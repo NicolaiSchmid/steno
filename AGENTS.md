@@ -2,7 +2,7 @@
 
 > **Steno** is a bot-free meeting recorder for the Mac with a dumb iOS
 > companion recorder. Swift core and macOS app, Expo (React Native) mobile
-> app. The repository is still called `audacious`; the product is Steno.
+> app. GitHub repository `NicolaiSchmid/steno`; local checkouts may still sit in a directory named `audacious` from before the rename.
 
 Scope and every settled decision live in
 [`.plans/2026-09-24-initial-scope.md`](.plans/2026-09-24-initial-scope.md).
