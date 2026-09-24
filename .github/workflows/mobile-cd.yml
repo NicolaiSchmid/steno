@@ -1,0 +1,349 @@
+name: Mobile CD (EAS — OTA update or TestFlight build)
+
+# Continuous delivery for the Steno iOS recorder. On every push to `main` that
+# touches the app, decide — from the Expo *native fingerprint* — whether the
+# change needs a new native binary or can ship over-the-air:
+#
+#   • JS / asset-only change  → fingerprint unchanged → `eas update` (OTA).
+#     Runs on Linux in ~1–2 min, no store review. Installed builds pick it up
+#     on next launch (expo-updates only loads a bundle whose fingerprint
+#     matches, so this is always safe).
+#
+#   • Native change (deps, config plugins, icon, permissions, app.config native
+#     fields…) → fingerprint changes → local `eas build` on macOS, submit to
+#     TestFlight, publish the OTA baseline, and record the new fingerprint as a
+#     git tag so future JS changes OTA against it.
+#
+# Why a git tag drives the decision: builds are produced with `eas build
+# --local` (the free EAS plan allows 15 cloud iOS builds a month), and local
+# builds are NOT registered on EAS — there is no server-side record to diff
+# against. Each successful native build pushes `ios-fp-<hash>` at the built
+# commit (-f, so a re-released fingerprint moves its tag); the gate asks "is
+# the NEWEST build tag the current fingerprint?" — a historical match is not
+# enough, because the store binary would be running a different runtime and
+# reject the OTA.
+#
+# The gate itself lives in `mobile/scripts/ci/mobile-delivery-lane.sh` and is
+# shared with the PR-time preview in mobile-ci.yml, so the two cannot disagree.
+#
+# Requires the EXPO_TOKEN repo secret. Everything else (signing, ASC key,
+# production EXPO_PUBLIC_* vars) lives in EAS.
+#
+# Ported from fifthset/.github/workflows/mobile-cd.yml, iOS only. The env
+# contract gate (scripts/ci/mobile-env-contract.ts there) is not ported yet:
+# the recorder has no required EXPO_PUBLIC_* values. Add it back together
+# with the first `readRequired(...)` in mobile/src/lib/env.ts.
+
+on:
+  push:
+    branches: ['main']
+    paths:
+      - 'mobile/**'
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: 'Force a lane (auto = decide by fingerprint)'
+        type: choice
+        default: auto
+        options: [auto, update, build]
+
+# One mobile CD run per branch at a time: native builds autoIncrement the build
+# number and macOS minutes are expensive.
+concurrency:
+  group: mobile-cd-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write # push the `ios-fp-<hash>` build tag
+
+env:
+  # Every eas/expo invocation below must resolve the PRODUCTION app config.
+  # The eas.json `submit` profile does not set APP_VARIANT, and without it
+  # `eas submit` / `eas update` evaluate app.config.ts with the default
+  # (development) variant and target the `.dev` bundle id — Apple rejects that
+  # with error 90055. Set once for the whole workflow so no step can forget it.
+  APP_VARIANT: production
+  # eas-cli is pinned: `latest` lets a CLI release change build/update/submit
+  # behaviour between the decide job and the release jobs with no repository
+  # change. Bump deliberately, together with `cli.version` in mobile/eas.json
+  # and the README runbook, after a green run.
+  EAS_CLI_VERSION: "23.2.0"
+
+defaults:
+  run:
+    working-directory: mobile
+
+jobs:
+  # ── Decide: fingerprint gate before any minutes ────────────────────────────
+  decide:
+    name: Decide (fingerprint gate)
+    runs-on: ubuntu-latest
+    outputs:
+      ios_action: ${{ steps.lanes.outputs.ios_action }}
+      ios_fingerprint: ${{ steps.lanes.outputs.ios_fingerprint }}
+      ios_tag: ${{ steps.lanes.outputs.ios_tag }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # need existing `ios-fp-*` tags to gate on
+          fetch-tags: true
+
+      - uses: pnpm/action-setup@v4
+        with:
+          package_json_file: mobile/package.json
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: mobile/pnpm-lock.yaml
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      # eas-cli via the Expo action, never `pnpm add -g` (its symlinked store
+      # dies with `Cannot find module 'fast-glob'` on `eas build`).
+      - uses: expo/expo-github-action@v8
+        with:
+          eas-version: ${{ env.EAS_CLI_VERSION }}
+          token: ${{ secrets.EXPO_TOKEN }}
+
+      - name: Decide lane (fingerprint + tag)
+        id: lanes
+        env:
+          MODE: ${{ github.event.inputs.mode || 'auto' }}
+        run: scripts/ci/mobile-delivery-lane.sh --platform ios --mode "$MODE"
+
+      # eas.json ships with `submit.production.ios.ascAppId: "TODO_ASC_APP_ID"`
+      # until the App Store Connect record exists. A build would succeed and
+      # then fail 35 macOS-minutes later at `eas submit`; refuse up front.
+      - name: Refuse an iOS build while ascAppId is a TODO
+        if: steps.lanes.outputs.ios_action == 'build'
+        run: |
+          node -e '
+            const eas = require("./eas.json");
+            const id = String(eas?.submit?.production?.ios?.ascAppId ?? "");
+            if (!id || id.startsWith("TODO_")) {
+              console.error(
+                "mobile/eas.json → submit.production.ios.ascAppId is still \"" + id + "\".\n" +
+                "The iOS build lane cannot submit without the App Store Connect app id. Follow\n" +
+                "\"Apple one-time setup\" in mobile/README.md, then re-run."
+              );
+              process.exit(1);
+            }
+            console.log("ascAppId pinned: " + id);
+          '
+
+      - name: Summarise decision
+        env:
+          IOS_ACTION: ${{ steps.lanes.outputs.ios_action }}
+          IOS_FP: ${{ steps.lanes.outputs.ios_fingerprint }}
+          IOS_REASON: ${{ steps.lanes.outputs.ios_reason }}
+        run: |
+          {
+            echo "## Mobile CD decision"
+            echo
+            echo "| Platform | Lane | Fingerprint | Why |"
+            echo "|---|---|---|---|"
+            echo "| iOS | **$IOS_ACTION** | \`${IOS_FP:--}\` | ${IOS_REASON:-not selected} |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # ── OTA: publish the JS bundle to the production channel (fast, Linux) ─────
+  update:
+    name: OTA update → production (iOS)
+    needs: decide
+    if: needs.decide.outputs.ios_action == 'update'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          package_json_file: mobile/package.json
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: mobile/pnpm-lock.yaml
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - uses: expo/expo-github-action@v8
+        with:
+          eas-version: ${{ env.EAS_CLI_VERSION }}
+          token: ${{ secrets.EXPO_TOKEN }}
+
+      # `--environment production` bakes the production EXPO_PUBLIC_* vars into
+      # the OTA bundle, matching what a production build embeds. APP_VARIANT
+      # (workflow env) resolves the production app config, so the update's
+      # runtime version is the same fingerprint the decide job computed.
+      - name: Publish OTA update
+        env:
+          MSG: ${{ github.event.head_commit.message }}
+        run: |
+          MSG="${MSG%%$'\n'*}" # first line of the commit message
+          eas update --non-interactive \
+            --platform ios \
+            --branch production \
+            --environment production \
+            --message "${MSG:-manual dispatch ${{ github.sha }}}"
+
+  # ── iOS native: macOS only for the Xcode-dependent IPA compilation ─────────
+  build-ios:
+    name: Build IPA locally (macOS)
+    needs: decide
+    if: needs.decide.outputs.ios_action == 'build'
+    # The dedicated self-hosted Apple Silicon runner used by fifthset and june.
+    # Swap for `macos-15` if this repository has no access to it; GitHub-hosted
+    # macOS minutes bill at 10× on private repositories.
+    runs-on: [self-hosted, macOS, ARM64]
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+
+      # Expo SDK 56+ requires Xcode 26.4+ (expo-modules-jsi's SwiftPM manifest
+      # is swift-tools 6.2). Select the newest stable Xcode explicitly.
+      - uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: latest-stable
+
+      - uses: pnpm/action-setup@v4
+        with:
+          package_json_file: mobile/package.json
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: mobile/pnpm-lock.yaml
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - uses: expo/expo-github-action@v8
+        with:
+          eas-version: ${{ env.EAS_CLI_VERSION }}
+          token: ${{ secrets.EXPO_TOKEN }}
+
+      # Local build → runs on this runner, not Expo's cloud → no build-quota
+      # hit. `eas env:exec` makes the production EXPO_PUBLIC_* vars present for
+      # the local process so Metro inlines them.
+      - name: Build production IPA (local)
+        run: >
+          eas env:exec production --non-interactive
+          'eas build --local --non-interactive
+          --platform ios --profile production
+          --output ${{ runner.temp }}/app.ipa'
+
+      # `--non-interactive` cannot CREATE provisioning — it can only fetch what
+      # already exists on EAS. Trip-wires: the very first production build, and
+      # any PR that adds a new native target whose bundle id has no profile
+      # yet. Turn the cryptic error into instructions.
+      - name: Credentials hint (build failed)
+        if: failure()
+        run: |
+          {
+            echo "## eas build failed"
+            echo
+            echo "If the build log above mentions **credentials / provisioning /"
+            echo "bundle identifier**, CI cannot fix this itself — provisioning is"
+            echo "created interactively. Run once from any machine:"
+            echo
+            echo '```'
+            echo "cd mobile && APP_VARIANT=production eas credentials -p ios"
+            echo '```'
+            echo
+            echo "choose **\"Set up all required credentials\"**, then re-run this job."
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "::error title=eas build failed::If the error is about credentials/provisioning, run: cd mobile && APP_VARIANT=production eas credentials -p ios — 'Set up all required credentials' — then re-run this job."
+
+      - name: Upload IPA for the Linux release job
+        uses: actions/upload-artifact@v4
+        with:
+          name: production-ipa
+          path: ${{ runner.temp }}/app.ipa
+          if-no-files-found: error
+          retention-days: 1
+
+  # ── iOS release: submission and OTA publishing do not require macOS ────────
+  release-ios:
+    name: Submit IPA & publish OTA baseline (iOS)
+    needs: [decide, build-ios]
+    if: needs.decide.outputs.ios_action == 'build'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          package_json_file: mobile/package.json
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: mobile/pnpm-lock.yaml
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - uses: expo/expo-github-action@v8
+        with:
+          eas-version: ${{ env.EAS_CLI_VERSION }}
+          token: ${{ secrets.EXPO_TOKEN }}
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: production-ipa
+          path: ${{ runner.temp }}
+
+      # The runtime version baked into the binary must equal what `decide`
+      # computed, or the OTA baseline (and every later OTA) can never reach this
+      # build — a silent no-op, not a crash. Catch it HERE, before anything is
+      # released.
+      - name: Verify the embedded fingerprint matches the gate
+        env:
+          FP: ${{ needs.decide.outputs.ios_fingerprint }}
+        run: |
+          EMBEDDED=$(unzip -p "${{ runner.temp }}/app.ipa" 'Payload/*.app/EXUpdates.bundle/fingerprint')
+          echo "computed: $FP"
+          echo "embedded: $EMBEDDED"
+          [ "$FP" = "$EMBEDDED" ] || {
+            echo "::error title=fingerprint mismatch::IPA embeds $EMBEDDED but the gate computed $FP — OTA could never reach this build. Not submitting."
+            exit 1
+          }
+
+      # APP_VARIANT=production (workflow env) is REQUIRED here — see the `env`
+      # block at the top. The pinned ascAppId in eas.json is the second belt.
+      - name: Submit to TestFlight
+        run: >
+          eas submit --non-interactive
+          --platform ios --profile production
+          --path ${{ runner.temp }}/app.ipa
+
+      # Seed the production channel with a bundle for this fingerprint so future
+      # OTA checks have a baseline (and the branch reflects what shipped).
+      - name: Publish OTA baseline for this build
+        run: >
+          eas update --non-interactive
+          --platform ios
+          --branch production
+          --environment production
+          --message "baseline for TestFlight build (fp ${{ needs.decide.outputs.ios_fingerprint }})"
+
+      # Record that a native build now exists for this fingerprint, so the next
+      # JS-only change gates to `update` instead of rebuilding.
+      - name: Tag fingerprint as built
+        env:
+          TAG: ${{ needs.decide.outputs.ios_tag }}
+        run: |
+          # -f on both: the lane gate reads the NEWEST ios-fp-* tag as "what the
+          # store binary runs now", so a re-release of a fingerprint that was
+          # tagged before (a native revert, a forced rebuild) must move its tag
+          # to this build's commit or the gate would keep OTA-ing against a
+          # binary nobody is on any more.
+          git tag -f "$TAG"
+          git push -f origin "refs/tags/$TAG"
+          echo "Recorded $TAG at $GITHUB_SHA"

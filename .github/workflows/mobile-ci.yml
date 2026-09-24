@@ -1,0 +1,145 @@
+name: Mobile CI (PR checks)
+
+# PR-time checks for the Steno iOS recorder — the counterpart to mobile-cd.yml,
+# which only runs *after* merge. Two jobs:
+#
+#   • checks — Biome, typecheck and tests (serially in one job: the React
+#     Native type graph OOMs `tsc` under concurrent jobs) and an `expo config`
+#     evaluation with the production variant.
+#
+#   • delivery-preview — computes the same expo-updates native fingerprint the
+#     CD gate uses (via the SAME script, mobile/scripts/ci/mobile-delivery-lane.sh)
+#     and posts a sticky PR comment saying whether merging would ship an OTA
+#     update or needs a native TestFlight build. When it's the build lane, the
+#     comment reminds about the one thing CI cannot do itself:
+#     `eas build --non-interactive` cannot CREATE provisioning for a brand-new
+#     native target — that needs an interactive `eas credentials` run before
+#     merge. Reviewers also use it to spot a PR that unexpectedly moved the
+#     fingerprint (a stray config-plugin or permission change).
+#
+# Ported from fifthset/.github/workflows/mobile-ci.yml (iOS only, standalone
+# pnpm project in mobile/, no shared or backend packages).
+
+on:
+  pull_request:
+    paths:
+      - 'mobile/**'
+      - '.github/workflows/mobile-ci.yml'
+
+concurrency:
+  group: mobile-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  pull-requests: write # delivery-preview upserts a PR comment
+
+defaults:
+  run:
+    working-directory: mobile
+
+jobs:
+  checks:
+    name: Lint, typecheck & tests (serial)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          package_json_file: mobile/package.json
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: mobile/pnpm-lock.yaml
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Biome
+        run: pnpm lint
+
+      # Serial on purpose — see the header. Do not split into parallel jobs.
+      - name: Typecheck
+        run: pnpm typecheck
+
+      - name: Tests
+        run: pnpm test
+
+      # Evaluates app.config.ts exactly as a production build would; catches a
+      # broken plugin import or a config that fails to resolve before CD does.
+      - name: Evaluate production app config
+        env:
+          APP_VARIANT: production
+        run: pnpm exec expo config --type public
+
+  delivery-preview:
+    name: Delivery preview (OTA vs native build)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # the `ios-fp-*` tags drive the lane decision
+          fetch-tags: true
+
+      - uses: pnpm/action-setup@v4
+        with:
+          package_json_file: mobile/package.json
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: mobile/pnpm-lock.yaml
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      # Identical to the mobile-cd.yml `decide` job (same script, `auto` mode),
+      # so the preview can never disagree with what CD does after merge.
+      - name: Compute lane
+        id: lanes
+        run: scripts/ci/mobile-delivery-lane.sh --platform ios
+
+      - name: Compose the preview
+        env:
+          IOS_ACTION: ${{ steps.lanes.outputs.ios_action }}
+          IOS_FP: ${{ steps.lanes.outputs.ios_fingerprint }}
+          IOS_TAG: ${{ steps.lanes.outputs.ios_tag }}
+        run: |
+          {
+            echo "### Mobile delivery preview"
+            echo
+            echo "What merging this PR into \`main\` does (same gate as CD: \`mobile/scripts/ci/mobile-delivery-lane.sh\`, \`APP_VARIANT=production\`)."
+            echo
+            if [ "$IOS_ACTION" = "update" ]; then
+              echo "| Platform | Lane | Native fingerprint | Why |"
+              echo "|---|---|---|---|"
+              echo "| iOS | **OTA update** — no store build | \`$IOS_FP\` | tag \`$IOS_TAG\` exists |"
+              echo
+              echo "Ships over the air: live on installed builds at next launch, minutes after merge."
+            else
+              echo "| Platform | Lane | Native fingerprint | Why |"
+              echo "|---|---|---|---|"
+              echo "| iOS | **native build** → TestFlight | \`$IOS_FP\` | no tag \`$IOS_TAG\` |"
+              echo
+              echo "> [!IMPORTANT]"
+              echo "> A native build lane means the fingerprint moved: a dependency, config plugin, permission, icon, \`updates\`/\`version\` field or other native config changed. If that is unexpected, find the change before merging — installed apps cannot receive this as an OTA."
+              echo ">"
+              echo "> If this PR adds a **new native target** (widget, share extension, App Clip), the non-interactive CD build cannot create its provisioning. Run once before merging:"
+              echo "> \`\`\`"
+              echo "> cd mobile && APP_VARIANT=production eas credentials -p ios"
+              echo "> \`\`\`"
+              echo "> and choose **\"Set up all required credentials\"**. Plain native-dep/config changes need nothing."
+            fi
+          } > "${{ runner.temp }}/preview.md"
+          cat "${{ runner.temp }}/preview.md" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Report lane on the PR (sticky comment)
+        uses: marocchino/sticky-pull-request-comment@v2
+        continue-on-error: true # a comment failure must not fail CI
+        with:
+          header: mobile-delivery-preview
+          path: ${{ runner.temp }}/preview.md

@@ -23,8 +23,8 @@ already work, starting with an Obsidian vault.
 - **Writes files, not lock-in.** One dated folder per meeting in your Obsidian vault:
   summary note, transcript, tasks in Obsidian Tasks syntax, VTT and JSON. Further
   adapters plug into the same one-way push protocol.
-- **Phone companion.** A minimal iOS recorder for in-person meetings. It queues locally
-  and hands recordings to your Mac over the local network for processing.
+- **Phone companion.** A minimal iOS recorder (Expo) for in-person meetings. It queues
+  locally and hands recordings to your Mac over the local network for processing.
 
 ## What it deliberately does not do
 
@@ -42,11 +42,15 @@ with Sparkle updates.
 ## Repository
 
 ```
+AGENTS.md           conventions for coding agents (CLAUDE.md links here)
 .plans/             scope and planning documents, dated
 docs/research/      teardown of Jamie and the open-source landscape
+mobile/             Expo iOS recorder, own pnpm project, own README
+.github/workflows/  repository, Swift and mobile CI/CD
 ```
 
-Core package, macOS app and iOS app targets will follow the layout described in the scope.
+The Swift package (`Package.swift`, `Sources/StenoCore`) and the macOS app
+(`apps/macos/`) follow the layout described in `AGENTS.md`; they do not exist yet.
 
 ## Background
 

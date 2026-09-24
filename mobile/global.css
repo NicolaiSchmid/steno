@@ -1,0 +1,141 @@
+@import "tailwindcss";
+@import "uniwind";
+
+/* ─── Theme tokens ──────────────────────────────────────────────────────
+ * Ported from the web app's src/app/globals.css. Dark is the design's base
+ * (the web's :root); light is the web's html[data-theme="light"]. Same
+ * five-tier luminance ladder, alpha-veil surfaces (never opaque grays),
+ * hairline borders, one achromatic CTA gradient + semantic statuses.
+ *
+ * Components read these through `useThemeColor("--color-…")` for RN style
+ * props or as uniwind classes (bg-background, text-foreground, …). No
+ * hard-coded colours at call sites. */
+@layer theme {
+	:root {
+		@variant dark {
+			/* Canvas + text ladder on #000: 21 / 14.2 / 8.3 / 4.4 / 2.7 */
+			--color-background: #000000;
+			--color-strong: #ffffff; /* 21.00:1 */
+			--color-foreground: #d4d4d4; /* body tier, 14.17:1 */
+			--color-muted-foreground: #a3a3a3; /* 8.33:1 */
+			--color-faint: #737373; /* 4.43:1 */
+			--color-ghost: #525252; /* 2.69:1 — decorative/metadata only */
+
+			/* Alpha-veil surfaces */
+			--color-card: rgba(255, 255, 255, 0.031); /* 3.14% veil */
+			--color-card-foreground: #d4d4d4;
+			--color-muted: rgba(255, 255, 255, 0.031);
+			--color-secondary: rgba(255, 255, 255, 0.059); /* 5.88% veil */
+			--color-secondary-foreground: #ffffff;
+			--color-accent: rgba(255, 255, 255, 0.059);
+			--color-accent-foreground: #ffffff;
+			--color-popover: #101010;
+			--color-popover-foreground: #d4d4d4;
+
+			/* Hairlines */
+			--color-border: rgba(255, 255, 255, 0.102); /* 10.20% hairline */
+			--color-input: rgba(255, 255, 255, 0.102);
+			--color-ring: rgba(255, 255, 255, 0.251); /* 25.10% emphasis */
+
+			/* Primary action (solid) + the achromatic CTA gradient endpoints */
+			--color-primary: #ffffff;
+			--color-primary-foreground: #000000;
+			--color-accent-from: #ffffff;
+			--color-accent-to: #e4e4e7;
+			--color-on-accent: #000000;
+
+			/* Semantic status (alpha chips ~10-15%, never filled) */
+			--color-live: #4c8c57;
+			--color-live-bright: #62b06f; /* dot/text on black, 6.1:1 */
+			--color-warning: #d4a72c;
+			--color-info: #6b8cbe;
+			--color-destructive: #d05252;
+			--color-destructive-strong: #dc6b6b; /* hover tier on black, 6.4:1 */
+			--color-destructive-foreground: #ffffff;
+
+			--color-code-bg: #101010;
+		}
+
+		@variant light {
+			/* Same ladder re-based on #fafafa: 18.97 / 9.93 / 7.49 / 4.54 / 2.42 */
+			--color-background: #fafafa;
+			--color-strong: #0a0a0a; /* 18.97:1 */
+			--color-foreground: #404040; /* 9.93:1 */
+			--color-muted-foreground: #525252; /* 7.49:1 */
+			--color-faint: #696969; /* 5.26:1 on canvas */
+			--color-ghost: #a3a3a3; /* 2.42:1 — decorative/metadata only */
+
+			--color-card: rgba(0, 0, 0, 0.031);
+			--color-card-foreground: #404040;
+			--color-muted: rgba(0, 0, 0, 0.031);
+			--color-secondary: rgba(0, 0, 0, 0.059);
+			--color-secondary-foreground: #0a0a0a;
+			--color-accent: rgba(0, 0, 0, 0.059);
+			--color-accent-foreground: #0a0a0a;
+			--color-popover: #ffffff;
+			--color-popover-foreground: #404040;
+
+			--color-border: rgba(0, 0, 0, 0.122); /* 12.16% hairline */
+			--color-input: rgba(0, 0, 0, 0.122);
+			--color-ring: rgba(0, 0, 0, 0.239); /* 23.92% emphasis */
+
+			--color-primary: #171717;
+			--color-primary-foreground: #ffffff;
+			--color-accent-from: #171717;
+			--color-accent-to: #000000;
+			--color-on-accent: #ffffff;
+
+			--color-live: #3c8149;
+			--color-live-bright: #2f7040; /* dot/text on #fafafa, ~4.9:1 */
+			--color-warning: #7a5800;
+			--color-info: #3d64a0;
+			--color-destructive: #b23a3a;
+			--color-destructive-strong: #9a2f2f;
+			--color-destructive-foreground: #ffffff;
+
+			--color-code-bg: #f4f4f3;
+		}
+	}
+}
+
+/* ─── Typography ────────────────────────────────────────────────────────
+ * Geist, loaded at runtime via @expo-google-fonts/geist (App.tsx). The
+ * family names are the loaded font keys. */
+@theme {
+	--font-sans: "Geist_400Regular";
+	--font-medium: "Geist_500Medium";
+	--font-semibold: "Geist_600SemiBold";
+	--font-bold: "Geist_700Bold";
+
+	--text-3xs: 11px;
+	--text-3xs--line-height: 14px;
+	--text-2xs: 12px;
+	--text-2xs--line-height: 16px;
+	--text-xs: 13px;
+	--text-xs--line-height: 17px;
+	--text-sm: 14px;
+	--text-sm--line-height: 19px;
+	--text-base: 16px;
+	--text-base--line-height: 23px;
+	--text-lg: 18px;
+	--text-lg--line-height: 23px;
+	--text-xl: 21px;
+	--text-xl--line-height: 28px;
+	--text-2xl: 26px;
+	--text-2xl--line-height: 32px;
+	--text-3xl: 30px;
+	--text-3xl--line-height: 36px;
+}
+
+/* ─── Custom utilities ──────────────────────────────────────────────── */
+@utility font-medium-face {
+	font-family: "Geist_500Medium", sans-serif;
+}
+
+@utility font-semibold-face {
+	font-family: "Geist_600SemiBold", sans-serif;
+}
+
+@utility font-bold-face {
+	font-family: "Geist_700Bold", sans-serif;
+}

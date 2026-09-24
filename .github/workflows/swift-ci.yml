@@ -1,0 +1,61 @@
+name: Swift CI
+
+# Builds and tests the Swift package and the macOS app. Path-gated so it does
+# nothing until Package.swift exists; the job-level guard keeps a stray
+# trigger from failing on an empty tree.
+
+on:
+  pull_request:
+    paths:
+      - 'Package.swift'
+      - 'Package.resolved'
+      - 'Sources/**'
+      - 'Tests/**'
+      - 'apps/macos/**'
+      - '.github/workflows/swift-ci.yml'
+  push:
+    branches: ['main']
+    paths:
+      - 'Package.swift'
+      - 'Package.resolved'
+      - 'Sources/**'
+      - 'Tests/**'
+      - 'apps/macos/**'
+
+concurrency:
+  group: swift-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  package:
+    name: Build and test package
+    runs-on: macos-15
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Skip until the package exists
+        id: gate
+        run: |
+          if [ -f Package.swift ]; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+            echo "Package.swift not found; nothing to build yet."
+          fi
+
+      - uses: maxim-lobanov/setup-xcode@v1
+        if: steps.gate.outputs.present == 'true'
+        with:
+          xcode-version: latest-stable
+
+      - name: Resolve and build
+        if: steps.gate.outputs.present == 'true'
+        run: swift build -v
+
+      - name: Test
+        if: steps.gate.outputs.present == 'true'
+        run: swift test -v

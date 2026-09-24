@@ -1,0 +1,70 @@
+# EAS Workflow: build the production iOS app on Expo's cloud macOS workers and
+# submit it to App Store Connect (TestFlight).
+#
+# This is the MANUAL FALLBACK, not the delivery path. CD runs on GitHub Actions
+# (`.github/workflows/mobile-cd.yml`) with `eas build --local`, so it does not
+# consume the EAS Build cloud quota (free plan: 15 iOS builds/month). Use this
+# when Actions cannot run (billing hold, macOS runner outage):
+#
+#   cd mobile && eas workflow:run submit-ios.yml
+#
+# There is deliberately NO `push:` trigger: with one, both pipelines would fire
+# on every push to main and double-build.
+#
+# After a fallback build, `mobile-cd.yml` knows nothing about it: no
+# `ios-fp-<hash>` tag is pushed and no OTA baseline is published. Follow
+# "After a fallback build" in mobile/README.md or the next JS-only push takes
+# the build lane again and submits a redundant binary.
+#
+# Prereqs (one-time, see mobile/README.md "Apple one-time setup"):
+#   - App Store Connect app record + `ascAppId` in eas.json
+#   - App Store Connect API key stored in EAS (`eas credentials -p ios`)
+#   - Distribution cert + profile minted by one interactive production build
+
+on:
+  workflow_dispatch: {}
+
+jobs:
+  build_ios:
+    name: Build iOS app
+    type: build
+    params:
+      platform: ios
+      profile: production
+
+  # Same hard gate GitHub CD applies before `eas submit`: the runtime version
+  # the binary embeds must equal what this source tree computes, or no OTA can
+  # ever reach the build (silently). An empty output fails too.
+  verify_ios:
+    name: Verify embedded fingerprint
+    needs: [build_ios]
+    steps:
+      - uses: eas/checkout
+      - uses: eas/install_node_modules
+      - name: Compare embedded vs computed fingerprint
+        env:
+          APP_VARIANT: production
+          EMBEDDED: ${{ needs.build_ios.outputs.fingerprint_hash }}
+        run: |
+          set -euo pipefail
+          COMPUTED=$(pnpm exec expo-updates fingerprint:generate --platform ios \
+            | node -e 'const r=require("fs").readFileSync(0,"utf8");process.stdout.write(JSON.parse(r.slice(r.indexOf("{"))).hash)')
+          echo "embedded: ${EMBEDDED:-<none>}"
+          echo "computed: $COMPUTED"
+          if [ -z "$EMBEDDED" ]; then
+            echo "build job exposed no fingerprint_hash output — refusing to submit an unverified binary" >&2
+            exit 1
+          fi
+          if [ "$EMBEDDED" != "$COMPUTED" ]; then
+            echo "fingerprint mismatch — OTA could never reach this build; not submitting" >&2
+            exit 1
+          fi
+          echo "OK — after submission, record it: git tag -f ios-fp-$COMPUTED && git push -f origin ios-fp-$COMPUTED"
+
+  submit_ios:
+    name: Submit to App Store Connect (TestFlight)
+    needs: [build_ios, verify_ios]
+    type: submit
+    params:
+      build_id: ${{ needs.build_ios.outputs.build_id }}
+      profile: production

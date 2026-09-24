@@ -1,0 +1,9 @@
+*.pdf binary
+*.docx binary
+*.png binary
+*.jpg binary
+*.icon binary
+*.m4a binary
+*.wav binary
+*.mp3 binary
+*.mlmodelc/** binary

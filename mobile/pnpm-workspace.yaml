@@ -1,0 +1,6 @@
+# Standalone pnpm project (no packages key on purpose). pnpm 11 requires
+# dependency build scripts to be approved explicitly; an undeclared one fails
+# the install with ERR_PNPM_IGNORED_BUILDS.
+allowBuilds:
+  esbuild: true
+  '@biomejs/biome': true

@@ -1,0 +1,33 @@
+# macOS
+.DS_Store
+
+# Swift / Xcode
+.build/
+.swiftpm/
+DerivedData/
+*.xcodeproj
+!*.xcodeproj/project.xcworkspace/xcshareddata/
+xcuserdata/
+*.xcuserstate
+*.ipa
+*.dSYM.zip
+*.dSYM
+
+# Downloaded ML models never go into git
+*.mlpackage
+*.mlmodelc
+*.onnx
+*.gguf
+
+# Secrets and local env
+.env
+.env.*
+!.env.example
+
+# Node (mobile/ has its own .gitignore for Expo output)
+node_modules/
+
+# Claude Code local state stays untracked, but the project skill entries
+# (symlinks into .agents/skills, the authoritative source) are committed.
+.claude/*
+!.claude/skills/

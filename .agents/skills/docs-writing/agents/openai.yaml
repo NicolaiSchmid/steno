@@ -1,0 +1,4 @@
+interface:
+  display_name: "Docs Writing"
+  short_description: "Write crisp, trustworthy product docs"
+  default_prompt: "Use $docs-writing to write or rewrite product docs that feel clear, credible, and useful."

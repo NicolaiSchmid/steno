@@ -1,0 +1,49 @@
+name: Repository CI
+
+# Cheap checks that apply to the whole repository regardless of language:
+# workflow lint and shell syntax. Language-specific CI lives in swift-ci.yml
+# and mobile-ci.yml, each gated on its own paths.
+
+on:
+  pull_request:
+  merge_group:
+
+concurrency:
+  group: repository-ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  workflows:
+    name: GitHub Actions workflows
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version: '1.25'
+          cache: false
+
+      - name: Lint workflows
+        run: go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.12
+
+  shell:
+    name: Shell scripts
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Syntax-check every tracked shell script
+        run: |
+          set -euo pipefail
+          git ls-files -z '*.sh' '.githooks/*' | while IFS= read -r -d '' f; do
+            if head -c 64 "$f" | grep -q 'bash'; then
+              bash -n "$f"
+              echo "ok  $f"
+            fi
+          done

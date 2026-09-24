@@ -1,0 +1,66 @@
+{
+	"$schema": "./node_modules/@biomejs/biome/configuration_schema.json",
+	"root": true,
+	"vcs": {
+		"enabled": true,
+		"useIgnoreFile": true,
+		"clientKind": "git"
+	},
+	"assist": {
+		"enabled": true,
+		"actions": {
+			"preset": "recommended",
+			"source": {
+				"preset": "recommended",
+				"organizeImports": "on",
+				"useSortedAttributes": "on"
+			}
+		}
+	},
+	"formatter": {
+		"enabled": true
+	},
+	"css": {
+		"parser": {
+			// global.css uses Tailwind v4 at-rules (@theme, @variant, @utility).
+			"tailwindDirectives": true
+		}
+	},
+	"files": {
+		"includes": [
+			"**",
+			"!ios",
+			"!android",
+			"!dist",
+			"!.expo",
+			"!uniwind-types.d.ts"
+		]
+	},
+	"linter": {
+		"enabled": true,
+		"rules": {
+			"preset": "recommended",
+			"nursery": {
+				"useSortedClasses": {
+					"level": "warn",
+					"fix": "safe",
+					"options": {
+						"functions": ["clsx", "cn"]
+					}
+				}
+			}
+		}
+	},
+	"overrides": [
+		{
+			// The dark and light @variant blocks define the same --color-* tokens
+			// on purpose; that is how the theme switches.
+			"includes": ["global.css"],
+			"linter": {
+				"rules": {
+					"suspicious": { "noDuplicateCustomProperties": "off" }
+				}
+			}
+		}
+	]
+}
