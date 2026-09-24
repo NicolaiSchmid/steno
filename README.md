@@ -7,7 +7,7 @@ Steno captures system audio and your microphone directly from macOS, processes e
 on your Mac after the meeting, and writes summary, transcript and tasks into the places you
 already work, starting with an Obsidian vault.
 
-> Status: pre-alpha. Scope is settled, code is not written yet. See [docs/SCOPE.md](docs/SCOPE.md).
+> Status: pre-alpha. Scope is settled, code is not written yet. See [.plans/2026-09-24-initial-scope.md](.plans/2026-09-24-initial-scope.md).
 
 ## What it does
 
@@ -42,7 +42,7 @@ with Sparkle updates.
 ## Repository
 
 ```
-docs/SCOPE.md       what is being built and why, decision by decision
+.plans/             scope and planning documents, dated
 docs/research/      teardown of Jamie and the open-source landscape
 ```
 
