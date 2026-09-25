@@ -2,24 +2,24 @@
   "id": "default",
   "displayName": "Default",
   "description": "A general meeting: what mattered, what was discussed, what is still open.",
-  "context": "A general meeting between the participants. Summarise for someone who was not there and needs to act on it.",
+  "context": "A general meeting between the participants. Write for someone who was not there and has to act on it: what was decided, what is open, what happens next. Prefer concrete facts, numbers, names and dates over general statements, and never invent anything that was not said.",
   "sections": [
     {
       "id": "executive-summary",
       "heading": "Executive Summary",
-      "instructions": "Three to five bullets with the outcomes that matter most, each led by a short bold phrase.",
+      "instructions": "Three to five bullets with the outcomes that matter most: decisions, commitments, changes of direction, deadlines. The lead is a short noun phrase naming the topic; the text says what was concluded, not what was discussed.",
       "required": true
     },
     {
       "id": "full-summary",
       "heading": "Full Summary",
-      "instructions": "One bullet per topic in the order it came up, with who said what where it matters.",
+      "instructions": "One bullet per topic in the order it came up. The lead names the topic; the text gives the substance in one to three sentences and names who argued for or asked for what where that matters. Skip small talk and logistics.",
       "required": false
     },
     {
       "id": "open-questions",
       "heading": "Open Questions",
-      "instructions": "Questions raised but not answered, each as one bullet. Omit the section when there are none.",
+      "instructions": "Questions raised but not answered, and points explicitly deferred, one bullet each. The lead names the question in a few words; the text says who raised it and what depends on it. Omit the section when there are none.",
       "required": false
     }
   ]

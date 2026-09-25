@@ -2,30 +2,30 @@
   "id": "daily-standup",
   "displayName": "Daily Standup",
   "description": "A short team check-in: progress, plans, blockers.",
-  "context": "A daily standup. Bullet leads are the person's name; keep each person's update to what they said.",
+  "context": "A daily standup. Every bullet lead is the person's name: their known name, else the speaker label verbatim. Keep each person's update to what they themselves said and never merge two people's updates into one bullet.",
   "sections": [
     {
       "id": "progress-since-last-standup",
       "heading": "Progress Since Last Standup",
-      "instructions": "One bullet per person led by their name with what they finished or moved forward.",
+      "instructions": "One bullet per person, led by their name, with what they finished or moved forward since the last standup.",
       "required": true
     },
     {
       "id": "plans-until-next-standup",
       "heading": "Plans Until Next Standup",
-      "instructions": "One bullet per person led by their name with what they will do next.",
+      "instructions": "One bullet per person, led by their name, with what they will work on until the next standup.",
       "required": true
     },
     {
       "id": "blockers-and-help-needed",
       "heading": "Blockers and Help Needed",
-      "instructions": "Blockers and requests for help, led by the person's name. Omit the section when there are none.",
+      "instructions": "Blockers, dependencies and requests for help, led by the person's name, with what or whom they are waiting on. Omit the section when there are none.",
       "required": false
     },
     {
       "id": "announcements",
       "heading": "Announcements",
-      "instructions": "Team-wide announcements and decisions that are not one person's update.",
+      "instructions": "Team-wide announcements, decisions and schedule changes that are not one person's update.",
       "required": false
     }
   ]

@@ -1,5 +1,5 @@
 {
-  "context" : "A job interview. Separate what the candidate said from the interviewer's assessment; never invent facts about the candidate.",
+  "context" : "A job interview. Keep what the candidate said apart from the interviewer's assessment; report the candidate's statements as their statements and never invent employers, dates, skills or reasons that were not mentioned.",
   "description" : "A job interview: background, fit, skills, motivation and a recommendation.",
   "displayName" : "Interview",
   "id" : "interview",
@@ -7,25 +7,25 @@
     {
       "heading" : "Candidate Background",
       "id" : "candidate-background",
-      "instructions" : "The candidate's background and experience as they described it.",
+      "instructions" : "The candidate's background and experience as they described it: roles, employers, duration and responsibilities.",
       "required" : true
     },
     {
       "heading" : "Role Fit and Experience",
       "id" : "role-fit-and-experience",
-      "instructions" : "Experience relevant to the role and how it maps to the requirements discussed.",
+      "instructions" : "Experience relevant to the role and how it maps to the requirements discussed; note gaps the candidate acknowledged.",
       "required" : true
     },
     {
       "heading" : "Skills Assessment",
       "id" : "skills-assessment",
-      "instructions" : "Skills demonstrated or claimed, with the evidence from the conversation.",
+      "instructions" : "Skills demonstrated or claimed, each with the evidence from the conversation: an example given, a problem walked through, a question answered.",
       "required" : false
     },
     {
       "heading" : "Motivation and Culture",
       "id" : "motivation-and-culture",
-      "instructions" : "Why the candidate is interested, how they like to work, and cultural signals.",
+      "instructions" : "Why the candidate is interested, how they like to work, what they expect from the team, and cultural signals in their own words.",
       "required" : false
     },
     {
@@ -37,7 +37,7 @@
     {
       "heading" : "Assessment and Recommendation",
       "id" : "assessment-and-recommendation",
-      "instructions" : "The interviewer's assessment and recommendation as stated; do not add your own.",
+      "instructions" : "The interviewer's assessment and recommendation as stated in the conversation; do not add your own judgement.",
       "required" : false
     },
     {

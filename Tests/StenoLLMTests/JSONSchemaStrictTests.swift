@@ -7,7 +7,8 @@ import Testing
 /// Walks the literal JSON every request-side schema emits and asserts the
 /// strict subset OpenAI, LM Studio and Groq agree on: every object has
 /// `additionalProperties: false` and lists every property in `required`,
-/// nesting stays within five levels, and no banned keyword appears.
+/// containers nest at most five levels deep (leaves do not count), and no
+/// banned keyword appears.
 @Suite struct JSONSchemaStrictTests {
   static let banned: Set<String> = [
     "format", "pattern", "minLength", "maxLength", "minimum", "maximum", "minItems", "maxItems",
@@ -18,7 +19,6 @@ import Testing
   static func problems(in value: JSONValue, path: String = "root", depth: Int = 1) -> [String] {
     guard case .object(let object) = value else { return ["\(path): schema node is not an object"] }
     var problems: [String] = []
-    if depth > 5 { problems.append("\(path): nesting depth \(depth) exceeds 5") }
     for key in object.keys.sorted() where banned.contains(key) {
       problems.append("\(path): banned keyword \(key)")
     }
@@ -37,6 +37,9 @@ import Testing
     default:
       problems.append("\(path): missing type")
       type = nil
+    }
+    if depth > 5, type == "object" || type == "array" {
+      problems.append("\(path): nesting depth \(depth) exceeds 5")
     }
     switch type {
     case "object":
