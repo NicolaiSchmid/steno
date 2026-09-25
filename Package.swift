@@ -53,7 +53,7 @@ let package = Package(
     .testTarget(name: "StenoAdaptersTests", dependencies: ["StenoAdapters"]),
     .testTarget(name: "StenoHandoverTests", dependencies: ["StenoHandover"]),
     .testTarget(name: "stenoTests", dependencies: ["StenoCore", "StenoAudio"]),
-    .testTarget(name: "StenoEndToEndTests", dependencies: ["StenoCore"]),
+    .testTarget(name: "StenoEndToEndTests", dependencies: ["StenoCore", "StenoAudio"]),
   ],
   swiftLanguageModes: [.v6]
 )

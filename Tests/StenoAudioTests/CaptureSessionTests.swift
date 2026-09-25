@@ -185,6 +185,30 @@ import Testing
     _ = try await session.stop()
   }
 
+  /// Fifty start/stop cycles on one session: every cycle ends idle with a
+  /// readable master and nothing carries over (rings cleared, threads
+  /// joined). The 200-cycle leaks and AudioObjectID check on real devices is
+  /// the plan's manual step.
+  @Test func repeatedStartStopCyclesStayClean() async throws {
+    let directory = try Fixtures.temporaryDirectory("session")
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let backend = SyntheticCaptureBackend(
+      lanes: [.mic, .system], tone: [.mic: 440, .system: 1_000], seconds: 0.1)
+    let session = try CaptureSession(
+      configuration: configuration(.call, in: directory), backend: backend)
+    for cycle in 0..<50 {
+      let meetingID = UUID()
+      try await session.start(meetingID: meetingID)
+      await backend.waitUntilFinished()
+      let result = try await session.stop()
+      #expect(await session.state == .idle)
+      #expect(abs(result.statistics.duration - 0.1) < 0.02, "cycle \(cycle)")
+      #expect(result.statistics.droppedFrames == [:], "cycle \(cycle)")
+      #expect(try CAFFile.read(result.asset.url).channels.count == 2)
+    }
+    #expect(try FileManager.default.contentsOfDirectory(atPath: directory.path).count == 50)
+  }
+
   @Test func aFailingBackendLeavesTheSessionFailedAndNoFolder() async throws {
     let directory = try Fixtures.temporaryDirectory("session")
     defer { try? FileManager.default.removeItem(at: directory) }

@@ -122,6 +122,16 @@ public enum CodecError: Error, Sendable, Equatable, CustomStringConvertible {
         if status == .endOfStream || status == .error { break }
         if status == .inputRanDry && ended { break }
       }
+      // The converter may emit a few samples of filter tail or swallow a few
+      // of priming; trim or pad to the exact length so the 16 kHz lane lasts
+      // exactly as long as the master and segment counts stay stable.
+      let expected = Int(
+        (Double(file.length) * AudioBuffer16k.sampleRate / source.sampleRate).rounded())
+      if samples.count > expected {
+        samples.removeLast(samples.count - expected)
+      } else if samples.count < expected {
+        samples.append(contentsOf: repeatElement(0, count: expected - samples.count))
+      }
       return AudioBuffer16k(samples: samples)
     }
 

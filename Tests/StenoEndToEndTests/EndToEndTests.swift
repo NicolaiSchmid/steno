@@ -1,4 +1,5 @@
 import Foundation
+import StenoAudio
 import StenoCore
 import Testing
 
@@ -6,6 +7,56 @@ import Testing
 /// everywhere; each module workstream's last step replaces its own fake with
 /// the real type. No models, no network.
 @Suite struct EndToEndTests {
+  #if canImport(AVFoundation)
+    static var decoder: any AudioDecoder { AVFoundationAudioCodec() }
+
+    /// The two 16 kHz fixture lanes upsampled to 48 kHz by sample repetition
+    /// and written through the recording writer, no sidecars: every lane the
+    /// pipeline decodes goes through the real converter.
+    static func makeAsset(layout: RecordingLayout, meetingID: UUID) throws -> AudioAsset {
+      let mic = try WAVAudioDecoder.read(Fixtures.url("audio/conversation-mic-6s.wav")).samples
+      let system = try WAVAudioDecoder.read(Fixtures.url("audio/conversation-system-6s.wav"))
+        .samples
+      let writer = try RecordingWriter(layout: layout, lanes: [.mic, .system])
+      var micFrame = [Float](repeating: 0, count: 480)
+      var systemFrame = [Float](repeating: 0, count: 480)
+      for start in stride(from: 0, to: mic.count, by: 160) {
+        for index in 0..<160 {
+          for repeatIndex in 0..<3 {
+            micFrame[index * 3 + repeatIndex] = mic[start + index]
+            systemFrame[index * 3 + repeatIndex] = system[start + index]
+          }
+        }
+        try micFrame.withUnsafeBufferPointer { m in
+          try systemFrame.withUnsafeBufferPointer { s in
+            try writer.write(LaneFrames(frameCount: 480, lanes: [m.baseAddress!, s.baseAddress!]))
+          }
+        }
+      }
+      let files = try writer.finish()
+      for sidecar in files.sidecars16k.values { try FileManager.default.removeItem(at: sidecar) }
+      return AudioAsset(
+        id: SampleData.uuid(70), meetingID: meetingID, url: files.master,
+        format: .caf48kFloat32, lanes: [.mic, .system], retention: .keepDays(30))
+    }
+  #else
+    static var decoder: any AudioDecoder { WAVAudioDecoder() }
+
+    static func makeAsset(layout: RecordingLayout, meetingID: UUID) throws -> AudioAsset {
+      try FileManager.default.copyItem(
+        at: Fixtures.url("audio/conversation-two-lane-6s.wav"), to: layout.master(.wav16kInt16))
+      try FileManager.default.copyItem(
+        at: Fixtures.url("audio/conversation-mic-6s.wav"), to: layout.sidecar(.mic))
+      try FileManager.default.copyItem(
+        at: Fixtures.url("audio/conversation-system-6s.wav"), to: layout.sidecar(.system))
+      return AudioAsset(
+        id: SampleData.uuid(70), meetingID: meetingID, url: layout.master(.wav16kInt16),
+        format: .wav16kInt16, lanes: [.mic, .system],
+        sidecars16k: [.mic: layout.sidecar(.mic), .system: layout.sidecar(.system)],
+        retention: .keepDays(30))
+    }
+  #endif
+
   @Test func macCallFixtureLandsInVault() async throws {
     let directory = try Fixtures.temporaryDirectory("e2e")
     defer { try? FileManager.default.removeItem(at: directory) }
@@ -26,7 +77,7 @@ import Testing
     let dispatcher = FakeDeliveryDispatcher(store: store, destinations: [vault], now: { now })
     let pipeline = ProcessingPipeline(
       dependencies: PipelineDependencies(
-        decoder: WAVAudioDecoder(),
+        decoder: Self.decoder,
         speechEngine: FakeSpeechEngine(),
         diarizer: FakeDiarizer(),
         speakerMemory: InMemorySpeakerMemory(people: SampleData.persons()),
@@ -43,21 +94,14 @@ import Testing
       id: SampleData.meetingID, title: "Produktstrategie", startedAt: SampleData.startedAt,
       duration: 6, source: .macCall, calendarEventID: "event-1", state: .recording,
       createdAt: SampleData.createdAt, updatedAt: SampleData.createdAt)
-    // Placed the way the capture writer would: master and sidecars in the
-    // meeting folder, so the pipeline's clips and mixdown land beside them.
+    // Placed the way the capture writer would: the master in the meeting
+    // folder, so the pipeline's clips and mixdown land beside it. With
+    // AVFoundation the master is the 48 kHz two-lane CAF the recording writer
+    // produces and the real decoder resamples each lane; elsewhere the WAV
+    // fixtures stand in.
     let layout = RecordingLayout(audioFolder: settings.audioFolder, meetingID: meeting.id)
     try layout.createDirectories()
-    try FileManager.default.copyItem(
-      at: Fixtures.url("audio/conversation-two-lane-6s.wav"), to: layout.master(.wav16kInt16))
-    try FileManager.default.copyItem(
-      at: Fixtures.url("audio/conversation-mic-6s.wav"), to: layout.sidecar(.mic))
-    try FileManager.default.copyItem(
-      at: Fixtures.url("audio/conversation-system-6s.wav"), to: layout.sidecar(.system))
-    let asset = AudioAsset(
-      id: SampleData.uuid(70), meetingID: meeting.id, url: layout.master(.wav16kInt16),
-      format: .wav16kInt16, lanes: [.mic, .system],
-      sidecars16k: [.mic: layout.sidecar(.mic), .system: layout.sidecar(.system)],
-      retention: .keepDays(30))
+    let asset = try Self.makeAsset(layout: layout, meetingID: meeting.id)
 
     try await pipeline.enqueue(meeting, asset: asset)
     await pipeline.waitUntilIdle()
