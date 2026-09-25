@@ -138,16 +138,38 @@ private func chunk(
     #expect(abs((result.clusters.first?.clusterConfidence ?? 0) - expected) < 1e-5)
   }
 
-  @Test func shortSpeakersArePenalisedAndTurnlessSpeakersStillAppear() {
+  @Test func shortSpeakersArePenalisedAndTurnlessChunkLabelsAreNotSpeakers() {
     let turns = [turn("S1", 0, 2, quality: 1), turn("S1", 4, 5, quality: 1)]
     let chunks = [
       chunk("S1", 0, 2, axis: 0, quality: 1), chunk("S9", 30, 31, axis: 1, quality: 0.5),
     ]
     let result = DiarizationMapping.result(turns: turns, chunks: chunks)
-    #expect(result.clusters.map(\.label) == ["Speaker 1", "Speaker 2"])
+    #expect(result.clusters.map(\.label) == ["Speaker 1"], "S9 lost every frame vote")
     #expect(abs(result.clusters[0].clusterConfidence - 0.5) < 1e-6, "under three seconds: halved")
-    #expect(result.clusters[1].ranges == [30...31], "chunk range stands in for missing turns")
-    #expect(result.clusters[1].embedding != nil)
+  }
+
+  /// The shape the real model produced on an Anna + Daniel `say` fixture:
+  /// two speakers alternate in the turns, and a third cluster label exists
+  /// only in the chunks with a window-sized span over both. It must not
+  /// become a speaker, and no two speakers' ranges may overlap.
+  @Test func aChunkOnlyLabelSpanningTheWindowDoesNotOverlapTheRealSpeakers() {
+    let turns = [
+      turn("S1", 0, 1.94), turn("S2", 2.28, 4.35), turn("S1", 4.67, 6.64), turn("S2", 6.98, 9.37),
+    ]
+    let chunks = [
+      chunk("S1", 0, 6.64, axis: 0), chunk("S2", 2.28, 9.37, axis: 1),
+      chunk("S3", 4.00, 9.35, axis: 2),
+    ]
+    let result = DiarizationMapping.result(turns: turns, chunks: chunks)
+    #expect(result.clusters.map(\.label) == ["Speaker 1", "Speaker 2"])
+    #expect(result.clusters[0].ranges == [0...1.94, 4.67...6.64])
+    #expect(result.clusters[1].ranges == [2.28...4.35, 6.98...9.37])
+    let all = result.clusters.flatMap { cluster in cluster.ranges.map { (cluster.label, $0) } }
+    for lhs in all {
+      for rhs in all where lhs.0 != rhs.0 {
+        #expect(!lhs.1.overlaps(rhs.1), "\(lhs) overlaps \(rhs)")
+      }
+    }
   }
 
   @Test func withoutChunksConfidenceComesFromTurns() {
@@ -208,7 +230,10 @@ private func chunk(
   /// Invariants over generated diarizations, whatever the shape: labels are
   /// sequential in order of first speech, ranges are sorted and disjoint,
   /// every clip lies inside one of its cluster's ranges and within the
-  /// target, embeddings are unit vectors, confidence is in `0...1`.
+  /// target, embeddings are unit vectors, confidence is in `0...1`. Half the
+  /// recordings also carry a chunk whose label has no turn (`S0`, spanning
+  /// the window over whoever spoke), the phantom the real model produced;
+  /// it must not become a cluster.
   @Test func invariantsHoldOverGeneratedInputs() throws {
     var rng = SplitMix64(seed: 2026)
     for _ in 0..<40 {
@@ -230,6 +255,12 @@ private func chunk(
         }
         cursor += length + Double.random(in: 0...1, using: &rng)
       }
+      if Bool.random(using: &rng) {
+        chunks.append(
+          ClusterChunk(
+            speakerLabel: "S0", start: max(0, cursor - 10), end: cursor,
+            embedding: vector(8, scale: 3), quality: 1))
+      }
       let result = DiarizationMapping.result(turns: turns, chunks: chunks)
       var order: [String] = []
       for label in turns.sorted(by: { $0.start < $1.start }).map(\.speakerLabel)
@@ -238,6 +269,13 @@ private func chunk(
       }
       #expect(result.clusters.count == order.count)
       #expect(result.clusters.map(\.label) == order.indices.map { "Speaker \($0 + 1)" })
+      let labelled = result.clusters.flatMap { cluster in cluster.ranges.map { (cluster.label, $0) }
+      }
+      for lhs in labelled {
+        for rhs in labelled where lhs.0 != rhs.0 && lhs.1.lowerBound < rhs.1.lowerBound {
+          #expect(lhs.1.upperBound <= rhs.1.lowerBound, "speakers overlap: \(lhs) \(rhs)")
+        }
+      }
       for cluster in result.clusters {
         for (lhs, rhs) in zip(cluster.ranges, cluster.ranges.dropFirst()) {
           #expect(lhs.upperBound < rhs.lowerBound, "ranges sorted and disjoint")

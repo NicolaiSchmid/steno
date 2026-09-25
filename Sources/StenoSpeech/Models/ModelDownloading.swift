@@ -21,13 +21,22 @@ actor DownloadSerializer {
   private var last: Task<Void, Never>?
 
   func run<T: Sendable>(_ body: @escaping @Sendable () async throws -> T) async throws -> T {
+    try await enqueue(body).value
+  }
+
+  /// Appends the job to the chain and returns it without waiting for it.
+  /// Once this returns the job's place in the order is fixed, which is what
+  /// lets a test submit two jobs in a known order without relying on the
+  /// scheduler.
+  func enqueue<T: Sendable>(_ body: @escaping @Sendable () async throws -> T) -> Task<T, any Error>
+  {
     let previous = last
     let job = Task {
       await previous?.value
       return try await body()
     }
     last = Task { _ = try? await job.value }
-    return try await job.value
+    return job
   }
 }
 

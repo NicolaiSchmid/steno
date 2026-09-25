@@ -477,3 +477,40 @@ Recorded by the speech workstream while building steps 0 to 8 (PR #8, 2026-09-25
     around `OfflineDiarizerModels.load` (a process-wide flag that would race a concurrent `ensure`; the
     completeness check above makes FluidAudio's self-repair moot for a complete install); splitting the remaining
     multi-behaviour tests.
+- **Real-model run (PR #83, 2026-09-25, Forge: M4, 24 GB, macOS 26.7, Xcode 27 / Swift 6.4).** First execution of
+  the `[opt-in]` suite, `RealModelsEndToEndTests` and spikes B and C. Downloads into
+  `~/Library/Application Support/Steno/Models`: Parakeet v3 470 MB, diarizer 21 MB, WhisperKit large-v3 turbo 1.5 GB,
+  `parakeet-de` 1.1 GB. Corrections to the contract above:
+  - *Two female `say` voices are one speaker to community-1.* The segmentation model reports one local speaker per
+    ten-second window for Anna and Samantha (`two-speakers.wav`), AHC warm-starts four clusters and VBx folds them
+    into one, whatever the clustering threshold. `two-speakers-mf.wav` (the same dialogue as Anna and Daniel,
+    rendered once on macOS 26.7) separates cleanly: Speaker 1 [0.00–1.94, 4.67–6.64], Speaker 2 [2.28–4.35,
+    6.98–9.37]. The two-speaker assertions and the end-to-end acceptance run on it; the Anna + Samantha file is
+    reported, not asserted, and stays as the segmenter fixture.
+  - *Chunk-only cluster labels are not speakers.* `chunkEmbeddings` can carry a label with no turn in `segments`
+    (it lost every frame vote in reconstruction); the mapping used to promote it with the chunk's window extent as
+    its range, which produced a phantom "Speaker 3 [4.00–9.35]" over the two real ones. Clusters now come from
+    labels with a turn only; the generated-input invariants check that no two speakers' ranges overlap.
+  - *Spike B: go.* The fine-tune downloads through the v3 redirect into `fluidaudio-de/parakeet-tdt-0.6b-v3`
+    (v3 is on `main`; only the diarizer repository is pinned to a commit, so `revisionOverrides` is not needed),
+    the redirect entry is gone afterwards, the installed v3 is untouched, `loadLocal` loads it (CoreML prints an
+    `E5RT … zero shape error` line while compiling the fp16 encoder; the model works) and `de-short.wav` comes out
+    at 0.0 % WER, RTFx 21 on the first call. Opt-in behind `STENO_MODEL_TESTS_PARAKEET_DE=1`.
+  - *Spike C: go for ranking, no-go for the absolute threshold on TTS voices.* Cluster-embedding cosines with the
+    real model: same `say` voice across sentences 0.90–0.96 (Anna 0.90/0.96, Daniel 0.93, Samantha 0.93);
+    different voices 0.48–0.87 (Anna/Samantha 0.74–0.82, Anna/Daniel 0.39–0.67, Daniel/Fred 0.80–0.87,
+    Anna/Ralph 0.48–0.54). Each voice's nearest is itself by at least 0.07, so `match` with the 0.05 margin
+    returns the right person when both are enrolled, but a voice enrolled nowhere (Samantha against {Anna, Daniel})
+    is accepted as Anna at 0.765 with the default 0.60 threshold. TTS voices compress the range upward; the
+    threshold is calibrated on real meetings in #34, and until then the suggestion is treated as exactly that.
+  - *Engines on the fixtures.* Parakeet v3: 0.0 % WER on the four single-voice files, 10.0 % on `denglish.wav`
+    ("Unboarding" is how Anna says it; WhisperKit agrees), 0.0 % on `two-speakers-mf.wav`, 45.8 % on
+    `two-speakers.wav` (the German opening decoded as "Good morning, we get", the plan's predicted failure mode);
+    RTFx 63–119 after warm-up. WhisperKit large-v3 turbo: 0.0 % on every file when pinned to the spoken language
+    or unpinned, RTFx 3–10 on these short files; pinned to the *wrong* language it translates ("We will discuss the
+    product strategy with the whole team." for `de-short.wav` with hint `en`), which is the cost of the pinning
+    rule when the first lane's election is wrong. Diarizer: 8.9 s in 2.7 s on the first call (compile), 0.1–0.2 s
+    afterwards.
+  - *`DownloadSerializer.enqueue`* (issue #80): `run` is `enqueue(_:).value`; a test submits jobs in a known order
+    and learns "the job is running" from a gate the job opens, so no ordering rests on `Task.yield()`. Stable over
+    ten `--parallel` runs, idle and under CPU load.

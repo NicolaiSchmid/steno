@@ -31,16 +31,28 @@ import Testing
     process.environment = environment
     process.standardOutput = Pipe()
     process.standardError = Pipe()
-    try process.run()
-    // Kill once the master holds a second of audio, not after a fixed
-    // sleep: on a loaded runner the binary can take most of two seconds to
-    // start, and the point is what a killed recorder leaves behind, not
-    // how fast it started.
     let layout = RecordingLayout(audioFolder: audio, meetingID: meetingID)
+    try process.run()
+    // A failed wait below must not leave the recorder running into the
+    // temporary home while it is removed.
+    defer { if process.isRunning { kill(process.processIdentifier, SIGKILL) } }
+    // The clock starts when the recorder has opened its master, not at
+    // `run()`: a freshly linked debug binary takes about a second to start
+    // on the self-hosted runner. Then kill once the master holds a second of
+    // audio rather than after a fixed sleep; the point is what a killed
+    // recorder leaves behind, not how fast it started or wrote.
     let masterURL = layout.master(.caf48kFloat32)
+    let launched = ContinuousClock.now
+    while !FileManager.default.fileExists(atPath: masterURL.path) {
+      try #require(ContinuousClock.now - launched < .seconds(20), "the recorder never started")
+      Thread.sleep(forTimeInterval: 0.02)
+    }
     let oneSecond = CAFStreamWriter.headerSize + 48_000 * 2 * CAFStreamWriter.bytesPerSample
-    let deadline = ContinuousClock.now + .seconds(20)
-    while Self.fileSize(masterURL) < oneSecond, ContinuousClock.now < deadline {
+    let opened = ContinuousClock.now
+    while Self.fileSize(masterURL) < oneSecond {
+      try #require(
+        ContinuousClock.now - opened < .seconds(10),
+        "the master holds \(Self.fileSize(masterURL)) bytes after 10 s, under a second of audio")
       Thread.sleep(forTimeInterval: 0.05)
     }
     kill(process.processIdentifier, SIGKILL)
