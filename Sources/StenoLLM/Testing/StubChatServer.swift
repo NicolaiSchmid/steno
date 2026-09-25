@@ -86,6 +86,8 @@ public final class StubChatServer: Sendable {
     var maxInFlight = 0
     var holding = false
     var stopped = false
+    /// Set by the accept thread once it has closed the listening socket.
+    var acceptLoopExited = false
     var waiters: [(count: Int, continuation: CheckedContinuation<Void, Never>)] = []
   }
 
@@ -207,16 +209,22 @@ public final class StubChatServer: Sendable {
   }
 
   /// Closes the listening socket, releases every parked or hanging
-  /// connection and wakes every waiter.
+  /// connection and wakes every waiter; `isClosed` turns true once the
+  /// accept thread has closed the descriptor. Idempotent: the second call
+  /// (`deinit` after an explicit `stop()`) touches nothing, because by then
+  /// the descriptor number may already belong to another socket in this
+  /// process, and a `shutdown` on it would cut a live connection of another
+  /// test.
   public func stop() {
-    let waiters = state.withLock { state -> [CheckedContinuation<Void, Never>] in
-      if state.stopped { return [] }
+    let waiters = state.withLock { state -> [CheckedContinuation<Void, Never>]? in
+      if state.stopped { return nil }
       state.stopped = true
       state.holding = false
       let waiting = state.waiters.map(\.continuation)
       state.waiters.removeAll()
       return waiting
     }
+    guard let waiters else { return }
     // The accept thread closes the descriptor once it has seen `stopped`,
     // so a new server can never inherit this number while the old loop
     // still calls `accept` on it.
@@ -225,10 +233,20 @@ public final class StubChatServer: Sendable {
     for waiter in waiters { waiter.resume() }
   }
 
+  /// True once the accept thread has closed the listening descriptor after
+  /// `stop()`; from then on the number is free for the next socket.
+  public var isClosed: Bool {
+    state.withLock { $0.acceptLoopExited }
+  }
+
   // MARK: Serving
 
   private func acceptLoop() {
-    defer { close(listenFD) }
+    defer {
+      close(listenFD)
+      state.withLock { $0.acceptLoopExited = true }
+      wakeParked()
+    }
     while !state.withLock({ $0.stopped }) {
       var pollFD = pollfd(fd: listenFD, events: Int16(POLLIN), revents: 0)
       let ready = poll(&pollFD, 1, 50)

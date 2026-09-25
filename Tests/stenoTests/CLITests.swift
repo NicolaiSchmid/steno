@@ -27,13 +27,16 @@ import Testing
     var stderr: String
   }
 
-  static func run(_ arguments: [String], home: URL) throws -> Result {
+  static func run(_ arguments: [String], home: URL, environment extra: [String: String] = [:])
+    throws -> Result
+  {
     let process = Foundation.Process()
     process.executableURL = binary
     process.arguments = arguments
     var environment = ProcessInfo.processInfo.environment
     environment["HOME"] = home.path
     environment.removeValue(forKey: "STENO_UPDATE_SNAPSHOTS")
+    environment.merge(extra) { _, new in new }
     process.environment = environment
     process.currentDirectoryURL = home
     let out = Pipe()

@@ -89,6 +89,31 @@ import Testing
     #expect(server.inFlight == 0)
   }
 
+  /// A stopped server's descriptor number is free for the next socket in
+  /// this process; a second `stop()` (the `deinit`) must not `shutdown` it.
+  /// Before the guard, that cut random live connections of other tests
+  /// ("Empty reply from server").
+  @Test func stopIsIdempotentAndNeverTouchesAReusedDescriptor() async throws {
+    let first = try StubChatServer()
+    first.stop()
+    // Yield until the descriptor is closed, so `second` gets its number.
+    for _ in 0..<5_000_000 where !first.isClosed { await Task.yield() }
+    #expect(first.isClosed)
+    let second = try StubChatServer()
+    defer { second.stop() }
+    first.stop()
+    second.enqueue(Scripts.completion("still here"))
+    var request = URLRequest(url: second.baseURL.appendingPathComponent("chat/completions"))
+    request.httpMethod = "POST"
+    request.httpBody = Data("{}".utf8)
+    let (data, response) = try await URLSession.shared.data(for: request)
+    #expect((response as? HTTPURLResponse)?.statusCode == 200)
+    let decoded = try WireJSON.decode(ChatCompletionResponse.self, from: data)
+    #expect(decoded.choices.first?.message.content == "still here")
+    #expect(second.requests.count == 1)
+    #expect(first.requests.isEmpty)
+  }
+
   @Test func wireTypesRoundTripThroughTheirSnakeCaseKeys() throws {
     let request = ChatCompletionRequest(
       model: "m", messages: [ChatMessage(LLMMessage(role: .system, content: "s"))],

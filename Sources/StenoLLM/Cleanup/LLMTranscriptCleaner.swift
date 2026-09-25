@@ -2,7 +2,7 @@ import Foundation
 import StenoCore
 
 /// Pass 1: the transcript in chunks through the model, at most
-/// `endpoint.maxConcurrentRequests` at a time. A chunk whose answer fails
+/// `endpoint.maxConcurrentRequests` at a time. A chunk whose answer is refused, fails
 /// validation (count, indices, emptied or reworded segments) or does not
 /// decode is retried once with the reason appended, then kept as raw text
 /// and listed in `failedChunks`. Network and HTTP failures propagate: the
@@ -57,9 +57,19 @@ public struct LLMTranscriptCleaner: TranscriptCleaner, Sendable {
     var request = request
     var usage = LLMUsage.zero
     for attempt in 0..<2 {
-      let response = try await model.complete(request)
-      usage = usage + response.countedUsage
+      let response: LLMResponse
       let rejection: String
+      do {
+        response = try await model.complete(request)
+      } catch let error as LLMError where error.isAnswerProblem {
+        // A refusal arrives as an error from the client, with no body to
+        // validate; it costs a request all the same.
+        usage = usage + LLMUsage(promptTokens: 0, completionTokens: 0, requests: 1)
+        guard attempt == 0 else { break }
+        request = builder.buildRetry(request, previousAnswer: "", error: error.description + ".")
+        continue
+      }
+      usage = usage + response.countedUsage
       do {
         let draft = try StructuredOutputDecoder.decode(CleanupDraft.self, from: response)
         let problems = draft.problems(against: chunk)

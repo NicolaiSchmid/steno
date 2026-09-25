@@ -411,3 +411,24 @@ Recorded while implementing this plan in PR #5 (`feat/llm-templates`), 2026-09-2
   `StructuredOutputDecoder` is a namespace with a static `decode`; `buildSingleShot(_:)` takes
   the input alone and `buildRepair(for:schema:invalid:error:)` is static and derives response
   format, token ceiling and purpose from the request it repairs; the wire types are internal.
+- Testing pass on the same PR. `OpenAICompatibleClient.wallClockBackstop(for:)` is the one
+  place `URLRequest.timeoutInterval` is computed (twice the clock timeout, at least 30 s), so a
+  test can pin it without waiting 30 s; a `URLProtocol` failing with `URLError.timedOut` proves
+  the transport timeout is reported and retried like the clock one. `LLMTranscriptCleaner` now
+  treats a refusal (`LLMError.refused`, thrown by the client for OpenAI's `refusal` field) like
+  the other answer-quality failures: one retry with the reason, then raw text and
+  `failedChunks`, one request counted; before, a refusal propagated and failed the stage, against
+  the deviation above. `StubChatServer.stop()` is idempotent and returns once the accept thread
+  has closed the listening descriptor: the `deinit` after an explicit `stop()` used to `shutdown`
+  the descriptor number again, which by then could be another socket of the same test process
+  (a live URLSession connection or another server), the source of the intermittent "Empty reply
+  from server" transport errors under `--parallel`. Still untestable on CI: the wall-clock backstop actually firing (30 s of
+  wall time), `Retry-After` in HTTP-date form (parsed as nil by design), and anything a real model
+  does (spikes 1 to 3, `LiveEndpointTests`). Known and reproduced on the Linux container only:
+  `swift test --parallel` stalls when a task group cancels a sibling that is entering
+  `URLSession.data(for:)` (swift-corelibs-foundation deadlocks between `CancelState.cancel()` ->
+  `URLSessionTask.cancel()` -> `workQueue.sync` and the `data(for:)` continuation body's
+  `DispatchQueue.sync`); `CleanupTests.transportFailuresPropagateInsteadOfFallingBackToRaw` is
+  the usual trigger and every later network test then hangs on `URLSession.shared`. Darwin's
+  URLSession does not have the bug, so CI on the Mac is unaffected; the loop is `--filter` per
+  suite on Linux.

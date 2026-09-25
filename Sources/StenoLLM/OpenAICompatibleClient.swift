@@ -173,9 +173,16 @@ public actor OpenAICompatibleClient: LanguageModel {
     if let apiKey {
       request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
     }
-    // A wall-clock backstop well past the clock-driven timeout, so a stuck
-    // socket cannot outlive the process when the clock never advances.
-    request.timeoutInterval = max(endpoint.requestTimeout / .seconds(1) * 2, 30)
+    request.timeoutInterval = Self.wallClockBackstop(for: endpoint.requestTimeout)
+  }
+
+  /// `URLRequest.timeoutInterval`: a wall-clock backstop well past the
+  /// clock-driven timeout (twice it, at least 30 s), so a stuck socket
+  /// cannot outlive the process when the injected clock never advances.
+  /// The transfer then fails with `URLError.timedOut`, which `send` reports
+  /// as `LLMError.timeout` like the clock-driven timeout.
+  static func wallClockBackstop(for timeout: Duration) -> TimeInterval {
+    max(timeout / .seconds(1) * 2, 30)
   }
 
   /// The wire `response_format` for a request under `mode`; nil sends none.
