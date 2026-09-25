@@ -7,9 +7,14 @@ import Testing
 /// The `say` fixtures under `Tests/Fixtures/speech` are committed once and
 /// never regenerated (`say` changes with macOS releases), so their hashes
 /// live in the folder's own `MANIFEST.sha256` rather than in the generated
-/// root manifest, and this suite pins them.
+/// root manifest, and this suite pins them. `two-speakers` is Anna and
+/// Samantha (two female voices the community-1 diarizer hears as one
+/// speaker); `two-speakers-mf` is the same dialogue as Anna and Daniel,
+/// rendered once on macOS 26.7, which it separates.
 @Suite struct SpeechFixtureTests {
-  static let names = ["de-short", "de-short-2", "en-short", "denglish", "two-speakers"]
+  static let names = [
+    "de-short", "de-short-2", "en-short", "denglish", "two-speakers", "two-speakers-mf",
+  ]
 
   @Test func everyFixtureIsListedWithItsReferenceAndHash() throws {
     let manifest = try String(
@@ -43,8 +48,9 @@ import Testing
     }
   }
 
-  @Test func twoSpeakersHasFourTurnsSeparatedBySilence() throws {
-    let audio = try WAVAudioDecoder.read(Fixtures.url("speech/two-speakers.wav"))
+  @Test(arguments: ["two-speakers", "two-speakers-mf"])
+  func twoSpeakersHasFourTurnsSeparatedBySilence(name: String) throws {
+    let audio = try WAVAudioDecoder.read(Fixtures.url("speech/\(name).wav"))
     // Energy per 100 ms frame; the four turns are separated by 0.4 s of
     // digital silence, so at least three silent stretches are inside.
     let frame = 1_600
