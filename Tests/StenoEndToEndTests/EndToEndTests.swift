@@ -133,13 +133,16 @@ import Testing
     let receipt = try #require(deliveries.first?.receipt)
     let folder = "Meetings/2026-09-24-produktstrategie"
     let slug = "2026-09-24-produktstrategie"
+    // `audio.m4a` with the real decoder (AAC mixdown), `audio.wav` elsewhere.
+    let mixdownFormat = Self.decoder.mixdownFormat
+    let mixdown = layout.mixdown(mixdownFormat).lastPathComponent
     #expect(receipt.root == vault.path)
     #expect(receipt.folder == folder)
     #expect(receipt.rendererVersion == ArtifactRenderer.version)
     #expect(
       receipt.files.map(\.relativePath) == [
         "\(folder)/\(slug) - Tasks.md", "\(folder)/\(slug) - Transcript.md", "\(folder)/\(slug).md",
-        "\(folder)/audio.wav", "\(folder)/meeting.json", "\(folder)/transcript.vtt",
+        "\(folder)/\(mixdown)", "\(folder)/meeting.json", "\(folder)/transcript.vtt",
         "People/Jérôme.md", "People/Nicolai.md",
       ])
     for file in receipt.files {
@@ -162,8 +165,8 @@ import Testing
     #expect(export.segments.count == 12)
     #expect(export.speakers.map(\.clusterLabel) == ["Me", "Speaker 1", "Speaker 2"])
     #expect(
-      try Data(contentsOf: vault.appendingPathComponent("\(folder)/audio.wav"))
-        == (try Data(contentsOf: layout.mixdown(.wav16kInt16))),
+      try Data(contentsOf: vault.appendingPathComponent("\(folder)/\(mixdown)"))
+        == (try Data(contentsOf: layout.mixdown(mixdownFormat))),
       "the mixdown is copied byte for byte")
     #expect(!SummaryMarkdown.render(export).isEmpty)
     try Snapshot.assert(

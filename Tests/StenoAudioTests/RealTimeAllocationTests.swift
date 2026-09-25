@@ -19,6 +19,12 @@ import Testing
     static let allocateFlag: UInt32 = 2
     static let count = Atomic<Int>(0)
     static let thread = Atomic<UInt>(0)
+    /// The first few offending stacks, captured with `backtrace` (no malloc)
+    /// into storage allocated before the hook goes in; symbolised afterwards.
+    static let traceDepth = 32
+    static let maxTraces = 4
+    nonisolated(unsafe) static let traces = UnsafeMutablePointer<UnsafeMutableRawPointer?>
+      .allocate(capacity: traceDepth * maxTraces)
 
     /// The global `malloc_logger` pointer, looked up by name so the test does
     /// not depend on the header being visible to Swift.
@@ -28,21 +34,40 @@ import Testing
       }
     }
 
-    /// Allocations the calling thread made while running `body`.
-    static func allocations(during body: () -> Void) throws -> Int {
+    /// Allocations the calling thread made while running `body`, and the
+    /// symbolised stacks of the first few, for the failure message.
+    static func allocations(during body: () -> Void) throws -> (count: Int, stacks: String) {
       let slot = try #require(Self.slot, "malloc_logger is not exported by libmalloc")
       count.store(0, ordering: .relaxed)
+      traces.update(repeating: nil, count: traceDepth * maxTraces)
       thread.store(UInt(bitPattern: pthread_self()), ordering: .relaxed)
       slot.pointee = { type, _, _, _, _, _ in
-        if type & AllocationHook.allocateFlag != 0,
+        guard type & AllocationHook.allocateFlag != 0,
           UInt(bitPattern: pthread_self()) == AllocationHook.thread.load(ordering: .relaxed)
-        {
-          AllocationHook.count.wrappingAdd(1, ordering: .relaxed)
+        else { return }
+        let index = AllocationHook.count.loadThenWrappingAdd(1, ordering: .relaxed)
+        if index < AllocationHook.maxTraces {
+          _ = backtrace(
+            AllocationHook.traces + index * AllocationHook.traceDepth,
+            Int32(AllocationHook.traceDepth))
         }
       }
       body()
       slot.pointee = nil
-      return count.load(ordering: .relaxed)
+      let total = count.load(ordering: .relaxed)
+      var stacks = ""
+      for index in 0..<min(total, maxTraces) {
+        let frames = traces + index * traceDepth
+        var depth = 0
+        while depth < traceDepth, frames[depth] != nil { depth += 1 }
+        guard let symbols = backtrace_symbols(frames, Int32(depth)) else { continue }
+        stacks += "\nallocation \(index + 1):\n"
+        for frame in 0..<depth {
+          if let symbol = symbols[frame] { stacks += "  " + String(cString: symbol) + "\n" }
+        }
+        free(symbols)
+      }
+      return (total, stacks)
     }
   }
 
@@ -102,7 +127,9 @@ import Testing
         pointer.initialize(repeating: 1, count: 100_000)
         pointer.deallocate()
       }
-      #expect(seen >= 1, "the hook must observe a deliberate allocation, or it proves nothing")
+      #expect(
+        seen.count >= 1, "the hook must observe a deliberate allocation, or it proves nothing")
+      #expect(seen.stacks.contains("allocation 1:"), "the hook captures the allocating stack")
     }
 
     @Test func producerProcessingAndRelayAllocateNothingAfterWarmUp() throws {
@@ -132,7 +159,9 @@ import Testing
         second.deliver(to: sink)
         thread.drain()
       }
-      #expect(allocations == 0, "\(allocations) allocations on the real-time path")
+      #expect(
+        allocations.count == 0,
+        "\(allocations.count) allocations on the real-time path\(allocations.stacks)")
       #expect(thread.framesProcessed == 110)
       #expect(sink.droppedSamples.isEmpty)
       #expect(relay.droppedFrames == [0, 0, 0])
@@ -156,7 +185,9 @@ import Testing
       let allocations = try AllocationHook.allocations {
         for _ in 0..<100 { resampler.process(input, into: output) }
       }
-      #expect(allocations == 0)
+      #expect(
+        allocations.count == 0,
+        "\(allocations.count) allocations in 100 resampler frames\(allocations.stacks)")
     }
   }
 #endif
