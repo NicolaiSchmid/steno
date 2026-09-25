@@ -91,4 +91,44 @@ import Testing
     let note = renderer.renderTasks(export, options: options)
     #expect(note.contains(" #steno-tasks "))
   }
+
+  @Test func everyPriorityOnABareTaskAndTheDoneMarker() {
+    var export = self.export
+    export.tasks = TaskPriority.allCases.enumerated().map { index, priority in
+      MeetingTask(
+        id: SampleData.uuid(80 + index), meetingID: export.meeting.id, text: "Nur \(priority)",
+        priority: priority)
+    }
+    export.tasks.append(
+      MeetingTask(
+        id: SampleData.uuid(90), meetingID: export.meeting.id, text: "Erledigt", priority: .high,
+        dueDate: FixtureMeeting.dueOctoberFirst, done: true))
+    let note = renderer.renderTasks(export, options: FixtureMeeting.wikilinkTag)
+    let lines = note.split(separator: "\n").filter { $0.hasPrefix("- [") }.map(String.init)
+    #expect(
+      lines == [
+        "- [ ] Nur low #task \u{1F53D}",
+        "- [ ] Nur normal #task",
+        "- [ ] Nur high #task \u{23EB}",
+        "- [x] Erledigt #task \u{23EB} \u{1F4C5} 2026-10-01",
+      ], "no assignee, no due date: the line ends after the tag or the priority")
+    let plain = renderer.renderTasks(export, options: .plain)
+    #expect(plain.contains("\n- [ ] Nur normal\n"), "a bare normal task is text alone")
+    #expect(!plain.contains("\u{2705}"), "done writes [x] and no completion date")
+  }
+
+  @Test func aDueDateFollowsTheOptionsTimeZone() {
+    var export = self.export
+    // 2026-10-01T23:30:00Z: still the 1st in UTC, already the 2nd in Berlin.
+    export.tasks = [
+      MeetingTask(
+        id: SampleData.uuid(81), meetingID: export.meeting.id, text: "Spät",
+        dueDate: Date(timeIntervalSince1970: 1_790_897_400))
+    ]
+    #expect(
+      renderer.renderTasks(export, options: .plain).contains("\n- [ ] Spät \u{1F4C5} 2026-10-01\n"))
+    #expect(
+      renderer.renderTasks(export, options: FixtureMeeting.plainBerlin).contains(
+        "\n- [ ] Spät \u{1F4C5} 2026-10-02\n"))
+  }
 }

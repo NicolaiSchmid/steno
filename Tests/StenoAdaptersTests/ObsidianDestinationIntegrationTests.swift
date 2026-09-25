@@ -298,4 +298,184 @@ import Testing
     let note = try vault.text("\(Self.folder)-2/\(Self.slug)-2.md")
     #expect(note.contains("  - \"Anna Müller\"\n"), "no people folder, no links")
   }
+
+  @Test func firstDeliveryAppendsTheBlockToAPersonPageTheUserAlreadyWrote() async throws {
+    let vault = try Vault()
+    defer { vault.cleanUp() }
+    let export = try FixtureMeeting.export(audioIn: vault.directory)
+    try FileManager.default.createDirectory(
+      at: vault.url("People"), withIntermediateDirectories: true)
+    let userPage = "---\nrole: \"CEO\"\n---\n# Anna\n\nMet her at the fair."
+    try Data(userPage.utf8).write(to: vault.url("People/Anna Müller.md"))
+    try Data("Bob's page.\n".utf8).write(to: vault.url("People/Bob.md"))
+
+    let receipt = try await vault.destination().deliver(export, previous: nil)
+
+    let anna = try vault.text("People/Anna Müller.md")
+    #expect(
+      anna.hasPrefix(userPage + "\n\n<!-- steno:meetings:start -->\n- 2026-09-24 [["),
+      "the user's frontmatter and text come first, then the block")
+    #expect(anna.hasSuffix("<!-- steno:meetings:end -->\n"))
+    #expect(!anna.contains("steno_person_id"), "an existing page never gets Steno's frontmatter")
+    #expect(try vault.text("People/Bob.md") == "Bob's page.\n")
+    #expect(try vault.list("People") == ["Anna Müller.md", "Bob.md", "Nicolai Schmid.md"])
+    #expect(!receipt.files.contains { $0.relativePath == "People/Bob.md" })
+    #expect(
+      receipt.files.first { $0.relativePath == "People/Anna Müller.md" }?.ownership
+        == .managedBlock)
+  }
+
+  @Test func reexportRewritesOwnedNotesAndRecreatesADeletedOne() async throws {
+    let vault = try Vault()
+    defer { vault.cleanUp() }
+    let export = try FixtureMeeting.export(audioIn: vault.directory)
+    let destination = vault.destination()
+    let first = try await destination.deliver(export, previous: nil)
+    let note = "\(Self.folder)/\(Self.slug).md"
+    let original = try vault.read(note)
+
+    // The folder note is wholly Steno's: an edit there is lost on re-export
+    // (the scratchpad in the app is the place for notes). A deleted file
+    // Steno wrote comes back.
+    let edited = (try vault.text(note)) + "\nMy addition.\n"
+    try Data(edited.utf8).write(to: vault.url(note))
+    try FileManager.default.removeItem(at: vault.url("\(Self.folder)/transcript.vtt"))
+
+    let second = try await destination.deliver(export, previous: first)
+
+    #expect(try vault.read(note) == original, "an owned note is rewritten from the model")
+    #expect(try vault.list(Self.folder) == Self.meetingFiles, "transcript.vtt is back")
+    try Snapshot.assert(
+      try vault.read("\(Self.folder)/transcript.vtt"), matches: "snapshots/obsidian/transcript.vtt")
+    #expect(second == first)
+  }
+
+  @Test func peopleFolderOffKeepsThePagesOnDiskAndInTheReceipt() async throws {
+    let vault = try Vault()
+    defer { vault.cleanUp() }
+    let export = try FixtureMeeting.export(audioIn: vault.directory)
+    let first = try await vault.destination().deliver(export, previous: nil)
+    let anna = try vault.read("People/Anna Müller.md")
+
+    let second = try await vault.destination(peopleFolder: nil).deliver(export, previous: first)
+
+    #expect(try vault.list("People") == ["Anna Müller.md", "Nicolai Schmid.md"])
+    #expect(try vault.read("People/Anna Müller.md") == anna, "not touched, not deleted")
+    #expect(second.files.map(\.relativePath) == first.files.map(\.relativePath))
+    #expect(second.files.filter { $0.ownership == .managedBlock }.count == 2)
+    let note = try vault.text("\(Self.folder)/\(Self.slug).md")
+    #expect(note.contains("  - \"Anna Müller\"\n"), "the notes stop linking people")
+    #expect(!note.contains("[[Anna"))
+  }
+
+  @Test func aSecondMeetingOnTheSameDayGetsTheNextSuffixAndSharesThePersonPages() async throws {
+    let vault = try Vault()
+    defer { vault.cleanUp() }
+    let destination = vault.destination(includeAudio: false)
+    let first = FixtureMeeting.export()
+    var second = first
+    second.meeting.id = SampleData.uuid(2)
+    second.meeting.startedAt = first.meeting.startedAt.addingTimeInterval(3 * 3600)
+
+    let receiptOne = try await destination.deliver(first, previous: nil)
+    let filesOne = try Dictionary(
+      uniqueKeysWithValues: receiptOne.files.map {
+        ($0.relativePath, try vault.read($0.relativePath))
+      })
+    let receiptTwo = try await destination.deliver(second, previous: nil)
+
+    #expect(receiptOne.folder == Self.folder)
+    #expect(receiptTwo.folder == "\(Self.folder)-2")
+    #expect(try vault.list("Meetings") == [Self.slug, "\(Self.slug)-2"])
+    #expect(
+      try vault.list("\(Self.folder)-2")
+        == Self.meetingFiles(slug: "\(Self.slug)-2").filter { $0 != "audio.m4a" })
+    for (path, data) in filesOne where !path.hasPrefix("People/") {
+      #expect(try vault.read(path) == data, "\(path): the first meeting's files are untouched")
+    }
+    let anna = try vault.text("People/Anna Müller.md")
+    let lines = anna.split(separator: "\n").filter { $0.hasPrefix("- 2026-09-24 ") }.map(
+      String.init)
+    #expect(lines.count == 2, "one line per meeting")
+    #expect(anna.contains("%%steno:00000000-0000-0000-0000-000000000001%%"))
+    #expect(anna.contains("%%steno:00000000-0000-0000-0000-000000000002%%"))
+    #expect(
+      anna.contains("[[\(Self.slug)-2|Produktstrategie"), "the line links the suffixed folder")
+    #expect(anna.components(separatedBy: ManagedBlock.start).count == 2, "one block")
+    #expect(lines == ManagedBlock.sortedNewestFirst(lines), "the block is in sorted order")
+
+    // Each meeting re-exports to its own pinned folder.
+    let again = try await destination.deliver(second, previous: receiptTwo)
+    #expect(again == receiptTwo)
+    #expect(try vault.list("Meetings") == [Self.slug, "\(Self.slug)-2"])
+  }
+
+  @Test func aRenamedPersonGetsANewPageAndTheOldOneStays() async throws {
+    let vault = try Vault()
+    defer { vault.cleanUp() }
+    let export = try FixtureMeeting.export(audioIn: vault.directory)
+    let first = try await vault.destination().deliver(export, previous: nil)
+    let oldPage = try vault.read("People/Anna Müller.md")
+
+    var renamed = export
+    renamed.persons[0].displayName = "Anna Schulz"
+    renamed.participants[0].displayName = "Anna Schulz"
+    let second = try await vault.destination().deliver(renamed, previous: first)
+
+    #expect(
+      try vault.list("People") == ["Anna Müller.md", "Anna Schulz.md", "Nicolai Schmid.md"])
+    #expect(try vault.read("People/Anna Müller.md") == oldPage, "never deleted, never rewritten")
+    let newPage = try vault.text("People/Anna Schulz.md")
+    #expect(newPage.contains("# Anna Schulz\n"))
+    #expect(newPage.contains("steno_person_id: \"00000000-0000-0000-0000-00000000000a\""))
+    #expect(
+      second.files.filter { $0.ownership == .managedBlock }.map(\.relativePath) == [
+        "People/Anna Müller.md", "People/Anna Schulz.md", "People/Nicolai Schmid.md",
+      ], "the old page stays in the receipt")
+    let transcript = try vault.text("\(Self.folder)/\(Self.slug) - Transcript.md")
+    #expect(transcript.contains("## [[Anna Schulz]] — 00:00:04"))
+    #expect(!transcript.contains("Anna Müller"), "every note uses the current name")
+  }
+
+  @Test func aMovedVaultIsWrittenFreshUnderThePinnedFolderAndTheOldOneIsLeftAlone() async throws {
+    let vault = try Vault()
+    defer { vault.cleanUp() }
+    let export = try FixtureMeeting.export(audioIn: vault.directory)
+    let first = try await vault.destination().deliver(export, previous: nil)
+    let before = try Dictionary(
+      uniqueKeysWithValues: first.files.map { ($0.relativePath, try vault.read($0.relativePath)) })
+
+    let moved = vault.directory.appendingPathComponent("moved", isDirectory: true)
+    try FileManager.default.createDirectory(at: moved, withIntermediateDirectories: true)
+    let destination = ObsidianFolderDestination(
+      settings: ObsidianSettings(
+        vaultPath: moved.path, peopleFolder: "People", includeAudio: true, taskTag: "task"),
+      timeZone: FixtureMeeting.berlin)
+    let second = try await destination.deliver(export, previous: first)
+
+    #expect(second.root == moved.path)
+    #expect(second.folder == first.folder, "the folder name travels with the receipt")
+    #expect(second.files.map(\.relativePath) == first.files.map(\.relativePath))
+    for file in second.files {
+      #expect(
+        try Data(contentsOf: moved.appendingPathComponent(file.relativePath))
+          == before[file.relativePath], "\(file.relativePath) in the new vault")
+    }
+    for (path, data) in before {
+      #expect(try vault.read(path) == data, "\(path) in the old vault")
+    }
+  }
+
+  @Test func aMixdownPathWithoutAFileIsAudioUnavailable() async throws {
+    let vault = try Vault()
+    defer { vault.cleanUp() }
+    var export = FixtureMeeting.export()
+    export.audio?.mixdownURL = vault.directory.appendingPathComponent("gone.m4a")
+    await #expect(throws: ObsidianError.audioUnavailable) {
+      try await vault.destination().deliver(export, previous: nil)
+    }
+    #expect(try vault.list(Self.folder) == Self.meetingFiles.filter { $0 != "audio.m4a" })
+    let noAudio = try await vault.destination(includeAudio: false).deliver(export, previous: nil)
+    #expect(noAudio.files.count == 7, "with audio off the missing mixdown is no error")
+  }
 }

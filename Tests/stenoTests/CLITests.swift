@@ -217,6 +217,33 @@ import Testing
       home: home)
     #expect(missingVault.status == 2)
     #expect(missingVault.stderr.contains("does not exist"))
+
+    let unknown = try Self.run(
+      ["deliver", UUID().uuidString, "--vault", vault.path, "--db", db], home: home)
+    #expect(unknown.status == 2)
+    #expect(unknown.stderr.contains("not found"))
+
+    // A failed destination is a printed row and exit 2; the other files are
+    // still written. The mixdown is removed so --include-audio has nothing
+    // to copy.
+    let mixdown = RecordingLayout(audioFolder: audio, meetingID: UUID(uuidString: meetingID)!)
+      .mixdown(.wav16kInt16)
+    try FileManager.default.removeItem(at: mixdown)
+    let third = home.appendingPathComponent("vault3", isDirectory: true)
+    try FileManager.default.createDirectory(at: third, withIntermediateDirectories: true)
+    let partial = try Self.run(
+      ["deliver", meetingID, "--vault", third.path, "--include-audio", "--db", db], home: home)
+    #expect(partial.status == 2)
+    #expect(partial.stdout.hasPrefix("obsidian-folder\tfailed\t"))
+    #expect(partial.stdout.contains("no audio mixdown"))
+    #expect(partial.stderr.contains("delivery failed"))
+    #expect(
+      try FileManager.default.contentsOfDirectory(
+        atPath: third.appendingPathComponent("Meetings/\(slug)").path
+      ).count == 5, "every other file was written before the failure")
+    let failedRows = try await store.deliveries(meetingID: UUID(uuidString: meetingID)!)
+    #expect(failedRows.first?.status.kind == .failed)
+    #expect(failedRows.first?.receipt?.root == second.path, "the last good receipt is kept")
   }
 
   @Test func defaultDatabaseFollowsHome() throws {

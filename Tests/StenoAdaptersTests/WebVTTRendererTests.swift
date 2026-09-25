@@ -44,4 +44,25 @@ import Testing
     #expect(WebVTTRenderer.noteText("x --> y") == "x  y")
     #expect(WebVTTRenderer.noteText("") == "Untitled")
   }
+
+  @Test func aVoiceNameCannotCloseTheSpanOrCarryAnAmpersand() throws {
+    var export = self.export
+    export.persons[1].displayName = "Tom <Tommy> & Söhne > GmbH\nBerlin"
+    export.meeting.title = "Q4 --> Q1 & <Plan>"
+    let vtt = renderer.renderVTT(export)
+    #expect(
+      vtt.contains(
+        "\n00:00:00.000 --> 00:00:04.200\n<v Tom <Tommy  Söhne  GmbH Berlin>Guten Morgen zusammen, fangen wir mit der Roadmap an.\n"
+      ), "> and & are dropped from the annotation, < may stay")
+    #expect(vtt.contains("\nNOTE\nQ4  Q1 & <Plan>\n"), "the NOTE block only loses -->")
+    let voice = try Regex("^<v ([^>]*)>(.*)$")
+    var cues = 0
+    for line in vtt.split(separator: "\n") where line.hasPrefix("<v ") {
+      let match = try #require(String(line).wholeMatch(of: voice), "\(line)")
+      cues += 1
+      #expect(!String(match.output[1].substring ?? "").contains("&"))
+    }
+    #expect(cues == 14, "every cue line still parses as one voice span")
+    #expect(!vtt.contains("\n\n\n"), "no blank cue blocks")
+  }
 }

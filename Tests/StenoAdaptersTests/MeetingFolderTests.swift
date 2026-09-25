@@ -32,4 +32,14 @@ import Testing
     #expect(
       MeetingFolder.basename(for: meeting, timeZone: .gmt) == "2026-09-24-meeting")
   }
+
+  @Test func theDateFollowsStandardTimeInWinter() {
+    var meeting = FixtureMeeting.meeting()
+    meeting.startedAt = Date(timeIntervalSince1970: 1_796_166_000)  // 2026-12-01T23:00:00Z
+    meeting.title = "Winter"
+    #expect(MeetingFolder.path(for: meeting, timeZone: .gmt) == "Meetings/2026-12-01-winter")
+    #expect(
+      MeetingFolder.path(for: meeting, timeZone: FixtureMeeting.berlin)
+        == "Meetings/2026-12-02-winter", "CET is one hour ahead, not two")
+  }
 }

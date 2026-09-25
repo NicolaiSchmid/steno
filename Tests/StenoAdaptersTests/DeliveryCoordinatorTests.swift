@@ -139,4 +139,40 @@ struct RecordingDestination: Destination, Sendable {
       try await store.deliveries(meetingID: SampleData.uuid(404)).isEmpty,
       "no meeting row, so no delivery row can hang off it; the result still reports the failure")
   }
+
+  @Test func theStoredReceiptRoundTripsIntoTheRealDestination() async throws {
+    let (store, settings) = try await Self.store()
+    let directory = try Fixtures.temporaryDirectory("coordinator-vault")
+    defer { try? FileManager.default.removeItem(at: directory) }
+    var configured = try await settings.load()
+    configured.obsidian = ObsidianSettings(vaultPath: directory.path, peopleFolder: "People")
+    try await settings.save(configured)
+    let coordinator = DeliveryCoordinator(
+      store: store, settings: settings,
+      destinations: { settings in
+        settings.obsidian.map {
+          [ObsidianFolderDestination(settings: $0, timeZone: FixtureMeeting.berlin)]
+        } ?? []
+      }, now: { Self.now })
+
+    let first = await coordinator.deliverAll(meetingID: FixtureMeeting.meetingID)
+    #expect(first.count == 1)
+    #expect(first[0].status == .delivered)
+    let receipt = try #require(first[0].receipt)
+    #expect(receipt.folder == FixtureMeeting.folder)
+    #expect(receipt.files.count == 5, "no audio, no persons in the store's export")
+    let stored = try #require(
+      try await store.deliveries(meetingID: FixtureMeeting.meetingID).first?.receipt)
+    #expect(stored == receipt, "the receipt survives the JSON column")
+
+    // The user drops a note in; the second run through the stored receipt
+    // changes nothing Steno wrote and leaves the note alone.
+    let notes = directory.appendingPathComponent("\(receipt.folder)/notes.md")
+    try Data("mine\n".utf8).write(to: notes)
+    let second = await coordinator.deliverAll(meetingID: FixtureMeeting.meetingID)
+    #expect(second[0].status == .delivered)
+    #expect(second[0].receipt == receipt, "byte-identical files, identical hashes")
+    #expect(try Data(contentsOf: notes) == Data("mine\n".utf8))
+    #expect(try await store.deliveries(meetingID: FixtureMeeting.meetingID).count == 1)
+  }
 }

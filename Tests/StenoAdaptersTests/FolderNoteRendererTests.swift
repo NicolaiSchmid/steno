@@ -112,4 +112,47 @@ import Testing
     let plain = try renderer.render(export, options: FixtureMeeting.plain)
     #expect(plain.count == 5, "no people folder, no person pages")
   }
+
+  @Test func hostileTitleAndTagsStayInsideTheirScalars() {
+    var export = self.export
+    export.meeting.title = "- yes: #no \"quoted\" \\ end\nsecond line"
+    export.meeting.tags = ["- x", "yes", "a:b", "#with space", "C/D_e", "🎉", "kunde/acme "]
+    let note = renderer.renderFolderNote(export, options: FixtureMeeting.wikilink)
+    #expect(
+      note.hasPrefix("---\ntitle: \"- yes: #no \\\"quoted\\\" \\\\ end\\nsecond line\"\ndate: "),
+      "the title is one double-quoted scalar")
+    let tags = ["meeting", "x", "yes", "ab", "with-space", "C/D_e", "kunde/acme"]
+    #expect(
+      note.contains("\ntags:\n" + tags.map { "  - \($0)\n" }.joined() + "source:"),
+      "tags lose #, :, spaces and symbols; an empty result is dropped")
+    #expect(note.contains("\n# - yes: #no \"quoted\" \\ end second line\n"), "H1 is one line")
+    let lines = note.split(separator: "\n", omittingEmptySubsequences: false)
+    let fence = lines.dropFirst().firstIndex(of: "---") ?? lines.endIndex
+    for line in lines[1..<fence] where !line.hasPrefix("  - ") {
+      #expect(
+        line.contains(": ") || line.hasSuffix(":"),
+        "every frontmatter line is key: value or a list head, got \(line)")
+    }
+    let folder = MeetingFolder.basename(for: export.meeting, timeZone: FixtureMeeting.berlin)
+    #expect(folder == "2026-09-24-yes-no-quoted-end-second-line")
+  }
+
+  @Test func personPageFileNamesAreTheWikilinkTargets() throws {
+    var export = self.export
+    export.persons[0].displayName = "Anna/Müller: <CEO> [Acme]"
+    export.participants[0].displayName = export.persons[0].displayName
+    let artifacts = try renderer.render(export, options: FixtureMeeting.wikilink)
+    let page = try #require(artifacts.first { $0.kind == .personPage })
+    #expect(page.fileName == "AnnaMüller CEO Acme.md")
+    func text(_ kind: RenderedArtifact.Kind) throws -> String {
+      String(decoding: try #require(artifacts.first { $0.kind == kind }).data, as: UTF8.self)
+    }
+    #expect(
+      try text(.folderNote).contains("  - \"[[AnnaMüller CEO Acme]]\"\n"),
+      "the participant link resolves to the page")
+    #expect(try text(.transcript).contains("\n## [[AnnaMüller CEO Acme]] — 00:00:04\n"))
+    #expect(try text(.tasks).contains(" [[AnnaMüller CEO Acme]] "))
+    #expect(
+      try text(.personPage).contains("# Anna/Müller: <CEO> [Acme]\n"), "the H1 keeps the real name")
+  }
 }

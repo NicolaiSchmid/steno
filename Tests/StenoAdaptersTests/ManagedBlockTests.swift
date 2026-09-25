@@ -100,4 +100,28 @@ import Testing
         "- 2026-03-01 a", "- 2026-01-01 a", "- 2026-01-01 b", "no date at all",
       ])
   }
+
+  @Test func aHostileTitleCannotBreakOutOfThePersonLine() {
+    var export = self.export
+    export.meeting.title = "Sync | Q4 ]] %%steno:evil%% [x]\nline two"
+    let line = renderer.renderPersonLine(
+      export, folderSlug: FixtureMeeting.folderSlug, options: FixtureMeeting.wikilink)
+    let alias = "Sync / Q4 )\u{200B}) %%steno:evil%% (x) line two"
+    let slug = FixtureMeeting.folderSlug
+    let marker = "%%steno:00000000-0000-0000-0000-000000000001%%"
+    #expect(line == "- 2026-09-24 [[\(slug)|\(alias)]] \(marker)")
+    #expect(line.components(separatedBy: "]]").count == 2, "exactly one link close")
+    #expect(!alias.contains("|"))
+    // The marker at the end still identifies the meeting on merge.
+    let merged = ManagedBlock.merge(line, meetingID: export.meeting.id, into: "")
+    let replaced = ManagedBlock.merge(
+      "- 2026-09-24 new", meetingID: export.meeting.id, into: merged)
+    #expect(replaced == ManagedBlock.block(lines: ["- 2026-09-24 new"]))
+
+    let plain = renderer.renderPersonLine(
+      export, folderSlug: FixtureMeeting.folderSlug, options: .plain)
+    #expect(
+      plain == "- 2026-09-24 [\(alias)](</Meetings/\(slug)/\(slug).md>) \(marker)",
+      "plain style uses a vault-absolute Markdown link")
+  }
 }
