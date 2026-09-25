@@ -1,35 +1,36 @@
 # Steno v1: LLM and templates (`StenoLLM`)
 
-Status: implementation plan, 2026-09-25, reconciled the same day. Workstream
-plan under [`2026-09-25-v1-program.md`](2026-09-25-v1-program.md); scope
-authority [`2026-09-24-initial-scope.md`](2026-09-24-initial-scope.md). Uses
-the program's types (`LanguageModel`, `TranscriptCleaner`, `MeetingSummarizer`,
-`CleanupContext`, `CleanupResult`, `SummaryInput`, `SummaryOutput`, `LLMUsage`,
-`SummaryTemplate`) and reads template data from StenoCore's `TemplateRegistry`.
+Status: implementation plan, 2026-09-25, reconciled and then revised the same day after the three
+reviews (program review application log). Workstream plan under
+[`2026-09-25-v1-program.md`](2026-09-25-v1-program.md); scope authority
+[`2026-09-24-initial-scope.md`](2026-09-24-initial-scope.md). Uses the program's types
+(`LanguageModel`, `TranscriptCleaner`, `MeetingSummarizer`, `CleanupInput`, `CleanupOutput`,
+`SummaryInput`, `SummaryOutput`, `SummaryDocument`, `LLMUsage`, `SummaryTemplate`) and reads template
+data from StenoCore's `SummaryTemplate.bundled`.
 
 ## Goal
 
-`StenoLLM` turns a merged, diarized transcript into what the user reads: a
-cleaned transcript, a title, a template-driven summary in Jamie's style,
-decisions, tasks with assignee, priority and due date, and speaker name
-suggestions. It talks to any OpenAI-compatible chat completions endpoint
-configured with base URL, API key and model name, handles hour-long
-German/English/Denglish meetings within a bounded context window, degrades
-predictably when the server ignores or rejects structured output, reports
-token usage per meeting, and is fully testable against a local stub server.
+`StenoLLM` turns a merged, diarized transcript into what the user reads: a cleaned transcript, a
+title, a template-driven structured summary in Jamie's style, decisions, tasks with assignee, priority
+and due date, and speaker name suggestions. It talks to any OpenAI-compatible chat completions endpoint
+configured with base URL, API key and model name, handles hour-long German/English/Denglish meetings
+within a bounded context window, degrades predictably when the server ignores or rejects structured
+output, reports token usage per meeting, and is fully testable against a local stub server with an
+injected clock.
 
 ## Non-goals
 
 - Streaming; the UI shows a processing state, not partial text.
-- Provider-specific APIs (Anthropic Messages, Gemini, OpenAI Responses API),
-  tool calling, embeddings, vision. Only `POST {baseURL}/chat/completions`
-  and `GET {baseURL}/models`.
-- Custom templates, template editing, template parsing (data is StenoCore's
-  JSON), auto-picking a template from content. Four fixed templates.
-- Cross-meeting context, Ask AI, translating the transcript, a per-meeting
-  output-language override, on-device Apple Foundation Models.
-- Exact tokenisation, pricing and cost estimation. Budgets use a byte
-  heuristic; `LLMUsage` records tokens only.
+- Provider-specific APIs (Anthropic Messages, Gemini, OpenAI Responses API), tool calling,
+  embeddings, vision. Only `POST {baseURL}/chat/completions` and `GET {baseURL}/models`.
+- Custom templates, template editing, template parsing (data is StenoCore's JSON), auto-picking a
+  template from content. Four fixed templates.
+- Cross-meeting context, Ask AI, translating the transcript, a per-meeting output-language override,
+  on-device Apple Foundation Models.
+- Exact tokenisation, pricing and cost estimation. Budgets use a byte heuristic; `LLMUsage` records
+  tokens only.
+- Rendering Markdown. The summary is a `SummaryDocument`; StenoCore's `SummaryMarkdown` renders it
+  at display and export time with the current speaker names.
 - Sending anything but text. No audio, file paths or scratchpad in v1.
 
 ## Research findings the design rests on
@@ -45,86 +46,86 @@ Verified 2026-09-25 against vendor docs unless marked otherwise.
 | Ollama (`/v1`) | docs state it works via `response_format`; request shape not shown, **unverified in practice** | Ollama recommends repeating the schema in the prompt; Ollama Cloud lacks structured output; the loaded model's default context length applies, not ours |
 | Anthropic OpenAI compatibility | **ignored** (documented "Ignored") | JSON must come from the prompt; the layer is declared not production-ready |
 
-Tokenizer-free budgeting: English prose runs about 4 bytes per token on
-current tokenizers; German 3.3 down to 2.8 depending on the tokenizer. Steno
-uses `tokens = ceil(utf8Bytes / 3.0)` for German and mixed text, `/ 3.6` for
-English, a deliberate 10 to 30 percent overestimate; `usage` comes from the server.
+Tokenizer-free budgeting: English prose runs about 4 bytes per token on current tokenizers; German
+3.3 down to 2.8 depending on the tokenizer. Steno uses `tokens = ceil(utf8Bytes / 3.0)` for German
+and mixed text, `/ 3.6` for English, a deliberate 10 to 30 percent overestimate; `usage` comes from
+the server.
 
-Jamie's shape (2026-09-24 screenshots): title `Topic: Subtopic`; summary
-starts with `Executive Summary`; every bullet is `**Lead phrase**: text`
-with speaker names in bold; language chip `Auto (German)`; template menu
-Default, Customer Discovery, Daily Standup, Interview; tasks show text,
-assignee, priority filter and `Set Date`. Jamie's docs confirm `Executive
-Summary` plus `Full Summary` by topic as the default and a template as
-context plus sections. Per-template sections are not public; ours below.
+Jamie's shape (2026-09-24 screenshots): title `Topic: Subtopic`; summary starts with `Executive
+Summary`; every bullet is `**Lead phrase**: text` with speaker names in bold; language chip `Auto
+(German)`; template menu Default, Customer Discovery, Daily Standup, Interview; tasks show text,
+assignee, priority filter and `Set Date`. Jamie's docs confirm `Executive Summary` plus `Full Summary`
+by topic as the default and a template as context plus sections. Per-template sections are not
+public; ours below.
 
 ## Design decisions
 
-1. Two passes. Pass 1 cleanup runs per chunk, always. Pass 2 analysis is one
-   call when the transcript fits the budget, else map (per-chunk notes) then
-   reduce (one call). Two levels only; beyond that `transcriptTooLong`.
-2. The schema is always also written into the prompt. `response_format` is
-   a bonus for servers that honour it. Output is validated locally always.
-3. Structured output mode resolves per endpoint and is remembered:
-   `.jsonSchema`, on HTTP 400 mentioning `response_format` or `json_schema`
-   `.jsonObject`, on 400 again `.promptOnly`. Silent ignoring (Anthropic) is
-   caught by validation, not mode detection.
-4. The summary is structured JSON (sections of bullets with `lead` and
-   `text`) rendered to Markdown by Steno: Jamie's bold-lead style becomes
-   deterministic and tests can assert on structure.
-5. Templates are StenoCore data (`TemplateRegistry.bundled`, per template
-   `description`, `context`; per section `id`, `heading`, `instructions`,
-   `required`). This plan specifies the section content below and owns the
-   prompt wording that turns a `SummaryTemplate` into system-prompt blocks.
-6. Output language is the meeting language (`Meeting.language`, fallback
-   English); the model writes headings in that language from the English
-   template heading.
-7. Speaker names are suggestions with confidence and evidence. StenoLLM
-   never renames a `Speaker`; the review sheet prefills from them.
-8. `SummaryOutput.usage` and `CleanupResult.usage` sum `usage` over every
-   call of a meeting; the pipeline stores the total on `Meeting.llmUsage`.
+1. Two passes. Pass 1 cleanup runs per chunk, always. Pass 2 analysis is one call when the transcript
+   fits the budget, else map (per-chunk notes) then reduce (one call). Two levels only; beyond that
+   `transcriptTooLong`.
+2. The schema is always also written into the prompt. `response_format` is a bonus for servers that
+   honour it. Output is validated locally always, by decoding into the `Codable` draft types; there is
+   no separate schema validator and no JSON repair heuristics. A decode failure goes once through
+   `buildRepair`, then fails the call.
+3. Structured output mode resolves per endpoint and is remembered: `.jsonSchema`, on HTTP 400
+   mentioning `response_format` or `json_schema` `.jsonObject`, on 400 again `.promptOnly`. Silent
+   ignoring (Anthropic) is caught by decoding, not mode detection.
+4. The summary is structured: sections of bullets with `lead` and `text`, returned as core's
+   `SummaryDocument`. People are named by known name or by the verbatim speaker label; StenoCore's
+   `SummaryMarkdown` substitutes labels with current names and bolds them when rendering, so a
+   renamed speaker is a re-export, never a re-run.
+5. Templates are StenoCore data (`SummaryTemplate.bundled`, per template `description`, `context`; per
+   section `id`, `heading`, `instructions`, `required`). Section ids and headings are core's; this
+   workstream owns the `instructions` and `context` strings (edited in core's JSON) and the prompt
+   wording that turns a `SummaryTemplate` into system-prompt blocks.
+6. Output language is `Meeting.language` (elected by the core pipeline from tagged segments; fallback
+   English); the model writes headings in that language from the English template heading.
+7. Speaker names are suggestions with confidence and evidence. StenoLLM never renames a `Speaker`;
+   the review sheet prefills from them.
+8. `SummaryOutput.usage` and `CleanupOutput.usage` sum `usage` over every call of a meeting; the
+   pipeline stores the total on `Meeting.llmUsage`.
+9. The API key is never part of a `Codable` value: `LLMEndpoint` carries URL, model and limits only;
+   the key goes into `OpenAICompatibleClient.init` and is redacted from every error and log.
 
 ## Public API
 
-Core types used as defined in the program: `LanguageModel`,
-`TranscriptCleaner`, `MeetingSummarizer`, `CleanupContext`, `CleanupResult`,
-`SummaryInput`, `SummaryOutput`, `SpeakerNameSuggestion`, `LLMRequest`
-(`responseFormat`, `purpose`), `LLMResponse` (`finishReason`, `usage`),
-`LLMUsage`, `JSONValue`, `SummaryTemplate`, `TemplateSection`, `SecretKey.llmAPIKey`.
+Core types used as defined in the program: `LanguageModel`, `TranscriptCleaner`, `MeetingSummarizer`,
+`CleanupInput`, `CleanupOutput`, `SummaryInput`, `SummaryOutput`, `SummaryDocument`,
+`SpeakerNameSuggestion`, `LLMRequest` (`responseFormat`, `purpose`), `LLMResponse` (`finishReason`,
+`usage`), `LLMUsage`, `JSONValue`, `SummaryTemplate`, `TemplateSection`, `SecretKey.llmAPIKey`.
 
 ```swift
 // Endpoint and client
-public struct LLMEndpoint: Sendable, Codable, Equatable {
-    public var baseURL: URL; public var apiKey: String?; public var model: String
+public struct LLMEndpoint: Sendable, Equatable {                      // not Codable: never carries the key
+    public var baseURL: URL; public var model: String
     public var contextTokens = 32_000; public var maxOutputTokens = 4_096; public var maxConcurrentRequests = 2
     public var requestTimeout: Duration = .seconds(240)
     public var structuredOutputMode: StructuredOutputMode = .auto
-    public init(settings: Settings, apiKey: String?) throws }   // baseURL, model, contextTokens from Settings; key from SecretStore
+    public init(settings: Settings) throws }                           // baseURL, model, contextTokens from Settings
 public enum StructuredOutputMode: String, Sendable, Codable { case auto, jsonSchema, jsonObject, promptOnly }
 public struct RetryPolicy: Sendable, Equatable { public var maxAttempts = 3; public var baseDelay: Duration = .seconds(2); public var maxDelay: Duration = .seconds(30); public static let `default`: RetryPolicy }
 public enum LLMError: Error, Sendable, Equatable {
     case http(status: Int, body: String), transport(String), timeout, rateLimited(retryAfter: Duration?)
-    case unsupportedResponseFormat, invalidJSON(String), schemaMismatch([String]), truncated, refused(String)
-    case transcriptTooLong(estimatedTokens: Int, budget: Int), cancelled }
+    case unsupportedResponseFormat, invalidJSON(String), truncated, refused(String)
+    case transcriptTooLong(estimatedTokens: Int, budget: Int) }        // bodies and descriptions never contain the key
 public actor OpenAICompatibleClient: LanguageModel {
-    public init(endpoint: LLMEndpoint, session: URLSession = .shared, retry: RetryPolicy = .default)
+    public init(endpoint: LLMEndpoint, apiKey: String?, session: URLSession = .shared, retry: RetryPolicy = .default,
+                clock: any Clock<Duration> = ContinuousClock())
     public func complete(_ request: LLMRequest) async throws -> LLMResponse
     public func probe() async throws -> EndpointProbe            // GET /models plus one tiny structured call
     public var resolvedMode: StructuredOutputMode { get } }
 public struct EndpointProbe: Sendable, Equatable { public var reachable: Bool; public var modelListed: Bool?; public var resolvedMode: StructuredOutputMode; public var roundTrip: Duration }
 
 // Structured output
-public struct JSONSchema: Sendable, Equatable {
+public struct JSONSchema: Sendable, Equatable {                     // request-side builder only; the Codable draft types are the validator
     public static func object(_ properties: KeyValuePairs<String, JSONSchema>, description: String? = nil) -> JSONSchema
     public static func array(of item: JSONSchema, description: String? = nil) -> JSONSchema
     public static func string(enum cases: [String]? = nil, description: String? = nil) -> JSONSchema
     public static func integer(description: String? = nil) -> JSONSchema   // also number, boolean
     public var nullable: JSONSchema { get }
-    public func validateStrict() throws          // all required, additionalProperties false, depth <= 5, no banned keywords
-    public var jsonValue: JSONValue { get }       // for LLMRequest
+    public var jsonValue: JSONValue { get }       // for LLMRequest; emitted with additionalProperties false and every property required
     public var promptText: String { get } }       // compact schema for the prompt
-public struct StructuredOutputDecoder: Sendable {  // extract from fences and prefixes, repair, validate, decode
-    public init(schema: JSONSchema)
+public struct StructuredOutputDecoder: Sendable {  // strip fences and prose prefixes, then JSONDecoder into T; no repair heuristics
     public func decode<T: Decodable & Sendable>(_ type: T.Type, from response: LLMResponse) throws -> T }
 
 // Budgeting and chunking (LLMUsage is StenoCore's; this module adds `+`)
@@ -138,7 +139,7 @@ public struct TranscriptChunker: Sendable, Equatable {
     public func chunk(_ segments: [TranscriptSegment], language: Locale.Language?) -> [TranscriptChunk] }
 
 // Pass 1 cleanup
-public struct Glossary: Sendable, Equatable { public var people: [String]; public init(context: CleanupContext) }   // participants, attendees, known people
+public struct Glossary: Sendable, Equatable { public var people: [String]; public init(input: CleanupInput) }   // participants (incl. attendees) and known people
 public struct CleanupPromptBuilder: Sendable {
     public static let outputSchema: JSONSchema
     public func build(chunk: TranscriptChunk, language: Locale.Language, glossary: Glossary) -> LLMRequest }
@@ -146,18 +147,18 @@ public struct CleanupDraft: Codable, Sendable, Equatable { public var segments: 
     public struct Segment: Codable, Sendable, Equatable { public var index: Int; public var text: String } }
 public struct LLMTranscriptCleaner: TranscriptCleaner {
     public init(model: any LanguageModel, endpoint: LLMEndpoint, chunker: TranscriptChunker = .init())
-    public func clean(_ segments: [TranscriptSegment], context: CleanupContext) async throws -> CleanupResult }
+    public func clean(_ input: CleanupInput) async throws -> CleanupOutput }
 
 // Pass 2 analysis
 public struct SummaryPromptBuilder: Sendable {
-    public init(template: SummaryTemplate)                                          // from TemplateRegistry.bundled
+    public init(template: SummaryTemplate)                                          // from SummaryTemplate.bundled
     public func templateBlocks() -> String                                          // one block per section: heading, instructions
     public var draftSchema: JSONSchema { get }     // section ids as enum, priority enum
     public var notesSchema: JSONSchema { get }
     public func buildSingleShot(_ input: SummaryInput, segments: [TranscriptSegment]) -> LLMRequest
     public func buildMap(_ input: SummaryInput, chunk: TranscriptChunk) -> LLMRequest
     public func buildReduce(_ input: SummaryInput, notes: [ChunkNotes]) -> LLMRequest
-    public func buildRepair(invalid: String, errors: [String]) -> LLMRequest }
+    public func buildRepair(invalid: String, error: String) -> LLMRequest }
 public struct AnalysisDraft: Codable, Sendable, Equatable {       // raw model output before post-processing
     public var title: String; public var language: String; public var sections: [Section]
     public var decisions: [String]; public var tasks: [DraftTask]; public var speakerNames: [DraftSpeakerName]
@@ -170,199 +171,182 @@ public struct DraftSpeakerName: Codable, Sendable, Equatable { public var speake
 public struct ChunkNotes: Codable, Sendable, Equatable { public var chunkIndex: Int; public var topics: [Topic]
     public var decisions: [String]; public var taskCandidates: [DraftTask]; public var speakerCues: [DraftSpeakerName]
     public struct Topic: Codable, Sendable, Equatable { public var topic: String; public var points: [String] } }
-public struct SummaryRenderer: Sendable { public func render(_ draft: AnalysisDraft, template: SummaryTemplate, boldNames: [String]) -> String }
 public struct LLMMeetingSummarizer: MeetingSummarizer {
     public init(model: any LanguageModel, endpoint: LLMEndpoint)
-    public func summarize(_ input: SummaryInput) async throws -> SummaryOutput }
+    public func summarize(_ input: SummaryInput) async throws -> SummaryOutput }   // AnalysisDraft -> SummaryDocument + tasks + names
 
 // Language
 public enum OutputLanguage {
     public static func resolve(meeting: Locale.Language?) -> Locale.Language   // fallback "en"
-    public static func promptName(_ language: Locale.Language) -> String }     // "German"
+    public static func promptName(_ language: Locale.Language) -> String }     // "German", via Locale(identifier: "en_US") so goldens are machine-independent
+
+// Testing/: StubChatServer (NWListener HTTP/1.1 on 127.0.0.1, ephemeral port, scripted responses, records requests and their timing), Scripts
 ```
 
 ## Prompt contracts
 
-Pass 1 cleanup, one request per chunk, temperature 0, `maxConcurrentRequests`
-in flight. System: role, meeting language, glossary (participants, calendar
-attendees, known people), schema, rules: keep the exact
-number and order of segments; never merge, split, drop, add, shorten or
-summarise; keep code-switching as spoken, never translate; fix STT
-misspellings of anglicisms and product names ("Git Hub" to "GitHub");
-German noun casing; glossary spelling of names; punctuation; return text
-unchanged when nothing needs fixing. User: `leadingContext` segments marked
-read-only, then the chunk as `[n] <speaker label>: <text>`. Validation:
-same count, indices `0..<n` each once, per-segment word ratio 0.7 to 1.3. A
-failing chunk is retried once with the error appended, then kept raw and
-listed in `failedChunks`. `rawText` always keeps the STT output.
+Pass 1 cleanup, one request per chunk, temperature 0, `maxConcurrentRequests` in flight. System:
+role, meeting language, glossary (participants including calendar attendees, known people), schema,
+rules: keep the exact number and order of segments; never merge, split, drop, add, shorten or
+summarise; keep code-switching as spoken, never translate; fix STT misspellings of anglicisms and
+product names ("Git Hub" to "GitHub"); German noun casing; glossary spelling of names; punctuation;
+return text unchanged when nothing needs fixing. User: `leadingContext` segments marked read-only,
+then the chunk as `[n] <speaker label>: <text>`. Validation: same count, indices `0..<n` each once,
+per-segment word ratio 0.7 to 1.3. A failing chunk is retried once with the error appended, then kept
+raw and listed in `failedChunks`. `rawText` always keeps the STT output.
 
-Pass 2 analysis, temperature 0.2. System: role, output language by name,
-meeting date (to resolve "next Friday"), participants with roles, speaker
-labels with known names, calendar attendees, template context, one block
-per template section (heading, instructions, omit when empty), schema,
-rules: bullets are a short bold lead phrase plus one to three sentences;
-name people by known name, else label, verbatim so Steno can bold them;
-decisions are things agreed, not proposals; tasks are explicit commitments
-with an owner; priority `high` only when urgency was said; `dueDate`
-absolute or null; suggest a speaker name only with transcript evidence
-(addressed by name, self-introduction) or by elimination against the
-attendee list, with confidence 0 to 1 and a one-line quote; title under 80
-characters, `Topic: Subtopic` when natural. User: the cleaned transcript
-(single shot), one chunk (map), or the `ChunkNotes` array (reduce).
-Post-processing in `LLMMeetingSummarizer`: drop sections not in the
-template and empty non-required ones; validate `dueDate` with a strict
-`yyyy-MM-dd` formatter, null on failure; match `assignee` to a participant
-or attendee case-insensitively, else keep `assigneeName`; map
-`speakerLabel` to `Speaker.id`; bold known names; render Markdown.
+Pass 2 analysis, temperature 0.2. System: role, output language by name, meeting date (to resolve
+"next Friday"), participants with roles, speaker labels with known names, template context, one
+block per template section (heading, instructions, omit when empty), schema, rules: bullets are a
+short lead phrase plus one to three sentences; name people by known name, else by the speaker label
+verbatim so Steno can resolve them later; decisions are things agreed, not proposals; tasks are
+explicit commitments with an owner; priority `high` only when urgency was said; `dueDate` absolute or
+null; suggest a speaker name only with transcript evidence (addressed by name, self-introduction) or
+by elimination against the participant list, with confidence 0 to 1 and a one-line quote; title under
+80 characters, `Topic: Subtopic` when natural. User: the cleaned transcript (single shot), one chunk
+(map), or the `ChunkNotes` array (reduce). Post-processing in `LLMMeetingSummarizer`: drop sections
+not in the template and empty non-required ones; validate `dueDate` with a strict `yyyy-MM-dd`
+formatter, null on failure; match `assignee` to a participant case-insensitively, else keep
+`assigneeName`; map `speakerLabel` to `Speaker.id`; build `SummaryDocument(templateID, language,
+sections)`. No Markdown is produced here.
 
 ## Files
 
 - `Package.swift`: add `StenoLLM` (depends on `StenoCore`), `StenoLLMTests`.
-- `Sources/StenoLLM/LLMEndpoint.swift`, `RetryPolicy.swift`,
-  `OpenAICompatibleClient.swift` (client, mode fallback, probe, key
-  redaction), `Wire/ChatCompletion.swift` (Codable request, response, error).
-- `Sources/StenoLLM/StructuredOutput/JSONSchema.swift` (builder, strict
-  validator, prompt rendering), `StructuredOutputDecoder.swift` (extract,
-  repair fences, prefixes, trailing commas, truncated tail; decode).
+- `Sources/StenoLLM/LLMEndpoint.swift`, `RetryPolicy.swift`, `OpenAICompatibleClient.swift`
+  (client, mode fallback, probe, key redaction, retries on the injected clock),
+  `Wire/ChatCompletion.swift` (Codable request, response, error).
+- `Sources/StenoLLM/StructuredOutput/JSONSchema.swift` (builder, prompt rendering),
+  `StructuredOutputDecoder.swift` (fence and prefix stripping, decode).
 - `Sources/StenoLLM/Budget/TokenBudget.swift`, `TranscriptChunker.swift`.
 - `Sources/StenoLLM/Cleanup/CleanupPromptBuilder.swift`, `CleanupDraft.swift`,
   `LLMTranscriptCleaner.swift`, `Glossary.swift`.
-- Template content, written by this workstream into StenoCore's
-  `Resources/Templates/*.json` (sections in order; instructions are this
-  plan's prompt wording): `default` Executive Summary (required), Full
-  Summary by topic, Open Questions; `customer-discovery` Customer Context,
-  Problems and Pain Points, Current Workflow and Tools, Reactions and Buying
-  Signals, Objections and Risks, Next Steps; `daily-standup` Progress Since
-  Last Standup, Plans Until Next Standup, Blockers and Help Needed,
-  Announcements (bullet leads are person names); `interview` Candidate
-  Background, Role Fit and Experience, Skills Assessment, Motivation and
+- Template instruction text, written by this workstream into StenoCore's `Resources/Templates/*.json`
+  in a PR against core (only `instructions` and `context` change; ids and headings are core's from
+  its step 6): `default` Executive Summary (required), Full Summary by topic, Open Questions;
+  `customer-discovery` Customer Context, Problems and Pain Points, Current Workflow and Tools,
+  Reactions and Buying Signals, Objections and Risks, Next Steps; `daily-standup` Progress Since Last
+  Standup, Plans Until Next Standup, Blockers and Help Needed, Announcements (bullet leads are person
+  names); `interview` Candidate Background, Role Fit and Experience, Skills Assessment, Motivation and
   Culture, Candidate Questions, Assessment and Recommendation, Next Steps.
 - `Sources/StenoLLM/Summary/SummaryPromptBuilder.swift`, `AnalysisDraft.swift`,
-  `SummaryRenderer.swift`, `LLMMeetingSummarizer.swift` (single shot or map
-  and reduce, post-processing to `SummaryOutput`).
+  `LLMMeetingSummarizer.swift` (single shot or map and reduce, post-processing to `SummaryOutput`).
 - `Sources/StenoLLM/Language/OutputLanguage.swift`.
-- `Sources/steno/Commands/LLMCommands.swift`: `steno llm probe|cleanup
-  <transcript.json>|summarize <transcript.json> --template <id>`; prints usage.
-- `Tests/StenoLLMTests/Support/StubChatServer.swift`: `NWListener` HTTP/1.1
-  server on 127.0.0.1, ephemeral port, scripted responses, records requests;
-  `Scripts.swift`: ok, 429 with `Retry-After`, 500 then ok, 400 on
-  `response_format`, fenced JSON, invalid JSON, `finish_reason: length`, slow.
-- `Tests/StenoLLMTests/{Client,Retry,StructuredDecoder,JSONSchemaStrict,
-  TokenBudget,TranscriptChunker,Cleanup,Summary,SummaryRenderer,
-  PromptSnapshot,LiveEndpoint}Tests.swift`; goldens through StenoCore's `Snapshot`.
-- `Tests/Fixtures/llm/transcripts/denglish-standup.json` (24 synthetic
-  segments, three speakers, deliberate STT errors),
-  `customer-call-60min.json` (generated, about 900 segments, forces map and
-  reduce at an 8k budget); `Tests/Fixtures/llm/prompts/*.txt` (golden
-  prompts); `Tests/Fixtures/llm/responses/*.json` (canned server bodies).
+- `Sources/StenoLLM/Testing/StubChatServer.swift`, `Scripts.swift`: ok, 429 with `Retry-After`, 500
+  then ok, 400 on `response_format`, fenced JSON, invalid JSON, `finish_reason: length`, slow.
+- `Sources/steno/Commands/DevLLMCommands.swift`: `steno dev llm probe|cleanup <transcript.json>|summarize
+  <transcript.json> --template <id>`; prints usage; key from `FileSecretStore` or `STENO_LLM_API_KEY`.
+- `Tests/StenoLLMTests/{Client,Retry,StructuredDecoder,JSONSchemaStrict,TokenBudget,TranscriptChunker,
+  Cleanup,Summary,PromptSnapshot,LiveEndpoint}Tests.swift`; goldens through StenoCore's `Snapshot`.
+- `Tests/Fixtures/llm/transcripts/denglish-standup.json` (24 synthetic segments, three speakers,
+  deliberate STT errors, fixed ids and dates), `customer-call-60min.json` (about 900 segments,
+  generated once by `steno dev fixtures generate --llm` with a fixed seed, committed, in
+  `MANIFEST.sha256`; forces map and reduce at an 8k budget); `Tests/Fixtures/llm/text/de-1000-words.txt`;
+  `Tests/Fixtures/llm/prompts/*.txt` (golden prompts); `Tests/Fixtures/llm/responses/*.json` (canned
+  server bodies, also used by `StenoEndToEndTests`).
 
 ## Steps
 
-Each step is at most one day and ends with a check a reviewer can run.
+Each step is at most one day and ends with a tagged check a reviewer can run.
 
-1. Target, wire types, stub server. Check: `StubChatServerTests` accept a
-   POST, return a scripted body and record the parsed request.
-2. Client, retry, timeout, errors. Bearer auth, per-attempt timeout, retry on
-   408, 429, 5xx, transport errors and timeouts with `Retry-After`, no retry
-   on other 4xx, cancellation, key never in logs. Check: `ClientTests` and
-   `RetryTests` cover "429 then 200 honours Retry-After", "three 500s throw
-   `http(500)`", "401 not retried", "cancel stops within 100 ms".
-3. Structured output. `JSONSchema.validateStrict`, decoder repairs, mode
-   fallback on 400, `truncated` on `finish_reason: length`, `refused`.
-   Check: strict tests reject an optional property, a missing
-   `additionalProperties: false` and depth 6; decoder tests accept fenced,
-   prefixed and trailing-comma JSON, reject truncated JSON; a scripted 400
+1. Target, wire types, stub server in `Testing/`. Check `[ci]`: `StubChatServerTests` accept a POST,
+   return a scripted body and record the parsed request.
+2. Client, retry, timeout, errors. Bearer auth, per-attempt timeout, retry on 408, 429, 5xx,
+   transport errors and timeouts with `Retry-After`, no retry on other 4xx, cancellation, key
+   redaction. Check `[ci]`: `ClientTests` and `RetryTests` on `ManualClock` cover "429 then 200
+   honours Retry-After" (clock advanced, no real sleep), "three 500s throw `http(500)`", "401 not
+   retried", "cancel throws `CancellationError` and the stub server recorded exactly one request";
+   `testRedaction`: `String(describing:)` of every `LLMError` and the recorded request exclude the key.
+3. Structured output. Fence and prefix stripping, mode fallback on 400, `truncated` on
+   `finish_reason: length`, `refused`. Check `[ci]`: `JSONSchemaStrictTests` walks the literal
+   `draftSchema`, `notesSchema` and `outputSchema` JSON and asserts every object has
+   `additionalProperties: false`, all properties required, depth <= 5, no banned keywords; decoder
+   tests accept fenced and prefixed JSON and throw `invalidJSON` on truncated JSON; a scripted 400
    flips `resolvedMode`.
-4. Budget and chunker. Check: a 1,000-word German sample estimates between
-   330 and 500 tokens; the 60-minute fixture yields 6 to 12 chunks that
-   concatenate back to the input in order; no chunk exceeds `maxTokens`
-   unless a single segment does.
-5. Template content and prompt blocks. Write the four JSON templates into
-   StenoCore's resources (PR against core), `templateBlocks()`. Check:
-   `TemplateRegistry.bundled` yields four templates whose section ids match
-   the list above; `templateBlocks()` snapshots for all four match.
-6. Cleanup pass. Check: `CleanupTests` preserve count and order, keep
-   `rawText`, mark a wrong-count chunk failed after one retry, never exceed
-   `maxConcurrentRequests` (server records overlap); `PromptSnapshotTests`
-   match `prompts/cleanup-*.txt`.
-7. Summary pass, single shot. Check: Markdown starts with `## Executive
-   Summary`, bullets match `^- \*\*[^*]+\*\*: ` and contain `**Nicolai**`;
-   an unknown section id is dropped; `dueDate` "next Friday" becomes nil;
-   snapshots for all four templates match.
-8. Map and reduce. Check: at `contextTokens: 8_000` the 60-minute fixture
-   issues N map calls then one reduce call (server records `purpose` order);
-   at 32k one call; at 4k `transcriptTooLong` with the transcript untouched.
-9. Names, tasks, language, usage. Check: `Speaker 2` maps to the right UUID,
-   a suggestion under 0.3 confidence is dropped; meeting `de` puts `German`
-   in the prompt and a nil language puts `English`; `SummaryOutput.usage`
-   equals the sum of the scripted server `usage` bodies.
-10. CLI, live test, probe matrix. `steno llm probe|cleanup|summarize`,
-    `LiveEndpointTests`, run spike 1 and replace "unverified" in the table
-    above. Check: `steno llm probe` against a local server prints
-    reachability, mode and round trip; `STENO_LLM_TESTS=1 swift test
-    --filter LiveEndpointTests` passes on one real endpoint; CI URL and test
-    count are in the PR.
+4. Budget and chunker. Check `[ci]`: `llm/text/de-1000-words.txt` estimates between 330 and 500
+   tokens; the 60-minute fixture yields 6 to 12 chunks that concatenate back to the input in order;
+   no chunk exceeds `maxTokens` unless a single segment does.
+5. Template instruction text and prompt blocks. PR against core editing only `instructions` and
+   `context` in the four JSON files, plus `templateBlocks()` here. Check `[ci]`:
+   `SummaryTemplate.bundled` still yields the section ids of core's step 6; core's template snapshot
+   is updated in the same PR with a sentence why; `templateBlocks()` snapshots for all four match.
+6. Cleanup pass. Check `[ci]`: `CleanupTests` preserve count and order, keep `rawText`, mark a
+   wrong-count chunk failed after one retry, never exceed `maxConcurrentRequests` (server records
+   overlap); `PromptSnapshotTests` match `prompts/cleanup-*.txt` (fixed meeting date, `en_US` names).
+7. Summary pass, single shot. Check `[ci]`: `SummaryOutput.summary.sections.first?.id == "executive-summary"`,
+   every bullet has a non-empty `lead`, a bullet text contains the verbatim label `Speaker 2` and
+   core's `SummaryMarkdown.render` turns it into `**Nicolai**` once the speaker is confirmed; an
+   unknown section id is dropped; `dueDate` "next Friday" becomes nil; snapshots for all four templates.
+8. Map and reduce. Check `[ci]`: at `contextTokens: 8_000` the 60-minute fixture issues N map calls
+   then one reduce call (server records `purpose` order); at 32k one call; at 4k `transcriptTooLong`
+   with the transcript untouched.
+9. Names, tasks, language, usage. Check `[ci]`: `Speaker 2` maps to the right UUID, a suggestion under
+   0.3 confidence is dropped; meeting `de` puts `German` in the prompt and a nil language puts
+   `English`; `SummaryOutput.usage` equals the sum of the scripted server `usage` bodies.
+10. CLI, live test, probe matrix, end-to-end. `steno dev llm probe|cleanup|summarize`,
+    `LiveEndpointTests`, run spike 1 and replace "unverified" in the table above;
+    `Tests/StenoEndToEndTests` swaps `PassthroughCleaner` and `FakeSummarizer` for
+    `LLMTranscriptCleaner` and `LLMMeetingSummarizer` on `StubChatServer` fed from `llm/responses/`.
+    Check `[ci]`: the end-to-end test passes and `Meeting.llmUsage` equals the summed scripted usage.
+    `[opt-in: STENO_LLM_TESTS]`: `swift test --filter LiveEndpointTests` passes on one real endpoint.
+    `[manual]`: `steno dev llm probe` against a local server prints reachability, mode and round trip.
 
 ## Tests
 
-Unit, no network, stub server on loopback only: client (auth, body per
-mode, retry matrix, timeout, cancel, usage, redaction); structured output
-(strict validator, each repair, truncation, refusal, mode fallback); budget
-and chunker (bounds per language, packing, order, oversized segment);
-cleanup (count and order, word ratio, raw fallback, concurrency, glossary
-present); summary (rendering, section filtering, date and assignee
-validation, speaker mapping, path selection, usage sum). Golden prompt
-snapshots for every builder, four templates, two languages, through
-StenoCore's `Snapshot`; a snapshot diff in a PR is a reviewed prompt change.
+Unit `[ci]`, no network, stub server on loopback only: client (auth, body per mode, retry matrix on
+`ManualClock`, timeout, cancel, usage, redaction); structured output (literal-schema walk, fence and
+prefix stripping, truncation, refusal, mode fallback); budget and chunker (bounds per language,
+packing, order, oversized segment); cleanup (count and order, word ratio, raw fallback, concurrency,
+glossary present); summary (section filtering, date and assignee validation, speaker mapping, path
+selection, usage sum). Golden prompt snapshots for every builder, four templates, two languages,
+through StenoCore's `Snapshot`; suites that touch `ModelHub`-like globals or the environment are
+`.serialized`; a snapshot diff in a PR is a reviewed prompt change.
 
-Integration, opt-in: `LiveEndpointTests` runs when `STENO_LLM_TESTS=1` with
-`STENO_LLM_BASE_URL`, `STENO_LLM_MODEL` and optional `STENO_LLM_API_KEY`:
-Denglish fixture through cleanup and the Default template; asserts segment
-count preserved, output decodes, a bullet, a title, `usage`; else skipped.
+Integration `[opt-in: STENO_LLM_TESTS]`: `LiveEndpointTests` runs with `STENO_LLM_BASE_URL`,
+`STENO_LLM_MODEL` and optional `STENO_LLM_API_KEY`: Denglish fixture through cleanup and the Default
+template; asserts segment count preserved, output decodes, a bullet, a title, `usage`; else skipped
+with a message naming the switch.
 
-Manual, a human on a Mac: `steno llm summarize` on a real personal Denglish
-transcript against LM Studio or Ollama on the same Mac and one hosted
-endpoint; open the Markdown in Obsidian; confirm bullets read like Jamie's,
-names are bold, no cleaned sentence was shortened, and reported token usage
-matches the provider dashboard within 10 percent.
+Manual `[manual]`, a human on a Mac: `steno dev llm summarize` on a real personal Denglish transcript
+against LM Studio or Ollama on the same Mac and one hosted endpoint; render with `steno export` and
+open the Markdown in Obsidian; confirm bullets read like Jamie's, names are bold, no cleaned sentence
+was shortened, and reported token usage matches the provider dashboard within 10 percent.
+
+Reviewer trap: a `prompts/*.txt` golden diff without a sentence in the PR; the 400-on-`response_format`
+script removed; any `Codable` type gaining an `apiKey` property.
 
 ## Spikes
 
-1. Structured output capability matrix (informs step 3, recorded in step
-   10). Run the real `draftSchema` against Ollama, LM Studio, OpenRouter,
-   Groq and the Anthropic compatibility endpoint; record resolved mode,
-   `strict` acceptance, validation rate. Success: every server validates
-   without the repair call in 9 of 10 runs.
-2. Cleanup fidelity (before step 6 is done). Denglish fixture plus one real
-   transcript, one local 7 to 9B model and one hosted model. Success: count
-   preserved in every chunk, word ratio 0.9 to 1.1 in 95 percent of
-   segments. This is the cleanup half of scope spike 2.
-3. Map and reduce quality (before step 8). Same meeting at 32k single shot and
-   8k map-reduce; success: no single-shot decision or task missing after reduce.
+1. Structured output capability matrix (informs step 3, recorded in step 10). Run the real
+   `draftSchema` against Ollama, LM Studio, OpenRouter, Groq and the Anthropic compatibility endpoint;
+   record resolved mode, `strict` acceptance, decode rate. Success: every server decodes without the
+   repair call in 9 of 10 runs.
+2. Cleanup fidelity (before step 6 is done). Denglish fixture plus one real transcript, one local 7 to
+   9B model and one hosted model. Success: count preserved in every chunk, word ratio 0.9 to 1.1 in
+   95 percent of segments. This is the cleanup half of scope spike 2.
+3. Map and reduce quality (before step 8). Same meeting at 32k single shot and 8k map-reduce; success:
+   no single-shot decision or task missing after reduce.
 
 ## Needs from other workstreams
 
-- StenoCore: the program's types as listed under Public API;
-  `TemplateRegistry.bundled`; `Settings.llmBaseURL`, `llmModel`,
-  `llmContextTokens`; `SecretKey.llmAPIKey`.
-- Speech and speakers (`SpeechEngine`, `Diarizer`, `SpeakerMemory`):
-  `speakerID` on every segment, stable `Speaker.clusterLabel` ("Speaker 1"),
-  `Meeting.language` detected.
-- Adapters (`Destination`): render `summaryMarkdown` as is (headings start
-  at level 2); use `MeetingTask.assigneeName` when `assigneePersonID` is nil.
-- macOS app (`SecretStore`): API key from Keychain into `LLMEndpoint`;
-  settings UI for base URL, model, context tokens; review sheet prefills
-  from `SpeakerNameSuggestion`; re-run summary after speaker renaming.
-
-## Requested changes to the program document
-
-Reconciled into the program document, see its log (entries 17 to 21).
+- StenoCore: the program's types as listed under Public API; `SummaryTemplate.bundled`;
+  `SummaryMarkdown.render`; `Settings.llmBaseURL`, `llmModel`, `llmContextTokens`;
+  `SecretKey.llmAPIKey`; `ManualClock`; `Tests/StenoEndToEndTests`; a PR review slot for the
+  template instruction text.
+- Speech and speakers (`SpeechEngine`, `Diarizer`, `SpeakerMemory`): `speakerID` on every segment,
+  stable `Speaker.clusterLabel` ("Speaker 1"); `RawSegment.language` tagged so core can elect
+  `Meeting.language`.
+- Adapters (`Destination`): render the summary through core's `SummaryMarkdown` (headings start at
+  level 2); use `MeetingTask.assigneeName` when `assigneePersonID` is nil.
+- macOS app (`SecretStore`): API key from Keychain into `OpenAICompatibleClient.init`; settings UI for
+  base URL, model, context tokens; review sheet prefills from `SpeakerNameSuggestion`; renaming a
+  speaker re-exports (no LLM re-run).
 
 ## Deferred
 
-- Pricing and cost estimation (`LLMPricing`, `CostEstimator`, per-million
-  prices in settings); token usage is recorded, money is not.
+- Pricing and cost estimation (`LLMPricing`, `CostEstimator`, per-million prices in settings); token
+  usage is recorded, money is not.
 - Per-meeting output-language override (`Meeting.summaryLanguage`).
-- User product glossary for the cleanup pass; names come from participants,
-  attendees and known people only.
+- User product glossary for the cleanup pass; names come from participants and known people only.
 - Markdown template parser and catalog; templates are StenoCore JSON.
+- JSON repair heuristics (trailing commas, truncated tails) if a server family turns out to need them.

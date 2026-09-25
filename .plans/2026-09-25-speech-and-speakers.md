@@ -1,38 +1,34 @@
 # Speech and speakers: StenoSpeech
 
-Status: workstream plan, 2026-09-25, reconciled the same day. Binding program:
-[`2026-09-25-v1-program.md`](2026-09-25-v1-program.md). Scope authority:
-[`2026-09-24-initial-scope.md`](2026-09-24-initial-scope.md).
-Owns `Sources/StenoSpeech`, `Tests/StenoSpeechTests`, the `steno bakeoff`
-and `steno models` subcommands.
+Status: workstream plan, 2026-09-25, reconciled and then revised the same day after the three reviews (program
+review application log). Binding program: [`2026-09-25-v1-program.md`](2026-09-25-v1-program.md). Scope authority:
+[`2026-09-24-initial-scope.md`](2026-09-24-initial-scope.md). Owns `Sources/StenoSpeech`, `Tests/StenoSpeechTests`,
+the `steno dev bakeoff` and `steno dev models` tools, and one line in core's `Wiring.swift` (the `--engine` flag).
 
-API names below were checked against FluidAudio `v0.17.3` (source of
-2026-09-24) and WhisperKit `v1.1.0` (repository now named `argmax-oss-swift`,
-old URL redirects). Anything marked **unverified** was seen only in a README,
-model card or doc page, or not seen at all, and must be confirmed in step 0.
+API names below were checked against FluidAudio `v0.17.3` (released 2026-09-24; 0.17.4 followed on 2026-09-25) and
+WhisperKit `v1.1.0` (released 2026-08-06; repository now named `argmax-oss-swift`, old URL redirects). Anything marked
+**unverified** was seen only in a README, model card or doc page, or not seen at all, and must be confirmed in step 0.
 
 ## Goal
 
-Turn a 16 kHz mono lane into timed, language-tagged `RawSegment`s with two
-interchangeable on-device engines, turn the "them" lane (or the whole mix)
-into speaker clusters with L2-normalised 256-dim embeddings and a ten-second
-sample clip each, match those clusters against remembered people, and give
-the project a repeatable bake-off so the default engine is chosen from
-measurements on real German/English/Denglish meetings, not from a README.
+Turn a 16 kHz mono lane into timed, language-tagged `RawSegment`s with two interchangeable on-device engines, turn
+the "them" lane (or the whole mix) into speaker clusters with L2-normalised 256-dim embeddings and a ten-second
+sample clip range each, rank those clusters against remembered people, and give the project a repeatable bake-off so
+the default engine is chosen from measurements on real German/English/Denglish meetings, not from a README.
 
 ## Non-goals
 
-- Live or streaming transcription and streaming diarization (`SlidingWindowAsrManager`,
-  `DiarizerManager`, `LSEENDDiarizer`, Sortformer are not wrapped).
+- Live or streaming transcription and streaming diarization (`SlidingWindowAsrManager`, `DiarizerManager`,
+  `LSEENDDiarizer`, Sortformer are not wrapped).
 - Any model conversion or fine-tuning; we consume published CoreML repos.
 - Speaker name inference from context (StenoLLM), speaker review UI (app).
 - Custom vocabulary boosting (FluidAudio CTC rescoring); revisit after v1.
 - Apple `SpeechAnalyzer`, whisper.cpp, cloud STT.
-- Audio decode and resampling to 16 kHz (StenoCore pipeline step 1).
-- Persisting `Person` rows and any merge bookkeeping (StenoCore `PersonStore`
-  and `MeetingStore.mergeSpeakers`); we only compute, match and average.
-- Fakes: `FakeSpeechEngine` and `FakeDiarizer` come from
-  `StenoCore/Testing/`; this module defines none.
+- Audio decode and resampling to 16 kHz (StenoCore pipeline, `AudioDecoder`).
+- Persisting `Person` rows, confirming speakers, or merging people or clusters (`MeetingStore.confirm`,
+  `mergePersons`, `mergeSpeakers` in StenoCore); we only compute, rank and average.
+- Fakes of core protocols: `FakeSpeechEngine` and `FakeDiarizer` come from `StenoCore/Testing/`. This module's own
+  `Testing/` holds only `FakeModelDownloader`.
 
 ## Decisions
 
@@ -40,16 +36,17 @@ measurements on real German/English/Denglish meetings, not from a README.
 |---|---|
 | Default engine candidate | Parakeet TDT v3 via FluidAudio (`parakeet-v3`). Final default set by the bake-off (step 9) and recorded in a follow-up plan. |
 | Second engine | WhisperKit `openai_whisper-large-v3-v20240930_turbo` (`whisperkit-large-v3-turbo`). |
-| Optional engines | `parakeet-ultra` (same FluidAudio API, `AsrModelVersion.ultra`); `parakeet-de` (German fine-tune, custom directory, German-only). Bake-off entrants sharing the `ParakeetEngine` implementation; not user-selectable in the app until the bake-off result plan promotes one (program log 12). |
-| Language handling | No engine can be forced per segment. Parakeet has no language control at all (its `Language` parameter only filters Latin vs Cyrillic script; `de` and `en` are both Latin). Whisper can be pinned per call, not per segment. So: engines run unpinned (Parakeet) or pinned to the meeting language (Whisper); every `RawSegment` gets `language` from `NLLanguageRecognizer` constrained to `{de, en}`; the LLM cleanup pass fixes the rest. |
+| Optional engines | `parakeet-ultra` (same FluidAudio API, `AsrModelVersion.ultra`); `parakeet-de` (German fine-tune, custom directory, German-only). Bake-off entrants sharing the `ParakeetEngine` implementation; not user-selectable in the app until the bake-off result plan promotes one. |
+| Actor conformance | `ParakeetEngine` and `WhisperKitEngine` are actors; `id` and `supportedLanguages` are `nonisolated public let`, because Swift 6 rejects an actor-isolated property satisfying a nonisolated protocol requirement. |
+| Language handling | No engine can be forced per segment. Parakeet has no language control at all (its `Language` parameter only filters Latin vs Cyrillic script; `de` and `en` are both Latin). Whisper can be pinned per call, not per segment. So: engines run unpinned (Parakeet) or pinned to the `hint` (Whisper); every `RawSegment` gets `language` from `NLLanguageRecognizer` constrained to `{de, en}`; the core pipeline elects `Meeting.language` from the tagged segments and passes the first lane's result as the second lane's `hint`; the LLM cleanup pass fixes the rest. |
 | Diarizer | FluidAudio `OfflineDiarizerManager`, pyannote community-1 offline pipeline, community defaults, `exposeChunkEmbeddings = true`. |
 | Cluster embedding | Mean of the cluster's `ChunkEmbedding.embedding256` values weighted by chunk duration, then L2-normalised. Not `speakerDatabase`/`TimedSpeakerSegment.embedding`: those are VBx centroids, an un-normalised mean of unit vectors, so cosine against stored people would be biased by cluster purity. |
-| Speaker match | Cosine similarity on unit vectors. Default threshold `0.60`, margin `0.05` over the runner-up; both are settings. Calibrated in step 6. |
+| Speaker match | Cosine similarity on unit vectors. `CosineSpeakerMemory` implements `candidates(for:limit:)` and `enroll`; the threshold and margin logic is the program's provided `SpeakerMemory.match(_:threshold:margin:)`. Threshold `0.60` is `Settings.speakerMatchThreshold`; the margin `0.05` over the runner-up is the program constant. Calibrated in step 6. |
 | Enrolment | Running mean: `e' = normalise((e * n + x) / (n + 1))`, `n` capped at 50 so a voice can drift. |
-| Merge | `SpeakerMemory.merge(B, into: A)`: sample-count-weighted mean, renormalise, save A, then `PersonStore.mergePersons(keep: A, remove: B)` re-points rows and deletes B. In-meeting cluster merge is `MeetingStore.mergeSpeakers` in StenoCore; not this module's concern. |
-| Sample clip | `FluidDiarizer` fills `SpeakerCluster.sampleClipRange`: longest contiguous single-speaker segment of the cluster, capped to 10 s centred on the highest-`qualityScore` chunk. `SpeakerCluster.confidence` is the mean chunk quality, halved when the longest segment is under 3 s. Core copies both onto `Speaker`. |
-| Model location | `~/Library/Application Support/Steno/Models/`. FluidAudio repos as `fluidaudio/<repo-last-path-component>` (the directory name must match the HF repo name, see German model caveat). WhisperKit under `whisperkit/` via `downloadBase`. |
-| Type collisions | FluidAudio exports `DiarizationResult`, `Speaker`, `Language`, `WordTiming`; WhisperKit exports `WordTiming`, `TranscriptionSegment`. StenoSpeech never `import`s both frameworks in one file and always module-qualifies StenoCore types where a collision exists. |
+| Merges | Not here. Person merge is `MeetingStore.mergePersons(keep:remove:)` (weighted mean in the store); in-meeting cluster merge is `MeetingStore.mergeSpeakers`. |
+| Sample clip | `FluidDiarizer` fills `SpeakerCluster.sampleClipRange`: longest contiguous single-speaker segment of the cluster, capped to 10 s centred on the highest-`qualityScore` chunk. `SpeakerCluster.clusterConfidence` is the mean chunk quality, halved when the longest segment is under 3 s. Core copies both onto `Speaker` and writes the clip file. |
+| Model location | `~/Library/Application Support/Steno/Models/`. FluidAudio repos as `fluidaudio/<repo-last-path-component>` (the directory name must match the HF repo name, see German model caveat). WhisperKit under `whisperkit/` via `downloadBase`. Downloads go through `ModelDownloading` so `ModelStore` is unit-tested without network. |
+| Type collisions | FluidAudio exports `DiarizationResult`, `Speaker`, `Language`, `WordTiming`; WhisperKit exports `WordTiming`, `TranscriptionSegment`. StenoSpeech never `import`s both frameworks in one file and always module-qualifies StenoCore types where a collision exists. FluidAudio's result is mapped first into StenoSpeech's own `ClusterChunk` values, and every mapping test starts from `ClusterChunk`, because FluidAudio's memberwise initialisers may be internal. |
 
 ## Public API
 
@@ -60,26 +57,27 @@ public enum SpeechEngineID: String, Sendable, CaseIterable {
     case parakeetDE = "parakeet-de", whisperKitLargeV3Turbo = "whisperkit-large-v3-turbo"
 }
 public actor ParakeetEngine: SpeechEngine {
+    public nonisolated let id: String; public nonisolated let supportedLanguages: Set<Locale.Language>
     public init(variant: ParakeetVariant, models: ModelStore)         // .v3, .ultra, .custom(directory: URL, id: String)
 }
 public actor WhisperKitEngine: SpeechEngine {
+    public nonisolated let id: String; public nonisolated let supportedLanguages: Set<Locale.Language>
     public init(variant: String = "openai_whisper-large-v3-v20240930_turbo", models: ModelStore)
 }
-public enum SpeechEngineFactory {
-    public static func make(_ id: SpeechEngineID, models: ModelStore) throws -> any SpeechEngine
-}
+public func makeSpeechEngine(_ id: SpeechEngineID, models: ModelStore) throws -> any SpeechEngine   // the app injects this as a closure
 
 // Models
-public struct ModelDownloadProgress: Sendable, Equatable {
-    public let asset: ModelAsset; public let fractionCompleted: Double; public let phase: String
-}
+public struct ModelDownloadProgress: Sendable, Equatable { public let asset: ModelAsset; public let fractionCompleted: Double; public let phase: String }
 public enum ModelAsset: String, Sendable, CaseIterable {
     case parakeetV3, parakeetUltra, parakeetDE, whisperLargeV3Turbo, offlineDiarizer
     public var approximateBytes: Int64 { get }
     public var sourceRepo: String { get }
 }
+public protocol ModelDownloading: Sendable {                                   // seam: FluidAudio / WhisperKit downloaders behind one call
+    func download(_ asset: ModelAsset, into directory: URL, progress: @Sendable (Double, String) -> Void) async throws
+}
 public actor ModelStore {
-    public init(directory: URL)                                       // default: Application Support/Steno/Models
+    public init(directory: URL, downloader: any ModelDownloading = LiveModelDownloader())   // default directory: Application Support/Steno/Models
     public func isInstalled(_ asset: ModelAsset) -> Bool
     public func ensure(_ asset: ModelAsset) -> AsyncThrowingStream<ModelDownloadProgress, Error>
     public func remove(_ asset: ModelAsset) throws
@@ -87,19 +85,18 @@ public actor ModelStore {
 }
 
 // Diarization and speakers
-public actor FluidDiarizer: Diarizer {
-    public init(models: ModelStore, config: FluidDiarizerConfig = .default)
-}
+public actor FluidDiarizer: Diarizer { public init(models: ModelStore, config: FluidDiarizerConfig = .default) }
 public struct FluidDiarizerConfig: Sendable {
     public var clusteringThreshold: Double = 0.6                      // passed to OfflineDiarizerConfig.clustering.threshold
     public var minSpeakers: Int?; public var maxSpeakers: Int?
 }
+struct ClusterChunk: Sendable, Equatable { let speakerLabel: String; let start, end: TimeInterval; let embedding: [Float]; let quality: Float }   // internal mapping unit
 struct SampleClipPicker: Sendable {                                   // internal, used by FluidDiarizer
     static func pick(ranges: [ClosedRange<TimeInterval>], chunks: [ClusterChunk],
-                     targetSeconds: TimeInterval = 10, minimumSeconds: TimeInterval = 3) -> (range: ClosedRange<TimeInterval>, confidence: Float)
+                     targetSeconds: TimeInterval = 10, minimumSeconds: TimeInterval = 3) -> (range: ClosedRange<TimeInterval>, clusterConfidence: Float)
 }
-public actor CosineSpeakerMemory: SpeakerMemory {                     // the four program members; pure math over PersonStore
-    public init(store: any PersonStore, threshold: Float = 0.60, margin: Float = 0.05, maxSamples: Int = 50)
+public actor CosineSpeakerMemory: SpeakerMemory {                     // candidates(for:limit:) and enroll(_:as:); pure math over MeetingStore
+    public init(store: MeetingStore, maxSamples: Int = 50)
 }
 public enum Embeddings {
     public static func normalised(_ v: [Float]) -> [Float]
@@ -107,6 +104,7 @@ public enum Embeddings {
 }
 
 // Segmentation and language
+public struct TokenAggregator: Sendable { public func words(from tokens: [TimedToken]) -> [TimedWord] }   // SentencePiece ▁ boundaries, punctuation glued, empty tokens dropped
 public struct TranscriptSegmenter: Sendable {
     public init(maxSegmentSeconds: TimeInterval = 30, splitGapSeconds: TimeInterval = 0.7)
     public func segments(fromWords words: [TimedWord]) -> [RawSegment]
@@ -114,7 +112,7 @@ public struct TranscriptSegmenter: Sendable {
 public struct LanguageTagger: Sendable {
     public init(candidates: Set<Locale.Language> = [de, en])
     public func tag(_ segments: [RawSegment]) -> [RawSegment]          // fills RawSegment.language
-    public func dominantLanguage(of segments: [RawSegment]) -> Locale.Language?  // duration-weighted
+    public func dominantLanguage(of segments: [RawSegment]) -> Locale.Language?  // duration-weighted; used by WhisperKitEngine and the bake-off
 }
 
 // Bake-off
@@ -124,44 +122,54 @@ public struct BakeoffRow: Codable, Sendable {
     public var realtimeFactor: Double { audioSeconds / wallSeconds }
     public let wer: Double?, languageFlips: Int, dominantLanguage: String?, cleanedWER: Double?
 }
-public enum WordErrorRate {
-    public static func compute(reference: String, hypothesis: String, foldUmlauts: Bool = true) -> Double
-}
+public enum WordErrorRate { public static func compute(reference: String, hypothesis: String, foldUmlauts: Bool = true) -> Double }
+// Testing/: FakeModelDownloader (writes marker files, scripted progress and failures)
 ```
 
 ## Files
 
 ```
 Sources/StenoSpeech/
-  Engines/SpeechEngineID.swift            ids, factory, supportedLanguages tables
+  Engines/SpeechEngineID.swift            ids, makeSpeechEngine, supportedLanguages tables
   Engines/ParakeetEngine.swift            AsrManager wrapper, v3/ultra/custom directory
   Engines/WhisperKitEngine.swift          WhisperKit wrapper, language pinning, VAD chunking
-  Engines/TimedWord.swift                 engine-neutral word timing; adapters from TokenTiming and WhisperKit words
+  Engines/TimedWord.swift                 TimedToken, TimedWord; adapters from TokenTiming and WhisperKit words
+  Segmentation/TokenAggregator.swift      tokens -> words on ▁ boundaries
   Segmentation/TranscriptSegmenter.swift  words -> RawSegments (gap, punctuation, max length)
   Segmentation/LanguageTagger.swift       NLLanguageRecognizer, constrained candidates, dominant language
   Models/ModelAsset.swift                 asset table: repo, files, bytes, licence
-  Models/ModelStore.swift                 download with progress, install check, removal, offline flag
-  Diarization/FluidDiarizer.swift         OfflineDiarizerManager wrapper, result mapping
+  Models/ModelDownloading.swift           protocol; LiveModelDownloader over FluidAudio and WhisperKit download APIs
+  Models/ModelStore.swift                 install check, progress stream, removal, offline flag
+  Diarization/FluidDiarizer.swift         OfflineDiarizerManager wrapper, FluidAudio result -> [ClusterChunk] -> StenoCore.DiarizationResult
   Diarization/ClusterEmbedding.swift      chunk-weighted mean, normalisation
-  Diarization/SampleClipPicker.swift      ten-second clip selection and confidence (internal)
-  Speakers/CosineSpeakerMemory.swift      match, enroll, merge, ranked candidates
+  Diarization/SampleClipPicker.swift      ten-second clip selection and clusterConfidence (internal)
+  Speakers/CosineSpeakerMemory.swift      candidates, enroll
   Speakers/Embeddings.swift               normalise, cosine (vDSP)
   Bakeoff/BakeoffRunner.swift             folder walk, per-engine run, timing, flips
   Bakeoff/WordErrorRate.swift             normalisation + Levenshtein over words
   Bakeoff/BakeoffReport.swift             Markdown and JSON rendering
-Sources/steno/Commands/BakeoffCommand.swift   steno bakeoff <audio-dir> [--engines] [--reference-dir] [--cleanup] [--out]
-Sources/steno/Commands/ModelsCommand.swift    steno models list|download|remove <asset>
-Tests/StenoSpeechTests/                       one file per type above plus ModelIntegrationTests.swift
-Tests/Fixtures/speech/de-short.wav            `say -v Anna` sentence, 16 kHz mono, < 6 s
-Tests/Fixtures/speech/en-short.wav            `say -v Samantha` sentence, < 6 s
-Tests/Fixtures/speech/denglish.wav            de sentence with two English product names, < 8 s
-Tests/Fixtures/speech/two-speakers.wav        two `say` voices alternating, < 10 s
-Tests/Fixtures/speech/*.ref.txt               reference transcripts for the WAVs above
+  Testing/FakeModelDownloader.swift
+Sources/steno/Commands/DevBakeoffCommand.swift   steno dev bakeoff <audio-dir> [--engines] [--reference-dir] [--cleanup] [--out]
+Sources/steno/Commands/DevModelsCommand.swift    steno dev models list|download|remove <asset>
+Sources/steno/Wiring.swift                       (core-owned) gains `--engine <id>`; the one cross-ownership edit, recorded in both plans
+Tests/StenoSpeechTests/                          one file per type above plus TokenAggregationTests.swift and ModelIntegrationTests.swift
+Tests/Fixtures/speech/de-short.wav, de-short-2.wav   `say -v Anna`, two different sentences, 16 kHz mono, < 6 s each (spike C needs the pair)
+Tests/Fixtures/speech/en-short.wav               `say -v Samantha` sentence, < 6 s
+Tests/Fixtures/speech/denglish.wav               de sentence with two English product names, < 8 s
+Tests/Fixtures/speech/two-speakers.wav           two `say` voices alternating, < 10 s
+Tests/Fixtures/speech/*.ref.txt                  reference transcripts for the WAVs above
 ```
 
-Package.swift additions in this workstream's PR (program rule): `FluidAudio`
-from `0.17.3`, `argmax-oss-swift` from `1.1.0` product `WhisperKit`. No other
-third-party packages; `NaturalLanguage` and `Accelerate` are system frameworks.
+`say` output changes with macOS releases and voices, so these fixtures are generated once, committed with their
+`.ref.txt`, listed in `Tests/Fixtures/MANIFEST.sha256` and never regenerated; `Tests/Fixtures/README.md` says so.
+
+Package.swift additions in this workstream's PR (program rule): `FluidAudio` from `0.17.3`, `argmax-oss-swift` from
+`1.1.0` product `WhisperKit`. No other third-party packages; `NaturalLanguage` and `Accelerate` are system frameworks.
+FluidAudio ships one binary target (`NemoTextProcessing` xcframework) plus C targets and `cxxLanguageStandard:
+.cxx17`; the macOS plan's archive signs and notarises the binary. WhisperKit publishes a tools-5.10 manifest
+(`swiftLanguageVersions: [.v5]`) and a `Package@swift-6.2.swift` (`swiftLanguageModes: [.v6]`); on the runner's Xcode
+16.4 SwiftPM selects the 5.10 manifest, and a dependency's language mode does not constrain Steno's Swift 6 mode
+(verified: both manifests, correctness review).
 
 ## Verified third-party surface we build on
 
@@ -179,7 +187,7 @@ FluidAudio (`https://github.com/FluidInference/FluidAudio.git`, swift-tools 6.0,
   The README's `transcribe(samples)` without `decoderState`: **unverified**.
 - `ASRResult { text, confidence, duration, processingTime, tokenTimings: [TokenTiming]?, rtfx }`,
   `TokenTiming { token, tokenId, startTime, endTime, confidence }`. FluidAudio's own `WordTiming` exists;
-  the aggregation helper name is **unverified**, so we aggregate on SentencePiece `▁` ourselves.
+  the aggregation helper name is **unverified**, so `TokenAggregator` aggregates on SentencePiece `▁` ourselves.
 - `Language` (script filter only): `.german = "de"`, `.english = "en"`, 28 cases, `Script.latin/.cyrillic`.
 - `ProgressHandler = @Sendable (DownloadProgress) -> Void`, `DownloadProgress { fractionCompleted: Double, phase: DownloadPhase }`,
   `ModelHub.offlineMode: Bool` (the model card's `DownloadUtils.enforceOffline` is stale). Default directory
@@ -197,7 +205,7 @@ FluidAudio (`https://github.com/FluidInference/FluidAudio.git`, swift-tools 6.0,
 - `SpeakerUtilities.cosineDistance(_:_:)` public. `SpeakerManager` is streaming-only and documented as unsupported with the offline pipeline; not used.
 - `AudioConverter().resampleAudioFile(_ url: URL) -> [Float]`, `.resample(_:from:)` (bake-off decode fallback if StenoAudio's `AVFoundationAudioCodec` is late).
 
-WhisperKit (`https://github.com/argmaxinc/WhisperKit.git`, `Package@swift-6.2.swift` with `swiftLanguageModes: [.v6]`, macOS 13+):
+WhisperKit (`https://github.com/argmaxinc/WhisperKit.git`, tools 5.10 plus `Package@swift-6.2.swift`, macOS 13+):
 - `WhisperKit.download(variant:downloadBase:useBackgroundSession:from: "argmaxinc/whisperkit-coreml":token:endpoint:progressCallback:) async throws -> URL`,
   `ProgressCallback = @Sendable (Progress) -> Void`. Subdirectory layout under `downloadBase`: **unverified**.
 - `WhisperKitConfig` fields `model`, `modelRepo`, `modelFolder`, `downloadBase`, `computeOptions: ModelComputeOptions`
@@ -241,95 +249,97 @@ We keep it under `Models/fluidaudio-de/parakeet-tdt-0.6b-v3/` so it cannot shado
    `wordTimestamps: true`, `chunkingStrategy: .vad`, `task: .transcribe`.
 3. `RawSegment.language` is always filled by `LanguageTagger` (`NLLanguageRecognizer` with `languageConstraints = [de, en]`
    and `languageHints` weighted toward the dominant language). Segments under four words inherit the previous segment's language.
-4. `Meeting.language` = duration-weighted dominant language; the pipeline owns writing it.
+4. `Meeting.language` is elected by the core pipeline (stage 1) from `RawSegment.language` by summed duration; this module only tags.
 5. `parakeet-de` is German-only: it will garble English passages. It is a bake-off entrant, and at most a per-meeting override,
    never auto-selected.
 
 ## Steps
 
-0. **Spike A + B, half a day each.** A: Package resolving FluidAudio 0.17.3 and WhisperKit 1.1.0 together compiles a
-   file that imports both, in Swift 6 language mode, on the `macos-15` CI job. B: German model loads via `AsrModels.load(from:)`
-   with `ModelHub.offlineMode = true` and transcribes `de-short.wav`. Acceptance: CI green with both imports; B transcript
-   contains the fixture's nouns. Go/no-go below.
-1. **Module skeleton and `ModelStore`, one day.** `ModelAsset` table, download to `Steno/Models` with progress
-   stream, install check by file presence, `remove`, `steno models list|download|remove`. Acceptance:
-   `steno models download offlineDiarizer` prints progress to 100 % and `list` shows it installed; unit test uses a fake
-   downloader against a temp directory.
-2. **`TranscriptSegmenter` and `LanguageTagger`, one day.** Pure functions over `TimedWord`. Acceptance: unit tests with
+0. **Spike A + B, half a day each.** A: Package resolving FluidAudio 0.17.3 and WhisperKit 1.1.0 together compiles a file that
+   imports both, in Swift 6 language mode, on the `macos-15` CI job. B: German model loads via `AsrModels.load(from:)` with
+   `ModelHub.offlineMode = true` and transcribes `de-short.wav`. Acceptance A `[ci]`: CI green with both imports. Acceptance B
+   `[opt-in: STENO_MODEL_TESTS]`: transcript contains the fixture's nouns. Go/no-go below.
+1. **Module skeleton, `ModelDownloading`, `ModelStore`, one day.** `ModelAsset` table, download to `Steno/Models` with progress
+   stream, install check by file presence, `remove`, `steno dev models list|download|remove`. Acceptance `[ci]`: `ModelStoreTests`
+   with `FakeModelDownloader` against a temp directory cover ensure-once, progress forwarding, failure surfacing and removal.
+   `[manual]`: `steno dev models download offlineDiarizer` prints progress to 100 % and `list` shows it installed.
+2. **`TokenAggregator`, `TranscriptSegmenter`, `LanguageTagger`, one day.** Pure functions. Acceptance `[ci]`:
+   `TokenAggregationTests` (a word over three tokens, a punctuation token, a leading `▁` only, an empty token); segmenter tests with
    synthetic word lists cover gap split, punctuation split, 30 s cap, short-segment inheritance, dominant language.
-3. **`ParakeetEngine`, one day.** Wrap `AsrManager`, aggregate `TokenTiming` to words, segment, tag. `supportedLanguages`
-   = FluidAudio's 25. `prepare()` = `ModelStore.ensure` then `loadModels`. Acceptance: opt-in integration test transcribes
-   `de-short.wav` and `en-short.wav`; segments have monotonic non-overlapping times; RTF under 1/20 on the CI runner.
-4. **`WhisperKitEngine`, one day.** Language decision as above, map segments and words. Acceptance: opt-in integration
-   test on `denglish.wav` with `hint: de` yields one language, no segment with `noSpeechProb > 0.6` kept; unit test for the
-   window-ranking function on synthetic energy profiles.
-5. **`FluidDiarizer`, one day.** Wrap `OfflineDiarizerManager`, map to `StenoCore.DiarizationResult`, compute
-   normalised cluster embeddings from `chunkEmbeddings`, fill `SpeakerCluster.sampleClipRange` and `confidence` through
-   `SampleClipPicker`. Acceptance: mapping unit test builds a `FluidAudio.DiarizationResult` by hand and checks unit-length
-   embeddings, range merging, clip choice and the under-3 s confidence penalty; opt-in integration test on
-   `two-speakers.wav` yields exactly two clusters, each with a clip range inside its own ranges.
-6. **`CosineSpeakerMemory`, one day.** Match with threshold and margin, enroll running mean, merge, ranked candidates,
-   over `MeetingStore.inMemory()` as the `PersonStore`. Acceptance: unit tests for near-duplicate match, below-threshold
-   miss, margin rejection, running-mean cap, merge weighting, and that after `merge` only the target remains in
-   `persons()`. Calibration note recorded from the two `say` voices plus the bake-off meetings (similarity distributions
-   same-speaker vs different-speaker).
-7. **Bake-off harness, one day.** `BakeoffRunner` walks `<audio-dir>` for `wav|m4a|mp3|caf`, decodes through an
-   injected `AudioDecoding` (StenoAudio's codec in the CLI, core's WAV decoder in tests), runs each requested engine,
-   times wall clock, computes WER against `<name>.ref.txt` when present (lower-case, punctuation stripped, optional umlaut
-   folding), counts language flips (adjacent segments with different `language`), optionally runs an injected
-   `TranscriptCleaner` and reports `cleanedWER`. Writes `report.md`, `report.json` and per-file `<name>.<engine>.json`.
-   Acceptance: unit tests for WER (known pairs), flip count, Markdown rendering; running it on `Tests/Fixtures/speech`
-   with `--engines parakeet-v3` under `STENO_MODEL_TESTS=1` produces a table with four rows.
-8. **Wiring and settings, half a day.** `SpeechEngineFactory` reads `Settings.speechEngineID`; `CosineSpeakerMemory`
-   takes `Settings.speakerMatchThreshold`; `ModelStore` takes `Settings.modelsDirectory` (nil = default). PR with CI URL
-   and test count. Acceptance: `steno process` (core) runs end to end with `parakeet-v3` on `two-speakers.wav` when the
-   `--real-speech` flag wires this module in.
-9. **Bake-off on real meetings, manual, one day.** Three real Denglish meetings kept outside the repository, references
-   typed by hand for two five-minute excerpts each. Engines: `parakeet-v3`, `parakeet-ultra`, `whisperkit-large-v3-turbo`,
-   `parakeet-de`, each with and without cleanup. Result and chosen default written to
-   `.plans/2026-xx-xx-stt-bakeoff-result.md`. Acceptance: that plan exists and names the default engine and thresholds.
+3. **`ParakeetEngine`, one day.** Wrap `AsrManager`, aggregate tokens, segment, tag. `supportedLanguages` = FluidAudio's 25.
+   `prepare()` = `ModelStore.ensure` then `loadModels`. Acceptance `[opt-in: STENO_MODEL_TESTS]`: integration test transcribes
+   `de-short.wav` and `en-short.wav`; segments have monotonic non-overlapping times; RTF is reported in the test log, not asserted.
+4. **`WhisperKitEngine`, one day.** Language decision as above, map segments and words. Acceptance `[opt-in: STENO_MODEL_TESTS]`
+   (plus `STENO_MODEL_TESTS_WHISPER=1`): `denglish.wav` with `hint: de` yields one language, no segment with `noSpeechProb > 0.6`
+   kept. `[ci]`: `WhisperWindowRankingTests` on synthetic energy profiles.
+5. **`FluidDiarizer`, one day.** Wrap `OfflineDiarizerManager`, map to `[ClusterChunk]` then `StenoCore.DiarizationResult`,
+   compute normalised cluster embeddings from `chunkEmbeddings`, fill `sampleClipRange` and `clusterConfidence` through
+   `SampleClipPicker`. Acceptance `[ci]`: `FluidDiarizerMappingTests` build `[ClusterChunk]` by hand and check unit-length
+   embeddings, range merging, clip choice and the under-3 s penalty. `[opt-in: STENO_MODEL_TESTS]`: `two-speakers.wav` yields
+   exactly two clusters, each with a clip range inside its own ranges.
+6. **`CosineSpeakerMemory`, one day.** `candidates(for:limit:)` ranked by cosine, `enroll` running mean, over
+   `MeetingStore.inMemory()`. Acceptance `[ci]`: unit tests for ranking order, the program's provided `match` (near-duplicate
+   hit, below-threshold miss, margin rejection), running-mean cap. Calibration note `[manual]` recorded from the two `say`
+   voices plus the bake-off meetings (similarity distributions same-speaker vs different-speaker).
+7. **Bake-off harness, one day.** `BakeoffRunner` walks `<audio-dir>` for `wav|m4a|mp3|caf`, decodes through an injected
+   `AudioDecoder` (StenoAudio's codec in the CLI, core's WAV decoder in tests), runs each requested engine, times wall clock,
+   computes WER against `<name>.ref.txt` when present (lower-case, punctuation stripped, optional umlaut folding), counts
+   language flips (adjacent segments with different `language`), optionally runs an injected `TranscriptCleaner` and reports
+   `cleanedWER`. Writes `report.md`, `report.json` and per-file `<name>.<engine>.json`. Acceptance `[ci]`: unit tests for WER
+   (known pairs), flip count, Markdown rendering. `[opt-in: STENO_MODEL_TESTS]`: the fixture folder with `--engines parakeet-v3`
+   produces a table with five rows.
+8. **Wiring, settings, end-to-end, half a day.** `makeSpeechEngine` reads `Settings.speechEngineID`; `ModelStore` takes
+   `Settings.modelsDirectory` (nil = default); core's `Wiring.swift` gains `--engine <id>` (ownership exception, one line, both
+   plans record it); `Tests/StenoEndToEndTests` swaps `InMemorySpeakerMemory` for `CosineSpeakerMemory` over the test store
+   (engines and diarizer stay fakes: no models on CI). Acceptance `[ci]`: the end-to-end test passes with a suggested match for
+   a pre-enrolled person. `[opt-in: STENO_MODEL_TESTS]`: `steno process two-speakers.wav --engine parakeet-v3` runs end to end.
+9. **Bake-off on real meetings, `[manual]`, one day.** Three real Denglish meetings kept outside the repository, references typed
+   by hand for two five-minute excerpts each. Engines: `parakeet-v3`, `parakeet-ultra`, `whisperkit-large-v3-turbo`, `parakeet-de`,
+   each with and without cleanup. Result and chosen default written to `.plans/2026-xx-xx-stt-bakeoff-result.md`. Acceptance:
+   that plan exists and names the default engine and threshold.
 
 ## Tests
 
-- Unit (no network, no models): `TranscriptSegmenterTests`, `LanguageTaggerTests`, `SampleClipPickerTests`,
-  `ClusterEmbeddingTests`, `CosineSpeakerMemoryTests` (in-memory `MeetingStore` as `PersonStore`), `EmbeddingsTests`, `WordErrorRateTests`,
-  `BakeoffReportTests`, `ModelStoreTests` (fake downloader), `FluidDiarizerMappingTests`, `WhisperWindowRankingTests`.
-  Fakes come from `StenoCore/Testing/`.
-- Integration, opt-in with `STENO_MODEL_TESTS=1`: `ModelIntegrationTests` downloads Parakeet v3 and the offline diarizer
-  into a temp directory, transcribes the four fixtures with both engines (WhisperKit only if `STENO_MODEL_TESTS_WHISPER=1`,
-  1.6 GB), diarizes `two-speakers.wav`, and runs the bake-off over the fixture folder. Skipped, not failed, when the
-  variable is unset; the PR report names it as skipped.
-- Manual, one human on a Mac: step 9. Additionally, listen to each generated sample clip for the three meetings and confirm
-  it contains only the named speaker; confirm that enrolling a speaker in meeting one auto-labels them in meeting two.
+- Unit `[ci]` (no network, no models): `TokenAggregationTests`, `TranscriptSegmenterTests`, `LanguageTaggerTests`,
+  `SampleClipPickerTests`, `ClusterEmbeddingTests`, `CosineSpeakerMemoryTests` (in-memory `MeetingStore`), `EmbeddingsTests`,
+  `WordErrorRateTests`, `BakeoffReportTests`, `ModelStoreTests` (`FakeModelDownloader`), `FluidDiarizerMappingTests`,
+  `WhisperWindowRankingTests`. Suites touching `ModelHub.offlineMode` or the environment are `.serialized`.
+- Integration `[opt-in: STENO_MODEL_TESTS]`: `ModelIntegrationTests` downloads Parakeet v3 and the offline diarizer into a temp
+  directory, transcribes the fixtures with both engines (WhisperKit only if `STENO_MODEL_TESTS_WHISPER=1`, 1.6 GB), diarizes
+  `two-speakers.wav`, and runs the bake-off over the fixture folder. Skipped, not failed, when the variable is unset; the skip
+  message names the variable.
+- Manual `[manual]`, one human on a Mac: step 9. Additionally, listen to each generated sample clip for the three meetings and
+  confirm it contains only the named speaker; confirm that confirming a speaker in meeting one suggests them in meeting two.
+
+Reviewer trap: a `Package.resolved` bump of a model package without a sentence in the PR; a skip message that does not name
+`STENO_MODEL_TESTS`; an RTF assertion (report only).
 
 ## Spikes with go/no-go
 
-- **A. Both dependencies in one Swift 6 package.** Go: builds in language mode 6 with no `@preconcurrency import`
-  beyond the two framework imports. No-go: WhisperKit fails to build under Swift 6 or its transitive dependencies clash with
-  FluidAudio; then WhisperKit moves behind a separate SwiftPM target with `swiftLanguageModes: [.v5]` for that target only,
-  and the plan notes it. Blocks steps 3 to 5.
-- **B. German fine-tune loads from a custom directory.** Go: transcribes `de-short.wav` offline. No-go: FluidAudio 0.17
-  rejects the layout; `parakeet-de` is dropped from the bake-off and the engine list, nothing else changes. Blocks only
-  the `parakeet-de` entrant of step 9.
-- **C. Cluster embeddings are usable across recordings.** During step 6: same `say` voice in two fixtures must score
-  above 0.6, the two different voices below 0.5; on the bake-off meetings the same person across two meetings must beat
-  every other speaker by the margin. Go: thresholds hold. No-go: cosine on WeSpeaker embeddings is not separable across
-  microphones; fall back to enrolment-only matching (never auto-assign, always propose top three in the review sheet) and
-  record it. Blocks the auto-assignment behaviour of step 8, not its code.
+- **A. Both dependencies in one Swift 6 package.** Go: builds in language mode 6 with no `@preconcurrency import` beyond the
+  two framework imports. The correctness review verified that "WhisperKit fails to build under Swift 6" cannot be the reason
+  (SwiftPM picks its 5.10 manifest on Xcode 16.4); the remaining risk is a transitive clash with FluidAudio. No-go: WhisperKit
+  moves behind a separate SwiftPM target for isolation, and the plan notes it. Blocks steps 3 to 5.
+- **B. German fine-tune loads from a custom directory** (`[opt-in: STENO_MODEL_TESTS]`, 1.2 GB download). Go: transcribes
+  `de-short.wav` offline. No-go: FluidAudio 0.17 rejects the layout; `parakeet-de` is dropped from the bake-off and the engine
+  list, nothing else changes. Blocks only the `parakeet-de` entrant of step 9.
+- **C. Cluster embeddings are usable across recordings.** During step 6: `de-short.wav` against `de-short-2.wav` (same voice)
+  must score above 0.6, the two different voices below 0.5; on the bake-off meetings the same person across two meetings must
+  beat every other speaker by the margin. Go: thresholds hold. No-go: cosine on WeSpeaker embeddings is not separable across
+  microphones; fall back to never suggesting (always `.unknown`, top three shown in the review sheet) and record it. Blocks the
+  auto-suggest behaviour of step 8, not its code.
 
 ## Needs from other workstreams
 
-- StenoCore: `SpeechEngine`, `Diarizer`, `SpeakerMemory`, `PersonStore`, `SpeakerCluster` (label, ranges, embedding,
-  confidence, sampleClipRange), `RawSegment.language` and `wordTimings`, `AudioBuffer16k.samples`, `AudioDecoding`,
-  `Settings.speechEngineID` / `speakerMatchThreshold` / `modelsDirectory`, the `steno` root command (swift-argument-parser).
+- StenoCore: `SpeechEngine`, `Diarizer`, `SpeakerMemory` with the provided `match`, `SpeakerMatch`, `SpeakerCluster` (label,
+  ranges, embedding, clusterConfidence, sampleClipRange), `RawSegment.language` and `wordTimings`, `AudioBuffer16k.samples`,
+  `AudioDecoder`, `MeetingStore` (persons, save), `Settings.speechEngineID` / `speakerMatchThreshold` / `modelsDirectory`, the
+  `steno` root command and `dev` group, `Wiring.swift` accepting the `--engine` edit, `Tests/StenoEndToEndTests`.
 - StenoAudio: `AVFoundationAudioCodec` for the bake-off's `m4a|mp3|caf` inputs.
 - StenoLLM: `LLMTranscriptCleaner` for `--cleanup`.
-- macOS app: the speaker review sheet calls `rankedCandidates`, `enroll`, `merge`, and plays `Speaker.sampleClipRange`
-  from the lane audio; the settings pane exposes engine choice, threshold and `ModelStore` actions with progress.
-
-## Requested changes to the program document
-
-Reconciled into the program document, see its log (entries 12 to 16).
+- macOS app: the speaker review sheet calls `candidates(for:limit:)`, `MeetingStore.confirm` and `mergePersons`, and plays
+  `Speaker.sampleClipURL`; the settings pane exposes engine choice, threshold and `ModelStore` actions with progress; the
+  archive signs FluidAudio's binary target.
 
 ## Deferred
 
