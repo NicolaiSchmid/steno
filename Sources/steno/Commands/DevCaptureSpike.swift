@@ -69,13 +69,7 @@ struct DevCaptureSpike: AsyncParsableCommand {
       print("aggregate rate: \(Int(backend.aggregateSampleRate ?? 0)) Hz")
       print("input latency + safety offset: \(backend.inputLatencyFrames) frames")
     #endif
-    let levelTask = Task {
-      for await levels in await session.levels {
-        var line = String(format: "mic %6.1f dBFS", levels.mic.rms)
-        if let system = levels.system { line += String(format: "  system %6.1f dBFS", system.rms) }
-        FileHandle.standardError.write(Data((line + "\n").utf8))
-      }
-    }
+    let levelTask = session.printLevelsToStandardError()
     try? await Task.sleep(for: .milliseconds(Int(seconds * 1_000)))
     let result: (asset: AudioAsset, statistics: CaptureStatistics)
     do {

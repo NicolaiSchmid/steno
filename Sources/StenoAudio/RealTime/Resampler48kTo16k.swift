@@ -33,8 +33,9 @@ public final class Resampler48kTo16k: @unchecked Sendable {
   }
 
   /// Consumes exactly `frameSize` input samples and produces
-  /// `outputFrameSize` output samples in `output`, clamped to `-1...1`.
-  public func process(_ input: UnsafePointer<Float>, into output: UnsafeMutablePointer<Float>) {
+  /// `outputFrameSize` Int16 samples (the sidecar format) in `output`,
+  /// clamped to full scale.
+  public func process(_ input: UnsafePointer<Float>, into output: UnsafeMutablePointer<Int16>) {
     let taps = Self.taps
     let offset = taps - 1
     (history + offset).update(from: input, count: frameSize)
@@ -48,30 +49,10 @@ public final class Resampler48kTo16k: @unchecked Sendable {
         accumulator += coefficients[k] * history[newest - k]
         k += 1
       }
-      output[n] = min(1, max(-1, accumulator))
-      n += 1
-    }
-    // Keep the last taps - 1 input samples for the next call.
-    history.update(from: history + frameSize, count: offset)
-  }
-
-  /// Same, writing Int16 for the sidecar.
-  public func process(_ input: UnsafePointer<Float>, into output: UnsafeMutablePointer<Int16>) {
-    let taps = Self.taps
-    let offset = taps - 1
-    (history + offset).update(from: input, count: frameSize)
-    var n = 0
-    while n < outputFrameSize {
-      let newest = n * Self.factor + offset
-      var accumulator: Float = 0
-      var k = 0
-      while k < taps {
-        accumulator += coefficients[k] * history[newest - k]
-        k += 1
-      }
       output[n] = Int16(clamping: Int((min(1, max(-1, accumulator)) * 32767).rounded()))
       n += 1
     }
+    // Keep the last taps - 1 input samples for the next call.
     history.update(from: history + frameSize, count: offset)
   }
 

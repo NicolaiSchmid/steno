@@ -88,19 +88,7 @@ struct Record: AsyncParsableCommand {
     let session = try CaptureSession(configuration: configuration, backend: captureBackend)
     let id = meetingID.flatMap(UUID.init(uuidString:)) ?? UUID()
 
-    let levelTask: Task<Void, Never>? =
-      quiet
-      ? nil
-      : Task {
-        for await levels in await session.levels {
-          var line = String(format: "mic %6.1f dBFS", levels.mic.rms)
-          if let system = levels.system {
-            line += String(format: "  system %6.1f dBFS", system.rms)
-          }
-          FileHandle.standardError.write(Data((line + "\n").utf8))
-        }
-      }
-
+    let levelTask = quiet ? nil : session.printLevelsToStandardError()
     do {
       try await session.start(meetingID: id)
     } catch {
@@ -115,7 +103,12 @@ struct Record: AsyncParsableCommand {
     signal(SIGINT, SIG_IGN)
     interrupt.setEventHandler { stopSignal.fire() }
     interrupt.resume()
-    let deadline = seconds.map { Task<Void, Never>.detachedSleep(seconds: $0, then: stopSignal) }
+    let deadline = seconds.map { seconds in
+      Task {
+        try? await Task.sleep(for: .milliseconds(Int(seconds * 1_000)))
+        if !Task.isCancelled { stopSignal.fire() }
+      }
+    }
     let stateWatch = Task {
       for await state in await session.states {
         if case .failed(let error) = state {
@@ -157,6 +150,20 @@ struct Record: AsyncParsableCommand {
   }
 }
 
+extension CaptureSession {
+  /// Prints one line per level update to stderr until the task is cancelled.
+  /// Shared by `steno record` and `steno dev capture-spike`.
+  nonisolated func printLevelsToStandardError() -> Task<Void, Never> {
+    Task {
+      for await levels in await self.levels {
+        var line = String(format: "mic %6.1f dBFS", levels.mic.rms)
+        if let system = levels.system { line += String(format: "  system %6.1f dBFS", system.rms) }
+        FileHandle.standardError.write(Data((line + "\n").utf8))
+      }
+    }
+  }
+}
+
 /// A one-shot signal any thread can fire and one task awaits.
 final class StopSignal: @unchecked Sendable {
   private let lock = NSLock()
@@ -182,16 +189,6 @@ final class StopSignal: @unchecked Sendable {
       }
       self.continuation = continuation
       lock.unlock()
-    }
-  }
-}
-
-extension Task where Success == Void, Failure == Never {
-  /// Fires `signal` after `seconds` unless cancelled first.
-  static func detachedSleep(seconds: Double, then signal: StopSignal) -> Task<Void, Never> {
-    Task.detached {
-      try? await Task<Never, Never>.sleep(for: .milliseconds(Int(seconds * 1_000)))
-      if !Task<Never, Never>.isCancelled { signal.fire() }
     }
   }
 }

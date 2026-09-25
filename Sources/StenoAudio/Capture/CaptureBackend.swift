@@ -20,18 +20,15 @@ public protocol CaptureBackend: Sendable {
 /// accounting and the device-lost signal.
 ///
 /// Producer protocol (real-time safe, one producer at a time):
-/// `beginCallback(frameCount:hostTime:)` checks every ring has room (or
-/// counts the whole callback as dropped for every lane and returns false),
-/// then one `write`/`writeMixed`/`writeSilence` per lane, then
-/// `endCallback()`. Nothing in that path allocates or locks.
+/// `beginCallback(frameCount:)` checks every ring has room (or counts the
+/// whole callback as dropped for every lane and returns false), then one
+/// `write`/`writeMixed`/`writeSilence` per lane, then `endCallback()`.
+/// Nothing in that path allocates or locks.
 public final class LaneFrameSink: @unchecked Sendable {
   public let lanes: [AudioLane]
-  public let sampleRate: Double
   let rings: [LaneRingBuffer]
   /// Signalled once per completed callback; the processing thread waits on it.
   let wake = DispatchSemaphore(value: 0)
-  private let callbackCount = Atomic<Int>(0)
-  private let lastHostTime = Atomic<UInt64>(0)
   private let deviceLost = Atomic<Bool>(false)
   private let deviceLostHandler: @Sendable () -> Void
   /// Producer-only scratch for the callback in flight.
@@ -43,23 +40,14 @@ public final class LaneFrameSink: @unchecked Sendable {
     onDeviceLost: @escaping @Sendable () -> Void = {}
   ) {
     self.lanes = lanes
-    self.sampleRate = sampleRate
     self.rings = lanes.map { _ in LaneRingBuffer(capacity: Int(sampleRate * ringSeconds)) }
     self.deviceLostHandler = onDeviceLost
   }
 
-  public var laneCount: Int { lanes.count }
-
-  /// Completed callbacks so far.
-  public var callbacks: Int { callbackCount.load(ordering: .relaxed) }
-
-  /// Host time of the most recent callback's first frame.
-  public var latestHostTime: UInt64 { lastHostTime.load(ordering: .relaxed) }
-
   // MARK: Producer (real-time)
 
   @inline(__always)
-  public func beginCallback(frameCount: Int, hostTime: UInt64) -> Bool {
+  public func beginCallback(frameCount: Int) -> Bool {
     var fits = true
     var index = 0
     while index < rings.count {
@@ -75,7 +63,6 @@ public final class LaneFrameSink: @unchecked Sendable {
       return false
     }
     pendingFrames = frameCount
-    lastHostTime.store(hostTime, ordering: .relaxed)
     return true
   }
 
@@ -98,7 +85,6 @@ public final class LaneFrameSink: @unchecked Sendable {
 
   @inline(__always)
   public func endCallback() {
-    callbackCount.wrappingAdd(1, ordering: .relaxed)
     wake.signal()
   }
 
@@ -111,8 +97,6 @@ public final class LaneFrameSink: @unchecked Sendable {
       expected: false, desired: true, ordering: .acquiringAndReleasing)
     if exchanged { deviceLostHandler() }
   }
-
-  public var isDeviceLost: Bool { deviceLost.load(ordering: .acquiring) }
 
   // MARK: Consumer
 

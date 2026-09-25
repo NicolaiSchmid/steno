@@ -15,24 +15,6 @@ public struct AudioDeviceInfo: Sendable, Equatable, Hashable, Identifiable {
   public var isDefaultOutput: Bool
   public var isDefaultSystemOutput: Bool
 
-  public init(
-    id: UInt32, uid: String, name: String, inputChannels: Int, outputChannels: Int,
-    nominalSampleRate: Double, transportType: String, isRunningSomewhere: Bool,
-    isDefaultInput: Bool, isDefaultOutput: Bool, isDefaultSystemOutput: Bool
-  ) {
-    self.id = id
-    self.uid = uid
-    self.name = name
-    self.inputChannels = inputChannels
-    self.outputChannels = outputChannels
-    self.nominalSampleRate = nominalSampleRate
-    self.transportType = transportType
-    self.isRunningSomewhere = isRunningSomewhere
-    self.isDefaultInput = isDefaultInput
-    self.isDefaultOutput = isDefaultOutput
-    self.isDefaultSystemOutput = isDefaultSystemOutput
-  }
-
   public var isInput: Bool { inputChannels > 0 }
   public var isOutput: Bool { outputChannels > 0 }
 }
@@ -59,8 +41,8 @@ public struct AudioDeviceInfo: Sendable, Equatable, Hashable, Identifiable {
       }
     }
 
+    /// The app's input picker.
     public static func inputs() throws -> [AudioDeviceInfo] { try all().filter(\.isInput) }
-    public static func outputs() throws -> [AudioDeviceInfo] { try all().filter(\.isOutput) }
 
     /// The device with `uid`, or nil when it is not connected.
     public static func device(uid: String) throws -> AudioDeviceInfo? {
@@ -69,10 +51,6 @@ public struct AudioDeviceInfo: Sendable, Equatable, Hashable, Identifiable {
 
     public static func defaultInput() throws -> AudioDeviceInfo {
       try info(try defaultDevice(kAudioHardwarePropertyDefaultInputDevice))
-    }
-
-    public static func defaultOutput() throws -> AudioDeviceInfo {
-      try info(try defaultDevice(kAudioHardwarePropertyDefaultOutputDevice))
     }
 
     /// The device alerts and system sounds play through; the tap aggregate's

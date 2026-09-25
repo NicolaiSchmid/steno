@@ -93,10 +93,10 @@ public enum CAFReadError: Error, Sendable, Equatable, CustomStringConvertible {
   }
 }
 
-/// Reads the CAF files the writer produces (Float32 or Int16 PCM, any channel
-/// count, data size -1 accepted) into de-interleaved channels. For tests,
-/// `steno dev aec-bench` and crash recovery; the pipeline's decoder is the
-/// AVFoundation codec.
+/// Reads the CAF files the writer produces (Float32 little-endian PCM, any
+/// channel count, data size -1 accepted) into de-interleaved channels. For
+/// tests, `steno dev aec-bench`, `steno dev capture-spike` and crash
+/// recovery; the pipeline's decoder is the AVFoundation codec.
 public struct CAFFile: Sendable, Equatable {
   public var sampleRate: Double
   public var channels: [[Float]]
@@ -142,34 +142,20 @@ public struct CAFFile: Sendable, Equatable {
     }
     guard let format else { throw CAFReadError.malformed("no desc chunk") }
     guard let samples else { throw CAFReadError.malformed("no data chunk") }
-    guard format.formatID == "lpcm" else {
-      throw CAFReadError.unsupportedFormat("format \(format.formatID)")
-    }
-    let isFloat = format.flags & 1 != 0
-    let littleEndian = format.flags & 2 != 0
-    let bytesPerSample = format.bits / 8
-    guard (isFloat && format.bits == 32) || (!isFloat && format.bits == 16) else {
-      throw CAFReadError.unsupportedFormat("\(format.bits)-bit \(isFloat ? "float" : "integer")")
+    // Flags: bit 0 float, bit 1 little-endian. The writer produces exactly this.
+    guard format.formatID == "lpcm", format.flags & 3 == 3, format.bits == 32 else {
+      throw CAFReadError.unsupportedFormat(
+        "\(format.formatID) flags \(format.flags) \(format.bits)-bit; need Float32 little-endian")
     }
     let channelCount = max(1, format.channels)
-    let bytesPerFrame = bytesPerSample * channelCount
-    let frames = samples.count / bytesPerFrame
+    let frames = samples.count / (4 * channelCount)
     var channels = [[Float]](repeating: [Float](repeating: 0, count: frames), count: channelCount)
     data.withUnsafeBytes { raw in
-      let base = samples.offset
       for frame in 0..<frames {
         for channel in 0..<channelCount {
-          let at = base + frame * bytesPerFrame + channel * bytesPerSample
-          if isFloat {
-            let bits = raw.loadUnaligned(fromByteOffset: at, as: UInt32.self)
-            channels[channel][frame] = Float(
-              bitPattern: littleEndian ? UInt32(littleEndian: bits) : UInt32(bigEndian: bits))
-          } else {
-            let bits = raw.loadUnaligned(fromByteOffset: at, as: UInt16.self)
-            let value = Int16(
-              bitPattern: littleEndian ? UInt16(littleEndian: bits) : UInt16(bigEndian: bits))
-            channels[channel][frame] = Float(value) / 32768
-          }
+          let at = samples.offset + (frame * channelCount + channel) * 4
+          let bits = raw.loadUnaligned(fromByteOffset: at, as: UInt32.self)
+          channels[channel][frame] = Float(bitPattern: UInt32(littleEndian: bits))
         }
       }
     }

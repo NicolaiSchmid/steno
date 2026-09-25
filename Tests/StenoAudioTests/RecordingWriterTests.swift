@@ -104,7 +104,7 @@ import Testing
   @Test func wrongFrameShapeAndDoubleFinishThrow() throws {
     let directory = try Fixtures.temporaryDirectory("writer")
     defer { try? FileManager.default.removeItem(at: directory) }
-    let writer = try RecordingWriter(directory: directory, lanes: [.mixed])
+    let writer = try RecordingWriter(layout: RecordingLayout(directory: directory), lanes: [.mixed])
     let short = [Float](repeating: 0, count: 100)
     #expect(throws: CaptureError.self) {
       try short.withUnsafeBufferPointer {

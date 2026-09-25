@@ -45,8 +45,8 @@ public actor CaptureSession {
   private var active: Active?
   private var lastResult: (asset: AudioAsset, statistics: CaptureStatistics)?
 
-  /// `echoCanceller` nil in `.call` with `echoCancellation` on means the
-  /// default `SpeexEchoCanceller`; `.inPerson` never cancels.
+  /// `echoCanceller` nil in `.call` with `echoCancellation` on means
+  /// `SpeexEchoCanceller` with the 200 ms tail; `.inPerson` never cancels.
   /// `writerHeadroomFrames` is the relay depth between processing and file
   /// I/O; a test that feeds audio faster than real time raises it so a slow
   /// disk in a debug build is not mistaken for a drop.
@@ -62,16 +62,10 @@ public actor CaptureSession {
     if configuration.usesEchoCancellation {
       self.echoCanceller =
         try echoCanceller
-        ?? CaptureSession.defaultEchoCanceller(
-          sampleRate: StenoAudio.sampleRate, frameSize: StenoAudio.frameSize)
+        ?? SpeexEchoCanceller(sampleRate: StenoAudio.sampleRate, frameSize: StenoAudio.frameSize)
     } else {
       self.echoCanceller = nil
     }
-  }
-
-  /// SpeexDSP with the 200 ms tail.
-  static func defaultEchoCanceller(sampleRate: Double, frameSize: Int) throws -> any EchoCanceller {
-    try SpeexEchoCanceller(sampleRate: sampleRate, frameSize: frameSize)
   }
 
   /// Every state change from now on, starting with the current state.
@@ -229,10 +223,6 @@ public actor CaptureSession {
     state = .stopping
     do {
       _ = try finish()
-      if var result = lastResult {
-        result.statistics.deviceChanges = active.deviceChanges
-        lastResult = result
-      }
       state = .failed(.deviceLost)
     } catch {
       state = .failed((error as? CaptureError) ?? .deviceLost)

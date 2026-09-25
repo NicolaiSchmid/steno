@@ -11,7 +11,6 @@ final class FrameRelay: @unchecked Sendable {
   let frameSize: Int
   let rings: [LaneRingBuffer]
   let wake = DispatchSemaphore(value: 0)
-  private let committed = Atomic<Int>(0)
 
   /// `capacityFrames` whole frames of headroom per channel.
   init(channels: Int, frameSize: Int, capacityFrames: Int) {
@@ -49,7 +48,6 @@ final class FrameRelay: @unchecked Sendable {
 
   @inline(__always)
   func endFrame() {
-    committed.wrappingAdd(1, ordering: .releasing)
     wake.signal()
   }
 
@@ -64,8 +62,6 @@ final class FrameRelay: @unchecked Sendable {
   func read(channel: Int, into destination: UnsafeMutablePointer<Float>) -> Bool {
     rings[channel].read(into: destination, count: frameSize)
   }
-
-  var committedFrames: Int { committed.load(ordering: .acquiring) }
 
   /// Frames refused per channel.
   var droppedFrames: [Int] {

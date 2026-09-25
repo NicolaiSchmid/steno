@@ -127,30 +127,20 @@ import StenoCore
         throw error
       }
 
-      var listeners: [AudioPropertyListenerToken] = []
-      let lost: @Sendable () -> Void = { sink.reportDeviceLost() }
-      let system = AudioObjectID.system
-      if inputDeviceUID == nil, needsMic {
-        listeners.append(
-          contentsOf: [
-            try? system.addListener(
-              AudioObjectPropertyAddress(kAudioHardwarePropertyDefaultInputDevice),
-              queue: listenerQueue, lost)
-          ].compactMap { $0 })
-      }
-      listeners.append(
-        contentsOf: [
-          try? system.addListener(
-            AudioObjectPropertyAddress(kAudioHardwarePropertyDefaultSystemOutputDevice),
-            queue: listenerQueue, lost)
-        ].compactMap { $0 })
-      for device in [output.id] + (mic.map { [$0.id] } ?? []) {
-        if let token = try? AudioObjectID(device).addListener(
-          AudioObjectPropertyAddress(kAudioDevicePropertyDeviceIsAlive), queue: listenerQueue,
-          lost)
-        {
-          listeners.append(token)
+      // Device loss: the default devices changing, or a sub-device dying.
+      var watched: [(AudioObjectID, AudioObjectPropertySelector)] = [
+        (.system, kAudioHardwarePropertyDefaultSystemOutputDevice),
+        (AudioObjectID(output.id), kAudioDevicePropertyDeviceIsAlive),
+      ]
+      if let mic {
+        watched.append((AudioObjectID(mic.id), kAudioDevicePropertyDeviceIsAlive))
+        if inputDeviceUID == nil {
+          watched.append((.system, kAudioHardwarePropertyDefaultInputDevice))
         }
+      }
+      let lost: @Sendable () -> Void = { sink.reportDeviceLost() }
+      let listeners = watched.compactMap { object, selector in
+        try? object.addListener(AudioObjectPropertyAddress(selector), queue: listenerQueue, lost)
       }
 
       active = Active(

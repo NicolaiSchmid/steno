@@ -51,11 +51,6 @@
 
     var isValid: Bool { self != .unknown }
 
-    func hasProperty(_ address: AudioObjectPropertyAddress) -> Bool {
-      var address = address
-      return AudioObjectHasProperty(self, &address)
-    }
-
     func propertySize(_ address: AudioObjectPropertyAddress) throws -> UInt32 {
       var address = address
       var size: UInt32 = 0

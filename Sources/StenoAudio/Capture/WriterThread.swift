@@ -11,15 +11,13 @@ final class WriterThread: @unchecked Sendable {
   private let relay: FrameRelay
   private let writer: RecordingWriter
   private let levels: LevelSlot
-  private let laneCount: Int
-  private let hasRawMic: Bool
-  private let frameSize: Int
   private let buffers: [UnsafeMutablePointer<Float>]
+  /// The view over `buffers` handed to the writer, built once.
+  private let frames: LaneFrames
   private let onLevels: @Sendable (LaneLevels) -> Void
   private let onError: @Sendable (any Error) -> Void
   private let stopRequested = Atomic<Bool>(false)
   private let finished = DispatchSemaphore(value: 0)
-  private let framesWrittenCount = Atomic<Int>(0)
   private let failed = Atomic<Bool>(false)
   private var lastGeneration = 0
   private var thread: Thread?
@@ -32,14 +30,16 @@ final class WriterThread: @unchecked Sendable {
     self.relay = relay
     self.writer = writer
     self.levels = levels
-    self.laneCount = laneCount
-    self.hasRawMic = hasRawMic
-    self.frameSize = relay.frameSize
-    self.buffers = (0..<relay.channels).map { _ in
+    let buffers = (0..<relay.channels).map { _ in
       let pointer = UnsafeMutablePointer<Float>.allocate(capacity: relay.frameSize)
       pointer.initialize(repeating: 0, count: relay.frameSize)
       return pointer
     }
+    self.buffers = buffers
+    self.frames = LaneFrames(
+      frameCount: relay.frameSize,
+      lanes: (0..<laneCount).map { UnsafePointer(buffers[$0]) },
+      rawMic: hasRawMic ? UnsafePointer(buffers[laneCount]) : nil)
     self.onLevels = onLevels
     self.onError = onError
   }
@@ -48,7 +48,6 @@ final class WriterThread: @unchecked Sendable {
     for buffer in buffers { buffer.deallocate() }
   }
 
-  var framesWritten: Int { framesWrittenCount.load(ordering: .relaxed) }
   var hasFailed: Bool { failed.load(ordering: .acquiring) }
 
   func start() {
@@ -87,13 +86,8 @@ final class WriterThread: @unchecked Sendable {
         channel += 1
       }
       guard !hasFailed else { continue }
-      let frames = LaneFrames(
-        frameCount: frameSize,
-        lanes: (0..<laneCount).map { UnsafePointer(buffers[$0]) },
-        rawMic: hasRawMic ? UnsafePointer(buffers[laneCount]) : nil)
       do {
         try writer.write(frames)
-        framesWrittenCount.wrappingAdd(1, ordering: .relaxed)
       } catch {
         failed.store(true, ordering: .releasing)
         onError(error)

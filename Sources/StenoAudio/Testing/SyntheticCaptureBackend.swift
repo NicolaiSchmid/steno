@@ -121,8 +121,7 @@ public final class SyntheticCaptureBackend: CaptureBackend, @unchecked Sendable 
           }
         }
         generator.fill(frames: frames)
-        let hostTime = UInt64(Double(delivered) / sampleRate * 1_000_000_000)
-        if sink.beginCallback(frameCount: frames, hostTime: hostTime) {
+        if sink.beginCallback(frameCount: frames) {
           var lane = 0
           while lane < lanes.count {
             sink.write(lane: lane, from: generator.buffer(lane))

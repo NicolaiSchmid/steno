@@ -27,11 +27,17 @@ final class ProcessingThread: @unchecked Sendable {
   private let relay: FrameRelay
   private let micIndex: Int?
   private let systemIndex: Int?
+  /// What the rings deliver, one buffer per lane.
   private let laneBuffers: [UnsafeMutablePointer<Float>]
+  /// What is metered and written: `laneBuffers`, except that the mic lane
+  /// points at the canceller's output while echo cancellation runs. The raw
+  /// mic channel is then `laneBuffers[micIndex]`, untouched.
+  private let outputs: [UnsafeMutablePointer<Float>]
   private let processedMic: UnsafeMutablePointer<Float>
-  private let rawMic: UnsafeMutablePointer<Float>
   private let delayedFar: UnsafeMutablePointer<Float>
   private let delayLine: LaneRingBuffer?
+  /// Set only when both a mic and a system lane exist.
+  private let aec: (canceller: any EchoCanceller, mic: Int, system: Int)?
   private var meters: [LevelMeter]
   private var framesSincePublish = 0
   private let framesProcessedCount = Atomic<Int>(0)
@@ -39,15 +45,16 @@ final class ProcessingThread: @unchecked Sendable {
   private let stopRequested = Atomic<Bool>(false)
   private let finished = DispatchSemaphore(value: 0)
   private var thread: Thread?
-  private let useEchoCancellation: Bool
 
   init(sink: LaneFrameSink, relay: FrameRelay, configuration: Configuration) {
     self.sink = sink
     self.relay = relay
     self.configuration = configuration
     let frameSize = configuration.frameSize
-    micIndex = configuration.lanes.firstIndex(of: .mic)
-    systemIndex = configuration.lanes.firstIndex(of: .system)
+    let micIndex = configuration.lanes.firstIndex(of: .mic)
+    let systemIndex = configuration.lanes.firstIndex(of: .system)
+    self.micIndex = micIndex
+    self.systemIndex = systemIndex
     laneBuffers = configuration.lanes.map { _ in
       let pointer = UnsafeMutablePointer<Float>.allocate(capacity: frameSize)
       pointer.initialize(repeating: 0, count: frameSize)
@@ -55,13 +62,17 @@ final class ProcessingThread: @unchecked Sendable {
     }
     processedMic = .allocate(capacity: frameSize)
     processedMic.initialize(repeating: 0, count: frameSize)
-    rawMic = .allocate(capacity: frameSize)
-    rawMic.initialize(repeating: 0, count: frameSize)
     delayedFar = .allocate(capacity: frameSize)
     delayedFar.initialize(repeating: 0, count: frameSize)
-    useEchoCancellation =
-      configuration.echoCanceller != nil && micIndex != nil && systemIndex != nil
-    if useEchoCancellation, configuration.farEndDelayFrames > 0 {
+    var outputs = laneBuffers
+    if let canceller = configuration.echoCanceller, let micIndex, let systemIndex {
+      aec = (canceller, micIndex, systemIndex)
+      outputs[micIndex] = processedMic
+    } else {
+      aec = nil
+    }
+    self.outputs = outputs
+    if aec != nil, configuration.farEndDelayFrames > 0 {
       let line = LaneRingBuffer(capacity: configuration.farEndDelayFrames + frameSize)
       line.writeZeros(count: configuration.farEndDelayFrames)
       delayLine = line
@@ -75,7 +86,6 @@ final class ProcessingThread: @unchecked Sendable {
   deinit {
     for buffer in laneBuffers { buffer.deallocate() }
     processedMic.deallocate()
-    rawMic.deallocate()
     delayedFar.deallocate()
   }
 
@@ -128,37 +138,24 @@ final class ProcessingThread: @unchecked Sendable {
   @inline(__always)
   private func processFrame() {
     let frameSize = configuration.frameSize
-    var micPointer: UnsafeMutablePointer<Float>?
-    if let micIndex { micPointer = laneBuffers[micIndex] }
-
-    if useEchoCancellation, let micIndex, let systemIndex,
-      let canceller = configuration.echoCanceller
-    {
-      let mic = laneBuffers[micIndex]
-      let system = laneBuffers[systemIndex]
-      if configuration.keepRawMic {
-        rawMic.update(from: mic, count: frameSize)
-      }
+    if let aec {
+      let system = laneBuffers[aec.system]
       var farEnd = UnsafeBufferPointer<Float>(start: system, count: frameSize)
       if let delayLine {
         delayLine.write(system, count: frameSize)
         delayLine.read(into: delayedFar, count: frameSize)
         farEnd = UnsafeBufferPointer(start: delayedFar, count: frameSize)
       }
-      canceller.process(
-        nearEnd: UnsafeBufferPointer(start: mic, count: frameSize),
+      aec.canceller.process(
+        nearEnd: UnsafeBufferPointer(start: laneBuffers[aec.mic], count: frameSize),
         farEnd: farEnd,
         out: UnsafeMutableBufferPointer(start: processedMic, count: frameSize))
-      micPointer = processedMic
-    } else if configuration.keepRawMic, let micIndex {
-      rawMic.update(from: laneBuffers[micIndex], count: frameSize)
     }
 
     // Metering on what is written.
     var index = 0
-    while index < laneBuffers.count {
-      let source = (index == micIndex ? micPointer : nil) ?? laneBuffers[index]
-      meters[index].accumulate(source, count: frameSize)
+    while index < outputs.count {
+      meters[index].accumulate(outputs[index], count: frameSize)
       index += 1
     }
     if let systemIndex {
@@ -183,13 +180,12 @@ final class ProcessingThread: @unchecked Sendable {
     framesProcessedCount.wrappingAdd(1, ordering: .relaxed)
     guard relay.beginFrame() else { return }
     index = 0
-    while index < laneBuffers.count {
-      let source = (index == micIndex ? micPointer : nil) ?? laneBuffers[index]
-      relay.write(channel: index, from: source)
+    while index < outputs.count {
+      relay.write(channel: index, from: outputs[index])
       index += 1
     }
-    if configuration.keepRawMic, micIndex != nil {
-      relay.write(channel: laneBuffers.count, from: rawMic)
+    if configuration.keepRawMic, let micIndex {
+      relay.write(channel: outputs.count, from: laneBuffers[micIndex])
     }
     relay.endFrame()
   }

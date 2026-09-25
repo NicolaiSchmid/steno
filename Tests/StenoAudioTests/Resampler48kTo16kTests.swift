@@ -11,11 +11,14 @@ import Testing
     }
   }
 
-  func resample(_ input: [Float]) -> [Float] {
+  /// Runs `input` frame by frame through one resampler (the sidecar path) and
+  /// returns the Int16 output.
+  func resampleInt16(_ input: [Float], reset resetAtFrame: Int? = nil) -> [Int16] {
     let resampler = Resampler48kTo16k()
-    var output: [Float] = []
-    var frame = [Float](repeating: 0, count: 160)
-    for start in stride(from: 0, to: input.count - 479, by: 480) {
+    var output: [Int16] = []
+    var frame = [Int16](repeating: 0, count: 160)
+    for (index, start) in stride(from: 0, to: input.count - 479, by: 480).enumerated() {
+      if index == resetAtFrame { resampler.reset() }
       input.withUnsafeBufferPointer { buffer in
         frame.withUnsafeMutableBufferPointer { out in
           resampler.process(buffer.baseAddress! + start, into: out.baseAddress!)
@@ -24,6 +27,10 @@ import Testing
       output.append(contentsOf: frame)
     }
     return output
+  }
+
+  func resample(_ input: [Float]) -> [Float] {
+    resampleInt16(input).map { Float($0) / 32767 }
   }
 
   func rms(_ samples: ArraySlice<Float>) -> Float {
@@ -58,48 +65,21 @@ import Testing
     #expect(nine < -40, "9 kHz aliases at \(nine) dB")
   }
 
-  @Test func int16OutputMatchesTheFloatPathAndClamps() {
-    let input = sine(frequency: 440, amplitude: 1.2, seconds: 0.1)
-    let floats = resample(input)
-    let resampler = Resampler48kTo16k()
-    var ints: [Int16] = []
-    var frame = [Int16](repeating: 0, count: 160)
-    for start in stride(from: 0, to: input.count - 479, by: 480) {
-      input.withUnsafeBufferPointer { buffer in
-        frame.withUnsafeMutableBufferPointer { out in
-          resampler.process(buffer.baseAddress! + start, into: out.baseAddress!)
-        }
-      }
-      ints.append(contentsOf: frame)
-    }
-    #expect(ints.count == floats.count)
-    for (int, float) in zip(ints, floats) {
-      #expect(abs(Float(int) / 32767 - float) < 1.0 / 32767)
-    }
-    #expect(floats.max()! <= 1)
+  @Test func outputClampsToFullScale() {
+    let ints = resampleInt16(sine(frequency: 440, amplitude: 1.2, seconds: 0.1))
+    #expect(ints.count == 1_600)
     #expect(ints.max()! == 32767)
+    #expect(ints.min()! == -32767)
   }
 
   @Test func historyCarriesAcrossFramesAndResets() {
     let input = sine(frequency: 1_000, seconds: 0.05)
-    let whole = resample(input)
-    // The same signal in one frame at a time must equal the frame-by-frame
-    // output above (which already is frame-by-frame); a reset in between
-    // must not.
-    let resampler = Resampler48kTo16k()
-    var output: [Float] = []
-    var frame = [Float](repeating: 0, count: 160)
-    for (index, start) in stride(from: 0, to: input.count - 479, by: 480).enumerated() {
-      if index == 2 { resampler.reset() }
-      input.withUnsafeBufferPointer { buffer in
-        frame.withUnsafeMutableBufferPointer { out in
-          resampler.process(buffer.baseAddress! + start, into: out.baseAddress!)
-        }
-      }
-      output.append(contentsOf: frame)
-    }
-    #expect(Array(output[..<320]) == Array(whole[..<320]))
-    #expect(Array(output[320..<480]) != Array(whole[320..<480]))
+    let whole = resampleInt16(input)
+    // The same signal with a reset before the third frame: identical until
+    // the reset, different after it.
+    let interrupted = resampleInt16(input, reset: 2)
+    #expect(Array(interrupted[..<320]) == Array(whole[..<320]))
+    #expect(Array(interrupted[320..<480]) != Array(whole[320..<480]))
   }
 
   @Test func filterHasUnityDCGainAndSymmetry() {

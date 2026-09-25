@@ -1,10 +1,11 @@
 import Foundation
 import StenoCore
 
-/// Reads any PCM RIFF/WAVE file (8/16/24/32-bit integer or 32-bit float, any
-/// rate, any channel count) into de-interleaved channels. For `steno dev
-/// aec-bench` and tests on 48 kHz material; core's `WAVAudioDecoder` stays
-/// the strict 16 kHz mono reader the pipeline uses.
+/// Reads a PCM RIFF/WAVE file (16-bit integer or 32-bit float, any rate, any
+/// channel count) into de-interleaved channels: what `AudioFixtures.writeWAV`
+/// and common recorders produce, for `steno dev aec-bench` on 48 kHz
+/// material. Core's `WAVAudioDecoder` stays the strict 16 kHz mono reader
+/// the pipeline uses.
 public struct WAVFile: Sendable, Equatable {
   public var sampleRate: Double
   public var channels: [[Float]]
@@ -49,13 +50,12 @@ public struct WAVFile: Sendable, Equatable {
     guard let format else { throw WAVDecodeError.malformed("no fmt chunk") }
     guard let samples else { throw WAVDecodeError.malformed("no data chunk") }
     let isFloat: Bool
-    switch format.tag {
-    case 1: isFloat = false
-    case 3: isFloat = true
-    default: throw WAVDecodeError.unsupportedFormat("audio format tag \(format.tag)")
-    }
-    guard [8, 16, 24, 32].contains(format.bits), !isFloat || format.bits == 32 else {
-      throw WAVDecodeError.unsupportedFormat("\(format.bits)-bit \(isFloat ? "float" : "integer")")
+    switch (format.tag, format.bits) {
+    case (1, 16): isFloat = false
+    case (3, 32): isFloat = true
+    default:
+      throw WAVDecodeError.unsupportedFormat(
+        "format tag \(format.tag) at \(format.bits) bits; need 16-bit integer or 32-bit float")
     }
     let channelCount = max(1, format.channels)
     let bytesPerSample = format.bits / 8
@@ -66,32 +66,13 @@ public struct WAVFile: Sendable, Equatable {
       for frame in 0..<frames {
         for channel in 0..<channelCount {
           let at = samples.lowerBound + frame * bytesPerFrame + channel * bytesPerSample
-          let value: Float
-          switch (isFloat, format.bits) {
-          case (true, _):
-            value = Float(
-              bitPattern: UInt32(
-                littleEndian: raw.loadUnaligned(fromByteOffset: at, as: UInt32.self)))
-          case (false, 8):
-            value = (Float(raw[at]) - 128) / 128
-          case (false, 16):
-            value =
-              Float(
-                Int16(
-                  bitPattern: UInt16(
-                    littleEndian: raw.loadUnaligned(fromByteOffset: at, as: UInt16.self)))) / 32768
-          case (false, 24):
-            let raw24 = Int32(raw[at]) | Int32(raw[at + 1]) << 8 | Int32(raw[at + 2]) << 16
-            value = Float(raw24 >= 0x80_0000 ? raw24 - 0x100_0000 : raw24) / 8_388_608
-          default:
-            value =
-              Float(
-                Int32(
-                  bitPattern: UInt32(
-                    littleEndian: raw.loadUnaligned(fromByteOffset: at, as: UInt32.self))))
-              / 2_147_483_648
+          if isFloat {
+            let bits = raw.loadUnaligned(fromByteOffset: at, as: UInt32.self)
+            channels[channel][frame] = Float(bitPattern: UInt32(littleEndian: bits))
+          } else {
+            let bits = raw.loadUnaligned(fromByteOffset: at, as: UInt16.self)
+            channels[channel][frame] = Float(Int16(bitPattern: UInt16(littleEndian: bits))) / 32768
           }
-          channels[channel][frame] = value
         }
       }
     }

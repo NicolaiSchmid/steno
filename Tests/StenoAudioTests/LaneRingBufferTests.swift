@@ -66,9 +66,6 @@ import Testing
       #expect(!ring.read(into: $0.baseAddress!, count: 7), "short reads are refused as a whole")
       #expect(ring.read(into: $0.baseAddress!, count: 6))
     }
-    #expect(ring.skip(10) == 0)
-    ring.writeZeros(count: 4)
-    #expect(ring.skip(10) == 4)
   }
 
   @Test func clearZeroesStorageAndResetsIndices() {

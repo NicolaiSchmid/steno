@@ -28,7 +28,7 @@
       guard procID == nil else { return }
       let sink = self.sink
       let sources = self.sources
-      let block: AudioDeviceIOBlock = { _, inputData, inputTime, _, _ in
+      let block: AudioDeviceIOBlock = { _, inputData, _, _, _ in
         let list = UnsafeMutableAudioBufferListPointer(UnsafeMutablePointer(mutating: inputData))
         let bufferCount = list.count
         guard bufferCount > 0, sources.count > 0 else { return }
@@ -38,10 +38,7 @@
         let channels = Int(first.mNumberChannels)
         guard channels > 0 else { return }
         let frames = Int(first.mDataByteSize) / (channels * 4)
-        guard frames > 0 else { return }
-        guard sink.beginCallback(frameCount: frames, hostTime: inputTime.pointee.mHostTime) else {
-          return
-        }
+        guard frames > 0, sink.beginCallback(frameCount: frames) else { return }
         var index = 0
         while index < sources.count {
           let source = sources[index]

@@ -6,16 +6,11 @@ import StenoCore
 /// the writer thread's buffers, valid for the duration of `write`.
 public struct LaneFrames {
   public var frameCount: Int
-  public var hostTime: UInt64
   public var lanes: [UnsafePointer<Float>]
   public var rawMic: UnsafePointer<Float>?
 
-  public init(
-    frameCount: Int, hostTime: UInt64 = 0, lanes: [UnsafePointer<Float>],
-    rawMic: UnsafePointer<Float>? = nil
-  ) {
+  public init(frameCount: Int, lanes: [UnsafePointer<Float>], rawMic: UnsafePointer<Float>? = nil) {
     self.frameCount = frameCount
-    self.hostTime = hostTime
     self.lanes = lanes
     self.rawMic = rawMic
   }
@@ -44,8 +39,6 @@ public struct RecordingFiles: Sendable, Equatable, Hashable {
 public final class RecordingWriter: @unchecked Sendable {
   public let layout: RecordingLayout
   public let lanes: [AudioLane]
-  public let sampleRate: Double
-  public let frameSize: Int
   private let master: CAFStreamWriter
   private let sidecars: [WAVStreamWriter]
   private let resamplers: [Resampler48kTo16k]
@@ -54,36 +47,22 @@ public final class RecordingWriter: @unchecked Sendable {
   private let sidecarScratch: UnsafeMutablePointer<Int16>
   private var isFinished = false
 
-  /// `directory` is the meeting folder; it is created if needed.
-  public convenience init(
-    directory: URL, lanes: [AudioLane], sampleRate: Double = StenoAudio.sampleRate,
-    keepRawMic: Bool = false, frameSize: Int = StenoAudio.frameSize
-  ) throws {
-    try self.init(
-      layout: RecordingLayout(directory: directory), lanes: lanes, sampleRate: sampleRate,
-      keepRawMic: keepRawMic, frameSize: frameSize)
-  }
-
-  public init(
-    layout: RecordingLayout, lanes: [AudioLane], sampleRate: Double = StenoAudio.sampleRate,
-    keepRawMic: Bool = false, frameSize: Int = StenoAudio.frameSize
-  ) throws {
+  /// `layout.directory` is created if needed.
+  public init(layout: RecordingLayout, lanes: [AudioLane], keepRawMic: Bool = false) throws {
     precondition(!lanes.isEmpty)
-    precondition(sampleRate == 48_000, "the sidecar resampler is 48 kHz to 16 kHz")
+    let frameSize = StenoAudio.frameSize
     self.layout = layout
     self.lanes = lanes
-    self.sampleRate = sampleRate
-    self.frameSize = frameSize
     try layout.createDirectories()
     master = try CAFStreamWriter(
-      url: layout.master(.caf48kFloat32), sampleRate: sampleRate, channels: lanes.count)
+      url: layout.master(.caf48kFloat32), sampleRate: StenoAudio.sampleRate, channels: lanes.count)
     sidecars = try lanes.map { try WAVStreamWriter(url: layout.sidecar($0)) }
     resamplers = lanes.map { _ in Resampler48kTo16k(frameSize: frameSize) }
     rawMic =
       keepRawMic && lanes.contains(.mic)
       ? try CAFStreamWriter(
-        url: layout.directory.appendingPathComponent("mic.raw.caf"), sampleRate: sampleRate,
-        channels: 1) : nil
+        url: layout.directory.appendingPathComponent("mic.raw.caf"),
+        sampleRate: StenoAudio.sampleRate, channels: 1) : nil
     interleaved = .allocate(capacity: frameSize * lanes.count)
     interleaved.initialize(repeating: 0, count: frameSize * lanes.count)
     sidecarScratch = .allocate(capacity: frameSize / Resampler48kTo16k.factor)
@@ -95,11 +74,9 @@ public final class RecordingWriter: @unchecked Sendable {
     sidecarScratch.deallocate()
   }
 
-  public var framesWritten: Int { master.framesWritten }
-  public var duration: TimeInterval { master.duration }
-
-  /// `frames.frameCount` must equal `frameSize`.
+  /// `frames.frameCount` must equal `StenoAudio.frameSize`.
   public func write(_ frames: LaneFrames) throws {
+    let frameSize = StenoAudio.frameSize
     guard !isFinished else { throw CaptureError.writerFailed("write after finish") }
     guard frames.frameCount == frameSize, frames.lanes.count == lanes.count else {
       throw CaptureError.writerFailed(

@@ -14,20 +14,8 @@ public struct StreamLayout: Sendable, Equatable {
     public var channelOffset: Int
     public var stride: Int
     /// -1 when the lane is a single channel.
-    public var secondBufferIndex: Int
-    public var secondChannelOffset: Int
-
-    public init(
-      lane: AudioLane, bufferIndex: Int, channelOffset: Int, stride: Int,
-      secondBufferIndex: Int = -1, secondChannelOffset: Int = 0
-    ) {
-      self.lane = lane
-      self.bufferIndex = bufferIndex
-      self.channelOffset = channelOffset
-      self.stride = stride
-      self.secondBufferIndex = secondBufferIndex
-      self.secondChannelOffset = secondChannelOffset
-    }
+    public var secondBufferIndex: Int = -1
+    public var secondChannelOffset: Int = 0
 
     public var isMixed: Bool { secondBufferIndex >= 0 }
   }

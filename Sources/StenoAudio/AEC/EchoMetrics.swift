@@ -1,4 +1,5 @@
 import Foundation
+import StenoCore
 
 /// RMS, ERLE and convolution helpers shared by the echo canceller tests,
 /// `LiveAECPathTests` and `steno dev aec-bench`.
@@ -72,8 +73,7 @@ public enum EchoMetrics {
   /// Runs `canceller` over whole frames of `nearEnd` with `farEnd` and returns
   /// the processed signal (the last partial frame is dropped).
   public static func run(
-    _ canceller: some EchoCancellerFrameProcessor, nearEnd: [Float], farEnd: [Float],
-    frameSize: Int
+    _ canceller: some EchoCanceller, nearEnd: [Float], farEnd: [Float], frameSize: Int
   ) -> [Float] {
     let frames = min(nearEnd.count, farEnd.count) / frameSize
     var output = [Float](repeating: 0, count: frames * frameSize)
@@ -93,14 +93,3 @@ public enum EchoMetrics {
     return output
   }
 }
-
-/// What `EchoMetrics.run` needs: the `EchoCanceller.process` shape without
-/// the initialiser requirement, so any canceller instance qualifies.
-public protocol EchoCancellerFrameProcessor {
-  func process(
-    nearEnd: UnsafeBufferPointer<Float>, farEnd: UnsafeBufferPointer<Float>,
-    out: UnsafeMutableBufferPointer<Float>)
-}
-
-extension SpeexEchoCanceller: EchoCancellerFrameProcessor {}
-extension PassthroughEchoCanceller: EchoCancellerFrameProcessor {}

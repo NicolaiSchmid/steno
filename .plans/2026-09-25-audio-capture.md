@@ -119,8 +119,8 @@ public final class SpeexEchoCanceller: EchoCanceller, @unchecked Sendable {
 }
 public final class PassthroughEchoCanceller: EchoCanceller { }       // tests and .inPerson
 
-public final class RecordingWriter: @unchecked Sendable {            // owned by the writer queue
-    public init(directory: URL, lanes: [AudioLane], sampleRate: Double) throws
+public final class RecordingWriter: @unchecked Sendable {            // owned by the writer thread
+    public init(layout: RecordingLayout, lanes: [AudioLane], keepRawMic: Bool = false) throws
     public func write(_ frames: LaneFrames) throws                    // 48 kHz Float32, one call per 10 ms
     public func finish() throws -> RecordingFiles                     // master + sidecars
 }
@@ -129,8 +129,8 @@ public struct RecordingFiles: Sendable, Equatable { public var master: URL; publ
 // Testing/: SyntheticCaptureBackend(lanes:, tone: [AudioLane: Double] Hz, seconds:, loseDeviceAfter: TimeInterval?), FakeProcessAudioActivity
 ```
 
-`LaneFrames` is a non-Sendable value with preallocated `UnsafeMutableBufferPointer<Float>` per lane
-and the host time of the first frame; `LaneFrameSink` is the ring writer handed to the backend.
+`LaneFrames` is a non-Sendable view over the writer thread's preallocated per-lane buffers;
+`LaneFrameSink` is the ring writer handed to the backend.
 `CaptureError` covers `tapCreationFailed(OSStatus)`, `aggregateCreationFailed(OSStatus)`,
 `inputDeviceUnavailable`, `systemAudioSilent`, `deviceLost`, `writerFailed(Error)`.
 
@@ -150,7 +150,6 @@ Sources/StenoAudio/
   Capture/SystemAudioPermission.swift           throwaway pipeline probe; TCC SPI behind STENO_TCC_SPI
   RealTime/LaneRingBuffer.swift                 SPSC ring, Synchronization.Atomic indices, drop counter
   RealTime/ProcessingThread.swift               drains rings in 10 ms frames: AEC, metering, downmix, hands off to writer
-  RealTime/LaneAligner.swift                    host-time alignment for the two-IOProc fallback
   RealTime/LevelMeter.swift                     RMS/peak per lane, dBFS
   RealTime/Resampler48kTo16k.swift              AVAudioConverter wrapper with preallocated buffers
   AEC/SpeexEchoCanceller.swift                  speex bridge, Float<->Int16 scratch, residual suppression
@@ -170,7 +169,7 @@ Sources/steno/Commands/
   DevAECBenchCommand.swift                      `steno dev aec-bench --mic --far --engine speex|passthrough`
   DevFixturesCommand+Audio.swift                adds the 48 kHz cases below to core's `steno dev fixtures generate` (seeded)
 Tests/StenoAudioTests/
-  LaneRingBufferTests.swift, LaneAlignerTests.swift, LevelMeterTests.swift, SpeexEchoCancellerTests.swift, LiveAECPathTests.swift,
+  LaneRingBufferTests.swift, LevelMeterTests.swift, SpeexEchoCancellerTests.swift, LiveAECPathTests.swift,
   RecordingWriterTests.swift, Resampler48kTo16kTests.swift, AVFoundationAudioCodecTests.swift, MeetingDetectorTests.swift,
   CaptureSessionTests.swift, TapIntegrationTests.swift
 Tests/Fixtures/audio/                           shared folder owned by core; these cases added here, hashes in MANIFEST.sha256
@@ -333,6 +332,9 @@ checks were run.
 - Per-application taps and an app picker; ScreenCaptureKit capture.
 - A mic-lane integration test on CI (needs a virtual input device; the `STENO_VIRTUAL_INPUT_UID`
   gate stays optional).
+- The two-IOProc fallback (a second IOProc for the microphone, lanes aligned by
+  `AudioTimeStamp.mHostTime`, a 20 ms alignment budget for the canceller), only if spike S2 is a
+  no-go on hardware. Nothing in the single-aggregate path needs host times.
 
 ## Deviations (implementation)
 
@@ -368,8 +370,9 @@ toolchain. Each line is one departure from the text above and why.
   than `AVAssetWriter`; `decode` trims or zero-pads the converter output to the exact
   `length × 16000 / rate` so a lane's duration stays integral to the master (segment counts in the
   end-to-end test depend on it).
-- Two-IOProc fallback: `LaneAligner` (the arithmetic, tested on synthetic host times) exists; the
-  second IOProc is wired only if spike S2 is a no-go, which this host could not run.
+- Two-IOProc fallback: not built. PR #4 first carried the `LaneAligner` arithmetic for it; with
+  spike S2 deferred that was dead code and the simplify pass removed it (see Deferred). The sink
+  and `LaneFrames` no longer carry host times.
 - `CaptureSession.stop()` after `.failed(.deviceLost)` returns the finalised partial recording
   instead of throwing, so the app can enqueue what was captured.
 - `CaptureConfiguration.laneOverride` (developer tools only) lets `steno dev capture-spike --lanes

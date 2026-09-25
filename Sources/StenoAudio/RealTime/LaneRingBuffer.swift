@@ -59,6 +59,19 @@ public final class LaneRingBuffer: @unchecked Sendable {
     dropped.wrappingAdd(count, ordering: .relaxed)
   }
 
+  /// Producer side. The write index when `count` more samples fit; nil, with
+  /// the drop counted, when they do not.
+  @inline(__always)
+  private func reserve(_ count: Int) -> Int? {
+    let write = writeIndex.load(ordering: .relaxed)
+    let read = readIndex.load(ordering: .acquiring)
+    guard capacity - (write - read) >= count else {
+      dropped.wrappingAdd(count, ordering: .relaxed)
+      return nil
+    }
+    return write
+  }
+
   /// Producer side. Copies `count` samples read from `source` every `stride`
   /// floats (1 for a non-interleaved channel, the channel count for an
   /// interleaved buffer). Returns false and counts the drop when the samples
@@ -66,12 +79,7 @@ public final class LaneRingBuffer: @unchecked Sendable {
   @discardableResult
   public func write(_ source: UnsafePointer<Float>, count: Int, stride: Int = 1) -> Bool {
     guard count > 0 else { return true }
-    let write = writeIndex.load(ordering: .relaxed)
-    let read = readIndex.load(ordering: .acquiring)
-    guard capacity - (write - read) >= count else {
-      dropped.wrappingAdd(count, ordering: .relaxed)
-      return false
-    }
+    guard let write = reserve(count) else { return false }
     var position = write & mask
     var index = 0
     while index < count {
@@ -90,12 +98,7 @@ public final class LaneRingBuffer: @unchecked Sendable {
     _ left: UnsafePointer<Float>, _ right: UnsafePointer<Float>, count: Int, stride: Int = 1
   ) -> Bool {
     guard count > 0 else { return true }
-    let write = writeIndex.load(ordering: .relaxed)
-    let read = readIndex.load(ordering: .acquiring)
-    guard capacity - (write - read) >= count else {
-      dropped.wrappingAdd(count, ordering: .relaxed)
-      return false
-    }
+    guard let write = reserve(count) else { return false }
     var position = write & mask
     var index = 0
     while index < count {
@@ -124,17 +127,6 @@ public final class LaneRingBuffer: @unchecked Sendable {
     }
     readIndex.store(read + count, ordering: .releasing)
     return true
-  }
-
-  /// Consumer side. Discards `count` samples (fewer when fewer are queued) and
-  /// returns how many were discarded.
-  @discardableResult
-  public func skip(_ count: Int) -> Int {
-    let read = readIndex.load(ordering: .relaxed)
-    let write = writeIndex.load(ordering: .acquiring)
-    let skipped = min(count, write - read)
-    readIndex.store(read + skipped, ordering: .releasing)
-    return skipped
   }
 
   /// Consumer side, not real-time: takes everything queued as an array (the

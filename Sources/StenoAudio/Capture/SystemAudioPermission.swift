@@ -42,9 +42,7 @@ public enum SystemAudioPermission {
       }
       defer { backend.stop() }
       try? await Task.sleep(for: .milliseconds(Int(duration * 1_000)))
-      let samples = sink.ring(0).drainAll()
-      let peak = samples.reduce(0) { max($0, abs($1)) }
-      return sink.callbacks > 0 && peak > 1e-4
+      return sink.ring(0).drainAll().contains { abs($0) > 1e-4 }
     #else
       return false
     #endif
