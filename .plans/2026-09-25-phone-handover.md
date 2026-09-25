@@ -432,6 +432,45 @@ handover"). The Mac side is untouched. Each line names the deviation and the rea
   Swift sources under `modules/steno-link/ios` as text and compares record fields, event names and event body keys
   with the TypeScript types, the closest this host gets to compiling them. `react-dom-client.d.ts` types the two
   members the recorder hook test needs to mount under happy-dom. No wire change.
+- Review application on the same PR (correctness and elegance reviews), where the documented shapes changed:
+  - Audio mode is `{allowsRecording, allowsBackgroundRecording, playsInSilentMode, interruptionMode: "doNotMix",
+    shouldPlayInBackground}`: expo-audio 57 pauses every recorder on `OnAppEntersBackground` unless
+    `allowsBackgroundRecording` is set, whatever `UIBackgroundModes` says.
+  - Interruptions do not end the recording: expo-audio pauses the recorder on `.began` and restarts it only when the
+    interruption ends with `.shouldResume`; no status event reaches JS. `useRecorder` owns the one-second poll,
+    reports `paused` when `isRecording` stays false for two ticks, exposes `resume()` (`record()` from `paused`) and
+    `elapsedSeconds` as a number; `stop()` from `paused` queues what exists. The screen shows a Resume action. JS
+    never calls `record()` on its own while paused, because expo-audio's own `.shouldResume` path needs the recorder
+    still in `.paused`.
+  - The queue row has `sourceUri: string | null`: expo-audio writes to its own `Documents/ExpoAudio/` directory while
+    recording, and the row keeps that URI from `prepareToRecordAsync` until stop. `planRecovery` adopts the file from
+    there (`RecoveryFiles.adopt(sourceUri, fileName)`) before sizing and hashing. Indexes written without the column
+    load with `null`.
+  - Every `uploadFailed` goes through `fail()` with the backoff, `retryable` or not; a 404 on a chunk and a 409 on
+    complete with every chunk already received schedule a retry too. Natively, a rejected pin is reported as "The
+    Mac's certificate does not match the pairing" with `retryable: true` in both clients (`StenoLinkError.pinMismatch`).
+    Both clients accept `https://` only and never follow a redirect.
+  - The pairing is one keychain item `steno.pairing.v1` (`{ mac, token }`) with
+    `AFTER_FIRST_UNLOCK_THIS_DEVICE_ONLY`, as is the device id; `PairingProvider` re-reads the keychain on every
+    return to the foreground while nothing is loaded. The pairing sheet cancels pending uploads before storing a new
+    pairing.
+  - `Browser.resolve` connects with `NWProtocolIP.Options.version = .v4`, so the resolved host is an IPv4 literal (a
+    link-local IPv6 address would lose its zone in the URL). Uncompiled.
+  - `executor.reconcile(pendingUploads())` replaces the chunk ids in flight instead of adding to them. Storage loads
+    `index.json`, then `index.json.tmp`, then quarantines.
+  - Module entries: `@modules/steno-link` (`index.ts`) is types plus `wire.ts` and imports no `expo`;
+    `@modules/steno-link/native` (`native.ts`) is `stenoLink()` (`src/native-module.ts`) plus the pinned transport
+    `src/pinned-client.ts` (`pinnedRequest`, `HandoverError`, `failureFor`, `MacEndpoint`), moved out of
+    `pairing/pairing-client.ts`, which keeps `hello`, `pair`, `unpair`. `recording-client.ts`'s `Session` is
+    `MacSession`.
+  - `ios/Records.swift` declares one `Record` struct per bridge type under the TypeScript name (`MacService`,
+    `ResolvedMac`, `BrowserState`, `PinnedRequest`, `PinnedResponse`, `UploadSpec`, `UploadProgress`,
+    `UploadFinished`, `UploadFailed`); the other Swift files hand them over with `toDictionary()`. Uncompiled.
+  - `src/features/recording/` is folded into `src/features/recorder/` as `use-recorder.ts`, `recording-options.ts`,
+    `recovery.ts`. `CoordinatorStatus` is `unpaired | searching | queued | uploading | failed | idle`; `retryNow`
+    takes an id and resets failed rows only. `UpdateIOSScreen` opens Settings with `Linking.openSettings()`.
 - Still to run on a device, as the plan tags them `[manual]`: P1 (prompt once, `policyDenied`), P2 (locked-phone
   upload, wrong fingerprint sends no body, `pendingUploads()` after relaunch), P3 (60-minute locked recording, call
-  interruption), P5 and P6 end to end against M6. Spikes S2, S3 and S4 are unchanged and unverified.
+  interruption: decline a call and check the Resume path, then force-quit mid-recording once and play the recovered
+  file, since an `.m4a` cut mid-write may lack its `moov` atom), P5 and P6 end to end against M6. Spikes S2, S3 and
+  S4 are unchanged and unverified.
