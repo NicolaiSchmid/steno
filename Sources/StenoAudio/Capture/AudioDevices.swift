@@ -51,12 +51,11 @@ public struct AudioDeviceInfo: Sendable, Equatable, Hashable, Identifiable {
       let defaultOutput = try? defaultDevice(kAudioHardwarePropertyDefaultOutputDevice)
       let defaultSystem = try? defaultDevice(kAudioHardwarePropertyDefaultSystemOutputDevice)
       return ids.compactMap { id in
-        guard let info = try? info(id) else { return nil }
-        var info = info
-        info.isDefaultInput = id == defaultInput
-        info.isDefaultOutput = id == defaultOutput
-        info.isDefaultSystemOutput = id == defaultSystem
-        return info
+        guard var device = try? Self.info(id) else { return nil }
+        device.isDefaultInput = id == defaultInput
+        device.isDefaultOutput = id == defaultOutput
+        device.isDefaultSystemOutput = id == defaultSystem
+        return device
       }
     }
 
