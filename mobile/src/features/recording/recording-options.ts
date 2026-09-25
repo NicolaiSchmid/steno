@@ -28,9 +28,15 @@ export const RECORDING_OPTIONS: RecordingOptions = {
 	web: { mimeType: "audio/mp4", bitsPerSecond: 64_000 },
 };
 
-/** Exclusive audio focus; keeps recording through the ringer switch and lock. */
+/**
+ * Exclusive audio focus; keeps recording through the ringer switch and lock.
+ * `allowsBackgroundRecording` is what keeps the recorder running when the
+ * screen locks: without it expo-audio pauses every recorder on
+ * `OnAppEntersBackground`, whatever `UIBackgroundModes` says.
+ */
 export const RECORDING_AUDIO_MODE: Partial<AudioMode> = {
 	allowsRecording: true,
+	allowsBackgroundRecording: true,
 	playsInSilentMode: true,
 	interruptionMode: "doNotMix",
 	shouldPlayInBackground: true,

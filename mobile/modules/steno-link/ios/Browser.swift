@@ -68,7 +68,14 @@ final class Browser {
         return
       }
       let token = UUID()
-      let connection = NWConnection(to: result.endpoint, using: .tcp)
+      // IPv4 only: a link-local IPv6 address needs its `%zone` to route, and
+      // URLs cannot carry one, so an IPv6 result would leave every later
+      // request with no route to host on a LAN without an IPv6 router.
+      let parameters = NWParameters.tcp
+      if let ip = parameters.defaultProtocolStack.internetProtocol as? NWProtocolIP.Options {
+        ip.version = .v4
+      }
+      let connection = NWConnection(to: result.endpoint, using: parameters)
       var finished = false
       let finish: (Result<(host: String, port: Int), Error>) -> Void = { [weak self] outcome in
         guard !finished else { return }
@@ -189,8 +196,9 @@ final class Browser {
     case .ipv4(let address):
       return ("\(address)", Int(port.rawValue))
     case .ipv6(let address):
-      // `IPv6Address.description` appends `%interface` for link-local
-      // addresses; URLs take the bare literal in brackets.
+      // Not expected with the IPv4-only parameters above; kept for a
+      // routable (global) IPv6 result. `IPv6Address.description` appends
+      // `%interface` for link-local addresses, which URLs cannot carry.
       let literal = "\(address)".split(separator: "%").first.map(String.init) ?? "\(address)"
       return ("[\(literal)]", Int(port.rawValue))
     case .name(let name, _):

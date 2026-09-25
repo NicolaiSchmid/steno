@@ -24,6 +24,7 @@ describe("recording preset", () => {
 	it("takes exclusive audio focus and records in silent mode and background", () => {
 		expect(RECORDING_AUDIO_MODE).toEqual({
 			allowsRecording: true,
+			allowsBackgroundRecording: true,
 			playsInSilentMode: true,
 			interruptionMode: "doNotMix",
 			shouldPlayInBackground: true,

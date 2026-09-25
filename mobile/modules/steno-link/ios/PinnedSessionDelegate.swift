@@ -2,8 +2,11 @@ import Foundation
 
 /// Session delegate for the foreground client: every server-trust challenge
 /// goes through `PinnedTrustEvaluator` with the fingerprint of the paired Mac.
+/// A rejected pin cancels the task, which URLSession reports as
+/// `NSURLErrorCancelled`; `pinRejected` lets the client name the real cause.
 final class PinnedSessionDelegate: NSObject, URLSessionDelegate {
   private let fingerprint: Data
+  private(set) var pinRejected = false
 
   init(fingerprint: Data) {
     self.fingerprint = fingerprint
@@ -15,6 +18,9 @@ final class PinnedSessionDelegate: NSObject, URLSessionDelegate {
     completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void
   ) {
     let (disposition, credential) = PinnedTrustEvaluator.respond(to: challenge, pinnedFingerprint: fingerprint)
+    if disposition == .cancelAuthenticationChallenge {
+      pinRejected = true
+    }
     completionHandler(disposition, credential)
   }
 }
@@ -65,15 +71,12 @@ enum PinnedClient {
     configuration.waitsForConnectivity = false
     configuration.timeoutIntervalForRequest = request.timeout
     configuration.timeoutIntervalForResource = request.timeout
-    let session = URLSession(
-      configuration: configuration,
-      delegate: PinnedSessionDelegate(fingerprint: fingerprint),
-      delegateQueue: nil
-    )
+    let delegate = PinnedSessionDelegate(fingerprint: fingerprint)
+    let session = URLSession(configuration: configuration, delegate: delegate, delegateQueue: nil)
     let task = session.dataTask(with: urlRequest) { data, response, error in
       defer { session.finishTasksAndInvalidate() }
       if let error {
-        completion(.failure(error))
+        completion(.failure(delegate.pinRejected ? StenoLinkError.pinMismatch : error))
         return
       }
       guard let http = response as? HTTPURLResponse else {

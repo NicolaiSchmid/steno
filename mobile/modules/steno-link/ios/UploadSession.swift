@@ -39,6 +39,8 @@ final class UploadSession: NSObject, URLSessionDataDelegate {
 
   private let lock = NSLock()
   private var responseBodies: [Int: Data] = [:]
+  /// Tasks whose server trust failed the pin; they complete as `NSURLErrorCancelled`.
+  private var pinRejectedTasks: Set<Int> = []
 
   private lazy var session: URLSession = {
     let configuration = URLSessionConfiguration.background(withIdentifier: UploadSession.identifier)
@@ -116,6 +118,11 @@ final class UploadSession: NSObject, URLSessionDataDelegate {
       return
     }
     let (disposition, credential) = PinnedTrustEvaluator.respond(to: challenge, pinnedFingerprint: fingerprint)
+    if disposition == .cancelAuthenticationChallenge {
+      lock.lock()
+      pinRejectedTasks.insert(task.taskIdentifier)
+      lock.unlock()
+    }
     completionHandler(disposition, credential)
   }
 
@@ -145,6 +152,7 @@ final class UploadSession: NSObject, URLSessionDataDelegate {
   func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
     lock.lock()
     let body = responseBodies.removeValue(forKey: task.taskIdentifier) ?? Data()
+    let pinRejected = pinRejectedTasks.remove(task.taskIdentifier) != nil
     lock.unlock()
 
     guard let info = UploadSession.info(of: task) else { return }
@@ -153,13 +161,17 @@ final class UploadSession: NSObject, URLSessionDataDelegate {
     }
 
     if let error {
+      // A rejected pin arrives as a cancellation too; name it, and let the
+      // coordinator back off like any other failure (the Mac may have been
+      // re-paired, or another Mac took the name for a moment).
       let cancelled = (error as NSError).code == NSURLErrorCancelled
+      let message = pinRejected ? StenoLinkError.pinMismatch.localizedDescription : error.localizedDescription
       eventSink?(
         "uploadFailed",
         [
           "taskID": info.taskID,
-          "message": error.localizedDescription,
-          "retryable": !cancelled,
+          "message": message,
+          "retryable": pinRejected || !cancelled,
         ])
       return
     }

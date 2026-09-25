@@ -8,17 +8,20 @@ import { errorMessage } from "@/lib/error-message";
 
 /**
  * A row still in `recording` at launch means the app died mid-recording.
- * If the file made it into the queue directory, hash it and queue it (the
- * duration is estimated from the bit rate); otherwise mark it failed so the
- * user sees why nothing arrived.
+ * While recording, expo-audio writes to its own directory, so the row carries
+ * that `sourceUri`: recovery moves the file into the queue directory, hashes
+ * it and queues it (the duration is estimated from the bit rate). A row whose
+ * file is nowhere is marked failed so the user sees why nothing arrived.
  *
  * Two phases so the async file work never races a recording that starts in
  * the meantime: `planRecovery` inspects a snapshot, `applyRecovery` patches
  * only rows that are still `recording` when the index is next written.
  */
 export type RecoveryFiles = {
-	/** Bytes on disk, 0 when missing. */
+	/** Bytes of the queued file, 0 when missing. */
 	size(fileName: string): number;
+	/** Moves the recorder's file to `Documents/queue/<fileName>`; throws when missing. */
+	adopt(sourceUri: string, fileName: string): Promise<void>;
 	sha256(fileName: string): Promise<string>;
 };
 
@@ -43,11 +46,14 @@ export async function planRecovery(
 	for (const rec of index.recordings) {
 		if (rec.state !== "recording") continue;
 		const { recordingID } = rec;
-		let byteCount = 0;
-		try {
-			byteCount = files.size(rec.fileName);
-		} catch {
-			byteCount = 0;
+		let byteCount = sizeOrZero(files, rec.fileName);
+		if (byteCount === 0 && rec.sourceUri) {
+			try {
+				await files.adopt(rec.sourceUri, rec.fileName);
+				byteCount = sizeOrZero(files, rec.fileName);
+			} catch {
+				byteCount = 0;
+			}
 		}
 		if (byteCount === 0) {
 			patches.push({
@@ -78,6 +84,14 @@ export async function planRecovery(
 		}
 	}
 	return patches;
+}
+
+function sizeOrZero(files: RecoveryFiles, fileName: string): number {
+	try {
+		return files.size(fileName);
+	} catch {
+		return 0;
+	}
 }
 
 export function applyRecovery(

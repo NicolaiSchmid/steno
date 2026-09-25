@@ -64,6 +64,33 @@ const one: QueueIndex = addRecording(EMPTY_INDEX, {
 });
 
 describe("createQueueStorage", () => {
+	it("round-trips the recorder's source URI and defaults it for indexes written without it", async () => {
+		const withSource = addRecording(
+			EMPTY_INDEX,
+			{
+				recordingID: "r",
+				fileName: "r.m4a",
+				sourceUri: "file:///docs/ExpoAudio/recording-1.m4a",
+				startedAt: "2026-09-25T09:00:00.000Z",
+				durationSeconds: 0,
+				byteCount: 0,
+				sha256: null,
+				chunkSize: 16,
+			},
+			"recording",
+		);
+		expect(parseQueueIndex(serializeQueueIndex(withSource))).toEqual(
+			withSource,
+		);
+
+		const legacy = JSON.parse(serializeQueueIndex(one)) as {
+			recordings: Record<string, unknown>[];
+		};
+		delete legacy.recordings[0]?.sourceUri;
+		expect(parseQueueIndex(JSON.stringify(legacy))).toEqual(one);
+		expect(one.recordings[0]?.sourceUri).toBeNull();
+	});
+
 	it("returns the empty index when nothing was saved", async () => {
 		const files = memoryFiles();
 		const storage = createQueueStorage(files.api, "file:///docs/queue/");
