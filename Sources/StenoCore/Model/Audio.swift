@@ -35,22 +35,34 @@ public enum AudioRetention: Codable, Sendable, Equatable, Hashable {
     }
   }
 
+  /// The case names, shared by `meeting.json` and the `audioAsset.retention`
+  /// column.
+  public enum Kind: String, CaseIterable, Codable, Sendable {
+    case deleteAfterProcessing, keepDays, keepForever
+  }
+
+  public var kind: Kind {
+    switch self {
+    case .deleteAfterProcessing: .deleteAfterProcessing
+    case .keepDays: .keepDays
+    case .keepForever: .keepForever
+    }
+  }
+
   public init(from decoder: any Decoder) throws {
-    let (name, payload) = try CaseCoding.decode(from: decoder)
-    switch name {
-    case "deleteAfterProcessing": self = .deleteAfterProcessing
-    case "keepForever": self = .keepForever
-    case "keepDays":
-      self = .keepDays(try CaseCoding.decodePayload(Int.self, from: payload, case: name))
-    default: throw CaseCoding.unknownCase(name, in: decoder)
+    let (kind, payload) = try CaseCoding.decode(Kind.self, from: decoder)
+    switch kind {
+    case .deleteAfterProcessing: self = .deleteAfterProcessing
+    case .keepForever: self = .keepForever
+    case .keepDays:
+      self = .keepDays(try CaseCoding.decodePayload(Int.self, from: payload, case: kind))
     }
   }
 
   public func encode(to encoder: any Encoder) throws {
     switch self {
-    case .deleteAfterProcessing: try CaseCoding.encode("deleteAfterProcessing", to: encoder)
-    case .keepForever: try CaseCoding.encode("keepForever", to: encoder)
-    case .keepDays(let days): try CaseCoding.encode("keepDays", payload: days, to: encoder)
+    case .keepDays(let days): try CaseCoding.encode(kind, payload: days, to: encoder)
+    default: try CaseCoding.encode(kind, to: encoder)
     }
   }
 }

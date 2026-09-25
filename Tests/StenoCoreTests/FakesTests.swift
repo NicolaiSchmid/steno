@@ -7,17 +7,17 @@ import Testing
   @Test func fakeSpeechEngineEmitsOneSegmentPerSecond() async throws {
     let engine = FakeSpeechEngine(textPrefix: "mic")
     let buffer = AudioBuffer16k(samples: [Float](repeating: 0, count: 40_000))
-    let segments = try await engine.transcribe(buffer, hint: Locale.Language(stenoIdentifier: "en"))
+    let segments = try await engine.transcribe(buffer, hint: LanguageTag(rawValue: "en").language)
     #expect(segments.count == 3)
     #expect(segments.map(\.text) == ["mic segment 1", "mic segment 2", "mic segment 3"])
     #expect(segments.last?.end == 2.5)
-    #expect(segments.allSatisfy { $0.language == Locale.Language(stenoIdentifier: "de") })
+    #expect(segments.allSatisfy { $0.language == LanguageTag(rawValue: "de") })
     #expect(
-      await engine.calls.calls == [
-        .init(duration: 2.5, hint: Locale.Language(stenoIdentifier: "en"))
+      await engine.transcriptions.entries == [
+        .init(duration: 2.5, hint: LanguageTag(rawValue: "en").language)
       ])
     try await engine.prepare()
-    #expect(await engine.prepareCalls.count == 1)
+    #expect(await engine.preparations.count == 1)
     let timed = FakeSpeechEngine.segments(
       duration: 1, segmentSeconds: 1, language: nil, textPrefix: "x", wordTimings: true)
     #expect(timed.first?.wordTimings?.count == 3)
@@ -64,7 +64,7 @@ import Testing
     #expect(summary.summary.sections.map(\.id) == ["executive-summary"])
     #expect(summary.summary.sections.first?.bullets.first?.lead == "Speaker 1")
     #expect(summary.speakerNames.count == 2)
-    #expect(await summarizer.calls.calls == ["default"])
+    #expect(await summarizer.summaries.entries == ["default"])
 
     struct Boom: Error {}
     let failing = FakeSummarizer(failure: Boom())
@@ -80,8 +80,8 @@ import Testing
     let root = try Fixtures.temporaryDirectory()
     defer { try? FileManager.default.removeItem(at: root) }
     let store = try await MeetingStoreTests.populated()
-    let destination = RecordingDestination(root: root)
-    let dispatcher = RecordingDispatcher(
+    let destination = FakeDestination(root: root)
+    let dispatcher = FakeDeliveryDispatcher(
       store: store, destinations: [destination], now: { SampleData.updatedAt })
 
     let deliveries = await dispatcher.deliverAll(meetingID: SampleData.meetingID)
@@ -100,9 +100,9 @@ import Testing
     #expect(try await store.deliveries(meetingID: SampleData.meetingID).count == 1)
 
     struct Boom: Error {}
-    let failing = RecordingDispatcher(
+    let failing = FakeDeliveryDispatcher(
       store: store,
-      destinations: [RecordingDestination(id: "broken", root: root, deliverFailure: Boom())])
+      destinations: [FakeDestination(id: "broken", root: root, deliverFailure: Boom())])
     let failed = await failing.deliverAll(meetingID: SampleData.meetingID)
     #expect(failed.first?.status == .failed("Boom()"))
     #expect(await dispatcher.deliverAll(meetingID: SampleData.uuid(999)).isEmpty)

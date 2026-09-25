@@ -16,8 +16,6 @@ public enum FixtureGenerator {
     }
   }
 
-  public static let sampleRate = WAVWriter.sampleRate
-
   /// Speaker A of the two-tone conversation: fundamental plus one harmonic.
   static let voiceA: [(frequency: Double, amplitude: Double)] = [(330, 0.35), (660, 0.15)]
   /// Speaker B.
@@ -60,7 +58,7 @@ public enum FixtureGenerator {
   public static func sweep(seconds: Double, from start: Double, to end: Double, amplitude: Double)
     -> [Int16]
   {
-    let count = Int(seconds * Double(sampleRate))
+    let count = Int(seconds * AudioBuffer16k.sampleRate)
     var phase: UInt32 = 0
     var samples = [Int16](repeating: 0, count: count)
     for index in 0..<count {
@@ -75,7 +73,7 @@ public enum FixtureGenerator {
   /// Seeded white noise.
   public static func noise(seconds: Double, seed: UInt64, amplitude: Double) -> [Int16] {
     var generator = SplitMix64(seed: seed)
-    let count = Int(seconds * Double(sampleRate))
+    let count = Int(seconds * AudioBuffer16k.sampleRate)
     return (0..<count).map { _ in
       let unit = Double(generator.next() >> 11) / Double(1 << 53)  // [0, 1)
       return quantize(amplitude * (unit * 2 - 1))
@@ -86,9 +84,9 @@ public enum FixtureGenerator {
   /// them; A speaks on `.mic`, B on `.system`. Passing one lane yields that
   /// lane's sidecar, both lanes the mixed room recording.
   public static func conversation(seconds: Double, lanes: [AudioLane]) -> [Int16] {
-    let count = Int(seconds * Double(sampleRate))
-    let turn = Int(1.5 * Double(sampleRate))
-    let gap = Int(0.1 * Double(sampleRate))
+    let count = Int(seconds * AudioBuffer16k.sampleRate)
+    let turn = Int(1.5 * AudioBuffer16k.sampleRate)
+    let gap = Int(0.1 * AudioBuffer16k.sampleRate)
     var phasesA = [UInt32](repeating: 0, count: voiceA.count)
     var phasesB = [UInt32](repeating: 0, count: voiceB.count)
     var samples = [Int16](repeating: 0, count: count)
@@ -121,7 +119,7 @@ public enum FixtureGenerator {
   }
 
   static func increment(_ frequency: Double) -> UInt32 {
-    UInt32((frequency / Double(sampleRate) * 4_294_967_296.0).rounded())
+    UInt32((frequency / AudioBuffer16k.sampleRate * 4_294_967_296.0).rounded())
   }
 
   static func sine(_ phase: UInt32) -> Double {

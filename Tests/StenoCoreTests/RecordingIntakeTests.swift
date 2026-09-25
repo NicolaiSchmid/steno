@@ -58,7 +58,7 @@ import Testing
     #expect(FileManager.default.fileExists(atPath: asset.url.path))
     #expect(!FileManager.default.fileExists(atPath: upload.path))
 
-    let receipt = try #require(try await store.receipt(SampleData.uuid(91)))
+    let receipt = try #require(try await store.handoverReceipt(recordingID: SampleData.uuid(91)))
     #expect(receipt.state == .complete(meetingID: meetingID))
     #expect(receipt.deviceID == SampleData.uuid(90))
     #expect(receipt.byteCount == 4096)
@@ -90,7 +90,7 @@ import Testing
     try Data([1]).write(to: upload)
     let meetingID = try await intake.admit(
       file: upload, metadata: SampleData.recordingMetadata(), device: SampleData.pairedDevice())
-    let receipt = try #require(try await store.receipt(SampleData.uuid(91)))
+    let receipt = try #require(try await store.handoverReceipt(recordingID: SampleData.uuid(91)))
     #expect(receipt.state == .complete(meetingID: meetingID))
     #expect(receipt.receivedChunks == [0, 1, 2, 3])
     #expect(receipt.createdAt == SampleData.createdAt)
@@ -122,7 +122,7 @@ import Testing
       _ = try await intake.admit(
         file: upload, metadata: SampleData.recordingMetadata(), device: SampleData.pairedDevice())
     }
-    let receipt = try #require(try await store.receipt(SampleData.uuid(91)))
+    let receipt = try #require(try await store.handoverReceipt(recordingID: SampleData.uuid(91)))
     #expect(receipt.state.meetingID == nil, "never .complete for a meeting that does not exist")
     guard case .failed(let reason) = receipt.state else {
       Issue.record("expected .failed, got \(receipt.state)")
@@ -142,7 +142,9 @@ import Testing
     let retrying = RecordingIntake(store: store, settings: settingsStore, enqueue: { _, _ in })
     let meetingID = try await retrying.admit(
       file: upload, metadata: SampleData.recordingMetadata(), device: SampleData.pairedDevice())
-    #expect(try await store.receipt(SampleData.uuid(91))?.state == .complete(meetingID: meetingID))
+    #expect(
+      try await store.handoverReceipt(recordingID: SampleData.uuid(91))?.state
+        == .complete(meetingID: meetingID))
     #expect(!FileManager.default.fileExists(atPath: upload.path))
   }
 
@@ -168,6 +170,8 @@ import Testing
       file: upload, metadata: SampleData.recordingMetadata(), device: SampleData.pairedDevice())
     #expect(meetingID != SampleData.meetingID)
     #expect(await enqueued.calls.count == 1)
-    #expect(try await store.receipt(SampleData.uuid(91))?.state == .complete(meetingID: meetingID))
+    #expect(
+      try await store.handoverReceipt(recordingID: SampleData.uuid(91))?.state
+        == .complete(meetingID: meetingID))
   }
 }

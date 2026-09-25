@@ -20,12 +20,12 @@ public enum LaneMerger {
 
   /// The "me" speaker's id for a meeting, stable across re-runs.
   public static func meSpeakerID(meetingID: UUID) -> UUID {
-    MeetingStore.derivedID(meetingID, salt: "speaker-me")
+    UUID(derivedFrom: meetingID, salt: "speaker-me")
   }
 
   /// The "me" participant's id for a meeting.
   public static func meParticipantID(meetingID: UUID) -> UUID {
-    MeetingStore.derivedID(meetingID, salt: "participant-me")
+    UUID(derivedFrom: meetingID, salt: "participant-me")
   }
 
   /// The `Speaker` row behind the mic lane: confirmed when the "me"
@@ -42,7 +42,7 @@ public enum LaneMerger {
 
   /// Deterministic segment id from meeting, lane and index.
   public static func segmentID(meetingID: UUID, lane: AudioLane, index: Int) -> UUID {
-    MeetingStore.derivedID(meetingID, salt: "segment-\(lane.rawValue)-\(index)")
+    UUID(derivedFrom: meetingID, salt: "segment-\(lane.rawValue)-\(index)")
   }
 
   public static func merge(

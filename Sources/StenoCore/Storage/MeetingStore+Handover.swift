@@ -24,7 +24,7 @@ extension MeetingStore {
     }
   }
 
-  public func device(id: UUID) async throws -> PairedDevice? {
+  public func pairedDevice(id: UUID) async throws -> PairedDevice? {
     try await writer.read { db in
       try PairedDeviceRow.filter(PairedDeviceRow.Columns.id == id.uuidString).fetchOne(db)?.device
     }
@@ -38,7 +38,7 @@ extension MeetingStore {
     }
   }
 
-  public func receipt(_ recordingID: UUID) async throws -> HandoverReceipt? {
+  public func handoverReceipt(recordingID: UUID) async throws -> HandoverReceipt? {
     try await writer.read { db in
       try HandoverReceiptRow
         .filter(HandoverReceiptRow.Columns.recordingID == recordingID.uuidString)

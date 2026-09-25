@@ -5,27 +5,41 @@ public enum DeliveryStatus: Codable, Sendable, Equatable, Hashable {
   case delivered
   case failed(String)
 
+  /// The case names, shared by `meeting.json` and the `delivery.status`
+  /// column.
+  public enum Kind: String, CaseIterable, Codable, Sendable {
+    case pending, delivered, failed
+  }
+
+  public var kind: Kind {
+    switch self {
+    case .pending: .pending
+    case .delivered: .delivered
+    case .failed: .failed
+    }
+  }
+
   public init(from decoder: any Decoder) throws {
-    let (name, payload) = try CaseCoding.decode(from: decoder)
-    switch name {
-    case "pending": self = .pending
-    case "delivered": self = .delivered
-    case "failed":
-      self = .failed(try CaseCoding.decodePayload(String.self, from: payload, case: name))
-    default: throw CaseCoding.unknownCase(name, in: decoder)
+    let (kind, payload) = try CaseCoding.decode(Kind.self, from: decoder)
+    switch kind {
+    case .pending: self = .pending
+    case .delivered: self = .delivered
+    case .failed:
+      self = .failed(try CaseCoding.decodePayload(String.self, from: payload, case: kind))
     }
   }
 
   public func encode(to encoder: any Encoder) throws {
     switch self {
-    case .pending: try CaseCoding.encode("pending", to: encoder)
-    case .delivered: try CaseCoding.encode("delivered", to: encoder)
-    case .failed(let message): try CaseCoding.encode("failed", payload: message, to: encoder)
+    case .failed(let message): try CaseCoding.encode(kind, payload: message, to: encoder)
+    default: try CaseCoding.encode(kind, to: encoder)
     }
   }
 }
 
-/// Per-destination delivery state of one meeting.
+/// Per-destination delivery state of one meeting. There is one row per
+/// (meeting, destination): `id` derives from the pair, so every dispatcher
+/// computes the same id and `MeetingStore.save` is a plain upsert.
 public struct Delivery: Codable, Sendable, Equatable, Hashable, Identifiable {
   public var id: UUID
   public var meetingID: UUID
@@ -35,19 +49,23 @@ public struct Delivery: Codable, Sendable, Equatable, Hashable, Identifiable {
   public var receipt: DeliveryReceipt?
 
   public init(
-    id: UUID,
     meetingID: UUID,
     destinationID: String,
     status: DeliveryStatus,
     lastAttemptAt: Date? = nil,
     receipt: DeliveryReceipt? = nil
   ) {
-    self.id = id
+    self.id = Self.id(meetingID: meetingID, destinationID: destinationID)
     self.meetingID = meetingID
     self.destinationID = destinationID
     self.status = status
     self.lastAttemptAt = lastAttemptAt
     self.receipt = receipt
+  }
+
+  /// The one id of the (meeting, destination) pair.
+  public static func id(meetingID: UUID, destinationID: String) -> UUID {
+    UUID(derivedFrom: meetingID, salt: "delivery-\(destinationID)")
   }
 }
 

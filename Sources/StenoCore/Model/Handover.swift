@@ -16,53 +16,67 @@ public struct PairedDevice: Codable, Sendable, Equatable, Hashable, Identifiable
   }
 }
 
+/// Where one phone recording's handover stands.
+public enum HandoverState: Codable, Sendable, Equatable, Hashable {
+  case receiving
+  case verifying
+  case complete(meetingID: UUID)
+  case failed(String)
+
+  /// The case names, shared by the wire and the `handoverReceipt.state`
+  /// column.
+  public enum Kind: String, CaseIterable, Codable, Sendable {
+    case receiving, verifying, complete, failed
+  }
+
+  public var kind: Kind {
+    switch self {
+    case .receiving: .receiving
+    case .verifying: .verifying
+    case .complete: .complete
+    case .failed: .failed
+    }
+  }
+
+  public var meetingID: UUID? {
+    if case .complete(let meetingID) = self { return meetingID }
+    return nil
+  }
+
+  private struct Complete: Codable {
+    var meetingID: UUID
+  }
+
+  public init(from decoder: any Decoder) throws {
+    let (kind, payload) = try CaseCoding.decode(Kind.self, from: decoder)
+    switch kind {
+    case .receiving: self = .receiving
+    case .verifying: self = .verifying
+    case .complete:
+      let complete = try CaseCoding.decodePayload(Complete.self, from: payload, case: kind)
+      self = .complete(meetingID: complete.meetingID)
+    case .failed:
+      self = .failed(try CaseCoding.decodePayload(String.self, from: payload, case: kind))
+    }
+  }
+
+  public func encode(to encoder: any Encoder) throws {
+    switch self {
+    case .complete(let meetingID):
+      try CaseCoding.encode(kind, payload: Complete(meetingID: meetingID), to: encoder)
+    case .failed(let message): try CaseCoding.encode(kind, payload: message, to: encoder)
+    default: try CaseCoding.encode(kind, to: encoder)
+    }
+  }
+}
+
 /// Progress of one phone recording being handed over. Idempotency key of
 /// `RecordingIntake.admit`: a recording that already reached `.complete`
 /// returns the same meeting id.
 public struct HandoverReceipt: Codable, Sendable, Equatable, Hashable, Identifiable {
-  public enum State: Codable, Sendable, Equatable, Hashable {
-    case receiving
-    case verifying
-    case complete(meetingID: UUID)
-    case failed(String)
-
-    public var meetingID: UUID? {
-      if case .complete(let meetingID) = self { return meetingID }
-      return nil
-    }
-
-    private struct Complete: Codable {
-      var meetingID: UUID
-    }
-
-    public init(from decoder: any Decoder) throws {
-      let (name, payload) = try CaseCoding.decode(from: decoder)
-      switch name {
-      case "receiving": self = .receiving
-      case "verifying": self = .verifying
-      case "complete":
-        let complete = try CaseCoding.decodePayload(Complete.self, from: payload, case: name)
-        self = .complete(meetingID: complete.meetingID)
-      case "failed":
-        self = .failed(try CaseCoding.decodePayload(String.self, from: payload, case: name))
-      default: throw CaseCoding.unknownCase(name, in: decoder)
-      }
-    }
-
-    public func encode(to encoder: any Encoder) throws {
-      switch self {
-      case .receiving: try CaseCoding.encode("receiving", to: encoder)
-      case .verifying: try CaseCoding.encode("verifying", to: encoder)
-      case .complete(let meetingID):
-        try CaseCoding.encode("complete", payload: Complete(meetingID: meetingID), to: encoder)
-      case .failed(let message): try CaseCoding.encode("failed", payload: message, to: encoder)
-      }
-    }
-  }
-
   public var recordingID: UUID
   public var deviceID: UUID
-  public var state: State
+  public var state: HandoverState
   public var byteCount: Int64
   public var sha256: Data
   public var chunkSize: Int
@@ -74,7 +88,7 @@ public struct HandoverReceipt: Codable, Sendable, Equatable, Hashable, Identifia
   public init(
     recordingID: UUID,
     deviceID: UUID,
-    state: State,
+    state: HandoverState,
     byteCount: Int64,
     sha256: Data,
     chunkSize: Int,

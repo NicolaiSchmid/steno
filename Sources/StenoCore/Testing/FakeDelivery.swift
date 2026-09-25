@@ -2,17 +2,17 @@ import Foundation
 
 /// A `Destination` that writes `meeting.json` under `<root>/<meetingID>/` and
 /// records every export it received.
-public struct RecordingDestination: Destination, Sendable {
+public struct FakeDestination: Destination, Sendable {
   public static let rendererVersion = 1
 
   public let id: String
-  public var root: URL
+  public let root: URL
   public var validateFailure: (any Error & Sendable)?
   public var deliverFailure: (any Error & Sendable)?
   public let deliveries = CallLog<MeetingExport>()
 
   public init(
-    id: String = "recording", root: URL,
+    id: String = "fake", root: URL,
     validateFailure: (any Error & Sendable)? = nil,
     deliverFailure: (any Error & Sendable)? = nil
   ) {
@@ -57,11 +57,12 @@ public struct RecordingDestination: Destination, Sendable {
 /// A `DeliveryDispatcher` over a fixed list of destinations: exports the
 /// meeting once, passes each destination its stored receipt as `previous`,
 /// saves one `Delivery` per destination and never throws.
-public struct RecordingDispatcher: DeliveryDispatcher, Sendable {
-  public var store: MeetingStore
-  public var destinations: [any Destination]
-  public var now: @Sendable () -> Date
-  public let calls = CallLog<UUID>()
+public struct FakeDeliveryDispatcher: DeliveryDispatcher, Sendable {
+  public let store: MeetingStore
+  public let destinations: [any Destination]
+  public let now: @Sendable () -> Date
+  /// Meeting ids of every `deliverAll` call.
+  public let dispatches = CallLog<UUID>()
 
   public init(
     store: MeetingStore, destinations: [any Destination],
@@ -73,14 +74,13 @@ public struct RecordingDispatcher: DeliveryDispatcher, Sendable {
   }
 
   public func deliverAll(meetingID: UUID) async -> [Delivery] {
-    await calls.record(meetingID)
+    await dispatches.record(meetingID)
     guard let export = try? await store.export(meetingID: meetingID) else { return [] }
     let existing = (try? await store.deliveries(meetingID: meetingID)) ?? []
     var results: [Delivery] = []
     for destination in destinations {
       let previous = existing.first { $0.destinationID == destination.id }
       var delivery = Delivery(
-        id: previous?.id ?? MeetingStore.derivedID(meetingID, salt: "delivery-\(destination.id)"),
         meetingID: meetingID,
         destinationID: destination.id,
         status: .pending,
@@ -102,14 +102,14 @@ public struct RecordingDispatcher: DeliveryDispatcher, Sendable {
 
 /// A `HandoverIntake` that records every admission and returns a fixed or
 /// fresh meeting id.
-public actor FakeHandoverIntake: HandoverIntake {
+public struct FakeHandoverIntake: HandoverIntake, Sendable {
   public struct Admission: Sendable, Equatable {
     public var file: URL
     public var metadata: RecordingMetadata
     public var device: PairedDevice
   }
 
-  public private(set) var admissions: [Admission] = []
+  public let admissions = CallLog<Admission>()
   public var meetingID: UUID?
   public var failure: (any Error & Sendable)?
 
@@ -121,7 +121,7 @@ public actor FakeHandoverIntake: HandoverIntake {
   public func admit(file: URL, metadata: RecordingMetadata, device: PairedDevice) async throws
     -> UUID
   {
-    admissions.append(Admission(file: file, metadata: metadata, device: device))
+    await admissions.record(Admission(file: file, metadata: metadata, device: device))
     if let failure { throw failure }
     return meetingID ?? UUID()
   }

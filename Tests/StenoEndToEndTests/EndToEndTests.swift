@@ -21,9 +21,9 @@ import Testing
     let events = MeetingEventBus()
     let cleaner = PassthroughCleaner()
     let summarizer = FakeSummarizer()
-    let vault = RecordingDestination(
+    let vault = FakeDestination(
       root: directory.appendingPathComponent("vault", isDirectory: true))
-    let dispatcher = RecordingDispatcher(store: store, destinations: [vault], now: { now })
+    let dispatcher = FakeDeliveryDispatcher(store: store, destinations: [vault], now: { now })
     let pipeline = ProcessingPipeline(
       dependencies: PipelineDependencies(
         decoder: WAVAudioDecoder(),
@@ -32,7 +32,7 @@ import Testing
         speakerMemory: InMemorySpeakerMemory(people: SampleData.persons()),
         cleaner: cleaner,
         summarizer: summarizer,
-        delivery: dispatcher,
+        dispatcher: dispatcher,
         store: store,
         settings: settingsStore,
         events: events,
@@ -72,7 +72,7 @@ import Testing
     #expect(deliveries.first?.status == .delivered)
     let receipt = try #require(deliveries.first?.receipt)
     #expect(receipt.files.map(\.relativePath) == ["meeting.json"])
-    #expect(receipt.rendererVersion == RecordingDestination.rendererVersion)
+    #expect(receipt.rendererVersion == FakeDestination.rendererVersion)
 
     let json = try Data(contentsOf: vault.exportURL(meetingID: meeting.id))
     let export = try StenoJSON.decode(MeetingExport.self, from: json)
@@ -85,14 +85,16 @@ import Testing
     try Snapshot.assert(
       SummaryMarkdown.render(export), matches: "snapshots/e2e/mac-call-summary.md")
 
-    guard stored.state == .ready else { return }
+    // Everything posted so far, read up to a sentinel so a failed run can
+    // never hang the test.
+    let sentinel = MeetingEvent.speakersNeedReview(meetingID: meeting.id, speakerIDs: [])
+    await events.post(sentinel)
     var iterator = stream.makeAsyncIterator()
     var collected: [MeetingEvent] = []
-    for _ in 0..<11 {
-      if let event = await iterator.next() { collected.append(event) }
-    }
+    while let event = await iterator.next(), event != sentinel { collected.append(event) }
+    try #require(collected.count == 11, "ten stage starts and one review request")
     let stages = collected.compactMap { event -> PipelineStage? in
-      if case .progress(_, let stage, _) = event { return stage }
+      if case .progress(_, let stage) = event { return stage }
       return nil
     }
     #expect(stages == PipelineStage.allCases)

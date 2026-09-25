@@ -34,7 +34,7 @@ public enum SampleData {
       title: "Produktstrategie 90/10",
       startedAt: startedAt,
       duration: 6,
-      language: Locale.Language(stenoIdentifier: "de"),
+      language: "de",
       source: .macCall,
       calendarEventID: "event-1",
       tags: ["strategie", "q4"],
@@ -51,7 +51,7 @@ public enum SampleData {
   public static func summaryDocument() -> SummaryDocument {
     SummaryDocument(
       templateID: SummaryTemplate.defaultID,
-      language: Locale.Language(stenoIdentifier: "de"),
+      language: "de",
       sections: [
         SummarySection(
           id: "executive-summary",
@@ -135,7 +135,7 @@ public enum SampleData {
   public static func decisions() -> [Decision] {
     [
       Decision(
-        id: MeetingStore.derivedID(meetingID, salt: "decision-0"), meetingID: meetingID,
+        id: UUID(derivedFrom: meetingID, salt: "decision-0"), meetingID: meetingID,
         text: "90/10-Aufteilung wird umgesetzt.")
     ]
   }
@@ -173,7 +173,7 @@ public enum SampleData {
 
   public static func delivery() -> Delivery {
     Delivery(
-      id: uuid(80), meetingID: meetingID, destinationID: "obsidian-folder", status: .delivered,
+      meetingID: meetingID, destinationID: "obsidian-folder", status: .delivered,
       lastAttemptAt: updatedAt,
       receipt: DeliveryReceipt(
         root: "/tmp/vault", folder: "Meetings/2026-09-24-produktstrategie-90-10",
@@ -214,7 +214,7 @@ public enum SampleData {
           speakerID: speakerTwoID, name: "Jérôme", confidence: 0.8,
           evidence: "Speaker 1 spricht Speaker 2 mit Jérôme an.")
       ],
-      language: Locale.Language(stenoIdentifier: "de"),
+      language: "de",
       usage: LLMUsage(promptTokens: 800, completionTokens: 200, requests: 1)
     )
   }
@@ -266,8 +266,7 @@ public enum SampleData {
   public static func rawSegments() -> [RawSegment] {
     [
       RawSegment(
-        start: 0, end: 2.5, text: "wir setzen 90 prozent auf den kern",
-        language: Locale.Language(stenoIdentifier: "de"),
+        start: 0, end: 2.5, text: "wir setzen 90 prozent auf den kern", language: "de",
         wordTimings: [WordTiming(word: "wir", start: 0, end: 0.3)]),
       RawSegment(start: 2.5, end: 5.5, text: "budget check on friday", language: nil),
     ]

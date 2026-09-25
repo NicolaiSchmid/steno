@@ -3,17 +3,17 @@ import Foundation
 /// Everything the pipeline needs, and the only injection axis: the app and
 /// the CLI pass real implementations, tests pass the fakes in `Testing/`.
 public struct PipelineDependencies: Sendable {
-  public var decoder: any AudioDecoder
-  public var speechEngine: any SpeechEngine
-  public var diarizer: any Diarizer
-  public var speakerMemory: any SpeakerMemory
-  public var cleaner: any TranscriptCleaner
-  public var summarizer: any MeetingSummarizer
-  public var delivery: any DeliveryDispatcher
-  public var store: MeetingStore
-  public var settings: SettingsStore
-  public var events: MeetingEventBus
-  public var now: @Sendable () -> Date
+  public let decoder: any AudioDecoder
+  public let speechEngine: any SpeechEngine
+  public let diarizer: any Diarizer
+  public let speakerMemory: any SpeakerMemory
+  public let cleaner: any TranscriptCleaner
+  public let summarizer: any MeetingSummarizer
+  public let dispatcher: any DeliveryDispatcher
+  public let store: MeetingStore
+  public let settings: SettingsStore
+  public let events: MeetingEventBus
+  public let now: @Sendable () -> Date
 
   public init(
     decoder: any AudioDecoder,
@@ -22,7 +22,7 @@ public struct PipelineDependencies: Sendable {
     speakerMemory: any SpeakerMemory,
     cleaner: any TranscriptCleaner,
     summarizer: any MeetingSummarizer,
-    delivery: any DeliveryDispatcher,
+    dispatcher: any DeliveryDispatcher,
     store: MeetingStore,
     settings: SettingsStore,
     events: MeetingEventBus,
@@ -34,7 +34,7 @@ public struct PipelineDependencies: Sendable {
     self.speakerMemory = speakerMemory
     self.cleaner = cleaner
     self.summarizer = summarizer
-    self.delivery = delivery
+    self.dispatcher = dispatcher
     self.store = store
     self.settings = settings
     self.events = events
@@ -50,7 +50,7 @@ public struct PipelineDependencies: Sendable {
 /// a second `process`, `rerunSummary` or `redeliver` on a meeting that is
 /// in flight throws instead of interleaving writes with the first.
 public actor ProcessingPipeline {
-  public let dependencies: PipelineDependencies
+  let dependencies: PipelineDependencies
   private var running: [UUID: Task<Void, Never>] = [:]
   private var inFlight: Set<UUID> = []
 
@@ -111,17 +111,16 @@ public actor ProcessingPipeline {
       try await store.setState(.processing, meetingID: meeting.id, now: now)
       let persisted: AudioAsset
       do {
-        let settings = try await dependencies.settings.load()
+        let settings = try await attributing(.decode) { try await dependencies.settings.load() }
         let transcription = try await decodeAndTranscribe(asset: asset, meetingID: meeting.id)
         var current = meeting
         current.language = transcription.language
         current.state = .processing
-        let diarized = try await diarize(asset: asset, meeting: current)
-        let matched = try await matchSpeakers(
+        var diarized = try await diarize(asset: asset, meeting: current)
+        diarized.speakers = try await matchSpeakers(
           diarized.speakers, meetingID: meeting.id, settings: settings)
         let merged = try await merge(
-          meeting: current, lanes: transcription.lanes, clusters: diarized.clusters,
-          speakers: matched)
+          meeting: current, lanes: transcription.lanes, diarization: diarized)
         let cleaned = try await cleanup(
           meeting: current, segments: merged.segments, speakers: merged.speakers)
         current.llmUsage = (current.llmUsage ?? .zero) + cleaned.usage
@@ -129,7 +128,9 @@ public actor ProcessingPipeline {
           meeting: current, segments: cleaned.segments, speakers: merged.speakers)
         persisted = try await persist(meeting: current, asset: asset)
       } catch {
-        let failure = PipelineFailure(stage: .decode, error: error)
+        // Every stage attributes its own errors; `.decode` is the fallback
+        // for anything thrown outside one.
+        let failure = PipelineFailure.wrapping(error, stage: .decode)
         try? await store.setState(
           .failed(reason: failure.description), meetingID: meeting.id, now: now)
         throw failure
@@ -147,7 +148,9 @@ public actor ProcessingPipeline {
       throw PipelineFailure(stage: .summarize, reason: "meeting \(meetingID) not found")
     }
     try await exclusively(meetingID, stage: .summarize) {
-      let export = try await store.export(meetingID: meetingID)
+      let export = try await attributing(.summarize) {
+        try await store.export(meetingID: meetingID)
+      }
       var current = meeting
       current.templateID = templateID
       current.state = .ready
@@ -181,23 +184,30 @@ public actor ProcessingPipeline {
     return try await body()
   }
 
-  /// Posts `progress` for `stage` (unless `post` is false, for the second
-  /// lane of a per-lane stage) and turns any error thrown by `body` into a
-  /// `PipelineFailure` carrying that stage.
-  func run<T: Sendable>(
-    _ stage: PipelineStage, meetingID: UUID, post: Bool = true,
-    _ body: () async throws -> T
-  ) async throws -> T {
-    if post {
-      let index = PipelineStage.allCases.firstIndex(of: stage) ?? 0
-      let fraction = Double(index) / Double(PipelineStage.allCases.count)
-      await dependencies.events.post(
-        .progress(meetingID: meetingID, stage: stage, fraction: fraction))
-    }
+  /// Posts `progress` for `stage` starting on `meetingID`.
+  func post(_ stage: PipelineStage, meetingID: UUID) async {
+    await dependencies.events.post(.progress(meetingID: meetingID, stage: stage))
+  }
+
+  /// Turns any error thrown by `body` into a `PipelineFailure` carrying
+  /// `stage`, without posting progress (the second lane of a per-lane stage,
+  /// work before a stage starts).
+  func attributing<T: Sendable>(_ stage: PipelineStage, _ body: () async throws -> T)
+    async throws -> T
+  {
     do {
       return try await body()
     } catch {
-      throw PipelineFailure(stage: stage, error: error)
+      throw PipelineFailure.wrapping(error, stage: stage)
     }
+  }
+
+  /// Posts `progress` for `stage`, then runs `body` attributing its errors
+  /// to the stage.
+  func run<T: Sendable>(_ stage: PipelineStage, meetingID: UUID, _ body: () async throws -> T)
+    async throws -> T
+  {
+    await post(stage, meetingID: meetingID)
+    return try await attributing(stage, body)
   }
 }

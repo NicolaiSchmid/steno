@@ -171,9 +171,20 @@ public enum SpeakerAssignment: Codable, Sendable, Equatable, Hashable {
     }
   }
 
-  public var isConfirmed: Bool {
-    if case .confirmed = self { return true }
-    return false
+  public var isConfirmed: Bool { kind == .confirmed }
+
+  /// The case names, shared by `meeting.json` and the `speaker.assignment`
+  /// column.
+  public enum Kind: String, CaseIterable, Codable, Sendable {
+    case unknown, suggested, confirmed
+  }
+
+  public var kind: Kind {
+    switch self {
+    case .unknown: .unknown
+    case .suggested: .suggested
+    case .confirmed: .confirmed
+    }
   }
 
   private struct Suggested: Codable {
@@ -186,27 +197,26 @@ public enum SpeakerAssignment: Codable, Sendable, Equatable, Hashable {
   }
 
   public init(from decoder: any Decoder) throws {
-    let (name, payload) = try CaseCoding.decode(from: decoder)
-    switch name {
-    case "unknown": self = .unknown
-    case "suggested":
-      let suggested = try CaseCoding.decodePayload(Suggested.self, from: payload, case: name)
+    let (kind, payload) = try CaseCoding.decode(Kind.self, from: decoder)
+    switch kind {
+    case .unknown: self = .unknown
+    case .suggested:
+      let suggested = try CaseCoding.decodePayload(Suggested.self, from: payload, case: kind)
       self = .suggested(personID: suggested.personID, similarity: suggested.similarity)
-    case "confirmed":
-      let confirmed = try CaseCoding.decodePayload(Confirmed.self, from: payload, case: name)
+    case .confirmed:
+      let confirmed = try CaseCoding.decodePayload(Confirmed.self, from: payload, case: kind)
       self = .confirmed(personID: confirmed.personID)
-    default: throw CaseCoding.unknownCase(name, in: decoder)
     }
   }
 
   public func encode(to encoder: any Encoder) throws {
     switch self {
-    case .unknown: try CaseCoding.encode("unknown", to: encoder)
+    case .unknown: try CaseCoding.encode(kind, to: encoder)
     case .suggested(let personID, let similarity):
       try CaseCoding.encode(
-        "suggested", payload: Suggested(personID: personID, similarity: similarity), to: encoder)
+        kind, payload: Suggested(personID: personID, similarity: similarity), to: encoder)
     case .confirmed(let personID):
-      try CaseCoding.encode("confirmed", payload: Confirmed(personID: personID), to: encoder)
+      try CaseCoding.encode(kind, payload: Confirmed(personID: personID), to: encoder)
     }
   }
 }

@@ -6,6 +6,10 @@ import Foundation
 /// `{"suggested": {"personID": "…", "similarity": 0.7}}`). Readable in
 /// `meeting.json` and stable, unlike the compiler-synthesized
 /// `{"keepDays": {"_0": 30}}`.
+///
+/// Every payload enum declares its case names once, in a nested
+/// `Kind: String` enum, which the wire (through these helpers) and the row
+/// types (`Storage/Records.swift`) share; an unknown name throws in both.
 enum CaseCoding {
   struct Key: CodingKey {
     var stringValue: String
@@ -16,49 +20,57 @@ enum CaseCoding {
     init?(intValue: Int) { nil }
   }
 
-  /// The case name and, for a payload case, a decoder positioned on the
-  /// payload.
-  static func decode(from decoder: any Decoder) throws -> (name: String, payload: (any Decoder)?) {
-    if let single = try? decoder.singleValueContainer(), let name = try? single.decode(String.self)
+  /// The case kind and, for a payload case, a decoder positioned on the
+  /// payload. Throws `DecodingError` for a name `Kind` does not know.
+  static func decode<Kind: RawRepresentable>(_ kind: Kind.Type, from decoder: any Decoder) throws
+    -> (kind: Kind, payload: (any Decoder)?) where Kind.RawValue == String
+  {
+    let name: String
+    let payload: (any Decoder)?
+    if let single = try? decoder.singleValueContainer(), let bare = try? single.decode(String.self)
     {
-      return (name, nil)
+      name = bare
+      payload = nil
+    } else {
+      let keyed = try decoder.container(keyedBy: Key.self)
+      guard keyed.allKeys.count == 1, let key = keyed.allKeys.first else {
+        throw DecodingError.dataCorrupted(
+          DecodingError.Context(
+            codingPath: decoder.codingPath,
+            debugDescription:
+              "Expected a case name or a one-key object, got \(keyed.allKeys.count) keys"))
+      }
+      name = key.stringValue
+      payload = try keyed.superDecoder(forKey: key)
     }
-    let keyed = try decoder.container(keyedBy: Key.self)
-    guard keyed.allKeys.count == 1, let key = keyed.allKeys.first else {
+    guard let kind = Kind(rawValue: name) else {
       throw DecodingError.dataCorrupted(
         DecodingError.Context(
-          codingPath: decoder.codingPath,
-          debugDescription:
-            "Expected a case name or a one-key object, got \(keyed.allKeys.count) keys"))
+          codingPath: decoder.codingPath, debugDescription: "Unknown case \(name)"))
     }
-    return (key.stringValue, try keyed.superDecoder(forKey: key))
+    return (kind, payload)
   }
 
   static func decodePayload<T: Decodable>(
-    _ type: T.Type, from payload: (any Decoder)?, case name: String
-  )
-    throws -> T
-  {
+    _ type: T.Type, from payload: (any Decoder)?, case kind: some RawRepresentable<String>
+  ) throws -> T {
     guard let payload else {
       throw DecodingError.dataCorrupted(
-        DecodingError.Context(codingPath: [], debugDescription: "Case \(name) needs a payload"))
+        DecodingError.Context(
+          codingPath: [], debugDescription: "Case \(kind.rawValue) needs a payload"))
     }
     return try T(from: payload)
   }
 
-  static func unknownCase(_ name: String, in decoder: any Decoder) -> DecodingError {
-    DecodingError.dataCorrupted(
-      DecodingError.Context(
-        codingPath: decoder.codingPath, debugDescription: "Unknown case \(name)"))
-  }
-
-  static func encode(_ name: String, to encoder: any Encoder) throws {
+  static func encode(_ kind: some RawRepresentable<String>, to encoder: any Encoder) throws {
     var container = encoder.singleValueContainer()
-    try container.encode(name)
+    try container.encode(kind.rawValue)
   }
 
-  static func encode<P: Encodable>(_ name: String, payload: P, to encoder: any Encoder) throws {
+  static func encode<P: Encodable>(
+    _ kind: some RawRepresentable<String>, payload: P, to encoder: any Encoder
+  ) throws {
     var container = encoder.container(keyedBy: Key.self)
-    try container.encode(payload, forKey: Key(name))
+    try container.encode(payload, forKey: Key(kind.rawValue))
   }
 }

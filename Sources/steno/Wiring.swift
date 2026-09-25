@@ -37,7 +37,7 @@ enum Wiring {
       speakerMemory: InMemorySpeakerMemory(),
       cleaner: PassthroughCleaner(),
       summarizer: FakeSummarizer(),
-      delivery: RecordingDispatcher(store: store, destinations: []),
+      dispatcher: FakeDeliveryDispatcher(store: store, destinations: []),
       store: store,
       settings: settings,
       events: MeetingEventBus()

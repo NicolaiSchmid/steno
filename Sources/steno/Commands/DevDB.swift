@@ -18,11 +18,12 @@ struct DevDB: AsyncParsableCommand {
     @OptionGroup var database: DatabaseOptions
 
     func run() async throws {
-      let opened = try Wiring.open(database)
-      let applied = try await opened.store.writer.read { db in
+      let url = try database.url()
+      let store = try MeetingStore.onDisk(at: url)
+      let applied = try await store.writer.read { db in
         try Migrations.migrator().appliedIdentifiers(db)
       }
-      print("\(try database.url().path): \(applied.sorted().joined(separator: ", "))")
+      print("\(url.path): \(applied.sorted().joined(separator: ", "))")
     }
   }
 
@@ -33,9 +34,9 @@ struct DevDB: AsyncParsableCommand {
     @OptionGroup var database: DatabaseOptions
 
     func run() async throws {
-      let opened = try Wiring.open(database)
-      try await opened.store.rebuildSearchIndex()
-      print("reindexed \(try database.url().path)")
+      let url = try database.url()
+      try await MeetingStore.onDisk(at: url).rebuildSearchIndex()
+      print("reindexed \(url.path)")
     }
   }
 }

@@ -24,7 +24,8 @@ public actor FakeLanguageModel: LanguageModel {
 public struct PassthroughCleaner: TranscriptCleaner, Sendable {
   public var usage: LLMUsage
   public var failure: (any Error & Sendable)?
-  public let calls = CallLog<Int>()
+  /// Segment counts of every `clean` call.
+  public let cleanups = CallLog<Int>()
 
   public init(
     usage: LLMUsage = LLMUsage(promptTokens: 100, completionTokens: 50, requests: 1),
@@ -35,7 +36,7 @@ public struct PassthroughCleaner: TranscriptCleaner, Sendable {
   }
 
   public func clean(_ input: CleanupInput) async throws -> CleanupOutput {
-    await calls.record(input.segments.count)
+    await cleanups.record(input.segments.count)
     if let failure { throw failure }
     return CleanupOutput(segments: input.segments, failedChunks: [], usage: usage)
   }
@@ -48,7 +49,8 @@ public struct FakeSummarizer: MeetingSummarizer, Sendable {
   public var canned: SummaryOutput?
   public var usage: LLMUsage
   public var failure: (any Error & Sendable)?
-  public let calls = CallLog<String>()
+  /// Template ids of every `summarize` call.
+  public let summaries = CallLog<String>()
 
   public init(
     canned: SummaryOutput? = nil,
@@ -61,7 +63,7 @@ public struct FakeSummarizer: MeetingSummarizer, Sendable {
   }
 
   public func summarize(_ input: SummaryInput) async throws -> SummaryOutput {
-    await calls.record(input.template.id)
+    await summaries.record(input.template.id)
     if let failure { throw failure }
     if let canned { return canned }
     return Self.output(for: input, usage: usage)
@@ -82,7 +84,7 @@ public struct FakeSummarizer: MeetingSummarizer, Sendable {
       decisions: ["Decision from \(firstLabel)."],
       tasks: [
         MeetingTask(
-          id: MeetingStore.derivedID(input.meeting.id, salt: "fake-task-0"),
+          id: UUID(derivedFrom: input.meeting.id, salt: "fake-task-0"),
           meetingID: input.meeting.id, text: "Follow up on \(input.template.displayName).",
           assigneeName: firstLabel, priority: .normal)
       ],

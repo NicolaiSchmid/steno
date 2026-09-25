@@ -2,11 +2,21 @@ import Foundation
 import GRDB
 
 /// Errors a store call can raise beyond GRDB's own.
-public enum MeetingStoreError: Error, Sendable, Equatable {
+public enum MeetingStoreError: Error, Sendable, Equatable, CustomStringConvertible {
   case meetingNotFound(UUID)
   case speakerNotFound(UUID)
   case personNotFound(UUID)
   case speakersInDifferentMeetings(UUID, UUID)
+
+  public var description: String {
+    switch self {
+    case .meetingNotFound(let id): "meeting \(id) not found"
+    case .speakerNotFound(let id): "speaker \(id) not found"
+    case .personNotFound(let id): "person \(id) not found"
+    case .speakersInDifferentMeetings(let a, let b):
+      "speakers \(a) and \(b) belong to different meetings"
+    }
+  }
 }
 
 /// The one store over the GRDB database. A `Sendable` final class, not an
@@ -133,8 +143,8 @@ public final class MeetingStore: Sendable {
       try DecisionRow.filter(DecisionRow.Columns.meetingID == meetingID.uuidString).deleteAll(db)
       for (index, text) in decisions.enumerated() {
         let decision = Decision(
-          id: Self.derivedID(meetingID, salt: "decision-\(index)"), meetingID: meetingID, text: text
-        )
+          id: UUID(derivedFrom: meetingID, salt: "decision-\(index)"), meetingID: meetingID,
+          text: text)
         try DecisionRow(decision).insert(db)
       }
     }
@@ -200,17 +210,9 @@ public final class MeetingStore: Sendable {
 
   // MARK: - Deliveries
 
-  /// One row per (meeting, destination): a delivery with the same pair but
-  /// another id replaces the old row.
+  /// One row per (meeting, destination); `Delivery.id` derives from the pair.
   public func save(_ delivery: Delivery) async throws {
-    try await writer.write { db in
-      try DeliveryRow
-        .filter(DeliveryRow.Columns.meetingID == delivery.meetingID.uuidString)
-        .filter(DeliveryRow.Columns.destinationID == delivery.destinationID)
-        .filter(Column("id") != delivery.id.uuidString)
-        .deleteAll(db)
-      try DeliveryRow(delivery).save(db)
-    }
+    try await writer.write { db in try DeliveryRow(delivery).save(db) }
   }
 
   public func deliveries(meetingID: UUID) async throws -> [Delivery] {
@@ -279,27 +281,5 @@ public final class MeetingStore: Sendable {
       .filter(DeliveryRow.Columns.meetingID == meetingID.uuidString)
       .order(DeliveryRow.Columns.destinationID)
       .fetchAll(db)
-  }
-
-  /// A UUID derived from another and a salt, so rows the store creates on
-  /// the meeting's behalf (decisions) keep stable ids across re-runs.
-  static func derivedID(_ base: UUID, salt: String) -> UUID {
-    var hash: UInt64 = 0xcbf2_9ce4_8422_2325
-    for byte in Array(base.uuidString.utf8) + Array(salt.utf8) {
-      hash ^= UInt64(byte)
-      hash = hash &* 0x0000_0100_0000_01b3
-    }
-    var second = hash ^ 0x9e37_79b9_7f4a_7c15
-    second = second &* 0xbf58_476d_1ce4_e5b9
-    second ^= second >> 31
-    let bytes =
-      withUnsafeBytes(of: hash.bigEndian, Array.init)
-      + withUnsafeBytes(of: second.bigEndian, Array.init)
-    var uuid = uuid_t(
-      bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7], bytes[8],
-      bytes[9], bytes[10], bytes[11], bytes[12], bytes[13], bytes[14], bytes[15])
-    uuid.6 = (uuid.6 & 0x0F) | 0x40
-    uuid.8 = (uuid.8 & 0x3F) | 0x80
-    return UUID(uuid: uuid)
   }
 }

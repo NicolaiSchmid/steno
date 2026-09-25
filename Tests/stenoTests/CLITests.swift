@@ -172,7 +172,7 @@ import Testing
     let notFound = try Self.run(
       ["export", UUID().uuidString, "--out", home.path, "--db", db], home: home)
     #expect(notFound.status == 2)
-    #expect(notFound.stderr.contains("meetingNotFound"))
+    #expect(notFound.stderr.contains("not found"))
 
     let notAUUID = try Self.run(["export", "nope", "--db", db], home: home)
     #expect(notAUUID.status == 1)

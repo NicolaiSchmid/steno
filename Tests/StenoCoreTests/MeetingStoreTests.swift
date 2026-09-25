@@ -134,7 +134,7 @@ import Testing
     #expect(second.meeting.templateID == "daily-standup")
     #expect(second.meeting.summary?.templateID == "daily-standup")
     #expect(
-      export.decisions.first?.id == MeetingStore.derivedID(SampleData.meetingID, salt: "decision-0")
+      export.decisions.first?.id == UUID(derivedFrom: SampleData.meetingID, salt: "decision-0")
     )
   }
 
@@ -163,19 +163,19 @@ import Testing
     #expect(try await store.expiredAssets(now: .distantFuture).isEmpty)
   }
 
-  @Test func deliveriesUpsertPerDestination() async throws {
+  @Test func deliveriesAreOneRowPerDestination() async throws {
     let store = try MeetingStore.inMemory()
     try await store.save(SampleData.meeting())
     try await store.save(SampleData.delivery())
     var retry = SampleData.delivery()
-    retry.id = SampleData.uuid(82)
     retry.status = .failed("vault missing")
     try await store.save(retry)
     let deliveries = try await store.deliveries(meetingID: SampleData.meetingID)
-    #expect(deliveries == [retry])
-    var other = SampleData.delivery()
-    other.id = SampleData.uuid(83)
-    other.destinationID = "another"
+    #expect(deliveries == [retry], "the same pair derives the same id and upserts")
+    #expect(
+      retry.id == Delivery.id(meetingID: SampleData.meetingID, destinationID: "obsidian-folder"))
+    let other = Delivery(
+      meetingID: SampleData.meetingID, destinationID: "another", status: .pending)
     try await store.save(other)
     #expect(try await store.deliveries(meetingID: SampleData.meetingID).count == 2)
   }
@@ -306,14 +306,18 @@ import Testing
     #expect(try await store.device(forTokenHash: Data(repeating: 1, count: 32)) == nil)
     try await store.save(SampleData.meeting())
     try await store.save(SampleData.handoverReceipt())
-    #expect(try await store.receipt(SampleData.uuid(91)) == SampleData.handoverReceipt())
+    #expect(
+      try await store.handoverReceipt(recordingID: SampleData.uuid(91))
+        == SampleData.handoverReceipt())
     var receipt = SampleData.handoverReceipt()
     receipt.state = .failed("hash mismatch")
     try await store.save(receipt)
-    #expect(try await store.receipt(SampleData.uuid(91))?.state == .failed("hash mismatch"))
+    #expect(
+      try await store.handoverReceipt(recordingID: SampleData.uuid(91))?.state
+        == .failed("hash mismatch"))
     try await store.delete(deviceID: SampleData.uuid(90))
     #expect(try await store.pairedDevices().isEmpty)
-    #expect(try await store.receipt(SampleData.uuid(91)) == nil)
+    #expect(try await store.handoverReceipt(recordingID: SampleData.uuid(91)) == nil)
   }
 
   @Test func rebuildSearchIndexRestoresMatches() async throws {
@@ -342,11 +346,12 @@ import Testing
     #expect(try await reopened.meeting(id: SampleData.meetingID) == SampleData.meeting())
   }
 
-  @Test func derivedIDsAreStableAndDistinct() {
-    let a = MeetingStore.derivedID(SampleData.meetingID, salt: "decision-0")
-    #expect(a == MeetingStore.derivedID(SampleData.meetingID, salt: "decision-0"))
-    #expect(a != MeetingStore.derivedID(SampleData.meetingID, salt: "decision-1"))
-    #expect(a != MeetingStore.derivedID(SampleData.uuid(2), salt: "decision-0"))
+  @Test func derivedIDsAreStableDistinctAndWellFormed() {
+    let a = UUID(derivedFrom: SampleData.meetingID, salt: "decision-0")
+    #expect(a == UUID(derivedFrom: SampleData.meetingID, salt: "decision-0"))
+    #expect(a != UUID(derivedFrom: SampleData.meetingID, salt: "decision-1"))
+    #expect(a != UUID(derivedFrom: SampleData.uuid(2), salt: "decision-0"))
+    #expect(a.uuidString[a.uuidString.index(a.uuidString.startIndex, offsetBy: 14)] == "4")
   }
 
   @Test func mergeSpeakersTakesTheSourceAssignmentAndClipWhenTheTargetHasNone() async throws {

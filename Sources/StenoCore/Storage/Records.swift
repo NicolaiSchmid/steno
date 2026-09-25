@@ -2,11 +2,13 @@ import Foundation
 import GRDB
 
 // Row types: one per table, private to Storage. Payload enums flatten into
-// columns here so the canonical types stay clean for meeting.json.
+// columns here so the canonical types stay clean for meeting.json: the case
+// name column is the enum's `Kind` (an unknown value fails the fetch instead
+// of becoming a default case) and the payload sits in its own column.
 //
 // Column encodings: UUID as uppercase TEXT, Date as GRDB's UTC text, arrays
 // and nested Codable values as JSON text through StenoJSON, embeddings as
-// little-endian Float32 BLOBs, Locale.Language as its BCP-47 tag.
+// little-endian Float32 BLOBs, LanguageTag as its BCP-47 string.
 
 protocol StenoRecord: Codable, FetchableRecord, PersistableRecord {}
 
@@ -51,11 +53,11 @@ struct MeetingRow: StenoRecord {
   var title: String
   var startedAt: Date
   var duration: Double
-  var language: String?
+  var language: LanguageTag?
   var source: MeetingSource
   var calendarEventID: String?
   var tags: [String]
-  var state: String
+  var state: MeetingState.Kind
   var failureReason: String?
   var templateID: String
   var summary: SummaryDocument?
@@ -77,19 +79,12 @@ struct MeetingRow: StenoRecord {
     title = meeting.title
     startedAt = meeting.startedAt
     duration = meeting.duration
-    language = meeting.language?.stenoIdentifier
+    language = meeting.language
     source = meeting.source
     calendarEventID = meeting.calendarEventID
     tags = meeting.tags
-    switch meeting.state {
-    case .recording: state = "recording"
-    case .queued: state = "queued"
-    case .processing: state = "processing"
-    case .ready: state = "ready"
-    case .failed(let reason):
-      state = "failed"
-      failureReason = reason
-    }
+    state = meeting.state.kind
+    if case .failed(let reason) = meeting.state { failureReason = reason }
     templateID = meeting.templateID
     summary = meeting.summary
     summaryText = meeting.summary?.plainText ?? ""
@@ -100,20 +95,20 @@ struct MeetingRow: StenoRecord {
   }
 
   var meeting: Meeting {
-    let meetingState: MeetingState
-    switch state {
-    case "recording": meetingState = .recording
-    case "queued": meetingState = .queued
-    case "processing": meetingState = .processing
-    case "ready": meetingState = .ready
-    default: meetingState = .failed(reason: failureReason ?? "")
-    }
+    let meetingState: MeetingState =
+      switch state {
+      case .recording: .recording
+      case .queued: .queued
+      case .processing: .processing
+      case .ready: .ready
+      case .failed: .failed(reason: failureReason ?? "")
+      }
     return Meeting(
       id: id,
       title: title,
       startedAt: startedAt,
       duration: duration,
-      language: language.map(Locale.Language.init(stenoIdentifier:)),
+      language: language,
       source: source,
       calendarEventID: calendarEventID,
       tags: tags,
@@ -204,7 +199,7 @@ struct SpeakerRow: StenoRecord {
   var id: UUID
   var meetingID: UUID
   var clusterLabel: String
-  var assignment: String
+  var assignment: SpeakerAssignment.Kind
   var personID: UUID?
   var similarity: Float?
   var embedding: Embedding?
@@ -225,17 +220,9 @@ struct SpeakerRow: StenoRecord {
     id = speaker.id
     meetingID = speaker.meetingID
     clusterLabel = speaker.clusterLabel
-    switch speaker.assignment {
-    case .unknown:
-      assignment = "unknown"
-    case .suggested(let person, let score):
-      assignment = "suggested"
-      personID = person
-      similarity = score
-    case .confirmed(let person):
-      assignment = "confirmed"
-      personID = person
-    }
+    assignment = speaker.assignment.kind
+    personID = speaker.assignment.personID
+    if case .suggested(_, let score) = speaker.assignment { similarity = score }
     embedding = speaker.embedding
     sampleClipStart = speaker.sampleClipRange?.lowerBound
     sampleClipEnd = speaker.sampleClipRange?.upperBound
@@ -244,15 +231,14 @@ struct SpeakerRow: StenoRecord {
   }
 
   var speaker: Speaker {
-    let speakerAssignment: SpeakerAssignment
-    switch (assignment, personID) {
-    case ("suggested", let person?):
-      speakerAssignment = .suggested(personID: person, similarity: similarity ?? 0)
-    case ("confirmed", let person?):
-      speakerAssignment = .confirmed(personID: person)
-    default:
-      speakerAssignment = .unknown
-    }
+    // A `.suggested` or `.confirmed` row without a person (only reachable by
+    // hand-edited SQL) reads as `.unknown` rather than inventing a person.
+    let speakerAssignment: SpeakerAssignment =
+      switch (assignment, personID) {
+      case (.suggested, let person?): .suggested(personID: person, similarity: similarity ?? 0)
+      case (.confirmed, let person?): .confirmed(personID: person)
+      case (.unknown, _), (.suggested, nil), (.confirmed, nil): .unknown
+      }
     var range: ClosedRange<TimeInterval>?
     if let sampleClipStart, let sampleClipEnd, sampleClipStart <= sampleClipEnd {
       range = sampleClipStart...sampleClipEnd
@@ -324,6 +310,7 @@ struct MeetingTaskRow: StenoRecord {
   var done: Bool
 
   enum Columns {
+    static let id = Column(CodingKeys.id)
     static let meetingID = Column(CodingKeys.meetingID)
     static let assigneePersonID = Column(CodingKeys.assigneePersonID)
   }
@@ -354,6 +341,7 @@ struct DecisionRow: StenoRecord {
   var text: String
 
   enum Columns {
+    static let id = Column(CodingKeys.id)
     static let meetingID = Column(CodingKeys.meetingID)
   }
 
@@ -378,7 +366,7 @@ struct AudioAssetRow: StenoRecord {
   var lanes: [AudioLane]
   var sidecars16k: [AudioLane: URL]
   var mixdownURL: URL?
-  var retention: String
+  var retention: AudioRetention.Kind
   var retentionDays: Int?
   var expiresAt: Date?
 
@@ -396,23 +384,18 @@ struct AudioAssetRow: StenoRecord {
     lanes = asset.lanes
     sidecars16k = asset.sidecars16k
     mixdownURL = asset.mixdownURL
-    switch asset.retention {
-    case .deleteAfterProcessing: retention = "deleteAfterProcessing"
-    case .keepForever: retention = "keepForever"
-    case .keepDays(let days):
-      retention = "keepDays"
-      retentionDays = days
-    }
+    retention = asset.retention.kind
+    if case .keepDays(let days) = asset.retention { retentionDays = days }
     expiresAt = asset.expiresAt
   }
 
   var asset: AudioAsset {
-    let assetRetention: AudioRetention
-    switch retention {
-    case "deleteAfterProcessing": assetRetention = .deleteAfterProcessing
-    case "keepDays": assetRetention = .keepDays(retentionDays ?? 0)
-    default: assetRetention = .keepForever
-    }
+    let assetRetention: AudioRetention =
+      switch retention {
+      case .deleteAfterProcessing: .deleteAfterProcessing
+      case .keepDays: .keepDays(retentionDays ?? 0)
+      case .keepForever: .keepForever
+      }
     return AudioAsset(
       id: id,
       meetingID: meetingID,
@@ -435,12 +418,13 @@ struct DeliveryRow: StenoRecord {
   var id: UUID
   var meetingID: UUID
   var destinationID: String
-  var status: String
+  var status: DeliveryStatus.Kind
   var failureMessage: String?
   var lastAttemptAt: Date?
   var receipt: DeliveryReceipt?
 
   enum Columns {
+    static let id = Column(CodingKeys.id)
     static let meetingID = Column(CodingKeys.meetingID)
     static let destinationID = Column(CodingKeys.destinationID)
   }
@@ -449,27 +433,24 @@ struct DeliveryRow: StenoRecord {
     id = delivery.id
     meetingID = delivery.meetingID
     destinationID = delivery.destinationID
-    switch delivery.status {
-    case .pending: status = "pending"
-    case .delivered: status = "delivered"
-    case .failed(let message):
-      status = "failed"
-      failureMessage = message
-    }
+    status = delivery.status.kind
+    if case .failed(let message) = delivery.status { failureMessage = message }
     lastAttemptAt = delivery.lastAttemptAt
     receipt = delivery.receipt
   }
 
   var delivery: Delivery {
-    let deliveryStatus: DeliveryStatus
-    switch status {
-    case "pending": deliveryStatus = .pending
-    case "delivered": deliveryStatus = .delivered
-    default: deliveryStatus = .failed(failureMessage ?? "")
-    }
-    return Delivery(
-      id: id, meetingID: meetingID, destinationID: destinationID, status: deliveryStatus,
+    let deliveryStatus: DeliveryStatus =
+      switch status {
+      case .pending: .pending
+      case .delivered: .delivered
+      case .failed: .failed(failureMessage ?? "")
+      }
+    var delivery = Delivery(
+      meetingID: meetingID, destinationID: destinationID, status: deliveryStatus,
       lastAttemptAt: lastAttemptAt, receipt: receipt)
+    delivery.id = id
+    return delivery
   }
 }
 
@@ -508,7 +489,7 @@ struct HandoverReceiptRow: StenoRecord {
 
   var recordingID: UUID
   var deviceID: UUID
-  var state: String
+  var state: HandoverState.Kind
   var meetingID: UUID?
   var failureMessage: String?
   var byteCount: Int64
@@ -525,15 +506,11 @@ struct HandoverReceiptRow: StenoRecord {
   init(_ receipt: HandoverReceipt) {
     recordingID = receipt.recordingID
     deviceID = receipt.deviceID
+    state = receipt.state.kind
     switch receipt.state {
-    case .receiving: state = "receiving"
-    case .verifying: state = "verifying"
-    case .complete(let meeting):
-      state = "complete"
-      meetingID = meeting
-    case .failed(let message):
-      state = "failed"
-      failureMessage = message
+    case .complete(let meeting): meetingID = meeting
+    case .failed(let message): failureMessage = message
+    case .receiving, .verifying: break
     }
     byteCount = receipt.byteCount
     sha256 = receipt.sha256
@@ -544,13 +521,14 @@ struct HandoverReceiptRow: StenoRecord {
   }
 
   var receipt: HandoverReceipt {
-    let receiptState: HandoverReceipt.State
-    switch (state, meetingID) {
-    case ("receiving", _): receiptState = .receiving
-    case ("verifying", _): receiptState = .verifying
-    case ("complete", let meeting?): receiptState = .complete(meetingID: meeting)
-    default: receiptState = .failed(failureMessage ?? "")
-    }
+    let receiptState: HandoverState =
+      switch (state, meetingID) {
+      case (.receiving, _): .receiving
+      case (.verifying, _): .verifying
+      case (.complete, let meeting?): .complete(meetingID: meeting)
+      case (.complete, nil): .failed("complete without a meeting id")
+      case (.failed, _): .failed(failureMessage ?? "")
+      }
     return HandoverReceipt(
       recordingID: recordingID,
       deviceID: deviceID,

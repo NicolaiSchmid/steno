@@ -36,13 +36,13 @@ extension MeetingStore {
     let tasks =
       try MeetingTaskRow
       .filter(MeetingTaskRow.Columns.meetingID == key)
-      .order(Column("id"))
+      .order(MeetingTaskRow.Columns.id)
       .fetchAll(db)
       .map(\.task)
     let decisions =
       try DecisionRow
       .filter(DecisionRow.Columns.meetingID == key)
-      .order(Column("id"))
+      .order(DecisionRow.Columns.id)
       .fetchAll(db)
       .map(\.decision)
 

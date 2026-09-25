@@ -77,14 +77,16 @@ public struct RawSegment: Codable, Sendable, Equatable, Hashable {
   public var start: TimeInterval
   public var end: TimeInterval
   public var text: String
-  @LanguageTag public var language: Locale.Language?
+  /// The engine's detected language as a tag; engines build it from their
+  /// `Locale.Language` with `LanguageTag(_:)`.
+  public var language: LanguageTag?
   public var wordTimings: [WordTiming]?
 
   public init(
     start: TimeInterval,
     end: TimeInterval,
     text: String,
-    language: Locale.Language? = nil,
+    language: LanguageTag? = nil,
     wordTimings: [WordTiming]? = nil
   ) {
     self.start = start

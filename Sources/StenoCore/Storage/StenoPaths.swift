@@ -5,11 +5,13 @@ import Foundation
 /// `Settings.audioFolder`.
 public struct StenoPaths: Sendable, Equatable {
   public var supportDirectory: URL
-  public var databaseURL: URL
 
   public init(supportDirectory: URL) {
     self.supportDirectory = supportDirectory
-    self.databaseURL = supportDirectory.appendingPathComponent("steno.sqlite", isDirectory: false)
+  }
+
+  public var databaseURL: URL {
+    supportDirectory.appendingPathComponent("steno.sqlite", isDirectory: false)
   }
 
   /// Follows `HOME`, so CLI tests with a temporary home never touch the real
@@ -28,10 +30,6 @@ public struct StenoPaths: Sendable, Equatable {
   }
 
   /// `$HOME` when set and absolute, else Foundation's answer.
-  public static var homeDirectory: URL {
-    homeDirectory(environment: ProcessInfo.processInfo.environment)
-  }
-
   public static func homeDirectory(environment: [String: String]) -> URL {
     if let home = environment["HOME"], home.hasPrefix("/") {
       return URL(fileURLWithPath: home, isDirectory: true)

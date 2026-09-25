@@ -9,7 +9,7 @@ import Testing
     let first = await bus.subscribe()
     let second = await bus.subscribe()
 
-    let event = MeetingEvent.progress(meetingID: SampleData.meetingID, stage: .decode, fraction: 0)
+    let event = MeetingEvent.progress(meetingID: SampleData.meetingID, stage: .decode)
     await bus.post(event)
     await bus.post(
       .speakersNeedReview(meetingID: SampleData.meetingID, speakerIDs: [SampleData.speakerTwoID]))
@@ -30,12 +30,12 @@ import Testing
 
   @Test func lateSubscribersMissEarlierEvents() async throws {
     let bus = MeetingEventBus()
-    await bus.post(.progress(meetingID: SampleData.meetingID, stage: .decode, fraction: 0))
+    await bus.post(.progress(meetingID: SampleData.meetingID, stage: .decode))
     let stream = await bus.subscribe()
-    await bus.post(.progress(meetingID: SampleData.meetingID, stage: .transcribe, fraction: 0.1))
+    await bus.post(.progress(meetingID: SampleData.meetingID, stage: .transcribe))
     var iterator = stream.makeAsyncIterator()
     #expect(
       await iterator.next()
-        == .progress(meetingID: SampleData.meetingID, stage: .transcribe, fraction: 0.1))
+        == .progress(meetingID: SampleData.meetingID, stage: .transcribe))
   }
 }

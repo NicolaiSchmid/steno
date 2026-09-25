@@ -3,8 +3,6 @@ import Foundation
 /// Writes 16 kHz mono 16-bit PCM WAV: sample clips, fixtures and the
 /// `steno dev fixtures generate` output.
 public enum WAVWriter {
-  public static let sampleRate = Int(AudioBuffer16k.sampleRate)
-
   /// Clamps to `-1...1`, scales to Int16 and writes.
   public static func write(_ buffer: AudioBuffer16k, to url: URL) throws {
     try write(int16(buffer.samples), to: url)
@@ -16,9 +14,9 @@ public enum WAVWriter {
 
   /// The complete file for `samples`. `sampleRate` and `channels` other than
   /// 16 000 and 1 exist so tests can build files the decoder must reject.
-  public static func data(_ samples: [Int16], sampleRate: Int = sampleRate, channels: Int = 1)
-    -> Data
-  {
+  public static func data(
+    _ samples: [Int16], sampleRate: Int = Int(AudioBuffer16k.sampleRate), channels: Int = 1
+  ) -> Data {
     var data = header(
       formatTag: 1, channels: channels, sampleRate: sampleRate, bytesPerSample: 2,
       sampleCount: samples.count)
@@ -29,9 +27,9 @@ public enum WAVWriter {
   }
 
   /// A 32-bit float file, for decoder tests.
-  public static func float32Data(_ samples: [Float]) -> Data {
+  static func float32Data(_ samples: [Float]) -> Data {
     var data = header(
-      formatTag: 3, channels: 1, sampleRate: sampleRate, bytesPerSample: 4,
+      formatTag: 3, channels: 1, sampleRate: Int(AudioBuffer16k.sampleRate), bytesPerSample: 4,
       sampleCount: samples.count)
     for sample in samples {
       append(sample.bitPattern, to: &data)

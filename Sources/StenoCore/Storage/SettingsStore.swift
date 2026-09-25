@@ -34,9 +34,7 @@ public final class SettingsStore: Sendable {
   static func rows(for settings: Settings) throws -> [SettingRow] {
     let object = try Self.object(settings)
     return try object.keys.sorted().map { key in
-      let fragment = try JSONSerialization.data(
-        withJSONObject: object[key] as Any,
-        options: [.fragmentsAllowed, .sortedKeys, .withoutEscapingSlashes])
+      let fragment = try StenoJSON.columnEncoder().encode(object[key])
       return SettingRow(key: key, value: String(decoding: fragment, as: UTF8.self))
     }
   }
@@ -46,15 +44,20 @@ public final class SettingsStore: Sendable {
   static func settings(from rows: [SettingRow]) throws -> Settings {
     var merged = try object(Settings())
     for row in rows {
-      merged[row.key] = try JSONSerialization.jsonObject(
-        with: Data(row.value.utf8), options: .fragmentsAllowed)
+      merged[row.key] = try StenoJSON.decode(JSONValue.self, from: Data(row.value.utf8))
     }
-    return try StenoJSON.decode(Settings.self, from: JSONSerialization.data(withJSONObject: merged))
+    return try StenoJSON.decode(Settings.self, from: StenoJSON.encode(JSONValue.object(merged)))
   }
 
   /// `settings` as a JSON object in the `StenoJSON` convention.
-  private static func object(_ settings: Settings) throws -> [String: Any] {
-    let data = try StenoJSON.columnEncoder().encode(settings)
-    return try JSONSerialization.jsonObject(with: data) as? [String: Any] ?? [:]
+  private static func object(_ settings: Settings) throws -> [String: JSONValue] {
+    guard
+      case .object(let object) = try StenoJSON.decode(
+        JSONValue.self, from: StenoJSON.encode(settings))
+    else {
+      throw DecodingError.dataCorrupted(
+        DecodingError.Context(codingPath: [], debugDescription: "Settings is not a JSON object"))
+    }
+    return object
   }
 }

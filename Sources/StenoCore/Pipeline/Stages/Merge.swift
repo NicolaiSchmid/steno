@@ -11,13 +11,12 @@ extension ProcessingPipeline {
   /// transaction, so it survives a later failure. When the asset has a
   /// `.mic` lane, the "me" participant (created if the app did not write
   /// one) and the "me" speaker exist before any segment points at them.
-  func merge(
-    meeting: Meeting, lanes: [AudioLane: [RawSegment]], clusters: [SpeakerCluster],
-    speakers: [Speaker]
-  ) async throws -> Merged {
+  func merge(meeting: Meeting, lanes: [AudioLane: [RawSegment]], diarization: Diarization)
+    async throws -> Merged
+  {
     let store = self.store
     return try await run(.merge, meetingID: meeting.id) {
-      var allSpeakers = speakers
+      var allSpeakers = diarization.speakers
       var meSpeakerID: UUID?
       if lanes[.mic] != nil {
         let me = try await Self.ensureMeParticipant(meetingID: meeting.id, store: store)
@@ -25,14 +24,9 @@ extension ProcessingPipeline {
         allSpeakers.append(meSpeaker)
         meSpeakerID = meSpeaker.id
       }
-      let clusterSpeakers = clusters.compactMap { cluster -> LaneMerger.ClusterSpeaker? in
-        guard let speaker = speakers.first(where: { $0.clusterLabel == cluster.label }) else {
-          return nil
-        }
-        return LaneMerger.ClusterSpeaker(speakerID: speaker.id, ranges: cluster.ranges)
-      }
       let segments = LaneMerger.merge(
-        meetingID: meeting.id, lanes: lanes, clusters: clusterSpeakers, meSpeakerID: meSpeakerID)
+        meetingID: meeting.id, lanes: lanes, clusters: diarization.clusterSpeakers,
+        meSpeakerID: meSpeakerID)
       var updated = meeting
       updated.updatedAt = self.now
       try await store.replaceTranscript(updated, segments: segments, speakers: allSpeakers)

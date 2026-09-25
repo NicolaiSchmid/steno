@@ -52,7 +52,7 @@ public struct RecordingIntake: HandoverIntake, Sendable {
   public func admit(file: URL, metadata: RecordingMetadata, device: PairedDevice) async throws
     -> UUID
   {
-    let existing = try await store.receipt(metadata.recordingID)
+    let existing = try await store.handoverReceipt(recordingID: metadata.recordingID)
     if let meetingID = existing?.state.meetingID, try await store.meeting(id: meetingID) != nil {
       return meetingID
     }

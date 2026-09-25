@@ -5,10 +5,10 @@ import Foundation
 /// names at display and export time.
 public struct SummaryDocument: Codable, Sendable, Equatable, Hashable {
   public var templateID: String
-  @LanguageTag public var language: Locale.Language?
+  public var language: LanguageTag?
   public var sections: [SummarySection]
 
-  public init(templateID: String, language: Locale.Language? = nil, sections: [SummarySection]) {
+  public init(templateID: String, language: LanguageTag? = nil, sections: [SummarySection]) {
     self.templateID = templateID
     self.language = language
     self.sections = sections

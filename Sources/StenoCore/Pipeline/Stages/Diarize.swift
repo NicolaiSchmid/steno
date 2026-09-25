@@ -1,9 +1,11 @@
 import Foundation
 
 extension ProcessingPipeline {
+  /// What the diarize stage hands on: the `Speaker` rows and, joined once,
+  /// the cluster ranges each speaker covers for the lane merge.
   struct Diarization: Sendable {
     var speakers: [Speaker]
-    var clusters: [SpeakerCluster]
+    var clusterSpeakers: [LaneMerger.ClusterSpeaker]
   }
 
   /// Which lane carries the voices to diarize: the tap in a call, else the
@@ -15,7 +17,7 @@ extension ProcessingPipeline {
   }
 
   /// The sample clip is at most ten seconds.
-  public static let sampleClipSeconds: TimeInterval = 10
+  static let sampleClipSeconds: TimeInterval = 10
 
   /// Decodes the diarized lane again, runs the diarizer, and turns every
   /// cluster into a `Speaker` with a deterministic id, copying the cluster's
@@ -28,7 +30,7 @@ extension ProcessingPipeline {
     let layout = RecordingLayout(asset: asset)
     return try await run(.diarize, meetingID: meeting.id) {
       guard let lane = Self.diarizedLane(source: meeting.source, lanes: asset.lanes) else {
-        return Diarization(speakers: [], clusters: [])
+        return Diarization(speakers: [], clusterSpeakers: [])
       }
       try await diarizer.prepare()
       let buffer = try await decoder.decode(asset, lane: lane)
@@ -39,8 +41,9 @@ extension ProcessingPipeline {
           stage: .diarize, reason: "diarizer returned two clusters labelled \(cluster.label)")
       }
       var speakers: [Speaker] = []
+      var clusterSpeakers: [LaneMerger.ClusterSpeaker] = []
       for cluster in result.clusters {
-        let id = MeetingStore.derivedID(meeting.id, salt: "speaker-\(cluster.label)")
+        let id = UUID(derivedFrom: meeting.id, salt: "speaker-\(cluster.label)")
         var clipURL: URL?
         if let range = cluster.sampleClipRange {
           let capped =
@@ -64,8 +67,9 @@ extension ProcessingPipeline {
             sampleClipURL: clipURL,
             clusterConfidence: cluster.clusterConfidence
           ))
+        clusterSpeakers.append(LaneMerger.ClusterSpeaker(speakerID: id, ranges: cluster.ranges))
       }
-      return Diarization(speakers: speakers, clusters: result.clusters)
+      return Diarization(speakers: speakers, clusterSpeakers: clusterSpeakers)
     }
   }
 }

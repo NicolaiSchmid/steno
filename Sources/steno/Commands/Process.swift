@@ -2,18 +2,23 @@ import ArgumentParser
 import Foundation
 import StenoCore
 
-enum SourceOption: String, ExpressibleByArgument, CaseIterable {
-  case macCall = "mac-call"
-  case macInPerson = "mac-in-person"
-  case phone
+/// `--source mac-call|mac-in-person|phone`: the one `MeetingSource` enum,
+/// spelled with hyphens on the command line.
+extension MeetingSource: ExpressibleByArgument {
+  static let arguments: [String: MeetingSource] = [
+    "mac-call": .macCall, "mac-in-person": .macInPerson, "phone": .phone,
+  ]
 
-  var source: MeetingSource {
-    switch self {
-    case .macCall: .macCall
-    case .macInPerson: .macInPerson
-    case .phone: .phone
-    }
+  public init?(argument: String) {
+    guard let source = Self.arguments[argument] else { return nil }
+    self = source
   }
+
+  public var defaultValueDescription: String {
+    Self.arguments.first { $0.value == self }?.key ?? rawValue
+  }
+
+  public static var allValueStrings: [String] { arguments.keys.sorted() }
 }
 
 /// `steno process <wav>`: copies the 16 kHz mono WAV (and the system lane
@@ -30,7 +35,7 @@ struct Process: AsyncParsableCommand {
   var systemLane: String?
 
   @Option(help: "mac-call, mac-in-person or phone.")
-  var source: SourceOption = .macInPerson
+  var source: MeetingSource = .macInPerson
 
   @Option(help: "Meeting title; defaults to the input file name.")
   var title: String?
@@ -105,7 +110,7 @@ struct Process: AsyncParsableCommand {
       title: title ?? inputURL.deletingPathExtension().lastPathComponent,
       startedAt: now.addingTimeInterval(-duration),
       duration: duration,
-      source: source.source,
+      source: source,
       state: .queued,
       templateID: template ?? settings.defaultTemplateID,
       createdAt: now,

@@ -29,7 +29,7 @@ import Testing
     let export = try await observedHarness.store.export(meetingID: meeting.id)
     #expect(export.meeting.state == .ready)
     #expect(export.meeting.title == "Summary of Untitled")
-    #expect(export.meeting.language == Locale.Language(stenoIdentifier: "de"))
+    #expect(export.meeting.language == LanguageTag(rawValue: "de"))
     #expect(
       export.meeting.llmUsage == LLMUsage(promptTokens: 300, completionTokens: 150, requests: 2))
     #expect(export.meeting.summary?.templateID == "default")
@@ -55,7 +55,7 @@ import Testing
     #expect(
       export.speakers.filter { $0.clusterLabel != "Me" }.allSatisfy { $0.sampleClipURL != nil })
 
-    #expect(await observedHarness.dispatcher.calls.calls == [meeting.id])
+    #expect(await observedHarness.dispatcher.dispatches.entries == [meeting.id])
     let deliveries = try await observedHarness.store.deliveries(meetingID: meeting.id)
     #expect(deliveries.map(\.status) == [.delivered])
     let written = try Data(contentsOf: observedHarness.destination.exportURL(meetingID: meeting.id))
@@ -63,15 +63,10 @@ import Testing
 
     #expect(await seen.states == [.processing])
 
-    // A failed run posts fewer events; bail out instead of waiting forever.
-    guard export.meeting.state == .ready else { return }
-    var iterator = events.makeAsyncIterator()
-    var collected: [MeetingEvent] = []
-    for _ in 0..<11 {
-      if let event = await iterator.next() { collected.append(event) }
-    }
+    let collected = await observedHarness.events.drain(events)
+    try #require(collected.count == 11, "ten stage starts and one review request")
     let stages = collected.compactMap { event -> PipelineStage? in
-      if case .progress(_, let stage, _) = event { return stage }
+      if case .progress(_, let stage) = event { return stage }
       return nil
     }
     #expect(stages == PipelineStage.allCases)
@@ -136,7 +131,7 @@ import Testing
     let stored = try #require(try await harness.store.meeting(id: meeting.id))
     #expect(stored.state == .failed(reason: "summarize: Boom()"))
     #expect(try await harness.store.export(meetingID: meeting.id).segments.count == 12)
-    #expect(await harness.dispatcher.calls.count == 0)
+    #expect(await harness.dispatcher.dispatches.count == 0)
     #expect(stored.summary == nil)
   }
 
@@ -173,20 +168,20 @@ import Testing
     #expect(export.meeting.summary?.sections.count == 4)
     #expect(
       export.meeting.llmUsage == LLMUsage(promptTokens: 500, completionTokens: 250, requests: 3))
-    #expect(await harness.summarizer.calls.calls == ["default", "daily-standup"])
-    #expect(await harness.dispatcher.calls.count == 2)
+    #expect(await harness.summarizer.summaries.entries == ["default", "daily-standup"])
+    #expect(await harness.dispatcher.dispatches.count == 2)
 
     try await harness.pipeline.redeliver(meetingID: meeting.id)
-    #expect(await harness.dispatcher.calls.count == 3)
+    #expect(await harness.dispatcher.dispatches.count == 3)
     #expect(try await harness.store.deliveries(meetingID: meeting.id).count == 1)
 
     var iterator = events.makeAsyncIterator()
     #expect(
-      await iterator.next() == .progress(meetingID: meeting.id, stage: .summarize, fraction: 0.6))
+      await iterator.next() == .progress(meetingID: meeting.id, stage: .summarize))
     #expect(
-      await iterator.next() == .progress(meetingID: meeting.id, stage: .deliver, fraction: 0.8))
+      await iterator.next() == .progress(meetingID: meeting.id, stage: .deliver))
     #expect(
-      await iterator.next() == .progress(meetingID: meeting.id, stage: .deliver, fraction: 0.8))
+      await iterator.next() == .progress(meetingID: meeting.id, stage: .deliver))
 
     await #expect(throws: PipelineFailure.self) {
       try await harness.pipeline.redeliver(meetingID: SampleData.uuid(999))
@@ -218,7 +213,7 @@ import Testing
     #expect(export.meeting.source == .phone)
     #expect(export.segments.count == 6)
     #expect(
-      try await harness.store.receipt(metadata.recordingID)?.state
+      try await harness.store.handoverReceipt(recordingID: metadata.recordingID)?.state
         == .complete(meetingID: meetingID))
   }
 
@@ -241,14 +236,11 @@ import Testing
     #expect(export.meeting.summary == nil)
     #expect(export.audio?.mixdownURL == nil)
     #expect(export.audio?.expiresAt == nil)
-    #expect(await harness.dispatcher.calls.count == 0)
+    #expect(await harness.dispatcher.dispatches.count == 0)
 
-    let sentinel = MeetingEvent.speakersNeedReview(meetingID: meeting.id, speakerIDs: [])
-    await harness.events.post(sentinel)
-    var iterator = events.makeAsyncIterator()
-    var stages: [PipelineStage] = []
-    while let event = await iterator.next(), event != sentinel {
-      if case .progress(_, let stage, _) = event { stages.append(stage) }
+    let stages = await harness.events.drain(events).compactMap { event -> PipelineStage? in
+      if case .progress(_, let stage) = event { return stage }
+      return nil
     }
     #expect(stages == [.decode, .transcribe, .diarize, .matchSpeakers, .merge, .cleanup])
   }
@@ -283,7 +275,7 @@ import Testing
     #expect(error == PipelineFailure(stage: .summarize, reason: "Boom()"))
     let after = try await harness.store.export(meetingID: meeting.id)
     #expect(after == before, "state, summary, template, transcript, tasks and decisions are kept")
-    #expect(await failing.dispatcher.calls.count == 0)
+    #expect(await failing.dispatcher.dispatches.count == 0)
   }
 
   @Test func editsMadeWhileTheMeetingIsProcessingSurvive() async throws {
@@ -347,13 +339,13 @@ import Testing
     await gate.open()
     try await first.value
 
-    #expect(await harness.engine.calls.count == 1)
-    #expect(await harness.summarizer.calls.count == 1)
-    #expect(await harness.dispatcher.calls.count == 1)
+    #expect(await harness.engine.transcriptions.count == 1)
+    #expect(await harness.summarizer.summaries.count == 1)
+    #expect(await harness.dispatcher.dispatches.count == 1)
     #expect(try await harness.store.meeting(id: meeting.id)?.state == .ready)
     // Once the run is over the meeting is free again.
     try await harness.pipeline.redeliver(meetingID: meeting.id)
-    #expect(await harness.dispatcher.calls.count == 2)
+    #expect(await harness.dispatcher.dispatches.count == 2)
   }
 
   /// Blocks one task until opened; tests use it to hold a stage mid-flight.

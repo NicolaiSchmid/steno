@@ -20,31 +20,39 @@ public enum MeetingState: Codable, Sendable, Equatable, Hashable {
   case ready
   case failed(reason: String)
 
-  public var isFailed: Bool {
-    if case .failed = self { return true }
-    return false
+  /// The case names, shared by `meeting.json` and the `meeting.state` column.
+  public enum Kind: String, CaseIterable, Codable, Sendable {
+    case recording, queued, processing, ready, failed
   }
 
+  public var kind: Kind {
+    switch self {
+    case .recording: .recording
+    case .queued: .queued
+    case .processing: .processing
+    case .ready: .ready
+    case .failed: .failed
+    }
+  }
+
+  public var isFailed: Bool { kind == .failed }
+
   public init(from decoder: any Decoder) throws {
-    let (name, payload) = try CaseCoding.decode(from: decoder)
-    switch name {
-    case "recording": self = .recording
-    case "queued": self = .queued
-    case "processing": self = .processing
-    case "ready": self = .ready
-    case "failed":
-      self = .failed(reason: try CaseCoding.decodePayload(String.self, from: payload, case: name))
-    default: throw CaseCoding.unknownCase(name, in: decoder)
+    let (kind, payload) = try CaseCoding.decode(Kind.self, from: decoder)
+    switch kind {
+    case .recording: self = .recording
+    case .queued: self = .queued
+    case .processing: self = .processing
+    case .ready: self = .ready
+    case .failed:
+      self = .failed(reason: try CaseCoding.decodePayload(String.self, from: payload, case: kind))
     }
   }
 
   public func encode(to encoder: any Encoder) throws {
     switch self {
-    case .recording: try CaseCoding.encode("recording", to: encoder)
-    case .queued: try CaseCoding.encode("queued", to: encoder)
-    case .processing: try CaseCoding.encode("processing", to: encoder)
-    case .ready: try CaseCoding.encode("ready", to: encoder)
-    case .failed(let reason): try CaseCoding.encode("failed", payload: reason, to: encoder)
+    case .failed(let reason): try CaseCoding.encode(kind, payload: reason, to: encoder)
+    default: try CaseCoding.encode(kind, to: encoder)
     }
   }
 }
@@ -58,7 +66,7 @@ public struct Meeting: Codable, Sendable, Equatable, Hashable, Identifiable {
   public var duration: TimeInterval
   /// Elected by the pipeline from tagged transcript segments; nil when
   /// untagged or not yet processed.
-  @LanguageTag public var language: Locale.Language?
+  public var language: LanguageTag?
   public var source: MeetingSource
   public var calendarEventID: String?
   public var tags: [String]
@@ -76,7 +84,7 @@ public struct Meeting: Codable, Sendable, Equatable, Hashable, Identifiable {
     title: String,
     startedAt: Date,
     duration: TimeInterval,
-    language: Locale.Language? = nil,
+    language: LanguageTag? = nil,
     source: MeetingSource,
     calendarEventID: String? = nil,
     tags: [String] = [],
@@ -118,28 +126,5 @@ public struct Meeting: Codable, Sendable, Equatable, Hashable, Identifiable {
     summary = results.summary
     llmUsage = results.llmUsage
     updatedAt = results.updatedAt
-  }
-}
-
-/// Token accounting summed over every LLM call of a meeting.
-public struct LLMUsage: Codable, Sendable, Equatable, Hashable {
-  public var promptTokens: Int
-  public var completionTokens: Int
-  public var requests: Int
-
-  public init(promptTokens: Int, completionTokens: Int, requests: Int) {
-    self.promptTokens = promptTokens
-    self.completionTokens = completionTokens
-    self.requests = requests
-  }
-
-  public static let zero = LLMUsage(promptTokens: 0, completionTokens: 0, requests: 0)
-
-  public static func + (lhs: LLMUsage, rhs: LLMUsage) -> LLMUsage {
-    LLMUsage(
-      promptTokens: lhs.promptTokens + rhs.promptTokens,
-      completionTokens: lhs.completionTokens + rhs.completionTokens,
-      requests: lhs.requests + rhs.requests
-    )
   }
 }

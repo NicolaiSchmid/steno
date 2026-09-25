@@ -24,8 +24,8 @@ import Testing
     try roundTrip(SampleData.delivery(), "Delivery")
     try roundTrip(
       Delivery(
-        id: SampleData.uuid(81), meetingID: SampleData.meetingID, destinationID: "x",
-        status: .failed("vault missing")), "Delivery failed")
+        meetingID: SampleData.meetingID, destinationID: "x", status: .failed("vault missing")),
+      "Delivery failed")
     try roundTrip(SampleData.pairedDevice(), "PairedDevice")
     try roundTrip(SampleData.handoverReceipt(), "HandoverReceipt")
     try roundTrip(SampleData.recordingMetadata(), "RecordingMetadata")
@@ -84,8 +84,10 @@ import Testing
   @Test func languageEncodesAsBCP47Tag() throws {
     let tags = ["de", "en", "en-US", "de-DE", "zh-Hant-TW"]
     for tag in tags {
-      let language = Locale.Language(stenoIdentifier: tag)
-      #expect(language.stenoIdentifier == tag)
+      let language = LanguageTag(rawValue: tag)
+      #expect(
+        LanguageTag(language.language) == language,
+        "the Locale.Language round trip keeps the explicit subtags")
       let document = SummaryDocument(templateID: "default", language: language, sections: [])
       let json = String(decoding: try StenoJSON.encode(document), as: UTF8.self)
       #expect(json.contains("\"language\" : \"\(tag)\""))
@@ -120,7 +122,7 @@ import Testing
       try json(SpeakerAssignment.suggested(personID: SampleData.uuid(1), similarity: 0.5))
         == #"{"suggested":{"personID":"00000000-0000-0000-0000-000000000001","similarity":0.5}}"#)
     #expect(
-      try json(HandoverReceipt.State.complete(meetingID: SampleData.uuid(1)))
+      try json(HandoverState.complete(meetingID: SampleData.uuid(1)))
         == #"{"complete":{"meetingID":"00000000-0000-0000-0000-000000000001"}}"#)
     #expect(try json(LLMResponseFormat.jsonObject) == #""jsonObject""#)
     #expect(
@@ -131,6 +133,23 @@ import Testing
     }
     #expect(throws: DecodingError.self) {
       try StenoJSON.decode(AudioRetention.self, from: Data(#"{"keepDays":1,"keepForever":1}"#.utf8))
+    }
+    #expect(MeetingState.failed(reason: "x").kind == .failed)
+    #expect(
+      MeetingState.Kind.allCases.map(\.rawValue) == [
+        "recording", "queued", "processing", "ready", "failed",
+      ])
+    #expect(HandoverState.complete(meetingID: SampleData.uuid(1)).kind == .complete)
+  }
+
+  @Test func anUnknownStateInTheDatabaseFailsTheFetchInsteadOfBecomingFailed() async throws {
+    let store = try MeetingStore.inMemory()
+    try await store.save(SampleData.meeting())
+    try await store.writer.write { db in
+      try db.execute(sql: "UPDATE meeting SET state = 'paused'")
+    }
+    await #expect(throws: (any Error).self) {
+      _ = try await store.meeting(id: SampleData.meetingID)
     }
   }
 

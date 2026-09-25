@@ -11,6 +11,13 @@ public enum PipelineStage: String, CaseIterable, Sendable, Codable, Equatable, H
   case persist
   case deliver
   case retention
+
+  /// The stage's position in `allCases`, `0` for the first and below `1`
+  /// for the last; what a progress bar shows when the stage starts.
+  public var fraction: Double {
+    let index = Self.allCases.firstIndex(of: self) ?? 0
+    return Double(index) / Double(Self.allCases.count)
+  }
 }
 
 /// The one failure type: any error thrown inside a stage becomes this, and
@@ -25,12 +32,10 @@ public struct PipelineFailure: Error, Sendable, Equatable, Hashable, CustomStrin
     self.reason = reason
   }
 
-  public init(stage: PipelineStage, error: any Error) {
-    if let failure = error as? PipelineFailure {
-      self = failure
-    } else {
-      self.init(stage: stage, reason: String(describing: error))
-    }
+  /// `error` itself when it already is a `PipelineFailure` (the stage it
+  /// carries wins), else a failure for `stage` describing `error`.
+  public static func wrapping(_ error: any Error, stage: PipelineStage) -> PipelineFailure {
+    error as? PipelineFailure ?? PipelineFailure(stage: stage, reason: String(describing: error))
   }
 
   public var description: String { "\(stage.rawValue): \(reason)" }

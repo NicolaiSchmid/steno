@@ -42,7 +42,7 @@ public struct SummaryTemplate: Codable, Sendable, Equatable, Hashable, Identifia
   }
 
   /// Reads `Templates/<id>.json` from `bundle`.
-  public static func load(id: String, from bundle: Bundle) throws -> SummaryTemplate {
+  static func load(id: String, from bundle: Bundle) throws -> SummaryTemplate {
     guard let url = bundle.url(forResource: id, withExtension: "json", subdirectory: "Templates")
     else {
       throw CocoaError(.fileNoSuchFile, userInfo: [NSFilePathErrorKey: "Templates/\(id).json"])
