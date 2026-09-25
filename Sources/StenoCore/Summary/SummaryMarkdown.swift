@@ -1,25 +1,63 @@
 import Foundation
 
+/// One summary section as rendered: the heading and its bullets as inline
+/// Markdown (`**lead**: text`) with every speaker cluster label already
+/// replaced by the speaker's current name. What `SummaryMarkdown.render`
+/// joins, and what a UI iterates instead of re-parsing the Markdown.
+public struct RenderedSection: Sendable, Equatable, Hashable {
+  /// The `SummarySection.id` (a template section id).
+  public var id: String
+  public var heading: String
+  /// Inline Markdown per bullet, without the list marker.
+  public var bullets: [String]
+
+  public init(id: String, heading: String, bullets: [String]) {
+    self.id = id
+    self.heading = heading
+    self.bullets = bullets
+  }
+
+  /// The bullets as a Markdown list, one `- ` line each, no trailing newline.
+  public var body: String {
+    bullets.map { "- \($0)" }.joined(separator: "\n")
+  }
+
+  /// `## heading`, a blank line, then `body`.
+  public var markdown: String {
+    "## \(heading)\n\n\(body)"
+  }
+}
+
 /// Renders a `SummaryDocument` to Markdown at display and export time:
 /// `## heading` per section, `- **lead**: text` per bullet, and every
 /// speaker cluster label ("Speaker 2") replaced by the speaker's current
 /// name in bold. Renaming a speaker is therefore a re-render, never an LLM
-/// re-run. Adapters that need a heading offset shift the `##` themselves.
+/// re-run. `sections(for:)` is the structured form `render` joins; a UI that
+/// shows sections renders those and never parses the Markdown back.
+/// Adapters that need a heading offset shift the `##` themselves.
 public enum SummaryMarkdown {
-  public static func render(_ export: MeetingExport) -> String {
-    guard let summary = export.meeting.summary else { return "" }
+  /// Every section with at least one bullet, in document order, names
+  /// substituted. Empty when the meeting has no summary yet.
+  public static func sections(for export: MeetingExport) -> [RenderedSection] {
+    guard let summary = export.meeting.summary else { return [] }
     let names = speakerNames(export)
-    var blocks: [String] = []
-    for section in summary.sections where !section.bullets.isEmpty {
-      var lines = ["## \(section.heading)", ""]
-      for bullet in section.bullets {
+    return summary.sections.compactMap { section in
+      guard !section.bullets.isEmpty else { return nil }
+      let bullets = section.bullets.map { bullet in
         let lead = substitute(bullet.lead, names: names, bold: false)
         let text = substitute(bullet.text, names: names, bold: true)
-        lines.append(lead.isEmpty ? "- \(text)" : "- **\(lead)**: \(text)")
+        return lead.isEmpty ? text : "**\(lead)**: \(text)"
       }
-      blocks.append(lines.joined(separator: "\n"))
+      return RenderedSection(id: section.id, heading: section.heading, bullets: bullets)
     }
-    return blocks.isEmpty ? "" : blocks.joined(separator: "\n\n") + "\n"
+  }
+
+  /// `sections(for:)` joined by blank lines, with one trailing newline; the
+  /// empty string when there is nothing to render.
+  public static func render(_ export: MeetingExport) -> String {
+    let sections = sections(for: export)
+    return sections.isEmpty
+      ? "" : sections.map(\.markdown).joined(separator: "\n\n") + "\n"
   }
 
   /// Cluster label to current display name, for speakers that resolved to a

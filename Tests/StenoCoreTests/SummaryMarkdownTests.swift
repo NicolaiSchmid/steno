@@ -77,6 +77,43 @@ import Testing
         """)
   }
 
+  @Test func sectionsCarryTheHeadingsAndSubstitutedBulletsThatRenderJoins() {
+    var export = SampleData.export()
+    export.meeting.summary?.sections.append(
+      SummarySection(id: "empty", heading: "Leer", bullets: []))
+    let sections = SummaryMarkdown.sections(for: export)
+    #expect(
+      sections == [
+        RenderedSection(
+          id: "executive-summary", heading: "Executive Summary",
+          bullets: [
+            "**Fokus**: **Nicolai** schlägt vor, 90 Prozent auf den Kern zu setzen.",
+            "**Budget**: **Jérôme** will die Zahlen bis Freitag prüfen.",
+          ]),
+        RenderedSection(
+          id: "open-questions", heading: "Offene Fragen",
+          bullets: ["**Zeitplan**: Start im Oktober oder November?"]),
+      ], "empty sections are skipped, as in the Markdown")
+    #expect(
+      sections[1].body == "- **Zeitplan**: Start im Oktober oder November?")
+    #expect(
+      sections[1].markdown == "## Offene Fragen\n\n- **Zeitplan**: Start im Oktober oder November?")
+    #expect(
+      SummaryMarkdown.render(export)
+        == sections.map(\.markdown).joined(separator: "\n\n") + "\n",
+      "render is the join over sections")
+    #expect(SummaryMarkdown.render(export) == SummaryMarkdown.render(SampleData.export()))
+
+    var unresolved = export
+    unresolved.speakers[1].assignment = .unknown
+    let bullets = SummaryMarkdown.sections(for: unresolved).flatMap(\.bullets)
+    #expect(bullets.contains("**Budget**: Speaker 2 will die Zahlen bis Freitag prüfen."))
+    #expect(!bullets.joined().contains("**Speaker 2**"))
+
+    export.meeting.summary = nil
+    #expect(SummaryMarkdown.sections(for: export).isEmpty)
+  }
+
   @Test func longerLabelsWinAndMissingSummaryRendersEmpty() {
     var export = SampleData.export()
     var ten = export.speakers[0]
