@@ -424,6 +424,14 @@ handover"). The Mac side is untouched. Each line names the deviation and the rea
   `fingerprintsEqual` and `encodeBase64` were unused by the app and are gone. Native: one `StenoLinkError` enum
   replaces `PinnedClientError` and `UploadSessionError`; `FileHashing.sha256(fileAt:)` lost its unused slice
   parameters. No wire change.
+- Testing pass on the same PR: the coordinator's execution step moved out of `useUploadCoordinator` into
+  `src/features/sync/upload-executor.ts` (`createUploadExecutor(deps)` with injected `client`, `files`, `deviceName`,
+  `update`, `onUnauthorized`, `now`, `random`) so the 401 / 404 / 409 / 422 paths, the resume after partial chunks and
+  the retry backoff run in vitest against a scripted fake of the Mac endpoints; the hook is the wiring only. The
+  status line derivation is `coordinatorStatus()` in `upload-coordinator.ts`. `native-contract.test.ts` parses the
+  Swift sources under `modules/steno-link/ios` as text and compares record fields, event names and event body keys
+  with the TypeScript types, the closest this host gets to compiling them. `react-dom-client.d.ts` types the two
+  members the recorder hook test needs to mount under happy-dom. No wire change.
 - Still to run on a device, as the plan tags them `[manual]`: P1 (prompt once, `policyDenied`), P2 (locked-phone
   upload, wrong fingerprint sends no body, `pendingUploads()` after relaunch), P3 (60-minute locked recording, call
   interruption), P5 and P6 end to end against M6. Spikes S2, S3 and S4 are unchanged and unverified.
