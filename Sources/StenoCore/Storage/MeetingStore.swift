@@ -67,26 +67,36 @@ public final class MeetingStore: Sendable {
     }
   }
 
-  public func setState(_ state: MeetingState, meetingID: UUID, now: Date = Date()) async throws {
+  /// Read-modify-write in one transaction: `mutate` sees the row as it is
+  /// now, not as a caller read it earlier, so two writers editing different
+  /// columns never revert each other. `updatedAt` is set to `now`. Returns the
+  /// meeting as written.
+  @discardableResult
+  public func update(
+    meetingID: UUID, now: Date, _ mutate: @Sendable (inout Meeting) throws -> Void
+  ) async throws -> Meeting {
     try await writer.write { db in
-      guard let row = try Self.meetingRow(meetingID, db) else {
-        throw MeetingStoreError.meetingNotFound(meetingID)
-      }
-      var meeting = row.meeting
-      meeting.state = state
+      var meeting = try Self.currentMeeting(meetingID, db)
+      try mutate(&meeting)
       meeting.updatedAt = now
       try MeetingRow(meeting).update(db)
+      return meeting
     }
   }
 
-  /// Replaces every speaker and segment of the meeting in one transaction.
+  public func setState(_ state: MeetingState, meetingID: UUID, now: Date) async throws {
+    try await update(meetingID: meetingID, now: now) { $0.state = state }
+  }
+
+  /// One transaction: the meeting's processing columns (see
+  /// `Meeting.applyProcessingResults`) plus every speaker and segment of the
+  /// meeting, replaced. The pipeline's merge and cleanup stages call this.
   public func replaceTranscript(
-    meetingID: UUID, segments: [TranscriptSegment], speakers: [Speaker]
+    _ meeting: Meeting, segments: [TranscriptSegment], speakers: [Speaker]
   ) async throws {
+    let meetingID = meeting.id
     try await writer.write { db in
-      guard try Self.meetingRow(meetingID, db) != nil else {
-        throw MeetingStoreError.meetingNotFound(meetingID)
-      }
+      try Self.writeProcessingResults(of: meeting, db)
       try TranscriptSegmentRow
         .filter(TranscriptSegmentRow.Columns.meetingID == meetingID.uuidString)
         .deleteAll(db)
@@ -104,38 +114,44 @@ public final class MeetingStore: Sendable {
     }
   }
 
-  /// Writes the summary JSON and `summaryText`, the template id, and replaces
-  /// the meeting's tasks and decisions. Title, language and usage stay the
-  /// pipeline's business through `save(_ meeting:)`.
-  public func replaceSummary(
-    meetingID: UUID, output: SummaryOutput, templateID: String, now: Date = Date()
-  ) async throws {
+  /// One transaction: the meeting's processing columns (summary JSON and
+  /// `summaryText` among them) plus the meeting's tasks and decisions,
+  /// replaced. Decision ids derive from the meeting id so re-runs are stable.
+  public func replaceSummary(_ meeting: Meeting, tasks: [MeetingTask], decisions: [String])
+    async throws
+  {
+    let meetingID = meeting.id
     try await writer.write { db in
-      guard let row = try Self.meetingRow(meetingID, db) else {
-        throw MeetingStoreError.meetingNotFound(meetingID)
-      }
-      var meeting = row.meeting
-      meeting.summary = output.summary
-      meeting.summary?.templateID = templateID
-      meeting.templateID = templateID
-      meeting.updatedAt = now
-      try MeetingRow(meeting).update(db)
-
+      try Self.writeProcessingResults(of: meeting, db)
       try MeetingTaskRow.filter(MeetingTaskRow.Columns.meetingID == meetingID.uuidString)
         .deleteAll(db)
-      for task in output.tasks {
+      for task in tasks {
         var task = task
         task.meetingID = meetingID
         try MeetingTaskRow(task).insert(db)
       }
       try DecisionRow.filter(DecisionRow.Columns.meetingID == meetingID.uuidString).deleteAll(db)
-      for (index, text) in output.decisions.enumerated() {
+      for (index, text) in decisions.enumerated() {
         let decision = Decision(
           id: Self.derivedID(meetingID, salt: "decision-\(index)"), meetingID: meetingID, text: text
         )
         try DecisionRow(decision).insert(db)
       }
     }
+  }
+
+  /// Reads the row and overlays `results`' processing columns, so a stage
+  /// that started minutes ago never writes back the scratchpad or tags it
+  /// read then.
+  static func writeProcessingResults(of results: Meeting, _ db: Database) throws {
+    var meeting = try currentMeeting(results.id, db)
+    meeting.applyProcessingResults(results)
+    try MeetingRow(meeting).update(db)
+  }
+
+  static func currentMeeting(_ id: UUID, _ db: Database) throws -> Meeting {
+    guard let row = try meetingRow(id, db) else { throw MeetingStoreError.meetingNotFound(id) }
+    return row.meeting
   }
 
   // MARK: - Participants

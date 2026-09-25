@@ -104,6 +104,21 @@ public struct Meeting: Codable, Sendable, Equatable, Hashable, Identifiable {
     self.createdAt = createdAt
     self.updatedAt = updatedAt
   }
+
+  /// Copies the columns the pipeline owns from `results`: title, language,
+  /// state, templateID, summary, llmUsage, updatedAt. Everything else
+  /// (`scratchpad`, `tags`, `calendarEventID`, source and timing) belongs to
+  /// the user or the app and stays as stored, so a stage that read the meeting
+  /// minutes ago cannot revert an edit made while it ran.
+  public mutating func applyProcessingResults(_ results: Meeting) {
+    title = results.title
+    language = results.language
+    state = results.state
+    templateID = results.templateID
+    summary = results.summary
+    llmUsage = results.llmUsage
+    updatedAt = results.updatedAt
+  }
 }
 
 /// Token accounting summed over every LLM call of a meeting.

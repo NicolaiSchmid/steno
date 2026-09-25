@@ -21,8 +21,7 @@ import Testing
         id: SampleData.uuid(42), meetingID: SampleData.meetingID, start: 4, end: 6, lane: .mixed,
         text: "Wir vertagen den Zeitplan.", rawText: "wir vertagen den zeitplan"),
     ]
-    try await store.replaceTranscript(
-      meetingID: SampleData.meetingID, segments: segments, speakers: [])
+    try await store.replaceTranscript(meeting, segments: segments, speakers: [])
     return store
   }
 
@@ -48,8 +47,10 @@ import Testing
     #expect(title.map(\.meetingID) == [SampleData.meetingID])
     #expect(title.first?.segmentID == nil)
     #expect(title.first?.snippet.contains("[Produktstrategie]") == true)
-    try await store.replaceSummary(
-      meetingID: SampleData.meetingID, output: SampleData.summaryOutput(), templateID: "default")
+    let output = SampleData.summaryOutput()
+    var summarized = SampleData.meeting()
+    summarized.summary = output.summary
+    try await store.replaceSummary(summarized, tasks: output.tasks, decisions: output.decisions)
     let summary = try await store.search("Oktober")
     #expect(summary.map(\.segmentID) == [nil])
   }

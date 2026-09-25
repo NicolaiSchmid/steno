@@ -62,30 +62,40 @@ struct PipelineHarness {
   }
 
   /// A queued mac call with the two-lane fixture as master and per-lane
-  /// sidecars, or a one-lane in-person recording.
-  func meeting(source: MeetingSource, retention: AudioRetention = .keepDays(30)) -> (
+  /// sidecars, or a one-lane in-person recording. The fixtures are copied
+  /// into `audioFolder/<meetingID>/` (the `RecordingLayout`) the way the
+  /// capture writer, the intake and `steno process` place them, so clips and
+  /// the mixdown land beside the master and never in `Tests/Fixtures/`.
+  func meeting(source: MeetingSource, retention: AudioRetention = .keepDays(30)) throws -> (
     Meeting, AudioAsset
   ) {
     let meeting = Meeting(
       id: SampleData.meetingID, title: "Untitled", startedAt: SampleData.startedAt, duration: 6,
       source: source, state: .recording, createdAt: SampleData.createdAt,
       updatedAt: SampleData.createdAt)
+    let layout = RecordingLayout(audioFolder: settings.audioFolder, meetingID: meeting.id)
+    try layout.createDirectories()
+    func place(_ fixture: String, at url: URL) throws {
+      if FileManager.default.fileExists(atPath: url.path) {
+        try FileManager.default.removeItem(at: url)
+      }
+      try FileManager.default.copyItem(at: Fixtures.url(fixture), to: url)
+    }
+    let master = layout.master(.wav16kInt16)
+    try place("audio/conversation-two-lane-6s.wav", at: master)
     let asset: AudioAsset
     switch source {
     case .macCall:
+      try place("audio/conversation-mic-6s.wav", at: layout.sidecar(.mic))
+      try place("audio/conversation-system-6s.wav", at: layout.sidecar(.system))
       asset = AudioAsset(
-        id: SampleData.uuid(70), meetingID: meeting.id,
-        url: Fixtures.url("audio/conversation-two-lane-6s.wav"), format: .wav16kInt16,
+        id: SampleData.uuid(70), meetingID: meeting.id, url: master, format: .wav16kInt16,
         lanes: [.mic, .system],
-        sidecars16k: [
-          .mic: Fixtures.url("audio/conversation-mic-6s.wav"),
-          .system: Fixtures.url("audio/conversation-system-6s.wav"),
-        ],
+        sidecars16k: [.mic: layout.sidecar(.mic), .system: layout.sidecar(.system)],
         retention: retention)
     case .macInPerson, .phone:
       asset = AudioAsset(
-        id: SampleData.uuid(70), meetingID: meeting.id,
-        url: Fixtures.url("audio/conversation-two-lane-6s.wav"), format: .wav16kInt16,
+        id: SampleData.uuid(70), meetingID: meeting.id, url: master, format: .wav16kInt16,
         lanes: [.mixed], retention: retention)
     }
     return (meeting, asset)
@@ -96,7 +106,7 @@ struct PipelineHarness {
   @Test func transcribesEachLaneAndPassesTheFirstLanguageAsHint() async throws {
     let harness = try await PipelineHarness()
     defer { harness.cleanUp() }
-    let (meeting, asset) = harness.meeting(source: .macCall)
+    let (meeting, asset) = try harness.meeting(source: .macCall)
     let transcription = try await harness.pipeline.decodeAndTranscribe(
       asset: asset, meetingID: meeting.id)
     #expect(transcription.lanes[.mic]?.count == 6)
@@ -111,7 +121,7 @@ struct PipelineHarness {
   @Test func decodeFailureCarriesTheDecodeStage() async throws {
     let harness = try await PipelineHarness()
     defer { harness.cleanUp() }
-    var (meeting, asset) = harness.meeting(source: .macInPerson)
+    var (meeting, asset) = try harness.meeting(source: .macInPerson)
     asset.url = harness.directory.appendingPathComponent("missing.wav")
     meeting.state = .queued
     let decodeFailure = await #expect(throws: PipelineFailure.self) {
@@ -123,7 +133,7 @@ struct PipelineHarness {
     defer { failing.cleanUp() }
     let transcribeFailure = await #expect(throws: PipelineFailure.self) {
       _ = try await failing.pipeline.decodeAndTranscribe(
-        asset: harness.meeting(source: .macInPerson).1, meetingID: meeting.id)
+        asset: try harness.meeting(source: .macInPerson).1, meetingID: meeting.id)
     }
     #expect(transcribeFailure?.stage == .transcribe)
     #expect(transcribeFailure?.reason.contains("Boom") == true)
@@ -153,7 +163,7 @@ struct PipelineHarness {
     let harness = try await PipelineHarness()
     defer { harness.cleanUp() }
     let stream = await harness.events.subscribe()
-    let (meeting, asset) = harness.meeting(source: .macCall)
+    let (meeting, asset) = try harness.meeting(source: .macCall)
     _ = try await harness.pipeline.decodeAndTranscribe(asset: asset, meetingID: meeting.id)
     var iterator = stream.makeAsyncIterator()
     #expect(await iterator.next() == .progress(meetingID: meeting.id, stage: .decode, fraction: 0))
@@ -171,9 +181,9 @@ struct PipelineHarness {
   @Test func diarizesTheSystemLaneOfACallAndWritesOneClipPerCluster() async throws {
     let harness = try await PipelineHarness()
     defer { harness.cleanUp() }
-    let (meeting, asset) = harness.meeting(source: .macCall)
+    let (meeting, asset) = try harness.meeting(source: .macCall)
     let diarization = try await harness.pipeline.diarize(
-      asset: asset, meeting: meeting, settings: harness.settings)
+      asset: asset, meeting: meeting)
     #expect(diarization.clusters.count == 2)
     #expect(diarization.speakers.map(\.clusterLabel) == ["Speaker 1", "Speaker 2"])
     #expect(diarization.speakers.allSatisfy { $0.assignment == .unknown })
@@ -185,8 +195,7 @@ struct PipelineHarness {
       ])
     #expect(
       diarization.speakers[0].id == MeetingStore.derivedID(meeting.id, salt: "speaker-Speaker 1"))
-    let folder = ProcessingPipeline.meetingFolder(meeting.id, settings: harness.settings)
-      .appendingPathComponent("speakers", isDirectory: true)
+    let folder = RecordingLayout(asset: asset).speakersDirectory
     let clips = try FileManager.default.contentsOfDirectory(atPath: folder.path).sorted()
     #expect(clips == diarization.speakers.map { "\($0.id.uuidString).wav" }.sorted())
     for speaker in diarization.speakers {
@@ -205,9 +214,9 @@ struct PipelineHarness {
     })
     let harness = try await PipelineHarness(diarizer: long)
     defer { harness.cleanUp() }
-    let (meeting, asset) = harness.meeting(source: .macInPerson)
+    let (meeting, asset) = try harness.meeting(source: .macInPerson)
     let diarization = try await harness.pipeline.diarize(
-      asset: asset, meeting: meeting, settings: harness.settings)
+      asset: asset, meeting: meeting)
     #expect(diarization.speakers.count == 1)
     let clip = try WAVAudioDecoder.read(try #require(diarization.speakers[0].sampleClipURL))
     #expect(clip.duration == 6)
@@ -261,12 +270,12 @@ struct PipelineHarness {
   @Test func mergePersistsTranscriptAndCreatesMeForCalls() async throws {
     let harness = try await PipelineHarness()
     defer { harness.cleanUp() }
-    let (meeting, asset) = harness.meeting(source: .macCall)
+    let (meeting, asset) = try harness.meeting(source: .macCall)
     try await harness.store.save(meeting, asset: asset)
     let transcription = try await harness.pipeline.decodeAndTranscribe(
       asset: asset, meetingID: meeting.id)
     let diarization = try await harness.pipeline.diarize(
-      asset: asset, meeting: meeting, settings: harness.settings)
+      asset: asset, meeting: meeting)
     let merged = try await harness.pipeline.merge(
       meeting: meeting, lanes: transcription.lanes, clusters: diarization.clusters,
       speakers: diarization.speakers)
@@ -293,7 +302,7 @@ struct PipelineHarness {
   @Test func mergeUsesAnExistingMeParticipantAndSkipsMeForRoomLanes() async throws {
     let harness = try await PipelineHarness()
     defer { harness.cleanUp() }
-    let (meeting, asset) = harness.meeting(source: .macCall)
+    let (meeting, asset) = try harness.meeting(source: .macCall)
     try await harness.store.save(meeting, asset: asset)
     for person in SampleData.persons() { try await harness.store.save(person) }
     try await harness.store.save(
@@ -331,10 +340,10 @@ struct PipelineHarness {
   /// A harness whose store already holds the sample transcript.
   static func prepared(cleaner: any TranscriptCleaner) async throws -> (PipelineHarness, Meeting) {
     let harness = try await PipelineHarness(cleaner: cleaner)
-    let (meeting, asset) = harness.meeting(source: .macCall)
+    let (meeting, asset) = try harness.meeting(source: .macCall)
     try await harness.store.save(meeting, asset: asset)
     try await harness.store.replaceTranscript(
-      meetingID: meeting.id, segments: SampleData.segments(), speakers: SampleData.speakers())
+      meeting, segments: SampleData.segments(), speakers: SampleData.speakers())
     return (harness, meeting)
   }
 
@@ -411,10 +420,10 @@ struct PipelineHarness {
     PipelineHarness, Meeting
   ) {
     let harness = try await PipelineHarness(summarizer: summarizer)
-    let (meeting, asset) = harness.meeting(source: .macCall)
+    let (meeting, asset) = try harness.meeting(source: .macCall)
     try await harness.store.save(meeting, asset: asset)
     try await harness.store.replaceTranscript(
-      meetingID: meeting.id, segments: SampleData.segments(), speakers: SampleData.speakers())
+      meeting, segments: SampleData.segments(), speakers: SampleData.speakers())
     return (harness, meeting)
   }
 
@@ -422,9 +431,11 @@ struct PipelineHarness {
     let (harness, meeting) = try await Self.prepared()
     defer { harness.cleanUp() }
     let prior = LLMUsage(promptTokens: 100, completionTokens: 50, requests: 1)
+    var withUsage = meeting
+    withUsage.templateID = "nope"
+    withUsage.llmUsage = prior
     let updated = try await harness.pipeline.summarize(
-      meeting: meeting, segments: SampleData.segments(), speakers: SampleData.speakers(),
-      templateID: "nope", priorUsage: prior)
+      meeting: withUsage, segments: SampleData.segments(), speakers: SampleData.speakers())
     #expect(await harness.summarizer.calls.calls == ["default"])
     #expect(updated.templateID == "default")
     #expect(updated.summary?.templateID == "default")
@@ -447,11 +458,12 @@ struct PipelineHarness {
     let (harness, meeting) = try await Self.prepared(summarizer: FakeSummarizer(canned: canned))
     defer { harness.cleanUp() }
 
-    var scheduled = meeting
+    var interview = meeting
+    interview.templateID = "interview"
+    var scheduled = interview
     scheduled.calendarEventID = "event-1"
     let kept = try await harness.pipeline.summarize(
-      meeting: scheduled, segments: SampleData.segments(), speakers: SampleData.speakers(),
-      templateID: "interview", priorUsage: nil)
+      meeting: scheduled, segments: SampleData.segments(), speakers: SampleData.speakers())
     #expect(kept.title == "Untitled", "a calendar title is authoritative")
     #expect(kept.language == Locale.Language(stenoIdentifier: "fr"))
     #expect(kept.templateID == "interview")
@@ -459,8 +471,7 @@ struct PipelineHarness {
     #expect(kept.llmUsage == canned.usage, "no prior usage and none on the meeting")
 
     let replaced = try await harness.pipeline.summarize(
-      meeting: meeting, segments: SampleData.segments(), speakers: SampleData.speakers(),
-      templateID: "interview", priorUsage: nil)
+      meeting: interview, segments: SampleData.segments(), speakers: SampleData.speakers())
     #expect(replaced.title == "Model title")
 
     canned.title = ""
@@ -468,8 +479,7 @@ struct PipelineHarness {
       summarizer: FakeSummarizer(canned: canned), sharedStore: harness.store)
     defer { untitled.cleanUp() }
     let unchanged = try await untitled.pipeline.summarize(
-      meeting: meeting, segments: SampleData.segments(), speakers: SampleData.speakers(),
-      templateID: "default", priorUsage: nil)
+      meeting: meeting, segments: SampleData.segments(), speakers: SampleData.speakers())
     #expect(unchanged.title == "Untitled", "an empty model title never replaces the meeting's")
     #expect(try await harness.store.meeting(id: meeting.id)?.title == "Untitled")
   }
@@ -479,24 +489,22 @@ struct PipelineHarness {
   @Test func anAACAssetGetsNoMixdownAndAConfirmedCastPostsNoReview() async throws {
     let harness = try await PipelineHarness()
     defer { harness.cleanUp() }
-    let (meeting, template) = harness.meeting(source: .phone)
+    let (meeting, template) = try harness.meeting(source: .phone)
     var asset = template
     asset.format = .m4aAAC
     try await harness.store.save(meeting, asset: asset)
     try await harness.store.replaceTranscript(
-      meetingID: meeting.id, segments: [],
+      meeting, segments: [],
       speakers: [LaneMerger.meSpeaker(meetingID: meeting.id, personID: SampleData.personNicolaiID)])
     let stream = await harness.events.subscribe()
 
-    let persisted = try await harness.pipeline.persist(
-      meeting: meeting, asset: asset, settings: harness.settings)
+    let persisted = try await harness.pipeline.persist(meeting: meeting, asset: asset)
 
     #expect(persisted.mixdownURL == nil)
     #expect(try await harness.store.asset(id: asset.id) == persisted)
     #expect(try await harness.store.meeting(id: meeting.id)?.state == .ready)
-    let folder = ProcessingPipeline.meetingFolder(meeting.id, settings: harness.settings)
     #expect(
-      !FileManager.default.fileExists(atPath: folder.appendingPathComponent("audio.m4a").path))
+      !FileManager.default.fileExists(atPath: RecordingLayout(asset: asset).mixdown(.m4aAAC).path))
     let sentinel = MeetingEvent.progress(meetingID: meeting.id, stage: .retention, fraction: 1)
     await harness.events.post(sentinel)
     var iterator = stream.makeAsyncIterator()
@@ -508,17 +516,15 @@ struct PipelineHarness {
   @Test func aWAVAssetGetsAMixdownAndOnlyUnconfirmedSpeakersNeedReview() async throws {
     let harness = try await PipelineHarness()
     defer { harness.cleanUp() }
-    let (meeting, asset) = harness.meeting(source: .macInPerson)
+    let (meeting, asset) = try harness.meeting(source: .macInPerson)
     try await harness.store.save(meeting, asset: asset)
     try await harness.store.replaceTranscript(
-      meetingID: meeting.id, segments: [], speakers: SampleData.speakers())
+      meeting, segments: [], speakers: SampleData.speakers())
     let stream = await harness.events.subscribe()
 
-    let persisted = try await harness.pipeline.persist(
-      meeting: meeting, asset: asset, settings: harness.settings)
+    let persisted = try await harness.pipeline.persist(meeting: meeting, asset: asset)
 
-    let mixdown = ProcessingPipeline.meetingFolder(meeting.id, settings: harness.settings)
-      .appendingPathComponent("audio.m4a")
+    let mixdown = RecordingLayout(asset: asset).mixdown(.m4aAAC)
     #expect(persisted.mixdownURL == mixdown)
     #expect(try Data(contentsOf: mixdown) == Data(contentsOf: asset.url))
     #expect(try await harness.store.asset(id: asset.id)?.mixdownURL == mixdown)

@@ -34,8 +34,9 @@ extension ProcessingPipeline {
         segment.text = candidate.text
         cleaned.append(segment)
       }
-      try await store.replaceTranscript(
-        meetingID: meeting.id, segments: cleaned, speakers: speakers)
+      var updated = meeting
+      updated.updatedAt = self.now
+      try await store.replaceTranscript(updated, segments: cleaned, speakers: speakers)
       return Cleaned(segments: cleaned, usage: output.usage)
     }
   }

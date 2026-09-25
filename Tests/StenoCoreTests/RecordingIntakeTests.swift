@@ -96,7 +96,7 @@ import Testing
     let title = RecordingIntake.title(
       for: SampleData.startedAt, timeZone: TimeZone(identifier: "Europe/Berlin")!)
     #expect(title == "Phone recording 2026-09-24 11:00")
-    #expect(RecordingIntake.fileExtension(.wav16kInt16) == "wav")
+    #expect(AudioFormat.wav16kInt16.fileExtension == "wav")
   }
 
   @Test func aFailedEnqueueLeavesNoCompleteReceipt() async throws {

@@ -12,11 +12,10 @@ import Testing
     for person in SampleData.persons() { try await store.save(person) }
     for participant in SampleData.participants() { try await store.save(participant) }
     try await store.replaceTranscript(
-      meetingID: SampleData.meetingID, segments: SampleData.segments(),
-      speakers: SampleData.speakers())
+      SampleData.meeting(), segments: SampleData.segments(), speakers: SampleData.speakers())
+    let output = SampleData.summaryOutput()
     try await store.replaceSummary(
-      meetingID: SampleData.meetingID, output: SampleData.summaryOutput(),
-      templateID: SummaryTemplate.defaultID, now: SampleData.updatedAt)
+      SampleData.meeting(), tasks: output.tasks, decisions: output.decisions)
     try await store.save(SampleData.audioAsset())
     return store
   }
@@ -57,8 +56,42 @@ import Testing
     #expect(meeting.state == .failed(reason: "summarize: boom"))
     #expect(meeting.updatedAt == later)
     await #expect(throws: MeetingStoreError.meetingNotFound(SampleData.uuid(999))) {
-      try await store.setState(.ready, meetingID: SampleData.uuid(999))
+      try await store.setState(.ready, meetingID: SampleData.uuid(999), now: later)
     }
+  }
+
+  @Test func updateReadsTheCurrentRowAndProcessingWritesKeepUserColumns() async throws {
+    let store = try await Self.populated()
+    let stale = SampleData.meeting()
+    let later = SampleData.updatedAt.addingTimeInterval(60)
+
+    // The user edits while a stage holds `stale`.
+    let edited = try await store.update(meetingID: stale.id, now: later) {
+      $0.scratchpad = "Neue Notizen."
+      $0.tags = ["neu"]
+    }
+    #expect(edited.scratchpad == "Neue Notizen.")
+    #expect(edited.updatedAt == later)
+    #expect(try await store.meeting(id: stale.id) == edited)
+
+    // The stage writes its results from the stale snapshot.
+    var results = stale
+    results.title = "Vom Modell"
+    results.state = .ready
+    results.updatedAt = later.addingTimeInterval(1)
+    try await store.replaceTranscript(results, segments: [], speakers: [])
+    let afterTranscript = try #require(try await store.meeting(id: stale.id))
+    #expect(afterTranscript.title == "Vom Modell")
+    #expect(afterTranscript.scratchpad == "Neue Notizen.", "not reverted by the stale snapshot")
+    #expect(afterTranscript.tags == ["neu"])
+    #expect(afterTranscript.updatedAt == results.updatedAt)
+
+    results.templateID = "interview"
+    try await store.replaceSummary(results, tasks: [], decisions: [])
+    let afterSummary = try #require(try await store.meeting(id: stale.id))
+    #expect(afterSummary.templateID == "interview")
+    #expect(afterSummary.scratchpad == "Neue Notizen.")
+    #expect(afterSummary.tags == ["neu"])
   }
 
   @Test func replaceTranscriptReplacesSpeakersAndSegments() async throws {
@@ -70,7 +103,7 @@ import Testing
       id: SampleData.uuid(43), meetingID: SampleData.meetingID, start: 0, end: 1,
       speakerID: newSpeaker.id, lane: .mixed, text: "Neu.", rawText: "neu")
     try await store.replaceTranscript(
-      meetingID: SampleData.meetingID, segments: [newSegment], speakers: [newSpeaker])
+      SampleData.meeting(), segments: [newSegment], speakers: [newSpeaker])
     let export = try await store.export(meetingID: SampleData.meetingID)
     #expect(export.speakers == [newSpeaker])
     #expect(export.segments == [newSegment])
@@ -91,11 +124,10 @@ import Testing
     #expect(summaryText == SampleData.summaryDocument().plainText)
     #expect(try await store.search("Zeitplan").map(\.meetingID) == [SampleData.meetingID])
 
-    var again = SampleData.summaryOutput()
-    again.decisions = ["Nur eine."]
-    again.tasks = []
-    try await store.replaceSummary(
-      meetingID: SampleData.meetingID, output: again, templateID: "daily-standup")
+    var standup = SampleData.meeting()
+    standup.templateID = "daily-standup"
+    standup.summary?.templateID = "daily-standup"
+    try await store.replaceSummary(standup, tasks: [], decisions: ["Nur eine."])
     let second = try await store.export(meetingID: SampleData.meetingID)
     #expect(second.tasks.isEmpty)
     #expect(second.decisions.map(\.text) == ["Nur eine."])
@@ -178,10 +210,8 @@ import Testing
     let store = try await Self.populated()
     var task = SampleData.tasks()[0]
     task.assigneePersonID = SampleData.personNicolaiID
-    var output = SampleData.summaryOutput()
-    output.tasks = [task]
     try await store.replaceSummary(
-      meetingID: SampleData.meetingID, output: output, templateID: "default")
+      SampleData.meeting(), tasks: [task], decisions: SampleData.decisions().map(\.text))
 
     try await store.mergePersons(
       keep: SampleData.personJeromeID, remove: SampleData.personNicolaiID)
@@ -216,7 +246,7 @@ import Testing
     var speakers = SampleData.speakers()
     speakers[1].sampleClipURL = clip
     try await store.replaceTranscript(
-      meetingID: SampleData.meetingID, segments: SampleData.segments(), speakers: speakers)
+      SampleData.meeting(), segments: SampleData.segments(), speakers: speakers)
 
     try await store.mergeSpeakers(
       SampleData.speakerTwoID, into: SampleData.speakerOneID, meetingID: SampleData.meetingID)
@@ -247,7 +277,7 @@ import Testing
     speakers[1].assignment = .unknown
     speakers[1].sampleClipURL = clip
     try await store.replaceTranscript(
-      meetingID: SampleData.meetingID, segments: SampleData.segments(), speakers: speakers)
+      SampleData.meeting(), segments: SampleData.segments(), speakers: speakers)
     let memory = InMemorySpeakerMemory(people: SampleData.persons())
     let newPerson = Person(
       id: SampleData.uuid(12), displayName: "Anna", createdAt: SampleData.createdAt)
@@ -328,7 +358,7 @@ import Testing
     speakers[0].clusterConfidence = 0.3
     speakers[1].sampleClipURL = nil
     try await store.replaceTranscript(
-      meetingID: SampleData.meetingID, segments: SampleData.segments(), speakers: speakers)
+      SampleData.meeting(), segments: SampleData.segments(), speakers: speakers)
 
     try await store.mergeSpeakers(
       SampleData.speakerTwoID, into: SampleData.speakerOneID, meetingID: SampleData.meetingID)
@@ -352,7 +382,7 @@ import Testing
     let stranger = Speaker(
       id: SampleData.uuid(25), meetingID: other.id, clusterLabel: "Speaker 1",
       clusterConfidence: 0.5)
-    try await store.replaceTranscript(meetingID: other.id, segments: [], speakers: [stranger])
+    try await store.replaceTranscript(other, segments: [], speakers: [stranger])
 
     await #expect(
       throws: MeetingStoreError.speakersInDifferentMeetings(stranger.id, SampleData.speakerOneID)
@@ -385,7 +415,7 @@ import Testing
     bare.sampleClipRange = nil
     speakers.append(bare)
     try await store.replaceTranscript(
-      meetingID: SampleData.meetingID, segments: SampleData.segments(), speakers: speakers)
+      SampleData.meeting(), segments: SampleData.segments(), speakers: speakers)
     let memory = InMemorySpeakerMemory(people: SampleData.persons())
     var renamed = SampleData.persons()[1]
     renamed.displayName = "Somebody Else"
@@ -421,11 +451,13 @@ import Testing
   @Test func transcriptAndSummaryWritesNeedTheMeeting() async throws {
     let store = try MeetingStore.inMemory()
     await #expect(throws: MeetingStoreError.meetingNotFound(SampleData.meetingID)) {
-      try await store.replaceTranscript(meetingID: SampleData.meetingID, segments: [], speakers: [])
+      try await store.replaceTranscript(SampleData.meeting(), segments: [], speakers: [])
     }
     await #expect(throws: MeetingStoreError.meetingNotFound(SampleData.meetingID)) {
-      try await store.replaceSummary(
-        meetingID: SampleData.meetingID, output: SampleData.summaryOutput(), templateID: "default")
+      try await store.replaceSummary(SampleData.meeting(), tasks: [], decisions: [])
+    }
+    await #expect(throws: MeetingStoreError.meetingNotFound(SampleData.meetingID)) {
+      try await store.update(meetingID: SampleData.meetingID, now: SampleData.updatedAt) { _ in }
     }
   }
 }

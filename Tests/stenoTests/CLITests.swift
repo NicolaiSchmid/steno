@@ -55,7 +55,7 @@ import Testing
       .appendingPathComponent("Library/Application Support/Steno", isDirectory: true)
   }
 
-  @Test func migrateGenerateProcessAndExport() throws {
+  @Test func migrateGenerateProcessAndExport() async throws {
     let home = try Fixtures.temporaryDirectory("steno-home")
     defer { try? FileManager.default.removeItem(at: home) }
     let hadRealFolder = FileManager.default.fileExists(atPath: Self.realStenoFolder.path)
@@ -86,9 +86,17 @@ import Testing
     #expect(process.status == 0, "\(process.stderr)")
     let meetingID = try #require(
       UUID(uuidString: process.stdout.trimmingCharacters(in: .whitespacesAndNewlines)))
+    let layout = RecordingLayout(audioFolder: audio, meetingID: meetingID)
+    #expect(FileManager.default.fileExists(atPath: layout.master(.wav16kInt16).path))
+    #expect(FileManager.default.fileExists(atPath: layout.mixdown(.m4aAAC).path))
     #expect(
-      FileManager.default.fileExists(
-        atPath: audio.appendingPathComponent("\(meetingID.uuidString)/recording.wav").path))
+      try FileManager.default.contentsOfDirectory(atPath: layout.speakersDirectory.path).count == 2)
+    let stored = try await SettingsStore(
+      writer: MeetingStore.onDisk(at: URL(fileURLWithPath: db)).writer
+    )
+    .load()
+    #expect(
+      stored.audioFolder == Settings().audioFolder, "--audio-folder never touches the setting")
 
     let out = home.appendingPathComponent("out", isDirectory: true)
     let export = try Self.run(

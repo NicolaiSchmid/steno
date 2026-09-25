@@ -53,11 +53,9 @@ public struct RecordingIntake: HandoverIntake, Sendable {
     let settings = try await settings.load()
     let meetingID = UUID()
     let timestamp = now()
-    let folder = settings.audioFolder.appendingPathComponent(
-      meetingID.uuidString, isDirectory: true)
-    try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
-    let destination = folder.appendingPathComponent(
-      "recording." + Self.fileExtension(metadata.format))
+    let layout = RecordingLayout(audioFolder: settings.audioFolder, meetingID: meetingID)
+    try layout.createDirectories()
+    let destination = layout.master(metadata.format)
     if FileManager.default.fileExists(atPath: destination.path) {
       try FileManager.default.removeItem(at: destination)
     }
@@ -101,14 +99,6 @@ public struct RecordingIntake: HandoverIntake, Sendable {
     try await enqueue(meeting, asset)
     try await store.save(receipt)
     return meetingID
-  }
-
-  static func fileExtension(_ format: AudioFormat) -> String {
-    switch format {
-    case .caf48kFloat32: "caf"
-    case .m4aAAC: "m4a"
-    case .wav16kInt16: "wav"
-    }
   }
 
   /// "Phone recording 2026-09-24 11:00" in the Mac's time zone.

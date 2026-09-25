@@ -6,8 +6,9 @@ extension ProcessingPipeline {
     var speakers: [Speaker]
   }
 
-  /// Merges the lanes into one ordered transcript and persists it together
-  /// with the speakers, so it survives a later failure. When the asset has a
+  /// Merges the lanes into one ordered transcript and persists it, together
+  /// with the speakers and the meeting's elected language, in one
+  /// transaction, so it survives a later failure. When the asset has a
   /// `.mic` lane, the "me" participant (created if the app did not write
   /// one) and the "me" speaker exist before any segment points at them.
   func merge(
@@ -34,9 +35,7 @@ extension ProcessingPipeline {
         meetingID: meeting.id, lanes: lanes, clusters: clusterSpeakers, meSpeakerID: meSpeakerID)
       var updated = meeting
       updated.updatedAt = self.now
-      try await store.save(updated)
-      try await store.replaceTranscript(
-        meetingID: meeting.id, segments: segments, speakers: allSpeakers)
+      try await store.replaceTranscript(updated, segments: segments, speakers: allSpeakers)
       return Merged(segments: segments, speakers: allSpeakers)
     }
   }

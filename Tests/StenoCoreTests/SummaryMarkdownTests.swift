@@ -50,6 +50,33 @@ import Testing
         == "## Progress\n\n- **Nicolai**: Shipped the thing with **Jérôme**.\n- No lead here.\n")
   }
 
+  @Test func labelsAreReplacedOnlyAsWholeWords() {
+    var export = SampleData.export()
+    // The mic lane's speaker is labelled "Me" and confirmed once the user is known.
+    var me = export.speakers[0]
+    me.id = SampleData.uuid(28)
+    me.clusterLabel = LaneMerger.meSpeakerLabel
+    export.speakers.append(me)
+    export.meeting.summary = SummaryDocument(
+      templateID: "default",
+      sections: [
+        SummarySection(
+          id: "s", heading: "S",
+          bullets: [
+            SummaryBullet(lead: "Meeting", text: "Melanie joined the Meeting with Me."),
+            SummaryBullet(lead: "", text: "Me: Speaker 1's plan; Speaker 12 disagrees (Me)."),
+          ])
+      ])
+    #expect(
+      SummaryMarkdown.render(export) == """
+        ## S
+
+        - **Meeting**: Melanie joined the Meeting with **Nicolai**.
+        - **Nicolai**: **Nicolai**'s plan; Speaker 12 disagrees (**Nicolai**).
+
+        """)
+  }
+
   @Test func longerLabelsWinAndMissingSummaryRendersEmpty() {
     var export = SampleData.export()
     var ten = export.speakers[0]

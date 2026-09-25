@@ -39,14 +39,41 @@ public enum SummaryMarkdown {
       }
   }
 
+  /// Replaces every label that stands as a whole word (no letter or digit
+  /// touching it on either side), in one pass over `text`, so "Me" never
+  /// matches inside "Meeting" and a name written in never gets matched again.
   static func substitute(_ text: String, names: [(label: String, name: String)], bold: Bool)
     -> String
   {
-    var result = text
-    for (label, name) in names {
-      let replacement = bold ? "**\(name)**" : name
-      result = result.replacingOccurrences(of: label, with: replacement)
+    guard !names.isEmpty else { return text }
+    var result = ""
+    var index = text.startIndex
+    while index < text.endIndex {
+      if isWordBoundary(text, before: index),
+        let (label, name) = names.first(where: { candidate in
+          text[index...].hasPrefix(candidate.label)
+            && isWordBoundary(text, after: text.index(index, offsetBy: candidate.label.count))
+        })
+      {
+        result += bold ? "**\(name)**" : name
+        index = text.index(index, offsetBy: label.count)
+      } else {
+        result.append(text[index])
+        index = text.index(after: index)
+      }
     }
     return result
+  }
+
+  private static func isWordBoundary(_ text: String, before index: String.Index) -> Bool {
+    index == text.startIndex || !isWordCharacter(text[text.index(before: index)])
+  }
+
+  private static func isWordBoundary(_ text: String, after index: String.Index) -> Bool {
+    index == text.endIndex || !isWordCharacter(text[index])
+  }
+
+  private static func isWordCharacter(_ character: Character) -> Bool {
+    character.isLetter || character.isNumber
   }
 }

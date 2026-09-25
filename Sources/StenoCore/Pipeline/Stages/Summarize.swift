@@ -1,18 +1,20 @@
 import Foundation
 
 extension ProcessingPipeline {
-  /// Runs the `MeetingSummarizer` for `templateID` (falling back to the
-  /// first bundled template), persists summary, tasks and decisions, and returns
-  /// the meeting with title, language and summed usage updated. A calendar
-  /// title stays; any other title is replaced by the model's.
-  func summarize(
-    meeting: Meeting, segments: [TranscriptSegment], speakers: [Speaker], templateID: String,
-    priorUsage: LLMUsage?
-  ) async throws -> Meeting {
+  /// Runs the `MeetingSummarizer` for `meeting.templateID` (falling back to
+  /// the first bundled template) and persists summary, tasks and decisions
+  /// with the meeting's title, language and summed usage in one transaction.
+  /// A calendar title stays; any other title is replaced by the model's. The
+  /// caller folds earlier usage (cleanup) into `meeting.llmUsage` first.
+  func summarize(meeting: Meeting, segments: [TranscriptSegment], speakers: [Speaker])
+    async throws -> Meeting
+  {
     let summarizer = dependencies.summarizer
     let store = self.store
     return try await run(.summarize, meetingID: meeting.id) {
-      guard let template = SummaryTemplate.bundled(id: templateID) ?? SummaryTemplate.bundled.first
+      guard
+        let template = SummaryTemplate.bundled(id: meeting.templateID)
+          ?? SummaryTemplate.bundled.first
       else {
         throw PipelineFailure(stage: .summarize, reason: "no bundled summary template")
       }
@@ -25,19 +27,16 @@ extension ProcessingPipeline {
           meeting: input, segments: segments, speakers: speakers, participants: participants,
           knownPeople: people, template: template))
 
-      var updated = meeting
-      updated.templateID = template.id
+      var updated = input
       updated.summary = output.summary
       updated.summary?.templateID = template.id
       if meeting.calendarEventID == nil, !output.title.isEmpty {
         updated.title = output.title
       }
       if let language = output.language { updated.language = language }
-      updated.llmUsage = (priorUsage ?? meeting.llmUsage ?? .zero) + output.usage
+      updated.llmUsage = (meeting.llmUsage ?? .zero) + output.usage
       updated.updatedAt = self.now
-      try await store.save(updated)
-      try await store.replaceSummary(
-        meetingID: meeting.id, output: output, templateID: template.id, now: self.now)
+      try await store.replaceSummary(updated, tasks: output.tasks, decisions: output.decisions)
       return updated
     }
   }

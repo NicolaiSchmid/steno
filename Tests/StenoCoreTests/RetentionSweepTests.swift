@@ -30,8 +30,7 @@ import Testing
     try await store.save(expired)
     var speaker = SampleData.speakers()[1]
     speaker.sampleClipURL = clip
-    try await store.replaceTranscript(
-      meetingID: SampleData.meetingID, segments: [], speakers: [speaker])
+    try await store.replaceTranscript(SampleData.meeting(), segments: [], speakers: [speaker])
 
     var forever = SampleData.meeting()
     forever.id = SampleData.uuid(2)

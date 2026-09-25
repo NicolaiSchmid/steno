@@ -20,13 +20,12 @@ extension ProcessingPipeline {
   /// Decodes the diarized lane again, runs the diarizer, and turns every
   /// cluster into a `Speaker` with a deterministic id, copying the cluster's
   /// embedding, confidence and sample clip range. Each cluster's clip is
-  /// written as 16 kHz WAV to `<meeting folder>/speakers/<speakerID>.wav`.
-  func diarize(asset: AudioAsset, meeting: Meeting, settings: Settings) async throws -> Diarization
-  {
+  /// written as 16 kHz WAV to `RecordingLayout.sampleClip(speakerID:)`
+  /// beside the master.
+  func diarize(asset: AudioAsset, meeting: Meeting) async throws -> Diarization {
     let decoder = dependencies.decoder
     let diarizer = dependencies.diarizer
-    let folder = Self.meetingFolder(meeting.id, settings: settings)
-      .appendingPathComponent("speakers", isDirectory: true)
+    let layout = RecordingLayout(asset: asset)
     return try await run(.diarize, meetingID: meeting.id) {
       guard let lane = Self.diarizedLane(source: meeting.source, lanes: asset.lanes) else {
         return Diarization(speakers: [], clusters: [])
@@ -43,8 +42,8 @@ extension ProcessingPipeline {
             range.lowerBound...min(range.upperBound, range.lowerBound + Self.sampleClipSeconds)
           let clip = buffer.slice(capped)
           if !clip.samples.isEmpty {
-            try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
-            let url = folder.appendingPathComponent("\(id.uuidString).wav")
+            try layout.createDirectories(speakers: true)
+            let url = layout.sampleClip(speakerID: id)
             try WAVWriter.write(clip, to: url)
             clipURL = url
           }

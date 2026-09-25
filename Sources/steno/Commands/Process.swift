@@ -38,7 +38,9 @@ struct Process: AsyncParsableCommand {
   @Option(help: "Summary template id; defaults to the settings' default template.")
   var template: String?
 
-  @Option(name: .customLong("audio-folder"), help: "Where meeting folders are created.")
+  @Option(
+    name: .customLong("audio-folder"),
+    help: "Where this meeting's folder is created; defaults to the settings' audio folder.")
   var audioFolder: String?
 
   @OptionGroup var database: DatabaseOptions
@@ -69,31 +71,28 @@ struct Process: AsyncParsableCommand {
 
   func run() async throws {
     let opened = try Wiring.open(database)
-    var settings = try await opened.settings.load()
-    if let audioFolder {
-      settings.audioFolder = URL(fileURLWithPath: audioFolder, isDirectory: true)
-      try await opened.settings.save(settings)
-    }
-
+    let settings = try await opened.settings.load()
+    // `--audio-folder` is a plain path for this run; the stored setting is
+    // the app's and never changes here.
+    let root = audioFolder.map { URL(fileURLWithPath: $0, isDirectory: true) }
     let meetingID = UUID()
-    let folder = settings.audioFolder.appendingPathComponent(
-      meetingID.uuidString, isDirectory: true)
-    try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+    let layout = RecordingLayout(audioFolder: root ?? settings.audioFolder, meetingID: meetingID)
+    try layout.createDirectories()
     let inputURL = URL(fileURLWithPath: input)
     let info = try WAVAudioDecoder.info(inputURL)
     let duration = Double(info.frameCount) / Double(max(info.sampleRate, 1))
 
     let asset: AudioAsset
     if source == .macCall, let systemLane {
-      let mic = folder.appendingPathComponent("mic.wav")
-      let system = folder.appendingPathComponent("system.wav")
+      let mic = layout.sidecar(.mic)
+      let system = layout.sidecar(.system)
       try FileManager.default.copyItem(at: inputURL, to: mic)
       try FileManager.default.copyItem(at: URL(fileURLWithPath: systemLane), to: system)
       asset = AudioAsset(
         id: UUID(), meetingID: meetingID, url: mic, format: .wav16kInt16, lanes: [.mic, .system],
         sidecars16k: [.mic: mic, .system: system], retention: settings.defaultRetention)
     } else {
-      let recording = folder.appendingPathComponent("recording.wav")
+      let recording = layout.master(.wav16kInt16)
       try FileManager.default.copyItem(at: inputURL, to: recording)
       asset = AudioAsset(
         id: UUID(), meetingID: meetingID, url: recording, format: .wav16kInt16, lanes: [.mixed],

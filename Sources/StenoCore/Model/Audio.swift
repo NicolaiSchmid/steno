@@ -7,6 +7,15 @@ public enum AudioFormat: String, Codable, Sendable, Equatable, Hashable, CaseIte
   case m4aAAC
   /// Fixtures, sample clips and `steno process` input: 16 kHz mono Int16.
   case wav16kInt16
+
+  /// The file extension `RecordingLayout` gives a file in this format.
+  public var fileExtension: String {
+    switch self {
+    case .caf48kFloat32: "caf"
+    case .m4aAAC: "m4a"
+    case .wav16kInt16: "wav"
+    }
+  }
 }
 
 /// How long the audio files of a meeting stay on disk.

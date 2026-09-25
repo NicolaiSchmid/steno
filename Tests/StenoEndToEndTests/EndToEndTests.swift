@@ -43,14 +43,20 @@ import Testing
       id: SampleData.meetingID, title: "Produktstrategie", startedAt: SampleData.startedAt,
       duration: 6, source: .macCall, calendarEventID: "event-1", state: .recording,
       createdAt: SampleData.createdAt, updatedAt: SampleData.createdAt)
+    // Placed the way the capture writer would: master and sidecars in the
+    // meeting folder, so the pipeline's clips and mixdown land beside them.
+    let layout = RecordingLayout(audioFolder: settings.audioFolder, meetingID: meeting.id)
+    try layout.createDirectories()
+    try FileManager.default.copyItem(
+      at: Fixtures.url("audio/conversation-two-lane-6s.wav"), to: layout.master(.wav16kInt16))
+    try FileManager.default.copyItem(
+      at: Fixtures.url("audio/conversation-mic-6s.wav"), to: layout.sidecar(.mic))
+    try FileManager.default.copyItem(
+      at: Fixtures.url("audio/conversation-system-6s.wav"), to: layout.sidecar(.system))
     let asset = AudioAsset(
-      id: SampleData.uuid(70), meetingID: meeting.id,
-      url: Fixtures.url("audio/conversation-two-lane-6s.wav"), format: .wav16kInt16,
-      lanes: [.mic, .system],
-      sidecars16k: [
-        .mic: Fixtures.url("audio/conversation-mic-6s.wav"),
-        .system: Fixtures.url("audio/conversation-system-6s.wav"),
-      ],
+      id: SampleData.uuid(70), meetingID: meeting.id, url: layout.master(.wav16kInt16),
+      format: .wav16kInt16, lanes: [.mic, .system],
+      sidecars16k: [.mic: layout.sidecar(.mic), .system: layout.sidecar(.system)],
       retention: .keepDays(30))
 
     try await pipeline.enqueue(meeting, asset: asset)

@@ -22,7 +22,7 @@ import Testing
     defer { observedHarness.cleanUp() }
 
     let events = await observedHarness.events.subscribe()
-    let (meeting, asset) = observedHarness.meeting(source: .macCall)
+    let (meeting, asset) = try observedHarness.meeting(source: .macCall)
     try await observedHarness.pipeline.enqueue(meeting, asset: asset)
     await observedHarness.pipeline.waitUntilIdle()
 
@@ -49,10 +49,7 @@ import Testing
     #expect(export.tasks.count == 1)
     #expect(export.decisions.count == 1)
     let audio = try #require(export.audio)
-    #expect(
-      audio.mixdownURL
-        == ProcessingPipeline.meetingFolder(meeting.id, settings: observedHarness.settings)
-        .appendingPathComponent("audio.m4a"))
+    #expect(audio.mixdownURL == RecordingLayout(asset: asset).mixdown(.m4aAAC))
     #expect(FileManager.default.fileExists(atPath: try #require(audio.mixdownURL).path))
     #expect(audio.expiresAt == PipelineHarness.now.addingTimeInterval(30 * 86_400))
     #expect(
@@ -91,7 +88,7 @@ import Testing
   @Test func observeMeetingSeesTheStatesInOrder() async throws {
     let harness = try await PipelineHarness()
     defer { harness.cleanUp() }
-    let (meeting, asset) = harness.meeting(source: .macInPerson)
+    let (meeting, asset) = try harness.meeting(source: .macInPerson)
     var iterator = harness.store.observeMeeting(id: meeting.id).makeAsyncIterator()
     #expect(try await iterator.next() == .some(nil))
     try await harness.pipeline.enqueue(meeting, asset: asset)
@@ -114,7 +111,7 @@ import Testing
   @Test func inPersonHasNoMeAndAssignsRoomSegmentsToClusters() async throws {
     let harness = try await PipelineHarness()
     defer { harness.cleanUp() }
-    let (meeting, asset) = harness.meeting(source: .macInPerson)
+    let (meeting, asset) = try harness.meeting(source: .macInPerson)
     try await harness.pipeline.enqueue(meeting, asset: asset)
     await harness.pipeline.waitUntilIdle()
     let export = try await harness.store.export(meetingID: meeting.id)
@@ -130,7 +127,7 @@ import Testing
     struct Boom: Error {}
     let harness = try await PipelineHarness(summarizer: FakeSummarizer(failure: Boom()))
     defer { harness.cleanUp() }
-    let (meeting, asset) = harness.meeting(source: .macCall)
+    let (meeting, asset) = try harness.meeting(source: .macCall)
     try await harness.store.save(meeting, asset: asset)
     let error = await #expect(throws: PipelineFailure.self) {
       try await harness.pipeline.process(assetID: asset.id)
@@ -146,14 +143,15 @@ import Testing
   @Test func retentionZeroExpiresImmediately() async throws {
     let harness = try await PipelineHarness()
     defer { harness.cleanUp() }
-    let (meeting, asset) = harness.meeting(source: .macInPerson, retention: .deleteAfterProcessing)
+    let (meeting, asset) = try harness.meeting(
+      source: .macInPerson, retention: .deleteAfterProcessing)
     try await harness.pipeline.enqueue(meeting, asset: asset)
     await harness.pipeline.waitUntilIdle()
     let stored = try #require(try await harness.store.asset(id: asset.id))
     #expect(stored.expiresAt == PipelineHarness.now)
     let forever = try await PipelineHarness()
     defer { forever.cleanUp() }
-    let (m2, a2) = forever.meeting(source: .macInPerson, retention: .keepForever)
+    let (m2, a2) = try forever.meeting(source: .macInPerson, retention: .keepForever)
     try await forever.pipeline.enqueue(m2, asset: a2)
     await forever.pipeline.waitUntilIdle()
     #expect(try await forever.store.asset(id: a2.id)?.expiresAt == nil)
@@ -162,7 +160,7 @@ import Testing
   @Test func rerunSummaryAndRedeliver() async throws {
     let harness = try await PipelineHarness()
     defer { harness.cleanUp() }
-    let (meeting, asset) = harness.meeting(source: .macInPerson)
+    let (meeting, asset) = try harness.meeting(source: .macInPerson)
     try await harness.pipeline.enqueue(meeting, asset: asset)
     await harness.pipeline.waitUntilIdle()
     let events = await harness.events.subscribe()
@@ -229,7 +227,7 @@ import Testing
     let harness = try await PipelineHarness(cleaner: PassthroughCleaner(failure: Boom()))
     defer { harness.cleanUp() }
     let events = await harness.events.subscribe()
-    let (meeting, asset) = harness.meeting(source: .macCall)
+    let (meeting, asset) = try harness.meeting(source: .macCall)
     try await harness.store.save(meeting, asset: asset)
     let error = await #expect(throws: PipelineFailure.self) {
       try await harness.pipeline.process(assetID: asset.id)
@@ -266,11 +264,11 @@ import Testing
     #expect(try await harness.store.meetings().isEmpty)
   }
 
-  @Test func rerunSummaryFailureMarksFailedAndKeepsThePreviousSummary() async throws {
+  @Test func rerunSummaryFailureIsThrownAndLeavesTheReadyMeetingAlone() async throws {
     struct Boom: Error {}
     let harness = try await PipelineHarness()
     defer { harness.cleanUp() }
-    let (meeting, asset) = harness.meeting(source: .macInPerson)
+    let (meeting, asset) = try harness.meeting(source: .macInPerson)
     try await harness.pipeline.enqueue(meeting, asset: asset)
     await harness.pipeline.waitUntilIdle()
     let before = try await harness.store.export(meetingID: meeting.id)
@@ -284,19 +282,111 @@ import Testing
     }
     #expect(error == PipelineFailure(stage: .summarize, reason: "Boom()"))
     let after = try await harness.store.export(meetingID: meeting.id)
-    #expect(after.meeting.state == .failed(reason: "summarize: Boom()"))
-    #expect(after.meeting.summary == before.meeting.summary)
-    #expect(after.meeting.templateID == "default")
-    #expect(after.segments == before.segments)
-    #expect(after.tasks == before.tasks)
-    #expect(after.decisions == before.decisions)
+    #expect(after == before, "state, summary, template, transcript, tasks and decisions are kept")
     #expect(await failing.dispatcher.calls.count == 0)
+  }
+
+  @Test func editsMadeWhileTheMeetingIsProcessingSurvive() async throws {
+    let store = try MeetingStore.inMemory()
+    var diarizer = FakeDiarizer()
+    diarizer.onDiarize = {
+      // The user types notes and tags while STT runs; the app saves the row.
+      _ = try? await store.update(meetingID: SampleData.meetingID, now: SampleData.updatedAt) {
+        $0.scratchpad = "Nachfassen wegen Budget."
+        $0.tags = ["strategie"]
+      }
+    }
+    let harness = try await PipelineHarness(diarizer: diarizer, sharedStore: store)
+    defer { harness.cleanUp() }
+    let (meeting, asset) = try harness.meeting(source: .macCall)
+    try await harness.pipeline.enqueue(meeting, asset: asset)
+    await harness.pipeline.waitUntilIdle()
+
+    let stored = try #require(try await store.meeting(id: meeting.id))
+    #expect(stored.state == .ready)
+    #expect(stored.scratchpad == "Nachfassen wegen Budget.")
+    #expect(stored.tags == ["strategie"])
+    #expect(stored.title == "Summary of Untitled", "the pipeline's own columns still land")
+    #expect(stored.summary != nil)
+
+    // The same holds for a rerun started from a stale snapshot.
+    try await store.update(meetingID: meeting.id, now: SampleData.updatedAt) {
+      $0.scratchpad = "Edited during the rerun."
+    }
+    try await harness.pipeline.rerunSummary(meetingID: meeting.id, templateID: "interview")
+    let rerun = try #require(try await store.meeting(id: meeting.id))
+    #expect(rerun.scratchpad == "Edited during the rerun.")
+    #expect(rerun.templateID == "interview")
+  }
+
+  @Test func aSecondOperationOnAnInFlightMeetingIsRefused() async throws {
+    let store = try MeetingStore.inMemory()
+    let gate = Gate()
+    var diarizer = FakeDiarizer()
+    diarizer.onDiarize = { await gate.wait() }
+    let harness = try await PipelineHarness(diarizer: diarizer, sharedStore: store)
+    defer { harness.cleanUp() }
+    let (meeting, asset) = try harness.meeting(source: .macInPerson)
+    try await harness.store.save(meeting, asset: asset)
+
+    let first = Task { try await harness.pipeline.process(assetID: asset.id) }
+    await gate.waitUntilBlocked()
+    let second = await #expect(throws: PipelineFailure.self) {
+      try await harness.pipeline.process(assetID: asset.id)
+    }
+    #expect(second?.reason.contains("already being processed") == true)
+    await #expect(throws: PipelineFailure.self) {
+      try await harness.pipeline.rerunSummary(meetingID: meeting.id, templateID: "default")
+    }
+    await #expect(throws: PipelineFailure.self) {
+      try await harness.pipeline.redeliver(meetingID: meeting.id)
+    }
+    await #expect(throws: PipelineFailure.self) {
+      try await harness.pipeline.enqueue(meeting, asset: asset)
+    }
+    await gate.open()
+    try await first.value
+
+    #expect(await harness.engine.calls.count == 1)
+    #expect(await harness.summarizer.calls.count == 1)
+    #expect(await harness.dispatcher.calls.count == 1)
+    #expect(try await harness.store.meeting(id: meeting.id)?.state == .ready)
+    // Once the run is over the meeting is free again.
+    try await harness.pipeline.redeliver(meetingID: meeting.id)
+    #expect(await harness.dispatcher.calls.count == 2)
+  }
+
+  /// Blocks one task until opened; tests use it to hold a stage mid-flight.
+  actor Gate {
+    private var opened = false
+    private var waiting: [CheckedContinuation<Void, Never>] = []
+    private var blocked: [CheckedContinuation<Void, Never>] = []
+
+    func wait() async {
+      if opened { return }
+      await withCheckedContinuation { continuation in
+        waiting.append(continuation)
+        for observer in blocked { observer.resume() }
+        blocked.removeAll()
+      }
+    }
+
+    func waitUntilBlocked() async {
+      if !waiting.isEmpty { return }
+      await withCheckedContinuation { blocked.append($0) }
+    }
+
+    func open() {
+      opened = true
+      for continuation in waiting { continuation.resume() }
+      waiting.removeAll()
+    }
   }
 
   @Test func redeliverHandsTheStoredReceiptToTheDestination() async throws {
     let harness = try await PipelineHarness()
     defer { harness.cleanUp() }
-    let (meeting, asset) = harness.meeting(source: .macInPerson)
+    let (meeting, asset) = try harness.meeting(source: .macInPerson)
     try await harness.pipeline.enqueue(meeting, asset: asset)
     await harness.pipeline.waitUntilIdle()
     var delivery = try #require(try await harness.store.deliveries(meetingID: meeting.id).first)
@@ -329,7 +419,8 @@ import Testing
     try FileManager.default.copyItem(at: Fixtures.url("audio/conversation-mic-6s.wav"), to: mic)
     try FileManager.default.copyItem(
       at: Fixtures.url("audio/conversation-system-6s.wav"), to: system)
-    let (meeting, template) = harness.meeting(source: .macCall, retention: .deleteAfterProcessing)
+    let (meeting, template) = try harness.meeting(
+      source: .macCall, retention: .deleteAfterProcessing)
     var asset = template
     asset.url = master
     asset.sidecars16k = [.mic: mic, .system: system]
@@ -379,10 +470,9 @@ import Testing
     let audio = try #require(export.audio)
     #expect(audio.format == .m4aAAC)
     #expect(audio.mixdownURL == nil)
-    let folder = ProcessingPipeline.meetingFolder(meetingID, settings: harness.settings)
-    #expect(audio.url.path == folder.appendingPathComponent("recording.m4a").path)
-    #expect(
-      !FileManager.default.fileExists(atPath: folder.appendingPathComponent("audio.m4a").path))
+    let layout = RecordingLayout(audioFolder: harness.settings.audioFolder, meetingID: meetingID)
+    #expect(audio.url.path == layout.master(.m4aAAC).path)
+    #expect(!FileManager.default.fileExists(atPath: layout.mixdown(.m4aAAC).path))
     #expect(audio.expiresAt == PipelineHarness.now.addingTimeInterval(30 * 86_400))
     #expect(export.speakers.allSatisfy { $0.sampleClipURL != nil })
   }
