@@ -507,3 +507,31 @@ Review application (2026-09-25, PR #3; C = correctness, E = elegance, T = testin
   `search` sorts merged hits by rank, meetingID, segmentID, not chronologically within a meeting
   (C note c); splitting the multi-behaviour tests and `@Test(arguments:)` tables (E12); a
   `RetentionSweep` test for a store failure mid-sweep (no seam to inject one).
+
+Additions for the macOS app (2026-09-25, PR #82, from the PR #75 reviews and issues #77, #78; the
+app adopts them after #75 merges):
+
+- `MeetingStore.delete(meetingID:)` removes the meeting with its cascades, FTS rows, handover
+  receipt and meeting folder (or, for an asset in a shared folder, only the files the rows name),
+  refuses `.recording` and `.processing` (`MeetingStoreError.meetingBusy`) and posts
+  `MeetingEvent.deleted`. For that the store owns a `MeetingEventBus` (`events`, injectable) and
+  `PipelineDependencies.events` defaults to `store.events`: one bus for the app to subscribe to.
+- Migration `v2`: `speakerNameSuggestion` (speakerID primary key referencing `speaker`, meetingID,
+  name, confidence, evidence; both cascading). The summarize stage passes
+  `SummaryOutput.speakerNames` to `replaceSummary(_:tasks:decisions:speakerNames:)`, which keeps
+  named suggestions for the meeting's speakers, strongest per speaker; `nameSuggestions(meetingID:)`
+  reads them; `confirm` drops the confirmed speaker's row. Nameless suggestions are not stored.
+- `LocalRecordingIntake` (`Storage/LocalRecordingIntake.swift`) is the Mac recording transaction,
+  beside `RecordingIntake` for the phone: `begin` (`.recording` row, default title, deduplicated
+  `.them` participants through `MeetingStore.save(_:participants:)`), `complete` (duration,
+  retention from `Settings` at completion time unless given, `expiresAt` cleared, enqueue as
+  `.queued`, `.failed` on error), `fail`. `RecordingResult` is the asset plus duration so core
+  needs no capture types. Launch reconciliation: `MeetingStore.failInterruptedRecordings(reason:
+  now:)` (one write over `.recording` rows) and `ProcessingPipeline.resumeUnfinished()` (re-runs
+  `.queued` and `.processing` oldest first through `MeetingStore.meetings(inStates:)`, fails a
+  meeting without an asset row, skips meetings in flight).
+- `SummaryMarkdown.sections(for:) -> [RenderedSection]` (id, heading, bullets as inline Markdown
+  with names substituted; `body`, `markdown`); `render` is the join, bytes unchanged.
+- `MeetingEvent.retentionApplied(meetingID:)` is posted by the retention stage after `expiresAt`
+  is written and is the app's sweep trigger; the `.ready` row change precedes `deliver` and
+  `retention` and is not one.
