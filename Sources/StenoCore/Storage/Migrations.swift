@@ -13,12 +13,13 @@ public enum Migrations {
   public static func migrator() -> DatabaseMigrator {
     var migrator = DatabaseMigrator()
     migrator.registerMigration("v1", migrate: v1)
+    migrator.registerMigration("v2", migrate: v2)
     return migrator
   }
 
   /// Every identifier in registration order; tests compare it with what a
   /// database has applied.
-  public static let identifiers = ["v1"]
+  public static let identifiers = ["v1", "v2"]
 
   /// Internal so `SchemaSnapshotTests` can run each version on its own.
   static func v1(_ db: Database) throws {
@@ -180,5 +181,20 @@ public enum Migrations {
       t.column("title")
       t.column("summaryText")
     }
+  }
+
+  /// The model's name guesses per speaker (#78): one row per speaker,
+  /// written by the summarize stage, gone with the speaker or the meeting.
+  static func v2(_ db: Database) throws {
+    try db.create(table: "speakerNameSuggestion") { t in
+      t.primaryKey("speakerID", .text).references("speaker", onDelete: .cascade)
+      t.column("meetingID", .text).notNull().references("meeting", onDelete: .cascade)
+      t.column("name", .text).notNull()
+      t.column("confidence", .double).notNull()
+      t.column("evidence", .text).notNull()
+    }
+    try db.create(
+      index: "speakerNameSuggestion_meetingID", on: "speakerNameSuggestion",
+      columns: ["meetingID"])
   }
 }

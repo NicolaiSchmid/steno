@@ -136,14 +136,19 @@ public final class MeetingStore: Sendable {
   }
 
   /// One transaction: the meeting's processing columns (summary JSON and
-  /// `summaryText` among them) plus the meeting's tasks and decisions,
-  /// replaced. Decision ids derive from the meeting id so re-runs are stable.
-  public func replaceSummary(_ meeting: Meeting, tasks: [MeetingTask], decisions: [String])
-    async throws
-  {
+  /// `summaryText` among them) plus the meeting's tasks, decisions and
+  /// speaker name suggestions, replaced. Decision ids derive from the meeting
+  /// id so re-runs are stable. Of `speakerNames`, only suggestions that carry
+  /// a name and point at one of the meeting's speakers are kept, the
+  /// strongest per speaker.
+  public func replaceSummary(
+    _ meeting: Meeting, tasks: [MeetingTask], decisions: [String],
+    speakerNames: [SpeakerNameSuggestion] = []
+  ) async throws {
     let meetingID = meeting.id
     try await writer.write { db in
       try Self.writeProcessingResults(of: meeting, db)
+      try Self.replaceNameSuggestions(speakerNames, meetingID: meetingID, db)
       try MeetingTaskRow.filter(MeetingTaskRow.Columns.meetingID == meetingID.uuidString)
         .deleteAll(db)
       for task in tasks {
@@ -158,6 +163,37 @@ public final class MeetingStore: Sendable {
           text: text)
         try DecisionRow(decision).insert(db)
       }
+    }
+  }
+
+  static func replaceNameSuggestions(
+    _ suggestions: [SpeakerNameSuggestion], meetingID: UUID, _ db: Database
+  ) throws {
+    let key = meetingID.uuidString
+    try SpeakerNameSuggestionRow.filter(SpeakerNameSuggestionRow.Columns.meetingID == key)
+      .deleteAll(db)
+    let speakerIDs = try Set(
+      UUID.fetchAll(
+        db, SpeakerRow.filter(SpeakerRow.Columns.meetingID == key).select(SpeakerRow.Columns.id)))
+    // Ascending, so a duplicate speaker ends with its strongest suggestion.
+    for suggestion in suggestions.sorted(by: { $0.confidence < $1.confidence })
+    where speakerIDs.contains(suggestion.speakerID) {
+      try SpeakerNameSuggestionRow(suggestion, meetingID: meetingID)?.save(db)
+    }
+  }
+
+  /// The model's guess who each speaker is, at most one per speaker, in
+  /// speaker id order: written with every summary, removed by `confirm` and
+  /// with the speaker or the meeting. Never applied automatically; the
+  /// review sheet offers it beside the cosine match and the calendar
+  /// attendees (#78).
+  public func nameSuggestions(meetingID: UUID) async throws -> [SpeakerNameSuggestion] {
+    try await writer.read { db in
+      try SpeakerNameSuggestionRow
+        .filter(SpeakerNameSuggestionRow.Columns.meetingID == meetingID.uuidString)
+        .order(SpeakerNameSuggestionRow.Columns.speakerID)
+        .fetchAll(db)
+        .map(\.suggestion)
     }
   }
 

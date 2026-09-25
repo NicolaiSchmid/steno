@@ -386,6 +386,17 @@ import Testing
     #expect(export.segments == SampleData.segments())
   }
 
+  @Test func theModelsNameGuessesArePersistedWithTheSummary() async throws {
+    let canned = SampleData.summaryOutput()
+    let (harness, meeting) = try await Self.prepared(summarizer: FakeSummarizer(canned: canned))
+    defer { harness.cleanUp() }
+    _ = try await harness.pipeline.summarize(
+      meeting: meeting, segments: SampleData.segments(), speakers: SampleData.speakers())
+    #expect(
+      try await harness.store.nameSuggestions(meetingID: meeting.id) == canned.speakerNames)
+    #expect(canned.speakerNames.map(\.name) == ["Jérôme"])
+  }
+
   @Test func calendarTitlesAndEmptyModelTitlesLeaveTheTitleAlone() async throws {
     var canned = SampleData.summaryOutput()
     canned.title = "Model title"

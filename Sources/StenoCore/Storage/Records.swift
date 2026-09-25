@@ -256,6 +256,41 @@ struct SpeakerRow: StenoRecord {
   }
 }
 
+// MARK: - speakerNameSuggestion
+
+struct SpeakerNameSuggestionRow: StenoRecord {
+  static let databaseTableName = "speakerNameSuggestion"
+
+  var speakerID: UUID
+  var meetingID: UUID
+  var name: String
+  var confidence: Double
+  var evidence: String
+
+  enum Columns {
+    static let speakerID = Column(CodingKeys.speakerID)
+    static let meetingID = Column(CodingKeys.meetingID)
+  }
+
+  /// nil for a suggestion without a name: the model found no evidence, and
+  /// there is nothing for the review sheet to show.
+  init?(_ suggestion: SpeakerNameSuggestion, meetingID: UUID) {
+    guard let name = suggestion.name?.trimmingCharacters(in: .whitespacesAndNewlines),
+      !name.isEmpty
+    else { return nil }
+    speakerID = suggestion.speakerID
+    self.meetingID = meetingID
+    self.name = name
+    confidence = suggestion.confidence
+    evidence = suggestion.evidence
+  }
+
+  var suggestion: SpeakerNameSuggestion {
+    SpeakerNameSuggestion(
+      speakerID: speakerID, name: name, confidence: confidence, evidence: evidence)
+  }
+}
+
 // MARK: - transcriptSegment
 
 struct TranscriptSegmentRow: StenoRecord {

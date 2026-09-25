@@ -206,6 +206,15 @@ import Testing
     #expect(
       Set(them.compactMap(\.personID)) == Set(SampleData.persons().map(\.id)),
       "each cluster is suggested to its own person")
+    // The stub's analysis names "Speaker 1" from a quote; the summarize stage
+    // persists it for the review sheet (#78).
+    let speakerOne = try #require(export.speakers.first { $0.clusterLabel == "Speaker 1" })
+    #expect(
+      try await store.nameSuggestions(meetingID: meeting.id) == [
+        SpeakerNameSuggestion(
+          speakerID: speakerOne.id, name: "Jérôme", confidence: 0.6,
+          evidence: "Me: \"fake segment 1\"")
+      ])
     #expect(
       try Data(contentsOf: vault.appendingPathComponent("\(folder)/\(mixdown)"))
         == (try Data(contentsOf: layout.mixdown(mixdownFormat))),
