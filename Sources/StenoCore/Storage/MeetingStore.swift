@@ -223,20 +223,7 @@ public final class MeetingStore: Sendable {
   private func stream<Value: Sendable>(
     _ observation: ValueObservation<ValueReducers.Fetch<Value>>
   ) -> AsyncThrowingStream<Value, any Error> {
-    let writer = self.writer
-    return AsyncThrowingStream { continuation in
-      let task = Task {
-        do {
-          for try await value in observation.values(in: writer, scheduling: .task) {
-            continuation.yield(value)
-          }
-          continuation.finish()
-        } catch {
-          continuation.finish(throwing: error)
-        }
-      }
-      continuation.onTermination = { _ in task.cancel() }
-    }
+    observationStream(observation, in: writer)
   }
 
   // MARK: - Maintenance
