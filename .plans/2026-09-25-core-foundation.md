@@ -393,3 +393,51 @@ executable (spike S2).
 - `SpeakerMemory.forget(personID:)` and person deletion: not in v1 scope; merging split speakers
   is covered by `mergePersons` and `mergeSpeakers`.
 - Core's own sample-clip range picker: the diarizer chooses the range; core writes the file.
+
+## Deviations (implementation)
+
+Recorded by the implementation on 2026-09-25 (PR #3). Each line names what the code does
+differently from the text above and why.
+
+- `Package.swift` does not set `.enableUpcomingFeature("InferSendableFromCaptures")`: Swift 6
+  language mode already enables it and the flag only produces a warning per target. GRDB's advice
+  targets Swift 5 mode.
+- Payload enums (`MeetingState`, `AudioRetention`, `DeliveryStatus`, `SpeakerAssignment`,
+  `HandoverReceipt.State`, `LLMResponseFormat`) encode as a bare case name or a one-key object
+  (`"ready"`, `{"failed": "reason"}`, `{"keepDays": 30}`) through `CaseCoding`, not the synthesized
+  `{"keepDays": {"_0": 30}}`: `meeting.json` is read by agents and the handover wire mirrors it.
+- `Locale.Language` encodes as its explicit BCP-47 tag through the `@LanguageTag` property wrapper.
+  Foundation's public `languageCode`, `script` and `region` accessors add likely subtags (`de`
+  reports `Latn`) and the stored components are package-internal, so the explicit components are
+  read through the language's own synthesized `Codable` form (`{"components": {...}}`).
+- Pipeline stage functions are `internal`, not `private`: they live one per file under `Stages/`
+  as the plan asks, and Swift's `private` does not span files. Tests call them through `@testable`.
+- `RecordingIntake` has an `enqueue` closure seam beside the plan's `init(store:settings:pipeline:)`
+  so the intake tests count calls without a pipeline; the pipeline init forwards to it.
+- `MeetingStore` gained `save(_:asset:)` (one transaction for `enqueue`), `participants(meetingID:)`,
+  `save(_ participant:)`, `speakers(meetingID:)`, `save(_ speaker:)`, `asset(meetingID:)`,
+  `person(id:)` and `device(id:)`; `setState` and `replaceSummary` take `now:` so wall time stays
+  injected. `replaceSummary` derives decision ids from the meeting id (`derivedID`) so re-runs are
+  stable. `SearchHit` is returned from raw FTS5 SQL ordered by `rank`, which is what
+  `.order(Column.rank)` compiles to.
+- The summarize stage replaces `Meeting.title` with the model's title unless `calendarEventID` is
+  set (a calendar title is authoritative); the plan did not say.
+- Sample clips and the mixdown are written under `Settings.audioFolder/<meetingID>/`, not beside
+  the master, so `steno process` on a fixture never writes into `Tests/Fixtures/`.
+- `SettingsStore` stores one row per `Settings` property as a JSON fragment; missing and unknown
+  rows are ignored so a property can be added without a migration.
+- `ContentHash` wraps SHA-256 through CryptoKit on Apple platforms and a portable implementation
+  elsewhere; the fixture manifest and delivery receipts use it. `FixtureGenerator` uses `sin` from
+  libm on an integer phase accumulator; CI on macOS confirms the committed bytes match.
+- `Snapshot.assert` takes a `root:` parameter (default `Tests/Fixtures/`) so it can test itself, and
+  writes `<name>.actual` beside a mismatching golden; `swift-ci.yml` uploads those files.
+- Spike S2 outcome: `Bundle.module` resolves for `steno` run from `.build/debug` (the CLI tests
+  load the templates through the binary). A bare binary copied elsewhere without its
+  `steno_StenoCore.bundle` is not supported; the app gets the bundle through Xcode's SwiftPM
+  resource handling. The string-literal fallback was not needed.
+- `swift-ci.yml` pins Xcode 16.4 (Swift 6.1, the version GRDB 7.11 requires and the version
+  `swift format` was run with locally) and runs `swift build --build-tests` before
+  `swift test --skip-build`, so build failures and test failures are separate steps.
+- `StenoPaths` reads `HOME` from the environment before asking Foundation: swift-corelibs
+  Foundation ignores the variable in `homeDirectoryForCurrentUser`, which the CLI tests' temporary
+  home depends on.
