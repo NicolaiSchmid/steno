@@ -69,9 +69,9 @@ public actor CaptureSession {
     }
   }
 
-  /// Replaced by the Speex canceller once it lands; until then a passthrough.
+  /// SpeexDSP with the 200 ms tail.
   static func defaultEchoCanceller(sampleRate: Double, frameSize: Int) throws -> any EchoCanceller {
-    try PassthroughEchoCanceller(sampleRate: sampleRate, frameSize: frameSize)
+    try SpeexEchoCanceller(sampleRate: sampleRate, frameSize: frameSize)
   }
 
   /// Every state change from now on, starting with the current state.
