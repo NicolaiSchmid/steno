@@ -26,9 +26,16 @@ final class MeetingDetailViewModelTests: XCTestCase {
     model.saveScratchpad("ab")
     model.saveScratchpad("abc")
     XCTAssertEqual(model.scratchpadSaves, 0)
-    _ = await clock.waitForSleepers(1)
-    clock.advance(by: MeetingDetailViewModel.scratchpadDebounce)
-    await TestSupport.waitUntil("one save") { model.scratchpadSaves == 1 }
+    // The superseded tasks may also hold sleepers on this clock, so the
+    // clock is advanced until the live task has saved; only one save can
+    // ever happen because only one task survives cancellation.
+    for _ in 0..<20 where model.scratchpadSaves == 0 {
+      _ = await clock.waitForSleepers(1)
+      clock.advance(by: MeetingDetailViewModel.scratchpadDebounce)
+      for _ in 0..<20 where model.scratchpadSaves == 0 {
+        try await Task.sleep(for: .milliseconds(10))
+      }
+    }
     XCTAssertEqual(model.scratchpadSaves, 1)
     let stored = try await environment.store.meeting(id: SampleData.meetingID)
     XCTAssertEqual(stored?.scratchpad, "abc")

@@ -176,7 +176,9 @@ final class MeetingDetailViewModel: Identifiable {
       } catch {
         return
       }
-      guard let self else { return }
+      // A superseded edit's task may still wake (a clock that resumes
+      // cancelled sleepers); only the live one saves.
+      guard let self, !Task.isCancelled else { return }
       // Clear the handle first: `flushScratchpad` cancels a pending task,
       // and cancelling this one would abort the GRDB write inside it.
       self.scratchpadTask = nil
@@ -185,6 +187,7 @@ final class MeetingDetailViewModel: Identifiable {
   }
 
   /// Saves the pending text now (the view going away, a selection change).
+  /// A failed write keeps the text pending for the next flush.
   func flushScratchpad() async {
     scratchpadTask?.cancel()
     scratchpadTask = nil
@@ -194,6 +197,7 @@ final class MeetingDetailViewModel: Identifiable {
       try await store.update(meetingID: id, now: now()) { $0.scratchpad = text }
       scratchpadSaves += 1
     } catch {
+      if pendingScratchpad == nil { pendingScratchpad = text }
       self.error = "Scratchpad could not be saved: \(error)"
     }
   }
