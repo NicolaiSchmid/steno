@@ -2,9 +2,20 @@ import Foundation
 import StenoCore
 
 /// Turns the diarizer's turns and chunks into `StenoCore.DiarizationResult`:
-/// one `SpeakerCluster` per speaker label, labelled "Speaker n" in order of
-/// first speech, with merged ranges, the normalised cluster embedding and
-/// the sample clip. Pure, so the mapping is tested without models.
+/// one `SpeakerCluster` per speaker label that has a turn, labelled
+/// "Speaker n" in order of first speech, with merged ranges, the normalised
+/// cluster embedding and the sample clip. Pure, so the mapping is tested
+/// without models.
+///
+/// The turns are the framework's final word on who spoke when (frame voting
+/// and post-processing over the whole recording); the chunks are the
+/// per-window embeddings that fed clustering, and a chunk's span is the
+/// local speaker's extent inside a ten-second window, not a turn. A cluster
+/// label that appears only in chunks lost every frame vote, so it gets no
+/// speaker: promoting it would invent a speaker whose range overlaps the real
+/// ones and whose sample clip plays somebody else (seen with the real model
+/// on a two-voice `say` fixture, where it produced a third speaker spanning
+/// 4.00 to 9.35 s over the two real ones).
 enum DiarizationMapping {
   /// `chunks` arrive without a quality (the framework reports none per
   /// chunk); each takes the quality of the turn it overlaps most first.
@@ -17,18 +28,11 @@ enum DiarizationMapping {
       if turnsByLabel[turn.speakerLabel] == nil { order.append(turn.speakerLabel) }
       turnsByLabel[turn.speakerLabel, default: []].append(turn)
     }
-    // Speakers that only have chunks (no turn survived post-processing)
-    // still get a cluster, after the ones that spoke.
-    for chunk in chunks.sorted(by: { $0.start < $1.start })
-    where turnsByLabel[chunk.speakerLabel] == nil && !order.contains(chunk.speakerLabel) {
-      order.append(chunk.speakerLabel)
-    }
 
     let clusters = order.enumerated().map { index, label -> SpeakerCluster in
       let ownTurns = turnsByLabel[label] ?? []
       let ownChunks = chunks.filter { $0.speakerLabel == label }
-      var ranges = merged(ownTurns.map { $0.start...max($0.start, $0.end) })
-      if ranges.isEmpty { ranges = merged(ownChunks.map(\.range)) }
+      let ranges = merged(ownTurns.map { $0.start...max($0.start, $0.end) })
       // Without chunks the turns carry the quality (and no embedding).
       let scored =
         ownChunks.isEmpty
