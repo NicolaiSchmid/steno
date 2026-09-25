@@ -1,10 +1,12 @@
 import Foundation
 import StenoCore
+import StenoSpeech
 import Testing
 
 /// The one real-pipeline test across modules. Core creates it with fakes
 /// everywhere; each module workstream's last step replaces its own fake with
-/// the real type. No models, no network.
+/// the real type. No models, no network. Speech: `CosineSpeakerMemory` over
+/// the store is real; the engine and diarizer stay fakes.
 @Suite struct EndToEndTests {
   @Test func macCallFixtureLandsInVault() async throws {
     let directory = try Fixtures.temporaryDirectory("e2e")
@@ -29,7 +31,7 @@ import Testing
         decoder: WAVAudioDecoder(),
         speechEngine: FakeSpeechEngine(),
         diarizer: FakeDiarizer(),
-        speakerMemory: InMemorySpeakerMemory(people: SampleData.persons()),
+        speakerMemory: CosineSpeakerMemory(store: store),
         cleaner: cleaner,
         summarizer: summarizer,
         dispatcher: dispatcher,
@@ -80,6 +82,14 @@ import Testing
     #expect(export.meeting.state == .ready)
     #expect(export.segments.count == 12)
     #expect(export.speakers.map(\.clusterLabel) == ["Me", "Speaker 1", "Speaker 2"])
+    // The fake diarizer's axis embeddings match the pre-enrolled people
+    // through the real cosine memory: every "them" speaker is suggested.
+    let them = export.speakers.filter { $0.clusterLabel != "Me" }
+    #expect(them.count == 2)
+    #expect(them.allSatisfy { $0.assignment.kind == .suggested }, "\(them.map(\.assignment))")
+    #expect(
+      Set(them.compactMap(\.personID)) == Set(SampleData.persons().map(\.id)),
+      "each cluster is suggested to its own person")
     #expect(receipt.files.first?.sha256 == ContentHash.sha256(json))
     #expect(!SummaryMarkdown.render(export).isEmpty)
     try Snapshot.assert(
