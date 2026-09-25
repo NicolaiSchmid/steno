@@ -215,10 +215,13 @@ actor HandoverEngine: RequestHandling {
     }
   }
 
-  /// Writes the receipt and tells the observers.
+  /// Writes the receipt and tells the observers. Memory is updated before
+  /// the awaited save: the actor is reentrant at that `await`, and the phone
+  /// keeps two chunks in flight, so the next request must already see this
+  /// one's chunk or it would persist a stale copy over it.
   func persist(_ receipt: HandoverReceipt) async throws {
-    try await store.save(receipt)
     activeReceipts[receipt.recordingID] = receipt
+    try await store.save(receipt)
     receiptUpdates.send(receiptsSnapshot)
   }
 }

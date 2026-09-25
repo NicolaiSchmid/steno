@@ -37,9 +37,13 @@ extension HandoverEngine {
         return .problem(.conflict, "metadata differs from the first announcement")
       }
       var receipt = existing
-      if !inbox.hasPartial(recordingID) || inbox.loadMetadata(recordingID) == nil {
+      if !inbox.hasVerified(recordingID, format: metadata.format),
+        !inbox.hasPartial(recordingID) || inbox.loadMetadata(recordingID) == nil
+      {
         // The partial is gone (a sweep, a crash before the first chunk):
-        // start over with the same receipt.
+        // start over with the same receipt. A verified file waiting for a
+        // second intake attempt keeps its chunk set instead, so the phone's
+        // retry (announce, then complete) sends no chunk twice.
         do {
           try inbox.begin(metadata)
         } catch {
@@ -228,12 +232,14 @@ extension HandoverEngine {
     return Wire.RecordingStatus(state: receipt.state.kind, receivedChunks: receipt.receivedChunks)
   }
 
-  /// The receipt from memory or the store.
+  /// The receipt from memory or the store. Another request may have loaded
+  /// and advanced it while the store read was awaited; memory wins then.
   func receipt(_ recordingID: UUID) async -> HandoverReceipt? {
     if let active = activeReceipts[recordingID] { return active }
     guard let stored = try? await store.handoverReceipt(recordingID: recordingID) else {
       return nil
     }
+    if let active = activeReceipts[recordingID] { return active }
     activeReceipts[recordingID] = stored
     return stored
   }
