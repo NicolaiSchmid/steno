@@ -96,6 +96,50 @@ describe("parsePairingPayload", () => {
 		});
 	});
 
+	it("rejects a fingerprint or secret that is not exactly 32 bytes", () => {
+		for (const length of [31, 33, 64]) {
+			const wrong = Buffer.alloc(length, 0xcd).toString("base64url");
+			expect(parsePairingPayload(url({ fp: wrong }), now)).toEqual({
+				ok: false,
+				reason: "bad-encoding",
+			});
+			expect(parsePairingPayload(url({ secret: wrong }), now)).toEqual({
+				ok: false,
+				reason: "bad-encoding",
+			});
+		}
+		// Standard-alphabet characters and padding never belong in the QR.
+		expect(parsePairingPayload(url({ fp: `${urlSafe(FP)}=` }), now)).toEqual({
+			ok: false,
+			reason: "bad-encoding",
+		});
+	});
+
+	it("rejects an expiry outside unix seconds and accepts one a second away", () => {
+		expect(parsePairingPayload(url({ exp: "1790000000000" }), now)).toEqual({
+			ok: false,
+			reason: "bad-encoding",
+		});
+		expect(parsePairingPayload(url({ exp: "-5" }), now)).toEqual({
+			ok: false,
+			reason: "bad-encoding",
+		});
+		const inOneSecond = String(Math.floor(now.getTime() / 1000) + 1);
+		expect(parsePairingPayload(url({ exp: inOneSecond }), now).ok).toBe(true);
+	});
+
+	it("keeps the query strict: a repeated or key-less parameter is damaged", () => {
+		expect(parsePairingPayload(`${url()}&mac=${MAC}`, now)).toEqual({
+			ok: false,
+			reason: "bad-encoding",
+		});
+		expect(parsePairingPayload(`${url()}&stray`, now)).toEqual({
+			ok: false,
+			reason: "bad-encoding",
+		});
+		expect(parsePairingPayload(`  ${url()}\n`, now).ok).toBe(true);
+	});
+
 	it("rejects an expired code on the injected clock", () => {
 		const exp = String(Math.floor(now.getTime() / 1000));
 		expect(parsePairingPayload(url({ exp }), now)).toEqual({

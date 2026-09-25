@@ -1,6 +1,11 @@
 import { describe, expect, it } from "vitest";
 
-import { addRecording, EMPTY_INDEX, type QueueIndex } from "./queue-index";
+import {
+	addRecording,
+	EMPTY_INDEX,
+	type QueueIndex,
+	setState,
+} from "./queue-index";
 import {
 	createQueueStorage,
 	parseQueueIndex,
@@ -120,6 +125,78 @@ describe("createQueueStorage", () => {
 		);
 		expect(files.store.has("file:///docs/queue/index.json")).toBe(false);
 		expect(logs[0]).toMatch(/not JSON/);
+	});
+
+	it("prefers the index over a stale temp file when both exist", async () => {
+		const files = memoryFiles({
+			"file:///docs/queue/index.json": serializeQueueIndex(one),
+			"file:///docs/queue/index.json.tmp": serializeQueueIndex(EMPTY_INDEX),
+		});
+		const storage = createQueueStorage(files.api, "file:///docs/queue");
+		expect(await storage.load()).toEqual(one);
+		expect(files.calls).toEqual(["read file:///docs/queue/index.json"]);
+	});
+
+	it("quarantines a schema-invalid index, replacing an older quarantine", async () => {
+		const invalid = serializeQueueIndex(one).replace('"queued"', '"paused"');
+		const files = memoryFiles({
+			"file:///docs/queue/index.json": invalid,
+			"file:///docs/queue/index.corrupt.json": "older",
+		});
+		const storage = createQueueStorage(files.api, "file:///docs/queue");
+		expect(await storage.load()).toEqual(EMPTY_INDEX);
+		expect(files.store.get("file:///docs/queue/index.corrupt.json")).toBe(
+			invalid,
+		);
+		// A save after the quarantine writes a fresh index that loads back.
+		await storage.save(one);
+		expect(await storage.load()).toEqual(one);
+		expect(files.store.get("file:///docs/queue/index.corrupt.json")).toBe(
+			invalid,
+		);
+	});
+
+	it("starts empty when only a corrupt temp file is left and nothing can be quarantined", async () => {
+		const logs: string[] = [];
+		const files = memoryFiles({ "file:///docs/queue/index.json.tmp": "nope" });
+		const storage = createQueueStorage(files.api, "file:///docs/queue", (m) =>
+			logs.push(m),
+		);
+		await expect(storage.load()).resolves.toEqual(EMPTY_INDEX);
+		expect(logs).toHaveLength(1);
+		expect(files.store.has("file:///docs/queue/index.corrupt.json")).toBe(
+			false,
+		);
+	});
+
+	it("keeps delivered rows with their meeting id across save and load", async () => {
+		const files = memoryFiles();
+		const storage = createQueueStorage(files.api, "file:///docs/queue");
+		const delivered = setState(
+			setState(one, "a", "uploading"),
+			"a",
+			"delivered",
+			{ meetingID: "m-1" },
+		);
+		await storage.save(delivered);
+		const loaded = await storage.load();
+		expect(loaded.recordings[0]).toMatchObject({
+			recordingID: "a",
+			state: "delivered",
+			meetingID: "m-1",
+		});
+		expect(loaded).toEqual(delivered);
+	});
+
+	it("does not touch the index when the temp write itself fails", async () => {
+		const files = memoryFiles();
+		const storage = createQueueStorage(files.api, "file:///docs/queue");
+		await storage.save(one);
+		files.api.writeText = async () => {
+			throw new Error("ENOSPC");
+		};
+		await expect(storage.save(EMPTY_INDEX)).rejects.toThrow("ENOSPC");
+		expect(await storage.load()).toEqual(one);
 	});
 });
 
