@@ -21,7 +21,6 @@ import Testing
     let outputs = try FixtureGenerator.generate(into: directory)
     let manifest = try String(contentsOf: Fixtures.url("MANIFEST.sha256"), encoding: .utf8)
     #expect(FixtureGenerator.manifest(outputs) == manifest)
-    #expect(FixtureGenerator.parseManifest(manifest) == outputs)
 
     for output in outputs {
       let regenerated = try Data(contentsOf: directory.appendingPathComponent(output.relativePath))
@@ -63,7 +62,6 @@ import Testing
     #expect(system[30_050] != 0, "B speaks second on the system lane")
     #expect(mixed[100] == mic[100])
     #expect(mixed[30_050] == system[30_050])
-    #expect(FixtureGenerator.conversationTurns(seconds: 6).map(\.speaker) == ["A", "B", "A", "B"])
   }
 
   @Test func sha256MatchesKnownVectors() {
@@ -73,8 +71,6 @@ import Testing
     #expect(
       ContentHash.sha256Hex(Data("abc".utf8))
         == "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad")
-    #expect(
-      PortableSHA256.hash(Data("abc".utf8)) == ContentHash.sha256(Data("abc".utf8)))
     let long = Data(repeating: 0x61, count: 1000)
     #expect(
       ContentHash.sha256Hex(long)

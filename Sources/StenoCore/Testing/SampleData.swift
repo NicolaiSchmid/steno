@@ -6,9 +6,8 @@ import Foundation
 public enum SampleData {
   /// `00000000-0000-0000-0000-000000000001` for `n == 1`.
   public static func uuid(_ n: Int) -> UUID {
-    let hex = String(n, radix: 16, uppercase: true)
-    let padded = String(repeating: "0", count: 12 - hex.count) + hex
-    return UUID(uuidString: "00000000-0000-0000-0000-\(padded)")!
+    let (high, low) = (UInt8(truncatingIfNeeded: n >> 8), UInt8(truncatingIfNeeded: n))
+    return UUID(uuid: (0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, high, low))
   }
 
   /// 2026-09-24T09:00:00Z.

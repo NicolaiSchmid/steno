@@ -139,7 +139,6 @@ public actor ProcessingPipeline {
         meeting: current, segments: export.segments, speakers: export.speakers,
         templateID: templateID, priorUsage: nil)
       current.state = .ready
-      current.updatedAt = now
       try await store.save(current)
       await deliver(meetingID: meetingID)
     } catch {
@@ -175,8 +174,6 @@ public actor ProcessingPipeline {
     }
     do {
       return try await body()
-    } catch let failure as PipelineFailure {
-      throw failure
     } catch {
       throw PipelineFailure(stage: stage, error: error)
     }

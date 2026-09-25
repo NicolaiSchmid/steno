@@ -15,14 +15,10 @@ struct Export: AsyncParsableCommand {
 
   @OptionGroup var database: DatabaseOptions
 
-  func validate() throws {
-    guard UUID(uuidString: meetingID) != nil else {
+  func run() async throws {
+    guard let id = UUID(uuidString: meetingID) else {
       throw ValidationError("\(meetingID) is not a UUID.")
     }
-  }
-
-  func run() async throws {
-    guard let id = UUID(uuidString: meetingID) else { return }
     let opened = try Wiring.open(database)
     let export = try await opened.store.export(meetingID: id)
     let directory = URL(fileURLWithPath: out, isDirectory: true)

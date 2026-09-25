@@ -424,11 +424,15 @@ differently from the text above and why.
   set (a calendar title is authoritative); the plan did not say.
 - Sample clips and the mixdown are written under `Settings.audioFolder/<meetingID>/`, not beside
   the master, so `steno process` on a fixture never writes into `Tests/Fixtures/`.
-- `SettingsStore` stores one row per `Settings` property as a JSON fragment; missing and unknown
-  rows are ignored so a property can be added without a migration.
-- `ContentHash` wraps SHA-256 through CryptoKit on Apple platforms and a portable implementation
-  elsewhere; the fixture manifest and delivery receipts use it. `FixtureGenerator` uses `sin` from
-  libm on an integer phase accumulator; CI on macOS confirms the committed bytes match.
+- `SettingsStore` stores one row per `Settings` property as a JSON fragment; it overlays the rows
+  on the encoded defaults before decoding, so a missing row loads as its default and an unknown
+  row is ignored without a migration. `Settings` itself uses the synthesized `Codable`.
+- `ContentHash` is CryptoKit's SHA-256; the fixture manifest and delivery receipts use it.
+  `FixtureGenerator` uses `sin` from libm on an integer phase accumulator; CI on macOS confirms the
+  committed bytes match.
+- `RetentionSweep.init(store:)` and `RecordingIntake` take no `fileManager:`; both use
+  `FileManager.default` like the rest of the module, which keeps them `Sendable` without an
+  `nonisolated(unsafe)` marker. `ManualClock` guards its state with `Synchronization.Mutex`.
 - `Snapshot.assert` takes a `root:` parameter (default `Tests/Fixtures/`) so it can test itself, and
   writes `<name>.actual` beside a mismatching golden; `swift-ci.yml` uploads those files.
 - Spike S2 outcome: `Bundle.module` resolves for `steno` run from `.build/debug` (the CLI tests

@@ -32,7 +32,6 @@ import Testing
     let rows = try await store.writer.read { db in
       try SettingRow.order(SettingRow.Columns.key).fetchAll(db)
     }
-    #expect(rows.map(\.key) == Settings.CodingKeys.allCases.map(\.stringValue).sorted())
     #expect(rows.first { $0.key == "llmContextTokens" }?.value == "16000")
     #expect(rows.first { $0.key == "defaultRetention" }?.value == #"{"keepDays":7}"#)
     #expect(rows.first { $0.key == "launchAtLogin" }?.value == "false")
@@ -54,7 +53,12 @@ import Testing
     }
     let settings = try await SettingsStore(writer: store.writer).load()
     #expect(settings.llmModel == "gpt")
+    #expect(settings.launchAtLogin == true)
+    #expect(settings.defaultTemplateID == "default")
     #expect(settings.defaultRetention == .keepDays(30))
+    #expect(settings.speakerMatchThreshold == 0.60)
+    #expect(settings.llmContextTokens == 32_000)
+    #expect(settings.obsidian == nil)
   }
 
   @Test func observeYieldsAgainAfterASave() async throws {

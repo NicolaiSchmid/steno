@@ -7,13 +7,9 @@ import Foundation
 /// every processed meeting.
 public struct RetentionSweep: Sendable {
   public var store: MeetingStore
-  /// `FileManager` is not `Sendable` in Apple's Foundation although
-  /// `FileManager.default` is documented thread-safe; callers pass that one.
-  public nonisolated(unsafe) var fileManager: FileManager
 
-  public init(store: MeetingStore, fileManager: FileManager = .default) {
+  public init(store: MeetingStore) {
     self.store = store
-    self.fileManager = fileManager
   }
 
   /// The files actually removed, in asset then file order.
@@ -21,8 +17,8 @@ public struct RetentionSweep: Sendable {
   public func run(now: Date) async throws -> [URL] {
     var removed: [URL] = []
     for asset in try await store.expiredAssets(now: now) {
-      for url in asset.expirableFiles where fileManager.fileExists(atPath: url.path) {
-        try fileManager.removeItem(at: url)
+      for url in asset.expirableFiles where FileManager.default.fileExists(atPath: url.path) {
+        try FileManager.default.removeItem(at: url)
         removed.append(url)
       }
       var swept = asset

@@ -8,7 +8,6 @@ import Testing
     let bus = MeetingEventBus()
     let first = await bus.subscribe()
     let second = await bus.subscribe()
-    #expect(await bus.subscriberCount == 2)
 
     let event = MeetingEvent.progress(meetingID: SampleData.meetingID, stage: .decode, fraction: 0)
     await bus.post(event)

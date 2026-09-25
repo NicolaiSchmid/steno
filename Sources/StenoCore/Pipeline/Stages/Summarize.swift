@@ -2,7 +2,7 @@ import Foundation
 
 extension ProcessingPipeline {
   /// Runs the `MeetingSummarizer` for `templateID` (falling back to the
-  /// default template), persists summary, tasks and decisions, and returns
+  /// first bundled template), persists summary, tasks and decisions, and returns
   /// the meeting with title, language and summed usage updated. A calendar
   /// title stays; any other title is replaced by the model's.
   func summarize(
@@ -12,9 +12,10 @@ extension ProcessingPipeline {
     let summarizer = dependencies.summarizer
     let store = self.store
     return try await run(.summarize, meetingID: meeting.id) {
-      let template =
-        SummaryTemplate.bundled(id: templateID)
-        ?? SummaryTemplate.bundled(id: SummaryTemplate.defaultID)!
+      guard let template = SummaryTemplate.bundled(id: templateID) ?? SummaryTemplate.bundled.first
+      else {
+        throw PipelineFailure(stage: .summarize, reason: "no bundled summary template")
+      }
       let participants = try await store.participants(meetingID: meeting.id)
       let people = try await store.persons()
       var input = meeting

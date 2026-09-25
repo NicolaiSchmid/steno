@@ -51,18 +51,7 @@ public enum FixtureGenerator {
 
   /// `sha256sum` format: hash, two spaces, path.
   public static func manifest(_ outputs: [Output]) -> String {
-    outputs
-      .sorted { $0.relativePath < $1.relativePath }
-      .map { "\($0.sha256)  \($0.relativePath)" }
-      .joined(separator: "\n") + "\n"
-  }
-
-  public static func parseManifest(_ text: String) -> [Output] {
-    text.split(separator: "\n").compactMap { line in
-      let parts = line.split(separator: "  ", maxSplits: 1).map(String.init)
-      guard parts.count == 2 else { return nil }
-      return Output(relativePath: parts[1], sha256: parts[0])
-    }
+    outputs.map { "\($0.sha256)  \($0.relativePath)" }.joined(separator: "\n") + "\n"
   }
 
   // MARK: - Signals
@@ -129,22 +118,6 @@ public enum FixtureGenerator {
       samples[index] = quantize(value)
     }
     return samples
-  }
-
-  /// Turn boundaries of `conversation`, for tests that map speakers to time.
-  public static func conversationTurns(seconds: Double) -> [(
-    speaker: String, range: ClosedRange<TimeInterval>
-  )] {
-    var turns: [(String, ClosedRange<TimeInterval>)] = []
-    var start = 0.0
-    var index = 0
-    while start < seconds {
-      let end = min(seconds, start + 1.4)
-      turns.append((index % 2 == 0 ? "A" : "B", start...end))
-      start += 1.5
-      index += 1
-    }
-    return turns
   }
 
   static func increment(_ frequency: Double) -> UInt32 {

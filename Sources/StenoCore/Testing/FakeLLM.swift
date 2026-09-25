@@ -17,10 +17,6 @@ public actor FakeLanguageModel: LanguageModel {
     guard !responses.isEmpty else { throw Exhausted() }
     return responses.removeFirst()
   }
-
-  public func enqueue(_ response: LLMResponse) {
-    responses.append(response)
-  }
 }
 
 /// A `TranscriptCleaner` that returns the segments untouched with a fixed

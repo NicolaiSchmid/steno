@@ -114,25 +114,19 @@ struct PipelineHarness {
     var (meeting, asset) = harness.meeting(source: .macInPerson)
     asset.url = harness.directory.appendingPathComponent("missing.wav")
     meeting.state = .queued
-    await #expect(throws: PipelineFailure.self) {
+    let decodeFailure = await #expect(throws: PipelineFailure.self) {
       _ = try await harness.pipeline.decodeAndTranscribe(asset: asset, meetingID: meeting.id)
     }
-    do {
-      _ = try await harness.pipeline.decodeAndTranscribe(asset: asset, meetingID: meeting.id)
-    } catch let failure as PipelineFailure {
-      #expect(failure.stage == .decode)
-    }
+    #expect(decodeFailure?.stage == .decode)
     struct Boom: Error {}
     let failing = try await PipelineHarness(engine: FakeSpeechEngine(failure: Boom()))
     defer { failing.cleanUp() }
-    do {
+    let transcribeFailure = await #expect(throws: PipelineFailure.self) {
       _ = try await failing.pipeline.decodeAndTranscribe(
         asset: harness.meeting(source: .macInPerson).1, meetingID: meeting.id)
-      Issue.record("expected a transcribe failure")
-    } catch let failure as PipelineFailure {
-      #expect(failure.stage == .transcribe)
-      #expect(failure.reason.contains("Boom"))
     }
+    #expect(transcribeFailure?.stage == .transcribe)
+    #expect(transcribeFailure?.reason.contains("Boom") == true)
   }
 
   @Test func languageElectionWeighsByDuration() {

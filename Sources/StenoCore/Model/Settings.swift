@@ -1,9 +1,7 @@
 import Foundation
 
-/// The one settings type, persisted as one row per property in the `setting`
-/// table. Unknown or missing properties fall back to their defaults, so a
-/// property can be added without a migration. API keys never live here; see
-/// `SecretStore`.
+/// The one settings type, persisted by `SettingsStore` as one row per property
+/// in the `setting` table. API keys never live here; see `SecretStore`.
 public struct Settings: Codable, Sendable, Equatable, Hashable {
   /// Where recordings live; the user picks it in onboarding.
   public var audioFolder: URL
@@ -58,53 +56,6 @@ public struct Settings: Codable, Sendable, Equatable, Hashable {
   /// folder.
   public static var defaultAudioFolder: URL {
     StenoPaths.defaultSupportDirectory.appendingPathComponent("Audio", isDirectory: true)
-  }
-
-  public init(from decoder: any Decoder) throws {
-    let defaults = Settings()
-    let container = try decoder.container(keyedBy: CodingKeys.self)
-    audioFolder =
-      try container.decodeIfPresent(URL.self, forKey: .audioFolder) ?? defaults.audioFolder
-    defaultRetention =
-      try container.decodeIfPresent(AudioRetention.self, forKey: .defaultRetention)
-      ?? defaults.defaultRetention
-    inputDeviceUID = try container.decodeIfPresent(String.self, forKey: .inputDeviceUID)
-    meetingDetectionEnabled =
-      try container.decodeIfPresent(Bool.self, forKey: .meetingDetectionEnabled)
-      ?? defaults.meetingDetectionEnabled
-    speechEngineID =
-      try container.decodeIfPresent(String.self, forKey: .speechEngineID) ?? defaults.speechEngineID
-    speakerMatchThreshold =
-      try container.decodeIfPresent(Float.self, forKey: .speakerMatchThreshold)
-      ?? defaults.speakerMatchThreshold
-    modelsDirectory = try container.decodeIfPresent(URL.self, forKey: .modelsDirectory)
-    llmBaseURL = try container.decodeIfPresent(URL.self, forKey: .llmBaseURL)
-    llmModel = try container.decodeIfPresent(String.self, forKey: .llmModel)
-    llmContextTokens =
-      try container.decodeIfPresent(Int.self, forKey: .llmContextTokens)
-      ?? defaults.llmContextTokens
-    defaultTemplateID =
-      try container.decodeIfPresent(String.self, forKey: .defaultTemplateID)
-      ?? defaults.defaultTemplateID
-    launchAtLogin =
-      try container.decodeIfPresent(Bool.self, forKey: .launchAtLogin) ?? defaults.launchAtLogin
-    obsidian = try container.decodeIfPresent(ObsidianSettings.self, forKey: .obsidian)
-  }
-
-  enum CodingKeys: String, CodingKey, CaseIterable {
-    case audioFolder
-    case defaultRetention
-    case inputDeviceUID
-    case meetingDetectionEnabled
-    case speechEngineID
-    case speakerMatchThreshold
-    case modelsDirectory
-    case llmBaseURL
-    case llmModel
-    case llmContextTokens
-    case defaultTemplateID
-    case launchAtLogin
-    case obsidian
   }
 }
 

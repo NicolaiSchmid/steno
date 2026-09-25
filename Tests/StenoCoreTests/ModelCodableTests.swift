@@ -190,16 +190,4 @@ import Testing
     #expect(sum == LLMUsage(promptTokens: 11, completionTokens: 22, requests: 3))
     #expect(LLMUsage.zero + sum == sum)
   }
-
-  @Test func settingsDecodeMissingKeysAsDefaults() throws {
-    let partial = #"{"llmModel":"gpt","launchAtLogin":false}"#
-    let settings = try StenoJSON.decode(Settings.self, from: Data(partial.utf8))
-    #expect(settings.llmModel == "gpt")
-    #expect(settings.launchAtLogin == false)
-    #expect(settings.defaultTemplateID == "default")
-    #expect(settings.defaultRetention == .keepDays(30))
-    #expect(settings.speakerMatchThreshold == 0.60)
-    #expect(settings.llmContextTokens == 32_000)
-    #expect(settings.obsidian == nil)
-  }
 }

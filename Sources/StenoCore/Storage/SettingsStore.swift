@@ -3,7 +3,8 @@ import GRDB
 
 /// Persists `Settings` as one row per property in the `setting` table, each
 /// value a JSON fragment in the `StenoJSON` convention. A property missing
-/// from the table decodes as its default, so adding one needs no migration.
+/// from the table loads as its default and an unknown row is ignored, so a
+/// property can be added without a migration.
 public final class SettingsStore: Sendable {
   public let writer: any DatabaseWriter
 
@@ -26,16 +27,12 @@ public final class SettingsStore: Sendable {
 
   /// The current settings, then again after every save.
   public func observe() -> AsyncThrowingStream<Settings, any Error> {
-    observationStream(
-      ValueObservation.tracking { db in try Self.settings(from: try SettingRow.fetchAll(db)) },
-      in: writer)
+    writer.stream(
+      ValueObservation.tracking { db in try Self.settings(from: try SettingRow.fetchAll(db)) })
   }
 
   static func rows(for settings: Settings) throws -> [SettingRow] {
-    let data = try StenoJSON.columnEncoder().encode(settings)
-    guard let object = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
-      return []
-    }
+    let object = try Self.object(settings)
     return try object.keys.sorted().map { key in
       let fragment = try JSONSerialization.data(
         withJSONObject: object[key] as Any,
@@ -44,14 +41,20 @@ public final class SettingsStore: Sendable {
     }
   }
 
+  /// The defaults overlaid with every stored row; unknown rows fall away when
+  /// `Settings` decodes.
   static func settings(from rows: [SettingRow]) throws -> Settings {
-    let known = Set(Settings.CodingKeys.allCases.map(\.stringValue))
-    let members =
-      rows
-      .filter { known.contains($0.key) }
-      .sorted { $0.key < $1.key }
-      .map { "\"\($0.key)\":\($0.value)" }
-    let json = "{" + members.joined(separator: ",") + "}"
-    return try StenoJSON.decode(Settings.self, from: Data(json.utf8))
+    var merged = try object(Settings())
+    for row in rows {
+      merged[row.key] = try JSONSerialization.jsonObject(
+        with: Data(row.value.utf8), options: .fragmentsAllowed)
+    }
+    return try StenoJSON.decode(Settings.self, from: JSONSerialization.data(withJSONObject: merged))
+  }
+
+  /// `settings` as a JSON object in the `StenoJSON` convention.
+  private static func object(_ settings: Settings) throws -> [String: Any] {
+    let data = try StenoJSON.columnEncoder().encode(settings)
+    return try JSONSerialization.jsonObject(with: data) as? [String: Any] ?? [:]
   }
 }

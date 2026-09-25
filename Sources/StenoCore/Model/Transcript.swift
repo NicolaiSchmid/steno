@@ -141,10 +141,4 @@ public struct SpeakerCluster: Codable, Sendable, Equatable, Hashable {
     self.clusterConfidence = clusterConfidence
     self.sampleClipRange = sampleClipRange
   }
-
-  /// Whether the cluster speaks for most of `start...end`.
-  public func covers(start: TimeInterval, end: TimeInterval) -> Bool {
-    let midpoint = (start + end) / 2
-    return ranges.contains { $0.contains(midpoint) }
-  }
 }

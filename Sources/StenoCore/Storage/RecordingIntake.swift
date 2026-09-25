@@ -13,9 +13,6 @@ public struct RecordingIntake: HandoverIntake, Sendable {
   public var settings: SettingsStore
   public var enqueue: Enqueue
   public var now: @Sendable () -> Date
-  /// `FileManager` is not `Sendable` in Apple's Foundation although
-  /// `FileManager.default` is documented thread-safe; callers pass that one.
-  public nonisolated(unsafe) var fileManager: FileManager
 
   /// `enqueue` is `ProcessingPipeline.enqueue(_:asset:)` in the app and the
   /// CLI; tests pass a counting closure.
@@ -23,14 +20,12 @@ public struct RecordingIntake: HandoverIntake, Sendable {
     store: MeetingStore,
     settings: SettingsStore,
     enqueue: @escaping Enqueue,
-    now: @escaping @Sendable () -> Date = Date.init,
-    fileManager: FileManager = .default
+    now: @escaping @Sendable () -> Date = Date.init
   ) {
     self.store = store
     self.settings = settings
     self.enqueue = enqueue
     self.now = now
-    self.fileManager = fileManager
   }
 
   /// The production wiring: `enqueue` is `ProcessingPipeline.enqueue`.
@@ -60,13 +55,13 @@ public struct RecordingIntake: HandoverIntake, Sendable {
     let timestamp = now()
     let folder = settings.audioFolder.appendingPathComponent(
       meetingID.uuidString, isDirectory: true)
-    try fileManager.createDirectory(at: folder, withIntermediateDirectories: true)
+    try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
     let destination = folder.appendingPathComponent(
       "recording." + Self.fileExtension(metadata.format))
-    if fileManager.fileExists(atPath: destination.path) {
-      try fileManager.removeItem(at: destination)
+    if FileManager.default.fileExists(atPath: destination.path) {
+      try FileManager.default.removeItem(at: destination)
     }
-    try fileManager.moveItem(at: file, to: destination)
+    try FileManager.default.moveItem(at: file, to: destination)
 
     let meeting = Meeting(
       id: meetingID,

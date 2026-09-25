@@ -43,6 +43,4 @@ public actor InMemorySpeakerMemory: SpeakerMemory {
     people[person.id] = updated
     enrolments.append(Enrolment(embedding: embedding, personID: person.id))
   }
-
-  public func person(id: UUID) -> Person? { people[id] }
 }

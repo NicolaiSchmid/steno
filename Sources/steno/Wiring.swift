@@ -22,20 +22,14 @@ struct DatabaseOptions: ParsableArguments {
 /// recorded exception: the speech PR adds `--engine <id>` here so
 /// `steno process` can run the real engines.
 enum Wiring {
-  struct Opened {
-    var store: MeetingStore
-    var settings: SettingsStore
-  }
-
-  static func open(_ options: DatabaseOptions) throws -> Opened {
+  static func open(_ options: DatabaseOptions) throws -> (
+    store: MeetingStore, settings: SettingsStore
+  ) {
     let store = try MeetingStore.onDisk(at: try options.url())
-    return Opened(store: store, settings: SettingsStore(writer: store.writer))
+    return (store, SettingsStore(writer: store.writer))
   }
 
-  static func dependencies(
-    _ opened: Opened, events: MeetingEventBus = MeetingEventBus(),
-    destinations: [any Destination] = []
-  ) -> PipelineDependencies {
+  static func dependencies(store: MeetingStore, settings: SettingsStore) -> PipelineDependencies {
     PipelineDependencies(
       decoder: WAVAudioDecoder(),
       speechEngine: FakeSpeechEngine(),
@@ -43,10 +37,10 @@ enum Wiring {
       speakerMemory: InMemorySpeakerMemory(),
       cleaner: PassthroughCleaner(),
       summarizer: FakeSummarizer(),
-      delivery: RecordingDispatcher(store: opened.store, destinations: destinations),
-      store: opened.store,
-      settings: opened.settings,
-      events: events
+      delivery: RecordingDispatcher(store: store, destinations: []),
+      store: store,
+      settings: settings,
+      events: MeetingEventBus()
     )
   }
 }

@@ -24,8 +24,6 @@ public actor MeetingEventBus {
     }
   }
 
-  public var subscriberCount: Int { subscribers.count }
-
   private func remove(_ id: UUID) {
     subscribers[id] = nil
   }

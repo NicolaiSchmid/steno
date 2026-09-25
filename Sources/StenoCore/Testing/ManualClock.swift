@@ -1,9 +1,10 @@
 import Foundation
+import Synchronization
 
 /// A `Clock<Duration>` that only moves when a test calls `advance(by:)`.
 /// Sleepers whose deadline has been reached wake in deadline order, each
 /// exactly once; cancelling a sleeping task throws `CancellationError`.
-public final class ManualClock: Clock, @unchecked Sendable {
+public final class ManualClock: Clock, Sendable {
   public struct Instant: InstantProtocol, Sendable, Hashable, Comparable, CustomStringConvertible {
     public var offset: Duration
 
@@ -26,29 +27,32 @@ public final class ManualClock: Clock, @unchecked Sendable {
     public var description: String { "\(offset)" }
   }
 
-  private struct Sleeper {
+  private struct Sleeper: Sendable {
     var id: UUID
     var deadline: Instant
     var continuation: CheckedContinuation<Void, any Error>
   }
 
-  private let lock = NSLock()
-  private var current: Instant
-  private var sleepers: [Sleeper] = []
+  private struct State: Sendable {
+    var current: Instant
+    var sleepers: [Sleeper] = []
+  }
+
+  private let state: Mutex<State>
 
   public init(start: Instant = Instant()) {
-    current = start
+    state = Mutex(State(current: start))
   }
 
   public var now: Instant {
-    lock.withLock { current }
+    state.withLock { $0.current }
   }
 
   public var minimumResolution: Duration { .zero }
 
   /// Sleepers currently waiting for `advance(by:)`.
   public var pendingSleepers: Int {
-    lock.withLock { sleepers.count }
+    state.withLock { $0.sleepers.count }
   }
 
   public func sleep(until deadline: Instant, tolerance: Duration? = nil) async throws {
@@ -56,17 +60,17 @@ public final class ManualClock: Clock, @unchecked Sendable {
     try await withTaskCancellationHandler {
       try await withCheckedThrowingContinuation {
         (continuation: CheckedContinuation<Void, any Error>) in
-        let resumeNow: Bool = lock.withLock {
-          if deadline <= current { return true }
-          sleepers.append(Sleeper(id: id, deadline: deadline, continuation: continuation))
+        let resumeNow = state.withLock { state -> Bool in
+          if deadline <= state.current { return true }
+          state.sleepers.append(Sleeper(id: id, deadline: deadline, continuation: continuation))
           return false
         }
         if resumeNow { continuation.resume() }
       }
     } onCancel: {
-      let cancelled: Sleeper? = lock.withLock {
-        guard let index = sleepers.firstIndex(where: { $0.id == id }) else { return nil }
-        return sleepers.remove(at: index)
+      let cancelled = state.withLock { state -> Sleeper? in
+        guard let index = state.sleepers.firstIndex(where: { $0.id == id }) else { return nil }
+        return state.sleepers.remove(at: index)
       }
       cancelled?.continuation.resume(throwing: CancellationError())
     }
@@ -74,11 +78,11 @@ public final class ManualClock: Clock, @unchecked Sendable {
 
   /// Moves time forward and wakes every sleeper whose deadline has passed.
   public func advance(by duration: Duration) {
-    let due: [Sleeper] = lock.withLock {
-      current = current.advanced(by: duration)
-      let reached = sleepers.filter { $0.deadline <= current }.sorted { $0.deadline < $1.deadline }
-      sleepers.removeAll { $0.deadline <= current }
-      return reached
+    let due = state.withLock { state -> [Sleeper] in
+      state.current = state.current.advanced(by: duration)
+      let reached = state.sleepers.filter { $0.deadline <= state.current }
+      state.sleepers.removeAll { $0.deadline <= state.current }
+      return reached.sorted { $0.deadline < $1.deadline }
     }
     for sleeper in due {
       sleeper.continuation.resume()

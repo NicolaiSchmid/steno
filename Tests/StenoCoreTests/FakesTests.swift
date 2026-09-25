@@ -32,8 +32,6 @@ import Testing
     #expect(result.clusters[1].ranges == [1.5...3, 4.5...6])
     #expect(result.clusters[0].sampleClipRange == 0...1.5)
     #expect(result.clusters[0].embedding == SampleData.embedding(axis: 0))
-    #expect(result.clusters[0].covers(start: 0.2, end: 1.0))
-    #expect(!result.clusters[0].covers(start: 1.6, end: 2.9))
     let canned = FakeDiarizer(result: { _ in SampleData.diarization() })
     #expect(try await canned.diarize(AudioBuffer16k(samples: [])) == SampleData.diarization())
   }

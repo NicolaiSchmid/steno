@@ -317,6 +317,5 @@ import Testing
     #expect(a == MeetingStore.derivedID(SampleData.meetingID, salt: "decision-0"))
     #expect(a != MeetingStore.derivedID(SampleData.meetingID, salt: "decision-1"))
     #expect(a != MeetingStore.derivedID(SampleData.uuid(2), salt: "decision-0"))
-    #expect(a.uuidString.hasPrefix("") && a.uuidString.count == 36)
   }
 }

@@ -6,7 +6,6 @@ public enum MeetingStoreError: Error, Sendable, Equatable {
   case meetingNotFound(UUID)
   case speakerNotFound(UUID)
   case personNotFound(UUID)
-  case assetNotFound(UUID)
   case speakersInDifferentMeetings(UUID, UUID)
 }
 
@@ -70,14 +69,13 @@ public final class MeetingStore: Sendable {
 
   public func setState(_ state: MeetingState, meetingID: UUID, now: Date = Date()) async throws {
     try await writer.write { db in
-      guard var row = try Self.meetingRow(meetingID, db) else {
+      guard let row = try Self.meetingRow(meetingID, db) else {
         throw MeetingStoreError.meetingNotFound(meetingID)
       }
       var meeting = row.meeting
       meeting.state = state
       meeting.updatedAt = now
-      row = MeetingRow(meeting)
-      try row.update(db)
+      try MeetingRow(meeting).update(db)
     }
   }
 
@@ -207,7 +205,7 @@ public final class MeetingStore: Sendable {
 
   /// Newest first; emits the current list, then again after every change.
   public func observeMeetings() -> AsyncThrowingStream<[Meeting], any Error> {
-    stream(
+    writer.stream(
       ValueObservation.tracking { db in
         try MeetingRow
           .order(MeetingRow.Columns.startedAt.desc, MeetingRow.Columns.id)
@@ -218,20 +216,14 @@ public final class MeetingStore: Sendable {
 
   /// The full export of one meeting, nil when the meeting does not exist.
   public func observeMeeting(id: UUID) -> AsyncThrowingStream<MeetingExport?, any Error> {
-    stream(ValueObservation.tracking { db in try Self.exportRows(meetingID: id, db) })
+    writer.stream(ValueObservation.tracking { db in try Self.exportRows(meetingID: id, db) })
   }
 
   public func observeDeliveries(meetingID: UUID) -> AsyncThrowingStream<[Delivery], any Error> {
-    stream(
+    writer.stream(
       ValueObservation.tracking { db in
         try Self.deliveryRows(meetingID: meetingID, db).map(\.delivery)
       })
-  }
-
-  private func stream<Value: Sendable>(
-    _ observation: ValueObservation<ValueReducers.Fetch<Value>>
-  ) -> AsyncThrowingStream<Value, any Error> {
-    observationStream(observation, in: writer)
   }
 
   // MARK: - Maintenance
