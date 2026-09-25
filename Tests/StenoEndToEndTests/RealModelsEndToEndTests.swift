@@ -3,7 +3,7 @@ import StenoCore
 import StenoSpeech
 import Testing
 
-/// Speech step 8's opt-in acceptance: the pipeline over `two-speakers.wav`
+/// Speech step 8's opt-in acceptance: the pipeline over `two-speakers-mf.wav`
 /// with the real Parakeet v3 engine, the FluidAudio diarizer and cosine
 /// speaker memory over the store, the way `steno process --engine
 /// parakeet-v3` wires them. Set `STENO_MODEL_TESTS=1` (about 0.5 GB of
@@ -12,7 +12,7 @@ import Testing
   static let environment = ProcessInfo.processInfo.environment
   static let enabled = environment["STENO_MODEL_TESTS"] == "1"
   static let skipMessage: Comment =
-    "set STENO_MODEL_TESTS=1 to run the pipeline over two-speakers.wav with Parakeet v3 and the diarizer"
+    "set STENO_MODEL_TESTS=1 to run the pipeline over two-speakers-mf.wav with Parakeet v3 and the diarizer"
 
   #if canImport(FluidAudio) && canImport(WhisperKit)
     @Test(.enabled(if: enabled, skipMessage))
@@ -45,7 +45,7 @@ import Testing
           settings: settingsStore,
           events: MeetingEventBus()))
 
-      let source = Fixtures.url("speech/two-speakers.wav")
+      let source = Fixtures.url("speech/two-speakers-mf.wav")
       let info = try WAVAudioDecoder.info(source)
       let duration = Double(info.frameCount) / Double(info.sampleRate)
       let meetingID = UUID()
@@ -54,7 +54,7 @@ import Testing
       try FileManager.default.copyItem(at: source, to: layout.master(.wav16kInt16))
       let now = Date()
       let meeting = Meeting(
-        id: meetingID, title: "two-speakers", startedAt: now.addingTimeInterval(-duration),
+        id: meetingID, title: "two-speakers-mf", startedAt: now.addingTimeInterval(-duration),
         duration: duration, source: .macInPerson, state: .queued, createdAt: now, updatedAt: now)
       let asset = AudioAsset(
         id: UUID(), meetingID: meetingID, url: layout.master(.wav16kInt16), format: .wav16kInt16,
@@ -69,10 +69,10 @@ import Testing
       try #require(!export.segments.isEmpty)
       let text = export.segments.map(\.text).joined(separator: " ")
       let reference = try String(
-        contentsOf: Fixtures.url("speech/two-speakers.ref.txt"), encoding: .utf8)
+        contentsOf: Fixtures.url("speech/two-speakers-mf.ref.txt"), encoding: .utf8)
       let wer = WordErrorRate.compute(reference: reference, hypothesis: text)
       print(
-        "[model-tests] pipeline two-speakers.wav: WER \(String(format: "%.1f", wer * 100)) %: \(text)"
+        "[model-tests] pipeline two-speakers-mf.wav: WER \(String(format: "%.1f", wer * 100)) %: \(text)"
       )
       #expect(wer < 0.5, "\(text)")
       let speakers = try await store.speakers(meetingID: meetingID)
