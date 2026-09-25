@@ -64,7 +64,8 @@ import Testing
     #expect(await seen.states == [.processing])
 
     let collected = await observedHarness.events.drain(events)
-    try #require(collected.count == 11, "ten stage starts and one review request")
+    try #require(
+      collected.count == 12, "ten stage starts, one review request, one retention applied")
     let stages = collected.compactMap { event -> PipelineStage? in
       if case .progress(_, let stage) = event { return stage }
       return nil
@@ -78,6 +79,11 @@ import Testing
       reviews == [.speakersNeedReview(meetingID: meeting.id, speakerIDs: export.speakers.map(\.id))]
     )
     #expect(collected.firstIndex(of: reviews[0]) == 8)
+    #expect(
+      collected.suffix(2) == [
+        .progress(meetingID: meeting.id, stage: .retention),
+        .retentionApplied(meetingID: meeting.id),
+      ], "the sweep trigger follows the expiry write and is the last event of a run")
   }
 
   @Test func observeMeetingSeesTheStatesInOrder() async throws {
@@ -405,7 +411,8 @@ import Testing
     #expect(try await harness.store.meeting(id: ready.id)?.state == .ready)
     #expect(try await harness.store.meeting(id: recording.id)?.state == .recording)
     #expect(await harness.summarizer.summaries.count == 2)
-    #expect(await harness.dispatcher.dispatches.entries == [processing.id, queued.id])
+    // Both run in the background at once, so only the set is fixed.
+    #expect(Set(await harness.dispatcher.dispatches.entries) == [processing.id, queued.id])
     #expect(try await harness.pipeline.resumeUnfinished().isEmpty, "nothing left to resume")
   }
 

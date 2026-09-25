@@ -260,7 +260,9 @@ import Testing
     var iterator = stream.makeAsyncIterator()
     var collected: [MeetingEvent] = []
     while let event = await iterator.next(), event != sentinel { collected.append(event) }
-    try #require(collected.count == 12, "ten stage starts, one review request, one re-export")
+    try #require(
+      collected.count == 13,
+      "ten stage starts, one review request, one retention applied, one re-export")
     let stages = collected.compactMap { event -> PipelineStage? in
       if case .progress(_, let stage) = event { return stage }
       return nil
@@ -269,5 +271,8 @@ import Testing
     #expect(
       collected[8]
         == .speakersNeedReview(meetingID: meeting.id, speakerIDs: export.speakers.map(\.id)))
+    #expect(
+      collected[11] == .retentionApplied(meetingID: meeting.id),
+      "after the retention stage's progress, before the re-export")
   }
 }
