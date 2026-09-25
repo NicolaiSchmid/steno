@@ -1,13 +1,6 @@
 import Foundation
 import StenoCore
 
-/// StenoCore's `DiarizationResult` and `Diarizer`: FluidAudio exports types
-/// of the same names, and `StenoCore.DiarizationResult` would resolve to the
-/// `StenoCore` version enum, so files that import FluidAudio use these.
-/// Public because they appear in `FluidDiarizer`'s public signatures.
-public typealias CoreDiarizationResult = DiarizationResult
-public typealias CoreDiarizer = Diarizer
-
 /// Turns the diarizer's turns and chunks into `StenoCore.DiarizationResult`:
 /// one `SpeakerCluster` per speaker label, labelled "Speaker n" in order of
 /// first speech, with merged ranges, the normalised cluster embedding and
@@ -16,7 +9,7 @@ enum DiarizationMapping {
   static func result(
     turns: [SpeakerTurn], chunks: [ClusterChunk],
     targetSeconds: TimeInterval = 10, minimumSeconds: TimeInterval = 3
-  ) -> CoreDiarizationResult {
+  ) -> DiarizationResult {
     let sortedTurns = turns.filter { $0.duration > 0 }.sorted { $0.start < $1.start }
     var order: [String] = []
     var turnsByLabel: [String: [SpeakerTurn]] = [:]
@@ -54,7 +47,7 @@ enum DiarizationMapping {
         clusterConfidence: choice.clusterConfidence,
         sampleClipRange: choice.range)
     }
-    return CoreDiarizationResult(clusters: clusters)
+    return DiarizationResult(clusters: clusters)
   }
 
   /// Sorted ranges with touching or overlapping ones joined.

@@ -360,9 +360,10 @@ Recorded by the speech workstream while building steps 0 to 8 (PR #8, 2026-09-25
   `Locale.Language` appears only on the engines' `supportedLanguages` and `hint`, converted with `LanguageTag(_:)`.
   Follows the PR #3 contract change.
 - **Module qualification.** `StenoCore.WordTiming` and `StenoCore.DiarizationResult` do not compile: `StenoCore` is
-  also the name of core's version enum, so the qualifier resolves to the enum. Files that import FluidAudio or
-  WhisperKit reach the core types through the internal aliases `CoreWordTiming` and `CoreDiarizationResult`,
-  declared in files that import only StenoCore.
+  also the name of core's version enum, so the qualifier resolves to the enum. `FluidDiarizer.swift` and
+  `WhisperKitEngine.swift` therefore use scoped imports (`import class FluidAudio.OfflineDiarizerManager`, ...)
+  that bring in only the framework names they need, so `Diarizer`, `DiarizationResult` and `WordTiming` are core's
+  without aliases.
 - **Directory names.** FluidAudio derives its folder from the repository name minus `-coreml`, so the assets live at
   `Models/fluidaudio/parakeet-tdt-0.6b-v3`, `Models/fluidaudio/parakeet-ultra`, `Models/fluidaudio/speaker-diarization`
   and (own parent, cannot shadow v3) `Models/fluidaudio-de/parakeet-tdt-0.6b-v3`; WhisperKit under
@@ -412,5 +413,3 @@ Recorded by the speech workstream while building steps 0 to 8 (PR #8, 2026-09-25
   `OfflineDiarizerBox` own one instance each, are created and called only by their actor (`WhisperKitEngine`,
   `FluidDiarizer`), and are the only places the module marks anything `@unchecked Sendable`. `AsrManager` is an
   actor in FluidAudio and needs no box.
-- **`Diarizer` clash.** FluidAudio also exports `Diarizer`; `FluidDiarizer` conforms through the public alias
-  `CoreDiarizer`, and `CoreDiarizationResult` is public too because both appear in its public signatures.

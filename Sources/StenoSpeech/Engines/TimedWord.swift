@@ -1,11 +1,6 @@
 import Foundation
 import StenoCore
 
-/// StenoCore's `WordTiming`, named so files that import FluidAudio or
-/// WhisperKit (which export their own `WordTiming`) can still reach it.
-/// `StenoCore.WordTiming` would resolve to the `StenoCore` enum.
-typealias CoreWordTiming = WordTiming
-
 /// One timed piece of text, the unit `TranscriptSegmenter` works on. Both
 /// engines produce words: Parakeet's decoder tokens (SentencePiece pieces,
 /// a leading `▁` marking a word start) arrive as these too and

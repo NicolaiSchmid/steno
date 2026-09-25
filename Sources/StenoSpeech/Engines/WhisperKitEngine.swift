@@ -1,7 +1,15 @@
 #if canImport(WhisperKit)
   import Foundation
   import StenoCore
-  import WhisperKit
+
+  // Scoped imports: WhisperKit also exports `WordTiming`, and
+  // `StenoCore.WordTiming` would resolve to the `StenoCore` version enum, so
+  // only the five names this file needs are brought in.
+  import class WhisperKit.TranscriptionResult
+  import class WhisperKit.WhisperKit
+  import class WhisperKit.WhisperKitConfig
+  import struct WhisperKit.DecodingOptions
+  import struct WhisperKit.ModelComputeOptions
 
   /// `WhisperKit` is a non-Sendable class with async methods: its instance
   /// can neither be returned into the actor nor be sent back out for a call.
@@ -128,10 +136,10 @@
           guard segment.noSpeechProb <= noSpeechThreshold else { continue }
           let text = segment.text.trimmingCharacters(in: .whitespacesAndNewlines)
           guard !text.isEmpty else { continue }
-          let words = segment.words?.compactMap { word -> CoreWordTiming? in
+          let words = segment.words?.compactMap { word -> WordTiming? in
             let trimmed = word.word.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !trimmed.isEmpty else { return nil }
-            return CoreWordTiming(
+            return WordTiming(
               word: trimmed, start: TimeInterval(word.start), end: TimeInterval(word.end))
           }
           segments.append(

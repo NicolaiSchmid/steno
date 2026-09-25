@@ -26,7 +26,12 @@ public struct FluidDiarizerConfig: Sendable, Equatable {
 }
 
 #if canImport(FluidAudio)
-  import FluidAudio
+  // Scoped imports: FluidAudio also exports `Diarizer` and
+  // `DiarizationResult`, and `StenoCore.X` would resolve to the `StenoCore`
+  // version enum, so only the three names this file needs are brought in.
+  import class FluidAudio.OfflineDiarizerManager
+  import struct FluidAudio.OfflineDiarizerConfig
+  import struct FluidAudio.OfflineDiarizerModels
 
   /// `OfflineDiarizerManager` is a non-Sendable class whose `process` is an
   /// async method: calling it with an actor-owned instance would send that
@@ -42,9 +47,8 @@ public struct FluidDiarizerConfig: Sendable, Equatable {
     }
 
     /// Runs the pipeline and maps the framework result straight into the
-    /// module's own turns and chunks, so FluidAudio's `DiarizationResult`
-    /// (which `FluidAudio.DiarizationResult` cannot name: `FluidAudio` is
-    /// also a struct) never appears in a signature.
+    /// module's own turns and chunks, so no FluidAudio type appears in a
+    /// signature.
     func process(_ samples: [Float]) async throws -> (turns: [SpeakerTurn], chunks: [ClusterChunk])
     {
       let result = try await manager.process(audio: samples)
@@ -66,7 +70,7 @@ public struct FluidDiarizerConfig: Sendable, Equatable {
   /// `OfflineDiarizerManager`, wrapped in an actor because the manager is
   /// not `Sendable`. Chunk embeddings are exposed so the cluster embedding
   /// is a normalised mean of unit vectors, not the VBx centroid.
-  public actor FluidDiarizer: CoreDiarizer {
+  public actor FluidDiarizer: Diarizer {
     public let config: FluidDiarizerConfig
     private let models: ModelStore
     private var manager: OfflineDiarizerBox?
@@ -90,10 +94,10 @@ public struct FluidDiarizerConfig: Sendable, Equatable {
       manager = OfflineDiarizerBox(config: fluidConfig, models: loaded)
     }
 
-    public func diarize(_ audio: AudioBuffer16k) async throws -> CoreDiarizationResult {
+    public func diarize(_ audio: AudioBuffer16k) async throws -> DiarizationResult {
       try await prepare()
       guard let manager else { throw SpeechEngineError.notPrepared("fluid-diarizer") }
-      guard !audio.samples.isEmpty else { return CoreDiarizationResult(clusters: []) }
+      guard !audio.samples.isEmpty else { return DiarizationResult(clusters: []) }
       let (turns, chunks) = try await manager.process(audio.samples)
       return DiarizationMapping.result(
         turns: turns, chunks: chunks,
