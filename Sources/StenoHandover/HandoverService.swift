@@ -139,6 +139,10 @@ public actor HandoverService {
   var loopbackURL: URL? {
     server.map { URL(string: "\($0.scheme)://127.0.0.1:\($0.port)")! }
   }
+
+  /// The loopback URL for the end-to-end test's pinned client; not for
+  /// product use (the phone reaches the Mac over Bonjour, not loopback).
+  public var loopbackURLForTesting: URL? { loopbackURL }
 }
 
 /// A current value plus a fan-out to any number of `AsyncStream` readers.
