@@ -205,8 +205,10 @@ public final class StubChatServer: Sendable {
       state.waiters.removeAll()
       return waiting
     }
+    // The accept thread closes the descriptor once it has seen `stopped`,
+    // so a new server can never inherit this number while the old loop
+    // still calls `accept` on it.
     shutdown(listenFD, Int32(SHUT_RDWR))
-    close(listenFD)
     latch.broadcast()
     for waiter in waiters { waiter.resume() }
   }
@@ -214,16 +216,28 @@ public final class StubChatServer: Sendable {
   // MARK: Serving
 
   private func acceptLoop() {
+    defer { close(listenFD) }
     while !state.withLock({ $0.stopped }) {
       var pollFD = pollfd(fd: listenFD, events: Int16(POLLIN), revents: 0)
       let ready = poll(&pollFD, 1, 50)
-      guard ready > 0 else { continue }
+      guard ready > 0, !state.withLock({ $0.stopped }) else { continue }
       let client = accept(listenFD, nil, nil)
       guard client >= 0 else { continue }
+      Self.ignoreSIGPIPE(on: client)
       let thread = Thread { [self] in self.serve(client) }
       thread.name = "StubChatServer.connection"
       thread.start()
     }
+  }
+
+  /// A peer that closed early must not kill the test process: Darwin raises
+  /// SIGPIPE on `send` unless the socket opts out; Linux takes the flag per
+  /// call in `write`.
+  private static func ignoreSIGPIPE(on fd: Int32) {
+    #if canImport(Darwin)
+      var on: Int32 = 1
+      setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &on, socklen_t(MemoryLayout<Int32>.size))
+    #endif
   }
 
   private func serve(_ fd: Int32) {
@@ -356,9 +370,15 @@ public final class StubChatServer: Sendable {
 
   private func write(_ fd: Int32, _ data: Data) {
     data.withUnsafeBytes { (bytes: UnsafeRawBufferPointer) in
+      guard let base = bytes.baseAddress else { return }
       var offset = 0
       while offset < bytes.count {
-        let written = send(fd, bytes.baseAddress! + offset, bytes.count - offset, 0)
+        #if canImport(Glibc)
+          let flags = Int32(MSG_NOSIGNAL)
+        #else
+          let flags: Int32 = 0
+        #endif
+        let written = send(fd, base + offset, bytes.count - offset, flags)
         guard written > 0 else { return }
         offset += Int(written)
       }
