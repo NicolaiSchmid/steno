@@ -2,6 +2,7 @@ import { createNativeStackNavigator } from "@react-navigation/native-stack";
 import * as SplashScreen from "expo-splash-screen";
 import { useEffect } from "react";
 
+import { PairingSheet } from "@/features/pairing/PairingSheet";
 import { RecorderScreen } from "@/features/recorder/RecorderScreen";
 import type { RootStackParamList } from "./types";
 
@@ -15,11 +16,12 @@ export function RootNavigator() {
 	}, []);
 
 	return (
-		<Stack.Navigator>
+		<Stack.Navigator screenOptions={{ headerShown: false }}>
+			<Stack.Screen component={RecorderScreen} name="Home" />
 			<Stack.Screen
-				component={RecorderScreen}
-				name="Home"
-				options={{ headerShown: false }}
+				component={PairingSheet}
+				name="Pairing"
+				options={{ presentation: "modal" }}
 			/>
 		</Stack.Navigator>
 	);
