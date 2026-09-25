@@ -182,7 +182,6 @@ jobs:
     env:
       XCODEBUILD_FLAGS: >-
         -project apps/macos/Steno.xcodeproj
-        -scheme Steno
         -configuration Debug
         -destination platform=macOS,arch=arm64
         -derivedDataPath apps/macos/build/DerivedData
@@ -229,27 +228,28 @@ jobs:
       - name: Resolve packages
         run: |
           # shellcheck disable=SC2086
-          xcodebuild -resolvePackageDependencies $XCODEBUILD_FLAGS
+          xcodebuild -resolvePackageDependencies -scheme Steno $XCODEBUILD_FLAGS
 
       # xcodebuild's full log goes to a file (uploaded below); the console
-      # shows compiler diagnostics and the result line only.
-      - name: Build for testing
+      # shows compiler diagnostics and the result line only. The app builds
+      # first so the hostless unit tests find Steno.app in the products
+      # directory (InfoPlistTests).
+      - name: Build app
         run: |
           set -o pipefail
           mkdir -p apps/macos/build
           # shellcheck disable=SC2086
-          xcodebuild build-for-testing $XCODEBUILD_FLAGS 2>&1 | tee apps/macos/build/build.log | grep -E --line-buffered '(error:|warning: .*apps/macos|\*\* .* \*\*)' || true
-          grep -q '\*\* TEST BUILD SUCCEEDED \*\*' apps/macos/build/build.log
+          xcodebuild build -scheme Steno $XCODEBUILD_FLAGS 2>&1 | tee apps/macos/build/build.log | grep -E --line-buffered '(error:|warning: .*apps/macos|\*\* .* \*\*)' || true
+          grep -q '\*\* BUILD SUCCEEDED \*\*' apps/macos/build/build.log
 
       - name: Unit tests
         id: unit
         run: |
           set -o pipefail
           # shellcheck disable=SC2086
-          xcodebuild test-without-building $XCODEBUILD_FLAGS \
-            -only-testing:StenoTests \
+          xcodebuild test -scheme StenoTests $XCODEBUILD_FLAGS \
             -resultBundlePath apps/macos/build/unit.xcresult 2>&1 | tee apps/macos/build/unit.log | grep -E --line-buffered '(Test Case|Test Suite|error:|\*\* )' || true
-          grep -q '\*\* TEST EXECUTE SUCCEEDED \*\*' apps/macos/build/unit.log
+          grep -q '\*\* TEST SUCCEEDED \*\*' apps/macos/build/unit.log
 
       # Spike S1: XCUITest on the hosted runner. If this step fails with the
       # automation-mode timeout, the smoke test becomes Forge-only and the
@@ -260,10 +260,9 @@ jobs:
         run: |
           set -o pipefail
           # shellcheck disable=SC2086
-          xcodebuild test-without-building $XCODEBUILD_FLAGS \
-            -only-testing:StenoUITests \
+          xcodebuild test -scheme Steno -only-testing:StenoUITests $XCODEBUILD_FLAGS \
             -resultBundlePath apps/macos/build/ui.xcresult 2>&1 | tee apps/macos/build/ui.log | grep -E --line-buffered '(Test Case|Test Suite|error:|\*\* )' || true
-          grep -q '\*\* TEST EXECUTE SUCCEEDED \*\*' apps/macos/build/ui.log
+          grep -q '\*\* TEST SUCCEEDED \*\*' apps/macos/build/ui.log
 
       - name: Test summary
         if: always()

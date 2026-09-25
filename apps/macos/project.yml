@@ -105,19 +105,17 @@ targets:
       properties:
         com.apple.security.device.audio-input: true
         com.apple.security.personal-information.calendars: true
-    scheme:
-      testTargets:
-        - StenoTests
-        - StenoUITests
-      gatherCoverageData: false
-      commandLineArguments:
-        "-steno-ui-testing": false
-      environmentVariables:
-        OS_ACTIVITY_MODE: disable
 
   # Hostless unit tests over the view models and services. The app's sources
   # compile into the bundle (everything but `@main` and the Sparkle wrapper),
   # so the tests link the package products directly and never load the app.
+  #
+  # Deliberately no dependency on the Steno target and its own scheme: when
+  # two targets of one build link the same package products, Xcode wraps
+  # every product in a dynamic `PackageFrameworks/*_PackageProduct.framework`
+  # and (Xcode 16.4) links `Crypto` before it is built. One client per build
+  # graph keeps the products static. The InfoPlist tests find `Steno.app` in
+  # the shared products directory, built by the Steno scheme first.
   StenoTests:
     type: bundle.unit-test
     platform: macOS
@@ -130,9 +128,6 @@ targets:
           - "Resources/**"
           - "Info.plist"
     dependencies:
-      - target: Steno
-        link: false
-        embed: false
       - package: StenoPackage
         product: StenoCore
       - package: StenoPackage
@@ -165,3 +160,40 @@ targets:
         PRODUCT_BUNDLE_IDENTIFIER: uno.schmid.steno.mac.uitests
         GENERATE_INFOPLIST_FILE: YES
         TEST_TARGET_NAME: Steno
+
+schemes:
+  # The app plus its UI smoke test. `-steno-ui-testing` is listed (disabled)
+  # so a developer can flip it on in Xcode to run the preview environment.
+  Steno:
+    build:
+      targets:
+        Steno: all
+        StenoUITests: [test]
+    run:
+      config: Debug
+      commandLineArguments:
+        "-steno-ui-testing": false
+    test:
+      config: Debug
+      gatherCoverageData: false
+      targets:
+        - StenoUITests
+    profile:
+      config: Release
+    analyze:
+      config: Debug
+    archive:
+      config: Release
+
+  # The hostless unit tests alone; see the StenoTests target comment.
+  StenoTests:
+    build:
+      targets:
+        StenoTests: [test, run, analyze]
+    run:
+      config: Debug
+    test:
+      config: Debug
+      gatherCoverageData: false
+      targets:
+        - StenoTests
