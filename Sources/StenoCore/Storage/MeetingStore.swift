@@ -45,6 +45,14 @@ public final class MeetingStore: Sendable {
     try await writer.write { db in try MeetingRow(meeting).save(db) }
   }
 
+  /// The meeting and its asset in one transaction; `ProcessingPipeline.enqueue`.
+  public func save(_ meeting: Meeting, asset: AudioAsset) async throws {
+    try await writer.write { db in
+      try MeetingRow(meeting).save(db)
+      try AudioAssetRow(asset).save(db)
+    }
+  }
+
   public func meeting(id: UUID) async throws -> Meeting? {
     try await writer.read { db in try Self.meetingRow(id, db)?.meeting }
   }
