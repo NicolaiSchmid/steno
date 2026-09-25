@@ -49,6 +49,30 @@ actor HandoverEngine: RequestHandling {
     onReceiptsChange = observer
   }
 
+  /// On start, drop inbox files with no receipt (a crash between announce and
+  /// the first save, or a device revoked while offline) and re-verify files
+  /// whose receipt is complete but whose meeting is gone. Best effort.
+  func sweepOrphans() async {
+    try? inbox.prepare()
+    for recordingID in inbox.recordingIDs() {
+      let receipt = try? await store.handoverReceipt(recordingID: recordingID)
+      switch receipt?.state {
+      case .none:
+        inbox.discard(recordingID, format: nil)
+      case .complete(let meetingID):
+        // The intake finished; if the meeting still exists the leftover
+        // verified file is the intake's to delete, so leave it, else drop it.
+        if (try? await store.meeting(id: meetingID)) == nil {
+          inbox.discard(recordingID, format: nil)
+        } else if let metadata = inbox.loadMetadata(recordingID) {
+          inbox.discard(recordingID, format: metadata.format)
+        }
+      case .some:
+        break
+      }
+    }
+  }
+
   // MARK: - Pairing session
 
   /// Opens a window and returns the payload for the QR code, replacing any

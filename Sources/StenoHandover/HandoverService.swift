@@ -24,6 +24,8 @@ public actor HandoverService {
   nonisolated let metrics = ServerMetrics()
   private var server: HandoverServer?
   private var listenerStates = Broadcast<ListenerState>(initial: .stopped)
+  private var receiptUpdates = Broadcast<[HandoverReceipt]>(initial: [])
+  private var receiptsObserverInstalled = false
 
   public init(
     configuration: HandoverConfiguration,
@@ -83,9 +85,35 @@ public actor HandoverService {
     listenerStates.remove(id)
   }
 
-  /// Binds the listener (and advertises when configured). Idempotent.
+  /// Every handover receipt touched since start, oldest first, updated as
+  /// chunks arrive and a recording completes. The UI reads it directly;
+  /// `receivedBytes ≈ receivedChunks.count * chunkSize`.
+  public var receipts: AsyncStream<[HandoverReceipt]> {
+    receiptUpdates.subscribe { [weak self] id in
+      Task { await self?.unsubscribeReceipts(id) }
+    }
+  }
+
+  private func unsubscribeReceipts(_ id: UUID) {
+    receiptUpdates.remove(id)
+  }
+
+  private func receiptsChanged(_ receipts: [HandoverReceipt]) {
+    receiptUpdates.send(receipts)
+  }
+
+  /// Binds the listener (and advertises when configured). Idempotent. Sweeps
+  /// orphaned inbox files on the first start.
   public func start() async throws {
     guard server == nil else { return }
+    if !receiptsObserverInstalled {
+      receiptsObserverInstalled = true
+      let bridge: @Sendable ([HandoverReceipt]) -> Void = { [weak self] receipts in
+        Task { await self?.receiptsChanged(receipts) }
+      }
+      await engine.setReceiptsObserver(bridge)
+      await engine.sweepOrphans()
+    }
     do {
       let server = try await HandoverServer.start(
         configuration: configuration, identity: identity, engine: engine, metrics: metrics)
