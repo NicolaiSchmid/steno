@@ -1,0 +1,69 @@
+PR #5 (StenoLLM), correctness review finding 12: the Linux-only stall of
+`swift test --parallel --filter StenoLLMTests` on the `steno-swift:6.1`
+container (swift-corelibs-foundation / FoundationNetworking). Excerpt of the
+lldb `thread backtrace all` taken while attached to the stalled test process;
+the two threads below hold each other's lock. Every other thread was parked
+behind them. The full dump was 38 threads; only what shows the cycle is kept.
+
+Not a product defect: the shipped macOS build runs on CFNetwork's URLSession,
+whose `cancel()` is asynchronous, and the same run completed 14 of 14 times on
+a Mac. The Linux loop runs one suite per `--filter` instead.
+
+Thread A: the test task leaving `mapBounded`'s task group after the first
+failed map call. `_swift_taskGroup_cancelAllChildren` holds the child's task
+status-record lock and, inside it, runs the child's cancellation handler,
+which is `URLSession.CancelState.cancel()` -> `URLSessionTask.cancel()` ->
+`DispatchQueue.sync` onto the session's work queue. That queue is busy on
+thread B, so A blocks while holding the status lock.
+
+  thread #15, name = 'stenoPackageTes', stop reason = signal SIGSTOP
+    frame #0: libc.so.6`syscall + 29
+    frame #1: libdispatch.so`_dispatch_futex_wait + 129
+    frame #2: libdispatch.so`_dispatch_thread_event_wait_slow + 29
+    frame #3: libdispatch.so`__DISPATCH_WAIT_FOR_QUEUE__ + 277
+    frame #4: libdispatch.so`_dispatch_sync_f_slow + 190
+    frame #5: libswiftDispatch.so`Dispatch.DispatchQueue.sync(execute: () -> ()) -> () + 146
+    frame #6: libFoundationNetworking.so`FoundationNetworking.URLSessionTask.cancel() -> () + 29
+    frame #7: libFoundationNetworking.so`FoundationNetworking.URLSession.CancelState.cancel() -> () + 150
+    frame #8: libswift_Concurrency.so`function_ref<void (swift::ActiveTaskStatus)>::callback_fn<swift_task_cancelImpl(swift::AsyncTask*)::$_0>
+    frame #9: libswift_Concurrency.so`withStatusRecordLock(swift::AsyncTask*, swift::ActiveTaskStatus, ...) + 367
+    frame #10: libswift_Concurrency.so`swift::_swift_taskGroup_cancelAllChildren(swift::TaskGroup*) + 218
+    frame #11: libswift_Concurrency.so`function_ref<void (swift::ActiveTaskStatus)>::callback_fn<swift_task_cancelImpl(swift::AsyncTask*)::$_0>
+    frame #12: libswift_Concurrency.so`withStatusRecordLock(swift::AsyncTask*, swift::ActiveTaskStatus, ...) + 367
+    frame #13: libswift_Concurrency.so`swift::_swift_taskGroup_cancelAllChildren(swift::TaskGroup*) + 218
+    frame #14: libswift_Concurrency.so`withStatusRecordLock(swift::AsyncTask*, swift::ActiveTaskStatus, ...) + 367
+    frame #15: libswift_Concurrency.so`swift::_swift_taskGroup_cancelAllChildren_unlocked(swift::TaskGroup*, swift::AsyncTask*) + 100
+    frame #16: libswift_Concurrency.so`(5) suspend resume partial function for Swift.withThrowingTaskGroup<...>
+    frame #17: stenoPackageTests.xctest`mapBounded<StenoLLM.TranscriptChunk, (StenoLLM.ChunkNotes, StenoCore.LLMUsage)>(items=10 values, limit=2, ...) at BoundedConcurrency.swift:10:13
+    frame #18: stenoPackageTests.xctest`LLMMeetingSummarizer.mapReduce(...)
+    frame #19: stenoPackageTests.xctest`LLMMeetingSummarizer.summarize(...) at LLMMeetingSummarizer.swift:53:34
+    frame #20: stenoPackageTests.xctest`closure #3 in MapReduceTests.aFailedMapCallPropagates(...)
+    frame #25: stenoPackageTests.xctest`MapReduceTests.aFailedMapCallPropagates() at MapReduceTests.swift:112:23
+
+Thread B: the session's work queue finishing that same child's transfer.
+`_MultiHandle.completedTransfer` -> `urlProtocolDidFinishLoading` -> the
+`data(for:)` completion closure -> `continuation.resume` ->
+`AsyncTask::flagAsAndEnqueueOnExecutor` -> `withStatusRecordLock` ->
+`pthread_mutex_lock` on the status lock thread A holds.
+
+  thread #5, name = 'stenoPackageTes', stop reason = signal SIGSTOP
+    frame #0: libc.so.6`___lldb_unnamed_symbol3649 + 48
+    frame #1: libc.so.6`pthread_mutex_lock + 273
+    frame #2: libswift_Concurrency.so`waitForStatusRecordUnlockIfNotSelfLocked(swift::AsyncTask*, swift::ActiveTaskStatus&) + 211
+    frame #3: libswift_Concurrency.so`withStatusRecordLock(swift::AsyncTask*, swift::ActiveTaskStatus, ...) + 76
+    frame #4: libswift_Concurrency.so`swift::updateStatusRecord(swift::AsyncTask*, swift::TaskStatusRecord*, ...)
+    frame #5: libswift_Concurrency.so`swift::AsyncTask::flagAsAndEnqueueOnExecutor(swift::SerialExecutorRef) + 128
+    frame #6: libFoundationNetworking.so`merged closure #1 @Sendable (Data?, URLResponse?, Error?) -> () in URLSession.data(for:) ...
+    frame #7: libFoundationNetworking.so`merged partial apply forwarder for closure #1 @Sendable (URL?, URLResponse?, Error?) -> () ...
+    frame #8: libFoundationNetworking.so`closure #8 @Sendable () -> () in FoundationNetworking._ProtocolClient.urlProtocolDidFinishLoading(FoundationNetworking.URLProtocol) -> ()
+    frame #9: libFoundationNetworking.so`FoundationNetworking._ProtocolClient.urlProtocolDidFinishLoading(FoundationNetworking.URLProtocol) -> () + 2027
+    frame #10: libFoundationNetworking.so`FoundationNetworking._NativeProtocol.completeTask() -> () + 1293
+    frame #11: libFoundationNetworking.so`FoundationNetworking._NativeProtocol.transferCompleted(withError: Foundation.NSError?) -> () + 2057
+    frame #12: libFoundationNetworking.so`FoundationNetworking.URLSession._MultiHandle.completedTransfer(forEasyHandle: UnsafeMutableRawPointer, easyCode: CFURLSessionEasyCode) -> () + 782
+    frame #13: libFoundationNetworking.so`FoundationNetworking.URLSession._MultiHandle.readAndWriteAvailableData(on: Int32) throws -> () + 122
+    frame #14: libFoundationNetworking.so`closure #1 () -> () in FoundationNetworking.URLSession._MultiHandle.register(socket:for:what:)
+    frame #16: libdispatch.so`_dispatch_block_async_invoke2 + 59
+
+Symptoms that identify a recurrence without lldb: the first second of the run
+finishes the pure tests, then nothing; `ss -tan` shows 8 to 10 client sockets
+in CLOSE_WAIT against the stub's ports; `timeout` has to kill `swift test`.

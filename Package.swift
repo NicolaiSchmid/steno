@@ -77,6 +77,7 @@ let package = Package(
         "StenoAudio",
         "StenoSpeech",
         "StenoAdapters",
+        "StenoLLM",
         "StenoHandover",
         .product(name: "ArgumentParser", package: "swift-argument-parser"),
       ]
@@ -103,11 +104,11 @@ let package = Package(
       // verbatim; it imports CryptoKit and Security, which Linux lacks.
       exclude: linuxOnlyExclusions(["Support/PinnedTrustEvaluator.swift"])
     ),
-    .testTarget(name: "stenoTests", dependencies: ["StenoCore", "StenoAudio"]),
+    .testTarget(name: "stenoTests", dependencies: ["StenoCore", "StenoAudio", "StenoLLM"]),
     .testTarget(
       name: "StenoEndToEndTests",
       dependencies: [
-        "StenoCore", "StenoAudio", "StenoSpeech", "StenoAdapters", "StenoHandover",
+        "StenoCore", "StenoAudio", "StenoSpeech", "StenoAdapters", "StenoLLM", "StenoHandover",
       ],
       // The pinned handover client compiles the phone's evaluator (symlink);
       // it needs CryptoKit and Security, absent on Linux.

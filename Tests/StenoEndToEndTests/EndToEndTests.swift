@@ -1,6 +1,7 @@
 import Foundation
 import StenoAdapters
 import StenoCore
+import StenoLLM
 import StenoSpeech
 import Testing
 
@@ -8,10 +9,11 @@ import Testing
 
 /// The one real-pipeline test across modules. Core created it with fakes
 /// everywhere; each module workstream's last step replaces its own fake with
-/// the real type. Delivery runs through the real `DeliveryCoordinator` and
-/// `ObsidianFolderDestination` into a temp vault; speaker suggestions come
-/// from the real `CosineSpeakerMemory` over the store (the engine and the
-/// diarizer stay fakes). No models, no network.
+/// the real type. The LLM passes run against `StubChatServer` on loopback,
+/// fed from `Tests/Fixtures/llm/responses/`; delivery runs through the real
+/// `DeliveryCoordinator` and `ObsidianFolderDestination` into a temp vault;
+/// speaker suggestions come from the real `CosineSpeakerMemory` over the
+/// store (the engine and the diarizer stay fakes). No models, no network.
 @Suite struct EndToEndTests {
   #if canImport(AVFoundation)
     static var decoder: any AudioDecoder { AVFoundationAudioCodec() }
@@ -64,6 +66,8 @@ import Testing
   #endif
 
   static let berlin = TimeZone(identifier: "Europe/Berlin")!
+  static let cleanupUsage = LLMUsage(promptTokens: 300, completionTokens: 120, requests: 1)
+  static let summaryUsage = LLMUsage(promptTokens: 900, completionTokens: 250, requests: 1)
 
   @Test func macCallFixtureLandsInVault() async throws {
     let directory = try Fixtures.temporaryDirectory("e2e")
@@ -82,8 +86,25 @@ import Testing
     for person in SampleData.persons() { try await store.save(person) }
 
     let events = MeetingEventBus()
-    let cleaner = PassthroughCleaner()
-    let summarizer = FakeSummarizer()
+    // StenoLLM's real cleaner and summarizer on the loopback stub: the
+    // cleanup answer echoes every segment capitalised, the summary answer
+    // is the canned analysis in `llm/responses/e2e-summary.json`.
+    let server = try StubChatServer()
+    defer { server.stop() }
+    let summaryBody = try String(
+      contentsOf: Fixtures.url("llm/responses/e2e-summary.json"), encoding: .utf8)
+    let echo = Scripts.cleanupEcho(usage: Self.cleanupUsage) { _, text in
+      text.prefix(1).uppercased() + text.dropFirst() + "."
+    }
+    server.respond { request in
+      request.purpose == "summary"
+        ? Scripts.completion(summaryBody, usage: Self.summaryUsage) : echo(request)
+    }
+    let endpoint = LLMEndpoint(baseURL: server.baseURL, model: "stub-model")
+    let client = OpenAICompatibleClient(endpoint: endpoint, apiKey: nil, retry: .none)
+    let cleaner = LLMTranscriptCleaner(model: client, endpoint: endpoint)
+    let summarizer = LLMMeetingSummarizer(
+      model: client, endpoint: endpoint, timeZone: TimeZone(identifier: "UTC")!)
     // The stored settings decide the destination, as in the app; the time
     // zone is pinned so the goldens hold on every machine.
     let dispatcher = DeliveryCoordinator(
@@ -127,7 +148,9 @@ import Testing
     let stored = try #require(try await store.meeting(id: meeting.id))
     #expect(stored.state == .ready)
     #expect(stored.title == "Produktstrategie", "a calendar title is kept")
-    #expect(stored.llmUsage == cleaner.usage + summarizer.usage)
+    #expect(server.requests.map(\.purpose) == ["cleanup", "summary"])
+    #expect(stored.llmUsage == Self.cleanupUsage + Self.summaryUsage)
+    #expect(stored.summary?.sections.map(\.id) == ["executive-summary", "full-summary"])
 
     let deliveries = try await store.deliveries(meetingID: meeting.id)
     #expect(deliveries.count == 1)
@@ -167,6 +190,13 @@ import Testing
     #expect(export.schemaVersion == MeetingExport.currentSchemaVersion)
     #expect(export.meeting.state == .ready)
     #expect(export.segments.count == 12)
+    #expect(
+      export.segments.allSatisfy {
+        $0.text == $0.rawText.prefix(1).uppercased() + $0.rawText.dropFirst() + "."
+      })
+    #expect(export.segments.allSatisfy { $0.rawText.hasPrefix("fake segment") })
+    #expect(export.tasks.map(\.text) == ["Budgetzahlen prüfen."])
+    #expect(export.decisions.map(\.text) == ["Der Kern wird priorisiert."])
     #expect(export.speakers.map(\.clusterLabel) == ["Me", "Speaker 1", "Speaker 2"])
     // The fake diarizer's axis embeddings match the pre-enrolled people
     // through the real cosine memory: every "them" speaker is suggested.
@@ -212,6 +242,7 @@ import Testing
       again.files[4].sha256 != receipt.files[4].sha256,
       "meeting.json changed: the retention stage set expiresAt after the first delivery")
     #expect(try String(contentsOf: notes, encoding: .utf8) == "mine\n")
+    #expect(server.requests.count == 2, "a re-export never re-runs the LLM")
 
     // Everything posted so far, read up to a sentinel so a failed run can
     // never hang the test.

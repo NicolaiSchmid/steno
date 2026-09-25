@@ -1,5 +1,5 @@
 {
-  "context" : "A customer discovery or sales conversation. Capture the customer's situation and words, not the pitch.",
+  "context" : "A customer discovery or sales conversation. Capture the customer's situation in their own words and keep what they said apart from what the vendor proposed. Never invent needs, budget, timelines or decision makers that were not stated.",
   "description" : "A conversation with a customer or prospect about their situation, problems and interest.",
   "displayName" : "Customer Discovery",
   "id" : "customer-discovery",
@@ -7,37 +7,37 @@
     {
       "heading" : "Customer Context",
       "id" : "customer-context",
-      "instructions" : "Who the customer is, their role, company and situation, as stated in the conversation.",
+      "instructions" : "Who the customer is: role, company, team size, market and current situation, as stated in the conversation. One bullet per cluster of facts.",
       "required" : true
     },
     {
       "heading" : "Problems and Pain Points",
       "id" : "problems-and-pain-points",
-      "instructions" : "The problems the customer described, in their own terms, with severity or frequency when mentioned.",
+      "instructions" : "The problems the customer described, in their own terms, with severity, frequency, cost or who is affected when they said so. Quote short phrases verbatim where they are telling.",
       "required" : true
     },
     {
       "heading" : "Current Workflow and Tools",
       "id" : "current-workflow-and-tools",
-      "instructions" : "How they solve it today and which tools or workarounds they use.",
+      "instructions" : "How they handle it today: process, tools and workarounds, plus what they have already tried and why it did not stick.",
       "required" : false
     },
     {
       "heading" : "Reactions and Buying Signals",
       "id" : "reactions-and-buying-signals",
-      "instructions" : "Reactions to what was shown or proposed, interest, urgency, budget and timeline signals.",
+      "instructions" : "Reactions to what was shown or proposed: interest, urgency, budget, decision process, timeline and who else must be involved. Only what was actually said, not what was implied.",
       "required" : false
     },
     {
       "heading" : "Objections and Risks",
       "id" : "objections-and-risks",
-      "instructions" : "Concerns, objections, blockers and risks the customer raised.",
+      "instructions" : "Concerns, objections, blockers and risks the customer raised, including compliance, integration, adoption and pricing, each with the customer's reasoning.",
       "required" : false
     },
     {
       "heading" : "Next Steps",
       "id" : "next-steps",
-      "instructions" : "Agreed follow-ups with owner and date when stated.",
+      "instructions" : "Agreed follow-ups with owner and date when stated. Mark proposals that were not agreed as proposals.",
       "required" : false
     }
   ]

@@ -60,12 +60,24 @@ public final class ManualClock: Clock, Sendable {
     try await withTaskCancellationHandler {
       try await withCheckedThrowingContinuation {
         (continuation: CheckedContinuation<Void, any Error>) in
-        let resumeNow = state.withLock { state -> Bool in
-          if deadline <= state.current { return true }
+        // A task cancelled before it gets here has already run the
+        // handler below (which found nothing), so the check happens under
+        // the same lock as the append: either the sleeper is never
+        // registered, or the handler that follows a later cancellation
+        // finds it. Without this a cancelled-before-start sleeper would
+        // wait forever.
+        enum Outcome { case resume, cancelled, wait }
+        let outcome = state.withLock { state -> Outcome in
+          if deadline <= state.current { return .resume }
+          if Task.isCancelled { return .cancelled }
           state.sleepers.append(Sleeper(id: id, deadline: deadline, continuation: continuation))
-          return false
+          return .wait
         }
-        if resumeNow { continuation.resume() }
+        switch outcome {
+        case .resume: continuation.resume()
+        case .cancelled: continuation.resume(throwing: CancellationError())
+        case .wait: break
+        }
       }
     } onCancel: {
       let cancelled = state.withLock { state -> Sleeper? in

@@ -1,11 +1,8 @@
 ## Executive Summary
 
-- **Nicolai**: fake segment 1
+- **Fokus**: Me schlägt vor, den Kern zu priorisieren; **Nicolai** stimmt zu.
+- **Budget**: **Jérôme** prüft die Zahlen bis Freitag.
 
-## Full Summary
+## Vollständige Zusammenfassung
 
-- **Nicolai**: fake segment 1
-
-## Open Questions
-
-- **Nicolai**: fake segment 1
+- **Segmente**: Die zwölf Testsegmente wurden der Reihe nach besprochen.

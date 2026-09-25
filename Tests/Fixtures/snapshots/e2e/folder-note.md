@@ -22,16 +22,13 @@ steno_id: "00000000-0000-0000-0000-000000000001"
 
 ### Executive Summary
 
-- **Nicolai**: fake segment 1
+- **Fokus**: Me schlägt vor, den Kern zu priorisieren; **Nicolai** stimmt zu.
+- **Budget**: **Jérôme** prüft die Zahlen bis Freitag.
 
-### Full Summary
+### Vollständige Zusammenfassung
 
-- **Nicolai**: fake segment 1
-
-### Open Questions
-
-- **Nicolai**: fake segment 1
+- **Segmente**: Die zwölf Testsegmente wurden der Reihe nach besprochen.
 
 ## Decisions
 
-- Decision from Speaker 1.
+- Der Kern wird priorisiert.

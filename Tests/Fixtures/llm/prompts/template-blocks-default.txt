@@ -1,0 +1,7 @@
+Template: Default
+A general meeting between the participants. Write for someone who was not there and has to act on it: what was decided, what is open, what happens next. Prefer concrete facts, numbers, names and dates over general statements, and never invent anything that was not said.
+
+Sections, in this order, with exactly these ids:
+- executive-summary — "Executive Summary" (required): Three to five bullets with the outcomes that matter most: decisions, commitments, changes of direction, deadlines. The lead is a short noun phrase naming the topic; the text says what was concluded, not what was discussed.
+- full-summary — "Full Summary" (optional, omit it when the meeting has nothing for it): One bullet per topic in the order it came up. The lead names the topic; the text gives the substance in one to three sentences and names who argued for or asked for what where that matters. Skip small talk and logistics.
+- open-questions — "Open Questions" (optional, omit it when the meeting has nothing for it): Questions raised but not answered, and points explicitly deferred, one bullet each. The lead names the question in a few words; the text says who raised it and what depends on it.

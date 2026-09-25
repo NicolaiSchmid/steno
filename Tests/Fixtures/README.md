@@ -12,6 +12,7 @@ case-insensitive by default.
 | `templates/` | The bundled summary templates as `StenoJSON`, one golden per template |
 | `exports/` | The `MeetingExport` golden that is `meeting.json` |
 | `meetings/` | The synthetic `MeetingExport` every adapter golden is rendered from (`StenoAdaptersTests/Support/FixtureMeeting.swift` is its source) |
+| `llm/` | StenoLLM: `transcripts/` (`MeetingExport` values of `LLMFixtures`, compared as values), `text/` (token estimate input), `prompts/` (golden prompts), `responses/` (canned server bodies) |
 | `handover/` | `test-identity.p12` and `.der`: a test-only P-256 TLS identity (`CN=Steno test identity`, password in `Tests/StenoHandoverTests/Support/TestIdentity.swift`), generated once with openssl; loaded only by the test targets, never by a product module |
 | `snapshots/schema/` | `sqlite_master` dump per migration version |
 | `snapshots/summary/` | `SummaryMarkdown.render` output for the sample export |

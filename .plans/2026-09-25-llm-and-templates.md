@@ -350,3 +350,158 @@ script removed; any `Codable` type gaining an `apiKey` property.
 - User product glossary for the cleanup pass; names come from participants and known people only.
 - Markdown template parser and catalog; templates are StenoCore JSON.
 - JSON repair heuristics (trailing commas, truncated tails) if a server family turns out to need them.
+
+## Deviations (implementation)
+
+Recorded while implementing this plan in PR #5 (`feat/llm-templates`), 2026-09-25.
+
+- `StubChatServer` uses POSIX sockets and one thread per connection instead of `NWListener`, so
+  the same server runs on the Linux container used for iteration and on macOS CI. Accepted sockets
+  opt out of SIGPIPE (`SO_NOSIGPIPE` / `MSG_NOSIGNAL`); Darwin otherwise kills the test process on
+  the first write to a peer that closed early, which is how the first macOS run died.
+- `OpenAICompatibleClient.init` takes an optional `observer: (LLMClientEvent) -> Void`. Tests on
+  `ManualClock` need to know when the backoff sleep begins (the per-attempt timeout is also a
+  sleeper on the same clock), and the CLI prints retries and mode changes with `--verbose`.
+- Every request carries an `X-Steno-Purpose` header with `LLMRequest.purpose`, so the stub server
+  (and any proxy) can tell `cleanup`, `cleanup-retry`, `summary`, `summary-map`, `summary-reduce`,
+  `*-repair` and `probe` apart. The wire format has no field for it.
+- `LLMError` gained `notConfigured(String)` for `LLMEndpoint(settings:)`. `rateLimited` is thrown
+  for 429; `Retry-After` in seconds is honoured and clamped to `maxDelay`, the HTTP-date form falls
+  back to the backoff. Retries are deterministic (no jitter).
+- The per-attempt timeout is raced on the injected clock; `URLRequest.timeoutInterval` is a
+  wall-clock backstop at twice the value. A `URLResponse` never crosses a task boundary (not
+  `Sendable` on Darwin).
+- `JSONSchema.promptText` is a compact typed shape (`"id": "a" | "b"`, `string | null`, trailing
+  comments), not JSON Schema, which is shorter and easier for small models; `jsonValue` is the
+  strict schema for `response_format`. The strict walker counts nesting for containers only, as
+  OpenAI's five-level limit does.
+- `CleanupPromptBuilder.build` takes `labels: SpeakerLabels` in addition to the plan's
+  parameters; the chunk carries speaker ids, not labels. The word-count check also accepts a
+  difference of one word, so a misheard two-word product name may become one word.
+- Answer-quality failures (`invalidJSON`, `truncated`, `refused`, validation) fall back to raw text
+  after one retry; HTTP and transport errors propagate so the pipeline marks the stage failed and
+  keeps the raw transcript instead of silently shipping an uncleaned one after burning retries.
+- `de-1000-words.txt` holds 1000 words and the check asserts 1.2 to 2.5 tokens per word. The
+  plan's "330 to 500 tokens" corresponds to about 1000 bytes, not 1000 words.
+- The 60-minute fixture is produced by `SyntheticTranscript` in `Sources/StenoLLM/Testing/`
+  (seeded SplitMix64) and pinned by `LLMFixturesTests`, not by core's `steno dev fixtures
+  generate --llm` and `MANIFEST.sha256`; the transcript JSON files are compared as decoded values
+  because Darwin and Linux Foundation may print the same Double differently. Both transcript
+  fixtures are `MeetingExport` files (`meeting.json`), which is also what `steno dev llm
+  cleanup|summarize` read, so `steno export` output feeds the CLI directly.
+- `SummaryOutput.language` is the resolved output language (meeting language, else `en`), which
+  the pipeline then writes to `Meeting.language`; the model's own `language` field is ignored.
+- Map-reduce reserves a quarter of the context (at most `maxOutputTokens`) for the answer and
+  refuses before the first call when `chunks * 200` estimated notes tokens exceed the input budget.
+- `steno dev llm` is one command group with `probe`, `cleanup <meeting.json>` and `summarize
+  <meeting.json> --template <id>` (the workstream brief spelled it `llm-probe`). Keys come from
+  `STENO_LLM_API_KEY` or `<support directory>/secrets.json` through `FileSecretStore`, never from a
+  flag. `Wiring.llmComponents(settings:)` swaps the fakes for the real passes when
+  `Settings.llmBaseURL` and `llmModel` are set; `stenoTests` and `StenoEndToEndTests` depend on
+  `StenoLLM` for the stub server.
+- Spikes 1 to 3 (structured output matrix, cleanup fidelity, map-reduce quality) need a real
+  endpoint and were not run in this PR; `LiveEndpointTests` behind `STENO_LLM_TESTS=1` is the
+  harness for them and the capability table above keeps its "unverified" marker for Ollama.
+- Simplify pass on the same PR, against the Public API above: `StructuredOutputMode.auto` is
+  gone (it behaved exactly like `.jsonSchema`, the fallback runs from any starting mode);
+  `LLMEndpoint.init?(settings:)` is failable instead of throwing, so `LLMError.notConfigured` and
+  `isConfigured` are gone; `LLMError.unsupportedResponseFormat` was never thrown and is gone;
+  `Glossary` is `CleanupInput.glossary: [String]`; `CleanupValidator` is
+  `CleanupDraft.problems(against:)` plus `orderedTexts`, so the module has one error type;
+  `StructuredOutputDecoder` is a namespace with a static `decode`; `buildSingleShot(_:)` takes
+  the input alone and `buildRepair(for:schema:invalid:error:)` is static and derives response
+  format, token ceiling and purpose from the request it repairs; the wire types are internal.
+- Testing pass on the same PR. `OpenAICompatibleClient.wallClockBackstop(for:)` is the one
+  place `URLRequest.timeoutInterval` is computed (twice the clock timeout, at least 30 s), so a
+  test can pin it without waiting 30 s; a `URLProtocol` failing with `URLError.timedOut` proves
+  the transport timeout is reported and retried like the clock one. `LLMTranscriptCleaner` now
+  treats a refusal (`LLMError.refused`, thrown by the client for OpenAI's `refusal` field) like
+  the other answer-quality failures: one retry with the reason, then raw text and
+  `failedChunks`, one request counted; before, a refusal propagated and failed the stage, against
+  the deviation above. `StubChatServer.stop()` is idempotent and returns once the accept thread
+  has closed the listening descriptor: the `deinit` after an explicit `stop()` used to `shutdown`
+  the descriptor number again, which by then could be another socket of the same test process
+  (a live URLSession connection or another server), the source of the intermittent "Empty reply
+  from server" transport errors under `--parallel`. Still untestable on CI: the wall-clock backstop actually firing (30 s of
+  wall time), `Retry-After` in HTTP-date form (parsed as nil by design), and anything a real model
+  does (spikes 1 to 3, `LiveEndpointTests`). Known and reproduced on the Linux container only:
+  `swift test --parallel` stalls when a task group cancels a sibling that is entering
+  `URLSession.data(for:)` (swift-corelibs-foundation deadlocks between `CancelState.cancel()` ->
+  `URLSessionTask.cancel()` -> `workQueue.sync` and the `data(for:)` continuation body's
+  `DispatchQueue.sync`); `CleanupTests.transportFailuresPropagateInsteadOfFallingBackToRaw` is
+  the usual trigger and every later network test then hangs on `URLSession.shared`. Darwin's
+  URLSession does not have the bug, so CI on the Mac is unaffected; the loop is `--filter` per
+  suite on Linux.
+
+### Review application (PR #5, after the correctness, elegance and testing passes)
+
+Applied in three commits (`ee927ad` correctness majors, `1aa1afb` correctness minors, `5904088`
+elegance), each behaviour change with a test that failed before it, iterated on the Linux
+container (`steno-swift:6.1`, one suite per `--filter`) and confirmed on `macos-15`. Departures
+from the text above:
+
+- `Retry-After` is honoured only as a finite, non-negative number of seconds, capped at an hour
+  before it becomes a `Duration` (`Duration.seconds(Double)` traps past about 1.7e20 s and
+  `Double("inf")` parses); anything else, the HTTP-date form included, falls back to the backoff.
+- `probe()` throws whatever the probe completion throws, not only 401/403: a base URL without
+  `/v1`, a model the server does not know, a non-JSON 200 all fail the probe. A returned
+  `EndpointProbe` means both passes can run, so it has no `reachable` field; `GET /models` failing
+  is still tolerated (`modelListed` nil). `steno dev llm probe --json` prints
+  `{modelListed, structuredOutput, roundTripMilliseconds}`, and with `--base-url` and `--model`
+  the settings are not read and no database is opened.
+- Map-reduce: the map ceiling is each chunk's share of the input budget
+  (`TokenBudget.mapNotesOutputTokens(chunkCount:)`, at most 1 500, at least 256), sent as
+  `max_tokens` and used by the up-front check, so both checks agree; the map prompt carries a
+  matching length rule ("at most N points in total", one point per 60 tokens, at least three).
+  The 200-tokens-per-chunk estimate above is superseded. At 8k the ten chunks get about 480
+  tokens each.
+- The client tolerates OpenAI's reasoning models without model-name sniffing: a 400 whose
+  `error.param` is `max_tokens` is resent with `max_completion_tokens`, one naming `temperature`
+  is resent without it, both remembered per client like the structured output mode and reported
+  as `LLMClientEvent.parameterRejected`. A repeated rejection of the same parameter, or any other
+  `param`, is a plain HTTP 400.
+- `usage.prompt_tokens` and `completion_tokens` are optional on the wire; a null or partial usage
+  block counts as one request with zero tokens instead of failing an intact answer three times.
+- A ``` inside the JSON is content: the decoder treats a fence as Markdown only when it opens
+  before the first `{` or `[`, and the last fence closes the block.
+- `SummaryOutput.language` is the meeting's tag as elected, nil included, so an untagged meeting
+  is not persisted as English (the deviation above that made it the resolved language is
+  superseded); `SummaryDocument.language` stays resolved for the renderer.
+- A section the model split into two blocks with one id is merged in order under the first
+  non-blank heading.
+- Budget policy lives in `LLMBudgetPolicy` (`Budget/BudgetPolicy.swift`), and `LLMEndpoint`
+  derives `cleanupChunkBudgetTokens` and `summaryReservedOutputTokens` from it, so the app can
+  show the derived budgets next to `llmContextTokens`. `LLMMeetingSummarizer.reservedOutputTokens`
+  and `notesTokensPerChunk` are gone.
+- The heading-translation sentence is `SummaryPromptBuilder.headingsRule` and follows the
+  language line only in the single-shot and reduce prompts, where the template sections follow;
+  the map prompt no longer carries an instruction it cannot satisfy. Goldens: the map prompt only.
+- Post-processing is `AnalysisDraft.summaryOutput(for:usage:minimumConfidence:)`
+  (`Summary/AnalysisDraft+Output.swift`), pure over the draft as `CleanupDraft.problems(against:)`
+  is for pass 1. `DraftTask.priority` is core's `TaskPriority`. `AnalysisDraft.language` is gone
+  from the type, the schema and the fixtures (it was requested and never read); the single-shot,
+  reduce and repair goldens lose that one schema line.
+- "Omit when empty" is said once, by the builder; the sentence left `default.json` and
+  `daily-standup.json`, so core's template goldens and the prompts embedding them changed.
+- Public surface nobody outside the module used is internal or gone (`SpeakerLabels.ordered`
+  and its `==`, `SpeakerLabels.unknown`, `OutputLanguage.fallback`,
+  `TranscriptLines.render(startIndex:)`, `JSONSchema.Property`/`properties`,
+  `TokenBudget.bytesPerToken`, `RecordedRequest.inFlightOnArrival`); the wall-clock backstop is
+  set in `perform`, and the probe schema goes through `JSONSchema` so the strict walker covers it.
+- The Linux-only `swift test --parallel` stall is a known environment issue, not a product
+  defect: a lock-order deadlock inside FoundationNetworking between the Swift task status lock
+  (held while a task group cancels its children) and `workQueue.sync` in
+  `URLSessionTask.cancel()`. The two deadlocked threads of the lldb dump are in
+  [`reviews/2026-09-25-pr5-linux-stall-backtrace.txt`](reviews/2026-09-25-pr5-linux-stall-backtrace.txt);
+  Darwin's `cancel()` is asynchronous and the same run passed 14 of 14 times on a Mac.
+
+Follow-ups recorded, not applied: neighbour-merge detection in the cleanup word check (a cleaned
+segment containing an adjacent original verbatim) and a tighter ratio; on a `finish_reason:
+length` cleanup retry, a larger `maxTokens` without the truncated echo, or a split chunk; the
+cleanup request size at 4k contexts (`max_tokens` capped by what the context still holds); one
+retry at the endpoint ceiling for a truncated summary; keep-alive in the stub server (it answers
+`Connection: close`, so URLSession's pooled-connection path is never exercised);
+`CleanupPromptBuilder.init(input:maxOutputTokens:)` mirroring the summary builder; `maxTokens` out
+of the prompt golden header; a `systemPrompt(for:)` so the budget is measured without rendering
+the transcript; splitting `SummaryTests.singleShotBuildsTheSummaryOutputFromTheDraft` and the
+first CLI test; `OutputLanguage.resolve(meeting:)` renamed for its `LanguageTag?` argument.

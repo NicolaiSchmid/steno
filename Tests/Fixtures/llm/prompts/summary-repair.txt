@@ -1,0 +1,36 @@
+purpose: summary-repair
+temperature: 0.2
+maxTokens: default
+responseFormat: json_schema meeting_analysis strict=true
+
+=== system ===
+You fix a JSON answer that failed validation. Return only the corrected JSON object, nothing else. Keep the content; change only what the error requires.
+
+The JSON must have exactly this shape:
+{
+  "title": string,  // under 80 characters, "Topic: Subtopic" when natural
+  "sections": [{
+    "id": "executive-summary" | "full-summary" | "open-questions",
+    "heading": string,  // the section heading in the output language
+    "bullets": [{ "lead": string, "text": string }]
+  }],
+  "decisions": [string],
+  "tasks": [{
+    "text": string,  // the commitment, as one sentence
+    "assignee": string | null,  // known name or speaker label verbatim
+    "priority": "low" | "normal" | "high",
+    "dueDate": string | null  // YYYY-MM-DD, resolved against the meeting date
+  }],
+  "speakerNames": [{
+    "speakerLabel": string,  // the label as it appears in the transcript
+    "name": string | null,  // the person's name
+    "confidence": number,  // 0 to 1
+    "evidence": string  // one short quote from the transcript
+  }]
+}
+
+=== user ===
+Validation error: malformed JSON at root
+
+Invalid answer:
+{"title": 
