@@ -165,7 +165,8 @@ import Testing
       seen = server.requests.count
       let single = purposes == ["summary"]
       let budget = TokenBudget(
-        contextTokens: contextTokens, reservedOutputTokens: summarizer.reservedOutputTokens,
+        contextTokens: contextTokens,
+        reservedOutputTokens: summarizer.endpoint.summaryReservedOutputTokens,
         promptOverheadTokens: overhead)
       #expect(single == budget.fits(tokens), "\(contextTokens): \(purposes)")
       if !single {

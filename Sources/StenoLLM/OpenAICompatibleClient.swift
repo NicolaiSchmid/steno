@@ -123,18 +123,16 @@ public actor OpenAICompatibleClient: LanguageModel {
     return EndpointProbe(modelListed: modelListed, resolvedMode: mode, roundTrip: roundTrip)
   }
 
+  /// Through the same builder as every other schema, so the strict-subset
+  /// walk in the tests covers it.
+  static let probeSchema = JSONSchema.object(["ok": .boolean()])
+
   static let probeRequest = LLMRequest(
     messages: [
       LLMMessage(role: .system, content: "Reply with JSON only."),
       LLMMessage(role: .user, content: "Return exactly {\"ok\": true}."),
     ],
-    responseFormat: .jsonSchema(
-      name: "probe",
-      schema: [
-        "type": "object", "properties": ["ok": ["type": "boolean"]], "required": ["ok"],
-        "additionalProperties": false,
-      ],
-      strict: true),
+    responseFormat: .jsonSchema(name: "probe", schema: probeSchema.jsonValue, strict: true),
     temperature: 0,
     maxTokens: 32,
     purpose: "probe")
@@ -175,7 +173,6 @@ public actor OpenAICompatibleClient: LanguageModel {
     if let apiKey {
       request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
     }
-    request.timeoutInterval = Self.wallClockBackstop(for: endpoint.requestTimeout)
   }
 
   /// `URLRequest.timeoutInterval`: a wall-clock backstop well past the
@@ -201,7 +198,8 @@ public actor OpenAICompatibleClient: LanguageModel {
     }
   }
 
-  /// One attempt: the request raced against `requestTimeout` on the clock.
+  /// One attempt: the request raced against `requestTimeout` on the clock,
+  /// with `URLRequest.timeoutInterval` set to the wall-clock backstop.
   /// Cancellation of the caller cancels the transfer and rethrows
   /// `CancellationError`; the timeout throws `LLMError.timeout`.
   private func perform(_ request: URLRequest) async throws -> Reply {
@@ -209,9 +207,14 @@ public actor OpenAICompatibleClient: LanguageModel {
     let clock = self.clock
     let timeout = endpoint.requestTimeout
     let apiKey = self.apiKey
+    let backstopped: URLRequest = {
+      var copy = request
+      copy.timeoutInterval = Self.wallClockBackstop(for: timeout)
+      return copy
+    }()
     return try await withThrowingTaskGroup(of: Reply?.self) { group in
       group.addTask {
-        try await Self.send(request, session: session, apiKey: apiKey)
+        try await Self.send(backstopped, session: session, apiKey: apiKey)
       }
       group.addTask {
         // Checked first so an already-cancelled child never registers a

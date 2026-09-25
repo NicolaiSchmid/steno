@@ -23,7 +23,7 @@ A general meeting between the participants. Write for someone who was not there 
 Sections, in this order, with exactly these ids:
 - executive-summary — "Executive Summary" (required): Three to five bullets with the outcomes that matter most: decisions, commitments, changes of direction, deadlines. The lead is a short noun phrase naming the topic; the text says what was concluded, not what was discussed.
 - full-summary — "Full Summary" (optional, omit it when the meeting has nothing for it): One bullet per topic in the order it came up. The lead names the topic; the text gives the substance in one to three sentences and names who argued for or asked for what where that matters. Skip small talk and logistics.
-- open-questions — "Open Questions" (optional, omit it when the meeting has nothing for it): Questions raised but not answered, and points explicitly deferred, one bullet each. The lead names the question in a few words; the text says who raised it and what depends on it. Omit the section when there are none.
+- open-questions — "Open Questions" (optional, omit it when the meeting has nothing for it): Questions raised but not answered, and points explicitly deferred, one bullet each. The lead names the question in a few words; the text says who raised it and what depends on it.
 
 Rules:
 - Each bullet is a short lead phrase plus one to three sentences of text. The lead names the topic (or the person, where the template says so); the text carries the substance.
@@ -37,7 +37,6 @@ Rules:
 Return exactly this JSON shape:
 {
   "title": string,  // under 80 characters, "Topic: Subtopic" when natural
-  "language": string,  // BCP-47 tag of the language you wrote in
   "sections": [{
     "id": "executive-summary" | "full-summary" | "open-questions",
     "heading": string,  // the section heading in the output language

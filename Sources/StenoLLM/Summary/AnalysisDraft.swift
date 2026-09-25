@@ -2,26 +2,16 @@ import Foundation
 import StenoCore
 
 // The model's raw answers for the summary pass, before post-processing into
-// `SummaryOutput`. Decoding into these types is the validation.
+// `SummaryOutput` (`AnalysisDraft+Output.swift`). Decoding into these types
+// is the validation.
 
 /// One task as the model wrote it. `dueDate` is `YYYY-MM-DD` or null and is
-/// validated by Steno, never trusted.
+/// validated by Steno, never trusted; `priority` decodes straight into
+/// core's closed enum, so an unknown value is a decode failure.
 public struct DraftTask: Codable, Sendable, Equatable {
-  public enum Priority: String, Codable, Sendable, Equatable {
-    case low, normal, high
-
-    public var taskPriority: TaskPriority {
-      switch self {
-      case .low: .low
-      case .normal: .normal
-      case .high: .high
-      }
-    }
-  }
-
   public var text: String
   public var assignee: String?
-  public var priority: Priority
+  public var priority: TaskPriority
   public var dueDate: String?
 }
 
@@ -47,7 +37,6 @@ public struct AnalysisDraft: Codable, Sendable, Equatable {
   }
 
   public var title: String
-  public var language: String
   public var sections: [Section]
   public var decisions: [String]
   public var tasks: [DraftTask]

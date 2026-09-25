@@ -31,6 +31,18 @@ import Testing
     #expect(probe.stdout.contains("model listed: yes"))
     #expect(probe.stdout.contains("structured output: jsonSchema"))
 
+    // `--json` for a "Test connection" script, and with both endpoint flags
+    // the settings are not read, so no database is opened or created.
+    let probeJSON = try CLITests.run(["dev", "llm", "probe", "--json"] + endpoint, home: home)
+    #expect(probeJSON.status == 0, "\(probeJSON.stderr)")
+    let decoded = try JSONSerialization.jsonObject(with: Data(probeJSON.stdout.utf8))
+    let object = try #require(decoded as? [String: Any])
+    #expect(object["modelListed"] as? Bool == true)
+    #expect(object["structuredOutput"] as? String == "jsonSchema")
+    #expect(object["roundTripMilliseconds"] is NSNumber)
+    #expect(
+      !FileManager.default.fileExists(atPath: home.appendingPathComponent("steno.sqlite").path))
+
     let fixture = Fixtures.url("llm/transcripts/denglish-standup.json").path
     let out = home.appendingPathComponent("cleaned.json").path
     let cleanup = try CLITests.run(

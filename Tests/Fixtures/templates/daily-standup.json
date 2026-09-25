@@ -19,7 +19,7 @@
     {
       "heading" : "Blockers and Help Needed",
       "id" : "blockers-and-help-needed",
-      "instructions" : "Blockers, dependencies and requests for help, led by the person's name, with what or whom they are waiting on. Omit the section when there are none.",
+      "instructions" : "Blockers, dependencies and requests for help, led by the person's name, with what or whom they are waiting on.",
       "required" : false
     },
     {

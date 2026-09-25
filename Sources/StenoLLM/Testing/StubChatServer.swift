@@ -25,7 +25,7 @@ public struct RecordedRequest: Sendable {
   /// The `X-Steno-Purpose` header the client sends with every completion.
   public var purpose: String?
   /// Requests in flight (including this one) when it arrived.
-  public var inFlightOnArrival: Int
+  var inFlightOnArrival: Int
 
   public var authorization: String? { headers["authorization"] }
 }

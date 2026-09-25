@@ -9,9 +9,9 @@ import StenoCore
 /// `anyOf`. Validation of the model's answer is done by decoding into the
 /// `Codable` draft types, never by this schema.
 public struct JSONSchema: Sendable, Equatable {
-  public struct Property: Sendable, Equatable {
-    public var name: String
-    public var schema: JSONSchema
+  struct Property: Sendable, Equatable {
+    var name: String
+    var schema: JSONSchema
   }
 
   indirect enum Node: Sendable, Equatable {
@@ -62,7 +62,7 @@ public struct JSONSchema: Sendable, Equatable {
     return copy
   }
 
-  public var properties: [Property] {
+  var properties: [Property] {
     if case .object(let properties) = node { return properties }
     return []
   }

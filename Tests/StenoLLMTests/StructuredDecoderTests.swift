@@ -45,7 +45,8 @@ import Testing
     #expect(try decode(text) == Reply(ok: true, items: ["Use ```swift``` blocks"]))
     let fencedAndQuoted = "```json\n{\"ok\": false, \"items\": [\"```\"]}\n```"
     #expect(
-      StructuredOutputDecoder.extractJSON(fencedAndQuoted) == "{\"ok\": false, \"items\": [\"```\"]}")
+      StructuredOutputDecoder.extractJSON(fencedAndQuoted)
+        == "{\"ok\": false, \"items\": [\"```\"]}")
   }
 
   @Test func stripsProseBeforeAndAfterTheObject() throws {

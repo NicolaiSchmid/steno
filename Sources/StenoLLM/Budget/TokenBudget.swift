@@ -30,14 +30,16 @@ public struct TokenBudget: Sendable, Equatable {
 
   /// Tokens one map call may spend on its chunk's notes: the chunk's share
   /// of the input budget, so the notes of every chunk fit the reduce prompt
-  /// together and the up-front check and the post-map check agree; at most
-  /// 1 500, at least 256 (less cannot carry a chunk, and the caller refuses
-  /// before the first call).
+  /// together and the up-front check and the post-map check agree; within
+  /// `LLMBudgetPolicy`'s ceiling and floor (below the floor a chunk cannot
+  /// be carried, and the caller refuses before the first call).
   public func mapNotesOutputTokens(chunkCount: Int) -> Int {
-    min(1_500, max(256, inputBudget / max(1, chunkCount)))
+    min(
+      LLMBudgetPolicy.mapNotesCeilingTokens,
+      max(LLMBudgetPolicy.mapNotesFloorTokens, inputBudget / max(1, chunkCount)))
   }
 
-  public static func bytesPerToken(_ language: LanguageTag?) -> Double {
+  static func bytesPerToken(_ language: LanguageTag?) -> Double {
     language?.primarySubtag == "en" ? 3.6 : 3.0
   }
 

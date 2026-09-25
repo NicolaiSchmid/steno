@@ -41,7 +41,6 @@ Rules:
 Return exactly this JSON shape:
 {
   "title": string,  // under 80 characters, "Topic: Subtopic" when natural
-  "language": string,  // BCP-47 tag of the language you wrote in
   "sections": [{
     "id": "candidate-background" | "role-fit-and-experience" | "skills-assessment" | "motivation-and-culture" | "candidate-questions" | "assessment-and-recommendation" | "next-steps",
     "heading": string,  // the section heading in the output language

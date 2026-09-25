@@ -4,5 +4,5 @@ A daily standup. Every bullet lead is the person's name: their known name, else 
 Sections, in this order, with exactly these ids:
 - progress-since-last-standup — "Progress Since Last Standup" (required): One bullet per person, led by their name, with what they finished or moved forward since the last standup.
 - plans-until-next-standup — "Plans Until Next Standup" (required): One bullet per person, led by their name, with what they will work on until the next standup.
-- blockers-and-help-needed — "Blockers and Help Needed" (optional, omit it when the meeting has nothing for it): Blockers, dependencies and requests for help, led by the person's name, with what or whom they are waiting on. Omit the section when there are none.
+- blockers-and-help-needed — "Blockers and Help Needed" (optional, omit it when the meeting has nothing for it): Blockers, dependencies and requests for help, led by the person's name, with what or whom they are waiting on.
 - announcements — "Announcements" (optional, omit it when the meeting has nothing for it): Team-wide announcements, decisions and schedule changes that are not one person's update.

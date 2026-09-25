@@ -11,11 +11,11 @@ import Testing
   static let standup = LLMFixtures.denglishStandup()
   static let utc = TimeZone(identifier: "UTC")!
 
-  static func draft(
-    speakerNames: [DraftSpeakerName] = [], tasks: [DraftTask] = [], language: String = "de"
-  ) -> AnalysisDraft {
+  static func draft(speakerNames: [DraftSpeakerName] = [], tasks: [DraftTask] = [])
+    -> AnalysisDraft
+  {
     AnalysisDraft(
-      title: "T", language: language,
+      title: "T",
       sections: [
         .init(
           id: "executive-summary", heading: "Executive Summary",
@@ -36,27 +36,24 @@ import Testing
       DraftSpeakerName(speakerLabel: "SPEAKER 1", name: "Mara", confidence: 0.29, evidence: "q"),
       DraftSpeakerName(speakerLabel: "Speaker 3", name: "Jérôme", confidence: 0.3, evidence: "q"),
     ]
-    let output = LLMMeetingSummarizer.output(
-      from: Self.draft(speakerNames: names), input: Self.input(language: "de"),
-      usage: .zero)
+    let output = Self.draft(speakerNames: names).summaryOutput(
+      for: Self.input(language: "de"), usage: .zero, minimumConfidence: 0.3)
     #expect(
       output.speakerNames.map(\.speakerID) == [
         LLMFixtures.standupSpeakerTwoID, LLMFixtures.standupSpeakerThreeID,
       ])
     #expect(output.speakerNames.map(\.name) == ["Nicolai", "Jérôme"])
 
-    let strict = LLMMeetingSummarizer.output(
-      from: Self.draft(speakerNames: names), input: Self.input(language: "de"),
-      usage: .zero, minimumConfidence: 0.5)
+    let strict = Self.draft(speakerNames: names).summaryOutput(
+      for: Self.input(language: "de"), usage: .zero, minimumConfidence: 0.5)
     #expect(strict.speakerNames.map(\.name) == ["Nicolai"])
   }
 
   @Test func suggestionsNeverRenameASpeaker() {
     let input = Self.input(language: "de")
-    let output = LLMMeetingSummarizer.output(
-      from: Self.draft(speakerNames: [
-        DraftSpeakerName(speakerLabel: "Speaker 2", name: "Nicolai", confidence: 1, evidence: "q")
-      ]), input: input, usage: .zero)
+    let output = Self.draft(speakerNames: [
+      DraftSpeakerName(speakerLabel: "Speaker 2", name: "Nicolai", confidence: 1, evidence: "q")
+    ]).summaryOutput(for: input, usage: .zero, minimumConfidence: 0.3)
     #expect(output.summary.sections[0].bullets[0].text == "Speaker 2 sagt etwas.")
     #expect(input.speakers[1].assignment == .unknown, "the input is a value; nothing was renamed")
     #expect(output.speakerNames[0].evidence == "q")
@@ -70,9 +67,8 @@ import Testing
       DraftTask(
         text: "Doku schreiben", assignee: "Speaker 3", priority: .normal, dueDate: "Freitag"),
     ]
-    let output = LLMMeetingSummarizer.output(
-      from: Self.draft(tasks: tasks), input: Self.input(language: "de"),
-      usage: .zero)
+    let output = Self.draft(tasks: tasks).summaryOutput(
+      for: Self.input(language: "de"), usage: .zero, minimumConfidence: 0.3)
     #expect(output.tasks.map(\.priority) == [.high, .low, .normal])
     #expect(output.tasks[0].assigneePersonID == SampleData.personNicolaiID)
     #expect(output.tasks[0].dueDate == Date(timeIntervalSince1970: 1_790_899_200))
@@ -105,15 +101,15 @@ import Testing
         glossary: CleanupInput(export: Self.standup).glossary,
         labels: SpeakerLabels(speakers: input.speakers))
       #expect(cleanup.messages[0].content.contains("Meeting language: \(name)."))
-      let output = LLMMeetingSummarizer.output(
-        from: Self.draft(language: "xx"), input: input, usage: .zero)
+      let output = Self.draft().summaryOutput(for: input, usage: .zero, minimumConfidence: 0.3)
       #expect(output.summary.language == tag, "the renderer always gets a language")
       #expect(
         output.language == input.meeting.language,
         "the pipeline stores the tag as elected; an untagged meeting stays untagged, not English")
     }
     #expect(
-      LLMMeetingSummarizer.output(from: Self.draft(), input: english, usage: .zero).language == nil)
+      Self.draft().summaryOutput(for: english, usage: .zero, minimumConfidence: 0.3).language == nil
+    )
   }
 
   @Test func usageIsTheSumOfEveryCallIncludingRepairsAndMissingUsage() async throws {

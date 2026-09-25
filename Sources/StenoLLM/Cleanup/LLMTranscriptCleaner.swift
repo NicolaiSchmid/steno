@@ -16,8 +16,7 @@ public struct LLMTranscriptCleaner: TranscriptCleaner, Sendable {
   public init(model: any LanguageModel, endpoint: LLMEndpoint, chunker: TranscriptChunker? = nil) {
     self.model = model
     self.endpoint = endpoint
-    // Half the context for the chunk, the other half for its echo.
-    self.chunker = chunker ?? TranscriptChunker(budget: max(256, endpoint.contextTokens / 2 - 512))
+    self.chunker = chunker ?? TranscriptChunker(budget: endpoint.cleanupChunkBudgetTokens)
   }
 
   public func clean(_ input: CleanupInput) async throws -> CleanupOutput {

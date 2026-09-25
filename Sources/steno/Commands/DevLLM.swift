@@ -37,9 +37,12 @@ struct DevLLM: AsyncParsableCommand {
 
     @OptionGroup var database: DatabaseOptions
 
+    /// Settings are read only for what the flags leave out, so
+    /// `probe --base-url … --model …` opens no database.
     func endpoint() async throws -> LLMEndpoint {
-      let opened = try Wiring.open(database)
-      var settings = try await opened.settings.load()
+      var settings =
+        baseURL != nil && model != nil
+        ? Settings() : try await Wiring.open(database).settings.load()
       if let baseURL {
         guard let url = URL(string: baseURL), url.scheme != nil else {
           throw ValidationError("--base-url is not a URL: \(baseURL)")
@@ -86,26 +89,46 @@ struct DevLLM: AsyncParsableCommand {
     "usage: \(usage.requests) request(s), \(usage.promptTokens) prompt + \(usage.completionTokens) completion tokens"
   }
 
-  /// `steno dev llm probe`: reachability, model list, structured output mode
-  /// and round trip.
+  /// `steno dev llm probe`: model list, structured output mode and round
+  /// trip; a failure of the probe completion is the exit code. `--json`
+  /// prints `{modelListed, structuredOutput, roundTripMilliseconds}` for a
+  /// "Test connection" script.
   struct Probe: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
       abstract: "GET /models and one tiny structured completion.")
 
+    @Flag(help: "Print the result as one JSON object.")
+    var json = false
+
     @OptionGroup var options: EndpointOptions
+
+    struct Report: Encodable {
+      var modelListed: Bool?
+      var structuredOutput: String
+      var roundTripMilliseconds: Int
+    }
 
     func run() async throws {
       let client = try await options.client()
       let endpoint = client.endpoint
-      print("endpoint: \(endpoint.baseURL.absoluteString) model \(endpoint.model)")
+      let probe: EndpointProbe
       do {
-        let probe = try await client.probe()
-        print("model listed: \(probe.modelListed.map { $0 ? "yes" : "no" } ?? "no model list")")
-        print("structured output: \(probe.resolvedMode.rawValue)")
-        print("round trip: \(probe.roundTrip)")
+        probe = try await client.probe()
       } catch let error as LLMError {
         throw RuntimeFailure(description: "probe failed: \(error)")
       }
+      let milliseconds = Int(probe.roundTrip / .milliseconds(1))
+      if json {
+        let report = Report(
+          modelListed: probe.modelListed, structuredOutput: probe.resolvedMode.rawValue,
+          roundTripMilliseconds: milliseconds)
+        print(String(decoding: try StenoJSON.encode(report), as: UTF8.self))
+        return
+      }
+      print("endpoint: \(endpoint.baseURL.absoluteString) model \(endpoint.model)")
+      print("model listed: \(probe.modelListed.map { $0 ? "yes" : "no" } ?? "no model list")")
+      print("structured output: \(probe.resolvedMode.rawValue)")
+      print("round trip: \(milliseconds) ms")
     }
   }
 

@@ -56,6 +56,24 @@ import Testing
     #expect(SummaryPromptBuilder.maxNotesPoints(for: 100) == 3)
   }
 
+  /// The budgets the app can show next to `llmContextTokens`, derived on the
+  /// endpoint from `LLMBudgetPolicy` alone.
+  @Test func endpointBudgetsFollowThePolicy() throws {
+    let url = try #require(URL(string: "http://127.0.0.1:1234/v1"))
+    func endpoint(context: Int, output: Int = 4_096) -> LLMEndpoint {
+      LLMEndpoint(baseURL: url, model: "m", contextTokens: context, maxOutputTokens: output)
+    }
+    #expect(endpoint(context: 32_000).cleanupChunkBudgetTokens == 15_488)
+    #expect(endpoint(context: 8_000).cleanupChunkBudgetTokens == 3_488)
+    #expect(endpoint(context: 1_024).cleanupChunkBudgetTokens == 256, "floor")
+    #expect(endpoint(context: 32_000).summaryReservedOutputTokens == 4_096, "the ceiling wins")
+    #expect(endpoint(context: 8_000).summaryReservedOutputTokens == 2_000, "a quarter")
+    #expect(endpoint(context: 8_000, output: 1_000).summaryReservedOutputTokens == 1_000)
+    #expect(endpoint(context: 1_024).summaryReservedOutputTokens == 256, "floor")
+    #expect(LLMBudgetPolicy.mapNotesCeilingTokens == 1_500)
+    #expect(LLMBudgetPolicy.mapNotesFloorTokens == 256)
+  }
+
   @Test func primarySubtagDropsRegionAndScript() {
     #expect(LanguageTag("de-CH").primarySubtag == "de")
     #expect(LanguageTag("zh-Hant-TW").primarySubtag == "zh")

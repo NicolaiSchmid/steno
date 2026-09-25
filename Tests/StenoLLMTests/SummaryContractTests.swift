@@ -25,7 +25,7 @@ import Testing
     sections.append(
       .init(id: "not-a-section", heading: "Nope", bullets: [.init(lead: "x", text: "y")]))
     return AnalysisDraft(
-      title: "Titel: Untertitel", language: "de", sections: sections,
+      title: "Titel: Untertitel", sections: sections,
       decisions: ["Entschieden."],
       tasks: [DraftTask(text: "Tun", assignee: "Mara", priority: .normal, dueDate: "2026-10-01")],
       speakerNames: [])
@@ -84,8 +84,8 @@ import Testing
     for template in SummaryTemplate.bundled {
       let input = SummaryInput(export: Self.standup, template: template)
       let empty = AnalysisDraft(
-        title: "", language: "de", sections: [], decisions: [], tasks: [], speakerNames: [])
-      let output = LLMMeetingSummarizer.output(from: empty, input: input, usage: .zero)
+        title: "", sections: [], decisions: [], tasks: [], speakerNames: [])
+      let output = empty.summaryOutput(for: input, usage: .zero, minimumConfidence: 0.3)
       #expect(
         output.summary.sections.map(\.id) == template.sections.filter(\.required).map(\.id),
         "\(template.id)")
@@ -146,7 +146,7 @@ import Testing
 
   @Test func nullableFieldsDecodeAsNil() throws {
     let json = """
-      {"title":"t","language":"de","sections":[],"decisions":[],
+      {"title":"t","sections":[],"decisions":[],
        "tasks":[{"text":"x","assignee":null,"priority":"low","dueDate":null}],
        "speakerNames":[{"speakerLabel":"Speaker 1","name":null,"confidence":0.1,"evidence":"q"}]}
       """
@@ -155,8 +155,8 @@ import Testing
     #expect(draft.tasks[0].assignee == nil)
     #expect(draft.tasks[0].dueDate == nil)
     #expect(draft.speakerNames[0].name == nil)
-    let output = LLMMeetingSummarizer.output(
-      from: draft, input: SummaryTests.defaultInput(), usage: .zero)
+    let output = draft.summaryOutput(
+      for: SummaryTests.defaultInput(), usage: .zero, minimumConfidence: 0.3)
     #expect(output.tasks[0].assigneeName == nil)
     #expect(output.tasks[0].dueDate == nil)
     #expect(output.speakerNames.isEmpty, "a suggestion without a name is dropped")
@@ -187,6 +187,34 @@ import Testing
     #expect(
       builder.buildReduce(input, notes: []).messages[0].content.contains(
         "Meeting date: 2026-09-24 (Thursday)."))
+  }
+
+  /// The instruction to translate the section headings follows the language
+  /// line only where headings follow in the prompt: single shot and reduce
+  /// list the template sections, the map prompt has none.
+  @Test func theHeadingsRuleAppearsOnlyWhereHeadingsFollow() {
+    let input = SummaryTests.defaultInput()
+    let builder = SummaryPromptBuilder(template: input.template, timeZone: Self.utc)
+    let rule = SummaryPromptBuilder.headingsRule("German")
+    #expect(rule == "Translate the section headings given below into German.")
+    #expect(builder.buildSingleShot(input).messages[0].content.contains(rule))
+    #expect(builder.buildReduce(input, notes: []).messages[0].content.contains(rule))
+    let chunk = TranscriptChunker().chunk(input.segments, language: "de")[0]
+    let map = builder.buildMap(input, chunk: chunk, of: 1, notesTokens: 1_500).messages[0].content
+    #expect(!map.contains("Translate the section headings"))
+    #expect(!map.contains("Sections, in this order"))
+    #expect(map.contains("Output language: German. Write the title, every heading"))
+  }
+
+  /// The draft carries no `language`: the meeting's tag decides the output
+  /// language and the model's own claim was never read.
+  @Test func theDraftSchemaHasNoLanguageField() {
+    let builder = SummaryPromptBuilder(template: SummaryTests.defaultInput().template)
+    #expect(builder.draftSchema.jsonValue["properties"]?["language"] == nil)
+    #expect(!builder.draftSchema.promptText.contains("\"language\""))
+    #expect(
+      builder.draftSchema.jsonValue["properties"]?["tasks"]?["items"]?["properties"]?["priority"]?[
+        "enum"] == .array(TaskPriority.allCases.map { .string($0.rawValue) }))
   }
 
   @Test func theSummarizerNeverSendsTheRawTextOrTheAPIKeyAndOnlyText() async throws {

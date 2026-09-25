@@ -5,21 +5,17 @@ import StenoCore
 /// Labels are what prompts and answers carry; StenoCore's renderer swaps
 /// them for names later, so the model never needs to know a person's id.
 public struct SpeakerLabels: Sendable, Equatable {
-  public static let unknown = "Unknown speaker"
+  static let unknown = "Unknown speaker"
 
   private var labelsByID: [UUID: String]
   private var idsByLabel: [String: UUID]
-  /// In `Speaker` order.
-  public private(set) var ordered: [(id: UUID, label: String)]
 
   public init(speakers: [Speaker]) {
     labelsByID = [:]
     idsByLabel = [:]
-    ordered = []
     for speaker in speakers {
       labelsByID[speaker.id] = speaker.clusterLabel
       idsByLabel[speaker.clusterLabel.lowercased()] = speaker.id
-      ordered.append((speaker.id, speaker.clusterLabel))
     }
   }
 
@@ -33,20 +29,14 @@ public struct SpeakerLabels: Sendable, Equatable {
   public func speakerID(forLabel label: String) -> UUID? {
     idsByLabel[label.trimmingCharacters(in: .whitespaces).lowercased()]
   }
-
-  public static func == (lhs: SpeakerLabels, rhs: SpeakerLabels) -> Bool {
-    lhs.labelsByID == rhs.labelsByID
-  }
 }
 
 /// The transcript as the model reads it: `[n] Speaker 1: text`, one line
-/// per segment, `n` counting from `startIndex`.
+/// per segment, `n` counting from 0.
 public enum TranscriptLines {
-  public static func render(
-    _ segments: [TranscriptSegment], labels: SpeakerLabels, startIndex: Int = 0
-  ) -> String {
+  public static func render(_ segments: [TranscriptSegment], labels: SpeakerLabels) -> String {
     segments.enumerated().map { offset, segment in
-      "[\(startIndex + offset)] \(labels.label(for: segment.speakerID)): \(segment.text)"
+      "[\(offset)] \(labels.label(for: segment.speakerID)): \(segment.text)"
     }.joined(separator: "\n")
   }
 

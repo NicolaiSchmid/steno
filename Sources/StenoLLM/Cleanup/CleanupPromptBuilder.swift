@@ -85,13 +85,18 @@ public struct CleanupPromptBuilder: Sendable {
     return retry
   }
 
-  /// The answer repeats the chunk as JSON: its text plus about twelve
-  /// tokens of framing per segment, with a third of headroom.
+  /// The answer repeats the chunk as JSON: its text plus the framing per
+  /// segment and the envelope, with headroom (`LLMBudgetPolicy`), capped at
+  /// the endpoint's ceiling.
   func outputTokens(for chunk: TranscriptChunk, language: LanguageTag?) -> Int {
+    typealias Policy = LLMBudgetPolicy
     let text = TokenBudget.estimateTokens(
       chunk.segments.map(\.text).joined(separator: "\n"), language: language)
-    let estimate = (text + chunk.segments.count * 12 + 64) * 4 / 3
-    return min(max(estimate, 256), maxOutputTokens)
+    let framing = chunk.segments.count * Policy.cleanupFramingTokensPerSegment
+    let estimate =
+      (text + framing + Policy.cleanupAnswerFixedTokens) * Policy.cleanupAnswerHeadroomNumerator
+      / Policy.cleanupAnswerHeadroomDenominator
+    return min(max(estimate, Policy.cleanupAnswerFloorTokens), maxOutputTokens)
   }
 }
 

@@ -126,7 +126,7 @@ import Testing
 
   @Test func requiredSectionsSurviveEmptyAndHeadingsFallBackToTheTemplate() {
     let draft = AnalysisDraft(
-      title: "  ", language: "de",
+      title: "  ",
       sections: [
         .init(
           id: "open-questions", heading: " ",
@@ -135,7 +135,7 @@ import Testing
       ],
       decisions: [" a ", "A", ""], tasks: [], speakerNames: [])
     let input = Self.defaultInput()
-    let output = LLMMeetingSummarizer.output(from: draft, input: input, usage: .zero)
+    let output = draft.summaryOutput(for: input, usage: .zero, minimumConfidence: 0.3)
     #expect(output.title == input.meeting.title, "a blank title keeps the meeting's")
     #expect(output.summary.sections.map(\.id) == ["executive-summary", "open-questions"])
     #expect(output.summary.sections[0].bullets.isEmpty)
@@ -151,7 +151,7 @@ import Testing
   /// first heading the model wrote.
   @Test func aSectionTheModelSplitInTwoIsMerged() {
     let draft = AnalysisDraft(
-      title: "T", language: "de",
+      title: "T",
       sections: [
         .init(id: "executive-summary", heading: "", bullets: [.init(lead: "A", text: "a")]),
         .init(id: "full-summary", heading: "  ", bullets: [.init(lead: "B", text: "b")]),
@@ -159,7 +159,7 @@ import Testing
         .init(id: "full-summary", heading: "Lang", bullets: [.init(lead: "D", text: "d")]),
       ],
       decisions: [], tasks: [], speakerNames: [])
-    let output = LLMMeetingSummarizer.output(from: draft, input: Self.defaultInput(), usage: .zero)
+    let output = draft.summaryOutput(for: Self.defaultInput(), usage: .zero, minimumConfidence: 0.3)
     #expect(output.summary.sections.map(\.id) == ["executive-summary", "full-summary"])
     #expect(output.summary.sections[0].bullets.map(\.lead) == ["A", "C"])
     #expect(output.summary.sections[0].heading == "Kurz", "the first non-blank heading")
@@ -171,7 +171,7 @@ import Testing
     let input = SummaryInput(export: LLMFixtures.customerCall60min())
     let labels = SpeakerLabels(speakers: input.speakers)
     func resolve(_ name: String?) -> (name: String, personID: UUID?)? {
-      LLMMeetingSummarizer.resolveAssignee(name, input: input, labels: labels)
+      AnalysisDraft.resolveAssignee(name, input: input, labels: labels)
     }
     #expect(resolve(nil) == nil)
     #expect(resolve("  ") == nil)
@@ -190,15 +190,15 @@ import Testing
 
   @Test func dueDatesAreStrict() {
     #expect(
-      LLMMeetingSummarizer.parseDueDate("2026-09-26") == Date(timeIntervalSince1970: 1_790_380_800))
-    #expect(LLMMeetingSummarizer.parseDueDate(" 2026-09-26 ") != nil)
-    #expect(LLMMeetingSummarizer.parseDueDate("next Friday") == nil)
-    #expect(LLMMeetingSummarizer.parseDueDate("2026-9-26") == nil)
-    #expect(LLMMeetingSummarizer.parseDueDate("26.09.2026") == nil)
-    #expect(LLMMeetingSummarizer.parseDueDate("2026-13-01") == nil)
-    #expect(LLMMeetingSummarizer.parseDueDate("2026-02-30") == nil)
-    #expect(LLMMeetingSummarizer.parseDueDate(nil) == nil)
-    #expect(LLMMeetingSummarizer.parseDueDate("") == nil)
+      AnalysisDraft.parseDueDate("2026-09-26") == Date(timeIntervalSince1970: 1_790_380_800))
+    #expect(AnalysisDraft.parseDueDate(" 2026-09-26 ") != nil)
+    #expect(AnalysisDraft.parseDueDate("next Friday") == nil)
+    #expect(AnalysisDraft.parseDueDate("2026-9-26") == nil)
+    #expect(AnalysisDraft.parseDueDate("26.09.2026") == nil)
+    #expect(AnalysisDraft.parseDueDate("2026-13-01") == nil)
+    #expect(AnalysisDraft.parseDueDate("2026-02-30") == nil)
+    #expect(AnalysisDraft.parseDueDate(nil) == nil)
+    #expect(AnalysisDraft.parseDueDate("") == nil)
   }
 
   @Test func speakerSuggestionsAreFilteredClampedAndOnePerSpeaker() {
@@ -213,7 +213,7 @@ import Testing
       DraftSpeakerName(speakerLabel: "Speaker 1", name: "", confidence: 0.9, evidence: "d"),
       DraftSpeakerName(speakerLabel: "Speaker 7", name: "Ghost", confidence: 0.9, evidence: "e"),
     ]
-    let result = LLMMeetingSummarizer.suggestions(
+    let result = AnalysisDraft.suggestions(
       drafts, labels: labels, speakers: speakers, minimum: 0.3)
     #expect(
       result == [

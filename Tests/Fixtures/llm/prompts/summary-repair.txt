@@ -9,7 +9,6 @@ You fix a JSON answer that failed validation. Return only the corrected JSON obj
 The JSON must have exactly this shape:
 {
   "title": string,  // under 80 characters, "Topic: Subtopic" when natural
-  "language": string,  // BCP-47 tag of the language you wrote in
   "sections": [{
     "id": "executive-summary" | "full-summary" | "open-questions",
     "heading": string,  // the section heading in the output language

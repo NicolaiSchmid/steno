@@ -6,7 +6,7 @@ import StenoCore
 /// from a fixed table first so golden prompts are machine-independent;
 /// `Locale(identifier: "en_US")` answers for anything else.
 public enum OutputLanguage {
-  public static let fallback: LanguageTag = "en"
+  static let fallback: LanguageTag = "en"
 
   public static func resolve(meeting language: LanguageTag?) -> LanguageTag {
     guard let language, !language.rawValue.isEmpty else { return fallback }

@@ -19,7 +19,7 @@
     {
       "id": "open-questions",
       "heading": "Open Questions",
-      "instructions": "Questions raised but not answered, and points explicitly deferred, one bullet each. The lead names the question in a few words; the text says who raised it and what depends on it. Omit the section when there are none.",
+      "instructions": "Questions raised but not answered, and points explicitly deferred, one bullet each. The lead names the question in a few words; the text says who raised it and what depends on it.",
       "required": false
     }
   ]

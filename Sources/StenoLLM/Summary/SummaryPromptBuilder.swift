@@ -42,7 +42,7 @@ public struct SummaryPromptBuilder: Sendable {
   static let taskSchema = JSONSchema.object([
     "text": .string(description: "the commitment, as one sentence"),
     "assignee": .string(description: "known name or speaker label verbatim").nullable,
-    "priority": .string(enum: ["low", "normal", "high"]),
+    "priority": .string(enum: TaskPriority.allCases.map(\.rawValue)),
     "dueDate": .string(description: "YYYY-MM-DD, resolved against the meeting date").nullable,
   ])
 
@@ -57,7 +57,6 @@ public struct SummaryPromptBuilder: Sendable {
   public var draftSchema: JSONSchema {
     .object([
       "title": .string(description: "under 80 characters, \"Topic: Subtopic\" when natural"),
-      "language": .string(description: "BCP-47 tag of the language you wrote in"),
       "sections": .array(
         of: .object([
           "id": .string(enum: template.sections.map(\.id)),
@@ -92,8 +91,8 @@ public struct SummaryPromptBuilder: Sendable {
     let labels = SpeakerLabels(speakers: input.speakers)
     let system = [
       "You are Steno's meeting analyst. You read the transcript of one meeting and return one JSON object and nothing else: no prose before or after it.",
-      "", meetingBlock(input), "", templateBlocks(), "", Self.analysisRules, "",
-      "Return exactly this JSON shape:", draftSchema.promptText,
+      "", meetingBlock(input, headingsFollow: true), "", templateBlocks(), "", Self.analysisRules,
+      "", "Return exactly this JSON shape:", draftSchema.promptText,
     ].joined(separator: "\n")
     let user = "Transcript:\n" + TranscriptLines.renderPlain(input.segments, labels: labels)
     return request(
@@ -109,7 +108,8 @@ public struct SummaryPromptBuilder: Sendable {
     let labels = SpeakerLabels(speakers: input.speakers)
     let system = [
       "You are Steno's meeting analyst. You read part \(chunk.index + 1) of \(total) of one meeting's transcript and return structured notes as one JSON object and nothing else.",
-      "", meetingBlock(input), "", "Template: \(template.displayName)", template.context, "",
+      "", meetingBlock(input, headingsFollow: false), "", "Template: \(template.displayName)",
+      template.context, "",
       Self.notesRules(maxPoints: Self.maxNotesPoints(for: notesTokens)), "",
       "Return exactly this JSON shape, with chunkIndex \(chunk.index):",
       notesSchema.promptText,
@@ -126,20 +126,18 @@ public struct SummaryPromptBuilder: Sendable {
       maxTokens: notesTokens)
   }
 
-  /// One notes point, a sentence plus its JSON framing, costs about this
-  /// many tokens; the length rule in the map prompt follows from the
-  /// ceiling, never below three points.
-  static let tokensPerNotesPoint = 60
-
+  /// The map prompt's length rule from the answer ceiling
+  /// (`LLMBudgetPolicy.tokensPerNotesPoint`), never below the minimum.
   static func maxNotesPoints(for notesTokens: Int) -> Int {
-    max(3, notesTokens / tokensPerNotesPoint)
+    max(LLMBudgetPolicy.mapNotesMinimumPoints, notesTokens / LLMBudgetPolicy.tokensPerNotesPoint)
   }
 
   /// One call merging every chunk's notes into the final analysis.
   public func buildReduce(_ input: SummaryInput, notes: [ChunkNotes]) -> LLMRequest {
     let system = [
       "You are Steno's meeting analyst. You receive structured notes taken from the consecutive parts of one meeting's transcript, in order. Merge them into the final analysis and return one JSON object and nothing else.",
-      "", meetingBlock(input), "", templateBlocks(), "", Self.analysisRules, "",
+      "", meetingBlock(input, headingsFollow: true), "", templateBlocks(), "", Self.analysisRules,
+      "",
       "Notes rules: the notes are your only source; merge duplicate decisions and tasks, keep every distinct one, and prefer later notes when a plan changed. Speaker cues with the same label agree or the higher confidence wins.",
       "", "Return exactly this JSON shape:", draftSchema.promptText,
     ].joined(separator: "\n")
@@ -176,11 +174,17 @@ public struct SummaryPromptBuilder: Sendable {
   // MARK: Blocks
 
   /// Output language, meeting date, participants and speaker labels.
-  func meetingBlock(_ input: SummaryInput) -> String {
+  /// `headingsFollow` appends `headingsRule` to the language line: the
+  /// single-shot and reduce prompts list the template sections below it,
+  /// the map prompt has no headings to translate.
+  func meetingBlock(_ input: SummaryInput, headingsFollow: Bool) -> String {
     let language = OutputLanguage.resolve(meeting: input.meeting.language)
     let languageName = OutputLanguage.promptName(language)
+    var languageLine =
+      "Output language: \(languageName). Write the title, every heading, bullet, decision and task in \(languageName); keep product names, code and terms the speakers used in another language as spoken."
+    if headingsFollow { languageLine += " " + Self.headingsRule(languageName) }
     var lines = [
-      "Output language: \(languageName). Write the title, every heading, bullet, decision and task in \(languageName); keep product names, code and terms the speakers used in another language as spoken. Translate the section headings given below into \(languageName).",
+      languageLine,
       "Meeting date: \(Self.formatDate(input.meeting.startedAt, timeZone: timeZone)). Resolve relative dates such as \"next Friday\" against it and write dates as YYYY-MM-DD.",
     ]
     lines.append("Participants:")
@@ -194,6 +198,11 @@ public struct SummaryPromptBuilder: Sendable {
       lines.append("- \(speaker.clusterLabel)\(Self.knownName(speaker, people: input.knownPeople))")
     }
     return lines.joined(separator: "\n")
+  }
+
+  /// Used only where the template's section headings follow in the prompt.
+  static func headingsRule(_ languageName: String) -> String {
+    "Translate the section headings given below into \(languageName)."
   }
 
   static func knownName(_ speaker: Speaker, people: [Person]) -> String {

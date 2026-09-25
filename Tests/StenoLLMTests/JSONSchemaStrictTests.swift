@@ -98,6 +98,21 @@ import Testing
       Self.sample.properties.map(\.name) == ["title", "count", "score", "flag", "kind", "items"])
   }
 
+  @Test func theProbeSchemaIsStrictToo() {
+    #expect(Self.problems(in: OpenAICompatibleClient.probeSchema.jsonValue) == [])
+    guard
+      case .jsonSchema(let name, let schema, let strict) =
+        OpenAICompatibleClient.probeRequest.responseFormat
+    else {
+      Issue.record("the probe asks for a JSON schema")
+      return
+    }
+    #expect(name == "probe")
+    #expect(strict)
+    #expect(schema == OpenAICompatibleClient.probeSchema.jsonValue)
+    #expect(schema["properties"]?["ok"]?["type"] == "boolean")
+  }
+
   @Test func walkerRejectsLooseSchemas() {
     let loose: JSONValue = [
       "type": "object", "properties": ["a": ["type": "string", "format": "date"]],
