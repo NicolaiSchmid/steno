@@ -8,7 +8,7 @@ import StenoSpeech
 extension SpeechEngineID: ExpressibleByArgument {}
 
 /// `steno dev bakeoff <audio-dir> [--engines] [--reference-dir] [--cleanup]
-/// [--out]`: runs the requested engines over a folder of recordings and
+/// [--json] [--out]`: runs the requested engines over a folder of recordings and
 /// writes `report.md`, `report.json` and the raw segments per file and
 /// engine. Models download on first use. Input is any `wav|m4a|mp3|caf` file
 /// `AVFoundationAudioCodec` reads: channel 0 is resampled to 16 kHz mono.
@@ -42,6 +42,9 @@ struct DevBakeoff: AsyncParsableCommand {
       "Run the LLM cleanup pass (Settings.llmBaseURL and llmModel) over each transcript and report the WER after it."
   )
   var cleanup = false
+
+  @Flag(help: "Print the report as JSON (the contents of report.json) instead of Markdown.")
+  var json = false
 
   /// Runs core's `FakeSpeechEngine` under every requested id, so the CLI
   /// tests exercise decoding, reporting and the LLM wiring without a model
@@ -77,6 +80,10 @@ struct DevBakeoff: AsyncParsableCommand {
         output: out)
     } catch let error as LLMError {
       throw RuntimeFailure(description: "cleanup failed: \(error)")
+    }
+    if json {
+      print(String(decoding: try report.json(), as: UTF8.self))
+      return
     }
     print(report.markdown())
     print("reports: \(out.path)")

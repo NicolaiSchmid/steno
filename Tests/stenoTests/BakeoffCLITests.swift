@@ -159,5 +159,53 @@ import Testing
         server.requests.allSatisfy { $0.authorization == nil },
         "no key is configured, so none is sent")
     }
+
+    /// `--json` prints `report.json` alone: one decodable object whose rows
+    /// carry both WER columns, the cleanup request count and the language
+    /// flip count.
+    @Test func jsonPrintsTheReportWithBothWERColumnsAndTheFlipCount() async throws {
+      let home = try Fixtures.temporaryDirectory("steno-bakeoff-home")
+      defer { try? FileManager.default.removeItem(at: home) }
+      let audio = try Self.makeAudioFolder(in: home, referenceWord: "real")
+      let db = home.appendingPathComponent("steno.sqlite")
+      let server = try StubChatServer()
+      defer { server.stop() }
+      server.respond(
+        with: Scripts.cleanupEcho { _, text in text.replacingOccurrences(of: "fake", with: "real") }
+      )
+      let store = try MeetingStore.onDisk(at: db)
+      var settings = try await SettingsStore(writer: store.writer).load()
+      settings.llmBaseURL = server.baseURL
+      settings.llmModel = "stub-model"
+      try await SettingsStore(writer: store.writer).save(settings)
+
+      let out = home.appendingPathComponent("out", isDirectory: true)
+      let result = try CLITests.run(
+        [
+          "dev", "bakeoff", audio.path, "--engines", "parakeet-v3", "--fake-engines", "--cleanup",
+          "--json", "--db", db.path, "--out", out.path,
+        ], home: home)
+      #expect(result.status == 0, "\(result.stderr)")
+      let object = try #require(
+        try JSONSerialization.jsonObject(with: Data(result.stdout.utf8)) as? [String: Any],
+        "stdout is the JSON document and nothing else")
+      #expect(object["generatedAt"] is String)
+      let rows = try #require(object["rows"] as? [[String: Any]])
+      #expect(rows.map { $0["file"] as? String } == ["tone-1s.m4a", "tone-2s.caf", "tone-3s.wav"])
+      for row in rows {
+        #expect(row["engine"] as? String == "parakeet-v3")
+        #expect(abs((row["wer"] as? Double ?? 0) - 1.0 / 3) < 1e-9, "\(row)")
+        #expect(row["cleanedWER"] as? Double == 0, "\(row)")
+        #expect(row["cleanupRequests"] as? Int == 1, "\(row)")
+        #expect(row["languageFlips"] as? Int == 0, "one language throughout: \(row)")
+        #expect(row["dominantLanguage"] as? String == "de")
+        #expect(row["segmentCount"] is Int && row["audioSeconds"] is Double)
+      }
+      #expect(
+        result.stdout == String(
+          decoding: try Data(contentsOf: out.appendingPathComponent("report.json")), as: UTF8.self)
+          + "\n",
+        "the same bytes as report.json")
+    }
   }
 #endif
