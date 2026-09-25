@@ -70,10 +70,26 @@ let package = Package(
         "StenoHandover",
         .product(name: "X509", package: "swift-certificates"),
         .product(name: "Crypto", package: "swift-crypto"),
-      ]
+        .product(name: "NIOCore", package: "swift-nio"),
+        .product(name: "NIOPosix", package: "swift-nio"),
+        .product(name: "NIOTransportServices", package: "swift-nio-transport-services"),
+      ],
+      // The symlink into the iOS module compiles the phone's pin check
+      // verbatim; it imports CryptoKit and Security, which Linux lacks.
+      exclude: linuxOnlyExclusions(["Support/PinnedTrustEvaluator.swift"])
     ),
     .testTarget(name: "stenoTests", dependencies: ["StenoCore"]),
     .testTarget(name: "StenoEndToEndTests", dependencies: ["StenoCore"]),
   ],
   swiftLanguageModes: [.v6]
 )
+
+/// Files left out of a target when the manifest is evaluated on Linux, where
+/// the Apple-only frameworks they import do not exist.
+func linuxOnlyExclusions(_ paths: [String]) -> [String] {
+  #if os(Linux)
+    return paths
+  #else
+    return []
+  #endif
+}

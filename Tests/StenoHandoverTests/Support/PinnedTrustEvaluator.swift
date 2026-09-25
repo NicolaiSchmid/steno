@@ -1,0 +1,1 @@
+../../../mobile/modules/steno-link/ios/PinnedTrustEvaluator.swift
