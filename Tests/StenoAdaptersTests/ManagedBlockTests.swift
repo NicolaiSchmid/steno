@@ -7,17 +7,19 @@ import Testing
 @Suite struct ManagedBlockTests {
   let renderer = ArtifactRenderer()
   let export = FixtureMeeting.export()
-  let line = ArtifactRenderer().renderPersonLine(
-    FixtureMeeting.export(), folderSlug: FixtureMeeting.folderSlug, options: FixtureMeeting.wikilink
-  )
+  /// Anna's page, the first person in export order.
+  let anna = ArtifactRenderer().renderPersonPages(
+    FixtureMeeting.export(), options: FixtureMeeting.wikilink, folderSlug: FixtureMeeting.folderSlug
+  )[0]
+  var line: String { anna.line }
 
   @Test func personLineAndNewPage() throws {
     #expect(
       line
         == "- 2026-09-24 [[\(FixtureMeeting.folderSlug)|Produktstrategie: \"90/10\" & Roadmap für Q4]] %%steno:00000000-0000-0000-0000-000000000001%%"
     )
-    let page = renderer.renderPersonPage(
-      FixtureMeeting.persons()[0], export: export, options: FixtureMeeting.wikilink)
+    #expect(anna.fileName == "Anna Müller.md")
+    let page = anna.page
     #expect(
       page == """
         ---
@@ -104,8 +106,8 @@ import Testing
   @Test func aHostileTitleCannotBreakOutOfThePersonLine() {
     var export = self.export
     export.meeting.title = "Sync | Q4 ]] %%steno:evil%% [x]\nline two"
-    let line = renderer.renderPersonLine(
-      export, folderSlug: FixtureMeeting.folderSlug, options: FixtureMeeting.wikilink)
+    let line = renderer.renderPersonPages(
+      export, options: FixtureMeeting.wikilink, folderSlug: FixtureMeeting.folderSlug)[0].line
     let alias = "Sync / Q4 )\u{200B}) %%steno:evil%% (x) line two"
     let slug = FixtureMeeting.folderSlug
     let marker = "%%steno:00000000-0000-0000-0000-000000000001%%"
@@ -118,10 +120,11 @@ import Testing
       "- 2026-09-24 new", meetingID: export.meeting.id, into: merged)
     #expect(replaced == ManagedBlock.block(lines: ["- 2026-09-24 new"]))
 
-    let plain = renderer.renderPersonLine(
-      export, folderSlug: FixtureMeeting.folderSlug, options: .plain)
+    let plain = renderer.renderPersonPages(
+      export, options: RenderOptions(personPages: true), folderSlug: FixtureMeeting.folderSlug)[0]
+      .line
     #expect(
       plain == "- 2026-09-24 [\(alias)](</Meetings/\(slug)/\(slug).md>) \(marker)",
-      "plain style uses a vault-absolute Markdown link")
+      "plain style uses a root-absolute Markdown link to the folder note")
   }
 }

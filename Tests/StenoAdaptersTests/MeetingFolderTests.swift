@@ -26,6 +26,22 @@ import Testing
         == "Meetings/2026-09-25-late")
   }
 
+  @Test func noteNamesAreTheWikilinkTargetsAndFilesAddTheExtension() {
+    let slug = FixtureMeeting.folderSlug
+    #expect(MeetingFolder.noteName(.folder, slug: slug) == slug)
+    #expect(MeetingFolder.noteName(.transcript, slug: slug) == "\(slug) - Transcript")
+    #expect(MeetingFolder.noteName(.tasks, slug: slug) == "\(slug) - Tasks")
+    for note in MeetingFolder.Note.allCases {
+      #expect(
+        MeetingFolder.noteFile(note, slug: slug) == MeetingFolder.noteName(note, slug: slug) + ".md"
+      )
+    }
+    #expect(MeetingFolder.vtt == "transcript.vtt")
+    #expect(MeetingFolder.json == "meeting.json")
+    #expect(MeetingFolder.audioFile(fileExtension: "m4a") == "audio.m4a")
+    #expect(MeetingFolder.audioFile(fileExtension: "") == "audio")
+  }
+
   @Test func untitledMeetingsStillGetAFolder() {
     var meeting = FixtureMeeting.meeting()
     meeting.title = "???"

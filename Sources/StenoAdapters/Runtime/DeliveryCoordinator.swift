@@ -16,7 +16,7 @@ public actor DeliveryCoordinator: DeliveryDispatcher {
   public init(
     store: MeetingStore,
     settings: SettingsStore,
-    destinations: @escaping @Sendable (Settings) -> [any Destination] = StenoAdapters
+    destinations: @escaping @Sendable (Settings) -> [any Destination] = DeliveryCoordinator
       .destinations(for:),
     now: @escaping @Sendable () -> Date = Date.init
   ) {
@@ -24,6 +24,14 @@ public actor DeliveryCoordinator: DeliveryDispatcher {
     self.settings = settings
     self.destinations = destinations
     self.now = now
+  }
+
+  /// Every destination the settings configure, in delivery order. Today the
+  /// Obsidian folder when `settings.obsidian` is set; a second destination
+  /// adds one line here and one typed optional to `Settings`.
+  public static func destinations(for settings: Settings) -> [any Destination] {
+    guard let obsidian = settings.obsidian else { return [] }
+    return [ObsidianFolderDestination(settings: obsidian)]
   }
 
   public func deliverAll(meetingID: UUID) async -> [Delivery] {

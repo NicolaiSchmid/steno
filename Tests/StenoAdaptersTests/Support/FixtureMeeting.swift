@@ -33,11 +33,10 @@ enum FixtureMeeting {
   static let plain = RenderOptions.plain
   static let plainBerlin = RenderOptions(timeZone: berlin)
   /// What the Obsidian destination uses with a people folder, in Berlin.
-  static let wikilink = RenderOptions(
-    linkStyle: .wikilink, peopleFolder: "People", timeZone: berlin)
-  static let wikilinkUTC = RenderOptions(linkStyle: .wikilink, peopleFolder: "People")
+  static let wikilink = RenderOptions(linkStyle: .wikilink, personPages: true, timeZone: berlin)
+  static let wikilinkUTC = RenderOptions(linkStyle: .wikilink, personPages: true)
   static let wikilinkTag = RenderOptions(
-    linkStyle: .wikilink, peopleFolder: "People", taskTag: "task", timeZone: berlin)
+    linkStyle: .wikilink, personPages: true, taskTag: "task", timeZone: berlin)
 
   static func export() -> MeetingExport {
     MeetingExport(

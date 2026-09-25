@@ -25,6 +25,14 @@ struct DatabaseOptions: ParsableArguments {
 /// speech PR adds `--engine <id>` here so `steno process` can run the real
 /// engines.
 enum Wiring {
+  /// The `transform:` of every `<meeting-id>` argument.
+  static func uuid(_ argument: String) throws -> UUID {
+    guard let id = UUID(uuidString: argument) else {
+      throw ValidationError("\(argument) is not a UUID.")
+    }
+    return id
+  }
+
   static func open(_ options: DatabaseOptions) throws -> (
     store: MeetingStore, settings: SettingsStore
   ) {

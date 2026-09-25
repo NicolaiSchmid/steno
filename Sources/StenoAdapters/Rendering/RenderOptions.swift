@@ -12,9 +12,11 @@ public enum LinkStyle: Sendable, Equatable {
 /// export always produce equal bytes.
 public struct RenderOptions: Sendable, Equatable {
   public var linkStyle: LinkStyle
-  /// Folder inside the vault for per-person pages; nil disables person
-  /// links and pages.
-  public var peopleFolder: String?
+  /// Whether per-person pages are rendered (the destination places them in
+  /// its people folder). With `.wikilink` this also links every person's
+  /// name to that page; a link to a page that does not exist is never
+  /// written.
+  public var personPages: Bool
   /// Tag appended to every task line, for vaults with a Tasks global filter.
   public var taskTag: String?
   /// Time zone of dates in frontmatter, the info line and person lines.
@@ -22,12 +24,12 @@ public struct RenderOptions: Sendable, Equatable {
 
   public init(
     linkStyle: LinkStyle = .none,
-    peopleFolder: String? = nil,
+    personPages: Bool = false,
     taskTag: String? = nil,
     timeZone: TimeZone = .gmt
   ) {
     self.linkStyle = linkStyle
-    self.peopleFolder = peopleFolder
+    self.personPages = personPages
     self.taskTag = taskTag
     self.timeZone = timeZone
   }
@@ -35,7 +37,7 @@ public struct RenderOptions: Sendable, Equatable {
   /// Plain names, no people, no tag, UTC.
   public static let plain = RenderOptions()
 
-  /// People are linked and get pages only with wikilinks and a people
-  /// folder.
-  var linksPeople: Bool { linkStyle == .wikilink && peopleFolder != nil }
+  /// A person's name becomes `[[Name]]` only when there is a page to land on
+  /// and links are wikilinks.
+  var linksPeople: Bool { linkStyle == .wikilink && personPages }
 }

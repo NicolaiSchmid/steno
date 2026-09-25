@@ -112,14 +112,14 @@ struct RecordingDestination: Destination, Sendable {
 
   @Test func noObsidianSettingsMeansNoDestinationsAndNoRows() async throws {
     let (store, settings) = try await Self.store()
-    #expect(destinations(for: Settings()).isEmpty)
+    #expect(DeliveryCoordinator.destinations(for: Settings()).isEmpty)
     let coordinator = DeliveryCoordinator(store: store, settings: settings, now: { Self.now })
     #expect(await coordinator.deliverAll(meetingID: FixtureMeeting.meetingID).isEmpty)
     #expect(try await store.deliveries(meetingID: FixtureMeeting.meetingID).isEmpty)
 
     var configured = Settings()
     configured.obsidian = ObsidianSettings(vaultPath: "/tmp/vault", peopleFolder: "People")
-    let built = destinations(for: configured)
+    let built = DeliveryCoordinator.destinations(for: configured)
     #expect(built.map(\.id) == [ObsidianFolderDestination.destinationID])
     #expect((built.first as? ObsidianFolderDestination)?.settings == configured.obsidian)
   }

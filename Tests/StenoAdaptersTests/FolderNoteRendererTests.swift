@@ -97,23 +97,28 @@ import Testing
     #expect(FolderNoteRenderer.durationText(0) == "0 min")
   }
 
-  @Test func renderReturnsTheFiveMeetingFilesPlusPersonPages() throws {
-    let artifacts = try renderer.render(export, options: FixtureMeeting.wikilink)
+  @Test func meetingFilesAndPersonPagesAreRenderedThroughTwoSeams() throws {
+    let artifacts = try renderer.renderMeetingFiles(export, options: FixtureMeeting.wikilink)
     #expect(
       artifacts.map(\.fileName) == [
         "meeting.json", "\(FixtureMeeting.folderSlug).md",
         "\(FixtureMeeting.folderSlug) - Transcript.md", "\(FixtureMeeting.folderSlug) - Tasks.md",
-        "transcript.vtt", "Anna Müller.md", "Nicolai Schmid.md",
+        "transcript.vtt",
       ])
-    #expect(
-      artifacts.map(\.kind) == [
-        .json, .folderNote, .transcript, .tasks, .vtt, .personPage, .personPage,
-      ])
+    #expect(artifacts.map(\.kind) == [.json, .folderNote, .transcript, .tasks, .vtt])
     #expect(
       artifacts.first?.kind == .json,
       "meeting.json is the crash marker: a folder is reused by it, so it is written first")
-    let plain = try renderer.render(export, options: FixtureMeeting.plain)
-    #expect(plain.count == 5, "no people folder, no person pages")
+
+    let pages = renderer.renderPersonPages(export, options: FixtureMeeting.wikilink)
+    #expect(pages.map(\.fileName) == ["Anna Müller.md", "Nicolai Schmid.md"])
+    #expect(pages.allSatisfy { $0.page.contains($0.line) }, "the page embeds the line")
+    #expect(
+      renderer.renderPersonPages(export, options: FixtureMeeting.plain).isEmpty,
+      "no person pages, no pages")
+    #expect(
+      renderer.renderPersonPages(export, options: RenderOptions(personPages: true)).count == 2,
+      "pages do not need wikilinks: a plain-link destination gets them too")
   }
 
   @Test func hostileTitleAndTagsStayInsideTheirScalars() {
@@ -144,8 +149,9 @@ import Testing
     var export = self.export
     export.persons[0].displayName = "Anna/Müller: <CEO> [Acme]"
     export.participants[0].displayName = export.persons[0].displayName
-    let artifacts = try renderer.render(export, options: FixtureMeeting.wikilink)
-    let page = try #require(artifacts.first { $0.kind == .personPage })
+    let artifacts = try renderer.renderMeetingFiles(export, options: FixtureMeeting.wikilink)
+    let page = try #require(
+      renderer.renderPersonPages(export, options: FixtureMeeting.wikilink).first)
     #expect(page.fileName == "AnnaMüller CEO Acme.md")
     func text(_ kind: RenderedArtifact.Kind) throws -> String {
       String(decoding: try #require(artifacts.first { $0.kind == kind }).data, as: UTF8.self)
@@ -155,7 +161,6 @@ import Testing
       "the participant link resolves to the page")
     #expect(try text(.transcript).contains("\n## [[AnnaMüller CEO Acme]] — 00:00:04\n"))
     #expect(try text(.tasks).contains(" [[AnnaMüller CEO Acme]] "))
-    #expect(
-      try text(.personPage).contains("# Anna/Müller: <CEO> [Acme]\n"), "the H1 keeps the real name")
+    #expect(page.page.contains("# Anna/Müller: <CEO> [Acme]\n"), "the H1 keeps the real name")
   }
 }

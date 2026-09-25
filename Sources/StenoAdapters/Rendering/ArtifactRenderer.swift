@@ -13,40 +13,39 @@ public struct ArtifactRenderer: Sendable {
 
   public init() {}
 
-  /// Every artefact of one meeting: `meeting.json` first, because a folder
-  /// is recognised as this meeting's crashed attempt by that file alone, so
-  /// it must be the first one on disk; then the four notes, then one
-  /// `.personPage` per person when the options have a people folder. Audio
-  /// is copied by the destination, not rendered.
-  public func render(_ export: MeetingExport, options: RenderOptions, folderSlug: String? = nil)
-    throws -> [RenderedArtifact]
-  {
+  /// The five files of the meeting folder. `meeting.json` comes first
+  /// because a folder is recognised as this meeting's crashed attempt by
+  /// that file alone, so it must be the first one on disk; then the three
+  /// notes and the WebVTT. Audio is copied by the destination, not rendered.
+  public func renderMeetingFiles(
+    _ export: MeetingExport, options: RenderOptions, folderSlug: String? = nil
+  ) throws -> [RenderedArtifact] {
     let slug = folderSlug ?? Self.folderSlug(export, options)
-    var artifacts = [
-      RenderedArtifact(kind: .json, fileName: ObsidianLayout.json, data: try renderJSON(export)),
+    return [
+      RenderedArtifact(kind: .json, fileName: MeetingFolder.json, data: try renderJSON(export)),
       RenderedArtifact(
-        kind: .folderNote, fileName: ObsidianLayout.folderNote(slug: slug),
+        kind: .folderNote, fileName: MeetingFolder.noteFile(.folder, slug: slug),
         data: Data(renderFolderNote(export, options: options, folderSlug: slug).utf8)),
       RenderedArtifact(
-        kind: .transcript, fileName: ObsidianLayout.transcriptNote(slug: slug),
+        kind: .transcript, fileName: MeetingFolder.noteFile(.transcript, slug: slug),
         data: Data(renderTranscript(export, options: options).utf8)),
       RenderedArtifact(
-        kind: .tasks, fileName: ObsidianLayout.tasksNote(slug: slug),
+        kind: .tasks, fileName: MeetingFolder.noteFile(.tasks, slug: slug),
         data: Data(renderTasks(export, options: options).utf8)),
       RenderedArtifact(
-        kind: .vtt, fileName: ObsidianLayout.vtt, data: Data(renderVTT(export).utf8)),
+        kind: .vtt, fileName: MeetingFolder.vtt, data: Data(renderVTT(export).utf8)),
     ]
-    if options.linksPeople {
-      for person in export.persons {
-        artifacts.append(
-          RenderedArtifact(
-            kind: .personPage,
-            fileName: ObsidianLayout.personPage(displayName: person.displayName),
-            data: Data(
-              renderPersonPage(person, export: export, options: options, folderSlug: slug).utf8)))
-      }
-    }
-    return artifacts
+  }
+
+  /// One page per person in export order when the options render person
+  /// pages, else none. The file name is the wikilink target the notes use.
+  public func renderPersonPages(
+    _ export: MeetingExport, options: RenderOptions, folderSlug: String? = nil
+  ) -> [PersonPage] {
+    guard options.personPages else { return [] }
+    let renderer = PersonPageRenderer(
+      export: export, options: options, folderSlug: folderSlug ?? Self.folderSlug(export, options))
+    return export.persons.map(renderer.page(for:))
   }
 
   /// Frontmatter, `# Title`, the info line, `## Summary` (core's
@@ -80,23 +79,6 @@ public struct ArtifactRenderer: Sendable {
   /// to `steno export`.
   public func renderJSON(_ export: MeetingExport) throws -> Data {
     try StenoJSON.encode(export)
-  }
-
-  /// A person page as created from scratch: frontmatter, `# Name` and the
-  /// managed block holding this meeting's line.
-  public func renderPersonPage(
-    _ person: Person, export: MeetingExport, options: RenderOptions, folderSlug: String? = nil
-  ) -> String {
-    PersonPageRenderer(
-      export: export, options: options, folderSlug: folderSlug ?? Self.folderSlug(export, options)
-    ).page(for: person)
-  }
-
-  /// `- 2026-09-24 [[<folder slug>|<title>]] %%steno:<meeting uuid>%%`.
-  public func renderPersonLine(_ export: MeetingExport, folderSlug: String, options: RenderOptions)
-    -> String
-  {
-    PersonPageRenderer(export: export, options: options, folderSlug: folderSlug).line()
   }
 
   static func folderSlug(_ export: MeetingExport, _ options: RenderOptions) -> String {

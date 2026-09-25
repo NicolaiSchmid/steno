@@ -86,8 +86,7 @@ import Testing
   }
 
   @Test func theTagIsSanitised() {
-    let options = RenderOptions(
-      linkStyle: .wikilink, peopleFolder: "People", taskTag: "#steno tasks")
+    let options = RenderOptions(linkStyle: .wikilink, personPages: true, taskTag: "#steno tasks")
     let note = renderer.renderTasks(export, options: options)
     #expect(note.contains(" #steno-tasks "))
   }

@@ -55,19 +55,20 @@ struct FolderNoteRenderer {
     let meeting = export.meeting
     let start = meeting.startedAt
     let end = start.addingTimeInterval(max(0, meeting.duration))
-    let transcript = ObsidianLayout.transcriptNote(slug: folderSlug)
-    let tasks = ObsidianLayout.tasksNote(slug: folderSlug)
     let links =
       switch options.linkStyle {
       case .wikilink:
         [
-          MarkdownText.wikilink(String(transcript.dropLast(3)), alias: "Transcript"),
-          MarkdownText.wikilink(String(tasks.dropLast(3)), alias: "Tasks"),
+          MarkdownText.wikilink(
+            MeetingFolder.noteName(.transcript, slug: folderSlug), alias: "Transcript"),
+          MarkdownText.wikilink(MeetingFolder.noteName(.tasks, slug: folderSlug), alias: "Tasks"),
         ]
       case .none:
         [
-          MarkdownText.markdownLink("Transcript", file: transcript),
-          MarkdownText.markdownLink("Tasks", file: tasks),
+          MarkdownText.markdownLink(
+            "Transcript", file: MeetingFolder.noteFile(.transcript, slug: folderSlug)),
+          MarkdownText.markdownLink(
+            "Tasks", file: MeetingFolder.noteFile(.tasks, slug: folderSlug)),
         ]
       }
     let when =

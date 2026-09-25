@@ -3,25 +3,26 @@ import Foundation
 /// The region of a person page that Steno owns: one line per meeting between
 /// two HTML comments, newest first, each line ending in a `%%steno:<uuid>%%`
 /// comment that identifies its meeting. Bytes outside the markers are
-/// copied unchanged; missing markers are appended.
-public enum ManagedBlock {
-  public static let start = "<!-- steno:meetings:start -->"
-  public static let end = "<!-- steno:meetings:end -->"
+/// copied unchanged; missing markers are appended. Internal until a second
+/// destination touches user-owned files.
+enum ManagedBlock {
+  static let start = "<!-- steno:meetings:start -->"
+  static let end = "<!-- steno:meetings:end -->"
 
   /// `%%steno:0d6f…%%`, Obsidian's comment syntax so the id never shows.
-  public static func marker(_ meetingID: UUID) -> String {
+  static func marker(_ meetingID: UUID) -> String {
     "%%steno:\(meetingID.uuidString.lowercased())%%"
   }
 
   /// A whole block around `lines`, terminated by a newline.
-  public static func block(lines: [String]) -> String {
+  static func block(lines: [String]) -> String {
     ([start] + lines + [end]).joined(separator: "\n") + "\n"
   }
 
   /// `existing` with `line` replacing the line that carries this meeting's
   /// marker (or inserted when there is none), the block re-sorted newest
   /// first; the block appended when the markers are missing.
-  public static func merge(_ line: String, meetingID: UUID, into existing: String) -> String {
+  static func merge(_ line: String, meetingID: UUID, into existing: String) -> String {
     guard let startRange = existing.range(of: start),
       let endRange = existing.range(of: end, range: startRange.upperBound..<existing.endIndex)
     else {
