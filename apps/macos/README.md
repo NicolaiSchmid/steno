@@ -33,6 +33,11 @@ xcodebuild test  -project Steno.xcodeproj -scheme StenoTests -configuration Debu
 xcodebuild test  -project Steno.xcodeproj -scheme Steno -only-testing:StenoUITests ...
 ```
 
+CI runs the first two on `MACOS_RUNS_ON` (the `app` job) and the UI smoke test in its own
+GitHub-hosted `macos-15` job (`ui-smoke`): Xcode 27 on the Forge runner aborts inside
+`IDELaunchServicesLauncher` (`INTERNAL ERROR: childPID > 0`) when `xcodebuild test` launches
+an XCUITest runner, so the smoke test stays where spike S1 passed.
+
 xcodebuild does not hand its own environment to the test process; prefix a variable with
 `TEST_RUNNER_` to pass it through. `TEST_RUNNER_STENO_UPDATE_SNAPSHOTS=1 xcodebuild test …`
 rewrites the tab goldens under `Tests/Fixtures/snapshots/macos/`, and

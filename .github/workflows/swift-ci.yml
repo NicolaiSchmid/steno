@@ -233,7 +233,11 @@ jobs:
       # xcodebuild's full log goes to a file (uploaded below); the console
       # shows compiler diagnostics and the result line only. The app builds
       # first so the hostless unit tests find Steno.app in the products
-      # directory (InfoPlistTests).
+      # directory (InfoPlistTests). The UI smoke test is the `ui-smoke` job
+      # below: Xcode 27 on the Forge runner aborts inside
+      # IDELaunchServicesLauncher when launching an XCUITest runner
+      # (`INTERNAL ERROR: childPID > 0`), while the hosted image passed
+      # spike S1.
       - name: Build app
         run: |
           set -o pipefail
@@ -243,7 +247,6 @@ jobs:
           grep -q '\*\* BUILD SUCCEEDED \*\*' apps/macos/build/build.log
 
       - name: Unit tests
-        id: unit
         run: |
           set -o pipefail
           # shellcheck disable=SC2086
@@ -251,14 +254,80 @@ jobs:
             -resultBundlePath apps/macos/build/unit.xcresult 2>&1 | tee apps/macos/build/unit.log | grep -E --line-buffered '(Test Case|Test Suite|error:|\*\* )' || true
           grep -q '\*\* TEST SUCCEEDED \*\*' apps/macos/build/unit.log
 
-      # Spike S1: XCUITest on the hosted runner. If this step fails with the
-      # automation-mode timeout, the smoke test becomes Forge-only and the
-      # summary lists it as skipped with that reason.
+      - name: Test summary
+        if: always()
+        run: python3 apps/macos/scripts/xcresult-summary.py apps/macos/build/unit.xcresult
+
+      - name: Upload logs and result bundles
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-app-output
+          path: |
+            apps/macos/build/*.log
+            apps/macos/build/*.xcresult
+          if-no-files-found: warn
+
+  # The one UI smoke test (LaunchSmokeTests), always on the GitHub-hosted
+  # image: spike S1 showed XCUITest launches there, and the self-hosted
+  # Forge runner's Xcode 27 cannot launch a test runner from xcodebuild
+  # (see the `app` job). Hard-required; it is the app's end-to-end proof
+  # beside the manual checklist.
+  ui-smoke:
+    name: UI smoke test (hosted)
+    runs-on: macos-15
+    timeout-minutes: 60
+    env:
+      XCODEBUILD_FLAGS: >-
+        -project apps/macos/Steno.xcodeproj
+        -configuration Debug
+        -destination platform=macOS,arch=arm64
+        -derivedDataPath apps/macos/build/DerivedData
+        -skipPackagePluginValidation
+        -skipMacroValidation
+        CODE_SIGN_IDENTITY=-
+        CODE_SIGN_STYLE=Manual
+        DEVELOPMENT_TEAM=
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: '16.4'
+
+      - name: Swift version
+        id: swift
+        run: |
+          swift --version
+          version="$(swift --version 2>&1 | head -n 1 | tr -c 'A-Za-z0-9.\n' '-')"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Install xcodegen
+        run: apps/macos/scripts/install-xcodegen.sh
+
+      - name: Cache DerivedData
+        uses: actions/cache@v4
+        with:
+          path: |
+            apps/macos/build/DerivedData/SourcePackages
+            apps/macos/build/DerivedData/Build
+          key: steno-ui-${{ runner.os }}-${{ steps.swift.outputs.version }}-${{ hashFiles('apps/macos/project.yml', 'Package.swift') }}-${{ hashFiles('Sources/**', 'apps/macos/**') }}
+          restore-keys: |
+            steno-ui-${{ runner.os }}-${{ steps.swift.outputs.version }}-${{ hashFiles('apps/macos/project.yml', 'Package.swift') }}-
+            steno-ui-${{ runner.os }}-${{ steps.swift.outputs.version }}-
+
+      - name: Generate project
+        run: xcodegen generate --spec apps/macos/project.yml
+
+      - name: Resolve packages
+        run: |
+          # shellcheck disable=SC2086
+          xcodebuild -resolvePackageDependencies -scheme Steno $XCODEBUILD_FLAGS
+
       - name: UI smoke test
-        id: ui
-        if: success() || steps.unit.outcome == 'failure'
         run: |
           set -o pipefail
+          mkdir -p apps/macos/build
           # shellcheck disable=SC2086
           xcodebuild test -scheme Steno -only-testing:StenoUITests $XCODEBUILD_FLAGS \
             -resultBundlePath apps/macos/build/ui.xcresult 2>&1 | tee apps/macos/build/ui.log | grep -E --line-buffered '(Test Case|Test Suite|error:|\*\* )' || true
@@ -266,13 +335,13 @@ jobs:
 
       - name: Test summary
         if: always()
-        run: python3 apps/macos/scripts/xcresult-summary.py apps/macos/build/unit.xcresult apps/macos/build/ui.xcresult
+        run: python3 apps/macos/scripts/xcresult-summary.py apps/macos/build/ui.xcresult
 
       - name: Upload logs and result bundles
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: macos-app-output
+          name: macos-ui-smoke-output
           path: |
             apps/macos/build/*.log
             apps/macos/build/*.xcresult
