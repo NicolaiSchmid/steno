@@ -36,28 +36,11 @@ struct RawClient {
     closeGrace: Duration = .seconds(3), timeout: Duration = .seconds(10)
   ) async throws -> Exchange {
     let collector = Collector()
-    #if canImport(Network)
-      let group = NIOTSEventLoopGroup(loopCount: 1)
-      let tls = NWProtocolTLS.Options()
-      let pinned = fingerprint
-      sec_protocol_options_set_verify_block(
-        tls.securityProtocolOptions,
-        { _, secTrust, complete in
-          let trust = sec_trust_copy_ref(secTrust).takeRetainedValue()
-          complete(PinnedTrustEvaluator.evaluate(trust, pinnedFingerprint: pinned))
-        }, DispatchQueue(label: "steno.rawclient.verify"))
-      let bootstrap = NIOTSConnectionBootstrap(group: group).tlsOptions(tls)
-    #else
-      let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
-      let bootstrap = ClientBootstrap(group: group)
-    #endif
+    let (channel, group) = try await connect { channel in
+      try channel.pipeline.syncOperations.addHTTPClientHandlers()
+      try channel.pipeline.syncOperations.addHandler(CollectingHandler(collector: collector))
+    }
     defer { Task { try? await group.shutdownGracefully() } }
-    let channel = try await bootstrap.channelInitializer { channel in
-      channel.eventLoop.makeCompletedFuture {
-        try channel.pipeline.syncOperations.addHTTPClientHandlers()
-        try channel.pipeline.syncOperations.addHandler(CollectingHandler(collector: collector))
-      }
-    }.connectTimeout(.seconds(8)).connect(host: "127.0.0.1", port: Int(port)).get()
 
     let head = HTTPRequestHead(
       version: .http1_1, method: method, uri: path,
@@ -81,6 +64,72 @@ struct RawClient {
     return Exchange(
       status: responseHead.map { Int($0.status.code) },
       headers: responseHead?.headers ?? HTTPHeaders(), body: responseBody, closedByServer: closed)
+  }
+
+  /// Sends `bytes` as they are (no HTTP codec) and then stays silent. True
+  /// when the server closed the connection within `timeout`.
+  func holdOpen(_ bytes: Data, timeout: Duration) async throws -> Bool {
+    let collector = Collector()
+    let (channel, group) = try await connect { channel in
+      try channel.pipeline.syncOperations.addHandler(RawHandler(collector: collector))
+    }
+    defer { Task { try? await group.shutdownGracefully() } }
+    try await channel.writeAndFlush(ByteBuffer(bytes: bytes))
+    let clock = ContinuousClock()
+    let deadline = clock.now + timeout
+    while clock.now < deadline, !collector.closed {
+      try await Task.sleep(for: .milliseconds(10))
+    }
+    let closed = collector.closed
+    try? await channel.close()
+    return closed
+  }
+
+  /// One connection to the listener, pinned over TLS on Apple platforms and
+  /// plain on Linux, with `configure` building the rest of the pipeline.
+  private func connect(
+    _ configure: @escaping @Sendable (any Channel) throws -> Void
+  ) async throws -> (any Channel, any EventLoopGroup) {
+    #if canImport(Network)
+      let group = NIOTSEventLoopGroup(loopCount: 1)
+      let tls = NWProtocolTLS.Options()
+      let pinned = fingerprint
+      sec_protocol_options_set_verify_block(
+        tls.securityProtocolOptions,
+        { _, secTrust, complete in
+          let trust = sec_trust_copy_ref(secTrust).takeRetainedValue()
+          complete(PinnedTrustEvaluator.evaluate(trust, pinnedFingerprint: pinned))
+        }, DispatchQueue(label: "steno.rawclient.verify"))
+      let bootstrap = NIOTSConnectionBootstrap(group: group).tlsOptions(tls)
+    #else
+      let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+      let bootstrap = ClientBootstrap(group: group)
+    #endif
+    let channel = try await bootstrap.channelInitializer { channel in
+      channel.eventLoop.makeCompletedFuture { try configure(channel) }
+    }.connectTimeout(.seconds(8)).connect(host: "127.0.0.1", port: Int(port)).get()
+    return (channel, group)
+  }
+}
+
+/// Marks the collector closed when a codec-less connection goes away.
+final class RawHandler: ChannelInboundHandler {
+  typealias InboundIn = ByteBuffer
+
+  private let collector: Collector
+
+  init(collector: Collector) {
+    self.collector = collector
+  }
+
+  func channelInactive(context: ChannelHandlerContext) {
+    collector.markClosed()
+    context.fireChannelInactive()
+  }
+
+  func errorCaught(context: ChannelHandlerContext, error: any Error) {
+    collector.markClosed()
+    context.close(promise: nil)
   }
 }
 

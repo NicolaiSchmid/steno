@@ -20,6 +20,10 @@ public struct HandoverConfiguration: Sendable {
   public var pairingWindow: Duration
   /// `0` lets the system choose; the port is published through Bonjour.
   public var port: UInt16
+  /// How long a connection may stay silent while the Mac waits for the
+  /// client (a request line, the rest of a body, the next request) before
+  /// it is closed. Not counted while the engine is handling a request.
+  public var readTimeout: Duration
 
   public static let defaultChunkSize = 16 * 1024 * 1024
   /// Headroom over the chunk size for the request body limit.
@@ -33,7 +37,8 @@ public struct HandoverConfiguration: Sendable {
     chunkSize: Int = HandoverConfiguration.defaultChunkSize,
     inboxDirectory: URL = HandoverConfiguration.defaultInboxDirectory(),
     pairingWindow: Duration = .seconds(300),
-    port: UInt16 = 0
+    port: UInt16 = 0,
+    readTimeout: Duration = .seconds(30)
   ) {
     self.serviceName = serviceName
     self.advertise = advertise
@@ -41,6 +46,7 @@ public struct HandoverConfiguration: Sendable {
     self.inboxDirectory = inboxDirectory
     self.pairingWindow = pairingWindow
     self.port = port
+    self.readTimeout = readTimeout
   }
 
   /// Body limit for chunk uploads: the chunk size plus 64 KiB.

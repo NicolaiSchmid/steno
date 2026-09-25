@@ -126,12 +126,21 @@ extension HandoverEngine {
       return .problem(.notFound, "no partial file; announce again")
     }
     do {
-      try ReceivingFile.write(
+      try await ReceivingFile.write(
         request.body, at: UInt64(index) * UInt64(receipt.chunkSize), to: inbox.partial(recordingID))
     } catch {
       return .problem(.internalServerError, "write: \(error)")
     }
-    receipt.receivedChunks = (receipt.receivedChunks + [index]).sorted()
+    // The write suspended the actor: another chunk may have landed, or the
+    // device may have been revoked. Fold this chunk into the receipt as it
+    // stands now, never into the copy from before the write.
+    guard let current = activeReceipts[recordingID], current.deviceID == receipt.deviceID else {
+      return .problem(.notFound, "no such recording")
+    }
+    receipt = current
+    receipt.receivedChunks =
+      receipt.receivedChunks.contains(index)
+      ? receipt.receivedChunks : (receipt.receivedChunks + [index]).sorted()
     receipt.state = .receiving
     receipt.updatedAt = now()
     do {
@@ -144,8 +153,9 @@ extension HandoverEngine {
 
   /// `POST /v1/recordings/{id}/complete`: 200 `{meetingID}` once every chunk
   /// is present and the whole file hashes to the announced value; 409 with
-  /// the status while chunks are missing; 422 on a hash mismatch, after
-  /// which the partial is gone and the phone starts over.
+  /// the status while chunks are missing or while an earlier `complete` is
+  /// still verifying or admitting; 422 on a hash mismatch, after which the
+  /// partial is gone and the phone starts over.
   func complete(_ recordingID: UUID, _ request: HandoverRequest) async -> HandoverResponse {
     guard let device = request.device, var receipt = await ownedReceipt(recordingID, request)
     else {
@@ -154,6 +164,15 @@ extension HandoverEngine {
     if let meetingID = receipt.state.meetingID {
       return .json(.ok, Wire.CompleteResponse(meetingID: meetingID))
     }
+    // One `complete` per recording at a time: the phone retries after its
+    // own timeout, and a second verify or admission of the same file must
+    // not start while the first is suspended. The phone answers a 409 whose
+    // status lists every chunk by backing off.
+    guard !completing.contains(recordingID) else {
+      return .json(.conflict, Self.status(of: receipt))
+    }
+    completing.insert(recordingID)
+    defer { completing.remove(recordingID) }
     guard let metadata = inbox.loadMetadata(recordingID) else {
       return .problem(.notFound, "no metadata; announce again")
     }
@@ -182,10 +201,11 @@ extension HandoverEngine {
       do {
         verified =
           try ReceivingFile.size(of: partial) == receipt.byteCount
-          && (try ReceivingFile.sha256(of: partial)) == receipt.sha256
+          ? try await ReceivingFile.hashMatches(partial, expected: receipt.sha256) : false
       } catch {
         return .problem(.internalServerError, "verify: \(error)")
       }
+      receipt = activeReceipts[recordingID] ?? receipt
       guard verified else {
         inbox.discard(recordingID)
         receipt.state = .failed("sha256 mismatch")
@@ -201,24 +221,28 @@ extension HandoverEngine {
       }
     }
 
+    let meetingID: UUID
     do {
-      let meetingID = try await intake.admit(file: file, metadata: metadata, device: device)
-      // The real intake wrote this same `.complete` receipt and deleted the
-      // verified file; a test intake did neither, so write it here too. The
-      // metadata sidecar is ours to remove; a replayed complete returns the
-      // same id through the early `.complete` check, no metadata needed.
-      receipt.state = .complete(meetingID: meetingID)
-      receipt.updatedAt = now()
-      try await persist(receipt)
-      try? FileManager.default.removeItem(at: inbox.metadata(recordingID))
-      return .json(.ok, Wire.CompleteResponse(meetingID: meetingID))
+      meetingID = try await intake.admit(file: file, metadata: metadata, device: device)
     } catch {
       // The verified file stays; the phone retries the same call.
+      receipt = activeReceipts[recordingID] ?? receipt
       receipt.state = .failed("admit: \(error)")
       receipt.updatedAt = now()
       try? await persist(receipt)
       return .problem(.internalServerError, "admit: \(error)")
     }
+    // Admitted: the answer is 200 whatever the receipt write does. The real
+    // intake wrote this same `.complete` receipt and deleted the verified
+    // file; a test intake did neither, so write it here too. The metadata
+    // sidecar is ours to remove; a replayed complete returns the same id
+    // through the early `.complete` check, no metadata needed.
+    receipt = activeReceipts[recordingID] ?? receipt
+    receipt.state = .complete(meetingID: meetingID)
+    receipt.updatedAt = now()
+    try? await persist(receipt)
+    try? FileManager.default.removeItem(at: inbox.metadata(recordingID))
+    return .json(.ok, Wire.CompleteResponse(meetingID: meetingID))
   }
 
   // MARK: - Helpers

@@ -101,6 +101,41 @@ import Testing
     #expect(await test.service.engine.pairingIsOpen, "a wrong secret does not burn the window")
   }
 
+  @Test func aSilentConnectionIsClosedAfterTheReadTimeout() async throws {
+    // Half a request line, then nothing: without a read timeout any peer on
+    // the Wi-Fi could hold hundreds of such connections open for good.
+    let test = try await TestService.start(readTimeout: .milliseconds(300))
+    defer { Task { await test.stop() } }
+    let raw = try await test.rawClient()
+
+    let closed = try await raw.holdOpen(Data("GET /v1/hel".utf8), timeout: .seconds(5))
+    #expect(closed, "the server closes a connection that stays silent")
+    let metrics = test.metrics
+    #expect(metrics.timedOut == 1)
+    #expect(metrics.requestHeads == 0, "no request line was ever completed")
+    #expect(metrics.handledRequests == 0)
+
+    // The listener is fine afterwards.
+    #expect(try await raw.exchange(.GET, "/v1/hello").status == 200)
+  }
+
+  @Test func theReadTimeoutDoesNotCutARequestTheEngineIsStillHandling() async throws {
+    // Once the body is in, the silence is the Mac's (a long verify or
+    // intake), not the client's; the phone waits ten seconds for `complete`.
+    let intake = ScriptedIntake(meetingID: UUID(), failures: 0, delay: .milliseconds(700))
+    let test = try await TestService.start(
+      chunkSize: Self.chunkSize, customIntake: intake, readTimeout: .milliseconds(200))
+    defer { Task { await test.stop() } }
+    let phone = try await Phone.pair(test.service)
+    let bytes = Phone.seededBytes(count: Self.chunkSize, seed: 31)
+    let metadata = phone.metadata(for: bytes, chunkSize: Self.chunkSize)
+    try await phone.uploadAll(metadata, bytes)
+
+    let completed = try await phone.complete(metadata.recordingID)
+    #expect(completed.status == 200)
+    #expect(test.metrics.timedOut == 0)
+  }
+
   @Test func missingAndMalformedAuthorizationAre401() async throws {
     let test = try await TestService.start()
     defer { Task { await test.stop() } }

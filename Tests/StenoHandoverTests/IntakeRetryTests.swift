@@ -7,30 +7,48 @@ import Testing
 
 /// A `HandoverIntake` that throws for the first `failures` admissions and
 /// then returns `meetingID`: the pipeline refusing a file once, as the plan's
-/// "intake failure leaves a retryable state" needs.
+/// "intake failure leaves a retryable state" needs. `delay` holds each
+/// admission open, the way the real intake's copy of a large file does;
+/// `admitOnce` refuses every admission after the first successful one, the
+/// way the real intake fails when a second copy races the first one's
+/// removal of the source.
 final class ScriptedIntake: HandoverIntake, Sendable {
+  /// Carries the file path, as a `CocoaError` from the real intake's copy
+  /// would; the Mac must not echo it to the phone or into the receipt.
   struct Refused: Error, CustomStringConvertible {
-    var description: String { "the pipeline refused the file" }
+    var file: URL
+    var description: String { "the pipeline refused \(file.path)" }
   }
 
   let meetingID: UUID
+  let delay: Duration
+  let admitOnce: Bool
   /// The file of every admission, in order.
   let admissions = CallLog<URL>()
   private let failuresLeft: Mutex<Int>
+  private let admitted = Mutex(false)
 
-  init(meetingID: UUID, failures: Int) {
+  init(meetingID: UUID, failures: Int, delay: Duration = .zero, admitOnce: Bool = false) {
     self.meetingID = meetingID
+    self.delay = delay
+    self.admitOnce = admitOnce
     self.failuresLeft = Mutex(failures)
   }
 
   func admit(file: URL, metadata: RecordingMetadata, device: PairedDevice) async throws -> UUID {
     await admissions.record(file)
+    if delay > .zero { try await Task.sleep(for: delay) }
     let refuse = failuresLeft.withLock { left -> Bool in
       guard left > 0 else { return false }
       left -= 1
       return true
     }
-    if refuse { throw Refused() }
+    if refuse { throw Refused(file: file) }
+    let repeated = admitted.withLock { done -> Bool in
+      defer { done = true }
+      return done
+    }
+    if admitOnce, repeated { throw Refused(file: file) }
     return meetingID
   }
 }

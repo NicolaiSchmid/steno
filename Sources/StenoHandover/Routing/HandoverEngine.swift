@@ -19,6 +19,10 @@ actor HandoverEngine: RequestHandling {
   private var pairing: PairingSession?
   /// Receipts touched since start, by recording id; what `receipts` streams.
   var activeReceipts: [UUID: HandoverReceipt] = [:]
+  /// Recordings whose `complete` is between the `.verifying` write and the
+  /// intake's answer. The verify and the admit suspend the actor, so a
+  /// retried `complete` must not start a second verify or admission.
+  var completing: Set<UUID> = []
   private var receiptUpdates = Broadcast<[HandoverReceipt]>(initial: [])
 
   /// `lastSeenAt` is written at most this often per device.
@@ -170,6 +174,11 @@ actor HandoverEngine: RequestHandling {
     guard !name.isEmpty, name.count <= 128 else {
       return .problem(.badRequest, "deviceName must be 1 to 128 characters")
     }
+    // Single use: the session is taken before the first suspension point, so
+    // a second request with the same secret that arrives while the save is
+    // awaited finds no session and is 403. The window reopens only if the
+    // save fails.
+    pairing = nil
     let token = DeviceTokens.mint()
     let timestamp = now()
     let device = PairedDevice(
@@ -177,9 +186,9 @@ actor HandoverEngine: RequestHandling {
     do {
       try await store.save(device, tokenHash: DeviceTokens.hash(token))
     } catch {
-      return .problem(.internalServerError, "saving the device failed: \(error)")
+      if pairing == nil { pairing = session }
+      return .problem(.internalServerError, "saving the device failed")
     }
-    pairing = nil
     return .json(
       .ok,
       Wire.PairResponse(token: token, macID: identity.macID, macName: configuration.serviceName))

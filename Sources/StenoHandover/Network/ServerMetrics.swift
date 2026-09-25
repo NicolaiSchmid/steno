@@ -11,6 +11,9 @@ final class ServerMetrics: Sendable {
     var discardedBodyBytes = 0
     var statuses: [UInt] = []
     var closedByServer = 0
+    /// Connections closed because the client stayed silent past the read
+    /// timeout (counted in `closedByServer` too).
+    var timedOut = 0
   }
 
   private let state = Mutex(Snapshot())

@@ -84,6 +84,16 @@ struct Phone {
     format: AudioFormat = .m4aAAC, sha256: Data? = nil,
     startedAt: Date = Date(timeIntervalSince1970: 1_789_990_000)
   ) -> RecordingMetadata {
+    Self.metadata(
+      for: bytes, deviceName: deviceName, recordingID: recordingID, chunkSize: chunkSize,
+      format: format, sha256: sha256, startedAt: startedAt)
+  }
+
+  static func metadata(
+    for bytes: Data, deviceName: String, recordingID: UUID = UUID(),
+    chunkSize: Int = 1024 * 1024, format: AudioFormat = .m4aAAC, sha256: Data? = nil,
+    startedAt: Date = Date(timeIntervalSince1970: 1_789_990_000)
+  ) -> RecordingMetadata {
     RecordingMetadata(
       recordingID: recordingID, startedAt: startedAt, durationSeconds: 61.5,
       byteCount: Int64(bytes.count), sha256: sha256 ?? ContentHash.sha256(bytes),

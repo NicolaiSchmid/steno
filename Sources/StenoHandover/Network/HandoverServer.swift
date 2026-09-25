@@ -36,8 +36,12 @@ final class HandoverServer: @unchecked Sendable {
     engine: any RequestHandling,
     metrics: ServerMetrics
   ) async throws -> HandoverServer {
+    let readTimeout = TimeAmount(configuration.readTimeout)
     let childInitializer: @Sendable (any Channel) -> EventLoopFuture<Void> = { channel in
       channel.eventLoop.makeCompletedFuture {
+        // The idle handler sits ahead of the HTTP codec so a client that
+        // never finishes its request line is timed out too.
+        try channel.pipeline.syncOperations.addHandler(IdleStateHandler(readTimeout: readTimeout))
         try channel.pipeline.syncOperations.configureHTTPServerPipeline(withErrorHandling: true)
         try channel.pipeline.syncOperations.addHandler(
           HTTPHandler(engine: engine, configuration: configuration, metrics: metrics))

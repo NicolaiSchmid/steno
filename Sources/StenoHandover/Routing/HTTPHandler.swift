@@ -8,7 +8,9 @@ import NIOHTTP1
 /// buffered), enforces the body limit (413 and close), collects the body and
 /// hands the complete request to the engine. Rejections are answered at
 /// once with `Connection: close`; what the client still sends is discarded
-/// up to the limit, then the connection closes.
+/// up to the limit, then the connection closes. A connection that stays
+/// silent for `configuration.readTimeout` while the Mac waits on the client
+/// is closed (`IdleStateHandler` ahead of the codec fires the event).
 final class HTTPHandler: ChannelInboundHandler, RemovableChannelHandler {
   typealias InboundIn = HTTPServerRequestPart
   typealias OutboundOut = HTTPServerResponsePart
@@ -47,6 +49,10 @@ final class HTTPHandler: ChannelInboundHandler, RemovableChannelHandler {
   private let configuration: HandoverConfiguration
   private let metrics: ServerMetrics
   private var state: State = .idle
+  /// True from dispatch until the response is written: the silence is the
+  /// engine's (a long verify), not the client's, so the read timeout does
+  /// not apply.
+  private var awaitingEngine = false
   /// The flush of the last response end; a close waits for it, because
   /// Network.framework's cancel drops queued sends.
   private var lastWrite: EventLoopFuture<Void>?
@@ -69,6 +75,17 @@ final class HTTPHandler: ChannelInboundHandler, RemovableChannelHandler {
     case .end:
       receiveEnd(context: context)
     }
+  }
+
+  func userInboundEventTriggered(context: ChannelHandlerContext, event: Any) {
+    if case IdleStateHandler.IdleStateEvent.read = event, !awaitingEngine, !state.isClosed {
+      metrics.update { $0.timedOut += 1 }
+      state = .closed
+      metrics.update { $0.closedByServer += 1 }
+      context.close(promise: nil)
+      return
+    }
+    context.fireUserInboundEventTriggered(event)
   }
 
   func channelInactive(context: ChannelHandlerContext) {
@@ -183,6 +200,7 @@ final class HTTPHandler: ChannelInboundHandler, RemovableChannelHandler {
 
   private func dispatch(_ pending: Pending, principal: Principal, context: ChannelHandlerContext) {
     state = .idle
+    awaitingEngine = true
     metrics.update { $0.handledRequests += 1 }
     let request = HandoverRequest(
       route: pending.route, principal: principal, headers: pending.head.headers,
@@ -229,6 +247,7 @@ final class HTTPHandler: ChannelInboundHandler, RemovableChannelHandler {
   private func write(
     _ response: HandoverResponse, head: HTTPRequestHead, close: Bool, context: ChannelHandlerContext
   ) {
+    awaitingEngine = false
     var headers = response.headers
     headers.replaceOrAdd(name: "Content-Length", value: String(response.body.count))
     if close || state.isTerminal { headers.replaceOrAdd(name: "Connection", value: "close") }
@@ -265,5 +284,15 @@ final class HTTPHandler: ChannelInboundHandler, RemovableChannelHandler {
         bound.value.1.close(mode: .all, promise: nil)
       }
     }
+  }
+}
+
+extension TimeAmount {
+  /// Whole nanoseconds of a `Duration`, saturating on overflow.
+  init(_ duration: Duration) {
+    let (seconds, attoseconds) = duration.components
+    let nanoseconds = seconds.multipliedReportingOverflow(by: 1_000_000_000)
+    self = .nanoseconds(
+      nanoseconds.overflow ? .max : nanoseconds.partialValue + attoseconds / 1_000_000_000)
   }
 }

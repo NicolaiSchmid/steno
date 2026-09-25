@@ -21,7 +21,8 @@ struct TestService {
     chunkSize: Int = 1024 * 1024,
     intake: FakeHandoverIntake = FakeHandoverIntake(),
     customIntake: (any HandoverIntake)? = nil,
-    now: Date = Date(timeIntervalSince1970: 1_790_000_000)
+    now: Date = Date(timeIntervalSince1970: 1_790_000_000),
+    readTimeout: Duration = .seconds(30)
   ) throws -> TestService {
     let directory = try Fixtures.temporaryDirectory("handover")
     let store = try MeetingStore.inMemory()
@@ -29,7 +30,7 @@ struct TestService {
     let configuration = HandoverConfiguration(
       serviceName: "Test Mac", advertise: false, chunkSize: chunkSize,
       inboxDirectory: directory.appendingPathComponent("inbox", isDirectory: true),
-      pairingWindow: .seconds(300))
+      pairingWindow: .seconds(300), readTimeout: readTimeout)
     let service = HandoverService(
       configuration: configuration, store: store, intake: customIntake ?? intake,
       identity: try TestIdentity.load(), clock: clock, now: { now })
@@ -41,10 +42,12 @@ struct TestService {
     chunkSize: Int = 1024 * 1024,
     intake: FakeHandoverIntake = FakeHandoverIntake(),
     customIntake: (any HandoverIntake)? = nil,
-    now: Date = Date(timeIntervalSince1970: 1_790_000_000)
+    now: Date = Date(timeIntervalSince1970: 1_790_000_000),
+    readTimeout: Duration = .seconds(30)
   ) async throws -> TestService {
     let test = try prepare(
-      chunkSize: chunkSize, intake: intake, customIntake: customIntake, now: now)
+      chunkSize: chunkSize, intake: intake, customIntake: customIntake, now: now,
+      readTimeout: readTimeout)
     try await test.service.start()
     return test
   }
