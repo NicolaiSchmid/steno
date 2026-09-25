@@ -639,3 +639,24 @@ correctness minors, `b7ae3e1` elegance), recorded by the applying agent. The PR 
   header comment. A comment edit in `mobile/modules/steno-link/ios/` moves the Expo native
   fingerprint and sends the next mobile delivery to TestFlight; `Tests/README.md` names both
   targets instead, and the header is a follow-up for the next native change to `steno-link`.
+
+Read-timeout tests (issue #76, PR "test(handover): make the read-timeout tests deterministic"):
+
+- `HandoverServer.configurePipeline(of:engine:configuration:metrics:)` is the child channel
+  initializer as a static function, the one seam the tests needed, so `ReadTimeoutTests`
+  builds the product pipeline (idle handler, HTTP codec, `HTTPHandler`) on a
+  `NIOAsyncTestingChannel`. `start` calls it; no behaviour changed.
+- The deterministic tests fire `IdleStateHandler.IdleStateEvent.read` into that pipeline
+  instead of waiting for it. NIO's `IdleStateHandler` reads `NIODeadline.now()`, the wall
+  clock, not `EventLoop.now`, so an embedded loop's virtual time cannot fire it, and the timer
+  is NIO's to test. What is ours, the handler's decision (close a connection that is waiting
+  on the client, keep one the engine is handling, answer it, then count the client's silence
+  again), is asserted without a clock.
+- The two wall-clock tests in `RouterLimitsTests` became one opt-in
+  `theReadTimeoutOverARealConnection` behind `STENO_HANDOVER_TIMING_TESTS=1`, with a ceiling
+  ten times the timeout and no upper bound on elapsed time. The old
+  `theReadTimeoutDoesNotCutARequestTheEngineIsStillHandling` asserted `timedOut == 0` for the
+  whole service, so any other connection idling past two seconds during the scripted
+  four-second intake (the phone's `URLSession` connections being torn down, a stretched
+  handshake on a loaded runner) failed it without anything being wrong; the manual test
+  asserts on the connection that carried the request.

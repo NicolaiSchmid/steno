@@ -29,15 +29,10 @@ final class HandoverServer: @unchecked Sendable {
     engine: any RequestHandling,
     metrics: ServerMetrics
   ) async throws -> HandoverServer {
-    let readTimeout = TimeAmount(configuration.readTimeout)
     let childInitializer: @Sendable (any Channel) -> EventLoopFuture<Void> = { channel in
       channel.eventLoop.makeCompletedFuture {
-        // The idle handler sits ahead of the HTTP codec so a client that
-        // never finishes its request line is timed out too.
-        try channel.pipeline.syncOperations.addHandler(IdleStateHandler(readTimeout: readTimeout))
-        try channel.pipeline.syncOperations.configureHTTPServerPipeline(withErrorHandling: true)
-        try channel.pipeline.syncOperations.addHandler(
-          HTTPHandler(engine: engine, configuration: configuration, metrics: metrics))
+        try configurePipeline(
+          of: channel, engine: engine, configuration: configuration, metrics: metrics)
       }
     }
 
@@ -97,6 +92,22 @@ final class HandoverServer: @unchecked Sendable {
       try? await group.shutdownGracefully()
       throw error
     }
+  }
+
+  /// Every accepted connection's pipeline, on the channel's event loop: the
+  /// idle handler ahead of the HTTP codec, so a client that never finishes
+  /// its request line is timed out too, then the codec, then `HTTPHandler`.
+  /// Separate from `start` so the tests can build the same pipeline on an
+  /// embedded channel.
+  static func configurePipeline(
+    of channel: any Channel, engine: any RequestHandling, configuration: HandoverConfiguration,
+    metrics: ServerMetrics
+  ) throws {
+    try channel.pipeline.syncOperations.addHandler(
+      IdleStateHandler(readTimeout: TimeAmount(configuration.readTimeout)))
+    try channel.pipeline.syncOperations.configureHTTPServerPipeline(withErrorHandling: true)
+    try channel.pipeline.syncOperations.addHandler(
+      HTTPHandler(engine: engine, configuration: configuration, metrics: metrics))
   }
 
   private init(port: UInt16, group: any EventLoopGroup, channel: any Channel) {
