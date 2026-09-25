@@ -200,7 +200,7 @@ import Testing
     #expect(output.segments == Self.standup.segments)
     #expect(server.requests.count == 2)
     let retry = try #require(server.requests.last?.chat)
-    #expect(retry.messages.count == 4)
+    try #require(retry.messages.count == 4, "the retry carries the rejected answer and the reason")
     #expect(retry.messages[2].role == "assistant")
     #expect(retry.messages[3].content.contains("the model refused: I will not edit this."))
     #expect(output.usage.requests == 2, "a refusal still cost a request")
