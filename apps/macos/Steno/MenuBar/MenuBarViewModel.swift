@@ -159,7 +159,6 @@ final class MenuBarViewModel {
   func stop() async {
     guard let active, case .recording = recording else { return }
     recording = .stopping
-    for observer in active.observers { observer.cancel() }
     do {
       let result = try await active.session.stop()
       var asset = result.asset
@@ -189,6 +188,9 @@ final class MenuBarViewModel {
     levels = nil
     recording = .idle
     await recordingDidChange?(false)
+    // Last: the states observer may be the caller (device loss), and a
+    // cancelled task aborts the GRDB writes above.
+    for observer in active.observers { observer.cancel() }
   }
 
   func toggleRecording() async {

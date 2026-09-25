@@ -9,7 +9,7 @@ final class MeetingListViewModelTests: XCTestCase {
     failed.id = UUID()
     failed.title = "Failed one"
     failed.tags = ["ops"]
-    failed.startedAt = TestSupport.now.addingTimeInterval(-3600)
+    failed.startedAt = SampleData.startedAt.addingTimeInterval(-3600)
     try await environment.store.save(failed)
 
     let model = MeetingListViewModel(store: environment.store, clock: ManualClock())

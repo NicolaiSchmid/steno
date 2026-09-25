@@ -56,6 +56,7 @@ final class DetectionPromptViewModel: Identifiable {
         guard let self, self.outcome == nil else { return }
         self.remaining -= .seconds(1)
         if self.remaining <= .zero {
+          self.countdown = nil
           await self.close(.timedOut)
           return
         }

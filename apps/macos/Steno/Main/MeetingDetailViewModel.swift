@@ -177,15 +177,19 @@ final class MeetingDetailViewModel: Identifiable {
         return
       }
       guard let self else { return }
+      // Clear the handle first: `flushScratchpad` cancels a pending task,
+      // and cancelling this one would abort the GRDB write inside it.
+      self.scratchpadTask = nil
       await self.flushScratchpad()
     }
   }
 
+  /// Saves the pending text now (the view going away, a selection change).
   func flushScratchpad() async {
-    guard let text = pendingScratchpad else { return }
-    pendingScratchpad = nil
     scratchpadTask?.cancel()
     scratchpadTask = nil
+    guard let text = pendingScratchpad else { return }
+    pendingScratchpad = nil
     do {
       try await store.update(meetingID: id, now: now()) { $0.scratchpad = text }
       scratchpadSaves += 1
