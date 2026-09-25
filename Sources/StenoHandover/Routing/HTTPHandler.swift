@@ -59,6 +59,9 @@ final class HTTPHandler: ChannelInboundHandler, RemovableChannelHandler {
   private var closeTimer: Scheduled<Void>?
   /// How long a half-closed connection may linger before it is torn down.
   static let closeGrace = TimeAmount.seconds(2)
+  /// How much of a rejected request's body is eaten before the connection
+  /// closes, so the client reads the status instead of a reset.
+  static let rejectedBodyDrain = 64 * 1024
 
   init(engine: any RequestHandling, configuration: HandoverConfiguration, metrics: ServerMetrics) {
     self.engine = engine
@@ -145,11 +148,8 @@ final class HTTPHandler: ChannelInboundHandler, RemovableChannelHandler {
       pending.principal = principal
       state = .pending(pending)
       if pending.endReceived { dispatch(pending, principal: principal, context: context) }
-    case .success(.unauthorized):
-      reject(
-        .problem(.unauthorized, "unknown or revoked token"), head: pending.head, context: context)
-    case .success(.forbidden):
-      reject(.problem(.forbidden, "pairing secret rejected"), head: pending.head, context: context)
+    case .success(.rejected(let response)):
+      reject(response, head: pending.head, context: context)
     case .failure(let error):
       reject(.internalError("authenticating", error), head: pending.head, context: context)
     }
@@ -229,7 +229,7 @@ final class HTTPHandler: ChannelInboundHandler, RemovableChannelHandler {
       let seen = pending.body.readableBytes
       metrics.update { $0.discardedBodyBytes += seen }
     }
-    state = .discarding(remaining: HandoverConfiguration.jsonBodyLimit)
+    state = .discarding(remaining: Self.rejectedBodyDrain)
     write(response, head: head, close: false, context: context)
   }
 

@@ -37,7 +37,7 @@ import Testing
       configuration: HandoverConfiguration(
         serviceName: "Steno on Test Mac", advertise: false, chunkSize: 1024 * 1024,
         inboxDirectory: directory.appendingPathComponent("inbox", isDirectory: true)),
-      store: store, intake: intake, identity: try TestIdentity.load(), clock: ManualClock())
+      store: store, intake: intake, identity: try TestIdentity.load())
     try await service.start()
     defer { Task { await service.stop() } }
 

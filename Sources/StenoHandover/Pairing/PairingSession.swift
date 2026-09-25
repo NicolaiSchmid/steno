@@ -2,25 +2,25 @@ import Crypto
 import Foundation
 
 /// One open pairing window: the secret in the QR code, expiring on the
-/// injected clock. Single use because the engine drops the session once it
-/// pairs; `beginPairing` replaces any open session.
+/// injected wall clock. Single use because the engine drops the session
+/// before it saves the paired device; `beginPairing` replaces any open
+/// session.
 struct PairingSession: Sendable {
   let payload: PairingPayload
-  /// True once the window on the injected clock has passed.
-  let isExpired: @Sendable () -> Bool
+  private let now: @Sendable () -> Date
 
   init(
     macID: UUID, macName: String, fingerprint: Data, window: Duration,
-    clock: any Clock<Duration>, now: Date
+    now: @escaping @Sendable () -> Date
   ) {
-    self.isExpired = clock.expiryCheck(after: window)
+    self.now = now
     self.payload = PairingPayload(
       macID: macID, macName: macName, fingerprint: fingerprint,
       secret: DeviceTokens.randomBytes(),
-      expiresAt: now.addingTimeInterval(window / .seconds(1)))
+      expiresAt: now().addingTimeInterval(window / .seconds(1)))
   }
 
-  var isOpen: Bool { !isExpired() }
+  var isOpen: Bool { now() < payload.expiresAt }
 
   /// Checks a presented credential without leaking timing: both sides are
   /// hashed and swift-crypto compares digests in constant time. The phone
@@ -31,13 +31,5 @@ struct PairingSession: Sendable {
       return false
     }
     return SHA256.hash(data: bytes) == SHA256.hash(data: payload.secret)
-  }
-}
-
-extension Clock where Duration == Swift.Duration {
-  /// A check that turns true once `window` has passed on this clock.
-  func expiryCheck(after window: Duration) -> @Sendable () -> Bool {
-    let deadline = now.advanced(by: window)
-    return { self.now >= deadline }
   }
 }

@@ -6,10 +6,12 @@ import X509
 
 @testable import StenoHandover
 
-@Suite struct ServerIdentityTests {
+/// Mint, fingerprint, Mac id and the committed test identity: the values
+/// the phone pins and shows.
+@Suite struct IdentityTests {
   @Test func mintYieldsSelfSignedP256CertificateForTenYears() throws {
     let now = Date(timeIntervalSince1970: 1_790_000_000)
-    let minted = try ServerIdentity.mint(commonName: "Steno on Test Mac", now: now)
+    let minted = try MintedIdentity.mint(commonName: "Steno on Test Mac", now: now)
     let certificate = try minted.certificate()
 
     #expect(String(describing: certificate.subject) == "CN=Steno on Test Mac")
@@ -30,20 +32,20 @@ import X509
   }
 
   @Test func fingerprintIsStableForOneDERAndDiffersBetweenMints() throws {
-    let a = try ServerIdentity.mint(commonName: "A")
-    let b = try ServerIdentity.mint(commonName: "A")
+    let a = try MintedIdentity.mint(commonName: "A")
+    let b = try MintedIdentity.mint(commonName: "A")
     #expect(a.fingerprint.count == 32)
-    #expect(a.fingerprint == ServerIdentity.fingerprint(der: a.certificateDER))
+    #expect(a.fingerprint == HandoverIdentity.fingerprint(ofDER: a.certificateDER))
     #expect(a.fingerprint != b.fingerprint)
     #expect(a.certificateDER != b.certificateDER)
   }
 
   @Test func macIDDerivesFromTheFingerprintDeterministically() throws {
     let fingerprint = Data(repeating: 0xAB, count: 32)
-    let first = MacIdentifier.derive(fromFingerprint: fingerprint)
-    let second = MacIdentifier.derive(fromFingerprint: fingerprint)
+    let first = HandoverIdentity.macID(forFingerprint: fingerprint)
+    let second = HandoverIdentity.macID(forFingerprint: fingerprint)
     #expect(first == second)
-    #expect(first != MacIdentifier.derive(fromFingerprint: Data(repeating: 0xAC, count: 32)))
+    #expect(first != HandoverIdentity.macID(forFingerprint: Data(repeating: 0xAC, count: 32)))
     // Version 4, variant 1, so it never collides with random ids by shape.
     #expect(
       first.uuidString[first.uuidString.index(first.uuidString.startIndex, offsetBy: 14)] == "4")
@@ -59,8 +61,8 @@ import X509
 
   @Test func sanLabelIsDNSSafe() {
     #expect(
-      ServerIdentity.sanLabel("Steno on Nicolai's MacBook Pro")
+      MintedIdentity.sanLabel("Steno on Nicolai's MacBook Pro")
         == "steno-on-nicolai-s-macbook-pro.local")
-    #expect(ServerIdentity.sanLabel("---") == "steno.local")
+    #expect(MintedIdentity.sanLabel("---") == "steno.local")
   }
 }

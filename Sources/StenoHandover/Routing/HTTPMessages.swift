@@ -9,12 +9,12 @@ enum Principal: Sendable, Equatable {
   case device(PairedDevice)
 }
 
-/// The outcome of the auth gate. `unauthorized` is the phone's "the Mac
-/// revoked me" signal; `forbidden` is a bad, used or expired pairing secret.
+/// The outcome of the auth gate. A rejection carries the answer the handler
+/// writes before it reads the body, so every status decision of the wire is
+/// the engine's (`HandoverEngine.unauthorized`, `.pairingRejected`).
 enum AuthOutcome: Sendable, Equatable {
   case allowed(Principal)
-  case unauthorized
-  case forbidden
+  case rejected(HandoverResponse)
 }
 
 /// One complete, authenticated request handed from the NIO handler to the
@@ -32,7 +32,7 @@ struct HandoverRequest: Sendable {
   }
 }
 
-struct HandoverResponse: Sendable {
+struct HandoverResponse: Sendable, Equatable {
   var status: HTTPResponseStatus
   var headers = HTTPHeaders()
   var body = Data()

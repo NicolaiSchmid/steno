@@ -34,12 +34,20 @@ struct LoopbackClient: Sendable {
   }
 
   /// A client for a running service, pinning its identity unless another
-  /// fingerprint is given.
-  static func forService(_ service: HandoverService, fingerprint: Data? = nil) async throws
+  /// fingerprint is given. `https` where the listener terminates TLS, plain
+  /// `http` against the Linux loopback listener.
+  static func forService(_ service: HandoverService, fingerprint: Data? = nil) throws
     -> LoopbackClient
   {
-    guard let url = await service.loopbackURL else { throw ServerError.notListening }
-    return LoopbackClient(baseURL: url, fingerprint: fingerprint ?? service.identity.fingerprint)
+    guard case .listening(let port) = service.state else { throw ClientError.notListening }
+    #if canImport(Security)
+      let scheme = "https"
+    #else
+      let scheme = "http"
+    #endif
+    return LoopbackClient(
+      baseURL: URL(string: "\(scheme)://127.0.0.1:\(port)")!,
+      fingerprint: fingerprint ?? service.identity.fingerprint)
   }
 
   func request(
@@ -99,6 +107,7 @@ struct LoopbackClient: Sendable {
 
   enum ClientError: Error {
     case notHTTP
+    case notListening
   }
 }
 

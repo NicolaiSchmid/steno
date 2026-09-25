@@ -1,5 +1,6 @@
 import Foundation
 import StenoCore
+import Synchronization
 
 /// Where the listener stands. Named `ListenerState` because core's
 /// `HandoverState` is the per-recording receipt state.
@@ -13,7 +14,8 @@ public enum ListenerState: Sendable, Equatable {
 /// that owns the listener, the pairing session and the receipt stream. The
 /// app renders `beginPairing().urlString` as a QR code, lists
 /// `pairedDevices()`, calls `revoke(_:)`, and observes `states` and
-/// `receipts`.
+/// `receipts`; `state` and both streams are `nonisolated`, so a view reads
+/// them without an `await`.
 public actor HandoverService {
   public nonisolated let configuration: HandoverConfiguration
   public nonisolated let identity: HandoverIdentity
@@ -21,26 +23,25 @@ public actor HandoverService {
   nonisolated let engine: HandoverEngine
   nonisolated let metrics = ServerMetrics()
   private var server: HandoverServer?
-  private var listenerStates = Broadcast<ListenerState>(initial: .stopped)
+  private nonisolated let listenerStates = Broadcast<ListenerState>(initial: .stopped)
+  private nonisolated let receiptUpdates = Broadcast<[HandoverReceipt]>(initial: [])
 
+  /// `now` is the one time source: it stamps receipts and devices and
+  /// decides when the pairing window has closed. Tests advance it.
   public init(
     configuration: HandoverConfiguration,
     store: MeetingStore,
     intake: any HandoverIntake,
     identity: HandoverIdentity,
-    clock: any Clock<Duration> = ContinuousClock(),
     now: @escaping @Sendable () -> Date = Date.init
   ) {
     self.configuration = configuration
     self.identity = identity
     self.store = store
     self.engine = HandoverEngine(
-      configuration: configuration, identity: identity, store: store, intake: intake, clock: clock,
-      now: now)
+      configuration: configuration, identity: identity, store: store, intake: intake,
+      receipts: receiptUpdates, now: now)
   }
-
-  /// The id in the Bonjour TXT record, the QR payload and `/v1/hello`.
-  public nonisolated var macID: UUID { identity.macID }
 
   // MARK: - Pairing and devices
 
@@ -65,26 +66,20 @@ public actor HandoverService {
     try await engine.revoke(deviceID)
   }
 
-  public var state: ListenerState { listenerStates.current }
+  // MARK: - Observation
+
+  public nonisolated var state: ListenerState { listenerStates.current }
 
   /// Yields the current state first, then every change. Each call is an
   /// independent subscription.
-  public var states: AsyncStream<ListenerState> {
-    listenerStates.subscribe { [weak self] id in
-      Task { await self?.unsubscribe(id) }
-    }
-  }
-
-  private func unsubscribe(_ id: UUID) {
-    listenerStates.remove(id)
-  }
+  public nonisolated var states: AsyncStream<ListenerState> { listenerStates.subscribe() }
 
   /// Every handover receipt touched since start, oldest first, updated as
   /// chunks arrive and a recording completes. The UI reads it directly;
   /// `receivedBytes ≈ receivedChunks.count * chunkSize`.
-  public var receipts: AsyncStream<[HandoverReceipt]> {
-    get async { await engine.receipts }
-  }
+  public nonisolated var receipts: AsyncStream<[HandoverReceipt]> { receiptUpdates.subscribe() }
+
+  // MARK: - Lifecycle
 
   /// Binds the listener (and advertises when configured). Idempotent. Sweeps
   /// orphaned inbox files first.
@@ -108,46 +103,51 @@ public actor HandoverService {
     await server.stop()
     listenerStates.send(.stopped)
   }
-
-  /// The bound port while listening.
-  public var port: UInt16? { server?.port }
-
-  /// `https://127.0.0.1:<port>` while listening (plain `http` on Linux). The
-  /// tests' pinned client uses it; the phone reaches the Mac over Bonjour.
-  var loopbackURL: URL? {
-    server.map { URL(string: "\(HandoverServer.scheme)://127.0.0.1:\($0.port)")! }
-  }
 }
 
 /// A current value plus a fan-out to any number of `AsyncStream` readers.
-struct Broadcast<Value: Sendable>: Sendable {
-  private(set) var current: Value
-  private var continuations: [UUID: AsyncStream<Value>.Continuation] = [:]
-
-  init(initial: Value) {
-    self.current = initial
+/// `Sendable` over a `Mutex`, so an actor hands out `current` and new
+/// streams from `nonisolated` members, and a reader that stops is removed
+/// from wherever `onTermination` runs, without a hop back to the owner.
+final class Broadcast<Value: Sendable>: Sendable {
+  private struct State {
+    var current: Value
+    var continuations: [UUID: AsyncStream<Value>.Continuation] = [:]
   }
 
-  mutating func send(_ value: Value) {
-    current = value
-    for continuation in continuations.values {
+  private let state: Mutex<State>
+
+  init(initial: Value) {
+    self.state = Mutex(State(current: initial))
+  }
+
+  var current: Value { state.withLock { $0.current } }
+
+  func send(_ value: Value) {
+    let continuations = state.withLock { state in
+      state.current = value
+      return Array(state.continuations.values)
+    }
+    for continuation in continuations {
       continuation.yield(value)
     }
   }
 
-  /// A stream that yields `current` first. `onTerminate` runs off the owner's
-  /// isolation when the reader stops; it must hop back to call `remove`.
-  mutating func subscribe(onTerminate: @escaping @Sendable (UUID) -> Void) -> AsyncStream<Value> {
+  /// A stream that yields `current` first, then every `send`, buffering the
+  /// newest sixteen for a slow reader.
+  func subscribe() -> AsyncStream<Value> {
     let id = UUID()
     let (stream, continuation) = AsyncStream.makeStream(
       of: Value.self, bufferingPolicy: .bufferingNewest(16))
-    continuation.yield(current)
-    continuation.onTermination = { _ in onTerminate(id) }
-    continuations[id] = continuation
+    continuation.onTermination = { [weak self] _ in self?.remove(id) }
+    state.withLock { state in
+      continuation.yield(state.current)
+      state.continuations[id] = continuation
+    }
     return stream
   }
 
-  mutating func remove(_ id: UUID) {
-    continuations.removeValue(forKey: id)?.finish()
+  private func remove(_ id: UUID) {
+    state.withLock { $0.continuations.removeValue(forKey: id) }?.finish()
   }
 }

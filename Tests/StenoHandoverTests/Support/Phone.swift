@@ -11,20 +11,30 @@ struct Phone {
   let deviceID: UUID
   let deviceName: String
 
-  /// Pairs a fresh device against the running service.
+  /// `POST /v1/pair` with `secret`, whatever the Mac answers.
+  static func pair(
+    _ service: HandoverService, secret: Data, deviceID: UUID = UUID(),
+    deviceName: String = "Test iPhone"
+  ) async throws -> LoopbackClient.Response {
+    try await LoopbackClient.forService(service).json(
+      "POST", "/v1/pair", headers: LoopbackClient.pairing(secret),
+      body: Wire.PairRequest(deviceID: deviceID, deviceName: deviceName))
+  }
+
+  /// Opens a window and pairs a fresh device against the running service.
   static func pair(
     _ service: HandoverService, deviceID: UUID = UUID(), deviceName: String = "Test iPhone"
   ) async throws -> Phone {
-    let client = try await LoopbackClient.forService(service)
     let payload = await service.beginPairing()
-    let response = try await client.json(
-      "POST", "/v1/pair", headers: LoopbackClient.pairing(payload.secret),
-      body: Wire.PairRequest(deviceID: deviceID, deviceName: deviceName))
+    let response = try await pair(
+      service, secret: payload.secret, deviceID: deviceID, deviceName: deviceName)
     guard response.status == 200 else {
       throw PhoneError.pairingFailed(response.status)
     }
     let pair = try response.json(Wire.PairResponse.self)
-    return Phone(client: client, token: pair.token, deviceID: deviceID, deviceName: deviceName)
+    return Phone(
+      client: try LoopbackClient.forService(service), token: pair.token, deviceID: deviceID,
+      deviceName: deviceName)
   }
 
   var bearer: [String: String] { LoopbackClient.bearer(token) }

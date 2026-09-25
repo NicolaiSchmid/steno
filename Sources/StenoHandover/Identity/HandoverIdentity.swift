@@ -1,3 +1,4 @@
+import Crypto
 import Foundation
 
 #if canImport(Security)
@@ -6,7 +7,9 @@ import Foundation
 
 /// The identity the listener presents: the leaf certificate (for the
 /// fingerprint the phone pins and the Mac id derived from it) and, on Apple
-/// platforms, the `SecIdentity` Network.framework terminates TLS with.
+/// platforms, the `SecIdentity` Network.framework terminates TLS with. Read
+/// it as mint (`MintedIdentity.mint`), store (`IdentityKeychain`), load
+/// (this type).
 ///
 /// On Linux there is no TLS stack in this module (Network.framework and
 /// Security do not exist there); the identity is the certificate alone and
@@ -35,21 +38,25 @@ public struct HandoverIdentity: @unchecked Sendable {
     }
   #endif
 
-  /// SHA-256 of the leaf DER.
-  public var fingerprint: Data { ServerIdentity.fingerprint(der: certificateDER) }
+  /// SHA-256 of the leaf DER, the value the phone pins.
+  public var fingerprint: Data { Self.fingerprint(ofDER: certificateDER) }
 
   /// The stable id of this Mac, derived from the certificate: a new identity
   /// is a new Mac to every phone, which matches "losing the identity means
   /// re-pairing".
-  public var macID: UUID { MacIdentifier.derive(fromFingerprint: fingerprint) }
-}
+  public var macID: UUID { Self.macID(forFingerprint: fingerprint) }
 
-/// The Mac id in the Bonjour TXT record, the QR payload and `/v1/hello`.
-public enum MacIdentifier {
-  /// UUID from the first 16 bytes of SHA-256("steno-mac-id" || fingerprint)
+  /// SHA-256 of a certificate's DER, the same bytes `SecCertificateCopyData`
+  /// yields on the phone (`PinnedTrustEvaluator.fingerprint(of:)`).
+  public static func fingerprint(ofDER der: Data) -> Data {
+    Data(SHA256.hash(data: der))
+  }
+
+  /// The Mac id in the Bonjour TXT record, the QR payload and `/v1/hello`:
+  /// a UUID from the first 16 bytes of SHA-256("steno-mac-id" || fingerprint)
   /// with version 4 and variant 1 bits set.
-  public static func derive(fromFingerprint fingerprint: Data) -> UUID {
-    let digest = ServerIdentity.fingerprint(der: Data("steno-mac-id".utf8) + fingerprint)
+  public static func macID(forFingerprint fingerprint: Data) -> UUID {
+    let digest = Self.fingerprint(ofDER: Data("steno-mac-id".utf8) + fingerprint)
     var bytes = Array(digest.prefix(16))
     bytes[6] = (bytes[6] & 0x0F) | 0x40
     bytes[8] = (bytes[8] & 0x3F) | 0x80

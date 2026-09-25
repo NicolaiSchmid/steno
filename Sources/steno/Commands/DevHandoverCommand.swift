@@ -1,7 +1,9 @@
 import ArgumentParser
+import Dispatch
 import Foundation
 import StenoCore
 import StenoHandover
+import Synchronization
 
 /// `steno dev handover serve [--pair]`: runs the Mac side of the phone
 /// handover against an in-memory store and core's `FakeHandoverIntake`, so a
@@ -39,23 +41,24 @@ struct DevHandover: AsyncParsableCommand {
       let store = try MeetingStore.inMemory()
       let intake = FakeHandoverIntake()
       let identity = try Self.identity(name: name)
+      let configuration = HandoverConfiguration(
+        serviceName: name, advertise: true, inboxDirectory: inboxURL, port: port)
       let service = HandoverService(
-        configuration: HandoverConfiguration(
-          serviceName: name, advertise: true, inboxDirectory: inboxURL, port: port),
-        store: store, intake: intake, identity: identity)
+        configuration: configuration, store: store, intake: intake, identity: identity)
 
       try await service.start()
-      guard let boundPort = await service.port else {
-        throw RuntimeFailure(description: "the handover listener reported no port")
+      guard case .listening(let boundPort) = service.state else {
+        throw RuntimeFailure(description: "the handover listener is not listening after start")
       }
       print("Steno handover listening on port \(boundPort)")
-      print("Mac id: \(service.macID)")
+      print("Mac id: \(identity.macID)")
       print("Fingerprint (base64): \(identity.fingerprint.base64EncodedString())")
       print("Advertising _steno._tcp as \"\(name)\"")
 
       if pair {
         let payload = await service.beginPairing()
-        print("\nPairing window open for 5 minutes. Scan this on the phone:")
+        let minutes = Int(configuration.pairingWindow / .seconds(60))
+        print("\nPairing window open for \(minutes) minutes. Scan this on the phone:")
         print(payload.urlString)
         Self.printQR(payload.urlString)
       } else {
@@ -63,11 +66,29 @@ struct DevHandover: AsyncParsableCommand {
       }
       print("\nPress Ctrl-C to stop.")
 
-      // Stay up until interrupted; the actor keeps serving on its own tasks.
-      while !Task.isCancelled {
-        try? await Task.sleep(for: .seconds(3600))
-      }
+      // Ctrl-C ends the wait rather than the process, so the listener stops
+      // and the Bonjour record is withdrawn instead of timing out on peers.
+      await Self.interrupted()
+      print("\nStopping.")
       await service.stop()
+    }
+
+    /// Returns on the first SIGINT.
+    static func interrupted() async {
+      signal(SIGINT, SIG_IGN)
+      let source = DispatchSource.makeSignalSource(signal: SIGINT, queue: .global())
+      let resumed = Mutex(false)
+      await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+        source.setEventHandler {
+          let first = resumed.withLock { done -> Bool in
+            defer { done = true }
+            return !done
+          }
+          if first { continuation.resume() }
+        }
+        source.resume()
+      }
+      source.cancel()
     }
 
     /// The login-keychain identity in the product; where there is no
@@ -78,7 +99,7 @@ struct DevHandover: AsyncParsableCommand {
         return try IdentityKeychain.loadOrCreate(commonName: "Steno on \(name)")
       #else
         return HandoverIdentity(
-          certificateDER: try ServerIdentity.mint(commonName: "Steno on \(name)").certificateDER)
+          certificateDER: try MintedIdentity.mint(commonName: "Steno on \(name)").certificateDER)
       #endif
     }
 

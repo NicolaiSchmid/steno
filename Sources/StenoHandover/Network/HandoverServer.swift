@@ -23,13 +23,6 @@ final class HandoverServer: @unchecked Sendable {
   private let group: any EventLoopGroup
   private let channel: any Channel
 
-  /// The scheme a loopback client uses against this listener.
-  #if canImport(Network)
-    static let scheme = "https"
-  #else
-    static let scheme = "http"
-  #endif
-
   static func start(
     configuration: HandoverConfiguration,
     identity: HandoverIdentity,
@@ -121,13 +114,11 @@ final class HandoverServer: @unchecked Sendable {
 enum ServerError: Error, CustomStringConvertible, Sendable {
   case identityRejected
   case noPort
-  case notListening
 
   var description: String {
     switch self {
     case .identityRejected: "Network.framework rejected the TLS identity"
     case .noPort: "the listener reported no port"
-    case .notListening: "the handover service is not listening"
     }
   }
 }

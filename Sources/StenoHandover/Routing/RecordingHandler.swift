@@ -5,15 +5,15 @@ import StenoCore
 
 /// The four recording routes: announce, status, chunk, complete. Every path
 /// is idempotent on the recording id, so a phone that lost the answer can
-/// simply repeat the call.
+/// simply repeat the call. `device` is the bearer principal the gate
+/// established; a recording belongs to the device that announced it.
 extension HandoverEngine {
   /// `PUT /v1/recordings/{id}` with `RecordingMetadata`: 201 for a new
   /// recording, 200 for a known one, both with `RecordingStatus`.
-  func announce(_ recordingID: UUID, _ request: HandoverRequest) async -> HandoverResponse {
-    guard let device = request.device else { return .problem(.unauthorized, "no device") }
+  func announce(_ recordingID: UUID, device: PairedDevice, body: Data) async -> HandoverResponse {
     let metadata: RecordingMetadata
     do {
-      metadata = try StenoJSON.decode(RecordingMetadata.self, from: request.body)
+      metadata = try StenoJSON.decode(RecordingMetadata.self, from: body)
     } catch {
       return .problem(.badRequest, "RecordingMetadata: \(error)")
     }
@@ -37,6 +37,7 @@ extension HandoverEngine {
         return .problem(.conflict, "metadata differs from the first announcement")
       }
       var receipt = existing
+      var receivedChunks: [Int]?
       if !inbox.hasVerified(recordingID, format: metadata.format),
         !inbox.hasPartial(recordingID) || inbox.loadMetadata(recordingID) == nil
       {
@@ -49,12 +50,10 @@ extension HandoverEngine {
         } catch {
           return .internalError("opening the partial file", error)
         }
-        receipt.receivedChunks = []
+        receivedChunks = []
       }
-      receipt.state = .receiving
-      receipt.updatedAt = now()
       do {
-        try await persist(receipt)
+        try await transition(&receipt, to: .receiving, receivedChunks: receivedChunks)
       } catch {
         return .internalError("saving the receipt", error)
       }
@@ -81,8 +80,8 @@ extension HandoverEngine {
   }
 
   /// `GET /v1/recordings/{id}`: the resume point, 404 for an unknown id.
-  func status(_ recordingID: UUID, _ request: HandoverRequest) async -> HandoverResponse {
-    guard let receipt = await ownedReceipt(recordingID, request) else {
+  func status(_ recordingID: UUID, device: PairedDevice) async -> HandoverResponse {
+    guard let receipt = await ownedReceipt(recordingID, device: device) else {
       return .problem(.notFound, "no such recording")
     }
     return .json(.ok, Self.status(of: receipt))
@@ -90,10 +89,10 @@ extension HandoverEngine {
 
   /// `PUT /v1/recordings/{id}/chunks/{n}` with raw bytes and
   /// `X-Steno-Chunk-SHA256`: 204, also for a chunk already received.
-  func receiveChunk(_ recordingID: UUID, index: Int, _ request: HandoverRequest) async
-    -> HandoverResponse
-  {
-    guard var receipt = await ownedReceipt(recordingID, request) else {
+  func receiveChunk(
+    _ recordingID: UUID, index: Int, device: PairedDevice, _ request: HandoverRequest
+  ) async -> HandoverResponse {
+    guard var receipt = await ownedReceipt(recordingID, device: device) else {
       return .problem(.notFound, "no such recording")
     }
     if receipt.state.kind == .complete {
@@ -134,17 +133,13 @@ extension HandoverEngine {
     // The write suspended the actor: another chunk may have landed, or the
     // device may have been revoked. Fold this chunk into the receipt as it
     // stands now, never into the copy from before the write.
-    guard let current = activeReceipts[recordingID], current.deviceID == receipt.deviceID else {
+    guard let current = activeReceipts[recordingID], current.deviceID == device.id else {
       return .problem(.notFound, "no such recording")
     }
     receipt = current
-    receipt.receivedChunks =
-      receipt.receivedChunks.contains(index)
-      ? receipt.receivedChunks : (receipt.receivedChunks + [index]).sorted()
-    receipt.state = .receiving
-    receipt.updatedAt = now()
     do {
-      try await persist(receipt)
+      try await transition(
+        &receipt, to: .receiving, receivedChunks: Set(receipt.receivedChunks + [index]).sorted())
     } catch {
       return .internalError("saving the receipt", error)
     }
@@ -156,9 +151,8 @@ extension HandoverEngine {
   /// the status while chunks are missing or while an earlier `complete` is
   /// still verifying or admitting; 422 on a hash mismatch, after which the
   /// partial is gone and the phone starts over.
-  func complete(_ recordingID: UUID, _ request: HandoverRequest) async -> HandoverResponse {
-    guard let device = request.device, var receipt = await ownedReceipt(recordingID, request)
-    else {
+  func complete(_ recordingID: UUID, device: PairedDevice) async -> HandoverResponse {
+    guard var receipt = await ownedReceipt(recordingID, device: device) else {
       return .problem(.notFound, "no such recording")
     }
     if let meetingID = receipt.state.meetingID {
@@ -176,72 +170,85 @@ extension HandoverEngine {
     guard let metadata = inbox.loadMetadata(recordingID) else {
       return .problem(.notFound, "no metadata; announce again")
     }
-
-    let file: URL
-    if inbox.hasVerified(recordingID, format: metadata.format) {
-      // Verified earlier; the intake failed then. Admit again.
-      file = inbox.verified(recordingID, format: metadata.format)
-    } else {
-      let count = MetadataValidation.chunkCount(
-        byteCount: receipt.byteCount, chunkSize: receipt.chunkSize)
-      guard receipt.receivedChunks == Array(0..<count), inbox.hasPartial(recordingID) else {
-        if !inbox.hasPartial(recordingID) {
-          receipt.receivedChunks = []
-          receipt.updatedAt = now()
-          try? await persist(receipt)
-        }
-        return .json(.conflict, Self.status(of: receipt))
-      }
-      receipt.state = .verifying
-      receipt.updatedAt = now()
-      try? await persist(receipt)
-
-      let partial = inbox.partial(recordingID)
-      let verified: Bool
-      do {
-        verified =
-          try ReceivingFile.size(of: partial) == receipt.byteCount
-          ? try await ReceivingFile.hashMatches(partial, expected: receipt.sha256) : false
-      } catch {
-        return .internalError("verifying the file", error)
-      }
-      receipt = activeReceipts[recordingID] ?? receipt
-      guard verified else {
-        inbox.discard(recordingID)
-        receipt.state = .failed("sha256 mismatch")
-        receipt.receivedChunks = []
-        receipt.updatedAt = now()
-        try? await persist(receipt)
-        return .problem(.unprocessableEntity, "sha256 mismatch; the partial was discarded")
-      }
-      do {
-        file = try inbox.promote(recordingID, format: metadata.format)
-      } catch {
-        return .internalError("moving the verified file", error)
-      }
+    switch await verifiedFile(for: &receipt, metadata: metadata) {
+    case .answered(let response):
+      return response
+    case .file(let file):
+      return await admit(file, metadata: metadata, device: device, receipt: &receipt)
     }
+  }
 
+  private enum Verification {
+    case file(URL)
+    case answered(HandoverResponse)
+  }
+
+  /// The verified file: the one already waiting after an earlier intake
+  /// failure, else the partial once every chunk is present (409 with the
+  /// status otherwise) and the whole file hashes to the announced value (422
+  /// and the partial is discarded otherwise), promoted to its final name.
+  private func verifiedFile(for receipt: inout HandoverReceipt, metadata: RecordingMetadata)
+    async -> Verification
+  {
+    let recordingID = receipt.recordingID
+    if inbox.hasVerified(recordingID, format: metadata.format) {
+      return .file(inbox.verified(recordingID, format: metadata.format))
+    }
+    let count = MetadataValidation.chunkCount(
+      byteCount: receipt.byteCount, chunkSize: receipt.chunkSize)
+    guard receipt.receivedChunks == Array(0..<count), inbox.hasPartial(recordingID) else {
+      if !inbox.hasPartial(recordingID) {
+        try? await transition(&receipt, to: receipt.state, receivedChunks: [])
+      }
+      return .answered(.json(.conflict, Self.status(of: receipt)))
+    }
+    try? await transition(&receipt, to: .verifying)
+
+    let partial = inbox.partial(recordingID)
+    let verified: Bool
+    do {
+      verified =
+        try ReceivingFile.size(of: partial) == receipt.byteCount
+        ? try await ReceivingFile.hashMatches(partial, expected: receipt.sha256) : false
+    } catch {
+      return .answered(.internalError("verifying the file", error))
+    }
+    receipt = activeReceipts[recordingID] ?? receipt
+    guard verified else {
+      inbox.discard(recordingID)
+      try? await transition(&receipt, to: .failed("sha256 mismatch"), receivedChunks: [])
+      return .answered(
+        .problem(.unprocessableEntity, "sha256 mismatch; the partial was discarded"))
+    }
+    do {
+      return .file(try inbox.promote(recordingID, format: metadata.format))
+    } catch {
+      return .answered(.internalError("moving the verified file", error))
+    }
+  }
+
+  /// Hands the verified file to the intake. On success the receipt is
+  /// `.complete` and the answer is 200 whatever the receipt write did: the
+  /// real intake wrote this same receipt and deleted the file, a test intake
+  /// did neither. The metadata sidecar is ours to remove; a replayed
+  /// complete returns the same id through the early `.complete` check. On
+  /// failure the verified file stays for the phone's retry and the reason is
+  /// fixed text, because the error may name the file's path.
+  private func admit(
+    _ file: URL, metadata: RecordingMetadata, device: PairedDevice,
+    receipt: inout HandoverReceipt
+  ) async -> HandoverResponse {
+    let recordingID = receipt.recordingID
     let meetingID: UUID
     do {
       meetingID = try await intake.admit(file: file, metadata: metadata, device: device)
     } catch {
-      // The verified file stays; the phone retries the same call. The
-      // reason is fixed text: the error may name the file's path.
       receipt = activeReceipts[recordingID] ?? receipt
-      receipt.state = .failed(Self.intakeRefused)
-      receipt.updatedAt = now()
-      try? await persist(receipt)
+      try? await transition(&receipt, to: .failed(Self.intakeRefused))
       return .internalError("the intake", error)
     }
-    // Admitted: the answer is 200 whatever the receipt write does. The real
-    // intake wrote this same `.complete` receipt and deleted the verified
-    // file; a test intake did neither, so write it here too. The metadata
-    // sidecar is ours to remove; a replayed complete returns the same id
-    // through the early `.complete` check, no metadata needed.
     receipt = activeReceipts[recordingID] ?? receipt
-    receipt.state = .complete(meetingID: meetingID)
-    receipt.updatedAt = now()
-    try? await persist(receipt)
+    try? await transition(&receipt, to: .complete(meetingID: meetingID))
     try? FileManager.default.removeItem(at: inbox.metadata(recordingID))
     return .json(.ok, Wire.CompleteResponse(meetingID: meetingID))
   }
@@ -273,12 +280,8 @@ extension HandoverEngine {
   }
 
   /// The receipt when it belongs to the requesting device.
-  private func ownedReceipt(_ recordingID: UUID, _ request: HandoverRequest) async
-    -> HandoverReceipt?
-  {
-    guard let device = request.device, let receipt = await receipt(recordingID),
-      receipt.deviceID == device.id
-    else {
+  private func ownedReceipt(_ recordingID: UUID, device: PairedDevice) async -> HandoverReceipt? {
+    guard let receipt = await receipt(recordingID), receipt.deviceID == device.id else {
       return nil
     }
     return receipt

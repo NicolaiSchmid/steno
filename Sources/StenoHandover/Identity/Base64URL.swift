@@ -2,8 +2,8 @@ import Foundation
 
 /// base64url without padding (RFC 4648 §5), used only inside the pairing QR
 /// URL; every JSON body and header uses standard base64 (`StenoJSON`).
-public enum Base64URL {
-  public static func encode(_ data: Data) -> String {
+enum Base64URL {
+  static func encode(_ data: Data) -> String {
     data.base64EncodedString()
       .replacingOccurrences(of: "+", with: "-")
       .replacingOccurrences(of: "/", with: "_")
@@ -12,7 +12,7 @@ public enum Base64URL {
 
   /// Accepts unpadded and padded input; rejects characters outside the
   /// alphabet.
-  public static func decode(_ string: String) -> Data? {
+  static func decode(_ string: String) -> Data? {
     let allowed = Set("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_=")
     guard string.allSatisfy(allowed.contains) else { return nil }
     var standard =

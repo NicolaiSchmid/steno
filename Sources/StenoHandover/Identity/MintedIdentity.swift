@@ -5,7 +5,7 @@ import X509
 
 /// A freshly minted self-signed TLS identity: the certificate's DER bytes and
 /// the P-256 key that signed it. Pure value; storing it is `IdentityKeychain`'s
-/// job.
+/// job, and the loaded form is `HandoverIdentity`.
 public struct MintedIdentity: @unchecked Sendable {
   public let certificateDER: Data
   public let privateKey: P256.Signing.PrivateKey
@@ -16,23 +16,21 @@ public struct MintedIdentity: @unchecked Sendable {
   }
 
   /// SHA-256 of the leaf DER, the value the phone pins.
-  public var fingerprint: Data { ServerIdentity.fingerprint(der: certificateDER) }
+  public var fingerprint: Data { HandoverIdentity.fingerprint(ofDER: certificateDER) }
 
   /// The parsed certificate, for tests and diagnostics.
   public func certificate() throws -> Certificate {
     try Certificate(derEncoded: Array(certificateDER))
   }
-}
 
-/// Mints the Mac's TLS identity with swift-certificates: P-256, self-signed,
-/// ten years, `CN=<commonName>`. No keychain, no Security framework, so the
-/// same code runs and is tested on Linux.
-public enum ServerIdentity {
   /// Ten years, the whole life of the identity (rotation is a non-goal).
   public static let validity: TimeInterval = 10 * 365 * 24 * 60 * 60
 
-  /// `commonName` is `Steno on <Mac name>` in the product. `now` is the
-  /// start of validity; a minute of clock skew is absorbed by backdating.
+  /// Mints with swift-certificates: P-256, self-signed, ten years,
+  /// `CN=<commonName>` (`Steno on <Mac name>` in the product). No keychain,
+  /// no Security framework, so the same code runs and is tested on Linux.
+  /// `now` is the start of validity; a minute of clock skew is absorbed by
+  /// backdating.
   public static func mint(commonName: String, now: Date = Date()) throws -> MintedIdentity {
     let privateKey = P256.Signing.PrivateKey()
     let name = try DistinguishedName {
@@ -61,12 +59,6 @@ public enum ServerIdentity {
     try serializer.serialize(certificate)
     return MintedIdentity(
       certificateDER: Data(serializer.serializedBytes), privateKey: privateKey)
-  }
-
-  /// SHA-256 of the certificate DER, the same bytes `SecCertificateCopyData`
-  /// yields on the phone.
-  public static func fingerprint(der: Data) -> Data {
-    Data(SHA256.hash(data: der))
   }
 
   /// A DNS-safe label for the SAN: the phone never checks the name, but a

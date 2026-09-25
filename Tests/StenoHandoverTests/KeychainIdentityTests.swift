@@ -18,7 +18,7 @@ import Testing
       defer { try? IdentityKeychain.delete(label: label) }
 
       #expect(try IdentityKeychain.load(label: label) == nil)
-      let minted = try ServerIdentity.mint(commonName: "Steno on Test Mac")
+      let minted = try MintedIdentity.mint(commonName: "Steno on Test Mac")
       try IdentityKeychain.store(minted, label: label)
 
       let loaded = try #require(try IdentityKeychain.load(label: label))

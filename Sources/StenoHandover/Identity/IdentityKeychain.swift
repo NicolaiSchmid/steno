@@ -95,7 +95,7 @@
       if let existing = try load(label: label) {
         return try HandoverIdentity(secIdentity: existing)
       }
-      try store(try ServerIdentity.mint(commonName: commonName), label: label)
+      try store(try MintedIdentity.mint(commonName: commonName), label: label)
       guard let created = try load(label: label) else {
         throw IdentityError.notFound(label: label)
       }

@@ -2,19 +2,23 @@ import Foundation
 import NIOHTTP1
 import StenoCore
 
-/// The protocol core behind the listener: the auth gate and every route,
-/// independent of NIO and of TLS so the same code runs on Linux in tests.
-/// Owned by `HandoverService`; one actor, so pairing, tokens and partial
-/// files are touched by one request at a time. The recording routes live
-/// in `RecordingHandler.swift`.
+/// The protocol core behind the listener: the auth gate and every route.
+/// Independent of the channel pipeline and of TLS (it uses NIOHTTP1's value
+/// types for headers and status), so `handle` is driven directly by the
+/// engine tests and the same code runs on Linux. Owned by `HandoverService`;
+/// one actor, so pairing, tokens and partial files are touched by one request
+/// at a time, though every store, file and intake call is a suspension point
+/// at which the next request runs. The recording routes live in
+/// `RecordingHandler.swift`.
 actor HandoverEngine: RequestHandling {
   let configuration: HandoverConfiguration
   let identity: HandoverIdentity
   let store: MeetingStore
   let intake: any HandoverIntake
-  let clock: any Clock<Duration>
   let now: @Sendable () -> Date
   nonisolated let inbox: Inbox
+  /// The service's receipt stream; every persisted change is sent here.
+  private nonisolated let receiptUpdates: Broadcast<[HandoverReceipt]>
 
   private var pairing: PairingSession?
   /// Receipts touched since start, by recording id; what `receipts` streams.
@@ -23,7 +27,6 @@ actor HandoverEngine: RequestHandling {
   /// intake's answer. The verify and the admit suspend the actor, so a
   /// retried `complete` must not start a second verify or admission.
   var completing: Set<UUID> = []
-  private var receiptUpdates = Broadcast<[HandoverReceipt]>(initial: [])
 
   /// `lastSeenAt` is written at most this often per device.
   static let lastSeenResolution: TimeInterval = 60
@@ -32,19 +35,24 @@ actor HandoverEngine: RequestHandling {
   /// the space. The receipt stays; a late re-announce starts the upload over.
   static let abandonedAfter: TimeInterval = 14 * 24 * 60 * 60
 
+  /// The two answers of the gate. `unauthorized` is the phone's "the Mac
+  /// revoked me" signal; `pairingRejected` a bad, used or expired secret.
+  static let unauthorized = HandoverResponse.problem(.unauthorized, "unknown or revoked token")
+  static let pairingRejected = HandoverResponse.problem(.forbidden, "pairing secret rejected")
+
   init(
     configuration: HandoverConfiguration,
     identity: HandoverIdentity,
     store: MeetingStore,
     intake: any HandoverIntake,
-    clock: any Clock<Duration>,
+    receipts: Broadcast<[HandoverReceipt]>,
     now: @escaping @Sendable () -> Date
   ) {
     self.configuration = configuration
     self.identity = identity
     self.store = store
     self.intake = intake
-    self.clock = clock
+    self.receiptUpdates = receipts
     self.now = now
     self.inbox = Inbox(directory: configuration.inboxDirectory)
   }
@@ -75,8 +83,7 @@ actor HandoverEngine: RequestHandling {
   func beginPairing() -> PairingPayload {
     let session = PairingSession(
       macID: identity.macID, macName: configuration.serviceName,
-      fingerprint: identity.fingerprint, window: configuration.pairingWindow, clock: clock,
-      now: now())
+      fingerprint: identity.fingerprint, window: configuration.pairingWindow, now: now)
     pairing = session
     return session.payload
   }
@@ -101,6 +108,8 @@ actor HandoverEngine: RequestHandling {
 
   // MARK: - Auth gate
 
+  /// Runs at the request head, before the body; a rejection carries the
+  /// answer the handler writes.
   func authenticate(_ route: Route, authorization: String?) async -> AuthOutcome {
     switch route.auth {
     case .none:
@@ -109,16 +118,16 @@ actor HandoverEngine: RequestHandling {
       guard let secret = Self.credential(scheme: "Pairing", in: authorization),
         let session = pairing, session.matches(secret)
       else {
-        return .forbidden
+        return .rejected(Self.pairingRejected)
       }
       return .allowed(.pairing)
     case .bearer:
       guard let token = Self.credential(scheme: "Bearer", in: authorization) else {
-        return .unauthorized
+        return .rejected(Self.unauthorized)
       }
       let hash = DeviceTokens.hash(token)
       guard let device = try? await store.device(forTokenHash: hash) else {
-        return .unauthorized
+        return .rejected(Self.unauthorized)
       }
       return .allowed(.device(await touch(device, tokenHash: hash)))
     }
@@ -154,23 +163,36 @@ actor HandoverEngine: RequestHandling {
       return .json(.ok, Wire.Hello(macID: identity.macID))
     case .pair:
       return await pair(request)
+    case .unpair, .announce, .status, .chunk, .complete:
+      // Every bearer route passed the gate with a device principal.
+      guard let device = request.device else { return Self.unauthorized }
+      return await handle(request, from: device)
+    }
+  }
+
+  private func handle(_ request: HandoverRequest, from device: PairedDevice) async
+    -> HandoverResponse
+  {
+    switch request.route {
     case .unpair:
-      return await unpair(request)
+      return await unpair(device)
     case .announce(let recordingID):
-      return await announce(recordingID, request)
+      return await announce(recordingID, device: device, body: request.body)
     case .status(let recordingID):
-      return await status(recordingID, request)
+      return await status(recordingID, device: device)
     case .chunk(let recordingID, let index):
-      return await receiveChunk(recordingID, index: index, request)
+      return await receiveChunk(recordingID, index: index, device: device, request)
     case .complete(let recordingID):
-      return await complete(recordingID, request)
+      return await complete(recordingID, device: device)
+    case .hello, .pair:
+      return .problem(.notFound, "no such route")
     }
   }
 
   private func pair(_ request: HandoverRequest) async -> HandoverResponse {
     // The gate passed at the head; the window may have closed since.
     guard let session = pairing, session.isOpen else {
-      return .problem(.forbidden, "pairing secret rejected")
+      return Self.pairingRejected
     }
     let body: Wire.PairRequest
     do {
@@ -202,8 +224,7 @@ actor HandoverEngine: RequestHandling {
       Wire.PairResponse(token: token, macID: identity.macID, macName: configuration.serviceName))
   }
 
-  private func unpair(_ request: HandoverRequest) async -> HandoverResponse {
-    guard let device = request.device else { return .problem(.unauthorized, "no device") }
+  private func unpair(_ device: PairedDevice) async -> HandoverResponse {
     do {
       try await revoke(device.id)
     } catch {
@@ -214,22 +235,24 @@ actor HandoverEngine: RequestHandling {
 
   // MARK: - Receipts
 
-  /// Yields the current receipts first, then every change.
-  var receipts: AsyncStream<[HandoverReceipt]> {
-    receiptUpdates.subscribe { [weak self] id in
-      Task { await self?.unsubscribe(id) }
-    }
-  }
-
-  private func unsubscribe(_ id: UUID) {
-    receiptUpdates.remove(id)
-  }
-
   /// Receipts touched since start, oldest first.
   var receiptsSnapshot: [HandoverReceipt] {
     activeReceipts.values.sorted {
       ($0.createdAt, $0.recordingID.uuidString) < ($1.createdAt, $1.recordingID.uuidString)
     }
+  }
+
+  /// One state change: the state, the chunk set when given, `updatedAt`,
+  /// then `persist`. Callers that answer the phone whatever the write did
+  /// use `try?` deliberately: memory already holds the change and the
+  /// phone's next request re-reads.
+  func transition(
+    _ receipt: inout HandoverReceipt, to state: HandoverState, receivedChunks: [Int]? = nil
+  ) async throws {
+    receipt.state = state
+    if let receivedChunks { receipt.receivedChunks = receivedChunks }
+    receipt.updatedAt = now()
+    try await persist(receipt)
   }
 
   /// Writes the receipt and tells the observers. Memory is updated before
