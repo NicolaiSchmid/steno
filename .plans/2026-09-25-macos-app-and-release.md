@@ -1,10 +1,11 @@
 # Steno v1: macOS app and release
 
-Status: implementation plan, 2026-09-25. Binding context:
-[`2026-09-25-v1-program.md`](2026-09-25-v1-program.md) (boundaries, model,
-protocols) and [`2026-09-24-initial-scope.md`](2026-09-24-initial-scope.md).
-Owns `apps/macos/`, the release workflow, and Forge runner adoption in CI.
-Implemented last, after the module workstreams have merged.
+Status: implementation plan, 2026-09-25, reconciled the same day. Binding
+context: [`2026-09-25-v1-program.md`](2026-09-25-v1-program.md) (boundaries,
+model, protocols) and [`2026-09-24-initial-scope.md`](2026-09-24-initial-scope.md).
+Owns `apps/macos/`, the release workflow, and the `MACOS_RUNS_ON` runner
+variable in every macOS workflow (including `mobile-cd.yml`). Implemented
+last, after the module workstreams have merged.
 
 ## Goal
 
@@ -21,10 +22,9 @@ models only; every decision that the CLI or iOS could need lives in the package.
 
 - Editing summary, transcript or task text; custom templates; audio import UI.
 - App Sandbox, Mac App Store, Intel, macOS 14. Localised UI strings.
-- Hiding the Dock icon (`LSUIElement`). v1 is a regular app whose window can
-  be closed while the menu bar item stays.
-- Sparkle deltas, phased rollouts, channels, signed feeds; Homebrew cask;
-  release notes beyond the GitHub Release body.
+- Hiding the Dock icon (`LSUIElement`); v1 is a regular app whose window can
+  be closed while the menu bar item stays. Sparkle deltas, phased rollouts,
+  channels, signed feeds; Homebrew cask; release notes beyond the Release body.
 - Pixel design. Tokens are dark-first and mirror `mobile/global.css`
   (luminance ladder, alpha-veil surfaces, hairline borders, achromatic CTA).
 
@@ -72,14 +72,16 @@ models only; every decision that the CLI or iOS could need lives in the package.
   runner kinds; nothing release-related is pre-installed in the Forge runner
   account. The keychain is deleted in an `always()` step.
 - The LLM API key lives in the login keychain as a generic password (service
-  `uno.schmid.steno.mac`, account `llm-api-key`); settings keep only URL and
-  model. The CLI reads the same secret from an environment variable through
-  the `SecretStore` protocol requested below.
+  `uno.schmid.steno.mac`, account `llm-api-key`) behind StenoCore's
+  `SecretStore`; `Settings` keeps only URL, model and context tokens.
 - Calendar attendees are resolved at recording start: the app writes title
   and `Participant` rows from the matching EventKit event (overlapping now,
-  else the next within 15 minutes). The pipeline needs no calendar access.
+  else the next within 15 minutes). The pipeline needs no calendar access;
+  the calendar never starts a recording.
 - Detection prompt is a floating `NSPanel` (`.nonactivatingPanel`, `.floating`)
   that auto-dismisses after 60 s and never appears while recording.
+- Settings has seven tabs: General, Audio, Speech, LLM, Obsidian, Phones,
+  Updates. Default template lives in General, retention in Audio.
 
 ## Public API of the app target
 
@@ -108,19 +110,19 @@ protocol PermissionsChecking: Sendable {
 }
 protocol CalendarProviding: Sendable { func currentOrNextEvent(within: TimeInterval) async throws -> CalendarEvent?; func attendees(of: CalendarEvent) -> [Attendee] }
 protocol UpdaterControlling: AnyObject { var canCheckForUpdates: Bool { get }; var automaticallyChecks: Bool { get set }; func checkForUpdates() }
-struct KeychainSecretStore: SecretStore { }                    // Security framework, generic password
+struct KeychainSecretStore: SecretStore { }                    // Security framework, generic password; program's async secret(for:) / setSecret
 ```
 
 ## Window and view-model inventory
 
 | Scene | View model | State | Actions |
 |---|---|---|---|
-| `MenuBarExtra` (`.window` style; icon changes while recording) | `MenuBarViewModel` | `recording: .idle / .recording(since:, levels:) / .stopping`, `queue: [QueueItem(meeting, stage, progress)]`, `nextEvent: CalendarEvent?`, `launchAtLogin: LoginItemStatus` | `toggleRecording()`, `startInPerson()`, `openMeeting(id)`, `openMain()`, `openSettings()`, `setLaunchAtLogin(Bool)`, `checkForUpdates()`, `quit()` |
+| `MenuBarExtra` (`.window` style; icon changes while recording) | `MenuBarViewModel` | `recording: .idle / .recording(since:, levels:) / .stopping`, `queue: [QueueItem(meeting, stage, fraction)]` from `MeetingEvent.progress`, `launchAtLogin: LoginItemStatus` | `toggleRecording()`, `startInPerson()`, `openMeeting(id)`, `openMain()`, `openSettings()`, `setLaunchAtLogin(Bool)`, `checkForUpdates()`, `quit()` |
 | `Window("Steno", id: "main")`: sidebar list + detail | `MeetingListViewModel` | `meetings` (GRDB `ValueObservation`), `query` (FTS), `stateFilter`, `tagFilter`, `selection` | `select(id)`, `delete(id)` with confirmation, `revealAudio(id)` |
-| Detail with tabs Summary, Transcript, Tasks, Scratchpad | `MeetingDetailViewModel` | `meeting`, `segments`, `tasks`, `speakers`, `deliveries`, `templates`, `tab` | `setTags`, `setTemplate(id)` + `rerunSummary()`, `setKeepAudio(Bool)`, `reexport()`, `openSpeakerReview()`, `saveScratchpad(String)` debounced (requested change 2) |
-| Speaker review `.sheet` on detail | `SpeakerReviewViewModel` | `unresolved: [SpeakerCard(clipRange, suggestions: person / attendee / inferredName)]`, `playing: id?` | `play(id)` (AVAudioPlayer over `AudioAsset.url` bounded to `sampleClipRange`), `name(id, String)`, `assign(id, personID)`, `merge(a, b)`, `skip(id)`, `finish()` enrols and re-exports |
-| Detection prompt (floating `NSPanel`) | `DetectionPromptViewModel` | `trigger: .micOpened(bundleID:) / .calendarStart(event:)`, `countdown` | `start()`, `ignoreOnce()`, `ignoreApp()`, `dismiss()` |
-| `Settings` scene, one tab each | `GeneralSettingsViewModel` (launch at login, detection on/off, ignored apps), `AudioSettingsViewModel` (input device, recordings folder), `SpeechSettingsViewModel` (engine id, `ModelStore.ensure` progress), `LLMSettingsViewModel` (base URL, model, key in Keychain, `test()`), `TemplatesSettingsViewModel`, `RetentionSettingsViewModel`, `ObsidianSettingsViewModel` (`ObsidianSettings` fields, `validate()`), `PhonesSettingsViewModel` (paired devices, `startPairing()` QR, `forget(id)`), `UpdatesSettingsViewModel` | per tab | per tab |
+| Detail with tabs Summary, Transcript, Tasks, Scratchpad | `MeetingDetailViewModel` | `meeting`, `segments`, `tasks`, `speakers`, `deliveries`, `templates`, `tab` | `setTags`, `setTemplate(id)` + `rerunSummary()`, `setKeepAudio(Bool)`, `reexport()`, `openSpeakerReview()`, `saveScratchpad(String)` debounced (scratchpad is the one editable text, program clarification) |
+| Speaker review `.sheet` on detail | `SpeakerReviewViewModel` | `unresolved: [SpeakerCard(clipRange, suggestions: SpeakerMemory.rankedCandidates / attendee / SpeakerNameSuggestion)]`, `playing: id?` | `play(id)` (AVAudioPlayer over `AudioAsset.url` bounded to `sampleClipRange`), `name(id, String)`, `assign(id, personID)` via `MeetingStore.assign`, `mergeSpeakers(a, b)` via `MeetingStore.mergeSpeakers`, `mergePersons(a, b)` via `SpeakerMemory.merge`, `skip(id)`, `finish()` enrols and re-exports |
+| Detection prompt (floating `NSPanel`) | `DetectionPromptViewModel` | `trigger: .micOpened(bundleID:)`, `countdown` | `start()`, `dismiss()` |
+| `Settings` scene, one tab each | `GeneralSettingsViewModel` (launch at login, detection on/off, default template), `AudioSettingsViewModel` (input device, recordings folder, retention), `SpeechSettingsViewModel` (engine id, `ModelStore.ensure` progress), `LLMSettingsViewModel` (base URL, model, context tokens, key in Keychain, `test()`), `ObsidianSettingsViewModel` (`ObsidianSettings` fields, `validate()`), `PhonesSettingsViewModel` (paired devices, `startPairing()` QR, `forget(id)`), `UpdatesSettingsViewModel` | per tab | per tab |
 | Onboarding `Window(id: "onboarding")`, shown until required permissions are granted | `OnboardingViewModel` | steps microphone -> system audio -> calendar (optional) -> local network (optional, deferred to first pairing), each with `PermissionState` | `request(step)`, `openSystemSettings(step)`, `continue()` |
 | `commands`: `CommandGroup(after: .appInfo)` Check for Updates; `Record` menu with start/stop shortcut | | | |
 
@@ -145,7 +147,7 @@ apps/macos/Steno/Main/{MeetingListViewModel,MeetingListView,MeetingDetailViewMod
 apps/macos/Steno/Main/Tabs/{Summary,Transcript,Tasks,Scratchpad}Tab.swift   markdown via AttributedString, grouped segments, read-only tasks, TextEditor
 apps/macos/Steno/Speakers/{SpeakerReviewViewModel,SpeakerReviewSheet,ClipPlayer}.swift
 apps/macos/Steno/Detection/{DetectionPromptViewModel,DetectionPanel}.swift   NSPanel host + SwiftUI content
-apps/macos/Steno/Settings/<Tab>SettingsViewModel.swift, <Tab>SettingsView.swift   nine tabs listed above
+apps/macos/Steno/Settings/<Tab>SettingsViewModel.swift, <Tab>SettingsView.swift   seven tabs listed above
 apps/macos/Steno/Onboarding/{OnboardingViewModel,OnboardingView}.swift
 apps/macos/Steno/Services/LoginItemController.swift     SMAppService
 apps/macos/Steno/Services/PermissionsService.swift      AVCaptureDevice, EKEventStore, SystemAudioPermission, local network probe
@@ -159,6 +161,7 @@ apps/macos/scripts/{build-release,make-dmg,make-appcast}.sh   archive+export+ver
 apps/macos/README.md                           generate the project, sign locally, cut a release
 .github/workflows/release.yml                  tag-triggered release
 .github/workflows/swift-ci.yml                 modified: runner variable, app job
+.github/workflows/mobile-cd.yml                modified: runner variable only
 .gitignore                                     add apps/macos/*.xcodeproj, apps/macos/Config/Local.xcconfig, apps/macos/build/
 ```
 
@@ -180,8 +183,9 @@ Each step is at most one day and ends in a PR with a green CI run.
    Accept: `AppEnvironmentTests` builds both roots; `ThemeTokensTests` reads
    `mobile/global.css` and checks every token name has a Swift counterpart.
 3. Menu bar: start/stop, elapsed time, recording icon, queue rows from
-   pipeline events, launch at login via `LoginItemController` (register on
-   first launch, surface `.requiresApproval` with a System Settings link).
+   `MeetingEventBus` (`stateChanged`, `progress`), launch at login via
+   `LoginItemController` (register on first launch, surface
+   `.requiresApproval` with a System Settings link).
    Accept: state-transition and queue-ordering tests with fakes; manual: the
    item appears in System Settings > Login Items.
 4. Main window: list with FTS search and filters over `ValueObservation`,
@@ -190,37 +194,35 @@ Each step is at most one day and ends in a PR with a green CI run.
    Accept: list tests (filtering, selection survives update), detail tests
    (re-run calls pipeline with `.reexport`); UI smoke test passes.
 5. Speaker review sheet: bounded clip playback, name entry, suggestions from
-   `CosineSpeakerMemory.rankedCandidates`, calendar attendees and the
-   inferred name; merge; skip; finish enrols and re-exports. Opens when a
-   meeting turns `.ready` with unresolved speakers and the window is
-   frontmost, else a badge.
-   Accept: tests for merge, assign, skip (`personID` stays nil); manual: the
-   clip is audible.
+   `SpeakerMemory.rankedCandidates`, calendar attendees and
+   `SpeakerNameSuggestion`; in-meeting cluster merge and person merge as two
+   distinct actions; skip; finish enrols and re-exports. Opens on
+   `speakersNeedReview` when the window is frontmost, else a badge.
+   Accept: tests for both merges, assign, skip (`personID` stays nil);
+   manual: the clip is audible.
 6. Detection prompt: subscribe to `MeetingDetector.events`, resolve bundle id
-   to app name, show panel, start `.macCall`, per-app ignore list in
-   settings, suppressed while recording.
-   Accept: view-model tests (ignore list, countdown, suppression); manual:
+   to app name, show panel, start `.macCall`, suppressed while recording and
+   when `Settings.meetingDetectionEnabled` is off.
+   Accept: view-model tests (countdown, suppression, disabled); manual:
    opening FaceTime shows the panel within 2 s.
-7. Settings part one: General, Audio (device list, recordings folder via
-   `NSOpenPanel`), Speech (engine, `ModelStore.ensure` progress), LLM (URL,
-   model, key to Keychain, Test through `LanguageModel`).
+7. Settings part one: General (launch at login, detection, default
+   template), Audio (device list, recordings folder via `NSOpenPanel`,
+   retention), Speech (engine, `ModelStore.ensure` progress), LLM (URL,
+   model, context tokens, key to Keychain, Test through `LanguageModel`).
    Accept: `KeychainSecretStoreTests` round-trip on a throwaway account;
-   `LLMSettingsViewModelTests` against a stub `LanguageModel`.
-8. Settings part two: Templates, Retention, Obsidian (`ObsidianSettings`,
-   `Destination.validate`), Phones (paired list, pairing QR, forget),
-   Updates (auto-check bound to Sparkle, Check now).
-   Accept: Obsidian tests surface validation errors; Phones tests with a
-   fake handover.
+   `LLMSettingsViewModelTests` against `FakeLanguageModel`.
+8. Settings part two: Obsidian (`ObsidianSettings`, `Destination.validate`),
+   Phones (paired list, pairing QR, forget), Updates (auto-check bound to
+   Sparkle, Check now). Accept: Obsidian tests surface validation errors;
+   Phones tests with a fake handover.
 9. Onboarding and permissions: `PermissionsService`, ordered steps, deep
    links to the right panes; the system audio step runs
    `SystemAudioPermission.request()` and reports silence versus signal.
    Accept: onboarding tests (order, optional steps skippable, done only when
    required ones granted); manual on a fresh macOS user.
 10. Calendar: `CalendarService`; at recording start resolve the event, write
-    title and participants; menu bar shows the next event; detection prompt
-    offers "start for <event>" at event start.
-    Accept: tests with an injected event source (no EventKit in tests);
-    manual: a recorded test call carries the event title.
+    title and participants. Accept: tests with an injected event source (no
+    EventKit in tests); manual: a recorded test call carries title and attendees.
 11. Sparkle wiring: `UpdaterController`, Check for Updates command, updates
     settings, Debug `SUFeedURL` overridable from `Local.xcconfig`.
     Accept: a Debug build installs an update served by `python3 -m
@@ -228,13 +230,12 @@ Each step is at most one day and ends in a PR with a green CI run.
 12. Release workflow, dry run: `release.yml` on `workflow_dispatch` and `v*`
     tags; keychain import, xcodegen, `xcodebuild archive` with versions from
     the tag, `-exportArchive`, `codesign --verify --deep --strict`, zip as a
-    workflow artifact. Run once on GitHub-hosted and once on Forge.
-    Accept: both green; `codesign -dv --entitlements -` shows Developer ID,
-    hardened runtime, the two entitlements.
+    workflow artifact; once on GitHub-hosted, once on Forge. Accept: both
+    green; `codesign -dv --entitlements -` shows Developer ID, hardened
+    runtime, the two entitlements.
 13. Release workflow, full: DMG, notarise, staple, `spctl -a -t open
     --context context:primary-signature -v`, appcast, draft release, upload,
-    publish. Switch `swift-ci.yml` and `release.yml` to the runner variable.
-    Update `apps/macos/README.md`.
+    publish; every macOS workflow on the runner variable; `apps/macos/README.md`.
     Accept: `v0.9.0-rc.1` pre-release has DMG and appcast; a fresh Mac opens
     the DMG without a Gatekeeper warning.
 14. Release rehearsal: install `v0.9.0`, tag `v0.9.1`, confirm Sparkle
@@ -243,9 +244,10 @@ Each step is at most one day and ends in a PR with a green CI run.
 
 ## CI and release
 
-### `swift-ci.yml` changes
+### `swift-ci.yml` and `mobile-cd.yml` changes
 
-- Both jobs: `runs-on: ${{ fromJSON(vars.MACOS_RUNS_ON || '"macos-15"') }}`.
+- Every macOS job, including `mobile-cd.yml` (today hard-coded to
+  `[self-hosted, macOS, ARM64]`): `runs-on: ${{ fromJSON(vars.MACOS_RUNS_ON || '"macos-15"') }}`.
 - New `app` job, gated on `apps/macos/project.yml`, `needs: package`:
   checkout, setup-xcode `latest-stable`, `brew install xcodegen`, `xcodegen
   generate --spec apps/macos/project.yml`, `xcodebuild -project
@@ -307,10 +309,8 @@ Forge (per `agent-infra/runbooks/forge.md`):
   https://github.com/NicolaiSchmid/steno --token <token> --name
   forge-macos-steno --labels forge,macos,arm64,ios,xcode --unattended`, then
   `./svc.sh install && ./svc.sh start`.
-- `brew install xcodegen` (CI installs it too; pre-installing saves time).
-- Add `steno` to `hosts/atlas/forge-runner-watchdog.nix`, redeploy atlas.
-- No certificates or keys in the runner keychain; the workflow brings and
-  removes its own.
+- `brew install xcodegen`; add `steno` to `hosts/atlas/forge-runner-watchdog.nix`,
+  redeploy atlas. No certificates or keys in the runner keychain.
 
 CI does everything in `release.yml` on every tag. GitHub-hosted `macos-15` is
 the fallback, free on this public repository, roughly 3x slower than Forge.
@@ -318,10 +318,9 @@ the fallback, free on this public repository, roughly 3x slower than Forge.
 ## Tests
 
 Unit (`StenoTests`, XCTest, no network, no TCC): one class per view model
-using fakes for every protocol in the public API section plus `SpeechEngine`,
-`LanguageModel`, `Destination`, `DeliveryDispatcher`, `PipelineControlling`;
-`AppEnvironmentTests`; `KeychainSecretStoreTests` (unique account, deleted in
-tearDown); `ThemeTokensTests`.
+using StenoCore `Testing/` fakes for core protocols and app-local fakes for
+the protocols in the public API section; `AppEnvironmentTests`;
+`KeychainSecretStoreTests` (unique account, deleted in tearDown); `ThemeTokensTests`.
 
 UI smoke (`StenoUITests`): `LaunchSmokeTests.testMainWindowOpens` launches
 with `-steno-ui-testing` (preview environment, no permission requests),
@@ -355,7 +354,7 @@ the release PR:
 
 - S1 (before the `app` job becomes required): XCUITest launches on
   GitHub-hosted `macos-15` without the automation-mode timeout. If not, the
-  UI smoke test is Forge-only (requested change 7).
+  UI smoke test is Forge-only (program log 38).
 - S2 (before step 11): `generate_appcast --ed-key-file -` from the SPM
   artifacts path under `-derivedDataPath` produces an appcast that a Debug
   build accepts from a local HTTP server; confirms the artifacts path.
@@ -369,18 +368,19 @@ the release PR:
 
 ## Needs from other workstreams
 
-- StenoCore: `MeetingStore` with GRDB `ValueObservation` for meetings,
-  segments, tasks, speakers, deliveries; `SettingsStore` with typed keys for
-  every settings tab; `ProcessingPipeline` exposing `AsyncStream<PipelineEvent>`
-  plus `enqueue`, `rerunSummary(meetingID, templateID)`; `Template`
-  catalogue; FTS query; `SecretStore` and `mergeSpeakers` (requested below).
+- StenoCore: `MeetingStore.observeMeetings()`, `observeMeeting(id:)`,
+  `search`, `assign(speakerID:personID:)`, `mergeSpeakers`; `SettingsStore`
+  with the program's `Settings` fields; `ProcessingPipeline.process`,
+  `rerunSummary`, `redeliver`; `MeetingEventBus.subscribe()` with
+  `progress`, `meetingReady`, `speakersNeedReview`; `TemplateRegistry`;
+  `SecretStore`; `Testing/` fakes.
 - StenoAudio: `CaptureSession` (`start(meetingID:)`, `stop()`, `states`,
   `levels`), `MeetingDetector.events` with bundle id, `SystemAudioPermission`,
   an input-device list with change notifications.
 - StenoSpeech: `SpeechEngineFactory`, `ModelStore.ensure` progress,
-  `CosineSpeakerMemory.rankedCandidates` and `merge(_:into:)` for people.
-- StenoLLM: a `LanguageModel` factory from (baseURL, model, secret), a cheap
-  validation request for the Test button, inferred speaker names on `Speaker`.
+  `SpeakerMemory.rankedCandidates` and `merge(_:into:)` for people.
+- StenoLLM: `LLMEndpoint(settings:apiKey:)`, `OpenAICompatibleClient.probe()`
+  for the Test button, `SpeakerNameSuggestion` in `SummaryOutput`.
 - StenoAdapters: `DeliveryCoordinator.reexport(meetingID:destinationID:)`,
   `ObsidianSettings`, user-readable `ObsidianError` from `validate`.
 - StenoHandover: `HandoverControlling` (start/stop listener, `pairingPayload()`
@@ -389,10 +389,11 @@ the release PR:
 
 ## Requested changes to the program document
 
-1. Add `public protocol SecretStore: Sendable { func get(_ key: SecretKey) throws -> String?; func set(_ value: String?, for key: SecretKey) throws }` to StenoCore; the app implements it with the Keychain, the CLI with environment variables. Settings must not hold the API key.
-2. Scratchpad: the scope calls the four tabs "display only" and also defines Scratchpad as "free text typed by the user". This plan builds Scratchpad as an editable text area with debounced save and the other three tabs read-only. Confirm or strike the field.
-3. Add `mergeSpeakers(_:into:)` (two clusters inside one meeting: moves segments, averages embeddings, deletes the merged `Speaker`) to the StenoCore store API. This is distinct from the person merge the speech plan added to `CosineSpeakerMemory`.
-4. Make `ProcessingPipeline` observability explicit: `AsyncStream<PipelineEvent>` with queued, progress(stage, fraction), ready, failed. The menu bar queue and the detail footer depend on it.
-5. Record the macOS bundle id `uno.schmid.steno.mac` and team `KQB68F43PW` next to the mobile identifiers as immutable.
-6. `mobile-cd.yml` hard-codes `runs-on: [self-hosted, macOS, ARM64]`; switch it to `${{ fromJSON(vars.MACOS_RUNS_ON || '"macos-15"') }}` in the handover workstream so one variable governs every macOS job.
-7. Verification standard: if spike S1 fails, the UI smoke test is required only on the Forge runner and reported as skipped on GitHub-hosted runs.
+Reconciled into the program document, see its log (entries 32 to 38).
+
+## Deferred
+
+- Per-application ignore list for the detection prompt (start and dismiss only).
+- Calendar-triggered recording prompt and "next event" in the menu bar; the
+  calendar supplies titles and attendees only, per scope.
+- Separate Templates and Retention settings tabs (folded into General and Audio).

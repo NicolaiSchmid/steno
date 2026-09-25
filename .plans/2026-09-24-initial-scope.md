@@ -136,7 +136,10 @@ Meetings/
 ```
 - Slug: lowercase, umlauts transliterated, spaces to hyphens, max 60 chars.
 - Frontmatter: date, duration, participants, tags, source, template, language.
-- Tasks as `- [ ] text 📅 due ⏫ [[Assignee]]`.
+- Tasks as `- [ ] text 📅 due ⏫ [[Assignee]]`. Erratum 2026-09-25: the Tasks
+  plugin parses fields from the end of the line, so this order does not parse;
+  the implemented line is `- [ ] text [[Assignee]] ⏫ 📅 YYYY-MM-DD` (see
+  `2026-09-25-v1-program.md`, scope clarifications).
 - Optional per-person pages linking their meetings.
 - Re-export overwrites app-written files, never touches other files in the folder.
 - The app never runs git.
