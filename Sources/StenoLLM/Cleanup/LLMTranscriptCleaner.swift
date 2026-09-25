@@ -40,32 +40,18 @@ public struct LLMTranscriptCleaner: TranscriptCleaner, Sendable {
     let builder = CleanupPromptBuilder(maxOutputTokens: endpoint.maxOutputTokens)
     let limit = max(1, endpoint.maxConcurrentRequests)
 
-    var results = [Int: ChunkResult]()
-    try await withThrowingTaskGroup(of: (Int, ChunkResult).self) { group in
-      var pending = chunks.makeIterator()
-      func addNext() {
-        guard let chunk = pending.next() else { return }
-        group.addTask {
-          let result = try await self.cleanChunk(
-            chunk, language: input.language, glossary: glossary, labels: labels, builder: builder)
-          return (chunk.index, result)
-        }
-      }
-      for _ in 0..<limit { addNext() }
-      while let (index, result) = try await group.next() {
-        results[index] = result
-        addNext()
-      }
+    let results = try await mapBounded(chunks, limit: limit) { chunk in
+      try await self.cleanChunk(
+        chunk, language: input.language, glossary: glossary, labels: labels, builder: builder)
     }
 
     var segments = input.segments
     var offset = 0
     var failed: [Int] = []
     var usage = LLMUsage.zero
-    for chunk in chunks {
-      let result = results[chunk.index]
-      usage = usage + (result?.usage ?? .zero)
-      if let texts = result?.texts, texts.count == chunk.segments.count {
+    for (chunk, result) in zip(chunks, results) {
+      usage = usage + result.usage
+      if let texts = result.texts, texts.count == chunk.segments.count {
         for (position, text) in texts.enumerated() {
           segments[offset + position].text = text
         }

@@ -51,10 +51,52 @@ public struct LLMMeetingSummarizer: MeetingSummarizer, Sendable {
       request.maxTokens = reservedOutputTokens
       (draft, usage) = try await complete(AnalysisDraft.self, request, builder: builder)
     } else {
+      (draft, usage) = try await mapReduce(
+        input, builder: builder, budget: budget, transcriptTokens: transcriptTokens)
+    }
+    return Self.output(from: draft, input: input, language: language, usage: usage)
+  }
+
+  /// Estimated tokens one chunk's notes take in the reduce prompt; decides
+  /// up front whether two levels are enough.
+  public static let notesTokensPerChunk = 200
+
+  /// Notes per chunk (`maxConcurrentRequests` at a time), then one reduce
+  /// call over every chunk's notes. Two levels only: when the notes alone
+  /// would not fit the budget, `transcriptTooLong` is thrown before the
+  /// first call; when the real notes turn out too long, after the map.
+  func mapReduce(
+    _ input: SummaryInput, builder: SummaryPromptBuilder, budget: TokenBudget,
+    transcriptTokens: Int
+  ) async throws -> (AnalysisDraft, LLMUsage) {
+    let chunks = TranscriptChunker(budget: budget.inputBudget).chunk(
+      input.segments, language: input.meeting.language)
+    guard budget.fits(chunks.count * Self.notesTokensPerChunk) else {
       throw LLMError.transcriptTooLong(
         estimatedTokens: transcriptTokens, budget: budget.inputBudget)
     }
-    return Self.output(from: draft, input: input, language: language, usage: usage)
+    let notesTokens = min(reservedOutputTokens, 1_500)
+    let mapped = try await mapBounded(chunks, limit: max(1, endpoint.maxConcurrentRequests)) {
+      chunk -> (ChunkNotes, LLMUsage) in
+      var request = builder.buildMap(input, chunk: chunk, of: chunks.count)
+      request.maxTokens = notesTokens
+      var (notes, usage) = try await self.complete(
+        ChunkNotes.self, request, builder: builder, schema: builder.notesSchema,
+        schemaName: "chunk_notes")
+      notes.chunkIndex = chunk.index
+      return (notes, usage)
+    }
+    let notes = mapped.map(\.0)
+    var usage = mapped.map(\.1).reduce(LLMUsage.zero, +)
+    var reduce = builder.buildReduce(input, notes: notes)
+    reduce.maxTokens = reservedOutputTokens
+    let notesEstimate = TokenBudget.estimateTokens(reduce.messages[1].content, language: "en")
+    guard budget.fits(notesEstimate) else {
+      throw LLMError.transcriptTooLong(estimatedTokens: notesEstimate, budget: budget.inputBudget)
+    }
+    let (draft, reduceUsage) = try await complete(AnalysisDraft.self, reduce, builder: builder)
+    usage = usage + reduceUsage
+    return (draft, usage)
   }
 
   // MARK: Calls
