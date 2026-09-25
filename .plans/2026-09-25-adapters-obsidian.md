@@ -349,3 +349,60 @@ Reviewer trap: a changed golden in `snapshots/obsidian/` without a `VERSION` bum
   fixed `Meetings/<date>-<slug>`.
 - Per-destination re-export once a second destination exists.
 - Renaming the meeting folder when a summary re-run changes the title.
+
+## Deviations (implementation)
+
+Recorded 2026-09-25 while building the plan in `feat/adapters-obsidian`. Each line names what the
+code does differently from the text above and why; none widens the scope.
+
+- `Frontmatter.fields` is `[Frontmatter.Field]` (a struct with `key` and `value`) instead of a tuple
+  array, because tuples cannot be `Equatable`; the struct carries a `timeZone` for `.date` and
+  `.dateTime`, and `Value` gained `.tags([String])` so tags are emitted as sanitised plain scalars
+  (Obsidian's Tags type) while every other string stays double-quoted.
+- `ArtifactRenderer.render`, `renderFolderNote`, `renderTranscript` and `renderTasks` take an
+  optional `folderSlug`; the destination passes the pinned folder's basename on re-export so note
+  names and the info-line links follow the folder, not a changed title. `renderPersonPage(_:export:
+  options:folderSlug:)` renders a page from scratch; `renderPersonLine` is unchanged.
+- `ObsidianFolderDestination.init(settings:timeZone: = .current)` replaces `init(settings:
+  fileManager:)`: `FileManager` is not `Sendable` in Swift 6, and the time zone is the one input the
+  integration and end-to-end tests must pin. The sink stays the internal seam.
+- `Slug.title` strips diacritics by canonical decomposition and dropping combining marks (Unicode
+  data in the standard library) rather than `folding(options:locale:)`; same output, no locale API
+  in the path at all.
+- Under `## Summary` the folder note demotes core's section headings by one level (`###`), the
+  offset `SummaryMarkdown` explicitly leaves to adapters; "verbatim" would have left `## Summary`
+  an empty section followed by sibling `##` headings.
+- The audio copy is named after the mixdown's extension (`audio.m4a` for the AAC mixdown,
+  `audio.wav` for core's WAV decoder in the CLI and end-to-end tests) so the bytes and the name never
+  disagree.
+- A name is wikilinked only when it belongs to a `Person` (who has a page): participants without a
+  person, cluster labels and free-text assignees stay plain. An assignee the model named by cluster
+  label (`Speaker 1`) resolves through the speaker to its person, as `SummaryMarkdown` does for
+  summary text. The plan's `[[assigneeName]] if any` would have produced dangling links such as
+  `[[Speaker 1]]`.
+- `DeliveredFile.relativePath` is relative to the receipt's `root` (the vault), not to the meeting
+  folder, so person pages under `People/` sit in the same list as `Meetings/<folder>/meeting.json`.
+- On re-export a freshly rendered path that is not in the previous receipt and already exists on
+  disk is skipped and left out of the receipt ("files the app never wrote are never opened for
+  writing"); a path that is absent is written. `ObsidianDestinationIntegrationTests.
+  filesTheAppNeverWroteAreNotOpenedOnReexport` pins it.
+- When `MeetingStore.export` fails, `DeliveryCoordinator.deliverAll` returns one `.failed("export
+  failed: …")` row per configured destination (saved when the meeting row exists) instead of an
+  empty list, so the failure reaches `observeDeliveries`.
+- `steno deliver` gained `--vault`, `--people-folder`, `--include-audio` and `--task-tag` for a
+  one-off run that never touches the stored settings (the `process --audio-folder` precedent);
+  without `--vault` the stored `Settings.obsidian` decides and a missing one exits 2.
+  `Wiring.dependencies(store:settings:dispatcher:)` gained the optional `dispatcher` and defaults to
+  `DeliveryCoordinator`, so `steno process` delivers too when a vault is configured.
+- The transcript and tasks notes carry `title: "<title> — Transcript"` / `"<title> — Tasks"` and
+  start with an H1 of the same text; the plan only named the `title` key.
+- The frontmatter `participants` list is the participants in export order, then speakers that
+  resolved to nobody under their cluster label; names are deduplicated.
+- The Ruby YAML round trip runs under `#if os(macOS)` (Linux containers have no `/usr/bin/ruby`);
+  the byte assertions run everywhere.
+- `Tests/StenoEndToEndTests` compares the folder note, transcript, tasks, VTT and both person pages
+  with `snapshots/e2e/`; `meeting.json` is compared with a re-encode because it embeds the temp
+  paths and the retention stage sets `expiresAt` after delivery, which also means the receipt's
+  `meeting.json` hash legitimately changes on the redelivery the test performs.
+- Step 9 (`[manual]` check in a real vault with Tasks, Dataview and Folder Notes) was not run in
+  this PR; the unverified items in Research notes stay open for the app workstream's first vault.
