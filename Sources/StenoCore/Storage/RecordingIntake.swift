@@ -13,7 +13,9 @@ public struct RecordingIntake: HandoverIntake, Sendable {
   public var settings: SettingsStore
   public var enqueue: Enqueue
   public var now: @Sendable () -> Date
-  public var fileManager: FileManager
+  /// `FileManager` is not `Sendable` in Apple's Foundation although
+  /// `FileManager.default` is documented thread-safe; callers pass that one.
+  public nonisolated(unsafe) var fileManager: FileManager
 
   /// `enqueue` is `ProcessingPipeline.enqueue(_:asset:)` in the app and the
   /// CLI; tests pass a counting closure.

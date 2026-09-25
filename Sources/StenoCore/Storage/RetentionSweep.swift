@@ -7,7 +7,9 @@ import Foundation
 /// every processed meeting.
 public struct RetentionSweep: Sendable {
   public var store: MeetingStore
-  public var fileManager: FileManager
+  /// `FileManager` is not `Sendable` in Apple's Foundation although
+  /// `FileManager.default` is documented thread-safe; callers pass that one.
+  public nonisolated(unsafe) var fileManager: FileManager
 
   public init(store: MeetingStore, fileManager: FileManager = .default) {
     self.store = store
