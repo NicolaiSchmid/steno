@@ -79,7 +79,13 @@ let package = Package(
       exclude: linuxOnlyExclusions(["Support/PinnedTrustEvaluator.swift"])
     ),
     .testTarget(name: "stenoTests", dependencies: ["StenoCore"]),
-    .testTarget(name: "StenoEndToEndTests", dependencies: ["StenoCore"]),
+    .testTarget(
+      name: "StenoEndToEndTests",
+      dependencies: ["StenoCore", "StenoHandover"],
+      // The pinned handover client compiles the phone's evaluator (symlink);
+      // it needs CryptoKit and Security, absent on Linux.
+      exclude: linuxOnlyExclusions(["Support/PinnedTrustEvaluator.swift"])
+    ),
   ],
   swiftLanguageModes: [.v6]
 )
