@@ -11,6 +11,7 @@ import {
 import {
 	BACKOFF_CAP_MS,
 	backoffMs,
+	coordinatorStatus,
 	parseChunkTaskID,
 	planNext,
 	taskIDs,
@@ -169,6 +170,42 @@ describe("backoffMs", () => {
 	it("clamps a misbehaving RNG", () => {
 		expect(backoffMs(1, () => 7)).toBe(5_000);
 		expect(backoffMs(1, () => -1)).toBe(2_500);
+	});
+});
+
+describe("coordinatorStatus", () => {
+	const queued = addRecording(EMPTY_INDEX, rec("a", "x"));
+	const uploading = setState(queued, "a", "uploading");
+	const failed = setState(queued, "a", "failed");
+	const delivered = setState(uploading, "a", "delivered");
+
+	it("is unpaired without a pairing, whatever the queue holds", () => {
+		expect(coordinatorStatus(false, EMPTY_INDEX, false)).toBe("unpaired");
+		expect(coordinatorStatus(false, uploading, true)).toBe("unpaired");
+	});
+
+	it("is searching while work is pending and the Mac is not resolved", () => {
+		expect(coordinatorStatus(true, queued, false)).toBe("searching");
+		expect(coordinatorStatus(true, uploading, false)).toBe("searching");
+	});
+
+	it("names the dominant pending state once the Mac is reachable", () => {
+		expect(coordinatorStatus(true, queued, true)).toBe("queued");
+		expect(coordinatorStatus(true, uploading, true)).toBe("uploading");
+		const both = addRecording(uploading, rec("b", "y"));
+		expect(coordinatorStatus(true, both, true)).toBe("uploading");
+	});
+
+	it("shows failed only when nothing is pending, and idle otherwise", () => {
+		expect(coordinatorStatus(true, failed, true)).toBe("failed");
+		expect(coordinatorStatus(true, failed, false)).toBe("failed");
+		expect(
+			coordinatorStatus(true, addRecording(failed, rec("b", "y")), true),
+		).toBe("queued");
+		expect(coordinatorStatus(true, delivered, true)).toBe("idle");
+		expect(coordinatorStatus(true, EMPTY_INDEX, false)).toBe("idle");
+		const live = addRecording(EMPTY_INDEX, rec("r", "z"), "recording");
+		expect(coordinatorStatus(true, live, true)).toBe("idle");
 	});
 });
 

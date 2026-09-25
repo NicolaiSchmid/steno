@@ -1,8 +1,10 @@
 import {
 	chunkPlan,
+	isPending,
 	nextRetryAt,
 	nextUploadable,
 	type QueueIndex,
+	type SyncState,
 } from "@/features/queue/queue-index";
 
 /**
@@ -86,6 +88,24 @@ export function planNext(
 			: { kind: "complete", recordingID: rec.recordingID };
 	}
 	return { kind: "idle" };
+}
+
+/** What the status line shows; `SyncState` values name the dominant row. */
+export type CoordinatorStatus = SyncState | "searching" | "idle";
+
+export function coordinatorStatus(
+	paired: boolean,
+	index: QueueIndex,
+	reachable: boolean,
+): CoordinatorStatus {
+	if (!paired) return "unpaired";
+	const rows = index.recordings;
+	if (rows.some((r) => r.state === "uploading") && reachable) {
+		return "uploading";
+	}
+	if (rows.some(isPending)) return reachable ? "queued" : "searching";
+	if (rows.some((r) => r.state === "failed")) return "failed";
+	return "idle";
 }
 
 export const BACKOFF_BASE_MS = 5_000;

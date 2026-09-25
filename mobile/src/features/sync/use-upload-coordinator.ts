@@ -8,47 +8,33 @@ import {
 	useMacDiscovery,
 } from "@/features/discovery/use-mac-discovery";
 import { usePairing } from "@/features/pairing/PairingProvider";
-import { HandoverError } from "@/features/pairing/pairing-client";
 import { deviceIdentity } from "@/features/pairing/pairing-store";
 import { useQueue } from "@/features/queue/QueueProvider";
 import { queuedFile } from "@/features/queue/queue-files";
-import {
-	chunkPlan,
-	findRecording,
-	isPending,
-	markChunk,
-	resetForUpload,
-	type SyncState,
-	scheduleRetry,
-	setState,
-	syncChunks,
-	unpairPending,
-} from "@/features/queue/queue-index";
-import { errorMessage } from "@/lib/error-message";
+import { resetForUpload } from "@/features/queue/queue-index";
 import {
 	announce,
 	complete,
 	status as fetchStatus,
-	metadataFor,
 	type Session,
 	startChunkUpload,
 } from "./recording-client";
 import {
-	type Action,
-	backoffMs,
+	type CoordinatorStatus,
+	coordinatorStatus,
 	parseChunkTaskID,
 	planNext,
-	taskIDs,
 } from "./upload-coordinator";
+import { createUploadExecutor, type RecordingFiles } from "./upload-executor";
+
+export type { CoordinatorStatus } from "./upload-coordinator";
 
 /**
- * Executes the planner (plan P6): resolves the paired Mac when Bonjour sees
- * it, runs one action per tick, feeds results back into the queue, retries on
- * the backoff, reconciles with the background session after a relaunch, and
- * turns a 401 into `unpaired` for everything pending.
+ * Runs the planner (plan P6) over the real module, files and clock: resolves
+ * the paired Mac when Bonjour sees it, runs one action per tick through
+ * `upload-executor.ts`, retries on the backoff, reconciles with the
+ * background session after a relaunch, and turns a 401 into `unpaired`.
  */
-export type CoordinatorStatus = SyncState | "searching" | "idle";
-
 export type UploadCoordinator = {
 	status: CoordinatorStatus;
 	macName: string | null;
@@ -58,18 +44,37 @@ export type UploadCoordinator = {
 	retryNow(recordingID?: string): void;
 };
 
+const recordingFiles: RecordingFiles = {
+	exists: (fileName) => queuedFile(fileName).exists,
+	uri: (fileName) => queuedFile(fileName).uri,
+	remove: (fileName) => queuedFile(fileName).delete(),
+};
+
 export function useUploadCoordinator(): UploadCoordinator {
 	const { pairing, ready: pairingReady, clear: clearPairing } = usePairing();
 	const { index, ready: queueReady, update } = useQueue();
 	const discovery = useMacDiscovery(pairingReady && pairing !== null);
 	const [session, setSession] = useState<Session | null>(null);
 	const [progress, setProgress] = useState<Record<string, number>>({});
-	const inFlight = useRef(new Set<string>());
 	const ticking = useRef(false);
 	const rerun = useRef(false);
 	const waitTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 	const indexRef = useRef(index);
 	const sessionRef = useRef(session);
+
+	const executor = useMemo(
+		() =>
+			createUploadExecutor({
+				client: { announce, status: fetchStatus, complete, startChunkUpload },
+				files: recordingFiles,
+				deviceName: async () => (await deviceIdentity()).deviceName,
+				update,
+				onUnauthorized: clearPairing,
+				now: () => new Date(),
+				random: Math.random,
+			}),
+		[update, clearPairing],
+	);
 
 	const serviceName = pairing
 		? (findByMacID(discovery.services, pairing.mac.macID)?.name ?? null)
@@ -101,132 +106,6 @@ export function useUploadCoordinator(): UploadCoordinator {
 		};
 	}, [pairing, serviceName]);
 
-	const handleUnauthorized = useCallback(async () => {
-		await update(unpairPending);
-		await clearPairing();
-	}, [update, clearPairing]);
-
-	const fail = useCallback(
-		async (recordingID: string, error: unknown) => {
-			if (error instanceof HandoverError && error.kind === "unauthorized") {
-				await handleUnauthorized();
-				return;
-			}
-			await update((current) => {
-				const rec = findRecording(current, recordingID);
-				if (!rec || !isPending(rec)) return current;
-				return scheduleRetry(
-					current,
-					recordingID,
-					new Date(),
-					backoffMs(rec.attempts + 1, Math.random),
-					errorMessage(error),
-				);
-			});
-		},
-		[update, handleUnauthorized],
-	);
-
-	const execute = useCallback(
-		async (action: Action, active: Session) => {
-			switch (action.kind) {
-				case "announce": {
-					const rec = findRecording(indexRef.current, action.recordingID);
-					if (!rec) return;
-					const id = taskIDs.announce(rec.recordingID);
-					inFlight.current.add(id);
-					try {
-						if (!queuedFile(rec.fileName).exists) {
-							await update((current) =>
-								setState(current, rec.recordingID, "failed", {
-									lastError: "The recording file is missing",
-								}),
-							);
-							return;
-						}
-						const { deviceName } = await deviceIdentity();
-						const result = await announce(active, metadataFor(rec, deviceName));
-						await update((current) =>
-							setState(
-								syncChunks(current, rec.recordingID, result.receivedChunks),
-								rec.recordingID,
-								"uploading",
-								{ lastError: null },
-							),
-						);
-					} catch (error) {
-						await fail(rec.recordingID, error);
-					} finally {
-						inFlight.current.delete(id);
-					}
-					return;
-				}
-				case "upload-chunk": {
-					const rec = findRecording(indexRef.current, action.recordingID);
-					if (!rec) return;
-					const chunk = chunkPlan(rec.byteCount, rec.chunkSize)[action.chunk];
-					if (!chunk) return;
-					const id = taskIDs.chunk(rec.recordingID, action.chunk);
-					inFlight.current.add(id);
-					try {
-						await startChunkUpload(
-							active,
-							rec.recordingID,
-							chunk,
-							queuedFile(rec.fileName).uri,
-						);
-					} catch (error) {
-						inFlight.current.delete(id);
-						await fail(rec.recordingID, error);
-					}
-					return;
-				}
-				case "complete": {
-					const rec = findRecording(indexRef.current, action.recordingID);
-					if (!rec) return;
-					const id = taskIDs.complete(rec.recordingID);
-					inFlight.current.add(id);
-					try {
-						const result = await complete(active, rec.recordingID);
-						if (result.kind === "complete") {
-							await update((current) =>
-								setState(current, rec.recordingID, "delivered", {
-									meetingID: result.meetingID,
-									lastError: null,
-								}),
-							);
-							const file = queuedFile(rec.fileName);
-							if (file.exists) file.delete();
-						} else if (result.kind === "missing-chunks") {
-							const remote = await fetchStatus(active, rec.recordingID);
-							await update((current) =>
-								syncChunks(current, rec.recordingID, remote.receivedChunks),
-							);
-						} else {
-							await update((current) =>
-								setState(
-									syncChunks(current, rec.recordingID, []),
-									rec.recordingID,
-									"failed",
-									{ lastError: "The Mac received a damaged file" },
-								),
-							);
-						}
-					} catch (error) {
-						await fail(rec.recordingID, error);
-					} finally {
-						inFlight.current.delete(id);
-					}
-					return;
-				}
-				case "wait":
-				case "idle":
-					return;
-			}
-		},
-		[update, fail],
-	);
-
 	const tick = useCallback(() => {
 		if (!queueReady) return;
 		if (ticking.current) {
@@ -243,7 +122,7 @@ export function useUploadCoordinator(): UploadCoordinator {
 			const action = planNext(
 				indexRef.current,
 				active !== null,
-				inFlight.current,
+				executor.inFlight,
 				new Date(),
 			);
 			if (action.kind === "wait") {
@@ -255,7 +134,7 @@ export function useUploadCoordinator(): UploadCoordinator {
 				return;
 			}
 			if (action.kind === "idle" || !active) return;
-			await execute(action, active);
+			await executor.execute(action, active, indexRef.current);
 			rerun.current = true;
 		};
 		void run()
@@ -267,7 +146,7 @@ export function useUploadCoordinator(): UploadCoordinator {
 					tick();
 				}
 			});
-	}, [queueReady, execute]);
+	}, [queueReady, executor]);
 
 	// Publish the latest inputs to the tick loop and re-plan on every change.
 	useEffect(() => {
@@ -285,65 +164,24 @@ export function useUploadCoordinator(): UploadCoordinator {
 				if (!parsed) return;
 				setProgress((p) => ({ ...p, [parsed.recordingID]: bytesSent }));
 			}),
-			link.addListener("uploadFinished", ({ taskID, status }) => {
-				inFlight.current.delete(taskID);
-				const parsed = parseChunkTaskID(taskID);
-				if (!parsed) return;
-				const { recordingID, chunk } = parsed;
-				setProgress((p) => {
-					const { [recordingID]: _done, ...rest } = p;
-					return rest;
-				});
-				const apply = async () => {
-					if (status === 204 || status === 200) {
-						await update((current) =>
-							findRecording(current, recordingID)
-								? markChunk(current, recordingID, chunk)
-								: current,
-						);
-					} else if (status === 401) {
-						await handleUnauthorized();
-					} else if (status === 404) {
-						// The Mac lost the partial (restart, cleanup): announce again.
-						await update((current) => {
-							const rec = findRecording(current, recordingID);
-							if (rec?.state !== "uploading") return current;
-							return setState(
-								syncChunks(current, recordingID, []),
-								recordingID,
-								"queued",
-								{
-									lastError: "The Mac forgot the upload; starting over",
-								},
-							);
-						});
-					} else {
-						await fail(
-							recordingID,
-							new HandoverError(
-								"server",
-								status,
-								`Chunk ${chunk} was answered ${status}`,
-							),
-						);
-					}
-				};
-				void apply().finally(tick);
-			}),
-			link.addListener("uploadFailed", ({ taskID, message, retryable }) => {
-				inFlight.current.delete(taskID);
-				const parsed = parseChunkTaskID(taskID);
-				if (!parsed || !retryable) {
-					tick();
-					return;
+			link.addListener("uploadFinished", (event) => {
+				const parsed = parseChunkTaskID(event.taskID);
+				if (parsed) {
+					setProgress((p) => {
+						const { [parsed.recordingID]: _done, ...rest } = p;
+						return rest;
+					});
 				}
-				void fail(parsed.recordingID, new Error(message)).finally(tick);
+				void executor.uploadFinished(event).finally(tick);
+			}),
+			link.addListener("uploadFailed", (event) => {
+				void executor.uploadFailed(event).finally(tick);
 			}),
 		];
 		return () => {
 			for (const sub of subs) sub.remove();
 		};
-	}, [update, fail, handleUnauthorized, tick]);
+	}, [executor, tick]);
 
 	// After launch or foreground: remember what iOS kept running, refresh
 	// browsing, and re-plan. Chunks that finished while JS was dead are
@@ -352,7 +190,7 @@ export function useUploadCoordinator(): UploadCoordinator {
 		const reconcile = async () => {
 			try {
 				const pending = await stenoLink().pendingUploads();
-				for (const id of pending) inFlight.current.add(id);
+				for (const id of pending) executor.inFlight.add(id);
 			} catch (error) {
 				console.warn("[sync] pendingUploads failed", error);
 			}
@@ -366,49 +204,20 @@ export function useUploadCoordinator(): UploadCoordinator {
 			}
 		});
 		return () => sub.remove();
-	}, [tick]);
+	}, [executor, tick]);
 
 	// Chunks that the session reports as in flight but whose announce never
 	// happened in this JS lifetime still count; re-announcing is idempotent.
 	useEffect(() => {
 		if (!session) return;
 		let cancelled = false;
-		const refresh = async () => {
-			for (const rec of indexRef.current.recordings) {
-				if (rec.state !== "uploading" || cancelled) continue;
-				try {
-					const remote = await fetchStatus(session, rec.recordingID);
-					await update((current) =>
-						findRecording(current, rec.recordingID)?.state === "uploading"
-							? syncChunks(current, rec.recordingID, remote.receivedChunks)
-							: current,
-					);
-				} catch (error) {
-					if (error instanceof HandoverError && error.kind === "not-found") {
-						await update((current) =>
-							findRecording(current, rec.recordingID)?.state === "uploading"
-								? setState(
-										syncChunks(current, rec.recordingID, []),
-										rec.recordingID,
-										"queued",
-									)
-								: current,
-						);
-					} else if (
-						error instanceof HandoverError &&
-						error.kind === "unauthorized"
-					) {
-						await handleUnauthorized();
-						return;
-					}
-				}
-			}
-		};
-		void refresh().finally(tick);
+		void executor
+			.refreshUploading(session, indexRef.current, () => cancelled)
+			.finally(tick);
 		return () => {
 			cancelled = true;
 		};
-	}, [session, update, handleUnauthorized, tick]);
+	}, [session, executor, tick]);
 
 	const retryNow = useCallback(
 		(recordingID?: string) => {
@@ -432,15 +241,10 @@ export function useUploadCoordinator(): UploadCoordinator {
 		[update, tick],
 	);
 
-	const status = useMemo<CoordinatorStatus>(() => {
-		if (!pairing) return "unpaired";
-		const rows = index.recordings;
-		if (rows.some((r) => r.state === "uploading") && session)
-			return "uploading";
-		if (rows.some(isPending)) return session ? "queued" : "searching";
-		if (rows.some((r) => r.state === "failed")) return "failed";
-		return "idle";
-	}, [pairing, index, session]);
+	const status = useMemo(
+		() => coordinatorStatus(pairing !== null, index, session !== null),
+		[pairing, index, session],
+	);
 
 	return {
 		status,

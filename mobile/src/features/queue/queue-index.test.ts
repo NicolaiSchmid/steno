@@ -13,9 +13,12 @@ import {
 	type QueueIndex,
 	removeRecording,
 	resetForUpload,
+	SYNC_STATES,
+	type SyncState,
 	scheduleRetry,
 	setState,
 	syncChunks,
+	unpairPending,
 } from "./queue-index";
 
 const MiB = 1024 * 1024;
@@ -131,6 +134,114 @@ describe("state machine", () => {
 			/unknown recording nope/,
 		);
 		expect(() => removeRecording(queued, "nope")).toThrow(QueueError);
+	});
+});
+
+describe("every transition", () => {
+	/** The plan's state machine, written out independently of the code's table. */
+	const LEGAL: Record<SyncState, readonly SyncState[]> = {
+		recording: ["queued", "failed"],
+		queued: ["uploading", "unpaired", "failed"],
+		uploading: ["queued", "delivered", "failed", "unpaired"],
+		failed: ["queued"],
+		unpaired: ["queued"],
+		delivered: [],
+	};
+	/** A legal path from `recording` into every state. */
+	const PATHS: Record<SyncState, readonly SyncState[]> = {
+		recording: [],
+		queued: ["queued"],
+		uploading: ["queued", "uploading"],
+		delivered: ["queued", "uploading", "delivered"],
+		failed: ["queued", "failed"],
+		unpaired: ["queued", "unpaired"],
+	};
+
+	function inState(state: SyncState): QueueIndex {
+		return PATHS[state].reduce(
+			(index, next) => setState(index, "a", next),
+			addRecording(EMPTY_INDEX, rec("a", "x"), "recording"),
+		);
+	}
+
+	it("lists the six states once", () => {
+		expect([...SYNC_STATES].sort()).toEqual(Object.keys(LEGAL).sort());
+	});
+
+	for (const from of Object.keys(LEGAL) as SyncState[]) {
+		for (const to of Object.keys(LEGAL) as SyncState[]) {
+			const legal = from === to || LEGAL[from].includes(to);
+			it(`${from} -> ${to} is ${legal ? "allowed" : "rejected"}`, () => {
+				const index = inState(from);
+				expect(index.recordings[0]?.state).toBe(from);
+				if (legal) {
+					expect(setState(index, "a", to).recordings[0]?.state).toBe(to);
+				} else {
+					expect(() => setState(index, "a", to)).toThrow(
+						new RegExp(`illegal transition ${from} -> ${to}`),
+					);
+					// A rejected transition leaves the input untouched.
+					expect(index.recordings[0]?.state).toBe(from);
+				}
+			});
+		}
+	}
+
+	it("delivered is terminal for scheduleRetry and resetForUpload too", () => {
+		const delivered = inState("delivered");
+		expect(() => scheduleRetry(delivered, "a", now, 1, "x")).toThrow(
+			QueueError,
+		);
+		expect(() => resetForUpload(delivered, "a")).toThrow(QueueError);
+	});
+
+	it("scheduleRetry lands in queued from every state that may still upload", () => {
+		for (const from of [
+			"recording",
+			"queued",
+			"uploading",
+			"failed",
+			"unpaired",
+		] as const) {
+			expect(
+				scheduleRetry(inState(from), "a", now, 1, "x").recordings[0],
+			).toMatchObject({ state: "queued", attempts: 1, lastError: "x" });
+		}
+	});
+});
+
+describe("unpairPending", () => {
+	it("moves queued and uploading rows to unpaired and leaves the others alone", () => {
+		let index = addRecording(EMPTY_INDEX, rec("q", "1"));
+		index = addRecording(index, rec("u", "2"));
+		index = setState(index, "u", "uploading");
+		index = addRecording(index, rec("d", "3"));
+		index = setState(setState(index, "d", "uploading"), "d", "delivered");
+		index = addRecording(index, rec("f", "4"));
+		index = setState(index, "f", "failed");
+		index = addRecording(index, rec("r", "5"), "recording");
+
+		const states = Object.fromEntries(
+			unpairPending(index).recordings.map((r) => [r.recordingID, r.state]),
+		);
+		expect(states).toEqual({
+			q: "unpaired",
+			u: "unpaired",
+			d: "delivered",
+			f: "failed",
+			r: "recording",
+		});
+		expect(nextUploadable(unpairPending(index), now)).toBeNull();
+	});
+
+	it("returns the same index when nothing is pending", () => {
+		const idle = setState(
+			addRecording(EMPTY_INDEX, rec("f", "1")),
+			"f",
+			"failed",
+		);
+		expect(unpairPending(idle)).toBe(idle);
+		expect(unpairPending(EMPTY_INDEX)).toBe(EMPTY_INDEX);
 	});
 });
 
