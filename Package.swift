@@ -22,6 +22,7 @@ let package = Package(
   dependencies: [
     .package(url: "https://github.com/groue/GRDB.swift.git", from: "7.11.1"),
     .package(url: "https://github.com/apple/swift-argument-parser.git", from: "1.8.2"),
+    .package(url: "https://github.com/sbooth/CSpeex.git", from: "1.2.1"),
   ],
   targets: [
     .target(
@@ -29,7 +30,10 @@ let package = Package(
       dependencies: [.product(name: "GRDB", package: "GRDB.swift")],
       resources: [.copy("Resources/Templates")]
     ),
-    .target(name: "StenoAudio", dependencies: ["StenoCore"]),
+    .target(
+      name: "StenoAudio",
+      dependencies: ["StenoCore", .product(name: "speex", package: "CSpeex")]
+    ),
     .target(name: "StenoSpeech", dependencies: ["StenoCore"]),
     .target(name: "StenoLLM", dependencies: ["StenoCore"]),
     .target(name: "StenoAdapters", dependencies: ["StenoCore"]),
@@ -38,6 +42,7 @@ let package = Package(
       name: "steno",
       dependencies: [
         "StenoCore",
+        "StenoAudio",
         .product(name: "ArgumentParser", package: "swift-argument-parser"),
       ]
     ),

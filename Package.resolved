@@ -1,6 +1,15 @@
 {
-  "originHash" : "72519fb31fd86fa834d6511b0d83974f1a8d588d3aa62ae810c6fabc55a5a64e",
+  "originHash" : "86c90870bd89c1eec6870d0752a5e7c633f560b13e2a17d02a064b65ac407768",
   "pins" : [
+    {
+      "identity" : "cspeex",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/sbooth/CSpeex.git",
+      "state" : {
+        "revision" : "ba33fd93d54d8e7fc93b8a1d27991e756bac7345",
+        "version" : "1.2.1"
+      }
+    },
     {
       "identity" : "grdb.swift",
       "kind" : "remoteSourceControl",
