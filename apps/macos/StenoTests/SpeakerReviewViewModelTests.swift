@@ -43,7 +43,8 @@ final class SpeakerReviewViewModelTests: XCTestCase {
     let speakers = try await environment.store.speakers(meetingID: SampleData.meetingID)
     XCTAssertEqual(
       speakers.first { $0.id == SampleData.speakerTwoID }?.personID, SampleData.personJeromeID)
-    XCTAssertEqual(try await environment.store.persons().count, 2, "no third person")
+    let people = try await environment.store.persons()
+    XCTAssertEqual(people.count, 2, "no third person")
   }
 
   func testAcceptSuggestionConfirmsTheSuggestedPerson() async throws {
@@ -104,7 +105,8 @@ final class SpeakerReviewViewModelTests: XCTestCase {
     let model = try await makeModel(environment)
     await model.mergePersons(keep: SampleData.personNicolaiID, remove: SampleData.personJeromeID)
     XCTAssertNil(model.error, model.error ?? "")
-    XCTAssertEqual(try await environment.store.persons().map(\.id), [SampleData.personNicolaiID])
+    let remaining = try await environment.store.persons()
+    XCTAssertEqual(remaining.map(\.id), [SampleData.personNicolaiID])
     let speakers = try await environment.store.speakers(meetingID: SampleData.meetingID)
     XCTAssertEqual(
       speakers.first { $0.id == SampleData.speakerTwoID }?.personID, SampleData.personNicolaiID)
@@ -116,7 +118,8 @@ final class SpeakerReviewViewModelTests: XCTestCase {
     await model.mergeSpeakers(SampleData.speakerTwoID, into: SampleData.speakerTwoID)
     await model.mergePersons(keep: SampleData.personJeromeID, remove: SampleData.personJeromeID)
     XCTAssertEqual(model.allSpeakers.count, 2)
-    XCTAssertEqual(try await environment.store.persons().count, 2)
+    let people = try await environment.store.persons()
+    XCTAssertEqual(people.count, 2)
   }
 
   func testFinishRedeliversExactlyOnce() async throws {

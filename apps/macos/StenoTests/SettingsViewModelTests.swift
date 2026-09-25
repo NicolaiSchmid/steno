@@ -120,12 +120,14 @@ final class SettingsViewModelTests: XCTestCase {
     XCTAssertEqual(settings.llmBaseURL?.absoluteString, "http://127.0.0.1:1234/v1")
     XCTAssertEqual(settings.llmModel, "qwen")
     XCTAssertEqual(settings.llmContextTokens, 8000)
-    XCTAssertEqual(try await environment.secrets.secret(for: .llmAPIKey), "sk-test")
+    let savedKey = try await environment.secrets.secret(for: .llmAPIKey)
+    XCTAssertEqual(savedKey, "sk-test")
     XCTAssertFalse(before === environment.pipeline, "saving rebuilt the pipeline")
 
     model.apiKey = ""
     await model.save()
-    XCTAssertNil(try await environment.secrets.secret(for: .llmAPIKey), "an empty key removes it")
+    let clearedKey = try await environment.secrets.secret(for: .llmAPIKey)
+    XCTAssertNil(clearedKey, "an empty key removes it")
     XCTAssertFalse(model.savedKeyPresent)
   }
 
@@ -156,7 +158,8 @@ final class SettingsViewModelTests: XCTestCase {
     XCTAssertEqual(
       model.validationMessage, ObsidianError.vaultMissing("/definitely/not/a/vault").description)
     XCTAssertFalse(model.saved)
-    XCTAssertNil(try await environment.settings.load().obsidian)
+    let afterInvalid = try await environment.settings.load()
+    XCTAssertNil(afterInvalid.obsidian)
 
     let vault = FileManager.default.temporaryDirectory
       .appendingPathComponent("steno-vault-\(UUID().uuidString)", isDirectory: true)
@@ -182,7 +185,8 @@ final class SettingsViewModelTests: XCTestCase {
 
     model.enabled = false
     await model.save()
-    XCTAssertNil(try await environment.settings.load().obsidian)
+    let afterDisable = try await environment.settings.load()
+    XCTAssertNil(afterDisable.obsidian)
   }
 
   // MARK: Phones

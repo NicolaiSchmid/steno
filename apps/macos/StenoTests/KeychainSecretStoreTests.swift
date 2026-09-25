@@ -12,13 +12,17 @@ final class KeychainSecretStoreTests: XCTestCase {
     let key = SecretKey.llmAPIKey
     defer { Task { try? await store.setSecret(nil, for: key) } }
 
-    XCTAssertNil(try await store.secret(for: key))
+    let initial = try await store.secret(for: key)
+    XCTAssertNil(initial)
     try await store.setSecret("first", for: key)
-    XCTAssertEqual(try await store.secret(for: key), "first")
+    let first = try await store.secret(for: key)
+    XCTAssertEqual(first, "first")
     try await store.setSecret("second", for: key)
-    XCTAssertEqual(try await store.secret(for: key), "second", "update, not duplicate")
+    let second = try await store.secret(for: key)
+    XCTAssertEqual(second, "second", "update, not duplicate")
     try await store.setSecret(nil, for: key)
-    XCTAssertNil(try await store.secret(for: key))
+    let removed = try await store.secret(for: key)
+    XCTAssertNil(removed)
     try await store.setSecret(nil, for: key)
   }
 
@@ -29,6 +33,7 @@ final class KeychainSecretStoreTests: XCTestCase {
     let store = KeychainSecretStore(service: "uno.schmid.steno.mac.tests.\(UUID().uuidString)")
     try await store.setSecret("x", for: .llmAPIKey)
     try await store.setSecret("", for: .llmAPIKey)
-    XCTAssertNil(try await store.secret(for: .llmAPIKey))
+    let value = try await store.secret(for: .llmAPIKey)
+    XCTAssertNil(value)
   }
 }
