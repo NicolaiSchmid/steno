@@ -87,6 +87,9 @@ final class MenuBarViewModel {
     }
   }
 
+  /// The status line the menu bar item shows for the state.
+  var statusText: String { recording.label }
+
   var elapsed: TimeInterval? {
     if case .recording(let since) = recording { return environment.now().timeIntervalSince(since) }
     return nil
@@ -282,5 +285,16 @@ final class MenuBarViewModel {
       granted
       ? "System audio probe: the tap carried signal (permission granted)."
       : "System audio probe: the tap stayed silent (permission missing or denied)."
+  }
+}
+
+extension MenuBarViewModel.RecordingState {
+  var label: String {
+    switch self {
+    case .idle: "Not recording"
+    case .starting: "Starting…"
+    case .recording: "Recording"
+    case .stopping: "Finishing…"
+    }
   }
 }

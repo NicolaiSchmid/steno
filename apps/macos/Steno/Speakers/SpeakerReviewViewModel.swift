@@ -148,7 +148,10 @@ final class SpeakerReviewViewModel {
     await confirm(id, person: match.person)
   }
 
+  /// Only a speaker the sheet still shows can be confirmed: a second
+  /// confirmation of the same speaker would enrol the embedding twice.
   private func confirm(_ id: UUID, person: Person) async {
+    guard cards.contains(where: { $0.id == id }) else { return }
     do {
       try await store.confirm(speakerID: id, person: person, memory: memory)
       await reload()

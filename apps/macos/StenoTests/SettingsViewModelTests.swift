@@ -144,6 +144,71 @@ final class SettingsViewModelTests: XCTestCase {
     XCTAssertFalse(message.isEmpty)
   }
 
+  func testLLMKeyNeverLandsInSettingsOrARenderedString() async throws {
+    let key = "sk-live-9f8e7d6c5b4a-STENO-SECRET"
+    let environment = try await TestSupport.environment(seed: false)
+    let model = LLMSettingsViewModel(environment: environment)
+    await model.load()
+    model.baseURLText = "http://127.0.0.1:9/v1"
+    model.model = "qwen"
+    model.apiKey = key
+    await model.save()
+    XCTAssertNil(model.error, model.error ?? "")
+
+    // Settings: neither the encoded value nor a reflection carries the key.
+    let settings = try await environment.settings.load()
+    let encoded = String(decoding: try JSONEncoder().encode(settings), as: UTF8.self)
+    XCTAssertFalse(encoded.contains(key), "the key is not a Settings field")
+    XCTAssertFalse(String(reflecting: settings).contains(key))
+    XCTAssertFalse(encoded.contains("sk-"), encoded)
+    let stored = try await environment.secrets.secret(for: .llmAPIKey)
+    XCTAssertEqual(stored, key, "it lives in the secret store")
+
+    // Rendered strings: the Test button's failure text, the probe's error
+    // and everything the pane shows.
+    await model.test()
+    guard case .failure(let message)? = model.testResult else {
+      return XCTFail("port 9 does not answer")
+    }
+    XCTAssertFalse(message.isEmpty)
+    for text in [model.error, model.validationMessage, message].compactMap({ $0 }) {
+      XCTAssertFalse(text.contains(key), text)
+    }
+    do {
+      _ = try await LLMWiring.probe(settings: settings, apiKey: key)
+      XCTFail("port 9 does not answer")
+    } catch {
+      XCTAssertFalse(String(describing: error).contains(key))
+      XCTAssertFalse(String(reflecting: error).contains(key))
+      XCTAssertFalse(error.localizedDescription.contains(key))
+    }
+
+    // A second pane reads the key back from the secret store, not from Settings.
+    let reloaded = LLMSettingsViewModel(environment: environment)
+    await reloaded.load()
+    XCTAssertEqual(reloaded.apiKey, key)
+    XCTAssertTrue(reloaded.isConfigured)
+  }
+
+  func testLLMInvalidInputSavesNothing() async throws {
+    let environment = try await TestSupport.environment(seed: false)
+    let model = LLMSettingsViewModel(environment: environment)
+    await model.load()
+    let before = try await environment.settings.load()
+    let pipeline = environment.pipeline
+    model.baseURLText = "ftp://nope"
+    model.model = "m"
+    model.apiKey = "sk-should-not-be-stored"
+    await model.save()
+    XCTAssertEqual(model.error, model.validationMessage)
+    XCTAssertFalse(model.isConfigured)
+    let after = try await environment.settings.load()
+    XCTAssertEqual(after, before, "an invalid pane changes nothing")
+    let stored = try await environment.secrets.secret(for: .llmAPIKey)
+    XCTAssertNil(stored, "the key is not written either")
+    XCTAssertTrue(pipeline === environment.pipeline, "no pipeline reload")
+  }
+
   // MARK: Obsidian
 
   func testObsidianValidationSurfacesTheDestinationMessageVerbatim() async throws {
@@ -187,6 +252,30 @@ final class SettingsViewModelTests: XCTestCase {
     await model.save()
     let afterDisable = try await environment.settings.load()
     XCTAssertNil(afterDisable.obsidian)
+  }
+
+  func testObsidianDisabledSavesNilWithoutValidating() async throws {
+    let environment = try await TestSupport.environment(seed: false)
+    let vault = try TestSupport.temporaryDirectory("steno-vault")
+    defer { try? FileManager.default.removeItem(at: vault) }
+    try await environment.updateSettings {
+      $0.obsidian = ObsidianSettings(
+        vaultPath: vault.path, peopleFolder: "People", includeAudio: false, taskTag: nil)
+    }
+    let model = ObsidianSettingsViewModel(environment: environment)
+    await model.load()
+    XCTAssertTrue(model.enabled)
+    XCTAssertEqual(model.vaultPath, vault.path)
+    XCTAssertEqual(model.peopleFolder, "People")
+    XCTAssertEqual(model.draft?.peopleFolder, "People")
+
+    model.enabled = false
+    model.vaultPath = "/definitely/not/a/vault"
+    await model.save()
+    XCTAssertNil(model.validationMessage, "a disabled destination is not validated")
+    XCTAssertTrue(model.saved)
+    let after = try await environment.settings.load()
+    XCTAssertNil(after.obsidian)
   }
 
   // MARK: Phones

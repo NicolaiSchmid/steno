@@ -1,5 +1,6 @@
 import Foundation
 import Security
+import StenoAudio
 import StenoCore
 import StenoHandover
 import XCTest
@@ -13,9 +14,35 @@ enum TestSupport {
 
   @MainActor
   static func environment(
-    clock: ManualClock = ManualClock(), seed: Bool = true, handover: HandoverService? = nil
+    clock: ManualClock = ManualClock(), seed: Bool = true, handover: HandoverService? = nil,
+    makeCaptureSession: AppEnvironment.MakeCaptureSession? = nil,
+    processActivity: FakeProcessAudioActivity = FakeProcessAudioActivity()
   ) async throws -> AppEnvironment {
-    try await AppEnvironment.preview(clock: clock, now: { now }, handover: handover, seed: seed)
+    try await AppEnvironment.preview(
+      clock: clock, now: { now }, handover: handover, seed: seed,
+      makeCaptureSession: makeCaptureSession, processActivity: processActivity)
+  }
+
+  /// A capture session over the synthetic backend that reports device loss
+  /// after `loseDeviceAfter` seconds of audio (an unplugged microphone).
+  static func deviceLosingCaptureSession(after loseDeviceAfter: TimeInterval)
+    -> AppEnvironment.MakeCaptureSession
+  {
+    { configuration in
+      try CaptureSession(
+        configuration: configuration,
+        backend: SyntheticCaptureBackend(
+          lanes: configuration.lanes, tone: [.mic: 440, .system: 660, .mixed: 440],
+          seconds: 30, loseDeviceAfter: loseDeviceAfter))
+    }
+  }
+
+  /// A fresh directory under the temporary folder, removed by the caller.
+  static func temporaryDirectory(_ label: String) throws -> URL {
+    let url = FileManager.default.temporaryDirectory
+      .appendingPathComponent("\(label)-\(UUID().uuidString)", isDirectory: true)
+    try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
+    return url
   }
 
   /// `Tests/Fixtures/` from this file's location.
@@ -30,6 +57,13 @@ enum TestSupport {
 
   static var repositoryRoot: URL {
     fixtures.deletingLastPathComponent().deletingLastPathComponent()
+  }
+
+  /// `apps/macos/` from this file's location.
+  static var appRoot: URL {
+    URL(fileURLWithPath: #filePath)
+      .deletingLastPathComponent()  // StenoTests
+      .deletingLastPathComponent()  // macos
   }
 
   /// The committed test identity, imported to memory only (no keychain).

@@ -126,4 +126,80 @@ final class SpeakerReviewViewModelTests: XCTestCase {
     XCTAssertNotNil(model.error)
     XCTAssertNil(model.playing)
   }
+
+  func testCandidatesAreRankedBestFirst() async throws {
+    let environment = try await TestSupport.environment()
+    let model = try await makeModel(environment)
+    let card = try XCTUnwrap(model.unresolved.first)
+    // Speaker 2's embedding is the unit vector on axis 1, Jérôme's too;
+    // Nicolai's is orthogonal.
+    XCTAssertEqual(
+      card.candidates.map(\.person.id), [SampleData.personJeromeID, SampleData.personNicolaiID])
+    let similarities = card.candidates.map(\.similarity)
+    XCTAssertEqual(similarities, similarities.sorted(by: >), "best first")
+    XCTAssertEqual(similarities.first ?? 0, 1, accuracy: 0.001)
+    XCTAssertEqual(similarities.last ?? 1, 0, accuracy: 0.001)
+    XCTAssertEqual(
+      model.displayName(card.speaker), "Jérôme", "a suggested speaker reads as the person")
+  }
+
+  func testConfirmEnrolsExactlyOnceAndFinishNeverEnrols() async throws {
+    let environment = try await TestSupport.environment()
+    let model = try await makeModel(environment)
+    let before = try await environment.store.person(id: SampleData.personJeromeID)
+    XCTAssertEqual(before?.sampleCount, 1)
+
+    await model.acceptSuggestion(SampleData.speakerTwoID)
+    XCTAssertNil(model.error, model.error ?? "")
+    var jerome = try await environment.store.person(id: SampleData.personJeromeID)
+    XCTAssertEqual(jerome?.sampleCount, 2, "one confirm, one enrolment")
+
+    await model.acceptSuggestion(SampleData.speakerTwoID)
+    let person = try XCTUnwrap(jerome)
+    await model.assign(SampleData.speakerTwoID, person: person)
+    await model.name(SampleData.speakerTwoID, "Jérôme")
+    jerome = try await environment.store.person(id: SampleData.personJeromeID)
+    XCTAssertEqual(
+      jerome?.sampleCount, 2,
+      "a confirmed speaker has no card, so the sheet cannot confirm it again")
+    XCTAssertNil(model.error, model.error ?? "")
+
+    await model.finish()
+    await model.finish()
+    jerome = try await environment.store.person(id: SampleData.personJeromeID)
+    XCTAssertEqual(jerome?.sampleCount, 2, "finish re-exports, it does not enrol")
+    XCTAssertEqual(model.redeliveries, 1)
+  }
+
+  func testConfirmRemovesTheSampleClip() async throws {
+    let environment = try await TestSupport.environment()
+    let folder = try TestSupport.temporaryDirectory("steno-clips")
+    defer { try? FileManager.default.removeItem(at: folder) }
+    let clip = folder.appendingPathComponent("speaker-2.wav")
+    try Data("RIFF".utf8).write(to: clip)
+    var speaker = try XCTUnwrap(SampleData.speakers().first { $0.id == SampleData.speakerTwoID })
+    speaker.sampleClipURL = clip
+    try await environment.store.save(speaker)
+
+    let model = try await makeModel(environment)
+    XCTAssertEqual(model.unresolved.first?.clipURL, clip)
+    await model.name(SampleData.speakerTwoID, "Anna")
+    XCTAssertNil(model.error, model.error ?? "")
+    XCTAssertFalse(FileManager.default.fileExists(atPath: clip.path), "confirm deletes the clip")
+    let speakers = try await environment.store.speakers(meetingID: SampleData.meetingID)
+    XCTAssertNil(speakers.first { $0.id == SampleData.speakerTwoID }?.sampleClipURL)
+  }
+
+  func testBlankNamesAndUnknownSpeakersAreIgnored() async throws {
+    let environment = try await TestSupport.environment()
+    let model = try await makeModel(environment)
+    await model.name(SampleData.speakerTwoID, "   ")
+    XCTAssertFalse(model.isDone, "a blank name confirms nothing")
+    await model.acceptSuggestion(UUID())
+    await model.name(UUID(), "Ghost")
+    XCTAssertNil(model.error, "a speaker the sheet does not show is a no-op")
+    let people = try await environment.store.persons()
+    XCTAssertEqual(people.count, 2, "no person was created for it")
+    XCTAssertFalse(model.isDone)
+  }
 }

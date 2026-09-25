@@ -383,3 +383,14 @@ Recorded 2026-09-25 while implementing steps 1 to 13 in PR #75 (`feat/macos-app`
 - **`mobile-cd.yml`** also guards `setup-xcode` on `runner.environment == 'github-hosted'`, the same pattern as the other macOS jobs.
 - **Tests** are XCTest (`@MainActor` classes with async methods) in the hostless bundle; the handover test identity import is repeated in `TestSupport` because the app cannot import the handover test target. Timers run on `ManualClock`; store observations and pipeline runs are awaited with a bounded poll.
 - **Step 14 (release rehearsal)** and every `[manual]` check remain for a human on a Mac; none were run here.
+
+### Testing pass (2026-09-25, PR #75)
+
+Seams added so the behaviours above are proven through fakes, one line each:
+
+- **`AppEnvironment.preview(makeCaptureSession:processActivity:)`**: tests inject a `CaptureSession` factory (a synthetic backend with `loseDeviceAfter`, a throwing factory, a backend whose `start` refuses) and the `FakeProcessAudioActivity` the detector polls, so device loss, start failures and the detector's 2 s debounce run on `ManualClock` with no HAL.
+- **`TabText`** (`Main/Tabs/TabText.swift`): the four tabs as plain text lines, composed from the pieces the views lay out (`MarkdownBlocks`, `TranscriptTurns`, `MeetingExport.assigneeName(for:)`, `timestampText`, `PendingText.text`); `TabTextSnapshotTests` pins them for the fixture meeting under `Tests/Fixtures/snapshots/macos/` and asserts the strings the UI smoke test clicks for. `TasksTab` and `PendingText` call the shared helpers; pixels stay untested.
+- **`MenuBarViewModel.RecordingState.label`** replaces the view's private status switch so every state's text is asserted.
+- **`scripts/check-release-secrets.sh`** holds the secrets guard that was inline in `release.yml`; the workflow runs it right after checkout, and `ReleaseScriptsTests` runs it under `/bin/bash` for every missing-secret and dry-run combination, checks it stays ahead of every tool and build step, and greps `build-release.sh` for the `codesign` guards (the reviewer trap).
+
+Still `[manual]`: the ten checklist items, spikes S2 to S4, `KeychainSecretStoreTests` (`STENO_KEYCHAIN_TESTS`), the first-launch login item registration (`AppController` skips it in the preview environment), `ClipPlayer` audibility, `NSWorkspace` app-name resolution, the SwiftUI sheet and window plumbing beyond the one UI smoke test.

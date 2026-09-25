@@ -18,6 +18,7 @@ case-insensitive by default.
 | `snapshots/summary/` | `SummaryMarkdown.render` output for the sample export |
 | `snapshots/e2e/` | The files `StenoEndToEndTests` finds in its temp vault; each workstream that replaces a fake updates it in the same PR |
 | `snapshots/obsidian/` | One golden per adapter renderer output and variant; `VERSION` pins `ArtifactRenderer.version` to a SHA-256 over the goldens, so a golden change without a version bump fails `RendererVersionTests` |
+| `snapshots/macos/` | The macOS app's four detail tabs (Summary, Transcript, Tasks, Scratchpad) as text lines for the sample meeting, from `TabText` in `apps/macos`; checked by `TabTextSnapshotTests` in the app's hostless test bundle |
 | `snapshots/` (other) | Golden outputs of later workstreams' renderers |
 
 No real meeting audio, ever. Audio is generated: `steno dev fixtures generate

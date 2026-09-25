@@ -33,6 +33,11 @@ xcodebuild test  -project Steno.xcodeproj -scheme StenoTests -configuration Debu
 xcodebuild test  -project Steno.xcodeproj -scheme Steno -only-testing:StenoUITests ...
 ```
 
+xcodebuild does not hand its own environment to the test process; prefix a variable with
+`TEST_RUNNER_` to pass it through. `TEST_RUNNER_STENO_UPDATE_SNAPSHOTS=1 xcodebuild test …`
+rewrites the tab goldens under `Tests/Fixtures/snapshots/macos/`, and
+`TEST_RUNNER_STENO_KEYCHAIN_TESTS=1` runs the two login-keychain tests.
+
 Launch the app with `-steno-ui-testing` for the preview environment: in-memory database seeded
 with StenoCore's sample meeting, synthetic capture backend, fake engines, every permission
 granted, no Sparkle, no keychain.
@@ -81,7 +86,8 @@ account `llm-api-key`), the handover identity in the login keychain.
 
 `.github/workflows/release.yml` runs on every `v*` tag:
 
-1. `Check secrets` fails early with the missing names.
+1. `Check secrets` (`scripts/check-release-secrets.sh`, unit-tested in `ReleaseScriptsTests`)
+   fails early with the missing names; a dry run needs only the certificate pair.
 2. The Developer ID certificate is imported into a throwaway keychain.
 3. `scripts/build-release.sh <version> <build>` archives and exports with Developer ID and the
    hardened runtime, then verifies: `codesign --verify --deep --strict`, the Developer ID

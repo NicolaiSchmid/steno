@@ -14,18 +14,11 @@ struct TasksTab: View {
             meeting: model.meeting, none: "No tasks", pending: "Tasks appear after processing")
         }
         ForEach(tasks) { task in
-          TaskRow(task: task, assignee: assigneeName(task))
+          TaskRow(task: task, assignee: model.export?.assigneeName(for: task))
         }
       }
       .readingColumn()
     }
-  }
-
-  private func assigneeName(_ task: MeetingTask) -> String? {
-    if let personID = task.assigneePersonID, let person = model.export?.person(id: personID) {
-      return person.displayName
-    }
-    return task.assigneeName
   }
 }
 

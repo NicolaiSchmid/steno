@@ -134,9 +134,13 @@ struct PendingText: View {
   let pending: String
 
   var body: some View {
-    Text(meeting?.state == .ready ? none : pending)
+    Text(Self.text(meeting: meeting, none: none, pending: pending))
       .font(.steno(Theme.TextSize.sm, weight: .medium))
       .foregroundStyle(Color.stenoMutedForeground)
+  }
+
+  static func text(meeting: Meeting?, none: String, pending: String) -> String {
+    meeting?.state == .ready ? none : pending
   }
 }
 

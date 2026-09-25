@@ -209,12 +209,16 @@ final class AppEnvironment {
   /// synthetic capture backend, fake engines, `FakeModelDownloader`, a fake
   /// HAL source for the detector and the app-protocol fakes with every
   /// permission granted. No file outside a fresh temporary directory, no
-  /// network, no prompts. `handover` stays nil unless a test passes one.
+  /// network, no prompts. `handover` stays nil unless a test passes one;
+  /// tests that need a failing or device-losing capture pass
+  /// `makeCaptureSession`, and drive the detector through `processActivity`.
   static func preview(
     clock: any Clock<Duration> = ContinuousClock(),
     now: @escaping @Sendable () -> Date = Date.init,
     handover: HandoverService? = nil,
-    seed: Bool = true
+    seed: Bool = true,
+    makeCaptureSession: MakeCaptureSession? = nil,
+    processActivity: FakeProcessAudioActivity = FakeProcessAudioActivity()
   ) async throws -> AppEnvironment {
     let root = FileManager.default.temporaryDirectory
       .appendingPathComponent("steno-preview-\(UUID().uuidString)", isDirectory: true)
@@ -253,14 +257,14 @@ final class AppEnvironment {
       secrets: FileSecretStore(
         url: root.appendingPathComponent("secrets.json"), environment: [:]),
       events: events,
-      makeCaptureSession: { configuration in
+      makeCaptureSession: makeCaptureSession ?? { configuration in
         try CaptureSession(
           configuration: configuration,
           backend: SyntheticCaptureBackend(
             lanes: configuration.lanes, tone: [.mic: 440, .system: 660, .mixed: 440],
             seconds: 2))
       },
-      detector: MeetingDetector(source: FakeProcessAudioActivity(), clock: clock),
+      detector: MeetingDetector(source: processActivity, clock: clock),
       pipeline: pipeline,
       makeDependencies: makeDependencies,
       models: models,

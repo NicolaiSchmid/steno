@@ -42,7 +42,7 @@ struct MenuBarView: View {
         Circle()
           .fill(model.isRecording ? Color.stenoDestructive : Color.stenoGhost)
           .frame(width: 8, height: 8)
-        Text(statusText)
+        Text(model.statusText)
           .font(.steno(Theme.TextSize.sm, weight: .semibold))
           .foregroundStyle(Color.stenoStrong)
         Spacer()
@@ -74,15 +74,6 @@ struct MenuBarView: View {
           ProgressView().controlSize(.small)
         }
       }
-    }
-  }
-
-  private var statusText: String {
-    switch model.recording {
-    case .idle: "Not recording"
-    case .starting: "Starting…"
-    case .recording: "Recording"
-    case .stopping: "Finishing…"
     }
   }
 

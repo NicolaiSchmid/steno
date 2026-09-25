@@ -38,6 +38,13 @@ jobs:
     runs-on: ${{ fromJSON(vars.MACOS_RUNS_ON || '"macos-15"') }}
     timeout-minutes: 90
     steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # First thing after checkout, before any tool is installed or built:
+      # the guard names every missing secret. The script is unit-tested in
+      # StenoTests (ReleaseScriptsTests) against /bin/bash.
       - name: Check secrets
         env:
           P12: ${{ secrets.MACOS_CERTIFICATE_P12_BASE64 }}
@@ -47,25 +54,7 @@ jobs:
           ASC_PRIVATE_KEY: ${{ secrets.ASC_PRIVATE_KEY }}
           SPARKLE_PRIVATE_KEY: ${{ secrets.SPARKLE_PRIVATE_KEY }}
           DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run }}
-        run: |
-          missing=()
-          [ -n "$P12" ] || missing+=(MACOS_CERTIFICATE_P12_BASE64)
-          [ -n "$P12_PASSWORD" ] || missing+=(MACOS_CERTIFICATE_PASSWORD)
-          if [ "$DRY_RUN" != "true" ]; then
-            [ -n "$ASC_KEY_ID" ] || missing+=(ASC_KEY_ID)
-            [ -n "$ASC_ISSUER_ID" ] || missing+=(ASC_ISSUER_ID)
-            [ -n "$ASC_PRIVATE_KEY" ] || missing+=(ASC_PRIVATE_KEY)
-            [ -n "$SPARKLE_PRIVATE_KEY" ] || missing+=(SPARKLE_PRIVATE_KEY)
-          fi
-          if [ "${#missing[@]}" -gt 0 ]; then
-            echo "::error::missing repository secrets: ${missing[*]}. Create the Developer ID Application certificate, export it as .p12, base64-encode it into MACOS_CERTIFICATE_P12_BASE64 and put its password in MACOS_CERTIFICATE_PASSWORD (apps/macos/README.md, 'One-time setup')."
-            exit 1
-          fi
-          echo "all release secrets present (dry run: $DRY_RUN)"
-
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
+        run: apps/macos/scripts/check-release-secrets.sh
 
       - uses: maxim-lobanov/setup-xcode@v1
         if: runner.environment == 'github-hosted'
