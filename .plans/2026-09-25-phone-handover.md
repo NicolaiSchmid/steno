@@ -415,6 +415,15 @@ handover"). The Mac side is untouched. Each line names the deviation and the rea
   relative paths; vitest also includes `modules/**/*.test.ts`.
 - Delivered rows stay in the index (state `delivered`, `meetingID` set) after the file is deleted, so the list can show
   what arrived; the plan only required deleting the file.
+- Simplify pass on the same PR: `planNext(index, reachable: boolean, inFlight, now)` replaces `MacState` (the planner
+  never read `serviceName`); `macOrigin(resolved)` lives in `wire.ts` and is the one place that builds the origin;
+  `locateMac` returns `ResolvedMac`; `performPairing` returns `Pairing`; `unpairPending` and `SYNC_STATES` are
+  exported from `queue-index.ts`; the Bonjour registry exposes `found` / `lost` / `browserState` / `reset` methods
+  instead of an event union; `queue-files.ts` exposes `queuedFile(fileName): File` instead of four wrappers;
+  `RecoveryFiles` is `{ size, sha256 }` (size 0 when missing). `decodeRecordingMetadata`, `encodeJSON`,
+  `fingerprintsEqual` and `encodeBase64` were unused by the app and are gone. Native: one `StenoLinkError` enum
+  replaces `PinnedClientError` and `UploadSessionError`; `FileHashing.sha256(fileAt:)` lost its unused slice
+  parameters. No wire change.
 - Still to run on a device, as the plan tags them `[manual]`: P1 (prompt once, `policyDenied`), P2 (locked-phone
   upload, wrong fingerprint sends no body, `pendingUploads()` after relaunch), P3 (60-minute locked recording, call
   interruption), P5 and P6 end to end against M6. Spikes S2, S3 and S4 are unchanged and unverified.

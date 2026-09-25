@@ -6,25 +6,12 @@ import {
 	decodeCompleteResponse,
 	decodeHello,
 	decodePairResponse,
-	decodeRecordingMetadata,
 	decodeRecordingStatus,
-	encodeJSON,
+	macOrigin,
 	PROTOCOL_VERSION,
 	paths,
-	type RecordingMetadata,
 	SERVICE_TYPE,
 } from "./wire";
-
-const metadata: RecordingMetadata = {
-	recordingID: "0f8fad5b-d9cb-469f-a165-70867728950e",
-	startedAt: "2026-09-25T09:30:00.000Z",
-	durationSeconds: 3600.25,
-	byteCount: 29_000_000,
-	sha256: "47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU=",
-	chunkSize: 16 * 1024 * 1024,
-	format: "m4aAAC",
-	deviceName: "Nicolai's iPhone",
-};
 
 describe("wire constants", () => {
 	it("pins protocol v1 and the service type", () => {
@@ -34,12 +21,24 @@ describe("wire constants", () => {
 	});
 
 	it("builds the v1 paths and escapes the recording id", () => {
-		expect(paths.hello()).toBe("/v1/hello");
-		expect(paths.pair()).toBe("/v1/pair");
-		expect(paths.pairing()).toBe("/v1/pairing");
+		expect(paths.hello).toBe("/v1/hello");
+		expect(paths.pair).toBe("/v1/pair");
+		expect(paths.pairing).toBe("/v1/pairing");
 		expect(paths.recording("a b")).toBe("/v1/recordings/a%20b");
 		expect(paths.chunk("id", 3)).toBe("/v1/recordings/id/chunks/3");
 		expect(paths.complete("id")).toBe("/v1/recordings/id/complete");
+	});
+
+	it("builds the origin from IPv4, bracketed IPv6 and .local hosts as-is", () => {
+		expect(macOrigin({ host: "192.168.1.20", port: 51234 })).toBe(
+			"https://192.168.1.20:51234",
+		);
+		expect(macOrigin({ host: "[fe80::1]", port: 1 })).toBe(
+			"https://[fe80::1]:1",
+		);
+		expect(macOrigin({ host: "studio.local", port: 8 })).toBe(
+			"https://studio.local:8",
+		);
 	});
 
 	it("formats the two authorization schemes", () => {
@@ -52,67 +51,34 @@ describe("wire constants", () => {
 	});
 });
 
-describe("RecordingMetadata", () => {
-	it("round-trips with the Swift key names in order", () => {
-		const text = encodeJSON(metadata);
-		expect(Object.keys(JSON.parse(text))).toEqual([
-			"recordingID",
-			"startedAt",
-			"durationSeconds",
-			"byteCount",
-			"sha256",
-			"chunkSize",
-			"format",
-			"deviceName",
-		]);
-		expect(decodeRecordingMetadata(text)).toEqual({
-			ok: true,
-			value: metadata,
-		});
-	});
-
-	it("rejects a missing field, a wrong type and an unknown format", () => {
-		const { deviceName: _dropped, ...withoutDevice } = metadata;
-		expect(decodeRecordingMetadata(encodeJSON(withoutDevice))).toEqual({
-			ok: false,
-			reason: "deviceName must be a string",
-		});
-		expect(
-			decodeRecordingMetadata(encodeJSON({ ...metadata, byteCount: "29" })),
-		).toEqual({ ok: false, reason: "byteCount must be a number" });
-		expect(
-			decodeRecordingMetadata(encodeJSON({ ...metadata, format: "mp3" })),
-		).toEqual({ ok: false, reason: "unknown format mp3" });
-	});
-
-	it("rejects non-JSON and non-object bodies", () => {
-		expect(decodeRecordingMetadata("{")).toEqual({
-			ok: false,
-			reason: "invalid JSON",
-		});
-		expect(decodeRecordingMetadata("[]")).toEqual({
-			ok: false,
-			reason: "not an object",
-		});
-		expect(decodeRecordingMetadata("null")).toEqual({
-			ok: false,
-			reason: "not an object",
-		});
-	});
-});
-
 describe("responses", () => {
-	it("decodes hello", () => {
+	it("decodes hello and rejects a missing field or a wrong type", () => {
 		expect(decodeHello('{"macID":"m","protocol":1}')).toEqual({
 			ok: true,
 			value: { macID: "m", protocol: 1 },
 		});
-		expect(decodeHello('{"macID":"m"}').ok).toBe(false);
+		expect(decodeHello('{"macID":"m"}')).toEqual({
+			ok: false,
+			reason: "protocol must be a number",
+		});
+		expect(decodeHello('{"macID":1,"protocol":1}')).toEqual({
+			ok: false,
+			reason: "macID must be a string",
+		});
+	});
+
+	it("rejects non-JSON and non-object bodies", () => {
+		expect(decodeHello("{")).toEqual({ ok: false, reason: "invalid JSON" });
+		expect(decodeHello("[]")).toEqual({ ok: false, reason: "not an object" });
+		expect(decodeHello("null")).toEqual({ ok: false, reason: "not an object" });
 	});
 
 	it("decodes the pair response", () => {
 		const value = { token: "t", macID: "m", macName: "Mac" };
-		expect(decodePairResponse(encodeJSON(value))).toEqual({ ok: true, value });
+		expect(decodePairResponse(JSON.stringify(value))).toEqual({
+			ok: true,
+			value,
+		});
 		expect(decodePairResponse('{"token":1}').ok).toBe(false);
 	});
 

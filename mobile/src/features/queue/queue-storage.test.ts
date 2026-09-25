@@ -62,8 +62,11 @@ describe("createQueueStorage", () => {
 	it("returns the empty index when nothing was saved", async () => {
 		const files = memoryFiles();
 		const storage = createQueueStorage(files.api, "file:///docs/queue/");
-		expect(storage.indexPath).toBe("file:///docs/queue/index.json");
 		expect(await storage.load()).toEqual(EMPTY_INDEX);
+		expect(files.calls).toEqual([
+			"read file:///docs/queue/index.json",
+			"read file:///docs/queue/index.json.tmp",
+		]);
 	});
 
 	it("writes through a temp file and renames it over the index", async () => {

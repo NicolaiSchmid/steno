@@ -152,3 +152,18 @@ struct UploadSpecRecord: Record {
 func StenoLinkException(_ code: String, _ message: String) -> Exception {
   Exception(name: code, description: message, code: code)
 }
+
+/// Input errors shared by `PinnedClient` and `UploadSession`.
+enum StenoLinkError: LocalizedError {
+  case badURL(String)
+  case badFingerprint
+  case notHTTP
+
+  var errorDescription: String? {
+    switch self {
+    case .badURL(let url): return "Not a URL: \(url)"
+    case .badFingerprint: return "Fingerprint must be 32 bytes of standard base64"
+    case .notHTTP: return "Response was not HTTP"
+    }
+  }
+}

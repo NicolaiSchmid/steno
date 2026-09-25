@@ -17,11 +17,8 @@ export function compareVersions(a: string, b: string): number {
 	return 0;
 }
 
-export function isSupportedIOS(
-	version: string | number,
-	minimum: string = MINIMUM_IOS_VERSION,
-): boolean {
+export function isSupportedIOS(version: string | number): boolean {
 	const text = String(version).trim();
 	if (!/^\d+(\.\d+)*$/.test(text)) return false;
-	return compareVersions(text, minimum) >= 0;
+	return compareVersions(text, MINIMUM_IOS_VERSION) >= 0;
 }

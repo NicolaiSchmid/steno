@@ -18,8 +18,6 @@ import {
 
 const MiB = 1024 * 1024;
 const now = new Date("2026-09-25T10:00:00.000Z");
-const reachable = { reachable: true, serviceName: "Studio" };
-const away = { reachable: false, serviceName: null };
 
 function rec(id: string, startedAt: string, byteCount = 3 * MiB): NewRecording {
 	return {
@@ -36,11 +34,11 @@ function rec(id: string, startedAt: string, byteCount = 3 * MiB): NewRecording {
 describe("planNext", () => {
 	it("does nothing while the Mac is unreachable, even with work queued", () => {
 		const index = addRecording(EMPTY_INDEX, rec("a", "x"));
-		expect(planNext(index, away, new Set(), now)).toEqual({ kind: "idle" });
+		expect(planNext(index, false, new Set(), now)).toEqual({ kind: "idle" });
 	});
 
 	it("is idle for an empty queue and waits for the next retry otherwise", () => {
-		expect(planNext(EMPTY_INDEX, reachable, new Set(), now)).toEqual({
+		expect(planNext(EMPTY_INDEX, true, new Set(), now)).toEqual({
 			kind: "idle",
 		});
 		const backedOff = scheduleRetry(
@@ -50,7 +48,7 @@ describe("planNext", () => {
 			30_000,
 			"timeout",
 		);
-		expect(planNext(backedOff, reachable, new Set(), now)).toEqual({
+		expect(planNext(backedOff, true, new Set(), now)).toEqual({
 			kind: "wait",
 			until: "2026-09-25T10:00:30.000Z",
 		});
@@ -58,18 +56,18 @@ describe("planNext", () => {
 
 	it("announces before any chunk, once", () => {
 		const index = addRecording(EMPTY_INDEX, rec("a", "x"));
-		expect(planNext(index, reachable, new Set(), now)).toEqual({
+		expect(planNext(index, true, new Set(), now)).toEqual({
 			kind: "announce",
 			recordingID: "a",
 		});
 		expect(
-			planNext(index, reachable, new Set([taskIDs.announce("a")]), now),
+			planNext(index, true, new Set([taskIDs.announce("a")]), now),
 		).toEqual({ kind: "idle" });
 	});
 
 	it("skips a recording that has no hash yet", () => {
 		const index = addRecording(EMPTY_INDEX, { ...rec("a", "x"), sha256: null });
-		expect(planNext(index, reachable, new Set(), now)).toEqual({
+		expect(planNext(index, true, new Set(), now)).toEqual({
 			kind: "idle",
 		});
 	});
@@ -80,19 +78,19 @@ describe("planNext", () => {
 			"a",
 			"uploading",
 		);
-		expect(planNext(index, reachable, new Set(), now)).toEqual({
+		expect(planNext(index, true, new Set(), now)).toEqual({
 			kind: "upload-chunk",
 			recordingID: "a",
 			chunk: 0,
 		});
 		const one = new Set([taskIDs.chunk("a", 0)]);
-		expect(planNext(index, reachable, one, now)).toEqual({
+		expect(planNext(index, true, one, now)).toEqual({
 			kind: "upload-chunk",
 			recordingID: "a",
 			chunk: 1,
 		});
 		const two = new Set([taskIDs.chunk("a", 0), taskIDs.chunk("a", 1)]);
-		expect(planNext(index, reachable, two, now)).toEqual({ kind: "idle" });
+		expect(planNext(index, true, two, now)).toEqual({ kind: "idle" });
 	});
 
 	it("resumes from the Mac's chunk set and completes only when nothing is left or in flight", () => {
@@ -102,23 +100,23 @@ describe("planNext", () => {
 			"uploading",
 		);
 		index = markChunk(markChunk(index, "a", 0), "a", 2);
-		expect(planNext(index, reachable, new Set(), now)).toEqual({
+		expect(planNext(index, true, new Set(), now)).toEqual({
 			kind: "upload-chunk",
 			recordingID: "a",
 			chunk: 1,
 		});
 		expect(
-			planNext(index, reachable, new Set([taskIDs.chunk("a", 1)]), now),
+			planNext(index, true, new Set([taskIDs.chunk("a", 1)]), now),
 		).toEqual({
 			kind: "idle",
 		});
 		index = markChunk(index, "a", 1);
-		expect(planNext(index, reachable, new Set(), now)).toEqual({
+		expect(planNext(index, true, new Set(), now)).toEqual({
 			kind: "complete",
 			recordingID: "a",
 		});
 		expect(
-			planNext(index, reachable, new Set([taskIDs.complete("a")]), now),
+			planNext(index, true, new Set([taskIDs.complete("a")]), now),
 		).toEqual({
 			kind: "idle",
 		});
@@ -132,8 +130,8 @@ describe("planNext", () => {
 		index = addRecording(index, rec("old", "2026-09-25T08:00:00.000Z"));
 		index = setState(index, "old", "uploading");
 		const busy = new Set([taskIDs.chunk("old", 0), taskIDs.chunk("old", 1)]);
-		expect(planNext(index, reachable, busy, now)).toEqual({ kind: "idle" });
-		expect(planNext(index, reachable, new Set(), now)).toMatchObject({
+		expect(planNext(index, true, busy, now)).toEqual({ kind: "idle" });
+		expect(planNext(index, true, new Set(), now)).toMatchObject({
 			recordingID: "old",
 		});
 	});
@@ -141,12 +139,12 @@ describe("planNext", () => {
 	it("treats a delivered or failed recording as done", () => {
 		let index = addRecording(EMPTY_INDEX, rec("a", "x"));
 		index = setState(setState(index, "a", "uploading"), "a", "delivered");
-		expect(planNext(index, reachable, new Set(), now)).toEqual({
+		expect(planNext(index, true, new Set(), now)).toEqual({
 			kind: "idle",
 		});
 		let failed = addRecording(EMPTY_INDEX, rec("b", "x"));
 		failed = setState(failed, "b", "failed");
-		expect(planNext(failed, reachable, new Set(), now)).toEqual({
+		expect(planNext(failed, true, new Set(), now)).toEqual({
 			kind: "idle",
 		});
 	});

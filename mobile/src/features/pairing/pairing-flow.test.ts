@@ -50,7 +50,6 @@ describe("performPairing", () => {
 			deviceName: "iPhone",
 		});
 		expect(outcome).toEqual({
-			origin: "https://192.168.1.20:51234",
 			token: "tok",
 			mac: {
 				macID: payload.macID,
@@ -63,8 +62,11 @@ describe("performPairing", () => {
 
 	it("brackets IPv6 hosts as returned by the module", async () => {
 		const d = deps({ locate: async () => ({ host: "[fe80::1]", port: 1 }) });
-		const outcome = await performPairing(payload, d);
-		expect(outcome.origin).toBe("https://[fe80::1]:1");
+		await performPairing(payload, d);
+		expect(d.hello).toHaveBeenCalledWith({
+			origin: "https://[fe80::1]:1",
+			fingerprint: payload.fingerprint,
+		});
 	});
 
 	it("stops before spending the secret when hello names another Mac", async () => {

@@ -40,11 +40,11 @@ enum PinnedClient {
 
   static func perform(_ request: Request, completion: @escaping (Result<Response, Error>) -> Void) {
     guard let url = URL(string: request.url) else {
-      completion(.failure(PinnedClientError.badURL(request.url)))
+      completion(.failure(StenoLinkError.badURL(request.url)))
       return
     }
     guard let fingerprint = Data(base64Encoded: request.fingerprint), fingerprint.count == 32 else {
-      completion(.failure(PinnedClientError.badFingerprint))
+      completion(.failure(StenoLinkError.badFingerprint))
       return
     }
 
@@ -77,7 +77,7 @@ enum PinnedClient {
         return
       }
       guard let http = response as? HTTPURLResponse else {
-        completion(.failure(PinnedClientError.notHTTP))
+        completion(.failure(StenoLinkError.notHTTP))
         return
       }
       var headers: [String: String] = [:]
@@ -90,19 +90,5 @@ enum PinnedClient {
       completion(.success(Response(status: http.statusCode, headers: headers, body: body)))
     }
     task.resume()
-  }
-}
-
-enum PinnedClientError: LocalizedError {
-  case badURL(String)
-  case badFingerprint
-  case notHTTP
-
-  var errorDescription: String? {
-    switch self {
-    case .badURL(let url): return "Not a URL: \(url)"
-    case .badFingerprint: return "Fingerprint must be 32 bytes of standard base64"
-    case .notHTTP: return "Response was not HTTP"
-    }
   }
 }

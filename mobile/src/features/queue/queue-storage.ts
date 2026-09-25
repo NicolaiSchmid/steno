@@ -3,6 +3,7 @@ import {
 	type QueuedRecording,
 	QueueError,
 	type QueueIndex,
+	SYNC_STATES,
 	type SyncState,
 } from "./queue-index";
 
@@ -23,24 +24,10 @@ export type QueueFileAPI = {
 	remove(path: string): Promise<void>;
 };
 
-export const QUEUE_INDEX_FILE = "index.json";
-export const QUEUE_INDEX_TEMP_FILE = "index.json.tmp";
-export const QUEUE_INDEX_CORRUPT_FILE = "index.corrupt.json";
-
 export type QueueStorage = {
-	readonly indexPath: string;
 	load(): Promise<QueueIndex>;
 	save(index: QueueIndex): Promise<void>;
 };
-
-const SYNC_STATES: readonly SyncState[] = [
-	"recording",
-	"queued",
-	"uploading",
-	"delivered",
-	"failed",
-	"unpaired",
-];
 
 function isString(v: unknown): v is string {
 	return typeof v === "string";
@@ -129,13 +116,11 @@ export function createQueueStorage(
 	directory: string,
 	log: (message: string) => void = () => {},
 ): QueueStorage {
-	const indexPath = join(directory, QUEUE_INDEX_FILE);
-	const tempPath = join(directory, QUEUE_INDEX_TEMP_FILE);
-	const corruptPath = join(directory, QUEUE_INDEX_CORRUPT_FILE);
+	const indexPath = join(directory, "index.json");
+	const tempPath = join(directory, "index.json.tmp");
+	const corruptPath = join(directory, "index.corrupt.json");
 
 	return {
-		indexPath,
-
 		async load() {
 			let text = await files.readText(indexPath);
 			if (text === null) {

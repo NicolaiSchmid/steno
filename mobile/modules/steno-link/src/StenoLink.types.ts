@@ -74,18 +74,3 @@ export type StenoLinkEvents = {
 	uploadFinished: (result: UploadFinished) => void;
 	uploadFailed: (failure: UploadFailed) => void;
 };
-
-export interface StenoLinkModule {
-	startBrowsing(): void;
-	stopBrowsing(): void;
-	resolve(serviceName: string): Promise<ResolvedMac>;
-	/** Foreground, small JSON bodies only. */
-	request(request: PinnedRequest): Promise<PinnedResponse>;
-	/** Background session; completion arrives as `uploadFinished` / `uploadFailed`. */
-	startUpload(spec: UploadSpec): Promise<void>;
-	cancelUpload(taskID: string): Promise<void>;
-	/** Task ids still alive in the background session (survives relaunch). */
-	pendingUploads(): Promise<string[]>;
-	/** Whole-file SHA-256, standard base64, streamed natively. */
-	sha256(filePath: string): Promise<string>;
-}

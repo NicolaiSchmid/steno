@@ -1,3 +1,4 @@
+import { macOrigin } from "@modules/steno-link";
 import { useNavigation } from "@react-navigation/native";
 import {
 	type BarcodeScanningResult,
@@ -16,11 +17,8 @@ import {
 	useMacDiscovery,
 } from "@/features/discovery/use-mac-discovery";
 import { useQueue } from "@/features/queue/QueueProvider";
-import {
-	isPending,
-	resetForUpload,
-	setState,
-} from "@/features/queue/queue-index";
+import { resetForUpload, unpairPending } from "@/features/queue/queue-index";
+import { errorMessage } from "@/lib/error-message";
 import { DURATION_ENTRANCE, HIT_SLOP } from "@/lib/motion";
 import { usePairing } from "./PairingProvider";
 import { hello, pair, unpair } from "./pairing-client";
@@ -81,13 +79,13 @@ export function PairingSheet() {
 			setPhase({ kind: "pairing", macName: parsed.payload.macName });
 			try {
 				const outcome = await performPairing(parsed.payload, {
-					locate: async (macID) => (await locateMac(macID)).resolved,
+					locate: locateMac,
 					hello,
 					pair,
 					device: deviceIdentity,
 					now: () => new Date(),
 				});
-				await replace({ mac: outcome.mac, token: outcome.token });
+				await replace(outcome);
 				// Anything the old Mac revoked is eligible for the new one.
 				await update((index) =>
 					index.recordings
@@ -97,10 +95,7 @@ export function PairingSheet() {
 				setPhase({ kind: "paired", macName: outcome.mac.macName });
 			} catch (error) {
 				scanBlockedUntil.current = Date.now() + RESCAN_DELAY_MS;
-				setPhase({
-					kind: "error",
-					message: error instanceof Error ? error.message : String(error),
-				});
+				setPhase({ kind: "error", message: errorMessage(error) });
 			} finally {
 				busy.current = false;
 			}
@@ -113,23 +108,16 @@ export function PairingSheet() {
 		busy.current = true;
 		try {
 			try {
-				const { resolved } = await locateMac(pairing.mac.macID, 3000);
+				const resolved = await locateMac(pairing.mac.macID, 3000);
 				await unpair(
-					{
-						origin: `https://${resolved.host}:${resolved.port}`,
-						fingerprint: pairing.mac.fingerprint,
-					},
+					{ origin: macOrigin(resolved), fingerprint: pairing.mac.fingerprint },
 					pairing.token,
 				);
 			} catch {
 				// The Mac is away; forgetting locally is what the user asked for.
 			}
 			await clear();
-			await update((index) =>
-				index.recordings
-					.filter(isPending)
-					.reduce((acc, r) => setState(acc, r.recordingID, "unpaired"), index),
-			);
+			await update(unpairPending);
 			navigation.goBack();
 		} finally {
 			busy.current = false;

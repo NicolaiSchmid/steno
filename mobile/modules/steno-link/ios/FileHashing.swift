@@ -7,11 +7,10 @@ import Foundation
 enum FileHashing {
   static let bufferSize = 1 << 20
 
-  /// SHA-256 of `[offset, offset + length)`; `length == nil` hashes to end of file.
-  /// Throws `shortRead` when the file ends before `length` bytes were read.
-  static func sha256(fileAt url: URL, offset: UInt64 = 0, length: UInt64? = nil) throws -> Data {
+  /// SHA-256 of the whole file.
+  static func sha256(fileAt url: URL) throws -> Data {
     var hasher = SHA256()
-    try forEachBlock(of: url, offset: offset, length: length) { block in
+    try forEachBlock(of: url, offset: 0, length: nil) { block in
       hasher.update(data: block)
     }
     return Data(hasher.finalize())

@@ -1,23 +1,20 @@
 import { describe, expect, it } from "vitest";
 
-import { base64ToBase64Url } from "@/lib/base64";
-import {
-	describePairingFailure,
-	fingerprintsEqual,
-	parsePairingPayload,
-} from "./pairing-payload";
+import { describePairingFailure, parsePairingPayload } from "./pairing-payload";
 
 const now = new Date("2026-09-25T10:00:00.000Z");
 const FP = Buffer.alloc(32, 0xab).toString("base64");
 const SECRET = Buffer.alloc(32, 0x12).toString("base64");
 const MAC = "0F8FAD5B-D9CB-469F-A165-70867728950E";
+const urlSafe = (standard: string) =>
+	Buffer.from(standard, "base64").toString("base64url");
 
 function url(overrides: Partial<Record<string, string>> = {}, version = "v1") {
 	const params: Record<string, string | undefined> = {
 		mac: MAC,
 		name: encodeURIComponent("Nicolai's Mac"),
-		fp: base64ToBase64Url(FP),
-		secret: base64ToBase64Url(SECRET),
+		fp: urlSafe(FP),
+		secret: urlSafe(SECRET),
 		exp: String(Math.floor(now.getTime() / 1000) + 300),
 		...overrides,
 	};
@@ -119,17 +116,5 @@ describe("parsePairingPayload", () => {
 		] as const) {
 			expect(describePairingFailure(reason)).toMatch(/\.$/);
 		}
-	});
-});
-
-describe("fingerprintsEqual", () => {
-	it("compares bytes across alphabets and padding", () => {
-		expect(fingerprintsEqual(FP, FP)).toBe(true);
-		expect(fingerprintsEqual(FP, base64ToBase64Url(FP))).toBe(true);
-		const other = Buffer.alloc(32, 0xac).toString("base64");
-		expect(fingerprintsEqual(FP, other)).toBe(false);
-		expect(fingerprintsEqual(FP, FP.slice(0, 40))).toBe(false);
-		expect(fingerprintsEqual("", "")).toBe(true);
-		expect(fingerprintsEqual("*", FP)).toBe(false);
 	});
 });

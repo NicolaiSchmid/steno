@@ -1,33 +1,30 @@
-import { stenoLink } from "@modules/steno-link";
+import { macOrigin, stenoLink } from "@modules/steno-link";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { AppState } from "react-native";
 
+import { findByMacID } from "@/features/discovery/mac-registry";
 import {
-	macRegistry,
 	restartBrowsing,
 	useMacDiscovery,
 } from "@/features/discovery/use-mac-discovery";
 import { usePairing } from "@/features/pairing/PairingProvider";
-import { HandoverError, macOrigin } from "@/features/pairing/pairing-client";
+import { HandoverError } from "@/features/pairing/pairing-client";
 import { deviceIdentity } from "@/features/pairing/pairing-store";
 import { useQueue } from "@/features/queue/QueueProvider";
-import {
-	deleteQueuedFile,
-	queuedFileExists,
-	queuedFileUri,
-} from "@/features/queue/queue-files";
+import { queuedFile } from "@/features/queue/queue-files";
 import {
 	chunkPlan,
 	findRecording,
 	isPending,
 	markChunk,
-	type QueueIndex,
 	resetForUpload,
 	type SyncState,
 	scheduleRetry,
 	setState,
 	syncChunks,
+	unpairPending,
 } from "@/features/queue/queue-index";
+import { errorMessage } from "@/lib/error-message";
 import {
 	announce,
 	complete,
@@ -61,16 +58,6 @@ export type UploadCoordinator = {
 	retryNow(recordingID?: string): void;
 };
 
-function errorMessage(error: unknown): string {
-	return error instanceof Error ? error.message : String(error);
-}
-
-function unpairAll(index: QueueIndex): QueueIndex {
-	return index.recordings
-		.filter(isPending)
-		.reduce((acc, r) => setState(acc, r.recordingID, "unpaired"), index);
-}
-
 export function useUploadCoordinator(): UploadCoordinator {
 	const { pairing, ready: pairingReady, clear: clearPairing } = usePairing();
 	const { index, ready: queueReady, update } = useQueue();
@@ -84,12 +71,9 @@ export function useUploadCoordinator(): UploadCoordinator {
 	const indexRef = useRef(index);
 	const sessionRef = useRef(session);
 
-	const service = pairing
-		? (discovery.services.find(
-				(s) => s.macID?.toLowerCase() === pairing.mac.macID.toLowerCase(),
-			) ?? null)
+	const serviceName = pairing
+		? (findByMacID(discovery.services, pairing.mac.macID)?.name ?? null)
 		: null;
-	const serviceName = service?.name ?? null;
 
 	// Resolve the Mac once per appearance; forget it when the service goes.
 	useEffect(() => {
@@ -118,7 +102,7 @@ export function useUploadCoordinator(): UploadCoordinator {
 	}, [pairing, serviceName]);
 
 	const handleUnauthorized = useCallback(async () => {
-		await update(unpairAll);
+		await update(unpairPending);
 		await clearPairing();
 	}, [update, clearPairing]);
 
@@ -152,7 +136,7 @@ export function useUploadCoordinator(): UploadCoordinator {
 					const id = taskIDs.announce(rec.recordingID);
 					inFlight.current.add(id);
 					try {
-						if (!queuedFileExists(rec.fileName)) {
+						if (!queuedFile(rec.fileName).exists) {
 							await update((current) =>
 								setState(current, rec.recordingID, "failed", {
 									lastError: "The recording file is missing",
@@ -189,7 +173,7 @@ export function useUploadCoordinator(): UploadCoordinator {
 							active,
 							rec.recordingID,
 							chunk,
-							queuedFileUri(rec.fileName),
+							queuedFile(rec.fileName).uri,
 						);
 					} catch (error) {
 						inFlight.current.delete(id);
@@ -211,7 +195,8 @@ export function useUploadCoordinator(): UploadCoordinator {
 									lastError: null,
 								}),
 							);
-							deleteQueuedFile(rec.fileName);
+							const file = queuedFile(rec.fileName);
+							if (file.exists) file.delete();
 						} else if (result.kind === "missing-chunks") {
 							const remote = await fetchStatus(active, rec.recordingID);
 							await update((current) =>
@@ -257,7 +242,7 @@ export function useUploadCoordinator(): UploadCoordinator {
 			const active = sessionRef.current;
 			const action = planNext(
 				indexRef.current,
-				{ reachable: active !== null, serviceName },
+				active !== null,
 				inFlight.current,
 				new Date(),
 			);
@@ -282,7 +267,7 @@ export function useUploadCoordinator(): UploadCoordinator {
 					tick();
 				}
 			});
-	}, [queueReady, serviceName, execute]);
+	}, [queueReady, execute]);
 
 	// Publish the latest inputs to the tick loop and re-plan on every change.
 	useEffect(() => {
@@ -441,7 +426,6 @@ export function useUploadCoordinator(): UploadCoordinator {
 				);
 			}).then(() => {
 				restartBrowsing();
-				macRegistry.apply({ type: "reset" });
 				tick();
 			});
 		},

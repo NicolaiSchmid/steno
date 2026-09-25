@@ -14,8 +14,6 @@ import {
  * two chunks in flight; complete only when every chunk is uploaded and
  * nothing is in flight.
  */
-export type MacState = { reachable: boolean; serviceName: string | null };
-
 export type Action =
 	| { kind: "idle" }
 	| { kind: "announce"; recordingID: string }
@@ -42,13 +40,14 @@ export function parseChunkTaskID(
 	return { recordingID: taskID.slice(0, slash), chunk };
 }
 
+/** `reachable`: the paired Mac is browsed and resolved right now. */
 export function planNext(
 	index: QueueIndex,
-	mac: MacState,
+	reachable: boolean,
 	inFlight: ReadonlySet<string>,
 	now: Date,
 ): Action {
-	if (!mac.reachable) return { kind: "idle" };
+	if (!reachable) return { kind: "idle" };
 
 	const rec = nextUploadable(index, now);
 	if (!rec) {
