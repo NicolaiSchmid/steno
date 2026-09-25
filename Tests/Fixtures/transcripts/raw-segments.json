@@ -1,0 +1,20 @@
+[
+  {
+    "end" : 2.5,
+    "language" : "de",
+    "start" : 0,
+    "text" : "wir setzen 90 prozent auf den kern",
+    "wordTimings" : [
+      {
+        "end" : 0.3,
+        "start" : 0,
+        "word" : "wir"
+      }
+    ]
+  },
+  {
+    "end" : 5.5,
+    "start" : 2.5,
+    "text" : "budget check on friday"
+  }
+]

@@ -1,0 +1,44 @@
+{
+  "context" : "A customer discovery or sales conversation. Capture the customer's situation and words, not the pitch.",
+  "description" : "A conversation with a customer or prospect about their situation, problems and interest.",
+  "displayName" : "Customer Discovery",
+  "id" : "customer-discovery",
+  "sections" : [
+    {
+      "heading" : "Customer Context",
+      "id" : "customer-context",
+      "instructions" : "Who the customer is, their role, company and situation, as stated in the conversation.",
+      "required" : true
+    },
+    {
+      "heading" : "Problems and Pain Points",
+      "id" : "problems-and-pain-points",
+      "instructions" : "The problems the customer described, in their own terms, with severity or frequency when mentioned.",
+      "required" : true
+    },
+    {
+      "heading" : "Current Workflow and Tools",
+      "id" : "current-workflow-and-tools",
+      "instructions" : "How they solve it today and which tools or workarounds they use.",
+      "required" : false
+    },
+    {
+      "heading" : "Reactions and Buying Signals",
+      "id" : "reactions-and-buying-signals",
+      "instructions" : "Reactions to what was shown or proposed, interest, urgency, budget and timeline signals.",
+      "required" : false
+    },
+    {
+      "heading" : "Objections and Risks",
+      "id" : "objections-and-risks",
+      "instructions" : "Concerns, objections, blockers and risks the customer raised.",
+      "required" : false
+    },
+    {
+      "heading" : "Next Steps",
+      "id" : "next-steps",
+      "instructions" : "Agreed follow-ups with owner and date when stated.",
+      "required" : false
+    }
+  ]
+}

@@ -1,0 +1,31 @@
+[
+  {
+    "end" : 2.5,
+    "id" : "00000000-0000-0000-0000-000000000028",
+    "lane" : "mic",
+    "meetingID" : "00000000-0000-0000-0000-000000000001",
+    "rawText" : "wir setzen 90 prozent auf den kern",
+    "speakerID" : "00000000-0000-0000-0000-000000000014",
+    "start" : 0,
+    "text" : "Wir setzen neunzig Prozent auf den Kern."
+  },
+  {
+    "end" : 5.5,
+    "id" : "00000000-0000-0000-0000-000000000029",
+    "lane" : "system",
+    "meetingID" : "00000000-0000-0000-0000-000000000001",
+    "rawText" : "ich prüfe das budget bis freitag",
+    "speakerID" : "00000000-0000-0000-0000-000000000015",
+    "start" : 2.5,
+    "text" : "Ich prüfe das Budget bis Freitag."
+  },
+  {
+    "end" : 6,
+    "id" : "00000000-0000-0000-0000-00000000002A",
+    "lane" : "system",
+    "meetingID" : "00000000-0000-0000-0000-000000000001",
+    "rawText" : "gut",
+    "start" : 5.5,
+    "text" : "Gut."
+  }
+]

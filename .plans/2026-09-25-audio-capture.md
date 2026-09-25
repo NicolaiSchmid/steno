@@ -159,7 +159,7 @@ Sources/StenoAudio/
   Detection/MeetingDetector.swift               actor, debounce and poll on the injected clock, event stream
   Detection/ProcessAudioActivity.swift          ProcessAudioActivitySource protocol; LiveProcessAudioActivity: process object list, IsRunningInput, BundleID, PID
   Writer/RecordingWriter.swift                  ExtAudioFile CAF master, WAV sidecars, optional raw mic
-  Writer/RecordingLayout.swift                  file names inside the meeting folder
+  (RecordingLayout is StenoCore's, Audio/RecordingLayout.swift; the writer creates the folder with RecordingLayout(audioFolder:meetingID:))
   Codec/AVFoundationAudioCodec.swift            AudioDecoder: decode one lane to 16 kHz, AAC mixdown
   Testing/SyntheticCaptureBackend.swift         deterministic sines per lane, scripted device loss, no HAL
   Testing/FakeProcessAudioActivity.swift        scripted IsRunningInput transitions for MeetingDetectorTests
