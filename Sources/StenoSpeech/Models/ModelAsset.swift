@@ -3,7 +3,8 @@ import Foundation
 /// One downloadable model bundle. The table below is the single place that
 /// knows where an asset comes from, how its files are laid out under the
 /// models root and which of them must be complete for it to count as
-/// installed.
+/// installed. The settings pane shows `displayName`, `approximateBytes` and
+/// `licence`; the layout is the store's and the downloaders' business.
 public enum ModelAsset: String, Sendable, CaseIterable, Codable, Hashable {
   case parakeetV3
   case parakeetUltra
@@ -58,7 +59,7 @@ public enum ModelAsset: String, Sendable, CaseIterable, Codable, Hashable {
   /// parent FluidAudio's `ModelHub` writes the repository folder into, or
   /// WhisperKit's `downloadBase`. The German fine-tune reuses the v3 folder
   /// name, so it gets its own parent and can never shadow the official model.
-  public var frameworkRoot: String {
+  var frameworkRoot: String {
     switch self {
     case .parakeetV3, .parakeetUltra, .offlineDiarizer: "fluidaudio"
     case .parakeetDE: "fluidaudio-de"
@@ -70,7 +71,7 @@ public enum ModelAsset: String, Sendable, CaseIterable, Codable, Hashable {
   /// `Repo.folderName` (the repository minus `-coreml`; the fine-tune keeps
   /// the v3 name because it is fetched through the v3 `Repo` case), or the
   /// WhisperKit variant the engine and the downloader pass to the framework.
-  public var modelFolder: String {
+  var modelFolder: String {
     switch self {
     case .parakeetV3, .parakeetDE: "parakeet-tdt-0.6b-v3"
     case .parakeetUltra: "parakeet-ultra"
@@ -83,7 +84,7 @@ public enum ModelAsset: String, Sendable, CaseIterable, Codable, Hashable {
   /// framework root plus the suffix the framework fixes. FluidAudio puts the
   /// repository folder straight under its parent; WhisperKit lays its Hub
   /// cache out as `models/<repo>/<variant>`.
-  public var relativePath: String {
+  var relativePath: String {
     switch self {
     case .parakeetV3, .parakeetUltra, .parakeetDE, .offlineDiarizer:
       "\(frameworkRoot)/\(modelFolder)"
@@ -99,7 +100,7 @@ public enum ModelAsset: String, Sendable, CaseIterable, Codable, Hashable {
 
   /// Files (or compiled model bundles) inside `relativePath` that the
   /// framework writes for the model itself.
-  public var requiredFiles: [String] {
+  var requiredFiles: [String] {
     switch self {
     case .parakeetV3, .parakeetUltra, .parakeetDE:
       [
@@ -144,15 +145,14 @@ public enum ModelAsset: String, Sendable, CaseIterable, Codable, Hashable {
   }
 }
 
-/// One progress event from `ModelStore.ensure`. `phase` is the downloader's
-/// own wording ("downloading Encoder.mlmodelc", "installed").
+/// One progress event of a download from `ModelStore.ensure` (the caller
+/// named the asset). `phase` is the downloader's own wording
+/// ("downloading Encoder.mlmodelc"); the end of the stream is the install.
 public struct ModelDownloadProgress: Sendable, Equatable {
-  public var asset: ModelAsset
   public var fractionCompleted: Double
   public var phase: String
 
-  public init(asset: ModelAsset, fractionCompleted: Double, phase: String) {
-    self.asset = asset
+  public init(fractionCompleted: Double, phase: String) {
     self.fractionCompleted = fractionCompleted
     self.phase = phase
   }

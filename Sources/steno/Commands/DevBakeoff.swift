@@ -48,7 +48,7 @@ struct DevBakeoff: AsyncParsableCommand {
     let out =
       output.map { URL(fileURLWithPath: $0, isDirectory: true) }
       ?? audio.appendingPathComponent("bakeoff", isDirectory: true)
-    let runner = BakeoffRunner(engineProvider: { try makeSpeechEngine($0, models: store) })
+    let runner = BakeoffRunner(makeEngine: { try makeSpeechEngine($0, models: store) })
     let report = try await runner.run(
       audioDirectory: audio,
       referenceDirectory: referenceDirectory.map { URL(fileURLWithPath: $0, isDirectory: true) },

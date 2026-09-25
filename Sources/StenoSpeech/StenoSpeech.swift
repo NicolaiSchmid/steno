@@ -10,21 +10,39 @@ import Foundation
 // Files that import FluidAudio or WhisperKit are compiled only where those
 // frameworks exist (`canImport`), so the pure logic builds and tests on
 // Linux as well.
+//
+// Public surface: `ModelStore`, `ModelAsset`, `ModelDownloadProgress`,
+// `ModelDownloading` and `LiveModelDownloader`, `SpeechEngineID`,
+// `makeSpeechEngine`, `makeDiarizer` and `FluidDiarizerConfig`,
+// `CosineSpeakerMemory`, `BakeoffRunner` with `BakeoffReport` and
+// `BakeoffRow`, `LanguageTagger.dominantLanguage(of:)`,
+// `WordErrorRate.compute`, and this one error. Everything else is internal
+// and reached by the tests through `@testable import`.
 
-public enum SpeechEngineError: Error, Sendable, Equatable, CustomStringConvertible {
+/// The one error type this module throws for its own conditions; the
+/// frameworks' errors pass through untouched.
+public enum StenoSpeechError: Error, Sendable, Equatable, CustomStringConvertible {
   /// `Settings.speechEngineID` names no known engine.
   case unknownEngine(String)
-  /// The engine exists in the table but not in this build (Linux).
-  case unavailable(SpeechEngineID)
-  /// `transcribe` was called before `prepare` could load the models.
-  case notPrepared(String)
+  /// This build has neither FluidAudio nor WhisperKit (Linux): the asset's
+  /// engine cannot be built and the asset cannot be downloaded.
+  case unsupportedPlatform(ModelAsset)
+  /// The downloader returned but `ModelAsset.requiredPaths` are still
+  /// missing.
+  case incompleteDownload(ModelAsset, missing: [String])
+  /// `ModelStore.remove` was called while the asset was being downloaded.
+  case downloadInProgress(ModelAsset)
 
   public var description: String {
     switch self {
     case .unknownEngine(let id):
       "unknown speech engine \(id); known: \(SpeechEngineID.allCases.map(\.rawValue).joined(separator: ", "))"
-    case .unavailable(let id): "speech engine \(id.rawValue) is not available on this platform"
-    case .notPrepared(let id): "speech engine \(id) has not loaded its models"
+    case .unsupportedPlatform(let asset):
+      "\(asset.rawValue) is not available on this platform"
+    case .incompleteDownload(let asset, let missing):
+      "\(asset.rawValue) download finished but \(missing.joined(separator: ", ")) is missing"
+    case .downloadInProgress(let asset):
+      "\(asset.rawValue) is being downloaded"
     }
   }
 }

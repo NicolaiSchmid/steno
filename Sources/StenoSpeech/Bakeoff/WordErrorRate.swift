@@ -15,7 +15,7 @@ public enum WordErrorRate {
   }
 
   /// Lower-case words with punctuation removed; digits and letters kept.
-  public static func normalise(_ text: String, foldUmlauts: Bool = true) -> [String] {
+  static func normalise(_ text: String, foldUmlauts: Bool = true) -> [String] {
     var lowered = text.lowercased()
     if foldUmlauts {
       for (from, to) in [("ä", "ae"), ("ö", "oe"), ("ü", "ue"), ("ß", "ss")] {

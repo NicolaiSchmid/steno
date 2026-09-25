@@ -12,23 +12,6 @@ public protocol ModelDownloading: Sendable {
   ) async throws
 }
 
-public enum ModelDownloadError: Error, Sendable, Equatable, CustomStringConvertible {
-  /// This build has neither FluidAudio nor WhisperKit (Linux); nothing can be
-  /// downloaded.
-  case unsupportedPlatform(ModelAsset)
-  /// The downloader returned but `requiredPaths` are still missing.
-  case incomplete(ModelAsset, missing: [String])
-
-  public var description: String {
-    switch self {
-    case .unsupportedPlatform(let asset):
-      "\(asset.rawValue) cannot be downloaded on this platform"
-    case .incomplete(let asset, let missing):
-      "\(asset.rawValue) download finished but \(missing.joined(separator: ", ")) is missing"
-    }
-  }
-}
-
 /// Runs jobs strictly one after another, in submission order, whatever
 /// their outcome. An actor alone cannot promise this for work it awaits (it
 /// is re-entrant across the suspension), and `LiveModelDownloader` needs it:
@@ -82,7 +65,7 @@ struct ScopedRedirect: Sendable {
 /// chain is process-wide too: `ModelStore`s are cheap and the app, the CLI
 /// and the pipeline each build their own, and two stores must not overlap a
 /// v3 download with the redirect active. Where the frameworks are missing
-/// (Linux) every download fails with `ModelDownloadError.unsupportedPlatform`.
+/// (Linux) every download fails with `StenoSpeechError.unsupportedPlatform`.
 public struct LiveModelDownloader: ModelDownloading {
   /// One chain per process, not per store.
   static let serializer = DownloadSerializer()
@@ -146,7 +129,6 @@ public struct LiveModelDownloader: ModelDownloading {
           progressCallback: { progress($0.fractionCompleted * 0.95, "downloading \(variant)") })
         progress(0.95, "downloading tokenizer")
         _ = try await ModelUtilities.loadTokenizer(for: .largev3, tokenizerFolder: frameworkRoot)
-        progress(1, "installed")
       }
     }
   #else
@@ -154,7 +136,7 @@ public struct LiveModelDownloader: ModelDownloading {
       _ asset: ModelAsset, under root: URL,
       progress: @escaping @Sendable (Double, String) -> Void
     ) async throws {
-      throw ModelDownloadError.unsupportedPlatform(asset)
+      throw StenoSpeechError.unsupportedPlatform(asset)
     }
   #endif
 }

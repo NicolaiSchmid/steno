@@ -8,7 +8,7 @@ import StenoCore
 /// Decides the language of one piece of text among `candidates`. `hint` is
 /// the language expected for the meeting; a recogniser may lean on it for
 /// ambiguous text and returns nil when it has no opinion.
-public protocol LanguageRecognizing: Sendable {
+protocol LanguageRecognizing: Sendable {
   func recognize(_ text: String, candidates: Set<LanguageTag>, hint: LanguageTag?) -> LanguageTag?
 }
 
@@ -19,16 +19,20 @@ public protocol LanguageRecognizing: Sendable {
 /// previous segment's language (or the next tagged one at the start), because
 /// four words are not enough to tell German from English reliably.
 public struct LanguageTagger: Sendable {
-  public static let defaultCandidates: Set<LanguageTag> = ["de", "en"]
+  static let defaultCandidates: Set<LanguageTag> = ["de", "en"]
 
-  public var candidates: Set<LanguageTag>
-  public var minimumWords: Int
-  public var recognizer: any LanguageRecognizing
+  var candidates: Set<LanguageTag>
+  var minimumWords: Int
+  var recognizer: any LanguageRecognizing
 
-  public init(
-    candidates: Set<LanguageTag> = LanguageTagger.defaultCandidates,
-    minimumWords: Int = 4,
-    recognizer: (any LanguageRecognizing)? = nil
+  /// German and English, four words, the platform recogniser.
+  public init() {
+    self.init(recognizer: nil)
+  }
+
+  init(
+    candidates: Set<LanguageTag> = LanguageTagger.defaultCandidates, minimumWords: Int = 4,
+    recognizer: (any LanguageRecognizing)?
   ) {
     self.candidates = candidates
     self.minimumWords = minimumWords
@@ -42,7 +46,7 @@ public struct LanguageTagger: Sendable {
   /// Tags every segment. `hint` is the meeting language when the pipeline
   /// knows it (the other lane's result, or the language WhisperKit was pinned
   /// to); it breaks ties and covers segments nothing else can tag.
-  public func tag(_ segments: [RawSegment], hint: LanguageTag? = nil) -> [RawSegment] {
+  func tag(_ segments: [RawSegment], hint: LanguageTag? = nil) -> [RawSegment] {
     var tagged = segments
     var decided: [LanguageTag?] = Array(repeating: nil, count: segments.count)
     for (index, segment) in segments.enumerated() where wordCount(segment.text) >= minimumWords {
@@ -62,13 +66,14 @@ public struct LanguageTagger: Sendable {
   }
 
   /// The language with the most seconds of tagged speech; nil when nothing
-  /// is tagged.
+  /// is tagged. The bake-off's language column and the cleaner's language.
   public func dominantLanguage(of segments: [RawSegment]) -> LanguageTag? {
     dominant(segments.map(\.language), segments: segments)
   }
 
-  /// Adjacent segments with different languages; the bake-off's flip count.
-  public static func languageFlips(in segments: [RawSegment]) -> Int {
+  /// Adjacent tagged segments with different languages; the bake-off's flip
+  /// count. Untagged segments neither flip nor break a run.
+  func languageFlips(in segments: [RawSegment]) -> Int {
     let languages = segments.compactMap(\.language)
     guard languages.count > 1 else { return 0 }
     return zip(languages, languages.dropFirst()).filter { $0 != $1 }.count
@@ -98,10 +103,8 @@ public struct LanguageTagger: Sendable {
 #if canImport(NaturalLanguage)
   /// `NLLanguageRecognizer` constrained to the candidates, with the hint
   /// weighted ahead of the others.
-  public struct NaturalLanguageRecognizer: LanguageRecognizing {
-    public init() {}
-
-    public func recognize(_ text: String, candidates: Set<LanguageTag>, hint: LanguageTag?)
+  struct NaturalLanguageRecognizer: LanguageRecognizing {
+    func recognize(_ text: String, candidates: Set<LanguageTag>, hint: LanguageTag?)
       -> LanguageTag?
     {
       let recognizer = NLLanguageRecognizer()
@@ -128,7 +131,7 @@ public struct LanguageTagger: Sendable {
 /// Counts German and English function words; a tie goes to the hint. The
 /// deterministic recogniser for tests and the fallback where NaturalLanguage
 /// is unavailable. Only knows `de` and `en`.
-public struct StopwordLanguageRecognizer: LanguageRecognizing {
+struct StopwordLanguageRecognizer: LanguageRecognizing {
   static let german: Set<String> = [
     "der", "die", "das", "und", "ist", "nicht", "ich", "wir", "sie", "ein", "eine", "zu", "mit",
     "auf", "für", "von", "den", "dem", "des", "im", "ja", "nein", "auch", "noch", "schon", "wie",
@@ -141,9 +144,7 @@ public struct StopwordLanguageRecognizer: LanguageRecognizing {
     "he", "she", "what", "at", "by", "from", "about", "can", "will", "do", "let's", "today", "our",
   ]
 
-  public init() {}
-
-  public func recognize(_ text: String, candidates: Set<LanguageTag>, hint: LanguageTag?)
+  func recognize(_ text: String, candidates: Set<LanguageTag>, hint: LanguageTag?)
     -> LanguageTag?
   {
     let words = text.lowercased().split { !$0.isLetter && $0 != "'" }.map(String.init)

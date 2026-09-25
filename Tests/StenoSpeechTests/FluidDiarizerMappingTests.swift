@@ -129,6 +129,12 @@ private func chunk(
       to: [chunk("S1", 0, 4, axis: 0), chunk("S1", 4, 9, axis: 0), chunk("S1", 20, 21, axis: 0)],
       from: turns)
     #expect(chunks.map(\.quality) == [0.3, 0.7, 1])
+    // `result` assigns first: the confidence is the duration-weighted mean of
+    // the turns' qualities, whatever the chunks arrived with.
+    let result = DiarizationMapping.result(
+      turns: turns, chunks: [chunk("S1", 0, 4, axis: 0, quality: 0), chunk("S1", 4, 9, axis: 0)])
+    let expected = Float((0.3 * 4 + 0.7 * 5) / 9)
+    #expect(abs((result.clusters.first?.clusterConfidence ?? 0) - expected) < 1e-5)
   }
 
   @Test func shortSpeakersArePenalisedAndTurnlessSpeakersStillAppear() {
@@ -186,16 +192,16 @@ private func chunk(
     #expect(result.clusters.allSatisfy { ($0.sampleClipRange?.upperBound ?? 0) <= 2 })
   }
 
-  @Test func clipLengthFollowsTheConfiguredTarget() throws {
-    let turns = [turn("S1", 0, 30, quality: 1)]
-    let chunks = [chunk("S1", 10, 12, axis: 0, quality: 1)]
+  /// Core documents `sampleClipRange` as at most ten seconds; the picker's
+  /// constants are the one place that number lives and no config can raise it.
+  @Test func theClipNeverExceedsCoresTenSecondCap() throws {
+    #expect(SampleClipPicker.targetSeconds == 10)
+    #expect(SampleClipPicker.minimumSeconds == 3)
     let result = DiarizationMapping.result(
-      turns: turns, chunks: chunks, targetSeconds: 4, minimumSeconds: 3)
-    #expect(result.clusters.first?.sampleClipRange == 9...13)
-    // Raising the floor above the range penalises what the default would not.
-    let strict = DiarizationMapping.result(
-      turns: turns, chunks: chunks, targetSeconds: 4, minimumSeconds: 40)
-    #expect(abs((strict.clusters.first?.clusterConfidence ?? 0) - 0.5) < 1e-6)
+      turns: [turn("S1", 0, 300, quality: 1)], chunks: [chunk("S1", 100, 102, axis: 0)])
+    let clip = try #require(result.clusters.first?.sampleClipRange)
+    #expect(clip.upperBound - clip.lowerBound == 10)
+    #expect(clip == 96...106, "centred on the one chunk")
   }
 
   /// Invariants over generated diarizations, whatever the shape: labels are

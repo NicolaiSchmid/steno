@@ -14,7 +14,7 @@ public struct FakeModelDownloader: ModelDownloading, Sendable {
   /// Awaited between the progress steps and the marker files.
   public var hold: (@Sendable () async -> Void)?
   /// When false the downloader returns without writing anything, which
-  /// `ModelStore` reports as `ModelDownloadError.incomplete`.
+  /// `ModelStore` reports as `StenoSpeechError.incompleteDownload`.
   public var writesMarkers: Bool
   public let downloads = CallLog<ModelAsset>()
 

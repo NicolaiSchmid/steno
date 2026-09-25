@@ -11,15 +11,15 @@ public struct BakeoffRow: Codable, Sendable, Equatable {
   /// Against `<name>.ref.txt`; nil when there is no reference.
   public var wer: Double?
   public var languageFlips: Int
-  public var dominantLanguage: String?
+  public var dominantLanguage: LanguageTag?
   /// WER after the injected `TranscriptCleaner`; nil without cleanup or
   /// reference.
   public var cleanedWER: Double?
 
   public init(
     file: String, engine: SpeechEngineID, audioSeconds: Double, wallSeconds: Double,
-    segmentCount: Int, wer: Double? = nil, languageFlips: Int, dominantLanguage: String? = nil,
-    cleanedWER: Double? = nil
+    segmentCount: Int, wer: Double? = nil, languageFlips: Int,
+    dominantLanguage: LanguageTag? = nil, cleanedWER: Double? = nil
   ) {
     self.file = file
     self.engine = engine
@@ -61,7 +61,7 @@ public struct BakeoffReport: Codable, Sendable, Equatable {
         "| \(row.file) | \(row.engine.rawValue) | \(format(row.audioSeconds)) | "
           + "\(format(row.wallSeconds)) | \(format(row.rtfx)) | \(row.segmentCount) | "
           + "\(percent(row.wer)) | \(percent(row.cleanedWER)) | \(row.languageFlips) | "
-          + "\(row.dominantLanguage ?? "-") |")
+          + "\(row.dominantLanguage?.rawValue ?? "-") |")
     }
     let engines = rows.map(\.engine).reduce(into: [SpeechEngineID]()) {
       if !$0.contains($1) { $0.append($1) }
@@ -85,7 +85,7 @@ public struct BakeoffReport: Codable, Sendable, Equatable {
     return lines.joined(separator: "\n")
   }
 
-  public func json() throws -> Data {
+  func json() throws -> Data {
     let encoder = JSONEncoder()
     encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
     encoder.dateEncodingStrategy = .iso8601

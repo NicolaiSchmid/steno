@@ -8,15 +8,19 @@ import Foundation
 /// never held the floor for three seconds is hard to name and easy to
 /// confuse.
 enum SampleClipPicker {
+  /// Core documents `SpeakerCluster.sampleClipRange` as "at most ten
+  /// seconds", so this is the one place that number lives and nothing can
+  /// raise it.
+  static let targetSeconds: TimeInterval = 10
+  /// Below this the longest range is too short to name a voice from.
+  static let minimumSeconds: TimeInterval = 3
+
   struct Choice: Equatable {
     var range: ClosedRange<TimeInterval>?
     var clusterConfidence: Float
   }
 
-  static func pick(
-    ranges: [ClosedRange<TimeInterval>], chunks: [ClusterChunk],
-    targetSeconds: TimeInterval = 10, minimumSeconds: TimeInterval = 3
-  ) -> Choice {
+  static func pick(ranges: [ClosedRange<TimeInterval>], chunks: [ClusterChunk]) -> Choice {
     guard let longest = ranges.max(by: { length($0) < length($1) }) else {
       return Choice(range: nil, clusterConfidence: 0)
     }

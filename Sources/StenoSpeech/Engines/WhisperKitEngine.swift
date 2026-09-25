@@ -18,7 +18,7 @@
   /// awaited `transcribe`) but the caller: core's pipeline transcribes one
   /// lane at a time, so no two calls are ever in flight on one engine. A
   /// second concurrent caller would need an in-flight guard here (follow-up).
-  final class WhisperKitBox: @unchecked Sendable {
+  private final class WhisperKitBox: @unchecked Sendable {
     private let kit: WhisperKit
 
     init(_ config: WhisperKitConfig) async throws {
@@ -43,27 +43,29 @@
   /// `detectLangauge` over the three most energetic 30 s windows. Segments
   /// the model considers silence (`noSpeechProb` above the threshold) are
   /// dropped.
-  public actor WhisperKitEngine: SpeechEngine {
-    public static let noSpeechThreshold: Float = WhisperMapping.noSpeechThreshold
-
-    public nonisolated let id = SpeechEngineID.whisperKitLargeV3Turbo.rawValue
-    public nonisolated let supportedLanguages = SpeechEngineID.whisperKitLargeV3Turbo
-      .supportedLanguages
+  actor WhisperKitEngine: SpeechEngine {
+    nonisolated let id = SpeechEngineID.whisperKitLargeV3Turbo.rawValue
+    nonisolated let supportedLanguages = SpeechEngineID.whisperKitLargeV3Turbo.supportedLanguages
 
     private let asset = ModelAsset.whisperLargeV3Turbo
     private let models: ModelStore
     private var whisper: WhisperKitBox?
     private let mapping = WhisperMapping()
 
-    public init(models: ModelStore) {
+    init(models: ModelStore) {
       self.models = models
     }
 
-    /// WhisperKit is told the variant (`ModelAsset.modelFolder`), its
-    /// `downloadBase` (the asset's framework root) and the model folder
-    /// itself; `download: false` keeps the framework off the network.
-    public func prepare() async throws {
-      guard whisper == nil else { return }
+    func prepare() async throws {
+      _ = try await loaded()
+    }
+
+    /// Downloads the asset when needed, then loads it. WhisperKit is told
+    /// the variant (`ModelAsset.modelFolder`), its `downloadBase` (the
+    /// asset's framework root) and the model folder itself; `download:
+    /// false` keeps the framework off the network.
+    private func loaded() async throws -> WhisperKitBox {
+      if let whisper { return whisper }
       try await models.ensureInstalled(asset)
       let config = WhisperKitConfig(
         model: asset.modelFolder,
@@ -77,14 +79,13 @@
         prewarm: false,
         load: true,
         download: false)
-      whisper = try await WhisperKitBox(config)
+      let whisper = try await WhisperKitBox(config)
+      self.whisper = whisper
+      return whisper
     }
 
-    public func transcribe(_ audio: AudioBuffer16k, hint: Locale.Language?) async throws
-      -> [RawSegment]
-    {
-      try await prepare()
-      guard let whisper else { throw SpeechEngineError.notPrepared(id) }
+    func transcribe(_ audio: AudioBuffer16k, hint: Locale.Language?) async throws -> [RawSegment] {
+      let whisper = try await loaded()
       guard !audio.samples.isEmpty else { return [] }
       let pinned = try await WhisperMapping.pinnedLanguage(samples: audio.samples, hint: hint) {
         try await whisper.detectLanguage(Array($0))
@@ -92,7 +93,7 @@
       var options = DecodingOptions(
         task: .transcribe, language: pinned, usePrefillPrompt: true, detectLanguage: false,
         skipSpecialTokens: true, wordTimestamps: true, chunkingStrategy: .vad)
-      options.noSpeechThreshold = Self.noSpeechThreshold
+      options.noSpeechThreshold = mapping.noSpeechThreshold
       let results = try await whisper.transcribe(audio.samples, options: options)
       return mapping.segments(from: Self.whisperSegments(results), pinned: pinned)
     }

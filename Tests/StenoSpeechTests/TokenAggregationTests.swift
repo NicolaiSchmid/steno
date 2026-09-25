@@ -78,7 +78,7 @@ import Testing
 
   @Test func splitsOnGaps() {
     let segments = TranscriptSegmenter().segments(
-      fromWords: words([("eins", 0, 0.3), ("zwei", 0.4, 0.7), ("drei", 1.6, 1.9)]))
+      from: words([("eins", 0, 0.3), ("zwei", 0.4, 0.7), ("drei", 1.6, 1.9)]))
     #expect(segments.map(\.text) == ["eins zwei", "drei"])
     #expect(segments.map(\.start) == [0, 1.6])
     #expect(segments.map(\.end) == [0.7, 1.9])
@@ -88,7 +88,7 @@ import Testing
 
   @Test func splitsAfterSentencePunctuation() {
     let segments = TranscriptSegmenter().segments(
-      fromWords: words([("Ja.", 0, 0.2), ("Gut", 0.3, 0.5), ("so?", 0.6, 0.8), ("Fein!", 0.9, 1.1)])
+      from: words([("Ja.", 0, 0.2), ("Gut", 0.3, 0.5), ("so?", 0.6, 0.8), ("Fein!", 0.9, 1.1)])
     )
     #expect(segments.map(\.text) == ["Ja.", "Gut so?", "Fein!"])
   }
@@ -97,7 +97,7 @@ import Testing
     let long = (0..<40).map { index in
       TimedWord(text: "w\(index)", start: Double(index), end: Double(index) + 0.9)
     }
-    let segments = TranscriptSegmenter().segments(fromWords: long)
+    let segments = TranscriptSegmenter().segments(from: long)
     #expect(segments.count == 2)
     #expect(segments[0].end - segments[0].start <= 30)
     #expect(segments[0].wordTimings?.count == 30)
@@ -105,8 +105,8 @@ import Testing
   }
 
   @Test func emptyInputGivesNoSegments() {
-    #expect(TranscriptSegmenter().segments(fromWords: []).isEmpty)
-    #expect(TranscriptSegmenter().segments(fromWords: words([("", 0, 1)])).isEmpty)
+    #expect(TranscriptSegmenter().segments(from: []).isEmpty)
+    #expect(TranscriptSegmenter().segments(from: words([("", 0, 1)])).isEmpty)
   }
 }
 
@@ -158,8 +158,8 @@ import Testing
     ]
     #expect(tagger.dominantLanguage(of: segments) == "de")
     #expect(tagger.dominantLanguage(of: []) == nil)
-    #expect(LanguageTagger.languageFlips(in: segments) == 1)
-    #expect(LanguageTagger.languageFlips(in: []) == 0)
+    #expect(tagger.languageFlips(in: segments) == 1)
+    #expect(tagger.languageFlips(in: []) == 0)
   }
 
   @Test func candidatesLimitTheAnswer() {

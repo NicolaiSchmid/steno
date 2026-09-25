@@ -6,30 +6,28 @@ import StenoCore
 /// with a cleaner injected, the WER after cleanup. Decoding is injected too:
 /// StenoAudio's codec in the CLI for m4a and CAF, core's WAV reader in tests.
 public struct BakeoffRunner: Sendable {
-  public static let audioExtensions: Set<String> = ["wav", "m4a", "mp3", "caf"]
+  static let audioExtensions: Set<String> = ["wav", "m4a", "mp3", "caf"]
 
-  public var engineProvider: @Sendable (SpeechEngineID) throws -> any SpeechEngine
+  /// Builds the engine for an id; the CLI passes `makeSpeechEngine` over its
+  /// store, tests pass fakes.
+  public var makeEngine: @Sendable (SpeechEngineID) throws -> any SpeechEngine
   public var decoder: any AudioDecoder
   public var cleaner: (any TranscriptCleaner)?
-  public var tagger: LanguageTagger
-  public var clock: ContinuousClock
+  var tagger = LanguageTagger()
+  var clock = ContinuousClock()
 
   public init(
-    engineProvider: @escaping @Sendable (SpeechEngineID) throws -> any SpeechEngine,
+    makeEngine: @escaping @Sendable (SpeechEngineID) throws -> any SpeechEngine,
     decoder: any AudioDecoder = WAVAudioDecoder(),
-    cleaner: (any TranscriptCleaner)? = nil,
-    tagger: LanguageTagger = LanguageTagger(),
-    clock: ContinuousClock = ContinuousClock()
+    cleaner: (any TranscriptCleaner)? = nil
   ) {
-    self.engineProvider = engineProvider
+    self.makeEngine = makeEngine
     self.decoder = decoder
     self.cleaner = cleaner
-    self.tagger = tagger
-    self.clock = clock
   }
 
   /// Audio files of the folder, sorted by name.
-  public static func audioFiles(in directory: URL) throws -> [URL] {
+  static func audioFiles(in directory: URL) throws -> [URL] {
     try FileManager.default.contentsOfDirectory(
       at: directory, includingPropertiesForKeys: nil, options: [.skipsHiddenFiles]
     )
@@ -38,7 +36,7 @@ public struct BakeoffRunner: Sendable {
   }
 
   /// `<name>.ref.txt` beside the audio or in `referenceDirectory`.
-  public static func reference(for audio: URL, referenceDirectory: URL?) -> String? {
+  static func reference(for audio: URL, referenceDirectory: URL?) -> String? {
     let name = audio.deletingPathExtension().lastPathComponent + ".ref.txt"
     let url = (referenceDirectory ?? audio.deletingLastPathComponent()).appendingPathComponent(name)
     return try? String(contentsOf: url, encoding: .utf8)
@@ -56,7 +54,7 @@ public struct BakeoffRunner: Sendable {
     }
     var rows: [BakeoffRow] = []
     for engineID in engines {
-      let engine = try engineProvider(engineID)
+      let engine = try makeEngine(engineID)
       try await engine.prepare()
       // One untimed pass over the first file: the first transcription of a
       // freshly loaded model carries the CoreML and ANE compile, which would
@@ -77,8 +75,8 @@ public struct BakeoffRunner: Sendable {
           file: file.lastPathComponent, engine: engineID, audioSeconds: audio.duration,
           wallSeconds: elapsed / .seconds(1), segmentCount: segments.count,
           wer: reference.map { WordErrorRate.compute(reference: $0, hypothesis: hypothesis) },
-          languageFlips: LanguageTagger.languageFlips(in: segments),
-          dominantLanguage: tagger.dominantLanguage(of: segments)?.rawValue)
+          languageFlips: tagger.languageFlips(in: segments),
+          dominantLanguage: tagger.dominantLanguage(of: segments))
         if let cleaner, let reference {
           let cleaned = try await Self.cleaned(segments, with: cleaner, tagger: tagger)
           row.cleanedWER = WordErrorRate.compute(reference: reference, hypothesis: cleaned)

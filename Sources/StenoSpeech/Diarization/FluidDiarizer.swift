@@ -2,24 +2,20 @@ import Foundation
 import StenoCore
 
 /// Knobs of the offline diarizer that Steno exposes. Everything else stays
-/// at FluidAudio's community defaults.
+/// at FluidAudio's community defaults; the sample clip length is core's
+/// contract (`SampleClipPicker.targetSeconds`), not a knob.
 public struct FluidDiarizerConfig: Sendable, Equatable {
   /// Passed to `OfflineDiarizerConfig.clustering.threshold`.
   public var clusteringThreshold: Double
   public var minSpeakers: Int?
   public var maxSpeakers: Int?
-  public var sampleClipSeconds: TimeInterval
-  public var minimumClipSeconds: TimeInterval
 
   public init(
-    clusteringThreshold: Double = 0.6, minSpeakers: Int? = nil, maxSpeakers: Int? = nil,
-    sampleClipSeconds: TimeInterval = 10, minimumClipSeconds: TimeInterval = 3
+    clusteringThreshold: Double = 0.6, minSpeakers: Int? = nil, maxSpeakers: Int? = nil
   ) {
     self.clusteringThreshold = clusteringThreshold
     self.minSpeakers = minSpeakers
     self.maxSpeakers = maxSpeakers
-    self.sampleClipSeconds = sampleClipSeconds
-    self.minimumClipSeconds = minimumClipSeconds
   }
 
   public static let `default` = FluidDiarizerConfig()
@@ -42,7 +38,7 @@ public struct FluidDiarizerConfig: Sendable, Equatable {
   /// caller: core's `Diarize` stage runs one lane per meeting, one meeting
   /// at a time, so no two calls are ever in flight on one diarizer. A second
   /// concurrent caller would need an in-flight guard here (follow-up).
-  final class OfflineDiarizerBox: @unchecked Sendable {
+  private final class OfflineDiarizerBox: @unchecked Sendable {
     private let manager: OfflineDiarizerManager
 
     init(config: OfflineDiarizerConfig, models: OfflineDiarizerModels) {
@@ -50,9 +46,9 @@ public struct FluidDiarizerConfig: Sendable, Equatable {
       manager.initialize(models: models)
     }
 
-    /// Runs the pipeline and maps the framework result straight into the
-    /// module's own turns and chunks, so no FluidAudio type appears in a
-    /// signature.
+    /// Runs the pipeline and copies the framework result field for field
+    /// into the module's own turns and chunks, so no FluidAudio type appears
+    /// in a signature; every decision about them lives in `DiarizationMapping`.
     func process(_ samples: [Float]) async throws -> (turns: [SpeakerTurn], chunks: [ClusterChunk])
     {
       let result = try await manager.process(audio: samples)
@@ -64,9 +60,9 @@ public struct FluidDiarizerConfig: Sendable, Equatable {
       let chunks = (result.chunkEmbeddings ?? []).map {
         ClusterChunk(
           speakerLabel: $0.speakerId, start: $0.startTimeSeconds, end: $0.endTimeSeconds,
-          embedding: $0.embedding256, quality: 1)
+          embedding: $0.embedding256)
       }
-      return (turns, DiarizationMapping.assigningQuality(to: chunks, from: turns))
+      return (turns, chunks)
     }
   }
 
@@ -74,25 +70,31 @@ public struct FluidDiarizerConfig: Sendable, Equatable {
   /// `OfflineDiarizerManager`, wrapped in an actor because the manager is
   /// not `Sendable`. Chunk embeddings are exposed so the cluster embedding
   /// is a normalised mean of unit vectors, not the VBx centroid.
-  public actor FluidDiarizer: Diarizer {
+  actor FluidDiarizer: Diarizer {
     /// Audio shorter than one embedding window has nothing to cluster;
     /// FluidAudio reports it as `noSpeechDetected`, so it is answered here
     /// without loading the models.
-    public static let minimumAudioSeconds: TimeInterval = 1
+    static let minimumAudioSeconds: TimeInterval = 1
 
-    public let config: FluidDiarizerConfig
+    let config: FluidDiarizerConfig
     private let models: ModelStore
     private var manager: OfflineDiarizerBox?
 
-    public init(models: ModelStore, config: FluidDiarizerConfig = .default) {
+    init(models: ModelStore, config: FluidDiarizerConfig = .default) {
       self.models = models
       self.config = config
     }
 
-    public func prepare() async throws {
-      guard manager == nil else { return }
+    func prepare() async throws {
+      _ = try await loaded()
+    }
+
+    /// Downloads the asset when needed, then loads the models from the
+    /// framework root (`load(from:)` takes the parent of the repository
+    /// folder).
+    private func loaded() async throws -> OfflineDiarizerBox {
+      if let manager { return manager }
       try await models.ensureInstalled(.offlineDiarizer)
-      // `load(from:)` takes the parent of the repository folder.
       let loaded = try await OfflineDiarizerModels.load(
         from: models.frameworkRoot(for: .offlineDiarizer))
       var fluidConfig = OfflineDiarizerConfig.default
@@ -100,24 +102,23 @@ public struct FluidDiarizerConfig: Sendable, Equatable {
       fluidConfig.clustering.minSpeakers = config.minSpeakers
       fluidConfig.clustering.maxSpeakers = config.maxSpeakers
       fluidConfig.exposeChunkEmbeddings = true
-      manager = OfflineDiarizerBox(config: fluidConfig, models: loaded)
+      let manager = OfflineDiarizerBox(config: fluidConfig, models: loaded)
+      self.manager = manager
+      return manager
     }
 
     /// Silence, room noise or a lane nobody spoke on is not a failed meeting:
     /// FluidAudio throws `noSpeechDetected` when no embedding survives, and
     /// that becomes a result with no speakers, like audio under
     /// `minimumAudioSeconds`.
-    public func diarize(_ audio: AudioBuffer16k) async throws -> DiarizationResult {
+    func diarize(_ audio: AudioBuffer16k) async throws -> DiarizationResult {
       guard audio.duration >= Self.minimumAudioSeconds else {
         return DiarizationResult(clusters: [])
       }
-      try await prepare()
-      guard let manager else { throw SpeechEngineError.notPrepared("fluid-diarizer") }
+      let manager = try await loaded()
       do {
         let (turns, chunks) = try await manager.process(audio.samples)
-        return DiarizationMapping.result(
-          turns: turns, chunks: chunks,
-          targetSeconds: config.sampleClipSeconds, minimumSeconds: config.minimumClipSeconds)
+        return DiarizationMapping.result(turns: turns, chunks: chunks)
       } catch OfflineDiarizationError.noSpeechDetected {
         return DiarizationResult(clusters: [])
       }

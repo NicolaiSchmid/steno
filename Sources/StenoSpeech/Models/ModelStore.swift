@@ -6,7 +6,9 @@ import Synchronization
 /// (`~/Library/Application Support/Steno/Models` unless `Settings.modelsDirectory`
 /// says otherwise). Downloads go through `ModelDownloading`; concurrent
 /// `ensure` calls for one asset share a single download and each sees its
-/// progress.
+/// progress. Install state is `isInstalled`; a settings pane derives
+/// `installed`, `downloading(fraction)` or `absent` from it and from whether
+/// its `ensure` stream is still open.
 public actor ModelStore {
   public nonisolated let directory: URL
   private let downloader: any ModelDownloading
@@ -51,7 +53,7 @@ public actor ModelStore {
     missingFiles(of: asset).isEmpty
   }
 
-  public nonisolated func installedAssets() -> [ModelAsset] {
+  nonisolated func installedAssets() -> [ModelAsset] {
     ModelAsset.allCases.filter(isInstalled)
   }
 
@@ -71,16 +73,12 @@ public actor ModelStore {
     return total
   }
 
-  /// Installs the asset if needed. The stream ends when the asset is on disk
-  /// and throws the downloader's error otherwise. An installed asset yields
-  /// one `installed` event and finishes.
+  /// Installs the asset if needed. The stream carries the downloader's
+  /// progress and ends when the asset is on disk; it throws the downloader's
+  /// error otherwise. For an installed asset it is already finished.
   public func ensure(_ asset: ModelAsset) -> AsyncThrowingStream<ModelDownloadProgress, any Error> {
     if isInstalled(asset) {
-      return AsyncThrowingStream { continuation in
-        continuation.yield(
-          ModelDownloadProgress(asset: asset, fractionCompleted: 1, phase: "installed"))
-        continuation.finish()
-      }
+      return AsyncThrowingStream { $0.finish() }
     }
     if let job = inFlight[asset] {
       return job.subscribe()
@@ -95,14 +93,12 @@ public actor ModelStore {
         try FileManager.default.createDirectory(
           at: asset.directory(under: root), withIntermediateDirectories: true)
         try await downloader.download(asset, under: root) { fraction, phase in
-          job.publish(
-            ModelDownloadProgress(asset: asset, fractionCompleted: fraction, phase: phase))
+          job.publish(ModelDownloadProgress(fractionCompleted: fraction, phase: phase))
         }
         let missing = self.missingFiles(of: asset)
         guard missing.isEmpty else {
-          throw ModelDownloadError.incomplete(asset, missing: missing)
+          throw StenoSpeechError.incompleteDownload(asset, missing: missing)
         }
-        job.publish(ModelDownloadProgress(asset: asset, fractionCompleted: 1, phase: "installed"))
         await self.finish(asset, job: job, result: .success(()))
       } catch {
         await self.finish(asset, job: job, result: .failure(error))
@@ -118,7 +114,7 @@ public actor ModelStore {
 
   /// Deletes the asset directory. Removing an asset mid-download is refused.
   public func remove(_ asset: ModelAsset) throws {
-    guard inFlight[asset] == nil else { throw ModelStoreError.downloadInProgress(asset) }
+    guard inFlight[asset] == nil else { throw StenoSpeechError.downloadInProgress(asset) }
     let target = directory(for: asset)
     if FileManager.default.fileExists(atPath: target.path) {
       try FileManager.default.removeItem(at: target)
@@ -151,16 +147,6 @@ public actor ModelStore {
       return false
     }
     return true
-  }
-}
-
-public enum ModelStoreError: Error, Sendable, Equatable, CustomStringConvertible {
-  case downloadInProgress(ModelAsset)
-
-  public var description: String {
-    switch self {
-    case .downloadInProgress(let asset): "\(asset.rawValue) is being downloaded"
-    }
   }
 }
 

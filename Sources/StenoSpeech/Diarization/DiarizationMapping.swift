@@ -6,10 +6,10 @@ import StenoCore
 /// first speech, with merged ranges, the normalised cluster embedding and
 /// the sample clip. Pure, so the mapping is tested without models.
 enum DiarizationMapping {
-  static func result(
-    turns: [SpeakerTurn], chunks: [ClusterChunk],
-    targetSeconds: TimeInterval = 10, minimumSeconds: TimeInterval = 3
-  ) -> DiarizationResult {
+  /// `chunks` arrive without a quality (the framework reports none per
+  /// chunk); each takes the quality of the turn it overlaps most first.
+  static func result(turns: [SpeakerTurn], chunks raw: [ClusterChunk]) -> DiarizationResult {
+    let chunks = assigningQuality(to: raw, from: turns)
     let sortedTurns = turns.filter { $0.duration > 0 }.sorted { $0.start < $1.start }
     var order: [String] = []
     var turnsByLabel: [String: [SpeakerTurn]] = [:]
@@ -37,9 +37,7 @@ enum DiarizationMapping {
             speakerLabel: label, start: $0.start, end: $0.end, embedding: [], quality: $0.quality)
         }
         : ownChunks
-      let choice = SampleClipPicker.pick(
-        ranges: ranges, chunks: scored, targetSeconds: targetSeconds,
-        minimumSeconds: minimumSeconds)
+      let choice = SampleClipPicker.pick(ranges: ranges, chunks: scored)
       return SpeakerCluster(
         label: "Speaker \(index + 1)",
         ranges: ranges,
@@ -63,8 +61,8 @@ enum DiarizationMapping {
     return result
   }
 
-  /// Chunk quality is not reported per chunk by the framework: each chunk
-  /// takes the quality of the turn it overlaps most, 1 when none overlaps.
+  /// Each chunk takes the quality of the turn of its speaker it overlaps
+  /// most, 1 when none overlaps.
   static func assigningQuality(to chunks: [ClusterChunk], from turns: [SpeakerTurn])
     -> [ClusterChunk]
   {

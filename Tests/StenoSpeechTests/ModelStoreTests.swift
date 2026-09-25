@@ -18,21 +18,18 @@ import Testing
 
     var seen: [ModelDownloadProgress] = []
     for try await progress in await store.ensure(.offlineDiarizer) { seen.append(progress) }
-    #expect(seen.map(\.fractionCompleted) == [0.25, 0.75, 1])
-    #expect(seen.map(\.phase) == ["a", "b", "installed"])
-    #expect(seen.allSatisfy { $0.asset == .offlineDiarizer })
+    // The downloader's own events, then the end of the stream is the install.
+    #expect(seen.map(\.fractionCompleted) == [0.25, 0.75])
+    #expect(seen.map(\.phase) == ["a", "b"])
     #expect(store.isInstalled(.offlineDiarizer))
     #expect(store.installedAssets() == [.offlineDiarizer])
     #expect(
       store.directory(for: .offlineDiarizer).path.hasSuffix("fluidaudio/speaker-diarization"))
 
-    // Installed: one synthetic event, no second download.
+    // Installed: an already finished stream, no event, no second download.
     var again: [ModelDownloadProgress] = []
     for try await progress in await store.ensure(.offlineDiarizer) { again.append(progress) }
-    #expect(
-      again == [
-        ModelDownloadProgress(asset: .offlineDiarizer, fractionCompleted: 1, phase: "installed")
-      ])
+    #expect(again.isEmpty)
     #expect(await downloader.downloads.count == 1)
   }
 
@@ -48,8 +45,8 @@ import Testing
     async let secondEvents = collect(second)
     await gate.open()
     let (a, b) = try await (firstEvents, secondEvents)
-    #expect(a.last?.phase == "installed")
-    #expect(b.last?.phase == "installed")
+    #expect(a.last?.phase == "half", "both streams ended after the one download")
+    #expect(b.last?.phase == "half")
     #expect(a.map(\.fractionCompleted).contains(0.5))
     #expect(b.map(\.fractionCompleted).contains(0.5), "late subscribers see the latest progress")
     #expect(await downloader.downloads.count == 1)
@@ -75,7 +72,7 @@ import Testing
     let downloader = FakeModelDownloader(writesMarkers: false)
     let (store, directory) = try makeStore(downloader)
     defer { try? FileManager.default.removeItem(at: directory) }
-    await #expect(throws: ModelDownloadError.self) {
+    await #expect(throws: StenoSpeechError.self) {
       try await store.ensureInstalled(.whisperLargeV3Turbo)
     }
   }
@@ -100,7 +97,7 @@ import Testing
     let stream = await store.ensure(.offlineDiarizer)
     async let events = collect(stream)
     for _ in 0..<50 { await Task.yield() }
-    await #expect(throws: ModelStoreError.downloadInProgress(.offlineDiarizer)) {
+    await #expect(throws: StenoSpeechError.downloadInProgress(.offlineDiarizer)) {
       try await store.remove(.offlineDiarizer)
     }
     await gate.open()
@@ -234,8 +231,8 @@ import Testing
     #expect(store.installedAssets().isEmpty)
     await gate.open()
     let (a, b) = try await (diarizerEvents, whisperEvents)
-    #expect(a.last?.asset == .offlineDiarizer && a.last?.phase == "installed")
-    #expect(b.last?.asset == .whisperLargeV3Turbo && b.last?.phase == "installed")
+    #expect(a.map(\.phase) == ["downloading", "done"])
+    #expect(b.map(\.phase) == ["downloading", "done"])
     #expect(Set(store.installedAssets()) == [.offlineDiarizer, .whisperLargeV3Turbo])
   }
 

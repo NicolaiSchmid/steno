@@ -6,12 +6,10 @@ import Foundation
 /// and the marker is kept for a source that does not. Punctuation-only tokens
 /// glue to the word before them; tokens that are only a boundary carry it to
 /// the next piece.
-public struct TokenAggregator: Sendable {
-  public static let wordBoundary: Character = "\u{2581}"
+struct TokenAggregator: Sendable {
+  static let wordBoundary: Character = "\u{2581}"
 
-  public init() {}
-
-  public func words(from tokens: [TimedWord]) -> [TimedWord] {
+  func words(from tokens: [TimedWord]) -> [TimedWord] {
     var words: [TimedWord] = []
     var current: TimedWord?
     var confidences: [Float] = []

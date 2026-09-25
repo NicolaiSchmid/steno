@@ -28,7 +28,7 @@ struct ParakeetMapping: Sendable {
   func segments(
     tokens: [TimedWord], text: String, duration: TimeInterval, hint: Locale.Language?
   ) -> [RawSegment] {
-    var segments = segmenter.segments(fromWords: aggregator.words(from: tokens))
+    var segments = segmenter.segments(from: aggregator.words(from: tokens))
     let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
     if segments.isEmpty, !trimmed.isEmpty {
       segments = [RawSegment(start: 0, end: max(0, duration), text: trimmed)]

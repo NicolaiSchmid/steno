@@ -149,7 +149,7 @@ import Testing
     func bakeoffOverTheFixtureFolderProducesFiveRows() async throws {
       let (store, cleanup) = try Self.modelStore()
       defer { cleanup() }
-      let runner = BakeoffRunner(engineProvider: { try makeSpeechEngine($0, models: store) })
+      let runner = BakeoffRunner(makeEngine: { try makeSpeechEngine($0, models: store) })
       let report = try await runner.run(
         audioDirectory: Fixtures.url("speech"), engines: [.parakeetV3])
       print(report.markdown())

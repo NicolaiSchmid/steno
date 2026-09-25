@@ -13,6 +13,15 @@ public enum SpeechEngineID: String, Sendable, CaseIterable, Codable, Hashable {
   /// The engines the settings pane offers.
   public static let userSelectable: [SpeechEngineID] = [.parakeetV3, .whisperKitLargeV3Turbo]
 
+  /// The id stored in `Settings.speechEngineID`; throws `unknownEngine`
+  /// with the known ids in its description.
+  public init(settingsValue: String) throws {
+    guard let id = SpeechEngineID(rawValue: settingsValue) else {
+      throw StenoSpeechError.unknownEngine(settingsValue)
+    }
+    self = id
+  }
+
   /// The model the engine loads; the diarizer is separate.
   public var asset: ModelAsset {
     switch self {
@@ -23,18 +32,17 @@ public enum SpeechEngineID: String, Sendable, CaseIterable, Codable, Hashable {
     }
   }
 
-  /// Languages as tags; engines expose them as `Locale.Language` through
-  /// `supportedLanguages`.
-  public var supportedLanguageTags: Set<LanguageTag> {
+  public var supportedLanguages: Set<Locale.Language> {
+    Set(supportedLanguageTags.map(\.language))
+  }
+
+  /// Languages as tags; `WhisperMapping` reduces hints against them.
+  var supportedLanguageTags: Set<LanguageTag> {
     switch self {
     case .parakeetV3, .parakeetUltra: Self.parakeetV3Languages
     case .parakeetDE: ["de"]
     case .whisperKitLargeV3Turbo: Self.whisperLanguages
     }
-  }
-
-  public var supportedLanguages: Set<Locale.Language> {
-    Set(supportedLanguageTags.map(\.language))
   }
 
   /// The 25 European languages of Parakeet TDT v3 (NVIDIA model card).
@@ -56,7 +64,8 @@ public enum SpeechEngineID: String, Sendable, CaseIterable, Codable, Hashable {
 }
 
 /// Builds the engine for an id over one `ModelStore`. The app injects this
-/// as a closure so it never imports the frameworks itself.
+/// as a closure so it never imports the frameworks itself. Building never
+/// touches the models; `prepare` downloads and loads them.
 public func makeSpeechEngine(_ id: SpeechEngineID, models: ModelStore) throws -> any SpeechEngine {
   #if canImport(FluidAudio) && canImport(WhisperKit)
     switch id {
@@ -64,7 +73,7 @@ public func makeSpeechEngine(_ id: SpeechEngineID, models: ModelStore) throws ->
     case .whisperKitLargeV3Turbo: return WhisperKitEngine(models: models)
     }
   #else
-    throw SpeechEngineError.unavailable(id)
+    throw StenoSpeechError.unsupportedPlatform(id.asset)
   #endif
 }
 
@@ -76,14 +85,6 @@ public func makeDiarizer(models: ModelStore, config: FluidDiarizerConfig = .defa
   #if canImport(FluidAudio)
     return FluidDiarizer(models: models, config: config)
   #else
-    throw SpeechEngineError.unavailable(.parakeetV3)
+    throw StenoSpeechError.unsupportedPlatform(.offlineDiarizer)
   #endif
-}
-
-/// `makeSpeechEngine` for the string stored in `Settings.speechEngineID`.
-public func makeSpeechEngine(id rawID: String, models: ModelStore) throws -> any SpeechEngine {
-  guard let id = SpeechEngineID(rawValue: rawID) else {
-    throw SpeechEngineError.unknownEngine(rawID)
-  }
-  return try makeSpeechEngine(id, models: models)
 }

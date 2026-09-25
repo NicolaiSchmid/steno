@@ -98,7 +98,7 @@ import Testing
     let german = FakeSpeechEngine(id: "parakeet-v3", language: "de")
     let english = FakeSpeechEngine(id: "whisperkit-large-v3-turbo", language: "en")
     let runner = BakeoffRunner(
-      engineProvider: { id in id == .parakeetV3 ? german : english },
+      makeEngine: { id in id == .parakeetV3 ? german : english },
       cleaner: PassthroughCleaner())
     let output = directory.appendingPathComponent("out", isDirectory: true)
     let report = try await runner.run(
@@ -162,7 +162,7 @@ import Testing
     }
     try Data("richtig gesagt".utf8).write(to: directory.appendingPathComponent("sweep-3s.ref.txt"))
     let runner = BakeoffRunner(
-      engineProvider: { _ in FakeSpeechEngine(id: "parakeet-v3", language: "de") },
+      makeEngine: { _ in FakeSpeechEngine(id: "parakeet-v3", language: "de") },
       cleaner: RewritingCleaner(replacement: "richtig gesagt"))
     let report = try await runner.run(audioDirectory: directory, engines: [.parakeetV3])
     let sweep = try #require(report.rows.first { $0.file == "sweep-3s.wav" })
@@ -176,14 +176,14 @@ import Testing
     func segment(_ language: LanguageTag?) -> RawSegment {
       RawSegment(start: 0, end: 1, text: "", language: language)
     }
-    #expect(LanguageTagger.languageFlips(in: [segment("de"), segment("en"), segment("de")]) == 2)
+    #expect(LanguageTagger().languageFlips(in: [segment("de"), segment("en"), segment("de")]) == 2)
     #expect(
-      LanguageTagger.languageFlips(in: [segment("de"), segment(nil), segment("de")]) == 0,
+      LanguageTagger().languageFlips(in: [segment("de"), segment(nil), segment("de")]) == 0,
       "untagged segments do not flip")
-    #expect(LanguageTagger.languageFlips(in: [segment("de"), segment(nil), segment("en")]) == 1)
-    #expect(LanguageTagger.languageFlips(in: [segment("de")]) == 0)
+    #expect(LanguageTagger().languageFlips(in: [segment("de"), segment(nil), segment("en")]) == 1)
+    #expect(LanguageTagger().languageFlips(in: [segment("de")]) == 0)
     #expect(
-      LanguageTagger.languageFlips(in: [segment("en-US"), segment("en")]) == 1,
+      LanguageTagger().languageFlips(in: [segment("en-US"), segment("en")]) == 1,
       "tags compare verbatim")
   }
 
@@ -193,7 +193,7 @@ import Testing
     defer { try? FileManager.default.removeItem(at: directory) }
     try FileManager.default.copyItem(
       at: Fixtures.url("audio/sweep-3s.wav"), to: directory.appendingPathComponent("sweep-3s.wav"))
-    let runner = BakeoffRunner(engineProvider: { _ in FakeSpeechEngine(failure: Boom()) })
+    let runner = BakeoffRunner(makeEngine: { _ in FakeSpeechEngine(failure: Boom()) })
     await #expect(throws: Boom.self) {
       _ = try await runner.run(audioDirectory: directory, engines: [.parakeetV3])
     }

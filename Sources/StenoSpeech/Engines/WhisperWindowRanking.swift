@@ -4,18 +4,13 @@ import Foundation
 /// `count` most energetic `windowSeconds` windows of the buffer, by RMS,
 /// highest first. No VAD model needed; speech-dense windows beat silence and
 /// room noise by a wide margin.
-public enum WhisperWindowRanking {
-  public struct Window: Sendable, Equatable {
-    public var samples: Range<Int>
-    public var rms: Float
-
-    public init(samples: Range<Int>, rms: Float) {
-      self.samples = samples
-      self.rms = rms
-    }
+enum WhisperWindowRanking {
+  struct Window: Sendable, Equatable {
+    var samples: Range<Int>
+    var rms: Float
   }
 
-  public static func topWindows(
+  static func topWindows(
     samples: [Float], sampleRate: Double = 16_000, windowSeconds: TimeInterval = 30,
     count: Int = 3
   ) -> [Window] {
@@ -43,7 +38,7 @@ public enum WhisperWindowRanking {
 
   /// Majority vote over detected languages; ties go to the earliest entry,
   /// which is the most energetic window when the input is `topWindows` order.
-  public static func majority(_ languages: [String]) -> String? {
+  static func majority(_ languages: [String]) -> String? {
     var counts: [String: Int] = [:]
     var firstSeen: [String: Int] = [:]
     for (index, language) in languages.enumerated() {

@@ -210,15 +210,14 @@ import Testing
     return (ModelStore(directory: directory, downloader: FakeModelDownloader()), directory)
   }
 
-  @Test func unknownIDsAreRejectedWithTheKnownOnesListed() throws {
-    let (store, directory) = try makeStore()
-    defer { try? FileManager.default.removeItem(at: directory) }
-    let error = #expect(throws: SpeechEngineError.self) {
-      _ = try makeSpeechEngine(id: "parakeet-v9", models: store)
+  @Test func unknownSettingsValuesAreRejectedWithTheKnownOnesListed() throws {
+    let error = #expect(throws: StenoSpeechError.self) {
+      _ = try SpeechEngineID(settingsValue: "parakeet-v9")
     }
     #expect(error == .unknownEngine("parakeet-v9"))
-    let message = String(describing: error ?? .notPrepared(""))
+    let message = String(describing: error ?? .unknownEngine(""))
     for id in SpeechEngineID.allCases { #expect(message.contains(id.rawValue)) }
+    #expect(try SpeechEngineID(settingsValue: "parakeet-v3") == .parakeetV3)
   }
 
   @Test func everyIDBuildsItsEngineLazilyOrFailsWhereTheFrameworksAreMissing() throws {
@@ -226,16 +225,19 @@ import Testing
     defer { try? FileManager.default.removeItem(at: directory) }
     for id in SpeechEngineID.allCases {
       #if canImport(FluidAudio) && canImport(WhisperKit)
-        let engine = try makeSpeechEngine(id: id.rawValue, models: store)
+        let engine = try makeSpeechEngine(id, models: store)
         #expect(engine.id == id.rawValue)
         #expect(engine.supportedLanguages == id.supportedLanguages, "\(id)")
         _ = try makeDiarizer(models: store)
       #else
-        let error = #expect(throws: SpeechEngineError.self) {
+        let error = #expect(throws: StenoSpeechError.self) {
           _ = try makeSpeechEngine(id, models: store)
         }
-        #expect(error == .unavailable(id))
-        #expect(throws: SpeechEngineError.self) { _ = try makeDiarizer(models: store) }
+        #expect(error == .unsupportedPlatform(id.asset))
+        let diarizer = #expect(throws: StenoSpeechError.self) {
+          _ = try makeDiarizer(models: store)
+        }
+        #expect(diarizer == .unsupportedPlatform(.offlineDiarizer))
       #endif
     }
     // Building an engine never touches the models: downloads happen in
@@ -286,7 +288,6 @@ import Testing
     let config = FluidDiarizerConfig.default
     #expect(config.clusteringThreshold == 0.6)
     #expect(config.minSpeakers == nil && config.maxSpeakers == nil)
-    #expect(config.sampleClipSeconds == 10)
-    #expect(config.minimumClipSeconds == 3)
+    #expect(config == FluidDiarizerConfig(clusteringThreshold: 0.6))
   }
 }

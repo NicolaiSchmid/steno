@@ -8,9 +8,9 @@
   /// script, so German and English both pass and code switching comes out
   /// mixed, which is what Denglish needs. Tokens are joined into words,
   /// words into segments, segments tagged with a language.
-  public actor ParakeetEngine: SpeechEngine {
-    public nonisolated let id: String
-    public nonisolated let supportedLanguages: Set<Locale.Language>
+  actor ParakeetEngine: SpeechEngine {
+    nonisolated let id: String
+    nonisolated let supportedLanguages: Set<Locale.Language>
 
     private let engine: SpeechEngineID
     private let models: ModelStore
@@ -19,18 +19,22 @@
 
     /// `id` is one of the three Parakeet engines. The German fine-tune has
     /// the v3 layout and loads like v3 from its own asset directory.
-    public init(id engine: SpeechEngineID, models: ModelStore) {
+    init(id engine: SpeechEngineID, models: ModelStore) {
       self.engine = engine
       self.models = models
       id = engine.rawValue
       supportedLanguages = engine.supportedLanguages
     }
 
+    func prepare() async throws {
+      _ = try await loaded()
+    }
+
     /// Downloads the asset when needed, then compiles and loads the models
     /// from their directory. `loadLocal` never touches the network, so a
     /// corrupt install fails here instead of re-downloading behind our back.
-    public func prepare() async throws {
-      guard manager == nil else { return }
+    private func loaded() async throws -> AsrManager {
+      if let manager { return manager }
       try await models.ensureInstalled(engine.asset)
       let loaded = try AsrModels.loadLocal(
         from: models.directory(for: engine.asset),
@@ -38,13 +42,11 @@
       let manager = AsrManager(config: .default)
       try await manager.loadModels(loaded)
       self.manager = manager
+      return manager
     }
 
-    public func transcribe(_ audio: AudioBuffer16k, hint: Locale.Language?) async throws
-      -> [RawSegment]
-    {
-      try await prepare()
-      guard let manager else { throw SpeechEngineError.notPrepared(id) }
+    func transcribe(_ audio: AudioBuffer16k, hint: Locale.Language?) async throws -> [RawSegment] {
+      let manager = try await loaded()
       guard !audio.samples.isEmpty else { return [] }
       let layers = await manager.decoderLayerCount
       var state = try TdtDecoderState(decoderLayers: layers)

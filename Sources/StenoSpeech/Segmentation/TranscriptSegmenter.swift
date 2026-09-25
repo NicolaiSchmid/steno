@@ -5,17 +5,17 @@ import StenoCore
 /// longer than `splitGapSeconds`, after sentence-final punctuation, and
 /// whenever the next word would push the segment past `maxSegmentSeconds`.
 /// `language` stays nil; `LanguageTagger` fills it.
-public struct TranscriptSegmenter: Sendable {
-  public var maxSegmentSeconds: TimeInterval
-  public var splitGapSeconds: TimeInterval
-  public static let sentenceEnd: Set<Character> = [".", "?", "!"]
+struct TranscriptSegmenter: Sendable {
+  var maxSegmentSeconds: TimeInterval
+  var splitGapSeconds: TimeInterval
+  static let sentenceEnd: Set<Character> = [".", "?", "!"]
 
-  public init(maxSegmentSeconds: TimeInterval = 30, splitGapSeconds: TimeInterval = 0.7) {
+  init(maxSegmentSeconds: TimeInterval = 30, splitGapSeconds: TimeInterval = 0.7) {
     self.maxSegmentSeconds = maxSegmentSeconds
     self.splitGapSeconds = splitGapSeconds
   }
 
-  public func segments(fromWords words: [TimedWord]) -> [RawSegment] {
+  func segments(from words: [TimedWord]) -> [RawSegment] {
     var segments: [RawSegment] = []
     var current: [TimedWord] = []
 

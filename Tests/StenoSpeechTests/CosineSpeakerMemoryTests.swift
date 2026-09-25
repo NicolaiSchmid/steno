@@ -64,9 +64,15 @@ import Testing
 
     for _ in 0..<5 { try await memory.enroll(embedding(1), as: anna) }
     stored = try #require(try await store.person(id: anna.id))
-    #expect(stored.sampleCount == 4, "count is capped at maxSamples + 1")
+    #expect(stored.sampleCount == 7, "the count keeps counting; only the weight is capped")
     let drifted = try #require(stored.embedding?.values)
     #expect(drifted[1] > 0.9, "a capped mean drifts toward the new voice")
+    // With weight capped at 3, the seventh sample still moves the mean by a
+    // quarter; an uncapped mean of seven would move it by a seventh.
+    let before = drifted
+    try await memory.enroll(embedding(3), as: anna)
+    let after = try #require(try await store.person(id: anna.id)?.embedding?.values)
+    #expect(after[3] / before[1] > 0.3, "\(after[3]) against \(before[1])")
   }
 
   /// The sample's scale is not a weight: enrolling a vector ten times

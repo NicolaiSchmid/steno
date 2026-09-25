@@ -103,7 +103,7 @@ private final class OverrideTable: Sendable {
         do {
           try await LiveModelDownloader().download(.parakeetV3, under: root) { _, _ in }
         } catch {
-          await log.record("second failed: \(error is ModelDownloadError)")
+          await log.record("second failed: \(error is StenoSpeechError)")
         }
       }()
       for _ in 0..<50 { await Task.yield() }
