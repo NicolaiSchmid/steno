@@ -137,6 +137,16 @@ public final class LaneRingBuffer: @unchecked Sendable {
     return skipped
   }
 
+  /// Consumer side, not real-time: takes everything queued as an array (the
+  /// permission probe inspects what the tap delivered).
+  public func drainAll() -> [Float] {
+    let count = availableToRead
+    guard count > 0 else { return [] }
+    var samples = [Float](repeating: 0, count: count)
+    samples.withUnsafeMutableBufferPointer { _ = read(into: $0.baseAddress!, count: count) }
+    return samples
+  }
+
   /// Empties the ring and zeroes its storage so a restart never replays stale
   /// frames. Only while no producer is running.
   public func clear() {

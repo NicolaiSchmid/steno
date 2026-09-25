@@ -29,23 +29,33 @@ public struct CaptureConfiguration: Sendable, Equatable {
   /// The audio folder; the per-meeting folder
   /// (`RecordingLayout(audioFolder:meetingID:)`) is created inside it.
   public var outputDirectory: URL
+  /// Developer tools only: record these lanes instead of the mode's
+  /// (`[.system]` for the Continuity spike). The app never sets it.
+  public var laneOverride: [AudioLane]?
 
   public init(
     mode: CaptureMode,
     inputDeviceUID: String? = nil,
     echoCancellation: Bool = true,
     keepRawMicLane: Bool = false,
-    outputDirectory: URL
+    outputDirectory: URL,
+    laneOverride: [AudioLane]? = nil
   ) {
     self.mode = mode
     self.inputDeviceUID = inputDeviceUID
     self.echoCancellation = echoCancellation
     self.keepRawMicLane = keepRawMicLane
     self.outputDirectory = outputDirectory
+    self.laneOverride = laneOverride
   }
 
-  /// Echo cancellation runs only in a call with two lanes.
-  public var usesEchoCancellation: Bool { mode == .call && echoCancellation }
+  /// The lanes a session records, in master channel order.
+  public var lanes: [AudioLane] { laneOverride ?? mode.lanes }
+
+  /// Echo cancellation runs only with both a mic and a system lane.
+  public var usesEchoCancellation: Bool {
+    echoCancellation && lanes.contains(.mic) && lanes.contains(.system)
+  }
 }
 
 public enum CaptureError: Error, Sendable, Equatable, Hashable, CustomStringConvertible {

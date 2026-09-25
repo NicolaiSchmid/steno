@@ -122,7 +122,7 @@ public actor CaptureSession {
     default: throw CaptureError.invalidState("start while \(state)")
     }
     state = .starting
-    let lanes = configuration.mode.lanes
+    let lanes = configuration.lanes
     let layout = RecordingLayout(audioFolder: configuration.outputDirectory, meetingID: meetingID)
     let keepRaw = configuration.keepRawMicLane && lanes.contains(.mic)
 
@@ -201,7 +201,7 @@ public actor CaptureSession {
     } catch {
       throw CaptureError.writerFailed(String(describing: error))
     }
-    let lanes = configuration.mode.lanes
+    let lanes = configuration.lanes
     var dropped: [AudioLane: Int] = [:]
     for (lane, samples) in active.sink.droppedSamples {
       dropped[lane, default: 0] += samples / StenoAudio.frameSize
