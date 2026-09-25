@@ -14,8 +14,7 @@
     private var isDestroyed = false
 
     init(excluding processObjects: [AudioObjectID], name: String = "Steno system lane") throws {
-      let description = CATapDescription(
-        stereoGlobalTapButExcludeProcesses: processObjects.map { NSNumber(value: $0) })
+      let description = CATapDescription(stereoGlobalTapButExcludeProcesses: processObjects)
       description.name = name
       description.isPrivate = true
       description.muteBehavior = .unmuted
