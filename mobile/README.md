@@ -5,8 +5,38 @@ the device, and hand it to the paired Mac over the local network for
 processing. No account, no backend, no notes on the phone. Scope and the
 decisions behind it: [`.plans/2026-09-24-initial-scope.md`](../.plans/2026-09-24-initial-scope.md).
 
-Status: scaffold only. The app builds a themed shell with one placeholder
-screen. Recording, the local queue and Bonjour handover are separate plans.
+Status: the phone side of
+[`.plans/2026-09-25-phone-handover.md`](../.plans/2026-09-25-phone-handover.md)
+is implemented and waits for the Mac listener (`Sources/StenoHandover`). The
+app records AAC `.m4a` with expo-audio, keeps a JSON-indexed queue in
+`Documents/queue/`, pairs with the Mac by scanning its QR code, and uploads in
+16 MiB chunks over a background `URLSession` that pins the Mac's certificate.
+
+## How the handover works
+
+- `modules/steno-link/` is a local Expo module (Swift, autolinked from
+  `./modules`). It browses `_steno._tcp` with `NWBrowser`, resolves the Mac,
+  performs small pinned JSON requests, runs the background upload session
+  `uno.schmid.steno.upload`, and hashes files with streaming SHA-256.
+  `ios/PinnedTrustEvaluator.swift` is the canonical pinning code; the Swift
+  package's handover tests symlink to it. The Swift compiles only during
+  `expo prebuild` on a Mac; CI checks the TypeScript around it.
+- `modules/steno-link/src/wire.ts` mirrors the StenoCore wire types by name
+  (`RecordingMetadata`, `RecordingStatus`, `PairRequest`, `PairResponse`),
+  camelCase JSON, `Data` as standard base64. Only the QR URL uses base64url.
+- `src/features/queue/` holds the queue index (pure state machine) and its
+  atomic storage; `src/features/sync/` the planner and coordinator;
+  `src/features/pairing/` the QR parser, pairing sequence and sheet;
+  `src/features/recording/` the expo-audio wrapper and crash recovery;
+  `src/features/recorder/` the screen.
+- Everything deterministic is under vitest (`pnpm test`): wire encoding,
+  queue index and storage, pairing payload parsing and fingerprint comparison,
+  discovery registry, pairing sequence, planner and backoff, version gate,
+  formatters, recovery. Anything touching a device (recording an hour locked,
+  a real pairing, uploads with the phone in a pocket) is a manual check listed
+  in the plan.
+- iOS 18.6 or later is required at runtime (Local Network privilege bug in
+  earlier 18.x); older builds see an update screen.
 
 ## Requirements
 
