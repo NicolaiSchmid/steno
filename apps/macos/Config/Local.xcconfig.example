@@ -1,0 +1,11 @@
+// Copy to Local.xcconfig (git-ignored) to override Debug settings on one
+// machine. Everything here is optional.
+
+// Sign Debug builds with an Apple Development identity so TCC remembers the
+// app across rebuilds (ad-hoc signatures are new to TCC every time).
+// DEVELOPMENT_TEAM = KQB68F43PW
+// CODE_SIGN_IDENTITY = Apple Development
+
+// The Sparkle feed of a Debug build is not an xcconfig matter: run
+// `defaults write uno.schmid.steno.mac STENO_FEED_URL http://127.0.0.1:8000/appcast.xml`
+// and UpdaterController serves that URL instead of SUFeedURL (Debug only).

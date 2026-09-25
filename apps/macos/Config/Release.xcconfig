@@ -1,0 +1,17 @@
+#include "Base.xcconfig"
+
+// Developer ID, hardened runtime, timestamped signature. release.yml imports
+// the certificate into a throwaway keychain; `build-release.sh` archives,
+// exports with Config/ExportOptions.plist and verifies the signature.
+CODE_SIGN_STYLE = Manual
+CODE_SIGN_IDENTITY = Developer ID Application
+CODE_SIGNING_REQUIRED = YES
+CODE_SIGNING_ALLOWED = YES
+ENABLE_HARDENED_RUNTIME = YES
+OTHER_CODE_SIGN_FLAGS = --timestamp
+PROVISIONING_PROFILE_SPECIFIER =
+SWIFT_OPTIMIZATION_LEVEL = -O
+SWIFT_COMPILATION_MODE = wholemodule
+DEBUG_INFORMATION_FORMAT = dwarf-with-dsym
+COPY_PHASE_STRIP = NO
+STRIP_INSTALLED_PRODUCT = YES

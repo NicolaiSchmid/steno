@@ -166,3 +166,115 @@ jobs:
             test-results/junit*.xml
             Tests/Fixtures/**/*.actual
           if-no-files-found: error
+
+  # The macOS app: xcodegen generates the project (git-ignored), xcodebuild
+  # compiles the app against the local package and Sparkle with an ad-hoc
+  # signature (Debug: hardened runtime off, so no certificate is needed),
+  # then the hostless unit tests and the UI smoke test run separately so a
+  # UI-automation failure on the hosted runner (spike S1) is attributable.
+  # Runs beside `package`, not after it, so a lint failure there never hides
+  # an app build failure and the two long builds overlap. DerivedData is
+  # cached so FluidAudio and WhisperKit compile once per dependency change.
+  app:
+    name: Build and test macOS app
+    runs-on: ${{ fromJSON(vars.MACOS_RUNS_ON || '"macos-15"') }}
+    timeout-minutes: 90
+    env:
+      XCODEBUILD_FLAGS: >-
+        -project apps/macos/Steno.xcodeproj
+        -scheme Steno
+        -configuration Debug
+        -destination platform=macOS,arch=arm64
+        -derivedDataPath apps/macos/build/DerivedData
+        -skipPackagePluginValidation
+        -skipMacroValidation
+        CODE_SIGN_IDENTITY=-
+        CODE_SIGN_STYLE=Manual
+        DEVELOPMENT_TEAM=
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: maxim-lobanov/setup-xcode@v1
+        if: runner.environment == 'github-hosted'
+        with:
+          xcode-version: '16.4'
+
+      - name: Swift version
+        id: swift
+        run: |
+          swift --version
+          version="$(swift --version 2>&1 | head -n 1 | tr -c 'A-Za-z0-9.\n' '-')"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Install xcodegen
+        run: apps/macos/scripts/install-xcodegen.sh
+
+      - name: Cache DerivedData
+        uses: actions/cache@v4
+        with:
+          path: |
+            apps/macos/build/DerivedData/SourcePackages
+            apps/macos/build/DerivedData/Build
+          key: steno-app-${{ runner.os }}-${{ steps.swift.outputs.version }}-${{ hashFiles('apps/macos/project.yml', 'Package.swift') }}-${{ hashFiles('Sources/**', 'apps/macos/**') }}
+          restore-keys: |
+            steno-app-${{ runner.os }}-${{ steps.swift.outputs.version }}-${{ hashFiles('apps/macos/project.yml', 'Package.swift') }}-
+            steno-app-${{ runner.os }}-${{ steps.swift.outputs.version }}-
+
+      - name: Generate project
+        run: |
+          xcodegen generate --spec apps/macos/project.yml
+          test -d apps/macos/Steno.xcodeproj
+          plutil -lint apps/macos/Steno/Info.plist
+
+      - name: Resolve packages
+        run: |
+          # shellcheck disable=SC2086
+          xcodebuild -resolvePackageDependencies $XCODEBUILD_FLAGS
+
+      # xcodebuild's full log goes to a file (uploaded below); the console
+      # shows compiler diagnostics and the result line only.
+      - name: Build for testing
+        run: |
+          set -o pipefail
+          mkdir -p apps/macos/build
+          # shellcheck disable=SC2086
+          xcodebuild build-for-testing $XCODEBUILD_FLAGS 2>&1 | tee apps/macos/build/build.log | grep -E --line-buffered '(error:|warning: .*apps/macos|\*\* .* \*\*)' || true
+          grep -q '\*\* TEST BUILD SUCCEEDED \*\*' apps/macos/build/build.log
+
+      - name: Unit tests
+        id: unit
+        run: |
+          set -o pipefail
+          # shellcheck disable=SC2086
+          xcodebuild test-without-building $XCODEBUILD_FLAGS \
+            -only-testing:StenoTests \
+            -resultBundlePath apps/macos/build/unit.xcresult 2>&1 | tee apps/macos/build/unit.log | grep -E --line-buffered '(Test Case|Test Suite|error:|\*\* )' || true
+          grep -q '\*\* TEST EXECUTE SUCCEEDED \*\*' apps/macos/build/unit.log
+
+      # Spike S1: XCUITest on the hosted runner. If this step fails with the
+      # automation-mode timeout, the smoke test becomes Forge-only and the
+      # summary lists it as skipped with that reason.
+      - name: UI smoke test
+        id: ui
+        if: success() || steps.unit.outcome == 'failure'
+        run: |
+          set -o pipefail
+          # shellcheck disable=SC2086
+          xcodebuild test-without-building $XCODEBUILD_FLAGS \
+            -only-testing:StenoUITests \
+            -resultBundlePath apps/macos/build/ui.xcresult 2>&1 | tee apps/macos/build/ui.log | grep -E --line-buffered '(Test Case|Test Suite|error:|\*\* )' || true
+          grep -q '\*\* TEST EXECUTE SUCCEEDED \*\*' apps/macos/build/ui.log
+
+      - name: Test summary
+        if: always()
+        run: python3 apps/macos/scripts/xcresult-summary.py apps/macos/build/unit.xcresult apps/macos/build/ui.xcresult
+
+      - name: Upload logs and result bundles
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-app-output
+          path: |
+            apps/macos/build/*.log
+            apps/macos/build/*.xcresult
+          if-no-files-found: warn
