@@ -21,7 +21,7 @@ public enum WAVWriter {
   {
     var data = header(
       formatTag: 1, channels: channels, sampleRate: sampleRate, bytesPerSample: 2,
-      frameCount: samples.count)
+      sampleCount: samples.count)
     for sample in samples {
       append(UInt16(bitPattern: sample), to: &data)
     }
@@ -32,7 +32,7 @@ public enum WAVWriter {
   public static func float32Data(_ samples: [Float]) -> Data {
     var data = header(
       formatTag: 3, channels: 1, sampleRate: sampleRate, bytesPerSample: 4,
-      frameCount: samples.count)
+      sampleCount: samples.count)
     for sample in samples {
       append(sample.bitPattern, to: &data)
     }
@@ -46,11 +46,12 @@ public enum WAVWriter {
     }
   }
 
-  /// RIFF, `fmt ` and `data` chunk headers, with room reserved for the samples.
+  /// RIFF, `fmt ` and `data` chunk headers for `sampleCount` interleaved
+  /// samples, with room reserved for them.
   private static func header(
-    formatTag: UInt16, channels: Int, sampleRate: Int, bytesPerSample: Int, frameCount: Int
+    formatTag: UInt16, channels: Int, sampleRate: Int, bytesPerSample: Int, sampleCount: Int
   ) -> Data {
-    let dataSize = frameCount * channels * bytesPerSample
+    let dataSize = sampleCount * bytesPerSample
     var data = Data(capacity: 44 + dataSize)
     data.append(contentsOf: Array("RIFF".utf8))
     append(UInt32(36 + dataSize), to: &data)
