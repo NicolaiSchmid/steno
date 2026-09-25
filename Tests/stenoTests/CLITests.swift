@@ -166,7 +166,10 @@ import Testing
         "--include-audio", "--task-tag", "task", "--db", db,
       ], home: home)
     #expect(deliver.status == 0, "\(deliver.stderr)")
-    #expect(deliver.stdout.hasPrefix("obsidian-folder\tdelivered\t\(vault.path)/Meetings/"))
+    // A --vault run has its own destination id, keyed by the vault, so it
+    // never replaces the stored destination's row and receipt.
+    let adHoc = "obsidian-folder@\(vault.path)"
+    #expect(deliver.stdout.hasPrefix("\(adHoc)\tdelivered\t\(vault.path)/Meetings/"))
     let meetings = vault.appendingPathComponent("Meetings", isDirectory: true)
     let folders = try FileManager.default.contentsOfDirectory(atPath: meetings.path)
     #expect(folders.count == 1)
@@ -185,9 +188,10 @@ import Testing
     #expect(try StenoJSON.decode(MeetingExport.self, from: json).meeting.id.uuidString == meetingID)
     let store = try MeetingStore.onDisk(at: URL(fileURLWithPath: db))
     let rows = try await store.deliveries(meetingID: UUID(uuidString: meetingID)!)
-    #expect(rows.map(\.destinationID) == ["obsidian-folder"])
+    #expect(rows.map(\.destinationID) == [adHoc])
     #expect(rows.first?.status == .delivered)
     #expect(rows.first?.receipt?.files.count == 6)
+    let adHocReceipt = rows.first?.receipt
     #expect(
       try await SettingsStore(writer: store.writer).load().obsidian == nil,
       "--vault never touches the stored settings")
@@ -207,6 +211,15 @@ import Testing
       try FileManager.default.contentsOfDirectory(
         atPath: second.appendingPathComponent("Meetings/\(slug)").path
       ).count == 5, "no audio, no people: five files")
+    #expect(
+      stored.stdout.split(separator: "\n").map { $0.split(separator: "\t").first ?? "" } == [
+        "obsidian-folder"
+      ], "only this run's destination is printed")
+    let bothRows = try await store.deliveries(meetingID: UUID(uuidString: meetingID)!)
+    #expect(bothRows.map(\.destinationID).sorted() == ["obsidian-folder", adHoc].sorted())
+    #expect(
+      bothRows.first { $0.destinationID == adHoc }?.receipt == adHocReceipt,
+      "the stored-settings run leaves the --vault row alone")
 
     let flagsWithoutVault = try Self.run(
       ["deliver", meetingID, "--include-audio", "--db", db], home: home)
@@ -234,16 +247,20 @@ import Testing
     let partial = try Self.run(
       ["deliver", meetingID, "--vault", third.path, "--include-audio", "--db", db], home: home)
     #expect(partial.status == 2)
-    #expect(partial.stdout.hasPrefix("obsidian-folder\tfailed\t"))
+    #expect(partial.stdout.hasPrefix("obsidian-folder@\(third.path)\tfailed\t"))
     #expect(partial.stdout.contains("no audio mixdown"))
     #expect(partial.stderr.contains("delivery failed"))
     #expect(
       try FileManager.default.contentsOfDirectory(
         atPath: third.appendingPathComponent("Meetings/\(slug)").path
       ).count == 5, "every other file was written before the failure")
-    let failedRows = try await store.deliveries(meetingID: UUID(uuidString: meetingID)!)
-    #expect(failedRows.first?.status.kind == .failed)
-    #expect(failedRows.first?.receipt?.root == second.path, "the last good receipt is kept")
+    let allRows = try await store.deliveries(meetingID: UUID(uuidString: meetingID)!)
+    let failedRow = allRows.first { $0.destinationID == "obsidian-folder@\(third.path)" }
+    #expect(failedRow?.status.kind == .failed)
+    #expect(failedRow?.receipt == nil, "a failed first delivery has no receipt")
+    let storedRow = allRows.first { $0.destinationID == "obsidian-folder" }
+    #expect(storedRow?.status == .delivered)
+    #expect(storedRow?.receipt?.root == second.path, "the stored destination's receipt is kept")
   }
 
   @Test func defaultDatabaseFollowsHome() throws {

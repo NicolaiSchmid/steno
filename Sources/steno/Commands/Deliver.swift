@@ -6,8 +6,11 @@ import StenoCore
 /// `steno deliver <meeting-id>`: re-exports a processed meeting to every
 /// configured destination through `ProcessingPipeline.redeliver` and the real
 /// `DeliveryCoordinator`. Without `--vault` the stored `Settings.obsidian`
-/// decides; with it the Obsidian destination is built for this run alone and
-/// the stored settings stay untouched. Prints one line per destination.
+/// decides; with it the Obsidian destination is built for this run alone
+/// under its own destination id (`obsidian-folder@<vault>`), so neither the
+/// stored settings nor the stored destination's receipt are touched and a
+/// second run into the same vault is a proper re-export. Prints one line per
+/// destination of this run.
 struct Deliver: AsyncParsableCommand {
   static let configuration = CommandConfiguration(
     abstract: "Deliver a processed meeting to every configured destination.")
@@ -44,28 +47,33 @@ struct Deliver: AsyncParsableCommand {
 
   func run() async throws {
     let opened = try Wiring.open(database)
-    let dispatcher: DeliveryCoordinator
+    let targets: [any Destination]
     if let vault {
+      let path = URL(fileURLWithPath: vault, isDirectory: true).standardizedFileURL.path
       let obsidian = ObsidianSettings(
-        vaultPath: URL(fileURLWithPath: vault, isDirectory: true).standardizedFileURL.path,
-        peopleFolder: peopleFolder, includeAudio: includeAudio, taskTag: taskTag)
-      dispatcher = DeliveryCoordinator(
-        store: opened.store, settings: opened.settings,
-        destinations: { _ in [ObsidianFolderDestination(settings: obsidian)] })
+        vaultPath: path, peopleFolder: peopleFolder, includeAudio: includeAudio, taskTag: taskTag)
+      targets = [
+        ObsidianFolderDestination(
+          settings: obsidian, id: "\(ObsidianFolderDestination.destinationID)@\(path)")
+      ]
     } else {
-      guard try await opened.settings.load().obsidian != nil else {
+      targets = destinations(for: try await opened.settings.load())
+      guard !targets.isEmpty else {
         throw RuntimeFailure(
           description:
             "No destination configured: set the Obsidian vault in Settings or pass --vault.")
       }
-      dispatcher = DeliveryCoordinator(store: opened.store, settings: opened.settings)
     }
+    let dispatcher = DeliveryCoordinator(
+      store: opened.store, settings: opened.settings, destinations: { _ in targets })
     let pipeline = ProcessingPipeline(
       dependencies: Wiring.dependencies(
         store: opened.store, settings: opened.settings, dispatcher: dispatcher))
     try await pipeline.redeliver(meetingID: meetingID)
 
+    let ids = Set(targets.map(\.id))
     let deliveries = try await opened.store.deliveries(meetingID: meetingID)
+      .filter { ids.contains($0.destinationID) }
     var failures: [String] = []
     for delivery in deliveries {
       switch delivery.status {

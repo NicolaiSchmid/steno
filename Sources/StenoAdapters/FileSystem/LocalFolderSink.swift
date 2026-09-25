@@ -21,6 +21,12 @@ struct LocalFolderSink: Sendable {
       && isDirectory.boolValue
   }
 
+  /// The names in a directory; empty when it does not exist or cannot be
+  /// listed.
+  func fileNames(in relativePath: String) -> [String] {
+    (try? FileManager.default.contentsOfDirectory(atPath: url(relativePath).path)) ?? []
+  }
+
   /// nil when there is no such file.
   func read(_ relativePath: String) throws -> Data? {
     guard exists(relativePath) else { return nil }

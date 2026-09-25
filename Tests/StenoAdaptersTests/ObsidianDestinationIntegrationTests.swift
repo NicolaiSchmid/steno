@@ -122,7 +122,7 @@ import Testing
         .validate()
     }
 
-    for bad in ["/People", "../People", "People/../..", "", "a//b", "a\\b"] {
+    for bad in ["/People", "../People", "People/../..", "", "a//b", "a\\b", " People", "People\n"] {
       await #expect(throws: ObsidianError.peopleFolderInvalid(bad), "\(bad)") {
         try await vault.destination(peopleFolder: bad).validate()
       }
@@ -454,7 +454,9 @@ import Testing
     let second = try await destination.deliver(export, previous: first)
 
     #expect(second.root == moved.path)
-    #expect(second.folder == first.folder, "the folder name travels with the receipt")
+    #expect(
+      second.folder == first.folder,
+      "another root is a first delivery; the empty vault resolves to the same name")
     #expect(second.files.map(\.relativePath) == first.files.map(\.relativePath))
     for file in second.files {
       #expect(
@@ -477,5 +479,141 @@ import Testing
     #expect(try vault.list(Self.folder) == Self.meetingFiles.filter { $0 != "audio.m4a" })
     let noAudio = try await vault.destination(includeAudio: false).deliver(export, previous: nil)
     #expect(noAudio.files.count == 7, "with audio off the missing mixdown is no error")
+  }
+
+  @Test func aSweptMixdownIsNoErrorWhenTheAudioCopyIsAlreadyInTheVault() async throws {
+    let vault = try Vault()
+    defer { vault.cleanUp() }
+    let export = try FixtureMeeting.export(audioIn: vault.directory)
+    let first = try await vault.destination().deliver(export, previous: nil)
+    let audioFile = try #require(first.files.first { $0.relativePath.hasSuffix("audio.m4a") })
+
+    // Retention removed the mixdown; the summary re-run changed the title.
+    try FileManager.default.removeItem(at: try #require(export.audio?.mixdownURL))
+    var renamed = export
+    renamed.meeting.title = "Nach dem Sweep"
+    let second = try await vault.destination().deliver(renamed, previous: first)
+    #expect(try vault.text("\(Self.folder)/\(Self.slug).md").contains("# Nach dem Sweep\n"))
+    #expect(second.files.first { $0.relativePath.hasSuffix("audio.m4a") } == audioFile)
+    #expect(try vault.read("\(Self.folder)/audio.m4a") == Data((0..<100).map { UInt8($0) }))
+
+    // The same with no mixdown URL at all (meeting.json changes with it).
+    renamed.audio?.mixdownURL = nil
+    let third = try await vault.destination().deliver(renamed, previous: second)
+    #expect(third.files.map(\.relativePath) == second.files.map(\.relativePath))
+    #expect(third.files.first { $0.relativePath.hasSuffix("audio.m4a") } == audioFile)
+  }
+
+  @Test func aUsersAudioFileCountsWhenTheMixdownIsGone() async throws {
+    let vault = try Vault()
+    defer { vault.cleanUp() }
+    var export = try FixtureMeeting.export(audioIn: vault.directory)
+    let first = try await vault.destination(includeAudio: false).deliver(export, previous: nil)
+    try Data("user audio\n".utf8).write(to: vault.url("\(Self.folder)/audio.m4a"))
+    export.audio?.mixdownURL = nil
+
+    let second = try await vault.destination(includeAudio: true).deliver(export, previous: first)
+    #expect(try vault.text("\(Self.folder)/audio.m4a") == "user audio\n")
+    #expect(!second.files.contains { $0.relativePath.hasSuffix("audio.m4a") })
+    #expect(second.files.count == first.files.count)
+  }
+
+  @Test func anUnreadableMixdownIsAReadFailureNotMissingAudio() async throws {
+    let vault = try Vault()
+    defer { vault.cleanUp() }
+    var export = FixtureMeeting.export()
+    let directory = vault.directory.appendingPathComponent("mixdown-dir.m4a", isDirectory: true)
+    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+    export.audio?.mixdownURL = directory
+    let error = await #expect(throws: ObsidianError.self) {
+      try await vault.destination().deliver(export, previous: nil)
+    }
+    if case .readFailed(let path, _)? = error {
+      #expect(path == directory.path)
+      #expect(error?.description.hasPrefix("Could not read \(directory.path): ") == true)
+    } else {
+      Issue.record("expected readFailed, got \(String(describing: error))")
+    }
+  }
+
+  @Test func aReceiptFromAnotherRootIsAFirstDeliveryWithTheCollisionRule() async throws {
+    let vault = try Vault()
+    defer { vault.cleanUp() }
+    let export = try FixtureMeeting.export(audioIn: vault.directory)
+    let first = try await vault.destination().deliver(export, previous: nil)
+
+    // In the other vault the pinned folder already belongs to someone else.
+    let other = vault.directory.appendingPathComponent("other", isDirectory: true)
+    var theirs = export
+    theirs.meeting.id = SampleData.uuid(99)
+    try FileManager.default.createDirectory(
+      at: other.appendingPathComponent(Self.folder), withIntermediateDirectories: true)
+    try StenoJSON.encode(theirs).write(
+      to: other.appendingPathComponent("\(Self.folder)/meeting.json"))
+    let destination = ObsidianFolderDestination(
+      settings: ObsidianSettings(
+        vaultPath: other.path, peopleFolder: "People", includeAudio: true, taskTag: "task"),
+      timeZone: FixtureMeeting.berlin)
+
+    let second = try await destination.deliver(export, previous: first)
+
+    #expect(second.root == other.path)
+    #expect(second.folder == "\(Self.folder)-2", "the other root does not pin the folder")
+    #expect(second.files.count == 8, "every file is written, nothing is carried over")
+    #expect(
+      try FileManager.default.contentsOfDirectory(
+        atPath: other.appendingPathComponent(Self.folder).path) == ["meeting.json"],
+      "the taken folder is untouched")
+    #expect(
+      try FileManager.default.contentsOfDirectory(
+        atPath: other.appendingPathComponent("\(Self.folder)-2").path
+      ).sorted() == Self.meetingFiles(slug: "\(Self.slug)-2"))
+    #expect(try vault.list(Self.folder) == Self.meetingFiles, "the first vault is left alone")
+  }
+
+  @Test func anotherSpellingOfTheVaultPathIsTheSameRoot() async throws {
+    let vault = try Vault()
+    defer { vault.cleanUp() }
+    let export = try FixtureMeeting.export(audioIn: vault.directory)
+    let first = try await vault.destination().deliver(export, previous: nil)
+    var renamed = export
+    renamed.meeting.title = "Neuer Titel"
+
+    for spelling in [vault.root.path + "/", vault.root.path + "/./Meetings/.."] {
+      let destination = ObsidianFolderDestination(
+        settings: ObsidianSettings(
+          vaultPath: spelling, peopleFolder: "People", includeAudio: true, taskTag: "task"),
+        timeZone: FixtureMeeting.berlin)
+      let second = try await destination.deliver(renamed, previous: first)
+      #expect(second.folder == first.folder, "\(spelling)")
+      #expect(second.files.map(\.relativePath) == first.files.map(\.relativePath), "\(spelling)")
+      #expect(second.root == spelling, "the receipt records the path as configured")
+      #expect(
+        try vault.text("\(Self.folder)/\(Self.slug).md").contains("# Neuer Titel\n"),
+        "\(spelling): a re-export, so the owned note is rewritten")
+      #expect(try vault.list("Meetings") == [Self.slug], "\(spelling): no second folder")
+    }
+  }
+
+  @Test func aPersonPageThatIsNotUTF8IsLeftAloneAndReported() async throws {
+    let vault = try Vault()
+    defer { vault.cleanUp() }
+    let export = try FixtureMeeting.export(audioIn: vault.directory)
+    try FileManager.default.createDirectory(
+      at: vault.url("People"), withIntermediateDirectories: true)
+    let latin1 = Data("# Anna M".utf8) + Data([0xFC]) + Data("ller\n".utf8)
+    try latin1.write(to: vault.url("People/Anna Müller.md"))
+
+    let error = await #expect(throws: ObsidianError.self) {
+      try await vault.destination().deliver(export, previous: nil)
+    }
+    if case .readFailed(let path, let underlying)? = error {
+      #expect(path == vault.url("People/Anna Müller.md").path)
+      #expect(underlying.contains("not UTF-8"))
+    } else {
+      Issue.record("expected readFailed, got \(String(describing: error))")
+    }
+    #expect(try vault.read("People/Anna Müller.md") == latin1, "no byte was replaced")
+    #expect(try vault.list(Self.folder) == Self.meetingFiles.filter { $0 != "audio.m4a" })
   }
 }
