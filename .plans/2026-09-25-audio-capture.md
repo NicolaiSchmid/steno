@@ -333,3 +333,72 @@ checks were run.
 - Per-application taps and an app picker; ScreenCaptureKit capture.
 - A mic-lane integration test on CI (needs a virtual input device; the `STENO_VIRTUAL_INPUT_UID`
   gate stays optional).
+
+## Deviations (implementation)
+
+Recorded while building PR #4 on a Linux host with the hosted `macos-15` CI as the only Apple
+toolchain. Each line is one departure from the text above and why.
+
+- `LiveCaptureBackend` is a final class, not a struct: it holds the tap, aggregate, IOProc and
+  listener tokens between `start` and `stop`.
+- No 48 kHz fixtures are committed under `Tests/Fixtures/audio/` and there is no
+  `DevFixturesCommand+Audio.swift`: core's `FixtureManifestTests` asserts the manifest equals core's
+  generator output exactly and that every audio fixture is 16 kHz mono. The cases live in
+  `Sources/StenoAudio/Testing/AudioFixtures.swift` (tones, sweeps, a syllable-modulated speech-like
+  far-end, a seeded sparse room, the echoed mic), built deterministically in test setup and by
+  `steno dev aec-bench --synthetic`.
+- `RecordingWriter` writes CAF and WAV itself (`CAFStreamWriter`, `WAVStreamWriter`) instead of
+  through `ExtAudioFile`: the CAF data chunk carries size -1 while recording (the streaming form
+  Core Audio's own writers use), so a killed process leaves a readable master, and the writer plus
+  the SIGKILL test compile and run on Linux. `AVFoundationAudioCodecTests` confirm `AVAudioFile`
+  reads the result.
+- `Resampler48kTo16k` is a pure-Swift 192-tap Kaiser-windowed sinc 3:1 decimator, not an
+  `AVAudioConverter` wrapper: deterministic across machines, allocation-free after `init`, testable
+  off macOS (1 kHz within 0.1 dB, 9 kHz below -40 dB, 12 kHz below -60 dB).
+- The writer is a thread (`WriterThread`) fed by `FrameRelay` rings, not a dispatch queue:
+  `DispatchQueue.async` would allocate a block on the processing thread; a bounded ring plus a
+  semaphore does not. The relay depth is `CaptureSession.init(writerHeadroomFrames:)`, 200 frames
+  (2 s) by default; tests that feed audio faster than real time raise it.
+- Levels reach the `levels` stream through a `LevelSlot` of atomic bit patterns that the writer
+  thread republishes on generation change; the processing thread never yields to a continuation.
+- The in-person aggregate keeps the default output device as clock master (no tap) so the HAL
+  resamples the microphone to 48 kHz; an input-only aggregate would run at the mic's native rate
+  and break the 3:1 sidecar path for 44.1 kHz and Bluetooth inputs.
+- `AVFoundationAudioCodec.mixdown` encodes AAC through `AVAudioFile(forWriting:settings:)` rather
+  than `AVAssetWriter`; `decode` trims or zero-pads the converter output to the exact
+  `length × 16000 / rate` so a lane's duration stays integral to the master (segment counts in the
+  end-to-end test depend on it).
+- Two-IOProc fallback: `LaneAligner` (the arithmetic, tested on synthetic host times) exists; the
+  second IOProc is wired only if spike S2 is a no-go, which this host could not run.
+- `CaptureSession.stop()` after `.failed(.deviceLost)` returns the finalised partial recording
+  instead of throwing, so the app can enqueue what was captured.
+- `CaptureConfiguration.laneOverride` (developer tools only) lets `steno dev capture-spike --lanes
+  system` record the tap alone without a third `CaptureMode`.
+- `MeetingDetector.init` takes `debounce` and `pollInterval` (both 2 s by default) and `start()`
+  throws when the first snapshot fails; later failures are tolerated.
+- `steno record` gained `--meeting-id`, `--quiet`, `--no-aec`, `--keep-raw-mic` and
+  `--input-device`; the SIGKILL test needs the folder name up front.
+- ERLE fixture: the noise floor is -60 dBFS (0.001) and the room is sparse (48 seeded reflections,
+  gain 0.1, 100 ms), the far-end a low-passed (`tilt` 0.7) syllable-modulated noise normalised to
+  peak 0.7. With the plan's louder noise the measured ERLE caps below 20 dB regardless of the
+  canceller. Measured: 24.7 dB over 3–6 s (5, 16, 20, 23, 26, 27 dB per second); double talk keeps
+  the near-end sweep within 0.04 dB.
+- Speex tail stays 200 ms as decided; a 100 ms tail converged faster on the same fixture (32 dB at
+  3–4 s against 23 dB). Input for the S4 bake-off.
+- Names the plan marked "(unverified)" that now compile against the macOS 15 SDK on CI:
+  `kAudioProcessPropertyIsRunningInput`, `kAudioProcessPropertyIsRunningOutput`,
+  `kAudioTapPropertyFormat`, `kAudioAggregateDeviceTapListKey`, `kAudioAggregateDeviceTapAutoStartKey`,
+  `kAudioSubTapUIDKey`, `kAudioSubTapDriftCompensationKey`, `CATapDescription(stereoGlobalTapButExcludeProcesses:
+  [AudioObjectID])`. Still unverified at runtime (needs a Mac): setting
+  `kAudioDevicePropertyNominalSampleRate` on the aggregate, whether `DeviceIsRunningSomewhere`
+  listeners fire, the buffer order of sub-devices versus taps (both orders are handled by
+  `StreamLayout` and printed by `capture-spike`).
+
+## Spike addendum
+
+- S1 (permission and silence), S2 (mic in the tap aggregate) and S3 (Continuity call audible): not
+  run. This workstream had no Mac; `SystemAudioPermission.request()`, `steno dev capture-spike`
+  and `steno dev audio-devices` are the instruments, and every `[manual]` check in the steps above
+  is open. The S3 outcome and the phone-story consequence stay to be recorded here by whoever runs
+  it.
+- S4 (AEC bake-off): not started; see the tail note above.
