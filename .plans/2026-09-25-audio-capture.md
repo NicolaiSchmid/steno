@@ -396,6 +396,25 @@ toolchain. Each line is one departure from the text above and why.
   `kAudioDevicePropertyNominalSampleRate` on the aggregate, whether `DeviceIsRunningSomewhere`
   listeners fire, the buffer order of sub-devices versus taps (both orders are handled by
   `StreamLayout` and printed by `capture-spike`).
+- Two test seams added by the testing pass, both without behaviour change:
+  `ProcessingThread.drain()` is internal rather than private so
+  `RealTimeAllocationTests` can run the loop body on the test's own thread under libmalloc's
+  `malloc_logger` hook (the plan's "Instruments Allocations shows zero allocations" check, now
+  `[ci]` on macOS: producer calls, Speex, the far-end delay line, metering, the raw-mic copy and
+  the relay hand-off allocate nothing over 100 frames after a ten-frame warm-up); and the IOProc
+  block body is `IOProcRunner.deliver(_:sources:sink:)`, a static function the block calls, so
+  `IOProcRunnerTests` can hand it `AudioBufferList`s built by hand for both HAL orderings, a
+  buffer without data and a callback that does not fit. glibc has no malloc hook, so the
+  allocation guard does not exist on Linux.
+- `StreamLayout` cannot tell the two HAL orderings apart when the microphone and the tap have the
+  same channel shape (a stereo input next to the stereo tap: `[2, 2]` either way); it assumes
+  sub-devices first, `equalShapesAssumeSubDevicesFirst` pins that, and spike S2 on hardware is
+  what confirms or refutes it (`capture-spike` prints the resolution).
+- An unfinished sidecar (zero-size RIFF header with samples appended) is rejected as malformed by
+  `WAVAudioDecoder` and `WAVFile` rather than read as empty; `AVFoundationAudioCodec.decode`
+  absorbs that with `try?` and rebuilds the lane from the master, which
+  `anUnfinishedMasterWithEmptySidecarsDecodesFromTheMaster` checks through `AVAudioFile` on the
+  size -1 master.
 
 ## Spike addendum
 

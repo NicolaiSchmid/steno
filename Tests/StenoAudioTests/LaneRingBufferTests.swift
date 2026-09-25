@@ -68,6 +68,39 @@ import Testing
     }
   }
 
+  /// The ring holds exactly `capacity` samples: full is full (one more zero
+  /// is refused and counted), empty is empty (a one-sample read is refused),
+  /// and the wrap point moves every round.
+  @Test func aRingHoldsExactlyItsCapacityAndEmptiesAgain() {
+    let ring = LaneRingBuffer(capacity: 8)
+    let block = (0..<8).map(Float.init)
+    let partial: [Float] = [-1, -2, -3]
+    var out = [Float](repeating: 0, count: 8)
+    for round in 0..<4 {
+      // Three in, three out: the indices advance by three, so the eight
+      // below straddle a different wrap point each round.
+      partial.withUnsafeBufferPointer { #expect(ring.write($0.baseAddress!, count: 3)) }
+      out.withUnsafeMutableBufferPointer { #expect(ring.read(into: $0.baseAddress!, count: 3)) }
+      #expect(Array(out.prefix(3)) == partial)
+
+      block.withUnsafeBufferPointer {
+        #expect(ring.write($0.baseAddress!, count: 8), "round \(round)")
+      }
+      #expect(ring.availableToRead == 8)
+      #expect(ring.availableToWrite == 0)
+      #expect(!ring.hasRoom(for: 1))
+      #expect(!ring.writeZeros(count: 1), "full: one more sample is refused")
+      out.withUnsafeMutableBufferPointer { #expect(ring.read(into: $0.baseAddress!, count: 8)) }
+      #expect(out == block, "round \(round)")
+      #expect(ring.availableToRead == 0)
+      #expect(ring.availableToWrite == 8)
+      out.withUnsafeMutableBufferPointer {
+        #expect(!ring.read(into: $0.baseAddress!, count: 1), "empty: a read is refused")
+      }
+    }
+    #expect(ring.droppedSamples == 4, "one refused zero per round")
+  }
+
   @Test func clearZeroesStorageAndResetsIndices() {
     let ring = LaneRingBuffer(capacity: 4)
     let block: [Float] = [1, 2, 3]

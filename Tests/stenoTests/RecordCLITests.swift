@@ -66,6 +66,56 @@ import Testing
     #expect(!FileManager.default.fileExists(atPath: layout.sidecar(.mic).path))
   }
 
+  /// Every dev tool and `record` reject bad arguments with exit 1 before any
+  /// device or file is touched.
+  @Test func devToolArgumentsAreValidatedBeforeAnyDeviceIsTouched() throws {
+    let home = try Fixtures.temporaryDirectory("steno-home")
+    defer { try? FileManager.default.removeItem(at: home) }
+    let noInputs = try CLITests.run(["dev", "aec-bench"], home: home)
+    #expect(noInputs.status == 1)
+    #expect(noInputs.stderr.contains("--synthetic"))
+    let badEngine = try CLITests.run(
+      ["dev", "aec-bench", "--synthetic", "--engine", "webrtc"], home: home)
+    #expect(badEngine.status == 1)
+    let badLanes = try CLITests.run(
+      ["dev", "capture-spike", "--lanes", "phone", "--out", home.path], home: home)
+    #expect(badLanes.status == 1)
+    let zeroSeconds = try CLITests.run(
+      ["record", "--backend", "synthetic", "--seconds", "0", "--out", home.path], home: home)
+    #expect(zeroSeconds.status == 1)
+    #expect(zeroSeconds.stderr.contains("positive"))
+    let badBackend = try CLITests.run(
+      ["record", "--backend", "tape", "--out", home.path], home: home)
+    #expect(badBackend.status == 1)
+    #expect(try FileManager.default.contentsOfDirectory(atPath: home.path).isEmpty)
+  }
+
+  /// `steno dev aec-bench --synthetic` runs the built-in echo fixtures through
+  /// both engines: passthrough cancels nothing, Speex reaches the plan's
+  /// 20 dB after three seconds, and `--out` writes the processed lane.
+  @Test func syntheticAECBenchReportsERLEForBothEngines() throws {
+    let home = try Fixtures.temporaryDirectory("steno-home")
+    defer { try? FileManager.default.removeItem(at: home) }
+    let passthrough = try CLITests.run(
+      ["dev", "aec-bench", "--synthetic", "--engine", "passthrough"], home: home)
+    #expect(passthrough.status == 0, "\(passthrough.stderr)")
+    #expect(passthrough.stdout.contains("engine: passthrough, tail 200 ms"))
+    #expect(passthrough.stdout.contains("after 3 s 0.0 dB"))
+
+    let out = home.appendingPathComponent("processed.wav")
+    let speex = try CLITests.run(
+      ["dev", "aec-bench", "--synthetic", "--tail-milliseconds", "100", "--out", out.path],
+      home: home)
+    #expect(speex.status == 0, "\(speex.stderr)")
+    #expect(speex.stdout.contains("engine: speex, tail 100 ms"))
+    let tail = speex.stdout.components(separatedBy: "after 3 s ").last ?? ""
+    let steady = Float(tail.split(separator: " ").first ?? "") ?? 0
+    #expect(steady >= 20, "ERLE after 3 s: \(steady) dB")
+    let processed = try WAVFile.read(out)
+    #expect(processed.sampleRate == 48_000)
+    #expect(processed.frameCount == 6 * 48_000)
+  }
+
   @Test func recordUsageErrors() throws {
     let home = try Fixtures.temporaryDirectory("steno-home")
     defer { try? FileManager.default.removeItem(at: home) }

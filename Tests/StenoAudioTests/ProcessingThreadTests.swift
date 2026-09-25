@@ -146,6 +146,92 @@ import Testing
     #expect(relay.availableFrames == headroom)
   }
 
+  /// Records every near-end and far-end frame it is given and negates the
+  /// near-end into the output, so the relay shows which channel the
+  /// canceller wrote and which it left alone.
+  final class SpyEchoCanceller: EchoCanceller, @unchecked Sendable {
+    let sampleRate: Double
+    let frameSize: Int
+    private(set) var nearEnd: [Float] = []
+    private(set) var farEnd: [Float] = []
+    private(set) var calls = 0
+
+    init(sampleRate: Double, frameSize: Int) throws {
+      self.sampleRate = sampleRate
+      self.frameSize = frameSize
+    }
+
+    func process(
+      nearEnd: UnsafeBufferPointer<Float>, farEnd: UnsafeBufferPointer<Float>,
+      out: UnsafeMutableBufferPointer<Float>
+    ) {
+      self.nearEnd.append(contentsOf: nearEnd)
+      self.farEnd.append(contentsOf: farEnd)
+      calls += 1
+      for index in 0..<min(nearEnd.count, out.count) { out[index] = -nearEnd[index] }
+    }
+  }
+
+  /// AEC routing: the canceller's near-end is the mic lane, its far-end the
+  /// system lane of the same frame, its output the written mic channel; the
+  /// system lane and the raw mic copy are untouched.
+  @Test func theCancellerSeesTheMicAsNearEndAndTheSameFramesSystemAsFarEnd() throws {
+    let lanes: [AudioLane] = [.mic, .system]
+    let backend = SyntheticCaptureBackend(
+      signals: [
+        .mic: SyntheticLane(frequency: 300, amplitude: 0.25),
+        .system: SyntheticLane(frequency: 2_000, amplitude: 0.5),
+      ], seconds: 0.5, callbackFrames: 333)
+    let sink = LaneFrameSink(lanes: lanes)
+    let relay = FrameRelay(channels: 3, frameSize: 480, capacityFrames: 100)
+    let spy = try SpyEchoCanceller(sampleRate: 48_000, frameSize: 480)
+    let thread = ProcessingThread(
+      sink: sink, relay: relay,
+      configuration: .init(lanes: lanes, echoCanceller: spy, keepRawMic: true))
+    thread.start()
+    try backend.start(lanes: lanes, inputDeviceUID: nil, sink: sink)
+    let output = drain(relay, channels: 3, frameSize: 480, expectedFrames: 50)
+    backend.stop()
+    thread.stop()
+
+    #expect(spy.calls == 50, "one call per 10 ms frame")
+    #expect(spy.nearEnd == output[2], "near-end is the raw mic lane, frame for frame")
+    #expect(spy.farEnd == output[1], "far-end is the system lane of the same frame")
+    #expect(output[0] == output[2].map { -$0 }, "the canceller's output is the written mic lane")
+    #expect(abs(rmsDecibels(output[1][...]) - -9.03) < 0.1, "the system lane is what arrived")
+    #expect(abs(rmsDecibels(output[2][...]) - -15.05) < 0.1, "the raw mic is what arrived")
+    #expect(output[1] != output[2])
+  }
+
+  /// With a device latency above 100 ms the far-end is the system lane
+  /// delayed by that many samples: zeros first, then the system lane shifted.
+  @Test func theFarEndDelayLineShiftsTheSystemLaneBySamples() throws {
+    let lanes: [AudioLane] = [.mic, .system]
+    let delay = 1_000
+    let backend = SyntheticCaptureBackend(
+      signals: [
+        .mic: SyntheticLane(frequency: 300, amplitude: 0.25),
+        .system: SyntheticLane(frequency: 2_000, amplitude: 0.5),
+      ], seconds: 0.5)
+    let sink = LaneFrameSink(lanes: lanes)
+    let relay = FrameRelay(channels: 2, frameSize: 480, capacityFrames: 100)
+    let spy = try SpyEchoCanceller(sampleRate: 48_000, frameSize: 480)
+    let thread = ProcessingThread(
+      sink: sink, relay: relay,
+      configuration: .init(lanes: lanes, echoCanceller: spy, farEndDelayFrames: delay))
+    thread.start()
+    try backend.start(lanes: lanes, inputDeviceUID: nil, sink: sink)
+    let output = drain(relay, channels: 2, frameSize: 480, expectedFrames: 50)
+    backend.stop()
+    thread.stop()
+
+    #expect(spy.farEnd.count == 24_000)
+    #expect(spy.farEnd[..<delay].allSatisfy { $0 == 0 }, "primed with zeros")
+    #expect(Array(spy.farEnd[delay...]) == Array(output[1][..<(24_000 - delay)]))
+    #expect(spy.nearEnd.count == 24_000)
+    #expect(output[0] == spy.nearEnd.map { -$0 })
+  }
+
   @Test func syntheticEchoIsADelayedCopy() throws {
     let lanes: [AudioLane] = [.mic, .system]
     let backend = SyntheticCaptureBackend(

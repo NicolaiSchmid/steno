@@ -76,8 +76,8 @@ import Testing
       let systemFromMaster = try await codec.decode(withoutSidecars, lane: .system)
 
       #expect(micFromSidecar.samples.count == 32_000)
-      #expect(abs(micFromMaster.samples.count - 32_000) <= 64, "\(micFromMaster.samples.count)")
-      #expect(abs(systemFromMaster.samples.count - 32_000) <= 64)
+      #expect(micFromMaster.samples.count == 32_000, "exactly length × 16 000 / 48 000")
+      #expect(systemFromMaster.samples.count == 32_000)
       let window = 4_000..<30_000
       let micDifference =
         20
@@ -94,6 +94,47 @@ import Testing
       await #expect(throws: CodecError.laneNotInAsset(.mixed)) {
         try await codec.decode(withoutSidecars, lane: .mixed)
       }
+    }
+
+    /// Crash recovery through the real decoder: a master whose writer never
+    /// reached `finish()` (data chunk size -1) reads through `AVAudioFile` up
+    /// to the last frame, and sidecars with zero-size headers are skipped in
+    /// favour of the master.
+    @Test func anUnfinishedMasterWithEmptySidecarsDecodesFromTheMaster() async throws {
+      let directory = try Fixtures.temporaryDirectory("codec")
+      defer { try? FileManager.default.removeItem(at: directory) }
+      let meetingID = UUID()
+      let layout = RecordingLayout(audioFolder: directory, meetingID: meetingID)
+      let writer = try RecordingWriter(layout: layout, lanes: [.mic, .system])
+      let mic = AudioFixtures.tone(frequency: 1_000, seconds: 1.5, amplitude: 0.5)
+      let system = AudioFixtures.tone(frequency: 1_000, seconds: 1.5, amplitude: 0.25)
+      for start in stride(from: 0, to: mic.count, by: 480) {
+        try mic.withUnsafeBufferPointer { m in
+          try system.withUnsafeBufferPointer { s in
+            try writer.write(
+              LaneFrames(frameCount: 480, lanes: [m.baseAddress! + start, s.baseAddress! + start]))
+          }
+        }
+      }
+      // No finish(): the process "died" here, its handles still open.
+      let asset = AudioAsset(
+        id: UUID(), meetingID: meetingID, url: layout.master(.caf48kFloat32),
+        format: .caf48kFloat32, lanes: [.mic, .system],
+        sidecars16k: [.mic: layout.sidecar(.mic), .system: layout.sidecar(.system)],
+        retention: .keepForever)
+      #expect(throws: WAVDecodeError.self, "zero-size header, samples after it") {
+        try WAVAudioDecoder.read(layout.sidecar(.mic))
+      }
+      let codec = AVFoundationAudioCodec()
+      let decodedMic = try await codec.decode(asset, lane: .mic)
+      let decodedSystem = try await codec.decode(asset, lane: .system)
+      #expect(decodedMic.samples.count == 24_000, "1.5 s to the last frame written")
+      #expect(decodedSystem.samples.count == 24_000)
+      let window = 4_000..<22_000
+      #expect(abs(Self.rms(decodedMic.samples[window]) - 0.3536) < 0.01)
+      #expect(abs(Self.rms(decodedSystem.samples[window]) - 0.1768) < 0.005)
+      // Only now may the writer go away (and with it the open handles).
+      #expect(writer.lanes == [.mic, .system])
     }
 
     @Test func decodesThePhoneM4aForMixedAndRejectsMic() async throws {

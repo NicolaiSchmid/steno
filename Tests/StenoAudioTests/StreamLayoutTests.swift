@@ -41,6 +41,32 @@ import Testing
     #expect(layout.sources[1].bufferIndex == 2)
   }
 
+  /// The tap first and interleaved, the microphone mono.
+  @Test func tapFirstInterleaved() throws {
+    let layout = try StreamLayout.resolve(
+      lanes: [.mic, .system], aggregate: [2, 1], subDevices: [[], [1]], tap: [2], micSubDevice: 1)
+    #expect(layout.tapFirst)
+    #expect(
+      layout.sources == [
+        .init(lane: .mic, bufferIndex: 1, channelOffset: 0, stride: 1),
+        .init(
+          lane: .system, bufferIndex: 0, channelOffset: 0, stride: 2, secondBufferIndex: 0,
+          secondChannelOffset: 1),
+      ])
+  }
+
+  /// A stereo microphone next to a stereo tap has the same shape in either
+  /// order. The resolver then assumes sub-devices first; spike S2 on hardware
+  /// confirms or refutes that assumption, and `capture-spike` prints it.
+  @Test func equalShapesAssumeSubDevicesFirst() throws {
+    let layout = try StreamLayout.resolve(
+      lanes: [.mic, .system], aggregate: [2, 2], subDevices: [[], [2]], tap: [2], micSubDevice: 1)
+    #expect(!layout.tapFirst)
+    #expect(layout.sources[0] == .init(lane: .mic, bufferIndex: 0, channelOffset: 0, stride: 2))
+    #expect(layout.sources[1].bufferIndex == 1)
+    #expect(layout.sources[1].isMixed)
+  }
+
   @Test func inPersonUsesTheMicOnly() throws {
     let layout = try StreamLayout.resolve(
       lanes: [.mixed], aggregate: [1], subDevices: [[], [1]], tap: [], micSubDevice: 1)

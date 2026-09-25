@@ -122,8 +122,12 @@ final class ProcessingThread: @unchecked Sendable {
     finished.signal()
   }
 
+  /// Processes every whole frame the rings hold right now. Internal (not
+  /// private) only so `RealTimeAllocationTests` can run the loop body on the
+  /// test's own thread under an allocation hook; production calls it from
+  /// `run()` alone.
   @inline(__always)
-  private func drain() {
+  func drain() {
     let frameSize = configuration.frameSize
     while sink.availableToRead >= frameSize {
       var index = 0

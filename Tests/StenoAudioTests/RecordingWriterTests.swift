@@ -141,6 +141,88 @@ import Testing
     #expect(size == 4 + 960 * 8)
   }
 
+  /// A process killed inside a write leaves a partial trailing frame; the
+  /// reader takes whole frames and ignores the tail.
+  @Test func aTruncatedMasterReadsWholeFramesOnly() throws {
+    let directory = try Fixtures.temporaryDirectory("writer")
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let url = directory.appendingPathComponent("killed.caf")
+    let writer = try CAFStreamWriter(url: url, sampleRate: 48_000, channels: 2)
+    let frame = (0..<960).map { Float($0) }
+    try frame.withUnsafeBufferPointer {
+      try writer.write(interleaved: $0.baseAddress!, frameCount: 480)
+    }
+    let handle = try FileHandle(forWritingTo: url)
+    try handle.truncate(atOffset: 68 + 479 * 8 + 5)
+    try handle.close()
+    let partial = try CAFFile.read(url)
+    #expect(partial.frameCount == 479)
+    #expect(partial.channels[0].last == 956)
+    #expect(partial.channels[1].last == 957)
+  }
+
+  /// The sidecar is the master's lane at a third of the rate: an onset at
+  /// 1.0 s on the mic lane lands at 16 000 samples in `mic.wav` plus the
+  /// resampler's 32-sample group delay, exact zeros before it, and nothing at
+  /// all in `system.wav`.
+  @Test func sidecarsAlignWithTheMasterAndTheirLane() throws {
+    let directory = try Fixtures.temporaryDirectory("writer")
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let layout = RecordingLayout(audioFolder: directory, meetingID: UUID())
+    let writer = try RecordingWriter(layout: layout, lanes: [.mic, .system])
+    var mic = [Float](repeating: 0, count: 96_000)
+    let tone = sine(frequency: 1_000, amplitude: 0.5, count: 48_000)
+    mic.replaceSubrange(48_000..<96_000, with: tone)
+    let system = [Float](repeating: 0, count: 96_000)
+    for start in stride(from: 0, to: mic.count, by: 480) {
+      try mic.withUnsafeBufferPointer { micBuffer in
+        try system.withUnsafeBufferPointer { systemBuffer in
+          try writer.write(
+            LaneFrames(
+              frameCount: 480,
+              lanes: [micBuffer.baseAddress! + start, systemBuffer.baseAddress! + start]))
+        }
+      }
+    }
+    let files = try writer.finish()
+
+    let master = try CAFFile.read(files.master)
+    #expect(master.channels[0][..<48_000].allSatisfy { $0 == 0 })
+    #expect(master.channels[0][48_001] != 0)
+    #expect(master.channels[1].allSatisfy { $0 == 0 })
+
+    let micSidecar = try WAVAudioDecoder.read(files.sidecars16k[.mic]!)
+    let systemSidecar = try WAVAudioDecoder.read(files.sidecars16k[.system]!)
+    #expect(micSidecar.samples.count == 32_000)
+    #expect(
+      micSidecar.samples[..<16_000].allSatisfy { $0 == 0 }, "causal: nothing before the onset")
+    // The low-pass's step response ramps in around the delayed onset, so the
+    // first sample above 0.1 lands a few samples either side of 16 032; a
+    // frame of misalignment would be 160 samples away.
+    let onset = micSidecar.samples.firstIndex { abs($0) > 0.1 }
+    #expect(onset.map { (16_020...16_050).contains($0) } == true, "onset at \(onset ?? -1)")
+    #expect(systemSidecar.samples.allSatisfy { $0 == 0 }, "the silent lane's sidecar stays silent")
+  }
+
+  /// A sidecar whose writer never reached `finish()` (the process died) keeps
+  /// its zero-size header with the samples after it, so the RIFF parsers
+  /// reject it as malformed (the trailing bytes read as a chunk that runs
+  /// past the file). `AVFoundationAudioCodec.decode` relies on exactly that
+  /// (`try?`) to rebuild the lane from the master; finishing repairs it.
+  @Test func anUnfinishedSidecarIsRejectedUntilFinished() throws {
+    let directory = try Fixtures.temporaryDirectory("writer")
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let url = directory.appendingPathComponent("mic.wav")
+    let writer = try WAVStreamWriter(url: url)
+    let samples = [Int16](repeating: 1_000, count: 160)
+    try samples.withUnsafeBufferPointer { try writer.write($0.baseAddress!, count: 160) }
+    #expect(try Data(contentsOf: url).count == 44 + 320, "the samples are on disk")
+    #expect(throws: WAVDecodeError.self) { try WAVAudioDecoder.read(url) }
+    #expect(throws: WAVDecodeError.self) { try WAVFile.read(url) }
+    try writer.finish()
+    #expect(try WAVAudioDecoder.read(url).samples.count == 160)
+  }
+
   @Test func cafReaderRejectsGarbage() {
     #expect(throws: CAFReadError.self) { try CAFFile.read(Data(repeating: 0x41, count: 64)) }
     #expect(throws: CAFReadError.self) { try CAFFile.read(Data("caff".utf8)) }

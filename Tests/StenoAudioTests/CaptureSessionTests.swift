@@ -136,6 +136,90 @@ import Testing
     #expect(restarted == .idle || restarted == .failed(.deviceLost))
   }
 
+  /// A tap that never delivers anything (permission denied, a muted mix) is
+  /// reported through `systemLaneSilent` and the level stream's floor, while
+  /// the recording itself completes.
+  @Test func aSilentSystemLaneIsReportedInStatisticsAndLevels() async throws {
+    let directory = try Fixtures.temporaryDirectory("session")
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let backend = SyntheticCaptureBackend(
+      signals: [.mic: SyntheticLane(frequency: 440), .system: .silence], seconds: 1)
+    let session = try CaptureSession(
+      configuration: configuration(.call, in: directory), backend: backend,
+      echoCanceller: try PassthroughEchoCanceller(sampleRate: 48_000, frameSize: 480),
+      writerHeadroomFrames: 1_000)
+    let levels = await session.levels
+    try await session.start(meetingID: UUID())
+    var iterator = levels.makeAsyncIterator()
+    let first = try #require(await iterator.next())
+    #expect(abs(first.mic.rms - -9.03) < 0.2)
+    #expect(first.system == LaneLevel.silence)
+    await backend.waitUntilFinished()
+    let result = try await session.stop()
+    #expect(result.statistics.systemLaneSilent)
+    #expect(result.statistics.droppedFrames == [:])
+    let master = try CAFFile.read(result.asset.url)
+    #expect(master.channels[1].allSatisfy { $0 == 0 })
+    #expect(master.channels[0].contains { $0 != 0 })
+  }
+
+  /// One frame of relay headroom against a backend that delivers two seconds
+  /// in milliseconds: the writer falls behind, and every frame it missed is
+  /// counted against the master that was written, on every lane alike.
+  @Test func droppedFramesAccountForEveryFrameTheWriterMissed() async throws {
+    let directory = try Fixtures.temporaryDirectory("session")
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let backend = SyntheticCaptureBackend(
+      lanes: [.mic, .system], tone: [.mic: 440, .system: 1_000], seconds: 2)
+    let session = try CaptureSession(
+      configuration: configuration(.call, in: directory), backend: backend,
+      echoCanceller: try PassthroughEchoCanceller(sampleRate: 48_000, frameSize: 480),
+      writerHeadroomFrames: 1)
+    try await session.start(meetingID: UUID())
+    await backend.waitUntilFinished()
+    let result = try await session.stop()
+    let master = try CAFFile.read(result.asset.url)
+    let processedFrames = 200
+    for lane in [AudioLane.mic, .system] {
+      let dropped = result.statistics.droppedFrames[lane] ?? 0
+      #expect(
+        dropped + master.frameCount / 480 == processedFrames,
+        "\(lane.rawValue): \(dropped) dropped + \(master.frameCount / 480) written")
+    }
+    #expect(result.statistics.duration == Double(master.frameCount) / 48_000)
+    let sidecar = try WAVAudioDecoder.read(result.asset.sidecars16k[.mic]!)
+    #expect(sidecar.samples.count == master.frameCount / 3, "sidecars drop with the master")
+  }
+
+  /// After device loss every `stop()` returns the same finished recording,
+  /// and stopping the backend again is harmless.
+  @Test func stopAfterDeviceLossReturnsTheSameRecordingEveryTime() async throws {
+    let directory = try Fixtures.temporaryDirectory("session")
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let backend = SyntheticCaptureBackend(
+      lanes: [.mic, .system], tone: [.mic: 440, .system: 1_000], seconds: 10,
+      loseDeviceAfter: 0.5)
+    let session = try CaptureSession(
+      configuration: configuration(.call, in: directory), backend: backend,
+      echoCanceller: try PassthroughEchoCanceller(sampleRate: 48_000, frameSize: 480))
+    let states = await session.states
+    try await session.start(meetingID: UUID())
+    _ = await collectStates(states) { state in
+      if case .failed = state { return true }
+      return false
+    }
+    let first = try await session.stop()
+    let second = try await session.stop()
+    #expect(first.asset == second.asset)
+    #expect(first.statistics == second.statistics)
+    #expect(await session.state == .failed(.deviceLost))
+    backend.stop()
+    backend.stop()
+    #expect(
+      try CAFFile.read(first.asset.url).frameCount
+        == Int((first.statistics.duration * 48_000).rounded()))
+  }
+
   @Test func inPersonProducesOneChannelAndTheMixedSidecar() async throws {
     let directory = try Fixtures.temporaryDirectory("session")
     defer { try? FileManager.default.removeItem(at: directory) }

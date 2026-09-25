@@ -65,6 +65,22 @@ import Testing
     #expect(nine < -40, "9 kHz aliases at \(nine) dB")
   }
 
+  /// Phase across chunks: processed 480 samples at a time, the output is the
+  /// input low-passed and delayed by exactly half the filter (95.5 input
+  /// samples, 31.83 output samples), with no seam at any frame boundary. A
+  /// history shift off by one sample would show as a 0.13 rad phase error at
+  /// 1 kHz, far above the tolerance.
+  @Test func outputFollowsTheInputWithAFixedDelayAcrossFrameBoundaries() {
+    let output = resample(sine(frequency: 1_000))
+    let delay = Double(Resampler48kTo16k.taps - 1) / 2 / Double(Resampler48kTo16k.factor)
+    var maxError: Float = 0
+    for index in 500..<16_000 {
+      let ideal = 0.5 * Float(sin(2 * Double.pi * 1_000 * (Double(index) - delay) / 16_000))
+      maxError = max(maxError, abs(output[index] - ideal))
+    }
+    #expect(maxError < 0.01, "largest deviation from the delayed sine: \(maxError)")
+  }
+
   @Test func outputClampsToFullScale() {
     let ints = resampleInt16(sine(frequency: 440, amplitude: 1.2, seconds: 0.1))
     #expect(ints.count == 1_600)
