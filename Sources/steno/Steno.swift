@@ -14,7 +14,7 @@ struct Steno: AsyncParsableCommand {
     commandName: "steno",
     abstract: "Bot-free meeting recorder for the Mac.",
     version: StenoCore.version,
-    subcommands: [Record.self, Process.self, Export.self, Dev.self]
+    subcommands: [Record.self, Process.self, Export.self, Deliver.self, Dev.self]
   )
 
   static func main() async {

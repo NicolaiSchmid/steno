@@ -43,6 +43,7 @@ let package = Package(
       dependencies: [
         "StenoCore",
         "StenoAudio",
+        "StenoAdapters",
         .product(name: "ArgumentParser", package: "swift-argument-parser"),
       ]
     ),
@@ -50,10 +51,14 @@ let package = Package(
     .testTarget(name: "StenoAudioTests", dependencies: ["StenoAudio"]),
     .testTarget(name: "StenoSpeechTests", dependencies: ["StenoSpeech"]),
     .testTarget(name: "StenoLLMTests", dependencies: ["StenoLLM"]),
-    .testTarget(name: "StenoAdaptersTests", dependencies: ["StenoAdapters"]),
+    // GRDB only to corrupt a settings row in the coordinator tests.
+    .testTarget(
+      name: "StenoAdaptersTests",
+      dependencies: ["StenoAdapters", .product(name: "GRDB", package: "GRDB.swift")]),
     .testTarget(name: "StenoHandoverTests", dependencies: ["StenoHandover"]),
     .testTarget(name: "stenoTests", dependencies: ["StenoCore", "StenoAudio"]),
-    .testTarget(name: "StenoEndToEndTests", dependencies: ["StenoCore", "StenoAudio"]),
+    .testTarget(
+      name: "StenoEndToEndTests", dependencies: ["StenoCore", "StenoAudio", "StenoAdapters"]),
   ],
   swiftLanguageModes: [.v6]
 )
