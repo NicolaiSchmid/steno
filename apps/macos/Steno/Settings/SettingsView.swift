@@ -22,7 +22,7 @@ struct SettingsView: View {
         .tabItem { Label("Obsidian", systemImage: "folder") }
       PhonesSettingsView(model: PhonesSettingsViewModel(environment: controller.environment))
         .tabItem { Label("Phones", systemImage: "iphone") }
-      UpdatesSettingsView(model: UpdatesSettingsViewModel(updater: controller.environment.updater))
+      UpdatesSettingsView(updater: controller.environment.updater)
         .tabItem { Label("Updates", systemImage: "arrow.down.circle") }
     }
     .frame(width: 560)
@@ -453,17 +453,29 @@ struct PhonesSettingsView: View {
 
 // MARK: - Updates
 
+/// Sparkle's automatic check, Check now, the last check and the running
+/// version, straight off `UpdaterControlling`.
 struct UpdatesSettingsView: View {
-  @State var model: UpdatesSettingsViewModel
+  let updater: any UpdaterControlling
+
+  private var version: String {
+    let info = Bundle.main.infoDictionary ?? [:]
+    let marketing = info["CFBundleShortVersionString"] as? String ?? "0.0.0"
+    return "\(marketing) (\(info["CFBundleVersion"] as? String ?? "0"))"
+  }
 
   var body: some View {
     Form {
       Section {
-        Toggle("Check for updates automatically", isOn: $model.automaticallyChecks)
+        Toggle(
+          "Check for updates automatically",
+          isOn: Binding(
+            get: { updater.automaticallyChecksForUpdates },
+            set: { updater.automaticallyChecksForUpdates = $0 }))
         HStack {
-          Button("Check now") { model.checkNow() }
-            .disabled(!model.canCheck)
-          if let last = model.lastCheck {
+          Button("Check now") { updater.checkForUpdates() }
+            .disabled(!updater.canCheckForUpdates)
+          if let last = updater.lastUpdateCheckDate {
             Text("Last checked \(last.formatted(date: .abbreviated, time: .shortened))")
               .font(.steno(Theme.TextSize.xs))
               .foregroundStyle(Color.stenoFaint)
@@ -471,7 +483,7 @@ struct UpdatesSettingsView: View {
         }
       }
       Section {
-        Text("Steno \(model.version) (\(model.build))")
+        Text("Steno \(version)")
           .font(.steno(Theme.TextSize.xs))
           .foregroundStyle(Color.stenoMutedForeground)
         Text("Updates are signed releases from github.com/NicolaiSchmid/steno, delivered by Sparkle.")

@@ -1,5 +1,6 @@
 import Foundation
 import StenoCore
+import StenoLLM
 
 /// LLM: OpenAI-compatible base URL, model, context tokens, and the API key
 /// in the keychain through `SecretStore` (never in `Settings`). Saving
@@ -16,7 +17,6 @@ final class LLMSettingsViewModel {
   var model = ""
   var contextTokensText = "32000"
   var apiKey = ""
-  private(set) var savedKeyPresent = false
   private(set) var error: String?
   private(set) var testResult: TestResult?
   private(set) var isTesting = false
@@ -33,10 +33,8 @@ final class LLMSettingsViewModel {
       baseURLText = settings.llmBaseURL?.absoluteString ?? ""
       model = settings.llmModel ?? ""
       contextTokensText = String(settings.llmContextTokens)
-      isConfigured = LLMWiring.isConfigured(settings)
-      let key = try await environment.secrets.secret(for: .llmAPIKey)
-      apiKey = key ?? ""
-      savedKeyPresent = !(key ?? "").isEmpty
+      isConfigured = LLMEndpoint(settings: settings) != nil
+      apiKey = try await environment.secrets.secret(for: .llmAPIKey) ?? ""
     } catch {
       self.error = "Settings could not be loaded: \(error)"
     }
@@ -73,17 +71,16 @@ final class LLMSettingsViewModel {
       error = validationMessage
       return
     }
+    let trimmedModel = model.trimmingCharacters(in: .whitespaces)
+    let trimmedKey = apiKey.trimmingCharacters(in: .whitespaces)
     do {
-      var settings = try await environment.settings.load()
-      settings.llmBaseURL = baseURL
-      let trimmedModel = model.trimmingCharacters(in: .whitespaces)
-      settings.llmModel = trimmedModel.isEmpty ? nil : trimmedModel
-      settings.llmContextTokens = contextTokens ?? 32_000
-      try await environment.settings.save(settings)
-      let trimmedKey = apiKey.trimmingCharacters(in: .whitespaces)
+      let settings = try await environment.updateSettings {
+        $0.llmBaseURL = baseURL
+        $0.llmModel = trimmedModel.isEmpty ? nil : trimmedModel
+        $0.llmContextTokens = contextTokens ?? 32_000
+      }
       try await environment.secrets.setSecret(trimmedKey.isEmpty ? nil : trimmedKey, for: .llmAPIKey)
-      savedKeyPresent = !trimmedKey.isEmpty
-      isConfigured = LLMWiring.isConfigured(settings)
+      isConfigured = LLMEndpoint(settings: settings) != nil
       try await environment.reloadPipeline()
       error = nil
     } catch {

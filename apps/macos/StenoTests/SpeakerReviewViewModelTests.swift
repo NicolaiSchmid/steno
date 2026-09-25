@@ -31,7 +31,8 @@ final class SpeakerReviewViewModelTests: XCTestCase {
     let speakers = try await environment.store.speakers(meetingID: SampleData.meetingID)
     let speaker = try XCTUnwrap(speakers.first { $0.id == SampleData.speakerTwoID })
     XCTAssertTrue(speaker.assignment.isConfirmed)
-    let personOptional = try await environment.store.person(id: speaker.personID!)
+    let personID = try XCTUnwrap(speaker.personID)
+    let personOptional = try await environment.store.person(id: personID)
     let person = try XCTUnwrap(personOptional)
     XCTAssertEqual(person.displayName, "Anna")
     XCTAssertEqual(person.sampleCount, 1, "confirm enrolled the embedding")
@@ -102,26 +103,11 @@ final class SpeakerReviewViewModelTests: XCTestCase {
     XCTAssertEqual(model.allSpeakers.count, 1)
   }
 
-  func testMergePersonsRepointsSpeakers() async throws {
-    let environment = try await TestSupport.environment()
-    let model = try await makeModel(environment)
-    await model.mergePersons(keep: SampleData.personNicolaiID, remove: SampleData.personJeromeID)
-    XCTAssertNil(model.error, model.error ?? "")
-    let remaining = try await environment.store.persons()
-    XCTAssertEqual(remaining.map(\.id), [SampleData.personNicolaiID])
-    let speakers = try await environment.store.speakers(meetingID: SampleData.meetingID)
-    XCTAssertEqual(
-      speakers.first { $0.id == SampleData.speakerTwoID }?.personID, SampleData.personNicolaiID)
-  }
-
   func testMergeWithItselfIsANoOp() async throws {
     let environment = try await TestSupport.environment()
     let model = try await makeModel(environment)
     await model.mergeSpeakers(SampleData.speakerTwoID, into: SampleData.speakerTwoID)
-    await model.mergePersons(keep: SampleData.personJeromeID, remove: SampleData.personJeromeID)
     XCTAssertEqual(model.allSpeakers.count, 2)
-    let people = try await environment.store.persons()
-    XCTAssertEqual(people.count, 2)
   }
 
   func testFinishRedeliversExactlyOnce() async throws {

@@ -88,6 +88,15 @@ final class AppEnvironment {
 
   // MARK: - Runtime
 
+  /// Load, mutate, save: every settings edit in the app goes through here.
+  @discardableResult
+  func updateSettings(_ mutate: (inout Settings) -> Void) async throws -> Settings {
+    var current = try await settings.load()
+    mutate(&current)
+    try await settings.save(current)
+    return current
+  }
+
   /// Waits for the current pipeline to go idle, then replaces it with one
   /// built from the stored settings and the keychain's API key.
   func reloadPipeline() async throws {
@@ -128,6 +137,9 @@ final class AppEnvironment {
   /// backend, the real engines and diarizer over `ModelStore`, cosine speaker
   /// memory, the Obsidian coordinator, the handover listener with its
   /// login-keychain identity, EventKit, ServiceManagement, TCC and Sparkle.
+  /// One `EKEventStore` for the calendar service and the permission check.
+  private static let eventStore = EKEventStore()
+
   static func live(updater: any UpdaterControlling) async throws -> AppEnvironment {
     let paths = try StenoPaths.default()
     let store = try MeetingStore.onDisk(at: paths.databaseURL)
@@ -160,7 +172,6 @@ final class AppEnvironment {
         events: events)
     }
     let pipeline = ProcessingPipeline(dependencies: try makeDependencies(settings, apiKey))
-    let eventStore = SharedEventStore.store
     let environment = AppEnvironment(
       store: store,
       settings: settingsStore,
@@ -278,12 +289,6 @@ final class AppEnvironment {
       },
       now: now)
   }
-}
-
-/// One `EKEventStore` for the calendar service and the permission check.
-@MainActor
-enum SharedEventStore {
-  static let store = EKEventStore()
 }
 
 /// StenoCore's sample meeting written into a store, the way the pipeline

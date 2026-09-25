@@ -1,3 +1,4 @@
+import StenoCore
 import SwiftUI
 
 /// The few composed controls the app reuses: an achromatic primary button,
@@ -112,39 +113,55 @@ struct MessageRow: View {
   }
 }
 
-extension MeetingStateLabel {
-  static func chip(for state: MeetingStateLabel) -> StatusChip {
-    StatusChip(text: state.text, color: state.color)
+extension StatusChip {
+  /// How a `MeetingState` reads in the list, the header and the queue.
+  init(_ state: MeetingState) {
+    switch state {
+    case .recording: self.init(text: "Recording", color: Color.stenoLiveBright)
+    case .queued: self.init(text: "Queued", color: Color.stenoInfo)
+    case .processing: self.init(text: "Processing", color: Color.stenoInfo)
+    case .ready: self.init(text: "Ready", color: Color.stenoLive)
+    case .failed: self.init(text: "Failed", color: Color.stenoDestructive)
+    }
   }
 }
 
-/// How a `MeetingState` reads in the list and the queue.
-struct MeetingStateLabel {
-  var text: String
-  var color: Color
+/// What a display tab shows until the pipeline has produced its content:
+/// `none` once the meeting is ready, `pending` before.
+struct PendingText: View {
+  let meeting: Meeting?
+  let none: String
+  let pending: String
+
+  var body: some View {
+    Text(meeting?.state == .ready ? none : pending)
+      .font(.steno(Theme.TextSize.sm, weight: .medium))
+      .foregroundStyle(Color.stenoMutedForeground)
+  }
 }
 
-extension Duration {
-  /// `mm:ss` or `h:mm:ss` for elapsed recording time.
-  var clockText: String {
-    let total = Int(components.seconds)
-    return TimeInterval(total).clockText
+extension View {
+  /// The 720 pt reading column the Summary, Transcript and Tasks tabs share.
+  func readingColumn() -> some View {
+    frame(maxWidth: 720, alignment: .leading)
+      .padding(Theme.Space.lg)
+      .textSelection(.enabled)
   }
 }
 
 extension TimeInterval {
+  private var wholeSeconds: Duration { .seconds(Int(max(0, rounded(.down)))) }
+
+  /// `mm:ss` or `h:mm:ss` for elapsed recording time.
   var clockText: String {
-    let total = max(0, Int(self.rounded(.down)))
-    let hours = total / 3600
-    let minutes = (total % 3600) / 60
-    let seconds = total % 60
-    if hours > 0 { return String(format: "%d:%02d:%02d", hours, minutes, seconds) }
-    return String(format: "%02d:%02d", minutes, seconds)
+    wholeSeconds.formatted(
+      .time(
+        pattern: self >= 3600
+          ? .hourMinuteSecond(padHourToLength: 1) : .minuteSecond(padMinuteToLength: 2)))
   }
 
   /// `HH:MM:SS` for transcript timestamps.
   var timestampText: String {
-    let total = max(0, Int(self.rounded(.down)))
-    return String(format: "%02d:%02d:%02d", total / 3600, (total % 3600) / 60, total % 60)
+    wholeSeconds.formatted(.time(pattern: .hourMinuteSecond(padHourToLength: 2)))
   }
 }

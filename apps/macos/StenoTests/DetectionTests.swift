@@ -6,9 +6,7 @@ import XCTest
 final class DetectionTests: XCTestCase {
   func testPromptCountsDownOnTheClockAndTimesOut() async throws {
     let clock = ManualClock()
-    let prompt = DetectionPromptViewModel(
-      trigger: .microphoneOpened(bundleID: "com.apple.FaceTime", appName: "FaceTime"),
-      clock: clock, timeout: .seconds(3))
+    let prompt = DetectionPromptViewModel(appName: "FaceTime", clock: clock, timeout: .seconds(3))
     var outcomes: [DetectionPromptViewModel.Outcome] = []
     prompt.onClose = { outcomes.append($0) }
     prompt.begin()
@@ -26,8 +24,7 @@ final class DetectionTests: XCTestCase {
 
   func testStartAndDismissCloseOnce() async throws {
     let clock = ManualClock()
-    let prompt = DetectionPromptViewModel(
-      trigger: .microphoneOpened(bundleID: nil, appName: "Another app"), clock: clock)
+    let prompt = DetectionPromptViewModel(appName: "Another app", clock: clock)
     var outcomes: [DetectionPromptViewModel.Outcome] = []
     prompt.onClose = { outcomes.append($0) }
     prompt.begin()

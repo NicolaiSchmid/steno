@@ -8,10 +8,12 @@ import SwiftUI
 /// window's appearance. `ThemeTokensTests` checks that every `--color-*`
 /// name in the CSS has an entry in `tokens`.
 enum Theme {
+  typealias RGBA = (red: Double, green: Double, blue: Double, alpha: Double)
+
   struct Token: Sendable {
     let cssName: String
-    let dark: (red: Double, green: Double, blue: Double, alpha: Double)
-    let light: (red: Double, green: Double, blue: Double, alpha: Double)
+    let dark: RGBA
+    let light: RGBA
 
     var nsColor: NSColor {
       let dark = self.dark
@@ -27,26 +29,15 @@ enum Theme {
     var color: Color { Color(nsColor: nsColor) }
   }
 
-  private static func hex(_ value: UInt32, alpha: Double = 1) -> (
-    red: Double, green: Double, blue: Double, alpha: Double
-  ) {
+  private static func hex(_ value: UInt32, alpha: Double = 1) -> RGBA {
     (
       red: Double((value >> 16) & 0xFF) / 255, green: Double((value >> 8) & 0xFF) / 255,
       blue: Double(value & 0xFF) / 255, alpha: alpha
     )
   }
 
-  private static func white(_ alpha: Double) -> (
-    red: Double, green: Double, blue: Double, alpha: Double
-  ) {
-    (red: 1, green: 1, blue: 1, alpha: alpha)
-  }
-
-  private static func black(_ alpha: Double) -> (
-    red: Double, green: Double, blue: Double, alpha: Double
-  ) {
-    (red: 0, green: 0, blue: 0, alpha: alpha)
-  }
+  private static func white(_ alpha: Double) -> RGBA { (red: 1, green: 1, blue: 1, alpha: alpha) }
+  private static func black(_ alpha: Double) -> RGBA { (red: 0, green: 0, blue: 0, alpha: alpha) }
 
   // Canvas and text ladder.
   static let background = Token(cssName: "background", dark: hex(0x000000), light: hex(0xFAFAFA))

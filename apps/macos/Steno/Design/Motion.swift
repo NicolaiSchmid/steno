@@ -5,10 +5,6 @@ import SwiftUI
 /// spatial moves use the one critically damped spring. No inline durations
 /// at call sites.
 enum Motion {
-  /// The standard curve for every timing-driven change (0.4, 0, 0.2, 1).
-  static let easeStandard = UnitCurve.bezier(
-    startControlPoint: UnitPoint(x: 0.4, y: 0), endControlPoint: UnitPoint(x: 0.2, y: 1))
-
   /// Opacity and colour swaps between existing states.
   static let durationFunctional: TimeInterval = 0.150
   /// Exits are quicker than entries so the incoming state reads first.

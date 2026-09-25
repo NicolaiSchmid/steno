@@ -76,9 +76,7 @@ final class DetectionController {
     switch event {
     case .microphoneOpened(let bundleID, _):
       guard enabled, !isRecording, prompt == nil else { return }
-      let prompt = DetectionPromptViewModel(
-        trigger: .microphoneOpened(bundleID: bundleID, appName: appName(bundleID)),
-        clock: environment.clock)
+      let prompt = DetectionPromptViewModel(appName: appName(bundleID), clock: environment.clock)
       prompt.onClose = { [weak self] outcome in
         guard let self else { return }
         self.prompt = nil

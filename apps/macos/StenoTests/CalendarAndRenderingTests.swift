@@ -55,6 +55,6 @@ final class CalendarAndRenderingTests: XCTestCase {
     XCTAssertEqual(TimeInterval(65).clockText, "01:05")
     XCTAssertEqual(TimeInterval(3661).clockText, "1:01:01")
     XCTAssertEqual(TimeInterval(3661).timestampText, "01:01:01")
-    XCTAssertEqual(Duration.seconds(125).clockText, "02:05")
+    XCTAssertEqual(TimeInterval(-3).clockText, "00:00")
   }
 }

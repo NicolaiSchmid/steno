@@ -35,7 +35,7 @@ final class GeneralSettingsViewModel {
   func setLaunchAtLogin(_ enabled: Bool) async {
     do {
       try environment.loginItem.setEnabled(enabled)
-      try await update { $0.launchAtLogin = enabled }
+      try await environment.updateSettings { $0.launchAtLogin = enabled }
     } catch {
       self.error = "Login item could not be changed: \(error)"
     }
@@ -48,26 +48,20 @@ final class GeneralSettingsViewModel {
 
   func setDetectionEnabled(_ enabled: Bool) async {
     detectionEnabled = enabled
-    do {
-      try await update { $0.meetingDetectionEnabled = enabled }
-    } catch {
-      self.error = "Setting could not be saved: \(error)"
-    }
+    await save { $0.meetingDetectionEnabled = enabled }
   }
 
   func setDefaultTemplate(_ id: String) async {
     guard SummaryTemplate.bundled(id: id) != nil else { return }
     defaultTemplateID = id
+    await save { $0.defaultTemplateID = id }
+  }
+
+  private func save(_ mutate: (inout Settings) -> Void) async {
     do {
-      try await update { $0.defaultTemplateID = id }
+      try await environment.updateSettings(mutate)
     } catch {
       self.error = "Setting could not be saved: \(error)"
     }
-  }
-
-  private func update(_ mutate: (inout Settings) -> Void) async throws {
-    var settings = try await environment.settings.load()
-    mutate(&settings)
-    try await environment.settings.save(settings)
   }
 }

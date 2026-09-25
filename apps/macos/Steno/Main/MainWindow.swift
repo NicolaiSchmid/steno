@@ -46,13 +46,13 @@ struct MainWindow: View {
     }
     .onChange(of: controller.requestedMeetingID, initial: true) { _, requested in
       guard let requested else { return }
-      list.select(requested)
+      list.selection = requested
       controller.requestedMeetingID = nil
     }
     .onChange(of: list.all.isEmpty, initial: true) { _, empty in
       // First launch of the window: show the newest meeting.
       if !empty, list.selection == nil, let first = list.meetings.first {
-        list.select(first.id)
+        list.selection = first.id
       }
     }
   }

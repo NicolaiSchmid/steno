@@ -25,11 +25,6 @@ final class MenuBarViewModel {
     var fraction: Double { stage?.fraction ?? 0 }
   }
 
-  struct StopOutcome: Equatable, Sendable {
-    var meetingID: UUID
-    var statistics: CaptureStatistics
-  }
-
   private struct Active {
     var session: CaptureSession
     var meetingID: UUID
@@ -45,7 +40,8 @@ final class MenuBarViewModel {
   private(set) var launchAtLogin: LoginItemStatus
   private(set) var lastError: String?
   private(set) var lastWarning: String?
-  private(set) var lastStop: StopOutcome?
+  /// The meeting the last `stop()` enqueued.
+  private(set) var lastStoppedMeetingID: UUID?
 
   private let environment: AppEnvironment
   private var active: Active?
@@ -55,8 +51,6 @@ final class MenuBarViewModel {
   /// Called around recordings so the detector never sees Steno's own tap;
   /// set by `AppController`.
   var recordingDidChange: ((Bool) async -> Void)?
-  /// Called after a stopped recording is enqueued.
-  var meetingEnqueued: ((UUID) -> Void)?
 
   init(environment: AppEnvironment) {
     self.environment = environment
@@ -170,14 +164,13 @@ final class MenuBarViewModel {
         meeting.duration = result.statistics.duration
       }
       try await environment.pipeline.enqueue(meeting, asset: asset)
-      lastStop = StopOutcome(meetingID: active.meetingID, statistics: result.statistics)
+      lastStoppedMeetingID = active.meetingID
       if active.mode == .call, result.statistics.systemLaneSilent {
         lastWarning = "The system audio lane stayed silent. Check the system audio permission."
       }
       if result.statistics.endedOnDeviceLoss {
         lastWarning = "An audio device disappeared; the partial recording was kept."
       }
-      meetingEnqueued?(active.meetingID)
     } catch {
       lastError = "Recording could not be saved: \(error)"
       try? await environment.store.setState(
@@ -259,9 +252,7 @@ final class MenuBarViewModel {
   func setLaunchAtLogin(_ enabled: Bool) async {
     do {
       try environment.loginItem.setEnabled(enabled)
-      var settings = try await environment.settings.load()
-      settings.launchAtLogin = enabled
-      try await environment.settings.save(settings)
+      try await environment.updateSettings { $0.launchAtLogin = enabled }
     } catch {
       lastError = "Login item could not be changed: \(error)"
     }

@@ -6,7 +6,6 @@ import SwiftUI
 struct ScratchpadTab: View {
   let model: MeetingDetailViewModel
   @State private var text = ""
-  @State private var loadedFor: UUID?
 
   var body: some View {
     VStack(alignment: .leading, spacing: Theme.Space.sm) {
@@ -23,7 +22,6 @@ struct ScratchpadTab: View {
             .strokeBorder(Color.stenoBorder, lineWidth: Theme.Space.hairline))
         .accessibilityIdentifier("scratchpad-editor")
         .onChange(of: text) { _, newValue in
-          guard loadedFor == model.id else { return }
           if newValue != model.meeting?.scratchpad { model.saveScratchpad(newValue) }
         }
       Text("Saved with the meeting and exported into the folder note.")
@@ -31,14 +29,7 @@ struct ScratchpadTab: View {
         .foregroundStyle(Color.stenoFaint)
     }
     .padding(Theme.Space.lg)
-    .onAppear { load() }
-    .onChange(of: model.export == nil) { _, _ in load() }
+    .onAppear { text = model.meeting?.scratchpad ?? "" }
     .onDisappear { Task { await model.flushScratchpad() } }
-  }
-
-  private func load() {
-    guard loadedFor != model.id else { return }
-    text = model.meeting?.scratchpad ?? ""
-    loadedFor = model.id
   }
 }

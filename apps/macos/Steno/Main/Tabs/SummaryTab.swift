@@ -12,7 +12,15 @@ struct SummaryTab: View {
     ScrollView {
       VStack(alignment: .leading, spacing: Theme.Space.lg) {
         if model.summaryMarkdown.isEmpty {
-          placeholder
+          VStack(alignment: .leading, spacing: Theme.Space.sm) {
+            PendingText(
+              meeting: model.meeting, none: "No summary",
+              pending: "Summary appears after processing")
+            if let meeting = model.meeting, meeting.state == .queued || meeting.state == .processing
+            {
+              ProgressView().controlSize(.small)
+            }
+          }
         } else {
           ForEach(Array(MarkdownBlocks.parse(model.summaryMarkdown).enumerated()), id: \.offset) {
             _, block in
@@ -30,20 +38,7 @@ struct SummaryTab: View {
           }
         }
       }
-      .frame(maxWidth: 720, alignment: .leading)
-      .padding(Theme.Space.lg)
-      .textSelection(.enabled)
-    }
-  }
-
-  private var placeholder: some View {
-    VStack(alignment: .leading, spacing: Theme.Space.sm) {
-      Text(model.meeting?.state == .ready ? "No summary" : "Summary appears after processing")
-        .font(.steno(Theme.TextSize.sm, weight: .medium))
-        .foregroundStyle(Color.stenoMutedForeground)
-      if let meeting = model.meeting, meeting.state == .queued || meeting.state == .processing {
-        ProgressView().controlSize(.small)
-      }
+      .readingColumn()
     }
   }
 }

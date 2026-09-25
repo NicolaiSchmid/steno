@@ -9,7 +9,7 @@
 # Usage: make-appcast.sh <tag>            e.g. make-appcast.sh v1.2.3
 # Environment: SPARKLE_PRIVATE_KEY (base64 EdDSA private key from
 # `generate_keys -x`). Requires the Sparkle package resolved in DerivedData
-# (build-release.sh does that) or GENERATE_APPCAST pointing at the binary.
+# (build-release.sh does that).
 # Output: apps/macos/dist/appcast.xml
 set -euo pipefail
 
@@ -22,12 +22,9 @@ dist="$app_dir/dist"
 derived="$app_dir/build/DerivedData"
 repo="https://github.com/NicolaiSchmid/steno"
 
-generate_appcast="${GENERATE_APPCAST:-}"
-if [ -z "$generate_appcast" ]; then
-  generate_appcast="$(find "$derived/SourcePackages/artifacts" -type f -name generate_appcast -path '*/bin/*' 2>/dev/null | head -n 1 || true)"
-fi
+generate_appcast="$(find "$derived/SourcePackages/artifacts" -type f -name generate_appcast -path '*/bin/*' 2>/dev/null | head -n 1 || true)"
 if [ -z "$generate_appcast" ] || [ ! -x "$generate_appcast" ]; then
-  echo "::error::generate_appcast not found under $derived/SourcePackages/artifacts; set GENERATE_APPCAST" >&2
+  echo "::error::generate_appcast not found under $derived/SourcePackages/artifacts" >&2
   exit 1
 fi
 

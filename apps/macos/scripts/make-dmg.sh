@@ -3,8 +3,8 @@
 # staples the ticket and runs the Gatekeeper assessment.
 #
 # Usage: make-dmg.sh <marketing-version> [--skip-notarization]
-# Environment for notarisation: ASC_KEY_ID, ASC_ISSUER_ID and either
-# ASC_PRIVATE_KEY (the .p8 contents) or ASC_PRIVATE_KEY_PATH.
+# Environment for notarisation: ASC_KEY_ID, ASC_ISSUER_ID, ASC_PRIVATE_KEY
+# (the .p8 contents; written to $RUNNER_TEMP for the call and removed).
 # Output: apps/macos/dist/Steno-<version>.dmg
 set -euo pipefail
 
@@ -18,7 +18,6 @@ dist="$app_dir/dist"
 app="$dist/Steno.app"
 dmg="$dist/Steno-$version.dmg"
 staging="$dist/dmg-staging"
-identity="${CODESIGN_IDENTITY:-Developer ID Application}"
 
 test -d "$app" || { echo "::error::$app missing; run build-release.sh first"; exit 1; }
 
@@ -33,7 +32,7 @@ hdiutil create -volname "Steno $version" -srcfolder "$staging" -ov -format UDZO 
 rm -rf "$staging"
 
 echo "==> sign the image"
-codesign --sign "$identity" --timestamp --force "$dmg"
+codesign --sign "Developer ID Application" --timestamp --force "$dmg"
 codesign --verify --verbose=2 "$dmg"
 
 if [ "$skip_notarization" = true ]; then
@@ -44,16 +43,11 @@ fi
 
 : "${ASC_KEY_ID:?ASC_KEY_ID missing}"
 : "${ASC_ISSUER_ID:?ASC_ISSUER_ID missing}"
-key_path="${ASC_PRIVATE_KEY_PATH:-}"
-cleanup_key=false
-if [ -z "$key_path" ]; then
-  : "${ASC_PRIVATE_KEY:?ASC_PRIVATE_KEY (or ASC_PRIVATE_KEY_PATH) missing}"
-  key_path="${RUNNER_TEMP:-${TMPDIR:-/tmp}}/AuthKey_$ASC_KEY_ID.p8"
-  umask 077
-  printf '%s\n' "$ASC_PRIVATE_KEY" > "$key_path"
-  cleanup_key=true
-fi
-trap '[ "$cleanup_key" = true ] && rm -f "$key_path"' EXIT
+: "${ASC_PRIVATE_KEY:?ASC_PRIVATE_KEY missing}"
+key_path="${RUNNER_TEMP:-${TMPDIR:-/tmp}}/AuthKey_$ASC_KEY_ID.p8"
+umask 077
+printf '%s\n' "$ASC_PRIVATE_KEY" > "$key_path"
+trap 'rm -f "$key_path"' EXIT
 
 echo "==> notarytool submit"
 xcrun notarytool submit "$dmg" \

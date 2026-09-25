@@ -49,10 +49,7 @@ final class MeetingListViewModel {
   var tagFilter: String? {
     didSet { apply() }
   }
-  var selection: UUID? {
-    didSet { if selection != oldValue { selectionChanged?(selection) } }
-  }
-  var selectionChanged: ((UUID?) -> Void)?
+  var selection: UUID?
 
   private let store: MeetingStore
   private let clock: any Clock<Duration>
@@ -78,14 +75,6 @@ final class MeetingListViewModel {
 
   var tags: [String] {
     Array(Set(all.flatMap(\.tags))).sorted()
-  }
-
-  func select(_ id: UUID?) {
-    selection = id
-  }
-
-  func meeting(id: UUID) -> Meeting? {
-    all.first { $0.id == id }
   }
 
   private func apply() {

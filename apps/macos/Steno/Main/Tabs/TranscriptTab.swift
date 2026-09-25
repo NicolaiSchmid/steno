@@ -11,12 +11,9 @@ struct TranscriptTab: View {
       LazyVStack(alignment: .leading, spacing: Theme.Space.lg) {
         let turns = TranscriptTurns.group(model.export?.segments ?? [])
         if turns.isEmpty {
-          Text(
-            model.meeting?.state == .ready
-              ? "No transcript" : "Transcript appears after processing"
-          )
-          .font(.steno(Theme.TextSize.sm, weight: .medium))
-          .foregroundStyle(Color.stenoMutedForeground)
+          PendingText(
+            meeting: model.meeting, none: "No transcript",
+            pending: "Transcript appears after processing")
         }
         ForEach(turns) { turn in
           VStack(alignment: .leading, spacing: Theme.Space.xs) {
@@ -38,9 +35,7 @@ struct TranscriptTab: View {
           }
         }
       }
-      .frame(maxWidth: 720, alignment: .leading)
-      .padding(Theme.Space.lg)
-      .textSelection(.enabled)
+      .readingColumn()
     }
   }
 }

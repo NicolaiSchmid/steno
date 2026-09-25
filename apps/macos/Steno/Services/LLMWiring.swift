@@ -46,9 +46,4 @@ enum LLMWiring {
     return
       "Connected: \(listed), structured output \(report.resolvedMode.rawValue), \(milliseconds) ms."
   }
-
-  /// Whether the settings name an endpoint the passes can use.
-  static func isConfigured(_ settings: Settings) -> Bool {
-    LLMEndpoint(settings: settings) != nil
-  }
 }

@@ -7,7 +7,6 @@ import SwiftUI
 struct MeetingDetailView: View {
   @Bindable var model: MeetingDetailViewModel
   let controller: AppController
-  @State private var defaultRetention: AudioRetention = .keepDays(30)
   @State private var tagsText = ""
   @State private var editingTags = false
 
@@ -25,11 +24,6 @@ struct MeetingDetailView: View {
       }
     }
     .background(Color.stenoBackground)
-    .task(id: model.id) {
-      if let settings = try? await controller.environment.settings.load() {
-        defaultRetention = settings.defaultRetention
-      }
-    }
     .sheet(isPresented: $model.showsSpeakerReview) {
       if let export = model.export {
         SpeakerReviewSheet(
@@ -40,7 +34,7 @@ struct MeetingDetailView: View {
           })
       }
     }
-    .onChange(of: controller.pendingReviews[model.id] != nil, initial: true) { _, pending in
+    .onChange(of: controller.pendingReviews.contains(model.id), initial: true) { _, pending in
       if pending, NSApp.isActive, !model.unconfirmedSpeakers.isEmpty {
         model.showsSpeakerReview = true
       }
@@ -55,7 +49,7 @@ struct MeetingDetailView: View {
           .foregroundStyle(Color.stenoStrong)
           .textSelection(.enabled)
         Spacer()
-        MeetingStateLabel.chip(for: MeetingStateLabel(meeting.state))
+        StatusChip(meeting.state)
       }
       HStack(spacing: Theme.Space.md) {
         Text(meeting.startedAt, format: .dateTime.year().month().day().hour().minute())
@@ -101,9 +95,7 @@ struct MeetingDetailView: View {
             "Keep audio",
             isOn: Binding(
               get: { model.keepsAudio },
-              set: { keep in
-                Task { await model.setKeepAudio(keep, defaultRetention: defaultRetention) }
-              }))
+              set: { keep in Task { await model.setKeepAudio(keep) } }))
           if let url = model.export?.audio?.url {
             Button("Reveal recording in Finder") {
               NSWorkspace.shared.activateFileViewerSelecting([url])

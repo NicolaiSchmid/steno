@@ -86,13 +86,14 @@ final class MeetingDetailViewModelTests: XCTestCase {
     await TestSupport.waitUntil("export loaded") { model.export != nil }
     XCTAssertFalse(model.keepsAudio)
 
-    await model.setKeepAudio(true, defaultRetention: .keepDays(30))
+    await model.setKeepAudio(true)
     let assetOptional = try await environment.store.asset(meetingID: SampleData.meetingID)
     var asset = try XCTUnwrap(assetOptional)
     XCTAssertEqual(asset.retention, .keepForever)
     XCTAssertNil(asset.expiresAt)
 
-    await model.setKeepAudio(false, defaultRetention: .keepDays(7))
+    try await environment.updateSettings { $0.defaultRetention = .keepDays(7) }
+    await model.setKeepAudio(false)
     let assetReloaded = try await environment.store.asset(meetingID: SampleData.meetingID)
     asset = try XCTUnwrap(assetReloaded)
     XCTAssertEqual(asset.retention, .keepDays(7))

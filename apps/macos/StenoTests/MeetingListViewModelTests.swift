@@ -17,7 +17,7 @@ final class MeetingListViewModelTests: XCTestCase {
     XCTAssertEqual(model.meetings.first?.id, SampleData.meetingID, "newest first")
     XCTAssertEqual(model.tags, ["ops", "q4", "strategie"])
 
-    model.select(SampleData.meetingID)
+    model.selection = SampleData.meetingID
     model.stateFilter = .failed
     XCTAssertEqual(model.meetings.map(\.id), [failed.id])
     XCTAssertEqual(model.selection, SampleData.meetingID, "a filter never drops the selection")
@@ -33,7 +33,7 @@ final class MeetingListViewModelTests: XCTestCase {
       $0.title = "Renamed"
     }
     await TestSupport.waitUntil("rename observed") {
-      model.meeting(id: SampleData.meetingID)?.title == "Renamed"
+      model.all.first { $0.id == SampleData.meetingID }?.title == "Renamed"
     }
     XCTAssertEqual(model.selection, SampleData.meetingID)
   }

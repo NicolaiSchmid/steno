@@ -127,7 +127,7 @@ struct MenuBarView: View {
               .foregroundStyle(Color.stenoForeground)
               .lineLimit(1)
             Spacer()
-            MeetingStateLabel.chip(for: MeetingStateLabel(meeting.state))
+            StatusChip(meeting.state)
           }
           .padding(.vertical, 2)
         }

@@ -5,7 +5,7 @@
 # Actions, otherwise prints the path.
 set -euo pipefail
 
-VERSION="${XCODEGEN_VERSION:-2.46.0}"
+VERSION="2.46.0"
 
 if command -v xcodegen >/dev/null 2>&1; then
   echo "xcodegen $(xcodegen --version) already on PATH"
@@ -13,17 +13,15 @@ if command -v xcodegen >/dev/null 2>&1; then
 fi
 
 root="${RUNNER_TEMP:-${TMPDIR:-/tmp}}/xcodegen-${VERSION}"
-binary="$(find "$root" -type f -name xcodegen -path '*/bin/*' 2>/dev/null | head -n 1 || true)"
-
-if [ -z "$binary" ]; then
+if [ ! -d "$root" ]; then
   mkdir -p "$root"
   url="https://github.com/yonaskolb/XcodeGen/releases/download/${VERSION}/xcodegen.zip"
   echo "downloading $url"
   curl -fsSL --retry 3 -o "$root/xcodegen.zip" "$url"
   unzip -oq "$root/xcodegen.zip" -d "$root"
-  binary="$(find "$root" -type f -name xcodegen -path '*/bin/*' | head -n 1)"
 fi
 
+binary="$(find "$root" -type f -name xcodegen -path '*/bin/*' | head -n 1 || true)"
 if [ -z "$binary" ]; then
   echo "::error::xcodegen binary not found in the release zip" >&2
   exit 1

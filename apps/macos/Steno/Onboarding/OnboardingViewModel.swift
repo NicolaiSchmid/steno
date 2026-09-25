@@ -14,10 +14,7 @@ final class OnboardingViewModel {
     var isRequired: Bool { kind.isRequired }
   }
 
-  static let order: [PermissionKind] = [.microphone, .systemAudio, .calendar, .localNetwork]
-
-  private(set) var steps: [Step] = OnboardingViewModel.order.map { Step(kind: $0, state: .unknown) }
-  private(set) var current: PermissionKind = .microphone
+  private(set) var steps = PermissionKind.allCases.map { Step(kind: $0, state: .unknown) }
   private(set) var requesting: PermissionKind?
   private(set) var skipped: Set<PermissionKind> = []
   private let permissions: any PermissionsChecking
@@ -30,7 +27,12 @@ final class OnboardingViewModel {
     for index in steps.indices {
       steps[index].state = await permissions.state(of: steps[index].kind)
     }
-    advance()
+  }
+
+  /// The first step that is neither granted nor skipped; the last one when
+  /// every step is handled.
+  var current: PermissionKind {
+    steps.first { $0.state != .granted && !skipped.contains($0.kind) }?.kind ?? .localNetwork
   }
 
   var isComplete: Bool {
@@ -56,7 +58,6 @@ final class OnboardingViewModel {
       steps[index].state = state
     }
     requesting = nil
-    advance()
   }
 
   func openSystemSettings(_ kind: PermissionKind) {
@@ -67,19 +68,6 @@ final class OnboardingViewModel {
   func skip(_ kind: PermissionKind) {
     guard !kind.isRequired else { return }
     skipped.insert(kind)
-    advance()
-  }
-
-  func `continue`() {
-    advance()
-  }
-
-  /// The first step that is neither granted nor skipped becomes current.
-  private func advance() {
-    current =
-      steps.first { step in
-        step.state != .granted && !skipped.contains(step.kind)
-      }?.kind ?? Self.order.last ?? .microphone
   }
 }
 

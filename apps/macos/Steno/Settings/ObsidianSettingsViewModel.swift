@@ -66,9 +66,7 @@ final class ObsidianSettingsViewModel {
       }
     }
     do {
-      var settings = try await environment.settings.load()
-      settings.obsidian = draft
-      try await environment.settings.save(settings)
+      try await environment.updateSettings { $0.obsidian = draft }
       saved = true
       error = nil
     } catch {

@@ -12,8 +12,8 @@ final class AppController {
   let environment: AppEnvironment
   let menuBar: MenuBarViewModel
   let detection: DetectionController
-  /// Meetings the pipeline flagged with unconfirmed speakers, by meeting id.
-  private(set) var pendingReviews: [UUID: [UUID]] = [:]
+  /// Meetings the pipeline flagged with unconfirmed speakers.
+  private(set) var pendingReviews: Set<UUID> = []
   /// The meeting the main window should show next (from the menu bar or the
   /// detection prompt).
   var requestedMeetingID: UUID?
@@ -54,8 +54,8 @@ final class AppController {
         let stream = await environment.events.subscribe()
         for await event in stream {
           guard let self else { return }
-          if case .speakersNeedReview(let meetingID, let speakerIDs) = event {
-            self.pendingReviews[meetingID] = speakerIDs
+          if case .speakersNeedReview(let meetingID, _) = event {
+            self.pendingReviews.insert(meetingID)
           }
         }
       })
@@ -81,13 +81,11 @@ final class AppController {
     if !newlyFinished.isEmpty {
       await environment.runRetentionSweep()
     }
-    for id in Array(pendingReviews.keys) where !meetings.contains(where: { $0.id == id }) {
-      pendingReviews[id] = nil
-    }
+    pendingReviews.formIntersection(meetings.map(\.id))
   }
 
   func reviewCompleted(meetingID: UUID) {
-    pendingReviews[meetingID] = nil
+    pendingReviews.remove(meetingID)
   }
 
   private func registerLoginItemOnFirstLaunch() async {

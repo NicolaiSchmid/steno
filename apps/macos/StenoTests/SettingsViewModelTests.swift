@@ -128,7 +128,6 @@ final class SettingsViewModelTests: XCTestCase {
     await model.save()
     let clearedKey = try await environment.secrets.secret(for: .llmAPIKey)
     XCTAssertNil(clearedKey, "an empty key removes it")
-    XCTAssertFalse(model.savedKeyPresent)
   }
 
   func testLLMTestReportsTheOutcome() async throws {
@@ -240,18 +239,5 @@ final class SettingsViewModelTests: XCTestCase {
     await TestSupport.waitUntil("stopped after the last phone left") {
       model.listener == .stopped
     }
-  }
-
-  // MARK: Updates
-
-  func testUpdatesBindsToTheUpdater() {
-    let updater = FakeUpdater()
-    let model = UpdatesSettingsViewModel(updater: updater)
-    XCTAssertTrue(model.automaticallyChecks)
-    model.automaticallyChecks = false
-    XCTAssertFalse(updater.automaticallyChecksForUpdates)
-    model.checkNow()
-    XCTAssertEqual(updater.checks, 1)
-    XCTAssertFalse(model.version.isEmpty)
   }
 }

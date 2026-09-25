@@ -55,9 +55,7 @@ final class SpeechSettingsViewModel {
     guard id != engineID else { return }
     engineID = id
     do {
-      var settings = try await environment.settings.load()
-      settings.speechEngineID = id.rawValue
-      try await environment.settings.save(settings)
+      try await environment.updateSettings { $0.speechEngineID = id.rawValue }
       try await environment.reloadPipeline()
       error = nil
     } catch {

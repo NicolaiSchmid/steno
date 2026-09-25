@@ -84,7 +84,7 @@ struct MeetingRow: View {
           .foregroundStyle(Color.stenoStrong)
           .lineLimit(1)
         Spacer(minLength: Theme.Space.sm)
-        MeetingStateLabel.chip(for: MeetingStateLabel(meeting.state))
+        StatusChip(meeting.state)
       }
       HStack(spacing: Theme.Space.sm) {
         Text(meeting.startedAt, format: .dateTime.day().month(.abbreviated).hour().minute())
@@ -102,18 +102,6 @@ struct MeetingRow: View {
     }
     .padding(.vertical, Theme.Space.xs)
     .accessibilityIdentifier("meeting-\(meeting.id.uuidString)")
-  }
-}
-
-extension MeetingStateLabel {
-  init(_ state: MeetingState) {
-    switch state {
-    case .recording: self.init(text: "Recording", color: Color.stenoLiveBright)
-    case .queued: self.init(text: "Queued", color: Color.stenoInfo)
-    case .processing: self.init(text: "Processing", color: Color.stenoInfo)
-    case .ready: self.init(text: "Ready", color: Color.stenoLive)
-    case .failed: self.init(text: "Failed", color: Color.stenoDestructive)
-    }
   }
 }
 

@@ -63,14 +63,6 @@ final class AudioSettingsViewModel {
     }
   }
 
-  var retention: AudioRetention {
-    switch retentionMode {
-    case .deleteAfterProcessing: .deleteAfterProcessing
-    case .keepDays: .keepDays(max(1, retentionDays))
-    case .keepForever: .keepForever
-    }
-  }
-
   func setInputDevice(_ uid: String?) async {
     inputDeviceUID = uid
     await save { $0.inputDeviceUID = uid }
@@ -84,15 +76,18 @@ final class AudioSettingsViewModel {
   func setRetention(mode: RetentionMode, days: Int) async {
     retentionMode = mode
     retentionDays = max(1, days)
-    let retention = self.retention
+    let retention: AudioRetention =
+      switch mode {
+      case .deleteAfterProcessing: .deleteAfterProcessing
+      case .keepDays: .keepDays(retentionDays)
+      case .keepForever: .keepForever
+      }
     await save { $0.defaultRetention = retention }
   }
 
   private func save(_ mutate: (inout Settings) -> Void) async {
     do {
-      var settings = try await environment.settings.load()
-      mutate(&settings)
-      try await environment.settings.save(settings)
+      try await environment.updateSettings(mutate)
       error = nil
     } catch {
       self.error = "Setting could not be saved: \(error)"

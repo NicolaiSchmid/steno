@@ -1,14 +1,10 @@
 import Foundation
 
-/// One detection prompt: which app opened the microphone, a countdown on
+/// One detection prompt: the app that opened the microphone, a countdown on
 /// the injected clock, and the two actions. Auto-dismisses after `timeout`.
 @MainActor
 @Observable
 final class DetectionPromptViewModel: Identifiable {
-  enum Trigger: Equatable, Sendable {
-    case microphoneOpened(bundleID: String?, appName: String)
-  }
-
   enum Outcome: Equatable, Sendable {
     case started
     case dismissed
@@ -16,7 +12,7 @@ final class DetectionPromptViewModel: Identifiable {
   }
 
   let id = UUID()
-  let trigger: Trigger
+  let appName: String
   let timeout: Duration
   private(set) var remaining: Duration
   private(set) var outcome: Outcome?
@@ -25,17 +21,11 @@ final class DetectionPromptViewModel: Identifiable {
   /// Runs once, with the outcome, when the prompt closes.
   var onClose: ((Outcome) async -> Void)?
 
-  init(trigger: Trigger, clock: any Clock<Duration>, timeout: Duration = .seconds(60)) {
-    self.trigger = trigger
+  init(appName: String, clock: any Clock<Duration>, timeout: Duration = .seconds(60)) {
+    self.appName = appName
     self.clock = clock
     self.timeout = timeout
     self.remaining = timeout
-  }
-
-  var appName: String {
-    switch trigger {
-    case .microphoneOpened(_, let appName): appName
-    }
   }
 
   var remainingSeconds: Int {

@@ -10,17 +10,14 @@ struct TasksTab: View {
       VStack(alignment: .leading, spacing: Theme.Space.sm) {
         let tasks = model.export?.tasks ?? []
         if tasks.isEmpty {
-          Text(model.meeting?.state == .ready ? "No tasks" : "Tasks appear after processing")
-            .font(.steno(Theme.TextSize.sm, weight: .medium))
-            .foregroundStyle(Color.stenoMutedForeground)
+          PendingText(
+            meeting: model.meeting, none: "No tasks", pending: "Tasks appear after processing")
         }
         ForEach(tasks) { task in
           TaskRow(task: task, assignee: assigneeName(task))
         }
       }
-      .frame(maxWidth: 720, alignment: .leading)
-      .padding(Theme.Space.lg)
-      .textSelection(.enabled)
+      .readingColumn()
     }
   }
 

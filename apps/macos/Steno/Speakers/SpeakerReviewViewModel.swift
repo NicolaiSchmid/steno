@@ -5,8 +5,7 @@ import StenoCore
 /// or `.suggested`, with its clip, cosine candidates from `SpeakerMemory`
 /// and the calendar participants as name suggestions. Naming and assigning
 /// go through `MeetingStore.confirm(speakerID:person:memory:)` (the one
-/// operation that enrols and deletes the clip); cluster merge and person
-/// merge are two distinct store operations; `finish()` re-exports once.
+/// operation that enrols and deletes the clip); `finish()` re-exports once.
 @MainActor
 @Observable
 final class SpeakerReviewViewModel {
@@ -163,8 +162,6 @@ final class SpeakerReviewViewModel {
     skipped.insert(id)
   }
 
-  // MARK: - Merges
-
   /// Two clusters of this meeting are one voice: segments move to `target`,
   /// embeddings average, `source` is deleted.
   func mergeSpeakers(_ source: UUID, into target: UUID) async {
@@ -174,17 +171,6 @@ final class SpeakerReviewViewModel {
       await reload()
     } catch {
       self.error = "Speakers could not be merged: \(error)"
-    }
-  }
-
-  /// One person recorded twice, across meetings.
-  func mergePersons(keep: UUID, remove: UUID) async {
-    guard keep != remove else { return }
-    do {
-      try await store.mergePersons(keep: keep, remove: remove)
-      await reload()
-    } catch {
-      self.error = "People could not be merged: \(error)"
     }
   }
 

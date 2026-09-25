@@ -15,15 +15,7 @@ final class MeetingDetailViewModel: Identifiable {
     case scratchpad
 
     var id: String { rawValue }
-
-    var title: String {
-      switch self {
-      case .summary: "Summary"
-      case .transcript: "Transcript"
-      case .tasks: "Tasks"
-      case .scratchpad: "Scratchpad"
-      }
-    }
+    var title: String { rawValue.capitalized }
   }
 
   let id: UUID
@@ -38,6 +30,7 @@ final class MeetingDetailViewModel: Identifiable {
   static let scratchpadDebounce: Duration = .seconds(1)
 
   private let store: MeetingStore
+  private let settings: SettingsStore
   private let pipeline: () -> ProcessingPipeline
   private let clock: any Clock<Duration>
   private let now: @Sendable () -> Date
@@ -46,11 +39,13 @@ final class MeetingDetailViewModel: Identifiable {
   private var pendingScratchpad: String?
 
   init(
-    meetingID: UUID, store: MeetingStore, pipeline: @escaping () -> ProcessingPipeline,
-    clock: any Clock<Duration>, now: @escaping @Sendable () -> Date
+    meetingID: UUID, store: MeetingStore, settings: SettingsStore,
+    pipeline: @escaping () -> ProcessingPipeline, clock: any Clock<Duration>,
+    now: @escaping @Sendable () -> Date
   ) {
     self.id = meetingID
     self.store = store
+    self.settings = settings
     self.pipeline = pipeline
     self.clock = clock
     self.now = now
@@ -80,8 +75,8 @@ final class MeetingDetailViewModel: Identifiable {
 
   convenience init(meetingID: UUID, environment: AppEnvironment) {
     self.init(
-      meetingID: meetingID, store: environment.store, pipeline: { environment.pipeline },
-      clock: environment.clock, now: environment.now)
+      meetingID: meetingID, store: environment.store, settings: environment.settings,
+      pipeline: { environment.pipeline }, clock: environment.clock, now: environment.now)
   }
 
   var meeting: Meeting? { export?.meeting }
@@ -143,17 +138,18 @@ final class MeetingDetailViewModel: Identifiable {
   }
 
   /// `keep` sets `.keepForever` and clears `expiresAt`; off restores the
-  /// stored default retention with a fresh expiry from now.
-  func setKeepAudio(_ keep: Bool, defaultRetention: AudioRetention) async {
-    guard var asset = try? await store.asset(meetingID: id) else { return }
-    if keep {
-      asset.retention = .keepForever
-      asset.expiresAt = nil
-    } else {
-      asset.retention = defaultRetention
-      asset.expiresAt = defaultRetention.expiry(from: now())
-    }
+  /// default retention from Settings with a fresh expiry from now.
+  func setKeepAudio(_ keep: Bool) async {
     do {
+      guard var asset = try await store.asset(meetingID: id) else { return }
+      if keep {
+        asset.retention = .keepForever
+        asset.expiresAt = nil
+      } else {
+        let retention = try await settings.load().defaultRetention
+        asset.retention = retention
+        asset.expiresAt = retention.expiry(from: now())
+      }
       try await store.save(asset)
     } catch {
       self.error = "Retention could not be changed: \(error)"

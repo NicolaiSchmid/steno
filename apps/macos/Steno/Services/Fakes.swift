@@ -8,22 +8,17 @@ import Foundation
 final class FakeLoginItem: LoginItemControlling {
   var status: LoginItemStatus
   private(set) var changes: [Bool] = []
-  var failure: (any Error)?
-  private(set) var openedSystemSettings = 0
 
   init(status: LoginItemStatus = .notRegistered) {
     self.status = status
   }
 
   func setEnabled(_ enabled: Bool) throws {
-    if let failure { throw failure }
     changes.append(enabled)
     status = enabled ? .enabled : .notRegistered
   }
 
-  func openSystemSettings() {
-    openedSystemSettings += 1
-  }
+  func openSystemSettings() {}
 }
 
 @MainActor
@@ -62,18 +57,12 @@ final class FakePermissions: PermissionsChecking {
 @MainActor
 final class FakeCalendar: CalendarProviding {
   var events: [CalendarEvent]
-  var failure: (any Error)?
-  private(set) var queries: [Date] = []
 
   init(events: [CalendarEvent] = []) {
     self.events = events
   }
 
-  func events(on day: Date) async throws -> [CalendarEvent] {
-    queries.append(day)
-    if let failure { throw failure }
-    return events
-  }
+  func events(on day: Date) async throws -> [CalendarEvent] { events }
 }
 
 @MainActor
@@ -81,11 +70,8 @@ final class FakeUpdater: UpdaterControlling {
   var canCheckForUpdates = true
   var automaticallyChecksForUpdates = true
   var lastUpdateCheckDate: Date?
-  private(set) var checks = 0
 
   init() {}
 
-  func checkForUpdates() {
-    checks += 1
-  }
+  func checkForUpdates() {}
 }
