@@ -242,8 +242,15 @@ public final class StubChatServer: Sendable {
 
   private func serve(_ fd: Int32) {
     defer { close(fd) }
-    guard let raw = readRequest(fd) else { return }
+    FileHandle.standardError.write(Data("TRACE: serve start\n".utf8))
+    guard let raw = readRequest(fd) else {
+    FileHandle.standardError.write(Data("TRACE: readRequest nil\n".utf8))
+      return
+    }
+    FileHandle.standardError.write(Data("TRACE: read \(raw.method) \(raw.path) body \(raw.body.count)\n".utf8))
     let request = record(raw)
+    FileHandle.standardError.write(Data("TRACE: recorded \(request.index)\n".utf8))
+
     let response = state.withLock { state -> StubResponse in
       if !state.queue.isEmpty { return state.queue.removeFirst() }
       if let responder = state.responder, let scripted = responder(request) { return scripted }
@@ -264,7 +271,10 @@ public final class StubChatServer: Sendable {
       latch.unlock()
       return
     case .respond:
+    FileHandle.standardError.write(Data("TRACE: writing \(response.status)\n".utf8))
       write(fd, Self.serialize(response))
+    FileHandle.standardError.write(Data("TRACE: written\n".utf8))
+
     }
   }
 
@@ -308,7 +318,10 @@ public final class StubChatServer: Sendable {
     let terminator = Data("\r\n\r\n".utf8)
     var headerEnd: Range<Data.Index>?
     while headerEnd == nil {
+    FileHandle.standardError.write(Data("TRACE: recv header loop buffer=\(buffer.count)\n".utf8))
       let count = recv(fd, &chunk, chunk.count, 0)
+    FileHandle.standardError.write(Data("TRACE: recv returned \(count)\n".utf8))
+
       guard count > 0 else { return nil }
       buffer.append(contentsOf: chunk[0..<Int(count)])
       headerEnd = buffer.range(of: terminator)
@@ -329,6 +342,8 @@ public final class StubChatServer: Sendable {
       headers[name] = value
     }
     let contentLength = headers["content-length"].flatMap { Int($0) } ?? 0
+    FileHandle.standardError.write(Data("TRACE: headers parsed \(headers) contentLength=\(contentLength)\n".utf8))
+
     var body = Data(buffer[headerEnd.upperBound...])
     while body.count < contentLength {
       let count = recv(fd, &chunk, chunk.count, 0)
