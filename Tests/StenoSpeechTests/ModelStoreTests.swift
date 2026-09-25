@@ -94,9 +94,9 @@ import Testing
     let downloader = FakeModelDownloader(hold: { await gate.wait() })
     let (store, directory) = try makeStore(downloader)
     defer { try? FileManager.default.removeItem(at: directory) }
+    // `ensure` marks the asset in flight before it returns its stream.
     let stream = await store.ensure(.offlineDiarizer)
     async let events = collect(stream)
-    for _ in 0..<50 { await Task.yield() }
     await #expect(throws: StenoSpeechError.downloadInProgress(.offlineDiarizer)) {
       try await store.remove(.offlineDiarizer)
     }
@@ -217,8 +217,12 @@ import Testing
   }
 
   @Test func differentAssetsDownloadConcurrentlyAndIndependently() async throws {
+    let started = Countdown(2)
     let gate = Gate()
-    let downloader = FakeModelDownloader(hold: { await gate.wait() })
+    let downloader = FakeModelDownloader(hold: {
+      await started.arrive()
+      await gate.wait()
+    })
     let (store, directory) = try makeStore(downloader)
     defer { try? FileManager.default.removeItem(at: directory) }
     let diarizer = await store.ensure(.offlineDiarizer)
@@ -226,7 +230,7 @@ import Testing
     async let diarizerEvents = collect(diarizer)
     async let whisperEvents = collect(whisper)
     // Both downloads are started (and held) before either finishes.
-    for _ in 0..<50 { await Task.yield() }
+    await started.wait()
     #expect(await Set(downloader.downloads.entries) == [.offlineDiarizer, .whisperLargeV3Turbo])
     #expect(store.installedAssets().isEmpty)
     await gate.open()
@@ -282,6 +286,29 @@ import Testing
     var events: [ModelDownloadProgress] = []
     for try await event in stream { events.append(event) }
     return events
+  }
+}
+
+/// Opens once `count` parties have arrived; `wait` returns immediately
+/// afterwards.
+actor Countdown {
+  private var remaining: Int
+  private var waiters: [CheckedContinuation<Void, Never>] = []
+
+  init(_ count: Int) {
+    remaining = count
+  }
+
+  func arrive() {
+    remaining -= 1
+    guard remaining <= 0 else { return }
+    for waiter in waiters { waiter.resume() }
+    waiters = []
+  }
+
+  func wait() async {
+    if remaining <= 0 { return }
+    await withCheckedContinuation { waiters.append($0) }
   }
 }
 

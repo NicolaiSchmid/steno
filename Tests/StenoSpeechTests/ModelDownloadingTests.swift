@@ -22,24 +22,29 @@ private final class OverrideTable: Sendable {
 /// `LiveModelDownloader` runs every download through these two; the
 /// framework calls themselves need a Mac and a network.
 @Suite struct DownloadSerializerTests {
+  /// Submission order is fixed by `enqueue` returning, and "the first job
+  /// is running" by a gate the job itself opens, so nothing here waits on
+  /// the scheduler.
   @Test func jobsRunOneAtATimeInSubmissionOrder() async throws {
     let serializer = DownloadSerializer()
-    let gate = Gate()
+    let firstStarted = Gate()
+    let release = Gate()
     let log = CallLog<String>()
-    async let first: Void = serializer.run {
+    let first = await serializer.enqueue {
       await log.record("first start")
-      await gate.wait()
+      await firstStarted.open()
+      await release.wait()
       await log.record("first end")
     }
-    async let second: Void = serializer.run {
+    let second = await serializer.enqueue {
       await log.record("second start")
       await log.record("second end")
     }
-    // The second job must not start while the first is held open.
-    for _ in 0..<50 { await Task.yield() }
+    await firstStarted.wait()
+    // The second job is queued behind a first that is held open.
     #expect(await log.entries == ["first start"])
-    await gate.open()
-    _ = try await (first, second)
+    await release.open()
+    _ = try await (first.value, second.value)
     #expect(await log.entries == ["first start", "first end", "second start", "second end"])
   }
 
@@ -90,26 +95,30 @@ private final class OverrideTable: Sendable {
     /// observable where the download itself needs no network (the Linux
     /// stub fails with `unsupportedPlatform` once its turn comes).
     @Test func liveDownloadersShareOneProcessWideChain() async throws {
-      let gate = Gate()
+      let heldStarted = Gate()
+      let release = Gate()
       let log = CallLog<String>()
-      async let held: Void = LiveModelDownloader.serializer.run {
+      let held = await LiveModelDownloader.serializer.enqueue {
         await log.record("held start")
-        await gate.wait()
+        await heldStarted.open()
+        await release.wait()
         await log.record("held end")
       }
+      await heldStarted.wait()
       let root = try Fixtures.temporaryDirectory("live")
       defer { try? FileManager.default.removeItem(at: root) }
-      async let second: Void = {
+      // Submitted while the held job runs, so it lands behind it in the
+      // chain and its failure can only be recorded after "held end".
+      let second = Task {
         do {
           try await LiveModelDownloader().download(.parakeetV3, under: root) { _, _ in }
         } catch {
           await log.record("second failed: \(error is StenoSpeechError)")
         }
-      }()
-      for _ in 0..<50 { await Task.yield() }
-      #expect(await log.entries == ["held start"], "the second downloader waits its turn")
-      await gate.open()
-      _ = try await (held, second)
+      }
+      await release.open()
+      _ = try await held.value
+      await second.value
       #expect(await log.entries == ["held start", "held end", "second failed: true"])
     }
   #endif
@@ -119,20 +128,23 @@ private final class OverrideTable: Sendable {
     // requested while it runs must observe the untouched table.
     let serializer = DownloadSerializer()
     let table = OverrideTable()
-    let gate = Gate()
+    let redirected = Gate()
+    let release = Gate()
     let observed = CallLog<[String: String]>()
-    async let german: Void = serializer.run {
+    let german = await serializer.enqueue {
       try await table.redirect.run("v3", to: "de-repo") {
         await observed.record(table.current)
-        await gate.wait()
+        await redirected.open()
+        await release.wait()
       }
     }
-    async let official: Void = serializer.run {
+    // Requested while the redirect is in place.
+    await redirected.wait()
+    let official = await serializer.enqueue {
       await observed.record(table.current)
     }
-    for _ in 0..<50 { await Task.yield() }
-    await gate.open()
-    _ = try await (german, official)
+    await release.open()
+    _ = try await (german.value, official.value)
     #expect(await observed.entries == [["v3": "de-repo"], [:]])
     #expect(table.current.isEmpty)
   }
