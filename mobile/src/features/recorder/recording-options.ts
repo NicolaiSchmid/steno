@@ -1,4 +1,4 @@
-import type { AudioFormat } from "@modules/steno-link/src/wire";
+import type { AudioFormat } from "@modules/steno-link";
 import type { AudioMode, RecordingOptions } from "expo-audio";
 
 /**

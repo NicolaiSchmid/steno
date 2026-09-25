@@ -17,32 +17,28 @@ import { CHUNK_HASH_HEADER, SERVICE_TYPE } from "./wire";
 
 /**
  * The JS-native contract, checked by name without a Swift toolchain: the
- * Swift sources under `ios/` are parsed as text and every record field,
- * event name and event body key is compared with the TypeScript types.
- * Each `Record<keyof T, null>` below fails to compile when the TS type
- * changes, so both sides move together or this test breaks.
+ * Swift sources under `ios/` are parsed as text. Every JS-facing shape is a
+ * `Record` struct in `Records.swift` named as its TypeScript type, so the
+ * check is one field list per type, plus which record each event and
+ * function hands over. Each `Record<keyof T, null>` below fails to compile
+ * when the TS type changes, so both sides move together or this test breaks.
  */
 const source = (relative: string) =>
 	readFileSync(new URL(relative, import.meta.url), "utf8");
 const swift = (file: string) => source(`../ios/${file}`);
 
 const module = swift("StenoLinkModule.swift");
+const records = swift("Records.swift");
 const uploadSession = swift("UploadSession.swift");
 const browser = swift("Browser.swift");
+const pinnedClient = swift("PinnedSessionDelegate.swift");
 
 function quotedStrings(text: string): string[] {
 	return [...text.matchAll(/"([^"]+)"/g)].map((m) => m[1] as string);
 }
 
-/** `"key": value` entries of Swift dictionary literals in `text`. */
-function dictionaryKeys(text: string): string[] {
-	return [
-		...new Set([...text.matchAll(/"(\w+)":/g)].map((m) => m[1] as string)),
-	].sort();
-}
-
 function recordFields(name: string): string[] {
-	const body = module.match(
+	const body = records.match(
 		new RegExp(`struct ${name}: Record \\{([\\s\\S]*?)\\n\\}`),
 	)?.[1];
 	if (!body) throw new Error(`no record ${name}`);
@@ -60,15 +56,91 @@ function functionBody(name: string): string {
 	return next === -1 ? rest : rest.slice(0, next);
 }
 
-/** Body literal of every `eventSink?("name", [...])` or `emit("name", [...])`. */
-function eventBodies(text: string, event: string): string[] {
+/** The expression handed over with every `emit("name", …)` / `eventSink?("name", …)`. */
+function eventPayloads(text: string, event: string): string[] {
 	return [
-		...text.matchAll(new RegExp(`"${event}",\\s*\\[([^\\]]*)\\]`, "g")),
-	].map((m) => m[1] as string);
+		...text.matchAll(
+			new RegExp(`"${event}",\\s*([\\s\\S]*?)\\.toDictionary\\(\\)`, "g"),
+		),
+	].map((m) => (m[1] as string).trim());
 }
 
 const keys = <T extends object>(record: Record<keyof T, null>) =>
 	Object.keys(record).sort();
+
+describe("Records.swift names every bridge type with the TypeScript fields", () => {
+	it("MacService, ResolvedMac, BrowserState", () => {
+		expect(recordFields("MacService")).toEqual(
+			keys<MacService>({ name: null, macID: null }),
+		);
+		expect(recordFields("ResolvedMac")).toEqual(
+			keys<ResolvedMac>({ host: null, port: null }),
+		);
+		expect(recordFields("BrowserState")).toEqual(
+			keys<BrowserState>({ state: null, policyDenied: null }),
+		);
+	});
+
+	it("PinnedRequest and PinnedResponse", () => {
+		expect(recordFields("PinnedRequest")).toEqual(
+			keys<PinnedRequest>({
+				url: null,
+				method: null,
+				headers: null,
+				body: null,
+				fingerprint: null,
+				timeoutMs: null,
+			}),
+		);
+		expect(recordFields("PinnedResponse")).toEqual(
+			keys<PinnedResponse>({ status: null, headers: null, body: null }),
+		);
+	});
+
+	it("UploadSpec, UploadProgress, UploadFinished, UploadFailed", () => {
+		expect(recordFields("UploadSpec")).toEqual(
+			keys<UploadSpec>({
+				taskID: null,
+				url: null,
+				headers: null,
+				fingerprint: null,
+				filePath: null,
+				offset: null,
+				length: null,
+			}),
+		);
+		expect(recordFields("UploadProgress")).toEqual(
+			keys<UploadProgress>({ taskID: null, bytesSent: null, totalBytes: null }),
+		);
+		expect(recordFields("UploadFinished")).toEqual(
+			keys<UploadFinished>({ taskID: null, status: null, body: null }),
+		);
+		expect(recordFields("UploadFailed")).toEqual(
+			keys<UploadFailed>({ taskID: null, message: null, retryable: null }),
+		);
+	});
+
+	it("declares no other record, so nothing crosses the bridge untyped", () => {
+		const declared = [...records.matchAll(/struct (\w+): Record/g)]
+			.map((m) => m[1] as string)
+			.sort();
+		expect(declared).toEqual(
+			[
+				"MacService",
+				"ResolvedMac",
+				"BrowserState",
+				"PinnedRequest",
+				"PinnedResponse",
+				"UploadSpec",
+				"UploadProgress",
+				"UploadFinished",
+				"UploadFailed",
+			].sort(),
+		);
+		expect(module).not.toMatch(/: Record \{/);
+		expect(module).not.toMatch(/promise\.resolve\(\[/);
+	});
+});
 
 describe("StenoLinkModule definition", () => {
 	it("declares exactly the events StenoLinkEvents names", () => {
@@ -86,7 +158,7 @@ describe("StenoLinkModule definition", () => {
 	});
 
 	it("exposes exactly the functions the TypeScript module declares", () => {
-		const declaration = source("../index.ts").match(
+		const declaration = source("./native-module.ts").match(
 			/declare class StenoLinkNativeModule[^{]*\{([\s\S]*?)\n\}/,
 		)?.[1];
 		if (!declaration) throw new Error("no StenoLinkNativeModule declaration");
@@ -100,86 +172,64 @@ describe("StenoLinkModule definition", () => {
 		expect(defined).toEqual(declared);
 	});
 
-	it("reads PinnedRequest and UploadSpec by the TypeScript field names", () => {
-		expect(recordFields("PinnedRequestRecord")).toEqual(
-			keys<PinnedRequest>({
-				url: null,
-				method: null,
-				headers: null,
-				body: null,
-				fingerprint: null,
-				timeoutMs: null,
-			}),
+	it("takes PinnedRequest and UploadSpec as arguments and resolves the records", () => {
+		expect(functionBody("request")).toContain("(request: PinnedRequest,");
+		expect(functionBody("request")).toContain(
+			"promise.resolve(response.toDictionary())",
 		);
-		expect(recordFields("UploadSpecRecord")).toEqual(
-			keys<UploadSpec>({
-				taskID: null,
-				url: null,
-				headers: null,
-				fingerprint: null,
-				filePath: null,
-				offset: null,
-				length: null,
-			}),
+		expect(pinnedClient).toContain(
+			"perform(_ request: PinnedRequest, completion: @escaping (Result<PinnedResponse, Error>) -> Void)",
 		);
-	});
-
-	it("resolves ResolvedMac and PinnedResponse with the TypeScript keys", () => {
-		expect(dictionaryKeys(functionBody("resolve"))).toEqual(
-			keys<ResolvedMac>({ host: null, port: null }),
+		expect(functionBody("startUpload")).toContain("(spec: UploadSpec)");
+		expect(uploadSession).toContain("func start(_ spec: UploadSpec) throws");
+		expect(functionBody("resolve")).toContain(
+			"promise.resolve(resolved.toDictionary())",
 		);
-		expect(dictionaryKeys(functionBody("request"))).toEqual(
-			keys<PinnedResponse>({ status: null, headers: null, body: null }),
+		expect(browser).toContain(
+			"completion: @escaping (Result<ResolvedMac, Error>) -> Void",
 		);
+		expect(browser).toContain("-> ResolvedMac?");
 	});
 });
 
-describe("event bodies", () => {
-	it("upload events carry the UploadProgress, UploadFinished and UploadFailed keys", () => {
-		const progress = eventBodies(uploadSession, "uploadProgress");
+describe("event payloads are the matching records", () => {
+	it("upload events hand over UploadProgress, UploadFinished and UploadFailed", () => {
+		const progress = eventPayloads(uploadSession, "uploadProgress");
 		expect(progress).toHaveLength(1);
-		expect(dictionaryKeys(progress[0] ?? "")).toEqual(
-			keys<UploadProgress>({ taskID: null, bytesSent: null, totalBytes: null }),
-		);
+		expect(progress[0]).toMatch(/^UploadProgress\(/);
 
-		const finished = eventBodies(uploadSession, "uploadFinished");
+		const finished = eventPayloads(uploadSession, "uploadFinished");
 		expect(finished).toHaveLength(1);
-		expect(dictionaryKeys(finished[0] ?? "")).toEqual(
-			keys<UploadFinished>({ taskID: null, status: null, body: null }),
-		);
+		expect(finished[0]).toMatch(/^UploadFinished\(/);
 
-		const failed = eventBodies(uploadSession, "uploadFailed");
+		const failed = eventPayloads(uploadSession, "uploadFailed");
 		expect(failed.length).toBeGreaterThanOrEqual(2);
-		for (const body of failed) {
-			expect(dictionaryKeys(body)).toEqual(
-				keys<UploadFailed>({ taskID: null, message: null, retryable: null }),
-			);
-		}
+		for (const payload of failed) expect(payload).toMatch(/^UploadFailed\(/);
 	});
 
-	it("browser events carry the BrowserState and MacService keys and every state value", () => {
-		const states = eventBodies(browser, "browserState");
+	it("browser events hand over BrowserState with every state value, and MacService", () => {
+		const states = eventPayloads(browser, "browserState");
 		expect(states).toHaveLength(4);
-		for (const body of states) {
-			expect(dictionaryKeys(body)).toEqual(
-				keys<BrowserState>({ state: null, policyDenied: null }),
-			);
-		}
+		for (const payload of states) expect(payload).toMatch(/^BrowserState\(/);
 		const values: Record<BrowserState["state"], null> = {
 			ready: null,
 			waiting: null,
 			failed: null,
 			cancelled: null,
 		};
-		expect(states.map((b) => b.match(/"state": "(\w+)"/)?.[1]).sort()).toEqual(
+		expect(states.map((b) => b.match(/state: "(\w+)"/)?.[1]).sort()).toEqual(
 			Object.keys(values).sort(),
 		);
 
-		const service = browser.match(
-			/func serviceBody\([^)]*\)[^{]*\{([\s\S]*?)\n {2}\}/,
-		)?.[1];
-		expect(dictionaryKeys(service ?? "")).toEqual(
-			keys<MacService>({ name: null, macID: null }),
+		for (const event of ["serviceFound", "serviceLost"]) {
+			const payloads = eventPayloads(browser, event);
+			expect(payloads.length).toBeGreaterThanOrEqual(1);
+			for (const payload of payloads) {
+				expect(payload).toMatch(/^Browser\.service\(/);
+			}
+		}
+		expect(browser).toContain(
+			"static func service(_ result: NWBrowser.Result) -> MacService",
 		);
 	});
 });

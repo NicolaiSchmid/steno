@@ -1,7 +1,6 @@
 import type { PinnedRequest, UploadSpec } from "@modules/steno-link";
+import { HandoverError } from "@modules/steno-link/native";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-
-import { HandoverError } from "@/features/pairing/pairing-client";
 import {
 	addRecording,
 	EMPTY_INDEX,
@@ -11,8 +10,8 @@ import {
 	announce,
 	cancelAllUploads,
 	complete,
+	type MacSession,
 	metadataFor,
-	type Session,
 	startChunkUpload,
 	status,
 } from "./recording-client";
@@ -25,7 +24,7 @@ const link = vi.hoisted(() => ({
 }));
 vi.mock("expo", () => ({ requireNativeModule: () => link }));
 
-const session: Session = {
+const session: MacSession = {
 	endpoint: { origin: "https://192.168.1.20:51234", fingerprint: "FP" },
 	token: "tok",
 };

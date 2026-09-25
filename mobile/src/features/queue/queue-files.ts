@@ -14,9 +14,9 @@ export function ensureQueueDirectory(): Directory {
 	return directory;
 }
 
-/** A recording in the queue directory; read `.exists`, `.size`, `.uri`. */
+/** A recording in the queue directory (created on demand); read `.exists`, `.size`, `.uri`. */
 export function queuedFile(fileName: string): File {
-	return new File(queueDirectory(), fileName);
+	return new File(ensureQueueDirectory(), fileName);
 }
 
 /** `QueueFileAPI` over expo-file-system. Paths are `file://` URIs. */

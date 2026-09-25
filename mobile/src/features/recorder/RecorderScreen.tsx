@@ -1,4 +1,4 @@
-import { stenoLink } from "@modules/steno-link";
+import { stenoLink } from "@modules/steno-link/native";
 import { useNavigation } from "@react-navigation/native";
 import type { NativeStackNavigationProp } from "@react-navigation/native-stack";
 import { File } from "expo-file-system";
@@ -16,12 +16,6 @@ import {
 	patchRecording,
 	setState,
 } from "@/features/queue/queue-index";
-import { useRecorder } from "@/features/recording/recorder";
-import {
-	CHUNK_SIZE,
-	recordingFileName,
-} from "@/features/recording/recording-options";
-import { applyRecovery, planRecovery } from "@/features/recording/recovery";
 import {
 	type CoordinatorStatus,
 	useUploadCoordinator,
@@ -32,6 +26,9 @@ import type { RootStackParamList } from "@/navigation/types";
 import { formatDuration } from "./format";
 import { RecordButton } from "./RecordButton";
 import { RecordingList } from "./RecordingList";
+import { CHUNK_SIZE, recordingFileName } from "./recording-options";
+import { applyRecovery, planRecovery } from "./recovery";
+import { useRecorder } from "./use-recorder";
 
 /** The "Today" / "Yesterday" labels refresh once a minute. */
 const CLOCK_TICK_MS = 60_000;
@@ -229,9 +226,6 @@ function describeSync(
 			return reachable ? "Waiting to upload…" : "Waiting for your Mac…";
 		case "failed":
 			return "An upload failed. Retry from the list.";
-		case "recording":
-			return "Recording…";
-		case "delivered":
 		case "idle":
 			return macName
 				? reachable

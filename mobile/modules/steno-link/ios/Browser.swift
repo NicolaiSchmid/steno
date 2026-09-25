@@ -1,3 +1,4 @@
+import ExpoModulesCore
 import Foundation
 import Network
 import dnssd
@@ -60,7 +61,7 @@ final class Browser {
   func resolve(
     serviceName: String,
     timeout: TimeInterval = 10,
-    completion: @escaping (Result<(host: String, port: Int), Error>) -> Void
+    completion: @escaping (Result<ResolvedMac, Error>) -> Void
   ) {
     queue.async {
       guard let result = self.resultsByName[serviceName] else {
@@ -77,7 +78,7 @@ final class Browser {
       }
       let connection = NWConnection(to: result.endpoint, using: parameters)
       var finished = false
-      let finish: (Result<(host: String, port: Int), Error>) -> Void = { [weak self] outcome in
+      let finish: (Result<ResolvedMac, Error>) -> Void = { [weak self] outcome in
         guard !finished else { return }
         finished = true
         connection.cancel()
@@ -115,13 +116,13 @@ final class Browser {
   private func handle(state: NWBrowser.State) {
     switch state {
     case .ready:
-      emit("browserState", ["state": "ready", "policyDenied": false])
+      emit("browserState", BrowserState(state: "ready", policyDenied: false).toDictionary())
     case .waiting(let error):
-      emit("browserState", ["state": "waiting", "policyDenied": Browser.isPolicyDenied(error)])
+      emit("browserState", BrowserState(state: "waiting", policyDenied: Browser.isPolicyDenied(error)).toDictionary())
     case .failed(let error):
-      emit("browserState", ["state": "failed", "policyDenied": Browser.isPolicyDenied(error)])
+      emit("browserState", BrowserState(state: "failed", policyDenied: Browser.isPolicyDenied(error)).toDictionary())
     case .cancelled:
-      emit("browserState", ["state": "cancelled", "policyDenied": false])
+      emit("browserState", BrowserState(state: "cancelled", policyDenied: false).toDictionary())
     case .setup:
       break
     @unknown default:
@@ -134,16 +135,16 @@ final class Browser {
       switch change {
       case .added(let result):
         remember(result)
-        emit("serviceFound", Browser.serviceBody(result))
+        emit("serviceFound", Browser.service(result).toDictionary())
       case .removed(let result):
         if let name = Browser.serviceName(of: result) {
           resultsByName.removeValue(forKey: name)
         }
-        emit("serviceLost", Browser.serviceBody(result))
+        emit("serviceLost", Browser.service(result).toDictionary())
       case .changed(_, let new, _):
         // TXT or interface changed; the identity in TXT may have moved.
         remember(new)
-        emit("serviceFound", Browser.serviceBody(new))
+        emit("serviceFound", Browser.service(new).toDictionary())
       case .identical:
         break
       @unknown default:
@@ -182,27 +183,24 @@ final class Browser {
     return nil
   }
 
-  static func serviceBody(_ result: NWBrowser.Result) -> [String: Any] {
-    return [
-      "name": serviceName(of: result) ?? "",
-      "macID": macID(of: result) as Any,
-    ]
+  static func service(_ result: NWBrowser.Result) -> MacService {
+    return MacService(name: serviceName(of: result) ?? "", macID: macID(of: result))
   }
 
   /// Turns a resolved remote endpoint into a URL-safe host literal and a port.
-  static func hostPort(from endpoint: NWEndpoint) -> (host: String, port: Int)? {
+  static func hostPort(from endpoint: NWEndpoint) -> ResolvedMac? {
     guard case .hostPort(let host, let port) = endpoint else { return nil }
     switch host {
     case .ipv4(let address):
-      return ("\(address)", Int(port.rawValue))
+      return ResolvedMac(host: "\(address)", port: Int(port.rawValue))
     case .ipv6(let address):
       // Not expected with the IPv4-only parameters above; kept for a
       // routable (global) IPv6 result. `IPv6Address.description` appends
       // `%interface` for link-local addresses, which URLs cannot carry.
       let literal = "\(address)".split(separator: "%").first.map(String.init) ?? "\(address)"
-      return ("[\(literal)]", Int(port.rawValue))
+      return ResolvedMac(host: "[\(literal)]", port: Int(port.rawValue))
     case .name(let name, _):
-      return (name, Int(port.rawValue))
+      return ResolvedMac(host: name, port: Int(port.rawValue))
     @unknown default:
       return nil
     }

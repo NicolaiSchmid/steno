@@ -4,7 +4,6 @@ import {
 	nextRetryAt,
 	nextUploadable,
 	type QueueIndex,
-	type SyncState,
 } from "@/features/queue/queue-index";
 
 /**
@@ -90,8 +89,14 @@ export function planNext(
 	return { kind: "idle" };
 }
 
-/** What the status line shows; `SyncState` values name the dominant row. */
-export type CoordinatorStatus = SyncState | "searching" | "idle";
+/** What the status line shows; the `SyncState` values name the dominant row. */
+export type CoordinatorStatus =
+	| "unpaired"
+	| "searching"
+	| "queued"
+	| "uploading"
+	| "failed"
+	| "idle";
 
 export function coordinatorStatus(
 	paired: boolean,

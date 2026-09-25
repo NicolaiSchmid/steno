@@ -1,3 +1,4 @@
+import ExpoModulesCore
 import Foundation
 
 /// The background `URLSession` that carries chunk uploads while the phone is
@@ -15,17 +16,6 @@ final class UploadSession: NSObject, URLSessionDataDelegate {
   static let shared = UploadSession()
 
   typealias EventSink = (_ name: String, _ body: [String: Any]) -> Void
-
-  struct Spec {
-    var taskID: String
-    var url: String
-    var headers: [String: String]
-    /// Standard base64 of the 32-byte leaf fingerprint.
-    var fingerprint: String
-    var filePath: String
-    var offset: UInt64
-    var length: UInt64
-  }
 
   /// Persisted on each task as JSON in `taskDescription`.
   private struct TaskInfo: Codable {
@@ -59,7 +49,8 @@ final class UploadSession: NSObject, URLSessionDataDelegate {
     _ = session
   }
 
-  func start(_ spec: Spec) throws {
+  /// `spec.filePath` is a `file://` URI or a path; `spec.fingerprint` is standard base64.
+  func start(_ spec: UploadSpec) throws {
     guard let url = URL(string: spec.url) else {
       throw StenoLinkError.badURL(spec.url)
     }
@@ -71,9 +62,9 @@ final class UploadSession: NSObject, URLSessionDataDelegate {
     }
     let chunkURL = try UploadSession.chunkFileURL(for: spec.taskID)
     let digest = try FileHashing.copySlice(
-      of: URL(fileURLWithPath: spec.filePath),
-      offset: spec.offset,
-      length: spec.length,
+      of: URL(fileURLWithPath: StenoLinkModule.path(from: spec.filePath)),
+      offset: UInt64(spec.offset),
+      length: UInt64(spec.length),
       to: chunkURL
     )
 
@@ -150,11 +141,8 @@ final class UploadSession: NSObject, URLSessionDataDelegate {
     guard let info = UploadSession.info(of: task) else { return }
     eventSink?(
       "uploadProgress",
-      [
-        "taskID": info.taskID,
-        "bytesSent": totalBytesSent,
-        "totalBytes": totalBytesExpectedToSend,
-      ])
+      UploadProgress(taskID: info.taskID, bytesSent: totalBytesSent, totalBytes: totalBytesExpectedToSend)
+        .toDictionary())
   }
 
   func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive data: Data) {
@@ -182,26 +170,20 @@ final class UploadSession: NSObject, URLSessionDataDelegate {
       let message = pinRejected ? StenoLinkError.pinMismatch.localizedDescription : error.localizedDescription
       eventSink?(
         "uploadFailed",
-        [
-          "taskID": info.taskID,
-          "message": message,
-          "retryable": pinRejected || !cancelled,
-        ])
+        UploadFailed(taskID: info.taskID, message: message, retryable: pinRejected || !cancelled).toDictionary())
       return
     }
     guard let http = task.response as? HTTPURLResponse else {
       eventSink?(
         "uploadFailed",
-        ["taskID": info.taskID, "message": "Response was not HTTP", "retryable": true])
+        UploadFailed(taskID: info.taskID, message: StenoLinkError.notHTTP.localizedDescription, retryable: true)
+          .toDictionary())
       return
     }
     eventSink?(
       "uploadFinished",
-      [
-        "taskID": info.taskID,
-        "status": http.statusCode,
-        "body": String(data: body, encoding: .utf8) ?? "",
-      ])
+      UploadFinished(taskID: info.taskID, status: http.statusCode, body: String(data: body, encoding: .utf8) ?? "")
+        .toDictionary())
   }
 
   func urlSessionDidFinishEvents(forBackgroundURLSession session: URLSession) {

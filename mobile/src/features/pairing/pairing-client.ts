@@ -5,96 +5,21 @@ import {
 	type Hello,
 	type PairRequest,
 	type PairResponse,
-	type PinnedResponse,
 	PROTOCOL_VERSION,
 	paths,
-	stenoLink,
 } from "@modules/steno-link";
+import {
+	failureFor,
+	HandoverError,
+	type MacEndpoint,
+	pinnedRequest,
+} from "@modules/steno-link/native";
 
 /**
- * The three pairing calls over the pinned foreground session: hello (probe),
- * pair (spend the QR secret for a token) and unpair. Every call needs the
- * Mac's origin and fingerprint; nothing here touches the queue.
+ * The three pairing calls over the pinned transport: hello (probe), pair
+ * (spend the QR secret for a token) and unpair. Every call needs the Mac's
+ * origin and fingerprint; nothing here touches the queue.
  */
-export type MacEndpoint = { origin: string; fingerprint: string };
-
-const REQUEST_TIMEOUT_MS = 10_000;
-
-export type HandoverFailure =
-	| "unreachable"
-	| "unauthorized"
-	| "forbidden"
-	| "not-found"
-	| "protocol"
-	| "server";
-
-export class HandoverError extends Error {
-	constructor(
-		readonly kind: HandoverFailure,
-		readonly status: number | null,
-		message: string,
-	) {
-		super(message);
-		this.name = "HandoverError";
-	}
-}
-
-/**
- * Runs a pinned request; transport failures (including a failed pin) become
- * `unreachable`. The module adds `Content-Type: application/json` to bodies.
- */
-export async function pinnedRequest(
-	endpoint: MacEndpoint,
-	method: "GET" | "POST" | "PUT" | "DELETE",
-	path: string,
-	options: { headers?: Record<string, string>; body?: unknown } = {},
-): Promise<PinnedResponse> {
-	try {
-		return await stenoLink().request({
-			url: `${endpoint.origin}${path}`,
-			method,
-			headers: { Accept: "application/json", ...options.headers },
-			...(options.body !== undefined
-				? { body: JSON.stringify(options.body) }
-				: {}),
-			fingerprint: endpoint.fingerprint,
-			timeoutMs: REQUEST_TIMEOUT_MS,
-		});
-	} catch (error) {
-		throw new HandoverError(
-			"unreachable",
-			null,
-			error instanceof Error ? error.message : String(error),
-		);
-	}
-}
-
-export function failureFor(response: PinnedResponse): HandoverError | null {
-	if (response.status < 400) return null;
-	if (response.status === 401) {
-		return new HandoverError(
-			"unauthorized",
-			401,
-			"The Mac no longer knows this phone",
-		);
-	}
-	if (response.status === 403) {
-		return new HandoverError(
-			"forbidden",
-			403,
-			"The Mac rejected the pairing code",
-		);
-	}
-	if (response.status === 404) {
-		return new HandoverError("not-found", 404, "The Mac has no such recording");
-	}
-	return new HandoverError(
-		"server",
-		response.status,
-		`The Mac answered ${response.status}`,
-	);
-}
-
 export async function hello(endpoint: MacEndpoint): Promise<Hello> {
 	const response = await pinnedRequest(endpoint, "GET", paths.hello);
 	const failure = failureFor(response);

@@ -5,16 +5,16 @@ import {
 	paths,
 	type RecordingMetadata,
 	type RecordingStatus,
-	stenoLink,
 } from "@modules/steno-link";
 import {
 	failureFor,
 	HandoverError,
 	type MacEndpoint,
 	pinnedRequest,
-} from "@/features/pairing/pairing-client";
+	stenoLink,
+} from "@modules/steno-link/native";
 import type { Chunk, QueuedRecording } from "@/features/queue/queue-index";
-import { RECORDING_FORMAT } from "@/features/recording/recording-options";
+import { RECORDING_FORMAT } from "@/features/recorder/recording-options";
 import { taskIDs } from "./upload-coordinator";
 
 /**
@@ -22,7 +22,8 @@ import { taskIDs } from "./upload-coordinator";
  * (background session) and complete. Foreground calls go through the pinned
  * ephemeral session; chunks through `steno-link`'s background session.
  */
-export type Session = { endpoint: MacEndpoint; token: string };
+/** The paired Mac as resolved right now, plus the bearer for it. */
+export type MacSession = { endpoint: MacEndpoint; token: string };
 
 export function metadataFor(
 	rec: QueuedRecording,
@@ -51,7 +52,7 @@ function decodeStatus(body: string, status: number): RecordingStatus {
 
 /** `PUT /v1/recordings/{id}`: 201 new or 200 existing, both with the status. */
 export async function announce(
-	session: Session,
+	session: MacSession,
 	metadata: RecordingMetadata,
 ): Promise<RecordingStatus> {
 	const response = await pinnedRequest(
@@ -67,7 +68,7 @@ export async function announce(
 
 /** `GET /v1/recordings/{id}` for resume; 404 surfaces as `not-found`. */
 export async function status(
-	session: Session,
+	session: MacSession,
 	recordingID: string,
 ): Promise<RecordingStatus> {
 	const response = await pinnedRequest(
@@ -88,7 +89,7 @@ export type CompleteResult =
 
 /** `POST /v1/recordings/{id}/complete`: 200, 409 (missing chunks), 422 (hash). */
 export async function complete(
-	session: Session,
+	session: MacSession,
 	recordingID: string,
 ): Promise<CompleteResult> {
 	const response = await pinnedRequest(
@@ -121,7 +122,7 @@ export async function cancelAllUploads(): Promise<void> {
 
 /** Hands one chunk to the background session; completion arrives as an event. */
 export async function startChunkUpload(
-	session: Session,
+	session: MacSession,
 	recordingID: string,
 	chunk: Chunk,
 	fileUri: string,
