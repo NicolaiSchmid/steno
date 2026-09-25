@@ -55,7 +55,7 @@ struct RawClient {
       channel.eventLoop.makeCompletedFuture {
         try channel.pipeline.syncOperations.addHandler(CollectingHandler(collector: collector))
       }
-    }.connect(host: "127.0.0.1", port: Int(port)).get()
+    }.connectTimeout(.seconds(30)).connect(host: "127.0.0.1", port: Int(port)).get()
 
     var buffer = channel.allocator.buffer(capacity: request.count)
     buffer.writeBytes(request)

@@ -47,6 +47,12 @@ final class HTTPHandler: ChannelInboundHandler, RemovableChannelHandler {
   private let configuration: HandoverConfiguration
   private let metrics: ServerMetrics
   private var state: State = .idle
+  /// The flush of the last response end; a close waits for it, because
+  /// Network.framework's cancel drops queued sends.
+  private var lastWrite: EventLoopFuture<Void>?
+  private var closeTimer: Scheduled<Void>?
+  /// How long a half-closed connection may linger before it is torn down.
+  static let closeGrace = TimeAmount.seconds(2)
 
   init(engine: any RequestHandling, configuration: HandoverConfiguration, metrics: ServerMetrics) {
     self.engine = engine
@@ -68,6 +74,13 @@ final class HTTPHandler: ChannelInboundHandler, RemovableChannelHandler {
     case .end:
       receiveEnd(context: context)
     }
+  }
+
+  func channelInactive(context: ChannelHandlerContext) {
+    closeTimer?.cancel()
+    closeTimer = nil
+    state = .closed
+    context.fireChannelInactive()
   }
 
   func errorCaught(context: ChannelHandlerContext, error: any Error) {
@@ -253,19 +266,27 @@ final class HTTPHandler: ChannelInboundHandler, RemovableChannelHandler {
     }
     let promise = context.eventLoop.makePromise(of: Void.self)
     context.writeAndFlush(wrapOutboundOut(.end(nil)), promise: promise)
+    lastWrite = promise.futureResult
     if close {
-      let bound = NIOLoopBound((self, context), eventLoop: context.eventLoop)
-      promise.futureResult.whenComplete { _ in
-        let (handler, context) = bound.value
-        handler.close(context: context)
-      }
+      self.close(context: context)
     }
   }
 
+  /// Orderly close: once the last response has left, half-close the output
+  /// (FIN after the data, so the client reads the status instead of a
+  /// reset), then tear the connection down after `closeGrace` unless the
+  /// client closed first.
   private func close(context: ChannelHandlerContext) {
     guard !state.isClosed else { return }
     state = .closed
     metrics.update { $0.closedByServer += 1 }
-    context.close(promise: nil)
+    let bound = NIOLoopBound((self, context), eventLoop: context.eventLoop)
+    (lastWrite ?? context.eventLoop.makeSucceededVoidFuture()).whenComplete { _ in
+      let (handler, context) = bound.value
+      context.close(mode: .output, promise: nil)
+      handler.closeTimer = context.eventLoop.scheduleTask(in: Self.closeGrace) {
+        bound.value.1.close(mode: .all, promise: nil)
+      }
+    }
   }
 }
