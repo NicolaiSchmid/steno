@@ -73,6 +73,19 @@ public final class MeetingStore: Sendable {
     }
   }
 
+  /// The meeting and its participants in one transaction;
+  /// `LocalRecordingIntake.begin`.
+  public func save(_ meeting: Meeting, participants: [Participant]) async throws {
+    try await writer.write { db in
+      try MeetingRow(meeting).save(db)
+      for participant in participants {
+        var participant = participant
+        participant.meetingID = meeting.id
+        try ParticipantRow(participant).save(db)
+      }
+    }
+  }
+
   public func meeting(id: UUID) async throws -> Meeting? {
     try await writer.read { db in try Self.meetingRow(id, db)?.meeting }
   }
@@ -85,6 +98,44 @@ public final class MeetingStore: Sendable {
         .limit(limit, offset: offset)
         .fetchAll(db)
         .map(\.meeting)
+    }
+  }
+
+  /// Every meeting in one of `kinds`, oldest first by `startedAt`: the order
+  /// a queue is worked off in. `ProcessingPipeline.resumeUnfinished` reads
+  /// `.queued` and `.processing` through this.
+  public func meetings(inStates kinds: Set<MeetingState.Kind>) async throws -> [Meeting] {
+    try await writer.read { db in
+      try MeetingRow
+        .filter(kinds.map(\.rawValue).contains(MeetingRow.Columns.state))
+        .order(MeetingRow.Columns.startedAt, MeetingRow.Columns.id)
+        .fetchAll(db)
+        .map(\.meeting)
+    }
+  }
+
+  /// Launch reconciliation: a meeting still `.recording` belongs to a
+  /// process that died mid-meeting, since the capture session that owned it
+  /// is gone. One transaction marks every such row `.failed(reason)` with
+  /// `updatedAt = now` and returns their ids, oldest first. The master file,
+  /// if the writer got that far, stays in the meeting folder.
+  @discardableResult
+  public func failInterruptedRecordings(
+    reason: String = "Recording was interrupted before it finished.", now: Date
+  ) async throws -> [UUID] {
+    try await writer.write { db in
+      let rows =
+        try MeetingRow
+        .filter(MeetingRow.Columns.state == MeetingState.Kind.recording.rawValue)
+        .order(MeetingRow.Columns.startedAt, MeetingRow.Columns.id)
+        .fetchAll(db)
+      for row in rows {
+        var meeting = row.meeting
+        meeting.state = .failed(reason: reason)
+        meeting.updatedAt = now
+        try MeetingRow(meeting).update(db)
+      }
+      return rows.map(\.id)
     }
   }
 

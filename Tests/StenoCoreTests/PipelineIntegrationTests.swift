@@ -348,6 +348,87 @@ import Testing
     #expect(await harness.dispatcher.dispatches.count == 2)
   }
 
+  @Test func resumeUnfinishedProcessesLeftoversOldestFirstAndFailsThoseWithoutAnAsset()
+    async throws
+  {
+    let harness = try await PipelineHarness()
+    defer { harness.cleanUp() }
+    // What a process that exited mid-run leaves behind: a queued meeting, a
+    // processing one that started earlier, a queued one whose asset row is
+    // gone, plus a ready and a recording meeting that are none of resume's
+    // business.
+    let (template, templateAsset) = try harness.meeting(source: .macInPerson)
+    var queued = template
+    queued.state = .queued
+    try await harness.store.save(queued, asset: templateAsset)
+
+    var processing = template
+    processing.id = SampleData.uuid(2)
+    processing.state = .processing
+    processing.startedAt = template.startedAt.addingTimeInterval(-3600)
+    let layout = RecordingLayout(
+      audioFolder: harness.settings.audioFolder, meetingID: processing.id)
+    try layout.createDirectories()
+    try FileManager.default.copyItem(at: templateAsset.url, to: layout.master(.wav16kInt16))
+    var processingAsset = templateAsset
+    processingAsset.id = SampleData.uuid(71)
+    processingAsset.meetingID = processing.id
+    processingAsset.url = layout.master(.wav16kInt16)
+    try await harness.store.save(processing, asset: processingAsset)
+
+    var orphan = template
+    orphan.id = SampleData.uuid(3)
+    orphan.state = .queued
+    try await harness.store.save(orphan)
+    var ready = template
+    ready.id = SampleData.uuid(4)
+    ready.state = .ready
+    try await harness.store.save(ready)
+    var recording = template
+    recording.id = SampleData.uuid(5)
+    recording.state = .recording
+    try await harness.store.save(recording)
+
+    let resumed = try await harness.pipeline.resumeUnfinished()
+    #expect(resumed == [processing.id, queued.id], "oldest first")
+    await harness.pipeline.waitUntilIdle()
+
+    #expect(try await harness.store.meeting(id: queued.id)?.state == .ready)
+    #expect(try await harness.store.meeting(id: processing.id)?.state == .ready)
+    let orphaned = try #require(try await harness.store.meeting(id: orphan.id))
+    guard case .failed(let reason) = orphaned.state else {
+      Issue.record("expected .failed, got \(orphaned.state)")
+      return
+    }
+    #expect(reason.contains("asset is missing"))
+    #expect(orphaned.updatedAt == PipelineHarness.now)
+    #expect(try await harness.store.meeting(id: ready.id)?.state == .ready)
+    #expect(try await harness.store.meeting(id: recording.id)?.state == .recording)
+    #expect(await harness.summarizer.summaries.count == 2)
+    #expect(await harness.dispatcher.dispatches.entries == [processing.id, queued.id])
+    #expect(try await harness.pipeline.resumeUnfinished().isEmpty, "nothing left to resume")
+  }
+
+  @Test func resumeUnfinishedSkipsAMeetingThatIsAlreadyInFlight() async throws {
+    let store = try MeetingStore.inMemory()
+    let gate = Gate()
+    var diarizer = FakeDiarizer()
+    diarizer.onDiarize = { await gate.wait() }
+    let harness = try await PipelineHarness(diarizer: diarizer, sharedStore: store)
+    defer { harness.cleanUp() }
+    let (meeting, asset) = try harness.meeting(source: .macInPerson)
+    try await harness.pipeline.enqueue(meeting, asset: asset)
+    await gate.waitUntilBlocked()
+    #expect(try await store.meeting(id: meeting.id)?.state == .processing)
+
+    #expect(try await harness.pipeline.resumeUnfinished().isEmpty)
+
+    await gate.open()
+    await harness.pipeline.waitUntilIdle()
+    #expect(try await store.meeting(id: meeting.id)?.state == .ready)
+    #expect(await harness.engine.transcriptions.count == 1, "processed once")
+  }
+
   /// Blocks one task until opened; tests use it to hold a stage mid-flight.
   actor Gate {
     private var opened = false
