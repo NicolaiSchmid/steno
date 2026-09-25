@@ -11,7 +11,7 @@ final class UpdaterController: NSObject, UpdaterControlling, SPUUpdaterDelegate 
   /// Debug builds serve this `UserDefaults` value instead of `SUFeedURL`
   /// (`defaults write uno.schmid.steno.mac STENO_FEED_URL <url>`) for the
   /// local appcast spike.
-  static let feedOverrideKey = "STENO_FEED_URL"
+  nonisolated static let feedOverrideKey = "STENO_FEED_URL"
 
   private var controller: SPUStandardUpdaterController?
 

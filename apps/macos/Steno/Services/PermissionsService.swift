@@ -49,12 +49,15 @@ final class PermissionsService: PermissionsChecking {
       let granted = await SystemAudioPermission.microphone()
       return granted ? .granted : .denied
     case .calendar:
-      do {
-        let granted = try await eventStore.requestFullAccessToEvents()
-        return granted ? .granted : .denied
-      } catch {
-        return .denied
+      // The completion-handler form: `EKEventStore` is not Sendable, so the
+      // async variant cannot be awaited from the main actor under strict
+      // concurrency.
+      let granted = await withCheckedContinuation { (continuation: CheckedContinuation<Bool, Never>) in
+        eventStore.requestFullAccessToEvents { granted, _ in
+          continuation.resume(returning: granted)
+        }
       }
+      return granted ? .granted : .denied
     case .systemAudio:
       // Runs the real tap pipeline while `afplay` plays a tone; the first
       // run surfaces the TCC prompt. Only the deadline means denied.

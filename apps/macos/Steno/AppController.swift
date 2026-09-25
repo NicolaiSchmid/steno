@@ -81,7 +81,7 @@ final class AppController {
     if !newlyFinished.isEmpty {
       await environment.runRetentionSweep()
     }
-    for id in pendingReviews.keys where !meetings.contains(where: { $0.id == id }) {
+    for id in Array(pendingReviews.keys) where !meetings.contains(where: { $0.id == id }) {
       pendingReviews[id] = nil
     }
   }

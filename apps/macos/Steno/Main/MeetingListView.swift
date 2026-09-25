@@ -101,7 +101,6 @@ struct MeetingRow: View {
       .foregroundStyle(Color.stenoFaint)
     }
     .padding(.vertical, Theme.Space.xs)
-    .accessibilityElement(children: .combine)
     .accessibilityIdentifier("meeting-\(meeting.id.uuidString)")
   }
 }

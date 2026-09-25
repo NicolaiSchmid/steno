@@ -242,7 +242,7 @@ final class MenuBarViewModel {
       live
       .map { QueueItem(meeting: $0, stage: stages[$0.id]) }
       .sorted { $0.meeting.startedAt < $1.meeting.startedAt }
-    for id in stages.keys where !live.contains(where: { $0.id == id }) {
+    for id in Array(stages.keys) where !live.contains(where: { $0.id == id }) {
       stages[id] = nil
     }
     recent = Array(
