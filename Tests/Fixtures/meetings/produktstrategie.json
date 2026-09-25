@@ -1,0 +1,345 @@
+{
+  "audio" : {
+    "expiresAt" : "2026-10-24T13:40:00.000Z",
+    "format" : "caf48kFloat32",
+    "id" : "00000000-0000-0000-0000-000000000046",
+    "lanes" : [
+      "mic",
+      "system"
+    ],
+    "meetingID" : "00000000-0000-0000-0000-000000000001",
+    "mixdownURL" : "file:///tmp/steno/00000000-0000-0000-0000-000000000001/audio.m4a",
+    "retention" : {
+      "keepDays" : 30
+    },
+    "sidecars16k" : {
+      "mic" : "file:///tmp/steno/00000000-0000-0000-0000-000000000001/mic.wav",
+      "system" : "file:///tmp/steno/00000000-0000-0000-0000-000000000001/system.wav"
+    },
+    "url" : "file:///tmp/steno/00000000-0000-0000-0000-000000000001/recording.caf"
+  },
+  "decisions" : [
+    {
+      "id" : "71500DB1-A674-4091-B0C9-12977DF0CA49",
+      "meetingID" : "00000000-0000-0000-0000-000000000001",
+      "text" : "90/10-Aufteilung wird umgesetzt."
+    },
+    {
+      "id" : "71500CB1-A674-4EDE-B8D7-29870CEEA8BE",
+      "meetingID" : "00000000-0000-0000-0000-000000000001",
+      "text" : "Roadmap-Review am 15. Oktober."
+    }
+  ],
+  "meeting" : {
+    "calendarEventID" : "event-42",
+    "createdAt" : "2026-09-24T13:30:00.000Z",
+    "duration" : 5400,
+    "id" : "00000000-0000-0000-0000-000000000001",
+    "language" : "de",
+    "llmUsage" : {
+      "completionTokens" : 900,
+      "promptTokens" : 4200,
+      "requests" : 5
+    },
+    "scratchpad" : "Nachfassen wegen Budget.\n\n---\n\n## Summary\n\nNicht vergessen: Jérôme fragen.",
+    "source" : "macCall",
+    "startedAt" : "2026-09-24T12:00:00.000Z",
+    "state" : "ready",
+    "summary" : {
+      "language" : "de",
+      "sections" : [
+        {
+          "bullets" : [
+            {
+              "lead" : "Fokus",
+              "text" : "Speaker 1 setzt 90 Prozent auf den Kern und 10 auf Experimente."
+            },
+            {
+              "lead" : "Protokoll",
+              "text" : "Speaker 2 verteilt das Protokoll nach dem Termin."
+            }
+          ],
+          "heading" : "Executive Summary",
+          "id" : "executive-summary"
+        },
+        {
+          "bullets" : [
+            {
+              "lead" : "",
+              "text" : "Angebot an ACME bis 1. Oktober; Roadmap-Folien bis Mitte Oktober."
+            }
+          ],
+          "heading" : "Nächste Schritte",
+          "id" : "next-steps"
+        }
+      ],
+      "templateID" : "default"
+    },
+    "tags" : [
+      "Kunde ACME",
+      "#q4"
+    ],
+    "templateID" : "default",
+    "title" : "Produktstrategie: \"90/10\" & Roadmap für Q4",
+    "updatedAt" : "2026-09-24T13:40:00.000Z"
+  },
+  "participants" : [
+    {
+      "displayName" : "Anna Müller",
+      "email" : "anna@example.com",
+      "id" : "00000000-0000-0000-0000-00000000001E",
+      "meetingID" : "00000000-0000-0000-0000-000000000001",
+      "personID" : "00000000-0000-0000-0000-00000000000A",
+      "role" : "them"
+    },
+    {
+      "displayName" : "Jérôme Dupont",
+      "id" : "00000000-0000-0000-0000-000000000020",
+      "meetingID" : "00000000-0000-0000-0000-000000000001",
+      "role" : "them"
+    },
+    {
+      "displayName" : "Nicolai Schmid",
+      "email" : "nicolai@example.com",
+      "id" : "00000000-0000-0000-0000-00000000001F",
+      "meetingID" : "00000000-0000-0000-0000-000000000001",
+      "personID" : "00000000-0000-0000-0000-00000000000B",
+      "role" : "me"
+    }
+  ],
+  "persons" : [
+    {
+      "createdAt" : "2026-09-24T13:30:00.000Z",
+      "displayName" : "Anna Müller",
+      "email" : "anna@example.com",
+      "id" : "00000000-0000-0000-0000-00000000000A",
+      "sampleCount" : 4
+    },
+    {
+      "createdAt" : "2026-09-24T13:30:00.000Z",
+      "displayName" : "Nicolai Schmid",
+      "email" : "nicolai@example.com",
+      "id" : "00000000-0000-0000-0000-00000000000B",
+      "sampleCount" : 9
+    }
+  ],
+  "schemaVersion" : 1,
+  "segments" : [
+    {
+      "end" : 4.2,
+      "id" : "00000000-0000-0000-0000-000000000028",
+      "lane" : "mic",
+      "meetingID" : "00000000-0000-0000-0000-000000000001",
+      "rawText" : "guten morgen zusammen, fangen wir mit der roadmap an.",
+      "speakerID" : "00000000-0000-0000-0000-000000000014",
+      "start" : 0,
+      "text" : "Guten Morgen zusammen, fangen wir mit der Roadmap an."
+    },
+    {
+      "end" : 9.8,
+      "id" : "00000000-0000-0000-0000-000000000029",
+      "lane" : "system",
+      "meetingID" : "00000000-0000-0000-0000-000000000001",
+      "rawText" : "gern. ich habe die zahlen für q4 dabei.",
+      "speakerID" : "00000000-0000-0000-0000-000000000015",
+      "start" : 4.5,
+      "text" : "Gern. Ich habe die Zahlen für Q4 dabei."
+    },
+    {
+      "end" : 15.2,
+      "id" : "00000000-0000-0000-0000-00000000002A",
+      "lane" : "system",
+      "meetingID" : "00000000-0000-0000-0000-000000000001",
+      "rawText" : "der kern bekommt 90 prozent, der rest 10.",
+      "speakerID" : "00000000-0000-0000-0000-000000000015",
+      "start" : 10,
+      "text" : "Der Kern bekommt 90 Prozent, der Rest 10."
+    },
+    {
+      "end" : 24,
+      "id" : "00000000-0000-0000-0000-00000000002B",
+      "lane" : "system",
+      "meetingID" : "00000000-0000-0000-0000-000000000001",
+      "rawText" : "das acme-angebot muss bis zum 1. oktober raus.",
+      "speakerID" : "00000000-0000-0000-0000-000000000015",
+      "start" : 19,
+      "text" : "Das ACME-Angebot muss bis zum 1. Oktober raus."
+    },
+    {
+      "end" : 30,
+      "id" : "00000000-0000-0000-0000-00000000002C",
+      "lane" : "mic",
+      "meetingID" : "00000000-0000-0000-0000-000000000001",
+      "rawText" : "# punkt eins: budget <kern> & rest --> offen",
+      "speakerID" : "00000000-0000-0000-0000-000000000014",
+      "start" : 24.5,
+      "text" : "# Punkt eins: Budget <Kern> & Rest --> offen"
+    },
+    {
+      "end" : 36,
+      "id" : "00000000-0000-0000-0000-00000000002D",
+      "lane" : "system",
+      "meetingID" : "00000000-0000-0000-0000-000000000001",
+      "rawText" : "ich kann das protokoll verteilen.",
+      "speakerID" : "00000000-0000-0000-0000-000000000016",
+      "start" : 30.5,
+      "text" : "Ich kann das Protokoll verteilen."
+    },
+    {
+      "end" : 36,
+      "id" : "00000000-0000-0000-0000-00000000002E",
+      "lane" : "system",
+      "meetingID" : "00000000-0000-0000-0000-000000000001",
+      "rawText" : "okay.",
+      "speakerID" : "00000000-0000-0000-0000-000000000016",
+      "start" : 36,
+      "text" : "Okay."
+    },
+    {
+      "end" : 39.5,
+      "id" : "00000000-0000-0000-0000-00000000002F",
+      "lane" : "system",
+      "meetingID" : "00000000-0000-0000-0000-000000000001",
+      "rawText" : "- notiz: einwurf aus dem off.",
+      "start" : 37,
+      "text" : "- Notiz: Einwurf aus dem Off."
+    },
+    {
+      "end" : 46,
+      "id" : "00000000-0000-0000-0000-000000000030",
+      "lane" : "mic",
+      "meetingID" : "00000000-0000-0000-0000-000000000001",
+      "rawText" : "1. wir starten im oktober.",
+      "speakerID" : "00000000-0000-0000-0000-000000000014",
+      "start" : 40,
+      "text" : "1. Wir starten im Oktober."
+    },
+    {
+      "end" : 52,
+      "id" : "00000000-0000-0000-0000-000000000031",
+      "lane" : "system",
+      "meetingID" : "00000000-0000-0000-0000-000000000001",
+      "rawText" : "> zitat aus dem kundenbrief.",
+      "speakerID" : "00000000-0000-0000-0000-000000000015",
+      "start" : 46.5,
+      "text" : "> Zitat aus dem Kundenbrief."
+    },
+    {
+      "end" : 58,
+      "id" : "00000000-0000-0000-0000-000000000032",
+      "lane" : "mic",
+      "meetingID" : "00000000-0000-0000-0000-000000000001",
+      "rawText" : "jérôme, kannst du das budget freigeben lassen?",
+      "speakerID" : "00000000-0000-0000-0000-000000000014",
+      "start" : 52.5,
+      "text" : "Jérôme, kannst du das Budget freigeben lassen?"
+    },
+    {
+      "end" : 66,
+      "id" : "00000000-0000-0000-0000-000000000033",
+      "lane" : "system",
+      "meetingID" : "00000000-0000-0000-0000-000000000001",
+      "rawText" : "ja, ich kümmere mich darum.",
+      "speakerID" : "00000000-0000-0000-0000-000000000016",
+      "start" : 60,
+      "text" : "Ja, ich kümmere mich darum."
+    },
+    {
+      "end" : 70,
+      "id" : "00000000-0000-0000-0000-000000000034",
+      "lane" : "system",
+      "meetingID" : "00000000-0000-0000-0000-000000000001",
+      "rawText" : "dann sind wir durch.",
+      "speakerID" : "00000000-0000-0000-0000-000000000015",
+      "start" : 66.5,
+      "text" : "Dann sind wir durch."
+    },
+    {
+      "end" : 72,
+      "id" : "00000000-0000-0000-0000-000000000035",
+      "lane" : "mic",
+      "meetingID" : "00000000-0000-0000-0000-000000000001",
+      "rawText" : "danke, bis nächste woche.",
+      "speakerID" : "00000000-0000-0000-0000-000000000014",
+      "start" : 70.5,
+      "text" : "Danke, bis nächste Woche."
+    }
+  ],
+  "speakers" : [
+    {
+      "assignment" : {
+        "confirmed" : {
+          "personID" : "00000000-0000-0000-0000-00000000000B"
+        }
+      },
+      "clusterConfidence" : 1,
+      "clusterLabel" : "Me",
+      "id" : "00000000-0000-0000-0000-000000000014",
+      "meetingID" : "00000000-0000-0000-0000-000000000001"
+    },
+    {
+      "assignment" : {
+        "confirmed" : {
+          "personID" : "00000000-0000-0000-0000-00000000000A"
+        }
+      },
+      "clusterConfidence" : 0.88,
+      "clusterLabel" : "Speaker 1",
+      "id" : "00000000-0000-0000-0000-000000000015",
+      "meetingID" : "00000000-0000-0000-0000-000000000001",
+      "sampleClipRange" : [
+        4.5,
+        14.5
+      ]
+    },
+    {
+      "assignment" : "unknown",
+      "clusterConfidence" : 0.7,
+      "clusterLabel" : "Speaker 2",
+      "id" : "00000000-0000-0000-0000-000000000016",
+      "meetingID" : "00000000-0000-0000-0000-000000000001",
+      "sampleClipRange" : [
+        30.5,
+        36
+      ],
+      "sampleClipURL" : "file:///tmp/steno/00000000-0000-0000-0000-000000000001/speakers/00000000-0000-0000-0000-000000000016.wav"
+    }
+  ],
+  "tasks" : [
+    {
+      "assigneeName" : "Anna",
+      "assigneePersonID" : "00000000-0000-0000-0000-00000000000A",
+      "done" : false,
+      "dueDate" : "2026-10-01T12:00:00.000Z",
+      "id" : "00000000-0000-0000-0000-000000000032",
+      "meetingID" : "00000000-0000-0000-0000-000000000001",
+      "priority" : "high",
+      "text" : "Angebot an ACME schicken"
+    },
+    {
+      "assigneeName" : "Nicolai Schmid",
+      "assigneePersonID" : "00000000-0000-0000-0000-00000000000B",
+      "done" : false,
+      "dueDate" : "2026-10-15T12:00:00.000Z",
+      "id" : "00000000-0000-0000-0000-000000000033",
+      "meetingID" : "00000000-0000-0000-0000-000000000001",
+      "priority" : "normal",
+      "text" : "Roadmap-Folien aktualisieren"
+    },
+    {
+      "done" : true,
+      "id" : "00000000-0000-0000-0000-000000000034",
+      "meetingID" : "00000000-0000-0000-0000-000000000001",
+      "priority" : "low",
+      "text" : "Protokoll verteilen"
+    },
+    {
+      "assigneeName" : "Jérôme Dupont",
+      "done" : false,
+      "id" : "00000000-0000-0000-0000-000000000035",
+      "meetingID" : "00000000-0000-0000-0000-000000000001",
+      "priority" : "normal",
+      "text" : "Budget\nfreigeben lassen"
+    }
+  ]
+}
