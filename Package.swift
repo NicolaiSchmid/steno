@@ -22,6 +22,11 @@ let package = Package(
   dependencies: [
     .package(url: "https://github.com/groue/GRDB.swift.git", from: "7.11.1"),
     .package(url: "https://github.com/apple/swift-argument-parser.git", from: "1.8.2"),
+    .package(url: "https://github.com/apple/swift-nio.git", from: "2.80.0"),
+    .package(url: "https://github.com/apple/swift-nio-transport-services.git", from: "1.23.0"),
+    .package(url: "https://github.com/apple/swift-certificates.git", from: "1.10.0"),
+    .package(url: "https://github.com/apple/swift-crypto.git", from: "3.0.0"),
+    .package(url: "https://github.com/apple/swift-asn1.git", from: "1.0.0"),
   ],
   targets: [
     .target(
@@ -33,12 +38,25 @@ let package = Package(
     .target(name: "StenoSpeech", dependencies: ["StenoCore"]),
     .target(name: "StenoLLM", dependencies: ["StenoCore"]),
     .target(name: "StenoAdapters", dependencies: ["StenoCore"]),
-    .target(name: "StenoHandover", dependencies: ["StenoCore"]),
+    .target(
+      name: "StenoHandover",
+      dependencies: [
+        "StenoCore",
+        .product(name: "NIOCore", package: "swift-nio"),
+        .product(name: "NIOPosix", package: "swift-nio"),
+        .product(name: "NIOHTTP1", package: "swift-nio"),
+        .product(name: "NIOTransportServices", package: "swift-nio-transport-services"),
+        .product(name: "X509", package: "swift-certificates"),
+        .product(name: "Crypto", package: "swift-crypto"),
+        .product(name: "SwiftASN1", package: "swift-asn1"),
+      ]
+    ),
     .executableTarget(
       name: "steno",
       dependencies: [
         "StenoCore",
         "StenoAdapters",
+        "StenoHandover",
         .product(name: "ArgumentParser", package: "swift-argument-parser"),
       ]
     ),
@@ -50,9 +68,38 @@ let package = Package(
     .testTarget(
       name: "StenoAdaptersTests",
       dependencies: ["StenoAdapters", .product(name: "GRDB", package: "GRDB.swift")]),
-    .testTarget(name: "StenoHandoverTests", dependencies: ["StenoHandover"]),
+    .testTarget(
+      name: "StenoHandoverTests",
+      dependencies: [
+        "StenoHandover",
+        .product(name: "X509", package: "swift-certificates"),
+        .product(name: "Crypto", package: "swift-crypto"),
+        .product(name: "NIOCore", package: "swift-nio"),
+        .product(name: "NIOPosix", package: "swift-nio"),
+        .product(name: "NIOTransportServices", package: "swift-nio-transport-services"),
+      ],
+      // The symlink into the iOS module compiles the phone's pin check
+      // verbatim; it imports CryptoKit and Security, which Linux lacks.
+      exclude: linuxOnlyExclusions(["Support/PinnedTrustEvaluator.swift"])
+    ),
     .testTarget(name: "stenoTests", dependencies: ["StenoCore"]),
-    .testTarget(name: "StenoEndToEndTests", dependencies: ["StenoCore", "StenoAdapters"]),
+    .testTarget(
+      name: "StenoEndToEndTests",
+      dependencies: ["StenoCore", "StenoAdapters", "StenoHandover"],
+      // The pinned handover client compiles the phone's evaluator (symlink);
+      // it needs CryptoKit and Security, absent on Linux.
+      exclude: linuxOnlyExclusions(["Support/PinnedTrustEvaluator.swift"])
+    ),
   ],
   swiftLanguageModes: [.v6]
 )
+
+/// Files left out of a target when the manifest is evaluated on Linux, where
+/// the Apple-only frameworks they import do not exist.
+func linuxOnlyExclusions(_ paths: [String]) -> [String] {
+  #if os(Linux)
+    return paths
+  #else
+    return []
+  #endif
+}
