@@ -350,20 +350,65 @@ Reviewer trap: a changed golden in `snapshots/obsidian/` without a `VERSION` bum
 - Per-destination re-export once a second destination exists.
 - Renaming the meeting folder when a summary re-run changes the title.
 
+Follow-ups from the PR #7 reviews (each names the finding it comes from):
+
+- Core: `MeetingSource` needs one wire key (`"mac-call"`, `"mac-in-person"`, `"phone"`) that
+  `FolderNoteRenderer.sourceKey` and the CLI's `--source` map both read, so the next destination does
+  not add a third copy (elegance 15).
+- Core, privacy: `meeting.json` embeds `audio.mixdownURL` as an absolute `file:///Users/<name>/…`
+  URL, which puts the account name and folder layout into a vault that is often synced. Encode it
+  relative to the audio folder or drop it from `MeetingExport`'s JSON (correctness 12).
+- Escaping `%%` (Obsidian comment) and `<!--` in transcript, task and decision text so a segment
+  cannot hide the rest of the note in reading view. `&lt;!--` is safe CommonMark; whether `\%\%`
+  stops Obsidian's comment parser needs the step 9 vault check before it lands (correctness 7).
+- Person pages whose display names differ only in case, forbidden characters or Unicode
+  normalisation map to one file on APFS; dedupe by normalised file name within one delivery and
+  report the duplicate (correctness 9).
+- Two meetings delivering at once can drop one line from a shared person page: the pipeline's lock
+  is per meeting. A per-destination or per-file lock in the coordinator (correctness 10).
+- An iCloud-evicted person page is `.Name.md.icloud`; treat the placeholder as existing and refuse
+  the write instead of producing a conflict copy (correctness 11).
+- When `deliver` throws after writing files (today only `audioUnavailable` on a first delivery with
+  no audio anywhere), the files written are not in any receipt until the crashed-attempt rule
+  recovers the folder on the next run. Returning the partial receipt alongside the error needs a
+  `Destination` contract change (correctness 2, second half).
+- `DeliveryCoordinator` could be a `struct` (no mutable state) and its two `try? store.save` could
+  surface as `.failed` rows; the plan's `public actor` shape is kept until the app wires it
+  (elegance 10). `Slug.fileName` is not a slug and could be `FileName.sanitized` (elegance 7);
+  `noteHead`/`stenoID`/`orderedSegments` could leave the facade (elegance 6); tests named with
+  "And" could be split (elegance 16). All cosmetic, none changes bytes.
+
 ## Deviations (implementation)
 
 Recorded 2026-09-25 while building the plan in `feat/adapters-obsidian`. Each line names what the
 code does differently from the text above and why; none widens the scope.
 
 - `Frontmatter` is not `Equatable` (nothing compares two) and carries a `timeZone` for `.date` and
-  `.dateTime`; `Value` gained `.tags([String])` so tags are emitted as sanitised plain scalars
-  (Obsidian's Tags type) while every other string stays double-quoted.
-- `ArtifactRenderer.render`, `renderFolderNote` and `renderPersonPage(_:export:options:folderSlug:)`
-  take an optional `folderSlug`; the destination passes the pinned folder's basename on re-export so
-  note names and the info-line links follow the folder, not a changed title. The transcript and
-  tasks notes never mention the folder, so `renderTranscript` and `renderTasks` take no slug.
-- `RenderedArtifact` has no `personID` and `Kind` has no `.audio`: the destination merges a person
-  page by its file name and copies the audio itself, so neither was ever read.
+  `.dateTime`. Tags are *not* the plain scalars the layout above shows: `FolderNoteRenderer`
+  sanitises them with `MarkdownText.tag` and the emitter double-quotes them like every other string,
+  so a tag of `2026`, `true` or `null` stays a string (Obsidian reads quoted list entries as tags).
+  `quoted` is internal.
+- The render seam is split by placement instead of one `render` returning a mixed list:
+  `renderMeetingFiles(_:options:folderSlug:)` returns the five `RenderedArtifact`s of the meeting
+  folder (`meeting.json` first, because the crashed-attempt rule recognises a folder by that file
+  alone) and `renderPersonPages(_:options:folderSlug:)` returns one `PersonPage` (`fileName`, `page`,
+  `line`) per person. `renderPersonLine` is folded into `PersonPage.line`. Both take an optional
+  `folderSlug`; the destination passes the pinned folder's basename on re-export so note names and
+  the info-line links follow the folder, not a changed title. The transcript and tasks notes never
+  mention the folder, so `renderTranscript` and `renderTasks` take no slug.
+- `RenderedArtifact` has no `personID` and `Kind` has neither `.audio` nor `.personPage`: the
+  destination places person pages from `PersonPage.fileName` and copies the audio itself.
+- `RenderOptions.peopleFolder: String?` is `personPages: Bool`: no renderer ever read the string
+  (the destination places the pages), and the flag no longer couples pages to `.wikilink`, so a
+  plain-link destination can have pages too. Names are wikilinked only with `.wikilink` and pages.
+- `ObsidianLayout` does not exist; `MeetingFolder` (Naming/) holds the whole layout, with
+  `noteName(_:slug:)` as the extension-less wikilink target and `noteFile(_:slug:)` for the file.
+- The delivery policy lives in `DeliveryLedger` (Runtime/, internal): which receipt applies to this
+  root, the write rule, carry-over, receipt assembly and the collision rule as a static over two
+  closures. The destination renders, asks the ledger and writes; a WebDAV destination reuses it.
+  `DeliveryReceipt.folderURL` (adapters extension) is the `root + folder` join.
+- `destinations(for:)` is `DeliveryCoordinator.destinations(for:)`, not a module-level function.
+  `ManagedBlock` is internal until a second destination touches user-owned files.
 - `ObsidianFolderDestination.init(settings:timeZone: = .current)` replaces `init(settings:
   fileManager:)`: `FileManager` is not `Sendable` in Swift 6, and the time zone is the one input the
   integration and end-to-end tests must pin. The sink stays the internal seam.
@@ -389,10 +434,16 @@ code does differently from the text above and why; none widens the scope.
   filesTheAppNeverWroteAreNotOpenedOnReexport` pins it.
 - When `MeetingStore.export` fails, `DeliveryCoordinator.deliverAll` returns one `.failed("export
   failed: …")` row per configured destination (saved when the meeting row exists) instead of an
-  empty list, so the failure reaches `observeDeliveries`.
-- `steno deliver` gained `--vault`, `--people-folder`, `--include-audio` and `--task-tag` for a
-  one-off run that never touches the stored settings (the `process --audio-folder` precedent);
-  without `--vault` the stored `Settings.obsidian` decides and a missing one exits 2.
+  empty list, so the failure reaches `observeDeliveries`. When `Settings` do not load, every stored
+  delivery of the meeting becomes a `.failed("settings failed: …")` row with its receipt kept, for
+  the same reason; only "no destination configured" is still an empty list.
+- `steno deliver` gained `--vault`, `--people-folder`, `--include-audio` and `--task-tag`
+  (`ObsidianOptions`, an `@OptionGroup`) for a one-off run that never touches the stored settings
+  (the `process --audio-folder` precedent). The run uses its own destination id,
+  `obsidian-folder@<standardised vault path>` (`ObsidianFolderDestination.init(settings:timeZone:id:)`),
+  so it never replaces the stored destination's `Delivery` row and receipt, and a second run into the
+  same vault is a proper re-export; the command prints only this run's destinations. Without
+  `--vault` the stored `Settings.obsidian` decides and a missing one exits 2.
   `Wiring.dependencies(store:settings:dispatcher:)` gained the optional `dispatcher` and defaults to
   `DeliveryCoordinator`, so `steno process` delivers too when a vault is configured.
 - The transcript and tasks notes carry `title: "<title> — Transcript"` / `"<title> — Tasks"` and
@@ -407,3 +458,27 @@ code does differently from the text above and why; none widens the scope.
   `meeting.json` hash legitimately changes on the redelivery the test performs.
 - Step 9 (`[manual]` check in a real vault with Tasks, Dataview and Folder Notes) was not run in
   this PR; the unverified items in Research notes stay open for the app workstream's first vault.
+
+Recorded 2026-09-25 while applying the correctness and elegance reviews of PR #7 (the "Review
+application" comment on the PR maps every finding to accept, reject or follow-up):
+
+- A receipt applies only to the root it was written for. `previous.root` and the current vault
+  path are compared through `URL(fileURLWithPath:).standardizedFileURL.path` (trailing slash, `.`,
+  `..` and a `/private` prefix are one root); a receipt from another root makes the delivery a first
+  delivery, so the collision rule runs and every file is written. The plan's "folder pinned by the
+  previous receipt" therefore holds only within one vault; a moved vault gets the scope's folder
+  name again (`-2` if that folder now belongs to another meeting).
+- With `includeAudio`, a missing mixdown (nil URL or file gone after the retention sweep) is no
+  error when `audio` or `audio.*` is already in the meeting folder, listed in the receipt or on
+  disk; `audioUnavailable` is thrown only when neither exists. A mixdown that exists but cannot be
+  read is `readFailed(path:underlying:)`, a new `ObsidianError` case also used for an unreadable
+  person page ("Could not read …"); `writeFailed` keeps the write verb.
+- A person page that is not UTF-8 text is left untouched and the delivery fails with `readFailed`
+  ("not UTF-8 text; the page was left unchanged") instead of the lossy decode that rewrote foreign
+  bytes as U+FFFD. Operating on `Data` was the alternative; refusing keeps `ManagedBlock.merge` a
+  pure `String -> String` and never alters a byte the user wrote.
+- `peopleFolder` with surrounding whitespace is rejected by `validate` and `deliver` alike (it was
+  trimmed in one and used verbatim in the other).
+- `Frontmatter.quoted` escapes C1 controls (U+0080…U+009F), U+2028, U+2029 and U+FEFF as `\uXXXX`
+  in addition to C0 and DEL.
+- `ArtifactRenderer.version` is 2: the only byte change is the quoted tag lines in the folder note.
