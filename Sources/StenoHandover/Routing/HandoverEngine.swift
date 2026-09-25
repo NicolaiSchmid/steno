@@ -5,7 +5,8 @@ import StenoCore
 /// The protocol core behind the listener: the auth gate and every route,
 /// independent of NIO and of TLS so the same code runs on Linux in tests.
 /// Owned by `HandoverService`; one actor, so pairing, tokens and partial
-/// files are touched by one request at a time.
+/// files are touched by one request at a time. The recording routes live
+/// in `RecordingHandler.swift`.
 actor HandoverEngine: RequestHandling {
   let configuration: HandoverConfiguration
   let macID: UUID
@@ -14,8 +15,13 @@ actor HandoverEngine: RequestHandling {
   let intake: any HandoverIntake
   let clock: any Clock<Duration>
   let now: @Sendable () -> Date
+  nonisolated let inbox: Inbox
 
   private var pairing: PairingSession?
+  /// Receipts touched since start, by recording id; what `receipts` streams.
+  var activeReceipts: [UUID: HandoverReceipt] = [:]
+  /// Set by the service; called with every receipt change.
+  var onReceiptsChange: (@Sendable ([HandoverReceipt]) -> Void)?
 
   /// `lastSeenAt` is written at most this often per device.
   static let lastSeenResolution: TimeInterval = 60
@@ -36,6 +42,11 @@ actor HandoverEngine: RequestHandling {
     self.intake = intake
     self.clock = clock
     self.now = now
+    self.inbox = Inbox(directory: configuration.inboxDirectory)
+  }
+
+  func setReceiptsObserver(_ observer: @escaping @Sendable ([HandoverReceipt]) -> Void) {
+    onReceiptsChange = observer
   }
 
   // MARK: - Pairing session
@@ -56,8 +67,16 @@ actor HandoverEngine: RequestHandling {
 
   var pairingIsOpen: Bool { pairing?.isOpen ?? false }
 
+  /// Forgets the device and drops whatever it was uploading.
   func revoke(_ deviceID: UUID) async throws {
+    for (recordingID, receipt) in activeReceipts where receipt.deviceID == deviceID {
+      if receipt.state.kind != .complete {
+        inbox.discard(recordingID, format: nil)
+      }
+      activeReceipts.removeValue(forKey: recordingID)
+    }
     try await store.delete(deviceID: deviceID)
+    onReceiptsChange?(receiptsSnapshot)
   }
 
   // MARK: - Auth gate
@@ -117,8 +136,14 @@ actor HandoverEngine: RequestHandling {
       return await pair(request)
     case .unpair:
       return await unpair(request)
-    case .announce, .status, .chunk, .complete:
-      return .problem(.notImplemented, "not yet")
+    case .announce(let recordingID):
+      return await announce(recordingID, request)
+    case .status(let recordingID):
+      return await status(recordingID, request)
+    case .chunk(let recordingID, let index):
+      return await receiveChunk(recordingID, index: index, request)
+    case .complete(let recordingID):
+      return await complete(recordingID, request)
     }
   }
 
@@ -155,10 +180,26 @@ actor HandoverEngine: RequestHandling {
   private func unpair(_ request: HandoverRequest) async -> HandoverResponse {
     guard let device = request.device else { return .problem(.unauthorized, "no device") }
     do {
-      try await store.delete(deviceID: device.id)
+      try await revoke(device.id)
     } catch {
       return .problem(.internalServerError, "revoking failed: \(error)")
     }
     return .empty(.noContent)
+  }
+
+  // MARK: - Receipts
+
+  /// Receipts touched since start, oldest first.
+  var receiptsSnapshot: [HandoverReceipt] {
+    activeReceipts.values.sorted {
+      ($0.createdAt, $0.recordingID.uuidString) < ($1.createdAt, $1.recordingID.uuidString)
+    }
+  }
+
+  /// Writes the receipt and tells the observer.
+  func persist(_ receipt: HandoverReceipt) async throws {
+    try await store.save(receipt)
+    activeReceipts[receipt.recordingID] = receipt
+    onReceiptsChange?(receiptsSnapshot)
   }
 }

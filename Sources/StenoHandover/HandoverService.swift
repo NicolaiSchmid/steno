@@ -20,7 +20,7 @@ public actor HandoverService {
   private let store: MeetingStore
   private let intake: any HandoverIntake
   private let now: @Sendable () -> Date
-  let engine: HandoverEngine
+  nonisolated let engine: HandoverEngine
   nonisolated let metrics = ServerMetrics()
   private var server: HandoverServer?
   private var listenerStates = Broadcast<ListenerState>(initial: .stopped)

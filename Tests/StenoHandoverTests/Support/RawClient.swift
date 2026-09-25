@@ -32,7 +32,7 @@ struct RawClient {
   /// `closeGrace` passed. A response that never arrives within `timeout`
   /// returns whatever was read.
   func exchange(
-    _ request: Data, closeGrace: Duration = .milliseconds(500), timeout: Duration = .seconds(10)
+    _ request: Data, closeGrace: Duration = .seconds(3), timeout: Duration = .seconds(10)
   ) async throws -> Exchange {
     let collector = Collector()
     #if canImport(Network)
@@ -55,7 +55,7 @@ struct RawClient {
       channel.eventLoop.makeCompletedFuture {
         try channel.pipeline.syncOperations.addHandler(CollectingHandler(collector: collector))
       }
-    }.connectTimeout(.seconds(30)).connect(host: "127.0.0.1", port: Int(port)).get()
+    }.connectTimeout(.seconds(8)).connect(host: "127.0.0.1", port: Int(port)).get()
 
     var buffer = channel.allocator.buffer(capacity: request.count)
     buffer.writeBytes(request)

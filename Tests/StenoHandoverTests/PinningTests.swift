@@ -53,12 +53,14 @@
       let exchange = try await raw.exchange(RawClient.request("GET", "/v1/hello"))
       #expect(exchange.status == 200)
 
+      // A rejected pin leaves the NWConnection waiting, so the connect
+      // times out instead of failing fast; either way no request is made.
       var flipped = test.service.identity.fingerprint
       flipped[31] ^= 0x80
       let wrong = RawClient(port: raw.port, fingerprint: flipped)
-      let failed = try await wrong.exchange(
-        RawClient.request("GET", "/v1/hello"), timeout: .seconds(3))
-      #expect(failed.status == nil)
+      await #expect(throws: (any Error).self) {
+        _ = try await wrong.exchange(RawClient.request("GET", "/v1/hello"), timeout: .seconds(3))
+      }
       #expect(test.metrics.requestHeads == 1)
     }
   }
