@@ -406,30 +406,44 @@ differently from the text above and why.
   `HandoverReceipt.State`, `LLMResponseFormat`) encode as a bare case name or a one-key object
   (`"ready"`, `{"failed": "reason"}`, `{"keepDays": 30}`) through `CaseCoding`, not the synthesized
   `{"keepDays": {"_0": 30}}`: `meeting.json` is read by agents and the handover wire mirrors it.
-- `Locale.Language` encodes as its explicit BCP-47 tag through the `@LanguageTag` property wrapper.
-  Foundation's public `languageCode`, `script` and `region` accessors add likely subtags (`de`
-  reports `Latn`) and the stored components are package-internal, so the explicit components are
-  read through the language's own synthesized `Codable` form (`{"components": {...}}`).
+- The model's language value is `LanguageTag: RawRepresentable` (the BCP-47 string), on `Meeting`,
+  `SummaryDocument`, `RawSegment`, `SummaryOutput` and `CleanupInput`; `Locale.Language` appears
+  only at the `SpeechEngine` boundary (`supportedLanguages`, the `hint`) through `LanguageTag(_:)`
+  and `.language`. `LanguageTag(_:)` reads the language's explicit components through Foundation's
+  synthesized `Codable` form (`{"components": {...}}`), because the public `languageCode`, `script`
+  and `region` accessors add likely subtags (`de` reports `Latn`); that dependency on a private
+  shape is confined to tag construction at the engine boundary (correctness review C16).
 - Pipeline stage functions are `internal`, not `private`: they live one per file under `Stages/`
   as the plan asks, and Swift's `private` does not span files. Tests call them through `@testable`.
 - `RecordingIntake` has an `enqueue` closure seam beside the plan's `init(store:settings:pipeline:)`
   so the intake tests count calls without a pipeline; the pipeline init forwards to it.
 - `MeetingStore` gained `save(_:asset:)` (one transaction for `enqueue`), `participants(meetingID:)`,
   `save(_ participant:)`, `speakers(meetingID:)`, `save(_ speaker:)`, `asset(meetingID:)`,
-  `person(id:)` and `device(id:)`; `setState` and `replaceSummary` take `now:` so wall time stays
-  injected. `replaceSummary` derives decision ids from the meeting id (`derivedID`) so re-runs are
-  stable. `SearchHit` is returned from raw FTS5 SQL ordered by `rank`, which is what
+  `person(id:)`, `pairedDevice(id:)` and `update(meetingID:now:_:)`, the read-modify-write
+  primitive. `setState(_:meetingID:now:)` has no `Date()` default. `replaceTranscript(_ meeting:
+  segments:speakers:)` and `replaceSummary(_ meeting:tasks:decisions:)` take the meeting as the
+  sole carrier and, in one transaction, overlay only its processing columns
+  (`Meeting.applyProcessingResults`: title, language, state, templateID, summary, llmUsage,
+  updatedAt) on the current row, so a stage never reverts a scratchpad or tag edit made while it
+  ran (correctness review C1, elegance review E3). Decision ids are `UUID(derivedFrom:salt:)` so
+  re-runs are stable. `SearchHit` is returned from raw FTS5 SQL ordered by `rank`, which is what
   `.order(Column.rank)` compiles to.
 - The summarize stage replaces `Meeting.title` with the model's title unless `calendarEventID` is
   set (a calendar title is authoritative); the plan did not say.
-- Sample clips and the mixdown are written under `Settings.audioFolder/<meetingID>/`, not beside
-  the master, so `steno process` on a fixture never writes into `Tests/Fixtures/`.
+- `RecordingLayout` (core, `Audio/RecordingLayout.swift`) is the one spelling of the meeting
+  folder: `recording.<ext>`, `<lane>.wav`, `audio.<ext>`, `speakers/<speakerID>.wav`. Whoever
+  creates the asset (the capture writer, `RecordingIntake`, `steno process`) picks the folder with
+  `RecordingLayout(audioFolder:meetingID:)`; the pipeline derives it from the asset
+  (`RecordingLayout(asset:)`) and never reads `Settings.audioFolder`, so `steno process
+  --audio-folder` is a plain path and no longer rewrites the setting (C5, E1). The pipeline test
+  harness copies fixtures into a meeting folder so nothing is written under `Tests/Fixtures/`.
 - `SettingsStore` stores one row per `Settings` property as a JSON fragment; it overlays the rows
   on the encoded defaults before decoding, so a missing row loads as its default and an unknown
   row is ignored without a migration. `Settings` itself uses the synthesized `Codable`.
-- `ContentHash` is CryptoKit's SHA-256; the fixture manifest and delivery receipts use it.
-  `FixtureGenerator` uses `sin` from libm on an integer phase accumulator; CI on macOS confirms the
-  committed bytes match.
+- `ContentHash` is CryptoKit's SHA-256 on Apple platforms; a portable implementation compiled only
+  where CryptoKit is missing keeps the package building in the Linux review container (C7). The
+  fixture manifest and delivery receipts use it. `FixtureGenerator` uses `sin` from libm on an
+  integer phase accumulator; CI on macOS confirms the committed bytes match.
 - `RetentionSweep.init(store:)` and `RecordingIntake` take no `fileManager:`; both use
   `FileManager.default` like the rest of the module, which keeps them `Sendable` without an
   `nonisolated(unsafe)` marker. `ManualClock` guards its state with `Synchronization.Mutex`.
@@ -451,3 +465,45 @@ differently from the text above and why.
   described as deleted, was still in the tree; it is removed here and its two checks live in
   `MigrationsTests` and `CLITests`. `snapshots/e2e/mac-call-summary.md` is the first end-to-end
   golden; a workstream that replaces a fake updates it in the same PR.
+
+Review application (2026-09-25, PR #3; C = correctness, E = elegance, T = testing pass):
+
+- `ProcessingPipeline` keeps an in-flight set per meeting: a second `process`, `rerunSummary`,
+  `redeliver` or `enqueue` on a meeting in flight throws a `PipelineFailure` (C3). `rerunSummary`
+  rethrows and leaves state, summary and deliveries untouched; `process` is the one place that
+  marks `.failed`, and it does so only until `persist` marks `.ready`: `deliver` and `retention`
+  run after that catch, so a retention error is thrown to the caller and never downgrades a ready,
+  delivered meeting (C4, C13).
+- `SummaryMarkdown` replaces labels only as whole words, in one pass (C2): the mic lane's `Me` no
+  longer rewrites `Meeting`.
+- `AudioDecoder` gained `var mixdownFormat: AudioFormat { get }`; persist names the mixdown
+  `RecordingLayout.mixdown(decoder.mixdownFormat)`, so core's WAV copy is `audio.wav` and
+  StenoAudio's AAC is `audio.m4a` (C8). An unknown `templateID` fails the summarize stage instead of
+  running `default` (C9). Two diarizer clusters with one label fail the diarize stage (C12).
+- `RecordingIntake.admit` copies the upload, saves the receipt `.complete`, enqueues, then deletes
+  the source; on failure the copy is removed and the receipt becomes `.failed(reason)`, so the
+  handover service's retry with the same path admits again (C10, T). The idempotency check also
+  requires the meeting row to exist. Phone `.m4aAAC` assets keep `mixdownURL == nil` (C11,
+  deviation from the plan's `mixdownURL = url`): the master is already the export file, and
+  `persist` skips `.m4aAAC`; adapters honouring `includeAudio` use `mixdownURL ?? url` for
+  `.m4aAAC`.
+- `mergeSpeakers` moves the source's clip to a target without one (C14). `RetentionSweep` removes
+  what it can, leaves `expiresAt` on an asset whose file resisted so the next sweep retries, and
+  throws `RetentionSweep.Incomplete` after visiting every asset (C15).
+- `swift-ci.yml`: the cache key adds a hash of `Package.swift`, `Sources/**` and `Tests/**` with the
+  resolved-only key as restore fallback; xunit output lives in `test-results/`, outside `.build`
+  (C6).
+- Every payload enum declares its case names once in a nested `Kind: String, CaseIterable`; the
+  row columns are typed as the Kind, so an unknown value fails the fetch instead of reading as a
+  default case (E4). `HandoverReceipt.State` is top-level `HandoverState`. `UUID(derivedFrom:salt:)`
+  is public; `Delivery.id` derives from (meetingID, destinationID) and `save(_ delivery:)` is a
+  plain upsert (E5). `MeetingEvent.progress(meetingID:stage:)` carries no fraction;
+  `PipelineStage.fraction` computes it (E11).
+- Fakes: `FakeDestination`, `FakeDeliveryDispatcher`, `FakeHandoverIntake` (a struct);
+  `PipelineDependencies.dispatcher`; `CallLog.entries` and logs named for what they record (E8).
+  `MeetingSource: ExpressibleByArgument` in the CLI; `MeetingStoreError: CustomStringConvertible`
+  (E13). `Model/Outputs.swift` is `Tasks.swift`, `LLM.swift`, `StageIO.swift` (E14).
+- Follow-ups, not applied: `MeetingEventBus` buffers unbounded per subscriber (C note b);
+  `search` sorts merged hits by rank, meetingID, segmentID, not chronologically within a meeting
+  (C note c); splitting the multi-behaviour tests and `@Test(arguments:)` tables (E12); a
+  `RetentionSweep` test for a store failure mid-sweep (no seam to inject one).

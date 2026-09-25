@@ -152,7 +152,7 @@ tags:
   - kunde/acme                 # user tags: no #, spaces to -, only [A-Za-z0-9_/-]
 source: "mac-call"             # mac-call | mac-in-person | phone
 template: "default"
-language: "de"                 # Locale.Language.minimalIdentifier
+language: "de"                 # LanguageTag.rawValue
 steno_id: "0d6f…"              # lowercase UUID (YAML key stays snake_case, Obsidian convention)
 ---
 ```
@@ -298,7 +298,7 @@ directory.
    `RendererVersionTests`: sha256 over all goldens in `snapshots/obsidian/` equals the hash recorded
    beside the version in `snapshots/obsidian/VERSION` (a golden diff with an unchanged version fails);
    `stenoTests`: `steno process` then `steno deliver <id>` with `Settings.obsidian` pointing at a temp
-   vault writes the six files; `Tests/StenoEndToEndTests` swaps `RecordingDestination` for
+   vault writes the six files; `Tests/StenoEndToEndTests` swaps `FakeDestination` for
    `ObsidianFolderDestination` into a temp vault and compares every file with `snapshots/e2e/`.
 9. `[manual]` check in a real vault with Tasks, Dataview and Folder Notes: folder note opens on
    folder click; properties show `date` as Date & time, `duration` as Number, `participants` as
