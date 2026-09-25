@@ -21,7 +21,6 @@ final class AppController {
   var requestedMeetingID: UUID?
   private(set) var launched = false
   private var observers: [Task<Void, Never>] = []
-  private var readyMeetings: Set<UUID> = []
 
   static let loginItemRegisteredKey = "steno.loginItemRegistered"
 
@@ -40,7 +39,8 @@ final class AppController {
   }
 
   /// Everything that happens once at launch, in order: interrupted
-  /// recordings become failed, the retention sweep runs, the login item is
+  /// recordings become failed, meetings left queued or processing are
+  /// processed again, the retention sweep runs, the login item is
   /// registered the first time (when the setting says so), the detector
   /// starts, the handover listener starts when a phone is already paired,
   /// and the pipeline's events are observed.
@@ -48,6 +48,7 @@ final class AppController {
     guard !launched else { return }
     launched = true
     await environment.reconcileInterruptedRecordings()
+    await environment.resumeUnfinishedProcessing()
     await environment.runRetentionSweep()
     await registerLoginItemOnFirstLaunch()
     await detection.applySettings()
@@ -59,8 +60,18 @@ final class AppController {
         let stream = await environment.events.subscribe()
         for await event in stream {
           guard let self else { return }
-          if case .speakersNeedReview(let meetingID, _) = event {
+          switch event {
+          case .speakersNeedReview(let meetingID, _):
             self.pendingReviews.insert(meetingID)
+          case .retentionApplied:
+            // The stage has written `expiresAt`; the `.ready` row change
+            // came earlier, before deliver and retention ran, so it is not
+            // the trigger.
+            await environment.runRetentionSweep()
+          case .deleted(let meetingID):
+            self.pendingReviews.remove(meetingID)
+          case .progress:
+            break
           }
         }
       })
@@ -77,15 +88,9 @@ final class AppController {
       })
   }
 
-  /// A meeting that just reached `.ready` or `.failed` triggers the sweep
-  /// (its retention stage set `expiresAt`).
+  /// A pending review for a meeting the store no longer lists is dropped,
+  /// so a badge never points at nothing.
   private func meetingsChanged(_ meetings: [Meeting]) async {
-    let finished = Set(meetings.filter { $0.state == .ready || $0.state.isFailed }.map(\.id))
-    let newlyFinished = finished.subtracting(readyMeetings)
-    readyMeetings = finished
-    if !newlyFinished.isEmpty {
-      await environment.runRetentionSweep()
-    }
     pendingReviews.formIntersection(meetings.map(\.id))
   }
 

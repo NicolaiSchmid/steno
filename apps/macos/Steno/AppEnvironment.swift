@@ -140,12 +140,39 @@ final class AppEnvironment {
   /// `.recording` in the store; at launch it becomes `.failed` so the list
   /// never shows a phantom red dot. The master file is still on disk.
   func reconcileInterruptedRecordings() async {
-    guard let meetings = try? await store.meetings(limit: 200) else { return }
-    for meeting in meetings where meeting.state == .recording {
-      try? await store.setState(
-        .failed(reason: "Recording was interrupted before it finished."), meetingID: meeting.id,
-        now: now())
+    do {
+      _ = try await store.failInterruptedRecordings(now: now())
+    } catch {
+      startupWarnings.append("Interrupted recordings could not be marked: \(error)")
     }
+  }
+
+  /// A meeting left `.queued` or `.processing` by the last process (Quit or
+  /// a crash during the LLM pass) is processed again from the start;
+  /// without this it would sit in the queue forever with no button to
+  /// reach it. Returns the meetings resumed.
+  @discardableResult
+  func resumeUnfinishedProcessing() async -> [UUID] {
+    do {
+      return try await pipeline.resumeUnfinished()
+    } catch {
+      startupWarnings.append("Unfinished meetings could not be resumed: \(error)")
+      return []
+    }
+  }
+
+  /// Core's Mac recording transaction over the current pipeline, so a
+  /// reload between start and stop never strands the recording.
+  func makeLocalIntake() -> LocalRecordingIntake {
+    LocalRecordingIntake(
+      store: store, settings: settings,
+      enqueue: { [weak self] meeting, asset in
+        guard let pipeline = await MainActor.run(body: { self?.pipeline }) else {
+          throw PipelineFailure(stage: .decode, reason: "the app is shutting down")
+        }
+        try await pipeline.enqueue(meeting, asset: asset)
+      },
+      now: now)
   }
 
   // MARK: - Roots
@@ -159,7 +186,10 @@ final class AppEnvironment {
 
   static func live(updater: any UpdaterControlling) async throws -> AppEnvironment {
     let paths = try StenoPaths.default()
-    let store = try MeetingStore.onDisk(at: paths.databaseURL)
+    // One bus: the store posts `deleted` on it, the pipeline `progress`,
+    // `speakersNeedReview` and `retentionApplied`; the app subscribes once.
+    let events = MeetingEventBus()
+    let store = try MeetingStore.onDisk(at: paths.databaseURL, events: events)
     let settingsStore = SettingsStore(writer: store.writer)
     let settings = try await settingsStore.load()
     let secrets = KeychainSecretStore()
@@ -170,7 +200,6 @@ final class AppEnvironment {
     } catch {
       warnings.append("Could not read the LLM API key from the keychain: \(error)")
     }
-    let events = MeetingEventBus()
     let models = ModelStore(directory: settings.modelsDirectory)
     let memory = CosineSpeakerMemory(store: store)
     let makeDependencies: MakeDependencies = { settings, apiKey in
@@ -244,7 +273,8 @@ final class AppEnvironment {
     let root = FileManager.default.temporaryDirectory
       .appendingPathComponent("steno-preview-\(UUID().uuidString)", isDirectory: true)
     try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
-    let store = try MeetingStore.inMemory()
+    let events = MeetingEventBus()
+    let store = try MeetingStore.inMemory(events: events)
     let settingsStore = SettingsStore(writer: store.writer)
     var settings = Settings()
     settings.audioFolder = root.appendingPathComponent("audio", isDirectory: true)
@@ -253,7 +283,6 @@ final class AppEnvironment {
     try await settingsStore.save(settings)
     if seed { try await PreviewSeed.seed(store) }
 
-    let events = MeetingEventBus()
     let models = ModelStore(
       directory: settings.modelsDirectory, downloader: FakeModelDownloader())
     let memory = CosineSpeakerMemory(store: store)

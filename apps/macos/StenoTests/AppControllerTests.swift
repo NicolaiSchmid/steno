@@ -99,9 +99,14 @@ final class AppControllerTests: XCTestCase {
     await controller.shutdown()
   }
 
-  func testAMeetingReachingReadyTriggersTheRetentionSweep() async throws {
+  /// The sweep runs on `retentionApplied`, posted after the retention stage
+  /// wrote `expiresAt`. The `.ready` row change comes earlier (persist runs
+  /// before deliver and retention), so it must not be the trigger: at that
+  /// point no asset is expired yet and the files would stay until the next
+  /// launch.
+  func testRetentionAppliedTriggersTheSweepAndReadyAloneDoesNot() async throws {
     // No seed: the launch sweep has nothing to do, so the files below can
-    // only go once the meeting's own state change triggers a sweep.
+    // only go once an event triggers a sweep.
     let environment = try await TestSupport.environment(seed: false)
     let controller = try makeController(environment)
     await controller.launch()
@@ -113,18 +118,81 @@ final class AppControllerTests: XCTestCase {
     await TestSupport.waitUntil("the processing meeting reached the queue") {
       controller.menuBar.queue.contains { $0.id == processing.meeting.id }
     }
-    for url in processing.files {
-      XCTAssertTrue(
-        FileManager.default.fileExists(atPath: url.path),
-        "\(url.lastPathComponent) stays while the meeting is still processing")
-    }
 
     try await environment.store.setState(
       .ready, meetingID: processing.meeting.id, now: TestSupport.now)
-    await TestSupport.waitUntil("sweep after the meeting finished") {
+    await TestSupport.waitUntil("the meeting left the queue") {
+      !controller.menuBar.queue.contains { $0.id == processing.meeting.id }
+    }
+    try await Task.sleep(for: .milliseconds(100))
+    for url in processing.files {
+      XCTAssertTrue(
+        FileManager.default.fileExists(atPath: url.path),
+        "\(url.lastPathComponent): `.ready` is not the sweep trigger")
+    }
+
+    await environment.events.post(.retentionApplied(meetingID: processing.meeting.id))
+    await TestSupport.waitUntil("sweep after retention was applied") {
       processing.files.allSatisfy { !FileManager.default.fileExists(atPath: $0.path) }
     }
     XCTAssertTrue(FileManager.default.fileExists(atPath: processing.unrelated.path))
+    await controller.shutdown()
+  }
+
+  /// "Delete after processing" end to end: a recording stopped with that
+  /// retention loses its master and sidecars once the pipeline is done,
+  /// without a relaunch.
+  func testDeleteAfterProcessingRemovesTheAudioOnceProcessed() async throws {
+    let environment = try await TestSupport.environment(seed: false)
+    try await environment.updateSettings { $0.defaultRetention = .deleteAfterProcessing }
+    let controller = try makeController(environment)
+    await controller.launch()
+    await controller.recorder.start(mode: .inPerson)
+    await controller.recorder.stop()
+    let meeting = try await recordedMeeting(in: environment)
+    let assetOptional = try await environment.store.asset(meetingID: meeting.id)
+    let asset = try XCTUnwrap(assetOptional)
+    XCTAssertTrue(FileManager.default.fileExists(atPath: asset.url.path), "master written")
+
+    await environment.pipeline.waitUntilIdle()
+    await TestSupport.waitUntil("audio swept after processing") {
+      !FileManager.default.fileExists(atPath: asset.url.path)
+    }
+    let stored = try await environment.store.meeting(id: meeting.id)
+    XCTAssertEqual(stored?.state, .ready, "the transcript and summary stay")
+    await controller.shutdown()
+  }
+
+  /// Quit (or a crash) while meetings were queued or processing: launch
+  /// processes them again instead of leaving them in the queue with no
+  /// button to reach them. A meeting without an asset row cannot be
+  /// processed and is marked failed.
+  func testLaunchResumesQueuedAndProcessingMeetings() async throws {
+    let environment = try await TestSupport.environment(seed: false)
+    // A real recording, so the asset's files exist for the pipeline.
+    let recorder = RecordingController(environment: environment)
+    await recorder.start(mode: .inPerson)
+    await recorder.stop()
+    let meeting = try await recordedMeeting(in: environment)
+    await environment.pipeline.waitUntilIdle()
+    // Pretend the last process died mid-way.
+    try await environment.store.setState(.processing, meetingID: meeting.id, now: TestSupport.now)
+    var orphan = SampleData.meeting(state: .queued)
+    orphan.id = UUID()
+    orphan.title = "Queued without an asset"
+    try await environment.store.save(orphan)
+
+    let controller = try makeController(environment)
+    await controller.launch()
+    await environment.pipeline.waitUntilIdle()
+    let resumed = try await environment.store.meeting(id: meeting.id)
+    XCTAssertEqual(resumed?.state, .ready, "processed again from decode")
+    let failed = try await environment.store.meeting(id: orphan.id)
+    guard case .failed(let reason)? = failed?.state else {
+      return XCTFail("expected .failed, got \(String(describing: failed?.state))")
+    }
+    XCTAssertTrue(reason.contains("asset is missing"), reason)
+    XCTAssertTrue(environment.startupWarnings.isEmpty, "\(environment.startupWarnings)")
     await controller.shutdown()
   }
 
