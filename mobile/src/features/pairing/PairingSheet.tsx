@@ -18,6 +18,7 @@ import {
 } from "@/features/discovery/use-mac-discovery";
 import { useQueue } from "@/features/queue/QueueProvider";
 import { resetForUpload, unpairPending } from "@/features/queue/queue-index";
+import { cancelAllUploads } from "@/features/sync/recording-client";
 import { errorMessage } from "@/lib/error-message";
 import { DURATION_ENTRANCE, HIT_SLOP } from "@/lib/motion";
 import { usePairing } from "./PairingProvider";
@@ -85,6 +86,9 @@ export function PairingSheet() {
 					device: deviceIdentity,
 					now: () => new Date(),
 				});
+				// Chunks in flight for the old pairing would answer 401 under the
+				// new one and wipe it; the retry backoff re-queues them.
+				await cancelAllUploads().catch(() => {});
 				await replace(outcome);
 				// Anything the old Mac revoked is eligible for the new one.
 				await update((index) =>

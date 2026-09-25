@@ -63,6 +63,9 @@ final class UploadSession: NSObject, URLSessionDataDelegate {
     guard let url = URL(string: spec.url) else {
       throw StenoLinkError.badURL(spec.url)
     }
+    guard url.scheme?.lowercased() == "https" else {
+      throw StenoLinkError.notHTTPS(spec.url)
+    }
     guard let fingerprint = Data(base64Encoded: spec.fingerprint), fingerprint.count == 32 else {
       throw StenoLinkError.badFingerprint
     }
@@ -124,6 +127,17 @@ final class UploadSession: NSObject, URLSessionDataDelegate {
       lock.unlock()
     }
     completionHandler(disposition, credential)
+  }
+
+  /// Never follow a redirect: it could carry the bearer to a host that was not pinned.
+  func urlSession(
+    _ session: URLSession,
+    task: URLSessionTask,
+    willPerformHTTPRedirection response: HTTPURLResponse,
+    newRequest request: URLRequest,
+    completionHandler: @escaping (URLRequest?) -> Void
+  ) {
+    completionHandler(nil)
   }
 
   func urlSession(

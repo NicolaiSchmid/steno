@@ -108,6 +108,17 @@ export async function complete(
 	return { kind: "complete", meetingID: decoded.value.meetingID };
 }
 
+/**
+ * Cancels every chunk still in the background session. Before a re-pairing:
+ * a task started under the old token would otherwise finish with 401 and
+ * unpair the fresh Mac.
+ */
+export async function cancelAllUploads(): Promise<void> {
+	const link = stenoLink();
+	const pending = await link.pendingUploads();
+	await Promise.all(pending.map((taskID) => link.cancelUpload(taskID)));
+}
+
 /** Hands one chunk to the background session; completion arrives as an event. */
 export async function startChunkUpload(
 	session: Session,

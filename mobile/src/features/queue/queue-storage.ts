@@ -110,6 +110,16 @@ export function serializeQueueIndex(index: QueueIndex): string {
 	return JSON.stringify(index, null, "\t");
 }
 
+function tryParse(
+	text: string,
+): { ok: true; value: QueueIndex } | { ok: false; reason: string } {
+	try {
+		return { ok: true, value: parseQueueIndex(text) };
+	} catch (error) {
+		return { ok: false, reason: String(error) };
+	}
+}
+
 function join(directory: string, name: string): string {
 	return `${directory.replace(/\/+$/, "")}/${name}`;
 }
@@ -125,22 +135,23 @@ export function createQueueStorage(
 
 	return {
 		async load() {
-			let text = await files.readText(indexPath);
-			if (text === null) {
-				// A crash between removing the old index and renaming the temp
-				// file leaves only the temp file; it holds a complete index.
-				const temp = await files.readText(tempPath);
-				if (temp === null) return EMPTY_INDEX;
-				text = temp;
-			}
-			try {
-				return parseQueueIndex(text);
-			} catch (error) {
-				log(`queue index unreadable, starting empty: ${String(error)}`);
+			const text = await files.readText(indexPath);
+			const parsed = text === null ? null : tryParse(text);
+			if (parsed?.ok) return parsed.value;
+			// Missing or torn index: a complete temp file is the newest state
+			// (a crash between the temp write and the rename leaves exactly
+			// that), so it wins over quarantining.
+			const temp = await files.readText(tempPath);
+			const fromTemp = temp === null ? null : tryParse(temp);
+			if (parsed && !parsed.ok) {
+				const outcome = fromTemp?.ok ? "using the temp file" : "starting empty";
+				log(`queue index unreadable, ${outcome}: ${parsed.reason}`);
 				await files.remove(corruptPath);
 				await files.rename(indexPath, corruptPath).catch(() => {});
-				return EMPTY_INDEX;
+			} else if (fromTemp && !fromTemp.ok) {
+				log(`queue temp index unreadable, starting empty: ${fromTemp.reason}`);
 			}
+			return fromTemp?.ok ? fromTemp.value : EMPTY_INDEX;
 		},
 
 		async save(index) {

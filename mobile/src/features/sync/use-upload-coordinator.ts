@@ -183,14 +183,14 @@ export function useUploadCoordinator(): UploadCoordinator {
 		};
 	}, [executor, tick]);
 
-	// After launch or foreground: remember what iOS kept running, refresh
-	// browsing, and re-plan. Chunks that finished while JS was dead are
-	// recovered from the Mac's status at the next announce (200 + chunks).
+	// After launch or foreground: take the background session's word on which
+	// chunks are in flight, refresh browsing, and re-plan. Chunks that
+	// finished while JS was dead are recovered from the Mac's status at the
+	// next announce (200 + chunks).
 	useEffect(() => {
 		const reconcile = async () => {
 			try {
-				const pending = await stenoLink().pendingUploads();
-				for (const id of pending) executor.inFlight.add(id);
+				executor.reconcile(await stenoLink().pendingUploads());
 			} catch (error) {
 				console.warn("[sync] pendingUploads failed", error);
 			}

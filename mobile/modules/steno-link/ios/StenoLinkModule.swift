@@ -156,6 +156,8 @@ func StenoLinkException(_ code: String, _ message: String) -> Exception {
 /// Input errors shared by `PinnedClient` and `UploadSession`.
 enum StenoLinkError: LocalizedError {
   case badURL(String)
+  /// Only `https://` carries the pin; a bearer must never travel in clear.
+  case notHTTPS(String)
   case badFingerprint
   case notHTTP
   /// The server's leaf certificate did not hash to the pinned fingerprint.
@@ -164,6 +166,7 @@ enum StenoLinkError: LocalizedError {
   var errorDescription: String? {
     switch self {
     case .badURL(let url): return "Not a URL: \(url)"
+    case .notHTTPS(let url): return "Not an https URL: \(url)"
     case .badFingerprint: return "Fingerprint must be 32 bytes of standard base64"
     case .notHTTP: return "Response was not HTTP"
     case .pinMismatch: return "The Mac's certificate does not match the pairing"
