@@ -74,6 +74,33 @@ import Testing
     #expect(metrics.statuses == [401])
   }
 
+  @Test func badPairingSecretIsAnswered403BeforeItsBodyIsRead() async throws {
+    let test = try await TestService.start(chunkSize: Self.chunkSize)
+    defer { Task { await test.stop() } }
+    _ = await test.service.beginPairing()
+    let raw = try await test.rawClient()
+    let declared = HandoverConfiguration.jsonBodyLimit - 1
+    let sent = 4 * 1024
+
+    let exchange = try await raw.exchange(
+      .POST, "/v1/pair",
+      headers: [
+        ("Authorization", "Pairing \(Data(repeating: 0x55, count: 32).base64EncodedString())"),
+        ("Content-Type", "application/json"),
+        ("Content-Length", String(declared)),
+      ],
+      body: Data(repeating: 0x7B, count: sent), closeGrace: .milliseconds(100))
+
+    #expect(exchange.status == 403)
+    #expect(exchange.headers.first(name: "connection") == "close")
+    #expect(try StenoJSON.decode(Wire.Problem.self, from: exchange.body).error.contains("pairing"))
+    let metrics = test.metrics
+    #expect(metrics.handledRequests == 0, "the engine never saw the request")
+    #expect(metrics.discardedBodyBytes <= sent)
+    #expect(metrics.statuses == [403])
+    #expect(await test.service.engine.pairingIsOpen, "a wrong secret does not burn the window")
+  }
+
   @Test func missingAndMalformedAuthorizationAre401() async throws {
     let test = try await TestService.start()
     defer { Task { await test.stop() } }

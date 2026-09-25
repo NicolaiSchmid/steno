@@ -1,5 +1,6 @@
 #if canImport(Security)
   import Foundation
+  import Security
   import StenoCore
   import Testing
 
@@ -43,6 +44,54 @@
         _ = try await client.request("GET", "/v1/hello")
       }
       #expect(test.metrics.requestHeads == 0)
+    }
+
+    @Test func thePhonesEvaluatorComputesTheFingerprintTheQRCarries() async throws {
+      // Decision 3: SHA-256 of the leaf DER on both sides. The phone hashes
+      // `SecCertificateCopyData` of the presented leaf; the Mac hashes the
+      // DER it minted or imported and puts it in the QR as `fp`.
+      let test = try await TestService.start()
+      defer { Task { await test.stop() } }
+      let identity = test.service.identity
+      let certificate = try #require(
+        SecCertificateCreateWithData(nil, identity.certificateDER as CFData))
+      #expect(PinnedTrustEvaluator.fingerprint(of: certificate) == identity.fingerprint)
+      #expect(identity.fingerprint == ServerIdentity.fingerprint(der: identity.certificateDER))
+
+      let payload = await test.service.beginPairing()
+      let scanned = try PairingPayload(parsing: try #require(URL(string: payload.urlString)))
+      #expect(scanned.fingerprint == PinnedTrustEvaluator.fingerprint(of: certificate))
+
+      var trust: SecTrust?
+      #expect(
+        SecTrustCreateWithCertificates(certificate, SecPolicyCreateBasicX509(), &trust)
+          == errSecSuccess)
+      let presented = try #require(trust)
+      #expect(PinnedTrustEvaluator.evaluate(presented, pinnedFingerprint: scanned.fingerprint))
+      var flipped = scanned.fingerprint
+      flipped[17] ^= 0x40
+      #expect(!PinnedTrustEvaluator.evaluate(presented, pinnedFingerprint: flipped))
+      #expect(
+        !PinnedTrustEvaluator.evaluate(presented, pinnedFingerprint: scanned.fingerprint.prefix(31))
+      )
+      #expect(!PinnedTrustEvaluator.evaluate(presented, pinnedFingerprint: Data()))
+    }
+
+    @Test func plaintextHTTPToTheListenerNeverReachesTheRouter() async throws {
+      // The phone builds `https://` origins only; a stray `http://` client
+      // meets the TLS handshake and no request line is ever parsed.
+      let test = try await TestService.start()
+      defer { Task { await test.stop() } }
+      let port = try #require(await test.service.port)
+      let plain = LoopbackClient(
+        baseURL: try #require(URL(string: "http://127.0.0.1:\(port)")),
+        fingerprint: test.service.identity.fingerprint, timeout: 5)
+
+      await #expect(throws: (any Error).self) {
+        _ = try await plain.request("GET", "/v1/hello")
+      }
+      #expect(test.metrics.requestHeads == 0)
+      #expect(test.metrics.handledRequests == 0)
     }
 
     @Test func theRawClientPinsTheSameWay() async throws {

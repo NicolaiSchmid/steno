@@ -14,10 +14,13 @@ struct TestService {
   let directory: URL
   let now: Date
 
-  /// The service before `start()`, for tests that watch it come up.
+  /// The service before `start()`, for tests that watch it come up. A
+  /// `customIntake` (such as a scripted one that fails first) replaces the
+  /// fake behind the service; `intake` stays what `test.intake` reads.
   static func prepare(
     chunkSize: Int = 1024 * 1024,
     intake: FakeHandoverIntake = FakeHandoverIntake(),
+    customIntake: (any HandoverIntake)? = nil,
     now: Date = Date(timeIntervalSince1970: 1_790_000_000)
   ) throws -> TestService {
     let directory = try Fixtures.temporaryDirectory("handover")
@@ -28,8 +31,8 @@ struct TestService {
       inboxDirectory: directory.appendingPathComponent("inbox", isDirectory: true),
       pairingWindow: .seconds(300))
     let service = HandoverService(
-      configuration: configuration, store: store, intake: intake, identity: try TestIdentity.load(),
-      clock: clock, now: { now })
+      configuration: configuration, store: store, intake: customIntake ?? intake,
+      identity: try TestIdentity.load(), clock: clock, now: { now })
     return TestService(
       service: service, store: store, intake: intake, clock: clock, directory: directory, now: now)
   }
@@ -37,9 +40,11 @@ struct TestService {
   static func start(
     chunkSize: Int = 1024 * 1024,
     intake: FakeHandoverIntake = FakeHandoverIntake(),
+    customIntake: (any HandoverIntake)? = nil,
     now: Date = Date(timeIntervalSince1970: 1_790_000_000)
   ) async throws -> TestService {
-    let test = try prepare(chunkSize: chunkSize, intake: intake, now: now)
+    let test = try prepare(
+      chunkSize: chunkSize, intake: intake, customIntake: customIntake, now: now)
     try await test.service.start()
     return test
   }

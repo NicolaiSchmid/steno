@@ -109,6 +109,10 @@ import Testing
     let receipt = try #require(
       try await test.store.handoverReceipt(recordingID: metadata.recordingID))
     #expect(receipt.state == .failed("sha256 mismatch"))
+    let chunks = Phone.chunks(of: bytes, size: Self.chunkSize)
+    let late = try await phone.upload(metadata.recordingID, chunk: 0, chunks[0])
+    #expect(late.status == 404, "a chunk for the discarded partial asks for a new announce")
+    #expect(try late.json(Wire.Problem.self).error.contains("announce again"))
 
     // The phone starts over: re-announcing the same id (same metadata) after
     // a failure is a resume, 200 with no chunks.
@@ -208,6 +212,98 @@ import Testing
       try await phone.upload(metadata.recordingID, chunk: 1, chunks[1]).status == 204,
       "a late duplicate after completion is harmless")
     #expect(await test.intake.admissions.count == 1)
+  }
+
+  @Test func chunksInFlightAtOnceAllLandInTheReceipt() async throws {
+    // The phone keeps two background tasks going, and after a relaunch the
+    // background session may deliver several at once. The engine is an actor
+    // that suspends while it saves a receipt, so every concurrent chunk must
+    // survive into the same receipt: no lost update, in memory or in the store.
+    let intake = FakeHandoverIntake(meetingID: Self.meetingID)
+    let chunkSize = 64 * 1024
+    let test = try await TestService.start(chunkSize: chunkSize, intake: intake)
+    defer { Task { await test.stop() } }
+    let phone = try await Phone.pair(test.service)
+    let bytes = Phone.seededBytes(count: 8 * chunkSize - 77, seed: 5)
+    let metadata = phone.metadata(for: bytes, chunkSize: chunkSize)
+    let chunks = Phone.chunks(of: bytes, size: chunkSize)
+    #expect(chunks.count == 8)
+    #expect(try await phone.announce(metadata).status == 201)
+
+    let statuses = try await withThrowingTaskGroup(of: Int.self) { group in
+      for (index, chunk) in chunks.enumerated().reversed() {
+        group.addTask { try await phone.upload(metadata.recordingID, chunk: index, chunk).status }
+      }
+      return try await group.reduce(into: [Int]()) { $0.append($1) }
+    }
+    #expect(statuses == Array(repeating: 204, count: 8))
+    #expect(
+      try await phone.status(metadata.recordingID).json(Wire.RecordingStatus.self)
+        == Wire.RecordingStatus(state: .receiving, receivedChunks: Array(0..<8)))
+    let receipt = try #require(
+      try await test.store.handoverReceipt(recordingID: metadata.recordingID))
+    #expect(receipt.receivedChunks == Array(0..<8), "the stored copy lost nothing either")
+    #expect(try await phone.complete(metadata.recordingID).status == 200)
+    let admission = try #require(await intake.admissions.entries.first)
+    #expect(try Data(contentsOf: admission.file) == bytes, "out-of-order chunks land in place")
+  }
+
+  @Test func announceAfterCompleteReportsCompleteWithEveryChunk() async throws {
+    // The phone's retry after a lost 200 re-announces (`upload-executor.test.ts`,
+    // "retry re-announces and completes without re-uploading anything").
+    let intake = FakeHandoverIntake(meetingID: Self.meetingID)
+    let test = try await TestService.start(chunkSize: Self.chunkSize, intake: intake)
+    defer { Task { await test.stop() } }
+    let phone = try await Phone.pair(test.service)
+    let bytes = Phone.seededBytes(count: 2 * Self.chunkSize + 1, seed: 6)
+    let metadata = phone.metadata(for: bytes)
+    try await phone.uploadAll(metadata, bytes)
+    #expect(try await phone.complete(metadata.recordingID).status == 200)
+
+    let again = try await phone.announce(metadata)
+    #expect(again.status == 200)
+    #expect(
+      try again.json(Wire.RecordingStatus.self)
+        == Wire.RecordingStatus(state: .complete, receivedChunks: [0, 1, 2]))
+    let repeated = try await phone.complete(metadata.recordingID)
+    #expect(repeated.status == 200)
+    #expect(try repeated.json(Wire.CompleteResponse.self).meetingID == Self.meetingID)
+    #expect(await intake.admissions.count == 1, "no second admission")
+    #expect(
+      !test.service.engine.inbox.hasPartial(metadata.recordingID), "no partial is reopened")
+  }
+
+  @Test func aVanishedPartialIs404OnChunkAndAReAnnounceStartsOver() async throws {
+    // The phone's executor answers a 404 on a chunk by re-announcing with an
+    // empty chunk set ("The Mac forgot the upload; starting over").
+    let test = try await TestService.start(chunkSize: Self.chunkSize)
+    defer { Task { await test.stop() } }
+    let phone = try await Phone.pair(test.service)
+    let bytes = Phone.seededBytes(count: 2 * Self.chunkSize, seed: 8)
+    let metadata = phone.metadata(for: bytes)
+    let chunks = Phone.chunks(of: bytes, size: Self.chunkSize)
+    let inbox = test.service.engine.inbox
+    #expect(try await phone.announce(metadata).status == 201)
+    #expect(try await phone.upload(metadata.recordingID, chunk: 0, chunks[0]).status == 204)
+
+    try FileManager.default.removeItem(at: inbox.partial(metadata.recordingID))
+    let lost = try await phone.upload(metadata.recordingID, chunk: 1, chunks[1])
+    #expect(lost.status == 404)
+    #expect(try lost.json(Wire.Problem.self).error.contains("announce again"))
+    #expect(
+      try await phone.upload(metadata.recordingID, chunk: 0, chunks[0]).status == 204,
+      "a chunk already recorded is still a harmless duplicate")
+
+    let again = try await phone.announce(metadata)
+    #expect(again.status == 200)
+    #expect(
+      try again.json(Wire.RecordingStatus.self)
+        == Wire.RecordingStatus(state: .receiving, receivedChunks: []))
+    #expect(inbox.hasPartial(metadata.recordingID))
+    try await phone.uploadAll(metadata, bytes)
+    #expect(try await phone.complete(metadata.recordingID).status == 200)
+    let admission = try #require(await test.intake.admissions.entries.first)
+    #expect(try Data(contentsOf: admission.file) == bytes)
   }
 
   @Test func chunkArithmeticCoversTheShortLastChunk() {

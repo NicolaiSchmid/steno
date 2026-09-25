@@ -547,3 +547,31 @@ Each line names the deviation and the reason.
   `pinned-client.ts`, `recording-client.ts` and `pairing-payload.ts`. macID case differs
   (the Mac emits the uppercase UUID in JSON, lowercase in the QR); the phone compares
   case-insensitively, so it is not observable.
+
+Testing pass on the same PR (commit `test(handover): …`), recorded by the testing agent:
+
+- Concurrent chunks no longer lose each other's `receivedChunks`. `HandoverEngine` is an
+  actor, but `receiveChunk` held a local copy of the receipt across `await persist`, and
+  `receipt(_:)` across the store read, so two chunks in flight (what the phone's planner
+  keeps, and what the background session delivers after a relaunch) could each persist a
+  stale set over the other's; the phone would see a 409 at `complete` and upload the lost
+  chunk again. `persist` now updates memory before the awaited save and `receipt(_:)` prefers
+  a receipt another request loaded meanwhile. Found by
+  `ChunkUploadTests.chunksInFlightAtOnceAllLandInTheReceipt`, which failed intermittently
+  before the fix.
+- Re-announcing a recording whose verified file is waiting for a second intake attempt
+  (the intake threw once, receipt `.failed`) no longer wipes the chunk set and reopens an
+  empty partial: `announce` skips the "partial is gone, start over" branch when
+  `inbox.hasVerified` is true, so the phone's retry path after a 5xx at `complete`
+  (backoff, announce, complete; see `upload-executor.test.ts`) admits the same file without
+  sending a chunk twice or leaving a stray partial. Before the change every intake failure
+  cost one full re-upload.
+- `TestService.prepare/start` take an optional `customIntake: any HandoverIntake` beside the
+  `FakeHandoverIntake` the tests read; `IntakeRetryTests.ScriptedIntake` fails the first N
+  admissions and then answers. Test support only.
+- `WireContractTests` reads `mobile/modules/steno-link/src/wire.ts`,
+  `mobile/src/features/pairing/pairing-payload.ts` and
+  `mobile/src/features/recorder/recording-options.ts` as text (the way the phone's
+  `native-contract.test.ts` reads the Swift sources) and compares field names, `decodeShape`
+  kinds, enum values, constants, paths and QR query names with what the Mac encodes. It runs
+  in the Linux container and on CI; the phone's `wire.test.ts` is its mirror.
