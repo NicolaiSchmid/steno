@@ -9,7 +9,6 @@ import { applyRecovery, planRecovery, type RecoveryFiles } from "./recovery";
 
 function files(overrides: Partial<RecoveryFiles> = {}): RecoveryFiles {
 	return {
-		exists: () => true,
 		size: () => 80_000,
 		sha256: async () => "HASH",
 		...overrides,
@@ -54,9 +53,8 @@ describe("planRecovery", () => {
 		expect(patch).toMatchObject({ kind: "queued", durationSeconds: 42 });
 	});
 
-	it("fails a recording with no file, an empty file or an unreadable size", async () => {
+	it("fails a recording with a missing or empty file or an unreadable size", async () => {
 		for (const broken of [
-			files({ exists: () => false }),
 			files({ size: () => 0 }),
 			files({
 				size: () => {

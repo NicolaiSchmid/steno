@@ -4,6 +4,7 @@ import {
 	type QueueIndex,
 	setState,
 } from "@/features/queue/queue-index";
+import { errorMessage } from "@/lib/error-message";
 
 /**
  * A row still in `recording` at launch means the app died mid-recording.
@@ -16,7 +17,7 @@ import {
  * only rows that are still `recording` when the index is next written.
  */
 export type RecoveryFiles = {
-	exists(fileName: string): boolean;
+	/** Bytes on disk, 0 when missing. */
 	size(fileName: string): number;
 	sha256(fileName: string): Promise<string>;
 };
@@ -32,7 +33,7 @@ export type RecoveryPatch =
 	| { recordingID: string; kind: "failed"; lastError: string };
 
 /** Mono AAC at 64 kbps: bytes per second of audio. */
-export const ESTIMATED_BYTES_PER_SECOND = 64_000 / 8;
+const ESTIMATED_BYTES_PER_SECOND = 64_000 / 8;
 
 export async function planRecovery(
 	index: QueueIndex,
@@ -44,7 +45,7 @@ export async function planRecovery(
 		const { recordingID } = rec;
 		let byteCount = 0;
 		try {
-			byteCount = files.exists(rec.fileName) ? files.size(rec.fileName) : 0;
+			byteCount = files.size(rec.fileName);
 		} catch {
 			byteCount = 0;
 		}
@@ -72,7 +73,7 @@ export async function planRecovery(
 			patches.push({
 				recordingID,
 				kind: "failed",
-				lastError: error instanceof Error ? error.message : String(error),
+				lastError: errorMessage(error),
 			});
 		}
 	}

@@ -2,14 +2,12 @@ import {
 	authorizationHeader,
 	decodeHello,
 	decodePairResponse,
-	encodeJSON,
 	type Hello,
 	type PairRequest,
 	type PairResponse,
 	type PinnedResponse,
 	PROTOCOL_VERSION,
 	paths,
-	type ResolvedMac,
 	stenoLink,
 } from "@modules/steno-link";
 
@@ -20,11 +18,7 @@ import {
  */
 export type MacEndpoint = { origin: string; fingerprint: string };
 
-export const REQUEST_TIMEOUT_MS = 10_000;
-
-export function macOrigin(resolved: ResolvedMac): string {
-	return `https://${resolved.host}:${resolved.port}`;
-}
+const REQUEST_TIMEOUT_MS = 10_000;
 
 export type HandoverFailure =
 	| "unreachable"
@@ -45,7 +39,10 @@ export class HandoverError extends Error {
 	}
 }
 
-/** Runs a pinned request; transport failures (including a failed pin) become `unreachable`. */
+/**
+ * Runs a pinned request; transport failures (including a failed pin) become
+ * `unreachable`. The module adds `Content-Type: application/json` to bodies.
+ */
 export async function pinnedRequest(
 	endpoint: MacEndpoint,
 	method: "GET" | "POST" | "PUT" | "DELETE",
@@ -56,14 +53,10 @@ export async function pinnedRequest(
 		return await stenoLink().request({
 			url: `${endpoint.origin}${path}`,
 			method,
-			headers: {
-				Accept: "application/json",
-				...(options.body !== undefined
-					? { "Content-Type": "application/json" }
-					: {}),
-				...options.headers,
-			},
-			...(options.body !== undefined ? { body: encodeJSON(options.body) } : {}),
+			headers: { Accept: "application/json", ...options.headers },
+			...(options.body !== undefined
+				? { body: JSON.stringify(options.body) }
+				: {}),
 			fingerprint: endpoint.fingerprint,
 			timeoutMs: REQUEST_TIMEOUT_MS,
 		});
@@ -103,7 +96,7 @@ export function failureFor(response: PinnedResponse): HandoverError | null {
 }
 
 export async function hello(endpoint: MacEndpoint): Promise<Hello> {
-	const response = await pinnedRequest(endpoint, "GET", paths.hello());
+	const response = await pinnedRequest(endpoint, "GET", paths.hello);
 	const failure = failureFor(response);
 	if (failure) throw failure;
 	const decoded = decodeHello(response.body);
@@ -125,7 +118,7 @@ export async function pair(
 	secret: string,
 	request: PairRequest,
 ): Promise<PairResponse> {
-	const response = await pinnedRequest(endpoint, "POST", paths.pair(), {
+	const response = await pinnedRequest(endpoint, "POST", paths.pair, {
 		headers: authorizationHeader("Pairing", secret),
 		body: request,
 	});
@@ -142,7 +135,7 @@ export async function unpair(
 	endpoint: MacEndpoint,
 	token: string,
 ): Promise<void> {
-	const response = await pinnedRequest(endpoint, "DELETE", paths.pairing(), {
+	const response = await pinnedRequest(endpoint, "DELETE", paths.pairing, {
 		headers: authorizationHeader("Bearer", token),
 	});
 	const failure = failureFor(response);

@@ -10,16 +10,13 @@
  * Pure module: no native imports, unit-tested by `wire.test.ts`.
  */
 
+import type { ResolvedMac } from "./StenoLink.types";
+
 export const PROTOCOL_VERSION = 1;
 export const SERVICE_TYPE = "_steno._tcp";
 
 /** Raw values of core's `AudioFormat`. The phone only ever sends `m4aAAC`. */
 export type AudioFormat = "caf48kFloat32" | "m4aAAC" | "wav16kInt16";
-export const AUDIO_FORMATS: readonly AudioFormat[] = [
-	"caf48kFloat32",
-	"m4aAAC",
-	"wav16kInt16",
-];
 
 /** `GET /v1/hello` response, the reachability probe. */
 export type Hello = { macID: string; protocol: number };
@@ -62,11 +59,16 @@ export type CompleteResponse = { meetingID: string };
 /** Request header carrying the SHA-256 (standard base64) of one chunk body. */
 export const CHUNK_HASH_HEADER = "X-Steno-Chunk-SHA256";
 
+/** `https://<host>:<port>`; `host` is already URL-safe (see `ResolvedMac`). */
+export function macOrigin(resolved: ResolvedMac): string {
+	return `https://${resolved.host}:${resolved.port}`;
+}
+
 /** Paths, relative to the resolved Mac origin. */
 export const paths = {
-	hello: () => "/v1/hello",
-	pair: () => "/v1/pair",
-	pairing: () => "/v1/pairing",
+	hello: "/v1/hello",
+	pair: "/v1/pair",
+	pairing: "/v1/pairing",
 	recording: (recordingID: string) =>
 		`/v1/recordings/${encodeURIComponent(recordingID)}`,
 	chunk: (recordingID: string, index: number) =>
@@ -83,11 +85,6 @@ export function authorizationHeader(
 }
 
 export type Decoded<T> = { ok: true; value: T } | { ok: false; reason: string };
-
-/** JSON body encoding; camelCase falls out of the type literals above. */
-export function encodeJSON(value: unknown): string {
-	return JSON.stringify(value);
-}
 
 type Shape = Record<string, "string" | "number" | "number[]">;
 
@@ -148,24 +145,4 @@ export function decodeCompleteResponse(
 	text: string,
 ): Decoded<CompleteResponse> {
 	return decodeShape<CompleteResponse>(text, { meetingID: "string" });
-}
-
-export function decodeRecordingMetadata(
-	text: string,
-): Decoded<RecordingMetadata> {
-	const decoded = decodeShape<RecordingMetadata>(text, {
-		recordingID: "string",
-		startedAt: "string",
-		durationSeconds: "number",
-		byteCount: "number",
-		sha256: "string",
-		chunkSize: "number",
-		format: "string",
-		deviceName: "string",
-	});
-	if (!decoded.ok) return decoded;
-	if (!AUDIO_FORMATS.includes(decoded.value.format)) {
-		return { ok: false, reason: `unknown format ${decoded.value.format}` };
-	}
-	return decoded;
 }

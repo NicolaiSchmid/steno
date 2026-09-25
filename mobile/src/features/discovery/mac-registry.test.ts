@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { createMacRegistry, EMPTY_REGISTRY } from "./mac-registry";
+import { createMacRegistry, EMPTY_REGISTRY, findByMacID } from "./mac-registry";
 
 const studio = {
 	name: "Studio",
@@ -15,23 +15,21 @@ describe("createMacRegistry", () => {
 	it("starts empty and tracks found, replaced and lost services by name", () => {
 		const registry = createMacRegistry();
 		expect(registry.snapshot()).toBe(EMPTY_REGISTRY);
-		registry.apply({ type: "found", service: studio });
-		registry.apply({ type: "found", service: laptop });
-		registry.apply({ type: "found", service: { ...studio, macID: null } });
+		registry.found(studio);
+		registry.found(laptop);
+		registry.found({ ...studio, macID: null });
 		expect(registry.snapshot().services).toEqual([
 			laptop,
 			{ ...studio, macID: null },
 		]);
-		registry.apply({ type: "lost", service: laptop });
+		registry.lost(laptop);
 		expect(registry.snapshot().services).toEqual([{ ...studio, macID: null }]);
 	});
 
 	it("finds by mac id case-insensitively and ignores services without one", () => {
-		const registry = createMacRegistry();
-		registry.apply({ type: "found", service: { name: "Anon", macID: null } });
-		registry.apply({ type: "found", service: studio });
-		expect(registry.findByMacID(studio.macID.toUpperCase())).toEqual(studio);
-		expect(registry.findByMacID(laptop.macID)).toBeNull();
+		const services = [{ name: "Anon", macID: null }, studio];
+		expect(findByMacID(services, studio.macID.toUpperCase())).toEqual(studio);
+		expect(findByMacID(services, laptop.macID)).toBeNull();
 	});
 
 	it("notifies subscribers only on change and keeps snapshots immutable", () => {
@@ -39,12 +37,9 @@ describe("createMacRegistry", () => {
 		const listener = vi.fn();
 		const unsubscribe = registry.subscribe(listener);
 		const before = registry.snapshot();
-		registry.apply({ type: "lost", service: studio });
+		registry.lost(studio);
 		expect(listener).not.toHaveBeenCalled();
-		registry.apply({
-			type: "state",
-			state: { state: "ready", policyDenied: false },
-		});
+		registry.browserState({ state: "ready", policyDenied: false });
 		expect(listener).toHaveBeenCalledTimes(1);
 		expect(registry.snapshot()).not.toBe(before);
 		expect(registry.snapshot().browser).toEqual({
@@ -52,7 +47,7 @@ describe("createMacRegistry", () => {
 			policyDenied: false,
 		});
 		unsubscribe();
-		registry.apply({ type: "reset" });
+		registry.reset();
 		expect(listener).toHaveBeenCalledTimes(1);
 		expect(registry.snapshot()).toBe(EMPTY_REGISTRY);
 	});
@@ -64,7 +59,7 @@ describe("waitForMac", () => {
 
 	it("resolves immediately when the Mac is already known", async () => {
 		const registry = createMacRegistry();
-		registry.apply({ type: "found", service: studio });
+		registry.found(studio);
 		await expect(registry.waitForMac(studio.macID, 1000)).resolves.toEqual(
 			studio,
 		);
@@ -73,8 +68,8 @@ describe("waitForMac", () => {
 	it("resolves when the Mac appears later and stops listening afterwards", async () => {
 		const registry = createMacRegistry();
 		const pending = registry.waitForMac(studio.macID, 5000);
-		registry.apply({ type: "found", service: laptop });
-		registry.apply({ type: "found", service: studio });
+		registry.found(laptop);
+		registry.found(studio);
 		await expect(pending).resolves.toEqual(studio);
 		vi.advanceTimersByTime(10_000);
 	});
@@ -85,6 +80,6 @@ describe("waitForMac", () => {
 		const outcome = expect(pending).rejects.toThrow(/not found/);
 		vi.advanceTimersByTime(5000);
 		await outcome;
-		registry.apply({ type: "found", service: studio });
+		registry.found(studio);
 	});
 });

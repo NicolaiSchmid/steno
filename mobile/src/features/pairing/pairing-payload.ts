@@ -1,4 +1,4 @@
-import { base64UrlToStandard, decodeBase64 } from "@/lib/base64";
+import { base64UrlToStandard } from "@/lib/base64";
 
 /**
  * Parser for the pairing QR code and deep link (plan wire protocol):
@@ -34,8 +34,8 @@ export type PairingParseResult =
 
 const PREFIX = "steno://pair/";
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-export const FINGERPRINT_BYTES = 32;
-export const SECRET_BYTES = 32;
+const FINGERPRINT_BYTES = 32;
+const SECRET_BYTES = 32;
 
 function parseQuery(query: string): Map<string, string> | null {
 	const params = new Map<string, string>();
@@ -113,17 +113,6 @@ export function parsePairingPayload(
 			expiresAt,
 		},
 	};
-}
-
-/**
- * Byte equality of two base64 fingerprints regardless of alphabet or padding.
- * Not constant-time: it compares public identities, never secrets.
- */
-export function fingerprintsEqual(a: string, b: string): boolean {
-	const left = decodeBase64(a) ?? decodeBase64(base64UrlToStandard(a) ?? "");
-	const right = decodeBase64(b) ?? decodeBase64(base64UrlToStandard(b) ?? "");
-	if (!left || !right || left.length !== right.length) return false;
-	return left.every((byte, i) => byte === right[i]);
 }
 
 export function describePairingFailure(reason: PairingParseFailure): string {

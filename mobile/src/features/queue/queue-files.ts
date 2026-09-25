@@ -6,14 +6,17 @@ import type { QueueFileAPI } from "./queue-storage";
  * `Documents/queue/`: the recordings and their index. Documents is backed up
  * and survives updates; the audio file protection is iOS's default.
  */
-export function queueDirectory(): Directory {
-	return new Directory(Paths.document, "queue");
-}
+const queueDirectory = () => new Directory(Paths.document, "queue");
 
 export function ensureQueueDirectory(): Directory {
 	const directory = queueDirectory();
 	if (!directory.exists) directory.create({ intermediates: true });
 	return directory;
+}
+
+/** A recording in the queue directory; read `.exists`, `.size`, `.uri`. */
+export function queuedFile(fileName: string): File {
+	return new File(queueDirectory(), fileName);
 }
 
 /** `QueueFileAPI` over expo-file-system. Paths are `file://` URIs. */
@@ -36,22 +39,3 @@ export const expoQueueFiles: QueueFileAPI = {
 		if (file.exists) file.delete();
 	},
 };
-
-export function deleteQueuedFile(fileName: string): void {
-	const file = new File(queueDirectory(), fileName);
-	if (file.exists) file.delete();
-}
-
-export function queuedFileUri(fileName: string): string {
-	return new File(queueDirectory(), fileName).uri;
-}
-
-export function queuedFileExists(fileName: string): boolean {
-	return new File(queueDirectory(), fileName).exists;
-}
-
-/** Bytes on disk, 0 when missing. */
-export function queuedFileSize(fileName: string): number {
-	const file = new File(queueDirectory(), fileName);
-	return file.exists ? file.size : 0;
-}

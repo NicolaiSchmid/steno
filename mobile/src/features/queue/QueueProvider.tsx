@@ -11,7 +11,7 @@ import {
 
 import { ensureQueueDirectory, expoQueueFiles } from "./queue-files";
 import { EMPTY_INDEX, type QueueIndex } from "./queue-index";
-import { createQueueStorage, type QueueStorage } from "./queue-storage";
+import { createQueueStorage } from "./queue-storage";
 
 /**
  * React state over the persisted queue index. `update` applies a pure
@@ -27,23 +27,11 @@ export type QueueContextValue = {
 
 const QueueContext = createContext<QueueContextValue | null>(null);
 
-export function QueueProvider({
-	children,
-	storage: injected,
-}: {
-	children: ReactNode;
-	/** Test seam; production uses the Documents/queue storage. */
-	storage?: QueueStorage;
-}) {
-	const storage = useMemo(
-		() =>
-			injected ??
-			createQueueStorage(
-				expoQueueFiles,
-				ensureQueueDirectory().uri,
-				(message) => console.warn(`[queue] ${message}`),
-			),
-		[injected],
+export function QueueProvider({ children }: { children: ReactNode }) {
+	const [storage] = useState(() =>
+		createQueueStorage(expoQueueFiles, ensureQueueDirectory().uri, (message) =>
+			console.warn(`[queue] ${message}`),
+		),
 	);
 	const [index, setIndex] = useState<QueueIndex>(EMPTY_INDEX);
 	const [ready, setReady] = useState(false);

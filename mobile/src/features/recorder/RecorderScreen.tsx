@@ -8,27 +8,24 @@ import { AppText } from "@/components/AppText";
 import { PressableScale } from "@/components/PressableScale";
 import { usePairing } from "@/features/pairing/PairingProvider";
 import { useQueue } from "@/features/queue/QueueProvider";
-import {
-	queuedFileExists,
-	queuedFileSize,
-	queuedFileUri,
-} from "@/features/queue/queue-files";
+import { queuedFile } from "@/features/queue/queue-files";
 import {
 	addRecording,
 	findRecording,
 	patchRecording,
 	setState,
 } from "@/features/queue/queue-index";
-import {
-	type FinishedRecording,
-	useRecorder,
-} from "@/features/recording/recorder";
+import { useRecorder } from "@/features/recording/recorder";
 import {
 	CHUNK_SIZE,
 	recordingFileName,
 } from "@/features/recording/recording-options";
 import { applyRecovery, planRecovery } from "@/features/recording/recovery";
-import { useUploadCoordinator } from "@/features/sync/use-upload-coordinator";
+import {
+	type CoordinatorStatus,
+	useUploadCoordinator,
+} from "@/features/sync/use-upload-coordinator";
+import { errorMessage } from "@/lib/error-message";
 import { HIT_SLOP } from "@/lib/motion";
 import type { RootStackParamList } from "@/navigation/types";
 import { formatDuration } from "./format";
@@ -71,30 +68,19 @@ export function RecorderScreen() {
 				),
 			);
 		},
-		onFinished: (finished: FinishedRecording) => {
+		onFinished: (finished) => {
 			setBusy(false);
 			void update((current) => {
-				const patched = findRecording(current, finished.recordingID)
-					? patchRecording(current, finished.recordingID, {
-							durationSeconds: finished.durationSeconds,
-							byteCount: finished.byteCount,
-							sha256: finished.sha256,
-							fileName: finished.fileName,
-						})
+				// The row normally exists from `onStarted`; add it if that write failed.
+				const { recordingID, startedAt, ...fields } = finished;
+				const patched = findRecording(current, recordingID)
+					? patchRecording(current, recordingID, fields)
 					: addRecording(
 							current,
-							{
-								recordingID: finished.recordingID,
-								fileName: finished.fileName,
-								startedAt: finished.startedAt,
-								durationSeconds: finished.durationSeconds,
-								byteCount: finished.byteCount,
-								sha256: finished.sha256,
-								chunkSize: CHUNK_SIZE,
-							},
+							{ recordingID, startedAt, ...fields, chunkSize: CHUNK_SIZE },
 							"recording",
 						);
-				return setState(patched, finished.recordingID, "queued");
+				return setState(patched, recordingID, "queued");
 			});
 		},
 		onFailed: (session, message) => {
@@ -116,9 +102,11 @@ export function RecorderScreen() {
 		if (!ready || recoveredOnce.current) return;
 		recoveredOnce.current = true;
 		void planRecovery(index, {
-			exists: queuedFileExists,
-			size: queuedFileSize,
-			sha256: (fileName) => stenoLink().sha256(queuedFileUri(fileName)),
+			size: (fileName) => {
+				const file = queuedFile(fileName);
+				return file.exists ? file.size : 0;
+			},
+			sha256: (fileName) => stenoLink().sha256(queuedFile(fileName).uri),
 		})
 			.then((patches) =>
 				patches.length > 0
@@ -148,7 +136,7 @@ export function RecorderScreen() {
 			}
 		} catch (caught) {
 			setBusy(false);
-			setError(caught instanceof Error ? caught.message : String(caught));
+			setError(errorMessage(caught));
 		}
 	}, [recorder]);
 
@@ -205,7 +193,7 @@ export function RecorderScreen() {
 }
 
 function describeSync(
-	status: ReturnType<typeof useUploadCoordinator>["status"],
+	status: CoordinatorStatus,
 	macName: string | null,
 	reachable: boolean,
 ): string {

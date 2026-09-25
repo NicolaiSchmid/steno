@@ -1,8 +1,4 @@
-import {
-	type MacService,
-	type ResolvedMac,
-	stenoLink,
-} from "@modules/steno-link";
+import { type ResolvedMac, stenoLink } from "@modules/steno-link";
 import { useEffect, useSyncExternalStore } from "react";
 import { createMacRegistry, type RegistrySnapshot } from "./mac-registry";
 
@@ -11,7 +7,7 @@ import { createMacRegistry, type RegistrySnapshot } from "./mac-registry";
  * The native browser runs while at least one hook instance is mounted;
  * events land in one module-level registry.
  */
-export const macRegistry = createMacRegistry();
+const macRegistry = createMacRegistry();
 
 let consumers = 0;
 let subscriptions: { remove(): void }[] = [];
@@ -19,15 +15,9 @@ let subscriptions: { remove(): void }[] = [];
 function startBrowsing() {
 	const link = stenoLink();
 	subscriptions = [
-		link.addListener("serviceFound", (service) =>
-			macRegistry.apply({ type: "found", service }),
-		),
-		link.addListener("serviceLost", (service) =>
-			macRegistry.apply({ type: "lost", service }),
-		),
-		link.addListener("browserState", (state) =>
-			macRegistry.apply({ type: "state", state }),
-		),
+		link.addListener("serviceFound", macRegistry.found),
+		link.addListener("serviceLost", macRegistry.lost),
+		link.addListener("browserState", macRegistry.browserState),
 	];
 	link.startBrowsing();
 }
@@ -36,7 +26,7 @@ function stopBrowsing() {
 	for (const subscription of subscriptions) subscription.remove();
 	subscriptions = [];
 	stenoLink().stopBrowsing();
-	macRegistry.apply({ type: "reset" });
+	macRegistry.reset();
 }
 
 /** Restart the browser after Wi-Fi came back or the app returned to the foreground. */
@@ -60,14 +50,13 @@ export function useMacDiscovery(enabled = true): RegistrySnapshot {
 	return useSyncExternalStore(macRegistry.subscribe, macRegistry.snapshot);
 }
 
-export const MAC_WAIT_TIMEOUT_MS = 15_000;
+const MAC_WAIT_TIMEOUT_MS = 15_000;
 
 /** Waits for the Mac with `macID` to be browsed, then resolves its host and port. */
 export async function locateMac(
 	macID: string,
 	timeoutMs = MAC_WAIT_TIMEOUT_MS,
-): Promise<{ service: MacService; resolved: ResolvedMac }> {
+): Promise<ResolvedMac> {
 	const service = await macRegistry.waitForMac(macID, timeoutMs);
-	const resolved = await stenoLink().resolve(service.name);
-	return { service, resolved };
+	return stenoLink().resolve(service.name);
 }

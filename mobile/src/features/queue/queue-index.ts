@@ -67,6 +67,8 @@ const TRANSITIONS: Record<SyncState, readonly SyncState[]> = {
 	delivered: [],
 };
 
+export const SYNC_STATES = Object.keys(TRANSITIONS) as readonly SyncState[];
+
 export function findRecording(
 	index: QueueIndex,
 	recordingID: string,
@@ -243,6 +245,13 @@ export function chunkPlan(byteCount: number, chunkSize: number): Chunk[] {
 
 export function isPending(rec: QueuedRecording): boolean {
 	return rec.state === "queued" || rec.state === "uploading";
+}
+
+/** The Mac revoked us (401) or the user unpaired: nothing pending can proceed. */
+export function unpairPending(index: QueueIndex): QueueIndex {
+	return index.recordings
+		.filter(isPending)
+		.reduce((acc, r) => setState(acc, r.recordingID, "unpaired"), index);
 }
 
 function isDue(rec: QueuedRecording, now: Date): boolean {

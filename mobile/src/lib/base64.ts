@@ -1,14 +1,13 @@
 /**
- * Standard and URL-safe base64 without relying on `atob`/`btoa`, so the
- * pairing parser and the wire helpers run identically on Hermes and Node.
- * Decoding is strict: wrong alphabet, bad padding or a dangling sextet
- * returns null instead of a best-effort result.
+ * Strict base64 and base64url decoding without `atob`, so the pairing parser
+ * runs identically on Hermes and Node. Wrong alphabet, bad padding or a
+ * dangling sextet returns null instead of a best-effort result.
  */
 
-const STANDARD =
-	"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 const LOOKUP = new Map<string, number>(
-	[...STANDARD].map((char, value) => [char, value] as const),
+	[..."ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"].map(
+		(char, value) => [char, value] as const,
+	),
 );
 
 /** `-_` alphabet and no padding to `+/` with padding. Null when not base64url. */
@@ -18,10 +17,6 @@ export function base64UrlToBase64(text: string): string | null {
 	const remainder = standard.length % 4;
 	if (remainder === 1) return null;
 	return remainder === 0 ? standard : standard + "=".repeat(4 - remainder);
-}
-
-export function base64ToBase64Url(text: string): string {
-	return text.replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
 }
 
 export function decodeBase64(text: string): Uint8Array | null {
@@ -48,22 +43,11 @@ export function decodeBase64(text: string): Uint8Array | null {
 	return out === bytes.length ? bytes : null;
 }
 
-export function encodeBase64(bytes: Uint8Array): string {
-	let output = "";
-	for (let i = 0; i < bytes.length; i += 3) {
-		const a = bytes[i] ?? 0;
-		const b = bytes[i + 1];
-		const c = bytes[i + 2];
-		const triple = (a << 16) | ((b ?? 0) << 8) | (c ?? 0);
-		output += STANDARD[(triple >> 18) & 63];
-		output += STANDARD[(triple >> 12) & 63];
-		output += b === undefined ? "=" : STANDARD[(triple >> 6) & 63];
-		output += c === undefined ? "=" : STANDARD[triple & 63];
-	}
-	return output;
-}
-
-/** Decodes base64url text and re-encodes it as standard base64, or null. */
+/**
+ * Base64url text as standard base64, or null when it is not canonical base64url
+ * of exactly `byteLength` bytes. A decode that passes is canonical, so the
+ * padded text is already the standard encoding.
+ */
 export function base64UrlToStandard(
 	text: string,
 	byteLength?: number,
@@ -73,5 +57,5 @@ export function base64UrlToStandard(
 	const bytes = decodeBase64(standard);
 	if (bytes === null) return null;
 	if (byteLength !== undefined && bytes.length !== byteLength) return null;
-	return encodeBase64(bytes);
+	return standard;
 }

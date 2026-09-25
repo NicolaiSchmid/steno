@@ -59,10 +59,10 @@ final class UploadSession: NSObject, URLSessionDataDelegate {
 
   func start(_ spec: Spec) throws {
     guard let url = URL(string: spec.url) else {
-      throw UploadSessionError.badURL(spec.url)
+      throw StenoLinkError.badURL(spec.url)
     }
     guard let fingerprint = Data(base64Encoded: spec.fingerprint), fingerprint.count == 32 else {
-      throw UploadSessionError.badFingerprint
+      throw StenoLinkError.badFingerprint
     }
     let chunkURL = try UploadSession.chunkFileURL(for: spec.taskID)
     let digest = try FileHashing.copySlice(
@@ -200,17 +200,5 @@ final class UploadSession: NSObject, URLSessionDataDelegate {
     try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
     let safeName = taskID.replacingOccurrences(of: "/", with: "_")
     return directory.appendingPathComponent("\(safeName).bin")
-  }
-}
-
-enum UploadSessionError: LocalizedError {
-  case badURL(String)
-  case badFingerprint
-
-  var errorDescription: String? {
-    switch self {
-    case .badURL(let url): return "Not a URL: \(url)"
-    case .badFingerprint: return "Fingerprint must be 32 bytes of standard base64"
-    }
   }
 }

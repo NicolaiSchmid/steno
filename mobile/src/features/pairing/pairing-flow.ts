@@ -1,12 +1,13 @@
-import type {
-	Hello,
-	PairRequest,
-	PairResponse,
-	ResolvedMac,
-} from "@modules/steno-link";
+import type { ResolvedMac } from "@modules/steno-link";
+import {
+	type Hello,
+	macOrigin,
+	type PairRequest,
+	type PairResponse,
+} from "@modules/steno-link/src/wire";
 import type { MacEndpoint } from "./pairing-client";
 import type { PairingPayload } from "./pairing-payload";
-import type { DeviceIdentity, PairedMac } from "./pairing-store";
+import type { DeviceIdentity, Pairing } from "./pairing-store";
 
 /**
  * The pairing sequence after a QR code parsed (plan P5): find the Mac the
@@ -37,15 +38,12 @@ export class PairingMismatchError extends Error {
 	}
 }
 
-export type PairingOutcome = { mac: PairedMac; token: string; origin: string };
-
 export async function performPairing(
 	payload: PairingPayload,
 	deps: PairingDependencies,
-): Promise<PairingOutcome> {
-	const resolved = await deps.locate(payload.macID);
+): Promise<Pairing> {
 	const endpoint: MacEndpoint = {
-		origin: `https://${resolved.host}:${resolved.port}`,
+		origin: macOrigin(await deps.locate(payload.macID)),
 		fingerprint: payload.fingerprint,
 	};
 
@@ -71,6 +69,5 @@ export async function performPairing(
 			pairedAt: deps.now().toISOString(),
 		},
 		token: response.token,
-		origin: endpoint.origin,
 	};
 }

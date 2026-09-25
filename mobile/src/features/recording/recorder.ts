@@ -9,6 +9,7 @@ import { randomUUID } from "expo-crypto";
 import { File } from "expo-file-system";
 import { useCallback, useRef, useState } from "react";
 import { ensureQueueDirectory } from "@/features/queue/queue-files";
+import { errorMessage } from "@/lib/error-message";
 import {
 	RECORDING_AUDIO_MODE,
 	RECORDING_OPTIONS,
@@ -30,7 +31,6 @@ export type RecordingSession = {
 export type FinishedRecording = {
 	recordingID: string;
 	fileName: string;
-	fileUri: string;
 	startedAt: string;
 	durationSeconds: number;
 	byteCount: number;
@@ -44,31 +44,15 @@ export type RecorderCallbacks = {
 	onFailed(session: RecordingSession, message: string): void;
 };
 
-export class RecordingPermissionError extends Error {
-	constructor() {
-		super("Microphone permission was not granted");
-		this.name = "RecordingPermissionError";
-	}
-}
-
-export async function ensureRecordingPermission(): Promise<void> {
-	const response = await requestRecordingPermissionsAsync();
-	if (!response.granted) throw new RecordingPermissionError();
-}
-
-export async function prepareAudioSession(): Promise<void> {
-	await setAudioModeAsync(RECORDING_AUDIO_MODE);
-}
-
 /** Moves the finished file into the queue directory and hashes it. */
-export async function finalizeRecording(args: {
-	uri: string;
-	session: RecordingSession;
-	durationSeconds: number;
-}): Promise<FinishedRecording> {
-	const fileName = recordingFileName(args.session.recordingID);
+async function finalizeRecording(
+	uri: string,
+	session: RecordingSession,
+	durationSeconds: number,
+): Promise<FinishedRecording> {
+	const fileName = recordingFileName(session.recordingID);
 	const destination = new File(ensureQueueDirectory(), fileName);
-	const source = new File(args.uri);
+	const source = new File(uri);
 	if (source.uri !== destination.uri) {
 		await source.move(destination, { overwrite: true });
 	}
@@ -78,11 +62,10 @@ export async function finalizeRecording(args: {
 	}
 	const sha256 = await stenoLink().sha256(destination.uri);
 	return {
-		recordingID: args.session.recordingID,
+		recordingID: session.recordingID,
 		fileName,
-		fileUri: destination.uri,
-		startedAt: args.session.startedAt.toISOString(),
-		durationSeconds: args.durationSeconds,
+		startedAt: session.startedAt.toISOString(),
+		durationSeconds,
 		byteCount,
 		sha256,
 	};
@@ -117,17 +100,10 @@ export function useRecorder(callbacks: RecorderCallbacks): RecorderHandle {
 				return;
 			}
 			try {
-				const finished = await finalizeRecording({
-					uri,
-					session: current,
-					durationSeconds,
-				});
+				const finished = await finalizeRecording(uri, current, durationSeconds);
 				callbacksRef.current.onFinished(finished);
 			} catch (error) {
-				callbacksRef.current.onFailed(
-					current,
-					error instanceof Error ? error.message : String(error),
-				);
+				callbacksRef.current.onFailed(current, errorMessage(error));
 			}
 		},
 		[],
@@ -159,8 +135,11 @@ export function useRecorder(callbacks: RecorderCallbacks): RecorderHandle {
 
 	const start = useCallback(async () => {
 		if (sessionRef.current) return;
-		await ensureRecordingPermission();
-		await prepareAudioSession();
+		const permission = await requestRecordingPermissionsAsync();
+		if (!permission.granted) {
+			throw new Error("Microphone permission was not granted");
+		}
+		await setAudioModeAsync(RECORDING_AUDIO_MODE);
 		await recorder.prepareToRecordAsync();
 		const next: RecordingSession = {
 			recordingID: randomUUID(),
