@@ -118,8 +118,7 @@ public enum Scripts {
   /// A responder that plays an OpenAI reasoning model: it rejects
   /// `max_tokens` (wanting `max_completion_tokens`) and any `temperature`,
   /// each by name, and otherwise returns `completion`.
-  public static func reasoningModel(completion: StubResponse)
-    -> @Sendable (RecordedRequest) ->
+  public static func reasoningModel(completion: StubResponse) -> @Sendable (RecordedRequest) ->
     StubResponse?
   {
     { request in
