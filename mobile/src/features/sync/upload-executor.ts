@@ -69,6 +69,12 @@ export type UploadExecutor = {
 	uploadFinished(event: UploadFinished): Promise<void>;
 	uploadFailed(event: UploadFailed): Promise<void>;
 	/**
+	 * Replaces the chunk ids in flight with what the background session
+	 * reports (`pendingUploads()`), so a dropped `uploadFinished` never parks
+	 * a recording; announce and complete ids are untouched.
+	 */
+	reconcile(pendingTaskIDs: readonly string[]): void;
+	/**
 	 * Re-reads the Mac's chunk set for every `uploading` row, so chunks that
 	 * finished while JS was dead count; a 404 sends the row back to `queued`.
 	 */
@@ -276,6 +282,13 @@ export function createUploadExecutor(
 		await fail(parsed.recordingID, new Error(message));
 	};
 
+	const reconcile = (pendingTaskIDs: readonly string[]) => {
+		for (const id of inFlight) {
+			if (parseChunkTaskID(id)) inFlight.delete(id);
+		}
+		for (const id of pendingTaskIDs) inFlight.add(id);
+	};
+
 	const refreshUploading = async (
 		session: Session,
 		index: QueueIndex,
@@ -318,6 +331,7 @@ export function createUploadExecutor(
 		fail,
 		uploadFinished,
 		uploadFailed,
+		reconcile,
 		refreshUploading,
 	};
 }

@@ -4,7 +4,7 @@ import Foundation
 /// goes through `PinnedTrustEvaluator` with the fingerprint of the paired Mac.
 /// A rejected pin cancels the task, which URLSession reports as
 /// `NSURLErrorCancelled`; `pinRejected` lets the client name the real cause.
-final class PinnedSessionDelegate: NSObject, URLSessionDelegate {
+final class PinnedSessionDelegate: NSObject, URLSessionTaskDelegate {
   private let fingerprint: Data
   private(set) var pinRejected = false
 
@@ -22,6 +22,17 @@ final class PinnedSessionDelegate: NSObject, URLSessionDelegate {
       pinRejected = true
     }
     completionHandler(disposition, credential)
+  }
+
+  /// Never follow a redirect: it could carry the bearer to a host that was not pinned.
+  func urlSession(
+    _ session: URLSession,
+    task: URLSessionTask,
+    willPerformHTTPRedirection response: HTTPURLResponse,
+    newRequest request: URLRequest,
+    completionHandler: @escaping (URLRequest?) -> Void
+  ) {
+    completionHandler(nil)
   }
 }
 
@@ -47,6 +58,10 @@ enum PinnedClient {
   static func perform(_ request: Request, completion: @escaping (Result<Response, Error>) -> Void) {
     guard let url = URL(string: request.url) else {
       completion(.failure(StenoLinkError.badURL(request.url)))
+      return
+    }
+    guard url.scheme?.lowercased() == "https" else {
+      completion(.failure(StenoLinkError.notHTTPS(request.url)))
       return
     }
     guard let fingerprint = Data(base64Encoded: request.fingerprint), fingerprint.count == 32 else {

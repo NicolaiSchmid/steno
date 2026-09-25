@@ -696,6 +696,41 @@ describe("guards", () => {
 	});
 });
 
+describe("reconcile with the background session", () => {
+	it("drops chunk ids the session no longer knows, adopts the ones it does, keeps announce and complete ids", async () => {
+		const h = harness(addRecording(EMPTY_INDEX, rec("a")));
+		await h.drive();
+		expect(h.executor.inFlight).toEqual(
+			new Set([taskIDs.chunk("a", 0), taskIDs.chunk("a", 1)]),
+		);
+		h.executor.inFlight.add(taskIDs.announce("bb"));
+		h.executor.inFlight.add(taskIDs.complete("cc"));
+
+		// Chunk 0's `uploadFinished` was missed (dev reload); chunk 2 was
+		// started by a previous JS lifetime.
+		h.executor.reconcile([taskIDs.chunk("a", 1), taskIDs.chunk("a", 2)]);
+		expect(h.executor.inFlight).toEqual(
+			new Set([
+				taskIDs.chunk("a", 1),
+				taskIDs.chunk("a", 2),
+				taskIDs.announce("bb"),
+				taskIDs.complete("cc"),
+			]),
+		);
+
+		// Once chunk 2 finishes natively, the planner no longer waits on the
+		// dropped chunk 0.
+		h.executor.reconcile([taskIDs.chunk("a", 1)]);
+		expect(
+			planNext(h.state.index, true, h.executor.inFlight, h.clock.now),
+		).toEqual({
+			kind: "upload-chunk",
+			recordingID: "a",
+			chunk: 0,
+		});
+	});
+});
+
 describe("refreshUploading after a relaunch", () => {
 	it("syncs the chunk set of every uploading row and skips the others", async () => {
 		let index = addRecording(EMPTY_INDEX, rec("a"));

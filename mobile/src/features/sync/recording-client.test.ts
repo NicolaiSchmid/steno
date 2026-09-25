@@ -9,6 +9,7 @@ import {
 } from "@/features/queue/queue-index";
 import {
 	announce,
+	cancelAllUploads,
 	complete,
 	metadataFor,
 	type Session,
@@ -19,6 +20,8 @@ import {
 const link = vi.hoisted(() => ({
 	request: vi.fn(),
 	startUpload: vi.fn(),
+	pendingUploads: vi.fn(async (): Promise<string[]> => []),
+	cancelUpload: vi.fn(async (_taskID: string) => {}),
 }));
 vi.mock("expo", () => ({ requireNativeModule: () => link }));
 
@@ -233,5 +236,22 @@ describe("startChunkUpload", () => {
 		await expect(
 			startChunkUpload(session, "r", { index: 0, offset: 0, length: 1 }, "f"),
 		).rejects.toThrow("ERR_STENO_UPLOAD");
+	});
+});
+
+describe("cancelAllUploads", () => {
+	it("cancels every task the background session still knows", async () => {
+		link.pendingUploads.mockResolvedValueOnce(["a/0", "a/1"]);
+		await cancelAllUploads();
+		expect(link.cancelUpload.mock.calls.map((c) => c[0])).toEqual([
+			"a/0",
+			"a/1",
+		]);
+	});
+
+	it("is a no-op when nothing is pending", async () => {
+		link.cancelUpload.mockClear();
+		await cancelAllUploads();
+		expect(link.cancelUpload).not.toHaveBeenCalled();
 	});
 });

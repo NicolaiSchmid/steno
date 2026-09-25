@@ -164,6 +164,25 @@ describe("createQueueStorage", () => {
 		expect(files.calls).toEqual(["read file:///docs/queue/index.json"]);
 	});
 
+	it("takes a complete temp file over a torn index and sets the torn one aside", async () => {
+		const logs: string[] = [];
+		const torn = '{"version":1,"recordings":[{"rec';
+		const files = memoryFiles({
+			"file:///docs/queue/index.json": torn,
+			"file:///docs/queue/index.json.tmp": serializeQueueIndex(one),
+		});
+		const storage = createQueueStorage(files.api, "file:///docs/queue", (m) =>
+			logs.push(m),
+		);
+		expect(await storage.load()).toEqual(one);
+		expect(files.store.get("file:///docs/queue/index.corrupt.json")).toBe(torn);
+		expect(files.store.has("file:///docs/queue/index.json")).toBe(false);
+		expect(logs[0]).toMatch(/using the temp file/);
+		// The next save writes a fresh index over the temp file as usual.
+		await storage.save(one);
+		expect(await storage.load()).toEqual(one);
+	});
+
 	it("quarantines a schema-invalid index, replacing an older quarantine", async () => {
 		const invalid = serializeQueueIndex(one).replace('"queued"', '"paused"');
 		const files = memoryFiles({
