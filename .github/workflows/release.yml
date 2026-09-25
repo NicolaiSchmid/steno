@@ -31,12 +31,18 @@ permissions:
 
 env:
   KEYCHAIN_PATH: ${{ github.workspace }}/../steno-release.keychain-db
+  # The runner user's keychain search list as it was before this run, saved
+  # by "Import signing certificate" and put back by the cleanup step.
+  KEYCHAINS_BEFORE: ${{ github.workspace }}/../steno-release.keychains-before
 
 jobs:
   release:
     name: Build, notarise, publish
     runs-on: ${{ fromJSON(vars.MACOS_RUNS_ON || '"macos-15"') }}
     timeout-minutes: 90
+    env:
+      # One place decides what a dry run is; every conditional step reads it.
+      DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -53,7 +59,6 @@ jobs:
           ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
           ASC_PRIVATE_KEY: ${{ secrets.ASC_PRIVATE_KEY }}
           SPARKLE_PRIVATE_KEY: ${{ secrets.SPARKLE_PRIVATE_KEY }}
-          DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run }}
         run: apps/macos/scripts/check-release-secrets.sh
 
       - uses: maxim-lobanov/setup-xcode@v1
@@ -101,7 +106,12 @@ jobs:
           security unlock-keychain -p "$keychain_password" "$KEYCHAIN_PATH"
           security import "$cert_path" -P "$P12_PASSWORD" -A -t cert -f pkcs12 -k "$KEYCHAIN_PATH"
           security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$keychain_password" "$KEYCHAIN_PATH" >/dev/null
-          security list-keychain -d user -s "$KEYCHAIN_PATH" login.keychain-db
+          # Remember the search list as it is (on Forge it may hold more than
+          # the login keychain), then put the throwaway keychain in front.
+          security list-keychains -d user | sed 's/^ *"//; s/"$//' > "$KEYCHAINS_BEFORE"
+          before=()
+          while IFS= read -r line; do [ -n "$line" ] && before+=("$line"); done < "$KEYCHAINS_BEFORE"
+          security list-keychains -d user -s "$KEYCHAIN_PATH" "${before[@]}"
           rm -f "$cert_path"
           security find-identity -v -p codesigning "$KEYCHAIN_PATH" | grep -q 'Developer ID Application' \
             || { echo "::error::the imported certificate is not a Developer ID Application identity"; exit 1; }
@@ -110,11 +120,11 @@ jobs:
         run: apps/macos/scripts/build-release.sh "${{ steps.version.outputs.version }}" "${{ steps.version.outputs.build }}"
 
       - name: DMG (dry run, unsigned by Apple)
-        if: github.event_name == 'workflow_dispatch' && inputs.dry_run
+        if: env.DRY_RUN == 'true'
         run: apps/macos/scripts/make-dmg.sh "${{ steps.version.outputs.version }}" --skip-notarization
 
       - name: DMG, notarise, staple
-        if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.dry_run) }}
+        if: env.DRY_RUN != 'true'
         env:
           ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
           ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
@@ -122,7 +132,7 @@ jobs:
         run: apps/macos/scripts/make-dmg.sh "${{ steps.version.outputs.version }}"
 
       - name: Appcast
-        if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.dry_run) }}
+        if: env.DRY_RUN != 'true'
         env:
           SPARKLE_PRIVATE_KEY: ${{ secrets.SPARKLE_PRIVATE_KEY }}
         run: apps/macos/scripts/make-appcast.sh "${{ steps.version.outputs.tag }}"
@@ -168,5 +178,12 @@ jobs:
         if: always()
         run: |
           security delete-keychain "$KEYCHAIN_PATH" 2>/dev/null || true
-          security list-keychain -d user -s login.keychain-db 2>/dev/null || true
+          # Restore the search list the import step saved, not a guess at
+          # it: on Forge the runner user may keep other keychains there.
+          if [ -s "$KEYCHAINS_BEFORE" ]; then
+            before=()
+            while IFS= read -r line; do [ -n "$line" ] && before+=("$line"); done < "$KEYCHAINS_BEFORE"
+            security list-keychains -d user -s "${before[@]}" 2>/dev/null || true
+            rm -f "$KEYCHAINS_BEFORE"
+          fi
           rm -f "$RUNNER_TEMP"/AuthKey_*.p8 "$RUNNER_TEMP"/steno-release.p12

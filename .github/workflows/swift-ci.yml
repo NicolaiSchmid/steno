@@ -225,16 +225,29 @@ jobs:
       - name: Install xcodegen
         run: apps/macos/scripts/install-xcodegen.sh
 
+      # DerivedData holds absolute paths (SourcePackages checkouts, the
+      # build database), so like the package job's `.build` it is scoped per
+      # self-hosted runner: the two Forge runners share a machine but not a
+      # workspace path.
+      - name: Cache scope
+        id: cache-scope
+        run: |
+          if [ "$RUNNER_ENVIRONMENT" = "self-hosted" ]; then
+            echo "scope=$RUNNER_NAME" >> "$GITHUB_OUTPUT"
+          else
+            echo "scope=hosted" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Cache DerivedData
         uses: actions/cache@v4
         with:
           path: |
             apps/macos/build/DerivedData/SourcePackages
             apps/macos/build/DerivedData/Build
-          key: steno-app-${{ runner.os }}-${{ steps.swift.outputs.version }}-${{ hashFiles('apps/macos/project.yml', 'Package.swift') }}-${{ hashFiles('Sources/**', 'apps/macos/**') }}
+          key: steno-app-${{ runner.os }}-${{ steps.cache-scope.outputs.scope }}-${{ steps.swift.outputs.version }}-${{ hashFiles('apps/macos/project.yml', 'Package.swift') }}-${{ hashFiles('Sources/**', 'apps/macos/**') }}
           restore-keys: |
-            steno-app-${{ runner.os }}-${{ steps.swift.outputs.version }}-${{ hashFiles('apps/macos/project.yml', 'Package.swift') }}-
-            steno-app-${{ runner.os }}-${{ steps.swift.outputs.version }}-
+            steno-app-${{ runner.os }}-${{ steps.cache-scope.outputs.scope }}-${{ steps.swift.outputs.version }}-${{ hashFiles('apps/macos/project.yml', 'Package.swift') }}-
+            steno-app-${{ runner.os }}-${{ steps.cache-scope.outputs.scope }}-${{ steps.swift.outputs.version }}-
 
       - name: Generate project
         run: |
@@ -247,29 +260,26 @@ jobs:
           # shellcheck disable=SC2086
           xcodebuild -resolvePackageDependencies -scheme Steno $XCODEBUILD_FLAGS
 
-      # xcodebuild's full log goes to a file (uploaded below); the console
-      # shows compiler diagnostics and the result line only. The app builds
-      # first so the hostless unit tests find Steno.app in the products
-      # directory (InfoPlistTests). The UI smoke test is the `ui-smoke` job
-      # below: Xcode 27 on the Forge runner aborts inside
+      # `xcodebuild-quiet.sh` keeps the full log in a file (uploaded below)
+      # and shows diagnostics, test lines and the result line only. The app
+      # builds first so the hostless unit tests find Steno.app in the
+      # products directory (InfoPlistTests). The UI smoke test is the
+      # `ui-smoke` job below: Xcode 27 on the Forge runner aborts inside
       # IDELaunchServicesLauncher when launching an XCUITest runner
       # (`INTERNAL ERROR: childPID > 0`), while the hosted image passed
       # spike S1.
       - name: Build app
-        run: |
-          set -o pipefail
-          mkdir -p apps/macos/build
-          # shellcheck disable=SC2086
-          xcodebuild build -scheme Steno $XCODEBUILD_FLAGS 2>&1 | tee apps/macos/build/build.log | grep -E --line-buffered '(error:|warning: .*apps/macos|\*\* .* \*\*)' || true
-          grep -q '\*\* BUILD SUCCEEDED \*\*' apps/macos/build/build.log
+        # shellcheck disable=SC2086
+        run: >-
+          apps/macos/scripts/xcodebuild-quiet.sh apps/macos/build/build.log 'BUILD SUCCEEDED' --
+          build -scheme Steno $XCODEBUILD_FLAGS
 
       - name: Unit tests
-        run: |
-          set -o pipefail
-          # shellcheck disable=SC2086
-          xcodebuild test -scheme StenoTests $XCODEBUILD_FLAGS \
-            -resultBundlePath apps/macos/build/unit.xcresult 2>&1 | tee apps/macos/build/unit.log | grep -E --line-buffered '(Test Case|Test Suite|error:|\*\* )' || true
-          grep -q '\*\* TEST SUCCEEDED \*\*' apps/macos/build/unit.log
+        # shellcheck disable=SC2086
+        run: >-
+          apps/macos/scripts/xcodebuild-quiet.sh apps/macos/build/unit.log 'TEST SUCCEEDED' --
+          test -scheme StenoTests $XCODEBUILD_FLAGS
+          -resultBundlePath apps/macos/build/unit.xcresult
 
       - name: Test summary
         if: always()
@@ -342,13 +352,11 @@ jobs:
           xcodebuild -resolvePackageDependencies -scheme Steno $XCODEBUILD_FLAGS
 
       - name: UI smoke test
-        run: |
-          set -o pipefail
-          mkdir -p apps/macos/build
-          # shellcheck disable=SC2086
-          xcodebuild test -scheme Steno -only-testing:StenoUITests $XCODEBUILD_FLAGS \
-            -resultBundlePath apps/macos/build/ui.xcresult 2>&1 | tee apps/macos/build/ui.log | grep -E --line-buffered '(Test Case|Test Suite|error:|\*\* )' || true
-          grep -q '\*\* TEST SUCCEEDED \*\*' apps/macos/build/ui.log
+        # shellcheck disable=SC2086
+        run: >-
+          apps/macos/scripts/xcodebuild-quiet.sh apps/macos/build/ui.log 'TEST SUCCEEDED' --
+          test -scheme Steno -only-testing:StenoUITests $XCODEBUILD_FLAGS
+          -resultBundlePath apps/macos/build/ui.xcresult
 
       - name: Test summary
         if: always()

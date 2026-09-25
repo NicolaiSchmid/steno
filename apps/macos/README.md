@@ -80,7 +80,7 @@ a Debug build read that feed instead of `SUFeedURL`. Serve `dist/` with
 | `Steno/Services/` | the four app protocols over system frameworks, their live types and fakes |
 | `StenoTests/` | hostless XCTest unit tests, one file per view model |
 | `StenoUITests/` | `LaunchSmokeTests` |
-| `scripts/` | `install-xcodegen.sh`, `xcresult-summary.py`, `build-release.sh`, `make-dmg.sh`, `make-appcast.sh` |
+| `scripts/` | `install-xcodegen.sh` (release zip pinned by version and SHA-256; an `xcodegen` on PATH counts only at the pinned version), `xcodebuild-quiet.sh` (log to file, diagnostics to the console, fails without the `** … SUCCEEDED **` marker; used by CI and `build-release.sh`), `xcresult-summary.py`, `build-release.sh`, `make-dmg.sh`, `make-appcast.sh` |
 
 Where things live at runtime: the database in `~/Library/Application Support/Steno/steno.sqlite`,
 recordings in the folder chosen in Audio settings (default `…/Steno/Audio`), models in
@@ -97,8 +97,10 @@ account `llm-api-key`), the handover identity in the login keychain.
 3. `scripts/build-release.sh <version> <build>` archives and exports with Developer ID and the
    hardened runtime, then verifies: `codesign --verify --deep --strict`, the Developer ID
    authority, the runtime flag, a secure timestamp, exactly the two entitlements
-   (audio-input, calendars), and that every nested framework and XPC service is signed by the
-   same team. `<version>` is the tag without `v`; `<build>` is `git rev-list --count HEAD`.
+   (audio-input, calendars, read with `codesign -d --entitlements - --xml`), and that every
+   nested code item (Sparkle.framework with its `Autoupdate`, `Updater.app` and XPC services,
+   FluidAudio's framework) carries the same team, the runtime flag and a timestamp.
+   `<version>` is the tag without `v`; `<build>` is `git rev-list --count HEAD`.
 4. `scripts/make-dmg.sh <version>` builds `Steno-<version>.dmg` with `hdiutil` (UDZO, an
    `Applications` symlink), signs it, submits it to `notarytool --wait`, staples the ticket
    and runs `spctl -a -t open --context context:primary-signature`.
