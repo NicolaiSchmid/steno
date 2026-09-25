@@ -17,9 +17,13 @@ participants:
   - "Speaker 2"
 nothing: []
 tags:
-  - meeting
-  - Kunde-ACME
-  - q4
-  - a/b
-  - x
+  - "meeting"
+  - "Kunde-ACME"
+  - "q4"
+  - "a/b"
+  - "x"
+  - "2026"
+  - "true"
+  - "null"
+  - "1e3"
 ---

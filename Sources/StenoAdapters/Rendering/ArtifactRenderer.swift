@@ -9,11 +9,13 @@ import StenoCore
 public struct ArtifactRenderer: Sendable {
   /// Bumped whenever any renderer's bytes change; recorded in every receipt
   /// and pinned by `Tests/Fixtures/snapshots/obsidian/VERSION`.
-  public static let version = 1
+  public static let version = 2
 
   public init() {}
 
-  /// Every artefact of one meeting: the five meeting files, then one
+  /// Every artefact of one meeting: `meeting.json` first, because a folder
+  /// is recognised as this meeting's crashed attempt by that file alone, so
+  /// it must be the first one on disk; then the four notes, then one
   /// `.personPage` per person when the options have a people folder. Audio
   /// is copied by the destination, not rendered.
   public func render(_ export: MeetingExport, options: RenderOptions, folderSlug: String? = nil)
@@ -21,6 +23,7 @@ public struct ArtifactRenderer: Sendable {
   {
     let slug = folderSlug ?? Self.folderSlug(export, options)
     var artifacts = [
+      RenderedArtifact(kind: .json, fileName: ObsidianLayout.json, data: try renderJSON(export)),
       RenderedArtifact(
         kind: .folderNote, fileName: ObsidianLayout.folderNote(slug: slug),
         data: Data(renderFolderNote(export, options: options, folderSlug: slug).utf8)),
@@ -32,7 +35,6 @@ public struct ArtifactRenderer: Sendable {
         data: Data(renderTasks(export, options: options).utf8)),
       RenderedArtifact(
         kind: .vtt, fileName: ObsidianLayout.vtt, data: Data(renderVTT(export).utf8)),
-      RenderedArtifact(kind: .json, fileName: ObsidianLayout.json, data: try renderJSON(export)),
     ]
     if options.linksPeople {
       for person in export.persons {

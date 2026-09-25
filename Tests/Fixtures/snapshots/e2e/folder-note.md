@@ -7,7 +7,7 @@ participants:
   - "[[Nicolai]]"
   - "[[Jérôme]]"
 tags:
-  - meeting
+  - "meeting"
 source: "mac-call"
 template: "default"
 language: "de"

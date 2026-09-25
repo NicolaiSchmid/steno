@@ -32,7 +32,7 @@ import Testing
       note.contains(
         "\nparticipants:\n  - \"[[Anna Müller]]\"\n  - \"Jérôme Dupont\"\n  - \"[[Nicolai Schmid]]\"\n  - \"Speaker 2\"\n"
       ), "persons are linked; an attendee without a person and the unresolved speaker are not")
-    #expect(note.contains("\ntags:\n  - meeting\n  - Kunde-ACME\n  - q4\n"))
+    #expect(note.contains("\ntags:\n  - \"meeting\"\n  - \"Kunde-ACME\"\n  - \"q4\"\n"))
     #expect(note.contains("\nsource: \"mac-call\"\n"))
     #expect(note.contains("\ntemplate: \"default\"\n"))
     #expect(note.contains("\nlanguage: \"de\"\n"))
@@ -89,7 +89,7 @@ import Testing
     #expect(!note.contains("## Scratchpad"))
     #expect(!note.contains("language:"))
     #expect(note.contains("\n## Summary\n\nNo summary.\n"))
-    #expect(note.contains("\ntags:\n  - meeting\nsource:"))
+    #expect(note.contains("\ntags:\n  - \"meeting\"\nsource:"))
     #expect(note.contains("\nduration: 46\n"), "whole minutes, rounded up")
     #expect(note.contains(" · 46 min · "))
     #expect(note.contains("[[2026-09-24-pinned - Transcript|Transcript]]"))
@@ -101,14 +101,17 @@ import Testing
     let artifacts = try renderer.render(export, options: FixtureMeeting.wikilink)
     #expect(
       artifacts.map(\.fileName) == [
-        "\(FixtureMeeting.folderSlug).md", "\(FixtureMeeting.folderSlug) - Transcript.md",
-        "\(FixtureMeeting.folderSlug) - Tasks.md", "transcript.vtt", "meeting.json",
-        "Anna Müller.md", "Nicolai Schmid.md",
+        "meeting.json", "\(FixtureMeeting.folderSlug).md",
+        "\(FixtureMeeting.folderSlug) - Transcript.md", "\(FixtureMeeting.folderSlug) - Tasks.md",
+        "transcript.vtt", "Anna Müller.md", "Nicolai Schmid.md",
       ])
     #expect(
       artifacts.map(\.kind) == [
-        .folderNote, .transcript, .tasks, .vtt, .json, .personPage, .personPage,
+        .json, .folderNote, .transcript, .tasks, .vtt, .personPage, .personPage,
       ])
+    #expect(
+      artifacts.first?.kind == .json,
+      "meeting.json is the crash marker: a folder is reused by it, so it is written first")
     let plain = try renderer.render(export, options: FixtureMeeting.plain)
     #expect(plain.count == 5, "no people folder, no person pages")
   }
@@ -123,8 +126,8 @@ import Testing
       "the title is one double-quoted scalar")
     let tags = ["meeting", "x", "yes", "ab", "with-space", "C/D_e", "kunde/acme"]
     #expect(
-      note.contains("\ntags:\n" + tags.map { "  - \($0)\n" }.joined() + "source:"),
-      "tags lose #, :, spaces and symbols; an empty result is dropped")
+      note.contains("\ntags:\n" + tags.map { "  - \"\($0)\"\n" }.joined() + "source:"),
+      "tags lose #, :, spaces and symbols; an empty result is dropped; every tag is quoted")
     #expect(note.contains("\n# - yes: #no \"quoted\" \\ end second line\n"), "H1 is one line")
     let lines = note.split(separator: "\n", omittingEmptySubsequences: false)
     let fence = lines.dropFirst().firstIndex(of: "---") ?? lines.endIndex

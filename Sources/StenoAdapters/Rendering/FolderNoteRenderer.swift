@@ -38,7 +38,9 @@ struct FolderNoteRenderer {
     frontmatter.append("duration", .int(Self.wholeMinutes(meeting.duration)))
     frontmatter.append(
       "participants", .list(Names(export: export, options: options).participants()))
-    frontmatter.append("tags", .tags(["meeting"] + meeting.tags))
+    // Sanitised to Obsidian's tag grammar here, quoted by the emitter so a
+    // tag of `2026` or `true` stays a string.
+    frontmatter.append("tags", .list((["meeting"] + meeting.tags).compactMap(MarkdownText.tag)))
     frontmatter.append("source", .string(Self.sourceKey(meeting.source)))
     frontmatter.append("template", .string(meeting.templateID))
     if let language = meeting.language {

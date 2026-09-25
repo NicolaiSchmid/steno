@@ -8,9 +8,9 @@ participants:
   - "Nicolai Schmid"
   - "Speaker 2"
 tags:
-  - meeting
-  - Kunde-ACME
-  - q4
+  - "meeting"
+  - "Kunde-ACME"
+  - "q4"
 source: "mac-call"
 template: "default"
 language: "de"

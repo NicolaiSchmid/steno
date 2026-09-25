@@ -22,7 +22,13 @@ import Testing
     frontmatter.append("done", .bool(false))
     frontmatter.append("participants", .list(["[[Anna Müller]]", "Speaker 2"]))
     frontmatter.append("nothing", .list([]))
-    frontmatter.append("tags", .tags(["meeting", "Kunde ACME", "#q4", "  ", "a/b", "-x-"]))
+    // Tags go through the renderer's sanitiser, then the emitter quotes them
+    // like every other string; the YAML-typed ones are the point.
+    frontmatter.append(
+      "tags",
+      .list(
+        ["meeting", "Kunde ACME", "#q4", "  ", "a/b", "-x-", "2026", "true", "null", "1e3"]
+          .compactMap(MarkdownText.tag)))
     return frontmatter
   }
 
@@ -45,7 +51,10 @@ import Testing
     #expect(encoded.contains("done: false\n"))
     #expect(encoded.contains("participants:\n  - \"[[Anna Müller]]\"\n  - \"Speaker 2\"\n"))
     #expect(encoded.contains("nothing: []\n"))
-    #expect(encoded.contains("tags:\n  - meeting\n  - Kunde-ACME\n  - q4\n  - a/b\n  - x\n"))
+    #expect(
+      encoded.contains(
+        "tags:\n  - \"meeting\"\n  - \"Kunde-ACME\"\n  - \"q4\"\n  - \"a/b\"\n  - \"x\"\n  - \"2026\"\n  - \"true\"\n  - \"null\"\n  - \"1e3\"\n"
+      ), "a tag YAML would type as int, bool, null or float is quoted like every string")
     try Snapshot.assert(encoded, matches: "snapshots/obsidian/frontmatter.md")
   }
 
@@ -56,6 +65,12 @@ import Testing
     #expect(Frontmatter.quoted("ü 日本 🎉") == "\"ü 日本 🎉\"")
     #expect(Frontmatter.quoted("\r\n") == "\"\\r\\n\"")
     #expect(Frontmatter.quoted("\u{1B}") == "\"\\u001B\"")
+    // C1 controls, the line and paragraph separators and a stray BOM are
+    // non-printable to YAML; one of them would void the whole block.
+    #expect(Frontmatter.quoted("a\u{85}b\u{9F}c") == "\"a\\u0085b\\u009Fc\"")
+    #expect(Frontmatter.quoted("\u{2028}\u{2029}") == "\"\\u2028\\u2029\"")
+    #expect(Frontmatter.quoted("\u{FEFF}title") == "\"\\uFEFFtitle\"")
+    #expect(Frontmatter.quoted("\u{A0}\u{2027}") == "\"\u{A0}\u{2027}\"", "neighbours stay")
   }
 
   @Test func rubyReadsBackTheSameKeysAndStrings() throws {
@@ -95,7 +110,10 @@ import Testing
       #expect(parsed["duration"] as? String == "90")
       #expect(parsed["done"] as? String == "false")
       #expect(parsed["participants"] as? [String] == ["[[Anna Müller]]", "Speaker 2"])
-      #expect(parsed["tags"] as? [String] == ["meeting", "Kunde-ACME", "q4", "a/b", "x"])
+      #expect(
+        parsed["tags"] as? [String] == [
+          "meeting", "Kunde-ACME", "q4", "a/b", "x", "2026", "true", "null", "1e3",
+        ], "Ruby reads every tag back as a string")
       #expect((parsed["date"] as? String)?.hasPrefix("2026-09-24") == true)
     #endif
   }

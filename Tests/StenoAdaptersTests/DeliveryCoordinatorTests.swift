@@ -1,4 +1,5 @@
 import Foundation
+import GRDB
 import StenoCore
 import Testing
 
@@ -121,6 +122,39 @@ struct RecordingDestination: Destination, Sendable {
     let built = destinations(for: configured)
     #expect(built.map(\.id) == [ObsidianFolderDestination.destinationID])
     #expect((built.first as? ObsidianFolderDestination)?.settings == configured.obsidian)
+  }
+
+  @Test func settingsThatDoNotLoadFailEveryStoredRowInsteadOfSilence() async throws {
+    let (store, settings) = try await Self.store()
+    let working = RecordingDestination(id: "b-works")
+    let first = await DeliveryCoordinator(
+      store: store, settings: settings, destinations: { _ in [working] }, now: { Self.now }
+    ).deliverAll(meetingID: FixtureMeeting.meetingID)
+    #expect(first[0].status == .delivered)
+
+    // A settings row that is not JSON makes `SettingsStore.load` throw.
+    try await store.writer.write { db in
+      try db.execute(
+        sql: "INSERT OR REPLACE INTO setting (key, value) VALUES ('obsidian', '{not json')")
+    }
+    await #expect(throws: (any Error).self) { try await settings.load() }
+
+    let later = Self.now.addingTimeInterval(60)
+    let results = await DeliveryCoordinator(
+      store: store, settings: settings, destinations: { _ in [working] }, now: { later }
+    ).deliverAll(meetingID: FixtureMeeting.meetingID)
+
+    #expect(results.count == 1)
+    let row = try #require(results.first, "one failed row per stored delivery, not silence")
+    #expect(row.destinationID == "b-works")
+    #expect(row.status.kind == .failed)
+    if case .failed(let reason) = row.status {
+      #expect(reason.hasPrefix("settings failed: "))
+    }
+    #expect(row.lastAttemptAt == later)
+    #expect(row.receipt == first[0].receipt, "the receipt is kept for the next attempt")
+    #expect(try await store.deliveries(meetingID: FixtureMeeting.meetingID) == results)
+    #expect(await working.previousReceipts.count == 1, "no destination ran")
   }
 
   @Test func anUnknownMeetingYieldsFailedRowsNotAThrow() async throws {

@@ -27,10 +27,25 @@ public actor DeliveryCoordinator: DeliveryDispatcher {
   }
 
   public func deliverAll(meetingID: UUID) async -> [Delivery] {
-    guard let settings = try? await settings.load() else { return [] }
+    let existing = (try? await store.deliveries(meetingID: meetingID)) ?? []
+    let settings: Settings
+    do {
+      settings = try await self.settings.load()
+    } catch {
+      // Settings that do not load cannot say where to deliver. Every
+      // destination delivered before is told so; silence would leave the
+      // meeting `.ready` with stale rows and no trace of the failure.
+      var results: [Delivery] = []
+      for var delivery in existing {
+        delivery.status = .failed("settings failed: \(String(describing: error))")
+        delivery.lastAttemptAt = now()
+        try? await store.save(delivery)
+        results.append(delivery)
+      }
+      return results
+    }
     let targets = destinations(settings)
     guard !targets.isEmpty else { return [] }
-    let existing = (try? await store.deliveries(meetingID: meetingID)) ?? []
     let export: Result<MeetingExport, any Error>
     do {
       export = .success(try await store.export(meetingID: meetingID))

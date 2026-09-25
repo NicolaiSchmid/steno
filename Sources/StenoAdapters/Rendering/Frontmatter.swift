@@ -3,9 +3,10 @@ import Foundation
 /// A YAML frontmatter block built from typed values, never from string
 /// interpolation. Every string is double-quoted with `\\`, `\"` and control
 /// characters escaped, so titles with colons, quotes, `#` or a leading `-`
-/// are safe; dates, numbers and booleans are the plain scalars Obsidian types
-/// as Date, Date & time, Number and Checkbox; tags are sanitised plain
-/// scalars so Obsidian reads them as Tags.
+/// are safe and a tag of `2026`, `true` or `null` stays a string; dates,
+/// numbers and booleans are the plain scalars Obsidian types as Date, Date &
+/// time, Number and Checkbox. The emitter knows no consumer: tag grammar
+/// belongs to the renderer that builds the list.
 public struct Frontmatter: Sendable {
   public enum Value: Sendable {
     case string(String)
@@ -17,9 +18,6 @@ public struct Frontmatter: Sendable {
     case dateTime(Date)
     /// A list of quoted strings.
     case list([String])
-    /// A list of plain tag scalars; entries are passed through
-    /// `MarkdownText.tag` and empty results dropped.
-    case tags([String])
   }
 
   /// Insertion order is output order.
@@ -46,17 +44,17 @@ public struct Frontmatter: Sendable {
       case .date(let date): lines.append("\(key): \(DateText.day(date, in: timeZone))")
       case .dateTime(let date): lines.append("\(key): \(DateText.dateTime(date, in: timeZone))")
       case .list(let items): lines += Self.list(key, items.map(Self.quoted))
-      case .tags(let raw): lines += Self.list(key, raw.compactMap(MarkdownText.tag))
       }
     }
     lines.append("---")
     return lines.joined(separator: "\n") + "\n"
   }
 
-  /// A YAML double-quoted scalar: `\` and `"` escaped, C0 controls and DEL
-  /// as `\n`, `\t`, `\r` or `\uXXXX`, everything else (including non-ASCII)
-  /// verbatim.
-  public static func quoted(_ string: String) -> String {
+  /// A YAML double-quoted scalar: `\` and `"` escaped; C0 and C1 controls,
+  /// DEL, the line and paragraph separators and the byte order mark as
+  /// `\n`, `\t`, `\r` or `\uXXXX` (YAML forbids them unescaped); everything
+  /// else, including non-ASCII, verbatim.
+  static func quoted(_ string: String) -> String {
     var result = "\""
     for scalar in string.unicodeScalars {
       switch scalar {
@@ -66,7 +64,7 @@ public struct Frontmatter: Sendable {
       case "\t": result += "\\t"
       case "\r": result += "\\r"
       default:
-        if scalar.value < 0x20 || scalar.value == 0x7F {
+        if needsEscape(scalar) {
           result += "\\u" + Timecode.pad(Int(scalar.value), width: 4, radix: 16)
         } else {
           result.unicodeScalars.append(scalar)
@@ -74,6 +72,13 @@ public struct Frontmatter: Sendable {
       }
     }
     return result + "\""
+  }
+
+  private static func needsEscape(_ scalar: Unicode.Scalar) -> Bool {
+    switch scalar.value {
+    case 0x00..<0x20, 0x7F...0x9F, 0x2028, 0x2029, 0xFEFF: true
+    default: false
+    }
   }
 
   /// `key: []`, or `key:` followed by one `  - item` line each.
