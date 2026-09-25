@@ -7,9 +7,13 @@ import StenoHandover
 /// `HandoverService.beginPairing().urlString`, revoke, listener status and
 /// transfers in flight. The listener starts for the first pairing (which
 /// triggers the local network prompt) and stays on while phones are paired.
+/// `observe()` and `observePairing()` run from the view's `.task`s; every
+/// timer is on the injected clock.
 @MainActor
 @Observable
 final class PhonesSettingsViewModel {
+  static let pairingPoll: Duration = .seconds(2)
+
   private(set) var devices: [PairedDevice] = []
   private(set) var listener: ListenerState = .stopped
   private(set) var receipts: [HandoverReceipt] = []
@@ -18,31 +22,20 @@ final class PhonesSettingsViewModel {
   private(set) var error: String?
   let handover: HandoverService?
   private let now: @Sendable () -> Date
-  private var observers: [Task<Void, Never>] = []
+  private let clock: any Clock<Duration>
 
-  init(handover: HandoverService?, now: @escaping @Sendable () -> Date) {
+  init(
+    handover: HandoverService?, now: @escaping @Sendable () -> Date,
+    clock: any Clock<Duration> = ContinuousClock()
+  ) {
     self.handover = handover
     self.now = now
-    guard let handover else { return }
-    listener = handover.state
-    observers.append(
-      Task { [weak self] in
-        for await state in handover.states {
-          guard let self else { return }
-          self.listener = state
-        }
-      })
-    observers.append(
-      Task { [weak self] in
-        for await receipts in handover.receipts {
-          guard let self else { return }
-          self.receipts = receipts
-        }
-      })
+    self.clock = clock
+    if let handover { listener = handover.state }
   }
 
   convenience init(environment: AppEnvironment) {
-    self.init(handover: environment.handover, now: environment.now)
+    self.init(handover: environment.handover, now: environment.now, clock: environment.clock)
   }
 
   var isAvailable: Bool { handover != nil }
@@ -52,6 +45,36 @@ final class PhonesSettingsViewModel {
   var pairingIsOpen: Bool {
     guard let pairing else { return false }
     return pairing.expiresAt > now()
+  }
+
+  /// Follows the listener state until cancelled (one view `.task`).
+  func observe() async {
+    guard let handover else { return }
+    for await state in handover.states {
+      listener = state
+    }
+  }
+
+  /// Follows the transfers in flight until cancelled (a second `.task`).
+  func observeReceipts() async {
+    guard let handover else { return }
+    for await update in handover.receipts {
+      receipts = update
+    }
+  }
+
+  /// While a pairing code is shown, polls the paired devices on the clock so
+  /// the phone's arrival closes the code; ends when the code closes or the
+  /// task is cancelled.
+  func observePairing() async {
+    while !Task.isCancelled, pairingIsOpen {
+      do {
+        try await clock.sleep(for: Self.pairingPoll)
+      } catch {
+        return
+      }
+      await refreshAfterPairing()
+    }
   }
 
   func load() async {

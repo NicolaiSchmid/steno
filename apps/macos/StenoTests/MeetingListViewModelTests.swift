@@ -13,6 +13,8 @@ final class MeetingListViewModelTests: XCTestCase {
     try await environment.store.save(failed)
 
     let model = MeetingListViewModel(store: environment.store, clock: ManualClock())
+    let observing = Task { await model.observe() }
+    defer { observing.cancel() }
     await TestSupport.waitUntil("two meetings") { model.meetings.count == 2 }
     XCTAssertEqual(model.meetings.first?.id, SampleData.meetingID, "newest first")
     XCTAssertEqual(model.tags, ["ops", "q4", "strategie"])
@@ -42,6 +44,8 @@ final class MeetingListViewModelTests: XCTestCase {
     let environment = try await TestSupport.environment()
     let clock = ManualClock()
     let model = MeetingListViewModel(store: environment.store, clock: clock)
+    let observing = Task { await model.observe() }
+    defer { observing.cancel() }
     await TestSupport.waitUntil("meeting listed") { model.meetings.count == 1 }
 
     model.query = "Bud"

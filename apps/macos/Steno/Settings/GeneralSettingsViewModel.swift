@@ -28,14 +28,11 @@ final class GeneralSettingsViewModel {
     }
   }
 
-  var launchAtLogin: Bool {
-    loginItem == .enabled || loginItem == .requiresApproval
-  }
+  var launchAtLogin: Bool { loginItem.isOn }
 
   func setLaunchAtLogin(_ enabled: Bool) async {
     do {
-      try environment.loginItem.setEnabled(enabled)
-      try await environment.updateSettings { $0.launchAtLogin = enabled }
+      try await environment.setLaunchAtLogin(enabled)
     } catch {
       self.error = "Login item could not be changed: \(error)"
     }

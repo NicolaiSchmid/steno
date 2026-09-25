@@ -2,7 +2,7 @@ import StenoAudio
 import StenoCore
 import XCTest
 
-/// `AppController.launch()` and the wiring between the menu bar, the
+/// `AppController.launch()` and the wiring between the recorder, the
 /// detection prompt, the retention sweep and pending speaker reviews, all
 /// over the preview environment's fakes.
 @MainActor
@@ -49,6 +49,15 @@ final class AppControllerTests: XCTestCase {
     }
     try await environment.store.save(meeting, asset: asset)
     return (meeting, asset.expirableFiles, unrelated)
+  }
+
+  /// The one meeting the recorder wrote, after it stopped.
+  private func recordedMeeting(in environment: AppEnvironment) async throws -> Meeting {
+    let meetings = try await environment.store.meetings()
+    XCTAssertEqual(meetings.count, 1)
+    let meeting = try XCTUnwrap(meetings.first)
+    XCTAssertNotEqual(meeting.state, .recording, "the recording was stopped and handed over")
+    return meeting
   }
 
   func testLaunchMarksInterruptedRecordingsFailedAndSweepsExpiredAudio() async throws {
@@ -162,8 +171,8 @@ final class AppControllerTests: XCTestCase {
     await prompt.start()
 
     XCTAssertNil(controller.detection.prompt)
-    guard case .recording = controller.menuBar.recording else {
-      return XCTFail("the prompt's Start should record, got \(controller.menuBar.recording)")
+    guard case .recording = controller.recorder.recording else {
+      return XCTFail("the prompt's Start should record, got \(controller.recorder.recording)")
     }
     running = await environment.detector.isRunning
     XCTAssertTrue(running, "the detector keeps its view of the open microphone")
@@ -173,12 +182,12 @@ final class AppControllerTests: XCTestCase {
     await controller.detection.handle(.microphoneOpened(bundleID: "us.zoom.xos", pid: 8))
     XCTAssertNil(controller.detection.prompt, "no prompt while recording")
 
-    await controller.menuBar.stop()
+    await controller.recorder.stop()
     running = await environment.detector.isRunning
     XCTAssertTrue(running, "still running after the recording")
-    let meetingID = try XCTUnwrap(controller.menuBar.lastStoppedMeetingID)
+    let meeting = try await recordedMeeting(in: environment)
     await environment.pipeline.waitUntilIdle()
-    let stored = try await environment.store.meeting(id: meetingID)
+    let stored = try await environment.store.meeting(id: meeting.id)
     XCTAssertEqual(stored?.state, .ready)
     await controller.shutdown()
   }
@@ -187,14 +196,16 @@ final class AppControllerTests: XCTestCase {
     let environment = try await TestSupport.environment(seed: false)
     let controller = try makeController(environment)
     await controller.launch()
-    await controller.menuBar.start(mode: .inPerson)
-    XCTAssertTrue(controller.menuBar.isRecording)
+    await controller.recorder.start(mode: .inPerson)
+    XCTAssertTrue(controller.recorder.isRecording)
 
     await controller.shutdown()
-    XCTAssertEqual(controller.menuBar.recording, .idle)
-    XCTAssertNotNil(controller.menuBar.lastStoppedMeetingID, "quitting keeps the recording")
+    XCTAssertEqual(controller.recorder.recording, .idle)
+    let meeting = try await recordedMeeting(in: environment)
+    XCTAssertFalse(meeting.state.isFailed, "quitting keeps the recording")
     let running = await environment.detector.isRunning
     XCTAssertFalse(running)
+    await environment.pipeline.waitUntilIdle()
   }
 
   /// Quit during the start window (calendar lookup, row write, `session
@@ -207,9 +218,9 @@ final class AppControllerTests: XCTestCase {
     let controller = try makeController(environment)
     await controller.launch()
 
-    let starting = Task { await controller.menuBar.start(mode: .call) }
+    let starting = Task { await controller.recorder.start(mode: .call) }
     await TestSupport.waitUntil("the start is waiting on the calendar") {
-      controller.menuBar.recording == .starting
+      controller.recorder.recording == .starting
     }
     let shutdown = Task { await controller.shutdown() }
     await TestSupport.settle()
@@ -217,14 +228,29 @@ final class AppControllerTests: XCTestCase {
     await starting.value
     await shutdown.value
 
-    XCTAssertEqual(controller.menuBar.recording, .idle, "quit stopped the capture it waited for")
-    let meetings = try await environment.store.meetings()
-    XCTAssertEqual(meetings.count, 1)
-    XCTAssertNotEqual(meetings.first?.state, .recording, "the row left the recording state")
-    XCTAssertFalse(
-      meetings.first?.state.isFailed ?? true, String(describing: meetings.first?.state))
+    XCTAssertEqual(controller.recorder.recording, .idle, "quit stopped the capture it waited for")
+    let meeting = try await recordedMeeting(in: environment)
+    XCTAssertFalse(meeting.state.isFailed, String(describing: meeting.state))
     await environment.pipeline.waitUntilIdle()
-    let stored = try await environment.store.meeting(id: meetings[0].id)
+    let stored = try await environment.store.meeting(id: meeting.id)
     XCTAssertEqual(stored?.state, .ready, "the recording was enqueued and processed")
+  }
+
+  /// `shutdown()` ends the controller's observations: a store change after
+  /// it no longer reaches the menu bar model.
+  func testShutdownCancelsTheObservations() async throws {
+    let environment = try await TestSupport.environment(seed: false)
+    let controller = try makeController(environment)
+    await controller.launch()
+    var meeting = SampleData.meeting(state: .queued)
+    meeting.id = UUID()
+    try await environment.store.save(meeting)
+    await TestSupport.waitUntil("queued meeting listed") { controller.menuBar.queue.count == 1 }
+
+    await controller.shutdown()
+    try await environment.store.setState(.ready, meetingID: meeting.id, now: TestSupport.now)
+    await TestSupport.settle()
+    try await Task.sleep(for: .milliseconds(100))
+    XCTAssertEqual(controller.menuBar.queue.count, 1, "no update after shutdown")
   }
 }

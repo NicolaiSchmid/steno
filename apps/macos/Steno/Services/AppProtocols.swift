@@ -10,6 +10,15 @@ enum LoginItemStatus: Sendable, Equatable {
   case enabled
   case requiresApproval
   case notFound
+
+  /// What a toggle shows: registered, whether or not the user has approved
+  /// it in System Settings yet.
+  var isOn: Bool {
+    switch self {
+    case .enabled, .requiresApproval: true
+    case .notRegistered, .notFound: false
+    }
+  }
 }
 
 @MainActor

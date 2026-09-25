@@ -24,7 +24,7 @@ struct TranscriptTab: View {
               Text(turn.start.timestampText)
                 .font(.steno(Theme.TextSize.xxs).monospacedDigit())
                 .foregroundStyle(Color.stenoFaint)
-              Text(turn.lane.rawValue)
+              Text(turn.lane.label)
                 .font(.steno(Theme.TextSize.xxxs))
                 .foregroundStyle(Color.stenoGhost)
             }

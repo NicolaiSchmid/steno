@@ -56,7 +56,7 @@ enum TabText {
     }
     return turns.flatMap { turn in
       let name = turn.speakerID.map(export.displayName(forSpeaker:)) ?? "Unknown"
-      return ["\(name) \(turn.start.timestampText) \(turn.lane.rawValue)", turn.text]
+      return ["\(name) \(turn.start.timestampText) \(turn.lane.label)", turn.text]
     }
   }
 

@@ -300,7 +300,15 @@ final class SettingsViewModelTests: XCTestCase {
         serviceName: "Test Mac", advertise: false, inboxDirectory: inbox),
       store: store, intake: FakeHandoverIntake(meetingID: UUID()), identity: identity,
       now: { TestSupport.now })
-    let model = PhonesSettingsViewModel(handover: handover, now: { TestSupport.now })
+    let clock = ManualClock()
+    let model = PhonesSettingsViewModel(
+      handover: handover, now: { TestSupport.now }, clock: clock)
+    let observing = Task { await model.observe() }
+    let observingReceipts = Task { await model.observeReceipts() }
+    defer {
+      observing.cancel()
+      observingReceipts.cancel()
+    }
     XCTAssertTrue(model.isAvailable)
     XCTAssertEqual(model.macID, identity.macID.uuidString)
     await model.load()
@@ -317,11 +325,18 @@ final class SettingsViewModelTests: XCTestCase {
       return false
     }
 
+    // The pairing poll runs on the injected clock: the phone shows up in
+    // the store, the next tick closes the code, and the poll ends with it.
+    let polling = Task { await model.observePairing() }
+    _ = await clock.waitForSleepers(1)
     let device = PairedDevice(id: UUID(), name: "iPhone", pairedAt: TestSupport.now)
     try await store.save(device, tokenHash: Data(repeating: 1, count: 32))
-    await model.refreshAfterPairing()
+    XCTAssertNotNil(model.pairing, "nothing before the tick")
+    clock.advance(by: PhonesSettingsViewModel.pairingPoll)
+    await TestSupport.waitUntil("a new device closes the pairing code") { model.pairing == nil }
     XCTAssertEqual(model.devices.map(\.name), ["iPhone"])
-    XCTAssertNil(model.pairing, "a new device closes the pairing code")
+    await polling.value
+    XCTAssertEqual(clock.pendingSleepers, 0, "the poll stopped with the code")
 
     await model.revoke(device.id)
     XCTAssertTrue(model.devices.isEmpty)

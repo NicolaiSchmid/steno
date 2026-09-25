@@ -99,6 +99,13 @@ final class AppEnvironment {
     return current
   }
 
+  /// The one place launch-at-login is written: the login item and the
+  /// setting together, for the menu bar toggle and the General tab alike.
+  func setLaunchAtLogin(_ enabled: Bool) async throws {
+    try loginItem.setEnabled(enabled)
+    try await updateSettings { $0.launchAtLogin = enabled }
+  }
+
   /// Replaces the pipeline with one built from the stored settings and the
   /// keychain's API key. The swap comes first, so a Save never waits for a
   /// run in progress and every later `enqueue` lands on the replacement; the

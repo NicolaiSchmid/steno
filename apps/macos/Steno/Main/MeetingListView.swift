@@ -104,13 +104,3 @@ struct MeetingRow: View {
     .accessibilityIdentifier("meeting-\(meeting.id.uuidString)")
   }
 }
-
-extension MeetingSource {
-  var label: String {
-    switch self {
-    case .macCall: "Call"
-    case .macInPerson: "In person"
-    case .phone: "Phone"
-    }
-  }
-}

@@ -3,12 +3,11 @@ import SwiftUI
 
 /// One card per unresolved speaker: play the clip, accept the suggestion,
 /// pick a known person or a calendar attendee, type a name, merge into
-/// another speaker of this meeting, or skip. Done re-exports once.
+/// another speaker of this meeting, or skip. Done re-exports once, and only
+/// when something changed.
 struct SpeakerReviewSheet: View {
-  @State var model: SpeakerReviewViewModel
+  @Bindable var model: SpeakerReviewViewModel
   let onFinish: () -> Void
-  @State private var names: [UUID: String] = [:]
-  @State private var mergeTargets: [UUID: UUID] = [:]
 
   var body: some View {
     VStack(alignment: .leading, spacing: Theme.Space.md) {
@@ -28,7 +27,7 @@ struct SpeakerReviewSheet: View {
             speakerCard(card)
           }
           if model.isDone {
-            Text("Every speaker is named. Done re-exports the meeting with the names.")
+            Text(doneHint)
               .font(.steno(Theme.TextSize.sm))
               .foregroundStyle(Color.stenoMutedForeground)
               .padding(Theme.Space.lg)
@@ -59,20 +58,32 @@ struct SpeakerReviewSheet: View {
     .task { await model.load() }
   }
 
+  private var doneHint: String {
+    model.didChange
+      ? "Every speaker is named. Done re-exports the meeting with the names."
+      : "Every speaker is named. Nothing changed, so Done leaves the export as it is."
+  }
+
   private func speakerCard(_ card: SpeakerReviewViewModel.Card) -> some View {
-    Card {
+    let isPlaying = model.playing == card.id
+    let draft = (model.draftNames[card.id] ?? "").trimmingCharacters(in: .whitespaces)
+    return Card {
       VStack(alignment: .leading, spacing: Theme.Space.sm) {
         HStack(spacing: Theme.Space.sm) {
           Button {
-            if model.playing == card.id { model.stopPlayback() } else { model.play(card.id) }
+            if isPlaying { model.stopPlayback() } else { model.play(card.id) }
           } label: {
-            Image(systemName: model.playing == card.id ? "stop.circle.fill" : "play.circle.fill")
+            Image(systemName: isPlaying ? "stop.circle.fill" : "play.circle.fill")
               .font(.system(size: 22))
               .foregroundStyle(card.clipURL == nil ? Color.stenoGhost : Color.stenoStrong)
           }
           .buttonStyle(.plain)
           .disabled(card.clipURL == nil)
           .help(card.clipURL == nil ? "No sample clip" : "Play the ten-second sample")
+          .accessibilityLabel(
+            card.clipURL == nil
+              ? "No sample clip for \(card.speaker.clusterLabel)"
+              : isPlaying ? "Stop sample" : "Play sample of \(card.speaker.clusterLabel)")
           VStack(alignment: .leading, spacing: 2) {
             Text(card.speaker.clusterLabel)
               .font(.steno(Theme.TextSize.sm, weight: .semibold))
@@ -90,6 +101,7 @@ struct SpeakerReviewSheet: View {
             .buttonStyle(.plain)
             .font(.steno(Theme.TextSize.xxs))
             .foregroundStyle(Color.stenoFaint)
+            .accessibilityLabel("Skip \(card.speaker.clusterLabel)")
         }
 
         if let suggestion = model.suggestion(for: card) {
@@ -100,6 +112,7 @@ struct SpeakerReviewSheet: View {
             StatusChip(text: "\(Int(suggestion.similarity * 100))%", color: Color.stenoLive)
             Button("Accept") { Task { await model.acceptSuggestion(card.id) } }
               .buttonStyle(StenoPrimaryButtonStyle())
+              .accessibilityLabel("Accept \(suggestion.person.displayName)")
           }
         }
 
@@ -126,15 +139,16 @@ struct SpeakerReviewSheet: View {
           TextField(
             "Name",
             text: Binding(
-              get: { names[card.id] ?? "" }, set: { names[card.id] = $0 }))
+              get: { model.draftNames[card.id] ?? "" },
+              set: { model.draftNames[card.id] = $0 }))
             .textFieldStyle(.roundedBorder)
-            .onSubmit { Task { await model.name(card.id, names[card.id] ?? "") } }
-          Button("Name") { Task { await model.name(card.id, names[card.id] ?? "") } }
+            .onSubmit { Task { await model.nameFromDraft(card.id) } }
+          Button("Name") { Task { await model.nameFromDraft(card.id) } }
             .buttonStyle(StenoSecondaryButtonStyle())
-            .disabled((names[card.id] ?? "").trimmingCharacters(in: .whitespaces).isEmpty)
+            .disabled(draft.isEmpty)
         }
 
-        let others = model.allSpeakers.filter { $0.id != card.id }
+        let others = model.mergeCandidates(for: card)
         if !others.isEmpty {
           HStack(spacing: Theme.Space.sm) {
             Text("Same voice as")
@@ -143,9 +157,10 @@ struct SpeakerReviewSheet: View {
             Picker(
               "Same voice as",
               selection: Binding(
-                get: { mergeTargets[card.id] ?? others.first?.id },
-                set: { mergeTargets[card.id] = $0 })
+                get: { model.mergeTargets[card.id] },
+                set: { model.mergeTargets[card.id] = $0 })
             ) {
+              Text("Choose a speaker").tag(UUID?.none)
               ForEach(others) { other in
                 Text(model.displayName(other)).tag(Optional(other.id))
               }
@@ -153,12 +168,10 @@ struct SpeakerReviewSheet: View {
             .labelsHidden()
             .pickerStyle(.menu)
             .frame(width: 180)
-            Button("Merge") {
-              if let target = mergeTargets[card.id] ?? others.first?.id {
-                Task { await model.mergeSpeakers(card.id, into: target) }
-              }
-            }
-            .buttonStyle(StenoSecondaryButtonStyle())
+            .accessibilityLabel("Same voice as")
+            Button("Merge") { Task { await model.mergeIntoChosenTarget(card.id) } }
+              .buttonStyle(StenoSecondaryButtonStyle())
+              .disabled(model.mergeTargets[card.id] == nil)
           }
         }
       }

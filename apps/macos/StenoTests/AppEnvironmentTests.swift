@@ -48,10 +48,11 @@ final class AppEnvironmentTests: XCTestCase {
       makeSpeechEngine: { () -> any SpeechEngine in
         firstBuild.take() ? GatedSpeechEngine(gate: gate) : FakeSpeechEngine()
       })
-    let model = MenuBarViewModel(environment: environment)
-    await model.start(mode: .call)
-    await model.stop()
-    let first = try XCTUnwrap(model.lastStoppedMeetingID)
+    let recorder = RecordingController(environment: environment)
+    await recorder.start(mode: .call)
+    await recorder.stop()
+    let firstOptional = try await environment.store.meetings().first?.id
+    let first = try XCTUnwrap(firstOptional)
     let retired = environment.pipeline
     await TestSupport.waitUntil("the first meeting is processing on the old pipeline") {
       (try? await environment.store.meeting(id: first))?.state == .processing
@@ -66,9 +67,10 @@ final class AppEnvironmentTests: XCTestCase {
     try await reload.value
     XCTAssertFalse(retired === environment.pipeline)
 
-    await model.start(mode: .inPerson)
-    await model.stop()
-    let second = try XCTUnwrap(model.lastStoppedMeetingID)
+    await recorder.start(mode: .inPerson)
+    await recorder.stop()
+    let secondOptional = try await environment.store.meetings().first { $0.id != first }?.id
+    let second = try XCTUnwrap(secondOptional)
     await environment.pipeline.waitUntilIdle()
     let secondStored = try await environment.store.meeting(id: second)
     XCTAssertEqual(secondStored?.state, .ready, "enqueued after the swap: the new pipeline ran it")

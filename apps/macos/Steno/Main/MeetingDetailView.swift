@@ -24,6 +24,8 @@ struct MeetingDetailView: View {
       }
     }
     .background(Color.stenoBackground)
+    .task { await model.observe() }
+    .task { await model.observeDeliveries() }
     .sheet(isPresented: $model.showsSpeakerReview) {
       if let export = model.export {
         SpeakerReviewSheet(
@@ -55,7 +57,7 @@ struct MeetingDetailView: View {
         Text(meeting.startedAt, format: .dateTime.year().month().day().hour().minute())
         if meeting.duration > 0 { Text(meeting.duration.clockText) }
         Text(meeting.source.label)
-        if let language = meeting.language { Text(language.rawValue.uppercased()) }
+        if let language = meeting.language { Text(language.localizedName()) }
         if let usage = meeting.llmUsage {
           Text("\(usage.promptTokens + usage.completionTokens) tokens")
         }
@@ -76,12 +78,7 @@ struct MeetingDetailView: View {
           .accessibilityIdentifier("review-speakers")
         }
         Menu {
-          Picker(
-            "Template",
-            selection: Binding(
-              get: { meeting.templateID },
-              set: { id in Task { await model.setTemplate(id) } })
-          ) {
+          Picker("Template", selection: .action({ meeting.templateID }, model.setTemplate)) {
             ForEach(model.templates) { template in
               Text(template.displayName).tag(template.id)
             }
@@ -91,11 +88,7 @@ struct MeetingDetailView: View {
           Button("Re-export") { Task { await model.reexport() } }
             .disabled(!model.canRerun)
           Divider()
-          Toggle(
-            "Keep audio",
-            isOn: Binding(
-              get: { model.keepsAudio },
-              set: { keep in Task { await model.setKeepAudio(keep) } }))
+          Toggle("Keep audio", isOn: .action({ model.keepsAudio }, model.setKeepAudio))
           if let url = model.export?.audio?.url {
             Button("Reveal recording in Finder") {
               NSWorkspace.shared.activateFileViewerSelecting([url])
@@ -122,11 +115,9 @@ struct MeetingDetailView: View {
           .textFieldStyle(.roundedBorder)
           .frame(width: 240)
           .onSubmit {
-            let tags = tagsText.split(separator: ",")
-              .map { $0.trimmingCharacters(in: .whitespaces).lowercased() }
-              .filter { !$0.isEmpty }
             editingTags = false
-            Task { await model.setTags(Array(Set(tags)).sorted()) }
+            let text = tagsText
+            Task { await model.setTags(text: text) }
           }
       } else {
         ForEach(meeting.tags, id: \.self) { tag in
@@ -224,6 +215,7 @@ struct DeliveryBadge: View {
         .buttonStyle(.plain)
         .foregroundStyle(Color.stenoFaint)
         .help("Reveal in Finder")
+        .accessibilityLabel("Reveal \(delivery.destinationID) folder in Finder")
       }
       if let at = delivery.lastAttemptAt {
         Text(at, format: .dateTime.hour().minute())

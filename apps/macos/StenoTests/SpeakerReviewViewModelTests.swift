@@ -110,13 +110,53 @@ final class SpeakerReviewViewModelTests: XCTestCase {
     XCTAssertEqual(model.allSpeakers.count, 2)
   }
 
-  func testFinishRedeliversExactlyOnce() async throws {
+  /// Done on an untouched sheet leaves the vault alone; after a confirm it
+  /// re-exports once, and a second Done does nothing more.
+  func testFinishRedeliversOnlyAfterAChangeAndOnlyOnce() async throws {
+    let environment = try await TestSupport.environment()
+    let vault = try TestSupport.temporaryDirectory("steno-vault")
+    defer { try? FileManager.default.removeItem(at: vault) }
+    try await environment.updateSettings {
+      $0.obsidian = ObsidianSettings(
+        vaultPath: vault.path, peopleFolder: nil, includeAudio: false, taskTag: nil)
+    }
+
+    let untouched = try await makeModel(environment)
+    XCTAssertFalse(untouched.didChange)
+    await untouched.finish()
+    var deliveries = try await environment.store.deliveries(meetingID: SampleData.meetingID)
+    XCTAssertTrue(deliveries.isEmpty, "nothing changed, nothing re-exported")
+
+    let model = try await makeModel(environment)
+    await model.acceptSuggestion(SampleData.speakerTwoID)
+    XCTAssertTrue(model.didChange)
+    await model.finish()
+    await model.finish()
+    XCTAssertNil(model.error, model.error ?? "")
+    deliveries = try await environment.store.deliveries(meetingID: SampleData.meetingID)
+    XCTAssertEqual(deliveries.map(\.destinationID), ["obsidian-folder"], "one delivery row")
+    XCTAssertEqual(deliveries.first?.status, .delivered)
+    XCTAssertTrue(
+      FileManager.default.fileExists(atPath: vault.appendingPathComponent("Meetings").path))
+  }
+
+  /// The merge picker starts with no target, so Merge without a choice is a
+  /// no-op; a chosen target merges and the choice is dropped with the card.
+  func testMergeNeedsAChosenTarget() async throws {
     let environment = try await TestSupport.environment()
     let model = try await makeModel(environment)
-    await model.finish()
-    await model.finish()
-    XCTAssertEqual(model.redeliveries, 1)
-    XCTAssertTrue(model.finished)
+    let card = try XCTUnwrap(model.unresolved.first)
+    XCTAssertNil(model.mergeTargets[card.id], "no default target")
+    XCTAssertEqual(model.mergeCandidates(for: card).map(\.id), [SampleData.speakerOneID])
+    await model.mergeIntoChosenTarget(card.id)
+    XCTAssertEqual(model.allSpeakers.count, 2, "nothing merged without a choice")
+    XCTAssertFalse(model.didChange)
+
+    model.mergeTargets[card.id] = SampleData.speakerOneID
+    await model.mergeIntoChosenTarget(card.id)
+    XCTAssertEqual(model.allSpeakers.map(\.id), [SampleData.speakerOneID])
+    XCTAssertTrue(model.didChange)
+    XCTAssertTrue(model.mergeTargets.isEmpty, "the merged card's choice is gone")
   }
 
   func testPlayingAMissingClipReportsAnError() async throws {
@@ -168,7 +208,7 @@ final class SpeakerReviewViewModelTests: XCTestCase {
     await model.finish()
     jerome = try await environment.store.person(id: SampleData.personJeromeID)
     XCTAssertEqual(jerome?.sampleCount, 2, "finish re-exports, it does not enrol")
-    XCTAssertEqual(model.redeliveries, 1)
+    XCTAssertTrue(model.didChange)
   }
 
   func testConfirmRemovesTheSampleClip() async throws {

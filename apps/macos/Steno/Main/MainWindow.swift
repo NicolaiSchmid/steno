@@ -38,6 +38,7 @@ struct MainWindow: View {
     }
     .navigationTitle("Steno")
     .frame(minWidth: 820, minHeight: 520)
+    .task { await list.observe() }
     .onChange(of: list.selection, initial: true) { _, selection in
       guard selection != detail?.id else { return }
       detail = selection.map {

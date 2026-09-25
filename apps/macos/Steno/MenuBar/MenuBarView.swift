@@ -9,6 +9,7 @@ struct MenuBarView: View {
   @Environment(\.openSettings) private var openSettings
 
   private var model: MenuBarViewModel { controller.menuBar }
+  private var recorder: RecordingController { controller.recorder }
 
   var body: some View {
     VStack(alignment: .leading, spacing: Theme.Space.md) {
@@ -21,10 +22,13 @@ struct MenuBarView: View {
         Divider().overlay(Color.stenoBorder)
         recentSection
       }
-      if let warning = model.lastWarning {
+      if let warning = recorder.lastWarning {
         MessageRow(kind: .warning, text: warning)
       }
-      if let error = model.lastError {
+      if let warning = controller.environment.startupWarnings.first {
+        MessageRow(kind: .warning, text: warning)
+      }
+      if let error = recorder.lastError ?? model.lastError {
         MessageRow(kind: .error, text: error)
       }
       Divider().overlay(Color.stenoBorder)
@@ -40,13 +44,13 @@ struct MenuBarView: View {
     VStack(alignment: .leading, spacing: Theme.Space.sm) {
       HStack(spacing: Theme.Space.sm) {
         Circle()
-          .fill(model.isRecording ? Color.stenoDestructive : Color.stenoGhost)
+          .fill(recorder.isRecording ? Color.stenoDestructive : Color.stenoGhost)
           .frame(width: 8, height: 8)
-        Text(model.statusText)
+        Text(recorder.statusText)
           .font(.steno(Theme.TextSize.sm, weight: .semibold))
           .foregroundStyle(Color.stenoStrong)
         Spacer()
-        if case .recording(let since) = model.recording {
+        if case .recording(let since) = recorder.recording {
           TimelineView(.periodic(from: since, by: 1)) { context in
             Text(context.date.timeIntervalSince(since).clockText)
               .font(.steno(Theme.TextSize.sm).monospacedDigit())
@@ -54,20 +58,20 @@ struct MenuBarView: View {
           }
         }
       }
-      if let levels = model.levels, model.isRecording {
+      if let levels = recorder.levels, recorder.isRecording {
         LevelBars(levels: levels)
       }
       HStack(spacing: Theme.Space.sm) {
-        switch model.recording {
+        switch recorder.recording {
         case .idle:
-          Button("Record call") { Task { await model.start(mode: .call) } }
+          Button("Record call") { Task { await recorder.start(mode: .call) } }
             .buttonStyle(StenoPrimaryButtonStyle())
             .accessibilityIdentifier("record-call")
-          Button("Record in person") { Task { await model.start(mode: .inPerson) } }
+          Button("Record in person") { Task { await recorder.start(mode: .inPerson) } }
             .buttonStyle(StenoSecondaryButtonStyle())
             .accessibilityIdentifier("record-in-person")
         case .recording:
-          Button("Stop") { Task { await model.stop() } }
+          Button("Stop") { Task { await recorder.stop() } }
             .buttonStyle(StenoPrimaryButtonStyle())
             .accessibilityIdentifier("stop-recording")
         case .starting, .stopping:
@@ -91,7 +95,7 @@ struct MenuBarView: View {
                 .foregroundStyle(Color.stenoForeground)
                 .lineLimit(1)
               Spacer()
-              Text(item.stage.map { $0.rawValue } ?? "queued")
+              Text(item.stage?.label ?? "Queued")
                 .font(.steno(Theme.TextSize.xxs))
                 .foregroundStyle(Color.stenoFaint)
             }
@@ -128,13 +132,11 @@ struct MenuBarView: View {
   }
 
   private var footer: some View {
-    VStack(alignment: .leading, spacing: Theme.Space.sm) {
+    let launchAtLogin: Binding<Bool> = .action(
+      { model.launchAtLogin.isOn }, model.setLaunchAtLogin)
+    return VStack(alignment: .leading, spacing: Theme.Space.sm) {
       HStack {
-        Toggle(
-          "Launch at login",
-          isOn: Binding(
-            get: { model.launchAtLogin == .enabled || model.launchAtLogin == .requiresApproval },
-            set: { enabled in Task { await model.setLaunchAtLogin(enabled) } }))
+        Toggle("Launch at login", isOn: launchAtLogin)
           .toggleStyle(.switch)
           .controlSize(.mini)
           .font(.steno(Theme.TextSize.xs))
@@ -195,16 +197,19 @@ struct LevelBars: View {
           Capsule().fill(Color.stenoSecondary)
           Capsule()
             .fill(Color.stenoLiveBright)
-            .frame(width: proxy.size.width * fraction(level.rms))
+            .frame(width: proxy.size.width * Self.fraction(level.rms))
             .animation(Motion.functional, value: level.rms)
         }
       }
       .frame(height: 4)
     }
+    .accessibilityElement(children: .ignore)
+    .accessibilityLabel("\(label) level")
+    .accessibilityValue("\(Int(Self.fraction(level.rms) * 100)) percent")
   }
 
   /// dBFS from -60 to 0 mapped onto 0...1.
-  private func fraction(_ dbfs: Float) -> CGFloat {
+  static func fraction(_ dbfs: Float) -> CGFloat {
     CGFloat(min(1, max(0, (dbfs + 60) / 60)))
   }
 }

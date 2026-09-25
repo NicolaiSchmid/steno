@@ -4,23 +4,42 @@ import StenoCore
 import StenoSpeech
 import SwiftUI
 
-/// The Settings scene: seven tabs, one view model each.
+/// The Settings scene: seven tabs, one view model each, built once for the
+/// scene's lifetime (a model created in `body` would be replaced on every
+/// evaluation and its state lost).
 struct SettingsView: View {
   let controller: AppController
+  @State private var general: GeneralSettingsViewModel
+  @State private var audio: AudioSettingsViewModel
+  @State private var speech: SpeechSettingsViewModel
+  @State private var llm: LLMSettingsViewModel
+  @State private var obsidian: ObsidianSettingsViewModel
+  @State private var phones: PhonesSettingsViewModel
+
+  init(controller: AppController) {
+    self.controller = controller
+    let environment = controller.environment
+    _general = State(initialValue: GeneralSettingsViewModel(environment: environment))
+    _audio = State(initialValue: AudioSettingsViewModel(environment: environment))
+    _speech = State(initialValue: SpeechSettingsViewModel(environment: environment))
+    _llm = State(initialValue: LLMSettingsViewModel(environment: environment))
+    _obsidian = State(initialValue: ObsidianSettingsViewModel(environment: environment))
+    _phones = State(initialValue: PhonesSettingsViewModel(environment: environment))
+  }
 
   var body: some View {
     TabView {
-      GeneralSettingsView(model: GeneralSettingsViewModel(environment: controller.environment))
+      GeneralSettingsView(model: general)
         .tabItem { Label("General", systemImage: "gearshape") }
-      AudioSettingsView(model: AudioSettingsViewModel(environment: controller.environment))
+      AudioSettingsView(model: audio)
         .tabItem { Label("Audio", systemImage: "mic") }
-      SpeechSettingsView(model: SpeechSettingsViewModel(environment: controller.environment))
+      SpeechSettingsView(model: speech)
         .tabItem { Label("Speech", systemImage: "waveform") }
-      LLMSettingsView(model: LLMSettingsViewModel(environment: controller.environment))
+      LLMSettingsView(model: llm)
         .tabItem { Label("LLM", systemImage: "brain") }
-      ObsidianSettingsView(model: ObsidianSettingsViewModel(environment: controller.environment))
+      ObsidianSettingsView(model: obsidian)
         .tabItem { Label("Obsidian", systemImage: "folder") }
-      PhonesSettingsView(model: PhonesSettingsViewModel(environment: controller.environment))
+      PhonesSettingsView(model: phones)
         .tabItem { Label("Phones", systemImage: "iphone") }
       UpdatesSettingsView(updater: controller.environment.updater)
         .tabItem { Label("Updates", systemImage: "arrow.down.circle") }
@@ -33,16 +52,14 @@ struct SettingsView: View {
 // MARK: - General
 
 struct GeneralSettingsView: View {
-  @State var model: GeneralSettingsViewModel
+  let model: GeneralSettingsViewModel
 
   var body: some View {
     Form {
       Section {
         Toggle(
           "Launch Steno at login",
-          isOn: Binding(
-            get: { model.launchAtLogin },
-            set: { enabled in Task { await model.setLaunchAtLogin(enabled) } }))
+          isOn: .action({ model.launchAtLogin }, model.setLaunchAtLogin))
         if model.loginItem == .requiresApproval {
           HStack {
             Text("Waiting for approval in System Settings > Login Items.")
@@ -53,16 +70,12 @@ struct GeneralSettingsView: View {
         }
         Toggle(
           "Offer to record when another app opens the microphone",
-          isOn: Binding(
-            get: { model.detectionEnabled },
-            set: { enabled in Task { await model.setDetectionEnabled(enabled) } }))
+          isOn: .action({ model.detectionEnabled }, model.setDetectionEnabled))
       }
       Section("Summary") {
         Picker(
           "Default template",
-          selection: Binding(
-            get: { model.defaultTemplateID },
-            set: { id in Task { await model.setDefaultTemplate(id) } })
+          selection: .action({ model.defaultTemplateID }, model.setDefaultTemplate)
         ) {
           ForEach(model.templates) { template in
             Text(template.displayName).tag(template.id)
@@ -84,18 +97,12 @@ struct GeneralSettingsView: View {
 // MARK: - Audio
 
 struct AudioSettingsView: View {
-  @State var model: AudioSettingsViewModel
-  @State private var days = 30
+  let model: AudioSettingsViewModel
 
   var body: some View {
     Form {
       Section("Input") {
-        Picker(
-          "Microphone",
-          selection: Binding(
-            get: { model.inputDeviceUID },
-            set: { uid in Task { await model.setInputDevice(uid) } })
-        ) {
+        Picker("Microphone", selection: .action({ model.inputDeviceUID }, model.setInputDevice)) {
           Text("System default").tag(String?.none)
           ForEach(model.devices) { device in
             Text(device.name).tag(String?.some(device.uid))
@@ -115,9 +122,9 @@ struct AudioSettingsView: View {
         }
         Picker(
           "Keep audio",
-          selection: Binding(
-            get: { model.retentionMode },
-            set: { mode in Task { await model.setRetention(mode: mode, days: days) } })
+          selection: .action(
+            { model.retentionMode },
+            { mode in await model.setRetention(mode: mode, days: model.retentionDays) })
         ) {
           ForEach(AudioSettingsViewModel.RetentionMode.allCases) { mode in
             Text(mode.title).tag(mode)
@@ -125,13 +132,10 @@ struct AudioSettingsView: View {
         }
         if model.retentionMode == .keepDays {
           Stepper(
-            "\(days) days",
-            value: Binding(
-              get: { days },
-              set: { value in
-                days = value
-                Task { await model.setRetention(mode: .keepDays, days: value) }
-              }),
+            "\(model.retentionDays) days",
+            value: .action(
+              { model.retentionDays },
+              { days in await model.setRetention(mode: .keepDays, days: days) }),
             in: 1...3650)
         }
         Text("Speaker sample clips stay until the speaker is named, whatever the retention.")
@@ -141,10 +145,7 @@ struct AudioSettingsView: View {
       if let error = model.error { MessageRow(kind: .error, text: error) }
     }
     .formStyle(.grouped)
-    .task {
-      await model.load()
-      days = model.retentionDays
-    }
+    .task { await model.load() }
   }
 
   private func chooseFolder() {
@@ -164,17 +165,12 @@ struct AudioSettingsView: View {
 // MARK: - Speech
 
 struct SpeechSettingsView: View {
-  @State var model: SpeechSettingsViewModel
+  let model: SpeechSettingsViewModel
 
   var body: some View {
     Form {
       Section("Engine") {
-        Picker(
-          "Speech engine",
-          selection: Binding(
-            get: { model.engineID },
-            set: { id in Task { await model.setEngine(id) } })
-        ) {
+        Picker("Speech engine", selection: .action({ model.engineID }, model.setEngine)) {
           ForEach(model.engines, id: \.self) { engine in
             Text(engine.asset.displayName).tag(engine)
           }
@@ -239,7 +235,7 @@ struct SpeechSettingsView: View {
 // MARK: - LLM
 
 struct LLMSettingsView: View {
-  @State var model: LLMSettingsViewModel
+  @Bindable var model: LLMSettingsViewModel
 
   var body: some View {
     Form {
@@ -286,7 +282,7 @@ struct LLMSettingsView: View {
 // MARK: - Obsidian
 
 struct ObsidianSettingsView: View {
-  @State var model: ObsidianSettingsViewModel
+  @Bindable var model: ObsidianSettingsViewModel
 
   var body: some View {
     Form {
@@ -345,7 +341,7 @@ struct ObsidianSettingsView: View {
 // MARK: - Phones
 
 struct PhonesSettingsView: View {
-  @State var model: PhonesSettingsViewModel
+  let model: PhonesSettingsViewModel
 
   var body: some View {
     Form {
@@ -378,6 +374,7 @@ struct PhonesSettingsView: View {
               }
               Spacer()
               Button("Remove") { Task { await model.revoke(device.id) } }
+                .accessibilityLabel("Remove \(device.name)")
             }
           }
         }
@@ -391,19 +388,17 @@ struct PhonesSettingsView: View {
                   .frame(width: 200, height: 200)
                   .background(Color.white)
                   .padding(Theme.Space.sm)
+                  .accessibilityLabel("Pairing code for the Steno iPhone app")
               }
-              Text("Scan with the Steno iPhone app. Expires \(pairing.expiresAt.formatted(date: .omitted, time: .standard)).")
-                .font(.steno(Theme.TextSize.xs))
-                .foregroundStyle(Color.stenoMutedForeground)
+              Text(
+                "Scan with the Steno iPhone app. Expires \(pairing.expiresAt.formatted(date: .omitted, time: .standard))."
+              )
+              .font(.steno(Theme.TextSize.xs))
+              .foregroundStyle(Color.stenoMutedForeground)
               Button("Cancel pairing") { Task { await model.cancelPairing() } }
             }
-            .task {
-              // Poll for the phone showing up while the code is displayed.
-              while !Task.isCancelled, model.pairingIsOpen {
-                try? await Task.sleep(for: .seconds(2))
-                await model.refreshAfterPairing()
-              }
-            }
+            // The phone's arrival closes the code; polled on the app's clock.
+            .task(id: pairing.expiresAt) { await model.observePairing() }
           } else {
             Button("Show pairing code") { Task { await model.beginPairing() } }
             Text(
@@ -416,14 +411,7 @@ struct PhonesSettingsView: View {
         Section("Listener") {
           HStack {
             Circle()
-              .fill(
-                { () -> Color in
-                  switch model.listener {
-                  case .listening: Color.stenoLiveBright
-                  case .stopped: Color.stenoGhost
-                  case .failed: Color.stenoDestructive
-                  }
-                }())
+              .fill(listenerColor)
               .frame(width: 8, height: 8)
             Text(model.listenerText).font(.steno(Theme.TextSize.xs))
             Spacer()
@@ -433,8 +421,9 @@ struct PhonesSettingsView: View {
                 .foregroundStyle(Color.stenoGhost)
             }
           }
-          ForEach(model.receipts.filter { $0.state.kind == .receiving || $0.state.kind == .verifying }) {
-            receipt in
+          ForEach(
+            model.receipts.filter { $0.state.kind == .receiving || $0.state.kind == .verifying }
+          ) { receipt in
             VStack(alignment: .leading, spacing: 2) {
               Text("Receiving \(receipt.recordingID.uuidString.prefix(8))…")
                 .font(.steno(Theme.TextSize.xxs))
@@ -448,6 +437,16 @@ struct PhonesSettingsView: View {
     }
     .formStyle(.grouped)
     .task { await model.load() }
+    .task { await model.observe() }
+    .task { await model.observeReceipts() }
+  }
+
+  private var listenerColor: Color {
+    switch model.listener {
+    case .listening: Color.stenoLiveBright
+    case .stopped: Color.stenoGhost
+    case .failed: Color.stenoDestructive
+    }
   }
 }
 
@@ -486,9 +485,11 @@ struct UpdatesSettingsView: View {
         Text("Steno \(version)")
           .font(.steno(Theme.TextSize.xs))
           .foregroundStyle(Color.stenoMutedForeground)
-        Text("Updates are signed releases from github.com/NicolaiSchmid/steno, delivered by Sparkle.")
-          .font(.steno(Theme.TextSize.xs))
-          .foregroundStyle(Color.stenoFaint)
+        Text(
+          "Updates are signed releases from github.com/NicolaiSchmid/steno, delivered by Sparkle."
+        )
+        .font(.steno(Theme.TextSize.xs))
+        .foregroundStyle(Color.stenoFaint)
       }
     }
     .formStyle(.grouped)

@@ -5,6 +5,8 @@ import StenoCore
 /// from `observeDeliveries`, the bundled templates and the selected tab.
 /// Summary, Transcript and Tasks are display only; the scratchpad is the
 /// one editable text and saves once after a debounce on the injected clock.
+/// `observe()` runs from the view's `.task`, so SwiftUI ends the store
+/// observations when the selection changes.
 @MainActor
 @Observable
 final class MeetingDetailViewModel: Identifiable {
@@ -23,7 +25,6 @@ final class MeetingDetailViewModel: Identifiable {
   private(set) var deliveries: [Delivery] = []
   private(set) var error: String?
   private(set) var isBusy = false
-  private(set) var scratchpadSaves = 0
   var tab: Tab = .summary
   var showsSpeakerReview = false
   let templates = SummaryTemplate.bundled
@@ -34,9 +35,9 @@ final class MeetingDetailViewModel: Identifiable {
   private let pipeline: () -> ProcessingPipeline
   private let clock: any Clock<Duration>
   private let now: @Sendable () -> Date
-  private var observers: [Task<Void, Never>] = []
   private var scratchpadTask: Task<Void, Never>?
   private var pendingScratchpad: String?
+  private var scratchpadEdits = 0
 
   init(
     meetingID: UUID, store: MeetingStore, settings: SettingsStore,
@@ -49,34 +50,34 @@ final class MeetingDetailViewModel: Identifiable {
     self.pipeline = pipeline
     self.clock = clock
     self.now = now
-    observers.append(
-      Task { [weak self, store] in
-        do {
-          for try await export in store.observeMeeting(id: meetingID) {
-            guard let self else { return }
-            self.export = export
-          }
-        } catch {
-          self?.error = "Meeting could not be loaded: \(error)"
-        }
-      })
-    observers.append(
-      Task { [weak self, store] in
-        do {
-          for try await deliveries in store.observeDeliveries(meetingID: meetingID) {
-            guard let self else { return }
-            self.deliveries = deliveries
-          }
-        } catch {
-          self?.error = "Deliveries could not be loaded: \(error)"
-        }
-      })
   }
 
   convenience init(meetingID: UUID, environment: AppEnvironment) {
     self.init(
       meetingID: meetingID, store: environment.store, settings: environment.settings,
       pipeline: { environment.pipeline }, clock: environment.clock, now: environment.now)
+  }
+
+  /// Follows the export until cancelled (one view `.task`).
+  func observe() async {
+    do {
+      for try await export in store.observeMeeting(id: id) {
+        self.export = export
+      }
+    } catch {
+      self.error = "Meeting could not be loaded: \(error)"
+    }
+  }
+
+  /// Follows the deliveries until cancelled (a second `.task`).
+  func observeDeliveries() async {
+    do {
+      for try await deliveries in store.observeDeliveries(meetingID: id) {
+        self.deliveries = deliveries
+      }
+    } catch {
+      self.error = "Deliveries could not be loaded: \(error)"
+    }
   }
 
   var meeting: Meeting? { export?.meeting }
@@ -103,14 +104,21 @@ final class MeetingDetailViewModel: Identifiable {
 
   // MARK: - Actions
 
-  func setTags(_ tags: [String]) async {
-    await update("Tags") { $0.tags = tags }
+  /// Tags as typed, comma separated: trimmed, lower-cased, deduplicated and
+  /// sorted. "Q4, q4 , Strategie" becomes `["q4", "strategie"]`.
+  static func tags(from text: String) -> [String] {
+    let tags = text.split(separator: ",")
+      .map { $0.trimmingCharacters(in: .whitespaces).lowercased() }
+      .filter { !$0.isEmpty }
+    return Array(Set(tags)).sorted()
   }
 
-  func setTitle(_ title: String) async {
-    let trimmed = title.trimmingCharacters(in: .whitespaces)
-    guard !trimmed.isEmpty else { return }
-    await update("Title") { $0.title = trimmed }
+  func setTags(text: String) async {
+    await setTags(Self.tags(from: text))
+  }
+
+  func setTags(_ tags: [String]) async {
+    await update("Tags") { $0.tags = tags }
   }
 
   /// Stores the template and re-runs summarize plus deliver with it.
@@ -160,21 +168,25 @@ final class MeetingDetailViewModel: Identifiable {
     export?.audio?.retention == .keepForever
   }
 
-  /// Debounced on the injected clock: several edits within a second save
-  /// once, with the last text.
+  /// Debounced on the injected clock with one sleeper: edits within the
+  /// window keep it sleeping, and the last text saves once after a quiet
+  /// debounce interval.
   func saveScratchpad(_ text: String) {
     pendingScratchpad = text
-    scratchpadTask?.cancel()
+    scratchpadEdits += 1
+    guard scratchpadTask == nil else { return }
     let clock = self.clock
     scratchpadTask = Task { [weak self] in
-      do {
-        try await clock.sleep(for: Self.scratchpadDebounce)
-      } catch {
-        return
+      var seen = -1
+      while let edits = self?.scratchpadEdits, edits != seen {
+        seen = edits
+        do {
+          try await clock.sleep(for: Self.scratchpadDebounce)
+        } catch {
+          return
+        }
       }
-      // A superseded edit's task may still wake (a clock that resumes
-      // cancelled sleepers); only the live one saves.
-      guard let self, !Task.isCancelled else { return }
+      guard let self else { return }
       // Clear the handle first: `flushScratchpad` cancels a pending task,
       // and cancelling this one would abort the GRDB write inside it.
       self.scratchpadTask = nil
@@ -191,7 +203,6 @@ final class MeetingDetailViewModel: Identifiable {
     pendingScratchpad = nil
     do {
       try await store.update(meetingID: id, now: now()) { $0.scratchpad = text }
-      scratchpadSaves += 1
     } catch {
       if pendingScratchpad == nil { pendingScratchpad = text }
       self.error = "Scratchpad could not be saved: \(error)"

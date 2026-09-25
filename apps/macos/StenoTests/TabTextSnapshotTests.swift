@@ -37,9 +37,9 @@ final class TabTextSnapshotTests: XCTestCase {
   func testTranscriptNamesSpeakersAndLeavesUnassignedSegmentsUnknown() {
     let export = SampleData.export()
     let rendered = lines(.transcript, export)
-    XCTAssertEqual(rendered.first, "Nicolai 00:00:00 mic", "confirmed speaker by name")
-    XCTAssertTrue(rendered.contains("Jérôme 00:00:02 system"), "suggested speaker by name")
-    XCTAssertTrue(rendered.contains("Unknown 00:00:05 system"), "no speaker: Unknown")
+    XCTAssertEqual(rendered.first, "Nicolai 00:00:00 Mic", "confirmed speaker by name")
+    XCTAssertTrue(rendered.contains("Jérôme 00:00:02 System"), "suggested speaker by name")
+    XCTAssertTrue(rendered.contains("Unknown 00:00:05 System"), "no speaker: Unknown")
     XCTAssertEqual(rendered.count, 6, "three turns, header and text each")
   }
 

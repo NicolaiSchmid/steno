@@ -115,7 +115,7 @@ struct MenuBarLabel: View {
   let bootstrap: AppBootstrap
 
   var body: some View {
-    let recording = bootstrap.controller?.menuBar.isRecording ?? false
+    let recording = bootstrap.controller?.recorder.isRecording ?? false
     Image(systemName: recording ? "record.circle.fill" : "waveform")
       .symbolRenderingMode(recording ? .multicolor : .monochrome)
       .accessibilityLabel(recording ? "Steno, recording" : "Steno")
@@ -164,18 +164,18 @@ struct AppCommands: Commands {
         .disabled(bootstrap.controller == nil)
     }
     CommandMenu("Record") {
-      Button(bootstrap.controller?.menuBar.isRecording == true ? "Stop Recording" : "Record Call")
+      Button(bootstrap.controller?.recorder.isRecording == true ? "Stop Recording" : "Record Call")
       {
         guard let controller = bootstrap.controller else { return }
-        Task { await controller.menuBar.toggleRecording() }
+        Task { await controller.recorder.toggleRecording() }
       }
       .keyboardShortcut("r", modifiers: [.command, .shift])
       .disabled(bootstrap.controller == nil)
       Button("Record In Person") {
         guard let controller = bootstrap.controller else { return }
-        Task { await controller.menuBar.start(mode: .inPerson) }
+        Task { await controller.recorder.start(mode: .inPerson) }
       }
-      .disabled(bootstrap.controller?.menuBar.recording != .idle)
+      .disabled(bootstrap.controller?.recorder.recording != .idle)
     }
     #if DEBUG
       CommandMenu("Debug") {
@@ -185,7 +185,7 @@ struct AppCommands: Commands {
         Button("Run System Audio Probe") {
           Task {
             let granted = await SystemAudioPermission.request()
-            bootstrap.controller?.menuBar.noteProbe(granted: granted)
+            bootstrap.controller?.recorder.noteProbe(granted: granted)
           }
         }
         .disabled(bootstrap.controller == nil)

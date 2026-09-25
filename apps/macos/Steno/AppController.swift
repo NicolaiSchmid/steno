@@ -2,14 +2,16 @@ import Foundation
 import StenoAudio
 import StenoCore
 
-/// The running app's object graph over one `AppEnvironment`: the menu bar
-/// view model, the detection controller, pending speaker reviews, the
-/// retention sweep after processed meetings, the handover listener when
-/// phones are paired, and the first-launch login item registration.
+/// The running app's object graph over one `AppEnvironment`: the recorder,
+/// the detection controller, the menu bar view model, pending speaker
+/// reviews, the retention sweep after processed meetings, the handover
+/// listener when phones are paired, and the first-launch login item
+/// registration.
 @MainActor
 @Observable
 final class AppController {
   let environment: AppEnvironment
+  let recorder: RecordingController
   let menuBar: MenuBarViewModel
   let detection: DetectionController
   /// Meetings the pipeline flagged with unconfirmed speakers.
@@ -28,10 +30,11 @@ final class AppController {
   init(environment: AppEnvironment, defaults: UserDefaults = .standard) {
     self.environment = environment
     self.defaults = defaults
+    self.recorder = RecordingController(environment: environment)
     self.menuBar = MenuBarViewModel(environment: environment)
     self.detection = DetectionController(environment: environment)
-    detection.startRecording = { [weak self] in await self?.menuBar.start(mode: .call) }
-    menuBar.recordingDidChange = { [weak self] recording in
+    detection.startRecording = { [weak self] in await self?.recorder.start(mode: .call) }
+    recorder.recordingDidChange = { [weak self] recording in
       await self?.detection.recordingDidChange(recording)
     }
   }
@@ -49,6 +52,8 @@ final class AppController {
     await registerLoginItemOnFirstLaunch()
     await detection.applySettings()
     await startHandoverIfPaired()
+    observers.append(Task { [menuBar] in await menuBar.observe() })
+    observers.append(Task { [menuBar] in await menuBar.observeProgress() })
     observers.append(
       Task { [weak self, environment] in
         let stream = await environment.events.subscribe()
@@ -112,11 +117,14 @@ final class AppController {
   }
 
   /// Quit: a recording that is still starting is allowed to reach
-  /// `.recording` (or fail) first, then stopped and enqueued like any other.
+  /// `.recording` (or fail) first, then stopped and enqueued like any other;
+  /// then the detector, the handover listener and every observation end.
   func shutdown() async {
-    await menuBar.awaitSettled()
-    if case .recording = menuBar.recording { await menuBar.stop() }
+    await recorder.awaitSettled()
+    if case .recording = recorder.recording { await recorder.stop() }
     await detection.stop()
     if let handover = environment.handover { await handover.stop() }
+    for observer in observers { observer.cancel() }
+    observers = []
   }
 }

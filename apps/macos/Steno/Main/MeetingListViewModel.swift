@@ -53,23 +53,23 @@ final class MeetingListViewModel {
 
   private let store: MeetingStore
   private let clock: any Clock<Duration>
-  private var observer: Task<Void, Never>?
   private var searchTask: Task<Void, Never>?
   static let searchDebounce: Duration = .milliseconds(200)
 
   init(store: MeetingStore, clock: any Clock<Duration>) {
     self.store = store
     self.clock = clock
-    observer = Task { [weak self, store] in
-      do {
-        for try await meetings in store.observeMeetings() {
-          guard let self else { return }
-          self.all = meetings.sorted { $0.startedAt > $1.startedAt }
-          self.apply()
-        }
-      } catch {
-        self?.error = "Meetings could not be loaded: \(error)"
+  }
+
+  /// Follows `observeMeetings()` until cancelled (the window's `.task`).
+  func observe() async {
+    do {
+      for try await meetings in store.observeMeetings() {
+        all = meetings.sorted { $0.startedAt > $1.startedAt }
+        apply()
       }
+    } catch {
+      self.error = "Meetings could not be loaded: \(error)"
     }
   }
 

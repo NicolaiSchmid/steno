@@ -17,8 +17,6 @@ options:
   createIntermediateGroups: true
   generateEmptyDirectories: true
   groupSortPosition: top
-  # Every Swift file compiles in Swift 6 language mode; xcconfigs repeat it
-  # so a project regenerated without this option still does.
   defaultConfig: Debug
 
 configs:
@@ -138,9 +136,6 @@ targets:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: uno.schmid.steno.mac.tests
         GENERATE_INFOPLIST_FILE: YES
-        # The tests find `Steno.app` beside their own bundle to read its
-        # Info.plist.
-        STENO_APP_PRODUCT_NAME: Steno
 
   StenoUITests:
     type: bundle.ui-testing

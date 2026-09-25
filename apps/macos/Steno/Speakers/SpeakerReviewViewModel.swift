@@ -5,7 +5,8 @@ import StenoCore
 /// or `.suggested`, with its clip, cosine candidates from `SpeakerMemory`
 /// and the calendar participants as name suggestions. Naming and assigning
 /// go through `MeetingStore.confirm(speakerID:person:memory:)` (the one
-/// operation that enrols and deletes the clip); `finish()` re-exports once.
+/// operation that enrols and deletes the clip); `finish()` re-exports once,
+/// and only when something changed.
 @MainActor
 @Observable
 final class SpeakerReviewViewModel {
@@ -22,15 +23,20 @@ final class SpeakerReviewViewModel {
   private(set) var knownPeople: [Person] = []
   private(set) var attendees: [Participant]
   private(set) var error: String?
-  private(set) var redeliveries = 0
-  private(set) var finished = false
   private(set) var skipped: Set<UUID> = []
+  /// A confirm or a merge happened; Done re-exports only then.
+  private(set) var didChange = false
+  /// The sheet's draft state per card: the typed name and the chosen merge
+  /// target (nil until the user picks one, so Merge never guesses).
+  var draftNames: [UUID: String] = [:]
+  var mergeTargets: [UUID: UUID] = [:]
   let player = ClipPlayer()
 
   private let store: MeetingStore
   private let memory: any SpeakerMemory
   private let pipeline: () -> ProcessingPipeline
   private let now: @Sendable () -> Date
+  private var finished = false
 
   init(
     export: MeetingExport, store: MeetingStore, memory: any SpeakerMemory,
@@ -90,6 +96,11 @@ final class SpeakerReviewViewModel {
     return speaker.clusterLabel
   }
 
+  /// The other speakers of this meeting a card can be merged into.
+  func mergeCandidates(for card: Card) -> [Speaker] {
+    allSpeakers.filter { $0.id != card.id }
+  }
+
   // MARK: - Playback
 
   func play(_ id: UUID) {
@@ -124,6 +135,11 @@ final class SpeakerReviewViewModel {
     await confirm(id, person: person)
   }
 
+  /// The card's typed draft name, confirmed.
+  func nameFromDraft(_ id: UUID) async {
+    await name(id, draftNames[id] ?? "")
+  }
+
   /// A calendar attendee becomes (or reuses) a person and is confirmed.
   func assign(_ id: UUID, attendee: Participant) async {
     let person =
@@ -154,6 +170,7 @@ final class SpeakerReviewViewModel {
     guard cards.contains(where: { $0.id == id }) else { return }
     do {
       try await store.confirm(speakerID: id, person: person, memory: memory)
+      didChange = true
       await reload()
     } catch {
       self.error = "Speaker could not be confirmed: \(error)"
@@ -171,10 +188,17 @@ final class SpeakerReviewViewModel {
     guard source != target else { return }
     do {
       try await store.mergeSpeakers(source, into: target, meetingID: meetingID)
+      didChange = true
       await reload()
     } catch {
       self.error = "Speakers could not be merged: \(error)"
     }
+  }
+
+  /// Merges the card into the target the user picked; nothing without one.
+  func mergeIntoChosenTarget(_ source: UUID) async {
+    guard let target = mergeTargets[source] else { return }
+    await mergeSpeakers(source, into: target)
   }
 
   private func reload() async {
@@ -186,6 +210,10 @@ final class SpeakerReviewViewModel {
         .filter { !$0.assignment.isConfirmed }
         .map { Card(speaker: $0, candidates: existing[$0.id] ?? []) }
       skipped = skipped.intersection(cards.map(\.id))
+      let ids = Set(allSpeakers.map(\.id))
+      mergeTargets = mergeTargets.filter { entry in
+        ids.contains(entry.key) && ids.contains(entry.value)
+      }
     } catch {
       self.error = "Speakers could not be reloaded: \(error)"
     }
@@ -193,15 +221,15 @@ final class SpeakerReviewViewModel {
 
   // MARK: - Finish
 
-  /// Re-exports once so the vault picks up the names. Enrolment already
-  /// happened in `confirm`.
+  /// Re-exports once so the vault picks up the names, and only when a
+  /// confirm or a merge happened: Done on an untouched sheet leaves the
+  /// vault alone. Enrolment already happened in `confirm`.
   func finish() async {
-    guard !finished else { return }
-    finished = true
     player.stop()
+    guard didChange, !finished else { return }
+    finished = true
     do {
       try await pipeline().redeliver(meetingID: meetingID)
-      redeliveries += 1
     } catch {
       self.error = "Re-export failed: \(error)"
     }

@@ -146,6 +146,17 @@ struct PendingText: View {
   }
 }
 
+extension Binding where Value: Sendable {
+  /// A binding whose reads come from the model and whose writes run an
+  /// async main-actor view-model action, for controls that mirror a
+  /// `private(set)` property and save on change.
+  static func action(
+    _ get: @escaping () -> Value, _ set: @escaping @Sendable @MainActor (Value) async -> Void
+  ) -> Binding<Value> {
+    Binding(get: get, set: { value in Task { @MainActor in await set(value) } })
+  }
+}
+
 extension View {
   /// The 720 pt reading column the Summary, Transcript and Tasks tabs share.
   func readingColumn() -> some View {
