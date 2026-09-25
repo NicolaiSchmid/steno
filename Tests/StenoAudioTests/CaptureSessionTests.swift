@@ -59,13 +59,9 @@ import Testing
     #expect(abs(first.mic.rms - -9.03) < 0.2)
     #expect(abs((first.system?.rms ?? 0) - -9.03) < 0.2)
 
-    // Wait for the backend to finish its three seconds so the duration check
-    // is exact, without a wall-clock sleep.
-    var spins = 0
-    while backend.framesDelivered < 144_000, spins < 20_000 {
-      await Task.yield()
-      spins += 1
-    }
+    // The backend finishing its three seconds makes the duration exact; no
+    // wall-clock sleep.
+    await backend.waitUntilFinished()
     let result = try await session.stop()
     #expect(await session.state == .idle)
 
@@ -148,11 +144,7 @@ import Testing
       configuration: configuration(.inPerson, in: directory), backend: backend)
     let meetingID = UUID()
     try await session.start(meetingID: meetingID)
-    var spins = 0
-    while backend.framesDelivered < 48_000, spins < 20_000 {
-      await Task.yield()
-      spins += 1
-    }
+    await backend.waitUntilFinished()
     let result = try await session.stop()
     #expect(result.asset.lanes == [.mixed])
     #expect(result.asset.sidecars16k.keys.map(\.rawValue) == ["mixed"])
@@ -174,11 +166,7 @@ import Testing
       echoCanceller: try PassthroughEchoCanceller(sampleRate: 48_000, frameSize: 480))
     let meetingID = UUID()
     try await session.start(meetingID: meetingID)
-    var spins = 0
-    while backend.framesDelivered < 24_000, spins < 20_000 {
-      await Task.yield()
-      spins += 1
-    }
+    await backend.waitUntilFinished()
     let result = try await session.stop()
     let raw = RecordingLayout(asset: result.asset).directory.appendingPathComponent("mic.raw.caf")
     #expect(FileManager.default.fileExists(atPath: raw.path))

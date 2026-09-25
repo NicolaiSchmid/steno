@@ -27,6 +27,29 @@ public enum EchoMetrics {
     return decibels(before) - decibels(after)
   }
 
+  /// The linear magnitude of one frequency in `samples` (Goertzel), scaled so
+  /// a full-scale sine at `frequency` reads 1. Tells how much of an
+  /// independent tone survived cancellation while an echo at another
+  /// frequency was removed.
+  public static func toneLevel(_ samples: ArraySlice<Float>, frequency: Double, sampleRate: Double)
+    -> Float
+  {
+    let count = samples.count
+    guard count > 0 else { return 0 }
+    let omega = 2 * Double.pi * frequency / sampleRate
+    let coefficient = 2 * cos(omega)
+    var previous = 0.0
+    var beforePrevious = 0.0
+    for sample in samples {
+      let current = Double(sample) + coefficient * previous - beforePrevious
+      beforePrevious = previous
+      previous = current
+    }
+    let real = previous - beforePrevious * cos(omega)
+    let imaginary = beforePrevious * sin(omega)
+    return Float((real * real + imaginary * imaginary).squareRoot() * 2 / Double(count))
+  }
+
   /// Direct-form convolution of `signal` with `impulseResponse`, truncated to
   /// `signal.count`, optionally delayed by `delay` samples (zeros first).
   /// Zero taps are skipped, so a sparse room costs one multiply per

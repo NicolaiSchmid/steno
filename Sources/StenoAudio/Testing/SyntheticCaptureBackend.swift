@@ -50,6 +50,7 @@ public final class SyntheticCaptureBackend: CaptureBackend, @unchecked Sendable 
   private let stopRequested = Atomic<Bool>(false)
   private let finished = DispatchSemaphore(value: 0)
   private let framesDeliveredCount = Atomic<Int>(0)
+  private let completion = Completion()
 
   public init(
     signals: [AudioLane: SyntheticLane], seconds: TimeInterval, callbackFrames: Int = 512,
@@ -78,6 +79,13 @@ public final class SyntheticCaptureBackend: CaptureBackend, @unchecked Sendable 
   /// Frames delivered to the sink so far (including refused callbacks).
   public var framesDelivered: Int { framesDeliveredCount.load(ordering: .relaxed) }
 
+  /// Suspends until the producer thread has delivered `seconds` of audio,
+  /// reported device loss or been stopped. Tests wait on this instead of
+  /// wall time.
+  public func waitUntilFinished() async {
+    await completion.wait()
+  }
+
   public func start(lanes: [AudioLane], inputDeviceUID: String?, sink: LaneFrameSink) throws {
     lock.lock()
     defer { lock.unlock() }
@@ -85,6 +93,7 @@ public final class SyntheticCaptureBackend: CaptureBackend, @unchecked Sendable 
       throw CaptureError.invalidState("synthetic backend already started")
     }
     stopRequested.store(false, ordering: .releasing)
+    completion.reset()
     let generator = Generator(
       lanes: lanes, signals: signals, sampleRate: sampleRate, callbackFrames: callbackFrames)
     let totalFrames = Int(seconds * sampleRate)
@@ -124,6 +133,7 @@ public final class SyntheticCaptureBackend: CaptureBackend, @unchecked Sendable 
         delivered += frames
         framesDeliveredCount.store(delivered, ordering: .relaxed)
       }
+      completion.finish()
       finished.signal()
     }
     thread.name = "uno.schmid.steno.audio.synthetic"
@@ -140,6 +150,41 @@ public final class SyntheticCaptureBackend: CaptureBackend, @unchecked Sendable 
     guard thread != nil else { return }
     stopRequested.store(true, ordering: .releasing)
     finished.wait()
+  }
+
+  /// One-shot completion any number of tasks can await.
+  private final class Completion: @unchecked Sendable {
+    private let lock = NSLock()
+    private var isFinished = false
+    private var waiters: [CheckedContinuation<Void, Never>] = []
+
+    func reset() {
+      lock.lock()
+      isFinished = false
+      lock.unlock()
+    }
+
+    func finish() {
+      lock.lock()
+      isFinished = true
+      let pending = waiters
+      waiters = []
+      lock.unlock()
+      for waiter in pending { waiter.resume() }
+    }
+
+    func wait() async {
+      await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+        lock.lock()
+        if isFinished {
+          lock.unlock()
+          continuation.resume()
+          return
+        }
+        waiters.append(continuation)
+        lock.unlock()
+      }
+    }
   }
 
   /// Per-lane phase accumulators and preallocated output buffers.
