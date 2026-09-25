@@ -68,14 +68,31 @@ jobs:
           version="$(swift --version 2>&1 | head -n 1 | tr -c 'A-Za-z0-9.\n' '-')"
           echo "version=$version" >> "$GITHUB_OUTPUT"
 
+      # SwiftPM writes absolute paths into `.build/workspace-state.json`
+      # (binary artifacts such as FluidAudio's NemoTextProcessing.xcframework),
+      # so a `.build` saved by one self-hosted runner does not build on
+      # another: the two runners on Forge share a machine but not a workspace
+      # path, and a run that restored the other runner's cache failed with
+      # "There is no XCFramework found at .../actions-runner-macos-steno-2/...".
+      # Hosted runners get a fresh workspace at the same path every time, so
+      # they share one key.
+      - name: Cache scope
+        id: cache-scope
+        run: |
+          if [ "$RUNNER_ENVIRONMENT" = "self-hosted" ]; then
+            echo "scope=$RUNNER_NAME" >> "$GITHUB_OUTPUT"
+          else
+            echo "scope=hosted" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Cache .build
         uses: actions/cache@v4
         with:
           path: .build
-          key: swift-build-${{ runner.os }}-${{ steps.swift.outputs.version }}-${{ hashFiles('Package.resolved') }}-${{ hashFiles('Package.swift', 'Sources/**', 'Tests/**') }}
+          key: swift-build-${{ runner.os }}-${{ steps.cache-scope.outputs.scope }}-${{ steps.swift.outputs.version }}-${{ hashFiles('Package.resolved') }}-${{ hashFiles('Package.swift', 'Sources/**', 'Tests/**') }}
           restore-keys: |
-            swift-build-${{ runner.os }}-${{ steps.swift.outputs.version }}-${{ hashFiles('Package.resolved') }}-
-            swift-build-${{ runner.os }}-${{ steps.swift.outputs.version }}-
+            swift-build-${{ runner.os }}-${{ steps.cache-scope.outputs.scope }}-${{ steps.swift.outputs.version }}-${{ hashFiles('Package.resolved') }}-
+            swift-build-${{ runner.os }}-${{ steps.cache-scope.outputs.scope }}-${{ steps.swift.outputs.version }}-
 
       - name: Lint formatting
         run: swift format lint --strict --recursive Sources Tests Package.swift
