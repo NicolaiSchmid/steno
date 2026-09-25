@@ -122,7 +122,8 @@ struct Process: AsyncParsableCommand {
     let pipeline = ProcessingPipeline(
       dependencies: try Wiring.dependencies(
         store: opened.store, settings: opened.settings, engine: speech.engine,
-        modelsDirectory: settings.modelsDirectory))
+        modelsDirectory: settings.modelsDirectory,
+        llm: try await Wiring.llmComponents(settings: settings)))
     try await pipeline.enqueue(meeting, asset: asset)
     await pipeline.waitUntilIdle()
 

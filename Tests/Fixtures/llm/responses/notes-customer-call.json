@@ -1,0 +1,14 @@
+{
+  "chunkIndex": 0,
+  "topics": [
+    { "topic": "Heutige Disposition", "points": ["Speaker 1 plant heute mit Excel, jeder Disponent hat seine eigene Datei.", "Die Fahrer bekommen die Tour am Vorabend, Änderungen kommen per Telefon."] },
+    { "topic": "Fuhrpark", "points": ["Speaker 1 nennt etwa achtzig Fahrzeuge an drei Standorten."] }
+  ],
+  "decisions": ["Ein Pilot mit dem Depot in Hannover ist denkbar."],
+  "taskCandidates": [
+    { "text": "Zusammenfassung und Pilotvorschlag nach dem Call schicken.", "assignee": "Nicolai", "priority": "normal", "dueDate": null }
+  ],
+  "speakerCues": [
+    { "speakerLabel": "Speaker 2", "name": "Tom Berger", "confidence": 0.5, "evidence": "Speaker 1: \"ich müsste tom noch dazu holen\"" }
+  ]
+}

@@ -1,0 +1,345 @@
+{
+  "decisions" : [
+
+  ],
+  "meeting" : {
+    "calendarEventID" : "standup-2026-09-24",
+    "createdAt" : "2026-09-24T10:00:00.000Z",
+    "duration" : 140,
+    "id" : "00000000-0000-0000-0000-000000000064",
+    "language" : "de",
+    "scratchpad" : "",
+    "source" : "macInPerson",
+    "startedAt" : "2026-09-24T09:00:00.000Z",
+    "state" : "ready",
+    "tags" : [
+
+    ],
+    "templateID" : "daily-standup",
+    "title" : "Daily Standup",
+    "updatedAt" : "2026-09-24T10:05:00.000Z"
+  },
+  "participants" : [
+    {
+      "displayName" : "Mara",
+      "id" : "00000000-0000-0000-0000-000000000082",
+      "meetingID" : "00000000-0000-0000-0000-000000000064",
+      "personID" : "00000000-0000-0000-0000-00000000000C",
+      "role" : "them"
+    },
+    {
+      "displayName" : "Jérôme",
+      "id" : "00000000-0000-0000-0000-000000000083",
+      "meetingID" : "00000000-0000-0000-0000-000000000064",
+      "personID" : "00000000-0000-0000-0000-00000000000B",
+      "role" : "them"
+    },
+    {
+      "displayName" : "Nicolai",
+      "email" : "nicolai@example.com",
+      "id" : "00000000-0000-0000-0000-000000000084",
+      "meetingID" : "00000000-0000-0000-0000-000000000064",
+      "personID" : "00000000-0000-0000-0000-00000000000A",
+      "role" : "me"
+    }
+  ],
+  "persons" : [
+    {
+      "createdAt" : "2026-09-24T10:00:00.000Z",
+      "displayName" : "Jérôme",
+      "id" : "00000000-0000-0000-0000-00000000000B",
+      "sampleCount" : 0
+    },
+    {
+      "createdAt" : "2026-09-24T10:00:00.000Z",
+      "displayName" : "Nicolai",
+      "email" : "nicolai@example.com",
+      "id" : "00000000-0000-0000-0000-00000000000A",
+      "sampleCount" : 0
+    },
+    {
+      "createdAt" : "2026-09-24T10:00:00.000Z",
+      "displayName" : "Mara",
+      "id" : "00000000-0000-0000-0000-00000000000C",
+      "sampleCount" : 0
+    }
+  ],
+  "schemaVersion" : 1,
+  "segments" : [
+    {
+      "end" : 4.5,
+      "id" : "3D6A01E9-3CA6-44AF-BBFA-029BA65B055C",
+      "lane" : "mixed",
+      "meetingID" : "00000000-0000-0000-0000-000000000064",
+      "rawText" : "okay lass uns anfangen. nicolai, willst du starten?",
+      "speakerID" : "00000000-0000-0000-0000-00000000006E",
+      "start" : 0,
+      "text" : "okay lass uns anfangen. nicolai, willst du starten?"
+    },
+    {
+      "end" : 13.5,
+      "id" : "3D6A00E9-3CA6-42FC-93C1-6751DA954DC0",
+      "lane" : "mixed",
+      "meetingID" : "00000000-0000-0000-0000-000000000064",
+      "rawText" : "klar. gestern habe ich den pull request für das onboarding gemerged und das deployment auf staging gepusht.",
+      "speakerID" : "00000000-0000-0000-0000-00000000006F",
+      "start" : 4.5,
+      "text" : "klar. gestern habe ich den pull request für das onboarding gemerged und das deployment auf staging gepusht."
+    },
+    {
+      "end" : 25,
+      "id" : "3D6A03E9-3CA6-4815-9E83-DAE102CE81C1",
+      "lane" : "mixed",
+      "meetingID" : "00000000-0000-0000-0000-000000000064",
+      "rawText" : "heute schaue ich mir die flaky tests in der ci pipeline an, die laufen seit dem git hub upgrade nicht mehr stabil.",
+      "speakerID" : "00000000-0000-0000-0000-00000000006F",
+      "start" : 13.5,
+      "text" : "heute schaue ich mir die flaky tests in der ci pipeline an, die laufen seit dem git hub upgrade nicht mehr stabil."
+    },
+    {
+      "end" : 27.5,
+      "id" : "3D6A02E9-3CA6-4662-871F-564705ACFE72",
+      "lane" : "mixed",
+      "meetingID" : "00000000-0000-0000-0000-000000000064",
+      "rawText" : "hast du einen blocker?",
+      "speakerID" : "00000000-0000-0000-0000-00000000006E",
+      "start" : 25,
+      "text" : "hast du einen blocker?"
+    },
+    {
+      "end" : 34.5,
+      "id" : "3D69FDE9-3CA6-4DE3-8FAB-42323C3EDCA2",
+      "lane" : "mixed",
+      "meetingID" : "00000000-0000-0000-0000-000000000064",
+      "rawText" : "nein, aber ich brauche von jerome nochmal die zugangsdaten für das test environment.",
+      "speakerID" : "00000000-0000-0000-0000-00000000006F",
+      "start" : 27.5,
+      "text" : "nein, aber ich brauche von jerome nochmal die zugangsdaten für das test environment."
+    },
+    {
+      "end" : 44.5,
+      "id" : "3D69FCE9-3CA6-4C30-A537-3E006DCD6FBC",
+      "lane" : "mixed",
+      "meetingID" : "00000000-0000-0000-0000-000000000064",
+      "rawText" : "kann ich dir nach dem standup schicken. ich habe gestern das kuber netes cluster auf die neue version gezogen.",
+      "speakerID" : "00000000-0000-0000-0000-000000000070",
+      "start" : 34.5,
+      "text" : "kann ich dir nach dem standup schicken. ich habe gestern das kuber netes cluster auf die neue version gezogen."
+    },
+    {
+      "end" : 53,
+      "id" : "3D69FFE9-3CA6-4149-9D3E-081B9463534A",
+      "lane" : "mixed",
+      "meetingID" : "00000000-0000-0000-0000-000000000064",
+      "rawText" : "heute mache ich die dokumentation für die api endpoints fertig und reviewe dein pull request, nicolai.",
+      "speakerID" : "00000000-0000-0000-0000-000000000070",
+      "start" : 44.5,
+      "text" : "heute mache ich die dokumentation für die api endpoints fertig und reviewe dein pull request, nicolai."
+    },
+    {
+      "end" : 57,
+      "id" : "3D69FEE9-3CA6-4F96-BA43-316706E6FA64",
+      "lane" : "mixed",
+      "meetingID" : "00000000-0000-0000-0000-000000000064",
+      "rawText" : "super. gibt es was von der kundenseite?",
+      "speakerID" : "00000000-0000-0000-0000-00000000006E",
+      "start" : 53,
+      "text" : "super. gibt es was von der kundenseite?"
+    },
+    {
+      "end" : 64.5,
+      "id" : "3D6A09E9-3CA6-4247-A624-F326EFF1950F",
+      "lane" : "mixed",
+      "meetingID" : "00000000-0000-0000-0000-000000000064",
+      "rawText" : "die firma müller hat gefragt ob wir den export nach obsidian bis freitag schaffen.",
+      "speakerID" : "00000000-0000-0000-0000-000000000070",
+      "start" : 57,
+      "text" : "die firma müller hat gefragt ob wir den export nach obsidian bis freitag schaffen."
+    },
+    {
+      "end" : 71,
+      "id" : "3D6A08E9-3CA6-4094-BBB0-EEF5D092F3D3",
+      "lane" : "mixed",
+      "meetingID" : "00000000-0000-0000-0000-000000000064",
+      "rawText" : "das ist high priority, ich würde sagen wir committen uns auf freitag.",
+      "speakerID" : "00000000-0000-0000-0000-00000000006E",
+      "start" : 64.5,
+      "text" : "das ist high priority, ich würde sagen wir committen uns auf freitag."
+    },
+    {
+      "end" : 79,
+      "id" : "01C25852-0F26-40A4-90E0-362B2879BCBC",
+      "lane" : "mixed",
+      "meetingID" : "00000000-0000-0000-0000-000000000064",
+      "rawText" : "okay, dann nehme ich das mit rein, das ist ein kleiner change im markdown renderer.",
+      "speakerID" : "00000000-0000-0000-0000-00000000006F",
+      "start" : 71,
+      "text" : "okay, dann nehme ich das mit rein, das ist ein kleiner change im markdown renderer."
+    },
+    {
+      "end" : 86.5,
+      "id" : "01C25952-0F26-4257-A542-5F1586C1199B",
+      "lane" : "mixed",
+      "meetingID" : "00000000-0000-0000-0000-000000000064",
+      "rawText" : "ich selber habe gestern die road map für q4 mit dem product owner durchgesprochen.",
+      "speakerID" : "00000000-0000-0000-0000-00000000006E",
+      "start" : 79,
+      "text" : "ich selber habe gestern die road map für q4 mit dem product owner durchgesprochen."
+    },
+    {
+      "end" : 93.5,
+      "id" : "01C25A52-0F26-440A-9935-377C49FD879F",
+      "lane" : "mixed",
+      "meetingID" : "00000000-0000-0000-0000-000000000064",
+      "rawText" : "heute bereite ich das sprint review vor und update die tickets in linear.",
+      "speakerID" : "00000000-0000-0000-0000-00000000006E",
+      "start" : 86.5,
+      "text" : "heute bereite ich das sprint review vor und update die tickets in linear."
+    },
+    {
+      "end" : 101.5,
+      "id" : "01C25B52-0F26-45BD-B2D5-24FC3356DB93",
+      "lane" : "mixed",
+      "meetingID" : "00000000-0000-0000-0000-000000000064",
+      "rawText" : "ein blocker bei mir: der mac book pro von der it kommt erst nächste woche.",
+      "speakerID" : "00000000-0000-0000-0000-000000000070",
+      "start" : 93.5,
+      "text" : "ein blocker bei mir: der mac book pro von der it kommt erst nächste woche."
+    },
+    {
+      "end" : 105.5,
+      "id" : "01C25452-0F26-49D8-93CF-881C9949621E",
+      "lane" : "mixed",
+      "meetingID" : "00000000-0000-0000-0000-000000000064",
+      "rawText" : "okay, ich frage nochmal nach. noch was?",
+      "speakerID" : "00000000-0000-0000-0000-00000000006E",
+      "start" : 101.5,
+      "text" : "okay, ich frage nochmal nach. noch was?"
+    },
+    {
+      "end" : 110.5,
+      "id" : "01C25552-0F26-4B8B-BE43-8C4F461CAFB0",
+      "lane" : "mixed",
+      "meetingID" : "00000000-0000-0000-0000-000000000064",
+      "rawText" : "eine frage: sollen wir die retro auf donnerstag verschieben?",
+      "speakerID" : "00000000-0000-0000-0000-00000000006F",
+      "start" : 105.5,
+      "text" : "eine frage: sollen wir die retro auf donnerstag verschieben?"
+    },
+    {
+      "end" : 115,
+      "id" : "01C25652-0F26-4D3E-A6A0-129C2F260A28",
+      "lane" : "mixed",
+      "meetingID" : "00000000-0000-0000-0000-000000000064",
+      "rawText" : "ja lass uns das machen, donnerstag vierzehn uhr.",
+      "speakerID" : "00000000-0000-0000-0000-00000000006E",
+      "start" : 110.5,
+      "text" : "ja lass uns das machen, donnerstag vierzehn uhr."
+    },
+    {
+      "end" : 117,
+      "id" : "01C25752-0F26-4EF1-A0CD-6495E92F23ED",
+      "lane" : "mixed",
+      "meetingID" : "00000000-0000-0000-0000-000000000064",
+      "rawText" : "passt für mich.",
+      "speakerID" : "00000000-0000-0000-0000-000000000070",
+      "start" : 115,
+      "text" : "passt für mich."
+    },
+    {
+      "end" : 118,
+      "id" : "01C25052-0F26-430C-A8F0-AE878F3F7B1D",
+      "lane" : "mixed",
+      "meetingID" : "00000000-0000-0000-0000-000000000064",
+      "rawText" : "passt.",
+      "speakerID" : "00000000-0000-0000-0000-00000000006F",
+      "start" : 117,
+      "text" : "passt."
+    },
+    {
+      "end" : 127,
+      "id" : "01C25152-0F26-44BF-BB17-6E888C12E9C8",
+      "lane" : "mixed",
+      "meetingID" : "00000000-0000-0000-0000-000000000064",
+      "rawText" : "dann noch eine announcement: ab nächster woche haben wir eine neue kollegin im team, sie heißt lena.",
+      "speakerID" : "00000000-0000-0000-0000-00000000006E",
+      "start" : 118,
+      "text" : "dann noch eine announcement: ab nächster woche haben wir eine neue kollegin im team, sie heißt lena."
+    },
+    {
+      "end" : 131,
+      "id" : "01CCCA52-0F2F-46DF-84D7-3B8772704AF5",
+      "lane" : "mixed",
+      "meetingID" : "00000000-0000-0000-0000-000000000064",
+      "rawText" : "cool. soll ich ein onboarding dokument vorbereiten?",
+      "speakerID" : "00000000-0000-0000-0000-000000000070",
+      "start" : 127,
+      "text" : "cool. soll ich ein onboarding dokument vorbereiten?"
+    },
+    {
+      "end" : 134.5,
+      "id" : "01CCC952-0F2F-452C-9CDE-2E9C00EE3A0A",
+      "lane" : "mixed",
+      "meetingID" : "00000000-0000-0000-0000-000000000064",
+      "rawText" : "ja bitte, bis mittwoch wäre gut.",
+      "speakerID" : "00000000-0000-0000-0000-00000000006E",
+      "start" : 131,
+      "text" : "ja bitte, bis mittwoch wäre gut."
+    },
+    {
+      "end" : 136,
+      "id" : "01CCCC52-0F2F-4A45-BD72-EF1459D401F9",
+      "lane" : "mixed",
+      "meetingID" : "00000000-0000-0000-0000-000000000064",
+      "rawText" : "mache ich.",
+      "speakerID" : "00000000-0000-0000-0000-000000000070",
+      "start" : 134.5,
+      "text" : "mache ich."
+    },
+    {
+      "end" : 139.5,
+      "id" : "01CCCB52-0F2F-4892-BA2A-424C7AC74C17",
+      "lane" : "mixed",
+      "meetingID" : "00000000-0000-0000-0000-000000000064",
+      "rawText" : "danke euch, das wars für heute.",
+      "speakerID" : "00000000-0000-0000-0000-00000000006E",
+      "start" : 136,
+      "text" : "danke euch, das wars für heute."
+    }
+  ],
+  "speakers" : [
+    {
+      "assignment" : {
+        "suggested" : {
+          "personID" : "00000000-0000-0000-0000-00000000000C",
+          "similarity" : 0.7
+        }
+      },
+      "clusterConfidence" : 0.8,
+      "clusterLabel" : "Speaker 1",
+      "id" : "00000000-0000-0000-0000-00000000006E",
+      "meetingID" : "00000000-0000-0000-0000-000000000064"
+    },
+    {
+      "assignment" : "unknown",
+      "clusterConfidence" : 0.85,
+      "clusterLabel" : "Speaker 2",
+      "id" : "00000000-0000-0000-0000-00000000006F",
+      "meetingID" : "00000000-0000-0000-0000-000000000064"
+    },
+    {
+      "assignment" : {
+        "confirmed" : {
+          "personID" : "00000000-0000-0000-0000-00000000000B"
+        }
+      },
+      "clusterConfidence" : 0.9,
+      "clusterLabel" : "Speaker 3",
+      "id" : "00000000-0000-0000-0000-000000000070",
+      "meetingID" : "00000000-0000-0000-0000-000000000064"
+    }
+  ],
+  "tasks" : [
+
+  ]
+}

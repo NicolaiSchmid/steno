@@ -59,6 +59,22 @@ import Testing
     #expect(clock.pendingSleepers == 0)
   }
 
+  /// A task that is already cancelled when it reaches `sleep` must throw
+  /// instead of registering a sleeper that nothing ever wakes.
+  @Test func sleepingInAnAlreadyCancelledTaskThrowsWithoutRegistering() async throws {
+    let clock = ManualClock()
+    let gate = ManualClock()
+    let sleeper = Task {
+      // Park on a second clock until the test has cancelled this task.
+      try? await gate.sleep(for: .seconds(1))
+      try await clock.sleep(for: .seconds(1))
+    }
+    #expect(await gate.waitForSleepers(1))
+    sleeper.cancel()
+    await #expect(throws: CancellationError.self) { try await sleeper.value }
+    #expect(clock.pendingSleepers == 0)
+  }
+
   @Test func pastDeadlinesReturnImmediately() async throws {
     let clock = ManualClock()
     try await clock.sleep(until: clock.now)

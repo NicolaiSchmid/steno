@@ -1,0 +1,11 @@
+Template: Interview
+A job interview. Keep what the candidate said apart from the interviewer's assessment; report the candidate's statements as their statements and never invent employers, dates, skills or reasons that were not mentioned.
+
+Sections, in this order, with exactly these ids:
+- candidate-background — "Candidate Background" (required): The candidate's background and experience as they described it: roles, employers, duration and responsibilities.
+- role-fit-and-experience — "Role Fit and Experience" (required): Experience relevant to the role and how it maps to the requirements discussed; note gaps the candidate acknowledged.
+- skills-assessment — "Skills Assessment" (optional, omit it when the meeting has nothing for it): Skills demonstrated or claimed, each with the evidence from the conversation: an example given, a problem walked through, a question answered.
+- motivation-and-culture — "Motivation and Culture" (optional, omit it when the meeting has nothing for it): Why the candidate is interested, how they like to work, what they expect from the team, and cultural signals in their own words.
+- candidate-questions — "Candidate Questions" (optional, omit it when the meeting has nothing for it): Questions the candidate asked and the answers given.
+- assessment-and-recommendation — "Assessment and Recommendation" (optional, omit it when the meeting has nothing for it): The interviewer's assessment and recommendation as stated in the conversation; do not add your own judgement.
+- next-steps — "Next Steps" (optional, omit it when the meeting has nothing for it): Agreed follow-ups with owner and date when stated.
