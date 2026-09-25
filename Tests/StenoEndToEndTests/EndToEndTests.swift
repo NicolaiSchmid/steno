@@ -1,13 +1,17 @@
 import Foundation
+import StenoAdapters
 import StenoCore
 import StenoLLM
 import Testing
 
-/// The one real-pipeline test across modules. Core creates it with fakes
+/// The one real-pipeline test across modules. Core created it with fakes
 /// everywhere; each module workstream's last step replaces its own fake with
-/// the real type. No models, no network: the LLM passes run against
-/// `StubChatServer` on loopback, fed from `Tests/Fixtures/llm/responses/`.
+/// the real type. The LLM passes run against `StubChatServer` on loopback,
+/// fed from `Tests/Fixtures/llm/responses/`; delivery runs through the real
+/// `DeliveryCoordinator` and `ObsidianFolderDestination` into a temp vault.
+/// No models, no network.
 @Suite struct EndToEndTests {
+  static let berlin = TimeZone(identifier: "Europe/Berlin")!
   static let cleanupUsage = LLMUsage(promptTokens: 300, completionTokens: 120, requests: 1)
   static let summaryUsage = LLMUsage(promptTokens: 900, completionTokens: 250, requests: 1)
 
@@ -18,8 +22,12 @@ import Testing
 
     let store = try MeetingStore.inMemory()
     let settingsStore = SettingsStore(writer: store.writer)
+    let vault = directory.appendingPathComponent("vault", isDirectory: true)
+    try FileManager.default.createDirectory(at: vault, withIntermediateDirectories: true)
     var settings = Settings()
     settings.audioFolder = directory.appendingPathComponent("audio", isDirectory: true)
+    settings.obsidian = ObsidianSettings(
+      vaultPath: vault.path, peopleFolder: "People", includeAudio: true, taskTag: "task")
     try await settingsStore.save(settings)
     for person in SampleData.persons() { try await store.save(person) }
 
@@ -43,9 +51,15 @@ import Testing
     let cleaner = LLMTranscriptCleaner(model: client, endpoint: endpoint)
     let summarizer = LLMMeetingSummarizer(
       model: client, endpoint: endpoint, timeZone: TimeZone(identifier: "UTC")!)
-    let vault = FakeDestination(
-      root: directory.appendingPathComponent("vault", isDirectory: true))
-    let dispatcher = FakeDeliveryDispatcher(store: store, destinations: [vault], now: { now })
+    // The stored settings decide the destination, as in the app; the time
+    // zone is pinned so the goldens hold on every machine.
+    let dispatcher = DeliveryCoordinator(
+      store: store, settings: settingsStore,
+      destinations: { settings in
+        settings.obsidian.map { [ObsidianFolderDestination(settings: $0, timeZone: Self.berlin)] }
+          ?? []
+      },
+      now: { now })
     let pipeline = ProcessingPipeline(
       dependencies: PipelineDependencies(
         decoder: WAVAudioDecoder(),
@@ -93,13 +107,36 @@ import Testing
 
     let deliveries = try await store.deliveries(meetingID: meeting.id)
     #expect(deliveries.count == 1)
+    #expect(deliveries.first?.destinationID == ObsidianFolderDestination.destinationID)
     #expect(deliveries.first?.status == .delivered)
+    #expect(deliveries.first?.lastAttemptAt == now)
     let receipt = try #require(deliveries.first?.receipt)
-    #expect(receipt.files.map(\.relativePath) == ["meeting.json"])
-    #expect(receipt.rendererVersion == FakeDestination.rendererVersion)
+    let folder = "Meetings/2026-09-24-produktstrategie"
+    let slug = "2026-09-24-produktstrategie"
+    #expect(receipt.root == vault.path)
+    #expect(receipt.folder == folder)
+    #expect(receipt.rendererVersion == ArtifactRenderer.version)
+    #expect(
+      receipt.files.map(\.relativePath) == [
+        "\(folder)/\(slug) - Tasks.md", "\(folder)/\(slug) - Transcript.md", "\(folder)/\(slug).md",
+        "\(folder)/audio.wav", "\(folder)/meeting.json", "\(folder)/transcript.vtt",
+        "People/Jérôme.md", "People/Nicolai.md",
+      ])
+    for file in receipt.files {
+      let data = try Data(contentsOf: vault.appendingPathComponent(file.relativePath))
+      #expect(file.sha256 == ContentHash.sha256(data), "\(file.relativePath)")
+    }
 
-    let json = try Data(contentsOf: vault.exportURL(meetingID: meeting.id))
+    let json = try Data(contentsOf: vault.appendingPathComponent("\(folder)/meeting.json"))
     let export = try StenoJSON.decode(MeetingExport.self, from: json)
+    #expect(json == (try StenoJSON.encode(export)), "meeting.json is the StenoJSON encoding")
+    let current = try await store.export(meetingID: meeting.id)
+    #expect(export.meeting == current.meeting)
+    #expect(export.segments == current.segments)
+    #expect(export.tasks == current.tasks)
+    #expect(
+      export.audio?.expiresAt == nil && current.audio?.expiresAt != nil,
+      "delivery precedes the retention stage, which sets the expiry afterwards")
     #expect(export.schemaVersion == MeetingExport.currentSchemaVersion)
     #expect(export.meeting.state == .ready)
     #expect(export.segments.count == 12)
@@ -111,10 +148,43 @@ import Testing
     #expect(export.tasks.map(\.text) == ["Budgetzahlen prüfen."])
     #expect(export.decisions.map(\.text) == ["Der Kern wird priorisiert."])
     #expect(export.speakers.map(\.clusterLabel) == ["Me", "Speaker 1", "Speaker 2"])
-    #expect(receipt.files.first?.sha256 == ContentHash.sha256(json))
+    #expect(
+      try Data(contentsOf: vault.appendingPathComponent("\(folder)/audio.wav"))
+        == (try Data(contentsOf: layout.mixdown(.wav16kInt16))),
+      "the mixdown is copied byte for byte")
     #expect(!SummaryMarkdown.render(export).isEmpty)
     try Snapshot.assert(
       SummaryMarkdown.render(export), matches: "snapshots/e2e/mac-call-summary.md")
+    for (file, golden) in [
+      ("\(folder)/\(slug).md", "folder-note.md"),
+      ("\(folder)/\(slug) - Transcript.md", "transcript.md"),
+      ("\(folder)/\(slug) - Tasks.md", "tasks.md"),
+      ("\(folder)/transcript.vtt", "transcript.vtt"),
+      ("People/Jérôme.md", "person-jerome.md"),
+      ("People/Nicolai.md", "person-nicolai.md"),
+    ] {
+      try Snapshot.assert(
+        try Data(contentsOf: vault.appendingPathComponent(file)), matches: "snapshots/e2e/\(golden)"
+      )
+    }
+
+    // Re-export through the one entry point overwrites Steno's files and
+    // leaves the user's alone.
+    let notes = vault.appendingPathComponent("\(folder)/notes.md")
+    try Data("mine\n".utf8).write(to: notes)
+    try await pipeline.redeliver(meetingID: meeting.id)
+    let again = try #require(try await store.deliveries(meetingID: meeting.id).first?.receipt)
+    #expect(again.folder == receipt.folder)
+    #expect(again.files.map(\.relativePath) == receipt.files.map(\.relativePath))
+    for (before, after) in zip(receipt.files, again.files)
+    where !before.relativePath.hasSuffix("meeting.json") {
+      #expect(before.sha256 == after.sha256, "\(before.relativePath) is byte-identical")
+    }
+    #expect(
+      again.files[4].sha256 != receipt.files[4].sha256,
+      "meeting.json changed: the retention stage set expiresAt after the first delivery")
+    #expect(try String(contentsOf: notes, encoding: .utf8) == "mine\n")
+    #expect(server.requests.count == 2, "a re-export never re-runs the LLM")
 
     // Everything posted so far, read up to a sentinel so a failed run can
     // never hang the test.
@@ -123,12 +193,12 @@ import Testing
     var iterator = stream.makeAsyncIterator()
     var collected: [MeetingEvent] = []
     while let event = await iterator.next(), event != sentinel { collected.append(event) }
-    try #require(collected.count == 11, "ten stage starts and one review request")
+    try #require(collected.count == 12, "ten stage starts, one review request, one re-export")
     let stages = collected.compactMap { event -> PipelineStage? in
       if case .progress(_, let stage) = event { return stage }
       return nil
     }
-    #expect(stages == PipelineStage.allCases)
+    #expect(stages == PipelineStage.allCases + [.deliver])
     #expect(
       collected[8]
         == .speakersNeedReview(meetingID: meeting.id, speakerIDs: export.speakers.map(\.id)))

@@ -1,5 +1,6 @@
 import ArgumentParser
 import Foundation
+import StenoAdapters
 import StenoCore
 import StenoLLM
 
@@ -18,11 +19,21 @@ struct DatabaseOptions: ParsableArguments {
 }
 
 /// Builds the stores and the `PipelineDependencies`. Core wires fakes for
-/// speech, diarization, LLM and delivery; later workstreams swap real
-/// implementations in behind flags in their own command files, with one
-/// recorded exception: the speech PR adds `--engine <id>` here so
-/// `steno process` can run the real engines.
+/// speech, diarization and LLM; delivery runs through the real
+/// `DeliveryCoordinator` (or the `dispatcher` a command passes, as `steno
+/// deliver --vault` does). Later workstreams swap real implementations in
+/// behind flags in their own command files, with one recorded exception: the
+/// speech PR adds `--engine <id>` here so `steno process` can run the real
+/// engines.
 enum Wiring {
+  /// The `transform:` of every `<meeting-id>` argument.
+  static func uuid(_ argument: String) throws -> UUID {
+    guard let id = UUID(uuidString: argument) else {
+      throw ValidationError("\(argument) is not a UUID.")
+    }
+    return id
+  }
+
   static func open(_ options: DatabaseOptions) throws -> (
     store: MeetingStore, settings: SettingsStore
   ) {
@@ -33,7 +44,8 @@ enum Wiring {
   /// `llm` replaces the fake cleaner and summarizer when the settings name
   /// an endpoint; see `llmComponents(settings:)`.
   static func dependencies(
-    store: MeetingStore, settings: SettingsStore, llm: LLMPasses? = nil
+    store: MeetingStore, settings: SettingsStore, dispatcher: (any DeliveryDispatcher)? = nil,
+    llm: LLMPasses? = nil
   ) -> PipelineDependencies {
     PipelineDependencies(
       decoder: WAVAudioDecoder(),
@@ -42,7 +54,7 @@ enum Wiring {
       speakerMemory: InMemorySpeakerMemory(),
       cleaner: llm?.cleaner ?? PassthroughCleaner(),
       summarizer: llm?.summarizer ?? FakeSummarizer(),
-      dispatcher: FakeDeliveryDispatcher(store: store, destinations: []),
+      dispatcher: dispatcher ?? DeliveryCoordinator(store: store, settings: settings),
       store: store,
       settings: settings,
       events: MeetingEventBus()
