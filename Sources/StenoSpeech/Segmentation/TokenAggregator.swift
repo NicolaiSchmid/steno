@@ -1,8 +1,11 @@
 import Foundation
 
-/// Joins SentencePiece tokens into words. A token starting with `▁` begins
-/// a new word; punctuation-only tokens glue to the word before them; tokens
-/// that are empty after stripping the marker only carry a word boundary.
+/// Joins SentencePiece tokens into words. A token starting with a space or
+/// with the `▁` marker begins a new word: FluidAudio replaces the marker with
+/// a space before it builds a `TokenTiming` (`AsrManager.normalizedTimingToken`),
+/// and the marker is kept for a source that does not. Punctuation-only tokens
+/// glue to the word before them; tokens that are only a boundary carry it to
+/// the next piece.
 public struct TokenAggregator: Sendable {
   public static let wordBoundary: Character = "\u{2581}"
 
@@ -26,11 +29,11 @@ public struct TokenAggregator: Sendable {
 
     for token in tokens {
       var text = token.text
-      let startsWord = text.first == Self.wordBoundary
+      let startsWord = text.first == " " || text.first == Self.wordBoundary
       if startsWord { text.removeFirst() }
       text = text.trimmingCharacters(in: .whitespaces)
       guard !text.isEmpty else {
-        // A bare marker: the next piece starts a word.
+        // A bare boundary: the next piece starts a word.
         if startsWord { boundaryPending = true }
         continue
       }

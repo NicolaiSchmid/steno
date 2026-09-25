@@ -21,13 +21,14 @@ import Testing
   @Test func tokensBecomeTimedSegmentsWithWordTimings() throws {
     // "Wir haben das heute nicht besprochen." then, after a 1.5 s pause,
     // "We should ship the flow this week." The second sentence is English.
+    // Tokens as FluidAudio delivers them: the `▁` marker already a space.
     let tokens = [
-      token("▁Wir", 0.00, 0.20), token("▁haben", 0.25, 0.50), token("▁das", 0.55, 0.70),
-      token("▁heute", 0.75, 1.00), token("▁nicht", 1.05, 1.30), token("▁be", 1.35, 1.50),
+      token(" Wir", 0.00, 0.20), token(" haben", 0.25, 0.50), token(" das", 0.55, 0.70),
+      token(" heute", 0.75, 1.00), token(" nicht", 1.05, 1.30), token(" be", 1.35, 1.50),
       token("sprochen", 1.50, 1.90), token(".", 1.90, 1.95),
-      token("▁We", 3.50, 3.60), token("▁should", 3.65, 3.90), token("▁ship", 3.95, 4.10),
-      token("▁the", 4.15, 4.25), token("▁flow", 4.30, 4.50), token("▁this", 4.55, 4.70),
-      token("▁week", 4.75, 5.00), token(".", 5.00, 5.05),
+      token(" We", 3.50, 3.60), token(" should", 3.65, 3.90), token(" ship", 3.95, 4.10),
+      token(" the", 4.15, 4.25), token(" flow", 4.30, 4.50), token(" this", 4.55, 4.70),
+      token(" week", 4.75, 5.00), token(".", 5.00, 5.05),
     ]
     let segments = mapping.segments(tokens: tokens, text: "ignored", duration: 6, hint: nil)
     try #require(segments.count == 2)
@@ -57,11 +58,13 @@ import Testing
   @Test func nothingRecognisedGivesNoSegments() {
     #expect(mapping.segments(tokens: [], text: "   ", duration: 3, hint: nil).isEmpty)
     #expect(
+      mapping.segments(tokens: [token(" ", 0, 0.1)], text: "", duration: 3, hint: nil).isEmpty)
+    #expect(
       mapping.segments(tokens: [token("▁", 0, 0.1)], text: "", duration: 3, hint: nil).isEmpty)
   }
 
   @Test func theHintOnlySteersTheTaggerAndCoversUndecidableText() {
-    let tokens = [token("▁Kubernetes", 0, 0.5), token("▁Grafana", 0.6, 1.0)]
+    let tokens = [token(" Kubernetes", 0, 0.5), token(" Grafana", 0.6, 1.0)]
     let german = mapping.segments(
       tokens: tokens, text: "", duration: 1, hint: LanguageTag("de").language)
     #expect(german.map(\.language) == ["de"])
@@ -73,8 +76,8 @@ import Testing
     // Clear text wins over the hint.
     let clear = mapping.segments(
       tokens: [
-        token("▁We", 0, 0.1), token("▁should", 0.2, 0.4), token("▁ship", 0.5, 0.6),
-        token("▁the", 0.7, 0.8), token("▁flow", 0.9, 1.0),
+        token(" We", 0, 0.1), token(" should", 0.2, 0.4), token(" ship", 0.5, 0.6),
+        token(" the", 0.7, 0.8), token(" flow", 0.9, 1.0),
       ], text: "", duration: 1, hint: LanguageTag("de").language)
     #expect(clear.map(\.language) == ["en"])
   }

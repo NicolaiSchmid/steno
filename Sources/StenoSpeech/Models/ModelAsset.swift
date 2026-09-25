@@ -1,8 +1,9 @@
 import Foundation
 
 /// One downloadable model bundle. The table below is the single place that
-/// knows where an asset comes from, where it lives under the models root and
-/// which files must be present for it to count as installed.
+/// knows where an asset comes from, how its files are laid out under the
+/// models root and which of them must be complete for it to count as
+/// installed.
 public enum ModelAsset: String, Sendable, CaseIterable, Codable, Hashable {
   case parakeetV3
   case parakeetUltra
@@ -51,27 +52,53 @@ public enum ModelAsset: String, Sendable, CaseIterable, Codable, Hashable {
     }
   }
 
-  /// Where the asset's files live, relative to the models root. FluidAudio
-  /// derives the directory name from the repository (`<repo>` minus
-  /// `-coreml`), so those names are fixed by the framework; the German
-  /// fine-tune reuses the v3 name and gets its own parent so it can never
-  /// shadow the official model. WhisperKit lays its Hugging Face cache out
-  /// under `downloadBase/models/<repo>/<variant>`, so the last component is
-  /// the variant name the engine and the downloader pass to the framework.
-  public var relativePath: String {
+  // MARK: Layout under the models root
+
+  /// The folder handed to the framework, relative to the models root: the
+  /// parent FluidAudio's `ModelHub` writes the repository folder into, or
+  /// WhisperKit's `downloadBase`. The German fine-tune reuses the v3 folder
+  /// name, so it gets its own parent and can never shadow the official model.
+  public var frameworkRoot: String {
     switch self {
-    case .parakeetV3: "fluidaudio/parakeet-tdt-0.6b-v3"
-    case .parakeetUltra: "fluidaudio/parakeet-ultra"
-    case .parakeetDE: "fluidaudio-de/parakeet-tdt-0.6b-v3"
-    case .whisperLargeV3Turbo:
-      "whisperkit/models/argmaxinc/whisperkit-coreml/openai_whisper-large-v3-v20240930_turbo"
-    case .offlineDiarizer: "fluidaudio/speaker-diarization"
+    case .parakeetV3, .parakeetUltra, .offlineDiarizer: "fluidaudio"
+    case .parakeetDE: "fluidaudio-de"
+    case .whisperLargeV3Turbo: "whisperkit"
     }
   }
 
-  /// Files (or compiled model bundles) inside `relativePath` whose presence
-  /// means the asset is installed. Checked by `ModelStore.isInstalled`;
-  /// written as markers by `FakeModelDownloader`.
+  /// The framework's own name for the model inside its root: FluidAudio's
+  /// `Repo.folderName` (the repository minus `-coreml`; the fine-tune keeps
+  /// the v3 name because it is fetched through the v3 `Repo` case), or the
+  /// WhisperKit variant the engine and the downloader pass to the framework.
+  public var modelFolder: String {
+    switch self {
+    case .parakeetV3, .parakeetDE: "parakeet-tdt-0.6b-v3"
+    case .parakeetUltra: "parakeet-ultra"
+    case .offlineDiarizer: "speaker-diarization"
+    case .whisperLargeV3Turbo: "openai_whisper-large-v3-v20240930_turbo"
+    }
+  }
+
+  /// Where the asset's files live, relative to the models root: the
+  /// framework root plus the suffix the framework fixes. FluidAudio puts the
+  /// repository folder straight under its parent; WhisperKit lays its Hub
+  /// cache out as `models/<repo>/<variant>`.
+  public var relativePath: String {
+    switch self {
+    case .parakeetV3, .parakeetUltra, .parakeetDE, .offlineDiarizer:
+      "\(frameworkRoot)/\(modelFolder)"
+    case .whisperLargeV3Turbo:
+      "\(frameworkRoot)/models/\(sourceRepo)/\(modelFolder)"
+    }
+  }
+
+  /// The tokenizer repository WhisperKit resolves for large-v3 weights
+  /// (`ModelUtilities.tokenizerNameForVariant(.largev3)`); it is cached under
+  /// `downloadBase/models/<repo>` like any other Hub repository.
+  static let whisperTokenizerRepo = "openai/whisper-large-v3"
+
+  /// Files (or compiled model bundles) inside `relativePath` that the
+  /// framework writes for the model itself.
   public var requiredFiles: [String] {
     switch self {
     case .parakeetV3, .parakeetUltra, .parakeetDE:
@@ -90,6 +117,30 @@ public enum ModelAsset: String, Sendable, CaseIterable, Codable, Hashable {
         "plda-parameters.json",
       ]
     }
+  }
+
+  /// Everything that must be complete under the models root for the asset
+  /// to count as installed: `requiredFiles` inside `relativePath`, plus what
+  /// the framework fetches beside the weights. WhisperKit loads its
+  /// tokenizer from `downloadBase/models/openai/whisper-large-v3` and goes
+  /// online when it is missing, so the file belongs to the asset. Checked by
+  /// `ModelStore.isInstalled`; written as markers by `FakeModelDownloader`.
+  var requiredPaths: [String] {
+    var paths = requiredFiles.map { "\(relativePath)/\($0)" }
+    if self == .whisperLargeV3Turbo {
+      paths.append("\(frameworkRoot)/models/\(Self.whisperTokenizerRepo)/tokenizer.json")
+    }
+    return paths
+  }
+
+  /// `relativePath` under `root`.
+  func directory(under root: URL) -> URL {
+    root.appendingPathComponent(relativePath, isDirectory: true)
+  }
+
+  /// `frameworkRoot` under `root`.
+  func frameworkRoot(under root: URL) -> URL {
+    root.appendingPathComponent(frameworkRoot, isDirectory: true)
   }
 }
 

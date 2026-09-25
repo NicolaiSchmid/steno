@@ -113,6 +113,18 @@ import Testing
       }
     }
 
+    /// Silence is not a failed meeting: FluidAudio throws `noSpeechDetected`
+    /// when no embedding survives, and the diarizer answers with no speakers.
+    @Test(.enabled(if: enabled, skipMessage))
+    func silenceGivesNoClustersInsteadOfAnError() async throws {
+      let (store, cleanup) = try Self.modelStore()
+      defer { cleanup() }
+      let diarizer = FluidDiarizer(models: store)
+      let silence = AudioBuffer16k(samples: [Float](repeating: 0, count: 3 * 16_000))
+      let result = try await diarizer.diarize(silence)
+      #expect(result.clusters.isEmpty)
+    }
+
     /// Spike C: the same voice across two recordings scores above the match
     /// threshold, two different voices below it.
     @Test(.enabled(if: enabled, skipMessage))

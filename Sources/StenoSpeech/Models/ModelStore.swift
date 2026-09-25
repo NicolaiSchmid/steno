@@ -12,6 +12,11 @@ public actor ModelStore {
   private let downloader: any ModelDownloading
   private var inFlight: [ModelAsset: DownloadJob] = [:]
 
+  /// Extensions of the staging files both frameworks write while a file of
+  /// a bundle is still coming in (FluidAudio `*.partial`, WhisperKit
+  /// `*.incomplete`).
+  static let stagingExtensions: Set<String> = ["partial", "incomplete"]
+
   /// `<support directory>/Models`, following `HOME` like `StenoPaths`.
   public static func defaultDirectory() -> URL {
     StenoPaths.defaultSupportDirectory.appendingPathComponent("Models", isDirectory: true)
@@ -24,12 +29,24 @@ public actor ModelStore {
     self.downloader = downloader
   }
 
+  /// The asset's own directory (`ModelAsset.relativePath` under the root).
   public nonisolated func directory(for asset: ModelAsset) -> URL {
-    directory.appendingPathComponent(asset.relativePath, isDirectory: true)
+    asset.directory(under: directory)
   }
 
-  /// True when every `requiredFiles` entry exists. File presence only: a
-  /// corrupt bundle surfaces when the framework loads it.
+  /// The folder handed to the framework for this asset: FluidAudio's
+  /// `ModelHub` parent, WhisperKit's `downloadBase`.
+  public nonisolated func frameworkRoot(for asset: ModelAsset) -> URL {
+    asset.frameworkRoot(under: directory)
+  }
+
+  /// True when every `ModelAsset.requiredPaths` entry is complete: plain
+  /// files exist, compiled bundles have their root `coremldata.bin` and no
+  /// staging file inside. Both frameworks write each file of a bundle
+  /// straight into place, so a process killed mid-bundle leaves a directory
+  /// that exists and cannot load; FluidAudio's own cache check refuses the
+  /// same shape. A bundle that is complete but corrupt still surfaces only
+  /// when the framework loads it.
   public nonisolated func isInstalled(_ asset: ModelAsset) -> Bool {
     missingFiles(of: asset).isEmpty
   }
@@ -71,12 +88,13 @@ public actor ModelStore {
     let job = DownloadJob()
     inFlight[asset] = job
     let stream = job.subscribe()
-    let target = directory(for: asset)
+    let root = directory
     let downloader = self.downloader
     Task {
       do {
-        try FileManager.default.createDirectory(at: target, withIntermediateDirectories: true)
-        try await downloader.download(asset, into: target) { fraction, phase in
+        try FileManager.default.createDirectory(
+          at: asset.directory(under: root), withIntermediateDirectories: true)
+        try await downloader.download(asset, under: root) { fraction, phase in
           job.publish(
             ModelDownloadProgress(asset: asset, fractionCompleted: fraction, phase: phase))
         }
@@ -112,11 +130,27 @@ public actor ModelStore {
     job.finish(result)
   }
 
+  /// The `requiredPaths` entries that are absent or not load-ready, relative
+  /// to the models root.
   private nonisolated func missingFiles(of asset: ModelAsset) -> [String] {
-    let root = directory(for: asset)
-    return asset.requiredFiles.filter {
-      !FileManager.default.fileExists(atPath: root.appendingPathComponent($0).path)
+    asset.requiredPaths.filter { !Self.isComplete(directory.appendingPathComponent($0)) }
+  }
+
+  /// A plain file is complete when it exists. A compiled bundle
+  /// (`.mlmodelc`) is complete when it is a directory with its root
+  /// `coremldata.bin` and nothing inside it still carries a staging
+  /// extension.
+  static func isComplete(_ url: URL) -> Bool {
+    let fileManager = FileManager.default
+    guard fileManager.fileExists(atPath: url.path) else { return false }
+    guard url.pathExtension == "mlmodelc" else { return true }
+    guard fileManager.fileExists(atPath: url.appendingPathComponent("coremldata.bin").path),
+      let contents = fileManager.enumerator(at: url, includingPropertiesForKeys: nil)
+    else { return false }
+    for case let item as URL in contents where stagingExtensions.contains(item.pathExtension) {
+      return false
     }
+    return true
   }
 }
 

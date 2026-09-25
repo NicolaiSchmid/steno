@@ -47,6 +47,7 @@
     public nonisolated let supportedLanguages = SpeechEngineID.whisperKitLargeV3Turbo
       .supportedLanguages
 
+    private let asset = ModelAsset.whisperLargeV3Turbo
     private let models: ModelStore
     private var whisper: WhisperKitBox?
     private let mapping = WhisperMapping()
@@ -55,27 +56,16 @@
       self.models = models
     }
 
-    /// `downloadBase` is the `whisperkit/` folder: the asset directory minus
-    /// WhisperKit's own `models/<repo>/<variant>` suffix.
-    static func downloadBase(for assetDirectory: URL) -> URL {
-      assetDirectory
-        .deletingLastPathComponent()  // variant
-        .deletingLastPathComponent()  // whisperkit-coreml
-        .deletingLastPathComponent()  // argmaxinc
-        .deletingLastPathComponent()  // models
-    }
-
-    /// The asset directory's last component is the WhisperKit variant name
-    /// (`ModelAsset.relativePath`); `download: false` keeps the framework off
-    /// the network.
+    /// WhisperKit is told the variant (`ModelAsset.modelFolder`), its
+    /// `downloadBase` (the asset's framework root) and the model folder
+    /// itself; `download: false` keeps the framework off the network.
     public func prepare() async throws {
       guard whisper == nil else { return }
-      try await models.ensureInstalled(.whisperLargeV3Turbo)
-      let directory = models.directory(for: .whisperLargeV3Turbo)
+      try await models.ensureInstalled(asset)
       let config = WhisperKitConfig(
-        model: directory.lastPathComponent,
-        downloadBase: Self.downloadBase(for: directory),
-        modelFolder: directory.path,
+        model: asset.modelFolder,
+        downloadBase: models.frameworkRoot(for: asset),
+        modelFolder: models.directory(for: asset).path,
         computeOptions: ModelComputeOptions(
           melCompute: .cpuAndGPU, audioEncoderCompute: .cpuAndNeuralEngine,
           textDecoderCompute: .cpuAndNeuralEngine),

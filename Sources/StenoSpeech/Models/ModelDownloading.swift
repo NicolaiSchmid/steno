@@ -2,12 +2,12 @@ import Foundation
 import StenoCore
 
 /// The seam between `ModelStore` and the two frameworks' download code, so
-/// the store is unit-tested without network. `directory` is the asset's own
-/// directory (`ModelStore.directory(for:)`); the downloader fills it so that
-/// every `ModelAsset.requiredFiles` entry exists when it returns.
+/// the store is unit-tested without network. `root` is the models root
+/// (`ModelStore.directory`); the downloader fills the asset's layout under it
+/// so that every `ModelAsset.requiredPaths` entry is complete when it returns.
 public protocol ModelDownloading: Sendable {
   func download(
-    _ asset: ModelAsset, into directory: URL,
+    _ asset: ModelAsset, under root: URL,
     progress: @escaping @Sendable (Double, String) -> Void
   ) async throws
 }
@@ -16,7 +16,7 @@ public enum ModelDownloadError: Error, Sendable, Equatable, CustomStringConverti
   /// This build has neither FluidAudio nor WhisperKit (Linux); nothing can be
   /// downloaded.
   case unsupportedPlatform(ModelAsset)
-  /// The downloader returned but `requiredFiles` are still missing.
+  /// The downloader returned but `requiredPaths` are still missing.
   case incomplete(ModelAsset, missing: [String])
 
   public var description: String {
@@ -89,26 +89,29 @@ struct ScopedRedirect: Sendable {
     public init() {}
 
     public func download(
-      _ asset: ModelAsset, into directory: URL,
+      _ asset: ModelAsset, under root: URL,
       progress: @escaping @Sendable (Double, String) -> Void
     ) async throws {
       try await serializer.run {
-        try await Self.perform(asset, into: directory, progress: progress)
+        try await Self.perform(asset, under: root, progress: progress)
       }
     }
 
-    /// `ModelHub` writes `<parent>/<repo folder>` and derives the folder from
-    /// the repository name, which is how `ModelAsset.relativePath` is built.
-    /// WhisperKit appends `models/<repo>/<variant>` to `downloadBase`, so the
-    /// asset directory's last component is the variant; the tokenizer is
-    /// fetched right after the weights so an installed asset works offline.
+    /// `AsrModels.download(to:)` takes the model directory itself;
+    /// `ModelHub.download(_:to:)` and WhisperKit take the framework root and
+    /// append their own layout (`ModelAsset.relativePath`). The tokenizer is
+    /// fetched right after the Whisper weights so an installed asset works
+    /// offline; `.largev3` is the variant WhisperKit maps the turbo weights
+    /// to, and it resolves to `ModelAsset.whisperTokenizerRepo`.
     private static func perform(
-      _ asset: ModelAsset, into directory: URL,
+      _ asset: ModelAsset, under root: URL,
       progress: @escaping @Sendable (Double, String) -> Void
     ) async throws {
       let handler: ProgressHandler = {
         progress($0.fractionCompleted, String(describing: $0.phase))
       }
+      let directory = asset.directory(under: root)
+      let frameworkRoot = asset.frameworkRoot(under: root)
       switch asset {
       case .parakeetV3:
         try await AsrModels.download(
@@ -123,16 +126,14 @@ struct ScopedRedirect: Sendable {
         }
       case .offlineDiarizer:
         try await ModelHub.download(
-          .diarizer, to: directory.deletingLastPathComponent(), variant: "offline",
-          progressHandler: handler)
+          .diarizer, to: frameworkRoot, variant: "offline", progressHandler: handler)
       case .whisperLargeV3Turbo:
-        let variant = directory.lastPathComponent
-        let downloadBase = WhisperKitEngine.downloadBase(for: directory)
+        let variant = asset.modelFolder
         _ = try await WhisperKit.download(
-          variant: variant, downloadBase: downloadBase, from: asset.sourceRepo,
+          variant: variant, downloadBase: frameworkRoot, from: asset.sourceRepo,
           progressCallback: { progress($0.fractionCompleted * 0.95, "downloading \(variant)") })
         progress(0.95, "downloading tokenizer")
-        _ = try await ModelUtilities.loadTokenizer(for: .largev3, tokenizerFolder: downloadBase)
+        _ = try await ModelUtilities.loadTokenizer(for: .largev3, tokenizerFolder: frameworkRoot)
         progress(1, "installed")
       }
     }
@@ -144,7 +145,7 @@ struct ScopedRedirect: Sendable {
     public init() {}
 
     public func download(
-      _ asset: ModelAsset, into directory: URL,
+      _ asset: ModelAsset, under root: URL,
       progress: @escaping @Sendable (Double, String) -> Void
     ) async throws {
       throw ModelDownloadError.unsupportedPlatform(asset)

@@ -29,8 +29,19 @@ private func chunk(
     #expect(embedding.values.count == Embedding.dimension)
     #expect(abs(embedding.magnitude - 1) < 1e-5)
     #expect(embedding.values[0] > embedding.values[1], "three seconds beat one")
-    // Weighted sum before normalisation: axis 0 gets 5 * 3, axis 1 gets 1 * 1.
-    #expect(abs(embedding.values[0] / embedding.values[1] - 15) < 1e-3)
+    // Each chunk is brought to unit length first, so only the durations
+    // weigh: axis 0 gets 3, axis 1 gets 1. The norm of 5 plays no part.
+    #expect(abs(embedding.values[0] / embedding.values[1] - 3) < 1e-3)
+  }
+
+  /// FluidAudio's `embedding256` is the raw WeSpeaker output: two windows of
+  /// equal length with norms 1 and 20 must weigh the same, or a few loud or
+  /// clipped windows steer the whole cluster.
+  @Test func aHighNormChunkDoesNotSteerTheMean() throws {
+    let chunks = [chunk("S1", 0, 2, axis: 0), chunk("S1", 2, 4, axis: 1, scale: 20)]
+    let embedding = try #require(ClusterEmbedding.embedding(of: chunks))
+    #expect(abs(embedding.values[0] - embedding.values[1]) < 1e-5)
+    #expect(abs(embedding.values[0] - 0.7071) < 1e-3)
   }
 
   @Test func chunksWithTheWrongDimensionAreIgnored() {

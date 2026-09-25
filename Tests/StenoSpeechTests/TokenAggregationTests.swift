@@ -4,6 +4,9 @@ import Testing
 
 @testable import StenoSpeech
 
+/// FluidAudio hands Parakeet's SentencePiece pieces over with the `▁` marker
+/// already replaced by a space, so a leading space is the word boundary; the
+/// marker itself is still honoured for a source that keeps it.
 @Suite struct TokenAggregationTests {
   private func token(_ text: String, _ start: TimeInterval, _ end: TimeInterval, _ c: Float = 1)
     -> TimedWord
@@ -13,38 +16,57 @@ import Testing
 
   @Test func aWordOverThreeTokens() {
     let words = TokenAggregator().words(from: [
-      token("▁Pro", 0.0, 0.1, 0.9), token("dukt", 0.1, 0.2, 0.8), token("strategie", 0.2, 0.4, 0.7),
+      token(" Pro", 0.0, 0.1, 0.9), token("dukt", 0.1, 0.2, 0.8), token("strategie", 0.2, 0.4, 0.7),
     ])
     #expect(words == [TimedWord(text: "Produktstrategie", start: 0.0, end: 0.4, confidence: 0.8)])
   }
 
+  @Test func spacePrefixedTokensAsFluidAudioDeliversThem() {
+    let words = TokenAggregator().words(from: [
+      token(" Wir", 0.0, 0.2), token(" müs", 0.3, 0.4), token("sen", 0.4, 0.5),
+      token(" das", 0.6, 0.7), token(" Onboarding", 0.8, 1.1), token(".", 1.1, 1.15),
+      token(" Dann", 1.3, 1.4),
+    ])
+    #expect(words.map(\.text) == ["Wir", "müssen", "das", "Onboarding.", "Dann"])
+    #expect(words.map(\.start) == [0.0, 0.3, 0.6, 0.8, 1.3])
+    #expect(words[1].end == 0.5 && words[3].end == 1.15)
+  }
+
+  @Test func theSentencePieceMarkerIsStillAWordBoundary() {
+    let words = TokenAggregator().words(from: [
+      token("▁Wir", 0.0, 0.2), token("▁müs", 0.3, 0.4), token("sen", 0.4, 0.5),
+      token(".", 0.5, 0.55),
+    ])
+    #expect(words.map(\.text) == ["Wir", "müssen."])
+  }
+
   @Test func punctuationGluesToThePreviousWord() {
     let words = TokenAggregator().words(from: [
-      token("▁Hallo", 0, 0.2), token(",", 0.2, 0.25), token("▁Welt", 0.3, 0.5),
+      token(" Hallo", 0, 0.2), token(",", 0.2, 0.25), token(" Welt", 0.3, 0.5),
       token(".", 0.5, 0.55),
     ])
     #expect(words.map(\.text) == ["Hallo,", "Welt."])
     #expect(words.last?.end == 0.55)
   }
 
-  @Test func aLeadingMarkerOnlyStartsTheNextWord() {
+  @Test func aBareBoundaryOnlyStartsTheNextWord() {
     let words = TokenAggregator().words(from: [
-      token("▁", 0, 0.05), token("O", 0.05, 0.1), token("K", 0.1, 0.15), token("▁", 0.2, 0.2),
-      token("go", 0.2, 0.3),
+      token(" ", 0, 0.05), token("O", 0.05, 0.1), token("K", 0.1, 0.15), token("▁", 0.2, 0.2),
+      token("go", 0.2, 0.3), token(" ", 0.35, 0.35), token("on", 0.4, 0.5),
     ])
-    #expect(words.map(\.text) == ["OK", "go"])
+    #expect(words.map(\.text) == ["OK", "go", "on"])
     #expect(words.first?.start == 0.05)
   }
 
-  @Test func emptyTokensAreDropped() {
+  @Test func emptyTokensAreDroppedWithoutStartingAWord() {
     let words = TokenAggregator().words(from: [
-      token("", 0, 0.1), token("▁a", 0.1, 0.2), token(" ", 0.2, 0.3), token("b", 0.3, 0.4),
+      token("", 0, 0.1), token(" a", 0.1, 0.2), token("", 0.2, 0.3), token("b", 0.3, 0.4),
     ])
     #expect(words.map(\.text) == ["ab"])
   }
 
-  @Test func firstTokenWithoutMarkerStillStartsAWord() {
-    let words = TokenAggregator().words(from: [token("hi", 0, 0.1), token("▁there", 0.2, 0.3)])
+  @Test func firstTokenWithoutBoundaryStillStartsAWord() {
+    let words = TokenAggregator().words(from: [token("hi", 0, 0.1), token(" there", 0.2, 0.3)])
     #expect(words.map(\.text) == ["hi", "there"])
   }
 }
