@@ -37,6 +37,17 @@ import Testing
         == "{\"ok\":false,\"items\":[]}")
   }
 
+  /// A ``` inside a JSON string (a bullet quoting a code block) is content,
+  /// not a Markdown fence around the answer; it used to swallow the object.
+  @Test func aFenceInsideTheJSONIsNotAFence() throws {
+    let text = "{\"ok\": true, \"items\": [\"Use ```swift``` blocks\"]}"
+    #expect(StructuredOutputDecoder.extractJSON(text) == text)
+    #expect(try decode(text) == Reply(ok: true, items: ["Use ```swift``` blocks"]))
+    let fencedAndQuoted = "```json\n{\"ok\": false, \"items\": [\"```\"]}\n```"
+    #expect(
+      StructuredOutputDecoder.extractJSON(fencedAndQuoted) == "{\"ok\": false, \"items\": [\"```\"]}")
+  }
+
   @Test func stripsProseBeforeAndAfterTheObject() throws {
     let text = "The cleaned segments are: {\"ok\": true, \"items\": [\"x}\"]} — done."
     #expect(StructuredOutputDecoder.extractJSON(text) == "{\"ok\": true, \"items\": [\"x}\"]}")

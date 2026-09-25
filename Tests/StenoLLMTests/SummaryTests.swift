@@ -146,6 +146,27 @@ import Testing
     #expect(output.decisions == ["a"])
   }
 
+  /// Small models in `promptOnly` mode sometimes split one section into two
+  /// blocks with the same id; both halves are kept, in order, under the
+  /// first heading the model wrote.
+  @Test func aSectionTheModelSplitInTwoIsMerged() {
+    let draft = AnalysisDraft(
+      title: "T", language: "de",
+      sections: [
+        .init(id: "executive-summary", heading: "", bullets: [.init(lead: "A", text: "a")]),
+        .init(id: "full-summary", heading: "  ", bullets: [.init(lead: "B", text: "b")]),
+        .init(id: "executive-summary", heading: "Kurz", bullets: [.init(lead: "C", text: "c")]),
+        .init(id: "full-summary", heading: "Lang", bullets: [.init(lead: "D", text: "d")]),
+      ],
+      decisions: [], tasks: [], speakerNames: [])
+    let output = LLMMeetingSummarizer.output(from: draft, input: Self.defaultInput(), usage: .zero)
+    #expect(output.summary.sections.map(\.id) == ["executive-summary", "full-summary"])
+    #expect(output.summary.sections[0].bullets.map(\.lead) == ["A", "C"])
+    #expect(output.summary.sections[0].heading == "Kurz", "the first non-blank heading")
+    #expect(output.summary.sections[1].bullets.map(\.lead) == ["B", "D"])
+    #expect(output.summary.sections[1].heading == "Lang")
+  }
+
   @Test func assigneeResolutionOrder() {
     let input = SummaryInput(export: LLMFixtures.customerCall60min())
     let labels = SpeakerLabels(speakers: input.speakers)

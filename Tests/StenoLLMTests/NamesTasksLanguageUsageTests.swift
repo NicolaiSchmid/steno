@@ -107,9 +107,13 @@ import Testing
       #expect(cleanup.messages[0].content.contains("Meeting language: \(name)."))
       let output = LLMMeetingSummarizer.output(
         from: Self.draft(language: "xx"), input: input, usage: .zero)
-      #expect(output.language == tag)
-      #expect(output.summary.language == tag)
+      #expect(output.summary.language == tag, "the renderer always gets a language")
+      #expect(
+        output.language == input.meeting.language,
+        "the pipeline stores the tag as elected; an untagged meeting stays untagged, not English")
     }
+    #expect(
+      LLMMeetingSummarizer.output(from: Self.draft(), input: english, usage: .zero).language == nil)
   }
 
   @Test func usageIsTheSumOfEveryCallIncludingRepairsAndMissingUsage() async throws {

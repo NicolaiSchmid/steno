@@ -19,12 +19,15 @@ public enum StructuredOutputDecoder {
     }
   }
 
-  /// The JSON inside `text`: the content of the first ``` fence when there
-  /// is one, else everything from the first `{` or `[` to the last matching
-  /// `}` or `]`; whitespace trimmed.
+  /// The JSON inside `text`: the content of the first ``` fence when one
+  /// opens before the JSON starts, else everything from the first `{` or
+  /// `[` to the last matching `}` or `]`; whitespace trimmed. A fence after
+  /// the first `{` or `[` is text inside the answer (a bullet quoting a code
+  /// block), not Markdown around it.
   public static func extractJSON(_ text: String) -> String {
     var body = Substring(text)
-    if let fence = body.range(of: "```") {
+    let jsonStart = body.firstIndex { $0 == "{" || $0 == "[" }
+    if let fence = body.range(of: "```"), jsonStart.map({ fence.lowerBound < $0 }) ?? true {
       var afterFence = body[fence.upperBound...]
       // Skip a language tag such as `json` up to the end of the line.
       if let newline = afterFence.firstIndex(of: "\n") {
@@ -33,7 +36,8 @@ public enum StructuredOutputDecoder {
           afterFence = afterFence[afterFence.index(after: newline)...]
         }
       }
-      if let closing = afterFence.range(of: "```") {
+      // The last fence closes the block; an earlier one is quoted content.
+      if let closing = afterFence.range(of: "```", options: .backwards) {
         body = afterFence[..<closing.lowerBound]
       } else {
         body = afterFence

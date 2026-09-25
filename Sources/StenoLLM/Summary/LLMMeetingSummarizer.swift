@@ -126,19 +126,21 @@ public struct LLMMeetingSummarizer: MeetingSummarizer, Sendable {
 
   // MARK: Post-processing
 
-  /// `language` is the meeting's, else English; the model's own `language`
-  /// field is ignored.
+  /// The document's `language` is the meeting's, else English (what the
+  /// renderer needs); the output's `language` is the meeting's as tagged,
+  /// nil included, so the pipeline never stores English for a meeting the
+  /// engine left untagged. The model's own `language` field is ignored.
   static func output(
     from draft: AnalysisDraft, input: SummaryInput, usage: LLMUsage,
     minimumConfidence: Double = 0.3
   ) -> SummaryOutput {
     let labels = SpeakerLabels(speakers: input.speakers)
-    let language = OutputLanguage.resolve(meeting: input.meeting.language)
     let title = trimmed(draft.title).isEmpty ? input.meeting.title : trimmed(draft.title)
     return SummaryOutput(
       title: title,
       summary: SummaryDocument(
-        templateID: input.template.id, language: language,
+        templateID: input.template.id,
+        language: OutputLanguage.resolve(meeting: input.meeting.language),
         sections: sections(from: draft, template: input.template)),
       decisions: unique(draft.decisions.map(trimmed).filter { !$0.isEmpty }),
       tasks: draft.tasks.enumerated().compactMap { offset, task in
@@ -146,17 +148,18 @@ public struct LLMMeetingSummarizer: MeetingSummarizer, Sendable {
       },
       speakerNames: suggestions(
         draft.speakerNames, labels: labels, speakers: input.speakers, minimum: minimumConfidence),
-      language: language,
+      language: input.meeting.language,
       usage: usage)
   }
 
-  /// Template order; unknown ids dropped; empty optional sections dropped,
-  /// empty required ones kept; a missing or blank heading falls back to the
-  /// template's.
+  /// Template order; unknown ids dropped; a section the model split in two
+  /// is merged (bullets in order, the first non-blank heading); empty
+  /// optional sections dropped, empty required ones kept; a missing or blank
+  /// heading falls back to the template's.
   static func sections(from draft: AnalysisDraft, template: SummaryTemplate) -> [SummarySection] {
     template.sections.compactMap { section in
-      let drafted = draft.sections.first { $0.id == section.id }
-      let bullets = (drafted?.bullets ?? []).compactMap { bullet -> SummaryBullet? in
+      let drafted = draft.sections.filter { $0.id == section.id }
+      let bullets = drafted.flatMap(\.bullets).compactMap { bullet -> SummaryBullet? in
         var lead = trimmed(bullet.lead)
         if lead.hasSuffix(":") { lead.removeLast() }
         let text = trimmed(bullet.text)
@@ -164,9 +167,8 @@ public struct LLMMeetingSummarizer: MeetingSummarizer, Sendable {
         return SummaryBullet(lead: lead, text: text)
       }
       guard !bullets.isEmpty || section.required else { return nil }
-      let heading = trimmed(drafted?.heading ?? "")
-      return SummarySection(
-        id: section.id, heading: heading.isEmpty ? section.heading : heading, bullets: bullets)
+      let heading = drafted.map { trimmed($0.heading) }.first { !$0.isEmpty } ?? section.heading
+      return SummarySection(id: section.id, heading: heading, bullets: bullets)
     }
   }
 
