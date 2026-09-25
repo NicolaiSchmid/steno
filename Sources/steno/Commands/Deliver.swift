@@ -12,8 +12,8 @@ struct Deliver: AsyncParsableCommand {
   static let configuration = CommandConfiguration(
     abstract: "Deliver a processed meeting to every configured destination.")
 
-  @Argument(help: "The meeting id printed by `steno process`.")
-  var meetingID: String
+  @Argument(help: "The meeting id printed by `steno process`.", transform: Deliver.uuid)
+  var meetingID: UUID
 
   @Option(help: "Obsidian vault for this run; defaults to the stored Obsidian settings.")
   var vault: String?
@@ -29,17 +29,20 @@ struct Deliver: AsyncParsableCommand {
 
   @OptionGroup var database: DatabaseOptions
 
-  func validate() throws {
-    guard UUID(uuidString: meetingID) != nil else {
-      throw ValidationError("\(meetingID) is not a UUID.")
+  static func uuid(_ argument: String) throws -> UUID {
+    guard let id = UUID(uuidString: argument) else {
+      throw ValidationError("\(argument) is not a UUID.")
     }
+    return id
+  }
+
+  func validate() throws {
     if vault == nil, peopleFolder != nil || includeAudio || taskTag != nil {
       throw ValidationError("--people-folder, --include-audio and --task-tag need --vault.")
     }
   }
 
   func run() async throws {
-    let id = UUID(uuidString: meetingID)!
     let opened = try Wiring.open(database)
     let dispatcher: DeliveryCoordinator
     if let vault {
@@ -60,9 +63,9 @@ struct Deliver: AsyncParsableCommand {
     let pipeline = ProcessingPipeline(
       dependencies: Wiring.dependencies(
         store: opened.store, settings: opened.settings, dispatcher: dispatcher))
-    try await pipeline.redeliver(meetingID: id)
+    try await pipeline.redeliver(meetingID: meetingID)
 
-    let deliveries = try await opened.store.deliveries(meetingID: id)
+    let deliveries = try await opened.store.deliveries(meetingID: meetingID)
     var failures: [String] = []
     for delivery in deliveries {
       switch delivery.status {

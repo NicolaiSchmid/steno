@@ -109,7 +109,6 @@ import Testing
       artifacts.map(\.kind) == [
         .folderNote, .transcript, .tasks, .vtt, .json, .personPage, .personPage,
       ])
-    #expect(artifacts[5].personID == FixtureMeeting.annaID)
     let plain = try renderer.render(export, options: FixtureMeeting.plain)
     #expect(plain.count == 5, "no people folder, no person pages")
   }

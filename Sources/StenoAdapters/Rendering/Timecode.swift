@@ -20,9 +20,9 @@ public enum Timecode {
     return Int((offset * 1000).rounded())
   }
 
-  static func pad(_ value: Int, width: Int = 2) -> String {
-    let digits = String(value)
-    return digits.count >= width
-      ? digits : String(repeating: "0", count: width - digits.count) + digits
+  /// `value` in `radix`, zero-padded on the left to at least `width` digits.
+  static func pad(_ value: Int, width: Int = 2, radix: Int = 10) -> String {
+    let digits = String(value, radix: radix, uppercase: true)
+    return String(repeating: "0", count: max(0, width - digits.count)) + digits
   }
 }

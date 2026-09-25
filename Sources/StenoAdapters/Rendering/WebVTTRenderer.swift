@@ -15,10 +15,7 @@ struct WebVTTRenderer {
     var blocks = ["WEBVTT - Steno \(ArtifactRenderer.stenoID(export))"]
     blocks.append(
       "NOTE\n\(Self.noteText(export.meeting.title))\n\(DateText.utc(export.meeting.startedAt))")
-    let segments = export.segments.sorted {
-      ($0.start, $0.id.uuidString) < ($1.start, $1.id.uuidString)
-    }
-    for segment in segments {
+    for segment in ArtifactRenderer.orderedSegments(export) {
       let start = max(0, segment.start)
       let end = max(segment.end, start + Self.minimumCue)
       blocks.append(

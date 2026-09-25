@@ -41,37 +41,20 @@ enum MarkdownText {
 
   /// Line breaks and runs of whitespace become one space; trimmed.
   static func singleLine(_ text: String) -> String {
-    var result = ""
-    var pendingSpace = false
-    for scalar in text.unicodeScalars {
-      if scalar.properties.isWhitespace || scalar == "\r" || scalar == "\n" {
-        pendingSpace = true
-        continue
-      }
-      if pendingSpace, !result.isEmpty { result.append(" ") }
-      pendingSpace = false
-      result.unicodeScalars.append(scalar)
-    }
-    return result
+    text.unicodeScalars.split(whereSeparator: \.properties.isWhitespace)
+      .map { String($0) }
+      .joined(separator: " ")
   }
 
   /// An Obsidian tag without `#`: whitespace to `-`, only `[A-Za-z0-9_/-]`
   /// kept, separators trimmed. Nil when nothing is left.
   static func tag(_ raw: String) -> String? {
-    var result = ""
-    var pendingHyphen = false
-    for scalar in raw.unicodeScalars {
-      if scalar.properties.isWhitespace {
-        pendingHyphen = true
-        continue
-      }
-      guard isTagCharacter(scalar) else { continue }
-      if pendingHyphen, !result.isEmpty { result.append("-") }
-      pendingHyphen = false
-      result.unicodeScalars.append(scalar)
-    }
-    let trimmed = result.trimmingCharacters(in: CharacterSet(charactersIn: "-/_"))
-    return trimmed.isEmpty ? nil : trimmed
+    let tag = raw.unicodeScalars.split(whereSeparator: \.properties.isWhitespace)
+      .map { String($0.filter(isTagCharacter)) }
+      .filter { !$0.isEmpty }
+      .joined(separator: "-")
+      .trimmingCharacters(in: CharacterSet(charactersIn: "-/_"))
+    return tag.isEmpty ? nil : tag
   }
 
   private static func isTagCharacter(_ scalar: Unicode.Scalar) -> Bool {

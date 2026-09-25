@@ -11,7 +11,7 @@ import Testing
       MeetingFolder.path(for: meeting, timeZone: FixtureMeeting.berlin)
         == "Meetings/2026-09-24-produktstrategie-90-10-roadmap-fuer-q4")
     #expect(
-      MeetingFolder.basename(for: meeting, timeZone: RenderOptions.utc)
+      MeetingFolder.basename(for: meeting, timeZone: .gmt)
         == "2026-09-24-produktstrategie-90-10-roadmap-fuer-q4")
   }
 
@@ -20,7 +20,7 @@ import Testing
     meeting.startedAt = Date(timeIntervalSince1970: 1_790_290_800)  // 2026-09-24T23:00:00Z
     meeting.title = "Late"
     #expect(
-      MeetingFolder.path(for: meeting, timeZone: RenderOptions.utc) == "Meetings/2026-09-24-late")
+      MeetingFolder.path(for: meeting, timeZone: .gmt) == "Meetings/2026-09-24-late")
     #expect(
       MeetingFolder.path(for: meeting, timeZone: FixtureMeeting.berlin)
         == "Meetings/2026-09-25-late")
@@ -30,6 +30,6 @@ import Testing
     var meeting = FixtureMeeting.meeting()
     meeting.title = "???"
     #expect(
-      MeetingFolder.basename(for: meeting, timeZone: RenderOptions.utc) == "2026-09-24-meeting")
+      MeetingFolder.basename(for: meeting, timeZone: .gmt) == "2026-09-24-meeting")
   }
 }

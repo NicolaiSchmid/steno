@@ -6,8 +6,8 @@ import Foundation
 /// are safe; dates, numbers and booleans are the plain scalars Obsidian types
 /// as Date, Date & time, Number and Checkbox; tags are sanitised plain
 /// scalars so Obsidian reads them as Tags.
-public struct Frontmatter: Sendable, Equatable {
-  public enum Value: Sendable, Equatable {
+public struct Frontmatter: Sendable {
+  public enum Value: Sendable {
     case string(String)
     case int(Int)
     case bool(Bool)
@@ -22,59 +22,31 @@ public struct Frontmatter: Sendable, Equatable {
     case tags([String])
   }
 
-  public struct Field: Sendable, Equatable {
-    public var key: String
-    public var value: Value
-
-    public init(_ key: String, _ value: Value) {
-      self.key = key
-      self.value = value
-    }
-  }
-
   /// Insertion order is output order.
-  public var fields: [Field]
+  public var fields: [(key: String, value: Value)]
   public var timeZone: TimeZone
 
-  public init(fields: [Field] = [], timeZone: TimeZone = RenderOptions.utc) {
+  public init(fields: [(key: String, value: Value)] = [], timeZone: TimeZone = .gmt) {
     self.fields = fields
     self.timeZone = timeZone
   }
 
   public mutating func append(_ key: String, _ value: Value) {
-    fields.append(Field(key, value))
+    fields.append((key, value))
   }
 
   /// `"---\n…\n---\n"`.
   public func encoded() -> String {
     var lines = ["---"]
-    for field in fields {
-      switch field.value {
-      case .string(let string):
-        lines.append("\(field.key): \(Self.quoted(string))")
-      case .int(let int):
-        lines.append("\(field.key): \(int)")
-      case .bool(let bool):
-        lines.append("\(field.key): \(bool ? "true" : "false")")
-      case .date(let date):
-        lines.append("\(field.key): \(DateText.day(date, in: timeZone))")
-      case .dateTime(let date):
-        lines.append("\(field.key): \(DateText.dateTime(date, in: timeZone))")
-      case .list(let items):
-        if items.isEmpty {
-          lines.append("\(field.key): []")
-        } else {
-          lines.append("\(field.key):")
-          for item in items { lines.append("  - \(Self.quoted(item))") }
-        }
-      case .tags(let raw):
-        let tags = raw.compactMap(MarkdownText.tag)
-        if tags.isEmpty {
-          lines.append("\(field.key): []")
-        } else {
-          lines.append("\(field.key):")
-          for tag in tags { lines.append("  - \(tag)") }
-        }
+    for (key, value) in fields {
+      switch value {
+      case .string(let string): lines.append("\(key): \(Self.quoted(string))")
+      case .int(let int): lines.append("\(key): \(int)")
+      case .bool(let bool): lines.append("\(key): \(bool)")
+      case .date(let date): lines.append("\(key): \(DateText.day(date, in: timeZone))")
+      case .dateTime(let date): lines.append("\(key): \(DateText.dateTime(date, in: timeZone))")
+      case .list(let items): lines += Self.list(key, items.map(Self.quoted))
+      case .tags(let raw): lines += Self.list(key, raw.compactMap(MarkdownText.tag))
       }
     }
     lines.append("---")
@@ -95,7 +67,7 @@ public struct Frontmatter: Sendable, Equatable {
       case "\r": result += "\\r"
       default:
         if scalar.value < 0x20 || scalar.value == 0x7F {
-          result += "\\u" + hex4(scalar.value)
+          result += "\\u" + Timecode.pad(Int(scalar.value), width: 4, radix: 16)
         } else {
           result.unicodeScalars.append(scalar)
         }
@@ -104,8 +76,8 @@ public struct Frontmatter: Sendable, Equatable {
     return result + "\""
   }
 
-  private static func hex4(_ value: UInt32) -> String {
-    let digits = String(value, radix: 16, uppercase: true)
-    return String(repeating: "0", count: max(0, 4 - digits.count)) + digits
+  /// `key: []`, or `key:` followed by one `  - item` line each.
+  private static func list(_ key: String, _ items: [String]) -> [String] {
+    items.isEmpty ? ["\(key): []"] : ["\(key):"] + items.map { "  - \($0)" }
   }
 }

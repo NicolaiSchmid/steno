@@ -15,12 +15,7 @@ struct TasksMarkdownRenderer {
   static let closingLine = "Edit tasks in Steno; this file is rewritten on re-export."
 
   func render() -> String {
-    var frontmatter = Frontmatter(timeZone: options.timeZone)
-    frontmatter.append("title", .string("\(export.meeting.title) — Tasks"))
-    frontmatter.append("type", .string("tasks"))
-    frontmatter.append("steno_id", .string(ArtifactRenderer.stenoID(export)))
-    var parts = [frontmatter.encoded()]
-    parts.append("# \(MarkdownText.singleLine(export.meeting.title)) — Tasks\n")
+    var parts = ArtifactRenderer.noteHead(export, kind: "Tasks", options: options)
     if export.tasks.isEmpty {
       parts.append("No tasks.\n")
     } else {
@@ -32,9 +27,8 @@ struct TasksMarkdownRenderer {
 
   /// `- [ ] Angebot an ACME schicken [[Anna Müller]] #task ⏫ 📅 2026-10-01`.
   func line(_ task: MeetingTask) -> String {
-    let names = Names(export: export, options: options)
     var fields = ["- [\(task.done ? "x" : " ")] \(MarkdownText.singleLine(task.text))"]
-    if let assignee = names.assignee(task) {
+    if let assignee = Names(export: export, options: options).assignee(task) {
       fields.append(MarkdownText.singleLine(assignee))
     }
     if let tag = options.taskTag.flatMap(MarkdownText.tag) {

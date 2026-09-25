@@ -9,11 +9,9 @@ struct Names {
   let export: MeetingExport
   let options: RenderOptions
 
-  static let unknownSpeaker = "Unknown"
-
   /// The display name of a segment's speaker; `"Unknown"` for none.
   func speaker(_ speakerID: UUID?) -> String {
-    guard let speakerID else { return Self.unknownSpeaker }
+    guard let speakerID else { return "Unknown" }
     return export.displayName(forSpeaker: speakerID)
   }
 

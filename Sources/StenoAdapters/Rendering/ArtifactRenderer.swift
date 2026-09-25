@@ -26,10 +26,10 @@ public struct ArtifactRenderer: Sendable {
         data: Data(renderFolderNote(export, options: options, folderSlug: slug).utf8)),
       RenderedArtifact(
         kind: .transcript, fileName: ObsidianLayout.transcriptNote(slug: slug),
-        data: Data(renderTranscript(export, options: options, folderSlug: slug).utf8)),
+        data: Data(renderTranscript(export, options: options).utf8)),
       RenderedArtifact(
         kind: .tasks, fileName: ObsidianLayout.tasksNote(slug: slug),
-        data: Data(renderTasks(export, options: options, folderSlug: slug).utf8)),
+        data: Data(renderTasks(export, options: options).utf8)),
       RenderedArtifact(
         kind: .vtt, fileName: ObsidianLayout.vtt, data: Data(renderVTT(export).utf8)),
       RenderedArtifact(kind: .json, fileName: ObsidianLayout.json, data: try renderJSON(export)),
@@ -41,8 +41,7 @@ public struct ArtifactRenderer: Sendable {
             kind: .personPage,
             fileName: ObsidianLayout.personPage(displayName: person.displayName),
             data: Data(
-              renderPersonPage(person, export: export, options: options, folderSlug: slug).utf8),
-            personID: person.id))
+              renderPersonPage(person, export: export, options: options, folderSlug: slug).utf8)))
       }
     }
     return artifacts
@@ -61,18 +60,12 @@ public struct ArtifactRenderer: Sendable {
 
   /// One `## Name — 00:12:34` header per turn, paragraphs split at gaps of
   /// three seconds or more.
-  public func renderTranscript(
-    _ export: MeetingExport, options: RenderOptions, folderSlug: String? = nil
-  ) -> String {
+  public func renderTranscript(_ export: MeetingExport, options: RenderOptions) -> String {
     TranscriptMarkdownRenderer(export: export, options: options).render()
   }
 
   /// Obsidian Tasks lines: `- [ ] text [[Assignee]] #tag ⏫ 📅 YYYY-MM-DD`.
-  public func renderTasks(
-    _ export: MeetingExport, options: RenderOptions, folderSlug: String? = nil
-  )
-    -> String
-  {
+  public func renderTasks(_ export: MeetingExport, options: RenderOptions) -> String {
     TasksMarkdownRenderer(export: export, options: options).render()
   }
 
@@ -111,5 +104,22 @@ public struct ArtifactRenderer: Sendable {
   /// The lowercase UUID every note carries as `steno_id`.
   static func stenoID(_ export: MeetingExport) -> String {
     export.meeting.id.uuidString.lowercased()
+  }
+
+  /// The frontmatter and `# Title — Kind` heading the transcript and tasks
+  /// notes open with; `kind` is `"Transcript"` or `"Tasks"`.
+  static func noteHead(_ export: MeetingExport, kind: String, options: RenderOptions) -> [String] {
+    var frontmatter = Frontmatter(timeZone: options.timeZone)
+    frontmatter.append("title", .string("\(export.meeting.title) — \(kind)"))
+    frontmatter.append("type", .string(kind.lowercased()))
+    frontmatter.append("steno_id", .string(stenoID(export)))
+    return [
+      frontmatter.encoded(), "# \(MarkdownText.singleLine(export.meeting.title)) — \(kind)\n",
+    ]
+  }
+
+  /// Segments by start, ties broken by id so the order is total.
+  static func orderedSegments(_ export: MeetingExport) -> [TranscriptSegment] {
+    export.segments.sorted { ($0.start, $0.id.uuidString) < ($1.start, $1.id.uuidString) }
   }
 }

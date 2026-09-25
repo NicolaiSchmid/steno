@@ -27,12 +27,13 @@ struct PersonPageRenderer {
   /// `- 2026-09-24 [[2026-09-24-slug|Title]] %%steno:<meeting uuid>%%`.
   func line() -> String {
     let meeting = export.meeting
-    let target = "\(MeetingFolder.root)/\(folderSlug)/\(folderSlug)"
-    let link: String
-    switch options.linkStyle {
-    case .wikilink: link = MarkdownText.wikilink(folderSlug, alias: meeting.title)
-    case .none: link = MarkdownText.markdownLink(meeting.title, file: "/\(target).md")
-    }
+    let link =
+      switch options.linkStyle {
+      case .wikilink: MarkdownText.wikilink(folderSlug, alias: meeting.title)
+      case .none:
+        MarkdownText.markdownLink(
+          meeting.title, file: "/\(MeetingFolder.root)/\(folderSlug)/\(folderSlug).md")
+      }
     return
       "- \(DateText.day(meeting.startedAt, in: options.timeZone)) \(link) \(ManagedBlock.marker(meeting.id))"
   }

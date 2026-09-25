@@ -24,7 +24,7 @@ public struct RenderOptions: Sendable, Equatable {
     linkStyle: LinkStyle = .none,
     peopleFolder: String? = nil,
     taskTag: String? = nil,
-    timeZone: TimeZone = RenderOptions.utc
+    timeZone: TimeZone = .gmt
   ) {
     self.linkStyle = linkStyle
     self.peopleFolder = peopleFolder
@@ -34,8 +34,6 @@ public struct RenderOptions: Sendable, Equatable {
 
   /// Plain names, no people, no tag, UTC.
   public static let plain = RenderOptions()
-
-  public static let utc = TimeZone(identifier: "UTC")!
 
   /// People are linked and get pages only with wikilinks and a people
   /// folder.

@@ -55,26 +55,23 @@ struct FolderNoteRenderer {
     let end = start.addingTimeInterval(max(0, meeting.duration))
     let transcript = ObsidianLayout.transcriptNote(slug: folderSlug)
     let tasks = ObsidianLayout.tasksNote(slug: folderSlug)
-    let links: [String]
-    switch options.linkStyle {
-    case .wikilink:
-      links = [
-        MarkdownText.wikilink(String(transcript.dropLast(3)), alias: "Transcript"),
-        MarkdownText.wikilink(String(tasks.dropLast(3)), alias: "Tasks"),
-      ]
-    case .none:
-      links = [
-        MarkdownText.markdownLink("Transcript", file: transcript),
-        MarkdownText.markdownLink("Tasks", file: tasks),
-      ]
-    }
-    return [
-      "\(DateText.day(start, in: options.timeZone)) \(DateText.clock(start, in: options.timeZone))–\(DateText.clock(end, in: options.timeZone))",
-      Self.durationText(meeting.duration),
-      Self.sourceLabel(meeting.source),
-    ]
-    .appending(links)
-    .joined(separator: " · ")
+    let links =
+      switch options.linkStyle {
+      case .wikilink:
+        [
+          MarkdownText.wikilink(String(transcript.dropLast(3)), alias: "Transcript"),
+          MarkdownText.wikilink(String(tasks.dropLast(3)), alias: "Tasks"),
+        ]
+      case .none:
+        [
+          MarkdownText.markdownLink("Transcript", file: transcript),
+          MarkdownText.markdownLink("Tasks", file: tasks),
+        ]
+      }
+    let when =
+      "\(DateText.day(start, in: options.timeZone)) \(DateText.clock(start, in: options.timeZone))–\(DateText.clock(end, in: options.timeZone))"
+    return ([when, Self.durationText(meeting.duration), Self.sourceLabel(meeting.source)] + links)
+      .joined(separator: " · ")
   }
 
   /// Core renders sections as `## heading`; under `## Summary` they become
@@ -118,8 +115,4 @@ struct FolderNoteRenderer {
     case .phone: "Phone"
     }
   }
-}
-
-extension Array {
-  fileprivate func appending(_ other: [Element]) -> [Element] { self + other }
 }

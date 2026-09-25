@@ -1,22 +1,10 @@
 import Foundation
 
-/// Where a destination's bytes land, addressed by paths relative to a root.
-/// One implementation today (`LocalFolderSink`); a WebDAV sink would be the
-/// second, at which point this goes public per the two-implementations rule.
-protocol FileSink: Sendable {
-  var root: URL { get }
-  func exists(_ relativePath: String) -> Bool
-  func isDirectory(_ relativePath: String) -> Bool
-  /// nil when there is no such file.
-  func read(_ relativePath: String) throws -> Data?
-  func write(_ data: Data, to relativePath: String) throws
-  func createDirectory(_ relativePath: String) throws
-  func removeStaleTemporaries(in relativeDirectory: String)
-}
-
-/// The local file system under one folder, writing through
-/// `AtomicFileWriter`.
-struct LocalFolderSink: FileSink {
+/// The local file system under one folder, addressed by paths relative to
+/// its root and written through `AtomicFileWriter`. The destination's one
+/// seam to disk; a WebDAV sink would be the second implementation, at which
+/// point a protocol is extracted per the two-implementations rule.
+struct LocalFolderSink: Sendable {
   let root: URL
 
   func url(_ relativePath: String) -> URL {
@@ -33,6 +21,7 @@ struct LocalFolderSink: FileSink {
       && isDirectory.boolValue
   }
 
+  /// nil when there is no such file.
   func read(_ relativePath: String) throws -> Data? {
     guard exists(relativePath) else { return nil }
     return try Data(contentsOf: url(relativePath))
@@ -45,9 +34,5 @@ struct LocalFolderSink: FileSink {
   func createDirectory(_ relativePath: String) throws {
     try FileManager.default.createDirectory(
       at: url(relativePath), withIntermediateDirectories: true)
-  }
-
-  func removeStaleTemporaries(in relativeDirectory: String) {
-    AtomicFileWriter.removeStaleTemporaries(in: url(relativeDirectory))
   }
 }

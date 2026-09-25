@@ -355,14 +355,15 @@ Reviewer trap: a changed golden in `snapshots/obsidian/` without a `VERSION` bum
 Recorded 2026-09-25 while building the plan in `feat/adapters-obsidian`. Each line names what the
 code does differently from the text above and why; none widens the scope.
 
-- `Frontmatter.fields` is `[Frontmatter.Field]` (a struct with `key` and `value`) instead of a tuple
-  array, because tuples cannot be `Equatable`; the struct carries a `timeZone` for `.date` and
-  `.dateTime`, and `Value` gained `.tags([String])` so tags are emitted as sanitised plain scalars
+- `Frontmatter` is not `Equatable` (nothing compares two) and carries a `timeZone` for `.date` and
+  `.dateTime`; `Value` gained `.tags([String])` so tags are emitted as sanitised plain scalars
   (Obsidian's Tags type) while every other string stays double-quoted.
-- `ArtifactRenderer.render`, `renderFolderNote`, `renderTranscript` and `renderTasks` take an
-  optional `folderSlug`; the destination passes the pinned folder's basename on re-export so note
-  names and the info-line links follow the folder, not a changed title. `renderPersonPage(_:export:
-  options:folderSlug:)` renders a page from scratch; `renderPersonLine` is unchanged.
+- `ArtifactRenderer.render`, `renderFolderNote` and `renderPersonPage(_:export:options:folderSlug:)`
+  take an optional `folderSlug`; the destination passes the pinned folder's basename on re-export so
+  note names and the info-line links follow the folder, not a changed title. The transcript and
+  tasks notes never mention the folder, so `renderTranscript` and `renderTasks` take no slug.
+- `RenderedArtifact` has no `personID` and `Kind` has no `.audio`: the destination merges a person
+  page by its file name and copies the audio itself, so neither was ever read.
 - `ObsidianFolderDestination.init(settings:timeZone: = .current)` replaces `init(settings:
   fileManager:)`: `FileManager` is not `Sendable` in Swift 6, and the time zone is the one input the
   integration and end-to-end tests must pin. The sink stays the internal seam.

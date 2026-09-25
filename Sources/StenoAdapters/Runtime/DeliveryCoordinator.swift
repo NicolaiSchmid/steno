@@ -4,8 +4,8 @@ import StenoCore
 /// The `DeliveryDispatcher`: exports the meeting once, then runs every
 /// configured destination in order with one `Delivery` row per (meeting,
 /// destination), handing each its stored receipt as `previous`. Never
-/// throws; a failed destination is a `.failed` row and the next destination
-/// still runs. There is no separate re-export path:
+/// throws; a failed export or destination is a `.failed` row and the next
+/// destination still runs. There is no separate re-export path:
 /// `ProcessingPipeline.redeliver` calls `deliverAll` again.
 public actor DeliveryCoordinator: DeliveryDispatcher {
   let store: MeetingStore
@@ -31,22 +31,11 @@ public actor DeliveryCoordinator: DeliveryDispatcher {
     let targets = destinations(settings)
     guard !targets.isEmpty else { return [] }
     let existing = (try? await store.deliveries(meetingID: meetingID)) ?? []
-
-    let export: MeetingExport
+    let export: Result<MeetingExport, any Error>
     do {
-      export = try await store.export(meetingID: meetingID)
+      export = .success(try await store.export(meetingID: meetingID))
     } catch {
-      var failed: [Delivery] = []
-      for destination in targets {
-        let delivery = Delivery(
-          meetingID: meetingID, destinationID: destination.id,
-          status: .failed("export failed: \(String(describing: error))"),
-          lastAttemptAt: now(),
-          receipt: existing.first { $0.destinationID == destination.id }?.receipt)
-        try? await store.save(delivery)
-        failed.append(delivery)
-      }
-      return failed
+      export = .failure(error)
     }
 
     var results: [Delivery] = []
@@ -55,12 +44,17 @@ public actor DeliveryCoordinator: DeliveryDispatcher {
       var delivery = Delivery(
         meetingID: meetingID, destinationID: destination.id, status: .pending,
         lastAttemptAt: now(), receipt: previous)
-      try? await store.save(delivery)
-      do {
-        delivery.receipt = try await destination.deliver(export, previous: previous)
-        delivery.status = .delivered
-      } catch {
-        delivery.status = .failed(String(describing: error))
+      switch export {
+      case .failure(let error):
+        delivery.status = .failed("export failed: \(String(describing: error))")
+      case .success(let export):
+        try? await store.save(delivery)
+        do {
+          delivery.receipt = try await destination.deliver(export, previous: previous)
+          delivery.status = .delivered
+        } catch {
+          delivery.status = .failed(String(describing: error))
+        }
       }
       try? await store.save(delivery)
       results.append(delivery)

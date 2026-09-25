@@ -16,28 +16,22 @@ import Foundation
 /// Renderers name their artefacts through it and the destination places
 /// them; the "never delete" tests in `ObsidianDestinationIntegrationTests`
 /// are written against these names.
-public enum ObsidianLayout {
-  public static func folderNote(slug: String) -> String { "\(slug).md" }
-  public static func transcriptNote(slug: String) -> String { "\(slug) - Transcript.md" }
-  public static func tasksNote(slug: String) -> String { "\(slug) - Tasks.md" }
-  public static let vtt = "transcript.vtt"
-  public static let json = "meeting.json"
+enum ObsidianLayout {
+  static func folderNote(slug: String) -> String { "\(slug).md" }
+  static func transcriptNote(slug: String) -> String { "\(slug) - Transcript.md" }
+  static func tasksNote(slug: String) -> String { "\(slug) - Tasks.md" }
+  static let vtt = "transcript.vtt"
+  static let json = "meeting.json"
 
   /// `"audio.m4a"` for the AAC mixdown; the extension follows the mixdown
   /// file so the bytes and the name never disagree.
-  public static func audio(fileExtension: String) -> String {
+  static func audio(fileExtension: String) -> String {
     fileExtension.isEmpty ? "audio" : "audio.\(fileExtension)"
   }
 
   /// `"Anna Müller.md"`: the display name is the file name so `[[Anna
   /// Müller]]` resolves.
-  public static func personPage(displayName: String) -> String {
+  static func personPage(displayName: String) -> String {
     "\(Slug.fileName(displayName)).md"
   }
-
-  /// Temp files of the atomic writer; the only files the destination ever
-  /// removes.
-  public static let temporaryPrefix = ".steno-tmp-"
-  /// The write probe of `validate()`.
-  public static let probePrefix = ".steno-probe-"
 }

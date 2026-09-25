@@ -50,11 +50,8 @@ public struct ObsidianFolderDestination: Destination {
   /// missing `.obsidian/` is not an error: the folder may be a vault Obsidian
   /// has not opened yet.
   public func validate() async throws {
-    guard sink.isDirectory("") else { throw ObsidianError.vaultMissing(settings.vaultPath) }
-    if let peopleFolder = settings.peopleFolder {
-      try Self.checkPeopleFolder(peopleFolder)
-    }
-    let probe = "\(ObsidianLayout.probePrefix)\(AtomicFileWriter.randomHex())"
+    try checkVault()
+    let probe = ".steno-probe-\(AtomicFileWriter.randomHex())"
     do {
       try Data().write(to: sink.url(probe))
       try FileManager.default.removeItem(at: sink.url(probe))
@@ -66,10 +63,7 @@ public struct ObsidianFolderDestination: Destination {
   public func deliver(_ meeting: MeetingExport, previous: DeliveryReceipt?) async throws
     -> DeliveryReceipt
   {
-    guard sink.isDirectory("") else { throw ObsidianError.vaultMissing(settings.vaultPath) }
-    if let peopleFolder = settings.peopleFolder {
-      try Self.checkPeopleFolder(peopleFolder)
-    }
+    try checkVault()
     let folder = try resolveFolder(for: meeting, previous: previous)
     let slug = URL(fileURLWithPath: folder).lastPathComponent
     let options = RenderOptions(
@@ -79,57 +73,55 @@ public struct ObsidianFolderDestination: Destination {
     let artifacts = try renderer.render(meeting, options: options, folderSlug: slug)
 
     try wrapping(folder) { try sink.createDirectory(folder) }
-    sink.removeStaleTemporaries(in: folder)
+    AtomicFileWriter.removeStaleTemporaries(in: sink.url(folder))
     if let peopleFolder = settings.peopleFolder {
       try wrapping(peopleFolder) { try sink.createDirectory(peopleFolder) }
-      sink.removeStaleTemporaries(in: peopleFolder)
+      AtomicFileWriter.removeStaleTemporaries(in: sink.url(peopleFolder))
     }
 
     // Files from the previous receipt stay listed unless rewritten below, so
     // an opted-out audio copy or a disabled people folder keeps its entry.
-    let sameVault = previous?.root == settings.vaultPath
     var files: [String: DeliveredFile] = [:]
-    for file in (sameVault ? previous?.files : nil) ?? [] {
-      files[file.relativePath] = file
+    if let previous, previous.root == settings.vaultPath {
+      for file in previous.files { files[file.relativePath] = file }
     }
     let owned = Set(files.values.filter { $0.ownership == .owned }.map(\.relativePath))
-    let personLine = renderer.renderPersonLine(meeting, folderSlug: slug, options: options)
 
+    // Freshly rendered paths are written on first delivery and, on
+    // re-export, when the receipt lists them or nothing is there yet. A file
+    // the app never wrote is never opened for writing.
+    func writeOwned(_ path: String, _ data: Data) throws {
+      guard previous == nil || owned.contains(path) || !sink.exists(path) else { return }
+      try wrapping(path) { try sink.write(data, to: path) }
+      files[path] = DeliveredFile(
+        relativePath: path, ownership: .owned, sha256: ContentHash.sha256(data))
+    }
+
+    let personLine = renderer.renderPersonLine(meeting, folderSlug: slug, options: options)
     for artifact in artifacts {
-      switch artifact.kind {
-      case .personPage:
-        guard let peopleFolder = settings.peopleFolder else { continue }
-        let path = "\(peopleFolder)/\(artifact.fileName)"
-        let data: Data
-        if let existing = try wrapping(path, { try sink.read(path) }) {
-          let merged = ManagedBlock.merge(
-            personLine, meetingID: meeting.meeting.id,
-            into: String(decoding: existing, as: UTF8.self))
-          data = Data(merged.utf8)
-        } else {
-          data = artifact.data
-        }
-        try wrapping(path) { try sink.write(data, to: path) }
-        files[path] = DeliveredFile(
-          relativePath: path, ownership: .managedBlock, sha256: ContentHash.sha256(data))
-      default:
-        let path = "\(folder)/\(artifact.fileName)"
-        guard mayWrite(path, previous: previous, owned: owned) else { continue }
-        try wrapping(path) { try sink.write(artifact.data, to: path) }
-        files[path] = DeliveredFile(
-          relativePath: path, ownership: .owned, sha256: ContentHash.sha256(artifact.data))
+      guard artifact.kind == .personPage else {
+        try writeOwned("\(folder)/\(artifact.fileName)", artifact.data)
+        continue
       }
+      guard let peopleFolder = settings.peopleFolder else { continue }
+      let path = "\(peopleFolder)/\(artifact.fileName)"
+      var data = artifact.data
+      if let existing = try wrapping(path, { try sink.read(path) }) {
+        let merged = ManagedBlock.merge(
+          personLine, meetingID: meeting.meeting.id,
+          into: String(decoding: existing, as: UTF8.self))
+        data = Data(merged.utf8)
+      }
+      try wrapping(path) { try sink.write(data, to: path) }
+      files[path] = DeliveredFile(
+        relativePath: path, ownership: .managedBlock, sha256: ContentHash.sha256(data))
     }
 
     if settings.includeAudio {
       guard let mixdown = meeting.audio?.mixdownURL, let data = try? Data(contentsOf: mixdown)
       else { throw ObsidianError.audioUnavailable }
-      let path = "\(folder)/\(ObsidianLayout.audio(fileExtension: mixdown.pathExtension))"
-      if mayWrite(path, previous: previous, owned: owned) {
-        try wrapping(path) { try sink.write(data, to: path) }
-        files[path] = DeliveredFile(
-          relativePath: path, ownership: .owned, sha256: ContentHash.sha256(data))
-      }
+      try writeOwned(
+        "\(folder)/\(ObsidianLayout.audio(fileExtension: mixdown.pathExtension))", data)
     }
 
     return DeliveryReceipt(
@@ -163,15 +155,11 @@ public struct ObsidianFolderDestination: Destination {
     return candidate
   }
 
-  /// Freshly rendered paths are written on first delivery and, on
-  /// re-export, when the receipt lists them or nothing is there yet. A file
-  /// the app never wrote is never opened for writing.
-  func mayWrite(_ path: String, previous: DeliveryReceipt?, owned: Set<String>) -> Bool {
-    guard previous != nil else { return true }
-    return owned.contains(path) || !sink.exists(path)
-  }
-
-  static func checkPeopleFolder(_ folder: String) throws {
+  /// The vault exists and the people folder, if any, is a relative path
+  /// without `..`, `\` or empty components.
+  func checkVault() throws {
+    guard sink.isDirectory("") else { throw ObsidianError.vaultMissing(settings.vaultPath) }
+    guard let folder = settings.peopleFolder else { return }
     let trimmed = folder.trimmingCharacters(in: .whitespaces)
     let components = trimmed.split(separator: "/", omittingEmptySubsequences: false)
     guard !trimmed.isEmpty, !trimmed.hasPrefix("/"), !trimmed.contains("\\"),
@@ -182,8 +170,6 @@ public struct ObsidianFolderDestination: Destination {
   private func wrapping<T>(_ path: String, _ body: () throws -> T) throws -> T {
     do {
       return try body()
-    } catch let error as ObsidianError {
-      throw error
     } catch let failure as AtomicFileWriter.Failure {
       throw ObsidianError.writeFailed(path: failure.path, underlying: failure.underlying)
     } catch {

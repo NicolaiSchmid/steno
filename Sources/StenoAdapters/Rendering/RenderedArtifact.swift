@@ -6,19 +6,16 @@ import Foundation
 /// destination merges only the managed block into a page that exists.
 public struct RenderedArtifact: Sendable, Equatable {
   public enum Kind: String, Sendable, Equatable {
-    case folderNote, transcript, tasks, vtt, json, personPage, audio
+    case folderNote, transcript, tasks, vtt, json, personPage
   }
 
   public var kind: Kind
   public var fileName: String
   public var data: Data
-  /// The person a `.personPage` belongs to.
-  public var personID: UUID?
 
-  public init(kind: Kind, fileName: String, data: Data, personID: UUID? = nil) {
+  public init(kind: Kind, fileName: String, data: Data) {
     self.kind = kind
     self.fileName = fileName
     self.data = data
-    self.personID = personID
   }
 }

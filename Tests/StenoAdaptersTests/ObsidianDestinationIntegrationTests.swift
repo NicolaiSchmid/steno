@@ -104,7 +104,7 @@ import Testing
         "\(file.relativePath) hash")
     }
     #expect(
-      try vault.list(Self.folder).allSatisfy { !$0.hasPrefix(ObsidianLayout.temporaryPrefix) })
+      try vault.list(Self.folder).allSatisfy { !$0.hasPrefix(AtomicFileWriter.temporaryPrefix) })
   }
 
   @Test func validateRejectsMissingUnwritableAndBadPeopleFolder() async throws {

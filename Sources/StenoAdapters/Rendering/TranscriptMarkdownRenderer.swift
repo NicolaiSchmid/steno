@@ -18,13 +18,8 @@ struct TranscriptMarkdownRenderer {
 
   func render() -> String {
     let names = Names(export: export, options: options)
-    var frontmatter = Frontmatter(timeZone: options.timeZone)
-    frontmatter.append("title", .string("\(export.meeting.title) — Transcript"))
-    frontmatter.append("type", .string("transcript"))
-    frontmatter.append("steno_id", .string(ArtifactRenderer.stenoID(export)))
-    var parts = [frontmatter.encoded()]
-    parts.append("# \(MarkdownText.singleLine(export.meeting.title)) — Transcript\n")
-    let turns = Self.turns(export.segments)
+    var parts = ArtifactRenderer.noteHead(export, kind: "Transcript", options: options)
+    let turns = Self.turns(ArtifactRenderer.orderedSegments(export))
     if turns.isEmpty {
       parts.append("No transcript.\n")
     }
@@ -40,18 +35,15 @@ struct TranscriptMarkdownRenderer {
   static func turns(_ segments: [TranscriptSegment]) -> [Turn] {
     var turns: [Turn] = []
     var previousEnd: TimeInterval = 0
-    for segment in segments.sorted(by: {
-      ($0.start, $0.id.uuidString) < ($1.start, $1.id.uuidString)
-    }) {
+    for segment in segments {
       let text = MarkdownText.singleLine(segment.text)
       guard !text.isEmpty else { continue }
-      if var last = turns.last, last.speakerID == segment.speakerID {
+      if let last = turns.indices.last, turns[last].speakerID == segment.speakerID {
         if segment.start - previousEnd >= paragraphGap {
-          last.paragraphs.append(text)
+          turns[last].paragraphs.append(text)
         } else {
-          last.paragraphs[last.paragraphs.count - 1] += " " + text
+          turns[last].paragraphs[turns[last].paragraphs.count - 1] += " " + text
         }
-        turns[turns.count - 1] = last
       } else {
         turns.append(Turn(speakerID: segment.speakerID, start: segment.start, paragraphs: [text]))
       }
