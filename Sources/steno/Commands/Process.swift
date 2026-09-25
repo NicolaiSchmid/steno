@@ -50,6 +50,8 @@ struct Process: AsyncParsableCommand {
 
   @OptionGroup var database: DatabaseOptions
 
+  @OptionGroup var speech: SpeechOptions
+
   func validate() throws {
     switch source {
     case .macCall:
@@ -118,8 +120,9 @@ struct Process: AsyncParsableCommand {
     )
 
     let pipeline = ProcessingPipeline(
-      dependencies: Wiring.dependencies(
-        store: opened.store, settings: opened.settings,
+      dependencies: try Wiring.dependencies(
+        store: opened.store, settings: opened.settings, engine: speech.engine,
+        modelsDirectory: settings.modelsDirectory,
         llm: try await Wiring.llmComponents(settings: settings)))
     try await pipeline.enqueue(meeting, asset: asset)
     await pipeline.waitUntilIdle()

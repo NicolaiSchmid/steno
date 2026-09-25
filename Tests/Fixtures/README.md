@@ -7,6 +7,7 @@ case-insensitive by default.
 | Folder | Contents |
 |---|---|
 | `audio/` | Generated 16 kHz mono Int16 WAV files, each under ten seconds, listed in `MANIFEST.sha256` |
+| `speech/` | `say` output committed once (German `Anna`, English `Samantha`, 16 kHz mono Int16, under ten seconds) with a `.ref.txt` per file and its own `MANIFEST.sha256`, checked by `SpeechFixtureTests`; never regenerated because `say` output changes with macOS releases |
 | `transcripts/` | `[RawSegment]` and `[TranscriptSegment]` samples with invented text |
 | `templates/` | The bundled summary templates as `StenoJSON`, one golden per template |
 | `exports/` | The `MeetingExport` golden that is `meeting.json` |

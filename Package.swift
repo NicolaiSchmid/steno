@@ -22,6 +22,13 @@ let package = Package(
   dependencies: [
     .package(url: "https://github.com/groue/GRDB.swift.git", from: "7.11.1"),
     .package(url: "https://github.com/apple/swift-argument-parser.git", from: "1.8.2"),
+    // StenoSpeech only. FluidAudio moves fast and has broken source
+    // compatibility inside minor releases before, so it is pinned to one
+    // minor; WhisperKit follows semantic versioning.
+    .package(
+      url: "https://github.com/FluidInference/FluidAudio.git", .upToNextMinor(from: "0.17.4")),
+    .package(url: "https://github.com/argmaxinc/argmax-oss-swift.git", from: "1.1.0"),
+    // StenoHandover only.
     .package(url: "https://github.com/apple/swift-nio.git", from: "2.80.0"),
     .package(url: "https://github.com/apple/swift-nio-transport-services.git", from: "1.23.0"),
     .package(url: "https://github.com/apple/swift-certificates.git", from: "1.10.0"),
@@ -35,7 +42,14 @@ let package = Package(
       resources: [.copy("Resources/Templates")]
     ),
     .target(name: "StenoAudio", dependencies: ["StenoCore"]),
-    .target(name: "StenoSpeech", dependencies: ["StenoCore"]),
+    .target(
+      name: "StenoSpeech",
+      dependencies: [
+        "StenoCore",
+        .product(name: "FluidAudio", package: "FluidAudio"),
+        .product(name: "WhisperKit", package: "argmax-oss-swift"),
+      ]
+    ),
     .target(name: "StenoLLM", dependencies: ["StenoCore"]),
     .target(name: "StenoAdapters", dependencies: ["StenoCore"]),
     .target(
@@ -55,6 +69,7 @@ let package = Package(
       name: "steno",
       dependencies: [
         "StenoCore",
+        "StenoSpeech",
         "StenoAdapters",
         "StenoLLM",
         "StenoHandover",
@@ -86,7 +101,7 @@ let package = Package(
     .testTarget(name: "stenoTests", dependencies: ["StenoCore", "StenoLLM"]),
     .testTarget(
       name: "StenoEndToEndTests",
-      dependencies: ["StenoCore", "StenoAdapters", "StenoLLM", "StenoHandover"],
+      dependencies: ["StenoCore", "StenoSpeech", "StenoAdapters", "StenoLLM", "StenoHandover"],
       // The pinned handover client compiles the phone's evaluator (symlink);
       // it needs CryptoKit and Security, absent on Linux.
       exclude: linuxOnlyExclusions(["Support/PinnedTrustEvaluator.swift"])
