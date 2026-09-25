@@ -425,3 +425,43 @@ Recorded by the speech workstream while building steps 0 to 8 (PR #8, 2026-09-25
   message naming `STENO_MODEL_TESTS`. `stenoTests` checks `--engine` parsing, `dev models list|remove` and
   `dev bakeoff --engines` against the binary without a download. Wall-clock in `BakeoffRunner` stays on
   `ContinuousClock` and is reported, never asserted.
+- **Review application (PR #8, correctness and elegance reviews).** Corrections to the contract above:
+  - *Word boundaries.* FluidAudio 0.17.4 replaces the SentencePiece `▁` with a space before it builds a
+    `TokenTiming` (`AsrManager.normalizedTimingToken`), so `TokenAggregator` treats a leading space as the word
+    boundary and keeps the marker only for a source that does not. Step 2's "SentencePiece `▁`" wording describes
+    the model's vocabulary, not what the framework delivers.
+  - *Chunk embeddings are raw.* `embedding256` is the un-normalised WeSpeaker output (FluidAudio normalises only
+    inside its own clustering), so `ClusterEmbedding` brings every chunk to unit length before the duration-weighted
+    sum. Step 5's "L2-normalised" describes the output of the mapping, not its input.
+  - *Silence is not a failure.* `OfflineDiarizerManager.cluster` throws `OfflineDiarizationError.noSpeechDetected`
+    when no embedding survives; `FluidDiarizer.diarize` maps that, and audio under one second, to a result with no
+    clusters, so a lane nobody spoke on does not fail the meeting.
+  - *Install means complete.* `ModelStore.isInstalled` checks every `ModelAsset.requiredPaths` entry: a `.mlmodelc`
+    counts only with its root `coremldata.bin` and no `*.partial` / `*.incomplete` inside (FluidAudio's own
+    `ModelCache.incompleteFiles` rule), and WhisperKit's tokenizer under `whisperkit/models/openai/whisper-large-v3`
+    belongs to the Whisper asset, so a kill mid-bundle or before the tokenizer is repaired by the next `ensure`
+    and the first load stays offline. `ModelAsset.frameworkRoot` / `modelFolder` derive `relativePath` and
+    `requiredPaths`; `ModelStore.frameworkRoot(for:)` is what the downloaders, `WhisperKitEngine` and
+    `FluidDiarizer` hand to the frameworks, and `ModelDownloading` receives the models root.
+  - *One download chain per process.* `LiveModelDownloader`'s `DownloadSerializer` is a static: the app, the CLI
+    and the pipeline each build a `ModelStore`, and two stores must not overlap a v3 download with the
+    `parakeet-de` redirect active. `ScopedRedirect` puts back only the redirected key.
+  - *Sample clip length is core's contract.* Ten seconds (and the three-second floor) live on `SampleClipPicker`
+    only; `FluidDiarizerConfig` is back to the plan's three FluidAudio fields.
+  - *Install state is the end of the `ensure` stream*, not an `"installed"` sentinel phase; `ModelDownloadProgress`
+    carries `fractionCompleted` and `phase` only. A settings pane derives installed / downloading / absent from
+    `isInstalled` and whether its stream is still open.
+  - *One error.* `StenoSpeechError` (`unknownEngine`, `unsupportedPlatform(ModelAsset)`,
+    `incompleteDownload`, `downloadInProgress`) replaces `SpeechEngineError`, `ModelDownloadError` and
+    `ModelStoreError`; `notPrepared` was unreachable and is gone. `SpeechEngineID(settingsValue:)` parses the
+    settings string; `makeSpeechEngine` takes the id only.
+  - *Public surface* is the list in `Sources/StenoSpeech/StenoSpeech.swift`; engines, the diarizer, the
+    segmentation types, the recognisers, the layout strings and the bake-off helpers are internal.
+  - *`enroll`* normalises the sample and caps the weight, not `Person.sampleCount` (which `mergePersons` uses).
+  - *Bake-off* reports `RTFx` (audio seconds per wall second) and runs one untimed transcription per engine
+    before the timed rows so the CoreML compile never lands on the first file.
+  - *Follow-ups, not applied:* an in-flight guard in the `WhisperKitEngine` / `FluidDiarizer` actors (the boxes are
+    safe today because core's pipeline runs one lane at a time; the comments say so); `ModelHub.offlineMode`
+    around `OfflineDiarizerModels.load` (a process-wide flag that would race a concurrent `ensure`; the
+    completeness check above makes FluidAudio's self-repair moot for a complete install); splitting the remaining
+    multi-behaviour tests.
