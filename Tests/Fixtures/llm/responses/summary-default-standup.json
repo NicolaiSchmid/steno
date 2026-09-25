@@ -1,0 +1,55 @@
+{
+  "title": "Daily Standup: Onboarding, CI und Obsidian-Export",
+  "language": "de",
+  "sections": [
+    {
+      "id": "executive-summary",
+      "heading": "Executive Summary",
+      "bullets": [
+        { "lead": "Obsidian-Export", "text": "Speaker 2 übernimmt den Export nach Obsidian für die Firma Müller bis Freitag; Speaker 1 stuft ihn als high priority ein." },
+        { "lead": "Retro", "text": "Die Retro wird auf Donnerstag 14 Uhr verschoben." },
+        { "lead": "Neue Kollegin", "text": "Ab nächster Woche ist Lena im Team; Jérôme bereitet bis Mittwoch ein Onboarding-Dokument vor." }
+      ]
+    },
+    {
+      "id": "full-summary",
+      "heading": "Vollständige Zusammenfassung",
+      "bullets": [
+        { "lead": "Onboarding und Staging", "text": "Speaker 2 hat den Pull Request für das Onboarding gemerged und das Deployment auf Staging gepusht und schaut sich heute die flaky Tests in der CI-Pipeline an." },
+        { "lead": "Kubernetes", "text": "Jérôme hat das Kubernetes-Cluster auf die neue Version gezogen und schreibt heute die Dokumentation der API-Endpoints." },
+        { "lead": "Roadmap Q4", "text": "Speaker 1 hat die Roadmap für Q4 mit dem Product Owner durchgesprochen und bereitet das Sprint Review vor." }
+      ]
+    },
+    {
+      "id": "open-questions",
+      "heading": "Offene Fragen",
+      "bullets": []
+    },
+    {
+      "id": "wrap-up",
+      "heading": "Abschluss",
+      "bullets": [
+        { "lead": "Ende", "text": "Speaker 1 beendet das Standup." }
+      ]
+    }
+  ],
+  "decisions": [
+    "Der Obsidian-Export für die Firma Müller wird bis Freitag umgesetzt.",
+    "Die Retro findet am Donnerstag um 14 Uhr statt.",
+    "Die Retro findet am Donnerstag um 14 Uhr statt."
+  ],
+  "tasks": [
+    { "text": "Export nach Obsidian für die Firma Müller umsetzen.", "assignee": "Speaker 2", "priority": "high", "dueDate": "next Friday" },
+    { "text": "Zugangsdaten für das Test-Environment an Speaker 2 schicken.", "assignee": "Jérôme", "priority": "normal", "dueDate": "2026-09-24" },
+    { "text": "Onboarding-Dokument für Lena vorbereiten.", "assignee": "jérôme", "priority": "normal", "dueDate": "2026-09-30" },
+    { "text": "Beim IT-Support wegen des MacBook Pro nachfragen.", "assignee": "Mara", "priority": "low", "dueDate": null },
+    { "text": "   ", "assignee": null, "priority": "normal", "dueDate": null }
+  ],
+  "speakerNames": [
+    { "speakerLabel": "Speaker 2", "name": "Nicolai", "confidence": 0.9, "evidence": "Speaker 1: \"nicolai, willst du starten?\" — Speaker 2 antwortet." },
+    { "speakerLabel": "Speaker 2", "name": "Nico", "confidence": 0.5, "evidence": "weaker guess" },
+    { "speakerLabel": "Speaker 1", "name": "Mara", "confidence": 0.2, "evidence": "by elimination only" },
+    { "speakerLabel": "Speaker 9", "name": "Unknown", "confidence": 0.9, "evidence": "no such label" },
+    { "speakerLabel": "Speaker 3", "name": null, "confidence": 0.9, "evidence": "no name" }
+  ]
+}
