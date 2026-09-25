@@ -30,6 +30,7 @@ export type HandoverFailure =
 	| "unreachable"
 	| "unauthorized"
 	| "forbidden"
+	| "not-found"
 	| "protocol"
 	| "server";
 
@@ -90,6 +91,9 @@ export function failureFor(response: PinnedResponse): HandoverError | null {
 			403,
 			"The Mac rejected the pairing code",
 		);
+	}
+	if (response.status === 404) {
+		return new HandoverError("not-found", 404, "The Mac has no such recording");
 	}
 	return new HandoverError(
 		"server",
