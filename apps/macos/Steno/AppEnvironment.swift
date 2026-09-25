@@ -1,3 +1,4 @@
+import EventKit
 import Foundation
 import StenoAdapters
 import StenoAudio
@@ -282,13 +283,7 @@ final class AppEnvironment {
 /// One `EKEventStore` for the calendar service and the permission check.
 @MainActor
 enum SharedEventStore {
-  static let store = EventKitStore.make()
-}
-
-import EventKit
-
-enum EventKitStore {
-  static func make() -> EKEventStore { EKEventStore() }
+  static let store = EKEventStore()
 }
 
 /// StenoCore's sample meeting written into a store, the way the pipeline

@@ -37,13 +37,4 @@ final class AppEnvironmentTests: XCTestCase {
     XCTAssertEqual(untouched?.state, .ready)
   }
 
-  func testIntakeEnqueuesThroughTheCurrentPipeline() async throws {
-    let environment = try await TestSupport.environment()
-    let intake = environment.makeIntake()
-    XCTAssertNotNil(intake)
-    // The seam is exercised end to end by the handover module's tests; here
-    // the closure must resolve the pipeline without the environment leaking.
-    weak var weakEnvironment = environment
-    XCTAssertNotNil(weakEnvironment)
-  }
 }

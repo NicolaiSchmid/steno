@@ -122,13 +122,18 @@ final class MeetingDetailViewModel: Identifiable {
   func setTemplate(_ templateID: String) async {
     guard SummaryTemplate.bundled(id: templateID) != nil else { return }
     await update("Template") { $0.templateID = templateID }
-    await rerunSummary()
+    await rerunSummary(templateID: templateID)
   }
 
   func rerunSummary() async {
     guard let meeting else { return }
+    await rerunSummary(templateID: meeting.templateID)
+  }
+
+  private func rerunSummary(templateID: String) async {
+    let meetingID = id
     await run("Summary re-run") {
-      try await self.pipeline().rerunSummary(meetingID: meeting.id, templateID: meeting.templateID)
+      try await self.pipeline().rerunSummary(meetingID: meetingID, templateID: templateID)
     }
   }
 
