@@ -22,12 +22,14 @@ public enum Snapshot {
     }
   }
 
-  /// Compares `data` with `Tests/Fixtures/<relative>` byte for byte.
+  /// Compares `data` with `<root>/<relative>` byte for byte; `root` is
+  /// `Tests/Fixtures/` unless a test of this helper says otherwise.
   public static func assert(
     _ data: Data, matches relative: String,
+    root: URL = Fixtures.root,
     environment: [String: String] = ProcessInfo.processInfo.environment
   ) throws {
-    let url = Fixtures.url(relative)
+    let url = root.appendingPathComponent(relative)
     if environment[updateEnvironmentKey] == "1" {
       try FileManager.default.createDirectory(
         at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
