@@ -13,6 +13,9 @@ final class SpeakerReviewViewModel {
   struct Card: Identifiable, Equatable {
     var speaker: Speaker
     var candidates: [SpeakerMatch]
+    /// The LLM's guess from the conversation ("Speaker 2 is Jérôme"),
+    /// persisted by the summarize stage; never applied without a click.
+    var nameSuggestion: SpeakerNameSuggestion?
     var id: UUID { speaker.id }
     var clipURL: URL? { speaker.sampleClipURL }
   }
@@ -64,17 +67,31 @@ final class SpeakerReviewViewModel {
   var unresolved: [Card] { cards.filter { !skipped.contains($0.id) } }
   var isDone: Bool { unresolved.isEmpty }
 
-  /// Candidates for every card and the current people list.
+  /// Candidates and the LLM's name suggestion for every card, and the
+  /// current people list.
   func load() async {
     do {
       knownPeople = try await store.persons()
+      let suggestions = Dictionary(
+        try await store.nameSuggestions(meetingID: meetingID).map { ($0.speakerID, $0) },
+        uniquingKeysWith: { first, _ in first })
       for index in cards.indices {
+        cards[index].nameSuggestion = suggestions[cards[index].id].flatMap {
+          $0.name?.isEmpty == false ? $0 : nil
+        }
         guard let embedding = cards[index].speaker.embedding else { continue }
         cards[index].candidates = try await memory.candidates(for: embedding, limit: 5)
       }
     } catch {
       self.error = "Suggestions unavailable: \(error)"
     }
+  }
+
+  /// The LLM's guess, confirmed like a typed name (a new person, or the
+  /// existing person of that name).
+  func acceptNameSuggestion(_ id: UUID) async {
+    guard let name = cards.first(where: { $0.id == id })?.nameSuggestion?.name else { return }
+    await self.name(id, name)
   }
 
   func person(id: UUID) -> Person? {
@@ -205,10 +222,14 @@ final class SpeakerReviewViewModel {
     do {
       allSpeakers = try await store.speakers(meetingID: meetingID)
       knownPeople = try await store.persons()
-      let existing = Dictionary(uniqueKeysWithValues: cards.map { ($0.id, $0.candidates) })
+      let existing = Dictionary(uniqueKeysWithValues: cards.map { ($0.id, $0) })
       cards = allSpeakers
         .filter { !$0.assignment.isConfirmed }
-        .map { Card(speaker: $0, candidates: existing[$0.id] ?? []) }
+        .map {
+          Card(
+            speaker: $0, candidates: existing[$0.id]?.candidates ?? [],
+            nameSuggestion: existing[$0.id]?.nameSuggestion)
+        }
       skipped = skipped.intersection(cards.map(\.id))
       let ids = Set(allSpeakers.map(\.id))
       mergeTargets = mergeTargets.filter { entry in

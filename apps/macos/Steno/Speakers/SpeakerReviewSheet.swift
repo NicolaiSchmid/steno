@@ -116,6 +116,19 @@ struct SpeakerReviewSheet: View {
           }
         }
 
+        if let guess = card.nameSuggestion, let name = guess.name {
+          HStack(spacing: Theme.Space.sm) {
+            Text("The conversation suggests \(name)")
+              .font(.steno(Theme.TextSize.xs))
+              .foregroundStyle(Color.stenoForeground)
+            StatusChip(text: "\(Int(guess.confidence * 100))%", color: Color.stenoInfo)
+            Button("Use") { Task { await model.acceptNameSuggestion(card.id) } }
+              .buttonStyle(StenoSecondaryButtonStyle())
+              .accessibilityLabel("Name this speaker \(name)")
+          }
+          .help(guess.evidence)
+        }
+
         if !card.candidates.isEmpty || !model.attendees.isEmpty {
           ScrollView(.horizontal, showsIndicators: false) {
             HStack(spacing: Theme.Space.xs) {

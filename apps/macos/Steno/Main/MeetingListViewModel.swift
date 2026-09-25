@@ -112,8 +112,24 @@ final class MeetingListViewModel {
 
   // MARK: - Actions
 
-  // Deleting a meeting needs `MeetingStore.delete(meetingID:)` in StenoCore
-  // (a follow-up named in the PR); the app owns no SQL.
+  /// The meeting the view is asking the user to confirm deleting.
+  var pendingDeletion: Meeting?
+
+  /// Core's `MeetingStore.delete(meetingID:)`: rows, receipt and the
+  /// meeting's files go; a meeting still recording or processing is
+  /// refused and the reason shown. A deleted selection clears itself when
+  /// the list updates.
+  func delete(_ id: UUID) async {
+    pendingDeletion = nil
+    do {
+      try await store.delete(meetingID: id)
+      error = nil
+    } catch let failure as MeetingStoreError {
+      error = "Meeting could not be deleted: \(failure.description)"
+    } catch {
+      self.error = "Meeting could not be deleted: \(error)"
+    }
+  }
 
   /// The meeting's recording folder, for Finder.
   func revealAudio(_ id: UUID) async -> URL? {

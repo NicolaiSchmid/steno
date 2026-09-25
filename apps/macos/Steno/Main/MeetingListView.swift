@@ -1,7 +1,8 @@
 import StenoCore
 import SwiftUI
 
-/// The sidebar list with search, a state filter and a tag filter.
+/// The sidebar list with search, a state filter, a tag filter, and delete
+/// (context menu and toolbar, behind a confirmation).
 struct MeetingListView: View {
   @Bindable var model: MeetingListViewModel
 
@@ -14,6 +15,10 @@ struct MeetingListView: View {
           MeetingRow(meeting: meeting)
             .tag(meeting.id)
             .listRowSeparator(.hidden)
+            .contextMenu {
+              Button("Delete Meeting…", role: .destructive) { model.pendingDeletion = meeting }
+                .disabled(!Self.canDelete(meeting))
+            }
         }
       }
       .listStyle(.sidebar)
@@ -29,6 +34,49 @@ struct MeetingListView: View {
     }
     .searchable(text: $model.query, placement: .sidebar, prompt: "Search meetings")
     .background(Color.stenoBackground)
+    .toolbar {
+      ToolbarItem {
+        Button {
+          model.pendingDeletion = selectedMeeting
+        } label: {
+          Label("Delete Meeting", systemImage: "trash")
+        }
+        .disabled(selectedMeeting.map { !Self.canDelete($0) } ?? true)
+        .help("Delete the selected meeting and its recording")
+        .accessibilityIdentifier("delete-meeting")
+      }
+    }
+    .confirmationDialog(
+      "Delete “\(model.pendingDeletion?.title ?? "")”?",
+      isPresented: Binding(
+        get: { model.pendingDeletion != nil },
+        set: { if !$0 { model.pendingDeletion = nil } }),
+      titleVisibility: .visible
+    ) {
+      Button("Delete", role: .destructive) {
+        guard let meeting = model.pendingDeletion else { return }
+        Task { await model.delete(meeting.id) }
+      }
+      Button("Cancel", role: .cancel) { model.pendingDeletion = nil }
+    } message: {
+      Text(
+        "The transcript, summary, tasks and the recording on this Mac are removed. Files already exported to Obsidian stay. People stay."
+      )
+    }
+  }
+
+  private var selectedMeeting: Meeting? {
+    guard let selection = model.selection else { return nil }
+    return model.all.first { $0.id == selection }
+  }
+
+  /// The store refuses while the capture writer or the pipeline holds the
+  /// meeting's files; the controls say so before the attempt.
+  static func canDelete(_ meeting: Meeting) -> Bool {
+    switch meeting.state {
+    case .recording, .processing: false
+    case .queued, .ready, .failed: true
+    }
   }
 
   private var filters: some View {

@@ -159,6 +159,42 @@ final class SpeakerReviewViewModelTests: XCTestCase {
     XCTAssertTrue(model.mergeTargets.isEmpty, "the merged card's choice is gone")
   }
 
+  /// The LLM's persisted guess shows on the card and is applied only on
+  /// request, as a typed name would be; a blank guess shows nothing.
+  func testLLMNameSuggestionShowsAndNamesOnRequest() async throws {
+    let environment = try await TestSupport.environment()
+    let meetingOptional = try await environment.store.meeting(id: SampleData.meetingID)
+    let meeting = try XCTUnwrap(meetingOptional)
+    try await environment.store.replaceSummary(
+      meeting, tasks: SampleData.tasks(), decisions: SampleData.decisions().map(\.text),
+      speakerNames: [
+        SpeakerNameSuggestion(
+          speakerID: SampleData.speakerTwoID, name: "Anna", confidence: 0.8,
+          evidence: "Nicolai says 'danke, Anna' at 00:02"),
+        SpeakerNameSuggestion(
+          speakerID: SampleData.speakerOneID, name: nil, confidence: 0, evidence: ""),
+      ])
+    let model = try await makeModel(environment)
+    let card = try XCTUnwrap(model.unresolved.first)
+    XCTAssertEqual(card.nameSuggestion?.name, "Anna")
+    XCTAssertEqual(card.nameSuggestion?.confidence, 0.8)
+    let speakers = try await environment.store.speakers(meetingID: SampleData.meetingID)
+    XCTAssertEqual(
+      speakers.first { $0.id == SampleData.speakerTwoID }?.assignment,
+      .suggested(personID: SampleData.personJeromeID, similarity: 0.72),
+      "showing the guess applies nothing")
+
+    await model.acceptNameSuggestion(card.id)
+    XCTAssertNil(model.error, model.error ?? "")
+    XCTAssertTrue(model.isDone)
+    let after = try await environment.store.speakers(meetingID: SampleData.meetingID)
+    let personID = try XCTUnwrap(after.first { $0.id == SampleData.speakerTwoID }?.personID)
+    let person = try await environment.store.person(id: personID)
+    XCTAssertEqual(person?.displayName, "Anna")
+    let remaining = try await environment.store.nameSuggestions(meetingID: SampleData.meetingID)
+    XCTAssertFalse(remaining.contains { $0.speakerID == SampleData.speakerTwoID })
+  }
+
   func testPlayingAMissingClipReportsAnError() async throws {
     let environment = try await TestSupport.environment()
     let model = try await makeModel(environment)

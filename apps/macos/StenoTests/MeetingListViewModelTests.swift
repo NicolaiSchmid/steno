@@ -40,6 +40,44 @@ final class MeetingListViewModelTests: XCTestCase {
     XCTAssertEqual(model.selection, SampleData.meetingID)
   }
 
+  /// Delete goes through core: the meeting and its asset go, the selection
+  /// clears with the list, and a meeting still processing is refused with
+  /// the store's reason.
+  func testDeleteRemovesTheMeetingAndRefusesABusyOne() async throws {
+    let environment = try await TestSupport.environment()
+    var processing = SampleData.meeting(state: .processing)
+    processing.id = UUID()
+    processing.title = "Still processing"
+    try await environment.store.save(processing)
+    let model = MeetingListViewModel(store: environment.store, clock: ManualClock())
+    let observing = Task { await model.observe() }
+    defer { observing.cancel() }
+    await TestSupport.waitUntil("two meetings") { model.meetings.count == 2 }
+
+    XCTAssertTrue(MeetingListView.canDelete(SampleData.meeting(state: .ready)))
+    XCTAssertTrue(MeetingListView.canDelete(SampleData.meeting(state: .failed(reason: "x"))))
+    XCTAssertFalse(MeetingListView.canDelete(processing))
+    XCTAssertFalse(MeetingListView.canDelete(SampleData.meeting(state: .recording)))
+
+    await model.delete(processing.id)
+    XCTAssertEqual(model.error?.hasPrefix("Meeting could not be deleted:"), true, model.error ?? "")
+    XCTAssertEqual(model.meetings.count, 2, "a busy meeting stays")
+
+    model.selection = SampleData.meetingID
+    model.pendingDeletion = model.all.first { $0.id == SampleData.meetingID }
+    await model.delete(SampleData.meetingID)
+    XCTAssertNil(model.error)
+    XCTAssertNil(model.pendingDeletion)
+    await TestSupport.waitUntil("the meeting left the list") { model.meetings.count == 1 }
+    XCTAssertNil(model.selection, "the deleted selection clears")
+    let gone = try await environment.store.meeting(id: SampleData.meetingID)
+    XCTAssertNil(gone)
+    let asset = try await environment.store.asset(meetingID: SampleData.meetingID)
+    XCTAssertNil(asset)
+    let people = try await environment.store.persons()
+    XCTAssertEqual(people.count, 2, "people stay")
+  }
+
   func testSearchDebouncesOnTheClockAndUsesFTS() async throws {
     let environment = try await TestSupport.environment()
     let clock = ManualClock()
