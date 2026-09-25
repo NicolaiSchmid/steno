@@ -38,6 +38,8 @@ final class AppEnvironment {
   /// Rebuilt by `reloadPipeline()` when the speech engine or the LLM
   /// endpoint changes in Settings, so neither needs a relaunch.
   private(set) var pipeline: ProcessingPipeline
+  /// Pipelines `reloadPipeline()` retired, kept alive until their runs end.
+  private var draining: [ObjectIdentifier: ProcessingPipeline] = [:]
   private let makeDependencies: MakeDependencies
   /// nil when the handover identity could not be created (locked keychain);
   /// the Phones settings say so.
@@ -97,14 +99,22 @@ final class AppEnvironment {
     return current
   }
 
-  /// Waits for the current pipeline to go idle, then replaces it with one
-  /// built from the stored settings and the keychain's API key.
+  /// Replaces the pipeline with one built from the stored settings and the
+  /// keychain's API key. The swap comes first, so a Save never waits for a
+  /// run in progress and every later `enqueue` lands on the replacement; the
+  /// retired pipeline is retained until it is idle, so meetings in flight
+  /// finish on the dependencies they started with.
   func reloadPipeline() async throws {
     let settings = try await settings.load()
     let apiKey = try await secrets.secret(for: .llmAPIKey)
     let replacement = ProcessingPipeline(dependencies: try makeDependencies(settings, apiKey))
-    await pipeline.waitUntilIdle()
+    let retired = pipeline
     pipeline = replacement
+    draining[ObjectIdentifier(retired)] = retired
+    Task { [weak self] in
+      await retired.waitUntilIdle()
+      self?.draining[ObjectIdentifier(retired)] = nil
+    }
   }
 
   /// StenoCore's sweep; the app owns no deletion code. Runs at launch and
@@ -211,14 +221,18 @@ final class AppEnvironment {
   /// permission granted. No file outside a fresh temporary directory, no
   /// network, no prompts. `handover` stays nil unless a test passes one;
   /// tests that need a failing or device-losing capture pass
-  /// `makeCaptureSession`, and drive the detector through `processActivity`.
+  /// `makeCaptureSession`, drive the detector through `processActivity`,
+  /// gate the pipeline through `makeSpeechEngine` (called once per pipeline
+  /// build) and the recording start through `calendar`.
   static func preview(
     clock: any Clock<Duration> = ContinuousClock(),
     now: @escaping @Sendable () -> Date = Date.init,
     handover: HandoverService? = nil,
     seed: Bool = true,
     makeCaptureSession: MakeCaptureSession? = nil,
-    processActivity: FakeProcessAudioActivity = FakeProcessAudioActivity()
+    processActivity: FakeProcessAudioActivity = FakeProcessAudioActivity(),
+    makeSpeechEngine: @escaping @Sendable () -> any SpeechEngine = { FakeSpeechEngine() },
+    calendar: (any CalendarProviding)? = nil
   ) async throws -> AppEnvironment {
     let root = FileManager.default.temporaryDirectory
       .appendingPathComponent("steno-preview-\(UUID().uuidString)", isDirectory: true)
@@ -239,7 +253,7 @@ final class AppEnvironment {
     let makeDependencies: MakeDependencies = { _, _ in
       PipelineDependencies(
         decoder: AVFoundationAudioCodec(),
-        speechEngine: FakeSpeechEngine(),
+        speechEngine: makeSpeechEngine(),
         diarizer: FakeDiarizer(),
         speakerMemory: memory,
         cleaner: PassthroughCleaner(),
@@ -271,7 +285,7 @@ final class AppEnvironment {
       speakerMemory: memory,
       handover: handover,
       sweep: RetentionSweep(store: store),
-      calendar: FakeCalendar(),
+      calendar: calendar ?? FakeCalendar(),
       loginItem: FakeLoginItem(),
       permissions: FakePermissions.allGranted(),
       updater: FakeUpdater(),

@@ -5,8 +5,11 @@ import StenoCore
 
 /// Subscribes to `MeetingDetector.events`, resolves the bundle id to an app
 /// name and shows one prompt at a time. Suppressed while Steno records and
-/// when `Settings.meetingDetectionEnabled` is off; the detector itself is
-/// stopped while recording so it never reports Steno's own tap.
+/// when `Settings.meetingDetectionEnabled` is off. The detector keeps
+/// running through Steno's own recordings: it ignores Steno's PID, and
+/// `handle` drops events while recording, so a Stop during a call that is
+/// still holding the microphone never re-prompts (a restarted detector
+/// would report that microphone as newly opened).
 @MainActor
 @Observable
 final class DetectionController {
@@ -52,21 +55,17 @@ final class DetectionController {
     guard enabled != self.enabled else { return }
     self.enabled = enabled
     if enabled {
-      if !isRecording { await startDetector() }
+      await startDetector()
     } else {
       await stopDetector()
       await prompt?.dismiss()
     }
   }
 
+  /// A recording starting dismisses the prompt; the detector runs on.
   func recordingDidChange(_ recording: Bool) async {
     isRecording = recording
-    if recording {
-      await prompt?.dismiss()
-      await stopDetector()
-    } else if enabled {
-      await startDetector()
-    }
+    if recording { await prompt?.dismiss() }
   }
 
   /// The decision the tests pin: an opened microphone shows a prompt only

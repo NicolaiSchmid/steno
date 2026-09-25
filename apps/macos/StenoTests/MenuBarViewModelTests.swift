@@ -75,6 +75,21 @@ final class MenuBarViewModelTests: XCTestCase {
     await model.stop()
   }
 
+  /// Retention is read when the recording stops, so a setting changed during
+  /// the meeting applies to that meeting.
+  func testRetentionChangedDuringTheRecordingAppliesToIt() async throws {
+    let environment = try await TestSupport.environment(seed: false)
+    let model = MenuBarViewModel(environment: environment)
+    await model.start(mode: .call)
+    try await environment.updateSettings { $0.defaultRetention = .deleteAfterProcessing }
+    await model.stop()
+    let meetingID = try XCTUnwrap(model.lastStoppedMeetingID)
+    let assetOptional = try await environment.store.asset(meetingID: meetingID)
+    let asset = try XCTUnwrap(assetOptional)
+    XCTAssertEqual(asset.retention, .deleteAfterProcessing)
+    await environment.pipeline.waitUntilIdle()
+  }
+
   func testStartWhileRecordingIsIgnored() async throws {
     let environment = try await TestSupport.environment(seed: false)
     let model = MenuBarViewModel(environment: environment)

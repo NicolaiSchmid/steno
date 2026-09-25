@@ -111,8 +111,11 @@ final class AppController {
     try? await handover.start()
   }
 
+  /// Quit: a recording that is still starting is allowed to reach
+  /// `.recording` (or fail) first, then stopped and enqueued like any other.
   func shutdown() async {
-    if menuBar.isRecording { await menuBar.stop() }
+    await menuBar.awaitSettled()
+    if case .recording = menuBar.recording { await menuBar.stop() }
     await detection.stop()
     if let handover = environment.handover { await handover.stop() }
   }

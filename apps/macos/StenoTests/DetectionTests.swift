@@ -74,21 +74,75 @@ final class DetectionTests: XCTestCase {
     await controller.stop()
   }
 
-  func testControllerFollowsTheDetectorEvents() async throws {
+  func testRecordingKeepsTheDetectorRunningAndDismissesThePrompt() async throws {
     let clock = ManualClock()
     let environment = try await TestSupport.environment(clock: clock, seed: false)
     let controller = DetectionController(environment: environment)
     controller.appName = { $0 ?? "?" }
     await controller.applySettings()
     XCTAssertTrue(controller.enabled, "the default setting is on")
-    let running = await environment.detector.isRunning
+    var running = await environment.detector.isRunning
     XCTAssertTrue(running)
+    await controller.handle(.microphoneOpened(bundleID: "us.zoom.xos", pid: 42))
+    XCTAssertNotNil(controller.prompt)
+
     await controller.recordingDidChange(true)
-    let stopped = await environment.detector.isRunning
-    XCTAssertFalse(stopped, "the detector is off while Steno records")
+    XCTAssertNil(controller.prompt, "a recording starting takes the prompt down")
+    running = await environment.detector.isRunning
+    XCTAssertTrue(running, "the detector is never stopped for Steno's own recording")
     await controller.recordingDidChange(false)
-    let restarted = await environment.detector.isRunning
-    XCTAssertTrue(restarted)
+    running = await environment.detector.isRunning
+    XCTAssertTrue(running)
+    await controller.stop()
+  }
+
+  /// The user records the call the prompt announced, then presses Stop while
+  /// the other app still holds the microphone: nothing new happened, so no
+  /// prompt. (A detector restarted at Stop would report that microphone as
+  /// freshly opened after its debounce.)
+  func testStopDuringAStillOpenMicrophoneDoesNotRePrompt() async throws {
+    let clock = ManualClock()
+    let activity = FakeProcessAudioActivity()
+    let environment = try await TestSupport.environment(
+      clock: clock, seed: false, processActivity: activity)
+    let controller = DetectionController(environment: environment)
+    controller.appName = { $0 ?? "?" }
+    controller.startRecording = { [weak controller] in
+      await controller?.recordingDidChange(true)
+    }
+    await controller.applySettings()
+    await TestSupport.waitUntil("poll armed") { clock.pendingSleepers == 1 }
+
+    activity.set([ProcessAudioActivity(pid: 4242, bundleID: "us.zoom.xos", isRunningInput: true)])
+    await TestSupport.waitUntil("debounce armed") { clock.pendingSleepers == 2 }
+    for _ in 0..<2 {
+      clock.advance(by: .seconds(1))
+      await TestSupport.waitUntil("sleepers re-armed") { clock.pendingSleepers >= 1 }
+    }
+    let prompt = try XCTUnwrap(controller.prompt, "Zoom's microphone prompts once")
+    await prompt.start()
+    XCTAssertNil(controller.prompt)
+    XCTAssertTrue(controller.isRecording)
+
+    // Stop while Zoom still holds the input, then let several polls and a
+    // full debounce pass.
+    await controller.recordingDidChange(false)
+    for _ in 0..<4 {
+      _ = await clock.waitForSleepers(1)
+      clock.advance(by: .seconds(1))
+      await TestSupport.waitUntil("poll re-armed") { clock.pendingSleepers >= 1 }
+    }
+    XCTAssertNil(controller.prompt, "the microphone was open all along; no second prompt")
+
+    // Releasing and reopening it is a new call and prompts again.
+    activity.set([])
+    await TestSupport.waitUntil("release debounce armed") { clock.pendingSleepers == 2 }
+    clock.advance(by: .seconds(2))
+    await TestSupport.waitUntil("released") { clock.pendingSleepers == 1 }
+    activity.set([ProcessAudioActivity(pid: 4242, bundleID: "us.zoom.xos", isRunningInput: true)])
+    await TestSupport.waitUntil("debounce armed again") { clock.pendingSleepers == 2 }
+    clock.advance(by: .seconds(2))
+    await TestSupport.waitUntil("second call prompts") { controller.prompt != nil }
     await controller.stop()
   }
 

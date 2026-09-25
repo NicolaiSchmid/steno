@@ -29,11 +29,18 @@ final class MenuBarViewModel {
     var session: CaptureSession
     var meetingID: UUID
     var mode: CaptureMode
-    var settings: Settings
     var observers: [Task<Void, Never>]
   }
 
-  private(set) var recording: RecordingState = .idle
+  private(set) var recording: RecordingState = .idle {
+    didSet {
+      guard recording != .starting, recording != .stopping else { return }
+      let waiters = settledWaiters
+      settledWaiters = []
+      for waiter in waiters { waiter.resume() }
+    }
+  }
+  private var settledWaiters: [CheckedContinuation<Void, Never>] = []
   private(set) var levels: LaneLevels?
   private(set) var queue: [QueueItem] = []
   private(set) var recent: [Meeting] = []
@@ -135,8 +142,7 @@ final class MenuBarViewModel {
       }
       await recordingDidChange?(true)
       try await session.start(meetingID: meetingID)
-      var active = Active(
-        session: session, meetingID: meetingID, mode: mode, settings: settings, observers: [])
+      var active = Active(session: session, meetingID: meetingID, mode: mode, observers: [])
       active.observers = observe(session)
       self.active = active
       recording = .recording(since: startedAt)
@@ -150,7 +156,8 @@ final class MenuBarViewModel {
     }
   }
 
-  /// Stops the recording, sets retention from the settings, writes the final
+  /// Stops the recording, sets retention from the settings as they are now
+  /// (a change made during the recording applies to it), writes the final
   /// duration and enqueues the meeting. After a device loss the session hands
   /// back the partial recording, which is enqueued like any other.
   func stop() async {
@@ -159,7 +166,7 @@ final class MenuBarViewModel {
     do {
       let result = try await active.session.stop()
       var asset = result.asset
-      asset.retention = active.settings.defaultRetention
+      asset.retention = try await environment.settings.load().defaultRetention
       asset.expiresAt = nil
       let meeting = try await environment.store.update(
         meetingID: active.meetingID, now: environment.now()
@@ -195,6 +202,14 @@ final class MenuBarViewModel {
     case .recording: await stop()
     case .starting, .stopping: break
     }
+  }
+
+  /// Returns once no `start()` or `stop()` is in flight, so a quit during
+  /// the start window can finish the capture instead of leaving its threads
+  /// running and the master unfinalised.
+  func awaitSettled() async {
+    guard recording == .starting || recording == .stopping else { return }
+    await withCheckedContinuation { settledWaiters.append($0) }
   }
 
   private func observe(_ session: CaptureSession) -> [Task<Void, Never>] {

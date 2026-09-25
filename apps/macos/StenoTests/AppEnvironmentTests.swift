@@ -37,26 +37,48 @@ final class AppEnvironmentTests: XCTestCase {
     XCTAssertEqual(untouched?.state, .ready)
   }
 
-  func testReloadPipelineWaitsForTheInFlightMeeting() async throws {
-    let environment = try await TestSupport.environment(seed: false)
+  /// Save in the LLM or Speech settings while a meeting is processing: the
+  /// swap is immediate, the next recording lands on the new pipeline, and
+  /// the meeting in flight still finishes on the old one.
+  func testReloadPipelineSwapsFirstAndLetsTheOldOneFinish() async throws {
+    let gate = Gate()
+    let firstBuild = OnceFlag()
+    let environment = try await TestSupport.environment(
+      seed: false,
+      makeSpeechEngine: { () -> any SpeechEngine in
+        firstBuild.take() ? GatedSpeechEngine(gate: gate) : FakeSpeechEngine()
+      })
     let model = MenuBarViewModel(environment: environment)
     await model.start(mode: .call)
     await model.stop()
-    let meetingID = try XCTUnwrap(model.lastStoppedMeetingID)
-    let before = environment.pipeline
+    let first = try XCTUnwrap(model.lastStoppedMeetingID)
+    let retired = environment.pipeline
+    await TestSupport.waitUntil("the first meeting is processing on the old pipeline") {
+      (try? await environment.store.meeting(id: first))?.state == .processing
+    }
 
-    // The old pipeline is processing the recording right now; the reload
-    // returns only once it is idle, so the meeting is final at that point.
-    try await environment.reloadPipeline()
-    XCTAssertFalse(before === environment.pipeline)
-    let storedOptional = try await environment.store.meeting(id: meetingID)
-    let stored = try XCTUnwrap(storedOptional)
-    XCTAssertEqual(stored.state, .ready, "the in-flight meeting finished before the swap")
+    var reloaded = false
+    let reload = Task {
+      try await environment.reloadPipeline()
+      reloaded = true
+    }
+    await TestSupport.waitUntil("the reload returned while the old pipeline was busy") { reloaded }
+    try await reload.value
+    XCTAssertFalse(retired === environment.pipeline)
 
-    // The replacement serves the next request.
-    try await environment.pipeline.rerunSummary(meetingID: meetingID, templateID: "interview")
-    let rerun = try await environment.store.meeting(id: meetingID)
-    XCTAssertEqual(rerun?.summary?.templateID, "interview")
+    await model.start(mode: .inPerson)
+    await model.stop()
+    let second = try XCTUnwrap(model.lastStoppedMeetingID)
+    await environment.pipeline.waitUntilIdle()
+    let secondStored = try await environment.store.meeting(id: second)
+    XCTAssertEqual(secondStored?.state, .ready, "enqueued after the swap: the new pipeline ran it")
+    let firstStored = try await environment.store.meeting(id: first)
+    XCTAssertEqual(firstStored?.state, .processing, "the old pipeline is still held at the gate")
+
+    await gate.open()
+    await retired.waitUntilIdle()
+    let firstFinished = try await environment.store.meeting(id: first)
+    XCTAssertEqual(firstFinished?.state, .ready, "the retired pipeline stayed alive to finish it")
   }
 
   func testUpdateSettingsLoadsMutatesAndSaves() async throws {

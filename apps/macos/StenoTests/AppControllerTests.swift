@@ -148,7 +148,7 @@ final class AppControllerTests: XCTestCase {
     await controller.shutdown()
   }
 
-  func testDetectionPromptStartsACallRecordingAndPausesTheDetector() async throws {
+  func testDetectionPromptStartsACallRecordingWhileTheDetectorRunsOn() async throws {
     let environment = try await TestSupport.environment(seed: false)
     let controller = try makeController(environment)
     controller.detection.appName = { $0 ?? "?" }
@@ -166,7 +166,7 @@ final class AppControllerTests: XCTestCase {
       return XCTFail("the prompt's Start should record, got \(controller.menuBar.recording)")
     }
     running = await environment.detector.isRunning
-    XCTAssertFalse(running, "the detector never sees Steno's own tap")
+    XCTAssertTrue(running, "the detector keeps its view of the open microphone")
     let meetings = try await environment.store.meetings()
     XCTAssertEqual(meetings.map(\.source), [.macCall])
 
@@ -175,7 +175,7 @@ final class AppControllerTests: XCTestCase {
 
     await controller.menuBar.stop()
     running = await environment.detector.isRunning
-    XCTAssertTrue(running, "the detector resumes after the recording")
+    XCTAssertTrue(running, "still running after the recording")
     let meetingID = try XCTUnwrap(controller.menuBar.lastStoppedMeetingID)
     await environment.pipeline.waitUntilIdle()
     let stored = try await environment.store.meeting(id: meetingID)
@@ -195,5 +195,36 @@ final class AppControllerTests: XCTestCase {
     XCTAssertNotNil(controller.menuBar.lastStoppedMeetingID, "quitting keeps the recording")
     let running = await environment.detector.isRunning
     XCTAssertFalse(running)
+  }
+
+  /// Quit during the start window (calendar lookup, row write, `session
+  /// .start`): the capture is allowed to come up and is then stopped and
+  /// enqueued, instead of the process exiting with the writer threads live.
+  func testShutdownWhileStartingFinishesTheCapture() async throws {
+    let gate = Gate()
+    let environment = try await TestSupport.environment(
+      seed: false, calendar: GatedCalendar(gate: gate))
+    let controller = try makeController(environment)
+    await controller.launch()
+
+    let starting = Task { await controller.menuBar.start(mode: .call) }
+    await TestSupport.waitUntil("the start is waiting on the calendar") {
+      controller.menuBar.recording == .starting
+    }
+    let shutdown = Task { await controller.shutdown() }
+    await TestSupport.settle()
+    await gate.open()
+    await starting.value
+    await shutdown.value
+
+    XCTAssertEqual(controller.menuBar.recording, .idle, "quit stopped the capture it waited for")
+    let meetings = try await environment.store.meetings()
+    XCTAssertEqual(meetings.count, 1)
+    XCTAssertNotEqual(meetings.first?.state, .recording, "the row left the recording state")
+    XCTAssertFalse(
+      meetings.first?.state.isFailed ?? true, String(describing: meetings.first?.state))
+    await environment.pipeline.waitUntilIdle()
+    let stored = try await environment.store.meeting(id: meetings[0].id)
+    XCTAssertEqual(stored?.state, .ready, "the recording was enqueued and processed")
   }
 }
