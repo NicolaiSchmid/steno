@@ -110,7 +110,7 @@ public enum CodecError: Error, Sendable, Equatable, CustomStringConvertible {
       }
       while true {
         var error: NSError?
-        let status = converter.convert(to: output, error: &error, withInputBlock: input)
+        let status = converter.convert(to: output, error: &error, withInputFrom: input)
         if let readError { throw readError }
         if let error { throw CodecError.conversionFailed(error.localizedDescription) }
         if output.frameLength > 0 {
