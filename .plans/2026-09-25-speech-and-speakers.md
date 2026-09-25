@@ -335,8 +335,8 @@ Reviewer trap: a `Package.resolved` bump of a model package without a sentence i
   ranges, embedding, clusterConfidence, sampleClipRange), `RawSegment.language` and `wordTimings`, `AudioBuffer16k.samples`,
   `AudioDecoder`, `MeetingStore` (persons, save), `Settings.speechEngineID` / `speakerMatchThreshold` / `modelsDirectory`, the
   `steno` root command and `dev` group, `Wiring.swift` accepting the `--engine` edit, `Tests/StenoEndToEndTests`.
-- StenoAudio: `AVFoundationAudioCodec` for the bake-off's `m4a|mp3|caf` inputs.
-- StenoLLM: `LLMTranscriptCleaner` for `--cleanup`.
+- StenoAudio: `AVFoundationAudioCodec` for the bake-off's `m4a|mp3|caf` inputs. Delivered; wired in issue #33.
+- StenoLLM: `LLMTranscriptCleaner` for `--cleanup`. Delivered; wired in issue #33.
 - macOS app: the speaker review sheet calls `candidates(for:limit:)`, `MeetingStore.confirm` and `mergePersons`, and plays
   `Speaker.sampleClipURL`; the settings pane exposes engine choice, threshold and `ModelStore` actions with progress; the
   archive signs FluidAudio's binary target.
@@ -347,6 +347,11 @@ Reviewer trap: a `Package.resolved` bump of a model package without a sentence i
 - `parakeet-ultra` and `parakeet-de` as user-selectable engines; bake-off entrants only until the result plan says otherwise.
 - Diarization clustering threshold as a user setting; it stays a `FluidDiarizerConfig` constant.
 - Custom vocabulary boosting (FluidAudio CTC rescoring).
+- Endpoint flags on `steno dev bakeoff --cleanup` (`--base-url`, `--model` as `steno dev llm` has them); the bake-off
+  reads the stored settings only, so a run reflects what the app would do.
+- An `[opt-in: STENO_MODEL_TESTS]` bake-off over an `.m4a` fixture built in setup (issue #33's second test):
+  `StenoSpeechTests` does not depend on StenoAudio, and the `stenoTests` codec coverage runs on CI without models.
+  The first real run over the fixture folder is recorded in PR #81.
 
 ## Deviations (implementation)
 
@@ -387,8 +392,15 @@ Recorded by the speech workstream while building steps 0 to 8 (PR #8, 2026-09-25
 - **`--engine` touches two core files, not one.** `Wiring.swift` gains `SpeechOptions` and the `engine:` and
   `modelsDirectory:` parameters of `dependencies`; `Process.swift` needs one `@OptionGroup` line and passes both
   through. Without `--engine` the fakes run as before, so `stenoTests` are unchanged.
-- **Bake-off CLI input is WAV only** until StenoAudio's codec exists (`BakeoffRunner` takes any `AudioDecoder`; the
-  CLI passes `WAVAudioDecoder`). `--cleanup` is not a flag yet; the runner's `cleaner` seam is there for StenoLLM.
+- **Bake-off CLI input was WAV only** until StenoAudio's codec existed (`BakeoffRunner` takes any `AudioDecoder`; the
+  CLI passed `WAVAudioDecoder`), and `--cleanup` was not a flag yet. Both resolved by issue #33 (PR #81): the CLI
+  decodes through `AVFoundationAudioCodec` (`wav|m4a|mp3|caf`, any sample rate, channel 0), `--cleanup` builds
+  `LLMTranscriptCleaner` from the stored settings through `Wiring.llmComponents` and the table gains "WER (cleaned)"
+  and "Cleanup requests" (`BakeoffRow.cleanupRequests`), `--json` prints `report.json`. Without an endpoint,
+  `--cleanup` prints one notice on stderr and runs without cleanup (the issue said exit 2; a bake-off without cleanup
+  is still a useful run and the missing column is visible in the table). The hidden `--fake-engines` switch runs
+  core's `FakeSpeechEngine` under each id so `stenoTests` covers decoding, cleanup and JSON against the binary
+  without a model.
 - **Linux builds.** Every file that imports FluidAudio or WhisperKit is wrapped in `#if canImport(...)`, and
   `LanguageTagger` falls back from NaturalLanguage to function words, so the pure logic builds and runs in the
   Linux container (FluidAudio 0.17.4 itself does not compile on Linux, so the local loop strips the two framework

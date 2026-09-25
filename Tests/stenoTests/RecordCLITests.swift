@@ -33,24 +33,42 @@ import Testing
     process.standardError = Pipe()
     let layout = RecordingLayout(audioFolder: audio, meetingID: meetingID)
     try process.run()
-    // The two seconds count from when the recorder has opened its master,
-    // not from `run()`: a freshly linked debug binary takes about a second
-    // to start on the self-hosted runner, which left 0.98 s of audio.
-    let started = ContinuousClock.now
-    while !FileManager.default.fileExists(atPath: layout.master(.caf48kFloat32).path) {
-      try #require(ContinuousClock.now - started < .seconds(20), "the recorder never started")
+    // A failed wait below must not leave the recorder running into the
+    // temporary home while it is removed.
+    defer { if process.isRunning { kill(process.processIdentifier, SIGKILL) } }
+    // The clock starts when the recorder has opened its master, not at
+    // `run()`: a freshly linked debug binary takes about a second to start
+    // on the self-hosted runner. Then kill once the master holds a second of
+    // audio rather than after a fixed sleep; the point is what a killed
+    // recorder leaves behind, not how fast it started or wrote.
+    let masterURL = layout.master(.caf48kFloat32)
+    let launched = ContinuousClock.now
+    while !FileManager.default.fileExists(atPath: masterURL.path) {
+      try #require(ContinuousClock.now - launched < .seconds(20), "the recorder never started")
       Thread.sleep(forTimeInterval: 0.02)
     }
-    Thread.sleep(forTimeInterval: 2)
+    let oneSecond = CAFStreamWriter.headerSize + 48_000 * 2 * CAFStreamWriter.bytesPerSample
+    let opened = ContinuousClock.now
+    while Self.fileSize(masterURL) < oneSecond {
+      try #require(
+        ContinuousClock.now - opened < .seconds(10),
+        "the master holds \(Self.fileSize(masterURL)) bytes after 10 s, under a second of audio")
+      Thread.sleep(forTimeInterval: 0.05)
+    }
     kill(process.processIdentifier, SIGKILL)
     process.waitUntilExit()
     #expect(process.terminationStatus != 0)
 
-    let master = try CAFFile.read(layout.master(.caf48kFloat32))
+    let master = try CAFFile.read(masterURL)
     #expect(master.sampleRate == 48_000)
     #expect(master.channels.count == 2)
-    #expect(abs(master.duration - 2) < 1, "\(master.duration) s written before SIGKILL")
+    #expect(master.duration >= 1, "\(master.duration) s written before SIGKILL")
+    #expect(master.duration < 30, "SIGKILL landed before the 30 s run ended")
     #expect(master.channels[1][master.frameCount - 1] != 0, "the system lane carries the tone")
+  }
+
+  static func fileSize(_ url: URL) -> Int {
+    (try? FileManager.default.attributesOfItem(atPath: url.path)[.size] as? Int) ?? 0
   }
 
   @Test func inPersonSyntheticRecordingProducesOneChannelAndTheMixedSidecar() throws {
