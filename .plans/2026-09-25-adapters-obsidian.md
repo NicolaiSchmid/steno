@@ -1,12 +1,12 @@
 # Steno adapters: destination runtime and the Obsidian folder destination
 
-Status: implementation plan, 2026-09-25. Program: [`2026-09-25-v1-program.md`](2026-09-25-v1-program.md).
-Scope authority: [`2026-09-24-initial-scope.md`](2026-09-24-initial-scope.md).
-Owns `Sources/StenoAdapters` and `Tests/StenoAdaptersTests`. Requested program
-changes are in the last section. Most important: the scope's task line
-`- [ ] text 📅 due ⏫ [[Assignee]]` does not parse in the Obsidian Tasks plugin
-(it reads backwards and stops at the first unrecognised token; only tags and
-`^block-id` may follow the fields). Steno writes `- [ ] text [[Assignee]] ⏫ 📅 YYYY-MM-DD`.
+Status: implementation plan, 2026-09-25, reconciled the same day. Program:
+[`2026-09-25-v1-program.md`](2026-09-25-v1-program.md). Scope authority:
+[`2026-09-24-initial-scope.md`](2026-09-24-initial-scope.md). Owns
+`Sources/StenoAdapters`, `Tests/StenoAdaptersTests` and the `steno deliver`
+command. The scope's original task line did not parse in the Obsidian Tasks
+plugin (it reads fields from the end); the corrected order
+`- [ ] text [[Assignee]] ⏫ 📅 YYYY-MM-DD` is now in the scope as an erratum.
 
 ## Goal
 
@@ -24,9 +24,11 @@ nothing about vaults, so a later WebDAV or Drive destination reuses them.
 - WebDAV, Google Drive, Nextcloud, webhooks, Notion, CRMs, MCP, REST (seam
   designed, not built). SRT, PDF, DOCX, HTML.
 - Reading the vault back, two-way sync, watching for edits, git, `.obsidian/`.
-- User-editable note templates (only path template, people folder, audio
-  opt-in and task tag are configurable); retry scheduling or background
-  queues (explicit re-export is the retry).
+- User-editable note templates or folder path templates (only vault path,
+  people folder, audio opt-in and task tag are configurable); retry
+  scheduling or background queues (explicit re-export is the retry).
+- Transcoding audio: `AudioAsset.mixdownURL` is produced by the pipeline
+  (`2026-09-25-audio-capture.md`); this module copies the file.
 - Deleting or moving vault files for any reason, including audio retention
   (once `audio.m4a` is in the vault it belongs to the user); renaming the
   meeting folder when a summary re-run changes the title (pinned at first delivery).
@@ -85,27 +87,21 @@ public enum Slug {
     public static func title(_ s: String, maxLength: Int = 60) -> String   // "produktstrategie-90-10"
     public static func fileName(_ s: String) -> String                     // strips / \ : * ? " < > | # ^ [ ] and controls
 }
-public struct PathTemplate: Sendable, Equatable {
-    public static let `default` = PathTemplate("Meetings/{{date}}-{{slug}}")
-    public init(_ raw: String)
-    public func validate() throws                       // known variables, relative, no "..", no empty segment
-    public func resolve(for meeting: Meeting, timeZone: TimeZone) -> String
-}
+public enum MeetingFolder { public static func path(for meeting: Meeting, timeZone: TimeZone) -> String }   // "Meetings/2026-09-24-<slug>"
 public enum Timecode { public static func clock(_ t: TimeInterval) -> String; public static func vtt(_ t: TimeInterval) -> String }  // "00:12:34", "00:12:34.567"
 
-// Runtime. DeliveryDispatcher is a StenoCore protocol, see last section.
+// Runtime. DeliveryDispatcher, DeliveryReceipt, RenderedArtifact and DeliveryMode are StenoCore types (program).
 public actor DestinationRegistry { public init(destinations: [any Destination]); public func destination(id: String) -> (any Destination)? }
 public actor DeliveryCoordinator: DeliveryDispatcher {
     public init(store: MeetingStore, settings: SettingsStore, registry: DestinationRegistry,
                 clock: @Sendable () -> Date = Date.init)
-    public func deliverAll(meetingID: UUID, mode: DeliveryMode) async -> [Delivery]     // never throws
-    public func reexport(meetingID: UUID, destinationID: String?) async -> [Delivery]   // nil = all enabled
+    public func deliverAll(meetingID: UUID, mode: DeliveryMode) async -> [Delivery]     // never throws; fills reexport(previous:) per destination
+    public func reexport(meetingID: UUID, destinationID: String?) async -> [Delivery]   // nil = all enabled; app and CLI entry point
 }
 
 // Obsidian.
 public struct ObsidianSettings: Sendable, Equatable, Codable {
     public var vaultPath: String                 // absolute, must exist and be writable
-    public var pathTemplate: PathTemplate        // default Meetings/{{date}}-{{slug}}
     public var peopleFolder: String?             // default nil
     public var includeAudio: Bool                // default false
     public var taskTag: String?                  // default nil
@@ -118,35 +114,24 @@ public struct ObsidianFolderDestination: Destination {
     public func validate(settings: DestinationSettings) async throws
     public func deliver(_ export: MeetingExport, settings: DestinationSettings, mode: DeliveryMode) async throws -> DeliveryReceipt
 }
-public enum ObsidianError: Error, Sendable, Equatable { case vaultMissing(String), vaultNotWritable(String), templateInvalid(String), writeFailed(path: String, underlying: String), audioUnavailable }
-
-// Proposed for StenoCore (requested changes 3 and 4).
-public struct DeliveryReceipt: Codable, Sendable, Equatable {
-    public struct File: Codable, Sendable, Equatable {
-        public enum Ownership: String, Codable, Sendable { case owned, managedBlock }   // whole file vs marked region
-        public var relativePath: String, ownership: Ownership, sha256: String
-    }
-    public var root: String               // vault path at delivery time
-    public var folder: String             // "Meetings/2026-09-24-produktstrategie-90-10", pinned
-    public var files: [File]
-    public var rendererVersion: Int       // bumped when output format changes
-}
-public struct RenderedArtifact: Sendable, Equatable {
-    public enum Kind: String, Sendable { case folderNote, transcript, tasks, vtt, json, personPage, audio }
-    public var kind: Kind, fileName: String, data: Data, personID: UUID?   // fileName is a basename
-}
+public enum ObsidianError: Error, Sendable, Equatable { case vaultMissing(String), vaultNotWritable(String), peopleFolderInvalid(String), writeFailed(path: String, underlying: String), audioUnavailable }
 ```
+
+`DeliveryReceipt` (root = vault path at delivery, folder pinned at first
+delivery, files with `.owned` or `.managedBlock` ownership and sha256,
+`rendererVersion` bumped when output changes) and `RenderedArtifact` (kind,
+basename, data, personID?) are defined in StenoCore exactly as this module
+needs them.
 
 ## Default folder layout and formats
 
 Slug. `Slug.title` lowercases, transliterates ä→ae ö→oe ü→ue ß→ss, strips
 other diacritics (`.diacriticInsensitive`), replaces runs outside `[a-z0-9]`
 with one hyphen, trims hyphens, cuts to 60 characters at the last hyphen,
-falls back to `meeting`. Folder: `pathTemplate.resolve`, default
-`Meetings/{{date}}-{{slug}}`; variables from `startedAt` in the user's zone:
-`{{year}}` `2026`, `{{month}}` `09`, `{{day}}` `24`, `{{date}}` `2026-09-24`,
-`{{slug}}`, `{{title}}` (`Slug.fileName(title)`). The folder basename is the
-slug used in file names. Collision on `.initial`: a folder whose
+falls back to `meeting`. Folder: `MeetingFolder.path`, always
+`Meetings/<yyyy-MM-dd>-<slug>` with the date from `startedAt` in the user's
+zone (the scope's layout; no user template). The folder basename is the slug
+used in file names. Collision on `.initial`: a folder whose
 `meeting.json` has another `steno_id` (or none) gets `-2`, `-3`, … appended;
 one with our `steno_id` is a crashed attempt and is reused.
 
@@ -230,23 +215,24 @@ only the region between `<!-- steno:meetings:start -->` and `<!-- steno:meetings
 this uuid is replaced or inserted, bytes outside the markers copied
 unchanged. Renamed people get a new page; the old one stays.
 
-Audio. Copied byte for byte when `includeAudio` is on and the `AudioAsset` is
-an AAC `.m4a` mixdown; otherwise `.audioUnavailable` after all other files are written.
+Audio. `AudioAsset.mixdownURL` copied byte for byte to `audio.m4a` when
+`includeAudio` is on; a nil `mixdownURL` yields `.audioUnavailable` after all
+other files are written.
 
 ## Delivery runtime
 
-`deliverAll` loads the bundle from `MeetingStore`, builds `MeetingExport`
-with `artifacts` rendered under `RenderOptions.plain`, reads
-`enabledDestinationIDs` and per-destination settings from `SettingsStore`,
-then per destination in settings order: upsert the `Delivery` row to
-`.pending` with `lastAttemptAt = now`; call `deliver` with `.initial` or
-`.reexport(previous:)`; store `.delivered(now)` plus receipt, or
-`.failed(String(describing: error), now)`; move on. Strictly sequential; one
-failure never blocks the next. `reexport` takes the same path; a row without
-receipt (never delivered, or folder removed by the user) falls back to `.initial`.
+`deliverAll` calls `MeetingStore.export(meetingID:)`, fills `artifacts`
+under `RenderOptions.plain`, reads `Settings.enabledDestinationIDs` and
+`destinations[id]`, then per destination in settings order: upsert the
+`Delivery` row to `.pending` with `lastAttemptAt = now`; call `deliver` with
+`.initial`, or with `.reexport(previous:)` carrying that destination's stored
+receipt; store `.delivered(now)` plus receipt, or `.failed(String(describing:
+error), now)`; move on. Strictly sequential; one failure never blocks the
+next. `reexport` takes the same path; a row without receipt (never delivered,
+or folder removed by the user) falls back to `.initial`.
 
 Obsidian `deliver`: resolve `ObsidianSettings`; pick the folder (receipt on
-re-export, template plus collision rule on initial); render with
+re-export, `MeetingFolder.path` plus collision rule on initial); render with
 `RenderOptions(linkStyle: .wikilink, peopleFolder:, taskTag:)`; remove stale
 `.steno-tmp-*`; write each artefact through `AtomicFileWriter` (temp
 `.steno-tmp-<name>-<8 hex>` in the target folder, `fsync`, `rename(2)`);
@@ -255,19 +241,18 @@ paths in the previous receipt or freshly rendered are written; a file no
 longer produced (audio opted out, people off) stays on disk and in the
 receipt. Files the app never wrote are never opened for writing; nothing is
 deleted except the app's own temp files. `validate`: vault path is a
-writable directory (probe `.steno-probe-<hex>` created and removed);
-template validates; people folder relative without `..`; missing
-`.obsidian/` is a warning, not an error.
+writable directory (probe `.steno-probe-<hex>` created and removed); people
+folder relative without `..`; missing `.obsidian/` is a warning, not an error.
 
 Future WebDAV or Drive destination: conforms to `Destination`, calls
 `ArtifactRenderer.render(export, options:)` with its own `RenderOptions`
-(likely `linkStyle: .none`), resolves the folder with the same
-`PathTemplate`, pushes each `RenderedArtifact.data` to `folder/fileName`
+(likely `linkStyle: .none`), resolves the folder with `MeetingFolder`,
+pushes each `RenderedArtifact.data` to `folder/fileName`
 through its transport, and returns a `DeliveryReceipt` whose `root` is the
 remote base URL. The Obsidian destination already writes through a small
 non-public `FileSink` with one `LocalFolderSink`; a `WebDAVSink` would be
 the second implementation, at which point `FileSink` goes public per the
-two-implementations rule. Renderers, slugs, templates, receipts: unchanged.
+two-implementations rule. Renderers, slugs, folders, receipts: unchanged.
 
 ## Files
 
@@ -277,15 +262,15 @@ Sources/StenoAdapters/
   Rendering/Frontmatter.swift, MarkdownEscaping.swift        YAML emitter (no dependency); escaping, wikilinks, tag sanitiser
   Rendering/FolderNoteRenderer.swift, TranscriptMarkdownRenderer.swift, TasksMarkdownRenderer.swift
   Rendering/WebVTTRenderer.swift, MeetingJSONRenderer.swift, PersonPageRenderer.swift, Timecode.swift
-  Naming/Slug.swift, PathTemplate.swift                      slug table and sanitiser; parse, validate, resolve
-  Runtime/DestinationRegistry.swift, DeliveryCoordinator.swift, ExportCommand.swift   `steno export` wiring
+  Naming/Slug.swift, MeetingFolder.swift                     slug table and sanitiser; fixed folder path
+  Runtime/DestinationRegistry.swift, DeliveryCoordinator.swift
   Obsidian/ObsidianSettings.swift, ObsidianFolderDestination.swift, ObsidianLayout.swift, ManagedBlock.swift
   FileSystem/FileSink.swift, AtomicFileWriter.swift          internal sink protocol; temp + fsync + rename
+Sources/steno/Commands/DeliverCommand.swift                  `steno deliver <meeting-id> [--destination ID]` (core's `steno export` writes meeting.json)
 Tests/StenoAdaptersTests/
-  Support/FixtureMeeting.swift, Snapshot.swift               fixture loader; golden compare, STENO_UPDATE_SNAPSHOTS=1
   one <Type>Tests.swift per public type above, plus ManagedBlockTests, AtomicFileWriterTests,
-  ObsidianDestinationIntegrationTests, DeliveryCoordinatorTests
-Tests/Fixtures/meetings/produktstrategie.json                synthetic meeting (step 1)
+  ObsidianDestinationIntegrationTests, DeliveryCoordinatorTests; fixture via StenoCore `Fixtures.url`, goldens via `Snapshot`
+Tests/Fixtures/meetings/produktstrategie.json                synthetic MeetingExport (step 1)
 Tests/Fixtures/snapshots/obsidian/*                          one golden file per renderer output and variant
 Package.swift                                                adds StenoAdapters (depends on StenoCore only) and its test target; no third-party packages
 ```
@@ -299,15 +284,13 @@ Each step is at most one day; checks run as `swift test --filter StenoAdaptersTe
    over both lanes, one containing `<`, `&`, a leading `# ` and `-->`; tasks
    covering all priorities, with and without due date and assignee, one
    done; two decisions; scratchpad containing `---` and `## Summary`; tags
-   `Kunde ACME`, `#q4`. Implement `Slug`, `PathTemplate`, `Timecode`.
+   `Kunde ACME`, `#q4`. Implement `Slug`, `MeetingFolder`, `Timecode`.
    Check: `SlugTests` (umlauts, ß, é, emoji-only → `meeting`, 61-char cut,
-   forbidden characters), `PathTemplateTests` (six variables, `..` and
-   unknown variable rejected), `TimecodeTests` pass.
+   forbidden characters), `MeetingFolderTests` (date in the given zone),
+   `TimecodeTests` pass.
 2. Frontmatter emitter, Markdown escaping, tag sanitiser.
    Check: `FrontmatterTests` golden plus cases for `: `, `"`, `\`, leading
-   `-`, ` #`, `yes`, `2026-09-24`, empty string, control character; opt-in
-   round trip when `ruby` is on PATH via
-   `ruby -ryaml -rjson -e 'puts YAML.safe_load(STDIN.read, permitted_classes: [Date, Time]).to_json'`.
+   `-`, ` #`, `yes`, `2026-09-24`, empty string, control character.
 3. Folder note, transcript, tasks renderers, `.plain` and `.wikilink`.
    Check: six golden files match; tasks test asserts by regex that each line
    ends with the emoji fields, has no U+FE0F or U+00A0, `.normal` no emoji.
@@ -330,12 +313,12 @@ Each step is at most one day; checks run as `swift test --filter StenoAdaptersTe
    intact, keeps the folder name, updates `title`, keeps `audio.m4a` after
    `includeAudio` is off; a second meeting resolving to the same folder gets
    `-2`; a rerun `.initial` for the same `steno_id` reuses it.
-8. `DestinationRegistry`, `DeliveryCoordinator`, `ExportCommand`.
+8. `DestinationRegistry`, `DeliveryCoordinator`, `DeliverCommand`.
    Check: two fake destinations, first throwing → `.failed` with error text
    and `.delivered` with receipt, `lastAttemptAt` on both; `reexport` passes
-   the stored receipt back; disabled destination gets no row;
-   `steno export --meeting <id> --destination obsidian-folder` runs against
-   the core fixture database.
+   the stored receipt back as `previous`; disabled destination gets no row;
+   `steno deliver <id> --destination obsidian-folder` runs against the core
+   fixture database.
 9. Manual check in a real vault with Tasks, Dataview and Folder Notes: folder
    note opens on folder click; properties show `date` as Date & time,
    `duration` as Number, `participants` as links; a Tasks `not done` query
@@ -360,40 +343,31 @@ Each step is at most one day; checks run as `swift test --filter StenoAdaptersTe
 - S1 (before step 3, half a day): in a real vault, Tasks recognises the
   emitted line order with the wikilink before the emojis and `🔽`/`⏫`
   without U+FE0F. Failure changes the line order, not the architecture.
-- S2 (before step 2): `ruby -ryaml` exists on the `macos-15` runner; otherwise the round trip stays skipped and step 9 carries it.
-- S3 (before step 6): the audio workstream delivers one AAC `.m4a` mixdown per meeting; otherwise `.audioUnavailable` as written.
 
 ## Needs from other workstreams
 
-- Core foundation: `MeetingExport` as canonical bundle (`Meeting`,
-  `[Participant]`, `[Person]`, `[Speaker]`, `[TranscriptSegment]`,
-  `[MeetingTask]`, `[Decision]`, `AudioAsset?`) plus `artifacts`;
-  `DestinationSettings` typed getters; `DeliveryMode` with previous receipt;
-  `Delivery` receipt column; `MeetingStore` bundle read and `Delivery`
-  upsert/query; `SettingsStore` `enabledDestinationIDs` and
-  `destinationSettings(id:)`; `DeliveryDispatcher` in pipeline step 9; CLI
-  hook for `ExportCommand`; stable `templateID` strings.
-- LLM (`LanguageModel` output): summary headings at level 2 or deeper, no
-  frontmatter or leading `---`; task and decision text single-line.
-- Speech (`Diarizer`, `SpeakerMemory`): stable `clusterLabel` so `Speaker N`
-  numbering is deterministic across re-exports.
-- Audio: `AudioAsset.format` distinguishes the AAC `.m4a` mixdown (S3).
-- macOS app: settings UI (vault picker, path template with live preview,
-  people folder, audio opt-in, task tag); delivery status and re-export
-  button from `Delivery` rows; `ObsidianError` messages shown verbatim.
+- Core foundation: `MeetingExport` from `MeetingStore.export(meetingID:)`,
+  `RenderedArtifact`, `DeliveryReceipt`, `DeliveryMode.reexport(previous:)`,
+  `Delivery.receipt`, `DestinationSettings` typed getters,
+  `Settings.destinations` and `enabledDestinationIDs`, `DeliveryDispatcher`
+  called from pipeline step 9, `AudioAsset.mixdownURL`, the `steno` root
+  command, `Fixtures` and `Snapshot` from `Testing/`.
+- LLM (`MeetingSummarizer` output): summary headings at level 2 or deeper,
+  no frontmatter or leading `---`; task and decision text single-line.
+- Speech (`Diarizer`): stable `clusterLabel` so `Speaker N` numbering is
+  deterministic across re-exports.
+- macOS app: settings UI (vault picker, people folder, audio opt-in, task
+  tag); delivery status and re-export button from `Delivery` rows;
+  `ObsidianError` messages shown verbatim.
 
 ## Requested changes to the program document
 
-1. `Destination.deliver` returns `DeliveryReceipt` (`… async throws ->
-   DeliveryReceipt`); without it re-export cannot know what the app wrote.
-2. `DeliveryMode` becomes `case initial`, `case reexport(previous: DeliveryReceipt?)`.
-3. `Delivery` gains `receipt: DeliveryReceipt?` stored as JSON text;
-   `DeliveryReceipt` lives in StenoCore with the shape above.
-4. `MeetingExport` is the canonical bundle plus `artifacts: [RenderedArtifact]`,
-   constructed by `DeliveryCoordinator` in StenoAdapters; `RenderedArtifact`
-   moves to StenoCore.
-5. StenoCore defines `public protocol DeliveryDispatcher: Sendable { func deliverAll(meetingID: UUID, mode: DeliveryMode) async -> [Delivery] }`;
-   pipeline step 9 calls it; app and CLI inject `DeliveryCoordinator`.
-6. Scope corrections: task line `- [ ] text [[Assignee]] ⏫ 📅 YYYY-MM-DD`;
-   frontmatter gains `title`; `duration` is whole minutes as a number.
-   Note for the LLM workstream: summary headings start at level 2.
+Reconciled into the program document, see its log (entries 22 to 27).
+
+## Deferred
+
+- User-configurable folder path template (`{{year}}`, `{{title}}`, ...); the
+  folder is the scope's fixed `Meetings/<date>-<slug>`.
+- Ruby YAML round-trip test for the frontmatter emitter; the manual vault
+  check in step 9 covers parser compatibility.
+- Renaming the meeting folder when a summary re-run changes the title.

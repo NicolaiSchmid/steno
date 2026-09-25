@@ -1,6 +1,6 @@
 # Speech and speakers: StenoSpeech
 
-Status: workstream plan, 2026-09-25. Binding program:
+Status: workstream plan, 2026-09-25, reconciled the same day. Binding program:
 [`2026-09-25-v1-program.md`](2026-09-25-v1-program.md). Scope authority:
 [`2026-09-24-initial-scope.md`](2026-09-24-initial-scope.md).
 Owns `Sources/StenoSpeech`, `Tests/StenoSpeechTests`, the `steno bakeoff`
@@ -29,7 +29,10 @@ measurements on real German/English/Denglish meetings, not from a README.
 - Custom vocabulary boosting (FluidAudio CTC rescoring); revisit after v1.
 - Apple `SpeechAnalyzer`, whisper.cpp, cloud STT.
 - Audio decode and resampling to 16 kHz (StenoCore pipeline step 1).
-- Persisting `Person` rows (StenoCore storage); we only compute and match.
+- Persisting `Person` rows and any merge bookkeeping (StenoCore `PersonStore`
+  and `MeetingStore.mergeSpeakers`); we only compute, match and average.
+- Fakes: `FakeSpeechEngine` and `FakeDiarizer` come from
+  `StenoCore/Testing/`; this module defines none.
 
 ## Decisions
 
@@ -37,14 +40,14 @@ measurements on real German/English/Denglish meetings, not from a README.
 |---|---|
 | Default engine candidate | Parakeet TDT v3 via FluidAudio (`parakeet-v3`). Final default set by the bake-off (step 9) and recorded in a follow-up plan. |
 | Second engine | WhisperKit `openai_whisper-large-v3-v20240930_turbo` (`whisperkit-large-v3-turbo`). |
-| Optional engines | `parakeet-ultra` (same FluidAudio API, `AsrModelVersion.ultra`); `parakeet-de` (German fine-tune, custom directory, German-only). Both bake-off only unless the bake-off promotes one. |
+| Optional engines | `parakeet-ultra` (same FluidAudio API, `AsrModelVersion.ultra`); `parakeet-de` (German fine-tune, custom directory, German-only). Bake-off entrants sharing the `ParakeetEngine` implementation; not user-selectable in the app until the bake-off result plan promotes one (program log 12). |
 | Language handling | No engine can be forced per segment. Parakeet has no language control at all (its `Language` parameter only filters Latin vs Cyrillic script; `de` and `en` are both Latin). Whisper can be pinned per call, not per segment. So: engines run unpinned (Parakeet) or pinned to the meeting language (Whisper); every `RawSegment` gets `language` from `NLLanguageRecognizer` constrained to `{de, en}`; the LLM cleanup pass fixes the rest. |
 | Diarizer | FluidAudio `OfflineDiarizerManager`, pyannote community-1 offline pipeline, community defaults, `exposeChunkEmbeddings = true`. |
 | Cluster embedding | Mean of the cluster's `ChunkEmbedding.embedding256` values weighted by chunk duration, then L2-normalised. Not `speakerDatabase`/`TimedSpeakerSegment.embedding`: those are VBx centroids, an un-normalised mean of unit vectors, so cosine against stored people would be biased by cluster purity. |
 | Speaker match | Cosine similarity on unit vectors. Default threshold `0.60`, margin `0.05` over the runner-up; both are settings. Calibrated in step 6. |
 | Enrolment | Running mean: `e' = normalise((e * n + x) / (n + 1))`, `n` capped at 50 so a voice can drift. |
-| Merge | Merging person B into A: sample-count-weighted mean, renormalise, B's `Speaker` and `Participant` rows repointed to A, B deleted. Within a meeting, merging clusters unions their ranges and recomputes the embedding from their chunks. |
-| Sample clip | Longest contiguous single-speaker segment of the cluster, capped to 10 s centred on the highest-`qualityScore` chunk; if the longest segment is under 3 s the speaker is flagged `lowConfidence`. |
+| Merge | `SpeakerMemory.merge(B, into: A)`: sample-count-weighted mean, renormalise, save A, then `PersonStore.mergePersons(keep: A, remove: B)` re-points rows and deletes B. In-meeting cluster merge is `MeetingStore.mergeSpeakers` in StenoCore; not this module's concern. |
+| Sample clip | `FluidDiarizer` fills `SpeakerCluster.sampleClipRange`: longest contiguous single-speaker segment of the cluster, capped to 10 s centred on the highest-`qualityScore` chunk. `SpeakerCluster.confidence` is the mean chunk quality, halved when the longest segment is under 3 s. Core copies both onto `Speaker`. |
 | Model location | `~/Library/Application Support/Steno/Models/`. FluidAudio repos as `fluidaudio/<repo-last-path-component>` (the directory name must match the HF repo name, see German model caveat). WhisperKit under `whisperkit/` via `downloadBase`. |
 | Type collisions | FluidAudio exports `DiarizationResult`, `Speaker`, `Language`, `WordTiming`; WhisperKit exports `WordTiming`, `TranscriptionSegment`. StenoSpeech never `import`s both frameworks in one file and always module-qualifies StenoCore types where a collision exists. |
 
@@ -91,16 +94,12 @@ public struct FluidDiarizerConfig: Sendable {
     public var clusteringThreshold: Double = 0.6                      // passed to OfflineDiarizerConfig.clustering.threshold
     public var minSpeakers: Int?; public var maxSpeakers: Int?
 }
-public struct SampleClipPicker: Sendable {
-    public static func pick(for cluster: StenoCore.DiarizationCluster, chunks: [ClusterChunk],
-                            targetSeconds: TimeInterval = 10, minimumSeconds: TimeInterval = 3) -> (range: ClosedRange<TimeInterval>, lowConfidence: Bool)
+struct SampleClipPicker: Sendable {                                   // internal, used by FluidDiarizer
+    static func pick(ranges: [ClosedRange<TimeInterval>], chunks: [ClusterChunk],
+                     targetSeconds: TimeInterval = 10, minimumSeconds: TimeInterval = 3) -> (range: ClosedRange<TimeInterval>, confidence: Float)
 }
-public actor CosineSpeakerMemory: SpeakerMemory {
+public actor CosineSpeakerMemory: SpeakerMemory {                     // the four program members; pure math over PersonStore
     public init(store: any PersonStore, threshold: Float = 0.60, margin: Float = 0.05, maxSamples: Int = 50)
-    public func match(_ embedding: [Float]) async throws -> (Person, Float)?
-    public func enroll(_ embedding: [Float], as person: Person) async throws
-    public func merge(_ source: Person, into target: Person) async throws -> Person   // added member
-    public func rankedCandidates(_ embedding: [Float], limit: Int) async throws -> [(Person, Float)]  // added, for the review sheet
 }
 public enum Embeddings {
     public static func normalised(_ v: [Float]) -> [Float]
@@ -144,7 +143,7 @@ Sources/StenoSpeech/
   Models/ModelStore.swift                 download with progress, install check, removal, offline flag
   Diarization/FluidDiarizer.swift         OfflineDiarizerManager wrapper, result mapping
   Diarization/ClusterEmbedding.swift      chunk-weighted mean, normalisation
-  Diarization/SampleClipPicker.swift      ten-second clip selection
+  Diarization/SampleClipPicker.swift      ten-second clip selection and confidence (internal)
   Speakers/CosineSpeakerMemory.swift      match, enroll, merge, ranked candidates
   Speakers/Embeddings.swift               normalise, cosine (vDSP)
   Bakeoff/BakeoffRunner.swift             folder walk, per-engine run, timing, flips
@@ -160,10 +159,9 @@ Tests/Fixtures/speech/two-speakers.wav        two `say` voices alternating, < 10
 Tests/Fixtures/speech/*.ref.txt               reference transcripts for the WAVs above
 ```
 
-Package.swift additions (StenoCore workstream owns the file, we send the
-diff): `FluidAudio` from `0.17.3`, `argmax-oss-swift` from `1.1.0` product
-`WhisperKit`. No other third-party packages; `NaturalLanguage` and
-`Accelerate` are system frameworks.
+Package.swift additions in this workstream's PR (program rule): `FluidAudio`
+from `0.17.3`, `argmax-oss-swift` from `1.1.0` product `WhisperKit`. No other
+third-party packages; `NaturalLanguage` and `Accelerate` are system frameworks.
 
 ## Verified third-party surface we build on
 
@@ -197,7 +195,7 @@ FluidAudio (`https://github.com/FluidInference/FluidAudio.git`, swift-tools 6.0,
   `ChunkEmbedding { speakerId, chunkIndex, speakerIndex, startTimeSeconds: Double, endTimeSeconds: Double, embedding256 (L2-normalised), rho128 }`.
 - `OfflineDiarizerModels.load(from:configuration:progressHandler:)`; files `Segmentation.mlmodelc`, `FBank.mlmodelc`, `Embedding.mlmodelc`, `PldaRho.mlmodelc`, `plda-parameters.json`.
 - `SpeakerUtilities.cosineDistance(_:_:)` public. `SpeakerManager` is streaming-only and documented as unsupported with the offline pipeline; not used.
-- `AudioConverter().resampleAudioFile(_ url: URL) -> [Float]`, `.resample(_:from:)` (bake-off decode fallback if StenoCore's decoder is late).
+- `AudioConverter().resampleAudioFile(_ url: URL) -> [Float]`, `.resample(_:from:)` (bake-off decode fallback if StenoAudio's `AVFoundationAudioCodec` is late).
 
 WhisperKit (`https://github.com/argmaxinc/WhisperKit.git`, `Package@swift-6.2.swift` with `swiftLanguageModes: [.v6]`, macOS 13+):
 - `WhisperKit.download(variant:downloadBase:useBackgroundSession:from: "argmaxinc/whisperkit-coreml":token:endpoint:progressCallback:) async throws -> URL`,
@@ -266,22 +264,26 @@ We keep it under `Models/fluidaudio-de/parakeet-tdt-0.6b-v3/` so it cannot shado
    test on `denglish.wav` with `hint: de` yields one language, no segment with `noSpeechProb > 0.6` kept; unit test for the
    window-ranking function on synthetic energy profiles.
 5. **`FluidDiarizer`, one day.** Wrap `OfflineDiarizerManager`, map to `StenoCore.DiarizationResult`, compute
-   normalised cluster embeddings from `chunkEmbeddings`, attach `SampleClipPicker` result. Acceptance: mapping unit test
-   builds a `FluidAudio.DiarizationResult` by hand and checks unit-length embeddings, range merging and clip choice;
-   opt-in integration test on `two-speakers.wav` yields exactly two clusters.
+   normalised cluster embeddings from `chunkEmbeddings`, fill `SpeakerCluster.sampleClipRange` and `confidence` through
+   `SampleClipPicker`. Acceptance: mapping unit test builds a `FluidAudio.DiarizationResult` by hand and checks unit-length
+   embeddings, range merging, clip choice and the under-3 s confidence penalty; opt-in integration test on
+   `two-speakers.wav` yields exactly two clusters, each with a clip range inside its own ranges.
 6. **`CosineSpeakerMemory`, one day.** Match with threshold and margin, enroll running mean, merge, ranked candidates,
-   over a fake `PersonStore`. Acceptance: unit tests for near-duplicate match, below-threshold miss, margin rejection,
-   running-mean cap, merge weighting and repointing. Calibration note recorded from the two `say` voices plus the
-   bake-off meetings (similarity distributions same-speaker vs different-speaker).
-7. **Bake-off harness, one day.** `BakeoffRunner` walks `<audio-dir>` for `wav|m4a|mp3|caf`, decodes via StenoCore's
-   decoder, runs each requested engine, times wall clock, computes WER against `<name>.ref.txt` when present (lower-case,
-   punctuation stripped, optional umlaut folding), counts language flips (adjacent segments with different `language`),
-   optionally runs the StenoLLM cleanup and reports `cleanedWER`. Writes `report.md`, `report.json` and per-file
-   `<name>.<engine>.json`. Acceptance: unit tests for WER (known pairs), flip count, Markdown rendering; running it on
-   `Tests/Fixtures/speech` with `--engines parakeet-v3` under `STENO_MODEL_TESTS=1` produces a table with four rows.
-8. **Wiring and settings, half a day.** `SpeechEngineFactory`, settings keys `speech.engine`, `speech.speakerThreshold`,
-   `speech.diarizationThreshold`, `speech.modelsDirectory`; PR with CI URL and test count. Acceptance: `steno process`
-   (core) runs end to end with `parakeet-v3` on `two-speakers.wav`.
+   over `MeetingStore.inMemory()` as the `PersonStore`. Acceptance: unit tests for near-duplicate match, below-threshold
+   miss, margin rejection, running-mean cap, merge weighting, and that after `merge` only the target remains in
+   `persons()`. Calibration note recorded from the two `say` voices plus the bake-off meetings (similarity distributions
+   same-speaker vs different-speaker).
+7. **Bake-off harness, one day.** `BakeoffRunner` walks `<audio-dir>` for `wav|m4a|mp3|caf`, decodes through an
+   injected `AudioDecoding` (StenoAudio's codec in the CLI, core's WAV decoder in tests), runs each requested engine,
+   times wall clock, computes WER against `<name>.ref.txt` when present (lower-case, punctuation stripped, optional umlaut
+   folding), counts language flips (adjacent segments with different `language`), optionally runs an injected
+   `TranscriptCleaner` and reports `cleanedWER`. Writes `report.md`, `report.json` and per-file `<name>.<engine>.json`.
+   Acceptance: unit tests for WER (known pairs), flip count, Markdown rendering; running it on `Tests/Fixtures/speech`
+   with `--engines parakeet-v3` under `STENO_MODEL_TESTS=1` produces a table with four rows.
+8. **Wiring and settings, half a day.** `SpeechEngineFactory` reads `Settings.speechEngineID`; `CosineSpeakerMemory`
+   takes `Settings.speakerMatchThreshold`; `ModelStore` takes `Settings.modelsDirectory` (nil = default). PR with CI URL
+   and test count. Acceptance: `steno process` (core) runs end to end with `parakeet-v3` on `two-speakers.wav` when the
+   `--real-speech` flag wires this module in.
 9. **Bake-off on real meetings, manual, one day.** Three real Denglish meetings kept outside the repository, references
    typed by hand for two five-minute excerpts each. Engines: `parakeet-v3`, `parakeet-ultra`, `whisperkit-large-v3-turbo`,
    `parakeet-de`, each with and without cleanup. Result and chosen default written to
@@ -290,10 +292,9 @@ We keep it under `Models/fluidaudio-de/parakeet-tdt-0.6b-v3/` so it cannot shado
 ## Tests
 
 - Unit (no network, no models): `TranscriptSegmenterTests`, `LanguageTaggerTests`, `SampleClipPickerTests`,
-  `ClusterEmbeddingTests`, `CosineSpeakerMemoryTests` (fake `PersonStore`), `EmbeddingsTests`, `WordErrorRateTests`,
+  `ClusterEmbeddingTests`, `CosineSpeakerMemoryTests` (in-memory `MeetingStore` as `PersonStore`), `EmbeddingsTests`, `WordErrorRateTests`,
   `BakeoffReportTests`, `ModelStoreTests` (fake downloader), `FluidDiarizerMappingTests`, `WhisperWindowRankingTests`.
-  A `FakeSpeechEngine` and `FakeDiarizer` conforming to the StenoCore protocols live in `Tests/StenoSpeechTests/Fakes/` and
-  are offered to the pipeline tests in StenoCore.
+  Fakes come from `StenoCore/Testing/`.
 - Integration, opt-in with `STENO_MODEL_TESTS=1`: `ModelIntegrationTests` downloads Parakeet v3 and the offline diarizer
   into a temp directory, transcribes the four fixtures with both engines (WhisperKit only if `STENO_MODEL_TESTS_WHISPER=1`,
   1.6 GB), diarizes `two-speakers.wav`, and runs the bake-off over the fixture folder. Skipped, not failed, when the
@@ -318,30 +319,21 @@ We keep it under `Models/fluidaudio-de/parakeet-tdt-0.6b-v3/` so it cannot shado
 
 ## Needs from other workstreams
 
-- StenoCore: `SpeechEngine`, `Diarizer`, `SpeakerMemory` as in the program. `RawSegment` must carry
-  `language: Locale.Language?` and `wordTimings: [WordTiming]?` (program says it does). `StenoCore.DiarizationResult` needs
-  a cluster type; proposed `DiarizationCluster { label: String, ranges: [ClosedRange<TimeInterval>], embedding: [Float],
-  confidence: Float, sampleClipRange: ClosedRange<TimeInterval>?, lowConfidence: Bool }` (**unverified**, to agree with core).
-- StenoCore: a `PersonStore` protocol (**unverified name**) with `allPeople()`, `save(Person)`, `delete(Person)`,
-  `repointSpeakers(from:to:)`; `CosineSpeakerMemory` is pure math over it.
-- StenoCore: the pipeline's step-1 decoder as a callable type (**unverified name**, e.g. `AudioDecoder.load(_ url:) ->
-  AudioBuffer16k`) for the bake-off; and `AudioBuffer16k` exposing `samples: [Float]`.
-- StenoCore `steno` CLI: command registration point and the argument parser choice, so `BakeoffCommand` and `ModelsCommand`
-  can plug in; settings keys listed in step 8.
-- StenoLLM: the cleanup pass as a callable (`LanguageModel` plus its prompt assembly, **unverified name**) for `--cleanup`.
+- StenoCore: `SpeechEngine`, `Diarizer`, `SpeakerMemory`, `PersonStore`, `SpeakerCluster` (label, ranges, embedding,
+  confidence, sampleClipRange), `RawSegment.language` and `wordTimings`, `AudioBuffer16k.samples`, `AudioDecoding`,
+  `Settings.speechEngineID` / `speakerMatchThreshold` / `modelsDirectory`, the `steno` root command (swift-argument-parser).
+- StenoAudio: `AVFoundationAudioCodec` for the bake-off's `m4a|mp3|caf` inputs.
+- StenoLLM: `LLMTranscriptCleaner` for `--cleanup`.
 - macOS app: the speaker review sheet calls `rankedCandidates`, `enroll`, `merge`, and plays `Speaker.sampleClipRange`
-  from the lane audio; the settings pane exposes engine choice, thresholds and `steno models` actions with progress.
+  from the lane audio; the settings pane exposes engine choice, threshold and `ModelStore` actions with progress.
 
 ## Requested changes to the program document
 
-1. Allow two optional engine ids beyond the two named: `parakeet-ultra` and `parakeet-de`. Ultra is the same FluidAudio
-   API and is FluidInference's current recommendation; it should be a legitimate bake-off winner without a program edit.
-2. `SpeakerMemory` gains `merge(_ source: Person, into target: Person) async throws -> Person` and
-   `rankedCandidates(_ embedding: [Float], limit: Int) async throws -> [(Person, Float)]`. Scope requires merge; the review
-   sheet needs ranked candidates.
-3. Add a `PersonStore` protocol to StenoCore (or state that the `SpeakerMemory` implementation lives in StenoCore next to
-   GRDB). Today the program places speaker matching in StenoSpeech but gives it no storage seam.
-4. Fix the shape of `StenoCore.DiarizationResult` (cluster type above) so StenoSpeech and the pipeline agree before code.
-5. Note that `AudioBuffer16k` for a two-hour lane is ~460 MB of Float32; acceptable for v1, but the pipeline should
-   process lanes sequentially, not hold both. Optionally add a default-implemented `transcribe(fileURL:hint:)` later so
-   engines can use disk-backed paths (`transcribeDiskBacked`, `process(_ url:)`).
+Reconciled into the program document, see its log (entries 12 to 16).
+
+## Deferred
+
+- Disk-backed `transcribe(fileURL:hint:)` on `SpeechEngine`; the pipeline processes lanes sequentially instead.
+- `parakeet-ultra` and `parakeet-de` as user-selectable engines; bake-off entrants only until the result plan says otherwise.
+- Diarization clustering threshold as a user setting; it stays a `FluidDiarizerConfig` constant.
+- Custom vocabulary boosting (FluidAudio CTC rescoring).

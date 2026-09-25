@@ -1,10 +1,12 @@
 # Phone handover: Bonjour, pairing, pinned TLS, queued upload, recorder UI
 
-Status: implementation plan, written 2026-09-25. Binding program:
-[`2026-09-25-v1-program.md`](2026-09-25-v1-program.md). Scope authority:
-[`2026-09-24-initial-scope.md`](2026-09-24-initial-scope.md).
-Owns `Sources/StenoHandover` (Mac) and the feature work inside `mobile/`
-(iOS). The Expo scaffold in `mobile/` is extended, never replaced.
+Status: implementation plan, written 2026-09-25, reconciled the same day.
+Binding program: [`2026-09-25-v1-program.md`](2026-09-25-v1-program.md).
+Scope authority: [`2026-09-24-initial-scope.md`](2026-09-24-initial-scope.md).
+Owns `Sources/StenoHandover` (Mac), the `steno handover` command and the
+feature work inside `mobile/` (iOS). The Expo scaffold in `mobile/` is
+extended, never replaced. `PairedDevice`, `HandoverReceipt`,
+`RecordingMetadata`, `HandoverStore` and `HandoverIntake` are StenoCore types.
 
 Facts are tagged `(verified: source)` when read from documentation or the
 packages in `mobile/node_modules`, `(unverified)` when a spike must confirm them.
@@ -29,6 +31,7 @@ revoke them.
   means re-pairing every phone.
 - Android, iPad layout, widgets, Live Activities, Siri; encryption at rest
   beyond iOS file protection; third-party HTTP server or client libraries.
+- Localised strings. English only, like the macOS app.
 
 ## Decisions
 
@@ -76,9 +79,7 @@ revoke them.
 9. **Pairing secret travels once over the pinned channel** as
    `Authorization: Pairing <secret>`; no HMAC. Single use, five-minute
    expiry, constant-time compare on the Mac.
-10. **Strings**: `expo-localization` for the device language plus a typed
-    `t()` over `de.ts` / `en.ts`. No i18n library.
-11. **Local network privacy (verified: TN3179)**: browsing, resolving and
+10. **Local network privacy (verified: TN3179)**: browsing, resolving and
     registering Bonjour services need the Local Network privilege on iOS and
     macOS 15; listening and accepting TCP do not. A backgrounded iOS app in
     undetermined state is denied silently, so pairing runs in the foreground.
@@ -114,24 +115,14 @@ public struct HandoverConfiguration: Sendable {
     public var serviceName: String, advertise: Bool, chunkSize: Int, inboxDirectory: URL, pairingWindow: TimeInterval
     // defaults: Host.current().localizedName, true (false in tests: loopback only), 4 MiB, Application Support/Steno/handover-inbox, 300
 }
-public struct PairedDevice: Codable, Sendable, Equatable, Identifiable {
-    public let id: UUID; public var name: String; public let pairedAt: Date; public var lastSeenAt: Date?
-}
 public struct PairingPayload: Codable, Sendable, Equatable {
     public let macID: UUID, macName: String, fingerprint: Data, secret: Data, expiresAt: Date
     public var urlString: String { get }
     public init(parsing url: URL) throws
 }
-public struct HandoverTransfer: Sendable, Identifiable, Equatable {
+public struct HandoverTransfer: Sendable, Identifiable, Equatable {   // in-memory view over HandoverReceipt for the UI
     public let id: UUID                   // recordingID
-    public let deviceID: UUID, byteCount: Int64, receivedBytes: Int64, state: State
-    public enum State: Sendable, Equatable { case receiving, verifying, complete(meetingID: UUID), failed(String) }
-}
-public struct RecordingMetadata: Codable, Sendable, Equatable { /* fields as in the wire protocol */ }
-public struct HandoverReceipt: Codable, Sendable, Equatable {
-    public let recordingID: UUID, deviceID: UUID; public var meetingID: UUID?
-    public var state: HandoverTransfer.State, byteCount: Int64, sha256: Data, chunkSize: Int, receivedChunks: [Int]
-    public let createdAt: Date; public var updatedAt: Date
+    public let deviceID: UUID, byteCount: Int64, receivedBytes: Int64, state: HandoverReceipt.State
 }
 public struct ServerIdentity: Sendable {
     public let fingerprint: Data          // SHA-256 of leaf certificate DER
@@ -147,17 +138,7 @@ public struct ServerIdentity: Sendable {
     public func cancelPairing()
     public func revoke(_ deviceID: UUID) async throws
 }
-public protocol HandoverStore: Sendable {          // GRDB implementation in StenoCore
-    func pairedDevices() async throws -> [PairedDevice]
-    func insert(_ device: PairedDevice, tokenHash: Data) async throws
-    func device(forTokenHash: Data) async throws -> PairedDevice?
-    func delete(deviceID: UUID) async throws
-    func receipt(_ recordingID: UUID) async throws -> HandoverReceipt?
-    func upsert(_ receipt: HandoverReceipt) async throws
-}
-public protocol HandoverIntake: Sendable {         // implementation in StenoCore
-    func admit(file: URL, metadata: RecordingMetadata, device: PairedDevice) async throws -> UUID   // Meeting.id
-}
+// HandoverStore (MeetingStore conforms) and HandoverIntake (RecordingIntake conforms) are StenoCore protocols, see the program.
 ```
 
 ## Public API, phone side (TypeScript)
@@ -226,9 +207,9 @@ Sources/StenoHandover/Network/HandoverListener.swift  NWListener, TLS options, B
 Sources/StenoHandover/Network/HTTPConnection.swift, HTTPRequest.swift, HTTPResponse.swift   read loop and body sink; request line, headers, limits; status and JSON body
 Sources/StenoHandover/Routing/Router.swift, PairingHandler.swift, RecordingHandler.swift   auth gate and dispatch; hello/pair/unpair; announce/chunk/status/complete
 Sources/StenoHandover/Upload/ReceivingFile.swift, Inbox.swift   sparse partial file with offset writes and chunk hash check; partial lifecycle, orphan cleanup
-Sources/StenoHandover/Upload/RecordingMetadata.swift  metadata and validation; HandoverReceipt
-Sources/steno/Commands/HandoverCommand.swift        `steno handover serve --pair` (CLI target owned by core; coordinated)
-Tests/StenoHandoverTests/Support/                   LoopbackClient.swift (pinning URLSession client, reference for iOS), InMemoryStore.swift
+Sources/StenoHandover/Upload/MetadataValidation.swift  RecordingMetadata limits and checks
+Sources/steno/Commands/HandoverCommand.swift        `steno handover serve --pair`
+Tests/StenoHandoverTests/Support/LoopbackClient.swift   pinning URLSession client, reference for iOS; store is MeetingStore.inMemory(), intake is core's FakeHandoverIntake
 Tests/StenoHandoverTests/                           HTTPRequestTests, PairingPayloadTests, PairingFlowTests, ChunkUploadTests,
                                                     IdempotencyTests, ServerIdentityTests (keychain part behind STENO_KEYCHAIN_TESTS=1)
 ```
@@ -250,8 +231,8 @@ src/features/pairing/pairing-store.ts, pairing-client.ts   secure-store token pl
 src/features/pairing/PairingSheet.tsx               camera QR scan, progress, errors, unpair
 src/features/sync/upload-coordinator.ts, upload-coordinator.test.ts, recording-client.ts   planner, backoff, hook, vitest; announce/status/complete
 src/features/recorder/RecorderScreen.tsx, RecordButton.tsx, RecordingList.tsx, SyncStatusBadge.tsx   the one screen
-src/lib/i18n.ts; src/locales/de.ts, en.ts; src/navigation/types.ts   t(), all strings, Pairing sheet route
-app.config.ts, package.json, README.md              expo-camera (cameraPermission de/en), expo-crypto, expo-localization; status paragraph
+src/navigation/types.ts                             Pairing sheet route
+app.config.ts, package.json, README.md              expo-camera (cameraPermission), expo-crypto; status paragraph
 ```
 
 ## Steps
@@ -277,7 +258,7 @@ needs M3, P6 needs M4, P8 is last.
   state, Bonjour service with TXT, orphan cleanup on start. Accept:
   `IdempotencyTests` return the same `meetingID` twice; manual on a Mac:
   `dns-sd -B _steno._tcp` lists the service and the macOS prompt shows once.
-- **M6 CLI command.** `steno handover serve --pair` with an in-memory store.
+- **M6 CLI command.** `steno handover serve --pair` over `MeetingStore.inMemory()` and core's `FakeHandoverIntake`.
   Accept: prints payload URL and QR; a phone dev build pairs against it.
 - **P1 Module skeleton and browsing** (after S2). Local module, `Browser`,
   events, `resolve`. Accept: a device dev build lists a service published
@@ -308,9 +289,8 @@ needs M3, P6 needs M4, P8 is last.
   two chunks in flight, complete only when all chunks are uploaded, wait while
   unreachable) and `backoffMs` bounds; manual: Wi-Fi off for a minute
   mid-upload, the upload finishes without restarting from chunk 0.
-- **P7 Screen and strings.** Recorder screen, list, badges, i18n, motion
-  tokens. Accept: `pnpm check` passes; de and en screenshots show no raw
-  key; VoiceOver labels on record and retry.
+- **P7 Screen.** Recorder screen, list, badges, theme and motion tokens.
+  Accept: `pnpm check` passes; VoiceOver labels on record and retry.
 - **P8 Delivery.** `app.config.ts`, `package.json`, README. Accept: the
   `mobile-ci.yml` sticky comment says TestFlight lane (fingerprint moves);
   the build installs and passes the P1 to P7 manual checks.
@@ -359,22 +339,21 @@ needs M3, P6 needs M4, P8 is last.
 
 ## Needs from other workstreams
 
-- **core-foundation**: `Meeting`, `AudioAsset`, `Meeting.Source.phone`,
-  `Meeting.State.queued`; `HandoverStore` over GRDB with tables
-  `pairedDevice` and `handoverReceipt` in `Storage/Migrations.swift`;
-  `HandoverIntake` moving the file into the audio directory and inserting
-  `AudioAsset` (`m4a`, lanes `[.mixed]`, retention from settings) plus
-  `Meeting` (`.queued`, title from `startedAt`) in one transaction, then
-  enqueuing in `ProcessingPipeline`; decode accepting AAC `.m4a`;
-  `Sources/steno` registering `HandoverCommand`.
+- **core-foundation**: `PairedDevice`, `HandoverReceipt`,
+  `RecordingMetadata`, `MeetingStore` as `HandoverStore`, `RecordingIntake`
+  as `HandoverIntake` (file move, `Meeting(.queued, .phone)` plus
+  `AudioAsset(.m4aAAC, [.mixed])` in one transaction, pipeline enqueue,
+  idempotent on `recordingID`), `FakeHandoverIntake` in `Testing/`, the
+  `steno` root command.
+- **audio-capture**: `AVFoundationAudioCodec` decodes AAC `.m4a` (pipeline
+  step 1); nothing to do here.
 - **macos-app-and-release**: render `PairingPayload.urlString` as a QR
   (`CIQRCodeGenerator`) in a pairing sheet; settings pane bound to
   `HandoverService` (devices, revoke, port, transfers); onboarding text for
   the macOS local network prompt; `NSLocalNetworkUsageDescription` and
   `NSBonjourServices: ["_steno._tcp"]` in the app Info.plist; menu bar
   progress from `transfers`.
-- **audio-capture, speech-and-speakers, llm-and-templates,
-  adapters-obsidian**: nothing.
+- **speech-and-speakers, llm-and-templates, adapters-obsidian**: nothing.
 
 ## Risks
 
@@ -386,13 +365,10 @@ strict limits, auth before body, `Connection: close`, edge-case tests.
 
 ## Requested changes to the program document
 
-1. Add `PairedDevice` and `HandoverReceipt` to the canonical model list,
-   owned by StenoCore, persisted in the append-only migrations file, used by
-   StenoHandover through `HandoverStore`.
-2. Add `swift-certificates` (with transitive `swift-crypto` and `swift-asn1`)
-   to the third-party package list, scoped to StenoHandover, because
-   Security.framework cannot mint a self-signed certificate.
-3. State in the pipeline section that step 1 accepts AAC `.m4a` input.
-4. Add `HandoverStore` and `HandoverIntake` to the protocol list as
-   StenoCore-owned protocols implemented in StenoCore and consumed by
-   StenoHandover, keeping the dependency direction one way.
+Reconciled into the program document, see its log (entries 28 to 31).
+
+## Deferred
+
+- German and English strings on the phone (`expo-localization`, `t()`,
+  locale files); the recorder ships in English like the macOS app.
+- Certificate rotation, several Macs per phone, relay or cloud transport.

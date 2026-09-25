@@ -1,11 +1,11 @@
 # Steno v1: audio capture (`Sources/StenoAudio`)
 
-Status: implementation plan, written 2026-09-25. Binding context:
-[`2026-09-25-v1-program.md`](2026-09-25-v1-program.md) (module boundaries,
-`EchoCanceller` protocol) and [`2026-09-24-initial-scope.md`](2026-09-24-initial-scope.md).
-This plan asks for two program-level changes, listed in the last section:
-the mic lane is captured through a Core Audio IOProc rather than
-AVAudioEngine, and `AudioAsset` gains per-lane 16 kHz sidecar URLs.
+Status: implementation plan, written 2026-09-25, reconciled the same day.
+Binding context: [`2026-09-25-v1-program.md`](2026-09-25-v1-program.md)
+(`EchoCanceller`, `AudioDecoding`, `AudioAsset`, `AudioLane`) and
+[`2026-09-24-initial-scope.md`](2026-09-24-initial-scope.md). Owns
+`Sources/StenoAudio`, `Tests/StenoAudioTests` and the `audio-devices`,
+`capture-spike`, `record` and `aec-bench` CLI commands.
 
 API names marked "(unverified)" were seen only in blog posts or recalled
 from memory, not in the AudioCap source, Apple documentation, or the
@@ -18,8 +18,10 @@ Capture a meeting on the Mac as two time-aligned lanes at 48 kHz, "me" from
 the microphone and "them" from a Core Audio process tap of everything the
 Mac plays except Steno itself, cancel the loudspeaker echo out of the mic
 lane in software, write a crash-tolerant master file plus the 16 kHz mono
-sidecars the pipeline consumes, tell the app when another process opens the
-microphone, and settle the Continuity phone-call question with a CLI spike.
+sidecars the pipeline consumes, implement the program's `AudioDecoding`
+(decode any recording to 16 kHz lanes, mix down to AAC for export), tell the
+app when another process opens the microphone, and settle the Continuity
+phone-call question with a CLI spike.
 Everything real-time runs without allocation or locks; everything else is
 an actor.
 
@@ -32,8 +34,8 @@ an actor.
 - Per-application taps or an app picker. v1 taps the global mix.
 - Recording the phone through the iPhone; that is the handover workstream.
 - Windows, Intel, macOS 14.
-- Encoding to AAC/m4a at capture time; the adapter workstream transcodes
-  the optional `audio.m4a` export.
+- Encoding to AAC at capture time. The `audio.m4a` mixdown is produced after
+  processing by `AVFoundationAudioCodec.mixdown` (pipeline step 8).
 
 ## Decisions
 
@@ -47,7 +49,8 @@ an actor.
 | Threads | IOProc (real-time) copies into two lock-free rings. A dedicated processing thread drains 10 ms frames, runs AEC, metering and downmix. A serial writer queue does file I/O. Actors only outside these three. |
 | Permission | No status API. Onboarding runs the full tap pipeline for 500 ms and treats "prompt accepted and buffers non-zero while `afplay` plays a tone" as authorised. AudioCap's private `TCCAccessPreflight`/`TCCAccessRequest` on `kTCCServiceAudioCapture` is compiled only under `STENO_TCC_SPI` for debugging, never shipped. |
 | Meeting detection | Listener on `kAudioDevicePropertyDeviceIsRunningSomewhere` for input devices, then attribution by enumerating `kAudioHardwarePropertyProcessObjectList` and reading `kAudioProcessPropertyIsRunningInput` (unverified; listeners on it reportedly never fire) and `kAudioProcessPropertyBundleID`. Poll every 2 s as a safety net. |
-| Lanes | Call mode: `[.mic, .system]`. In-person: `[.mixed]`, one lane, no tap, no AEC. Lane names assume `Lane` in StenoCore matches `TranscriptSegment.lane`. |
+| Lanes | Call mode: `[.mic, .system]`. In-person: `[.mixed]`, one lane, no tap, no AEC. `AudioLane` is StenoCore's enum, shared with `TranscriptSegment.lane`. |
+| Decode and mixdown | `AVFoundationAudioCodec: AudioDecoding`. `decode` returns `sidecars16k` when present, otherwise reads CAF, m4a or WAV through `AVAudioFile` + `AVAudioConverter` to 16 kHz mono per lane (channel n = lane n of the master). `mixdown` sums lanes to mono and writes AAC 64 kbps `.m4a` via `AVAssetWriter`; `.m4aAAC` inputs are copied. |
 
 ## Public API
 
@@ -60,7 +63,7 @@ public struct CaptureConfiguration: Sendable, Equatable {
     public var echoCancellation: Bool         // default true in .call, ignored in .inPerson
     public var keepRawMicLane: Bool           // debug: writes mic.raw.caf next to the master
     public var outputDirectory: URL           // per-meeting folder is created inside
-    public var retention: AudioAsset.Retention
+    public var retention: AudioRetention
 }
 
 public enum CaptureState: Sendable, Equatable {
@@ -79,7 +82,7 @@ public struct LaneLevels: Sendable, Equatable {   // emitted at 10 Hz
 
 public struct CaptureStatistics: Sendable, Equatable {
     public var duration: TimeInterval
-    public var droppedFrames: [Lane: Int]     // ring overruns, should be zero
+    public var droppedFrames: [AudioLane: Int]   // ring overruns, should be zero
     public var systemLaneSilent: Bool          // true if the tap never exceeded -80 dBFS
     public var deviceChanges: Int
 }
@@ -90,7 +93,13 @@ public actor CaptureSession {
     public var states: AsyncStream<CaptureState> { get }
     public var levels: AsyncStream<LaneLevels> { get }
     public func start(meetingID: UUID) async throws
-    public func stop() async throws -> (asset: AudioAsset, statistics: CaptureStatistics)
+    public func stop() async throws -> (asset: AudioAsset, statistics: CaptureStatistics)   // format .caf48kFloat32, sidecars16k filled
+}
+
+public struct AVFoundationAudioCodec: AudioDecoding {                // program protocol; StenoCore's WAVAudioDecoder is the fake
+    public init()
+    public func decode(_ asset: AudioAsset) async throws -> [AudioLane: AudioBuffer16k]
+    public func mixdown(_ asset: AudioAsset, to url: URL) async throws
 }
 
 public enum SystemAudioPermission {
@@ -120,14 +129,14 @@ public final class SpeexEchoCanceller: EchoCanceller, @unchecked Sendable {
 public final class PassthroughEchoCanceller: EchoCanceller { }       // tests and .inPerson
 
 public final class RecordingWriter: @unchecked Sendable {            // owned by the writer queue
-    public init(directory: URL, lanes: [Lane], sampleRate: Double) throws
+    public init(directory: URL, lanes: [AudioLane], sampleRate: Double) throws
     public func write(_ frames: LaneFrames) throws                    // 48 kHz Float32, one call per 10 ms
     public func finish() throws -> RecordingFiles                     // master + sidecars
 }
 
 public struct RecordingFiles: Sendable, Equatable {
     public var master: URL                    // recording.caf
-    public var sidecars16k: [Lane: URL]       // mic.16k.wav, system.16k.wav or mixed.16k.wav
+    public var sidecars16k: [AudioLane: URL]  // mic.16k.wav, system.16k.wav or mixed.16k.wav
     public var rawMic: URL?
     public var duration: TimeInterval
 }
@@ -164,17 +173,18 @@ Sources/StenoAudio/
   Detection/ProcessAudioActivity.swift          process object list, IsRunningInput, BundleID, PID
   Writer/RecordingWriter.swift                  ExtAudioFile CAF master, WAV sidecars, optional raw mic
   Writer/RecordingLayout.swift                  file names inside the meeting folder
+  Codec/AVFoundationAudioCodec.swift            AudioDecoding: decode to 16 kHz lanes, AAC mixdown
 Sources/steno/Commands/
   AudioDevicesCommand.swift                     `steno audio-devices`: devices, processes, running flags
   CaptureSpikeCommand.swift                     `steno capture-spike --seconds 10 --out DIR`: RMS per lane
   RecordCommand.swift                           `steno record --mode call|in-person --out DIR`
   AECBenchCommand.swift                         `steno aec-bench --mic --far --engine speex|passthrough`
-  FixturesCommand.swift                         generates the synthetic audio fixtures below
+  FixturesCommand+Audio.swift                   adds the 48 kHz cases below to core's `steno fixtures generate`
 Tests/StenoAudioTests/
   LaneRingBufferTests.swift, LaneAlignerTests.swift, LevelMeterTests.swift,
   SpeexEchoCancellerTests.swift, RecordingWriterTests.swift, Resampler48kTo16kTests.swift,
-  MeetingDetectorTests.swift, CaptureSessionTests.swift, TapIntegrationTests.swift
-Tests/Fixtures/audio/
+  AVFoundationAudioCodecTests.swift, MeetingDetectorTests.swift, CaptureSessionTests.swift, TapIntegrationTests.swift
+Tests/Fixtures/audio/                           shared folder owned by core; these cases added here
   tone-1k-48k-2s.wav, sweep-48k-3s.wav, speech-like-far-48k-6s.wav, echo-mic-48k-6s.wav, room-ir-48k.wav
 ```
 
@@ -182,7 +192,7 @@ Tests/Fixtures/audio/
 
 Each step is at most one day and ends with a reviewer-runnable check.
 CI is the `macos-15` job; audio integration tests run only when
-`STENO_AUDIO_TESTS=1` because hosted runners have no audio devices (unverified).
+`STENO_AUDIO_TESTS=1` (program verification standard).
 
 1. **Package wiring.** `StenoAudio` target depending on `StenoCore` and
    `CSpeex`, empty public types, `StenoAudioTests` with one test.
@@ -226,14 +236,21 @@ CI is the `macos-15` job; audio integration tests run only when
    read them back sample-accurately; killing `steno record` with SIGKILL
    mid-recording leaves a `recording.caf` that `afinfo` reads with the
    correct duration to within one second.
-7. **SpeexDSP canceller.** `SpeexEchoCanceller` with preallocated Int16
+7. **`AVFoundationAudioCodec`.** `decode` for `.caf48kFloat32` (per-channel
+   lanes), `.m4aAAC` (one `.mixed` lane) and `.wav16kInt16`, preferring
+   `sidecars16k`; `mixdown` to AAC mono. Check: `AVFoundationAudioCodecTests`
+   decode a 2 s two-channel CAF fixture into two 32 000-sample lanes whose
+   1 kHz peaks match the sidecar decode within 0.1 dB; a mixdown of the same
+   file is an `.m4a` that `afinfo` reports as AAC mono with duration 2 s;
+   `decode` of a phone-style `.m4a` fixture yields one `.mixed` lane.
+8. **SpeexDSP canceller.** `SpeexEchoCanceller` with preallocated Int16
    scratch, `speex_preprocess` residual suppression, `reset()`.
    `steno aec-bench` prints ERLE and writes the processed file.
    Check: `SpeexEchoCancellerTests` on `echo-mic-48k-6s.wav` (far-end
    convolved with `room-ir-48k.wav` at 60 ms delay plus -20 dB noise) reach
    ERLE >= 20 dB after 3 s; with a near-end sweep added (double talk) the
    sweep's RMS in the output is within 3 dB of the input.
-8. **AEC in the live path.** Feed the system lane frame as far-end for the
+9. **AEC in the live path.** Feed the system lane frame as far-end for the
    mic lane frame of the same callback; when device latency
    (`kAudioDevicePropertyLatency` + `kAudioDevicePropertySafetyOffset`,
    unverified for aggregates) exceeds 100 ms, delay the far-end by that
@@ -242,20 +259,20 @@ CI is the `macos-15` job; audio integration tests run only when
    nobody talking, `steno aec-bench --mic mic.raw.caf --far recording.caf:1`
    reports ERLE >= 15 dB and the master's mic lane RMS is >= 15 dB below the
    raw mic lane.
-9. **Meeting detection.** `MeetingDetector` with the IsRunningSomewhere
+10. **Meeting detection.** `MeetingDetector` with the IsRunningSomewhere
    listener, process attribution, 2 s debounce, 2 s poll fallback, own PID
    ignored. Check: `MeetingDetectorTests` with a fake activity source emit
    exactly one `microphoneOpened` for a flapping input and one
    `microphoneReleased` after release; manually, opening FaceTime audio
    emits `microphoneOpened(bundleID: "com.apple.FaceTime", ...)` within 3 s.
-10. **In-person mode and device changes.** `.inPerson` builds an aggregate
+11. **In-person mode and device changes.** `.inPerson` builds an aggregate
     with the input device only, one `.mixed` lane, no AEC. Listen for default
     output/input changes and `kAudioDevicePropertyDeviceIsAlive`; on change,
     fail with `.deviceLost` and stop cleanly (rebuilding mid-meeting is v1.1).
     Check: unplugging the USB mic during `steno record` yields a readable file,
     state `.failed(.deviceLost)` and no crash; `steno record --mode in-person`
     produces `recording.caf` with one channel and `mixed.16k.wav`.
-11. **Continuity spike (S3) and stress.** Run S3 below, record the outcome as
+12. **Continuity spike (S3) and stress.** Run S3 below, record the outcome as
     an addendum to this file. Stress: 200 start/stop cycles, leaks and
     `AudioObjectID` counts flat. Check: addendum committed; `leaks` clean.
 
@@ -285,8 +302,8 @@ CI is the `macos-15` job; audio integration tests run only when
 |---|---|---|---|
 | S1 permission and silence | 4 | Prompt appears on first start of a signed build with `NSAudioCaptureUsageDescription` as a literal Info.plist key; after accepting, buffers are non-zero while `afplay` plays; after `tccutil reset` they are zero and the prompt returns. | Onboarding cannot detect denial; fall back to the TCC SPI in Developer ID builds and document it. |
 | S2 mic in the tap aggregate | 5 | Both input streams appear in one buffer list; built-in mic and AirPods (HFP) deliver at 48 kHz; onsets aligned within 5 ms over 60 s. | Two IOProcs plus `LaneAligner`; AEC gets a 20 ms alignment jitter budget. |
-| S3 Continuity call audible | 11 (result gates the phone story) | `steno capture-spike --seconds 10` during a Continuity call taken on the Mac: system lane RMS during remote speech >= -40 dBFS and >= 20 dB above the idle floor; playback intelligible. Test with the tone first so TCC denial is not mistaken for a no-go. | Phone source becomes "phone on speaker, room mic, `.mixed` lane"; program `Meeting.source == .phone` keeps meaning but capture uses `.inPerson`. Report to the program doc. |
-| S4 AEC bake-off | after 8, time-boxed two days | Switch from Speex only if DTLN-aec on CoreML (models `model_128_{1,2}.onnx`, block 512, shift 128, 16 kHz, two stateful sessions per block) or WebRTC AEC3 beats Speex by >= 6 dB ERLE or clearly fewer double-talk artefacts on the manual-check recording, at < 15% of one core. | Speex stays. DTLN's fixed 16 kHz would also force the master's mic lane to be band-limited or raw; note in the addendum. |
+| S3 Continuity call audible | 12 (result gates the phone story) | `steno capture-spike --seconds 10` during a Continuity call taken on the Mac: system lane RMS during remote speech >= -40 dBFS and >= 20 dB above the idle floor; playback intelligible. Test with the tone first so TCC denial is not mistaken for a no-go. | Phone source becomes "phone on speaker, room mic, `.mixed` lane"; `Meeting.source == .phone` keeps its meaning but capture uses `.inPerson`. Addendum to this plan plus a program log entry. |
+| S4 AEC bake-off | after 9, time-boxed two days | Switch from Speex only if DTLN-aec on CoreML (models `model_128_{1,2}.onnx`, block 512, shift 128, 16 kHz, two stateful sessions per block) or WebRTC AEC3 beats Speex by >= 6 dB ERLE or clearly fewer double-talk artefacts on the manual-check recording, at < 15% of one core. | Speex stays. DTLN's fixed 16 kHz would also force the master's mic lane to be band-limited or raw; note in the addendum. |
 
 ## Real-time and privacy rules for this module
 
@@ -302,12 +319,12 @@ CI is the `macos-15` job; audio integration tests run only when
 
 ## Needs from other workstreams
 
-- **StenoCore**: `EchoCanceller` as in the program doc; `AudioAsset` and its
-  `Retention`; the `Lane` enum with `.mic`, `.system`, `.mixed`; the `steno`
-  CLI skeleton exposing a way to register subcommands; the settings type
-  that carries the audio output folder and retention.
-- **Pipeline (StenoCore `ProcessingPipeline`)**: step 1 should read the 16 kHz
-  sidecars when present instead of decoding the master.
+- **StenoCore**: `EchoCanceller`, `AudioDecoding`, `AudioAsset`
+  (`AudioFormat`, `sidecars16k`, `mixdownURL`), `AudioLane`,
+  `AudioRetention`; `Settings.audioFolder`, `defaultRetention`,
+  `inputDeviceUID`; the `steno` root command and `fixtures generate`.
+  Pipeline step 1 calls `AudioDecoding.decode(asset)` and step 8 calls
+  `mixdown`, so no core change is needed for sidecars.
 - **macOS app**: onboarding calls `SystemAudioPermission.request()` and
   `SystemAudioPermission.microphone()`; `Info.plist` contains
   `NSAudioCaptureUsageDescription` and `NSMicrophoneUsageDescription` as
@@ -319,19 +336,12 @@ CI is the `macos-15` job; audio integration tests run only when
 
 ## Requested changes to the program document
 
-1. Scope and program: "Microphone via AVAudioEngine as a separate lane"
-   becomes "Microphone via a Core Audio IOProc, as a sub-device of the tap
-   aggregate where possible". Rationale in Decisions.
-2. `AudioAsset` gains `sidecars16k: [Lane: URL]` (optional) and a typed
-   `format` (`.caf48kFloat32`), so pipeline step 1 can skip decoding.
-3. Third-party package added: `CSpeex` (SpeexDSP), because the MDF
-   canceller is real-time safe, model-free and proven at 38 dB ERLE in a
-   comparable Swift app.
-4. Clarify `EchoCanceller.process`: `farEnd` is the far-end signal captured
-   at the same instant as `nearEnd`; implementations own any delay handling
-   within their tail.
-5. Confirm `Lane.mixed` means "single room lane, fully diarized, no segment
-   auto-assigned to the me participant" and that in-person and the phone
-   fallback both produce it.
-6. Verification standard: audio integration tests are opt-in
-   (`STENO_AUDIO_TESTS=1`) because hosted runners have no audio devices.
+Reconciled into the program document, see its log (entries 6 to 11).
+
+## Deferred
+
+- Rebuilding the aggregate mid-meeting after a device change (v1 fails with
+  `.deviceLost` and stops cleanly).
+- Per-application taps and an app picker; ScreenCaptureKit capture.
+- A mic-lane integration test on CI (needs a virtual input device; the
+  `STENO_VIRTUAL_INPUT_UID` gate stays optional).
