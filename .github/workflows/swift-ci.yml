@@ -148,6 +148,9 @@ jobs:
       # A golden mismatch writes the actual bytes beside the golden as
       # `<name>.actual` (see StenoCore/Testing/Snapshot.swift); uploading them
       # lets a developer without a Mac inspect or adopt the runner's output.
+      # `.build` is a dot directory, which upload-artifact v4 skips unless
+      # `include-hidden-files` is set; and the junit files must exist, so a
+      # missing upload fails the job instead of passing silently.
       - name: Upload xunit output and snapshot mismatches
         if: success() || steps.test.outcome == 'failure'
         uses: actions/upload-artifact@v4
@@ -156,4 +159,5 @@ jobs:
           path: |
             .build/junit*.xml
             Tests/Fixtures/**/*.actual
-          if-no-files-found: ignore
+          include-hidden-files: true
+          if-no-files-found: error
