@@ -1,6 +1,7 @@
 import { stenoLink } from "@modules/steno-link";
 import { useNavigation } from "@react-navigation/native";
 import type { NativeStackNavigationProp } from "@react-navigation/native-stack";
+import { File } from "expo-file-system";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { View } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
@@ -32,8 +33,8 @@ import { formatDuration } from "./format";
 import { RecordButton } from "./RecordButton";
 import { RecordingList } from "./RecordingList";
 
-/** The elapsed counter and "Today" labels refresh once a second. */
-const CLOCK_TICK_MS = 1000;
+/** The "Today" / "Yesterday" labels refresh once a minute. */
+const CLOCK_TICK_MS = 60_000;
 
 /**
  * The one screen the scope gives the phone: record or stop, see every
@@ -48,7 +49,6 @@ export function RecorderScreen() {
 	const [busy, setBusy] = useState(false);
 	const [error, setError] = useState<string | null>(null);
 	const [now, setNow] = useState(() => new Date());
-	const [elapsed, setElapsed] = useState(0);
 
 	const recorder = useRecorder({
 		onStarted: (session) => {
@@ -58,6 +58,7 @@ export function RecorderScreen() {
 					{
 						recordingID: session.recordingID,
 						fileName: recordingFileName(session.recordingID),
+						sourceUri: session.sourceUri,
 						startedAt: session.startedAt.toISOString(),
 						durationSeconds: 0,
 						byteCount: 0,
@@ -74,7 +75,7 @@ export function RecorderScreen() {
 				// The row normally exists from `onStarted`; add it if that write failed.
 				const { recordingID, startedAt, ...fields } = finished;
 				const patched = findRecording(current, recordingID)
-					? patchRecording(current, recordingID, fields)
+					? patchRecording(current, recordingID, { ...fields, sourceUri: null })
 					: addRecording(
 							current,
 							{ recordingID, startedAt, ...fields, chunkSize: CHUNK_SIZE },
@@ -96,7 +97,8 @@ export function RecorderScreen() {
 		},
 	});
 
-	// Rows left in `recording` by a crash: queue the file if it exists.
+	// Rows left in `recording` by a crash: move the recorder's file into the
+	// queue and queue it, or mark the row failed when nothing survived.
 	const recoveredOnce = useRef(false);
 	useEffect(() => {
 		if (!ready || recoveredOnce.current) return;
@@ -106,6 +108,8 @@ export function RecorderScreen() {
 				const file = queuedFile(fileName);
 				return file.exists ? file.size : 0;
 			},
+			adopt: (sourceUri, fileName) =>
+				new File(sourceUri).move(queuedFile(fileName), { overwrite: true }),
 			sha256: (fileName) => stenoLink().sha256(queuedFile(fileName).uri),
 		})
 			.then((patches) =>
@@ -117,12 +121,9 @@ export function RecorderScreen() {
 	}, [ready, index, update]);
 
 	useEffect(() => {
-		const timer = setInterval(() => {
-			setNow(new Date());
-			setElapsed(recorder.elapsedSeconds());
-		}, CLOCK_TICK_MS);
+		const timer = setInterval(() => setNow(new Date()), CLOCK_TICK_MS);
 		return () => clearInterval(timer);
-	}, [recorder]);
+	}, []);
 
 	const toggle = useCallback(async () => {
 		setError(null);
@@ -132,17 +133,21 @@ export function RecorderScreen() {
 				await recorder.stop();
 			} else {
 				await recorder.start();
-				setBusy(false);
 			}
 		} catch (caught) {
-			setBusy(false);
 			setError(errorMessage(caught));
+		} finally {
+			// `onFinished` / `onFailed` clear it too; this covers a stop() that
+			// found nothing to stop.
+			setBusy(false);
 		}
 	}, [recorder]);
 
 	const macLabel = pairing ? pairing.mac.macName : "Pair a Mac";
 	const statusLine = recorder.isRecording
-		? formatDuration(elapsed)
+		? recorder.paused
+			? `Paused at ${formatDuration(recorder.elapsedSeconds)}`
+			: formatDuration(recorder.elapsedSeconds)
 		: describeSync(sync.status, sync.macName, sync.reachable);
 
 	return (
@@ -175,6 +180,22 @@ export function RecorderScreen() {
 				>
 					{statusLine}
 				</AppText>
+				{recorder.paused ? (
+					<View className="items-center gap-2">
+						<AppText className="text-center" variant="muted">
+							A call or another app paused the recording. Resume, or stop to
+							keep what you have.
+						</AppText>
+						<PressableScale
+							accessibilityLabel="Resume recording"
+							accessibilityRole="button"
+							hitSlop={HIT_SLOP}
+							onPress={recorder.resume}
+						>
+							<AppText variant="heading">Resume</AppText>
+						</PressableScale>
+					</View>
+				) : null}
 				{error ? (
 					<AppText className="text-center" variant="error">
 						{error}

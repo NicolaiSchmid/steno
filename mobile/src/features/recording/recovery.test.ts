@@ -7,12 +7,33 @@ import {
 } from "@/features/queue/queue-index";
 import { applyRecovery, planRecovery, type RecoveryFiles } from "./recovery";
 
+const SOURCE = "file:///docs/ExpoAudio/recording-123.m4a";
+
 function files(overrides: Partial<RecoveryFiles> = {}): RecoveryFiles {
 	return {
 		size: () => 80_000,
+		adopt: async () => {},
 		sha256: async () => "HASH",
 		...overrides,
 	};
+}
+
+/** Files keyed by URI or queue file name; `adopt` moves between them. */
+function disk(initial: Record<string, number>) {
+	const sizes = new Map(Object.entries(initial));
+	const moves: [string, string][] = [];
+	const api: RecoveryFiles = {
+		size: (fileName) => sizes.get(fileName) ?? 0,
+		adopt: async (sourceUri, fileName) => {
+			const size = sizes.get(sourceUri);
+			if (size === undefined) throw new Error(`missing ${sourceUri}`);
+			sizes.delete(sourceUri);
+			sizes.set(fileName, size);
+			moves.push([sourceUri, fileName]);
+		},
+		sha256: async (fileName) => `sha(${fileName})`,
+	};
+	return { api, moves, sizes };
 }
 
 const base = {
@@ -24,13 +45,61 @@ const base = {
 	chunkSize: 16,
 };
 
+/** Left in `recording` by a crash; the recorder was writing to `SOURCE`. */
 const interrupted = addRecording(
 	EMPTY_INDEX,
-	{ ...base, recordingID: "a" },
+	{ ...base, recordingID: "a", sourceUri: SOURCE },
 	"recording",
 );
 
 describe("planRecovery", () => {
+	it("moves the recorder's file into the queue directory, then hashes and queues it", async () => {
+		const d = disk({ [SOURCE]: 80_000 });
+		expect(await planRecovery(interrupted, d.api)).toEqual([
+			{
+				recordingID: "a",
+				kind: "queued",
+				byteCount: 80_000,
+				sha256: "sha(a.m4a)",
+				durationSeconds: 10,
+			},
+		]);
+		expect(d.moves).toEqual([[SOURCE, "a.m4a"]]);
+		expect(d.sizes.has(SOURCE)).toBe(false);
+	});
+
+	it("does not move anything when the file is already in the queue directory", async () => {
+		const d = disk({ "a.m4a": 80_000 });
+		expect(await planRecovery(interrupted, d.api)).toMatchObject([
+			{ kind: "queued", byteCount: 80_000 },
+		]);
+		expect(d.moves).toEqual([]);
+	});
+
+	it("fails a row whose recorder file is gone and cannot be adopted", async () => {
+		const d = disk({});
+		expect(await planRecovery(interrupted, d.api)).toEqual([
+			{
+				recordingID: "a",
+				kind: "failed",
+				lastError: "Recording was interrupted before it was saved",
+			},
+		]);
+	});
+
+	it("fails a row without a source when the queued file is missing", async () => {
+		const noSource = addRecording(
+			EMPTY_INDEX,
+			{ ...base, recordingID: "a" },
+			"recording",
+		);
+		const d = disk({ [SOURCE]: 80_000 });
+		expect(await planRecovery(noSource, d.api)).toMatchObject([
+			{ kind: "failed" },
+		]);
+		expect(d.moves).toEqual([]);
+	});
+
 	it("queues a recording whose file survived, estimating the duration", async () => {
 		expect(await planRecovery(interrupted, files())).toEqual([
 			{
@@ -59,6 +128,12 @@ describe("planRecovery", () => {
 			files({
 				size: () => {
 					throw new Error("stat");
+				},
+			}),
+			files({
+				size: () => 0,
+				adopt: async () => {
+					throw new Error("missing");
 				},
 			}),
 		]) {

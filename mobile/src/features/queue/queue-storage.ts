@@ -47,6 +47,7 @@ function parseRecording(raw: unknown, position: number): QueuedRecording {
 	const ok =
 		isString(r.recordingID) &&
 		isString(r.fileName) &&
+		(r.sourceUri === undefined || isNullableString(r.sourceUri)) &&
 		isString(r.startedAt) &&
 		isNumber(r.durationSeconds) &&
 		isNumber(r.byteCount) &&
@@ -64,6 +65,8 @@ function parseRecording(raw: unknown, position: number): QueuedRecording {
 	return {
 		recordingID: r.recordingID as string,
 		fileName: r.fileName as string,
+		// Absent in indexes written before the column existed.
+		sourceUri: (r.sourceUri as string | null | undefined) ?? null,
 		startedAt: r.startedAt as string,
 		durationSeconds: r.durationSeconds as number,
 		byteCount: r.byteCount as number,

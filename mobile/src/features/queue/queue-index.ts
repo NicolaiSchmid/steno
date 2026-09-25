@@ -18,6 +18,12 @@ export type QueuedRecording = {
 	recordingID: string;
 	/** Relative to the queue directory. */
 	fileName: string;
+	/**
+	 * Where the recorder writes while the recording runs (expo-audio's own
+	 * directory); null once the file moved into the queue directory. Crash
+	 * recovery moves it from here.
+	 */
+	sourceUri: string | null;
 	/** ISO 8601 with fractional seconds. */
 	startedAt: string;
 	durationSeconds: number;
@@ -46,7 +52,8 @@ export type NewRecording = Pick<
 	| "byteCount"
 	| "sha256"
 	| "chunkSize"
->;
+> &
+	Partial<Pick<QueuedRecording, "sourceUri">>;
 
 export type Chunk = { index: number; offset: number; length: number };
 
@@ -110,6 +117,7 @@ export function addRecording(
 		throw new QueueError("chunkSize must be a positive integer");
 	}
 	const row: QueuedRecording = {
+		sourceUri: null,
 		...rec,
 		uploadedChunks: [],
 		state,
@@ -128,7 +136,12 @@ export function patchRecording(
 	patch: Partial<
 		Pick<
 			QueuedRecording,
-			"durationSeconds" | "byteCount" | "sha256" | "fileName" | "lastError"
+			| "durationSeconds"
+			| "byteCount"
+			| "sha256"
+			| "fileName"
+			| "sourceUri"
+			| "lastError"
 		>
 	>,
 ): QueueIndex {

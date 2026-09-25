@@ -61,8 +61,12 @@ export type UploadProgress = {
 export type UploadFinished = { taskID: string; status: number; body: string };
 export type UploadFailed = {
 	taskID: string;
+	/** A rejected pin reads "The Mac's certificate does not match the pairing". */
 	message: string;
-	/** False only when the task was cancelled by the app. */
+	/**
+	 * False only when the app cancelled the task itself. The coordinator backs
+	 * off either way; the flag is informational.
+	 */
 	retryable: boolean;
 };
 

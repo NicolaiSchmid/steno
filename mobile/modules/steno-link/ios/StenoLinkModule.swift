@@ -158,12 +158,15 @@ enum StenoLinkError: LocalizedError {
   case badURL(String)
   case badFingerprint
   case notHTTP
+  /// The server's leaf certificate did not hash to the pinned fingerprint.
+  case pinMismatch
 
   var errorDescription: String? {
     switch self {
     case .badURL(let url): return "Not a URL: \(url)"
     case .badFingerprint: return "Fingerprint must be 32 bytes of standard base64"
     case .notHTTP: return "Response was not HTTP"
+    case .pinMismatch: return "The Mac's certificate does not match the pairing"
     }
   }
 }

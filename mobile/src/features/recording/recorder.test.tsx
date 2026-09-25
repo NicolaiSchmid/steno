@@ -4,6 +4,7 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
+	RECORDER_POLL_MS,
 	type RecorderCallbacks,
 	type RecorderHandle,
 	useRecorder,
@@ -43,10 +44,15 @@ const fake = vi.hoisted(() => {
 	}
 	const recorder = {
 		currentTime: 0,
+		isRecording: false,
 		uri: null as string | null,
 		prepareToRecordAsync: vi.fn(async () => {}),
-		record: vi.fn(),
-		stop: vi.fn(async () => {}),
+		record: vi.fn(() => {
+			recorder.isRecording = true;
+		}),
+		stop: vi.fn(async () => {
+			recorder.isRecording = false;
+		}),
 	};
 	let uuid = 0;
 	return {
@@ -65,11 +71,14 @@ const fake = vi.hoisted(() => {
 			files.clear();
 			moves.length = 0;
 			recorder.currentTime = 0;
+			recorder.isRecording = false;
 			recorder.uri = null;
 			recorder.prepareToRecordAsync.mockClear();
 			recorder.record.mockClear();
 			recorder.stop.mockClear();
-			recorder.stop.mockImplementation(async () => {});
+			recorder.stop.mockImplementation(async () => {
+				recorder.isRecording = false;
+			});
 			this.permission = { granted: true };
 			this.requestRecordingPermissionsAsync.mockClear();
 			this.setAudioModeAsync.mockClear();
@@ -140,6 +149,11 @@ function mount() {
 		start: () => act(() => handle.start()),
 		stop: () => act(() => handle.stop()),
 		emit: (s: RecordingStatus) => act(async () => fake.listener?.(s)),
+		/** One poll tick of the hook. */
+		tick: (times = 1) =>
+			act(() => {
+				vi.advanceTimersByTime(RECORDER_POLL_MS * times);
+			}),
 	};
 }
 
@@ -151,10 +165,14 @@ async function startWithFile(size = 4096) {
 	return h;
 }
 
-beforeEach(() => fake.reset());
+beforeEach(() => {
+	fake.reset();
+	vi.useFakeTimers();
+});
 afterEach(() => {
 	act(() => root?.unmount());
 	root = null;
+	vi.useRealTimers();
 });
 
 describe("start", () => {
@@ -173,8 +191,21 @@ describe("start", () => {
 		expect(h.callbacks.onStarted).toHaveBeenCalledWith({
 			recordingID: "rec-1",
 			startedAt: expect.any(Date),
+			sourceUri: null,
 		});
 		expect(h.handle.session?.recordingID).toBe("rec-1");
+	});
+
+	it("hands the recorder's file URI to onStarted so a crash can recover it", async () => {
+		fake.recorder.prepareToRecordAsync.mockImplementationOnce(async () => {
+			fake.recorder.uri = SOURCE;
+		});
+		const h = mount();
+		await h.start();
+		expect(h.callbacks.onStarted).toHaveBeenCalledWith(
+			expect.objectContaining({ recordingID: "rec-1", sourceUri: SOURCE }),
+		);
+		expect(h.handle.session?.sourceUri).toBe(SOURCE);
 	});
 
 	it("throws and stays idle when the permission is denied", async () => {
@@ -216,7 +247,7 @@ describe("stop", () => {
 		});
 		expect(h.callbacks.onFailed).not.toHaveBeenCalled();
 		expect(h.handle.isRecording).toBe(false);
-		expect(h.handle.elapsedSeconds()).toBe(0);
+		expect(h.handle.elapsedSeconds).toBe(0);
 	});
 
 	it("does not move a file that is already in place", async () => {
@@ -275,11 +306,77 @@ describe("stop", () => {
 });
 
 describe("interruptions", () => {
-	it("queues the file when a call or Siri finishes the recording without stop()", async () => {
+	it("refreshes the elapsed time once a second while recording", async () => {
+		const h = await startWithFile();
+		expect(h.handle.elapsedSeconds).toBe(0);
+		fake.recorder.currentTime = 1.2;
+		await h.tick();
+		expect(h.handle.elapsedSeconds).toBe(1.2);
+		fake.recorder.currentTime = 2.4;
+		await h.tick();
+		expect(h.handle.elapsedSeconds).toBe(2.4);
+		expect(h.handle.paused).toBe(false);
+	});
+
+	it("reports paused when the recorder stops taking audio for two ticks, and resume() restarts it", async () => {
+		const h = await startWithFile();
+		fake.recorder.currentTime = 30;
+		await h.tick();
+		// A call began: expo-audio pauses the recorder without any status event.
+		fake.recorder.isRecording = false;
+		await h.tick();
+		expect(h.handle.paused).toBe(false);
+		await h.tick();
+		expect(h.handle.paused).toBe(true);
+		expect(h.handle.isRecording).toBe(true);
+		expect(h.handle.elapsedSeconds).toBe(30);
+		expect(h.callbacks.onFinished).not.toHaveBeenCalled();
+		expect(h.callbacks.onFailed).not.toHaveBeenCalled();
+
+		act(() => h.handle.resume());
+		expect(fake.recorder.record).toHaveBeenCalledTimes(2);
+		await h.tick();
+		expect(h.handle.paused).toBe(false);
+	});
+
+	it("clears paused by itself when iOS resumes the recorder after the call", async () => {
+		const h = await startWithFile();
+		fake.recorder.isRecording = false;
+		await h.tick(2);
+		expect(h.handle.paused).toBe(true);
+		fake.recorder.isRecording = true;
+		await h.tick();
+		expect(h.handle.paused).toBe(false);
+		expect(fake.recorder.record).toHaveBeenCalledTimes(1);
+	});
+
+	it("resume() is a no-op while recording or idle", async () => {
+		const h = mount();
+		act(() => h.handle.resume());
+		await h.start();
+		act(() => h.handle.resume());
+		expect(fake.recorder.record).toHaveBeenCalledTimes(1);
+	});
+
+	it("stop() from a paused recorder queues what was recorded so far", async () => {
 		const h = await startWithFile(2048);
 		fake.recorder.currentTime = 30;
-		// The screen polls once a second; this is the last value it saw.
-		expect(h.handle.elapsedSeconds()).toBe(30);
+		fake.recorder.isRecording = false;
+		await h.tick(2);
+		expect(h.handle.paused).toBe(true);
+		await h.stop();
+		expect(h.callbacks.onFinished).toHaveBeenCalledWith(
+			expect.objectContaining({ durationSeconds: 30, byteCount: 2048 }),
+		);
+		expect(h.handle.paused).toBe(false);
+		expect(h.handle.isRecording).toBe(false);
+	});
+
+	it("queues the file when the recorder finishes on its own, with the last polled duration", async () => {
+		const h = await startWithFile(2048);
+		fake.recorder.currentTime = 30;
+		await h.tick();
+		expect(h.handle.elapsedSeconds).toBe(30);
 
 		await h.emit(status({ isFinished: true, url: SOURCE }));
 

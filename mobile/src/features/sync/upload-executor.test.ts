@@ -64,6 +64,8 @@ class FakeMac implements RecordingClient {
 	readonly expected = new Map<string, number>();
 	revoked = false;
 	damaged = false;
+	/** The Mac is still hashing: `complete` answers 409 although every chunk is in. */
+	verifying = false;
 	/** Announces that fail with a transport error before succeeding. */
 	unreachableAnnounces = 0;
 	startUploadError: Error | null = null;
@@ -132,7 +134,7 @@ class FakeMac implements RecordingClient {
 	): Promise<CompleteResult> => {
 		this.calls.push(`complete ${recordingID}`);
 		this.guard(recordingID);
-		if (this.statusOf(recordingID).state !== "verifying") {
+		if (this.statusOf(recordingID).state !== "verifying" || this.verifying) {
 			return { kind: "missing-chunks" };
 		}
 		if (this.damaged) {
@@ -311,7 +313,7 @@ describe("a recording travels queued -> uploading -> delivered", () => {
 });
 
 describe("the Mac's answers", () => {
-	it("404 on a chunk sends the recording back to queued with no chunks and re-announces", async () => {
+	it("404 on a chunk sends the recording back to queued with no chunks and re-announces after the backoff", async () => {
 		const h = harness(addRecording(EMPTY_INDEX, rec("a")));
 		await h.drive();
 		await h.finishChunk("a", 0);
@@ -321,17 +323,41 @@ describe("the Mac's answers", () => {
 		expect(h.row("a")).toMatchObject({
 			state: "queued",
 			uploadedChunks: [],
-			attempts: 0,
+			attempts: 1,
+			nextAttemptAt: "2026-09-25T10:00:05.000Z",
 			lastError: "The Mac forgot the upload; starting over",
 		});
 		expect(h.executor.inFlight.has(taskIDs.chunk("a", 1))).toBe(false);
 
+		// Not on the same tick: a Mac that keeps forgetting must not cost a
+		// 16 MiB copy per tick.
+		const before = h.mac.calls.length;
+		expect(await h.drive()).toEqual({
+			kind: "wait",
+			until: "2026-09-25T10:00:05.000Z",
+		});
+		expect(h.mac.calls).toHaveLength(before);
+
+		h.advance(5_000);
 		await h.drive();
 		expect(h.mac.calls.slice(-3)).toEqual([
 			"announce a",
 			"chunk a/0",
 			"chunk a/1",
 		]);
+	});
+
+	it("a second 404 doubles the wait", async () => {
+		const h = harness(addRecording(EMPTY_INDEX, rec("a", CHUNK)));
+		await h.drive();
+		await h.finishChunk("a", 0, 404);
+		h.advance(5_000);
+		await h.drive();
+		await h.finishChunk("a", 0, 404);
+		expect(h.row("a")).toMatchObject({
+			attempts: 2,
+			nextAttemptAt: "2026-09-25T10:00:15.000Z",
+		});
 	});
 
 	it("404 on a chunk of a row that is no longer uploading changes nothing", async () => {
@@ -363,6 +389,34 @@ describe("the Mac's answers", () => {
 		await h.finishChunk("a", 1);
 		await h.drive();
 		expect(h.row("a")?.state).toBe("delivered");
+	});
+
+	it("409 on complete while the Mac already has every chunk backs off instead of looping", async () => {
+		const h = harness(addRecording(EMPTY_INDEX, rec("a", CHUNK)));
+		await h.drive();
+		await h.finishChunk("a", 0);
+		h.mac.verifying = true;
+
+		expect(await h.drive()).toEqual({
+			kind: "wait",
+			until: "2026-09-25T10:00:05.000Z",
+		});
+		expect(h.mac.calls.slice(-2)).toEqual(["complete a", "status a"]);
+		expect(h.row("a")).toMatchObject({
+			state: "queued",
+			uploadedChunks: [0],
+			attempts: 1,
+			lastError: "The Mac is not ready to complete the upload",
+		});
+
+		// Once the Mac is done verifying, the retry re-announces (200 with the
+		// chunk set) and completes without re-uploading anything.
+		h.mac.verifying = false;
+		h.advance(5_000);
+		await h.drive();
+		expect(h.mac.calls.slice(-2)).toEqual(["announce a", "complete a"]);
+		expect(h.row("a")?.state).toBe("delivered");
+		expect(h.mac.started).toHaveLength(1);
 	});
 
 	it("422 on complete marks the recording failed, clears its chunks and keeps the file", async () => {
@@ -529,17 +583,30 @@ describe("transient failures back off on the injected clock", () => {
 		});
 	});
 
-	it("a retryable background failure schedules a retry; a cancelled task does not", async () => {
+	it("every background failure schedules a retry, a cancelled task included", async () => {
 		const h = harness(addRecording(EMPTY_INDEX, rec("a", CHUNK)));
 		await h.drive();
+		// A rejected pin surfaces as a cancellation; re-planning it at once
+		// would copy and hand off the chunk again on the same tick.
 		await h.executor.uploadFailed({
 			taskID: taskIDs.chunk("a", 0),
-			message: "The network connection was lost.",
+			message: "The Mac's certificate does not match the pairing",
 			retryable: false,
 		});
 		expect(h.executor.inFlight.has(taskIDs.chunk("a", 0))).toBe(false);
-		expect(h.row("a")).toMatchObject({ state: "uploading", attempts: 0 });
+		expect(h.row("a")).toMatchObject({
+			state: "queued",
+			attempts: 1,
+			nextAttemptAt: "2026-09-25T10:00:05.000Z",
+			lastError: "The Mac's certificate does not match the pairing",
+		});
+		expect(await h.drive()).toEqual({
+			kind: "wait",
+			until: "2026-09-25T10:00:05.000Z",
+		});
+		expect(h.mac.started).toHaveLength(1);
 
+		h.advance(5_000);
 		await h.drive();
 		await h.executor.uploadFailed({
 			taskID: taskIDs.chunk("a", 0),
@@ -548,7 +615,7 @@ describe("transient failures back off on the injected clock", () => {
 		});
 		expect(h.row("a")).toMatchObject({
 			state: "queued",
-			attempts: 1,
+			attempts: 2,
 			lastError: "The network connection was lost.",
 		});
 	});

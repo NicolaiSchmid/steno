@@ -189,6 +189,20 @@ export function createUploadExecutor(
 						await deps.update((current) =>
 							syncChunks(current, rec.recordingID, remote.receivedChunks),
 						);
+						// The Mac has every chunk yet refuses to complete (still
+						// verifying, or the two sides disagree on the plan): back
+						// off instead of posting `complete` again on the same tick.
+						const planned = chunkPlan(rec.byteCount, rec.chunkSize).length;
+						if (new Set(remote.receivedChunks).size >= planned) {
+							await fail(
+								rec.recordingID,
+								new HandoverError(
+									"server",
+									409,
+									"The Mac is not ready to complete the upload",
+								),
+							);
+						}
 					} else {
 						await deps.update((current) =>
 							setState(
@@ -226,15 +240,18 @@ export function createUploadExecutor(
 		} else if (status === 401) {
 			await unauthorized();
 		} else if (status === 404) {
-			// The Mac lost the partial (restart, cleanup): announce again.
+			// The Mac lost the partial (restart, cleanup): announce again after
+			// the backoff, so a Mac that keeps forgetting does not cost a
+			// 16 MiB copy per tick.
 			await deps.update((current) => {
 				const rec = findRecording(current, recordingID);
 				if (rec?.state !== "uploading") return current;
-				return setState(
+				return scheduleRetry(
 					syncChunks(current, recordingID, []),
 					recordingID,
-					"queued",
-					{ lastError: "The Mac forgot the upload; starting over" },
+					deps.now(),
+					backoffMs(rec.attempts + 1, deps.random),
+					"The Mac forgot the upload; starting over",
 				);
 			});
 		} else {
@@ -249,10 +266,13 @@ export function createUploadExecutor(
 		}
 	};
 
-	const uploadFailed = async ({ taskID, message, retryable }: UploadFailed) => {
+	// Every failure backs off, cancelled or not: a rejected pin arrives as a
+	// cancellation too, and re-planning it at once would loop through a
+	// 16 MiB copy and a TLS handshake per tick.
+	const uploadFailed = async ({ taskID, message }: UploadFailed) => {
 		inFlight.delete(taskID);
 		const parsed = parseChunkTaskID(taskID);
-		if (!parsed || !retryable) return;
+		if (!parsed) return;
 		await fail(parsed.recordingID, new Error(message));
 	};
 
