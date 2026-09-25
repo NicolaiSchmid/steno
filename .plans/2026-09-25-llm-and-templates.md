@@ -432,3 +432,76 @@ Recorded while implementing this plan in PR #5 (`feat/llm-templates`), 2026-09-2
   the usual trigger and every later network test then hangs on `URLSession.shared`. Darwin's
   URLSession does not have the bug, so CI on the Mac is unaffected; the loop is `--filter` per
   suite on Linux.
+
+### Review application (PR #5, after the correctness, elegance and testing passes)
+
+Applied in three commits (`ee927ad` correctness majors, `1aa1afb` correctness minors, `5904088`
+elegance), each behaviour change with a test that failed before it, iterated on the Linux
+container (`steno-swift:6.1`, one suite per `--filter`) and confirmed on `macos-15`. Departures
+from the text above:
+
+- `Retry-After` is honoured only as a finite, non-negative number of seconds, capped at an hour
+  before it becomes a `Duration` (`Duration.seconds(Double)` traps past about 1.7e20 s and
+  `Double("inf")` parses); anything else, the HTTP-date form included, falls back to the backoff.
+- `probe()` throws whatever the probe completion throws, not only 401/403: a base URL without
+  `/v1`, a model the server does not know, a non-JSON 200 all fail the probe. A returned
+  `EndpointProbe` means both passes can run, so it has no `reachable` field; `GET /models` failing
+  is still tolerated (`modelListed` nil). `steno dev llm probe --json` prints
+  `{modelListed, structuredOutput, roundTripMilliseconds}`, and with `--base-url` and `--model`
+  the settings are not read and no database is opened.
+- Map-reduce: the map ceiling is each chunk's share of the input budget
+  (`TokenBudget.mapNotesOutputTokens(chunkCount:)`, at most 1 500, at least 256), sent as
+  `max_tokens` and used by the up-front check, so both checks agree; the map prompt carries a
+  matching length rule ("at most N points in total", one point per 60 tokens, at least three).
+  The 200-tokens-per-chunk estimate above is superseded. At 8k the ten chunks get about 480
+  tokens each.
+- The client tolerates OpenAI's reasoning models without model-name sniffing: a 400 whose
+  `error.param` is `max_tokens` is resent with `max_completion_tokens`, one naming `temperature`
+  is resent without it, both remembered per client like the structured output mode and reported
+  as `LLMClientEvent.parameterRejected`. A repeated rejection of the same parameter, or any other
+  `param`, is a plain HTTP 400.
+- `usage.prompt_tokens` and `completion_tokens` are optional on the wire; a null or partial usage
+  block counts as one request with zero tokens instead of failing an intact answer three times.
+- A ``` inside the JSON is content: the decoder treats a fence as Markdown only when it opens
+  before the first `{` or `[`, and the last fence closes the block.
+- `SummaryOutput.language` is the meeting's tag as elected, nil included, so an untagged meeting
+  is not persisted as English (the deviation above that made it the resolved language is
+  superseded); `SummaryDocument.language` stays resolved for the renderer.
+- A section the model split into two blocks with one id is merged in order under the first
+  non-blank heading.
+- Budget policy lives in `LLMBudgetPolicy` (`Budget/BudgetPolicy.swift`), and `LLMEndpoint`
+  derives `cleanupChunkBudgetTokens` and `summaryReservedOutputTokens` from it, so the app can
+  show the derived budgets next to `llmContextTokens`. `LLMMeetingSummarizer.reservedOutputTokens`
+  and `notesTokensPerChunk` are gone.
+- The heading-translation sentence is `SummaryPromptBuilder.headingsRule` and follows the
+  language line only in the single-shot and reduce prompts, where the template sections follow;
+  the map prompt no longer carries an instruction it cannot satisfy. Goldens: the map prompt only.
+- Post-processing is `AnalysisDraft.summaryOutput(for:usage:minimumConfidence:)`
+  (`Summary/AnalysisDraft+Output.swift`), pure over the draft as `CleanupDraft.problems(against:)`
+  is for pass 1. `DraftTask.priority` is core's `TaskPriority`. `AnalysisDraft.language` is gone
+  from the type, the schema and the fixtures (it was requested and never read); the single-shot,
+  reduce and repair goldens lose that one schema line.
+- "Omit when empty" is said once, by the builder; the sentence left `default.json` and
+  `daily-standup.json`, so core's template goldens and the prompts embedding them changed.
+- Public surface nobody outside the module used is internal or gone (`SpeakerLabels.ordered`
+  and its `==`, `SpeakerLabels.unknown`, `OutputLanguage.fallback`,
+  `TranscriptLines.render(startIndex:)`, `JSONSchema.Property`/`properties`,
+  `TokenBudget.bytesPerToken`, `RecordedRequest.inFlightOnArrival`); the wall-clock backstop is
+  set in `perform`, and the probe schema goes through `JSONSchema` so the strict walker covers it.
+- The Linux-only `swift test --parallel` stall is a known environment issue, not a product
+  defect: a lock-order deadlock inside FoundationNetworking between the Swift task status lock
+  (held while a task group cancels its children) and `workQueue.sync` in
+  `URLSessionTask.cancel()`. The two deadlocked threads of the lldb dump are in
+  [`reviews/2026-09-25-pr5-linux-stall-backtrace.txt`](reviews/2026-09-25-pr5-linux-stall-backtrace.txt);
+  Darwin's `cancel()` is asynchronous and the same run passed 14 of 14 times on a Mac.
+
+Follow-ups recorded, not applied: neighbour-merge detection in the cleanup word check (a cleaned
+segment containing an adjacent original verbatim) and a tighter ratio; on a `finish_reason:
+length` cleanup retry, a larger `maxTokens` without the truncated echo, or a split chunk; the
+cleanup request size at 4k contexts (`max_tokens` capped by what the context still holds); one
+retry at the endpoint ceiling for a truncated summary; keep-alive in the stub server (it answers
+`Connection: close`, so URLSession's pooled-connection path is never exercised);
+`CleanupPromptBuilder.init(input:maxOutputTokens:)` mirroring the summary builder; `maxTokens` out
+of the prompt golden header; a `systemPrompt(for:)` so the budget is measured without rendering
+the transcript; splitting `SummaryTests.singleShotBuildsTheSummaryOutputFromTheDraft` and the
+first CLI test; `OutputLanguage.resolve(meeting:)` renamed for its `LanguageTag?` argument.
