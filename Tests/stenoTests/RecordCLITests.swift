@@ -31,13 +31,21 @@ import Testing
     process.environment = environment
     process.standardOutput = Pipe()
     process.standardError = Pipe()
+    let layout = RecordingLayout(audioFolder: audio, meetingID: meetingID)
     try process.run()
+    // The two seconds count from when the recorder has opened its master,
+    // not from `run()`: a freshly linked debug binary takes about a second
+    // to start on the self-hosted runner, which left 0.98 s of audio.
+    let started = ContinuousClock.now
+    while !FileManager.default.fileExists(atPath: layout.master(.caf48kFloat32).path) {
+      try #require(ContinuousClock.now - started < .seconds(20), "the recorder never started")
+      Thread.sleep(forTimeInterval: 0.02)
+    }
     Thread.sleep(forTimeInterval: 2)
     kill(process.processIdentifier, SIGKILL)
     process.waitUntilExit()
     #expect(process.terminationStatus != 0)
 
-    let layout = RecordingLayout(audioFolder: audio, meetingID: meetingID)
     let master = try CAFFile.read(layout.master(.caf48kFloat32))
     #expect(master.sampleRate == 48_000)
     #expect(master.channels.count == 2)
