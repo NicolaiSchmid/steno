@@ -8,9 +8,15 @@ name: Swift CI
 # standard): `swift format lint --strict`, `swift test --parallel
 # --xunit-output`, a step summary with totals and every skipped test's name and
 # message, and a failure when a skip message names none of the `STENO_*`
-# opt-in switches. `.build` is cached on `Package.resolved`, the Swift version
-# and a hash of the sources, with the resolved-only key as a fallback, so a
-# run never restores exactly the state of an earlier tree. Sixty minutes
+# opt-in switches. `.build` is cached on the runner, `Package.resolved`, the
+# Swift version and a hash of the sources, with the resolved-only key as a
+# fallback, so a run never restores exactly the state of an earlier tree. The
+# runner is part of the key because SwiftPM writes absolute paths into
+# `.build` (`workspace-state.json`, `artifacts/`, checkout symlinks): the two
+# Forge runners share one host under different `_work` directories, and a
+# cache one wrote fails the other with "There is no XCFramework found at
+# .../actions-runner-macos-steno-2/_work/...". Hosted runners all build at the
+# same path, so they share one `hosted` scope. Sixty minutes
 # because FluidAudio and WhisperKit compile cold in 15 to 25 minutes once
 # their workstreams land.
 
@@ -61,21 +67,29 @@ jobs:
         with:
           xcode-version: '16.4'
 
-      - name: Swift version
+      # `scope` names the cache owner: `hosted` on GitHub-hosted runners, the
+      # runner's own name on self-hosted ones (see the header for why).
+      - name: Swift version and cache scope
         id: swift
         run: |
           swift --version
           version="$(swift --version 2>&1 | head -n 1 | tr -c 'A-Za-z0-9.\n' '-')"
           echo "version=$version" >> "$GITHUB_OUTPUT"
+          if [ "$RUNNER_ENVIRONMENT" = "github-hosted" ]; then
+            scope="hosted"
+          else
+            scope="$(printf '%s' "$RUNNER_NAME" | tr -c 'A-Za-z0-9.' '-')"
+          fi
+          echo "scope=$scope" >> "$GITHUB_OUTPUT"
 
       - name: Cache .build
         uses: actions/cache@v4
         with:
           path: .build
-          key: swift-build-${{ runner.os }}-${{ steps.swift.outputs.version }}-${{ hashFiles('Package.resolved') }}-${{ hashFiles('Package.swift', 'Sources/**', 'Tests/**') }}
+          key: swift-build-${{ runner.os }}-${{ steps.swift.outputs.scope }}-${{ steps.swift.outputs.version }}-${{ hashFiles('Package.resolved') }}-${{ hashFiles('Package.swift', 'Sources/**', 'Tests/**') }}
           restore-keys: |
-            swift-build-${{ runner.os }}-${{ steps.swift.outputs.version }}-${{ hashFiles('Package.resolved') }}-
-            swift-build-${{ runner.os }}-${{ steps.swift.outputs.version }}-
+            swift-build-${{ runner.os }}-${{ steps.swift.outputs.scope }}-${{ steps.swift.outputs.version }}-${{ hashFiles('Package.resolved') }}-
+            swift-build-${{ runner.os }}-${{ steps.swift.outputs.scope }}-${{ steps.swift.outputs.version }}-
 
       - name: Lint formatting
         run: swift format lint --strict --recursive Sources Tests Package.swift
