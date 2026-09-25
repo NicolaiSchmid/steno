@@ -1,4 +1,3 @@
-import Crypto
 import Foundation
 import StenoCore
 
@@ -14,10 +13,10 @@ struct Phone {
 
   /// Pairs a fresh device against the running service.
   static func pair(
-    _ test: TestService, deviceID: UUID = UUID(), deviceName: String = "Test iPhone"
+    _ service: HandoverService, deviceID: UUID = UUID(), deviceName: String = "Test iPhone"
   ) async throws -> Phone {
-    let client = try await test.client()
-    let payload = await test.service.beginPairing()
+    let client = try await LoopbackClient.forService(service)
+    let payload = await service.beginPairing()
     let response = try await client.json(
       "POST", "/v1/pair", headers: LoopbackClient.pairing(payload.secret),
       body: Wire.PairRequest(deviceID: deviceID, deviceName: deviceName))
@@ -48,7 +47,7 @@ struct Phone {
     var headers = bearer
     headers["Content-Type"] = "application/octet-stream"
     if hashHeader {
-      headers[Wire.chunkHashHeader] = (declaredHash ?? Data(SHA256.hash(data: bytes)))
+      headers[Wire.chunkHashHeader] = (declaredHash ?? ContentHash.sha256(bytes))
         .base64EncodedString()
     }
     return try await client.request(
@@ -87,7 +86,7 @@ struct Phone {
   ) -> RecordingMetadata {
     RecordingMetadata(
       recordingID: recordingID, startedAt: startedAt, durationSeconds: 61.5,
-      byteCount: Int64(bytes.count), sha256: sha256 ?? Data(SHA256.hash(data: bytes)),
+      byteCount: Int64(bytes.count), sha256: sha256 ?? ContentHash.sha256(bytes),
       chunkSize: chunkSize, format: format, deviceName: deviceName)
   }
 

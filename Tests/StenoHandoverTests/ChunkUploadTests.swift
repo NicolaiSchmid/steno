@@ -16,7 +16,7 @@ import Testing
     let intake = FakeHandoverIntake(meetingID: Self.meetingID)
     let test = try await TestService.start(chunkSize: Self.chunkSize, intake: intake)
     defer { Task { await test.stop() } }
-    let phone = try await Phone.pair(test)
+    let phone = try await Phone.pair(test.service)
     let bytes = Phone.seededBytes(count: 3 * Self.chunkSize + 12345, seed: 42)
     let metadata = phone.metadata(for: bytes)
     let chunks = Phone.chunks(of: bytes, size: Self.chunkSize)
@@ -34,17 +34,16 @@ import Testing
     // Chunk 1 breaks off after 100 KiB: head with the full length, part of
     // the body, then the connection goes away.
     let raw = try await test.rawClient()
-    let torn = RawClient.request(
-      "PUT", "/v1/recordings/\(metadata.recordingID.uuidString)/chunks/1",
+    let interrupted = try await raw.exchange(
+      .PUT, "/v1/recordings/\(metadata.recordingID.uuidString)/chunks/1",
       headers: [
         ("Authorization", "Bearer \(phone.token)"),
         ("Content-Type", "application/octet-stream"),
-        (Wire.chunkHashHeader, ReceivingFile.sha256(chunks[1]).base64EncodedString()),
+        (Wire.chunkHashHeader, ContentHash.sha256(chunks[1]).base64EncodedString()),
         ("Content-Length", String(chunks[1].count)),
       ],
-      body: chunks[1].prefix(100 * 1024))
-    let interrupted = try await raw.exchange(
-      torn, closeGrace: .milliseconds(50), timeout: .milliseconds(300))
+      body: chunks[1].prefix(100 * 1024), closeGrace: .milliseconds(50),
+      timeout: .milliseconds(300))
     #expect(interrupted.status == nil, "nothing is answered for a torn chunk")
 
     // Resume from the status the Mac reports.
@@ -91,9 +90,9 @@ import Testing
   @Test func hashMismatchIs422AndThePartialIsGone() async throws {
     let test = try await TestService.start(chunkSize: Self.chunkSize)
     defer { Task { await test.stop() } }
-    let phone = try await Phone.pair(test)
+    let phone = try await Phone.pair(test.service)
     let bytes = Phone.seededBytes(count: 2 * Self.chunkSize, seed: 7)
-    let wrongHash = ReceivingFile.sha256(Data("something else".utf8))
+    let wrongHash = ContentHash.sha256(Data("something else".utf8))
     let metadata = phone.metadata(for: bytes, sha256: wrongHash)
 
     try await phone.uploadAll(metadata, bytes)
@@ -125,7 +124,7 @@ import Testing
   @Test func completeWithMissingChunksIs409WithTheStatus() async throws {
     let test = try await TestService.start(chunkSize: Self.chunkSize)
     defer { Task { await test.stop() } }
-    let phone = try await Phone.pair(test)
+    let phone = try await Phone.pair(test.service)
     let bytes = Phone.seededBytes(count: 2 * Self.chunkSize + 1, seed: 9)
     let metadata = phone.metadata(for: bytes)
     let chunks = Phone.chunks(of: bytes, size: Self.chunkSize)
@@ -143,8 +142,8 @@ import Testing
   @Test func chunkAndMetadataErrorsAreAnsweredWithoutSideEffects() async throws {
     let test = try await TestService.start(chunkSize: Self.chunkSize)
     defer { Task { await test.stop() } }
-    let phone = try await Phone.pair(test)
-    let other = try await Phone.pair(test, deviceName: "Other phone")
+    let phone = try await Phone.pair(test.service)
+    let other = try await Phone.pair(test.service, deviceName: "Other phone")
     let bytes = Phone.seededBytes(count: Self.chunkSize + 10, seed: 3)
     let metadata = phone.metadata(for: bytes)
     let chunks = Phone.chunks(of: bytes, size: Self.chunkSize)
@@ -197,8 +196,14 @@ import Testing
 
     #expect(try await phone.upload(metadata.recordingID, chunk: 0, chunks[0]).status == 204)
     #expect(try await phone.upload(metadata.recordingID, chunk: 1, chunks[1]).status == 204)
-    #expect(try await phone.complete(metadata.recordingID).status == 200)
-    #expect(try await phone.complete(metadata.recordingID).status == 200, "idempotent")
+    let completed = try await phone.complete(metadata.recordingID)
+    #expect(completed.status == 200)
+    let repeated = try await phone.complete(metadata.recordingID)
+    #expect(repeated.status == 200)
+    #expect(
+      try repeated.json(Wire.CompleteResponse.self).meetingID
+        == completed.json(Wire.CompleteResponse.self).meetingID,
+      "completing twice returns the same meeting id")
     #expect(
       try await phone.upload(metadata.recordingID, chunk: 1, chunks[1]).status == 204,
       "a late duplicate after completion is harmless")

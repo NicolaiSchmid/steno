@@ -50,7 +50,7 @@
       defer { Task { await test.stop() } }
       let raw = try await test.rawClient()
 
-      let exchange = try await raw.exchange(RawClient.request("GET", "/v1/hello"))
+      let exchange = try await raw.exchange(.GET, "/v1/hello")
       #expect(exchange.status == 200)
 
       // A rejected pin leaves the NWConnection waiting, so the connect
@@ -59,7 +59,7 @@
       flipped[31] ^= 0x80
       let wrong = RawClient(port: raw.port, fingerprint: flipped)
       await #expect(throws: (any Error).self) {
-        _ = try await wrong.exchange(RawClient.request("GET", "/v1/hello"), timeout: .seconds(3))
+        _ = try await wrong.exchange(.GET, "/v1/hello", timeout: .seconds(3))
       }
       #expect(test.metrics.requestHeads == 1)
     }

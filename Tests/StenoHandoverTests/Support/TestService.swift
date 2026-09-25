@@ -14,11 +14,12 @@ struct TestService {
   let directory: URL
   let now: Date
 
-  static func start(
+  /// The service before `start()`, for tests that watch it come up.
+  static func prepare(
     chunkSize: Int = 1024 * 1024,
     intake: FakeHandoverIntake = FakeHandoverIntake(),
     now: Date = Date(timeIntervalSince1970: 1_790_000_000)
-  ) async throws -> TestService {
+  ) throws -> TestService {
     let directory = try Fixtures.temporaryDirectory("handover")
     let store = try MeetingStore.inMemory()
     let clock = ManualClock()
@@ -29,9 +30,18 @@ struct TestService {
     let service = HandoverService(
       configuration: configuration, store: store, intake: intake, identity: try TestIdentity.load(),
       clock: clock, now: { now })
-    try await service.start()
     return TestService(
       service: service, store: store, intake: intake, clock: clock, directory: directory, now: now)
+  }
+
+  static func start(
+    chunkSize: Int = 1024 * 1024,
+    intake: FakeHandoverIntake = FakeHandoverIntake(),
+    now: Date = Date(timeIntervalSince1970: 1_790_000_000)
+  ) async throws -> TestService {
+    let test = try prepare(chunkSize: chunkSize, intake: intake, now: now)
+    try await test.service.start()
+    return test
   }
 
   func stop() async {

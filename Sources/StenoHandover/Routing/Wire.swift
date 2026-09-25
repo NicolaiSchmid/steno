@@ -53,10 +53,6 @@ public enum Wire {
       self.state = state
       self.receivedChunks = receivedChunks
     }
-
-    public init(_ receipt: HandoverReceipt) {
-      self.init(state: receipt.state.kind, receivedChunks: receipt.receivedChunks)
-    }
   }
 
   /// `POST /v1/recordings/{id}/complete` 200 body.

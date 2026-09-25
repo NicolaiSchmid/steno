@@ -77,12 +77,4 @@ import Testing
       with: "fp=\(Base64URL.encode(fingerprint.prefix(31)))")
     #expect(failure(shortFingerprint) == .badEncoding("fp"))
   }
-
-  @Test func expiryIsWholeSecondsOnTheWallClock() {
-    let payload = PairingPayload(
-      macID: macID, macName: "Mac", fingerprint: fingerprint, secret: secret,
-      expiresAt: Date(timeIntervalSince1970: 100.9))
-    #expect(payload.isExpired(at: Date(timeIntervalSince1970: 99)) == false)
-    #expect(payload.isExpired(at: Date(timeIntervalSince1970: 100)) == true)
-  }
 }

@@ -26,15 +26,3 @@ public enum Base64URL {
     return Data(base64Encoded: standard)
   }
 }
-
-/// Constant-time equality for secrets and digests.
-enum ConstantTime {
-  static func equals(_ lhs: Data, _ rhs: Data) -> Bool {
-    guard lhs.count == rhs.count else { return false }
-    var difference: UInt8 = 0
-    for (a, b) in zip(lhs, rhs) {
-      difference |= a ^ b
-    }
-    return difference == 0
-  }
-}

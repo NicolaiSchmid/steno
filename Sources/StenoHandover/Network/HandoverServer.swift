@@ -20,12 +20,14 @@ import NIOHTTP1
 /// Mac product.
 final class HandoverServer: @unchecked Sendable {
   let port: UInt16
-  /// The scheme a loopback client uses against this listener.
-  let scheme: String
   private let group: any EventLoopGroup
   private let channel: any Channel
+
+  /// The scheme a loopback client uses against this listener.
   #if canImport(Network)
-    private let listener: NWListener
+    static let scheme = "https"
+  #else
+    static let scheme = "http"
   #endif
 
   static func start(
@@ -65,59 +67,42 @@ final class HandoverServer: @unchecked Sendable {
         listener.service = NWListener.Service(
           name: configuration.serviceName, type: Wire.serviceType, domain: nil, txtRecord: txt)
       }
-      let group = NIOTSEventLoopGroup(loopCount: 1)
-      do {
-        let channel = try await NIOTSListenerBootstrap(group: group)
-          .childChannelInitializer(childInitializer)
-          .withNWListener(listener).get()
-        guard let bound = listener.port?.rawValue, bound != 0 else {
-          try await channel.close()
-          throw ServerError.noPort
-        }
-        return HandoverServer(
-          port: bound, scheme: "https", group: group, channel: channel, listener: listener)
-      } catch {
-        try? await group.shutdownGracefully()
-        throw error
-      }
+      let group: any EventLoopGroup = NIOTSEventLoopGroup(loopCount: 1)
+      let bind = NIOTSListenerBootstrap(group: group)
+        .childChannelInitializer(childInitializer)
+        .withNWListener(listener)
     #else
-      let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
-      do {
-        let channel = try await ServerBootstrap(group: group)
-          .serverChannelOption(.socketOption(.so_reuseaddr), value: 1)
-          .childChannelInitializer(childInitializer)
-          .bind(host: "127.0.0.1", port: Int(configuration.port)).get()
-        guard let bound = channel.localAddress?.port, bound != 0 else {
-          try await channel.close()
-          throw ServerError.noPort
-        }
-        return HandoverServer(port: UInt16(bound), scheme: "http", group: group, channel: channel)
-      } catch {
-        try? await group.shutdownGracefully()
-        throw error
-      }
+      let group: any EventLoopGroup = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+      let bind = ServerBootstrap(group: group)
+        .serverChannelOption(.socketOption(.so_reuseaddr), value: 1)
+        .childChannelInitializer(childInitializer)
+        .bind(host: "127.0.0.1", port: Int(configuration.port))
     #endif
+    do {
+      let channel = try await bind.get()
+      // An advertising NWListener has no required local endpoint, so NIOTS
+      // reports no local address; the listener itself knows the port.
+      #if canImport(Network)
+        let bound = listener.port?.rawValue
+      #else
+        let bound = channel.localAddress?.port.map(UInt16.init)
+      #endif
+      guard let bound, bound != 0 else {
+        try await channel.close()
+        throw ServerError.noPort
+      }
+      return HandoverServer(port: bound, group: group, channel: channel)
+    } catch {
+      try? await group.shutdownGracefully()
+      throw error
+    }
   }
 
-  #if canImport(Network)
-    private init(
-      port: UInt16, scheme: String, group: any EventLoopGroup, channel: any Channel,
-      listener: NWListener
-    ) {
-      self.port = port
-      self.scheme = scheme
-      self.group = group
-      self.channel = channel
-      self.listener = listener
-    }
-  #else
-    private init(port: UInt16, scheme: String, group: any EventLoopGroup, channel: any Channel) {
-      self.port = port
-      self.scheme = scheme
-      self.group = group
-      self.channel = channel
-    }
-  #endif
+  private init(port: UInt16, group: any EventLoopGroup, channel: any Channel) {
+    self.port = port
+    self.group = group
+    self.channel = channel
+  }
 
   func stop() async {
     try? await channel.close()

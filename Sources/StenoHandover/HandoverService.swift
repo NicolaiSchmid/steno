@@ -18,14 +18,10 @@ public actor HandoverService {
   public nonisolated let configuration: HandoverConfiguration
   public nonisolated let identity: HandoverIdentity
   private let store: MeetingStore
-  private let intake: any HandoverIntake
-  private let now: @Sendable () -> Date
   nonisolated let engine: HandoverEngine
   nonisolated let metrics = ServerMetrics()
   private var server: HandoverServer?
   private var listenerStates = Broadcast<ListenerState>(initial: .stopped)
-  private var receiptUpdates = Broadcast<[HandoverReceipt]>(initial: [])
-  private var receiptsObserverInstalled = false
 
   public init(
     configuration: HandoverConfiguration,
@@ -36,13 +32,11 @@ public actor HandoverService {
     now: @escaping @Sendable () -> Date = Date.init
   ) {
     self.configuration = configuration
-    self.store = store
-    self.intake = intake
     self.identity = identity
-    self.now = now
+    self.store = store
     self.engine = HandoverEngine(
-      configuration: configuration, macID: identity.macID, fingerprint: identity.fingerprint,
-      store: store, intake: intake, clock: clock, now: now)
+      configuration: configuration, identity: identity, store: store, intake: intake, clock: clock,
+      now: now)
   }
 
   /// The id in the Bonjour TXT record, the QR payload and `/v1/hello`.
@@ -77,11 +71,11 @@ public actor HandoverService {
   /// independent subscription.
   public var states: AsyncStream<ListenerState> {
     listenerStates.subscribe { [weak self] id in
-      Task { await self?.unsubscribeState(id) }
+      Task { await self?.unsubscribe(id) }
     }
   }
 
-  private func unsubscribeState(_ id: UUID) {
+  private func unsubscribe(_ id: UUID) {
     listenerStates.remove(id)
   }
 
@@ -89,31 +83,14 @@ public actor HandoverService {
   /// chunks arrive and a recording completes. The UI reads it directly;
   /// `receivedBytes ≈ receivedChunks.count * chunkSize`.
   public var receipts: AsyncStream<[HandoverReceipt]> {
-    receiptUpdates.subscribe { [weak self] id in
-      Task { await self?.unsubscribeReceipts(id) }
-    }
-  }
-
-  private func unsubscribeReceipts(_ id: UUID) {
-    receiptUpdates.remove(id)
-  }
-
-  private func receiptsChanged(_ receipts: [HandoverReceipt]) {
-    receiptUpdates.send(receipts)
+    get async { await engine.receipts }
   }
 
   /// Binds the listener (and advertises when configured). Idempotent. Sweeps
-  /// orphaned inbox files on the first start.
+  /// orphaned inbox files first.
   public func start() async throws {
     guard server == nil else { return }
-    if !receiptsObserverInstalled {
-      receiptsObserverInstalled = true
-      let bridge: @Sendable ([HandoverReceipt]) -> Void = { [weak self] receipts in
-        Task { await self?.receiptsChanged(receipts) }
-      }
-      await engine.setReceiptsObserver(bridge)
-      await engine.sweepOrphans()
-    }
+    await engine.sweepOrphans()
     do {
       let server = try await HandoverServer.start(
         configuration: configuration, identity: identity, engine: engine, metrics: metrics)
@@ -135,14 +112,11 @@ public actor HandoverService {
   /// The bound port while listening.
   public var port: UInt16? { server?.port }
 
-  /// `https://127.0.0.1:<port>` while listening (plain `http` on Linux).
+  /// `https://127.0.0.1:<port>` while listening (plain `http` on Linux). The
+  /// tests' pinned client uses it; the phone reaches the Mac over Bonjour.
   var loopbackURL: URL? {
-    server.map { URL(string: "\($0.scheme)://127.0.0.1:\($0.port)")! }
+    server.map { URL(string: "\(HandoverServer.scheme)://127.0.0.1:\($0.port)")! }
   }
-
-  /// The loopback URL for the end-to-end test's pinned client; not for
-  /// product use (the phone reaches the Mac over Bonjour, not loopback).
-  public var loopbackURLForTesting: URL? { loopbackURL }
 }
 
 /// A current value plus a fan-out to any number of `AsyncStream` readers.
@@ -175,12 +149,5 @@ struct Broadcast<Value: Sendable>: Sendable {
 
   mutating func remove(_ id: UUID) {
     continuations.removeValue(forKey: id)?.finish()
-  }
-
-  mutating func finishAll() {
-    for continuation in continuations.values {
-      continuation.finish()
-    }
-    continuations.removeAll()
   }
 }

@@ -35,8 +35,6 @@ public struct PairingPayload: Codable, Sendable, Equatable {
       + "&exp=\(Int64(expiresAt.timeIntervalSince1970))"
   }
 
-  public var url: URL { URL(string: urlString)! }
-
   public init(parsing url: URL) throws {
     guard url.scheme?.lowercased() == Self.scheme, url.host?.lowercased() == "pair" else {
       throw PairingPayloadError.notSteno
@@ -69,8 +67,6 @@ public struct PairingPayload: Codable, Sendable, Equatable {
       macID: macID, macName: name, fingerprint: fingerprint, secret: secretBytes,
       expiresAt: Date(timeIntervalSince1970: seconds))
   }
-
-  public func isExpired(at now: Date) -> Bool { now >= expiresAt }
 
   /// RFC 3986 unreserved characters; everything else, including `+`, is
   /// percent-encoded so the phone's `decodeURIComponent` reads it back.

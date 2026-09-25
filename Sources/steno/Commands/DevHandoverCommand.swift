@@ -83,20 +83,17 @@ struct DevHandover: AsyncParsableCommand {
     /// Renders the payload as a QR with `qrencode` when it is on PATH; the
     /// macOS app draws the real QR with `CIQRCodeGenerator`.
     static func printQR(_ text: String) {
-      #if canImport(Darwin)
-        let process = Foundation.Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
-        process.arguments = ["qrencode", "-t", "ANSIUTF8", "-m", "1", text]
-        do {
-          try process.run()
-          process.waitUntilExit()
-          if process.terminationStatus != 0 {
-            print("(install qrencode to render a scannable QR in the terminal)")
-          }
-          return
-        } catch {}
-      #endif
-      print("(install qrencode to render a scannable QR in the terminal)")
+      let process = Foundation.Process()
+      process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
+      process.arguments = ["qrencode", "-t", "ANSIUTF8", "-m", "1", text]
+      let hint = "(install qrencode to render a scannable QR in the terminal)"
+      do {
+        try process.run()
+        process.waitUntilExit()
+        if process.terminationStatus != 0 { print(hint) }
+      } catch {
+        print(hint)
+      }
     }
   }
 }

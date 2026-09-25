@@ -18,14 +18,14 @@ final class HTTPHandler: ChannelInboundHandler, RemovableChannelHandler {
     var route: Route
     var limit: Int
     var body: ByteBuffer
-    var principal: Principal = .anonymous
+    /// Nil while the auth gate is still deciding.
+    var principal: Principal?
     var endReceived = false
   }
 
   private enum State {
     case idle
-    case authenticating(Pending)
-    case receiving(Pending)
+    case pending(Pending)
     /// Rejected or over limit: eat what is left, then close.
     case discarding(remaining: Int)
     case closed
@@ -58,11 +58,6 @@ final class HTTPHandler: ChannelInboundHandler, RemovableChannelHandler {
     self.engine = engine
     self.configuration = configuration
     self.metrics = metrics
-  }
-
-  func channelActive(context: ChannelHandlerContext) {
-    metrics.update { $0.handshakes += 1 }
-    context.fireChannelActive()
   }
 
   func channelRead(context: ChannelHandlerContext, data: NIOAny) {
@@ -105,38 +100,34 @@ final class HTTPHandler: ChannelInboundHandler, RemovableChannelHandler {
         .problem(.payloadTooLarge, "body limit is \(limit) bytes"), head: head, context: context)
       return
     }
-    let pending = Pending(
-      head: head, route: route, limit: limit, body: context.channel.allocator.buffer(capacity: 0))
-    switch route.auth {
-    case .none:
-      state = .receiving(pending)
-    case .pairing, .bearer:
-      state = .authenticating(pending)
-      // Stop reading until the gate has decided; bytes already decoded from
-      // the first read are buffered below and dropped on rejection.
-      context.channel.setOption(ChannelOptions.autoRead, value: false).whenFailure { _ in }
-      let authorization = head.headers.first(name: "authorization")
-      let bound = NIOLoopBound((self, context), eventLoop: context.eventLoop)
-      let engine = self.engine
-      context.eventLoop.makeFutureWithTask {
-        await engine.authenticate(route, authorization: authorization)
-      }.whenComplete { result in
-        let (handler, context) = bound.value
-        handler.authenticationFinished(result, context: context)
-      }
+    state = .pending(
+      Pending(
+        head: head, route: route, limit: limit, body: context.channel.allocator.buffer(capacity: 0))
+    )
+    // Stop reading until the gate has decided; bytes already decoded from
+    // the first read are buffered below and dropped on rejection.
+    context.channel.setOption(ChannelOptions.autoRead, value: false).whenFailure { _ in }
+    let authorization = head.headers.first(name: "authorization")
+    let bound = NIOLoopBound((self, context), eventLoop: context.eventLoop)
+    let engine = self.engine
+    context.eventLoop.makeFutureWithTask {
+      await engine.authenticate(route, authorization: authorization)
+    }.whenComplete { result in
+      let (handler, context) = bound.value
+      handler.authenticationFinished(result, context: context)
     }
   }
 
   private func authenticationFinished(
     _ result: Result<AuthOutcome, any Error>, context: ChannelHandlerContext
   ) {
-    guard case .authenticating(var pending) = state else { return }
+    guard case .pending(var pending) = state, pending.principal == nil else { return }
     context.channel.setOption(ChannelOptions.autoRead, value: true).whenFailure { _ in }
     switch result {
     case .success(.allowed(let principal)):
       pending.principal = principal
-      state = .receiving(pending)
-      if pending.endReceived { dispatch(pending, context: context) }
+      state = .pending(pending)
+      if pending.endReceived { dispatch(pending, principal: principal, context: context) }
     case .success(.unauthorized):
       reject(
         .problem(.unauthorized, "unknown or revoked token"), head: pending.head, context: context)
@@ -151,14 +142,14 @@ final class HTTPHandler: ChannelInboundHandler, RemovableChannelHandler {
 
   private func receive(body buffer: inout ByteBuffer, context: ChannelHandlerContext) {
     switch state {
-    case .authenticating(var pending):
+    case .pending(var pending):
       pending.body.writeBuffer(&buffer)
-      state = .authenticating(pending)
-      enforceLimit(pending, context: context)
-    case .receiving(var pending):
-      pending.body.writeBuffer(&buffer)
-      state = .receiving(pending)
-      enforceLimit(pending, context: context)
+      state = .pending(pending)
+      if pending.body.readableBytes > pending.limit {
+        respondAndClose(
+          .problem(.payloadTooLarge, "body limit is \(pending.limit) bytes"), head: pending.head,
+          context: context)
+      }
     case .discarding(let remaining):
       let count = buffer.readableBytes
       metrics.update { $0.discardedBodyBytes += count }
@@ -172,20 +163,15 @@ final class HTTPHandler: ChannelInboundHandler, RemovableChannelHandler {
     }
   }
 
-  private func enforceLimit(_ pending: Pending, context: ChannelHandlerContext) {
-    guard pending.body.readableBytes > pending.limit else { return }
-    respondAndClose(
-      .problem(.payloadTooLarge, "body limit is \(pending.limit) bytes"), head: pending.head,
-      context: context)
-  }
-
   private func receiveEnd(context: ChannelHandlerContext) {
     switch state {
-    case .authenticating(var pending):
-      pending.endReceived = true
-      state = .authenticating(pending)
-    case .receiving(let pending):
-      dispatch(pending, context: context)
+    case .pending(var pending):
+      if let principal = pending.principal {
+        dispatch(pending, principal: principal, context: context)
+      } else {
+        pending.endReceived = true
+        state = .pending(pending)
+      }
     case .discarding:
       close(context: context)
     case .idle, .closed:
@@ -195,15 +181,11 @@ final class HTTPHandler: ChannelInboundHandler, RemovableChannelHandler {
 
   // MARK: - Dispatch and responses
 
-  private func dispatch(_ pending: Pending, context: ChannelHandlerContext) {
+  private func dispatch(_ pending: Pending, principal: Principal, context: ChannelHandlerContext) {
     state = .idle
     metrics.update { $0.handledRequests += 1 }
-    var headers: [String: String] = [:]
-    for (name, value) in pending.head.headers {
-      headers[name.lowercased()] = value
-    }
     let request = HandoverRequest(
-      route: pending.route, principal: pending.principal, headers: headers,
+      route: pending.route, principal: principal, headers: pending.head.headers,
       body: Data(pending.body.readableBytesView))
     let head = pending.head
     let bound = NIOLoopBound((self, context), eventLoop: context.eventLoop)
@@ -227,12 +209,11 @@ final class HTTPHandler: ChannelInboundHandler, RemovableChannelHandler {
   private func reject(
     _ response: HandoverResponse, head: HTTPRequestHead, context: ChannelHandlerContext
   ) {
-    let limit = HandoverConfiguration.jsonBodyLimit
-    if case .authenticating(let pending) = state {
+    if case .pending(let pending) = state {
       let seen = pending.body.readableBytes
       metrics.update { $0.discardedBodyBytes += seen }
     }
-    state = .discarding(remaining: limit)
+    state = .discarding(remaining: HandoverConfiguration.jsonBodyLimit)
     write(response, head: head, close: false, context: context)
   }
 
@@ -248,13 +229,9 @@ final class HTTPHandler: ChannelInboundHandler, RemovableChannelHandler {
   private func write(
     _ response: HandoverResponse, head: HTTPRequestHead, close: Bool, context: ChannelHandlerContext
   ) {
-    var headers = HTTPHeaders()
-    for (name, value) in response.headers {
-      headers.add(name: name, value: value)
-    }
+    var headers = response.headers
     headers.replaceOrAdd(name: "Content-Length", value: String(response.body.count))
-    let mustClose = close || state.isTerminal
-    if mustClose { headers.replaceOrAdd(name: "Connection", value: "close") }
+    if close || state.isTerminal { headers.replaceOrAdd(name: "Connection", value: "close") }
     metrics.update { $0.statuses.append(response.status.code) }
     let responseHead = HTTPResponseHead(
       version: head.version, status: response.status, headers: headers)

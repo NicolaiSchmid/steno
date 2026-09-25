@@ -1,3 +1,4 @@
+import Crypto
 import Foundation
 import NIOHTTP1
 import StenoCore
@@ -69,7 +70,7 @@ extension HandoverEngine {
     do {
       try await persist(receipt)
     } catch {
-      inbox.discard(recordingID, format: metadata.format)
+      inbox.discard(recordingID)
       return .problem(.internalServerError, "receipt: \(error)")
     }
     return .json(.created, Self.status(of: receipt))
@@ -104,12 +105,13 @@ extension HandoverEngine {
     guard request.body.count == expected else {
       return .problem(.badRequest, "chunk \(index) must be \(expected) bytes")
     }
-    guard let declared = request.headers[Wire.chunkHashHeader.lowercased()],
+    guard let declared = request.headers.first(name: Wire.chunkHashHeader),
       let digest = Data(base64Encoded: declared), digest.count == 32
     else {
       return .problem(.badRequest, "\(Wire.chunkHashHeader) must be the base64 SHA-256 of the body")
     }
-    guard ConstantTime.equals(ReceivingFile.sha256(request.body), digest) else {
+    // swift-crypto compares digests in constant time.
+    guard SHA256.hash(data: request.body) == digest else {
       return .problem(.unprocessableEntity, "chunk \(index) hash mismatch")
     }
     if receipt.receivedChunks.contains(index) {
@@ -176,12 +178,12 @@ extension HandoverEngine {
       do {
         verified =
           try ReceivingFile.size(of: partial) == receipt.byteCount
-          && ConstantTime.equals(try ReceivingFile.sha256(of: partial), receipt.sha256)
+          && (try ReceivingFile.sha256(of: partial)) == receipt.sha256
       } catch {
         return .problem(.internalServerError, "verify: \(error)")
       }
       guard verified else {
-        inbox.discard(recordingID, format: metadata.format)
+        inbox.discard(recordingID)
         receipt.state = .failed("sha256 mismatch")
         receipt.receivedChunks = []
         receipt.updatedAt = now()
@@ -197,33 +199,20 @@ extension HandoverEngine {
 
     do {
       let meetingID = try await intake.admit(file: file, metadata: metadata, device: device)
-      // The intake deletes the verified file and writes `.complete`; mirror
-      // that receipt for the stream, or write `.complete` ourselves when a
-      // test intake did not. Keep the metadata so a replayed complete still
-      // returns the same meeting id through the early `.complete` check.
-      if let stored = try? await store.handoverReceipt(recordingID: recordingID),
-        stored.state.kind == .complete
-      {
-        receipt = stored
-      } else {
-        receipt.state = .complete(meetingID: meetingID)
-      }
+      // The real intake wrote this same `.complete` receipt and deleted the
+      // verified file; a test intake did neither, so write it here too. The
+      // metadata sidecar is ours to remove; a replayed complete returns the
+      // same id through the early `.complete` check, no metadata needed.
+      receipt.state = .complete(meetingID: meetingID)
       receipt.updatedAt = now()
       try await persist(receipt)
-      // The intake owns the verified file (it copies then deletes it); the
-      // metadata sidecar is ours to remove. A replayed complete returns the
-      // same id through the early `.complete` check, no metadata needed.
       try? FileManager.default.removeItem(at: inbox.metadata(recordingID))
       return .json(.ok, Wire.CompleteResponse(meetingID: meetingID))
     } catch {
-      // The intake left `.failed(reason)` and the file; the phone retries.
-      if let stored = try? await store.handoverReceipt(recordingID: recordingID) {
-        activeReceipts[recordingID] = stored
-      } else {
-        receipt.state = .failed("admit: \(error)")
-        activeReceipts[recordingID] = receipt
-      }
-      onReceiptsChange?(receiptsSnapshot)
+      // The verified file stays; the phone retries the same call.
+      receipt.state = .failed("admit: \(error)")
+      receipt.updatedAt = now()
+      try? await persist(receipt)
       return .problem(.internalServerError, "admit: \(error)")
     }
   }
@@ -236,7 +225,7 @@ extension HandoverEngine {
         byteCount: receipt.byteCount, chunkSize: receipt.chunkSize)
       return Wire.RecordingStatus(state: .complete, receivedChunks: Array(0..<count))
     }
-    return Wire.RecordingStatus(receipt)
+    return Wire.RecordingStatus(state: receipt.state.kind, receivedChunks: receipt.receivedChunks)
   }
 
   /// The receipt from memory or the store.

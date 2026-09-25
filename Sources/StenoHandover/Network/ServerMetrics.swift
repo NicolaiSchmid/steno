@@ -11,7 +11,6 @@ final class ServerMetrics: Sendable {
     var discardedBodyBytes = 0
     var statuses: [UInt] = []
     var closedByServer = 0
-    var handshakes = 0
   }
 
   private let state = Mutex(Snapshot())

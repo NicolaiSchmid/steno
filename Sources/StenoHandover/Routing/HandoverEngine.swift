@@ -9,8 +9,7 @@ import StenoCore
 /// in `RecordingHandler.swift`.
 actor HandoverEngine: RequestHandling {
   let configuration: HandoverConfiguration
-  let macID: UUID
-  let fingerprint: Data
+  let identity: HandoverIdentity
   let store: MeetingStore
   let intake: any HandoverIntake
   let clock: any Clock<Duration>
@@ -20,24 +19,21 @@ actor HandoverEngine: RequestHandling {
   private var pairing: PairingSession?
   /// Receipts touched since start, by recording id; what `receipts` streams.
   var activeReceipts: [UUID: HandoverReceipt] = [:]
-  /// Set by the service; called with every receipt change.
-  var onReceiptsChange: (@Sendable ([HandoverReceipt]) -> Void)?
+  private var receiptUpdates = Broadcast<[HandoverReceipt]>(initial: [])
 
   /// `lastSeenAt` is written at most this often per device.
   static let lastSeenResolution: TimeInterval = 60
 
   init(
     configuration: HandoverConfiguration,
-    macID: UUID,
-    fingerprint: Data,
+    identity: HandoverIdentity,
     store: MeetingStore,
     intake: any HandoverIntake,
     clock: any Clock<Duration>,
     now: @escaping @Sendable () -> Date
   ) {
     self.configuration = configuration
-    self.macID = macID
-    self.fingerprint = fingerprint
+    self.identity = identity
     self.store = store
     self.intake = intake
     self.clock = clock
@@ -45,30 +41,17 @@ actor HandoverEngine: RequestHandling {
     self.inbox = Inbox(directory: configuration.inboxDirectory)
   }
 
-  func setReceiptsObserver(_ observer: @escaping @Sendable ([HandoverReceipt]) -> Void) {
-    onReceiptsChange = observer
-  }
-
-  /// On start, drop inbox files with no receipt (a crash between announce and
-  /// the first save, or a device revoked while offline) and re-verify files
-  /// whose receipt is complete but whose meeting is gone. Best effort.
+  /// On start, drop inbox files no receipt accounts for (a crash between
+  /// announce and the first save, a device revoked while offline) or that a
+  /// completed intake left behind (it copied the file before writing
+  /// `.complete`). Best effort.
   func sweepOrphans() async {
     try? inbox.prepare()
     for recordingID in inbox.recordingIDs() {
       let receipt = try? await store.handoverReceipt(recordingID: recordingID)
       switch receipt?.state {
-      case .none:
-        inbox.discard(recordingID, format: nil)
-      case .complete(let meetingID):
-        // The intake finished; if the meeting still exists the leftover
-        // verified file is the intake's to delete, so leave it, else drop it.
-        if (try? await store.meeting(id: meetingID)) == nil {
-          inbox.discard(recordingID, format: nil)
-        } else if let metadata = inbox.loadMetadata(recordingID) {
-          inbox.discard(recordingID, format: metadata.format)
-        }
-      case .some:
-        break
+      case .none, .complete: inbox.discard(recordingID)
+      case .some: break
       }
     }
   }
@@ -79,8 +62,9 @@ actor HandoverEngine: RequestHandling {
   /// open session.
   func beginPairing() -> PairingPayload {
     let session = PairingSession(
-      macID: macID, macName: configuration.serviceName, fingerprint: fingerprint,
-      window: configuration.pairingWindow, clock: clock, now: now())
+      macID: identity.macID, macName: configuration.serviceName,
+      fingerprint: identity.fingerprint, window: configuration.pairingWindow, clock: clock,
+      now: now())
     pairing = session
     return session.payload
   }
@@ -95,12 +79,12 @@ actor HandoverEngine: RequestHandling {
   func revoke(_ deviceID: UUID) async throws {
     for (recordingID, receipt) in activeReceipts where receipt.deviceID == deviceID {
       if receipt.state.kind != .complete {
-        inbox.discard(recordingID, format: nil)
+        inbox.discard(recordingID)
       }
       activeReceipts.removeValue(forKey: recordingID)
     }
     try await store.delete(deviceID: deviceID)
-    onReceiptsChange?(receiptsSnapshot)
+    receiptUpdates.send(receiptsSnapshot)
   }
 
   // MARK: - Auth gate
@@ -155,7 +139,7 @@ actor HandoverEngine: RequestHandling {
   func handle(_ request: HandoverRequest) async -> HandoverResponse {
     switch request.route {
     case .hello:
-      return .json(.ok, Wire.Hello(macID: macID))
+      return .json(.ok, Wire.Hello(macID: identity.macID))
     case .pair:
       return await pair(request)
     case .unpair:
@@ -173,7 +157,7 @@ actor HandoverEngine: RequestHandling {
 
   private func pair(_ request: HandoverRequest) async -> HandoverResponse {
     // The gate passed at the head; the window may have closed since.
-    guard var session = pairing, session.isOpen else {
+    guard let session = pairing, session.isOpen else {
       return .problem(.forbidden, "pairing secret rejected")
     }
     let body: Wire.PairRequest
@@ -195,10 +179,10 @@ actor HandoverEngine: RequestHandling {
     } catch {
       return .problem(.internalServerError, "saving the device failed: \(error)")
     }
-    session.used = true
     pairing = nil
     return .json(
-      .ok, Wire.PairResponse(token: token, macID: macID, macName: configuration.serviceName))
+      .ok,
+      Wire.PairResponse(token: token, macID: identity.macID, macName: configuration.serviceName))
   }
 
   private func unpair(_ request: HandoverRequest) async -> HandoverResponse {
@@ -213,6 +197,17 @@ actor HandoverEngine: RequestHandling {
 
   // MARK: - Receipts
 
+  /// Yields the current receipts first, then every change.
+  var receipts: AsyncStream<[HandoverReceipt]> {
+    receiptUpdates.subscribe { [weak self] id in
+      Task { await self?.unsubscribe(id) }
+    }
+  }
+
+  private func unsubscribe(_ id: UUID) {
+    receiptUpdates.remove(id)
+  }
+
   /// Receipts touched since start, oldest first.
   var receiptsSnapshot: [HandoverReceipt] {
     activeReceipts.values.sorted {
@@ -220,10 +215,10 @@ actor HandoverEngine: RequestHandling {
     }
   }
 
-  /// Writes the receipt and tells the observer.
+  /// Writes the receipt and tells the observers.
   func persist(_ receipt: HandoverReceipt) async throws {
     try await store.save(receipt)
     activeReceipts[receipt.recordingID] = receipt
-    onReceiptsChange?(receiptsSnapshot)
+    receiptUpdates.send(receiptsSnapshot)
   }
 }

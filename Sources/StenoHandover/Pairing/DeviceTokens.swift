@@ -8,25 +8,15 @@ enum DeviceTokens {
   static let byteCount = 32
 
   static func mint() -> String {
-    var bytes = [UInt8](repeating: 0, count: byteCount)
-    var generator = SystemRandomNumberGenerator()
-    for index in bytes.indices {
-      bytes[index] = generator.next()
-    }
-    return Data(bytes).base64EncodedString()
+    randomBytes().base64EncodedString()
   }
 
   static func hash(_ token: String) -> Data {
     Data(SHA256.hash(data: Data(token.utf8)))
   }
 
-  /// 32 random bytes for the pairing secret.
+  /// 32 bytes from the system generator, for tokens and pairing secrets.
   static func randomBytes() -> Data {
-    var bytes = [UInt8](repeating: 0, count: byteCount)
-    var generator = SystemRandomNumberGenerator()
-    for index in bytes.indices {
-      bytes[index] = generator.next()
-    }
-    return Data(bytes)
+    Data((0..<byteCount).map { _ in UInt8.random(in: .min ... .max) })
   }
 }

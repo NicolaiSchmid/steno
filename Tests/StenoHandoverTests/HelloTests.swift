@@ -32,13 +32,9 @@ import Testing
   }
 
   @Test func statesStreamFollowsStartAndStop() async throws {
-    let directory = try Fixtures.temporaryDirectory("handover")
-    defer { try? FileManager.default.removeItem(at: directory) }
-    let service = HandoverService(
-      configuration: HandoverConfiguration(
-        serviceName: "Test Mac", advertise: false, inboxDirectory: directory),
-      store: try MeetingStore.inMemory(), intake: FakeHandoverIntake(),
-      identity: try TestIdentity.load(), clock: ManualClock())
+    let test = try TestService.prepare()
+    defer { Task { await test.stop() } }
+    let service = test.service
     let states = await service.states
     var iterator = states.makeAsyncIterator()
     #expect(await iterator.next() == .stopped)

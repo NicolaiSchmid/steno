@@ -60,16 +60,9 @@ struct Inbox: Sendable {
   }
 
   /// Removes every file of the recording.
-  func discard(_ recordingID: UUID, format: AudioFormat?) {
-    var urls = [partial(recordingID), metadata(recordingID)]
-    if let format {
-      urls.append(verified(recordingID, format: format))
-    } else {
-      for candidate in AudioFormat.allCases {
-        urls.append(verified(recordingID, format: candidate))
-      }
-    }
-    for url in urls {
+  func discard(_ recordingID: UUID) {
+    let finals = AudioFormat.allCases.map { verified(recordingID, format: $0) }
+    for url in [partial(recordingID), metadata(recordingID)] + finals {
       try? FileManager.default.removeItem(at: url)
     }
   }

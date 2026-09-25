@@ -527,9 +527,10 @@ Each line names the deviation and the reason.
 - `HandoverService.beginPairing`/`cancelPairing`/`pairedDevices`/`revoke`/`receipts` are
   `async` (the actor). `receipts` fans out through a `Broadcast` value that yields the current
   set first; `receivedBytes ≈ receivedChunks.count * chunkSize`, as the plan notes.
-- `HandoverService.loopbackURLForTesting` is a small public seam so the end-to-end test's
-  pinned client can reach the loopback listener; it is not used by the app (the phone reaches
-  the Mac over Bonjour).
+- The end-to-end test reaches the loopback listener through the internal `loopbackURL`
+  (`@testable`), using the same `LoopbackClient` and `Phone` helpers as `StenoHandoverTests`
+  (symlinked into `Tests/StenoEndToEndTests/Support/`, like the pin evaluator); the app has no
+  loopback seam (the phone reaches the Mac over Bonjour).
 - The end-to-end `testPhoneUploadBecomesQueuedMeeting` uploads deterministic seeded bytes
   labelled `.m4aAAC` rather than a committed `.m4a` file: the handover copies and hashes the
   payload without decoding it, and generating a real AAC fixture needs AVFoundation, which the

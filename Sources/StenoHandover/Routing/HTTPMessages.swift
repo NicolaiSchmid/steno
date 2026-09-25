@@ -22,7 +22,7 @@ enum AuthOutcome: Sendable, Equatable {
 struct HandoverRequest: Sendable {
   var route: Route
   var principal: Principal
-  var headers: [String: String]
+  var headers: HTTPHeaders
   var body: Data
 
   /// The device behind a bearer route; routes with other auth never ask.
@@ -34,13 +34,13 @@ struct HandoverRequest: Sendable {
 
 struct HandoverResponse: Sendable {
   var status: HTTPResponseStatus
-  var headers: [(String, String)] = []
-  var body: Data = Data()
+  var headers = HTTPHeaders()
+  var body = Data()
 
   static func json<T: Encodable>(_ status: HTTPResponseStatus, _ value: T) -> HandoverResponse {
     do {
       return HandoverResponse(
-        status: status, headers: [("Content-Type", "application/json")],
+        status: status, headers: ["Content-Type": "application/json"],
         body: try StenoJSON.encode(value))
     } catch {
       return problem(.internalServerError, "encoding failed: \(error)")

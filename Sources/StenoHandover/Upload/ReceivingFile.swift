@@ -9,11 +9,9 @@ enum ReceivingFile {
 
   /// Creates an empty partial file (or leaves an existing one alone).
   static func create(at url: URL) throws {
-    try FileManager.default.createDirectory(
-      at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
     if !FileManager.default.fileExists(atPath: url.path) {
       guard FileManager.default.createFile(atPath: url.path, contents: nil) else {
-        throw UploadError.io("could not create \(url.lastPathComponent)")
+        throw CocoaError(.fileWriteUnknown, userInfo: [NSFilePathErrorKey: url.path])
       }
     }
   }
@@ -27,33 +25,20 @@ enum ReceivingFile {
     try handle.synchronize()
   }
 
-  /// SHA-256 of the whole file, streamed.
-  static func sha256(of url: URL) throws -> Data {
+  /// SHA-256 of the whole file, streamed. Compare the digest with `==`:
+  /// swift-crypto does that in constant time.
+  static func sha256(of url: URL) throws -> SHA256Digest {
     let handle = try FileHandle(forReadingFrom: url)
     defer { try? handle.close() }
     var hasher = SHA256()
     while let block = try handle.read(upToCount: readBlock), !block.isEmpty {
       hasher.update(data: block)
     }
-    return Data(hasher.finalize())
+    return hasher.finalize()
   }
 
   static func size(of url: URL) throws -> Int64 {
     let attributes = try FileManager.default.attributesOfItem(atPath: url.path)
     return (attributes[.size] as? NSNumber)?.int64Value ?? 0
-  }
-
-  static func sha256(_ data: Data) -> Data {
-    Data(SHA256.hash(data: data))
-  }
-}
-
-enum UploadError: Error, CustomStringConvertible, Sendable {
-  case io(String)
-
-  var description: String {
-    switch self {
-    case .io(let message): message
-    }
   }
 }
