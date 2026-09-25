@@ -96,8 +96,8 @@ import Testing
       #expect(single.messages[0].content.contains("Output language: \(name)."))
       let map = builder.buildMap(
         input,
-        chunk: TranscriptChunker().chunk(input.segments, language: input.meeting.language)[0], of: 1
-      )
+        chunk: TranscriptChunker().chunk(input.segments, language: input.meeting.language)[0],
+        of: 1, notesTokens: 1_500)
       #expect(map.messages[0].content.contains("Output language: \(name)."))
       let cleanup = CleanupPromptBuilder().build(
         chunk: TranscriptChunker().chunk(input.segments, language: input.meeting.language)[0],

@@ -67,8 +67,8 @@ import Testing
         return Scripts.completion(draft, usage: reduceUsage)
       }
     }
-    let output = try await MapReduceTests.summarizer(server, contextTokens: 8_000).summarize(
-      Self.input)
+    let summarizer = MapReduceTests.summarizer(server, contextTokens: 8_000)
+    let output = try await summarizer.summarize(Self.input)
     let purposes = server.requests.map(\.purpose)
     let mapCount = purposes.filter { $0 == "summary-map" }.count
     let repairs = purposes.filter { $0 == "summary-map-repair" }
@@ -78,7 +78,9 @@ import Testing
 
     let repair = try #require(server.requests.first { $0.purpose == "summary-map-repair" }?.chat)
     #expect(repair.responseFormat?.jsonSchema?.name == "chunk_notes")
-    #expect(repair.maxTokens == 1_500)
+    #expect(
+      repair.maxTokens
+        == summarizer.budget(for: Self.input).mapNotesOutputTokens(chunkCount: mapCount))
     #expect(repair.messages[0].content.contains("\"chunkIndex\": integer"))
     #expect(repair.messages[1].content.contains("Here are my notes, no JSON today."))
     #expect(repair.messages[1].content.contains("Validation error: "))
@@ -94,6 +96,38 @@ import Testing
           promptTokens: 500 * mapCount + 700 + 2_000,
           completionTokens: 50 * mapCount + 60 + 400,
           requests: mapCount + 2))
+  }
+
+  /// The map ceiling is each chunk's share of the input budget, so a model
+  /// that fills its ceiling on every chunk still leaves notes that fit the
+  /// reduce call. With a flat 1 500 ceiling, ten chunks of full notes burnt
+  /// ten calls and then threw `transcriptTooLong`.
+  @Test func mapAnswersThatFillTheirCeilingStillFitTheReduce() async throws {
+    let server = try StubChatServer()
+    defer { server.stop() }
+    let draft = try SummaryTests.canned("summary-default-standup")
+    // A model spending about 70 percent of its ceiling on notes: 20-word
+    // points of 100 bytes, about 34 estimated tokens each.
+    server.respond { request in
+      guard request.purpose == "summary-map", let ceiling = request.chat?.maxTokens else {
+        return Scripts.completion(draft)
+      }
+      return Scripts.json(Self.notes(0, points: max(1, ceiling * 7 / 10 / 34), pointLength: 100))
+    }
+    let summarizer = MapReduceTests.summarizer(server, contextTokens: 8_000)
+    let output = try await summarizer.summarize(Self.input)
+
+    let purposes = server.requests.map(\.purpose)
+    #expect(purposes.last == "summary-reduce")
+    let mapCount = purposes.filter { $0 == "summary-map" }.count
+    #expect(mapCount >= 6)
+    let budget = summarizer.budget(for: Self.input)
+    let ceiling = budget.mapNotesOutputTokens(chunkCount: mapCount)
+    #expect(ceiling * mapCount <= budget.inputBudget, "the pre-check and the ceiling agree")
+    #expect(server.requests.dropLast().allSatisfy { $0.chat?.maxTokens == ceiling })
+    let reduceUser = try #require(server.requests.last?.chat?.messages[1].content)
+    #expect(budget.fits(TokenBudget.estimateTokens(reduceUser, language: "en")))
+    #expect(output.summary.sections.first?.id == "executive-summary")
   }
 
   @Test func aTruncatedMapAnswerFailsTheWholePassWithoutRepair() async throws {

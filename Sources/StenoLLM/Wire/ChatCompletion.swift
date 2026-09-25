@@ -6,12 +6,15 @@ import StenoCore
 // Keys are spelled as the API spells them; nothing here is stored and
 // nothing leaves the module: callers see `LLMRequest` and `LLMResponse`.
 
-/// The request body of `POST /chat/completions`.
+/// The request body of `POST /chat/completions`. `maxTokens` is the field
+/// every compatible server takes; `maxCompletionTokens` is OpenAI's
+/// successor, sent instead once a server has rejected `max_tokens` by name.
 struct ChatCompletionRequest: Codable, Sendable, Equatable {
   var model: String
   var messages: [ChatMessage]
   var temperature: Double?
   var maxTokens: Int?
+  var maxCompletionTokens: Int?
   var responseFormat: ChatResponseFormat?
 
   enum CodingKeys: String, CodingKey {
@@ -19,6 +22,7 @@ struct ChatCompletionRequest: Codable, Sendable, Equatable {
     case messages
     case temperature
     case maxTokens = "max_tokens"
+    case maxCompletionTokens = "max_completion_tokens"
     case responseFormat = "response_format"
   }
 }
@@ -88,9 +92,11 @@ struct ChatCompletionResponse: Codable, Sendable, Equatable {
     }
   }
 
+  /// Every count is optional: proxies and some local servers send a partial
+  /// or null `usage`, and a good answer must never fail on its bookkeeping.
   struct Usage: Codable, Sendable, Equatable {
-    var promptTokens: Int
-    var completionTokens: Int
+    var promptTokens: Int?
+    var completionTokens: Int?
     var totalTokens: Int?
 
     enum CodingKeys: String, CodingKey {
@@ -124,12 +130,14 @@ extension ChatCompletionResponse.Message {
   }
 }
 
-/// `{"error": {"message": ..., "type": ..., "code": ...}}`; `code` is a string
-/// on OpenAI and an integer on some servers, so it is read as any JSON value.
+/// `{"error": {"message": ..., "type": ..., "param": ..., "code": ...}}`;
+/// `code` is a string on OpenAI and an integer on some servers, so it is read
+/// as any JSON value. `param` names the rejected request field on a 400.
 struct ChatErrorEnvelope: Codable, Sendable, Equatable {
   struct Detail: Codable, Sendable, Equatable {
     var message: String
     var type: String?
+    var param: String?
     var code: JSONValue?
   }
 

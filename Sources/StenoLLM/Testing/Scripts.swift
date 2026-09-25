@@ -58,11 +58,24 @@ public enum Scripts {
   }
 
   public static func rateLimited(retryAfterSeconds: Int? = nil) -> StubResponse {
+    rateLimited(retryAfter: retryAfterSeconds.map { "\($0)" })
+  }
+
+  /// A 429 whose `Retry-After` header is `retryAfter` verbatim, for the
+  /// values a client must survive (`inf`, `1e300`, an HTTP date).
+  public static func rateLimited(retryAfter header: String?) -> StubResponse {
     var headers: [String: String] = [:]
-    if let retryAfterSeconds { headers["Retry-After"] = "\(retryAfterSeconds)" }
+    if let header { headers["Retry-After"] = header }
     return .json(
       ChatErrorEnvelope(error: .init(message: "Rate limit reached", type: "rate_limit_error")),
       status: 429, headers: headers)
+  }
+
+  /// A completion body written verbatim, for shapes the wire types cannot
+  /// produce (a null or partial `usage`).
+  public static func rawCompletion(_ body: String) -> StubResponse {
+    StubResponse(
+      status: 200, headers: ["Content-Type": "application/json"], body: Data(body.utf8))
   }
 
   public static func serverError(_ status: Int = 500) -> StubResponse {
@@ -88,6 +101,32 @@ public enum Scripts {
 
   public static func badRequest(_ message: String) -> StubResponse {
     .json(ChatErrorEnvelope(error: .init(message: message)), status: 400)
+  }
+
+  /// OpenAI's 400 for a request field a model does not take, the field named
+  /// in `error.param`: `max_tokens` and `temperature` on reasoning models.
+  public static func rejectsParameter(_ param: String) -> StubResponse {
+    .json(
+      ChatErrorEnvelope(
+        error: .init(
+          message:
+            "Unsupported parameter: '\(param)' is not supported with this model.",
+          type: "invalid_request_error", param: param, code: "unsupported_parameter")),
+      status: 400)
+  }
+
+  /// A responder that plays an OpenAI reasoning model: it rejects
+  /// `max_tokens` (wanting `max_completion_tokens`) and any `temperature`,
+  /// each by name, and otherwise returns `completion`.
+  public static func reasoningModel(completion: StubResponse) -> @Sendable (RecordedRequest) ->
+    StubResponse?
+  {
+    { request in
+      guard let chat = request.chat else { return completion }
+      if chat.maxTokens != nil { return rejectsParameter("max_tokens") }
+      if chat.temperature != nil { return rejectsParameter("temperature") }
+      return completion
+    }
   }
 
   public static func models(_ ids: [String]) -> StubResponse {

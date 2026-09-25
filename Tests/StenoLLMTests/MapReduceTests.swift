@@ -60,7 +60,15 @@ import Testing
     // order; every part must have been asked for exactly once.
     let maps = server.requests.dropLast().compactMap(\.chat)
     #expect(maps.allSatisfy { $0.responseFormat?.jsonSchema?.name == "chunk_notes" })
-    #expect(maps.allSatisfy { $0.maxTokens == 1_500 })
+    // Each map call may spend the chunk's share of the input budget on its
+    // notes, not the 1 500 ceiling: at 8k the ten chunks share about 4 800.
+    let budget = summarizer.budget(for: Self.input())
+    let notesTokens = budget.mapNotesOutputTokens(chunkCount: mapCount)
+    #expect(notesTokens >= 256 && notesTokens < 1_500, "\(notesTokens)")
+    #expect(notesTokens * mapCount <= budget.inputBudget)
+    #expect(maps.allSatisfy { $0.maxTokens == notesTokens }, "\(maps.map(\.maxTokens))")
+    let rule = "at most \(SummaryPromptBuilder.maxNotesPoints(for: notesTokens)) points in total"
+    #expect(maps.allSatisfy { $0.messages[0].content.contains(rule) }, "\(rule)")
     for part in 1...mapCount {
       #expect(
         maps.filter { $0.messages[0].content.contains("part \(part) of \(mapCount)") }.count == 1,
@@ -121,7 +129,7 @@ import Testing
     let builder = SummaryPromptBuilder(template: input.template, timeZone: Self.utc)
     let chunks = TranscriptChunker(targetTokens: 150, maxTokens: 220).chunk(
       input.segments, language: "de")
-    let map = builder.buildMap(input, chunk: chunks[1], of: chunks.count)
+    let map = builder.buildMap(input, chunk: chunks[1], of: chunks.count, notesTokens: 1_500)
     try Snapshot.assert(
       PromptSnapshotTests.render(map), matches: "llm/prompts/summary-map-default.txt")
     #expect(map.messages[1].content.contains("End of the previous part, for context only:"))

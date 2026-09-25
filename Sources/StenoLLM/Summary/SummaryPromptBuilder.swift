@@ -100,13 +100,18 @@ public struct SummaryPromptBuilder: Sendable {
       system: system, user: user, schema: draftSchema, name: "meeting_analysis", purpose: "summary")
   }
 
-  /// Notes for one chunk of a long transcript.
-  public func buildMap(_ input: SummaryInput, chunk: TranscriptChunk, of total: Int) -> LLMRequest {
+  /// Notes for one chunk of a long transcript. `notesTokens` is the answer's
+  /// ceiling (`max_tokens`) and sizes the length rule in the prompt, so the
+  /// notes of every chunk fit the reduce call together.
+  public func buildMap(
+    _ input: SummaryInput, chunk: TranscriptChunk, of total: Int, notesTokens: Int
+  ) -> LLMRequest {
     let labels = SpeakerLabels(speakers: input.speakers)
     let system = [
       "You are Steno's meeting analyst. You read part \(chunk.index + 1) of \(total) of one meeting's transcript and return structured notes as one JSON object and nothing else.",
       "", meetingBlock(input), "", "Template: \(template.displayName)", template.context, "",
-      Self.notesRules, "", "Return exactly this JSON shape, with chunkIndex \(chunk.index):",
+      Self.notesRules(maxPoints: Self.maxNotesPoints(for: notesTokens)), "",
+      "Return exactly this JSON shape, with chunkIndex \(chunk.index):",
       notesSchema.promptText,
     ].joined(separator: "\n")
     var user = "Part \(chunk.index + 1) of \(total)."
@@ -117,7 +122,17 @@ public struct SummaryPromptBuilder: Sendable {
     }
     user += "\n\nTranscript:\n" + TranscriptLines.renderPlain(chunk.segments, labels: labels)
     return request(
-      system: system, user: user, schema: notesSchema, name: "chunk_notes", purpose: "summary-map")
+      system: system, user: user, schema: notesSchema, name: "chunk_notes", purpose: "summary-map",
+      maxTokens: notesTokens)
+  }
+
+  /// One notes point, a sentence plus its JSON framing, costs about this
+  /// many tokens; the length rule in the map prompt follows from the
+  /// ceiling, never below three points.
+  static let tokensPerNotesPoint = 60
+
+  static func maxNotesPoints(for notesTokens: Int) -> Int {
+    max(3, notesTokens / tokensPerNotesPoint)
   }
 
   /// One call merging every chunk's notes into the final analysis.
@@ -203,13 +218,16 @@ public struct SummaryPromptBuilder: Sendable {
     - Only what was said. Never invent facts, names, numbers or dates.
     """
 
-  static let notesRules = """
+  static func notesRules(maxPoints: Int) -> String {
+    """
     Rules:
     - Group what was said into topics in the order they came up. Each point is one full sentence in the output language that names who said or asked for what, using known names where listed above and the speaker label verbatim otherwise.
+    - Keep the notes short: at most \(maxPoints) points in total across all topics, one sentence each, so that the notes of every part fit one final call together. Prefer the points that carry a decision, a commitment, a number, a date or a name.
     - decisions are things agreed in this part, not proposals. taskCandidates are explicit commitments with an owner as said in this part; dueDate is an absolute date or null.
     - speakerCues: evidence in this part for who a speaker label is (addressed by name, a self-introduction), with a short quote; name null when there is none.
     - Only what was said in this part. Never invent anything.
     """
+  }
 
   static func formatDate(_ date: Date, timeZone: TimeZone) -> String {
     let formatter = DateFormatter()
@@ -220,7 +238,8 @@ public struct SummaryPromptBuilder: Sendable {
   }
 
   private func request(
-    system: String, user: String, schema: JSONSchema, name: String, purpose: String
+    system: String, user: String, schema: JSONSchema, name: String, purpose: String,
+    maxTokens: Int? = nil
   ) -> LLMRequest {
     LLMRequest(
       messages: [
@@ -228,7 +247,7 @@ public struct SummaryPromptBuilder: Sendable {
       ],
       responseFormat: .jsonSchema(name: name, schema: schema.jsonValue, strict: true),
       temperature: Self.temperature,
-      maxTokens: nil,
+      maxTokens: maxTokens,
       purpose: purpose)
   }
 }

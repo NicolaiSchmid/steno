@@ -128,6 +128,34 @@ import Testing
     #expect(harness.server.requests.count == 2, "the model list answered, the completion did not")
   }
 
+  /// A model list that answers does not make the endpoint usable: the probe
+  /// completion's own failure is thrown, whatever it is (a base URL without
+  /// `/v1`, a model the server does not know, a non-JSON 200), so a settings
+  /// "Test connection" never shows green while every pass would fail.
+  @Test func probeThrowsWhenTheCompletionFailsHoweverTheModelListAnswered() async throws {
+    let harness = try ClientHarness(retry: .none)
+    defer { harness.stop() }
+    harness.server.respond { request in
+      request.method == "GET"
+        ? Scripts.models(["stub-model"])
+        : StubResponse.json(
+          ChatErrorEnvelope(error: .init(message: "model `stub-model` does not exist")),
+          status: 404)
+    }
+    let notFound = await #expect(throws: LLMError.self) { try await harness.client.probe() }
+    #expect(notFound == .http(status: 404, body: "model `stub-model` does not exist"))
+    #expect(harness.server.requests.count == 2)
+
+    harness.server.respond { request in
+      request.method == "GET"
+        ? Scripts.models(["stub-model"]) : Scripts.rawCompletion("<html>not an API</html>")
+    }
+    let undecodable = await #expect(throws: LLMError.self) { try await harness.client.probe() }
+    #expect(undecodable == .transport("undecodable completion body: <html>not an API</html>"))
+    #expect(harness.server.requests.count == 4)
+    #expect(harness.clock.pendingSleepers == 0)
+  }
+
   @Test func probeThrowsATransportErrorWhenNothingListens() async throws {
     // Port 1 (tcpmux) is closed on every runner: the connection is refused.
     let baseURL = try #require(URL(string: "http://127.0.0.1:1/v1"))
@@ -149,7 +177,6 @@ import Testing
         models: ["other"], rejecting: ["json_schema"],
         completion: Scripts.completion("{\"ok\":true}")))
     let probe = try await harness.client.probe()
-    #expect(probe.reachable)
     #expect(probe.modelListed == false)
     #expect(probe.resolvedMode == .jsonObject)
     #expect(harness.server.requests.count == 3, "GET, rejected json_schema, json_object")
@@ -171,6 +198,39 @@ import Testing
     let response = try await harness.client.complete(ClientHarness.request())
     #expect(response.usage == LLMUsage(promptTokens: 0, completionTokens: 0, requests: 1))
     #expect(response.countedUsage.requests == 1)
+  }
+
+  /// Proxies and some local servers send a `usage` block with null or
+  /// missing counts. The answer arrived intact, so it must be returned
+  /// (counts read as zero, one request), never retried as an undecodable
+  /// body until the policy is exhausted.
+  @Test func aNullOrPartialUsageBlockNeverFailsAGoodAnswer() async throws {
+    let harness = try ClientHarness()
+    defer { harness.stop() }
+    func body(usage: String) -> String {
+      "{\"id\":\"x\",\"object\":\"chat.completion\",\"model\":\"m\",\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\",\"content\":\"{\\\"ok\\\":true}\"},\"finish_reason\":\"stop\"}],\"usage\":\(usage)}"
+    }
+    harness.server.enqueue(
+      Scripts.rawCompletion(
+        body(usage: "{\"prompt_tokens\":null,\"completion_tokens\":null,\"total_tokens\":2}")),
+      Scripts.rawCompletion(body(usage: "{\"total_tokens\":2}")),
+      Scripts.rawCompletion(body(usage: "{\"prompt_tokens\":7}")),
+      Scripts.rawCompletion(body(usage: "null")))
+    var responses: [LLMResponse] = []
+    for _ in 0..<4 {
+      responses.append(try await harness.client.complete(ClientHarness.request()))
+    }
+    #expect(responses.allSatisfy { $0.text == "{\"ok\":true}" })
+    #expect(
+      responses.map(\.usage) == [
+        LLMUsage(promptTokens: 0, completionTokens: 0, requests: 1),
+        LLMUsage(promptTokens: 0, completionTokens: 0, requests: 1),
+        LLMUsage(promptTokens: 7, completionTokens: 0, requests: 1),
+        LLMUsage(promptTokens: 0, completionTokens: 0, requests: 1),
+      ])
+    #expect(harness.server.requests.count == 4, "no retries")
+    #expect(harness.clock.pendingSleepers == 0)
+    #expect(!harness.events.contains { if case .retrying = $0 { true } else { false } })
   }
 }
 
@@ -224,6 +284,32 @@ import Testing
         .retrying(
           after: .seconds(5), attempt: 1, reason: .rateLimited(retryAfter: .seconds(600)))))
     #expect(harness.clock.now.offset == .seconds(5))
+  }
+
+  /// `Retry-After: inf` parses as a `Double` and used to trap in
+  /// `Duration.seconds`; now it falls back to the policy's backoff, and a
+  /// huge finite value is capped at an hour before the policy clamps it.
+  @Test func aRetryAfterTheClientCannotRepresentFallsBackToTheBackoff() async throws {
+    let harness = try ClientHarness()
+    defer { harness.stop() }
+    harness.server.enqueue(
+      Scripts.rateLimited(retryAfter: "inf"), Scripts.rateLimited(retryAfter: "1e300"),
+      Scripts.completion("ok"))
+    let driver = harness.driveRetries()
+    defer { driver.cancel() }
+    let response = try await harness.client.complete(ClientHarness.request())
+    #expect(response.text == "ok")
+    #expect(harness.server.requests.count == 3)
+    #expect(
+      harness.events.contains(
+        .retrying(after: .seconds(2), attempt: 1, reason: .rateLimited(retryAfter: nil))),
+      "\(harness.events)")
+    #expect(
+      harness.events.contains(
+        .retrying(
+          after: .seconds(30), attempt: 2, reason: .rateLimited(retryAfter: .seconds(3_600)))),
+      "\(harness.events)")
+    #expect(harness.clock.now.offset == .seconds(32))
   }
 
   @Test func threeClockTimeoutsExhaustThePolicy() async throws {

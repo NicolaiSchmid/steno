@@ -1,6 +1,6 @@
 purpose: summary-map
 temperature: 0.2
-maxTokens: default
+maxTokens: 1500
 responseFormat: json_schema chunk_notes strict=true
 
 === system ===
@@ -22,6 +22,7 @@ A general meeting between the participants. Write for someone who was not there 
 
 Rules:
 - Group what was said into topics in the order they came up. Each point is one full sentence in the output language that names who said or asked for what, using known names where listed above and the speaker label verbatim otherwise.
+- Keep the notes short: at most 25 points in total across all topics, one sentence each, so that the notes of every part fit one final call together. Prefer the points that carry a decision, a commitment, a number, a date or a name.
 - decisions are things agreed in this part, not proposals. taskCandidates are explicit commitments with an owner as said in this part; dueDate is an absolute date or null.
 - speakerCues: evidence in this part for who a speaker label is (addressed by name, a self-introduction), with a short quote; name null when there is none.
 - Only what was said in this part. Never invent anything.

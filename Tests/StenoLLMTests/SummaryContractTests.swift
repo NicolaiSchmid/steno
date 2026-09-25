@@ -182,7 +182,7 @@ import Testing
     let builder = SummaryPromptBuilder(template: input.template, timeZone: Self.utc)
     let chunk = TranscriptChunker().chunk(input.segments, language: "de")[0]
     #expect(
-      builder.buildMap(input, chunk: chunk, of: 1).messages[0].content.contains(
+      builder.buildMap(input, chunk: chunk, of: 1, notesTokens: 1_500).messages[0].content.contains(
         "Meeting date: 2026-09-24 (Thursday)."))
     #expect(
       builder.buildReduce(input, notes: []).messages[0].content.contains(

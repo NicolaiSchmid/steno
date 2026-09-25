@@ -131,7 +131,7 @@ import Testing
     #expect(
       probe
         == EndpointProbe(
-          reachable: true, modelListed: true, resolvedMode: .jsonSchema, roundTrip: .zero))
+          modelListed: true, resolvedMode: .jsonSchema, roundTrip: .zero))
     let paths = harness.server.requests.map { "\($0.method) \($0.path)" }
     #expect(paths == ["GET /v1/models", "POST /v1/chat/completions"])
     #expect(harness.server.requests.last?.purpose == "probe")
@@ -145,7 +145,6 @@ import Testing
         ? Scripts.badRequest("no such route") : Scripts.completion("{\"ok\":true}")
     }
     let probe = try await harness.client.probe()
-    #expect(probe.reachable)
     #expect(probe.modelListed == nil)
   }
 
@@ -174,6 +173,15 @@ import Testing
     #expect(OpenAICompatibleClient.retryAfter(" 1.5 ") == .milliseconds(1500))
     #expect(OpenAICompatibleClient.retryAfter("Wed, 21 Oct 2026 07:28:00 GMT") == nil)
     #expect(OpenAICompatibleClient.retryAfter(nil) == nil)
+    // Values `Double` parses but `Duration.seconds` would trap on, or that
+    // make no sense as a wait: nil or the cap, never a crash.
+    #expect(OpenAICompatibleClient.retryAfter("inf") == nil)
+    #expect(OpenAICompatibleClient.retryAfter("infinity") == nil)
+    #expect(OpenAICompatibleClient.retryAfter("nan") == nil)
+    #expect(OpenAICompatibleClient.retryAfter("-1") == nil)
+    #expect(OpenAICompatibleClient.retryAfter("1e300") == .seconds(3_600))
+    #expect(OpenAICompatibleClient.retryAfter("1e19") == .seconds(3_600))
+    #expect(OpenAICompatibleClient.retryAfter("3601") == .seconds(3_600))
     #expect(
       OpenAICompatibleClient.complainsAboutResponseFormat("Invalid parameter: 'response_format'"))
     #expect(OpenAICompatibleClient.complainsAboutResponseFormat("json_schema is not supported"))

@@ -100,7 +100,6 @@ struct DevLLM: AsyncParsableCommand {
       print("endpoint: \(endpoint.baseURL.absoluteString) model \(endpoint.model)")
       do {
         let probe = try await client.probe()
-        print("reachable: \(probe.reachable)")
         print("model listed: \(probe.modelListed.map { $0 ? "yes" : "no" } ?? "no model list")")
         print("structured output: \(probe.resolvedMode.rawValue)")
         print("round trip: \(probe.roundTrip)")

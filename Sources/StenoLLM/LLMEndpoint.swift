@@ -68,10 +68,9 @@ public struct LLMEndpoint: Sendable, Equatable {
   public var modelsURL: URL { baseURL.appendingPathComponent("models") }
 }
 
-/// What `OpenAICompatibleClient.probe()` learned about an endpoint.
+/// What `OpenAICompatibleClient.probe()` learned about an endpoint whose
+/// probe completion succeeded; a probe that could not complete throws.
 public struct EndpointProbe: Sendable, Equatable {
-  /// Some HTTP answer came back from the server.
-  public var reachable: Bool
   /// Whether `GET /models` lists the configured model; nil when the server
   /// has no model list.
   public var modelListed: Bool?

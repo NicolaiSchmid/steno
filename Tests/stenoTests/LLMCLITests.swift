@@ -28,7 +28,6 @@ import Testing
 
     let probe = try CLITests.run(["dev", "llm", "probe"] + endpoint + db, home: home)
     #expect(probe.status == 0, "\(probe.stderr)")
-    #expect(probe.stdout.contains("reachable: true"))
     #expect(probe.stdout.contains("model listed: yes"))
     #expect(probe.stdout.contains("structured output: jsonSchema"))
 

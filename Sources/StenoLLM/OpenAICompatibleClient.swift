@@ -13,6 +13,10 @@ public enum LLMClientEvent: Sendable, Equatable {
   /// Fired right before the backoff sleep begins.
   case retrying(after: Duration, attempt: Int, reason: LLMError)
   case modeDowngraded(to: StructuredOutputMode)
+  /// A 400 named this request parameter (`error.param`); the request is
+  /// resent without it (`temperature`) or with its successor (`max_tokens`
+  /// as `max_completion_tokens`) and the client keeps spelling it that way.
+  case parameterRejected(String)
 }
 
 /// The one `LanguageModel` implementation: `POST {baseURL}/chat/completions`
@@ -28,6 +32,11 @@ public actor OpenAICompatibleClient: LanguageModel {
   private let clock: any Clock<Duration>
   private let observer: (@Sendable (LLMClientEvent) -> Void)?
   private var mode: StructuredOutputMode
+  /// Parameters a 400 named (`error.param`) and that the client now spells
+  /// differently, remembered per client like the mode: `max_tokens` goes as
+  /// `max_completion_tokens` (OpenAI's reasoning models), `temperature` is
+  /// left out (they accept only the default). No model-name sniffing.
+  private var rejectedParameters: Set<String> = []
 
   public init(
     endpoint: LLMEndpoint,
@@ -71,6 +80,13 @@ public actor OpenAICompatibleClient: LanguageModel {
           observer?(.modeDowngraded(to: next))
           continue
         }
+        if reply.status == 400, let param = Self.rejectedParameter(reply),
+          Self.adjustableParameters.contains(param), !rejectedParameters.contains(param)
+        {
+          rejectedParameters.insert(param)
+          observer?(.parameterRejected(param))
+          continue
+        }
         failure = classify(reply)
       } catch let error as LLMError {
         if error == .timeout { observer?(.timedOut(attempt: attempt)) }
@@ -86,42 +102,25 @@ public actor OpenAICompatibleClient: LanguageModel {
     }
   }
 
-  /// `GET /models` (reachability, whether the model is listed) and one tiny
-  /// structured completion (mode fallback, round trip). Throws the last
-  /// error when the server never answered anything or rejected the key.
+  /// `GET /models` (whether the model is listed; a server without a list is
+  /// tolerated) and one tiny structured completion (mode fallback, round
+  /// trip). Any failure of the completion is thrown, so a probe that returns
+  /// describes an endpoint both passes can use; a wrong base URL, an unknown
+  /// model or an undecodable answer is the caller's to show.
   public func probe() async throws -> EndpointProbe {
-    var reachable = false
     var modelListed: Bool?
-    var failure: LLMError?
     let roundTrip = try await clock.measure {
-      do {
-        var request = URLRequest(url: endpoint.modelsURL)
-        request.httpMethod = "GET"
-        addHeaders(to: &request, purpose: "probe")
-        let reply = try await perform(request)
-        reachable = true
-        if (200..<300).contains(reply.status),
-          let list = try? WireJSON.decode(ModelList.self, from: reply.body)
-        {
-          modelListed = list.data.contains { $0.id == endpoint.model }
-        }
-      } catch let error as LLMError {
-        failure = error
+      var request = URLRequest(url: endpoint.modelsURL)
+      request.httpMethod = "GET"
+      addHeaders(to: &request, purpose: "probe")
+      if let reply = try? await perform(request), (200..<300).contains(reply.status),
+        let list = try? WireJSON.decode(ModelList.self, from: reply.body)
+      {
+        modelListed = list.data.contains { $0.id == endpoint.model }
       }
-      do {
-        _ = try await complete(Self.probeRequest)
-        reachable = true
-        failure = nil
-      } catch let error as LLMError {
-        failure = error
-      }
+      _ = try await complete(Self.probeRequest)
     }
-    if let failure {
-      if case .http(let status, _) = failure, status == 401 || status == 403 { throw failure }
-      if !reachable { throw failure }
-    }
-    return EndpointProbe(
-      reachable: reachable, modelListed: modelListed, resolvedMode: mode, roundTrip: roundTrip)
+    return EndpointProbe(modelListed: modelListed, resolvedMode: mode, roundTrip: roundTrip)
   }
 
   static let probeRequest = LLMRequest(
@@ -152,11 +151,14 @@ public actor OpenAICompatibleClient: LanguageModel {
   }
 
   private func makeRequest(_ request: LLMRequest, mode: StructuredOutputMode) throws -> URLRequest {
+    let ceiling = request.maxTokens ?? endpoint.maxOutputTokens
+    let renamesMaxTokens = rejectedParameters.contains("max_tokens")
     let body = ChatCompletionRequest(
       model: endpoint.model,
       messages: request.messages.map(ChatMessage.init),
-      temperature: request.temperature,
-      maxTokens: request.maxTokens ?? endpoint.maxOutputTokens,
+      temperature: rejectedParameters.contains("temperature") ? nil : request.temperature,
+      maxTokens: renamesMaxTokens ? nil : ceiling,
+      maxCompletionTokens: renamesMaxTokens ? ceiling : nil,
       responseFormat: Self.responseFormat(for: request.responseFormat, mode: mode))
     var urlRequest = URLRequest(url: endpoint.chatCompletionsURL)
     urlRequest.httpMethod = "POST"
@@ -305,13 +307,26 @@ public actor OpenAICompatibleClient: LanguageModel {
       || lowered.contains("json schema") || lowered.contains("structured output")
   }
 
-  /// `Retry-After` in delta seconds; the HTTP-date form is not parsed and
-  /// falls back to the policy's backoff.
+  /// The parameters a 400 may name that the client can spell differently.
+  static let adjustableParameters: Set<String> = ["max_tokens", "temperature"]
+
+  /// `error.param` of a 400 envelope, when the server sent one.
+  static func rejectedParameter(_ reply: Reply) -> String? {
+    (try? WireJSON.decode(ChatErrorEnvelope.self, from: reply.body))?.error.param
+  }
+
+  /// `Retry-After` in delta seconds, capped at an hour before it becomes a
+  /// `Duration` (`Duration.seconds(Double)` traps past about 1.7e20 s, and
+  /// `Double("inf")` parses). Anything that is not a finite, non-negative
+  /// number, including the HTTP-date form, falls back to the policy's
+  /// backoff.
+  static let retryAfterCap: Double = 3_600
+
   static func retryAfter(_ header: String?) -> Duration? {
     guard let header, let seconds = Double(header.trimmingCharacters(in: .whitespaces)),
-      seconds >= 0
+      seconds.isFinite, seconds >= 0
     else { return nil }
-    return .seconds(seconds)
+    return .seconds(min(seconds, retryAfterCap))
   }
 
   // MARK: Redaction

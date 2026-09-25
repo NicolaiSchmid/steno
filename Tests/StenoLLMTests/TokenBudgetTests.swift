@@ -41,6 +41,21 @@ import Testing
     #expect(tiny.inputBudget == 0)
   }
 
+  @Test func mapNotesCeilingIsTheChunksShareWithinBounds() {
+    let budget = TokenBudget(
+      contextTokens: 8_000, reservedOutputTokens: 2_000, promptOverheadTokens: 1_211)
+    #expect(budget.inputBudget == 4_789)
+    #expect(budget.mapNotesOutputTokens(chunkCount: 10) == 478)
+    #expect(budget.fits(10 * budget.mapNotesOutputTokens(chunkCount: 10)))
+    #expect(budget.mapNotesOutputTokens(chunkCount: 1) == 1_500, "capped at the ceiling")
+    #expect(budget.mapNotesOutputTokens(chunkCount: 0) == 1_500)
+    #expect(budget.mapNotesOutputTokens(chunkCount: 100) == 256, "never below the floor")
+    #expect(!budget.fits(100 * budget.mapNotesOutputTokens(chunkCount: 100)))
+    #expect(SummaryPromptBuilder.maxNotesPoints(for: 1_500) == 25)
+    #expect(SummaryPromptBuilder.maxNotesPoints(for: 478) == 7)
+    #expect(SummaryPromptBuilder.maxNotesPoints(for: 100) == 3)
+  }
+
   @Test func primarySubtagDropsRegionAndScript() {
     #expect(LanguageTag("de-CH").primarySubtag == "de")
     #expect(LanguageTag("zh-Hant-TW").primarySubtag == "zh")

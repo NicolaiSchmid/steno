@@ -36,10 +36,7 @@ public struct LLMMeetingSummarizer: MeetingSummarizer, Sendable {
   public func summarize(_ input: SummaryInput) async throws -> SummaryOutput {
     let builder = SummaryPromptBuilder(template: input.template, timeZone: timeZone)
     var singleShot = builder.buildSingleShot(input)
-    let budget = TokenBudget(
-      contextTokens: endpoint.contextTokens, reservedOutputTokens: reservedOutputTokens,
-      promptOverheadTokens: TokenBudget.estimateTokens(
-        singleShot.messages[0].content, language: "en") + 64)
+    let budget = budget(for: input, systemPrompt: singleShot.messages[0].content)
     let transcriptTokens = TranscriptChunker.estimateTokens(
       input.segments, language: input.meeting.language)
 
@@ -57,29 +54,41 @@ public struct LLMMeetingSummarizer: MeetingSummarizer, Sendable {
       from: draft, input: input, usage: usage, minimumConfidence: minimumConfidence)
   }
 
-  /// Estimated tokens one chunk's notes take in the reduce prompt; decides
-  /// up front whether two levels are enough.
-  public static let notesTokensPerChunk = 200
+  /// The budget both paths work within: the context less the reserved
+  /// answer and the single-shot system prompt (the largest of the three)
+  /// plus message framing. `systemPrompt` defaults to building it.
+  func budget(for input: SummaryInput, systemPrompt: String? = nil) -> TokenBudget {
+    let system =
+      systemPrompt
+      ?? SummaryPromptBuilder(template: input.template, timeZone: timeZone)
+      .buildSingleShot(input).messages[0].content
+    return TokenBudget(
+      contextTokens: endpoint.contextTokens, reservedOutputTokens: reservedOutputTokens,
+      promptOverheadTokens: TokenBudget.estimateTokens(system, language: "en") + 64)
+  }
 
   /// Notes per chunk (`maxConcurrentRequests` at a time), then one reduce
-  /// call over every chunk's notes. Two levels only: when the notes alone
-  /// would not fit the budget, `transcriptTooLong` is thrown before the
-  /// first call; when the real notes turn out too long, after the map.
+  /// call over every chunk's notes. Two levels only. Each map call may
+  /// spend the chunk's share of the input budget on its notes
+  /// (`TokenBudget.mapNotesOutputTokens`), which is also what the up-front
+  /// check reserves, so `transcriptTooLong` is thrown before the first call
+  /// when the chunks are too many for that share; the post-map check only
+  /// catches a model that ignored its ceiling and the prompt's length rule.
   func mapReduce(
     _ input: SummaryInput, builder: SummaryPromptBuilder, budget: TokenBudget,
     transcriptTokens: Int
   ) async throws -> (AnalysisDraft, LLMUsage) {
     let chunks = TranscriptChunker(budget: budget.inputBudget).chunk(
       input.segments, language: input.meeting.language)
-    guard budget.fits(chunks.count * Self.notesTokensPerChunk) else {
+    let notesTokens = budget.mapNotesOutputTokens(chunkCount: chunks.count)
+    guard budget.fits(chunks.count * notesTokens) else {
       throw LLMError.transcriptTooLong(
         estimatedTokens: transcriptTokens, budget: budget.inputBudget)
     }
-    let notesTokens = min(reservedOutputTokens, 1_500)
     let mapped = try await mapBounded(chunks, limit: endpoint.maxConcurrentRequests) {
       chunk -> (ChunkNotes, LLMUsage) in
-      var request = builder.buildMap(input, chunk: chunk, of: chunks.count)
-      request.maxTokens = notesTokens
+      let request = builder.buildMap(
+        input, chunk: chunk, of: chunks.count, notesTokens: notesTokens)
       var (notes, usage) = try await self.complete(
         ChunkNotes.self, request, schema: builder.notesSchema)
       notes.chunkIndex = chunk.index
