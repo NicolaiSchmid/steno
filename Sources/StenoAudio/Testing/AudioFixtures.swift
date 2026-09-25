@@ -114,6 +114,19 @@ public enum AudioFixtures {
       to: url, options: .atomic)
   }
 
+  /// Writes 48 kHz mono Float32 CAF in the recording writer's master
+  /// format; the bake-off CLI tests decode it through
+  /// `AVFoundationAudioCodec`.
+  public static func writeCAF(_ samples: [Float], to url: URL) throws {
+    let writer = try CAFStreamWriter(url: url, sampleRate: sampleRate, channels: 1)
+    try samples.withUnsafeBufferPointer { buffer in
+      if let base = buffer.baseAddress {
+        try writer.write(interleaved: base, frameCount: buffer.count)
+      }
+    }
+    try writer.finish()
+  }
+
   static func phaseIncrement(_ frequency: Double) -> UInt32 {
     UInt32((frequency / sampleRate * 4_294_967_296.0).rounded())
   }

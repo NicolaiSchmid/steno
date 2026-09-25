@@ -45,7 +45,8 @@ public actor CaptureSession {
 
   /// Opens the files for one recording; `RecordingWriter.init` in
   /// production, a failure-injecting wrapper in tests.
-  typealias WriterFactory = @Sendable (RecordingLayout, [AudioLane], _ keepRawMic: Bool) throws ->
+  typealias WriterFactory =
+    @Sendable (RecordingLayout, [AudioLane], _ keepRawMic: Bool) throws ->
     any RecordingWriting
 
   private let makeWriter: WriterFactory

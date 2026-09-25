@@ -15,11 +15,14 @@ public struct BakeoffRow: Codable, Sendable, Equatable {
   /// WER after the injected `TranscriptCleaner`; nil without cleanup or
   /// reference.
   public var cleanedWER: Double?
+  /// Model requests the cleaner made for this file, retries included; nil
+  /// when cleanup did not run.
+  public var cleanupRequests: Int?
 
   public init(
     file: String, engine: SpeechEngineID, audioSeconds: Double, wallSeconds: Double,
     segmentCount: Int, wer: Double? = nil, languageFlips: Int,
-    dominantLanguage: LanguageTag? = nil, cleanedWER: Double? = nil
+    dominantLanguage: LanguageTag? = nil, cleanedWER: Double? = nil, cleanupRequests: Int? = nil
   ) {
     self.file = file
     self.engine = engine
@@ -30,6 +33,7 @@ public struct BakeoffRow: Codable, Sendable, Equatable {
     self.languageFlips = languageFlips
     self.dominantLanguage = dominantLanguage
     self.cleanedWER = cleanedWER
+    self.cleanupRequests = cleanupRequests
   }
 
   /// Seconds of audio per second of wall clock, FluidAudio's `RTFx` (the
@@ -53,14 +57,16 @@ public struct BakeoffReport: Codable, Sendable, Equatable {
   public func markdown() -> String {
     var lines = [
       "# STT bake-off", "",
-      "| File | Engine | Audio s | Wall s | RTFx | Segments | WER | Cleaned WER | Flips | Language |",
-      "|---|---|---:|---:|---:|---:|---:|---:|---:|---|",
+      "| File | Engine | Audio s | Wall s | RTFx | Segments | WER | WER (cleaned) | "
+        + "Cleanup requests | Flips | Language |",
+      "|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---|",
     ]
     for row in rows {
       lines.append(
         "| \(row.file) | \(row.engine.rawValue) | \(format(row.audioSeconds)) | "
           + "\(format(row.wallSeconds)) | \(format(row.rtfx)) | \(row.segmentCount) | "
-          + "\(percent(row.wer)) | \(percent(row.cleanedWER)) | \(row.languageFlips) | "
+          + "\(percent(row.wer)) | \(percent(row.cleanedWER)) | "
+          + "\(row.cleanupRequests.map(String.init) ?? "-") | \(row.languageFlips) | "
           + "\(row.dominantLanguage?.rawValue ?? "-") |")
     }
     let engines = rows.map(\.engine).reduce(into: [SpeechEngineID]()) {
@@ -68,16 +74,19 @@ public struct BakeoffReport: Codable, Sendable, Equatable {
     }
     if !engines.isEmpty {
       lines.append("")
-      lines.append("| Engine | Files | Mean RTFx | Mean WER | Mean cleaned WER | Flips |")
-      lines.append("|---|---:|---:|---:|---:|---:|")
+      lines.append(
+        "| Engine | Files | Mean RTFx | Mean WER | Mean WER (cleaned) | Cleanup requests | Flips |")
+      lines.append("|---|---:|---:|---:|---:|---:|---:|")
       for engine in engines {
         let own = rows.filter { $0.engine == engine }
         let wers = own.compactMap(\.wer)
         let cleaned = own.compactMap(\.cleanedWER)
+        let requests = own.compactMap(\.cleanupRequests)
         lines.append(
           "| \(engine.rawValue) | \(own.count) | \(format(mean(own.map(\.rtfx)))) | "
             + "\(percent(wers.isEmpty ? nil : mean(wers))) | "
             + "\(percent(cleaned.isEmpty ? nil : mean(cleaned))) | "
+            + "\(requests.isEmpty ? "-" : String(requests.reduce(0, +))) | "
             + "\(own.reduce(0) { $0 + $1.languageFlips }) |")
       }
     }
@@ -85,7 +94,9 @@ public struct BakeoffReport: Codable, Sendable, Equatable {
     return lines.joined(separator: "\n")
   }
 
-  func json() throws -> Data {
+  /// Pretty-printed, sorted keys, ISO 8601 dates: what `report.json` and
+  /// `steno dev bakeoff --json` contain.
+  public func json() throws -> Data {
     let encoder = JSONEncoder()
     encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
     encoder.dateEncodingStrategy = .iso8601

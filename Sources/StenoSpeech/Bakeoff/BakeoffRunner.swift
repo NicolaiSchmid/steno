@@ -79,7 +79,8 @@ public struct BakeoffRunner: Sendable {
           dominantLanguage: tagger.dominantLanguage(of: segments))
         if let cleaner, let reference {
           let cleaned = try await Self.cleaned(segments, with: cleaner, tagger: tagger)
-          row.cleanedWER = WordErrorRate.compute(reference: reference, hypothesis: cleaned)
+          row.cleanedWER = WordErrorRate.compute(reference: reference, hypothesis: cleaned.text)
+          row.cleanupRequests = cleaned.usage.requests
         }
         rows.append(row)
         if let output {
@@ -111,9 +112,11 @@ public struct BakeoffRunner: Sendable {
       retention: .keepForever)
   }
 
+  /// The segments through the cleaner as one mixed-lane transcript: the
+  /// joined cleaned text and what the pass cost.
   static func cleaned(
     _ segments: [RawSegment], with cleaner: any TranscriptCleaner, tagger: LanguageTagger
-  ) async throws -> String {
+  ) async throws -> (text: String, usage: LLMUsage) {
     let meetingID = UUID()
     let transcript = segments.enumerated().map { index, segment in
       TranscriptSegment(
@@ -125,6 +128,6 @@ public struct BakeoffRunner: Sendable {
       CleanupInput(
         segments: transcript, language: tagger.dominantLanguage(of: segments), participants: [],
         speakers: [], knownPeople: []))
-    return output.segments.map(\.text).joined(separator: " ")
+    return (output.segments.map(\.text).joined(separator: " "), output.usage)
   }
 }
