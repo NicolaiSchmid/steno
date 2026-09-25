@@ -244,7 +244,11 @@ jobs:
           path: |
             apps/macos/build/DerivedData/SourcePackages
             apps/macos/build/DerivedData/Build
-          key: steno-app-${{ runner.os }}-${{ steps.cache-scope.outputs.scope }}-${{ steps.swift.outputs.version }}-${{ hashFiles('apps/macos/project.yml', 'Package.swift') }}-${{ hashFiles('Sources/**', 'apps/macos/**') }}
+          # The source hash names the source folders, not `apps/macos/**`:
+          # on a self-hosted runner the workspace persists between runs, so
+          # that glob would walk the previous run's DerivedData (hundreds of
+          # thousands of files) and hashFiles times out after 120 s.
+          key: steno-app-${{ runner.os }}-${{ steps.cache-scope.outputs.scope }}-${{ steps.swift.outputs.version }}-${{ hashFiles('apps/macos/project.yml', 'Package.swift') }}-${{ hashFiles('Sources/**', 'apps/macos/Steno/**', 'apps/macos/StenoTests/**', 'apps/macos/StenoUITests/**', 'apps/macos/Config/**') }}
           restore-keys: |
             steno-app-${{ runner.os }}-${{ steps.cache-scope.outputs.scope }}-${{ steps.swift.outputs.version }}-${{ hashFiles('apps/macos/project.yml', 'Package.swift') }}-
             steno-app-${{ runner.os }}-${{ steps.cache-scope.outputs.scope }}-${{ steps.swift.outputs.version }}-
@@ -338,7 +342,7 @@ jobs:
           path: |
             apps/macos/build/DerivedData/SourcePackages
             apps/macos/build/DerivedData/Build
-          key: steno-ui-${{ runner.os }}-${{ steps.swift.outputs.version }}-${{ hashFiles('apps/macos/project.yml', 'Package.swift') }}-${{ hashFiles('Sources/**', 'apps/macos/**') }}
+          key: steno-ui-${{ runner.os }}-${{ steps.swift.outputs.version }}-${{ hashFiles('apps/macos/project.yml', 'Package.swift') }}-${{ hashFiles('Sources/**', 'apps/macos/Steno/**', 'apps/macos/StenoTests/**', 'apps/macos/StenoUITests/**', 'apps/macos/Config/**') }}
           restore-keys: |
             steno-ui-${{ runner.os }}-${{ steps.swift.outputs.version }}-${{ hashFiles('apps/macos/project.yml', 'Package.swift') }}-
             steno-ui-${{ runner.os }}-${{ steps.swift.outputs.version }}-
