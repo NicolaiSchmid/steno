@@ -39,11 +39,35 @@ public actor HandoverService {
     self.identity = identity
     self.now = now
     self.engine = HandoverEngine(
-      configuration: configuration, macID: identity.macID, store: store, intake: intake, now: now)
+      configuration: configuration, macID: identity.macID, fingerprint: identity.fingerprint,
+      store: store, intake: intake, clock: clock, now: now)
   }
 
   /// The id in the Bonjour TXT record, the QR payload and `/v1/hello`.
   public nonisolated var macID: UUID { identity.macID }
+
+  // MARK: - Pairing and devices
+
+  /// Opens a pairing window and returns what the QR code shows
+  /// (`urlString`). Replaces any open session; the secret is single use and
+  /// expires after `configuration.pairingWindow`.
+  public func beginPairing() async -> PairingPayload {
+    await engine.beginPairing()
+  }
+
+  public func cancelPairing() async {
+    await engine.cancelPairing()
+  }
+
+  public func pairedDevices() async throws -> [PairedDevice] {
+    try await store.pairedDevices()
+  }
+
+  /// Forgets the phone: its next request is answered 401, which the phone
+  /// shows as unpaired.
+  public func revoke(_ deviceID: UUID) async throws {
+    try await engine.revoke(deviceID)
+  }
 
   public var state: ListenerState { listenerStates.current }
 

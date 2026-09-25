@@ -9,22 +9,55 @@ import StenoCore
 actor HandoverEngine: RequestHandling {
   let configuration: HandoverConfiguration
   let macID: UUID
+  let fingerprint: Data
   let store: MeetingStore
   let intake: any HandoverIntake
+  let clock: any Clock<Duration>
   let now: @Sendable () -> Date
+
+  private var pairing: PairingSession?
+
+  /// `lastSeenAt` is written at most this often per device.
+  static let lastSeenResolution: TimeInterval = 60
 
   init(
     configuration: HandoverConfiguration,
     macID: UUID,
+    fingerprint: Data,
     store: MeetingStore,
     intake: any HandoverIntake,
+    clock: any Clock<Duration>,
     now: @escaping @Sendable () -> Date
   ) {
     self.configuration = configuration
     self.macID = macID
+    self.fingerprint = fingerprint
     self.store = store
     self.intake = intake
+    self.clock = clock
     self.now = now
+  }
+
+  // MARK: - Pairing session
+
+  /// Opens a window and returns the payload for the QR code, replacing any
+  /// open session.
+  func beginPairing() -> PairingPayload {
+    let session = PairingSession(
+      macID: macID, macName: configuration.serviceName, fingerprint: fingerprint,
+      window: configuration.pairingWindow, clock: clock, now: now())
+    pairing = session
+    return session.payload
+  }
+
+  func cancelPairing() {
+    pairing = nil
+  }
+
+  var pairingIsOpen: Bool { pairing?.isOpen ?? false }
+
+  func revoke(_ deviceID: UUID) async throws {
+    try await store.delete(deviceID: deviceID)
   }
 
   // MARK: - Auth gate
@@ -34,15 +67,34 @@ actor HandoverEngine: RequestHandling {
     case .none:
       return .allowed(.anonymous)
     case .pairing:
-      return .forbidden
-    case .bearer:
-      guard let token = Self.credential(scheme: "Bearer", in: authorization),
-        let device = try? await store.device(forTokenHash: DeviceTokens.hash(token))
+      guard let secret = Self.credential(scheme: "Pairing", in: authorization),
+        let session = pairing, session.matches(secret)
       else {
+        return .forbidden
+      }
+      return .allowed(.pairing)
+    case .bearer:
+      guard let token = Self.credential(scheme: "Bearer", in: authorization) else {
         return .unauthorized
       }
-      return .allowed(.device(device))
+      let hash = DeviceTokens.hash(token)
+      guard let device = try? await store.device(forTokenHash: hash) else {
+        return .unauthorized
+      }
+      return .allowed(.device(await touch(device, tokenHash: hash)))
     }
+  }
+
+  /// Refreshes `lastSeenAt`, at most once a minute.
+  private func touch(_ device: PairedDevice, tokenHash: Data) async -> PairedDevice {
+    let timestamp = now()
+    if let seen = device.lastSeenAt, timestamp.timeIntervalSince(seen) < Self.lastSeenResolution {
+      return device
+    }
+    var seen = device
+    seen.lastSeenAt = timestamp
+    try? await store.save(seen, tokenHash: tokenHash)
+    return seen
   }
 
   /// The credential after `<scheme> ` in an `Authorization` header, case
@@ -61,8 +113,52 @@ actor HandoverEngine: RequestHandling {
     switch request.route {
     case .hello:
       return .json(.ok, Wire.Hello(macID: macID))
-    case .pair, .unpair, .announce, .status, .chunk, .complete:
+    case .pair:
+      return await pair(request)
+    case .unpair:
+      return await unpair(request)
+    case .announce, .status, .chunk, .complete:
       return .problem(.notImplemented, "not yet")
     }
+  }
+
+  private func pair(_ request: HandoverRequest) async -> HandoverResponse {
+    // The gate passed at the head; the window may have closed since.
+    guard var session = pairing, session.isOpen else {
+      return .problem(.forbidden, "pairing secret rejected")
+    }
+    let body: Wire.PairRequest
+    do {
+      body = try StenoJSON.decode(Wire.PairRequest.self, from: request.body)
+    } catch {
+      return .problem(.badRequest, "PairRequest: \(error)")
+    }
+    let name = body.deviceName.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !name.isEmpty, name.count <= 128 else {
+      return .problem(.badRequest, "deviceName must be 1 to 128 characters")
+    }
+    let token = DeviceTokens.mint()
+    let timestamp = now()
+    let device = PairedDevice(
+      id: body.deviceID, name: name, pairedAt: timestamp, lastSeenAt: timestamp)
+    do {
+      try await store.save(device, tokenHash: DeviceTokens.hash(token))
+    } catch {
+      return .problem(.internalServerError, "saving the device failed: \(error)")
+    }
+    session.used = true
+    pairing = nil
+    return .json(
+      .ok, Wire.PairResponse(token: token, macID: macID, macName: configuration.serviceName))
+  }
+
+  private func unpair(_ request: HandoverRequest) async -> HandoverResponse {
+    guard let device = request.device else { return .problem(.unauthorized, "no device") }
+    do {
+      try await store.delete(deviceID: device.id)
+    } catch {
+      return .problem(.internalServerError, "revoking failed: \(error)")
+    }
+    return .empty(.noContent)
   }
 }
