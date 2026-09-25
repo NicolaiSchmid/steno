@@ -6,7 +6,8 @@ struct Dev: AsyncParsableCommand {
   static let configuration = CommandConfiguration(
     abstract: "Developer tools.",
     subcommands: [
-      DevDB.self, DevFixtures.self, DevModels.self, DevBakeoff.self, DevHandover.self,
+      DevDB.self, DevFixtures.self, DevAudioDevices.self, DevAECBench.self, DevCaptureSpike.self,
+      DevModels.self, DevBakeoff.self, DevHandover.self,
     ]
   )
 }
