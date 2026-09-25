@@ -1,0 +1,26 @@
+{
+  "id": "default",
+  "displayName": "Default",
+  "description": "A general meeting: what mattered, what was discussed, what is still open.",
+  "context": "A general meeting between the participants. Summarise for someone who was not there and needs to act on it.",
+  "sections": [
+    {
+      "id": "executive-summary",
+      "heading": "Executive Summary",
+      "instructions": "Three to five bullets with the outcomes that matter most, each led by a short bold phrase.",
+      "required": true
+    },
+    {
+      "id": "full-summary",
+      "heading": "Full Summary",
+      "instructions": "One bullet per topic in the order it came up, with who said what where it matters.",
+      "required": false
+    },
+    {
+      "id": "open-questions",
+      "heading": "Open Questions",
+      "instructions": "Questions raised but not answered, each as one bullet. Omit the section when there are none.",
+      "required": false
+    }
+  ]
+}

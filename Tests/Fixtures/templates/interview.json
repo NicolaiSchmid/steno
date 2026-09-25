@@ -1,0 +1,50 @@
+{
+  "context" : "A job interview. Separate what the candidate said from the interviewer's assessment; never invent facts about the candidate.",
+  "description" : "A job interview: background, fit, skills, motivation and a recommendation.",
+  "displayName" : "Interview",
+  "id" : "interview",
+  "sections" : [
+    {
+      "heading" : "Candidate Background",
+      "id" : "candidate-background",
+      "instructions" : "The candidate's background and experience as they described it.",
+      "required" : true
+    },
+    {
+      "heading" : "Role Fit and Experience",
+      "id" : "role-fit-and-experience",
+      "instructions" : "Experience relevant to the role and how it maps to the requirements discussed.",
+      "required" : true
+    },
+    {
+      "heading" : "Skills Assessment",
+      "id" : "skills-assessment",
+      "instructions" : "Skills demonstrated or claimed, with the evidence from the conversation.",
+      "required" : false
+    },
+    {
+      "heading" : "Motivation and Culture",
+      "id" : "motivation-and-culture",
+      "instructions" : "Why the candidate is interested, how they like to work, and cultural signals.",
+      "required" : false
+    },
+    {
+      "heading" : "Candidate Questions",
+      "id" : "candidate-questions",
+      "instructions" : "Questions the candidate asked and the answers given.",
+      "required" : false
+    },
+    {
+      "heading" : "Assessment and Recommendation",
+      "id" : "assessment-and-recommendation",
+      "instructions" : "The interviewer's assessment and recommendation as stated; do not add your own.",
+      "required" : false
+    },
+    {
+      "heading" : "Next Steps",
+      "id" : "next-steps",
+      "instructions" : "Agreed follow-ups with owner and date when stated.",
+      "required" : false
+    }
+  ]
+}

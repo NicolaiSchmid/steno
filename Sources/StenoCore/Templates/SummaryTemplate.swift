@@ -23,6 +23,39 @@ public struct SummaryTemplate: Codable, Sendable, Equatable, Hashable, Identifia
 
   public static let defaultID = "default"
 
+  /// The bundled template ids in menu order.
+  public static let bundledIDs = ["default", "customer-discovery", "daily-standup", "interview"]
+
+  /// The four fixed templates from `Resources/Templates/*.json`, in
+  /// `bundledIDs` order. Loaded once; a missing or malformed file is a
+  /// packaging error and stops the process with the file name.
+  public static let bundled: [SummaryTemplate] = bundledIDs.map { id in
+    do {
+      return try load(id: id, from: .module)
+    } catch {
+      preconditionFailure("Summary template \(id).json failed to load: \(error)")
+    }
+  }
+
+  public static func bundled(id: String) -> SummaryTemplate? {
+    bundled.first { $0.id == id }
+  }
+
+  /// Reads `Templates/<id>.json` from `bundle`.
+  public static func load(id: String, from bundle: Bundle) throws -> SummaryTemplate {
+    guard let url = bundle.url(forResource: id, withExtension: "json", subdirectory: "Templates")
+    else {
+      throw CocoaError(.fileNoSuchFile, userInfo: [NSFilePathErrorKey: "Templates/\(id).json"])
+    }
+    let template = try StenoJSON.decode(SummaryTemplate.self, from: Data(contentsOf: url))
+    guard template.id == id else {
+      throw DecodingError.dataCorrupted(
+        DecodingError.Context(
+          codingPath: [], debugDescription: "Templates/\(id).json declares id \(template.id)"))
+    }
+    return template
+  }
+
   public func section(id: String) -> TemplateSection? {
     sections.first { $0.id == id }
   }
