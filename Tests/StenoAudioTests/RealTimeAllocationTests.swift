@@ -45,7 +45,7 @@ import Testing
         guard type & AllocationHook.allocateFlag != 0,
           UInt(bitPattern: pthread_self()) == AllocationHook.thread.load(ordering: .relaxed)
         else { return }
-        let index = AllocationHook.count.loadThenWrappingAdd(1, ordering: .relaxed)
+        let index = AllocationHook.count.wrappingAdd(1, ordering: .relaxed).oldValue
         if index < AllocationHook.maxTraces {
           _ = backtrace(
             AllocationHook.traces + index * AllocationHook.traceDepth,
