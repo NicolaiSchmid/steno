@@ -32,16 +32,10 @@ public struct LanguageTagger: Sendable {
   ) {
     self.candidates = candidates
     self.minimumWords = minimumWords
-    self.recognizer = recognizer ?? Self.defaultRecognizer()
-  }
-
-  /// `NLLanguageRecognizer` where it exists, the function-word recogniser
-  /// elsewhere.
-  public static func defaultRecognizer() -> any LanguageRecognizing {
     #if canImport(NaturalLanguage)
-      return NaturalLanguageRecognizer()
+      self.recognizer = recognizer ?? NaturalLanguageRecognizer()
     #else
-      return StopwordLanguageRecognizer()
+      self.recognizer = recognizer ?? StopwordLanguageRecognizer()
     #endif
   }
 

@@ -3,9 +3,7 @@ import Foundation
 import StenoCore
 import StenoSpeech
 
-extension ModelAsset: ExpressibleByArgument {
-  public static var allValueStrings: [String] { allCases.map(\.rawValue) }
-}
+extension ModelAsset: ExpressibleByArgument {}
 
 /// `steno dev models list|download|remove <asset>`: the model store from
 /// the command line. `--models-dir` overrides `Settings.modelsDirectory`

@@ -53,13 +53,12 @@ public struct FluidDiarizerConfig: Sendable, Equatable {
           speakerLabel: $0.speakerId, start: TimeInterval($0.startTimeSeconds),
           end: TimeInterval($0.endTimeSeconds), quality: $0.qualityScore)
       }
-      let windows = (result.chunkEmbeddings ?? []).map {
-        (
-          label: $0.speakerId, start: $0.startTimeSeconds, end: $0.endTimeSeconds,
-          embedding: $0.embedding256
-        )
+      let chunks = (result.chunkEmbeddings ?? []).map {
+        ClusterChunk(
+          speakerLabel: $0.speakerId, start: $0.startTimeSeconds, end: $0.endTimeSeconds,
+          embedding: $0.embedding256, quality: 1)
       }
-      return (turns, DiarizationMapping.chunks(windows, turns: turns))
+      return (turns, DiarizationMapping.assigningQuality(to: chunks, from: turns))
     }
   }
 

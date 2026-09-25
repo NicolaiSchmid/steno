@@ -8,7 +8,7 @@ public struct TokenAggregator: Sendable {
 
   public init() {}
 
-  public func words(from tokens: [TimedToken]) -> [TimedWord] {
+  public func words(from tokens: [TimedWord]) -> [TimedWord] {
     var words: [TimedWord] = []
     var current: TimedWord?
     var confidences: [Float] = []

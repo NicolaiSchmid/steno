@@ -6,9 +6,9 @@ import Testing
 
 @Suite struct TokenAggregationTests {
   private func token(_ text: String, _ start: TimeInterval, _ end: TimeInterval, _ c: Float = 1)
-    -> TimedToken
+    -> TimedWord
   {
-    TimedToken(text: text, start: start, end: end, confidence: c)
+    TimedWord(text: text, start: start, end: end, confidence: c)
   }
 
   @Test func aWordOverThreeTokens() {

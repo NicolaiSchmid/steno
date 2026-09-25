@@ -369,11 +369,13 @@ Recorded by the speech workstream while building steps 0 to 8 (PR #8, 2026-09-25
   `Models/whisperkit/models/argmaxinc/whisperkit-coreml/<variant>` with `downloadBase = Models/whisperkit`. The
   tokenizer is fetched right after the weights (`ModelUtilities.loadTokenizer`) so an installed asset is usable
   offline.
-- **German fine-tune download.** FluidAudio downloads only its own `Repo` cases, so `parakeetDE` is fetched by
-  redirecting the v3 repository through `ModelRegistry.repoOverrides` for the duration of that one download; all
-  FluidAudio downloads are serialised in an actor so a concurrent v3 download never sees the redirect. Loading uses
-  `loadLocal(from:)`, which never re-downloads, so the model-card `offlineMode` caveat does not apply. Spike B stays
-  `[opt-in]` and is not yet run (needs a Mac and 1.2 GB).
+- **German fine-tune download.** Every FluidAudio download entry point takes a `Repo` case and the override table is
+  process-wide and prefix-matched, so `parakeetDE` cannot be a plain table entry: it is fetched by redirecting the
+  v3 repository through `ModelRegistry.repoOverrides` for the duration of that one download. `LiveModelDownloader`
+  runs all downloads strictly in sequence (a `Task` chain; an actor alone is re-entrant across the awaited download)
+  so a concurrent v3 download never sees the redirect. `ParakeetEngine` ensures the asset like the other two
+  Parakeet ids and loads with `loadLocal(from:)`, which never re-downloads, so the model-card `offlineMode` caveat
+  does not apply. Spike B stays `[opt-in]` and is not yet run (needs a Mac and 1.2 GB).
 - **Chunk quality.** `ChunkEmbedding` carries no quality; each chunk takes the `qualityScore` of the turn it overlaps
   most (1 when none), and `clusterConfidence` is the duration-weighted mean of those.
 - **Fixtures.** No Mac was reachable (Forge down), so the `say` fixtures are generated on the `macos-15` runner by a
@@ -387,10 +389,22 @@ Recorded by the speech workstream while building steps 0 to 8 (PR #8, 2026-09-25
 - **Bake-off CLI input is WAV only** until StenoAudio's codec exists (`BakeoffRunner` takes any `AudioDecoder`; the
   CLI passes `WAVAudioDecoder`). `--cleanup` is not a flag yet; the runner's `cleaner` seam is there for StenoLLM.
 - **Linux builds.** Every file that imports FluidAudio or WhisperKit is wrapped in `#if canImport(...)`, and
-  `Embeddings`/`LanguageTagger` fall back from Accelerate and NaturalLanguage, so the pure logic (208 tests across the
-  package) builds and runs in the Linux container. `makeSpeechEngine` and `makeDiarizer` throw
+  `LanguageTagger` falls back from NaturalLanguage to function words, so the pure logic builds and runs in the
+  Linux container (FluidAudio 0.17.4 itself does not compile on Linux, so the local loop strips the two framework
+  packages from a scratch copy of `Package.swift`). `makeSpeechEngine` and `makeDiarizer` throw
   `SpeechEngineError.unavailable` there.
-- **`FakeModelDownloader.failureCount`** (default unlimited) so a test can show that a failed download is retried.
+- **`FakeModelDownloader.failure`** is thrown by the first download only, so one test shows that a failed download
+  is retried.
+- **Simplify pass (after the PR review).** Shapes the contract above named that the code no longer has, each
+  replaced by something the module or core already had: `ParakeetVariant` (the three Parakeet ids are
+  `ParakeetEngine(id:models:)`; the German fine-tune is an ordinary asset), `WhisperKitEngine(variant:)` (the variant
+  is the asset directory's last component, so `ModelAsset.whisperVariant` went too), `Embeddings` (core's
+  `Embedding` has `normalized()`, `cosineSimilarity(to:)` and `magnitude`; the cluster mean is one loop in
+  `ClusterEmbedding`), `TimedToken` (tokens are `TimedWord`s that `TokenAggregator` joins), `ParakeetLanguages` and
+  `WhisperLanguages` (private tables on `SpeechEngineID`), the `StenoSpeech` namespace enum and
+  `SpeechEngineError.emptyResult` (unused), the per-framework `FluidAudioDownloads` and `WhisperKitDownloads` types
+  (one `LiveModelDownloader`), and the `DiarizationMapping` fallback that re-implemented the picker's weighting for
+  clusters without chunks (turns stand in as chunks without an embedding).
 - **`makeDiarizer(models:config:)`** added beside `makeSpeechEngine` so the app and the CLI never name `FluidDiarizer`.
 - **Two `@unchecked Sendable` boxes.** `WhisperKit` and `OfflineDiarizerManager` are non-Sendable classes whose
   work is async: Swift 6 lets neither a fresh instance be returned into an actor (`WhisperKit(config)`) nor an

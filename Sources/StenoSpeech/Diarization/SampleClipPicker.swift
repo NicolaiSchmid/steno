@@ -7,7 +7,7 @@ import Foundation
 /// halved when the longest range is under `minimumSeconds`: a speaker who
 /// never held the floor for three seconds is hard to name and easy to
 /// confuse.
-struct SampleClipPicker: Sendable {
+enum SampleClipPicker {
   struct Choice: Equatable {
     var range: ClosedRange<TimeInterval>?
     var clusterConfidence: Float

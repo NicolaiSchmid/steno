@@ -30,22 +30,73 @@ public enum ModelDownloadError: Error, Sendable, Equatable, CustomStringConverti
 }
 
 #if canImport(FluidAudio) && canImport(WhisperKit)
-  /// Downloads through FluidAudio's `ModelHub` and WhisperKit's Hub client.
-  /// FluidAudio downloads are serialised because the German fine-tune is
-  /// fetched through the process-wide `ModelRegistry.repoOverrides`
-  /// redirection, which must not be visible to a concurrent v3 download.
-  public struct LiveModelDownloader: ModelDownloading {
+  import FluidAudio
+  import WhisperKit
+
+  /// Downloads through FluidAudio's `ModelHub` and WhisperKit's Hub client,
+  /// one at a time. FluidAudio downloads only its own `Repo` cases, so the
+  /// German fine-tune (v3 layout, another repository) is fetched by
+  /// redirecting the v3 repository through the process-wide
+  /// `ModelRegistry.repoOverrides` for the duration of that one download.
+  /// Running the downloads strictly in sequence is what keeps a concurrent
+  /// v3 download from seeing the redirect; the actor alone would not, since
+  /// it is re-entrant across the awaited download.
+  public actor LiveModelDownloader: ModelDownloading {
+    private var last: Task<Void, Never>?
+
     public init() {}
 
     public func download(
       _ asset: ModelAsset, into directory: URL,
       progress: @escaping @Sendable (Double, String) -> Void
     ) async throws {
+      let previous = last
+      let job = Task {
+        await previous?.value
+        try await Self.perform(asset, into: directory, progress: progress)
+      }
+      last = Task { _ = try? await job.value }
+      try await job.value
+    }
+
+    /// `ModelHub` writes `<parent>/<repo folder>` and derives the folder from
+    /// the repository name, which is how `ModelAsset.relativePath` is built.
+    /// WhisperKit appends `models/<repo>/<variant>` to `downloadBase`, so the
+    /// asset directory's last component is the variant; the tokenizer is
+    /// fetched right after the weights so an installed asset works offline.
+    private static func perform(
+      _ asset: ModelAsset, into directory: URL,
+      progress: @escaping @Sendable (Double, String) -> Void
+    ) async throws {
+      let handler: ProgressHandler = {
+        progress($0.fractionCompleted, String(describing: $0.phase))
+      }
       switch asset {
-      case .parakeetV3, .parakeetUltra, .parakeetDE, .offlineDiarizer:
-        try await FluidAudioDownloads.shared.download(asset, into: directory, progress: progress)
+      case .parakeetV3:
+        try await AsrModels.download(
+          to: directory, version: .v3, encoderPrecision: .int8, progressHandler: handler)
+      case .parakeetUltra:
+        try await AsrModels.download(
+          to: directory, version: .ultra, encoderPrecision: .int8, progressHandler: handler)
+      case .parakeetDE:
+        let previous = ModelRegistry.repoOverrides
+        ModelRegistry.repoOverrides[Repo.parakeetV3.rawValue] = asset.sourceRepo
+        defer { ModelRegistry.repoOverrides = previous }
+        try await AsrModels.download(
+          to: directory, version: .v3, encoderPrecision: .int8, progressHandler: handler)
+      case .offlineDiarizer:
+        try await ModelHub.download(
+          .diarizer, to: directory.deletingLastPathComponent(), variant: "offline",
+          progressHandler: handler)
       case .whisperLargeV3Turbo:
-        try await WhisperKitDownloads.download(asset, into: directory, progress: progress)
+        let variant = directory.lastPathComponent
+        let downloadBase = WhisperKitEngine.downloadBase(for: directory)
+        _ = try await WhisperKit.download(
+          variant: variant, downloadBase: downloadBase, from: asset.sourceRepo,
+          progressCallback: { progress($0.fractionCompleted * 0.95, "downloading \(variant)") })
+        progress(0.95, "downloading tokenizer")
+        _ = try await ModelUtilities.loadTokenizer(for: .largev3, tokenizerFolder: downloadBase)
+        progress(1, "installed")
       }
     }
   }

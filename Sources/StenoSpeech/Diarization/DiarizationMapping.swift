@@ -36,27 +36,22 @@ enum DiarizationMapping {
       let ownChunks = chunks.filter { $0.speakerLabel == label }
       var ranges = merged(ownTurns.map { $0.start...max($0.start, $0.end) })
       if ranges.isEmpty { ranges = merged(ownChunks.map(\.range)) }
-      let choice = SampleClipPicker.pick(
-        ranges: ranges, chunks: ownChunks, targetSeconds: targetSeconds,
-        minimumSeconds: minimumSeconds)
-      var confidence = choice.clusterConfidence
-      if ownChunks.isEmpty {
-        // No chunk quality to average: fall back to the turns' own scores.
-        let total = ownTurns.reduce(0.0) { $0 + $1.duration }
-        if total > 0 {
-          confidence = Float(ownTurns.reduce(0.0) { $0 + Double($1.quality) * $1.duration } / total)
-          if let longest = ranges.max(by: { length($0) < length($1) }),
-            length(longest) < minimumSeconds
-          {
-            confidence /= 2
-          }
+      // Without chunks the turns carry the quality (and no embedding).
+      let scored =
+        ownChunks.isEmpty
+        ? ownTurns.map {
+          ClusterChunk(
+            speakerLabel: label, start: $0.start, end: $0.end, embedding: [], quality: $0.quality)
         }
-      }
+        : ownChunks
+      let choice = SampleClipPicker.pick(
+        ranges: ranges, chunks: scored, targetSeconds: targetSeconds,
+        minimumSeconds: minimumSeconds)
       return SpeakerCluster(
         label: "Speaker \(index + 1)",
         ranges: ranges,
         embedding: ClusterEmbedding.embedding(of: ownChunks),
-        clusterConfidence: max(0, min(1, confidence)),
+        clusterConfidence: choice.clusterConfidence,
         sampleClipRange: choice.range)
     }
     return CoreDiarizationResult(clusters: clusters)
@@ -75,31 +70,21 @@ enum DiarizationMapping {
     return result
   }
 
-  static func length(_ range: ClosedRange<TimeInterval>) -> TimeInterval {
-    range.upperBound - range.lowerBound
-  }
-
   /// Chunk quality is not reported per chunk by the framework: each chunk
   /// takes the quality of the turn it overlaps most, 1 when none overlaps.
-  static func chunks(
-    _ windows: [(label: String, start: TimeInterval, end: TimeInterval, embedding: [Float])],
-    turns: [SpeakerTurn]
-  ) -> [ClusterChunk] {
-    windows.map { window in
-      let own = turns.filter { $0.speakerLabel == window.label }
-      let best = own.max { lhs, rhs in
-        overlap(lhs, window.start, window.end) < overlap(rhs, window.start, window.end)
-      }
-      let quality = best.flatMap { overlap($0, window.start, window.end) > 0 ? $0.quality : nil }
-      return ClusterChunk(
-        speakerLabel: window.label, start: window.start, end: window.end,
-        embedding: window.embedding, quality: quality ?? 1)
+  static func assigningQuality(to chunks: [ClusterChunk], from turns: [SpeakerTurn])
+    -> [ClusterChunk]
+  {
+    chunks.map { chunk in
+      var chunk = chunk
+      let best = turns.filter { $0.speakerLabel == chunk.speakerLabel }
+        .max { overlap($0, chunk) < overlap($1, chunk) }
+      chunk.quality = best.map { overlap($0, chunk) > 0 ? $0.quality : 1 } ?? 1
+      return chunk
     }
   }
 
-  private static func overlap(_ turn: SpeakerTurn, _ start: TimeInterval, _ end: TimeInterval)
-    -> TimeInterval
-  {
-    max(0, min(turn.end, end) - max(turn.start, start))
+  private static func overlap(_ turn: SpeakerTurn, _ chunk: ClusterChunk) -> TimeInterval {
+    max(0, min(turn.end, chunk.end) - max(turn.start, chunk.start))
   }
 }

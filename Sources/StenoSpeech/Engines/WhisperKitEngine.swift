@@ -33,20 +33,17 @@
   /// the model considers silence (`noSpeechProb` above the threshold) are
   /// dropped.
   public actor WhisperKitEngine: SpeechEngine {
-    public static let defaultVariant = "openai_whisper-large-v3-v20240930_turbo"
     public static let noSpeechThreshold: Float = 0.6
 
     public nonisolated let id = SpeechEngineID.whisperKitLargeV3Turbo.rawValue
     public nonisolated let supportedLanguages = SpeechEngineID.whisperKitLargeV3Turbo
       .supportedLanguages
 
-    private let variant: String
     private let models: ModelStore
     private var whisper: WhisperKitBox?
     private let tagger = LanguageTagger()
 
-    public init(variant: String = WhisperKitEngine.defaultVariant, models: ModelStore) {
-      self.variant = variant
+    public init(models: ModelStore) {
       self.models = models
     }
 
@@ -60,12 +57,15 @@
         .deletingLastPathComponent()  // models
     }
 
+    /// The asset directory's last component is the WhisperKit variant name
+    /// (`ModelAsset.relativePath`); `download: false` keeps the framework off
+    /// the network.
     public func prepare() async throws {
       guard whisper == nil else { return }
       try await models.ensureInstalled(.whisperLargeV3Turbo)
       let directory = models.directory(for: .whisperLargeV3Turbo)
       let config = WhisperKitConfig(
-        model: variant,
+        model: directory.lastPathComponent,
         downloadBase: Self.downloadBase(for: directory),
         modelFolder: directory.path,
         computeOptions: ModelComputeOptions(
@@ -91,9 +91,8 @@
         skipSpecialTokens: true, wordTimestamps: true, chunkingStrategy: .vad)
       options.noSpeechThreshold = Self.noSpeechThreshold
       let results = try await whisper.transcribe(audio.samples, options: options)
-      let segments = Self.segments(
-        from: results, language: pinned.map { LanguageTag(rawValue: $0) })
-      return tagger.tag(segments, hint: pinned.map { LanguageTag(rawValue: $0) })
+      return tagger.tag(
+        Self.segments(from: results), hint: pinned.map { LanguageTag(rawValue: $0) })
     }
 
     /// Whisper's two-letter code for the hint, or the detected majority.
@@ -117,12 +116,12 @@
         return nil
       }
       let tag = LanguageTag(rawValue: String(code))
-      return WhisperLanguages.all.contains(tag) ? tag.rawValue : nil
+      return SpeechEngineID.whisperKitLargeV3Turbo.supportedLanguageTags.contains(tag)
+        ? tag.rawValue : nil
     }
 
-    static func segments(from results: [TranscriptionResult], language: LanguageTag?)
-      -> [RawSegment]
-    {
+    /// Untagged segments; `LanguageTagger` fills the language afterwards.
+    static func segments(from results: [TranscriptionResult]) -> [RawSegment] {
       var segments: [RawSegment] = []
       for result in results {
         for segment in result.segments {
@@ -139,7 +138,7 @@
             RawSegment(
               start: TimeInterval(segment.start),
               end: TimeInterval(max(segment.start, segment.end)),
-              text: text, language: language, wordTimings: words?.isEmpty == false ? words : nil))
+              text: text, wordTimings: words?.isEmpty == false ? words : nil))
         }
       }
       return segments.sorted { $0.start < $1.start }

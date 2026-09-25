@@ -26,17 +26,20 @@ struct SpeakerTurn: Sendable, Equatable {
   var duration: TimeInterval { max(0, end - start) }
 }
 
-/// The cluster embedding a `Speaker` row stores: chunk vectors averaged
-/// with their duration as weight, then L2-normalised. Not the VBx centroid,
-/// which is an un-normalised mean and would bias cosine against stored
-/// people by cluster purity.
+/// The cluster embedding a `Speaker` row stores: chunk vectors summed with
+/// their duration as weight, then L2-normalised (normalising removes the
+/// scale, so dividing by the total weight first would change nothing). Not
+/// the VBx centroid, which is an un-normalised mean and would bias cosine
+/// against stored people by cluster purity.
 enum ClusterEmbedding {
   static func embedding(of chunks: [ClusterChunk]) -> Embedding? {
-    let usable = chunks.filter { $0.embedding.count == Embedding.dimension && $0.duration > 0 }
-    guard !usable.isEmpty else { return nil }
-    let mean = Embeddings.weightedMean(
-      usable.map(\.embedding), weights: usable.map { Float($0.duration) })
-    guard mean.count == Embedding.dimension else { return nil }
-    return Embedding(mean)
+    var sum = [Float](repeating: 0, count: Embedding.dimension)
+    var usable = false
+    for chunk in chunks where chunk.embedding.count == Embedding.dimension && chunk.duration > 0 {
+      let weight = Float(chunk.duration)
+      for index in sum.indices { sum[index] += chunk.embedding[index] * weight }
+      usable = true
+    }
+    return usable ? Embedding(sum).normalized() : nil
   }
 }

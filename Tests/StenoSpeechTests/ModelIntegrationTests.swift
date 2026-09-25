@@ -42,7 +42,7 @@ import Testing
   }
 
   static func report(_ label: String, audio: AudioBuffer16k, elapsed: Duration) {
-    let seconds = BakeoffRunner.seconds(elapsed)
+    let seconds = elapsed / .seconds(1)
     print(
       "[model-tests] \(label): \(String(format: "%.2f", audio.duration)) s audio in "
         + "\(String(format: "%.2f", seconds)) s, RTF \(String(format: "%.1f", audio.duration / max(seconds, 1e-9)))"
@@ -107,7 +107,7 @@ import Testing
       if result.clusters.count == 2, let a = result.clusters[0].embedding,
         let b = result.clusters[1].embedding
       {
-        let similarity = Embeddings.cosine(a.values, b.values)
+        let similarity = a.cosineSimilarity(to: b)
         print("[model-tests] cross-speaker cosine: \(similarity)")
         #expect(similarity < 0.6, "two `say` voices should not match at the default threshold")
       }
@@ -126,10 +126,8 @@ import Testing
         let result = try await diarizer.diarize(try Self.fixture(name))
         embeddings[name] = try #require(result.clusters.first?.embedding, "\(name)")
       }
-      let same = Embeddings.cosine(
-        embeddings["de-short.wav"]!.values, embeddings["de-short-2.wav"]!.values)
-      let different = Embeddings.cosine(
-        embeddings["de-short.wav"]!.values, embeddings["en-short.wav"]!.values)
+      let same = embeddings["de-short.wav"]!.cosineSimilarity(to: embeddings["de-short-2.wav"]!)
+      let different = embeddings["de-short.wav"]!.cosineSimilarity(to: embeddings["en-short.wav"]!)
       print("[model-tests] same voice \(same), different voices \(different)")
       #expect(same > 0.6)
       #expect(different < 0.5)
@@ -166,10 +164,5 @@ import Testing
         reference: try Self.reference("denglish.wav"), hypothesis: text)
       #expect(wer < 0.5, "\(text)")
     }
-  #else
-    @Test(
-      .enabled(
-        if: false, "STENO_MODEL_TESTS need FluidAudio and WhisperKit, which only build on macOS"))
-    func modelTestsNeedTheFrameworks() {}
   #endif
 }

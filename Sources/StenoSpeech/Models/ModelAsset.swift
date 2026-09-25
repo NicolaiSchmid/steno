@@ -51,20 +51,13 @@ public enum ModelAsset: String, Sendable, CaseIterable, Codable, Hashable {
     }
   }
 
-  /// The WhisperKit variant directory name; nil for every other asset.
-  public var whisperVariant: String? {
-    switch self {
-    case .whisperLargeV3Turbo: "openai_whisper-large-v3-v20240930_turbo"
-    default: nil
-    }
-  }
-
   /// Where the asset's files live, relative to the models root. FluidAudio
   /// derives the directory name from the repository (`<repo>` minus
   /// `-coreml`), so those names are fixed by the framework; the German
   /// fine-tune reuses the v3 name and gets its own parent so it can never
   /// shadow the official model. WhisperKit lays its Hugging Face cache out
-  /// under `downloadBase/models/<repo>/<variant>`.
+  /// under `downloadBase/models/<repo>/<variant>`, so the last component is
+  /// the variant name the engine and the downloader pass to the framework.
   public var relativePath: String {
     switch self {
     case .parakeetV3: "fluidaudio/parakeet-tdt-0.6b-v3"

@@ -12,18 +12,20 @@
     public nonisolated let id: String
     public nonisolated let supportedLanguages: Set<Locale.Language>
 
-    private let variant: ParakeetVariant
+    private let engine: SpeechEngineID
     private let models: ModelStore
     private var manager: AsrManager?
     private let aggregator = TokenAggregator()
     private let segmenter = TranscriptSegmenter()
     private let tagger = LanguageTagger()
 
-    public init(variant: ParakeetVariant, models: ModelStore) {
-      self.variant = variant
+    /// `id` is one of the three Parakeet engines. The German fine-tune has
+    /// the v3 layout and loads like v3 from its own asset directory.
+    public init(id engine: SpeechEngineID, models: ModelStore) {
+      self.engine = engine
       self.models = models
-      id = variant.id
-      supportedLanguages = Set(variant.supportedLanguageTags.map(\.language))
+      id = engine.rawValue
+      supportedLanguages = engine.supportedLanguages
     }
 
     /// Downloads the asset when needed, then compiles and loads the models
@@ -31,18 +33,10 @@
     /// corrupt install fails here instead of re-downloading behind our back.
     public func prepare() async throws {
       guard manager == nil else { return }
-      let directory: URL
-      switch variant {
-      case .custom(let url, _):
-        directory = url
-      case .v3, .ultra:
-        let asset = variant.asset ?? .parakeetV3
-        try await models.ensureInstalled(asset)
-        directory = models.directory(for: asset)
-      }
-      let version: AsrModelVersion = variant == .ultra ? .ultra : .v3
+      try await models.ensureInstalled(engine.asset)
       let loaded = try AsrModels.loadLocal(
-        from: directory, version: version, encoderPrecision: .int8)
+        from: models.directory(for: engine.asset),
+        version: engine == .parakeetUltra ? .ultra : .v3, encoderPrecision: .int8)
       let manager = AsrManager(config: .default)
       try await manager.loadModels(loaded)
       self.manager = manager
@@ -58,7 +52,7 @@
       var state = try TdtDecoderState(decoderLayers: layers)
       let result = try await manager.transcribe(audio.samples, decoderState: &state, language: nil)
       let tokens = (result.tokenTimings ?? []).map {
-        TimedToken(text: $0.token, start: $0.startTime, end: $0.endTime, confidence: $0.confidence)
+        TimedWord(text: $0.token, start: $0.startTime, end: $0.endTime, confidence: $0.confidence)
       }
       var segments = segmenter.segments(fromWords: aggregator.words(from: tokens))
       let text = result.text.trimmingCharacters(in: .whitespacesAndNewlines)

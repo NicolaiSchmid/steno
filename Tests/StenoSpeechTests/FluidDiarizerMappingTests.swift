@@ -114,12 +114,9 @@ private func chunk(
 
   @Test func chunkQualityComesFromTheOverlappingTurn() {
     let turns = [turn("S1", 0, 5, quality: 0.3), turn("S1", 5, 10, quality: 0.7)]
-    let chunks = DiarizationMapping.chunks(
-      [
-        (label: "S1", start: 0, end: 4, embedding: vector(0)),
-        (label: "S1", start: 4, end: 9, embedding: vector(0)),
-        (label: "S1", start: 20, end: 21, embedding: vector(0)),
-      ], turns: turns)
+    let chunks = DiarizationMapping.assigningQuality(
+      to: [chunk("S1", 0, 4, axis: 0), chunk("S1", 4, 9, axis: 0), chunk("S1", 20, 21, axis: 0)],
+      from: turns)
     #expect(chunks.map(\.quality) == [0.3, 0.7, 1])
   }
 

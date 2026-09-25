@@ -3,9 +3,7 @@ import Foundation
 import StenoCore
 import StenoSpeech
 
-extension SpeechEngineID: ExpressibleByArgument {
-  public static var allValueStrings: [String] { allCases.map(\.rawValue) }
-}
+extension SpeechEngineID: ExpressibleByArgument {}
 
 /// `steno dev bakeoff <audio-dir> [--engines] [--reference-dir] [--out]`:
 /// runs the requested engines over a folder of recordings and writes

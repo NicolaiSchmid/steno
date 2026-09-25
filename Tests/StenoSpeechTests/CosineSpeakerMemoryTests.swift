@@ -4,34 +4,6 @@ import Testing
 
 @testable import StenoSpeech
 
-@Suite struct EmbeddingsTests {
-  @Test func normalisedHasUnitLength() {
-    let unit = Embeddings.normalised([3, 4])
-    #expect(unit == [0.6, 0.8])
-    #expect(abs(Embeddings.norm(unit) - 1) < 1e-6)
-    #expect(Embeddings.normalised([0, 0]) == [0, 0])
-    #expect(Embeddings.normalised([]) == [])
-  }
-
-  @Test func cosineOfKnownVectors() {
-    #expect(abs(Embeddings.cosine([1, 0], [1, 0]) - 1) < 1e-6)
-    #expect(abs(Embeddings.cosine([1, 0], [0, 1])) < 1e-6)
-    #expect(abs(Embeddings.cosine([1, 0], [-1, 0]) + 1) < 1e-6)
-    #expect(
-      abs(Embeddings.cosine([2, 0], [1, 1]) - 0.70710677) < 1e-5, "not unit length still works")
-    #expect(Embeddings.cosine([1, 0], [1]) == 0)
-    #expect(Embeddings.cosine([0, 0], [1, 0]) == 0)
-  }
-
-  @Test func weightedMeanIsNormalised() {
-    let mean = Embeddings.weightedMean([[1, 0], [0, 1]], weights: [3, 1])
-    #expect(abs(mean[0] - 0.9486833) < 1e-5)
-    #expect(abs(mean[1] - 0.31622776) < 1e-5)
-    #expect(Embeddings.weightedMean([], weights: []) == [])
-    #expect(Embeddings.weightedMean([[1, 0]], weights: [0]) == [])
-  }
-}
-
 @Suite struct CosineSpeakerMemoryTests {
   private func embedding(_ axis: Int, _ mix: Float = 0, mixAxis: Int = 2) -> Embedding {
     var values = [Float](repeating: 0, count: Embedding.dimension)
@@ -88,7 +60,7 @@ import Testing
     #expect(stored.sampleCount == 2)
     let values = try #require(stored.embedding?.values)
     #expect(abs(values[0] - values[1]) < 1e-6, "one old sample and one new: equal weight")
-    #expect(abs(Embeddings.norm(values) - 1) < 1e-5)
+    #expect(abs(Embedding(values).magnitude - 1) < 1e-5)
 
     for _ in 0..<5 { try await memory.enroll(embedding(1), as: anna) }
     stored = try #require(try await store.person(id: anna.id))

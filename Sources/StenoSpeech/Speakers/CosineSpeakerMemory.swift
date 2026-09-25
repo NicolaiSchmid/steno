@@ -17,11 +17,13 @@ public actor CosineSpeakerMemory: SpeakerMemory {
   /// Best first; ties broken by person id so the order is stable.
   public func candidates(for embedding: Embedding, limit: Int) async throws -> [SpeakerMatch] {
     guard limit > 0 else { return [] }
-    let probe = Embeddings.normalised(embedding.values)
+    let probe = embedding.normalized()
     return try await store.persons()
       .compactMap { person -> SpeakerMatch? in
-        guard let known = person.embedding, known.values.count == probe.count else { return nil }
-        return SpeakerMatch(person: person, similarity: Embeddings.cosine(known.values, probe))
+        guard let known = person.embedding, known.values.count == probe.values.count else {
+          return nil
+        }
+        return SpeakerMatch(person: person, similarity: known.cosineSimilarity(to: probe))
       }
       .sorted { lhs, rhs in
         if lhs.similarity != rhs.similarity { return lhs.similarity > rhs.similarity }

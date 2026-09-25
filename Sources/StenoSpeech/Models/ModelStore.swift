@@ -68,7 +68,7 @@ public actor ModelStore {
     if let job = inFlight[asset] {
       return job.subscribe()
     }
-    let job = DownloadJob(asset: asset)
+    let job = DownloadJob()
     inFlight[asset] = job
     let stream = job.subscribe()
     let target = directory(for: asset)
@@ -142,13 +142,7 @@ final class DownloadJob: Sendable {
     var outcome: Result<Void, any Error>?
   }
 
-  let asset: ModelAsset
-  private let state: Mutex<State>
-
-  init(asset: ModelAsset) {
-    self.asset = asset
-    state = Mutex(State())
-  }
+  private let state = Mutex(State())
 
   func subscribe() -> AsyncThrowingStream<ModelDownloadProgress, any Error> {
     AsyncThrowingStream { continuation in

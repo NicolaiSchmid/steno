@@ -58,7 +58,7 @@ import Testing
 
   @Test func downloadFailureSurfacesAndLeavesNothingInstalled() async throws {
     struct Boom: Error, Equatable {}
-    let downloader = FakeModelDownloader(failure: Boom(), failureCount: 1)
+    let downloader = FakeModelDownloader(failure: Boom())
     let (store, directory) = try makeStore(downloader)
     defer { try? FileManager.default.removeItem(at: directory) }
 
@@ -105,9 +105,10 @@ import Testing
       #expect(!asset.relativePath.hasPrefix("/"), "\(asset)")
     }
     #expect(Set(ModelAsset.allCases.map(\.relativePath)).count == ModelAsset.allCases.count)
+    // WhisperKit is told the variant by the asset directory's name.
     #expect(
-      ModelAsset.whisperLargeV3Turbo.whisperVariant == "openai_whisper-large-v3-v20240930_turbo")
-    #expect(ModelAsset.parakeetV3.whisperVariant == nil)
+      ModelStore(downloader: FakeModelDownloader()).directory(for: .whisperLargeV3Turbo)
+        .lastPathComponent == "openai_whisper-large-v3-v20240930_turbo")
   }
 
   private func collect(_ stream: AsyncThrowingStream<ModelDownloadProgress, any Error>)

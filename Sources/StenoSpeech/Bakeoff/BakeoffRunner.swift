@@ -67,7 +67,7 @@ public struct BakeoffRunner: Sendable {
         let hypothesis = segments.map(\.text).joined(separator: " ")
         var row = BakeoffRow(
           file: file.lastPathComponent, engine: engineID, audioSeconds: audio.duration,
-          wallSeconds: Self.seconds(elapsed), segmentCount: segments.count,
+          wallSeconds: elapsed / .seconds(1), segmentCount: segments.count,
           wer: reference.map { WordErrorRate.compute(reference: $0, hypothesis: hypothesis) },
           languageFlips: LanguageTagger.languageFlips(in: segments),
           dominantLanguage: tagger.dominantLanguage(of: segments)?.rawValue)
@@ -120,10 +120,5 @@ public struct BakeoffRunner: Sendable {
         segments: transcript, language: tagger.dominantLanguage(of: segments), participants: [],
         speakers: [], knownPeople: []))
     return output.segments.map(\.text).joined(separator: " ")
-  }
-
-  static func seconds(_ duration: Duration) -> Double {
-    let components = duration.components
-    return Double(components.seconds) + Double(components.attoseconds) / 1e18
   }
 }
