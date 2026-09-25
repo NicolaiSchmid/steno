@@ -5,6 +5,6 @@ import ArgumentParser
 struct Dev: AsyncParsableCommand {
   static let configuration = CommandConfiguration(
     abstract: "Developer tools.",
-    subcommands: [DevDB.self, DevFixtures.self, DevLLM.self]
+    subcommands: [DevDB.self, DevFixtures.self, DevLLM.self, DevHandover.self]
   )
 }
