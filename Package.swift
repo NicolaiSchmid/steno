@@ -22,6 +22,8 @@ let package = Package(
   dependencies: [
     .package(url: "https://github.com/groue/GRDB.swift.git", from: "7.11.1"),
     .package(url: "https://github.com/apple/swift-argument-parser.git", from: "1.8.2"),
+    // StenoAudio only.
+    .package(url: "https://github.com/sbooth/CSpeex.git", from: "1.2.1"),
     // StenoSpeech only. FluidAudio moves fast and has broken source
     // compatibility inside minor releases before, so it is pinned to one
     // minor; WhisperKit follows semantic versioning.
@@ -41,7 +43,10 @@ let package = Package(
       dependencies: [.product(name: "GRDB", package: "GRDB.swift")],
       resources: [.copy("Resources/Templates")]
     ),
-    .target(name: "StenoAudio", dependencies: ["StenoCore"]),
+    .target(
+      name: "StenoAudio",
+      dependencies: ["StenoCore", .product(name: "speex", package: "CSpeex")]
+    ),
     .target(
       name: "StenoSpeech",
       dependencies: [
@@ -69,6 +74,7 @@ let package = Package(
       name: "steno",
       dependencies: [
         "StenoCore",
+        "StenoAudio",
         "StenoSpeech",
         "StenoAdapters",
         "StenoLLM",
@@ -98,10 +104,12 @@ let package = Package(
       // verbatim; it imports CryptoKit and Security, which Linux lacks.
       exclude: linuxOnlyExclusions(["Support/PinnedTrustEvaluator.swift"])
     ),
-    .testTarget(name: "stenoTests", dependencies: ["StenoCore", "StenoLLM"]),
+    .testTarget(name: "stenoTests", dependencies: ["StenoCore", "StenoAudio", "StenoLLM"]),
     .testTarget(
       name: "StenoEndToEndTests",
-      dependencies: ["StenoCore", "StenoSpeech", "StenoAdapters", "StenoLLM", "StenoHandover"],
+      dependencies: [
+        "StenoCore", "StenoAudio", "StenoSpeech", "StenoAdapters", "StenoLLM", "StenoHandover",
+      ],
       // The pinned handover client compiles the phone's evaluator (symlink);
       // it needs CryptoKit and Security, absent on Linux.
       exclude: linuxOnlyExclusions(["Support/PinnedTrustEvaluator.swift"])

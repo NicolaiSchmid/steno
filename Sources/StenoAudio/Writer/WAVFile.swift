@@ -1,0 +1,126 @@
+import Foundation
+import StenoCore
+
+/// Reads a PCM RIFF/WAVE file (16-bit integer or 32-bit float, any rate, any
+/// channel count) into de-interleaved channels: what `AudioFixtures.writeWAV`
+/// and common recorders produce, for `steno dev aec-bench` on 48 kHz
+/// material. Core's `WAVAudioDecoder` stays the strict 16 kHz mono reader
+/// the pipeline uses.
+struct WAVFile: Sendable, Equatable {
+  var sampleRate: Double
+  var channels: [[Float]]
+
+  var frameCount: Int { channels.first?.count ?? 0 }
+  var duration: TimeInterval { Double(frameCount) / sampleRate }
+
+  static func read(_ url: URL) throws -> WAVFile {
+    try read(Data(contentsOf: url))
+  }
+
+  static func read(_ data: Data) throws -> WAVFile {
+    guard data.count >= 12, tag(data, 0) == "RIFF", tag(data, 8) == "WAVE" else {
+      throw WAVDecodeError.malformed("missing RIFF/WAVE tags")
+    }
+    var offset = 12
+    var format: (tag: UInt16, channels: Int, rate: Int, bits: Int)?
+    var samples: Range<Int>?
+    while offset + 8 <= data.count {
+      let id = tag(data, offset)
+      let size = Int(uint32(data, offset + 4))
+      let body = offset + 8
+      guard body + size <= data.count else {
+        throw WAVDecodeError.malformed("chunk \(id) runs past the end of the file")
+      }
+      switch id {
+      case "fmt ":
+        guard size >= 16 else { throw WAVDecodeError.malformed("fmt chunk too short") }
+        var formatTag = uint16(data, body)
+        if formatTag == 0xFFFE, size >= 26 { formatTag = uint16(data, body + 24) }
+        format = (
+          formatTag, Int(uint16(data, body + 2)), Int(uint32(data, body + 4)),
+          Int(uint16(data, body + 14))
+        )
+      case "data":
+        samples = body..<(body + size)
+      default:
+        break
+      }
+      offset = body + size + (size % 2)
+    }
+    guard let format else { throw WAVDecodeError.malformed("no fmt chunk") }
+    guard let samples else { throw WAVDecodeError.malformed("no data chunk") }
+    let isFloat: Bool
+    switch (format.tag, format.bits) {
+    case (1, 16): isFloat = false
+    case (3, 32): isFloat = true
+    default:
+      throw WAVDecodeError.unsupportedFormat(
+        "format tag \(format.tag) at \(format.bits) bits; need 16-bit integer or 32-bit float")
+    }
+    let channelCount = max(1, format.channels)
+    let bytesPerSample = format.bits / 8
+    let bytesPerFrame = bytesPerSample * channelCount
+    let frames = samples.count / bytesPerFrame
+    var channels = [[Float]](repeating: [Float](repeating: 0, count: frames), count: channelCount)
+    data.withUnsafeBytes { raw in
+      for frame in 0..<frames {
+        for channel in 0..<channelCount {
+          let at = samples.lowerBound + frame * bytesPerFrame + channel * bytesPerSample
+          if isFloat {
+            let bits = raw.loadUnaligned(fromByteOffset: at, as: UInt32.self)
+            channels[channel][frame] = Float(bitPattern: UInt32(littleEndian: bits))
+          } else {
+            let bits = raw.loadUnaligned(fromByteOffset: at, as: UInt16.self)
+            channels[channel][frame] = Float(Int16(bitPattern: UInt16(littleEndian: bits))) / 32768
+          }
+        }
+      }
+    }
+    return WAVFile(sampleRate: Double(format.rate), channels: channels)
+  }
+
+  private static func tag(_ data: Data, _ offset: Int) -> String {
+    String(
+      decoding: data.subdata(in: (data.startIndex + offset)..<(data.startIndex + offset + 4)),
+      as: UTF8.self)
+  }
+
+  private static func uint16(_ data: Data, _ offset: Int) -> UInt16 {
+    UInt16(data[data.startIndex + offset]) | UInt16(data[data.startIndex + offset + 1]) << 8
+  }
+
+  private static func uint32(_ data: Data, _ offset: Int) -> UInt32 {
+    UInt32(uint16(data, offset)) | UInt32(uint16(data, offset + 2)) << 16
+  }
+}
+
+/// Reads a 48 kHz lane from a CAF or WAV file for the bench tools:
+/// `path` or `path:channel`.
+public enum LaneFileReader {
+  public static func read(_ argument: String) throws -> (samples: [Float], sampleRate: Double) {
+    var path = argument
+    var channel = 0
+    if let colon = argument.lastIndex(of: ":"),
+      let index = Int(argument[argument.index(after: colon)...])
+    {
+      path = String(argument[..<colon])
+      channel = index
+    }
+    let url = URL(fileURLWithPath: path)
+    let channels: [[Float]]
+    let rate: Double
+    if url.pathExtension.lowercased() == "caf" {
+      let file = try CAFFile.read(url)
+      channels = file.channels
+      rate = file.sampleRate
+    } else {
+      let file = try WAVFile.read(url)
+      channels = file.channels
+      rate = file.sampleRate
+    }
+    guard channel < channels.count else {
+      throw CodecError.channelMissing(lane: .mixed, channel: channel, channels: channels.count)
+    }
+    return (channels[channel], rate)
+  }
+}

@@ -119,8 +119,8 @@ public final class SpeexEchoCanceller: EchoCanceller, @unchecked Sendable {
 }
 public final class PassthroughEchoCanceller: EchoCanceller { }       // tests and .inPerson
 
-public final class RecordingWriter: @unchecked Sendable {            // owned by the writer queue
-    public init(directory: URL, lanes: [AudioLane], sampleRate: Double) throws
+public final class RecordingWriter: @unchecked Sendable {            // owned by the writer thread
+    public init(layout: RecordingLayout, lanes: [AudioLane], keepRawMic: Bool = false) throws
     public func write(_ frames: LaneFrames) throws                    // 48 kHz Float32, one call per 10 ms
     public func finish() throws -> RecordingFiles                     // master + sidecars
 }
@@ -129,8 +129,8 @@ public struct RecordingFiles: Sendable, Equatable { public var master: URL; publ
 // Testing/: SyntheticCaptureBackend(lanes:, tone: [AudioLane: Double] Hz, seconds:, loseDeviceAfter: TimeInterval?), FakeProcessAudioActivity
 ```
 
-`LaneFrames` is a non-Sendable value with preallocated `UnsafeMutableBufferPointer<Float>` per lane
-and the host time of the first frame; `LaneFrameSink` is the ring writer handed to the backend.
+`LaneFrames` is a non-Sendable view over the writer thread's preallocated per-lane buffers;
+`LaneFrameSink` is the ring writer handed to the backend.
 `CaptureError` covers `tapCreationFailed(OSStatus)`, `aggregateCreationFailed(OSStatus)`,
 `inputDeviceUnavailable`, `systemAudioSilent`, `deviceLost`, `writerFailed(Error)`.
 
@@ -150,7 +150,6 @@ Sources/StenoAudio/
   Capture/SystemAudioPermission.swift           throwaway pipeline probe; TCC SPI behind STENO_TCC_SPI
   RealTime/LaneRingBuffer.swift                 SPSC ring, Synchronization.Atomic indices, drop counter
   RealTime/ProcessingThread.swift               drains rings in 10 ms frames: AEC, metering, downmix, hands off to writer
-  RealTime/LaneAligner.swift                    host-time alignment for the two-IOProc fallback
   RealTime/LevelMeter.swift                     RMS/peak per lane, dBFS
   RealTime/Resampler48kTo16k.swift              AVAudioConverter wrapper with preallocated buffers
   AEC/SpeexEchoCanceller.swift                  speex bridge, Float<->Int16 scratch, residual suppression
@@ -170,7 +169,7 @@ Sources/steno/Commands/
   DevAECBenchCommand.swift                      `steno dev aec-bench --mic --far --engine speex|passthrough`
   DevFixturesCommand+Audio.swift                adds the 48 kHz cases below to core's `steno dev fixtures generate` (seeded)
 Tests/StenoAudioTests/
-  LaneRingBufferTests.swift, LaneAlignerTests.swift, LevelMeterTests.swift, SpeexEchoCancellerTests.swift, LiveAECPathTests.swift,
+  LaneRingBufferTests.swift, LevelMeterTests.swift, SpeexEchoCancellerTests.swift, LiveAECPathTests.swift,
   RecordingWriterTests.swift, Resampler48kTo16kTests.swift, AVFoundationAudioCodecTests.swift, MeetingDetectorTests.swift,
   CaptureSessionTests.swift, TapIntegrationTests.swift
 Tests/Fixtures/audio/                           shared folder owned by core; these cases added here, hashes in MANIFEST.sha256
@@ -333,3 +332,162 @@ checks were run.
 - Per-application taps and an app picker; ScreenCaptureKit capture.
 - A mic-lane integration test on CI (needs a virtual input device; the `STENO_VIRTUAL_INPUT_UID`
   gate stays optional).
+- The two-IOProc fallback (a second IOProc for the microphone, lanes aligned by
+  `AudioTimeStamp.mHostTime`, a 20 ms alignment budget for the canceller), only if spike S2 is a
+  no-go on hardware. Nothing in the single-aggregate path needs host times.
+
+## Deviations (implementation)
+
+Recorded while building PR #4 on a Linux host with the hosted `macos-15` CI as the only Apple
+toolchain. Each line is one departure from the text above and why.
+
+- `LiveCaptureBackend` is a final class, not a struct: it holds the tap, aggregate, IOProc and
+  listener tokens between `start` and `stop`.
+- No 48 kHz fixtures are committed under `Tests/Fixtures/audio/` and there is no
+  `DevFixturesCommand+Audio.swift`: core's `FixtureManifestTests` asserts the manifest equals core's
+  generator output exactly and that every audio fixture is 16 kHz mono. The cases live in
+  `Sources/StenoAudio/Testing/AudioFixtures.swift` (tones, sweeps, a syllable-modulated speech-like
+  far-end, a seeded sparse room, the echoed mic), built deterministically in test setup and by
+  `steno dev aec-bench --synthetic`.
+- `RecordingWriter` writes CAF and WAV itself (`CAFStreamWriter`, `WAVStreamWriter`) instead of
+  through `ExtAudioFile`: the CAF data chunk carries size -1 while recording (the streaming form
+  Core Audio's own writers use), so a killed process leaves a readable master, and the writer plus
+  the SIGKILL test compile and run on Linux. `AVFoundationAudioCodecTests` confirm `AVAudioFile`
+  reads the result.
+- `Resampler48kTo16k` is a pure-Swift 192-tap Kaiser-windowed sinc 3:1 decimator, not an
+  `AVAudioConverter` wrapper: deterministic across machines, allocation-free after `init`, testable
+  off macOS (1 kHz within 0.1 dB, 9 kHz below -40 dB, 12 kHz below -60 dB).
+- The writer is a thread (`WriterThread`) fed by `FrameRelay` rings, not a dispatch queue:
+  `DispatchQueue.async` would allocate a block on the processing thread; a bounded ring plus a
+  semaphore does not. The relay depth is `CaptureSession.init(writerHeadroomFrames:)`, 200 frames
+  (2 s) by default; tests that feed audio faster than real time raise it.
+- Levels reach the `levels` stream through a `LevelSlot` of atomic bit patterns that the writer
+  thread republishes on generation change; the processing thread never yields to a continuation.
+- The in-person aggregate keeps the default output device as clock master (no tap) so the HAL
+  resamples the microphone to 48 kHz; an input-only aggregate would run at the mic's native rate
+  and break the 3:1 sidecar path for 44.1 kHz and Bluetooth inputs.
+- `AVFoundationAudioCodec.mixdown` encodes AAC through `AVAudioFile(forWriting:settings:)` rather
+  than `AVAssetWriter`; `decode` trims or zero-pads the converter output to the exact
+  `length × 16000 / rate` so a lane's duration stays integral to the master (segment counts in the
+  end-to-end test depend on it).
+- Two-IOProc fallback: not built. PR #4 first carried the `LaneAligner` arithmetic for it; with
+  spike S2 deferred that was dead code and the simplify pass removed it (see Deferred). The sink
+  and `LaneFrames` no longer carry host times.
+- `CaptureSession.stop()` after `.failed(.deviceLost)` returns the finalised partial recording
+  instead of throwing, so the app can enqueue what was captured.
+- `CaptureConfiguration.laneOverride` (developer tools only) lets `steno dev capture-spike --lanes
+  system` record the tap alone without a third `CaptureMode`.
+- `MeetingDetector.init` takes `debounce` and `pollInterval` (both 2 s by default) and `start()`
+  throws when the first snapshot fails; later failures are tolerated.
+- `steno record` gained `--meeting-id`, `--quiet`, `--no-aec`, `--keep-raw-mic` and
+  `--input-device`; the SIGKILL test needs the folder name up front.
+- ERLE fixture: the noise floor is -60 dBFS (0.001) and the room is sparse (48 seeded reflections,
+  gain 0.1, 100 ms), the far-end a low-passed (`tilt` 0.7) syllable-modulated noise normalised to
+  peak 0.7. With the plan's louder noise the measured ERLE caps below 20 dB regardless of the
+  canceller. Measured: 24.7 dB over 3–6 s (5, 16, 20, 23, 26, 27 dB per second); double talk keeps
+  the near-end sweep within 0.04 dB.
+- Speex tail stays 200 ms as decided; a 100 ms tail converged faster on the same fixture (32 dB at
+  3–4 s against 23 dB). Input for the S4 bake-off.
+- Names the plan marked "(unverified)" that now compile against the macOS 15 SDK on CI:
+  `kAudioProcessPropertyIsRunningInput`, `kAudioProcessPropertyIsRunningOutput`,
+  `kAudioTapPropertyFormat`, `kAudioAggregateDeviceTapListKey`, `kAudioAggregateDeviceTapAutoStartKey`,
+  `kAudioSubTapUIDKey`, `kAudioSubTapDriftCompensationKey`, `CATapDescription(stereoGlobalTapButExcludeProcesses:
+  [AudioObjectID])`. Still unverified at runtime (needs a Mac): setting
+  `kAudioDevicePropertyNominalSampleRate` on the aggregate, whether `DeviceIsRunningSomewhere`
+  listeners fire, the buffer order of sub-devices versus taps (both orders are handled by
+  `StreamLayout` and printed by `capture-spike`).
+- Two test seams added by the testing pass, both without behaviour change:
+  `ProcessingThread.drain()` is internal rather than private so
+  `RealTimeAllocationTests` can run the loop body on the test's own thread under libmalloc's
+  `malloc_logger` hook (the plan's "Instruments Allocations shows zero allocations" check, now
+  `[ci]` on macOS: producer calls, Speex, the far-end delay line, metering, the raw-mic copy and
+  the relay hand-off allocate nothing over 100 frames after a ten-frame warm-up); and the IOProc
+  block body is `IOProcRunner.deliver(_:sources:sink:)`, a static function the block calls, so
+  `IOProcRunnerTests` can hand it `AudioBufferList`s built by hand for both HAL orderings, a
+  buffer without data and a callback that does not fit. glibc has no malloc hook, so the
+  allocation guard does not exist on Linux.
+- The guard's first run caught one real allocation on the processing thread:
+  `LaneFrameSink.availableToRead` was `rings.map(\.availableToRead).min()`, an array (and, in a
+  debug build, per-element boxes: nine mallocs per frame) once per frame from
+  `ProcessingThread.drain()`. It lives in `Capture/CaptureBackend.swift`, so the reviewer grep of
+  `RealTime/` for `[`, `Array` and closures did not see it. Now a `while` loop, as is
+  `FrameRelay.availableFrames` (writer thread, same shape). Test loops on the guarded path use
+  `while` too: an unspecialised `for _ in 0..<n` allocates per iteration under `-Onone`.
+- `StreamLayout` cannot tell the two HAL orderings apart when the microphone and the tap have the
+  same channel shape (a stereo input next to the stereo tap: `[2, 2]` either way); it assumes
+  sub-devices first, `equalShapesAssumeSubDevicesFirst` pins that, and spike S2 on hardware is
+  what confirms or refutes it (`capture-spike` prints the resolution).
+- An unfinished sidecar (zero-size RIFF header with samples appended) is rejected as malformed by
+  `WAVAudioDecoder` and `WAVFile` rather than read as empty; `AVFoundationAudioCodec.decode`
+  absorbs that with `try?` and rebuilds the lane from the master, which
+  `anUnfinishedMasterWithEmptySidecarsDecodesFromTheMaster` checks through `AVAudioFile` on the
+  size -1 master.
+
+### Review application (PR #4, after the correctness and elegance reviews)
+
+Applied in three commits (`39b278f` correctness majors, `fc62cc5` correctness minors, `a581acc`
+elegance), each behaviour change with a test that failed before it. Departures from the text above:
+
+- `EchoCanceller` (core protocol) gains `func reset()` with an empty default; `CaptureSession.start()`
+  calls it so the shared `SpeexEchoCanceller` never carries one meeting's converged filter and
+  far-end history into the next (measured: 20.4 dB ERLE in the first 0.5 s on reuse against 3.9 dB
+  cold, so the carry-over was real).
+- The far-end delay is the sum of the microphone's input path and the loudspeaker's output path
+  (latency plus safety offset, read on the devices themselves), applied from one processing frame
+  up rather than from 100 ms. The 200 ms Speex tail is left for the room and for what the HAL
+  under-reports; over-delaying is the one thing the MDF filter cannot recover from, so nothing is
+  rounded up. Step 5's "above 100 ms" rule is superseded.
+- The aggregate's nominal sample rate is read back after it is set (ten reads 20 ms apart; the HAL
+  applies the change asynchronously) and `start()` throws `CaptureError.sampleRateMismatch(actual:)`
+  when it is not 48 kHz. A silent 44.1 kHz master labelled 48 kHz is no longer possible; the user
+  fixes the output device's rate or picks another output.
+- `SystemAudioPermission.request(timeout:)` waits for the TCC decision: the tap starts first (where
+  the prompt appears), `afplay` is restarted whenever its one-second tone has finished, the ring is
+  polled every 100 ms, and only the 30 s bound means denied. The loop is pure
+  (`waitForSignal`) and runs on `ManualClock` in tests. Step 11's fixed 500 ms window is superseded.
+- `CaptureBackend.start` returns a `CaptureStream` (confirmed rate, both latencies, the resolved
+  `StreamLayout`); `CaptureSession.stream` keeps it while recording. `LiveCaptureBackend` has no
+  post-start getters.
+- `stop()` returns `CaptureResult { asset, statistics }` and the state carries a cut-short recording:
+  `.failed(CaptureError, recording: CaptureResult?)`. `stop()` after `.failed` returns the same
+  recording or throws when the start produced nothing; a failed re-start can no longer hand out
+  the previous meeting's files. `CaptureStatistics.deviceChanges` is `endedOnDeviceLoss: Bool`.
+- A full disk while closing the files keeps the recording: `RecordingWriter.finish()` closes every
+  file before rethrowing, the session builds the asset from the URLs fixed at start, `stop()`
+  returns it and the state ends `.failed(.writerFailed, recording:)` instead of `stop()` throwing.
+  The master is written before the sidecars on every frame. `RecordingWriting` is the internal
+  seam the tests use to inject the failure.
+- `MeetingDetector` polls every second, so the worst case without a listener event is the plan's
+  3 s. Known v1 limit, documented on the type: after a same-snapshot hand-over of the microphone
+  between two processes, `holder` keeps naming the first one until it is released again.
+- `LiveProcessAudioActivity.ownProcessObject()` throws instead of returning object 0 (a tap that
+  "excludes" object 0 excludes nothing). `LiveCaptureBackend` stops itself in `deinit`, and watches
+  `kAudioHardwarePropertyDefaultOutputDevice` beside the system output device.
+- One `LaneRings` type owns the all-or-nothing reservation; `LaneFrameSink` and `FrameRelay` are
+  built on it. `IOProcRunner`, `LaneFrameSink` and `LaneRings` live in `RealTime/`, `WriterThread`
+  and `Resampler48kTo16k` in `Writer/`; the thread and hand-off map is the module doc in
+  `StenoAudio.swift`, so the reviewer grep of `RealTime/` now covers the whole real-time path.
+- Public surface reduced to what the app and CLI use (`LaneRingBuffer`, `LevelMeter`, `LevelSlot`,
+  the stream writers, `RecordingWriter`, `LaneFrames`, `RecordingFiles`, `Resampler48kTo16k`,
+  `WAVFile`, `AudioPropertyListenerToken` are internal; tests use `@testable import`).
+  `StreamLayout.LaneSource` is `{ left: ChannelRef, right: ChannelRef? }` without `-1` sentinels;
+  `CaptureError.coreAudio(operation:status:)` is the one `OSStatus` rendering; CAF and WAV header
+  arithmetic is named constants shared by writer, reader and tests; `LaneLevel.silentPeakLinear`
+  names the -80 dBFS threshold.
+- The sidecars lag the master by the resampler's group delay (95.5 input samples, 2.0 ms), by
+  design; documented on `RecordingWriter` so nobody corrects it by hand.
+
+Follow-ups recorded, not applied: an ERLE variant with residual suppression off for the S4
+bake-off (so cancellers are compared on the linear stage); the clock-master choice (system output
+device, as AudioCap) versus the default output device the tap mirrors; `LaneLevels` as a per-lane
+dictionary; `AudioDeviceInfo.id` as `AudioObjectID`; `CaptureMode` raw values for the CLI;
+`AVFoundationAudioCodec`'s public statics; test-file literal clean-ups.
+
+## Spike addendum
+
+- S1 (permission and silence), S2 (mic in the tap aggregate) and S3 (Continuity call audible): not
+  run. This workstream had no Mac; `SystemAudioPermission.request()`, `steno dev capture-spike`
+  and `steno dev audio-devices` are the instruments, and every `[manual]` check in the steps above
+  is open. The S3 outcome and the phone-story consequence stay to be recorded here by whoever runs
+  it.
+- S4 (AEC bake-off): not started; see the tail note above.
