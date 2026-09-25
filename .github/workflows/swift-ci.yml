@@ -269,17 +269,17 @@ jobs:
       # (`INTERNAL ERROR: childPID > 0`), while the hosted image passed
       # spike S1.
       - name: Build app
-        # shellcheck disable=SC2086
-        run: >-
-          apps/macos/scripts/xcodebuild-quiet.sh apps/macos/build/build.log 'BUILD SUCCEEDED' --
-          build -scheme Steno $XCODEBUILD_FLAGS
+        run: |
+          # shellcheck disable=SC2086
+          apps/macos/scripts/xcodebuild-quiet.sh apps/macos/build/build.log 'BUILD SUCCEEDED' -- \
+            build -scheme Steno $XCODEBUILD_FLAGS
 
       - name: Unit tests
-        # shellcheck disable=SC2086
-        run: >-
-          apps/macos/scripts/xcodebuild-quiet.sh apps/macos/build/unit.log 'TEST SUCCEEDED' --
-          test -scheme StenoTests $XCODEBUILD_FLAGS
-          -resultBundlePath apps/macos/build/unit.xcresult
+        run: |
+          # shellcheck disable=SC2086
+          apps/macos/scripts/xcodebuild-quiet.sh apps/macos/build/unit.log 'TEST SUCCEEDED' -- \
+            test -scheme StenoTests $XCODEBUILD_FLAGS \
+            -resultBundlePath apps/macos/build/unit.xcresult
 
       - name: Test summary
         if: always()
@@ -352,11 +352,11 @@ jobs:
           xcodebuild -resolvePackageDependencies -scheme Steno $XCODEBUILD_FLAGS
 
       - name: UI smoke test
-        # shellcheck disable=SC2086
-        run: >-
-          apps/macos/scripts/xcodebuild-quiet.sh apps/macos/build/ui.log 'TEST SUCCEEDED' --
-          test -scheme Steno -only-testing:StenoUITests $XCODEBUILD_FLAGS
-          -resultBundlePath apps/macos/build/ui.xcresult
+        run: |
+          # shellcheck disable=SC2086
+          apps/macos/scripts/xcodebuild-quiet.sh apps/macos/build/ui.log 'TEST SUCCEEDED' -- \
+            test -scheme Steno -only-testing:StenoUITests $XCODEBUILD_FLAGS \
+            -resultBundlePath apps/macos/build/ui.xcresult
 
       - name: Test summary
         if: always()
