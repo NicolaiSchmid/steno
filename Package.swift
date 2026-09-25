@@ -38,6 +38,7 @@ let package = Package(
       name: "steno",
       dependencies: [
         "StenoCore",
+        "StenoLLM",
         .product(name: "ArgumentParser", package: "swift-argument-parser"),
       ]
     ),
@@ -47,8 +48,8 @@ let package = Package(
     .testTarget(name: "StenoLLMTests", dependencies: ["StenoLLM"]),
     .testTarget(name: "StenoAdaptersTests", dependencies: ["StenoAdapters"]),
     .testTarget(name: "StenoHandoverTests", dependencies: ["StenoHandover"]),
-    .testTarget(name: "stenoTests", dependencies: ["StenoCore"]),
-    .testTarget(name: "StenoEndToEndTests", dependencies: ["StenoCore"]),
+    .testTarget(name: "stenoTests", dependencies: ["StenoCore", "StenoLLM"]),
+    .testTarget(name: "StenoEndToEndTests", dependencies: ["StenoCore", "StenoLLM"]),
   ],
   swiftLanguageModes: [.v6]
 )

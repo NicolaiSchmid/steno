@@ -1,11 +1,16 @@
 import Foundation
 import StenoCore
+import StenoLLM
 import Testing
 
 /// The one real-pipeline test across modules. Core creates it with fakes
 /// everywhere; each module workstream's last step replaces its own fake with
-/// the real type. No models, no network.
+/// the real type. No models, no network: the LLM passes run against
+/// `StubChatServer` on loopback, fed from `Tests/Fixtures/llm/responses/`.
 @Suite struct EndToEndTests {
+  static let cleanupUsage = LLMUsage(promptTokens: 300, completionTokens: 120, requests: 1)
+  static let summaryUsage = LLMUsage(promptTokens: 900, completionTokens: 250, requests: 1)
+
   @Test func macCallFixtureLandsInVault() async throws {
     let directory = try Fixtures.temporaryDirectory("e2e")
     defer { try? FileManager.default.removeItem(at: directory) }
@@ -19,8 +24,25 @@ import Testing
     for person in SampleData.persons() { try await store.save(person) }
 
     let events = MeetingEventBus()
-    let cleaner = PassthroughCleaner()
-    let summarizer = FakeSummarizer()
+    // StenoLLM's real cleaner and summarizer on the loopback stub: the
+    // cleanup answer echoes every segment capitalised, the summary answer
+    // is the canned analysis in `llm/responses/e2e-summary.json`.
+    let server = try StubChatServer()
+    defer { server.stop() }
+    let summaryBody = try String(
+      contentsOf: Fixtures.url("llm/responses/e2e-summary.json"), encoding: .utf8)
+    let echo = Scripts.cleanupEcho(usage: Self.cleanupUsage) { _, text in
+      text.prefix(1).uppercased() + text.dropFirst() + "."
+    }
+    server.respond { request in
+      request.purpose == "summary"
+        ? Scripts.completion(summaryBody, usage: Self.summaryUsage) : echo(request)
+    }
+    let endpoint = LLMEndpoint(baseURL: server.baseURL, model: "stub-model")
+    let client = OpenAICompatibleClient(endpoint: endpoint, apiKey: nil, retry: .none)
+    let cleaner = LLMTranscriptCleaner(model: client, endpoint: endpoint)
+    let summarizer = LLMMeetingSummarizer(
+      model: client, endpoint: endpoint, timeZone: TimeZone(identifier: "UTC")!)
     let vault = FakeDestination(
       root: directory.appendingPathComponent("vault", isDirectory: true))
     let dispatcher = FakeDeliveryDispatcher(store: store, destinations: [vault], now: { now })
@@ -65,7 +87,9 @@ import Testing
     let stored = try #require(try await store.meeting(id: meeting.id))
     #expect(stored.state == .ready)
     #expect(stored.title == "Produktstrategie", "a calendar title is kept")
-    #expect(stored.llmUsage == cleaner.usage + summarizer.usage)
+    #expect(server.requests.map(\.purpose) == ["cleanup", "summary"])
+    #expect(stored.llmUsage == Self.cleanupUsage + Self.summaryUsage)
+    #expect(stored.summary?.sections.map(\.id) == ["executive-summary", "full-summary"])
 
     let deliveries = try await store.deliveries(meetingID: meeting.id)
     #expect(deliveries.count == 1)
@@ -79,6 +103,13 @@ import Testing
     #expect(export.schemaVersion == MeetingExport.currentSchemaVersion)
     #expect(export.meeting.state == .ready)
     #expect(export.segments.count == 12)
+    #expect(
+      export.segments.allSatisfy {
+        $0.text == $0.rawText.prefix(1).uppercased() + $0.rawText.dropFirst() + "."
+      })
+    #expect(export.segments.allSatisfy { $0.rawText.hasPrefix("fake segment") })
+    #expect(export.tasks.map(\.text) == ["Budgetzahlen prüfen."])
+    #expect(export.decisions.map(\.text) == ["Der Kern wird priorisiert."])
     #expect(export.speakers.map(\.clusterLabel) == ["Me", "Speaker 1", "Speaker 2"])
     #expect(receipt.files.first?.sha256 == ContentHash.sha256(json))
     #expect(!SummaryMarkdown.render(export).isEmpty)

@@ -9,6 +9,11 @@ import Synchronization
 /// so a retry test never sleeps on wall time.
 final class ClientHarness: Sendable {
   static let apiKey = "sk-test-secret-0123456789"
+  /// Yields to spend waiting for the client to register a sleeper. The
+  /// default 10k can run out when the whole suite saturates the pool; the
+  /// sleeper always follows the event that triggers the wait, so a large
+  /// budget only costs time in the failure case.
+  static let sleeperAttempts = 5_000_000
 
   let server: StubChatServer
   let clock: ManualClock
@@ -64,7 +69,7 @@ final class ClientHarness: Sendable {
     Task { [clock, stream] in
       for await event in stream {
         if case .retrying(let delay, _, _) = event {
-          _ = await clock.waitForSleepers(1)
+          _ = await clock.waitForSleepers(1, attempts: ClientHarness.sleeperAttempts)
           clock.advance(by: delay)
         }
       }

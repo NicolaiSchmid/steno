@@ -32,7 +32,7 @@ import Testing
     #expect(
       retrying
         == .retrying(after: .seconds(7), attempt: 1, reason: .rateLimited(retryAfter: .seconds(7))))
-    #expect(await harness.clock.waitForSleepers(1))
+    #expect(await harness.clock.waitForSleepers(1, attempts: ClientHarness.sleeperAttempts))
     #expect(harness.server.requests.count == 1)
 
     harness.clock.advance(by: .seconds(6))
@@ -74,7 +74,9 @@ import Testing
     defer { driver.cancel() }
     let task = Task { try await harness.client.complete(ClientHarness.request()) }
     await harness.server.received(atLeast: 1)
-    #expect(await harness.clock.waitForSleepers(1), "the timeout sleeper is registered")
+    #expect(
+      await harness.clock.waitForSleepers(1, attempts: ClientHarness.sleeperAttempts),
+      "the timeout sleeper is registered")
     harness.clock.advance(by: .seconds(30))
     let response = try await task.value
     #expect(response.text == "late")

@@ -1,0 +1,33 @@
+{
+  "title": "Produktstrategie: Fokus und Budget",
+  "language": "de",
+  "sections": [
+    {
+      "id": "executive-summary",
+      "heading": "Executive Summary",
+      "bullets": [
+        { "lead": "Fokus", "text": "Me schlägt vor, den Kern zu priorisieren; Speaker 1 stimmt zu." },
+        { "lead": "Budget", "text": "Speaker 2 prüft die Zahlen bis Freitag." }
+      ]
+    },
+    {
+      "id": "full-summary",
+      "heading": "Vollständige Zusammenfassung",
+      "bullets": [
+        { "lead": "Segmente", "text": "Die zwölf Testsegmente wurden der Reihe nach besprochen." }
+      ]
+    },
+    {
+      "id": "open-questions",
+      "heading": "Offene Fragen",
+      "bullets": []
+    }
+  ],
+  "decisions": ["Der Kern wird priorisiert."],
+  "tasks": [
+    { "text": "Budgetzahlen prüfen.", "assignee": "Speaker 2", "priority": "normal", "dueDate": "2026-09-25" }
+  ],
+  "speakerNames": [
+    { "speakerLabel": "Speaker 1", "name": "Jérôme", "confidence": 0.6, "evidence": "Me: \"fake segment 1\"" }
+  ]
+}

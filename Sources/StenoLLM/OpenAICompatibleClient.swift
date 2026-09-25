@@ -21,7 +21,7 @@ public enum LLMClientEvent: Sendable, Equatable {
 /// and the API key redacted from every error. Text only ever leaves through
 /// here.
 public actor OpenAICompatibleClient: LanguageModel {
-  public let endpoint: LLMEndpoint
+  public nonisolated let endpoint: LLMEndpoint
   private let apiKey: String?
   private let session: URLSession
   private let retry: RetryPolicy

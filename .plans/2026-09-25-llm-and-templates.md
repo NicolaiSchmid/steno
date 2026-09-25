@@ -350,3 +350,55 @@ script removed; any `Codable` type gaining an `apiKey` property.
 - User product glossary for the cleanup pass; names come from participants and known people only.
 - Markdown template parser and catalog; templates are StenoCore JSON.
 - JSON repair heuristics (trailing commas, truncated tails) if a server family turns out to need them.
+
+## Deviations (implementation)
+
+Recorded while implementing this plan in PR #5 (`feat/llm-templates`), 2026-09-25.
+
+- `StubChatServer` uses POSIX sockets and one thread per connection instead of `NWListener`, so
+  the same server runs on the Linux container used for iteration and on macOS CI. Accepted sockets
+  opt out of SIGPIPE (`SO_NOSIGPIPE` / `MSG_NOSIGNAL`); Darwin otherwise kills the test process on
+  the first write to a peer that closed early, which is how the first macOS run died.
+- `OpenAICompatibleClient.init` takes an optional `observer: (LLMClientEvent) -> Void`. Tests on
+  `ManualClock` need to know when the backoff sleep begins (the per-attempt timeout is also a
+  sleeper on the same clock), and the CLI prints retries and mode changes with `--verbose`.
+- Every request carries an `X-Steno-Purpose` header with `LLMRequest.purpose`, so the stub server
+  (and any proxy) can tell `cleanup`, `cleanup-retry`, `summary`, `summary-map`, `summary-reduce`,
+  `*-repair` and `probe` apart. The wire format has no field for it.
+- `LLMError` gained `notConfigured(String)` for `LLMEndpoint(settings:)`. `rateLimited` is thrown
+  for 429; `Retry-After` in seconds is honoured and clamped to `maxDelay`, the HTTP-date form falls
+  back to the backoff. Retries are deterministic (no jitter).
+- The per-attempt timeout is raced on the injected clock; `URLRequest.timeoutInterval` is a
+  wall-clock backstop at twice the value. A `URLResponse` never crosses a task boundary (not
+  `Sendable` on Darwin).
+- `JSONSchema.promptText` is a compact typed shape (`"id": "a" | "b"`, `string | null`, trailing
+  comments), not JSON Schema, which is shorter and easier for small models; `jsonValue` is the
+  strict schema for `response_format`. The strict walker counts nesting for containers only, as
+  OpenAI's five-level limit does.
+- `CleanupPromptBuilder.build` takes `labels: SpeakerLabels` in addition to the plan's
+  parameters; the chunk carries speaker ids, not labels. The word-count check also accepts a
+  difference of one word, so a misheard two-word product name may become one word.
+- Answer-quality failures (`invalidJSON`, `truncated`, `refused`, validation) fall back to raw text
+  after one retry; HTTP and transport errors propagate so the pipeline marks the stage failed and
+  keeps the raw transcript instead of silently shipping an uncleaned one after burning retries.
+- `de-1000-words.txt` holds 1000 words and the check asserts 1.2 to 2.5 tokens per word. The
+  plan's "330 to 500 tokens" corresponds to about 1000 bytes, not 1000 words.
+- The 60-minute fixture is produced by `SyntheticTranscript` in `Sources/StenoLLM/Testing/`
+  (seeded SplitMix64) and pinned by `LLMFixturesTests`, not by core's `steno dev fixtures
+  generate --llm` and `MANIFEST.sha256`; the transcript JSON files are compared as decoded values
+  because Darwin and Linux Foundation may print the same Double differently. Both transcript
+  fixtures are `MeetingExport` files (`meeting.json`), which is also what `steno dev llm
+  cleanup|summarize` read, so `steno export` output feeds the CLI directly.
+- `SummaryOutput.language` is the resolved output language (meeting language, else `en`), which
+  the pipeline then writes to `Meeting.language`; the model's own `language` field is ignored.
+- Map-reduce reserves a quarter of the context (at most `maxOutputTokens`) for the answer and
+  refuses before the first call when `chunks * 200` estimated notes tokens exceed the input budget.
+- `steno dev llm` is one command group with `probe`, `cleanup <meeting.json>` and `summarize
+  <meeting.json> --template <id>` (the workstream brief spelled it `llm-probe`). Keys come from
+  `STENO_LLM_API_KEY` or `<support directory>/secrets.json` through `FileSecretStore`, never from a
+  flag. `Wiring.llmComponents(settings:)` swaps the fakes for the real passes when
+  `Settings.llmBaseURL` and `llmModel` are set; `stenoTests` and `StenoEndToEndTests` depend on
+  `StenoLLM` for the stub server.
+- Spikes 1 to 3 (structured output matrix, cleanup fidelity, map-reduce quality) need a real
+  endpoint and were not run in this PR; `LiveEndpointTests` behind `STENO_LLM_TESTS=1` is the
+  harness for them and the capability table above keeps its "unverified" marker for Ollama.

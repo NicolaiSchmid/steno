@@ -118,7 +118,9 @@ struct Process: AsyncParsableCommand {
     )
 
     let pipeline = ProcessingPipeline(
-      dependencies: Wiring.dependencies(store: opened.store, settings: opened.settings))
+      dependencies: Wiring.dependencies(
+        store: opened.store, settings: opened.settings,
+        llm: try await Wiring.llmComponents(settings: settings)))
     try await pipeline.enqueue(meeting, asset: asset)
     await pipeline.waitUntilIdle()
 
