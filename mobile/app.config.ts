@@ -56,6 +56,9 @@ const SPLASH_DARK = "#000000";
 // primary locale is de-DE (see `locales` below for the iOS override).
 const MICROPHONE_PERMISSION =
 	"Steno records meetings and calls through the microphone.";
+// The camera is used for exactly one thing: reading the Mac's pairing QR code.
+const CAMERA_PERMISSION =
+	"Steno uses the camera to scan the pairing code shown on your Mac.";
 
 const config: ExpoConfig = {
 	name: VARIANT.name,
@@ -94,6 +97,8 @@ const config: ExpoConfig = {
 					"Steno nimmt Meetings und Anrufe über das Mikrofon auf.",
 				NSLocalNetworkUsageDescription:
 					"Steno sucht deinen Mac im lokalen Netzwerk, um Aufnahmen zu übertragen.",
+				NSCameraUsageDescription:
+					"Steno nutzt die Kamera, um den Kopplungscode auf deinem Mac zu scannen.",
 			},
 		},
 	},
@@ -111,6 +116,12 @@ const config: ExpoConfig = {
 			NSLocalNetworkUsageDescription:
 				"Steno looks for your Mac on the local network to hand over recordings.",
 			NSBonjourServices: ["_steno._tcp"],
+			// Since iOS 17 App Transport Security rejects connections to IP
+			// addresses and `.local` names by default. This re-enables them for
+			// the handover (plan decision 2) and needs no App Review
+			// justification. It does NOT trust the Mac's self-signed leaf: the
+			// steno-link URLSession delegate pins its SHA-256 fingerprint.
+			NSAppTransportSecurity: { NSAllowsLocalNetworking: true },
 		},
 	},
 	plugins: [
@@ -124,6 +135,17 @@ const config: ExpoConfig = {
 			"expo-audio",
 			{
 				microphonePermission: MICROPHONE_PERMISSION,
+			},
+		],
+		[
+			"expo-camera",
+			{
+				cameraPermission: CAMERA_PERMISSION,
+				// expo-camera would otherwise add a microphone string of its own
+				// and the Android record-audio permission; the recorder's
+				// microphone purpose string comes from expo-audio above.
+				microphonePermission: MICROPHONE_PERMISSION,
+				recordAudioAndroid: false,
 			},
 		],
 		[
