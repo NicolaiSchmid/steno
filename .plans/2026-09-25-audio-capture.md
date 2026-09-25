@@ -423,6 +423,66 @@ toolchain. Each line is one departure from the text above and why.
   `anUnfinishedMasterWithEmptySidecarsDecodesFromTheMaster` checks through `AVAudioFile` on the
   size -1 master.
 
+### Review application (PR #4, after the correctness and elegance reviews)
+
+Applied in three commits (`39b278f` correctness majors, `fc62cc5` correctness minors, `a581acc`
+elegance), each behaviour change with a test that failed before it. Departures from the text above:
+
+- `EchoCanceller` (core protocol) gains `func reset()` with an empty default; `CaptureSession.start()`
+  calls it so the shared `SpeexEchoCanceller` never carries one meeting's converged filter and
+  far-end history into the next (measured: 20.4 dB ERLE in the first 0.5 s on reuse against 3.9 dB
+  cold, so the carry-over was real).
+- The far-end delay is the sum of the microphone's input path and the loudspeaker's output path
+  (latency plus safety offset, read on the devices themselves), applied from one processing frame
+  up rather than from 100 ms. The 200 ms Speex tail is left for the room and for what the HAL
+  under-reports; over-delaying is the one thing the MDF filter cannot recover from, so nothing is
+  rounded up. Step 5's "above 100 ms" rule is superseded.
+- The aggregate's nominal sample rate is read back after it is set (ten reads 20 ms apart; the HAL
+  applies the change asynchronously) and `start()` throws `CaptureError.sampleRateMismatch(actual:)`
+  when it is not 48 kHz. A silent 44.1 kHz master labelled 48 kHz is no longer possible; the user
+  fixes the output device's rate or picks another output.
+- `SystemAudioPermission.request(timeout:)` waits for the TCC decision: the tap starts first (where
+  the prompt appears), `afplay` is restarted whenever its one-second tone has finished, the ring is
+  polled every 100 ms, and only the 30 s bound means denied. The loop is pure
+  (`waitForSignal`) and runs on `ManualClock` in tests. Step 11's fixed 500 ms window is superseded.
+- `CaptureBackend.start` returns a `CaptureStream` (confirmed rate, both latencies, the resolved
+  `StreamLayout`); `CaptureSession.stream` keeps it while recording. `LiveCaptureBackend` has no
+  post-start getters.
+- `stop()` returns `CaptureResult { asset, statistics }` and the state carries a cut-short recording:
+  `.failed(CaptureError, recording: CaptureResult?)`. `stop()` after `.failed` returns the same
+  recording or throws when the start produced nothing; a failed re-start can no longer hand out
+  the previous meeting's files. `CaptureStatistics.deviceChanges` is `endedOnDeviceLoss: Bool`.
+- A full disk while closing the files keeps the recording: `RecordingWriter.finish()` closes every
+  file before rethrowing, the session builds the asset from the URLs fixed at start, `stop()`
+  returns it and the state ends `.failed(.writerFailed, recording:)` instead of `stop()` throwing.
+  The master is written before the sidecars on every frame. `RecordingWriting` is the internal
+  seam the tests use to inject the failure.
+- `MeetingDetector` polls every second, so the worst case without a listener event is the plan's
+  3 s. Known v1 limit, documented on the type: after a same-snapshot hand-over of the microphone
+  between two processes, `holder` keeps naming the first one until it is released again.
+- `LiveProcessAudioActivity.ownProcessObject()` throws instead of returning object 0 (a tap that
+  "excludes" object 0 excludes nothing). `LiveCaptureBackend` stops itself in `deinit`, and watches
+  `kAudioHardwarePropertyDefaultOutputDevice` beside the system output device.
+- One `LaneRings` type owns the all-or-nothing reservation; `LaneFrameSink` and `FrameRelay` are
+  built on it. `IOProcRunner`, `LaneFrameSink` and `LaneRings` live in `RealTime/`, `WriterThread`
+  and `Resampler48kTo16k` in `Writer/`; the thread and hand-off map is the module doc in
+  `StenoAudio.swift`, so the reviewer grep of `RealTime/` now covers the whole real-time path.
+- Public surface reduced to what the app and CLI use (`LaneRingBuffer`, `LevelMeter`, `LevelSlot`,
+  the stream writers, `RecordingWriter`, `LaneFrames`, `RecordingFiles`, `Resampler48kTo16k`,
+  `WAVFile`, `AudioPropertyListenerToken` are internal; tests use `@testable import`).
+  `StreamLayout.LaneSource` is `{ left: ChannelRef, right: ChannelRef? }` without `-1` sentinels;
+  `CaptureError.coreAudio(operation:status:)` is the one `OSStatus` rendering; CAF and WAV header
+  arithmetic is named constants shared by writer, reader and tests; `LaneLevel.silentPeakLinear`
+  names the -80 dBFS threshold.
+- The sidecars lag the master by the resampler's group delay (95.5 input samples, 2.0 ms), by
+  design; documented on `RecordingWriter` so nobody corrects it by hand.
+
+Follow-ups recorded, not applied: an ERLE variant with residual suppression off for the S4
+bake-off (so cancellers are compared on the linear stage); the clock-master choice (system output
+device, as AudioCap) versus the default output device the tap mirrors; `LaneLevels` as a per-lane
+dictionary; `AudioDeviceInfo.id` as `AudioObjectID`; `CaptureMode` raw values for the CLI;
+`AVFoundationAudioCodec`'s public statics; test-file literal clean-ups.
+
 ## Spike addendum
 
 - S1 (permission and silence), S2 (mic in the tap aggregate) and S3 (Continuity call audible): not
