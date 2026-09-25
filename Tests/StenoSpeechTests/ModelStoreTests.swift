@@ -92,6 +92,85 @@ import Testing
     try await store.remove(.parakeetDE)
   }
 
+  @Test func removingAnAssetMidDownloadIsRefused() async throws {
+    let gate = Gate()
+    let downloader = FakeModelDownloader(hold: { await gate.wait() })
+    let (store, directory) = try makeStore(downloader)
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let stream = await store.ensure(.offlineDiarizer)
+    async let events = collect(stream)
+    for _ in 0..<50 { await Task.yield() }
+    await #expect(throws: ModelStoreError.downloadInProgress(.offlineDiarizer)) {
+      try await store.remove(.offlineDiarizer)
+    }
+    await gate.open()
+    _ = try await events
+    #expect(store.isInstalled(.offlineDiarizer))
+    try await store.remove(.offlineDiarizer)
+    #expect(store.isInstalled(.offlineDiarizer) == false)
+  }
+
+  /// A download killed halfway (the process died, the disk filled up) leaves
+  /// some of the required files behind. That directory is not an install,
+  /// and the next `ensure` downloads again and completes it.
+  @Test func aKilledDownloadIsNotInstalledAndIsCompletedByTheNextEnsure() async throws {
+    let downloader = FakeModelDownloader()
+    let (store, directory) = try makeStore(downloader)
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let target = store.directory(for: .parakeetV3)
+    try FileManager.default.createDirectory(at: target, withIntermediateDirectories: true)
+    let partial = Array(ModelAsset.parakeetV3.requiredFiles.dropLast())
+    for name in partial {
+      try Data("partial".utf8).write(to: target.appendingPathComponent(name))
+    }
+    try Data("junk".utf8).write(to: target.appendingPathComponent("Encoder.mlmodelc.download"))
+    #expect(store.isInstalled(.parakeetV3) == false)
+    #expect(store.installedSize(of: .parakeetV3) == nil)
+    #expect(store.installedAssets().isEmpty)
+
+    try await store.ensureInstalled(.parakeetV3)
+    #expect(store.isInstalled(.parakeetV3))
+    #expect(await downloader.downloads.entries == [.parakeetV3])
+    let files = try FileManager.default.contentsOfDirectory(atPath: target.path).sorted()
+    #expect(files == (ModelAsset.parakeetV3.requiredFiles + ["Encoder.mlmodelc.download"]).sorted())
+    // Size counts every regular file under the asset, whatever wrote it; the
+    // fake rewrote the required files as empty markers, the leftover stays.
+    #expect(store.installedSize(of: .parakeetV3) == Int64("junk".utf8.count))
+  }
+
+  @Test func everyStreamOpenedDuringADownloadEndsWithItsOutcome() async throws {
+    struct Boom: Error, Equatable {}
+    let (store, directory) = try makeStore(FakeModelDownloader(failure: Boom()))
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let first = await store.ensure(.parakeetUltra)
+    let second = await store.ensure(.parakeetUltra)
+    await #expect(throws: Boom.self) { _ = try await collect(first) }
+    // The job is gone by now; the other stream, read late, still throws.
+    await #expect(throws: Boom.self) { _ = try await collect(second) }
+    #expect(store.isInstalled(.parakeetUltra) == false)
+    try await store.ensureInstalled(.parakeetUltra)
+  }
+
+  @Test func differentAssetsDownloadConcurrentlyAndIndependently() async throws {
+    let gate = Gate()
+    let downloader = FakeModelDownloader(hold: { await gate.wait() })
+    let (store, directory) = try makeStore(downloader)
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let diarizer = await store.ensure(.offlineDiarizer)
+    let whisper = await store.ensure(.whisperLargeV3Turbo)
+    async let diarizerEvents = collect(diarizer)
+    async let whisperEvents = collect(whisper)
+    // Both downloads are started (and held) before either finishes.
+    for _ in 0..<50 { await Task.yield() }
+    #expect(await Set(downloader.downloads.entries) == [.offlineDiarizer, .whisperLargeV3Turbo])
+    #expect(store.installedAssets().isEmpty)
+    await gate.open()
+    let (a, b) = try await (diarizerEvents, whisperEvents)
+    #expect(a.last?.asset == .offlineDiarizer && a.last?.phase == "installed")
+    #expect(b.last?.asset == .whisperLargeV3Turbo && b.last?.phase == "installed")
+    #expect(Set(store.installedAssets()) == [.offlineDiarizer, .whisperLargeV3Turbo])
+  }
+
   @Test func defaultDirectoryFollowsHome() {
     #expect(ModelStore.defaultDirectory().path.hasSuffix("Steno/Models"))
     let store = ModelStore(downloader: FakeModelDownloader())

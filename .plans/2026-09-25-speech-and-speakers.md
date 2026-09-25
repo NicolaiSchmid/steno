@@ -413,3 +413,15 @@ Recorded by the speech workstream while building steps 0 to 8 (PR #8, 2026-09-25
   `OfflineDiarizerBox` own one instance each, are created and called only by their actor (`WhisperKitEngine`,
   `FluidDiarizer`), and are the only places the module marks anything `@unchecked Sendable`. `AsrManager` is an
   actor in FluidAudio and needs no box.
+- **Testing pass (PR #8, after the reviews).** Three seams so the framework call sites are one-line adapters over
+  logic the CI suite pins without models: `ParakeetMapping` (tokens, full text and duration in, tagged
+  `RawSegment`s out; the whole-text fallback and the "hint steers only the tagger" rule live here),
+  `WhisperSegment` plus `WhisperMapping` (the flattened WhisperKit segment; `whisperCode`, `pinnedLanguage` over an
+  injected detector, the `noSpeechProb` drop, word trimming and ordering), and `DownloadSerializer` plus
+  `ScopedRedirect` (the strict one-at-a-time download chain and the set-then-restore of one override-table entry,
+  both framework-free; `LiveModelDownloader` is a struct that composes them and binds `ScopedRedirect` to
+  `ModelRegistry.repoOverrides`). `Tests/StenoEndToEndTests/RealModelsEndToEndTests.swift` adds step 8's opt-in
+  acceptance (pipeline over `two-speakers.wav` with Parakeet v3, the diarizer and cosine memory), skipped with a
+  message naming `STENO_MODEL_TESTS`. `stenoTests` checks `--engine` parsing, `dev models list|remove` and
+  `dev bakeoff --engines` against the binary without a download. Wall-clock in `BakeoffRunner` stays on
+  `ContinuousClock` and is reported, never asserted.

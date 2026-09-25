@@ -41,7 +41,7 @@
   /// the model considers silence (`noSpeechProb` above the threshold) are
   /// dropped.
   public actor WhisperKitEngine: SpeechEngine {
-    public static let noSpeechThreshold: Float = 0.6
+    public static let noSpeechThreshold: Float = WhisperMapping.noSpeechThreshold
 
     public nonisolated let id = SpeechEngineID.whisperKitLargeV3Turbo.rawValue
     public nonisolated let supportedLanguages = SpeechEngineID.whisperKitLargeV3Turbo
@@ -49,7 +49,7 @@
 
     private let models: ModelStore
     private var whisper: WhisperKitBox?
-    private let tagger = LanguageTagger()
+    private let mapping = WhisperMapping()
 
     public init(models: ModelStore) {
       self.models = models
@@ -93,63 +93,32 @@
       try await prepare()
       guard let whisper else { throw SpeechEngineError.notPrepared(id) }
       guard !audio.samples.isEmpty else { return [] }
-      let pinned = try await decideLanguage(audio, hint: hint, whisper: whisper)
+      let pinned = try await WhisperMapping.pinnedLanguage(samples: audio.samples, hint: hint) {
+        try await whisper.detectLanguage(Array($0))
+      }
       var options = DecodingOptions(
         task: .transcribe, language: pinned, usePrefillPrompt: true, detectLanguage: false,
         skipSpecialTokens: true, wordTimestamps: true, chunkingStrategy: .vad)
       options.noSpeechThreshold = Self.noSpeechThreshold
       let results = try await whisper.transcribe(audio.samples, options: options)
-      return tagger.tag(
-        Self.segments(from: results), hint: pinned.map { LanguageTag(rawValue: $0) })
+      return mapping.segments(from: Self.whisperSegments(results), pinned: pinned)
     }
 
-    /// Whisper's two-letter code for the hint, or the detected majority.
-    private func decideLanguage(
-      _ audio: AudioBuffer16k, hint: Locale.Language?, whisper: WhisperKitBox
-    )
-      async throws -> String?
-    {
-      if let hint, let code = Self.whisperCode(for: hint) { return code }
-      var votes: [String] = []
-      for window in WhisperWindowRanking.topWindows(samples: audio.samples) {
-        votes.append(try await whisper.detectLanguage(Array(audio.samples[window.samples])))
-      }
-      return WhisperWindowRanking.majority(votes)
-    }
-
-    /// `en-US` becomes `en`; a language Whisper does not know gives nil so the
-    /// model is not forced into a code it has no token for.
-    static func whisperCode(for language: Locale.Language) -> String? {
-      guard let code = LanguageTag(language).rawValue.split(separator: "-").first else {
-        return nil
-      }
-      let tag = LanguageTag(rawValue: String(code))
-      return SpeechEngineID.whisperKitLargeV3Turbo.supportedLanguageTags.contains(tag)
-        ? tag.rawValue : nil
-    }
-
-    /// Untagged segments; `LanguageTagger` fills the language afterwards.
-    static func segments(from results: [TranscriptionResult]) -> [RawSegment] {
-      var segments: [RawSegment] = []
-      for result in results {
-        for segment in result.segments {
-          guard segment.noSpeechProb <= noSpeechThreshold else { continue }
-          let text = segment.text.trimmingCharacters(in: .whitespacesAndNewlines)
-          guard !text.isEmpty else { continue }
-          let words = segment.words?.compactMap { word -> WordTiming? in
-            let trimmed = word.word.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !trimmed.isEmpty else { return nil }
-            return WordTiming(
-              word: trimmed, start: TimeInterval(word.start), end: TimeInterval(word.end))
-          }
-          segments.append(
-            RawSegment(
-              start: TimeInterval(segment.start),
-              end: TimeInterval(max(segment.start, segment.end)),
-              text: text, wordTimings: words?.isEmpty == false ? words : nil))
+    /// The framework's segments flattened into the module's own; every
+    /// decision about them lives in `WhisperMapping`.
+    static func whisperSegments(_ results: [TranscriptionResult]) -> [WhisperSegment] {
+      results.flatMap { result in
+        result.segments.map { segment in
+          WhisperSegment(
+            start: TimeInterval(segment.start), end: TimeInterval(segment.end),
+            text: segment.text, noSpeechProb: segment.noSpeechProb,
+            words: (segment.words ?? []).map {
+              TimedWord(
+                text: $0.word, start: TimeInterval($0.start), end: TimeInterval($0.end),
+                confidence: $0.probability)
+            })
         }
       }
-      return segments.sorted { $0.start < $1.start }
     }
   }
 #endif

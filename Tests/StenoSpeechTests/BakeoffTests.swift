@@ -132,6 +132,67 @@ import Testing
         "| sweep-3s.wav | parakeet-v3 |"))
   }
 
+  /// A cleaner that rewrites the transcript to `replacement`: `cleanedWER`
+  /// must be measured on its output, and only where a reference exists.
+  struct RewritingCleaner: TranscriptCleaner, Sendable {
+    var replacement: String
+    func clean(_ input: CleanupInput) async throws -> CleanupOutput {
+      var segments = input.segments
+      for index in segments.indices { segments[index].text = index == 0 ? replacement : "" }
+      return CleanupOutput(
+        segments: segments, usage: LLMUsage(promptTokens: 1, completionTokens: 1, requests: 1))
+    }
+  }
+
+  @Test func cleanedWERIsMeasuredOnTheCleanersOutputOnlyWithAReference() async throws {
+    let directory = try Fixtures.temporaryDirectory("bakeoff-clean")
+    defer { try? FileManager.default.removeItem(at: directory) }
+    for name in ["sweep-3s.wav", "noise-2s.wav"] {
+      try FileManager.default.copyItem(
+        at: Fixtures.url("audio/\(name)"), to: directory.appendingPathComponent(name))
+    }
+    try Data("richtig gesagt".utf8).write(to: directory.appendingPathComponent("sweep-3s.ref.txt"))
+    let runner = BakeoffRunner(
+      engineProvider: { _ in FakeSpeechEngine(id: "parakeet-v3", language: "de") },
+      cleaner: RewritingCleaner(replacement: "richtig gesagt"))
+    let report = try await runner.run(audioDirectory: directory, engines: [.parakeetV3])
+    let sweep = try #require(report.rows.first { $0.file == "sweep-3s.wav" })
+    #expect(sweep.wer ?? 0 > 1, "the fake's nine words against two reference words")
+    #expect(sweep.cleanedWER == 0)
+    let noise = try #require(report.rows.first { $0.file == "noise-2s.wav" })
+    #expect(noise.wer == nil && noise.cleanedWER == nil)
+  }
+
+  @Test func languageFlipsCountAdjacentTaggedSegmentsOnly() {
+    func segment(_ language: LanguageTag?) -> RawSegment {
+      RawSegment(start: 0, end: 1, text: "", language: language)
+    }
+    #expect(LanguageTagger.languageFlips(in: [segment("de"), segment("en"), segment("de")]) == 2)
+    #expect(
+      LanguageTagger.languageFlips(in: [segment("de"), segment(nil), segment("de")]) == 0,
+      "untagged segments do not flip")
+    #expect(LanguageTagger.languageFlips(in: [segment("de"), segment(nil), segment("en")]) == 1)
+    #expect(LanguageTagger.languageFlips(in: [segment("de")]) == 0)
+    #expect(
+      LanguageTagger.languageFlips(in: [segment("en-US"), segment("en")]) == 1,
+      "tags compare verbatim")
+  }
+
+  @Test func anEngineFailureAbortsTheRunWithItsError() async throws {
+    struct Boom: Error, Equatable {}
+    let directory = try Fixtures.temporaryDirectory("bakeoff-fail")
+    defer { try? FileManager.default.removeItem(at: directory) }
+    try FileManager.default.copyItem(
+      at: Fixtures.url("audio/sweep-3s.wav"), to: directory.appendingPathComponent("sweep-3s.wav"))
+    let runner = BakeoffRunner(engineProvider: { _ in FakeSpeechEngine(failure: Boom()) })
+    await #expect(throws: Boom.self) {
+      _ = try await runner.run(audioDirectory: directory, engines: [.parakeetV3])
+    }
+    #expect(throws: (any Error).self) {
+      _ = try BakeoffRunner.audioFiles(in: directory.appendingPathComponent("missing"))
+    }
+  }
+
   @Test func referenceLookupPrefersTheReferenceDirectory() throws {
     let directory = try Fixtures.temporaryDirectory("refs")
     defer { try? FileManager.default.removeItem(at: directory) }

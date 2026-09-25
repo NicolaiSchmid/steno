@@ -141,6 +141,101 @@ private func chunk(
     #expect(result.clusters[0].sampleClipRange == 0...8)
   }
 
+  @Test func oneSpeakerGivesOneClusterWithTheClipInsideTheRange() throws {
+    let turns = [turn("S1", 0.5, 6, quality: 0.8), turn("S1", 6, 14, quality: 0.9)]
+    let chunks = [
+      chunk("S1", 0.5, 7, axis: 3, quality: 0.8), chunk("S1", 7, 14, axis: 3, quality: 0.9),
+    ]
+    let result = DiarizationMapping.result(turns: turns, chunks: chunks)
+    try #require(result.clusters.count == 1)
+    let only = result.clusters[0]
+    #expect(only.label == "Speaker 1")
+    #expect(only.ranges == [0.5...14])
+    let clip = try #require(only.sampleClipRange)
+    #expect(clip.upperBound - clip.lowerBound == 10)
+    #expect(clip.lowerBound >= 0.5 && clip.upperBound <= 14)
+    #expect(clip.contains(10.5), "centred on the better second chunk")
+    #expect(abs(only.clusterConfidence - Float((0.8 * 6.5 + 0.9 * 7) / 13.5)) < 1e-5)
+    #expect(only.embedding?.values[3] ?? 0 > 0.99)
+  }
+
+  /// A two-second recording: everything is under the three-second floor,
+  /// so the clip is the whole range and the confidence is halved, and no
+  /// clip ever reaches past the audio.
+  @Test func shortAudioKeepsClipsInsideTheAudioAndPenalisesEveryone() throws {
+    let turns = [turn("S1", 0, 1.2, quality: 1), turn("S2", 1.2, 2, quality: 1)]
+    let chunks = [
+      chunk("S1", 0, 1.2, axis: 0, quality: 1), chunk("S2", 1.2, 2, axis: 1, quality: 1),
+    ]
+    let result = DiarizationMapping.result(turns: turns, chunks: chunks)
+    try #require(result.clusters.count == 2)
+    #expect(result.clusters[0].sampleClipRange == 0...1.2)
+    #expect(result.clusters[1].sampleClipRange == 1.2...2)
+    #expect(result.clusters.allSatisfy { abs($0.clusterConfidence - 0.5) < 1e-6 })
+    #expect(result.clusters.allSatisfy { ($0.sampleClipRange?.upperBound ?? 0) <= 2 })
+  }
+
+  @Test func clipLengthFollowsTheConfiguredTarget() throws {
+    let turns = [turn("S1", 0, 30, quality: 1)]
+    let chunks = [chunk("S1", 10, 12, axis: 0, quality: 1)]
+    let result = DiarizationMapping.result(
+      turns: turns, chunks: chunks, targetSeconds: 4, minimumSeconds: 3)
+    #expect(result.clusters.first?.sampleClipRange == 9...13)
+    // Raising the floor above the range penalises what the default would not.
+    let strict = DiarizationMapping.result(
+      turns: turns, chunks: chunks, targetSeconds: 4, minimumSeconds: 40)
+    #expect(abs((strict.clusters.first?.clusterConfidence ?? 0) - 0.5) < 1e-6)
+  }
+
+  /// Invariants over generated diarizations, whatever the shape: labels are
+  /// sequential in order of first speech, ranges are sorted and disjoint,
+  /// every clip lies inside one of its cluster's ranges and within the
+  /// target, embeddings are unit vectors, confidence is in `0...1`.
+  @Test func invariantsHoldOverGeneratedInputs() throws {
+    var rng = SplitMix64(seed: 2026)
+    for _ in 0..<40 {
+      let speakers = Int.random(in: 1...4, using: &rng)
+      var turns: [SpeakerTurn] = []
+      var chunks: [ClusterChunk] = []
+      var cursor = 0.0
+      for _ in 0..<Int.random(in: 1...12, using: &rng) {
+        let label = "S\(Int.random(in: 1...speakers, using: &rng))"
+        let length = Double.random(in: 0.2...12, using: &rng)
+        let quality = Float.random(in: 0...1, using: &rng)
+        turns.append(
+          SpeakerTurn(speakerLabel: label, start: cursor, end: cursor + length, quality: quality))
+        if Bool.random(using: &rng) {
+          chunks.append(
+            ClusterChunk(
+              speakerLabel: label, start: cursor, end: cursor + min(length, 5),
+              embedding: vector(Int.random(in: 0..<8, using: &rng), scale: 3), quality: 1))
+        }
+        cursor += length + Double.random(in: 0...1, using: &rng)
+      }
+      let result = DiarizationMapping.result(turns: turns, chunks: chunks)
+      var order: [String] = []
+      for label in turns.sorted(by: { $0.start < $1.start }).map(\.speakerLabel)
+      where !order.contains(label) {
+        order.append(label)
+      }
+      #expect(result.clusters.count == order.count)
+      #expect(result.clusters.map(\.label) == order.indices.map { "Speaker \($0 + 1)" })
+      for cluster in result.clusters {
+        for (lhs, rhs) in zip(cluster.ranges, cluster.ranges.dropFirst()) {
+          #expect(lhs.upperBound < rhs.lowerBound, "ranges sorted and disjoint")
+        }
+        let clip = try #require(cluster.sampleClipRange)
+        #expect(clip.upperBound - clip.lowerBound <= 10 + 1e-9)
+        #expect(
+          cluster.ranges.contains {
+            $0.lowerBound <= clip.lowerBound + 1e-9 && clip.upperBound <= $0.upperBound + 1e-9
+          }, "\(clip) outside \(cluster.ranges)")
+        #expect(cluster.clusterConfidence >= 0 && cluster.clusterConfidence <= 1)
+        if let embedding = cluster.embedding { #expect(abs(embedding.magnitude - 1) < 1e-4) }
+      }
+    }
+  }
+
   @Test func emptyInputGivesNoClusters() {
     #expect(DiarizationMapping.result(turns: [], chunks: []).clusters.isEmpty)
     #expect(DiarizationMapping.merged([]) == [])

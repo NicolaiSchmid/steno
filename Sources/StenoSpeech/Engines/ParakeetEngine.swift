@@ -15,9 +15,7 @@
     private let engine: SpeechEngineID
     private let models: ModelStore
     private var manager: AsrManager?
-    private let aggregator = TokenAggregator()
-    private let segmenter = TranscriptSegmenter()
-    private let tagger = LanguageTagger()
+    private let mapping = ParakeetMapping()
 
     /// `id` is one of the three Parakeet engines. The German fine-tune has
     /// the v3 layout and loads like v3 from its own asset directory.
@@ -54,12 +52,8 @@
       let tokens = (result.tokenTimings ?? []).map {
         TimedWord(text: $0.token, start: $0.startTime, end: $0.endTime, confidence: $0.confidence)
       }
-      var segments = segmenter.segments(fromWords: aggregator.words(from: tokens))
-      let text = result.text.trimmingCharacters(in: .whitespacesAndNewlines)
-      if segments.isEmpty, !text.isEmpty {
-        segments = [RawSegment(start: 0, end: audio.duration, text: text)]
-      }
-      return tagger.tag(segments, hint: hint.map(LanguageTag.init))
+      return mapping.segments(
+        tokens: tokens, text: result.text, duration: audio.duration, hint: hint)
     }
   }
 #endif
