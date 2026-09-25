@@ -156,10 +156,15 @@ jobs:
               sys.exit(1)
           PY
 
-      - name: Upload xunit output
+      # A golden mismatch writes the actual bytes beside the golden as
+      # `<name>.actual` (see StenoCore/Testing/Snapshot.swift); uploading them
+      # lets a developer without a Mac inspect or adopt the runner's output.
+      - name: Upload xunit output and snapshot mismatches
         if: steps.gate.outputs.present == 'true' && (success() || steps.test.outcome == 'failure')
         uses: actions/upload-artifact@v4
         with:
-          name: junit
-          path: .build/junit*.xml
+          name: test-output
+          path: |
+            .build/junit*.xml
+            Tests/Fixtures/**/*.actual
           if-no-files-found: ignore
