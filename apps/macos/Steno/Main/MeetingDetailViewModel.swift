@@ -88,6 +88,11 @@ final class MeetingDetailViewModel: Identifiable {
     export.map(SummaryMarkdown.render) ?? ""
   }
 
+  /// The same summary as sections, what the tab lays out.
+  var summarySections: [RenderedSection] {
+    export.map(SummaryMarkdown.sections(for:)) ?? []
+  }
+
   var unconfirmedSpeakers: [Speaker] {
     export?.speakers.filter { !$0.assignment.isConfirmed } ?? []
   }

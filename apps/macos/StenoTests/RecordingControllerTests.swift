@@ -114,12 +114,18 @@ final class RecordingControllerTests: XCTestCase {
     await environment.pipeline.waitUntilIdle()
   }
 
-  func testDefaultTitleNamesTheKind() {
-    let title = RecordingController.defaultTitle(mode: .call, startedAt: TestSupport.now)
-    XCTAssertTrue(title.hasPrefix("Call "), title)
-    XCTAssertTrue(
-      RecordingController.defaultTitle(mode: .inPerson, startedAt: TestSupport.now)
-        .hasPrefix("Meeting "))
+  /// Without a calendar event the title is core's default for the source.
+  func testDefaultTitleComesFromCore() async throws {
+    let environment = try await TestSupport.environment(seed: false)
+    let recorder = RecordingController(environment: environment)
+    await recorder.start(mode: .inPerson)
+    let meetings = try await environment.store.meetings()
+    XCTAssertEqual(
+      meetings.first?.title,
+      LocalRecordingIntake.defaultTitle(source: .macInPerson, startedAt: TestSupport.now))
+    XCTAssertEqual(meetings.first?.title.hasPrefix("Meeting "), true)
+    await recorder.stop()
+    await environment.pipeline.waitUntilIdle()
   }
 
   func testRecordingStateLabels() {

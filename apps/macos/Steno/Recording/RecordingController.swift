@@ -25,10 +25,11 @@ enum RecordingState: Equatable, Sendable {
 /// `AppEnvironment.makeCaptureSession`, the state machine, levels, the
 /// calendar lookup and the messages. The menu bar, the Record menu, the
 /// detection prompt and `shutdown()` all drive this, none of them each
-/// other. Starting writes the `.recording` meeting row with the calendar
-/// title and attendees so the list shows it at once; stopping sets the
-/// asset's retention from `Settings` as they are then, writes the duration
-/// and hands the meeting to `ProcessingPipeline.enqueue`.
+/// other. The meeting rows are core's business: `LocalRecordingIntake`
+/// writes the `.recording` row with the calendar title and attendees at
+/// `begin`, sets retention from `Settings` as they are at `complete`,
+/// writes the duration and enqueues; the app carries no copy of that
+/// transaction.
 @MainActor
 @Observable
 final class RecordingController {
@@ -88,7 +89,8 @@ final class RecordingController {
     lastError = nil
     lastWarning = nil
     let startedAt = environment.now()
-    let meetingID = UUID()
+    let intake = environment.makeLocalIntake()
+    var meetingID: UUID?
     do {
       let settings = try await environment.settings.load()
       let configuration = CaptureConfiguration(
@@ -96,59 +98,44 @@ final class RecordingController {
         outputDirectory: settings.audioFolder)
       let session = try environment.makeCaptureSession(configuration)
       let event = await resolveCalendarEvent(at: startedAt)
-      let meeting = Meeting(
-        id: meetingID,
-        title: event.map(\.title).flatMap { $0.isEmpty ? nil : $0 }
-          ?? Self.defaultTitle(mode: mode, startedAt: startedAt),
-        startedAt: startedAt,
-        duration: 0,
+      let meeting = try await intake.begin(
         source: mode == .call ? .macCall : .macInPerson,
+        title: event?.title,
         calendarEventID: event?.id,
-        state: .recording,
-        templateID: settings.defaultTemplateID,
-        createdAt: startedAt,
-        updatedAt: startedAt)
-      try await environment.store.save(meeting)
-      for attendee in event?.attendees ?? [] where !attendee.isCurrentUser {
-        try await environment.store.save(
-          Participant(
-            id: UUID(), meetingID: meetingID, personID: nil, displayName: attendee.name,
-            role: .them, email: attendee.email))
-      }
+        attendees: (event?.attendees ?? [])
+          .filter { !$0.isCurrentUser }
+          .map { LocalRecordingIntake.Attendee(displayName: $0.name, email: $0.email) },
+        startedAt: startedAt)
+      meetingID = meeting.id
       await recordingDidChange?(true)
-      try await session.start(meetingID: meetingID)
-      var active = Active(session: session, meetingID: meetingID, mode: mode, observers: [])
+      try await session.start(meetingID: meeting.id)
+      var active = Active(session: session, meetingID: meeting.id, mode: mode, observers: [])
       active.observers = observe(session)
       self.active = active
       recording = .recording(since: startedAt)
     } catch {
       lastError = "Recording could not start: \(error)"
-      try? await environment.store.setState(
-        .failed(reason: "Recording could not start: \(error)"), meetingID: meetingID,
-        now: environment.now())
+      if let meetingID {
+        try? await intake.fail(meetingID: meetingID, reason: "Recording could not start: \(error)")
+      }
       recording = .idle
       await recordingDidChange?(false)
     }
   }
 
-  /// Stops the recording, sets retention from the settings as they are now
-  /// (a change made during the recording applies to it), writes the final
-  /// duration and enqueues the meeting. After a device loss the session hands
-  /// back the partial recording, which is enqueued like any other.
+  /// Stops the recording and hands it to the intake, which sets retention
+  /// from the settings as they are now (a change made during the recording
+  /// applies to it), writes the final duration and enqueues the meeting.
+  /// After a device loss the session hands back the partial recording,
+  /// which is enqueued like any other.
   func stop() async {
     guard let active, case .recording = recording else { return }
     recording = .stopping
     do {
       let result = try await active.session.stop()
-      var asset = result.asset
-      asset.retention = try await environment.settings.load().defaultRetention
-      asset.expiresAt = nil
-      let meeting = try await environment.store.update(
-        meetingID: active.meetingID, now: environment.now()
-      ) { meeting in
-        meeting.duration = result.statistics.duration
-      }
-      try await environment.pipeline.enqueue(meeting, asset: asset)
+      try await environment.makeLocalIntake().complete(
+        meetingID: active.meetingID,
+        result: RecordingResult(asset: result.asset, duration: result.statistics.duration))
       if active.mode == .call, result.statistics.systemLaneSilent {
         lastWarning = "The system audio lane stayed silent. Check the system audio permission."
       }
@@ -156,10 +143,11 @@ final class RecordingController {
         lastWarning = "An audio device disappeared; the partial recording was kept."
       }
     } catch {
+      // `complete` already marked the row failed when the save or the
+      // enqueue threw; a session that could not stop is marked here.
       lastError = "Recording could not be saved: \(error)"
-      try? await environment.store.setState(
-        .failed(reason: "Recording could not be saved: \(error)"), meetingID: active.meetingID,
-        now: environment.now())
+      try? await environment.makeLocalIntake().fail(
+        meetingID: active.meetingID, reason: "Recording could not be saved: \(error)")
     }
     self.active = nil
     levels = nil
@@ -211,14 +199,6 @@ final class RecordingController {
   private func resolveCalendarEvent(at now: Date) async -> CalendarEvent? {
     guard let events = try? await environment.calendar.events(on: now) else { return nil }
     return CalendarEvent.match(in: events, now: now)
-  }
-
-  static func defaultTitle(mode: CaptureMode, startedAt: Date) -> String {
-    let formatter = DateFormatter()
-    formatter.dateStyle = .medium
-    formatter.timeStyle = .short
-    let kind = mode == .call ? "Call" : "Meeting"
-    return "\(kind) \(formatter.string(from: startedAt))"
   }
 
   // MARK: - Messages

@@ -22,14 +22,16 @@ enum TabText {
   }
 
   private static func summary(_ export: MeetingExport) -> [String] {
-    let markdown = SummaryMarkdown.render(export)
-    guard !markdown.isEmpty else {
+    let sections = SummaryMarkdown.sections(for: export)
+    guard !sections.isEmpty else {
       return [
         PendingText.text(
           meeting: export.meeting, none: "No summary", pending: "Summary appears after processing")
       ]
     }
-    var lines = MarkdownBlocks.parse(markdown).map(line(for:))
+    var lines = sections.flatMap { section in
+      [line(for: .heading(section.heading))] + section.bullets.map { line(for: .bullet($0)) }
+    }
     if !export.decisions.isEmpty {
       lines.append("Decisions")
       lines.append(contentsOf: export.decisions.map { line(for: .bullet($0.text)) })
@@ -41,7 +43,6 @@ enum TabText {
     switch block {
     case .heading(let text): text
     case .bullet(let text): "• " + String(MarkdownBlocks.inline(text).characters)
-    case .paragraph(let text): String(MarkdownBlocks.inline(text).characters)
     }
   }
 

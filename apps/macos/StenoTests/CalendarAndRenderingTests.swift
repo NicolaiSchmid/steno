@@ -41,12 +41,18 @@ final class CalendarAndRenderingTests: XCTestCase {
     XCTAssertEqual(grouped[1].start, 2.5)
   }
 
-  func testMarkdownBlocksParseWhatSummaryMarkdownEmits() {
-    let markdown = SummaryMarkdown.render(SampleData.export())
-    let blocks = MarkdownBlocks.parse(markdown)
-    XCTAssertFalse(blocks.isEmpty)
-    guard case .heading = blocks.first else { return XCTFail("first block is a heading") }
-    XCTAssertTrue(blocks.contains { if case .bullet = $0 { return true } else { return false } })
+  /// The tab renders core's sections, so what it shows is exactly what
+  /// `render` joins; no Markdown is parsed back.
+  func testSummaryTabRendersCoresSectionsNotReparsedMarkdown() {
+    let export = SampleData.export()
+    let sections = SummaryMarkdown.sections(for: export)
+    XCTAssertEqual(sections.map(\.heading), ["Executive Summary", "Offene Fragen"])
+    XCTAssertTrue(
+      sections[0].bullets.contains { $0.contains("**Nicolai**") },
+      "the confirmed speaker's name is substituted before the tab sees it")
+    XCTAssertEqual(
+      sections.map(\.markdown).joined(separator: "\n\n") + "\n", SummaryMarkdown.render(export),
+      "the sections are the render")
     let inline = MarkdownBlocks.inline("**Nicolai**: prüft")
     XCTAssertEqual(String(inline.characters), "Nicolai: prüft", "bold markers become styling")
   }
