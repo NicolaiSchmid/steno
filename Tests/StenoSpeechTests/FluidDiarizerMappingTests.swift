@@ -133,7 +133,8 @@ private func chunk(
     // the turns' qualities, whatever the chunks arrived with.
     let result = DiarizationMapping.result(
       turns: turns, chunks: [chunk("S1", 0, 4, axis: 0, quality: 0), chunk("S1", 4, 9, axis: 0)])
-    let expected = Float((0.3 * 4 + 0.7 * 5) / 9)
+    // (0.3 * 4 s + 0.7 * 5 s) / 9 s, spelled out so the type-checker stays quick.
+    let expected: Float = 4.7 / 9
     #expect(abs((result.clusters.first?.clusterConfidence ?? 0) - expected) < 1e-5)
   }
 
