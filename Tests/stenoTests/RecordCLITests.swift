@@ -32,27 +32,31 @@ import Testing
     process.standardOutput = Pipe()
     process.standardError = Pipe()
     try process.run()
-    // The two seconds count from the moment the recorder opened its master
-    // file, not from `run()`: a cold start of the binary on a loaded runner
-    // took over a second and left 0.75 s of audio behind.
+    // Kill once the master holds a second of audio, not after a fixed
+    // sleep: on a loaded runner the binary can take most of two seconds to
+    // start, and the point is what a killed recorder leaves behind, not
+    // how fast it started.
     let layout = RecordingLayout(audioFolder: audio, meetingID: meetingID)
-    let masterPath = layout.master(.caf48kFloat32).path
-    let startDeadline = Date().addingTimeInterval(20)
-    while !FileManager.default.fileExists(atPath: masterPath), Date() < startDeadline {
-      Thread.sleep(forTimeInterval: 0.02)
+    let masterURL = layout.master(.caf48kFloat32)
+    let oneSecond = CAFStreamWriter.headerSize + 48_000 * 2 * CAFStreamWriter.bytesPerSample
+    let deadline = ContinuousClock.now + .seconds(20)
+    while Self.fileSize(masterURL) < oneSecond, ContinuousClock.now < deadline {
+      Thread.sleep(forTimeInterval: 0.05)
     }
-    #expect(
-      FileManager.default.fileExists(atPath: masterPath), "the recorder never opened its master")
-    Thread.sleep(forTimeInterval: 2)
     kill(process.processIdentifier, SIGKILL)
     process.waitUntilExit()
     #expect(process.terminationStatus != 0)
 
-    let master = try CAFFile.read(layout.master(.caf48kFloat32))
+    let master = try CAFFile.read(masterURL)
     #expect(master.sampleRate == 48_000)
     #expect(master.channels.count == 2)
-    #expect(abs(master.duration - 2) < 1, "\(master.duration) s written before SIGKILL")
+    #expect(master.duration >= 1, "\(master.duration) s written before SIGKILL")
+    #expect(master.duration < 30, "SIGKILL landed before the 30 s run ended")
     #expect(master.channels[1][master.frameCount - 1] != 0, "the system lane carries the tone")
+  }
+
+  static func fileSize(_ url: URL) -> Int {
+    (try? FileManager.default.attributesOfItem(atPath: url.path)[.size] as? Int) ?? 0
   }
 
   @Test func inPersonSyntheticRecordingProducesOneChannelAndTheMixedSidecar() throws {
