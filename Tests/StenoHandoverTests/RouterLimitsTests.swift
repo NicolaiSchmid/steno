@@ -104,11 +104,13 @@ import Testing
 
   @Test func aSilentConnectionIsClosedAfterTheReadTimeout() async throws {
     // Half a request line, then nothing: without a read timeout any peer on
-    // the Wi-Fi could hold hundreds of such connections open for good.
-    try await TestService.run(readTimeout: .milliseconds(300)) { test in
+    // the Wi-Fi could hold hundreds of such connections open for good. The
+    // timeout is seconds, not hundreds of milliseconds: it also counts the
+    // TLS handshake of the next connection, which a loaded runner stretches.
+    try await TestService.run(readTimeout: .seconds(2)) { test in
       let raw = try test.rawClient()
 
-      let closed = try await raw.holdOpen(Data("GET /v1/hel".utf8), timeout: .seconds(5))
+      let closed = try await raw.holdOpen(Data("GET /v1/hel".utf8), timeout: .seconds(10))
       #expect(closed, "the server closes a connection that stays silent")
       let metrics = test.metrics
       #expect(metrics.timedOut == 1)
@@ -116,7 +118,7 @@ import Testing
       #expect(metrics.handledRequests == 0)
 
       // The listener is fine afterwards.
-      #expect(try await raw.exchange(.GET, "/v1/hello").status == 200)
+      #expect(try await raw.exchange(.GET, "/v1/hello", closeGrace: .zero).status == 200)
     }
   }
 
@@ -124,10 +126,11 @@ import Testing
     // Once the body is in, the silence is the Mac's (a long verify or
     // intake), not the client's; the phone waits ten seconds for `complete`.
     // The raw client sends the whole request in one flush, so the only
-    // silence on this connection is the intake's two seconds.
-    let intake = ScriptedIntake(meetingID: UUID(), failures: 0, delay: .seconds(2))
+    // silence on this connection is the intake's four seconds, twice the
+    // read timeout.
+    let intake = ScriptedIntake(meetingID: UUID(), failures: 0, delay: .seconds(4))
     try await TestService.run(
-      chunkSize: Self.chunkSize, customIntake: intake, readTimeout: .seconds(1)
+      chunkSize: Self.chunkSize, customIntake: intake, readTimeout: .seconds(2)
     ) { test in
       let phone = try await Phone.pair(test.service)
       let bytes = Phone.seededBytes(count: Self.chunkSize, seed: 31)
