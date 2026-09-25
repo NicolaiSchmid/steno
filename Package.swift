@@ -22,6 +22,11 @@ let package = Package(
   dependencies: [
     .package(url: "https://github.com/groue/GRDB.swift.git", from: "7.11.1"),
     .package(url: "https://github.com/apple/swift-argument-parser.git", from: "1.8.2"),
+    .package(url: "https://github.com/apple/swift-nio.git", from: "2.80.0"),
+    .package(url: "https://github.com/apple/swift-nio-transport-services.git", from: "1.23.0"),
+    .package(url: "https://github.com/apple/swift-certificates.git", from: "1.10.0"),
+    .package(url: "https://github.com/apple/swift-crypto.git", from: "3.0.0"),
+    .package(url: "https://github.com/apple/swift-asn1.git", from: "1.0.0"),
   ],
   targets: [
     .target(
@@ -33,11 +38,24 @@ let package = Package(
     .target(name: "StenoSpeech", dependencies: ["StenoCore"]),
     .target(name: "StenoLLM", dependencies: ["StenoCore"]),
     .target(name: "StenoAdapters", dependencies: ["StenoCore"]),
-    .target(name: "StenoHandover", dependencies: ["StenoCore"]),
+    .target(
+      name: "StenoHandover",
+      dependencies: [
+        "StenoCore",
+        .product(name: "NIOCore", package: "swift-nio"),
+        .product(name: "NIOPosix", package: "swift-nio"),
+        .product(name: "NIOHTTP1", package: "swift-nio"),
+        .product(name: "NIOTransportServices", package: "swift-nio-transport-services"),
+        .product(name: "X509", package: "swift-certificates"),
+        .product(name: "Crypto", package: "swift-crypto"),
+        .product(name: "SwiftASN1", package: "swift-asn1"),
+      ]
+    ),
     .executableTarget(
       name: "steno",
       dependencies: [
         "StenoCore",
+        "StenoHandover",
         .product(name: "ArgumentParser", package: "swift-argument-parser"),
       ]
     ),
@@ -46,7 +64,14 @@ let package = Package(
     .testTarget(name: "StenoSpeechTests", dependencies: ["StenoSpeech"]),
     .testTarget(name: "StenoLLMTests", dependencies: ["StenoLLM"]),
     .testTarget(name: "StenoAdaptersTests", dependencies: ["StenoAdapters"]),
-    .testTarget(name: "StenoHandoverTests", dependencies: ["StenoHandover"]),
+    .testTarget(
+      name: "StenoHandoverTests",
+      dependencies: [
+        "StenoHandover",
+        .product(name: "X509", package: "swift-certificates"),
+        .product(name: "Crypto", package: "swift-crypto"),
+      ]
+    ),
     .testTarget(name: "stenoTests", dependencies: ["StenoCore"]),
     .testTarget(name: "StenoEndToEndTests", dependencies: ["StenoCore"]),
   ],
