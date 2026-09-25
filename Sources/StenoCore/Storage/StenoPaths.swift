@@ -13,12 +13,21 @@ public struct StenoPaths: Sendable, Equatable {
   }
 
   /// Follows `HOME`, so CLI tests with a temporary home never touch the real
-  /// one.
+  /// one. Read from the environment first: not every Foundation honours the
+  /// variable in `homeDirectoryForCurrentUser`.
   public static var defaultSupportDirectory: URL {
-    FileManager.default.homeDirectoryForCurrentUser
+    homeDirectory
       .appendingPathComponent("Library", isDirectory: true)
       .appendingPathComponent("Application Support", isDirectory: true)
       .appendingPathComponent("Steno", isDirectory: true)
+  }
+
+  /// `$HOME` when set and absolute, else Foundation's answer.
+  public static var homeDirectory: URL {
+    if let home = ProcessInfo.processInfo.environment["HOME"], home.hasPrefix("/") {
+      return URL(fileURLWithPath: home, isDirectory: true)
+    }
+    return FileManager.default.homeDirectoryForCurrentUser
   }
 
   /// The default paths with the support directory created.
