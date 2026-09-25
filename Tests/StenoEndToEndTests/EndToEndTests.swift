@@ -1,6 +1,7 @@
 import Foundation
 import StenoAdapters
 import StenoCore
+import StenoSpeech
 import Testing
 
 @testable import StenoAudio
@@ -8,7 +9,9 @@ import Testing
 /// The one real-pipeline test across modules. Core created it with fakes
 /// everywhere; each module workstream's last step replaces its own fake with
 /// the real type. Delivery runs through the real `DeliveryCoordinator` and
-/// `ObsidianFolderDestination` into a temp vault. No models, no network.
+/// `ObsidianFolderDestination` into a temp vault; speaker suggestions come
+/// from the real `CosineSpeakerMemory` over the store (the engine and the
+/// diarizer stay fakes). No models, no network.
 @Suite struct EndToEndTests {
   #if canImport(AVFoundation)
     static var decoder: any AudioDecoder { AVFoundationAudioCodec() }
@@ -95,7 +98,7 @@ import Testing
         decoder: Self.decoder,
         speechEngine: FakeSpeechEngine(),
         diarizer: FakeDiarizer(),
-        speakerMemory: InMemorySpeakerMemory(people: SampleData.persons()),
+        speakerMemory: CosineSpeakerMemory(store: store),
         cleaner: cleaner,
         summarizer: summarizer,
         dispatcher: dispatcher,
@@ -165,6 +168,14 @@ import Testing
     #expect(export.meeting.state == .ready)
     #expect(export.segments.count == 12)
     #expect(export.speakers.map(\.clusterLabel) == ["Me", "Speaker 1", "Speaker 2"])
+    // The fake diarizer's axis embeddings match the pre-enrolled people
+    // through the real cosine memory: every "them" speaker is suggested.
+    let them = export.speakers.filter { $0.clusterLabel != "Me" }
+    #expect(them.count == 2)
+    #expect(them.allSatisfy { $0.assignment.kind == .suggested }, "\(them.map(\.assignment))")
+    #expect(
+      Set(them.compactMap(\.personID)) == Set(SampleData.persons().map(\.id)),
+      "each cluster is suggested to its own person")
     #expect(
       try Data(contentsOf: vault.appendingPathComponent("\(folder)/\(mixdown)"))
         == (try Data(contentsOf: layout.mixdown(mixdownFormat))),

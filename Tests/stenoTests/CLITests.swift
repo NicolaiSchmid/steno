@@ -137,6 +137,65 @@ import Testing
     #expect(FileManager.default.fileExists(atPath: Self.realStenoFolder.path) == hadRealFolder)
   }
 
+  /// `--engine` and the model commands are parsed and answered without a
+  /// download: an unknown engine is a usage error naming the known ones, the
+  /// model store lists every asset as absent under a fresh directory, and
+  /// removing an absent asset is a no-op. `dev models download` and
+  /// `process --engine <real id>` are never run here; they need the models.
+  @Test func speechOptionsParseWithoutTouchingModels() throws {
+    let home = try Fixtures.temporaryDirectory("steno-home")
+    defer { try? FileManager.default.removeItem(at: home) }
+    let hadRealFolder = FileManager.default.fileExists(atPath: Self.realStenoFolder.path)
+    let db = home.appendingPathComponent("steno.sqlite").path
+    let models = home.appendingPathComponent("models", isDirectory: true).path
+
+    let badEngine = try Self.run(
+      ["process", Fixtures.url("audio/sweep-3s.wav").path, "--engine", "parakeet-v9", "--db", db],
+      home: home)
+    #expect(badEngine.status == 1)
+    #expect(badEngine.stderr.contains("parakeet-v9"))
+    #expect(badEngine.stderr.contains("parakeet-v3"), "the known ids are listed")
+    #expect(badEngine.stderr.contains("whisperkit-large-v3-turbo"))
+
+    let help = try Self.run(["process", "--help"], home: home)
+    #expect(help.status == 0)
+    #expect(help.stdout.contains("--engine <engine>"))
+    for id in ["parakeet-v3", "parakeet-ultra", "parakeet-de", "whisperkit-large-v3-turbo"] {
+      #expect(help.stdout.contains(id), "\(id)")
+    }
+
+    let badBakeoff = try Self.run(
+      ["dev", "bakeoff", home.path, "--engines", "nope", "--models-dir", models], home: home)
+    #expect(badBakeoff.status == 1)
+    #expect(badBakeoff.stderr.contains("nope") && badBakeoff.stderr.contains("parakeet-v3"))
+
+    let list = try Self.run(["dev", "models", "list", "--models-dir", models], home: home)
+    #expect(list.status == 0, "\(list.stderr)")
+    #expect(list.stdout.contains("models: \(models)"))
+    for asset in [
+      "parakeetV3", "parakeetUltra", "parakeetDE", "whisperLargeV3Turbo", "offlineDiarizer",
+    ] {
+      #expect(list.stdout.contains(asset), "\(asset)")
+    }
+    #expect(
+      list.stdout.components(separatedBy: "not installed (~").count == 6, "five absent assets")
+    #expect(
+      list.stdout.components(separatedBy: "installed (").count == 6,
+      "every installed marker is a 'not installed' one")
+
+    let remove = try Self.run(
+      ["dev", "models", "remove", "offlineDiarizer", "--models-dir", models], home: home)
+    #expect(remove.status == 0, "\(remove.stderr)")
+    let badAsset = try Self.run(
+      ["dev", "models", "remove", "nope", "--models-dir", models], home: home)
+    #expect(badAsset.status == 1)
+    #expect(badAsset.stderr.contains("offlineDiarizer"), "the known assets are listed")
+
+    let leftovers = (try? FileManager.default.contentsOfDirectory(atPath: models)) ?? []
+    #expect(leftovers.isEmpty, "nothing was downloaded: \(leftovers)")
+    #expect(FileManager.default.fileExists(atPath: Self.realStenoFolder.path) == hadRealFolder)
+  }
+
   @Test func deliverWritesTheVaultLayoutFromFlagsOrStoredSettings() async throws {
     let home = try Fixtures.temporaryDirectory("steno-home")
     defer { try? FileManager.default.removeItem(at: home) }

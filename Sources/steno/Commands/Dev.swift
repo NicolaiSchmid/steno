@@ -7,7 +7,7 @@ struct Dev: AsyncParsableCommand {
     abstract: "Developer tools.",
     subcommands: [
       DevDB.self, DevFixtures.self, DevAudioDevices.self, DevAECBench.self, DevCaptureSpike.self,
-      DevHandover.self,
+      DevModels.self, DevBakeoff.self, DevHandover.self,
     ]
   )
 }
