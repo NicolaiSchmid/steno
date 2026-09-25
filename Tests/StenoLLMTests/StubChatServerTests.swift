@@ -71,13 +71,20 @@ import Testing
     var request = URLRequest(url: server.baseURL.appendingPathComponent("chat/completions"))
     request.httpMethod = "POST"
     request.httpBody = Data("{}".utf8)
-    let first = Task { try await URLSession.shared.data(for: request) }
-    let second = Task { try await URLSession.shared.data(for: request) }
+    // Only the status crosses the task boundary: `URLResponse` is not
+    // `Sendable` on Darwin.
+    let held = request
+    @Sendable func status() async throws -> Int {
+      let (_, response) = try await URLSession.shared.data(for: held)
+      return (response as? HTTPURLResponse)?.statusCode ?? 0
+    }
+    let first = Task { try await status() }
+    let second = Task { try await status() }
     await server.received(atLeast: 2)
     #expect(server.inFlight == 2)
     server.release()
-    _ = try await first.value
-    _ = try await second.value
+    #expect(try await first.value == 200)
+    #expect(try await second.value == 200)
     #expect(server.maxInFlight == 2)
     #expect(server.inFlight == 0)
   }
