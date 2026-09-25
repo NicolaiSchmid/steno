@@ -69,6 +69,29 @@ import Testing
     #expect(drifted[1] > 0.9, "a capped mean drifts toward the new voice")
   }
 
+  /// The sample's scale is not a weight: enrolling a vector ten times
+  /// longer than the unit sample gives the same row.
+  @Test func aScaledSampleEnrolsLikeTheUnitSample() async throws {
+    let (store, anna, ben) = try await makeStore()
+    // Both start from the same voice with the same weight.
+    var annaCopy = anna
+    annaCopy.sampleCount = 50
+    var benCopy = ben
+    benCopy.embedding = anna.embedding
+    benCopy.sampleCount = 50
+    try await store.save(annaCopy)
+    try await store.save(benCopy)
+    let memory = CosineSpeakerMemory(store: store)
+    let unit = embedding(1)
+    let scaled = Embedding(unit.values.map { $0 * 10 })
+    try await memory.enroll(unit, as: annaCopy)
+    try await memory.enroll(scaled, as: benCopy)
+    let annaRow = try #require(try await store.person(id: anna.id)?.embedding)
+    let benRow = try #require(try await store.person(id: ben.id)?.embedding)
+    #expect(zip(annaRow.values, benRow.values).allSatisfy { abs($0 - $1) < 1e-6 })
+    #expect(abs(annaRow.values[1] - 1 / 51.0) < 1e-3, "one sample among fifty-one")
+  }
+
   /// `enroll` folds into the stored row, not into the caller's copy: the
   /// review sheet may hold a `Person` from before another meeting enrolled.
   @Test func enrollFoldsIntoTheStoredPersonNotTheStaleArgument() async throws {

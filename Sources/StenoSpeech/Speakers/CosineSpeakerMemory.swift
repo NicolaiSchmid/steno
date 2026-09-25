@@ -33,16 +33,18 @@ public actor CosineSpeakerMemory: SpeakerMemory {
       .map { $0 }
   }
 
-  /// `e' = normalise((e * n + x) / (n + 1))` with `n` capped at `maxSamples`.
-  /// Saves the person (inserting them when the store does not know them).
+  /// `e' = normalise((e * n + x̂) / (n + 1))` with `n` capped at `maxSamples`
+  /// and `x̂` the sample at unit length, so a caller's scale never becomes a
+  /// weight. Saves the person (inserting them when the store does not know
+  /// them).
   public func enroll(_ embedding: Embedding, as person: Person) async throws {
+    let sample = embedding.normalized()
     var updated = try await store.person(id: person.id) ?? person
     let count = min(max(updated.sampleCount, 0), maxSamples)
-    if let known = updated.embedding, count > 0, known.values.count == embedding.values.count {
-      updated.embedding = Embedding.weightedMean(
-        known, weight: Float(count), embedding, weight: 1)
+    if let known = updated.embedding, count > 0, known.values.count == sample.values.count {
+      updated.embedding = Embedding.weightedMean(known, weight: Float(count), sample, weight: 1)
     } else {
-      updated.embedding = embedding.normalized()
+      updated.embedding = sample
     }
     updated.sampleCount = count + 1
     try await store.save(updated)

@@ -37,8 +37,11 @@ public struct FluidDiarizerConfig: Sendable, Equatable {
   /// `OfflineDiarizerManager` is a non-Sendable class whose `process` is an
   /// async method: calling it with an actor-owned instance would send that
   /// instance to the generic executor. The box owns the manager and is the
-  /// only thing the actor holds; the actor serialises every call, which is
-  /// what makes the `@unchecked Sendable` true in practice.
+  /// only thing the actor holds. What makes `@unchecked Sendable` true is
+  /// not the actor (it is re-entrant across the awaited `process`) but the
+  /// caller: core's `Diarize` stage runs one lane per meeting, one meeting
+  /// at a time, so no two calls are ever in flight on one diarizer. A second
+  /// concurrent caller would need an in-flight guard here (follow-up).
   final class OfflineDiarizerBox: @unchecked Sendable {
     private let manager: OfflineDiarizerManager
 

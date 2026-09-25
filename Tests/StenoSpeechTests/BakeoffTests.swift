@@ -47,6 +47,12 @@ import Testing
     let markdown = BakeoffReport(rows: rows).markdown()
     let lines = markdown.split(separator: "\n").map(String.init)
     #expect(lines.first == "# STT bake-off")
+    // Speed is labelled as what it is: FluidAudio's RTFx, not the real-time factor.
+    #expect(
+      lines[1]
+        == "| File | Engine | Audio s | Wall s | RTFx | Segments | WER | Cleaned WER | Flips | Language |"
+    )
+    #expect(lines.contains("| Engine | Files | Mean RTFx | Mean WER | Mean cleaned WER | Flips |"))
     #expect(lines.filter { $0.hasPrefix("| de-short.wav") }.count == 2)
     #expect(
       lines.contains {
@@ -67,11 +73,11 @@ import Testing
       String(decoding: try report.json(), as: UTF8.self).contains("\"engine\" : \"parakeet-v3\""))
   }
 
-  @Test func realtimeFactorNeverDividesByZero() {
+  @Test func rtfxNeverDividesByZero() {
     let row = BakeoffRow(
       file: "x", engine: .parakeetV3, audioSeconds: 1, wallSeconds: 0, segmentCount: 0,
       languageFlips: 0)
-    #expect(row.realtimeFactor.isFinite)
+    #expect(row.rtfx.isFinite)
   }
 }
 
@@ -115,7 +121,10 @@ import Testing
     #expect(report.rows[0].wer == nil, "no reference for the noise file")
     #expect(report.rows[3].dominantLanguage == "en")
     #expect(await german.preparations.count == 1)
-    #expect(await english.transcriptions.count == 2)
+    // Two files plus one untimed warm-up pass over the first, so the CoreML
+    // compile of a freshly loaded model never lands in a timed row.
+    #expect(await english.transcriptions.count == 3)
+    #expect(await german.transcriptions.count == 3)
 
     let written = try FileManager.default.contentsOfDirectory(atPath: output.path).sorted()
     #expect(

@@ -58,6 +58,14 @@ public struct BakeoffRunner: Sendable {
     for engineID in engines {
       let engine = try engineProvider(engineID)
       try await engine.prepare()
+      // One untimed pass over the first file: the first transcription of a
+      // freshly loaded model carries the CoreML and ANE compile, which would
+      // otherwise land on whichever file sorts first and make its wall clock
+      // incomparable with the rest of the column.
+      if let first = files.first {
+        _ = try await engine.transcribe(
+          try await decoder.decode(Self.asset(for: first), lane: .mixed), hint: nil)
+      }
       for file in files {
         let audio = try await decoder.decode(Self.asset(for: file), lane: .mixed)
         let started = clock.now

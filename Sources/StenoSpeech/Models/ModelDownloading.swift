@@ -49,9 +49,11 @@ actor DownloadSerializer {
 }
 
 /// One entry of a process-wide string table set for the duration of a job
-/// and restored afterwards, whether the job returns or throws. `read` and
-/// `write` are the table's accessors (FluidAudio's `ModelRegistry.repoOverrides`
-/// in production), so the scoping rule is testable against a plain dictionary.
+/// and put back afterwards, whether the job returns or throws. Only that one
+/// key is touched: entries another party writes meanwhile survive. `read`
+/// and `write` are the table's accessors (FluidAudio's
+/// `ModelRegistry.repoOverrides` in production), so the scoping rule is
+/// testable against a plain dictionary.
 struct ScopedRedirect: Sendable {
   var read: @Sendable () -> [String: String]
   var write: @Sendable ([String: String]) -> Void
@@ -59,43 +61,47 @@ struct ScopedRedirect: Sendable {
   func run<T: Sendable>(
     _ key: String, to value: String, body: @Sendable () async throws -> T
   ) async throws -> T {
-    let previous = read()
-    var redirected = previous
-    redirected[key] = value
-    write(redirected)
-    defer { write(previous) }
+    let previous = read()[key]
+    set(key, to: value)
+    defer { set(key, to: previous) }
     return try await body()
+  }
+
+  private func set(_ key: String, to value: String?) {
+    var table = read()
+    table[key] = value
+    write(table)
   }
 }
 
-#if canImport(FluidAudio) && canImport(WhisperKit)
-  import FluidAudio
-  import WhisperKit
+/// Downloads through FluidAudio's `ModelHub` and WhisperKit's Hub client,
+/// one at a time for the whole process. FluidAudio downloads only its own
+/// `Repo` cases, so the German fine-tune (v3 layout, another repository) is
+/// fetched by redirecting the v3 repository through the process-wide
+/// `ModelRegistry.repoOverrides` for the duration of that one download. The
+/// chain is process-wide too: `ModelStore`s are cheap and the app, the CLI
+/// and the pipeline each build their own, and two stores must not overlap a
+/// v3 download with the redirect active. Where the frameworks are missing
+/// (Linux) every download fails with `ModelDownloadError.unsupportedPlatform`.
+public struct LiveModelDownloader: ModelDownloading {
+  /// One chain per process, not per store.
+  static let serializer = DownloadSerializer()
 
-  /// Downloads through FluidAudio's `ModelHub` and WhisperKit's Hub client,
-  /// one at a time. FluidAudio downloads only its own `Repo` cases, so the
-  /// German fine-tune (v3 layout, another repository) is fetched by
-  /// redirecting the v3 repository through the process-wide
-  /// `ModelRegistry.repoOverrides` for the duration of that one download.
-  /// `DownloadSerializer` runs the downloads strictly in sequence, which is
-  /// what keeps a concurrent v3 download from seeing the redirect.
-  public struct LiveModelDownloader: ModelDownloading {
-    private let serializer = DownloadSerializer()
+  public init() {}
 
+  public func download(
+    _ asset: ModelAsset, under root: URL,
+    progress: @escaping @Sendable (Double, String) -> Void
+  ) async throws {
+    try await Self.serializer.run {
+      try await Self.perform(asset, under: root, progress: progress)
+    }
+  }
+
+  #if canImport(FluidAudio) && canImport(WhisperKit)
     /// FluidAudio's override table, read and written in place.
     static let repoOverrides = ScopedRedirect(
       read: { ModelRegistry.repoOverrides }, write: { ModelRegistry.repoOverrides = $0 })
-
-    public init() {}
-
-    public func download(
-      _ asset: ModelAsset, under root: URL,
-      progress: @escaping @Sendable (Double, String) -> Void
-    ) async throws {
-      try await serializer.run {
-        try await Self.perform(asset, under: root, progress: progress)
-      }
-    }
 
     /// `AsrModels.download(to:)` takes the model directory itself;
     /// `ModelHub.download(_:to:)` and WhisperKit take the framework root and
@@ -125,8 +131,14 @@ struct ScopedRedirect: Sendable {
             to: directory, version: .v3, encoderPrecision: .int8, progressHandler: handler)
         }
       case .offlineDiarizer:
+        // `ModelHub.download` for a repository reports the download as the
+        // first half of an operation whose second half (the CoreML compile)
+        // it never runs here, so the fraction is doubled to reach 1.
         try await ModelHub.download(
-          .diarizer, to: frameworkRoot, variant: "offline", progressHandler: handler)
+          .diarizer, to: frameworkRoot, variant: "offline",
+          progressHandler: {
+            progress(min(1, $0.fractionCompleted * 2), String(describing: $0.phase))
+          })
       case .whisperLargeV3Turbo:
         let variant = asset.modelFolder
         _ = try await WhisperKit.download(
@@ -137,18 +149,17 @@ struct ScopedRedirect: Sendable {
         progress(1, "installed")
       }
     }
-  }
-#else
-  /// Linux builds have no model frameworks; every download fails with
-  /// `ModelDownloadError.unsupportedPlatform`.
-  public struct LiveModelDownloader: ModelDownloading {
-    public init() {}
-
-    public func download(
+  #else
+    private static func perform(
       _ asset: ModelAsset, under root: URL,
       progress: @escaping @Sendable (Double, String) -> Void
     ) async throws {
       throw ModelDownloadError.unsupportedPlatform(asset)
     }
-  }
+  #endif
+}
+
+#if canImport(FluidAudio) && canImport(WhisperKit)
+  import FluidAudio
+  import WhisperKit
 #endif

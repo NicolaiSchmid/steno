@@ -72,6 +72,48 @@ private final class OverrideTable: Sendable {
     #expect(table.current == ["v3": "official"])
   }
 
+  /// Only the redirected key is put back: an entry someone else writes
+  /// while the job runs is not wiped by restoring a snapshot.
+  @Test func restoringTheRedirectLeavesOtherEntriesWrittenMeanwhileAlone() async throws {
+    let table = OverrideTable()
+    _ = try await table.redirect.run("v3", to: "de-repo") {
+      var current = table.current
+      current["ultra"] = "mirror"
+      table.redirect.write(current)
+    }
+    #expect(table.current == ["ultra": "mirror"])
+  }
+
+  #if !canImport(FluidAudio)
+    /// The chain is one per process, not one per store: a download of a
+    /// second `LiveModelDownloader` waits behind a job of the first. Only
+    /// observable where the download itself needs no network (the Linux
+    /// stub fails with `unsupportedPlatform` once its turn comes).
+    @Test func liveDownloadersShareOneProcessWideChain() async throws {
+      let gate = Gate()
+      let log = CallLog<String>()
+      async let held: Void = LiveModelDownloader.serializer.run {
+        await log.record("held start")
+        await gate.wait()
+        await log.record("held end")
+      }
+      let root = try Fixtures.temporaryDirectory("live")
+      defer { try? FileManager.default.removeItem(at: root) }
+      async let second: Void = {
+        do {
+          try await LiveModelDownloader().download(.parakeetV3, under: root) { _, _ in }
+        } catch {
+          await log.record("second failed: \(error is ModelDownloadError)")
+        }
+      }()
+      for _ in 0..<50 { await Task.yield() }
+      #expect(await log.entries == ["held start"], "the second downloader waits its turn")
+      await gate.open()
+      _ = try await (held, second)
+      #expect(await log.entries == ["held start", "held end", "second failed: true"])
+    }
+  #endif
+
   @Test func aConcurrentDownloadNeverSeesAnotherJobsRedirect() async throws {
     // The parakeet-de download redirects the v3 repository; a v3 download
     // requested while it runs must observe the untouched table.

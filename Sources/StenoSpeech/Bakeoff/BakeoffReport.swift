@@ -32,8 +32,10 @@ public struct BakeoffRow: Codable, Sendable, Equatable {
     self.cleanedWER = cleanedWER
   }
 
-  /// Seconds of audio per second of wall clock; reported, never asserted.
-  public var realtimeFactor: Double { audioSeconds / max(wallSeconds, 1e-9) }
+  /// Seconds of audio per second of wall clock, FluidAudio's `RTFx` (the
+  /// inverse of the real-time factor: higher is faster). Reported, never
+  /// asserted.
+  public var rtfx: Double { audioSeconds / max(wallSeconds, 1e-9) }
 }
 
 /// Every row of one bake-off run plus its Markdown and JSON renderings.
@@ -51,13 +53,13 @@ public struct BakeoffReport: Codable, Sendable, Equatable {
   public func markdown() -> String {
     var lines = [
       "# STT bake-off", "",
-      "| File | Engine | Audio s | Wall s | RTF | Segments | WER | Cleaned WER | Flips | Language |",
+      "| File | Engine | Audio s | Wall s | RTFx | Segments | WER | Cleaned WER | Flips | Language |",
       "|---|---|---:|---:|---:|---:|---:|---:|---:|---|",
     ]
     for row in rows {
       lines.append(
         "| \(row.file) | \(row.engine.rawValue) | \(format(row.audioSeconds)) | "
-          + "\(format(row.wallSeconds)) | \(format(row.realtimeFactor)) | \(row.segmentCount) | "
+          + "\(format(row.wallSeconds)) | \(format(row.rtfx)) | \(row.segmentCount) | "
           + "\(percent(row.wer)) | \(percent(row.cleanedWER)) | \(row.languageFlips) | "
           + "\(row.dominantLanguage ?? "-") |")
     }
@@ -66,14 +68,14 @@ public struct BakeoffReport: Codable, Sendable, Equatable {
     }
     if !engines.isEmpty {
       lines.append("")
-      lines.append("| Engine | Files | Mean RTF | Mean WER | Mean cleaned WER | Flips |")
+      lines.append("| Engine | Files | Mean RTFx | Mean WER | Mean cleaned WER | Flips |")
       lines.append("|---|---:|---:|---:|---:|---:|")
       for engine in engines {
         let own = rows.filter { $0.engine == engine }
         let wers = own.compactMap(\.wer)
         let cleaned = own.compactMap(\.cleanedWER)
         lines.append(
-          "| \(engine.rawValue) | \(own.count) | \(format(mean(own.map(\.realtimeFactor)))) | "
+          "| \(engine.rawValue) | \(own.count) | \(format(mean(own.map(\.rtfx)))) | "
             + "\(percent(wers.isEmpty ? nil : mean(wers))) | "
             + "\(percent(cleaned.isEmpty ? nil : mean(cleaned))) | "
             + "\(own.reduce(0) { $0 + $1.languageFlips }) |")

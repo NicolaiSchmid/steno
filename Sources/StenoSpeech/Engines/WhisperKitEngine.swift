@@ -13,8 +13,11 @@
 
   /// `WhisperKit` is a non-Sendable class with async methods: its instance
   /// can neither be returned into the actor nor be sent back out for a call.
-  /// The box owns it, is created and used only by the actor, and the actor
-  /// serialises every call, which is what makes `@unchecked Sendable` true.
+  /// The box owns it and is created and used only by the actor. What makes
+  /// `@unchecked Sendable` true is not the actor (it is re-entrant across the
+  /// awaited `transcribe`) but the caller: core's pipeline transcribes one
+  /// lane at a time, so no two calls are ever in flight on one engine. A
+  /// second concurrent caller would need an in-flight guard here (follow-up).
   final class WhisperKitBox: @unchecked Sendable {
     private let kit: WhisperKit
 
