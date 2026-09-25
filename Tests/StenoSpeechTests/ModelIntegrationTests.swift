@@ -6,8 +6,9 @@ import Testing
 
 /// Downloads real models and runs the engines and the diarizer over the
 /// `say` fixtures. Opt-in: set `STENO_MODEL_TESTS=1` (Parakeet v3 and the
-/// diarizer, about 0.5 GB) and `STENO_MODEL_TESTS_WHISPER=1` for WhisperKit
-/// (another 1.6 GB). Models land in `STENO_MODEL_TESTS_DIR` when set, else
+/// diarizer, about 0.5 GB), `STENO_MODEL_TESTS_WHISPER=1` for WhisperKit
+/// (another 1.6 GB) and `STENO_MODEL_TESTS_PARAKEET_DE=1` for the German
+/// fine-tune (1.2 GB). Models land in `STENO_MODEL_TESTS_DIR` when set, else
 /// in a temporary directory that is removed afterwards. Real-time factors
 /// are printed, never asserted.
 @Suite(.serialized) struct ModelIntegrationTests {

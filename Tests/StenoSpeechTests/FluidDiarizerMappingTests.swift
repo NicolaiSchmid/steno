@@ -230,7 +230,10 @@ private func chunk(
   /// Invariants over generated diarizations, whatever the shape: labels are
   /// sequential in order of first speech, ranges are sorted and disjoint,
   /// every clip lies inside one of its cluster's ranges and within the
-  /// target, embeddings are unit vectors, confidence is in `0...1`.
+  /// target, embeddings are unit vectors, confidence is in `0...1`. Half the
+  /// recordings also carry a chunk whose label has no turn (`S0`, spanning
+  /// the window over whoever spoke), the phantom the real model produced;
+  /// it must not become a cluster.
   @Test func invariantsHoldOverGeneratedInputs() throws {
     var rng = SplitMix64(seed: 2026)
     for _ in 0..<40 {
@@ -251,6 +254,12 @@ private func chunk(
               embedding: vector(Int.random(in: 0..<8, using: &rng), scale: 3), quality: 1))
         }
         cursor += length + Double.random(in: 0...1, using: &rng)
+      }
+      if Bool.random(using: &rng) {
+        chunks.append(
+          ClusterChunk(
+            speakerLabel: "S0", start: max(0, cursor - 10), end: cursor,
+            embedding: vector(8, scale: 3), quality: 1))
       }
       let result = DiarizationMapping.result(turns: turns, chunks: chunks)
       var order: [String] = []
