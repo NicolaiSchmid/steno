@@ -60,20 +60,6 @@
       AudioDevices.inputChannelCounts(of: deviceID)
     }
 
-    /// Input latency plus safety offset in frames, for the far-end delay.
-    var inputLatencyFrames: Int {
-      let latency =
-        (try? deviceID.readUInt32(
-          AudioObjectPropertyAddress(
-            kAudioDevicePropertyLatency, scope: kAudioObjectPropertyScopeInput)
-        )) ?? 0
-      let safety =
-        (try? deviceID.readUInt32(
-          AudioObjectPropertyAddress(
-            kAudioDevicePropertySafetyOffset, scope: kAudioObjectPropertyScopeInput))) ?? 0
-      return Int(latency) + Int(safety)
-    }
-
     func destroy() {
       destroyed.lock()
       defer { destroyed.unlock() }

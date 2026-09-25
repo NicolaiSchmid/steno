@@ -21,6 +21,9 @@ import StenoCore
       var runner: IOProcRunner
       var listeners: [AudioPropertyListenerToken]
       var layout: StreamLayout
+      var sampleRate: Double
+      var inputLatencyFrames: Int
+      var outputLatencyFrames: Int
     }
 
     private let lock = NSLock()
@@ -28,6 +31,11 @@ import StenoCore
     private let listenerQueue = DispatchQueue(label: "uno.schmid.steno.audio.devices")
 
     public init() {}
+
+    /// A session dropped without `stop()` still tears the HAL objects down in
+    /// order (IOProc, listeners, aggregate, tap) instead of leaving it to
+    /// property destruction order.
+    deinit { stop() }
 
     /// The layout the last `start` resolved; `steno dev capture-spike`
     /// prints it so the manual check can attribute buffers to lanes.
@@ -37,18 +45,27 @@ import StenoCore
       return active?.layout
     }
 
+    /// The rate the aggregate confirmed after `start`, always
+    /// `StenoAudio.sampleRate` while active.
     public var aggregateSampleRate: Double? {
       lock.lock()
       defer { lock.unlock() }
-      return active?.aggregate.nominalSampleRate
+      return active?.sampleRate
     }
 
-    /// Input latency plus safety offset of the aggregate in frames; the
-    /// processing thread delays the far-end by it when it exceeds 100 ms.
+    /// Latency plus safety offset of the microphone's input path, in frames.
     public var inputLatencyFrames: Int {
       lock.lock()
       defer { lock.unlock() }
-      return active?.aggregate.inputLatencyFrames ?? 0
+      return active?.inputLatencyFrames ?? 0
+    }
+
+    /// Latency plus safety offset of the output device's output path, in
+    /// frames: the tap sees a sample this long before the loudspeaker plays it.
+    public var outputLatencyFrames: Int {
+      lock.lock()
+      defer { lock.unlock() }
+      return active?.outputLatencyFrames ?? 0
     }
 
     public func start(lanes: [AudioLane], inputDeviceUID: String?, sink: LaneFrameSink) throws {
@@ -103,8 +120,20 @@ import StenoCore
         tap?.destroy()
         throw error
       }
+      // The aggregate inherits the clock master's rate. Ask for 48 kHz, then
+      // read it back: the HAL applies the change asynchronously and a device
+      // that cannot run at 48 kHz keeps its own, which would leave a
+      // pitch-shifted master labelled 48 kHz. Fail loud instead.
       if aggregate.nominalSampleRate != StenoAudio.sampleRate {
         try? aggregate.setNominalSampleRate(StenoAudio.sampleRate)
+      }
+      let sampleRate = NominalSampleRate.settle(
+        to: StenoAudio.sampleRate, read: { aggregate.nominalSampleRate },
+        wait: { Thread.sleep(forTimeInterval: NominalSampleRate.interval) })
+      guard sampleRate == StenoAudio.sampleRate else {
+        aggregate.destroy()
+        tap?.destroy()
+        throw CaptureError.sampleRateMismatch(actual: sampleRate)
       }
 
       let layout: StreamLayout
@@ -127,9 +156,13 @@ import StenoCore
         throw error
       }
 
-      // Device loss: the default devices changing, or a sub-device dying.
+      // Device loss: the default devices changing, or a sub-device dying. The
+      // tap mirrors the default output device (where the call plays), the
+      // clock follows the system output device (alerts); a change of either
+      // moves the far-end alignment, so both are watched.
       var watched: [(AudioObjectID, AudioObjectPropertySelector)] = [
         (.system, kAudioHardwarePropertyDefaultSystemOutputDevice),
+        (.system, kAudioHardwarePropertyDefaultOutputDevice),
         (AudioObjectID(output.id), kAudioDevicePropertyDeviceIsAlive),
       ]
       if let mic {
@@ -143,8 +176,20 @@ import StenoCore
         try? object.addListener(AudioObjectPropertyAddress(selector), queue: listenerQueue, lost)
       }
 
+      // The far-end delay: the microphone's input path plus the loudspeaker's
+      // output path, each latency plus safety offset, read on the devices
+      // themselves rather than the aggregate.
+      let inputLatency =
+        mic.map {
+          AudioDevices.latencyFrames(
+            of: AudioObjectID($0.id), scope: kAudioObjectPropertyScopeInput)
+        } ?? 0
+      let outputLatency = AudioDevices.latencyFrames(
+        of: AudioObjectID(output.id), scope: kAudioObjectPropertyScopeOutput)
       active = Active(
-        tap: tap, aggregate: aggregate, runner: runner, listeners: listeners, layout: layout)
+        tap: tap, aggregate: aggregate, runner: runner, listeners: listeners, layout: layout,
+        sampleRate: sampleRate, inputLatencyFrames: inputLatency,
+        outputLatencyFrames: outputLatency)
     }
 
     public func stop() {
@@ -166,6 +211,7 @@ import StenoCore
     public init() {}
 
     public var inputLatencyFrames: Int { 0 }
+    public var outputLatencyFrames: Int { 0 }
 
     public func start(lanes: [AudioLane], inputDeviceUID: String?, sink: LaneFrameSink) throws {
       throw CaptureError.backendFailed("live capture needs macOS (Core Audio)")

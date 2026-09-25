@@ -102,12 +102,28 @@ public actor CaptureSession {
     for continuation in levelContinuations.values { continuation.yield(levels) }
   }
 
-  /// The far-end delay the live backend's latency asks for: only above 100 ms.
+  /// The far-end delay for the latencies the backend reports. The mic hears
+  /// the tap's signal after the output path (output latency plus safety
+  /// offset), the room and the input path (input latency plus safety
+  /// offset), so the far-end is delayed by the two device paths in full and
+  /// the Speex tail (200 ms) is left for the room and for what the HAL
+  /// under-reports. Below one processing frame the tail absorbs the offset
+  /// as well; over-delaying is the one thing the MDF filter cannot recover
+  /// from, so nothing is rounded up.
+  static func farEndDelayFrames(inputLatencyFrames: Int, outputLatencyFrames: Int) -> Int {
+    let total = max(0, inputLatencyFrames) + max(0, outputLatencyFrames)
+    return total >= StenoAudio.frameSize ? total : 0
+  }
+
   private func farEndDelayFrames() -> Int {
     guard configuration.usesEchoCancellation else { return 0 }
-    var latency = 0
-    if let live = backend as? LiveCaptureBackend { latency = live.inputLatencyFrames }
-    return latency > Int(0.1 * StenoAudio.sampleRate) ? latency : 0
+    var input = 0
+    var output = 0
+    if let live = backend as? LiveCaptureBackend {
+      input = live.inputLatencyFrames
+      output = live.outputLatencyFrames
+    }
+    return Self.farEndDelayFrames(inputLatencyFrames: input, outputLatencyFrames: output)
   }
 
   public func start(meetingID: UUID) async throws {
@@ -115,7 +131,11 @@ public actor CaptureSession {
     case .idle, .failed: break
     default: throw CaptureError.invalidState("start while \(state)")
     }
+    // A failed start must never hand out the previous meeting's files.
+    lastResult = nil
     state = .starting
+    // A new recording, possibly on other devices, starts from a cold filter.
+    echoCanceller?.reset()
     let lanes = configuration.lanes
     let layout = RecordingLayout(audioFolder: configuration.outputDirectory, meetingID: meetingID)
     let keepRaw = configuration.keepRawMicLane && lanes.contains(.mic)
@@ -206,7 +226,8 @@ public actor CaptureSession {
     let statistics = CaptureStatistics(
       duration: files.duration,
       droppedFrames: dropped,
-      systemLaneSilent: lanes.contains(.system) && active.processing.systemPeak < 1e-4,
+      systemLaneSilent: lanes.contains(.system)
+        && active.processing.systemPeak < LaneLevel.silentPeakLinear,
       deviceChanges: active.deviceChanges)
     let asset = AudioAsset(
       id: UUID(), meetingID: active.meetingID, url: files.master, format: .caf48kFloat32,

@@ -65,7 +65,12 @@ public enum CaptureError: Error, Sendable, Equatable, Hashable, CustomStringConv
   case outputDeviceUnavailable
   /// The aggregate's input streams did not match the expected lanes.
   case unexpectedStreamLayout(String)
-  /// The tap never rose above -80 dBFS during the whole session.
+  /// The aggregate would not run at `StenoAudio.sampleRate` (the output
+  /// device is fixed at another rate); the user changes it in Audio MIDI
+  /// Setup or picks another output.
+  case sampleRateMismatch(actual: Double)
+  /// The tap never rose above `LaneLevel.silentPeakLinear` during the whole
+  /// session.
   case systemAudioSilent
   case deviceLost
   case writerFailed(String)
@@ -81,6 +86,8 @@ public enum CaptureError: Error, Sendable, Equatable, Hashable, CustomStringConv
     case .inputDeviceUnavailable: "the input device is not available"
     case .outputDeviceUnavailable: "the output device is not available"
     case .unexpectedStreamLayout(let detail): "unexpected input stream layout: \(detail)"
+    case .sampleRateMismatch(let actual):
+      "the audio devices run at \(Int(actual)) Hz, not \(Int(StenoAudio.sampleRate)) Hz"
     case .systemAudioSilent: "the system lane stayed silent"
     case .deviceLost: "an audio device disappeared"
     case .writerFailed(let detail): "writing the recording failed: \(detail)"
@@ -110,6 +117,10 @@ public struct LaneLevel: Sendable, Equatable, Hashable {
 
   /// Digital silence: the floor every meter reports for zeros.
   public static let silence = LaneLevel(rms: -160, peak: -160)
+
+  /// -80 dBFS, linear: a lane whose peak never exceeds it is "silent" for
+  /// `CaptureStatistics.systemLaneSilent` and the permission probe.
+  public static let silentPeakLinear: Float = 1e-4
 }
 
 /// Published at 10 Hz; `system` is nil in `.inPerson`.
@@ -129,7 +140,7 @@ public struct CaptureStatistics: Sendable, Equatable, Hashable {
   /// Frames lost per lane to ring overruns or a stalled writer; should be
   /// empty.
   public var droppedFrames: [AudioLane: Int]
-  /// True when the tap never exceeded -80 dBFS.
+  /// True when the tap never exceeded `LaneLevel.silentPeakLinear` (-80 dBFS).
   public var systemLaneSilent: Bool
   public var deviceChanges: Int
 

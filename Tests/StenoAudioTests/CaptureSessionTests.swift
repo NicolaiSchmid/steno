@@ -1,5 +1,6 @@
 import Foundation
 import StenoCore
+import Synchronization
 import Testing
 
 @testable import StenoAudio
@@ -291,6 +292,121 @@ import Testing
       #expect(try CAFFile.read(result.asset.url).channels.count == 2)
     }
     #expect(try FileManager.default.contentsOfDirectory(atPath: directory.path).count == 50)
+  }
+
+  /// A backend that records once and fails on every later start.
+  final class OnceThenFailing: CaptureBackend, @unchecked Sendable {
+    let inner: SyntheticCaptureBackend
+    private let starts = Atomic<Int>(0)
+
+    init(_ inner: SyntheticCaptureBackend) { self.inner = inner }
+
+    func start(lanes: [AudioLane], inputDeviceUID: String?, sink: LaneFrameSink) throws {
+      guard starts.wrappingAdd(1, ordering: .relaxed).oldValue == 0 else {
+        throw CaptureError.inputDeviceUnavailable
+      }
+      try inner.start(lanes: lanes, inputDeviceUID: inputDeviceUID, sink: sink)
+    }
+
+    func stop() { inner.stop() }
+  }
+
+  /// Meeting A records and stops; meeting B's start fails in the backend.
+  /// `stop()` after that failure must throw, not hand out A's asset under
+  /// B's meeting (the app would enqueue A twice).
+  @Test func aFailedRestartDoesNotReturnThePreviousMeetingsRecording() async throws {
+    let directory = try Fixtures.temporaryDirectory("session")
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let backend = OnceThenFailing(
+      SyntheticCaptureBackend(lanes: [.mixed], tone: [.mixed: 440], seconds: 0.2))
+    let session = try CaptureSession(
+      configuration: configuration(.inPerson, in: directory), backend: backend)
+    let first = UUID()
+    try await session.start(meetingID: first)
+    await backend.inner.waitUntilFinished()
+    let result = try await session.stop()
+    #expect(result.asset.meetingID == first)
+
+    await #expect(throws: CaptureError.inputDeviceUnavailable) {
+      try await session.start(meetingID: UUID())
+    }
+    #expect(await session.state == .failed(.inputDeviceUnavailable))
+    await #expect(throws: CaptureError.self, "nothing was recorded for this start") {
+      _ = try await session.stop()
+    }
+  }
+
+  /// Logs `reset` and `process` calls in order.
+  final class ResetLoggingCanceller: EchoCanceller, @unchecked Sendable {
+    let sampleRate: Double
+    let frameSize: Int
+    private let lock = NSLock()
+    private var entries: [String] = []
+
+    init(sampleRate: Double, frameSize: Int) throws {
+      self.sampleRate = sampleRate
+      self.frameSize = frameSize
+    }
+
+    var log: [String] {
+      lock.lock()
+      defer { lock.unlock() }
+      return entries
+    }
+
+    func process(
+      nearEnd: UnsafeBufferPointer<Float>, farEnd: UnsafeBufferPointer<Float>,
+      out: UnsafeMutableBufferPointer<Float>
+    ) {
+      lock.lock()
+      if entries.last != "process" { entries.append("process") }
+      lock.unlock()
+      for index in 0..<min(nearEnd.count, out.count) { out[index] = nearEnd[index] }
+    }
+
+    func reset() {
+      lock.lock()
+      entries.append("reset")
+      lock.unlock()
+    }
+  }
+
+  /// One canceller serves every recording of a session, so each start resets
+  /// it before the first frame: meeting two on headphones must not begin
+  /// with the filter meeting one converged on the loudspeakers.
+  @Test func everyStartResetsTheEchoCancellerBeforeTheFirstFrame() async throws {
+    let directory = try Fixtures.temporaryDirectory("session")
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let backend = SyntheticCaptureBackend(
+      lanes: [.mic, .system], tone: [.mic: 440, .system: 1_000], seconds: 0.1)
+    let canceller = try ResetLoggingCanceller(sampleRate: 48_000, frameSize: 480)
+    let session = try CaptureSession(
+      configuration: configuration(.call, in: directory), backend: backend,
+      echoCanceller: canceller)
+    for _ in 0..<2 {
+      try await session.start(meetingID: UUID())
+      await backend.waitUntilFinished()
+      _ = try await session.stop()
+    }
+    #expect(canceller.log == ["reset", "process", "reset", "process"])
+  }
+
+  /// The far-end is delayed by both device paths (mic input, speaker output)
+  /// whenever their sum reaches one processing frame; the Speex tail keeps
+  /// the room. A 30 ms input path alone used to stay under the old 100 ms
+  /// threshold while a Bluetooth output pushed the echo past the tail.
+  @Test func farEndDelayCoversInputAndOutputPathsFromOneFrameUp() {
+    #expect(CaptureSession.farEndDelayFrames(inputLatencyFrames: 0, outputLatencyFrames: 0) == 0)
+    #expect(
+      CaptureSession.farEndDelayFrames(inputLatencyFrames: 200, outputLatencyFrames: 200) == 0,
+      "under one frame the tail absorbs it")
+    #expect(
+      CaptureSession.farEndDelayFrames(inputLatencyFrames: 300, outputLatencyFrames: 300) == 600)
+    #expect(
+      CaptureSession.farEndDelayFrames(inputLatencyFrames: 1_440, outputLatencyFrames: 9_600)
+        == 11_040, "a 30 ms mic path plus a 200 ms Bluetooth output")
+    #expect(
+      CaptureSession.farEndDelayFrames(inputLatencyFrames: 0, outputLatencyFrames: 480) == 480)
   }
 
   @Test func aFailingBackendLeavesTheSessionFailedAndNoFolder() async throws {

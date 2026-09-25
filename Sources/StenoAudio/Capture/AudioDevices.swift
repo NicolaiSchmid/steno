@@ -77,6 +77,19 @@ public struct AudioDeviceInfo: Sendable, Equatable, Hashable, Identifiable {
           kAudioDevicePropertyStreamConfiguration, scope: kAudioObjectPropertyScopeInput))) ?? []
     }
 
+    /// `kAudioDevicePropertyLatency` plus `kAudioDevicePropertySafetyOffset`
+    /// of one device in `scope`, in frames: the input path of the microphone
+    /// or the output path of the loudspeaker, for the far-end delay.
+    static func latencyFrames(of id: AudioObjectID, scope: AudioObjectPropertyScope) -> Int {
+      let latency =
+        (try? id.readUInt32(AudioObjectPropertyAddress(kAudioDevicePropertyLatency, scope: scope)))
+        ?? 0
+      let safety =
+        (try? id.readUInt32(
+          AudioObjectPropertyAddress(kAudioDevicePropertySafetyOffset, scope: scope))) ?? 0
+      return Int(latency) + Int(safety)
+    }
+
     static func outputChannelCounts(of id: AudioObjectID) -> [Int] {
       (try? id.readBufferChannelCounts(
         AudioObjectPropertyAddress(

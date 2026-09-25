@@ -9,4 +9,13 @@ public protocol EchoCanceller: Sendable {
     farEnd: UnsafeBufferPointer<Float>,
     out: UnsafeMutableBufferPointer<Float>
   )
+  /// Forgets every adapted state (the filter, the far-end history). The
+  /// capture session calls it on every start so a new recording, possibly on
+  /// other devices, never begins with the previous meeting's echo path.
+  /// Stateless cancellers keep the empty default.
+  func reset()
+}
+
+extension EchoCanceller {
+  public func reset() {}
 }
