@@ -1,4 +1,9 @@
-/// Placeholder namespace for the `StenoLLM` module. Its workstream replaces
-/// this file with the real implementation; the core foundation only creates
-/// the target so the package builds.
-public enum StenoLLM {}
+/// `StenoLLM`: the OpenAI-compatible client, structured output, token
+/// budgeting and chunking, the cleanup pass (`LLMTranscriptCleaner`) and the
+/// summary pass (`LLMMeetingSummarizer`). Text only ever crosses the network
+/// from here: no audio, no file paths, no scratchpad.
+public enum StenoLLM {
+  /// The header every completion carries so a proxy or the stub server can
+  /// tell the passes apart.
+  public static let purposeHeader = "X-Steno-Purpose"
+}
