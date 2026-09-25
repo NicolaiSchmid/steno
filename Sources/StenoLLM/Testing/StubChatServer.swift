@@ -163,7 +163,15 @@ public final class StubChatServer: Sendable {
 
   public func release() {
     state.withLock { $0.holding = false }
+    wakeParked()
+  }
+
+  /// Waiters check their predicate and call `wait()` while holding `latch`,
+  /// so taking it here before broadcasting means no wakeup is ever lost.
+  private func wakeParked() {
+    latch.lock()
     latch.broadcast()
+    latch.unlock()
   }
 
   // MARK: Observation
@@ -209,7 +217,7 @@ public final class StubChatServer: Sendable {
     // so a new server can never inherit this number while the old loop
     // still calls `accept` on it.
     shutdown(listenFD, Int32(SHUT_RDWR))
-    latch.broadcast()
+    wakeParked()
     for waiter in waiters { waiter.resume() }
   }
 

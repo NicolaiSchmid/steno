@@ -98,6 +98,46 @@ public enum Scripts {
   /// Closes the connection without answering; a transport error.
   public static let drop = StubResponse.drop
 
+  /// A responder that plays a perfect cleanup model: it reads the numbered
+  /// segments out of the request and answers with them, each passed through
+  /// `transform(index, text)`. Segments the transform returns nil for are
+  /// dropped from the answer, which lets a test script a wrong count.
+  public static func cleanupEcho(
+    usage: LLMUsage = LLMUsage(promptTokens: 100, completionTokens: 50, requests: 1),
+    transform: @escaping @Sendable (Int, String) -> String? = { $1 }
+  ) -> @Sendable (RecordedRequest) -> StubResponse? {
+    { request in
+      guard let user = request.chat?.messages.last(where: { $0.role == "user" }) else {
+        return nil
+      }
+      let draft = CleanupDraft(
+        segments: parseSegments(user.content).compactMap { index, text in
+          transform(index, text).map { CleanupDraft.Segment(index: index, text: $0) }
+        })
+      return json(draft, usage: usage)
+    }
+  }
+
+  /// `[n] Label: text` lines after the "Segments to correct" marker.
+  public static func parseSegments(_ userMessage: String) -> [(index: Int, text: String)] {
+    var segments: [(Int, String)] = []
+    var started = false
+    for line in userMessage.split(separator: "\n", omittingEmptySubsequences: false) {
+      if line.hasPrefix("Segments to correct") {
+        started = true
+        continue
+      }
+      guard started, line.hasPrefix("["), let close = line.firstIndex(of: "]"),
+        let index = Int(line[line.index(after: line.startIndex)..<close])
+      else { continue }
+      let rest = line[line.index(after: close)...]
+      guard let colon = rest.firstIndex(of: ":") else { continue }
+      let text = rest[rest.index(after: colon)...].trimmingCharacters(in: .whitespaces)
+      segments.append((index, text))
+    }
+    return segments
+  }
+
   /// A responder that answers `GET /models` with `models`, rejects
   /// `response_format` kinds in `rejecting` with a 400, and otherwise returns
   /// `completion`. Models the servers that honour `json_object` but not
