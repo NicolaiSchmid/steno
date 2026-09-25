@@ -74,7 +74,7 @@ import Testing
       print(
         "[model-tests] pipeline two-speakers.wav: WER \(String(format: "%.1f", wer * 100)) %: \(text)"
       )
-      #expect(wer < 0.5, text)
+      #expect(wer < 0.5, "\(text)")
       let speakers = try await store.speakers(meetingID: meetingID)
       print("[model-tests] speakers: \(speakers.map { "\($0.clusterLabel) \($0.assignment)" })")
       #expect(speakers.count == 2, "\(speakers.map(\.clusterLabel))")
