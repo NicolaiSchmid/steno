@@ -49,3 +49,9 @@ export function queuedFileUri(fileName: string): string {
 export function queuedFileExists(fileName: string): boolean {
 	return new File(queueDirectory(), fileName).exists;
 }
+
+/** Bytes on disk, 0 when missing. */
+export function queuedFileSize(fileName: string): number {
+	const file = new File(queueDirectory(), fileName);
+	return file.exists ? file.size : 0;
+}
