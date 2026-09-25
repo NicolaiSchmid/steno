@@ -95,6 +95,9 @@ public enum Scripts {
   /// Never answers; released by `StubChatServer.stop()`.
   public static let hang = StubResponse.hang
 
+  /// Closes the connection without answering; a transport error.
+  public static let drop = StubResponse.drop
+
   /// A responder that answers `GET /models` with `models`, rejects
   /// `response_format` kinds in `rejecting` with a 400, and otherwise returns
   /// `completion`. Models the servers that honour `json_object` but not
