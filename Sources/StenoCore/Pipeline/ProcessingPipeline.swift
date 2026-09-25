@@ -2,6 +2,8 @@ import Foundation
 
 /// Everything the pipeline needs, and the only injection axis: the app and
 /// the CLI pass real implementations, tests pass the fakes in `Testing/`.
+/// `events` defaults to `store.events`, so the store's `deleted` and the
+/// pipeline's `progress` reach one subscriber.
 public struct PipelineDependencies: Sendable {
   public let decoder: any AudioDecoder
   public let speechEngine: any SpeechEngine
@@ -25,7 +27,7 @@ public struct PipelineDependencies: Sendable {
     dispatcher: any DeliveryDispatcher,
     store: MeetingStore,
     settings: SettingsStore,
-    events: MeetingEventBus,
+    events: MeetingEventBus? = nil,
     now: @escaping @Sendable () -> Date = Date.init
   ) {
     self.decoder = decoder
@@ -37,7 +39,7 @@ public struct PipelineDependencies: Sendable {
     self.dispatcher = dispatcher
     self.store = store
     self.settings = settings
-    self.events = events
+    self.events = events ?? store.events
     self.now = now
   }
 }

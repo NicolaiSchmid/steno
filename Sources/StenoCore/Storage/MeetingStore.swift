@@ -7,10 +7,14 @@ public enum MeetingStoreError: Error, Sendable, Equatable, CustomStringConvertib
   case speakerNotFound(UUID)
   case personNotFound(UUID)
   case speakersInDifferentMeetings(UUID, UUID)
+  /// `delete(meetingID:)` while the capture writer or the pipeline still
+  /// holds the meeting's files.
+  case meetingBusy(UUID, MeetingState.Kind)
 
   public var description: String {
     switch self {
     case .meetingNotFound(let id): "meeting \(id) not found"
+    case .meetingBusy(let id, let state): "meeting \(id) is \(state.rawValue) and cannot be deleted"
     case .speakerNotFound(let id): "speaker \(id) not found"
     case .personNotFound(let id): "person \(id) not found"
     case .speakersInDifferentMeetings(let a, let b):
@@ -22,30 +26,37 @@ public enum MeetingStoreError: Error, Sendable, Equatable, CustomStringConvertib
 /// The one store over the GRDB database. A `Sendable` final class, not an
 /// actor: the pool already serialises writes and an actor would serialise
 /// reads too. Every write is `save`; row changes reach the app through the
-/// `observe*` streams.
+/// `observe*` streams, and the few things a row change cannot say (a
+/// deletion, see `delete(meetingID:)`) are posted on `events`. The pipeline
+/// posts on the same bus when built with `PipelineDependencies` from this
+/// store, so the app subscribes once.
 public final class MeetingStore: Sendable {
   public let writer: any DatabaseWriter
+  public let events: MeetingEventBus
 
   /// Runs the migrator on `writer`.
-  public init(writer: any DatabaseWriter) throws {
+  public init(writer: any DatabaseWriter, events: MeetingEventBus = MeetingEventBus()) throws {
     self.writer = writer
+    self.events = events
     try Migrations.migrator().migrate(writer)
   }
 
   /// A `DatabasePool` in WAL mode with a five-second busy timeout, creating
   /// the parent directory when needed. The app and the CLI use this.
-  public static func onDisk(at url: URL) throws -> MeetingStore {
+  public static func onDisk(at url: URL, events: MeetingEventBus = MeetingEventBus()) throws
+    -> MeetingStore
+  {
     try FileManager.default.createDirectory(
       at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
     var configuration = Configuration()
     configuration.busyMode = .timeout(5)
     let pool = try DatabasePool(path: url.path, configuration: configuration)
-    return try MeetingStore(writer: pool)
+    return try MeetingStore(writer: pool, events: events)
   }
 
   /// A private in-memory `DatabaseQueue`. Tests use this.
-  public static func inMemory() throws -> MeetingStore {
-    try MeetingStore(writer: DatabaseQueue())
+  public static func inMemory(events: MeetingEventBus = MeetingEventBus()) throws -> MeetingStore {
+    try MeetingStore(writer: DatabaseQueue(), events: events)
   }
 
   // MARK: - Meetings
@@ -162,6 +173,64 @@ public final class MeetingStore: Sendable {
   static func currentMeeting(_ id: UUID, _ db: Database) throws -> Meeting {
     guard let row = try meetingRow(id, db) else { throw MeetingStoreError.meetingNotFound(id) }
     return row.meeting
+  }
+
+  // MARK: - Deletion
+
+  /// Removes the meeting and everything that hangs off it: the cascaded rows
+  /// (participants, speakers, segments, tasks, decisions, assets,
+  /// deliveries), their FTS rows through the triggers, the handover receipt
+  /// that admitted it, and its files. Persons stay; they belong to every
+  /// meeting. Throws `MeetingStoreError.meetingBusy` while the meeting is
+  /// `.recording` or `.processing`, because the capture writer or the
+  /// pipeline still holds the files.
+  ///
+  /// Files: when the asset sits in its own meeting folder
+  /// (`RecordingLayout(audioFolder:meetingID:)`, the folder named after the
+  /// meeting id) the whole folder goes, sample clips included. Otherwise only
+  /// the files the rows point at are removed (master, sidecars, mixdown,
+  /// clips), so an asset placed in a shared folder never takes its
+  /// neighbours with it. The rows are gone and `MeetingEvent.deleted` is
+  /// posted before any file is touched; a file that resists is thrown after
+  /// the rest were removed.
+  public func delete(meetingID: UUID) async throws {
+    let files: [URL] = try await writer.write { db in
+      let meeting = try Self.currentMeeting(meetingID, db)
+      switch meeting.state {
+      case .recording, .processing:
+        throw MeetingStoreError.meetingBusy(meetingID, meeting.state.kind)
+      case .queued, .ready, .failed:
+        break
+      }
+      let key = meetingID.uuidString
+      let assets = try AudioAssetRow.filter(AudioAssetRow.Columns.meetingID == key)
+        .order(AudioAssetRow.Columns.id).fetchAll(db).map(\.asset)
+      let clips = try SpeakerRow.filter(SpeakerRow.Columns.meetingID == key).fetchAll(db)
+        .compactMap(\.sampleClipURL)
+      try HandoverReceiptRow.filter(HandoverReceiptRow.Columns.meetingID == key).deleteAll(db)
+      try MeetingRow.filter(MeetingRow.Columns.id == key).deleteAll(db)
+      return Self.filesToRemove(meetingID: meetingID, assets: assets, clips: clips)
+    }
+    await events.post(.deleted(meetingID: meetingID))
+    var firstError: (any Error)?
+    for url in files where FileManager.default.fileExists(atPath: url.path) {
+      do {
+        try FileManager.default.removeItem(at: url)
+      } catch {
+        if firstError == nil { firstError = error }
+      }
+    }
+    if let firstError { throw firstError }
+  }
+
+  /// The meeting folder when an asset lives in one, else every file the rows
+  /// name, each once, in asset then clip order.
+  static func filesToRemove(meetingID: UUID, assets: [AudioAsset], clips: [URL]) -> [URL] {
+    let folders = assets.map { RecordingLayout(asset: $0).directory }
+      .filter { $0.lastPathComponent == meetingID.uuidString }
+    if let folder = folders.first { return [folder] }
+    var seen: Set<String> = []
+    return (assets.flatMap(\.expirableFiles) + clips).filter { seen.insert($0.path).inserted }
   }
 
   // MARK: - Participants

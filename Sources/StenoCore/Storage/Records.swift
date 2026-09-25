@@ -501,6 +501,7 @@ struct HandoverReceiptRow: StenoRecord {
 
   enum Columns {
     static let recordingID = Column(CodingKeys.recordingID)
+    static let meetingID = Column(CodingKeys.meetingID)
   }
 
   init(_ receipt: HandoverReceipt) {
