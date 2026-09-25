@@ -91,4 +91,46 @@ import Testing
     #expect(buffer.slice(1.5...9.0).samples.count == 8_000)
     #expect(buffer.slice(5...6).samples.isEmpty)
   }
+
+  /// The RIFF and `data` sizes count interleaved samples, so a stereo file
+  /// declares exactly the bytes it holds.
+  @Test func headerSizesFollowTheInterleavedSampleCount() throws {
+    func uint32(_ data: Data, _ offset: Int) -> UInt32 {
+      data.withUnsafeBytes { $0.loadUnaligned(fromByteOffset: offset, as: UInt32.self) }
+        .littleEndian
+    }
+    func uint16(_ data: Data, _ offset: Int) -> UInt16 {
+      data.withUnsafeBytes { $0.loadUnaligned(fromByteOffset: offset, as: UInt16.self) }
+        .littleEndian
+    }
+    let stereo = WAVWriter.data([Int16](repeating: 0, count: 480), sampleRate: 48_000, channels: 2)
+    #expect(stereo.count == 44 + 960)
+    #expect(uint32(stereo, 4) == UInt32(stereo.count - 8))
+    #expect(uint16(stereo, 20) == 1, "PCM")
+    #expect(uint16(stereo, 22) == 2, "channels")
+    #expect(uint32(stereo, 24) == 48_000)
+    #expect(uint32(stereo, 28) == 48_000 * 4, "byte rate")
+    #expect(uint16(stereo, 32) == 4, "block align")
+    #expect(uint16(stereo, 34) == 16, "bits per sample")
+    #expect(uint32(stereo, 40) == 960, "data bytes")
+
+    let float = WAVWriter.float32Data([Float](repeating: 0.5, count: 10))
+    #expect(float.count == 44 + 40)
+    #expect(uint32(float, 4) == UInt32(float.count - 8))
+    #expect(uint16(float, 20) == 3, "IEEE float")
+    #expect(uint16(float, 22) == 1)
+    #expect(uint32(float, 28) == 16_000 * 4)
+    #expect(uint16(float, 34) == 32)
+    #expect(uint32(float, 40) == 40)
+
+    let directory = try Fixtures.temporaryDirectory()
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let url = directory.appendingPathComponent("mono.wav")
+    try WAVWriter.write([Int16](repeating: 7, count: 100), to: url)
+    #expect(
+      try WAVAudioDecoder.info(url)
+        == .init(
+          sampleRate: 16_000, channels: 1, bitsPerSample: 16, isFloat: false, frameCount: 100)
+    )
+  }
 }

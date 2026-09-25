@@ -98,4 +98,27 @@ import Testing
     #expect(title == "Phone recording 2026-09-24 11:00")
     #expect(RecordingIntake.fileExtension(.wav16kInt16) == "wav")
   }
+
+  @Test func aFailedEnqueueLeavesNoCompleteReceipt() async throws {
+    struct Boom: Error {}
+    let directory = try Fixtures.temporaryDirectory()
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let store = try MeetingStore.inMemory()
+    let settingsStore = SettingsStore(writer: store.writer)
+    var settings = Settings()
+    settings.audioFolder = directory
+    try await settingsStore.save(settings)
+    try await store.save(SampleData.pairedDevice(), tokenHash: Data(repeating: 1, count: 32))
+    let intake = RecordingIntake(
+      store: store, settings: settingsStore, enqueue: { _, _ in throw Boom() })
+    let upload = directory.appendingPathComponent("upload.bin")
+    try Data([1]).write(to: upload)
+
+    await #expect(throws: Boom.self) {
+      _ = try await intake.admit(
+        file: upload, metadata: SampleData.recordingMetadata(), device: SampleData.pairedDevice())
+    }
+    #expect(try await store.receipt(SampleData.uuid(91)) == nil)
+    #expect(try await store.meetings().isEmpty)
+  }
 }

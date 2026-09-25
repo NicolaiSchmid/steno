@@ -13,7 +13,7 @@ struct PipelineHarness {
   let engine: FakeSpeechEngine
   let diarizer: FakeDiarizer
   let memory: InMemorySpeakerMemory
-  let cleaner: PassthroughCleaner
+  let cleaner: any TranscriptCleaner
   let summarizer: FakeSummarizer
   let destination: RecordingDestination
   let dispatcher: RecordingDispatcher
@@ -26,7 +26,7 @@ struct PipelineHarness {
     engine: FakeSpeechEngine = FakeSpeechEngine(),
     diarizer: FakeDiarizer = FakeDiarizer(),
     memory: InMemorySpeakerMemory = InMemorySpeakerMemory(people: SampleData.persons()),
-    cleaner: PassthroughCleaner = PassthroughCleaner(),
+    cleaner: any TranscriptCleaner = PassthroughCleaner(),
     summarizer: FakeSummarizer = FakeSummarizer(),
     retention: AudioRetention = .keepDays(30),
     sharedStore: MeetingStore? = nil
@@ -314,5 +314,219 @@ struct PipelineHarness {
       speakers: [])
     #expect(room.speakers.isEmpty)
     #expect(room.segments.first?.speakerID == nil)
+  }
+}
+
+@Suite struct CleanupStageTests {
+  /// A cleaner that applies `transform` to the segments it is given.
+  struct ScriptedCleaner: TranscriptCleaner, Sendable {
+    var transform: @Sendable ([TranscriptSegment]) -> [TranscriptSegment]
+    let usage = LLMUsage(promptTokens: 7, completionTokens: 3, requests: 1)
+
+    func clean(_ input: CleanupInput) async throws -> CleanupOutput {
+      CleanupOutput(segments: transform(input.segments), failedChunks: [], usage: usage)
+    }
+  }
+
+  /// A harness whose store already holds the sample transcript.
+  static func prepared(cleaner: any TranscriptCleaner) async throws -> (PipelineHarness, Meeting) {
+    let harness = try await PipelineHarness(cleaner: cleaner)
+    let (meeting, asset) = harness.meeting(source: .macCall)
+    try await harness.store.save(meeting, asset: asset)
+    try await harness.store.replaceTranscript(
+      meetingID: meeting.id, segments: SampleData.segments(), speakers: SampleData.speakers())
+    return (harness, meeting)
+  }
+
+  @Test func onlyTheCleanedTextIsTakenAndItIsPersisted() async throws {
+    let cleaner = ScriptedCleaner { segments in
+      segments.map { segment in
+        var tampered = segment
+        tampered.text = segment.text.uppercased()
+        tampered.rawText = "tampered"
+        tampered.speakerID = nil
+        tampered.start += 100
+        tampered.lane = .mixed
+        return tampered
+      }
+    }
+    let (harness, meeting) = try await Self.prepared(cleaner: cleaner)
+    defer { harness.cleanUp() }
+    let cleaned = try await harness.pipeline.cleanup(
+      meeting: meeting, segments: SampleData.segments(), speakers: SampleData.speakers())
+    var expected = SampleData.segments()
+    for index in expected.indices { expected[index].text = expected[index].text.uppercased() }
+    #expect(cleaned.segments == expected, "ids, order, rawText, speaker and lane are the merge's")
+    #expect(cleaned.usage == cleaner.usage)
+    let export = try await harness.store.export(meetingID: meeting.id)
+    #expect(export.segments == expected)
+    #expect(export.speakers == SampleData.speakers())
+    #expect(try await harness.store.search("neunzig").count == 1)
+  }
+
+  @Test func droppingReorderingOrThrowingFailsTheStageAndKeepsTheTranscript() async throws {
+    do {
+      let (harness, meeting) = try await Self.prepared(
+        cleaner: ScriptedCleaner { Array($0.dropLast()) })
+      defer { harness.cleanUp() }
+      let failure = await #expect(throws: PipelineFailure.self) {
+        _ = try await harness.pipeline.cleanup(
+          meeting: meeting, segments: SampleData.segments(), speakers: SampleData.speakers())
+      }
+      #expect(
+        failure == PipelineFailure(stage: .cleanup, reason: "cleaner returned 2 segments for 3"))
+      #expect(
+        try await harness.store.export(meetingID: meeting.id).segments == SampleData.segments())
+    }
+    do {
+      let (harness, meeting) = try await Self.prepared(cleaner: ScriptedCleaner { $0.reversed() })
+      defer { harness.cleanUp() }
+      let failure = await #expect(throws: PipelineFailure.self) {
+        _ = try await harness.pipeline.cleanup(
+          meeting: meeting, segments: SampleData.segments(), speakers: SampleData.speakers())
+      }
+      #expect(failure?.stage == .cleanup)
+      #expect(failure?.reason.hasPrefix("cleaner reordered segment") == true)
+      #expect(
+        try await harness.store.export(meetingID: meeting.id).segments == SampleData.segments())
+    }
+    do {
+      struct Boom: Error {}
+      let (harness, meeting) = try await Self.prepared(
+        cleaner: PassthroughCleaner(failure: Boom()))
+      defer { harness.cleanUp() }
+      let failure = await #expect(throws: PipelineFailure.self) {
+        _ = try await harness.pipeline.cleanup(
+          meeting: meeting, segments: SampleData.segments(), speakers: SampleData.speakers())
+      }
+      #expect(failure == PipelineFailure(stage: .cleanup, reason: "Boom()"))
+      #expect(
+        try await harness.store.export(meetingID: meeting.id).segments == SampleData.segments())
+    }
+  }
+}
+
+@Suite struct SummarizeStageTests {
+  static func prepared(summarizer: FakeSummarizer = FakeSummarizer()) async throws -> (
+    PipelineHarness, Meeting
+  ) {
+    let harness = try await PipelineHarness(summarizer: summarizer)
+    let (meeting, asset) = harness.meeting(source: .macCall)
+    try await harness.store.save(meeting, asset: asset)
+    try await harness.store.replaceTranscript(
+      meetingID: meeting.id, segments: SampleData.segments(), speakers: SampleData.speakers())
+    return (harness, meeting)
+  }
+
+  @Test func unknownTemplateFallsBackAndTheModelTitleReplacesAPlainOne() async throws {
+    let (harness, meeting) = try await Self.prepared()
+    defer { harness.cleanUp() }
+    let prior = LLMUsage(promptTokens: 100, completionTokens: 50, requests: 1)
+    let updated = try await harness.pipeline.summarize(
+      meeting: meeting, segments: SampleData.segments(), speakers: SampleData.speakers(),
+      templateID: "nope", priorUsage: prior)
+    #expect(await harness.summarizer.calls.calls == ["default"])
+    #expect(updated.templateID == "default")
+    #expect(updated.summary?.templateID == "default")
+    #expect(updated.summary?.sections.map(\.id) == SummaryTemplate.bundled[0].sections.map(\.id))
+    #expect(updated.title == "Summary of Untitled")
+    #expect(updated.llmUsage == prior + harness.summarizer.usage)
+    #expect(updated.updatedAt == PipelineHarness.now)
+
+    let export = try await harness.store.export(meetingID: meeting.id)
+    #expect(export.meeting == updated)
+    #expect(export.tasks.map(\.text) == ["Follow up on Default."])
+    #expect(export.decisions.map(\.text) == ["Decision from Speaker 1."])
+    #expect(export.segments == SampleData.segments())
+  }
+
+  @Test func calendarTitlesAndEmptyModelTitlesLeaveTheTitleAlone() async throws {
+    var canned = SampleData.summaryOutput()
+    canned.title = "Model title"
+    canned.language = Locale.Language(stenoIdentifier: "fr")
+    let (harness, meeting) = try await Self.prepared(summarizer: FakeSummarizer(canned: canned))
+    defer { harness.cleanUp() }
+
+    var scheduled = meeting
+    scheduled.calendarEventID = "event-1"
+    let kept = try await harness.pipeline.summarize(
+      meeting: scheduled, segments: SampleData.segments(), speakers: SampleData.speakers(),
+      templateID: "interview", priorUsage: nil)
+    #expect(kept.title == "Untitled", "a calendar title is authoritative")
+    #expect(kept.language == Locale.Language(stenoIdentifier: "fr"))
+    #expect(kept.templateID == "interview")
+    #expect(kept.summary?.templateID == "interview")
+    #expect(kept.llmUsage == canned.usage, "no prior usage and none on the meeting")
+
+    let replaced = try await harness.pipeline.summarize(
+      meeting: meeting, segments: SampleData.segments(), speakers: SampleData.speakers(),
+      templateID: "interview", priorUsage: nil)
+    #expect(replaced.title == "Model title")
+
+    canned.title = ""
+    let untitled = try await PipelineHarness(
+      summarizer: FakeSummarizer(canned: canned), sharedStore: harness.store)
+    defer { untitled.cleanUp() }
+    let unchanged = try await untitled.pipeline.summarize(
+      meeting: meeting, segments: SampleData.segments(), speakers: SampleData.speakers(),
+      templateID: "default", priorUsage: nil)
+    #expect(unchanged.title == "Untitled", "an empty model title never replaces the meeting's")
+    #expect(try await harness.store.meeting(id: meeting.id)?.title == "Untitled")
+  }
+}
+
+@Suite struct PersistStageTests {
+  @Test func anAACAssetGetsNoMixdownAndAConfirmedCastPostsNoReview() async throws {
+    let harness = try await PipelineHarness()
+    defer { harness.cleanUp() }
+    let (meeting, template) = harness.meeting(source: .phone)
+    var asset = template
+    asset.format = .m4aAAC
+    try await harness.store.save(meeting, asset: asset)
+    try await harness.store.replaceTranscript(
+      meetingID: meeting.id, segments: [],
+      speakers: [LaneMerger.meSpeaker(meetingID: meeting.id, personID: SampleData.personNicolaiID)])
+    let stream = await harness.events.subscribe()
+
+    let persisted = try await harness.pipeline.persist(
+      meeting: meeting, asset: asset, settings: harness.settings)
+
+    #expect(persisted.mixdownURL == nil)
+    #expect(try await harness.store.asset(id: asset.id) == persisted)
+    #expect(try await harness.store.meeting(id: meeting.id)?.state == .ready)
+    let folder = ProcessingPipeline.meetingFolder(meeting.id, settings: harness.settings)
+    #expect(
+      !FileManager.default.fileExists(atPath: folder.appendingPathComponent("audio.m4a").path))
+    let sentinel = MeetingEvent.progress(meetingID: meeting.id, stage: .retention, fraction: 1)
+    await harness.events.post(sentinel)
+    var iterator = stream.makeAsyncIterator()
+    #expect(
+      await iterator.next() == .progress(meetingID: meeting.id, stage: .persist, fraction: 0.7))
+    #expect(await iterator.next() == sentinel, "no speakersNeedReview when everyone is confirmed")
+  }
+
+  @Test func aWAVAssetGetsAMixdownAndOnlyUnconfirmedSpeakersNeedReview() async throws {
+    let harness = try await PipelineHarness()
+    defer { harness.cleanUp() }
+    let (meeting, asset) = harness.meeting(source: .macInPerson)
+    try await harness.store.save(meeting, asset: asset)
+    try await harness.store.replaceTranscript(
+      meetingID: meeting.id, segments: [], speakers: SampleData.speakers())
+    let stream = await harness.events.subscribe()
+
+    let persisted = try await harness.pipeline.persist(
+      meeting: meeting, asset: asset, settings: harness.settings)
+
+    let mixdown = ProcessingPipeline.meetingFolder(meeting.id, settings: harness.settings)
+      .appendingPathComponent("audio.m4a")
+    #expect(persisted.mixdownURL == mixdown)
+    #expect(try Data(contentsOf: mixdown) == Data(contentsOf: asset.url))
+    #expect(try await harness.store.asset(id: asset.id)?.mixdownURL == mixdown)
+    var iterator = stream.makeAsyncIterator()
+    #expect(
+      await iterator.next() == .progress(meetingID: meeting.id, stage: .persist, fraction: 0.7))
+    #expect(
+      await iterator.next()
+        == .speakersNeedReview(meetingID: meeting.id, speakerIDs: [SampleData.speakerTwoID]))
   }
 }

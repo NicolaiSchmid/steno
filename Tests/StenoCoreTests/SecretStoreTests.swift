@@ -40,4 +40,17 @@ import Testing
     #expect(
       try await FileSecretStore(url: url, environment: [:]).secret(for: .llmAPIKey) == "from-file")
   }
+
+  @Test func anEmptyEnvironmentVariableDoesNotOverrideTheFile() async throws {
+    let directory = try Fixtures.temporaryDirectory()
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let url = directory.appendingPathComponent("secrets.json")
+    let store = FileSecretStore(url: url, environment: ["STENO_LLM_API_KEY": ""])
+    #expect(try await store.secret(for: .llmAPIKey) == nil)
+    try await store.setSecret("from-file", for: .llmAPIKey)
+    #expect(try await store.secret(for: .llmAPIKey) == "from-file")
+    #expect(
+      FileSecretStore.environmentVariable(for: SecretKey(rawValue: "obsidian-token"))
+        == "STENO_OBSIDIAN_TOKEN")
+  }
 }

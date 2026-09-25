@@ -318,4 +318,114 @@ import Testing
     #expect(a != MeetingStore.derivedID(SampleData.meetingID, salt: "decision-1"))
     #expect(a != MeetingStore.derivedID(SampleData.uuid(2), salt: "decision-0"))
   }
+
+  @Test func mergeSpeakersTakesTheSourceAssignmentWhenTheTargetIsUnknown() async throws {
+    let store = try await Self.populated()
+    var speakers = SampleData.speakers()
+    speakers[0].assignment = .unknown
+    speakers[0].embedding = nil
+    speakers[0].sampleClipRange = nil
+    speakers[0].clusterConfidence = 0.3
+    speakers[1].sampleClipURL = nil
+    try await store.replaceTranscript(
+      meetingID: SampleData.meetingID, segments: SampleData.segments(), speakers: speakers)
+
+    try await store.mergeSpeakers(
+      SampleData.speakerTwoID, into: SampleData.speakerOneID, meetingID: SampleData.meetingID)
+
+    let remaining = try await store.speakers(meetingID: SampleData.meetingID)
+    #expect(remaining.map(\.id) == [SampleData.speakerOneID])
+    let kept = try #require(remaining.first)
+    #expect(kept.assignment == .suggested(personID: SampleData.personJeromeID, similarity: 0.72))
+    #expect(kept.sampleClipRange == 3...5.5)
+    #expect(kept.clusterConfidence == 0.75)
+    #expect(
+      kept.embedding == SampleData.embedding(axis: 1), "a missing embedding takes the source's")
+    #expect(kept.clusterLabel == "Speaker 1")
+  }
+
+  @Test func mergeSpeakersRefusesOtherMeetingsAndSelfMergesAreNoOps() async throws {
+    let store = try await Self.populated()
+    var other = SampleData.meeting()
+    other.id = SampleData.uuid(2)
+    try await store.save(other)
+    let stranger = Speaker(
+      id: SampleData.uuid(25), meetingID: other.id, clusterLabel: "Speaker 1",
+      clusterConfidence: 0.5)
+    try await store.replaceTranscript(meetingID: other.id, segments: [], speakers: [stranger])
+
+    await #expect(
+      throws: MeetingStoreError.speakersInDifferentMeetings(stranger.id, SampleData.speakerOneID)
+    ) {
+      try await store.mergeSpeakers(
+        stranger.id, into: SampleData.speakerOneID, meetingID: SampleData.meetingID)
+    }
+    await #expect(throws: MeetingStoreError.speakerNotFound(SampleData.uuid(999))) {
+      try await store.mergeSpeakers(
+        SampleData.speakerTwoID, into: SampleData.uuid(999), meetingID: SampleData.meetingID)
+    }
+    try await store.mergeSpeakers(
+      SampleData.speakerOneID, into: SampleData.speakerOneID, meetingID: SampleData.meetingID)
+    try await store.mergePersons(
+      keep: SampleData.personNicolaiID, remove: SampleData.personNicolaiID)
+    #expect(try await store.export(meetingID: SampleData.meetingID) == SampleData.export())
+    #expect(try await store.speakers(meetingID: other.id) == [stranger])
+  }
+
+  @Test func confirmKeepsAnExistingPersonAndSkipsEnrolWithoutAnEmbedding() async throws {
+    let store = try await Self.populated()
+    var speakers = SampleData.speakers()
+    speakers[1].assignment = .unknown
+    speakers[1].sampleClipURL = nil
+    var bare = speakers[0]
+    bare.id = SampleData.uuid(22)
+    bare.clusterLabel = "Speaker 3"
+    bare.assignment = .unknown
+    bare.embedding = nil
+    bare.sampleClipRange = nil
+    speakers.append(bare)
+    try await store.replaceTranscript(
+      meetingID: SampleData.meetingID, segments: SampleData.segments(), speakers: speakers)
+    let memory = InMemorySpeakerMemory(people: SampleData.persons())
+    var renamed = SampleData.persons()[1]
+    renamed.displayName = "Somebody Else"
+    renamed.email = nil
+
+    try await store.confirm(speakerID: SampleData.speakerTwoID, person: renamed, memory: memory)
+
+    #expect(
+      try await store.person(id: SampleData.personNicolaiID) == SampleData.persons()[1],
+      "an existing person row is not overwritten")
+    #expect(try await store.persons().count == 2)
+    #expect(
+      try await store.speakers(meetingID: SampleData.meetingID).map(\.assignment) == [
+        .confirmed(personID: SampleData.personNicolaiID),
+        .confirmed(personID: SampleData.personNicolaiID), .unknown,
+      ])
+    #expect(
+      await memory.enrolments == [
+        .init(embedding: SampleData.embedding(axis: 1), personID: SampleData.personNicolaiID)
+      ])
+
+    try await store.confirm(speakerID: bare.id, person: SampleData.persons()[0], memory: memory)
+    #expect(await memory.enrolments.count == 1, "no embedding, nothing to enrol")
+    #expect(
+      try await store.speakers(meetingID: SampleData.meetingID).last?.assignment
+        == .confirmed(personID: SampleData.personJeromeID))
+    await #expect(throws: MeetingStoreError.speakerNotFound(SampleData.uuid(999))) {
+      try await store.confirm(speakerID: SampleData.uuid(999), person: renamed, memory: memory)
+    }
+    #expect(await memory.enrolments.count == 1)
+  }
+
+  @Test func transcriptAndSummaryWritesNeedTheMeeting() async throws {
+    let store = try MeetingStore.inMemory()
+    await #expect(throws: MeetingStoreError.meetingNotFound(SampleData.meetingID)) {
+      try await store.replaceTranscript(meetingID: SampleData.meetingID, segments: [], speakers: [])
+    }
+    await #expect(throws: MeetingStoreError.meetingNotFound(SampleData.meetingID)) {
+      try await store.replaceSummary(
+        meetingID: SampleData.meetingID, output: SampleData.summaryOutput(), templateID: "default")
+    }
+  }
 }

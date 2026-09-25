@@ -444,4 +444,10 @@ differently from the text above and why.
   `swift test --skip-build`, so build failures and test failures are separate steps.
 - `StenoPaths` reads `HOME` from the environment before asking Foundation: swift-corelibs
   Foundation ignores the variable in `homeDirectoryForCurrentUser`, which the CLI tests' temporary
-  home depends on.
+  home depends on. The testing pass added `homeDirectory(environment:)`,
+  `supportDirectory(environment:)` and `default(environment:)` (defaulting to the process
+  environment) so `StenoPathsTests` runs under `--parallel` without touching the process's `HOME`.
+- Testing pass (2026-09-25): `Tests/StenoCoreTests/PlaceholderTests.swift`, which the simplify pass
+  described as deleted, was still in the tree; it is removed here and its two checks live in
+  `MigrationsTests` and `CLITests`. `snapshots/e2e/mac-call-summary.md` is the first end-to-end
+  golden; a workstream that replaces a fake updates it in the same PR.

@@ -169,6 +169,21 @@ import Testing
     let notAUUID = try Self.run(["export", "nope", "--db", db], home: home)
     #expect(notAUUID.status == 1)
 
+    let garbage = home.appendingPathComponent("garbage.wav")
+    try Data(repeating: 0x41, count: 64).write(to: garbage)
+    let malformed = try Self.run(
+      [
+        "process", garbage.path, "--db", db, "--audio-folder",
+        home.appendingPathComponent("audio").path,
+      ], home: home)
+    #expect(malformed.status == 2)
+    #expect(malformed.stderr.contains("RIFF"))
+
+    let unwritable = try Self.run(
+      ["dev", "db", "migrate", "--db", garbage.appendingPathComponent("steno.sqlite").path],
+      home: home)
+    #expect(unwritable.status == 2)
+
     let version = try Self.run(["--version"], home: home)
     #expect(version.status == 0)
     #expect(version.stdout.trimmingCharacters(in: .whitespacesAndNewlines) == StenoCore.version)

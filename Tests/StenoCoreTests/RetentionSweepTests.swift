@@ -76,4 +76,27 @@ import Testing
     #expect(removed == [present])
     #expect(try await store.asset(id: asset.id)?.expiresAt == nil)
   }
+
+  /// `steno process` stores the mic file as both master and `.mic` sidecar.
+  @Test func aSidecarThatIsAlsoTheMasterIsRemovedOnce() async throws {
+    let directory = try Fixtures.temporaryDirectory()
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let store = try MeetingStore.inMemory()
+    try await store.save(SampleData.meeting())
+    let mic = directory.appendingPathComponent("mic.wav")
+    let system = directory.appendingPathComponent("system.wav")
+    try Data([1]).write(to: mic)
+    try Data([2]).write(to: system)
+    let asset = AudioAsset(
+      id: SampleData.uuid(70), meetingID: SampleData.meetingID, url: mic, format: .wav16kInt16,
+      lanes: [.mic, .system], sidecars16k: [.mic: mic, .system: system],
+      retention: .deleteAfterProcessing, expiresAt: SampleData.updatedAt)
+    try await store.save(asset)
+    #expect(asset.expirableFiles == [mic, mic, system])
+    let removed = try await RetentionSweep(store: store).run(now: SampleData.updatedAt)
+    #expect(removed == [mic, system])
+    #expect(!FileManager.default.fileExists(atPath: mic.path))
+    #expect(!FileManager.default.fileExists(atPath: system.path))
+    #expect(try await store.asset(id: asset.id)?.expiresAt == nil)
+  }
 }

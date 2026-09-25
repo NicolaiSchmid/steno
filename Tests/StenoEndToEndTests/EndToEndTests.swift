@@ -76,6 +76,8 @@ import Testing
     #expect(export.speakers.map(\.clusterLabel) == ["Me", "Speaker 1", "Speaker 2"])
     #expect(receipt.files.first?.sha256 == ContentHash.sha256(json))
     #expect(!SummaryMarkdown.render(export).isEmpty)
+    try Snapshot.assert(
+      SummaryMarkdown.render(export), matches: "snapshots/e2e/mac-call-summary.md")
 
     guard stored.state == .ready else { return }
     var iterator = stream.makeAsyncIterator()

@@ -11,6 +11,8 @@ case-insensitive by default.
 | `templates/` | The bundled summary templates as `StenoJSON`, one golden per template |
 | `exports/` | The `MeetingExport` golden that is `meeting.json` |
 | `snapshots/schema/` | `sqlite_master` dump per migration version |
+| `snapshots/summary/` | `SummaryMarkdown.render` output for the sample export |
+| `snapshots/e2e/` | What `StenoEndToEndTests` renders from the vault's `meeting.json`; each workstream that replaces a fake updates it in the same PR |
 | `snapshots/` (other) | Golden outputs of later workstreams' renderers |
 
 No real meeting audio, ever. Audio is generated: `steno dev fixtures generate

@@ -223,4 +223,167 @@ import Testing
       try await harness.store.receipt(metadata.recordingID)?.state
         == .complete(meetingID: meetingID))
   }
+
+  @Test func cleanupFailureKeepsTheMergedTranscriptAndStopsTheEvents() async throws {
+    struct Boom: Error {}
+    let harness = try await PipelineHarness(cleaner: PassthroughCleaner(failure: Boom()))
+    defer { harness.cleanUp() }
+    let events = await harness.events.subscribe()
+    let (meeting, asset) = harness.meeting(source: .macCall)
+    try await harness.store.save(meeting, asset: asset)
+    let error = await #expect(throws: PipelineFailure.self) {
+      try await harness.pipeline.process(assetID: asset.id)
+    }
+    #expect(error == PipelineFailure(stage: .cleanup, reason: "Boom()"))
+    let export = try await harness.store.export(meetingID: meeting.id)
+    #expect(export.meeting.state == .failed(reason: "cleanup: Boom()"))
+    #expect(export.segments.count == 12)
+    #expect(export.segments.allSatisfy { $0.text == $0.rawText })
+    #expect(export.speakers.map(\.clusterLabel) == ["Me", "Speaker 1", "Speaker 2"])
+    #expect(export.meeting.summary == nil)
+    #expect(export.audio?.mixdownURL == nil)
+    #expect(export.audio?.expiresAt == nil)
+    #expect(await harness.dispatcher.calls.count == 0)
+
+    let sentinel = MeetingEvent.speakersNeedReview(meetingID: meeting.id, speakerIDs: [])
+    await harness.events.post(sentinel)
+    var iterator = events.makeAsyncIterator()
+    var stages: [PipelineStage] = []
+    while let event = await iterator.next(), event != sentinel {
+      if case .progress(_, let stage, _) = event { stages.append(stage) }
+    }
+    #expect(stages == [.decode, .transcribe, .diarize, .matchSpeakers, .merge, .cleanup])
+  }
+
+  @Test func processingAnUnknownAssetFailsAtDecode() async throws {
+    let harness = try await PipelineHarness()
+    defer { harness.cleanUp() }
+    let error = await #expect(throws: PipelineFailure.self) {
+      try await harness.pipeline.process(assetID: SampleData.uuid(999))
+    }
+    #expect(error?.stage == .decode)
+    #expect(error?.reason.contains("not found") == true)
+    #expect(try await harness.store.meetings().isEmpty)
+  }
+
+  @Test func rerunSummaryFailureMarksFailedAndKeepsThePreviousSummary() async throws {
+    struct Boom: Error {}
+    let harness = try await PipelineHarness()
+    defer { harness.cleanUp() }
+    let (meeting, asset) = harness.meeting(source: .macInPerson)
+    try await harness.pipeline.enqueue(meeting, asset: asset)
+    await harness.pipeline.waitUntilIdle()
+    let before = try await harness.store.export(meetingID: meeting.id)
+    #expect(before.meeting.state == .ready)
+
+    let failing = try await PipelineHarness(
+      summarizer: FakeSummarizer(failure: Boom()), sharedStore: harness.store)
+    defer { failing.cleanUp() }
+    let error = await #expect(throws: PipelineFailure.self) {
+      try await failing.pipeline.rerunSummary(meetingID: meeting.id, templateID: "interview")
+    }
+    #expect(error == PipelineFailure(stage: .summarize, reason: "Boom()"))
+    let after = try await harness.store.export(meetingID: meeting.id)
+    #expect(after.meeting.state == .failed(reason: "summarize: Boom()"))
+    #expect(after.meeting.summary == before.meeting.summary)
+    #expect(after.meeting.templateID == "default")
+    #expect(after.segments == before.segments)
+    #expect(after.tasks == before.tasks)
+    #expect(after.decisions == before.decisions)
+    #expect(await failing.dispatcher.calls.count == 0)
+  }
+
+  @Test func redeliverHandsTheStoredReceiptToTheDestination() async throws {
+    let harness = try await PipelineHarness()
+    defer { harness.cleanUp() }
+    let (meeting, asset) = harness.meeting(source: .macInPerson)
+    try await harness.pipeline.enqueue(meeting, asset: asset)
+    await harness.pipeline.waitUntilIdle()
+    var delivery = try #require(try await harness.store.deliveries(meetingID: meeting.id).first)
+    var receipt = try #require(delivery.receipt)
+    receipt.folder = "moved-by-the-user"
+    delivery.receipt = receipt
+    try await harness.store.save(delivery)
+
+    try await harness.pipeline.redeliver(meetingID: meeting.id)
+
+    let deliveries = try await harness.store.deliveries(meetingID: meeting.id)
+    #expect(deliveries.map(\.id) == [delivery.id])
+    #expect(deliveries.first?.status == .delivered)
+    #expect(deliveries.first?.receipt?.folder == "moved-by-the-user")
+    let moved = harness.destination.root.appendingPathComponent("moved-by-the-user/meeting.json")
+    let written = try Data(contentsOf: moved)
+    #expect(deliveries.first?.receipt?.files.first?.sha256 == ContentHash.sha256(written))
+    #expect(try StenoJSON.decode(MeetingExport.self, from: written).meeting.id == meeting.id)
+    #expect(await harness.destination.deliveries.count == 2)
+  }
+
+  @Test func retentionZeroSweepRemovesTheAudioAndKeepsTheSampleClips() async throws {
+    let harness = try await PipelineHarness()
+    defer { harness.cleanUp() }
+    let master = harness.directory.appendingPathComponent("master.wav")
+    let mic = harness.directory.appendingPathComponent("mic.wav")
+    let system = harness.directory.appendingPathComponent("system.wav")
+    try FileManager.default.copyItem(
+      at: Fixtures.url("audio/conversation-two-lane-6s.wav"), to: master)
+    try FileManager.default.copyItem(at: Fixtures.url("audio/conversation-mic-6s.wav"), to: mic)
+    try FileManager.default.copyItem(
+      at: Fixtures.url("audio/conversation-system-6s.wav"), to: system)
+    let (meeting, template) = harness.meeting(source: .macCall, retention: .deleteAfterProcessing)
+    var asset = template
+    asset.url = master
+    asset.sidecars16k = [.mic: mic, .system: system]
+    try await harness.pipeline.enqueue(meeting, asset: asset)
+    await harness.pipeline.waitUntilIdle()
+    let before = try await harness.store.export(meetingID: meeting.id)
+    #expect(before.meeting.state == .ready)
+    #expect(before.audio?.expiresAt == PipelineHarness.now)
+    let mixdown = try #require(before.audio?.mixdownURL)
+    let clips = before.speakers.compactMap(\.sampleClipURL)
+    #expect(clips.count == 2)
+
+    let sweep = RetentionSweep(store: harness.store)
+    #expect(try await sweep.run(now: PipelineHarness.now.addingTimeInterval(-1)).isEmpty)
+    let removed = try await sweep.run(now: PipelineHarness.now)
+    #expect(removed == [master, mic, system, mixdown])
+    for url in removed {
+      #expect(!FileManager.default.fileExists(atPath: url.path), "\(url.lastPathComponent)")
+    }
+    for clip in clips {
+      #expect(FileManager.default.fileExists(atPath: clip.path), "\(clip.lastPathComponent)")
+    }
+    let after = try await harness.store.export(meetingID: meeting.id)
+    #expect(after.audio?.expiresAt == nil)
+    #expect(after.audio?.url == master, "the row keeps its URLs")
+    #expect(after.speakers.compactMap(\.sampleClipURL) == clips)
+    #expect(after.segments == before.segments)
+    #expect(try await sweep.run(now: .distantFuture).isEmpty)
+  }
+
+  @Test func aPhoneAACRecordingIsNotMixedDownAgain() async throws {
+    let harness = try await PipelineHarness()
+    defer { harness.cleanUp() }
+    try await harness.store.save(
+      SampleData.pairedDevice(), tokenHash: Data(repeating: 1, count: 32))
+    let upload = harness.directory.appendingPathComponent("upload.m4a")
+    try FileManager.default.copyItem(
+      at: Fixtures.url("audio/conversation-two-lane-6s.wav"), to: upload)
+    let intake = RecordingIntake(
+      store: harness.store, settings: harness.settingsStore, pipeline: harness.pipeline,
+      now: { PipelineHarness.now })
+    let meetingID = try await intake.admit(
+      file: upload, metadata: SampleData.recordingMetadata(), device: SampleData.pairedDevice())
+    await harness.pipeline.waitUntilIdle()
+    let export = try await harness.store.export(meetingID: meetingID)
+    #expect(export.meeting.state == .ready)
+    let audio = try #require(export.audio)
+    #expect(audio.format == .m4aAAC)
+    #expect(audio.mixdownURL == nil)
+    let folder = ProcessingPipeline.meetingFolder(meetingID, settings: harness.settings)
+    #expect(audio.url.path == folder.appendingPathComponent("recording.m4a").path)
+    #expect(
+      !FileManager.default.fileExists(atPath: folder.appendingPathComponent("audio.m4a").path))
+    #expect(audio.expiresAt == PipelineHarness.now.addingTimeInterval(30 * 86_400))
+    #expect(export.speakers.allSatisfy { $0.sampleClipURL != nil })
+  }
 }
