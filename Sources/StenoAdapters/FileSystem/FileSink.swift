@@ -12,8 +12,6 @@ protocol FileSink: Sendable {
   func write(_ data: Data, to relativePath: String) throws
   func createDirectory(_ relativePath: String) throws
   func removeStaleTemporaries(in relativeDirectory: String)
-  /// Sorted names inside a directory; nil when it does not exist.
-  func list(_ relativeDirectory: String) -> [String]?
 }
 
 /// The local file system under one folder, writing through
@@ -51,9 +49,5 @@ struct LocalFolderSink: FileSink {
 
   func removeStaleTemporaries(in relativeDirectory: String) {
     AtomicFileWriter.removeStaleTemporaries(in: url(relativeDirectory))
-  }
-
-  func list(_ relativeDirectory: String) -> [String]? {
-    (try? FileManager.default.contentsOfDirectory(atPath: url(relativeDirectory).path))?.sorted()
   }
 }
