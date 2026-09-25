@@ -97,7 +97,9 @@ public actor ProcessingPipeline {
 
   /// Runs every stage: `queued → processing → ready`, or `failed(reason)`
   /// with whatever was persisted so far (the transcript survives a cleanup
-  /// or summarize failure).
+  /// or summarize failure). Once `persist` has marked the meeting `.ready`
+  /// nothing downgrades it: a `retention` error is thrown to the caller and
+  /// the meeting stays ready and delivered.
   public func process(assetID: UUID) async throws {
     guard let asset = try await store.asset(id: assetID) else {
       throw PipelineFailure(stage: .decode, reason: "audio asset \(assetID) not found")
@@ -107,6 +109,7 @@ public actor ProcessingPipeline {
     }
     try await exclusively(meeting.id, stage: .decode) {
       try await store.setState(.processing, meetingID: meeting.id, now: now)
+      let persisted: AudioAsset
       do {
         let settings = try await dependencies.settings.load()
         let transcription = try await decodeAndTranscribe(asset: asset, meetingID: meeting.id)
@@ -124,15 +127,15 @@ public actor ProcessingPipeline {
         current.llmUsage = (current.llmUsage ?? .zero) + cleaned.usage
         current = try await summarize(
           meeting: current, segments: cleaned.segments, speakers: merged.speakers)
-        let persisted = try await persist(meeting: current, asset: asset)
-        await deliver(meetingID: meeting.id)
-        try await retention(asset: persisted)
+        persisted = try await persist(meeting: current, asset: asset)
       } catch {
         let failure = PipelineFailure(stage: .decode, error: error)
         try? await store.setState(
           .failed(reason: failure.description), meetingID: meeting.id, now: now)
         throw failure
       }
+      await deliver(meetingID: meeting.id)
+      try await retention(asset: persisted)
     }
   }
 

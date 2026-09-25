@@ -33,7 +33,10 @@ public struct WAVAudioDecoder: AudioDecoder, Sendable {
     try Self.read(asset.sidecars16k[lane] ?? asset.url)
   }
 
-  /// Copies the master; there is no AAC encoder in core.
+  /// There is no AAC encoder in core: the mixdown is a WAV copy of the master.
+  public var mixdownFormat: AudioFormat { .wav16kInt16 }
+
+  /// Copies the master to `url`.
   public func mixdown(_ asset: AudioAsset, to url: URL) async throws {
     try FileManager.default.createDirectory(
       at: url.deletingLastPathComponent(), withIntermediateDirectories: true)

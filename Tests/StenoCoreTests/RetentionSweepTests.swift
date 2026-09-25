@@ -76,6 +76,52 @@ import Testing
     #expect(try await store.asset(id: asset.id)?.expiresAt == nil)
   }
 
+  @Test func anUndeletableFileIsRetriedNextTimeAndDoesNotBlockOtherAssets() async throws {
+    let directory = try Fixtures.temporaryDirectory()
+    let locked = directory.appendingPathComponent("locked", isDirectory: true)
+    try FileManager.default.createDirectory(at: locked, withIntermediateDirectories: true)
+    let stuck = locked.appendingPathComponent("stuck.caf")
+    try Data([1]).write(to: stuck)
+    let free = directory.appendingPathComponent("free.caf")
+    try Data([2]).write(to: free)
+    // A read-only parent refuses the unlink; restored before cleanup.
+    try FileManager.default.setAttributes([.posixPermissions: 0o500], ofItemAtPath: locked.path)
+    defer {
+      try? FileManager.default.setAttributes(
+        [.posixPermissions: 0o700], ofItemAtPath: locked.path)
+      try? FileManager.default.removeItem(at: directory)
+    }
+    let store = try MeetingStore.inMemory()
+    try await store.save(SampleData.meeting())
+    var other = SampleData.meeting()
+    other.id = SampleData.uuid(2)
+    try await store.save(other)
+    let stuckAsset = AudioAsset(
+      id: SampleData.uuid(70), meetingID: SampleData.meetingID, url: stuck,
+      format: .caf48kFloat32, lanes: [.mixed], retention: .deleteAfterProcessing,
+      expiresAt: SampleData.updatedAt)
+    let freeAsset = AudioAsset(
+      id: SampleData.uuid(71), meetingID: other.id, url: free, format: .caf48kFloat32,
+      lanes: [.mixed], retention: .deleteAfterProcessing, expiresAt: SampleData.updatedAt)
+    try await store.save(stuckAsset)
+    try await store.save(freeAsset)
+
+    let sweep = RetentionSweep(store: store)
+    let incomplete = await #expect(throws: RetentionSweep.Incomplete.self) {
+      try await sweep.run(now: SampleData.updatedAt)
+    }
+    #expect(incomplete?.failures.map(\.url) == [stuck])
+    #expect(!FileManager.default.fileExists(atPath: free.path), "the other asset was swept")
+    #expect(try await store.asset(id: freeAsset.id)?.expiresAt == nil)
+    #expect(
+      try await store.asset(id: stuckAsset.id)?.expiresAt == SampleData.updatedAt,
+      "still expired, so the next sweep retries")
+
+    try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: locked.path)
+    #expect(try await sweep.run(now: SampleData.updatedAt) == [stuck])
+    #expect(try await store.asset(id: stuckAsset.id)?.expiresAt == nil)
+  }
+
   /// `steno process` stores the mic file as both master and `.mic` sidecar.
   @Test func aSidecarThatIsAlsoTheMasterIsRemovedOnce() async throws {
     let directory = try Fixtures.temporaryDirectory()

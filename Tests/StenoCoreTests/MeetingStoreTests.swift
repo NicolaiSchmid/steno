@@ -349,14 +349,18 @@ import Testing
     #expect(a != MeetingStore.derivedID(SampleData.uuid(2), salt: "decision-0"))
   }
 
-  @Test func mergeSpeakersTakesTheSourceAssignmentWhenTheTargetIsUnknown() async throws {
+  @Test func mergeSpeakersTakesTheSourceAssignmentAndClipWhenTheTargetHasNone() async throws {
     let store = try await Self.populated()
+    let directory = try Fixtures.temporaryDirectory()
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let clip = directory.appendingPathComponent("source.wav")
+    try Data([1, 2, 3]).write(to: clip)
     var speakers = SampleData.speakers()
     speakers[0].assignment = .unknown
     speakers[0].embedding = nil
     speakers[0].sampleClipRange = nil
     speakers[0].clusterConfidence = 0.3
-    speakers[1].sampleClipURL = nil
+    speakers[1].sampleClipURL = clip
     try await store.replaceTranscript(
       SampleData.meeting(), segments: SampleData.segments(), speakers: speakers)
 
@@ -368,6 +372,8 @@ import Testing
     let kept = try #require(remaining.first)
     #expect(kept.assignment == .suggested(personID: SampleData.personJeromeID, similarity: 0.72))
     #expect(kept.sampleClipRange == 3...5.5)
+    #expect(kept.sampleClipURL == clip, "the clip moves with its range")
+    #expect(FileManager.default.fileExists(atPath: clip.path))
     #expect(kept.clusterConfidence == 0.75)
     #expect(
       kept.embedding == SampleData.embedding(axis: 1), "a missing embedding takes the source's")

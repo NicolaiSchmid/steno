@@ -227,6 +227,25 @@ struct PipelineHarness {
   }
 }
 
+@Suite struct DiarizeLabelTests {
+  @Test func twoClustersWithOneLabelFailTheStage() async throws {
+    let doubled = FakeDiarizer(result: { _ in
+      DiarizationResult(clusters: [
+        SpeakerCluster(label: "Speaker 1", ranges: [0...3], clusterConfidence: 0.5),
+        SpeakerCluster(label: "Speaker 1", ranges: [3...6], clusterConfidence: 0.5),
+      ])
+    })
+    let harness = try await PipelineHarness(diarizer: doubled)
+    defer { harness.cleanUp() }
+    let (meeting, asset) = try harness.meeting(source: .macInPerson)
+    let failure = await #expect(throws: PipelineFailure.self) {
+      _ = try await harness.pipeline.diarize(asset: asset, meeting: meeting)
+    }
+    #expect(failure?.stage == .diarize)
+    #expect(failure?.reason.contains("Speaker 1") == true)
+  }
+}
+
 @Suite struct MatchSpeakersStageTests {
   @Test func matchesAboveThresholdAndLeavesTheRestUnknown() async throws {
     let harness = try await PipelineHarness()
@@ -427,12 +446,25 @@ struct PipelineHarness {
     return (harness, meeting)
   }
 
-  @Test func unknownTemplateFallsBackAndTheModelTitleReplacesAPlainOne() async throws {
+  @Test func anUnknownTemplateFailsTheStageWithoutCallingTheModel() async throws {
+    let (harness, meeting) = try await Self.prepared()
+    defer { harness.cleanUp() }
+    var unknown = meeting
+    unknown.templateID = "nope"
+    let failure = await #expect(throws: PipelineFailure.self) {
+      _ = try await harness.pipeline.summarize(
+        meeting: unknown, segments: SampleData.segments(), speakers: SampleData.speakers())
+    }
+    #expect(failure == PipelineFailure(stage: .summarize, reason: "unknown summary template nope"))
+    #expect(await harness.summarizer.calls.count == 0)
+    #expect(try await harness.store.meeting(id: meeting.id)?.summary == nil)
+  }
+
+  @Test func theModelTitleReplacesAPlainOneAndUsageSums() async throws {
     let (harness, meeting) = try await Self.prepared()
     defer { harness.cleanUp() }
     let prior = LLMUsage(promptTokens: 100, completionTokens: 50, requests: 1)
     var withUsage = meeting
-    withUsage.templateID = "nope"
     withUsage.llmUsage = prior
     let updated = try await harness.pipeline.summarize(
       meeting: withUsage, segments: SampleData.segments(), speakers: SampleData.speakers())
@@ -524,8 +556,9 @@ struct PipelineHarness {
 
     let persisted = try await harness.pipeline.persist(meeting: meeting, asset: asset)
 
-    let mixdown = RecordingLayout(asset: asset).mixdown(.m4aAAC)
-    #expect(persisted.mixdownURL == mixdown)
+    let mixdown = RecordingLayout(asset: asset).mixdown(.wav16kInt16)
+    #expect(persisted.mixdownURL == mixdown, "named after the decoder's mixdownFormat")
+    #expect(mixdown.lastPathComponent == "audio.wav")
     #expect(try Data(contentsOf: mixdown) == Data(contentsOf: asset.url))
     #expect(try await harness.store.asset(id: asset.id)?.mixdownURL == mixdown)
     var iterator = stream.makeAsyncIterator()

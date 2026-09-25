@@ -49,7 +49,7 @@ import Testing
     #expect(export.tasks.count == 1)
     #expect(export.decisions.count == 1)
     let audio = try #require(export.audio)
-    #expect(audio.mixdownURL == RecordingLayout(asset: asset).mixdown(.m4aAAC))
+    #expect(audio.mixdownURL == RecordingLayout(asset: asset).mixdown(.wav16kInt16))
     #expect(FileManager.default.fileExists(atPath: try #require(audio.mixdownURL).path))
     #expect(audio.expiresAt == PipelineHarness.now.addingTimeInterval(30 * 86_400))
     #expect(

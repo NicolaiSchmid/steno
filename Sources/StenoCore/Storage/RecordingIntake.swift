@@ -1,18 +1,26 @@
 import Foundation
 
-/// Admits a fully received phone recording: moves the file into
-/// `audioFolder/<meetingID>/`, writes the `HandoverReceipt` as
-/// `.complete(meetingID)`, and enqueues a `.phone` meeting with a `.mixed`
-/// `AudioAsset` under the default retention. Idempotent on `recordingID`: a
-/// recording already admitted returns the same meeting id and does nothing
-/// else.
+/// Admits a fully received phone recording: copies the file into
+/// `audioFolder/<meetingID>/` (`RecordingLayout`), writes the
+/// `HandoverReceipt` as `.complete(meetingID)`, enqueues a `.phone` meeting
+/// with a `.mixed` `AudioAsset` under the default retention, and only then
+/// deletes the upload. Idempotent on `recordingID`: a recording whose
+/// receipt is `.complete` and whose meeting still exists returns the same
+/// meeting id and does nothing else.
+///
+/// Order of writes, so that a failure at any point leaves a retryable state:
+/// copy (the source stays), receipt `.complete`, enqueue (meeting and asset
+/// in one transaction, processing starts). If enqueue throws, the copy is
+/// removed and the receipt becomes `.failed(reason)`, so the handover
+/// service's retry with the same path admits again instead of finding the
+/// file gone or a second meeting created.
 public struct RecordingIntake: HandoverIntake, Sendable {
   public typealias Enqueue = @Sendable (Meeting, AudioAsset) async throws -> Void
 
-  public var store: MeetingStore
-  public var settings: SettingsStore
-  public var enqueue: Enqueue
-  public var now: @Sendable () -> Date
+  public let store: MeetingStore
+  public let settings: SettingsStore
+  public let enqueue: Enqueue
+  public let now: @Sendable () -> Date
 
   /// `enqueue` is `ProcessingPipeline.enqueue(_:asset:)` in the app and the
   /// CLI; tests pass a counting closure.
@@ -44,9 +52,8 @@ public struct RecordingIntake: HandoverIntake, Sendable {
   public func admit(file: URL, metadata: RecordingMetadata, device: PairedDevice) async throws
     -> UUID
   {
-    if let existing = try await store.receipt(metadata.recordingID),
-      let meetingID = existing.state.meetingID
-    {
+    let existing = try await store.receipt(metadata.recordingID)
+    if let meetingID = existing?.state.meetingID, try await store.meeting(id: meetingID) != nil {
       return meetingID
     }
 
@@ -59,7 +66,7 @@ public struct RecordingIntake: HandoverIntake, Sendable {
     if FileManager.default.fileExists(atPath: destination.path) {
       try FileManager.default.removeItem(at: destination)
     }
-    try FileManager.default.moveItem(at: file, to: destination)
+    try FileManager.default.copyItem(at: file, to: destination)
 
     let meeting = Meeting(
       id: meetingID,
@@ -82,7 +89,7 @@ public struct RecordingIntake: HandoverIntake, Sendable {
     )
 
     var receipt =
-      try await store.receipt(metadata.recordingID)
+      existing
       ?? HandoverReceipt(
         recordingID: metadata.recordingID,
         deviceID: device.id,
@@ -96,8 +103,16 @@ public struct RecordingIntake: HandoverIntake, Sendable {
     receipt.state = .complete(meetingID: meetingID)
     receipt.updatedAt = timestamp
 
-    try await enqueue(meeting, asset)
-    try await store.save(receipt)
+    do {
+      try await store.save(receipt)
+      try await enqueue(meeting, asset)
+    } catch {
+      try? FileManager.default.removeItem(at: destination)
+      receipt.state = .failed("admit: \(error)")
+      try? await store.save(receipt)
+      throw error
+    }
+    try? FileManager.default.removeItem(at: file)
     return meetingID
   }
 

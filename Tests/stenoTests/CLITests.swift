@@ -88,7 +88,7 @@ import Testing
       UUID(uuidString: process.stdout.trimmingCharacters(in: .whitespacesAndNewlines)))
     let layout = RecordingLayout(audioFolder: audio, meetingID: meetingID)
     #expect(FileManager.default.fileExists(atPath: layout.master(.wav16kInt16).path))
-    #expect(FileManager.default.fileExists(atPath: layout.mixdown(.m4aAAC).path))
+    #expect(FileManager.default.fileExists(atPath: layout.mixdown(.wav16kInt16).path))
     #expect(
       try FileManager.default.contentsOfDirectory(atPath: layout.speakersDirectory.path).count == 2)
     let stored = try await SettingsStore(

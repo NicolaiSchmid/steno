@@ -9,7 +9,7 @@ import Testing
     func record(_ meeting: Meeting, _ asset: AudioAsset) { calls.append((meeting, asset)) }
   }
 
-  @Test func admitMovesTheFileEnqueuesOnceAndIsIdempotent() async throws {
+  @Test func admitPlacesTheFileEnqueuesOnceAndIsIdempotent() async throws {
     let directory = try Fixtures.temporaryDirectory()
     defer { try? FileManager.default.removeItem(at: directory) }
     let store = try MeetingStore.inMemory()
@@ -24,7 +24,11 @@ import Testing
     let enqueued = Enqueued()
     let intake = RecordingIntake(
       store: store, settings: settingsStore,
-      enqueue: { meeting, asset in await enqueued.record(meeting, asset) },
+      enqueue: { meeting, asset in
+        // Like the pipeline's enqueue: the meeting row exists afterwards.
+        try await store.save(meeting, asset: asset)
+        await enqueued.record(meeting, asset)
+      },
       now: { SampleData.createdAt })
     let upload = directory.appendingPathComponent("upload.bin")
     try Data(repeating: 0xAA, count: 4096).write(to: upload)
@@ -99,14 +103,14 @@ import Testing
     #expect(AudioFormat.wav16kInt16.fileExtension == "wav")
   }
 
-  @Test func aFailedEnqueueLeavesNoCompleteReceipt() async throws {
+  @Test func aFailedEnqueueLeavesAFailedReceiptTheUploadAndNoMeeting() async throws {
     struct Boom: Error {}
     let directory = try Fixtures.temporaryDirectory()
     defer { try? FileManager.default.removeItem(at: directory) }
     let store = try MeetingStore.inMemory()
     let settingsStore = SettingsStore(writer: store.writer)
     var settings = Settings()
-    settings.audioFolder = directory
+    settings.audioFolder = directory.appendingPathComponent("audio", isDirectory: true)
     try await settingsStore.save(settings)
     try await store.save(SampleData.pairedDevice(), tokenHash: Data(repeating: 1, count: 32))
     let intake = RecordingIntake(
@@ -118,7 +122,52 @@ import Testing
       _ = try await intake.admit(
         file: upload, metadata: SampleData.recordingMetadata(), device: SampleData.pairedDevice())
     }
-    #expect(try await store.receipt(SampleData.uuid(91)) == nil)
+    let receipt = try #require(try await store.receipt(SampleData.uuid(91)))
+    #expect(receipt.state.meetingID == nil, "never .complete for a meeting that does not exist")
+    guard case .failed(let reason) = receipt.state else {
+      Issue.record("expected .failed, got \(receipt.state)")
+      return
+    }
+    #expect(reason.contains("Boom"))
     #expect(try await store.meetings().isEmpty)
+    #expect(FileManager.default.fileExists(atPath: upload.path), "the retry finds its file")
+    let copies = try FileManager.default.contentsOfDirectory(atPath: settings.audioFolder.path)
+      .flatMap { folder in
+        try FileManager.default.contentsOfDirectory(
+          atPath: settings.audioFolder.appendingPathComponent(folder).path)
+      }
+    #expect(copies.isEmpty, "the copy is removed with the failed admission")
+
+    // The retry succeeds and completes the same receipt.
+    let retrying = RecordingIntake(store: store, settings: settingsStore, enqueue: { _, _ in })
+    let meetingID = try await retrying.admit(
+      file: upload, metadata: SampleData.recordingMetadata(), device: SampleData.pairedDevice())
+    #expect(try await store.receipt(SampleData.uuid(91))?.state == .complete(meetingID: meetingID))
+    #expect(!FileManager.default.fileExists(atPath: upload.path))
+  }
+
+  @Test func aCompleteReceiptWhoseMeetingIsGoneIsAdmittedAgain() async throws {
+    let directory = try Fixtures.temporaryDirectory()
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let store = try MeetingStore.inMemory()
+    let settingsStore = SettingsStore(writer: store.writer)
+    var settings = Settings()
+    settings.audioFolder = directory
+    try await settingsStore.save(settings)
+    try await store.save(SampleData.pairedDevice(), tokenHash: Data(repeating: 1, count: 32))
+    // A .complete receipt whose meeting row does not exist.
+    try await store.save(SampleData.handoverReceipt())
+    let enqueued = Enqueued()
+    let intake = RecordingIntake(
+      store: store, settings: settingsStore,
+      enqueue: { meeting, asset in await enqueued.record(meeting, asset) })
+    let upload = directory.appendingPathComponent("upload.bin")
+    try Data([1]).write(to: upload)
+
+    let meetingID = try await intake.admit(
+      file: upload, metadata: SampleData.recordingMetadata(), device: SampleData.pairedDevice())
+    #expect(meetingID != SampleData.meetingID)
+    #expect(await enqueued.calls.count == 1)
+    #expect(try await store.receipt(SampleData.uuid(91))?.state == .complete(meetingID: meetingID))
   }
 }

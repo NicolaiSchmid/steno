@@ -6,7 +6,12 @@ import Foundation
 public protocol AudioDecoder: Sendable {
   /// The lane's sidecar when present, else decoded from the master.
   func decode(_ asset: AudioAsset, lane: AudioLane) async throws -> AudioBuffer16k
-  /// AAC m4a mono for the optional audio export.
+  /// The container `mixdown` writes: `.m4aAAC` for StenoAudio, `.wav16kInt16`
+  /// for core's WAV copy. The persist stage names the file from it
+  /// (`RecordingLayout.mixdown(_:)`), so `mixdownURL` never carries the
+  /// wrong extension.
+  var mixdownFormat: AudioFormat { get }
+  /// Mono mixdown in `mixdownFormat` for the optional audio export.
   func mixdown(_ asset: AudioAsset, to url: URL) async throws
 }
 

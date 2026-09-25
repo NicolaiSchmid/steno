@@ -1,33 +1,30 @@
 import Foundation
 
 extension ProcessingPipeline {
-  /// Runs the `MeetingSummarizer` for `meeting.templateID` (falling back to
-  /// the first bundled template) and persists summary, tasks and decisions
-  /// with the meeting's title, language and summed usage in one transaction.
-  /// A calendar title stays; any other title is replaced by the model's. The
-  /// caller folds earlier usage (cleanup) into `meeting.llmUsage` first.
+  /// Runs the `MeetingSummarizer` for `meeting.templateID` and persists
+  /// summary, tasks and decisions with the meeting's title, language and
+  /// summed usage in one transaction. An unknown template id fails the stage;
+  /// nothing is substituted. A calendar title stays; any other title is
+  /// replaced by the model's. The caller folds earlier usage (cleanup) into
+  /// `meeting.llmUsage` first.
   func summarize(meeting: Meeting, segments: [TranscriptSegment], speakers: [Speaker])
     async throws -> Meeting
   {
     let summarizer = dependencies.summarizer
     let store = self.store
     return try await run(.summarize, meetingID: meeting.id) {
-      guard
-        let template = SummaryTemplate.bundled(id: meeting.templateID)
-          ?? SummaryTemplate.bundled.first
-      else {
-        throw PipelineFailure(stage: .summarize, reason: "no bundled summary template")
+      guard let template = SummaryTemplate.bundled(id: meeting.templateID) else {
+        throw PipelineFailure(
+          stage: .summarize, reason: "unknown summary template \(meeting.templateID)")
       }
       let participants = try await store.participants(meetingID: meeting.id)
       let people = try await store.persons()
-      var input = meeting
-      input.templateID = template.id
       let output = try await summarizer.summarize(
         SummaryInput(
-          meeting: input, segments: segments, speakers: speakers, participants: participants,
+          meeting: meeting, segments: segments, speakers: speakers, participants: participants,
           knownPeople: people, template: template))
 
-      var updated = input
+      var updated = meeting
       updated.summary = output.summary
       updated.summary?.templateID = template.id
       if meeting.calendarEventID == nil, !output.title.isEmpty {

@@ -76,8 +76,9 @@ extension MeetingStore {
 
   /// Two clusters inside one meeting: moves `source`'s segments to `target`,
   /// averages the embeddings, keeps `target`'s assignment (or takes
-  /// `source`'s when `target` is unknown), deletes the `source` speaker and
-  /// its sample clip file.
+  /// `source`'s when `target` is unknown) and deletes the `source` speaker.
+  /// `source`'s sample clip moves to `target` when `target` has none and is
+  /// deleted otherwise, so a range never survives without its file.
   public func mergeSpeakers(_ source: UUID, into target: UUID, meetingID: UUID) async throws {
     guard source != target else { return }
     let clipToRemove: URL? = try await writer.write { db in
@@ -101,7 +102,12 @@ extension MeetingStore {
         break
       }
       if case .unknown = kept.assignment { kept.assignment = merged.assignment }
-      if kept.sampleClipRange == nil { kept.sampleClipRange = merged.sampleClipRange }
+      var clipToRemove = merged.sampleClipURL
+      if kept.sampleClipRange == nil {
+        kept.sampleClipRange = merged.sampleClipRange
+        kept.sampleClipURL = merged.sampleClipURL
+        clipToRemove = nil
+      }
       kept.clusterConfidence = max(kept.clusterConfidence, merged.clusterConfidence)
       try SpeakerRow(kept).update(db)
 
@@ -109,7 +115,7 @@ extension MeetingStore {
         sql: "UPDATE transcriptSegment SET speakerID = ? WHERE speakerID = ?",
         arguments: [target.uuidString, source.uuidString])
       try SpeakerRow.filter(SpeakerRow.Columns.id == source.uuidString).deleteAll(db)
-      return merged.sampleClipURL
+      return clipToRemove
     }
     if let clipToRemove { try? FileManager.default.removeItem(at: clipToRemove) }
   }

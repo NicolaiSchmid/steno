@@ -33,6 +33,11 @@ extension ProcessingPipeline {
       try await diarizer.prepare()
       let buffer = try await decoder.decode(asset, lane: lane)
       let result = try await diarizer.diarize(buffer)
+      var labels = Set<String>()
+      for cluster in result.clusters where !labels.insert(cluster.label).inserted {
+        throw PipelineFailure(
+          stage: .diarize, reason: "diarizer returned two clusters labelled \(cluster.label)")
+      }
       var speakers: [Speaker] = []
       for cluster in result.clusters {
         let id = MeetingStore.derivedID(meeting.id, salt: "speaker-\(cluster.label)")
