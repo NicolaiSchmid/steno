@@ -194,6 +194,8 @@ import Testing
     let leftovers = (try? FileManager.default.contentsOfDirectory(atPath: models)) ?? []
     #expect(leftovers.isEmpty, "nothing was downloaded: \(leftovers)")
     #expect(FileManager.default.fileExists(atPath: Self.realStenoFolder.path) == hadRealFolder)
+  }
+
   @Test func deliverWritesTheVaultLayoutFromFlagsOrStoredSettings() async throws {
     let home = try Fixtures.temporaryDirectory("steno-home")
     defer { try? FileManager.default.removeItem(at: home) }
