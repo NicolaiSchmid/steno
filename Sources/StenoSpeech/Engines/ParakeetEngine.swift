@@ -54,7 +54,8 @@
       try await prepare()
       guard let manager else { throw SpeechEngineError.notPrepared(id) }
       guard !audio.samples.isEmpty else { return [] }
-      var state = try TdtDecoderState(decoderLayers: await manager.decoderLayerCount)
+      let layers = await manager.decoderLayerCount
+      var state = try TdtDecoderState(decoderLayers: layers)
       let result = try await manager.transcribe(audio.samples, decoderState: &state, language: nil)
       let tokens = (result.tokenTimings ?? []).map {
         TimedToken(text: $0.token, start: $0.startTime, end: $0.endTime, confidence: $0.confidence)

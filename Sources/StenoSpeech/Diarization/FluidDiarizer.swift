@@ -41,8 +41,25 @@ public struct FluidDiarizerConfig: Sendable, Equatable {
       manager.initialize(models: models)
     }
 
-    func process(_ samples: [Float]) async throws -> FluidAudio.DiarizationResult {
-      try await manager.process(audio: samples)
+    /// Runs the pipeline and maps the framework result straight into the
+    /// module's own turns and chunks, so FluidAudio's `DiarizationResult`
+    /// (which `FluidAudio.DiarizationResult` cannot name: `FluidAudio` is
+    /// also a struct) never appears in a signature.
+    func process(_ samples: [Float]) async throws -> (turns: [SpeakerTurn], chunks: [ClusterChunk])
+    {
+      let result = try await manager.process(audio: samples)
+      let turns = result.segments.map {
+        SpeakerTurn(
+          speakerLabel: $0.speakerId, start: TimeInterval($0.startTimeSeconds),
+          end: TimeInterval($0.endTimeSeconds), quality: $0.qualityScore)
+      }
+      let windows = (result.chunkEmbeddings ?? []).map {
+        (
+          label: $0.speakerId, start: $0.startTimeSeconds, end: $0.endTimeSeconds,
+          embedding: $0.embedding256
+        )
+      }
+      return (turns, DiarizationMapping.chunks(windows, turns: turns))
     }
   }
 
@@ -78,20 +95,9 @@ public struct FluidDiarizerConfig: Sendable, Equatable {
       try await prepare()
       guard let manager else { throw SpeechEngineError.notPrepared("fluid-diarizer") }
       guard !audio.samples.isEmpty else { return CoreDiarizationResult(clusters: []) }
-      let result = try await manager.process(audio.samples)
-      let turns = result.segments.map {
-        SpeakerTurn(
-          speakerLabel: $0.speakerId, start: TimeInterval($0.startTimeSeconds),
-          end: TimeInterval($0.endTimeSeconds), quality: $0.qualityScore)
-      }
-      let windows = (result.chunkEmbeddings ?? []).map {
-        (
-          label: $0.speakerId, start: $0.startTimeSeconds, end: $0.endTimeSeconds,
-          embedding: $0.embedding256
-        )
-      }
+      let (turns, chunks) = try await manager.process(audio.samples)
       return DiarizationMapping.result(
-        turns: turns, chunks: DiarizationMapping.chunks(windows, turns: turns),
+        turns: turns, chunks: chunks,
         targetSeconds: config.sampleClipSeconds, minimumSeconds: config.minimumClipSeconds)
     }
   }
