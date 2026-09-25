@@ -69,23 +69,25 @@ public enum SampleData {
       ])
   }
 
+  /// Ordered by display name, as `MeetingStore.export` returns them.
   public static func persons() -> [Person] {
     [
       Person(
-        id: personNicolaiID, displayName: "Nicolai", email: "nicolai@example.com",
-        embedding: embedding(axis: 0), sampleCount: 3, createdAt: createdAt),
-      Person(
         id: personJeromeID, displayName: "Jérôme", embedding: embedding(axis: 1), sampleCount: 1,
         createdAt: createdAt),
+      Person(
+        id: personNicolaiID, displayName: "Nicolai", email: "nicolai@example.com",
+        embedding: embedding(axis: 0), sampleCount: 3, createdAt: createdAt),
     ]
   }
 
+  /// Ordered by display name, as `MeetingStore.export` returns them.
   public static func participants() -> [Participant] {
     [
+      Participant(id: uuid(31), meetingID: meetingID, displayName: "Jérôme", role: .them),
       Participant(
         id: uuid(30), meetingID: meetingID, personID: personNicolaiID, displayName: "Nicolai",
         role: .me, email: "nicolai@example.com"),
-      Participant(id: uuid(31), meetingID: meetingID, displayName: "Jérôme", role: .them),
     ]
   }
 
@@ -132,7 +134,11 @@ public enum SampleData {
   }
 
   public static func decisions() -> [Decision] {
-    [Decision(id: uuid(60), meetingID: meetingID, text: "90/10-Aufteilung wird umgesetzt.")]
+    [
+      Decision(
+        id: MeetingStore.derivedID(meetingID, salt: "decision-0"), meetingID: meetingID,
+        text: "90/10-Aufteilung wird umgesetzt.")
+    ]
   }
 
   public static func audioAsset() -> AudioAsset {

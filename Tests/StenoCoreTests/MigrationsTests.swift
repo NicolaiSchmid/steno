@@ -96,7 +96,7 @@ import Testing
         try PersonRow.order(PersonRow.Columns.displayName).fetchAll(db).map(\.person)
           == SampleData.persons().sorted { $0.displayName < $1.displayName })
       #expect(
-        try ParticipantRow.order(ParticipantRow.Columns.id).fetchAll(db).map(\.participant)
+        try ParticipantRow.order(ParticipantRow.Columns.displayName).fetchAll(db).map(\.participant)
           == SampleData.participants())
       #expect(
         try SpeakerRow.order(SpeakerRow.Columns.id).fetchAll(db).map(\.speaker)

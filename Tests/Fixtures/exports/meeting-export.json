@@ -20,7 +20,7 @@
   },
   "decisions" : [
     {
-      "id" : "00000000-0000-0000-0000-00000000003C",
+      "id" : "71500DB1-A674-4091-B0C9-12977DF0CA49",
       "meetingID" : "00000000-0000-0000-0000-000000000001",
       "text" : "90/10-Aufteilung wird umgesetzt."
     }
@@ -80,33 +80,33 @@
   },
   "participants" : [
     {
+      "displayName" : "Jérôme",
+      "id" : "00000000-0000-0000-0000-00000000001F",
+      "meetingID" : "00000000-0000-0000-0000-000000000001",
+      "role" : "them"
+    },
+    {
       "displayName" : "Nicolai",
       "email" : "nicolai@example.com",
       "id" : "00000000-0000-0000-0000-00000000001E",
       "meetingID" : "00000000-0000-0000-0000-000000000001",
       "personID" : "00000000-0000-0000-0000-00000000000A",
       "role" : "me"
-    },
-    {
-      "displayName" : "Jérôme",
-      "id" : "00000000-0000-0000-0000-00000000001F",
-      "meetingID" : "00000000-0000-0000-0000-000000000001",
-      "role" : "them"
     }
   ],
   "persons" : [
+    {
+      "createdAt" : "2026-09-24T10:00:00.000Z",
+      "displayName" : "Jérôme",
+      "id" : "00000000-0000-0000-0000-00000000000B",
+      "sampleCount" : 1
+    },
     {
       "createdAt" : "2026-09-24T10:00:00.000Z",
       "displayName" : "Nicolai",
       "email" : "nicolai@example.com",
       "id" : "00000000-0000-0000-0000-00000000000A",
       "sampleCount" : 3
-    },
-    {
-      "createdAt" : "2026-09-24T10:00:00.000Z",
-      "displayName" : "Jérôme",
-      "id" : "00000000-0000-0000-0000-00000000000B",
-      "sampleCount" : 1
     }
   ],
   "schemaVersion" : 1,
