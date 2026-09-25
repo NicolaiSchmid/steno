@@ -111,6 +111,18 @@ public func makeSpeechEngine(_ id: SpeechEngineID, models: ModelStore) throws ->
   #endif
 }
 
+/// The FluidAudio offline diarizer over one `ModelStore`; throws where the
+/// framework is missing so callers without it (Linux) fail at wiring time.
+public func makeDiarizer(models: ModelStore, config: FluidDiarizerConfig = .default) throws
+  -> any Diarizer
+{
+  #if canImport(FluidAudio)
+    return FluidDiarizer(models: models, config: config)
+  #else
+    throw SpeechEngineError.unavailable(.parakeetV3)
+  #endif
+}
+
 /// `makeSpeechEngine` for the string stored in `Settings.speechEngineID`.
 public func makeSpeechEngine(id rawID: String, models: ModelStore) throws -> any SpeechEngine {
   guard let id = SpeechEngineID(rawValue: rawID) else {

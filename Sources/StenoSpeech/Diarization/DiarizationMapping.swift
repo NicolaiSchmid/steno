@@ -1,9 +1,12 @@
 import Foundation
 import StenoCore
 
-/// StenoCore's `DiarizationResult`; FluidAudio exports one of the same name
-/// and `StenoCore.DiarizationResult` would resolve to the `StenoCore` enum.
-typealias CoreDiarizationResult = DiarizationResult
+/// StenoCore's `DiarizationResult` and `Diarizer`: FluidAudio exports types
+/// of the same names, and `StenoCore.DiarizationResult` would resolve to the
+/// `StenoCore` version enum, so files that import FluidAudio use these.
+/// Public because they appear in `FluidDiarizer`'s public signatures.
+public typealias CoreDiarizationResult = DiarizationResult
+public typealias CoreDiarizer = Diarizer
 
 /// Turns the diarizer's turns and chunks into `StenoCore.DiarizationResult`:
 /// one `SpeakerCluster` per speaker label, labelled "Speaker n" in order of

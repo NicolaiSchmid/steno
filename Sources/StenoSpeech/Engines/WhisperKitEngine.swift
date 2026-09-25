@@ -3,6 +3,28 @@
   import StenoCore
   import WhisperKit
 
+  /// `WhisperKit` is a non-Sendable class with async methods: its instance
+  /// can neither be returned into the actor nor be sent back out for a call.
+  /// The box owns it, is created and used only by the actor, and the actor
+  /// serialises every call, which is what makes `@unchecked Sendable` true.
+  final class WhisperKitBox: @unchecked Sendable {
+    private let kit: WhisperKit
+
+    init(_ config: WhisperKitConfig) async throws {
+      kit = try await WhisperKit(config)
+    }
+
+    func transcribe(_ samples: [Float], options: DecodingOptions) async throws
+      -> [TranscriptionResult]
+    {
+      try await kit.transcribe(audioArray: samples, decodeOptions: options)
+    }
+
+    func detectLanguage(_ samples: [Float]) async throws -> String {
+      try await kit.detectLangauge(audioArray: samples).language
+    }
+  }
+
   /// Whisper large-v3 turbo through WhisperKit. Whisper can be pinned per
   /// call, not per segment, and unpinned it flips whole windows on Denglish
   /// and sometimes translates, so the meeting language is decided first: the
@@ -20,7 +42,7 @@
 
     private let variant: String
     private let models: ModelStore
-    private var whisper: WhisperKit?
+    private var whisper: WhisperKitBox?
     private let tagger = LanguageTagger()
 
     public init(variant: String = WhisperKitEngine.defaultVariant, models: ModelStore) {
@@ -54,7 +76,7 @@
         prewarm: false,
         load: true,
         download: false)
-      whisper = try await WhisperKit(config)
+      whisper = try await WhisperKitBox(config)
     }
 
     public func transcribe(_ audio: AudioBuffer16k, hint: Locale.Language?) async throws
@@ -68,7 +90,7 @@
         task: .transcribe, language: pinned, usePrefillPrompt: true, detectLanguage: false,
         skipSpecialTokens: true, wordTimestamps: true, chunkingStrategy: .vad)
       options.noSpeechThreshold = Self.noSpeechThreshold
-      let results = try await whisper.transcribe(audioArray: audio.samples, decodeOptions: options)
+      let results = try await whisper.transcribe(audio.samples, options: options)
       let segments = Self.segments(
         from: results, language: pinned.map { LanguageTag(rawValue: $0) })
       return tagger.tag(segments, hint: pinned.map { LanguageTag(rawValue: $0) })
@@ -76,16 +98,14 @@
 
     /// Whisper's two-letter code for the hint, or the detected majority.
     private func decideLanguage(
-      _ audio: AudioBuffer16k, hint: Locale.Language?, whisper: WhisperKit
+      _ audio: AudioBuffer16k, hint: Locale.Language?, whisper: WhisperKitBox
     )
       async throws -> String?
     {
       if let hint, let code = Self.whisperCode(for: hint) { return code }
       var votes: [String] = []
       for window in WhisperWindowRanking.topWindows(samples: audio.samples) {
-        let detected = try await whisper.detectLangauge(
-          audioArray: Array(audio.samples[window.samples]))
-        votes.append(detected.language)
+        votes.append(try await whisper.detectLanguage(Array(audio.samples[window.samples])))
       }
       return WhisperWindowRanking.majority(votes)
     }

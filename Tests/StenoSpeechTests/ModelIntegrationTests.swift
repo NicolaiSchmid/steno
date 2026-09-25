@@ -65,7 +65,7 @@ import Testing
         let started = clock.now
         let segments = try await engine.transcribe(audio, hint: nil)
         Self.report("parakeet-v3 \(name)", audio: audio, elapsed: clock.now - started)
-        try #require(!segments.isEmpty, name)
+        try #require(!segments.isEmpty, "\(name)")
         for (lhs, rhs) in zip(segments, segments.dropFirst()) {
           #expect(lhs.end <= rhs.start + 0.05, "segments overlap in \(name)")
         }
@@ -75,7 +75,7 @@ import Testing
         print(
           "[model-tests] parakeet-v3 \(name): WER \(String(format: "%.1f", wer * 100)) %: \(text)")
         #expect(wer < 0.5, "\(name): \(text)")
-        #expect(LanguageTagger().dominantLanguage(of: segments)?.rawValue == language, text)
+        #expect(LanguageTagger().dominantLanguage(of: segments)?.rawValue == language, "\(text)")
       }
     }
 
@@ -124,7 +124,7 @@ import Testing
       var embeddings: [String: Embedding] = [:]
       for name in ["de-short.wav", "de-short-2.wav", "en-short.wav"] {
         let result = try await diarizer.diarize(try Self.fixture(name))
-        embeddings[name] = try #require(result.clusters.first?.embedding, name)
+        embeddings[name] = try #require(result.clusters.first?.embedding, "\(name)")
       }
       let same = Embeddings.cosine(
         embeddings["de-short.wav"]!.values, embeddings["de-short-2.wav"]!.values)
@@ -161,10 +161,10 @@ import Testing
       try #require(!segments.isEmpty)
       let text = segments.map(\.text).joined(separator: " ")
       print("[model-tests] whisperkit denglish.wav: \(text)")
-      #expect(LanguageTagger().dominantLanguage(of: segments) == "de", text)
+      #expect(LanguageTagger().dominantLanguage(of: segments) == "de", "\(text)")
       let wer = WordErrorRate.compute(
         reference: try Self.reference("denglish.wav"), hypothesis: text)
-      #expect(wer < 0.5, text)
+      #expect(wer < 0.5, "\(text)")
     }
   #else
     @Test(

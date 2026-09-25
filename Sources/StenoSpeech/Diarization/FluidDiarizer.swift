@@ -28,14 +28,32 @@ public struct FluidDiarizerConfig: Sendable, Equatable {
 #if canImport(FluidAudio)
   import FluidAudio
 
+  /// `OfflineDiarizerManager` is a non-Sendable class whose `process` is an
+  /// async method: calling it with an actor-owned instance would send that
+  /// instance to the generic executor. The box owns the manager and is the
+  /// only thing the actor holds; the actor serialises every call, which is
+  /// what makes the `@unchecked Sendable` true in practice.
+  final class OfflineDiarizerBox: @unchecked Sendable {
+    private let manager: OfflineDiarizerManager
+
+    init(config: OfflineDiarizerConfig, models: OfflineDiarizerModels) {
+      manager = OfflineDiarizerManager(config: config)
+      manager.initialize(models: models)
+    }
+
+    func process(_ samples: [Float]) async throws -> FluidAudio.DiarizationResult {
+      try await manager.process(audio: samples)
+    }
+  }
+
   /// The pyannote community-1 offline pipeline through FluidAudio's
   /// `OfflineDiarizerManager`, wrapped in an actor because the manager is
   /// not `Sendable`. Chunk embeddings are exposed so the cluster embedding
   /// is a normalised mean of unit vectors, not the VBx centroid.
-  public actor FluidDiarizer: Diarizer {
+  public actor FluidDiarizer: CoreDiarizer {
     public let config: FluidDiarizerConfig
     private let models: ModelStore
-    private var manager: OfflineDiarizerManager?
+    private var manager: OfflineDiarizerBox?
 
     public init(models: ModelStore, config: FluidDiarizerConfig = .default) {
       self.models = models
@@ -53,16 +71,14 @@ public struct FluidDiarizerConfig: Sendable, Equatable {
       fluidConfig.clustering.minSpeakers = config.minSpeakers
       fluidConfig.clustering.maxSpeakers = config.maxSpeakers
       fluidConfig.exposeChunkEmbeddings = true
-      let manager = OfflineDiarizerManager(config: fluidConfig)
-      manager.initialize(models: loaded)
-      self.manager = manager
+      manager = OfflineDiarizerBox(config: fluidConfig, models: loaded)
     }
 
     public func diarize(_ audio: AudioBuffer16k) async throws -> CoreDiarizationResult {
       try await prepare()
       guard let manager else { throw SpeechEngineError.notPrepared("fluid-diarizer") }
       guard !audio.samples.isEmpty else { return CoreDiarizationResult(clusters: []) }
-      let result = try await manager.process(audio: audio.samples)
+      let result = try await manager.process(audio.samples)
       let turns = result.segments.map {
         SpeakerTurn(
           speakerLabel: $0.speakerId, start: TimeInterval($0.startTimeSeconds),
@@ -80,15 +96,3 @@ public struct FluidDiarizerConfig: Sendable, Equatable {
     }
   }
 #endif
-
-/// The FluidAudio offline diarizer over one `ModelStore`; throws where the
-/// framework is missing so callers without it (Linux) fail at wiring time.
-public func makeDiarizer(models: ModelStore, config: FluidDiarizerConfig = .default) throws
-  -> any Diarizer
-{
-  #if canImport(FluidAudio)
-    return FluidDiarizer(models: models, config: config)
-  #else
-    throw SpeechEngineError.unavailable(.parakeetV3)
-  #endif
-}
