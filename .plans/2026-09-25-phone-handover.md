@@ -379,3 +379,42 @@ prompt. Bonjour advertising through NIOTS is unverified; `DNSServiceRegister` is
 - German and English strings on the phone (`expo-localization`, `t()`, locale files); the recorder ships in English
   like the macOS app.
 - Certificate rotation, several Macs per phone, relay or cloud transport.
+
+## Deviations (implementation, iOS)
+
+Recorded by the agent that implemented P1 to P8 in `mobile/` (PR "feat(mobile): iOS recorder, local queue and Mac
+handover"). The Mac side is untouched. Each line names the deviation and the reason.
+
+- `PinnedTrustEvaluator.swift` imports CryptoKit besides Foundation and Security: SHA-256 needs CryptoKit or
+  CommonCrypto, and CryptoKit is present on iOS 13+ and macOS 10.15+, so the symlinked Mac test still compiles it.
+- `UploadSession` computes and sets `X-Steno-Chunk-SHA256` itself while copying the slice into the temp file; JS never
+  sees chunk bytes. `UploadSpec.headers` carries only the bearer.
+- `StenoLinkModule` errors are plain `Exception(name:description:code:)` values (`ERR_STENO_RESOLVE`,
+  `ERR_STENO_REQUEST`, `ERR_STENO_UPLOAD`): `Exception.name` is an `open lazy var`, so a subclass cannot override it.
+- `expo-crypto` added for `randomUUID` (recording and device ids): `expo-modules-core` is not hoisted by pnpm and
+  Hermes offers no `crypto.randomUUID`. `deviceName` comes from `expo-constants`.
+- Queue: `use-queue.ts` became `QueueProvider.tsx` (a context) because the recorder and the coordinator share one
+  serialised writer. The index gained `patchRecording`, `syncChunks`, `scheduleRetry`, `resetForUpload`,
+  `removeRecording`, `nextRetryAt`, and `addRecording` takes an initial state (`recording` at start, so a crash
+  mid-recording leaves a row to recover). `setState` enforces legal transitions and throws `QueueError`.
+- Queue storage's injected API is `{ readText, writeText, rename, remove }`; `save` writes `index.json.tmp` and renames
+  it, `load` falls back to a leftover temp file and quarantines an unparseable index as `index.corrupt.json`.
+  expo-file-system's `move(overwrite)` is remove-then-move, not an atomic replace, hence the temp-file fallback.
+- Pairing store keeps both the token and the Mac record in SecureStore (two small keychain items) instead of a JSON
+  file; `PairingProvider.tsx` hydrates it once. `pairing-flow.ts` (injected `locate`, `hello`, `pair`, `device`,
+  `now`) holds the sequence and checks the Mac's id at hello and at pair before trusting the token.
+- `planNext` answers `idle`, not `wait`, while the Mac is unreachable: there is no `until` to wait for; the coordinator
+  re-plans on `serviceFound`, foreground and index changes. `wait` is used only for the retry backoff.
+- `useUploadCoordinator` returns `{ status, macName, reachable, progress, retryNow(recordingID?) }`; `status` adds
+  `idle`. A chunk answered 404 sends the recording back to `queued` with an empty chunk set (the Mac lost the
+  partial); 409 on complete re-reads the status; 422 marks `failed` and clears the chunk set.
+- Files added beyond the plan's list: `src/lib/base64.ts` (strict codec, no `atob`), `discovery/mac-registry.ts`
+  (pure store behind `useMacDiscovery`), `pairing/pairing-flow.ts`, `pairing/PairingProvider.tsx`,
+  `recorder/format.ts`, `recorder/ios-version.ts`, `recording/recovery.ts`. Each has a vitest file.
+- `tsconfig.json` and `vitest.config.ts` gained the `@modules/*` alias so app code imports the local module without
+  relative paths; vitest also includes `modules/**/*.test.ts`.
+- Delivered rows stay in the index (state `delivered`, `meetingID` set) after the file is deleted, so the list can show
+  what arrived; the plan only required deleting the file.
+- Still to run on a device, as the plan tags them `[manual]`: P1 (prompt once, `policyDenied`), P2 (locked-phone
+  upload, wrong fingerprint sends no body, `pendingUploads()` after relaunch), P3 (60-minute locked recording, call
+  interruption), P5 and P6 end to end against M6. Spikes S2, S3 and S4 are unchanged and unverified.
