@@ -54,7 +54,9 @@ public struct LLMMeetingSummarizer: MeetingSummarizer, Sendable {
       (draft, usage) = try await mapReduce(
         input, builder: builder, budget: budget, transcriptTokens: transcriptTokens)
     }
-    return Self.output(from: draft, input: input, language: language, usage: usage)
+    return Self.output(
+      from: draft, input: input, language: language, usage: usage,
+      minimumConfidence: minimumConfidence)
   }
 
   /// Estimated tokens one chunk's notes take in the reduce prompt; decides
@@ -132,7 +134,8 @@ public struct LLMMeetingSummarizer: MeetingSummarizer, Sendable {
   // MARK: Post-processing
 
   static func output(
-    from draft: AnalysisDraft, input: SummaryInput, language: LanguageTag, usage: LLMUsage
+    from draft: AnalysisDraft, input: SummaryInput, language: LanguageTag, usage: LLMUsage,
+    minimumConfidence: Double = 0.3
   ) -> SummaryOutput {
     let labels = SpeakerLabels(speakers: input.speakers)
     let title = trimmed(draft.title).isEmpty ? input.meeting.title : trimmed(draft.title)
@@ -146,7 +149,7 @@ public struct LLMMeetingSummarizer: MeetingSummarizer, Sendable {
         makeTask(task, index: offset, input: input, labels: labels)
       },
       speakerNames: suggestions(
-        draft.speakerNames, labels: labels, speakers: input.speakers, minimum: 0.3),
+        draft.speakerNames, labels: labels, speakers: input.speakers, minimum: minimumConfidence),
       language: language,
       usage: usage)
   }
