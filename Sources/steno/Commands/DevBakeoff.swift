@@ -1,5 +1,6 @@
 import ArgumentParser
 import Foundation
+import StenoAudio
 import StenoCore
 import StenoSpeech
 
@@ -8,14 +9,15 @@ extension SpeechEngineID: ExpressibleByArgument {}
 /// `steno dev bakeoff <audio-dir> [--engines] [--reference-dir] [--out]`:
 /// runs the requested engines over a folder of recordings and writes
 /// `report.md`, `report.json` and the raw segments per file and engine.
-/// Models download on first use. Input is 16 kHz mono WAV until StenoAudio's
-/// codec lands; `--cleanup` arrives with StenoLLM's cleaner.
+/// Models download on first use. Input is any `wav|m4a|mp3|caf` file
+/// `AVFoundationAudioCodec` reads: channel 0 is resampled to 16 kHz mono.
 struct DevBakeoff: AsyncParsableCommand {
   static let configuration = CommandConfiguration(
     commandName: "bakeoff",
     abstract: "Compare speech engines over a folder of recordings.")
 
-  @Argument(help: "Folder with 16 kHz mono WAV files and optional <name>.ref.txt references.")
+  @Argument(
+    help: "Folder with wav, m4a, mp3 or caf recordings and optional <name>.ref.txt references.")
   var audioDirectory: String
 
   @Option(
@@ -31,6 +33,12 @@ struct DevBakeoff: AsyncParsableCommand {
   @Option(name: .customLong("out"), help: "Where the reports go; defaults to <audio-dir>/bakeoff.")
   var output: String?
 
+  /// Runs core's `FakeSpeechEngine` under every requested id, so the CLI
+  /// tests exercise decoding, reporting and the LLM wiring without a model
+  /// download. Hidden: it measures nothing.
+  @Flag(name: .customLong("fake-engines"), help: .hidden)
+  var fakeEngines = false
+
   @OptionGroup var models: DevModels.Options
 
   func validate() throws {
@@ -43,12 +51,11 @@ struct DevBakeoff: AsyncParsableCommand {
   }
 
   func run() async throws {
-    let store = try await models.store()
     let audio = URL(fileURLWithPath: audioDirectory, isDirectory: true)
     let out =
       output.map { URL(fileURLWithPath: $0, isDirectory: true) }
       ?? audio.appendingPathComponent("bakeoff", isDirectory: true)
-    let runner = BakeoffRunner(makeEngine: { try makeSpeechEngine($0, models: store) })
+    let runner = BakeoffRunner(makeEngine: try await makeEngine(), decoder: Self.decoder)
     let report = try await runner.run(
       audioDirectory: audio,
       referenceDirectory: referenceDirectory.map { URL(fileURLWithPath: $0, isDirectory: true) },
@@ -56,5 +63,25 @@ struct DevBakeoff: AsyncParsableCommand {
       output: out)
     print(report.markdown())
     print("reports: \(out.path)")
+  }
+
+  /// The real engines over the model store, or the fake behind
+  /// `--fake-engines` (which then never opens the store).
+  func makeEngine() async throws -> @Sendable (SpeechEngineID) throws -> any SpeechEngine {
+    if fakeEngines {
+      return { id in FakeSpeechEngine(id: id.rawValue, language: "de") }
+    }
+    let store = try await models.store()
+    return { try makeSpeechEngine($0, models: store) }
+  }
+
+  /// StenoAudio's codec where AVFoundation exists (any sample rate, CAF,
+  /// m4a, mp3); core's 16 kHz WAV reader elsewhere.
+  static var decoder: any AudioDecoder {
+    #if canImport(AVFoundation)
+      AVFoundationAudioCodec()
+    #else
+      WAVAudioDecoder()
+    #endif
   }
 }
