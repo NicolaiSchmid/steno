@@ -31,7 +31,8 @@ final class SpeakerReviewViewModelTests: XCTestCase {
     let speakers = try await environment.store.speakers(meetingID: SampleData.meetingID)
     let speaker = try XCTUnwrap(speakers.first { $0.id == SampleData.speakerTwoID })
     XCTAssertTrue(speaker.assignment.isConfirmed)
-    let person = try XCTUnwrap(try await environment.store.person(id: speaker.personID!))
+    let personOptional = try await environment.store.person(id: speaker.personID!)
+    let person = try XCTUnwrap(personOptional)
     XCTAssertEqual(person.displayName, "Anna")
     XCTAssertEqual(person.sampleCount, 1, "confirm enrolled the embedding")
   }
@@ -69,7 +70,8 @@ final class SpeakerReviewViewModelTests: XCTestCase {
     await model.assign(SampleData.speakerTwoID, attendee: attendee)
     let speakers = try await environment.store.speakers(meetingID: SampleData.meetingID)
     let personID = try XCTUnwrap(speakers.first { $0.id == SampleData.speakerTwoID }?.personID)
-    let person = try XCTUnwrap(try await environment.store.person(id: personID))
+    let personOptional = try await environment.store.person(id: personID)
+    let person = try XCTUnwrap(personOptional)
     XCTAssertEqual(person.displayName, "Maya")
     XCTAssertEqual(person.email, "maya@example.com")
   }

@@ -80,12 +80,14 @@ final class MeetingDetailViewModelTests: XCTestCase {
     XCTAssertFalse(model.keepsAudio)
 
     await model.setKeepAudio(true, defaultRetention: .keepDays(30))
-    var asset = try XCTUnwrap(try await environment.store.asset(meetingID: SampleData.meetingID))
+    let assetOptional = try await environment.store.asset(meetingID: SampleData.meetingID)
+    var asset = try XCTUnwrap(assetOptional)
     XCTAssertEqual(asset.retention, .keepForever)
     XCTAssertNil(asset.expiresAt)
 
     await model.setKeepAudio(false, defaultRetention: .keepDays(7))
-    asset = try XCTUnwrap(try await environment.store.asset(meetingID: SampleData.meetingID))
+    let assetReloaded = try await environment.store.asset(meetingID: SampleData.meetingID)
+    asset = try XCTUnwrap(assetReloaded)
     XCTAssertEqual(asset.retention, .keepDays(7))
     XCTAssertEqual(asset.expiresAt, TestSupport.now.addingTimeInterval(7 * 86_400))
   }

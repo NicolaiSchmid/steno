@@ -27,9 +27,11 @@ final class MenuBarViewModelTests: XCTestCase {
     XCTAssertEqual(outcome.meetingID, meetings.first?.id)
 
     await environment.pipeline.waitUntilIdle()
-    let stored = try XCTUnwrap(try await environment.store.meeting(id: outcome.meetingID))
+    let storedOptional = try await environment.store.meeting(id: outcome.meetingID)
+    let stored = try XCTUnwrap(storedOptional)
     XCTAssertEqual(stored.state, .ready, "the synthetic recording runs through the fake pipeline")
-    let asset = try XCTUnwrap(try await environment.store.asset(meetingID: outcome.meetingID))
+    let assetOptional = try await environment.store.asset(meetingID: outcome.meetingID)
+    let asset = try XCTUnwrap(assetOptional)
     XCTAssertEqual(asset.retention, .keepDays(30), "retention comes from Settings")
     XCTAssertEqual(asset.lanes, [.mic, .system])
   }
@@ -40,7 +42,8 @@ final class MenuBarViewModelTests: XCTestCase {
     await model.start(mode: .inPerson)
     await model.stop()
     let outcome = try XCTUnwrap(model.lastStop)
-    let asset = try XCTUnwrap(try await environment.store.asset(meetingID: outcome.meetingID))
+    let assetOptional = try await environment.store.asset(meetingID: outcome.meetingID)
+    let asset = try XCTUnwrap(assetOptional)
     XCTAssertEqual(asset.lanes, [.mixed])
     let meeting = try await environment.store.meeting(id: outcome.meetingID)
     XCTAssertEqual(meeting?.source, .macInPerson)
@@ -61,7 +64,8 @@ final class MenuBarViewModelTests: XCTestCase {
     ]
     let model = MenuBarViewModel(environment: environment)
     await model.start(mode: .call)
-    let meeting = try XCTUnwrap(try await environment.store.meetings().first)
+    let meetingOptional = try await environment.store.meetings().first
+    let meeting = try XCTUnwrap(meetingOptional)
     XCTAssertEqual(meeting.title, "Roadmap sync")
     XCTAssertEqual(meeting.calendarEventID, "event-42")
     let participants = try await environment.store.participants(meetingID: meeting.id)

@@ -177,7 +177,8 @@ final class SettingsViewModelTests: XCTestCase {
     await model.save()
     XCTAssertNil(model.validationMessage)
     XCTAssertTrue(model.saved)
-    let stored = try XCTUnwrap(try await environment.settings.load().obsidian)
+    let storedOptional = try await environment.settings.load().obsidian
+    let stored = try XCTUnwrap(storedOptional)
     XCTAssertEqual(stored.vaultPath, vault.path)
     XCTAssertEqual(stored.peopleFolder, "People")
     XCTAssertEqual(stored.taskTag, "task")
