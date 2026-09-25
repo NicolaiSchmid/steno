@@ -53,9 +53,17 @@ final class FrameRelay: @unchecked Sendable {
 
   // MARK: Consumer (writer thread)
 
-  /// Whole frames every channel has queued.
+  /// Whole frames every channel has queued. A loop, not `map`, for the same
+  /// reason as `LaneFrameSink.availableToRead`.
   var availableFrames: Int {
-    (rings.map(\.availableToRead).min() ?? 0) / frameSize
+    var minimum = Int.max
+    var index = 0
+    while index < rings.count {
+      let available = rings[index].availableToRead
+      if available < minimum { minimum = available }
+      index += 1
+    }
+    return minimum == Int.max ? 0 : minimum / frameSize
   }
 
   @inline(__always)

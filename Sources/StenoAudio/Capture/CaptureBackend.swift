@@ -102,9 +102,18 @@ public final class LaneFrameSink: @unchecked Sendable {
 
   func ring(_ lane: Int) -> LaneRingBuffer { rings[lane] }
 
-  /// Samples every lane has queued right now (the minimum over lanes).
+  /// Samples every lane has queued right now (the minimum over lanes). The
+  /// processing thread asks once per frame, so no `map`: a debug build
+  /// allocates for it.
   var availableToRead: Int {
-    rings.map(\.availableToRead).min() ?? 0
+    var minimum = Int.max
+    var index = 0
+    while index < rings.count {
+      let available = rings[index].availableToRead
+      if available < minimum { minimum = available }
+      index += 1
+    }
+    return minimum == Int.max ? 0 : minimum
   }
 
   /// Ring overruns per lane, in samples.

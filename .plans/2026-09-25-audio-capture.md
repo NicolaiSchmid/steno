@@ -406,6 +406,13 @@ toolchain. Each line is one departure from the text above and why.
   `IOProcRunnerTests` can hand it `AudioBufferList`s built by hand for both HAL orderings, a
   buffer without data and a callback that does not fit. glibc has no malloc hook, so the
   allocation guard does not exist on Linux.
+- The guard's first run caught one real allocation on the processing thread:
+  `LaneFrameSink.availableToRead` was `rings.map(\.availableToRead).min()`, an array (and, in a
+  debug build, per-element boxes: nine mallocs per frame) once per frame from
+  `ProcessingThread.drain()`. It lives in `Capture/CaptureBackend.swift`, so the reviewer grep of
+  `RealTime/` for `[`, `Array` and closures did not see it. Now a `while` loop, as is
+  `FrameRelay.availableFrames` (writer thread, same shape). Test loops on the guarded path use
+  `while` too: an unspecialised `for _ in 0..<n` allocates per iteration under `-Onone`.
 - `StreamLayout` cannot tell the two HAL orderings apart when the microphone and the tap have the
   same channel shape (a stereo input next to the stereo tap: `[2, 2]` either way); it assumes
   sub-devices first, `equalShapesAssumeSubDevicesFirst` pins that, and spike S2 on hardware is

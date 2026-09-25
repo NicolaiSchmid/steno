@@ -183,7 +183,13 @@ import Testing
       defer { output.deallocate() }
       resampler.process(input, into: output)
       let allocations = try AllocationHook.allocations {
-        for _ in 0..<100 { resampler.process(input, into: output) }
+        // A `while`, as the module writes its loops: in a debug build an
+        // unspecialised `for` over a range allocates per iteration.
+        var frame = 0
+        while frame < 100 {
+          resampler.process(input, into: output)
+          frame += 1
+        }
       }
       #expect(
         allocations.count == 0,
