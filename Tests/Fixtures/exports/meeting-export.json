@@ -1,0 +1,190 @@
+{
+  "audio" : {
+    "expiresAt" : "2026-10-26T10:05:00.000Z",
+    "format" : "caf48kFloat32",
+    "id" : "00000000-0000-0000-0000-000000000046",
+    "lanes" : [
+      "mic",
+      "system"
+    ],
+    "meetingID" : "00000000-0000-0000-0000-000000000001",
+    "mixdownURL" : "file:///tmp/steno/00000000-0000-0000-0000-000000000001/audio.m4a",
+    "retention" : {
+      "keepDays" : 30
+    },
+    "sidecars16k" : {
+      "mic" : "file:///tmp/steno/00000000-0000-0000-0000-000000000001/mic.wav",
+      "system" : "file:///tmp/steno/00000000-0000-0000-0000-000000000001/system.wav"
+    },
+    "url" : "file:///tmp/steno/00000000-0000-0000-0000-000000000001/master.caf"
+  },
+  "decisions" : [
+    {
+      "id" : "00000000-0000-0000-0000-00000000003C",
+      "meetingID" : "00000000-0000-0000-0000-000000000001",
+      "text" : "90/10-Aufteilung wird umgesetzt."
+    }
+  ],
+  "meeting" : {
+    "calendarEventID" : "event-1",
+    "createdAt" : "2026-09-24T10:00:00.000Z",
+    "duration" : 6,
+    "id" : "00000000-0000-0000-0000-000000000001",
+    "language" : "de",
+    "llmUsage" : {
+      "completionTokens" : 300,
+      "promptTokens" : 1200,
+      "requests" : 3
+    },
+    "scratchpad" : "Nachfassen wegen Budget.",
+    "source" : "macCall",
+    "startedAt" : "2026-09-24T09:00:00.000Z",
+    "state" : "ready",
+    "summary" : {
+      "language" : "de",
+      "sections" : [
+        {
+          "bullets" : [
+            {
+              "lead" : "Fokus",
+              "text" : "Speaker 1 schlägt vor, 90 Prozent auf den Kern zu setzen."
+            },
+            {
+              "lead" : "Budget",
+              "text" : "Speaker 2 will die Zahlen bis Freitag prüfen."
+            }
+          ],
+          "heading" : "Executive Summary",
+          "id" : "executive-summary"
+        },
+        {
+          "bullets" : [
+            {
+              "lead" : "Zeitplan",
+              "text" : "Start im Oktober oder November?"
+            }
+          ],
+          "heading" : "Offene Fragen",
+          "id" : "open-questions"
+        }
+      ],
+      "templateID" : "default"
+    },
+    "tags" : [
+      "strategie",
+      "q4"
+    ],
+    "templateID" : "default",
+    "title" : "Produktstrategie 90/10",
+    "updatedAt" : "2026-09-24T10:05:00.000Z"
+  },
+  "participants" : [
+    {
+      "displayName" : "Nicolai",
+      "email" : "nicolai@example.com",
+      "id" : "00000000-0000-0000-0000-00000000001E",
+      "meetingID" : "00000000-0000-0000-0000-000000000001",
+      "personID" : "00000000-0000-0000-0000-00000000000A",
+      "role" : "me"
+    },
+    {
+      "displayName" : "Jérôme",
+      "id" : "00000000-0000-0000-0000-00000000001F",
+      "meetingID" : "00000000-0000-0000-0000-000000000001",
+      "role" : "them"
+    }
+  ],
+  "persons" : [
+    {
+      "createdAt" : "2026-09-24T10:00:00.000Z",
+      "displayName" : "Nicolai",
+      "email" : "nicolai@example.com",
+      "id" : "00000000-0000-0000-0000-00000000000A",
+      "sampleCount" : 3
+    },
+    {
+      "createdAt" : "2026-09-24T10:00:00.000Z",
+      "displayName" : "Jérôme",
+      "id" : "00000000-0000-0000-0000-00000000000B",
+      "sampleCount" : 1
+    }
+  ],
+  "schemaVersion" : 1,
+  "segments" : [
+    {
+      "end" : 2.5,
+      "id" : "00000000-0000-0000-0000-000000000028",
+      "lane" : "mic",
+      "meetingID" : "00000000-0000-0000-0000-000000000001",
+      "rawText" : "wir setzen 90 prozent auf den kern",
+      "speakerID" : "00000000-0000-0000-0000-000000000014",
+      "start" : 0,
+      "text" : "Wir setzen neunzig Prozent auf den Kern."
+    },
+    {
+      "end" : 5.5,
+      "id" : "00000000-0000-0000-0000-000000000029",
+      "lane" : "system",
+      "meetingID" : "00000000-0000-0000-0000-000000000001",
+      "rawText" : "ich prüfe das budget bis freitag",
+      "speakerID" : "00000000-0000-0000-0000-000000000015",
+      "start" : 2.5,
+      "text" : "Ich prüfe das Budget bis Freitag."
+    },
+    {
+      "end" : 6,
+      "id" : "00000000-0000-0000-0000-00000000002A",
+      "lane" : "system",
+      "meetingID" : "00000000-0000-0000-0000-000000000001",
+      "rawText" : "gut",
+      "start" : 5.5,
+      "text" : "Gut."
+    }
+  ],
+  "speakers" : [
+    {
+      "assignment" : {
+        "confirmed" : {
+          "personID" : "00000000-0000-0000-0000-00000000000A"
+        }
+      },
+      "clusterConfidence" : 0.9,
+      "clusterLabel" : "Speaker 1",
+      "id" : "00000000-0000-0000-0000-000000000014",
+      "meetingID" : "00000000-0000-0000-0000-000000000001",
+      "sampleClipRange" : [
+        0.5,
+        4.5
+      ]
+    },
+    {
+      "assignment" : {
+        "suggested" : {
+          "personID" : "00000000-0000-0000-0000-00000000000B",
+          "similarity" : 0.72
+        }
+      },
+      "clusterConfidence" : 0.75,
+      "clusterLabel" : "Speaker 2",
+      "id" : "00000000-0000-0000-0000-000000000015",
+      "meetingID" : "00000000-0000-0000-0000-000000000001",
+      "sampleClipRange" : [
+        3,
+        5.5
+      ],
+      "sampleClipURL" : "file:///tmp/steno/00000000-0000-0000-0000-000000000001/speakers/00000000-0000-0000-0000-000000000015.wav"
+    }
+  ],
+  "tasks" : [
+    {
+      "assigneeName" : "Jérôme",
+      "assigneePersonID" : "00000000-0000-0000-0000-00000000000B",
+      "done" : false,
+      "dueDate" : "2026-09-29T00:00:00.000Z",
+      "id" : "00000000-0000-0000-0000-000000000032",
+      "meetingID" : "00000000-0000-0000-0000-000000000001",
+      "priority" : "high",
+      "text" : "Budgetzahlen prüfen"
+    }
+  ]
+}

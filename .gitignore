@@ -31,3 +31,6 @@ node_modules/
 # (symlinks into .agents/skills, the authoritative source) are committed.
 .claude/*
 !.claude/skills/
+
+# Snapshot mismatches write the actual bytes beside the golden for inspection
+Tests/Fixtures/**/*.actual
