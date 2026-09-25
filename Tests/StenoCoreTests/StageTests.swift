@@ -28,15 +28,19 @@ struct PipelineHarness {
     memory: InMemorySpeakerMemory = InMemorySpeakerMemory(people: SampleData.persons()),
     cleaner: PassthroughCleaner = PassthroughCleaner(),
     summarizer: FakeSummarizer = FakeSummarizer(),
-    retention: AudioRetention = .keepDays(30)
+    retention: AudioRetention = .keepDays(30),
+    sharedStore: MeetingStore? = nil
   ) async throws {
     directory = try Fixtures.temporaryDirectory("pipeline")
-    store = try MeetingStore.inMemory()
+    store = try sharedStore ?? MeetingStore.inMemory()
     settingsStore = SettingsStore(writer: store.writer)
     settings = Settings()
     settings.audioFolder = directory.appendingPathComponent("audio", isDirectory: true)
     settings.defaultRetention = retention
     try await settingsStore.save(settings)
+    // The production SpeakerMemory reads persons from the store, so every
+    // person the in-memory fake can suggest must exist as a row.
+    for person in SampleData.persons() { try await self.store.save(person) }
     events = MeetingEventBus()
     self.engine = engine
     self.diarizer = diarizer

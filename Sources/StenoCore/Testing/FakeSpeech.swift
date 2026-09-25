@@ -96,6 +96,8 @@ public struct FakeDiarizer: Diarizer, Sendable {
   public var turnSeconds: TimeInterval
   public var result: (@Sendable (AudioBuffer16k) -> DiarizationResult)?
   public var failure: (any Error & Sendable)?
+  /// Runs before every `diarize`; tests use it to observe state mid-pipeline.
+  public var onDiarize: (@Sendable () async -> Void)?
   public let calls = CallLog<TimeInterval>()
 
   public init(
@@ -117,6 +119,7 @@ public struct FakeDiarizer: Diarizer, Sendable {
 
   public func diarize(_ audio: AudioBuffer16k) async throws -> DiarizationResult {
     await calls.record(audio.duration)
+    await onDiarize?()
     if let failure { throw failure }
     if let result { return result(audio) }
     return Self.roundRobin(

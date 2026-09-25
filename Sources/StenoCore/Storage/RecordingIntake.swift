@@ -31,6 +31,19 @@ public struct RecordingIntake: HandoverIntake, Sendable {
     self.fileManager = fileManager
   }
 
+  /// The production wiring: `enqueue` is `ProcessingPipeline.enqueue`.
+  public init(
+    store: MeetingStore,
+    settings: SettingsStore,
+    pipeline: ProcessingPipeline,
+    now: @escaping @Sendable () -> Date = Date.init
+  ) {
+    self.init(
+      store: store, settings: settings,
+      enqueue: { meeting, asset in try await pipeline.enqueue(meeting, asset: asset) },
+      now: now)
+  }
+
   public func admit(file: URL, metadata: RecordingMetadata, device: PairedDevice) async throws
     -> UUID
   {
