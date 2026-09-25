@@ -1,7 +1,6 @@
 import Foundation
 import NIOCore
 import NIOEmbedded
-import NIOHTTP1
 import Synchronization
 import Testing
 
@@ -33,10 +32,11 @@ import Testing
     #expect(connection.metrics.snapshot.requestHeads == 0)
     #expect(channel.isActive)
 
+    // The embedded channel closes on its loop, inside `fireReadTimeout`, so
+    // this is a decision to check, not a close to wait for: a handler that
+    // keeps the connection fails here instead of hanging on `closeFuture`.
     try await connection.fireReadTimeout()
-    try await channel.closeFuture.get()
-
-    #expect(!channel.isActive, "the server closes a connection that stays silent")
+    try #require(!channel.isActive, "the server closes a connection that stays silent")
     let metrics = connection.metrics.snapshot
     #expect(metrics.timedOut == 1)
     #expect(metrics.requestHeads == 0, "no request line was ever completed")
@@ -56,7 +56,7 @@ import Testing
     // The idle handler fires once per timeout for as long as the silence lasts.
     try await connection.fireReadTimeout()
     try await connection.fireReadTimeout()
-    #expect(channel.isActive, "the connection survives the engine's silence")
+    try #require(channel.isActive, "the connection survives the engine's silence")
     #expect(connection.metrics.snapshot.timedOut == 0)
     #expect(connection.metrics.snapshot.handledRequests == 1)
 
@@ -68,7 +68,6 @@ import Testing
 
     // Once the response is out, the client's silence counts again.
     try await connection.fireReadTimeout()
-    try await channel.closeFuture.get()
     #expect(!channel.isActive)
     #expect(connection.metrics.snapshot.timedOut == 1)
   }
