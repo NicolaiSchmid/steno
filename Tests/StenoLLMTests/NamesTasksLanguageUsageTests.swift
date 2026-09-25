@@ -37,7 +37,7 @@ import Testing
       DraftSpeakerName(speakerLabel: "Speaker 3", name: "Jérôme", confidence: 0.3, evidence: "q"),
     ]
     let output = LLMMeetingSummarizer.output(
-      from: Self.draft(speakerNames: names), input: Self.input(language: "de"), language: "de",
+      from: Self.draft(speakerNames: names), input: Self.input(language: "de"),
       usage: .zero)
     #expect(
       output.speakerNames.map(\.speakerID) == [
@@ -46,7 +46,7 @@ import Testing
     #expect(output.speakerNames.map(\.name) == ["Nicolai", "Jérôme"])
 
     let strict = LLMMeetingSummarizer.output(
-      from: Self.draft(speakerNames: names), input: Self.input(language: "de"), language: "de",
+      from: Self.draft(speakerNames: names), input: Self.input(language: "de"),
       usage: .zero, minimumConfidence: 0.5)
     #expect(strict.speakerNames.map(\.name) == ["Nicolai"])
   }
@@ -56,7 +56,7 @@ import Testing
     let output = LLMMeetingSummarizer.output(
       from: Self.draft(speakerNames: [
         DraftSpeakerName(speakerLabel: "Speaker 2", name: "Nicolai", confidence: 1, evidence: "q")
-      ]), input: input, language: "de", usage: .zero)
+      ]), input: input, usage: .zero)
     #expect(output.summary.sections[0].bullets[0].text == "Speaker 2 sagt etwas.")
     #expect(input.speakers[1].assignment == .unknown, "the input is a value; nothing was renamed")
     #expect(output.speakerNames[0].evidence == "q")
@@ -71,7 +71,7 @@ import Testing
         text: "Doku schreiben", assignee: "Speaker 3", priority: .normal, dueDate: "Freitag"),
     ]
     let output = LLMMeetingSummarizer.output(
-      from: Self.draft(tasks: tasks), input: Self.input(language: "de"), language: "de",
+      from: Self.draft(tasks: tasks), input: Self.input(language: "de"),
       usage: .zero)
     #expect(output.tasks.map(\.priority) == [.high, .low, .normal])
     #expect(output.tasks[0].assigneePersonID == SampleData.personNicolaiID)
@@ -92,7 +92,7 @@ import Testing
       (german, "German", "de"), (english, "English", "en"), (swiss, "German", "de-CH"),
     ] as [(SummaryInput, String, LanguageTag)] {
       let builder = SummaryPromptBuilder(template: input.template, timeZone: Self.utc)
-      let single = builder.buildSingleShot(input, segments: input.segments)
+      let single = builder.buildSingleShot(input)
       #expect(single.messages[0].content.contains("Output language: \(name)."))
       let map = builder.buildMap(
         input,
@@ -102,12 +102,11 @@ import Testing
       let cleanup = CleanupPromptBuilder().build(
         chunk: TranscriptChunker().chunk(input.segments, language: input.meeting.language)[0],
         language: input.meeting.language,
-        glossary: Glossary(input: CleanupInput(export: Self.standup)),
+        glossary: CleanupInput(export: Self.standup).glossary,
         labels: SpeakerLabels(speakers: input.speakers))
       #expect(cleanup.messages[0].content.contains("Meeting language: \(name)."))
       let output = LLMMeetingSummarizer.output(
-        from: Self.draft(language: "xx"), input: input,
-        language: OutputLanguage.resolve(meeting: input.meeting.language), usage: .zero)
+        from: Self.draft(language: "xx"), input: input, usage: .zero)
       #expect(output.language == tag)
       #expect(output.summary.language == tag)
     }
@@ -118,11 +117,11 @@ import Testing
     defer { server.stop() }
     let good = try String(
       contentsOf: Fixtures.url("llm/responses/summary-default-standup.json"), encoding: .utf8)
-    server.enqueue(contentsOf: [
+    server.enqueue(
       Scripts.completion(
         "broken {", usage: LLMUsage(promptTokens: 700, completionTokens: 3, requests: 1)),
       Scripts.completion(good, usage: nil),
-    ])
+    )
     let endpoint = LLMEndpoint(baseURL: server.baseURL, model: "stub-model")
     let client = OpenAICompatibleClient(endpoint: endpoint, apiKey: nil, retry: .none)
     let summarizer = LLMMeetingSummarizer(model: client, endpoint: endpoint, timeZone: Self.utc)

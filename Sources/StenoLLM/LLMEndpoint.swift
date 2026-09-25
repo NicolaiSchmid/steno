@@ -1,12 +1,11 @@
 import Foundation
 import StenoCore
 
-/// How the client asks for JSON. `.auto` starts at `.jsonSchema` and falls
-/// back per endpoint on a 400 that names `response_format`: to
-/// `.jsonObject`, then to `.promptOnly` (the schema is always in the prompt
-/// as well, so every mode yields decodable output on a capable model).
+/// How the client asks for JSON. It starts at the endpoint's mode and falls
+/// back per endpoint on a 400 that names `response_format`: `.jsonSchema` to
+/// `.jsonObject` to `.promptOnly` (the schema is always in the prompt as
+/// well, so every mode yields decodable output on a capable model).
 public enum StructuredOutputMode: String, Sendable, Codable, Equatable, CaseIterable {
-  case auto
   case jsonSchema
   case jsonObject
   case promptOnly
@@ -14,7 +13,7 @@ public enum StructuredOutputMode: String, Sendable, Codable, Equatable, CaseIter
   /// The next weaker mode; nil from `.promptOnly`.
   public var downgraded: StructuredOutputMode? {
     switch self {
-    case .auto, .jsonSchema: .jsonObject
+    case .jsonSchema: .jsonObject
     case .jsonObject: .promptOnly
     case .promptOnly: nil
     }
@@ -45,7 +44,7 @@ public struct LLMEndpoint: Sendable, Equatable {
     maxOutputTokens: Int = 4_096,
     maxConcurrentRequests: Int = 2,
     requestTimeout: Duration = .seconds(240),
-    structuredOutputMode: StructuredOutputMode = .auto
+    structuredOutputMode: StructuredOutputMode = .jsonSchema
   ) {
     self.baseURL = baseURL
     self.model = model
@@ -56,21 +55,13 @@ public struct LLMEndpoint: Sendable, Equatable {
     self.structuredOutputMode = structuredOutputMode
   }
 
-  /// `llmBaseURL`, `llmModel` and `llmContextTokens` from the settings;
-  /// throws `LLMError.notConfigured` naming the missing one.
-  public init(settings: Settings) throws {
-    guard let baseURL = settings.llmBaseURL else {
-      throw LLMError.notConfigured("llmBaseURL")
-    }
-    guard let model = settings.llmModel, !model.isEmpty else {
-      throw LLMError.notConfigured("llmModel")
+  /// `llmBaseURL`, `llmModel` and `llmContextTokens` from the settings; nil
+  /// until both the URL and the model are set.
+  public init?(settings: Settings) {
+    guard let baseURL = settings.llmBaseURL, let model = settings.llmModel, !model.isEmpty else {
+      return nil
     }
     self.init(baseURL: baseURL, model: model, contextTokens: max(settings.llmContextTokens, 1_024))
-  }
-
-  /// True when settings name both a base URL and a model.
-  public static func isConfigured(_ settings: Settings) -> Bool {
-    settings.llmBaseURL != nil && !(settings.llmModel ?? "").isEmpty
   }
 
   public var chatCompletionsURL: URL { baseURL.appendingPathComponent("chat/completions") }
@@ -86,13 +77,4 @@ public struct EndpointProbe: Sendable, Equatable {
   public var modelListed: Bool?
   public var resolvedMode: StructuredOutputMode
   public var roundTrip: Duration
-
-  public init(
-    reachable: Bool, modelListed: Bool?, resolvedMode: StructuredOutputMode, roundTrip: Duration
-  ) {
-    self.reachable = reachable
-    self.modelListed = modelListed
-    self.resolvedMode = resolvedMode
-    self.roundTrip = roundTrip
-  }
 }

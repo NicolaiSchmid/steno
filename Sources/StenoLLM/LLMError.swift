@@ -3,8 +3,6 @@ import Foundation
 /// Every failure this module reports. Bodies and messages are redacted by
 /// the client before they get here, so no case ever carries the API key.
 public enum LLMError: Error, Sendable, Equatable, CustomStringConvertible {
-  /// `Settings` lacks the named LLM value.
-  case notConfigured(String)
   /// A non-2xx answer that is not a rate limit; `body` is the server's
   /// error message or the first bytes of the body.
   case http(status: Int, body: String)
@@ -13,8 +11,6 @@ public enum LLMError: Error, Sendable, Equatable, CustomStringConvertible {
   /// The per-attempt timeout on the injected clock elapsed.
   case timeout
   case rateLimited(retryAfter: Duration?)
-  /// Every structured output mode was rejected by the server.
-  case unsupportedResponseFormat
   /// The model's text did not decode into the expected type.
   case invalidJSON(String)
   /// `finish_reason: length`: the answer was cut off.
@@ -33,10 +29,17 @@ public enum LLMError: Error, Sendable, Equatable, CustomStringConvertible {
     }
   }
 
+  /// A failure of the answer rather than of the transport: worth one retry
+  /// with the reason appended, never a backoff.
+  public var isAnswerProblem: Bool {
+    switch self {
+    case .invalidJSON, .truncated, .refused: true
+    default: false
+    }
+  }
+
   public var description: String {
     switch self {
-    case .notConfigured(let name):
-      "LLM not configured: Settings.\(name) is missing"
     case .http(let status, let body):
       "HTTP \(status): \(body)"
     case .transport(let message):
@@ -49,8 +52,6 @@ public enum LLMError: Error, Sendable, Equatable, CustomStringConvertible {
       } else {
         "rate limited"
       }
-    case .unsupportedResponseFormat:
-      "the server rejected every structured output mode"
     case .invalidJSON(let detail):
       "the model returned invalid JSON: \(detail)"
     case .truncated:

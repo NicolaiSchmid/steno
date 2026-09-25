@@ -185,24 +185,17 @@ public enum LLMFixtures {
 
 /// A seeded transcript generator: SplitMix64, integer arithmetic only, so
 /// the output is byte-identical on every machine.
-public enum SyntheticTranscript {
-  public enum Role: Sendable {
+enum SyntheticTranscript {
+  enum Role: Sendable {
     case vendor, customer, colleague
   }
 
-  public struct SpeakerSpec: Sendable {
-    public var id: UUID
-    public var lane: AudioLane
-    public var role: Role
+  struct SpeakerSpec: Sendable {
+    var id: UUID
+    var lane: AudioLane
+    var role: Role
     /// Relative share of turns.
-    public var weight: Int
-
-    public init(id: UUID, lane: AudioLane, role: Role, weight: Int) {
-      self.id = id
-      self.lane = lane
-      self.role = role
-      self.weight = weight
-    }
+    var weight: Int
   }
 
   struct SplitMix64 {
@@ -221,7 +214,7 @@ public enum SyntheticTranscript {
     }
   }
 
-  public static func generate(
+  static func generate(
     meetingID: UUID, seed: UInt64, speakers: [SpeakerSpec], segmentCount: Int,
     segmentSeconds: TimeInterval
   ) -> [TranscriptSegment] {

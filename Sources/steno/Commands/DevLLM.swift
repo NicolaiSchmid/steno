@@ -48,25 +48,21 @@ struct DevLLM: AsyncParsableCommand {
       }
       if let model { settings.llmModel = model }
       if let contextTokens { settings.llmContextTokens = contextTokens }
-      guard LLMEndpoint.isConfigured(settings) else {
+      guard var endpoint = LLMEndpoint(settings: settings) else {
         throw ValidationError(
           "No LLM endpoint configured. Pass --base-url and --model or set Settings.llmBaseURL and llmModel."
         )
       }
-      var endpoint = try LLMEndpoint(settings: settings)
       if let maxOutputTokens { endpoint.maxOutputTokens = maxOutputTokens }
       if let timeoutSeconds { endpoint.requestTimeout = .seconds(timeoutSeconds) }
       return endpoint
     }
 
     func client() async throws -> OpenAICompatibleClient {
-      let endpoint = try await endpoint()
-      let apiKey = try await Wiring.secretStore().secret(for: .llmAPIKey)
-      if verbose {
-        return OpenAICompatibleClient(
-          endpoint: endpoint, apiKey: apiKey, observer: { @Sendable event in Self.log(event) })
-      }
-      return OpenAICompatibleClient(endpoint: endpoint, apiKey: apiKey)
+      OpenAICompatibleClient(
+        endpoint: try await endpoint(),
+        apiKey: try await Wiring.secretStore().secret(for: .llmAPIKey),
+        observer: verbose ? Self.log : nil)
     }
 
     static func log(_ event: LLMClientEvent) {

@@ -6,71 +6,53 @@ public struct CleanupDraft: Codable, Sendable, Equatable {
   public struct Segment: Codable, Sendable, Equatable {
     public var index: Int
     public var text: String
-
-    public init(index: Int, text: String) {
-      self.index = index
-      self.text = text
-    }
   }
 
   public var segments: [Segment]
 
-  public init(segments: [Segment]) {
-    self.segments = segments
-  }
-}
+  /// Word counts may drift by at most this ratio, or by one word so that
+  /// "Git Hub" can become "GitHub".
+  static let wordRatio = 0.7...1.3
 
-/// Checks a draft against its chunk: same count, indices `0..<n` each once,
-/// no emptied segment, and a word count within `wordRatio` of the input
-/// (or within one word, so "Git Hub" may become "GitHub"). Returns the
-/// cleaned texts in segment order.
-public struct CleanupValidator: Sendable, Equatable {
-  public var wordRatio: ClosedRange<Double>
-
-  public init(wordRatio: ClosedRange<Double> = 0.7...1.3) {
-    self.wordRatio = wordRatio
-  }
-
-  public struct Rejection: Error, Sendable, Equatable, CustomStringConvertible {
-    public var reasons: [String]
-    public var description: String { reasons.joined(separator: " ") }
-  }
-
-  public func validate(_ draft: CleanupDraft, against chunk: TranscriptChunk) throws -> [String] {
+  /// Why the draft does not fit its chunk, in prompt-ready sentences; empty
+  /// when it does. Same count, indices `0..<n` each once, no emptied
+  /// segment, word count within `wordRatio` of the input.
+  public func problems(against chunk: TranscriptChunk) -> [String] {
     let expected = chunk.segments.count
-    var reasons: [String] = []
-    if draft.segments.count != expected {
-      reasons.append("Expected \(expected) segments, got \(draft.segments.count).")
+    var problems: [String] = []
+    if segments.count != expected {
+      problems.append("Expected \(expected) segments, got \(segments.count).")
     }
-    let indices = draft.segments.map(\.index).sorted()
+    let indices = segments.map(\.index).sorted()
     if indices != Array(0..<expected) {
-      reasons.append(
+      problems.append(
         "Indices must be 0 to \(expected - 1), each exactly once; got \(indices.map(String.init).joined(separator: ", "))."
       )
     }
-    if !reasons.isEmpty { throw Rejection(reasons: reasons) }
-    var texts = [String](repeating: "", count: expected)
-    for segment in draft.segments {
-      let original = chunk.segments[segment.index]
-      let cleaned = segment.text.trimmingCharacters(in: .whitespacesAndNewlines)
-      let originalWords = Self.wordCount(original.text)
-      let cleanedWords = Self.wordCount(cleaned)
-      if originalWords > 0 && cleanedWords == 0 {
-        reasons.append("Segment \(segment.index) came back empty.")
-        continue
+    guard problems.isEmpty else { return problems }
+    for segment in segments {
+      let originalWords = Self.wordCount(chunk.segments[segment.index].text)
+      let cleanedWords = Self.wordCount(segment.text)
+      guard originalWords > 0 else { continue }
+      if cleanedWords == 0 {
+        problems.append("Segment \(segment.index) came back empty.")
+      } else if abs(cleanedWords - originalWords) > 1,
+        !Self.wordRatio.contains(Double(cleanedWords) / Double(originalWords))
+      {
+        problems.append(
+          "Segment \(segment.index) changed from \(originalWords) to \(cleanedWords) words; keep the wording, only fix spelling, casing and punctuation."
+        )
       }
-      if originalWords > 0 {
-        let ratio = Double(cleanedWords) / Double(originalWords)
-        if abs(cleanedWords - originalWords) > 1 && !wordRatio.contains(ratio) {
-          reasons.append(
-            "Segment \(segment.index) changed from \(originalWords) to \(cleanedWords) words; keep the wording, only fix spelling, casing and punctuation."
-          )
-        }
-      }
-      texts[segment.index] = cleaned
     }
-    if !reasons.isEmpty { throw Rejection(reasons: reasons) }
-    return texts
+    return problems
+  }
+
+  /// The cleaned texts in segment order, trimmed; meaningful once
+  /// `problems(against:)` is empty.
+  public var orderedTexts: [String] {
+    segments.sorted { $0.index < $1.index }.map {
+      $0.text.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
   }
 
   static func wordCount(_ text: String) -> Int {

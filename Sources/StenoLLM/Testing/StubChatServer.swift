@@ -2,6 +2,9 @@ import Foundation
 import StenoCore
 import Synchronization
 
+#if canImport(FoundationNetworking)
+  import FoundationNetworking
+#endif
 #if canImport(Glibc)
   import Glibc
 #elseif canImport(Darwin)
@@ -18,7 +21,7 @@ public struct RecordedRequest: Sendable {
   public var headers: [String: String]
   public var body: Data
   /// The body decoded as a chat completion request, when it is one.
-  public var chat: ChatCompletionRequest?
+  var chat: ChatCompletionRequest?
   /// The `X-Steno-Purpose` header the client sends with every completion.
   public var purpose: String?
   /// Requests in flight (including this one) when it arrived.
@@ -100,7 +103,7 @@ public final class StubChatServer: Sendable {
       let streamType = SOCK_STREAM
     #endif
     let fd = socket(AF_INET, streamType, 0)
-    guard fd >= 0 else { throw StubServerError.socket(errno) }
+    guard fd >= 0 else { throw StubServerError(call: "socket", errno: errno) }
     var reuse: Int32 = 1
     setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &reuse, socklen_t(MemoryLayout<Int32>.size))
     var address = sockaddr_in()
@@ -114,11 +117,11 @@ public final class StubChatServer: Sendable {
     }
     guard bound == 0 else {
       close(fd)
-      throw StubServerError.bind(errno)
+      throw StubServerError(call: "bind", errno: errno)
     }
     guard listen(fd, 16) == 0 else {
       close(fd)
-      throw StubServerError.listen(errno)
+      throw StubServerError(call: "listen", errno: errno)
     }
     var boundAddress = sockaddr_in()
     var length = socklen_t(MemoryLayout<sockaddr_in>.size)
@@ -127,9 +130,14 @@ public final class StubChatServer: Sendable {
         getsockname(fd, sockaddrPointer, &length)
       }
     }
+    let port = UInt16(bigEndian: boundAddress.sin_port)
+    guard let baseURL = URL(string: "http://127.0.0.1:\(port)/v1") else {
+      close(fd)
+      throw StubServerError(call: "URL", errno: EINVAL)
+    }
     listenFD = fd
-    port = UInt16(bigEndian: boundAddress.sin_port)
-    baseURL = URL(string: "http://127.0.0.1:\(port)/v1")!
+    self.port = port
+    self.baseURL = baseURL
     let thread = Thread { [self] in self.acceptLoop() }
     thread.name = "StubChatServer.accept"
     thread.start()
@@ -141,12 +149,8 @@ public final class StubChatServer: Sendable {
 
   // MARK: Scripting
 
-  /// Appends a response; the queue is consumed in arrival order.
-  public func enqueue(_ response: StubResponse) {
-    state.withLock { $0.queue.append(response) }
-  }
-
-  public func enqueue(contentsOf responses: [StubResponse]) {
+  /// Appends responses; the queue is consumed in arrival order.
+  public func enqueue(_ responses: StubResponse...) {
     state.withLock { $0.queue.append(contentsOf: responses) }
   }
 
@@ -349,7 +353,8 @@ public final class StubChatServer: Sendable {
   }
 
   private static func serialize(_ response: StubResponse) -> Data {
-    var head = "HTTP/1.1 \(response.status) \(reason(response.status))\r\n"
+    let reason = HTTPURLResponse.localizedString(forStatusCode: response.status)
+    var head = "HTTP/1.1 \(response.status) \(reason)\r\n"
     var headers = response.headers
     headers["Content-Length"] = "\(response.body.count)"
     headers["Connection"] = "close"
@@ -358,22 +363,6 @@ public final class StubChatServer: Sendable {
     }
     head += "\r\n"
     return Data(head.utf8) + response.body
-  }
-
-  private static func reason(_ status: Int) -> String {
-    switch status {
-    case 200: "OK"
-    case 400: "Bad Request"
-    case 401: "Unauthorized"
-    case 403: "Forbidden"
-    case 404: "Not Found"
-    case 408: "Request Timeout"
-    case 429: "Too Many Requests"
-    case 500: "Internal Server Error"
-    case 502: "Bad Gateway"
-    case 503: "Service Unavailable"
-    default: "Status"
-    }
   }
 
   private func write(_ fd: Int32, _ data: Data) {
@@ -394,8 +383,8 @@ public final class StubChatServer: Sendable {
   }
 }
 
-public enum StubServerError: Error, Sendable, Equatable {
-  case socket(Int32)
-  case bind(Int32)
-  case listen(Int32)
+/// The named system call failed with `errno` while the server started.
+public struct StubServerError: Error, Sendable, Equatable {
+  public var call: String
+  public var errno: Int32
 }

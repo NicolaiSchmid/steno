@@ -12,46 +12,33 @@ public struct LLMTranscriptCleaner: TranscriptCleaner, Sendable {
   public var model: any LanguageModel
   public var endpoint: LLMEndpoint
   public var chunker: TranscriptChunker
-  public var validator: CleanupValidator
 
-  public init(
-    model: any LanguageModel, endpoint: LLMEndpoint, chunker: TranscriptChunker? = nil,
-    validator: CleanupValidator = CleanupValidator()
-  ) {
+  public init(model: any LanguageModel, endpoint: LLMEndpoint, chunker: TranscriptChunker? = nil) {
     self.model = model
     self.endpoint = endpoint
     // Half the context for the chunk, the other half for its echo.
     self.chunker = chunker ?? TranscriptChunker(budget: max(256, endpoint.contextTokens / 2 - 512))
-    self.validator = validator
-  }
-
-  struct ChunkResult: Sendable {
-    var texts: [String]?
-    var usage: LLMUsage
   }
 
   public func clean(_ input: CleanupInput) async throws -> CleanupOutput {
     let chunks = chunker.chunk(input.segments, language: input.language)
-    guard !chunks.isEmpty else {
-      return CleanupOutput(segments: input.segments, failedChunks: [], usage: .zero)
-    }
-    let glossary = Glossary(input: input)
+    let glossary = input.glossary
     let labels = SpeakerLabels(speakers: input.speakers)
     let builder = CleanupPromptBuilder(maxOutputTokens: endpoint.maxOutputTokens)
-    let limit = max(1, endpoint.maxConcurrentRequests)
 
-    let results = try await mapBounded(chunks, limit: limit) { chunk in
+    let results = try await mapBounded(chunks, limit: endpoint.maxConcurrentRequests) { chunk in
       try await self.cleanChunk(
-        chunk, language: input.language, glossary: glossary, labels: labels, builder: builder)
+        builder.build(chunk: chunk, language: input.language, glossary: glossary, labels: labels),
+        chunk: chunk, builder: builder)
     }
 
     var segments = input.segments
     var offset = 0
     var failed: [Int] = []
     var usage = LLMUsage.zero
-    for (chunk, result) in zip(chunks, results) {
-      usage = usage + result.usage
-      if let texts = result.texts, texts.count == chunk.segments.count {
+    for (chunk, (texts, chunkUsage)) in zip(chunks, results) {
+      usage = usage + chunkUsage
+      if let texts {
         for (position, text) in texts.enumerated() {
           segments[offset + position].text = text
         }
@@ -65,36 +52,25 @@ public struct LLMTranscriptCleaner: TranscriptCleaner, Sendable {
 
   /// One chunk: request, validate, one retry with the reason, else nil.
   func cleanChunk(
-    _ chunk: TranscriptChunk, language: LanguageTag?, glossary: Glossary, labels: SpeakerLabels,
-    builder: CleanupPromptBuilder
-  ) async throws -> ChunkResult {
+    _ request: LLMRequest, chunk: TranscriptChunk, builder: CleanupPromptBuilder
+  ) async throws -> (texts: [String]?, usage: LLMUsage) {
+    var request = request
     var usage = LLMUsage.zero
-    var request = builder.build(
-      chunk: chunk, language: language, glossary: glossary, labels: labels)
     for attempt in 0..<2 {
       let response = try await model.complete(request)
-      usage =
-        usage + (response.usage ?? LLMUsage(promptTokens: 0, completionTokens: 0, requests: 1))
+      usage = usage + response.countedUsage
       let rejection: String
       do {
-        let draft = try StructuredOutputDecoder().decode(CleanupDraft.self, from: response)
-        return ChunkResult(texts: try validator.validate(draft, against: chunk), usage: usage)
-      } catch let error as CleanupValidator.Rejection {
-        rejection = error.description
-      } catch let error as LLMError where Self.isAnswerProblem(error) {
+        let draft = try StructuredOutputDecoder.decode(CleanupDraft.self, from: response)
+        let problems = draft.problems(against: chunk)
+        if problems.isEmpty { return (draft.orderedTexts, usage) }
+        rejection = problems.joined(separator: " ")
+      } catch let error as LLMError where error.isAnswerProblem {
         rejection = error.description + "."
       }
       guard attempt == 0 else { break }
       request = builder.buildRetry(request, previousAnswer: response.text, error: rejection)
     }
-    return ChunkResult(texts: nil, usage: usage)
-  }
-
-  /// Failures of the answer, worth one retry; everything else propagates.
-  static func isAnswerProblem(_ error: LLMError) -> Bool {
-    switch error {
-    case .invalidJSON, .truncated, .refused: true
-    default: false
-    }
+    return (nil, usage)
   }
 }

@@ -17,12 +17,11 @@ import Testing
 struct LiveEndpointTests {
   static func endpoint() throws -> LLMEndpoint {
     let environment = ProcessInfo.processInfo.environment
-    guard let base = environment["STENO_LLM_BASE_URL"], let url = URL(string: base),
-      let model = environment["STENO_LLM_MODEL"], !model.isEmpty
-    else {
-      throw LLMError.notConfigured("STENO_LLM_BASE_URL and STENO_LLM_MODEL")
-    }
-    var endpoint = LLMEndpoint(baseURL: url, model: model)
+    var settings = Settings()
+    settings.llmBaseURL = environment["STENO_LLM_BASE_URL"].flatMap { URL(string: $0) }
+    settings.llmModel = environment["STENO_LLM_MODEL"]
+    var endpoint = try #require(
+      LLMEndpoint(settings: settings), "set STENO_LLM_BASE_URL and STENO_LLM_MODEL")
     if let context = environment["STENO_LLM_CONTEXT_TOKENS"].flatMap({ Int($0) }) {
       endpoint.contextTokens = context
     }

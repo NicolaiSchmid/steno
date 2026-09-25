@@ -6,8 +6,7 @@ func mapBounded<Item: Sendable, Result: Sendable>(
   _ items: [Item], limit: Int,
   _ transform: @escaping @Sendable (Item) async throws -> Result
 ) async throws -> [Result] {
-  guard !items.isEmpty else { return [] }
-  var results = [Result?](repeating: nil, count: items.count)
+  var results: [(index: Int, result: Result)] = []
   try await withThrowingTaskGroup(of: (Int, Result).self) { group in
     var next = 0
     func addNext() {
@@ -18,10 +17,10 @@ func mapBounded<Item: Sendable, Result: Sendable>(
       group.addTask { (index, try await transform(item)) }
     }
     for _ in 0..<max(1, limit) { addNext() }
-    while let (index, result) = try await group.next() {
-      results[index] = result
+    while let result = try await group.next() {
+      results.append(result)
       addNext()
     }
   }
-  return results.map { $0! }
+  return results.sorted { $0.index < $1.index }.map(\.result)
 }

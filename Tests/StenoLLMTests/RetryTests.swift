@@ -21,9 +21,9 @@ import Testing
   @Test func rateLimitThenSuccessHonoursRetryAfterOnTheClock() async throws {
     let harness = try ClientHarness()
     defer { harness.stop() }
-    harness.server.enqueue(contentsOf: [
+    harness.server.enqueue(
       Scripts.rateLimited(retryAfterSeconds: 7), Scripts.completion("{}"),
-    ])
+    )
     let task = Task { try await harness.client.complete(ClientHarness.request()) }
 
     let retrying = await harness.next {
@@ -48,9 +48,9 @@ import Testing
   @Test func threeServerErrorsThrowHTTP500AfterTwoBackoffs() async throws {
     let harness = try ClientHarness()
     defer { harness.stop() }
-    harness.server.enqueue(contentsOf: [
+    harness.server.enqueue(
       Scripts.serverError(), Scripts.serverError(), Scripts.serverError(),
-    ])
+    )
     let driver = harness.driveRetries()
     defer { driver.cancel() }
     let error = await #expect(throws: LLMError.self) {
@@ -69,7 +69,7 @@ import Testing
   @Test func timeoutOnTheClockCancelsTheAttemptAndRetries() async throws {
     let harness = try ClientHarness { $0.requestTimeout = .seconds(30) }
     defer { harness.stop() }
-    harness.server.enqueue(contentsOf: [Scripts.hang, Scripts.completion("late")])
+    harness.server.enqueue(.hang, Scripts.completion("late"))
     let driver = harness.driveRetries()
     defer { driver.cancel() }
     let task = Task { try await harness.client.complete(ClientHarness.request()) }
@@ -88,7 +88,7 @@ import Testing
   @Test func droppedConnectionIsATransportErrorAndRetried() async throws {
     let harness = try ClientHarness()
     defer { harness.stop() }
-    harness.server.enqueue(contentsOf: [Scripts.drop, Scripts.completion("again")])
+    harness.server.enqueue(.drop, Scripts.completion("again"))
     let driver = harness.driveRetries()
     defer { driver.cancel() }
     let response = try await harness.client.complete(ClientHarness.request())
@@ -108,7 +108,7 @@ import Testing
   @Test func requestTimeoutIsRetriedOn408() async throws {
     let harness = try ClientHarness()
     defer { harness.stop() }
-    harness.server.enqueue(contentsOf: [Scripts.serverError(408), Scripts.completion("ok")])
+    harness.server.enqueue(Scripts.serverError(408), Scripts.completion("ok"))
     let driver = harness.driveRetries()
     defer { driver.cancel() }
     let response = try await harness.client.complete(ClientHarness.request())

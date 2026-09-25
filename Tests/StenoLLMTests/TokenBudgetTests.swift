@@ -31,10 +31,8 @@ import Testing
   }
 
   @Test func inputBudgetIsWhatRemainsAndNeverNegative() {
-    let endpoint = LLMEndpoint(
-      baseURL: URL(string: "http://127.0.0.1:1/v1")!, model: "m", contextTokens: 8_000)
     let budget = TokenBudget(
-      endpoint: endpoint, reservedOutputTokens: 2_000, promptOverheadTokens: 1_500)
+      contextTokens: 8_000, reservedOutputTokens: 2_000, promptOverheadTokens: 1_500)
     #expect(budget.inputBudget == 4_500)
     #expect(budget.fits(4_500))
     #expect(!budget.fits(4_501))

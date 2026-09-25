@@ -3,29 +3,16 @@ import StenoCore
 
 // The OpenAI chat completions wire format, the one shape every supported
 // server speaks: `POST {baseURL}/chat/completions` and `GET {baseURL}/models`.
-// Keys are spelled as the API spells them; nothing here is stored.
+// Keys are spelled as the API spells them; nothing here is stored and
+// nothing leaves the module: callers see `LLMRequest` and `LLMResponse`.
 
 /// The request body of `POST /chat/completions`.
-public struct ChatCompletionRequest: Codable, Sendable, Equatable {
-  public var model: String
-  public var messages: [ChatMessage]
-  public var temperature: Double?
-  public var maxTokens: Int?
-  public var responseFormat: ChatResponseFormat?
-
-  public init(
-    model: String,
-    messages: [ChatMessage],
-    temperature: Double? = nil,
-    maxTokens: Int? = nil,
-    responseFormat: ChatResponseFormat? = nil
-  ) {
-    self.model = model
-    self.messages = messages
-    self.temperature = temperature
-    self.maxTokens = maxTokens
-    self.responseFormat = responseFormat
-  }
+struct ChatCompletionRequest: Codable, Sendable, Equatable {
+  var model: String
+  var messages: [ChatMessage]
+  var temperature: Double?
+  var maxTokens: Int?
+  var responseFormat: ChatResponseFormat?
 
   enum CodingKeys: String, CodingKey {
     case model
@@ -36,49 +23,32 @@ public struct ChatCompletionRequest: Codable, Sendable, Equatable {
   }
 }
 
-public struct ChatMessage: Codable, Sendable, Equatable {
-  public var role: String
-  public var content: String
+struct ChatMessage: Codable, Sendable, Equatable {
+  var role: String
+  var content: String
+}
 
-  public init(role: String, content: String) {
-    self.role = role
-    self.content = content
-  }
-
-  public init(_ message: LLMMessage) {
-    self.role = message.role.rawValue
-    self.content = message.content
+extension ChatMessage {
+  init(_ message: LLMMessage) {
+    self.init(role: message.role.rawValue, content: message.content)
   }
 }
 
 /// `response_format`: `{"type": "json_object"}` or
 /// `{"type": "json_schema", "json_schema": {"name", "schema", "strict"}}`.
-public struct ChatResponseFormat: Codable, Sendable, Equatable {
-  public struct Schema: Codable, Sendable, Equatable {
-    public var name: String
-    public var schema: JSONValue
-    public var strict: Bool
-
-    public init(name: String, schema: JSONValue, strict: Bool) {
-      self.name = name
-      self.schema = schema
-      self.strict = strict
-    }
+struct ChatResponseFormat: Codable, Sendable, Equatable {
+  struct Schema: Codable, Sendable, Equatable {
+    var name: String
+    var schema: JSONValue
+    var strict: Bool
   }
 
-  public var type: String
-  public var jsonSchema: Schema?
+  var type: String
+  var jsonSchema: Schema?
 
-  public init(type: String, jsonSchema: Schema? = nil) {
-    self.type = type
-    self.jsonSchema = jsonSchema
-  }
+  static let jsonObject = ChatResponseFormat(type: "json_object")
 
-  public static let jsonObject = ChatResponseFormat(type: "json_object")
-
-  public static func jsonSchema(name: String, schema: JSONValue, strict: Bool)
-    -> ChatResponseFormat
-  {
+  static func jsonSchema(name: String, schema: JSONValue, strict: Bool) -> ChatResponseFormat {
     ChatResponseFormat(
       type: "json_schema", jsonSchema: Schema(name: name, schema: schema, strict: strict))
   }
@@ -90,17 +60,11 @@ public struct ChatResponseFormat: Codable, Sendable, Equatable {
 }
 
 /// The response body of `POST /chat/completions`. Only the fields Steno reads.
-public struct ChatCompletionResponse: Codable, Sendable, Equatable {
-  public struct Choice: Codable, Sendable, Equatable {
-    public var index: Int?
-    public var message: Message
-    public var finishReason: String?
-
-    public init(index: Int? = nil, message: Message, finishReason: String?) {
-      self.index = index
-      self.message = message
-      self.finishReason = finishReason
-    }
+struct ChatCompletionResponse: Codable, Sendable, Equatable {
+  struct Choice: Codable, Sendable, Equatable {
+    var index: Int?
+    var message: Message
+    var finishReason: String?
 
     enum CodingKeys: String, CodingKey {
       case index
@@ -112,34 +76,10 @@ public struct ChatCompletionResponse: Codable, Sendable, Equatable {
   /// `content` is a string on every server Steno targets; a few return an
   /// array of `{"type": "text", "text": ...}` parts, which decode to their
   /// concatenated text. `refusal` is OpenAI's structured-output refusal.
-  public struct Message: Codable, Sendable, Equatable {
-    public var role: String?
-    public var content: String?
-    public var refusal: String?
-
-    public init(role: String? = "assistant", content: String?, refusal: String? = nil) {
-      self.role = role
-      self.content = content
-      self.refusal = refusal
-    }
-
-    private struct Part: Decodable {
-      var type: String?
-      var text: String?
-    }
-
-    public init(from decoder: any Decoder) throws {
-      let container = try decoder.container(keyedBy: CodingKeys.self)
-      role = try container.decodeIfPresent(String.self, forKey: .role)
-      refusal = try container.decodeIfPresent(String.self, forKey: .refusal)
-      if let text = try? container.decodeIfPresent(String.self, forKey: .content) {
-        content = text
-      } else if let parts = try? container.decodeIfPresent([Part].self, forKey: .content) {
-        content = parts.compactMap(\.text).joined()
-      } else {
-        content = nil
-      }
-    }
+  struct Message: Codable, Sendable, Equatable {
+    var role: String? = "assistant"
+    var content: String?
+    var refusal: String?
 
     enum CodingKeys: String, CodingKey {
       case role
@@ -148,16 +88,10 @@ public struct ChatCompletionResponse: Codable, Sendable, Equatable {
     }
   }
 
-  public struct Usage: Codable, Sendable, Equatable {
-    public var promptTokens: Int
-    public var completionTokens: Int
-    public var totalTokens: Int?
-
-    public init(promptTokens: Int, completionTokens: Int, totalTokens: Int? = nil) {
-      self.promptTokens = promptTokens
-      self.completionTokens = completionTokens
-      self.totalTokens = totalTokens
-    }
+  struct Usage: Codable, Sendable, Equatable {
+    var promptTokens: Int
+    var completionTokens: Int
+    var totalTokens: Int?
 
     enum CodingKeys: String, CodingKey {
       case promptTokens = "prompt_tokens"
@@ -166,56 +100,49 @@ public struct ChatCompletionResponse: Codable, Sendable, Equatable {
     }
   }
 
-  public var id: String?
-  public var model: String?
-  public var choices: [Choice]
-  public var usage: Usage?
+  var id: String?
+  var model: String?
+  var choices: [Choice]
+  var usage: Usage?
+}
 
-  public init(id: String? = nil, model: String? = nil, choices: [Choice], usage: Usage? = nil) {
-    self.id = id
-    self.model = model
-    self.choices = choices
-    self.usage = usage
+extension ChatCompletionResponse.Message {
+  private struct Part: Decodable {
+    var type: String?
+    var text: String?
+  }
+
+  init(from decoder: any Decoder) throws {
+    let container = try decoder.container(keyedBy: CodingKeys.self)
+    role = try container.decodeIfPresent(String.self, forKey: .role)
+    refusal = try container.decodeIfPresent(String.self, forKey: .refusal)
+    if let text = try? container.decodeIfPresent(String.self, forKey: .content) {
+      content = text
+    } else if let parts = try? container.decodeIfPresent([Part].self, forKey: .content) {
+      content = parts.compactMap(\.text).joined()
+    }
   }
 }
 
 /// `{"error": {"message": ..., "type": ..., "code": ...}}`; `code` is a string
 /// on OpenAI and an integer on some servers, so it is read as any JSON value.
-public struct ChatErrorEnvelope: Codable, Sendable, Equatable {
-  public struct Detail: Codable, Sendable, Equatable {
-    public var message: String
-    public var type: String?
-    public var code: JSONValue?
-
-    public init(message: String, type: String? = nil, code: JSONValue? = nil) {
-      self.message = message
-      self.type = type
-      self.code = code
-    }
+struct ChatErrorEnvelope: Codable, Sendable, Equatable {
+  struct Detail: Codable, Sendable, Equatable {
+    var message: String
+    var type: String?
+    var code: JSONValue?
   }
 
-  public var error: Detail
-
-  public init(error: Detail) {
-    self.error = error
-  }
+  var error: Detail
 }
 
 /// The response body of `GET /models`.
-public struct ModelList: Codable, Sendable, Equatable {
-  public struct Model: Codable, Sendable, Equatable {
-    public var id: String
-
-    public init(id: String) {
-      self.id = id
-    }
+struct ModelList: Codable, Sendable, Equatable {
+  struct Model: Codable, Sendable, Equatable {
+    var id: String
   }
 
-  public var data: [Model]
-
-  public init(data: [Model]) {
-    self.data = data
-  }
+  var data: [Model]
 }
 
 /// One JSON coder pair for the wire: no key sorting requirements, but sorted

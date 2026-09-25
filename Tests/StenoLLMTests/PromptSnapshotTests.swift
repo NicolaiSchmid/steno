@@ -39,7 +39,7 @@ import Testing
     let chunks = TranscriptChunker(targetTokens: 150, maxTokens: 220).chunk(
       input.segments, language: language)
     return CleanupPromptBuilder().build(
-      chunk: chunks[1], language: language, glossary: Glossary(input: input),
+      chunk: chunks[1], language: language, glossary: input.glossary,
       labels: SpeakerLabels(speakers: input.speakers))
   }
 

@@ -80,7 +80,7 @@ import Testing
   @Test func cancelThrowsCancellationErrorAfterExactlyOneRequest() async throws {
     let harness = try ClientHarness()
     defer { harness.stop() }
-    harness.server.enqueue(Scripts.hang)
+    harness.server.enqueue(.hang)
     let task = Task { try await harness.client.complete(ClientHarness.request()) }
     await harness.server.received(atLeast: 1)
     task.cancel()
@@ -105,9 +105,9 @@ import Testing
     #expect(refused == .refused("no, [redacted]"))
 
     let everyCase: [LLMError] = [
-      .notConfigured("llmModel"), http!, .transport("boom"), .timeout,
+      http!, .transport("boom"), .timeout,
       .rateLimited(retryAfter: .seconds(3)), .rateLimited(retryAfter: nil),
-      .unsupportedResponseFormat, .invalidJSON("x"), .truncated, refused!,
+      .invalidJSON("x"), .truncated, refused!,
       .transcriptTooLong(estimatedTokens: 1, budget: 2),
     ]
     for error in everyCase {
@@ -149,22 +149,22 @@ import Testing
     #expect(probe.modelListed == nil)
   }
 
-  @Test func endpointFromSettingsAndConfigurationErrors() throws {
+  @Test func endpointFromSettingsNeedsBothURLAndModel() throws {
     var settings = Settings()
-    #expect(!LLMEndpoint.isConfigured(settings))
-    #expect(throws: LLMError.notConfigured("llmBaseURL")) { try LLMEndpoint(settings: settings) }
+    #expect(LLMEndpoint(settings: settings) == nil)
     settings.llmBaseURL = URL(string: "http://127.0.0.1:1234/v1/")
-    #expect(throws: LLMError.notConfigured("llmModel")) { try LLMEndpoint(settings: settings) }
+    #expect(LLMEndpoint(settings: settings) == nil)
+    settings.llmModel = ""
+    #expect(LLMEndpoint(settings: settings) == nil)
     settings.llmModel = "local-model"
     settings.llmContextTokens = 16_000
-    let endpoint = try LLMEndpoint(settings: settings)
-    #expect(LLMEndpoint.isConfigured(settings))
+    let endpoint = try #require(LLMEndpoint(settings: settings))
     #expect(endpoint.model == "local-model")
     #expect(endpoint.contextTokens == 16_000)
     #expect(
       endpoint.chatCompletionsURL.absoluteString == "http://127.0.0.1:1234/v1/chat/completions")
     #expect(endpoint.modelsURL.absoluteString == "http://127.0.0.1:1234/v1/models")
-    #expect(endpoint.structuredOutputMode == .auto)
+    #expect(endpoint.structuredOutputMode == .jsonSchema)
     #expect(endpoint.maxConcurrentRequests == 2)
     #expect(endpoint.requestTimeout == .seconds(240))
   }

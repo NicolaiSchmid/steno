@@ -35,10 +35,9 @@ public struct LLMMeetingSummarizer: MeetingSummarizer, Sendable {
 
   public func summarize(_ input: SummaryInput) async throws -> SummaryOutput {
     let builder = SummaryPromptBuilder(template: input.template, timeZone: timeZone)
-    let language = OutputLanguage.resolve(meeting: input.meeting.language)
-    let singleShot = builder.buildSingleShot(input, segments: input.segments)
+    var singleShot = builder.buildSingleShot(input)
     let budget = TokenBudget(
-      endpoint: endpoint, reservedOutputTokens: reservedOutputTokens,
+      contextTokens: endpoint.contextTokens, reservedOutputTokens: reservedOutputTokens,
       promptOverheadTokens: TokenBudget.estimateTokens(
         singleShot.messages[0].content, language: "en") + 64)
     let transcriptTokens = TranscriptChunker.estimateTokens(
@@ -47,16 +46,15 @@ public struct LLMMeetingSummarizer: MeetingSummarizer, Sendable {
     let draft: AnalysisDraft
     let usage: LLMUsage
     if budget.fits(transcriptTokens) {
-      var request = singleShot
-      request.maxTokens = reservedOutputTokens
-      (draft, usage) = try await complete(AnalysisDraft.self, request, builder: builder)
+      singleShot.maxTokens = reservedOutputTokens
+      (draft, usage) = try await complete(
+        AnalysisDraft.self, singleShot, schema: builder.draftSchema)
     } else {
       (draft, usage) = try await mapReduce(
         input, builder: builder, budget: budget, transcriptTokens: transcriptTokens)
     }
     return Self.output(
-      from: draft, input: input, language: language, usage: usage,
-      minimumConfidence: minimumConfidence)
+      from: draft, input: input, usage: usage, minimumConfidence: minimumConfidence)
   }
 
   /// Estimated tokens one chunk's notes take in the reduce prompt; decides
@@ -78,66 +76,55 @@ public struct LLMMeetingSummarizer: MeetingSummarizer, Sendable {
         estimatedTokens: transcriptTokens, budget: budget.inputBudget)
     }
     let notesTokens = min(reservedOutputTokens, 1_500)
-    let mapped = try await mapBounded(chunks, limit: max(1, endpoint.maxConcurrentRequests)) {
+    let mapped = try await mapBounded(chunks, limit: endpoint.maxConcurrentRequests) {
       chunk -> (ChunkNotes, LLMUsage) in
       var request = builder.buildMap(input, chunk: chunk, of: chunks.count)
       request.maxTokens = notesTokens
       var (notes, usage) = try await self.complete(
-        ChunkNotes.self, request, builder: builder, schema: builder.notesSchema,
-        schemaName: "chunk_notes")
+        ChunkNotes.self, request, schema: builder.notesSchema)
       notes.chunkIndex = chunk.index
       return (notes, usage)
     }
-    let notes = mapped.map(\.0)
-    var usage = mapped.map(\.1).reduce(LLMUsage.zero, +)
-    var reduce = builder.buildReduce(input, notes: notes)
+    var reduce = builder.buildReduce(input, notes: mapped.map(\.0))
     reduce.maxTokens = reservedOutputTokens
     let notesEstimate = TokenBudget.estimateTokens(reduce.messages[1].content, language: "en")
     guard budget.fits(notesEstimate) else {
       throw LLMError.transcriptTooLong(estimatedTokens: notesEstimate, budget: budget.inputBudget)
     }
-    let (draft, reduceUsage) = try await complete(AnalysisDraft.self, reduce, builder: builder)
-    usage = usage + reduceUsage
-    return (draft, usage)
+    let (draft, reduceUsage) = try await complete(
+      AnalysisDraft.self, reduce, schema: builder.draftSchema)
+    return (draft, mapped.map(\.1).reduce(reduceUsage, +))
   }
-
-  // MARK: Calls
 
   /// One request, decoded into `type`; an undecodable answer gets exactly
   /// one repair round. Usage sums both calls.
-  func complete<T: Decodable & Sendable>(
-    _ type: T.Type, _ request: LLMRequest, builder: SummaryPromptBuilder,
-    schema: JSONSchema? = nil, schemaName: String = "meeting_analysis"
+  func complete<T: Decodable>(
+    _ type: T.Type, _ request: LLMRequest, schema: JSONSchema
   ) async throws -> (T, LLMUsage) {
-    let decoder = StructuredOutputDecoder()
     let first = try await model.complete(request)
-    var usage = Self.usage(of: first)
     do {
-      return (try decoder.decode(type, from: first), usage)
-    } catch let error as LLMError {
-      guard case .invalidJSON(let detail) = error else { throw error }
-      let repair = builder.buildRepair(
-        invalid: first.text, error: detail, schema: schema, name: schemaName,
-        purpose: request.purpose + "-repair")
-      var repairRequest = repair
-      repairRequest.maxTokens = request.maxTokens
-      let second = try await model.complete(repairRequest)
-      usage = usage + Self.usage(of: second)
-      return (try decoder.decode(type, from: second), usage)
+      return (try StructuredOutputDecoder.decode(type, from: first), first.countedUsage)
+    } catch LLMError.invalidJSON(let detail) {
+      let repair = SummaryPromptBuilder.buildRepair(
+        for: request, schema: schema, invalid: first.text, error: detail)
+      let second = try await model.complete(repair)
+      return (
+        try StructuredOutputDecoder.decode(type, from: second),
+        first.countedUsage + second.countedUsage
+      )
     }
-  }
-
-  static func usage(of response: LLMResponse) -> LLMUsage {
-    response.usage ?? LLMUsage(promptTokens: 0, completionTokens: 0, requests: 1)
   }
 
   // MARK: Post-processing
 
+  /// `language` is the meeting's, else English; the model's own `language`
+  /// field is ignored.
   static func output(
-    from draft: AnalysisDraft, input: SummaryInput, language: LanguageTag, usage: LLMUsage,
+    from draft: AnalysisDraft, input: SummaryInput, usage: LLMUsage,
     minimumConfidence: Double = 0.3
   ) -> SummaryOutput {
     let labels = SpeakerLabels(speakers: input.speakers)
+    let language = OutputLanguage.resolve(meeting: input.meeting.language)
     let title = trimmed(draft.title).isEmpty ? input.meeting.title : trimmed(draft.title)
     return SummaryOutput(
       title: title,
@@ -232,7 +219,7 @@ public struct LLMMeetingSummarizer: MeetingSummarizer, Sendable {
     guard text.count == 10 else { return nil }
     let formatter = DateFormatter()
     formatter.locale = Locale(identifier: "en_US_POSIX")
-    formatter.timeZone = TimeZone(identifier: "UTC")
+    formatter.timeZone = .gmt
     formatter.dateFormat = "yyyy-MM-dd"
     formatter.isLenient = false
     guard let date = formatter.date(from: text), formatter.string(from: date) == text else {

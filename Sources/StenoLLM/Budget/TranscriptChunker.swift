@@ -9,16 +9,6 @@ public struct TranscriptChunk: Sendable, Equatable {
   public var leadingContext: [TranscriptSegment]
   /// Estimated tokens of `segments` as transcript lines, context excluded.
   public var estimatedTokens: Int
-
-  public init(
-    index: Int, segments: [TranscriptSegment], leadingContext: [TranscriptSegment],
-    estimatedTokens: Int
-  ) {
-    self.index = index
-    self.segments = segments
-    self.leadingContext = leadingContext
-    self.estimatedTokens = estimatedTokens
-  }
 }
 
 /// Splits a transcript on segment boundaries. A chunk grows to at least

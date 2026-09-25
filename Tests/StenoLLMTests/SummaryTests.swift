@@ -88,12 +88,12 @@ import Testing
   @Test func anInvalidAnswerIsRepairedOnceThenFails() async throws {
     let server = try StubChatServer()
     defer { server.stop() }
-    server.enqueue(contentsOf: [
+    server.enqueue(
       Scripts.completion("{\"title\": \"x\", \"sections\": [}"),
       Scripts.fenced(
         try WireJSON.decode(
           AnalysisDraft.self, from: Data(try Self.canned("summary-default-standup").utf8))),
-    ])
+    )
     let output = try await Self.summarizer(server).summarize(Self.defaultInput())
     #expect(output.summary.sections.count == 2)
     #expect(server.requests.map(\.purpose) == ["summary", "summary-repair"])
@@ -102,7 +102,7 @@ import Testing
     #expect(repair.messages[1].content.contains("{\"title\": \"x\", \"sections\": [}"))
     #expect(output.usage.requests == 2)
 
-    server.enqueue(contentsOf: [Scripts.completion("nope"), Scripts.completion("still nope")])
+    server.enqueue(Scripts.completion("nope"), Scripts.completion("still nope"))
     let error = await #expect(throws: LLMError.self) {
       try await Self.summarizer(server).summarize(Self.defaultInput())
     }
@@ -135,8 +135,7 @@ import Testing
       ],
       decisions: [" a ", "A", ""], tasks: [], speakerNames: [])
     let input = Self.defaultInput()
-    let output = LLMMeetingSummarizer.output(
-      from: draft, input: input, language: "de", usage: .zero)
+    let output = LLMMeetingSummarizer.output(from: draft, input: input, usage: .zero)
     #expect(output.title == input.meeting.title, "a blank title keeps the meeting's")
     #expect(output.summary.sections.map(\.id) == ["executive-summary", "open-questions"])
     #expect(output.summary.sections[0].bullets.isEmpty)
@@ -211,7 +210,7 @@ import Testing
     let input = SummaryInput(
       export: Self.standup, template: SummaryTemplate.bundled(id: templateID))
     let request = SummaryPromptBuilder(template: input.template, timeZone: Self.utc)
-      .buildSingleShot(input, segments: input.segments)
+      .buildSingleShot(input)
     try Snapshot.assert(
       PromptSnapshotTests.render(request), matches: "llm/prompts/summary-single-\(templateID).txt")
     let system = request.messages[0].content
@@ -232,7 +231,7 @@ import Testing
     export.meeting.language = nil
     let input = SummaryInput(export: export, template: SummaryTemplate.bundled(id: "default"))
     let request = SummaryPromptBuilder(template: input.template, timeZone: Self.utc)
-      .buildSingleShot(input, segments: input.segments)
+      .buildSingleShot(input)
     try Snapshot.assert(
       PromptSnapshotTests.render(request), matches: "llm/prompts/summary-single-default-en.txt")
     #expect(request.messages[0].content.contains("Output language: English."))

@@ -66,7 +66,7 @@ import Testing
   @Test func heldResponsesShowUpAsInFlightUntilReleased() async throws {
     let server = try StubChatServer()
     defer { server.stop() }
-    server.enqueue(contentsOf: [Scripts.completion("1"), Scripts.completion("2")])
+    server.enqueue(Scripts.completion("1"), Scripts.completion("2"))
     server.holdResponses()
     var request = URLRequest(url: server.baseURL.appendingPathComponent("chat/completions"))
     request.httpMethod = "POST"

@@ -88,14 +88,14 @@ public struct SummaryPromptBuilder: Sendable {
   // MARK: Requests
 
   /// One call over the whole cleaned transcript.
-  public func buildSingleShot(_ input: SummaryInput, segments: [TranscriptSegment]) -> LLMRequest {
+  public func buildSingleShot(_ input: SummaryInput) -> LLMRequest {
     let labels = SpeakerLabels(speakers: input.speakers)
     let system = [
       "You are Steno's meeting analyst. You read the transcript of one meeting and return one JSON object and nothing else: no prose before or after it.",
       "", meetingBlock(input), "", templateBlocks(), "", Self.analysisRules, "",
       "Return exactly this JSON shape:", draftSchema.promptText,
     ].joined(separator: "\n")
-    let user = "Transcript:\n" + TranscriptLines.renderPlain(segments, labels: labels)
+    let user = "Transcript:\n" + TranscriptLines.renderPlain(input.segments, labels: labels)
     return request(
       system: system, user: user, schema: draftSchema, name: "meeting_analysis", purpose: "summary")
   }
@@ -137,19 +137,25 @@ public struct SummaryPromptBuilder: Sendable {
       purpose: "summary-reduce")
   }
 
-  /// The one repair round after a decode failure: the invalid output, the
-  /// error, the shape, same response format.
-  public func buildRepair(
-    invalid: String, error: String, schema: JSONSchema? = nil, name: String = "meeting_analysis",
-    purpose: String = "summary-repair"
+  /// The one repair round after `request`'s answer failed to decode: the
+  /// invalid output, the error, the shape; same response format, token
+  /// ceiling and purpose (suffixed `-repair`) as the request it repairs.
+  public static func buildRepair(
+    for request: LLMRequest, schema: JSONSchema, invalid: String, error: String
   ) -> LLMRequest {
-    let schema = schema ?? draftSchema
     let system = [
       "You fix a JSON answer that failed validation. Return only the corrected JSON object, nothing else. Keep the content; change only what the error requires.",
       "", "The JSON must have exactly this shape:", schema.promptText,
     ].joined(separator: "\n")
     let user = "Validation error: \(error)\n\nInvalid answer:\n\(invalid)"
-    return request(system: system, user: user, schema: schema, name: name, purpose: purpose)
+    return LLMRequest(
+      messages: [
+        LLMMessage(role: .system, content: system), LLMMessage(role: .user, content: user),
+      ],
+      responseFormat: request.responseFormat,
+      temperature: temperature,
+      maxTokens: request.maxTokens,
+      purpose: request.purpose + "-repair")
   }
 
   // MARK: Blocks

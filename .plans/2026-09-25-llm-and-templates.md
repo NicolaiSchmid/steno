@@ -402,3 +402,12 @@ Recorded while implementing this plan in PR #5 (`feat/llm-templates`), 2026-09-2
 - Spikes 1 to 3 (structured output matrix, cleanup fidelity, map-reduce quality) need a real
   endpoint and were not run in this PR; `LiveEndpointTests` behind `STENO_LLM_TESTS=1` is the
   harness for them and the capability table above keeps its "unverified" marker for Ollama.
+- Simplify pass on the same PR, against the Public API above: `StructuredOutputMode.auto` is
+  gone (it behaved exactly like `.jsonSchema`, the fallback runs from any starting mode);
+  `LLMEndpoint.init?(settings:)` is failable instead of throwing, so `LLMError.notConfigured` and
+  `isConfigured` are gone; `LLMError.unsupportedResponseFormat` was never thrown and is gone;
+  `Glossary` is `CleanupInput.glossary: [String]`; `CleanupValidator` is
+  `CleanupDraft.problems(against:)` plus `orderedTexts`, so the module has one error type;
+  `StructuredOutputDecoder` is a namespace with a static `decode`; `buildSingleShot(_:)` takes
+  the input alone and `buildRepair(for:schema:invalid:error:)` is static and derives response
+  format, token ceiling and purpose from the request it repairs; the wire types are internal.

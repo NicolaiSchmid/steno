@@ -33,7 +33,7 @@ enum Wiring {
   /// `llm` replaces the fake cleaner and summarizer when the settings name
   /// an endpoint; see `llmComponents(settings:)`.
   static func dependencies(
-    store: MeetingStore, settings: SettingsStore, llm: LLMComponents? = nil
+    store: MeetingStore, settings: SettingsStore, llm: LLMPasses? = nil
   ) -> PipelineDependencies {
     PipelineDependencies(
       decoder: WAVAudioDecoder(),
@@ -49,33 +49,25 @@ enum Wiring {
     )
   }
 
-  /// The real cleaner and summarizer on an `OpenAICompatibleClient`, or nil
-  /// when `Settings.llmBaseURL` or `llmModel` is unset (the fakes stay). The
-  /// key comes from `secretStore()`: `STENO_LLM_API_KEY` or the 0600
-  /// secrets file in the support directory.
-  static func llmComponents(settings: Settings) async throws -> LLMComponents? {
-    guard LLMEndpoint.isConfigured(settings) else { return nil }
-    let endpoint = try LLMEndpoint(settings: settings)
-    let apiKey = try await secretStore().secret(for: .llmAPIKey)
-    return LLMComponents(endpoint: endpoint, apiKey: apiKey)
+  typealias LLMPasses = (cleaner: LLMTranscriptCleaner, summarizer: LLMMeetingSummarizer)
+
+  /// The real cleaner and summarizer on one shared `OpenAICompatibleClient`
+  /// (so a structured output mode learned during cleanup carries over to the
+  /// summary), or nil when `Settings.llmBaseURL` or `llmModel` is unset and
+  /// the fakes stay. The key comes from `secretStore()`: `STENO_LLM_API_KEY`
+  /// or the 0600 secrets file in the support directory.
+  static func llmComponents(settings: Settings) async throws -> LLMPasses? {
+    guard let endpoint = LLMEndpoint(settings: settings) else { return nil }
+    let client = OpenAICompatibleClient(
+      endpoint: endpoint, apiKey: try await secretStore().secret(for: .llmAPIKey))
+    return (
+      LLMTranscriptCleaner(model: client, endpoint: endpoint),
+      LLMMeetingSummarizer(model: client, endpoint: endpoint)
+    )
   }
 
   static func secretStore() throws -> FileSecretStore {
     FileSecretStore(
       url: try StenoPaths.default().supportDirectory.appendingPathComponent("secrets.json"))
-  }
-}
-
-/// One client shared by both passes, so a structured output mode learned
-/// during cleanup carries over to the summary.
-struct LLMComponents {
-  let client: OpenAICompatibleClient
-  let cleaner: LLMTranscriptCleaner
-  let summarizer: LLMMeetingSummarizer
-
-  init(endpoint: LLMEndpoint, apiKey: String?) {
-    client = OpenAICompatibleClient(endpoint: endpoint, apiKey: apiKey)
-    cleaner = LLMTranscriptCleaner(model: client, endpoint: endpoint)
-    summarizer = LLMMeetingSummarizer(model: client, endpoint: endpoint)
   }
 }

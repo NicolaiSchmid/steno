@@ -5,23 +5,15 @@ import StenoCore
 /// is `LLMError.truncated`, a Markdown fence or prose around the JSON is
 /// stripped, then `JSONDecoder` decides. No repair heuristics: a failure
 /// is `LLMError.invalidJSON` and the caller's one repair round takes over.
-public struct StructuredOutputDecoder: Sendable {
-  public init() {}
-
-  public func decode<T: Decodable & Sendable>(_ type: T.Type, from response: LLMResponse) throws
-    -> T
-  {
+public enum StructuredOutputDecoder {
+  public static func decode<T: Decodable>(_ type: T.Type, from response: LLMResponse) throws -> T {
     if response.finishReason == .length { throw LLMError.truncated }
-    return try decode(type, from: response.text)
-  }
-
-  public func decode<T: Decodable & Sendable>(_ type: T.Type, from text: String) throws -> T {
-    let json = Self.extractJSON(text)
+    let json = extractJSON(response.text)
     guard !json.isEmpty else { throw LLMError.invalidJSON("empty answer") }
     do {
       return try JSONDecoder().decode(T.self, from: Data(json.utf8))
     } catch let error as DecodingError {
-      throw LLMError.invalidJSON(Self.describe(error))
+      throw LLMError.invalidJSON(describe(error))
     } catch {
       throw LLMError.invalidJSON(String(describing: error))
     }

@@ -28,11 +28,6 @@ public struct RetryPolicy: Sendable, Equatable {
     if let retryAfter {
       return min(max(retryAfter, .zero), maxDelay)
     }
-    var delay = baseDelay
-    for _ in 1..<max(retry, 1) {
-      delay = delay * 2
-      if delay >= maxDelay { break }
-    }
-    return min(delay, maxDelay)
+    return min(baseDelay * (1 << min(max(retry - 1, 0), 30)), maxDelay)
   }
 }

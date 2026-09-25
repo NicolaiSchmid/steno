@@ -68,13 +68,11 @@ import Testing
     let schema = LLMResponseFormat.jsonSchema(name: "n", schema: ["type": "object"], strict: true)
     #expect(
       OpenAICompatibleClient.responseFormat(for: schema, mode: .jsonSchema)?.type == "json_schema")
-    #expect(OpenAICompatibleClient.responseFormat(for: schema, mode: .auto)?.type == "json_schema")
     #expect(OpenAICompatibleClient.responseFormat(for: schema, mode: .jsonObject) == .jsonObject)
     #expect(OpenAICompatibleClient.responseFormat(for: schema, mode: .promptOnly) == nil)
     #expect(
       OpenAICompatibleClient.responseFormat(for: .jsonObject, mode: .jsonSchema) == .jsonObject)
     #expect(OpenAICompatibleClient.responseFormat(for: .text, mode: .jsonSchema) == nil)
-    #expect(StructuredOutputMode.auto.downgraded == .jsonObject)
     #expect(StructuredOutputMode.jsonObject.downgraded == .promptOnly)
     #expect(StructuredOutputMode.promptOnly.downgraded == nil)
   }

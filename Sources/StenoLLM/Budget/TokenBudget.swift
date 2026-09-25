@@ -19,12 +19,6 @@ public struct TokenBudget: Sendable, Equatable {
     self.promptOverheadTokens = promptOverheadTokens
   }
 
-  public init(endpoint: LLMEndpoint, reservedOutputTokens: Int, promptOverheadTokens: Int) {
-    self.init(
-      contextTokens: endpoint.contextTokens, reservedOutputTokens: reservedOutputTokens,
-      promptOverheadTokens: promptOverheadTokens)
-  }
-
   /// What is left for the transcript or notes; never negative.
   public var inputBudget: Int {
     max(0, contextTokens - reservedOutputTokens - promptOverheadTokens)
@@ -49,5 +43,13 @@ extension LanguageTag {
   /// The language subtag alone, lowercased: `de` for `de-CH`.
   public var primarySubtag: String {
     rawValue.split(separator: "-").first.map { $0.lowercased() } ?? rawValue.lowercased()
+  }
+}
+
+extension LLMResponse {
+  /// What one call cost; a body without `usage` still counts as a request,
+  /// so per-meeting totals stay honest about the number of calls.
+  var countedUsage: LLMUsage {
+    usage ?? LLMUsage(promptTokens: 0, completionTokens: 0, requests: 1)
   }
 }

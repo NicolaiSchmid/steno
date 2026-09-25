@@ -4,7 +4,8 @@ import StenoCore
 /// Ready-made `StubResponse`s for the situations the client must survive:
 /// a plain completion, a rate limit with `Retry-After`, a server error, a
 /// 400 rejecting `response_format`, fenced or invalid JSON, a truncated
-/// answer, a refusal, a model list, and a connection that never answers.
+/// answer, a refusal and a model list. `StubResponse.hang` and `.drop`
+/// cover a connection that never answers or closes early.
 public enum Scripts {
   /// A successful completion whose message content is `text`.
   public static func completion(
@@ -31,15 +32,16 @@ public enum Scripts {
   public static func json<T: Encodable>(
     _ value: T, usage: LLMUsage? = LLMUsage(promptTokens: 10, completionTokens: 5, requests: 1)
   ) -> StubResponse {
-    let data = (try? WireJSON.encode(value)) ?? Data("{}".utf8)
-    return completion(String(decoding: data, as: UTF8.self), usage: usage)
+    completion(encoded(value), usage: usage)
   }
 
   /// `value` as JSON inside a Markdown fence with a prose prefix.
   public static func fenced<T: Encodable>(_ value: T) -> StubResponse {
-    let data = (try? WireJSON.encode(value)) ?? Data("{}".utf8)
-    return completion(
-      "Here is the JSON you asked for:\n```json\n\(String(decoding: data, as: UTF8.self))\n```\n")
+    completion("Here is the JSON you asked for:\n```json\n\(encoded(value))\n```\n")
+  }
+
+  private static func encoded<T: Encodable>(_ value: T) -> String {
+    String(decoding: (try? WireJSON.encode(value)) ?? Data("{}".utf8), as: UTF8.self)
   }
 
   /// A completion cut off by the server's token limit.
@@ -91,12 +93,6 @@ public enum Scripts {
   public static func models(_ ids: [String]) -> StubResponse {
     .json(ModelList(data: ids.map { .init(id: $0) }))
   }
-
-  /// Never answers; released by `StubChatServer.stop()`.
-  public static let hang = StubResponse.hang
-
-  /// Closes the connection without answering; a transport error.
-  public static let drop = StubResponse.drop
 
   /// A responder that plays a perfect cleanup model: it reads the numbered
   /// segments out of the request and answers with them, each passed through

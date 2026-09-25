@@ -160,9 +160,19 @@ import Testing
     #expect(reduce.messages[1].content.contains("\"chunkIndex\" : 1"))
     #expect(reduce.purpose == "summary-reduce")
 
-    let repair = builder.buildRepair(invalid: "{\"title\": ", error: "malformed JSON at root")
+    let repair = SummaryPromptBuilder.buildRepair(
+      for: builder.buildSingleShot(input), schema: builder.draftSchema, invalid: "{\"title\": ",
+      error: "malformed JSON at root")
     try Snapshot.assert(
       PromptSnapshotTests.render(repair), matches: "llm/prompts/summary-repair.txt")
+    var sized = map
+    sized.maxTokens = 1_500
+    let mapRepair = SummaryPromptBuilder.buildRepair(
+      for: sized, schema: builder.notesSchema, invalid: "{", error: "x")
+    #expect(mapRepair.purpose == "summary-map-repair")
+    #expect(mapRepair.maxTokens == 1_500)
+    #expect(mapRepair.responseFormat == sized.responseFormat)
+    #expect(mapRepair.messages[0].content.contains("\"chunkIndex\": integer"))
   }
 
   @Test func mapBoundedKeepsOrderAndPropagatesTheFirstError() async throws {

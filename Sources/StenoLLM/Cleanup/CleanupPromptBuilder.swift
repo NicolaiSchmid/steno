@@ -20,19 +20,19 @@ public struct CleanupPromptBuilder: Sendable {
       ]))
   ])
 
+  /// `glossary` is `CleanupInput.glossary`: the names to spell exactly.
   public func build(
-    chunk: TranscriptChunk, language: LanguageTag?, glossary: Glossary, labels: SpeakerLabels
+    chunk: TranscriptChunk, language: LanguageTag?, glossary: [String], labels: SpeakerLabels
   ) -> LLMRequest {
     let count = chunk.segments.count
-    let outputLanguage = OutputLanguage.resolve(meeting: language)
-    let languageName = OutputLanguage.promptName(outputLanguage)
+    let languageName = OutputLanguage.promptName(OutputLanguage.resolve(meeting: language))
     var system = [
       "You are Steno's transcript editor. You receive numbered segments of a speech-to-text transcript and return the same segments, corrected, as one JSON object and nothing else.",
       "",
       "Meeting language: \(languageName). Speakers may mix \(languageName) and English; keep every code-switch exactly as spoken and never translate.",
     ]
-    if !glossary.people.isEmpty {
-      system.append("Names to spell exactly like this: \(glossary.people.joined(separator: ", ")).")
+    if !glossary.isEmpty {
+      system.append("Names to spell exactly like this: \(glossary.joined(separator: ", ")).")
     }
     system += [
       "",
@@ -92,5 +92,19 @@ public struct CleanupPromptBuilder: Sendable {
       chunk.segments.map(\.text).joined(separator: "\n"), language: language)
     let estimate = (text + chunk.segments.count * 12 + 64) * 4 / 3
     return min(max(estimate, 256), maxOutputTokens)
+  }
+}
+
+extension CleanupInput {
+  /// Names the cleanup pass must spell exactly: participants (calendar
+  /// attendees included) first, then known people, each once
+  /// (case-insensitively), in order of appearance. No product glossary in v1.
+  public var glossary: [String] {
+    var seen: Set<String> = []
+    return (participants.map(\.displayName) + knownPeople.map(\.displayName)).compactMap { name in
+      let trimmed = name.trimmingCharacters(in: .whitespaces)
+      guard !trimmed.isEmpty, seen.insert(trimmed.lowercased()).inserted else { return nil }
+      return trimmed
+    }
   }
 }

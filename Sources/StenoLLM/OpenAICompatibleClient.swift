@@ -43,8 +43,7 @@ public actor OpenAICompatibleClient: LanguageModel {
     self.retry = retry
     self.clock = clock
     self.observer = observer
-    self.mode =
-      endpoint.structuredOutputMode == .auto ? .jsonSchema : endpoint.structuredOutputMode
+    self.mode = endpoint.structuredOutputMode
   }
 
   /// The structured output mode in use after any fallback so far.
@@ -54,7 +53,6 @@ public actor OpenAICompatibleClient: LanguageModel {
 
   public func complete(_ request: LLMRequest) async throws -> LLMResponse {
     var attempt = 1
-    var downgrades = 0
     while true {
       try Task.checkCancellation()
       let wire = try makeRequest(request, mode: mode)
@@ -67,11 +65,9 @@ public actor OpenAICompatibleClient: LanguageModel {
           return try parse(reply)
         }
         if reply.status == 400, request.responseFormat.kind != .text,
-          Self.complainsAboutResponseFormat(reply.bodyText), downgrades < 2,
-          let next = mode.downgraded
+          Self.complainsAboutResponseFormat(reply.bodyText), let next = mode.downgraded
         {
           mode = next
-          downgrades += 1
           observer?(.modeDowngraded(to: next))
           continue
         }
@@ -91,12 +87,12 @@ public actor OpenAICompatibleClient: LanguageModel {
   }
 
   /// `GET /models` (reachability, whether the model is listed) and one tiny
-  /// structured completion (mode fallback, round trip). Throws the
-  /// completion's error when the server never answered anything.
+  /// structured completion (mode fallback, round trip). Throws the last
+  /// error when the server never answered anything or rejected the key.
   public func probe() async throws -> EndpointProbe {
     var reachable = false
     var modelListed: Bool?
-    var completionError: LLMError?
+    var failure: LLMError?
     let roundTrip = try await clock.measure {
       do {
         var request = URLRequest(url: endpoint.modelsURL)
@@ -110,21 +106,19 @@ public actor OpenAICompatibleClient: LanguageModel {
           modelListed = list.data.contains { $0.id == endpoint.model }
         }
       } catch let error as LLMError {
-        completionError = error
+        failure = error
       }
       do {
         _ = try await complete(Self.probeRequest)
         reachable = true
-        completionError = nil
+        failure = nil
       } catch let error as LLMError {
-        completionError = error
+        failure = error
       }
     }
-    if let completionError, !reachable { throw completionError }
-    if let completionError, case .http(let status, _) = completionError,
-      status == 401 || status == 403
-    {
-      throw completionError
+    if let failure {
+      if case .http(let status, _) = failure, status == 401 || status == 403 { throw failure }
+      if !reachable { throw failure }
     }
     return EndpointProbe(
       reachable: reachable, modelListed: modelListed, resolvedMode: mode, roundTrip: roundTrip)
@@ -175,13 +169,13 @@ public actor OpenAICompatibleClient: LanguageModel {
   private func addHeaders(to request: inout URLRequest, purpose: String) {
     request.setValue("application/json", forHTTPHeaderField: "Accept")
     request.setValue("steno/\(StenoCore.version)", forHTTPHeaderField: "User-Agent")
-    request.setValue(purpose, forHTTPHeaderField: StenoLLM.purposeHeader)
+    request.setValue(purpose, forHTTPHeaderField: "X-Steno-Purpose")
     if let apiKey {
       request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
     }
     // A wall-clock backstop well past the clock-driven timeout, so a stuck
     // socket cannot outlive the process when the clock never advances.
-    request.timeoutInterval = max(Self.seconds(endpoint.requestTimeout) * 2, 30)
+    request.timeoutInterval = max(endpoint.requestTimeout / .seconds(1) * 2, 30)
   }
 
   /// The wire `response_format` for a request under `mode`; nil sends none.
@@ -193,8 +187,7 @@ public actor OpenAICompatibleClient: LanguageModel {
       return nil
     case (.jsonObject, _), (.jsonSchema, .jsonObject):
       return .jsonObject
-    case (.jsonSchema(let name, let schema, let strict), .jsonSchema),
-      (.jsonSchema(let name, let schema, let strict), .auto):
+    case (.jsonSchema(let name, let schema, let strict), .jsonSchema):
       return .jsonSchema(name: name, schema: schema, strict: strict)
     }
   }
@@ -274,12 +267,12 @@ public actor OpenAICompatibleClient: LanguageModel {
       case "content_filter": .contentFilter
       default: .other
       }
-    let usage =
-      decoded.usage.map {
-        LLMUsage(promptTokens: $0.promptTokens, completionTokens: $0.completionTokens, requests: 1)
-      } ?? LLMUsage(promptTokens: 0, completionTokens: 0, requests: 1)
     return LLMResponse(
-      text: choice.message.content ?? "", finishReason: finish, usage: usage, model: decoded.model)
+      text: choice.message.content ?? "", finishReason: finish,
+      usage: LLMUsage(
+        promptTokens: decoded.usage?.promptTokens ?? 0,
+        completionTokens: decoded.usage?.completionTokens ?? 0, requests: 1),
+      model: decoded.model)
   }
 
   private func classify(_ reply: Reply) -> LLMError {
@@ -311,7 +304,7 @@ public actor OpenAICompatibleClient: LanguageModel {
     guard let header, let seconds = Double(header.trimmingCharacters(in: .whitespaces)),
       seconds >= 0
     else { return nil }
-    return .milliseconds(Int(seconds * 1000))
+    return .seconds(seconds)
   }
 
   // MARK: Redaction
@@ -324,10 +317,5 @@ public actor OpenAICompatibleClient: LanguageModel {
   nonisolated static func redact(_ text: String, apiKey: String?) -> String {
     guard let apiKey, !apiKey.isEmpty else { return text }
     return text.replacingOccurrences(of: apiKey, with: "[redacted]")
-  }
-
-  static func seconds(_ duration: Duration) -> TimeInterval {
-    let (seconds, attoseconds) = duration.components
-    return TimeInterval(seconds) + TimeInterval(attoseconds) / 1e18
   }
 }

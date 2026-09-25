@@ -101,34 +101,34 @@ import Testing
 
   @Test func rewordedSegmentsAreRejectedButOneWordDifferencesPass() throws {
     let chunk = TranscriptChunker().chunk(Self.standup.segments, language: "de")[0]
-    let validator = CleanupValidator()
     var draft = CleanupDraft(
       segments: chunk.segments.enumerated().map { .init(index: $0.offset, text: $0.element.text) })
-    #expect(try validator.validate(draft, against: chunk) == chunk.segments.map(\.text))
+    #expect(draft.problems(against: chunk) == [])
+    #expect(draft.orderedTexts == chunk.segments.map(\.text))
 
     draft.segments[2].text =
       "Heute schaue ich mir die flaky Tests in der CI-Pipeline an, die laufen seit dem GitHub-Upgrade nicht mehr stabil."
-    #expect(try validator.validate(draft, against: chunk)[2].hasPrefix("Heute"))
+    #expect(draft.problems(against: chunk) == [])
+    #expect(draft.orderedTexts[2].hasPrefix("Heute"))
 
     draft.segments[3].text = "Blocker?"
-    var rejected = #expect(throws: CleanupValidator.Rejection.self) {
-      try validator.validate(draft, against: chunk)
-    }
-    #expect(rejected?.reasons.first?.hasPrefix("Segment 3 changed from 4 to 1 words") == true)
+    #expect(
+      draft.problems(against: chunk).first?.hasPrefix("Segment 3 changed from 4 to 1 words") == true
+    )
 
     draft.segments[3].text = "hast du einen blocker?"
     draft.segments[5].text = ""
-    rejected = #expect(throws: CleanupValidator.Rejection.self) {
-      try validator.validate(draft, against: chunk)
-    }
-    #expect(rejected?.reasons == ["Segment 5 came back empty."])
+    #expect(draft.problems(against: chunk) == ["Segment 5 came back empty."])
 
     draft.segments[5].text = chunk.segments[5].text
     draft.segments[0].index = 7
-    rejected = #expect(throws: CleanupValidator.Rejection.self) {
-      try validator.validate(draft, against: chunk)
-    }
-    #expect(rejected?.reasons.first?.hasPrefix("Indices must be 0 to") == true)
+    #expect(draft.problems(against: chunk).first?.hasPrefix("Indices must be 0 to") == true)
+
+    draft.segments[0].index = 0
+    let inOrder = draft.orderedTexts
+    draft.segments.swapAt(0, 1)
+    #expect(draft.problems(against: chunk) == [])
+    #expect(draft.orderedTexts == inOrder, "answers arrive in any order")
   }
 
   @Test func neverExceedsMaxConcurrentRequests() async throws {
@@ -171,9 +171,9 @@ import Testing
   @Test func undecodableAndTruncatedAnswersFallBackToRawAfterOneRetry() async throws {
     let server = try StubChatServer()
     defer { server.stop() }
-    server.enqueue(contentsOf: [
+    server.enqueue(
       Scripts.completion("not json at all"), Scripts.truncated("{\"segments\": ["),
-    ])
+    )
     let chunker = TranscriptChunker()
     let cleaner = Self.cleaner(server, chunker: chunker)
     let output = try await cleaner.clean(CleanupInput(export: Self.standup))
@@ -201,9 +201,9 @@ import Testing
       Person(id: SampleData.uuid(99), displayName: "nicolai", createdAt: SampleData.createdAt))
     input.knownPeople.append(
       Person(id: SampleData.uuid(98), displayName: "  ", createdAt: SampleData.createdAt))
-    #expect(Glossary(input: input).people == ["Mara", "Jérôme", "Nicolai"])
+    #expect(input.glossary == ["Mara", "Jérôme", "Nicolai"])
     #expect(
-      Glossary(input: CleanupInput(export: Self.call)).people == [
+      CleanupInput(export: Self.call).glossary == [
         "Nicolai", "Petra Vogel", "Tom Berger", "Jérôme",
       ])
   }
