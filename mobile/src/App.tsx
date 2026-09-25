@@ -17,6 +17,8 @@ import {
 	AppearanceProvider,
 	useResolvedAppearance,
 } from "@/features/appearance/AppearanceProvider";
+import { PairingProvider } from "@/features/pairing/PairingProvider";
+import { QueueProvider } from "@/features/queue/QueueProvider";
 import { RootNavigator } from "@/navigation/RootNavigator";
 import { useNavigationTheme } from "@/navigation/theme";
 
@@ -36,7 +38,8 @@ function ThemedNavigation() {
 /**
  * Provider order (fifthset's, minus auth, data, analytics and OTA controller):
  * gesture root → safe area → StartupGate (above theme so it can render when
- * theme breaks) → Appearance → React Navigation.
+ * theme breaks) → Appearance → Pairing and Queue (the recorder's two stores)
+ * → React Navigation.
  */
 export default function App() {
 	const [fontsLoaded, fontError] = useFonts({
@@ -54,7 +57,11 @@ export default function App() {
 			<SafeAreaProvider>
 				<StartupGate>
 					<AppearanceProvider>
-						<ThemedNavigation />
+						<PairingProvider>
+							<QueueProvider>
+								<ThemedNavigation />
+							</QueueProvider>
+						</PairingProvider>
 					</AppearanceProvider>
 				</StartupGate>
 			</SafeAreaProvider>

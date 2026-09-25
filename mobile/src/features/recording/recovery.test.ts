@@ -1,0 +1,131 @@
+import { describe, expect, it } from "vitest";
+
+import {
+	addRecording,
+	EMPTY_INDEX,
+	setState,
+} from "@/features/queue/queue-index";
+import { applyRecovery, planRecovery, type RecoveryFiles } from "./recovery";
+
+function files(overrides: Partial<RecoveryFiles> = {}): RecoveryFiles {
+	return {
+		exists: () => true,
+		size: () => 80_000,
+		sha256: async () => "HASH",
+		...overrides,
+	};
+}
+
+const base = {
+	fileName: "a.m4a",
+	startedAt: "2026-09-25T09:00:00.000Z",
+	durationSeconds: 0,
+	byteCount: 0,
+	sha256: null,
+	chunkSize: 16,
+};
+
+const interrupted = addRecording(
+	EMPTY_INDEX,
+	{ ...base, recordingID: "a" },
+	"recording",
+);
+
+describe("planRecovery", () => {
+	it("queues a recording whose file survived, estimating the duration", async () => {
+		expect(await planRecovery(interrupted, files())).toEqual([
+			{
+				recordingID: "a",
+				kind: "queued",
+				byteCount: 80_000,
+				sha256: "HASH",
+				durationSeconds: 10,
+			},
+		]);
+	});
+
+	it("keeps a known duration", async () => {
+		const index = addRecording(
+			EMPTY_INDEX,
+			{ ...base, recordingID: "a", durationSeconds: 42 },
+			"recording",
+		);
+		const [patch] = await planRecovery(index, files());
+		expect(patch).toMatchObject({ kind: "queued", durationSeconds: 42 });
+	});
+
+	it("fails a recording with no file, an empty file or an unreadable size", async () => {
+		for (const broken of [
+			files({ exists: () => false }),
+			files({ size: () => 0 }),
+			files({
+				size: () => {
+					throw new Error("stat");
+				},
+			}),
+		]) {
+			expect(await planRecovery(interrupted, broken)).toEqual([
+				{
+					recordingID: "a",
+					kind: "failed",
+					lastError: "Recording was interrupted before it was saved",
+				},
+			]);
+		}
+	});
+
+	it("fails a recording whose hash cannot be computed", async () => {
+		expect(
+			await planRecovery(
+				interrupted,
+				files({ sha256: async () => Promise.reject(new Error("io")) }),
+			),
+		).toEqual([{ recordingID: "a", kind: "failed", lastError: "io" }]);
+	});
+
+	it("ignores every other state", async () => {
+		const queued = addRecording(EMPTY_INDEX, {
+			...base,
+			recordingID: "q",
+			sha256: "X",
+		});
+		expect(await planRecovery(queued, files())).toEqual([]);
+	});
+});
+
+describe("applyRecovery", () => {
+	it("patches and queues, or fails, the rows named", () => {
+		const next = applyRecovery(interrupted, [
+			{
+				recordingID: "a",
+				kind: "queued",
+				byteCount: 5,
+				sha256: "H",
+				durationSeconds: 1,
+			},
+		]);
+		expect(next.recordings[0]).toMatchObject({
+			state: "queued",
+			byteCount: 5,
+			sha256: "H",
+			durationSeconds: 1,
+		});
+		const failed = applyRecovery(interrupted, [
+			{ recordingID: "a", kind: "failed", lastError: "gone" },
+		]);
+		expect(failed.recordings[0]).toMatchObject({
+			state: "failed",
+			lastError: "gone",
+		});
+	});
+
+	it("leaves rows alone that moved on or vanished since the plan", () => {
+		const moved = setState(interrupted, "a", "queued");
+		const patches = [
+			{ recordingID: "a", kind: "failed" as const, lastError: "late" },
+			{ recordingID: "zz", kind: "failed" as const, lastError: "late" },
+		];
+		expect(applyRecovery(moved, patches)).toBe(moved);
+		expect(applyRecovery(interrupted, [])).toBe(interrupted);
+	});
+});
