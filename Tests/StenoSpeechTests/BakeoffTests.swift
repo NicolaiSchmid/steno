@@ -33,7 +33,7 @@ import Testing
   private let rows = [
     BakeoffRow(
       file: "de-short.wav", engine: .parakeetV3, audioSeconds: 5, wallSeconds: 0.5, segmentCount: 1,
-      wer: 0.1, languageFlips: 0, dominantLanguage: "de", cleanedWER: 0.05),
+      wer: 0.1, languageFlips: 0, dominantLanguage: "de", cleanedWER: 0.05, cleanupRequests: 3),
     BakeoffRow(
       file: "en-short.wav", engine: .parakeetV3, audioSeconds: 4, wallSeconds: 0.25,
       segmentCount: 2,
@@ -50,17 +50,31 @@ import Testing
     // Speed is labelled as what it is: FluidAudio's RTFx, not the real-time factor.
     #expect(
       lines[1]
-        == "| File | Engine | Audio s | Wall s | RTFx | Segments | WER | Cleaned WER | Flips | Language |"
+        == "| File | Engine | Audio s | Wall s | RTFx | Segments | WER | WER (cleaned) | Cleanup requests | Flips | Language |"
     )
-    #expect(lines.contains("| Engine | Files | Mean RTFx | Mean WER | Mean cleaned WER | Flips |"))
+    #expect(
+      lines.contains(
+        "| Engine | Files | Mean RTFx | Mean WER | Mean WER (cleaned) | Cleanup requests | Flips |")
+    )
     #expect(lines.filter { $0.hasPrefix("| de-short.wav") }.count == 2)
     #expect(
       lines.contains {
-        $0.hasPrefix("| en-short.wav | parakeet-v3 | 4.00 | 0.25 | 16.00 | 2 | - | - | 1 | en |")
+        $0.hasPrefix(
+          "| de-short.wav | parakeet-v3 | 5.00 | 0.50 | 10.00 | 1 | 10.0 % | 5.0 % | 3 | 0 | de |")
       })
-    #expect(lines.contains { $0.hasPrefix("| parakeet-v3 | 2 | 13.00 | 10.0 % | 5.0 % | 1 |") })
     #expect(
-      lines.contains { $0.hasPrefix("| whisperkit-large-v3-turbo | 1 | 2.50 | 20.0 % | - | 0 |") })
+      lines.contains {
+        $0.hasPrefix(
+          "| en-short.wav | parakeet-v3 | 4.00 | 0.25 | 16.00 | 2 | - | - | - | 1 | en |")
+      })
+    // Cleanup requests are summed over the files that ran cleanup; an engine
+    // that never did shows a dash, not a zero.
+    #expect(
+      lines.contains { $0.hasPrefix("| parakeet-v3 | 2 | 13.00 | 10.0 % | 5.0 % | 3 | 1 |") })
+    #expect(
+      lines.contains {
+        $0.hasPrefix("| whisperkit-large-v3-turbo | 1 | 2.50 | 20.0 % | - | - | 0 |")
+      })
   }
 
   @Test func jsonRoundTrips() throws {
@@ -168,8 +182,9 @@ import Testing
     let sweep = try #require(report.rows.first { $0.file == "sweep-3s.wav" })
     #expect(sweep.wer ?? 0 > 1, "the fake's nine words against two reference words")
     #expect(sweep.cleanedWER == 0)
+    #expect(sweep.cleanupRequests == 1, "the cleaner's usage is reported per file")
     let noise = try #require(report.rows.first { $0.file == "noise-2s.wav" })
-    #expect(noise.wer == nil && noise.cleanedWER == nil)
+    #expect(noise.wer == nil && noise.cleanedWER == nil && noise.cleanupRequests == nil)
   }
 
   @Test func languageFlipsCountAdjacentTaggedSegmentsOnly() {

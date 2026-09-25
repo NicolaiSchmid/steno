@@ -2,15 +2,19 @@ import ArgumentParser
 import Foundation
 import StenoAudio
 import StenoCore
+import StenoLLM
 import StenoSpeech
 
 extension SpeechEngineID: ExpressibleByArgument {}
 
-/// `steno dev bakeoff <audio-dir> [--engines] [--reference-dir] [--out]`:
-/// runs the requested engines over a folder of recordings and writes
-/// `report.md`, `report.json` and the raw segments per file and engine.
-/// Models download on first use. Input is any `wav|m4a|mp3|caf` file
+/// `steno dev bakeoff <audio-dir> [--engines] [--reference-dir] [--cleanup]
+/// [--out]`: runs the requested engines over a folder of recordings and
+/// writes `report.md`, `report.json` and the raw segments per file and
+/// engine. Models download on first use. Input is any `wav|m4a|mp3|caf` file
 /// `AVFoundationAudioCodec` reads: channel 0 is resampled to 16 kHz mono.
+/// `--cleanup` sends every transcript that has a reference through
+/// `LLMTranscriptCleaner` on the configured endpoint and reports the WER
+/// after it; text only, the audio never leaves the machine.
 struct DevBakeoff: AsyncParsableCommand {
   static let configuration = CommandConfiguration(
     commandName: "bakeoff",
@@ -32,6 +36,12 @@ struct DevBakeoff: AsyncParsableCommand {
 
   @Option(name: .customLong("out"), help: "Where the reports go; defaults to <audio-dir>/bakeoff.")
   var output: String?
+
+  @Flag(
+    help:
+      "Run the LLM cleanup pass (Settings.llmBaseURL and llmModel) over each transcript and report the WER after it."
+  )
+  var cleanup = false
 
   /// Runs core's `FakeSpeechEngine` under every requested id, so the CLI
   /// tests exercise decoding, reporting and the LLM wiring without a model
@@ -55,14 +65,36 @@ struct DevBakeoff: AsyncParsableCommand {
     let out =
       output.map { URL(fileURLWithPath: $0, isDirectory: true) }
       ?? audio.appendingPathComponent("bakeoff", isDirectory: true)
-    let runner = BakeoffRunner(makeEngine: try await makeEngine(), decoder: Self.decoder)
-    let report = try await runner.run(
-      audioDirectory: audio,
-      referenceDirectory: referenceDirectory.map { URL(fileURLWithPath: $0, isDirectory: true) },
-      engines: engines,
-      output: out)
+    let runner = BakeoffRunner(
+      makeEngine: try await makeEngine(), decoder: Self.decoder,
+      cleaner: cleanup ? try await makeCleaner() : nil)
+    let report: BakeoffReport
+    do {
+      report = try await runner.run(
+        audioDirectory: audio,
+        referenceDirectory: referenceDirectory.map { URL(fileURLWithPath: $0, isDirectory: true) },
+        engines: engines,
+        output: out)
+    } catch let error as LLMError {
+      throw RuntimeFailure(description: "cleanup failed: \(error)")
+    }
     print(report.markdown())
     print("reports: \(out.path)")
+  }
+
+  /// The real cleaner from the stored settings, or nil with a notice on
+  /// stderr when no endpoint is configured: the bake-off still runs, the
+  /// cleaned column stays empty.
+  func makeCleaner() async throws -> LLMTranscriptCleaner? {
+    let settings = try await Wiring.open(models.database).settings.load()
+    guard let passes = try await Wiring.llmComponents(settings: settings) else {
+      FileHandle.standardError.write(
+        Data(
+          "cleanup skipped: no LLM endpoint configured (set Settings.llmBaseURL and llmModel)\n"
+            .utf8))
+      return nil
+    }
+    return passes.cleaner
   }
 
   /// The real engines over the model store, or the fake behind

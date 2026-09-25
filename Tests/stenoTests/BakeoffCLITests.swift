@@ -1,6 +1,7 @@
 import Foundation
 import StenoAudio
 import StenoCore
+import StenoLLM
 import Testing
 
 #if canImport(AVFoundation)
@@ -12,9 +13,10 @@ import Testing
   /// downloaded and no database is opened.
   @Suite(.serialized) struct BakeoffCLITests {
     /// `tone-2s.caf`, `tone-3s.wav` and `tone-1s.m4a` at 48 kHz, each with
-    /// a reference the fake engine reproduces exactly (one segment per
-    /// second, "fake segment n").
-    static func makeAudioFolder(in home: URL) throws -> URL {
+    /// a reference of one "<referenceWord> segment n" per second; the fake
+    /// engine says "fake segment n", so `fake` matches it word for word and
+    /// any other word puts one substitution per segment into the WER.
+    static func makeAudioFolder(in home: URL, referenceWord: String = "fake") throws -> URL {
       let audio = home.appendingPathComponent("audio", isDirectory: true)
       try FileManager.default.createDirectory(at: audio, withIntermediateDirectories: true)
       try AudioFixtures.writeCAF(
@@ -27,7 +29,8 @@ import Testing
         AudioFixtures.tone(frequency: 440, seconds: 1),
         to: audio.appendingPathComponent("tone-1s.m4a"))
       for (name, seconds) in [("tone-2s", 2), ("tone-3s", 3), ("tone-1s", 1)] {
-        let reference = (1...seconds).map { "fake segment \($0)" }.joined(separator: " ")
+        let reference = (1...seconds).map { "\(referenceWord) segment \($0)" }
+          .joined(separator: " ")
         try Data(reference.utf8).write(to: audio.appendingPathComponent("\(name).ref.txt"))
       }
       return audio
@@ -88,6 +91,73 @@ import Testing
         !FileManager.default.fileExists(
           atPath: home.appendingPathComponent("Library/Application Support/Steno").path),
         "fake engines open neither the model store nor the database")
+    }
+
+    /// Table rows as trimmed cells: file, engine, audio s, wall s, RTFx,
+    /// segments, WER, WER (cleaned), cleanup requests, flips, language.
+    static func rows(in stdout: String) -> [[String]] {
+      stdout.split(separator: "\n").filter { $0.hasPrefix("| tone-") }.map { row in
+        row.split(separator: "|").map { $0.trimmingCharacters(in: .whitespaces) }
+      }
+    }
+
+    /// `--cleanup` without an endpoint in the settings prints one notice and
+    /// runs without the cleaned columns; with one, every transcript that
+    /// has a reference goes through `LLMTranscriptCleaner` on the stub and
+    /// the table shows the WER after it and the requests it took.
+    @Test func cleanupRunsOnTheConfiguredEndpointOrSkipsWithANotice() async throws {
+      let home = try Fixtures.temporaryDirectory("steno-bakeoff-home")
+      defer { try? FileManager.default.removeItem(at: home) }
+      let audio = try Self.makeAudioFolder(in: home, referenceWord: "real")
+      let db = home.appendingPathComponent("steno.sqlite")
+      let arguments = [
+        "dev", "bakeoff", audio.path, "--engines", "parakeet-v3", "--fake-engines", "--cleanup",
+        "--db", db.path,
+      ]
+
+      let skipped = try CLITests.run(
+        arguments + ["--out", home.appendingPathComponent("skipped").path], home: home)
+      #expect(skipped.status == 0, "\(skipped.stderr)")
+      #expect(
+        skipped.stderr
+          == "cleanup skipped: no LLM endpoint configured (set Settings.llmBaseURL and llmModel)\n")
+      let skippedRows = Self.rows(in: skipped.stdout)
+      #expect(skippedRows.count == 3)
+      for row in skippedRows {
+        #expect(row[6] == "33.3 %", "one substitution per segment: \(row)")
+        #expect(row[7] == "-" && row[8] == "-", "no cleaned WER, no requests: \(row)")
+      }
+      #expect(skipped.stdout.contains("| parakeet-v3 | 3 | "))
+      #expect(skipped.stdout.contains(" | 33.3 % | - | - | 0 |"), "the summary skips cleanup too")
+
+      let server = try StubChatServer()
+      defer { server.stop() }
+      server.respond(
+        with: Scripts.cleanupEcho { _, text in text.replacingOccurrences(of: "fake", with: "real") }
+      )
+      let store = try MeetingStore.onDisk(at: db)
+      var settings = try await SettingsStore(writer: store.writer).load()
+      settings.llmBaseURL = server.baseURL
+      settings.llmModel = "stub-model"
+      try await SettingsStore(writer: store.writer).save(settings)
+
+      let cleaned = try CLITests.run(
+        arguments + ["--out", home.appendingPathComponent("cleaned").path], home: home)
+      #expect(cleaned.status == 0, "\(cleaned.stderr)")
+      #expect(cleaned.stderr.isEmpty)
+      let cleanedRows = Self.rows(in: cleaned.stdout)
+      #expect(cleanedRows.count == 3)
+      for row in cleanedRows {
+        #expect(row[6] == "33.3 %", "the raw WER is unchanged: \(row)")
+        #expect(row[7] == "0.0 %", "the cleaner's output matches the reference: \(row)")
+        #expect(row[8] == "1", "one chunk, one request per file: \(row)")
+      }
+      #expect(cleaned.stdout.contains(" | 33.3 % | 0.0 % | 3 | 0 |"), "requests summed per engine")
+      #expect(server.requests.count == 3)
+      #expect(server.requests.allSatisfy { $0.purpose == "cleanup" })
+      #expect(
+        server.requests.allSatisfy { $0.authorization == nil },
+        "no key is configured, so none is sent")
     }
   }
 #endif
