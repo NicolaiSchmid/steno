@@ -1,4 +1,5 @@
-import { type ResolvedMac, stenoLink } from "@modules/steno-link";
+import type { ResolvedMac } from "@modules/steno-link";
+import { stenoLink } from "@modules/steno-link/native";
 import { useEffect, useSyncExternalStore } from "react";
 import { createMacRegistry, type RegistrySnapshot } from "./mac-registry";
 

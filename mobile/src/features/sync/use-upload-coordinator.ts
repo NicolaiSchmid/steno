@@ -1,4 +1,5 @@
-import { macOrigin, stenoLink } from "@modules/steno-link";
+import { macOrigin } from "@modules/steno-link";
+import { stenoLink } from "@modules/steno-link/native";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { AppState } from "react-native";
 
@@ -11,12 +12,12 @@ import { usePairing } from "@/features/pairing/PairingProvider";
 import { deviceIdentity } from "@/features/pairing/pairing-store";
 import { useQueue } from "@/features/queue/QueueProvider";
 import { queuedFile } from "@/features/queue/queue-files";
-import { resetForUpload } from "@/features/queue/queue-index";
+import { findRecording, resetForUpload } from "@/features/queue/queue-index";
 import {
 	announce,
 	complete,
 	status as fetchStatus,
-	type Session,
+	type MacSession,
 	startChunkUpload,
 } from "./recording-client";
 import {
@@ -41,7 +42,8 @@ export type UploadCoordinator = {
 	reachable: boolean;
 	/** Bytes sent of the chunk in flight, per recording id. */
 	progress: Readonly<Record<string, number>>;
-	retryNow(recordingID?: string): void;
+	/** Puts a failed recording back in the queue, eligible now. */
+	retryNow(recordingID: string): void;
 };
 
 const recordingFiles: RecordingFiles = {
@@ -54,7 +56,7 @@ export function useUploadCoordinator(): UploadCoordinator {
 	const { pairing, ready: pairingReady, clear: clearPairing } = usePairing();
 	const { index, ready: queueReady, update } = useQueue();
 	const discovery = useMacDiscovery(pairingReady && pairing !== null);
-	const [session, setSession] = useState<Session | null>(null);
+	const [session, setSession] = useState<MacSession | null>(null);
 	const [progress, setProgress] = useState<Record<string, number>>({});
 	const ticking = useRef(false);
 	const rerun = useRef(false);
@@ -220,20 +222,12 @@ export function useUploadCoordinator(): UploadCoordinator {
 	}, [session, executor, tick]);
 
 	const retryNow = useCallback(
-		(recordingID?: string) => {
-			void update((current) => {
-				const targets = current.recordings.filter(
-					(r) =>
-						(recordingID ? r.recordingID === recordingID : true) &&
-						(r.state === "failed" ||
-							r.state === "queued" ||
-							r.state === "uploading"),
-				);
-				return targets.reduce(
-					(acc, r) => resetForUpload(acc, r.recordingID),
-					current,
-				);
-			}).then(() => {
+		(recordingID: string) => {
+			void update((current) =>
+				findRecording(current, recordingID)?.state === "failed"
+					? resetForUpload(current, recordingID)
+					: current,
+			).then(() => {
 				restartBrowsing();
 				tick();
 			});

@@ -1,11 +1,11 @@
-import type { ResolvedMac } from "@modules/steno-link";
 import {
 	type Hello,
 	macOrigin,
 	type PairRequest,
 	type PairResponse,
-} from "@modules/steno-link/src/wire";
-import type { MacEndpoint } from "./pairing-client";
+	type ResolvedMac,
+} from "@modules/steno-link";
+import type { MacEndpoint } from "@modules/steno-link/native";
 import type { PairingPayload } from "./pairing-payload";
 import type { DeviceIdentity, Pairing } from "./pairing-store";
 

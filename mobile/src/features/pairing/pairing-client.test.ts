@@ -1,15 +1,13 @@
 import type { PinnedRequest } from "@modules/steno-link";
-import { beforeEach, describe, expect, it, vi } from "vitest";
-
 import {
 	failureFor,
 	HandoverError,
-	hello,
 	type MacEndpoint,
-	pair,
 	pinnedRequest,
-	unpair,
-} from "./pairing-client";
+} from "@modules/steno-link/native";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+
+import { hello, pair, unpair } from "./pairing-client";
 
 const link = vi.hoisted(() => ({ request: vi.fn() }));
 vi.mock("expo", () => ({ requireNativeModule: () => link }));

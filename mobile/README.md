@@ -27,8 +27,9 @@ app records AAC `.m4a` with expo-audio, keeps a JSON-indexed queue in
 - `src/features/queue/` holds the queue index (pure state machine) and its
   atomic storage; `src/features/sync/` the planner and coordinator;
   `src/features/pairing/` the QR parser, pairing sequence and sheet;
-  `src/features/recording/` the expo-audio wrapper and crash recovery;
-  `src/features/recorder/` the screen.
+  `src/features/recorder/` the screen, the expo-audio hook and crash
+  recovery. `@modules/steno-link` is the pure entry (types and wire);
+  `@modules/steno-link/native` the module and the pinned transport.
 - Everything deterministic is under vitest (`pnpm test`): wire encoding,
   queue index and storage, pairing payload parsing and fingerprint comparison,
   discovery registry, pairing sequence, planner and backoff, version gate,

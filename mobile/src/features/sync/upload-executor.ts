@@ -1,6 +1,7 @@
 import type { UploadFailed, UploadFinished } from "@modules/steno-link";
 
-import { HandoverError } from "@/features/pairing/pairing-client";
+import { HandoverError } from "@modules/steno-link/native";
+
 import {
 	chunkPlan,
 	findRecording,
@@ -16,7 +17,7 @@ import { errorMessage } from "@/lib/error-message";
 import type {
 	announce,
 	complete,
-	Session,
+	MacSession,
 	startChunkUpload,
 	status,
 } from "./recording-client";
@@ -63,7 +64,11 @@ export type ExecutorDependencies = {
 export type UploadExecutor = {
 	/** Task ids in flight: announces, chunks in the background session, completes. */
 	readonly inFlight: Set<string>;
-	execute(action: Action, session: Session, index: QueueIndex): Promise<void>;
+	execute(
+		action: Action,
+		session: MacSession,
+		index: QueueIndex,
+	): Promise<void>;
 	/** A transient failure or a 401 for one recording. */
 	fail(recordingID: string, error: unknown): Promise<void>;
 	uploadFinished(event: UploadFinished): Promise<void>;
@@ -79,7 +84,7 @@ export type UploadExecutor = {
 	 * finished while JS was dead count; a 404 sends the row back to `queued`.
 	 */
 	refreshUploading(
-		session: Session,
+		session: MacSession,
 		index: QueueIndex,
 		cancelled?: () => boolean,
 	): Promise<void>;
@@ -115,7 +120,7 @@ export function createUploadExecutor(
 
 	const execute = async (
 		action: Action,
-		session: Session,
+		session: MacSession,
 		index: QueueIndex,
 	) => {
 		switch (action.kind) {
@@ -290,7 +295,7 @@ export function createUploadExecutor(
 	};
 
 	const refreshUploading = async (
-		session: Session,
+		session: MacSession,
 		index: QueueIndex,
 		cancelled: () => boolean = () => false,
 	) => {

@@ -17,19 +17,16 @@ export function UpdateIOSScreen({ version }: { version: string }) {
 				<AppText variant="title">Update iOS to use Steno</AppText>
 				<AppText variant="body">
 					Steno needs iOS {MINIMUM_IOS_VERSION} or later to find your Mac on the
-					local network reliably. This iPhone runs iOS {version}.
+					local network reliably. This iPhone runs iOS {version}. Update it
+					under Settings, General, Software Update.
 				</AppText>
 				<PressableScale
 					accessibilityRole="button"
-					onPress={() =>
-						void Linking.openURL(
-							"App-Prefs:root=General&path=SOFTWARE_UPDATE_LINK",
-						)
-					}
+					onPress={() => void Linking.openSettings()}
 				>
 					<View className="self-start rounded-2xl bg-primary px-5 py-3">
 						<AppText className="text-primary-foreground" variant="heading">
-							Open Software Update
+							Open Settings
 						</AppText>
 					</View>
 				</PressableScale>

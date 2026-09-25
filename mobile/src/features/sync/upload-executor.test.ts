@@ -1,7 +1,7 @@
 import type { RecordingMetadata, RecordingStatus } from "@modules/steno-link";
+import { HandoverError } from "@modules/steno-link/native";
 import { describe, expect, it, vi } from "vitest";
 
-import { HandoverError } from "@/features/pairing/pairing-client";
 import type { Chunk } from "@/features/queue/queue-index";
 import {
 	addRecording,
@@ -17,7 +17,7 @@ import {
 	parseQueueIndex,
 	serializeQueueIndex,
 } from "@/features/queue/queue-storage";
-import type { CompleteResult, Session } from "./recording-client";
+import type { CompleteResult, MacSession } from "./recording-client";
 import { planNext, taskIDs } from "./upload-coordinator";
 import {
 	createUploadExecutor,
@@ -33,7 +33,7 @@ vi.mock("expo", () => ({
 }));
 
 const CHUNK = 1024;
-const session: Session = {
+const session: MacSession = {
 	endpoint: { origin: "https://192.168.1.20:51234", fingerprint: "FP" },
 	token: "tok",
 };
@@ -104,7 +104,7 @@ class FakeMac implements RecordingClient {
 		this.received.get(recordingID)?.add(chunk);
 	}
 
-	announce = async (_: Session, metadata: RecordingMetadata) => {
+	announce = async (_: MacSession, metadata: RecordingMetadata) => {
 		this.calls.push(`announce ${metadata.recordingID}`);
 		if (this.revoked) throw new HandoverError("unauthorized", 401, "revoked");
 		if (this.unreachableAnnounces > 0) {
@@ -122,14 +122,14 @@ class FakeMac implements RecordingClient {
 		return this.statusOf(metadata.recordingID);
 	};
 
-	status = async (_: Session, recordingID: string) => {
+	status = async (_: MacSession, recordingID: string) => {
 		this.calls.push(`status ${recordingID}`);
 		this.guard(recordingID);
 		return this.statusOf(recordingID);
 	};
 
 	complete = async (
-		_: Session,
+		_: MacSession,
 		recordingID: string,
 	): Promise<CompleteResult> => {
 		this.calls.push(`complete ${recordingID}`);
@@ -145,7 +145,7 @@ class FakeMac implements RecordingClient {
 	};
 
 	startChunkUpload = async (
-		_: Session,
+		_: MacSession,
 		recordingID: string,
 		chunk: Chunk,
 		uri: string,

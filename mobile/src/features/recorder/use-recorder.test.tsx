@@ -3,13 +3,13 @@ import type { RecordingStatus } from "expo-audio";
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { RECORDING_AUDIO_MODE, RECORDING_OPTIONS } from "./recording-options";
 import {
 	RECORDER_POLL_MS,
 	type RecorderCallbacks,
 	type RecorderHandle,
 	useRecorder,
-} from "./recorder";
-import { RECORDING_AUDIO_MODE, RECORDING_OPTIONS } from "./recording-options";
+} from "./use-recorder";
 
 /**
  * Fakes for the native surface: expo-audio's recorder and status listener,
@@ -102,11 +102,12 @@ vi.mock("expo-audio", () => ({
 }));
 vi.mock("expo-crypto", () => ({ randomUUID: () => fake.nextUUID() }));
 vi.mock("expo-file-system", () => ({ File: fake.File }));
-vi.mock("@modules/steno-link", () => ({
+vi.mock("@modules/steno-link/native", () => ({
 	stenoLink: () => ({ sha256: fake.sha256 }),
 }));
 vi.mock("@/features/queue/queue-files", () => ({
-	ensureQueueDirectory: () => ({ uri: "file:///docs/queue" }),
+	queuedFile: (fileName: string) =>
+		new fake.File("file:///docs/queue", fileName),
 }));
 
 (

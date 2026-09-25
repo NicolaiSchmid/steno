@@ -1,4 +1,4 @@
-import { stenoLink } from "@modules/steno-link";
+import { stenoLink } from "@modules/steno-link/native";
 import {
 	type RecordingStatus,
 	requestRecordingPermissionsAsync,
@@ -8,7 +8,7 @@ import {
 import { randomUUID } from "expo-crypto";
 import { File } from "expo-file-system";
 import { useCallback, useEffect, useRef, useState } from "react";
-import { ensureQueueDirectory } from "@/features/queue/queue-files";
+import { queuedFile } from "@/features/queue/queue-files";
 import { errorMessage } from "@/lib/error-message";
 import {
 	RECORDING_AUDIO_MODE,
@@ -63,7 +63,7 @@ async function finalizeRecording(
 	durationSeconds: number,
 ): Promise<FinishedRecording> {
 	const fileName = recordingFileName(session.recordingID);
-	const destination = new File(ensureQueueDirectory(), fileName);
+	const destination = queuedFile(fileName);
 	const source = new File(uri);
 	if (source.uri !== destination.uri) {
 		await source.move(destination, { overwrite: true });

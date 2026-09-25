@@ -37,25 +37,11 @@ final class PinnedSessionDelegate: NSObject, URLSessionTaskDelegate {
 }
 
 /// One small foreground request (hello, pair, announce, status, complete,
-/// unpair) over an ephemeral pinned session. Bodies are UTF-8 JSON.
+/// unpair) over an ephemeral pinned session. Bodies are UTF-8 JSON;
+/// `PinnedRequest.fingerprint` is standard base64 of the 32-byte leaf hash.
 enum PinnedClient {
-  struct Request {
-    var url: String
-    var method: String
-    var headers: [String: String]
-    var body: String?
-    /// Standard base64 of the 32-byte leaf fingerprint.
-    var fingerprint: String
-    var timeout: TimeInterval
-  }
-
-  struct Response {
-    var status: Int
-    var headers: [String: String]
-    var body: String
-  }
-
-  static func perform(_ request: Request, completion: @escaping (Result<Response, Error>) -> Void) {
+  static func perform(_ request: PinnedRequest, completion: @escaping (Result<PinnedResponse, Error>) -> Void) {
+    let timeout: TimeInterval = max(request.timeoutMs, 1) / 1000
     guard let url = URL(string: request.url) else {
       completion(.failure(StenoLinkError.badURL(request.url)))
       return
@@ -71,7 +57,7 @@ enum PinnedClient {
 
     var urlRequest = URLRequest(url: url)
     urlRequest.httpMethod = request.method
-    urlRequest.timeoutInterval = request.timeout
+    urlRequest.timeoutInterval = timeout
     for (name, value) in request.headers {
       urlRequest.setValue(value, forHTTPHeaderField: name)
     }
@@ -84,8 +70,8 @@ enum PinnedClient {
 
     let configuration = URLSessionConfiguration.ephemeral
     configuration.waitsForConnectivity = false
-    configuration.timeoutIntervalForRequest = request.timeout
-    configuration.timeoutIntervalForResource = request.timeout
+    configuration.timeoutIntervalForRequest = timeout
+    configuration.timeoutIntervalForResource = timeout
     let delegate = PinnedSessionDelegate(fingerprint: fingerprint)
     let session = URLSession(configuration: configuration, delegate: delegate, delegateQueue: nil)
     let task = session.dataTask(with: urlRequest) { data, response, error in
@@ -105,7 +91,7 @@ enum PinnedClient {
         }
       }
       let body = data.flatMap { String(data: $0, encoding: .utf8) } ?? ""
-      completion(.success(Response(status: http.statusCode, headers: headers, body: body)))
+      completion(.success(PinnedResponse(status: http.statusCode, headers: headers, body: body)))
     }
     task.resume()
   }
