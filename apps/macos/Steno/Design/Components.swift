@@ -139,7 +139,9 @@ struct PendingText: View {
       .foregroundStyle(Color.stenoMutedForeground)
   }
 
-  static func text(meeting: Meeting?, none: String, pending: String) -> String {
+  /// `nonisolated`: `View` conformance makes the struct main-actor
+  /// isolated, and `TabText` calls this from plain code.
+  nonisolated static func text(meeting: Meeting?, none: String, pending: String) -> String {
     meeting?.state == .ready ? none : pending
   }
 }

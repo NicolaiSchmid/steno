@@ -31,7 +31,9 @@ def walk(node, path, cases):
         details = [
             child.get("name", "")
             for child in node.get("children", [])
-            if child.get("nodeType") in ("Failure Message", "Skipped", "Expected Failure", "Repetition")
+            # Xcode 16 emits the skip reason as a "Skipped" child, Xcode 27 as
+            # "Skip Message".
+            if child.get("nodeType") in ("Failure Message", "Skipped", "Skip Message", "Expected Failure", "Repetition")
             or child.get("result") in ("Skipped", "Failed")
         ]
         cases.append(("/".join(here), node.get("result", ""), " ".join(d for d in details if d)))

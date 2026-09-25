@@ -32,12 +32,22 @@ import Testing
     process.standardOutput = Pipe()
     process.standardError = Pipe()
     try process.run()
+    // The two seconds count from the moment the recorder opened its master
+    // file, not from `run()`: a cold start of the binary on a loaded runner
+    // took over a second and left 0.75 s of audio behind.
+    let layout = RecordingLayout(audioFolder: audio, meetingID: meetingID)
+    let masterPath = layout.master(.caf48kFloat32).path
+    let startDeadline = Date().addingTimeInterval(20)
+    while !FileManager.default.fileExists(atPath: masterPath), Date() < startDeadline {
+      Thread.sleep(forTimeInterval: 0.02)
+    }
+    #expect(
+      FileManager.default.fileExists(atPath: masterPath), "the recorder never opened its master")
     Thread.sleep(forTimeInterval: 2)
     kill(process.processIdentifier, SIGKILL)
     process.waitUntilExit()
     #expect(process.terminationStatus != 0)
 
-    let layout = RecordingLayout(audioFolder: audio, meetingID: meetingID)
     let master = try CAFFile.read(layout.master(.caf48kFloat32))
     #expect(master.sampleRate == 48_000)
     #expect(master.channels.count == 2)
