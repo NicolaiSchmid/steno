@@ -347,3 +347,48 @@ Reviewer trap: a `Package.resolved` bump of a model package without a sentence i
 - `parakeet-ultra` and `parakeet-de` as user-selectable engines; bake-off entrants only until the result plan says otherwise.
 - Diarization clustering threshold as a user setting; it stays a `FluidDiarizerConfig` constant.
 - Custom vocabulary boosting (FluidAudio CTC rescoring).
+
+## Deviations (implementation)
+
+Recorded by the speech workstream while building steps 0 to 8 (PR #8, 2026-09-25).
+
+- **FluidAudio pinned to the minor.** `Package.swift` says `.upToNextMinor(from: "0.17.4")`, not `from: "0.17.3"`:
+  the API was verified against 0.17.4 (`AsrModels.loadLocal(from:)`, `ModelRegistry.repoOverrides`, `Repo.folderName`
+  all exist there) and FluidAudio has renamed types inside a major before. WhisperKit stays `from: "1.1.0"` under its
+  canonical repository name `argmax-oss-swift`.
+- **Model-side language values are `LanguageTag`** (`LanguageTagger.candidates`, `dominantLanguage`, `tag(_:hint:)`);
+  `Locale.Language` appears only on the engines' `supportedLanguages` and `hint`, converted with `LanguageTag(_:)`.
+  Follows the PR #3 contract change.
+- **Module qualification.** `StenoCore.WordTiming` and `StenoCore.DiarizationResult` do not compile: `StenoCore` is
+  also the name of core's version enum, so the qualifier resolves to the enum. Files that import FluidAudio or
+  WhisperKit reach the core types through the internal aliases `CoreWordTiming` and `CoreDiarizationResult`,
+  declared in files that import only StenoCore.
+- **Directory names.** FluidAudio derives its folder from the repository name minus `-coreml`, so the assets live at
+  `Models/fluidaudio/parakeet-tdt-0.6b-v3`, `Models/fluidaudio/parakeet-ultra`, `Models/fluidaudio/speaker-diarization`
+  and (own parent, cannot shadow v3) `Models/fluidaudio-de/parakeet-tdt-0.6b-v3`; WhisperKit under
+  `Models/whisperkit/models/argmaxinc/whisperkit-coreml/<variant>` with `downloadBase = Models/whisperkit`. The
+  tokenizer is fetched right after the weights (`ModelUtilities.loadTokenizer`) so an installed asset is usable
+  offline.
+- **German fine-tune download.** FluidAudio downloads only its own `Repo` cases, so `parakeetDE` is fetched by
+  redirecting the v3 repository through `ModelRegistry.repoOverrides` for the duration of that one download; all
+  FluidAudio downloads are serialised in an actor so a concurrent v3 download never sees the redirect. Loading uses
+  `loadLocal(from:)`, which never re-downloads, so the model-card `offlineMode` caveat does not apply. Spike B stays
+  `[opt-in]` and is not yet run (needs a Mac and 1.2 GB).
+- **Chunk quality.** `ChunkEmbedding` carries no quality; each chunk takes the `qualityScore` of the turn it overlaps
+  most (1 when none), and `clusterConfidence` is the duration-weighted mean of those.
+- **Fixtures.** No Mac was reachable (Forge down), so the `say` fixtures are generated on the `macos-15` runner by a
+  temporary workflow (`.github/workflows/speech-fixtures.yml`, removed before the PR is ready), downloaded and
+  committed once. Their hashes live in `Tests/Fixtures/speech/MANIFEST.sha256` (checked by `SpeechFixtureTests`),
+  not in the root manifest: `FixtureManifestTests` compares the root file with `FixtureGenerator`'s output
+  verbatim, so foreign lines there would fail core's test.
+- **`--engine` touches two core files, not one.** `Wiring.swift` gains `SpeechOptions` and the `engine:` and
+  `modelsDirectory:` parameters of `dependencies`; `Process.swift` needs one `@OptionGroup` line and passes both
+  through. Without `--engine` the fakes run as before, so `stenoTests` are unchanged.
+- **Bake-off CLI input is WAV only** until StenoAudio's codec exists (`BakeoffRunner` takes any `AudioDecoder`; the
+  CLI passes `WAVAudioDecoder`). `--cleanup` is not a flag yet; the runner's `cleaner` seam is there for StenoLLM.
+- **Linux builds.** Every file that imports FluidAudio or WhisperKit is wrapped in `#if canImport(...)`, and
+  `Embeddings`/`LanguageTagger` fall back from Accelerate and NaturalLanguage, so the pure logic (208 tests across the
+  package) builds and runs in the Linux container. `makeSpeechEngine` and `makeDiarizer` throw
+  `SpeechEngineError.unavailable` there.
+- **`FakeModelDownloader.failureCount`** (default unlimited) so a test can show that a failed download is retried.
+- **`makeDiarizer(models:config:)`** added beside `makeSpeechEngine` so the app and the CLI never name `FluidDiarizer`.
