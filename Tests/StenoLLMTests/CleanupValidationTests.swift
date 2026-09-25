@@ -140,7 +140,8 @@ import Testing
     #expect(output.failedChunks == [])
     #expect(output.segments.allSatisfy { $0.text.first?.isUppercase == true })
     #expect(output.segments.map(\.rawText) == input.segments.map(\.rawText))
-    #expect(server.requests.map(\.purpose).filter { $0 == "cleanup-retry" }.count == 1)
+    let retries = server.requests.filter { $0.purpose == "cleanup-retry" }
+    #expect(retries.count == 1)
     #expect(server.requests.count == chunks.count + 1)
     #expect(output.usage.requests == chunks.count + 1)
     let victimOffset = chunks[0].segments.count

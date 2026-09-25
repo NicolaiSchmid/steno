@@ -319,8 +319,8 @@ import Testing
         "json_object", "json_object", nil,
       ])
     #expect(await harness.client.resolvedMode == .promptOnly)
-    #expect(
-      harness.events.filter { if case .modeDowngraded = $0 { true } else { false } }.count == 2)
+    let downgrades = harness.events.filter { if case .modeDowngraded = $0 { true } else { false } }
+    #expect(downgrades.count == 2)
     _ = try await harness.client.complete(ModeFallbackTests.schemaRequest)
     #expect(harness.server.requests.count == 4)
     #expect(harness.server.requests.last?.chat?.responseFormat == nil)

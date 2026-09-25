@@ -51,7 +51,8 @@ import Testing
     // Schema: the id enum is the same list, for single shot and reduce.
     let idEnum = builder.draftSchema.jsonValue["properties"]?["sections"]?["items"]?["properties"]?[
       "id"]?["enum"]
-    #expect(idEnum == .array(ids.map { .string($0) }), "\(templateID)")
+    let expectedEnum = JSONValue.array(ids.map { JSONValue.string($0) })
+    #expect(idEnum == expectedEnum, "\(templateID)")
     #expect(
       builder.draftSchema.promptText.contains(ids.map { "\"\($0)\"" }.joined(separator: " | ")))
     #expect(
@@ -66,7 +67,8 @@ import Testing
     let output = try await SummaryTests.summarizer(server).summarize(input)
     #expect(output.summary.templateID == templateID)
     #expect(output.summary.sections.map(\.id) == ids, "\(templateID)")
-    #expect(output.summary.sections.map(\.heading) == ids.map { "Überschrift \($0)" })
+    let headings = ids.map { "Überschrift \($0)" }
+    #expect(output.summary.sections.map(\.heading) == headings)
     #expect(output.title == "Titel: Untertitel")
     #expect(output.tasks.first?.assigneePersonID == LLMFixtures.personMaraID)
     var export = Self.standup

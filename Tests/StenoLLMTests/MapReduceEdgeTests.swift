@@ -71,7 +71,8 @@ import Testing
       Self.input)
     let purposes = server.requests.map(\.purpose)
     let mapCount = purposes.filter { $0 == "summary-map" }.count
-    #expect(purposes.filter { $0 == "summary-map-repair" }.count == 1)
+    let repairs = purposes.filter { $0 == "summary-map-repair" }
+    #expect(repairs.count == 1)
     #expect(purposes.last == "summary-reduce")
     #expect(server.requests.count == mapCount + 2)
 
