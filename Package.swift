@@ -55,6 +55,7 @@ let package = Package(
       name: "steno",
       dependencies: [
         "StenoCore",
+        "StenoAdapters",
         "StenoHandover",
         .product(name: "ArgumentParser", package: "swift-argument-parser"),
       ]
@@ -63,7 +64,10 @@ let package = Package(
     .testTarget(name: "StenoAudioTests", dependencies: ["StenoAudio"]),
     .testTarget(name: "StenoSpeechTests", dependencies: ["StenoSpeech"]),
     .testTarget(name: "StenoLLMTests", dependencies: ["StenoLLM"]),
-    .testTarget(name: "StenoAdaptersTests", dependencies: ["StenoAdapters"]),
+    // GRDB only to corrupt a settings row in the coordinator tests.
+    .testTarget(
+      name: "StenoAdaptersTests",
+      dependencies: ["StenoAdapters", .product(name: "GRDB", package: "GRDB.swift")]),
     .testTarget(
       name: "StenoHandoverTests",
       dependencies: [
@@ -81,7 +85,7 @@ let package = Package(
     .testTarget(name: "stenoTests", dependencies: ["StenoCore"]),
     .testTarget(
       name: "StenoEndToEndTests",
-      dependencies: ["StenoCore", "StenoHandover"],
+      dependencies: ["StenoCore", "StenoAdapters", "StenoHandover"],
       // The pinned handover client compiles the phone's evaluator (symlink);
       // it needs CryptoKit and Security, absent on Linux.
       exclude: linuxOnlyExclusions(["Support/PinnedTrustEvaluator.swift"])

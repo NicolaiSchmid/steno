@@ -137,6 +137,132 @@ import Testing
     #expect(FileManager.default.fileExists(atPath: Self.realStenoFolder.path) == hadRealFolder)
   }
 
+  @Test func deliverWritesTheVaultLayoutFromFlagsOrStoredSettings() async throws {
+    let home = try Fixtures.temporaryDirectory("steno-home")
+    defer { try? FileManager.default.removeItem(at: home) }
+    let db = home.appendingPathComponent("db/steno.sqlite").path
+    let fixtures = home.appendingPathComponent("fixtures", isDirectory: true)
+    #expect(try Self.run(["dev", "db", "migrate", "--db", db], home: home).status == 0)
+    #expect(
+      try Self.run(["dev", "fixtures", "generate", "--out", fixtures.path], home: home).status == 0)
+    let audio = home.appendingPathComponent("audio", isDirectory: true)
+    let process = try Self.run(
+      [
+        "process", fixtures.appendingPathComponent("audio/sweep-3s.wav").path,
+        "--source", "mac-in-person", "--title", "Sweep", "--db", db, "--audio-folder", audio.path,
+      ], home: home)
+    #expect(process.status == 0, "\(process.stderr)")
+    let meetingID = process.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
+    #expect(
+      try await SettingsStore(writer: MeetingStore.onDisk(at: URL(fileURLWithPath: db)).writer)
+        .load().obsidian == nil, "process delivered nowhere: no vault is configured")
+
+    // --vault builds the destination for this run only.
+    let vault = home.appendingPathComponent("vault", isDirectory: true)
+    try FileManager.default.createDirectory(at: vault, withIntermediateDirectories: true)
+    let deliver = try Self.run(
+      [
+        "deliver", meetingID, "--vault", vault.path, "--people-folder", "People",
+        "--include-audio", "--task-tag", "task", "--db", db,
+      ], home: home)
+    #expect(deliver.status == 0, "\(deliver.stderr)")
+    // A --vault run has its own destination id, keyed by the vault, so it
+    // never replaces the stored destination's row and receipt.
+    let adHoc = "obsidian-folder@\(vault.path)"
+    #expect(deliver.stdout.hasPrefix("\(adHoc)\tdelivered\t\(vault.path)/Meetings/"))
+    let meetings = vault.appendingPathComponent("Meetings", isDirectory: true)
+    let folders = try FileManager.default.contentsOfDirectory(atPath: meetings.path)
+    #expect(folders.count == 1)
+    let slug = try #require(folders.first)
+    #expect(slug.hasSuffix("-summary-of-sweep"))
+    let files = try FileManager.default.contentsOfDirectory(
+      atPath: meetings.appendingPathComponent(slug).path
+    ).sorted()
+    #expect(
+      files == [
+        "\(slug) - Tasks.md", "\(slug) - Transcript.md", "\(slug).md", "audio.wav", "meeting.json",
+        "transcript.vtt",
+      ], "six files: the WAV decoder's mixdown is copied as audio.wav")
+    let json = try Data(
+      contentsOf: meetings.appendingPathComponent(slug).appendingPathComponent("meeting.json"))
+    #expect(try StenoJSON.decode(MeetingExport.self, from: json).meeting.id.uuidString == meetingID)
+    let store = try MeetingStore.onDisk(at: URL(fileURLWithPath: db))
+    let rows = try await store.deliveries(meetingID: UUID(uuidString: meetingID)!)
+    #expect(rows.map(\.destinationID) == [adHoc])
+    #expect(rows.first?.status == .delivered)
+    #expect(rows.first?.receipt?.files.count == 6)
+    let adHocReceipt = rows.first?.receipt
+    #expect(
+      try await SettingsStore(writer: store.writer).load().obsidian == nil,
+      "--vault never touches the stored settings")
+
+    // Without --vault the stored settings decide.
+    let unconfigured = try Self.run(["deliver", meetingID, "--db", db], home: home)
+    #expect(unconfigured.status == 2)
+    #expect(unconfigured.stderr.contains("No destination configured"))
+    let second = home.appendingPathComponent("vault2", isDirectory: true)
+    try FileManager.default.createDirectory(at: second, withIntermediateDirectories: true)
+    var settings = try await SettingsStore(writer: store.writer).load()
+    settings.obsidian = ObsidianSettings(vaultPath: second.path)
+    try await SettingsStore(writer: store.writer).save(settings)
+    let stored = try Self.run(["deliver", meetingID, "--db", db], home: home)
+    #expect(stored.status == 0, "\(stored.stderr)")
+    #expect(
+      try FileManager.default.contentsOfDirectory(
+        atPath: second.appendingPathComponent("Meetings/\(slug)").path
+      ).count == 5, "no audio, no people: five files")
+    #expect(
+      stored.stdout.split(separator: "\n").map { $0.split(separator: "\t").first ?? "" } == [
+        "obsidian-folder"
+      ], "only this run's destination is printed")
+    let bothRows = try await store.deliveries(meetingID: UUID(uuidString: meetingID)!)
+    #expect(bothRows.map(\.destinationID).sorted() == ["obsidian-folder", adHoc].sorted())
+    #expect(
+      bothRows.first { $0.destinationID == adHoc }?.receipt == adHocReceipt,
+      "the stored-settings run leaves the --vault row alone")
+
+    let flagsWithoutVault = try Self.run(
+      ["deliver", meetingID, "--include-audio", "--db", db], home: home)
+    #expect(flagsWithoutVault.status == 1)
+    #expect(try Self.run(["deliver", "nope", "--db", db], home: home).status == 1)
+    let missingVault = try Self.run(
+      ["deliver", meetingID, "--vault", home.appendingPathComponent("absent").path, "--db", db],
+      home: home)
+    #expect(missingVault.status == 2)
+    #expect(missingVault.stderr.contains("does not exist"))
+
+    let unknown = try Self.run(
+      ["deliver", UUID().uuidString, "--vault", vault.path, "--db", db], home: home)
+    #expect(unknown.status == 2)
+    #expect(unknown.stderr.contains("not found"))
+
+    // A failed destination is a printed row and exit 2; the other files are
+    // still written. The mixdown is removed so --include-audio has nothing
+    // to copy.
+    let mixdown = RecordingLayout(audioFolder: audio, meetingID: UUID(uuidString: meetingID)!)
+      .mixdown(.wav16kInt16)
+    try FileManager.default.removeItem(at: mixdown)
+    let third = home.appendingPathComponent("vault3", isDirectory: true)
+    try FileManager.default.createDirectory(at: third, withIntermediateDirectories: true)
+    let partial = try Self.run(
+      ["deliver", meetingID, "--vault", third.path, "--include-audio", "--db", db], home: home)
+    #expect(partial.status == 2)
+    #expect(partial.stdout.hasPrefix("obsidian-folder@\(third.path)\tfailed\t"))
+    #expect(partial.stdout.contains("no audio mixdown"))
+    #expect(partial.stderr.contains("delivery failed"))
+    #expect(
+      try FileManager.default.contentsOfDirectory(
+        atPath: third.appendingPathComponent("Meetings/\(slug)").path
+      ).count == 5, "every other file was written before the failure")
+    let allRows = try await store.deliveries(meetingID: UUID(uuidString: meetingID)!)
+    let failedRow = allRows.first { $0.destinationID == "obsidian-folder@\(third.path)" }
+    #expect(failedRow?.status.kind == .failed)
+    #expect(failedRow?.receipt == nil, "a failed first delivery has no receipt")
+    let storedRow = allRows.first { $0.destinationID == "obsidian-folder" }
+    #expect(storedRow?.status == .delivered)
+    #expect(storedRow?.receipt?.root == second.path, "the stored destination's receipt is kept")
+  }
+
   @Test func defaultDatabaseFollowsHome() throws {
     let home = try Fixtures.temporaryDirectory("steno-home")
     defer { try? FileManager.default.removeItem(at: home) }
