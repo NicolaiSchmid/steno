@@ -93,7 +93,15 @@ import StenoCore
 
       var tap: ProcessTap?
       if needsTap {
-        tap = try ProcessTap(excluding: [LiveProcessAudioActivity.ownProcessObject()])
+        let ownProcess: AudioObjectID
+        do {
+          ownProcess = try LiveProcessAudioActivity.ownProcessObject()
+        } catch let error as CaptureError {
+          throw error
+        } catch {
+          throw CaptureError.backendFailed("own process object: \(error)")
+        }
+        tap = try ProcessTap(excluding: [ownProcess])
       }
 
       // Sub-devices in aggregate order: the output device (clock master), then

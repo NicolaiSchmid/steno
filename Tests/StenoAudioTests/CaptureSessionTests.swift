@@ -409,6 +409,97 @@ import Testing
       CaptureSession.farEndDelayFrames(inputLatencyFrames: 0, outputLatencyFrames: 480) == 480)
   }
 
+  /// Wraps the real writer and fails where a full disk would: every `write`
+  /// after `failAfterFrames`, and `finish()` itself when asked.
+  final class FaultyWriter: RecordingWriting, @unchecked Sendable {
+    struct DiskFull: Error {}
+    let inner: RecordingWriter
+    let failAfterFrames: Int?
+    let failFinish: Bool
+    private var frames = 0
+
+    init(_ inner: RecordingWriter, failAfterFrames: Int? = nil, failFinish: Bool) {
+      self.inner = inner
+      self.failAfterFrames = failAfterFrames
+      self.failFinish = failFinish
+    }
+
+    var files: RecordingFiles { inner.files }
+
+    func write(_ frames: LaneFrames) throws {
+      self.frames += 1
+      if let failAfterFrames, self.frames > failAfterFrames { throw DiskFull() }
+      try inner.write(frames)
+    }
+
+    func finish() throws -> RecordingFiles {
+      let files = try inner.finish()
+      if failFinish { throw DiskFull() }
+      return files
+    }
+  }
+
+  func faultySession(
+    in directory: URL, backend: SyntheticCaptureBackend, failAfterFrames: Int? = nil,
+    failFinish: Bool
+  ) throws -> CaptureSession {
+    try CaptureSession(
+      configuration: configuration(.inPerson, in: directory), backend: backend,
+      echoCanceller: nil, writerHeadroomFrames: 1_000,
+      makeWriter: { layout, lanes, keepRaw in
+        FaultyWriter(
+          try RecordingWriter(layout: layout, lanes: lanes, keepRawMic: keepRaw),
+          failAfterFrames: failAfterFrames, failFinish: failFinish)
+      })
+  }
+
+  /// The disk fills while closing the files: `stop()` still returns the
+  /// asset (the master is readable to its last frame) and the state, not a
+  /// thrown error, carries the failure. It used to throw and strand the
+  /// session in `.stopping`.
+  @Test func aFailingFinishStillReturnsTheAssetAndEndsFailed() async throws {
+    let directory = try Fixtures.temporaryDirectory("session")
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let backend = SyntheticCaptureBackend(lanes: [.mixed], tone: [.mixed: 440], seconds: 0.5)
+    let session = try faultySession(in: directory, backend: backend, failFinish: true)
+    let meetingID = UUID()
+    try await session.start(meetingID: meetingID)
+    await backend.waitUntilFinished()
+    let result = try await session.stop()
+    #expect(result.asset.meetingID == meetingID)
+    #expect(abs(result.statistics.duration - 0.5) < 0.02)
+    #expect(try CAFFile.read(result.asset.url).frameCount == 24_000)
+    guard case .failed(.writerFailed(let detail)) = await session.state else {
+      Issue.record("expected .failed(.writerFailed), got \(await session.state)")
+      return
+    }
+    #expect(detail.contains("DiskFull"))
+    #expect(try await session.stop().asset == result.asset, "the failed state keeps the asset")
+  }
+
+  /// The disk fills mid-recording: the first write error stops the writes,
+  /// the session finalises, and `stop()` returns what was written.
+  @Test func aFailingWriteMidRecordingFinalisesWhatWasWritten() async throws {
+    let directory = try Fixtures.temporaryDirectory("session")
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let backend = SyntheticCaptureBackend(lanes: [.mixed], tone: [.mixed: 440], seconds: 2)
+    let session = try faultySession(
+      in: directory, backend: backend, failAfterFrames: 30, failFinish: false)
+    let states = await session.states
+    try await session.start(meetingID: UUID())
+    let seen = await collectStates(states) { state in
+      if case .failed = state { return true }
+      return false
+    }
+    guard case .failed(.writerFailed) = seen.last else {
+      Issue.record("expected .failed(.writerFailed), got \(String(describing: seen.last))")
+      return
+    }
+    let result = try await session.stop()
+    #expect(abs(result.statistics.duration - 0.3) < 0.001)
+    #expect(try CAFFile.read(result.asset.url).frameCount == 30 * 480)
+  }
+
   @Test func aFailingBackendLeavesTheSessionFailedAndNoFolder() async throws {
     let directory = try Fixtures.temporaryDirectory("session")
     defer { try? FileManager.default.removeItem(at: directory) }

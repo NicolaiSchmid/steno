@@ -30,13 +30,32 @@ public struct RecordingFiles: Sendable, Equatable, Hashable {
   }
 }
 
+/// What the writer thread and the session need from the file writer.
+/// `RecordingWriter` is the production implementation; tests wrap it to
+/// inject the I/O failures a full disk produces.
+protocol RecordingWriting: AnyObject, Sendable {
+  /// The files and the duration written so far; valid before `finish()`
+  /// and after a failed one, so the session can still hand out the asset.
+  var files: RecordingFiles { get }
+  func write(_ frames: LaneFrames) throws
+  @discardableResult
+  func finish() throws -> RecordingFiles
+}
+
 /// Writes the master (`recording.caf`, 48 kHz Float32, one channel per lane)
 /// and one 16 kHz Int16 WAV sidecar per lane through `Resampler48kTo16k`,
 /// plus `mic.raw.caf` when asked, all into
 /// `RecordingLayout(audioFolder:meetingID:)`. Owned by the writer thread;
 /// one `write` per 10 ms frame, `finish()` patches sizes and returns the
 /// files. All scratch buffers are allocated in `init`.
-public final class RecordingWriter: @unchecked Sendable {
+///
+/// The sidecars lag the master by the resampler's group delay: the 192-tap
+/// linear-phase FIR delays by 95.5 input samples, so every sidecar sample
+/// sits 2.0 ms (32 samples at 16 kHz) after the master sample it belongs to.
+/// Segment times taken from a sidecar are 2 ms late against the master and
+/// against lanes `AVFoundationAudioCodec` decodes from it; harmless for
+/// transcripts, and deliberate, so do not "fix" a 2 ms offset by hand.
+public final class RecordingWriter: RecordingWriting, @unchecked Sendable {
   public let layout: RecordingLayout
   public let lanes: [AudioLane]
   private let master: CAFStreamWriter
@@ -92,25 +111,44 @@ public final class RecordingWriter: @unchecked Sendable {
         interleaved[index * laneCount + lane] = source[index]
         index += 1
       }
-      resamplers[lane].process(source, into: sidecarScratch)
+      lane += 1
+    }
+    // The master first: when the disk fills on this frame, the recoverable
+    // copy is never shorter than a sidecar.
+    try master.write(interleaved: interleaved, frameCount: frameSize)
+    lane = 0
+    while lane < laneCount {
+      resamplers[lane].process(frames.lanes[lane], into: sidecarScratch)
       try sidecars[lane].write(sidecarScratch, count: frameSize / Resampler48kTo16k.factor)
       lane += 1
     }
-    try master.write(interleaved: interleaved, frameCount: frameSize)
     if let rawMic, let raw = frames.rawMic {
       try rawMic.write(interleaved: raw, frameCount: frameSize)
     }
   }
 
-  public func finish() throws -> RecordingFiles {
-    guard !isFinished else { throw CaptureError.writerFailed("finish called twice") }
-    isFinished = true
-    try master.finish()
-    for sidecar in sidecars { try sidecar.finish() }
-    try rawMic?.finish()
+  /// The URLs are fixed at `init`; the duration is what the master holds.
+  public var files: RecordingFiles {
     var sidecarURLs: [AudioLane: URL] = [:]
     for (lane, sidecar) in zip(lanes, sidecars) { sidecarURLs[lane] = sidecar.url }
     return RecordingFiles(
       master: master.url, sidecars16k: sidecarURLs, rawMic: rawMic?.url, duration: master.duration)
+  }
+
+  /// Closes every file, the master first. A failure on one file still
+  /// closes the others before it is rethrown.
+  @discardableResult
+  public func finish() throws -> RecordingFiles {
+    guard !isFinished else { throw CaptureError.writerFailed("finish called twice") }
+    isFinished = true
+    var firstError: (any Error)?
+    func attempt(_ close: () throws -> Void) {
+      do { try close() } catch { firstError = firstError ?? error }
+    }
+    attempt { try master.finish() }
+    for sidecar in sidecars { attempt { try sidecar.finish() } }
+    attempt { try rawMic?.finish() }
+    if let firstError { throw firstError }
+    return files
   }
 }

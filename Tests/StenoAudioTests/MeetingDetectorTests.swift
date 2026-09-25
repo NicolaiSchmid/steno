@@ -107,6 +107,30 @@ import Testing
     await detector.stop()
   }
 
+  /// The plan's acceptance: a microphone opened right after a poll, with no
+  /// HAL listener event, is reported within 3 s (1 s poll plus 2 s debounce).
+  /// With the earlier 2 s poll the worst case was 4 s.
+  @Test func withoutAListenerEventAnOpenedMicrophoneIsReportedWithinThreeSeconds() async throws {
+    let clock = ManualClock()
+    let source = FakeProcessAudioActivity()
+    let detector = makeDetector(source, clock: clock)
+    let events = await detector.events
+    try await detector.start()
+    #expect(await clock.waitForSleepers(1))
+    #expect(await detector.pollInterval == .seconds(1))
+    let before = source.snapshotCount
+
+    source.setSilently([Self.zoom])
+    clock.advance(by: .seconds(1))
+    #expect(await clock.waitForSleepers(2), "the poll fired and armed the debounce")
+    #expect(source.snapshotCount > before, "one second after opening, the poll has seen it")
+    clock.advance(by: .seconds(2))
+    var iterator = events.makeAsyncIterator()
+    #expect(await iterator.next() == .microphoneOpened(bundleID: "us.zoom.xos", pid: 5_151))
+    #expect(clock.now == ManualClock.Instant(offset: .seconds(3)))
+    await detector.stop()
+  }
+
   @Test func anAlreadyOpenMicrophoneIsReportedAfterTheDebounce() async throws {
     let clock = ManualClock()
     let source = FakeProcessAudioActivity([Self.zoom])

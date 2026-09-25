@@ -3,11 +3,18 @@ import StenoCore
 
 /// Tells the app when another process opens the microphone (a call starting)
 /// and when it lets go. Reads `ProcessAudioActivitySource.snapshot()` on
-/// every HAL change notification and on a 2 s poll (the listener behaviour
-/// is undocumented, so the poll is the safety net), ignores its own PID, and
-/// debounces both edges by 2 s so a flapping input yields one
-/// `microphoneOpened` and one `microphoneReleased`. Every timer runs on the
-/// injected `Clock`, so tests drive `ManualClock` and never sleep.
+/// every HAL change notification and on a 1 s poll (the listener behaviour
+/// is undocumented, so the poll is the safety net; a snapshot is a handful of
+/// property reads), ignores its own PID, and debounces both edges by 2 s so
+/// a flapping input yields one `microphoneOpened` and one
+/// `microphoneReleased`. Worst case without a listener event: 3 s from the
+/// microphone opening to the event. Every timer runs on the injected `Clock`,
+/// so tests drive `ManualClock` and never sleep.
+///
+/// Known v1 limit: when the reported holder releases the microphone and
+/// another process already holds it in the same snapshot, the microphone
+/// stays "open" and `holder` keeps naming the first process until it is
+/// released again.
 public actor MeetingDetector {
   public enum Event: Sendable, Equatable {
     case microphoneOpened(bundleID: String?, pid: pid_t)
@@ -34,7 +41,7 @@ public actor MeetingDetector {
     clock: any Clock<Duration> = ContinuousClock(),
     ignoringPIDs: Set<pid_t> = [ProcessInfo.processInfo.processIdentifier],
     debounce: Duration = .seconds(2),
-    pollInterval: Duration = .seconds(2)
+    pollInterval: Duration = .seconds(1)
   ) {
     self.source = source
     self.clock = clock

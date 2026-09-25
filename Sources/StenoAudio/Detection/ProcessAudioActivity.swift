@@ -40,9 +40,16 @@ public protocol ProcessAudioActivitySource: Sendable {
   public struct LiveProcessAudioActivity: ProcessAudioActivitySource {
     public init() {}
 
-    /// The HAL's process object for this process, or `kAudioObjectUnknown`.
-    public static func ownProcessObject() -> AudioObjectID {
-      (try? processObject(pid: ProcessInfo.processInfo.processIdentifier)) ?? .unknown
+    /// The HAL's process object for this process. Throws rather than
+    /// returning `kAudioObjectUnknown`: a tap that "excludes" object 0
+    /// excludes nothing and would record Steno's own playback.
+    public static func ownProcessObject() throws -> AudioObjectID {
+      let pid = ProcessInfo.processInfo.processIdentifier
+      let object = try processObject(pid: pid)
+      guard object.isValid else {
+        throw CaptureError.backendFailed("no process object for pid \(pid)")
+      }
+      return object
     }
 
     public static func processObject(pid: pid_t) throws -> AudioObjectID {

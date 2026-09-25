@@ -29,7 +29,8 @@ struct DevAudioDevices: AsyncParsableCommand {
             + "\tuid=\(device.uid)" + (marks.isEmpty ? "" : "\t[\(marks.joined(separator: ", "))]"))
       }
       print("")
-      print("Own process object: \(LiveProcessAudioActivity.ownProcessObject())")
+      let ownProcess = (try? LiveProcessAudioActivity.ownProcessObject()).map(String.init)
+      print("Own process object: \(ownProcess ?? "none (the tap could not exclude Steno)")")
       print("")
       print("Processes")
       let activities = try LiveProcessAudioActivity().snapshot()

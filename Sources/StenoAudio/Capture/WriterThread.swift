@@ -9,7 +9,7 @@ import Synchronization
 /// stops further writes; the loop keeps draining so the relay never fills.
 final class WriterThread: @unchecked Sendable {
   private let relay: FrameRelay
-  private let writer: RecordingWriter
+  private let writer: any RecordingWriting
   private let levels: LevelSlot
   private let buffers: [UnsafeMutablePointer<Float>]
   /// The view over `buffers` handed to the writer, built once.
@@ -23,7 +23,8 @@ final class WriterThread: @unchecked Sendable {
   private var thread: Thread?
 
   init(
-    relay: FrameRelay, writer: RecordingWriter, levels: LevelSlot, laneCount: Int, hasRawMic: Bool,
+    relay: FrameRelay, writer: any RecordingWriting, levels: LevelSlot, laneCount: Int,
+    hasRawMic: Bool,
     onLevels: @escaping @Sendable (LaneLevels) -> Void,
     onError: @escaping @Sendable (any Error) -> Void
   ) {
