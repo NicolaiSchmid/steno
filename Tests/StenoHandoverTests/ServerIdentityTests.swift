@@ -24,6 +24,9 @@ import X509
     #expect(certificate.publicKey.isValidSignature(certificate.signature, for: certificate))
     let constraints = try certificate.extensions.basicConstraints
     #expect(constraints == .notCertificateAuthority)
+    // RFC 5480 §3: keyEncipherment is not a use an EC key has; a strict
+    // validator rejects a critical KeyUsage that claims it.
+    #expect(try certificate.extensions.keyUsage == KeyUsage(digitalSignature: true))
   }
 
   @Test func fingerprintIsStableForOneDERAndDiffersBetweenMints() throws {

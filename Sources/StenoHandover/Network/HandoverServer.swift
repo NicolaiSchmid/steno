@@ -58,7 +58,11 @@ final class HandoverServer: @unchecked Sendable {
       let parameters = NWParameters(tls: tls)
       parameters.allowLocalEndpointReuse = true
       let port = NWEndpoint.Port(rawValue: configuration.port) ?? .any
-      if !configuration.advertise {
+      if configuration.advertise {
+        // The service is advertised on the LAN and nowhere else: not over a
+        // VPN tunnel or another virtual interface, not over cellular.
+        parameters.prohibitedInterfaceTypes = [.cellular, .other]
+      } else {
         parameters.requiredLocalEndpoint = .hostPort(host: .ipv4(.loopback), port: port)
       }
       let listener =

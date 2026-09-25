@@ -27,6 +27,10 @@ actor HandoverEngine: RequestHandling {
 
   /// `lastSeenAt` is written at most this often per device.
   static let lastSeenResolution: TimeInterval = 60
+  /// A partial whose receipt has not moved for this long is abandoned: the
+  /// phone that announced it is not coming back, and the sweep reclaims
+  /// the space. The receipt stays; a late re-announce starts the upload over.
+  static let abandonedAfter: TimeInterval = 14 * 24 * 60 * 60
 
   init(
     configuration: HandoverConfiguration,
@@ -46,16 +50,20 @@ actor HandoverEngine: RequestHandling {
   }
 
   /// On start, drop inbox files no receipt accounts for (a crash between
-  /// announce and the first save, a device revoked while offline) or that a
+  /// announce and the first save, a device revoked while offline), that a
   /// completed intake left behind (it copied the file before writing
-  /// `.complete`). Best effort.
+  /// `.complete`), or whose receipt has not moved in `abandonedAfter`. Best
+  /// effort.
   func sweepOrphans() async {
     try? inbox.prepare()
+    let cutoff = now().addingTimeInterval(-Self.abandonedAfter)
     for recordingID in inbox.recordingIDs() {
-      let receipt = try? await store.handoverReceipt(recordingID: recordingID)
-      switch receipt?.state {
-      case .none, .complete: inbox.discard(recordingID)
-      case .some: break
+      guard let receipt = try? await store.handoverReceipt(recordingID: recordingID) else {
+        inbox.discard(recordingID)
+        continue
+      }
+      if receipt.state.kind == .complete || receipt.updatedAt < cutoff {
+        inbox.discard(recordingID)
       }
     }
   }
@@ -187,7 +195,7 @@ actor HandoverEngine: RequestHandling {
       try await store.save(device, tokenHash: DeviceTokens.hash(token))
     } catch {
       if pairing == nil { pairing = session }
-      return .problem(.internalServerError, "saving the device failed")
+      return .internalError("saving the device", error)
     }
     return .json(
       .ok,
@@ -199,7 +207,7 @@ actor HandoverEngine: RequestHandling {
     do {
       try await revoke(device.id)
     } catch {
-      return .problem(.internalServerError, "revoking failed: \(error)")
+      return .internalError("revoking the device", error)
     }
     return .empty(.noContent)
   }

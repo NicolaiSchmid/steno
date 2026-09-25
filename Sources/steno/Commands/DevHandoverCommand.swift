@@ -70,13 +70,15 @@ struct DevHandover: AsyncParsableCommand {
       await service.stop()
     }
 
-    /// The login-keychain identity in the product; the committed test
-    /// identity where there is no keychain (the Linux container).
+    /// The login-keychain identity in the product; where there is no
+    /// keychain (the Linux container) a fresh one, minted in memory and
+    /// forgotten on exit, for the plaintext loopback listener.
     static func identity(name: String) throws -> HandoverIdentity {
       #if canImport(Security)
         return try IdentityKeychain.loadOrCreate(commonName: "Steno on \(name)")
       #else
-        return try TestIdentity.load()
+        return HandoverIdentity(
+          certificateDER: try ServerIdentity.mint(commonName: "Steno on \(name)").certificateDER)
       #endif
     }
 

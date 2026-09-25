@@ -43,7 +43,7 @@ struct HandoverResponse: Sendable {
         status: status, headers: ["Content-Type": "application/json"],
         body: try StenoJSON.encode(value))
     } catch {
-      return problem(.internalServerError, "encoding failed: \(error)")
+      return internalError("encoding the response", error)
     }
   }
 
@@ -53,6 +53,13 @@ struct HandoverResponse: Sendable {
 
   static func problem(_ status: HTTPResponseStatus, _ message: String) -> HandoverResponse {
     json(status, Wire.Problem(message))
+  }
+
+  /// A 500 whose body names the step and nothing else; the error itself,
+  /// which may carry a path under the user's home, goes to the local log.
+  static func internalError(_ what: String, _ error: any Error) -> HandoverResponse {
+    HandoverLog.failure(what, error)
+    return problem(.internalServerError, "\(what) failed on the Mac")
   }
 }
 

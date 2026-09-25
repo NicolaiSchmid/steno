@@ -50,7 +50,8 @@ public enum ServerIdentity {
       signatureAlgorithm: .ecdsaWithSHA256,
       extensions: try Certificate.Extensions {
         Critical(BasicConstraints.notCertificateAuthority)
-        Critical(KeyUsage(digitalSignature: true, keyEncipherment: true))
+        // RFC 5480 §3: an EC key signs; keyEncipherment is not a use it has.
+        Critical(KeyUsage(digitalSignature: true))
         try ExtendedKeyUsage([.serverAuth])
         SubjectAlternativeNames([.dnsName(Self.sanLabel(commonName))])
       },

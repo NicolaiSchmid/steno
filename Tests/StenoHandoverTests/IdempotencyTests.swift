@@ -55,4 +55,41 @@ import Testing
     #expect(!inbox.hasPartial(orphan), "the orphan partial is swept")
     #expect(inbox.loadMetadata(orphan) == nil)
   }
+
+  @Test func startSweepsPartialsAbandonedForTwoWeeks() async throws {
+    // A phone that announced, uploaded most of a recording and was never
+    // seen again would otherwise hold that space in the inbox for good.
+    let test = try TestService.prepare(chunkSize: Self.chunkSize)
+    defer { Task { await test.stop() } }
+    let inbox = test.service.engine.inbox
+    let device = PairedDevice(id: UUID(), name: "Absent phone", pairedAt: test.now)
+    try await test.store.save(device, tokenHash: Data(repeating: 1, count: 32))
+    func seed(_ id: UUID, age: TimeInterval, state: HandoverState) async throws {
+      let metadata = RecordingMetadata(
+        recordingID: id, startedAt: test.now, durationSeconds: 10, byteCount: 1000,
+        sha256: Data(repeating: 0, count: 32), chunkSize: Self.chunkSize, format: .m4aAAC,
+        deviceName: device.name)
+      try inbox.begin(metadata)
+      try await test.store.save(
+        HandoverReceipt(
+          recordingID: id, deviceID: device.id, state: state, byteCount: 1000,
+          sha256: metadata.sha256, chunkSize: Self.chunkSize, receivedChunks: [0],
+          createdAt: test.now.addingTimeInterval(-age - 60),
+          updatedAt: test.now.addingTimeInterval(-age)))
+    }
+    let abandoned = UUID()
+    try await seed(abandoned, age: 15 * 24 * 3600, state: .receiving)
+    let stale = UUID()
+    try await seed(stale, age: 15 * 24 * 3600, state: .failed("sha256 mismatch"))
+    let live = UUID()
+    try await seed(live, age: 13 * 24 * 3600, state: .receiving)
+
+    try await test.service.start()
+    #expect(!inbox.hasPartial(abandoned) && inbox.loadMetadata(abandoned) == nil)
+    #expect(!inbox.hasPartial(stale) && inbox.loadMetadata(stale) == nil)
+    #expect(inbox.hasPartial(live), "thirteen days is not abandoned")
+    #expect(
+      try await test.store.handoverReceipt(recordingID: abandoned) != nil,
+      "the receipt stays; a late re-announce starts over")
+  }
 }

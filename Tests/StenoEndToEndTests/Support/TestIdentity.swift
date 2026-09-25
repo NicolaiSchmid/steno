@@ -1,0 +1,1 @@
+../../StenoHandoverTests/Support/TestIdentity.swift

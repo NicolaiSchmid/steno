@@ -73,13 +73,17 @@ final class ScriptedIntake: HandoverIntake, Sendable {
 
     let failed = try await phone.complete(metadata.recordingID)
     #expect(failed.status == 500)
-    #expect(try failed.json(Wire.Problem.self).error.contains("refused"))
+    let problem = try failed.json(Wire.Problem.self).error
+    #expect(problem.contains("intake"))
+    #expect(
+      !problem.contains(inbox.directory.path),
+      "the intake's error names the file; the phone must not learn the inbox path")
     #expect(inbox.hasVerified(metadata.recordingID, format: .m4aAAC), "the verified file waits")
     #expect(!inbox.hasPartial(metadata.recordingID))
     #expect(inbox.loadMetadata(metadata.recordingID) == metadata, "the sidecar waits with it")
     let receipt = try #require(
       try await test.store.handoverReceipt(recordingID: metadata.recordingID))
-    #expect(receipt.state.kind == .failed)
+    #expect(receipt.state == .failed(HandoverEngine.intakeRefused), "no path in the receipt either")
     #expect(receipt.receivedChunks == [0, 1], "the chunk set survives the failure")
     #expect(
       try await phone.status(metadata.recordingID).json(Wire.RecordingStatus.self)

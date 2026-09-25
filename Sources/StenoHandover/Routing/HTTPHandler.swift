@@ -151,9 +151,7 @@ final class HTTPHandler: ChannelInboundHandler, RemovableChannelHandler {
     case .success(.forbidden):
       reject(.problem(.forbidden, "pairing secret rejected"), head: pending.head, context: context)
     case .failure(let error):
-      reject(
-        .problem(.internalServerError, "authentication failed: \(error)"), head: pending.head,
-        context: context)
+      reject(.internalError("authenticating", error), head: pending.head, context: context)
     }
   }
 
@@ -217,7 +215,7 @@ final class HTTPHandler: ChannelInboundHandler, RemovableChannelHandler {
         handler.write(response, head: head, close: !head.isKeepAlive, context: context)
       case .failure(let error):
         handler.write(
-          .problem(.internalServerError, "\(error)"), head: head, close: true, context: context)
+          .internalError("handling the request", error), head: head, close: true, context: context)
       }
     }
   }

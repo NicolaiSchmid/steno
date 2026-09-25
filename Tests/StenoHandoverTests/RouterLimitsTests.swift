@@ -122,16 +122,21 @@ import Testing
   @Test func theReadTimeoutDoesNotCutARequestTheEngineIsStillHandling() async throws {
     // Once the body is in, the silence is the Mac's (a long verify or
     // intake), not the client's; the phone waits ten seconds for `complete`.
-    let intake = ScriptedIntake(meetingID: UUID(), failures: 0, delay: .milliseconds(700))
+    // The raw client sends the whole request in one flush, so the only
+    // silence on this connection is the intake's two seconds.
+    let intake = ScriptedIntake(meetingID: UUID(), failures: 0, delay: .seconds(2))
     let test = try await TestService.start(
-      chunkSize: Self.chunkSize, customIntake: intake, readTimeout: .milliseconds(200))
+      chunkSize: Self.chunkSize, customIntake: intake, readTimeout: .seconds(1))
     defer { Task { await test.stop() } }
     let phone = try await Phone.pair(test.service)
     let bytes = Phone.seededBytes(count: Self.chunkSize, seed: 31)
     let metadata = phone.metadata(for: bytes, chunkSize: Self.chunkSize)
     try await phone.uploadAll(metadata, bytes)
 
-    let completed = try await phone.complete(metadata.recordingID)
+    let raw = try await test.rawClient()
+    let completed = try await raw.exchange(
+      .POST, "/v1/recordings/\(metadata.recordingID.uuidString)/complete",
+      headers: [("Authorization", "Bearer \(phone.token)")], closeGrace: .milliseconds(100))
     #expect(completed.status == 200)
     #expect(test.metrics.timedOut == 0)
   }

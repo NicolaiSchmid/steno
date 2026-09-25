@@ -306,6 +306,31 @@ import Testing
     #expect(try Data(contentsOf: admission.file) == bytes)
   }
 
+  @Test func aFailedWriteIs500WithoutTheInboxPath() async throws {
+    // A `FileHandle` error names the file, and the inbox lives under the
+    // user's home; the phone gets the step that failed and nothing else.
+    let test = try await TestService.start(chunkSize: Self.chunkSize)
+    defer { Task { await test.stop() } }
+    let phone = try await Phone.pair(test.service)
+    let bytes = Phone.seededBytes(count: Self.chunkSize, seed: 10)
+    let metadata = phone.metadata(for: bytes)
+    let inbox = test.service.engine.inbox
+    #expect(try await phone.announce(metadata).status == 201)
+    // The partial becomes a directory: every write to it fails.
+    try FileManager.default.removeItem(at: inbox.partial(metadata.recordingID))
+    try FileManager.default.createDirectory(
+      at: inbox.partial(metadata.recordingID), withIntermediateDirectories: false)
+
+    let failed = try await phone.upload(metadata.recordingID, chunk: 0, bytes)
+    #expect(failed.status == 500)
+    let problem = try failed.json(Wire.Problem.self).error
+    #expect(problem == "writing the chunk failed on the Mac")
+    #expect(!problem.contains(inbox.directory.path))
+    #expect(
+      try await phone.status(metadata.recordingID).json(Wire.RecordingStatus.self).receivedChunks
+        .isEmpty, "the failed chunk is not recorded")
+  }
+
   @Test func chunkArithmeticCoversTheShortLastChunk() {
     #expect(MetadataValidation.chunkCount(byteCount: 1, chunkSize: 10) == 1)
     #expect(MetadataValidation.chunkCount(byteCount: 10, chunkSize: 10) == 1)

@@ -47,7 +47,7 @@ extension HandoverEngine {
         do {
           try inbox.begin(metadata)
         } catch {
-          return .problem(.internalServerError, "inbox: \(error)")
+          return .internalError("opening the partial file", error)
         }
         receipt.receivedChunks = []
       }
@@ -56,7 +56,7 @@ extension HandoverEngine {
       do {
         try await persist(receipt)
       } catch {
-        return .problem(.internalServerError, "receipt: \(error)")
+        return .internalError("saving the receipt", error)
       }
       return .json(.ok, Self.status(of: receipt))
     }
@@ -64,7 +64,7 @@ extension HandoverEngine {
     do {
       try inbox.begin(metadata)
     } catch {
-      return .problem(.internalServerError, "inbox: \(error)")
+      return .internalError("opening the partial file", error)
     }
     let timestamp = now()
     let receipt = HandoverReceipt(
@@ -75,7 +75,7 @@ extension HandoverEngine {
       try await persist(receipt)
     } catch {
       inbox.discard(recordingID)
-      return .problem(.internalServerError, "receipt: \(error)")
+      return .internalError("saving the receipt", error)
     }
     return .json(.created, Self.status(of: receipt))
   }
@@ -129,7 +129,7 @@ extension HandoverEngine {
       try await ReceivingFile.write(
         request.body, at: UInt64(index) * UInt64(receipt.chunkSize), to: inbox.partial(recordingID))
     } catch {
-      return .problem(.internalServerError, "write: \(error)")
+      return .internalError("writing the chunk", error)
     }
     // The write suspended the actor: another chunk may have landed, or the
     // device may have been revoked. Fold this chunk into the receipt as it
@@ -146,7 +146,7 @@ extension HandoverEngine {
     do {
       try await persist(receipt)
     } catch {
-      return .problem(.internalServerError, "receipt: \(error)")
+      return .internalError("saving the receipt", error)
     }
     return .empty(.noContent)
   }
@@ -203,7 +203,7 @@ extension HandoverEngine {
           try ReceivingFile.size(of: partial) == receipt.byteCount
           ? try await ReceivingFile.hashMatches(partial, expected: receipt.sha256) : false
       } catch {
-        return .problem(.internalServerError, "verify: \(error)")
+        return .internalError("verifying the file", error)
       }
       receipt = activeReceipts[recordingID] ?? receipt
       guard verified else {
@@ -217,7 +217,7 @@ extension HandoverEngine {
       do {
         file = try inbox.promote(recordingID, format: metadata.format)
       } catch {
-        return .problem(.internalServerError, "promote: \(error)")
+        return .internalError("moving the verified file", error)
       }
     }
 
@@ -225,12 +225,13 @@ extension HandoverEngine {
     do {
       meetingID = try await intake.admit(file: file, metadata: metadata, device: device)
     } catch {
-      // The verified file stays; the phone retries the same call.
+      // The verified file stays; the phone retries the same call. The
+      // reason is fixed text: the error may name the file's path.
       receipt = activeReceipts[recordingID] ?? receipt
-      receipt.state = .failed("admit: \(error)")
+      receipt.state = .failed(Self.intakeRefused)
       receipt.updatedAt = now()
       try? await persist(receipt)
-      return .problem(.internalServerError, "admit: \(error)")
+      return .internalError("the intake", error)
     }
     // Admitted: the answer is 200 whatever the receipt write does. The real
     // intake wrote this same `.complete` receipt and deleted the verified
@@ -246,6 +247,9 @@ extension HandoverEngine {
   }
 
   // MARK: - Helpers
+
+  /// The `.failed` reason after the intake threw; the detail is logged.
+  static let intakeRefused = "the intake refused the file"
 
   static func status(of receipt: HandoverReceipt) -> Wire.RecordingStatus {
     if receipt.state.kind == .complete {
