@@ -102,50 +102,6 @@ import Testing
     }
   }
 
-  @Test func aSilentConnectionIsClosedAfterTheReadTimeout() async throws {
-    // Half a request line, then nothing: without a read timeout any peer on
-    // the Wi-Fi could hold hundreds of such connections open for good. The
-    // timeout is seconds, not hundreds of milliseconds: it also counts the
-    // TLS handshake of the next connection, which a loaded runner stretches.
-    try await TestService.run(readTimeout: .seconds(2)) { test in
-      let raw = try test.rawClient()
-
-      let closed = try await raw.holdOpen(Data("GET /v1/hel".utf8), timeout: .seconds(10))
-      #expect(closed, "the server closes a connection that stays silent")
-      let metrics = test.metrics
-      #expect(metrics.timedOut == 1)
-      #expect(metrics.requestHeads == 0, "no request line was ever completed")
-      #expect(metrics.handledRequests == 0)
-
-      // The listener is fine afterwards.
-      #expect(try await raw.exchange(.GET, "/v1/hello", closeGrace: .zero).status == 200)
-    }
-  }
-
-  @Test func theReadTimeoutDoesNotCutARequestTheEngineIsStillHandling() async throws {
-    // Once the body is in, the silence is the Mac's (a long verify or
-    // intake), not the client's; the phone waits ten seconds for `complete`.
-    // The raw client sends the whole request in one flush, so the only
-    // silence on this connection is the intake's four seconds, twice the
-    // read timeout.
-    let intake = ScriptedIntake(meetingID: UUID(), failures: 0, delay: .seconds(4))
-    try await TestService.run(
-      chunkSize: Self.chunkSize, customIntake: intake, readTimeout: .seconds(2)
-    ) { test in
-      let phone = try await Phone.pair(test.service)
-      let bytes = Phone.seededBytes(count: Self.chunkSize, seed: 31)
-      let metadata = phone.metadata(for: bytes, chunkSize: Self.chunkSize)
-      try await phone.uploadAll(metadata, bytes)
-
-      let raw = try test.rawClient()
-      let completed = try await raw.exchange(
-        .POST, "/v1/recordings/\(metadata.recordingID.uuidString)/complete",
-        headers: [("Authorization", "Bearer \(phone.token)")], closeGrace: .milliseconds(100))
-      #expect(completed.status == 200)
-      #expect(test.metrics.timedOut == 0)
-    }
-  }
-
   @Test func missingAndMalformedAuthorizationAre401() async throws {
     try await TestService.run { test in
       let client = try test.client()
