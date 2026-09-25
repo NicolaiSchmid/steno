@@ -11,10 +11,9 @@ public enum EchoMetrics {
     return Float((sum / Double(samples.count)).squareRoot())
   }
 
-  /// dBFS of a linear magnitude; `-160` for silence.
+  /// dBFS of a linear magnitude; `-160` for silence. The meter's scale.
   public static func decibels(_ linear: Float) -> Float {
-    guard linear > 1e-8 else { return -160 }
-    return 20 * log10(linear)
+    LevelMeter.decibels(linear)
   }
 
   /// Echo return loss enhancement over `range`: how much quieter the

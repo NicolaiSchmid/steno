@@ -38,8 +38,13 @@
       ]
       var id = AudioObjectID.unknown
       let status = AudioHardwareCreateAggregateDevice(description as CFDictionary, &id)
-      guard status == noErr, id.isValid else {
-        throw CaptureError.aggregateCreationFailed(status == noErr ? -1 : status)
+      guard status == noErr else {
+        throw CaptureError.coreAudio(
+          operation: "AudioHardwareCreateAggregateDevice", status: status)
+      }
+      guard id.isValid else {
+        throw CaptureError.backendFailed(
+          "AudioHardwareCreateAggregateDevice returned no device object")
       }
       self.deviceID = id
       self.uid = uid

@@ -5,13 +5,14 @@ import StenoCore
 /// stopping → idle`, or `failed` when a device disappears or the writer
 /// fails. Owns the sink, the processing thread, the relay, the writer thread
 /// and the `RecordingWriter`; `stop()` tears them down in order (backend,
-/// processing, writer, files) and returns the finished `AudioAsset`
-/// (`.caf48kFloat32`, `sidecars16k` filled, retention `.keepForever` until
-/// the caller sets it from `Settings`) with statistics.
+/// processing, writer, files) and returns the `CaptureResult`: the finished
+/// `AudioAsset` (`.caf48kFloat32`, `sidecars16k` filled, retention
+/// `.keepForever` until the caller sets it from `Settings`) with statistics.
 ///
-/// After `.failed(.deviceLost)` the partial recording is finalised and
-/// `stop()` returns it instead of throwing, so the app can enqueue what was
-/// captured.
+/// A recording cut short (device loss, writer failure, a full disk while
+/// closing) is finalised and travels in the state:
+/// `.failed(error, recording: result)`; `stop()` returns the same result, or
+/// throws when the failure came from a start that produced nothing.
 public actor CaptureSession {
   public let configuration: CaptureConfiguration
   /// Frames the writer may fall behind the processing thread before frames
@@ -33,13 +34,13 @@ public actor CaptureSession {
   private struct Active {
     var meetingID: UUID
     var startedAt: Date
-    var layout: RecordingLayout
+    var stream: CaptureStream
     var sink: LaneFrameSink
     var relay: FrameRelay
     var processing: ProcessingThread
     var writerThread: WriterThread
     var writer: any RecordingWriting
-    var deviceChanges = 0
+    var endedOnDeviceLoss = false
   }
 
   /// Opens the files for one recording; `RecordingWriter.init` in
@@ -49,7 +50,6 @@ public actor CaptureSession {
 
   private let makeWriter: WriterFactory
   private var active: Active?
-  private var lastResult: (asset: AudioAsset, statistics: CaptureStatistics)?
 
   /// `echoCanceller` nil in `.call` with `echoCancellation` on means
   /// `SpeexEchoCanceller` with the 200 ms tail; `.inPerson` never cancels.
@@ -116,6 +116,10 @@ public actor CaptureSession {
     }
   }
 
+  /// The stream the backend opened for the current recording; nil while not
+  /// recording. `steno dev capture-spike` prints it.
+  public var stream: CaptureStream? { active?.stream }
+
   private func removeStateContinuation(_ id: UUID) { stateContinuations[id] = nil }
   private func removeLevelContinuation(_ id: UUID) { levelContinuations[id] = nil }
 
@@ -137,15 +141,11 @@ public actor CaptureSession {
     return total >= StenoAudio.frameSize ? total : 0
   }
 
-  private func farEndDelayFrames() -> Int {
+  private func farEndDelayFrames(for stream: CaptureStream) -> Int {
     guard configuration.usesEchoCancellation else { return 0 }
-    var input = 0
-    var output = 0
-    if let live = backend as? LiveCaptureBackend {
-      input = live.inputLatencyFrames
-      output = live.outputLatencyFrames
-    }
-    return Self.farEndDelayFrames(inputLatencyFrames: input, outputLatencyFrames: output)
+    return Self.farEndDelayFrames(
+      inputLatencyFrames: stream.inputLatencyFrames,
+      outputLatencyFrames: stream.outputLatencyFrames)
   }
 
   public func start(meetingID: UUID) async throws {
@@ -153,8 +153,8 @@ public actor CaptureSession {
     case .idle, .failed: break
     default: throw CaptureError.invalidState("start while \(state)")
     }
-    // A failed start must never hand out the previous meeting's files.
-    lastResult = nil
+    // `.starting` carries no recording: a failed start must never hand out
+    // the previous meeting's files.
     state = .starting
     // A new recording, possibly on other devices, starts from a cold filter.
     echoCanceller?.reset()
@@ -167,20 +167,22 @@ public actor CaptureSession {
       writer = try makeWriter(layout, lanes, keepRaw)
     } catch {
       let failure = CaptureError.writerFailed(String(describing: error))
-      state = .failed(failure)
+      state = .failed(failure, recording: nil)
       throw failure
     }
 
     let sink = LaneFrameSink(lanes: lanes) { [weak self] in
       Task { await self?.deviceLost() }
     }
+    let stream: CaptureStream
     do {
-      try backend.start(lanes: lanes, inputDeviceUID: configuration.inputDeviceUID, sink: sink)
+      stream = try backend.start(
+        lanes: lanes, inputDeviceUID: configuration.inputDeviceUID, sink: sink)
     } catch {
       _ = try? writer.finish()
       try? FileManager.default.removeItem(at: layout.directory)
       let failure = (error as? CaptureError) ?? .backendFailed(String(describing: error))
-      state = .failed(failure)
+      state = .failed(failure, recording: nil)
       throw failure
     }
 
@@ -190,8 +192,8 @@ public actor CaptureSession {
     let processing = ProcessingThread(
       sink: sink, relay: relay,
       configuration: .init(
-        lanes: lanes, echoCanceller: echoCanceller, farEndDelayFrames: farEndDelayFrames(),
-        keepRawMic: keepRaw))
+        lanes: lanes, echoCanceller: echoCanceller,
+        farEndDelayFrames: farEndDelayFrames(for: stream), keepRawMic: keepRaw))
     let writerThread = WriterThread(
       relay: relay, writer: writer, levels: processing.levels, laneCount: lanes.count,
       hasRawMic: keepRaw,
@@ -202,17 +204,20 @@ public actor CaptureSession {
 
     let startedAt = Date()
     active = Active(
-      meetingID: meetingID, startedAt: startedAt, layout: layout, sink: sink, relay: relay,
+      meetingID: meetingID, startedAt: startedAt, stream: stream, sink: sink, relay: relay,
       processing: processing, writerThread: writerThread, writer: writer)
     state = .recording(startedAt: startedAt)
   }
 
-  public func stop() async throws -> (asset: AudioAsset, statistics: CaptureStatistics) {
+  /// Ends the recording and returns it. After `.failed` returns the
+  /// finalised partial recording the state carries, or throws when the
+  /// failure came from a start that produced nothing.
+  public func stop() async throws -> CaptureResult {
     switch state {
     case .recording:
       break
-    case .failed:
-      if let lastResult { return lastResult }
+    case .failed(_, let recording):
+      if let recording { return recording }
       throw CaptureError.invalidState("stop after a failed start")
     default:
       throw CaptureError.invalidState("stop while \(state)")
@@ -222,9 +227,9 @@ public actor CaptureSession {
       throw CaptureError.invalidState("nothing to finish")
     }
     // Closing the files can fail on a full disk; the master is still
-    // readable to its last frame, so the asset comes back and the state
+    // readable to its last frame, so the result comes back and the state
     // carries the failure instead of `stop()` throwing it away.
-    state = failure.map { .failed($0) } ?? .idle
+    state = failure.map { .failed($0, recording: result) } ?? .idle
     return result
   }
 
@@ -232,9 +237,7 @@ public actor CaptureSession {
   /// The asset is built even when closing the files fails (its URLs are
   /// fixed at start and the duration is what the master holds); the failure
   /// comes back beside it.
-  private func finish() -> (
-    result: (asset: AudioAsset, statistics: CaptureStatistics), failure: CaptureError?
-  )? {
+  private func finish() -> (result: CaptureResult, failure: CaptureError?)? {
     guard let active else { return nil }
     self.active = nil
     backend.stop()
@@ -261,27 +264,26 @@ public actor CaptureSession {
       droppedFrames: dropped,
       systemLaneSilent: lanes.contains(.system)
         && active.processing.systemPeak < LaneLevel.silentPeakLinear,
-      deviceChanges: active.deviceChanges)
+      endedOnDeviceLoss: active.endedOnDeviceLoss)
     let asset = AudioAsset(
       id: UUID(), meetingID: active.meetingID, url: files.master, format: .caf48kFloat32,
       lanes: lanes, sidecars16k: files.sidecars16k, retention: .keepForever)
-    let result = (asset, statistics)
-    lastResult = result
-    return (result, failure)
+    return (CaptureResult(asset: asset, statistics: statistics), failure)
   }
 
   private func deviceLost() {
     guard case .recording = state, var active else { return }
-    active.deviceChanges += 1
+    active.endedOnDeviceLoss = true
     self.active = active
     state = .stopping
-    state = .failed(finish()?.failure ?? .deviceLost)
+    guard let (result, failure) = finish() else { return }
+    state = .failed(failure ?? .deviceLost, recording: result)
   }
 
   private func writerFailed(_ error: any Error) {
     guard case .recording = state else { return }
     state = .stopping
-    _ = finish()
-    state = .failed(.writerFailed(String(describing: error)))
+    let result = finish()?.result
+    state = .failed(.writerFailed(String(describing: error)), recording: result)
   }
 }

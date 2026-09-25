@@ -5,19 +5,33 @@ import StenoCore
 /// IOProc only follows precomputed indices. Pure, so the two possible HAL
 /// orderings (sub-devices then taps, or taps first) are tested on CI.
 public struct StreamLayout: Sendable, Equatable {
-  /// One lane's source: the buffer index and channel offset of the first
-  /// channel, the buffer's channel count as the sample stride, and an optional
-  /// second channel (a stereo tap folded to mono).
+  /// One channel in the buffer list: which buffer, the offset of the first
+  /// sample in it, and the buffer's channel count as the sample stride (1
+  /// for a non-interleaved channel).
+  public struct ChannelRef: Sendable, Equatable {
+    public var buffer: Int
+    public var offset: Int
+    public var stride: Int
+
+    public init(buffer: Int, offset: Int, stride: Int) {
+      self.buffer = buffer
+      self.offset = offset
+      self.stride = stride
+    }
+  }
+
+  /// One lane's source: its channel, plus a second channel when a stereo tap
+  /// is folded to the mono system lane.
   public struct LaneSource: Sendable, Equatable {
     public var lane: AudioLane
-    public var bufferIndex: Int
-    public var channelOffset: Int
-    public var stride: Int
-    /// -1 when the lane is a single channel.
-    public var secondBufferIndex: Int = -1
-    public var secondChannelOffset: Int = 0
+    public var left: ChannelRef
+    public var right: ChannelRef?
 
-    public var isMixed: Bool { secondBufferIndex >= 0 }
+    public init(lane: AudioLane, left: ChannelRef, right: ChannelRef? = nil) {
+      self.lane = lane
+      self.left = left
+      self.right = right
+    }
   }
 
   public var sources: [LaneSource]
@@ -56,24 +70,22 @@ public struct StreamLayout: Sendable, Equatable {
         }
         let start = subDeviceOffset + subDevices.prefix(micSubDevice).reduce(0) { $0 + $1.count }
         sources.append(
-          LaneSource(lane: lane, bufferIndex: start, channelOffset: 0, stride: firstBuffer))
+          LaneSource(lane: lane, left: ChannelRef(buffer: start, offset: 0, stride: firstBuffer)))
       case .system:
         guard !tap.isEmpty else {
           throw CaptureError.unexpectedStreamLayout("no tap buffers for the system lane")
         }
+        let left = ChannelRef(buffer: tapOffset, offset: 0, stride: tap[0])
         if tap[0] >= 2 {
-          sources.append(
-            LaneSource(
-              lane: lane, bufferIndex: tapOffset, channelOffset: 0, stride: tap[0],
-              secondBufferIndex: tapOffset, secondChannelOffset: 1))
+          // Interleaved stereo: the right channel is the next sample.
+          let right = ChannelRef(buffer: tapOffset, offset: 1, stride: tap[0])
+          sources.append(LaneSource(lane: lane, left: left, right: right))
         } else if tap.count >= 2 {
-          sources.append(
-            LaneSource(
-              lane: lane, bufferIndex: tapOffset, channelOffset: 0, stride: 1,
-              secondBufferIndex: tapOffset + 1, secondChannelOffset: 0))
+          // Non-interleaved: the right channel is the next buffer.
+          let right = ChannelRef(buffer: tapOffset + 1, offset: 0, stride: 1)
+          sources.append(LaneSource(lane: lane, left: left, right: right))
         } else {
-          sources.append(
-            LaneSource(lane: lane, bufferIndex: tapOffset, channelOffset: 0, stride: 1))
+          sources.append(LaneSource(lane: lane, left: left))
         }
       }
     }

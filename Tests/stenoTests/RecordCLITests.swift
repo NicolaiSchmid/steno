@@ -1,7 +1,8 @@
 import Foundation
-import StenoAudio
 import StenoCore
 import Testing
+
+@testable import StenoAudio
 
 #if canImport(Glibc)
   import Glibc

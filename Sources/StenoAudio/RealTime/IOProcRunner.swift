@@ -36,13 +36,13 @@
       var procID: AudioDeviceIOProcID?
       let created = AudioDeviceCreateIOProcIDWithBlock(&procID, deviceID, queue, block)
       guard created == noErr, let procID else {
-        throw CaptureError.backendFailed(
-          "AudioDeviceCreateIOProcIDWithBlock failed: \(fourCharCode(created))")
+        throw CaptureError.coreAudio(
+          operation: "AudioDeviceCreateIOProcIDWithBlock", status: created)
       }
       let started = AudioDeviceStart(deviceID, procID)
       guard started == noErr else {
         AudioDeviceDestroyIOProcID(deviceID, procID)
-        throw CaptureError.backendFailed("AudioDeviceStart failed: \(fourCharCode(started))")
+        throw CaptureError.coreAudio(operation: "AudioDeviceStart", status: started)
       }
       self.procID = procID
     }
@@ -60,7 +60,7 @@
     ) {
       let bufferCount = list.count
       guard bufferCount > 0, sources.count > 0 else { return }
-      let firstIndex = sources[0].bufferIndex
+      let firstIndex = sources[0].left.buffer
       guard firstIndex < bufferCount else { return }
       let first = list[firstIndex]
       let channels = Int(first.mNumberChannels)
@@ -70,15 +70,13 @@
       var index = 0
       while index < sources.count {
         let source = sources[index]
-        if source.bufferIndex < bufferCount, let data = list[source.bufferIndex].mData {
-          let base = data.assumingMemoryBound(to: Float.self) + source.channelOffset
-          if source.secondBufferIndex >= 0, source.secondBufferIndex < bufferCount,
-            let second = list[source.secondBufferIndex].mData
-          {
-            let right = second.assumingMemoryBound(to: Float.self) + source.secondChannelOffset
-            sink.writeMixed(lane: index, left: base, right: right, stride: source.stride)
+        if let left = samples(of: source.left, in: list) {
+          if let right = source.right, let rightSamples = samples(of: right, in: list) {
+            sink.writeMixed(
+              lane: index, left: left, right: rightSamples, stride: source.left.stride,
+              rightStride: right.stride)
           } else {
-            sink.write(lane: index, from: base, stride: source.stride)
+            sink.write(lane: index, from: left, stride: source.left.stride)
           }
         } else {
           sink.writeSilence(lane: index)
@@ -86,6 +84,16 @@
         index += 1
       }
       sink.endCallback()
+    }
+
+    /// The first sample of `channel` in `list`, nil when the buffer is missing
+    /// or the HAL delivered it without data.
+    @inline(__always)
+    private static func samples(
+      of channel: StreamLayout.ChannelRef, in list: UnsafeMutableAudioBufferListPointer
+    ) -> UnsafePointer<Float>? {
+      guard channel.buffer < list.count, let data = list[channel.buffer].mData else { return nil }
+      return UnsafePointer(data.assumingMemoryBound(to: Float.self)) + channel.offset
     }
 
     /// `AudioDeviceStop` then `AudioDeviceDestroyIOProcID`; idempotent.

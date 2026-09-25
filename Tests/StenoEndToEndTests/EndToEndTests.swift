@@ -1,8 +1,9 @@
 import Foundation
 import StenoAdapters
-import StenoAudio
 import StenoCore
 import Testing
+
+@testable import StenoAudio
 
 /// The one real-pipeline test across modules. Core created it with fakes
 /// everywhere; each module workstream's last step replaces its own fake with

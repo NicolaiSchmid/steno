@@ -95,7 +95,7 @@ import Testing
     #expect(result.statistics.droppedFrames == [:])
     #expect(abs(result.statistics.duration - 3) < 0.02)
     #expect(!result.statistics.systemLaneSilent)
-    #expect(result.statistics.deviceChanges == 0)
+    #expect(!result.statistics.endedOnDeviceLoss)
 
     let master = try CAFFile.read(result.asset.url)
     #expect(master.channels.count == 2)
@@ -119,22 +119,25 @@ import Testing
       if case .failed = state { return true }
       return false
     }
-    #expect(seen.last == .failed(.deviceLost))
+    #expect(seen.last?.failure == .deviceLost)
     #expect(seen.contains(.stopping))
 
+    // The state carries the finalised partial recording; `stop()` returns
+    // the same one.
     let result = try await session.stop()
-    #expect(result.statistics.deviceChanges == 1)
+    #expect(seen.last == .failed(.deviceLost, recording: result))
+    #expect(result.statistics.endedOnDeviceLoss)
     #expect(abs(result.statistics.duration - 1) < 0.05)
     let master = try CAFFile.read(result.asset.url)
     #expect(master.channels.count == 2)
     #expect(abs(master.duration - 1) < 0.05)
-    #expect(await session.state == .failed(.deviceLost))
+    #expect(await session.state == .failed(.deviceLost, recording: result))
 
     // A failed session restarts (and this backend loses its device again).
     try await session.start(meetingID: UUID())
     _ = try await session.stop()
     let restarted = await session.state
-    #expect(restarted == .idle || restarted == .failed(.deviceLost))
+    #expect(restarted == .idle || restarted.failure == .deviceLost)
   }
 
   /// A tap that never delivers anything (permission denied, a muted mix) is
@@ -211,9 +214,8 @@ import Testing
     }
     let first = try await session.stop()
     let second = try await session.stop()
-    #expect(first.asset == second.asset)
-    #expect(first.statistics == second.statistics)
-    #expect(await session.state == .failed(.deviceLost))
+    #expect(first == second)
+    #expect(await session.state == .failed(.deviceLost, recording: first))
     backend.stop()
     backend.stop()
     #expect(
@@ -301,11 +303,13 @@ import Testing
 
     init(_ inner: SyntheticCaptureBackend) { self.inner = inner }
 
-    func start(lanes: [AudioLane], inputDeviceUID: String?, sink: LaneFrameSink) throws {
+    func start(lanes: [AudioLane], inputDeviceUID: String?, sink: LaneFrameSink) throws
+      -> CaptureStream
+    {
       guard starts.wrappingAdd(1, ordering: .relaxed).oldValue == 0 else {
         throw CaptureError.inputDeviceUnavailable
       }
-      try inner.start(lanes: lanes, inputDeviceUID: inputDeviceUID, sink: sink)
+      return try inner.start(lanes: lanes, inputDeviceUID: inputDeviceUID, sink: sink)
     }
 
     func stop() { inner.stop() }
@@ -330,7 +334,7 @@ import Testing
     await #expect(throws: CaptureError.inputDeviceUnavailable) {
       try await session.start(meetingID: UUID())
     }
-    #expect(await session.state == .failed(.inputDeviceUnavailable))
+    #expect(await session.state == .failed(.inputDeviceUnavailable, recording: nil))
     await #expect(throws: CaptureError.self, "nothing was recorded for this start") {
       _ = try await session.stop()
     }
@@ -409,6 +413,23 @@ import Testing
       CaptureSession.farEndDelayFrames(inputLatencyFrames: 0, outputLatencyFrames: 480) == 480)
   }
 
+  /// The backend describes the stream it opened; the session keeps it while
+  /// recording (capture-spike prints it) and drops it with the recording.
+  @Test func theSessionExposesTheBackendsStreamWhileRecording() async throws {
+    let directory = try Fixtures.temporaryDirectory("session")
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let backend = SyntheticCaptureBackend(lanes: [.mixed], tone: [.mixed: 440], seconds: 0.1)
+    let session = try CaptureSession(
+      configuration: configuration(.inPerson, in: directory), backend: backend)
+    #expect(await session.stream == nil)
+    try await session.start(meetingID: UUID())
+    #expect(await session.stream == .synthetic)
+    #expect(await session.stream?.sampleRate == StenoAudio.sampleRate)
+    await backend.waitUntilFinished()
+    _ = try await session.stop()
+    #expect(await session.stream == nil)
+  }
+
   /// Wraps the real writer and fails where a full disk would: every `write`
   /// after `failAfterFrames`, and `finish()` itself when asked.
   final class FaultyWriter: RecordingWriting, @unchecked Sendable {
@@ -469,12 +490,13 @@ import Testing
     #expect(result.asset.meetingID == meetingID)
     #expect(abs(result.statistics.duration - 0.5) < 0.02)
     #expect(try CAFFile.read(result.asset.url).frameCount == 24_000)
-    guard case .failed(.writerFailed(let detail)) = await session.state else {
+    guard case .failed(.writerFailed(let detail), let recording) = await session.state else {
       Issue.record("expected .failed(.writerFailed), got \(await session.state)")
       return
     }
     #expect(detail.contains("DiskFull"))
-    #expect(try await session.stop().asset == result.asset, "the failed state keeps the asset")
+    #expect(recording == result, "the failed state carries the recording")
+    #expect(try await session.stop() == result, "and stop() returns the same one")
   }
 
   /// The disk fills mid-recording: the first write error stops the writes,
@@ -491,7 +513,7 @@ import Testing
       if case .failed = state { return true }
       return false
     }
-    guard case .failed(.writerFailed) = seen.last else {
+    guard case .failed(.writerFailed, _) = seen.last else {
       Issue.record("expected .failed(.writerFailed), got \(String(describing: seen.last))")
       return
     }
@@ -504,7 +526,9 @@ import Testing
     let directory = try Fixtures.temporaryDirectory("session")
     defer { try? FileManager.default.removeItem(at: directory) }
     struct Failing: CaptureBackend {
-      func start(lanes: [AudioLane], inputDeviceUID: String?, sink: LaneFrameSink) throws {
+      func start(lanes: [AudioLane], inputDeviceUID: String?, sink: LaneFrameSink) throws
+        -> CaptureStream
+      {
         throw CaptureError.inputDeviceUnavailable
       }
       func stop() {}
@@ -515,7 +539,7 @@ import Testing
     await #expect(throws: CaptureError.inputDeviceUnavailable) {
       try await session.start(meetingID: meetingID)
     }
-    #expect(await session.state == .failed(.inputDeviceUnavailable))
+    #expect(await session.state == .failed(.inputDeviceUnavailable, recording: nil))
     let layout = RecordingLayout(audioFolder: directory, meetingID: meetingID)
     #expect(!FileManager.default.fileExists(atPath: layout.directory.path))
     await #expect(throws: CaptureError.self) { try await session.stop() }

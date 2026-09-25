@@ -136,7 +136,7 @@ import Testing
     let finished = try CAFFile.read(url)
     #expect(finished.frameCount == 960)
     let bytes = try Data(contentsOf: url)
-    #expect(bytes.count == 68 + 960 * 8, "8 caff + 44 desc + 16 data header")
+    #expect(bytes.count == CAFStreamWriter.headerSize + 960 * 8, "the header, then the samples")
     let size = bytes[56..<64].reduce(Int64(0)) { $0 << 8 | Int64($1) }
     #expect(size == 4 + 960 * 8)
   }
@@ -216,7 +216,9 @@ import Testing
     let writer = try WAVStreamWriter(url: url)
     let samples = [Int16](repeating: 1_000, count: 160)
     try samples.withUnsafeBufferPointer { try writer.write($0.baseAddress!, count: 160) }
-    #expect(try Data(contentsOf: url).count == 44 + 320, "the samples are on disk")
+    #expect(
+      try Data(contentsOf: url).count == WAVStreamWriter.headerSize + 320,
+      "the samples are on disk")
     #expect(throws: WAVDecodeError.self) { try WAVAudioDecoder.read(url) }
     #expect(throws: WAVDecodeError.self) { try WAVFile.read(url) }
     try writer.finish()

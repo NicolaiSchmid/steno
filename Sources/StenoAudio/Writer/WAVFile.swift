@@ -6,18 +6,18 @@ import StenoCore
 /// and common recorders produce, for `steno dev aec-bench` on 48 kHz
 /// material. Core's `WAVAudioDecoder` stays the strict 16 kHz mono reader
 /// the pipeline uses.
-public struct WAVFile: Sendable, Equatable {
-  public var sampleRate: Double
-  public var channels: [[Float]]
+struct WAVFile: Sendable, Equatable {
+  var sampleRate: Double
+  var channels: [[Float]]
 
-  public var frameCount: Int { channels.first?.count ?? 0 }
-  public var duration: TimeInterval { Double(frameCount) / sampleRate }
+  var frameCount: Int { channels.first?.count ?? 0 }
+  var duration: TimeInterval { Double(frameCount) / sampleRate }
 
-  public static func read(_ url: URL) throws -> WAVFile {
+  static func read(_ url: URL) throws -> WAVFile {
     try read(Data(contentsOf: url))
   }
 
-  public static func read(_ data: Data) throws -> WAVFile {
+  static func read(_ data: Data) throws -> WAVFile {
     guard data.count >= 12, tag(data, 0) == "RIFF", tag(data, 8) == "WAVE" else {
       throw WAVDecodeError.malformed("missing RIFF/WAVE tags")
     }

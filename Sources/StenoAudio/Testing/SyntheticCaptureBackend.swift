@@ -86,7 +86,9 @@ public final class SyntheticCaptureBackend: CaptureBackend, @unchecked Sendable 
     await completion.wait()
   }
 
-  public func start(lanes: [AudioLane], inputDeviceUID: String?, sink: LaneFrameSink) throws {
+  public func start(lanes: [AudioLane], inputDeviceUID: String?, sink: LaneFrameSink) throws
+    -> CaptureStream
+  {
     lock.lock()
     defer { lock.unlock() }
     guard thread == nil else {
@@ -115,7 +117,7 @@ public final class SyntheticCaptureBackend: CaptureBackend, @unchecked Sendable 
           if due > now { Thread.sleep(forTimeInterval: Double(due - now) / 1_000_000_000) }
         } else {
           var spins = 0
-          while !sink.hasRoom(for: frames), !stopRequested.load(ordering: .acquiring) {
+          while !sink.rings.hasRoom(for: frames), !stopRequested.load(ordering: .acquiring) {
             spins += 1
             Thread.sleep(forTimeInterval: spins < 100 ? 0.0002 : 0.002)
           }
@@ -139,6 +141,7 @@ public final class SyntheticCaptureBackend: CaptureBackend, @unchecked Sendable 
     thread.qualityOfService = .userInteractive
     self.thread = thread
     thread.start()
+    return .synthetic
   }
 
   public func stop() {
@@ -270,13 +273,5 @@ public final class SyntheticCaptureBackend: CaptureBackend, @unchecked Sendable 
       }
       position += frames
     }
-  }
-}
-
-extension LaneFrameSink {
-  /// Whether every ring can take `frameCount` more samples right now.
-  public func hasRoom(for frameCount: Int) -> Bool {
-    for ring in rings where !ring.hasRoom(for: frameCount) { return false }
-    return true
   }
 }

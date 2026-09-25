@@ -20,10 +20,6 @@ import StenoCore
       var aggregate: AggregateDevice
       var runner: IOProcRunner
       var listeners: [AudioPropertyListenerToken]
-      var layout: StreamLayout
-      var sampleRate: Double
-      var inputLatencyFrames: Int
-      var outputLatencyFrames: Int
     }
 
     private let lock = NSLock()
@@ -37,38 +33,12 @@ import StenoCore
     /// property destruction order.
     deinit { stop() }
 
-    /// The layout the last `start` resolved; `steno dev capture-spike`
-    /// prints it so the manual check can attribute buffers to lanes.
-    public var resolvedLayout: StreamLayout? {
-      lock.lock()
-      defer { lock.unlock() }
-      return active?.layout
-    }
-
-    /// The rate the aggregate confirmed after `start`, always
-    /// `StenoAudio.sampleRate` while active.
-    public var aggregateSampleRate: Double? {
-      lock.lock()
-      defer { lock.unlock() }
-      return active?.sampleRate
-    }
-
-    /// Latency plus safety offset of the microphone's input path, in frames.
-    public var inputLatencyFrames: Int {
-      lock.lock()
-      defer { lock.unlock() }
-      return active?.inputLatencyFrames ?? 0
-    }
-
-    /// Latency plus safety offset of the output device's output path, in
-    /// frames: the tap sees a sample this long before the loudspeaker plays it.
-    public var outputLatencyFrames: Int {
-      lock.lock()
-      defer { lock.unlock() }
-      return active?.outputLatencyFrames ?? 0
-    }
-
-    public func start(lanes: [AudioLane], inputDeviceUID: String?, sink: LaneFrameSink) throws {
+    /// Returns the stream it opened: the confirmed 48 kHz rate, both device
+    /// latencies for the far-end delay, and the resolved `StreamLayout` so
+    /// `steno dev capture-spike` can attribute buffers to lanes.
+    public func start(lanes: [AudioLane], inputDeviceUID: String?, sink: LaneFrameSink) throws
+      -> CaptureStream
+    {
       lock.lock()
       defer { lock.unlock() }
       guard active == nil else { throw CaptureError.invalidState("backend already started") }
@@ -194,10 +164,10 @@ import StenoCore
         } ?? 0
       let outputLatency = AudioDevices.latencyFrames(
         of: AudioObjectID(output.id), scope: kAudioObjectPropertyScopeOutput)
-      active = Active(
-        tap: tap, aggregate: aggregate, runner: runner, listeners: listeners, layout: layout,
+      active = Active(tap: tap, aggregate: aggregate, runner: runner, listeners: listeners)
+      return CaptureStream(
         sampleRate: sampleRate, inputLatencyFrames: inputLatency,
-        outputLatencyFrames: outputLatency)
+        outputLatencyFrames: outputLatency, layout: layout)
     }
 
     public func stop() {
@@ -218,10 +188,9 @@ import StenoCore
   public final class LiveCaptureBackend: CaptureBackend, @unchecked Sendable {
     public init() {}
 
-    public var inputLatencyFrames: Int { 0 }
-    public var outputLatencyFrames: Int { 0 }
-
-    public func start(lanes: [AudioLane], inputDeviceUID: String?, sink: LaneFrameSink) throws {
+    public func start(lanes: [AudioLane], inputDeviceUID: String?, sink: LaneFrameSink) throws
+      -> CaptureStream
+    {
       throw CaptureError.backendFailed("live capture needs macOS (Core Audio)")
     }
 

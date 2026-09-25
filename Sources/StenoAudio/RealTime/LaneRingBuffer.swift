@@ -9,9 +9,9 @@ import Synchronization
 /// A write that does not fit is refused as a whole (the caller keeps lanes
 /// aligned by refusing every lane of that callback) and counted in
 /// `droppedSamples`.
-public final class LaneRingBuffer: @unchecked Sendable {
+final class LaneRingBuffer: @unchecked Sendable {
   /// Samples the ring holds; a power of two.
-  public let capacity: Int
+  let capacity: Int
   private let mask: Int
   private let storage: UnsafeMutablePointer<Float>
   private let writeIndex = Atomic<Int>(0)
@@ -19,7 +19,7 @@ public final class LaneRingBuffer: @unchecked Sendable {
   private let dropped = Atomic<Int>(0)
 
   /// `capacity` is rounded up to a power of two, at least 2.
-  public init(capacity: Int) {
+  init(capacity: Int) {
     var size = 2
     while size < capacity { size <<= 1 }
     self.capacity = size
@@ -33,29 +33,29 @@ public final class LaneRingBuffer: @unchecked Sendable {
   }
 
   /// Samples the consumer may read right now.
-  public var availableToRead: Int {
+  var availableToRead: Int {
     writeIndex.load(ordering: .acquiring) - readIndex.load(ordering: .acquiring)
   }
 
   /// Samples the producer may write right now.
-  public var availableToWrite: Int {
+  var availableToWrite: Int {
     capacity - availableToRead
   }
 
   /// Samples refused because the ring was full.
-  public var droppedSamples: Int {
+  var droppedSamples: Int {
     dropped.load(ordering: .relaxed)
   }
 
   /// Producer side. Whether `count` samples fit right now.
   @inline(__always)
-  public func hasRoom(for count: Int) -> Bool {
+  func hasRoom(for count: Int) -> Bool {
     availableToWrite >= count
   }
 
   /// Producer side. Records `count` refused samples without writing.
   @inline(__always)
-  public func recordDrop(_ count: Int) {
+  func recordDrop(_ count: Int) {
     dropped.wrappingAdd(count, ordering: .relaxed)
   }
 
@@ -77,7 +77,7 @@ public final class LaneRingBuffer: @unchecked Sendable {
   /// interleaved buffer). Returns false and counts the drop when the samples
   /// do not fit.
   @discardableResult
-  public func write(_ source: UnsafePointer<Float>, count: Int, stride: Int = 1) -> Bool {
+  func write(_ source: UnsafePointer<Float>, count: Int, stride: Int = 1) -> Bool {
     guard count > 0 else { return true }
     guard let write = reserve(count) else { return false }
     var position = write & mask
@@ -92,17 +92,20 @@ public final class LaneRingBuffer: @unchecked Sendable {
   }
 
   /// Producer side. Writes the average of two channels (a stereo tap folded
-  /// to the mono system lane).
+  /// to the mono system lane); each channel has its own stride because the
+  /// HAL may deliver them in different buffers.
   @discardableResult
-  public func writeMixed(
-    _ left: UnsafePointer<Float>, _ right: UnsafePointer<Float>, count: Int, stride: Int = 1
+  func writeMixed(
+    _ left: UnsafePointer<Float>, _ right: UnsafePointer<Float>, count: Int, stride: Int = 1,
+    rightStride: Int? = nil
   ) -> Bool {
     guard count > 0 else { return true }
     guard let write = reserve(count) else { return false }
+    let rightStride = rightStride ?? stride
     var position = write & mask
     var index = 0
     while index < count {
-      storage[position] = (left[index * stride] + right[index * stride]) * 0.5
+      storage[position] = (left[index * stride] + right[index * rightStride]) * 0.5
       position = (position + 1) & mask
       index += 1
     }
@@ -110,10 +113,19 @@ public final class LaneRingBuffer: @unchecked Sendable {
     return true
   }
 
+  /// Producer side. Writes `count` zeros (a buffer the HAL delivered without
+  /// data keeps the lane aligned; the far-end delay line is primed with them).
+  @discardableResult
+  func writeZeros(count: Int) -> Bool {
+    guard count > 0 else { return true }
+    var zero: Float = 0
+    return withUnsafePointer(to: &zero) { write($0, count: count, stride: 0) }
+  }
+
   /// Consumer side. Copies exactly `count` samples into `destination` or, when
   /// fewer are available, copies nothing and returns false.
   @discardableResult
-  public func read(into destination: UnsafeMutablePointer<Float>, count: Int) -> Bool {
+  func read(into destination: UnsafeMutablePointer<Float>, count: Int) -> Bool {
     guard count > 0 else { return true }
     let read = readIndex.load(ordering: .relaxed)
     let write = writeIndex.load(ordering: .acquiring)
@@ -131,7 +143,7 @@ public final class LaneRingBuffer: @unchecked Sendable {
 
   /// Consumer side, not real-time: takes everything queued as an array (the
   /// permission probe inspects what the tap delivered).
-  public func drainAll() -> [Float] {
+  func drainAll() -> [Float] {
     let count = availableToRead
     guard count > 0 else { return [] }
     var samples = [Float](repeating: 0, count: count)
@@ -141,7 +153,7 @@ public final class LaneRingBuffer: @unchecked Sendable {
 
   /// Empties the ring and zeroes its storage so a restart never replays stale
   /// frames. Only while no producer is running.
-  public func clear() {
+  func clear() {
     storage.update(repeating: 0, count: capacity)
     readIndex.store(0, ordering: .sequentiallyConsistent)
     writeIndex.store(0, ordering: .sequentiallyConsistent)

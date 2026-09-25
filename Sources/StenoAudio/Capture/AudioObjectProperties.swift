@@ -20,18 +20,6 @@
     }
   }
 
-  /// Renders an `OSStatus` as its four-character code when it is one
-  /// (`'!obj'`, `'who?'`), else as the number.
-  func fourCharCode(_ status: OSStatus) -> String {
-    let value = UInt32(bitPattern: status)
-    let bytes = [
-      UInt8((value >> 24) & 0xff), UInt8((value >> 16) & 0xff), UInt8((value >> 8) & 0xff),
-      UInt8(value & 0xff),
-    ]
-    guard bytes.allSatisfy({ $0 >= 0x20 && $0 < 0x7f }) else { return String(status) }
-    return "'" + String(decoding: bytes, as: UTF8.self) + "'"
-  }
-
   extension AudioObjectPropertyAddress {
     init(
       _ selector: AudioObjectPropertySelector,
@@ -193,7 +181,7 @@
   }
 
   /// One registered property listener; `remove()` unregisters it once.
-  public final class AudioPropertyListenerToken: @unchecked Sendable {
+  final class AudioPropertyListenerToken: @unchecked Sendable {
     private let objectID: AudioObjectID
     private var address: AudioObjectPropertyAddress
     private let queue: DispatchQueue
@@ -211,7 +199,7 @@
       self.block = block
     }
 
-    public func remove() {
+    func remove() {
       removed.lock()
       defer { removed.unlock() }
       guard !isRemoved else { return }

@@ -54,24 +54,25 @@ struct DevCaptureSpike: AsyncParsableCommand {
     } catch {
       throw RuntimeFailure(description: "could not start: \(error)")
     }
-    #if canImport(CoreAudio)
-      if let layout = backend.resolvedLayout {
+    if let stream = await session.stream {
+      if let layout = stream.layout {
         print("layout: tap first = \(layout.tapFirst)")
         for source in layout.sources {
+          func describe(_ channel: StreamLayout.ChannelRef) -> String {
+            "buffer \(channel.buffer) channel \(channel.offset) stride \(channel.stride)"
+          }
           print(
-            "  \(source.lane.rawValue): buffer \(source.bufferIndex) channel \(source.channelOffset)"
-              + " stride \(source.stride)"
-              + (source.isMixed
-                ? " + buffer \(source.secondBufferIndex) channel \(source.secondChannelOffset)"
-                : ""))
+            "  \(source.lane.rawValue): \(describe(source.left))"
+              + (source.right.map { " + \(describe($0))" } ?? ""))
         }
       }
-      print("aggregate rate: \(Int(backend.aggregateSampleRate ?? 0)) Hz")
-      print("input latency + safety offset: \(backend.inputLatencyFrames) frames")
-    #endif
+      print("aggregate rate: \(Int(stream.sampleRate)) Hz")
+      print("input latency + safety offset: \(stream.inputLatencyFrames) frames")
+      print("output latency + safety offset: \(stream.outputLatencyFrames) frames")
+    }
     let levelTask = session.printLevelsToStandardError()
     try? await Task.sleep(for: .milliseconds(Int(seconds * 1_000)))
-    let result: (asset: AudioAsset, statistics: CaptureStatistics)
+    let result: CaptureResult
     do {
       result = try await session.stop()
     } catch {

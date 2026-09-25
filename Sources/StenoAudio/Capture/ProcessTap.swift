@@ -20,8 +20,11 @@
       description.muteBehavior = .unmuted
       var id = AudioObjectID.unknown
       let status = AudioHardwareCreateProcessTap(description, &id)
-      guard status == noErr, id.isValid else {
-        throw CaptureError.tapCreationFailed(status == noErr ? -1 : status)
+      guard status == noErr else {
+        throw CaptureError.coreAudio(operation: "AudioHardwareCreateProcessTap", status: status)
+      }
+      guard id.isValid else {
+        throw CaptureError.backendFailed("AudioHardwareCreateProcessTap returned no tap object")
       }
       tapID = id
       uid = description.uuid.uuidString

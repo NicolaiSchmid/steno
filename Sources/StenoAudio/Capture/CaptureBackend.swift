@@ -1,144 +1,47 @@
 import Foundation
 import StenoCore
-import Synchronization
 
 /// The HAL seam under `CaptureSession`: a backend delivers frames for every
 /// lane into the `LaneFrameSink` from its own real-time context and reports
 /// device loss. `LiveCaptureBackend` is the tap + aggregate + IOProc;
 /// `SyntheticCaptureBackend` (Testing/) generates deterministic tones.
 public protocol CaptureBackend: Sendable {
-  /// Starts delivering `lanes` (in this order) at `StenoAudio.sampleRate`.
-  /// `inputDeviceUID` nil selects the default input device. Throws a
-  /// `CaptureError` when a device or the tap cannot be set up.
+  /// Starts delivering `lanes` (in this order) at `StenoAudio.sampleRate`
+  /// and describes the stream it opened. `inputDeviceUID` nil selects the
+  /// default input device. Throws a `CaptureError` when a device or the tap
+  /// cannot be set up.
   func start(lanes: [AudioLane], inputDeviceUID: String?, sink: LaneFrameSink) throws
+    -> CaptureStream
   /// Stops delivering; idempotent. No frame arrives after it returns.
   func stop()
 }
 
-/// The ring writer handed to the backend: one `LaneRingBuffer` per lane, a
-/// semaphore that wakes the processing thread once per callback, drop
-/// accounting and the device-lost signal.
-///
-/// Producer protocol (real-time safe, one producer at a time):
-/// `beginCallback(frameCount:)` checks every ring has room (or counts the
-/// whole callback as dropped for every lane and returns false), then one
-/// `write`/`writeMixed`/`writeSilence` per lane, then `endCallback()`.
-/// Nothing in that path allocates or locks.
-public final class LaneFrameSink: @unchecked Sendable {
-  public let lanes: [AudioLane]
-  let rings: [LaneRingBuffer]
-  /// Signalled once per completed callback; the processing thread waits on it.
-  let wake = DispatchSemaphore(value: 0)
-  private let deviceLost = Atomic<Bool>(false)
-  private let deviceLostHandler: @Sendable () -> Void
-  /// Producer-only scratch for the callback in flight.
-  private var pendingFrames = 0
+/// What one started capture delivers, as the backend found it: the rate the
+/// device runs at, the device latencies the far-end delay is built from, and
+/// where each lane sits in the HAL's buffers. `CaptureSession.stream` keeps
+/// it while recording; `steno dev capture-spike` prints it.
+public struct CaptureStream: Sendable, Equatable {
+  /// The confirmed rate; `StenoAudio.sampleRate` for every backend that
+  /// started (the live one fails otherwise).
+  public var sampleRate: Double
+  /// Latency plus safety offset of the microphone's input path, in frames.
+  public var inputLatencyFrames: Int
+  /// Latency plus safety offset of the loudspeaker's output path, in frames:
+  /// the tap sees a sample this long before the room hears it.
+  public var outputLatencyFrames: Int
+  /// nil for a backend without HAL buffers (synthetic).
+  public var layout: StreamLayout?
 
-  /// `ringSeconds` of headroom per lane absorbs a stalled consumer.
   public init(
-    lanes: [AudioLane], sampleRate: Double = StenoAudio.sampleRate, ringSeconds: Double = 2,
-    onDeviceLost: @escaping @Sendable () -> Void = {}
+    sampleRate: Double, inputLatencyFrames: Int, outputLatencyFrames: Int, layout: StreamLayout?
   ) {
-    self.lanes = lanes
-    self.rings = lanes.map { _ in LaneRingBuffer(capacity: Int(sampleRate * ringSeconds)) }
-    self.deviceLostHandler = onDeviceLost
+    self.sampleRate = sampleRate
+    self.inputLatencyFrames = inputLatencyFrames
+    self.outputLatencyFrames = outputLatencyFrames
+    self.layout = layout
   }
 
-  // MARK: Producer (real-time)
-
-  @inline(__always)
-  public func beginCallback(frameCount: Int) -> Bool {
-    var fits = true
-    var index = 0
-    while index < rings.count {
-      if !rings[index].hasRoom(for: frameCount) { fits = false }
-      index += 1
-    }
-    if !fits {
-      index = 0
-      while index < rings.count {
-        rings[index].recordDrop(frameCount)
-        index += 1
-      }
-      return false
-    }
-    pendingFrames = frameCount
-    return true
-  }
-
-  @inline(__always)
-  public func write(lane: Int, from source: UnsafePointer<Float>, stride: Int = 1) {
-    rings[lane].write(source, count: pendingFrames, stride: stride)
-  }
-
-  @inline(__always)
-  public func writeMixed(
-    lane: Int, left: UnsafePointer<Float>, right: UnsafePointer<Float>, stride: Int = 1
-  ) {
-    rings[lane].writeMixed(left, right, count: pendingFrames, stride: stride)
-  }
-
-  @inline(__always)
-  public func writeSilence(lane: Int) {
-    rings[lane].writeZeros(count: pendingFrames)
-  }
-
-  @inline(__always)
-  public func endCallback() {
-    wake.signal()
-  }
-
-  // MARK: Backend (any thread)
-
-  /// The backend's device-change or `DeviceIsAlive` listener calls this; the
-  /// first call runs the handler, later calls are ignored.
-  public func reportDeviceLost() {
-    let (exchanged, _) = deviceLost.compareExchange(
-      expected: false, desired: true, ordering: .acquiringAndReleasing)
-    if exchanged { deviceLostHandler() }
-  }
-
-  // MARK: Consumer
-
-  func ring(_ lane: Int) -> LaneRingBuffer { rings[lane] }
-
-  /// Samples every lane has queued right now (the minimum over lanes). The
-  /// processing thread asks once per frame, so no `map`: a debug build
-  /// allocates for it.
-  var availableToRead: Int {
-    var minimum = Int.max
-    var index = 0
-    while index < rings.count {
-      let available = rings[index].availableToRead
-      if available < minimum { minimum = available }
-      index += 1
-    }
-    return minimum == Int.max ? 0 : minimum
-  }
-
-  /// Ring overruns per lane, in samples.
-  public var droppedSamples: [AudioLane: Int] {
-    var result: [AudioLane: Int] = [:]
-    for (lane, ring) in zip(lanes, rings) where ring.droppedSamples > 0 {
-      result[lane] = ring.droppedSamples
-    }
-    return result
-  }
-
-  /// Zeroes every ring so a restart never replays stale frames. Only while
-  /// no producer runs.
-  func clear() {
-    for ring in rings { ring.clear() }
-  }
-}
-
-extension LaneRingBuffer {
-  /// Producer side. Writes `count` zeros (a buffer the HAL delivered without
-  /// data keeps the lane aligned).
-  @discardableResult
-  public func writeZeros(count: Int) -> Bool {
-    guard count > 0 else { return true }
-    var zero: Float = 0
-    return withUnsafePointer(to: &zero) { write($0, count: count, stride: 0) }
-  }
+  /// 48 kHz, no latency, no HAL layout.
+  public static let synthetic = CaptureStream(
+    sampleRate: StenoAudio.sampleRate, inputLatencyFrames: 0, outputLatencyFrames: 0, layout: nil)
 }

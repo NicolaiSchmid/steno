@@ -4,30 +4,23 @@ import StenoCore
 /// One processed frame handed to the writer: `frameCount` samples per lane in
 /// the session's lane order, plus the raw microphone when kept. A view over
 /// the writer thread's buffers, valid for the duration of `write`.
-public struct LaneFrames {
-  public var frameCount: Int
-  public var lanes: [UnsafePointer<Float>]
-  public var rawMic: UnsafePointer<Float>?
+struct LaneFrames {
+  var frameCount: Int
+  var lanes: [UnsafePointer<Float>]
+  var rawMic: UnsafePointer<Float>?
 
-  public init(frameCount: Int, lanes: [UnsafePointer<Float>], rawMic: UnsafePointer<Float>? = nil) {
+  init(frameCount: Int, lanes: [UnsafePointer<Float>], rawMic: UnsafePointer<Float>? = nil) {
     self.frameCount = frameCount
     self.lanes = lanes
     self.rawMic = rawMic
   }
 }
 
-public struct RecordingFiles: Sendable, Equatable, Hashable {
-  public var master: URL
-  public var sidecars16k: [AudioLane: URL]
-  public var rawMic: URL?
-  public var duration: TimeInterval
-
-  public init(master: URL, sidecars16k: [AudioLane: URL], rawMic: URL?, duration: TimeInterval) {
-    self.master = master
-    self.sidecars16k = sidecars16k
-    self.rawMic = rawMic
-    self.duration = duration
-  }
+struct RecordingFiles: Sendable, Equatable, Hashable {
+  var master: URL
+  var sidecars16k: [AudioLane: URL]
+  var rawMic: URL?
+  var duration: TimeInterval
 }
 
 /// What the writer thread and the session need from the file writer.
@@ -55,9 +48,9 @@ protocol RecordingWriting: AnyObject, Sendable {
 /// Segment times taken from a sidecar are 2 ms late against the master and
 /// against lanes `AVFoundationAudioCodec` decodes from it; harmless for
 /// transcripts, and deliberate, so do not "fix" a 2 ms offset by hand.
-public final class RecordingWriter: RecordingWriting, @unchecked Sendable {
-  public let layout: RecordingLayout
-  public let lanes: [AudioLane]
+final class RecordingWriter: RecordingWriting, @unchecked Sendable {
+  let layout: RecordingLayout
+  let lanes: [AudioLane]
   private let master: CAFStreamWriter
   private let sidecars: [WAVStreamWriter]
   private let resamplers: [Resampler48kTo16k]
@@ -67,7 +60,7 @@ public final class RecordingWriter: RecordingWriting, @unchecked Sendable {
   private var isFinished = false
 
   /// `layout.directory` is created if needed.
-  public init(layout: RecordingLayout, lanes: [AudioLane], keepRawMic: Bool = false) throws {
+  init(layout: RecordingLayout, lanes: [AudioLane], keepRawMic: Bool = false) throws {
     precondition(!lanes.isEmpty)
     let frameSize = StenoAudio.frameSize
     self.layout = layout
@@ -94,7 +87,7 @@ public final class RecordingWriter: RecordingWriting, @unchecked Sendable {
   }
 
   /// `frames.frameCount` must equal `StenoAudio.frameSize`.
-  public func write(_ frames: LaneFrames) throws {
+  func write(_ frames: LaneFrames) throws {
     let frameSize = StenoAudio.frameSize
     guard !isFinished else { throw CaptureError.writerFailed("write after finish") }
     guard frames.frameCount == frameSize, frames.lanes.count == lanes.count else {
@@ -128,7 +121,7 @@ public final class RecordingWriter: RecordingWriting, @unchecked Sendable {
   }
 
   /// The URLs are fixed at `init`; the duration is what the master holds.
-  public var files: RecordingFiles {
+  var files: RecordingFiles {
     var sidecarURLs: [AudioLane: URL] = [:]
     for (lane, sidecar) in zip(lanes, sidecars) { sidecarURLs[lane] = sidecar.url }
     return RecordingFiles(
@@ -138,7 +131,7 @@ public final class RecordingWriter: RecordingWriting, @unchecked Sendable {
   /// Closes every file, the master first. A failure on one file still
   /// closes the others before it is rethrown.
   @discardableResult
-  public func finish() throws -> RecordingFiles {
+  func finish() throws -> RecordingFiles {
     guard !isFinished else { throw CaptureError.writerFailed("finish called twice") }
     isFinished = true
     var firstError: (any Error)?

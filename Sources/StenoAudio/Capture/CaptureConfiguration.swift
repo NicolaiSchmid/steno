@@ -59,8 +59,10 @@ public struct CaptureConfiguration: Sendable, Equatable {
 }
 
 public enum CaptureError: Error, Sendable, Equatable, Hashable, CustomStringConvertible {
-  case tapCreationFailed(Int32)
-  case aggregateCreationFailed(Int32)
+  /// A Core Audio call failed: which one, and its `OSStatus` (rendered as
+  /// the four-character code when it is one). Creating the tap or the
+  /// aggregate, adding or starting the IOProc.
+  case coreAudio(operation: String, status: Int32)
   case inputDeviceUnavailable
   case outputDeviceUnavailable
   /// The aggregate's input streams did not match the expected lanes.
@@ -81,8 +83,7 @@ public enum CaptureError: Error, Sendable, Equatable, Hashable, CustomStringConv
 
   public var description: String {
     switch self {
-    case .tapCreationFailed(let status): "creating the process tap failed (\(status))"
-    case .aggregateCreationFailed(let status): "creating the aggregate device failed (\(status))"
+    case .coreAudio(let operation, let status): "\(operation) failed: \(fourCharCode(status))"
     case .inputDeviceUnavailable: "the input device is not available"
     case .outputDeviceUnavailable: "the output device is not available"
     case .unexpectedStreamLayout(let detail): "unexpected input stream layout: \(detail)"
@@ -97,12 +98,46 @@ public enum CaptureError: Error, Sendable, Equatable, Hashable, CustomStringConv
   }
 }
 
+/// Renders an `OSStatus` as its four-character code when it is one
+/// (`'!obj'`, `'who?'`), else as the number.
+func fourCharCode(_ status: Int32) -> String {
+  let value = UInt32(bitPattern: status)
+  let bytes = [
+    UInt8((value >> 24) & 0xff), UInt8((value >> 16) & 0xff), UInt8((value >> 8) & 0xff),
+    UInt8(value & 0xff),
+  ]
+  guard bytes.allSatisfy({ $0 >= 0x20 && $0 < 0x7f }) else { return String(status) }
+  return "'" + String(decoding: bytes, as: UTF8.self) + "'"
+}
+
+/// What `stop()` returns: the finished master with its sidecars (retention
+/// `.keepForever` until the caller sets it from `Settings`) and the
+/// session's statistics.
+public struct CaptureResult: Sendable, Equatable, Hashable {
+  public var asset: AudioAsset
+  public var statistics: CaptureStatistics
+
+  public init(asset: AudioAsset, statistics: CaptureStatistics) {
+    self.asset = asset
+    self.statistics = statistics
+  }
+}
+
 public enum CaptureState: Sendable, Equatable, Hashable {
   case idle
   case starting
   case recording(startedAt: Date)
   case stopping
-  case failed(CaptureError)
+  /// `recording` is nil when the start produced nothing, and the finalised
+  /// partial recording when a device disappeared or the writer failed
+  /// mid-meeting; `stop()` returns the same value or throws when it is nil.
+  case failed(CaptureError, recording: CaptureResult?)
+
+  /// The failure, when in `.failed`.
+  public var failure: CaptureError? {
+    if case .failed(let error, _) = self { return error }
+    return nil
+  }
 }
 
 /// RMS and peak of one lane over the last metering window, in dBFS.
@@ -142,15 +177,17 @@ public struct CaptureStatistics: Sendable, Equatable, Hashable {
   public var droppedFrames: [AudioLane: Int]
   /// True when the tap never exceeded `LaneLevel.silentPeakLinear` (-80 dBFS).
   public var systemLaneSilent: Bool
-  public var deviceChanges: Int
+  /// True when a device disappeared and the session finalised the recording
+  /// early (v1 stops on the first loss; rebuilding mid-meeting is v1.1).
+  public var endedOnDeviceLoss: Bool
 
   public init(
     duration: TimeInterval, droppedFrames: [AudioLane: Int], systemLaneSilent: Bool,
-    deviceChanges: Int
+    endedOnDeviceLoss: Bool
   ) {
     self.duration = duration
     self.droppedFrames = droppedFrames
     self.systemLaneSilent = systemLaneSilent
-    self.deviceChanges = deviceChanges
+    self.endedOnDeviceLoss = endedOnDeviceLoss
   }
 }

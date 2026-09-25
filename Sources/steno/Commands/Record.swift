@@ -111,7 +111,7 @@ struct Record: AsyncParsableCommand {
     }
     let stateWatch = Task {
       for await state in await session.states {
-        if case .failed(let error) = state {
+        if case .failed(let error, _) = state {
           FileHandle.standardError.write(Data("capture failed: \(error)\n".utf8))
           stopSignal.fire()
           return
@@ -123,7 +123,7 @@ struct Record: AsyncParsableCommand {
     stateWatch.cancel()
     interrupt.cancel()
 
-    let result: (asset: AudioAsset, statistics: CaptureStatistics)
+    let result: CaptureResult
     do {
       result = try await session.stop()
     } catch {
@@ -143,8 +143,8 @@ struct Record: AsyncParsableCommand {
       .map { "\($0.key.rawValue)=\($0.value)" }.joined(separator: " ")
     print("dropped frames: \(dropped.isEmpty ? "none" : dropped)")
     print("system lane silent: \(result.statistics.systemLaneSilent)")
-    print("device changes: \(result.statistics.deviceChanges)")
-    if case .failed(let error) = await session.state {
+    print("ended on device loss: \(result.statistics.endedOnDeviceLoss)")
+    if case .failed(let error, _) = await session.state {
       throw RuntimeFailure(description: "recording ended with \(error)")
     }
   }

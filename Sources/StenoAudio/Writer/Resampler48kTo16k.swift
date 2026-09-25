@@ -6,19 +6,19 @@ import Foundation
 /// so it runs on the writer thread without allocation and its output is
 /// byte-identical between CI and a Mac. One instance per lane; it keeps the
 /// filter history between calls.
-public final class Resampler48kTo16k: @unchecked Sendable {
-  public static let factor = 3
-  public static let taps = 192
+final class Resampler48kTo16k: @unchecked Sendable {
+  static let factor = 3
+  static let taps = 192
 
-  public let frameSize: Int
+  let frameSize: Int
   /// Output samples per call: `frameSize / 3`.
-  public let outputFrameSize: Int
+  let outputFrameSize: Int
   private let coefficients: [Float]
   private let history: UnsafeMutablePointer<Float>
   private let historyLength: Int
 
   /// `frameSize` must be a multiple of 3.
-  public init(frameSize: Int = StenoAudio.frameSize) {
+  init(frameSize: Int = StenoAudio.frameSize) {
     precondition(frameSize % Self.factor == 0, "frameSize must be a multiple of 3")
     self.frameSize = frameSize
     self.outputFrameSize = frameSize / Self.factor
@@ -35,7 +35,7 @@ public final class Resampler48kTo16k: @unchecked Sendable {
   /// Consumes exactly `frameSize` input samples and produces
   /// `outputFrameSize` Int16 samples (the sidecar format) in `output`,
   /// clamped to full scale.
-  public func process(_ input: UnsafePointer<Float>, into output: UnsafeMutablePointer<Int16>) {
+  func process(_ input: UnsafePointer<Float>, into output: UnsafeMutablePointer<Int16>) {
     let taps = Self.taps
     let offset = taps - 1
     (history + offset).update(from: input, count: frameSize)
@@ -57,7 +57,7 @@ public final class Resampler48kTo16k: @unchecked Sendable {
   }
 
   /// Zeroes the history (a new recording).
-  public func reset() {
+  func reset() {
     history.update(repeating: 0, count: historyLength)
   }
 
