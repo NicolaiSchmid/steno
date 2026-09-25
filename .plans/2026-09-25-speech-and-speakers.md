@@ -392,3 +392,11 @@ Recorded by the speech workstream while building steps 0 to 8 (PR #8, 2026-09-25
   `SpeechEngineError.unavailable` there.
 - **`FakeModelDownloader.failureCount`** (default unlimited) so a test can show that a failed download is retried.
 - **`makeDiarizer(models:config:)`** added beside `makeSpeechEngine` so the app and the CLI never name `FluidDiarizer`.
+- **Two `@unchecked Sendable` boxes.** `WhisperKit` and `OfflineDiarizerManager` are non-Sendable classes whose
+  work is async: Swift 6 lets neither a fresh instance be returned into an actor (`WhisperKit(config)`) nor an
+  actor-owned instance be passed to a nonisolated async method (`process(audio:)`). `WhisperKitBox` and
+  `OfflineDiarizerBox` own one instance each, are created and called only by their actor (`WhisperKitEngine`,
+  `FluidDiarizer`), and are the only places the module marks anything `@unchecked Sendable`. `AsrManager` is an
+  actor in FluidAudio and needs no box.
+- **`Diarizer` clash.** FluidAudio also exports `Diarizer`; `FluidDiarizer` conforms through the public alias
+  `CoreDiarizer`, and `CoreDiarizationResult` is public too because both appear in its public signatures.
