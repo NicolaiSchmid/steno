@@ -42,7 +42,10 @@ permissions:
 jobs:
   package:
     name: Build and test package
-    runs-on: ${{ vars.MACOS_RUNS_ON || 'macos-15' }}
+    # MACOS_RUNS_ON holds a JSON value: the string "macos-15" today, a label
+    # array such as ["self-hosted","macOS","ARM64"] once the Forge runner is
+    # registered. fromJSON turns either into a runner label.
+    runs-on: ${{ fromJSON(vars.MACOS_RUNS_ON || '"macos-15"') }}
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
@@ -60,8 +63,10 @@ jobs:
       # Pinned, not `latest-stable`: the toolchain decides how `swift format`
       # lays code out and which Swift Testing / xunit shape we parse below.
       # Xcode 16.4 is Swift 6.1, the version GRDB 7.11 requires.
+      # Hosted runners only: the self-hosted Forge runner ships one Xcode and
+      # no 16.4, so there we rely on the preinstalled toolchain.
       - uses: maxim-lobanov/setup-xcode@v1
-        if: steps.gate.outputs.present == 'true'
+        if: steps.gate.outputs.present == 'true' && runner.environment == 'github-hosted'
         with:
           xcode-version: '16.4'
 
