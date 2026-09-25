@@ -474,3 +474,168 @@ handover"). The Mac side is untouched. Each line names the deviation and the rea
   interruption: decline a call and check the Resume path, then force-quit mid-recording once and play the recovered
   file, since an `.m4a` cut mid-write may lack its `moov` atom), P5 and P6 end to end against M6. Spikes S2, S3 and
   S4 are unchanged and unverified.
+
+## Deviations (implementation, Mac)
+
+Recorded by the agent that implemented M1 to M6 in `Sources/StenoHandover` (PR
+"feat(handover): Mac side of the phone handover"). The iOS side is untouched.
+Each line names the deviation and the reason.
+
+- `MintedIdentity` and `HandoverIdentity` are `@unchecked Sendable`: swift-crypto's
+  `P256.Signing.PrivateKey` and `SecIdentity` are not `Sendable`, and the identity is
+  immutable value data handed across the actor boundary once at construction.
+- `MintedIdentity.mint` (the plan's `ServerIdentity.mint`) sets
+  `BasicConstraints(notCertificateAuthority)`, `KeyUsage(digitalSignature)`,
+  `ExtendedKeyUsage(.serverAuth)` and a DNS SAN derived from the common name (`sanLabel`).
+  Beyond the plan's "P-256, self-signed, ten years, CN"; the SAN and EKU keep the leaf usable
+  by tooling, and the phone pins the DER regardless. (The first cut also set
+  `keyEncipherment`; the review application dropped it, see below.)
+- The Mac id is derived from the leaf fingerprint (`HandoverIdentity.macID(forFingerprint:)`),
+  not stored: a
+  new identity is a new Mac to every phone, which is exactly the "losing the Mac identity
+  means re-pairing" non-goal. The QR `mac`, the TXT `id` and `/v1/hello.macID` are this
+  value.
+- `ListenerState` is the public state enum, not `HandoverState`: core already owns
+  `HandoverState` for the per-recording receipt, so the listener's `stopped/listening/failed`
+  needed a distinct name. Cases match the plan's `HandoverState { stopped, listening(port),
+  failed(String) }`.
+- The plan's single `HandoverServer.swift` is split into `Network/HandoverServer.swift`,
+  `Routing/{Route,Wire,HTTPMessages,HTTPHandler,HandoverEngine,RecordingHandler}.swift` and
+  `Upload/{ReceivingFile,Inbox,MetadataValidation}.swift`. The auth-before-body gate lives in
+  `HTTPHandler` (it pauses reads while the async gate runs, so an unauthenticated body is
+  never buffered) rather than a `Router` `ChannelInboundHandler`; `HandoverEngine` is the
+  NIO-independent protocol core so the same code is tested on Linux.
+- After answering a rejection or a 413 the handler waits for the response flush, then
+  half-closes the output (FIN after the data) and tears the socket down two seconds later.
+  Network.framework's full `cancel` drops queued sends, so a plain close raced the response
+  off the wire on macOS; the half-close is the fix (see the `fix(handover)` commit).
+- Linux fallback: `HandoverServer` listens in plaintext on 127.0.0.1 (`ServerBootstrap`)
+  under `#if !canImport(Network)` so the protocol core builds and tests in the review
+  container; `IdentityKeychain`, `PinningTests` and the pinned test clients are guarded by
+  `#if canImport(Security)`; `Package.swift` excludes the symlinked `PinnedTrustEvaluator.swift`
+  on Linux via a `linuxOnlyExclusions` manifest helper. None of the Linux branches compile on
+  macOS, where CI is authoritative.
+- `MetadataValidation` bounds byteCount (≤ 4 GiB), chunkSize (64 KiB … the Mac's limit),
+  sha256 (32 bytes), durationSeconds (0 … 7 days), deviceName (1 … 128) and the format
+  (`.m4aAAC` or `.wav16kInt16`) before any partial file is created. Not spelled out in the
+  plan but needed on the one port that accepts bytes from another device.
+- `complete` writes the `.complete` receipt itself when the intake did not (a test
+  `FakeHandoverIntake`); the real `RecordingIntake` writes it and deletes the source, so the
+  handler leaves the verified file to the intake and only removes the metadata sidecar. A
+  replayed `complete` returns the same meeting id through the early `.complete` check, no
+  metadata needed.
+- Re-announcing a `.failed` recording under the same id with identical metadata is a resume
+  (200 with an empty chunk set), not a conflict; different metadata under a known id is 409.
+- `HandoverService.beginPairing`/`cancelPairing`/`pairedDevices`/`revoke`/`receipts` are
+  `async` (the actor). `receipts` fans out through a `Broadcast` value that yields the current
+  set first; `receivedBytes ≈ receivedChunks.count * chunkSize`, as the plan notes.
+- The end-to-end test reaches the loopback listener through the same `LoopbackClient` and
+  `Phone` helpers as `StenoHandoverTests` (symlinked into `Tests/StenoEndToEndTests/Support/`,
+  like the pin evaluator; `Tests/README.md` lists the links); `LoopbackClient.forService`
+  builds `https://127.0.0.1:<port>` from the public `state`. The app has no loopback seam
+  (the phone reaches the Mac over Bonjour).
+- The end-to-end `testPhoneUploadBecomesQueuedMeeting` uploads deterministic seeded bytes
+  labelled `.m4aAAC` rather than a committed `.m4a` file: the handover copies and hashes the
+  payload without decoding it, and generating a real AAC fixture needs AVFoundation, which the
+  Linux review container lacks. The queued-`.phone`-meeting assertion is unaffected.
+- `steno dev handover serve` renders the pairing QR by shelling to `qrencode` when it is on
+  PATH (macOS dev convenience) and always prints the payload URL; the macOS app draws the real
+  QR with `CIQRCodeGenerator` (a `macos-app-and-release` need). The command uses
+  `IdentityKeychain.loadOrCreate` on Apple and mints an in-memory identity on Linux.
+- No wire mismatch was found against the phone (`mobile/modules/steno-link`): the QR URL
+  (base64url `fp`/`secret`, lowercased `mac`, `exp` unix seconds, `name` percent-encoded with
+  `+` as `%2B`), the standard-base64 `X-Steno-Chunk-SHA256` header, the `Pairing`/`Bearer`
+  schemes, the `{macID, protocol}` / `{token, macID, macName}` / `{state, receivedChunks}` /
+  `{meetingID}` bodies and the 201/200/204/401/403/409/422 statuses all match `wire.ts`,
+  `pinned-client.ts`, `recording-client.ts` and `pairing-payload.ts`. macID case differs
+  (the Mac emits the uppercase UUID in JSON, lowercase in the QR); the phone compares
+  case-insensitively, so it is not observable.
+
+Testing pass on the same PR (commit `test(handover): …`), recorded by the testing agent:
+
+- Concurrent chunks no longer lose each other's `receivedChunks`. `HandoverEngine` is an
+  actor, but `receiveChunk` held a local copy of the receipt across `await persist`, and
+  `receipt(_:)` across the store read, so two chunks in flight (what the phone's planner
+  keeps, and what the background session delivers after a relaunch) could each persist a
+  stale set over the other's; the phone would see a 409 at `complete` and upload the lost
+  chunk again. `persist` now updates memory before the awaited save and `receipt(_:)` prefers
+  a receipt another request loaded meanwhile. Found by
+  `ChunkUploadTests.chunksInFlightAtOnceAllLandInTheReceipt`, which failed intermittently
+  before the fix.
+- Re-announcing a recording whose verified file is waiting for a second intake attempt
+  (the intake threw once, receipt `.failed`) no longer wipes the chunk set and reopens an
+  empty partial: `announce` skips the "partial is gone, start over" branch when
+  `inbox.hasVerified` is true, so the phone's retry path after a 5xx at `complete`
+  (backoff, announce, complete; see `upload-executor.test.ts`) admits the same file without
+  sending a chunk twice or leaving a stray partial. Before the change every intake failure
+  cost one full re-upload.
+- `TestService.prepare/start` take an optional `customIntake: any HandoverIntake` beside the
+  `FakeHandoverIntake` the tests read; `IntakeRetryTests.ScriptedIntake` fails the first N
+  admissions and then answers. Test support only.
+- `WireContractTests` reads `mobile/modules/steno-link/src/wire.ts`,
+  `mobile/src/features/pairing/pairing-payload.ts` and
+  `mobile/src/features/recorder/recording-options.ts` as text (the way the phone's
+  `native-contract.test.ts` reads the Swift sources) and compares field names, `decodeShape`
+  kinds, enum values, constants, paths and QR query names with what the Mac encodes. It runs
+  in the Linux container and on CI; the phone's `wire.test.ts` is its mirror.
+
+Review application on the same PR (commits `4f135ab` correctness majors, `b109ca4`
+correctness minors, `b7ae3e1` elegance), recorded by the applying agent. The PR comment
+"Review application" lists every finding with its verdict.
+
+- `HandoverService.init` takes `now: @Sendable () -> Date` only; the plan's
+  `clock: any Clock<Duration>` is gone. Nothing slept on the clock; it existed to expire the
+  pairing window, which `now()` decides (`PairingSession.isOpen` is `now() < expiresAt`).
+  Tests advance a `WallClock` through `TestService.advance(by:)`.
+- `HandoverConfiguration.readTimeout` (30 s) is a sixth field beside the plan's five and
+  `port`: every child channel has an `IdleStateHandler` read timeout ahead of the HTTP codec,
+  and `HTTPHandler` closes the connection on the idle event unless the engine is still handling
+  a request (a long verify is the Mac's silence, not the client's). A half-sent request line
+  that goes silent is closed; `ServerMetrics.timedOut` counts it.
+- `state`, `states` and `receipts` are `nonisolated` on `HandoverService` (`Broadcast` is a
+  `Mutex`-backed `Sendable` class), so a view reads them without `await`. The `port` and
+  `macID` accessors and the internal `loopbackURL` are gone: the app reads
+  `state` (`.listening(port:)`) and `identity.macID`. `Wire` and `Base64URL` are internal
+  until an app file needs them.
+- `ServerIdentity` and `MacIdentifier` are gone: `MintedIdentity.mint(commonName:now:)`,
+  `HandoverIdentity.fingerprint(ofDER:)`, `HandoverIdentity.macID(forFingerprint:)`. The
+  reading order is mint, store (`IdentityKeychain`), load (`HandoverIdentity`).
+- The minted leaf's critical `KeyUsage` is `digitalSignature` only. RFC 5480 §3 gives an EC
+  key no `keyEncipherment`, and a strict validator rejects a critical extension it cannot
+  accept. The phone pins SHA-256 of the DER and never evaluates the chain, so the pinning
+  contract is unchanged; an identity already in a login keychain keeps its DER and its
+  fingerprint, and only a re-mint would present a new one (no shipped Mac has minted yet).
+- `TestIdentity` lives in `Tests/StenoHandoverTests/Support/` (symlinked into the end-to-end
+  target), not in a `Testing/` folder of the product module, so no product build can present
+  the committed test key. The Linux branch of `steno dev handover serve` mints an identity in
+  memory instead.
+- `pair` spends the session (`pairing = nil`) before its first suspension point, so a second
+  request with the same secret that arrives while the device save is awaited is 403; the
+  window reopens only if the save fails and nothing replaced it. `complete` runs once per
+  recording at a time (`HandoverEngine.completing`): a retry that lands during the verify or
+  the intake's copy is 409 with the status listing every chunk, which the phone's executor
+  answers by backing off (`upload-executor.ts`, "The Mac is not ready to complete"). The
+  admit is outside the `do` that writes `.failed`, so a receipt write failing after a
+  successful admission cannot overwrite `.complete`.
+- Chunk writes with their fsync and the whole-file hash run on a dedicated concurrent
+  `DispatchQueue` (`ReceivingFile`), not on the engine actor or the cooperative pool, so
+  `/v1/hello` and every other connection's auth gate answer while a 4 GiB file is hashed.
+  `receiveChunk` and `complete` re-read the receipt from memory after the await.
+- The start-up sweep also discards partials whose receipt has not moved for fourteen days
+  (`HandoverEngine.abandonedAfter`); the receipt stays and a late re-announce starts over.
+- Every 500 body is a fixed phrase naming the step, and the `.failed` reason after an intake
+  error is fixed text (`HandoverEngine.intakeRefused`); the error itself, which may carry the
+  inbox path under the user's home, goes to `HandoverLog` (`os.Logger` on Apple platforms,
+  stderr on Linux). Decoding errors on 400s stay verbatim: they name JSON keys, not paths.
+- With `advertise: true` the `NWListener` prohibits `.cellular` and `.other` interfaces (VPN
+  tunnels and other virtual interfaces), so the TLS port is reachable on the LAN and loopback
+  only, where Bonjour advertises it. Compile-only on CI (advertising stays `[manual]`).
+- `AuthOutcome` is `allowed(Principal)` or `rejected(HandoverResponse)`: the engine decides
+  every status and string on the wire; `HTTPHandler` writes what it is handed.
+- Tests drive `HandoverEngine.handle` directly through `EngineClient` where two requests must
+  enter the actor in a known order (`ConcurrencyTests`); `TestService.run { test in … }`
+  stops the service awaited so no shutdown overlaps the next test.
+- Not applied: the review's suggestion to name both test targets in the iOS evaluator's
+  header comment. A comment edit in `mobile/modules/steno-link/ios/` moves the Expo native
+  fingerprint and sends the next mobile delivery to TestFlight; `Tests/README.md` names both
+  targets instead, and the header is a follow-up for the next native change to `steno-link`.
