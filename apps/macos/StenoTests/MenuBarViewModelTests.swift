@@ -7,9 +7,13 @@ import XCTest
 final class MenuBarViewModelTests: XCTestCase {
   private var observing: [Task<Void, Never>] = []
 
-  override func tearDown() {
-    for task in observing { task.cancel() }
-    observing = []
+  /// A nonisolated override under Swift 6.0: hop to the main actor for the
+  /// isolated state.
+  override func tearDown() async throws {
+    await MainActor.run {
+      for task in observing { task.cancel() }
+      observing = []
+    }
   }
 
   /// A model with both observations running, as `AppController.launch()`

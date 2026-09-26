@@ -7,11 +7,10 @@ import XCTest
 /// over the preview environment's fakes.
 @MainActor
 final class AppControllerTests: XCTestCase {
-  private var defaultsSuite = ""
-
-  override func setUp() {
-    defaultsSuite = "uno.schmid.steno.mac.tests.\(UUID().uuidString)"
-  }
+  /// XCTest allocates one instance per test, so this is unique per test; a
+  /// `let` because `tearDown()` is a nonisolated override under Swift 6.0
+  /// and may only read Sendable constants of this main-actor class.
+  private let defaultsSuite = "uno.schmid.steno.mac.tests.\(UUID().uuidString)"
 
   override func tearDown() {
     UserDefaults.standard.removePersistentDomain(forName: defaultsSuite)

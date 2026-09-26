@@ -6,9 +6,13 @@ import XCTest
 final class MeetingDetailViewModelTests: XCTestCase {
   private var observing: [Task<Void, Never>] = []
 
-  override func tearDown() {
-    for task in observing { task.cancel() }
-    observing = []
+  /// A nonisolated override under Swift 6.0: hop to the main actor for the
+  /// isolated state.
+  override func tearDown() async throws {
+    await MainActor.run {
+      for task in observing { task.cancel() }
+      observing = []
+    }
   }
 
   /// A detail model with its store observations running, as the view's
