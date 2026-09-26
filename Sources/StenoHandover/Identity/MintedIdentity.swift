@@ -61,6 +61,27 @@ public struct MintedIdentity: @unchecked Sendable {
       certificateDER: Data(serializer.serializedBytes), privateKey: privateKey)
   }
 
+  /// The private key as an RFC 5915 `ECPrivateKey` (SEC1) DER with the named
+  /// curve and the public key present, the one shape `SecItemImport` with
+  /// `.formatOpenSSL` accepts for an EC key (#88): swift-crypto's
+  /// `derRepresentation` is PKCS#8, which the importer rejects as
+  /// `errSecUnknownFormat`. `P256.Signing.PrivateKey(derRepresentation:)`
+  /// reads both, so the round trip is tested on Linux as well.
+  public func privateKeySEC1DER() throws -> Data {
+    var serializer = DER.Serializer()
+    try serializer.appendConstructedNode(identifier: .sequence) { coder in
+      try coder.serialize(1)  // ecPrivkeyVer1
+      try coder.serialize(ASN1OctetString(contentBytes: ArraySlice(privateKey.rawRepresentation)))
+      try coder.serialize(
+        ASN1ObjectIdentifier.NamedCurves.secp256r1,
+        explicitlyTaggedWithTagNumber: 0, tagClass: .contextSpecific)
+      try coder.serialize(
+        ASN1BitString(bytes: ArraySlice(privateKey.publicKey.x963Representation)),
+        explicitlyTaggedWithTagNumber: 1, tagClass: .contextSpecific)
+    }
+    return Data(serializer.serializedBytes)
+  }
+
   /// A DNS-safe label for the SAN: the phone never checks the name, but a
   /// certificate without one trips some tooling.
   static func sanLabel(_ commonName: String) -> String {

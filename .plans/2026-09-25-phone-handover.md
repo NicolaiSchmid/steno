@@ -660,3 +660,20 @@ Read-timeout tests (issue #76, PR "test(handover): make the read-timeout tests d
   four-second intake (the phone's `URLSession` connections being torn down, a stretched
   handshake on a loaded runner) failed it without anything being wrong; the manual test
   asserts on the connection that carried the request.
+
+Login keychain identity (issue #88, PR "fix(handover): store and load the handover identity in
+the login keychain"):
+
+- Decision 6 stands (file-based login keychain, never `kSecUseDataProtectionKeychain`), but the
+  API it named does not reach that keychain. `SecItemAdd` of a `kSecClassKey` by `kSecValueRef`
+  is routed to the data-protection keychain because a software key is not a CDSA key, so it
+  fails with -34018 exactly as the decision feared; and `SecItemCopyMatching` with
+  `kSecClassIdentity` ignores `kSecAttrLabel` on the file keychain and returns every identity
+  present (on a managed Mac: the MDM ones). What decision 6 actually required: `SecItemImport`
+  of the minted key as RFC 5915 (SEC1) DER with `.formatOpenSSL` into `SecKeychainCopyDefault()`
+  (PKCS#8 is refused as `errSecUnknownFormat`), `SecItemAdd` of the certificate with
+  `kSecUseKeychain`, then `SecItemUpdate` to relabel both (the file keychain labels a
+  certificate with its subject CN on add), and every lookup through the certificate by label
+  plus `SecIdentityCreateWithCertificate`, never a `kSecClassIdentity` query. `MintedIdentity`
+  gained `privateKeySEC1DER()` for the import; a labelled certificate whose key is gone is an
+  error, not a silent re-mint. The deprecated `SecKeychain*` calls are commented at each site.

@@ -59,6 +59,21 @@ import X509
     #expect(P256.Signing.PublicKey(certificate.publicKey) != nil)
   }
 
+  /// The SEC1 DER `IdentityKeychain` imports (#88): RFC 5915 with the named
+  /// curve and the public key, read back by swift-crypto as the same key.
+  @Test func privateKeySEC1DERRoundTripsAndNamesTheCurve() throws {
+    let minted = try MintedIdentity.mint(commonName: "A")
+    let der = try minted.privateKeySEC1DER()
+    #expect(der.first == 0x30, "a SEQUENCE")
+    let parsed = try P256.Signing.PrivateKey(derRepresentation: der)
+    #expect(parsed.rawRepresentation == minted.privateKey.rawRepresentation)
+    #expect(parsed.publicKey.x963Representation == minted.privateKey.publicKey.x963Representation)
+    // 1.2.840.10045.3.1.7 (prime256v1), explicitly tagged [0].
+    let curve: [UInt8] = [0xA0, 0x0A, 0x06, 0x08, 0x2A, 0x86, 0x48, 0xCE, 0x3D, 0x03, 0x01, 0x07]
+    #expect(Array(der).firstRange(of: curve) != nil)
+    #expect(der != minted.privateKey.derRepresentation, "PKCS#8 is a different shape")
+  }
+
   @Test func sanLabelIsDNSSafe() {
     #expect(
       MintedIdentity.sanLabel("Steno on Nicolai's MacBook Pro")
