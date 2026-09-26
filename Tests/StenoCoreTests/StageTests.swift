@@ -386,6 +386,17 @@ import Testing
     #expect(export.segments == SampleData.segments())
   }
 
+  @Test func theModelsNameGuessesArePersistedWithTheSummary() async throws {
+    let canned = SampleData.summaryOutput()
+    let (harness, meeting) = try await Self.prepared(summarizer: FakeSummarizer(canned: canned))
+    defer { harness.cleanUp() }
+    _ = try await harness.pipeline.summarize(
+      meeting: meeting, segments: SampleData.segments(), speakers: SampleData.speakers())
+    #expect(
+      try await harness.store.nameSuggestions(meetingID: meeting.id) == canned.speakerNames)
+    #expect(canned.speakerNames.map(\.name) == ["Jérôme"])
+  }
+
   @Test func calendarTitlesAndEmptyModelTitlesLeaveTheTitleAlone() async throws {
     var canned = SampleData.summaryOutput()
     canned.title = "Model title"
@@ -470,5 +481,46 @@ import Testing
     #expect(
       await iterator.next()
         == .speakersNeedReview(meetingID: meeting.id, speakerIDs: [SampleData.speakerTwoID]))
+  }
+}
+
+@Suite struct RetentionStageTests {
+  @Test func retentionAppliedFollowsTheExpiryWrite() async throws {
+    let harness = try await PipelineHarness()
+    defer { harness.cleanUp() }
+    let (meeting, asset) = try harness.meeting(
+      source: .phone, retention: .deleteAfterProcessing)
+    var ready = meeting
+    ready.state = .ready
+    try await harness.store.save(ready, asset: asset)
+    let stream = await harness.events.subscribe()
+
+    try await harness.pipeline.retention(asset: asset)
+
+    #expect(try await harness.store.asset(id: asset.id)?.expiresAt == PipelineHarness.now)
+    #expect(
+      await harness.events.drain(stream) == [
+        .progress(meetingID: meeting.id, stage: .retention),
+        .retentionApplied(meetingID: meeting.id),
+      ])
+  }
+
+  @Test func aFailedExpiryWritePostsNoRetentionApplied() async throws {
+    let harness = try await PipelineHarness()
+    defer { harness.cleanUp() }
+    // The meeting row was never written, so the foreign key refuses the
+    // asset row and the stage throws before anything could be swept.
+    let (meeting, asset) = try harness.meeting(source: .phone)
+    let stream = await harness.events.subscribe()
+
+    let failure = await #expect(throws: PipelineFailure.self) {
+      try await harness.pipeline.retention(asset: asset)
+    }
+
+    #expect(failure?.stage == .retention)
+    #expect(try await harness.store.asset(id: asset.id) == nil)
+    #expect(
+      await harness.events.drain(stream) == [.progress(meetingID: meeting.id, stage: .retention)],
+      "a sweep started on the event must find the expiry written")
   }
 }

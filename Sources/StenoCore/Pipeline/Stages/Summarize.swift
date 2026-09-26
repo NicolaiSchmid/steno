@@ -2,8 +2,8 @@ import Foundation
 
 extension ProcessingPipeline {
   /// Runs the `MeetingSummarizer` for `meeting.templateID` and persists
-  /// summary, tasks and decisions with the meeting's title, language and
-  /// summed usage in one transaction. An unknown template id fails the stage;
+  /// summary, tasks, decisions and speaker name suggestions with the
+  /// meeting's title, language and summed usage in one transaction. An unknown template id fails the stage;
   /// nothing is substituted. A calendar title stays; any other title is
   /// replaced by the model's. The caller folds earlier usage (cleanup) into
   /// `meeting.llmUsage` first.
@@ -33,7 +33,9 @@ extension ProcessingPipeline {
       if let language = output.language { updated.language = language }
       updated.llmUsage = (meeting.llmUsage ?? .zero) + output.usage
       updated.updatedAt = self.now
-      try await store.replaceSummary(updated, tasks: output.tasks, decisions: output.decisions)
+      try await store.replaceSummary(
+        updated, tasks: output.tasks, decisions: output.decisions,
+        speakerNames: output.speakerNames)
       return updated
     }
   }

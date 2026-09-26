@@ -7,10 +7,14 @@ public enum MeetingStoreError: Error, Sendable, Equatable, CustomStringConvertib
   case speakerNotFound(UUID)
   case personNotFound(UUID)
   case speakersInDifferentMeetings(UUID, UUID)
+  /// `delete(meetingID:)` while the capture writer or the pipeline still
+  /// holds the meeting's files.
+  case meetingBusy(UUID, MeetingState.Kind)
 
   public var description: String {
     switch self {
     case .meetingNotFound(let id): "meeting \(id) not found"
+    case .meetingBusy(let id, let state): "meeting \(id) is \(state.rawValue) and cannot be deleted"
     case .speakerNotFound(let id): "speaker \(id) not found"
     case .personNotFound(let id): "person \(id) not found"
     case .speakersInDifferentMeetings(let a, let b):
@@ -22,30 +26,37 @@ public enum MeetingStoreError: Error, Sendable, Equatable, CustomStringConvertib
 /// The one store over the GRDB database. A `Sendable` final class, not an
 /// actor: the pool already serialises writes and an actor would serialise
 /// reads too. Every write is `save`; row changes reach the app through the
-/// `observe*` streams.
+/// `observe*` streams, and the few things a row change cannot say (a
+/// deletion, see `delete(meetingID:)`) are posted on `events`. The pipeline
+/// posts on the same bus when built with `PipelineDependencies` from this
+/// store, so the app subscribes once.
 public final class MeetingStore: Sendable {
   public let writer: any DatabaseWriter
+  public let events: MeetingEventBus
 
   /// Runs the migrator on `writer`.
-  public init(writer: any DatabaseWriter) throws {
+  public init(writer: any DatabaseWriter, events: MeetingEventBus = MeetingEventBus()) throws {
     self.writer = writer
+    self.events = events
     try Migrations.migrator().migrate(writer)
   }
 
   /// A `DatabasePool` in WAL mode with a five-second busy timeout, creating
   /// the parent directory when needed. The app and the CLI use this.
-  public static func onDisk(at url: URL) throws -> MeetingStore {
+  public static func onDisk(at url: URL, events: MeetingEventBus = MeetingEventBus()) throws
+    -> MeetingStore
+  {
     try FileManager.default.createDirectory(
       at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
     var configuration = Configuration()
     configuration.busyMode = .timeout(5)
     let pool = try DatabasePool(path: url.path, configuration: configuration)
-    return try MeetingStore(writer: pool)
+    return try MeetingStore(writer: pool, events: events)
   }
 
   /// A private in-memory `DatabaseQueue`. Tests use this.
-  public static func inMemory() throws -> MeetingStore {
-    try MeetingStore(writer: DatabaseQueue())
+  public static func inMemory(events: MeetingEventBus = MeetingEventBus()) throws -> MeetingStore {
+    try MeetingStore(writer: DatabaseQueue(), events: events)
   }
 
   // MARK: - Meetings
@@ -62,6 +73,19 @@ public final class MeetingStore: Sendable {
     }
   }
 
+  /// The meeting and its participants in one transaction;
+  /// `LocalRecordingIntake.begin`.
+  public func save(_ meeting: Meeting, participants: [Participant]) async throws {
+    try await writer.write { db in
+      try MeetingRow(meeting).save(db)
+      for participant in participants {
+        var participant = participant
+        participant.meetingID = meeting.id
+        try ParticipantRow(participant).save(db)
+      }
+    }
+  }
+
   public func meeting(id: UUID) async throws -> Meeting? {
     try await writer.read { db in try Self.meetingRow(id, db)?.meeting }
   }
@@ -74,6 +98,44 @@ public final class MeetingStore: Sendable {
         .limit(limit, offset: offset)
         .fetchAll(db)
         .map(\.meeting)
+    }
+  }
+
+  /// Every meeting in one of `kinds`, oldest first by `startedAt`: the order
+  /// a queue is worked off in. `ProcessingPipeline.resumeUnfinished` reads
+  /// `.queued` and `.processing` through this.
+  public func meetings(inStates kinds: Set<MeetingState.Kind>) async throws -> [Meeting] {
+    try await writer.read { db in
+      try MeetingRow
+        .filter(kinds.map(\.rawValue).contains(MeetingRow.Columns.state))
+        .order(MeetingRow.Columns.startedAt, MeetingRow.Columns.id)
+        .fetchAll(db)
+        .map(\.meeting)
+    }
+  }
+
+  /// Launch reconciliation: a meeting still `.recording` belongs to a
+  /// process that died mid-meeting, since the capture session that owned it
+  /// is gone. One transaction marks every such row `.failed(reason)` with
+  /// `updatedAt = now` and returns their ids, oldest first. The master file,
+  /// if the writer got that far, stays in the meeting folder.
+  @discardableResult
+  public func failInterruptedRecordings(
+    reason: String = "Recording was interrupted before it finished.", now: Date
+  ) async throws -> [UUID] {
+    try await writer.write { db in
+      let rows =
+        try MeetingRow
+        .filter(MeetingRow.Columns.state == MeetingState.Kind.recording.rawValue)
+        .order(MeetingRow.Columns.startedAt, MeetingRow.Columns.id)
+        .fetchAll(db)
+      for row in rows {
+        var meeting = row.meeting
+        meeting.state = .failed(reason: reason)
+        meeting.updatedAt = now
+        try MeetingRow(meeting).update(db)
+      }
+      return rows.map(\.id)
     }
   }
 
@@ -125,14 +187,19 @@ public final class MeetingStore: Sendable {
   }
 
   /// One transaction: the meeting's processing columns (summary JSON and
-  /// `summaryText` among them) plus the meeting's tasks and decisions,
-  /// replaced. Decision ids derive from the meeting id so re-runs are stable.
-  public func replaceSummary(_ meeting: Meeting, tasks: [MeetingTask], decisions: [String])
-    async throws
-  {
+  /// `summaryText` among them) plus the meeting's tasks, decisions and
+  /// speaker name suggestions, replaced. Decision ids derive from the meeting
+  /// id so re-runs are stable. Of `speakerNames`, only suggestions that carry
+  /// a name and point at one of the meeting's speakers are kept, the
+  /// strongest per speaker.
+  public func replaceSummary(
+    _ meeting: Meeting, tasks: [MeetingTask], decisions: [String],
+    speakerNames: [SpeakerNameSuggestion] = []
+  ) async throws {
     let meetingID = meeting.id
     try await writer.write { db in
       try Self.writeProcessingResults(of: meeting, db)
+      try Self.replaceNameSuggestions(speakerNames, meetingID: meetingID, db)
       try MeetingTaskRow.filter(MeetingTaskRow.Columns.meetingID == meetingID.uuidString)
         .deleteAll(db)
       for task in tasks {
@@ -150,6 +217,37 @@ public final class MeetingStore: Sendable {
     }
   }
 
+  static func replaceNameSuggestions(
+    _ suggestions: [SpeakerNameSuggestion], meetingID: UUID, _ db: Database
+  ) throws {
+    let key = meetingID.uuidString
+    try SpeakerNameSuggestionRow.filter(SpeakerNameSuggestionRow.Columns.meetingID == key)
+      .deleteAll(db)
+    let speakerIDs = try Set(
+      UUID.fetchAll(
+        db, SpeakerRow.filter(SpeakerRow.Columns.meetingID == key).select(SpeakerRow.Columns.id)))
+    // Ascending, so a duplicate speaker ends with its strongest suggestion.
+    for suggestion in suggestions.sorted(by: { $0.confidence < $1.confidence })
+    where speakerIDs.contains(suggestion.speakerID) {
+      try SpeakerNameSuggestionRow(suggestion, meetingID: meetingID)?.save(db)
+    }
+  }
+
+  /// The model's guess who each speaker is, at most one per speaker, in
+  /// speaker id order: written with every summary, removed by `confirm` and
+  /// with the speaker or the meeting. Never applied automatically; the
+  /// review sheet offers it beside the cosine match and the calendar
+  /// attendees (#78).
+  public func nameSuggestions(meetingID: UUID) async throws -> [SpeakerNameSuggestion] {
+    try await writer.read { db in
+      try SpeakerNameSuggestionRow
+        .filter(SpeakerNameSuggestionRow.Columns.meetingID == meetingID.uuidString)
+        .order(SpeakerNameSuggestionRow.Columns.speakerID)
+        .fetchAll(db)
+        .map(\.suggestion)
+    }
+  }
+
   /// Reads the row and overlays `results`' processing columns, so a stage
   /// that started minutes ago never writes back the scratchpad or tags it
   /// read then.
@@ -162,6 +260,64 @@ public final class MeetingStore: Sendable {
   static func currentMeeting(_ id: UUID, _ db: Database) throws -> Meeting {
     guard let row = try meetingRow(id, db) else { throw MeetingStoreError.meetingNotFound(id) }
     return row.meeting
+  }
+
+  // MARK: - Deletion
+
+  /// Removes the meeting and everything that hangs off it: the cascaded rows
+  /// (participants, speakers, segments, tasks, decisions, assets,
+  /// deliveries), their FTS rows through the triggers, the handover receipt
+  /// that admitted it, and its files. Persons stay; they belong to every
+  /// meeting. Throws `MeetingStoreError.meetingBusy` while the meeting is
+  /// `.recording` or `.processing`, because the capture writer or the
+  /// pipeline still holds the files.
+  ///
+  /// Files: when the asset sits in its own meeting folder
+  /// (`RecordingLayout(audioFolder:meetingID:)`, the folder named after the
+  /// meeting id) the whole folder goes, sample clips included. Otherwise only
+  /// the files the rows point at are removed (master, sidecars, mixdown,
+  /// clips), so an asset placed in a shared folder never takes its
+  /// neighbours with it. The rows are gone and `MeetingEvent.deleted` is
+  /// posted before any file is touched; a file that resists is thrown after
+  /// the rest were removed.
+  public func delete(meetingID: UUID) async throws {
+    let files: [URL] = try await writer.write { db in
+      let meeting = try Self.currentMeeting(meetingID, db)
+      switch meeting.state {
+      case .recording, .processing:
+        throw MeetingStoreError.meetingBusy(meetingID, meeting.state.kind)
+      case .queued, .ready, .failed:
+        break
+      }
+      let key = meetingID.uuidString
+      let assets = try AudioAssetRow.filter(AudioAssetRow.Columns.meetingID == key)
+        .order(AudioAssetRow.Columns.id).fetchAll(db).map(\.asset)
+      let clips = try SpeakerRow.filter(SpeakerRow.Columns.meetingID == key).fetchAll(db)
+        .compactMap(\.sampleClipURL)
+      try HandoverReceiptRow.filter(HandoverReceiptRow.Columns.meetingID == key).deleteAll(db)
+      try MeetingRow.filter(MeetingRow.Columns.id == key).deleteAll(db)
+      return Self.filesToRemove(meetingID: meetingID, assets: assets, clips: clips)
+    }
+    await events.post(.deleted(meetingID: meetingID))
+    var firstError: (any Error)?
+    for url in files where FileManager.default.fileExists(atPath: url.path) {
+      do {
+        try FileManager.default.removeItem(at: url)
+      } catch {
+        if firstError == nil { firstError = error }
+      }
+    }
+    if let firstError { throw firstError }
+  }
+
+  /// The meeting folder when an asset lives in one, else every file the rows
+  /// name, each once, in asset then clip order.
+  static func filesToRemove(meetingID: UUID, assets: [AudioAsset], clips: [URL]) -> [URL] {
+    let folders = assets.map { RecordingLayout(asset: $0).directory }
+      .filter { $0.lastPathComponent == meetingID.uuidString }
+    if let folder = folders.first { return [folder] }
+    var seen: Set<String> = []
+    return (assets.flatMap(\.expirableFiles) + clips).filter { seen.insert($0.path).inserted }
   }
 
   // MARK: - Participants
