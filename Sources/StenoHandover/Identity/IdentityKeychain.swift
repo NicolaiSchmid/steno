@@ -127,7 +127,10 @@
     /// Removes the certificate(s) and the key(s) stored under `label`.
     /// Missing items are not an error. Keys are found through their
     /// certificates first (a key query by label only finds keys this type
-    /// labelled itself), then whatever still carries the label goes.
+    /// labelled itself), then whatever still carries the label goes. The
+    /// file keychain deletes one item per `SecItemDelete` unless the query
+    /// says `kSecMatchLimitAll`; without it a second labelled certificate
+    /// would survive its key and make every later `load` throw.
     public static func delete(label: String) throws {
       for certificate in try storedCertificates(labelled: label) {
         var identity: SecIdentity?
@@ -142,7 +145,9 @@
         }
       }
       for itemClass in [kSecClassCertificate, kSecClassKey] {
-        let status = SecItemDelete([kSecClass: itemClass, kSecAttrLabel: label] as CFDictionary)
+        let status = SecItemDelete(
+          [kSecClass: itemClass, kSecAttrLabel: label, kSecMatchLimit: kSecMatchLimitAll]
+            as CFDictionary)
         guard status == errSecSuccess || status == errSecItemNotFound else {
           throw IdentityError.security("SecItemDelete", status)
         }
