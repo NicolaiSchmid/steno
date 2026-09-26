@@ -122,12 +122,16 @@ extension MeetingStore {
 
   /// The one operation that sets `.confirmed`: saves the person (new or
   /// existing), confirms the speaker, enrols the speaker's embedding through
-  /// `memory`, and deletes the sample clip.
+  /// `memory`, deletes the sample clip and drops the speaker's name
+  /// suggestion, which the confirmation answered.
   public func confirm(speakerID: UUID, person: Person, memory: any SpeakerMemory) async throws {
     let (embedding, clip): (Embedding?, URL?) = try await writer.write { db in
       guard var speaker = try Self.speakerRow(speakerID, db)?.speaker else {
         throw MeetingStoreError.speakerNotFound(speakerID)
       }
+      try SpeakerNameSuggestionRow
+        .filter(SpeakerNameSuggestionRow.Columns.speakerID == speakerID.uuidString)
+        .deleteAll(db)
       if try Self.personRow(person.id, db) == nil {
         try PersonRow(person).insert(db)
       }

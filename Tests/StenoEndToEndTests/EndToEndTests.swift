@@ -206,6 +206,15 @@ import Testing
     #expect(
       Set(them.compactMap(\.personID)) == Set(SampleData.persons().map(\.id)),
       "each cluster is suggested to its own person")
+    // The stub's analysis names "Speaker 1" from a quote; the summarize stage
+    // persists it for the review sheet (#78).
+    let speakerOne = try #require(export.speakers.first { $0.clusterLabel == "Speaker 1" })
+    #expect(
+      try await store.nameSuggestions(meetingID: meeting.id) == [
+        SpeakerNameSuggestion(
+          speakerID: speakerOne.id, name: "Jérôme", confidence: 0.6,
+          evidence: "Me: \"fake segment 1\"")
+      ])
     #expect(
       try Data(contentsOf: vault.appendingPathComponent("\(folder)/\(mixdown)"))
         == (try Data(contentsOf: layout.mixdown(mixdownFormat))),
@@ -251,7 +260,9 @@ import Testing
     var iterator = stream.makeAsyncIterator()
     var collected: [MeetingEvent] = []
     while let event = await iterator.next(), event != sentinel { collected.append(event) }
-    try #require(collected.count == 12, "ten stage starts, one review request, one re-export")
+    try #require(
+      collected.count == 13,
+      "ten stage starts, one review request, one retention applied, one re-export")
     let stages = collected.compactMap { event -> PipelineStage? in
       if case .progress(_, let stage) = event { return stage }
       return nil
@@ -260,5 +271,8 @@ import Testing
     #expect(
       collected[8]
         == .speakersNeedReview(meetingID: meeting.id, speakerIDs: export.speakers.map(\.id)))
+    #expect(
+      collected[11] == .retentionApplied(meetingID: meeting.id),
+      "after the retention stage's progress, before the re-export")
   }
 }

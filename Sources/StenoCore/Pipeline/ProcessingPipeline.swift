@@ -2,6 +2,8 @@ import Foundation
 
 /// Everything the pipeline needs, and the only injection axis: the app and
 /// the CLI pass real implementations, tests pass the fakes in `Testing/`.
+/// `events` defaults to `store.events`, so the store's `deleted` and the
+/// pipeline's `progress` reach one subscriber.
 public struct PipelineDependencies: Sendable {
   public let decoder: any AudioDecoder
   public let speechEngine: any SpeechEngine
@@ -25,7 +27,7 @@ public struct PipelineDependencies: Sendable {
     dispatcher: any DeliveryDispatcher,
     store: MeetingStore,
     settings: SettingsStore,
-    events: MeetingEventBus,
+    events: MeetingEventBus? = nil,
     now: @escaping @Sendable () -> Date = Date.init
   ) {
     self.decoder = decoder
@@ -37,7 +39,7 @@ public struct PipelineDependencies: Sendable {
     self.dispatcher = dispatcher
     self.store = store
     self.settings = settings
-    self.events = events
+    self.events = events ?? store.events
     self.now = now
   }
 }
@@ -76,15 +78,46 @@ public actor ProcessingPipeline {
     var asset = asset
     asset.meetingID = meeting.id
     try await store.save(queued, asset: asset)
-    let assetID = asset.id
+    start(assetID: asset.id)
+  }
+
+  /// Launch recovery for the queue: every meeting a previous process left
+  /// `.queued` or `.processing` is processed again from `decode` (each stage
+  /// replaces what an earlier run wrote), oldest first, in the background
+  /// like `enqueue`. A meeting whose asset row is missing cannot be processed
+  /// and is marked `.failed`. Meetings already in flight here are skipped.
+  /// Returns the ids of the meetings whose processing was started. The app
+  /// calls this once after `MeetingStore.failInterruptedRecordings(now:)`.
+  @discardableResult
+  public func resumeUnfinished() async throws -> [UUID] {
+    var resumed: [UUID] = []
+    for meeting in try await store.meetings(inStates: [.queued, .processing])
+    where !inFlight.contains(meeting.id) {
+      guard let asset = try await store.asset(meetingID: meeting.id) else {
+        try await store.setState(
+          .failed(reason: "Processing was interrupted and the recording's asset is missing"),
+          meetingID: meeting.id, now: now)
+        continue
+      }
+      guard running[asset.id] == nil else { continue }
+      start(assetID: asset.id)
+      resumed.append(meeting.id)
+    }
+    return resumed
+  }
+
+  /// Runs `process(assetID:)` in the background and tracks it for
+  /// `waitUntilIdle`.
+  private func start(assetID: UUID) {
     running[assetID] = Task { [weak self] in
       try? await self?.process(assetID: assetID)
       await self?.finished(assetID)
     }
   }
 
-  /// Waits for every processing task started by `enqueue`; the CLI and the
-  /// tests call it before reading results.
+  /// Waits for every processing task started by `enqueue` or
+  /// `resumeUnfinished`; the CLI and the tests call it before reading
+  /// results.
   public func waitUntilIdle() async {
     while let task = running.values.first {
       await task.value
