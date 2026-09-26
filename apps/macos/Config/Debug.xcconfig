@@ -1,0 +1,20 @@
+#include "Base.xcconfig"
+
+// Ad-hoc signature, hardened runtime off: PR builds need no certificate and
+// Sparkle (signed by another team) still loads without library validation.
+// A developer testing permissions sets a real identity in Local.xcconfig,
+// because TCC forgets an ad-hoc signed app on every rebuild.
+CODE_SIGN_STYLE = Manual
+CODE_SIGN_IDENTITY = -
+CODE_SIGNING_REQUIRED = YES
+CODE_SIGNING_ALLOWED = YES
+ENABLE_HARDENED_RUNTIME = NO
+PROVISIONING_PROFILE_SPECIFIER =
+SWIFT_OPTIMIZATION_LEVEL = -Onone
+SWIFT_COMPILATION_MODE = singlefile
+DEBUG_INFORMATION_FORMAT = dwarf
+ONLY_ACTIVE_ARCH = YES
+
+// Git-ignored developer overrides: DEVELOPMENT_TEAM, CODE_SIGN_IDENTITY,
+// SUFeedURL for a local Sparkle spike. See Local.xcconfig.example.
+#include? "Local.xcconfig"

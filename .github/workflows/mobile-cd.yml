@@ -196,16 +196,18 @@ jobs:
     needs: decide
     if: needs.decide.outputs.ios_action == 'build'
     # The dedicated self-hosted Apple Silicon runner used by fifthset and june.
-    # Swap for `macos-15` if this repository has no access to it; GitHub-hosted
-    # macOS minutes bill at 10× on private repositories.
-    runs-on: [self-hosted, macOS, ARM64]
+    # The same runner variable as every macOS job: the Forge label array when
+    # the runner is registered, GitHub-hosted `macos-15` otherwise.
+    runs-on: ${{ fromJSON(vars.MACOS_RUNS_ON || '"macos-15"') }}
     timeout-minutes: 35
     steps:
       - uses: actions/checkout@v4
 
       # Expo SDK 56+ requires Xcode 26.4+ (expo-modules-jsi's SwiftPM manifest
-      # is swift-tools 6.2). Select the newest stable Xcode explicitly.
+      # is swift-tools 6.2). Select the newest stable Xcode explicitly on the
+      # hosted image; the Forge runner ships one Xcode.
       - uses: maxim-lobanov/setup-xcode@v1
+        if: runner.environment == 'github-hosted'
         with:
           xcode-version: latest-stable
 

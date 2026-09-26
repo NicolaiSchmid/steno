@@ -1,0 +1,188 @@
+# XcodeGen spec for the Steno macOS app. `xcodegen generate --spec
+# apps/macos/project.yml` writes `apps/macos/Steno.xcodeproj` (git-ignored)
+# and `apps/macos/Steno/Info.plist`. The app target links every module of
+# the Swift package at the repository root plus Sparkle; signing, versions
+# and the deployment target live in `Config/*.xcconfig`.
+#
+# Identifiers are immutable once a build ships (see
+# .plans/2026-09-25-v1-program.md): bundle id `uno.schmid.steno.mac`, team
+# `KQB68F43PW`. TCC and Sparkle key off the bundle id.
+name: Steno
+
+options:
+  bundleIdPrefix: uno.schmid
+  deploymentTarget:
+    macOS: "15.0"
+  xcodeVersion: "16.4"
+  createIntermediateGroups: true
+  generateEmptyDirectories: true
+  groupSortPosition: top
+  defaultConfig: Debug
+
+configs:
+  Debug: debug
+  Release: release
+
+settings:
+  configs:
+    Debug:
+      SWIFT_ACTIVE_COMPILATION_CONDITIONS: DEBUG
+
+configFiles:
+  Debug: Config/Debug.xcconfig
+  Release: Config/Release.xcconfig
+
+packages:
+  StenoPackage:
+    path: ../..
+  Sparkle:
+    url: https://github.com/sparkle-project/Sparkle
+    from: 2.10.0
+
+# Every module of the root package; both the app and the hostless tests
+# link them (each in its own build graph, see StenoTests below).
+targetTemplates:
+  PackageClient:
+    platform: macOS
+    dependencies:
+      - package: StenoPackage
+        product: StenoCore
+      - package: StenoPackage
+        product: StenoAudio
+      - package: StenoPackage
+        product: StenoSpeech
+      - package: StenoPackage
+        product: StenoLLM
+      - package: StenoPackage
+        product: StenoAdapters
+      - package: StenoPackage
+        product: StenoHandover
+
+targets:
+  Steno:
+    type: application
+    templates: [PackageClient]
+    sources:
+      - path: Steno
+        excludes:
+          - "Info.plist"
+    dependencies:
+      - package: Sparkle
+        product: Sparkle
+    settings:
+      base:
+        PRODUCT_NAME: Steno
+        PRODUCT_BUNDLE_IDENTIFIER: uno.schmid.steno.mac
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME: ""
+        ENABLE_PREVIEWS: YES
+    info:
+      path: Steno/Info.plist
+      properties:
+        CFBundleName: Steno
+        CFBundleDisplayName: Steno
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        LSMinimumSystemVersion: $(MACOSX_DEPLOYMENT_TARGET)
+        LSApplicationCategoryType: public.app-category.productivity
+        NSPrincipalClass: NSApplication
+        NSHighResolutionCapable: true
+        NSSupportsAutomaticTermination: false
+        NSSupportsSuddenTermination: false
+        NSHumanReadableCopyright: "MIT License"
+        # Purpose strings. `NSAudioCaptureUsageDescription` must be a literal
+        # key: it gates Core Audio process taps and Xcode's editor does not
+        # offer it.
+        NSAudioCaptureUsageDescription: "Steno records the audio of your calls on this Mac so it can transcribe and summarise them afterwards. Audio never leaves your Mac."
+        NSMicrophoneUsageDescription: "Steno records your microphone during meetings so it can transcribe what you said. Audio never leaves your Mac."
+        NSCalendarsFullAccessUsageDescription: "Steno reads the title and attendees of the calendar event that overlaps a recording to name the meeting and its speakers."
+        NSLocalNetworkUsageDescription: "Steno receives recordings from your paired iPhone over your local network."
+        NSBonjourServices:
+          - _steno._tcp
+        # Sparkle 2. The feed is the latest GitHub release's appcast asset;
+        # each release regenerates it with `generate_appcast`.
+        SUFeedURL: https://github.com/NicolaiSchmid/steno/releases/latest/download/appcast.xml
+        SUPublicEDKey: RxaX7phoHvb7M0P4yaOC7zngDo+lqlOE6Iq89UtOuQI=
+        SUEnableAutomaticChecks: true
+        SUScheduledCheckInterval: 86400
+    entitlements:
+      path: Config/Steno.entitlements
+      properties:
+        com.apple.security.device.audio-input: true
+        com.apple.security.personal-information.calendars: true
+
+  # Hostless unit tests over the view models and services. The app's sources
+  # compile into the bundle (everything but `@main` and the Sparkle wrapper),
+  # so the tests link the package products directly and never load the app.
+  #
+  # Deliberately no dependency on the Steno target and its own scheme: when
+  # two targets of one build link the same package products, Xcode wraps
+  # every product in a dynamic `PackageFrameworks/*_PackageProduct.framework`
+  # and (Xcode 16.4) links `Crypto` before it is built. One client per build
+  # graph keeps the products static. The InfoPlist tests find `Steno.app` in
+  # the shared products directory, built by the Steno scheme first.
+  StenoTests:
+    type: bundle.unit-test
+    templates: [PackageClient]
+    sources:
+      - path: StenoTests
+      - path: Steno
+        excludes:
+          - "StenoApp.swift"
+          - "Services/UpdaterController.swift"
+          - "Resources/**"
+          - "Info.plist"
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: uno.schmid.steno.mac.tests
+        GENERATE_INFOPLIST_FILE: YES
+
+  StenoUITests:
+    type: bundle.ui-testing
+    platform: macOS
+    sources:
+      - path: StenoUITests
+    dependencies:
+      - target: Steno
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: uno.schmid.steno.mac.uitests
+        GENERATE_INFOPLIST_FILE: YES
+        TEST_TARGET_NAME: Steno
+
+schemes:
+  # The app plus its UI smoke test. `-steno-ui-testing` is listed (disabled)
+  # so a developer can flip it on in Xcode to run the preview environment.
+  Steno:
+    build:
+      targets:
+        Steno: all
+        StenoUITests: [test]
+    run:
+      config: Debug
+      commandLineArguments:
+        "-steno-ui-testing": false
+    test:
+      config: Debug
+      gatherCoverageData: false
+      targets:
+        - StenoUITests
+    profile:
+      config: Release
+    analyze:
+      config: Debug
+    archive:
+      config: Release
+
+  # The hostless unit tests alone; see the StenoTests target comment.
+  StenoTests:
+    build:
+      targets:
+        StenoTests: [test, run, analyze]
+    run:
+      config: Debug
+    test:
+      config: Debug
+      gatherCoverageData: false
+      targets:
+        - StenoTests
