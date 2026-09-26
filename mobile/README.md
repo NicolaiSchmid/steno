@@ -7,10 +7,11 @@ decisions behind it: [`.plans/2026-09-24-initial-scope.md`](../.plans/2026-09-24
 
 Status: the phone side of
 [`.plans/2026-09-25-phone-handover.md`](../.plans/2026-09-25-phone-handover.md)
-is implemented and waits for the Mac listener (`Sources/StenoHandover`). The
-app records AAC `.m4a` with expo-audio, keeps a JSON-indexed queue in
-`Documents/queue/`, pairs with the Mac by scanning its QR code, and uploads in
-16 MiB chunks over a background `URLSession` that pins the Mac's certificate.
+is implemented; the Mac side is `Sources/StenoHandover`, used by the macOS
+app's Phones settings and by `steno dev handover`. The app records AAC `.m4a`
+with expo-audio, keeps a JSON-indexed queue in `Documents/queue/`, pairs with
+the Mac by scanning its QR code, and uploads in 16 MiB chunks over a
+background `URLSession` that pins the Mac's certificate.
 
 ## How the handover works
 

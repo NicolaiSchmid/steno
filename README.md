@@ -7,7 +7,10 @@ Steno captures system audio and your microphone directly from macOS, processes e
 on your Mac after the meeting, and writes summary, transcript and tasks into the places you
 already work, starting with an Obsidian vault.
 
-> Status: pre-alpha. Scope is settled, code is not written yet. See [.plans/2026-09-24-initial-scope.md](.plans/2026-09-24-initial-scope.md).
+> Status: v1 is code-complete and not yet released. The signing certificate, TestFlight
+> setup and the manual checks on real hardware that gate the first release are tracked in
+> [issue #74](https://github.com/NicolaiSchmid/steno/issues/74). Scope:
+> [.plans/2026-09-24-initial-scope.md](.plans/2026-09-24-initial-scope.md).
 
 ## What it does
 
@@ -43,14 +46,15 @@ with Sparkle updates.
 
 ```
 AGENTS.md           conventions for coding agents (CLAUDE.md links here)
+Package.swift       Swift package manifest; modules under Sources/, tests under Tests/
+Sources/            StenoCore, StenoAudio, StenoSpeech, StenoLLM, StenoAdapters,
+                    StenoHandover and the `steno` CLI
+apps/macos/         SwiftUI app over the package, own README, xcodegen project
+mobile/             Expo iOS recorder, own pnpm project, own README
 .plans/             scope and planning documents, dated
 docs/research/      teardown of Jamie and the open-source landscape
-mobile/             Expo iOS recorder, own pnpm project, own README
-.github/workflows/  repository, Swift and mobile CI/CD
+.github/workflows/  repository, Swift and mobile CI; macOS release on `v*` tags
 ```
-
-The Swift package (`Package.swift`, `Sources/StenoCore`) and the macOS app
-(`apps/macos/`) follow the layout described in `AGENTS.md`; they do not exist yet.
 
 ## Background
 
