@@ -26,6 +26,49 @@ import Testing
     }
   }
 
+  /// A database created before `v2` (a release that shipped `v1` alone)
+  /// upgrades in place: `v2` alone is applied, every row survives, the new
+  /// cascade holds, and the schema is byte-identical to a fresh database's.
+  @Test func aV1DatabaseUpgradesToTheLatestVersionKeepingItsRows() throws {
+    let queue = try DatabaseQueue()
+    var v1Only = DatabaseMigrator()
+    v1Only.registerMigration("v1", migrate: Migrations.v1)
+    try v1Only.migrate(queue)
+    try queue.write { db in
+      try MeetingRow(SampleData.meeting()).insert(db)
+      for person in SampleData.persons() { try PersonRow(person).insert(db) }
+      for speaker in SampleData.speakers() { try SpeakerRow(speaker).insert(db) }
+      try AudioAssetRow(SampleData.audioAsset()).insert(db)
+    }
+    try queue.read { (db) throws in
+      #expect(try Migrations.migrator().appliedIdentifiers(db) == ["v1"])
+      #expect(try !db.tableExists("speakerNameSuggestion"))
+    }
+
+    try Migrations.migrator().migrate(queue)
+
+    try queue.read { (db) throws in
+      #expect(try Migrations.migrator().appliedIdentifiers(db) == Set(Migrations.identifiers))
+      #expect(
+        try MeetingRow.fetchOne(db, key: SampleData.meetingID)?.meeting == SampleData.meeting())
+      #expect(
+        try SpeakerRow.order(SpeakerRow.Columns.id).fetchAll(db).map(\.speaker)
+          == SampleData.speakers())
+      #expect(try AudioAssetRow.fetchAll(db).map(\.asset) == [SampleData.audioAsset()])
+      #expect(try SpeakerNameSuggestionRow.fetchCount(db) == 0)
+      #expect(try Row.fetchAll(db, sql: "PRAGMA foreign_key_check").isEmpty)
+      try Snapshot.assert(SchemaSnapshotTests.dump(db), matches: "snapshots/schema/v2.sql")
+    }
+    try queue.write { db in
+      let suggestion = SpeakerNameSuggestion(
+        speakerID: SampleData.speakerTwoID, name: "Jérôme", confidence: 0.8, evidence: "quote")
+      try SpeakerNameSuggestionRow(suggestion, meetingID: SampleData.meetingID)?.insert(db)
+      #expect(try SpeakerNameSuggestionRow.fetchCount(db) == 1)
+      _ = try SpeakerRow.deleteOne(db, key: SampleData.speakerTwoID)
+      #expect(try SpeakerNameSuggestionRow.fetchCount(db) == 0, "the new cascade holds")
+    }
+  }
+
   @Test func migratingTwiceIsANoOp() throws {
     let queue = try DatabaseQueue()
     try Migrations.migrator().migrate(queue)
