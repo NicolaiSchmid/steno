@@ -229,6 +229,21 @@ jobs:
           eas-version: ${{ env.EAS_CLI_VERSION }}
           token: ${{ secrets.EXPO_TOKEN }}
 
+      # Without this, `xcodebuild -exportArchive` dies with the opaque
+      # `error: exportArchive Copy failed`; IDEDistributionPipeline.log shows
+      # `rsync: on remote machine: --extended-attributes: unknown option`.
+      # Apple's /usr/bin/rsync (openrsync 2.6.9) spawns its local "server"
+      # side as plain `rsync` through PATH, and on the Forge runner PATH puts
+      # the Nix rsync 3.4.4 (no `-E`) before /usr/bin. Expose ONLY Apple's
+      # rsync ahead of it — putting /usr/bin first would shadow the Nix node,
+      # pnpm, yarn, python and git the job relies on.
+      - name: Prefer Apple's rsync for xcodebuild -exportArchive
+        if: runner.environment == 'self-hosted'
+        run: |
+          mkdir -p "$RUNNER_TEMP/apple-bin"
+          ln -sf /usr/bin/rsync "$RUNNER_TEMP/apple-bin/rsync"
+          echo "$RUNNER_TEMP/apple-bin" >> "$GITHUB_PATH"
+
       # Local build → runs on this runner, not Expo's cloud → no build-quota
       # hit. `eas env:exec` makes the production EXPO_PUBLIC_* vars present for
       # the local process so Metro inlines them.
