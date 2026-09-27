@@ -82,6 +82,14 @@ the lane:
 - **TestFlight build** otherwise: `eas build --local` on the macOS runner,
   `eas submit`, OTA baseline, then the `ios-fp-<hash>` tag is pushed.
 
+Submission authenticates with the repository's App Store Connect API key
+(`ASC_KEY_ID`, `ASC_ISSUER_ID`, `ASC_PRIVATE_KEY` secrets, the same key the
+macOS release uses for notarytool). The submit job writes the `.p8` to the
+runner's temp directory and sets `ascApiKeyPath`, `ascApiKeyId` and
+`ascApiKeyIssuerId` on the `production` submit profile in the checkout only,
+then removes both. No App Store Connect API key needs to be stored on EAS for
+CD; only the fallback EAS Workflow below still authenticates through EAS.
+
 PRs get the same decision as a sticky comment from `mobile-ci.yml`, computed
 by the same script (`scripts/ci/mobile-delivery-lane.sh`), so the preview
 cannot disagree with CD. The manual fallback when Actions cannot run is the
