@@ -15,7 +15,7 @@ final class Browser {
 
   static let serviceType = "_steno._tcp"
 
-  private let queue = DispatchQueue(label: "uno.schmid.steno.link.browser")
+  private let queue = DispatchQueue(label: "com.nicolaischmid.steno.link.browser")
   private let emit: EventSink
   private var browser: NWBrowser?
   /// Latest result per service instance name; `resolve` looks endpoints up here.

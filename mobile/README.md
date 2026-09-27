@@ -18,7 +18,7 @@ background `URLSession` that pins the Mac's certificate.
 - `modules/steno-link/` is a local Expo module (Swift, autolinked from
   `./modules`). It browses `_steno._tcp` with `NWBrowser`, resolves the Mac,
   performs small pinned JSON requests, runs the background upload session
-  `uno.schmid.steno.upload`, and hashes files with streaming SHA-256.
+  `com.nicolaischmid.steno.upload`, and hashes files with streaming SHA-256.
   `ios/PinnedTrustEvaluator.swift` is the canonical pinning code; the Swift
   package's handover tests symlink to it. The Swift compiles only during
   `expo prebuild` on a Mac; CI checks the TypeScript around it.
@@ -91,21 +91,34 @@ Anything that moves the fingerprint (a dependency, config plugin, permission,
 icon, `version`, `updates`) forces a native build. Check the PR comment before
 merging such a change.
 
-### Apple one-time setup (not done yet)
+### Apple one-time setup
 
-1. `cd mobile && eas init` against account `nicolaischmid`. Commit the printed
-   project id as the `easProjectId` default in `app.config.ts`; OTA updates are
-   disabled until then.
-2. Confirm the bundle id `uno.schmid.steno` (and `.dev`, `.preview`). It is
-   immutable after the first build.
-3. Create the App Store Connect record, pin its numeric id as
-   `submit.production.ios.ascAppId` in `eas.json` (replaces `TODO_ASC_APP_ID`;
-   CD refuses to build until then).
-4. `APP_VARIANT=production eas credentials -p ios`, "Set up all required
-   credentials", so the non-interactive CD build can fetch provisioning.
-5. Add the `EXPO_TOKEN` repository secret.
-6. Add an app icon (`ios.icon` in `app.config.ts`) and splash images before the
-   first TestFlight build.
+Identifiers are fixed in [`.plans/2026-09-27-ios-bundle-id.md`](../.plans/2026-09-27-ios-bundle-id.md).
+
+Done:
+
+- EAS project `@nicolaischmid/steno`, id `0bfb34f4-1f48-4286-a576-32dcbde71b15`,
+  pinned as the `easProjectId` default in `app.config.ts` (`EAS_PROJECT_ID`
+  still overrides it). OTA updates are enabled; the `production` update channel
+  and branch exist; the remote iOS build number starts at 1.
+- Bundle id `com.nicolaischmid.steno` registered as an App ID under team
+  `KQB68F43PW`; `.dev` and `.preview` are the dev-client and preview ids.
+- App Store Connect record "Steno – Transcripts", app id `6816745548`, SKU
+  `steno-ios`, pinned as `submit.production.ios.ascAppId` in `eas.json`.
+- `EXPO_TOKEN` repository secret.
+
+Still open:
+
+1. `cd mobile && APP_VARIANT=production npx eas-cli credentials -p ios`,
+   production, "Set up all required credentials", log in with the Apple ID.
+   Non-interactive builds cannot create the distribution certificate or
+   profile; they only fetch what this step stores on EAS. The App Store Connect
+   API key on file has the Developer role, which Apple refuses for certificate
+   and App ID creation (`403 FORBIDDEN_ERROR`). The same step registers the
+   `.dev` and `.preview` App IDs when a development or preview build first
+   needs them.
+2. Add an app icon (`ios.icon` in `app.config.ts`) and splash images before
+   the first TestFlight build.
 
 ### After a fallback build
 
