@@ -16,10 +16,11 @@ const APP_VARIANT = (process.env.APP_VARIANT ?? "development") as
 	| "preview"
 	| "production";
 
-// EAS workspace linkage. Minted by `eas init` (account @nicolaischmid); until
-// then the id is empty and OTA updates are disabled below. Once minted, commit
-// the uuid here as the default — it is public and non-secret.
-const easProjectId = process.env.EAS_PROJECT_ID ?? "";
+// EAS workspace linkage: @nicolaischmid/steno, minted by `eas project:init`
+// on 2026-09-27. The uuid is public and non-secret; the env override exists
+// for forks that point at their own Expo project.
+const easProjectId =
+	process.env.EAS_PROJECT_ID ?? "0bfb34f4-1f48-4286-a576-32dcbde71b15";
 const expoOwner = process.env.EXPO_OWNER ?? "nicolaischmid";
 // Apple Developer team (Nicolai Schmid, Individual) — the same team that
 // owns fifthset and nunc-uebergabe.
@@ -27,23 +28,24 @@ const APPLE_TEAM_ID = "KQB68F43PW";
 
 // IMMUTABLE identifiers — decided once. Bundle id, EAS projectId, ascAppId and
 // slug can never change without losing testers, keychain-backed data and
-// server-side version codes. `uno.schmid.steno` derives from schmid.uno;
-// confirm before the first TestFlight build, not after.
+// server-side version codes. `com.nicolaischmid.steno` was chosen before the
+// first TestFlight build (.plans/2026-09-27-ios-bundle-id.md); the macOS app
+// keeps `uno.schmid.steno.mac`.
 export const VARIANTS = {
 	development: {
 		name: "Steno Dev",
 		scheme: "steno-dev",
-		bundleId: "uno.schmid.steno.dev",
+		bundleId: "com.nicolaischmid.steno.dev",
 	},
 	preview: {
 		name: "Steno Preview",
 		scheme: "steno-preview",
-		bundleId: "uno.schmid.steno.preview",
+		bundleId: "com.nicolaischmid.steno.preview",
 	},
 	production: {
 		name: "Steno",
 		scheme: "steno",
-		bundleId: "uno.schmid.steno",
+		bundleId: "com.nicolaischmid.steno",
 	},
 } as const;
 const VARIANT = VARIANTS[APP_VARIANT];
@@ -76,8 +78,7 @@ const config: ExpoConfig = {
 	owner: expoOwner,
 	// OTA updates via EAS Update, fingerprint runtime policy: EAS hashes the
 	// native layer and only delivers a bundle to a build whose fingerprint
-	// matches. A mismatch is silent, not a crash. Disabled until `eas init`
-	// mints the project id.
+	// matches. A mismatch is silent, not a crash.
 	...(easProjectId
 		? {
 				updates: {

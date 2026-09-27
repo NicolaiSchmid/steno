@@ -11,7 +11,7 @@ import Foundation
 /// design; the coordinator reconciles with `pendingUploads()` and the Mac's
 /// `GET /v1/recordings/{id}` on the next foreground.
 final class UploadSession: NSObject, URLSessionDataDelegate {
-  static let identifier = "uno.schmid.steno.upload"
+  static let identifier = "com.nicolaischmid.steno.upload"
   static let chunkHashHeader = "X-Steno-Chunk-SHA256"
   static let shared = UploadSession()
 

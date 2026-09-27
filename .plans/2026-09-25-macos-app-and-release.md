@@ -48,7 +48,7 @@ directly and adds protocols only where a system framework has no seam.
 
 ## Decisions
 
-- Bundle id `uno.schmid.steno.mac`, team `KQB68F43PW` (same team as mobile, which owns `uno.schmid.steno`). Immutable
+- Bundle id `uno.schmid.steno.mac`, team `KQB68F43PW` (same team as mobile, which owns `com.nicolaischmid.steno`, see `.plans/2026-09-27-ios-bundle-id.md`). Immutable
   once v1 ships; TCC and Sparkle key off it.
 - `MARKETING_VERSION` comes from the tag (`v1.2.3` -> `1.2.3`); `CURRENT_PROJECT_VERSION` (`CFBundleVersion`) is `git
   rev-list --count` of the tagged commit, monotonic on `main`. Local builds use `0.0.0` / `0`.
