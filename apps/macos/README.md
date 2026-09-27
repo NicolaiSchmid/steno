@@ -99,8 +99,12 @@ account `llm-api-key`), the handover identity in the login keychain.
    authority, the runtime flag, a secure timestamp, exactly the two entitlements
    (audio-input, calendars, read with `codesign -d --entitlements - --xml`), and that every
    nested code item (Sparkle.framework with its `Autoupdate`, `Updater.app` and XPC services,
-   FluidAudio's framework) carries the same team, the runtime flag and a timestamp.
-   `<version>` is the tag without `v`; `<build>` is `git rev-list --count HEAD`.
+   the Swift compatibility dylib Xcode embeds) carries the same team and a timestamp, and
+   every nested bundle and executable the runtime flag (dylibs never carry it; notarisation
+   requires it on executables and bundles only). `build-release.sh --verify-only <Steno.app>`
+   runs only these checks against an app exported earlier; `ReleaseScriptsTests` does so
+   against a `codesign` shim. `<version>` is the tag without `v`; `<build>` is
+   `git rev-list --count HEAD`.
 4. `scripts/make-dmg.sh <version>` builds `Steno-<version>.dmg` with `hdiutil` (UDZO, an
    `Applications` symlink), signs it, submits it to `notarytool --wait`, staples the ticket
    and runs `spctl -a -t open --context context:primary-signature`.

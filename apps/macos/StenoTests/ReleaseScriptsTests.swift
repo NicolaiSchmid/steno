@@ -176,16 +176,225 @@ final class ReleaseScriptsTests: XCTestCase {
       // Machine-readable entitlements; `:-` is deprecated on Xcode 27 and
       // the bare `-` prints a format with no `<key>` lines.
       "codesign -d --entitlements - --xml",
-      // Nested code items get the same three checks, Sparkle's helpers
-      // included; no `-prune` at the framework boundary.
+      // Nested code items get the team and timestamp checks, Sparkle's
+      // helpers included, and bundles and executables the runtime flag;
+      // no `-prune` at the framework boundary.
       "require_release_signature \"$nested\"",
       "-name 'Autoupdate'",
       "-name '*.xpc'",
+      "*.dylib) echo library",
+      // The whole `-o` disjunction is parenthesised ahead of `-print0`;
+      // otherwise find prints the last branch only and skips the bundles.
+      "\\) -print0",
+      // The helper's diagnostics go to stderr, never into the captured
+      // team, and the substitution's status is checked explicitly.
+      "require_release_signature \"$app\")\" || exit 1",
+      "require_release_signature \"$nested\" \"$nested_kind\")\" || exit 1",
     ] {
       XCTAssertTrue(script.contains(guardLine), "build-release.sh lost its guard: \(guardLine)")
     }
     XCTAssertFalse(script.contains("-prune"), "the nested walk must descend into frameworks")
     XCTAssertFalse(script.contains("--entitlements :-"), "deprecated codesign spelling")
+  }
+
+  // MARK: build-release.sh --verify-only
+
+  /// A `codesign` shim: `--verify` succeeds, `--entitlements` prints the
+  /// two keys (a third with CODESIGN_FAKE_EXTRA_ENTITLEMENT), `-dv` prints
+  /// canned details on stderr as codesign does. Items named in
+  /// CODESIGN_FAKE_NO_RUNTIME are signed without the hardened runtime flag
+  /// (`flags=0x0(none)`, what Xcode 27 produces for its embedded
+  /// libswiftCompatibilitySpan.dylib); items named in CODESIGN_FAKE_FOREIGN
+  /// carry another team.
+  private static let codesignShim = #"""
+    #!/bin/bash
+    item="${!#}"
+    name="$(basename "$item")"
+    case " $* " in
+      *" --verify "*) exit 0 ;;
+      *" --entitlements "*)
+        extra=""
+        [ -n "${CODESIGN_FAKE_EXTRA_ENTITLEMENT:-}" ] && extra="<key>$CODESIGN_FAKE_EXTRA_ENTITLEMENT</key><true/>"
+        printf '<plist><dict><key>com.apple.security.device.audio-input</key><true/><key>com.apple.security.personal-information.calendars</key><true/>%s</dict></plist>\n' "$extra"
+        exit 0 ;;
+    esac
+    flags='0x10000(runtime)'
+    team='TEAM0000AA'
+    case " ${CODESIGN_FAKE_NO_RUNTIME:-} " in *" $name "*) flags='0x0(none)' ;; esac
+    case " ${CODESIGN_FAKE_FOREIGN:-} " in *" $name "*) team='FOREIGN00X' ;; esac
+    {
+      echo "Executable=$item"
+      echo "Identifier=fake.$name"
+      echo "Format=Mach-O universal (x86_64 arm64)"
+      echo "CodeDirectory v=20500 size=1 flags=$flags hashes=1+1 location=embedded"
+      echo "Authority=Developer ID Application: Fake ($team)"
+      echo "Authority=Developer ID Certification Authority"
+      echo "Timestamp=27. Sep 2026 at 22:22:20"
+      echo "TeamIdentifier=$team"
+    } >&2
+
+    """#
+
+  /// The nested code items of an exported Steno.app, relative to the app:
+  /// Sparkle's framework, its helpers and XPC services, and the Swift
+  /// compatibility dylib Xcode embeds for deployment targets below the
+  /// SDK's.
+  private static let nestedItems = [
+    "Contents/Frameworks/Sparkle.framework",
+    "Contents/Frameworks/Sparkle.framework/Versions/B/Autoupdate",
+    "Contents/Frameworks/Sparkle.framework/Versions/B/Updater.app",
+    "Contents/Frameworks/Sparkle.framework/Versions/B/XPCServices/Installer.xpc",
+    "Contents/Frameworks/Sparkle.framework/Versions/B/XPCServices/Downloader.xpc",
+    "Contents/Frameworks/libswiftCompatibilitySpan.dylib",
+  ]
+
+  /// A fake Steno.app holding `nestedItems` (empty files for the Mach-O
+  /// executables, directories for the bundles) next to a `bin/` with the
+  /// codesign shim. The caller removes `root`.
+  private func fakeSignedApp() throws -> (root: URL, app: URL, bin: URL) {
+    let root = try TestSupport.temporaryDirectory("steno-verify")
+    let app = root.appendingPathComponent("Steno.app", isDirectory: true)
+    let versions = app.appendingPathComponent(
+      "Contents/Frameworks/Sparkle.framework/Versions/B", isDirectory: true)
+    let files = FileManager.default
+    for bundle in [
+      "Updater.app/Contents/MacOS", "XPCServices/Installer.xpc/Contents/MacOS",
+      "XPCServices/Downloader.xpc/Contents/MacOS",
+    ] {
+      try files.createDirectory(
+        at: versions.appendingPathComponent(bundle, isDirectory: true),
+        withIntermediateDirectories: true)
+    }
+    try Data().write(to: versions.appendingPathComponent("Autoupdate"))
+    try Data().write(
+      to: app.appendingPathComponent("Contents/Frameworks/libswiftCompatibilitySpan.dylib"))
+    let bin = root.appendingPathComponent("bin", isDirectory: true)
+    try files.createDirectory(at: bin, withIntermediateDirectories: true)
+    let tool = bin.appendingPathComponent("codesign")
+    try Self.codesignShim.write(to: tool, atomically: true, encoding: .utf8)
+    try files.setAttributes([.posixPermissions: 0o755], ofItemAtPath: tool.path)
+    return (root, app, bin)
+  }
+
+  /// Bytes read from a pipe on another queue.
+  private final class CapturedOutput: @unchecked Sendable {
+    var data = Data()
+  }
+
+  /// Runs `build-release.sh --verify-only <app>` with `bin` first on PATH.
+  /// stdout and stderr are kept apart: the `::error::` lines must reach
+  /// stderr, since the script captures the helper's stdout as the team.
+  private func verifyOnly(app: URL, bin: URL, environment: [String: String] = [:]) throws -> (
+    status: Int32, stdout: String, stderr: String
+  ) {
+    let process = Process()
+    process.executableURL = URL(fileURLWithPath: "/bin/bash")
+    process.arguments = [
+      Self.scripts.appendingPathComponent("build-release.sh").path, "--verify-only", app.path,
+    ]
+    process.environment = ["PATH": "\(bin.path):/usr/bin:/bin"].merging(environment) { $1 }
+    let out = Pipe()
+    let err = Pipe()
+    process.standardOutput = out
+    process.standardError = err
+    try process.run()
+    let captured = CapturedOutput()
+    let group = DispatchGroup()
+    group.enter()
+    DispatchQueue.global().async {
+      captured.data = err.fileHandleForReading.readDataToEndOfFile()
+      group.leave()
+    }
+    let stdout = out.fileHandleForReading.readDataToEndOfFile()
+    group.wait()
+    process.waitUntilExit()
+    return (
+      process.terminationStatus, String(decoding: stdout, as: UTF8.self),
+      String(decoding: captured.data, as: UTF8.self)
+    )
+  }
+
+  /// Every nested item is visited (the find expression is parenthesised
+  /// ahead of `-print0`), and a dylib signed without the hardened runtime
+  /// flag passes: notarisation requires the flag on executables and
+  /// bundles only.
+  func testVerifyOnlyChecksEveryNestedItemAndAcceptsADylibWithoutRuntime() throws {
+    let (root, app, bin) = try fakeSignedApp()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let result = try verifyOnly(
+      app: app, bin: bin,
+      environment: ["CODESIGN_FAKE_NO_RUNTIME": "libswiftCompatibilitySpan.dylib"])
+    XCTAssertEqual(result.status, 0, result.stdout + result.stderr)
+    for item in Self.nestedItems {
+      XCTAssertTrue(
+        result.stdout.contains("ok: \(item) ("), "\(item) not checked:\n\(result.stdout)")
+    }
+    XCTAssertTrue(
+      result.stdout.contains("ok: Contents/Frameworks/libswiftCompatibilitySpan.dylib (library)"))
+    XCTAssertTrue(
+      result.stdout.contains(
+        "ok: Contents/Frameworks/Sparkle.framework/Versions/B/Autoupdate (executable)"))
+    XCTAssertTrue(
+      result.stdout.contains("==> ok: \(app.path) (team TEAM0000AA, 6 nested items)"), result.stdout
+    )
+    XCTAssertFalse(result.stderr.contains("::error::"), result.stderr)
+  }
+
+  /// A helper without the hardened runtime fails before the notarisation
+  /// upload, and loudly: the `::error::` line and codesign's details block
+  /// land on stderr rather than in the captured team variable.
+  func testVerifyOnlyFailsLoudlyOnABundleWithoutRuntime() throws {
+    let (root, app, bin) = try fakeSignedApp()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let result = try verifyOnly(
+      app: app, bin: bin,
+      environment: ["CODESIGN_FAKE_NO_RUNTIME": "libswiftCompatibilitySpan.dylib Installer.xpc"])
+    XCTAssertEqual(result.status, 1, result.stdout + result.stderr)
+    XCTAssertTrue(
+      result.stderr.contains(
+        "::error::hardened runtime flag missing on \(app.path)/Contents/Frameworks/Sparkle.framework/Versions/B/XPCServices/Installer.xpc"
+      ), result.stderr)
+    XCTAssertTrue(result.stderr.contains("flags=0x0(none)"), "the details block follows")
+    XCTAssertFalse(result.stdout.contains("::error::"), "diagnostics never go to stdout")
+    XCTAssertFalse(result.stdout.contains("==> ok:"), result.stdout)
+    XCTAssertFalse(
+      result.stdout.contains(
+        "ok: Contents/Frameworks/Sparkle.framework/Versions/B/XPCServices/Installer.xpc"))
+
+    // A standalone executable gets the same treatment as a bundle.
+    let autoupdate = try verifyOnly(
+      app: app, bin: bin, environment: ["CODESIGN_FAKE_NO_RUNTIME": "Autoupdate"])
+    XCTAssertEqual(autoupdate.status, 1)
+    XCTAssertTrue(
+      autoupdate.stderr.contains("::error::hardened runtime flag missing on"), autoupdate.stderr)
+    XCTAssertTrue(autoupdate.stderr.contains("/Versions/B/Autoupdate"), autoupdate.stderr)
+  }
+
+  func testVerifyOnlyRejectsANestedItemFromAnotherTeam() throws {
+    let (root, app, bin) = try fakeSignedApp()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let result = try verifyOnly(
+      app: app, bin: bin, environment: ["CODESIGN_FAKE_FOREIGN": "Downloader.xpc"])
+    XCTAssertEqual(result.status, 1, result.stdout + result.stderr)
+    XCTAssertTrue(
+      result.stderr.contains(
+        "::error::\(app.path)/Contents/Frameworks/Sparkle.framework/Versions/B/XPCServices/Downloader.xpc is signed by team 'FOREIGN00X', expected 'TEAM0000AA'"
+      ), result.stderr)
+    XCTAssertFalse(result.stdout.contains("==> ok:"), result.stdout)
+  }
+
+  /// The entitlement count guard on the app is untouched by the nested
+  /// checks.
+  func testVerifyOnlyStillCountsTheEntitlements() throws {
+    let (root, app, bin) = try fakeSignedApp()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let result = try verifyOnly(
+      app: app, bin: bin,
+      environment: ["CODESIGN_FAKE_EXTRA_ENTITLEMENT": "com.apple.security.network.client"])
+    XCTAssertEqual(result.status, 1, result.stdout + result.stderr)
+    XCTAssertTrue(
+      result.stderr.contains("::error::expected exactly two entitlements, found 3"), result.stderr)
+    XCTAssertFalse(result.stdout.contains("verify nested signatures"), "fails before the walk")
   }
 
   // MARK: install-xcodegen.sh
