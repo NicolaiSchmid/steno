@@ -98,6 +98,17 @@ final class AppController {
     pendingReviews.remove(meetingID)
   }
 
+  /// The sidebar control's start: the recorder starts as it does from the
+  /// menu bar, then the live row is requested so the window selects it.
+  /// Starts from the menu bar or the detection prompt call `recorder.start`
+  /// and never move the selection.
+  func startRecordingFromWindow(mode: CaptureMode) async {
+    await recorder.start(mode: mode)
+    if case .recording = recorder.recording {
+      requestedMeetingID = recorder.activeMeetingID
+    }
+  }
+
   private func registerLoginItemOnFirstLaunch() async {
     guard !environment.isPreview, !defaults.bool(forKey: Self.loginItemRegisteredKey) else {
       return

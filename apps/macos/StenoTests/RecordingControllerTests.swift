@@ -233,6 +233,47 @@ final class RecordingControllerTests: XCTestCase {
     XCTAssertTrue(meetings.isEmpty)
   }
 
+  func testActiveMeetingIDFollowsTheRecording() async throws {
+    let environment = try await TestSupport.environment(seed: false)
+    let recorder = RecordingController(environment: environment)
+    XCTAssertNil(recorder.activeMeetingID)
+    await recorder.start(mode: .call)
+    let meetings = try await environment.store.meetings()
+    XCTAssertEqual(meetings.count, 1)
+    XCTAssertEqual(recorder.activeMeetingID, meetings.first?.id, "the live row's id")
+    await recorder.stop()
+    XCTAssertNil(recorder.activeMeetingID, "nothing is active after stop")
+    await environment.pipeline.waitUntilIdle()
+  }
+
+  /// Only `.denied` required kinds are reported; `.unknown` (macOS has not
+  /// asked yet) and optional kinds are not. The report is not a guard:
+  /// `start` still runs, so `testAFailingSessionFactoryLeavesNoMeetingRow`
+  /// remains the one failure path.
+  func testRefreshPermissionsReportsDeniedRequiredKindsOnly() async throws {
+    let environment = try await TestSupport.environment(seed: false)
+    let permissions = try XCTUnwrap(environment.permissions as? FakePermissions)
+    permissions.states[.microphone] = .denied
+    permissions.states[.systemAudio] = .unknown
+    permissions.states[.calendar] = .denied
+    let recorder = RecordingController(environment: environment)
+    XCTAssertEqual(recorder.deniedPermissions, [], "nothing reported before a refresh")
+    await recorder.refreshPermissions()
+    XCTAssertEqual(recorder.deniedPermissions, [.microphone])
+
+    await recorder.start(mode: .call)
+    guard case .recording = recorder.recording else {
+      return XCTFail("a reported denial does not guard start, got \(recorder.recording)")
+    }
+    XCTAssertEqual(recorder.deniedPermissions, [.microphone], "start does not touch the report")
+    await recorder.stop()
+
+    permissions.states[.microphone] = .granted
+    await recorder.refreshPermissions()
+    XCTAssertEqual(recorder.deniedPermissions, [], "a fix in System Settings clears the report")
+    await environment.pipeline.waitUntilIdle()
+  }
+
   func testProbeResultShowsAsAWarning() async throws {
     let environment = try await TestSupport.environment(seed: false)
     let recorder = RecordingController(environment: environment)

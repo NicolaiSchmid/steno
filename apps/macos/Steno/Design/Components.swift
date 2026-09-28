@@ -40,6 +40,18 @@ struct StenoSecondaryButtonStyle: ButtonStyle {
   }
 }
 
+/// The one 6 pt status dot: the Stop control, the message rows and the
+/// list entry share it.
+struct StatusDot: View {
+  var color: Color
+
+  var body: some View {
+    Circle()
+      .fill(color)
+      .frame(width: 6, height: 6)
+  }
+}
+
 /// A small alpha chip (never filled) with a semantic colour.
 struct StatusChip: View {
   var text: String
@@ -104,7 +116,7 @@ struct MessageRow: View {
 
   var body: some View {
     HStack(alignment: .top, spacing: Theme.Space.sm) {
-      Circle().fill(color).frame(width: 6, height: 6).padding(.top, 5)
+      StatusDot(color: color).padding(.top, 5)
       Text(text)
         .font(.steno(Theme.TextSize.xs))
         .foregroundStyle(Color.stenoForeground)

@@ -259,6 +259,47 @@ final class AppControllerTests: XCTestCase {
     await controller.shutdown()
   }
 
+  /// The sidebar control starts through the controller, which requests the
+  /// live row so the window selects it; the menu bar and the detection
+  /// prompt call `recorder.start` and leave the selection alone.
+  func testStartFromTheWindowSelectsTheLiveRowAndTheMenuBarDoesNot() async throws {
+    let environment = try await TestSupport.environment(seed: false)
+    let controller = try makeController(environment)
+    XCTAssertNil(controller.requestedMeetingID)
+
+    await controller.startRecordingFromWindow(mode: .call)
+    guard case .recording = controller.recorder.recording else {
+      return XCTFail("expected .recording, got \(controller.recorder.recording)")
+    }
+    let live = try XCTUnwrap(controller.recorder.activeMeetingID)
+    XCTAssertEqual(controller.requestedMeetingID, live, "the window shows the row it started")
+    let meetings = try await environment.store.meetings()
+    XCTAssertEqual(meetings.map(\.id), [live])
+    await controller.recorder.stop()
+    controller.requestedMeetingID = nil
+
+    await controller.recorder.start(mode: .inPerson)
+    guard case .recording = controller.recorder.recording else {
+      return XCTFail("expected .recording, got \(controller.recorder.recording)")
+    }
+    XCTAssertNil(
+      controller.requestedMeetingID, "a start from the menu bar does not steal the selection")
+    await controller.recorder.stop()
+    await environment.pipeline.waitUntilIdle()
+  }
+
+  /// A start that fails requests nothing: there is no live row to show.
+  func testStartFromTheWindowThatFailsRequestsNoRow() async throws {
+    let environment = try await TestSupport.environment(
+      seed: false,
+      makeCaptureSession: { _ in throw CaptureError.invalidState("no input device") })
+    let controller = try makeController(environment)
+    await controller.startRecordingFromWindow(mode: .call)
+    XCTAssertEqual(controller.recorder.recording, .idle)
+    XCTAssertNotNil(controller.recorder.lastError)
+    XCTAssertNil(controller.requestedMeetingID)
+  }
+
   func testShutdownStopsTheRecordingAndTheDetector() async throws {
     let environment = try await TestSupport.environment(seed: false)
     let controller = try makeController(environment)
