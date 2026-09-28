@@ -245,8 +245,7 @@ final class AppControllerTests: XCTestCase {
       "Speaker 2 is only suggested, so the review stays pending")
 
     try await environment.store.confirm(
-      speakerID: SampleData.speakerTwoID, person: SampleData.persons()[0],
-      memory: environment.speakerMemory)
+      speakerID: SampleData.speakerTwoID, person: SampleData.persons()[0])
     await TestSupport.waitUntil("review cleared by the store") {
       !controller.pendingReviews.contains(SampleData.meetingID)
     }
