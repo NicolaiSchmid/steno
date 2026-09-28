@@ -1,16 +1,20 @@
 import Foundation
 
 /// What a finished capture hands to `LocalRecordingIntake.complete`: the
-/// asset the writer produced (master, lanes, sidecars) and the seconds of
-/// audio in it. StenoAudio's `CaptureResult` maps onto it; core does not
-/// know the capture types.
+/// asset the writer produced (master, lanes, sidecars), the seconds of
+/// audio in it and why it ended. StenoAudio's `CaptureResult` maps onto it;
+/// core does not know the capture types. The reason is required because the
+/// caller always knows it (the user stopped, the countdown ran out, the
+/// device stayed lost, Steno quit).
 public struct RecordingResult: Sendable, Equatable, Hashable {
   public var asset: AudioAsset
   public var duration: TimeInterval
+  public var endReason: RecordingEndReason
 
-  public init(asset: AudioAsset, duration: TimeInterval) {
+  public init(asset: AudioAsset, duration: TimeInterval, endReason: RecordingEndReason) {
     self.asset = asset
     self.duration = duration
+    self.endReason = endReason
   }
 }
 
@@ -86,9 +90,11 @@ public struct LocalRecordingIntake: Sendable {
 
   /// Writes the `.recording` meeting and its `.them` participants in one
   /// transaction and returns the meeting. An empty or nil `title` becomes
-  /// "Call 2026-09-24 11:00" or "Meeting 2026-09-24 11:00" by `source`. The
-  /// template is `Settings.defaultTemplateID`. Attendees are deduplicated by
-  /// email, else by name, case-insensitively; blank names are dropped.
+  /// "Call 2026-09-24 11:00" or "Meeting 2026-09-24 11:00" by `source` with
+  /// `titleOrigin` `.default`; a title with a `calendarEventID` is
+  /// `.calendar`, one without is `.user`. The template is
+  /// `Settings.defaultTemplateID`. Attendees are deduplicated by email, else
+  /// by name, case-insensitively; blank names are dropped.
   public func begin(
     source: MeetingSource,
     title: String? = nil,
@@ -99,6 +105,8 @@ public struct LocalRecordingIntake: Sendable {
     let settings = try await settings.load()
     let timestamp = now()
     let trimmedTitle = title?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+    let titleOrigin: TitleOrigin =
+      trimmedTitle.isEmpty ? .default : calendarEventID == nil ? .user : .calendar
     let meeting = Meeting(
       id: UUID(),
       title: trimmedTitle.isEmpty
@@ -108,6 +116,7 @@ public struct LocalRecordingIntake: Sendable {
       source: source,
       calendarEventID: calendarEventID,
       state: .recording,
+      titleOrigin: titleOrigin,
       templateID: settings.defaultTemplateID,
       createdAt: timestamp,
       updatedAt: timestamp
@@ -117,13 +126,14 @@ public struct LocalRecordingIntake: Sendable {
     return meeting
   }
 
-  /// Writes the duration, sets the asset's retention (`retention`, else
-  /// `Settings.defaultRetention` as it is now, so a change made during the
-  /// recording applies) with `expiresAt` cleared, and enqueues the meeting
-  /// as `.queued`. Returns the meeting as handed to the pipeline. A meeting
-  /// that is not `.recording` throws `LocalRecordingIntakeError.notRecording`
-  /// and is left alone; any other failure (the enqueue among them) marks the
-  /// meeting `.failed` with the reason and is rethrown.
+  /// Writes the duration and the end reason in one update, sets the asset's
+  /// retention (`retention`, else `Settings.defaultRetention` as it is now,
+  /// so a change made during the recording applies) with `expiresAt`
+  /// cleared, and enqueues the meeting as `.queued`. Returns the meeting as
+  /// handed to the pipeline. A meeting that is not `.recording` throws
+  /// `LocalRecordingIntakeError.notRecording` and is left alone; any other
+  /// failure (the enqueue among them) marks the meeting `.failed` with the
+  /// reason and is rethrown.
   @discardableResult
   public func complete(
     meetingID: UUID, result: RecordingResult, retention: AudioRetention? = nil
@@ -137,6 +147,7 @@ public struct LocalRecordingIntake: Sendable {
           throw LocalRecordingIntakeError.notRecording(meetingID, meeting.state.kind)
         }
         meeting.duration = result.duration
+        meeting.endReason = result.endReason
       }
       meeting.state = .queued
       var asset = result.asset

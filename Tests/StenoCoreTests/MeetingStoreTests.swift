@@ -31,6 +31,37 @@ import Testing
     #expect(try await store.meeting(id: SampleData.meetingID)?.title == "Renamed")
   }
 
+  /// The user's rename stores the trimmed title as `.user`, so no later
+  /// default or model title is mistaken for it; a blank rename changes
+  /// nothing; the pipeline's own title write carries its origin.
+  @Test func renameStoresTheUserOriginAndProcessingResultsCarryTheirs() async throws {
+    let store = try MeetingStore.inMemory()
+    try await store.save(SampleData.meeting())
+    let later = SampleData.updatedAt.addingTimeInterval(60)
+    try await store.rename(meetingID: SampleData.meetingID, title: "  Neuer Titel ", now: later)
+    let renamed = try #require(try await store.meeting(id: SampleData.meetingID))
+    #expect(renamed.title == "Neuer Titel")
+    #expect(renamed.titleOrigin == .user)
+    #expect(renamed.updatedAt == later)
+
+    try await store.rename(meetingID: SampleData.meetingID, title: " \n", now: later + 1)
+    #expect(try await store.meeting(id: SampleData.meetingID) == renamed, "blank: untouched")
+    await #expect(throws: MeetingStoreError.meetingNotFound(SampleData.uuid(999))) {
+      try await store.rename(meetingID: SampleData.uuid(999), title: "x", now: later)
+    }
+
+    var results = renamed
+    results.title = "Vom Modell"
+    results.titleOrigin = .summary
+    results.endReason = .quit
+    try await store.replaceTranscript(results, segments: [], speakers: [])
+    let processed = try #require(try await store.meeting(id: SampleData.meetingID))
+    #expect(processed.title == "Vom Modell")
+    #expect(processed.titleOrigin == .summary)
+    #expect(
+      processed.endReason == nil, "the end reason is the recorder's column, not the pipeline's")
+  }
+
   @Test func meetingsAreNewestFirstWithPaging() async throws {
     let store = try MeetingStore.inMemory()
     for n in 1...5 {

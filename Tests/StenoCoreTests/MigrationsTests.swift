@@ -10,7 +10,7 @@ import Testing
     try Migrations.migrator().migrate(queue)
     try queue.read { (db) throws in
       #expect(try Migrations.migrator().appliedIdentifiers(db) == Set(Migrations.identifiers))
-      #expect(Migrations.identifiers == ["v1", "v2"])
+      #expect(Migrations.identifiers == ["v1", "v2", "v3"])
       let tables = try String.fetchAll(
         db, sql: "SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name")
       for expected in [
@@ -26,16 +26,34 @@ import Testing
     }
   }
 
+  /// Inserts `meeting` into a database that predates `v3`: the row's columns
+  /// minus the two `v3` added, so the upgrade tests need no second record
+  /// type per schema version.
+  static func insertPreV3(_ meeting: Meeting, _ db: Database) throws {
+    var columns = try MeetingRow(meeting).databaseDictionary
+    columns["endReason"] = nil
+    columns["titleOrigin"] = nil
+    let names = columns.keys.sorted()
+    try db.execute(
+      sql: """
+        INSERT INTO meeting (\(names.joined(separator: ", ")))
+        VALUES (\(names.map { _ in "?" }.joined(separator: ", ")))
+        """,
+      arguments: StatementArguments(names.map { columns[$0]! }))
+  }
+
   /// A database created before `v2` (a release that shipped `v1` alone)
-  /// upgrades in place: `v2` alone is applied, every row survives, the new
-  /// cascade holds, and the schema is byte-identical to a fresh database's.
+  /// upgrades in place: the later versions alone are applied, every row
+  /// survives, the new cascade holds, the `v3` columns read as "no reason"
+  /// and "default title", and the schema is byte-identical to a fresh
+  /// database's.
   @Test func aV1DatabaseUpgradesToTheLatestVersionKeepingItsRows() throws {
     let queue = try DatabaseQueue()
     var v1Only = DatabaseMigrator()
     v1Only.registerMigration("v1", migrate: Migrations.v1)
     try v1Only.migrate(queue)
     try queue.write { db in
-      try MeetingRow(SampleData.meeting()).insert(db)
+      try Self.insertPreV3(SampleData.meeting(), db)
       for person in SampleData.persons() { try PersonRow(person).insert(db) }
       for speaker in SampleData.speakers() { try SpeakerRow(speaker).insert(db) }
       try AudioAssetRow(SampleData.audioAsset()).insert(db)
@@ -43,21 +61,28 @@ import Testing
     try queue.read { (db) throws in
       #expect(try Migrations.migrator().appliedIdentifiers(db) == ["v1"])
       #expect(try !db.tableExists("speakerNameSuggestion"))
+      #expect(try !db.columns(in: "meeting").contains { $0.name == "endReason" })
     }
 
     try Migrations.migrator().migrate(queue)
 
     try queue.read { (db) throws in
       #expect(try Migrations.migrator().appliedIdentifiers(db) == Set(Migrations.identifiers))
+      let meeting = try MeetingRow.fetchOne(db, key: SampleData.meetingID)?.meeting
+      #expect(meeting == SampleData.meeting())
+      #expect(meeting?.endReason == nil)
+      #expect(meeting?.titleOrigin == .default)
       #expect(
-        try MeetingRow.fetchOne(db, key: SampleData.meetingID)?.meeting == SampleData.meeting())
+        try Row.fetchOne(db, sql: "SELECT endReason, titleOrigin FROM meeting")
+          == ["endReason": nil, "titleOrigin": "default"])
       #expect(
         try SpeakerRow.order(SpeakerRow.Columns.id).fetchAll(db).map(\.speaker)
           == SampleData.speakers())
       #expect(try AudioAssetRow.fetchAll(db).map(\.asset) == [SampleData.audioAsset()])
       #expect(try SpeakerNameSuggestionRow.fetchCount(db) == 0)
       #expect(try Row.fetchAll(db, sql: "PRAGMA foreign_key_check").isEmpty)
-      try Snapshot.assert(SchemaSnapshotTests.dump(db), matches: "snapshots/schema/v2.sql")
+      let latest = try #require(Migrations.identifiers.last)
+      try Snapshot.assert(SchemaSnapshotTests.dump(db), matches: "snapshots/schema/\(latest).sql")
     }
     try queue.write { db in
       let suggestion = SpeakerNameSuggestion(
@@ -74,7 +99,59 @@ import Testing
     try Migrations.migrator().migrate(queue)
     try Migrations.migrator().migrate(queue)
     try queue.read { (db) throws in
-      #expect(try Migrations.migrator().appliedIdentifiers(db).count == 2)
+      #expect(
+        try Migrations.migrator().appliedIdentifiers(db).count == Migrations.identifiers.count)
+    }
+  }
+
+  /// A `v2` database (the first release) gains the two columns with their
+  /// defaults, and a row written afterwards stores every end reason as one
+  /// readable JSON text and the title origin as its raw value.
+  @Test func aV2DatabaseGainsEndReasonAndTitleOrigin() throws {
+    let queue = try DatabaseQueue()
+    try Migrations.migrator(upTo: 2).migrate(queue)
+    try queue.write { db in try Self.insertPreV3(SampleData.meeting(), db) }
+    try Migrations.migrator().migrate(queue)
+    try queue.write { db in
+      #expect(try Migrations.migrator().appliedIdentifiers(db) == Set(Migrations.identifiers))
+      #expect(
+        try MeetingRow.fetchOne(db, key: SampleData.meetingID)?.meeting == SampleData.meeting())
+      let reasons: [RecordingEndReason] = [
+        .manual, .callEnded(appName: "Zen"), .callEnded(appName: nil), .deviceLost, .quit,
+      ]
+      for (index, reason) in reasons.enumerated() {
+        var meeting = SampleData.meeting()
+        meeting.id = SampleData.uuid(200 + index)
+        meeting.endReason = reason
+        meeting.titleOrigin = .summary
+        try MeetingRow(meeting).insert(db)
+        #expect(try MeetingRow.fetchOne(db, key: meeting.id)?.meeting == meeting)
+      }
+      #expect(
+        try String.fetchOne(
+          db, sql: "SELECT endReason FROM meeting WHERE id = ?",
+          arguments: [SampleData.uuid(201).uuidString]) == #"{"callEnded":"Zen"}"#)
+      #expect(
+        try String.fetchOne(
+          db, sql: "SELECT endReason FROM meeting WHERE id = ?",
+          arguments: [SampleData.uuid(202).uuidString]) == #""callEnded""#)
+      #expect(
+        try String.fetchOne(
+          db, sql: "SELECT titleOrigin FROM meeting WHERE id = ?",
+          arguments: [SampleData.uuid(200).uuidString]) == "summary")
+      // An unknown value fails the fetch instead of becoming a default case.
+      try db.execute(
+        sql: "UPDATE meeting SET endReason = 'paused' WHERE id = ?",
+        arguments: [SampleData.uuid(200).uuidString])
+      #expect(throws: (any Error).self) {
+        try MeetingRow.fetchOne(db, key: SampleData.uuid(200))
+      }
+      try db.execute(
+        sql: "UPDATE meeting SET endReason = NULL, titleOrigin = 'oracle' WHERE id = ?",
+        arguments: [SampleData.uuid(200).uuidString])
+      #expect(throws: (any Error).self) {
+        try MeetingRow.fetchOne(db, key: SampleData.uuid(200))
+      }
     }
   }
 

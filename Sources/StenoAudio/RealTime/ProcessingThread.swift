@@ -46,7 +46,13 @@ final class ProcessingThread: @unchecked Sendable {
   private let finished = DispatchSemaphore(value: 0)
   private var thread: Thread?
 
-  init(sink: LaneFrameSink, relay: FrameRelay, configuration: Configuration) {
+  /// `levels` nil allocates a fresh slot; the session passes the previous
+  /// thread's slot when it rebuilds after a device change, so the writer
+  /// thread keeps reading the one it was given at start.
+  init(
+    sink: LaneFrameSink, relay: FrameRelay, configuration: Configuration,
+    levels: LevelSlot? = nil
+  ) {
     self.sink = sink
     self.relay = relay
     self.configuration = configuration
@@ -80,7 +86,7 @@ final class ProcessingThread: @unchecked Sendable {
       delayLine = nil
     }
     meters = configuration.lanes.map { _ in LevelMeter() }
-    levels = LevelSlot(hasSystem: systemIndex != nil)
+    self.levels = levels ?? LevelSlot(hasSystem: systemIndex != nil)
   }
 
   deinit {

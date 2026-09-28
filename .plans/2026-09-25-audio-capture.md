@@ -47,7 +47,7 @@ capture backend.
 | Threads | IOProc (real-time) copies into two lock-free rings. A dedicated processing thread drains 10 ms frames, runs AEC, metering and downmix. A serial writer queue does file I/O. Actors only outside these three. |
 | Backend | `CaptureBackend` is the seam under `CaptureSession`: `LiveCaptureBackend` (tap + aggregate + IOProc) and `SyntheticCaptureBackend` in `Sources/StenoAudio/Testing/` (deterministic sines per lane, injectable device loss, no HAL). Everything from the rings down to the files runs on CI through the synthetic backend. |
 | Permission | No public status API (verified: AudioCap README; `NSAudioCaptureUsageDescription` must be typed as a literal Info.plist key). Onboarding runs the full tap pipeline for 500 ms and treats "prompt accepted and buffers non-zero while `afplay` plays a tone" as authorised. The TCC service is `kTCCServiceAudioCapture`; `tccutil reset AudioCapture <bundle-id>` re-triggers the prompt (verified: field reports; DTS lists valid names via `dyld_info -exports …/TCC.framework/…/TCC | grep kTCCService`). AudioCap's private `TCCAccessPreflight`/`TCCAccessRequest` compile only under `STENO_TCC_SPI`, never shipped. TCC attributes a Terminal-launched tool to Terminal, so every prompt check runs from a bundled, signed app (see step 3). |
-| Meeting detection | Listener on `kAudioDevicePropertyDeviceIsRunningSomewhere` for input devices, then attribution by enumerating `kAudioHardwarePropertyProcessObjectList` and reading `kAudioProcessPropertyIsRunningInput` (exists, verified: Apple docs; listener behaviour undocumented, "listeners reportedly never fire" stays open) and `kAudioProcessPropertyBundleID`. Poll every 2 s as a safety net; both timers on an injected `Clock<Duration>`. |
+| Meeting detection | Listener on `kAudioDevicePropertyDeviceIsRunningSomewhere` for input devices, then attribution by enumerating `kAudioHardwarePropertyProcessObjectList` and reading `kAudioProcessPropertyIsRunningInput` (exists, verified: Apple docs; listener behaviour undocumented, "listeners reportedly never fire" stays open) and `kAudioProcessPropertyBundleID`. Poll every 1 s as a safety net (2 s at first; see the deviations); both timers on an injected `Clock<Duration>`. |
 | Lanes | Call mode: `[.mic, .system]`. In-person: `[.mixed]`, one lane, no tap, no AEC. `AudioLane` is StenoCore's enum, shared with `TranscriptSegment.lane`. |
 | Decode and mixdown | `AVFoundationAudioCodec: AudioDecoder`. `decode(asset, lane:)` returns the sidecar when present, otherwise reads CAF, m4a or WAV through `AVAudioFile` + `AVAudioConverter` to 16 kHz mono for that lane (channel n = lane n of the master). `mixdown` sums lanes to mono and writes AAC 64 kbps `.m4a` via `AVAssetWriter`; `.m4aAAC` inputs are copied. |
 
@@ -327,8 +327,11 @@ checks were run.
 
 ## Deferred
 
-- Rebuilding the aggregate mid-meeting after a device change (v1 fails with `.deviceLost` and stops
-  cleanly).
+- Rebuilding the aggregate mid-meeting after a device change: deferred at first (`.deviceLost`, a
+  clean stop), lifted by
+  [`2026-09-28-device-change-during-recording.md`](2026-09-28-device-change-during-recording.md)
+  (the session rebuilds the backend in place, fills the gap with silence and gives up after four
+  failed restarts).
 - Per-application taps and an app picker; ScreenCaptureKit capture.
 - A mic-lane integration test on CI (needs a virtual input device; the `STENO_VIRTUAL_INPUT_UID`
   gate stays optional).

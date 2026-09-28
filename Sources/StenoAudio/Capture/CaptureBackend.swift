@@ -3,8 +3,11 @@ import StenoCore
 
 /// The HAL seam under `CaptureSession`: a backend delivers frames for every
 /// lane into the `LaneFrameSink` from its own real-time context and reports
-/// device loss. `LiveCaptureBackend` is the tap + aggregate + IOProc;
-/// `SyntheticCaptureBackend` (Testing/) generates deterministic tones.
+/// device changes through the sink. `LiveCaptureBackend` is the tap +
+/// aggregate + IOProc; `SyntheticCaptureBackend` (Testing/) generates
+/// deterministic tones. The session orchestrates a rebuild after a change by
+/// calling `stop()` and `start` again on the same backend and the same sink,
+/// so a backend must be restartable.
 public protocol CaptureBackend: Sendable {
   /// Starts delivering `lanes` (in this order) at `StenoAudio.sampleRate`
   /// and describes the stream it opened. `inputDeviceUID` nil selects the

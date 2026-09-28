@@ -5,8 +5,9 @@ extension ProcessingPipeline {
   /// summary, tasks, decisions and speaker name suggestions with the
   /// meeting's title, language and summed usage in one transaction. An
   /// unknown template id fails the stage; nothing is substituted. A calendar
-  /// title stays; any other title is replaced by the model's. The caller
-  /// folds earlier usage (cleanup) into `meeting.llmUsage` first.
+  /// title and a title the user typed (`titleOrigin == .user`) stay; a
+  /// default title is replaced by the model's. The caller folds earlier usage
+  /// (cleanup) into `meeting.llmUsage` first.
   ///
   /// Without a summarizer (no LLM endpoint) the stage posts its progress,
   /// leaves title, language and usage as given, and persists the meeting
@@ -37,8 +38,9 @@ extension ProcessingPipeline {
 
       updated.summary = output.summary
       updated.summary?.templateID = template.id
-      if meeting.calendarEventID == nil, !output.title.isEmpty {
+      if meeting.calendarEventID == nil, meeting.titleOrigin != .user, !output.title.isEmpty {
         updated.title = output.title
+        updated.titleOrigin = .summary
       }
       if let language = output.language { updated.language = language }
       updated.llmUsage = (meeting.llmUsage ?? .zero) + output.usage

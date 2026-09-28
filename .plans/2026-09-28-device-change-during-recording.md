@@ -1,6 +1,6 @@
 # Steno: device changes during a recording and an honest auto-stop
 
-Status: proposal, 2026-09-28, revised after the 2026-09-28 reviews. Triggered by first-run feedback (second round).
+Status: accepted, 2026-09-28, revised after the 2026-09-28 reviews; steps 1 to 6 implemented in PR #115, steps 7 to 10 follow in the app PR. Triggered by first-run feedback (second round).
 
 Binding context: [`2026-09-24-initial-scope.md`](2026-09-24-initial-scope.md) (Capture (Mac)),
 [`2026-09-25-audio-capture.md`](2026-09-25-audio-capture.md) (the capture design, its

@@ -71,15 +71,18 @@ struct DevCaptureSpike: AsyncParsableCommand {
       print("output latency + safety offset: \(stream.outputLatencyFrames) frames")
     }
     let levelTask = session.printLevelsToStandardError()
+    let noticeTask = session.printNoticesToStandardError()
     try? await Task.sleep(for: .milliseconds(Int(seconds * 1_000)))
     let result: CaptureResult
     do {
       result = try await session.stop()
     } catch {
       levelTask.cancel()
+      noticeTask.cancel()
       throw RuntimeFailure(description: "could not stop: \(error)")
     }
     levelTask.cancel()
+    noticeTask.cancel()
 
     let master = try CAFFile.read(result.asset.url)
     print("master: \(result.asset.url.path) (\(String(format: "%.2f", master.duration)) s)")
@@ -123,5 +126,11 @@ struct DevCaptureSpike: AsyncParsableCommand {
       print(String(format: "mic - system onset: %.1f ms", (mic - system) * 1_000))
     }
     print("system lane silent: \(result.statistics.systemLaneSilent)")
+    print("device changes: \(result.statistics.deviceChanges)")
+    print(String(format: "gap filled: %.2f s", result.statistics.gapSeconds))
+    if let stream = await session.stream, result.statistics.deviceChanges > 0 {
+      print("input latency + safety offset after rebuild: \(stream.inputLatencyFrames) frames")
+      print("output latency + safety offset after rebuild: \(stream.outputLatencyFrames) frames")
+    }
   }
 }

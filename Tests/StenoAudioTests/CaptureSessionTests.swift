@@ -6,8 +6,9 @@ import Testing
 @testable import StenoAudio
 
 /// The session over the synthetic backend: state machine, level stream,
-/// files, drop accounting, device loss. Everything runs as fast as the rings
-/// accept; no wall-clock sleeps.
+/// files, drop accounting, device changes and loss. Everything runs as fast
+/// as the rings accept and the rebuild's backoff runs on a `ManualClock`; no
+/// wall-clock sleeps.
 @Suite(.timeLimit(.minutes(2))) struct CaptureSessionTests {
   func configuration(_ mode: CaptureMode, in directory: URL, keepRaw: Bool = false)
     -> CaptureConfiguration
@@ -15,6 +16,55 @@ import Testing
     CaptureConfiguration(
       mode: mode, echoCancellation: true, keepRawMicLane: keepRaw, outputDirectory: directory)
   }
+
+  func kind(_ state: CaptureState) -> String {
+    switch state {
+    case .idle: "idle"
+    case .starting: "starting"
+    case .recording: "recording"
+    case .stopping: "stopping"
+    case .failed: "failed"
+    }
+  }
+
+  /// Advances `clock` through the first `count` backoff sleeps of a rebuild
+  /// (`CaptureSession.restartBackoff`), each once the sleeper is registered.
+  func advance(_ clock: ManualClock, throughSleeps count: Int) async {
+    for step in CaptureSession.restartBackoff.prefix(count) {
+      #expect(await clock.waitForSleepers(1), "the rebuild sleeps on the injected clock")
+      clock.advance(by: step)
+    }
+  }
+
+  /// Advances `clock` in 5 ms steps whenever the rebuild waits out a full
+  /// relay, until `done` says the rebuild is over. A fast writer may drain
+  /// the relay before it ever fills, so the waits are driven as they appear
+  /// rather than counted.
+  func driveRelayWaits(_ clock: ManualClock, until done: () async -> Bool) async {
+    while !(await done()) {
+      if await clock.waitForSleepers(1, attempts: 100) {
+        clock.advance(by: .milliseconds(5))
+      }
+    }
+  }
+
+  /// Gives every task already queued on the cooperative pool (a report that
+  /// arrives as a `Task`, an abandoned rebuild waking) every chance to run
+  /// before asserting that nothing further happened. No wall time enters.
+  func settle() async {
+    for _ in 0..<1_000 { await Task.yield() }
+  }
+
+  /// Collects notices as they arrive, for tests that assert on their absence.
+  actor NoticeLog {
+    var entries: [CaptureNotice] = []
+    func append(_ notice: CaptureNotice) { entries.append(notice) }
+  }
+
+  /// What a restarted backend reports: a Bluetooth output's latencies.
+  static let restartedStream = CaptureStream(
+    sampleRate: StenoAudio.sampleRate, inputLatencyFrames: 480, outputLatencyFrames: 9_600,
+    layout: nil)
 
   /// Collects states until the predicate matches or the stream ends.
   func collectStates(
@@ -104,17 +154,26 @@ import Testing
     #expect(abs(mic.duration - 3) < 0.02)
   }
 
+  /// A device that changes and never comes back: four restarts fail across
+  /// the backoff ladder and the recording ends in `.deviceLost`, finalised
+  /// and readable to its last frame.
   @Test func deviceLostStopsCleanlyWithAReadableMaster() async throws {
     let directory = try Fixtures.temporaryDirectory("session")
     defer { try? FileManager.default.removeItem(at: directory) }
+    let clock = ManualClock()
     let backend = SyntheticCaptureBackend(
-      lanes: [.mic, .system], tone: [.mic: 440, .system: 1_000], seconds: 10, loseDeviceAfter: 1)
+      lanes: [.mic, .system], tone: [.mic: 440, .system: 1_000], seconds: 10,
+      changeDeviceAfter: 1, restartsThatFail: CaptureSession.restartAttempts)
     let session = try CaptureSession(
       configuration: configuration(.call, in: directory), backend: backend,
-      echoCanceller: try PassthroughEchoCanceller(sampleRate: 48_000, frameSize: 480))
+      echoCanceller: try PassthroughEchoCanceller(sampleRate: 48_000, frameSize: 480),
+      clock: clock)
     let states = await session.states
+    var notices = await session.notices.makeAsyncIterator()
     let meetingID = UUID()
     try await session.start(meetingID: meetingID)
+    #expect(await notices.next() == .deviceChanged(.defaultInputChanged))
+    await advance(clock, throughSleeps: CaptureSession.restartAttempts - 1)
     let seen = await collectStates(states) { state in
       if case .failed = state { return true }
       return false
@@ -127,17 +186,22 @@ import Testing
     let result = try await session.stop()
     #expect(seen.last == .failed(.deviceLost, recording: result))
     #expect(result.statistics.endedOnDeviceLoss)
-    #expect(abs(result.statistics.duration - 1) < 0.05)
+    #expect(result.statistics.deviceChanges == 0)
+    #expect(result.statistics.gapSeconds == 0)
+    #expect(result.statistics.duration == 1)
     let master = try CAFFile.read(result.asset.url)
     #expect(master.channels.count == 2)
-    #expect(abs(master.duration - 1) < 0.05)
+    #expect(master.frameCount == 48_000)
     #expect(await session.state == .failed(.deviceLost, recording: result))
+    #expect(backend.starts == 1 + CaptureSession.restartAttempts)
 
-    // A failed session restarts (and this backend loses its device again).
+    // A failed session restarts; this backend's one change is spent, so the
+    // second recording sees no change and no restart.
     try await session.start(meetingID: UUID())
-    _ = try await session.stop()
-    let restarted = await session.state
-    #expect(restarted == .idle || restarted.failure == .deviceLost)
+    let second = try await session.stop()
+    #expect(await session.state == .idle)
+    #expect(backend.starts == 2 + CaptureSession.restartAttempts, "one start, no restart")
+    #expect(second.statistics.deviceChanges == 0)
   }
 
   /// A tap that never delivers anything (permission denied, a muted mix) is
@@ -200,14 +264,19 @@ import Testing
   @Test func stopAfterDeviceLossReturnsTheSameRecordingEveryTime() async throws {
     let directory = try Fixtures.temporaryDirectory("session")
     defer { try? FileManager.default.removeItem(at: directory) }
+    let clock = ManualClock()
     let backend = SyntheticCaptureBackend(
       lanes: [.mic, .system], tone: [.mic: 440, .system: 1_000], seconds: 10,
-      loseDeviceAfter: 0.5)
+      changeDeviceAfter: 0.5, restartsThatFail: CaptureSession.restartAttempts)
     let session = try CaptureSession(
       configuration: configuration(.call, in: directory), backend: backend,
-      echoCanceller: try PassthroughEchoCanceller(sampleRate: 48_000, frameSize: 480))
+      echoCanceller: try PassthroughEchoCanceller(sampleRate: 48_000, frameSize: 480),
+      clock: clock)
     let states = await session.states
+    var notices = await session.notices.makeAsyncIterator()
     try await session.start(meetingID: UUID())
+    #expect(await notices.next() == .deviceChanged(.defaultInputChanged))
+    await advance(clock, throughSleeps: CaptureSession.restartAttempts - 1)
     _ = await collectStates(states) { state in
       if case .failed = state { return true }
       return false
@@ -462,11 +531,11 @@ import Testing
 
   func faultySession(
     in directory: URL, backend: SyntheticCaptureBackend, failAfterFrames: Int? = nil,
-    failFinish: Bool
+    failFinish: Bool, clock: any Clock<Duration> = ContinuousClock()
   ) throws -> CaptureSession {
     try CaptureSession(
       configuration: configuration(.inPerson, in: directory), backend: backend,
-      echoCanceller: nil, writerHeadroomFrames: 1_000,
+      echoCanceller: nil, writerHeadroomFrames: 1_000, clock: clock,
       makeWriter: { layout, lanes, keepRaw in
         FaultyWriter(
           try RecordingWriter(layout: layout, lanes: lanes, keepRawMic: keepRaw),
@@ -543,5 +612,505 @@ import Testing
     let layout = RecordingLayout(audioFolder: directory, meetingID: meetingID)
     #expect(!FileManager.default.fileExists(atPath: layout.directory.path))
     await #expect(throws: CaptureError.self) { try await session.stop() }
+  }
+
+  // MARK: - Device changes
+
+  /// A device change rebuilds the backend in place: the state never leaves
+  /// `.recording`, the notices say what happened, the master keeps growing on
+  /// the same files with every frame of both starts and nothing dropped, the
+  /// echo canceller starts cold again, and no silence is needed when the
+  /// restart succeeds at once.
+  @Test func aDeviceChangeKeepsRecordingOnTheSameFiles() async throws {
+    let directory = try Fixtures.temporaryDirectory("session")
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let clock = ManualClock()
+    let backend = SyntheticCaptureBackend(
+      lanes: [.mic, .system], tone: [.mic: 440, .system: 1_000], seconds: 2, changeDeviceAfter: 1,
+      streamAfterRestart: Self.restartedStream)
+    let canceller = try ResetLoggingCanceller(sampleRate: 48_000, frameSize: 480)
+    let session = try CaptureSession(
+      configuration: configuration(.call, in: directory), backend: backend,
+      echoCanceller: canceller, writerHeadroomFrames: 1_000, clock: clock)
+    let states = await session.states
+    var notices = await session.notices.makeAsyncIterator()
+    let meetingID = UUID()
+    try await session.start(meetingID: meetingID)
+    #expect(await session.stream == .synthetic)
+
+    #expect(await notices.next() == .deviceChanged(.defaultInputChanged))
+    #expect(await notices.next() == .deviceResumed(attempt: 1, gapSeconds: 0))
+    guard case .recording = await session.state else {
+      Issue.record("expected .recording after the rebuild, got \(await session.state)")
+      return
+    }
+    #expect(await session.stream == Self.restartedStream, "the rebuilt backend's stream")
+    #expect(backend.starts == 2)
+    await backend.waitUntilFinished()
+    let result = try await session.stop()
+    #expect(await session.state == .idle)
+
+    var idles = 0
+    let seen = await collectStates(states) { state in
+      if state == .idle { idles += 1 }
+      return idles == 2
+    }
+    #expect(
+      seen.map(kind) == ["idle", "starting", "recording", "stopping", "idle"],
+      "the state never left .recording during the change")
+    #expect(result.statistics.deviceChanges == 1)
+    #expect(result.statistics.gapSeconds == 0)
+    #expect(result.statistics.droppedFrames == [:])
+    #expect(!result.statistics.endedOnDeviceLoss)
+    #expect(backend.framesDelivered == 3 * 48_000, "one second, then two")
+    let master = try CAFFile.read(result.asset.url)
+    #expect(master.channels.count == 2)
+    #expect(master.frameCount == backend.framesDelivered, "every frame of both starts")
+    #expect(result.statistics.duration == 3)
+    let layout = RecordingLayout(audioFolder: directory, meetingID: meetingID)
+    #expect(result.asset.url == layout.master(.caf48kFloat32), "the same files")
+    #expect(try FileManager.default.contentsOfDirectory(atPath: directory.path).count == 1)
+    #expect(canceller.log == ["reset", "process", "reset", "process"], "cold filter after")
+    #expect(clock.pendingSleepers == 0)
+  }
+
+  /// The contiguity claim. A gap longer than the two seconds the sink's
+  /// rings hold is written in full as silence through the relay, so the
+  /// master runs to wall time with nothing truncated into `droppedFrames`:
+  /// three restarts fail, the clock advances 0.25, 0.5 and then 2.5 s (a
+  /// sleeper wakes at its deadline however far the clock moves past it), the
+  /// fourth succeeds, and 3.25 s of zeros sit between the old device's last
+  /// frame and the new device's first. A gap pushed through the rings would
+  /// lose 1.25 s of it; this is the test that fails then. The state stays
+  /// `.recording` throughout.
+  @Test func aGapLongerThanTheRingIsWrittenInFull() async throws {
+    let directory = try Fixtures.temporaryDirectory("session")
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let clock = ManualClock()
+    let backend = SyntheticCaptureBackend(
+      lanes: [.mic, .system], tone: [.mic: 440, .system: 1_000], seconds: 2, changeDeviceAfter: 1,
+      restartsThatFail: 3)
+    let session = try CaptureSession(
+      configuration: configuration(.call, in: directory), backend: backend,
+      echoCanceller: try PassthroughEchoCanceller(sampleRate: 48_000, frameSize: 480),
+      writerHeadroomFrames: 1_000, clock: clock)
+    let states = await session.states
+    var notices = await session.notices.makeAsyncIterator()
+    try await session.start(meetingID: UUID())
+    #expect(await notices.next() == .deviceChanged(.defaultInputChanged))
+    await advance(clock, throughSleeps: 2)
+    #expect(await clock.waitForSleepers(1), "the third backoff")
+    clock.advance(by: .milliseconds(2_500))
+    #expect(await notices.next() == .deviceResumed(attempt: 4, gapSeconds: 3.25))
+    guard case .recording = await session.state else {
+      Issue.record("expected .recording after the rebuild, got \(await session.state)")
+      return
+    }
+    await backend.waitUntilFinished()
+    let result = try await session.stop()
+
+    var idles = 0
+    let seen = await collectStates(states) { state in
+      if state == .idle { idles += 1 }
+      return idles == 2
+    }
+    #expect(seen.map(kind) == ["idle", "starting", "recording", "stopping", "idle"])
+    #expect(result.statistics.gapSeconds == 3.25)
+    #expect(result.statistics.deviceChanges == 1)
+    #expect(result.statistics.droppedFrames == [:])
+    #expect(!result.statistics.endedOnDeviceLoss)
+    #expect(backend.starts == 5)
+    let oldFrames = 48_000
+    let gapFrames = Int(3.25 * 48_000)
+    #expect(backend.framesDelivered == 3 * 48_000)
+    let master = try CAFFile.read(result.asset.url)
+    #expect(master.frameCount == backend.framesDelivered + gapFrames)
+    #expect(result.statistics.duration == 6.25)
+    for channel in master.channels {
+      #expect(
+        channel[(oldFrames - 480)..<oldFrames].contains { $0 != 0 },
+        "the old device's last frame precedes the gap")
+      #expect(
+        channel[oldFrames..<(oldFrames + gapFrames)].allSatisfy { $0 == 0 }, "the gap is silence")
+      #expect(
+        channel[(oldFrames + gapFrames)..<(oldFrames + gapFrames + 480)].contains { $0 != 0 },
+        "the new device's first frame follows it")
+    }
+    let sidecar = try WAVAudioDecoder.read(result.asset.sidecars16k[.mic]!)
+    #expect(sidecar.samples.count == master.frameCount / 3, "the sidecars carry the gap too")
+  }
+
+  /// The shape a Bluetooth headset produces (out of the profile and back):
+  /// two changes, two rebuilds, four notices in order, one master.
+  @Test func twoDeviceChangesRebuildTwice() async throws {
+    let directory = try Fixtures.temporaryDirectory("session")
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let clock = ManualClock()
+    let backend = SyntheticCaptureBackend(
+      lanes: [.mic, .system], tone: [.mic: 440, .system: 1_000], seconds: 2,
+      changeDeviceAfter: 0.5, changes: 2)
+    let session = try CaptureSession(
+      configuration: configuration(.call, in: directory), backend: backend,
+      echoCanceller: try PassthroughEchoCanceller(sampleRate: 48_000, frameSize: 480),
+      writerHeadroomFrames: 1_000, clock: clock)
+    var notices = await session.notices.makeAsyncIterator()
+    try await session.start(meetingID: UUID())
+    var seen: [CaptureNotice] = []
+    for _ in 0..<4 {
+      guard let notice = await notices.next() else { break }
+      seen.append(notice)
+    }
+    #expect(
+      seen == [
+        .deviceChanged(.defaultInputChanged), .deviceResumed(attempt: 1, gapSeconds: 0),
+        .deviceChanged(.defaultInputChanged), .deviceResumed(attempt: 1, gapSeconds: 0),
+      ])
+    await backend.waitUntilFinished()
+    let result = try await session.stop()
+    #expect(result.statistics.deviceChanges == 2)
+    #expect(result.statistics.gapSeconds == 0)
+    #expect(result.statistics.droppedFrames == [:])
+    #expect(!result.statistics.endedOnDeviceLoss)
+    #expect(backend.starts == 3)
+    #expect(backend.framesDelivered == 24_000 + 24_000 + 96_000)
+    #expect(try CAFFile.read(result.asset.url).frameCount == backend.framesDelivered)
+  }
+
+  /// Four failed restarts end the recording in `.deviceLost` after the
+  /// summed backoff on the manual clock, with what was recorded before the
+  /// change and nothing rebuilt.
+  @Test func aRestartThatKeepsFailingEndsInDeviceLost() async throws {
+    let directory = try Fixtures.temporaryDirectory("session")
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let clock = ManualClock()
+    let backend = SyntheticCaptureBackend(
+      lanes: [.mic, .system], tone: [.mic: 440, .system: 1_000], seconds: 10,
+      changeDeviceAfter: 0.5, restartsThatFail: 4)
+    let session = try CaptureSession(
+      configuration: configuration(.call, in: directory), backend: backend,
+      echoCanceller: try PassthroughEchoCanceller(sampleRate: 48_000, frameSize: 480),
+      clock: clock)
+    let states = await session.states
+    let log = NoticeLog()
+    let noticeStream = await session.notices
+    let collector = Task { for await notice in noticeStream { await log.append(notice) } }
+    try await session.start(meetingID: UUID())
+    // Three sleeps separate the four attempts; none before the first.
+    await advance(clock, throughSleeps: 3)
+    #expect(clock.now.offset == .milliseconds(1_750))
+    let seen = await collectStates(states) { state in
+      if case .failed = state { return true }
+      return false
+    }
+    #expect(seen.last?.failure == .deviceLost)
+    let result = try await session.stop()
+    #expect(seen.last == .failed(.deviceLost, recording: result))
+    #expect(result.statistics.endedOnDeviceLoss)
+    #expect(result.statistics.deviceChanges == 0)
+    #expect(result.statistics.gapSeconds == 0)
+    #expect(result.statistics.duration == 0.5)
+    #expect(try CAFFile.read(result.asset.url).frameCount == 24_000)
+    #expect(backend.starts == 5, "one start and four failed restarts")
+    #expect(clock.pendingSleepers == 0)
+    await settle()
+    #expect(await log.entries == [.deviceChanged(.defaultInputChanged)], "no resumed notice")
+    collector.cancel()
+  }
+
+  /// A backend whose `stop()` reports a change on the sink it was given, the
+  /// way a HAL listener can fire while the session tears down.
+  final class ReportingOnStop: CaptureBackend, @unchecked Sendable {
+    let inner: SyntheticCaptureBackend
+    private let lock = NSLock()
+    private var sink: LaneFrameSink?
+
+    init(_ inner: SyntheticCaptureBackend) { self.inner = inner }
+
+    func start(lanes: [AudioLane], inputDeviceUID: String?, sink: LaneFrameSink) throws
+      -> CaptureStream
+    {
+      lock.lock()
+      self.sink = sink
+      lock.unlock()
+      return try inner.start(lanes: lanes, inputDeviceUID: inputDeviceUID, sink: sink)
+    }
+
+    func stop() {
+      inner.stop()
+      lock.lock()
+      let sink = self.sink
+      lock.unlock()
+      sink?.reportDeviceChange(.outputDeviceGone)
+    }
+  }
+
+  /// A report before `start` and one from inside `stop()` produce no notice
+  /// and leave the state as it was. The second reaches the actor as a task
+  /// once `stop()` has returned, so the guard sees `.idle` both times; the
+  /// same `case .recording` guard drops a report during `.stopping` and
+  /// `.starting`.
+  @Test func aDeviceChangeWhileIdleOrAfterStopIsIgnored() async throws {
+    let directory = try Fixtures.temporaryDirectory("session")
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let backend = ReportingOnStop(
+      SyntheticCaptureBackend(lanes: [.mixed], tone: [.mixed: 440], seconds: 0.2))
+    let session = try CaptureSession(
+      configuration: configuration(.inPerson, in: directory), backend: backend)
+    let log = NoticeLog()
+    let noticeStream = await session.notices
+    let collector = Task { for await notice in noticeStream { await log.append(notice) } }
+
+    await session.deviceChanged(.defaultInputChanged)
+    #expect(await session.state == .idle)
+
+    try await session.start(meetingID: UUID())
+    await backend.inner.waitUntilFinished()
+    let result = try await session.stop()
+    #expect(await session.state == .idle)
+    await settle()
+    #expect(await session.state == .idle)
+    #expect(await log.entries.isEmpty)
+    #expect(result.statistics.deviceChanges == 0)
+    #expect(!result.statistics.endedOnDeviceLoss)
+    #expect(backend.inner.starts == 1, "nothing was restarted")
+    collector.cancel()
+  }
+
+  /// The writer fails while a rebuild is under way (on the first frame of
+  /// gap silence, the 51st frame written): the session ends
+  /// `.failed(.writerFailed)` with what was written, not `.deviceLost`, and
+  /// the rebuild does not resurrect it.
+  @Test func aWriterFailureDuringARebuildEndsWriterFailed() async throws {
+    let directory = try Fixtures.temporaryDirectory("session")
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let clock = ManualClock()
+    let backend = SyntheticCaptureBackend(
+      lanes: [.mixed], tone: [.mixed: 440], seconds: 2, changeDeviceAfter: 0.5, restartsThatFail: 1
+    )
+    let session = try faultySession(
+      in: directory, backend: backend, failAfterFrames: 50, failFinish: false, clock: clock)
+    let states = await session.states
+    var notices = await session.notices.makeAsyncIterator()
+    try await session.start(meetingID: UUID())
+    #expect(await notices.next() == .deviceChanged(.defaultInputChanged))
+    // One failed restart, 250 ms on the clock, then 25 frames of silence.
+    await advance(clock, throughSleeps: 1)
+    let seen = await collectStates(states) { state in
+      if case .failed = state { return true }
+      return false
+    }
+    guard case .failed(.writerFailed(let detail), let recording) = seen.last else {
+      Issue.record("expected .failed(.writerFailed), got \(String(describing: seen.last))")
+      return
+    }
+    #expect(detail.contains("DiskFull"))
+    let result = try await session.stop()
+    #expect(recording == result)
+    #expect(!result.statistics.endedOnDeviceLoss)
+    #expect(result.statistics.duration == 0.5)
+    #expect(try CAFFile.read(result.asset.url).frameCount == 50 * 480)
+    await settle()
+    #expect(await session.state == .failed(.writerFailed(detail), recording: result))
+    #expect(clock.pendingSleepers == 0)
+  }
+
+  /// `stop()` while the rebuild waits out a backoff abandons it: the
+  /// recording is finalised once, ends `.idle`, the cancelled sleep is gone,
+  /// and nothing the clock does afterwards changes the outcome.
+  @Test func stopDuringARebuildFinalisesOnce() async throws {
+    let directory = try Fixtures.temporaryDirectory("session")
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let clock = ManualClock()
+    let backend = SyntheticCaptureBackend(
+      lanes: [.mic, .system], tone: [.mic: 440, .system: 1_000], seconds: 10,
+      changeDeviceAfter: 0.5, restartsThatFail: 4)
+    let session = try CaptureSession(
+      configuration: configuration(.call, in: directory), backend: backend,
+      echoCanceller: try PassthroughEchoCanceller(sampleRate: 48_000, frameSize: 480),
+      clock: clock)
+    let states = await session.states
+    var notices = await session.notices.makeAsyncIterator()
+    let meetingID = UUID()
+    try await session.start(meetingID: meetingID)
+    #expect(await notices.next() == .deviceChanged(.defaultInputChanged))
+    #expect(await clock.waitForSleepers(1), "the rebuild is waiting out the first backoff")
+
+    let result = try await session.stop()
+    #expect(await session.state == .idle)
+    #expect(clock.pendingSleepers == 0, "the abandoned rebuild's sleep was cancelled")
+    #expect(!result.statistics.endedOnDeviceLoss)
+    #expect(result.statistics.deviceChanges == 0)
+    #expect(result.statistics.gapSeconds == 0)
+    #expect(result.statistics.duration == 0.5)
+    #expect(try CAFFile.read(result.asset.url).frameCount == 24_000)
+    #expect(backend.starts == 2, "one start, one failed restart")
+
+    clock.advance(by: .seconds(10))
+    await settle()
+    #expect(await session.state == .idle)
+    #expect(backend.starts == 2, "nothing after the stop")
+    await #expect(throws: CaptureError.self) { try await session.stop() }
+    var idles = 0
+    let seen = await collectStates(states) { state in
+      if state == .idle { idles += 1 }
+      return idles == 2
+    }
+    #expect(seen.map(kind) == ["idle", "starting", "recording", "stopping", "idle"])
+    #expect(try FileManager.default.contentsOfDirectory(atPath: directory.path).count == 1)
+  }
+
+  /// Whole relay frames for a gap, rounded down: what `gapSeconds` reports.
+  @Test func gapFramesRoundDownToWholeFrames() {
+    #expect(CaptureSession.gapFrames(for: .zero) == 0)
+    #expect(CaptureSession.gapFrames(for: .milliseconds(255)) == 25)
+    #expect(CaptureSession.gapFrames(for: .seconds(10)) == 1_000)
+  }
+
+  /// In production the relay holds two seconds; a gap wider than that waits
+  /// for the writer in 5 ms steps on the clock, and every frame of silence
+  /// still arrives: 1.75 s of gap through a one-second relay. Both recorded
+  /// stretches fit the relay on their own, so nothing else can drop.
+  @Test func aGapWiderThanTheRelayWaitsForTheWriterAndLosesNothing() async throws {
+    let directory = try Fixtures.temporaryDirectory("session")
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let clock = ManualClock()
+    let backend = SyntheticCaptureBackend(
+      lanes: [.mic, .system], tone: [.mic: 440, .system: 1_000], seconds: 1,
+      changeDeviceAfter: 0.5, restartsThatFail: 3)
+    let session = try CaptureSession(
+      configuration: configuration(.call, in: directory), backend: backend,
+      echoCanceller: try PassthroughEchoCanceller(sampleRate: 48_000, frameSize: 480),
+      writerHeadroomFrames: 100, clock: clock)
+    let log = NoticeLog()
+    let noticeStream = await session.notices
+    let collector = Task { for await notice in noticeStream { await log.append(notice) } }
+    try await session.start(meetingID: UUID())
+    await advance(clock, throughSleeps: 3)
+    // The rebuilt backend delivers its second at machine speed into the rings
+    // while the gap waits on the clock; let it finish first, so the backlog
+    // the session waits for room for is the whole second.
+    while backend.starts < 5 { await Task.yield() }
+    await backend.waitUntilFinished()
+    await driveRelayWaits(clock) { await log.entries.count == 2 }
+    #expect(
+      await log.entries == [
+        .deviceChanged(.defaultInputChanged), .deviceResumed(attempt: 4, gapSeconds: 1.75),
+      ])
+    await backend.waitUntilFinished()
+    let result = try await session.stop()
+    collector.cancel()
+
+    #expect(result.statistics.gapSeconds == 1.75)
+    #expect(result.statistics.deviceChanges == 1)
+    #expect(result.statistics.droppedFrames == [:])
+    #expect(backend.framesDelivered == 24_000 + 48_000)
+    #expect(try CAFFile.read(result.asset.url).frameCount == backend.framesDelivered + 84_000)
+    #expect(result.statistics.duration == 3.25)
+    #expect(clock.pendingSleepers == 0)
+  }
+
+  /// `maximumGap`: an outage of 30 s on the clock fills 10 s of silence, and
+  /// `gapSeconds` reports the capped value the master actually holds.
+  @Test func aGapIsCappedAtTenSeconds() async throws {
+    let directory = try Fixtures.temporaryDirectory("session")
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let clock = ManualClock()
+    let backend = SyntheticCaptureBackend(
+      lanes: [.mic, .system], tone: [.mic: 440, .system: 1_000], seconds: 2, changeDeviceAfter: 1,
+      restartsThatFail: 1)
+    let session = try CaptureSession(
+      configuration: configuration(.call, in: directory), backend: backend,
+      echoCanceller: try PassthroughEchoCanceller(sampleRate: 48_000, frameSize: 480),
+      writerHeadroomFrames: 2_000, clock: clock)
+    var notices = await session.notices.makeAsyncIterator()
+    try await session.start(meetingID: UUID())
+    #expect(await notices.next() == .deviceChanged(.defaultInputChanged))
+    #expect(await clock.waitForSleepers(1))
+    clock.advance(by: .seconds(30))
+    #expect(await notices.next() == .deviceResumed(attempt: 2, gapSeconds: 10))
+    await backend.waitUntilFinished()
+    let result = try await session.stop()
+    #expect(result.statistics.gapSeconds == 10)
+    #expect(result.statistics.droppedFrames == [:])
+    #expect(try CAFFile.read(result.asset.url).frameCount == backend.framesDelivered + 480_000)
+    #expect(result.statistics.duration == 13)
+  }
+
+  /// `stop()` while the rebuild waits for the writer to drain the relay
+  /// abandons it: the recording is finalised once, ends `.idle`, the 5 ms
+  /// sleep is cancelled, and the gap counts for nothing because it was never
+  /// completed. The master holds the old device's half second and whatever
+  /// silence reached the relay before the stop; the rebuilt backend's frames
+  /// never left the rings.
+  @Test func stopDuringTheGapWriteFinalisesOnce() async throws {
+    let directory = try Fixtures.temporaryDirectory("session")
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let clock = ManualClock()
+    let backend = SyntheticCaptureBackend(
+      lanes: [.mic, .system], tone: [.mic: 440, .system: 1_000], seconds: 1,
+      changeDeviceAfter: 0.5, restartsThatFail: 3)
+    let session = try CaptureSession(
+      configuration: configuration(.call, in: directory), backend: backend,
+      echoCanceller: try PassthroughEchoCanceller(sampleRate: 48_000, frameSize: 480),
+      writerHeadroomFrames: 100, clock: clock)
+    var notices = await session.notices.makeAsyncIterator()
+    try await session.start(meetingID: UUID())
+    #expect(await notices.next() == .deviceChanged(.defaultInputChanged))
+    await advance(clock, throughSleeps: 3)
+    // 175 frames of silence through a relay of 100: the writer cannot keep
+    // pace with the actor's zeros, so the rebuild sleeps on the clock.
+    #expect(await clock.waitForSleepers(1), "the rebuild waits for the writer")
+    #expect(backend.starts == 5)
+
+    let result = try await session.stop()
+    #expect(await session.state == .idle)
+    #expect(clock.pendingSleepers == 0, "the abandoned wait was cancelled")
+    #expect(result.statistics.deviceChanges == 0)
+    #expect(result.statistics.gapSeconds == 0)
+    #expect(result.statistics.droppedFrames == [:])
+    #expect(!result.statistics.endedOnDeviceLoss)
+    let frames = try CAFFile.read(result.asset.url).frameCount
+    #expect(frames >= 24_000 && frames <= 24_000 + 175 * 480, "old audio plus partial silence")
+    await settle()
+    #expect(await session.state == .idle)
+    #expect(backend.starts == 5, "nothing after the stop")
+  }
+
+  /// A change reported while a rebuild is under way (here from the test; in
+  /// production from the rebuilt backend's listeners before the gap is
+  /// written) is not lost: `resume` starts the next rebuild from it, so the
+  /// notices come in pairs and the second rebuild runs at once.
+  @Test func aChangeReportedDuringARebuildStartsTheNextOne() async throws {
+    let directory = try Fixtures.temporaryDirectory("session")
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let clock = ManualClock()
+    let backend = SyntheticCaptureBackend(
+      lanes: [.mic, .system], tone: [.mic: 440, .system: 1_000], seconds: 2,
+      changeDeviceAfter: 0.5, restartsThatFail: 1)
+    let session = try CaptureSession(
+      configuration: configuration(.call, in: directory), backend: backend,
+      echoCanceller: try PassthroughEchoCanceller(sampleRate: 48_000, frameSize: 480),
+      writerHeadroomFrames: 1_000, clock: clock)
+    var notices = await session.notices.makeAsyncIterator()
+    try await session.start(meetingID: UUID())
+    #expect(await notices.next() == .deviceChanged(.defaultInputChanged))
+    #expect(await clock.waitForSleepers(1), "the first restart failed; the rebuild waits")
+    await session.deviceChanged(.outputDeviceGone)
+    clock.advance(by: .milliseconds(250))
+    #expect(await notices.next() == .deviceResumed(attempt: 2, gapSeconds: 0.25))
+    #expect(await notices.next() == .deviceChanged(.outputDeviceGone), "kept, not dropped")
+    #expect(await notices.next() == .deviceResumed(attempt: 1, gapSeconds: 0))
+    await backend.waitUntilFinished()
+    let result = try await session.stop()
+    #expect(result.statistics.deviceChanges == 2)
+    #expect(result.statistics.gapSeconds == 0.25)
+    #expect(result.statistics.droppedFrames == [:])
+    #expect(backend.starts == 4, "start, failed restart, restart, restart")
+    // The second rebuild stopped its backend mid-callback, so only the
+    // sub-frame residue is missing from the master.
+    let frames = try CAFFile.read(result.asset.url).frameCount
+    let expected = backend.framesDelivered + 12_000
+    #expect(frames <= expected && frames > expected - 480)
+    #expect(clock.pendingSleepers == 0)
   }
 }
