@@ -276,9 +276,7 @@ final class AppControllerTests: XCTestCase {
     // microphone arms the auto-stop without a later `.opened`.
     await controller.detection.handle(.microphoneReleased)
     XCTAssertEqual(controller.recorder.autoStop?.appName, "com.apple.FaceTime")
-    XCTAssertEqual(
-      controller.recorder.autoStop?.presentation.line,
-      "com.apple.FaceTime closed the microphone. Stopping in 1:30.")
+    XCTAssertEqual(controller.recorder.autoStop?.presentation.remainingText, "1:30")
 
     await controller.detection.handle(.microphoneOpened(bundleID: "us.zoom.xos", pid: 8))
     XCTAssertNil(controller.detection.prompt, "no prompt while recording")

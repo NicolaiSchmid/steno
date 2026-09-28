@@ -21,15 +21,13 @@ final class CountdownTests: XCTestCase {
     XCTAssertEqual(clock.pendingSleepers, 1, "one tick loop, whatever `begin` is called")
 
     for (fraction, text) in [(2.0 / 3.0, "0:02"), (1.0 / 3.0, "0:01")] {
-      _ = await clock.waitForSleepers(1)
-      clock.advance(by: .seconds(1))
+      await TestSupport.tick(clock, seconds: 1)
       await TestSupport.waitUntil("tick to \(text)") { countdown.remainingText == text }
       XCTAssertEqual(countdown.fractionRemaining, fraction, accuracy: 1e-9)
       XCTAssertEqual(elapsed, 0)
       XCTAssertFalse(countdown.hasElapsed)
     }
-    _ = await clock.waitForSleepers(1)
-    clock.advance(by: .seconds(1))
+    await TestSupport.tick(clock, seconds: 1)
     await TestSupport.waitUntil("elapsed") { countdown.hasElapsed }
     XCTAssertEqual(countdown.fractionRemaining, 0)
     XCTAssertEqual(countdown.remainingText, "0:00")
@@ -49,8 +47,7 @@ final class CountdownTests: XCTestCase {
     var elapsed = 0
     let countdown = Countdown(duration: .seconds(2), clock: clock) { elapsed += 1 }
     countdown.begin()
-    _ = await clock.waitForSleepers(1)
-    clock.advance(by: .seconds(1))
+    await TestSupport.tick(clock, seconds: 1)
     await TestSupport.waitUntil("one tick") { countdown.remainingText == "0:01" }
     _ = await clock.waitForSleepers(1)
 
@@ -64,6 +61,42 @@ final class CountdownTests: XCTestCase {
     XCTAssertEqual(countdown.remainingText, "0:01", "remaining keeps its last value")
     countdown.cancel()
     XCTAssertFalse(countdown.isRunning, "a second cancel is a no-op")
+  }
+
+  /// A ticker cancelled after its sleep resumed but before it got the main
+  /// actor back must not mistake a fresh `begin()`'s ticker for itself: one
+  /// loop, one decrement per second.
+  func testCancelThenBeginLeavesOneTicker() async throws {
+    let clock = ManualClock()
+    let countdown = Countdown(duration: .seconds(3), clock: clock)
+    countdown.begin()
+    _ = await clock.waitForSleepers(1)
+    // No suspension between these three: the stale task wakes to find itself
+    // cancelled and the new ticker already installed.
+    clock.advance(by: .seconds(1))
+    countdown.cancel()
+    countdown.begin()
+    await TestSupport.waitUntil("the new ticker sleeps") { clock.pendingSleepers == 1 }
+    await TestSupport.settle()
+    XCTAssertEqual(countdown.remainingText, "0:03", "the stale task did not tick")
+    XCTAssertEqual(clock.pendingSleepers, 1, "one loop")
+
+    await TestSupport.tick(clock, seconds: 1)
+    await TestSupport.waitUntil("one tick") { countdown.remainingText == "0:02" }
+    await TestSupport.settle()
+    XCTAssertEqual(countdown.remainingText, "0:02", "one decrement per second")
+    XCTAssertEqual(clock.pendingSleepers, 1)
+  }
+
+  /// A countdown dropped without `cancel()` takes its sleeper with it.
+  func testDroppingARunningCountdownWithdrawsItsSleeper() async throws {
+    let clock = ManualClock()
+    var countdown: Countdown? = Countdown(duration: .seconds(5), clock: clock)
+    countdown?.begin()
+    _ = await clock.waitForSleepers(1)
+    XCTAssertEqual(clock.pendingSleepers, 1)
+    countdown = nil
+    await TestSupport.waitUntil("the sleeper is withdrawn") { clock.pendingSleepers == 0 }
   }
 
   func testRemainingTextFormatsMinutesAndSeconds() {
@@ -86,8 +119,7 @@ final class CountdownTests: XCTestCase {
     let countdown = Countdown(duration: .seconds(1), clock: clock)
     countdown.onElapsed = { fired = true }
     countdown.begin()
-    _ = await clock.waitForSleepers(1)
-    clock.advance(by: .seconds(1))
+    await TestSupport.tick(clock, seconds: 1)
     await TestSupport.waitUntil("elapsed") { countdown.hasElapsed }
     XCTAssertTrue(fired)
   }

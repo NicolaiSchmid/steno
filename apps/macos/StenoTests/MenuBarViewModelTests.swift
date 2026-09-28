@@ -132,14 +132,4 @@ final class MenuBarViewModelTests: XCTestCase {
     XCTAssertEqual(PermissionKind.systemAudio.deniedMessage, "System audio access is denied.")
     XCTAssertEqual(LanguageTag("de").localizedName(in: Locale(identifier: "en_US")), "German")
   }
-
-  /// The armed row on the menu bar and the sidebar renders the recorder's
-  /// `AutoStopPresentation`; the sentence has one owner.
-  func testAutoStopRowCopy() {
-    let named = AutoStopPresentation(appName: "Zen", remainingText: "1:29", fractionRemaining: 0.99)
-    XCTAssertEqual(named.line, "Zen closed the microphone. Stopping in 1:29.")
-    let unnamed = AutoStopPresentation(appName: nil, remainingText: "0:05", fractionRemaining: 0.05)
-    XCTAssertEqual(unnamed.line, "The call app closed the microphone. Stopping in 0:05.")
-    XCTAssertEqual(AutoStopPresentation.keepRecordingLabel, "Keep recording")
-  }
 }

@@ -24,7 +24,9 @@ final class Countdown {
   /// owner can point it at itself after its own `init`.
   var onElapsed: @MainActor () async -> Void
   private let clock: any Clock<Duration>
-  private var ticker: Task<Void, Never>?
+  /// Not observed: surfaces track `remaining` and `hasElapsed`; `isRunning`
+  /// is for owners and tests. Stored plainly so `deinit` can cancel it.
+  @ObservationIgnored private var ticker: Task<Void, Never>?
 
   init(
     duration: Duration, clock: any Clock<Duration>,
@@ -34,6 +36,10 @@ final class Countdown {
     self.remaining = duration
     self.clock = clock
     self.onElapsed = onElapsed
+  }
+
+  deinit {
+    ticker?.cancel()
   }
 
   var isRunning: Bool { ticker != nil }
@@ -56,7 +62,9 @@ final class Countdown {
   }
 
   /// Starts ticking; a second call while running or after the end is a
-  /// no-op.
+  /// no-op. A `cancel()` then `begin()` leaves one loop: the cancelled task
+  /// checks its own cancellation after the sleep, so it never mistakes the
+  /// new ticker for itself.
   func begin() {
     guard ticker == nil, !hasElapsed else { return }
     let clock = self.clock
@@ -67,7 +75,7 @@ final class Countdown {
         } catch {
           return  // cancelled
         }
-        guard let self, self.ticker != nil else { return }
+        guard !Task.isCancelled, let self, self.ticker != nil else { return }
         self.remaining = max(.zero, self.remaining - .seconds(1))
         if self.remaining <= .zero {
           self.ticker = nil

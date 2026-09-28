@@ -66,8 +66,8 @@ enum TestSupport {
     beforeEach: @MainActor () -> Void = {}
   ) async {
     for step in CaptureSession.restartBackoff {
-      let sleeping = await waitForSleepers(
-        clock, 1, "the rebuild sleeps on the injected clock", file: file, line: line)
+      let sleeping = await waitUntilSleeping(
+        on: clock, count: 1, "the rebuild sleeps on the injected clock", file: file, line: line)
       guard sleeping else { return }
       beforeEach()
       clock.advance(by: step)
@@ -75,13 +75,13 @@ enum TestSupport {
   }
 
   /// Waits on wall time (10 ms polls, up to `timeout`) until `count` tasks
-  /// sleep on `clock`. `ManualClock.waitForSleepers` only yields, which is
-  /// enough for a main-actor countdown but not for a session whose rebuild
-  /// joins the backend and processing threads before it sleeps.
+  /// sleep on `clock`. Named apart from `ManualClock.waitForSleepers`, which
+  /// only yields: enough for a main-actor countdown but not for a session
+  /// whose rebuild joins the backend and processing threads before it sleeps.
   @MainActor
   @discardableResult
-  static func waitForSleepers(
-    _ clock: ManualClock, _ count: Int, _ description: String, timeout: TimeInterval = 10,
+  static func waitUntilSleeping(
+    on clock: ManualClock, count: Int, _ description: String, timeout: TimeInterval = 10,
     file: StaticString = #filePath, line: UInt = #line
   ) async -> Bool {
     let deadline = Date().addingTimeInterval(timeout)
@@ -94,6 +94,24 @@ enum TestSupport {
       try? await Task.sleep(for: .milliseconds(10))
     }
     return true
+  }
+
+  /// Ticks a `Countdown` on `clock` `seconds` times: each one-second advance
+  /// waits for the countdown's sleeper first, so no tick is lost, and yields
+  /// afterwards so the ticker runs on the main actor between advances. Read
+  /// the result through `waitUntil`: the resumed ticker is its own main-actor
+  /// job and `settle` is a courtesy, not a guarantee.
+  @MainActor
+  static func tick(
+    _ clock: ManualClock, seconds: Int, file: StaticString = #filePath, line: UInt = #line
+  ) async {
+    for _ in 0..<seconds {
+      let sleeping = await waitUntilSleeping(
+        on: clock, count: 1, "the countdown sleeps on the injected clock", file: file, line: line)
+      guard sleeping else { return }
+      clock.advance(by: .seconds(1))
+      await settle()
+    }
   }
 
   /// Polls `condition` like `waitUntil` and, whenever at least `sleepers`

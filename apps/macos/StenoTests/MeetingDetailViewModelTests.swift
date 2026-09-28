@@ -41,8 +41,12 @@ final class MeetingDetailViewModelTests: XCTestCase {
       RecordingEndReason.deviceLost.sentence,
       "Ended because an audio device disappeared. The recording up to that point was kept.")
     XCTAssertEqual(RecordingEndReason.quit.sentence, "Ended when Steno quit.")
+    XCTAssertEqual(
+      RecordingEndReason.failed.sentence,
+      "Ended because the recording failed. The recording up to that point was kept.")
     XCTAssertEqual(RecordingEndReason.callEnded(appName: "Zen").listSuffix, "ended automatically")
     XCTAssertEqual(RecordingEndReason.deviceLost.listSuffix, "device lost")
+    XCTAssertEqual(RecordingEndReason.failed.listSuffix, "recording failed")
     XCTAssertNil(RecordingEndReason.manual.listSuffix)
     XCTAssertNil(RecordingEndReason.quit.listSuffix)
 

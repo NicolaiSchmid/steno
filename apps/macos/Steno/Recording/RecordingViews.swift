@@ -89,7 +89,7 @@ struct AutoStopRow: View {
   let keepRecording: () -> Void
 
   var body: some View {
-    HStack(alignment: .top, spacing: Theme.Space.sm) {
+    HStack(alignment: .firstTextBaseline, spacing: Theme.Space.sm) {
       MessageRow(kind: .warning, text: presentation.line)
       Spacer(minLength: 0)
       Button(AutoStopPresentation.keepRecordingLabel, action: keepRecording)

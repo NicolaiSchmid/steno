@@ -30,8 +30,7 @@ struct AutoStop {
   let countdown: Countdown
 
   var presentation: AutoStopPresentation {
-    let countdown = countdown.presentation
-    return AutoStopPresentation(
+    AutoStopPresentation(
       appName: appName, remainingText: countdown.remainingText,
       fractionRemaining: countdown.fractionRemaining)
   }

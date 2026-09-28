@@ -4,7 +4,9 @@ import XCTest
 
 /// The recorder's auto-stop policy over the synthetic capture backend and a
 /// `ManualClock`: every row of the device-change plan's "recorder during a
-/// call" table, one test each. Results are read from the store.
+/// call" table, one test each. Results are read from the store. The
+/// countdown sentence itself is pinned in `RecordingControlPresentationTests`;
+/// only the first test here reads it, end to end.
 @MainActor
 final class AutoStopTests: XCTestCase {
   private func makeRecorder(
@@ -27,20 +29,6 @@ final class AutoStopTests: XCTestCase {
     return made
   }
 
-  /// Ticks the countdown `seconds` times, each once its sleeper waits on the
-  /// clock; the ticker runs on the main actor between advances.
-  private func tick(
-    _ clock: ManualClock, seconds: Int, file: StaticString = #filePath, line: UInt = #line
-  ) async {
-    for _ in 0..<seconds {
-      let sleeping = await TestSupport.waitForSleepers(
-        clock, 1, "the countdown sleeps on the injected clock", file: file, line: line)
-      guard sleeping else { return }
-      clock.advance(by: .seconds(1))
-      await TestSupport.settle()
-    }
-  }
-
   func testMicrophoneReleaseAfterACallArmsAndStopsAfterTheGrace() async throws {
     let clock = ManualClock()
     let (environment, recorder) = try await makeRecorder(clock: clock)
@@ -58,15 +46,18 @@ final class AutoStopTests: XCTestCase {
     XCTAssertTrue(
       recorder.autoStop?.countdown === armed.countdown, "a second release does not re-arm")
 
-    await tick(clock, seconds: 1)
-    XCTAssertEqual(
-      recorder.autoStop?.presentation.line, "Zen closed the microphone. Stopping in 1:29.")
-    await tick(clock, seconds: 88)
-    XCTAssertEqual(recorder.autoStop?.presentation.remainingText, "0:01")
+    await TestSupport.tick(clock, seconds: 1)
+    await TestSupport.waitUntil("one tick") {
+      recorder.autoStop?.presentation.remainingText == "1:29"
+    }
+    await TestSupport.tick(clock, seconds: 88)
+    await TestSupport.waitUntil("the last second") {
+      recorder.autoStop?.presentation.remainingText == "0:01"
+    }
     guard case .recording = recorder.recording else {
       return XCTFail("still recording at 0:01, got \(recorder.recording)")
     }
-    await tick(clock, seconds: 1)
+    await TestSupport.tick(clock, seconds: 1)
     await TestSupport.waitUntil("the grace elapsed and stopped the recording") {
       recorder.recording == .idle
     }
@@ -82,8 +73,10 @@ final class AutoStopTests: XCTestCase {
   func testMicrophoneReopenedCancelsTheCountdown() async throws {
     let clock = ManualClock()
     let (environment, recorder) = try await armedRecorder(clock: clock)
-    await tick(clock, seconds: 1)
-    XCTAssertEqual(recorder.autoStop?.presentation.remainingText, "1:29")
+    await TestSupport.tick(clock, seconds: 1)
+    await TestSupport.waitUntil("one tick") {
+      recorder.autoStop?.presentation.remainingText == "1:29"
+    }
     _ = await clock.waitForSleepers(1)
 
     await recorder.microphoneActivity(.opened(appName: "Zen"))
@@ -114,6 +107,9 @@ final class AutoStopTests: XCTestCase {
     await recorder.microphoneActivity(.released)
     XCTAssertNil(recorder.autoStop, "another release does not re-arm")
     await recorder.microphoneActivity(.opened(appName: "Meet"))
+    // A "Keep recording" click that lands after the row is gone (the call
+    // app reopened the microphone) must not wipe the memory of that call.
+    recorder.keepRecording()
     await recorder.microphoneActivity(.released)
     XCTAssertEqual(recorder.autoStop?.appName, "Meet", "the next call arms again")
     await recorder.stop()
@@ -145,7 +141,10 @@ final class AutoStopTests: XCTestCase {
     await environment.pipeline.waitUntilIdle()
   }
 
-  func testAnUnnamedAppUsesTheGenericLine() async throws {
+  /// An `.opened` whose bundle id could not be named arms all the same and
+  /// stores a nameless `.callEnded`; the generic line follows from the nil
+  /// name (`RecordingControlPresentationTests`).
+  func testAnUnnamedAppStoresANamelessCallEnded() async throws {
     let clock = ManualClock()
     let (environment, recorder) = try await makeRecorder(clock: clock)
     await recorder.start(mode: .call)
@@ -153,29 +152,10 @@ final class AutoStopTests: XCTestCase {
     await recorder.microphoneActivity(.released)
     let armed = try XCTUnwrap(recorder.autoStop)
     XCTAssertNil(armed.appName)
-    XCTAssertEqual(
-      armed.presentation.line, "The call app closed the microphone. Stopping in 1:30.")
-    await recorder.stopNow()
+    await TestSupport.tick(clock, seconds: 90)
+    await TestSupport.waitUntil("the grace elapsed") { recorder.recording == .idle }
     let meeting = try await TestSupport.stoppedMeeting(in: environment)
     XCTAssertEqual(meeting.endReason, .callEnded(appName: nil))
-    await environment.pipeline.waitUntilIdle()
-  }
-
-  func testStopNowUsesCallEnded() async throws {
-    let clock = ManualClock()
-    let (environment, recorder) = try await armedRecorder(clock: clock)
-    await recorder.stopNow()
-    XCTAssertEqual(recorder.recording, .idle)
-    XCTAssertNil(recorder.autoStop)
-    let meeting = try await TestSupport.stoppedMeeting(in: environment)
-    XCTAssertEqual(meeting.endReason, .callEnded(appName: "Zen"))
-
-    await recorder.start(mode: .call)
-    await recorder.stopNow()
-    guard case .recording = recorder.recording else {
-      return XCTFail("stopNow without a countdown is a no-op, got \(recorder.recording)")
-    }
-    await recorder.stop()
     await environment.pipeline.waitUntilIdle()
   }
 
@@ -198,8 +178,31 @@ final class AutoStopTests: XCTestCase {
     await environment.pipeline.waitUntilIdle()
   }
 
+  /// Quit during the grace stores `.quit`, not the countdown's reason, and
+  /// withdraws the sleeper so the elapsed callback cannot fire into a
+  /// torn-down app.
+  func testQuitWhileArmedStoresQuitAndWithdrawsTheCountdown() async throws {
+    let clock = ManualClock()
+    let (environment, recorder) = try await armedRecorder(clock: clock)
+    _ = await clock.waitForSleepers(1)
+    await recorder.stop(reason: .quit)
+    XCTAssertEqual(recorder.recording, .idle)
+    XCTAssertNil(recorder.autoStop)
+    XCTAssertEqual(clock.pendingSleepers, 0, "the countdown went with the recording")
+    let meeting = try await TestSupport.stoppedMeeting(in: environment)
+    XCTAssertEqual(meeting.endReason, .quit)
+
+    clock.advance(by: RecordingController.autoStopGrace)
+    await TestSupport.settle()
+    let meetings = try await environment.store.meetings()
+    XCTAssertEqual(meetings.count, 1, "nothing else happened")
+    await environment.pipeline.waitUntilIdle()
+  }
+
   /// The countdown is armed while a restart is pending on the clock; the
-  /// rebuild completes under it and leaves it where it was.
+  /// rebuild completes under it and leaves it where it was. Identity is the
+  /// observable: the exact `remaining` would couple the test to how far the
+  /// rebuild's relay waits advanced the shared clock.
   func testADeviceChangeNoticeLeavesTheCountdownRunning() async throws {
     let clock = ManualClock()
     let (environment, recorder) = try await makeRecorder(
@@ -210,12 +213,15 @@ final class AutoStopTests: XCTestCase {
     await TestSupport.waitUntil("the change was noticed") {
       recorder.lastWarning == "Audio devices changed. Reconnecting…"
     }
-    await TestSupport.waitForSleepers(clock, 1, "the first restart failed and the rebuild sleeps")
+    await TestSupport.waitUntilSleeping(
+      on: clock, count: 1, "the first restart failed and the rebuild sleeps")
 
     await recorder.microphoneActivity(.opened(appName: "Zen"))
     await recorder.microphoneActivity(.released)
-    XCTAssertEqual(recorder.autoStop?.appName, "Zen")
-    await TestSupport.waitForSleepers(clock, 2, "the rebuild's backoff and the countdown's tick")
+    let armed = try XCTUnwrap(recorder.autoStop)
+    XCTAssertEqual(armed.appName, "Zen")
+    await TestSupport.waitUntilSleeping(
+      on: clock, count: 2, "the rebuild's backoff and the countdown's tick")
 
     clock.advance(by: CaptureSession.restartBackoff[0])
     await TestSupport.waitDrivingTheClock(clock, sleepers: 2, "the resumed warning") {
@@ -224,12 +230,19 @@ final class AutoStopTests: XCTestCase {
     guard case .recording = recorder.recording else {
       return XCTFail("the recording survived the change, got \(recorder.recording)")
     }
-    XCTAssertEqual(
-      recorder.autoStop?.countdown.remaining, RecordingController.autoStopGrace,
-      "the countdown neither ticked nor reset")
+    XCTAssertTrue(
+      recorder.autoStop?.countdown === armed.countdown,
+      "the countdown was neither reset nor re-armed")
+    XCTAssertTrue(armed.countdown.isRunning)
+    XCTAssertGreaterThanOrEqual(
+      armed.countdown.remaining, RecordingController.autoStopGrace - .seconds(1),
+      "at most the one tick the driven clock may have crossed")
 
-    await tick(clock, seconds: 1)
-    XCTAssertEqual(recorder.autoStop?.presentation.remainingText, "1:29", "and keeps running")
+    let before = armed.countdown.remaining
+    await TestSupport.tick(clock, seconds: 1)
+    await TestSupport.waitUntil("and keeps running") {
+      armed.countdown.remaining == before - .seconds(1)
+    }
     await recorder.stop()
     let meeting = try await TestSupport.stoppedMeeting(in: environment)
     XCTAssertEqual(meeting.endReason, .manual)
@@ -263,7 +276,31 @@ final class AutoStopTests: XCTestCase {
     await environment.pipeline.waitUntilIdle()
   }
 
-  func testEventsWhileIdleOrStoppingAreIgnored() async throws {
+  /// The detector forwards from the moment the start is announced, so a call
+  /// joined while Steno is still starting (settings, calendar, the intake
+  /// row, the backend) is remembered and its release arms.
+  func testAMicrophoneOpenedWhileStartingIsRemembered() async throws {
+    let clock = ManualClock()
+    let gate = Gate()
+    let environment = try await TestSupport.environment(
+      clock: clock, seed: false, calendar: GatedCalendar(gate: gate))
+    let recorder = RecordingController(environment: environment)
+    let starting = Task { await recorder.start(mode: .call) }
+    await TestSupport.waitUntil("the start is waiting on the calendar") {
+      recorder.recording == .starting
+    }
+    await recorder.microphoneActivity(.opened(appName: "Zen"))
+    XCTAssertNil(recorder.autoStop)
+    await gate.open()
+    await starting.value
+
+    await recorder.microphoneActivity(.released)
+    XCTAssertEqual(recorder.autoStop?.appName, "Zen", "the call joined during the start window")
+    await recorder.stop()
+    await environment.pipeline.waitUntilIdle()
+  }
+
+  func testEventsWhileIdleAreIgnoredAndNotRemembered() async throws {
     let clock = ManualClock()
     let (environment, recorder) = try await makeRecorder(clock: clock)
     await recorder.microphoneActivity(.opened(appName: "Zen"))

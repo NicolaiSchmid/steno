@@ -303,15 +303,16 @@ Prompt (`DetectionPromptViewModel` holds a `Countdown`; its `remainingSeconds` b
 One PR, commits in this order, after the start-recording plan has merged (it supplies
 `activeMeetingID` and moves `LevelBars`).
 
-1. **Motion tokens and the shared countdown** (`apps/macos/Steno/Design/Motion.swift`, new
-   `apps/macos/Steno/Recording/Countdown.swift`,
+1. **Motion tokens and the shared countdown** (`apps/macos/Steno/Design/Motion.swift`, the
+   existing `apps/macos/Steno/Recording/Countdown.swift` from the device-change plan's app PR,
    `apps/macos/Steno/Detection/DetectionPromptViewModel.swift`): `Motion.countdown` and
    `Motion.pulse`. `@MainActor @Observable final class Countdown` with
-   `init(duration: Duration, clock: any Clock<Duration>, onElapsed: @MainActor () -> Void)`,
+   `init(duration: Duration, clock: any Clock<Duration>, onElapsed: @MainActor () async -> Void)`,
    `remaining`, `fractionRemaining` (clamped 0...1), `remainingText` ("1:29"), `begin()` ticking
    once a second on the injected clock, `cancel()`, and `var presentation: CountdownPresentation`
    (a `Sendable` value with `remainingText` and `fractionRemaining`). `DetectionPromptViewModel`
-   holds one instead of its own tick loop; `remainingSeconds` reads through. Radius comes from
+   already holds one instead of its own tick loop (done in that PR); `remainingSeconds` reads
+   through. Radius comes from
    `Theme.Radius.xl`, already added by the redesign's system PR;
    `apps/macos/StenoTests/ThemeTokensTests.swift` is untouched.
 2. **Pure pieces** (new `apps/macos/Steno/Panels/FloatingContent.swift`):

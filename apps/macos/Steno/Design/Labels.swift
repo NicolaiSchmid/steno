@@ -56,6 +56,8 @@ extension RecordingEndReason {
       "Ended because an audio device disappeared. The recording up to that point was kept."
     case .quit:
       "Ended when Steno quit."
+    case .failed:
+      "Ended because the recording failed. The recording up to that point was kept."
     }
   }
 
@@ -65,6 +67,7 @@ extension RecordingEndReason {
     switch self {
     case .callEnded: "ended automatically"
     case .deviceLost: "device lost"
+    case .failed: "recording failed"
     case .manual, .quit: nil
     }
   }

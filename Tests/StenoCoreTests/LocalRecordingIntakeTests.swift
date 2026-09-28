@@ -153,7 +153,7 @@ import Testing
     let fixture = try await Fixture()
     let intake = fixture.intake()
     let reasons: [RecordingEndReason] = [
-      .callEnded(appName: "Zen"), .callEnded(appName: nil), .deviceLost, .quit,
+      .callEnded(appName: "Zen"), .callEnded(appName: nil), .deviceLost, .quit, .failed,
     ]
     for reason in reasons {
       let begun = try await intake.begin(source: .macCall, startedAt: SampleData.startedAt)

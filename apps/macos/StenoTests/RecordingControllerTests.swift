@@ -183,6 +183,38 @@ final class RecordingControllerTests: XCTestCase {
     await environment.pipeline.waitUntilIdle()
   }
 
+  /// A change reported inside `backend.start` (the synthetic producer's first
+  /// loop iteration) is emitted the moment `session.start` returns. The
+  /// recorder subscribes to `notices` before `start`, so the warning still
+  /// lands; opened afterwards, the notice would have no continuation to land
+  /// in. The first restart fails so the rebuild parks on its backoff sleeper
+  /// and nothing else moves until the clock is advanced.
+  func testAChangeInTheFirstMillisecondsStillWarns() async throws {
+    let clock = ManualClock()
+    let environment = try await TestSupport.environment(
+      clock: clock, seed: false,
+      makeCaptureSession: TestSupport.deviceChangingCaptureSession(
+        after: 0, restartsThatFail: 1, clock: clock))
+    let recorder = RecordingController(environment: environment)
+    await recorder.start(mode: .call)
+    await TestSupport.waitUntil("the change was noticed without advancing the clock") {
+      recorder.lastWarning == "Audio devices changed. Reconnecting…"
+    }
+    guard case .recording = recorder.recording else {
+      return XCTFail("a pending restart keeps recording, got \(recorder.recording)")
+    }
+
+    await TestSupport.waitUntilSleeping(on: clock, count: 1, "the rebuild sleeps on its backoff")
+    clock.advance(by: CaptureSession.restartBackoff[0])
+    await TestSupport.waitDrivingTheClock(clock, "the resumed warning") {
+      recorder.lastWarning == "Audio devices changed. Recording continues."
+    }
+    await recorder.stop()
+    let meeting = try await TestSupport.stoppedMeeting(in: environment)
+    XCTAssertEqual(meeting.endReason, .manual)
+    await environment.pipeline.waitUntilIdle()
+  }
+
   /// A device that comes back keeps the recording on the same row: the
   /// state never leaves `.recording`, the warning says so, and the meeting
   /// ends with the reason the user gives it.
@@ -214,7 +246,7 @@ final class RecordingControllerTests: XCTestCase {
 
   /// `stop()` stores `.manual`; the reason a caller passes (Quit passes
   /// `.quit`) is stored as given.
-  func testStopStoresTheManualReason() async throws {
+  func testStopStoresTheReasonItIsGiven() async throws {
     let environment = try await TestSupport.environment(seed: false)
     let recorder = RecordingController(environment: environment)
     await recorder.start(mode: .inPerson)

@@ -28,9 +28,14 @@ final class DetectionTests: XCTestCase {
     var outcomes: [DetectionPromptViewModel.Outcome] = []
     prompt.onClose = { outcomes.append($0) }
     prompt.begin()
+    _ = await clock.waitForSleepers(1)
     await prompt.start()
+    XCTAssertEqual(clock.pendingSleepers, 0, "start cancels the countdown")
+    XCTAssertFalse(prompt.countdown.isRunning)
     await prompt.dismiss()
-    XCTAssertEqual(outcomes, [.started])
+    clock.advance(by: prompt.countdown.duration)
+    await TestSupport.settle()
+    XCTAssertEqual(outcomes, [.started], "no timeout after the prompt closed")
     XCTAssertEqual(prompt.appName, "Another app")
   }
 

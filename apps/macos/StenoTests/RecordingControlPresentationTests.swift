@@ -57,7 +57,8 @@ final class RecordingControlPresentationTests: XCTestCase {
 
   /// The recorder's armed countdown rides along as a value while recording
   /// and is dropped in every other state (the recorder clears it at stop;
-  /// the table never shows a stale row).
+  /// the table never shows a stale row). The sentence has one owner,
+  /// `AutoStopPresentation.line`, pinned here for both spellings.
   func testAnArmedAutoStopShowsOnlyWhileRecording() {
     let autoStop = AutoStopPresentation(
       appName: "Zen", remainingText: "1:29", fractionRemaining: 89.0 / 90.0)
@@ -66,6 +67,9 @@ final class RecordingControlPresentationTests: XCTestCase {
     XCTAssertEqual(recording.autoStop, autoStop, "passed through unchanged")
     XCTAssertEqual(recording.label, "Stop")
     XCTAssertEqual(recording.autoStop?.line, "Zen closed the microphone. Stopping in 1:29.")
+    let unnamed = AutoStopPresentation(appName: nil, remainingText: "0:05", fractionRemaining: 0.05)
+    XCTAssertEqual(unnamed.line, "The call app closed the microphone. Stopping in 0:05.")
+    XCTAssertEqual(AutoStopPresentation.keepRecordingLabel, "Keep recording")
     for state in [RecordingState.idle, .starting, .stopping] {
       XCTAssertNil(
         RecordingControlPresentation.make(state: state, denied: [], autoStop: autoStop).autoStop,
