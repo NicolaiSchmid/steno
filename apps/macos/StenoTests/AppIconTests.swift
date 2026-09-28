@@ -59,9 +59,9 @@ final class AppIconTests: XCTestCase {
     let named = [info["CFBundleIconName"], info["CFBundleIconFile"]].compactMap { $0 as? String }
     XCTAssertTrue(named.contains { $0.hasPrefix("AppIcon") }, "Info.plist names AppIcon: \(named)")
 
-    let products = Bundle(for: InfoPlistTests.self).bundleURL.deletingLastPathComponent()
-    let icns = products.appendingPathComponent("Steno.app/Contents/Resources/AppIcon.icns")
-    XCTAssertTrue(FileManager.default.fileExists(atPath: icns.path), "AppIcon.icns is in the bundle")
+    let icns = InfoPlistTests.builtApp.appendingPathComponent("Contents/Resources/AppIcon.icns")
+    XCTAssertTrue(
+      FileManager.default.fileExists(atPath: icns.path), "AppIcon.icns is in the bundle")
     let header = try Data(contentsOf: icns).prefix(4)
     XCTAssertEqual(String(decoding: header, as: UTF8.self), "icns", "icns magic bytes")
     let image = try XCTUnwrap(NSImage(contentsOf: icns), "AppIcon.icns decodes")
