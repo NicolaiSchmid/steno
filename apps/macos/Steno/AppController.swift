@@ -33,9 +33,19 @@ final class AppController {
   /// The meeting the main window should show next (from the menu bar or the
   /// detection prompt).
   var requestedMeetingID: UUID?
-  /// The Settings section to select next; `SettingsView` applies and clears
-  /// it, as `MainWindow` does for `requestedMeetingID`.
+  /// The Settings section to select next, from the setup banner, the detail
+  /// rows and the footer (`openSettings(_:)`); `SettingsView` applies and
+  /// clears it, as `MainWindow` does for `requestedMeetingID`.
   var requestedSettingsSection: SettingsSection?
+  /// "Not now" on the setup banner hides it for the rest of this launch; it
+  /// comes back on the next launch while the configuration is still missing.
+  private(set) var setupBannerDismissed = false
+  /// The stored settings as last emitted by `environment.settings.observe()`,
+  /// nil until the first emission after `launch()`. The setup banner reads
+  /// `setupBannerMessage` from it and a new detail model seeds its configured
+  /// flags from it, so neither shows a wrong frame before its own
+  /// observation lands.
+  private(set) var storedSettings: Settings?
   private(set) var launched = false
   private var observers: [Task<Void, Never>] = []
   private var activationObserver: (any NSObjectProtocol)?
@@ -114,6 +124,18 @@ final class AppController {
     await detection.applySettings()
     await startHandoverIfPaired()
     observers.append(Task { [menuBar] in await menuBar.observe() })
+    observers.append(
+      Task { [weak self, environment] in
+        do {
+          for try await settings in environment.settings.observe() {
+            guard let self else { return }
+            self.storedSettings = settings
+          }
+        } catch {
+          // Settings and the detail pane report store errors; the banner
+          // just stays hidden.
+        }
+      })
     observers.append(
       Task { [weak self, environment] in
         do {
@@ -198,11 +220,25 @@ final class AppController {
   }
 
   /// Deep link into Settings: callers set the request here, then call the
-  /// `openSettings` environment action and activate the app.
+  /// `openSettings` environment action and activate the app
+  /// (`openSettings(_:with:)` does all three for the setup banner, the
+  /// detail rows and the footer).
   @discardableResult
   func openSettings(_ section: SettingsSection) -> SettingsSection {
     requestedSettingsSection = section
     return section
+  }
+
+  /// What the setup banner says; nil before the first settings emission and
+  /// once both the endpoint and the vault are configured. Follows the store,
+  /// so the banner disappears as soon as Settings saves the missing piece.
+  var setupBannerMessage: SetupBannerMessage? {
+    storedSettings.flatMap { SetupBannerMessage(settings: $0) }
+  }
+
+  /// "Not now" on the setup banner.
+  func dismissSetupBanner() {
+    setupBannerDismissed = true
   }
 
   private func registerLoginItemOnFirstLaunch() async {

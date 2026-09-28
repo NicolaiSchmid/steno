@@ -15,6 +15,7 @@ struct MeetingDetailView: View {
   @State private var tagsText = ""
   @State private var editingTags = false
   @State private var showsSpeakers = false
+  @Environment(\.openSettings) private var openSettings
 
   var body: some View {
     VStack(alignment: .leading, spacing: 0) {
@@ -102,10 +103,14 @@ struct MeetingDetailView: View {
               Text(template.displayName).tag(template.id)
             }
           }
+          .disabled(!model.canRerunSummary)
+          .help(model.llmConfigured ? "" : SetupCopy.rerunHelp)
           Button("Re-run summary") { Task { await model.rerunSummary() } }
-            .disabled(!model.canRerun)
+            .disabled(!model.canRerunSummary)
+            .help(model.llmConfigured ? "" : SetupCopy.rerunHelp)
           Button("Re-export") { Task { await model.reexport() } }
-            .disabled(!model.canRerun)
+            .disabled(!model.canReexport)
+            .help(model.vaultConfigured ? "" : SetupCopy.reexportHelp)
           if let url = model.export?.audio?.url {
             Divider()
             Button("Reveal recording in Finder") {
@@ -203,9 +208,9 @@ struct MeetingDetailView: View {
     let progress = controller.progress.entry(for: model.id)
     Group {
       switch model.tab {
-      case .summary: SummaryTab(model: model, progress: progress)
+      case .summary: SummaryTab(model: model, controller: controller, progress: progress)
       case .transcript: TranscriptTab(model: model, progress: progress)
-      case .tasks: TasksTab(model: model, progress: progress)
+      case .tasks: TasksTab(model: model, controller: controller, progress: progress)
       case .scratchpad: ScratchpadTab(model: model, progress: progress)
       }
     }
@@ -214,21 +219,48 @@ struct MeetingDetailView: View {
     .accessibilityIdentifier("tab-content-\(model.tab.rawValue)")
   }
 
+  /// Selected by `exportStatus`: no vault, not exported yet, or one badge
+  /// per delivery. Ids `footer-choose-vault` and `footer-export-now`.
   private func footer(_ meeting: Meeting) -> some View {
     HStack(spacing: Theme.Space.md) {
-      if model.deliveries.isEmpty {
-        Text("Not delivered yet")
-          .font(.steno(Theme.TextSize.xxs))
-          .foregroundStyle(Color.stenoFaint)
-      }
-      ForEach(model.deliveries) { delivery in
-        DeliveryBadge(delivery: delivery)
+      switch model.exportStatus {
+      case .noVault:
+        footerText(SetupCopy.notExportedNoVault)
+        footerButton(SetupCopy.chooseVault, id: "footer-choose-vault") {
+          controller.openSettings(.export, with: openSettings)
+        }
+      case .notExported:
+        footerText(SetupCopy.notExportedYet)
+        footerButton(SetupCopy.exportNow, id: "footer-export-now") {
+          Task { await model.reexport() }
+        }
+        .disabled(model.isBusy || !model.canReexport)
+      case .exported(let deliveries):
+        ForEach(deliveries) { delivery in
+          DeliveryBadge(delivery: delivery)
+        }
       }
       Spacer()
       if model.isBusy { ProgressView().controlSize(.small) }
     }
     .padding(.horizontal, Theme.Space.lg)
     .padding(.vertical, Theme.Space.sm)
+  }
+
+  private func footerText(_ text: String) -> some View {
+    Text(text)
+      .font(.steno(Theme.TextSize.xxs))
+      .foregroundStyle(Color.stenoFaint)
+      .accessibilityIdentifier("footer-export-status")
+  }
+
+  /// The footer's one ghost action beside the status text.
+  private func footerButton(_ title: String, id: String, action: @escaping () -> Void)
+    -> some View
+  {
+    Button(title, action: action)
+      .buttonStyle(StenoGhostButtonStyle())
+      .accessibilityIdentifier(id)
   }
 }
 
@@ -241,7 +273,7 @@ struct DeliveryBadge: View {
       case .pending:
         StatusChip(text: "\(delivery.destinationID): pending", color: Color.stenoInfo)
       case .delivered:
-        StatusChip(text: "\(delivery.destinationID): delivered", color: Color.stenoLive)
+        StatusChip(text: "\(delivery.destinationID): exported", color: Color.stenoLive)
       case .failed(let message):
         StatusChip(text: "\(delivery.destinationID): failed", color: Color.stenoDestructive)
           .help(message)

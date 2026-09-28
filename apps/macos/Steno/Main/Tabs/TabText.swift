@@ -7,22 +7,37 @@ import StenoCore
 /// `timestampText` (Transcript), `MeetingExport.assigneeName(for:)` and the
 /// priority chips (Tasks), the meeting's scratchpad (Scratchpad), the
 /// `ProcessingCard`'s title row through `ProcessingPresentation.lines` while
-/// `progress` says the meeting is queued or processing, and
-/// `PendingText.text` for a tab without content otherwise. The views add
-/// styling only; the snapshot test pins these lines for the fixture meeting.
+/// `progress` says the meeting is queued or processing, the `SummaryStatus`
+/// skipped row (title, body, footnote) for a ready meeting the pipeline
+/// summarised without an endpoint (`llmConfigured` is the setup state it
+/// keys off), and `PendingText.text` for a tab without content otherwise.
+/// The views add styling only; the snapshot test pins these lines for the
+/// fixture meeting.
 enum TabText {
   static func lines(
     _ tab: MeetingDetailViewModel.Tab, export: MeetingExport,
     progress: ProcessingProgressModel.Entry? = nil, elapsed: Duration = .zero,
-    locale: Locale = .current, timeZone: TimeZone = .current
+    llmConfigured: Bool = false, locale: Locale = .current, timeZone: TimeZone = .current
   ) -> [String] {
     switch tab {
-    case .summary: summary(export, progress: progress, elapsed: elapsed)
+    case .summary:
+      summary(export, progress: progress, elapsed: elapsed, llmConfigured: llmConfigured)
     case .transcript: transcript(export, progress: progress, elapsed: elapsed)
     case .tasks:
-      tasks(export, progress: progress, elapsed: elapsed, locale: locale, timeZone: timeZone)
+      tasks(
+        export, progress: progress, elapsed: elapsed, llmConfigured: llmConfigured, locale: locale,
+        timeZone: timeZone)
     case .scratchpad: card(progress, elapsed: elapsed) + [export.meeting.scratchpad]
     }
+  }
+
+  /// The skipped row's lines for a ready meeting without a summary; nil
+  /// otherwise.
+  private static func skippedLines(
+    _ tab: MeetingDetailViewModel.Tab, export: MeetingExport, llmConfigured: Bool
+  ) -> [String]? {
+    SummaryStatus(meeting: export.meeting, llmConfigured: llmConfigured).skippedRow(for: tab)?
+      .lines
   }
 
   /// The card's lines while the meeting is queued or processing, else none;
@@ -44,10 +59,14 @@ enum TabText {
   }
 
   private static func summary(
-    _ export: MeetingExport, progress: ProcessingProgressModel.Entry?, elapsed: Duration
+    _ export: MeetingExport, progress: ProcessingProgressModel.Entry?, elapsed: Duration,
+    llmConfigured: Bool
   ) -> [String] {
     let sections = SummaryMarkdown.sections(for: export)
     guard !sections.isEmpty else {
+      if let skipped = skippedLines(.summary, export: export, llmConfigured: llmConfigured) {
+        return skipped
+      }
       return pending(
         export, progress: progress, elapsed: elapsed, none: "No summary",
         pending: "Summary appears after processing")
@@ -88,9 +107,12 @@ enum TabText {
 
   private static func tasks(
     _ export: MeetingExport, progress: ProcessingProgressModel.Entry?, elapsed: Duration,
-    locale: Locale, timeZone: TimeZone
+    llmConfigured: Bool, locale: Locale, timeZone: TimeZone
   ) -> [String] {
     guard !export.tasks.isEmpty else {
+      if let skipped = skippedLines(.tasks, export: export, llmConfigured: llmConfigured) {
+        return skipped
+      }
       return pending(
         export, progress: progress, elapsed: elapsed, none: "No tasks",
         pending: "Tasks appear after processing")

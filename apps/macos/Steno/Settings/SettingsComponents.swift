@@ -52,6 +52,10 @@ struct SettingsHeader: View {
     .padding(.horizontal, Theme.Space.xl)
     .padding(.top, Theme.Space.xl)
     .padding(.bottom, Theme.Space.sm)
+    // Only the selected section's header is in the hierarchy, so the UI
+    // smoke test reads a deep link's landing from this id.
+    .accessibilityElement(children: .contain)
+    .accessibilityIdentifier("settings-header-\(section.rawValue)")
   }
 }
 

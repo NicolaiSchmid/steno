@@ -507,4 +507,60 @@ final class AppControllerTests: XCTestCase {
     try await Task.sleep(for: .milliseconds(100))
     XCTAssertEqual(controller.menuBar.queue.count, 1, "no update after shutdown")
   }
+
+  /// The banner's one piece of state: dismissed for this launch only. The
+  /// configuration itself is read off `Settings`, which the Settings tabs
+  /// write; after `launch()` a fresh controller reports both missing. The
+  /// LLM tab's `isConfigured` and the Obsidian toggle are the same rule as
+  /// `llmConfigured` and `vaultConfigured`, so the tabs' info rows and the
+  /// banner agree.
+  func testSetupBannerDismissalAndTheConfiguredFlags() async throws {
+    let environment = try await TestSupport.environment(seed: false)
+    let controller = try makeController(environment)
+    XCTAssertFalse(controller.setupBannerDismissed, "a fresh controller shows the banner")
+    XCTAssertNil(controller.setupBannerMessage, "nothing before the store's first emission")
+    await controller.launch()
+    await TestSupport.waitUntil("banner message loaded") {
+      controller.setupBannerMessage == .bothMissing
+    }
+    let initial = try await environment.settings.load()
+    XCTAssertFalse(initial.llmConfigured)
+    XCTAssertFalse(initial.vaultConfigured)
+
+    let llm = LLMSettingsViewModel(environment: environment)
+    await llm.load()
+    XCTAssertEqual(llm.isConfigured, initial.llmConfigured)
+    llm.baseURLText = "http://127.0.0.1:1234/v1"
+    llm.model = "qwen"
+    await llm.save()
+    XCTAssertNil(llm.error, llm.error ?? "")
+    let afterLLM = try await environment.settings.load()
+    XCTAssertTrue(afterLLM.llmConfigured, "saving the LLM tab configures the endpoint")
+    XCTAssertEqual(llm.isConfigured, afterLLM.llmConfigured)
+    await TestSupport.waitUntil("endpoint observed by the controller") {
+      controller.setupBannerMessage == .vaultMissing
+    }
+
+    let vault = try TestSupport.temporaryDirectory("steno-vault")
+    defer { try? FileManager.default.removeItem(at: vault) }
+    let obsidian = ObsidianSettingsViewModel(environment: environment)
+    await obsidian.load()
+    XCTAssertEqual(obsidian.enabled, afterLLM.vaultConfigured)
+    obsidian.enabled = true
+    obsidian.vaultPath = vault.path
+    await obsidian.save()
+    XCTAssertTrue(obsidian.saved)
+    let afterVault = try await environment.settings.load()
+    XCTAssertTrue(afterVault.vaultConfigured, "saving the Obsidian tab configures the vault")
+    await TestSupport.waitUntil("vault observed by the controller") {
+      controller.storedSettings?.vaultConfigured == true
+    }
+    XCTAssertNil(controller.setupBannerMessage, "nothing left to set up: the banner live-hides")
+
+    controller.dismissSetupBanner()
+    XCTAssertTrue(controller.setupBannerDismissed)
+    let fresh = try makeController(environment)
+    XCTAssertFalse(fresh.setupBannerDismissed, "the dismissal lives for one launch")
+    await controller.shutdown()
+  }
 }

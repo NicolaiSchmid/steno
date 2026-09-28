@@ -288,13 +288,14 @@ final class AppEnvironment {
   /// network, no prompts. `handover` stays nil unless a test passes one;
   /// tests that need a failing or device-losing capture pass
   /// `makeCaptureSession`, drive the detector through `processActivity`,
-  /// gate or observe the pipeline through `makeSpeechEngine` and
-  /// `makeDiarizer` (each called once per pipeline build) and the recording
-  /// start through `calendar`. Without `makeSpeechEngine` the engine is a
-  /// `FakeSpeechEngine` whose `onTranscribe` sleeps for
+  /// gate or observe the pipeline through `makeSpeechEngine`, `makeDiarizer`
+  /// and `makeSummarizer` (each called once per pipeline build) and the
+  /// recording start through `calendar`. Without `makeSpeechEngine` the
+  /// engine is a `FakeSpeechEngine` whose `onTranscribe` sleeps for
   /// `uiTestingTranscribeHold` under `holdTranscribeArgument`, which also
   /// queues the seeded meeting; without `makeDiarizer` the diarizer is a
-  /// `FakeDiarizer`.
+  /// `FakeDiarizer`; without `makeSummarizer` the summarizer is a
+  /// `FakeSummarizer`.
   static func preview(
     clock: any Clock<Duration> = ContinuousClock(),
     now: @escaping @Sendable () -> Date = Date.init,
@@ -304,6 +305,7 @@ final class AppEnvironment {
     processActivity: FakeProcessAudioActivity = FakeProcessAudioActivity(),
     makeSpeechEngine: (@Sendable () -> any SpeechEngine)? = nil,
     makeDiarizer: (@Sendable () -> any Diarizer)? = nil,
+    makeSummarizer: (@Sendable () -> any MeetingSummarizer)? = nil,
     calendar: (any CalendarProviding)? = nil
   ) async throws -> AppEnvironment {
     let root = FileManager.default.temporaryDirectory
@@ -338,6 +340,8 @@ final class AppEnvironment {
         return engine
       }
     let makeDiarizer: @Sendable () -> any Diarizer = makeDiarizer ?? { FakeDiarizer() }
+    let makeSummarizer: @Sendable () -> any MeetingSummarizer =
+      makeSummarizer ?? { FakeSummarizer() }
     let makeDependencies: MakeDependencies = { _, _ in
       PipelineDependencies(
         decoder: AVFoundationAudioCodec(),
@@ -345,7 +349,7 @@ final class AppEnvironment {
         diarizer: makeDiarizer(),
         speakerMemory: memory,
         cleaner: PassthroughCleaner(),
-        summarizer: FakeSummarizer(),
+        summarizer: makeSummarizer(),
         dispatcher: DeliveryCoordinator(store: store, settings: settingsStore, now: now),
         store: store,
         settings: settingsStore,

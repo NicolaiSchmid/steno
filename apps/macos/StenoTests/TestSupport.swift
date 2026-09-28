@@ -19,12 +19,14 @@ enum TestSupport {
     processActivity: FakeProcessAudioActivity = FakeProcessAudioActivity(),
     makeSpeechEngine: @escaping @Sendable () -> any SpeechEngine = { FakeSpeechEngine() },
     makeDiarizer: @escaping @Sendable () -> any Diarizer = { FakeDiarizer() },
+    makeSummarizer: @escaping @Sendable () -> any MeetingSummarizer = { FakeSummarizer() },
     calendar: (any CalendarProviding)? = nil
   ) async throws -> AppEnvironment {
     try await AppEnvironment.preview(
       clock: clock, now: { now }, handover: handover, seed: seed,
       makeCaptureSession: makeCaptureSession, processActivity: processActivity,
-      makeSpeechEngine: makeSpeechEngine, makeDiarizer: makeDiarizer, calendar: calendar)
+      makeSpeechEngine: makeSpeechEngine, makeDiarizer: makeDiarizer,
+      makeSummarizer: makeSummarizer, calendar: calendar)
   }
 
   /// A capture session over a synthetic backend whose device changes after

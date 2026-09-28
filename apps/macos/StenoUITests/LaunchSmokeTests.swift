@@ -125,6 +125,46 @@ final class LaunchSmokeTests: XCTestCase {
     XCTAssertEqual(meetingRowCount(in: app), 2, "the stopped recording keeps its row")
   }
 
+  /// The preview environment has no LLM endpoint and no vault, so the setup
+  /// banner shows over the detail pane with both fixes. "Set up summaries"
+  /// opens Settings on the Summaries section (`settings-header-summaries` is
+  /// in the hierarchy only while that section is selected, which proves the
+  /// request was applied; `SettingsSectionTests` pins the request itself);
+  /// Settings is closed again
+  /// before "Not now", which would otherwise sit under it on the runner's
+  /// one display; "Not now" hides the banner for the launch.
+  func testSetupBannerLinksToSettingsAndHides() throws {
+    let app = XCUIApplication()
+    app.launchArguments = ["-steno-ui-testing"]
+    app.launch()
+
+    let window = app.windows.firstMatch
+    XCTAssertTrue(window.waitForExistence(timeout: 10), "no window appeared")
+    let setup = app.buttons["setup-summaries"].firstMatch
+    XCTAssertTrue(setup.waitForExistence(timeout: 10), "the banner's summaries button is missing")
+    XCTAssertTrue(
+      app.buttons["choose-vault"].firstMatch.exists, "the banner's vault button is missing")
+    let notNow = app.buttons["banner-not-now"].firstMatch
+    XCTAssertTrue(notNow.exists, "the banner's Not now is missing")
+
+    setup.click()
+    let header = app.descendants(matching: .any)["settings-header-summaries"].firstMatch
+    XCTAssertTrue(header.waitForExistence(timeout: 10), "Settings did not open on Summaries")
+    let screenshot = XCTAttachment(screenshot: XCUIScreen.main.screenshot())
+    screenshot.name = "setup-banner-and-llm-settings"
+    screenshot.lifetime = .keepAlways
+    add(screenshot)
+
+    app.typeKey("w", modifierFlags: .command)
+    XCTAssertTrue(waitUntil(timeout: 5) { !header.exists }, "Settings did not close")
+    XCTAssertTrue(notNow.isHittable, "the banner's Not now is covered")
+    notNow.click()
+    XCTAssertTrue(
+      waitUntil(timeout: 5) { !app.buttons["setup-summaries"].firstMatch.exists },
+      "Not now did not hide the banner")
+    XCTAssertFalse(app.buttons["banner-not-now"].firstMatch.exists)
+  }
+
   /// Rows carrying a `meeting-<uuid>` identifier, and only those: the
   /// redesign's `meeting-list` container must not count. The list's cells
   /// are counted with one query when they carry the row identifier; SwiftUI

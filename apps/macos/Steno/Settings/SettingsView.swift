@@ -586,3 +586,17 @@ struct PairingSheet: View {
       .joined(separator: " ")
   }
 }
+
+extension AppController {
+  /// The one way a button lands on a Settings section: record the request,
+  /// open the scene through the view's `openSettings` environment action and
+  /// bring the app to the front. Used by the setup banner, the detail rows
+  /// and the footer. Lives here, not in `AppController.swift`, because
+  /// `OpenSettingsAction` needs SwiftUI, whose `Settings` scene would shadow
+  /// the model type the controller names.
+  func openSettings(_ section: SettingsSection, with open: OpenSettingsAction) {
+    openSettings(section)
+    open()
+    NSApp.activate()
+  }
+}

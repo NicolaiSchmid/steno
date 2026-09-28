@@ -1,28 +1,35 @@
 import StenoCore
 import SwiftUI
 
-/// The extracted tasks, read only: text, assignee, priority, due date.
+/// The extracted tasks, read only: text, assignee, priority, due date. A
+/// ready meeting the pipeline summarised without an endpoint shows the
+/// `SummaryStatus` row instead, with the same action as the Summary tab.
 struct TasksTab: View {
   let model: MeetingDetailViewModel
+  let controller: AppController
   /// Where the pipeline is with this meeting while it is queued or
   /// processing, from `controller.progress.entry(for:)`; nil otherwise. The
   /// card it drives replaces the pending copy and the spinner.
   let progress: ProcessingProgressModel.Entry?
 
   var body: some View {
-    ScrollView {
-      VStack(alignment: .leading, spacing: Theme.Space.sm) {
-        ProcessingCardSlot(progress: progress, meeting: model.meeting)
-        let tasks = model.export?.tasks ?? []
-        if tasks.isEmpty, progress == nil {
-          PendingText(
-            meeting: model.meeting, none: "No tasks", pending: "Tasks appear after processing")
+    let tasks = model.export?.tasks ?? []
+    if tasks.isEmpty, let row = model.summaryStatus.skippedRow(for: .tasks) {
+      SkippedSummaryState(row: row, tab: .tasks, model: model, controller: controller)
+    } else {
+      ScrollView {
+        VStack(alignment: .leading, spacing: Theme.Space.sm) {
+          ProcessingCardSlot(progress: progress, meeting: model.meeting)
+          if tasks.isEmpty, progress == nil {
+            PendingText(
+              meeting: model.meeting, none: "No tasks", pending: "Tasks appear after processing")
+          }
+          ForEach(tasks) { task in
+            TaskRow(task: task, assignee: model.export?.assigneeName(for: task))
+          }
         }
-        ForEach(tasks) { task in
-          TaskRow(task: task, assignee: model.export?.assigneeName(for: task))
-        }
+        .readingColumn()
       }
-      .readingColumn()
     }
   }
 }
