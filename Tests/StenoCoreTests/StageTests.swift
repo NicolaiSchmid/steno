@@ -347,7 +347,7 @@ import Testing
     let cleaned = try await harness.pipeline.cleanup(
       meeting: meeting, segments: incoming, speakers: SampleData.speakers())
     #expect(cleaned.segments == incoming)
-    #expect(cleaned.usage == .zero)
+    #expect(cleaned.usage == nil)
     #expect(
       try await harness.store.export(meetingID: meeting.id).segments == SampleData.segments(),
       "the merge stage's rows stay; the skipped stage writes nothing")
@@ -467,17 +467,17 @@ import Testing
     defer { skipping.cleanUp() }
     let events = await skipping.events.subscribe()
     var input = summarized
-    input.llmUsage = nil
+    input.updatedAt = SampleData.createdAt
     let updated = try await skipping.pipeline.summarize(
       meeting: input, segments: SampleData.segments(), speakers: SampleData.speakers())
     #expect(updated.summary == nil)
-    #expect(updated.llmUsage == nil)
+    #expect(updated.llmUsage == summarized.llmUsage, "usage is left as given; `process` resets it")
     #expect(updated.title == summarized.title, "the title is left as given")
     #expect(updated.updatedAt == PipelineHarness.now)
 
     let after = try await harness.store.export(meetingID: meeting.id)
     #expect(after.meeting.summary == nil)
-    #expect(after.meeting.llmUsage == nil)
+    #expect(after.meeting.llmUsage == summarized.llmUsage)
     #expect(after.tasks.isEmpty)
     #expect(after.decisions.isEmpty)
     #expect(try await harness.store.nameSuggestions(meetingID: meeting.id).isEmpty)

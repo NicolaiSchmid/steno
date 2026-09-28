@@ -121,11 +121,11 @@ struct Process: AsyncParsableCommand {
       updatedAt: now
     )
 
+    let llm = try await Wiring.llmComponents(settings: settings)
     let pipeline = ProcessingPipeline(
       dependencies: try Wiring.dependencies(
         store: opened.store, settings: opened.settings, engine: speech.engine,
-        modelsDirectory: settings.modelsDirectory,
-        llm: try await Wiring.llmComponents(settings: settings)))
+        modelsDirectory: settings.modelsDirectory, llm: llm))
     try await pipeline.enqueue(meeting, asset: asset)
     await pipeline.waitUntilIdle()
 
@@ -135,7 +135,7 @@ struct Process: AsyncParsableCommand {
     if case .failed(let reason) = result.state {
       throw RuntimeFailure(description: "processing failed: \(reason)")
     }
-    if result.summary == nil {
+    if llm == nil {
       FileHandle.standardError.write(
         Data("summary skipped: no LLM endpoint configured\n".utf8))
     }

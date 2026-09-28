@@ -4,7 +4,7 @@ import StenoLLM
 
 /// The LLM passes for the pipeline, built from `Settings` and the API key:
 /// `LLMEndpoint(settings:)` (nil until URL and model are set; the pipeline
-/// then skips the cleanup and summary passes, as the CLI does),
+/// then skips the cleanup and summary passes),
 /// one `OpenAICompatibleClient` shared by the cleaner and the summarizer so
 /// a structured-output mode learned during cleanup carries over. The key
 /// goes into the client's init only; it is never part of `Settings`.

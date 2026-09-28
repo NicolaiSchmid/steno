@@ -251,6 +251,10 @@ import Testing
         "\(slug) - Tasks.md", "\(slug) - Transcript.md", "\(slug).md", "audio.wav", "meeting.json",
         "transcript.vtt",
       ], "six files: the WAV decoder's mixdown is copied as audio.wav")
+    let note = try String(
+      contentsOf: meetings.appendingPathComponent(slug).appendingPathComponent("\(slug).md"),
+      encoding: .utf8)
+    #expect(note.contains("No summary."), "a skipped summary is said, not left blank")
     let json = try Data(
       contentsOf: meetings.appendingPathComponent(slug).appendingPathComponent("meeting.json"))
     #expect(try StenoJSON.decode(MeetingExport.self, from: json).meeting.id.uuidString == meetingID)

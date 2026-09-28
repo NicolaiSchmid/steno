@@ -4,8 +4,9 @@ import Foundation
 /// the CLI pass real implementations, tests pass the fakes in `Testing/`.
 /// `cleaner` and `summarizer` are nil when no LLM endpoint is configured:
 /// the cleanup and summarize stages then post their progress and write
-/// nothing, so the meeting lands `.ready` with `summary == nil` and
-/// `llmUsage == nil` instead of a fabricated summary. `events` defaults to
+/// nothing, so the meeting lands `.ready` with `summary == nil` instead of
+/// a fabricated summary (and `llmUsage == nil` when both are nil; `summary`
+/// is the one signal that the summary was skipped). `events` defaults to
 /// `store.events`, so the store's `deleted` and the pipeline's `progress`
 /// reach one subscriber.
 public struct PipelineDependencies: Sendable {
@@ -160,10 +161,10 @@ public actor ProcessingPipeline {
           meeting: current, lanes: transcription.lanes, diarization: diarized)
         let cleaned = try await cleanup(
           meeting: current, segments: merged.segments, speakers: merged.speakers)
-        // Without a cleaner no request was made, and a usage an earlier run
-        // wrote (each stage replaces what it wrote) does not survive either.
-        current.llmUsage =
-          dependencies.cleaner == nil ? nil : (current.llmUsage ?? .zero) + cleaned.usage
+        // This run's usage starts from the cleanup pass (nil when it was
+        // skipped) and the summarize stage adds its own; whatever an earlier
+        // run wrote is replaced, never added to.
+        current.llmUsage = cleaned.usage
         current = try await summarize(
           meeting: current, segments: cleaned.segments, speakers: merged.speakers)
         persisted = try await persist(meeting: current, asset: asset)

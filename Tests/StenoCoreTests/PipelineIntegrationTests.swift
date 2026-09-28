@@ -145,7 +145,7 @@ import Testing
   /// the summary was skipped for lack of an endpoint. Nil passes post their
   /// progress, write nothing, and the meeting still lands ready and
   /// delivered with the merged transcript and its original title.
-  @Test func nilLLMPassesSkipCleanupAndSummaryAndLandReady() async throws {
+  @Test func withoutAnEndpointProcessSkipsBothPassesAndLandsReady() async throws {
     let harness = try await PipelineHarness(cleaner: nil, summarizer: nil)
     defer { harness.cleanUp() }
     let events = await harness.events.subscribe()
@@ -195,7 +195,9 @@ import Testing
     let empty = SummaryOutput(
       title: "", summary: SummaryDocument(templateID: "default", sections: []), decisions: [],
       tasks: [], speakerNames: [], usage: .zero)
-    let harness = try await PipelineHarness(summarizer: FakeSummarizer(canned: empty))
+    // No cleaner, so only the summarize stage can make `llmUsage` non-nil.
+    let harness = try await PipelineHarness(
+      cleaner: nil, summarizer: FakeSummarizer(canned: empty))
     defer { harness.cleanUp() }
     let (meeting, asset) = try harness.meeting(source: .macInPerson)
     try await harness.pipeline.enqueue(meeting, asset: asset)
@@ -205,8 +207,38 @@ import Testing
     #expect(export.meeting.state == .ready)
     #expect(export.meeting.summary != nil)
     #expect(export.meeting.summary?.sections.isEmpty == true)
-    #expect(export.meeting.llmUsage != nil)
+    #expect(export.meeting.llmUsage == .zero, "the summarizer ran and reported its usage")
     #expect(export.meeting.title == "Untitled")
+  }
+
+  /// A `.processing` meeting picked up at launch after the endpoint was
+  /// removed: the earlier run's summary, rows and usage are replaced, not
+  /// kept or added to.
+  @Test func resumeWithNilPassesClearsAnEarlierRunsSummaryAndUsage() async throws {
+    let harness = try await PipelineHarness(cleaner: nil, summarizer: nil)
+    defer { harness.cleanUp() }
+    let earlier = SampleData.summaryOutput()
+    let (fresh, asset) = try harness.meeting(source: .macInPerson)
+    var meeting = fresh
+    meeting.state = .processing
+    meeting.summary = earlier.summary
+    meeting.llmUsage = LLMUsage(promptTokens: 1, completionTokens: 1, requests: 1)
+    try await harness.store.save(meeting, asset: asset)
+    try await harness.store.replaceSummary(
+      meeting, tasks: earlier.tasks, decisions: earlier.decisions,
+      speakerNames: earlier.speakerNames)
+    #expect(try await harness.store.export(meetingID: meeting.id).tasks.isEmpty == false)
+
+    #expect(try await harness.pipeline.resumeUnfinished() == [meeting.id])
+    await harness.pipeline.waitUntilIdle()
+
+    let export = try await harness.store.export(meetingID: meeting.id)
+    #expect(export.meeting.state == .ready)
+    #expect(export.meeting.summary == nil)
+    #expect(export.meeting.llmUsage == nil)
+    #expect(export.tasks.isEmpty)
+    #expect(export.decisions.isEmpty)
+    #expect(try await harness.store.nameSuggestions(meetingID: meeting.id).isEmpty)
   }
 
   @Test func retentionZeroExpiresImmediately() async throws {

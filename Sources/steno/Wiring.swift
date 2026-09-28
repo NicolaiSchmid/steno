@@ -30,14 +30,13 @@ struct SpeechOptions: ParsableArguments {
 }
 
 /// Builds the stores and the `PipelineDependencies`. Core wires fakes for
-/// speech and diarization; the LLM passes are the real ones when the
-/// settings name an endpoint and nil otherwise (the pipeline then skips
-/// cleanup and summary; no fake runs in the product). Delivery runs through
-/// the real `DeliveryCoordinator` (or the `dispatcher` a command passes, as
-/// `steno deliver --vault` does); `--engine <id>` swaps in the real speech
-/// engine, diarizer and cosine speaker memory (the speech PR's one recorded
-/// edit here). Later workstreams swap the rest in behind flags in their own
-/// command files.
+/// speech and diarization; the LLM passes come from
+/// `llmComponents(settings:)` and are nil without an endpoint. Delivery
+/// runs through the real `DeliveryCoordinator` (or the `dispatcher` a
+/// command passes, as `steno deliver --vault` does); `--engine <id>` swaps
+/// in the real speech engine, diarizer and cosine speaker memory (the speech
+/// PR's one recorded edit here). Later workstreams swap the rest in behind
+/// flags in their own command files.
 enum Wiring {
   /// The `transform:` of every `<meeting-id>` argument.
   static func uuid(_ argument: String) throws -> UUID {
@@ -54,8 +53,7 @@ enum Wiring {
     return (store, SettingsStore(writer: store.writer))
   }
 
-  /// `llm` is the real cleaner and summarizer when the settings name an
-  /// endpoint and nil otherwise; see `llmComponents(settings:)`.
+  /// `llm` is `llmComponents(settings:)`'s result; nil skips both passes.
   static func dependencies(
     store: MeetingStore, settings: SettingsStore, engine: SpeechEngineID? = nil,
     modelsDirectory: URL? = nil, dispatcher: (any DeliveryDispatcher)? = nil,
