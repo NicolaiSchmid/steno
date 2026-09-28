@@ -1,3 +1,4 @@
+import AppKit
 import XCTest
 
 /// Every `--color-*` token in `mobile/global.css` has a Swift counterpart in
@@ -27,6 +28,87 @@ final class ThemeTokensTests: XCTestCase {
       let color = token.nsColor
       XCTAssertNotNil(color.usingColorSpace(.sRGB), token.cssName)
     }
+  }
+
+  /// The Mac-only surfaces resolve to their light and dark values under the
+  /// matching appearance and never take a name the CSS owns.
+  @MainActor func testMacTokensResolveInBothAppearancesAndAvoidCSSNames() throws {
+    XCTAssertEqual(Set(Theme.macTokens.map(\.cssName)), ["sidebar", "raised"])
+    let cssNames = Set(Theme.tokens.map(\.cssName))
+    for token in Theme.macTokens {
+      XCTAssertFalse(cssNames.contains(token.cssName), "\(token.cssName) collides with the CSS")
+      try assertResolves(token, under: .aqua, to: token.light)
+      try assertResolves(token, under: .darkAqua, to: token.dark)
+    }
+  }
+
+  @MainActor private func assertResolves(
+    _ token: Theme.Token, under name: NSAppearance.Name, to expected: Theme.RGBA,
+    file: StaticString = #filePath, line: UInt = #line
+  ) throws {
+    let appearance = try XCTUnwrap(NSAppearance(named: name), file: file, line: line)
+    var resolved: NSColor?
+    appearance.performAsCurrentDrawingAppearance {
+      resolved = token.nsColor.usingColorSpace(.sRGB)
+    }
+    let label = "\(token.cssName) under \(name.rawValue)"
+    let color = try XCTUnwrap(resolved, label, file: file, line: line)
+    XCTAssertEqual(color.redComponent, expected.red, accuracy: 0.002, label, file: file, line: line)
+    XCTAssertEqual(
+      color.greenComponent, expected.green, accuracy: 0.002, label, file: file, line: line)
+    XCTAssertEqual(
+      color.blueComponent, expected.blue, accuracy: 0.002, label, file: file, line: line)
+    XCTAssertEqual(
+      color.alphaComponent, expected.alpha, accuracy: 0.002, label, file: file, line: line)
+  }
+
+  /// `sidebar` is `background` with the `card` veil composited on it, not a
+  /// hand-picked grey: `#f2f2f2` in light, `#080808` in dark.
+  func testSidebarIsBackgroundUnderTheCardVeil() {
+    let pairs: [(name: String, actual: Theme.RGBA, base: Theme.RGBA, veil: Theme.RGBA)] = [
+      ("light", Theme.sidebar.light, Theme.background.light, Theme.card.light),
+      ("dark", Theme.sidebar.dark, Theme.background.dark, Theme.card.dark),
+    ]
+    for pair in pairs {
+      let a = pair.veil.alpha
+      XCTAssertEqual(
+        pair.actual.red, pair.base.red * (1 - a) + pair.veil.red * a, accuracy: 0.0005, pair.name)
+      XCTAssertEqual(
+        pair.actual.green, pair.base.green * (1 - a) + pair.veil.green * a, accuracy: 0.0005,
+        pair.name)
+      XCTAssertEqual(
+        pair.actual.blue, pair.base.blue * (1 - a) + pair.veil.blue * a, accuracy: 0.0005,
+        pair.name)
+      XCTAssertEqual(pair.actual.alpha, 1, pair.name)
+    }
+    XCTAssertEqual(Theme.sidebar.light.red, 242.25 / 255, accuracy: 0.002)
+    XCTAssertEqual(Theme.sidebar.dark.red, 7.9 / 255, accuracy: 0.002)
+  }
+
+  /// Every spacing step except `xxs` and `hairline` sits on the 4 pt grid,
+  /// and the radii descend one step per nest.
+  func testSpaceSitsOnTheGridAndRadiiDescend() {
+    let steps: [(name: String, value: CGFloat)] = [
+      ("xs", Theme.Space.xs), ("sm", Theme.Space.sm), ("md", Theme.Space.md),
+      ("lg", Theme.Space.lg), ("xl", Theme.Space.xl), ("xxl", Theme.Space.xxl),
+      ("xxxl", Theme.Space.xxxl),
+    ]
+    XCTAssertEqual(steps.map(\.value), Theme.Space.grid)
+    XCTAssertEqual(Theme.Space.grid, [4, 8, 12, 16, 24, 32, 48])
+    for step in steps {
+      XCTAssertEqual(
+        step.value.truncatingRemainder(dividingBy: 4), 0, "Space.\(step.name) is off the 4 pt grid")
+    }
+    XCTAssertEqual(Theme.Space.xxs, 2)
+    XCTAssertEqual(Theme.Space.hairline, 1)
+
+    let radii = Theme.Radius.allCases.map(\.rawValue)
+    XCTAssertEqual(radii, [16, 12, 8, 6, 4])
+    for (outer, inner) in zip(radii, radii.dropFirst()) {
+      XCTAssertGreaterThan(outer, inner, "radii must strictly descend")
+    }
+    XCTAssertEqual(Theme.Radius.allCases.first, .xl)
+    XCTAssertEqual(Theme.Radius.allCases.last, .xs)
   }
 
   func testMotionTokensMirrorMobile() {

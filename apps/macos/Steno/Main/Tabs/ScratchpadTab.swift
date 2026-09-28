@@ -15,11 +15,13 @@ struct ScratchpadTab: View {
         .scrollContentBackground(.hidden)
         .padding(Theme.Space.sm)
         .background(
-          RoundedRectangle(cornerRadius: Theme.Space.radius, style: .continuous)
-            .fill(Color.stenoCard))
+          Theme.Radius.md.shape
+            .fill(Color.stenoCard)
+        )
         .overlay(
-          RoundedRectangle(cornerRadius: Theme.Space.radius, style: .continuous)
-            .strokeBorder(Color.stenoBorder, lineWidth: Theme.Space.hairline))
+          Theme.Radius.md.shape
+            .strokeBorder(Color.stenoBorder, lineWidth: Theme.Space.hairline)
+        )
         .accessibilityIdentifier("scratchpad-editor")
         .onChange(of: text) { _, newValue in
           if newValue != model.meeting?.scratchpad { model.saveScratchpad(newValue) }

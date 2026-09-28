@@ -117,7 +117,7 @@ struct MeetingDetailView: View {
           }
       } else {
         ForEach(meeting.tags, id: \.self) { tag in
-          StatusChip(text: "#\(tag)", color: Color.stenoMutedForeground)
+          StatusChip(text: "#\(tag)", style: .neutral)
         }
         Button(meeting.tags.isEmpty ? "Add tags" : "Edit tags") {
           tagsText = meeting.tags.joined(separator: ", ")
@@ -142,7 +142,7 @@ struct MeetingDetailView: View {
             .padding(.horizontal, Theme.Space.md)
             .padding(.vertical, Theme.Space.xs + 2)
             .background(
-              RoundedRectangle(cornerRadius: Theme.Space.radiusSmall, style: .continuous)
+              Theme.Radius.sm.shape
                 .fill(model.tab == tab ? Color.stenoSecondary : Color.clear))
         }
         .buttonStyle(.plain)

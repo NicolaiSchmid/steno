@@ -24,6 +24,9 @@ directly and adds protocols only where a system framework has no seam.
   Sparkle deltas, phased rollouts, channels, signed feeds; Homebrew cask; release notes beyond the Release body.
 - Pixel design. Tokens are dark-first and mirror `mobile/global.css` (luminance ladder, alpha-veil surfaces, hairline
   borders, achromatic CTA).
+  Amended 2026-09-28 by [`2026-09-28-macos-visual-redesign.md`](2026-09-28-macos-visual-redesign.md): pixel design is
+  in scope; token names and the shared ladder mirror `mobile/global.css`, and the Mac adds surface tokens
+  (`Theme.macTokens`) the mobile app does not need.
 - App-side wrappers around package types (`CaptureSession`, `MeetingDetector`, `ProcessingPipeline`, `HandoverService`
   are injected as they are; their fakes come from the modules' `Testing/`).
 

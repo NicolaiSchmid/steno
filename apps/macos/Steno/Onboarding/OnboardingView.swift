@@ -54,7 +54,7 @@ struct OnboardingView: View {
             .font(.steno(Theme.TextSize.sm, weight: .semibold))
             .foregroundStyle(Color.stenoStrong)
           if !step.isRequired {
-            StatusChip(text: "Optional", color: Color.stenoFaint)
+            StatusChip(text: "Optional", style: .neutral)
           }
           Spacer()
           if model.skipped.contains(step.kind) {
