@@ -26,10 +26,13 @@ public enum ObsidianError: Error, Sendable, Equatable, CustomStringConvertible {
 
 /// The Obsidian vault folder destination: `Meetings/<date>-<slug>/` with the
 /// folder note, transcript, tasks, `transcript.vtt`, `meeting.json`, the
-/// optional audio copy, and one managed block per person page. The policy
-/// (which receipt applies, what may be written, what the receipt says) is
-/// `DeliveryLedger`'s; this type renders, asks the ledger and writes through
-/// `LocalFolderSink`. Nothing is deleted but the writer's own temp files.
+/// optional audio copy, and one managed block per person page. A person page
+/// the previous receipt lists but this delivery no longer renders (a speaker
+/// reassigned to somebody else, a renamed person) loses this meeting's line
+/// and keeps everything else. The policy (which receipt applies, what may be
+/// written, what the receipt says) is `DeliveryLedger`'s; this type renders,
+/// asks the ledger and writes through `LocalFolderSink`. Nothing is deleted
+/// but the writer's own temp files.
 public struct ObsidianFolderDestination: Destination {
   public static let destinationID = "obsidian-folder"
 
@@ -95,8 +98,10 @@ public struct ObsidianFolderDestination: Destination {
     if let peopleFolder = settings.peopleFolder {
       try writing(peopleFolder) { try sink.createDirectory(peopleFolder) }
       AtomicFileWriter.removeStaleTemporaries(in: sink.url(peopleFolder))
+      var rendered: Set<String> = []
       for page in renderer.renderPersonPages(meeting, options: options, folderSlug: slug) {
         let path = "\(peopleFolder)/\(page.fileName)"
+        rendered.insert(path)
         var data = Data(page.page.utf8)
         if let existing = try reading(path, { try sink.read(path) }) {
           // A page that is not UTF-8 text cannot be merged without changing
@@ -111,6 +116,9 @@ public struct ObsidianFolderDestination: Destination {
         try writing(path) { try sink.write(data, to: path) }
         ledger.record(path, .managedBlock, data)
       }
+      try removeMeetingLine(
+        from: ledger.previous?.files ?? [], except: rendered, meetingID: meeting.meeting.id,
+        ledger: &ledger)
     }
 
     if settings.includeAudio {
@@ -129,6 +137,32 @@ public struct ObsidianFolderDestination: Destination {
     }
 
     return ledger.receipt(folder: folder)
+  }
+
+  /// Drops this meeting's line from every managed-block page of the previous
+  /// receipt that this delivery did not render, so a person who left the
+  /// meeting no longer lists it. A page that is gone from disk is skipped and
+  /// a page that is not UTF-8 text is left as it is; neither fails the
+  /// delivery, since there is nothing of ours to correct in the first case
+  /// and no safe way to in the second. An unchanged page is not rewritten.
+  /// The path stays in the receipt either way, as every file the app wrote
+  /// does.
+  private func removeMeetingLine(
+    from previous: [DeliveredFile], except rendered: Set<String>, meetingID: UUID,
+    ledger: inout DeliveryLedger
+  ) throws {
+    for file in previous where file.ownership == .managedBlock {
+      let path = file.relativePath
+      guard !rendered.contains(path),
+        let existing = try reading(path, { try sink.read(path) }),
+        let text = String(data: existing, encoding: .utf8)
+      else { continue }
+      let cleaned = ManagedBlock.remove(meetingID: meetingID, from: text)
+      guard cleaned != text else { continue }
+      let data = Data(cleaned.utf8)
+      try writing(path) { try sink.write(data, to: path) }
+      ledger.record(path, .managedBlock, data)
+    }
   }
 
   // MARK: - Vault lookups

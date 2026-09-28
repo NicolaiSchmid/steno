@@ -114,7 +114,7 @@ struct KeychainSecretStore: SecretStore { }                    // Security frame
 | `MenuBarExtra` (`.window` style; icon changes while recording) | `MenuBarViewModel` | `recording: .idle / .recording(since:, levels:) / .stopping` from a `CaptureSession` built per recording over `captureBackend`, `queue: [QueueItem(meeting, stage, fraction)]` from `MeetingEvent.progress` joined with `observeMeetings()`, `launchAtLogin: LoginItemStatus` | `toggleRecording()` (stop → set retention from `Settings`, write title and participants from the calendar, `pipeline.enqueue`), `startInPerson()`, `openMeeting(id)`, `openMain()`, `openSettings()`, `setLaunchAtLogin(Bool)`, `checkForUpdates()`, `quit()` |
 | `Window("Steno", id: "main")`: sidebar list + detail | `MeetingListViewModel` | `meetings` (`observeMeetings()`), `query` (FTS), `stateFilter`, `tagFilter`, `selection` | `select(id)`, `delete(id)` with confirmation, `revealAudio(id)` |
 | Detail with tabs Summary, Transcript, Tasks, Scratchpad | `MeetingDetailViewModel` | `export` (`observeMeeting(id:)`), `deliveries` (`observeDeliveries`), `templates` (`SummaryTemplate.bundled`), `tab`; Summary tab shows `SummaryMarkdown.render(export)` | `setTags`, `setTemplate(id)` + `rerunSummary()`, `setKeepAudio(Bool)` (retention `.keepForever`, clears `expiresAt`), `reexport()` (`pipeline.redeliver`), `openSpeakerReview()`, `saveScratchpad(String)` debounced on the injected clock (scratchpad is the one editable text) |
-| Speaker review `.sheet` on detail | `SpeakerReviewViewModel` | `unresolved: [SpeakerCard]` for speakers whose `assignment` is `.unknown` or `.suggested` (clip, suggestions from `SpeakerMemory.candidates(for:limit:)`, calendar participants, `SpeakerNameSuggestion`), `playing: id?` | `play(id)` (`AVAudioPlayer` over `Speaker.sampleClipURL`), `name(id, String)` (new `Person` then `confirm`), `assign(id, person)` and `acceptSuggestion(id)` via `MeetingStore.confirm(speakerID:person:memory:)`, `mergeSpeakers(a, b)` via `MeetingStore.mergeSpeakers`, `mergePersons(a, b)` via `MeetingStore.mergePersons`, `skip(id)`, `finish()` calls `pipeline.redeliver` (enrolment already happened in `confirm`) |
+| Speaker review `.sheet` on detail (superseded 2026-09-28 by the inline `SpeakersViewModel`, see the inline speaker assignment plan) | `SpeakerReviewViewModel` | `unresolved: [SpeakerCard]` for speakers whose `assignment` is `.unknown` or `.suggested` (clip, suggestions from `SpeakerMemory.candidates(for:limit:)`, calendar participants, `SpeakerNameSuggestion`), `playing: id?` | `play(id)` (`AVAudioPlayer` over `Speaker.sampleClipURL`), `name(id, String)` (new `Person` then `confirm`), `assign(id, person)` and `acceptSuggestion(id)` via `MeetingStore.confirm(speakerID:person:memory:)`, `mergeSpeakers(a, b)` via `MeetingStore.mergeSpeakers`, `mergePersons(a, b)` via `MeetingStore.mergePersons`, `skip(id)`, `finish()` calls `pipeline.redeliver` (enrolment already happened in `confirm`) |
 | Detection prompt (floating `NSPanel`) | `DetectionPromptViewModel` | `trigger: .micOpened(bundleID:)`, `countdown` on `clock` | `start()`, `dismiss()` |
 | `Settings` scene, one tab each | `GeneralSettingsViewModel` (launch at login, detection on/off, default template), `AudioSettingsViewModel` (input device, recordings folder, retention), `SpeechSettingsViewModel` (engine id, `ModelStore.ensure` progress), `LLMSettingsViewModel` (base URL, model, context tokens, key in Keychain, `test()` via `OpenAICompatibleClient.probe`), `ObsidianSettingsViewModel` (edits `Settings.obsidian`, `ObsidianFolderDestination(settings:).validate()`), `PhonesSettingsViewModel` (`HandoverService.pairedDevices()`, `beginPairing()` QR, `revoke(_:)`, `states`, `receipts`), `UpdatesSettingsViewModel` | per tab | per tab |
 | Onboarding `Window(id: "onboarding")`, shown until required permissions are granted | `OnboardingViewModel` | steps microphone -> system audio -> calendar (optional) -> local network (optional, deferred to first pairing), each with `PermissionState` | `request(step)`, `openSystemSettings(step)`, `continue()` |
@@ -191,6 +191,8 @@ STENO_KEYCHAIN_TESTS]` or `[manual]`.
    two distinct actions; skip; finish re-exports. Opens on `speakersNeedReview` when the window is frontmost, else a
    badge. Accept `[ci]`: tests for both merges, `confirm` for new and existing persons, accept-suggestion, skip
    (`assignment` unchanged), `finish` calling `redeliver` exactly once. `[manual]`: the clip is audible.
+   Superseded 2026-09-28 by [`2026-09-28-inline-speaker-assignment.md`](2026-09-28-inline-speaker-assignment.md):
+   no sheet, inline selects, `confirm` without `memory:`, merge by choosing the same person.
 6. Detection prompt: subscribe to `MeetingDetector.events`, resolve bundle id to app name, show panel, start
    `.macCall`, suppressed while recording and when `Settings.meetingDetectionEnabled` is off. Accept `[ci]`:
    view-model tests on `ManualClock` (countdown, suppression, disabled). `[manual]`: opening FaceTime shows the panel
@@ -309,12 +311,13 @@ Manual checklist `[manual]`, run by a human on a Mac before tagging v1, recorded
 4. FaceTime or Zoom call: detection panel appears, record two minutes, stop; processing completes; menu bar queue
    empties.
 5. Speaker review plays a ten-second clip from `sampleClipURL`; naming and merging persist; a second call with the
-   same person shows a suggestion.
+   same person shows a suggestion. (2026-09-28: from the header Speakers row and the transcript, not a sheet.)
 6. Four tabs render; template re-run changes the summary; renaming a speaker updates the summary without a re-run;
    scratchpad text survives relaunch.
 7. Obsidian folder matches the documented layout; re-export overwrites only app-written files.
 8. Retention `0` deletes audio after processing but keeps the speaker clips until confirmed; keep toggle prevents
-   deletion.
+   deletion. (2026-09-28: a confirmed speaker's clip is removed by the next sweep with the audio; an unconfirmed
+   speaker's clip stays.)
 9. Phone pairing: local network prompt on first pairing; a phone recording arrives and is processed.
 10. Sparkle: an installed older build offers and installs the new version; after relaunch no permission re-prompts.
 

@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Steno app icon. Source of truth for every raster icon asset; regenerate
+     them with apps/macos/scripts/make-app-icon.sh. Design notes and geometry:
+     .plans/2026-09-28-app-icon.md. -->
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <defs>
+    <linearGradient id="plate-gradient" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#303034"/>
+      <stop offset="1" stop-color="#141416"/>
+    </linearGradient>
+  </defs>
+  <!-- Plate: the macOS icon grid's 824 pt rounded square centred on the
+       1024 pt canvas. The system draws the drop shadow. -->
+  <g id="plate">
+    <rect id="plate-fill" x="100" y="100" width="824" height="824" rx="185" fill="url(#plate-gradient)"/>
+    <rect id="plate-hairline" x="102" y="102" width="820" height="820" rx="183" fill="none" stroke="#ffffff" stroke-opacity="0.1" stroke-width="3"/>
+  </g>
+  <!-- Glyph: a steno pad. The centre rule splits the page into two columns,
+       "them" on the left and "me" on the right; the newest line, the one
+       being written right now on this Mac, is live green. -->
+  <g id="glyph">
+    <rect id="rule" x="500" y="292" width="24" height="440" rx="12" fill="#a3a3a3"/>
+    <rect x="232" y="318" width="212" height="68" rx="34" fill="#ffffff"/>
+    <rect x="296" y="478" width="148" height="68" rx="34" fill="#ffffff"/>
+    <rect x="256" y="638" width="188" height="68" rx="34" fill="#ffffff"/>
+    <rect x="580" y="318" width="168" height="68" rx="34" fill="#ffffff"/>
+    <rect x="580" y="478" width="128" height="68" rx="34" fill="#ffffff"/>
+    <rect id="live" x="580" y="638" width="212" height="68" rx="34" fill="#62b06f"/>
+  </g>
+</svg>
