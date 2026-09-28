@@ -49,7 +49,7 @@ struct StenoPrimaryButtonStyle: ButtonStyle {
 }
 
 /// The secondary action: the same box on a `raised` surface with a hairline,
-/// the `card` veil on hover.
+/// the `card` veil on hover while enabled.
 struct StenoSecondaryButtonStyle: ButtonStyle {
   func makeBody(configuration: Configuration) -> some View {
     Surface(configuration: configuration)
@@ -58,6 +58,7 @@ struct StenoSecondaryButtonStyle: ButtonStyle {
   private struct Surface: View {
     let configuration: Configuration
     @State private var hovering = false
+    @Environment(\.isEnabled) private var isEnabled
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
@@ -69,7 +70,7 @@ struct StenoSecondaryButtonStyle: ButtonStyle {
         .background(
           ZStack {
             Theme.Radius.md.shape.fill(Color.stenoRaised)
-            Theme.Radius.md.shape.fill(hovering ? Color.stenoCard : Color.clear)
+            Theme.Radius.md.shape.fill(hovering && isEnabled ? Color.stenoCard : Color.clear)
           }
         )
         .overlay(Theme.Radius.md.shape.hairline())
@@ -97,7 +98,7 @@ struct StatusDot: View {
 /// text in the colour; neutral metadata (tags, assignees, "Optional") gets a
 /// hairline and `muted` text, so only state reads as state.
 struct StatusChip: View {
-  enum Style {
+  enum Style: Equatable {
     case semantic(Color)
     case neutral
   }
@@ -139,7 +140,7 @@ struct StatusChip: View {
     HStack(spacing: Theme.Space.xs) {
       if let systemImage {
         Image(systemName: systemImage)
-          .font(.system(size: Theme.TextSize.xxxs.size - 1, weight: .medium))
+          .font(.system(size: Theme.Control.chipGlyphSize, weight: .medium))
       }
       Text(text)
     }

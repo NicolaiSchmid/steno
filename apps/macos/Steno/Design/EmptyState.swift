@@ -17,6 +17,8 @@ struct EmptyState: View {
   let message: String
   let action: Action?
   let id: String
+  /// The width the body wraps at; a layout width, not a control box.
+  private static let bodyWidth: CGFloat = 280
 
   init(
     symbol: String? = nil, title: String, body message: String, action: Action? = nil, id: String
@@ -32,7 +34,7 @@ struct EmptyState: View {
     VStack(spacing: Theme.Space.md) {
       if let symbol {
         Image(systemName: symbol)
-          .font(.system(size: 20))
+          .font(.system(size: Theme.Control.emptySymbolSize))
           .foregroundStyle(Color.stenoFaint)
           .frame(width: Theme.Control.emptyWellSize, height: Theme.Control.emptyWellSize)
           .background(Theme.Radius.lg.shape.fill(Color.stenoCard))
@@ -46,7 +48,7 @@ struct EmptyState: View {
         .font(.steno(Theme.TextSize.xs))
         .foregroundStyle(Color.stenoMutedForeground)
         .multilineTextAlignment(.center)
-        .frame(maxWidth: Theme.Control.emptyBodyWidth)
+        .frame(maxWidth: Self.bodyWidth)
         .fixedSize(horizontal: false, vertical: true)
       if let action {
         Button(action.title, action: action.run)

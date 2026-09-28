@@ -57,7 +57,7 @@ struct TaskRow: View {
     switch task.priority {
     case .high: StatusChip(text: "High", color: Color.stenoWarning)
     case .normal: EmptyView()
-    case .low: StatusChip(text: "Low", color: Color.stenoFaint)
+    case .low: StatusChip(text: "Low", style: .neutral)
     }
   }
 }

@@ -165,6 +165,8 @@ enum Theme {
 
   /// Control boxes: heights and the insets the recipes fix off-grid.
   enum Control {
+    /// The Start recording CTA at the top of the nav column.
+    static let ctaHeight: CGFloat = 40
     static let buttonHeight: CGFloat = 32
     static let inputHeight: CGFloat = 28
     static let navRowHeight: CGFloat = 32
@@ -179,9 +181,11 @@ enum Theme {
     static let rowInset: CGFloat = 10
     /// The glyph column in a nav row.
     static let navGlyphWidth: CGFloat = 20
-    /// The empty state's icon well and the width its body wraps at.
+    /// The glyph inside a chip, one point under its 11 pt text.
+    static let chipGlyphSize: CGFloat = 10
+    /// The empty state's icon well and the glyph inside it.
     static let emptyWellSize: CGFloat = 48
-    static let emptyBodyWidth: CGFloat = 280
+    static let emptySymbolSize: CGFloat = 20
   }
 }
 

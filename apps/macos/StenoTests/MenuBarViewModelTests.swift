@@ -116,6 +116,7 @@ final class MenuBarViewModelTests: XCTestCase {
     // detail header.
     let chips = states.map { StatusChip($0).text }
     XCTAssertEqual(chips, ["Recording", "Queued", "Processing", "Ready", "Failed"])
+    XCTAssertFalse(states.contains { StatusChip($0).style == .neutral }, "state chips are semantic")
   }
 
   func testLabelsAreWordsNotRawValues() {

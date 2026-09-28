@@ -107,8 +107,7 @@ struct MeetingDetailView: View {
   private func tagsEditor(_ meeting: Meeting) -> some View {
     HStack(spacing: Theme.Space.xs) {
       if editingTags {
-        TextField("tags, comma separated", text: $tagsText)
-          .textFieldStyle(.roundedBorder)
+        StenoTextField("tags, comma separated", text: $tagsText)
           .frame(width: 240)
           .onSubmit {
             editingTags = false

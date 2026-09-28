@@ -8,9 +8,9 @@ import SwiftUI
 /// selection, the query and the action.
 
 /// A row in the nav column: glyph, label, optional count. Selected rows
-/// sit on the `secondary` veil, hovered rows on `card`. Id `nav-<name>`.
+/// sit on the `secondary` veil, hovered rows on `card`. Id `nav-<id>`.
 struct NavRow: View {
-  let name: String
+  let id: String
   let symbol: String
   let label: String
   let count: Int?
@@ -20,10 +20,10 @@ struct NavRow: View {
   @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
   init(
-    name: String, symbol: String, label: String, count: Int? = nil, isSelected: Bool,
+    id: String, symbol: String, label: String, count: Int? = nil, isSelected: Bool,
     action: @escaping () -> Void
   ) {
-    self.name = name
+    self.id = id
     self.symbol = symbol
     self.label = label
     self.count = count
@@ -67,7 +67,7 @@ struct NavRow: View {
     .onHover { hovering = $0 }
     .animation(Motion.swap(reduceMotion: reduceMotion), value: hovering)
     .animation(Motion.swap(reduceMotion: reduceMotion), value: isSelected)
-    .accessibilityIdentifier("nav-\(name)")
+    .accessibilityIdentifier("nav-\(id)")
     .accessibilityAddTraits(isSelected ? [.isSelected] : [])
   }
 }
@@ -107,19 +107,28 @@ struct IconButton: View {
 }
 
 /// The list column's search field: a 28 pt `raised` hairline box with the
-/// glyph, `ring` while focused. The text field carries the accessibility id
-/// so `app.textFields[id]` finds it.
+/// glyph, `ring` while focused. The text field carries the caller's
+/// accessibility id so `app.textFields[id]` finds it. Pass `focus` when a
+/// command (the planned ⌘F) must focus the field from outside; otherwise
+/// the field owns its focus.
 struct SearchField: View {
   @Binding var text: String
   let placeholder: String
   let id: String
-  @FocusState private var focused: Bool
+  private let externalFocus: FocusState<Bool>.Binding?
+  @FocusState private var ownFocus: Bool
 
-  init(text: Binding<String>, placeholder: String = "Search", id: String = "search-meetings") {
+  init(
+    text: Binding<String>, placeholder: String = "Search", id: String,
+    focus: FocusState<Bool>.Binding? = nil
+  ) {
     _text = text
     self.placeholder = placeholder
     self.id = id
+    externalFocus = focus
   }
+
+  private var focus: FocusState<Bool>.Binding { externalFocus ?? $ownFocus }
 
   var body: some View {
     HStack(spacing: Theme.Space.sm) {
@@ -130,18 +139,20 @@ struct SearchField: View {
         .textFieldStyle(.plain)
         .font(.steno(Theme.TextSize.xs))
         .foregroundStyle(Color.stenoStrong)
-        .focused($focused)
+        .focused(focus)
         .focusEffectDisabled()
         .accessibilityIdentifier(id)
     }
-    .modifier(InputBox(focused: focused))
+    .modifier(InputBox(focused: focus.wrappedValue))
     .contentShape(Theme.Radius.md.shape)
-    .onTapGesture { focused = true }
+    .onTapGesture { focus.wrappedValue = true }
   }
 }
 
 /// The input box the search field and the text field share: 28 pt tall,
-/// radius 8, `raised`, hairline `border`, `ring` while focused.
+/// radius 8, `raised`, hairline `border`; while focused the hairline turns
+/// `ring` and a 2 pt `ring` stroke sits outside the box, so keyboard focus
+/// reads beyond the caret.
 private struct InputBox: ViewModifier {
   let focused: Bool
   @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -152,7 +163,16 @@ private struct InputBox: ViewModifier {
       .frame(height: Theme.Control.inputHeight)
       .background(Theme.Radius.md.shape.fill(Color.stenoRaised))
       .overlay(Theme.Radius.md.shape.hairline(focused ? Color.stenoRing : Color.stenoBorder))
+      .overlay {
+        if focused { focusRing }
+      }
       .animation(Motion.swap(reduceMotion: reduceMotion), value: focused)
+  }
+
+  private var focusRing: some View {
+    RoundedRectangle(cornerRadius: Theme.Radius.md.rawValue + Theme.Space.xxs, style: .continuous)
+      .strokeBorder(Color.stenoRing, lineWidth: Theme.Space.xxs)
+      .padding(-Theme.Space.xxs)
   }
 }
 
@@ -176,14 +196,34 @@ private struct StenoTextFieldBox: ViewModifier {
 
 extension View {
   /// The hairline text field box: 28 pt tall, radius 8, `raised`, `ring`
-  /// while focused, 13 pt `strong` text. Apply to a `TextField`.
+  /// while focused, 13 pt `strong` text. Apply to a `TextField`. The
+  /// modifier cannot reach the field's prompt, so a field with a placeholder
+  /// is `StenoTextField(_:text:)`, which passes the `faint` prompt once.
   func stenoTextField() -> some View {
     modifier(StenoTextFieldBox())
   }
 }
 
+/// The hairline text field with its placeholder in `faint`: the title is
+/// the accessibility label and the prompt is the visible placeholder.
+struct StenoTextField: View {
+  @Binding var text: String
+  let placeholder: String
+
+  init(_ placeholder: String, text: Binding<String>) {
+    self.placeholder = placeholder
+    _text = text
+  }
+
+  var body: some View {
+    TextField(placeholder, text: $text, prompt: Text(placeholder).foregroundStyle(Color.stenoFaint))
+      .stenoTextField()
+  }
+}
+
 /// A segmented control: a 28 pt `secondary` container at radius 8 holding
-/// 24 pt cells at radius 6; the active cell is `raised` with `shadow-sm`.
+/// 24 pt cells at radius 6; the active cell is `raised` with a hairline and
+/// `shadow-sm`, so it reads on the dark container too.
 /// Ids `tab-<id>`, the `isSelected` trait on the active cell.
 struct SegmentedTabs<Tab: Hashable>: View {
   let tabs: [Tab]
@@ -226,7 +266,9 @@ struct SegmentedTabs<Tab: Hashable>: View {
         .frame(height: Theme.Control.segmentHeight)
         .background {
           if active {
-            Theme.Radius.sm.shape.fill(Color.stenoRaised).stenoShadowSmall()
+            Theme.Radius.sm.shape.fill(Color.stenoRaised)
+              .stenoShadowSmall()
+              .overlay(Theme.Radius.sm.shape.hairline())
           }
         }
         .contentShape(Theme.Radius.sm.shape)
@@ -252,6 +294,7 @@ extension SegmentedTabs where Tab: RawRepresentable, Tab.RawValue == String {
 
     @State private var tab = Tab.summary
     @State private var query = ""
+    @State private var filled = "Produktstrategie"
     @State private var name = ""
     @State private var selected = "all"
 
@@ -259,31 +302,41 @@ extension SegmentedTabs where Tab: RawRepresentable, Tab.RawValue == String {
       VStack(alignment: .leading, spacing: Theme.Space.lg) {
         VStack(spacing: Theme.Space.xxs) {
           NavRow(
-            name: "all", symbol: "rectangle.stack", label: "All", count: 12,
+            id: "all", symbol: "rectangle.stack", label: "All", count: 12,
             isSelected: selected == "all"
           ) { selected = "all" }
           NavRow(
-            name: "failed", symbol: "exclamationmark.triangle", label: "Failed", count: 1,
+            id: "failed", symbol: "exclamationmark.triangle", label: "Failed", count: 1,
             isSelected: selected == "failed"
           ) { selected = "failed" }
-          NavRow(name: "settings", symbol: "gearshape", label: "Settings", isSelected: false) {}
+          NavRow(id: "settings", symbol: "gearshape", label: "Settings", isSelected: false) {}
         }
         .frame(width: 220)
         SegmentedTabs(Tab.allCases, selection: $tab) { $0.rawValue.capitalized }
         HStack(spacing: Theme.Space.sm) {
-          SearchField(text: $query)
+          SearchField(text: $query, id: "search-meetings")
             .frame(width: 240)
           IconButton("ellipsis", label: "Actions") {}
         }
-        TextField("Speaker name", text: $name)
-          .stenoTextField()
+        SearchField(text: $filled, id: "search-filled")
           .frame(width: 240)
+        HStack(spacing: Theme.Space.sm) {
+          StenoTextField("Speaker name", text: $name)
+            .frame(width: 240)
+          // The focused box, rendered statically since a preview cannot hold focus.
+          Text("Focused")
+            .font(.steno(Theme.TextSize.xs))
+            .foregroundStyle(Color.stenoStrong)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .modifier(InputBox(focused: true))
+            .frame(width: 240)
+        }
       }
     }
   }
 
   #Preview("Controls") {
     PreviewPair { ControlsPreview() }
-      .frame(width: 720, height: 360)
+      .frame(width: 720, height: 440)
   }
 #endif
