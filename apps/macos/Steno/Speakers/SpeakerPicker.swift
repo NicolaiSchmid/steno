@@ -7,23 +7,53 @@ import SwiftUI
 /// Up move it, Escape collapses the field. `select` runs on Return or click
 /// only, never on a keystroke. The keyboard rules live in
 /// `SpeakerPickerState`.
+///
+/// Two presentations: `.inline` (the header popover's rows) swaps the button
+/// for the field in place; `.popover` (a transcript turn header) keeps the
+/// button and opens the field and list in a `.popover` anchored to it, and
+/// renders the label exactly as the transcript's static text did, so
+/// `TabText` is unchanged. Hover state lives here, not in the tab.
 struct SpeakerPicker: View {
+  enum Presentation {
+    case inline
+    case popover
+  }
+
   let model: SpeakersViewModel
   let speakerID: UUID
   @Binding var isExpanded: Bool
+  var presentation: Presentation = .inline
   @State private var state = SpeakerPickerState()
   @State private var hovering = false
   @FocusState private var fieldFocused: Bool
 
+  static let popoverWidth: CGFloat = 300
+
   private var row: SpeakersViewModel.Row? { model.row(speakerID) }
 
   var body: some View {
-    VStack(alignment: .leading, spacing: Theme.Space.xs) {
-      if isExpanded {
-        field
-        optionList
-      } else {
+    Group {
+      switch presentation {
+      case .inline:
+        VStack(alignment: .leading, spacing: Theme.Space.xs) {
+          if isExpanded {
+            field
+            optionList
+          } else {
+            trigger
+          }
+        }
+      case .popover:
         trigger
+          .popover(isPresented: $isExpanded, arrowEdge: .bottom) {
+            VStack(alignment: .leading, spacing: Theme.Space.xs) {
+              field
+              optionList
+            }
+            .padding(Theme.Space.md)
+            .frame(width: Self.popoverWidth)
+            .background(Color.stenoPopover)
+          }
       }
     }
     .onChange(of: isExpanded) { _, expanded in
@@ -42,21 +72,29 @@ struct SpeakerPicker: View {
       isExpanded = true
     } label: {
       HStack(spacing: Theme.Space.xs) {
-        if let row, row.isConfirmed {
-          Text(row.displayName)
-            .font(.steno(Theme.TextSize.sm, weight: .medium))
-            .foregroundStyle(Color.stenoStrong)
-          if let email = row.person?.email, !email.isEmpty {
-            Text("·").foregroundStyle(Color.stenoGhost)
-            Text(email)
-              .font(.steno(Theme.TextSize.xxs))
-              .foregroundStyle(Color.stenoFaint)
-              .lineLimit(1)
+        switch presentation {
+        case .inline:
+          if let row, row.isConfirmed {
+            Text(row.displayName)
+              .font(.steno(Theme.TextSize.sm, weight: .medium))
+              .foregroundStyle(Color.stenoStrong)
+            if let email = row.person?.email, !email.isEmpty {
+              Text("·").foregroundStyle(Color.stenoGhost)
+              Text(email)
+                .font(.steno(Theme.TextSize.xxs))
+                .foregroundStyle(Color.stenoFaint)
+                .lineLimit(1)
+            }
+          } else {
+            Text("Name this speaker…")
+              .font(.steno(Theme.TextSize.sm))
+              .foregroundStyle(Color.stenoMutedForeground)
           }
-        } else {
-          Text("Name this speaker…")
-            .font(.steno(Theme.TextSize.sm))
-            .foregroundStyle(Color.stenoMutedForeground)
+        case .popover:
+          // The transcript's turn header: the same words `TabText` renders.
+          Text(model.export?.displayName(forSpeaker: speakerID) ?? "Unknown")
+            .font(.steno(Theme.TextSize.xs, weight: .semibold))
+            .foregroundStyle(Color.stenoStrong)
         }
         Image(systemName: "chevron.down")
           .font(.system(size: 9, weight: .semibold))
