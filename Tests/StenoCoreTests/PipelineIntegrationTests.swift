@@ -192,12 +192,9 @@ import Testing
   /// The other side of the invariant: a configured summarizer never leaves a
   /// ready meeting without a summary, even when the model has nothing to say.
   @Test func aConfiguredSummarizerNeverLeavesReadyWithoutASummary() async throws {
-    var empty = SampleData.summaryOutput()
-    empty.title = ""
-    empty.summary = SummaryDocument(templateID: "default", language: nil, sections: [])
-    empty.tasks = []
-    empty.decisions = []
-    empty.speakerNames = []
+    let empty = SummaryOutput(
+      title: "", summary: SummaryDocument(templateID: "default", sections: []), decisions: [],
+      tasks: [], speakerNames: [], usage: .zero)
     let harness = try await PipelineHarness(summarizer: FakeSummarizer(canned: empty))
     defer { harness.cleanUp() }
     let (meeting, asset) = try harness.meeting(source: .macInPerson)

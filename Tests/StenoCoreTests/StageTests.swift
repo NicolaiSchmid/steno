@@ -357,10 +357,10 @@ import Testing
 }
 
 @Suite struct SummarizeStageTests {
-  static func prepared(
-    summarizer: FakeSummarizer? = FakeSummarizer(), sharedStore: MeetingStore? = nil
-  ) async throws -> (PipelineHarness, Meeting) {
-    let harness = try await PipelineHarness(summarizer: summarizer, sharedStore: sharedStore)
+  static func prepared(summarizer: FakeSummarizer = FakeSummarizer()) async throws -> (
+    PipelineHarness, Meeting
+  ) {
+    let harness = try await PipelineHarness(summarizer: summarizer)
     let (meeting, asset) = try harness.meeting(source: .macCall)
     try await harness.store.save(meeting, asset: asset)
     try await harness.store.replaceTranscript(
@@ -463,7 +463,7 @@ import Testing
     #expect(!before.decisions.isEmpty)
     #expect(try await harness.store.nameSuggestions(meetingID: meeting.id).count == 1)
 
-    let (skipping, _) = try await Self.prepared(summarizer: nil, sharedStore: harness.store)
+    let skipping = try await PipelineHarness(summarizer: nil, sharedStore: harness.store)
     defer { skipping.cleanUp() }
     let events = await skipping.events.subscribe()
     var input = summarized

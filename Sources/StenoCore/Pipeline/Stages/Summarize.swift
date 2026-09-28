@@ -16,16 +16,14 @@ extension ProcessingPipeline {
     async throws -> Meeting
   {
     let store = self.store
-    guard let summarizer = dependencies.summarizer else {
-      return try await run(.summarize, meetingID: meeting.id) {
-        var updated = meeting
+    return try await run(.summarize, meetingID: meeting.id) {
+      var updated = meeting
+      guard let summarizer = dependencies.summarizer else {
         updated.summary = nil
         updated.updatedAt = self.now
         try await store.replaceSummary(updated, tasks: [], decisions: [], speakerNames: [])
         return updated
       }
-    }
-    return try await run(.summarize, meetingID: meeting.id) {
       guard let template = SummaryTemplate.bundled(id: meeting.templateID) else {
         throw PipelineFailure(
           stage: .summarize, reason: "unknown summary template \(meeting.templateID)")
@@ -37,7 +35,6 @@ extension ProcessingPipeline {
           meeting: meeting, segments: segments, speakers: speakers, participants: participants,
           knownPeople: people, template: template))
 
-      var updated = meeting
       updated.summary = output.summary
       updated.summary?.templateID = template.id
       if meeting.calendarEventID == nil, !output.title.isEmpty {
