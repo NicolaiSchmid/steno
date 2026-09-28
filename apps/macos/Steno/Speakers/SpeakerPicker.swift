@@ -126,13 +126,10 @@ struct SpeakerPicker: View {
     .padding(.horizontal, Theme.Space.sm)
     .padding(.vertical, Theme.Space.xs + 2)
     .background(
-      RoundedRectangle(cornerRadius: Theme.Space.radiusSmall, style: .continuous)
+      Theme.Radius.sm.shape
         .fill(Color.stenoSecondary)
     )
-    .overlay(
-      RoundedRectangle(cornerRadius: Theme.Space.radiusSmall, style: .continuous)
-        .strokeBorder(Color.stenoRing, lineWidth: Theme.Space.hairline)
-    )
+    .overlay(Theme.Radius.sm.shape.hairline(Color.stenoRing))
     .focused($fieldFocused)
     .onSubmit { commit() }
     .onKeyPress(.downArrow) {
@@ -196,7 +193,7 @@ struct SpeakerPicker: View {
     .padding(.horizontal, Theme.Space.sm)
     .frame(height: 24)
     .background(
-      RoundedRectangle(cornerRadius: Theme.Space.radiusSmall, style: .continuous)
+      Theme.Radius.sm.shape
         .fill(highlighted ? Color.stenoSecondary : Color.clear)
     )
     .contentShape(Rectangle())

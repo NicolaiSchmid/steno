@@ -38,7 +38,7 @@ struct TaskRow: View {
           .fixedSize(horizontal: false, vertical: true)
         HStack(spacing: Theme.Space.sm) {
           if let assignee, !assignee.isEmpty {
-            StatusChip(text: assignee, color: Color.stenoMutedForeground)
+            StatusChip(text: assignee, style: .neutral)
           }
           priorityChip
           if let due = task.dueDate {
@@ -57,7 +57,7 @@ struct TaskRow: View {
     switch task.priority {
     case .high: StatusChip(text: "High", color: Color.stenoWarning)
     case .normal: EmptyView()
-    case .low: StatusChip(text: "Low", color: Color.stenoFaint)
+    case .low: StatusChip(text: "Low", style: .neutral)
     }
   }
 }

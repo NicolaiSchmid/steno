@@ -73,13 +73,10 @@ struct SpeakersRow: View {
         .padding(.horizontal, Theme.Space.md)
         .frame(height: 28)
         .background(
-          RoundedRectangle(cornerRadius: Theme.Space.radius, style: .continuous)
+          Theme.Radius.md.shape
             .fill(Color.stenoSecondary)
         )
-        .overlay(
-          RoundedRectangle(cornerRadius: Theme.Space.radius, style: .continuous)
-            .strokeBorder(Color.stenoBorder, lineWidth: Theme.Space.hairline)
-        )
+        .overlay(Theme.Radius.md.shape.hairline())
         .contentShape(Rectangle())
       }
       .buttonStyle(.plain)

@@ -21,12 +21,21 @@ enum Motion {
 
   static let pressScale: CGFloat = 0.97
   static let pressOpacity: Double = 0.85
+  /// Mac buttons press less than touch targets: the pointer is already on
+  /// the control, so the recipe is a 2 % scale and a 5 % dim.
+  static let controlPressScale: CGFloat = 0.98
+  static let controlPressOpacity: Double = 0.95
   /// A disabled control, in both button styles.
   static let disabledOpacity: Double = 0.5
   static let hitSlop: CGFloat = 10
 
   static var functional: Animation {
     .timingCurve(0.4, 0, 0.2, 1, duration: durationFunctional)
+  }
+  /// The swap rule: every state change in a control animates over
+  /// `functional`, and none of them animate under Reduce Motion.
+  static func swap(reduceMotion: Bool) -> Animation? {
+    reduceMotion ? nil : functional
   }
   static var exit: Animation { .timingCurve(0.4, 0, 0.2, 1, duration: durationExit) }
   static var entrance: Animation { .timingCurve(0.4, 0, 0.2, 1, duration: durationEntrance) }

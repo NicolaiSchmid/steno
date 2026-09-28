@@ -6,7 +6,9 @@ import SwiftUI
 /// opaque greys), hairline borders, one achromatic primary and semantic
 /// status colours. Every colour is a dynamic `NSColor` that follows the
 /// window's appearance. `ThemeTokensTests` checks that every `--color-*`
-/// name in the CSS has an entry in `tokens`.
+/// name in the CSS has an entry in `tokens`. `macTokens` adds the two
+/// surfaces only the Mac needs (`sidebar`, `raised`), which the CSS does not
+/// mirror and which must never collide with a CSS name.
 enum Theme {
   typealias RGBA = (red: Double, green: Double, blue: Double, alpha: Double)
 
@@ -38,6 +40,16 @@ enum Theme {
 
   private static func white(_ alpha: Double) -> RGBA { (red: 1, green: 1, blue: 1, alpha: alpha) }
   private static func black(_ alpha: Double) -> RGBA { (red: 0, green: 0, blue: 0, alpha: alpha) }
+
+  /// Source-over compositing of an alpha veil on an opaque base, so a
+  /// derived surface stays derivable instead of being a hand-picked grey.
+  static func composite(_ veil: RGBA, over base: RGBA) -> RGBA {
+    let a = veil.alpha
+    return (
+      red: veil.red * a + base.red * (1 - a), green: veil.green * a + base.green * (1 - a),
+      blue: veil.blue * a + base.blue * (1 - a), alpha: 1
+    )
+  }
 
   // Canvas and text ladder.
   static let background = Token(cssName: "background", dark: hex(0x000000), light: hex(0xFAFAFA))
@@ -88,6 +100,15 @@ enum Theme {
     cssName: "destructive-foreground", dark: hex(0xFFFFFF), light: hex(0xFFFFFF))
   static let codeBackground = Token(cssName: "code-bg", dark: hex(0x101010), light: hex(0xF4F4F3))
 
+  // Mac-only surfaces. `sidebar` is the nav column fill: `background` with
+  // the `card` veil composited on it (`#f2f2f2` light, `#080808` dark).
+  // `raised` is the white card on the light canvas; on black it is the
+  // `card` veil, the dark idiom the ladder was authored on.
+  static let sidebar = Token(
+    cssName: "sidebar", dark: composite(card.dark, over: background.dark),
+    light: composite(card.light, over: background.light))
+  static let raised = Token(cssName: "raised", dark: white(0.031), light: hex(0xFFFFFF))
+
   /// Every token by its CSS name (`--color-<name>`), for the tokens test.
   static let tokens: [Token] = [
     background, strong, foreground, mutedForeground, faint, ghost,
@@ -98,6 +119,9 @@ enum Theme {
     live, liveBright, warning, info, destructive, destructiveStrong, destructiveForeground,
     codeBackground,
   ]
+
+  /// The Mac-only surfaces; not in the CSS and not in `tokens`.
+  static let macTokens: [Token] = [sidebar, raised]
 
   /// Type scale from `global.css` (`--text-*`), in points with line heights.
   enum TextSize {
@@ -112,16 +136,56 @@ enum Theme {
     static let xxxl: (size: CGFloat, lineHeight: CGFloat) = (30, 36)
   }
 
-  /// Spacing and radii used across the app, so call sites carry no numbers.
+  /// Spacing used across the app, so call sites carry no numbers. Every
+  /// step except `xxs` and `hairline` sits on the 4 pt grid.
   enum Space {
+    static let xxs: CGFloat = 2
     static let xs: CGFloat = 4
     static let sm: CGFloat = 8
     static let md: CGFloat = 12
     static let lg: CGFloat = 16
     static let xl: CGFloat = 24
-    static let radius: CGFloat = 8
-    static let radiusSmall: CGFloat = 5
+    static let xxl: CGFloat = 32
+    static let xxxl: CGFloat = 48
     static let hairline: CGFloat = 1
+  }
+
+  /// Radii descend one step per nest: cards and the CTA `lg`, controls and
+  /// inputs `md`, chips and segmented cells `sm`, tiny wells `xs`; `xl` is
+  /// reserved for panels the system does not round for us.
+  enum Radius: CGFloat, CaseIterable {
+    case xl = 16
+    case lg = 12
+    case md = 8
+    case sm = 6
+    case xs = 4
+
+    var shape: RoundedRectangle { RoundedRectangle(cornerRadius: rawValue, style: .continuous) }
+  }
+
+  /// Control boxes: heights and the insets the recipes fix off-grid.
+  enum Control {
+    /// The Start recording CTA at the top of the nav column.
+    static let ctaHeight: CGFloat = 40
+    static let buttonHeight: CGFloat = 32
+    static let inputHeight: CGFloat = 28
+    static let navRowHeight: CGFloat = 32
+    static let iconButtonSize: CGFloat = 28
+    static let segmentHeight: CGFloat = 24
+    static let segmentContainerHeight: CGFloat = 28
+    /// Horizontal padding inside a button.
+    static let buttonInset: CGFloat = 14
+    /// Horizontal padding inside a chip.
+    static let chipInset: CGFloat = 6
+    /// Horizontal padding inside nav rows, inputs and the search field.
+    static let rowInset: CGFloat = 10
+    /// The glyph column in a nav row.
+    static let navGlyphWidth: CGFloat = 20
+    /// The glyph inside a chip, one point under its 11 pt text.
+    static let chipGlyphSize: CGFloat = 10
+    /// The empty state's icon well and the glyph inside it.
+    static let emptyWellSize: CGFloat = 48
+    static let emptySymbolSize: CGFloat = 20
   }
 }
 
@@ -133,6 +197,8 @@ extension Color {
   static var stenoFaint: Color { Theme.faint.color }
   static var stenoGhost: Color { Theme.ghost.color }
   static var stenoCard: Color { Theme.card.color }
+  static var stenoSidebar: Color { Theme.sidebar.color }
+  static var stenoRaised: Color { Theme.raised.color }
   static var stenoSecondary: Color { Theme.secondary.color }
   static var stenoAccent: Color { Theme.accent.color }
   static var stenoPopover: Color { Theme.popover.color }
@@ -141,6 +207,9 @@ extension Color {
   static var stenoRing: Color { Theme.ring.color }
   static var stenoPrimary: Color { Theme.primary.color }
   static var stenoPrimaryForeground: Color { Theme.primaryForeground.color }
+  static var stenoAccentFrom: Color { Theme.accentFrom.color }
+  static var stenoAccentTo: Color { Theme.accentTo.color }
+  static var stenoOnAccent: Color { Theme.onAccent.color }
   static var stenoLive: Color { Theme.live.color }
   static var stenoLiveBright: Color { Theme.liveBright.color }
   static var stenoWarning: Color { Theme.warning.color }

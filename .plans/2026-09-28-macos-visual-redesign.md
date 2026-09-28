@@ -256,7 +256,7 @@ engineer applies the right tier; two tokens are added.
 | Token | Light | Dark | Role |
 |---|---|---|---|
 | `background` | `#fafafa` | `#000000` | List column, detail pane, onboarding canvas |
-| `sidebar` (new, Mac) | `background` over the `card` veil (`#f5f5f5`) | `background` over `card` (`#080808`) | Nav column fill; defined as the composite `Theme.macTokens.sidebar = background.over(card)`, not a hand-picked grey, so both appearances stay derivable and the ladder's "every surface is `raised`, a veil, or a hairline" test holds without an exception |
+| `sidebar` (new, Mac) | `background` over the `card` veil (`#f2f2f2`: the composite, 250 x 0.969 = 242.25) | `background` over `card` (`#080808`) | Nav column fill; defined as the composite `Theme.sidebar = composite(card, over: background)`, not a hand-picked grey, so both appearances stay derivable and the ladder's "every surface is `raised`, a veil, or a hairline" test holds without an exception |
 | `raised` (new, Mac) | `#ffffff` | `rgba(255,255,255,0.031)` | Cards, scratchpad editor, active segmented cell, secondary button fill, inputs |
 | `card` | `rgba(0,0,0,0.031)` | `rgba(255,255,255,0.031)` | Hover veil on rows and entries, empty-state icon well |
 | `secondary` | `rgba(0,0,0,0.059)` | `rgba(255,255,255,0.059)` | Selected nav row, segmented tab container, selected entry veil |
@@ -308,15 +308,15 @@ segmented cells 24 inside a 28 container.
 | `StenoPrimaryButtonStyle` | height 32, padding 0 x 14, radius 8 | vertical gradient `accent-from` to `accent-to`, no border | 14 medium `on-accent` | pressed: opacity 0.95 and scale 0.98 over `Motion.functional`; disabled: opacity 0.5 |
 | `StenoSecondaryButtonStyle` | same box | `raised`, hairline `border` | 14 regular `strong` | hover: `card` veil; pressed as primary |
 | `RecordingControl` (the start-recording plan's `RecordingControl(controller:)`, restyled here; presentation, ids and actions unchanged) | full nav width minus 12 gutters, height 40, radius 12; the start plan's `HStack` of a `Button` (id `sidebar-record`) and a `Menu` with a chevron label (id `sidebar-record-in-person`): main segment plus a 28 pt trailing chevron segment separated by a hairline in `on-accent` at 20 %, both in `StenoPrimaryButtonStyle` | idle: primary gradient; starting/stopping: same, label replaced by a 16 pt spinner; recording: `raised` with hairline `border`; permission denied: primary at opacity 0.5 with the reason `MessageRow(kind: .warning)` and the fix button below | idle: 16 pt `record.circle` glyph in a 28 pt well (radius 8, `on-accent` at 12 %) then "Record call" 14 medium `on-accent`; the chevron segment opens a menu with "Record in person"; recording: 6 pt `StatusDot` `destructive` then "Stop" 14 medium `destructive` then elapsed `mm:ss` 14 mono `muted`, achromatic level bars 12 pt tall to the right | the dot is static (it sits beside a ticking clock; see Motion); disabled while starting/stopping |
-| `NavRow` | height 32, padding 0 x 10, radius 8, gap 10 | selected: `secondary`; hover: `card` | 16 pt SF Symbol `muted` (selected `strong`), label 14 medium (`muted`, selected `strong`), optional trailing count 12 `faint` mono | id `nav-<name>` |
+| `NavRow` | height 32, padding 0 x 10, radius 8, gap 10 | selected: `secondary`; hover: `card` | 16 pt SF Symbol `muted` (selected `strong`), label 14 medium (`muted`, selected `strong`), optional trailing count 12 `faint` mono | id `nav-<id>` |
 | `Card` | padding 16 (parameter), radius 12 | `raised`, hairline `border`, no shadow | content | none |
 | `MeetingCard` (one per day) | `Card` with padding 16 | as `Card` | header: date (`FormatStyle` `.month(.abbreviated).day()`) 12 semibold `strong`, " / " and weekday (`.weekday(.wide)`) 12 `muted`; 12 pt below; entries stacked with 12 pt gaps | none on the card |
 | `MeetingEntry` | HStack gap 12: 2 pt rail (radius 1, full entry height) + VStack gap 2; padding 8 x 8, radius 8; `contentShape` is the whole entry | rail `border`, selected `strong`; selected entry `secondary` veil; hover `card` veil | title 14 medium `strong` 1 line tail-truncated; time (`FormatStyle` `.hour(.defaultDigits(amPM: .abbreviated)).minute()`, so 12 or 24 hour follows the locale) 12 `muted` (mono digits), status chip trailing only for queued / processing / failed; preview 13 `muted` 1 line | context menu: Delete Meeting… (disabled while recording or processing); id `meeting-<uuid>` retained, `meeting-<uuid>-state` as the accessibility value |
-| `SegmentedTabs` | container padding 2, radius 8, height 28; cells padding 4 x 10, radius 6 | container `secondary`; active cell `raised` + `shadow-sm` (0 1 3 0 black 10 %, 0 1 2 -1 black 10 %) | 13 medium `strong` active, 13 regular `muted` inactive | swap over `Motion.functional`; ids `tab-<raw>` and the `isSelected` trait retained |
+| `SegmentedTabs` | container padding 2, radius 8, height 28; cells padding 4 x 10, radius 6 | container `secondary`; active cell `raised` + hairline `border` + `shadow-sm` (0 1 3 0 black 10 %, 0 1 2 -1 black 10 %), the hairline so the cell reads on the dark container | 13 medium `strong` active, 13 regular `muted` inactive | swap over `Motion.functional`; ids `tab-<raw>` and the `isSelected` trait retained |
 | `StatusChip` | padding 1 x 6, radius 6, gap 4 | semantic: colour at 12 % fill, text in the colour; neutral (`.neutral` case): transparent, hairline `border`, text `muted` | 11 medium | none |
 | `IconButton` | 28 x 28, radius 14 | transparent, hairline `border`; hover `card` | 14 pt glyph `muted`, hover `strong` | requires an accessibility label |
-| `SearchField` | height 28, padding 0 x 10, radius 8, gap 8 | `raised`, hairline `border`; focused `ring` | 14 pt `magnifyingglass` `faint`, text 13 `strong`, placeholder `faint` | `@FocusState`; ⌘F from `AppCommands` focuses it; id `search-meetings` |
-| `StenoTextFieldStyle` | height 28, padding 0 x 10, radius 8 | `raised`, hairline; focused `ring` | 13 `strong`, placeholder `faint` | replaces every `.roundedBorder` |
+| `SearchField` | height 28, padding 0 x 10, radius 8, gap 8 | `raised`, hairline `border`; focused `ring` hairline plus a 2 pt outer `ring` stroke | 14 pt `magnifyingglass` `faint`, text 13 `strong`, placeholder `faint` | owns its `@FocusState` unless the caller passes a `FocusState<Bool>.Binding` (`focus:`), which is how ⌘F from `AppCommands` focuses it; the caller passes the id (`search-meetings`) |
+| `.stenoTextField()` (planned as `StenoTextFieldStyle`; shipped as a `View` modifier because `TextFieldStyle._body` is nonisolated and Swift 6.1 on the hosted runner cannot build the `@FocusState` helper from it) | height 28, padding 0 x 10, radius 8 | `raised`, hairline; focused `ring` hairline plus a 2 pt outer `ring` stroke | 13 `strong`, placeholder `faint` (via `StenoTextField(_:text:)`, since a modifier cannot reach the prompt) | replaces every `.roundedBorder` |
 | `EmptyState` | centred VStack gap 12; icon well 48 x 48 radius 12 | well `card` + hairline; 20 pt symbol `faint` | title 14 medium `strong`; body 13 `muted`, max width 280, centred; optional action (`EmptyState.Action(title:id:run:)`) 16 below, rendered as a secondary button, so the onboarding plan's "Set up summaries" and "Run summary" survive | ids passed in (`empty-meetings`, `empty-detail`) |
 | `SectionLabel` | unchanged | | 11 semibold uppercase tracking 0.6 `faint` | |
 | `StatusDot(color:)` | 6 pt circle (from the start-recording plan) | the colour passed | | used by the list entry, `MessageRow`, `StopLabel`; summary bullets are 4 pt, not a `StatusDot` |
@@ -372,7 +372,7 @@ Three columns:
       something the default does not. 8 pt when present.
    6. Progress row or level bars (Recording and processing states). 12 pt when present.
    7. Tags row: neutral chips, then an "Add tag" ghost button (12 `faint`, `plus` glyph 10 pt)
-      that swaps to a `StenoTextFieldStyle` field 240 wide; trailing on the same row: "Review
+      that swaps to a `.stenoTextField()` field 240 wide; trailing on the same row: "Review
       speakers (n)" primary when needed, then `IconButton("ellipsis")` opening the existing
       Actions menu; failed reason and `model.error` as `MessageRow`s under the title. 16 pt.
    8. `SegmentedTabs` left-aligned at 32 pt inset; 16 pt; full-width hairline; content;
@@ -406,7 +406,7 @@ glyph (`checkmark.circle.fill` `live-bright`, `xmark.circle.fill` `destructive`,
 `circle` `ghost`), title 14 semibold `strong`, neutral "Optional" chip, trailing
 "Skipped" 12 `faint`; expanded: 12 pt, explanation 13 `muted` `lineSpacing(4)`, 12 pt,
 action row (primary, secondary, ghost "Skip" 13 `faint`), spinner and the listening note
-12 `faint` while requesting; the setup rows' fields use `StenoTextFieldStyle`. 24 pt;
+12 `faint` while requesting; the setup rows' fields use `.stenoTextField()`. 24 pt;
 footer right-aligned, buttons per the onboarding plan (Later or Done on page 1, Back and
 Finish on page 2; secondary and primary).
 
@@ -484,7 +484,7 @@ selection altogether, and `.listStyle(.plain)` keeps the highlight. The list col
 semibold with "n to review" 13 `faint`; cards `Card` padding 16 gap 12; play control as
 a 28 pt `IconButton`; suggestion rows unchanged in structure; candidates as neutral
 chip buttons (hairline, radius 6, 12 medium, height 24, hover `card`) in the existing
-horizontal scroller; name field `StenoTextFieldStyle`; merge picker unchanged; footer
+horizontal scroller; name field `.stenoTextField()`; merge picker unchanged; footer
 Later / Done.
 
 **Settings** (`SettingsView.swift`): structure unchanged. Chips through the new
@@ -512,7 +512,7 @@ index step 10. Build and test commands are in Verification.
 2. **Components** (system PR). `Components.swift`: rewrite the two button styles,
    `Card(padding:)`, `StatusChip` with a `.neutral` variant, `MessageRow` over `StatusDot`,
    `readingColumn()`. New files `Design/Controls.swift` (`IconButton`, `SearchField`,
-   `StenoTextFieldStyle`, `SegmentedTabs`, `NavRow`) and `Design/EmptyState.swift` (with the
+   `.stenoTextField()`, `SegmentedTabs`, `NavRow`) and `Design/EmptyState.swift` (with the
    optional action). No layout, no behaviour, no copy change. Add `#Preview` blocks per
    component showing light and dark side by side. Done when the app builds, every existing
    test passes unchanged (`TabTextSnapshotTests` included), and the previews render both
