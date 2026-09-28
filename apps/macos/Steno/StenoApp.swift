@@ -150,32 +150,41 @@ struct OnboardingWindowContent: View {
 
   var body: some View {
     OnboardingView(
-      model: OnboardingViewModel(permissions: controller.environment.permissions),
+      model: OnboardingViewModel(environment: controller.environment),
       onFinished: { dismissWindow(id: "onboarding") })
   }
 }
 
+@MainActor
 struct AppCommands: Commands {
   let bootstrap: AppBootstrap
 
+  /// The same state table the sidebar control and the menu bar item render;
+  /// without a controller the menu reads as idle and is disabled.
+  private var presentation: RecordingControlPresentation {
+    guard let recorder = bootstrap.controller?.recorder else { return .unavailable }
+    return RecordingControlPresentation.make(
+      state: recorder.recording, denied: recorder.deniedPermissions)
+  }
+
   var body: some Commands {
+    let presentation = self.presentation
     CommandGroup(after: .appInfo) {
       Button("Check for Updates…") { bootstrap.controller?.menuBar.checkForUpdates() }
         .disabled(bootstrap.controller == nil)
     }
     CommandMenu("Record") {
-      Button(bootstrap.controller?.recorder.isRecording == true ? "Stop Recording" : "Record Call")
-      {
+      Button(presentation.menuLabel) {
         guard let controller = bootstrap.controller else { return }
         Task { await controller.recorder.toggleRecording() }
       }
       .keyboardShortcut("r", modifiers: [.command, .shift])
-      .disabled(bootstrap.controller == nil)
+      .disabled(!presentation.isEnabled)
       Button("Record In Person") {
         guard let controller = bootstrap.controller else { return }
         Task { await controller.recorder.start(mode: .inPerson) }
       }
-      .disabled(bootstrap.controller?.recorder.recording != .idle)
+      .disabled(!presentation.offersInPerson)
     }
     #if DEBUG
       CommandMenu("Debug") {

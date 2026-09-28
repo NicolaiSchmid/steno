@@ -1,74 +1,173 @@
 import StenoCore
 import SwiftUI
 
-/// The few composed controls the app reuses: an achromatic primary button,
-/// a veil secondary button, a status chip and a hairline card. Pressed
-/// states use the motion tokens.
+/// The composed controls the app reuses, built from the tokens: the two
+/// button styles, the status chip, the raised card, the status dot and the
+/// message row. Boxes, fills and type follow the redesign plan's components
+/// table; every state swap runs over `Motion.functional` and holds still
+/// under Reduce Motion. `Design/Controls.swift` holds the nav row, the
+/// icon button, the fields and the segmented tabs; `Design/EmptyState.swift`
+/// the empty state.
 
+extension LinearGradient {
+  /// The achromatic CTA fill: `accent-from` over `accent-to`, top to bottom.
+  static var stenoAccent: LinearGradient {
+    LinearGradient(
+      colors: [Color.stenoAccentFrom, Color.stenoAccentTo], startPoint: .top, endPoint: .bottom)
+  }
+}
+
+/// Press and disabled feedback shared by the two button styles: a 2 % scale
+/// and a 5 % dim while pressed, half opacity while disabled.
+private struct PressFeedback: ViewModifier {
+  let isPressed: Bool
+  @Environment(\.isEnabled) private var isEnabled
+  @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+  func body(content: Content) -> some View {
+    content
+      .scaleEffect(isPressed ? Motion.controlPressScale : 1)
+      .opacity(isPressed ? Motion.controlPressOpacity : 1)
+      .opacity(isEnabled ? 1 : Motion.disabledOpacity)
+      .animation(Motion.swap(reduceMotion: reduceMotion), value: isPressed)
+  }
+}
+
+/// The primary action: 32 pt tall, radius 8, the accent gradient with
+/// `on-accent` text, no border.
 struct StenoPrimaryButtonStyle: ButtonStyle {
   func makeBody(configuration: Configuration) -> some View {
     configuration.label
-      .font(.steno(Theme.TextSize.xs, weight: .semibold))
-      .foregroundStyle(Color.stenoPrimaryForeground)
-      .padding(.horizontal, Theme.Space.md)
-      .padding(.vertical, Theme.Space.xs + 2)
-      .background(
-        RoundedRectangle(cornerRadius: Theme.Space.radiusSmall, style: .continuous)
-          .fill(Color.stenoPrimary))
-      .scaleEffect(configuration.isPressed ? Motion.pressScale : 1)
-      .opacity(configuration.isPressed ? Motion.pressOpacity : 1)
-      .animation(Motion.functional, value: configuration.isPressed)
+      .font(.steno(Theme.TextSize.sm, weight: .medium))
+      .foregroundStyle(Color.stenoOnAccent)
+      .padding(.horizontal, Theme.Control.buttonInset)
+      .frame(height: Theme.Control.buttonHeight)
+      .background(Theme.Radius.md.shape.fill(LinearGradient.stenoAccent))
+      .contentShape(Theme.Radius.md.shape)
+      .modifier(PressFeedback(isPressed: configuration.isPressed))
   }
 }
 
+/// The secondary action: the same box on a `raised` surface with a hairline,
+/// the `card` veil on hover while enabled.
 struct StenoSecondaryButtonStyle: ButtonStyle {
   func makeBody(configuration: Configuration) -> some View {
-    configuration.label
-      .font(.steno(Theme.TextSize.xs, weight: .medium))
-      .foregroundStyle(Color.stenoForeground)
-      .padding(.horizontal, Theme.Space.md)
-      .padding(.vertical, Theme.Space.xs + 2)
-      .background(
-        RoundedRectangle(cornerRadius: Theme.Space.radiusSmall, style: .continuous)
-          .fill(Color.stenoSecondary))
-      .overlay(
-        RoundedRectangle(cornerRadius: Theme.Space.radiusSmall, style: .continuous)
-          .strokeBorder(Color.stenoBorder, lineWidth: Theme.Space.hairline))
-      .scaleEffect(configuration.isPressed ? Motion.pressScale : 1)
-      .opacity(configuration.isPressed ? Motion.pressOpacity : 1)
-      .animation(Motion.functional, value: configuration.isPressed)
+    Surface(configuration: configuration)
+  }
+
+  private struct Surface: View {
+    let configuration: Configuration
+    @State private var hovering = false
+    @Environment(\.isEnabled) private var isEnabled
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    var body: some View {
+      configuration.label
+        .font(.steno(Theme.TextSize.sm))
+        .foregroundStyle(Color.stenoStrong)
+        .padding(.horizontal, Theme.Control.buttonInset)
+        .frame(height: Theme.Control.buttonHeight)
+        .background(
+          ZStack {
+            Theme.Radius.md.shape.fill(Color.stenoRaised)
+            Theme.Radius.md.shape.fill(hovering && isEnabled ? Color.stenoCard : Color.clear)
+          }
+        )
+        .overlay(Theme.Radius.md.shape.hairline())
+        .contentShape(Theme.Radius.md.shape)
+        .onHover { hovering = $0 }
+        .animation(Motion.swap(reduceMotion: reduceMotion), value: hovering)
+        .modifier(PressFeedback(isPressed: configuration.isPressed))
+    }
   }
 }
 
-/// A small alpha chip (never filled) with a semantic colour.
-struct StatusChip: View {
-  var text: String
+/// The one 6 pt status dot: the Stop control, the message rows and the
+/// list entry share it.
+struct StatusDot: View {
   var color: Color
 
   var body: some View {
-    Text(text)
-      .font(.steno(Theme.TextSize.xxxs, weight: .medium))
-      .foregroundStyle(color)
-      .padding(.horizontal, Theme.Space.sm)
-      .padding(.vertical, 2)
-      .background(
-        Capsule().fill(color.opacity(0.12)))
+    Circle()
+      .fill(color)
+      .frame(width: 6, height: 6)
   }
 }
 
-/// A veil surface with a hairline border.
+/// A small chip, radius 6. Semantic state gets the colour at 12 % with the
+/// text in the colour; neutral metadata (tags, assignees, "Optional") gets a
+/// hairline and `muted` text, so only state reads as state.
+struct StatusChip: View {
+  enum Style: Equatable {
+    case semantic(Color)
+    case neutral
+  }
+
+  let text: String
+  let style: Style
+  let systemImage: String?
+
+  init(text: String, style: Style, systemImage: String? = nil) {
+    self.text = text
+    self.style = style
+    self.systemImage = systemImage
+  }
+
+  init(text: String, color: Color, systemImage: String? = nil) {
+    self.init(text: text, style: .semantic(color), systemImage: systemImage)
+  }
+
+  private var foreground: Color {
+    switch style {
+    case .semantic(let color): color
+    case .neutral: Color.stenoMutedForeground
+    }
+  }
+
+  private var fill: Color {
+    switch style {
+    case .semantic(let color): color.opacity(0.12)
+    case .neutral: Color.clear
+    }
+  }
+
+  private var isNeutral: Bool {
+    if case .neutral = style { return true }
+    return false
+  }
+
+  var body: some View {
+    HStack(spacing: Theme.Space.xs) {
+      if let systemImage {
+        Image(systemName: systemImage)
+          .font(.system(size: Theme.Control.chipGlyphSize, weight: .medium))
+      }
+      Text(text)
+    }
+    .font(.steno(Theme.TextSize.xxxs, weight: .medium))
+    .foregroundStyle(foreground)
+    .padding(.horizontal, Theme.Control.chipInset)
+    .padding(.vertical, Theme.Space.hairline)
+    .background(Theme.Radius.sm.shape.fill(fill))
+    .overlay(Theme.Radius.sm.shape.hairline(isNeutral ? Color.stenoBorder : Color.clear))
+  }
+}
+
+/// A raised surface with a hairline border, radius 12, no shadow.
 struct Card<Content: View>: View {
+  var padding: CGFloat
   @ViewBuilder var content: () -> Content
+
+  init(padding: CGFloat = Theme.Space.lg, @ViewBuilder content: @escaping () -> Content) {
+    self.padding = padding
+    self.content = content
+  }
 
   var body: some View {
     content()
-      .padding(Theme.Space.md)
-      .background(
-        RoundedRectangle(cornerRadius: Theme.Space.radius, style: .continuous)
-          .fill(Color.stenoCard))
-      .overlay(
-        RoundedRectangle(cornerRadius: Theme.Space.radius, style: .continuous)
-          .strokeBorder(Color.stenoBorder, lineWidth: Theme.Space.hairline))
+      .padding(padding)
+      .background(Theme.Radius.lg.shape.fill(Color.stenoRaised))
+      .overlay(Theme.Radius.lg.shape.hairline())
   }
 }
 
@@ -83,7 +182,8 @@ struct SectionLabel: View {
   }
 }
 
-/// An inline message row for errors and warnings.
+/// An inline message row for errors, warnings and notes: the status dot,
+/// 13 pt body text, the colour at 8 % behind, radius 8.
 struct MessageRow: View {
   enum Kind {
     case error
@@ -104,12 +204,16 @@ struct MessageRow: View {
 
   var body: some View {
     HStack(alignment: .top, spacing: Theme.Space.sm) {
-      Circle().fill(color).frame(width: 6, height: 6).padding(.top, 5)
+      StatusDot(color: color).padding(.top, 5)
       Text(text)
         .font(.steno(Theme.TextSize.xs))
         .foregroundStyle(Color.stenoForeground)
         .textSelection(.enabled)
     }
+    .padding(.vertical, Theme.Space.sm)
+    .padding(.horizontal, Theme.Control.rowInset)
+    .frame(maxWidth: .infinity, alignment: .leading)
+    .background(Theme.Radius.md.shape.fill(color.opacity(0.08)))
   }
 }
 
@@ -158,11 +262,28 @@ extension Binding where Value: Sendable {
 }
 
 extension View {
-  /// The 720 pt reading column the Summary, Transcript and Tasks tabs share.
+  /// The 720 pt reading column the Summary, Transcript and Tasks tabs share:
+  /// 32 pt sides, 24 pt above, 32 pt below.
   func readingColumn() -> some View {
     frame(maxWidth: 720, alignment: .leading)
-      .padding(Theme.Space.lg)
+      .padding(.horizontal, Theme.Space.xxl)
+      .padding(.top, Theme.Space.xl)
+      .padding(.bottom, Theme.Space.xxl)
       .textSelection(.enabled)
+  }
+
+  /// `shadow-sm`, the one shadow in the system: on the active segmented cell.
+  func stenoShadowSmall() -> some View {
+    shadow(color: .black.opacity(0.1), radius: 1.5, y: 1)
+      .shadow(color: .black.opacity(0.1), radius: 1, y: 1)
+  }
+}
+
+extension InsettableShape {
+  /// The 1 pt inner stroke every bordered surface wears, `border` unless a
+  /// state (focus `ring`) says otherwise.
+  func hairline(_ color: Color = Color.stenoBorder) -> some View {
+    strokeBorder(color, lineWidth: Theme.Space.hairline)
   }
 }
 
@@ -182,3 +303,82 @@ extension TimeInterval {
     wholeSeconds.formatted(.time(pattern: .hourMinuteSecond(padHourToLength: 2)))
   }
 }
+
+#if DEBUG
+  /// Light beside dark on their own canvases, for the component previews.
+  struct PreviewPair<Content: View>: View {
+    @ViewBuilder var content: () -> Content
+
+    var body: some View {
+      HStack(spacing: 0) {
+        pane(.light)
+        pane(.dark)
+      }
+    }
+
+    private func pane(_ scheme: ColorScheme) -> some View {
+      content()
+        .padding(Theme.Space.xl)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(Color.stenoBackground)
+        .environment(\.colorScheme, scheme)
+    }
+  }
+
+  #Preview("Buttons") {
+    PreviewPair {
+      VStack(alignment: .leading, spacing: Theme.Space.md) {
+        HStack(spacing: Theme.Space.sm) {
+          Button("Record call") {}.buttonStyle(StenoPrimaryButtonStyle())
+          Button("Later") {}.buttonStyle(StenoSecondaryButtonStyle())
+        }
+        HStack(spacing: Theme.Space.sm) {
+          Button("Record call") {}.buttonStyle(StenoPrimaryButtonStyle()).disabled(true)
+          Button("Later") {}.buttonStyle(StenoSecondaryButtonStyle()).disabled(true)
+        }
+        Button {
+        } label: {
+          StopLabel(since: .now.addingTimeInterval(-754))
+        }
+        .buttonStyle(StenoSecondaryButtonStyle())
+      }
+    }
+    .frame(width: 560, height: 220)
+  }
+
+  #Preview("Chips") {
+    PreviewPair {
+      HStack(spacing: Theme.Space.sm) {
+        let states: [MeetingState] = [
+          .recording, .queued, .processing, .ready, .failed(reason: "Timed out"),
+        ]
+        ForEach(states, id: \.self) { StatusChip($0) }
+        StatusChip(text: "Optional", style: .neutral)
+        StatusChip(text: "Exported 10:02", style: .neutral, systemImage: "folder")
+      }
+    }
+    .frame(width: 760, height: 120)
+  }
+
+  #Preview("Card and message rows") {
+    PreviewPair {
+      VStack(alignment: .leading, spacing: Theme.Space.md) {
+        Card {
+          VStack(alignment: .leading, spacing: Theme.Space.sm) {
+            SectionLabel(text: "Meetings")
+            Text("Produktstrategie 90/10")
+              .font(.steno(Theme.TextSize.sm, weight: .medium))
+              .foregroundStyle(Color.stenoStrong)
+            Text("Decided to ship the redesign as two PRs.")
+              .font(.steno(Theme.TextSize.xs))
+              .foregroundStyle(Color.stenoMutedForeground)
+          }
+        }
+        MessageRow(kind: .info, text: "Processing starts when the current meeting finishes.")
+        MessageRow(kind: .warning, text: "Microphone access is denied.")
+        MessageRow(kind: .error, text: "The LLM endpoint did not answer.")
+      }
+    }
+    .frame(width: 720, height: 360)
+  }
+#endif

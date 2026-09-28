@@ -40,10 +40,20 @@ import Testing
     #expect(sink.availableToRead == 0, "the consumer sees the minimum over lanes")
   }
 
-  @Test func silenceKeepsTheLaneAlignedAndDeviceLossFiresOnce() {
+  /// The last reason handed to a sink's handler.
+  private final class LastReason: Sendable {
+    private let reason = Mutex<DeviceChangeReason?>(nil)
+    var value: DeviceChangeReason? { reason.withLock { $0 } }
+    func set(_ new: DeviceChangeReason) { reason.withLock { $0 = new } }
+  }
+
+  @Test func silenceKeepsTheLaneAlignedAndADeviceChangeFiresOnceUntilRearmed() {
     let lost = Counter()
+    let last = LastReason()
     let sink = LaneFrameSink(lanes: [.mic, .system], sampleRate: 1_000, ringSeconds: 1) {
+      reason in
       lost.value.wrappingAdd(1, ordering: .relaxed)
+      last.set(reason)
     }
     let block: [Float] = [1, 2, 3]
     block.withUnsafeBufferPointer {
@@ -61,9 +71,15 @@ import Testing
     out.withUnsafeMutableBufferPointer { _ = sink.ring(0).read(into: $0.baseAddress!, count: 3) }
     #expect(out == [1, 2, 3])
 
-    sink.reportDeviceLost()
-    sink.reportDeviceLost()
+    sink.reportDeviceChange(.defaultInputChanged)
+    sink.reportDeviceChange(.outputDeviceGone)
     #expect(lost.value.load(ordering: .relaxed) == 1, "later reports are ignored")
+    #expect(last.value == .defaultInputChanged, "the first report's reason is the one delivered")
+    sink.rearmDeviceChange()
+    sink.reportDeviceChange(.sampleRateChanged)
+    sink.reportDeviceChange(.inputDeviceGone)
+    #expect(lost.value.load(ordering: .relaxed) == 2, "rearming lets exactly one more through")
+    #expect(last.value == .sampleRateChanged)
 
     block.withUnsafeBufferPointer {
       _ = sink.beginCallback(frameCount: 3)

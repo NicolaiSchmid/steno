@@ -42,7 +42,7 @@ the default engine is chosen from measurements on real German/English/Denglish m
 | Diarizer | FluidAudio `OfflineDiarizerManager`, pyannote community-1 offline pipeline, community defaults, `exposeChunkEmbeddings = true`. |
 | Cluster embedding | Mean of the cluster's `ChunkEmbedding.embedding256` values weighted by chunk duration, then L2-normalised. Not `speakerDatabase`/`TimedSpeakerSegment.embedding`: those are VBx centroids, an un-normalised mean of unit vectors, so cosine against stored people would be biased by cluster purity. |
 | Speaker match | Cosine similarity on unit vectors. `CosineSpeakerMemory` implements `candidates(for:limit:)` and `enroll`; the threshold and margin logic is the program's provided `SpeakerMemory.match(_:threshold:margin:)`. Threshold `0.60` is `Settings.speakerMatchThreshold`; the margin `0.05` over the runner-up is the program constant. Calibrated in step 6. |
-| Enrolment | Running mean: `e' = normalise((e * n + x) / (n + 1))`, `n` capped at 50 so a voice can drift. |
+| Enrolment | Running mean: `e' = normalise((e * n + x) / (n + 1))`, `n` capped at 50 so a voice can drift. Replaced 2026-09-28: `MeetingStore` recomputes `normalise(mean(...))` over the person's newest 50 confirmed speaker embeddings on every confirm and merge; `enroll` left `SpeakerMemory` (inline speaker assignment plan). |
 | Merges | Not here. Person merge is `MeetingStore.mergePersons(keep:remove:)` (weighted mean in the store); in-meeting cluster merge is `MeetingStore.mergeSpeakers`. |
 | Sample clip | `FluidDiarizer` fills `SpeakerCluster.sampleClipRange`: longest contiguous single-speaker segment of the cluster, capped to 10 s centred on the highest-`qualityScore` chunk. `SpeakerCluster.clusterConfidence` is the mean chunk quality, halved when the longest segment is under 3 s. Core copies both onto `Speaker` and writes the clip file. |
 | Model location | `~/Library/Application Support/Steno/Models/`. FluidAudio repos as `fluidaudio/<repo-last-path-component>` (the directory name must match the HF repo name, see German model caveat). WhisperKit under `whisperkit/` via `downloadBase`. Downloads go through `ModelDownloading` so `ModelStore` is unit-tested without network. |
@@ -337,7 +337,7 @@ Reviewer trap: a `Package.resolved` bump of a model package without a sentence i
   `steno` root command and `dev` group, `Wiring.swift` accepting the `--engine` edit, `Tests/StenoEndToEndTests`.
 - StenoAudio: `AVFoundationAudioCodec` for the bake-off's `m4a|mp3|caf` inputs. Delivered; wired in issue #33.
 - StenoLLM: `LLMTranscriptCleaner` for `--cleanup`. Delivered; wired in issue #33.
-- macOS app: the speaker review sheet calls `candidates(for:limit:)`, `MeetingStore.confirm` and `mergePersons`, and plays
+- macOS app: the speaker surfaces (inline since 2026-09-28) call `MeetingStore.confirm` and play
   `Speaker.sampleClipURL`; the settings pane exposes engine choice, threshold and `ModelStore` actions with progress; the
   archive signs FluidAudio's binary target.
 

@@ -116,7 +116,8 @@ struct MeetingListView: View {
         .font(.steno(Theme.TextSize.sm, weight: .medium))
         .foregroundStyle(Color.stenoMutedForeground)
       if model.all.isEmpty {
-        Text("Start a recording from the menu bar item.")
+        Text("Press Record call above, or ⌘⇧R. The menu bar item works too.")
+          .multilineTextAlignment(.center)
           .font(.steno(Theme.TextSize.xs))
           .foregroundStyle(Color.stenoFaint)
       }

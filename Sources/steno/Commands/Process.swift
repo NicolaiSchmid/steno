@@ -25,7 +25,9 @@ extension MeetingSource: ExpressibleByArgument {
 /// for a call) into `<audio folder>/<meetingID>/`, enqueues the meeting and
 /// waits for the pipeline. Prints one line per progress event to standard
 /// error, `stage percent remaining`, and the meeting id alone to standard
-/// output. Those lines are how the stage rates get measured on a Mac.
+/// output; a note on stderr says when the summary was skipped for lack of
+/// an LLM endpoint. The progress lines are how the stage rates get measured
+/// on a Mac.
 struct Process: AsyncParsableCommand {
   static let configuration = CommandConfiguration(
     abstract: "Run the processing pipeline over a WAV file.")
@@ -121,13 +123,13 @@ struct Process: AsyncParsableCommand {
       updatedAt: now
     )
 
+    let llm = try await Wiring.llmComponents(settings: settings)
     let events = MeetingEventBus()
     let stream = await events.subscribe()
     let pipeline = ProcessingPipeline(
       dependencies: try Wiring.dependencies(
         store: opened.store, settings: opened.settings, engine: speech.engine,
-        modelsDirectory: settings.modelsDirectory,
-        llm: try await Wiring.llmComponents(settings: settings), events: events))
+        modelsDirectory: settings.modelsDirectory, llm: llm, events: events))
     let printer = Task {
       for await event in stream {
         switch event {
@@ -150,6 +152,10 @@ struct Process: AsyncParsableCommand {
     }
     if case .failed(let reason) = result.state {
       throw RuntimeFailure(description: "processing failed: \(reason)")
+    }
+    if llm == nil {
+      FileHandle.standardError.write(
+        Data("summary skipped: no LLM endpoint configured\n".utf8))
     }
     print(meetingID.uuidString)
   }

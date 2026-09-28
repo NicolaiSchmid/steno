@@ -58,6 +58,10 @@ for Core Audio taps. Rebuilt from scratch, no forks.
   Fallback: phone on speaker, Mac mic records the room. iOS cannot record calls.
 - Recording start: popup prompt when another app opens the microphone, plus manual
   start/stop from the menu bar. Menu bar shows a visible recording indicator.
+- A device change during a recording (Bluetooth profile switch, a default device moved, a
+  device gone) rebuilds the capture in place and fills the gap with silence; only four failed
+  restarts end the recording. The call ending stops the recording on purpose after a grace
+  period. See `2026-09-28-device-change-during-recording.md`.
 - Calendar via EventKit for titles and attendee names. No Google Calendar API.
 
 ## Processing (post-meeting, on the Mac)
@@ -101,7 +105,9 @@ for Core Audio taps. Rebuilt from scratch, no forks.
 - Editable: speaker assignment and naming, tags, template selection and re-run,
   per-meeting audio "keep" toggle, re-export trigger.
 - Speaker review sheet after processing for unknown speakers (clip, name, pick from
-  known people or calendar attendees).
+  known people or calendar attendees). Amended 2026-09-28: the sheet became inline
+  selects in the meeting header and the transcript, see
+  [`2026-09-28-inline-speaker-assignment.md`](2026-09-28-inline-speaker-assignment.md).
 
 ## iOS companion
 

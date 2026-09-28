@@ -6,9 +6,8 @@ import XCTest
 /// the plan: a missing purpose string surfaces as a silent TCC denial.
 final class InfoPlistTests: XCTestCase {
   static func appInfo() throws -> [String: Any] {
-    let products = Bundle(for: InfoPlistTests.self).bundleURL.deletingLastPathComponent()
-    let app = products.appendingPathComponent("Steno.app", isDirectory: true)
-    let bundle = try XCTUnwrap(Bundle(url: app), "Steno.app not found beside the test bundle")
+    let bundle = try XCTUnwrap(
+      Bundle(url: TestSupport.builtApp), "Steno.app not found beside the test bundle")
     return try XCTUnwrap(bundle.infoDictionary, "Steno.app has no Info.plist")
   }
 

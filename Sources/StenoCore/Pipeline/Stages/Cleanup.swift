@@ -3,20 +3,26 @@ import Foundation
 extension ProcessingPipeline {
   struct Cleaned: Sendable {
     var segments: [TranscriptSegment]
-    var usage: LLMUsage
+    /// Nil when the pass was skipped.
+    var usage: LLMUsage?
   }
 
   /// Runs the `TranscriptCleaner` and persists the cleaned `text`; `rawText`,
   /// ids, order and count are the merge stage's and must come back intact.
   /// The transcript's token count replaces the run's guess from the audio
-  /// duration before the stage's event is posted.
+  /// duration before the stage's event is posted. Without a cleaner (no LLM
+  /// endpoint) the stage posts its progress and hands the merged segments on
+  /// untouched with nil usage; the merge stage already persisted them, so
+  /// nothing is written.
   func cleanup(meeting: Meeting, segments: [TranscriptSegment], speakers: [Speaker]) async throws
     -> Cleaned
   {
-    let cleaner = dependencies.cleaner
     let store = self.store
     revise(tokens: ProcessingEstimator.tokenCount(segments), meetingID: meeting.id)
     return try await run(.cleanup, meetingID: meeting.id) {
+      guard let cleaner = dependencies.cleaner else {
+        return Cleaned(segments: segments, usage: nil)
+      }
       let participants = try await store.participants(meetingID: meeting.id)
       let people = try await store.persons()
       let output = try await cleaner.clean(

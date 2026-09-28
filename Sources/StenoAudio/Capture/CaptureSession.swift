@@ -2,12 +2,23 @@ import Foundation
 import StenoCore
 
 /// The state machine over a `CaptureBackend`: `idle → starting → recording →
-/// stopping → idle`, or `failed` when a device disappears or the writer
+/// stopping → idle`, or `failed` when a device stays lost or the writer
 /// fails. Owns the sink, the processing thread, the relay, the writer thread
 /// and the `RecordingWriter`; `stop()` tears them down in order (backend,
 /// processing, writer, files) and returns the `CaptureResult`: the finished
 /// `AudioAsset` (`.caf48kFloat32`, `sidecars16k` filled, retention
 /// `.keepForever` until the caller sets it from `Settings`) with statistics.
+///
+/// A device change while recording does not end the recording. The backend
+/// reports it through the sink; the session stops the backend and the
+/// processing thread, starts the backend again on the devices as they are
+/// now (up to `restartAttempts` times, `restartBackoff` apart on `clock`),
+/// fills the gap with silence through the relay so the master stays on wall
+/// time, starts a processing thread built for the new latencies, and keeps
+/// the sink, the relay, the writer thread, the writer and the files. The
+/// state stays `.recording`; `notices` carries `.deviceChanged` and
+/// `.deviceResumed`. Only when every restart fails does the recording end in
+/// `.failed(.deviceLost, recording:)`.
 ///
 /// A recording cut short (device loss, writer failure, a full disk while
 /// closing) is finalised and travels in the state:
@@ -18,8 +29,22 @@ public actor CaptureSession {
   /// Frames the writer may fall behind the processing thread before frames
   /// are dropped and counted: 200 (2 s) by default.
   public let writerHeadroomFrames: Int
+  /// The waits before the second, third and fourth restart after a device
+  /// change: a Bluetooth device is gone for one to two seconds while it
+  /// changes profile; a device replugged by hand takes longer and is a loss
+  /// the user can see and restart from.
+  public static let restartBackoff: [Duration] = [
+    .milliseconds(250), .milliseconds(500), .seconds(1),
+  ]
+  /// Restarts tried before the recording ends in `.deviceLost`: one more
+  /// than the waits between them.
+  public static var restartAttempts: Int { restartBackoff.count + 1 }
+  /// The most silence written for one gap; a longer outage leaves the master
+  /// that much short of wall time rather than filling minutes of zeros.
+  public static let maximumGap: Duration = .seconds(10)
   private let backend: any CaptureBackend
   private let echoCanceller: (any EchoCanceller)?
+  private let clock: ErasedClock
 
   public private(set) var state: CaptureState = .idle {
     didSet {
@@ -29,6 +54,7 @@ public actor CaptureSession {
 
   private var stateContinuations: [UUID: AsyncStream<CaptureState>.Continuation] = [:]
   private var levelContinuations: [UUID: AsyncStream<LaneLevels>.Continuation] = [:]
+  private var noticeContinuations: [UUID: AsyncStream<CaptureNotice>.Continuation] = [:]
   private var latestLevels: LaneLevels?
 
   private struct Active {
@@ -41,6 +67,19 @@ public actor CaptureSession {
     var writerThread: WriterThread
     var writer: any RecordingWriting
     var endedOnDeviceLoss = false
+    /// Rebuilds that succeeded.
+    var deviceChanges = 0
+    /// Silence written across those rebuilds.
+    var gapSeconds: TimeInterval = 0
+    /// The loudest system-lane sample over every processing thread replaced
+    /// so far; `finish()` takes the maximum with the current one.
+    var systemPeakSoFar: Float = 0
+    /// The rebuild in flight, so `stop()` can abandon it.
+    var rebuild: Task<Void, Never>?
+    /// A change reported while that rebuild ran (the rebuilt backend's
+    /// listeners are live before the gap is written); `resume` starts the
+    /// next rebuild from it instead of losing it.
+    var pendingChange: DeviceChangeReason?
   }
 
   /// Opens the files for one recording; `RecordingWriter.init` in
@@ -51,21 +90,28 @@ public actor CaptureSession {
 
   private let makeWriter: WriterFactory
   private var active: Active?
+  /// Bumped per rebuild and never reset, so a rebuild task that wakes after
+  /// a stop and a new start does nothing: the new recording's rebuilds count
+  /// on from here rather than from zero.
+  private var rebuildGeneration = 0
 
   /// `echoCanceller` nil in `.call` with `echoCancellation` on means
   /// `SpeexEchoCanceller` with the 200 ms tail; `.inPerson` never cancels.
   /// `writerHeadroomFrames` is the relay depth between processing and file
   /// I/O; a test that feeds audio faster than real time raises it so a slow
-  /// disk in a debug build is not mistaken for a drop.
+  /// disk in a debug build is not mistaken for a drop. `clock` paces the
+  /// restart backoff and measures the gap after a device change; tests pass
+  /// a `ManualClock`.
   public init(
     configuration: CaptureConfiguration,
     backend: any CaptureBackend = LiveCaptureBackend(),
     echoCanceller: (any EchoCanceller)? = nil,
-    writerHeadroomFrames: Int = 200
+    writerHeadroomFrames: Int = 200,
+    clock: any Clock<Duration> = ContinuousClock()
   ) throws {
     try self.init(
       configuration: configuration, backend: backend, echoCanceller: echoCanceller,
-      writerHeadroomFrames: writerHeadroomFrames,
+      writerHeadroomFrames: writerHeadroomFrames, clock: clock,
       makeWriter: { layout, lanes, keepRawMic in
         try RecordingWriter(layout: layout, lanes: lanes, keepRawMic: keepRawMic)
       })
@@ -76,11 +122,13 @@ public actor CaptureSession {
     backend: any CaptureBackend,
     echoCanceller: (any EchoCanceller)?,
     writerHeadroomFrames: Int,
+    clock: any Clock<Duration> = ContinuousClock(),
     makeWriter: @escaping WriterFactory
   ) throws {
     self.configuration = configuration
     self.backend = backend
     self.writerHeadroomFrames = writerHeadroomFrames
+    self.clock = ErasedClock(clock)
     self.makeWriter = makeWriter
     if configuration.usesEchoCancellation {
       self.echoCanceller =
@@ -117,16 +165,36 @@ public actor CaptureSession {
     }
   }
 
-  /// The stream the backend opened for the current recording; nil while not
-  /// recording. `steno dev capture-spike` prints it.
+  /// Device changes from now on, while the state stays `.recording`:
+  /// `.deviceChanged(reason)` when a rebuild begins and
+  /// `.deviceResumed(attempt:gapSeconds:)` when the new backend runs. Device
+  /// loss is not a notice; `states` carries it.
+  public var notices: AsyncStream<CaptureNotice> {
+    let id = UUID()
+    return AsyncStream { continuation in
+      noticeContinuations[id] = continuation
+      continuation.onTermination = { [weak self] _ in
+        Task { await self?.removeNoticeContinuation(id) }
+      }
+    }
+  }
+
+  /// The stream the backend opened for the current recording, the rebuilt
+  /// backend's after a device change; nil while not recording. `steno dev
+  /// capture-spike` prints it.
   public var stream: CaptureStream? { active?.stream }
 
   private func removeStateContinuation(_ id: UUID) { stateContinuations[id] = nil }
   private func removeLevelContinuation(_ id: UUID) { levelContinuations[id] = nil }
+  private func removeNoticeContinuation(_ id: UUID) { noticeContinuations[id] = nil }
 
   private func publish(_ levels: LaneLevels) {
     latestLevels = levels
     for continuation in levelContinuations.values { continuation.yield(levels) }
+  }
+
+  private func emit(_ notice: CaptureNotice) {
+    for continuation in noticeContinuations.values { continuation.yield(notice) }
   }
 
   /// The far-end delay for the latencies the backend reports. The mic hears
@@ -149,6 +217,22 @@ public actor CaptureSession {
       outputLatencyFrames: stream.outputLatencyFrames)
   }
 
+  /// Whether the relay and the writer carry the raw microphone channel.
+  private var keepRaw: Bool {
+    configuration.keepRawMicLane && configuration.lanes.contains(.mic)
+  }
+
+  private func makeProcessingThread(
+    sink: LaneFrameSink, relay: FrameRelay, stream: CaptureStream, levels: LevelSlot?
+  ) -> ProcessingThread {
+    ProcessingThread(
+      sink: sink, relay: relay,
+      configuration: .init(
+        lanes: configuration.lanes, echoCanceller: echoCanceller,
+        farEndDelayFrames: farEndDelayFrames(for: stream), keepRawMic: keepRaw),
+      levels: levels)
+  }
+
   public func start(meetingID: UUID) async throws {
     switch state {
     case .idle, .failed: break
@@ -161,7 +245,6 @@ public actor CaptureSession {
     echoCanceller?.reset()
     let lanes = configuration.lanes
     let layout = RecordingLayout(audioFolder: configuration.outputDirectory, meetingID: meetingID)
-    let keepRaw = configuration.keepRawMicLane && lanes.contains(.mic)
 
     let writer: any RecordingWriting
     do {
@@ -172,8 +255,8 @@ public actor CaptureSession {
       throw failure
     }
 
-    let sink = LaneFrameSink(lanes: lanes) { [weak self] in
-      Task { await self?.deviceLost() }
+    let sink = LaneFrameSink(lanes: lanes) { [weak self] reason in
+      Task { await self?.deviceChanged(reason) }
     }
     let stream: CaptureStream
     do {
@@ -190,11 +273,7 @@ public actor CaptureSession {
     let relay = FrameRelay(
       channels: lanes.count + (keepRaw ? 1 : 0), frameSize: StenoAudio.frameSize,
       capacityFrames: writerHeadroomFrames)
-    let processing = ProcessingThread(
-      sink: sink, relay: relay,
-      configuration: .init(
-        lanes: lanes, echoCanceller: echoCanceller,
-        farEndDelayFrames: farEndDelayFrames(for: stream), keepRawMic: keepRaw))
+    let processing = makeProcessingThread(sink: sink, relay: relay, stream: stream, levels: nil)
     let writerThread = WriterThread(
       relay: relay, writer: writer, levels: processing.levels, laneCount: lanes.count,
       hasRawMic: keepRaw,
@@ -210,9 +289,10 @@ public actor CaptureSession {
     state = .recording(startedAt: startedAt)
   }
 
-  /// Ends the recording and returns it. After `.failed` returns the
-  /// finalised partial recording the state carries, or throws when the
-  /// failure came from a start that produced nothing.
+  /// Ends the recording and returns it. A rebuild in flight is abandoned.
+  /// After `.failed` returns the finalised partial recording the state
+  /// carries, or throws when the failure came from a start that produced
+  /// nothing.
   public func stop() async throws -> CaptureResult {
     switch state {
     case .recording:
@@ -234,13 +314,14 @@ public actor CaptureSession {
     return result
   }
 
-  /// Backend off, rings drained, relay drained, files closed, asset built.
-  /// The asset is built even when closing the files fails (its URLs are
-  /// fixed at start and the duration is what the master holds); the failure
-  /// comes back beside it.
+  /// Rebuild abandoned, backend off, rings drained, relay drained, files
+  /// closed, asset built. The asset is built even when closing the files
+  /// fails (its URLs are fixed at start and the duration is what the master
+  /// holds); the failure comes back beside it.
   private func finish() -> (result: CaptureResult, failure: CaptureError?)? {
     guard let active else { return nil }
     self.active = nil
+    active.rebuild?.cancel()
     backend.stop()
     active.processing.stop()
     active.writerThread.stop()
@@ -260,21 +341,210 @@ public actor CaptureSession {
     for (index, frames) in active.relay.droppedFrames.enumerated() where index < lanes.count {
       if frames > 0 { dropped[lanes[index], default: 0] += frames }
     }
+    let systemPeak = max(active.systemPeakSoFar, active.processing.systemPeak)
     let statistics = CaptureStatistics(
       duration: files.duration,
       droppedFrames: dropped,
-      systemLaneSilent: lanes.contains(.system)
-        && active.processing.systemPeak < LaneLevel.silentPeakLinear,
-      endedOnDeviceLoss: active.endedOnDeviceLoss)
+      systemLaneSilent: lanes.contains(.system) && systemPeak < LaneLevel.silentPeakLinear,
+      endedOnDeviceLoss: active.endedOnDeviceLoss,
+      deviceChanges: active.deviceChanges,
+      gapSeconds: active.gapSeconds)
     let asset = AudioAsset(
       id: UUID(), meetingID: active.meetingID, url: files.master, format: .caf48kFloat32,
       lanes: lanes, sidecars16k: files.sidecars16k, retention: .keepForever)
     return (CaptureResult(asset: asset, statistics: statistics), failure)
   }
 
+  // MARK: Device changes
+
+  /// The sink's handler, on the actor. Ignored unless recording; during a
+  /// rebuild the reason is kept for `resume`; otherwise the notice goes out
+  /// and the rebuild runs as its own task so `stop()` can interleave at its
+  /// sleeps. Internal so a test can report a change while idle, after a
+  /// stop or during a rebuild; production reaches it through the sink alone.
+  func deviceChanged(_ reason: DeviceChangeReason) {
+    guard case .recording = state, var active else { return }
+    if active.rebuild != nil {
+      self.active?.pendingChange = reason
+      return
+    }
+    emit(.deviceChanged(reason))
+    rebuildGeneration += 1
+    let generation = rebuildGeneration
+    // The task body runs on the actor once this method returns, so the
+    // handle is in place before it looks for it.
+    active.rebuild = Task { await self.rebuild(generation: generation) }
+    self.active = active
+  }
+
+  private func stillRebuilding(_ generation: Int) -> Bool {
+    guard case .recording = state, let active, active.rebuild != nil,
+      rebuildGeneration == generation
+    else { return false }
+    return true
+  }
+
+  /// Old backend and processing thread off, then `start` again with backoff;
+  /// the gap from the moment the old backend was told to stop is written as
+  /// silence before the new processing thread starts. The sink, the relay,
+  /// the writer thread and the files stay. Nothing here runs on a real-time
+  /// thread.
+  private func rebuild(generation: Int) async {
+    guard stillRebuilding(generation), let current = active else { return }
+    // The stopwatch runs from before the teardown: the HAL calls in `stop()`
+    // take tens to hundreds of milliseconds during a device transition, and
+    // that is dead time in the master too.
+    let elapsed = clock.stopwatch()
+    // Whatever whole frames the rings hold are the old device's last audio;
+    // the processing thread's stop drains them into the relay.
+    backend.stop()
+    current.processing.stop()
+    active?.systemPeakSoFar = max(current.systemPeakSoFar, current.processing.systemPeak)
+    // The old backend's listeners went with it, so the latch can open now: a
+    // report from the rebuilt backend before the gap is written reaches
+    // `deviceChanged`, which keeps it for `resume`.
+    current.sink.rearmDeviceChange()
+    // New devices mean a new echo path: the filter starts cold, as at start.
+    echoCanceller?.reset()
+    switch await restartBackend(sink: current.sink, generation: generation) {
+    case .started(let stream, let attempt):
+      // The gap grows through every failed attempt and is written once, in
+      // full, when a start succeeds.
+      let gapFrames = Self.gapFrames(for: min(elapsed(), Self.maximumGap))
+      guard await writeSilence(frames: gapFrames, into: current.relay, generation: generation),
+        await relayHasRoom(for: current.sink, in: current.relay, generation: generation)
+      else { return }
+      resume(
+        stream: stream, attempt: attempt, gapFrames: gapFrames, sink: current.sink,
+        relay: current.relay, generation: generation)
+    case .abandoned:
+      return
+    case .exhausted:
+      deviceLost()
+    }
+  }
+
+  private enum Restart {
+    case started(CaptureStream, attempt: Int)
+    case abandoned
+    case exhausted
+  }
+
+  /// `start` again, `restartBackoff` apart on `clock`: `.started` with the
+  /// attempt that succeeded, `.exhausted` after `restartAttempts` failures,
+  /// `.abandoned` when `stop()` cancelled a sleep or the recording is gone.
+  private func restartBackend(sink: LaneFrameSink, generation: Int) async -> Restart {
+    for attempt in 1...Self.restartAttempts {
+      do {
+        let stream = try backend.start(
+          lanes: configuration.lanes, inputDeviceUID: configuration.inputDeviceUID, sink: sink)
+        return .started(stream, attempt: attempt)
+      } catch {
+        guard attempt < Self.restartAttempts else { return .exhausted }
+        do {
+          try await clock.sleep(Self.restartBackoff[attempt - 1])
+        } catch {
+          return .abandoned  // cancelled by `stop()`
+        }
+        guard stillRebuilding(generation) else { return .abandoned }
+      }
+    }
+    return .exhausted
+  }
+
+  /// The new processing thread on the kept sink and relay, built for
+  /// `stream`'s latencies and publishing into the shared `LevelSlot`; the
+  /// statistics and the notice follow. A change reported during the rebuild
+  /// starts the next one.
+  private func resume(
+    stream: CaptureStream, attempt: Int, gapFrames: Int, sink: LaneFrameSink, relay: FrameRelay,
+    generation: Int
+  ) {
+    guard stillRebuilding(generation), var updated = active else { return }
+    let gapSeconds = Double(gapFrames * StenoAudio.frameSize) / StenoAudio.sampleRate
+    let processing = makeProcessingThread(
+      sink: sink, relay: relay, stream: stream, levels: updated.processing.levels)
+    processing.start()
+    let pending = updated.pendingChange
+    updated.stream = stream
+    updated.processing = processing
+    updated.deviceChanges += 1
+    updated.gapSeconds += gapSeconds
+    updated.rebuild = nil
+    updated.pendingChange = nil
+    active = updated
+    emit(.deviceResumed(attempt: attempt, gapSeconds: gapSeconds))
+    if let pending { deviceChanged(pending) }
+  }
+
+  /// Whole relay frames for a gap: 48 000 samples a second in frames of
+  /// `StenoAudio.frameSize`, rounded down.
+  static func gapFrames(for gap: Duration) -> Int {
+    let samples = (gap / .seconds(1)) * StenoAudio.sampleRate
+    return max(0, Int(samples.rounded(.down)) / StenoAudio.frameSize)
+  }
+
+  /// Zeros in every written channel for `frames` relay frames, from the
+  /// actor, through the relay the writer thread keeps draining. The rings
+  /// under the sink are not touched: they hold two seconds and nothing
+  /// drains them while the processing thread is stopped, so a longer gap
+  /// would silently shrink into `droppedSamples`. A full relay (a long gap,
+  /// or a writer still behind the old producer) is waited out in 5 ms steps
+  /// on the clock; `hasRoom` is asked first because a refused `beginFrame`
+  /// counts as a dropped frame. Returns false when the rebuild was abandoned
+  /// meanwhile (a stop cancelled the wait or replaced the recording).
+  private func writeSilence(frames: Int, into relay: FrameRelay, generation: Int) async -> Bool {
+    guard frames > 0 else { return true }
+    let zeros = [Float](repeating: 0, count: relay.frameSize)
+    var remaining = frames
+    while remaining > 0 {
+      guard stillRebuilding(generation) else { return false }
+      if relay.hasRoom, relay.beginFrame() {
+        zeros.withUnsafeBufferPointer { buffer in
+          for channel in 0..<relay.channels {
+            relay.write(channel: channel, from: buffer.baseAddress!)
+          }
+        }
+        relay.endFrame()
+        remaining -= 1
+      } else {
+        do {
+          try await clock.sleep(.milliseconds(5))
+        } catch {
+          return false  // cancelled by `stop()`
+        }
+      }
+    }
+    return true
+  }
+
+  /// Waits, in 5 ms steps on the clock, until the relay has room for the
+  /// whole frames the rings collected while the gap was written (capped at
+  /// the relay's capacity, re-read on every step): the new processing thread
+  /// pushes them at once, and a relay still full of silence would refuse and
+  /// count them. Returns false when the rebuild was abandoned meanwhile.
+  private func relayHasRoom(for sink: LaneFrameSink, in relay: FrameRelay, generation: Int) async
+    -> Bool
+  {
+    let backlog = { min(sink.availableToRead / StenoAudio.frameSize, relay.capacityFrames) }
+    while relay.capacityFrames - relay.availableFrames < backlog() {
+      guard stillRebuilding(generation) else { return false }
+      do {
+        try await clock.sleep(.milliseconds(5))
+      } catch {
+        return false  // cancelled by `stop()`
+      }
+    }
+    return true
+  }
+
+  /// Every restart failed: the recording ends as it did before rebuilds
+  /// existed, finalised and carried in `.failed(.deviceLost, recording:)`.
   private func deviceLost() {
     guard case .recording = state, var active else { return }
     active.endedOnDeviceLoss = true
+    // This runs inside the rebuild task; `finish()` must not cancel it.
+    active.rebuild = nil
     self.active = active
     state = .stopping
     guard let (result, failure) = finish() else { return }
@@ -286,5 +556,23 @@ public actor CaptureSession {
     state = .stopping
     let result = finish()?.result
     state = .failed(.writerFailed(String(describing: error)), recording: result)
+  }
+}
+
+/// `any Clock<Duration>` cannot hand the actor an instant it can store, so
+/// the clock is erased to the two things the rebuild needs: a sleep and a
+/// stopwatch. Both run on the injected clock, so a test on `ManualClock`
+/// knows the exact gap.
+struct ErasedClock: Sendable {
+  let sleep: @Sendable (Duration) async throws -> Void
+  /// Starts a stopwatch; the returned closure reads the time since.
+  let stopwatch: @Sendable () -> @Sendable () -> Duration
+
+  init(_ clock: some Clock<Duration>) {
+    sleep = { try await clock.sleep(for: $0) }
+    stopwatch = {
+      let start = clock.now
+      return { start.duration(to: clock.now) }
+    }
   }
 }

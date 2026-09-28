@@ -24,6 +24,9 @@ directly and adds protocols only where a system framework has no seam.
   Sparkle deltas, phased rollouts, channels, signed feeds; Homebrew cask; release notes beyond the Release body.
 - Pixel design. Tokens are dark-first and mirror `mobile/global.css` (luminance ladder, alpha-veil surfaces, hairline
   borders, achromatic CTA).
+  Amended 2026-09-28 by [`2026-09-28-macos-visual-redesign.md`](2026-09-28-macos-visual-redesign.md): pixel design is
+  in scope; token names and the shared ladder mirror `mobile/global.css`, and the Mac adds surface tokens
+  (`Theme.macTokens`) the mobile app does not need.
 - App-side wrappers around package types (`CaptureSession`, `MeetingDetector`, `ProcessingPipeline`, `HandoverService`
   are injected as they are; their fakes come from the modules' `Testing/`).
 
@@ -114,7 +117,7 @@ struct KeychainSecretStore: SecretStore { }                    // Security frame
 | `MenuBarExtra` (`.window` style; icon changes while recording) | `MenuBarViewModel` | `recording: .idle / .recording(since:, levels:) / .stopping` from a `CaptureSession` built per recording over `captureBackend`, `queue: [QueueItem(meeting, stage, fraction)]` from `MeetingEvent.progress` joined with `observeMeetings()`, `launchAtLogin: LoginItemStatus` | `toggleRecording()` (stop → set retention from `Settings`, write title and participants from the calendar, `pipeline.enqueue`), `startInPerson()`, `openMeeting(id)`, `openMain()`, `openSettings()`, `setLaunchAtLogin(Bool)`, `checkForUpdates()`, `quit()` |
 | `Window("Steno", id: "main")`: sidebar list + detail | `MeetingListViewModel` | `meetings` (`observeMeetings()`), `query` (FTS), `stateFilter`, `tagFilter`, `selection` | `select(id)`, `delete(id)` with confirmation, `revealAudio(id)` |
 | Detail with tabs Summary, Transcript, Tasks, Scratchpad | `MeetingDetailViewModel` | `export` (`observeMeeting(id:)`), `deliveries` (`observeDeliveries`), `templates` (`SummaryTemplate.bundled`), `tab`; Summary tab shows `SummaryMarkdown.render(export)` | `setTags`, `setTemplate(id)` + `rerunSummary()`, `setKeepAudio(Bool)` (retention `.keepForever`, clears `expiresAt`), `reexport()` (`pipeline.redeliver`), `openSpeakerReview()`, `saveScratchpad(String)` debounced on the injected clock (scratchpad is the one editable text) |
-| Speaker review `.sheet` on detail | `SpeakerReviewViewModel` | `unresolved: [SpeakerCard]` for speakers whose `assignment` is `.unknown` or `.suggested` (clip, suggestions from `SpeakerMemory.candidates(for:limit:)`, calendar participants, `SpeakerNameSuggestion`), `playing: id?` | `play(id)` (`AVAudioPlayer` over `Speaker.sampleClipURL`), `name(id, String)` (new `Person` then `confirm`), `assign(id, person)` and `acceptSuggestion(id)` via `MeetingStore.confirm(speakerID:person:memory:)`, `mergeSpeakers(a, b)` via `MeetingStore.mergeSpeakers`, `mergePersons(a, b)` via `MeetingStore.mergePersons`, `skip(id)`, `finish()` calls `pipeline.redeliver` (enrolment already happened in `confirm`) |
+| Speaker review `.sheet` on detail (superseded 2026-09-28 by the inline `SpeakersViewModel`, see the inline speaker assignment plan) | `SpeakerReviewViewModel` | `unresolved: [SpeakerCard]` for speakers whose `assignment` is `.unknown` or `.suggested` (clip, suggestions from `SpeakerMemory.candidates(for:limit:)`, calendar participants, `SpeakerNameSuggestion`), `playing: id?` | `play(id)` (`AVAudioPlayer` over `Speaker.sampleClipURL`), `name(id, String)` (new `Person` then `confirm`), `assign(id, person)` and `acceptSuggestion(id)` via `MeetingStore.confirm(speakerID:person:memory:)`, `mergeSpeakers(a, b)` via `MeetingStore.mergeSpeakers`, `mergePersons(a, b)` via `MeetingStore.mergePersons`, `skip(id)`, `finish()` calls `pipeline.redeliver` (enrolment already happened in `confirm`) |
 | Detection prompt (floating `NSPanel`) | `DetectionPromptViewModel` | `trigger: .micOpened(bundleID:)`, `countdown` on `clock` | `start()`, `dismiss()` |
 | `Settings` scene, one tab each | `GeneralSettingsViewModel` (launch at login, detection on/off, default template), `AudioSettingsViewModel` (input device, recordings folder, retention), `SpeechSettingsViewModel` (engine id, `ModelStore.ensure` progress), `LLMSettingsViewModel` (base URL, model, context tokens, key in Keychain, `test()` via `OpenAICompatibleClient.probe`), `ObsidianSettingsViewModel` (edits `Settings.obsidian`, `ObsidianFolderDestination(settings:).validate()`), `PhonesSettingsViewModel` (`HandoverService.pairedDevices()`, `beginPairing()` QR, `revoke(_:)`, `states`, `receipts`), `UpdatesSettingsViewModel` | per tab | per tab |
 | Onboarding `Window(id: "onboarding")`, shown until required permissions are granted | `OnboardingViewModel` | steps microphone -> system audio -> calendar (optional) -> local network (optional, deferred to first pairing), each with `PermissionState` | `request(step)`, `openSystemSettings(step)`, `continue()` |
@@ -191,6 +194,8 @@ STENO_KEYCHAIN_TESTS]` or `[manual]`.
    two distinct actions; skip; finish re-exports. Opens on `speakersNeedReview` when the window is frontmost, else a
    badge. Accept `[ci]`: tests for both merges, `confirm` for new and existing persons, accept-suggestion, skip
    (`assignment` unchanged), `finish` calling `redeliver` exactly once. `[manual]`: the clip is audible.
+   Superseded 2026-09-28 by [`2026-09-28-inline-speaker-assignment.md`](2026-09-28-inline-speaker-assignment.md):
+   no sheet, inline selects, `confirm` without `memory:`, merge by choosing the same person.
 6. Detection prompt: subscribe to `MeetingDetector.events`, resolve bundle id to app name, show panel, start
    `.macCall`, suppressed while recording and when `Settings.meetingDetectionEnabled` is off. Accept `[ci]`:
    view-model tests on `ManualClock` (countdown, suppression, disabled). `[manual]`: opening FaceTime shows the panel
@@ -309,12 +314,13 @@ Manual checklist `[manual]`, run by a human on a Mac before tagging v1, recorded
 4. FaceTime or Zoom call: detection panel appears, record two minutes, stop; processing completes; menu bar queue
    empties.
 5. Speaker review plays a ten-second clip from `sampleClipURL`; naming and merging persist; a second call with the
-   same person shows a suggestion.
+   same person shows a suggestion. (2026-09-28: from the header Speakers row and the transcript, not a sheet.)
 6. Four tabs render; template re-run changes the summary; renaming a speaker updates the summary without a re-run;
    scratchpad text survives relaunch.
 7. Obsidian folder matches the documented layout; re-export overwrites only app-written files.
 8. Retention `0` deletes audio after processing but keeps the speaker clips until confirmed; keep toggle prevents
-   deletion.
+   deletion, and a failed export defers deletion. (2026-09-28: a confirmed speaker's clip is removed by the next
+   sweep with the audio; an unconfirmed speaker's clip stays.)
 9. Phone pairing: local network prompt on first pairing; a phone recording arrives and is processed.
 10. Sparkle: an installed older build offers and installs the new version; after relaunch no permission re-prompts.
 
@@ -372,6 +378,7 @@ Recorded 2026-09-25 while implementing steps 1 to 13 in PR #75 (`feat/macos-app`
 - **Detection.** `DetectionController.handle(_:)` holds the suppression rules (disabled, recording, one prompt at a time, released microphone dismisses); the detector is stopped while Steno records; `DetectionPromptViewModel` counts down on the injected clock. App names resolve through `NSWorkspace`; tests inject the resolver.
 - **Speaker review.** `SpeakerNameSuggestion`s are not persisted by the pipeline (core follow-up), so the sheet's suggestions are the `.suggested` assignment, `SpeakerMemory.candidates(for:limit:)` and the calendar participants. Naming an existing display name reuses that person. Clip playback is `ClipPlayer` over `AVAudioPlayer`, no protocol.
 - **Calendar protocol** is `events(on:) -> [CalendarEvent]` with attendees embedded (no `attendees(of:)`); attendees flagged `isCurrentUser` are not written as participants (the pipeline adds "me").
+- **Main window start/stop control** (2026-09-28). The sidebar gained a primary Record/Stop control above the list that drives the one recorder through `AppController.startRecordingFromWindow` and selects the live row; the menu bar item is no longer the only manual start. Labels and states come from `RecordingControlPresentation`; see [`2026-09-28-start-recording-from-main-window.md`](2026-09-28-start-recording-from-main-window.md).
 - **Permissions protocol** is `state(of:)`, `request(_:)`, `openSystemSettings(for:)` over one `PermissionKind`; the system audio state is what the last probe found, remembered in `UserDefaults`; local network stays `.unknown` (no status API) and the onboarding step only explains it.
 - **Delete meeting** is not offered: it needs `MeetingStore.delete(meetingID:)` in StenoCore (follow-up), and the app owns no SQL. The list offers "Reveal recording in Finder" instead.
 - **LLM wiring** lives in `Services/LLMWiring.swift` (PR #5 merged during this workstream): `LLMEndpoint(settings:)` decides whether the real `LLMTranscriptCleaner` and `LLMMeetingSummarizer` run on one shared `OpenAICompatibleClient`, else the pipeline runs `PassthroughCleaner` and `FakeSummarizer` as the CLI does without an endpoint. The Test button calls `probe()` with `RetryPolicy.none` and shows `LLMError.description` on failure.
@@ -383,6 +390,10 @@ Recorded 2026-09-25 while implementing steps 1 to 13 in PR #75 (`feat/macos-app`
 - **`mobile-cd.yml`** also guards `setup-xcode` on `runner.environment == 'github-hosted'`, the same pattern as the other macOS jobs.
 - **Tests** are XCTest (`@MainActor` classes with async methods) in the hostless bundle; the handover test identity import is repeated in `TestSupport` because the app cannot import the handover test target. Timers run on `ManualClock`; store observations and pipeline runs are awaited with a bounded poll.
 - **Step 14 (release rehearsal)** and every `[manual]` check remain for a human on a Mac; none were run here.
+- **Retention (2026-09-28).** The default is `.keepForever` for new installs, the detail header carries a
+  "Recording" line with the per-meeting "Keep this recording" toggle (out of the Actions menu), and Settings > Audio
+  shows the folder's disk usage next to the rule; see
+  [`2026-09-28-audio-retention-keep-forever.md`](2026-09-28-audio-retention-keep-forever.md).
 
 ### Testing pass (2026-09-25, PR #75)
 

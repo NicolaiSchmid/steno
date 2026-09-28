@@ -2,12 +2,14 @@ import XCTest
 
 /// The UI smoke tests: the app launches in its UI-testing mode (preview
 /// environment: in-memory database seeded with StenoCore's sample meeting,
-/// fakes, no permission prompts), the main window appears, the fixture
-/// meeting is listed and each of the four tabs is selectable and shows its
-/// content; and with the transcribe hold the processing card follows the
-/// run and makes way for the summary. The app cannot join the SwiftPM
-/// end-to-end test target, so these tests and the manual checklist are its
-/// end-to-end proof.
+/// fakes, synthetic audio, no permission prompts), the main window appears,
+/// the fixture meeting is listed and each of the four tabs is selectable and
+/// shows its content; the sidebar control starts and stops a recording; and
+/// with the transcribe hold the processing card follows the run and makes
+/// way for the summary. The app cannot join the SwiftPM end-to-end test
+/// target, so these tests and the manual checklist are its end-to-end
+/// proof. Identifiers are pinned, never copy: titles and chip texts belong
+/// to other plans.
 @MainActor
 final class LaunchSmokeTests: XCTestCase {
   /// Launches with `arguments`, waits for the window and selects the
@@ -50,6 +52,100 @@ final class LaunchSmokeTests: XCTestCase {
       button.click()
       XCTAssertTrue(expectation.check(), "tab \(expectation.tab) content missing")
     }
+
+    // Speakers: the header row names the confirmed speaker and counts the
+    // unnamed one; its popover lists both, and the unnamed speaker's picker
+    // opens pre-filled with the suggested name. Ids are SampleData's
+    // `uuid(20)` and `uuid(21)`.
+    let speakersRow = app.buttons["speakers-row"].firstMatch
+    XCTAssertTrue(speakersRow.waitForExistence(timeout: 10), "no speakers row")
+    XCTAssertTrue(speakersRow.label.contains("Nicolai"), speakersRow.label)
+    XCTAssertTrue(speakersRow.label.contains("1 to confirm"), speakersRow.label)
+    speakersRow.click()
+    XCTAssertTrue(app.popovers.firstMatch.waitForExistence(timeout: 10), "no speakers popover")
+    let speakerOne = "00000000-0000-0000-0000-000000000014"
+    let speakerTwo = "00000000-0000-0000-0000-000000000015"
+    let firstPicker = app.buttons["speaker-picker-\(speakerOne)"].firstMatch
+    XCTAssertTrue(firstPicker.waitForExistence(timeout: 5), "Speaker 1 row missing")
+    XCTAssertTrue(firstPicker.label.contains("Nicolai"), firstPicker.label)
+    let secondPicker = app.buttons["speaker-picker-\(speakerTwo)"].firstMatch
+    XCTAssertTrue(secondPicker.waitForExistence(timeout: 5), "Speaker 2 row missing")
+    secondPicker.click()
+    let field = app.textFields["speaker-field-\(speakerTwo)"].firstMatch
+    XCTAssertTrue(field.waitForExistence(timeout: 5), "the picker field did not open")
+    XCTAssertEqual(field.value as? String, "Jérôme", "pre-filled with the suggested name")
+    app.typeKey(.escape, modifierFlags: [])
+    if app.popovers.firstMatch.exists { app.typeKey(.escape, modifierFlags: []) }
+
+    // Transcript: the turn header's name is the same picker, in its own
+    // popover. The screenshot is the review evidence for the speaker
+    // surfaces.
+    app.buttons["tab-transcript"].firstMatch.click()
+    let turnPicker = app.buttons["speaker-picker-\(speakerOne)"].firstMatch
+    XCTAssertTrue(turnPicker.waitForExistence(timeout: 10), "no picker on the turn header")
+    XCTAssertTrue(turnPicker.label.contains("Nicolai"), turnPicker.label)
+    turnPicker.click()
+    let turnField = app.textFields["speaker-field-\(speakerOne)"].firstMatch
+    XCTAssertTrue(turnField.waitForExistence(timeout: 5), "the transcript picker did not open")
+    let screenshot = XCTAttachment(screenshot: XCUIScreen.main.screenshot())
+    screenshot.name = "transcript-speaker-picker"
+    screenshot.lifetime = .keepAlways
+    add(screenshot)
+    app.typeKey(.escape, modifierFlags: [])
+  }
+
+  /// Record call in the sidebar, the control turns into Stop and the live
+  /// row joins the fixture meeting; Stop returns the control and keeps the
+  /// row. The synthetic backend delivers audio at once, so this stays well
+  /// under 30 seconds.
+  func testSidebarStartsAndStopsARecording() throws {
+    let app = XCUIApplication()
+    app.launchArguments = ["-steno-ui-testing"]
+    app.launch()
+
+    let window = app.windows.firstMatch
+    XCTAssertTrue(window.waitForExistence(timeout: 10), "no window appeared")
+
+    let record = app.buttons["sidebar-record"].firstMatch
+    XCTAssertTrue(record.waitForExistence(timeout: 10), "the sidebar record control is missing")
+    XCTAssertFalse(app.buttons["sidebar-stop"].exists, "nothing in the window records on its own")
+    XCTAssertTrue(
+      waitUntil(timeout: 10) { meetingRowCount(in: app) == 1 },
+      "expected the fixture meeting alone before the click, got \(meetingRowCount(in: app))")
+    record.click()
+
+    let stop = app.buttons["sidebar-stop"].firstMatch
+    XCTAssertTrue(stop.waitForExistence(timeout: 10), "the control did not turn into Stop")
+    XCTAssertTrue(
+      waitUntil(timeout: 20) { meetingRowCount(in: app) == 2 },
+      "expected the fixture meeting plus the live row, got \(meetingRowCount(in: app))")
+
+    stop.click()
+    XCTAssertTrue(record.waitForExistence(timeout: 10), "the control did not return to Record call")
+    XCTAssertEqual(meetingRowCount(in: app), 2, "the stopped recording keeps its row")
+  }
+
+  /// Rows carrying a `meeting-<uuid>` identifier, and only those: the
+  /// redesign's `meeting-list` container must not count. The list's cells
+  /// are counted with one query when they carry the row identifier; SwiftUI
+  /// otherwise stamps a row's identifier on each of the row's text elements
+  /// as well, so the fallback counts distinct identifiers, not elements.
+  private func meetingRowCount(in app: XCUIApplication) -> Int {
+    let row = NSPredicate(format: "identifier MATCHES %@", "meeting-[0-9A-F-]{36}")
+    let cells = app.descendants(matching: .cell).matching(row).count
+    if cells > 0 { return cells }
+    let elements = app.descendants(matching: .any).matching(row)
+    return Set(elements.allElementsBoundByIndex.map(\.identifier)).count
+  }
+
+  /// Polls `condition` on the main run loop until it holds or `timeout` passes.
+  private func waitUntil(timeout: TimeInterval, _ condition: () -> Bool) -> Bool {
+    let deadline = Date().addingTimeInterval(timeout)
+    while !condition() {
+      guard Date() < deadline else { return false }
+      RunLoop.current.run(until: Date().addingTimeInterval(0.5))
+    }
+    return true
   }
 
   /// `-steno-ui-testing-hold-transcribe` queues the seeded meeting at launch

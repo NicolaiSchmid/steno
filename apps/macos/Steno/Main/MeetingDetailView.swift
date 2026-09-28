@@ -3,15 +3,18 @@ import StenoAdapters
 import StenoCore
 import SwiftUI
 
-/// Header (title, meta, actions), the four tabs and the delivery footer.
-/// While the meeting is queued or processing the header chip reads the
-/// progress model's title and every tab shows the `ProcessingCard`; the
-/// chip is the header's only processing signal, the card has the one bar.
+/// Header (title, meta, the speakers row, tags, actions), the four tabs and
+/// the delivery footer. Speakers are named from the header row's popover;
+/// closing it re-exports when something changed. While the meeting is
+/// queued or processing the header chip reads the progress model's title
+/// and every tab shows the `ProcessingCard`; the chip is the header's only
+/// processing signal, the card has the one bar.
 struct MeetingDetailView: View {
   @Bindable var model: MeetingDetailViewModel
   let controller: AppController
   @State private var tagsText = ""
   @State private var editingTags = false
+  @State private var showsSpeakers = false
 
   var body: some View {
     VStack(alignment: .leading, spacing: 0) {
@@ -29,21 +32,24 @@ struct MeetingDetailView: View {
     .background(Color.stenoBackground)
     .task { await model.observe() }
     .task { await model.observeDeliveries() }
-    .sheet(isPresented: $model.showsSpeakerReview) {
-      if let export = model.export {
-        SpeakerReviewSheet(
-          model: SpeakerReviewViewModel(export: export, environment: controller.environment),
-          onFinish: {
-            controller.reviewCompleted(meetingID: model.id)
-            model.showsSpeakerReview = false
-          })
-      }
+    .task { await model.observeSettings() }
+    .confirmationDialog(
+      "Delete this recording now?", isPresented: $model.confirmsDeleteNow, titleVisibility: .visible
+    ) {
+      Button("Delete recording", role: .destructive) { Task { await model.setKeepAudio(false) } }
+      Button("Cancel", role: .cancel) {}
+    } message: {
+      Text("The recording is deleted shortly. The transcript, summary and exports stay.")
     }
-    .onChange(of: controller.pendingReviews.contains(model.id), initial: true) { _, pending in
-      if pending, NSApp.isActive, !model.unconfirmedSpeakers.isEmpty {
-        model.showsSpeakerReview = true
-      }
+    .onChange(of: showsSpeakers) { _, shown in
+      if !shown { Task { await model.pickerClosed() } }
     }
+    .onDisappear { model.viewDisappeared() }
+  }
+
+  private var showsSpeakersRow: Bool {
+    guard let export = model.export else { return false }
+    return export.meeting.state == .ready && !export.speakers.isEmpty
   }
 
   private func header(_ meeting: Meeting) -> some View {
@@ -74,16 +80,18 @@ struct MeetingDetailView: View {
       if case .failed(let reason) = meeting.state {
         MessageRow(kind: .error, text: reason)
       }
+      if model.recordingStatusText != nil || model.showsKeepToggle {
+        recordingLine
+      }
+      if showsSpeakersRow {
+        SpeakersRow(model: model.speakers, isPresented: $showsSpeakers)
+          .popover(isPresented: $showsSpeakers, arrowEdge: .bottom) {
+            SpeakersPopover(model: model.speakers)
+          }
+      }
       HStack(spacing: Theme.Space.sm) {
         tagsEditor(meeting)
         Spacer()
-        if !model.unconfirmedSpeakers.isEmpty {
-          Button("Review speakers (\(model.unconfirmedSpeakers.count))") {
-            model.showsSpeakerReview = true
-          }
-          .buttonStyle(StenoPrimaryButtonStyle())
-          .accessibilityIdentifier("review-speakers")
-        }
         Menu {
           Picker("Template", selection: .action({ meeting.templateID }, model.setTemplate)) {
             ForEach(model.templates) { template in
@@ -94,12 +102,12 @@ struct MeetingDetailView: View {
             .disabled(!model.canRerun)
           Button("Re-export") { Task { await model.reexport() } }
             .disabled(!model.canRerun)
-          Divider()
-          Toggle("Keep audio", isOn: .action({ model.keepsAudio }, model.setKeepAudio))
           if let url = model.export?.audio?.url {
+            Divider()
             Button("Reveal recording in Finder") {
               NSWorkspace.shared.activateFileViewerSelecting([url])
             }
+            .disabled(!model.recordingFilesExist)
           }
         } label: {
           Label("Actions", systemImage: "ellipsis.circle")
@@ -115,11 +123,31 @@ struct MeetingDetailView: View {
     .padding(Theme.Space.lg)
   }
 
+  /// The retention row of the header: what happens to the audio file when
+  /// the default rule does not say it all, and the per-meeting keep when
+  /// the default is not Forever.
+  private var recordingLine: some View {
+    HStack(spacing: Theme.Space.md) {
+      if let status = model.recordingStatusText {
+        Text(status)
+          .font(.steno(Theme.TextSize.xxs))
+          .foregroundStyle(Color.stenoMutedForeground)
+          .accessibilityIdentifier("recording-status")
+      }
+      if model.showsKeepToggle {
+        Toggle("Keep this recording", isOn: .action({ model.keepsAudio }, model.toggleKeepAudio))
+          .toggleStyle(.checkbox)
+          .font(.steno(Theme.TextSize.xxs))
+          .foregroundStyle(Color.stenoMutedForeground)
+          .accessibilityIdentifier("keep-recording")
+      }
+    }
+  }
+
   private func tagsEditor(_ meeting: Meeting) -> some View {
     HStack(spacing: Theme.Space.xs) {
       if editingTags {
-        TextField("tags, comma separated", text: $tagsText)
-          .textFieldStyle(.roundedBorder)
+        StenoTextField("tags, comma separated", text: $tagsText)
           .frame(width: 240)
           .onSubmit {
             editingTags = false
@@ -128,7 +156,7 @@ struct MeetingDetailView: View {
           }
       } else {
         ForEach(meeting.tags, id: \.self) { tag in
-          StatusChip(text: "#\(tag)", color: Color.stenoMutedForeground)
+          StatusChip(text: "#\(tag)", style: .neutral)
         }
         Button(meeting.tags.isEmpty ? "Add tags" : "Edit tags") {
           tagsText = meeting.tags.joined(separator: ", ")
@@ -153,7 +181,7 @@ struct MeetingDetailView: View {
             .padding(.horizontal, Theme.Space.md)
             .padding(.vertical, Theme.Space.xs + 2)
             .background(
-              RoundedRectangle(cornerRadius: Theme.Space.radiusSmall, style: .continuous)
+              Theme.Radius.sm.shape
                 .fill(model.tab == tab ? Color.stenoSecondary : Color.clear))
         }
         .buttonStyle(.plain)

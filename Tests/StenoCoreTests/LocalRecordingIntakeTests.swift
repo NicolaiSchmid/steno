@@ -62,6 +62,8 @@ import Testing
       startedAt: SampleData.startedAt)
 
     #expect(meeting.title == "Produktstrategie")
+    #expect(meeting.titleOrigin == .calendar)
+    #expect(meeting.endReason == nil)
     #expect(meeting.state == .recording)
     #expect(meeting.source == .macCall)
     #expect(meeting.calendarEventID == "event-1")
@@ -92,6 +94,8 @@ import Testing
       call.title == LocalRecordingIntake.defaultTitle(source: .macCall, startedAt: call.startedAt))
     #expect(call.title.hasPrefix("Call 2026-09-24"))
     #expect(room.title.hasPrefix("Meeting 2026-09-24"))
+    #expect(call.titleOrigin == .default)
+    #expect(room.titleOrigin == .default)
     #expect(call.id != room.id)
     let berlin = TimeZone(identifier: "Europe/Berlin")!
     #expect(
@@ -118,7 +122,8 @@ import Testing
     }
 
     let completed = try await intake.complete(
-      meetingID: begun.id, result: RecordingResult(asset: Self.capturedAsset(), duration: 61.5))
+      meetingID: begun.id,
+      result: RecordingResult(asset: Self.capturedAsset(), duration: 61.5, endReason: .manual))
 
     let calls = await fixture.enqueued.calls
     #expect(calls.count == 1)
@@ -127,6 +132,8 @@ import Testing
     #expect(meeting.id == begun.id)
     #expect(meeting.state == .queued)
     #expect(meeting.duration == 61.5)
+    #expect(meeting.endReason == .manual)
+    #expect(try await fixture.store.meeting(id: begun.id)?.endReason == .manual)
     #expect(meeting.scratchpad == "Notizen.")
     #expect(meeting.updatedAt == SampleData.createdAt)
     #expect(asset.meetingID == begun.id, "the asset is re-pointed at the meeting")
@@ -139,12 +146,64 @@ import Testing
     #expect(try await fixture.store.asset(meetingID: begun.id) == asset)
   }
 
+  /// Every reason the recorder can pass lands on the row in the same update
+  /// as the duration, so a meeting never shows a duration without its
+  /// reason; a `.recording` row that never completed keeps nil.
+  @Test func completeStoresWhyTheRecordingEnded() async throws {
+    let fixture = try await Fixture()
+    let intake = fixture.intake()
+    let reasons: [RecordingEndReason] = [
+      .callEnded(appName: "Zen"), .callEnded(appName: nil), .deviceLost, .quit,
+    ]
+    for reason in reasons {
+      let begun = try await intake.begin(source: .macCall, startedAt: SampleData.startedAt)
+      #expect(begun.endReason == nil, "nothing has ended yet")
+      #expect(try await fixture.store.meeting(id: begun.id)?.endReason == nil)
+      let completed = try await intake.complete(
+        meetingID: begun.id,
+        result: RecordingResult(asset: Self.capturedAsset(), duration: 12, endReason: reason))
+      #expect(completed.endReason == reason)
+      let stored = try #require(try await fixture.store.meeting(id: begun.id))
+      #expect(stored.endReason == reason, "\(reason)")
+      #expect(stored.duration == 12)
+      #expect(stored.state == .queued)
+    }
+  }
+
+  /// Where the title came from is stored with it: the default when none was
+  /// given, the calendar's when the event supplied it, the caller's when a
+  /// title came without an event.
+  @Test func beginStoresWhereTheTitleCameFrom() async throws {
+    let fixture = try await Fixture()
+    let intake = fixture.intake()
+    let plain = try await intake.begin(source: .macCall, startedAt: SampleData.startedAt)
+    #expect(plain.titleOrigin == .default)
+    #expect(try await fixture.store.meeting(id: plain.id)?.titleOrigin == .default)
+
+    let scheduled = try await intake.begin(
+      source: .macCall, title: "Weekly", calendarEventID: "event-1",
+      startedAt: SampleData.startedAt)
+    #expect(scheduled.titleOrigin == .calendar)
+    #expect(try await fixture.store.meeting(id: scheduled.id)?.titleOrigin == .calendar)
+
+    let blankFromCalendar = try await intake.begin(
+      source: .macCall, title: "  ", calendarEventID: "event-2", startedAt: SampleData.startedAt)
+    #expect(blankFromCalendar.titleOrigin == .default, "a blank event title is no title")
+    #expect(blankFromCalendar.title.hasPrefix("Call "))
+
+    let typed = try await intake.begin(
+      source: .macInPerson, title: "Standup", startedAt: SampleData.startedAt)
+    #expect(typed.titleOrigin == .user)
+    #expect(try await fixture.store.meeting(id: typed.id)?.titleOrigin == .user)
+  }
+
   @Test func completeTakesAnExplicitRetention() async throws {
     let fixture = try await Fixture()
     let intake = fixture.intake()
     let begun = try await intake.begin(source: .macInPerson, startedAt: SampleData.startedAt)
     try await intake.complete(
-      meetingID: begun.id, result: RecordingResult(asset: Self.capturedAsset(), duration: 1),
+      meetingID: begun.id,
+      result: RecordingResult(asset: Self.capturedAsset(), duration: 1, endReason: .manual),
       retention: .deleteAfterProcessing)
     let (_, asset) = try #require(await fixture.enqueued.calls.first)
     #expect(asset.retention == .deleteAfterProcessing)
@@ -158,7 +217,7 @@ import Testing
     let error = await #expect(throws: LocalRecordingIntakeError.self) {
       try await intake.complete(
         meetingID: SampleData.meetingID,
-        result: RecordingResult(asset: Self.capturedAsset(), duration: 1))
+        result: RecordingResult(asset: Self.capturedAsset(), duration: 1, endReason: .manual))
     }
     #expect(error == .notRecording(SampleData.meetingID, .ready))
     #expect(error?.description.contains("ready") == true)
@@ -167,7 +226,7 @@ import Testing
     await #expect(throws: MeetingStoreError.meetingNotFound(SampleData.uuid(999))) {
       try await intake.complete(
         meetingID: SampleData.uuid(999),
-        result: RecordingResult(asset: Self.capturedAsset(), duration: 1))
+        result: RecordingResult(asset: Self.capturedAsset(), duration: 1, endReason: .manual))
     }
   }
 
@@ -178,7 +237,8 @@ import Testing
     let failing = fixture.intake(enqueueFailure: Boom())
     await #expect(throws: Boom.self) {
       try await failing.complete(
-        meetingID: begun.id, result: RecordingResult(asset: Self.capturedAsset(), duration: 9))
+        meetingID: begun.id,
+        result: RecordingResult(asset: Self.capturedAsset(), duration: 9, endReason: .quit))
     }
     let stored = try #require(try await fixture.store.meeting(id: begun.id))
     guard case .failed(let reason) = stored.state else {

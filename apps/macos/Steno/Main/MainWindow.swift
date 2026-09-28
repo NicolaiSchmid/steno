@@ -17,8 +17,11 @@ struct MainWindow: View {
 
   var body: some View {
     NavigationSplitView {
-      MeetingListView(model: list, progress: controller.progress)
-        .navigationSplitViewColumnWidth(min: 240, ideal: 300, max: 420)
+      VStack(spacing: 0) {
+        RecordingControl(controller: controller)
+        MeetingListView(model: list, progress: controller.progress)
+      }
+      .navigationSplitViewColumnWidth(min: 240, ideal: 300, max: 420)
     } detail: {
       if let detail {
         MeetingDetailView(model: detail, controller: controller)

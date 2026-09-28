@@ -424,8 +424,15 @@ import Testing
 
     #expect(
       try vault.list("People") == ["Anna Müller.md", "Anna Schulz.md", "Nicolai Schmid.md"])
-    #expect(try vault.read("People/Anna Müller.md") == oldPage, "never deleted, never rewritten")
+    let marker = ManagedBlock.marker(export.meeting.id)
+    #expect(
+      try vault.text("People/Anna Müller.md")
+        == ManagedBlock.remove(
+          meetingID: export.meeting.id, from: String(decoding: oldPage, as: UTF8.self)),
+      "never deleted; only this meeting's line leaves the old page")
+    #expect(!(try vault.text("People/Anna Müller.md")).contains(marker))
     let newPage = try vault.text("People/Anna Schulz.md")
+    #expect(newPage.contains(marker))
     #expect(newPage.contains("# Anna Schulz\n"))
     #expect(newPage.contains("steno_person_id: \"00000000-0000-0000-0000-00000000000a\""))
     #expect(
@@ -435,6 +442,70 @@ import Testing
     let transcript = try vault.text("\(Self.folder)/\(Self.slug) - Transcript.md")
     #expect(transcript.contains("## [[Anna Schulz]] — 00:00:04"))
     #expect(!transcript.contains("Anna Müller"), "every note uses the current name")
+  }
+
+  @Test func redeliverAfterReassignmentRemovesTheOldPersonLine() async throws {
+    let vault = try Vault()
+    defer { vault.cleanUp() }
+    let export = try FixtureMeeting.export(audioIn: vault.directory)
+    let destination = vault.destination()
+    let first = try await destination.deliver(export, previous: nil)
+    let anna = "People/Anna Müller.md"
+    let marker = ManagedBlock.marker(export.meeting.id)
+
+    // The user writes around Anna's block; Anna also has an older meeting.
+    let older =
+      "- 2026-08-01 [[2026-08-01-kickoff|Kickoff]] \(ManagedBlock.marker(SampleData.uuid(9)))"
+    let above = "Above the block, with \(marker) mentioned.\n\n"
+    let below = "\nBelow the block.\n"
+    let block = ManagedBlock.merge(older, meetingID: SampleData.uuid(9), into: try vault.text(anna))
+    try Data((above + block + below).utf8).write(to: vault.url(anna))
+
+    // Speaker 1 turns out to be Bea, a new person; Anna leaves the export.
+    let beaID = SampleData.uuid(12)
+    var reassigned = export
+    reassigned.speakers[1].assignment = .confirmed(personID: beaID)
+    reassigned.persons[0] = Person(
+      id: beaID, displayName: "Bea Braun", sampleCount: 1, createdAt: FixtureMeeting.createdAt)
+    reassigned.participants[0].personID = beaID
+    reassigned.participants[0].displayName = "Bea Braun"
+    reassigned.participants[0].email = nil
+    let second = try await destination.deliver(reassigned, previous: first)
+
+    #expect(try vault.list("People") == ["Anna Müller.md", "Bea Braun.md", "Nicolai Schmid.md"])
+    let page = try vault.text(anna)
+    #expect(page.hasPrefix(above), "bytes above the block are untouched")
+    #expect(page.hasSuffix(ManagedBlock.end + "\n" + below), "bytes below the block are untouched")
+    let inside = page.components(separatedBy: ManagedBlock.start)[1]
+      .components(separatedBy: ManagedBlock.end)[0]
+    #expect(inside == "\n\(older)\n", "only this meeting's line left the block")
+    #expect(!inside.contains(marker))
+    #expect(try vault.text("People/Bea Braun.md").contains(marker), "Bea's page lists the meeting")
+    #expect(
+      second.files.filter { $0.ownership == .managedBlock }.map(\.relativePath) == [
+        anna, "People/Bea Braun.md", "People/Nicolai Schmid.md",
+      ], "Anna's page stays in the receipt")
+    #expect(
+      second.files.first { $0.relativePath == anna }?.sha256
+        == ContentHash.sha256(try vault.read(anna)), "with the hash of what is on disk")
+
+    // Nothing left to remove: a third delivery leaves Anna's page alone.
+    let before = try vault.read(anna)
+    let third = try await destination.deliver(reassigned, previous: second)
+    #expect(try vault.read(anna) == before)
+    #expect(third == second)
+
+    // Anna's page deleted by the user is skipped, not recreated; a page that
+    // is not UTF-8 text is left as it is, and neither fails the delivery.
+    try FileManager.default.removeItem(at: vault.url(anna))
+    let binary = Data([0xFF, 0xFE, 0x00, 0x41] + Array(ManagedBlock.block(lines: [marker]).utf8))
+    try binary.write(to: vault.url("People/Nicolai Schmid.md"))
+    var withoutNicolai = reassigned
+    withoutNicolai.persons.removeLast()
+    let fourth = try await destination.deliver(withoutNicolai, previous: third)
+    #expect(!FileManager.default.fileExists(atPath: vault.url(anna).path))
+    #expect(try vault.read("People/Nicolai Schmid.md") == binary)
+    #expect(fourth.files.map(\.relativePath) == third.files.map(\.relativePath))
   }
 
   @Test func aMovedVaultIsWrittenFreshUnderThePinnedFolderAndTheOldOneIsLeftAlone() async throws {

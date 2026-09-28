@@ -11,16 +11,36 @@ import GRDB
 /// `steno dev db reindex` rebuilds the index if it drifts.
 public enum Migrations {
   public static func migrator() -> DatabaseMigrator {
+    migrator(upTo: steps.count)
+  }
+
+  /// The migrator for the first `count` versions. `SchemaSnapshotTests` runs
+  /// every prefix against its golden; production always runs them all.
+  static func migrator(upTo count: Int) -> DatabaseMigrator {
     var migrator = DatabaseMigrator()
-    migrator.registerMigration("v1", migrate: v1)
-    migrator.registerMigration("v2", migrate: v2)
-    migrator.registerMigration("v3", migrate: v3)
+    for step in steps.prefix(count) {
+      migrator.registerMigration(step.identifier, migrate: step.migrate)
+    }
     return migrator
   }
 
+  /// One schema version: its GRDB identifier and the migration.
+  struct Step: Sendable {
+    let identifier: String
+    let migrate: @Sendable (Database) throws -> Void
+  }
+
+  /// Every version in registration order. Append below the last one.
+  static let steps: [Step] = [
+    Step(identifier: "v1", migrate: v1),
+    Step(identifier: "v2", migrate: v2),
+    Step(identifier: "v3", migrate: v3),
+    Step(identifier: "v4", migrate: v4),
+  ]
+
   /// Every identifier in registration order; tests compare it with what a
   /// database has applied.
-  public static let identifiers = ["v1", "v2", "v3"]
+  public static let identifiers = steps.map(\.identifier)
 
   /// Internal so `SchemaSnapshotTests` can run each version on its own.
   static func v1(_ db: Database) throws {
@@ -199,11 +219,22 @@ public enum Migrations {
       columns: ["meetingID"])
   }
 
+  /// Why a recording ended and where its title came from (the 2026-09-28
+  /// device-change plan): two columns on `meeting`, nullable or defaulted, so
+  /// every row written before reads as "no reason recorded" and "default
+  /// title". `meeting_ft` is unaffected: its triggers name their columns.
+  static func v3(_ db: Database) throws {
+    try db.alter(table: "meeting") { t in
+      t.add(column: "endReason", .text)
+      t.add(column: "titleOrigin", .text).notNull().defaults(to: "default")
+    }
+  }
+
   /// The learned per-stage rates behind `progress` estimates
   /// (`MeetingStore+Timings.swift`): one row per stage and key, the speech
   /// engine id for transcribe, the LLM model for cleanup and summarize,
   /// empty for the rest. Measurements, not choices, so not a `setting`.
-  static func v3(_ db: Database) throws {
+  static func v4(_ db: Database) throws {
     try db.create(table: "stageRate") { t in
       t.column("stage", .text).notNull()
       t.column("key", .text).notNull()

@@ -87,8 +87,10 @@ import Testing
         "--source", "mac-in-person", "--title", "Sweep", "--db", db, "--audio-folder", audio.path,
       ], home: home)
     #expect(process.status == 0, "\(process.stderr)")
+    #expect(process.stderr.contains("summary skipped: no LLM endpoint configured"))
     let meetingID = try #require(
-      UUID(uuidString: process.stdout.trimmingCharacters(in: .whitespacesAndNewlines)))
+      UUID(uuidString: process.stdout.trimmingCharacters(in: .whitespacesAndNewlines)),
+      "stdout carries the meeting id and nothing else")
     let layout = RecordingLayout(audioFolder: audio, meetingID: meetingID)
     #expect(FileManager.default.fileExists(atPath: layout.master(.wav16kInt16).path))
     #expect(FileManager.default.fileExists(atPath: layout.mixdown(.wav16kInt16).path))
@@ -110,7 +112,9 @@ import Testing
     #expect(decoded.meeting.id == meetingID)
     #expect(decoded.meeting.state == .ready)
     #expect(decoded.meeting.source == .macInPerson)
-    #expect(decoded.meeting.title == "Summary of Sweep")
+    #expect(decoded.meeting.title == "Sweep", "no fake summarizer renames the meeting")
+    #expect(decoded.meeting.summary == nil)
+    #expect(decoded.meeting.llmUsage == nil)
     #expect(decoded.segments.count == 3)
     #expect(decoded.audio?.mixdownURL != nil)
 
@@ -135,7 +139,8 @@ import Testing
       MeetingExport.self,
       from: try Data(contentsOf: out.appendingPathComponent("call/meeting.json")))
     #expect(callDecoded.speakers.map(\.clusterLabel) == ["Me", "Speaker 1", "Speaker 2"])
-    #expect(callDecoded.meeting.summary?.templateID == "daily-standup")
+    #expect(callDecoded.meeting.templateID == "daily-standup")
+    #expect(callDecoded.meeting.summary == nil, "no endpoint, no summary")
 
     #expect(FileManager.default.fileExists(atPath: Self.realStenoFolder.path) == hadRealFolder)
   }
@@ -236,7 +241,8 @@ import Testing
     let folders = try FileManager.default.contentsOfDirectory(atPath: meetings.path)
     #expect(folders.count == 1)
     let slug = try #require(folders.first)
-    #expect(slug.hasSuffix("-summary-of-sweep"))
+    #expect(
+      slug.hasSuffix("-sweep"), "the folder is named after the meeting title, not a fake summary")
     let files = try FileManager.default.contentsOfDirectory(
       atPath: meetings.appendingPathComponent(slug).path
     ).sorted()
@@ -245,6 +251,10 @@ import Testing
         "\(slug) - Tasks.md", "\(slug) - Transcript.md", "\(slug).md", "audio.wav", "meeting.json",
         "transcript.vtt",
       ], "six files: the WAV decoder's mixdown is copied as audio.wav")
+    let note = try String(
+      contentsOf: meetings.appendingPathComponent(slug).appendingPathComponent("\(slug).md"),
+      encoding: .utf8)
+    #expect(note.contains("No summary."), "a skipped summary is said, not left blank")
     let json = try Data(
       contentsOf: meetings.appendingPathComponent(slug).appendingPathComponent("meeting.json"))
     #expect(try StenoJSON.decode(MeetingExport.self, from: json).meeting.id.uuidString == meetingID)
@@ -326,8 +336,8 @@ import Testing
   }
 
   /// `steno process` prints one progress line per event to standard error,
-  /// `stage percent remaining`, and keeps the meeting id alone on standard
-  /// output.
+  /// `stage percent remaining`, then (without an LLM endpoint) the skipped
+  /// summary note, and keeps the meeting id alone on standard output.
   @Test func processReportsProgressOnStderr() throws {
     let home = try Fixtures.temporaryDirectory("steno-home")
     defer { try? FileManager.default.removeItem(at: home) }
@@ -346,7 +356,10 @@ import Testing
         UUID(uuidString: result.stdout.trimmingCharacters(in: .whitespacesAndNewlines)) != nil,
         "stdout is the meeting id alone: \(result.stdout)")
       #expect(result.stdout.split(separator: "\n").count == 1)
-      let lines = result.stderr.split(separator: "\n").map(String.init)
+      var lines = result.stderr.split(separator: "\n").map(String.init)
+      #expect(
+        lines.popLast() == "summary skipped: no LLM endpoint configured",
+        "the note follows the last progress line: \(result.stderr)")
       #expect(lines.count == expected, "\(result.stderr)")
       var percents: [Int] = []
       for line in lines {

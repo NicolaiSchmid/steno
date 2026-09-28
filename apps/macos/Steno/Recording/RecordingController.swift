@@ -54,6 +54,10 @@ final class RecordingController {
   private(set) var lastStatistics: CaptureStatistics?
   private(set) var lastError: String?
   private(set) var lastWarning: String?
+  /// The required permissions the last `refreshPermissions()` found
+  /// `.denied`, in `PermissionKind.allCases` order. A report, not a guard:
+  /// `start(mode:)` does not read it.
+  private(set) var deniedPermissions: [PermissionKind] = []
 
   private let environment: AppEnvironment
   private var active: Active?
@@ -75,6 +79,10 @@ final class RecordingController {
 
   /// The status line for the state.
   var statusText: String { recording.label }
+
+  /// The meeting row of the live recording: set from `.recording` until the
+  /// stop has handed the row over, nil when idle or while starting.
+  var activeMeetingID: UUID? { active?.meetingID }
 
   var elapsed: TimeInterval? {
     if case .recording(let since) = recording { return environment.now().timeIntervalSince(since) }
@@ -139,7 +147,9 @@ final class RecordingController {
       lastStatistics = result.statistics
       try await environment.makeLocalIntake().complete(
         meetingID: active.meetingID,
-        result: RecordingResult(asset: result.asset, duration: result.statistics.duration))
+        result: RecordingResult(
+          asset: result.asset, duration: result.statistics.duration,
+          endReason: result.statistics.endedOnDeviceLoss ? .deviceLost : .manual))
       if active.mode == .call, result.statistics.systemLaneSilent {
         lastWarning = "The system audio lane stayed silent. Check the system audio permission."
       }
@@ -203,6 +213,21 @@ final class RecordingController {
   private func resolveCalendarEvent(at now: Date) async -> CalendarEvent? {
     guard let events = try? await environment.calendar.events(on: now) else { return nil }
     return CalendarEvent.match(in: events, now: now)
+  }
+
+  // MARK: - Permissions
+
+  /// Re-reads the required permissions and records the denied ones. Only
+  /// `.denied` counts: `.unknown` means macOS has not asked yet and the
+  /// first recording will.
+  func refreshPermissions() async {
+    var denied: [PermissionKind] = []
+    for kind in PermissionKind.allCases where kind.isRequired {
+      if await environment.permissions.state(of: kind) == .denied {
+        denied.append(kind)
+      }
+    }
+    deniedPermissions = denied
   }
 
   // MARK: - Messages

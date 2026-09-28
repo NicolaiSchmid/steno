@@ -197,7 +197,10 @@ resolves. Created when missing with frontmatter (`steno_person_id`, `email?`, `t
 `# Name`. The app owns only the region between `<!-- steno:meetings:start -->` and `<!--
 steno:meetings:end -->` (appended when missing): one line per meeting, newest first, `- 2026-09-24
 [[<folder slug>|<title>]] %%steno:<meeting uuid>%%`; the line for this uuid is replaced or inserted,
-bytes outside the markers copied unchanged. Renamed people get a new page; the old one stays.
+bytes outside the markers copied unchanged. Renamed people get a new page; the old one stays on disk
+and in the receipt, but a page the previous receipt lists that a re-export no longer renders (a
+renamed person, a speaker reassigned to somebody else) loses this meeting's line
+(`ManagedBlock.remove`; Decision 13 of `2026-09-28-inline-speaker-assignment.md`).
 
 Audio. `AudioAsset.mixdownURL` copied byte for byte to `audio.m4a` when `includeAudio` is on; a nil
 `mixdownURL` yields `.audioUnavailable` after all other files are written.

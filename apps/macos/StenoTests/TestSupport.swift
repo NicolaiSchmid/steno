@@ -27,9 +27,13 @@ enum TestSupport {
       makeSpeechEngine: makeSpeechEngine, makeDiarizer: makeDiarizer, calendar: calendar)
   }
 
-  /// A capture session over the synthetic backend that reports device loss
-  /// after `loseDeviceAfter` seconds of audio (an unplugged microphone).
-  static func deviceLosingCaptureSession(after loseDeviceAfter: TimeInterval)
+  /// A capture session over a synthetic backend whose device changes after
+  /// `changeDeviceAfter` seconds of audio and never comes back: every restart
+  /// fails, so the session ends in `.deviceLost` after the backoff ladder
+  /// (about 4 s of wall time on the session's default clock). Each session
+  /// gets its own backend, so a second recording loses its device the same
+  /// way.
+  static func deviceLosingCaptureSession(after changeDeviceAfter: TimeInterval)
     -> AppEnvironment.MakeCaptureSession
   {
     { configuration in
@@ -37,7 +41,8 @@ enum TestSupport {
         configuration: configuration,
         backend: SyntheticCaptureBackend(
           lanes: configuration.lanes, tone: [.mic: 440, .system: 660, .mixed: 440],
-          seconds: 30, loseDeviceAfter: loseDeviceAfter))
+          seconds: 30, changeDeviceAfter: changeDeviceAfter,
+          restartsThatFail: CaptureSession.restartAttempts))
     }
   }
 
@@ -68,6 +73,13 @@ enum TestSupport {
     URL(fileURLWithPath: #filePath)
       .deletingLastPathComponent()  // StenoTests
       .deletingLastPathComponent()  // macos
+  }
+
+  /// The built `Steno.app` beside the test bundle. The hostless tests read
+  /// its Info.plist and resources through this path instead of `Bundle.main`.
+  static var builtApp: URL {
+    Bundle(for: BundleToken.self).bundleURL.deletingLastPathComponent()
+      .appendingPathComponent("Steno.app", isDirectory: true)
   }
 
   /// The committed test identity, imported to memory only (no keychain).
@@ -144,3 +156,6 @@ final class GatedCalendar: CalendarProviding {
     return []
   }
 }
+
+/// `Bundle(for:)` needs a class; `TestSupport` is an enum.
+private final class BundleToken {}

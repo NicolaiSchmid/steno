@@ -2,17 +2,21 @@ import Foundation
 
 /// Everything the pipeline needs, and the only injection axis: the app and
 /// the CLI pass real implementations, tests pass the fakes in `Testing/`.
-/// `events` defaults to `store.events`, so the store's `deleted` and the
-/// pipeline's `progress` reach one subscriber. `now` stamps rows; `clock`
-/// measures stage durations for the learned rates, and tests pass a
-/// `ManualClock`.
+/// `cleaner` and `summarizer` are nil when no LLM endpoint is configured:
+/// the cleanup and summarize stages then post their progress and write
+/// nothing, so the meeting lands `.ready` with `summary == nil` instead of
+/// a fabricated summary (and `llmUsage == nil` when both are nil; `summary`
+/// is the one signal that the summary was skipped). `events` defaults to
+/// `store.events`, so the store's `deleted` and the pipeline's `progress`
+/// reach one subscriber. `now` stamps rows; `clock` measures stage
+/// durations for the learned rates, and tests pass a `ManualClock`.
 public struct PipelineDependencies: Sendable {
   public let decoder: any AudioDecoder
   public let speechEngine: any SpeechEngine
   public let diarizer: any Diarizer
   public let speakerMemory: any SpeakerMemory
-  public let cleaner: any TranscriptCleaner
-  public let summarizer: any MeetingSummarizer
+  public let cleaner: (any TranscriptCleaner)?
+  public let summarizer: (any MeetingSummarizer)?
   public let dispatcher: any DeliveryDispatcher
   public let store: MeetingStore
   public let settings: SettingsStore
@@ -25,8 +29,8 @@ public struct PipelineDependencies: Sendable {
     speechEngine: any SpeechEngine,
     diarizer: any Diarizer,
     speakerMemory: any SpeakerMemory,
-    cleaner: any TranscriptCleaner,
-    summarizer: any MeetingSummarizer,
+    cleaner: (any TranscriptCleaner)? = nil,
+    summarizer: (any MeetingSummarizer)? = nil,
     dispatcher: any DeliveryDispatcher,
     store: MeetingStore,
     settings: SettingsStore,
@@ -215,7 +219,10 @@ public actor ProcessingPipeline {
           meeting: current, lanes: transcription.lanes, diarization: diarized)
         let cleaned = try await cleanup(
           meeting: current, segments: merged.segments, speakers: merged.speakers)
-        current.llmUsage = (current.llmUsage ?? .zero) + cleaned.usage
+        // This run's usage starts from the cleanup pass (nil when it was
+        // skipped) and the summarize stage adds its own; whatever an earlier
+        // run wrote is replaced, never added to.
+        current.llmUsage = cleaned.usage
         current = try await summarize(
           meeting: current, segments: cleaned.segments, speakers: merged.speakers)
         persisted = try await persist(meeting: current, asset: asset)
@@ -234,11 +241,17 @@ public actor ProcessingPipeline {
 
   /// Summarize again with another template, then deliver. A failure is
   /// thrown to the caller and leaves the meeting's state, summary and
-  /// deliveries as they were; only `process` marks `.failed`. Progress is
+  /// deliveries as they were; only `process` marks `.failed`. Without a
+  /// summarizer there is nothing to run and the call throws instead of
+  /// writing a placeholder. An audio asset whose expiry was deferred by a
+  /// failed delivery is stamped once this delivery succeeds. Progress is
   /// posted over a run of `[.summarize, .deliver]`.
   public func rerunSummary(meetingID: UUID, templateID: String) async throws {
     guard let meeting = try await store.meeting(id: meetingID) else {
       throw PipelineFailure(stage: .summarize, reason: "meeting \(meetingID) not found")
+    }
+    guard dependencies.summarizer != nil else {
+      throw PipelineFailure(stage: .summarize, reason: "no LLM endpoint is configured")
     }
     try await exclusively(meetingID, stage: .summarize) {
       let export = try await attributing(.summarize) {
@@ -256,11 +269,13 @@ public actor ProcessingPipeline {
       _ = try await summarize(
         meeting: current, segments: export.segments, speakers: export.speakers)
       await deliver(meetingID: meetingID)
+      try await stampDeferredRetention(meetingID: meetingID)
     }
   }
 
-  /// Deliver only: the one re-export entry point. Progress is posted over a
-  /// run of `[.deliver]`.
+  /// Deliver only: the one re-export entry point. Stamps an audio asset
+  /// whose expiry was deferred by a failed delivery once this one succeeds.
+  /// Progress is posted over a run of `[.deliver]`.
   public func redeliver(meetingID: UUID) async throws {
     guard let meeting = try await store.meeting(id: meetingID) else {
       throw PipelineFailure(stage: .deliver, reason: "meeting \(meetingID) not found")
@@ -272,6 +287,7 @@ public actor ProcessingPipeline {
           stages: [.deliver], settings: dependencies.settings.load())
       }
       await deliver(meetingID: meetingID)
+      try await stampDeferredRetention(meetingID: meetingID)
     }
   }
 

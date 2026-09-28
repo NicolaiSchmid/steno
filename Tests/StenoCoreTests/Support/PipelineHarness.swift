@@ -4,7 +4,9 @@ import Testing
 @testable import StenoCore
 
 /// A pipeline over an in-memory store, temp audio folder and every fake,
-/// with hooks to swap single dependencies.
+/// with hooks to swap single dependencies. `cleaner` and `summarizer` are
+/// optional the way `PipelineDependencies` has them: pass nil for the
+/// "no LLM endpoint" case.
 struct PipelineHarness {
   let directory: URL
   let store: MeetingStore
@@ -14,8 +16,8 @@ struct PipelineHarness {
   let engine: FakeSpeechEngine
   let diarizer: FakeDiarizer
   let memory: InMemorySpeakerMemory
-  let cleaner: any TranscriptCleaner
-  let summarizer: FakeSummarizer
+  let cleaner: (any TranscriptCleaner)?
+  let summarizer: FakeSummarizer?
   let destination: FakeDestination
   let dispatcher: FakeDeliveryDispatcher
   let pipeline: ProcessingPipeline
@@ -31,9 +33,11 @@ struct PipelineHarness {
     engine: FakeSpeechEngine = FakeSpeechEngine(),
     diarizer: FakeDiarizer = FakeDiarizer(),
     memory: InMemorySpeakerMemory = InMemorySpeakerMemory(people: SampleData.persons()),
-    cleaner: any TranscriptCleaner = PassthroughCleaner(),
-    summarizer: FakeSummarizer = FakeSummarizer(),
+    cleaner: (any TranscriptCleaner)? = PassthroughCleaner(),
+    summarizer: FakeSummarizer? = FakeSummarizer(),
     retention: AudioRetention = .keepDays(30),
+    failDeliveriesUntil: Int = 0,
+    destinations: [any Destination]? = nil,
     sharedStore: MeetingStore? = nil,
     clock: ManualClock = ManualClock()
   ) async throws {
@@ -55,10 +59,13 @@ struct PipelineHarness {
     self.cleaner = cleaner
     self.summarizer = summarizer
     self.clock = clock
+    // `failUntil` counts on the destination's call log, so a value type
+    // built once here can still recover after the fact.
     destination = FakeDestination(
-      root: directory.appendingPathComponent("vault", isDirectory: true))
+      root: directory.appendingPathComponent("vault", isDirectory: true),
+      failUntil: failDeliveriesUntil)
     dispatcher = FakeDeliveryDispatcher(
-      store: store, destinations: [destination], now: { Self.now })
+      store: store, destinations: destinations ?? [destination], now: { Self.now })
     pipeline = ProcessingPipeline(
       dependencies: PipelineDependencies(
         decoder: decoder, speechEngine: engine, diarizer: diarizer, speakerMemory: memory,

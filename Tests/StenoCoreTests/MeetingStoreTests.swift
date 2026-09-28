@@ -31,6 +31,37 @@ import Testing
     #expect(try await store.meeting(id: SampleData.meetingID)?.title == "Renamed")
   }
 
+  /// The user's rename stores the trimmed title as `.user`, so no later
+  /// default or model title is mistaken for it; a blank rename changes
+  /// nothing; the pipeline's own title write carries its origin.
+  @Test func renameStoresTheUserOriginAndProcessingResultsCarryTheirs() async throws {
+    let store = try MeetingStore.inMemory()
+    try await store.save(SampleData.meeting())
+    let later = SampleData.updatedAt.addingTimeInterval(60)
+    try await store.rename(meetingID: SampleData.meetingID, title: "  Neuer Titel ", now: later)
+    let renamed = try #require(try await store.meeting(id: SampleData.meetingID))
+    #expect(renamed.title == "Neuer Titel")
+    #expect(renamed.titleOrigin == .user)
+    #expect(renamed.updatedAt == later)
+
+    try await store.rename(meetingID: SampleData.meetingID, title: " \n", now: later + 1)
+    #expect(try await store.meeting(id: SampleData.meetingID) == renamed, "blank: untouched")
+    await #expect(throws: MeetingStoreError.meetingNotFound(SampleData.uuid(999))) {
+      try await store.rename(meetingID: SampleData.uuid(999), title: "x", now: later)
+    }
+
+    var results = renamed
+    results.title = "Vom Modell"
+    results.titleOrigin = .summary
+    results.endReason = .quit
+    try await store.replaceTranscript(results, segments: [], speakers: [])
+    let processed = try #require(try await store.meeting(id: SampleData.meetingID))
+    #expect(processed.title == "Vom Modell")
+    #expect(processed.titleOrigin == .summary)
+    #expect(
+      processed.endReason == nil, "the end reason is the recorder's column, not the pipeline's")
+  }
+
   @Test func meetingsAreNewestFirstWithPaging() async throws {
     let store = try MeetingStore.inMemory()
     for n in 1...5 {
@@ -163,6 +194,24 @@ import Testing
     #expect(try await store.expiredAssets(now: .distantFuture).isEmpty)
   }
 
+  @Test func keepForeverSetsTheRuleAndClearsTheStampInOneWrite() async throws {
+    let store = try MeetingStore.inMemory()
+    try await store.save(SampleData.meeting())
+    let asset = SampleData.audioAsset()
+    try await store.save(asset)
+    #expect(try await store.assets() == [asset])
+    #expect(asset.expiresAt != nil)
+
+    try await store.keepForever(assetIDs: [])
+    #expect(try await store.asset(id: asset.id) == asset, "an empty list writes nothing")
+    try await store.keepForever(assetIDs: [asset.id, SampleData.uuid(999)])
+    let kept = try #require(try await store.asset(id: asset.id))
+    #expect(kept.retention == .keepForever)
+    #expect(kept.expiresAt == nil)
+    #expect(kept.url == asset.url && kept.mixdownURL == asset.mixdownURL, "URLs untouched")
+    #expect(try await store.expiredAssets(now: .distantFuture).isEmpty)
+  }
+
   @Test func deliveriesAreOneRowPerDestination() async throws {
     let store = try MeetingStore.inMemory()
     try await store.save(SampleData.meeting())
@@ -178,6 +227,24 @@ import Testing
       meetingID: SampleData.meetingID, destinationID: "another", status: .pending)
     try await store.save(other)
     #expect(try await store.deliveries(meetingID: SampleData.meetingID).count == 2)
+  }
+
+  /// The one predicate behind the retention guard: `allSatisfy` on no rows
+  /// is true (a meeting without destinations is stamped at once), and any
+  /// row that is not `.delivered` holds the stamp back.
+  @Test func allDeliveredIsTrueForNoRowsAndOnlyWhenEveryRowIsDelivered() {
+    var delivered = SampleData.delivery()
+    delivered.status = .delivered
+    var pending = SampleData.delivery()
+    pending.status = .pending
+    var failed = SampleData.delivery()
+    failed.status = .failed("vault missing")
+    #expect([Delivery]().allDelivered)
+    #expect([delivered].allDelivered)
+    #expect(![pending].allDelivered)
+    #expect(![failed].allDelivered)
+    #expect(![delivered, failed].allDelivered)
+    #expect(![failed, delivered].allDelivered)
   }
 
   @Test func observeMeetingsYieldsAgainAfterASave() async throws {
@@ -206,7 +273,7 @@ import Testing
     #expect(try await iterator.next() == [SampleData.delivery()])
   }
 
-  @Test func mergePersonsRepointsAndAverages() async throws {
+  @Test func mergePersonsRepointsAndRefreshesTheKeptVoice() async throws {
     let store = try await Self.populated()
     var task = SampleData.tasks()[0]
     task.assigneePersonID = SampleData.personNicolaiID
@@ -219,12 +286,10 @@ import Testing
     let persons = try await store.persons()
     #expect(persons.map(\.id) == [SampleData.personJeromeID])
     let kept = try #require(persons.first)
-    #expect(kept.sampleCount == 4)
-    let embedding = try #require(kept.embedding)
-    // Jérôme (axis 1, weight 1) with Nicolai (axis 0, weight 3), renormalised.
-    #expect(abs(embedding.values[0] - 0.9487) < 0.001)
-    #expect(abs(embedding.values[1] - 0.3162) < 0.001)
-    #expect(abs(embedding.magnitude - 1) < 0.0001)
+    // Speaker 1 (axis 0) is now confirmed to Jérôme; Speaker 2 is only
+    // suggested, so it does not count.
+    #expect(kept.sampleCount == 1)
+    #expect(kept.embedding == SampleData.embedding(axis: 0))
     #expect(kept.email == "nicolai@example.com")
 
     let export = try await store.export(meetingID: SampleData.meetingID)
@@ -267,34 +332,237 @@ import Testing
     }
   }
 
-  @Test func confirmSetsConfirmedEnrolsOnceAndRemovesTheClip() async throws {
-    let store = try await Self.populated()
-    let directory = try Fixtures.temporaryDirectory()
-    defer { try? FileManager.default.removeItem(at: directory) }
+  /// A store whose asset points at a master file that exists, so confirm
+  /// keeps the clips; the clip file itself for Speaker 2.
+  static func populatedWithAudio(in directory: URL) async throws -> (MeetingStore, URL) {
+    let store = try await populated()
+    let master = directory.appendingPathComponent("master.caf")
+    try Data([9, 9, 9]).write(to: master)
+    var asset = SampleData.audioAsset()
+    asset.url = master
+    try await store.save(asset)
     let clip = directory.appendingPathComponent("speaker-two.wav")
     try Data([1, 2, 3]).write(to: clip)
+    return (store, clip)
+  }
+
+  static let anna = Person(
+    id: SampleData.uuid(12), displayName: "Anna", createdAt: SampleData.createdAt)
+  static let bea = Person(
+    id: SampleData.uuid(13), displayName: "Bea", createdAt: SampleData.createdAt)
+
+  @Test func confirmSetsConfirmedRefreshesTheVoiceAndKeepsTheClip() async throws {
+    let directory = try Fixtures.temporaryDirectory()
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let (store, clip) = try await Self.populatedWithAudio(in: directory)
     var speakers = SampleData.speakers()
     speakers[1].assignment = .unknown
     speakers[1].sampleClipURL = clip
     try await store.replaceTranscript(
       SampleData.meeting(), segments: SampleData.segments(), speakers: speakers)
-    let memory = InMemorySpeakerMemory(people: SampleData.persons())
-    let newPerson = Person(
-      id: SampleData.uuid(12), displayName: "Anna", createdAt: SampleData.createdAt)
 
-    try await store.confirm(speakerID: SampleData.speakerTwoID, person: newPerson, memory: memory)
+    try await store.confirm(speakerID: SampleData.speakerTwoID, person: Self.anna)
 
     let speaker = try #require(try await store.speakers(meetingID: SampleData.meetingID).last)
-    #expect(speaker.assignment == .confirmed(personID: newPerson.id))
-    #expect(speaker.sampleClipURL == nil)
-    #expect(!FileManager.default.fileExists(atPath: clip.path))
-    #expect(try await store.person(id: newPerson.id) == newPerson)
-    let enrolments = await memory.enrolments
-    #expect(enrolments == [.init(embedding: SampleData.embedding(axis: 1), personID: newPerson.id)])
+    #expect(speaker.assignment == .confirmed(personID: Self.anna.id))
+    #expect(speaker.sampleClipURL == clip, "the clip stays while the recording exists")
+    #expect(FileManager.default.fileExists(atPath: clip.path))
+    let stored = try #require(try await store.person(id: Self.anna.id))
+    #expect(stored.displayName == "Anna")
+    #expect(stored.sampleCount == 1)
+    #expect(stored.embedding == SampleData.embedding(axis: 1), "the voice is the speaker's")
     #expect(
       try await store.export(meetingID: SampleData.meetingID).persons.map(\.displayName) == [
         "Anna", "Jérôme", "Nicolai",
       ])
+  }
+
+  @Test func clearSampleClipsNullsOnlyTheNamedRows() async throws {
+    let store = try await Self.populated()
+    var speakers = SampleData.speakers()
+    speakers[0].sampleClipURL = URL(fileURLWithPath: "/tmp/steno/named.wav")
+    try await store.replaceTranscript(
+      SampleData.meeting(), segments: SampleData.segments(), speakers: speakers)
+
+    try await store.clearSampleClips(meetingID: SampleData.uuid(2), speakerIDs: [speakers[0].id])
+    #expect(
+      try await store.speakers(meetingID: SampleData.meetingID) == speakers,
+      "another meeting's id touches nothing")
+    try await store.clearSampleClips(meetingID: SampleData.meetingID, speakerIDs: [])
+    #expect(try await store.speakers(meetingID: SampleData.meetingID) == speakers)
+
+    try await store.clearSampleClips(meetingID: SampleData.meetingID, speakerIDs: [speakers[0].id])
+    var expected = speakers
+    expected[0].sampleClipURL = nil
+    let after = try await store.speakers(meetingID: SampleData.meetingID)
+    #expect(after == expected, "only the clip column of the named row changes")
+    #expect(after[1].sampleClipURL == speakers[1].sampleClipURL)
+    #expect(
+      try await store.export(meetingID: SampleData.meetingID).segments == SampleData.segments())
+  }
+
+  @Test func confirmTwiceWithTheSamePersonIsANoOp() async throws {
+    let store = try await Self.populated()
+    try await store.confirm(speakerID: SampleData.speakerTwoID, person: Self.anna)
+    let once = try await store.person(id: Self.anna.id)
+    let speakersOnce = try await store.speakers(meetingID: SampleData.meetingID)
+
+    try await store.confirm(speakerID: SampleData.speakerTwoID, person: Self.anna)
+
+    #expect(try await store.person(id: Self.anna.id) == once)
+    #expect(try await store.speakers(meetingID: SampleData.meetingID) == speakersOnce)
+    #expect(once?.sampleCount == 1)
+  }
+
+  /// Anna already has a voice from another meeting; confirming Speaker 2 to
+  /// her and then to Bea leaves Anna exactly as she was.
+  @Test func confirmAThenBRestoresAExactly() async throws {
+    let store = try await Self.populated()
+    var earlier = SampleData.meeting()
+    earlier.id = SampleData.uuid(2)
+    earlier.startedAt = SampleData.startedAt.addingTimeInterval(-86_400)
+    try await store.save(earlier)
+    try await store.save(Self.anna)
+    let annasVoice = Speaker(
+      id: SampleData.uuid(30), meetingID: earlier.id, clusterLabel: "Speaker 1",
+      assignment: .confirmed(personID: Self.anna.id), embedding: SampleData.embedding(axis: 5),
+      clusterConfidence: 0.8)
+    try await store.replaceTranscript(earlier, segments: [], speakers: [annasVoice])
+    try await store.confirm(speakerID: annasVoice.id, person: Self.anna)  // no-op; voice as seeded
+    try await store.mergePersons(keep: Self.anna.id, remove: Self.anna.id)
+    // Force one refresh so `before` is the recomputed voice.
+    try await store.confirm(speakerID: SampleData.speakerTwoID, person: Self.bea)
+    try await store.confirm(speakerID: SampleData.speakerTwoID, person: Self.anna)
+    let mixed = try #require(try await store.person(id: Self.anna.id))
+    #expect(mixed.sampleCount == 2)
+    let values = try #require(mixed.embedding?.values)
+    #expect(abs(values[1] - values[5]) < 1e-6, "axis 1 and axis 5 at equal weight")
+
+    try await store.confirm(speakerID: SampleData.speakerTwoID, person: Self.bea)
+
+    let restored = try #require(try await store.person(id: Self.anna.id))
+    #expect(restored.sampleCount == 1)
+    #expect(restored.embedding == SampleData.embedding(axis: 5))
+    let bea = try #require(try await store.person(id: Self.bea.id))
+    #expect(bea.sampleCount == 1)
+    #expect(bea.embedding == SampleData.embedding(axis: 1))
+    #expect(
+      try await store.speakers(meetingID: SampleData.meetingID).last?.assignment
+        == .confirmed(personID: Self.bea.id))
+  }
+
+  @Test func confirmingAwayFromASuggestionLeavesTheSuggestedPersonUntouched() async throws {
+    let store = try await Self.populated()
+    try await store.confirm(speakerID: SampleData.speakerTwoID, person: Self.anna)
+    #expect(try await store.person(id: SampleData.personJeromeID) == SampleData.persons()[0])
+  }
+
+  @Test func confirmIntoAPersonOwningAnotherSpeakerMerges() async throws {
+    let store = try await Self.populated()
+
+    try await store.confirm(speakerID: SampleData.speakerTwoID, person: SampleData.persons()[1])
+
+    let export = try await store.export(meetingID: SampleData.meetingID)
+    #expect(export.speakers.map(\.id) == [SampleData.speakerOneID], "Speaker 2 merged into 1")
+    #expect(
+      export.segments.compactMap(\.speakerID) == [SampleData.speakerOneID, SampleData.speakerOneID])
+    let nicolai = try #require(export.person(id: SampleData.personNicolaiID))
+    #expect(nicolai.sampleCount == 1, "one merged cluster")
+    let values = try #require(nicolai.embedding?.values)
+    #expect(abs(values[0] - 0.7071) < 0.001)
+    #expect(abs(values[1] - 0.7071) < 0.001)
+  }
+
+  @Test func confirmDeletesTheClipWhenTheAudioIsGone() async throws {
+    let store = try await Self.populated()  // the sample asset's master does not exist
+    let directory = try Fixtures.temporaryDirectory()
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let clip = directory.appendingPathComponent("speaker-two.wav")
+    try Data([1, 2, 3]).write(to: clip)
+    var speakers = SampleData.speakers()
+    speakers[1].sampleClipURL = clip
+    try await store.replaceTranscript(
+      SampleData.meeting(), segments: SampleData.segments(), speakers: speakers)
+
+    try await store.confirm(speakerID: SampleData.speakerTwoID, person: Self.anna)
+
+    let speaker = try #require(try await store.speakers(meetingID: SampleData.meetingID).last)
+    #expect(speaker.sampleClipURL == nil)
+    #expect(!FileManager.default.fileExists(atPath: clip.path))
+  }
+
+  @Test func mergeIntoAnUnknownTargetKeepsTheVoice() async throws {
+    let store = try await Self.populated()
+    var speakers = SampleData.speakers()
+    speakers[0].assignment = .unknown
+    speakers[0].embedding = nil
+    speakers[1].assignment = .confirmed(personID: SampleData.personJeromeID)
+    try await store.replaceTranscript(
+      SampleData.meeting(), segments: SampleData.segments(), speakers: speakers)
+
+    try await store.mergeSpeakers(
+      SampleData.speakerTwoID, into: SampleData.speakerOneID, meetingID: SampleData.meetingID)
+
+    let kept = try #require(try await store.speakers(meetingID: SampleData.meetingID).first)
+    #expect(kept.assignment == .confirmed(personID: SampleData.personJeromeID))
+    let jerome = try #require(try await store.person(id: SampleData.personJeromeID))
+    #expect(jerome.sampleCount == 1)
+    #expect(jerome.embedding == SampleData.embedding(axis: 1))
+  }
+
+  /// Fifty-one confirmed speakers over fifty-one meetings plus one whose
+  /// embedding has the wrong dimension: the voice is the newest fifty valid
+  /// ones, so the oldest (axis 7) drops out and the odd one is skipped.
+  @Test func refreshVoiceSkipsAMismatchedDimensionAndCapsAtFifty() async throws {
+    let store = try MeetingStore.inMemory()
+    try await store.save(Self.anna)
+    var newest: Speaker?
+    for index in 0..<52 {
+      var meeting = SampleData.meeting()
+      meeting.id = SampleData.uuid(100 + index)
+      meeting.startedAt = SampleData.startedAt.addingTimeInterval(TimeInterval(index) * 60)
+      try await store.save(meeting)
+      let embedding: Embedding =
+        switch index {
+        case 0: SampleData.embedding(axis: 7)
+        case 51: Embedding([1, 0, 0])
+        default: SampleData.embedding(axis: 0)
+        }
+      let speaker = Speaker(
+        id: SampleData.uuid(200 + index), meetingID: meeting.id, clusterLabel: "Speaker 1",
+        assignment: index == 51 ? .unknown : .confirmed(personID: Self.anna.id),
+        embedding: embedding, clusterConfidence: 0.9)
+      try await store.replaceTranscript(meeting, segments: [], speakers: [speaker])
+      if index == 51 { newest = speaker }
+    }
+
+    try await store.confirm(speakerID: try #require(newest).id, person: Self.anna)
+
+    let anna = try #require(try await store.person(id: Self.anna.id))
+    #expect(anna.sampleCount == 50)
+    let values = try #require(anna.embedding?.values)
+    #expect(values[7] == 0, "the fifty-first newest sample is outside the window")
+    #expect(abs(values[0] - 1) < 1e-6)
+  }
+
+  @Test func recentPersonsOrdersByLatestConfirmedMeeting() async throws {
+    let store = try await Self.populated()
+    #expect(
+      try await store.recentPersons().map(\.displayName) == ["Nicolai"],
+      "Jérôme is only suggested")
+
+    var later = SampleData.meeting()
+    later.id = SampleData.uuid(2)
+    later.startedAt = SampleData.startedAt.addingTimeInterval(3600)
+    try await store.save(later)
+    let speaker = Speaker(
+      id: SampleData.uuid(30), meetingID: later.id, clusterLabel: "Speaker 1",
+      assignment: .confirmed(personID: SampleData.personJeromeID),
+      embedding: SampleData.embedding(axis: 1), clusterConfidence: 0.9)
+    try await store.replaceTranscript(later, segments: [], speakers: [speaker])
+
+    #expect(try await store.recentPersons().map(\.displayName) == ["Jérôme", "Nicolai"])
+    #expect(try await store.persons().map(\.displayName) == ["Jérôme", "Nicolai"], "by name")
   }
 
   @Test func handoverRowsRoundTrip() async throws {
@@ -413,7 +681,7 @@ import Testing
     #expect(try await store.speakers(meetingID: other.id) == [stranger])
   }
 
-  @Test func confirmKeepsAnExistingPersonAndSkipsEnrolWithoutAnEmbedding() async throws {
+  @Test func confirmKeepsAnExistingPersonAndLeavesTheVoiceWithoutAnEmbedding() async throws {
     let store = try await Self.populated()
     var speakers = SampleData.speakers()
     speakers[1].assignment = .unknown
@@ -427,36 +695,64 @@ import Testing
     speakers.append(bare)
     try await store.replaceTranscript(
       SampleData.meeting(), segments: SampleData.segments(), speakers: speakers)
-    let memory = InMemorySpeakerMemory(people: SampleData.persons())
     var renamed = SampleData.persons()[1]
     renamed.displayName = "Somebody Else"
     renamed.email = nil
 
-    try await store.confirm(speakerID: SampleData.speakerTwoID, person: renamed, memory: memory)
+    try await store.confirm(speakerID: SampleData.speakerTwoID, person: renamed)
 
-    #expect(
-      try await store.person(id: SampleData.personNicolaiID) == SampleData.persons()[1],
-      "an existing person row is not overwritten")
+    let nicolai = try #require(try await store.person(id: SampleData.personNicolaiID))
+    #expect(nicolai.displayName == "Nicolai", "an existing person row is not overwritten")
+    #expect(nicolai.email == "nicolai@example.com")
+    // Nicolai already owned Speaker 1, so Speaker 2 merged into it: one
+    // cluster with the averaged embedding is his voice now.
+    #expect(nicolai.sampleCount == 1)
+    let values = try #require(nicolai.embedding?.values)
+    #expect(abs(values[0] - values[1]) < 1e-6)
     #expect(try await store.persons().count == 2)
     #expect(
       try await store.speakers(meetingID: SampleData.meetingID).map(\.assignment) == [
-        .confirmed(personID: SampleData.personNicolaiID),
         .confirmed(personID: SampleData.personNicolaiID), .unknown,
       ])
-    #expect(
-      await memory.enrolments == [
-        .init(embedding: SampleData.embedding(axis: 1), personID: SampleData.personNicolaiID)
-      ])
 
-    try await store.confirm(speakerID: bare.id, person: SampleData.persons()[0], memory: memory)
-    #expect(await memory.enrolments.count == 1, "no embedding, nothing to enrol")
+    try await store.confirm(speakerID: bare.id, person: SampleData.persons()[0])
+    let jerome = try #require(try await store.person(id: SampleData.personJeromeID))
+    #expect(jerome.embedding == nil, "no confirmed speaker with an embedding, no voice")
+    #expect(jerome.sampleCount == 0)
     #expect(
       try await store.speakers(meetingID: SampleData.meetingID).last?.assignment
         == .confirmed(personID: SampleData.personJeromeID))
     await #expect(throws: MeetingStoreError.speakerNotFound(SampleData.uuid(999))) {
-      try await store.confirm(speakerID: SampleData.uuid(999), person: renamed, memory: memory)
+      try await store.confirm(speakerID: SampleData.uuid(999), person: renamed)
     }
-    #expect(await memory.enrolments.count == 1)
+  }
+
+  @Test func resolvePersonReusesJeromeForJérôme() async throws {
+    let store = try await Self.populated()
+    let found = try await store.resolvePerson(named: "  jerome ", now: SampleData.createdAt)
+    #expect(found == SampleData.persons()[0])
+    let exact = try await store.resolvePerson(named: "Nicolai", now: SampleData.createdAt)
+    #expect(exact.id == SampleData.personNicolaiID)
+    #expect(try await store.persons().count == 2, "nothing is written")
+  }
+
+  @Test func resolvePersonCreatesWithEmail() async throws {
+    let store = try await Self.populated()
+    let created = try await store.resolvePerson(
+      named: " Maya ", email: "maya@example.com", now: SampleData.createdAt)
+    #expect(created.displayName == "Maya")
+    #expect(created.email == "maya@example.com")
+    #expect(created.sampleCount == 0)
+    #expect(created.embedding == nil)
+    #expect(created.createdAt == SampleData.createdAt)
+    #expect(try await store.person(id: created.id) == nil, "unsaved until confirm")
+  }
+
+  @Test func resolvePersonIgnoresBlank() async throws {
+    let store = try await Self.populated()
+    await #expect(throws: MeetingStoreError.blankPersonName) {
+      try await store.resolvePerson(named: " \n ", now: SampleData.createdAt)
+    }
   }
 
   @Test func transcriptAndSummaryWritesNeedTheMeeting() async throws {

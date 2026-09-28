@@ -74,6 +74,7 @@ a Debug build read that feed instead of `SUFeedURL`. Serve `dist/` with
 | `Steno/AppEnvironment.swift` | composition root: `live()` and `preview()` |
 | `Steno/AppController.swift` | the running object graph over one environment |
 | `Steno/Design/` | `Theme` (tokens mirroring `mobile/global.css`), `Motion`, shared controls |
+| `Steno/Resources/` | `AppIcon.svg`, the icon's source of truth, and `Assets.xcassets` with the `AppIcon` set it renders to |
 | `Steno/MenuBar/` | recording, queue, launch at login |
 | `Steno/Main/` | meeting list, detail with Summary, Transcript, Tasks, Scratchpad |
 | `Steno/Speakers/` | the speaker review sheet and clip player |
@@ -83,7 +84,19 @@ a Debug build read that feed instead of `SUFeedURL`. Serve `dist/` with
 | `Steno/Services/` | the four app protocols over system frameworks, their live types and fakes |
 | `StenoTests/` | hostless XCTest unit tests, one file per view model |
 | `StenoUITests/` | `LaunchSmokeTests` |
-| `scripts/` | `install-xcodegen.sh` (release zip pinned by version and SHA-256; an `xcodegen` on PATH counts only at the pinned version), `xcodebuild-quiet.sh` (log to file, diagnostics to the console, fails without the `** … SUCCEEDED **` marker; used by CI and `build-release.sh`), `xcresult-summary.py`, `build-release.sh`, `make-dmg.sh`, `make-appcast.sh` |
+| `scripts/` | `install-xcodegen.sh` (release zip pinned by version and SHA-256; an `xcodegen` on PATH counts only at the pinned version), `xcodebuild-quiet.sh` (log to file, diagnostics to the console, fails without the `** … SUCCEEDED **` marker; used by CI and `build-release.sh`), `xcresult-summary.py`, `build-release.sh`, `make-dmg.sh`, `make-appcast.sh`, `make-app-icon.sh` |
+
+### App icon
+
+Edit `Steno/Resources/AppIcon.svg`, run `scripts/make-app-icon.sh` (ImageMagick 7 with librsvg,
+`brew install imagemagick`) and commit the SVG together with everything it wrote: the ten PNGs and
+`Contents.json` in `Assets.xcassets/AppIcon.appiconset`, `Steno/Resources/AppIcon.sha256` and
+`mobile/assets/icon.png`. `AppIconTests` fails on CI when the SVG and `AppIcon.sha256` disagree.
+`scripts/make-app-icon.sh --check` compares bytes; it is exact only for the ImageMagick and librsvg
+pair that produced the committed files (7.1.2 and 2.62 today), and it also reports a `Contents.json`
+that Xcode's asset editor reformatted. A diff after a Homebrew upgrade or an Xcode edit means
+re-render and commit, not a bug. Design and geometry:
+[`.plans/2026-09-28-app-icon.md`](../../.plans/2026-09-28-app-icon.md).
 
 Where things live at runtime: the database in `~/Library/Application Support/Steno/steno.sqlite`,
 recordings in the folder chosen in Audio settings (default `…/Steno/Audio`), models in

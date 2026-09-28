@@ -42,7 +42,7 @@ CREATE TABLE "handoverReceipt" ("recordingID" TEXT PRIMARY KEY NOT NULL, "device
 
 CREATE INDEX "handoverReceipt_deviceID" ON "handoverReceipt"("deviceID");
 
-CREATE TABLE "meeting" ("id" TEXT PRIMARY KEY NOT NULL, "title" TEXT NOT NULL, "startedAt" DATETIME NOT NULL, "duration" DOUBLE NOT NULL, "language" TEXT, "source" TEXT NOT NULL, "calendarEventID" TEXT, "tags" TEXT NOT NULL DEFAULT '[]', "state" TEXT NOT NULL, "failureReason" TEXT, "templateID" TEXT NOT NULL, "summary" TEXT, "summaryText" TEXT NOT NULL DEFAULT '', "scratchpad" TEXT NOT NULL DEFAULT '', "llmUsage" TEXT, "createdAt" DATETIME NOT NULL, "updatedAt" DATETIME NOT NULL);
+CREATE TABLE "meeting" ("id" TEXT PRIMARY KEY NOT NULL, "title" TEXT NOT NULL, "startedAt" DATETIME NOT NULL, "duration" DOUBLE NOT NULL, "language" TEXT, "source" TEXT NOT NULL, "calendarEventID" TEXT, "tags" TEXT NOT NULL DEFAULT '[]', "state" TEXT NOT NULL, "failureReason" TEXT, "templateID" TEXT NOT NULL, "summary" TEXT, "summaryText" TEXT NOT NULL DEFAULT '', "scratchpad" TEXT NOT NULL DEFAULT '', "llmUsage" TEXT, "createdAt" DATETIME NOT NULL, "updatedAt" DATETIME NOT NULL, "endReason" TEXT, "titleOrigin" TEXT NOT NULL DEFAULT 'default');
 
 CREATE TABLE "meetingTask" ("id" TEXT PRIMARY KEY NOT NULL, "meetingID" TEXT NOT NULL REFERENCES "meeting"("id") ON DELETE CASCADE, "text" TEXT NOT NULL, "assigneePersonID" TEXT REFERENCES "person"("id") ON DELETE SET NULL, "assigneeName" TEXT, "priority" TEXT NOT NULL, "dueDate" DATETIME, "done" BOOLEAN NOT NULL DEFAULT 0);
 
@@ -83,8 +83,6 @@ CREATE INDEX "speakerNameSuggestion_meetingID" ON "speakerNameSuggestion"("meeti
 CREATE INDEX "speaker_meetingID" ON "speaker"("meetingID");
 
 CREATE INDEX "speaker_personID" ON "speaker"("personID");
-
-CREATE TABLE "stageRate" ("stage" TEXT NOT NULL, "key" TEXT NOT NULL, "samples" INTEGER NOT NULL, "secondsPerUnit" DOUBLE NOT NULL, "updatedAt" DATETIME NOT NULL, PRIMARY KEY ("stage", "key"));
 
 CREATE TABLE "transcriptSegment" ("id" TEXT PRIMARY KEY NOT NULL, "meetingID" TEXT NOT NULL REFERENCES "meeting"("id") ON DELETE CASCADE, "start" DOUBLE NOT NULL, "end" DOUBLE NOT NULL, "speakerID" TEXT REFERENCES "speaker"("id") ON DELETE SET NULL, "lane" TEXT NOT NULL, "text" TEXT NOT NULL, "rawText" TEXT NOT NULL);
 

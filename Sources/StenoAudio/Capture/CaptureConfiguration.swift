@@ -74,6 +74,8 @@ public enum CaptureError: Error, Sendable, Equatable, Hashable, CustomStringConv
   /// The tap never rose above `LaneLevel.silentPeakLinear` during the whole
   /// session.
   case systemAudioSilent
+  /// A device changed or disappeared and the backend could not be restarted
+  /// within `CaptureSession.restartAttempts`.
   case deviceLost
   case writerFailed(String)
   /// A backend error that is none of the above (its description).
@@ -129,7 +131,7 @@ public enum CaptureState: Sendable, Equatable, Hashable {
   case recording(startedAt: Date)
   case stopping
   /// `recording` is nil when the start produced nothing, and the finalised
-  /// partial recording when a device disappeared or the writer failed
+  /// partial recording when a device stayed lost or the writer failed
   /// mid-meeting; `stop()` returns the same value or throws when it is nil.
   case failed(CaptureError, recording: CaptureResult?)
 
@@ -169,6 +171,27 @@ public struct LaneLevels: Sendable, Equatable, Hashable {
   }
 }
 
+/// What the backend's listener found different after a notification burst
+/// settled. The synthetic backend reports `.defaultInputChanged`.
+public enum DeviceChangeReason: Sendable, Equatable, Hashable {
+  case defaultOutputChanged
+  case defaultInputChanged
+  case outputDeviceGone
+  case inputDeviceGone
+  /// The aggregate no longer runs at `StenoAudio.sampleRate`.
+  case sampleRateChanged
+}
+
+/// What `CaptureSession.notices` carries while the state stays `.recording`:
+/// the rebuild beginning and the new backend running. Device loss is not a
+/// notice; `states` carries `.failed(.deviceLost, recording:)`.
+public enum CaptureNotice: Sendable, Equatable, Hashable {
+  case deviceChanged(DeviceChangeReason)
+  /// `attempt` is the restart that succeeded (1 when the first did);
+  /// `gapSeconds` the silence written for this gap.
+  case deviceResumed(attempt: Int, gapSeconds: TimeInterval)
+}
+
 public struct CaptureStatistics: Sendable, Equatable, Hashable {
   /// Seconds of audio written to the master.
   public var duration: TimeInterval
@@ -177,17 +200,24 @@ public struct CaptureStatistics: Sendable, Equatable, Hashable {
   public var droppedFrames: [AudioLane: Int]
   /// True when the tap never exceeded `LaneLevel.silentPeakLinear` (-80 dBFS).
   public var systemLaneSilent: Bool
-  /// True when a device disappeared and the session finalised the recording
-  /// early (v1 stops on the first loss; rebuilding mid-meeting is v1.1).
+  /// True when a device change could not be survived (every restart failed)
+  /// and the session finalised the recording early.
   public var endedOnDeviceLoss: Bool
+  /// Device changes the recording survived by rebuilding in place.
+  public var deviceChanges: Int
+  /// Seconds of silence written to keep the master on wall time across
+  /// those rebuilds.
+  public var gapSeconds: TimeInterval
 
   public init(
     duration: TimeInterval, droppedFrames: [AudioLane: Int], systemLaneSilent: Bool,
-    endedOnDeviceLoss: Bool
+    endedOnDeviceLoss: Bool, deviceChanges: Int = 0, gapSeconds: TimeInterval = 0
   ) {
     self.duration = duration
     self.droppedFrames = droppedFrames
     self.systemLaneSilent = systemLaneSilent
     self.endedOnDeviceLoss = endedOnDeviceLoss
+    self.deviceChanges = deviceChanges
+    self.gapSeconds = gapSeconds
   }
 }

@@ -10,6 +10,8 @@ public enum MeetingStoreError: Error, Sendable, Equatable, CustomStringConvertib
   /// `delete(meetingID:)` while the capture writer or the pipeline still
   /// holds the meeting's files.
   case meetingBusy(UUID, MeetingState.Kind)
+  /// `resolvePerson(named:)` with nothing but whitespace.
+  case blankPersonName
 
   public var description: String {
     switch self {
@@ -19,6 +21,7 @@ public enum MeetingStoreError: Error, Sendable, Equatable, CustomStringConvertib
     case .personNotFound(let id): "person \(id) not found"
     case .speakersInDifferentMeetings(let a, let b):
       "speakers \(a) and \(b) belong to different meetings"
+    case .blankPersonName: "a person needs a name"
     }
   }
 }
@@ -160,6 +163,18 @@ public final class MeetingStore: Sendable {
     try await update(meetingID: meetingID, now: now) { $0.state = state }
   }
 
+  /// The user's rename: the trimmed `title` with `titleOrigin = .user`, so
+  /// no later default or summary title is mistaken for it. A blank title
+  /// leaves the row alone.
+  public func rename(meetingID: UUID, title: String, now: Date) async throws {
+    let trimmed = title.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !trimmed.isEmpty else { return }
+    try await update(meetingID: meetingID, now: now) {
+      $0.title = trimmed
+      $0.titleOrigin = .user
+    }
+  }
+
   /// One transaction: the meeting's processing columns (see
   /// `Meeting.applyProcessingResults`) plus every speaker and segment of the
   /// meeting, replaced. The pipeline's merge and cleanup stages call this.
@@ -236,7 +251,7 @@ public final class MeetingStore: Sendable {
   /// The model's guess who each speaker is, at most one per speaker, in
   /// speaker id order: written with every summary, removed by `confirm` and
   /// with the speaker or the meeting. Never applied automatically; the
-  /// review sheet offers it beside the cosine match and the calendar
+  /// speaker picker offers it beside the cosine match and the calendar
   /// attendees (#78).
   public func nameSuggestions(meetingID: UUID) async throws -> [SpeakerNameSuggestion] {
     try await writer.read { db in
@@ -352,12 +367,44 @@ public final class MeetingStore: Sendable {
     try await writer.read { db in try Self.assetRow(meetingID: meetingID, db)?.asset }
   }
 
-  /// Assets whose `expiresAt` is at or before `now`; the retention sweep's
-  /// one query.
-  public func expiredAssets(now: Date) async throws -> [AudioAsset] {
+  /// Every asset with its URLs, in id order. `RetentionSweep.keepAll()`
+  /// pairs them with the files on disk.
+  public func assets() async throws -> [AudioAsset] {
     try await writer.read { db in
+      try AudioAssetRow.order(AudioAssetRow.Columns.id).fetchAll(db).map(\.asset)
+    }
+  }
+
+  /// One write: `retention = .keepForever` and `expiresAt = nil` on every
+  /// listed asset. Both together, because an asset left at `.keepDays` with
+  /// no stamp is the deferred case that the next Re-export would stamp
+  /// again. Unknown ids are ignored.
+  public func keepForever(assetIDs: [UUID]) async throws {
+    guard !assetIDs.isEmpty else { return }
+    let keys = assetIDs.map(\.uuidString)
+    try await writer.write { db in
+      try AudioAssetRow.filter(keys.contains(AudioAssetRow.Columns.id))
+        .updateAll(
+          db,
+          AudioAssetRow.Columns.retention.set(to: AudioRetention.Kind.keepForever.rawValue),
+          AudioAssetRow.Columns.retentionDays.set(to: nil),
+          AudioAssetRow.Columns.expiresAt.set(to: nil))
+    }
+  }
+
+  /// Assets whose `expiresAt` is at or before `now` and whose meeting is
+  /// `.ready` or `.failed`; the retention sweep's one query. A meeting that
+  /// is still recording, queued or processing keeps its files whatever the
+  /// stamp says.
+  public func expiredAssets(now: Date) async throws -> [AudioAsset] {
+    let settled = [MeetingState.Kind.ready, .failed].map(\.rawValue)
+    return try await writer.read { db in
       try AudioAssetRow
         .filter(AudioAssetRow.Columns.expiresAt != nil && AudioAssetRow.Columns.expiresAt <= now)
+        .filter(
+          sql: "meetingID IN (SELECT id FROM meeting WHERE state IN (?, ?))",
+          arguments: StatementArguments(settled)
+        )
         .order(AudioAssetRow.Columns.expiresAt, AudioAssetRow.Columns.id)
         .fetchAll(db)
         .map(\.asset)
@@ -373,6 +420,16 @@ public final class MeetingStore: Sendable {
 
   public func deliveries(meetingID: UUID) async throws -> [Delivery] {
     try await writer.read { db in try Self.deliveryRows(meetingID: meetingID, db).map(\.delivery) }
+  }
+
+  /// Drops the listed rows; `DeliveryCoordinator` uses it for destinations
+  /// that are no longer configured. Unknown ids are ignored.
+  public func deleteDeliveries(ids: [UUID]) async throws {
+    guard !ids.isEmpty else { return }
+    let keys = ids.map(\.uuidString)
+    try await writer.write { db in
+      _ = try DeliveryRow.filter(keys.contains(DeliveryRow.Columns.id)).deleteAll(db)
+    }
   }
 
   // MARK: - Observation

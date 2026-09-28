@@ -84,6 +84,8 @@ import Testing
     #expect(result.status == 0, "\(result.stderr)")
     #expect(result.stdout.contains("meeting: \(meetingID.uuidString)"))
     #expect(result.stdout.contains("dropped frames: none"))
+    #expect(result.stdout.contains("device changes: 0"))
+    #expect(result.stdout.contains("gap filled: 0.00 s"))
     let layout = RecordingLayout(audioFolder: audio, meetingID: meetingID)
     let master = try CAFFile.read(layout.master(.caf48kFloat32))
     #expect(master.channels.count == 1)

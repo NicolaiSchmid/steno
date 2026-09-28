@@ -334,7 +334,9 @@ import Testing
   }
 
   /// A harness whose store already holds the sample transcript.
-  static func prepared(cleaner: any TranscriptCleaner) async throws -> (PipelineHarness, Meeting) {
+  static func prepared(cleaner: (any TranscriptCleaner)?) async throws -> (
+    PipelineHarness, Meeting
+  ) {
     let harness = try await PipelineHarness(cleaner: cleaner)
     let (meeting, asset) = try harness.meeting(source: .macCall)
     try await harness.store.save(meeting, asset: asset)
@@ -409,6 +411,22 @@ import Testing
         try await harness.store.export(meetingID: meeting.id).segments == SampleData.segments())
     }
   }
+
+  @Test func withoutACleanerTheSegmentsPassThroughAndNothingIsWritten() async throws {
+    let (harness, meeting) = try await Self.prepared(cleaner: nil)
+    defer { harness.cleanUp() }
+    let events = await harness.events.subscribe()
+    var incoming = SampleData.segments()
+    for index in incoming.indices { incoming[index].text = "not yet persisted \(index)" }
+    let cleaned = try await harness.pipeline.cleanup(
+      meeting: meeting, segments: incoming, speakers: SampleData.speakers())
+    #expect(cleaned.segments == incoming)
+    #expect(cleaned.usage == nil)
+    #expect(
+      try await harness.store.export(meetingID: meeting.id).segments == SampleData.segments(),
+      "the merge stage's rows stay; the skipped stage writes nothing")
+    #expect(await harness.events.drain(events).map(\.stage) == [.cleanup])
+  }
 }
 
 @Suite struct SummarizeStageTests {
@@ -433,7 +451,7 @@ import Testing
         meeting: unknown, segments: SampleData.segments(), speakers: SampleData.speakers())
     }
     #expect(failure == PipelineFailure(stage: .summarize, reason: "unknown summary template nope"))
-    #expect(await harness.summarizer.summaries.count == 0)
+    #expect(await harness.summarizer?.summaries.count == 0)
     #expect(try await harness.store.meeting(id: meeting.id)?.summary == nil)
   }
 
@@ -445,12 +463,16 @@ import Testing
     withUsage.llmUsage = prior
     let updated = try await harness.pipeline.summarize(
       meeting: withUsage, segments: SampleData.segments(), speakers: SampleData.speakers())
-    #expect(await harness.summarizer.summaries.entries == ["default"])
+    #expect(await harness.summarizer?.summaries.entries == ["default"])
     #expect(updated.templateID == "default")
     #expect(updated.summary?.templateID == "default")
     #expect(updated.summary?.sections.map(\.id) == SummaryTemplate.bundled[0].sections.map(\.id))
     #expect(updated.title == "Summary of Untitled")
-    #expect(updated.llmUsage == prior + harness.summarizer.usage)
+    #expect(updated.titleOrigin == .summary)
+    #expect(
+      try await harness.store.meeting(id: meeting.id)?.titleOrigin == .summary,
+      "the origin is written with the title")
+    #expect(updated.llmUsage == prior + (try #require(harness.summarizer)).usage)
     #expect(updated.updatedAt == PipelineHarness.now)
 
     let export = try await harness.store.export(meetingID: meeting.id)
@@ -485,6 +507,7 @@ import Testing
     let kept = try await harness.pipeline.summarize(
       meeting: scheduled, segments: SampleData.segments(), speakers: SampleData.speakers())
     #expect(kept.title == "Untitled", "a calendar title is authoritative")
+    #expect(kept.titleOrigin == meeting.titleOrigin, "and so is its origin")
     #expect(kept.language == LanguageTag(rawValue: "fr"))
     #expect(kept.templateID == "interview")
     #expect(kept.summary?.templateID == "interview")
@@ -493,6 +516,7 @@ import Testing
     let replaced = try await harness.pipeline.summarize(
       meeting: interview, segments: SampleData.segments(), speakers: SampleData.speakers())
     #expect(replaced.title == "Model title")
+    #expect(replaced.titleOrigin == .summary)
 
     canned.title = ""
     let untitled = try await PipelineHarness(
@@ -501,7 +525,63 @@ import Testing
     let unchanged = try await untitled.pipeline.summarize(
       meeting: meeting, segments: SampleData.segments(), speakers: SampleData.speakers())
     #expect(unchanged.title == "Untitled", "an empty model title never replaces the meeting's")
+    #expect(unchanged.titleOrigin == meeting.titleOrigin)
     #expect(try await harness.store.meeting(id: meeting.id)?.title == "Untitled")
+  }
+
+  /// A title the user typed (`.user`: the recording prompt without a
+  /// calendar event, or a rename) is as authoritative as a calendar one: the
+  /// model's title is dropped and the origin stays.
+  @Test func aUserTypedTitleIsNotReplacedByTheModels() async throws {
+    var canned = SampleData.summaryOutput()
+    canned.title = "Model title"
+    let (harness, meeting) = try await Self.prepared(summarizer: FakeSummarizer(canned: canned))
+    defer { harness.cleanUp() }
+    var named = meeting
+    named.title = "Budget sync"
+    named.titleOrigin = .user
+    let kept = try await harness.pipeline.summarize(
+      meeting: named, segments: SampleData.segments(), speakers: SampleData.speakers())
+    #expect(kept.title == "Budget sync")
+    #expect(kept.titleOrigin == .user)
+    #expect(kept.summary != nil, "the summary itself is stored")
+    #expect(try await harness.store.meeting(id: meeting.id)?.titleOrigin == .user)
+  }
+
+  /// A meeting processed while a fake still ran, or processed again after
+  /// the endpoint was removed, keeps none of the earlier summary's rows.
+  @Test func withoutASummarizerTheStageClearsWhatAnEarlierRunWrote() async throws {
+    let (harness, meeting) = try await Self.prepared(
+      summarizer: FakeSummarizer(canned: SampleData.summaryOutput()))
+    defer { harness.cleanUp() }
+    let summarized = try await harness.pipeline.summarize(
+      meeting: meeting, segments: SampleData.segments(), speakers: SampleData.speakers())
+    let before = try await harness.store.export(meetingID: meeting.id)
+    #expect(before.meeting.summary != nil)
+    #expect(!before.tasks.isEmpty)
+    #expect(!before.decisions.isEmpty)
+    #expect(try await harness.store.nameSuggestions(meetingID: meeting.id).count == 1)
+
+    let skipping = try await PipelineHarness(summarizer: nil, sharedStore: harness.store)
+    defer { skipping.cleanUp() }
+    let events = await skipping.events.subscribe()
+    var input = summarized
+    input.updatedAt = SampleData.createdAt
+    let updated = try await skipping.pipeline.summarize(
+      meeting: input, segments: SampleData.segments(), speakers: SampleData.speakers())
+    #expect(updated.summary == nil)
+    #expect(updated.llmUsage == summarized.llmUsage, "usage is left as given; `process` resets it")
+    #expect(updated.title == summarized.title, "the title is left as given")
+    #expect(updated.updatedAt == PipelineHarness.now)
+
+    let after = try await harness.store.export(meetingID: meeting.id)
+    #expect(after.meeting.summary == nil)
+    #expect(after.meeting.llmUsage == summarized.llmUsage)
+    #expect(after.tasks.isEmpty)
+    #expect(after.decisions.isEmpty)
+    #expect(try await harness.store.nameSuggestions(meetingID: meeting.id).isEmpty)
+    #expect(after.segments == before.segments)
+    #expect(await skipping.events.drain(events).map(\.stage) == [.summarize])
   }
 }
 

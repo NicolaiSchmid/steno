@@ -170,6 +170,7 @@ final class MenuBarViewModelTests: XCTestCase {
     // detail header.
     let chips = states.map { StatusChip($0).text }
     XCTAssertEqual(chips, ["Recording", "Queued", "Processing", "Ready", "Failed"])
+    XCTAssertFalse(states.contains { StatusChip($0).style == .neutral }, "state chips are semantic")
   }
 
   func testLabelsAreWordsNotRawValues() {
@@ -182,6 +183,8 @@ final class MenuBarViewModelTests: XCTestCase {
     XCTAssertEqual(AudioLane.system.label, "System")
     XCTAssertEqual(AudioLane.mixed.label, "Room")
     XCTAssertEqual(MeetingSource.macInPerson.label, "In person")
+    XCTAssertEqual(PermissionKind.microphone.deniedMessage, "Microphone access is denied.")
+    XCTAssertEqual(PermissionKind.systemAudio.deniedMessage, "System audio access is denied.")
     XCTAssertEqual(LanguageTag("de").localizedName(in: Locale(identifier: "en_US")), "German")
   }
 }

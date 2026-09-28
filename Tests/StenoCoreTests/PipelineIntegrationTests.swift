@@ -176,6 +176,103 @@ import Testing
     #expect(stored.summary == nil)
   }
 
+  /// Decision 2 of the onboarding plan: `.ready` with `summary == nil` means
+  /// the summary was skipped for lack of an endpoint. Nil passes post their
+  /// progress, write nothing, and the meeting still lands ready and
+  /// delivered with the merged transcript and its original title.
+  @Test func withoutAnEndpointProcessSkipsBothPassesAndLandsReady() async throws {
+    let harness = try await PipelineHarness(cleaner: nil, summarizer: nil)
+    defer { harness.cleanUp() }
+    let events = await harness.events.subscribe()
+    let (meeting, asset) = try harness.meeting(source: .macCall)
+    try await harness.pipeline.enqueue(meeting, asset: asset)
+    await harness.pipeline.waitUntilIdle()
+
+    let export = try await harness.store.export(meetingID: meeting.id)
+    #expect(export.meeting.state == .ready)
+    #expect(export.meeting.summary == nil)
+    #expect(export.meeting.llmUsage == nil)
+    #expect(export.meeting.title == "Untitled")
+    #expect(
+      export.meeting.language == LanguageTag(rawValue: "de"), "the transcript's, not a model's")
+    #expect(export.tasks.isEmpty)
+    #expect(export.decisions.isEmpty)
+    #expect(try await harness.store.nameSuggestions(meetingID: meeting.id).isEmpty)
+    #expect(export.segments.count == 12)
+    #expect(export.segments.allSatisfy { $0.text == $0.rawText })
+    #expect(export.audio?.mixdownURL != nil)
+    #expect(await harness.dispatcher.dispatches.entries == [meeting.id])
+    #expect(
+      try await harness.store.deliveries(meetingID: meeting.id).map(\.status) == [.delivered])
+
+    let stages = await harness.events.drain(events).compactMap(\.stage)
+    #expect(stages == Self.callStages, "cleanup and summarize still report progress")
+
+    let error = await #expect(throws: PipelineFailure.self) {
+      try await harness.pipeline.rerunSummary(meetingID: meeting.id, templateID: "interview")
+    }
+    #expect(error?.stage == .summarize)
+    #expect(error?.reason.contains("LLM endpoint") == true)
+    let after = try await harness.store.export(meetingID: meeting.id)
+    #expect(after == export, "a refused re-run changes nothing")
+    #expect(await harness.dispatcher.dispatches.count == 1)
+
+    try await harness.pipeline.redeliver(meetingID: meeting.id)
+    #expect(await harness.dispatcher.dispatches.count == 2)
+  }
+
+  /// The other side of the invariant: a configured summarizer never leaves a
+  /// ready meeting without a summary, even when the model has nothing to say.
+  @Test func aConfiguredSummarizerNeverLeavesReadyWithoutASummary() async throws {
+    let empty = SummaryOutput(
+      title: "", summary: SummaryDocument(templateID: "default", sections: []), decisions: [],
+      tasks: [], speakerNames: [], usage: .zero)
+    // No cleaner, so only the summarize stage can make `llmUsage` non-nil.
+    let harness = try await PipelineHarness(
+      cleaner: nil, summarizer: FakeSummarizer(canned: empty))
+    defer { harness.cleanUp() }
+    let (meeting, asset) = try harness.meeting(source: .macInPerson)
+    try await harness.pipeline.enqueue(meeting, asset: asset)
+    await harness.pipeline.waitUntilIdle()
+
+    let export = try await harness.store.export(meetingID: meeting.id)
+    #expect(export.meeting.state == .ready)
+    #expect(export.meeting.summary != nil)
+    #expect(export.meeting.summary?.sections.isEmpty == true)
+    #expect(export.meeting.llmUsage == .zero, "the summarizer ran and reported its usage")
+    #expect(export.meeting.title == "Untitled")
+  }
+
+  /// A `.processing` meeting picked up at launch after the endpoint was
+  /// removed: the earlier run's summary, rows and usage are replaced, not
+  /// kept or added to.
+  @Test func resumeWithNilPassesClearsAnEarlierRunsSummaryAndUsage() async throws {
+    let harness = try await PipelineHarness(cleaner: nil, summarizer: nil)
+    defer { harness.cleanUp() }
+    let earlier = SampleData.summaryOutput()
+    let (fresh, asset) = try harness.meeting(source: .macInPerson)
+    var meeting = fresh
+    meeting.state = .processing
+    meeting.summary = earlier.summary
+    meeting.llmUsage = LLMUsage(promptTokens: 1, completionTokens: 1, requests: 1)
+    try await harness.store.save(meeting, asset: asset)
+    try await harness.store.replaceSummary(
+      meeting, tasks: earlier.tasks, decisions: earlier.decisions,
+      speakerNames: earlier.speakerNames)
+    #expect(try await harness.store.export(meetingID: meeting.id).tasks.isEmpty == false)
+
+    #expect(try await harness.pipeline.resumeUnfinished() == [meeting.id])
+    await harness.pipeline.waitUntilIdle()
+
+    let export = try await harness.store.export(meetingID: meeting.id)
+    #expect(export.meeting.state == .ready)
+    #expect(export.meeting.summary == nil)
+    #expect(export.meeting.llmUsage == nil)
+    #expect(export.tasks.isEmpty)
+    #expect(export.decisions.isEmpty)
+    #expect(try await harness.store.nameSuggestions(meetingID: meeting.id).isEmpty)
+  }
+
   @Test func retentionZeroExpiresImmediately() async throws {
     let harness = try await PipelineHarness()
     defer { harness.cleanUp() }
@@ -209,7 +306,7 @@ import Testing
     #expect(export.meeting.summary?.sections.count == 4)
     #expect(
       export.meeting.llmUsage == LLMUsage(promptTokens: 500, completionTokens: 250, requests: 3))
-    #expect(await harness.summarizer.summaries.entries == ["default", "daily-standup"])
+    #expect(await harness.summarizer?.summaries.entries == ["default", "daily-standup"])
     #expect(await harness.dispatcher.dispatches.count == 2)
 
     try await harness.pipeline.redeliver(meetingID: meeting.id)
@@ -385,7 +482,7 @@ import Testing
     try await first.value
 
     #expect(await harness.engine.transcriptions.count == 1)
-    #expect(await harness.summarizer.summaries.count == 1)
+    #expect(await harness.summarizer?.summaries.count == 1)
     #expect(await harness.dispatcher.dispatches.count == 1)
     #expect(try await harness.store.meeting(id: meeting.id)?.state == .ready)
     // Once the run is over the meeting is free again.
@@ -449,7 +546,7 @@ import Testing
     #expect(orphaned.updatedAt == PipelineHarness.now)
     #expect(try await harness.store.meeting(id: ready.id)?.state == .ready)
     #expect(try await harness.store.meeting(id: recording.id)?.state == .recording)
-    #expect(await harness.summarizer.summaries.count == 2)
+    #expect(await harness.summarizer?.summaries.count == 2)
     // Both run in the background at once, so only the set is fixed.
     #expect(Set(await harness.dispatcher.dispatches.entries) == [processing.id, queued.id])
     #expect(try await harness.pipeline.resumeUnfinished().isEmpty, "nothing left to resume")
@@ -541,6 +638,46 @@ import Testing
     #expect(after.speakers.compactMap(\.sampleClipURL) == clips)
     #expect(after.segments == before.segments)
     #expect(try await sweep.run(now: .distantFuture).isEmpty)
+  }
+
+  /// Confirming a speaker keeps the clip while the recording exists, gives
+  /// the person the speaker's voice, and naming somebody else moves it.
+  @Test func confirmThenReassignKeepsTheClipAndMovesTheVoice() async throws {
+    let harness = try await PipelineHarness()
+    defer { harness.cleanUp() }
+    let (meeting, asset) = try harness.meeting(source: .macCall)
+    try await harness.pipeline.enqueue(meeting, asset: asset)
+    await harness.pipeline.waitUntilIdle()
+    let export = try await harness.store.export(meetingID: meeting.id)
+    let speaker = try #require(export.speakers.first { $0.embedding != nil })
+    let clip = try #require(speaker.sampleClipURL)
+    #expect(FileManager.default.fileExists(atPath: clip.path))
+    let anna = Person(id: SampleData.uuid(12), displayName: "Anna", createdAt: PipelineHarness.now)
+    let bea = Person(id: SampleData.uuid(13), displayName: "Bea", createdAt: PipelineHarness.now)
+
+    try await harness.store.confirm(speakerID: speaker.id, person: anna)
+    var stored = try #require(
+      try await harness.store.speakers(meetingID: meeting.id)
+        .first { $0.id == speaker.id })
+    #expect(stored.assignment == .confirmed(personID: anna.id))
+    #expect(stored.sampleClipURL == clip)
+    #expect(FileManager.default.fileExists(atPath: clip.path))
+    var annaRow = try #require(try await harness.store.person(id: anna.id))
+    #expect(annaRow.sampleCount == 1)
+    #expect(annaRow.embedding == speaker.embedding?.normalized())
+
+    try await harness.store.confirm(speakerID: speaker.id, person: bea)
+    stored = try #require(
+      try await harness.store.speakers(meetingID: meeting.id)
+        .first { $0.id == speaker.id })
+    #expect(stored.assignment == .confirmed(personID: bea.id))
+    #expect(FileManager.default.fileExists(atPath: clip.path))
+    annaRow = try #require(try await harness.store.person(id: anna.id))
+    #expect(annaRow.sampleCount == 0)
+    #expect(annaRow.embedding == nil)
+    let beaRow = try #require(try await harness.store.person(id: bea.id))
+    #expect(beaRow.sampleCount == 1)
+    #expect(beaRow.embedding == speaker.embedding?.normalized())
   }
 
   @Test func aPhoneAACRecordingIsNotMixedDownAgain() async throws {
@@ -855,5 +992,286 @@ import Testing
     }
     #expect(try await harness.store.meeting(id: queued.id)?.state == .ready)
     #expect(try await harness.store.meeting(id: processing.id)?.state == .ready)
+  }
+
+  // MARK: - Deletion waits for delivery
+
+  /// The retention stage collects what a run posted, up to a sentinel so a
+  /// failed run never hangs the test.
+  private func retentionEvents(_ harness: PipelineHarness, _ events: AsyncStream<MeetingEvent>)
+    async -> [MeetingEvent]
+  {
+    await harness.events.drain(events).filter {
+      if case .retentionApplied = $0 { return true }
+      return false
+    }
+  }
+
+  @Test func aFailedDeliveryDefersExpiryUntilRedeliverSucceeds() async throws {
+    let harness = try await PipelineHarness(failDeliveriesUntil: 1)
+    defer { harness.cleanUp() }
+    let events = await harness.events.subscribe()
+    let (meeting, asset) = try harness.meeting(
+      source: .macInPerson, retention: .deleteAfterProcessing)
+    try await harness.pipeline.enqueue(meeting, asset: asset)
+    await harness.pipeline.waitUntilIdle()
+
+    #expect(try await harness.store.meeting(id: meeting.id)?.state == .ready, "process succeeded")
+    #expect(
+      try await harness.store.deliveries(meetingID: meeting.id).map(\.status.kind) == [.failed])
+    let deferred = try #require(try await harness.store.asset(id: asset.id))
+    #expect(deferred.expiresAt == nil, "not stamped while the export is outstanding")
+    #expect(deferred.retention == .deleteAfterProcessing)
+    #expect(await retentionEvents(harness, events).isEmpty, "no sweep trigger")
+    #expect(try await RetentionSweep(store: harness.store).run(now: .distantFuture).isEmpty)
+    #expect(FileManager.default.fileExists(atPath: asset.url.path))
+
+    let second = await harness.events.subscribe()
+    try await harness.pipeline.redeliver(meetingID: meeting.id)
+    #expect(
+      try await harness.store.deliveries(meetingID: meeting.id).map(\.status) == [.delivered])
+    let stamped = try #require(try await harness.store.asset(id: asset.id))
+    #expect(stamped.expiresAt == PipelineHarness.now, "stamped once the export succeeded")
+    #expect(
+      await retentionEvents(harness, second) == [.retentionApplied(meetingID: meeting.id)])
+
+    // A stamped asset is never restamped: a later re-export does not move
+    // the expiry, and posts no second trigger.
+    var moved = stamped
+    moved.expiresAt = PipelineHarness.now.addingTimeInterval(-3_600)
+    try await harness.store.save(moved)
+    let third = await harness.events.subscribe()
+    try await harness.pipeline.redeliver(meetingID: meeting.id)
+    #expect(try await harness.store.asset(id: asset.id)?.expiresAt == moved.expiresAt)
+    #expect(await retentionEvents(harness, third).isEmpty)
+  }
+
+  @Test func rerunSummaryAlsoStampsADeferredExpiry() async throws {
+    let harness = try await PipelineHarness(failDeliveriesUntil: 1)
+    defer { harness.cleanUp() }
+    let (meeting, asset) = try harness.meeting(source: .macInPerson, retention: .keepDays(3))
+    try await harness.pipeline.enqueue(meeting, asset: asset)
+    await harness.pipeline.waitUntilIdle()
+    #expect(try await harness.store.asset(id: asset.id)?.expiresAt == nil)
+
+    let events = await harness.events.subscribe()
+    try await harness.pipeline.rerunSummary(meetingID: meeting.id, templateID: "daily-standup")
+    let stamped = try #require(try await harness.store.asset(id: asset.id))
+    #expect(stamped.expiresAt == PipelineHarness.now.addingTimeInterval(3 * 86_400))
+    #expect(stamped.retention == .keepDays(3))
+    #expect(await retentionEvents(harness, events) == [.retentionApplied(meetingID: meeting.id)])
+  }
+
+  @Test func keepForeverStampsNilWhetherDeliverySucceedsOrFails() async throws {
+    for failures in [0, 1] {
+      let harness = try await PipelineHarness(failDeliveriesUntil: failures)
+      defer { harness.cleanUp() }
+      let (meeting, asset) = try harness.meeting(source: .macInPerson, retention: .keepForever)
+      try await harness.pipeline.enqueue(meeting, asset: asset)
+      await harness.pipeline.waitUntilIdle()
+      try await harness.pipeline.redeliver(meetingID: meeting.id)
+      let stored = try #require(try await harness.store.asset(id: asset.id))
+      #expect(stored.retention == .keepForever, "failures=\(failures)")
+      #expect(stored.expiresAt == nil, "failures=\(failures)")
+      #expect(FileManager.default.fileExists(atPath: asset.url.path))
+    }
+  }
+
+  /// Processing failure keeps the audio: the retention stage is only reached
+  /// after `persist`, so a failed meeting stays unstamped and can be
+  /// processed again from its files.
+  @Test func aProcessingFailureLeavesTheAudioUnstamped() async throws {
+    struct Boom: Error {}
+    let harness = try await PipelineHarness(engine: FakeSpeechEngine(failure: Boom()))
+    defer { harness.cleanUp() }
+    let (meeting, asset) = try harness.meeting(
+      source: .macInPerson, retention: .deleteAfterProcessing)
+    try await harness.pipeline.enqueue(meeting, asset: asset)
+    await harness.pipeline.waitUntilIdle()
+    let stored = try #require(try await harness.store.meeting(id: meeting.id))
+    #expect(stored.state.isFailed)
+    let audio = try #require(try await harness.store.asset(id: asset.id))
+    #expect(audio.expiresAt == nil)
+    #expect(audio.retention == .deleteAfterProcessing)
+    #expect(await harness.dispatcher.dispatches.count == 0)
+    #expect(try await RetentionSweep(store: harness.store).run(now: .distantFuture).isEmpty)
+    #expect(FileManager.default.fileExists(atPath: asset.url.path), "the master survives")
+  }
+
+  /// Guard rule 1's empty case: no destination, no row, `allDelivered` is
+  /// true and the asset is stamped as soon as processing ends.
+  @Test func aMeetingWithoutDestinationsIsStampedAtOnce() async throws {
+    let harness = try await PipelineHarness(destinations: [])
+    defer { harness.cleanUp() }
+    let events = await harness.events.subscribe()
+    let (meeting, asset) = try harness.meeting(
+      source: .macInPerson, retention: .deleteAfterProcessing)
+    try await harness.pipeline.enqueue(meeting, asset: asset)
+    await harness.pipeline.waitUntilIdle()
+    #expect(try await harness.store.deliveries(meetingID: meeting.id).isEmpty)
+    #expect(try await harness.store.asset(id: asset.id)?.expiresAt == PipelineHarness.now)
+    #expect(await retentionEvents(harness, events) == [.retentionApplied(meetingID: meeting.id)])
+  }
+
+  /// A failed meeting needs its audio for the next run: Re-export on it
+  /// stamps nothing even when nothing is left to deliver.
+  @Test func redeliverOnAFailedMeetingStampsNothing() async throws {
+    struct Boom: Error {}
+    let harness = try await PipelineHarness(
+      engine: FakeSpeechEngine(failure: Boom()), destinations: [])
+    defer { harness.cleanUp() }
+    let (meeting, asset) = try harness.meeting(
+      source: .macInPerson, retention: .deleteAfterProcessing)
+    try await harness.pipeline.enqueue(meeting, asset: asset)
+    await harness.pipeline.waitUntilIdle()
+    #expect(try await harness.store.meeting(id: meeting.id)?.state.isFailed == true)
+
+    let events = await harness.events.subscribe()
+    try await harness.pipeline.redeliver(meetingID: meeting.id)
+    #expect(try await harness.store.deliveries(meetingID: meeting.id).isEmpty)
+    #expect(try await harness.store.asset(id: asset.id)?.expiresAt == nil)
+    #expect(await retentionEvents(harness, events).isEmpty)
+    #expect(try await RetentionSweep(store: harness.store).run(now: .distantFuture).isEmpty)
+    #expect(FileManager.default.fileExists(atPath: asset.url.path), "the master survives")
+  }
+
+  /// The stages write the row they read at the end, not the copy `process`
+  /// loaded at the start: a "Forever" chosen in Settings while the meeting
+  /// was processing survives `persist` and `retention`, and a finite rule
+  /// chosen meanwhile is what gets stamped.
+  @Test func aRetentionChosenWhileProcessingSurvivesPersistAndRetention() async throws {
+    let toForever = RetentionGate()
+    let harness = try await PipelineHarness(cleaner: RetentionGatedCleaner(gate: toForever))
+    defer { harness.cleanUp() }
+    let events = await harness.events.subscribe()
+    let (meeting, asset) = try harness.meeting(source: .macInPerson, retention: .keepDays(30))
+    try await harness.pipeline.enqueue(meeting, asset: asset)
+    await toForever.waitUntilEntered()
+    #expect(try await harness.store.meeting(id: meeting.id)?.state == .processing)
+    #expect(try await RetentionSweep(store: harness.store).keepAll() == 1)
+    await toForever.open()
+    await harness.pipeline.waitUntilIdle()
+    let kept = try #require(try await harness.store.asset(id: asset.id))
+    #expect(try await harness.store.meeting(id: meeting.id)?.state == .ready)
+    #expect(kept.retention == .keepForever, "keepAll() is not overwritten by persist")
+    #expect(kept.expiresAt == nil)
+    #expect(kept.mixdownURL != nil, "persist still wrote the mixdown onto the re-read row")
+    #expect(await retentionEvents(harness, events) == [.retentionApplied(meetingID: meeting.id)])
+    #expect(try await RetentionSweep(store: harness.store).run(now: .distantFuture).isEmpty)
+
+    let toDays = RetentionGate()
+    let second = try await PipelineHarness(cleaner: RetentionGatedCleaner(gate: toDays))
+    defer { second.cleanUp() }
+    let (forever, foreverAsset) = try second.meeting(source: .macInPerson, retention: .keepForever)
+    try await second.pipeline.enqueue(forever, asset: foreverAsset)
+    await toDays.waitUntilEntered()
+    try await second.pipeline.applyRetention(meetingID: forever.id, rule: .keepDays(3))
+    #expect(
+      try await second.store.asset(id: foreverAsset.id)?.expiresAt == nil,
+      "not stamped while processing")
+    await toDays.open()
+    await second.pipeline.waitUntilIdle()
+    let stamped = try #require(try await second.store.asset(id: foreverAsset.id))
+    #expect(stamped.retention == .keepDays(3))
+    #expect(stamped.expiresAt == PipelineHarness.now.addingTimeInterval(3 * 86_400))
+  }
+
+  /// The per-meeting keep: on never stamps; off stamps only under the
+  /// deferred-case rules (ready meeting, every delivery succeeded), and the
+  /// stamp and the post are the pipeline's.
+  @Test func applyRetentionFollowsTheDeferredCaseRules() async throws {
+    let harness = try await PipelineHarness(failDeliveriesUntil: 1)
+    defer { harness.cleanUp() }
+    let (meeting, asset) = try harness.meeting(source: .macInPerson, retention: .keepDays(7))
+    try await harness.pipeline.enqueue(meeting, asset: asset)
+    await harness.pipeline.waitUntilIdle()
+    #expect(try await harness.store.asset(id: asset.id)?.expiresAt == nil, "export failed")
+
+    var events = await harness.events.subscribe()
+    try await harness.pipeline.applyRetention(meetingID: meeting.id, rule: .keepForever)
+    var stored = try #require(try await harness.store.asset(id: asset.id))
+    #expect(stored.retention == .keepForever && stored.expiresAt == nil)
+    try await harness.pipeline.applyRetention(meetingID: meeting.id, rule: .keepDays(7))
+    stored = try #require(try await harness.store.asset(id: asset.id))
+    #expect(stored.retention == .keepDays(7))
+    #expect(stored.expiresAt == nil, "off with an export outstanding stays deferred")
+    #expect(await retentionEvents(harness, events).isEmpty)
+
+    try await harness.pipeline.redeliver(meetingID: meeting.id)
+    stored = try #require(try await harness.store.asset(id: asset.id))
+    #expect(stored.expiresAt == PipelineHarness.now.addingTimeInterval(7 * 86_400))
+    try await harness.pipeline.applyRetention(meetingID: meeting.id, rule: .keepForever)
+    #expect(try await harness.store.asset(id: asset.id)?.expiresAt == nil)
+    events = await harness.events.subscribe()
+    try await harness.pipeline.applyRetention(meetingID: meeting.id, rule: .deleteAfterProcessing)
+    stored = try #require(try await harness.store.asset(id: asset.id))
+    #expect(stored.retention == .deleteAfterProcessing)
+    #expect(stored.expiresAt == PipelineHarness.now, "off with every export done stamps now")
+    #expect(await retentionEvents(harness, events) == [.retentionApplied(meetingID: meeting.id)])
+
+    let failure = await #expect(throws: PipelineFailure.self) {
+      try await harness.pipeline.applyRetention(meetingID: UUID(), rule: .keepForever)
+    }
+    #expect(failure?.stage == .retention)
+  }
+
+  /// A swept asset (stamp cleared, files gone) looks like the deferred
+  /// case; a Re-export must not stamp it again and trigger another sweep.
+  @Test func aSweptAssetIsNotStampedAgainOnReexport() async throws {
+    let harness = try await PipelineHarness()
+    defer { harness.cleanUp() }
+    let (meeting, asset) = try harness.meeting(
+      source: .macInPerson, retention: .deleteAfterProcessing)
+    try await harness.pipeline.enqueue(meeting, asset: asset)
+    await harness.pipeline.waitUntilIdle()
+    #expect(try await harness.store.asset(id: asset.id)?.expiresAt == PipelineHarness.now)
+    #expect(!(try await RetentionSweep(store: harness.store).run(now: PipelineHarness.now)).isEmpty)
+    #expect(!FileManager.default.fileExists(atPath: asset.url.path))
+    #expect(try await harness.store.asset(id: asset.id)?.expiresAt == nil)
+
+    let events = await harness.events.subscribe()
+    try await harness.pipeline.redeliver(meetingID: meeting.id)
+    #expect(try await harness.store.asset(id: asset.id)?.expiresAt == nil, "nothing left to delete")
+    #expect(await retentionEvents(harness, events).isEmpty)
+  }
+}
+
+/// Holds the pipeline inside `cleanup` until a test opened it, so the test
+/// can act while the meeting is `.processing`.
+private actor RetentionGate {
+  private var entered = false
+  private var opened = false
+  private var enteredWaiters: [CheckedContinuation<Void, Never>] = []
+  private var openWaiters: [CheckedContinuation<Void, Never>] = []
+
+  /// Called by the gated stage: reports the arrival, then waits for `open()`.
+  func enter() async {
+    entered = true
+    for waiter in enteredWaiters { waiter.resume() }
+    enteredWaiters = []
+    guard !opened else { return }
+    await withCheckedContinuation { openWaiters.append($0) }
+  }
+
+  func open() {
+    opened = true
+    for waiter in openWaiters { waiter.resume() }
+    openWaiters = []
+  }
+
+  func waitUntilEntered() async {
+    guard !entered else { return }
+    await withCheckedContinuation { enteredWaiters.append($0) }
+  }
+}
+
+/// `PassthroughCleaner` behind a `RetentionGate`.
+private struct RetentionGatedCleaner: TranscriptCleaner, Sendable {
+  let gate: RetentionGate
+  let inner = PassthroughCleaner()
+
+  func clean(_ input: CleanupInput) async throws -> CleanupOutput {
+    await gate.enter()
+    return try await inner.clean(input)
   }
 }
