@@ -1,7 +1,7 @@
 import SwiftUI
 
 /// The composed controls of the redesign that are not buttons or chips:
-/// the nav row, the icon button, the search field, the text field style and
+/// the nav row, the icon button, the search field, the text field box and
 /// the segmented tabs. Boxes, fills and type follow the plan's components
 /// table; hover and selection swap over `Motion.functional` and hold still
 /// under Reduce Motion. No control here owns behaviour; callers pass the
@@ -114,7 +114,6 @@ struct SearchField: View {
   let placeholder: String
   let id: String
   @FocusState private var focused: Bool
-  @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
   init(text: Binding<String>, placeholder: String = "Search", id: String = "search-meetings") {
     _text = text
@@ -135,43 +134,20 @@ struct SearchField: View {
         .focusEffectDisabled()
         .accessibilityIdentifier(id)
     }
-    .padding(.horizontal, Theme.Control.rowInset)
-    .frame(height: Theme.Control.inputHeight)
-    .background(Theme.Radius.md.shape.fill(Color.stenoRaised))
-    .overlay(
-      Theme.Radius.md.shape.strokeBorder(
-        focused ? Color.stenoRing : Color.stenoBorder, lineWidth: Theme.Space.hairline)
-    )
+    .modifier(InputBox(focused: focused))
     .contentShape(Theme.Radius.md.shape)
     .onTapGesture { focused = true }
-    .animation(Motion.swap(reduceMotion: reduceMotion), value: focused)
   }
 }
 
-/// The hairline text field: 28 pt tall, radius 8, `raised`, `ring` while
-/// focused. Replaces `.roundedBorder` everywhere.
-struct StenoTextFieldStyle: TextFieldStyle {
-  func _body(configuration: TextField<Self._Label>) -> some View {
-    StenoTextFieldSurface(field: configuration)
-  }
-}
-
-/// `nonisolated` (SE-0449): `TextFieldStyle._body` is a nonisolated
-/// requirement, so the surface must be constructible off the main actor.
-/// Dropping the `View` protocol's main-actor inference makes the memberwise
-/// init plain; SwiftUI still evaluates `body` on the main thread.
-nonisolated private struct StenoTextFieldSurface: View {
-  let field: TextField<StenoTextFieldStyle._Label>
-  @FocusState private var focused: Bool
+/// The input box the search field and the text field share: 28 pt tall,
+/// radius 8, `raised`, hairline `border`, `ring` while focused.
+private struct InputBox: ViewModifier {
+  let focused: Bool
   @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
-  var body: some View {
-    field
-      .textFieldStyle(.plain)
-      .font(.steno(Theme.TextSize.xs))
-      .foregroundStyle(Color.stenoStrong)
-      .focused($focused)
-      .focusEffectDisabled()
+  func body(content: Content) -> some View {
+    content
       .padding(.horizontal, Theme.Control.rowInset)
       .frame(height: Theme.Control.inputHeight)
       .background(Theme.Radius.md.shape.fill(Color.stenoRaised))
@@ -180,6 +156,32 @@ nonisolated private struct StenoTextFieldSurface: View {
           focused ? Color.stenoRing : Color.stenoBorder, lineWidth: Theme.Space.hairline)
       )
       .animation(Motion.swap(reduceMotion: reduceMotion), value: focused)
+  }
+}
+
+/// The hairline text field of the plan's `StenoTextFieldStyle` row, shipped
+/// as a modifier: `TextFieldStyle._body` is a nonisolated requirement and
+/// Swift 6.1 cannot build a view holding `@FocusState` from it, whereas a
+/// `View` extension is main-actor inferred. Replaces `.roundedBorder`.
+private struct StenoTextFieldBox: ViewModifier {
+  @FocusState private var focused: Bool
+
+  func body(content: Content) -> some View {
+    content
+      .textFieldStyle(.plain)
+      .font(.steno(Theme.TextSize.xs))
+      .foregroundStyle(Color.stenoStrong)
+      .focused($focused)
+      .focusEffectDisabled()
+      .modifier(InputBox(focused: focused))
+  }
+}
+
+extension View {
+  /// The hairline text field box: 28 pt tall, radius 8, `raised`, `ring`
+  /// while focused, 13 pt `strong` text. Apply to a `TextField`.
+  func stenoTextField() -> some View {
+    modifier(StenoTextFieldBox())
   }
 }
 
@@ -277,7 +279,7 @@ extension SegmentedTabs where Tab: RawRepresentable, Tab.RawValue == String {
           IconButton("ellipsis", label: "Actions") {}
         }
         TextField("Speaker name", text: $name)
-          .textFieldStyle(StenoTextFieldStyle())
+          .stenoTextField()
           .frame(width: 240)
       }
     }

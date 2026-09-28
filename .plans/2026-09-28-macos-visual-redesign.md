@@ -316,7 +316,7 @@ segmented cells 24 inside a 28 container.
 | `StatusChip` | padding 1 x 6, radius 6, gap 4 | semantic: colour at 12 % fill, text in the colour; neutral (`.neutral` case): transparent, hairline `border`, text `muted` | 11 medium | none |
 | `IconButton` | 28 x 28, radius 14 | transparent, hairline `border`; hover `card` | 14 pt glyph `muted`, hover `strong` | requires an accessibility label |
 | `SearchField` | height 28, padding 0 x 10, radius 8, gap 8 | `raised`, hairline `border`; focused `ring` | 14 pt `magnifyingglass` `faint`, text 13 `strong`, placeholder `faint` | `@FocusState`; ⌘F from `AppCommands` focuses it; id `search-meetings` |
-| `StenoTextFieldStyle` | height 28, padding 0 x 10, radius 8 | `raised`, hairline; focused `ring` | 13 `strong`, placeholder `faint` | replaces every `.roundedBorder` |
+| `.stenoTextField()` (planned as `StenoTextFieldStyle`; shipped as a `View` modifier because `TextFieldStyle._body` is nonisolated and Swift 6.1 on the hosted runner cannot build the `@FocusState` helper from it) | height 28, padding 0 x 10, radius 8 | `raised`, hairline; focused `ring` | 13 `strong`, placeholder `faint` | replaces every `.roundedBorder` |
 | `EmptyState` | centred VStack gap 12; icon well 48 x 48 radius 12 | well `card` + hairline; 20 pt symbol `faint` | title 14 medium `strong`; body 13 `muted`, max width 280, centred; optional action (`EmptyState.Action(title:id:run:)`) 16 below, rendered as a secondary button, so the onboarding plan's "Set up summaries" and "Run summary" survive | ids passed in (`empty-meetings`, `empty-detail`) |
 | `SectionLabel` | unchanged | | 11 semibold uppercase tracking 0.6 `faint` | |
 | `StatusDot(color:)` | 6 pt circle (from the start-recording plan) | the colour passed | | used by the list entry, `MessageRow`, `StopLabel`; summary bullets are 4 pt, not a `StatusDot` |
@@ -372,7 +372,7 @@ Three columns:
       something the default does not. 8 pt when present.
    6. Progress row or level bars (Recording and processing states). 12 pt when present.
    7. Tags row: neutral chips, then an "Add tag" ghost button (12 `faint`, `plus` glyph 10 pt)
-      that swaps to a `StenoTextFieldStyle` field 240 wide; trailing on the same row: "Review
+      that swaps to a `.stenoTextField()` field 240 wide; trailing on the same row: "Review
       speakers (n)" primary when needed, then `IconButton("ellipsis")` opening the existing
       Actions menu; failed reason and `model.error` as `MessageRow`s under the title. 16 pt.
    8. `SegmentedTabs` left-aligned at 32 pt inset; 16 pt; full-width hairline; content;
@@ -406,7 +406,7 @@ glyph (`checkmark.circle.fill` `live-bright`, `xmark.circle.fill` `destructive`,
 `circle` `ghost`), title 14 semibold `strong`, neutral "Optional" chip, trailing
 "Skipped" 12 `faint`; expanded: 12 pt, explanation 13 `muted` `lineSpacing(4)`, 12 pt,
 action row (primary, secondary, ghost "Skip" 13 `faint`), spinner and the listening note
-12 `faint` while requesting; the setup rows' fields use `StenoTextFieldStyle`. 24 pt;
+12 `faint` while requesting; the setup rows' fields use `.stenoTextField()`. 24 pt;
 footer right-aligned, buttons per the onboarding plan (Later or Done on page 1, Back and
 Finish on page 2; secondary and primary).
 
@@ -484,7 +484,7 @@ selection altogether, and `.listStyle(.plain)` keeps the highlight. The list col
 semibold with "n to review" 13 `faint`; cards `Card` padding 16 gap 12; play control as
 a 28 pt `IconButton`; suggestion rows unchanged in structure; candidates as neutral
 chip buttons (hairline, radius 6, 12 medium, height 24, hover `card`) in the existing
-horizontal scroller; name field `StenoTextFieldStyle`; merge picker unchanged; footer
+horizontal scroller; name field `.stenoTextField()`; merge picker unchanged; footer
 Later / Done.
 
 **Settings** (`SettingsView.swift`): structure unchanged. Chips through the new
@@ -512,7 +512,7 @@ index step 10. Build and test commands are in Verification.
 2. **Components** (system PR). `Components.swift`: rewrite the two button styles,
    `Card(padding:)`, `StatusChip` with a `.neutral` variant, `MessageRow` over `StatusDot`,
    `readingColumn()`. New files `Design/Controls.swift` (`IconButton`, `SearchField`,
-   `StenoTextFieldStyle`, `SegmentedTabs`, `NavRow`) and `Design/EmptyState.swift` (with the
+   `.stenoTextField()`, `SegmentedTabs`, `NavRow`) and `Design/EmptyState.swift` (with the
    optional action). No layout, no behaviour, no copy change. Add `#Preview` blocks per
    component showing light and dark side by side. Done when the app builds, every existing
    test passes unchanged (`TabTextSnapshotTests` included), and the previews render both
