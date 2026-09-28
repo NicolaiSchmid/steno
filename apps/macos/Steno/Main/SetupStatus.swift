@@ -38,19 +38,15 @@ enum SummaryStatus: Equatable, Sendable {
   func skippedRow(for tab: MeetingDetailViewModel.Tab) -> SkippedRow? {
     switch (self, tab) {
     case (.skippedUnconfigured, .summary):
-      SkippedRow(
-        title: "No summary", body: SetupCopy.summarySkipped, action: .setUpSummaries,
-        footnote: nil)
+      SkippedRow(title: "No summary", body: SetupCopy.summarySkipped, action: .setUpSummaries)
     case (.skippedRunnable, .summary):
       SkippedRow(
         title: "No summary yet", body: SetupCopy.summaryRunnable, action: .runSummary,
         footnote: SetupCopy.summaryRunnableFootnote)
     case (.skippedUnconfigured, .tasks):
-      SkippedRow(
-        title: "No tasks", body: SetupCopy.tasksSkipped, action: .setUpSummaries, footnote: nil)
+      SkippedRow(title: "No tasks", body: SetupCopy.tasksSkipped, action: .setUpSummaries)
     case (.skippedRunnable, .tasks):
-      SkippedRow(
-        title: "No tasks", body: SetupCopy.tasksSkipped, action: .runSummary, footnote: nil)
+      SkippedRow(title: "No tasks", body: SetupCopy.tasksSkipped, action: .runSummary)
     case (.pending, _), (.present, _), (_, .transcript), (_, .scratchpad):
       nil
     }

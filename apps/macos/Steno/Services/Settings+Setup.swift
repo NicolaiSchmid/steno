@@ -2,11 +2,6 @@ import Foundation
 import StenoCore
 import StenoLLM
 
-/// The model type by an unambiguous name for files that also import
-/// SwiftUI, whose `Settings` scene shadows it (and `StenoCore.Settings`
-/// resolves to the module's namespace enum, not the module).
-typealias StenoSettings = Settings
-
 /// "Configured" is a pure function of `Settings`: the onboarding plan's
 /// banner, detail rows and onboarding page read these, never a mirrored
 /// class. The view models already observe `Settings`, so nothing else has

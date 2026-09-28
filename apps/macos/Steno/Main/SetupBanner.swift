@@ -12,13 +12,15 @@ import SwiftUI
 struct SetupBanner: View {
   let controller: AppController
   let hasMeetings: Bool
-  @State private var settings: StenoSettings?
+  /// What the stored `Settings` are missing; nil while loading or once both
+  /// are configured.
+  @State private var missing: SetupBannerMessage?
   @Environment(\.openSettings) private var openSettings
   @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
   private var message: SetupBannerMessage? {
-    guard hasMeetings, !controller.setupBannerDismissed, let settings else { return nil }
-    return SetupBannerMessage(settings: settings)
+    guard hasMeetings, !controller.setupBannerDismissed else { return nil }
+    return missing
   }
 
   var body: some View {
@@ -76,7 +78,7 @@ struct SetupBanner: View {
   private func observeSettings() async {
     do {
       for try await settings in controller.environment.settings.observe() {
-        self.settings = settings
+        missing = SetupBannerMessage(settings: settings)
       }
     } catch {
       // The detail pane and Settings report store errors; the banner just

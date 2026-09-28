@@ -189,7 +189,7 @@ final class OnboardingViewModel {
   /// Both setup rows saved or skipped. The window closes when this turns
   /// true on page 2.
   var setupHandled: Bool {
-    SetupStep.allCases.allSatisfy { setupStates[$0]?.isHandled ?? false }
+    SetupStep.allCases.allSatisfy { setupState(of: $0).isHandled }
   }
 
   /// Every row handled: the permissions and the two setup steps.

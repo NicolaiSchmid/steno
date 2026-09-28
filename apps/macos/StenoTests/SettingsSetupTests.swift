@@ -68,22 +68,21 @@ final class SettingsSetupTests: XCTestCase {
     XCTAssertEqual(SummaryStatus(meeting: nil, llmConfigured: true), .pending)
   }
 
-  func testSkippedRowsCarryThePlansCopyAndActions() throws {
+  /// Which action and footnote each skipped row carries; the words are
+  /// pinned by `TabTextSnapshotTests`.
+  func testSkippedRowsCarryTheActions() throws {
     let unconfigured = try XCTUnwrap(SummaryStatus.skippedUnconfigured.skippedRow(for: .summary))
-    XCTAssertEqual(unconfigured.title, "No summary")
-    XCTAssertTrue(unconfigured.body.hasPrefix("Summary skipped: no LLM endpoint is configured."))
     XCTAssertEqual(unconfigured.action, .setUpSummaries)
     XCTAssertNil(unconfigured.footnote)
+    XCTAssertEqual(unconfigured.lines.count, 2)
 
     let runnable = try XCTUnwrap(SummaryStatus.skippedRunnable.skippedRow(for: .summary))
-    XCTAssertEqual(runnable.title, "No summary yet")
     XCTAssertEqual(runnable.action, .runSummary)
-    XCTAssertEqual(runnable.footnote, "Summary only; the transcript stays as recorded.")
+    XCTAssertNotNil(runnable.footnote, "the re-run keeps the transcript as recorded")
     XCTAssertEqual(runnable.lines.count, 3)
 
-    let tasks = try XCTUnwrap(SummaryStatus.skippedUnconfigured.skippedRow(for: .tasks))
-    XCTAssertEqual(tasks.body, "No tasks: the summary was skipped.")
-    XCTAssertEqual(tasks.action, .setUpSummaries)
+    XCTAssertEqual(
+      SummaryStatus.skippedUnconfigured.skippedRow(for: .tasks)?.action, .setUpSummaries)
     XCTAssertEqual(SummaryStatus.skippedRunnable.skippedRow(for: .tasks)?.action, .runSummary)
 
     XCTAssertNil(SummaryStatus.present.skippedRow(for: .summary))

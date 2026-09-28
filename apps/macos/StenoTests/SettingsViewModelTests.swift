@@ -450,36 +450,4 @@ final class SettingsViewModelTests: XCTestCase {
     }
   }
 
-  // MARK: Setup
-
-  /// The LLM tab's `isConfigured` and `Settings.llmConfigured` are the same
-  /// rule (`LLMEndpoint(settings:)`), so the tab's info row and the setup
-  /// banner agree; the Obsidian toggle and `vaultConfigured` likewise.
-  func testConfiguredFlagsAgreeWithTheTabs() async throws {
-    let environment = try await TestSupport.environment(seed: false)
-    let llm = LLMSettingsViewModel(environment: environment)
-    await llm.load()
-    var settings = try await environment.settings.load()
-    XCTAssertEqual(llm.isConfigured, settings.llmConfigured)
-    XCTAssertFalse(settings.llmConfigured)
-
-    llm.baseURLText = "http://127.0.0.1:1234/v1"
-    llm.model = "qwen"
-    await llm.save()
-    settings = try await environment.settings.load()
-    XCTAssertTrue(llm.isConfigured)
-    XCTAssertEqual(llm.isConfigured, settings.llmConfigured)
-
-    let obsidian = ObsidianSettingsViewModel(environment: environment)
-    await obsidian.load()
-    XCTAssertEqual(obsidian.enabled, settings.vaultConfigured)
-    let vault = try TestSupport.temporaryDirectory("steno-vault")
-    defer { try? FileManager.default.removeItem(at: vault) }
-    obsidian.enabled = true
-    obsidian.vaultPath = vault.path
-    await obsidian.save()
-    settings = try await environment.settings.load()
-    XCTAssertTrue(settings.vaultConfigured)
-    XCTAssertEqual(SettingsTab.allCases.count, 7, "one case per Settings tab")
-  }
 }

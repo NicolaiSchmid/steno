@@ -212,19 +212,15 @@ struct MeetingDetailView: View {
       switch model.exportStatus {
       case .noVault:
         footerText(SetupCopy.notExportedNoVault)
-        Button(SetupCopy.chooseVault) { controller.openSettings(.obsidian, with: openSettings) }
-          .buttonStyle(.plain)
-          .font(.steno(Theme.TextSize.xxs))
-          .foregroundStyle(Color.stenoMutedForeground)
-          .accessibilityIdentifier("footer-choose-vault")
+        footerButton(SetupCopy.chooseVault, id: "footer-choose-vault") {
+          controller.openSettings(.obsidian, with: openSettings)
+        }
       case .notExported:
         footerText(SetupCopy.notExportedYet)
-        Button(SetupCopy.exportNow) { Task { await model.reexport() } }
-          .buttonStyle(.plain)
-          .font(.steno(Theme.TextSize.xxs))
-          .foregroundStyle(Color.stenoMutedForeground)
-          .disabled(model.isBusy || !model.canReexport)
-          .accessibilityIdentifier("footer-export-now")
+        footerButton(SetupCopy.exportNow, id: "footer-export-now") {
+          Task { await model.reexport() }
+        }
+        .disabled(model.isBusy || !model.canReexport)
       case .exported(let deliveries):
         ForEach(deliveries) { delivery in
           DeliveryBadge(delivery: delivery)
@@ -242,6 +238,17 @@ struct MeetingDetailView: View {
       .font(.steno(Theme.TextSize.xxs))
       .foregroundStyle(Color.stenoFaint)
       .accessibilityIdentifier("footer-export-status")
+  }
+
+  /// The footer's one plain action beside the status text.
+  private func footerButton(_ title: String, id: String, action: @escaping () -> Void)
+    -> some View
+  {
+    Button(title, action: action)
+      .buttonStyle(.plain)
+      .font(.steno(Theme.TextSize.xxs))
+      .foregroundStyle(Color.stenoMutedForeground)
+      .accessibilityIdentifier(id)
   }
 }
 
