@@ -30,6 +30,11 @@ final class UITestScenarioTests: XCTestCase {
     XCTAssertNil(hold.launchError)
   }
 
+  /// The flag `AppEnvironment.preview()` reads is the one the parser knows.
+  @MainActor func testTheHoldTranscribeFlagIsTheEnvironmentsArgument() {
+    XCTAssertEqual(UITestScenario.holdTranscribeFlag, AppEnvironment.holdTranscribeArgument)
+  }
+
   func testAnUnknownStenoFlagIsReported() {
     let scenario = UITestScenario(arguments: ["Steno", "-steno-ui-testing", "-steno-show-promt"])
     XCTAssertTrue(scenario.isUITesting)

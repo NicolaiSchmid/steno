@@ -7,8 +7,10 @@ struct UITestScenario: Equatable, Sendable {
   static let prefix = "-steno-"
   static let uiTestingFlag = "-steno-ui-testing"
   static let showPromptFlag = "-steno-show-prompt"
-  /// Read by `AppEnvironment.preview()` itself; named here so it is known.
-  static let holdTranscribeFlag = AppEnvironment.holdTranscribeArgument
+  /// Read by `AppEnvironment.preview()` itself (`holdTranscribeArgument`,
+  /// main-actor isolated, so the literal is repeated here and a test pins
+  /// the two equal); named here so it is known.
+  static let holdTranscribeFlag = "-steno-ui-testing-hold-transcribe"
   static let knownFlags: Set<String> = [uiTestingFlag, showPromptFlag, holdTranscribeFlag]
 
   /// The preview environment: in-memory database, fakes, synthetic audio.
