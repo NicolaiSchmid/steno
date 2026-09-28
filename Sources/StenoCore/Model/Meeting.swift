@@ -144,6 +144,8 @@ public struct Meeting: Codable, Sendable, Equatable, Hashable, Identifiable {
   /// Where `title` came from; `.default` when absent from JSON.
   public var titleOrigin: TitleOrigin
   public var templateID: String
+  /// Nil on a `.ready` meeting means the summary was skipped: no LLM
+  /// endpoint was configured when it was processed; see `PipelineDependencies`.
   public var summary: SummaryDocument?
   /// Free text typed by the user; the one editable text of a meeting.
   public var scratchpad: String

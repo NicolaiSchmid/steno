@@ -2,9 +2,11 @@ import Foundation
 
 /// The region of a person page that Steno owns: one line per meeting between
 /// two HTML comments, newest first, each line ending in a `%%steno:<uuid>%%`
-/// comment that identifies its meeting. Bytes outside the markers are
-/// copied unchanged; missing markers are appended. Internal until a second
-/// destination touches user-owned files.
+/// comment that identifies its meeting. `merge` replaces or inserts a
+/// meeting's line, `remove` drops it again when the person left the meeting
+/// (a speaker reassigned to somebody else). Bytes outside the markers are
+/// copied unchanged; missing markers are appended by `merge` and never by
+/// `remove`. Internal until a second destination touches user-owned files.
 enum ManagedBlock {
   static let start = "<!-- steno:meetings:start -->"
   static let end = "<!-- steno:meetings:end -->"
@@ -40,6 +42,24 @@ enum ManagedBlock {
     return existing[..<startRange.upperBound] + "\n"
       + sortedNewestFirst(lines).joined(separator: "\n")
       + "\n" + existing[endRange.lowerBound...]
+  }
+
+  /// `existing` without the line that carries this meeting's marker. Every
+  /// other line of the block keeps its bytes and order, an emptied block
+  /// keeps its markers, and `existing` comes back unchanged when it has no
+  /// block or the block has no line for this meeting.
+  static func remove(meetingID: UUID, from existing: String) -> String {
+    guard let startRange = existing.range(of: start),
+      let endRange = existing.range(of: end, range: startRange.upperBound..<existing.endIndex)
+    else { return existing }
+    let marker = self.marker(meetingID)
+    let body = existing[startRange.upperBound..<endRange.lowerBound]
+    guard body.contains(marker) else { return existing }
+    let kept = body.split(separator: "\n", omittingEmptySubsequences: false)
+      .filter { !$0.contains(marker) }
+      .joined(separator: "\n")
+    return String(existing[..<startRange.upperBound]) + kept
+      + String(existing[endRange.lowerBound...])
   }
 
   /// By the leading `- YYYY-MM-DD` descending, then by text so equal dates

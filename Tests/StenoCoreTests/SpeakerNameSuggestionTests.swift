@@ -49,10 +49,8 @@ import Testing
       speakerID: SampleData.speakerOneID, name: "Nicolai", confidence: 0.7, evidence: "intro")
     try await store.replaceSummary(
       SampleData.meeting(), tasks: [], decisions: [], speakerNames: [Self.jerome, nicolai])
-    let memory = InMemorySpeakerMemory(people: SampleData.persons())
 
-    try await store.confirm(
-      speakerID: SampleData.speakerTwoID, person: SampleData.persons()[0], memory: memory)
+    try await store.confirm(speakerID: SampleData.speakerTwoID, person: SampleData.persons()[0])
 
     #expect(try await store.nameSuggestions(meetingID: SampleData.meetingID) == [nicolai])
   }

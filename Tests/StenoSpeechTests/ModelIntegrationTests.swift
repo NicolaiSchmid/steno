@@ -199,10 +199,14 @@ import Testing
 
       let meetings = try MeetingStore.inMemory()
       let memory = CosineSpeakerMemory(store: meetings)
-      let anna = Person(id: UUID(), displayName: "Anna", createdAt: Date())
-      let dan = Person(id: UUID(), displayName: "Daniel", createdAt: Date())
-      try await memory.enroll(voice["de-short.wav"]!, as: anna)
-      try await memory.enroll(daniel, as: dan)
+      let anna = Person(
+        id: UUID(), displayName: "Anna", embedding: voice["de-short.wav"]!.normalized(),
+        sampleCount: 1, createdAt: Date())
+      let dan = Person(
+        id: UUID(), displayName: "Daniel", embedding: daniel.normalized(), sampleCount: 1,
+        createdAt: Date())
+      try await meetings.save(anna)
+      try await meetings.save(dan)
       let threshold = Settings().speakerMatchThreshold
       let recognised = try await memory.match(voice["de-short-2.wav"]!, threshold: threshold)
       #expect(recognised?.person.id == anna.id, "\(String(describing: recognised))")

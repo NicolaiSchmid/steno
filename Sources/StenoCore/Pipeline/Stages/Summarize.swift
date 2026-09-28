@@ -8,12 +8,23 @@ extension ProcessingPipeline {
   /// title and a title the user typed (`titleOrigin == .user`) stay; a
   /// default title is replaced by the model's. The caller folds earlier usage
   /// (cleanup) into `meeting.llmUsage` first.
+  ///
+  /// Without a summarizer (no LLM endpoint) the stage posts its progress,
+  /// leaves title, language and usage as given, and persists the meeting
+  /// with `summary` nil and no tasks, decisions or name suggestions, so a
+  /// second `process` run never keeps rows an earlier run wrote.
   func summarize(meeting: Meeting, segments: [TranscriptSegment], speakers: [Speaker])
     async throws -> Meeting
   {
-    let summarizer = dependencies.summarizer
     let store = self.store
     return try await run(.summarize, meetingID: meeting.id) {
+      var updated = meeting
+      guard let summarizer = dependencies.summarizer else {
+        updated.summary = nil
+        updated.updatedAt = self.now
+        try await store.replaceSummary(updated, tasks: [], decisions: [], speakerNames: [])
+        return updated
+      }
       guard let template = SummaryTemplate.bundled(id: meeting.templateID) else {
         throw PipelineFailure(
           stage: .summarize, reason: "unknown summary template \(meeting.templateID)")
@@ -25,7 +36,6 @@ extension ProcessingPipeline {
           meeting: meeting, segments: segments, speakers: speakers, participants: participants,
           knownPeople: people, template: template))
 
-      var updated = meeting
       updated.summary = output.summary
       updated.summary?.templateID = template.id
       if meeting.calendarEventID == nil, meeting.titleOrigin != .user, !output.title.isEmpty {

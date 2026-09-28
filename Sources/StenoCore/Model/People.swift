@@ -34,8 +34,9 @@ public struct Participant: Codable, Sendable, Equatable, Hashable, Identifiable 
   }
 }
 
-/// A known voice across meetings. `embedding` is the running L2-normalised
-/// mean of `sampleCount` enrolments; it is persisted as a BLOB and never
+/// A known voice across meetings. `embedding` is the L2-normalised mean of
+/// the embeddings of the person's newest `sampleCount` confirmed speakers
+/// (`MeetingStore.refreshVoice`); it is persisted as a BLOB and never
 /// written to JSON.
 public struct Person: Codable, Sendable, Equatable, Hashable, Identifiable {
   public var id: UUID
@@ -67,6 +68,16 @@ public struct Person: Codable, Sendable, Equatable, Hashable, Identifiable {
     case email
     case sampleCount
     case createdAt
+  }
+
+  /// Whether two display names name the same person for lookup purposes:
+  /// equal ignoring case, diacritics and surrounding whitespace, so "jerome"
+  /// finds "Jérôme". Used by `MeetingStore.resolvePerson` and the speaker
+  /// picker's filter.
+  public static func namesMatch(_ lhs: String, _ rhs: String) -> Bool {
+    lhs.trimmingCharacters(in: .whitespacesAndNewlines).compare(
+      rhs.trimmingCharacters(in: .whitespacesAndNewlines),
+      options: [.caseInsensitive, .diacriticInsensitive]) == .orderedSame
   }
 }
 
@@ -143,8 +154,8 @@ public struct Embedding: Codable, Sendable, Equatable, Hashable {
     return dot(other) / denominator
   }
 
-  /// Weighted mean of two embeddings, renormalised. Used by the person and
-  /// speaker merges and by `SpeakerMemory.enroll` implementations.
+  /// Weighted mean of two embeddings, renormalised. Used by the speaker
+  /// merge.
   public static func weightedMean(
     _ lhs: Embedding, weight lhsWeight: Float, _ rhs: Embedding, weight rhsWeight: Float
   ) -> Embedding {
@@ -154,6 +165,18 @@ public struct Embedding: Codable, Sendable, Equatable, Hashable {
       (left * lhsWeight + right * rhsWeight) / total
     }
     return Embedding(mixed).normalized()
+  }
+
+  /// The normalised mean of `embeddings`, each taken at unit length so a
+  /// sample's scale is never a weight; nil for none. Embeddings whose
+  /// dimension differs from the first are skipped.
+  public static func mean(of embeddings: [Embedding]) -> Embedding? {
+    guard let first = embeddings.first else { return nil }
+    var sum = [Float](repeating: 0, count: first.values.count)
+    for sample in embeddings where sample.values.count == sum.count {
+      for (index, value) in sample.normalized().values.enumerated() { sum[index] += value }
+    }
+    return Embedding(sum).normalized()
   }
 }
 
@@ -232,7 +255,10 @@ public struct Speaker: Codable, Sendable, Equatable, Hashable, Identifiable {
   public var embedding: Embedding?
   /// The diarizer-chosen range of the cluster's clearest speech.
   public var sampleClipRange: ClosedRange<TimeInterval>?
-  /// 10 s 16 kHz WAV written by the pipeline, deleted on confirm.
+  /// 10 s 16 kHz WAV written by the pipeline. Stays after confirmation
+  /// while the recording exists (so a name can be checked later); removed
+  /// with the audio by the retention sweep once the speaker is confirmed,
+  /// by `confirm` when the audio is already gone, and with the meeting.
   public var sampleClipURL: URL?
   /// Diarizer cluster quality in `0...1`, not the match score.
   public var clusterConfidence: Float

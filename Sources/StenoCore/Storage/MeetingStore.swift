@@ -10,6 +10,8 @@ public enum MeetingStoreError: Error, Sendable, Equatable, CustomStringConvertib
   /// `delete(meetingID:)` while the capture writer or the pipeline still
   /// holds the meeting's files.
   case meetingBusy(UUID, MeetingState.Kind)
+  /// `resolvePerson(named:)` with nothing but whitespace.
+  case blankPersonName
 
   public var description: String {
     switch self {
@@ -19,6 +21,7 @@ public enum MeetingStoreError: Error, Sendable, Equatable, CustomStringConvertib
     case .personNotFound(let id): "person \(id) not found"
     case .speakersInDifferentMeetings(let a, let b):
       "speakers \(a) and \(b) belong to different meetings"
+    case .blankPersonName: "a person needs a name"
     }
   }
 }
@@ -248,7 +251,7 @@ public final class MeetingStore: Sendable {
   /// The model's guess who each speaker is, at most one per speaker, in
   /// speaker id order: written with every summary, removed by `confirm` and
   /// with the speaker or the meeting. Never applied automatically; the
-  /// review sheet offers it beside the cosine match and the calendar
+  /// speaker picker offers it beside the cosine match and the calendar
   /// attendees (#78).
   public func nameSuggestions(meetingID: UUID) async throws -> [SpeakerNameSuggestion] {
     try await writer.read { db in

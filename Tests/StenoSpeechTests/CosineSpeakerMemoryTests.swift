@@ -52,82 +52,15 @@ import Testing
     #expect(try await memory.match(Embedding(between), threshold: 0.6, margin: 0) != nil)
   }
 
-  @Test func enrollKeepsARunningMeanWithACap() async throws {
-    let (store, anna, _) = try await makeStore()
-    let memory = CosineSpeakerMemory(store: store, maxSamples: 3)
-    try await memory.enroll(embedding(1), as: anna)
-    var stored = try #require(try await store.person(id: anna.id))
-    #expect(stored.sampleCount == 2)
-    let values = try #require(stored.embedding?.values)
-    #expect(abs(values[0] - values[1]) < 1e-6, "one old sample and one new: equal weight")
-    #expect(abs(Embedding(values).magnitude - 1) < 1e-5)
-
-    for _ in 0..<5 { try await memory.enroll(embedding(1), as: anna) }
-    stored = try #require(try await store.person(id: anna.id))
-    #expect(stored.sampleCount == 7, "the count keeps counting; only the weight is capped")
-    let drifted = try #require(stored.embedding?.values)
-    #expect(drifted[1] > 0.9, "a capped mean drifts toward the new voice")
-    // With weight capped at 3, the seventh sample still moves the mean by a
-    // quarter; an uncapped mean of seven would move it by a seventh.
-    let before = drifted
-    try await memory.enroll(embedding(3), as: anna)
-    let after = try #require(try await store.person(id: anna.id)?.embedding?.values)
-    #expect(after[3] / before[1] > 0.3, "\(after[3]) against \(before[1])")
-  }
-
-  /// The sample's scale is not a weight: enrolling a vector ten times
-  /// longer than the unit sample gives the same row.
-  @Test func aScaledSampleEnrolsLikeTheUnitSample() async throws {
+  @Test func embeddingsOfAnotherDimensionAreSkippedInRanking() async throws {
     let (store, anna, ben) = try await makeStore()
-    // Both start from the same voice with the same weight.
-    var annaCopy = anna
-    annaCopy.sampleCount = 50
-    var benCopy = ben
-    benCopy.embedding = anna.embedding
-    benCopy.sampleCount = 50
-    try await store.save(annaCopy)
-    try await store.save(benCopy)
-    let memory = CosineSpeakerMemory(store: store)
-    let unit = embedding(1)
-    let scaled = Embedding(unit.values.map { $0 * 10 })
-    try await memory.enroll(unit, as: annaCopy)
-    try await memory.enroll(scaled, as: benCopy)
-    let annaRow = try #require(try await store.person(id: anna.id)?.embedding)
-    let benRow = try #require(try await store.person(id: ben.id)?.embedding)
-    #expect(zip(annaRow.values, benRow.values).allSatisfy { abs($0 - $1) < 1e-6 })
-    #expect(abs(annaRow.values[1] - 1 / 51.0) < 1e-3, "one sample among fifty-one")
-  }
-
-  /// `enroll` folds into the stored row, not into the caller's copy: the
-  /// review sheet may hold a `Person` from before another meeting enrolled.
-  @Test func enrollFoldsIntoTheStoredPersonNotTheStaleArgument() async throws {
-    let (store, anna, _) = try await makeStore()
-    let memory = CosineSpeakerMemory(store: store)
-    try await memory.enroll(embedding(0), as: anna)  // stored count is now 2
-    var stale = anna
-    stale.displayName = "Old name"
-    try await memory.enroll(embedding(1), as: stale)
-    let stored = try #require(try await store.person(id: anna.id))
-    #expect(stored.sampleCount == 3)
-    #expect(stored.displayName == "Anna", "the stored row wins over the stale copy")
-    let values = try #require(stored.embedding?.values)
-    #expect(abs(values[0] / values[1] - 2) < 1e-4, "two old samples against one new")
-  }
-
-  @Test func embeddingsOfAnotherDimensionAreSkippedInRankingAndReplacedOnEnrol() async throws {
-    let (store, anna, ben) = try await makeStore()
-    var odd = Person(
+    let odd = Person(
       id: SampleData.uuid(4), displayName: "Odd", embedding: Embedding([1, 0, 0]),
       sampleCount: 7, createdAt: SampleData.createdAt)
     try await store.save(odd)
     let memory = CosineSpeakerMemory(store: store)
     let ranked = try await memory.candidates(for: embedding(0), limit: 10)
     #expect(ranked.map(\.person.id) == [anna.id, ben.id], "the 3-dim row cannot be compared")
-
-    try await memory.enroll(embedding(2), as: odd)
-    odd = try #require(try await store.person(id: odd.id))
-    #expect(odd.embedding == embedding(2), "a mismatched row is replaced, not averaged")
-    #expect(odd.sampleCount == 8, "the count keeps growing")
   }
 
   /// The manual check made deterministic: confirming a speaker in meeting
@@ -146,7 +79,7 @@ import Testing
     let dora = Person(id: SampleData.uuid(9), displayName: "Dora", createdAt: SampleData.createdAt)
     #expect(try await memory.match(voice, threshold: 0.6) == nil, "nobody is known yet")
 
-    try await store.confirm(speakerID: speaker.id, person: dora, memory: memory)
+    try await store.confirm(speakerID: speaker.id, person: dora)
     let stored = try #require(try await store.person(id: dora.id))
     #expect(stored.sampleCount == 1)
     #expect(stored.embedding == voice.normalized())
@@ -160,11 +93,28 @@ import Testing
     #expect(try await memory.match(embedding(6), threshold: 0.6) == nil)
   }
 
-  @Test func mergedPeopleRankAsOneWithTheWeightedVoice() async throws {
-    // Anna: axis 0, one sample; Ben: axis 1, four samples.
+  @Test func mergedPeopleRankAsOneWithTheRecomputedVoice() async throws {
+    // Anna: one confirmed speaker on axis 0; Ben: four on axis 1.
     let (store, anna, ben) = try await makeStore()
+    let meeting = SampleData.meeting()
+    try await store.save(meeting)
+    var speakers = [
+      Speaker(
+        id: SampleData.uuid(40), meetingID: meeting.id, clusterLabel: "Speaker 1",
+        assignment: .confirmed(personID: anna.id), embedding: embedding(0), clusterConfidence: 0.9)
+    ]
+    for index in 0..<4 {
+      speakers.append(
+        Speaker(
+          id: SampleData.uuid(41 + index), meetingID: meeting.id,
+          clusterLabel: "Speaker \(index + 2)", assignment: .confirmed(personID: ben.id),
+          embedding: embedding(1), clusterConfidence: 0.9))
+    }
+    try await store.replaceTranscript(meeting, segments: [], speakers: speakers)
     let memory = CosineSpeakerMemory(store: store)
+
     try await store.mergePersons(keep: anna.id, remove: ben.id)
+
     let ranked = try await memory.candidates(for: embedding(1), limit: 10)
     #expect(ranked.map(\.person.id) == [anna.id], "Ben is gone")
     let kept = try #require(try await store.person(id: anna.id))
@@ -174,18 +124,4 @@ import Testing
     #expect(ranked[0].similarity > 0.9, "Ben's voice now matches Anna")
   }
 
-  @Test func enrollInsertsAnUnknownPerson() async throws {
-    let (store, _, _) = try await makeStore()
-    let memory = CosineSpeakerMemory(store: store)
-    let newcomer = Person(
-      id: SampleData.uuid(9), displayName: "Dora", createdAt: SampleData.createdAt)
-    try await memory.enroll(
-      Embedding([Float](repeating: 2, count: Embedding.dimension)), as: newcomer)
-    let stored = try #require(try await store.person(id: newcomer.id))
-    #expect(stored.sampleCount == 1)
-    #expect(abs((stored.embedding?.magnitude ?? 0) - 1) < 1e-5, "stored normalised")
-    let match = try await memory.match(
-      Embedding([Float](repeating: 1, count: Embedding.dimension)), threshold: 0.6)
-    #expect(match?.person.id == newcomer.id)
-  }
 }
