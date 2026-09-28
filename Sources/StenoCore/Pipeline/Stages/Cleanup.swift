@@ -8,10 +8,16 @@ extension ProcessingPipeline {
 
   /// Runs the `TranscriptCleaner` and persists the cleaned `text`; `rawText`,
   /// ids, order and count are the merge stage's and must come back intact.
+  /// Without a cleaner (no LLM endpoint) the stage posts its progress and
+  /// hands the merged segments on untouched with `.zero` usage; the merge
+  /// stage already persisted them, so nothing is written.
   func cleanup(meeting: Meeting, segments: [TranscriptSegment], speakers: [Speaker]) async throws
     -> Cleaned
   {
-    let cleaner = dependencies.cleaner
+    guard let cleaner = dependencies.cleaner else {
+      await post(.cleanup, meetingID: meeting.id)
+      return Cleaned(segments: segments, usage: .zero)
+    }
     let store = self.store
     return try await run(.cleanup, meetingID: meeting.id) {
       let participants = try await store.participants(meetingID: meeting.id)

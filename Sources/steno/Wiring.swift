@@ -30,11 +30,13 @@ struct SpeechOptions: ParsableArguments {
 }
 
 /// Builds the stores and the `PipelineDependencies`. Core wires fakes for
-/// speech, diarization and LLM; delivery runs through the real
-/// `DeliveryCoordinator` (or the `dispatcher` a command passes, as `steno
-/// deliver --vault` does); `--engine <id>` swaps in the real speech engine,
-/// diarizer and cosine speaker memory (the speech PR's one recorded edit
-/// here). Later workstreams swap the rest in behind flags in their own
+/// speech and diarization; the LLM passes are the real ones when the
+/// settings name an endpoint and nil otherwise (the pipeline then skips
+/// cleanup and summary; no fake runs in the product). Delivery runs through
+/// the real `DeliveryCoordinator` (or the `dispatcher` a command passes, as
+/// `steno deliver --vault` does); `--engine <id>` swaps in the real speech
+/// engine, diarizer and cosine speaker memory (the speech PR's one recorded
+/// edit here). Later workstreams swap the rest in behind flags in their own
 /// command files.
 enum Wiring {
   /// The `transform:` of every `<meeting-id>` argument.
@@ -52,8 +54,8 @@ enum Wiring {
     return (store, SettingsStore(writer: store.writer))
   }
 
-  /// `llm` replaces the fake cleaner and summarizer when the settings name
-  /// an endpoint; see `llmComponents(settings:)`.
+  /// `llm` is the real cleaner and summarizer when the settings name an
+  /// endpoint and nil otherwise; see `llmComponents(settings:)`.
   static func dependencies(
     store: MeetingStore, settings: SettingsStore, engine: SpeechEngineID? = nil,
     modelsDirectory: URL? = nil, dispatcher: (any DeliveryDispatcher)? = nil,
@@ -71,8 +73,8 @@ enum Wiring {
       speechEngine: speechEngine,
       diarizer: diarizer,
       speakerMemory: speakerMemory,
-      cleaner: llm?.cleaner ?? PassthroughCleaner(),
-      summarizer: llm?.summarizer ?? FakeSummarizer(),
+      cleaner: llm?.cleaner,
+      summarizer: llm?.summarizer,
       dispatcher: dispatcher ?? DeliveryCoordinator(store: store, settings: settings),
       store: store,
       settings: settings,
@@ -85,8 +87,8 @@ enum Wiring {
   /// The real cleaner and summarizer on one shared `OpenAICompatibleClient`
   /// (so a structured output mode learned during cleanup carries over to the
   /// summary), or nil when `Settings.llmBaseURL` or `llmModel` is unset and
-  /// the fakes stay. The key comes from `secretStore()`: `STENO_LLM_API_KEY`
-  /// or the 0600 secrets file in the support directory.
+  /// the pipeline skips both passes. The key comes from `secretStore()`:
+  /// `STENO_LLM_API_KEY` or the 0600 secrets file in the support directory.
   static func llmComponents(settings: Settings) async throws -> LLMPasses? {
     guard let endpoint = LLMEndpoint(settings: settings) else { return nil }
     let client = OpenAICompatibleClient(

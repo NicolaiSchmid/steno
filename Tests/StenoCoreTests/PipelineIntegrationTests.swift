@@ -141,6 +141,77 @@ import Testing
     #expect(stored.summary == nil)
   }
 
+  /// Decision 2 of the onboarding plan: `.ready` with `summary == nil` means
+  /// the summary was skipped for lack of an endpoint. Nil passes post their
+  /// progress, write nothing, and the meeting still lands ready and
+  /// delivered with the merged transcript and its original title.
+  @Test func nilLLMPassesSkipCleanupAndSummaryAndLandReady() async throws {
+    let harness = try await PipelineHarness(cleaner: nil, summarizer: nil)
+    defer { harness.cleanUp() }
+    let events = await harness.events.subscribe()
+    let (meeting, asset) = try harness.meeting(source: .macCall)
+    try await harness.pipeline.enqueue(meeting, asset: asset)
+    await harness.pipeline.waitUntilIdle()
+
+    let export = try await harness.store.export(meetingID: meeting.id)
+    #expect(export.meeting.state == .ready)
+    #expect(export.meeting.summary == nil)
+    #expect(export.meeting.llmUsage == nil)
+    #expect(export.meeting.title == "Untitled")
+    #expect(
+      export.meeting.language == LanguageTag(rawValue: "de"), "the transcript's, not a model's")
+    #expect(export.tasks.isEmpty)
+    #expect(export.decisions.isEmpty)
+    #expect(try await harness.store.nameSuggestions(meetingID: meeting.id).isEmpty)
+    #expect(export.segments.count == 12)
+    #expect(export.segments.allSatisfy { $0.text == $0.rawText })
+    #expect(export.audio?.mixdownURL != nil)
+    #expect(await harness.dispatcher.dispatches.entries == [meeting.id])
+    #expect(
+      try await harness.store.deliveries(meetingID: meeting.id).map(\.status) == [.delivered])
+
+    let stages = await harness.events.drain(events).compactMap { event -> PipelineStage? in
+      if case .progress(_, let stage) = event { return stage }
+      return nil
+    }
+    #expect(stages == PipelineStage.allCases, "cleanup and summarize still report progress")
+
+    let error = await #expect(throws: PipelineFailure.self) {
+      try await harness.pipeline.rerunSummary(meetingID: meeting.id, templateID: "interview")
+    }
+    #expect(error?.stage == .summarize)
+    #expect(error?.reason.contains("LLM endpoint") == true)
+    let after = try await harness.store.export(meetingID: meeting.id)
+    #expect(after == export, "a refused re-run changes nothing")
+    #expect(await harness.dispatcher.dispatches.count == 1)
+
+    try await harness.pipeline.redeliver(meetingID: meeting.id)
+    #expect(await harness.dispatcher.dispatches.count == 2)
+  }
+
+  /// The other side of the invariant: a configured summarizer never leaves a
+  /// ready meeting without a summary, even when the model has nothing to say.
+  @Test func aConfiguredSummarizerNeverLeavesReadyWithoutASummary() async throws {
+    var empty = SampleData.summaryOutput()
+    empty.title = ""
+    empty.summary = SummaryDocument(templateID: "default", language: nil, sections: [])
+    empty.tasks = []
+    empty.decisions = []
+    empty.speakerNames = []
+    let harness = try await PipelineHarness(summarizer: FakeSummarizer(canned: empty))
+    defer { harness.cleanUp() }
+    let (meeting, asset) = try harness.meeting(source: .macInPerson)
+    try await harness.pipeline.enqueue(meeting, asset: asset)
+    await harness.pipeline.waitUntilIdle()
+
+    let export = try await harness.store.export(meetingID: meeting.id)
+    #expect(export.meeting.state == .ready)
+    #expect(export.meeting.summary != nil)
+    #expect(export.meeting.summary?.sections.isEmpty == true)
+    #expect(export.meeting.llmUsage != nil)
+    #expect(export.meeting.title == "Untitled")
+  }
+
   @Test func retentionZeroExpiresImmediately() async throws {
     let harness = try await PipelineHarness()
     defer { harness.cleanUp() }
@@ -174,7 +245,7 @@ import Testing
     #expect(export.meeting.summary?.sections.count == 4)
     #expect(
       export.meeting.llmUsage == LLMUsage(promptTokens: 500, completionTokens: 250, requests: 3))
-    #expect(await harness.summarizer.summaries.entries == ["default", "daily-standup"])
+    #expect(await harness.summarizer?.summaries.entries == ["default", "daily-standup"])
     #expect(await harness.dispatcher.dispatches.count == 2)
 
     try await harness.pipeline.redeliver(meetingID: meeting.id)
@@ -346,7 +417,7 @@ import Testing
     try await first.value
 
     #expect(await harness.engine.transcriptions.count == 1)
-    #expect(await harness.summarizer.summaries.count == 1)
+    #expect(await harness.summarizer?.summaries.count == 1)
     #expect(await harness.dispatcher.dispatches.count == 1)
     #expect(try await harness.store.meeting(id: meeting.id)?.state == .ready)
     // Once the run is over the meeting is free again.
@@ -410,7 +481,7 @@ import Testing
     #expect(orphaned.updatedAt == PipelineHarness.now)
     #expect(try await harness.store.meeting(id: ready.id)?.state == .ready)
     #expect(try await harness.store.meeting(id: recording.id)?.state == .recording)
-    #expect(await harness.summarizer.summaries.count == 2)
+    #expect(await harness.summarizer?.summaries.count == 2)
     // Both run in the background at once, so only the set is fixed.
     #expect(Set(await harness.dispatcher.dispatches.entries) == [processing.id, queued.id])
     #expect(try await harness.pipeline.resumeUnfinished().isEmpty, "nothing left to resume")

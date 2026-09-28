@@ -23,7 +23,9 @@ extension MeetingSource: ExpressibleByArgument {
 
 /// `steno process <wav>`: copies the 16 kHz mono WAV (and the system lane
 /// for a call) into `<audio folder>/<meetingID>/`, enqueues the meeting and
-/// waits for the pipeline. Prints the meeting id.
+/// waits for the pipeline. Prints the meeting id, and only that, on stdout;
+/// a note on stderr says when the summary was skipped for lack of an LLM
+/// endpoint.
 struct Process: AsyncParsableCommand {
   static let configuration = CommandConfiguration(
     abstract: "Run the processing pipeline over a WAV file.")
@@ -132,6 +134,10 @@ struct Process: AsyncParsableCommand {
     }
     if case .failed(let reason) = result.state {
       throw RuntimeFailure(description: "processing failed: \(reason)")
+    }
+    if result.summary == nil {
+      FileHandle.standardError.write(
+        Data("summary skipped: no LLM endpoint configured\n".utf8))
     }
     print(meetingID.uuidString)
   }

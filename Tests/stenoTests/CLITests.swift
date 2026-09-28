@@ -87,8 +87,10 @@ import Testing
         "--source", "mac-in-person", "--title", "Sweep", "--db", db, "--audio-folder", audio.path,
       ], home: home)
     #expect(process.status == 0, "\(process.stderr)")
+    #expect(process.stderr.contains("summary skipped: no LLM endpoint configured"))
     let meetingID = try #require(
-      UUID(uuidString: process.stdout.trimmingCharacters(in: .whitespacesAndNewlines)))
+      UUID(uuidString: process.stdout.trimmingCharacters(in: .whitespacesAndNewlines)),
+      "stdout carries the meeting id and nothing else")
     let layout = RecordingLayout(audioFolder: audio, meetingID: meetingID)
     #expect(FileManager.default.fileExists(atPath: layout.master(.wav16kInt16).path))
     #expect(FileManager.default.fileExists(atPath: layout.mixdown(.wav16kInt16).path))
@@ -110,7 +112,9 @@ import Testing
     #expect(decoded.meeting.id == meetingID)
     #expect(decoded.meeting.state == .ready)
     #expect(decoded.meeting.source == .macInPerson)
-    #expect(decoded.meeting.title == "Summary of Sweep")
+    #expect(decoded.meeting.title == "Sweep", "no fake summarizer renames the meeting")
+    #expect(decoded.meeting.summary == nil)
+    #expect(decoded.meeting.llmUsage == nil)
     #expect(decoded.segments.count == 3)
     #expect(decoded.audio?.mixdownURL != nil)
 
@@ -135,7 +139,8 @@ import Testing
       MeetingExport.self,
       from: try Data(contentsOf: out.appendingPathComponent("call/meeting.json")))
     #expect(callDecoded.speakers.map(\.clusterLabel) == ["Me", "Speaker 1", "Speaker 2"])
-    #expect(callDecoded.meeting.summary?.templateID == "daily-standup")
+    #expect(callDecoded.meeting.templateID == "daily-standup")
+    #expect(callDecoded.meeting.summary == nil, "no endpoint, no summary")
 
     #expect(FileManager.default.fileExists(atPath: Self.realStenoFolder.path) == hadRealFolder)
   }
