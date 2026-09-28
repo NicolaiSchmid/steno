@@ -14,16 +14,48 @@ already work, starting with an Obsidian vault.
 
 ## Install
 
-macOS 15 or newer on Apple Silicon. Homebrew:
+Steno is a signed and notarized `Steno.app` for macOS 15+ on Apple Silicon. Every
+release publishes `Steno-<version>.dmg`; drag the app to `/Applications`, or use one of the
+package managers below. Releases so far are pre-releases.
+
+### Homebrew
 
 ```sh
 brew tap nicolaischmid/tap && brew install --cask steno
 ```
 
-Or download the DMG from [Releases](https://github.com/NicolaiSchmid/steno/releases). Either
-way the app updates itself through Sparkle. The tap
-([NicolaiSchmid/homebrew-tap](https://github.com/NicolaiSchmid/homebrew-tap)) follows every
-release, release candidates included; Sparkle offers stable releases only.
+The tap ([NicolaiSchmid/homebrew-tap](https://github.com/NicolaiSchmid/homebrew-tap))
+follows every release, release candidates included, and the app updates itself through
+Sparkle, which offers stable releases only. With nix-darwin: `homebrew.taps = [
+"nicolaischmid/tap" ]; homebrew.casks = [ "nicolaischmid/tap/steno" ];`.
+
+### Nix
+
+`flake.nix` installs the released `Steno.app` unchanged (no rebuild, no re-signing) on
+`aarch64-darwin`:
+
+```sh
+nix profile install github:NicolaiSchmid/steno#steno
+```
+
+With nix-darwin, add the flake as an input and put `steno.packages.aarch64-darwin.steno`
+in `environment.systemPackages`; nix-darwin links `Applications/Steno.app` into
+`/Applications/Nix Apps`. With home-manager use `home.packages` and link the app yourself
+(`home.file` into `~/Applications`, or the `mac-app-util` module); home-manager does not
+link `Applications/` on its own. `nix run` does not apply, the output is an app bundle
+with no `bin/`.
+
+The app runs from the read-only Nix store, so Sparkle's "Check for Updates…" can download
+a new version but cannot install it. Update by bumping `release.version` and
+`release.hash` at the top of `flake.nix` (the release workflow prints both in its job
+summary) and rebuilding. To silence the scheduled daily check:
+
+```sh
+defaults write uno.schmid.steno.mac SUEnableAutomaticChecks -bool NO
+```
+
+nix-darwin users who want in-app updates can use the Homebrew cask through
+`homebrew.casks` instead; it installs into `/Applications`, where Sparkle can write.
 
 ## What it does
 
