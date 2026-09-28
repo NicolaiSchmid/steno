@@ -4,12 +4,20 @@ import Testing
 @testable import StenoCore
 
 @Suite struct EventBusTests {
+  static func progress(_ stage: PipelineStage, fraction: Double = 0) -> MeetingEvent {
+    .progress(
+      meetingID: SampleData.meetingID,
+      progress: ProcessingProgress(
+        stage: stage, fraction: fraction, nextFraction: min(1, fraction + 0.1),
+        estimatedRemaining: .seconds(90), isEstimateSeeded: true))
+  }
+
   @Test func onePostReachesTwoSubscribers() async throws {
     let bus = MeetingEventBus()
     let first = await bus.subscribe()
     let second = await bus.subscribe()
 
-    let event = MeetingEvent.progress(meetingID: SampleData.meetingID, stage: .decode)
+    let event = Self.progress(.decode)
     await bus.post(event)
     await bus.post(
       .speakersNeedReview(meetingID: SampleData.meetingID, speakerIDs: [SampleData.speakerTwoID]))
@@ -30,12 +38,10 @@ import Testing
 
   @Test func lateSubscribersMissEarlierEvents() async throws {
     let bus = MeetingEventBus()
-    await bus.post(.progress(meetingID: SampleData.meetingID, stage: .decode))
+    await bus.post(Self.progress(.decode))
     let stream = await bus.subscribe()
-    await bus.post(.progress(meetingID: SampleData.meetingID, stage: .transcribe))
+    await bus.post(Self.progress(.transcribe, fraction: 0.1))
     var iterator = stream.makeAsyncIterator()
-    #expect(
-      await iterator.next()
-        == .progress(meetingID: SampleData.meetingID, stage: .transcribe))
+    #expect(await iterator.next() == Self.progress(.transcribe, fraction: 0.1))
   }
 }

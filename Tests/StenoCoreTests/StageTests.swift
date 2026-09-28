@@ -16,7 +16,9 @@ import Testing
     let calls = await harness.engine.transcriptions.entries
     #expect(calls.map(\.hint) == [nil, LanguageTag(rawValue: "de").language])
     #expect(calls.map(\.duration) == [6, 6])
-    #expect(await harness.engine.preparations.count == 1)
+    #expect(
+      await harness.engine.preparations.count == 0,
+      "`process` prepares the engine before the run's first event, not the stage")
   }
 
   @Test func decodeFailureCarriesTheDecodeStage() async throws {
@@ -60,21 +62,27 @@ import Testing
     #expect(LanguageElection.elect(tie) == de)
   }
 
-  @Test func progressIsPostedOncePerStageAcrossLanes() async throws {
+  @Test func transcribePostsOncePerLane() async throws {
     let harness = try await PipelineHarness()
     defer { harness.cleanUp() }
     let stream = await harness.events.subscribe()
     let (meeting, asset) = try harness.meeting(source: .macCall)
     _ = try await harness.pipeline.decodeAndTranscribe(asset: asset, meetingID: meeting.id)
-    var iterator = stream.makeAsyncIterator()
-    #expect(await iterator.next() == .progress(meetingID: meeting.id, stage: .decode))
-    #expect(
-      await iterator.next() == .progress(meetingID: meeting.id, stage: .transcribe))
     _ = try await harness.pipeline.matchSpeakers(
       [], meetingID: meeting.id, settings: harness.settings)
+    let collected = await harness.events.drain(stream)
+    #expect(collected.map(\.stage) == [.decode, .transcribe, .transcribe, .matchSpeakers])
     #expect(
-      await iterator.next()
-        == .progress(meetingID: meeting.id, stage: .matchSpeakers))
+      collected.allSatisfy { event in
+        if case .progress(let id, _) = event { return id == meeting.id }
+        return false
+      })
+    let inPerson = try await PipelineHarness()
+    defer { inPerson.cleanUp() }
+    let single = await inPerson.events.subscribe()
+    let (room, roomAsset) = try inPerson.meeting(source: .macInPerson)
+    _ = try await inPerson.pipeline.decodeAndTranscribe(asset: roomAsset, meetingID: room.id)
+    #expect(await inPerson.events.drain(single).map(\.stage) == [.decode, .transcribe])
   }
 }
 
@@ -451,12 +459,9 @@ import Testing
     #expect(try await harness.store.meeting(id: meeting.id)?.state == .ready)
     #expect(
       !FileManager.default.fileExists(atPath: RecordingLayout(asset: asset).mixdown(.m4aAAC).path))
-    let sentinel = MeetingEvent.progress(meetingID: meeting.id, stage: .retention)
-    await harness.events.post(sentinel)
-    var iterator = stream.makeAsyncIterator()
     #expect(
-      await iterator.next() == .progress(meetingID: meeting.id, stage: .persist))
-    #expect(await iterator.next() == sentinel, "no speakersNeedReview when everyone is confirmed")
+      await harness.events.drain(stream).map(\.stage) == [.persist],
+      "no speakersNeedReview when everyone is confirmed")
   }
 
   @Test func aWAVAssetGetsAMixdownAndOnlyUnconfirmedSpeakersNeedReview() async throws {
@@ -475,11 +480,10 @@ import Testing
     #expect(mixdown.lastPathComponent == "audio.wav")
     #expect(try Data(contentsOf: mixdown) == Data(contentsOf: asset.url))
     #expect(try await harness.store.asset(id: asset.id)?.mixdownURL == mixdown)
-    var iterator = stream.makeAsyncIterator()
+    let collected = await harness.events.drain(stream)
+    #expect(collected.map(\.stage) == [.persist, nil])
     #expect(
-      await iterator.next() == .progress(meetingID: meeting.id, stage: .persist))
-    #expect(
-      await iterator.next()
+      collected.last
         == .speakersNeedReview(meetingID: meeting.id, speakerIDs: [SampleData.speakerTwoID]))
   }
 }
@@ -498,11 +502,10 @@ import Testing
     try await harness.pipeline.retention(asset: asset)
 
     #expect(try await harness.store.asset(id: asset.id)?.expiresAt == PipelineHarness.now)
-    #expect(
-      await harness.events.drain(stream) == [
-        .progress(meetingID: meeting.id, stage: .retention),
-        .retentionApplied(meetingID: meeting.id),
-      ])
+    let collected = await harness.events.drain(stream)
+    #expect(collected.map(\.stage) == [.retention, nil])
+    #expect(collected.last == .retentionApplied(meetingID: meeting.id))
+    #expect(collected.first?.progress?.nextFraction == 1, "retention ends the run")
   }
 
   @Test func aFailedExpiryWritePostsNoRetentionApplied() async throws {
@@ -510,7 +513,7 @@ import Testing
     defer { harness.cleanUp() }
     // The meeting row was never written, so the foreign key refuses the
     // asset row and the stage throws before anything could be swept.
-    let (meeting, asset) = try harness.meeting(source: .phone)
+    let (_, asset) = try harness.meeting(source: .phone)
     let stream = await harness.events.subscribe()
 
     let failure = await #expect(throws: PipelineFailure.self) {
@@ -520,7 +523,7 @@ import Testing
     #expect(failure?.stage == .retention)
     #expect(try await harness.store.asset(id: asset.id) == nil)
     #expect(
-      await harness.events.drain(stream) == [.progress(meetingID: meeting.id, stage: .retention)],
+      await harness.events.drain(stream).map(\.stage) == [.retention],
       "a sweep started on the event must find the expiry written")
   }
 }

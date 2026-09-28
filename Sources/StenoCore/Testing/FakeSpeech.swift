@@ -30,6 +30,9 @@ public struct FakeSpeechEngine: SpeechEngine, Sendable {
   public var textPrefix: String
   public var wordTimings: Bool
   public var failure: (any Error & Sendable)?
+  /// Runs before every `transcribe`; tests advance a `ManualClock` here so a
+  /// lane takes a known time.
+  public var onTranscribe: (@Sendable () async -> Void)?
   public let transcriptions = CallLog<TranscribeCall>()
   public let preparations = CallLog<Bool>()
 
@@ -58,6 +61,7 @@ public struct FakeSpeechEngine: SpeechEngine, Sendable {
     -> [RawSegment]
   {
     await transcriptions.record(TranscribeCall(duration: audio.duration, hint: hint))
+    await onTranscribe?()
     if let failure { throw failure }
     return Self.segments(
       duration: audio.duration, segmentSeconds: segmentSeconds, language: language,

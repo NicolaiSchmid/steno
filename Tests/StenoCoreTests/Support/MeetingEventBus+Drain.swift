@@ -15,3 +15,16 @@ extension MeetingEventBus {
     return collected
   }
 }
+
+extension MeetingEvent {
+  /// The value of a `progress` event, nil for every other event.
+  var progress: ProcessingProgress? {
+    if case .progress(_, let progress) = self { return progress }
+    return nil
+  }
+
+  /// The stage of a `progress` event, nil for every other event; tests
+  /// compare stages where the fraction and the remaining time are not the
+  /// point.
+  var stage: PipelineStage? { progress?.stage }
+}

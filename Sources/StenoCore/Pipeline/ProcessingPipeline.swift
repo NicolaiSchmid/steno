@@ -3,7 +3,9 @@ import Foundation
 /// Everything the pipeline needs, and the only injection axis: the app and
 /// the CLI pass real implementations, tests pass the fakes in `Testing/`.
 /// `events` defaults to `store.events`, so the store's `deleted` and the
-/// pipeline's `progress` reach one subscriber.
+/// pipeline's `progress` reach one subscriber. `now` stamps rows; `clock`
+/// measures stage durations for the learned rates, and tests pass a
+/// `ManualClock`.
 public struct PipelineDependencies: Sendable {
   public let decoder: any AudioDecoder
   public let speechEngine: any SpeechEngine
@@ -16,6 +18,7 @@ public struct PipelineDependencies: Sendable {
   public let settings: SettingsStore
   public let events: MeetingEventBus
   public let now: @Sendable () -> Date
+  public let clock: any Clock<Duration>
 
   public init(
     decoder: any AudioDecoder,
@@ -28,7 +31,8 @@ public struct PipelineDependencies: Sendable {
     store: MeetingStore,
     settings: SettingsStore,
     events: MeetingEventBus? = nil,
-    now: @escaping @Sendable () -> Date = Date.init
+    now: @escaping @Sendable () -> Date = Date.init,
+    clock: any Clock<Duration> = ContinuousClock()
   ) {
     self.decoder = decoder
     self.speechEngine = speechEngine
@@ -41,20 +45,28 @@ public struct PipelineDependencies: Sendable {
     self.settings = settings
     self.events = events ?? store.events
     self.now = now
+    self.clock = clock
   }
 }
 
 /// The post-meeting pipeline: one actor, one typed function per
-/// `PipelineStage` (in `Stages/`), `progress` posted as each stage starts,
-/// and one place that turns any error into `.failed(reason)`. Lanes are
-/// decoded one at a time inside the stage that needs them, so at most one
-/// `AudioBuffer16k` is alive. One operation runs per meeting at a time:
-/// a second `process`, `rerunSummary` or `redeliver` on a meeting that is
-/// in flight throws instead of interleaving writes with the first.
+/// `PipelineStage` (in `Stages/`), `progress` posted as each stage starts
+/// with a fraction and an estimate from the run's `ProcessingRun`, and one
+/// place that turns any error into `.failed(reason)`. Lanes are decoded one
+/// at a time inside the stage that needs them, so at most one
+/// `AudioBuffer16k` is alive. One operation runs per meeting at a time: a
+/// second `process`, `rerunSummary` or `redeliver` on a meeting that is in
+/// flight throws instead of interleaving writes with the first. Stage
+/// durations feed `MeetingStore.record` when the meeting was alone in flight
+/// for the whole stage, so overlapping runs never pollute the rates.
 public actor ProcessingPipeline {
   let dependencies: PipelineDependencies
   private var running: [UUID: Task<Void, Never>] = [:]
   private var inFlight: Set<UUID> = []
+  /// Counts every admission to `inFlight`; a stage whose count moved was
+  /// not alone for its whole span.
+  private var admissions = 0
+  private var runs: [UUID: ProcessingRun] = [:]
 
   public init(dependencies: PipelineDependencies) {
     self.dependencies = dependencies
@@ -132,7 +144,10 @@ public actor ProcessingPipeline {
   /// with whatever was persisted so far (the transcript survives a cleanup
   /// or summarize failure). Once `persist` has marked the meeting `.ready`
   /// nothing downgrades it: a `retention` error is thrown to the caller and
-  /// the meeting stays ready and delivered.
+  /// the meeting stays ready and delivered. Both engines are prepared before
+  /// the first event, so a cold model load lands before the run's clock
+  /// starts and never enters a rate. A meeting processed again starts a new
+  /// run whose first event is `.decode` at fraction 0.
   public func process(assetID: UUID) async throws {
     guard let asset = try await store.asset(id: assetID) else {
       throw PipelineFailure(stage: .decode, reason: "audio asset \(assetID) not found")
@@ -145,6 +160,15 @@ public actor ProcessingPipeline {
       let persisted: AudioAsset
       do {
         let settings = try await attributing(.decode) { try await dependencies.settings.load() }
+        let rates = try await attributing(.decode) { try await store.stageRates() }
+        try await attributing(.decode) { try await dependencies.speechEngine.prepare() }
+        try await attributing(.diarize) { try await dependencies.diarizer.prepare() }
+        runs[meeting.id] = ProcessingRun(
+          estimator: ProcessingEstimator(
+            duration: meeting.duration, lanes: asset.lanes,
+            speechEngineID: dependencies.speechEngine.id,
+            llmModel: ProcessingEstimator.llmModelKey(settings), rates: rates),
+          stages: PipelineStage.allCases, stopwatch: Stopwatch(dependencies.clock))
         let transcription = try await decodeAndTranscribe(asset: asset, meetingID: meeting.id)
         var current = meeting
         current.language = transcription.language
@@ -175,7 +199,8 @@ public actor ProcessingPipeline {
 
   /// Summarize again with another template, then deliver. A failure is
   /// thrown to the caller and leaves the meeting's state, summary and
-  /// deliveries as they were; only `process` marks `.failed`.
+  /// deliveries as they were; only `process` marks `.failed`. Progress is
+  /// posted over a run of `[.summarize, .deliver]`.
   public func rerunSummary(meetingID: UUID, templateID: String) async throws {
     guard let meeting = try await store.meeting(id: meetingID) else {
       throw PipelineFailure(stage: .summarize, reason: "meeting \(meetingID) not found")
@@ -183,6 +208,12 @@ public actor ProcessingPipeline {
     try await exclusively(meetingID, stage: .summarize) {
       let export = try await attributing(.summarize) {
         try await store.export(meetingID: meetingID)
+      }
+      runs[meetingID] = try await attributing(.summarize) {
+        try await makeRun(
+          meeting: meeting, lanes: export.audio?.lanes ?? [],
+          tokens: ProcessingEstimator.tokenCount(export.segments),
+          stages: [.summarize, .deliver])
       }
       var current = meeting
       current.templateID = templateID
@@ -193,40 +224,86 @@ public actor ProcessingPipeline {
     }
   }
 
-  /// Deliver only: the one re-export entry point.
+  /// Deliver only: the one re-export entry point. Progress is posted over a
+  /// run of `[.deliver]`.
   public func redeliver(meetingID: UUID) async throws {
-    guard try await store.meeting(id: meetingID) != nil else {
+    guard let meeting = try await store.meeting(id: meetingID) else {
       throw PipelineFailure(stage: .deliver, reason: "meeting \(meetingID) not found")
     }
     try await exclusively(meetingID, stage: .deliver) {
+      runs[meetingID] = try await attributing(.deliver) {
+        let asset = try await store.asset(meetingID: meetingID)
+        return try await makeRun(
+          meeting: meeting, lanes: asset?.lanes ?? [], tokens: nil, stages: [.deliver])
+      }
       await deliver(meetingID: meetingID)
     }
   }
 
   // MARK: - Stage plumbing
 
+  /// A run over `stages` for a meeting outside `process`: the stored rates,
+  /// the configured engine and model, the given lanes and token count.
+  private func makeRun(
+    meeting: Meeting, lanes: [AudioLane], tokens: Int?, stages: [PipelineStage]
+  ) async throws -> ProcessingRun {
+    let settings = try await dependencies.settings.load()
+    let rates = try await store.stageRates()
+    return ProcessingRun(
+      estimator: ProcessingEstimator(
+        duration: meeting.duration, lanes: lanes, tokens: tokens,
+        speechEngineID: dependencies.speechEngine.id,
+        llmModel: ProcessingEstimator.llmModelKey(settings), rates: rates),
+      stages: stages, stopwatch: Stopwatch(dependencies.clock))
+  }
+
   /// Marks `meetingID` in flight for the duration of `body`; a second
   /// operation on the same meeting throws a `PipelineFailure` for `stage`.
+  /// The meeting's `ProcessingRun`, if `body` made one, goes with it.
   private func exclusively<T: Sendable>(
     _ meetingID: UUID, stage: PipelineStage, _ body: () async throws -> T
   ) async throws -> T {
     guard inFlight.insert(meetingID).inserted else {
       throw PipelineFailure(stage: stage, reason: "meeting \(meetingID) is already being processed")
     }
-    defer { inFlight.remove(meetingID) }
+    admissions += 1
+    defer {
+      inFlight.remove(meetingID)
+      runs[meetingID] = nil
+    }
     return try await body()
   }
 
-  /// Posts `progress` for `stage` starting on `meetingID`.
-  func post(_ stage: PipelineStage, meetingID: UUID) async {
-    await dependencies.events.post(.progress(meetingID: meetingID, stage: stage))
+  /// Replaces the run's guessed token count with the transcript's, the one
+  /// re-estimate inside a run; `cleanup` calls it before posting.
+  func revise(tokens: Int, meetingID: UUID) {
+    runs[meetingID]?.estimator.tokens = tokens
+  }
+
+  /// Posts `progress` for `stage` (lane `lane` inside transcribe) starting on
+  /// `meetingID`, computed and clamped on the meeting's run. A stage called
+  /// outside a run (tests reach stages directly) posts over a fresh run on
+  /// the seeds that is not kept.
+  func post(_ stage: PipelineStage, lane: Int = 0, meetingID: UUID) async {
+    var run = runs[meetingID] ?? standaloneRun()
+    let progress = run.progress(stage, lane: lane, elapsed: run.stopwatch.elapsed)
+    if runs[meetingID] != nil { runs[meetingID] = run }
+    await dependencies.events.post(.progress(meetingID: meetingID, progress: progress))
+  }
+
+  private func standaloneRun() -> ProcessingRun {
+    ProcessingRun(
+      estimator: ProcessingEstimator(
+        duration: 0, lanes: [], speechEngineID: dependencies.speechEngine.id,
+        llmModel: StageRates.fakeModel, rates: .seeds),
+      stages: PipelineStage.allCases, stopwatch: Stopwatch(dependencies.clock))
   }
 
   /// Turns any error thrown by `body` into a `PipelineFailure` carrying
-  /// `stage`, without posting progress (the second lane of a per-lane stage,
-  /// work before a stage starts).
+  /// `stage`, without posting progress (work before a stage starts, the
+  /// second lane's decode).
   func attributing<T: Sendable>(_ stage: PipelineStage, _ body: () async throws -> T)
-    async throws -> T
+    async rethrows -> T
   {
     do {
       return try await body()
@@ -235,12 +312,37 @@ public actor ProcessingPipeline {
     }
   }
 
-  /// Posts `progress` for `stage`, then runs `body` attributing its errors
-  /// to the stage.
-  func run<T: Sendable>(_ stage: PipelineStage, meetingID: UUID, _ body: () async throws -> T)
-    async throws -> T
-  {
-    await post(stage, meetingID: meetingID)
-    return try await attributing(stage, body)
+  /// Posts `progress` for `stage`, runs `body` attributing its errors to the
+  /// stage, and measures it on the dependencies' clock. The duration is
+  /// recorded as a rate sample once the stage is complete (its last lane
+  /// for transcribe) when the meeting was alone in flight for the whole
+  /// stage; a body that threw records nothing.
+  func run<T: Sendable>(
+    _ stage: PipelineStage, lane: Int = 0, meetingID: UUID, _ body: () async throws -> T
+  ) async rethrows -> T {
+    await post(stage, lane: lane, meetingID: meetingID)
+    let alone = inFlight.count == 1
+    let admissionsBefore = admissions
+    let watch = Stopwatch(dependencies.clock)
+    let value = try await attributing(stage, body)
+    let seconds = watch.elapsed.timeInterval
+    await recordTiming(
+      stage, lane: lane, seconds: seconds, alone: alone && admissions == admissionsBefore,
+      meetingID: meetingID)
+    return value
+  }
+
+  private func recordTiming(
+    _ stage: PipelineStage, lane: Int, seconds: Double, alone: Bool, meetingID: UUID
+  ) async {
+    guard var run = runs[meetingID] else { return }
+    run.measure(stage, seconds: seconds, alone: alone)
+    runs[meetingID] = run
+    let lastLane = max(run.estimator.lanes.count, 1) - 1
+    guard stage != .transcribe || lane == lastLane,
+      let sample = run.sample(stage, recordedAt: now)
+    else { return }
+    // The rates are a convenience; a bookkeeping failure never fails a run.
+    try? await store.record(sample)
   }
 }

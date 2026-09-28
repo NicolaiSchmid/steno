@@ -28,19 +28,25 @@ extension ProcessingPipeline {
 
   /// Per lane: decode, then transcribe with the previous lane's dominant
   /// language as the hint. The buffer goes out of scope before the next lane
-  /// is decoded. `progress` is posted once for `decode` and once for
-  /// `transcribe`, on the first lane.
+  /// is decoded. `progress` is posted once for `decode`, on the first lane,
+  /// and once per lane for `transcribe`; the engine was prepared by
+  /// `process` before the run's first event.
   func decodeAndTranscribe(asset: AudioAsset, meetingID: UUID) async throws -> Transcription {
     let decoder = dependencies.decoder
     let engine = dependencies.speechEngine
-    try await run(.decode, meetingID: meetingID) { try await engine.prepare() }
     var lanes: [AudioLane: [RawSegment]] = [:]
     var hint: LanguageTag?
     for (index, lane) in Self.orderedLanes(asset.lanes).enumerated() {
-      let buffer = try await attributing(.decode) { try await decoder.decode(asset, lane: lane) }
-      if index == 0 { await post(.transcribe, meetingID: meetingID) }
+      let buffer: AudioBuffer16k
+      if index == 0 {
+        buffer = try await run(.decode, meetingID: meetingID) {
+          try await decoder.decode(asset, lane: lane)
+        }
+      } else {
+        buffer = try await attributing(.decode) { try await decoder.decode(asset, lane: lane) }
+      }
       let laneHint = hint
-      let segments = try await attributing(.transcribe) {
+      let segments = try await run(.transcribe, lane: index, meetingID: meetingID) {
         try await engine.transcribe(buffer, hint: laneHint?.language)
       }
       lanes[lane] = segments

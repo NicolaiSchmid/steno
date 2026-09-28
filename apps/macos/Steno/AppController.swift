@@ -3,16 +3,19 @@ import StenoAudio
 import StenoCore
 
 /// The running app's object graph over one `AppEnvironment`: the recorder,
-/// the detection controller, the menu bar view model, pending speaker
-/// reviews, the retention sweep after processed meetings, the handover
-/// listener when phones are paired, and the first-launch login item
-/// registration.
+/// the detection controller, the menu bar view model, the processing
+/// progress model, pending speaker reviews, the retention sweep after
+/// processed meetings, the handover listener when phones are paired, and
+/// the first-launch login item registration.
 @MainActor
 @Observable
 final class AppController {
   let environment: AppEnvironment
   let recorder: RecordingController
   let menuBar: MenuBarViewModel
+  /// Where the pipeline is with every queued or processing meeting; the
+  /// menu bar row, the list entry and the detail view read it.
+  let progress: ProcessingProgressModel
   let detection: DetectionController
   /// Meetings the pipeline flagged with unconfirmed speakers.
   private(set) var pendingReviews: Set<UUID> = []
@@ -31,6 +34,7 @@ final class AppController {
     self.defaults = defaults
     self.recorder = RecordingController(environment: environment)
     self.menuBar = MenuBarViewModel(environment: environment)
+    self.progress = ProcessingProgressModel()
     self.detection = DetectionController(environment: environment)
     detection.startRecording = { [weak self] in await self?.recorder.start(mode: .call) }
     recorder.recordingDidChange = { [weak self] recording in
@@ -38,27 +42,21 @@ final class AppController {
     }
   }
 
-  /// Everything that happens once at launch, in order: interrupted
-  /// recordings become failed, meetings left queued or processing are
-  /// processed again, the retention sweep runs, the login item is
-  /// registered the first time (when the setting says so), the detector
-  /// starts, the handover listener starts when a phone is already paired,
-  /// and the pipeline's events are observed.
+  /// Everything that happens once at launch, in order: the pipeline's
+  /// events are subscribed, interrupted recordings become failed, meetings
+  /// left queued or processing are processed again, the retention sweep
+  /// runs, the login item is registered the first time (when the setting
+  /// says so), the detector starts, the handover listener starts when a
+  /// phone is already paired, and the meeting list is observed. The event
+  /// subscription comes first so the first events of resumed runs reach
+  /// the progress model.
   func launch() async {
     guard !launched else { return }
     launched = true
-    await environment.reconcileInterruptedRecordings()
-    await environment.resumeUnfinishedProcessing()
-    await environment.runRetentionSweep()
-    await registerLoginItemOnFirstLaunch()
-    await detection.applySettings()
-    await startHandoverIfPaired()
-    observers.append(Task { [menuBar] in await menuBar.observe() })
-    observers.append(Task { [menuBar] in await menuBar.observeProgress() })
+    let events = await environment.events.subscribe()
     observers.append(
       Task { [weak self, environment] in
-        let stream = await environment.events.subscribe()
-        for await event in stream {
+        for await event in events {
           guard let self else { return }
           switch event {
           case .speakersNeedReview(let meetingID, _):
@@ -70,11 +68,19 @@ final class AppController {
             await environment.runRetentionSweep()
           case .deleted(let meetingID):
             self.pendingReviews.remove(meetingID)
+            self.progress.apply(event)
           case .progress:
-            break
+            self.progress.apply(event)
           }
         }
       })
+    await environment.reconcileInterruptedRecordings()
+    await environment.resumeUnfinishedProcessing()
+    await environment.runRetentionSweep()
+    await registerLoginItemOnFirstLaunch()
+    await detection.applySettings()
+    await startHandoverIfPaired()
+    observers.append(Task { [menuBar] in await menuBar.observe() })
     observers.append(
       Task { [weak self, environment] in
         do {
@@ -89,9 +95,11 @@ final class AppController {
   }
 
   /// A pending review for a meeting the store no longer lists is dropped,
-  /// so a badge never points at nothing.
+  /// so a badge never points at nothing; the progress model gains an entry
+  /// for every queued or processing meeting and loses the others.
   private func meetingsChanged(_ meetings: [Meeting]) async {
     pendingReviews.formIntersection(meetings.map(\.id))
+    progress.meetingsChanged(meetings)
   }
 
   func reviewCompleted(meetingID: UUID) {

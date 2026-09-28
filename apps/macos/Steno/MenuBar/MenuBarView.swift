@@ -88,24 +88,40 @@ struct MenuBarView: View {
         Button {
           open(meeting: item.meeting.id)
         } label: {
-          VStack(alignment: .leading, spacing: Theme.Space.xs) {
-            HStack {
-              Text(item.meeting.title)
-                .font(.steno(Theme.TextSize.xs, weight: .medium))
-                .foregroundStyle(Color.stenoForeground)
-                .lineLimit(1)
-              Spacer()
-              Text(item.stage?.label ?? "Queued")
-                .font(.steno(Theme.TextSize.xxs))
-                .foregroundStyle(Color.stenoFaint)
-            }
-            ProgressView(value: item.fraction)
-              .progressViewStyle(.linear)
-              .tint(Color.stenoStrong)
-          }
+          queueRow(item)
         }
         .buttonStyle(.plain)
       }
+    }
+  }
+
+  /// Title, the stage and estimate from the progress model, and the bar.
+  /// Before the run's first event (or before the model has seen the
+  /// meeting) the row says "Waiting to process" over an empty bar.
+  private func queueRow(_ item: MenuBarViewModel.QueueItem) -> some View {
+    let entry =
+      controller.progress.entry(for: item.id)
+      ?? ProcessingProgressModel.Entry(meetingID: item.id)
+    return VStack(alignment: .leading, spacing: Theme.Space.xs) {
+      HStack(spacing: Theme.Space.sm) {
+        Text(item.meeting.title)
+          .font(.steno(Theme.TextSize.xs, weight: .medium))
+          .foregroundStyle(Color.stenoForeground)
+          .lineLimit(1)
+        Spacer()
+        Text(entry.title)
+          .font(.steno(Theme.TextSize.xxs))
+          .foregroundStyle(Color.stenoFaint)
+        if let remaining = entry.estimatedRemaining {
+          Text(remaining.clockText)
+            .font(.steno(Theme.TextSize.xxs).monospacedDigit())
+            .foregroundStyle(Color.stenoFaint)
+        }
+      }
+      ProgressView(value: entry.fraction)
+        .progressViewStyle(.linear)
+        .tint(Color.stenoStrong)
+        .accessibilityValue("\(Int(entry.fraction * 100)) percent")
     }
   }
 

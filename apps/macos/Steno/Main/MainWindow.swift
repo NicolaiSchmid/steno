@@ -17,7 +17,7 @@ struct MainWindow: View {
 
   var body: some View {
     NavigationSplitView {
-      MeetingListView(model: list)
+      MeetingListView(model: list, progress: controller.progress)
         .navigationSplitViewColumnWidth(min: 240, ideal: 300, max: 420)
     } detail: {
       if let detail {

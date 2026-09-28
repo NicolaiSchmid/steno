@@ -8,11 +8,14 @@ extension ProcessingPipeline {
 
   /// Runs the `TranscriptCleaner` and persists the cleaned `text`; `rawText`,
   /// ids, order and count are the merge stage's and must come back intact.
+  /// The transcript's token count replaces the run's guess from the audio
+  /// duration before the stage's event is posted.
   func cleanup(meeting: Meeting, segments: [TranscriptSegment], speakers: [Speaker]) async throws
     -> Cleaned
   {
     let cleaner = dependencies.cleaner
     let store = self.store
+    revise(tokens: ProcessingEstimator.tokenCount(segments), meetingID: meeting.id)
     return try await run(.cleanup, meetingID: meeting.id) {
       let participants = try await store.participants(meetingID: meeting.id)
       let people = try await store.persons()

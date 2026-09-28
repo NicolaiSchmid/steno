@@ -182,3 +182,11 @@ extension TimeInterval {
     wholeSeconds.formatted(.time(pattern: .hourMinuteSecond(padHourToLength: 2)))
   }
 }
+
+extension Duration {
+  /// `mm:ss` or `h:mm:ss`, as `TimeInterval.clockText`, for an estimate
+  /// such as the time a run still needs.
+  var clockText: String {
+    TimeInterval(components.seconds).clockText
+  }
+}

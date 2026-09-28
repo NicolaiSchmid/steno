@@ -471,4 +471,61 @@ import Testing
       try await store.update(meetingID: SampleData.meetingID, now: SampleData.updatedAt) { _ in }
     }
   }
+
+  @Test func stageRatesRoundTripAndUnknownRowsAreIgnored() async throws {
+    let store = try MeetingStore.inMemory()
+    #expect(try await store.stageRates() == StageRates.seeds, "an empty table is the seeds")
+
+    let first = StageSample(
+      stage: .transcribe, key: "parakeet-v3", secondsPerUnit: 0.02, recordedAt: SampleData.updatedAt
+    )
+    try await store.record(first)
+    var expected = StageRates.seeds
+    expected.record(first)
+    #expect(try await store.stageRates() == expected)
+    #expect(
+      try await store.stageRates().rate(.transcribe, key: "parakeet-v3")
+        == StageRate(secondsPerUnit: 0.02, samples: 1), "the first sample replaces the seed")
+
+    let later = SampleData.updatedAt.addingTimeInterval(60)
+    try await store.record(
+      StageSample(stage: .transcribe, key: "parakeet-v3", secondsPerUnit: 0.04, recordedAt: later))
+    let averaged = try await store.stageRates().rate(.transcribe, key: "parakeet-v3")
+    #expect(averaged.samples == 2)
+    #expect(abs(averaged.secondsPerUnit - (0.3 * 0.04 + 0.7 * 0.02)) < 1e-12)
+    let row: Row? = try await store.writer.read { db in
+      try Row.fetchOne(
+        db,
+        sql: """
+          SELECT samples, seconds_per_unit, updated_at FROM stageRate
+          WHERE stage = 'transcribe' AND key = 'parakeet-v3'
+          """)
+    }
+    let samples: Int? = row?["samples"]
+    let updatedAt: Date? = row?["updated_at"]
+    #expect(samples == 2)
+    #expect(updatedAt == later)
+    #expect(try await store.writer.read { db in try StageRateRow.fetchCount(db) } == 1)
+
+    // A stage a later version renamed, and a key on a stage that has none:
+    // both stay in the table and out of the rates. A model key on a keyed
+    // stage loads.
+    try await store.writer.write { db in
+      for (stage, key) in [("polish", ""), ("merge", "gpt-4o"), ("cleanup", "gpt-4o")] {
+        try db.execute(
+          sql: """
+            INSERT INTO stageRate (stage, key, samples, seconds_per_unit, updated_at)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+          arguments: [stage, key, 3, 9.0, SampleData.updatedAt])
+      }
+    }
+    let loaded = try await store.stageRates()
+    #expect(
+      loaded.rate(.merge, key: StageRates.unkeyed)
+        == StageRates.seeds.rate(.merge, key: StageRates.unkeyed))
+    #expect(loaded.entries[StageRates.Key(.merge, "gpt-4o")] == nil)
+    #expect(loaded.rate(.cleanup, key: "gpt-4o") == StageRate(secondsPerUnit: 9, samples: 3))
+    #expect(loaded.entries.count == StageRates.seeds.entries.count + 1)
+  }
 }

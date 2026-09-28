@@ -261,18 +261,23 @@ import Testing
     var collected: [MeetingEvent] = []
     while let event = await iterator.next(), event != sentinel { collected.append(event) }
     try #require(
-      collected.count == 13,
-      "ten stage starts, one review request, one retention applied, one re-export")
+      collected.count == 14,
+      "eleven stage starts (transcribe once per lane), one review request, one retention applied, one re-export"
+    )
     let stages = collected.compactMap { event -> PipelineStage? in
-      if case .progress(_, let stage) = event { return stage }
+      if case .progress(_, let progress) = event { return progress.stage }
       return nil
     }
-    #expect(stages == PipelineStage.allCases + [.deliver])
     #expect(
-      collected[8]
+      stages == [
+        .decode, .transcribe, .transcribe, .diarize, .matchSpeakers, .merge, .cleanup, .summarize,
+        .persist, .deliver, .retention, .deliver,
+      ])
+    #expect(
+      collected[9]
         == .speakersNeedReview(meetingID: meeting.id, speakerIDs: export.speakers.map(\.id)))
     #expect(
-      collected[11] == .retentionApplied(meetingID: meeting.id),
+      collected[12] == .retentionApplied(meetingID: meeting.id),
       "after the retention stage's progress, before the re-export")
   }
 }

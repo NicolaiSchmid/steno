@@ -18,6 +18,9 @@ struct PipelineHarness {
   let destination: FakeDestination
   let dispatcher: FakeDeliveryDispatcher
   let pipeline: ProcessingPipeline
+  /// The pipeline's clock: stage durations move only when a test advances
+  /// it, so the learned rates are exact.
+  let clock: ManualClock
   var settings: Settings
 
   static let now = SampleData.updatedAt
@@ -29,7 +32,8 @@ struct PipelineHarness {
     cleaner: any TranscriptCleaner = PassthroughCleaner(),
     summarizer: FakeSummarizer = FakeSummarizer(),
     retention: AudioRetention = .keepDays(30),
-    sharedStore: MeetingStore? = nil
+    sharedStore: MeetingStore? = nil,
+    clock: ManualClock = ManualClock()
   ) async throws {
     directory = try Fixtures.temporaryDirectory("pipeline")
     store = try sharedStore ?? MeetingStore.inMemory()
@@ -47,6 +51,7 @@ struct PipelineHarness {
     self.memory = memory
     self.cleaner = cleaner
     self.summarizer = summarizer
+    self.clock = clock
     destination = FakeDestination(
       root: directory.appendingPathComponent("vault", isDirectory: true))
     dispatcher = FakeDeliveryDispatcher(
@@ -55,7 +60,7 @@ struct PipelineHarness {
       dependencies: PipelineDependencies(
         decoder: WAVAudioDecoder(), speechEngine: engine, diarizer: diarizer, speakerMemory: memory,
         cleaner: cleaner, summarizer: summarizer, dispatcher: dispatcher, store: store,
-        settings: settingsStore, events: events, now: { Self.now }))
+        settings: settingsStore, events: events, now: { Self.now }, clock: clock))
   }
 
   func cleanUp() {

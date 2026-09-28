@@ -14,12 +14,13 @@ public enum Migrations {
     var migrator = DatabaseMigrator()
     migrator.registerMigration("v1", migrate: v1)
     migrator.registerMigration("v2", migrate: v2)
+    migrator.registerMigration("v3", migrate: v3)
     return migrator
   }
 
   /// Every identifier in registration order; tests compare it with what a
   /// database has applied.
-  public static let identifiers = ["v1", "v2"]
+  public static let identifiers = ["v1", "v2", "v3"]
 
   /// Internal so `SchemaSnapshotTests` can run each version on its own.
   static func v1(_ db: Database) throws {
@@ -196,5 +197,20 @@ public enum Migrations {
     try db.create(
       index: "speakerNameSuggestion_meetingID", on: "speakerNameSuggestion",
       columns: ["meetingID"])
+  }
+
+  /// The learned per-stage rates behind `progress` estimates
+  /// (`MeetingStore+Timings.swift`): one row per stage and key, the speech
+  /// engine id for transcribe, the LLM model for cleanup and summarize,
+  /// empty for the rest. Measurements, not choices, so not a `setting`.
+  static func v3(_ db: Database) throws {
+    try db.create(table: "stageRate") { t in
+      t.column("stage", .text).notNull()
+      t.column("key", .text).notNull()
+      t.column("samples", .integer).notNull()
+      t.column("seconds_per_unit", .double).notNull()
+      t.column("updated_at", .datetime).notNull()
+      t.primaryKey(["stage", "key"])
+    }
   }
 }

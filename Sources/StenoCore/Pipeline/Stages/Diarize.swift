@@ -19,11 +19,12 @@ extension ProcessingPipeline {
   /// The sample clip is at most ten seconds.
   static let sampleClipSeconds: TimeInterval = 10
 
-  /// Decodes the diarized lane again, runs the diarizer, and turns every
-  /// cluster into a `Speaker` with a deterministic id, copying the cluster's
-  /// embedding, confidence and sample clip range. Each cluster's clip is
-  /// written as 16 kHz WAV to `RecordingLayout.sampleClip(speakerID:)`
-  /// beside the master.
+  /// Decodes the diarized lane again, runs the diarizer (prepared by
+  /// `process` before the run's first event), and turns every cluster into a
+  /// `Speaker` with a deterministic id, copying the cluster's embedding,
+  /// confidence and sample clip range. Each cluster's clip is written as
+  /// 16 kHz WAV to `RecordingLayout.sampleClip(speakerID:)` beside the
+  /// master.
   func diarize(asset: AudioAsset, meeting: Meeting) async throws -> Diarization {
     let decoder = dependencies.decoder
     let diarizer = dependencies.diarizer
@@ -32,7 +33,6 @@ extension ProcessingPipeline {
       guard let lane = Self.diarizedLane(source: meeting.source, lanes: asset.lanes) else {
         return Diarization(speakers: [], clusterSpeakers: [])
       }
-      try await diarizer.prepare()
       let buffer = try await decoder.decode(asset, lane: lane)
       let result = try await diarizer.diarize(buffer)
       var labels = Set<String>()

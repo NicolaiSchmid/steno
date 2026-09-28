@@ -24,6 +24,16 @@ public actor MeetingEventBus {
     }
   }
 
+  /// Ends every subscription: each stream delivers what was posted before
+  /// this call and then finishes. The CLI calls it once the pipeline is
+  /// idle so a printing loop can end instead of being cancelled mid-buffer.
+  public func finish() {
+    for continuation in subscribers.values {
+      continuation.finish()
+    }
+    subscribers.removeAll()
+  }
+
   private func remove(_ id: UUID) {
     subscribers[id] = nil
   }

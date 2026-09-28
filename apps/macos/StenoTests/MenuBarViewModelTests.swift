@@ -1,8 +1,9 @@
 import StenoCore
 import XCTest
 
-/// The menu bar's presentation: the queue from `observeMeetings()` joined
-/// with progress events, the recent list, and the login item toggle.
+/// The menu bar's presentation: the queue from `observeMeetings()`, the
+/// progress model each queue row reads, the recent list, and the login item
+/// toggle.
 @MainActor
 final class MenuBarViewModelTests: XCTestCase {
   private var observing: [Task<Void, Never>] = []
@@ -16,18 +17,37 @@ final class MenuBarViewModelTests: XCTestCase {
     }
   }
 
-  /// A model with both observations running, as `AppController.launch()`
-  /// runs them.
-  private func makeModel(_ environment: AppEnvironment) -> MenuBarViewModel {
+  /// The menu bar model observing the meeting list, and the progress model
+  /// the queue rows read, fed from the bus and the list as
+  /// `AppController.launch()` feeds it: subscribed before returning, so an
+  /// event posted right after is seen.
+  private func makeModel(_ environment: AppEnvironment) async -> (
+    menuBar: MenuBarViewModel, progress: ProcessingProgressModel
+  ) {
     let model = MenuBarViewModel(environment: environment)
+    let progress = ProcessingProgressModel()
+    let events = await environment.events.subscribe()
     observing.append(Task { await model.observe() })
-    observing.append(Task { await model.observeProgress() })
-    return model
+    observing.append(
+      Task {
+        for await event in events { progress.apply(event) }
+      })
+    observing.append(
+      Task {
+        do {
+          for try await meetings in environment.store.observeMeetings() {
+            progress.meetingsChanged(meetings)
+          }
+        } catch {
+          XCTFail("meeting list unavailable: \(error)")
+        }
+      })
+    return (model, progress)
   }
 
   func testQueueOrdersByStartAndFollowsProgress() async throws {
     let environment = try await TestSupport.environment(seed: false)
-    let model = makeModel(environment)
+    let (model, progress) = await makeModel(environment)
     var later = SampleData.meeting(state: .queued)
     later.id = UUID()
     later.startedAt = TestSupport.now.addingTimeInterval(600)
@@ -38,22 +58,42 @@ final class MenuBarViewModelTests: XCTestCase {
     try await environment.store.save(earlier)
     await TestSupport.waitUntil("two queue items") { model.queue.count == 2 }
     XCTAssertEqual(model.queue.map(\.id), [earlier.id, later.id])
-    XCTAssertEqual(model.queue.first?.fraction, 0)
-
-    await environment.events.post(.progress(meetingID: earlier.id, stage: .summarize))
-    await TestSupport.waitUntil("progress reached the queue") {
-      model.queue.first?.stage == .summarize
+    await TestSupport.waitUntil("both meetings on the progress model") {
+      progress.entry(for: earlier.id) != nil && progress.entry(for: later.id) != nil
     }
-    XCTAssertEqual(model.queue.first?.fraction, PipelineStage.summarize.fraction)
+    let waiting = try XCTUnwrap(progress.entry(for: earlier.id))
+    XCTAssertNil(waiting.stage)
+    XCTAssertEqual(waiting.fraction, 0)
+    XCTAssertEqual(waiting.title, "Waiting to process")
+    XCTAssertNil(waiting.estimatedRemaining)
+
+    let summarizing = ProcessingProgress(
+      stage: .summarize, fraction: 0.8, nextFraction: 0.95, estimatedRemaining: .seconds(30),
+      isEstimateSeeded: false)
+    await environment.events.post(.progress(meetingID: earlier.id, progress: summarizing))
+    await TestSupport.waitUntil("progress reached the model") {
+      progress.entry(for: earlier.id)?.stage == .summarize
+    }
+    let entry = try XCTUnwrap(progress.entry(for: earlier.id))
+    XCTAssertEqual(entry.progress, summarizing)
+    XCTAssertEqual(entry.fraction, 0.8)
+    XCTAssertEqual(entry.title, "Summarising…")
+    XCTAssertEqual(entry.estimatedRemaining, .seconds(30))
+    XCTAssertEqual(progress.entry(for: later.id)?.fraction, 0, "the other meeting is untouched")
+    XCTAssertEqual(model.queue.map(\.id), [earlier.id, later.id], "the queue itself is the list")
 
     try await environment.store.setState(.ready, meetingID: earlier.id, now: TestSupport.now)
     await TestSupport.waitUntil("finished meeting left the queue") { model.queue.count == 1 }
     XCTAssertEqual(model.recent.map(\.id), [earlier.id])
+    await TestSupport.waitUntil("finished meeting left the progress model") {
+      progress.entry(for: earlier.id) == nil
+    }
+    XCTAssertNotNil(progress.entry(for: later.id))
   }
 
   func testObservationEndsWhenCancelled() async throws {
     let environment = try await TestSupport.environment(seed: false)
-    let model = makeModel(environment)
+    let (model, _) = await makeModel(environment)
     var meeting = SampleData.meeting(state: .queued)
     meeting.id = UUID()
     try await environment.store.save(meeting)
@@ -72,7 +112,7 @@ final class MenuBarViewModelTests: XCTestCase {
   func testLaunchAtLoginRoundTrip() async throws {
     let environment = try await TestSupport.environment(seed: false)
     let loginItem = try XCTUnwrap(environment.loginItem as? FakeLoginItem)
-    let model = makeModel(environment)
+    let (model, _) = await makeModel(environment)
     XCTAssertEqual(model.launchAtLogin, .notRegistered)
     XCTAssertFalse(model.launchAtLogin.isOn)
     await model.setLaunchAtLogin(true)
@@ -91,7 +131,7 @@ final class MenuBarViewModelTests: XCTestCase {
 
   func testQueueAndRecentPartitionEveryMeetingState() async throws {
     let environment = try await TestSupport.environment(seed: false)
-    let model = makeModel(environment)
+    let (model, progress) = await makeModel(environment)
     let states: [MeetingState] = [.recording, .queued, .processing, .ready, .failed(reason: "x")]
     var ids: [MeetingState.Kind: UUID] = [:]
     for (offset, state) in states.enumerated() {
@@ -110,7 +150,32 @@ final class MenuBarViewModelTests: XCTestCase {
     let listed = Set(model.queue.map(\.id) + model.recent.map(\.id))
     let recordingID = try XCTUnwrap(ids[.recording])
     XCTAssertFalse(listed.contains(recordingID), "a live recording is neither queued nor recent")
-    XCTAssertEqual(model.queue.map(\.fraction), [0, 0], "no stage yet")
+
+    // The progress model tracks exactly the queue: an entry without a stage
+    // for each queued or processing meeting, none for the others.
+    await TestSupport.waitUntil("the queue on the progress model") {
+      progress.entries.count == 2
+    }
+    XCTAssertEqual(Set(progress.entries.keys), Set(model.queue.map(\.id)))
+    XCTAssertEqual(
+      model.queue.map { progress.entry(for: $0.id)?.fraction }, [0, 0], "no stage yet")
+    XCTAssertEqual(
+      model.queue.map { progress.entry(for: $0.id)?.title },
+      ["Waiting to process", "Waiting to process"])
+    let readyID = try XCTUnwrap(ids[.ready])
+    XCTAssertNil(progress.entry(for: readyID))
+
+    // A summary re-run posts progress for a `.ready` meeting; it drives
+    // nothing in the queue or the model.
+    await environment.events.post(
+      .progress(
+        meetingID: readyID,
+        progress: ProcessingProgress(
+          stage: .summarize, fraction: 0, nextFraction: 0.5, estimatedRemaining: .seconds(10),
+          isEstimateSeeded: true)))
+    await TestSupport.settle()
+    XCTAssertNil(progress.entry(for: readyID), "a re-run on a ready meeting is not tracked")
+    XCTAssertEqual(model.queue.count, 2)
 
     // The chip each state renders as, in the queue, the recent list and the
     // detail header.

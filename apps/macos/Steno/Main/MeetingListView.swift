@@ -5,6 +5,10 @@ import SwiftUI
 /// (context menu and toolbar, behind a confirmation).
 struct MeetingListView: View {
   @Bindable var model: MeetingListViewModel
+  /// Where the pipeline is with each queued or processing meeting, passed
+  /// through from `MainWindow` because the list receives nothing else from
+  /// the controller; the entry's preview line reads it.
+  let progress: ProcessingProgressModel
 
   var body: some View {
     VStack(spacing: 0) {
