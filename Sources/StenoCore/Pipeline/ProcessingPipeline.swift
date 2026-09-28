@@ -185,7 +185,8 @@ public actor ProcessingPipeline {
   /// thrown to the caller and leaves the meeting's state, summary and
   /// deliveries as they were; only `process` marks `.failed`. Without a
   /// summarizer there is nothing to run and the call throws instead of
-  /// writing a placeholder.
+  /// writing a placeholder. An audio asset whose expiry was deferred by a
+  /// failed delivery is stamped once this delivery succeeds.
   public func rerunSummary(meetingID: UUID, templateID: String) async throws {
     guard let meeting = try await store.meeting(id: meetingID) else {
       throw PipelineFailure(stage: .summarize, reason: "meeting \(meetingID) not found")
@@ -203,16 +204,19 @@ public actor ProcessingPipeline {
       _ = try await summarize(
         meeting: current, segments: export.segments, speakers: export.speakers)
       await deliver(meetingID: meetingID)
+      try await stampDeferredRetention(meetingID: meetingID)
     }
   }
 
-  /// Deliver only: the one re-export entry point.
+  /// Deliver only: the one re-export entry point. Stamps an audio asset
+  /// whose expiry was deferred by a failed delivery once this one succeeds.
   public func redeliver(meetingID: UUID) async throws {
     guard try await store.meeting(id: meetingID) != nil else {
       throw PipelineFailure(stage: .deliver, reason: "meeting \(meetingID) not found")
     }
     try await exclusively(meetingID, stage: .deliver) {
       await deliver(meetingID: meetingID)
+      try await stampDeferredRetention(meetingID: meetingID)
     }
   }
 

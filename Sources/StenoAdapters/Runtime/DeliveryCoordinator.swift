@@ -53,6 +53,15 @@ public actor DeliveryCoordinator: DeliveryDispatcher {
       return results
     }
     let targets = destinations(settings)
+    // A row that still says an export is outstanding for a destination that
+    // is no longer configured would defer the audio's expiry forever. Those
+    // rows go; a `.delivered` row keeps its receipt for a re-added
+    // destination to update in place.
+    let configured = Set(targets.map(\.id))
+    let stale = existing.filter {
+      !configured.contains($0.destinationID) && $0.status != .delivered
+    }
+    try? await store.deleteDeliveries(ids: stale.map(\.id))
     guard !targets.isEmpty else { return [] }
     let export: Result<MeetingExport, any Error>
     do {

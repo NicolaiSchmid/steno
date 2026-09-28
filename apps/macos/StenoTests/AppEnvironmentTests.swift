@@ -93,7 +93,7 @@ final class AppEnvironmentTests: XCTestCase {
     XCTAssertEqual(stored, returned, "the return value is what was saved")
     XCTAssertEqual(stored.defaultTemplateID, "interview")
     XCTAssertEqual(stored.llmContextTokens, 4096)
-    XCTAssertEqual(stored.defaultRetention, .keepDays(30), "untouched fields survive")
+    XCTAssertEqual(stored.defaultRetention, .keepForever, "untouched fields survive")
   }
 
   func testRetentionSweepFailureIsAWarningNotAFatal() async throws {

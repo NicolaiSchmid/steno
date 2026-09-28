@@ -150,7 +150,7 @@ struct OnboardingWindowContent: View {
 
   var body: some View {
     OnboardingView(
-      model: OnboardingViewModel(permissions: controller.environment.permissions),
+      model: OnboardingViewModel(environment: controller.environment),
       onFinished: { dismissWindow(id: "onboarding") })
   }
 }

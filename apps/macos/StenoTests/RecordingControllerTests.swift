@@ -44,7 +44,7 @@ final class RecordingControllerTests: XCTestCase {
     XCTAssertEqual(stored.state, .ready, "the synthetic recording runs through the fake pipeline")
     let assetOptional = try await environment.store.asset(meetingID: stopped.id)
     let asset = try XCTUnwrap(assetOptional)
-    XCTAssertEqual(asset.retention, .keepDays(30), "retention comes from Settings")
+    XCTAssertEqual(asset.retention, .keepForever, "retention comes from Settings")
     XCTAssertEqual(asset.lanes, [.mic, .system])
   }
 
@@ -162,7 +162,7 @@ final class RecordingControllerTests: XCTestCase {
     XCTAssertLessThan(stored.duration, 5, "only the audio before the loss")
     let assetOptional = try await environment.store.asset(meetingID: meeting.id)
     let asset = try XCTUnwrap(assetOptional)
-    XCTAssertEqual(asset.retention, .keepDays(30))
+    XCTAssertEqual(asset.retention, .keepForever)
     XCTAssertTrue(FileManager.default.fileExists(atPath: asset.url.path), "master kept")
 
     await recorder.start(mode: .call)
