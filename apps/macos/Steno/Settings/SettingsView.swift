@@ -353,18 +353,18 @@ struct SummariesSettingsView: View {
             prompt: Text(model.preset.baseURL?.absoluteString ?? "https://example.com/v1")
           )
           .focused($focus, equals: .server)
-          .onSubmit(commit)
+          .onSubmit { commit() }
         }
         TextField("Model", text: $model.model, prompt: Text(model.preset.modelPlaceholder))
           .focused($focus, equals: .model)
-          .onSubmit(commit)
+          .onSubmit { commit() }
         if model.preset.needsAPIKey || model.preset == .custom {
           SecureField(
             "API key", text: $model.apiKey,
             prompt: Text(model.preset.needsAPIKey ? "required" : "optional")
           )
           .focused($focus, equals: .key)
-          .onSubmit(commit)
+          .onSubmit { commit() }
           Footnote("Stored in your login keychain and sent only to this service.")
         }
         if let message = model.validationMessage {
@@ -375,7 +375,7 @@ struct SummariesSettingsView: View {
         DisclosureGroup("Advanced") {
           TextField("Context size", text: $model.contextTokensText)
             .focused($focus, equals: .context)
-            .onSubmit(commit)
+            .onSubmit { commit() }
           Footnote(
             "How much text the model can read at once. Leave the default of \(LLMSettingsViewModel.defaultContextTokens) unless the service reports a shorter limit."
           )
@@ -396,7 +396,7 @@ struct SummariesSettingsView: View {
     .onChange(of: focus) { old, new in
       if old != nil, old != new { commit() }
     }
-    .onDisappear(perform: commit)
+    .onDisappear { commit() }
   }
 
   @ViewBuilder
@@ -456,11 +456,11 @@ struct ExportSettingsView: View {
           DisclosureGroup("Advanced") {
             TextField("People folder", text: $model.peopleFolder, prompt: Text("People"))
               .focused($focus, equals: .people)
-              .onSubmit(commit)
+              .onSubmit { commit() }
             Footnote("One page per person, inside the vault. Leave empty for none.")
             TextField("Tag for tasks", text: $model.taskTag, prompt: Text("task"))
               .focused($focus, equals: .tag)
-              .onSubmit(commit)
+              .onSubmit { commit() }
             Toggle(
               "Copy the recording into the vault",
               isOn: .action({ model.includeAudio }, model.setIncludeAudio))
@@ -487,7 +487,7 @@ struct ExportSettingsView: View {
     .onChange(of: focus) { old, new in
       if old != nil, old != new { commit() }
     }
-    .onDisappear(perform: commit)
+    .onDisappear { commit() }
   }
 
   private func commit() {
