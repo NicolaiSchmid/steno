@@ -97,10 +97,12 @@ final class SpeakersViewModelTests: XCTestCase {
     XCTAssertNil(model.error, model.error ?? "")
     var speakers = try await environment.store.speakers(meetingID: SampleData.meetingID)
     let annaID = try XCTUnwrap(speakers.first { $0.id == SampleData.speakerTwoID }?.personID)
-    let anna = try XCTUnwrap(try await environment.store.person(id: annaID))
+    let annaRow = try await environment.store.person(id: annaID)
+    let anna = try XCTUnwrap(annaRow)
     XCTAssertEqual(anna.displayName, "Anna")
     XCTAssertEqual(anna.sampleCount, 1, "the voice is the speaker's embedding")
-    XCTAssertEqual(try await environment.store.persons().count, 3)
+    let awaited2 = try await environment.store.persons().count
+    XCTAssertEqual(awaited2, 3)
 
     try await refresh(model, environment)
     await model.select(SpeakerOptions.Option(kind: .create("jérôme")), for: SampleData.speakerTwoID)
@@ -108,7 +110,8 @@ final class SpeakersViewModelTests: XCTestCase {
     XCTAssertEqual(
       speakers.first { $0.id == SampleData.speakerTwoID }?.personID, SampleData.personJeromeID,
       "an existing name, ignoring case and accents, reuses the person")
-    XCTAssertEqual(try await environment.store.persons().count, 3, "no fourth person")
+    let awaited3 = try await environment.store.persons().count
+    XCTAssertEqual(awaited3, 3, "no fourth person")
   }
 
   func testSelectingTheOwnPersonIsANoOp() async throws {
@@ -122,7 +125,8 @@ final class SpeakersViewModelTests: XCTestCase {
       SpeakerOptions.Option(kind: .person(SampleData.persons()[1])), for: SampleData.speakerOneID)
 
     XCTAssertEqual(writes, 0)
-    XCTAssertEqual(try await environment.store.speakers(meetingID: SampleData.meetingID), before)
+    let awaited4 = try await environment.store.speakers(meetingID: SampleData.meetingID)
+    XCTAssertEqual(awaited4, before)
   }
 
   func testSelectingAPersonWhoOwnsAnotherSpeakerMerges() async throws {
@@ -158,7 +162,8 @@ final class SpeakersViewModelTests: XCTestCase {
     XCTAssertNil(model.error, model.error ?? "")
     let speakers = try await environment.store.speakers(meetingID: SampleData.meetingID)
     let personID = try XCTUnwrap(speakers.first { $0.id == SampleData.speakerTwoID }?.personID)
-    let person = try XCTUnwrap(try await environment.store.person(id: personID))
+    let personRow = try await environment.store.person(id: personID)
+    let person = try XCTUnwrap(personRow)
     XCTAssertEqual(person.displayName, "Maya")
     XCTAssertEqual(person.email, "maya@example.com")
   }
@@ -169,15 +174,18 @@ final class SpeakersViewModelTests: XCTestCase {
     let before = try await environment.store.speakers(meetingID: SampleData.meetingID)
     _ = model.options(for: SampleData.speakerTwoID, query: "an")
     _ = model.options(for: SampleData.speakerOneID, query: "")
-    XCTAssertEqual(try await environment.store.speakers(meetingID: SampleData.meetingID), before)
-    XCTAssertEqual(try await environment.store.persons().count, 2)
+    let awaited6 = try await environment.store.speakers(meetingID: SampleData.meetingID)
+    XCTAssertEqual(awaited6, before)
+    let awaited7 = try await environment.store.persons().count
+    XCTAssertEqual(awaited7, 2)
   }
 
   /// The LLM's persisted guess is an option tagged "Mentioned" and applies
   /// nothing by itself; a blank guess shows nothing.
   func testLLMNameSuggestionIsAMentionedOption() async throws {
     let environment = try await TestSupport.environment()
-    let meeting = try XCTUnwrap(try await environment.store.meeting(id: SampleData.meetingID))
+    let meetingRow = try await environment.store.meeting(id: SampleData.meetingID)
+    let meeting = try XCTUnwrap(meetingRow)
     try await environment.store.replaceSummary(
       meeting, tasks: SampleData.tasks(), decisions: SampleData.decisions().map(\.text),
       speakerNames: [
@@ -213,7 +221,8 @@ final class SpeakersViewModelTests: XCTestCase {
     await model.select(SpeakerOptions.Option(kind: .create("Ghost")), for: UUID())
 
     XCTAssertEqual(writes, 0)
-    XCTAssertEqual(try await environment.store.persons().count, 2, "no person was created")
+    let awaited9 = try await environment.store.persons().count
+    XCTAssertEqual(awaited9, 2, "no person was created")
   }
 
   func testPlayWithoutAClipFileReportsAnError() async throws {
