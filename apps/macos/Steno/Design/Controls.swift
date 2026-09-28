@@ -157,7 +157,10 @@ struct StenoTextFieldStyle: TextFieldStyle {
 }
 
 private struct StenoTextFieldSurface: View {
-  let field: TextField<StenoTextFieldStyle._Label>
+  /// `nonisolated(unsafe)`: assigned once by the nonisolated init below and
+  /// read only from `body` on the main actor; SwiftUI calls `_body` on the
+  /// main thread.
+  nonisolated(unsafe) let field: TextField<StenoTextFieldStyle._Label>
   @FocusState private var focused: Bool
   @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
