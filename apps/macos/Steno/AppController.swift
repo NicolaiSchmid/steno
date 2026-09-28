@@ -1,3 +1,4 @@
+import AppKit
 import Foundation
 import StenoAudio
 import StenoCore
@@ -5,8 +6,9 @@ import StenoCore
 /// The running app's object graph over one `AppEnvironment`: the recorder,
 /// the detection controller, the menu bar view model, pending speaker
 /// reviews, the retention sweep after processed meetings, the handover
-/// listener when phones are paired, and the first-launch login item
-/// registration.
+/// listener when phones are paired, the first-launch login item
+/// registration, and the recorder's permission report, refreshed whenever
+/// the app becomes active (the user comes back from System Settings).
 @MainActor
 @Observable
 final class AppController {
@@ -21,6 +23,7 @@ final class AppController {
   var requestedMeetingID: UUID?
   private(set) var launched = false
   private var observers: [Task<Void, Never>] = []
+  private var activationObserver: (any NSObjectProtocol)?
 
   static let loginItemRegisteredKey = "steno.loginItemRegistered"
 
@@ -35,6 +38,11 @@ final class AppController {
     detection.startRecording = { [weak self] in await self?.recorder.start(mode: .call) }
     recorder.recordingDidChange = { [weak self] recording in
       await self?.detection.recordingDidChange(recording)
+    }
+    activationObserver = NotificationCenter.default.addObserver(
+      forName: NSApplication.didBecomeActiveNotification, object: nil, queue: .main
+    ) { [weak self] _ in
+      Task { @MainActor in await self?.recorder.refreshPermissions() }
     }
   }
 
@@ -101,11 +109,18 @@ final class AppController {
   /// The sidebar control's start: the recorder starts as it does from the
   /// menu bar, then the live row is requested so the window selects it.
   /// Starts from the menu bar or the detection prompt call `recorder.start`
-  /// and never move the selection.
+  /// and never move the selection. A start that fails re-reads the
+  /// permissions: a denial born at the first TCC prompt disables the control
+  /// at once, without waiting for the app to become active again.
   func startRecordingFromWindow(mode: CaptureMode) async {
     await recorder.start(mode: mode)
-    if case .recording = recorder.recording {
+    switch recorder.recording {
+    case .recording:
       requestedMeetingID = recorder.activeMeetingID
+    case .idle:
+      await recorder.refreshPermissions()
+    case .starting, .stopping:
+      break
     }
   }
 
@@ -142,5 +157,7 @@ final class AppController {
     if let handover = environment.handover { await handover.stop() }
     for observer in observers { observer.cancel() }
     observers = []
+    if let activationObserver { NotificationCenter.default.removeObserver(activationObserver) }
+    activationObserver = nil
   }
 }

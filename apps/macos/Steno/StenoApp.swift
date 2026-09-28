@@ -155,39 +155,26 @@ struct OnboardingWindowContent: View {
   }
 }
 
+@MainActor
 struct AppCommands: Commands {
   let bootstrap: AppBootstrap
 
-  /// The same state table the sidebar control renders; without a controller
-  /// the menu reads as idle and is disabled.
+  /// The same state table the sidebar control and the menu bar item render;
+  /// without a controller the menu reads as idle and is disabled.
   private var presentation: RecordingControlPresentation {
-    guard let recorder = bootstrap.controller?.recorder else {
-      return RecordingControlPresentation(
-        label: "Record call", role: .primary, isEnabled: false, isBusy: false,
-        offersInPerson: false, disabledReason: nil)
-    }
+    guard let recorder = bootstrap.controller?.recorder else { return .unavailable }
     return RecordingControlPresentation.make(
       state: recorder.recording, denied: recorder.deniedPermissions)
   }
 
-  /// Menu casing for the two settled states; the transient labels ("Starting…",
-  /// "Finishing…") are shown as they are.
-  private var recordMenuLabel: String {
-    let presentation = self.presentation
-    if presentation.isBusy { return presentation.label }
-    switch presentation.role {
-    case .primary: return "Record Call"
-    case .stop: return "Stop Recording"
-    }
-  }
-
   var body: some Commands {
+    let presentation = self.presentation
     CommandGroup(after: .appInfo) {
       Button("Check for Updates…") { bootstrap.controller?.menuBar.checkForUpdates() }
         .disabled(bootstrap.controller == nil)
     }
     CommandMenu("Record") {
-      Button(recordMenuLabel) {
+      Button(presentation.menuLabel) {
         guard let controller = bootstrap.controller else { return }
         Task { await controller.recorder.toggleRecording() }
       }

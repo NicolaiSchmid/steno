@@ -59,12 +59,16 @@ final class LaunchSmokeTests: XCTestCase {
 
     let record = app.buttons["sidebar-record"].firstMatch
     XCTAssertTrue(record.waitForExistence(timeout: 10), "the sidebar record control is missing")
+    XCTAssertFalse(app.buttons["sidebar-stop"].exists, "nothing in the window records on its own")
+    XCTAssertTrue(
+      waitUntil(timeout: 10) { meetingRowCount(in: app) == 1 },
+      "expected the fixture meeting alone before the click, got \(meetingRowCount(in: app))")
     record.click()
 
     let stop = app.buttons["sidebar-stop"].firstMatch
     XCTAssertTrue(stop.waitForExistence(timeout: 10), "the control did not turn into Stop")
     XCTAssertTrue(
-      waitUntil(timeout: 10) { meetingRowCount(in: app) == 2 },
+      waitUntil(timeout: 20) { meetingRowCount(in: app) == 2 },
       "expected the fixture meeting plus the live row, got \(meetingRowCount(in: app))")
 
     stop.click()
@@ -72,12 +76,16 @@ final class LaunchSmokeTests: XCTestCase {
     XCTAssertEqual(meetingRowCount(in: app), 2, "the stopped recording keeps its row")
   }
 
-  /// Distinct `meeting-<id>` identifiers. SwiftUI stamps a row's identifier
-  /// on each of the row's text elements as well, so elements are counted by
-  /// identifier, not by number.
+  /// Rows carrying a `meeting-<uuid>` identifier, and only those: the
+  /// redesign's `meeting-list` container must not count. The list's cells
+  /// are counted with one query when they carry the row identifier; SwiftUI
+  /// otherwise stamps a row's identifier on each of the row's text elements
+  /// as well, so the fallback counts distinct identifiers, not elements.
   private func meetingRowCount(in app: XCUIApplication) -> Int {
-    let elements = app.descendants(matching: .any)
-      .matching(NSPredicate(format: "identifier BEGINSWITH 'meeting-'"))
+    let row = NSPredicate(format: "identifier MATCHES %@", "meeting-[0-9A-F-]{36}")
+    let cells = app.descendants(matching: .cell).matching(row).count
+    if cells > 0 { return cells }
+    let elements = app.descendants(matching: .any).matching(row)
     return Set(elements.allElementsBoundByIndex.map(\.identifier)).count
   }
 

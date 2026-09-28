@@ -66,6 +66,36 @@ final class RecordingControlPresentationTests: XCTestCase {
     }
   }
 
+  /// The Record menu keeps macOS title case for the two settled states and
+  /// shows the transient labels as they are; a denial disables it without
+  /// changing the label.
+  func testRecordMenuLabelUsesMenuCasing() {
+    XCTAssertEqual(
+      RecordingControlPresentation.make(state: .idle, denied: []).menuLabel, "Record Call")
+    XCTAssertEqual(
+      RecordingControlPresentation.make(state: .recording(since: TestSupport.now), denied: [])
+        .menuLabel,
+      "Stop Recording")
+    XCTAssertEqual(
+      RecordingControlPresentation.make(state: .starting, denied: []).menuLabel, "Starting…")
+    XCTAssertEqual(
+      RecordingControlPresentation.make(state: .stopping, denied: []).menuLabel, "Finishing…")
+    let denied = RecordingControlPresentation.make(state: .idle, denied: [.microphone])
+    XCTAssertEqual(denied.menuLabel, "Record Call")
+    XCTAssertFalse(denied.isEnabled)
+  }
+
+  /// Before the controller exists the menu reads as the idle row, disabled.
+  func testUnavailableIsTheIdleRowDisabled() {
+    let unavailable = RecordingControlPresentation.unavailable
+    XCTAssertEqual(unavailable.menuLabel, "Record Call")
+    XCTAssertEqual(unavailable.role, .primary)
+    XCTAssertFalse(unavailable.isEnabled)
+    XCTAssertFalse(unavailable.isBusy)
+    XCTAssertFalse(unavailable.offersInPerson)
+    XCTAssertNil(unavailable.disabledReason)
+  }
+
   func testAnOptionalKindNeverDisables() {
     for denied in [[.calendar], [.localNetwork], [.calendar, .localNetwork]] as [[PermissionKind]] {
       let presentation = RecordingControlPresentation.make(state: .idle, denied: denied)

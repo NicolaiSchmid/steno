@@ -1,4 +1,5 @@
 import StenoAudio
+import StenoCore
 import SwiftUI
 
 // The recorder's views shared by the sidebar control and the menu bar item:
@@ -6,15 +7,16 @@ import SwiftUI
 // rows. Recording is one hue (the red dot); the meters are achromatic.
 
 /// Thin level bars, one per lane, from the 10 Hz `LaneLevels`. `strong`
-/// over a `border` track on every surface.
+/// over a `border` track on every surface. In person the one lane is the
+/// room, so `mic` carries `AudioLane.mixed` and is labelled as such.
 struct LevelBars: View {
   let levels: LaneLevels
 
   var body: some View {
     VStack(alignment: .leading, spacing: Theme.Space.xs) {
-      bar("Mic", levels.mic)
+      bar(levels.system == nil ? AudioLane.mixed.label : AudioLane.mic.label, levels.mic)
       if let system = levels.system {
-        bar("System", system)
+        bar(AudioLane.system.label, system)
       }
     }
   }
@@ -77,15 +79,17 @@ struct StopLabel: View {
 }
 
 /// The recorder's warning and error, as rows; both surfaces show the same
-/// text and the recorder clears them on the next start.
+/// text and the recorder clears them on the next start. Takes the strings,
+/// so the menu bar can fall back to its own model's error.
 struct RecordingMessages: View {
-  let recorder: RecordingController
+  let warning: String?
+  let error: String?
 
   var body: some View {
-    if let warning = recorder.lastWarning {
+    if let warning {
       MessageRow(kind: .warning, text: warning)
     }
-    if let error = recorder.lastError {
+    if let error {
       MessageRow(kind: .error, text: error)
     }
   }

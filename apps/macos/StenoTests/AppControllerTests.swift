@@ -1,3 +1,4 @@
+import AppKit
 import StenoAudio
 import StenoCore
 import XCTest
@@ -267,14 +268,19 @@ final class AppControllerTests: XCTestCase {
     let controller = try makeController(environment)
     XCTAssertNil(controller.requestedMeetingID)
 
-    await controller.startRecordingFromWindow(mode: .call)
-    guard case .recording = controller.recorder.recording else {
-      return XCTFail("expected .recording, got \(controller.recorder.recording)")
+    let modes: [(CaptureMode, MeetingSource)] = [(.call, .macCall), (.inPerson, .macInPerson)]
+    for (mode, source) in modes {
+      await controller.startRecordingFromWindow(mode: mode)
+      guard case .recording = controller.recorder.recording else {
+        return XCTFail("expected .recording, got \(controller.recorder.recording)")
+      }
+      let live = try XCTUnwrap(controller.recorder.activeMeetingID)
+      XCTAssertEqual(controller.requestedMeetingID, live, "the window shows the row it started")
+      let stored = try await environment.store.meeting(id: live)
+      XCTAssertEqual(stored?.source, source, "\(mode)")
+      await controller.recorder.stop()
+      controller.requestedMeetingID = nil
     }
-    let live = try XCTUnwrap(controller.recorder.activeMeetingID)
-    XCTAssertEqual(controller.requestedMeetingID, live, "the window shows the row it started")
-    await controller.recorder.stop()
-    controller.requestedMeetingID = nil
 
     await controller.recorder.start(mode: .inPerson)
     guard case .recording = controller.recorder.recording else {
@@ -284,18 +290,73 @@ final class AppControllerTests: XCTestCase {
       controller.requestedMeetingID, "a start from the menu bar does not steal the selection")
     await controller.recorder.stop()
     await environment.pipeline.waitUntilIdle()
+    await controller.shutdown()
   }
 
-  /// A start that fails requests nothing: there is no live row to show.
+  /// A second click while recording is a no-op on the recorder and
+  /// re-requests the live row, so the window comes back to it.
+  func testStartFromTheWindowWhileRecordingReselectsTheLiveRow() async throws {
+    let environment = try await TestSupport.environment(seed: false)
+    let controller = try makeController(environment)
+    await controller.startRecordingFromWindow(mode: .call)
+    let live = try XCTUnwrap(controller.recorder.activeMeetingID)
+    controller.requestedMeetingID = nil
+
+    await controller.startRecordingFromWindow(mode: .call)
+    XCTAssertEqual(controller.recorder.activeMeetingID, live, "the recorder ignores a second start")
+    XCTAssertEqual(controller.requestedMeetingID, live, "the window comes back to the live row")
+    let meetings = try await environment.store.meetings()
+    XCTAssertEqual(meetings.count, 1, "no second row")
+
+    await controller.recorder.stop()
+    await environment.pipeline.waitUntilIdle()
+    await controller.shutdown()
+  }
+
+  /// A start that fails requests nothing: there is no live row to show. The
+  /// permission report is re-read, so a denial born at the first TCC prompt
+  /// disables the control at once.
   func testStartFromTheWindowThatFailsRequestsNoRow() async throws {
     let environment = try await TestSupport.environment(
       seed: false,
       makeCaptureSession: { _ in throw CaptureError.invalidState("no input device") })
+    let permissions = try XCTUnwrap(environment.permissions as? FakePermissions)
+    permissions.states[.microphone] = .denied
     let controller = try makeController(environment)
+    XCTAssertEqual(controller.recorder.deniedPermissions, [], "nothing reported before the start")
+
     await controller.startRecordingFromWindow(mode: .call)
     XCTAssertEqual(controller.recorder.recording, .idle)
     XCTAssertNotNil(controller.recorder.lastError)
     XCTAssertNil(controller.requestedMeetingID)
+    XCTAssertEqual(
+      controller.recorder.deniedPermissions, [.microphone], "a failed start re-reads the report")
+    await controller.shutdown()
+  }
+
+  /// The controller refreshes the recorder's permission report whenever the
+  /// app becomes active (the user comes back from System Settings), so the
+  /// sidebar control and the Record menu follow without a relaunch; the
+  /// subscription ends with `shutdown()`.
+  func testActivationRefreshesThePermissionReport() async throws {
+    let environment = try await TestSupport.environment(seed: false)
+    let permissions = try XCTUnwrap(environment.permissions as? FakePermissions)
+    permissions.states[.microphone] = .denied
+    let controller = try makeController(environment)
+    XCTAssertEqual(controller.recorder.deniedPermissions, [], "nothing reported before activation")
+
+    NotificationCenter.default.post(name: NSApplication.didBecomeActiveNotification, object: nil)
+    await TestSupport.waitUntil("the report to refresh on activation") {
+      controller.recorder.deniedPermissions == [.microphone]
+    }
+
+    await controller.shutdown()
+    permissions.states[.microphone] = .granted
+    NotificationCenter.default.post(name: NSApplication.didBecomeActiveNotification, object: nil)
+    await TestSupport.settle()
+    try await Task.sleep(for: .milliseconds(100))
+    XCTAssertEqual(
+      controller.recorder.deniedPermissions, [.microphone], "no refresh after shutdown")
   }
 
   func testShutdownStopsTheRecordingAndTheDetector() async throws {

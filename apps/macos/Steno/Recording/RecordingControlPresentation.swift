@@ -23,6 +23,22 @@ struct RecordingControlPresentation: Equatable, Sendable {
   /// Shown under the control when it is disabled for a lasting reason.
   var disabledReason: String?
 
+  /// The Record menu's item: macOS title case for the two settled states;
+  /// the transient labels ("Starting…", "Finishing…") are shown as they are.
+  var menuLabel: String {
+    if isBusy { return label }
+    switch role {
+    case .primary: return "Record Call"
+    case .stop: return "Stop Recording"
+    }
+  }
+
+  /// The idle row, disabled: what the Record menu shows before the
+  /// controller exists.
+  static let unavailable = RecordingControlPresentation(
+    label: "Record call", role: .primary, isEnabled: false, isBusy: false,
+    offersInPerson: false, disabledReason: nil)
+
   /// Only required kinds in `denied` count; an optional kind never disables.
   static func make(state: RecordingState, denied: [PermissionKind]) -> RecordingControlPresentation
   {
@@ -50,7 +66,8 @@ struct RecordingControlPresentation: Equatable, Sendable {
 }
 
 extension PermissionKind {
-  /// The sentence a control shows when this permission is denied.
+  /// The sentence a control shows when this permission is denied. The
+  /// optional kinds never show: `make` filters them out before it reads this.
   var deniedMessage: String {
     switch self {
     case .microphone: "Microphone access is denied."

@@ -2,10 +2,12 @@ import StenoCore
 import SwiftUI
 
 /// The few composed controls the app reuses: an achromatic primary button,
-/// a veil secondary button, a status chip and a hairline card. Pressed
-/// states use the motion tokens.
+/// a veil secondary button, a status chip and a hairline card. Pressed and
+/// disabled states use the motion tokens.
 
 struct StenoPrimaryButtonStyle: ButtonStyle {
+  @Environment(\.isEnabled) private var isEnabled
+
   func makeBody(configuration: Configuration) -> some View {
     configuration.label
       .font(.steno(Theme.TextSize.xs, weight: .semibold))
@@ -14,14 +16,18 @@ struct StenoPrimaryButtonStyle: ButtonStyle {
       .padding(.vertical, Theme.Space.xs + 2)
       .background(
         RoundedRectangle(cornerRadius: Theme.Space.radiusSmall, style: .continuous)
-          .fill(Color.stenoPrimary))
+          .fill(Color.stenoPrimary)
+      )
       .scaleEffect(configuration.isPressed ? Motion.pressScale : 1)
       .opacity(configuration.isPressed ? Motion.pressOpacity : 1)
+      .opacity(isEnabled ? 1 : Motion.disabledOpacity)
       .animation(Motion.functional, value: configuration.isPressed)
   }
 }
 
 struct StenoSecondaryButtonStyle: ButtonStyle {
+  @Environment(\.isEnabled) private var isEnabled
+
   func makeBody(configuration: Configuration) -> some View {
     configuration.label
       .font(.steno(Theme.TextSize.xs, weight: .medium))
@@ -30,12 +36,15 @@ struct StenoSecondaryButtonStyle: ButtonStyle {
       .padding(.vertical, Theme.Space.xs + 2)
       .background(
         RoundedRectangle(cornerRadius: Theme.Space.radiusSmall, style: .continuous)
-          .fill(Color.stenoSecondary))
+          .fill(Color.stenoSecondary)
+      )
       .overlay(
         RoundedRectangle(cornerRadius: Theme.Space.radiusSmall, style: .continuous)
-          .strokeBorder(Color.stenoBorder, lineWidth: Theme.Space.hairline))
+          .strokeBorder(Color.stenoBorder, lineWidth: Theme.Space.hairline)
+      )
       .scaleEffect(configuration.isPressed ? Motion.pressScale : 1)
       .opacity(configuration.isPressed ? Motion.pressOpacity : 1)
+      .opacity(isEnabled ? 1 : Motion.disabledOpacity)
       .animation(Motion.functional, value: configuration.isPressed)
   }
 }
@@ -77,7 +86,8 @@ struct Card<Content: View>: View {
       .padding(Theme.Space.md)
       .background(
         RoundedRectangle(cornerRadius: Theme.Space.radius, style: .continuous)
-          .fill(Color.stenoCard))
+          .fill(Color.stenoCard)
+      )
       .overlay(
         RoundedRectangle(cornerRadius: Theme.Space.radius, style: .continuous)
           .strokeBorder(Color.stenoBorder, lineWidth: Theme.Space.hairline))

@@ -11,6 +11,12 @@ struct MenuBarView: View {
   private var model: MenuBarViewModel { controller.menuBar }
   private var recorder: RecordingController { controller.recorder }
 
+  /// The same state table the sidebar control and the Record menu render.
+  private var presentation: RecordingControlPresentation {
+    RecordingControlPresentation.make(
+      state: recorder.recording, denied: recorder.deniedPermissions)
+  }
+
   var body: some View {
     VStack(alignment: .leading, spacing: Theme.Space.md) {
       recordingSection
@@ -22,12 +28,9 @@ struct MenuBarView: View {
         Divider().overlay(Color.stenoBorder)
         recentSection
       }
-      RecordingMessages(recorder: recorder)
+      RecordingMessages(warning: recorder.lastWarning, error: recorder.lastError ?? model.lastError)
       if let warning = controller.environment.startupWarnings.first {
         MessageRow(kind: .warning, text: warning)
-      }
-      if recorder.lastError == nil, let error = model.lastError {
-        MessageRow(kind: .error, text: error)
       }
       Divider().overlay(Color.stenoBorder)
       footer
@@ -39,7 +42,8 @@ struct MenuBarView: View {
   }
 
   private var recordingSection: some View {
-    VStack(alignment: .leading, spacing: Theme.Space.sm) {
+    let presentation = self.presentation
+    return VStack(alignment: .leading, spacing: Theme.Space.sm) {
       HStack(spacing: Theme.Space.sm) {
         StatusDot(color: recorder.isRecording ? Color.stenoDestructive : Color.stenoGhost)
         Text(recorder.statusText)
@@ -58,11 +62,13 @@ struct MenuBarView: View {
       HStack(spacing: Theme.Space.sm) {
         switch recorder.recording {
         case .idle:
-          Button("Record call") { Task { await recorder.start(mode: .call) } }
+          Button(presentation.label) { Task { await recorder.start(mode: .call) } }
             .buttonStyle(StenoPrimaryButtonStyle())
+            .disabled(!presentation.isEnabled)
             .accessibilityIdentifier("record-call")
           Button("Record in person") { Task { await recorder.start(mode: .inPerson) } }
             .buttonStyle(StenoSecondaryButtonStyle())
+            .disabled(!presentation.offersInPerson)
             .accessibilityIdentifier("record-in-person")
         case .recording(let since):
           Button {
@@ -75,6 +81,9 @@ struct MenuBarView: View {
         case .starting, .stopping:
           ProgressView().controlSize(.small)
         }
+      }
+      if let reason = presentation.disabledReason {
+        MessageRow(kind: .warning, text: reason)
       }
     }
   }

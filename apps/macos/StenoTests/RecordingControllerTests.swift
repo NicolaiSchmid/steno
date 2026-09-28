@@ -233,11 +233,23 @@ final class RecordingControllerTests: XCTestCase {
     XCTAssertTrue(meetings.isEmpty)
   }
 
+  /// Nil while idle and while starting (the row is written before the
+  /// capture comes up, but nothing is active until it has), the live row's
+  /// id while recording, nil again after stop.
   func testActiveMeetingIDFollowsTheRecording() async throws {
-    let environment = try await TestSupport.environment(seed: false)
+    let gate = Gate()
+    let environment = try await TestSupport.environment(
+      seed: false, calendar: GatedCalendar(gate: gate))
     let recorder = RecordingController(environment: environment)
     XCTAssertNil(recorder.activeMeetingID)
-    await recorder.start(mode: .call)
+
+    let starting = Task { await recorder.start(mode: .call) }
+    await TestSupport.waitUntil("the start is waiting on the calendar") {
+      recorder.recording == .starting
+    }
+    XCTAssertNil(recorder.activeMeetingID, "nothing is active while starting")
+    await gate.open()
+    await starting.value
     let meetings = try await environment.store.meetings()
     XCTAssertEqual(meetings.count, 1)
     XCTAssertEqual(recorder.activeMeetingID, meetings.first?.id, "the live row's id")
@@ -271,6 +283,40 @@ final class RecordingControllerTests: XCTestCase {
     permissions.states[.microphone] = .granted
     await recorder.refreshPermissions()
     XCTAssertEqual(recorder.deniedPermissions, [], "a fix in System Settings clears the report")
+
+    permissions.states[.microphone] = .denied
+    permissions.states[.systemAudio] = .denied
+    await recorder.refreshPermissions()
+    XCTAssertEqual(
+      recorder.deniedPermissions, [.microphone, .systemAudio],
+      "reported in `allCases` order; the control joins the messages in this order")
+    await environment.pipeline.waitUntilIdle()
+  }
+
+  /// After a stop the recorder is idle at once, so a second recording starts
+  /// while the first is still queued or processing; each has its own row.
+  func testASecondRecordingStartsWhileTheFirstProcesses() async throws {
+    let environment = try await TestSupport.environment(seed: false)
+    let recorder = RecordingController(environment: environment)
+    await recorder.start(mode: .call)
+    let first = try XCTUnwrap(recorder.activeMeetingID)
+    await recorder.stop()
+
+    await recorder.start(mode: .call)
+    guard case .recording = recorder.recording else {
+      return XCTFail("expected .recording, got \(recorder.recording)")
+    }
+    let second = try XCTUnwrap(recorder.activeMeetingID)
+    XCTAssertNotEqual(second, first, "a new row for the new recording")
+    let meetings = try await environment.store.meetings()
+    XCTAssertEqual(meetings.count, 2)
+    let firstRow = try XCTUnwrap(meetings.first { $0.id == first })
+    XCTAssertNotEqual(firstRow.state, .recording, "the first recording was handed over")
+    XCTAssertFalse(firstRow.state.isFailed, String(describing: firstRow.state))
+    let secondRow = try XCTUnwrap(meetings.first { $0.id == second })
+    XCTAssertEqual(secondRow.state, .recording)
+
+    await recorder.stop()
     await environment.pipeline.waitUntilIdle()
   }
 

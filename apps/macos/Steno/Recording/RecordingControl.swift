@@ -1,5 +1,3 @@
-import AppKit
-import Combine
 import StenoAudio
 import SwiftUI
 
@@ -9,12 +7,11 @@ import SwiftUI
 /// reason while a required permission is denied. Drives the one recorder
 /// through `AppController.startRecordingFromWindow`, so the live row is
 /// selected; the menu bar item drives the same recorder and never moves the
-/// selection.
+/// selection. The permission report refreshes when the control appears;
+/// `AppController` refreshes it again whenever the app becomes active.
 struct RecordingControl: View {
   let controller: AppController
   @Environment(\.openWindow) private var openWindow
-
-  private static let disabledOpacity: Double = 0.5
 
   private var recorder: RecordingController { controller.recorder }
 
@@ -24,9 +21,10 @@ struct RecordingControl: View {
   }
 
   var body: some View {
+    let presentation = self.presentation
     VStack(spacing: 0) {
       VStack(alignment: .leading, spacing: Theme.Space.sm) {
-        control
+        control(presentation)
           .frame(maxWidth: .infinity)
         if let levels = recorder.levels, case .recording = recorder.recording {
           LevelBars(levels: levels)
@@ -37,22 +35,17 @@ struct RecordingControl: View {
             .buttonStyle(StenoSecondaryButtonStyle())
             .accessibilityIdentifier("sidebar-fix-permissions")
         }
-        RecordingMessages(recorder: recorder)
+        RecordingMessages(warning: recorder.lastWarning, error: recorder.lastError)
       }
       .padding(Theme.Space.md)
       .frame(maxWidth: .infinity)
       Divider().overlay(Color.stenoBorder)
     }
     .task { await recorder.refreshPermissions() }
-    .onReceive(
-      NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)
-    ) { _ in
-      Task { await recorder.refreshPermissions() }
-    }
   }
 
   @ViewBuilder
-  private var control: some View {
+  private func control(_ presentation: RecordingControlPresentation) -> some View {
     switch recorder.recording {
     case .idle:
       HStack(spacing: 0) {
@@ -64,7 +57,6 @@ struct RecordingControl: View {
         }
         .buttonStyle(StenoPrimaryButtonStyle())
         .disabled(!presentation.isEnabled)
-        .opacity(presentation.isEnabled ? 1 : Self.disabledOpacity)
         .help("Record a call (⌘⇧R)")
         .accessibilityIdentifier("sidebar-record")
         if presentation.offersInPerson {
@@ -82,10 +74,14 @@ struct RecordingControl: View {
           .menuIndicator(.hidden)
           .fixedSize()
           .help("Record in person")
+          .accessibilityLabel("Record in person")
           .accessibilityIdentifier("sidebar-record-in-person")
         }
       }
       .fixedSize(horizontal: false, vertical: true)
+    // The busy states are a disabled button so the control keeps its box
+    // while the spinner stands in for the label; the redesign owns the
+    // spinner size.
     case .starting:
       Button(action: {}) {
         ProgressView()
