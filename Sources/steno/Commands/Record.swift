@@ -160,11 +160,9 @@ extension CaptureNotice {
   var line: String {
     switch self {
     case .deviceChanged(let reason):
-      "audio devices changed (\(String(describing: reason))); reconnecting"
+      "device change: \(String(describing: reason)), reconnecting"
     case .deviceResumed(let attempt, let gapSeconds):
-      String(
-        format: "audio devices resumed on attempt %d; %.2f s of silence filled the gap", attempt,
-        gapSeconds)
+      String(format: "device resumed: attempt %d, gap %.2f s", attempt, gapSeconds)
     }
   }
 }

@@ -59,7 +59,7 @@ public enum MeetingState: Codable, Sendable, Equatable, Hashable {
 
 /// Why a recording ended. Written by `LocalRecordingIntake.complete` from
 /// `RecordingResult.endReason`; nil for meetings recorded before it was
-/// stored and for phone recordings. `.manual` shows nothing anywhere.
+/// stored and for phone recordings.
 public enum RecordingEndReason: Codable, Sendable, Equatable, Hashable {
   /// The user stopped it from any surface.
   case manual
@@ -140,8 +140,6 @@ public struct Meeting: Codable, Sendable, Equatable, Hashable, Identifiable {
   public var calendarEventID: String?
   public var tags: [String]
   public var state: MeetingState
-  /// Why the recording ended; nil until `LocalRecordingIntake.complete`
-  /// writes it, and for phone recordings.
   public var endReason: RecordingEndReason?
   /// Where `title` came from; `.default` when absent from JSON.
   public var titleOrigin: TitleOrigin
@@ -196,10 +194,14 @@ public struct Meeting: Codable, Sendable, Equatable, Hashable, Identifiable {
     case endReason, titleOrigin, templateID, summary, scratchpad, llmUsage, createdAt, updatedAt
   }
 
-  /// Hand-written only for the two `v3` fields: `endReason` is omitted when
-  /// nil, `titleOrigin` is omitted when `.default` and read as `.default`
-  /// when absent, so `Tests/Fixtures/meetings/*.json`, the export golden and
-  /// every `meeting.json` written before `v3` decode and re-encode unchanged.
+  /// Hand-written for one rule the synthesised conformance cannot express:
+  /// `titleOrigin` is omitted when `.default` and read as `.default` when
+  /// absent, so `Tests/Fixtures/meetings/*.json`, the export golden and every
+  /// `meeting.json` written before `v3` decode and re-encode unchanged. (A
+  /// nil `endReason` would be omitted by the synthesised code too.) The
+  /// cost: a new stored property needs a `CodingKeys` case, an `init(from:)`
+  /// line and an `encode(to:)` line, and only the `SampleData.meeting()`
+  /// round trip catches a missed one.
   public init(from decoder: any Decoder) throws {
     let container = try decoder.container(keyedBy: CodingKeys.self)
     id = try container.decode(UUID.self, forKey: .id)

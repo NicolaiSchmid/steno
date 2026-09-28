@@ -3,10 +3,11 @@ import Foundation
 extension ProcessingPipeline {
   /// Runs the `MeetingSummarizer` for `meeting.templateID` and persists
   /// summary, tasks, decisions and speaker name suggestions with the
-  /// meeting's title, language and summed usage in one transaction. An unknown template id fails the stage;
-  /// nothing is substituted. A calendar title stays; any other title is
-  /// replaced by the model's. The caller folds earlier usage (cleanup) into
-  /// `meeting.llmUsage` first.
+  /// meeting's title, language and summed usage in one transaction. An
+  /// unknown template id fails the stage; nothing is substituted. A calendar
+  /// title and a title the user typed (`titleOrigin == .user`) stay; a
+  /// default title is replaced by the model's. The caller folds earlier usage
+  /// (cleanup) into `meeting.llmUsage` first.
   func summarize(meeting: Meeting, segments: [TranscriptSegment], speakers: [Speaker])
     async throws -> Meeting
   {
@@ -27,7 +28,7 @@ extension ProcessingPipeline {
       var updated = meeting
       updated.summary = output.summary
       updated.summary?.templateID = template.id
-      if meeting.calendarEventID == nil, !output.title.isEmpty {
+      if meeting.calendarEventID == nil, meeting.titleOrigin != .user, !output.title.isEmpty {
         updated.title = output.title
         updated.titleOrigin = .summary
       }

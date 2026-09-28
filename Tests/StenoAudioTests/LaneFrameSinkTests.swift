@@ -41,19 +41,10 @@ import Testing
   }
 
   /// The last reason handed to a sink's handler.
-  private final class LastReason: @unchecked Sendable {
-    private let lock = NSLock()
-    private var reason: DeviceChangeReason?
-    var value: DeviceChangeReason? {
-      lock.lock()
-      defer { lock.unlock() }
-      return reason
-    }
-    func set(_ reason: DeviceChangeReason) {
-      lock.lock()
-      self.reason = reason
-      lock.unlock()
-    }
+  private final class LastReason: Sendable {
+    private let reason = Mutex<DeviceChangeReason?>(nil)
+    var value: DeviceChangeReason? { reason.withLock { $0 } }
+    func set(_ new: DeviceChangeReason) { reason.withLock { $0 = new } }
   }
 
   @Test func silenceKeepsTheLaneAlignedAndADeviceChangeFiresOnceUntilRearmed() {

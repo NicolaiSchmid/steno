@@ -41,8 +41,8 @@ public struct SyntheticLane: Sendable, Equatable {
 /// Device changes, so the session's rebuild runs on CI exactly as in
 /// production: `changeDeviceAfter` reports `.defaultInputChanged` after
 /// exactly that many seconds of one `start` and ends the producer thread,
-/// like a microphone that moved; it fires `changesRemaining` times per backend
-/// instance (one by default), not once per `start`, or the rebuilt backend
+/// like a microphone that moved; it fires `changes` times per backend instance
+/// (one by default), not once per `start`, or the rebuilt backend
 /// would report again and loop. `restartsThatFail` makes that many `start`
 /// calls after the first throw `CaptureError.inputDeviceUnavailable`, the
 /// device still absent; `streamAfterRestart` is what every restart reports
@@ -68,7 +68,7 @@ public final class SyntheticCaptureBackend: CaptureBackend, @unchecked Sendable 
 
   public init(
     signals: [AudioLane: SyntheticLane], seconds: TimeInterval, callbackFrames: Int = 512,
-    realTime: Bool = false, changeDeviceAfter: TimeInterval? = nil, changesRemaining: Int = 1,
+    realTime: Bool = false, changeDeviceAfter: TimeInterval? = nil, changes: Int = 1,
     restartsThatFail: Int = 0, streamAfterRestart: CaptureStream? = nil
   ) {
     self.signals = signals
@@ -76,7 +76,7 @@ public final class SyntheticCaptureBackend: CaptureBackend, @unchecked Sendable 
     self.callbackFrames = callbackFrames
     self.realTime = realTime
     self.changeDeviceAfter = changeDeviceAfter
-    self.changesRemaining = changesRemaining
+    self.changesRemaining = changes
     self.failingRestartsRemaining = restartsThatFail
     self.streamAfterRestart = streamAfterRestart
   }
@@ -84,7 +84,7 @@ public final class SyntheticCaptureBackend: CaptureBackend, @unchecked Sendable 
   /// The plan's spelling: one tone per lane at amplitude 0.5.
   public convenience init(
     lanes: [AudioLane], tone: [AudioLane: Double], seconds: TimeInterval,
-    changeDeviceAfter: TimeInterval? = nil, changesRemaining: Int = 1, restartsThatFail: Int = 0,
+    changeDeviceAfter: TimeInterval? = nil, changes: Int = 1, restartsThatFail: Int = 0,
     streamAfterRestart: CaptureStream? = nil, realTime: Bool = false
   ) {
     var signals: [AudioLane: SyntheticLane] = [:]
@@ -93,7 +93,7 @@ public final class SyntheticCaptureBackend: CaptureBackend, @unchecked Sendable 
     }
     self.init(
       signals: signals, seconds: seconds, realTime: realTime, changeDeviceAfter: changeDeviceAfter,
-      changesRemaining: changesRemaining, restartsThatFail: restartsThatFail,
+      changes: changes, restartsThatFail: restartsThatFail,
       streamAfterRestart: streamAfterRestart)
   }
 

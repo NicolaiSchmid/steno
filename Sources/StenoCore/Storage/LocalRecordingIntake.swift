@@ -105,6 +105,8 @@ public struct LocalRecordingIntake: Sendable {
     let settings = try await settings.load()
     let timestamp = now()
     let trimmedTitle = title?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+    let titleOrigin: TitleOrigin =
+      trimmedTitle.isEmpty ? .default : calendarEventID == nil ? .user : .calendar
     let meeting = Meeting(
       id: UUID(),
       title: trimmedTitle.isEmpty
@@ -114,7 +116,7 @@ public struct LocalRecordingIntake: Sendable {
       source: source,
       calendarEventID: calendarEventID,
       state: .recording,
-      titleOrigin: trimmedTitle.isEmpty ? .default : (calendarEventID == nil ? .user : .calendar),
+      titleOrigin: titleOrigin,
       templateID: settings.defaultTemplateID,
       createdAt: timestamp,
       updatedAt: timestamp
@@ -127,10 +129,11 @@ public struct LocalRecordingIntake: Sendable {
   /// Writes the duration and the end reason in one update, sets the asset's
   /// retention (`retention`, else `Settings.defaultRetention` as it is now,
   /// so a change made during the recording applies) with `expiresAt`
-  /// cleared, and enqueues the meeting as `.queued`. Returns the meeting as handed to the pipeline. A meeting
-  /// that is not `.recording` throws `LocalRecordingIntakeError.notRecording`
-  /// and is left alone; any other failure (the enqueue among them) marks the
-  /// meeting `.failed` with the reason and is rethrown.
+  /// cleared, and enqueues the meeting as `.queued`. Returns the meeting as
+  /// handed to the pipeline. A meeting that is not `.recording` throws
+  /// `LocalRecordingIntakeError.notRecording` and is left alone; any other
+  /// failure (the enqueue among them) marks the meeting `.failed` with the
+  /// reason and is rethrown.
   @discardableResult
   public func complete(
     meetingID: UUID, result: RecordingResult, retention: AudioRetention? = nil

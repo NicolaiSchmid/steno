@@ -29,15 +29,16 @@ public actor CaptureSession {
   /// Frames the writer may fall behind the processing thread before frames
   /// are dropped and counted: 200 (2 s) by default.
   public let writerHeadroomFrames: Int
-  /// Restarts tried after a device change before the recording ends in
-  /// `.deviceLost`, and the waits before the second, third and fourth: a
-  /// Bluetooth device is gone for one to two seconds while it changes
-  /// profile; a device replugged by hand takes longer and is a loss the user
-  /// can see and restart from.
-  public static let restartAttempts = 4
+  /// The waits before the second, third and fourth restart after a device
+  /// change: a Bluetooth device is gone for one to two seconds while it
+  /// changes profile; a device replugged by hand takes longer and is a loss
+  /// the user can see and restart from.
   public static let restartBackoff: [Duration] = [
     .milliseconds(250), .milliseconds(500), .seconds(1),
   ]
+  /// Restarts tried before the recording ends in `.deviceLost`: one more
+  /// than the waits between them.
+  public static var restartAttempts: Int { restartBackoff.count + 1 }
   /// The most silence written for one gap; a longer outage leaves the master
   /// that much short of wall time rather than filling minutes of zeros.
   public static let maximumGap: Duration = .seconds(10)
@@ -75,9 +76,10 @@ public actor CaptureSession {
     var systemPeakSoFar: Float = 0
     /// The rebuild in flight, so `stop()` can abandon it.
     var rebuild: Task<Void, Never>?
-    /// Bumped per rebuild; a rebuild that wakes to another generation (a
-    /// stop and a new start meanwhile) does nothing.
-    var rebuildGeneration = 0
+    /// A change reported while that rebuild ran (the rebuilt backend's
+    /// listeners are live before the gap is written); `resume` starts the
+    /// next rebuild from it instead of losing it.
+    var pendingChange: DeviceChangeReason?
   }
 
   /// Opens the files for one recording; `RecordingWriter.init` in
@@ -88,6 +90,10 @@ public actor CaptureSession {
 
   private let makeWriter: WriterFactory
   private var active: Active?
+  /// Bumped per rebuild and never reset, so a rebuild task that wakes after
+  /// a stop and a new start does nothing: the new recording's rebuilds count
+  /// on from here rather than from zero.
+  private var rebuildGeneration = 0
 
   /// `echoCanceller` nil in `.call` with `echoCancellation` on means
   /// `SpeexEchoCanceller` with the 200 ms tail; `.inPerson` never cancels.
@@ -351,16 +357,20 @@ public actor CaptureSession {
 
   // MARK: Device changes
 
-  /// The sink's handler, on the actor. Ignored unless recording with no
-  /// rebuild in flight; otherwise the notice goes out and the rebuild runs
-  /// as its own task so `stop()` can interleave at its sleeps. Internal so a
-  /// test can report a change while idle or stopping; production reaches it
-  /// through the sink alone.
+  /// The sink's handler, on the actor. Ignored unless recording; during a
+  /// rebuild the reason is kept for `resume`; otherwise the notice goes out
+  /// and the rebuild runs as its own task so `stop()` can interleave at its
+  /// sleeps. Internal so a test can report a change while idle, after a
+  /// stop or during a rebuild; production reaches it through the sink alone.
   func deviceChanged(_ reason: DeviceChangeReason) {
-    guard case .recording = state, var active, active.rebuild == nil else { return }
+    guard case .recording = state, var active else { return }
+    if active.rebuild != nil {
+      self.active?.pendingChange = reason
+      return
+    }
     emit(.deviceChanged(reason))
-    active.rebuildGeneration += 1
-    let generation = active.rebuildGeneration
+    rebuildGeneration += 1
+    let generation = rebuildGeneration
     // The task body runs on the actor once this method returns, so the
     // handle is in place before it looks for it.
     active.rebuild = Task { await self.rebuild(generation: generation) }
@@ -369,64 +379,102 @@ public actor CaptureSession {
 
   private func stillRebuilding(_ generation: Int) -> Bool {
     guard case .recording = state, let active, active.rebuild != nil,
-      active.rebuildGeneration == generation
+      rebuildGeneration == generation
     else { return false }
     return true
   }
 
   /// Old backend and processing thread off, then `start` again with backoff;
-  /// the gap since the old backend stopped is written as silence before the
-  /// new processing thread starts. The sink, the relay, the writer thread
-  /// and the files stay. Nothing here runs on a real-time thread.
+  /// the gap from the moment the old backend was told to stop is written as
+  /// silence before the new processing thread starts. The sink, the relay,
+  /// the writer thread and the files stay. Nothing here runs on a real-time
+  /// thread.
   private func rebuild(generation: Int) async {
     guard stillRebuilding(generation), let current = active else { return }
+    // The stopwatch runs from before the teardown: the HAL calls in `stop()`
+    // take tens to hundreds of milliseconds during a device transition, and
+    // that is dead time in the master too.
+    let elapsed = clock.stopwatch()
     // Whatever whole frames the rings hold are the old device's last audio;
     // the processing thread's stop drains them into the relay.
     backend.stop()
     current.processing.stop()
-    var interim = current
-    interim.systemPeakSoFar = max(current.systemPeakSoFar, current.processing.systemPeak)
-    active = interim
-    let elapsed = clock.stopwatch()
+    active?.systemPeakSoFar = max(current.systemPeakSoFar, current.processing.systemPeak)
+    // The old backend's listeners went with it, so the latch can open now: a
+    // report from the rebuilt backend before the gap is written reaches
+    // `deviceChanged`, which keeps it for `resume`.
+    current.sink.rearmDeviceChange()
     // New devices mean a new echo path: the filter starts cold, as at start.
     echoCanceller?.reset()
-    for attempt in 1...Self.restartAttempts {
-      let stream: CaptureStream
-      do {
-        stream = try backend.start(
-          lanes: configuration.lanes, inputDeviceUID: configuration.inputDeviceUID,
-          sink: current.sink)
-      } catch {
-        guard attempt < Self.restartAttempts else { break }
-        do {
-          try await clock.sleep(Self.restartBackoff[attempt - 1])
-        } catch {
-          return  // cancelled by `stop()`
-        }
-        guard stillRebuilding(generation) else { return }
-        continue
-      }
+    switch await restartBackend(sink: current.sink, generation: generation) {
+    case .started(let stream, let attempt):
       // The gap grows through every failed attempt and is written once, in
       // full, when a start succeeds.
       let gapFrames = Self.gapFrames(for: min(elapsed(), Self.maximumGap))
       guard await writeSilence(frames: gapFrames, into: current.relay, generation: generation),
-        var updated = active
+        await relayHasRoom(for: current.sink, in: current.relay, generation: generation)
       else { return }
-      let gapSeconds = Double(gapFrames * StenoAudio.frameSize) / StenoAudio.sampleRate
-      let processing = makeProcessingThread(
-        sink: current.sink, relay: current.relay, stream: stream, levels: current.processing.levels)
-      processing.start()
-      updated.stream = stream
-      updated.processing = processing
-      updated.deviceChanges += 1
-      updated.gapSeconds += gapSeconds
-      updated.rebuild = nil
-      active = updated
-      updated.sink.rearmDeviceChange()
-      emit(.deviceResumed(attempt: attempt, gapSeconds: gapSeconds))
+      resume(
+        stream: stream, attempt: attempt, gapFrames: gapFrames, sink: current.sink,
+        relay: current.relay, generation: generation)
+    case .abandoned:
       return
+    case .exhausted:
+      deviceLost()
     }
-    deviceLost()
+  }
+
+  private enum Restart {
+    case started(CaptureStream, attempt: Int)
+    case abandoned
+    case exhausted
+  }
+
+  /// `start` again, `restartBackoff` apart on `clock`: `.started` with the
+  /// attempt that succeeded, `.exhausted` after `restartAttempts` failures,
+  /// `.abandoned` when `stop()` cancelled a sleep or the recording is gone.
+  private func restartBackend(sink: LaneFrameSink, generation: Int) async -> Restart {
+    for attempt in 1...Self.restartAttempts {
+      do {
+        let stream = try backend.start(
+          lanes: configuration.lanes, inputDeviceUID: configuration.inputDeviceUID, sink: sink)
+        return .started(stream, attempt: attempt)
+      } catch {
+        guard attempt < Self.restartAttempts else { return .exhausted }
+        do {
+          try await clock.sleep(Self.restartBackoff[attempt - 1])
+        } catch {
+          return .abandoned  // cancelled by `stop()`
+        }
+        guard stillRebuilding(generation) else { return .abandoned }
+      }
+    }
+    return .exhausted
+  }
+
+  /// The new processing thread on the kept sink and relay, built for
+  /// `stream`'s latencies and publishing into the shared `LevelSlot`; the
+  /// statistics and the notice follow. A change reported during the rebuild
+  /// starts the next one.
+  private func resume(
+    stream: CaptureStream, attempt: Int, gapFrames: Int, sink: LaneFrameSink, relay: FrameRelay,
+    generation: Int
+  ) {
+    guard stillRebuilding(generation), var updated = active else { return }
+    let gapSeconds = Double(gapFrames * StenoAudio.frameSize) / StenoAudio.sampleRate
+    let processing = makeProcessingThread(
+      sink: sink, relay: relay, stream: stream, levels: updated.processing.levels)
+    processing.start()
+    let pending = updated.pendingChange
+    updated.stream = stream
+    updated.processing = processing
+    updated.deviceChanges += 1
+    updated.gapSeconds += gapSeconds
+    updated.rebuild = nil
+    updated.pendingChange = nil
+    active = updated
+    emit(.deviceResumed(attempt: attempt, gapSeconds: gapSeconds))
+    if let pending { deviceChanged(pending) }
   }
 
   /// Whole relay frames for a gap: 48 000 samples a second in frames of
@@ -442,15 +490,16 @@ public actor CaptureSession {
   /// drains them while the processing thread is stopped, so a longer gap
   /// would silently shrink into `droppedSamples`. A full relay (a long gap,
   /// or a writer still behind the old producer) is waited out in 5 ms steps
-  /// on the clock. Returns false when the rebuild was abandoned meanwhile
-  /// (a stop cancelled the wait or replaced the recording).
+  /// on the clock; `hasRoom` is asked first because a refused `beginFrame`
+  /// counts as a dropped frame. Returns false when the rebuild was abandoned
+  /// meanwhile (a stop cancelled the wait or replaced the recording).
   private func writeSilence(frames: Int, into relay: FrameRelay, generation: Int) async -> Bool {
     guard frames > 0 else { return true }
     let zeros = [Float](repeating: 0, count: relay.frameSize)
     var remaining = frames
     while remaining > 0 {
       guard stillRebuilding(generation) else { return false }
-      if relay.beginFrame() {
+      if relay.hasRoom, relay.beginFrame() {
         zeros.withUnsafeBufferPointer { buffer in
           for channel in 0..<relay.channels {
             relay.write(channel: channel, from: buffer.baseAddress!)
@@ -464,6 +513,26 @@ public actor CaptureSession {
         } catch {
           return false  // cancelled by `stop()`
         }
+      }
+    }
+    return true
+  }
+
+  /// Waits, in 5 ms steps on the clock, until the relay has room for the
+  /// whole frames the rings collected while the gap was written (capped at
+  /// the relay's capacity, re-read on every step): the new processing thread
+  /// pushes them at once, and a relay still full of silence would refuse and
+  /// count them. Returns false when the rebuild was abandoned meanwhile.
+  private func relayHasRoom(for sink: LaneFrameSink, in relay: FrameRelay, generation: Int) async
+    -> Bool
+  {
+    let backlog = { min(sink.availableToRead / StenoAudio.frameSize, relay.capacityFrames) }
+    while relay.capacityFrames - relay.availableFrames < backlog() {
+      guard stillRebuilding(generation) else { return false }
+      do {
+        try await clock.sleep(.milliseconds(5))
+      } catch {
+        return false  // cancelled by `stop()`
       }
     }
     return true

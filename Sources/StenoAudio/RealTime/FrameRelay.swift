@@ -9,18 +9,25 @@ final class FrameRelay: @unchecked Sendable {
   let channels: Int
   let frameSize: Int
   let rings: LaneRings
+  /// Whole frames the relay holds at most.
+  let capacityFrames: Int
 
   /// `capacityFrames` whole frames of headroom per channel.
   init(channels: Int, frameSize: Int, capacityFrames: Int) {
     self.channels = channels
     self.frameSize = frameSize
     self.rings = LaneRings(count: channels, capacity: frameSize * capacityFrames)
+    self.capacityFrames = capacityFrames
   }
 
   /// Signalled once per committed frame; the writer thread waits on it.
   var wake: DispatchSemaphore { rings.wake }
 
   // MARK: Producer (processing thread)
+
+  /// Whether one more frame fits right now. `beginFrame` counts a refusal
+  /// as a drop, so a producer that would rather wait asks this first.
+  var hasRoom: Bool { rings.hasRoom(for: frameSize) }
 
   @inline(__always)
   func beginFrame() -> Bool {

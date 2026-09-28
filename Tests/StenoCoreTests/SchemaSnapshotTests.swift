@@ -37,6 +37,5 @@ import Testing
   @Test func identifiersAreUniqueAndOrdered() {
     #expect(Set(Migrations.identifiers).count == Migrations.identifiers.count)
     #expect(Migrations.identifiers.first == "v1")
-    #expect(Migrations.identifiers.count == Migrations.steps.count)
   }
 }

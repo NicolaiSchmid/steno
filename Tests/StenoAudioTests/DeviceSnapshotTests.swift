@@ -9,8 +9,8 @@ import Testing
 /// first difference names the reason, loss before movement.
 @Suite struct DeviceSnapshotTests {
   static let baseline = DeviceSnapshot(
-    outputUID: "AirPods", inputUID: "AirPods", outputAlive: true, inputAlive: true,
-    sampleRate: 48_000)
+    outputUID: "AirPods", defaultOutputUID: "AirPods", inputUID: "AirPods", outputAlive: true,
+    inputAlive: true, sampleRate: 48_000)
 
   @Test func identicalDevicesAreNoChange() {
     #expect(Self.baseline.difference(from: Self.baseline) == nil)
@@ -31,6 +31,17 @@ import Testing
     var both = output
     both.inputUID = "MacBook Pro Microphone"
     #expect(both.difference(from: Self.baseline) == .defaultOutputChanged, "the first difference")
+  }
+
+  /// The tap mirrors the default output device while the clock follows the
+  /// system output: alerts pinned to the speakers and a call moved to
+  /// headphones move only the first, and the far-end alignment with it.
+  @Test func theDefaultOutputMovingAloneIsAChange() {
+    var moved = Self.baseline
+    moved.defaultOutputUID = "Headphones"
+    #expect(moved.difference(from: Self.baseline) == .defaultOutputChanged)
+    moved.inputUID = "MacBook Pro Microphone"
+    #expect(moved.difference(from: Self.baseline) == .defaultOutputChanged, "output before input")
   }
 
   @Test func aDeadDeviceIsReportedBeforeTheDefaultThatMovedBecauseOfIt() {
@@ -61,8 +72,8 @@ import Testing
   /// invisible because it is not resolved.
   @Test func aCaptureWithoutAMicrophoneIgnoresTheInputSide() {
     let tapOnly = DeviceSnapshot(
-      outputUID: "Speakers", inputUID: nil, outputAlive: true, inputAlive: false,
-      sampleRate: 48_000)
+      outputUID: "Speakers", defaultOutputUID: "Speakers", inputUID: nil, outputAlive: true,
+      inputAlive: false, sampleRate: 48_000)
     #expect(tapOnly.difference(from: tapOnly) == nil)
     var moved = tapOnly
     moved.outputUID = "AirPods"

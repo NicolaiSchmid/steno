@@ -76,7 +76,8 @@ public final class LaneFrameSink: @unchecked Sendable {
   }
 
   /// Lets the next `reportDeviceChange` through again. The session calls it
-  /// after a successful restart, never a producer.
+  /// once the old backend is stopped and before the restart, never a
+  /// producer.
   public func rearmDeviceChange() {
     deviceChangeReported.store(false, ordering: .releasing)
   }
