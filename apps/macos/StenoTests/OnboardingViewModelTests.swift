@@ -1,7 +1,37 @@
+import StenoCore
 import XCTest
 
 @MainActor
 final class OnboardingViewModelTests: XCTestCase {
+  /// Built from the environment, the model tells what the stored rule does
+  /// to the recordings, one sentence per rule.
+  func testRetentionSentenceFollowsTheStoredRule() async throws {
+    let environment = try await TestSupport.environment(seed: false)
+    let model = OnboardingViewModel(environment: environment)
+    XCTAssertNil(model.retentionSentence, "nothing before load")
+    await model.load()
+    XCTAssertTrue(model.isComplete, "permissions come from the environment")
+    let forever = try XCTUnwrap(model.retentionSentence)
+    XCTAssertTrue(forever.hasPrefix("Recordings are kept forever in "), forever)
+    XCTAssertTrue(forever.hasSuffix(" Change this any time in Settings > Audio."), forever)
+    let folder = try await environment.settings.load().audioFolder
+    XCTAssertTrue(
+      forever.contains("in \(folder.lastPathComponent)."), "names the folder, not the path: \(forever)")
+
+    try await environment.updateSettings { $0.defaultRetention = .keepDays(7) }
+    await model.load()
+    let days = try XCTUnwrap(model.retentionSentence)
+    XCTAssertTrue(days.contains("deleted 7 days after it was processed and exported"), days)
+    XCTAssertTrue(days.hasSuffix("Change this any time in Settings > Audio."), days)
+
+    try await environment.updateSettings { $0.defaultRetention = .deleteAfterProcessing }
+    await model.load()
+    let delete = try XCTUnwrap(model.retentionSentence)
+    XCTAssertTrue(delete.contains("as soon as it was transcribed, summarised and exported"), delete)
+
+    XCTAssertNil(OnboardingViewModel(permissions: FakePermissions()).retentionSentence)
+  }
+
   func testStepsRunInOrderAndRequiredOnesGateCompletion() async {
     let permissions = FakePermissions()
     let model = OnboardingViewModel(permissions: permissions)

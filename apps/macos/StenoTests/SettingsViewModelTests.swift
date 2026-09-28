@@ -39,8 +39,12 @@ final class SettingsViewModelTests: XCTestCase {
     model.listInputs = { [] }
     await model.load()
     XCTAssertNil(model.error)
-    XCTAssertEqual(model.retentionMode, .keepDays)
+    XCTAssertEqual(model.retentionMode, .keepForever, "a fresh install keeps every recording")
     XCTAssertEqual(model.retentionDays, 30)
+    XCTAssertTrue(model.footnote.hasPrefix("Recordings stay in the folder above"), model.footnote)
+    XCTAssertEqual(
+      AudioSettingsViewModel.RetentionMode.allCases,
+      [.keepForever, .keepDays, .deleteAfterProcessing])
 
     await model.setInputDevice("mic-1")
     let folder = FileManager.default.temporaryDirectory.appendingPathComponent("rec")
@@ -50,16 +54,117 @@ final class SettingsViewModelTests: XCTestCase {
     XCTAssertEqual(settings.inputDeviceUID, "mic-1")
     XCTAssertEqual(settings.audioFolder, folder)
     XCTAssertEqual(settings.defaultRetention, .deleteAfterProcessing)
+    XCTAssertEqual(model.footnote, AudioRetention.deleteAfterProcessing.footnote)
+    XCTAssertTrue(model.footnote.hasPrefix("Each recording is deleted as soon as"), model.footnote)
 
     await model.setRetention(mode: .keepDays, days: 0)
     settings = try await environment.settings.load()
     XCTAssertEqual(settings.defaultRetention, .keepDays(1), "days are clamped to at least one")
+    XCTAssertTrue(model.footnote.contains("deleted 1 day after"), model.footnote)
+    XCTAssertEqual(AudioSettingsViewModel.RetentionMode.keepDays.title(days: 1), "For 1 day")
+    await model.setRetention(mode: .keepDays, days: 5000)
+    settings = try await environment.settings.load()
+    XCTAssertEqual(settings.defaultRetention, .keepDays(3650), "and to the stepper's maximum")
+    await model.setRetention(mode: .keepDays, days: 7)
+    settings = try await environment.settings.load()
+    XCTAssertEqual(settings.defaultRetention, .keepDays(7))
+    XCTAssertTrue(model.footnote.contains("deleted 7 days after"), model.footnote)
+    XCTAssertEqual(AudioSettingsViewModel.RetentionMode.keepDays.title(days: 7), "For 7 days")
+    let reloaded = AudioSettingsViewModel(environment: environment)
+    reloaded.listInputs = { [] }
+    await reloaded.load()
+    XCTAssertEqual(reloaded.retentionMode, .keepDays)
+    XCTAssertEqual(reloaded.retentionDays, 7)
+
     await model.setRetention(mode: .keepForever, days: 5)
     settings = try await environment.settings.load()
     XCTAssertEqual(settings.defaultRetention, .keepForever)
+    XCTAssertEqual(model.keptForever, 0, "no recording on disk to keep")
     await model.setInputDevice(nil)
     settings = try await environment.settings.load()
     XCTAssertNil(settings.inputDeviceUID)
+  }
+
+  /// Switching to Forever keeps every recording whose master is on disk
+  /// (rule and stamp together); a shorter rule changes nothing on disk or
+  /// in the rows.
+  func testAudioSwitchingToForeverKeepsRecordingsOnDisk() async throws {
+    let environment = try await TestSupport.environment()
+    try await environment.updateSettings { $0.defaultRetention = .keepDays(30) }
+    let folder = try TestSupport.temporaryDirectory("steno-audio")
+    defer { try? FileManager.default.removeItem(at: folder) }
+    var meeting = SampleData.meeting()
+    meeting.id = UUID()
+    let master = folder.appendingPathComponent("master.caf")
+    try Data([1, 2, 3]).write(to: master)
+    let onDisk = AudioAsset(
+      id: UUID(), meetingID: meeting.id, url: master, format: .caf48kFloat32, lanes: [.mixed],
+      retention: .keepDays(30), expiresAt: TestSupport.now)
+    try await environment.store.save(meeting, asset: onDisk)
+    let model = AudioSettingsViewModel(environment: environment)
+    model.listInputs = { [] }
+    await model.load()
+    XCTAssertEqual(model.retentionMode, .keepDays)
+
+    await model.setRetention(mode: .keepDays, days: 7)
+    XCTAssertNil(model.keptForever)
+    let untouched = try await environment.store.asset(id: onDisk.id)
+    XCTAssertEqual(untouched, onDisk, "a shorter rule applies to new recordings only")
+    XCTAssertTrue(FileManager.default.fileExists(atPath: master.path))
+
+    await model.setRetention(mode: .keepForever, days: 7)
+    XCTAssertNil(model.error, model.error ?? "")
+    XCTAssertEqual(model.keptForever, 1, "the seeded asset has no files and is not counted")
+    let keptOptional = try await environment.store.asset(id: onDisk.id)
+    let kept = try XCTUnwrap(keptOptional)
+    XCTAssertEqual(kept.retention, .keepForever)
+    XCTAssertNil(kept.expiresAt)
+    let seededOptional = try await environment.store.asset(meetingID: SampleData.meetingID)
+    let seeded = try XCTUnwrap(seededOptional)
+    XCTAssertEqual(seeded.retention, .keepDays(30), "no file, no rewrite")
+    XCTAssertNotNil(seeded.expiresAt)
+    XCTAssertTrue(FileManager.default.fileExists(atPath: master.path), "nothing is deleted")
+  }
+
+  func testAudioMeasuresTheRecordingsFolder() async throws {
+    let environment = try await TestSupport.environment(seed: false)
+    let folder = try TestSupport.temporaryDirectory("steno-usage")
+    defer { try? FileManager.default.removeItem(at: folder) }
+    try Data(repeating: 1, count: 1_500).write(to: folder.appendingPathComponent("a.caf"))
+    let nested = folder.appendingPathComponent("meeting", isDirectory: true)
+    try FileManager.default.createDirectory(at: nested, withIntermediateDirectories: true)
+    try Data(repeating: 2, count: 500).write(to: nested.appendingPathComponent("mic.wav"))
+    try Data(repeating: 3, count: 99).write(to: folder.appendingPathComponent(".DS_Store"))
+    try await environment.updateSettings { $0.audioFolder = folder }
+    let model = AudioSettingsViewModel(environment: environment)
+    model.listInputs = { [] }
+    XCTAssertEqual(model.folderUsage, .measuring)
+    await model.load()
+    XCTAssertEqual(model.folderUsage, .bytes(2_000))
+
+    // A folder that does not exist yet holds no recordings.
+    await model.setAudioFolder(folder.appendingPathComponent("not-yet", isDirectory: true))
+    XCTAssertEqual(model.folderUsage, .bytes(0))
+  }
+
+  /// A folder that exists but cannot be read is "unavailable", not zero.
+  func testAudioReportsAnUnreadableFolderAsUnavailable() async throws {
+    // Root reads everything; the permission bits cannot make a folder
+    // unreadable for it.
+    try XCTSkipIf(getuid() == 0, "runs as root")
+    let environment = try await TestSupport.environment(seed: false)
+    let folder = try TestSupport.temporaryDirectory("steno-unreadable")
+    defer {
+      try? FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: folder.path)
+      try? FileManager.default.removeItem(at: folder)
+    }
+    try Data(repeating: 1, count: 10).write(to: folder.appendingPathComponent("a.caf"))
+    try FileManager.default.setAttributes([.posixPermissions: 0], ofItemAtPath: folder.path)
+    try await environment.updateSettings { $0.audioFolder = folder }
+    let model = AudioSettingsViewModel(environment: environment)
+    model.listInputs = { [] }
+    await model.load()
+    XCTAssertEqual(model.folderUsage, .unavailable)
   }
 
   // MARK: Speech

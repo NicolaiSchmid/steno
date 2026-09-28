@@ -124,6 +124,33 @@ struct RecordingDestination: Destination, Sendable {
     #expect((built.first as? ObsidianFolderDestination)?.settings == configured.obsidian)
   }
 
+  /// A row still outstanding for a destination that is no longer configured
+  /// would defer the audio's expiry forever and promise an export that never
+  /// runs; it is dropped. A delivered row keeps its receipt for a re-added
+  /// destination to update in place.
+  @Test func rowsOfARemovedDestinationAreDroppedUnlessDelivered() async throws {
+    let (store, settings) = try await Self.store()
+    let meetingID = FixtureMeeting.meetingID
+    let failed = Delivery(
+      meetingID: meetingID, destinationID: "gone", status: .failed("vault missing"))
+    let delivered = Delivery(meetingID: meetingID, destinationID: "moved", status: .delivered)
+    try await store.save(failed)
+    try await store.save(delivered)
+
+    let none = DeliveryCoordinator(store: store, settings: settings, now: { Self.now })
+    #expect(await none.deliverAll(meetingID: meetingID).isEmpty)
+    #expect(try await store.deliveries(meetingID: meetingID).map(\.destinationID) == ["moved"])
+    #expect(try await store.deliveries(meetingID: meetingID).allDelivered)
+
+    try await store.save(failed)
+    let working = RecordingDestination(id: "working")
+    let coordinator = DeliveryCoordinator(
+      store: store, settings: settings, destinations: { _ in [working] }, now: { Self.now })
+    _ = await coordinator.deliverAll(meetingID: meetingID)
+    #expect(
+      try await store.deliveries(meetingID: meetingID).map(\.destinationID) == ["moved", "working"])
+  }
+
   @Test func settingsThatDoNotLoadFailEveryStoredRowInsteadOfSilence() async throws {
     let (store, settings) = try await Self.store()
     let working = RecordingDestination(id: "b-works")

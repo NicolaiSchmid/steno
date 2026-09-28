@@ -126,6 +126,13 @@ enum TestSupport {
       .deletingLastPathComponent()  // macos
   }
 
+  /// The built `Steno.app` beside the test bundle. The hostless tests read
+  /// its Info.plist and resources through this path instead of `Bundle.main`.
+  static var builtApp: URL {
+    Bundle(for: BundleToken.self).bundleURL.deletingLastPathComponent()
+      .appendingPathComponent("Steno.app", isDirectory: true)
+  }
+
   /// The committed test identity, imported to memory only (no keychain).
   static func testIdentity() throws -> HandoverIdentity {
     let data = try Data(contentsOf: fixtures.appendingPathComponent("handover/test-identity.p12"))
@@ -241,3 +248,6 @@ final class GatedCalendar: CalendarProviding {
     return []
   }
 }
+
+/// `Bundle(for:)` needs a class; `TestSupport` is an enum.
+private final class BundleToken {}

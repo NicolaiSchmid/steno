@@ -70,6 +70,29 @@ extension RecordingEndReason {
   }
 }
 
+extension AudioRetention {
+  /// What the rule does to the files, as Settings > Audio says it under the
+  /// picker; onboarding reuses the days and delete sentences. Transcripts,
+  /// summaries and exports are never touched by any rule.
+  var footnote: String {
+    switch self {
+    case .keepForever:
+      "Recordings stay in the folder above until you delete a meeting."
+    case .keepDays(let days):
+      "Each recording is deleted \(days) \(days == 1 ? "day" : "days") after it was processed and exported. Transcripts, summaries and exports are never deleted by this rule."
+    case .deleteAfterProcessing:
+      "Each recording is deleted as soon as it was transcribed, summarised and exported. Transcripts, summaries and exports stay."
+    }
+  }
+}
+
+extension ByteCountFormatter {
+  /// "4.2 GB": model sizes and the recordings folder alike.
+  static func fileSize(_ bytes: Int64) -> String {
+    string(fromByteCount: bytes, countStyle: .file)
+  }
+}
+
 extension LanguageTag {
   /// "German" for `de`, the tag itself when the locale has no name for it.
   func localizedName(in locale: Locale = .current) -> String {

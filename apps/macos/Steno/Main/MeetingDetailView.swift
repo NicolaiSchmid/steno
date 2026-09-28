@@ -29,6 +29,15 @@ struct MeetingDetailView: View {
     .background(Color.stenoBackground)
     .task { await model.observe() }
     .task { await model.observeDeliveries() }
+    .task { await model.observeSettings() }
+    .confirmationDialog(
+      "Delete this recording now?", isPresented: $model.confirmsDeleteNow, titleVisibility: .visible
+    ) {
+      Button("Delete recording", role: .destructive) { Task { await model.setKeepAudio(false) } }
+      Button("Cancel", role: .cancel) {}
+    } message: {
+      Text("The recording is deleted shortly. The transcript, summary and exports stay.")
+    }
     .onChange(of: showsSpeakers) { _, shown in
       if !shown { Task { await model.pickerClosed() } }
     }
@@ -68,6 +77,9 @@ struct MeetingDetailView: View {
       if case .failed(let reason) = meeting.state {
         MessageRow(kind: .error, text: reason)
       }
+      if model.recordingStatusText != nil || model.showsKeepToggle {
+        recordingLine
+      }
       if showsSpeakersRow {
         SpeakersRow(model: model.speakers, isPresented: $showsSpeakers)
           .popover(isPresented: $showsSpeakers, arrowEdge: .bottom) {
@@ -87,12 +99,12 @@ struct MeetingDetailView: View {
             .disabled(!model.canRerun)
           Button("Re-export") { Task { await model.reexport() } }
             .disabled(!model.canRerun)
-          Divider()
-          Toggle("Keep audio", isOn: .action({ model.keepsAudio }, model.setKeepAudio))
           if let url = model.export?.audio?.url {
+            Divider()
             Button("Reveal recording in Finder") {
               NSWorkspace.shared.activateFileViewerSelecting([url])
             }
+            .disabled(!model.recordingFilesExist)
           }
         } label: {
           Label("Actions", systemImage: "ellipsis.circle")
@@ -106,6 +118,27 @@ struct MeetingDetailView: View {
       }
     }
     .padding(Theme.Space.lg)
+  }
+
+  /// The retention row of the header: what happens to the audio file when
+  /// the default rule does not say it all, and the per-meeting keep when
+  /// the default is not Forever.
+  private var recordingLine: some View {
+    HStack(spacing: Theme.Space.md) {
+      if let status = model.recordingStatusText {
+        Text(status)
+          .font(.steno(Theme.TextSize.xxs))
+          .foregroundStyle(Color.stenoMutedForeground)
+          .accessibilityIdentifier("recording-status")
+      }
+      if model.showsKeepToggle {
+        Toggle("Keep this recording", isOn: .action({ model.keepsAudio }, model.toggleKeepAudio))
+          .toggleStyle(.checkbox)
+          .font(.steno(Theme.TextSize.xxs))
+          .foregroundStyle(Color.stenoMutedForeground)
+          .accessibilityIdentifier("keep-recording")
+      }
+    }
   }
 
   private func tagsEditor(_ meeting: Meeting) -> some View {

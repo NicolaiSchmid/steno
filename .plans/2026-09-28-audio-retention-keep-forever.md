@@ -1,6 +1,7 @@
 # Steno: keep recordings, explicit audio retention setting
 
-Status: proposal, 2026-09-28, revised after the 2026-09-28 reviews. Triggered by first-run feedback.
+Status: implemented, PR #123, 2026-09-28; revised after the 2026-09-28 reviews. Triggered by first-run
+feedback.
 
 Scope authority: [`2026-09-24-initial-scope.md`](2026-09-24-initial-scope.md) ("Retention and
 privacy"). Binding plans this one refines: [`2026-09-25-core-foundation.md`](2026-09-25-core-foundation.md)

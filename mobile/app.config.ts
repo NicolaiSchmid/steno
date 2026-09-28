@@ -72,6 +72,10 @@ const config: ExpoConfig = {
 	// installed build, so bump it only together with a native release. Keep it
 	// equal to mobile/package.json.
 	version: "0.1.0",
+	// Rendered from apps/macos/Steno/Resources/AppIcon.svg by
+	// apps/macos/scripts/make-app-icon.sh (opaque 1024 px, the plate filling
+	// the square); never edit the PNG by hand. Part of the native fingerprint.
+	icon: "./assets/icon.png",
 	orientation: "portrait",
 	userInterfaceStyle: "automatic",
 	platforms: ["ios"],
@@ -107,6 +111,9 @@ const config: ExpoConfig = {
 		supportsTablet: false,
 		bundleIdentifier: VARIANT.bundleId,
 		appleTeamId: APPLE_TEAM_ID,
+		// The dark plate is its own dark variant; no tinted variant in v1
+		// (.plans/2026-09-28-app-icon.md, open question 1).
+		icon: { light: "./assets/icon.png", dark: "./assets/icon.png" },
 		infoPlist: {
 			ITSAppUsesNonExemptEncryption: false,
 			// Keep recording when the phone locks or the user switches apps.
