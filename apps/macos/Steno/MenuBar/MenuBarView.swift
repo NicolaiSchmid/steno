@@ -11,6 +11,12 @@ struct MenuBarView: View {
   private var model: MenuBarViewModel { controller.menuBar }
   private var recorder: RecordingController { controller.recorder }
 
+  /// The same state table the sidebar control and the Record menu render.
+  private var presentation: RecordingControlPresentation {
+    RecordingControlPresentation.make(
+      state: recorder.recording, denied: recorder.deniedPermissions)
+  }
+
   var body: some View {
     VStack(alignment: .leading, spacing: Theme.Space.md) {
       recordingSection
@@ -22,14 +28,9 @@ struct MenuBarView: View {
         Divider().overlay(Color.stenoBorder)
         recentSection
       }
-      if let warning = recorder.lastWarning {
-        MessageRow(kind: .warning, text: warning)
-      }
+      RecordingMessages(warning: recorder.lastWarning, error: recorder.lastError ?? model.lastError)
       if let warning = controller.environment.startupWarnings.first {
         MessageRow(kind: .warning, text: warning)
-      }
-      if let error = recorder.lastError ?? model.lastError {
-        MessageRow(kind: .error, text: error)
       }
       Divider().overlay(Color.stenoBorder)
       footer
@@ -41,42 +42,48 @@ struct MenuBarView: View {
   }
 
   private var recordingSection: some View {
-    VStack(alignment: .leading, spacing: Theme.Space.sm) {
+    let presentation = self.presentation
+    return VStack(alignment: .leading, spacing: Theme.Space.sm) {
       HStack(spacing: Theme.Space.sm) {
-        Circle()
-          .fill(recorder.isRecording ? Color.stenoDestructive : Color.stenoGhost)
-          .frame(width: 8, height: 8)
+        StatusDot(color: recorder.isRecording ? Color.stenoDestructive : Color.stenoGhost)
         Text(recorder.statusText)
           .font(.steno(Theme.TextSize.sm, weight: .semibold))
           .foregroundStyle(Color.stenoStrong)
         Spacer()
         if case .recording(let since) = recorder.recording {
-          TimelineView(.periodic(from: since, by: 1)) { context in
-            Text(context.date.timeIntervalSince(since).clockText)
-              .font(.steno(Theme.TextSize.sm).monospacedDigit())
-              .foregroundStyle(Color.stenoMutedForeground)
-          }
+          ElapsedText(since: since)
+            .font(.steno(Theme.TextSize.sm))
+            .foregroundStyle(Color.stenoMutedForeground)
         }
       }
-      if let levels = recorder.levels, recorder.isRecording {
+      if let levels = recorder.levels, case .recording = recorder.recording {
         LevelBars(levels: levels)
       }
       HStack(spacing: Theme.Space.sm) {
         switch recorder.recording {
         case .idle:
-          Button("Record call") { Task { await recorder.start(mode: .call) } }
+          Button(presentation.label) { Task { await recorder.start(mode: .call) } }
             .buttonStyle(StenoPrimaryButtonStyle())
+            .disabled(!presentation.isEnabled)
             .accessibilityIdentifier("record-call")
           Button("Record in person") { Task { await recorder.start(mode: .inPerson) } }
             .buttonStyle(StenoSecondaryButtonStyle())
+            .disabled(!presentation.offersInPerson)
             .accessibilityIdentifier("record-in-person")
-        case .recording:
-          Button("Stop") { Task { await recorder.stop() } }
-            .buttonStyle(StenoPrimaryButtonStyle())
-            .accessibilityIdentifier("stop-recording")
+        case .recording(let since):
+          Button {
+            Task { await recorder.stop() }
+          } label: {
+            StopLabel(since: since)
+          }
+          .buttonStyle(StenoSecondaryButtonStyle())
+          .accessibilityIdentifier("stop-recording")
         case .starting, .stopping:
           ProgressView().controlSize(.small)
         }
+      }
+      if let reason = presentation.disabledReason {
+        MessageRow(kind: .warning, text: reason)
       }
     }
   }
@@ -170,46 +177,5 @@ struct MenuBarView: View {
     controller.requestedMeetingID = id
     openWindow(id: "main")
     NSApp.activate()
-  }
-}
-
-/// Two thin level bars, mic and system, from the 10 Hz `LaneLevels`.
-struct LevelBars: View {
-  let levels: LaneLevels
-
-  var body: some View {
-    VStack(alignment: .leading, spacing: Theme.Space.xs) {
-      bar("Mic", levels.mic)
-      if let system = levels.system {
-        bar("System", system)
-      }
-    }
-  }
-
-  private func bar(_ label: String, _ level: LaneLevel) -> some View {
-    HStack(spacing: Theme.Space.sm) {
-      Text(label)
-        .font(.steno(Theme.TextSize.xxxs))
-        .foregroundStyle(Color.stenoFaint)
-        .frame(width: 44, alignment: .leading)
-      GeometryReader { proxy in
-        ZStack(alignment: .leading) {
-          Capsule().fill(Color.stenoSecondary)
-          Capsule()
-            .fill(Color.stenoLiveBright)
-            .frame(width: proxy.size.width * Self.fraction(level.rms))
-            .animation(Motion.functional, value: level.rms)
-        }
-      }
-      .frame(height: 4)
-    }
-    .accessibilityElement(children: .ignore)
-    .accessibilityLabel("\(label) level")
-    .accessibilityValue("\(Int(Self.fraction(level.rms) * 100)) percent")
-  }
-
-  /// dBFS from -60 to 0 mapped onto 0...1.
-  static func fraction(_ dbfs: Float) -> CGFloat {
-    CGFloat(min(1, max(0, (dbfs + 60) / 60)))
   }
 }

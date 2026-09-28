@@ -21,6 +21,8 @@ enum Motion {
 
   static let pressScale: CGFloat = 0.97
   static let pressOpacity: Double = 0.85
+  /// A disabled control, in both button styles.
+  static let disabledOpacity: Double = 0.5
   static let hitSlop: CGFloat = 10
 
   static var functional: Animation {

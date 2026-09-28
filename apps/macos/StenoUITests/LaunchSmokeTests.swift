@@ -1,11 +1,13 @@
 import XCTest
 
-/// The one UI smoke test: the app launches in its UI-testing mode (preview
+/// The UI smoke tests: the app launches in its UI-testing mode (preview
 /// environment: in-memory database seeded with StenoCore's sample meeting,
-/// fakes, no permission prompts), the main window appears, the fixture
-/// meeting is listed and each of the four tabs is selectable and shows its
-/// content. The app cannot join the SwiftPM end-to-end test target, so this
-/// test and the manual checklist are its end-to-end proof.
+/// fakes, synthetic audio, no permission prompts), the main window appears,
+/// the fixture meeting is listed and each of the four tabs is selectable and
+/// shows its content; and the sidebar control starts and stops a recording.
+/// The app cannot join the SwiftPM end-to-end test target, so these tests
+/// and the manual checklist are its end-to-end proof. Identifiers are
+/// pinned, never copy: titles and chip texts belong to other plans.
 @MainActor
 final class LaunchSmokeTests: XCTestCase {
   func testMainWindowOpens() throws {
@@ -81,5 +83,59 @@ final class LaunchSmokeTests: XCTestCase {
     screenshot.lifetime = .keepAlways
     add(screenshot)
     app.typeKey(.escape, modifierFlags: [])
+  }
+
+  /// Record call in the sidebar, the control turns into Stop and the live
+  /// row joins the fixture meeting; Stop returns the control and keeps the
+  /// row. The synthetic backend delivers audio at once, so this stays well
+  /// under 30 seconds.
+  func testSidebarStartsAndStopsARecording() throws {
+    let app = XCUIApplication()
+    app.launchArguments = ["-steno-ui-testing"]
+    app.launch()
+
+    let window = app.windows.firstMatch
+    XCTAssertTrue(window.waitForExistence(timeout: 10), "no window appeared")
+
+    let record = app.buttons["sidebar-record"].firstMatch
+    XCTAssertTrue(record.waitForExistence(timeout: 10), "the sidebar record control is missing")
+    XCTAssertFalse(app.buttons["sidebar-stop"].exists, "nothing in the window records on its own")
+    XCTAssertTrue(
+      waitUntil(timeout: 10) { meetingRowCount(in: app) == 1 },
+      "expected the fixture meeting alone before the click, got \(meetingRowCount(in: app))")
+    record.click()
+
+    let stop = app.buttons["sidebar-stop"].firstMatch
+    XCTAssertTrue(stop.waitForExistence(timeout: 10), "the control did not turn into Stop")
+    XCTAssertTrue(
+      waitUntil(timeout: 20) { meetingRowCount(in: app) == 2 },
+      "expected the fixture meeting plus the live row, got \(meetingRowCount(in: app))")
+
+    stop.click()
+    XCTAssertTrue(record.waitForExistence(timeout: 10), "the control did not return to Record call")
+    XCTAssertEqual(meetingRowCount(in: app), 2, "the stopped recording keeps its row")
+  }
+
+  /// Rows carrying a `meeting-<uuid>` identifier, and only those: the
+  /// redesign's `meeting-list` container must not count. The list's cells
+  /// are counted with one query when they carry the row identifier; SwiftUI
+  /// otherwise stamps a row's identifier on each of the row's text elements
+  /// as well, so the fallback counts distinct identifiers, not elements.
+  private func meetingRowCount(in app: XCUIApplication) -> Int {
+    let row = NSPredicate(format: "identifier MATCHES %@", "meeting-[0-9A-F-]{36}")
+    let cells = app.descendants(matching: .cell).matching(row).count
+    if cells > 0 { return cells }
+    let elements = app.descendants(matching: .any).matching(row)
+    return Set(elements.allElementsBoundByIndex.map(\.identifier)).count
+  }
+
+  /// Polls `condition` on the main run loop until it holds or `timeout` passes.
+  private func waitUntil(timeout: TimeInterval, _ condition: () -> Bool) -> Bool {
+    let deadline = Date().addingTimeInterval(timeout)
+    while !condition() {
+      guard Date() < deadline else { return false }
+      RunLoop.current.run(until: Date().addingTimeInterval(0.5))
+    }
+    return true
   }
 }
