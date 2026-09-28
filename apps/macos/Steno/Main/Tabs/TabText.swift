@@ -5,31 +5,55 @@ import StenoCore
 /// tab views lay out: `MarkdownBlocks` and the inline renderer (Summary),
 /// `TranscriptTurns`, `MeetingExport.displayName(forSpeaker:)` and
 /// `timestampText` (Transcript), `MeetingExport.assigneeName(for:)` and the
-/// priority chips (Tasks), the meeting's scratchpad (Scratchpad), and
-/// `PendingText.text` for a tab without content. The views add styling only;
-/// the snapshot test pins these lines for the fixture meeting.
+/// priority chips (Tasks), the meeting's scratchpad (Scratchpad), the
+/// `ProcessingCard`'s title row through `ProcessingPresentation.lines` while
+/// `progress` says the meeting is queued or processing, and
+/// `PendingText.text` for a tab without content otherwise. The views add
+/// styling only; the snapshot test pins these lines for the fixture meeting.
 enum TabText {
   static func lines(
     _ tab: MeetingDetailViewModel.Tab, export: MeetingExport,
+    progress: ProcessingProgressModel.Entry? = nil, elapsed: Duration = .zero,
     locale: Locale = .current, timeZone: TimeZone = .current
   ) -> [String] {
     switch tab {
-    case .summary: summary(export)
-    case .transcript: transcript(export)
-    case .tasks: tasks(export, locale: locale, timeZone: timeZone)
-    case .scratchpad: [export.meeting.scratchpad]
+    case .summary: summary(export, progress: progress, elapsed: elapsed)
+    case .transcript: transcript(export, progress: progress, elapsed: elapsed)
+    case .tasks:
+      tasks(export, progress: progress, elapsed: elapsed, locale: locale, timeZone: timeZone)
+    case .scratchpad: card(progress, elapsed: elapsed) + [export.meeting.scratchpad]
     }
   }
 
-  private static func summary(_ export: MeetingExport) -> [String] {
+  /// The card's lines while the meeting is queued or processing, else none;
+  /// every tab shows the card above whatever content it has.
+  private static func card(_ progress: ProcessingProgressModel.Entry?, elapsed: Duration)
+    -> [String]
+  {
+    progress.map { ProcessingPresentation.lines(entry: $0, elapsed: elapsed) } ?? []
+  }
+
+  /// A tab without content: the card's lines while the meeting is queued or
+  /// processing, else the `PendingText` copy.
+  private static func pending(
+    _ export: MeetingExport, progress: ProcessingProgressModel.Entry?, elapsed: Duration,
+    none: String, pending: String
+  ) -> [String] {
+    if let progress { return ProcessingPresentation.lines(entry: progress, elapsed: elapsed) }
+    return [PendingText.text(meeting: export.meeting, none: none, pending: pending)]
+  }
+
+  private static func summary(
+    _ export: MeetingExport, progress: ProcessingProgressModel.Entry?, elapsed: Duration
+  ) -> [String] {
     let sections = SummaryMarkdown.sections(for: export)
     guard !sections.isEmpty else {
-      return [
-        PendingText.text(
-          meeting: export.meeting, none: "No summary", pending: "Summary appears after processing")
-      ]
+      return pending(
+        export, progress: progress, elapsed: elapsed, none: "No summary",
+        pending: "Summary appears after processing")
     }
-    var lines = sections.flatMap { section in
+    var lines = card(progress, elapsed: elapsed)
+    lines += sections.flatMap { section in
       [line(for: .heading(section.heading))] + section.bullets.map { line(for: .bullet($0)) }
     }
     if !export.decisions.isEmpty {
@@ -46,31 +70,32 @@ enum TabText {
     }
   }
 
-  private static func transcript(_ export: MeetingExport) -> [String] {
+  private static func transcript(
+    _ export: MeetingExport, progress: ProcessingProgressModel.Entry?, elapsed: Duration
+  ) -> [String] {
     let turns = TranscriptTurns.group(export.segments)
     guard !turns.isEmpty else {
-      return [
-        PendingText.text(
-          meeting: export.meeting, none: "No transcript",
-          pending: "Transcript appears after processing")
-      ]
+      return pending(
+        export, progress: progress, elapsed: elapsed, none: "No transcript",
+        pending: "Transcript appears after processing")
     }
-    return turns.flatMap { turn in
+    let rows: [String] = turns.flatMap { turn in
       let name = turn.speakerID.map(export.displayName(forSpeaker:)) ?? "Unknown"
       return ["\(name) \(turn.start.timestampText) \(turn.lane.label)", turn.text]
     }
+    return card(progress, elapsed: elapsed) + rows
   }
 
-  private static func tasks(_ export: MeetingExport, locale: Locale, timeZone: TimeZone)
-    -> [String]
-  {
+  private static func tasks(
+    _ export: MeetingExport, progress: ProcessingProgressModel.Entry?, elapsed: Duration,
+    locale: Locale, timeZone: TimeZone
+  ) -> [String] {
     guard !export.tasks.isEmpty else {
-      return [
-        PendingText.text(
-          meeting: export.meeting, none: "No tasks", pending: "Tasks appear after processing")
-      ]
+      return pending(
+        export, progress: progress, elapsed: elapsed, none: "No tasks",
+        pending: "Tasks appear after processing")
     }
-    return export.tasks.flatMap { task in
+    let rows: [String] = export.tasks.flatMap { task in
       var meta: [String] = []
       if let assignee = export.assigneeName(for: task), !assignee.isEmpty {
         meta.append(assignee)
@@ -88,6 +113,7 @@ enum TabText {
       }
       return ["\(task.done ? "[x]" : "[ ]") \(task.text)", meta.joined(separator: " · ")]
     }
+    return card(progress, elapsed: elapsed) + rows
   }
 }
 

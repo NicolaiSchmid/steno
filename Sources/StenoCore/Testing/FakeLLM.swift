@@ -24,6 +24,8 @@ public actor FakeLanguageModel: LanguageModel {
 public struct PassthroughCleaner: TranscriptCleaner, Sendable {
   public var usage: LLMUsage
   public var failure: (any Error & Sendable)?
+  /// Runs before every `clean`; tests advance a `ManualClock` here.
+  public var onClean: (@Sendable () async -> Void)?
   /// Segment counts of every `clean` call.
   public let cleanups = CallLog<Int>()
 
@@ -37,6 +39,7 @@ public struct PassthroughCleaner: TranscriptCleaner, Sendable {
 
   public func clean(_ input: CleanupInput) async throws -> CleanupOutput {
     await cleanups.record(input.segments.count)
+    await onClean?()
     if let failure { throw failure }
     return CleanupOutput(segments: input.segments, failedChunks: [], usage: usage)
   }
@@ -49,6 +52,8 @@ public struct FakeSummarizer: MeetingSummarizer, Sendable {
   public var canned: SummaryOutput?
   public var usage: LLMUsage
   public var failure: (any Error & Sendable)?
+  /// Runs before every `summarize`; tests advance a `ManualClock` here.
+  public var onSummarize: (@Sendable () async -> Void)?
   /// Template ids of every `summarize` call.
   public let summaries = CallLog<String>()
 
@@ -64,6 +69,7 @@ public struct FakeSummarizer: MeetingSummarizer, Sendable {
 
   public func summarize(_ input: SummaryInput) async throws -> SummaryOutput {
     await summaries.record(input.template.id)
+    await onSummarize?()
     if let failure { throw failure }
     if let canned { return canned }
     return Self.output(for: input, usage: usage)

@@ -4,17 +4,22 @@ import StenoAudio
 import StenoCore
 
 /// The running app's object graph over one `AppEnvironment`: the recorder,
-/// the detection controller, the menu bar view model, pending speaker
-/// reviews, the retention sweep after processed meetings, the handover
-/// listener when phones are paired, the first-launch login item
-/// registration, and the recorder's permission report, refreshed whenever
-/// the app becomes active (the user comes back from System Settings).
+/// the detection controller, the menu bar view model, the processing
+/// progress model, pending speaker reviews, the retention sweep after
+/// processed meetings, the handover listener when phones are paired, the
+/// first-launch login item registration, the recorder's permission report,
+/// refreshed whenever the app becomes active (the user comes back from
+/// System Settings), and the environment's pipeline warm-up when a
+/// recording starts.
 @MainActor
 @Observable
 final class AppController {
   let environment: AppEnvironment
   let recorder: RecordingController
   let menuBar: MenuBarViewModel
+  /// Where the pipeline is with every queued or processing meeting; the
+  /// menu bar row, the list entry and the detail view read it.
+  let progress: ProcessingProgressModel
   let detection: DetectionController
   /// Meetings the pipeline flagged with unconfirmed speakers. The set
   /// clears itself from the store, see `reviewChanged(_:speakers:)`.
@@ -44,6 +49,7 @@ final class AppController {
     self.defaults = defaults
     self.recorder = RecordingController(environment: environment)
     self.menuBar = MenuBarViewModel(environment: environment)
+    self.progress = ProcessingProgressModel(now: environment.now)
     self.detection = DetectionController(environment: environment)
     detection.startRecording = { [weak self] callApp in
       await self?.recorder.start(mode: .call, callApp: callApp)
@@ -52,7 +58,10 @@ final class AppController {
       await self?.recorder.microphoneActivity(event)
     }
     recorder.recordingDidChange = { [weak self] recording in
-      await self?.detection.recordingDidChange(recording)
+      guard let self else { return }
+      // In the background: the recording must not wait for a model load.
+      if recording { Task { [environment] in await environment.warmUpPipelineIfModelsInstalled() } }
+      await self.detection.recordingDidChange(recording)
     }
     activationObserver = NotificationCenter.default.addObserver(
       forName: NSApplication.didBecomeActiveNotification, object: nil, queue: .main
@@ -61,27 +70,27 @@ final class AppController {
     }
   }
 
-  /// Everything that happens once at launch, in order: interrupted
-  /// recordings become failed, meetings left queued or processing are
-  /// processed again, the retention sweep runs, the login item is
-  /// registered the first time (when the setting says so), the detector
-  /// starts, the handover listener starts when a phone is already paired,
-  /// and the pipeline's events are observed.
+  /// Everything that happens once at launch, in order: the pipeline's
+  /// events are subscribed, interrupted recordings become failed, meetings
+  /// left queued or processing are processed again, the retention sweep
+  /// runs, the login item is registered the first time (when the setting
+  /// says so), the detector starts, the handover listener starts when a
+  /// phone is already paired, and the meeting list is observed. The two
+  /// event subscriptions, the progress model's and this controller's, come
+  /// first so the first events of resumed runs reach both.
   func launch() async {
     guard !launched else { return }
     launched = true
-    await environment.reconcileInterruptedRecordings()
-    await environment.resumeUnfinishedProcessing()
-    await environment.runRetentionSweep()
-    await registerLoginItemOnFirstLaunch()
-    await detection.applySettings()
-    await startHandoverIfPaired()
-    observers.append(Task { [menuBar] in await menuBar.observe() })
-    observers.append(Task { [menuBar] in await menuBar.observeProgress() })
+    let progressEvents = await environment.events.subscribe()
+    observers.append(
+      Task { [progress, environment] in
+        await progress.observe(
+          events: progressEvents, meetings: environment.store.observeMeetings())
+      })
+    let events = await environment.events.subscribe()
     observers.append(
       Task { [weak self, environment] in
-        let stream = await environment.events.subscribe()
-        for await event in stream {
+        for await event in events {
           guard let self else { return }
           switch event {
           case .speakersNeedReview(let meetingID, _):
@@ -98,6 +107,13 @@ final class AppController {
           }
         }
       })
+    await environment.reconcileInterruptedRecordings()
+    await environment.resumeUnfinishedProcessing()
+    await environment.runRetentionSweep()
+    await registerLoginItemOnFirstLaunch()
+    await detection.applySettings()
+    await startHandoverIfPaired()
+    observers.append(Task { [menuBar] in await menuBar.observe() })
     observers.append(
       Task { [weak self, environment] in
         do {

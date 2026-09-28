@@ -7,20 +7,21 @@ import SwiftUI
 /// inline styling (bold names) goes through `AttributedString`.
 struct SummaryTab: View {
   let model: MeetingDetailViewModel
+  /// Where the pipeline is with this meeting while it is queued or
+  /// processing, from `controller.progress.entry(for:)`; nil otherwise. The
+  /// card it drives replaces the pending copy and the spinner.
+  let progress: ProcessingProgressModel.Entry?
 
   var body: some View {
     ScrollView {
       VStack(alignment: .leading, spacing: Theme.Space.lg) {
+        ProcessingCardSlot(progress: progress, meeting: model.meeting)
         let sections = model.summarySections
         if sections.isEmpty {
-          VStack(alignment: .leading, spacing: Theme.Space.sm) {
+          if progress == nil {
             PendingText(
               meeting: model.meeting, none: "No summary",
               pending: "Summary appears after processing")
-            if let meeting = model.meeting, meeting.state == .queued || meeting.state == .processing
-            {
-              ProgressView().controlSize(.small)
-            }
           }
         } else {
           ForEach(sections, id: \.id) { section in

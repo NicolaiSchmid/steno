@@ -3,9 +3,10 @@ import Foundation
 /// What the pipeline and the store tell the UI beyond row changes (which
 /// arrive through `MeetingStore.observe*`).
 public enum MeetingEvent: Sendable, Equatable, Hashable {
-  /// Posted once as each stage starts; `stage.fraction` is the progress bar
-  /// value.
-  case progress(meetingID: UUID, stage: PipelineStage)
+  /// Posted as each stage starts, once per lane inside `transcribe`;
+  /// `progress.fraction` is the progress bar value and
+  /// `progress.estimatedRemaining` the time the run still needs.
+  case progress(meetingID: UUID, progress: ProcessingProgress)
   /// Posted after persist when any speaker is not `.confirmed`.
   case speakersNeedReview(meetingID: UUID, speakerIDs: [UUID])
   /// Posted once the `retention` stage has written the asset's `expiresAt`

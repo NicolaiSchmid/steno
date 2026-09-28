@@ -621,3 +621,27 @@ struct SettingRow: StenoRecord {
     static let key = Column(CodingKeys.key)
   }
 }
+
+// MARK: - stageRate
+
+/// The learned rate rows; `stage` stays a string so a row for a stage a
+/// later version renamed is skipped on load instead of failing the fetch.
+struct StageRateRow: StenoRecord {
+  static let databaseTableName = "stageRate"
+
+  var stage: String
+  var key: String
+  var samples: Int
+  var secondsPerUnit: Double
+  var updatedAt: Date
+
+  init(stage: PipelineStage, key: String, rate: StageRate, updatedAt: Date) {
+    self.stage = stage.rawValue
+    self.key = key
+    samples = rate.samples
+    secondsPerUnit = rate.secondsPerUnit
+    self.updatedAt = updatedAt
+  }
+
+  var rate: StageRate { StageRate(secondsPerUnit: secondsPerUnit, samples: samples) }
+}

@@ -8,15 +8,19 @@ import Testing
     let harness = try await PipelineHarness()
     defer { harness.cleanUp() }
     let (meeting, asset) = try harness.meeting(source: .macCall)
-    let transcription = try await harness.pipeline.decodeAndTranscribe(
+    let (transcription, lastLane) = try await harness.pipeline.decodeAndTranscribe(
       asset: asset, meetingID: meeting.id)
     #expect(transcription.lanes[.mic]?.count == 6)
     #expect(transcription.lanes[.system]?.count == 6)
     #expect(transcription.language == LanguageTag(rawValue: "de"))
+    #expect(lastLane?.lane == .system, "the last lane's buffer is handed on for diarize")
+    #expect(lastLane?.buffer.duration == 6)
     let calls = await harness.engine.transcriptions.entries
     #expect(calls.map(\.hint) == [nil, LanguageTag(rawValue: "de").language])
     #expect(calls.map(\.duration) == [6, 6])
-    #expect(await harness.engine.preparations.count == 1)
+    #expect(
+      await harness.engine.preparations.count == 0,
+      "`process` prepares the engine before the run's first event, not the stage")
   }
 
   @Test func decodeFailureCarriesTheDecodeStage() async throws {
@@ -60,21 +64,27 @@ import Testing
     #expect(LanguageElection.elect(tie) == de)
   }
 
-  @Test func progressIsPostedOncePerStageAcrossLanes() async throws {
+  @Test func transcribePostsOncePerLane() async throws {
     let harness = try await PipelineHarness()
     defer { harness.cleanUp() }
     let stream = await harness.events.subscribe()
     let (meeting, asset) = try harness.meeting(source: .macCall)
     _ = try await harness.pipeline.decodeAndTranscribe(asset: asset, meetingID: meeting.id)
-    var iterator = stream.makeAsyncIterator()
-    #expect(await iterator.next() == .progress(meetingID: meeting.id, stage: .decode))
-    #expect(
-      await iterator.next() == .progress(meetingID: meeting.id, stage: .transcribe))
     _ = try await harness.pipeline.matchSpeakers(
       [], meetingID: meeting.id, settings: harness.settings)
+    let collected = await harness.events.drain(stream)
+    #expect(collected.map(\.stage) == [.decode, .transcribe, .transcribe, .matchSpeakers])
     #expect(
-      await iterator.next()
-        == .progress(meetingID: meeting.id, stage: .matchSpeakers))
+      collected.allSatisfy { event in
+        if case .progress(let id, _) = event { return id == meeting.id }
+        return false
+      })
+    let inPerson = try await PipelineHarness()
+    defer { inPerson.cleanUp() }
+    let single = await inPerson.events.subscribe()
+    let (room, roomAsset) = try inPerson.meeting(source: .macInPerson)
+    _ = try await inPerson.pipeline.decodeAndTranscribe(asset: roomAsset, meetingID: room.id)
+    #expect(await inPerson.events.drain(single).map(\.stage) == [.decode, .transcribe])
   }
 }
 
@@ -84,7 +94,7 @@ import Testing
     defer { harness.cleanUp() }
     let (meeting, asset) = try harness.meeting(source: .macCall)
     let diarization = try await harness.pipeline.diarize(
-      asset: asset, meeting: meeting)
+      asset: asset, meeting: meeting, buffer: nil)
     #expect(diarization.clusterSpeakers.map(\.speakerID) == diarization.speakers.map(\.id))
     #expect(
       diarization.clusterSpeakers.map(\.ranges) == [[0...1.5, 3...4.5], [1.5...3, 4.5...6]])
@@ -119,7 +129,7 @@ import Testing
     defer { harness.cleanUp() }
     let (meeting, asset) = try harness.meeting(source: .macInPerson)
     let diarization = try await harness.pipeline.diarize(
-      asset: asset, meeting: meeting)
+      asset: asset, meeting: meeting, buffer: nil)
     #expect(diarization.speakers.count == 1)
     let clip = try WAVAudioDecoder.read(try #require(diarization.speakers[0].sampleClipURL))
     #expect(clip.duration == 6)
@@ -127,6 +137,70 @@ import Testing
     #expect(ProcessingPipeline.diarizedLane(source: .macCall, lanes: [.mic, .system]) == .system)
     #expect(ProcessingPipeline.diarizedLane(source: .macCall, lanes: [.mixed]) == .mixed)
     #expect(ProcessingPipeline.diarizedLane(source: .phone, lanes: []) == nil)
+  }
+
+  /// A run decodes every lane once: the diarize stage reuses the buffer
+  /// `decodeAndTranscribe` hands it instead of decoding the lane again.
+  @Test func aCallDecodesEachLaneOnce() async throws {
+    let decoder = RecordingAudioDecoder()
+    let harness = try await PipelineHarness(decoder: decoder)
+    defer { harness.cleanUp() }
+    let (meeting, asset) = try harness.meeting(source: .macCall)
+    try await harness.store.save(meeting, asset: asset)
+    try await harness.pipeline.process(assetID: asset.id)
+    #expect(await decoder.decodes.entries == [.mic, .system])
+    #expect(await harness.diarizer.diarizations.entries == [6])
+    #expect(try await harness.store.meeting(id: meeting.id)?.state == .ready)
+
+    let roomDecoder = RecordingAudioDecoder()
+    let inPerson = try await PipelineHarness(decoder: roomDecoder)
+    defer { inPerson.cleanUp() }
+    let (room, roomAsset) = try inPerson.meeting(source: .macInPerson)
+    try await inPerson.store.save(room, asset: roomAsset)
+    try await inPerson.pipeline.process(assetID: roomAsset.id)
+    #expect(await roomDecoder.decodes.entries == [.mixed])
+    #expect(try await inPerson.store.meeting(id: room.id)?.state == .ready)
+  }
+
+  /// The branch `process` never takes: a buffer tagged for another lane is
+  /// not the diarized lane, so the stage decodes that lane itself; one tagged
+  /// for the diarized lane is used as it is.
+  @Test func diarizeDecodesWhenHandedAnotherLane() async throws {
+    let decoder = RecordingAudioDecoder()
+    let harness = try await PipelineHarness(decoder: decoder)
+    defer { harness.cleanUp() }
+    let (meeting, asset) = try harness.meeting(source: .macCall)
+    let other = ProcessingPipeline.DecodedLane(
+      lane: .mic, buffer: AudioBuffer16k(samples: [Float](repeating: 0, count: 16_000 * 3)))
+    let decoded = try await harness.pipeline.diarize(asset: asset, meeting: meeting, buffer: other)
+    #expect(await decoder.decodes.entries == [.system])
+    #expect(decoded.speakers.count == 2)
+    #expect(await harness.diarizer.diarizations.entries == [6], "the system lane, six seconds")
+
+    let system = ProcessingPipeline.DecodedLane(
+      lane: .system, buffer: AudioBuffer16k(samples: [Float](repeating: 0, count: 16_000 * 3)))
+    _ = try await harness.pipeline.diarize(asset: asset, meeting: meeting, buffer: system)
+    #expect(await decoder.decodes.entries == [.system], "no second decode")
+    #expect(await harness.diarizer.diarizations.entries == [6, 3], "the handed three seconds")
+  }
+
+  /// An asset without a diarizable lane yields an empty diarization even
+  /// when a buffer is handed in: nothing is decoded, nothing is diarized.
+  @Test func anAssetWithoutLanesDiarizesNothingEvenWhenHandedABuffer() async throws {
+    let decoder = RecordingAudioDecoder()
+    let harness = try await PipelineHarness(decoder: decoder)
+    defer { harness.cleanUp() }
+    let (meeting, original) = try harness.meeting(source: .phone)
+    var asset = original
+    asset.lanes = []
+    let handed = ProcessingPipeline.DecodedLane(
+      lane: .mixed, buffer: AudioBuffer16k(samples: [Float](repeating: 0, count: 16_000)))
+    let diarization = try await harness.pipeline.diarize(
+      asset: asset, meeting: meeting, buffer: handed)
+    #expect(diarization.speakers.isEmpty)
+    #expect(diarization.clusterSpeakers.isEmpty)
+    #expect(await decoder.decodes.entries.isEmpty)
+    #expect(await harness.diarizer.diarizations.entries.isEmpty)
   }
 }
 
@@ -142,7 +216,7 @@ import Testing
     defer { harness.cleanUp() }
     let (meeting, asset) = try harness.meeting(source: .macInPerson)
     let failure = await #expect(throws: PipelineFailure.self) {
-      _ = try await harness.pipeline.diarize(asset: asset, meeting: meeting)
+      _ = try await harness.pipeline.diarize(asset: asset, meeting: meeting, buffer: nil)
     }
     #expect(failure?.stage == .diarize)
     #expect(failure?.reason.contains("Speaker 1") == true)
@@ -194,10 +268,10 @@ import Testing
     defer { harness.cleanUp() }
     let (meeting, asset) = try harness.meeting(source: .macCall)
     try await harness.store.save(meeting, asset: asset)
-    let transcription = try await harness.pipeline.decodeAndTranscribe(
+    let (transcription, lastLane) = try await harness.pipeline.decodeAndTranscribe(
       asset: asset, meetingID: meeting.id)
     let diarization = try await harness.pipeline.diarize(
-      asset: asset, meeting: meeting)
+      asset: asset, meeting: meeting, buffer: lastLane)
     let merged = try await harness.pipeline.merge(
       meeting: meeting, lanes: transcription.lanes, diarization: diarization)
 
@@ -351,8 +425,7 @@ import Testing
     #expect(
       try await harness.store.export(meetingID: meeting.id).segments == SampleData.segments(),
       "the merge stage's rows stay; the skipped stage writes nothing")
-    #expect(
-      await harness.events.drain(events) == [.progress(meetingID: meeting.id, stage: .cleanup)])
+    #expect(await harness.events.drain(events).map(\.stage) == [.cleanup])
   }
 }
 
@@ -508,8 +581,7 @@ import Testing
     #expect(after.decisions.isEmpty)
     #expect(try await harness.store.nameSuggestions(meetingID: meeting.id).isEmpty)
     #expect(after.segments == before.segments)
-    #expect(
-      await skipping.events.drain(events) == [.progress(meetingID: meeting.id, stage: .summarize)])
+    #expect(await skipping.events.drain(events).map(\.stage) == [.summarize])
   }
 }
 
@@ -533,12 +605,9 @@ import Testing
     #expect(try await harness.store.meeting(id: meeting.id)?.state == .ready)
     #expect(
       !FileManager.default.fileExists(atPath: RecordingLayout(asset: asset).mixdown(.m4aAAC).path))
-    let sentinel = MeetingEvent.progress(meetingID: meeting.id, stage: .retention)
-    await harness.events.post(sentinel)
-    var iterator = stream.makeAsyncIterator()
     #expect(
-      await iterator.next() == .progress(meetingID: meeting.id, stage: .persist))
-    #expect(await iterator.next() == sentinel, "no speakersNeedReview when everyone is confirmed")
+      await harness.events.drain(stream).map(\.stage) == [.persist],
+      "no speakersNeedReview when everyone is confirmed")
   }
 
   @Test func aWAVAssetGetsAMixdownAndOnlyUnconfirmedSpeakersNeedReview() async throws {
@@ -557,11 +626,10 @@ import Testing
     #expect(mixdown.lastPathComponent == "audio.wav")
     #expect(try Data(contentsOf: mixdown) == Data(contentsOf: asset.url))
     #expect(try await harness.store.asset(id: asset.id)?.mixdownURL == mixdown)
-    var iterator = stream.makeAsyncIterator()
+    let collected = await harness.events.drain(stream)
+    #expect(collected.map(\.stage) == [.persist, nil])
     #expect(
-      await iterator.next() == .progress(meetingID: meeting.id, stage: .persist))
-    #expect(
-      await iterator.next()
+      collected.last
         == .speakersNeedReview(meetingID: meeting.id, speakerIDs: [SampleData.speakerTwoID]))
   }
 }
@@ -580,11 +648,10 @@ import Testing
     try await harness.pipeline.retention(asset: asset)
 
     #expect(try await harness.store.asset(id: asset.id)?.expiresAt == PipelineHarness.now)
-    #expect(
-      await harness.events.drain(stream) == [
-        .progress(meetingID: meeting.id, stage: .retention),
-        .retentionApplied(meetingID: meeting.id),
-      ])
+    let collected = await harness.events.drain(stream)
+    #expect(collected.map(\.stage) == [.retention, nil])
+    #expect(collected.last == .retentionApplied(meetingID: meeting.id))
+    #expect(collected.first?.progress?.nextFraction == 1, "retention ends the run")
   }
 
   @Test func aFailedExpiryWritePostsNoRetentionApplied() async throws {
@@ -592,7 +659,7 @@ import Testing
     defer { harness.cleanUp() }
     // The meeting row was never written, so the foreign key refuses the
     // asset row and the stage throws before anything could be swept.
-    let (meeting, asset) = try harness.meeting(source: .phone)
+    let (_, asset) = try harness.meeting(source: .phone)
     let stream = await harness.events.subscribe()
 
     let failure = await #expect(throws: PipelineFailure.self) {
@@ -602,7 +669,7 @@ import Testing
     #expect(failure?.stage == .retention)
     #expect(try await harness.store.asset(id: asset.id) == nil)
     #expect(
-      await harness.events.drain(stream) == [.progress(meetingID: meeting.id, stage: .retention)],
+      await harness.events.drain(stream).map(\.stage) == [.retention],
       "a sweep started on the event must find the expiry written")
   }
 }

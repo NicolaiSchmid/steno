@@ -1,19 +1,20 @@
 import Foundation
 import StenoCore
 
-/// The menu bar item's presentation: the processing queue (pipeline
-/// `progress` events joined with `observeMeetings()`), recent meetings and
-/// the login item. Recording itself is `RecordingController`, which the
-/// view reads through `AppController`. `observe()` runs for the app's
+/// The menu bar item's presentation: the processing queue from
+/// `observeMeetings()`, recent meetings and the login item. Each queue
+/// row's stage, bar and estimate come from `AppController.progress`, which
+/// the view reads beside this model; recording itself is
+/// `RecordingController`, read the same way. `observe()` runs for the app's
 /// lifetime from `AppController.launch()` and ends when it is cancelled.
 @MainActor
 @Observable
 final class MenuBarViewModel {
+  /// A meeting in `.queued` or `.processing`; its progress is
+  /// `ProcessingProgressModel.entry(for:)`.
   struct QueueItem: Identifiable, Equatable, Sendable {
     var meeting: Meeting
-    var stage: PipelineStage?
     var id: UUID { meeting.id }
-    var fraction: Double { stage?.fraction ?? 0 }
   }
 
   private(set) var queue: [QueueItem] = []
@@ -22,7 +23,6 @@ final class MenuBarViewModel {
   private(set) var lastError: String?
 
   private let environment: AppEnvironment
-  private var stages: [UUID: PipelineStage] = [:]
   private var meetings: [Meeting] = []
 
   init(environment: AppEnvironment) {
@@ -42,28 +42,14 @@ final class MenuBarViewModel {
     }
   }
 
-  /// Follows the pipeline's progress events until cancelled.
-  func observeProgress() async {
-    let stream = await environment.events.subscribe()
-    for await event in stream {
-      if case .progress(let meetingID, let stage) = event {
-        stages[meetingID] = stage
-        rebuildQueue()
-      }
-    }
-  }
-
   // MARK: - Queue
 
   private func rebuildQueue() {
-    let live = meetings.filter { $0.state == .queued || $0.state == .processing }
     queue =
-      live
-      .map { QueueItem(meeting: $0, stage: stages[$0.id]) }
+      meetings
+      .filter { $0.state == .queued || $0.state == .processing }
+      .map { QueueItem(meeting: $0) }
       .sorted { $0.meeting.startedAt < $1.meeting.startedAt }
-    for id in Array(stages.keys) where !live.contains(where: { $0.id == id }) {
-      stages[id] = nil
-    }
     recent = Array(
       meetings
         .filter { $0.state == .ready || $0.state.isFailed }

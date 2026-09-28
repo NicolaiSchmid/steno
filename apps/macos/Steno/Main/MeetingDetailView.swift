@@ -5,7 +5,10 @@ import SwiftUI
 
 /// Header (title, meta, the speakers row, tags, actions), the four tabs and
 /// the delivery footer. Speakers are named from the header row's popover;
-/// closing it re-exports when something changed.
+/// closing it re-exports when something changed. While the meeting is
+/// queued or processing the header chip reads the progress model's title
+/// and every tab shows the `ProcessingCard`; the chip is the header's only
+/// processing signal, the card has the one bar.
 struct MeetingDetailView: View {
   @Bindable var model: MeetingDetailViewModel
   let controller: AppController
@@ -57,7 +60,11 @@ struct MeetingDetailView: View {
           .foregroundStyle(Color.stenoStrong)
           .textSelection(.enabled)
         Spacer()
-        StatusChip(meeting.state)
+        if let entry = controller.progress.entry(for: meeting.id) {
+          StatusChip(text: entry.title, color: Color.stenoInfo)
+        } else {
+          StatusChip(meeting.state)
+        }
       }
       HStack(spacing: Theme.Space.md) {
         Text(meeting.startedAt, format: .dateTime.year().month().day().hour().minute())
@@ -193,12 +200,13 @@ struct MeetingDetailView: View {
 
   @ViewBuilder
   private var content: some View {
+    let progress = controller.progress.entry(for: model.id)
     Group {
       switch model.tab {
-      case .summary: SummaryTab(model: model)
-      case .transcript: TranscriptTab(model: model)
-      case .tasks: TasksTab(model: model)
-      case .scratchpad: ScratchpadTab(model: model)
+      case .summary: SummaryTab(model: model, progress: progress)
+      case .transcript: TranscriptTab(model: model, progress: progress)
+      case .tasks: TasksTab(model: model, progress: progress)
+      case .scratchpad: ScratchpadTab(model: model, progress: progress)
       }
     }
     .frame(maxWidth: .infinity, maxHeight: .infinity)

@@ -1,5 +1,5 @@
 /// The pipeline's stages in execution order. `progress` is posted as each
-/// stage starts.
+/// stage starts, once per lane inside `transcribe`.
 public enum PipelineStage: String, CaseIterable, Sendable, Codable, Equatable, Hashable {
   case decode
   case transcribe
@@ -11,13 +11,6 @@ public enum PipelineStage: String, CaseIterable, Sendable, Codable, Equatable, H
   case persist
   case deliver
   case retention
-
-  /// The stage's position in `allCases`, `0` for the first and below `1`
-  /// for the last; what a progress bar shows when the stage starts.
-  public var fraction: Double {
-    let index = Self.allCases.firstIndex(of: self) ?? 0
-    return Double(index) / Double(Self.allCases.count)
-  }
 }
 
 /// The one failure type: any error thrown inside a stage becomes this, and

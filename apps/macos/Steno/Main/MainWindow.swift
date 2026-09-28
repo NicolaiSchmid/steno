@@ -19,7 +19,7 @@ struct MainWindow: View {
     NavigationSplitView {
       VStack(spacing: 0) {
         RecordingControl(controller: controller)
-        MeetingListView(model: list)
+        MeetingListView(model: list, progress: controller.progress)
       }
       .navigationSplitViewColumnWidth(min: 240, ideal: 300, max: 420)
     } detail: {

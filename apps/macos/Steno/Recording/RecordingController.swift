@@ -62,6 +62,9 @@ final class RecordingController {
     }
   }
   private(set) var levels: LaneLevels?
+  /// The capture statistics of the last recording that stopped: duration,
+  /// dropped frames per lane, whether the system lane stayed silent.
+  private(set) var lastStatistics: CaptureStatistics?
   private(set) var lastError: String?
   private(set) var lastWarning: String?
   /// The required permissions the last `refreshPermissions()` found
@@ -179,6 +182,7 @@ final class RecordingController {
     callAppName = nil
     do {
       let result = try await active.session.stop()
+      lastStatistics = result.statistics
       try await environment.makeLocalIntake().complete(
         meetingID: active.meetingID,
         result: RecordingResult(

@@ -12,6 +12,7 @@ struct PipelineHarness {
   let store: MeetingStore
   let settingsStore: SettingsStore
   let events: MeetingEventBus
+  let decoder: any AudioDecoder
   let engine: FakeSpeechEngine
   let diarizer: FakeDiarizer
   let memory: InMemorySpeakerMemory
@@ -20,11 +21,15 @@ struct PipelineHarness {
   let destination: FakeDestination
   let dispatcher: FakeDeliveryDispatcher
   let pipeline: ProcessingPipeline
+  /// The pipeline's clock: stage durations move only when a test advances
+  /// it, so the learned rates are exact.
+  let clock: ManualClock
   var settings: Settings
 
   static let now = SampleData.updatedAt
 
   init(
+    decoder: any AudioDecoder = WAVAudioDecoder(),
     engine: FakeSpeechEngine = FakeSpeechEngine(),
     diarizer: FakeDiarizer = FakeDiarizer(),
     memory: InMemorySpeakerMemory = InMemorySpeakerMemory(people: SampleData.persons()),
@@ -33,7 +38,8 @@ struct PipelineHarness {
     retention: AudioRetention = .keepDays(30),
     failDeliveriesUntil: Int = 0,
     destinations: [any Destination]? = nil,
-    sharedStore: MeetingStore? = nil
+    sharedStore: MeetingStore? = nil,
+    clock: ManualClock = ManualClock()
   ) async throws {
     directory = try Fixtures.temporaryDirectory("pipeline")
     store = try sharedStore ?? MeetingStore.inMemory()
@@ -46,11 +52,13 @@ struct PipelineHarness {
     // person the in-memory fake can suggest must exist as a row.
     for person in SampleData.persons() { try await self.store.save(person) }
     events = MeetingEventBus()
+    self.decoder = decoder
     self.engine = engine
     self.diarizer = diarizer
     self.memory = memory
     self.cleaner = cleaner
     self.summarizer = summarizer
+    self.clock = clock
     // `failUntil` counts on the destination's call log, so a value type
     // built once here can still recover after the fact.
     destination = FakeDestination(
@@ -60,9 +68,9 @@ struct PipelineHarness {
       store: store, destinations: destinations ?? [destination], now: { Self.now })
     pipeline = ProcessingPipeline(
       dependencies: PipelineDependencies(
-        decoder: WAVAudioDecoder(), speechEngine: engine, diarizer: diarizer, speakerMemory: memory,
+        decoder: decoder, speechEngine: engine, diarizer: diarizer, speakerMemory: memory,
         cleaner: cleaner, summarizer: summarizer, dispatcher: dispatcher, store: store,
-        settings: settingsStore, events: events, now: { Self.now }))
+        settings: settingsStore, events: events, now: { Self.now }, clock: clock))
   }
 
   func cleanUp() {

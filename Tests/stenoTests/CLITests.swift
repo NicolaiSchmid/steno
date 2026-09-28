@@ -335,6 +335,92 @@ import Testing
     #expect(storedRow?.receipt?.root == second.path, "the stored destination's receipt is kept")
   }
 
+  /// `steno process` prints one progress line per event to standard error,
+  /// `stage percent remaining`, then (without an LLM endpoint) the skipped
+  /// summary note, and keeps the meeting id alone on standard output.
+  @Test func processReportsProgressOnStderr() throws {
+    let home = try Fixtures.temporaryDirectory("steno-home")
+    defer { try? FileManager.default.removeItem(at: home) }
+    let db = home.appendingPathComponent("db/steno.sqlite").path
+    let fixtures = home.appendingPathComponent("fixtures", isDirectory: true)
+    #expect(
+      try Self.run(["dev", "fixtures", "generate", "--out", fixtures.path], home: home).status == 0)
+    let audio = home.appendingPathComponent("audio", isDirectory: true)
+    // `stage percent remaining[, lane N of M]`; the remaining time is
+    // `1m 20s` or `4s`.
+    let pattern = /^[a-zA-Z]+ +\d{1,3}% (\d+m )?\d{1,2}s(, lane \d of \d)?$/
+
+    func check(_ result: Result, lines expected: Int) throws -> [String] {
+      #expect(result.status == 0, "\(result.stderr)")
+      #expect(
+        UUID(uuidString: result.stdout.trimmingCharacters(in: .whitespacesAndNewlines)) != nil,
+        "stdout is the meeting id alone: \(result.stdout)")
+      #expect(result.stdout.split(separator: "\n").count == 1)
+      var lines = result.stderr.split(separator: "\n").map(String.init)
+      #expect(
+        lines.popLast() == "summary skipped: no LLM endpoint configured",
+        "the note follows the last progress line: \(result.stderr)")
+      #expect(lines.count == expected, "\(result.stderr)")
+      var percents: [Int] = []
+      for line in lines {
+        #expect(line.wholeMatch(of: pattern) != nil, Comment(rawValue: line))
+        let words = line.split(separator: " ", omittingEmptySubsequences: true)
+        percents.append(try #require(Int(words[1].dropLast()), Comment(rawValue: line)))
+      }
+      #expect(percents == percents.sorted(), "percents never decrease: \(percents)")
+      let first = try #require(lines.first).split(separator: " ", omittingEmptySubsequences: true)
+      #expect(first.prefix(2) == ["decode", "0%"], "the run starts at decode 0%")
+      #expect(lines.last?.hasPrefix("retention") == true)
+      return lines
+    }
+
+    let inPerson = try Self.run(
+      [
+        "process", fixtures.appendingPathComponent("audio/sweep-3s.wav").path,
+        "--source", "mac-in-person", "--db", db, "--audio-folder", audio.path,
+      ], home: home)
+    let roomLines = try check(inPerson, lines: 10)
+    #expect(roomLines.filter { $0.hasPrefix("transcribe") }.count == 1)
+    #expect(!roomLines.joined().contains("lane"), "one lane names no lane")
+
+    let call = try Self.run(
+      [
+        "process", fixtures.appendingPathComponent("audio/conversation-mic-6s.wav").path,
+        "--system-lane", fixtures.appendingPathComponent("audio/conversation-system-6s.wav").path,
+        "--source", "mac-call", "--db", db, "--audio-folder", audio.path,
+      ], home: home)
+    let callLines = try check(call, lines: 11)
+    let transcribe = callLines.filter { $0.hasPrefix("transcribe") }
+    #expect(transcribe.count == 2)
+    #expect(transcribe[0].hasSuffix("lane 1 of 2"), Comment(rawValue: transcribe[0]))
+    #expect(transcribe[1].hasSuffix("lane 2 of 2"), Comment(rawValue: transcribe[1]))
+
+    // A run that fails: the lines up to the failing stage, then the error
+    // with the stage in it, a non-zero exit and nothing on stdout. A
+    // system lane that is not a WAV fails the second lane's decode, after
+    // the first lane was transcribed.
+    let notAudio = home.appendingPathComponent("not-audio.wav")
+    try Data("not a wav".utf8).write(to: notAudio)
+    let failed = try Self.run(
+      [
+        "process", fixtures.appendingPathComponent("audio/conversation-mic-6s.wav").path,
+        "--system-lane", notAudio.path,
+        "--source", "mac-call", "--db", db, "--audio-folder", audio.path,
+      ], home: home)
+    #expect(failed.status != 0)
+    #expect(failed.stdout.isEmpty, "no meeting id for a failed run: \(failed.stdout)")
+    let failedLines = failed.stderr.split(separator: "\n").map(String.init)
+    #expect(failedLines.count == 3, "\(failed.stderr)")
+    #expect(
+      failedLines.first?.wholeMatch(of: pattern) != nil, Comment(rawValue: failedLines.first ?? ""))
+    #expect(failedLines.first?.hasPrefix("decode ") == true)
+    #expect(failedLines.dropFirst().first?.hasPrefix("transcribe") == true)
+    #expect(failedLines.dropFirst().first?.hasSuffix("lane 1 of 2") == true)
+    #expect(
+      failedLines.last?.contains("processing failed: decode:") == true,
+      Comment(rawValue: failedLines.last ?? ""))
+  }
+
   @Test func defaultDatabaseFollowsHome() throws {
     let home = try Fixtures.temporaryDirectory("steno-home")
     defer { try? FileManager.default.removeItem(at: home) }

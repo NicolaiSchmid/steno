@@ -4,7 +4,9 @@ extension ProcessingPipeline {
   /// `DeliveryDispatcher.deliverAll`: never throws, every destination's
   /// outcome is a `Delivery` row.
   func deliver(meetingID: UUID) async {
-    await post(.deliver, meetingID: meetingID)
-    _ = await dependencies.dispatcher.deliverAll(meetingID: meetingID)
+    let dispatcher = dependencies.dispatcher
+    await run(.deliver, meetingID: meetingID) {
+      _ = await dispatcher.deliverAll(meetingID: meetingID)
+    }
   }
 }

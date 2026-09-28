@@ -32,6 +32,12 @@ extension PipelineStage {
   }
 }
 
+extension ProcessingProgressModel.Entry {
+  /// The card, chip, list entry and menu bar row before a run's first
+  /// event, while the meeting waits in the queue or the engines load.
+  static let waitingTitle = "Waiting to process"
+}
+
 extension AudioLane {
   /// The lane a transcript turn came from, as the header shows it.
   var label: String {

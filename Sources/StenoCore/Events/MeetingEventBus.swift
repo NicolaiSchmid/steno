@@ -24,6 +24,17 @@ public actor MeetingEventBus {
     }
   }
 
+  /// Ends every subscription: each stream delivers what was posted before
+  /// this call and then finishes, so a consumer loop can drain and end
+  /// instead of being cancelled mid-buffer. A post after this reaches
+  /// nobody; a later `subscribe()` starts a fresh subscription.
+  public func finish() {
+    for continuation in subscribers.values {
+      continuation.finish()
+    }
+    subscribers.removeAll()
+  }
+
   private func remove(_ id: UUID) {
     subscribers[id] = nil
   }
