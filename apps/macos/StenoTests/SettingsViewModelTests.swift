@@ -41,7 +41,7 @@ final class SettingsViewModelTests: XCTestCase {
     XCTAssertNil(model.error)
     XCTAssertEqual(model.retentionMode, .keepForever, "a fresh install keeps every recording")
     XCTAssertEqual(model.retentionDays, 30)
-    XCTAssertEqual(model.footnote, AudioRetention.keepForever.footnote)
+    XCTAssertTrue(model.footnote.hasPrefix("Recordings stay in the folder above"), model.footnote)
     XCTAssertEqual(
       AudioSettingsViewModel.RetentionMode.allCases,
       [.keepForever, .keepDays, .deleteAfterProcessing])
@@ -145,6 +145,26 @@ final class SettingsViewModelTests: XCTestCase {
     // A folder that does not exist yet holds no recordings.
     await model.setAudioFolder(folder.appendingPathComponent("not-yet", isDirectory: true))
     XCTAssertEqual(model.folderUsage, .bytes(0))
+  }
+
+  /// A folder that exists but cannot be read is "unavailable", not zero.
+  func testAudioReportsAnUnreadableFolderAsUnavailable() async throws {
+    // Root reads everything; the permission bits cannot make a folder
+    // unreadable for it.
+    try XCTSkipIf(getuid() == 0, "runs as root")
+    let environment = try await TestSupport.environment(seed: false)
+    let folder = try TestSupport.temporaryDirectory("steno-unreadable")
+    defer {
+      try? FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: folder.path)
+      try? FileManager.default.removeItem(at: folder)
+    }
+    try Data(repeating: 1, count: 10).write(to: folder.appendingPathComponent("a.caf"))
+    try FileManager.default.setAttributes([.posixPermissions: 0], ofItemAtPath: folder.path)
+    try await environment.updateSettings { $0.audioFolder = folder }
+    let model = AudioSettingsViewModel(environment: environment)
+    model.listInputs = { [] }
+    await model.load()
+    XCTAssertEqual(model.folderUsage, .unavailable)
   }
 
   // MARK: Speech

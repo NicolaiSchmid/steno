@@ -409,6 +409,8 @@ struct AudioAssetRow: StenoRecord {
   enum Columns {
     static let id = Column(CodingKeys.id)
     static let meetingID = Column(CodingKeys.meetingID)
+    static let retention = Column(CodingKeys.retention)
+    static let retentionDays = Column(CodingKeys.retentionDays)
     static let expiresAt = Column(CodingKeys.expiresAt)
   }
 

@@ -149,21 +149,12 @@ struct AudioSettingsView: View {
                 { days in await model.setRetention(mode: .keepDays, days: days) }),
               in: AudioSettingsViewModel.dayRange)
             .labelsHidden()
-            .accessibilityLabel("Days")
           }
         }
         Text(model.footnote)
           .font(.steno(Theme.TextSize.xs))
           .foregroundStyle(Color.stenoFaint)
           .fixedSize(horizontal: false, vertical: true)
-        if let kept = model.keptForever, kept > 0 {
-          Text(
-            kept == 1
-              ? "1 recording already on disk is kept as well."
-              : "\(kept) recordings already on disk are kept as well.")
-          .font(.steno(Theme.TextSize.xs))
-          .foregroundStyle(Color.stenoFaint)
-        }
         Text("Speaker sample clips stay until the speaker is named, whatever the rule.")
           .font(.steno(Theme.TextSize.xs))
           .foregroundStyle(Color.stenoFaint)

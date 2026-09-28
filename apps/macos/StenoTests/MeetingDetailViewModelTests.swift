@@ -221,10 +221,15 @@ final class MeetingDetailViewModelTests: XCTestCase {
     }
   }
 
+  /// The toggle runs the pipeline's `applyRetention`, so the stamp obeys
+  /// the stage's guard and the `retentionApplied` post is the pipeline's.
   func testKeepAudioTogglesRetention() async throws {
     let environment = try await TestSupport.environment()
     try await environment.updateSettings { $0.defaultRetention = .keepDays(7) }
     let model = await makeModel(environment)
+    let folder = try await placeMaster(environment, retention: .keepDays(7), expiresAt: nil)
+    defer { try? FileManager.default.removeItem(at: folder) }
+    await TestSupport.waitUntil("master observed") { model.recordingFilesExist }
     XCTAssertFalse(model.keepsAudio)
 
     await model.setKeepAudio(true)
@@ -240,7 +245,8 @@ final class MeetingDetailViewModelTests: XCTestCase {
     XCTAssertEqual(asset.retention, .keepDays(7))
     XCTAssertEqual(asset.expiresAt, TestSupport.now.addingTimeInterval(7 * 86_400))
     let posted = await environment.events.drain(events)
-    XCTAssertEqual(posted, [.retentionApplied(meetingID: SampleData.meetingID)], "sweep trigger")
+    XCTAssertTrue(
+      posted.contains(.retentionApplied(meetingID: SampleData.meetingID)), "sweep trigger: \(posted)")
 
     // A failed export defers the stamp, as the pipeline's retention stage does.
     var failed = SampleData.delivery()
@@ -255,6 +261,20 @@ final class MeetingDetailViewModelTests: XCTestCase {
     XCTAssertNil(deferred.expiresAt, "audio never expires before the export succeeds")
     let none = await environment.events.drain(deferredEvents)
     XCTAssertEqual(none, [], "nothing to sweep")
+
+    // A failed meeting is never stamped, whatever its deliveries say: its
+    // audio is what a re-run needs.
+    var delivered = failed
+    delivered.status = .delivered
+    try await environment.store.save(delivered)
+    try await environment.store.setState(
+      .failed(reason: "boom"), meetingID: SampleData.meetingID, now: TestSupport.now)
+    await model.setKeepAudio(true)
+    await model.setKeepAudio(false)
+    let failedMeetingAsset = try await environment.store.asset(meetingID: SampleData.meetingID)
+    XCTAssertEqual(try XCTUnwrap(failedMeetingAsset).retention, .keepDays(7))
+    XCTAssertNil(try XCTUnwrap(failedMeetingAsset).expiresAt, "a failed meeting keeps its audio")
+    XCTAssertNil(model.error)
   }
 
   func testRecordingStatusSaysWhatTheDefaultDoesNot() async throws {
@@ -276,6 +296,13 @@ final class MeetingDetailViewModelTests: XCTestCase {
 
     try await updateAsset(environment) { $0.expiresAt = TestSupport.now }
     await TestSupport.waitUntil("today") { model.recordingStatusText == "Deletes today" }
+    // A stamp the sweep could not honour yet is overdue, never past tense.
+    try await updateAsset(environment) { $0.expiresAt = TestSupport.now.addingTimeInterval(-3 * 86_400) }
+    await TestSupport.waitUntil("overdue") { model.recordingStatus == .deletes(on: TestSupport.now.addingTimeInterval(-3 * 86_400)) }
+    XCTAssertEqual(model.recordingStatusText, "Deletes today")
+    try await updateAsset(environment) { $0.expiresAt = TestSupport.now.addingTimeInterval(25 * 3_600) }
+    await TestSupport.waitUntil("tomorrow") { model.recordingStatus == .deletes(on: TestSupport.now.addingTimeInterval(25 * 3_600)) }
+    XCTAssertTrue(try XCTUnwrap(model.recordingStatusText).hasPrefix("Deletes on "))
 
     try await updateAsset(environment) {
       $0.retention = .keepForever
@@ -305,10 +332,12 @@ final class MeetingDetailViewModelTests: XCTestCase {
     }
     XCTAssertEqual(model.recordingStatusText, "Kept; processing failed")
 
-    try await environment.store.setState(
-      .processing, meetingID: SampleData.meetingID, now: TestSupport.now)
-    await TestSupport.waitUntil("processing") { model.recordingStatus == .keptWhileProcessing }
-    XCTAssertEqual(model.recordingStatusText, "Kept while processing")
+    for state in [MeetingState.processing, .queued, .recording] {
+      try await environment.store.setState(state, meetingID: SampleData.meetingID, now: TestSupport.now)
+      await TestSupport.waitUntil("\(state)") { model.meeting?.state == state }
+      XCTAssertEqual(model.recordingStatus, .keptWhileProcessing, "\(state)")
+      XCTAssertEqual(model.recordingStatusText, "Kept while processing")
+    }
   }
 
   func testKeepToggleShowsOnlyWhenTheDefaultIsNotForever() async throws {
@@ -318,7 +347,6 @@ final class MeetingDetailViewModelTests: XCTestCase {
       environment, retention: .keepDays(30), expiresAt: TestSupport.now.addingTimeInterval(86_400))
     defer { try? FileManager.default.removeItem(at: folder) }
     await TestSupport.waitUntil("master observed") { model.recordingFilesExist }
-    XCTAssertEqual(model.defaultRetention, .keepForever)
     XCTAssertFalse(model.showsKeepToggle, "the default already keeps everything")
 
     try await environment.updateSettings { $0.defaultRetention = .keepDays(7) }
@@ -328,15 +356,22 @@ final class MeetingDetailViewModelTests: XCTestCase {
   }
 
   /// Turning the keep off under "Until processed, then delete" with every
-  /// export done would delete the recording at the next sweep, so the
-  /// toggle asks first; with an export outstanding nothing would be
-  /// deleted and it applies at once.
+  /// export done would delete the recording now, so the toggle asks first;
+  /// with an export outstanding nothing would be deleted and it applies at
+  /// once.
   func testTurningKeepOffUnderDeleteAfterProcessingAsksFirst() async throws {
     let environment = try await TestSupport.environment()
     try await environment.updateSettings { $0.defaultRetention = .deleteAfterProcessing }
     let model = await makeModel(environment)
+    let folder = try await placeMaster(environment, retention: .keepDays(7), expiresAt: nil)
+    defer { try? FileManager.default.removeItem(at: folder) }
+    await TestSupport.waitUntil("master observed") { model.recordingFilesExist }
+    await TestSupport.waitUntil("default observed") {
+      model.defaultRetention == .deleteAfterProcessing
+    }
     await model.setKeepAudio(true)
 
+    XCTAssertTrue(model.wouldDeleteNow)
     await model.toggleKeepAudio(false)
     XCTAssertTrue(model.confirmsDeleteNow)
     let heldOptional = try await environment.store.asset(meetingID: SampleData.meetingID)
@@ -352,7 +387,9 @@ final class MeetingDetailViewModelTests: XCTestCase {
     var failed = SampleData.delivery()
     failed.status = .failed("vault missing")
     try await environment.store.save(failed)
+    await TestSupport.waitUntil("export outstanding") { !model.deliveries.allDelivered }
     await model.setKeepAudio(true)
+    XCTAssertFalse(model.wouldDeleteNow)
     await model.toggleKeepAudio(false)
     XCTAssertFalse(model.confirmsDeleteNow, "a deferred stamp deletes nothing")
     let deferredOptional = try await environment.store.asset(meetingID: SampleData.meetingID)

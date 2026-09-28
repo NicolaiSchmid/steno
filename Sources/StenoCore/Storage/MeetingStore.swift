@@ -371,13 +371,12 @@ public final class MeetingStore: Sendable {
     guard !assetIDs.isEmpty else { return }
     let keys = assetIDs.map(\.uuidString)
     try await writer.write { db in
-      let rows = try AudioAssetRow.filter(keys.contains(AudioAssetRow.Columns.id)).fetchAll(db)
-      for row in rows {
-        var asset = row.asset
-        asset.retention = .keepForever
-        asset.expiresAt = nil
-        try AudioAssetRow(asset).update(db)
-      }
+      try AudioAssetRow.filter(keys.contains(AudioAssetRow.Columns.id))
+        .updateAll(
+          db,
+          AudioAssetRow.Columns.retention.set(to: AudioRetention.Kind.keepForever.rawValue),
+          AudioAssetRow.Columns.retentionDays.set(to: nil),
+          AudioAssetRow.Columns.expiresAt.set(to: nil))
     }
   }
 
@@ -409,6 +408,16 @@ public final class MeetingStore: Sendable {
 
   public func deliveries(meetingID: UUID) async throws -> [Delivery] {
     try await writer.read { db in try Self.deliveryRows(meetingID: meetingID, db).map(\.delivery) }
+  }
+
+  /// Drops the listed rows; `DeliveryCoordinator` uses it for destinations
+  /// that are no longer configured. Unknown ids are ignored.
+  public func deleteDeliveries(ids: [UUID]) async throws {
+    guard !ids.isEmpty else { return }
+    let keys = ids.map(\.uuidString)
+    try await writer.write { db in
+      _ = try DeliveryRow.filter(keys.contains(DeliveryRow.Columns.id)).deleteAll(db)
+    }
   }
 
   // MARK: - Observation

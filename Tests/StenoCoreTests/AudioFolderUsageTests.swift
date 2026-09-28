@@ -20,6 +20,26 @@ import Testing
     try write(50, at: directory.appendingPathComponent(".DS_Store"))
     try write(9, at: directory.appendingPathComponent("meeting/.hidden"))
     #expect(try AudioFolderUsage.measure(directory) == 1_234)
+    #expect(throws: (any Error).self, "a file is not a folder") {
+      try AudioFolderUsage.measure(directory.appendingPathComponent("master.caf"))
+    }
+  }
+
+  /// A folder that exists but cannot be read throws, so Settings says
+  /// "Size unavailable" rather than a zero that looks like an empty folder.
+  @Test func anUnreadableFolderThrows() throws {
+    // Root reads everything; the permission bits cannot make a folder
+    // unreadable for it.
+    guard getuid() != 0 else { return }
+    let directory = try Fixtures.temporaryDirectory("usage-unreadable")
+    defer {
+      try? FileManager.default.setAttributes(
+        [.posixPermissions: 0o700], ofItemAtPath: directory.path)
+      try? FileManager.default.removeItem(at: directory)
+    }
+    try write(10, at: directory.appendingPathComponent("master.caf"))
+    try FileManager.default.setAttributes([.posixPermissions: 0], ofItemAtPath: directory.path)
+    #expect(throws: (any Error).self) { try AudioFolderUsage.measure(directory) }
   }
 
   @Test func anEmptyFolderIsZero() throws {

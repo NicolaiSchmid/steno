@@ -198,6 +198,24 @@ import Testing
     #expect(try await store.deliveries(meetingID: SampleData.meetingID).count == 2)
   }
 
+  /// The one predicate behind the retention guard: `allSatisfy` on no rows
+  /// is true (a meeting without destinations is stamped at once), and any
+  /// row that is not `.delivered` holds the stamp back.
+  @Test func allDeliveredIsTrueForNoRowsAndOnlyWhenEveryRowIsDelivered() {
+    var delivered = SampleData.delivery()
+    delivered.status = .delivered
+    var pending = SampleData.delivery()
+    pending.status = .pending
+    var failed = SampleData.delivery()
+    failed.status = .failed("vault missing")
+    #expect([Delivery]().allDelivered)
+    #expect([delivered].allDelivered)
+    #expect(![pending].allDelivered)
+    #expect(![failed].allDelivered)
+    #expect(![delivered, failed].allDelivered)
+    #expect(![failed, delivered].allDelivered)
+  }
+
   @Test func observeMeetingsYieldsAgainAfterASave() async throws {
     let store = try MeetingStore.inMemory()
     var iterator = store.observeMeetings().makeAsyncIterator()

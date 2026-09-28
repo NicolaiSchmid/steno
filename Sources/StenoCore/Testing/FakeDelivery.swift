@@ -10,8 +10,6 @@ public struct FakeDestination: Destination, Sendable {
   public var validateFailure: (any Error & Sendable)?
   public var deliverFailure: (any Error & Sendable)?
   /// The first `failUntil` deliveries throw `Transient`; the rest succeed.
-  /// Counted on `deliveries`, so a value type built once by a harness can
-  /// still recover after the fact.
   public var failUntil: Int
   public let deliveries = CallLog<MeetingExport>()
 

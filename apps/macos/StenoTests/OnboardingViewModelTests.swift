@@ -15,7 +15,8 @@ final class OnboardingViewModelTests: XCTestCase {
     XCTAssertTrue(forever.hasPrefix("Recordings are kept forever in "), forever)
     XCTAssertTrue(forever.hasSuffix(" Change this any time in Settings > Audio."), forever)
     let folder = try await environment.settings.load().audioFolder
-    XCTAssertTrue(forever.contains(folder.lastPathComponent), "names the folder: \(forever)")
+    XCTAssertTrue(
+      forever.contains("in \(folder.lastPathComponent)."), "names the folder, not the path: \(forever)")
 
     try await environment.updateSettings { $0.defaultRetention = .keepDays(7) }
     await model.load()

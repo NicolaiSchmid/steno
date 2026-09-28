@@ -24,6 +24,17 @@ import Testing
     #expect(try await settings.load() == Settings())
   }
 
+  /// The row an install wrote under the old default, byte for byte: no
+  /// migration touches it and the new default does not apply.
+  @Test func aStoredThirtyDayRowFromAnOldInstallWins() async throws {
+    let store = try MeetingStore.inMemory()
+    let settings = SettingsStore(writer: store.writer)
+    try await store.writer.write { db in
+      try SettingRow(key: "defaultRetention", value: #"{"keepDays":30}"#).insert(db)
+    }
+    #expect(try await settings.load().defaultRetention == .keepDays(30))
+  }
+
   /// Each of the three rules survives save and load; an install that stored
   /// `{"keepDays":30}` under the old default keeps it.
   @Test func everyRetentionRuleRoundTrips() async throws {

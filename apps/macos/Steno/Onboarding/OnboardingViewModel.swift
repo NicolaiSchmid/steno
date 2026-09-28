@@ -24,15 +24,27 @@ final class OnboardingViewModel {
   private(set) var retentionSentence: String?
   private let permissions: any PermissionsChecking
   private let settings: SettingsStore?
+  /// The app behind `init(environment:defaults:)`; nil under
+  /// `init(permissions:)`. The onboarding plan's setup rows read it.
+  private let environment: AppEnvironment?
+  /// Where the onboarding plan records that onboarding was completed.
+  private let defaults: UserDefaults
 
-  init(permissions: any PermissionsChecking, settings: SettingsStore? = nil) {
+  init(
+    permissions: any PermissionsChecking, settings: SettingsStore? = nil,
+    environment: AppEnvironment? = nil, defaults: UserDefaults = .standard
+  ) {
     self.permissions = permissions
     self.settings = settings
+    self.environment = environment
+    self.defaults = defaults
   }
 
   /// Permissions and the retention sentence from the app's environment.
-  convenience init(environment: AppEnvironment) {
-    self.init(permissions: environment.permissions, settings: environment.settings)
+  convenience init(environment: AppEnvironment, defaults: UserDefaults = .standard) {
+    self.init(
+      permissions: environment.permissions, settings: environment.settings,
+      environment: environment, defaults: defaults)
   }
 
   func load() async {
@@ -50,7 +62,7 @@ final class OnboardingViewModel {
     let rule =
       switch settings.defaultRetention {
       case .keepForever:
-        "Recordings are kept forever in \((settings.audioFolder.path as NSString).abbreviatingWithTildeInPath)."
+        "Recordings are kept forever in \(settings.audioFolder.lastPathComponent)."
       case .keepDays, .deleteAfterProcessing:
         settings.defaultRetention.footnote
       }

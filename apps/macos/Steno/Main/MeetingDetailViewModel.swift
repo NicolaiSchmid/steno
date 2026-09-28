@@ -50,7 +50,7 @@ final class MeetingDetailViewModel: Identifiable {
   private(set) var isBusy = false
   var tab: Tab = .summary
   /// Set by `toggleKeepAudio(false)` when turning the keep off would delete
-  /// the recording at the next sweep; the view asks first.
+  /// the recording now; the view asks first.
   var confirmsDeleteNow = false
   let speakers: SpeakersViewModel
   /// A speaker was named or reassigned since the last re-export.
@@ -253,10 +253,10 @@ final class MeetingDetailViewModel: Identifiable {
   }
 
   /// The toggle's action. On keeps at once; off asks first when the default
-  /// rule would delete the recording at the next sweep ("Until processed,
-  /// then delete" with every export done), else applies at once.
+  /// rule would delete the recording now ("Until processed, then delete"
+  /// on a ready meeting with every export done), else applies at once.
   func toggleKeepAudio(_ keep: Bool) async {
-    if !keep, await wouldDeleteNow() {
+    if !keep, wouldDeleteNow {
       confirmsDeleteNow = true
       return
     }
@@ -302,39 +302,27 @@ final class MeetingDetailViewModel: Identifiable {
     }
   }
 
-  /// `keep` sets `.keepForever` and clears `expiresAt`; off restores the
-  /// default retention from Settings and stamps a fresh expiry from now
-  /// only when every delivery of the meeting is `.delivered` (or there is
-  /// none), the pipeline's own guard. A stamp posts `retentionApplied` so
-  /// the app's sweep runs.
+  /// `keep` sets `.keepForever`; off restores the default retention from
+  /// Settings. Both go through `ProcessingPipeline.applyRetention`, so the
+  /// stamp (only on a ready meeting whose every delivery is `.delivered`, or
+  /// has none) and the `retentionApplied` post are the pipeline's, not a
+  /// second copy here.
   func setKeepAudio(_ keep: Bool) async {
     confirmsDeleteNow = false
     do {
-      guard var asset = try await store.asset(meetingID: id) else { return }
-      if keep {
-        asset.retention = .keepForever
-        asset.expiresAt = nil
-      } else {
-        let retention = try await settings.load().defaultRetention
-        asset.retention = retention
-        let deliveries = try await store.deliveries(meetingID: id)
-        asset.expiresAt = deliveries.allDelivered ? retention.expiry(from: now()) : nil
-      }
-      try await store.save(asset)
-      if asset.expiresAt != nil {
-        await store.events.post(.retentionApplied(meetingID: id))
-      }
+      let rule: AudioRetention =
+        if keep { .keepForever } else { try await settings.load().defaultRetention }
+      try await pipeline().applyRetention(meetingID: id, rule: rule)
     } catch {
       self.error = "Retention could not be changed: \(error)"
     }
   }
 
-  private func wouldDeleteNow() async -> Bool {
-    guard let retention = try? await settings.load().defaultRetention,
-      retention == .deleteAfterProcessing
-    else { return false }
-    let deliveries = (try? await store.deliveries(meetingID: id)) ?? []
-    return deliveries.allDelivered
+  /// The pipeline's stamp guard over the observed state: the default rule
+  /// stamps today, the meeting is ready and nothing is left to export.
+  var wouldDeleteNow: Bool {
+    defaultRetention == .deleteAfterProcessing && meeting?.state == .ready
+      && deliveries.allDelivered
   }
 
   /// Debounced on the injected clock with one sleeper: edits within the
