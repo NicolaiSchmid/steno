@@ -1,15 +1,20 @@
 import Foundation
 import StenoCore
 
-/// General: launch at login, meeting detection, default template.
+/// General: launch at login, meeting detection, the calendar permission that
+/// names meetings, the default template, and the update status.
 @MainActor
 @Observable
-final class GeneralSettingsViewModel {
+final class GeneralSettingsViewModel: SettingsSectionModel {
   private(set) var loginItem: LoginItemStatus
   private(set) var detectionEnabled = true
   private(set) var defaultTemplateID = SummaryTemplate.defaultID
-  private(set) var error: String?
+  private(set) var calendarPermission: PermissionState = .unknown
+  private(set) var requestingCalendar = false
+  var error: String?
+  var errorDetails: String?
   let templates = SummaryTemplate.bundled
+  let version = AppVersion.marketing
   private let environment: AppEnvironment
 
   init(environment: AppEnvironment) {
@@ -24,17 +29,22 @@ final class GeneralSettingsViewModel {
       defaultTemplateID = settings.defaultTemplateID
       loginItem = environment.loginItem.status
     } catch {
-      self.error = "Settings could not be loaded: \(error)"
+      fail("Settings could not be loaded.", error)
     }
+    calendarPermission = await environment.permissions.state(of: .calendar)
   }
 
   var launchAtLogin: Bool { loginItem.isOn }
+
+  var selectedTemplate: SummaryTemplate? {
+    templates.first { $0.id == defaultTemplateID }
+  }
 
   func setLaunchAtLogin(_ enabled: Bool) async {
     do {
       try await environment.setLaunchAtLogin(enabled)
     } catch {
-      self.error = "Login item could not be changed: \(error)"
+      fail("Opening Steno at login could not be changed.", error)
     }
     loginItem = environment.loginItem.status
   }
@@ -54,11 +64,78 @@ final class GeneralSettingsViewModel {
     await save { $0.defaultTemplateID = id }
   }
 
+  // MARK: Calendar
+
+  func requestCalendar() async {
+    requestingCalendar = true
+    defer { requestingCalendar = false }
+    calendarPermission = await environment.permissions.request(.calendar)
+  }
+
+  func openCalendarSettings() {
+    environment.permissions.openSystemSettings(for: .calendar)
+  }
+
+  // MARK: Updates
+
+  var canCheckForUpdates: Bool { environment.updater.canCheckForUpdates }
+
+  var automaticallyChecksForUpdates: Bool {
+    get { environment.updater.automaticallyChecksForUpdates }
+    set { environment.updater.automaticallyChecksForUpdates = newValue }
+  }
+
+  var automaticallyDownloadsUpdates: Bool {
+    get { environment.updater.automaticallyDownloadsUpdates }
+    set { environment.updater.automaticallyDownloadsUpdates = newValue }
+  }
+
+  func checkForUpdates() {
+    environment.updater.checkForUpdates()
+  }
+
+  /// "Up to date, checked 2 hours ago", "Update available: 0.9.1", "Could not
+  /// check for updates" or "Not checked yet".
+  func updateStatusText(now: Date) -> String {
+    Self.updateStatus(
+      outcome: environment.updater.lastOutcome, lastCheck: environment.updater.lastUpdateCheckDate,
+      now: now)
+  }
+
+  /// The failure text of the last check, for the details disclosure.
+  var updateFailureDetails: String? {
+    if case .failed(let message) = environment.updater.lastOutcome { return message }
+    return nil
+  }
+
+  nonisolated static func updateStatus(
+    outcome: UpdateCheckOutcome, lastCheck: Date?, now: Date
+  ) -> String {
+    let formatter = RelativeDateTimeFormatter()
+    formatter.unitsStyle = .full
+    switch outcome {
+    case .notChecked:
+      // Sparkle persists the date; the outcome starts over per launch.
+      guard let lastCheck else { return "Not checked yet" }
+      return "Checked \(formatter.localizedString(for: lastCheck, relativeTo: now))"
+    case .upToDate:
+      guard let lastCheck else { return "Up to date" }
+      return "Up to date, checked \(formatter.localizedString(for: lastCheck, relativeTo: now))"
+    case .available(let version):
+      return "Update available: \(version)"
+    case .failed:
+      return "Could not check for updates"
+    }
+  }
+
+  // MARK: Saving
+
   private func save(_ mutate: (inout Settings) -> Void) async {
     do {
       try await environment.updateSettings(mutate)
+      clearError()
     } catch {
-      self.error = "Setting could not be saved: \(error)"
+      fail("The setting could not be saved.", error)
     }
   }
 }

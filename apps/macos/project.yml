@@ -99,9 +99,11 @@ targets:
         NSLocalNetworkUsageDescription: "Steno receives recordings from your paired iPhone over your local network."
         NSBonjourServices:
           - _steno._tcp
-        # Sparkle 2. The feed is the latest GitHub release's appcast asset;
-        # each release regenerates it with `generate_appcast`.
-        SUFeedURL: https://github.com/NicolaiSchmid/steno/releases/latest/download/appcast.xml
+        # Sparkle 2. The feed is the rolling appcast on the `appcast` branch,
+        # written by the release workflow (scripts/publish-appcast.sh); a
+        # pre-release item carries the `beta` channel that only
+        # release-candidate builds read (Services/UpdateChannels.swift).
+        SUFeedURL: https://raw.githubusercontent.com/NicolaiSchmid/steno/appcast/appcast.xml
         SUPublicEDKey: RxaX7phoHvb7M0P4yaOC7zngDo+lqlOE6Iq89UtOuQI=
         SUEnableAutomaticChecks: true
         SUScheduledCheckInterval: 86400
