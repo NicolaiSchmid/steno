@@ -12,6 +12,19 @@ already work, starting with an Obsidian vault.
 > [issue #74](https://github.com/NicolaiSchmid/steno/issues/74). Scope:
 > [.plans/2026-09-24-initial-scope.md](.plans/2026-09-24-initial-scope.md).
 
+## Install
+
+macOS 15 or newer on Apple Silicon. Homebrew:
+
+```sh
+brew tap nicolaischmid/tap && brew install --cask steno
+```
+
+Or download the DMG from [Releases](https://github.com/NicolaiSchmid/steno/releases). Either
+way the app updates itself through Sparkle. The tap
+([NicolaiSchmid/homebrew-tap](https://github.com/NicolaiSchmid/homebrew-tap)) follows every
+release, release candidates included; Sparkle offers stable releases only.
+
 ## What it does
 
 - **Records without a bot.** Core Audio process taps for the other side, your mic for you.

@@ -4,8 +4,10 @@ name: Release macOS app
 # a throwaway keychain, generate the project, archive and export with
 # Developer ID and hardened runtime, verify the signature and entitlements,
 # build the DMG, notarise and staple it, generate the Sparkle appcast from
-# SPARKLE_PRIVATE_KEY, and publish a GitHub release with both assets (a
-# pre-release when the tag carries a hyphen, so `releases/latest` skips it).
+# SPARKLE_PRIVATE_KEY, publish a GitHub release with both assets (a
+# pre-release when the tag carries a hyphen, so `releases/latest` skips it)
+# and bump the Homebrew cask in NicolaiSchmid/homebrew-tap when
+# HOMEBREW_TAP_TOKEN exists.
 #
 # Runs on the Forge runner when `MACOS_RUNS_ON` names it, on GitHub-hosted
 # `macos-15` otherwise. Secrets that do not exist yet make the workflow fail
@@ -173,6 +175,19 @@ jobs:
             gh release edit "$TAG" --draft=false --latest
           fi
           gh release view "$TAG" --json url --jq .url
+
+      # Point Casks/steno.rb in NicolaiSchmid/homebrew-tap at the DMG just
+      # published. Pre-releases bump too (release candidates are tested
+      # through brew); Sparkle keeps installed users on releases/latest.
+      # Without HOMEBREW_TAP_TOKEN the script prints a notice and exits 0;
+      # with it, a failed push is a warning on a release that already stands.
+      - name: Bump Homebrew cask
+        if: github.ref_type == 'tag'
+        continue-on-error: true
+        env:
+          HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: apps/macos/scripts/bump-homebrew-cask.sh "$VERSION" "apps/macos/dist/Steno-$VERSION.dmg"
 
       - name: Remove keychain and keys
         if: always()
