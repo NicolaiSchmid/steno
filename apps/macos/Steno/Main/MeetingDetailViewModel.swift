@@ -198,7 +198,7 @@ final class MeetingDetailViewModel: Identifiable {
     case .ready:
       // All delivered and still unstamped: the retention stage is about to
       // run.
-      return deliveriesSettled(deliveries) ? .keptWhileProcessing : .keptUntilExportSucceeds
+      return deliveries.allDelivered ? .keptWhileProcessing : .keptUntilExportSucceeds
     case .failed:
       return .keptProcessingFailed
     case .recording, .queued, .processing:
@@ -262,7 +262,7 @@ final class MeetingDetailViewModel: Identifiable {
         let retention = try await settings.load().defaultRetention
         asset.retention = retention
         let deliveries = try await store.deliveries(meetingID: id)
-        asset.expiresAt = deliveriesSettled(deliveries) ? retention.expiry(from: now()) : nil
+        asset.expiresAt = deliveries.allDelivered ? retention.expiry(from: now()) : nil
       }
       try await store.save(asset)
       if asset.expiresAt != nil {
@@ -278,12 +278,7 @@ final class MeetingDetailViewModel: Identifiable {
       retention == .deleteAfterProcessing
     else { return false }
     let deliveries = (try? await store.deliveries(meetingID: id)) ?? []
-    return deliveriesSettled(deliveries)
-  }
-
-  /// Every row `.delivered`, or no destination at all.
-  private func deliveriesSettled(_ deliveries: [Delivery]) -> Bool {
-    deliveries.allSatisfy { $0.status == .delivered }
+    return deliveries.allDelivered
   }
 
   /// Debounced on the injected clock with one sleeper: edits within the

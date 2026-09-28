@@ -93,20 +93,6 @@ enum TestSupport {
   /// Yields to the main actor a few times so a task started just before has
   /// reached its first suspension point.
   @MainActor
-  /// Everything posted to `stream` so far: posts a sentinel on `bus` and
-  /// reads up to it, so a run that posted less than expected fails an
-  /// assertion instead of hanging the test.
-  static func drain(_ stream: AsyncStream<MeetingEvent>, from bus: MeetingEventBus) async
-    -> [MeetingEvent]
-  {
-    let sentinel = MeetingEvent.speakersNeedReview(meetingID: UUID(), speakerIDs: [])
-    await bus.post(sentinel)
-    var iterator = stream.makeAsyncIterator()
-    var collected: [MeetingEvent] = []
-    while let event = await iterator.next(), event != sentinel { collected.append(event) }
-    return collected
-  }
-
   static func settle() async {
     for _ in 0..<20 { await Task.yield() }
   }

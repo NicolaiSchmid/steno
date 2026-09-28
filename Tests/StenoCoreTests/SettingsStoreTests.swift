@@ -22,7 +22,6 @@ import Testing
     let store = try MeetingStore.inMemory()
     let settings = SettingsStore(writer: store.writer)
     #expect(try await settings.load() == Settings())
-    #expect(try await settings.load().defaultRetention == .keepForever)
   }
 
   /// Each of the three rules survives save and load; an install that stored

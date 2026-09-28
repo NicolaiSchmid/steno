@@ -173,7 +173,7 @@ final class MeetingDetailViewModelTests: XCTestCase {
     asset = try XCTUnwrap(assetReloaded)
     XCTAssertEqual(asset.retention, .keepDays(7))
     XCTAssertEqual(asset.expiresAt, TestSupport.now.addingTimeInterval(7 * 86_400))
-    let posted = await TestSupport.drain(events, from: environment.events)
+    let posted = await environment.events.drain(events)
     XCTAssertEqual(posted, [.retentionApplied(meetingID: SampleData.meetingID)], "sweep trigger")
 
     // A failed export defers the stamp, as the pipeline's retention stage does.
@@ -187,7 +187,7 @@ final class MeetingDetailViewModelTests: XCTestCase {
     let deferred = try XCTUnwrap(deferredOptional)
     XCTAssertEqual(deferred.retention, .keepDays(7))
     XCTAssertNil(deferred.expiresAt, "audio never expires before the export succeeds")
-    let none = await TestSupport.drain(deferredEvents, from: environment.events)
+    let none = await environment.events.drain(deferredEvents)
     XCTAssertEqual(none, [], "nothing to sweep")
   }
 

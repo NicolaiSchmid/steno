@@ -69,6 +69,13 @@ public struct Delivery: Codable, Sendable, Equatable, Hashable, Identifiable {
   }
 }
 
+extension Collection where Element == Delivery {
+  /// Every row `.delivered`, or no destination at all: the one guard that
+  /// lets an audio asset's `expiresAt` be stamped (the retention stage and
+  /// the per-meeting keep toggle alike).
+  public var allDelivered: Bool { allSatisfy { $0.status == .delivered } }
+}
+
 /// Whether a delivered file belongs to Steno outright or is a block inside a
 /// file the user also edits.
 public enum FileOwnership: String, Codable, Sendable, Equatable, Hashable {

@@ -16,8 +16,7 @@ extension ProcessingPipeline {
     let store = self.store
     let events = dependencies.events
     try await run(.retention, meetingID: asset.meetingID) {
-      let deliveries = try await store.deliveries(meetingID: asset.meetingID)
-      guard deliveries.allSatisfy({ $0.status == .delivered }) else { return }
+      guard try await store.deliveries(meetingID: asset.meetingID).allDelivered else { return }
       var updated = asset
       updated.expiresAt = asset.retention.expiry(from: self.now)
       try await store.save(updated)
