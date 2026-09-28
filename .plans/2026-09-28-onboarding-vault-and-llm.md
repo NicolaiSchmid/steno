@@ -163,18 +163,24 @@ The tests that pin the fake output (`Tests/StenoCoreTests/PipelineIntegrationTes
    `extension Settings { var llmConfigured: Bool; var vaultConfigured: Bool }`
    (`LLMEndpoint(settings:) != nil`, `obsidian != nil`) in the app, and the one real piece of state,
    `AppController.setupBannerDismissed: Bool`. The view models already observe `Settings`, so no
-   second observer task is needed.
+   second observer task is needed. Shipped: the controller follows the store once
+   (`AppController.storedSettings`, `setupBannerMessage`) so the banner's live hide is testable
+   and a new detail model starts from the configured state; the banner view holds no task.
 8a. The copy for a `.ready` meeting without a summary, and the export footer, is owned here and
    selected by `MeetingDetailViewModel.summaryStatus` and `exportStatus`. The redesign plan folds
    these rows into its states table verbatim and keeps the two selectors; its `PendingText` keys
    off `Meeting.state` only for queued, processing and failed. One vocabulary in user copy:
-   "export" (the Actions menu already says "Re-export"), never "delivered".
+   "export" (the Actions menu already says "Re-export"), never "delivered". The `DeliveryBadge`
+   chip therefore reads `<destination>: exported` where it said "delivered".
 
 9. Settings gets deep links. `SettingsView` binds its `TabView` to a `SettingsTab` selection and
    `AppController` gets `requestedSettingsTab` plus `openSettings(_ tab:)`, which sets the request
    and returns it, mirroring `requestedMeetingID`. Every "Open Settings" button in this plan lands
    on the right tab. The request is set on the controller (unit-tested) and cleared in the view
-   (covered by the UI smoke test that opens Settings on the right tab).
+   (covered by the UI smoke test that opens Settings on the right tab). Shipped over PR #117's
+   Settings redesign: `SettingsSection` and `requestedSettingsSection` replace `SettingsTab` and
+   `requestedSettingsTab`; the LLM and Obsidian tabs are the Summaries and Export sections, and
+   the copy says "Settings > Summaries" and "Settings > Export".
 
 10. The CLI follows the same rule. `Wiring.dependencies` passes nil passes when
     `Wiring.llmComponents` is nil and `steno process` reports the summary as skipped. The fakes
@@ -348,7 +354,7 @@ does for `requestedMeetingID`.
    vaultConfigured: Bool { obsidian != nil } }` and `AppController.setupBannerDismissed: Bool` with
    `dismissBanner()`. No class, no observer task: the banner and the detail view model read the
    current `Settings` the view models already observe.
-   Tests: `apps/macos/StenoTests/SettingsSetupTests.swift` covers the four combinations of the two
+   Tests: `apps/macos/StenoTests/SetupStatusTests.swift` covers the four combinations of the two
    properties; `AppControllerTests`: after `launch()`, saving the LLM tab makes the loaded
    settings report `llmConfigured`, saving the Obsidian tab `vaultConfigured`, `dismissBanner()`
    sets the flag and a fresh controller starts with it false.
@@ -386,11 +392,15 @@ does for `requestedMeetingID`.
 8. Onboarding: `apps/macos/Steno/Onboarding/OnboardingViewModel.swift` gets `enum Page { case
    permissions, setup }` with `page`, a `StepKind` enum (`permission(PermissionKind)`,
    `summaries`, `vault`) so the two setup rows sit in the same `steps` array as the permission
-   rows, owns an `LLMSettingsViewModel` and an `ObsidianSettingsViewModel` from the environment,
-   `advance()` (page 1 Done or Later), `back()`, `isFinished` requires the setup steps saved or
-   skipped, `markCompleted()` writes `steno.onboardingCompleted`, and a static
-   `shouldOpen(permissions:defaults:)` replaces the loop in `OnboardingOpener` (opening on page 2
-   when the permissions are granted and the flag is unset). The constructor is the
+   rows (shipped as two typed lists instead, `steps` and `setupStates`, since the rows carry
+   different state; `SetupStep.allCases` fixes the order), owns an `LLMSettingsViewModel` and an
+   `ObsidianSettingsViewModel` from the environment,
+   `advance()` (page 1 Done or Later), `back()`, `finish()` (Finish, or both setup rows saved or
+   skipped on page 2) writes `steno.onboardingCompleted` and sets `finished`, which the view turns
+   into the window's dismissal; `markCompleted()` alone covers the window's close button; and a
+   static `shouldOpen(permissions:settings:defaults:)` replaces the loop in `OnboardingOpener`
+   (opening on page 2 when the permissions are granted and the flag is unset, and not at all when
+   Settings already holds an endpoint and a vault, writing the flag). The constructor is the
    `init(environment:defaults:)` the retention plan introduced (index step 5); this plan extends
    that initialiser only and leaves the `init(permissions:)` convenience the 81 x 4 matrix test uses
    untouched, so the constructor is rewritten once, not twice. `OnboardingView.swift` renders the two
@@ -398,8 +408,8 @@ does for `requestedMeetingID`.
    uses `shouldOpen`, `OnboardingWindowContent` calls `markCompleted()` on finish.
    Tests in `apps/macos/StenoTests/OnboardingViewModelTests.swift`: the step order; the 81 x 4
    permission matrix still holds with the setup steps skipped; Done and Later on page 1 advance
-   instead of finishing; `isFinished` stays false with all permissions granted until Summaries and
-   Obsidian vault are saved or skipped; saving Summaries with a valid URL and model marks the step
+   instead of finishing; `finished` stays false with all permissions granted until Summaries and
+   Obsidian vault are saved or skipped, then the flag is set; saving Summaries with a valid URL and model marks the step
    done and rebuilds the pipeline; saving Obsidian vault with a temp directory marks it done and an
    unwritable path shows the destination's message; `shouldOpen` is true when the flag is unset
    even with every permission granted and false once `markCompleted()` ran; the preview guard stays
@@ -426,14 +436,14 @@ next opens.
   system audio; skip Calendar and Local network; Done advances to page 2; enter a local LM Studio
   URL and model, Test connection reports "Connected: ...", Save; choose a vault folder, Save; the
   window closes. Record a two-minute call; the meeting lands Ready with a real summary, a token
-  count and an "obsidian-folder: delivered" badge.
+  count and an "obsidian-folder: exported" badge.
 - Manual, existing install (the owner's): launch; onboarding opens on page 2 with both rows open;
   press Finish; the main window shows the "Summaries and export are off" banner; open the first
   meeting; the Summary tab reads "Summary skipped: no LLM endpoint is configured."; the footer
   reads "Not exported: no Obsidian vault is configured." Configure the endpoint from the banner;
   the Summary tab switches to "No summary yet" with Run summary; run it; the summary appears and
   the header shows the token count. Configure the vault; the footer switches to "Not exported yet"
-  with Export now; run it; the badge reads delivered and the folder opens from the Finder button.
+  with Export now; run it; the badge reads exported and the folder opens from the Finder button.
   Press Not now on the banner; it hides; relaunch with the vault removed from settings and the
   banner returns.
 - Manual, no configuration at all: record a call; the meeting lands Ready with the transcript, no

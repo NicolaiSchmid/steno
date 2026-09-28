@@ -7,12 +7,17 @@ struct UITestScenario: Equatable, Sendable {
   static let prefix = "-steno-"
   static let uiTestingFlag = "-steno-ui-testing"
   static let showPromptFlag = "-steno-show-prompt"
-  static let knownFlags: Set<String> = [uiTestingFlag, showPromptFlag]
+  /// Read by `AppEnvironment.preview()` itself; named here so it is known.
+  static let holdTranscribeFlag = AppEnvironment.holdTranscribeArgument
+  static let knownFlags: Set<String> = [uiTestingFlag, showPromptFlag, holdTranscribeFlag]
 
   /// The preview environment: in-memory database, fakes, synthetic audio.
   var isUITesting: Bool
   /// After launch, a detection prompt for "Zoom" is shown.
   var showPrompt: Bool
+  /// The preview's speech engine holds each transcribe for a minute and the
+  /// sample meeting is queued at launch (`AppEnvironment.preview()`).
+  var holdTranscribe: Bool
   /// `-steno-*` arguments that name no flag, in order.
   var unknownFlags: [String]
 
@@ -20,6 +25,7 @@ struct UITestScenario: Equatable, Sendable {
     let flags = arguments.filter { $0.hasPrefix(Self.prefix) }
     isUITesting = flags.contains(Self.uiTestingFlag)
     showPrompt = flags.contains(Self.showPromptFlag)
+    holdTranscribe = flags.contains(Self.holdTranscribeFlag)
     unknownFlags = flags.filter { !Self.knownFlags.contains($0) }
   }
 

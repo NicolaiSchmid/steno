@@ -85,6 +85,37 @@ import Testing
       }
     }
 
+    /// The claim behind warming the engines while a recording runs: a
+    /// `prepare()` on a loaded engine or diarizer is a no-op. Both durations
+    /// are printed; the second must return within a second.
+    @Test(.enabled(if: enabled, skipMessage))
+    func secondPrepareOnALoadedEngineAndDiarizerIsANoOp() async throws {
+      let (store, cleanup) = try Self.modelStore()
+      defer { cleanup() }
+      let clock = ContinuousClock()
+      func timed(_ label: String, _ prepare: () async throws -> Void) async throws -> Duration {
+        let elapsed = try await clock.measure { try await prepare() }
+        print(
+          "[model-tests] \(label): \(String(format: "%.2f", elapsed / .seconds(1))) s")
+        return elapsed
+      }
+      let engine = try makeSpeechEngine(.parakeetV3, models: store)
+      _ = try await timed("parakeet-v3 first prepare (download if needed, compile, load)") {
+        try await engine.prepare()
+      }
+      let engineAgain = try await timed("parakeet-v3 second prepare") { try await engine.prepare() }
+      #expect(engineAgain < .seconds(1), "a loaded engine's prepare is a no-op")
+
+      let diarizer = FluidDiarizer(models: store)
+      _ = try await timed("diarizer first prepare (download if needed, load)") {
+        try await diarizer.prepare()
+      }
+      let diarizerAgain = try await timed("diarizer second prepare") {
+        try await diarizer.prepare()
+      }
+      #expect(diarizerAgain < .seconds(1), "a loaded diarizer's prepare is a no-op")
+    }
+
     /// Every cluster the real model yields has a unit embedding, a clip of
     /// at most ten seconds inside one of its ranges, and no range shared
     /// with another speaker. Returns the result for the caller's own checks.

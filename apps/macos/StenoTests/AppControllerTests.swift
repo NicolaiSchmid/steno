@@ -196,6 +196,59 @@ final class AppControllerTests: XCTestCase {
     await controller.shutdown()
   }
 
+  /// The progress model is subscribed before `launch()` resumes the queue,
+  /// so a run that was left `.processing` and is held inside transcribe by
+  /// the engine shows its stage on the model right after `launch()`, and
+  /// leaves the model once it is ready.
+  func testLaunchShowsTheStageOfAHeldResumedRunOnTheProgressModel() async throws {
+    let gate = Gate()
+    let firstBuild = OnceFlag()
+    // The first pipeline records and processes a real asset with the plain
+    // fake; the one `reloadPipeline()` builds holds every run at the gate.
+    let environment = try await TestSupport.environment(
+      seed: false,
+      makeSpeechEngine: { () -> any SpeechEngine in
+        if firstBuild.take() { return FakeSpeechEngine() }
+        var held = FakeSpeechEngine()
+        held.onTranscribe = { await gate.wait() }
+        return held
+      })
+    let recorder = RecordingController(environment: environment)
+    await recorder.start(mode: .inPerson)
+    await recorder.stop()
+    let meeting = try await recordedMeeting(in: environment)
+    await environment.pipeline.waitUntilIdle()
+    // Pretend the last process died mid-way.
+    try await environment.store.setState(.processing, meetingID: meeting.id, now: TestSupport.now)
+    try await environment.reloadPipeline()
+
+    let controller = try makeController(environment)
+    XCTAssertNil(controller.progress.entry(for: meeting.id), "nothing before launch")
+    await controller.launch()
+    await TestSupport.waitUntil("the resumed run's stage on the model") {
+      controller.progress.entry(for: meeting.id)?.stage == .transcribe
+    }
+    let entry = try XCTUnwrap(controller.progress.entry(for: meeting.id))
+    XCTAssertEqual(entry.title, "Transcribing…")
+    XCTAssertGreaterThanOrEqual(entry.fraction, 0)
+    XCTAssertLessThan(entry.fraction, 1)
+    let remaining = try XCTUnwrap(entry.estimatedRemaining)
+    XCTAssertGreaterThan(remaining, .zero)
+    await TestSupport.waitUntil("the queue row the entry backs") {
+      controller.menuBar.queue.map(\.id) == [meeting.id]
+    }
+
+    await gate.open()
+    await environment.pipeline.waitUntilIdle()
+    await TestSupport.waitUntil("the finished run left the model") {
+      controller.progress.entry(for: meeting.id) == nil
+    }
+    let stored = try await environment.store.meeting(id: meeting.id)
+    XCTAssertEqual(stored?.state, .ready)
+    XCTAssertTrue(environment.startupWarnings.isEmpty, "\(environment.startupWarnings)")
+    await controller.shutdown()
+  }
+
   func testSpeakersNeedReviewForAnUnlistedMeetingIsDropped() async throws {
     let environment = try await TestSupport.environment()
     let controller = try makeController(environment)
@@ -461,5 +514,61 @@ final class AppControllerTests: XCTestCase {
     await TestSupport.settle()
     try await Task.sleep(for: .milliseconds(100))
     XCTAssertEqual(controller.menuBar.queue.count, 1, "no update after shutdown")
+  }
+
+  /// The banner's one piece of state: dismissed for this launch only. The
+  /// configuration itself is read off `Settings`, which the Settings tabs
+  /// write; after `launch()` a fresh controller reports both missing. The
+  /// LLM tab's `isConfigured` and the Obsidian toggle are the same rule as
+  /// `llmConfigured` and `vaultConfigured`, so the tabs' info rows and the
+  /// banner agree.
+  func testSetupBannerDismissalAndTheConfiguredFlags() async throws {
+    let environment = try await TestSupport.environment(seed: false)
+    let controller = try makeController(environment)
+    XCTAssertFalse(controller.setupBannerDismissed, "a fresh controller shows the banner")
+    XCTAssertNil(controller.setupBannerMessage, "nothing before the store's first emission")
+    await controller.launch()
+    await TestSupport.waitUntil("banner message loaded") {
+      controller.setupBannerMessage == .bothMissing
+    }
+    let initial = try await environment.settings.load()
+    XCTAssertFalse(initial.llmConfigured)
+    XCTAssertFalse(initial.vaultConfigured)
+
+    let llm = LLMSettingsViewModel(environment: environment)
+    await llm.load()
+    XCTAssertEqual(llm.isConfigured, initial.llmConfigured)
+    llm.baseURLText = "http://127.0.0.1:1234/v1"
+    llm.model = "qwen"
+    await llm.save()
+    XCTAssertNil(llm.error, llm.error ?? "")
+    let afterLLM = try await environment.settings.load()
+    XCTAssertTrue(afterLLM.llmConfigured, "saving the LLM tab configures the endpoint")
+    XCTAssertEqual(llm.isConfigured, afterLLM.llmConfigured)
+    await TestSupport.waitUntil("endpoint observed by the controller") {
+      controller.setupBannerMessage == .vaultMissing
+    }
+
+    let vault = try TestSupport.temporaryDirectory("steno-vault")
+    defer { try? FileManager.default.removeItem(at: vault) }
+    let obsidian = ObsidianSettingsViewModel(environment: environment)
+    await obsidian.load()
+    XCTAssertEqual(obsidian.enabled, afterLLM.vaultConfigured)
+    obsidian.enabled = true
+    obsidian.vaultPath = vault.path
+    await obsidian.save()
+    XCTAssertTrue(obsidian.saved)
+    let afterVault = try await environment.settings.load()
+    XCTAssertTrue(afterVault.vaultConfigured, "saving the Obsidian tab configures the vault")
+    await TestSupport.waitUntil("vault observed by the controller") {
+      controller.storedSettings?.vaultConfigured == true
+    }
+    XCTAssertNil(controller.setupBannerMessage, "nothing left to set up: the banner live-hides")
+
+    controller.dismissSetupBanner()
+    XCTAssertTrue(controller.setupBannerDismissed)
+    let fresh = try makeController(environment)
+    XCTAssertFalse(fresh.setupBannerDismissed, "the dismissal lives for one launch")
+    await controller.shutdown()
   }
 }

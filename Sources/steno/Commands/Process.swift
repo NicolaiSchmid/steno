@@ -23,9 +23,11 @@ extension MeetingSource: ExpressibleByArgument {
 
 /// `steno process <wav>`: copies the 16 kHz mono WAV (and the system lane
 /// for a call) into `<audio folder>/<meetingID>/`, enqueues the meeting and
-/// waits for the pipeline. Prints the meeting id, and only that, on stdout;
-/// a note on stderr says when the summary was skipped for lack of an LLM
-/// endpoint.
+/// waits for the pipeline. Prints one line per progress event to standard
+/// error, `stage percent remaining`, and the meeting id alone to standard
+/// output; a note on stderr says when the summary was skipped for lack of
+/// an LLM endpoint. The progress lines are how the stage rates get measured
+/// on a Mac.
 struct Process: AsyncParsableCommand {
   static let configuration = CommandConfiguration(
     abstract: "Run the processing pipeline over a WAV file.")
@@ -122,12 +124,28 @@ struct Process: AsyncParsableCommand {
     )
 
     let llm = try await Wiring.llmComponents(settings: settings)
+    let events = MeetingEventBus()
+    let stream = await events.subscribe()
     let pipeline = ProcessingPipeline(
       dependencies: try Wiring.dependencies(
         store: opened.store, settings: opened.settings, engine: speech.engine,
-        modelsDirectory: settings.modelsDirectory, llm: llm))
+        modelsDirectory: settings.modelsDirectory, llm: llm, events: events))
+    let printer = Task {
+      for await event in stream {
+        switch event {
+        case .progress(let id, let progress) where id == meetingID:
+          FileHandle.standardError.write(Data((Self.progressLine(progress) + "\n").utf8))
+        default:
+          continue
+        }
+      }
+    }
     try await pipeline.enqueue(meeting, asset: asset)
     await pipeline.waitUntilIdle()
+    // The bus is private to this command: every progress line is posted by
+    // now, so ending the subscription lets the printer finish after them.
+    await events.finish()
+    await printer.value
 
     guard let result = try await opened.store.meeting(id: meetingID) else {
       throw RuntimeFailure(description: "meeting \(meetingID) vanished during processing")
@@ -140,5 +158,24 @@ struct Process: AsyncParsableCommand {
         Data("summary skipped: no LLM endpoint configured\n".utf8))
     }
     print(meetingID.uuidString)
+  }
+
+  /// `stage percent remaining`, the stage padded to the longest name so the
+  /// percents line up, and the lane when the stage runs over more than one:
+  /// `transcribe     3% 1m 20s, lane 2 of 2`.
+  static func progressLine(_ progress: ProcessingProgress) -> String {
+    let width = PipelineStage.allCases.map(\.rawValue.count).max() ?? 0
+    let stage = progress.stage.rawValue.padding(toLength: width, withPad: " ", startingAt: 0)
+    let percent = String(format: "%3d", Int((progress.fraction * 100).rounded(.down)))
+    let lane =
+      progress.laneCount > 1 ? ", lane \(progress.lane + 1) of \(progress.laneCount)" : ""
+    return "\(stage) \(percent)% \(remainingText(progress.estimatedRemaining))\(lane)"
+  }
+
+  /// `1m 20s` or `4s`, seconds rounded up so a run never reads as done early.
+  static func remainingText(_ remaining: Duration) -> String {
+    let seconds = max(0, Int((remaining / .seconds(1)).rounded(.up)))
+    guard seconds >= 60 else { return "\(seconds)s" }
+    return "\(seconds / 60)m \(seconds % 60)s"
   }
 }

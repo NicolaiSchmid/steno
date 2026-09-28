@@ -1,5 +1,6 @@
 import StenoAudio
 import StenoCore
+import StenoSpeech
 import XCTest
 
 /// The recorder's state machine over the synthetic capture backend and the
@@ -117,6 +118,146 @@ final class RecordingControllerTests: XCTestCase {
     XCTAssertEqual(meetings.first?.title.hasPrefix("Meeting "), true)
     await recorder.stop()
     await environment.pipeline.waitUntilIdle()
+  }
+
+  // MARK: - Warm-up
+
+  /// With both models on disk a recording start loads the engines through
+  /// `AppController`'s hook, so by the time the run prepares them again the
+  /// load is a no-op; the capture lost nothing to it.
+  func testStartWarmsBothEnginesWhenTheirModelsAreInstalled() async throws {
+    let engine = FakeSpeechEngine()
+    let diarizer = FakeDiarizer()
+    let environment = try await TestSupport.environment(
+      seed: false, makeSpeechEngine: { engine }, makeDiarizer: { diarizer })
+    for try await _ in await environment.models.ensure(.parakeetV3) {}
+    for try await _ in await environment.models.ensure(.offlineDiarizer) {}
+    XCTAssertTrue(environment.models.isInstalled(.parakeetV3))
+    XCTAssertTrue(environment.models.isInstalled(.offlineDiarizer))
+    let controller = AppController(environment: environment)
+    let recorder = controller.recorder
+
+    await recorder.start(mode: .call)
+    await TestSupport.waitUntil("both engines warmed during the recording") {
+      let enginePreparations = await engine.preparations.count
+      let diarizerPreparations = await diarizer.preparations.count
+      return enginePreparations == 1 && diarizerPreparations == 1
+    }
+    let transcribedWhileWarm = await engine.transcriptions.count
+    XCTAssertEqual(transcribedWhileWarm, 0, "the warm-up came before any transcription")
+
+    await recorder.stop()
+    await environment.pipeline.waitUntilIdle()
+    let enginePreparations = await engine.preparations.count
+    let diarizerPreparations = await diarizer.preparations.count
+    XCTAssertEqual(enginePreparations, 2, "the warm-up and the run's own prepare")
+    XCTAssertEqual(diarizerPreparations, 2, "the warm-up and the run's own prepare")
+    let transcriptions = await engine.transcriptions.count
+    XCTAssertEqual(transcriptions, 2, "both lanes of the call")
+    let statistics = try XCTUnwrap(recorder.lastStatistics)
+    for lane in [AudioLane.mic, .system] {
+      XCTAssertEqual(statistics.droppedFrames[lane] ?? 0, 0, "\(lane)")
+    }
+    let meeting = try await TestSupport.stoppedMeeting(in: environment)
+    let stored = try await environment.store.meeting(id: meeting.id)
+    XCTAssertEqual(stored?.state, .ready)
+    await controller.shutdown()
+  }
+
+  /// Without the models on disk nothing is prepared during the recording,
+  /// because a `prepare()` may download; the run prepares once after `stop()`.
+  func testStartDoesNotWarmWhenModelsAreAbsent() async throws {
+    let engine = FakeSpeechEngine()
+    let diarizer = FakeDiarizer()
+    let environment = try await TestSupport.environment(
+      seed: false, makeSpeechEngine: { engine }, makeDiarizer: { diarizer })
+    XCTAssertFalse(environment.models.isInstalled(.parakeetV3))
+    XCTAssertFalse(environment.models.isInstalled(.offlineDiarizer))
+    let controller = AppController(environment: environment)
+    let recorder = controller.recorder
+
+    await recorder.start(mode: .call)
+    // After a settle a warm-up scheduled a little later would still pass
+    // this; the `== 1` after the run is the proof.
+    await TestSupport.settle()
+    let enginePreparationsWhileRecording = await engine.preparations.count
+    let diarizerPreparationsWhileRecording = await diarizer.preparations.count
+    XCTAssertEqual(enginePreparationsWhileRecording, 0)
+    XCTAssertEqual(diarizerPreparationsWhileRecording, 0)
+
+    await recorder.stop()
+    await environment.pipeline.waitUntilIdle()
+    let enginePreparations = await engine.preparations.count
+    let diarizerPreparations = await diarizer.preparations.count
+    XCTAssertEqual(enginePreparations, 1, "only the run prepared; a warm-up would make two")
+    XCTAssertEqual(diarizerPreparations, 1, "only the run prepared; a warm-up would make two")
+    let meeting = try await TestSupport.stoppedMeeting(in: environment)
+    let stored = try await environment.store.meeting(id: meeting.id)
+    XCTAssertEqual(stored?.state, .ready)
+    await controller.shutdown()
+  }
+
+  /// A speech engine setting `SpeechEngineID(settingsValue:)` rejects skips
+  /// the warm-up even with both models on disk; the run prepares after
+  /// `stop()` as always.
+  func testStartDoesNotWarmWhenTheEngineSettingIsUnknown() async throws {
+    let engine = FakeSpeechEngine()
+    let diarizer = FakeDiarizer()
+    let environment = try await TestSupport.environment(
+      seed: false, makeSpeechEngine: { engine }, makeDiarizer: { diarizer })
+    for try await _ in await environment.models.ensure(.parakeetV3) {}
+    for try await _ in await environment.models.ensure(.offlineDiarizer) {}
+    try await environment.updateSettings { $0.speechEngineID = "unknown-engine" }
+    let controller = AppController(environment: environment)
+    let recorder = controller.recorder
+
+    await recorder.start(mode: .inPerson)
+    await recorder.stop()
+    await environment.pipeline.waitUntilIdle()
+    let enginePreparations = await engine.preparations.count
+    let diarizerPreparations = await diarizer.preparations.count
+    XCTAssertEqual(enginePreparations, 1, "only the run prepared")
+    XCTAssertEqual(diarizerPreparations, 1, "only the run prepared")
+    let finalState = try await TestSupport.stoppedMeeting(in: environment).state
+    XCTAssertEqual(finalState, .ready)
+    await controller.shutdown()
+  }
+
+  /// A `prepare()` that throws during the recording is swallowed by the
+  /// environment's warm-up: no warning, and the run after `stop()` prepares
+  /// again and lands the meeting ready.
+  func testAFailingWarmUpIsSwallowedAndTheRunPreparesAgain() async throws {
+    struct Boom: Error {}
+    var engine = FakeSpeechEngine()
+    let preparations = engine.preparations
+    engine.onPrepare = { if await preparations.count == 1 { throw Boom() } }
+    let failingOnce = engine
+    let diarizer = FakeDiarizer()
+    let environment = try await TestSupport.environment(
+      seed: false, makeSpeechEngine: { failingOnce }, makeDiarizer: { diarizer })
+    for try await _ in await environment.models.ensure(.parakeetV3) {}
+    for try await _ in await environment.models.ensure(.offlineDiarizer) {}
+    let controller = AppController(environment: environment)
+    let recorder = controller.recorder
+
+    await recorder.start(mode: .call)
+    await TestSupport.waitUntil("the warm-up reached the engine") {
+      await preparations.count == 1
+    }
+    let diarizerPreparationsWhileRecording = await diarizer.preparations.count
+    XCTAssertEqual(diarizerPreparationsWhileRecording, 0, "the engine threw first")
+
+    await recorder.stop()
+    await environment.pipeline.waitUntilIdle()
+    let enginePreparations = await preparations.count
+    let diarizerPreparations = await diarizer.preparations.count
+    XCTAssertEqual(enginePreparations, 2, "the failed warm-up and the run's own prepare")
+    XCTAssertEqual(diarizerPreparations, 1, "the run's prepare")
+    let finalState = try await TestSupport.stoppedMeeting(in: environment).state
+    XCTAssertEqual(finalState, .ready)
+    XCTAssertTrue(environment.startupWarnings.isEmpty, "\(environment.startupWarnings)")
+    XCTAssertNil(recorder.lastWarning)
+    await controller.shutdown()
   }
 
   func testRecordingStateLabels() {

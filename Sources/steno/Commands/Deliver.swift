@@ -69,7 +69,8 @@ struct Deliver: AsyncParsableCommand {
       store: opened.store, settings: opened.settings, destinations: { _ in targets })
     let pipeline = ProcessingPipeline(
       dependencies: try Wiring.dependencies(
-        store: opened.store, settings: opened.settings, dispatcher: dispatcher))
+        store: opened.store, settings: opened.settings, dispatcher: dispatcher,
+        events: MeetingEventBus()))
     try await pipeline.redeliver(meetingID: meetingID)
 
     let ids = Set(targets.map(\.id))

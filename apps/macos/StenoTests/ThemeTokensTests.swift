@@ -120,7 +120,7 @@ final class ThemeTokensTests: XCTestCase {
   func testCountdownAndPulseHoldUnderReduceMotion() {
     XCTAssertEqual(Motion.durationCountdown, 1)
     XCTAssertEqual(Motion.durationPulse, 1)
-    XCTAssertEqual(Motion.pulseOpacity, 0.4)
+    XCTAssertEqual(Motion.pulseOpacity, 0.5)
     XCTAssertNil(Motion.countdown(reduceMotion: true))
     XCTAssertEqual(Motion.countdown(reduceMotion: false), Motion.countdown)
     XCTAssertNil(Motion.pulse(reduceMotion: true))

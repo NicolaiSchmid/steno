@@ -5,6 +5,10 @@ import SwiftUI
 /// (context menu and toolbar, behind a confirmation).
 struct MeetingListView: View {
   @Bindable var model: MeetingListViewModel
+  /// Where the pipeline is with each queued or processing meeting, passed
+  /// through from `MainWindow` because the list receives nothing else from
+  /// the controller; the entry's preview line reads it.
+  let progress: ProcessingProgressModel
 
   var body: some View {
     VStack(spacing: 0) {
@@ -12,13 +16,16 @@ struct MeetingListView: View {
       Divider().overlay(Color.stenoBorder)
       List(selection: $model.selection) {
         ForEach(model.meetings) { meeting in
-          MeetingRow(meeting: meeting, isSelected: model.selection == meeting.id)
-            .tag(meeting.id)
-            .listRowSeparator(.hidden)
-            .contextMenu {
-              Button("Delete Meeting…", role: .destructive) { model.pendingDeletion = meeting }
-                .disabled(!Self.canDelete(meeting))
-            }
+          MeetingRow(
+            meeting: meeting, isSelected: model.selection == meeting.id,
+            statusLine: progress.entry(for: meeting.id)?.title
+          )
+          .tag(meeting.id)
+          .listRowSeparator(.hidden)
+          .contextMenu {
+            Button("Delete Meeting…", role: .destructive) { model.pendingDeletion = meeting }
+              .disabled(!Self.canDelete(meeting))
+          }
         }
       }
       .listStyle(.sidebar)
@@ -127,6 +134,10 @@ struct MeetingRow: View {
   /// Carried as the `isSelected` trait, so the UI smoke test can find the
   /// selected row by identifier.
   var isSelected = false
+  /// The row's preview line: the progress model's title while the meeting
+  /// is queued or processing, "Transcribing…", as the card and the header
+  /// chip read it; nil otherwise.
+  var statusLine: String? = nil
 
   var body: some View {
     VStack(alignment: .leading, spacing: Theme.Space.xs) {
@@ -154,6 +165,12 @@ struct MeetingRow: View {
       }
       .font(.steno(Theme.TextSize.xxs))
       .foregroundStyle(Color.stenoFaint)
+      if let statusLine {
+        Text(statusLine)
+          .font(.steno(Theme.TextSize.xs))
+          .foregroundStyle(Color.stenoFaint)
+          .lineLimit(1)
+      }
     }
     .padding(.vertical, Theme.Space.xs)
     .accessibilityIdentifier("meeting-\(meeting.id.uuidString)")

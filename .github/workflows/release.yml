@@ -5,8 +5,9 @@ name: Release macOS app
 # Developer ID and hardened runtime, verify the signature and entitlements,
 # build the DMG, notarise and staple it, generate the Sparkle appcast from
 # SPARKLE_PRIVATE_KEY, publish a GitHub release with both assets (a
-# pre-release when the tag carries a hyphen, so `releases/latest` skips it)
-# and bump the Homebrew cask in NicolaiSchmid/homebrew-tap when
+# pre-release when the tag carries a hyphen), fold the item into the rolling
+# appcast on the `appcast` branch (the feed every installed build reads) and
+# bump the Homebrew cask in NicolaiSchmid/homebrew-tap when
 # HOMEBREW_TAP_TOKEN exists.
 #
 # Runs on the Forge runner when `MACOS_RUNS_ON` names it, on GitHub-hosted
@@ -81,6 +82,17 @@ jobs:
           fi
           version="${tag#v}"
           build="$(git rev-list --count HEAD)"
+          # The build number is the commit count, so two tags on one commit
+          # share it and Sparkle (which orders by build number alone) would
+          # never offer the second to installs of the first. Promote a
+          # candidate by tagging a new commit, not the same one.
+          if [ "${GITHUB_REF_TYPE:-}" = "tag" ]; then
+            other="$(git tag --points-at HEAD 'v*' | grep -vx "$tag" || true)"
+            if [ -n "$other" ]; then
+              echo "::error::$tag shares its commit (build $build) with $other; tag a new commit instead"
+              exit 1
+            fi
+          fi
           prerelease=false
           case "$version" in *-*) prerelease=true ;; esac
           {
@@ -176,9 +188,20 @@ jobs:
           fi
           gh release view "$TAG" --json url --jq .url
 
+      # Fold this release's item into the rolling appcast every installed
+      # build reads (.plans/2026-09-28-settings-redesign.md, Decision 9).
+      # After the release is public, so the enclosure URL resolves; a
+      # pre-release lands on the `beta` channel.
+      - name: Rolling appcast
+        if: github.ref_type == 'tag'
+        env:
+          TAG: ${{ steps.version.outputs.tag }}
+          PRERELEASE: ${{ steps.version.outputs.prerelease }}
+        run: apps/macos/scripts/publish-appcast.sh "$TAG" "$PRERELEASE"
+
       # Point Casks/steno.rb in NicolaiSchmid/homebrew-tap at the DMG just
       # published. Pre-releases bump too (release candidates are tested
-      # through brew); Sparkle keeps installed users on releases/latest.
+      # through brew); Sparkle follows the rolling appcast above.
       # Without HOMEBREW_TAP_TOKEN the script prints a notice and exits 0;
       # with it, a failed push is a warning on a release that already stands.
       - name: Bump Homebrew cask

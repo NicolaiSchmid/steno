@@ -13,6 +13,14 @@ enum Motion {
   static let durationEntrance: TimeInterval = 0.250
   /// Press-in is near-instant; release relaxes at the functional tempo.
   static let durationPressIn: TimeInterval = 0.100
+  /// One tick of a value sampled at 1 Hz (a countdown, a progress bar): the
+  /// tween lasts exactly until the next sample, so the steps read as one
+  /// continuous motion. Also the `TimelineView` period of every such view.
+  static let durationCountdown: TimeInterval = 1
+  /// One half-cycle of an indeterminate pulse.
+  static let durationPulse: TimeInterval = 1
+  /// The pulse's low opacity; the high is 1.
+  static let pulseOpacity: Double = 0.5
 
   /// The one spatial spring: about 250 ms settle, no visible bounce.
   static let springDamping: Double = 28
@@ -42,23 +50,17 @@ enum Motion {
   static var spatial: Animation {
     .interpolatingSpring(mass: springMass, stiffness: springStiffness, damping: springDamping)
   }
-
-  /// The clock tempo: a countdown hairline drains one linear step per tick.
-  static let durationCountdown: TimeInterval = 1
+  /// Linear, so consecutive 1 Hz samples join without a visible ease.
   static var countdown: Animation { .linear(duration: durationCountdown) }
   /// The countdown steps without animation under Reduce Motion.
   static func countdown(reduceMotion: Bool) -> Animation? {
     reduceMotion ? nil : countdown
   }
-
-  /// The one ambient animation per viewport: opacity 1 to `pulseOpacity`
-  /// and back over a second, ease-in-out, repeating. Only the list entry's
-  /// recording dot pulses; nothing in the floating bubble does.
-  static let durationPulse: TimeInterval = 1
-  static let pulseOpacity: Double = 0.4
-  static var pulse: Animation {
-    .easeInOut(duration: durationPulse).repeatForever(autoreverses: true)
-  }
+  /// Ease-in-out between opacity 1 and `pulseOpacity`; callers repeat it
+  /// with `repeatForever(autoreverses: true)` and drop it under Reduce Motion.
+  /// Only the list entry's recording dot and the processing bar pulse;
+  /// nothing in the floating bubble does.
+  static var pulse: Animation { .easeInOut(duration: durationPulse) }
   /// The pulse rule: under Reduce Motion the element holds at opacity 1.
   static func pulse(reduceMotion: Bool) -> Animation? {
     reduceMotion ? nil : pulse

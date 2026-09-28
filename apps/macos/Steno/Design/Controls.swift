@@ -221,6 +221,25 @@ struct StenoTextField: View {
   }
 }
 
+/// `StenoTextField` over a `SecureField`, for API keys: the same box, the
+/// same `faint` prompt, the entry hidden.
+struct StenoSecureField: View {
+  @Binding var text: String
+  let placeholder: String
+
+  init(_ placeholder: String, text: Binding<String>) {
+    self.placeholder = placeholder
+    _text = text
+  }
+
+  var body: some View {
+    SecureField(
+      placeholder, text: $text, prompt: Text(placeholder).foregroundStyle(Color.stenoFaint)
+    )
+    .stenoTextField()
+  }
+}
+
 /// A segmented control: a 28 pt `secondary` container at radius 8 holding
 /// 24 pt cells at radius 6; the active cell is `raised` with a hairline and
 /// `shadow-sm`, so it reads on the dark container too.

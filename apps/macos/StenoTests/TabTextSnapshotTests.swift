@@ -6,12 +6,16 @@ import XCTest
 /// `STENO_UPDATE_SNAPSHOTS=1`; the diff is the reviewed output change). The
 /// UI smoke test clicks the same tabs and looks for one string each; those
 /// strings are asserted here too, so the two proofs cannot drift apart.
+@MainActor
 final class TabTextSnapshotTests: XCTestCase {
   private let locale = Locale(identifier: "en_US_POSIX")
   private let utc = TimeZone(identifier: "UTC")!
 
-  private func lines(_ tab: MeetingDetailViewModel.Tab, _ export: MeetingExport) -> [String] {
-    TabText.lines(tab, export: export, locale: locale, timeZone: utc)
+  private func lines(
+    _ tab: MeetingDetailViewModel.Tab, _ export: MeetingExport,
+    progress: ProcessingProgressModel.Entry? = nil
+  ) -> [String] {
+    TabText.lines(tab, export: export, progress: progress, locale: locale, timeZone: utc)
   }
 
   func testEveryTabMatchesItsGolden() throws {
@@ -64,15 +68,76 @@ final class TabTextSnapshotTests: XCTestCase {
     export.meeting.summary = nil
     export.meeting.scratchpad = ""
 
+    // Processing with the progress model's entry: the card's title row is
+    // the pending text, on every tab, the scratchpad above its own line.
     export.meeting.state = .processing
+    let transcribing = ProcessingProgressModel.Entry(
+      meetingID: export.meeting.id,
+      progress: ProcessingProgress(
+        stage: .transcribe, fraction: 0.1, nextFraction: 0.4, estimatedRemaining: .seconds(150),
+        isEstimateSeeded: false),
+      since: TestSupport.now)
+    let card = ["Transcribing…", "~3 min remaining"]
+    XCTAssertEqual(lines(.summary, export, progress: transcribing), card)
+    XCTAssertEqual(lines(.transcript, export, progress: transcribing), card)
+    XCTAssertEqual(lines(.tasks, export, progress: transcribing), card)
+    XCTAssertEqual(lines(.scratchpad, export, progress: transcribing), card + [""])
+    // Before the run's first event the title alone.
+    let waiting = ProcessingProgressModel.Entry(
+      meetingID: export.meeting.id, since: TestSupport.now)
+    XCTAssertEqual(lines(.summary, export, progress: waiting), ["Waiting to process"])
+    // Without an entry (the model has not seen the meeting yet) the copy
+    // from `PendingText` stands.
     XCTAssertEqual(lines(.summary, export), ["Summary appears after processing"])
     XCTAssertEqual(lines(.transcript, export), ["Transcript appears after processing"])
     XCTAssertEqual(lines(.tasks, export), ["Tasks appear after processing"])
     XCTAssertEqual(lines(.scratchpad, export), [""])
 
+    // Content that is still there while the meeting is processed again sits
+    // under the card.
+    let processedAgain = SampleData.export()
+    XCTAssertEqual(
+      Array(lines(.summary, processedAgain, progress: transcribing).prefix(3)),
+      card + ["Executive Summary"])
+
     export.meeting.state = .ready
-    XCTAssertEqual(lines(.summary, export), ["No summary"])
+    XCTAssertEqual(
+      lines(.summary, export),
+      ["Summary skipped", "No LLM endpoint is configured. The transcript is complete."],
+      "ready without a summary and no endpoint: the setup row")
     XCTAssertEqual(lines(.transcript, export), ["No transcript"])
+    XCTAssertEqual(lines(.tasks, export), ["No tasks", "The summary was skipped."])
+
+    // The template produced nothing: a summary exists, so no setup row.
+    export.meeting.summary = SummaryDocument(templateID: "default", sections: [])
+    XCTAssertEqual(lines(.summary, export), ["No summary"])
     XCTAssertEqual(lines(.tasks, export), ["No tasks"])
+  }
+
+  /// A ready meeting without a summary once an endpoint exists offers the
+  /// re-run, with the Summary tab's footnote; the Tasks tab shares the body.
+  func testSkippedSummaryOffersTheRunOnceAnEndpointExists() {
+    var export = SampleData.export()
+    export.tasks = []
+    export.decisions = []
+    export.meeting.summary = nil
+    export.meeting.state = .ready
+    XCTAssertEqual(
+      TabText.lines(.summary, export: export, llmConfigured: true),
+      [
+        "No summary yet", "This meeting was processed before an LLM endpoint was configured.",
+        "Summary only; the transcript stays as recorded.",
+      ])
+    XCTAssertEqual(
+      TabText.lines(.tasks, export: export, llmConfigured: true),
+      ["No tasks", "The summary was skipped."])
+    XCTAssertEqual(
+      TabText.lines(.transcript, export: export, llmConfigured: true).count, 6,
+      "the transcript is untouched by the setup state")
+
+    export.meeting.state = .processing
+    XCTAssertEqual(
+      TabText.lines(.summary, export: export, llmConfigured: true),
+      ["Summary appears after processing"], "pending keeps today's text")
   }
 }

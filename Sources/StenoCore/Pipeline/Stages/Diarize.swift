@@ -19,12 +19,20 @@ extension ProcessingPipeline {
   /// The sample clip is at most ten seconds.
   static let sampleClipSeconds: TimeInterval = 10
 
-  /// Decodes the diarized lane again, runs the diarizer, and turns every
-  /// cluster into a `Speaker` with a deterministic id, copying the cluster's
-  /// embedding, confidence and sample clip range. Each cluster's clip is
-  /// written as 16 kHz WAV to `RecordingLayout.sampleClip(speakerID:)`
-  /// beside the master.
-  func diarize(asset: AudioAsset, meeting: Meeting) async throws -> Diarization {
+  /// Runs the diarizer (prepared by `process` before the run's first event)
+  /// over the diarized lane and turns every cluster into a `Speaker` with a
+  /// deterministic id, copying the cluster's embedding, confidence and
+  /// sample clip range. Each cluster's clip is written as 16 kHz WAV to
+  /// `RecordingLayout.sampleClip(speakerID:)` beside the master.
+  ///
+  /// `buffer` is the last lane `decodeAndTranscribe` decoded, which under
+  /// today's lane rules is the diarized lane, so the stage reuses it. The
+  /// lane is decoded here only when no buffer was handed or it carries
+  /// another lane, a branch `process` never takes; a caller who does take
+  /// it holds two buffers for the stage's span.
+  func diarize(asset: AudioAsset, meeting: Meeting, buffer handed: DecodedLane?) async throws
+    -> Diarization
+  {
     let decoder = dependencies.decoder
     let diarizer = dependencies.diarizer
     let layout = RecordingLayout(asset: asset)
@@ -32,8 +40,12 @@ extension ProcessingPipeline {
       guard let lane = Self.diarizedLane(source: meeting.source, lanes: asset.lanes) else {
         return Diarization(speakers: [], clusterSpeakers: [])
       }
-      try await diarizer.prepare()
-      let buffer = try await decoder.decode(asset, lane: lane)
+      let buffer: AudioBuffer16k
+      if let handed, handed.lane == lane {
+        buffer = handed.buffer
+      } else {
+        buffer = try await decoder.decode(asset, lane: lane)
+      }
       let result = try await diarizer.diarize(buffer)
       var labels = Set<String>()
       for cluster in result.clusters where !labels.insert(cluster.label).inserted {

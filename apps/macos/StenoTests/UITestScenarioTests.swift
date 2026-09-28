@@ -3,10 +3,11 @@ import XCTest
 /// The launch-argument parser the UI smoke tests rely on: known flags parse,
 /// a misspelt `-steno-*` flag becomes the launch error the window shows.
 final class UITestScenarioTests: XCTestCase {
-  func testTheTwoKnownFlagsParse() {
+  func testTheThreeKnownFlagsParse() {
     let none = UITestScenario(arguments: ["/Applications/Steno.app/Contents/MacOS/Steno"])
     XCTAssertFalse(none.isUITesting)
     XCTAssertFalse(none.showPrompt)
+    XCTAssertFalse(none.holdTranscribe)
     XCTAssertEqual(none.unknownFlags, [])
 
     let testing = UITestScenario(arguments: [
@@ -20,6 +21,13 @@ final class UITestScenarioTests: XCTestCase {
     XCTAssertTrue(prompt.isUITesting)
     XCTAssertTrue(prompt.showPrompt)
     XCTAssertEqual(prompt.unknownFlags, [])
+
+    let hold = UITestScenario(arguments: [
+      "Steno", "-steno-ui-testing", "-steno-ui-testing-hold-transcribe",
+    ])
+    XCTAssertTrue(hold.holdTranscribe, "the processing card's flag is known")
+    XCTAssertEqual(hold.unknownFlags, [])
+    XCTAssertNil(hold.launchError)
   }
 
   func testAnUnknownStenoFlagIsReported() {
