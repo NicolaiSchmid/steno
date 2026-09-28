@@ -493,18 +493,14 @@ import Testing
     let averaged = try await store.stageRates().rate(.transcribe, key: "parakeet-v3")
     #expect(averaged.samples == 2)
     #expect(abs(averaged.secondsPerUnit - (0.3 * 0.04 + 0.7 * 0.02)) < 1e-12)
-    let row: Row? = try await store.writer.read { db in
-      try Row.fetchOne(
-        db,
-        sql: """
-          SELECT samples, seconds_per_unit, updated_at FROM stageRate
-          WHERE stage = 'transcribe' AND key = 'parakeet-v3'
-          """)
+    // `Row` is not `Sendable` on Apple platforms, so the values leave the
+    // read as plain types.
+    let stored: (samples: Int, updatedAt: Date)? = try await store.writer.read { db in
+      try StageRateRow.fetchOne(db, key: ["stage": "transcribe", "key": "parakeet-v3"])
+        .map { ($0.samples, $0.updatedAt) }
     }
-    let samples: Int? = row?["samples"]
-    let updatedAt: Date? = row?["updated_at"]
-    #expect(samples == 2)
-    #expect(updatedAt == later)
+    #expect(stored?.samples == 2)
+    #expect(stored?.updatedAt == later)
     #expect(try await store.writer.read { db in try StageRateRow.fetchCount(db) } == 1)
 
     // A stage a later version renamed, and a key on a stage that has none:
