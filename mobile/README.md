@@ -63,6 +63,11 @@ Config is read from `EXPO_PUBLIC_*` env vars via `src/lib/env.ts`. There are
 none yet. `APP_VARIANT` (`development` | `preview` | `production`) selects the
 bundle id, scheme and display name in `app.config.ts`.
 
+The home screen icon, `assets/icon.png` (`icon` and `ios.icon` in
+`app.config.ts`), is rendered from `apps/macos/Steno/Resources/AppIcon.svg`
+by `apps/macos/scripts/make-app-icon.sh`, shared with the Mac app. Do not edit
+the PNG by hand; change the SVG and rerun the script.
+
 ## Design system
 
 Tokens live in `global.css` (the house five-tier luminance ladder, alpha-veil
@@ -125,8 +130,7 @@ Still open:
    and App ID creation (`403 FORBIDDEN_ERROR`). The same step registers the
    `.dev` and `.preview` App IDs when a development or preview build first
    needs them.
-2. Add an app icon (`ios.icon` in `app.config.ts`) and splash images before
-   the first TestFlight build.
+2. Add splash images before the first TestFlight build.
 
 ### After a fallback build
 

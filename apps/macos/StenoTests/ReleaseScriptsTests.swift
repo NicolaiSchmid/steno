@@ -104,6 +104,16 @@ final class ReleaseScriptsTests: XCTestCase {
     XCTAssertEqual(missingNames(in: result.output), ["SPARKLE_PRIVATE_KEY"])
   }
 
+  // MARK: make-app-icon.sh
+
+  /// `PATH=/usr/bin:/bin` has no `magick`, so the missing-dependency path is
+  /// the friendly one: exit 1 and the install hint, before anything renders.
+  func testMakeAppIconWithoutImageMagickNamesTheInstallHint() throws {
+    let result = try run("make-app-icon.sh", [:])
+    XCTAssertEqual(result.status, 1, result.output)
+    XCTAssertTrue(result.output.contains("brew install imagemagick"), result.output)
+  }
+
   // MARK: release.yml and build-release.sh (reviewer traps)
 
   func testReleaseWorkflowRunsTheGuardBeforeAnyToolOrBuild() throws {

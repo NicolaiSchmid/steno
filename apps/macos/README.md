@@ -71,6 +71,7 @@ a Debug build read that feed instead of `SUFeedURL`. Serve `dist/` with
 | `Steno/AppEnvironment.swift` | composition root: `live()` and `preview()` |
 | `Steno/AppController.swift` | the running object graph over one environment |
 | `Steno/Design/` | `Theme` (tokens mirroring `mobile/global.css`), `Motion`, shared controls |
+| `Steno/Resources/` | `AppIcon.svg`, the icon's source of truth, and `Assets.xcassets` with the `AppIcon` set it renders to |
 | `Steno/MenuBar/` | recording, queue, launch at login |
 | `Steno/Main/` | meeting list, detail with Summary, Transcript, Tasks, Scratchpad |
 | `Steno/Speakers/` | the speaker review sheet and clip player |
@@ -80,7 +81,18 @@ a Debug build read that feed instead of `SUFeedURL`. Serve `dist/` with
 | `Steno/Services/` | the four app protocols over system frameworks, their live types and fakes |
 | `StenoTests/` | hostless XCTest unit tests, one file per view model |
 | `StenoUITests/` | `LaunchSmokeTests` |
-| `scripts/` | `install-xcodegen.sh` (release zip pinned by version and SHA-256; an `xcodegen` on PATH counts only at the pinned version), `xcodebuild-quiet.sh` (log to file, diagnostics to the console, fails without the `** … SUCCEEDED **` marker; used by CI and `build-release.sh`), `xcresult-summary.py`, `build-release.sh`, `make-dmg.sh`, `make-appcast.sh` |
+| `scripts/` | `install-xcodegen.sh` (release zip pinned by version and SHA-256; an `xcodegen` on PATH counts only at the pinned version), `xcodebuild-quiet.sh` (log to file, diagnostics to the console, fails without the `** … SUCCEEDED **` marker; used by CI and `build-release.sh`), `xcresult-summary.py`, `build-release.sh`, `make-dmg.sh`, `make-appcast.sh`, `make-app-icon.sh` |
+
+### App icon
+
+`Steno/Resources/AppIcon.svg` is the only hand-edited icon file. `scripts/make-app-icon.sh`
+renders it with ImageMagick 7 and librsvg (`brew install imagemagick`) into the ten PNGs of
+`Assets.xcassets/AppIcon.appiconset`, rewrites that set's `Contents.json`, records the SVG's
+digest in `SOURCE.sha256` and writes the opaque 1024 px iOS icon to `mobile/assets/icon.png`.
+Nobody exports PNGs by hand. A reviewer proves the committed PNGs match the SVG with
+`scripts/make-app-icon.sh --check`; CI never renders, it only builds the committed files and
+`AppIconTests` checks their presence, pixel sizes, the iOS icon's opacity and the digest.
+Design and geometry: [`.plans/2026-09-28-app-icon.md`](../../.plans/2026-09-28-app-icon.md).
 
 Where things live at runtime: the database in `~/Library/Application Support/Steno/steno.sqlite`,
 recordings in the folder chosen in Audio settings (default `…/Steno/Audio`), models in
