@@ -5,14 +5,14 @@ import StenoCore
 /// names meetings, the default template, and the update status.
 @MainActor
 @Observable
-final class GeneralSettingsViewModel {
+final class GeneralSettingsViewModel: SettingsSectionModel {
   private(set) var loginItem: LoginItemStatus
   private(set) var detectionEnabled = true
   private(set) var defaultTemplateID = SummaryTemplate.defaultID
   private(set) var calendarPermission: PermissionState = .unknown
   private(set) var requestingCalendar = false
-  private(set) var error: String?
-  private(set) var errorDetails: String?
+  var error: String?
+  var errorDetails: String?
   let templates = SummaryTemplate.bundled
   let version = AppVersion.marketing
   private let environment: AppEnvironment
@@ -78,7 +78,7 @@ final class GeneralSettingsViewModel {
 
   // MARK: Updates
 
-  var updater: any UpdaterControlling { environment.updater }
+  var canCheckForUpdates: Bool { environment.updater.canCheckForUpdates }
 
   var automaticallyChecksForUpdates: Bool {
     get { environment.updater.automaticallyChecksForUpdates }
@@ -126,20 +126,14 @@ final class GeneralSettingsViewModel {
     }
   }
 
-  // MARK: Errors
+  // MARK: Saving
 
   private func save(_ mutate: (inout Settings) -> Void) async {
     do {
       try await environment.updateSettings(mutate)
-      error = nil
-      errorDetails = nil
+      clearError()
     } catch {
       fail("The setting could not be saved.", error)
     }
-  }
-
-  private func fail(_ message: String, _ error: any Error) {
-    self.error = message
-    errorDetails = String(describing: error)
   }
 }

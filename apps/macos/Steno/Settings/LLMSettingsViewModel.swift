@@ -92,7 +92,7 @@ enum LLMPreset: String, CaseIterable, Identifiable, Sendable {
 /// and then probes the endpoint; `save()` and `test()` stay for direct use.
 @MainActor
 @Observable
-final class LLMSettingsViewModel {
+final class LLMSettingsViewModel: SettingsSectionModel {
   enum TestResult: Equatable, Sendable {
     case success(String)
     case failure(String)
@@ -122,8 +122,8 @@ final class LLMSettingsViewModel {
   var contextTokensText = String(LLMSettingsViewModel.defaultContextTokens)
   var apiKey = ""
   private(set) var preset: LLMPreset = .lmStudio
-  private(set) var error: String?
-  private(set) var errorDetails: String?
+  var error: String?
+  var errorDetails: String?
   private(set) var testResult: TestResult?
   private(set) var isTesting = false
   private(set) var isConfigured = false
@@ -239,8 +239,7 @@ final class LLMSettingsViewModel {
       isConfigured = LLMEndpoint(settings: settings) != nil
       stored = draft
       try await environment.reloadPipeline()
-      error = nil
-      errorDetails = nil
+      clearError()
     } catch {
       fail("Settings could not be saved.", error)
     }
@@ -249,32 +248,26 @@ final class LLMSettingsViewModel {
   /// Reachability, model listing and structured output mode, through the
   /// module's probe (`LLMWiring.probe`).
   func test() async {
-    guard let baseURL else {
+    let draft = self.draft
+    guard draft.baseURL != nil else {
       testResult = .failure("Enter a valid server address first.")
       return
     }
-    let trimmedModel = model.trimmingCharacters(in: .whitespaces)
-    guard !trimmedModel.isEmpty else {
+    guard draft.model != nil else {
       testResult = .failure("Enter the model name first.")
       return
     }
     isTesting = true
     defer { isTesting = false }
     var settings = Settings()
-    settings.llmBaseURL = baseURL
-    settings.llmModel = trimmedModel
-    settings.llmContextTokens = contextTokens ?? Self.defaultContextTokens
-    let key = apiKey.trimmingCharacters(in: .whitespaces)
+    settings.llmBaseURL = draft.baseURL
+    settings.llmModel = draft.model
+    settings.llmContextTokens = draft.contextTokens
     do {
-      let report = try await LLMWiring.probe(settings: settings, apiKey: key.isEmpty ? nil : key)
+      let report = try await LLMWiring.probe(settings: settings, apiKey: draft.apiKey)
       testResult = .success(report)
     } catch {
       testResult = .failure(String(describing: error))
     }
-  }
-
-  private func fail(_ message: String, _ error: any Error) {
-    self.error = message
-    errorDetails = String(describing: error)
   }
 }

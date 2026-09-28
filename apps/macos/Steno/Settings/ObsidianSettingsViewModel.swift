@@ -8,14 +8,14 @@ import StenoCore
 /// stored; the toggle and the folder chooser call it, text fields on blur.
 @MainActor
 @Observable
-final class ObsidianSettingsViewModel {
+final class ObsidianSettingsViewModel: SettingsSectionModel {
   var enabled = false
   var vaultPath = ""
   var peopleFolder = ""
   var includeAudio = false
   var taskTag = ""
-  private(set) var error: String?
-  private(set) var errorDetails: String?
+  var error: String?
+  var errorDetails: String?
   private(set) var validationMessage: String?
   /// True after a save; the view clears it by saving again or leaving.
   var saved = false
@@ -45,9 +45,7 @@ final class ObsidianSettingsViewModel {
   }
 
   /// The vault's folder name, for the folder row; empty until chosen.
-  var vaultName: String {
-    vaultPath.isEmpty ? "" : URL(fileURLWithPath: vaultPath).lastPathComponent
-  }
+  var vaultName: String { vaultURL?.lastPathComponent ?? "" }
 
   var vaultURL: URL? {
     vaultPath.isEmpty ? nil : URL(fileURLWithPath: vaultPath, isDirectory: true)
@@ -116,15 +114,9 @@ final class ObsidianSettingsViewModel {
       try await environment.updateSettings { $0.obsidian = draft }
       stored = draft
       saved = true
-      error = nil
-      errorDetails = nil
+      clearError()
     } catch {
       fail("Settings could not be saved.", error)
     }
-  }
-
-  private func fail(_ message: String, _ error: any Error) {
-    self.error = message
-    errorDetails = String(describing: error)
   }
 }

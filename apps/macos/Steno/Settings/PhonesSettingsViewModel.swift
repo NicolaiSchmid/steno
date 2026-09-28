@@ -11,7 +11,7 @@ import StenoHandover
 /// the view's `.task`s; every timer is on the injected clock.
 @MainActor
 @Observable
-final class PhonesSettingsViewModel {
+final class PhonesSettingsViewModel: SettingsSectionModel {
   static let pairingPoll: Duration = .seconds(2)
 
   private(set) var devices: [PairedDevice] = []
@@ -19,8 +19,8 @@ final class PhonesSettingsViewModel {
   private(set) var receipts: [HandoverReceipt] = []
   private(set) var pairing: PairingPayload?
   private(set) var qrImage: NSImage?
-  private(set) var error: String?
-  private(set) var errorDetails: String?
+  var error: String?
+  var errorDetails: String?
   let handover: HandoverService?
   private let now: @Sendable () -> Date
   private let clock: any Clock<Duration>
@@ -127,8 +127,7 @@ final class PhonesSettingsViewModel {
     let payload = await handover.beginPairing()
     pairing = payload
     qrImage = QRCode.image(for: payload.urlString)
-    error = nil
-    errorDetails = nil
+    clearError()
   }
 
   func cancelPairing() async {
@@ -161,14 +160,6 @@ final class PhonesSettingsViewModel {
     }
   }
 
-  var listenerText: String {
-    switch listener {
-    case .stopped: "Listener off"
-    case .listening(let port): "Listening on port \(port)"
-    case .failed(let message): "Listener failed: \(message)"
-    }
-  }
-
   /// The listener's failure, if any, for the details disclosure.
   var listenerFailure: String? {
     if case .failed(let message) = listener { return message }
@@ -179,10 +170,5 @@ final class PhonesSettingsViewModel {
     guard receipt.byteCount > 0, receipt.chunkSize > 0 else { return 0 }
     let received = Double(receipt.receivedChunks.count) * Double(receipt.chunkSize)
     return min(1, received / Double(receipt.byteCount))
-  }
-
-  private func fail(_ message: String, _ error: any Error) {
-    self.error = message
-    errorDetails = String(describing: error)
   }
 }

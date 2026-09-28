@@ -74,29 +74,38 @@ struct SettingsView: View {
   }
 }
 
-/// Header plus grouped form, the shape every section shares.
+/// Header plus grouped form, the shape every section shares. The page loads
+/// its model on appear and ends with the model's error row, so no section
+/// repeats either.
 private struct SectionPage<Content: View>: View {
   let section: SettingsSection
+  let model: any SettingsSectionModel
   @ViewBuilder let content: () -> Content
 
   var body: some View {
     VStack(spacing: 0) {
       SettingsHeader(section: section)
-      Form { content() }
-        .formStyle(.grouped)
-        .scrollContentBackground(.hidden)
+      Form {
+        content()
+        if let error = model.error {
+          SettingsErrorRow(message: error, details: model.errorDetails)
+        }
+      }
+      .formStyle(.grouped)
+      .scrollContentBackground(.hidden)
     }
+    .task { await model.load() }
   }
 }
 
 // MARK: - General
 
 struct GeneralSettingsView: View {
-  let model: GeneralSettingsViewModel
+  @Bindable var model: GeneralSettingsViewModel
   @State private var showingAcknowledgements = false
 
   var body: some View {
-    SectionPage(section: .general) {
+    SectionPage(section: .general, model: model) {
       Section {
         Toggle(
           "Open Steno at login",
@@ -143,31 +152,19 @@ struct GeneralSettingsView: View {
           }
           Spacer()
           Button("Check for Updates") { model.checkForUpdates() }
-            .disabled(!model.updater.canCheckForUpdates)
+            .disabled(!model.canCheckForUpdates)
         }
         if let details = model.updateFailureDetails {
           SettingsErrorRow(message: "The last update check did not succeed.", details: details)
         }
-        Toggle(
-          "Check for updates automatically",
-          isOn: Binding(
-            get: { model.automaticallyChecksForUpdates },
-            set: { model.automaticallyChecksForUpdates = $0 }))
-        Toggle(
-          "Install updates automatically",
-          isOn: Binding(
-            get: { model.automaticallyDownloadsUpdates },
-            set: { model.automaticallyDownloadsUpdates = $0 }))
+        Toggle("Check for updates automatically", isOn: $model.automaticallyChecksForUpdates)
+        Toggle("Install updates automatically", isOn: $model.automaticallyDownloadsUpdates)
         Footnote("Updates are checked once a day and installed when you relaunch Steno.")
       }
       Section {
         Button("Acknowledgements…") { showingAcknowledgements = true }
       }
-      if let error = model.error {
-        SettingsErrorRow(message: error, details: model.errorDetails)
-      }
     }
-    .task { await model.load() }
     .sheet(isPresented: $showingAcknowledgements) {
       AcknowledgementsView { showingAcknowledgements = false }
     }
@@ -180,7 +177,7 @@ struct RecordingSettingsView: View {
   let model: AudioSettingsViewModel
 
   var body: some View {
-    SectionPage(section: .recording) {
+    SectionPage(section: .recording, model: model) {
       Section("Permissions") {
         ForEach(AudioSettingsViewModel.recordingPermissions) { kind in
           PermissionRow(
@@ -252,11 +249,7 @@ struct RecordingSettingsView: View {
         Footnote(model.retentionFootnote)
         Footnote("Short voice samples stay until you have named the speaker.")
       }
-      if let error = model.error {
-        SettingsErrorRow(message: error, details: model.errorDetails)
-      }
     }
-    .task { await model.load() }
   }
 }
 
@@ -266,7 +259,7 @@ struct TranscriptionSettingsView: View {
   let model: SpeechSettingsViewModel
 
   var body: some View {
-    SectionPage(section: .transcription) {
+    SectionPage(section: .transcription, model: model) {
       if model.showsEnginePicker {
         Section("Language model") {
           Picker("Model", selection: .action({ model.engineID }, model.setEngine)) {
@@ -286,11 +279,7 @@ struct TranscriptionSettingsView: View {
             ? "Everything needed for transcription is installed."
             : "Downloads happen once and are kept for later meetings.")
       }
-      if let error = model.error {
-        SettingsErrorRow(message: error, details: model.errorDetails)
-      }
     }
-    .task { await model.load() }
   }
 
   private func componentRow(_ asset: ModelAsset) -> some View {
@@ -340,7 +329,7 @@ struct SummariesSettingsView: View {
   @FocusState private var focus: Field?
 
   var body: some View {
-    SectionPage(section: .summaries) {
+    SectionPage(section: .summaries, model: model) {
       Section {
         Picker("Service", selection: .action({ model.preset }, model.selectPreset)) {
           ForEach(LLMPreset.allCases) { preset in
@@ -353,18 +342,15 @@ struct SummariesSettingsView: View {
             prompt: Text(model.preset.baseURL?.absoluteString ?? "https://example.com/v1")
           )
           .focused($focus, equals: .server)
-          .onSubmit { commit() }
         }
         TextField("Model", text: $model.model, prompt: Text(model.preset.modelPlaceholder))
           .focused($focus, equals: .model)
-          .onSubmit { commit() }
         if model.preset.needsAPIKey || model.preset == .custom {
           SecureField(
             "API key", text: $model.apiKey,
             prompt: Text(model.preset.needsAPIKey ? "required" : "optional")
           )
           .focused($focus, equals: .key)
-          .onSubmit { commit() }
           Footnote("Stored in your login keychain and sent only to this service.")
         }
         if let message = model.validationMessage {
@@ -375,7 +361,6 @@ struct SummariesSettingsView: View {
         DisclosureGroup("Advanced") {
           TextField("Context size", text: $model.contextTokensText)
             .focused($focus, equals: .context)
-            .onSubmit { commit() }
           Footnote(
             "How much text the model can read at once. Leave the default of \(LLMSettingsViewModel.defaultContextTokens) unless the service reports a shorter limit."
           )
@@ -388,13 +373,11 @@ struct SummariesSettingsView: View {
             .disabled(model.isTesting)
         }
       }
-      if let error = model.error {
-        SettingsErrorRow(message: error, details: model.errorDetails)
-      }
     }
-    .task { await model.load() }
-    .onChange(of: focus) { old, new in
-      if old != nil, old != new { commit() }
+    // A field commits on Return, when focus leaves it and when the page goes.
+    .onSubmit { commit() }
+    .onChange(of: focus) { old, _ in
+      if old != nil { commit() }
     }
     .onDisappear { commit() }
   }
@@ -439,7 +422,7 @@ struct ExportSettingsView: View {
   @FocusState private var focus: Field?
 
   var body: some View {
-    SectionPage(section: .export) {
+    SectionPage(section: .export, model: model) {
       Section {
         Toggle("Export to Obsidian", isOn: .action({ model.enabled }, model.setEnabled))
         if model.enabled {
@@ -456,11 +439,9 @@ struct ExportSettingsView: View {
           DisclosureGroup("Advanced") {
             TextField("People folder", text: $model.peopleFolder, prompt: Text("People"))
               .focused($focus, equals: .people)
-              .onSubmit { commit() }
             Footnote("One page per person, inside the vault. Leave empty for none.")
             TextField("Tag for tasks", text: $model.taskTag, prompt: Text("task"))
               .focused($focus, equals: .tag)
-              .onSubmit { commit() }
             Toggle(
               "Copy the recording into the vault",
               isOn: .action({ model.includeAudio }, model.setIncludeAudio))
@@ -479,13 +460,10 @@ struct ExportSettingsView: View {
           }
         }
       }
-      if let error = model.error {
-        SettingsErrorRow(message: error, details: model.errorDetails)
-      }
     }
-    .task { await model.load() }
-    .onChange(of: focus) { old, new in
-      if old != nil, old != new { commit() }
+    .onSubmit { commit() }
+    .onChange(of: focus) { old, _ in
+      if old != nil { commit() }
     }
     .onDisappear { commit() }
   }
@@ -502,12 +480,12 @@ struct PhoneSettingsView: View {
   @State private var showingPairing = false
 
   var body: some View {
-    SectionPage(section: .iphone) {
+    SectionPage(section: .iphone, model: model) {
       if !model.isAvailable {
         Section {
           SettingsStatusRow(
             kind: .warning,
-            message: "Pairing is unavailable right now. Relaunch Steno to try again.", details: nil)
+            message: "Pairing is unavailable right now. Relaunch Steno to try again.")
         }
       } else {
         Section("Paired phones") {
@@ -554,11 +532,7 @@ struct PhoneSettingsView: View {
             kind: .error, message: "Steno cannot receive recordings right now.", details: failure)
         }
       }
-      if let error = model.error {
-        SettingsErrorRow(message: error, details: model.errorDetails)
-      }
     }
-    .task { await model.load() }
     .task { await model.observe() }
     .task { await model.observeReceipts() }
     .onChange(of: model.pairing == nil) { _, closed in

@@ -7,7 +7,7 @@ import StenoCore
 /// recordings folder with its size, and the default retention.
 @MainActor
 @Observable
-final class AudioSettingsViewModel {
+final class AudioSettingsViewModel: SettingsSectionModel {
   /// Picker order: the safe choice first, the destructive one last.
   enum RetentionMode: String, CaseIterable, Identifiable, Sendable {
     case keepForever
@@ -46,7 +46,8 @@ final class AudioSettingsViewModel {
     var text: String {
       switch self {
       case .measuring: "Measuring…"
-      case .bytes(let bytes): "Recordings use \(AudioSettingsViewModel.formatBytes(bytes))"
+      case .bytes(let bytes):
+        "Recordings use \(ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file))"
       case .unavailable: "Size unavailable"
       }
     }
@@ -62,8 +63,8 @@ final class AudioSettingsViewModel {
   private(set) var retentionDays = 30
   private(set) var permissions: [PermissionKind: PermissionState] = [:]
   private(set) var requesting: PermissionKind?
-  private(set) var error: String?
-  private(set) var errorDetails: String?
+  var error: String?
+  var errorDetails: String?
   private let environment: AppEnvironment
   /// Lists the input devices; the live one asks Core Audio.
   var listInputs: @Sendable () throws -> [AudioDeviceInfo] = { try AudioDevices.inputs() }
@@ -185,10 +186,6 @@ final class AudioSettingsViewModel {
     return total
   }
 
-  nonisolated static func formatBytes(_ bytes: Int64) -> String {
-    ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file)
-  }
-
   // MARK: Retention
 
   func setRetention(mode: RetentionMode, days: Int) async {
@@ -233,20 +230,14 @@ final class AudioSettingsViewModel {
     environment.permissions.openSystemSettings(for: kind)
   }
 
-  // MARK: Errors
+  // MARK: Saving
 
   private func save(_ mutate: (inout Settings) -> Void) async {
     do {
       try await environment.updateSettings(mutate)
-      error = nil
-      errorDetails = nil
+      clearError()
     } catch {
       fail("The setting could not be saved.", error)
     }
-  }
-
-  private func fail(_ message: String, _ error: any Error) {
-    self.error = message
-    errorDetails = String(describing: error)
   }
 }

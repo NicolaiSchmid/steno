@@ -47,7 +47,7 @@ if [ "$prerelease" = "true" ]; then channel_args=(--channel beta); fi
 # `${arr[@]+"${arr[@]}"}`: an empty array under `set -u` is an error in bash 3.2.
 python3 "$merge" "$work/appcast.xml" "$release_appcast" "$work/appcast.xml" ${channel_args[@]+"${channel_args[@]}"}
 
-git -C "$work" add appcast.xml README.md 2>/dev/null || git -C "$work" add appcast.xml
+git -C "$work" add --all
 if git -C "$work" diff --cached --quiet; then
   echo "appcast unchanged for $tag"
   exit 0

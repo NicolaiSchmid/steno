@@ -69,17 +69,15 @@ def main(argv):
     new_items = release_channel.findall("item")
     if not new_items:
         raise SystemExit("::error::%s carries no <item>" % args.release)
-    for item in new_items:
-        if args.channel:
+    if args.channel:
+        for item in new_items:
             set_channel(item, args.channel)
 
-    if os.path.exists(args.rolling):
-        tree, channel = load_channel(args.rolling)
-    else:
-        tree, channel = load_channel(args.release)
-        for item in channel.findall("item"):
-            channel.remove(item)
-
+    # Without a rolling file the release appcast is the template; its own
+    # items are dropped below as duplicates of the new ones.
+    tree, channel = load_channel(
+        args.rolling if os.path.exists(args.rolling) else args.release
+    )
     existing = channel.findall("item")
     for item in existing:
         channel.remove(item)

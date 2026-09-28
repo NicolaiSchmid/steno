@@ -13,16 +13,11 @@ enum UpdateChannels {
   }
 }
 
-/// The running build's version as Settings shows it: "0.9.0 (244)". Falls
-/// back to zeros outside an app bundle (the hostless tests).
+/// The running build's marketing version ("0.9.0-rc.1"), which picks the
+/// update lane and heads the General section. Falls back to zeros outside an
+/// app bundle (the hostless tests).
 enum AppVersion {
   static var marketing: String {
     Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "0.0.0"
   }
-
-  static var build: String {
-    Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "0"
-  }
-
-  static var display: String { "\(marketing) (\(build))" }
 }

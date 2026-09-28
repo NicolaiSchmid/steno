@@ -8,7 +8,7 @@ import StenoSpeech
 /// Acknowledgements sheet lists them.
 @MainActor
 @Observable
-final class SpeechSettingsViewModel {
+final class SpeechSettingsViewModel: SettingsSectionModel {
   enum AssetState: Equatable, Sendable {
     case absent
     case downloading(fraction: Double, phase: String)
@@ -18,8 +18,8 @@ final class SpeechSettingsViewModel {
 
   private(set) var engineID: SpeechEngineID = .parakeetV3
   private(set) var assetStates: [ModelAsset: AssetState] = [:]
-  private(set) var error: String?
-  private(set) var errorDetails: String?
+  var error: String?
+  var errorDetails: String?
   let engines = SpeechEngineID.userSelectable
   private let environment: AppEnvironment
   private var downloads: [ModelAsset: Task<Void, Never>] = [:]
@@ -96,13 +96,16 @@ final class SpeechSettingsViewModel {
 
   /// "Installed · 485 MB", "Downloading… 40%", "Not downloaded · 485 MB".
   func statusText(of asset: ModelAsset) -> String {
+    func size(_ bytes: Int64) -> String {
+      ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file)
+    }
     switch state(of: asset) {
     case .absent, .failed:
-      return "Not downloaded · \(Self.formatBytes(asset.approximateBytes))"
+      return "Not downloaded · \(size(asset.approximateBytes))"
     case .downloading(let fraction, _):
       return fraction > 0 ? "Downloading… \(Int((fraction * 100).rounded()))%" : "Downloading…"
     case .installed(let bytes):
-      return "Installed · \(Self.formatBytes(bytes ?? asset.approximateBytes))"
+      return "Installed · \(size(bytes ?? asset.approximateBytes))"
     }
   }
 
@@ -114,8 +117,7 @@ final class SpeechSettingsViewModel {
     do {
       try await environment.updateSettings { $0.speechEngineID = id.rawValue }
       try await environment.reloadPipeline()
-      error = nil
-      errorDetails = nil
+      clearError()
     } catch {
       fail("The language model could not be changed.", error)
     }
@@ -151,14 +153,5 @@ final class SpeechSettingsViewModel {
     } catch {
       fail("The download could not be removed.", error)
     }
-  }
-
-  nonisolated static func formatBytes(_ bytes: Int64) -> String {
-    ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file)
-  }
-
-  private func fail(_ message: String, _ error: any Error) {
-    self.error = message
-    errorDetails = String(describing: error)
   }
 }

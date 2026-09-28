@@ -5,6 +5,29 @@ import SwiftUI
 /// error with its details folded away, a permission row, a folder row and
 /// the sidebar row.
 
+/// What every section's view model provides: a `load()` for the page's
+/// `.task` and the error pair `SettingsErrorRow` renders, a plain sentence
+/// in `error` with the original text in `errorDetails`. Main-actor classes
+/// are Sendable, so the existential can be captured by the page's `.task`.
+@MainActor
+protocol SettingsSectionModel: AnyObject, Sendable {
+  var error: String? { get set }
+  var errorDetails: String? { get set }
+  func load() async
+}
+
+extension SettingsSectionModel {
+  func fail(_ message: String, _ error: any Error) {
+    self.error = message
+    errorDetails = String(describing: error)
+  }
+
+  func clearError() {
+    error = nil
+    errorDetails = nil
+  }
+}
+
 struct SettingsHeader: View {
   let section: SettingsSection
 
@@ -55,7 +78,7 @@ struct SettingsErrorRow: View {
 struct SettingsStatusRow: View {
   let kind: MessageRow.Kind
   let message: String
-  let details: String?
+  var details: String? = nil
   @State private var expanded = false
 
   var body: some View {
