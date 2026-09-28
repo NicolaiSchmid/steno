@@ -158,7 +158,7 @@ final class RecordingControllerTests: XCTestCase {
     for lane in [AudioLane.mic, .system] {
       XCTAssertEqual(statistics.droppedFrames[lane] ?? 0, 0, "\(lane)")
     }
-    let meeting = try await stoppedMeeting(in: environment)
+    let meeting = try await TestSupport.stoppedMeeting(in: environment)
     let stored = try await environment.store.meeting(id: meeting.id)
     XCTAssertEqual(stored?.state, .ready)
     await controller.shutdown()
@@ -191,7 +191,7 @@ final class RecordingControllerTests: XCTestCase {
     let diarizerPreparations = await diarizer.preparations.count
     XCTAssertEqual(enginePreparations, 1, "only the run prepared; a warm-up would make two")
     XCTAssertEqual(diarizerPreparations, 1, "only the run prepared; a warm-up would make two")
-    let meeting = try await stoppedMeeting(in: environment)
+    let meeting = try await TestSupport.stoppedMeeting(in: environment)
     let stored = try await environment.store.meeting(id: meeting.id)
     XCTAssertEqual(stored?.state, .ready)
     await controller.shutdown()
@@ -218,7 +218,7 @@ final class RecordingControllerTests: XCTestCase {
     let diarizerPreparations = await diarizer.preparations.count
     XCTAssertEqual(enginePreparations, 1, "only the run prepared")
     XCTAssertEqual(diarizerPreparations, 1, "only the run prepared")
-    let finalState = try await stoppedMeeting(in: environment).state
+    let finalState = try await TestSupport.stoppedMeeting(in: environment).state
     XCTAssertEqual(finalState, .ready)
     await controller.shutdown()
   }
@@ -253,7 +253,7 @@ final class RecordingControllerTests: XCTestCase {
     let diarizerPreparations = await diarizer.preparations.count
     XCTAssertEqual(enginePreparations, 2, "the failed warm-up and the run's own prepare")
     XCTAssertEqual(diarizerPreparations, 1, "the run's prepare")
-    let finalState = try await stoppedMeeting(in: environment).state
+    let finalState = try await TestSupport.stoppedMeeting(in: environment).state
     XCTAssertEqual(finalState, .ready)
     XCTAssertTrue(environment.startupWarnings.isEmpty, "\(environment.startupWarnings)")
     XCTAssertNil(recorder.lastWarning)
