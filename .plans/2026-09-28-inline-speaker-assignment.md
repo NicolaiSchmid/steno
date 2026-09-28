@@ -1,40 +1,45 @@
 # Inline speaker assignment: the review sheet becomes live selects
 
-Status: proposal, 2026-09-28, third round of the owner's first-run feedback ("the speaker
-selection UI needs major rework. See how Jamie does it: all inline and live-updating
-selects"). Binding context: [`2026-09-24-initial-scope.md`](2026-09-24-initial-scope.md)
-(App UI: "Speaker review sheet after processing for unknown speakers") and
-[`2026-09-25-macos-app-and-release.md`](2026-09-25-macos-app-and-release.md) (step 5,
-the `SpeakerReviewViewModel` row of the surface table). This plan replaces the sheet with
-an inline surface and amends both files (Supersedes, below). It also replaces the
-"Speaker review sheet" paragraph and findings F18, F19 (sheet part) and F28 of
-[`2026-09-28-macos-visual-redesign.md`](2026-09-28-macos-visual-redesign.md), which restyled
-the sheet in place; when that plan lands it points here for speakers.
+Status: reviewed, 2026-09-28. Third round of the owner's first-run feedback ("the speaker selection
+UI needs major rework. See how Jamie does it: all inline and live-updating selects"). Six reviews
+(simplification, spikes, conflicts, refactoring, tests, elegance) and the execution order that settles
+them live in [`reviews/2026-09-28-inline-speaker-execution-order.md`](reviews/2026-09-28-inline-speaker-execution-order.md);
+decisions below are the settled ones. Binding context:
+[`2026-09-24-initial-scope.md`](2026-09-24-initial-scope.md) (App UI: "Speaker review sheet after
+processing for unknown speakers") and [`2026-09-25-macos-app-and-release.md`](2026-09-25-macos-app-and-release.md)
+(step 5, the `SpeakerReviewViewModel` surface row, acceptance 5 and 8). This plan replaces the sheet
+with an inline surface and amends both files (Supersedes, below). It also replaces the "Speaker
+review sheet" paragraph, findings F28, the sheet half of F19, and the "Review speakers (n)" button of
+[`2026-09-28-macos-visual-redesign.md`](2026-09-28-macos-visual-redesign.md); when that plan lands
+it points here for speakers.
 
 ## Goal
 
-Speakers are named where they are read. The meeting header shows who spoke (avatars,
-names, "n unnamed"); clicking it opens a popover with one row per speaker, each an inline
-search-or-create select with a transcript excerpt and a play button. The same select sits on
-every speaker name in the Transcript tab. A choice applies on click: the transcript, the
-summary and the header update from the store observation, the voice is remembered, and the
-vault re-exports after a short debounce. Nothing is modal, nothing needs Done, and every
-speaker (named or not) can be changed at any time. Picking the same person for two clusters
-merges them, which is how Jamie handles a split voice ("just add the same name twice").
+Speakers are named where they are read. The meeting header shows who spoke (avatars, names, "n to
+confirm"); clicking it opens a popover with one row per speaker, each an inline search-or-create
+select with a transcript excerpt and a play button. The same select sits on every speaker name in the
+Transcript tab. A choice applies on click: the transcript, the summary and the header update from the
+store observation, the voice is remembered, and the vault re-exports when the picker closes. Nothing
+is modal, nothing needs Done, and every speaker (named or not) can be changed at any time. Picking the
+same person for two clusters merges them, which is how Jamie handles a split voice ("just add the same
+name twice").
 
 ## Non-goals
 
-- A People screen, contact photos, email editing, or importing Contacts.app. `Person` stays
-  what it is: display name, optional email, voice.
-- Cross-meeting person merge UI (`MeetingStore.mergePersons` keeps working from the CLI).
-- Changing diarization, the sample clip picker, or the match threshold. The 3 s clips in the
-  owner's screenshot (`00:23:29 – 00:23:32`) are `SampleClipPicker` capping the clip to the
-  longest contiguous turn; the excerpt text in this plan compensates, a longer clip is a
-  StenoSpeech follow-up.
+- A People screen, contact photos, email editing, or importing Contacts.app. `Person` stays what it
+  is: display name, optional email, voice.
+- Cross-meeting person merge UI. `MeetingStore.mergePersons` stays a store operation without a UI or
+  CLI caller.
+- Changing diarization, the sample clip picker, or the match threshold. The 3 s clips in the owner's
+  screenshot (`00:23:29 – 00:23:32`) are `SampleClipPicker` capping the clip to the longest contiguous
+  turn; the excerpt text in this plan compensates, a longer clip is a StenoSpeech follow-up.
 - Live transcription or naming during a recording.
-- Restyling anything outside the speaker surfaces. Tokens, buttons and the header layout come
-  from the visual redesign plan; this plan uses what exists today and adopts the new
-  primitives when they land.
+- Playing a range of the recording when the clip file is gone (Deferred).
+- Per-person avatar hues (Deferred): the first-run index's shared decision keeps the accent
+  achromatic, and a plan does not override it.
+- Restyling anything outside the speaker surfaces. This plan uses today's primitives
+  (`.buttonStyle(.plain)` with accessibility labels, its own 88 pt row label); the visual redesign
+  restyles the speaker surfaces later and deletes its sheet step.
 
 ## Findings
 
@@ -53,244 +58,272 @@ From the owner's screenshot of the current sheet and the code behind it.
 
 ## Decisions
 
-1. **Inline, not modal.** The sheet, Later, Done, Skip and "Review speakers (n)" go away.
-   The entry points are the header Speakers row and every speaker name in the Transcript
-   tab. `AppController.pendingReviews` stays (it drives the badge and the auto-focus below)
-   and clears itself when the export shows no unconfirmed speaker, not when a sheet closes.
-2. **One select, three places.** `SpeakerPicker` is one SwiftUI component with two triggers:
-   a field (unnamed speaker in the popover) and a name button (named speaker in the popover,
-   every name in the transcript). Both open the same list with the same keyboard model.
+1. **Inline, not modal.** The sheet, Later, Done, Skip and "Review speakers (n)" go away. The entry
+   points are the header Speakers row and every speaker name in the Transcript tab. The popover never
+   opens itself. `AppController.pendingReviews` stays for the list badge and clears itself: on every
+   `observeMeetings` tick the controller drops ids whose speakers are all confirmed (read from the
+   store), so `reviewCompleted` and the view `onChange` go.
+2. **One select, three places.** `SpeakerPicker` is one SwiftUI component with one trigger style: a
+   button showing the name, or the placeholder "Name this speaker…" for an unnamed speaker. In the
+   header popover the list expands inline under its row; in the transcript it opens its own
+   `.popover` driven by one `presentedSpeakerID` on the tab. Both share `SpeakerPickerState` and the
+   same keyboard model.
 3. **Selection applies immediately** through `MeetingStore.confirm`; the UI re-renders from
-   `observeMeeting(id:)`, which the detail view model already follows. No local optimistic
-   state beyond the field's draft text.
-4. **Any speaker can be reassigned.** Core learns which person a speaker's embedding was
-   enrolled into (`enrolledPersonID`) and `SpeakerMemory` learns to withdraw an enrolment,
-   so a reassignment moves the voice sample from the wrong person to the right one instead of
-   enrolling twice. Same person again is a no-op.
-5. **Same person twice merges.** Choosing a person who already owns another speaker of this
-   meeting calls `mergeSpeakers(source, into: thatSpeaker)`. The list also offers the other
-   speakers of the meeting under "Same voice as", so two unnamed clusters can be merged
-   before anyone knows the name. The Merge button and picker are gone.
-6. **Clips outlive confirmation.** `confirm` no longer deletes the sample clip; clips go
-   with the meeting (`delete(meetingID:)`, already the case) and with the audio when the
-   retention sweep removes it. When a clip file is missing but the recording is still there,
-   Play uses the clip range on the recording. When neither exists, Play is hidden.
-7. **One ranked list.** Under the field: Suggested (voice match, then the LLM's name guess,
-   then calendar attendees not yet assigned), Recent (people by last confirmation), Same
-   voice as (this meeting's other speakers), Create "typed text". Typing filters every
-   section. No Accept or Use buttons; the top row is highlighted and Return takes it.
-8. **Excerpt instead of confidence.** Each popover row shows what the speaker said in the clip
-   range (the segments overlapping `sampleClipRange`, else the speaker's longest segment),
-   two lines, 13 pt `faint`, leading "…" when cut. `clusterConfidence` leaves the UI.
-9. **Avatars carry the identity.** Initials on a per-person hue chosen from a fixed set of
-   eight muted hues by the person id's first byte, so the colour is stable across launches
-   and appearances. Unnamed speakers get a `secondary` veil with a `person` glyph. This is
-   the one place the app uses hue to tell things apart; controls stay achromatic, as the
-   redesign plan decided.
-10. **Re-export is debounced.** Every change schedules `pipeline.redeliver` 3 s later on the
-    injected clock, coalesced like the scratchpad save; leaving the meeting flushes it. Done
-    on an untouched sheet re-exporting nothing becomes: no change, no redeliver.
+   `observeMeeting(id:)`, which the detail view model already follows. No local optimistic state
+   beyond the field's draft text.
+4. **Any speaker can be reassigned, and the voice is recomputed, not adjusted.** A person's voice is
+   `normalise(mean(embedding of their confirmed speakers, newest 50 by meeting.startedAt))` with
+   `sampleCount = count`, written by one private `MeetingStore.refreshVoice(personID:db:)` inside the
+   transaction of `confirm`, `mergeSpeakers` (both persons) and `mergePersons`. `SpeakerMemory.enroll`
+   goes; `confirm` drops its `memory:` parameter; the previous person is whoever `assignment` named.
+   Same person again is a no-op. `.suggested` and embedding-less ("Me") speakers never count. Cost: a
+   50-sample window replaces the capped running mean, and samples of deleted meetings drop out at the
+   person's next refresh.
+5. **Same person twice merges.** Choosing a person who already owns another speaker of this meeting
+   merges the chosen speaker into that one. The rule lives inside `confirm`'s write (shared
+   `mergeSpeakerRows` body), not in the view model. There is no separate merge control and no "Same
+   voice as" section.
+6. **Clips outlive confirmation, within the scope's retention rules.** `confirm` deletes the clip only
+   when the meeting's master file is already gone. The retention sweep removes the clips of
+   `.confirmed` speakers together with the audio and nulls their `sampleClipURL`; unconfirmed speakers
+   keep theirs, so a retention-0 meeting still plays its unnamed speakers when the popover first opens.
+   Play is shown iff the clip file exists; `ClipPlayer` is unchanged. `sampleClipURL` stays in
+   `CodingKeys`, so the exported `meeting.json` keeps the path while the file exists.
+7. **One flat ranked list, built in core.** `SpeakerOptions.build(speaker:speakers:persons:participants:suggestion:recent:query:)
+   -> [Option]`, `Option = .person(Person, tag:) | .create(String)`: the voice match ("Sounds like"),
+   the LLM's name guess ("Mentioned", as the person of that name when one exists, else a create row),
+   calendar attendees not yet assigned ("Attendee"), a person owning another speaker here ("In this
+   meeting"), recent people, then Create last. No section headers, no Accept or Use buttons. Typing
+   filters with `.caseInsensitive, .diacriticInsensitive` over all persons, so "jerome" finds Jérôme
+   and a retyped name reuses a ghost. One verb in the view model: `select(_:for:)`.
+8. **Pre-fill instead of a hidden default.** A `.suggested` speaker's field opens with the suggested
+   name filled in and selected; Return confirms what is shown. Otherwise nothing is highlighted until
+   the user types or presses Down; Return on an empty field is a no-op. Escape with the list open
+   collapses the list; Escape again closes the popover. No Tab between rows.
+9. **Excerpt instead of confidence.** Each unconfirmed popover row shows what the speaker said in the
+   clip range (the segments overlapping `sampleClipRange`, else the speaker's longest segment), two
+   lines, 13 pt `faint`, at most 160 characters with a leading "…" when cut. Confirmed rows show none.
+   `clusterConfidence` leaves the UI.
+10. **Achromatic avatars.** Initials on a `secondary` veil, `strong` text; unnamed speakers get a
+    `person` glyph in `faint`. No hue tokens.
+11. **Re-export on close, not on a timer.** `MeetingDetailViewModel` sets `speakersDirty` on every
+    speaker write and calls `redeliver` once when the header popover or a transcript picker closes and
+    on `onDisappear`, only when dirty. A failure because the pipeline holds the meeting keeps the flag
+    and retries at the next `.ready` tick; the `onDisappear` flush is a `Task` capturing `pipeline`,
+    `store` and the meeting id, not `self`, with the same one retry. The scratchpad debounce is
+    untouched.
+12. **No orphan-person deletion.** `recentPersons()` returns persons who own a confirmed speaker
+    (inner join, latest `startedAt` descending, then `displayName COLLATE NOCASE`); a person left with
+    no speakers simply stops appearing in Recent and is found again by typing.
+13. **Vault integrity.** A redeliver removes this meeting's `%%steno:<uuid>%%` line from every person
+    page named in the previous receipt that this delivery did not render, so a reassignment leaves no
+    stale line on the wrong person's page.
 
 ## Jamie reference
 
-From the owner's screenshot and https://docs.meetjamie.ai/getting-started/identify-speaker:
-speakers live in the meeting header ("Hover over the Speakers list in the header"); each has
-a play button for a short clip; the field says "Search or create contact…" and offers
-"Recent Contacts", with pre-filled names when Jamie recognised the voice; "you can change the
-name at any point", "simply click on the speaker again and rename it"; a split voice is fixed
-by adding "the same name twice"; names flow into "both your meeting summary and your
-transcript"; a named voice is remembered for future meetings. Everything above maps onto
-existing core operations except reassignment and clip retention (Decisions 4 and 6).
+From the owner's screenshot and https://docs.meetjamie.ai/getting-started/identify-speaker: speakers
+live in the meeting header ("Hover over the Speakers list in the header"); each has a play button for
+a short clip; the field says "Search or create contact…" and offers "Recent Contacts", with pre-filled
+names when Jamie recognised the voice; "you can change the name at any point", "simply click on the
+speaker again and rename it"; a split voice is fixed by adding "the same name twice"; names flow into
+"both your meeting summary and your transcript"; a named voice is remembered for future meetings.
 
 ## Design
 
 ### Header: Speakers row
 
-`MeetingDetailView.header` gains a labelled row under the meta line, before Tags, shown once
-the export has at least one speaker:
+`MeetingDetailView.header` gains a labelled row after the meta line (and after the retention plan's
+"Recording" line when that lands), before Tags, shown only when the meeting is `.ready` and the export
+has at least one speaker:
 
-- Label "Speakers" 12 pt `faint`, 88 pt wide, like the Tags label the redesign plan adds.
-- Control: a `Button` (id `speakers-row`) with a hairline pill (`secondary` fill, radius 8,
-  height 28): an avatar stack (first three speakers in `clusterLabel` order, 20 pt, 6 pt
-  overlap, unnamed ones as the glyph avatar), a "·", the first names of named speakers in
-  order, "+n" 13 pt `faint` for the rest, then, when any speaker is unconfirmed, a neutral
-  chip "n unnamed" (`warning` text on a 12 % veil), then a 10 pt `chevron.down`.
-- Click opens `SpeakersPopover` as a `.popover(arrowEdge: .bottom)`; the pending badge case
-  (`controller.pendingReviews.contains(id)` and the window is active) opens it once per
-  meeting selection with the first unnamed row's field focused, which replaces today's
-  auto-presented sheet.
+- Label "Speakers" 12 pt `faint`, 88 pt wide.
+- Control: a `Button` (id `speakers-row`, `.buttonStyle(.plain)`) with a hairline pill (`secondary`
+  fill, radius 8, height 28): an avatar stack (first three speakers in `clusterLabel` order, 20 pt,
+  6 pt overlap, unnamed ones as the glyph avatar), a "·", `displayName(forSpeaker:)` of the named
+  speakers in order, "+n" 13 pt `faint` for the rest, then, when any speaker is unconfirmed, "n to
+  confirm" 12 pt `faint`, then a 10 pt `chevron.down`.
+- Click opens `SpeakersPopover` as a `.popover(arrowEdge: .bottom)`. Nothing opens it automatically.
 
 ### Popover: `SpeakersPopover`
 
-360 pt wide, content height up to 440 then scrolls, `popover` fill, padding 16. Title
-"Speakers" 16 semibold. Rows in two groups, animated with `Motion.functional` when a row
-moves: unnamed first, named after, each in `clusterLabel` order. A row (`speaker-row-<uuid>`):
+360 pt wide, content height up to 440 then scrolls, `popover` fill, padding 16. Title "Speakers" 16
+semibold. One row per speaker in stable `clusterLabel` order; rows never regroup or animate when a
+speaker is named. A row (`speaker-row-<uuid>`):
 
 - `Avatar` 28 pt.
-- `SpeakerPicker` trigger: unnamed shows the field (placeholder "Search or create a
-  person…"); named shows the name 14 medium `strong` with the person's email 12 `faint`
-  after a "·" when known, and a `chevron.down` on hover.
-- Excerpt 13 `faint`, two lines, under the trigger.
-- Trailing `IconButton` 28 pt: `play.fill` / `stop.fill`, id `speaker-play-<uuid>`, hidden
-  when nothing can be played. One clip plays at a time (`ClipPlayer`).
+- `SpeakerPicker` trigger (`speaker-picker-<uuid>`): the name 14 medium `strong` with the person's
+  email 12 `faint` after a "·" when known, or the placeholder "Name this speaker…" 14 `muted`; a
+  `chevron.down` on hover. Clicking expands the field (`speaker-field-<uuid>`) and the option list
+  inline under the row.
+- Excerpt 13 `faint`, two lines, under the trigger, on unconfirmed rows only.
+- Trailing plain button 28 pt: `play.fill` / `stop.fill`, id `speaker-play-<uuid>`, shown iff the
+  clip file exists. One clip plays at a time (`ClipPlayer`).
 
 No footer. Escape or clicking outside closes; nothing is lost because nothing is pending.
 
-### `SpeakerPicker`
+### `SpeakerPicker` and `SpeakerPickerState`
 
-State per open picker: query text, highlighted row, the ranked sections. Opening the list
-(field focus, or clicking a name trigger) shows the sections below the trigger inside the
-popover (or, in the transcript, in its own `.popover` anchored to the name). Rows are
-24 pt: avatar 18 pt, name 13, a trailing tag 12 `faint` ("Sounds like", "Mentioned in the
-conversation", "Attendee", "Speaker 3 in this meeting"). Sections:
+`SpeakerPickerState` (pure, tested hostless): `query`, `highlighted: Int?`, `options: [Option]`,
+`move(.up/.down)`, `commit() -> Option?`, `reset(prefill:)`. Opening a picker for a `.suggested`
+speaker pre-fills the suggested name selected and highlights that option; otherwise `highlighted` is
+nil until typing or Down. Return commits the highlighted option, or nothing. Committing calls
+`select(option, for: speakerID)`: `.person` confirms (and merges when that person owns another speaker
+here, inside `confirm`), `.create(text)` resolves the name through `MeetingStore.resolvePerson` and
+confirms.
 
-| Section | Source | Order |
+Option rows are 24 pt: avatar 18 pt, name 13, a trailing tag 12 `faint` when the option has one:
+
+| Option | Source | Tag |
 |---|---|---|
-| Suggested | `.suggested(personID, similarity)` on the speaker; `SpeakerNameSuggestion` for the speaker (as a person when a person of that name exists, else as a create row with the tag); meeting participants with `role == .them` whose person is not yet assigned to another speaker | voice match, LLM guess, attendees by name |
-| Recent | `MeetingStore.recentPersons()` minus anything already shown | most recently confirmed first, then by name |
-| Same voice as | the meeting's other speakers, named or not | `clusterLabel` order |
-| Create | shown when the trimmed query is non-empty and matches no person's name case- and diacritic-insensitively | one row: `Create "Anna"` |
+| Voice match | `.suggested(personID, similarity)` on the speaker | "Sounds like" |
+| LLM guess | `SpeakerNameSuggestion` for the speaker; the person of that name when one exists, else a create row | "Mentioned" |
+| Attendees | participants with `role == .them` whose person is not assigned to another speaker | "Attendee" |
+| In this meeting | persons owning another speaker of this meeting | "In this meeting" |
+| Recent | `MeetingStore.recentPersons()` minus anything above | none |
+| Create | when the trimmed query is non-empty and matches no person's name (`.caseInsensitive, .diacriticInsensitive`) | `Create "Anna"` |
 
-Typing filters Suggested, Recent and Same voice as by case- and diacritic-insensitive
-substring on the display name (and the cluster label). Down and Up move the highlight,
-Return commits the highlighted row (the first row when the query is empty), Escape closes
-without change, Tab moves to the next row's field in the popover. Committing a person calls
-`assign(speakerID, person)`; a create row calls `name(speakerID, text)`; a speaker row calls
-`merge(speakerID, into:)`. The highlighted default for an unnamed speaker is the first
-Suggested row when there is one, so Return on an untouched field accepts the voice match.
+The speaker's own person is never listed. Typing filters every option by the same fold and, once the
+query is non-empty, searches all `persons()`, not only Recent.
 
 ### Transcript tab
 
-The turn header's name `Text` becomes the compact `SpeakerPicker` trigger (name 13
-semibold `strong`, `chevron.down` 9 pt `ghost` on hover, id `speaker-picker-<uuid>`); turns
-without a speaker keep the static "Unknown". `TabText.transcript` is unchanged (the trigger's
-text is the same name), so `TabTextSnapshotTests` does not move.
+The turn header's name `Text` becomes the compact `SpeakerPicker` trigger (name 13 semibold `strong`,
+`chevron.down` 9 pt `ghost` on hover, id `speaker-picker-<uuid>`) that opens a `.popover` holding the
+field and the option list, one presented at a time via `presentedSpeakerID`; turns without a speaker
+keep the static "Unknown". The trigger renders exactly `displayName(forSpeaker:)`, so
+`TabText.transcript` and `TabTextSnapshotTests` do not move.
 
 ### Avatars
 
-`Design/Avatar.swift`: `Avatar(person: Person?, size:)`. Initials are the first letters of
-the first two words of `displayName` (one letter for a single word), uppercased, weight
-semibold, size `0.42 × size`. Fill for a person: `Theme.avatarHues[Int(id.uuid.0) % 8]`, a
-new token array of eight muted hues specified for both appearances with white initials
-(light) and near-white initials (dark), contrast at least 4.5:1 in both; the unnamed fill is
-`secondary` with a `person` glyph in `faint`. `ThemeTokensTests` asserts eight entries and
-the contrast bound.
+`Design/Avatar.swift`: `Avatar(name: String?, size:)`. Initials are the first letters of the first two
+words of the name (one letter for a single word), uppercased, semibold, size `0.42 × size`, `strong`
+on a `secondary` circle; nil name draws a `person` glyph in `faint`.
 
-### Playback
+## Core changes (`Sources/StenoCore`, `Sources/StenoSpeech`, `Sources/StenoAdapters`)
 
-`ClipPlayer.play(_ url: URL)` stays for the clip file. New `play(_ url: URL, range:)`
-for the recording fallback: `AVAudioPlayer` with `currentTime = range.lowerBound` and a stop
-scheduled on the injected clock after the range length, capped at 10 s. The view model picks
-the source: `speaker.sampleClipURL` when the file exists, else `export.audio` (`mixdownURL`
-when present, else `url`) with `sampleClipRange`, else no play button.
-
-## Core changes (`Sources/StenoCore`, `Sources/StenoSpeech`)
-
-1. **Withdraw an enrolment.** `SpeakerMemory` gains
-   `func withdraw(_ embedding: Embedding, from person: Person) async throws`. With
-   `w = min(sampleCount, maxSamples)`: when `w <= 1` the person's embedding becomes nil and
-   `sampleCount` drops to `max(0, sampleCount - 1)`; otherwise
-   `e' = normalise(e * w − x̂)` and `sampleCount -= 1`. Exact while the person is under the
-   cap, approximate above it (documented on the protocol; the common case, a mistake caught
-   in the same session, is exact). Implemented in `CosineSpeakerMemory` and
-   `InMemorySpeakerMemory` (which records withdrawals like enrolments).
-2. **`Speaker.enrolledPersonID`.** Migration `v3` in `Storage/Migrations.swift` adds
-   `enrolledPersonID TEXT NULL REFERENCES person ON DELETE SET NULL` to `speaker` and
-   backfills it from `personID` where `assignment = 'confirmed'`. `SpeakerRow`, `Speaker`
-   (not in `CodingKeys`, like `embedding`) and `SampleData` follow.
-3. **`confirm` reassigns.** `MeetingStore.confirm(speakerID:person:memory:)`:
-   - Same person as `enrolledPersonID`: writes `.confirmed`, deletes the name suggestion, no
-     enrol, no file change (idempotent).
-   - Different person (or none yet): withdraws from the previous person when there is one,
-     enrols into the new person, sets `enrolledPersonID`. When the previous person ends with
-     `sampleCount == 0` and no `speaker`, `participant` or `meetingTask` row references them,
-     the person row is deleted: a mistyped name leaves no ghost in Recent.
-   - The sample clip is left alone (Decision 6).
-   The `.suggested` similarity is kept on the person match, not on the row, as today.
-4. **`mergeSpeakers` keeps the memory honest.** After the merge, when the source's
-   `enrolledPersonID` is set and differs from the kept speaker's person, the source embedding
-   is withdrawn from that person (same orphan rule as above). The kept speaker's
-   `enrolledPersonID` is unchanged.
-5. **Recency.** `MeetingStore.recentPersons() -> [Person]`: every person, ordered by the
-   latest `meeting.startedAt` among the speakers confirmed to them (descending, nulls last),
-   then display name. One query with a left join; `persons()` keeps its name order for the
-   CLI and the export.
-6. **Clips follow the audio.** `RetentionSweep` removes `speaker.sampleClipURL` files of a
-   meeting together with its audio and nulls the column (today it never touches clips);
-   `.keepForever` keeps them. `Persist`'s `speakersNeedReview` event is unchanged.
-7. **Plan bookkeeping.** `2026-09-24-initial-scope.md` App UI bullet "Speaker review sheet
-   after processing…" gets an amendment line pointing here; `2026-09-25-macos-app-and-release.md`
-   step 5 and the `SpeakerReviewViewModel` surface row get the same note; the redesign plan
-   drops its sheet paragraph when it lands.
+1. **Shared merge body and person resolution.** `MeetingStore.mergeSpeakers` extracts
+   `static mergeSpeakerRows(_:into:_ db:)` so `confirm` can call it in its own transaction.
+   `MeetingStore.resolvePerson(named:email:now:) -> Person` moves the "existing person of that name,
+   else a new one" rule out of the view model, matching `.caseInsensitive, .diacriticInsensitive`;
+   blank names throw.
+2. **Voice recompute.** Private `refreshVoice(personID:db:)` per Decision 4; called by `confirm` (for
+   the previous and the new person), `mergeSpeakers` (both persons when they differ) and
+   `mergePersons` (the kept person). `SpeakerMemory` keeps `candidates(for:limit:)` and the provided
+   `match`; `enroll` and `InMemorySpeakerMemory.enrolments` go. Mismatched-dimension embeddings are
+   skipped; the window is the newest 50 by `meeting.startedAt`.
+3. **`confirm(speakerID:person:)`** (no `memory:`): same person as the current `.confirmed` is a
+   no-op beyond deleting the name suggestion; otherwise it saves the person when new, sets
+   `.confirmed`, merges into the speaker that already belongs to that person in this meeting when
+   there is one, refreshes both voices, and deletes the clip only when the meeting's master file is
+   gone.
+4. **Recency.** `MeetingStore.recentPersons() -> [Person]` per Decision 12. `persons()` keeps its name
+   order for the CLI and the export.
+5. **Clips follow the audio for confirmed speakers.** `RetentionSweep` gathers the clips of
+   `.confirmed` speakers per expired asset, removes them with the audio, counts them in `clean`, then
+   `MeetingStore.clearSampleClips(meetingID:speakerIDs:)` nulls those columns. Unconfirmed clips are
+   untouched. The `RetentionSweep` header doc is rewritten.
+6. **Options and excerpts.** `SpeakerOptions.build` (Decision 7) and `SpeakerExcerpts.text(for:in:)`
+   (Decision 9) as pure types in StenoCore, tested on Linux.
+7. **Vault stale lines.** `ManagedBlock.remove(meetingID:from:)`; `ObsidianFolderDestination.deliver`
+   applies it to every `.managedBlock` path of the previous receipt that this delivery did not render,
+   keeping the path in the new receipt.
+8. **Doc comments** that say "enrol" or "deleted on confirm": `People.swift` (`sampleClipURL`),
+   `Audio.swift` (`expirableFiles`), `MeetingStore+People.swift` (`confirm`), `SpeakerMemory.swift`,
+   `Diarize.swift`, `MeetingStore.swift` (`nameSuggestions`).
+9. **Plan bookkeeping** (this PR): `2026-09-24-initial-scope.md` App UI bullet;
+   `2026-09-25-macos-app-and-release.md` step 5, the `SpeakerReviewViewModel` surface row, acceptance
+   5 and 8; `2026-09-25-core-foundation.md` API listing (`confirm`, `RetentionSweep`), step 9 sweep
+   test note, Deferred ("`forget` stays deferred; recompute replaces enrolment");
+   `2026-09-25-speech-and-speakers.md` Enrolment row and the macOS line; `2026-09-25-llm-and-templates.md`
+   decision 7 and the macOS line. Unlanded siblings (visual redesign, first-run index, retention plan)
+   take their amendments in their own PRs per the execution order.
 
 ## App changes (`apps/macos`)
 
 - Delete `Speakers/SpeakerReviewSheet.swift`. Rename `SpeakerReviewViewModel` to
-  `Speakers/SpeakersViewModel.swift`: owned by `MeetingDetailViewModel` (`model.speakers`),
-  fed the current `MeetingExport` on every observation tick (`update(export:)`), so it never
-  reloads speakers or people itself except `recentPersons()` and `candidates` once per export
-  change. API: `rows: [Row]` (speaker, person?, excerpt, canPlay), `sections(for speakerID,
-  query) -> [Section]`, `assign(_:person:)`, `name(_:_:)`, `merge(_:into:)`, `play(_:)`,
-  `stopPlayback()`, `flushRedeliver()`, `error`. `didChange`, `skipped`, `draftNames`,
-  `mergeTargets`, `finish()` go away.
-- `Main/Debounce.swift`: the scratchpad's sleeper loop extracted into one `Debounce` type on
-  the injected clock, used by `saveScratchpad` and by the redeliver.
-- New `Speakers/SpeakersRow.swift`, `Speakers/SpeakersPopover.swift`,
-  `Speakers/SpeakerPicker.swift`, `Speakers/SpeakerExcerpt.swift` (pure, tested),
-  `Design/Avatar.swift`, `Theme.avatarHues`.
-- `MeetingDetailView`: the Speakers row; `.sheet` and `showsSpeakerReview` removed; the
-  popover auto-open for `pendingReviews`; `onChange(of: model.unconfirmedSpeakers.isEmpty)`
-  calls `controller.reviewCompleted(meetingID:)`; `onDisappear` flushes the redeliver.
-- `TranscriptTab`: the compact picker trigger.
-- `ClipPlayer`: range playback on the recording, `stopAt` via the injected clock.
+  `Speakers/SpeakersViewModel.swift`: owned by `MeetingDetailViewModel` (`model.speakers`), fed the
+  current `MeetingExport` on every observation tick (`update(export:)`) plus `nameSuggestions` and
+  `recentPersons` in one cancellable load. API: `rows: [Row]` (speaker, person?, excerpt, canPlay),
+  `options(for speakerID, query) -> [Option]`, `select(_:for:)`, `play(_:)`, `stopPlayback()`,
+  `error`. `didChange`, `skipped`, `draftNames`, `mergeTargets`, `candidates`, `finish()` go away.
+- New `Speakers/SpeakersRow.swift`, `Speakers/SpeakersPopover.swift`, `Speakers/SpeakerPicker.swift`,
+  `Speakers/SpeakerPickerState.swift`, `Design/Avatar.swift`.
+- `MeetingDetailViewModel`: `speakersDirty`, `pickerClosed()` and the `onDisappear` flush per
+  Decision 11; `showsSpeakerReview` removed.
+- `MeetingDetailView`: the Speakers row; `.sheet`, "Review speakers", auto-open and
+  `reviewCompleted` removed.
+- `AppController`: pending reviews cleared from the store on each observation tick.
+- `TranscriptTab`: the compact picker trigger and `presentedSpeakerID`.
 - Accessibility ids: `speakers-row`, `speaker-row-<uuid>`, `speaker-picker-<uuid>`,
-  `speaker-option-<personID>`, `speaker-option-speaker-<uuid>`, `speaker-create`,
-  `speaker-play-<uuid>`.
+  `speaker-field-<uuid>`, `speaker-option-<personID>`, `speaker-create`, `speaker-play-<uuid>`.
 
 ## Implementation steps
 
-Each step is one PR; the app cannot ship step 2 before step 1 is on `main`.
+Work packages from the execution order, one PR each. `{WP1, WP4, WP6}` run in parallel; then `{WP2,
+WP5}` and WP3; then WP7; WP8 last.
 
-1. **Core: reassignable confirmations.** Core changes 1 to 7. Tests in
-   `Tests/StenoCoreTests` and `Tests/StenoSpeechTests`: withdraw is the exact inverse of
-   enrol under the cap (enrol two samples, withdraw one, compare to a single enrol within
-   1e-5); withdraw at `sampleCount 1` clears the embedding; migration v3 backfills
-   `enrolledPersonID` for confirmed rows and leaves suggested rows nil; `confirm` twice with
-   the same person enrols once; `confirm` A then B leaves A at `sampleCount 0` and deleted
-   when unreferenced, B at 1, the speaker `.confirmed(B)` with `enrolledPersonID B`; `confirm`
-   keeps the clip file; `mergeSpeakers` withdraws the source's enrolment when the persons
-   differ; `recentPersons()` orders by latest meeting then name; the sweep removes clips with
-   the audio and keeps them under `.keepForever`. Done when `swift test` passes in the
-   `steno-swift:6.1` container for StenoCore (Linux, fast) and the `package` job passes for
-   StenoSpeech.
-2. **App: header row, popover, picker.** Everything under App changes except the transcript
-   trigger and range playback. `SpeakersViewModelTests` replaces
-   `SpeakerReviewViewModelTests`: rows list every speaker with the named ones after the
-   unnamed; `sections` puts the `.suggested` person first, the LLM guess second as a create
-   row when no person matches, attendees third, recent people after, the meeting's other
-   speaker under Same voice as, and a Create row only for an unmatched query; diacritic- and
-   case-insensitive filtering ("jerome" finds "Jérôme"); `assign` confirms and the export
-   observation updates `rows`; `name` with an existing name reuses the person; `assign` of a
-   person who owns another speaker merges the two; reassigning a confirmed speaker changes
-   the person without a second enrolment; three changes within the debounce redeliver once
-   on `ManualClock`, none without a change, and `flushRedeliver` delivers immediately;
-   `SpeakerExcerpt` picks the clip-range text, falls back to the longest segment, and
-   truncates with a leading ellipsis. `MeetingDetailViewModelTests` drops
-   `showsSpeakerReview`; `AppControllerTests.testSpeakersNeedReviewStaysPendingUntil…`
-   asserts the pending review clears when the last speaker is confirmed. Done when
-   `StenoTests` passes and `LaunchSmokeTests` finds `speakers-row` in the seeded meeting.
-3. **App: transcript trigger and playback fallback.** `TranscriptTab`, `ClipPlayer` range
-   playback (`[manual]`: the clip is audible after confirmation once the file is gone),
-   `LaunchSmokeTests` attaches a screenshot of the open popover (`lifetime = .keepAlways`).
-   Done when `TabTextSnapshotTests` is unchanged and the screenshot shows a named and an
-   unnamed row.
+1. **WP1 `refactor(core): share speaker merge and person resolution`.** Core change 1; the sheet's
+   view model calls `resolvePerson`. Tests: existing `SpeakerReviewViewModelTests` stay green;
+   `resolvePersonReusesJeromeForJérôme`, `resolvePersonCreatesWithEmail`, `resolvePersonIgnoresBlank`.
+2. **WP2 `feat(core): reassignable confirmations with a recomputed voice`.** Core changes 2, 3, 4, 8.
+   Re-pin `confirmSetsConfirmedEnrolsOnceAndRemovesTheClip` → `…RefreshesTheVoiceAndKeepsTheClip`,
+   `confirmKeepsAnExistingPersonAndSkipsEnrolWithoutAnEmbedding` → `…LeavesTheVoiceWithoutAnEmbedding`;
+   enrol tests in `SpeakerMemoryTests`, `CosineSpeakerMemoryTests`, `ModelIntegrationTests`,
+   `SpeakerNameSuggestionTests` reseeded by saving `Person(embedding:sampleCount:)`. Add
+   `confirmTwiceWithTheSamePersonIsANoOp`, `confirmAThenBRestoresAExactly` (1e-6),
+   `confirmingAwayFromASuggestionLeavesTheSuggestedPersonUntouched`,
+   `confirmIntoAPersonOwningAnotherSpeakerMerges`, `confirmDeletesTheClipWhenTheAudioIsGone`,
+   `mergeIntoAnUnknownTargetKeepsTheVoice`, `mergePersonsRefreshesTheKeptVoice`,
+   `refreshVoiceSkipsAMismatchedDimensionAndCapsAtFifty`, `recentPersonsOrdersByLatestConfirmedMeeting`,
+   `PipelineIntegrationTests.confirmThenReassignKeepsTheClipAndMovesTheVoice`.
+   `git diff --exit-code Tests/Fixtures` clean. Done: Linux `StenoCoreTests` and the `package` job.
+3. **WP3 `feat(core): retention sweep removes named speakers' clips`.** Core change 5. Re-pin
+   `removesMasterSidecarsAndMixdownButNeverClipsOrStrangers` →
+   `removesMasterSidecarsMixdownAndConfirmedClipsButNeverUnconfirmedClipsOrStrangers`; add
+   `anUndeletableClipKeepsExpiresAtAndTheClipColumn`; `retentionZeroSweep…KeepsTheSampleClips` stays
+   green (fresh clips are unconfirmed). Depends on the retention plan's step 2 (`expiredAssets` joining
+   the meeting state) when that lands first; otherwise builds on today's query. Must be on `main`
+   before any release that contains WP2.
+4. **WP4 `fix(adapters): drop a meeting's line from pages of removed persons`.** Core change 7. Test
+   `redeliverAfterReassignmentRemovesTheOldPersonLine` (bytes outside the block intact).
+5. **WP5 `feat(core): ranked speaker options and excerpts`.** Core change 6. `SpeakerOptionsTests`:
+   order, the suggested person not repeated under recent, a person owning another speaker here listed
+   once as "In this meeting", the speaker's own person excluded, "jerome" finds Jérôme, Create hidden
+   for a matching name and for whitespace, LLM guess as a person when it exists, nothing for a nil or
+   empty guess, a query searches all persons. `SpeakerExcerptsTests`: two-segment join, nil range →
+   longest, no segments → "", partial overlap → "…", 160-character cap.
+6. **WP6 `refactor(macos): clear pending reviews from the store`.** Decision 1, controller half; the
+   sheet keeps working. Add `testSpeakersNeedReviewClearsWhenTheLastSpeakerIsConfirmed`; keep the
+   ghost half of the existing test.
+7. **WP7 `feat(macos): inline speakers in the header`.** Everything under App changes except the
+   transcript trigger, after spike S1 (a day: keyboard in a popover, Escape order, one `.popover` from
+   a deep `LazyVStack` row). `SpeakersViewModelTests` replaces `SpeakerReviewViewModelTests`,
+   re-homing `testAssignAttendeeCreatesPersonWithEmail`, `testBlankNamesAndUnknownSpeakersAreIgnored`,
+   `testNamingCreatesAPersonAndConfirms`, the LLM suggestion test (as an option),
+   `testPlayingAMissingClipReportsAnError` → `canPlay == false`; drop the Skip and Merge-target tests;
+   self-merge becomes "assigning the own person is a no-op"; add
+   `testRowsUpdateFromTheObservationAfterAssign`, `testBuildingOptionsWritesNothing`.
+   `SpeakerPickerStateTests` (pre-filled Return → the suggested person, empty Return → nil, Down past
+   the end stays). `MeetingDetailViewModelTests`: drop `showsSpeakerReview`; add
+   `testClosingThePickerRedeliversOnceAfterChanges` (obsidian settings arranged),
+   `testClosingWithoutChangesDoesNotRedeliver`, `testDisappearFlushesAPendingRedeliver`, and spike S2
+   as a test (redeliver while `rerunSummary` is in flight: one delivery after the run, no error).
+   `AvatarTests` initials. `LaunchSmokeTests` `[ci hosted]`: `speakers-row` reads "1 to confirm",
+   click, `app.popovers.firstMatch` exists, the Speaker 1 row shows "Nicolai", clicking the Speaker 2
+   row shows its field with value "Jérôme". Done when
+   `grep -rn 'SpeakerReviewSheet\|showsSpeakerReview\|review-speakers\|clusterConfidence' apps/macos/Steno`
+   is empty and `ThemeTokensTests` is unchanged.
+8. **WP8 `feat(macos): speaker picker on transcript names`.** Transcript trigger with hover state in
+   the trigger and one `presentedSpeakerID`. `TabTextSnapshotTests` and
+   `git diff --exit-code Tests/Fixtures/snapshots/macos` unchanged; the smoke test clicks the Speaker 1
+   trigger, asserts the popover and attaches `XCUIScreen.main.screenshot()` with `.keepAlways`.
 
 ## Verification
 
-- CI: `.github/workflows/swift-ci.yml` jobs `package`, `app` and `ui-smoke` (all on
-  `vars.MACOS_RUNS_ON`, `macos-15` when unset) green for every step.
-- Local core: `docker run --rm -v "$PWD":/work -w /work steno-swift:6.1 swift test
-  --filter StenoCoreTests` (memory: the image exists on atlas).
+- CI: `.github/workflows/swift-ci.yml` jobs `package` and `app` (on `vars.MACOS_RUNS_ON`, `macos-15`
+  when unset) and `ui-smoke` (hosted `macos-15`) green for every step.
+- Local core: `docker run --rm -v "$PWD":/work -w /work steno-swift:6.1 swift test --filter
+  StenoCoreTests` (the image exists on atlas).
 - Local app: `xcodegen generate --spec apps/macos/project.yml`, `xcodebuild -project
   apps/macos/Steno.xcodeproj -scheme StenoTests test -destination platform=macOS,arch=arm64
   CODE_SIGN_IDENTITY= CODE_SIGN_STYLE=Manual DEVELOPMENT_TEAM=`, then the app with
@@ -298,36 +331,41 @@ Each step is one PR; the app cannot ship step 2 before step 1 is on `main`.
 
 ## Acceptance
 
-1. A processed meeting with two unnamed speakers shows "Speakers · 2 unnamed" in the header;
-   clicking it opens the popover with the first field focused and the voice match highlighted.
-2. Typing "Ph", Return, names the speaker "Philipp Schröder" if that person exists, else
-   offers Create; the transcript and summary show the name before the popover closes.
-3. Clicking a named speaker in the transcript and picking someone else changes every turn of
-   that speaker and leaves the first person's `sampleCount` where it was before the mistake.
-4. Picking a person who already owns Speaker 1 for Speaker 3 leaves one speaker with all
+1. `[ci hosted]` A processed meeting with an unnamed speaker shows "Speakers · Nicolai · 1 to confirm"
+   in the header; clicking it opens the popover; clicking the unnamed row shows the field with the
+   suggested name pre-filled.
+2. `[ci]` Typing "Ph", Return, names the speaker "Philipp Schröder" if that person exists, else offers
+   Create; the transcript and summary show the name before the popover closes.
+3. `[ci]` Clicking a named speaker in the transcript and picking someone else changes every turn of
+   that speaker and restores the first person's voice exactly to what it was before the mistake.
+4. `[ci]` Picking a person who already owns Speaker 1 for Speaker 3 leaves one speaker with all
    segments; the popover drops the row.
-5. Play works on a named speaker; after the retention sweep removed the audio, the button
-   is gone and the name still edits.
-6. The vault re-exports once after a burst of three changes; leaving the meeting mid-debounce
-   exports immediately; no change, no export.
-7. No `.sheet` for speakers, no "Review speakers" button, no `confidence` text anywhere in
+5. `[manual]` An unnamed speaker of a retention-0 meeting still plays after processing; a named speaker
+   plays while the audio exists; after the sweep removed the audio the button is gone and the name
+   still edits.
+6. `[ci]` The vault re-exports once per popover session after a burst of changes; leaving the meeting
+   with the popover open exports immediately; no change, no export.
+7. `[ci]` No `.sheet` for speakers, no "Review speakers" button, no `confidence` text anywhere in
    `apps/macos/Steno`.
 
 ## Reviewer trap
 
-`confirm` that still deletes the clip or still enrols on a same-person call; `withdraw`
-implemented as "set embedding nil" for every count; a picker that commits on every keystroke
-(`assign` must run on Return or click only); the transcript trigger re-rendering the whole
-`LazyVStack` on hover (hover state lives in the trigger, not the tab); `TabText` changed to
-carry picker text.
+`confirm` that still deletes the clip while the audio exists, or still enrols or adjusts a voice
+instead of recomputing it; the merge-on-same-person rule decided in the view model instead of inside
+`confirm`; `pendingReviews` cleared from a view; a picker that commits on every keystroke (`select`
+runs on Return or click only); the transcript trigger re-rendering the whole `LazyVStack` on hover
+(hover state lives in the trigger); `TabText` changed to carry picker text; Recent built from an
+outer join.
 
 ## Deferred
 
+- Per-person avatar hues (needs the shared achromatic decision reopened).
+- Playing a range of the recording when the clip file is gone.
+- Merging two unnamed clusters before either has a name.
+- Tab between popover rows.
+- Refreshing a person's voice when a meeting is deleted (samples drop out at the next refresh).
 - Longer sample clips for speakers with only short turns (pad with the next-longest range) in
   `SampleClipPicker`.
 - A People screen with cross-meeting merge and email editing.
-- Jamie's "turn automatic identification off" preference; `speakerMatchThreshold` stays a
-  Settings field.
-- Pre-filling a `.suggested` name in the field itself (Jamie shows recognised names filled
-  in); v1 highlights it as the first row instead, so a wrong voice match needs one keystroke
-  to override rather than a delete.
+- Jamie's "turn automatic identification off" preference; `speakerMatchThreshold` stays a Settings
+  field.
