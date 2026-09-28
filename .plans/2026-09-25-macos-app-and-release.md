@@ -316,8 +316,8 @@ Manual checklist `[manual]`, run by a human on a Mac before tagging v1, recorded
    scratchpad text survives relaunch.
 7. Obsidian folder matches the documented layout; re-export overwrites only app-written files.
 8. Retention `0` deletes audio after processing but keeps the speaker clips until confirmed; keep toggle prevents
-   deletion. (2026-09-28: a confirmed speaker's clip is removed by the next sweep with the audio; an unconfirmed
-   speaker's clip stays.)
+   deletion, and a failed export defers deletion. (2026-09-28: a confirmed speaker's clip is removed by the next
+   sweep with the audio; an unconfirmed speaker's clip stays.)
 9. Phone pairing: local network prompt on first pairing; a phone recording arrives and is processed.
 10. Sparkle: an installed older build offers and installs the new version; after relaunch no permission re-prompts.
 
@@ -386,6 +386,10 @@ Recorded 2026-09-25 while implementing steps 1 to 13 in PR #75 (`feat/macos-app`
 - **`mobile-cd.yml`** also guards `setup-xcode` on `runner.environment == 'github-hosted'`, the same pattern as the other macOS jobs.
 - **Tests** are XCTest (`@MainActor` classes with async methods) in the hostless bundle; the handover test identity import is repeated in `TestSupport` because the app cannot import the handover test target. Timers run on `ManualClock`; store observations and pipeline runs are awaited with a bounded poll.
 - **Step 14 (release rehearsal)** and every `[manual]` check remain for a human on a Mac; none were run here.
+- **Retention (2026-09-28).** The default is `.keepForever` for new installs, the detail header carries a
+  "Recording" line with the per-meeting "Keep this recording" toggle (out of the Actions menu), and Settings > Audio
+  shows the folder's disk usage next to the rule; see
+  [`2026-09-28-audio-retention-keep-forever.md`](2026-09-28-audio-retention-keep-forever.md).
 
 ### Testing pass (2026-09-25, PR #75)
 

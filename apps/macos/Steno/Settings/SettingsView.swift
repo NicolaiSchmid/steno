@@ -120,25 +120,51 @@ struct AudioSettingsView: View {
           Spacer()
           Button("Choose…") { chooseFolder() }
         }
-        Picker(
-          "Keep audio",
-          selection: .action(
-            { model.retentionMode },
-            { mode in await model.setRetention(mode: mode, days: model.retentionDays) })
-        ) {
-          ForEach(AudioSettingsViewModel.RetentionMode.allCases) { mode in
-            Text(mode.title).tag(mode)
+        HStack {
+          Text(usageText)
+            .font(.steno(Theme.TextSize.xs))
+            .foregroundStyle(Color.stenoMutedForeground)
+            .accessibilityIdentifier("recordings-usage")
+          Spacer()
+          Button("Show in Finder") {
+            NSWorkspace.shared.activateFileViewerSelecting([model.audioFolder])
           }
         }
-        if model.retentionMode == .keepDays {
-          Stepper(
-            "\(model.retentionDays) days",
-            value: .action(
-              { model.retentionDays },
-              { days in await model.setRetention(mode: .keepDays, days: days) }),
-            in: 1...3650)
+        HStack {
+          Picker(
+            "Keep recordings",
+            selection: .action(
+              { model.retentionMode },
+              { mode in await model.setRetention(mode: mode, days: model.retentionDays) })
+          ) {
+            ForEach(AudioSettingsViewModel.RetentionMode.allCases) { mode in
+              Text(mode.title(days: model.retentionDays)).tag(mode)
+            }
+          }
+          if model.retentionMode == .keepDays {
+            Stepper(
+              "Days",
+              value: .action(
+                { model.retentionDays },
+                { days in await model.setRetention(mode: .keepDays, days: days) }),
+              in: AudioSettingsViewModel.dayRange)
+            .labelsHidden()
+            .accessibilityLabel("Days")
+          }
         }
-        Text("Speaker sample clips stay until the speaker is named, whatever the retention.")
+        Text(model.footnote)
+          .font(.steno(Theme.TextSize.xs))
+          .foregroundStyle(Color.stenoFaint)
+          .fixedSize(horizontal: false, vertical: true)
+        if let kept = model.keptForever, kept > 0 {
+          Text(
+            kept == 1
+              ? "1 recording already on disk is kept as well."
+              : "\(kept) recordings already on disk are kept as well.")
+          .font(.steno(Theme.TextSize.xs))
+          .foregroundStyle(Color.stenoFaint)
+        }
+        Text("Speaker sample clips stay until the speaker is named, whatever the rule.")
           .font(.steno(Theme.TextSize.xs))
           .foregroundStyle(Color.stenoFaint)
       }
@@ -146,6 +172,14 @@ struct AudioSettingsView: View {
     }
     .formStyle(.grouped)
     .task { await model.load() }
+  }
+
+  private var usageText: String {
+    switch model.folderUsage {
+    case .measuring: "Measuring…"
+    case .bytes(let bytes): "Recordings use \(ByteCountFormatter.fileSize(bytes))"
+    case .unavailable: "Size unavailable"
+    }
   }
 
   private func chooseFolder() {
@@ -197,7 +231,7 @@ struct SpeechSettingsView: View {
           Text(asset.displayName)
             .font(.steno(Theme.TextSize.sm))
           Text(
-            "\(SpeechSettingsViewModel.formatBytes(asset.approximateBytes)) · \(asset.licence) · \(asset.sourceRepo)"
+            "\(ByteCountFormatter.fileSize(asset.approximateBytes)) · \(asset.licence) · \(asset.sourceRepo)"
           )
           .font(.steno(Theme.TextSize.xxs))
           .foregroundStyle(Color.stenoFaint)
@@ -210,7 +244,7 @@ struct SpeechSettingsView: View {
           ProgressView().controlSize(.small)
         case .installed(let bytes):
           StatusChip(
-            text: bytes.map { "Installed · \(SpeechSettingsViewModel.formatBytes($0))" }
+            text: bytes.map { "Installed · \(ByteCountFormatter.fileSize($0))" }
               ?? "Installed",
             color: Color.stenoLive)
           Button("Remove") { Task { await model.remove(asset) } }

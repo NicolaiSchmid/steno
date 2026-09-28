@@ -29,6 +29,7 @@ struct PipelineHarness {
     cleaner: any TranscriptCleaner = PassthroughCleaner(),
     summarizer: FakeSummarizer = FakeSummarizer(),
     retention: AudioRetention = .keepDays(30),
+    failDeliveriesUntil: Int = 0,
     sharedStore: MeetingStore? = nil
   ) async throws {
     directory = try Fixtures.temporaryDirectory("pipeline")
@@ -48,7 +49,8 @@ struct PipelineHarness {
     self.cleaner = cleaner
     self.summarizer = summarizer
     destination = FakeDestination(
-      root: directory.appendingPathComponent("vault", isDirectory: true))
+      root: directory.appendingPathComponent("vault", isDirectory: true),
+      failUntil: failDeliveriesUntil)
     dispatcher = FakeDeliveryDispatcher(
       store: store, destinations: [destination], now: { Self.now })
     pipeline = ProcessingPipeline(

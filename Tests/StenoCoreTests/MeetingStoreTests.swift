@@ -163,6 +163,24 @@ import Testing
     #expect(try await store.expiredAssets(now: .distantFuture).isEmpty)
   }
 
+  @Test func keepForeverSetsTheRuleAndClearsTheStampInOneWrite() async throws {
+    let store = try MeetingStore.inMemory()
+    try await store.save(SampleData.meeting())
+    let asset = SampleData.audioAsset()
+    try await store.save(asset)
+    #expect(try await store.assets() == [asset])
+    #expect(asset.expiresAt != nil)
+
+    try await store.keepForever(assetIDs: [])
+    #expect(try await store.asset(id: asset.id) == asset, "an empty list writes nothing")
+    try await store.keepForever(assetIDs: [asset.id, SampleData.uuid(999)])
+    let kept = try #require(try await store.asset(id: asset.id))
+    #expect(kept.retention == .keepForever)
+    #expect(kept.expiresAt == nil)
+    #expect(kept.url == asset.url && kept.mixdownURL == asset.mixdownURL, "URLs untouched")
+    #expect(try await store.expiredAssets(now: .distantFuture).isEmpty)
+  }
+
   @Test func deliveriesAreOneRowPerDestination() async throws {
     let store = try MeetingStore.inMemory()
     try await store.save(SampleData.meeting())

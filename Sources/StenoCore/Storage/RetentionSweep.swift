@@ -7,7 +7,11 @@ import Foundation
 /// cannot be removed (permissions, read-only volume) leaves `expiresAt` set
 /// on its asset so the next sweep retries it, and never stops the sweep
 /// from reaching the other assets; the errors are returned together. The
-/// app runs this at launch and after every processed meeting.
+/// app runs this at launch and on `MeetingEvent.retentionApplied`, which
+/// the retention stage does not post while a delivery of the meeting is
+/// still pending or failed (the asset is unstamped then). Assets of
+/// meetings still recording, queued or processing are never due
+/// (`MeetingStore.expiredAssets`).
 public struct RetentionSweep: Sendable {
   public let store: MeetingStore
 
@@ -48,5 +52,19 @@ public struct RetentionSweep: Sendable {
     }
     if !failures.isEmpty { throw Incomplete(failures: failures) }
     return removed
+  }
+
+  /// Every asset whose master file is still on disk becomes `.keepForever`
+  /// with `expiresAt` nil, in one write; Settings > Audio calls this when
+  /// the rule changes to Forever, so the safe direction needs no per-meeting
+  /// work. Assets whose master is gone are left as they are. Returns the
+  /// number of assets kept.
+  @discardableResult
+  public func keepAll() async throws -> Int {
+    let ids = try await store.assets()
+      .filter { FileManager.default.fileExists(atPath: $0.url.path) }
+      .map(\.id)
+    try await store.keepForever(assetIDs: ids)
+    return ids.count
   }
 }

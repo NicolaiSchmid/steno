@@ -20,13 +20,36 @@ final class MeetingDetailViewModel: Identifiable {
     var title: String { rawValue.capitalized }
   }
 
+  /// What the header's "Recording" line says. nil for the one case Settings
+  /// already covers: kept forever with the files present.
+  enum RecordingStatus: Equatable, Sendable {
+    /// The master file is gone (swept, or removed by hand).
+    case deleted
+    /// `expiresAt` is set; the sweep removes the files from that day on.
+    case deletes(on: Date)
+    /// A finite rule, no stamp, meeting ready, a delivery not delivered.
+    case keptUntilExportSucceeds
+    /// A finite rule, no stamp, meeting failed: re-processing needs the audio.
+    case keptProcessingFailed
+    /// A finite rule, no stamp, meeting still on its way to the retention stage.
+    case keptWhileProcessing
+  }
+
   let id: UUID
   private(set) var export: MeetingExport?
   private(set) var deliveries: [Delivery] = []
+  /// `FileManager.fileExists` on the master, rechecked whenever the export
+  /// changes.
+  private(set) var recordingFilesExist = false
+  /// `Settings.defaultRetention`, followed by `observeSettings()`.
+  private(set) var defaultRetention: AudioRetention = .keepForever
   private(set) var error: String?
   private(set) var isBusy = false
   var tab: Tab = .summary
   var showsSpeakerReview = false
+  /// Set by `toggleKeepAudio(false)` when turning the keep off would delete
+  /// the recording at the next sweep; the view asks first.
+  var confirmsDeleteNow = false
   let templates = SummaryTemplate.bundled
   static let scratchpadDebounce: Duration = .seconds(1)
 
@@ -63,9 +86,23 @@ final class MeetingDetailViewModel: Identifiable {
     do {
       for try await export in store.observeMeeting(id: id) {
         self.export = export
+        recordingFilesExist =
+          export?.audio.map { FileManager.default.fileExists(atPath: $0.url.path) } ?? false
       }
     } catch {
       self.error = "Meeting could not be loaded: \(error)"
+    }
+  }
+
+  /// Follows Settings so the keep toggle appears and disappears with the
+  /// default rule (a third view `.task`).
+  func observeSettings() async {
+    do {
+      for try await settings in settings.observe() {
+        defaultRetention = settings.defaultRetention
+      }
+    } catch {
+      self.error = "Settings could not be loaded: \(error)"
     }
   }
 
@@ -150,9 +187,72 @@ final class MeetingDetailViewModel: Identifiable {
     await run("Re-export") { try await self.pipeline().redeliver(meetingID: self.id) }
   }
 
+  // MARK: - Recording line
+
+  var recordingStatus: RecordingStatus? {
+    guard let export, let asset = export.audio else { return nil }
+    guard recordingFilesExist else { return .deleted }
+    if asset.retention == .keepForever { return nil }
+    if let expiresAt = asset.expiresAt { return .deletes(on: expiresAt) }
+    switch export.meeting.state {
+    case .ready:
+      // All delivered and still unstamped: the retention stage is about to
+      // run.
+      return deliveriesSettled(deliveries) ? .keptWhileProcessing : .keptUntilExportSucceeds
+    case .failed:
+      return .keptProcessingFailed
+    case .recording, .queued, .processing:
+      return .keptWhileProcessing
+    }
+  }
+
+  /// The line's text; the date in the user's locale, "today" once the
+  /// expiry falls on or before the current day. Never past tense for a
+  /// date to come.
+  var recordingStatusText: String? {
+    guard let status = recordingStatus else { return nil }
+    switch status {
+    case .deleted: return "Recording deleted"
+    case .deletes(let date):
+      let today = now()
+      if date <= today || Calendar.current.isDate(date, inSameDayAs: today) {
+        return "Deletes today"
+      }
+      return "Deletes on \(date.formatted(date: .abbreviated, time: .omitted))"
+    case .keptUntilExportSucceeds: return "Kept until the export succeeds"
+    case .keptProcessingFailed: return "Kept; processing failed"
+    case .keptWhileProcessing: return "Kept while processing"
+    }
+  }
+
+  /// The per-meeting keep is offered only when the default does not keep
+  /// everything already and there is a file to keep.
+  var showsKeepToggle: Bool {
+    defaultRetention != .keepForever && recordingFilesExist && export?.audio != nil
+  }
+
+  var keepsAudio: Bool {
+    export?.audio?.retention == .keepForever
+  }
+
+  /// The toggle's action. On keeps at once; off asks first when the default
+  /// rule would delete the recording at the next sweep ("Until processed,
+  /// then delete" with every export done), else applies at once.
+  func toggleKeepAudio(_ keep: Bool) async {
+    if !keep, await wouldDeleteNow() {
+      confirmsDeleteNow = true
+      return
+    }
+    await setKeepAudio(keep)
+  }
+
   /// `keep` sets `.keepForever` and clears `expiresAt`; off restores the
-  /// default retention from Settings with a fresh expiry from now.
+  /// default retention from Settings and stamps a fresh expiry from now
+  /// only when every delivery of the meeting is `.delivered` (or there is
+  /// none), the pipeline's own guard. A stamp posts `retentionApplied` so
+  /// the app's sweep runs.
   func setKeepAudio(_ keep: Bool) async {
+    confirmsDeleteNow = false
     do {
       guard var asset = try await store.asset(meetingID: id) else { return }
       if keep {
@@ -161,16 +261,29 @@ final class MeetingDetailViewModel: Identifiable {
       } else {
         let retention = try await settings.load().defaultRetention
         asset.retention = retention
-        asset.expiresAt = retention.expiry(from: now())
+        let deliveries = try await store.deliveries(meetingID: id)
+        asset.expiresAt = deliveriesSettled(deliveries) ? retention.expiry(from: now()) : nil
       }
       try await store.save(asset)
+      if asset.expiresAt != nil {
+        await store.events.post(.retentionApplied(meetingID: id))
+      }
     } catch {
       self.error = "Retention could not be changed: \(error)"
     }
   }
 
-  var keepsAudio: Bool {
-    export?.audio?.retention == .keepForever
+  private func wouldDeleteNow() async -> Bool {
+    guard let retention = try? await settings.load().defaultRetention,
+      retention == .deleteAfterProcessing
+    else { return false }
+    let deliveries = (try? await store.deliveries(meetingID: id)) ?? []
+    return deliveriesSettled(deliveries)
+  }
+
+  /// Every row `.delivered`, or no destination at all.
+  private func deliveriesSettled(_ deliveries: [Delivery]) -> Bool {
+    deliveries.allSatisfy { $0.status == .delivered }
   }
 
   /// Debounced on the injected clock with one sleeper: edits within the

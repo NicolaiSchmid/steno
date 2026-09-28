@@ -275,4 +275,82 @@ import Testing
       collected[11] == .retentionApplied(meetingID: meeting.id),
       "after the retention stage's progress, before the re-export")
   }
+
+  /// Deletion waits for the export. With `includeAudio` on and the vault
+  /// missing, the first delivery fails and the audio stays unstamped under
+  /// "delete after processing"; once the vault exists, Re-export copies the
+  /// mixdown into it and only then is the expiry written.
+  @Test func aFailedExportDefersDeletionUntilRedeliverCopiesTheAudio() async throws {
+    let directory = try Fixtures.temporaryDirectory("e2e-retention")
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let now = SampleData.updatedAt
+    let store = try MeetingStore.inMemory()
+    let settingsStore = SettingsStore(writer: store.writer)
+    let vault = directory.appendingPathComponent("vault", isDirectory: true)
+    var settings = Settings()
+    settings.audioFolder = directory.appendingPathComponent("audio", isDirectory: true)
+    settings.defaultRetention = .deleteAfterProcessing
+    settings.obsidian = ObsidianSettings(vaultPath: vault.path, includeAudio: true)
+    try await settingsStore.save(settings)
+    for person in SampleData.persons() { try await store.save(person) }
+
+    let dispatcher = DeliveryCoordinator(
+      store: store, settings: settingsStore,
+      destinations: { settings in
+        settings.obsidian.map { [ObsidianFolderDestination(settings: $0, timeZone: Self.berlin)] }
+          ?? []
+      },
+      now: { now })
+    let pipeline = ProcessingPipeline(
+      dependencies: PipelineDependencies(
+        decoder: Self.decoder,
+        speechEngine: FakeSpeechEngine(),
+        diarizer: FakeDiarizer(),
+        speakerMemory: CosineSpeakerMemory(store: store),
+        cleaner: PassthroughCleaner(),
+        summarizer: FakeSummarizer(),
+        dispatcher: dispatcher,
+        store: store,
+        settings: settingsStore,
+        now: { now }))
+
+    let meeting = Meeting(
+      id: SampleData.meetingID, title: "Produktstrategie", startedAt: SampleData.startedAt,
+      duration: 6, source: .macCall, calendarEventID: "event-1", state: .recording,
+      createdAt: SampleData.createdAt, updatedAt: SampleData.createdAt)
+    let layout = RecordingLayout(audioFolder: settings.audioFolder, meetingID: meeting.id)
+    try layout.createDirectories()
+    var asset = try Self.makeAsset(layout: layout, meetingID: meeting.id)
+    asset.retention = .deleteAfterProcessing
+    try await pipeline.enqueue(meeting, asset: asset)
+    await pipeline.waitUntilIdle()
+
+    #expect(try await store.meeting(id: meeting.id)?.state == .ready)
+    #expect(try await store.deliveries(meetingID: meeting.id).map(\.status.kind) == [.failed])
+    let mixdown = layout.mixdown(Self.decoder.mixdownFormat)
+    #expect(FileManager.default.fileExists(atPath: mixdown.path))
+    let deferred = try #require(try await store.asset(id: asset.id))
+    #expect(deferred.expiresAt == nil, "the export needs the audio, so nothing expires")
+    let sweep = RetentionSweep(store: store)
+    #expect(try await sweep.run(now: .distantFuture).isEmpty)
+    #expect(FileManager.default.fileExists(atPath: mixdown.path))
+
+    try FileManager.default.createDirectory(at: vault, withIntermediateDirectories: true)
+    try await pipeline.redeliver(meetingID: meeting.id)
+    let delivery = try #require(try await store.deliveries(meetingID: meeting.id).first)
+    #expect(delivery.status == .delivered)
+    let receipt = try #require(delivery.receipt)
+    let copied = try #require(
+      receipt.files.first { $0.relativePath.hasSuffix("/\(mixdown.lastPathComponent)") })
+    let copy = vault.appendingPathComponent(copied.relativePath)
+    #expect(try Data(contentsOf: copy) == (try Data(contentsOf: mixdown)))
+    let stamped = try #require(try await store.asset(id: asset.id))
+    #expect(stamped.expiresAt == now, "stamped only after the audio reached the vault")
+
+    let removed = try await sweep.run(now: now)
+    #expect(removed.contains(mixdown) && removed.contains(asset.url))
+    #expect(!FileManager.default.fileExists(atPath: mixdown.path))
+    #expect(FileManager.default.fileExists(atPath: copy.path), "the vault copy stays")
+    #expect(try await store.asset(id: asset.id)?.expiresAt == nil)
+  }
 }

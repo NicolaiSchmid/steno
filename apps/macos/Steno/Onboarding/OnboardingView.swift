@@ -16,6 +16,13 @@ struct OnboardingView: View {
         Text("A few permissions before the first recording. Audio never leaves this Mac.")
           .font(.steno(Theme.TextSize.sm))
           .foregroundStyle(Color.stenoMutedForeground)
+        if let sentence = model.retentionSentence {
+          Text(sentence)
+            .font(.steno(Theme.TextSize.xs))
+            .foregroundStyle(Color.stenoFaint)
+            .fixedSize(horizontal: false, vertical: true)
+            .accessibilityIdentifier("onboarding-retention")
+        }
       }
       VStack(spacing: Theme.Space.sm) {
         ForEach(model.steps) { step in

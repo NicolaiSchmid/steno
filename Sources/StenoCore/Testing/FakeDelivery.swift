@@ -9,17 +9,28 @@ public struct FakeDestination: Destination, Sendable {
   public let root: URL
   public var validateFailure: (any Error & Sendable)?
   public var deliverFailure: (any Error & Sendable)?
+  /// The first `failUntil` deliveries throw `Transient`; the rest succeed.
+  /// Counted on `deliveries`, so a value type built once by a harness can
+  /// still recover after the fact.
+  public var failUntil: Int
   public let deliveries = CallLog<MeetingExport>()
+
+  /// What a delivery within `failUntil` throws.
+  public struct Transient: Error, Sendable, Equatable {
+    public var attempt: Int
+  }
 
   public init(
     id: String = "fake", root: URL,
     validateFailure: (any Error & Sendable)? = nil,
-    deliverFailure: (any Error & Sendable)? = nil
+    deliverFailure: (any Error & Sendable)? = nil,
+    failUntil: Int = 0
   ) {
     self.id = id
     self.root = root
     self.validateFailure = validateFailure
     self.deliverFailure = deliverFailure
+    self.failUntil = failUntil
   }
 
   public func validate() async throws {
@@ -31,6 +42,8 @@ public struct FakeDestination: Destination, Sendable {
   {
     await deliveries.record(meeting)
     if let deliverFailure { throw deliverFailure }
+    let attempt = await deliveries.count
+    if attempt <= failUntil { throw Transient(attempt: attempt) }
     let folder = previous?.folder ?? meeting.meeting.id.uuidString
     let directory = root.appendingPathComponent(folder, isDirectory: true)
     try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)

@@ -537,3 +537,9 @@ app adopts them after #75 merges):
 - `MeetingEvent.retentionApplied(meetingID:)` is posted by the retention stage after `expiresAt`
   is written and is the app's sweep trigger; the `.ready` row change precedes `deliver` and
   `retention` and is not one.
+- `retention` is delivery-aware (2026-09-28, [`2026-09-28-audio-retention-keep-forever.md`](2026-09-28-audio-retention-keep-forever.md)):
+  it stamps and posts only when every `Delivery` row is `.delivered` (or there is none); otherwise the
+  asset stays unstamped and `redeliver` or `rerunSummary` stamp it after a later delivery succeeds,
+  never restamping an asset that already carries an expiry. `expiredAssets` skips meetings still
+  recording, queued or processing. `MeetingStore.keepForever(assetIDs:)` and `RetentionSweep.keepAll()`
+  rescue every recording on disk when the default switches to Forever.

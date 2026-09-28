@@ -8,7 +8,7 @@ import Testing
   @Test func defaultsAreTheProgramsDefaults() {
     let settings = Settings()
     #expect(settings.defaultTemplateID == "default")
-    #expect(settings.defaultRetention == .keepDays(30))
+    #expect(settings.defaultRetention == .keepForever, "a new install keeps every recording")
     #expect(settings.speakerMatchThreshold == 0.60)
     #expect(settings.llmContextTokens == 32_000)
     #expect(settings.obsidian == nil)
@@ -22,6 +22,28 @@ import Testing
     let store = try MeetingStore.inMemory()
     let settings = SettingsStore(writer: store.writer)
     #expect(try await settings.load() == Settings())
+    #expect(try await settings.load().defaultRetention == .keepForever)
+  }
+
+  /// Each of the three rules survives save and load; an install that stored
+  /// `{"keepDays":30}` under the old default keeps it.
+  @Test func everyRetentionRuleRoundTrips() async throws {
+    let store = try MeetingStore.inMemory()
+    let settings = SettingsStore(writer: store.writer)
+    for (rule, encoded) in [
+      (AudioRetention.keepForever, #""keepForever""#),
+      (.keepDays(30), #"{"keepDays":30}"#),
+      (.deleteAfterProcessing, #""deleteAfterProcessing""#),
+    ] {
+      var current = Settings()
+      current.defaultRetention = rule
+      try await settings.save(current)
+      #expect(try await settings.load().defaultRetention == rule)
+      let row = try await store.writer.read { db in
+        try SettingRow.filter(SettingRow.Columns.key == "defaultRetention").fetchOne(db)
+      }
+      #expect(row?.value == encoded, "\(rule)")
+    }
   }
 
   @Test func saveThenLoadRoundTrips() async throws {
@@ -55,7 +77,7 @@ import Testing
     #expect(settings.llmModel == "gpt")
     #expect(settings.launchAtLogin == true)
     #expect(settings.defaultTemplateID == "default")
-    #expect(settings.defaultRetention == .keepDays(30))
+    #expect(settings.defaultRetention == .keepForever)
     #expect(settings.speakerMatchThreshold == 0.60)
     #expect(settings.llmContextTokens == 32_000)
     #expect(settings.obsidian == nil)

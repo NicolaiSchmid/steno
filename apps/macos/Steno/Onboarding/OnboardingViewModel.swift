@@ -1,9 +1,11 @@
 import Foundation
+import StenoCore
 
 /// Permission onboarding: microphone, system audio (both required), then
 /// calendar (optional) and local network (optional; the prompt comes with
 /// the first phone pairing, so this step only explains). Done when every
-/// required step is granted.
+/// required step is granted. Under the intro, one sentence says what
+/// happens to the recordings under the stored retention rule.
 @MainActor
 @Observable
 final class OnboardingViewModel {
@@ -17,16 +19,42 @@ final class OnboardingViewModel {
   private(set) var steps = PermissionKind.allCases.map { Step(kind: $0, state: .unknown) }
   private(set) var requesting: PermissionKind?
   private(set) var skipped: Set<PermissionKind> = []
+  /// What happens to recordings under the stored rule and where to change
+  /// it; nil until `load()` ran with a settings store.
+  private(set) var retentionSentence: String?
   private let permissions: any PermissionsChecking
+  private let settings: SettingsStore?
 
-  init(permissions: any PermissionsChecking) {
+  init(permissions: any PermissionsChecking, settings: SettingsStore? = nil) {
     self.permissions = permissions
+    self.settings = settings
+  }
+
+  /// Permissions and the retention sentence from the app's environment.
+  convenience init(environment: AppEnvironment) {
+    self.init(permissions: environment.permissions, settings: environment.settings)
   }
 
   func load() async {
     for index in steps.indices {
       steps[index].state = await permissions.state(of: steps[index].kind)
     }
+    if let settings, let loaded = try? await settings.load() {
+      retentionSentence = Self.retentionSentence(for: loaded)
+    }
+  }
+
+  /// One sentence on what the rule does to the files, then where to change
+  /// it. The days and delete sentences are the Audio tab's footnotes.
+  static func retentionSentence(for settings: Settings) -> String {
+    let rule =
+      switch settings.defaultRetention {
+      case .keepForever:
+        "Recordings are kept forever in \((settings.audioFolder.path as NSString).abbreviatingWithTildeInPath)."
+      case .keepDays, .deleteAfterProcessing:
+        settings.defaultRetention.footnote
+      }
+    return rule + " Change this any time in Settings > Audio."
   }
 
   /// The first step that is neither granted nor skipped; the last one when

@@ -144,4 +144,80 @@ import Testing
     #expect(!FileManager.default.fileExists(atPath: system.path))
     #expect(try await store.asset(id: asset.id)?.expiresAt == nil)
   }
+
+  /// A stamp on a meeting that is still recording, queued or processing is
+  /// never acted on; the same asset is swept once the meeting settles.
+  @Test func aMeetingStillInFlightIsNotSweptUntilItSettles() async throws {
+    let directory = try Fixtures.temporaryDirectory()
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let store = try MeetingStore.inMemory()
+    try await store.save(SampleData.meeting(state: .processing))
+    let master = directory.appendingPathComponent("master.caf")
+    try Data([1]).write(to: master)
+    let asset = AudioAsset(
+      id: SampleData.uuid(70), meetingID: SampleData.meetingID, url: master,
+      format: .caf48kFloat32, lanes: [.mixed], retention: .deleteAfterProcessing,
+      expiresAt: SampleData.updatedAt)
+    try await store.save(asset)
+    let sweep = RetentionSweep(store: store)
+    for state in [MeetingState.recording, .queued, .processing] {
+      try await store.setState(state, meetingID: SampleData.meetingID, now: SampleData.updatedAt)
+      #expect(try await store.expiredAssets(now: .distantFuture).isEmpty, "\(state)")
+      #expect(try await sweep.run(now: .distantFuture).isEmpty, "\(state)")
+      #expect(FileManager.default.fileExists(atPath: master.path), "\(state)")
+      #expect(try await store.asset(id: asset.id)?.expiresAt == SampleData.updatedAt, "\(state)")
+    }
+    try await store.setState(.ready, meetingID: SampleData.meetingID, now: SampleData.updatedAt)
+    #expect(try await store.expiredAssets(now: .distantFuture) == [asset])
+    #expect(try await sweep.run(now: SampleData.updatedAt) == [master])
+    #expect(!FileManager.default.fileExists(atPath: master.path))
+    #expect(try await store.asset(id: asset.id)?.expiresAt == nil)
+
+    // A failed meeting settles too: its audio follows the stamp.
+    try Data([2]).write(to: master)
+    var restamped = asset
+    restamped.expiresAt = SampleData.updatedAt
+    try await store.save(restamped)
+    try await store.setState(
+      .failed(reason: "boom"), meetingID: SampleData.meetingID, now: SampleData.updatedAt)
+    #expect(try await sweep.run(now: SampleData.updatedAt) == [master])
+  }
+
+  /// Switching Settings > Audio to Forever keeps every recording still on
+  /// disk: rule and stamp change together, so the next Re-export (the
+  /// deferred-case stamp) leaves it alone. An asset whose master is gone is
+  /// not rewritten.
+  @Test func keepAllRescuesOnlyAssetsWithFiles() async throws {
+    let harness = try await PipelineHarness()
+    defer { harness.cleanUp() }
+    let (meeting, asset) = try harness.meeting(source: .macInPerson)
+    try await harness.pipeline.enqueue(meeting, asset: asset)
+    await harness.pipeline.waitUntilIdle()
+    let stamped = try #require(try await harness.store.asset(id: asset.id))
+    #expect(stamped.expiresAt == PipelineHarness.now.addingTimeInterval(30 * 86_400))
+
+    var other = SampleData.meeting()
+    other.id = SampleData.uuid(2)
+    try await harness.store.save(other)
+    let gone = AudioAsset(
+      id: SampleData.uuid(71), meetingID: other.id,
+      url: harness.directory.appendingPathComponent("gone.caf"), format: .caf48kFloat32,
+      lanes: [.mixed], retention: .keepDays(30), expiresAt: PipelineHarness.now)
+    try await harness.store.save(gone)
+
+    let sweep = RetentionSweep(store: harness.store)
+    #expect(try await sweep.keepAll() == 1)
+    let rescued = try #require(try await harness.store.asset(id: asset.id))
+    #expect(rescued.retention == .keepForever)
+    #expect(rescued.expiresAt == nil)
+    #expect(try await harness.store.asset(id: gone.id) == gone, "no file, no rewrite")
+
+    try await harness.pipeline.redeliver(meetingID: meeting.id)
+    let afterReexport = try #require(try await harness.store.asset(id: asset.id))
+    #expect(afterReexport.retention == .keepForever)
+    #expect(afterReexport.expiresAt == nil, "a rescued asset is never restamped")
+    #expect(try await sweep.run(now: .distantFuture).isEmpty)
+    #expect(FileManager.default.fileExists(atPath: asset.url.path))
+    #expect(try await sweep.keepAll() == 1, "idempotent")
+  }
 }
