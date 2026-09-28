@@ -7,9 +7,10 @@ import StenoCore
 /// name and shows one prompt at a time. Suppressed while Steno records and
 /// when `Settings.meetingDetectionEnabled` is off. The detector keeps
 /// running through Steno's own recordings: it ignores Steno's PID, and
-/// `handle` drops events while recording, so a Stop during a call that is
-/// still holding the microphone never re-prompts (a restarted detector
-/// would report that microphone as newly opened).
+/// `handle` forwards events while recording to the recorder's auto-stop
+/// policy instead of prompting, so a Stop during a call that is still
+/// holding the microphone never re-prompts (a restarted detector would
+/// report that microphone as newly opened).
 @MainActor
 @Observable
 final class DetectionController {
@@ -23,8 +24,12 @@ final class DetectionController {
   private let environment: AppEnvironment
   private var eventsTask: Task<Void, Never>?
   private var settingsTask: Task<Void, Never>?
-  /// Set by `AppController`: starts a `.call` recording.
-  var startRecording: (() async -> Void)?
+  /// Set by `AppController`: starts a `.call` recording for the named app
+  /// (nil when the prompt could not name it).
+  var startRecording: ((String?) async -> Void)?
+  /// Set by `AppController`: the recorder's auto-stop policy, fed with both
+  /// events while a recording runs.
+  var microphoneActivity: ((RecordingController.MicrophoneActivity) async -> Void)?
   /// Resolves a bundle id to a display name; the live one asks NSWorkspace.
   var appName: @MainActor (String?) -> String = DetectionController.liveAppName
 
@@ -70,21 +75,28 @@ final class DetectionController {
 
   /// The decision the tests pin: an opened microphone shows a prompt only
   /// when detection is on, nothing is recording and no prompt is up; a
-  /// released microphone dismisses the prompt.
+  /// released microphone dismisses the prompt. While recording, both events
+  /// go to the recorder instead, with the name resolved here.
   func handle(_ event: MeetingDetector.Event) async {
     switch event {
     case .microphoneOpened(let bundleID, _):
-      guard enabled, !isRecording, prompt == nil else { return }
+      let callApp: String? = bundleID == nil ? nil : appName(bundleID)
+      if isRecording {
+        await microphoneActivity?(.opened(appName: callApp))
+        return
+      }
+      guard enabled, prompt == nil else { return }
       let prompt = DetectionPromptViewModel(appName: appName(bundleID), clock: environment.clock)
       prompt.onClose = { [weak self] outcome in
         guard let self else { return }
         self.prompt = nil
-        if outcome == .started { await self.startRecording?() }
+        if outcome == .started { await self.startRecording?(callApp) }
       }
       self.prompt = prompt
       prompt.begin()
     case .microphoneReleased:
       await prompt?.dismiss()
+      if isRecording { await microphoneActivity?(.released) }
     }
   }
 

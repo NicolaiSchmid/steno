@@ -43,6 +43,33 @@ extension AudioLane {
   }
 }
 
+extension RecordingEndReason {
+  /// The meeting header's end-reason row. `.manual` says nothing: the user
+  /// was there.
+  var sentence: String? {
+    switch self {
+    case .manual:
+      nil
+    case .callEnded(let appName):
+      "Ended automatically when \(appName ?? "the call app") closed the microphone."
+    case .deviceLost:
+      "Ended because an audio device disappeared. The recording up to that point was kept."
+    case .quit:
+      "Ended when Steno quit."
+    }
+  }
+
+  /// What the list row appends to its meta line; nil when there is nothing
+  /// worth a glance.
+  var listSuffix: String? {
+    switch self {
+    case .callEnded: "ended automatically"
+    case .deviceLost: "device lost"
+    case .manual, .quit: nil
+    }
+  }
+}
+
 extension LanguageTag {
   /// "German" for `de`, the tag itself when the locale has no name for it.
   func localizedName(in locale: Locale = .current) -> String {

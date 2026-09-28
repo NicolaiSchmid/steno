@@ -42,7 +42,12 @@ final class AppController {
     self.recorder = RecordingController(environment: environment)
     self.menuBar = MenuBarViewModel(environment: environment)
     self.detection = DetectionController(environment: environment)
-    detection.startRecording = { [weak self] in await self?.recorder.start(mode: .call) }
+    detection.startRecording = { [weak self] callApp in
+      await self?.recorder.start(mode: .call, callApp: callApp)
+    }
+    detection.microphoneActivity = { [weak self] event in
+      await self?.recorder.microphoneActivity(event)
+    }
     recorder.recordingDidChange = { [weak self] recording in
       await self?.detection.recordingDidChange(recording)
     }
@@ -197,11 +202,12 @@ final class AppController {
   }
 
   /// Quit: a recording that is still starting is allowed to reach
-  /// `.recording` (or fail) first, then stopped and enqueued like any other;
-  /// then the detector, the handover listener and every observation end.
+  /// `.recording` (or fail) first, then stopped with `.quit` as its reason
+  /// and enqueued like any other; then the detector, the handover listener
+  /// and every observation end.
   func shutdown() async {
     await recorder.awaitSettled()
-    if case .recording = recorder.recording { await recorder.stop() }
+    if case .recording = recorder.recording { await recorder.stop(reason: .quit) }
     await detection.stop()
     if let handover = environment.handover { await handover.stop() }
     for observer in observers { observer.cancel() }

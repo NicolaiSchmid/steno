@@ -25,6 +25,35 @@ final class MeetingDetailViewModelTests: XCTestCase {
     return model
   }
 
+  /// The header's end-reason row and the list row's suffix: one string per
+  /// reason, from `Labels.swift`; `.manual` shows nothing. The stored reason
+  /// reaches the model through the export like every other column.
+  func testEndReasonCopy() async throws {
+    XCTAssertNil(RecordingEndReason.manual.sentence)
+    XCTAssertEqual(
+      RecordingEndReason.callEnded(appName: "Zen").sentence,
+      "Ended automatically when Zen closed the microphone.")
+    XCTAssertEqual(
+      RecordingEndReason.callEnded(appName: nil).sentence,
+      "Ended automatically when the call app closed the microphone.")
+    XCTAssertEqual(
+      RecordingEndReason.deviceLost.sentence,
+      "Ended because an audio device disappeared. The recording up to that point was kept.")
+    XCTAssertEqual(RecordingEndReason.quit.sentence, "Ended when Steno quit.")
+    XCTAssertEqual(RecordingEndReason.callEnded(appName: "Zen").listSuffix, "ended automatically")
+    XCTAssertEqual(RecordingEndReason.deviceLost.listSuffix, "device lost")
+    XCTAssertNil(RecordingEndReason.manual.listSuffix)
+    XCTAssertNil(RecordingEndReason.quit.listSuffix)
+
+    let environment = try await TestSupport.environment()
+    try await environment.store.update(meetingID: SampleData.meetingID, now: TestSupport.now) {
+      $0.endReason = .callEnded(appName: "Zen")
+    }
+    let model = await makeModel(environment)
+    XCTAssertEqual(
+      model.meeting?.endReason?.sentence, "Ended automatically when Zen closed the microphone.")
+  }
+
   func testExportAndSummaryRender() async throws {
     let environment = try await TestSupport.environment()
     let model = await makeModel(environment)

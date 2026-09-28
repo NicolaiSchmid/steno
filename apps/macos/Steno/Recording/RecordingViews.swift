@@ -78,6 +78,28 @@ struct StopLabel: View {
   }
 }
 
+/// The armed auto-stop under the Stop control on both surfaces: the one
+/// countdown line the recorder exposes as a warning row, and "Keep
+/// recording" next to it. The Stop control right above is the other choice,
+/// so the two carry equal weight without a second stop button here.
+struct AutoStopRow: View {
+  let presentation: AutoStopPresentation
+  /// The button's accessibility identifier, one per surface.
+  let identifier: String
+  let keepRecording: () -> Void
+
+  var body: some View {
+    HStack(alignment: .top, spacing: Theme.Space.sm) {
+      MessageRow(kind: .warning, text: presentation.line)
+      Spacer(minLength: 0)
+      Button(AutoStopPresentation.keepRecordingLabel, action: keepRecording)
+        .buttonStyle(StenoSecondaryButtonStyle())
+        .fixedSize()
+        .accessibilityIdentifier(identifier)
+    }
+  }
+}
+
 /// The recorder's warning and error, as rows; both surfaces show the same
 /// text and the recorder clears them on the next start. Takes the strings,
 /// so the menu bar can fall back to its own model's error.

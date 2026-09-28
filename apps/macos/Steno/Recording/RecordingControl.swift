@@ -17,7 +17,8 @@ struct RecordingControl: View {
 
   private var presentation: RecordingControlPresentation {
     RecordingControlPresentation.make(
-      state: recorder.recording, denied: recorder.deniedPermissions)
+      state: recorder.recording, denied: recorder.deniedPermissions,
+      autoStop: recorder.autoStop?.presentation)
   }
 
   var body: some View {
@@ -26,6 +27,11 @@ struct RecordingControl: View {
       VStack(alignment: .leading, spacing: Theme.Space.sm) {
         control(presentation)
           .frame(maxWidth: .infinity)
+        if let autoStop = presentation.autoStop {
+          AutoStopRow(presentation: autoStop, identifier: "sidebar-keep-recording") {
+            recorder.keepRecording()
+          }
+        }
         if let levels = recorder.levels, case .recording = recorder.recording {
           LevelBars(levels: levels)
         }

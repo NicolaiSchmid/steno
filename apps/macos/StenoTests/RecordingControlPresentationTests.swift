@@ -55,6 +55,27 @@ final class RecordingControlPresentationTests: XCTestCase {
     }
   }
 
+  /// The recorder's armed countdown rides along as a value while recording
+  /// and is dropped in every other state (the recorder clears it at stop;
+  /// the table never shows a stale row).
+  func testAnArmedAutoStopShowsOnlyWhileRecording() {
+    let autoStop = AutoStopPresentation(
+      appName: "Zen", remainingText: "1:29", fractionRemaining: 89.0 / 90.0)
+    let recording = RecordingControlPresentation.make(
+      state: .recording(since: TestSupport.now), denied: [.microphone], autoStop: autoStop)
+    XCTAssertEqual(recording.autoStop, autoStop, "passed through unchanged")
+    XCTAssertEqual(recording.label, "Stop")
+    XCTAssertEqual(recording.autoStop?.line, "Zen closed the microphone. Stopping in 1:29.")
+    for state in [RecordingState.idle, .starting, .stopping] {
+      XCTAssertNil(
+        RecordingControlPresentation.make(state: state, denied: [], autoStop: autoStop).autoStop,
+        "\(state)")
+    }
+    XCTAssertNil(
+      RecordingControlPresentation.make(state: .recording(since: TestSupport.now), denied: [])
+        .autoStop, "nil by default")
+  }
+
   func testStoppingIsBusyAndDisabledWhateverIsDenied() {
     for denied in deniedSets {
       XCTAssertEqual(

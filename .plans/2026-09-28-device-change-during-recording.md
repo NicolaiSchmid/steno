@@ -1,6 +1,6 @@
 # Steno: device changes during a recording and an honest auto-stop
 
-Status: accepted, 2026-09-28, revised after the 2026-09-28 reviews; steps 1 to 6 implemented in PR #115, steps 7 to 10 follow in the app PR. Triggered by first-run feedback (second round).
+Status: accepted, 2026-09-28, revised after the 2026-09-28 reviews; steps 1 to 6 implemented in PR #115, steps 7 to 11 in the app PR (branch `feat/macos-auto-stop-and-end-reasons`), except the bubble row, which waits for the floating indicator plan. Because the app PR landed before that plan, it created the shared `Countdown` (`apps/macos/Steno/Recording/Countdown.swift`) and `AutoStopPresentation` (in `apps/macos/Steno/Recording/AutoStop.swift`, not `Panels/FloatingContent.swift`) in the shapes that plan specifies, and the detection prompt already runs on the shared `Countdown`; the floating PR consumes them. Triggered by first-run feedback (second round).
 
 Binding context: [`2026-09-24-initial-scope.md`](2026-09-24-initial-scope.md) (Capture (Mac)),
 [`2026-09-25-audio-capture.md`](2026-09-25-audio-capture.md) (the capture design, its

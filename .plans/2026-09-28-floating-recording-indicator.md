@@ -15,8 +15,12 @@ owns the auto-stop countdown whose bubble row this plan's states table reference
 [`.plans/2026-09-28-macos-visual-redesign.md`](2026-09-28-macos-visual-redesign.md) owns the
 window's tokens and components; its system PR (tokens, `Theme.Radius`, components) lands before
 this plan, so the radius comes from `Theme.Radius.xl`, and this plan adds the two motion tokens it
-needs (`Motion.countdown`, `Motion.pulse`), the shared `Countdown`, `CountdownHairline` and
-`AutoStopPresentation`, which the redesign's layout PRs and the device-change plan reuse;
+needs (`Motion.countdown`, `Motion.pulse`) and `CountdownHairline`; the shared `Countdown`
+(`apps/macos/Steno/Recording/Countdown.swift`, with `CountdownPresentation`) and
+`AutoStopPresentation` (`apps/macos/Steno/Recording/AutoStop.swift`) landed first in the
+device-change plan's app PR in the shapes specified here, with the detection prompt already on the
+shared `Countdown`, so step 1 and step 2 below consume them rather than create them (`onElapsed`
+is `@MainActor () async -> Void`, a superset of the closure type named below);
 [`.plans/2026-09-28-app-icon.md`](2026-09-28-app-icon.md) decides the glyph. Index:
 [`.plans/2026-09-28-first-run-feedback.md`](2026-09-28-first-run-feedback.md), step 7.
 

@@ -23,13 +23,13 @@ enum RecordingState: Equatable, Sendable {
 /// The one recorder in the app, owned by `AppController` like
 /// `DetectionController`: a `CaptureSession` per recording over
 /// `AppEnvironment.makeCaptureSession`, the state machine, levels, the
-/// calendar lookup and the messages. The menu bar, the Record menu, the
-/// detection prompt and `shutdown()` all drive this, none of them each
-/// other. The meeting rows are core's business: `LocalRecordingIntake`
-/// writes the `.recording` row with the calendar title and attendees at
-/// `begin`, sets retention from `Settings` as they are at `complete`,
-/// writes the duration and enqueues; the app carries no copy of that
-/// transaction.
+/// calendar lookup, the messages and the auto-stop after a call ends. The
+/// menu bar, the Record menu, the detection prompt and `shutdown()` all
+/// drive this, none of them each other. The meeting rows are core's
+/// business: `LocalRecordingIntake` writes the `.recording` row with the
+/// calendar title and attendees at `begin`, sets retention from `Settings`
+/// as they are at `complete`, writes the duration and the end reason and
+/// enqueues; the app carries no copy of that transaction.
 @MainActor
 @Observable
 final class RecordingController {
@@ -39,6 +39,19 @@ final class RecordingController {
     var mode: CaptureMode
     var observers: [Task<Void, Never>]
   }
+
+  /// Foreign microphone activity while Steno records, forwarded by
+  /// `DetectionController` from the detector's events with the bundle id
+  /// already resolved to a name (nil when it could not be).
+  enum MicrophoneActivity: Equatable, Sendable {
+    case opened(appName: String?)
+    case released
+  }
+
+  /// How long a `.call` recording runs on after the call app closed the
+  /// microphone before it stops on its own. Long enough for a Meet or Zoom
+  /// reconnect; "Keep recording" cancels it.
+  static let autoStopGrace: Duration = .seconds(90)
 
   private(set) var recording: RecordingState = .idle {
     didSet {
@@ -55,10 +68,18 @@ final class RecordingController {
   /// `.denied`, in `PermissionKind.allCases` order. A report, not a guard:
   /// `start(mode:)` does not read it.
   private(set) var deniedPermissions: [PermissionKind] = []
+  /// The armed auto-stop while a `.call` recording waits out the grace
+  /// after the call app released the microphone; nil otherwise.
+  private(set) var autoStop: AutoStop?
 
   private let environment: AppEnvironment
   private var active: Active?
   private var settledWaiters: [CheckedContinuation<Void, Never>] = []
+  /// A foreign process held the microphone during this recording (the
+  /// prompt's app at start, or the first `.opened` seen while recording);
+  /// only then does a release mean a call ended.
+  private var sawForeignMicrophone = false
+  private var callAppName: String?
   /// Called around recordings; `AppController` points it at the detection
   /// controller so an open prompt closes when a recording starts.
   var recordingDidChange: ((Bool) async -> Void)?
@@ -91,11 +112,16 @@ final class RecordingController {
   /// Starts a recording; `.call` records mic and system lanes, `.inPerson`
   /// one room lane. The meeting row is written first (`.recording`) with
   /// the calendar title and attendees, so the list shows it immediately.
-  func start(mode: CaptureMode) async {
+  /// `callApp` is the app the detection prompt named; a recording started
+  /// from it arms the auto-stop on the first release without waiting for
+  /// another `.opened`.
+  func start(mode: CaptureMode, callApp: String? = nil) async {
     guard recording == .idle else { return }
     recording = .starting
     lastError = nil
     lastWarning = nil
+    sawForeignMicrophone = callApp != nil
+    callAppName = callApp
     let startedAt = environment.now()
     let intake = environment.makeLocalIntake()
     var meetingID: UUID?
@@ -133,19 +159,23 @@ final class RecordingController {
 
   /// Stops the recording and hands it to the intake, which sets retention
   /// from the settings as they are now (a change made during the recording
-  /// applies to it), writes the final duration and enqueues the meeting.
-  /// After a device loss the session hands back the partial recording,
-  /// which is enqueued like any other.
-  func stop() async {
+  /// applies to it), writes the final duration and `reason` and enqueues the
+  /// meeting. After a device loss the session hands back the partial
+  /// recording, which is enqueued like any other. Any stop disarms the
+  /// auto-stop and forgets the call app.
+  func stop(reason: RecordingEndReason = .manual) async {
     guard let active, case .recording = recording else { return }
     recording = .stopping
+    disarmAutoStop()
+    sawForeignMicrophone = false
+    callAppName = nil
     do {
       let result = try await active.session.stop()
       try await environment.makeLocalIntake().complete(
         meetingID: active.meetingID,
         result: RecordingResult(
           asset: result.asset, duration: result.statistics.duration,
-          endReason: result.statistics.endedOnDeviceLoss ? .deviceLost : .manual))
+          endReason: result.statistics.endedOnDeviceLoss ? .deviceLost : reason))
       if active.mode == .call, result.statistics.systemLaneSilent {
         lastWarning = "The system audio lane stayed silent. Check the system audio permission."
       }
@@ -184,6 +214,10 @@ final class RecordingController {
     await withCheckedContinuation { settledWaiters.append($0) }
   }
 
+  /// The session's `states` (a failure stops and stores the reason), its
+  /// `levels`, and its `notices`: a device change is a warning line while
+  /// the recording continues, replaced by the resumed line or, after the
+  /// last failed restart, by the failure the states observer reports.
   private func observe(_ session: CaptureSession) -> [Task<Void, Never>] {
     let states = Task { [weak self] in
       let stream = await session.states
@@ -191,7 +225,7 @@ final class RecordingController {
         guard let self else { return }
         if case .failed(let error, _) = state, case .recording = self.recording {
           self.lastError = "Recording failed: \(error.description)"
-          await self.stop()
+          await self.stop(reason: error == .deviceLost ? .deviceLost : .manual)
           return
         }
       }
@@ -203,7 +237,67 @@ final class RecordingController {
         self.levels = levels
       }
     }
-    return [states, levels]
+    let notices = Task { [weak self] in
+      let stream = await session.notices
+      for await notice in stream {
+        guard let self, case .recording = self.recording else { return }
+        switch notice {
+        case .deviceChanged:
+          self.lastWarning = "Audio devices changed. Reconnecting…"
+        case .deviceResumed:
+          self.lastWarning = "Audio devices changed. Recording continues."
+        }
+      }
+    }
+    return [states, levels, notices]
+  }
+
+  // MARK: - Auto-stop after the call ends
+
+  /// The policy: a `.call` recording during which a foreign process held the
+  /// microphone arms the grace countdown when that microphone is released;
+  /// a microphone opened again cancels it. In-person recordings and calls
+  /// nobody else ever joined never arm.
+  func microphoneActivity(_ event: MicrophoneActivity) async {
+    guard let active, case .recording = recording, active.mode == .call else { return }
+    switch event {
+    case .opened(let appName):
+      sawForeignMicrophone = true
+      callAppName = appName
+      disarmAutoStop()
+    case .released:
+      guard sawForeignMicrophone, autoStop == nil else { return }
+      armAutoStop()
+    }
+  }
+
+  /// "Keep recording": the countdown goes and does not come back until the
+  /// next call is observed (`.opened` then `.released`).
+  func keepRecording() {
+    disarmAutoStop()
+    sawForeignMicrophone = false
+  }
+
+  /// Stops now with the reason the countdown would have stored.
+  func stopNow() async {
+    guard autoStop != nil else { return }
+    await stop(reason: .callEnded(appName: callAppName))
+  }
+
+  private func armAutoStop() {
+    let appName = callAppName
+    let countdown = Countdown(duration: Self.autoStopGrace, clock: environment.clock) {
+      [weak self] in
+      guard let self, self.autoStop != nil else { return }
+      await self.stop(reason: .callEnded(appName: appName))
+    }
+    autoStop = AutoStop(appName: appName, countdown: countdown)
+    countdown.begin()
+  }
+
+  private func disarmAutoStop() {
+    autoStop?.countdown.cancel()
+    autoStop = nil
   }
 
   private func resolveCalendarEvent(at now: Date) async -> CalendarEvent? {
