@@ -157,16 +157,19 @@ struct BubbleStopButton: View {
 /// the recording through the shared `recorder.stop()`.
 struct RecordingBubbleView: View {
   let controller: AppController
+  /// The shared 1 Hz clock; the elapsed time is `clock.now` minus `since`.
+  let clock: RecordingClock
   let openMain: @MainActor () -> Void
   @State private var history = LiveBarsHistory()
 
   private var recorder: RecordingController { controller.recorder }
 
   var body: some View {
+    let presentation = BubblePresentation.make(state: recorder.recording, autoStop: nil)
     BubbleBody(
-      presentation: BubblePresentation.make(state: recorder.recording, autoStop: nil),
+      presentation: presentation,
       history: history,
-      elapsedValue: recorder.elapsed?.clockText,
+      elapsedText: presentation.since.map { clock.elapsed(since: $0).clockText },
       open: { open() },
       stop: { Task { await recorder.stop() } }
     )
@@ -192,8 +195,8 @@ struct RecordingBubbleView: View {
 struct BubbleBody: View {
   let presentation: BubblePresentation
   let history: LiveBarsHistory
-  /// The elapsed time as VoiceOver reads it.
-  let elapsedValue: String?
+  /// The elapsed time, `mm:ss`; shown while recording and read by VoiceOver.
+  let elapsedText: String?
   let open: () -> Void
   let stop: () -> Void
   @State private var hovering = false
@@ -210,7 +213,7 @@ struct BubbleBody: View {
       }
       .buttonStyle(.plain)
       .accessibilityLabel(presentation.text ?? "Recording")
-      .accessibilityValue(elapsedValue ?? "")
+      .accessibilityValue(elapsedText ?? "")
       .accessibilityHint("Opens the meeting in Steno")
       .accessibilityIdentifier("bubble-open")
       if presentation.showsStop {

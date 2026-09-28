@@ -2,14 +2,14 @@ import AppKit
 import SwiftUI
 
 /// What the panel model drives: one window that shows a frame, hides, and
-/// reports the screens and its content's size. `FloatingPanel` is the
-/// product conformance; the tests use a fake.
+/// reports the screens. `FloatingPanel` is the product conformance; the
+/// tests use a fake. The content's size reaches the model from SwiftUI
+/// (`FloatingPanelRoot` measures itself), never from AppKit layout, so the
+/// window is sized in exactly one place.
 @MainActor
 protocol PanelHost: AnyObject {
   /// The visible frames of the current screens, the main screen first.
   var currentScreens: [CGRect] { get }
-  /// The size the SwiftUI content wants right now.
-  var contentFittingSize: CGSize { get }
   var isShown: Bool { get }
   func setContent(_ view: AnyView)
   func show(frame: CGRect)
@@ -21,12 +21,11 @@ protocol PanelHost: AnyObject {
 /// and never activates Steno; the user drags it by its background. The
 /// window shadow is the one shadow the "hairlines, not shadows" rule does
 /// not cover: a floating panel over arbitrary content needs separation.
-/// Content comes through an `NSHostingController` sized by
-/// `preferredContentSize`, so the window follows the SwiftUI size; the
-/// presenter re-applies the anchor after every resize.
+/// The hosting view fills the window; the model sets the window's frame
+/// from the size the SwiftUI root reports.
 @MainActor
 final class FloatingPanel: NSPanel, PanelHost {
-  private var hosting: NSHostingController<AnyView>?
+  private var hosting: NSHostingView<AnyView>?
   /// True from `show` until `hide` finishes, so a hide that is still fading
   /// does not order out a panel shown again meanwhile.
   private(set) var isShown = false
@@ -63,23 +62,16 @@ final class FloatingPanel: NSPanel, PanelHost {
     return frames
   }
 
-  var contentFittingSize: CGSize {
-    guard let hosting else { return frame.size }
-    hosting.view.layoutSubtreeIfNeeded()
-    let preferred = hosting.preferredContentSize
-    if preferred.width > 0, preferred.height > 0 { return preferred }
-    return hosting.view.fittingSize
-  }
-
   func setContent(_ view: AnyView) {
     if let hosting {
       hosting.rootView = view
       return
     }
-    let hosting = NSHostingController(rootView: view)
-    hosting.sizingOptions = .preferredContentSize
+    let hosting = NSHostingView(rootView: view)
+    hosting.sizingOptions = []
+    hosting.autoresizingMask = [.width, .height]
     self.hosting = hosting
-    contentViewController = hosting
+    contentView = hosting
   }
 
   /// Orders the panel front at `frame`, fading in over `Motion.entrance`
