@@ -25,23 +25,24 @@ struct AcknowledgementsView: View {
     Library(name: "Speex", licence: "BSD", url: "https://github.com/sbooth/CSpeex"),
   ]
 
-  let dismiss: () -> Void
+  static let width: CGFloat = 480
+  static let height: CGFloat = 440
+
+  let dismiss: @MainActor () -> Void
 
   var body: some View {
-    VStack(alignment: .leading, spacing: Theme.Space.lg) {
-      Text("Acknowledgements")
-        .font(.steno(Theme.TextSize.lg, weight: .semibold))
-        .foregroundStyle(Color.stenoStrong)
+    SettingsSheet(
+      title: "Acknowledgements", dismissal: .done, width: Self.width, height: Self.height,
+      dismiss: dismiss
+    ) {
       ScrollView {
         VStack(alignment: .leading, spacing: Theme.Space.lg) {
-          VStack(alignment: .leading, spacing: Theme.Space.sm) {
-            SectionLabel(text: "Speech models")
+          group("Speech models") {
             ForEach(ModelAsset.allCases, id: \.self) { asset in
               row(title: asset.displayName, licence: asset.licence, source: asset.sourceRepo)
             }
           }
-          VStack(alignment: .leading, spacing: Theme.Space.sm) {
-            SectionLabel(text: "Libraries")
+          group("Libraries") {
             ForEach(Self.libraries) { library in
               row(title: library.name, licence: library.licence, source: library.url)
             }
@@ -49,33 +50,24 @@ struct AcknowledgementsView: View {
         }
         .frame(maxWidth: .infinity, alignment: .leading)
       }
-      HStack {
-        Spacer()
-        Button("Done") { dismiss() }
-          .buttonStyle(StenoPrimaryButtonStyle())
-          .keyboardShortcut(.defaultAction)
-      }
     }
-    .padding(Theme.Space.xl)
-    .frame(width: 480, height: 440)
-    .background(Color.stenoBackground)
+  }
+
+  private func group(_ label: String, @ViewBuilder rows: () -> some View) -> some View {
+    VStack(alignment: .leading, spacing: Theme.Space.sm) {
+      SectionLabel(text: label)
+      rows()
+    }
   }
 
   private func row(title: String, licence: String, source: String) -> some View {
-    VStack(alignment: .leading, spacing: 2) {
-      HStack {
-        Text(title)
-          .font(.steno(Theme.TextSize.sm))
-          .foregroundStyle(Color.stenoForeground)
-        Spacer()
-        Text(licence)
-          .font(.steno(Theme.TextSize.xxs))
-          .foregroundStyle(Color.stenoFaint)
-      }
-      Text(source)
-        .font(.steno(Theme.TextSize.xxs).monospaced())
+    HStack(alignment: .firstTextBaseline) {
+      SettingsRowLabel(title: title, subtitle: source)
+      Spacer()
+      Text(licence)
+        .font(.steno(Theme.TextSize.xxs))
         .foregroundStyle(Color.stenoFaint)
-        .textSelection(.enabled)
     }
+    .textSelection(.enabled)
   }
 }

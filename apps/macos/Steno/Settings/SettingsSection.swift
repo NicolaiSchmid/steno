@@ -39,11 +39,11 @@ enum SettingsSection: String, CaseIterable, Identifiable, Sendable, Hashable {
   /// One sentence under the section title.
   var purpose: String {
     switch self {
-    case .general: "Steno lives in the menu bar and records when you ask it to."
+    case .general: "Steno runs in the menu bar and records when you ask it to."
     case .recording: "Audio is recorded and kept on this Mac only."
     case .transcription: "Speech is turned into text on this Mac. Nothing is uploaded."
     case .summaries:
-      "Summaries and tasks are written by an AI model you choose. Only the transcript text is sent to it."
+      "Meeting summaries and tasks are written by an AI model you choose. Only the transcript text is sent to it."
     case .export: "Finished meetings can be written into an Obsidian vault as notes you own."
     case .iphone:
       "Record on your iPhone when you are away from the Mac. Recordings travel over your Wi-Fi only, encrypted to this Mac."

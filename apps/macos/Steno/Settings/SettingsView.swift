@@ -39,8 +39,11 @@ struct SettingsView: View {
   var body: some View {
     NavigationSplitView {
       List(SettingsSection.allCases, selection: $selection) { section in
-        SettingsSidebarRow(section: section, subtitle: overview.subtitles[section])
-          .tag(section)
+        SettingsSidebarRow(
+          section: section, subtitle: overview.subtitles[section],
+          isSelected: section == selection
+        )
+        .tag(section)
       }
       .listStyle(.sidebar)
       .navigationSplitViewColumnWidth(Self.sidebarWidth)
@@ -111,10 +114,10 @@ struct GeneralSettingsView: View {
           "Open Steno at login",
           isOn: .action({ model.launchAtLogin }, model.setLaunchAtLogin))
         if model.loginItem == .requiresApproval {
-          HStack {
-            Text("Waiting for your approval in System Settings › Login Items.")
-              .font(.steno(Theme.TextSize.xs))
-              .foregroundStyle(Color.stenoWarning)
+          HStack(alignment: .top) {
+            MessageRow(
+              kind: .warning,
+              text: "Waiting for your approval in System Settings › Login Items.")
             Spacer()
             Button("Open Login Items") { model.openLoginItemSettings() }
           }
@@ -142,14 +145,9 @@ struct GeneralSettingsView: View {
         }
       }
       Section("Updates") {
-        HStack(alignment: .firstTextBaseline) {
-          VStack(alignment: .leading, spacing: 2) {
-            Text("Steno \(model.version)")
-              .font(.steno(Theme.TextSize.sm))
-            Text(model.updateStatusText(now: Date()))
-              .font(.steno(Theme.TextSize.xs))
-              .foregroundStyle(Color.stenoFaint)
-          }
+        HStack(alignment: .top) {
+          SettingsRowLabel(
+            title: "Steno \(model.version)", subtitle: model.updateStatusText(now: Date()))
           Spacer()
           Button("Check for Updates") { model.checkForUpdates() }
             .disabled(!model.canCheckForUpdates)
@@ -160,9 +158,10 @@ struct GeneralSettingsView: View {
         Toggle("Check for updates automatically", isOn: $model.automaticallyChecksForUpdates)
         Toggle("Install updates automatically", isOn: $model.automaticallyDownloadsUpdates)
         Footnote("Updates are checked once a day and installed when you relaunch Steno.")
-      }
-      Section {
         Button("Acknowledgements…") { showingAcknowledgements = true }
+          .buttonStyle(.plain)
+          .font(.steno(Theme.TextSize.xs))
+          .foregroundStyle(Color.stenoMutedForeground)
       }
     }
     .sheet(isPresented: $showingAcknowledgements) {
@@ -203,6 +202,7 @@ struct RecordingSettingsView: View {
             model.refreshDevices()
           } label: {
             Image(systemName: "arrow.clockwise")
+              .foregroundStyle(Color.stenoMutedForeground)
           }
           .buttonStyle(.borderless)
           .help("Refresh microphones")
@@ -211,7 +211,7 @@ struct RecordingSettingsView: View {
       }
       Section("Recordings") {
         FolderRow(
-          label: "Folder", url: model.audioFolder, choosePrompt: "Choose…",
+          label: "Folder", url: model.audioFolder,
           choose: { url in Task { await model.setAudioFolder(url) } },
           reveal: { model.revealFolder() })
         Footnote(model.folderUsage.text)
@@ -246,8 +246,8 @@ struct RecordingSettingsView: View {
             .labelsHidden()
           }
         }
-        Footnote(model.retentionFootnote)
-        Footnote("Short voice samples stay until you have named the speaker.")
+        Footnote(
+          model.retentionFootnote + " Short voice samples stay until you have named the speaker.")
       }
     }
   }
@@ -283,17 +283,14 @@ struct TranscriptionSettingsView: View {
   }
 
   private func componentRow(_ asset: ModelAsset) -> some View {
-    VStack(alignment: .leading, spacing: Theme.Space.xs) {
+    let state = model.state(of: asset)
+    return VStack(alignment: .leading, spacing: Theme.Space.xs) {
       HStack {
-        VStack(alignment: .leading, spacing: 2) {
-          Text(SpeechSettingsViewModel.componentTitle(asset))
-            .font(.steno(Theme.TextSize.sm))
-          Text(model.statusText(of: asset))
-            .font(.steno(Theme.TextSize.xxs))
-            .foregroundStyle(Color.stenoFaint)
-        }
+        SettingsRowLabel(
+          title: SpeechSettingsViewModel.componentTitle(asset),
+          subtitle: model.statusText(of: asset))
         Spacer()
-        switch model.state(of: asset) {
+        switch state {
         case .absent:
           Button("Download") { model.download(asset) }
         case .downloading:
@@ -304,11 +301,11 @@ struct TranscriptionSettingsView: View {
           Button("Retry") { model.download(asset) }
         }
       }
-      if case .downloading(let fraction, _) = model.state(of: asset), fraction > 0 {
+      if case .downloading(let fraction, _) = state, fraction > 0 {
         ProgressView(value: fraction)
           .progressViewStyle(.linear)
       }
-      if case .failed(let message) = model.state(of: asset) {
+      if case .failed(let message) = state {
         SettingsErrorRow(message: "The download did not finish.", details: message)
       }
     }
@@ -346,11 +343,8 @@ struct SummariesSettingsView: View {
         TextField("Model", text: $model.model, prompt: Text(model.preset.modelPlaceholder))
           .focused($focus, equals: .model)
         if model.preset.needsAPIKey || model.preset == .custom {
-          SecureField(
-            "API key", text: $model.apiKey,
-            prompt: Text(model.preset.needsAPIKey ? "required" : "optional")
-          )
-          .focused($focus, equals: .key)
+          SecureField("API key", text: $model.apiKey, prompt: Text(keyPrompt))
+            .focused($focus, equals: .key)
           Footnote("Stored in your login keychain and sent only to this service.")
         }
         if let message = model.validationMessage {
@@ -362,24 +356,27 @@ struct SummariesSettingsView: View {
           TextField("Context size", text: $model.contextTokensText)
             .focused($focus, equals: .context)
           Footnote(
-            "How much text the model can read at once. Leave the default of \(LLMSettingsViewModel.defaultContextTokens) unless the service reports a shorter limit."
+            "How much text the model can read at once. Leave the default of \(LLMSettingsViewModel.defaultContextTokens.formatted()) unless the service reports a shorter limit."
           )
         }
       }
       Section {
-        statusRow
-        if model.isConfigured {
-          Button("Test again") { Task { await model.test() } }
-            .disabled(model.isTesting)
+        HStack(alignment: .top) {
+          statusRow
+          Spacer()
+          if model.isConfigured {
+            Button("Test again") { Task { await model.test() } }
+              .disabled(model.isTesting)
+          }
         }
       }
     }
-    // A field commits on Return, when focus leaves it and when the page goes.
-    .onSubmit { commit() }
-    .onChange(of: focus) { old, _ in
-      if old != nil { commit() }
-    }
-    .onDisappear { commit() }
+    .commitsFields(focus: focus) { Task { await model.commit() } }
+  }
+
+  private var keyPrompt: String {
+    model.preset.needsAPIKey
+      ? "Paste the key from your \(model.preset.title) account" : "Only if the server needs one"
   }
 
   @ViewBuilder
@@ -396,17 +393,13 @@ struct SummariesSettingsView: View {
         ProgressView().controlSize(.small)
         Text("Checking the connection…")
           .font(.steno(Theme.TextSize.xs))
-          .foregroundStyle(Color.stenoMutedForeground)
+          .foregroundStyle(Color.stenoForeground)
       }
     case .connected(let report):
       SettingsStatusRow(kind: .success, message: "Connected.", details: report)
     case .failed(let report):
       SettingsStatusRow(kind: .error, message: "Could not connect to the service.", details: report)
     }
-  }
-
-  private func commit() {
-    Task { await model.commit() }
   }
 }
 
@@ -427,7 +420,7 @@ struct ExportSettingsView: View {
         Toggle("Export to Obsidian", isOn: .action({ model.enabled }, model.setEnabled))
         if model.enabled {
           FolderRow(
-            label: "Vault", url: model.vaultURL, choosePrompt: "Choose vault…",
+            label: "Vault", url: model.vaultURL,
             choose: { url in Task { await model.chooseVault(url) } })
           Footnote(
             "Each meeting becomes a folder with a note, the transcript and the tasks. Steno never edits files it did not create."
@@ -447,29 +440,29 @@ struct ExportSettingsView: View {
               isOn: .action({ model.includeAudio }, model.setIncludeAudio))
           }
         }
-        Section {
-          if model.needsVault {
-            MessageRow(kind: .info, text: "Choose a vault folder to start exporting.")
-          } else if let message = model.validationMessage {
-            MessageRow(kind: .error, text: message)
-          } else if model.saved {
-            MessageRow(
-              kind: .success,
-              text:
-                "Exporting to \(model.vaultName). New meetings are written there when they finish.")
+        if let status {
+          Section {
+            MessageRow(kind: status.kind, text: status.text)
           }
         }
       }
     }
-    .onSubmit { commit() }
-    .onChange(of: focus) { old, _ in
-      if old != nil { commit() }
-    }
-    .onDisappear { commit() }
+    .commitsFields(focus: focus) { Task { await model.commit() } }
   }
 
-  private func commit() {
-    Task { await model.commit() }
+  /// What exporting amounts to right now; nil while the page's own error
+  /// row already says why nothing was saved.
+  private var status: (kind: MessageRow.Kind, text: String)? {
+    if model.needsVault {
+      return (.info, "Choose a vault folder to start exporting.")
+    }
+    if let message = model.validationMessage {
+      return (.error, message)
+    }
+    guard model.error == nil else { return nil }
+    return (
+      .success, "Exporting to \(model.vaultName). New meetings are written there when they finish."
+    )
   }
 }
 
@@ -494,21 +487,19 @@ struct PhoneSettingsView: View {
           }
           ForEach(model.devices) { device in
             HStack {
-              VStack(alignment: .leading, spacing: 2) {
-                Text(device.name).font(.steno(Theme.TextSize.sm))
-                Text(model.pairedText(device))
-                  .font(.steno(Theme.TextSize.xxs))
-                  .foregroundStyle(Color.stenoFaint)
-              }
+              SettingsRowLabel(title: device.name, subtitle: model.pairedText(device))
               Spacer()
               Button("Remove") { Task { await model.revoke(device.id) } }
                 .accessibilityLabel("Remove \(device.name)")
             }
           }
-          Button("Pair an iPhone…") {
-            Task {
-              await model.beginPairing()
-              showingPairing = model.pairing != nil
+          HStack {
+            Spacer()
+            Button("Pair an iPhone…") {
+              Task {
+                await model.beginPairing()
+                showingPairing = model.pairing != nil
+              }
             }
           }
           Footnote(
@@ -518,18 +509,15 @@ struct PhoneSettingsView: View {
         if !model.activeReceipts.isEmpty {
           Section("Receiving") {
             ForEach(model.activeReceipts) { receipt in
-              VStack(alignment: .leading, spacing: Theme.Space.xs) {
-                Text("Receiving from \(model.deviceName(for: receipt))…")
-                  .font(.steno(Theme.TextSize.xs))
-                ProgressView(value: PhonesSettingsViewModel.progress(receipt))
-                  .progressViewStyle(.linear)
-              }
+              receiptRow(receipt)
             }
           }
         }
         if let failure = model.listenerFailure {
-          SettingsStatusRow(
-            kind: .error, message: "Steno cannot receive recordings right now.", details: failure)
+          Section {
+            SettingsStatusRow(
+              kind: .error, message: "Steno cannot receive recordings right now.", details: failure)
+          }
         }
       }
     }
@@ -547,47 +535,67 @@ struct PhoneSettingsView: View {
         PairingSheet(model: model) { showingPairing = false }
       })
   }
+
+  private func receiptRow(_ receipt: HandoverReceipt) -> some View {
+    let progress = PhonesSettingsViewModel.progress(receipt)
+    return VStack(alignment: .leading, spacing: Theme.Space.xs) {
+      HStack {
+        Text("Receiving from \(model.deviceName(for: receipt))…")
+          .font(.steno(Theme.TextSize.xs))
+        Spacer()
+        Text(progress.formatted(.percent.precision(.fractionLength(0))))
+          .font(.steno(Theme.TextSize.xxs))
+          .monospacedDigit()
+          .foregroundStyle(Color.stenoFaint)
+      }
+      ProgressView(value: progress)
+        .progressViewStyle(.linear)
+    }
+  }
 }
 
 /// The QR code for the iPhone app, with its expiry and a Cancel.
 struct PairingSheet: View {
+  static let width: CGFloat = 360
+
   let model: PhonesSettingsViewModel
   let dismiss: @MainActor () -> Void
 
   var body: some View {
-    VStack(spacing: Theme.Space.lg) {
-      Text("Pair an iPhone")
-        .font(.steno(Theme.TextSize.lg, weight: .semibold))
-        .foregroundStyle(Color.stenoStrong)
-      if let image = model.qrImage {
-        Image(nsImage: image)
-          .interpolation(.none)
-          .resizable()
-          .frame(width: 220, height: 220)
-          .padding(Theme.Space.sm)
-          .background(Color.white)
-          .clipShape(RoundedRectangle(cornerRadius: Theme.Space.radius, style: .continuous))
-          .overlay(
-            RoundedRectangle(cornerRadius: Theme.Space.radius, style: .continuous)
-              .strokeBorder(Color.stenoBorder, lineWidth: Theme.Space.hairline)
-          )
-          .accessibilityLabel("Pairing code for the Steno iPhone app")
+    SettingsSheet(title: "Pair an iPhone", dismissal: .cancel, width: Self.width, dismiss: dismiss)
+    {
+      VStack(spacing: Theme.Space.lg) {
+        if let image = model.qrImage {
+          Image(nsImage: image)
+            .interpolation(.none)
+            .resizable()
+            .frame(width: SettingsMetrics.qrCodeSize, height: SettingsMetrics.qrCodeSize)
+            .padding(Theme.Space.sm)
+            // A scanner needs a white quiet zone around the code in both
+            // appearances, so this is the one surface that is not a veil.
+            .background(Color.white)
+            .clipShape(RoundedRectangle(cornerRadius: Theme.Space.radius, style: .continuous))
+            .overlay(
+              RoundedRectangle(cornerRadius: Theme.Space.radius, style: .continuous)
+                .strokeBorder(Color.stenoBorder, lineWidth: Theme.Space.hairline)
+            )
+            .accessibilityLabel("Pairing code for the Steno iPhone app")
+        }
+        Text(caption)
+          .font(.steno(Theme.TextSize.xs))
+          .foregroundStyle(Color.stenoMutedForeground)
+          .multilineTextAlignment(.center)
+          .fixedSize(horizontal: false, vertical: true)
       }
-      Text(
-        "Open Steno on your iPhone and scan this code. \(model.pairingExpiryText ?? "")"
-      )
-      .font(.steno(Theme.TextSize.xs))
-      .foregroundStyle(Color.stenoMutedForeground)
-      .multilineTextAlignment(.center)
-      .fixedSize(horizontal: false, vertical: true)
-      Button("Cancel") { dismiss() }
-        .buttonStyle(StenoSecondaryButtonStyle())
-        .keyboardShortcut(.cancelAction)
+      .frame(maxWidth: .infinity)
     }
-    .padding(Theme.Space.xl)
-    .frame(width: 360)
-    .background(Color.stenoBackground)
     // The phone's arrival closes the code; polled on the app's clock.
     .task(id: model.pairing?.expiresAt) { await model.observePairing() }
+  }
+
+  private var caption: String {
+    ["Scan this code with the Steno app on your iPhone.", model.pairingExpiryText]
+      .compactMap { $0 }
+      .joined(separator: " ")
   }
 }

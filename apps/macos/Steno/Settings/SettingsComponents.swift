@@ -1,9 +1,9 @@
 import AppKit
 import SwiftUI
 
-/// The rows the Settings sections share: a section header, a footnote, an
-/// error with its details folded away, a permission row, a folder row and
-/// the sidebar row.
+/// The pieces the Settings sections share: a section header, a footnote,
+/// the leading label of a row, a status with its details folded away, a
+/// permission row, a folder row, the sidebar row and the one sheet shape.
 
 /// What every section's view model provides: a `load()` for the page's
 /// `.task` and the error pair `SettingsErrorRow` renders, a plain sentence
@@ -28,6 +28,17 @@ extension SettingsSectionModel {
   }
 }
 
+/// The few sizes the settings plan names that `Theme` has no token for yet:
+/// the sidebar icon well and its radius (the visual redesign's `Radius.sm`),
+/// the gap between the two lines of a row (its `Space.xxs`) and the QR
+/// code's edge. Everything else comes from `Theme.Space`.
+enum SettingsMetrics {
+  static let iconWell: CGFloat = 28
+  static let iconWellRadius: CGFloat = 6
+  static let lineGap: CGFloat = 2
+  static let qrCodeSize: CGFloat = 220
+}
+
 struct SettingsHeader: View {
   let section: SettingsSection
 
@@ -48,7 +59,7 @@ struct SettingsHeader: View {
   }
 }
 
-/// Explanatory text under a control: 13 pt, the faint tier.
+/// Explanatory text under a control: the notes tier, 12 pt `faint`.
 struct Footnote: View {
   let text: String
 
@@ -58,9 +69,31 @@ struct Footnote: View {
 
   var body: some View {
     Text(text)
-      .font(.steno(Theme.TextSize.xs))
+      .font(.steno(Theme.TextSize.xxs))
       .foregroundStyle(Color.stenoFaint)
       .fixedSize(horizontal: false, vertical: true)
+  }
+}
+
+/// The leading text of a custom row, sized like the labels of the native
+/// controls around it (13 pt, the form's label colour), with a 12 pt
+/// `faint` subtitle when the row has two lines.
+struct SettingsRowLabel: View {
+  let title: String
+  var subtitle: String? = nil
+
+  var body: some View {
+    VStack(alignment: .leading, spacing: SettingsMetrics.lineGap) {
+      Text(title)
+        .font(.steno(Theme.TextSize.xs))
+      if let subtitle {
+        Text(subtitle)
+          .font(.steno(Theme.TextSize.xxs))
+          .foregroundStyle(Color.stenoFaint)
+          .lineLimit(1)
+          .truncationMode(.middle)
+      }
+    }
   }
 }
 
@@ -113,8 +146,7 @@ struct PermissionRow: View {
     VStack(alignment: .leading, spacing: Theme.Space.xs) {
       HStack(spacing: Theme.Space.sm) {
         stateIcon
-        Text(kind.title)
-          .font(.steno(Theme.TextSize.sm))
+        SettingsRowLabel(title: kind.title)
         Spacer()
         if isRequesting {
           ProgressView().controlSize(.small)
@@ -158,19 +190,17 @@ struct PermissionRow: View {
 struct FolderRow: View {
   let label: String
   let url: URL?
-  let choosePrompt: String
   let choose: @MainActor (URL) -> Void
   var reveal: (@MainActor () -> Void)? = nil
 
   var body: some View {
     HStack(spacing: Theme.Space.sm) {
-      Text(label)
-        .font(.steno(Theme.TextSize.sm))
+      SettingsRowLabel(title: label)
       Spacer()
       if let url {
         HStack(spacing: Theme.Space.xs) {
           Image(systemName: "folder")
-            .foregroundStyle(Color.stenoFaint)
+            .foregroundStyle(Color.stenoMutedForeground)
           Text(url.lastPathComponent)
             .font(.steno(Theme.TextSize.xs))
             .foregroundStyle(Color.stenoMutedForeground)
@@ -182,7 +212,7 @@ struct FolderRow: View {
           Button("Show in Finder") { reveal() }
         }
       }
-      Button(url == nil ? choosePrompt : "Choose…") { present() }
+      Button("Choose…") { present() }
     }
   }
 
@@ -200,38 +230,104 @@ struct FolderRow: View {
   }
 }
 
-/// The sidebar entry: an icon well, the title and the status subtitle.
+/// The sidebar entry: an icon well, the title and the status subtitle. The
+/// selected row hands its text to the list's hierarchical styles so it
+/// inverts with the selection highlight; resting rows use the ladder.
 struct SettingsSidebarRow: View {
   let section: SettingsSection
   let subtitle: String?
+  var isSelected = false
 
   var body: some View {
     HStack(spacing: Theme.Space.md) {
       Image(systemName: section.systemImage)
-        .font(.system(size: 13, weight: .medium))
-        .foregroundStyle(Color.stenoForeground)
-        .frame(width: 28, height: 28)
+        .font(.steno(Theme.TextSize.xs, weight: .medium))
+        .foregroundStyle(titleStyle)
+        .frame(width: SettingsMetrics.iconWell, height: SettingsMetrics.iconWell)
         .background(
-          RoundedRectangle(cornerRadius: 6, style: .continuous)
+          RoundedRectangle(cornerRadius: SettingsMetrics.iconWellRadius, style: .continuous)
             .fill(Color.stenoSecondary)
         )
         .overlay(
-          RoundedRectangle(cornerRadius: 6, style: .continuous)
+          RoundedRectangle(cornerRadius: SettingsMetrics.iconWellRadius, style: .continuous)
             .strokeBorder(Color.stenoBorder, lineWidth: Theme.Space.hairline))
-      VStack(alignment: .leading, spacing: 1) {
+      VStack(alignment: .leading, spacing: SettingsMetrics.lineGap) {
         Text(section.title)
           .font(.steno(Theme.TextSize.xs, weight: .medium))
-          .foregroundStyle(Color.stenoForeground)
+          .foregroundStyle(titleStyle)
         if let subtitle {
           Text(subtitle)
             .font(.steno(Theme.TextSize.xxxs))
-            .foregroundStyle(Color.stenoFaint)
+            .foregroundStyle(subtitleStyle)
             .lineLimit(1)
         }
       }
     }
-    .padding(.vertical, 2)
     .accessibilityElement(children: .combine)
     .accessibilityIdentifier("settings-\(section.rawValue)")
+  }
+
+  private var titleStyle: AnyShapeStyle {
+    isSelected ? AnyShapeStyle(.primary) : AnyShapeStyle(Color.stenoForeground)
+  }
+
+  private var subtitleStyle: AnyShapeStyle {
+    isSelected ? AnyShapeStyle(.secondary) : AnyShapeStyle(Color.stenoFaint)
+  }
+}
+
+/// The one sheet shape Settings presents: a title, the body, and the closing
+/// button trailing. Done is the default action in the primary style; Cancel
+/// is a secondary button bound to Escape.
+struct SettingsSheet<Content: View>: View {
+  enum Dismissal {
+    case done
+    case cancel
+  }
+
+  let title: String
+  let dismissal: Dismissal
+  let width: CGFloat
+  var height: CGFloat? = nil
+  let dismiss: @MainActor () -> Void
+  @ViewBuilder let content: () -> Content
+
+  var body: some View {
+    VStack(alignment: .leading, spacing: Theme.Space.lg) {
+      Text(title)
+        .font(.steno(Theme.TextSize.lg, weight: .semibold))
+        .foregroundStyle(Color.stenoStrong)
+      content()
+      HStack {
+        Spacer()
+        switch dismissal {
+        case .done:
+          Button("Done") { dismiss() }
+            .buttonStyle(StenoPrimaryButtonStyle())
+            .keyboardShortcut(.defaultAction)
+        case .cancel:
+          Button("Cancel") { dismiss() }
+            .buttonStyle(StenoSecondaryButtonStyle())
+            .keyboardShortcut(.cancelAction)
+        }
+      }
+    }
+    .padding(Theme.Space.xl)
+    .frame(width: width, height: height)
+    .background(Color.stenoBackground)
+  }
+}
+
+extension View {
+  /// Text fields save through `commit` on Return, when focus leaves a field
+  /// and when the page goes away. `focus` is the page's `@FocusState` value.
+  func commitsFields<Field: Hashable>(
+    focus: Field?, _ commit: @escaping @MainActor () -> Void
+  ) -> some View {
+    onSubmit { commit() }
+      .onChange(of: focus) { old, _ in
+        if old != nil { commit() }
+      }
+      .onDisappear { commit() }
   }
 }
