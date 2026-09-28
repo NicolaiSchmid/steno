@@ -62,11 +62,23 @@ final class AppIconTests: XCTestCase {
     let icns = InfoPlistTests.builtApp.appendingPathComponent("Contents/Resources/AppIcon.icns")
     XCTAssertTrue(
       FileManager.default.fileExists(atPath: icns.path), "AppIcon.icns is in the bundle")
-    let header = try Data(contentsOf: icns).prefix(4)
-    XCTAssertEqual(String(decoding: header, as: UTF8.self), "icns", "icns magic bytes")
-    let image = try XCTUnwrap(NSImage(contentsOf: icns), "AppIcon.icns decodes")
-    let widths = image.representations.map(\.pixelsWide)
-    XCTAssertTrue(widths.contains(1024), "the 512@2x representation is present: \(widths)")
+    let data = try Data(contentsOf: icns)
+    XCTAssertEqual(String(decoding: data.prefix(4), as: UTF8.self), "icns", "icns magic bytes")
+    // The container is a list of (4-byte type, 4-byte big-endian length)
+    // elements after the 8-byte header. `ic10` is the 512@2x (1024 px)
+    // image. Read from the bytes rather than `NSImage.representations`, which
+    // lists only the point sizes of an icns, not every element.
+    var types: [String] = []
+    var offset = 8
+    while offset + 8 <= data.count {
+      let type = String(decoding: data[offset..<offset + 4], as: UTF8.self)
+      let length = data[offset + 4..<offset + 8].reduce(0) { $0 << 8 | Int($1) }
+      guard length >= 8 else { break }
+      types.append(type)
+      offset += length
+    }
+    XCTAssertTrue(types.contains("ic10"), "the 512@2x (1024 px) element is present: \(types)")
+    XCTAssertNotNil(NSImage(contentsOf: icns), "AppIcon.icns decodes")
   }
 
   /// The SVG is the source of truth and `make-app-icon.sh` writes its digest
