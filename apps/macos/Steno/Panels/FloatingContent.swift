@@ -35,21 +35,9 @@ enum FloatingContent: Equatable {
   }
 }
 
-/// The auto-stop countdown as every surface renders it. The device-change
-/// plan fills this from the recorder; the sentence has one owner.
-struct AutoStopPresentation: Equatable, Sendable {
-  var appName: String?
-  var remainingText: String
-  var fractionRemaining: Double
-
-  /// "<App> closed the microphone. Stopping in 1:29."
-  var line: String {
-    "\(appName ?? "The call app") closed the microphone. Stopping in \(remainingText)."
-  }
-}
-
 /// What the bubble renders for a recorder state: the transient text, the
-/// bars, the stop button and its enabled state, and the auto-stop row.
+/// bars, the stop button and its enabled state, and the auto-stop row
+/// (`AutoStopPresentation`, the recorder's value; see `Recording/AutoStop.swift`).
 struct BubblePresentation: Equatable, Sendable {
   /// "Starting…" or "Finishing…"; nil while recording (the clock shows).
   var text: String?

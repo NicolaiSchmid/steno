@@ -62,6 +62,9 @@ final class AppBootstrap {
   private(set) var controller: AppController?
   private(set) var error: String?
   private let panels = FloatingPanelPresenter()
+  /// Ticks once a second while recording; the bubble and the menu bar label
+  /// read it for the elapsed time.
+  let clock = RecordingClock()
   private var loading = false
   /// Opens the main window and activates Steno; replaced by a scene's
   /// `openWindow` as soon as one renders. Until then, activation alone.
@@ -85,7 +88,7 @@ final class AppBootstrap {
       let controller = AppController(environment: environment)
       self.controller = controller
       await controller.launch()
-      panels.follow(controller) { [weak self] in self?.openMain() }
+      panels.follow(controller, clock: clock) { [weak self] in self?.openMain() }
       if Self.isUITesting, Self.scenario.showPrompt {
         controller.detection.appName = { _ in "Zoom" }
         await controller.detection.handle(.microphoneOpened(bundleID: "us.zoom.xos", pid: 1))
@@ -145,25 +148,17 @@ struct RootView<Content: View>: View {
 }
 
 /// The menu bar item's label: `waveform` idle, `record.circle.fill` while
-/// busy, and the symbol plus the elapsed time while recording, ticking on
-/// its own `TimelineView` (legible at a glance, immune to template
-/// rendering, self-refreshing). Always alive, so it also installs
+/// busy, and the symbol plus the elapsed time while recording, re-rendered
+/// by the shared `RecordingClock`'s tick (legible at a glance, immune to
+/// template rendering, self-refreshing). Always alive, so it also installs
 /// `openMain` for the floating bubble.
 struct MenuBarLabel: View {
   let bootstrap: AppBootstrap
 
   var body: some View {
     let state = bootstrap.controller?.recorder.recording ?? .idle
-    Group {
-      if case .recording(let since) = state {
-        TimelineView(.periodic(from: since, by: 1)) { context in
-          label(MenuBarLabelPresentation.make(state: state, now: context.date))
-        }
-      } else {
-        label(MenuBarLabelPresentation.make(state: state, now: .now))
-      }
-    }
-    .modifier(OpenMainInstaller(bootstrap: bootstrap))
+    label(MenuBarLabelPresentation.make(state: state, now: bootstrap.clock.now))
+      .modifier(OpenMainInstaller(bootstrap: bootstrap))
   }
 
   private func label(_ presentation: MenuBarLabelPresentation) -> some View {

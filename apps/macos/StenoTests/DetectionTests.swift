@@ -28,9 +28,14 @@ final class DetectionTests: XCTestCase {
     var outcomes: [DetectionPromptViewModel.Outcome] = []
     prompt.onClose = { outcomes.append($0) }
     prompt.begin()
+    _ = await clock.waitForSleepers(1)
     await prompt.start()
+    XCTAssertEqual(clock.pendingSleepers, 0, "start cancels the countdown")
+    XCTAssertFalse(prompt.countdown.isRunning)
     await prompt.dismiss()
-    XCTAssertEqual(outcomes, [.started])
+    clock.advance(by: prompt.countdown.duration)
+    await TestSupport.settle()
+    XCTAssertEqual(outcomes, [.started], "no timeout after the prompt closed")
     XCTAssertEqual(prompt.appName, "Another app")
   }
 
@@ -40,7 +45,7 @@ final class DetectionTests: XCTestCase {
     let controller = DetectionController(environment: environment)
     controller.appName = { $0 ?? "?" }
     var starts = 0
-    controller.startRecording = { starts += 1 }
+    controller.startRecording = { _ in starts += 1 }
 
     await controller.handle(.microphoneOpened(bundleID: "com.zoom.xos", pid: 42))
     XCTAssertNil(controller.prompt, "disabled: no prompt")
@@ -107,7 +112,7 @@ final class DetectionTests: XCTestCase {
       clock: clock, seed: false, processActivity: activity)
     let controller = DetectionController(environment: environment)
     controller.appName = { $0 ?? "?" }
-    controller.startRecording = { [weak controller] in
+    controller.startRecording = { [weak controller] _ in
       await controller?.recordingDidChange(true)
     }
     await controller.applySettings()
@@ -231,5 +236,40 @@ final class DetectionTests: XCTestCase {
     await controller.stop()
     running = await environment.detector.isRunning
     XCTAssertFalse(running, "stop() ends the detector for shutdown")
+  }
+
+  /// While Steno records, both detector events reach the recorder's
+  /// auto-stop policy with the name resolved, and nothing prompts; while
+  /// idle, nothing is forwarded.
+  func testEventsWhileRecordingReachTheRecorder() async throws {
+    let environment = try await TestSupport.environment(seed: false)
+    let controller = DetectionController(environment: environment)
+    controller.appName = { $0 ?? "?" }
+    var forwarded: [RecordingController.MicrophoneActivity] = []
+    controller.microphoneActivity = { forwarded.append($0) }
+    var startedFor: [String?] = []
+    controller.startRecording = { startedFor.append($0) }
+    await controller.setEnabled(true)
+
+    await controller.handle(.microphoneOpened(bundleID: "us.zoom.xos", pid: 42))
+    let prompt = try XCTUnwrap(controller.prompt, "idle: the prompt, not the recorder")
+    XCTAssertEqual(forwarded, [])
+    await prompt.start()
+    XCTAssertEqual(startedFor, ["us.zoom.xos"], "the prompt's app name goes to the recorder")
+
+    await controller.recordingDidChange(true)
+    await controller.handle(.microphoneOpened(bundleID: "us.zoom.xos", pid: 42))
+    XCTAssertNil(controller.prompt, "no prompt while recording")
+    await controller.handle(.microphoneReleased)
+    await controller.handle(.microphoneOpened(bundleID: nil, pid: 43))
+    XCTAssertEqual(
+      forwarded, [.opened(appName: "us.zoom.xos"), .released, .opened(appName: nil)],
+      "both events, the name resolved, nil when there is no bundle id")
+
+    await controller.recordingDidChange(false)
+    await controller.handle(.microphoneReleased)
+    XCTAssertEqual(forwarded.count, 3, "nothing is forwarded while idle")
+    XCTAssertEqual(startedFor.count, 1)
+    await controller.stop()
   }
 }

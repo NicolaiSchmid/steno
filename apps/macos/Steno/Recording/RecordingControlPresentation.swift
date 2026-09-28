@@ -22,6 +22,9 @@ struct RecordingControlPresentation: Equatable, Sendable {
   var offersInPerson: Bool
   /// Shown under the control when it is disabled for a lasting reason.
   var disabledReason: String?
+  /// The armed auto-stop's row under the Stop control: the countdown line
+  /// and "Keep recording". Only while recording.
+  var autoStop: AutoStopPresentation? = nil
 
   /// The Record menu's item: macOS title case for the two settled states;
   /// the transient labels ("Starting…", "Finishing…") are shown as they are.
@@ -40,8 +43,11 @@ struct RecordingControlPresentation: Equatable, Sendable {
     offersInPerson: false, disabledReason: nil)
 
   /// Only required kinds in `denied` count; an optional kind never disables.
-  static func make(state: RecordingState, denied: [PermissionKind]) -> RecordingControlPresentation
-  {
+  /// `autoStop` is the recorder's armed countdown as a value; it shows only
+  /// while recording.
+  static func make(
+    state: RecordingState, denied: [PermissionKind], autoStop: AutoStopPresentation? = nil
+  ) -> RecordingControlPresentation {
     let denied = denied.filter(\.isRequired)
     switch state {
     case .idle:
@@ -56,7 +62,7 @@ struct RecordingControlPresentation: Equatable, Sendable {
     case .recording:
       return RecordingControlPresentation(
         label: "Stop", role: .stop, isEnabled: true, isBusy: false, offersInPerson: false,
-        disabledReason: nil)
+        disabledReason: nil, autoStop: autoStop)
     case .stopping:
       return RecordingControlPresentation(
         label: "Finishing…", role: .stop, isEnabled: false, isBusy: true, offersInPerson: false,

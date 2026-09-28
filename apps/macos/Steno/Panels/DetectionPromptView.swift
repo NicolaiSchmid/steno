@@ -10,7 +10,7 @@ struct DetectionPromptView: View {
 
   var body: some View {
     PromptBody(
-      appName: model.appName, countdown: model.countdown,
+      appName: model.appName, fractionRemaining: model.countdown.fractionRemaining,
       record: { Task { await model.start() } },
       dismiss: { Task { await model.dismiss() } })
   }
@@ -20,7 +20,7 @@ struct DetectionPromptView: View {
 /// the countdown at any fraction.
 struct PromptBody: View {
   let appName: String
-  let countdown: Countdown
+  let fractionRemaining: Double
   let record: () -> Void
   let dismiss: () -> Void
 
@@ -55,7 +55,7 @@ struct PromptBody: View {
     .frame(height: PanelMetrics.promptHeight)
     .frame(minWidth: PanelMetrics.promptMinWidth, maxWidth: PanelMetrics.promptMaxWidth)
     .overlay(alignment: .bottom) {
-      CountdownHairline(countdown: countdown)
+      CountdownHairline(fractionRemaining: fractionRemaining)
         .padding(.horizontal, PanelMetrics.hairlineInset)
         .padding(.bottom, PanelMetrics.hairlineBottom)
     }
@@ -95,16 +95,11 @@ struct PromptDismissButton: View {
   #Preview("Detection prompt") {
     PreviewPair {
       VStack(alignment: .leading, spacing: Theme.Space.lg) {
+        PromptBody(appName: "Zoom", fractionRemaining: 1, record: {}, dismiss: {})
+        PromptBody(appName: "FaceTime", fractionRemaining: 0.5, record: {}, dismiss: {})
         PromptBody(
-          appName: "Zoom", countdown: .preview(duration: .seconds(60), remaining: .seconds(60)),
-          record: {}, dismiss: {})
-        PromptBody(
-          appName: "FaceTime", countdown: .preview(duration: .seconds(60), remaining: .seconds(30)),
-          record: {}, dismiss: {})
-        PromptBody(
-          appName: "Microsoft Teams (work or school)",
-          countdown: .preview(duration: .seconds(60), remaining: .seconds(4)),
-          record: {}, dismiss: {})
+          appName: "Microsoft Teams (work or school)", fractionRemaining: 0.06, record: {},
+          dismiss: {})
       }
     }
     .frame(width: 1080, height: 300)

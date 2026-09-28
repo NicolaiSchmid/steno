@@ -9,7 +9,6 @@ import XCTest
 @MainActor
 final class FakePanelHost: PanelHost {
   var currentScreens: [CGRect] = [CGRect(x: 0, y: 0, width: 1512, height: 944)]
-  var contentFittingSize = CGSize(width: 400, height: 56)
   private(set) var isShown = false
   private(set) var shownFrames: [CGRect] = []
   private(set) var hides = 0
@@ -179,46 +178,54 @@ final class FloatingPanelTests: XCTestCase {
     let prompt = makePrompt()
     model.apply(.prompt(prompt))
     XCTAssertEqual(model.state.content, .prompt(prompt))
+    XCTAssertTrue(host.shownFrames.isEmpty, "nothing to show before the root has measured")
+    let size = CGSize(width: 400, height: 56)
+    model.contentSizeDidChange(size)
     let screen = host.currentScreens[0]
-    XCTAssertEqual(
-      host.shownFrames, [PanelAnchor.default(in: screen).frame(for: host.contentFittingSize)])
+    XCTAssertEqual(host.shownFrames, [PanelAnchor.default(in: screen).frame(for: size)])
+    model.contentSizeDidChange(CGSize(width: 400.4, height: 56))
+    XCTAssertEqual(host.shownFrames.count, 1, "sub-point rounding is not a new size")
 
     model.apply(nil)
     XCTAssertEqual(host.hides, 2)
     XCTAssertEqual(model.state.content, .prompt(prompt), "the content stays while fading out")
+    model.contentSizeDidChange(CGSize(width: 300, height: 56))
+    XCTAssertEqual(host.shownFrames.count, 1, "a hidden panel is not shown by a size change")
   }
 
   /// The prompt morphs into the bubble at the same top-centre point.
   func testPromptThenBubbleKeepsTheAnchorAndResizes() throws {
     let host = FakePanelHost()
     let model = FloatingPanelModel(host: host, defaults: try makeDefaults())
-    host.contentFittingSize = CGSize(width: 420, height: 56)
     model.apply(.prompt(makePrompt()))
-    host.contentFittingSize = CGSize(width: 168, height: 40)
+    model.contentSizeDidChange(CGSize(width: 420, height: 56))
     model.apply(.bubble)
     XCTAssertEqual(model.state.content, .bubble)
-    XCTAssertEqual(host.shownFrames.count, 2)
+    // Shown at once at the last known size, then re-placed when the bubble
+    // has measured.
+    model.contentSizeDidChange(CGSize(width: 168, height: 40))
+    XCTAssertEqual(host.shownFrames.count, 3)
     let prompt = host.shownFrames[0]
-    let bubble = host.shownFrames[1]
+    let bubble = try XCTUnwrap(host.shownFrames.last)
     XCTAssertEqual(prompt.size, CGSize(width: 420, height: 56))
     XCTAssertEqual(bubble.size, CGSize(width: 168, height: 40))
     XCTAssertEqual(prompt.midX, bubble.midX)
     XCTAssertEqual(prompt.maxY, bubble.maxY)
 
-    // The content resized the window: the same rule re-anchors it.
-    model.panelDidResize(to: CGSize(width: 200, height: 40))
-    let resized = try XCTUnwrap(host.shownFrames.last)
-    XCTAssertEqual(resized.size, CGSize(width: 200, height: 40))
-    XCTAssertEqual(resized.midX, bubble.midX)
-    XCTAssertEqual(resized.maxY, bubble.maxY)
+    // The armed auto-stop row widens the bubble: the same rule re-anchors it.
+    model.contentSizeDidChange(CGSize(width: 420, height: 64))
+    let armed = try XCTUnwrap(host.shownFrames.last)
+    XCTAssertEqual(armed.size, CGSize(width: 420, height: 64))
+    XCTAssertEqual(armed.midX, bubble.midX)
+    XCTAssertEqual(armed.maxY, bubble.maxY)
   }
 
   func testAMoveSavesTheAnchorToTheInjectedDefaults() throws {
     let defaults = try makeDefaults()
     let host = FakePanelHost()
     let model = FloatingPanelModel(host: host, defaults: defaults)
-    host.contentFittingSize = CGSize(width: 168, height: 40)
     model.apply(.bubble)
+    model.contentSizeDidChange(CGSize(width: 168, height: 40))
 
     // A resize in flight (size differs from the placed one) is not a move.
     model.panelDidMove(to: CGRect(x: 100, y: 100, width: 300, height: 40))
@@ -235,7 +242,8 @@ final class FloatingPanelTests: XCTestCase {
     // A relaunch reads the saved anchor back.
     let again = FloatingPanelModel(host: host, defaults: defaults)
     again.apply(.bubble)
-    XCTAssertEqual(host.shownFrames.last, saved.frame(for: host.contentFittingSize))
+    again.contentSizeDidChange(CGSize(width: 168, height: 40))
+    XCTAssertEqual(host.shownFrames.last, saved.frame(for: CGSize(width: 168, height: 40)))
   }
 
   /// The saved screen is unplugged mid-call: the bubble comes to the
@@ -249,15 +257,16 @@ final class FloatingPanelTests: XCTestCase {
     let onSecond = PanelAnchor(topCenter: CGPoint(x: 2800, y: 1400), screenFrame: second)
     defaults.set(try JSONEncoder().encode(onSecond), forKey: FloatingPanelModel.anchorKey)
     let model = FloatingPanelModel(host: host, defaults: defaults)
-    host.contentFittingSize = CGSize(width: 168, height: 40)
+    let size = CGSize(width: 168, height: 40)
     model.apply(.bubble)
-    XCTAssertEqual(host.shownFrames.last, onSecond.frame(for: host.contentFittingSize))
+    model.contentSizeDidChange(size)
+    XCTAssertEqual(host.shownFrames.last, onSecond.frame(for: size))
 
     host.currentScreens = [first]
     model.screensDidChange()
     let fallback = PanelAnchor.default(in: first)
     XCTAssertEqual(model.anchor, fallback)
-    XCTAssertEqual(host.shownFrames.last, fallback.frame(for: host.contentFittingSize))
+    XCTAssertEqual(host.shownFrames.last, fallback.frame(for: size))
     let saved = try JSONDecoder().decode(
       PanelAnchor.self, from: try XCTUnwrap(defaults.data(forKey: FloatingPanelModel.anchorKey)))
     XCTAssertEqual(saved, fallback, "the stale anchor is replaced")
