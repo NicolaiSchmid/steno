@@ -227,7 +227,8 @@ final class RecordingControllerTests: XCTestCase {
     let diarizerPreparations = await diarizer.preparations.count
     XCTAssertEqual(enginePreparations, 1, "only the run prepared")
     XCTAssertEqual(diarizerPreparations, 1, "only the run prepared")
-    XCTAssertEqual(try await stoppedMeeting(in: environment).state, .ready)
+    let finalState = try await stoppedMeeting(in: environment).state
+    XCTAssertEqual(finalState, .ready)
     await controller.shutdown()
   }
 
@@ -239,9 +240,10 @@ final class RecordingControllerTests: XCTestCase {
     var engine = FakeSpeechEngine()
     let preparations = engine.preparations
     engine.onPrepare = { if await preparations.count == 1 { throw Boom() } }
+    let failingOnce = engine
     let diarizer = FakeDiarizer()
     let environment = try await TestSupport.environment(
-      seed: false, makeSpeechEngine: { engine }, makeDiarizer: { diarizer })
+      seed: false, makeSpeechEngine: { failingOnce }, makeDiarizer: { diarizer })
     for try await _ in await environment.models.ensure(.parakeetV3) {}
     for try await _ in await environment.models.ensure(.offlineDiarizer) {}
     let controller = AppController(environment: environment)
@@ -260,7 +262,8 @@ final class RecordingControllerTests: XCTestCase {
     let diarizerPreparations = await diarizer.preparations.count
     XCTAssertEqual(enginePreparations, 2, "the failed warm-up and the run's own prepare")
     XCTAssertEqual(diarizerPreparations, 1, "the run's prepare")
-    XCTAssertEqual(try await stoppedMeeting(in: environment).state, .ready)
+    let finalState = try await stoppedMeeting(in: environment).state
+    XCTAssertEqual(finalState, .ready)
     XCTAssertTrue(environment.startupWarnings.isEmpty, "\(environment.startupWarnings)")
     XCTAssertNil(recorder.lastWarning)
     await controller.shutdown()
