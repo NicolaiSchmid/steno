@@ -68,6 +68,16 @@ public struct Person: Codable, Sendable, Equatable, Hashable, Identifiable {
     case sampleCount
     case createdAt
   }
+
+  /// Whether two display names name the same person for lookup purposes:
+  /// equal ignoring case, diacritics and surrounding whitespace, so "jerome"
+  /// finds "Jérôme". Used by `MeetingStore.resolvePerson` and the speaker
+  /// picker's filter.
+  public static func namesMatch(_ lhs: String, _ rhs: String) -> Bool {
+    lhs.trimmingCharacters(in: .whitespacesAndNewlines).compare(
+      rhs.trimmingCharacters(in: .whitespacesAndNewlines),
+      options: [.caseInsensitive, .diacriticInsensitive]) == .orderedSame
+  }
 }
 
 /// A speaker embedding: `Embedding.dimension` Float32 values, L2-normalised

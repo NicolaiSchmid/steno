@@ -459,6 +459,34 @@ import Testing
     #expect(await memory.enrolments.count == 1)
   }
 
+  @Test func resolvePersonReusesJeromeForJérôme() async throws {
+    let store = try await Self.populated()
+    let found = try await store.resolvePerson(named: "  jerome ", now: SampleData.createdAt)
+    #expect(found == SampleData.persons()[0])
+    let exact = try await store.resolvePerson(named: "Nicolai", now: SampleData.createdAt)
+    #expect(exact.id == SampleData.personNicolaiID)
+    #expect(try await store.persons().count == 2, "nothing is written")
+  }
+
+  @Test func resolvePersonCreatesWithEmail() async throws {
+    let store = try await Self.populated()
+    let created = try await store.resolvePerson(
+      named: " Maya ", email: "maya@example.com", now: SampleData.createdAt)
+    #expect(created.displayName == "Maya")
+    #expect(created.email == "maya@example.com")
+    #expect(created.sampleCount == 0)
+    #expect(created.embedding == nil)
+    #expect(created.createdAt == SampleData.createdAt)
+    #expect(try await store.person(id: created.id) == nil, "unsaved until confirm")
+  }
+
+  @Test func resolvePersonIgnoresBlank() async throws {
+    let store = try await Self.populated()
+    await #expect(throws: MeetingStoreError.blankPersonName) {
+      try await store.resolvePerson(named: " \n ", now: SampleData.createdAt)
+    }
+  }
+
   @Test func transcriptAndSummaryWritesNeedTheMeeting() async throws {
     let store = try MeetingStore.inMemory()
     await #expect(throws: MeetingStoreError.meetingNotFound(SampleData.meetingID)) {

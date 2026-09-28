@@ -82,42 +82,71 @@ extension MeetingStore {
   public func mergeSpeakers(_ source: UUID, into target: UUID, meetingID: UUID) async throws {
     guard source != target else { return }
     let clipToRemove: URL? = try await writer.write { db in
-      guard let sourceRow = try Self.speakerRow(source, db) else {
-        throw MeetingStoreError.speakerNotFound(source)
-      }
-      guard let targetRow = try Self.speakerRow(target, db) else {
-        throw MeetingStoreError.speakerNotFound(target)
-      }
-      guard sourceRow.meetingID == meetingID, targetRow.meetingID == meetingID else {
-        throw MeetingStoreError.speakersInDifferentMeetings(source, target)
-      }
-      let merged = sourceRow.speaker
-      var kept = targetRow.speaker
-      switch (kept.embedding, merged.embedding) {
-      case (let lhs?, let rhs?):
-        kept.embedding = Embedding.weightedMean(lhs, weight: 1, rhs, weight: 1)
-      case (nil, let rhs?):
-        kept.embedding = rhs
-      default:
-        break
-      }
-      if case .unknown = kept.assignment { kept.assignment = merged.assignment }
-      var clipToRemove = merged.sampleClipURL
-      if kept.sampleClipRange == nil {
-        kept.sampleClipRange = merged.sampleClipRange
-        kept.sampleClipURL = merged.sampleClipURL
-        clipToRemove = nil
-      }
-      kept.clusterConfidence = max(kept.clusterConfidence, merged.clusterConfidence)
-      try SpeakerRow(kept).update(db)
-
-      try db.execute(
-        sql: "UPDATE transcriptSegment SET speakerID = ? WHERE speakerID = ?",
-        arguments: [target.uuidString, source.uuidString])
-      try SpeakerRow.filter(SpeakerRow.Columns.id == source.uuidString).deleteAll(db)
-      return clipToRemove
+      try Self.mergeSpeakerRows(source, into: target, meetingID: meetingID, db)
     }
     if let clipToRemove { try? FileManager.default.removeItem(at: clipToRemove) }
+  }
+
+  /// The row half of `mergeSpeakers`, inside a caller's transaction: returns
+  /// the clip file the caller removes once the transaction commits (nil when
+  /// the clip moved to `target`). Throws for a missing speaker or one from
+  /// another meeting; a self-merge is a no-op.
+  static func mergeSpeakerRows(
+    _ source: UUID, into target: UUID, meetingID: UUID, _ db: Database
+  ) throws -> URL? {
+    guard source != target else { return nil }
+    guard let sourceRow = try speakerRow(source, db) else {
+      throw MeetingStoreError.speakerNotFound(source)
+    }
+    guard let targetRow = try speakerRow(target, db) else {
+      throw MeetingStoreError.speakerNotFound(target)
+    }
+    guard sourceRow.meetingID == meetingID, targetRow.meetingID == meetingID else {
+      throw MeetingStoreError.speakersInDifferentMeetings(source, target)
+    }
+    let merged = sourceRow.speaker
+    var kept = targetRow.speaker
+    switch (kept.embedding, merged.embedding) {
+    case (let lhs?, let rhs?):
+      kept.embedding = Embedding.weightedMean(lhs, weight: 1, rhs, weight: 1)
+    case (nil, let rhs?):
+      kept.embedding = rhs
+    default:
+      break
+    }
+    if case .unknown = kept.assignment { kept.assignment = merged.assignment }
+    var clipToRemove = merged.sampleClipURL
+    if kept.sampleClipRange == nil {
+      kept.sampleClipRange = merged.sampleClipRange
+      kept.sampleClipURL = merged.sampleClipURL
+      clipToRemove = nil
+    }
+    kept.clusterConfidence = max(kept.clusterConfidence, merged.clusterConfidence)
+    try SpeakerRow(kept).update(db)
+
+    try db.execute(
+      sql: "UPDATE transcriptSegment SET speakerID = ? WHERE speakerID = ?",
+      arguments: [target.uuidString, source.uuidString])
+    try SpeakerRow.filter(SpeakerRow.Columns.id == source.uuidString).deleteAll(db)
+    return clipToRemove
+  }
+
+  /// The person a typed or calendar name stands for: the stored person whose
+  /// display name matches ignoring case and diacritics ("jerome" finds
+  /// Jérôme), else a new, unsaved person with the trimmed name and `email`.
+  /// Nothing is written; `confirm` saves a new person. A blank name throws
+  /// `MeetingStoreError.blankPersonName`.
+  public func resolvePerson(named name: String, email: String? = nil, now: Date) async throws
+    -> Person
+  {
+    let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !trimmed.isEmpty else { throw MeetingStoreError.blankPersonName }
+    if let existing = try await persons().first(where: {
+      Person.namesMatch($0.displayName, trimmed)
+    }) {
+      return existing
+    }
+    return Person(id: UUID(), displayName: trimmed, email: email, sampleCount: 0, createdAt: now)
   }
 
   /// The one operation that sets `.confirmed`: saves the person (new or
