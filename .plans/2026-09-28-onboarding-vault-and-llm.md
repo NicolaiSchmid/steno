@@ -1,6 +1,6 @@
 # Steno: configure summaries and the vault during onboarding
 
-Status: proposal, 2026-09-28. Triggered by first-run feedback.
+Status: proposal, 2026-09-28, revised after the 2026-09-28 reviews. Triggered by first-run feedback.
 
 Binding plans: scope authority [`2026-09-24-initial-scope.md`](2026-09-24-initial-scope.md);
 app plan [`2026-09-25-macos-app-and-release.md`](2026-09-25-macos-app-and-release.md) (onboarding
@@ -28,19 +28,20 @@ a meeting processed before configuration can still get its summary and its expor
 
 ## Findings
 
-What happens today when the first recording completes with no LLM endpoint and no vault:
+Line numbers are as of commit `9cd7cf5` (source identical to `bcf5eef` on `main`). What happens
+today when the first recording completes with no LLM endpoint and no vault:
 
 1. Onboarding is permissions only. `OnboardingViewModel.steps` is built from
    `PermissionKind.allCases` (`apps/macos/Steno/Onboarding/OnboardingViewModel.swift:17`); the
    window closes itself the moment every step is granted or skipped
-   (`OnboardingView.swift:138-140`). The opener runs once per launch and opens the window only
+   (`OnboardingView.swift:42-44`). The opener runs once per launch and opens the window only
    while a required permission is missing (`apps/macos/Steno/StenoApp.swift:132-143`). Once
    microphone and system audio are granted the window never appears again.
 
 2. Without an endpoint the product runs test doubles. `AppEnvironment.live` builds the pipeline
    with `LLMWiring.passes(settings:apiKey:)` (`apps/macos/Steno/AppEnvironment.swift:207`), which
    is nil until `Settings.llmBaseURL` and `llmModel` are both set
-   (`apps/macos/Steno/Services/LLMWiring.swift:211-218`, `Sources/StenoLLM/LLMEndpoint.swift:167-172`).
+   (`apps/macos/Steno/Services/LLMWiring.swift:18-19`, `Sources/StenoLLM/LLMEndpoint.swift:60-62`).
    The fallbacks are `PassthroughCleaner()` and `FakeSummarizer()`
    (`AppEnvironment.swift:213-214`), both from `Sources/StenoCore/Testing/FakeLLM.swift`. The CLI
    does the same (`Sources/steno/Wiring.swift:74-75`).
@@ -51,12 +52,12 @@ What happens today when the first recording completes with no LLM endpoint and n
    the first transcript segment, one decision "Decision from Speaker 1.", one task "Follow up on
    Default." assigned to Speaker 1, and a usage of 200 prompt and 100 completion tokens. The
    summarize stage replaces the title when the meeting has no calendar event
-   (`Sources/StenoCore/Pipeline/Stages/Summarize.swift:276-278`) and sums the usage (:280), on top
+   (`Sources/StenoCore/Pipeline/Stages/Summarize.swift:30-31`) and sums the usage (:34), on top
    of the passthrough cleaner's fixed 100 plus 50 (`FakeLLM.swift:31`, folded in at
    `Sources/StenoCore/Pipeline/ProcessingPipeline.swift:159`). The meeting lands `.ready`.
 
-4. What the user sees: a "Ready" chip (`apps/macos/Steno/Main/MeetingDetailView.swift:290`), a
-   header line "450 tokens" although no request was made (:297-299), a Summary tab with a heading
+4. What the user sees: a "Ready" chip (`apps/macos/Steno/Main/MeetingDetailView.swift:54`), a
+   header line "450 tokens" although no request was made (:61-62), a Summary tab with a heading
    per section and a bullet quoting the first sentence (`Main/Tabs/SummaryTab.swift:49-77`), a
    Tasks tab with the fake task, a Decisions block with the fake decision, and a meeting renamed to
    "Summary of Untitled" unless the calendar supplied a title. No error, no warning, no chip says
@@ -67,7 +68,7 @@ What happens today when the first recording completes with no LLM endpoint and n
 5. Delivery is silently absent. `DeliveryCoordinator.destinations(for:)` returns `[]` when
    `settings.obsidian == nil` (`Sources/StenoAdapters/Runtime/DeliveryCoordinator.swift:32-35`)
    and `deliverAll` returns without writing a row (:56). The footer shows "Not delivered yet"
-   (`MeetingDetailView.swift:415-418`), the same text a meeting shows in the seconds before a
+   (`MeetingDetailView.swift:176-190`), the same text a meeting shows in the seconds before a
    configured delivery lands. Nothing distinguishes "no vault" from "not yet".
 
 6. The only hint in the app is in Settings > LLM: "No endpoint configured: summaries use a
@@ -77,7 +78,7 @@ What happens today when the first recording completes with no LLM endpoint and n
    (`Main/MainWindow.swift`) carry no setup state at all.
 
 7. The recovery paths exist but are undiscoverable and incomplete. Actions > "Re-run summary" and
-   "Re-export" (`MeetingDetailView.swift:322-325`) are enabled for `.ready` and failed meetings
+   "Re-export" (`MeetingDetailView.swift:86-88`) are enabled for `.ready` and failed meetings
    (`Main/MeetingDetailViewModel.swift:100-103`). Saving the LLM tab rebuilds the pipeline
    (`Settings/LLMSettingsViewModel.swift:84`) and the coordinator reads settings per delivery
    (`DeliveryCoordinator.swift:41`), so after configuring, both actions do the right thing. But the
@@ -158,11 +159,22 @@ The tests that pin the fake output (`Tests/StenoCoreTests/PipelineIntegrationTes
    next launch while the configuration is still missing. The detail rows are factual per-meeting
    states and are never dismissed. Reason: a permanently dismissable banner would need a second
    flag and a reset rule when configuration changes; the per-meeting rows already carry the signal
-   permanently.
+   permanently. "Configured" is a pure function of `Settings`, not a mirrored class:
+   `extension Settings { var llmConfigured: Bool; var vaultConfigured: Bool }`
+   (`LLMEndpoint(settings:) != nil`, `obsidian != nil`) in the app, and the one real piece of state,
+   `AppController.setupBannerDismissed: Bool`. The view models already observe `Settings`, so no
+   second observer task is needed.
+8a. The copy for a `.ready` meeting without a summary, and the export footer, is owned here and
+   selected by `MeetingDetailViewModel.summaryStatus` and `exportStatus`. The redesign plan folds
+   these rows into its states table verbatim and keeps the two selectors; its `PendingText` keys
+   off `Meeting.state` only for queued, processing and failed. One vocabulary in user copy:
+   "export" (the Actions menu already says "Re-export"), never "delivered".
 
 9. Settings gets deep links. `SettingsView` binds its `TabView` to a `SettingsTab` selection and
-   `AppController` gets `requestedSettingsTab`, mirroring `requestedMeetingID`. Every "Open
-   Settings" button in this plan lands on the right tab.
+   `AppController` gets `requestedSettingsTab` plus `openSettings(_ tab:)`, which sets the request
+   and returns it, mirroring `requestedMeetingID`. Every "Open Settings" button in this plan lands
+   on the right tab. The request is set on the controller (unit-tested) and cleared in the view
+   (covered by the UI smoke test that opens Settings on the right tab).
 
 10. The CLI follows the same rule. `Wiring.dependencies` passes nil passes when
     `Wiring.llmComponents` is nil and `steno process` reports the summary as skipped. The fakes
@@ -178,8 +190,9 @@ Page 1: title stays "Welcome to Steno". Intro copy becomes:
 
 > A few permissions, then where summaries come from and where meetings go. Audio never leaves this Mac.
 
-Directly under the intro sits the retention plan's one-line sentence (for example "Recordings
-are kept forever in Steno. Change this any time in Settings > Audio."). Rows 1 to 4 are today's
+Directly under the intro sits the retention plan's one-line sentence ("Recordings are kept forever
+in <folder name>. Change this any time in Settings > Audio.", or its days or delete variant; the
+retention plan owns the wording). Rows 1 to 4 are today's
 Microphone (required), System audio (required), Calendar (optional) and Local network (optional,
 "Got it"), unchanged. Bottom buttons: "Later" until the required permissions are granted, then
 "Done"; both advance to page 2 instead of closing. The auto-close on page 1 is replaced by the
@@ -214,10 +227,12 @@ when both rows are saved or skipped, or on Finish. Finishing by any route sets
 
 ### Main window banner
 
-Shown at the top of the detail column, above the selected meeting or the detail empty state,
-when at least one meeting exists, the configuration is incomplete and the banner was not
-dismissed this launch. The preview environment has no endpoint and no vault, so the banner shows
-there and the UI smoke test uses that.
+Shown as row 1 of the redesign plan's detail header stack (above the header, full width,
+dismissable), over the selected meeting or the detail empty state, when at least one meeting
+exists, the configuration is incomplete and the banner was not dismissed this launch. The preview
+environment has no endpoint and no vault, so the banner shows there and the UI smoke test uses
+that. Button ids: `setup-summaries`, `choose-vault`, `banner-not-now`; the smoke test matches ids,
+not the copy.
 
 - Both missing:
 
@@ -237,8 +252,9 @@ there and the UI smoke test uses that.
 
   Buttons: "Choose a vault", "Not now".
 
-Styling: a `Card` with a `MessageRow(kind: .info)` and the buttons in a trailing `HStack`; motion
-from `Motion.functional` on appear and dismiss. No new colours.
+Styling: a `Card` with a `MessageRow(kind: .info)` and the buttons in a trailing `HStack`, 32 pt
+side insets like the header; motion from `Motion.functional` on appear and dismiss. No new colours.
+The redesign plan's detail pane spec carries this row so the banner is not left unstyled.
 
 ### Meeting detail
 
@@ -257,7 +273,9 @@ Summary tab, replacing the "No summary" text when the meeting is `.ready` and `s
   Button "Run summary" (calls `rerunSummary()`), footnote "Summary only; the transcript stays as recorded."
 
 Tasks tab in the same two states: "No tasks: the summary was skipped." with the same button as the
-Summary tab. Queued and processing keep today's pending texts.
+Summary tab. Queued and processing keep today's pending texts. All four strings go through
+`TabText` (a `setup` argument beside the state) so `TabTextSnapshotTests` keeps describing what the
+tabs show; the redesign's `EmptyState` gets an optional action so the button survives its restyle.
 
 Header: the "N tokens" line is absent because `llmUsage` stays nil. Actions menu: "Re-run summary"
 is disabled with help "Set up an LLM endpoint in Settings > LLM first" while unconfigured;
@@ -281,16 +299,17 @@ Footer:
 
 ### Settings deep links
 
-`SettingsTab` cases `general, audio, speech, llm, obsidian, phones, updates`. Callers set
-`controller.requestedSettingsTab`, call the `openSettings` environment action and `NSApp.activate()`.
-`SettingsView` applies the request in `onChange(of: controller.requestedSettingsTab, initial: true)`
-and clears it, like `MainWindow` does for `requestedMeetingID`.
+`SettingsTab` cases `general, audio, speech, llm, obsidian, phones, updates`. Callers call
+`controller.openSettings(.llm)` (sets `requestedSettingsTab`), then the `openSettings` environment
+action and `NSApp.activate()`. `SettingsView` applies the request in
+`onChange(of: controller.requestedSettingsTab, initial: true)` and clears it, like `MainWindow`
+does for `requestedMeetingID`.
 
 ## Implementation steps
 
 1. Core: optional LLM passes.
-   Files: `Sources/StenoCore/Pipeline/PipelineStage.swift` (`PipelineDependencies.cleaner` and
-   `.summarizer` optional with default nil), `Sources/StenoCore/Pipeline/Stages/Cleanup.swift`
+   Files: `Sources/StenoCore/Pipeline/ProcessingPipeline.swift:7-40` (`PipelineDependencies.cleaner`
+   and `.summarizer` optional with default nil; the struct lives there, not in `PipelineStage.swift`), `Sources/StenoCore/Pipeline/Stages/Cleanup.swift`
    (nil cleaner: post `.cleanup`, return the input segments with `usage: .zero`, no store write),
    `Sources/StenoCore/Pipeline/Stages/Summarize.swift` (nil summarizer: post `.summarize`, return
    the meeting unchanged, clear tasks, decisions and name suggestions through `replaceSummary` with
@@ -301,54 +320,68 @@ and clears it, like `MainWindow` does for `requestedMeetingID`.
    passes lands `.ready`, `summary == nil`, `llmUsage == nil`, no tasks or decisions, title still
    "Untitled", every segment `text == rawText`, `.cleanup` and `.summarize` progress events posted,
    the dispatcher called once; `rerunSummary` throws a `.summarize` failure whose reason contains
-   "LLM endpoint"; `redeliver` succeeds. `Tests/StenoCoreTests/StageTests.swift`: the skipped
-   summarize stage clears rows a previous fake run wrote. Existing tests that inject the fakes are
-   untouched.
+   "LLM endpoint"; `redeliver` succeeds. `PipelineHarness` (`Tests/StenoCoreTests/Support`) types
+   `cleaner` and `summarizer` as non-optional today; make them optional so the nil-passes case is
+   constructible. Add `PipelineIntegrationTests.aConfiguredSummarizerNeverLeavesReadyWithoutASummary`
+   with a `FakeSummarizer` that returns an empty document, expecting a non-nil `summary`, so
+   decision 2's invariant is pinned from both sides (today only the contrapositive,
+   `summarizeFailureMarksFailedAndKeepsTheTranscript`, exists). `Tests/StenoCoreTests/StageTests.swift`:
+   the skipped summarize stage clears rows a previous fake run wrote. Existing tests that inject
+   the fakes are untouched.
 
 2. CLI: `Sources/steno/Wiring.swift` passes `llm?.cleaner` and `llm?.summarizer` without
    fallbacks. `Sources/steno/Commands/Process.swift` keeps printing only the meeting id on stdout
    (`Process.swift:136`, scripts depend on it) and writes "summary skipped: no LLM endpoint
-   configured" to stderr when the meeting lands ready without a summary. Update any
-   `Tests/stenoTests` expectation that relies on the fake summary from the default wiring;
-   end-to-end tests already use the stub server for real summaries.
+   configured" to stderr when the meeting lands ready without a summary.
+   `CLITests.migrateGenerateProcessAndExport` (`Tests/stenoTests`, line 113) asserts
+   `decoded.meeting.title == "Summary of Sweep"`, the fake's title, and fails once the CLI stops
+   wiring the fake: change it to `title == "Sweep"`, `summary == nil`, `llmUsage == nil`, and
+   stderr containing "summary skipped: no LLM endpoint configured". End-to-end tests already use
+   the stub server for real summaries.
 
 3. App wiring: `apps/macos/Steno/AppEnvironment.swift` `live()` passes `llm?.cleaner` and
    `llm?.summarizer` without fallbacks. `preview()` keeps its explicit fakes so seeded meetings
    render summaries in UI tests. Fix the comment at `Sources/StenoCore/Model/Settings.swift:6`.
 
-4. Setup state: a new `apps/macos/Steno/Services/SetupState.swift`, `@MainActor @Observable final
-   class SetupState` with `llmConfigured`, `vaultConfigured` (both from `Settings` via
-   `LLMEndpoint(settings:) != nil` and `settings.obsidian != nil`), `bannerDismissed`, and a pure
-   `static func derive(_ settings: Settings)` for tests. `AppEnvironment` owns one instance;
-   `AppController.launch()` adds an observer over `environment.settings.observe()` that updates it,
-   alongside the existing observers, and `shutdown()` cancels it with the rest.
-   Tests in `apps/macos/StenoTests/AppControllerTests.swift`: after `launch()`, saving the LLM tab
-   flips `llmConfigured`, saving the Obsidian tab flips `vaultConfigured`, `dismissBanner()` hides
-   the banner and a fresh controller shows it again.
+4. Setup state: a new `apps/macos/Steno/Services/Settings+Setup.swift` with
+   `extension Settings { var llmConfigured: Bool { LLMEndpoint(settings: self) != nil }; var
+   vaultConfigured: Bool { obsidian != nil } }` and `AppController.setupBannerDismissed: Bool` with
+   `dismissBanner()`. No class, no observer task: the banner and the detail view model read the
+   current `Settings` the view models already observe.
+   Tests: `apps/macos/StenoTests/SettingsSetupTests.swift` covers the four combinations of the two
+   properties; `AppControllerTests`: after `launch()`, saving the LLM tab makes the loaded
+   settings report `llmConfigured`, saving the Obsidian tab `vaultConfigured`, `dismissBanner()`
+   sets the flag and a fresh controller starts with it false.
 
 5. Settings deep links: `SettingsTab` and the `TabView(selection:)` binding in
-   `apps/macos/Steno/Settings/SettingsView.swift`; `requestedSettingsTab` on
-   `apps/macos/Steno/AppController.swift`; a small `View` extension `openSettings(_ tab:, controller:)`
-   in `apps/macos/Steno/Design/Components.swift` used by the banner, the footer, the tabs and the
-   menu bar. Test in `apps/macos/StenoTests/AppControllerTests.swift` that the request is set and
-   cleared.
+   `apps/macos/Steno/Settings/SettingsView.swift`; `requestedSettingsTab` and
+   `openSettings(_ tab:) -> SettingsTab` on `apps/macos/Steno/AppController.swift`; a small `View`
+   extension `openSettings(_ tab:, controller:)` in `apps/macos/Steno/Design/Components.swift` used
+   by the banner, the footer, the tabs and the menu bar. Test in
+   `apps/macos/StenoTests/AppControllerTests.swift` that `openSettings(.llm)` sets and returns the
+   request; the clearing happens in `SettingsView.onChange`, which the hostless bundle never runs,
+   so it is covered by the UI smoke test in step 7 (`app.tabs["LLM"].isSelected` after clicking
+   `setup-summaries`).
 
-6. Detail pane states: `apps/macos/Steno/Main/MeetingDetailViewModel.swift` takes `SetupState` in
-   its designated init (the convenience init reads `environment.setup`) and exposes
-   `summaryStatus` (`pending`, `present`, `skippedUnconfigured`, `skippedRunnable`),
-   `exportStatus` (`noVault`, `notExported`, `delivered([Delivery])`), `canRerunSummary` and
-   `canReexport`. `apps/macos/Steno/Main/Tabs/SummaryTab.swift`, `Tabs/TasksTab.swift` and
-   `Main/MeetingDetailView.swift` (actions menu, footer) render the copy above. `TabText` is left
-   alone so `TabTextSnapshotTests` keeps its fixture lines.
+6. Detail pane states: `apps/macos/Steno/Main/MeetingDetailViewModel.swift` reads the current
+   `Settings` (it already observes them) and exposes `summaryStatus` (`pending`, `present`,
+   `skippedUnconfigured`, `skippedRunnable`), `exportStatus` (`noVault`, `notExported`,
+   `exported([Delivery])`), `canRerunSummary` and `canReexport`.
+   `apps/macos/Steno/Main/Tabs/SummaryTab.swift`, `Tabs/TasksTab.swift` and
+   `Main/MeetingDetailView.swift` (actions menu, footer) render the copy above. `TabText` gains a
+   `setup` argument carrying the four new strings and `TabTextSnapshotTests` is regenerated once,
+   so the snapshot and the tabs describe the same words.
    Tests in `apps/macos/StenoTests/MeetingDetailViewModelTests.swift`: each status for (ready with
    summary), (ready without summary, unconfigured), (ready without summary, configured),
    (processing); `canRerunSummary` false while unconfigured; `exportStatus` for empty deliveries
    with and without a vault.
 
-7. Banner: `apps/macos/Steno/Main/SetupBanner.swift` (view over `SetupState` and
-   `MeetingListViewModel.all.isEmpty`), mounted in `apps/macos/Steno/Main/MainWindow.swift` above
-   the detail column content. UI smoke test in `apps/macos/StenoUITests`: in the preview
-   environment the banner is present with both buttons, "Not now" hides it.
+7. Banner: `apps/macos/Steno/Main/SetupBanner.swift` (view over `Settings`,
+   `controller.setupBannerDismissed` and `MeetingListViewModel.all.isEmpty`), mounted in
+   `apps/macos/Steno/Main/MainWindow.swift` as row 1 of the detail header stack. UI smoke test in
+   `apps/macos/StenoUITests`: in the preview environment `setup-summaries` and `choose-vault`
+   exist, clicking `setup-summaries` opens Settings with the LLM tab selected, `banner-not-now`
+   hides the banner.
 
 8. Onboarding: `apps/macos/Steno/Onboarding/OnboardingViewModel.swift` gets `enum Page { case
    permissions, setup }` with `page`, a `StepKind` enum (`permission(PermissionKind)`,
@@ -357,7 +390,10 @@ and clears it, like `MainWindow` does for `requestedMeetingID`.
    `advance()` (page 1 Done or Later), `back()`, `isFinished` requires the setup steps saved or
    skipped, `markCompleted()` writes `steno.onboardingCompleted`, and a static
    `shouldOpen(permissions:defaults:)` replaces the loop in `OnboardingOpener` (opening on page 2
-   when the permissions are granted and the flag is unset). `OnboardingView.swift` renders the two
+   when the permissions are granted and the flag is unset). The constructor is the
+   `init(environment:defaults:)` the retention plan introduced (index step 5); this plan extends
+   that initialiser only and leaves the `init(permissions:)` convenience the 81 x 4 matrix test uses
+   untouched, so the constructor is rewritten once, not twice. `OnboardingView.swift` renders the two
    pages, the caption and the two new rows. `apps/macos/Steno/StenoApp.swift`: `OnboardingOpener`
    uses `shouldOpen`, `OnboardingWindowContent` calls `markCompleted()` on finish.
    Tests in `apps/macos/StenoTests/OnboardingViewModelTests.swift`: the step order; the 81 x 4
@@ -381,8 +417,9 @@ next opens.
 
 ## Verification
 
-- `swift test --filter StenoCoreTests` and `swift test --filter stenoTests` on the Linux
-  container; the new pipeline test is the one that pins decision 2.
+- `swift test --filter StenoCoreTests` and `swift test --filter stenoTests` in the local
+  `steno-swift` container (CI has no Linux job; the PR body states the run and its test count) and
+  on the macOS runner; the new pipeline test is the one that pins decision 2.
 - `xcodebuild test -scheme StenoTests` and `-scheme Steno` (UI smoke test with the banner) on the
   macOS runner.
 - Manual, fresh user account: launch; page 1 shows the four permission rows; grant microphone and

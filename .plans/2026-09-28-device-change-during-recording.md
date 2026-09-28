@@ -1,6 +1,6 @@
 # Steno: device changes during a recording and an honest auto-stop
 
-Status: proposal, 2026-09-28. Triggered by first-run feedback (second round).
+Status: proposal, 2026-09-28, revised after the 2026-09-28 reviews. Triggered by first-run feedback (second round).
 
 Binding context: [`2026-09-24-initial-scope.md`](2026-09-24-initial-scope.md) (Capture (Mac)),
 [`2026-09-25-audio-capture.md`](2026-09-25-audio-capture.md) (the capture design, its
@@ -11,9 +11,12 @@ detection rules). Siblings from the same feedback round:
 [`2026-09-28-floating-recording-indicator.md`](2026-09-28-floating-recording-indicator.md)
 (the bubble; its states table references the auto-stop row specified here),
 [`2026-09-28-start-recording-from-main-window.md`](2026-09-28-start-recording-from-main-window.md)
-(the sidebar control that shows the same countdown). This plan owns the auto-stop behaviour and
-copy on every surface. The implementing PR adds one line to the Deferred section of the audio
-capture plan pointing here.
+(the sidebar control that shows the same countdown). This plan owns the auto-stop behaviour on
+every surface, `Meeting.endReason`, `Meeting.titleOrigin` and migration `v3`; the countdown copy
+string has one owner, `AutoStopPresentation.line` in the floating indicator plan. The auto-stop is
+a new behaviour, approved by the owner on 2026-09-28, and the implementing PR adds one line to the
+scope's Capture (Mac) list and one to the Deferred section of the audio capture plan pointing here.
+Line numbers are as of commit `9cd7cf5` (source identical to `bcf5eef` on `main`).
 
 ## Goal
 
@@ -169,16 +172,26 @@ labelled with, or the tap delivering zeros.
    user can see and restart from. Bounded so a truly missing device does not leave the
    recording spinning.
 6. **The gap is filled with silence and counted.** Between the old IOProc's last callback and
-   the new backend's start the session writes zeros for the measured wall-clock gap into every
-   lane (capped at 10 s) through the sink's producer API, at a moment when no producer runs.
-   `CaptureStatistics` gains `deviceChanges` and `gapSeconds`. Reason: the master stays
-   aligned to wall time, so transcript timestamps and the elapsed timer agree. The fill is not
-   on the real-time path and touches no ring while an IOProc exists.
+   the new backend's start the session writes zeros for the gap into every lane (capped at
+   10 s) through `FrameRelay` (`beginFrame` / `write(channel:from:)` / `endFrame`,
+   `Sources/StenoAudio/RealTime/FrameRelay.swift:26-36`), not through the rings behind
+   `LaneFrameSink`: the rings hold 2 s (`LaneFrameSink.swift:22-28`) and nothing drains them
+   while the processing thread is stopped, so any gap over about 2 s (the retry ladder alone is
+   about 4 s) would be silently truncated into `droppedSamples`. `WriterThread` keeps draining
+   the relay during the rebuild, the relay is single-producer and its normal producer is
+   stopped, so the session is the one producer. The gap is measured on the injected `clock`
+   (the one the backoff sleeps on), so a test knows the exact value. `CaptureStatistics` gains
+   `deviceChanges` and `gapSeconds`. Reason: the master stays aligned to wall time, so
+   transcript timestamps and the elapsed timer agree. The fill is not on the real-time path
+   and touches no ring.
 7. **The state stays `.recording`; a notice stream carries the change.** `CaptureSession`
-   gains `notices: AsyncStream<CaptureNotice>` with `.deviceChanged(reason)`,
-   `.deviceResumed(attempt:gapSeconds:)` and `.deviceLost`. Reason: a new `CaptureState` case
-   would ripple through every `case .recording` guard in the app for a transient of a few
-   hundred milliseconds; the app wants a line of text, not a state.
+   gains `notices: AsyncStream<CaptureNotice>` with `.deviceChanged(reason)` and
+   `.deviceResumed(attempt:gapSeconds:)`. Device loss is not a notice: the state stream already
+   carries `.failed(.deviceLost, recording:)` and the recorder's `.failed` observer already sets
+   the error, so a second channel for the same fact is the pattern the 2026-09-25 review removed
+   from `MeetingEvent`. Reason: a new `CaptureState` case would ripple through every
+   `case .recording` guard in the app for a transient of a few hundred milliseconds; the app
+   wants a line of text, not a state.
 8. **An intentional auto-stop after the call app closes the microphone.** A `.call` recording
    during which a foreign process held the microphone arms a 90 s countdown when the detector
    reports `.microphoneReleased`; `.microphoneOpened` before it elapses cancels it; the user
@@ -195,6 +208,17 @@ labelled with, or the tap delivering zeros.
    `LocalRecordingIntake.complete` from `RecordingResult.endReason`. Column `endReason` on
    `meeting`, migration `v3`. On the meeting, not the asset: the list and the detail read
    meetings.
+9a. **Core also records where the title came from, in the same migration.**
+   `Meeting.titleOrigin: TitleOrigin` (`.default`, `.calendar`, `.summary`, `.user`), set by core
+   in the three places that write `title` (`LocalRecordingIntake.begin` chooses the default,
+   `LocalRecordingIntake.swift:105`; the calendar overwrite at stop; `Summarize` after
+   processing) and by the app's rename path (`.user`). Column `titleOrigin` on `meeting` in `v3`,
+   nil-omitting `Codable` with `.default` when absent so fixtures and the export golden stay.
+   Reason: the redesign plan needs to know whether a stored title is the machine default to
+   render a friendlier heading, and rediscovering that by re-running the formatter breaks across
+   time zones, format changes and a user who types exactly that string; the CLI list output and
+   the iOS app need the same fact and cannot reach the app's `Labels.swift`. `v3` is open in this
+   plan, so the column rides along instead of a `v4` two weeks later.
 10. **Grace period is a constant.** `RecordingController.autoStopGrace = .seconds(90)`. Reason:
     a knob in Settings is not worth the copy; change the constant in a later plan if field use
     says so.
@@ -208,10 +232,10 @@ labelled with, or the tap delivering zeros.
 | Notification, devices resolve identical, alive, 48 kHz | any | `.recording`, unchanged | none (logged "ignored") | untouched |
 | `DeviceChange(reason)` reported | `.recording` | stays `.recording`; backend stopped, processing thread stopped, silence written for the gap, backend started, new processing thread started | `.deviceChanged(reason)` then `.deviceResumed(attempt: n, gapSeconds:)` | same master and sidecars, contiguous |
 | Restart throws | attempt < 4 | stays `.recording`; wait backoff, try again | none until resolved | untouched during the wait (gap grows) |
-| Restart throws | attempt 4 | `.stopping` then `.failed(.deviceLost, recording: partial)`; `endedOnDeviceLoss = true` | `.deviceLost` | finalised as today |
-| `DeviceChange` reported | not `.recording` | ignored | none | |
+| Restart throws | attempt 4 | `.stopping` then `.failed(.deviceLost, recording: partial)`; `endedOnDeviceLoss = true` | none (the state carries it) | finalised as today |
+| `DeviceChange` reported | not `.recording` | ignored (`aDeviceChangeWhileIdleOrStoppingIsIgnored`) | none | |
 | `stop()` during a rebuild | any attempt | the rebuild is abandoned, `finish()` runs, `.idle` | none | finalised |
-| Writer fails during a rebuild | any | `.failed(.writerFailed)` as today | | |
+| Writer fails during a rebuild | any | `.failed(.writerFailed)` as today (`aWriterFailureDuringARebuildEndsWriterFailed`) | | |
 
 `CaptureStatistics`: `deviceChanges: Int` (successful rebuilds), `gapSeconds: TimeInterval`
 (silence written), `endedOnDeviceLoss` unchanged in meaning (true only after the fourth
@@ -225,50 +249,57 @@ Foreign microphone activity, forwarded by `DetectionController` while `isRecordi
 | Recorder state | Event | Result |
 |---|---|---|
 | `.recording`, mode `.call` | `.microphoneOpened(appName)` | `sawForeignMicrophone = true`, `callAppName = appName`; cancel a pending auto-stop if one is armed |
-| `.recording`, mode `.call`, `sawForeignMicrophone` | `.microphoneReleased` | `autoStop = AutoStopCountdown(appName, endsAt: now + 90 s)` |
+| `.recording`, mode `.call`, `sawForeignMicrophone` | `.microphoneReleased` | `autoStop = AutoStop(appName, countdown: Countdown(90 s))` |
 | `.recording`, mode `.call`, not `sawForeignMicrophone` | `.microphoneReleased` | nothing (no call was ever observed) |
 | `.recording`, mode `.inPerson` | any | nothing |
 | auto-stop armed | `keepRecording()` | `autoStop = nil`; not re-armed until the next `.microphoneOpened` then `.microphoneReleased` |
 | auto-stop armed | `stopNow()` or countdown elapsed | `stop(reason: .callEnded(appName))` |
-| auto-stop armed | user stops from any surface | `stop(reason: .manual)`, `autoStop = nil` |
-| auto-stop armed | device change notice | countdown unaffected |
-| any | `stop()` for any reason | `autoStop = nil`, `sawForeignMicrophone = false`, `callAppName = nil` |
+| auto-stop armed | user stops from any surface | `stop(reason: .manual)`, `autoStop = nil` (`testManualStopWhileArmedStoresManualAndClearsTheCountdown`) |
+| auto-stop armed | device change notice | countdown unaffected (`testADeviceChangeNoticeLeavesTheCountdownRunning`) |
+| any | `stop()` for any reason | `autoStop = nil`, `sawForeignMicrophone = false`, `callAppName = nil` (`testStopResetsTheForeignMicrophoneMemory`) |
 
 The recording started from the detection prompt sets `sawForeignMicrophone` and `callAppName`
-at start (the prompt's `appName`). A recording started manually learns them from the first
-`.microphoneOpened` seen while recording. The detector's 2 s debounce and 1 s poll mean the
-countdown starts within 3 s of the app releasing the microphone.
+at start (the prompt's `appName`), so a release with no later `.microphoneOpened` still arms
+(`testAPromptStartedRecordingArmsOnReleaseWithoutAnOpenedEvent`). A recording started manually
+learns them from the first `.microphoneOpened` seen while recording. The detector's 2 s debounce
+and 1 s poll mean the countdown starts within 3 s of the app releasing the microphone. Every row
+of both tables names the test that pins it; the earlier rows are covered by the tests in steps 4
+and 8.
 
 ### Surfaces while the auto-stop is armed
 
-Bubble (`BubblePresentation.make(state:autoStop:)`, the row the floating indicator plan's
-states table references):
+The countdown is the one decision the user has to make while recording, so the two choices have
+equal weight on every surface. Bubble (`BubblePresentation.make(state:autoStop:)` with
+`autoStop: AutoStopPresentation?`, the row the floating indicator plan's states table references):
 
 | Recorder state | Content | Stop button | Body click |
 |---|---|---|---|
-| `.recording(since:)`, `autoStop != nil` | glyph, bars, elapsed, then a second line `xxs` `mutedForeground`: "<App> closed the mic. Stopping in 1:29" with the prompt's 2 pt countdown hairline along the bottom (`Motion.countdown`), and a "Keep recording" text button before the stop button | enabled, calls `recorder.stop()` (manual) | opens the live meeting |
+| `.recording(since:)`, `autoStop != nil` | two rows, height 64: row 1 glyph, bars, elapsed as before; row 2 `autoStop.line` ("<App> closed the microphone. Stopping in 1:29.") at `sm` 14 `strong`, a "Keep recording" `StenoSecondaryButtonStyle` button at 28 pt trailing, and the `CountdownHairline` along the bottom (`Motion.countdown`) | unchanged, calls `recorder.stop()` (manual) | opens the live meeting |
 
-The bubble widens to fit the line (max 480 like the prompt) and returns to the plain
-recording row when `autoStop` clears.
+The bubble widens to fit the line (max 480 like the prompt) and returns to the 40 pt recording
+row when `autoStop` clears; both transitions animate the frame with `Motion.spatial` at the held
+anchor.
 
 Menu bar popover (`MenuBarView.recordingSection`): under the status line, a `MessageRow(kind:
-.warning)` reading "<App> closed the microphone. Stopping in 1:29." with a "Keep recording"
-button on the row. Menu bar label unchanged (elapsed time). Sidebar control
-(`RecordingControlPresentation`): the same line and button under the Stop control.
+.warning)` showing `autoStop.line` with a "Keep recording" button on the row. Menu bar label
+unchanged (elapsed time). Sidebar control (`RecordingControlPresentation`): the same row under
+the Stop control. All three surfaces render the one `AutoStopPresentation` value the recorder
+exposes; none composes the sentence itself.
 
-Device change, all surfaces: `lastWarning` set to "Audio devices changed; the recording
-continues." on `.deviceResumed`, and "Audio devices changed; reconnecting…" on
-`.deviceChanged` (replaced by the resumed line, or by the failure). On `.deviceLost` the
-existing error and warning stay as they are.
+Device change, all surfaces: `lastWarning` set to "Audio devices changed. Recording continues."
+on `.deviceResumed`, and "Audio devices changed. Reconnecting…" on `.deviceChanged` (replaced by
+the resumed line, or by the failure). On `.failed(.deviceLost)` the existing error and warning
+stay as they are.
 
 ### Copy
 
-- Countdown: "<App> closed the microphone. Stopping in m:ss." and "Keep recording". When the
-  app name is unknown: "The call app closed the microphone."
-- Meeting detail, a `MessageRow(kind: .info)` under the meta line, one of: "Ended
-  automatically when <App> closed the microphone.", "Ended because an audio device
-  disappeared; the recording up to that point was kept.", "Ended when Steno quit." `.manual`
-  and nil show nothing.
+- Countdown: `AutoStopPresentation.line`, "<App> closed the microphone. Stopping in m:ss."
+  and "Keep recording". When the app name is unknown: "The call app closed the microphone.
+  Stopping in m:ss." The string lives in the floating indicator plan's type; this plan fills it.
+- Meeting detail, a `MessageRow(kind: .info)` as the end-reason row of the redesign plan's
+  header stack (under the meta row, above the retention line), one of: "Ended automatically
+  when <App> closed the microphone.", "Ended because an audio device disappeared. The recording
+  up to that point was kept.", "Ended when Steno quit." `.manual` and nil show nothing.
 - Meeting list row meta line: append "· ended automatically" for `.callEnded`, "· device lost"
   for `.deviceLost`; nothing for the others.
 
@@ -287,59 +318,90 @@ if that has not merged; the sidebar line waits for the start-recording plan.
    (synthesised Codable omits nil, so `Tests/Fixtures/meetings/*.json` and the export golden
    are unchanged); `MeetingRecord.endReason: String?` as a JSON column; `registerMigration("v3")`
    with `ALTER TABLE meeting ADD COLUMN endReason TEXT` appended below `v2`;
-   `Tests/Fixtures/snapshots/schema/v3.sql` golden. `RecordingResult.endReason:
-   RecordingEndReason` (required; the app always knows); `complete` writes it in the same
-   `store.update` as the duration. Tests: `Tests/StenoCoreTests/MigrationsTests.swift` and
-   `SchemaSnapshotTests.swift` (v3), `ModelCodableTests.swift` (round trip of every case, nil
-   omitted), `LocalRecordingIntakeTests.swift` (`complete` stores the reason).
+   `Tests/Fixtures/snapshots/schema/v3.sql` golden, and `"v3"` appended to
+   `Migrations.identifiers` (`Migrations.swift:22`, a hand-written list;
+   `SchemaSnapshotTests.fullMigratorMatchesTheLatestGolden` picks the golden from
+   `identifiers.last`, so without this the test keeps comparing against `v2.sql` and fails on
+   the new column). In the same `v3`: `public enum TitleOrigin: String, Codable, Sendable {
+   case `default`, calendar, summary, user }`, `Meeting.titleOrigin: TitleOrigin = .default`
+   (decoded as `.default` when the key is absent, encoded always),
+   `ALTER TABLE meeting ADD COLUMN titleOrigin TEXT NOT NULL DEFAULT 'default'`, and the three
+   core writers of `title` set it (`begin` `.default`, the calendar match `.calendar`,
+   `Summarize` `.summary`); `MeetingStore.rename(meetingID:title:)` (the app's rename path) sets
+   `.user`. `RecordingResult.endReason: RecordingEndReason` (required; the app always knows;
+   five call sites in the intake tests and one in the app update); `complete` writes it in the
+   same `store.update` as the duration. Tests: `Tests/StenoCoreTests/MigrationsTests.swift`;
+   `SchemaSnapshotTests.swift` changed to iterate every prefix of `identifiers` (migrate
+   `identifiers[...n]`, compare with `v<n+1>.sql`) so `v2.sql` stays guarded once `v3` is
+   latest; `ModelCodableTests.swift` (round trip of every `RecordingEndReason` case, nil omitted;
+   `callEnded(appName: nil)` added to `payloadEnumsEncodeReadably` because `CaseCoding` has no
+   nil payload today and this is a new shape; `titleOrigin` absent decodes as `.default`);
+   `LocalRecordingIntakeTests.swift` (`complete` stores the reason; `begin` stores `.default`;
+   the calendar path stores `.calendar`); `StageTests` (`Summarize` stores `.summary`).
 2. **Sink and statistics** (`Sources/StenoAudio/RealTime/LaneFrameSink.swift`,
    `Sources/StenoAudio/Capture/CaptureConfiguration.swift`). `reportDeviceLost()` becomes
    `reportDeviceChange(_ reason: DeviceChangeReason)`; the latch stays an `Atomic<Bool>` and
    gains `rearmDeviceChange()` (called by the session after a successful restart, never by a
-   producer); the handler type becomes `@Sendable (DeviceChangeReason) -> Void`. Add
-   `writeGap(frames: Int)` that runs `beginCallback`, `writeSilence` per lane and
-   `endCallback` in chunks of `StenoAudio.frameSize`, documented as producer-slot use while no
-   IOProc exists. `public enum DeviceChangeReason: Sendable, Equatable { case
-   defaultOutputChanged, defaultInputChanged, outputDeviceGone, inputDeviceGone,
-   sampleRateChanged, synthetic }`. `CaptureStatistics` gains `deviceChanges: Int` and
-   `gapSeconds: TimeInterval` (init defaults 0 so existing call sites compile).
-   `public enum CaptureNotice: Sendable, Equatable { case deviceChanged(DeviceChangeReason),
-   deviceResumed(attempt: Int, gapSeconds: TimeInterval), deviceLost }`. Tests:
-   `Tests/StenoAudioTests/LaneFrameSinkTests.swift` (rearm allows a second report; `writeGap`
-   leaves every lane with the same count; `RealTimeAllocationTests` unchanged because the gap
-   fill is not in `deliver`).
+   producer); the handler type becomes `@Sendable (DeviceChangeReason) -> Void`. No gap API on
+   the sink: the gap goes through `FrameRelay` (step 4). `public enum DeviceChangeReason:
+   Sendable, Equatable { case defaultOutputChanged, defaultInputChanged, outputDeviceGone,
+   inputDeviceGone, sampleRateChanged }`; no test-only case, the synthetic backend reports
+   `.defaultInputChanged`. `CaptureStatistics` gains `deviceChanges: Int` and `gapSeconds:
+   TimeInterval` (init defaults 0 so existing call sites compile). `public enum CaptureNotice:
+   Sendable, Equatable { case deviceChanged(DeviceChangeReason), deviceResumed(attempt: Int,
+   gapSeconds: TimeInterval) }`. Tests: `Tests/StenoAudioTests/LaneFrameSinkTests.swift` (rearm
+   allows a second report; `RealTimeAllocationTests` unchanged because nothing in `deliver`
+   moves).
 3. **Synthetic backend** (`Sources/StenoAudio/Testing/SyntheticCaptureBackend.swift`).
-   `loseDeviceAfter` becomes `changeDeviceAfter: TimeInterval?` reporting `.synthetic` and
-   ending the producer thread as today; new `restartsThatFail: Int = 0` makes the next N
-   `start` calls throw `CaptureError.inputDeviceUnavailable`; new `streamAfterRestart:
-   CaptureStream?` lets a test see different latencies after the restart; `seconds` counts per
-   `start` so a restarted backend delivers again. `loseDeviceAfter` has two call sites
-   outside the backend (`Tests/StenoAudioTests/CaptureSessionTests.swift`,
+   `loseDeviceAfter` becomes `changeDeviceAfter: TimeInterval?` reporting `.defaultInputChanged`
+   and ending the producer thread as today, firing once per backend instance
+   (`changesRemaining: Int = 1`, decremented on each report, documented in the type's comment);
+   today's per-`start` evaluation would re-fire on the rebuilt backend and loop the
+   keep-recording test. New `restartsThatFail: Int = 0` makes the next N `start` calls throw
+   `CaptureError.inputDeviceUnavailable`; new `streamAfterRestart: CaptureStream?` lets a test
+   see different latencies after the restart; `seconds` counts per `start` so a restarted
+   backend delivers again. `loseDeviceAfter` has two call sites outside the backend
+   (`Tests/StenoAudioTests/CaptureSessionTests.swift`,
    `apps/macos/StenoTests/TestSupport.swift:31-41`); update both in the same PR.
 4. **Session rebuild** (`Sources/StenoAudio/Capture/CaptureSession.swift`). Inject `clock: any
    Clock<Duration> = ContinuousClock()`. `Active` gains `deviceChanges`, `gapSeconds`,
    `systemPeakSoFar` (max over processing threads) and `rebuildTask: Task<Void, Never>?`.
    Replace `deviceLost()` with `deviceChanged(_ reason:)`: guard `.recording` and no rebuild
    in flight; emit `.deviceChanged`; then `rebuild(attempt: 1)`: `backend.stop()`,
-   `processing.stop()`, note `systemPeak`, measure the gap from the report time (frames
-   already in the rings are the old device's last audio and are kept), `sink.writeGap` for the
-   gap, `echoCanceller?.reset()`, `try backend.start(...)`, build a `ProcessingThread` with the
-   new `farEndDelayFrames` sharing the existing `LevelSlot` (`ProcessingThread.init` gains
-   `levels: LevelSlot?` to reuse one), start it, swap into `Active`, `sink.rearmDeviceChange()`,
-   emit `.deviceResumed`. On a throw: attempt < 4 sleeps the backoff on the clock and retries
-   (the gap keeps growing and is filled at the next attempt); attempt 4 sets
-   `endedOnDeviceLoss`, runs `finish()` and ends in `.failed(.deviceLost, recording:)` as
-   today, emitting `.deviceLost`. `stop()` during a rebuild cancels `rebuildTask` and finishes.
-   `finish()` folds `deviceChanges`, `gapSeconds` and the max system peak into
+   `processing.stop()`, note `systemPeak` and `gapStart = clock.now` (frames already in the
+   rings are the old device's last audio and are drained by the last processing pass),
+   `echoCanceller?.reset()`, `try backend.start(...)`, then write the gap
+   (`clock.now - gapStart`, capped at 10 s) as silence into `FrameRelay` per lane in
+   `frameSize` chunks (`beginFrame`, `write(channel:from:)` with a zeroed buffer allocated once
+   per rebuild on the actor, `endFrame`; when `beginFrame()` returns `false` the writer has
+   not drained yet, so `try await clock.sleep(for: .milliseconds(5))` and retry), build a
+   `ProcessingThread` with the new `farEndDelayFrames` sharing the existing `LevelSlot`
+   (`ProcessingThread.init` gains `levels: LevelSlot?` to reuse one), start it, swap into
+   `Active`, `sink.rearmDeviceChange()`, emit `.deviceResumed`. On a throw: attempt < 4 sleeps
+   the backoff on the clock and retries (the gap keeps growing and is written in full when a
+   start succeeds); attempt 4 sets `endedOnDeviceLoss`, runs `finish()` and ends in
+   `.failed(.deviceLost, recording:)` as today. `stop()` during a rebuild cancels `rebuildTask`
+   and finishes. `finish()` folds `deviceChanges`, `gapSeconds` and the max system peak into
    `CaptureStatistics`. Add `public var notices: AsyncStream<CaptureNotice>` beside `states`
-   and `levels`. Tests in `Tests/StenoAudioTests/CaptureSessionTests.swift` with `ManualClock`:
-   `aDeviceChangeKeepsRecordingOnTheSameFiles` (state never leaves `.recording`, notices are
-   `[.deviceChanged, .deviceResumed]`, one master whose duration is the two halves plus the
-   gap, `deviceChanges == 1`, `endedOnDeviceLoss == false`, `session.stream` reflects
-   `streamAfterRestart`); `aRestartThatKeepsFailingEndsInDeviceLost` (three failures then
-   success recovers; four failures end `.failed(.deviceLost)` after the summed backoff on the
-   manual clock); `stopDuringARebuildFinalisesOnce`; the existing
-   `deviceLostStopsCleanlyWithAReadableMaster` and
+   and `levels`. Tests in `Tests/StenoAudioTests/CaptureSessionTests.swift` with `ManualClock`
+   and exact expectations (no tolerance wide enough to hide a drop):
+   `aDeviceChangeKeepsRecordingOnTheSameFiles` (`changeDeviceAfter: 1`, immediate restart;
+   state never leaves `.recording`, notices are `[.deviceChanged, .deviceResumed]`,
+   `gapSeconds == 0`, `droppedSamples == [:]`, master frames `== framesDelivered` summed over
+   both starts per lane, `deviceChanges == 1`, `endedOnDeviceLoss == false`, `session.stream`
+   reflects `streamAfterRestart`); `aGapLongerThanTheRingIsWrittenInFull`
+   (`restartsThatFail: 3`, the clock advanced 0.25, 0.5 and 1.0 s between attempts; expect
+   `gapSeconds == 1.75`, `droppedSamples == [:]`, master frames `== framesDelivered + 1.75 *
+   48_000` per lane, `deviceChanges == 1`; this is the test that fails if the gap goes through
+   the rings); `twoDeviceChangesRebuildTwice` (`changesRemaining: 2`, notices
+   `[.deviceChanged, .deviceResumed, .deviceChanged, .deviceResumed]`, `deviceChanges == 2`, the
+   shape the manual Bluetooth check produces); `aRestartThatKeepsFailingEndsInDeviceLost`
+   (four failures end `.failed(.deviceLost)` after the summed backoff on the manual clock);
+   `aDeviceChangeWhileIdleOrStoppingIsIgnored` (a report before `start` and one during `stop`
+   produce no notice and leave the state unchanged);
+   `aWriterFailureDuringARebuildEndsWriterFailed` (the existing failing `makeWriter` seam with
+   `restartsThatFail: 1` so the rebuild is in flight); `stopDuringARebuildFinalisesOnce`; the
+   existing `deviceLostStopsCleanlyWithAReadableMaster` and
    `stopAfterDeviceLossReturnsTheSameRecordingEveryTime` move to `restartsThatFail: 4`;
    `ProcessingThreadTests` cover the shared `LevelSlot`.
 5. **Live backend** (`Sources/StenoAudio/Capture/LiveCaptureBackend.swift`,
@@ -360,27 +422,34 @@ if that has not merged; the sidebar line waits for the start-recording plan.
    as it arrives and the new statistics at the end. No flag changes. `Tests/stenoTests` only
    if a test pins the statistics output.
 7. **Recorder end reasons and notices** (`apps/macos/Steno/Recording/RecordingController.swift`,
-   `apps/macos/Steno/AppController.swift`). `stop(reason: RecordingEndReason = .manual)`; the
-   `.failed` observer passes `.deviceLost`; `shutdown()` passes `.quit`; `RecordingResult`
-   gets the reason. A third observer task over `session.notices` sets `lastWarning` per the
-   spec and clears the stale device-lost warning on resume. Tests
+   `apps/macos/Steno/AppController.swift`, `apps/macos/StenoTests/TestSupport.swift`).
+   `stop(reason: RecordingEndReason = .manual)`; the `.failed` observer passes `.deviceLost`;
+   `shutdown()` passes `.quit`; `RecordingResult` gets the reason. A third observer task over
+   `session.notices` sets `lastWarning` per the spec and clears the stale device-lost warning
+   on resume. `TestSupport.deviceLosingCaptureSession` builds `CaptureSession` directly and
+   passes `environment.clock` (the `ManualClock`) explicitly; with the default
+   `ContinuousClock` the four-failure test would sleep about 4 s, with an unadvanced manual
+   clock it would hang until `waitUntil` fails. Tests
    (`apps/macos/StenoTests/RecordingControllerTests.swift`): update
-   `testDeviceLossStopsAndEnqueuesThePartialRecording` to `restartsThatFail: 4` and assert
-   `stored.endReason == .deviceLost`; add `testADeviceChangeKeepsTheRecordingAndWarns` (state
-   stays `.recording`, `lastWarning` is the resumed line, the stored meeting has
-   `endReason == .manual` after a manual stop); `testStopStoresTheManualReason`;
-   `AppControllerTests.testShutdownStopsTheRecordingAndTheDetector` asserts `.quit`.
-8. **Auto-stop policy** (new `apps/macos/Steno/Recording/AutoStopCountdown.swift`,
+   `testDeviceLossStopsAndEnqueuesThePartialRecording` to `restartsThatFail: 4`, advance the
+   manual clock through the ladder and assert the `.deviceLost` warning appears only after the
+   fourth attempt and `stored.endReason == .deviceLost`; add
+   `testADeviceChangeKeepsTheRecordingAndWarns` (state stays `.recording`, `lastWarning` is the
+   resumed line, the stored meeting has `endReason == .manual` after a manual stop);
+   `testStopStoresTheManualReason`; `AppControllerTests.testShutdownStopsTheRecordingAndTheDetector`
+   asserts `.quit`.
+8. **Auto-stop policy** (new `apps/macos/Steno/Recording/AutoStop.swift`,
    `RecordingController.swift`, `apps/macos/Steno/Detection/DetectionController.swift`,
-   `AppController.swift`). `@MainActor @Observable final class AutoStopCountdown` with
-   `appName: String?`, `remaining: Duration`, `fractionRemaining`, `remainingText` ("1:29"),
-   `begin()` ticking once a second on the injected clock (the `DetectionPromptViewModel`
-   pattern, kept separate), `onElapsed`. `RecordingController`: `private(set) var autoStop:
-   AutoStopCountdown?`, `private var sawForeignMicrophone = false`, `private var callAppName:
-   String?`, `static let autoStopGrace: Duration = .seconds(90)`, `func microphoneActivity(_
-   event: MicrophoneActivity) async` with `enum MicrophoneActivity { case opened(appName:
-   String?), released }` implementing the table above, `func keepRecording()`, and
-   `start(mode:callApp:)` so the prompt passes its app name. `DetectionController.handle`:
+   `AppController.swift`). `@MainActor struct AutoStop { let appName: String?; let countdown:
+   Countdown; var presentation: AutoStopPresentation }` over the floating indicator plan's
+   shared `Countdown(duration:clock:onElapsed:)` (the same class the detection prompt uses; no
+   second tick loop) and its `AutoStopPresentation` (the `Sendable` value the surfaces render,
+   built from `appName` and `countdown.presentation`). `RecordingController`:
+   `private(set) var autoStop: AutoStop?`, `private var sawForeignMicrophone = false`,
+   `private var callAppName: String?`, `static let autoStopGrace: Duration = .seconds(90)`,
+   `func microphoneActivity(_ event: MicrophoneActivity) async` with `enum MicrophoneActivity {
+   case opened(appName: String?), released }` implementing the table above, `func
+   keepRecording()`, and `start(mode:callApp:)` so the prompt passes its app name. `DetectionController.handle`:
    while `isRecording`, forward both events through `var microphoneActivity:
    ((RecordingController.MicrophoneActivity) async -> Void)?` (resolving the name with
    `appName(bundleID)`), keeping the prompt dismissal; `startRecording` passes the prompt's
@@ -389,30 +458,47 @@ if that has not merged; the sidebar line waits for the start-recording plan.
    `testMicrophoneReleaseAfterACallArmsAndStopsAfterTheGrace` (advance 90 s, recorder idle,
    `endReason == .callEnded(appName: "Zen")`), `testMicrophoneReopenedCancelsTheCountdown`,
    `testKeepRecordingCancelsUntilTheNextCall`, `testInPersonNeverArms`,
-   `testNoForeignMicrophoneNeverArms`, `testStopNowUsesCallEnded`;
+   `testNoForeignMicrophoneNeverArms`, `testStopNowUsesCallEnded`,
+   `testManualStopWhileArmedStoresManualAndClearsTheCountdown`,
+   `testADeviceChangeNoticeLeavesTheCountdownRunning` (`changeDeviceAfter` plus
+   `microphoneActivity(.released)`; `remaining` unchanged after the resumed warning),
+   `testStopResetsTheForeignMicrophoneMemory` (second recording, `.released` alone does not
+   arm), `testAPromptStartedRecordingArmsOnReleaseWithoutAnOpenedEvent`
+   (`start(mode: .call, callApp: "Zen")`, then `.released`, expect
+   `autoStop?.appName == "Zen"`);
    `DetectionTests.testEventsWhileRecordingReachTheRecorder`;
    `AppControllerTests.testDetectionPromptStartsACallRecordingWhileTheDetectorRunsOn` asserts
    the app name reached the recorder.
 9. **Surfaces** (`apps/macos/Steno/MenuBar/MenuBarView.swift`,
    `apps/macos/Steno/Recording/RecordingControl.swift` from the start-recording plan,
    `apps/macos/Steno/Panels/FloatingContent.swift` and the bubble view from the floating
-   indicator plan). Render `recorder.autoStop` per the spec; `BubblePresentation.make(state:autoStop:)`
-   gains the row; `RecordingControlPresentation` gains `autoStopLine` and `showsKeepRecording`.
-   Tests: the presentation tests those plans add gain one case each; `MenuBarViewModelTests`
-   unchanged (the countdown is the recorder's).
+   indicator plan). Render `recorder.autoStop?.presentation` per the spec:
+   `BubblePresentation.make(state:autoStop:)` receives the value (the signature and its tests
+   are the floating plan's and do not change); `RecordingControlPresentation.make(state:denied:autoStop:)`
+   gains `autoStop: AutoStopPresentation?` and renders the row and the button from it. No
+   presentation copies the string; each carries the value and calls `.line`. Tests: the
+   presentation tests those plans add gain one case each with a fixed `AutoStopPresentation`;
+   `MenuBarViewModelTests` unchanged (the countdown is the recorder's).
 10. **Meeting detail and list** (`apps/macos/Steno/Main/MeetingDetailView.swift`,
     `apps/macos/Steno/Main/MeetingListViewModel.swift` and the row view). Copy per the spec
-    through a pure `RecordingEndReason.sentence` helper in the app
-    (`apps/macos/Steno/Recording/EndReasonText.swift`) so `MeetingDetailViewModelTests` pins
-    the strings.
-11. **Plans and docs**. Add the pointer line to the audio capture plan's Deferred section;
-    `mobile/` untouched.
+    through a pure `RecordingEndReason.sentence` in `apps/macos/Steno/Design/Labels.swift`,
+    beside `MeetingSource.label` and `PipelineStage.label` where every other label lives, so
+    `MeetingDetailViewModelTests` pins the strings. The detail row is the end-reason row of the
+    redesign plan's header stack.
+11. **Plans and docs**. Add the pointer line to the audio capture plan's Deferred section and,
+    in the same edit, fix that plan's design table line "Poll every 2 s" (line 50) to the 1 s
+    poll its deviations already record. Add one line to the scope's Capture (Mac) list
+    (`2026-09-24-initial-scope.md`) naming the intentional auto-stop after the call ends, so the
+    scope document stays the authority. `mobile/` untouched.
 
 ## Verification
 
-Automated: `swift test` (Linux container and macOS CI) for steps 1 to 6; `xcodebuild test` for
-`apps/macos/StenoTests` for steps 7 to 10; `RealTimeAllocationTests` still green (no change to
-`deliver`); `SchemaSnapshotTests` with `v3.sql`; `FixtureManifestTests` unchanged.
+Automated: `swift test` in the local `steno-swift` container (StenoCore; CI has no Linux job, so
+the PR body states the run and its test count) and on macOS CI (StenoAudio) for steps 1 to 6;
+`xcodebuild test` for `apps/macos/StenoTests` for steps 7 to 10; `RealTimeAllocationTests` still
+green (no change to `deliver`); `SchemaSnapshotTests` over every prefix with `v3.sql`;
+`FixtureManifestTests` unchanged (`MANIFEST.sha256` lists no `snapshots/schema` file);
+`aGapLongerThanTheRingIsWrittenInFull` is the one test that proves the contiguity claim.
 
 Manual, on the owner's Mac with a debug build and Console filtered to `uno.schmid.steno`:
 
@@ -440,15 +526,21 @@ Manual, on the owner's Mac with a debug build and Console filtered to `uno.schmi
    elapsed time on the bubble to within a second.
 8. Quit Steno while recording. Expect: "Ended when Steno quit." on the meeting.
 
+Risks and checks (settled by the steps and the manual list, not by the owner):
+
+- Whether an aggregate whose Bluetooth sub-device is recreated by the HAL keeps running on the
+  new object (aggregates reference sub-devices by UID), in which case the "identical devices"
+  branch will be common and the rebuild rare. Manual step 2's Console line answers it; the plan
+  is correct either way.
+- `NominalSampleRate` on an aggregate and the default-device notifications on an HFP
+  transition are unverified platform facts (the audio plan marks them too); manual steps 2 and
+  3 are the first field data.
+
 ## Open questions
 
 - Which devices were in use during the 56 minute call (AirPods or another Bluetooth headset,
   built-in, USB)? The owner's answer decides whether step 5's Console line is the first field
   data point or whether a wired setup fired something this plan has not named.
-- Whether an aggregate whose Bluetooth sub-device is recreated by the HAL keeps running on the
-  new object (aggregates reference sub-devices by UID), in which case the "identical devices"
-  branch will be common and the rebuild rare. Only a Mac can tell; the plan is correct either
-  way.
 - A silent-tap watchdog: the tap delivering zeros for 30 s while the tapped app reports
   `IsRunningOutput` is a known Bluetooth-adjacent failure with no notification. The rebuild
   path built here is the remedy; whether to trigger it from the processing thread's system

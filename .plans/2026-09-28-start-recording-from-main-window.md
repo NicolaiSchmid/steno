@@ -1,6 +1,6 @@
 # Steno: start and stop recording from the main window
 
-Status: proposal, 2026-09-28. Triggered by first-run feedback.
+Status: proposal, 2026-09-28, revised after the 2026-09-28 reviews. Triggered by first-run feedback.
 
 Binding plans: [`.plans/2026-09-24-initial-scope.md`](2026-09-24-initial-scope.md)
 (scope), [`.plans/2026-09-25-macos-app-and-release.md`](2026-09-25-macos-app-and-release.md)
@@ -26,7 +26,8 @@ The empty state points at it, and the Record menu's shortcut works from the wind
 
 ## Findings
 
-How recording is started today, and why the window cannot:
+Line numbers are as of commit `9cd7cf5` (source identical to `bcf5eef` on `main`). How recording is
+started today, and why the window cannot:
 
 - `apps/macos/Steno/Recording/RecordingController.swift:33-64` is the one recorder in the
   app. `start(mode:)` (lines 86-124) writes the `.recording` meeting row through core's
@@ -46,9 +47,9 @@ How recording is started today, and why the window cannot:
   the last probe found (`apps/macos/Steno/Services/PermissionsService.swift:40-41`), `.unknown`
   until the onboarding probe ran, and a recording with the tap unauthorised ends with the
   "system audio lane stayed silent" warning at stop (`RecordingController.swift:139-141`).
-- The only manual start UI is the menu bar item: `apps/macos/Steno/MenuBar/MenuBarView.swift:139-178`.
-  It renders the status dot and label, a `TimelineView` elapsed timer (lines 149-155),
-  `LevelBars` (lines 157-158, defined at 272-311) and the buttons per state (lines 160-176):
+- The only manual start UI is the menu bar item: `apps/macos/Steno/MenuBar/MenuBarView.swift:45-80`.
+  It renders the status dot and label, a `TimelineView` elapsed timer (lines 54-58),
+  `LevelBars` (lines 60-62, defined at 177-215) and the buttons per state (lines 63-79):
   "Record call" and "Record in person" when idle, "Stop" when recording, a spinner while
   starting or stopping. Accessibility identifiers `record-call`, `record-in-person`,
   `stop-recording`.
@@ -62,17 +63,17 @@ How recording is started today, and why the window cannot:
 - `apps/macos/Steno/Main/MainWindow.swift:19-21` builds the sidebar column from
   `MeetingListView(model: list)` alone. `MainWindow` holds the `AppController` (line 7) and
   therefore `controller.recorder`, but `MeetingListView`
-  (`apps/macos/Steno/Main/MeetingListView.swift:66-67`) takes only a
+  (`apps/macos/Steno/Main/MeetingListView.swift:6-7`) takes only a
   `MeetingListViewModel`, which is built from the store and the clock (`MainWindow.swift:13-15`)
   and knows nothing about the recorder. That is the whole gap: the window has the recorder in
   hand and never renders it.
-- The empty state copy is `MeetingListView.swift:175`: "Start a recording from the menu bar
+- The empty state copy is `MeetingListView.swift:115`: "Start a recording from the menu bar
   item."
 - A live recording already shows in the list: `MeetingRow` renders `StatusChip(meeting.state)`
-  (`MeetingListView.swift:184-213`, chip text "Recording" from
+  (`MeetingListView.swift:124-153`, chip text "Recording" from
   `apps/macos/Steno/Design/Components.swift:116-127`), the "In progress" filter includes
-  `.recording` (`apps/macos/Steno/Main/MeetingListViewModel.swift:244-246`), and delete is
-  refused for it (`MeetingListView.swift:135-140`). The detail header shows the same chip
+  `.recording` (`apps/macos/Steno/Main/MeetingListViewModel.swift:30-32`), and delete is
+  refused for it (`MeetingListView.swift:19-20, 44`; `canDelete` at 75-80). The detail header shows the same chip
   (`apps/macos/Steno/Main/MeetingDetailView.swift:46-54`) and the tabs show their pending text.
 - The menu bar reads the recorder through `AppController.recorder` (`apps/macos/Steno/AppController.swift:14`);
   the detection prompt starts a `.call` recording through the closure at line 35; `shutdown()`
@@ -83,11 +84,11 @@ How recording is started today, and why the window cannot:
   line 24; `Color.stenoDestructive` exists (`apps/macos/Steno/Design/Theme.swift:128-150`).
 - Test seams: `AppEnvironment.preview()` uses `FakePermissions.allGranted()`
   (`apps/macos/Steno/AppEnvironment.swift:326`); `FakePermissions.states` is mutable
-  (`apps/macos/Steno/Services/Fakes.swift:175-206`) and tests already downcast environment
-  fakes (`environment.calendar as? FakeCalendar`, `RecordingControllerTests.swift:199`). The
+  (`apps/macos/Steno/Services/Fakes.swift:25-56`) and tests already downcast environment
+  fakes (`environment.calendar as? FakeCalendar`, `RecordingControllerTests.swift:66`). The
   synthetic capture backend and fake pipeline let a recording start, stop and reach `.ready`
-  in tests (`RecordingControllerTests.swift:152-182`). The UI smoke test launches the preview
-  environment with `-steno-ui-testing` (`apps/macos/StenoUITests/LaunchSmokeTests.swift:117-150`)
+  in tests (`RecordingControllerTests.swift:19-50, 140-173`). The UI smoke test launches the preview
+  environment with `-steno-ui-testing` (`apps/macos/StenoUITests/LaunchSmokeTests.swift:11-44`)
   and runs on the hosted `macos-15` job only.
 - Scope: `.plans/2026-09-24-initial-scope.md` "Capture (Mac)" names "manual start/stop from
   the menu bar" and "App UI (macOS)" lists start/stop under the menu bar item, with the main
@@ -125,15 +126,31 @@ How recording is started today, and why the window cannot:
   and `PendingText.text` are today. This also fixes the Record menu reading "Stop Recording"
   during `.starting`.
 - **Default mode is a call; in person is one click away.** The primary action is
-  `start(mode: .call)`, matching ⌘⇧R and the detection prompt. In-person start is the
-  secondary item of the same control (a `Menu` with `primaryAction`, which macOS renders as a
-  split button), so the sidebar carries one control.
+  `start(mode: .call)`, matching ⌘⇧R and the detection prompt. The control is composed from
+  two views in one `HStack`: a `Button("Record call")` in `StenoPrimaryButtonStyle` (id
+  `sidebar-record`) and a `Menu { Button("Record in person") }` with `.menuIndicator(.hidden)`
+  and a chevron label (id `sidebar-record-in-person`), separated by a hairline. Not a `Menu`
+  with `primaryAction`: SwiftUI styles a `Menu` through `menuStyle`, not `buttonStyle`, XCUITest
+  exposes it as a `popUpButton` rather than a `button`, and the redesign's split geometry is not
+  something the system control exposes. The composition lets the redesign own the geometry it
+  specifies and keeps `app.buttons["sidebar-record"]` a plain button.
 - **Stop is a secondary button carrying destructive colour, not a red fill.** `Stop` uses the
-  existing `StenoSecondaryButtonStyle` with an 8 pt `stenoDestructive` dot, the label "Stop"
-  in `stenoDestructive`, and the elapsed time after the label. No new button style and no new
-  colour shortcut. The menu bar Stop adopts the same treatment so the two surfaces agree.
-  Reason: the redesign plan spends the one hue on status, not on fills; a red button in the
-  user's eye line for a whole meeting is loud without being clearer.
+  existing `StenoSecondaryButtonStyle` with a 6 pt `StatusDot(color: .stenoDestructive)`, the
+  label "Stop" in `stenoDestructive`, and the elapsed time after the label. No new button style
+  and no new colour shortcut. The menu bar Stop adopts the same treatment so the two surfaces
+  agree. Reason: the redesign plan spends the one hue on status, not on fills; a red button in
+  the user's eye line for a whole meeting is loud without being clearer.
+- **Recording is one hue: red. Every level meter is achromatic.** `LevelBars` fills with
+  `strong` over a `border` track on every surface (sidebar, detail header, menu bar, bubble);
+  `live` and `liveBright` are reserved for success (granted permission glyph, delivered chip).
+  This plan owns `LevelBars` and makes the change when it moves the view. Reason: the shipped
+  meter is `liveBright` green next to a red dot inside one 40 pt control, two hues for one
+  state; the floating indicator plan already made its bars achromatic for the same reason and
+  the four plans now agree.
+- **`StatusDot(color:)` is the one dot.** A 6 pt circle in `Design/Components.swift`, added here
+  because this plan lands first; the list entry, `MessageRow` and the header Stop reuse it.
+  Summary bullets are 4 pt (on grid). The 2026-09-25 app plan deferred a `StatusDot`; this is
+  where it pays for itself.
 - **The elapsed time lives inside the Stop button; there is no status line in the sidebar.**
   The menu bar keeps its own status line. Reason: the redesign plan's decision 16 places it
   there, and building it there first avoids a second layout.
@@ -144,13 +161,17 @@ How recording is started today, and why the window cannot:
   disabling on `.unknown` would block a user who clicked "Later" in onboarding while the menu
   bar still lets them record. `start(mode:)` itself stays unguarded, so the detection prompt
   and Quit paths do not change. The report refreshes when the control appears and whenever
-  the app becomes active (the user comes back from System Settings).
-- **The live row is selected when the recording started from the window.** After `start`
-  returns in `.recording`, the control sets `controller.requestedMeetingID` to the new
-  `recorder.activeMeetingID`, which `MainWindow` already turns into a selection
-  (`MainWindow.swift:48-52`). Starts from the menu bar or the detection prompt do not steal
-  the selection. `activeMeetingID` becomes a read-only property of the recorder; the row
-  transaction stays core's.
+  the app becomes active (the user comes back from System Settings). In the live app only the
+  microphone can be `.denied`: `PermissionsService.state(of: .systemAudio)` returns `.granted`
+  or `.unknown` (`PermissionsService.swift:40-41`; there is no status API for the tap), so the
+  system audio rows of the table exist for `FakePermissions` and for a future status API.
+- **The live row is selected when the recording started from the window.** The control calls
+  `AppController.startRecordingFromWindow(mode:)`, which awaits `recorder.start(mode:)` and,
+  when the recorder is `.recording`, sets `requestedMeetingID` to `recorder.activeMeetingID`,
+  which `MainWindow` already turns into a selection (`MainWindow.swift:48-52`). The logic lives
+  on the controller, not in a view closure, so `AppControllerTests` proves it hostless. Starts
+  from the menu bar or the detection prompt do not steal the selection. `activeMeetingID`
+  becomes a read-only property of the recorder; the row transaction stays core's.
 - **Shortcut stays ⌘⇧R.** It is wired, tested (`testToggleRecordingStartsThenStops`) and free
   of conflicts. The control's help text and the empty state name it. "Record In Person" keeps
   no shortcut.
@@ -167,9 +188,9 @@ The control's states, from `RecordingControlPresentation.make(state:denied:)`.
 
 | State | Condition | Label | Treatment | Action | Enabled | Disabled reason shown |
 |---|---|---|---|---|---|---|
-| Idle | `.idle`, `denied` empty | "Record call"; secondary item "Record in person" | `StenoPrimaryButtonStyle` | `start(mode: .call)`; secondary `start(mode: .inPerson)`, then select the new row | yes | none |
+| Idle | `.idle`, `denied` empty | "Record call"; the chevron menu holds "Record in person" | `StenoPrimaryButtonStyle` on the button and the chevron | `startRecordingFromWindow(mode: .call)`; menu item `startRecordingFromWindow(mode: .inPerson)`; both select the new row | yes | none |
 | Starting | `.starting` | "Starting…" | primary, spinner in place of the label | none | no | none (transient) |
-| Recording | `.recording(since:)` | "Stop" with elapsed `mm:ss` (`h:mm:ss` past an hour), ticking once a second; level bars for mic and, in call mode, system | `StenoSecondaryButtonStyle`, `stenoDestructive` dot and label | `stop()` | yes | none |
+| Recording | `.recording(since:)` | "Stop" with elapsed `mm:ss` (`h:mm:ss` past an hour), ticking once a second; achromatic level bars for mic and, in call mode, system | `StenoSecondaryButtonStyle`, `stenoDestructive` `StatusDot` and label | `stop()` | yes | none |
 | Stopping | `.stopping` | "Finishing…" | secondary, spinner | none | no | none (transient) |
 | Permission denied | `.idle`, `denied` non-empty | "Record call" | primary at disabled opacity | none on the button; a "Fix permissions…" button opens the onboarding window | no | `MessageRow(kind: .warning)`: "Microphone access is denied." / "System audio access is denied." / both, plus the fix button |
 
@@ -208,29 +229,37 @@ Rules that hold across states:
    RecordingControlPresentation` implementing the table above. Also
    `PermissionKind.deniedMessage` ("Microphone access is denied.", "System audio access is
    denied."), joined with a space when both are denied.
-3. **Shared recording views** (new `apps/macos/Steno/Recording/RecordingViews.swift`). Move
-   `LevelBars` out of `MenuBarView.swift` unchanged. Add `ElapsedText(since:)` (the
-   `TimelineView` over `clockText`, monospaced digits), `StopLabel(since:)` (dot, "Stop",
-   `ElapsedText`) and `RecordingMessages(recorder:)` for the error and warning rows.
+3. **Shared recording views** (new `apps/macos/Steno/Recording/RecordingViews.swift`,
+   `apps/macos/Steno/Design/Components.swift`). Move `LevelBars` out of `MenuBarView.swift`
+   (from lines 177-215) and change its fill from `liveBright` to `strong` over a `border`
+   track; `LevelBars.fraction` is unchanged. Add `StatusDot(color:)` (6 pt) to
+   `Components.swift`. Add `ElapsedText(since:)` (the `TimelineView` over `clockText`,
+   monospaced digits), `StopLabel(since:)` (`StatusDot`, "Stop", `ElapsedText`) and
+   `RecordingMessages(recorder:)` for the error and warning rows.
    `MenuBarView` renders these instead of its inline copies; its Stop becomes a
    `StenoSecondaryButtonStyle` button with `StopLabel`. Existing identifiers `record-call`,
    `record-in-person`, `stop-recording` stay.
-4. **Sidebar control** (new `apps/macos/Steno/Recording/RecordingControl.swift`).
+4. **Controller seam** (`apps/macos/Steno/AppController.swift`). Add
+   `func startRecordingFromWindow(mode: RecordingMode) async`: `await recorder.start(mode:)`,
+   then if `case .recording = recorder.recording`, `requestedMeetingID =
+   recorder.activeMeetingID`. The menu bar and the detection prompt keep calling
+   `recorder.start` directly, so they never move the selection.
+4a. **Sidebar control** (new `apps/macos/Steno/Recording/RecordingControl.swift`).
    `struct RecordingControl: View { let controller: AppController }`. Reads
-   `controller.recorder`, computes the presentation, renders: the button (a `Menu` with
-   `primaryAction` for the idle state, accessibility identifiers `sidebar-record`,
-   `sidebar-record-in-person`; a `StenoSecondaryButtonStyle` `Button` with `StopLabel` for
-   `sidebar-stop`; a `ProgressView` while busy), `LevelBars` while recording, the disabled
+   `controller.recorder`, computes the presentation, renders: for the idle state an `HStack`
+   of `Button("Record call")` (`StenoPrimaryButtonStyle`, id `sidebar-record`) and
+   `Menu { Button("Record in person") }` with `.menuIndicator(.hidden)` and a chevron label
+   (id `sidebar-record-in-person`); a `StenoSecondaryButtonStyle` `Button` with `StopLabel` for
+   `sidebar-stop`; a `ProgressView` while busy; `LevelBars` while recording; the disabled
    reason as `MessageRow(kind: .warning)` with a "Fix permissions…" button that calls
-   `openWindow(id: "onboarding")`, and `RecordingMessages`. `.help("Record a call (⌘⇧R)")`
+   `openWindow(id: "onboarding")`; and `RecordingMessages`. `.help("Record a call (⌘⇧R)")`
    on the primary. `.task { await recorder.refreshPermissions() }` and
    `.onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification))`
-   calling it again. The start action: `await recorder.start(mode:)`, then if
-   `case .recording = recorder.recording`, `controller.requestedMeetingID =
-   recorder.activeMeetingID`. Full width via `.frame(maxWidth: .infinity)`, padded
-   `Theme.Space.md`, followed by `Divider().overlay(Color.stenoBorder)`.
+   calling it again. Both start actions call `controller.startRecordingFromWindow(mode:)`.
+   Full width via `.frame(maxWidth: .infinity)`, padded `Theme.Space.md`, followed by
+   `Divider().overlay(Color.stenoBorder)`.
 5. **Compose in the window and fix the copy** (`apps/macos/Steno/Main/MainWindow.swift`,
-   `apps/macos/Steno/Main/MeetingListView.swift:175`). Sidebar column becomes
+   `apps/macos/Steno/Main/MeetingListView.swift:115`). Sidebar column becomes
    `VStack(spacing: 0) { RecordingControl(controller: controller); MeetingListView(model:
    list) }` inside the existing `navigationSplitViewColumnWidth`. Replace the empty-state
    sentence with the spec's body.
@@ -253,19 +282,27 @@ Rules that hold across states:
      `testAFailingSessionFactoryLeavesNoMeetingRow` remains the failure path.
    - `MenuBarViewModelTests.testLabelsAreWordsNotRawValues`: add the two `deniedMessage`
      strings.
+   - `AppControllerTests.testStartFromTheWindowSelectsTheLiveRowAndTheMenuBarDoesNot`:
+     `startRecordingFromWindow(mode: .call)` sets `requestedMeetingID` to
+     `recorder.activeMeetingID`; a start through `recorder.start` alone leaves it nil.
    Existing fakes suffice; no new seam on `AppEnvironment.preview`.
 8. **UI smoke** (`apps/macos/StenoUITests/LaunchSmokeTests.swift`). Add
    `testSidebarStartsAndStopsARecording`: launch with `-steno-ui-testing`, wait for the
    window, click `app.buttons["sidebar-record"]`, wait for `app.buttons["sidebar-stop"]`
-   (timeout 10), assert `app.staticTexts["Recording"].firstMatch.exists` (row chip), click
-   stop, wait for `sidebar-record` to return, then assert a row whose label begins with
-   "Meeting " exists. Keep the whole test under 30 seconds; the synthetic backend delivers
-   audio immediately. The existing `testMainWindowOpens` is unchanged.
+   (timeout 10), wait until
+   `app.descendants(matching: .any).matching(NSPredicate(format: "identifier BEGINSWITH 'meeting-'")).count == 2`
+   (the fixture meeting plus the live row), click stop, wait for `sidebar-record` to return,
+   and assert the count is still 2. The test pins identifiers, never copy: the default title
+   starts with "Call", not "Meeting", and the redesign later removes the "Recording" chip from
+   the entry, so neither a title nor a chip text is asserted anywhere in the smoke suite. Keep
+   the whole test under 30 seconds; the synthetic backend delivers audio immediately. The
+   existing `testMainWindowOpens` is unchanged.
 9. **Plan bookkeeping.** Append one line to the "Deviations (implementation)" list of
    `.plans/2026-09-25-macos-app-and-release.md` recording that the main window gained a
    start/stop control and pointing here, and one line to this file's status when merged.
 
 Files touched: `apps/macos/Steno/Recording/RecordingController.swift`,
+`apps/macos/Steno/AppController.swift`, `apps/macos/Steno/Design/Components.swift`,
 `apps/macos/Steno/Recording/RecordingControlPresentation.swift` (new),
 `apps/macos/Steno/Recording/RecordingViews.swift` (new),
 `apps/macos/Steno/Recording/RecordingControl.swift` (new),
@@ -273,6 +310,7 @@ Files touched: `apps/macos/Steno/Recording/RecordingController.swift`,
 `apps/macos/Steno/Main/MeetingListView.swift`, `apps/macos/Steno/StenoApp.swift`,
 `apps/macos/StenoTests/RecordingControlPresentationTests.swift` (new),
 `apps/macos/StenoTests/RecordingControllerTests.swift`,
+`apps/macos/StenoTests/AppControllerTests.swift`,
 `apps/macos/StenoTests/MenuBarViewModelTests.swift`,
 `apps/macos/StenoUITests/LaunchSmokeTests.swift`,
 `.plans/2026-09-25-macos-app-and-release.md`. xcodegen picks the new files up from the
@@ -306,8 +344,8 @@ Manual, on a Mac with a Debug build signed per `apps/macos/README.md` so TCC rem
    window shows the same timer.
 3. Press ⌘⇧R: the recording stops from the window's shortcut; the row goes Queued, Processing,
    Ready; the control is idle again.
-4. Open the split button's menu, choose Record in person: one "Room" level bar; stop from
-   the menu bar item; the sidebar control follows.
+4. Open the chevron menu, choose Record in person: one "Room" level bar, achromatic; stop
+   from the menu bar item; the sidebar control follows.
 5. System Settings, Privacy, Microphone: switch Steno off. Return to Steno: the control
    disables with "Microphone access is denied." and the fix button opens onboarding. Switch it
    back on, return: the control re-enables without a relaunch.

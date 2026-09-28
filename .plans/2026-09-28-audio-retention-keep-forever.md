@@ -1,6 +1,6 @@
 # Steno: keep recordings, explicit audio retention setting
 
-Status: proposal, 2026-09-28. Triggered by first-run feedback.
+Status: proposal, 2026-09-28, revised after the 2026-09-28 reviews. Triggered by first-run feedback.
 
 Scope authority: [`2026-09-24-initial-scope.md`](2026-09-24-initial-scope.md) ("Retention and
 privacy"). Binding plans this one refines: [`2026-09-25-core-foundation.md`](2026-09-25-core-foundation.md)
@@ -35,8 +35,8 @@ What exists today, with evidence. Line numbers are as of commit `bcf5eef` on `ma
   `audioAsset.retention` text column (`keepForever`) with `retentionDays` NULL
   (`Sources/StenoCore/Storage/Records.swift:404-431`,
   `Sources/StenoCore/Storage/Migrations.swift:127-128`). In the `setting` table it is one JSON row,
-  key `defaultRetention`, value `"keepForever"` or `{"keepDays":30}`
-  (`Tests/StenoCoreTests/SettingsStoreTests.swift:36`).
+  key `defaultRetention`, value `"keepForever"` or `{"keepDays":N}` (the test at
+  `Tests/StenoCoreTests/SettingsStoreTests.swift:36` pins `{"keepDays":7}`).
 - Setting: `Settings.defaultRetention`, `Sources/StenoCore/Model/Settings.swift:8`.
 - UI: Settings > Audio > "Recordings" section, `apps/macos/Steno/Settings/SettingsView.swift:123-143`.
   A `Picker` labelled "Keep audio" with the options "Delete after processing", "Keep for a number of
@@ -167,16 +167,24 @@ for them.
    impossible by deleting first.
 3. The sweep skips meetings that are recording, queued or processing. Cheap, and it turns an
    accident of ordering into a rule with a test.
-4. Switching the default to "Keep forever" clears the expiry of every recording that still has
-   files, automatically. Switching to a shorter rule applies to new recordings only. Reason: the
-   safe direction should be effortless; the destructive one is not asked for and stays out.
+4. Switching the default to "Keep forever" makes every recording that still has files
+   `.keepForever` with `expiresAt` nil, in one write, automatically. Clearing `expiresAt` alone is
+   not enough: an asset left at `.keepDays(N)` with a nil stamp is exactly the deferred case that
+   guard rule 2 re-stamps on the next Re-export or Re-run, and the launch sweep would then remove
+   audio the user asked to keep. Switching to a shorter rule applies to new recordings only.
+   Reason: the safe direction should be effortless; the destructive one is not asked for and stays
+   out. The rows-plus-files pairing lives in core (`RetentionSweep.keepAll()`), where the sweep
+   already owns it, so the view model calls one method and the CLI can offer it too.
 5. Settings > Audio shows the audio folder's size next to the rule, with a "Show in Finder"
    button. Reason: how long and how big are weighed together.
 6. The per-meeting control moves out of the ellipsis menu into a visible "Recording" line in the
-   detail header with its current status ("Kept forever", "Deleted on 28 Oct 2026", "Kept until the
-   export succeeds", "Deleted") and a "Keep this recording" toggle shown only when the default is
-   not forever. Reason: the toggle is the scope's per-meeting keep, and it must be discoverable and
-   truthful when the default is forever.
+   detail header, shown only when it says something the default does not ("Deletes on 28 Oct 2026",
+   "Kept until the export succeeds", "Kept; processing failed", "Recording deleted"), with a "Keep
+   this recording" toggle shown only when the default is not forever. A `.keepForever` asset with
+   its files present renders nothing: with the default at forever that line would repeat Settings
+   on every meeting. "Reveal recording in Finder" stays in the Actions menu. Reason: the toggle is
+   the scope's per-meeting keep, and it must be discoverable and truthful when the default is
+   forever.
 7. Copy says "recording" where the user means the file. "Keep recordings" is the picker label;
    footnotes state that transcripts, summaries and exports are never deleted by this rule.
 8. The `AudioRetention` enum, its SQLite columns and its JSON encoding do not change. No schema
@@ -207,27 +215,31 @@ Order of rows:
    - Delete: "Each recording is deleted as soon as it was transcribed, summarised and exported.
      Transcripts, summaries and exports stay."
    Followed by the existing sample clip sentence.
-4. When the selection changes to Forever, the view model calls
-   `MeetingStore.clearExpiry(assetIDs:)` for every asset whose master file exists. No
-   confirmation; nothing is deleted.
+4. When the selection changes to Forever, the view model calls `RetentionSweep.keepAll()`, which
+   collects every asset whose master file exists and calls `MeetingStore.keepForever(assetIDs:)`
+   (retention `.keepForever`, `expiresAt` nil, one write). No confirmation; nothing is deleted.
 
 ### Detail header, "Recording" line
 
-Under the meta line (duration, language, tokens) and above the tags row:
+The retention row of the redesign plan's detail header stack (under the end-reason row, above the
+progress or level bars). Rendered only when the status is not "kept forever with files present":
 
 - Status text from the asset and the files:
   - files missing: "Recording deleted"
-  - `.keepForever`: "Recording kept forever"
-  - `expiresAt` set: "Recording deleted on <date>" (or "today")
+  - `.keepForever` with files: nothing rendered
+  - `expiresAt` set: "Deletes on <date>" (or "Deletes today"); never past tense for a future date
   - retention not forever, `expiresAt` nil, meeting `.ready`, any delivery not `.delivered`:
-    "Recording kept until the export succeeds"
-  - retention not forever, `expiresAt` nil, meeting `.failed`: "Recording kept; processing failed"
-  - otherwise (queued or processing): "Recording kept while processing"
+    "Kept until the export succeeds"
+  - retention not forever, `expiresAt` nil, meeting `.failed`: "Kept; processing failed"
+  - otherwise (queued or processing): "Kept while processing"
 - `Toggle("Keep this recording")` shown only when `Settings.defaultRetention != .keepForever` and the
-  files exist. On: `.keepForever`, `expiresAt = nil` (today's `setKeepAudio(true)`). Off: default rule,
-  `expiresAt` from now (today's `setKeepAudio(false)`); when the default is `.deleteAfterProcessing`
-  the expiry is now, so the off state confirms ("Delete this recording now?").
-- "Reveal recording in Finder" (moved here from the menu) only when the master file exists.
+  files exist. On: `.keepForever`, `expiresAt = nil` (today's `setKeepAudio(true)`). Off: default
+  rule; `expiresAt` is stamped from now only when every `Delivery` row of the meeting is
+  `.delivered` (or there are none), otherwise it stays nil and the line reads "Kept until the export
+  succeeds", so the toggle obeys the same guard as the pipeline (rule 2). When the default is
+  `.deleteAfterProcessing` and the stamp would be now, the off state confirms ("Delete this
+  recording now?").
+- "Reveal recording in Finder" stays in the Actions menu, enabled only when the master file exists.
 
 ### Deletion guard rules (StenoCore)
 
@@ -237,7 +249,9 @@ Under the meta line (duration, language, tokens) and above the tags row:
    today, so the app's launch sweep behaviour does not change.
 2. `redeliver` and `rerunSummary` call `retention(asset:)` after `deliver` when the asset's retention
    is not `.keepForever` and `expiresAt` is nil (the deferred case). An asset that is already stamped
-   is never restamped by these paths, so a re-export does not extend a 30 day expiry.
+   is never restamped by these paths, so a re-export does not extend a 30 day expiry. Assets
+   rescued by `keepForever(assetIDs:)` are `.keepForever` and therefore excluded by this rule's own
+   test; that is why decision 4 sets the retention and not only the stamp.
 3. `MeetingStore.expiredAssets(now:)` joins `meeting` and excludes `recording`, `queued` and
    `processing` states.
 4. Processing failure leaves `expiresAt` nil (unchanged behaviour, now tested).
@@ -245,11 +259,15 @@ Under the meta line (duration, language, tokens) and above the tags row:
 
 ### Model additions (StenoCore)
 
-- `MeetingStore.assets()` (every asset with its URLs; the file check happens in the caller, off the
-  database) and `MeetingStore.clearExpiry(assetIDs:)` as one write.
+- `MeetingStore.assets()` (every asset with its URLs) and `MeetingStore.keepForever(assetIDs:)`
+  (sets `retention = .keepForever` and `expiresAt = nil` in one write).
+- `RetentionSweep.keepAll()`: reads `assets()`, keeps those whose master file exists, calls
+  `keepForever(assetIDs:)`, returns the count. The file check happens here, off the database, beside
+  the sweep that already pairs rows with files.
 - `AudioFolderUsage` in `Sources/StenoCore/Audio/`: `static func measure(_ folder: URL) throws -> Int64`
-  using a `FileManager` enumerator with `.totalFileAllocatedSizeKey`, skipping hidden files. Pure
-  function, testable with a temp folder.
+  using a `FileManager` enumerator with `.fileSizeKey` (logical size; allocated size is block-rounded
+  on APFS and not reported by every file system, which would make the test machine-dependent),
+  skipping hidden files. Pure function, testable with a temp folder on macOS and in the container.
 
 ## Implementation steps
 
@@ -273,32 +291,40 @@ Under the meta line (duration, language, tokens) and above the tags row:
      `retention(asset:)` under rule 2.
    - `Sources/StenoCore/Storage/MeetingStore.swift`: `expiredAssets(now:)` joins the meeting state
      (rule 3).
-   - Tests in `Tests/StenoCoreTests/PipelineIntegrationTests.swift` with `FakeDestination(deliverFailure:)`
-     and `FakeDeliveryDispatcher` from `Sources/StenoCore/Testing/FakeDelivery.swift`: a failed
-     delivery under `.deleteAfterProcessing` leaves `expiresAt` nil and posts no `.retentionApplied`;
-     a later `redeliver` with the failure cleared stamps `expiresAt` and posts it; a second `redeliver`
-     does not move an existing `expiresAt`; a `.keepForever` asset is unaffected either way; a
-     processing failure (fake speech engine throwing) leaves `expiresAt` nil.
-     `Tests/StenoCoreTests/RetentionSweepTests.swift`: an expired asset on a `.processing` meeting is not
-     swept; the same asset is swept once the meeting is `.ready`.
+   - Tests in `Tests/StenoCoreTests/PipelineIntegrationTests.swift` with `FakeDeliveryDispatcher`
+     from `Sources/StenoCore/Testing/FakeDelivery.swift`. `FakeDestination` is a value type built once
+     by `PipelineHarness`, so nothing can clear `deliverFailure` after the fact: add
+     `FakeDestination(failUntil: Int)` (a class-backed call counter) as the seam. Cases:
+     `aFailedDeliveryDefersExpiryUntilRedeliverSucceeds` (a failed delivery under
+     `.deleteAfterProcessing` leaves `expiresAt` nil and posts no `.retentionApplied`; the
+     `redeliver` after `failUntil` is reached stamps it and posts; a second `redeliver` does not
+     move it); `rerunSummaryAlsoStampsADeferredExpiry` (rule 2 names both paths);
+     `keepForeverIsUnaffectedEitherWay`; a processing failure (fake speech engine throwing) leaves
+     `expiresAt` nil. `Tests/StenoCoreTests/RetentionSweepTests.swift`: an expired asset on a
+     `.processing` meeting is not swept; the same asset is swept once the meeting is `.ready`.
+     `MeetingStoreTests.assetsRoundTripAndExpire` is re-checked after `expiredAssets` joins
+     `meeting`: an asset saved without a meeting row disappears from the join, so the test saves
+     the meeting first.
    - `Tests/StenoEndToEndTests`: one test that fails the first delivery with `includeAudio` on under
      `.deleteAfterProcessing`, then redelivers and finds `audio.m4a` in the vault.
    - Doc comments on `MeetingEvent.retentionApplied` and `RetentionSweep` say when the event is not
      posted.
    Done when `swift test` is green on Linux and macOS.
 
-3. Clear expiry when switching to Forever (core and app).
-   - `MeetingStore`: `assets()` and `clearExpiry(assetIDs:)`.
-   - `AudioSettingsViewModel.setRetention`: on `.keepForever`, collect the assets whose master file
-     exists and call `clearExpiry`.
-   - Tests: `SettingsViewModelTests` with a temp audio folder and two assets (one stamped with a
-     file, one stamped without): switching to forever clears the first stamp only; switching to 7
-     days changes nothing on disk.
+3. Keep everything when switching to Forever (core and app).
+   - `MeetingStore`: `assets()` and `keepForever(assetIDs:)`; `RetentionSweep.keepAll()`.
+   - `AudioSettingsViewModel.setRetention`: on `.keepForever`, call `RetentionSweep.keepAll()`.
+   - Tests: `RetentionSweepTests.keepAllRescuesOnlyAssetsWithFiles` with a temp folder and two
+     stamped assets (one with a master file, one without): the first becomes `.keepForever` with
+     `expiresAt` nil, the second is untouched; then `redeliver` on the rescued meeting leaves
+     `expiresAt` nil (the blocker case). `SettingsViewModelTests`: switching to forever calls
+     through and reports the count; switching to 7 days changes nothing on disk or in rows.
 
 4. Disk usage (core and app).
    - `Sources/StenoCore/Audio/AudioFolderUsage.swift` as specified, with
-     `Tests/StenoCoreTests/AudioFolderUsageTests.swift` (temp folder with known sizes, hidden file
-     skipped, missing folder throws).
+     `Tests/StenoCoreTests/AudioFolderUsageTests.swift` (temp folder with known logical sizes,
+     asserted exactly; hidden file skipped; missing folder throws), run on macOS and in the
+     container.
    - `AudioSettingsViewModel.folderUsage: FolderUsage` (`.measuring`, `.bytes(Int64)`, `.unavailable`),
      measured on `load()`.
    - `SettingsView`: "Recordings use …" and "Show in Finder" via `NSWorkspace`. Formatting reuses
@@ -306,23 +332,30 @@ Under the meta line (duration, language, tokens) and above the tags row:
      `apps/macos/Steno/Design/Labels.swift`.
 
 5. Detail pane "Recording" line (app).
-   - `apps/macos/Steno/Main/MeetingDetailViewModel.swift`: `recordingStatus` (the cases in the spec),
-     `recordingFilesExist` (checked when `export` changes, `FileManager.fileExists` on the master),
-     `showsKeepToggle` (default not forever and files exist), `setKeepAudio` unchanged apart from the
-     confirmation when the default is delete-after-processing.
-   - `apps/macos/Steno/Main/MeetingDetailView.swift`: the line, the toggle, "Reveal recording in
-     Finder" moved and conditional. Remove the toggle from the ellipsis menu.
-   - Tests: `apps/macos/StenoTests/MeetingDetailViewModelTests.swift`: status text for each case;
-     toggle hidden when the default is forever; the existing `testKeepAudioTogglesRetention`
-     kept with an explicit `.keepDays(7)` default. `apps/macos/StenoTests/TabTextSnapshotTests.swift`:
-     update if the detail header text is snapshotted.
+   - `apps/macos/Steno/Main/MeetingDetailViewModel.swift`: `recordingStatus` (the cases in the
+     spec, nil for kept-forever-with-files), `recordingFilesExist` (checked when `export` changes,
+     `FileManager.fileExists` on the master), `showsKeepToggle` (default not forever and files
+     exist), `setKeepAudio(false)` stamps only when `store.deliveries(meetingID:)` are all
+     `.delivered` or empty, plus the confirmation when the default is delete-after-processing.
+   - `apps/macos/Steno/Main/MeetingDetailView.swift`: the line and the toggle as the retention row
+     of the header stack; "Reveal recording in Finder" stays in the Actions menu, enabled only when
+     the master exists. Remove the keep toggle from the ellipsis menu.
+   - Tests: `apps/macos/StenoTests/MeetingDetailViewModelTests.swift`: status text for each case
+     and nil for the default; toggle hidden when the default is forever; the existing
+     `testKeepAudioTogglesRetention` kept with an explicit `.keepDays(7)` default and one extra
+     case: with a `.failed` delivery row, toggling off leaves `expiresAt` nil.
+     `apps/macos/StenoTests/TabTextSnapshotTests.swift`: update if the detail header text is
+     snapshotted.
 
 6. First-run visibility (app). `apps/macos/Steno/Onboarding/OnboardingView.swift`: under the
    page 1 intro (the onboarding plan owns its wording) add one line built from the loaded
    settings: "Recordings are kept forever in <folder name>. Change this any time in Settings >
-   Audio." (or the days or delete sentence from the Audio footnote). `OnboardingViewModel` gains a
-   `retentionSentence` loaded from `SettingsStore`; `apps/macos/StenoTests/OnboardingViewModelTests.swift`
-   covers the three sentences.
+   Audio." (or the days or delete sentence from the Audio footnote). `OnboardingViewModel` gains
+   `init(environment:defaults:)` (permissions and `SettingsStore` from the environment) and a
+   `retentionSentence`; the existing `init(permissions:)` stays as a convenience so the 81 x 4
+   matrix test (`testCurrentIsDerivedForEveryPermissionCombination`) is untouched. This plan owns
+   the environment initialiser; the onboarding plan (index step 6) extends it and does not rewrite
+   it. `apps/macos/StenoTests/OnboardingViewModelTests.swift` covers the three sentences.
 
 7. Plans and docs.
    - This file: mark Status as implemented with the PR number.
@@ -342,19 +375,29 @@ PR with those two commits.
 
 ## Verification
 
-- `swift test` green on Linux (`StenoCore` and `StenoAdapters` tests) and on the macOS runner
+- `swift test` green in the local `steno-swift` container (`StenoCore` and `StenoAdapters` tests;
+  CI has no Linux job, so the PR body states the run and its test count) and on the macOS runner
   (`StenoAudio`, `StenoSpeech`, end-to-end), then `xcodebuild test` for `apps/macos/StenoTests`.
 - Manual, on a fresh profile (new Application Support folder): the onboarding says recordings are
   kept forever; Settings > Audio shows "Forever" selected and the folder size; record a one minute
-  call; after processing the folder size grows and the detail line says "Recording kept forever".
+  call; after processing the folder size grows and the detail header shows no retention line
+  (the default says it all); Actions > Reveal recording in Finder opens the folder.
 - Manual, delete-after-processing with Obsidian on and `includeAudio` on, vault folder made
-  read-only: process a recording; the detail line says "Recording kept until the export succeeds";
-  the master is still on disk; make the vault writable, "Re-export"; `audio.m4a` appears in the vault
-  and the detail line changes to "Recording deleted on today" and then "Recording deleted" after the
-  sweep; the transcript, summary and speaker clips are untouched.
+  read-only: process a recording; the detail line says "Kept until the export succeeds"; the master
+  is still on disk; make the vault writable, "Re-export"; `audio.m4a` appears in the vault and the
+  detail line changes to "Deletes today" and then "Recording deleted" after the sweep; the
+  transcript, summary and speaker clips are untouched.
 - The owner's existing install: after updating, Settings > Audio still shows "For 30 days" (the stored
-  row); selecting "Forever" clears the expiry of every recording still on disk and the detail line of
-  each reads "Recording kept forever".
+  row); selecting "Forever" makes every recording still on disk `.keepForever`, the retention line
+  disappears from each, and a Re-export afterwards leaves `expiresAt` nil.
+
+Risks and checks (settled by the steps, not by the owner):
+
+- The launch sweep stays a pure `expiresAt <= now` query joined on meeting state; stamp-time is the
+  only guard because nothing else stamps. Step 2's done criterion: a grep for `expiresAt =` finds
+  only `retention(asset:)`, `keepForever(assetIDs:)` and `setKeepAudio`.
+- `steno process` applies `Settings.defaultRetention` and never runs the sweep. Left as is; the CLI
+  is a developer tool. `RetentionSweep.keepAll()` is reachable from it if a `steno sweep` is wanted.
 
 ## Open questions
 
@@ -366,9 +409,5 @@ PR with those two commits.
    the only way to reclaim one meeting's disk is to delete the whole meeting
    (`MeetingStore.delete`, `MeetingStore.swift:283-303`). It is a scope addition; the owner decides
    whether it is wanted.
-3. Should the launch sweep also be delivery-aware, or is the stamp-time guard enough? Stamp-time is
-   enough because nothing else stamps; revisit if another writer of `expiresAt` appears.
-4. Whether the onboarding sentence (step 6) is enough, or the first processed meeting should show a
+3. Whether the onboarding sentence (step 6) is enough, or the first processed meeting should show a
    one-time notice in the detail pane. Start with the sentence.
-5. The `steno process` CLI applies `Settings.defaultRetention` but never runs the sweep. Leave as is
-   (the CLI is a developer tool) or add `steno sweep`. Not needed for the owner's question.
