@@ -18,7 +18,9 @@ final class ProcessingPresentationTests: XCTestCase {
   }
 
   func testFractionMovesFromTheEventToJustBeforeTheNextAndRests() {
-    XCTAssertEqual(transcribing.expectedTimeToNextEvent, .seconds(60))
+    XCTAssertEqual(
+      transcribing.expectedTimeToNextEvent / .seconds(1), 60, accuracy: 1e-9,
+      "(0.3 / 0.9) x 180 s, up to floating point")
     XCTAssertEqual(state(transcribing, elapsed: .zero).fraction, 0.1, "the event's fraction")
     XCTAssertEqual(
       state(transcribing, elapsed: .seconds(30)).fraction, 0.245, accuracy: 1e-9, "halfway")
