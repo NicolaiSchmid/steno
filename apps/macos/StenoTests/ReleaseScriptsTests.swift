@@ -15,12 +15,12 @@ final class ReleaseScriptsTests: XCTestCase {
     "ASC_PRIVATE_KEY": "pem", "SPARKLE_PRIVATE_KEY": "ed25519",
   ]
 
-  private func run(_ script: String, _ environment: [String: String]) throws -> (
-    status: Int32, output: String
-  ) {
+  private func run(_ script: String, _ environment: [String: String], arguments: [String] = [])
+    throws -> (status: Int32, output: String)
+  {
     let process = Process()
     process.executableURL = URL(fileURLWithPath: "/bin/bash")
-    process.arguments = [Self.scripts.appendingPathComponent(script).path]
+    process.arguments = [Self.scripts.appendingPathComponent(script).path] + arguments
     process.environment = ["PATH": "/usr/bin:/bin"].merging(environment) { $1 }
     let pipe = Pipe()
     process.standardOutput = pipe
@@ -112,6 +112,30 @@ final class ReleaseScriptsTests: XCTestCase {
     let result = try run("make-app-icon.sh", [:])
     XCTAssertEqual(result.status, 1, result.output)
     XCTAssertTrue(result.output.contains("brew install imagemagick"), result.output)
+  }
+
+  /// A `magick` whose format listing has only the internal MSVG renderer is
+  /// what Ubuntu's and MacPorts' ImageMagick ship; the script names the
+  /// missing delegate instead of rendering with the wrong one.
+  func testMakeAppIconWithoutLibrsvgNamesTheDelegate() throws {
+    let root = try TestSupport.temporaryDirectory("steno-magick")
+    defer { try? FileManager.default.removeItem(at: root) }
+    let bin = root.appendingPathComponent("bin", isDirectory: true)
+    try FileManager.default.createDirectory(at: bin, withIntermediateDirectories: true)
+    let stub = bin.appendingPathComponent("magick")
+    try "#!/bin/sh\necho '     MSVG  rw+   ImageMagick SVG'\n".write(
+      to: stub, atomically: true, encoding: .utf8)
+    try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: stub.path)
+    let result = try run("make-app-icon.sh", ["PATH": "\(bin.path):/usr/bin:/bin"])
+    XCTAssertEqual(result.status, 1, result.output)
+    XCTAssertTrue(result.output.contains("no librsvg delegate"), result.output)
+    XCTAssertTrue(result.output.contains("brew install imagemagick"), result.output)
+  }
+
+  func testMakeAppIconRejectsUnknownArguments() throws {
+    let result = try run("make-app-icon.sh", [:], arguments: ["--bogus"])
+    XCTAssertEqual(result.status, 2, result.output)
+    XCTAssertTrue(result.output.contains("usage:"), result.output)
   }
 
   // MARK: release.yml and build-release.sh (reviewer traps)

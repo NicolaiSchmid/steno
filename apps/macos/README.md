@@ -85,14 +85,15 @@ a Debug build read that feed instead of `SUFeedURL`. Serve `dist/` with
 
 ### App icon
 
-`Steno/Resources/AppIcon.svg` is the only hand-edited icon file. `scripts/make-app-icon.sh`
-renders it with ImageMagick 7 and librsvg (`brew install imagemagick`) into the ten PNGs of
-`Assets.xcassets/AppIcon.appiconset`, rewrites that set's `Contents.json`, records the SVG's
-digest in `SOURCE.sha256` and writes the opaque 1024 px iOS icon to `mobile/assets/icon.png`.
-Nobody exports PNGs by hand. A reviewer proves the committed PNGs match the SVG with
-`scripts/make-app-icon.sh --check`; CI never renders, it only builds the committed files and
-`AppIconTests` checks their presence, pixel sizes, the iOS icon's opacity and the digest.
-Design and geometry: [`.plans/2026-09-28-app-icon.md`](../../.plans/2026-09-28-app-icon.md).
+Edit `Steno/Resources/AppIcon.svg`, run `scripts/make-app-icon.sh` (ImageMagick 7 with librsvg,
+`brew install imagemagick`) and commit the SVG together with everything it wrote: the ten PNGs and
+`Contents.json` in `Assets.xcassets/AppIcon.appiconset`, `Steno/Resources/AppIcon.sha256` and
+`mobile/assets/icon.png`. `AppIconTests` fails on CI when the SVG and `AppIcon.sha256` disagree.
+`scripts/make-app-icon.sh --check` compares bytes; it is exact only for the ImageMagick and librsvg
+pair that produced the committed files (7.1.2 and 2.62 today), and it also reports a `Contents.json`
+that Xcode's asset editor reformatted. A diff after a Homebrew upgrade or an Xcode edit means
+re-render and commit, not a bug. Design and geometry:
+[`.plans/2026-09-28-app-icon.md`](../../.plans/2026-09-28-app-icon.md).
 
 Where things live at runtime: the database in `~/Library/Application Support/Steno/steno.sqlite`,
 recordings in the folder chosen in Audio settings (default `…/Steno/Audio`), models in

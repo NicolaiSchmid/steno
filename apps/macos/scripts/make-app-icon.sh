@@ -1,17 +1,17 @@
 #!/usr/bin/env bash
 # Renders every raster app icon from the one committed vector source,
 # Steno/Resources/AppIcon.svg: the ten mac PNGs of the AppIcon appiconset
-# (with its Contents.json), the set's SOURCE.sha256 drift guard, and the
-# opaque 1024 px iOS icon in mobile/assets/. Design notes and geometry:
-# .plans/2026-09-28-app-icon.md.
+# (with its Contents.json), the AppIcon.sha256 drift guard beside the SVG,
+# and the opaque 1024 px iOS icon in mobile/assets/. Design notes and
+# geometry: .plans/2026-09-28-app-icon.md.
 #
 # Renderer: ImageMagick 7 `magick` with the librsvg delegate, the one tool
-# that renders, resizes, strips alpha and verifies on macOS and Linux alike.
-# ImageMagick's internal MSVG renderer is refused because its gradient and
-# anti-aliasing output differs from librsvg's. Never runs in CI: the PNGs are
-# committed and built into Assets.car like any other resource, so the runners
-# need no Homebrew dependency. `AppIconTests` guards presence, pixel size, the
-# mobile icon's opacity and the SVG hash.
+# that rasterises the SVG at any pixel size and verifies on macOS and Linux
+# alike. ImageMagick's internal MSVG renderer is refused because its gradient
+# and anti-aliasing output differs from librsvg's. Never runs in CI: the PNGs
+# are committed and built into Assets.car like any other resource, so the
+# runners need no Homebrew dependency. `AppIconTests` guards presence, pixel
+# size, twin bytes, the mobile icon's opacity and plate, and the SVG hash.
 #
 # Usage:
 #   make-app-icon.sh          rewrite every output in place, one line per file
@@ -40,20 +40,31 @@ if ! magick -list format 2>/dev/null | grep '^ *RSVG' >/dev/null; then
   echo "error: this ImageMagick has no librsvg delegate (only the internal MSVG renderer, whose output differs); $hint" >&2
   exit 1
 fi
-# Only shell builtins run before the dependency check above, so a machine
-# without ImageMagick always gets the install hint rather than a stray error.
-here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-SVG="$here/../Steno/Resources/AppIcon.svg"
-SET="$here/../Steno/Resources/Assets.xcassets/AppIcon.appiconset"
-IOS="$here/../../../mobile/assets/icon.png"
 
-if [ ! -f "$SVG" ]; then
-  echo "error: $SVG not found" >&2
+# Only shell builtins run before the dependency check above, so a machine
+# without ImageMagick gets the install hint rather than a stray error; the
+# hostless test runs with PATH=/usr/bin:/bin, which on some hosts lacks
+# even dirname.
+here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+app_dir="$(cd "$here/.." && pwd)"
+repo_root="$(cd "$app_dir/../.." && pwd)"
+svg="$app_dir/Steno/Resources/AppIcon.svg"
+digest="$app_dir/Steno/Resources/AppIcon.sha256"
+iconset="$app_dir/Steno/Resources/Assets.xcassets/AppIcon.appiconset"
+ios_icon="$repo_root/mobile/assets/icon.png"
+
+if [ ! -f "$svg" ]; then
+  echo "error: $svg not found" >&2
   exit 1
 fi
 
 tmp="$(mktemp -d "${TMPDIR:-/tmp}/steno-app-icon.XXXXXX")"
 trap 'rm -rf "$tmp"' EXIT
+
+# -strip and the excluded date/time chunks make the bytes deterministic for
+# one ImageMagick and librsvg pair, which is what lets --check cmp instead of
+# decode. A different pair renders different bytes: re-render and commit.
+png_flags=(-strip -define png:exclude-chunks=date,time)
 
 # Density drives librsvg's vector rasterisation at the exact pixel size, so
 # no bitmap resampling happens. It must be fractional: bash arithmetic is
@@ -62,8 +73,7 @@ trap 'rm -rf "$tmp"' EXIT
 render() { # pixels, output path
   local density
   density="$(awk -v px="$1" 'BEGIN { printf "%.6f", 96 * px / 1024 }')"
-  magick -background none -density "$density" "$SVG" \
-    -strip -define png:exclude-chunks=date,time "PNG32:$2"
+  magick -background none -density "$density" "$svg" "${png_flags[@]}" "PNG32:$2"
 }
 
 # One table, the five mac point sizes at 1x and 2x, drives the files, the
@@ -72,7 +82,7 @@ render() { # pixels, output path
 # under two names, which is what Xcode expects: an asset catalog holds no
 # symlinks, and a render is deterministic, so the twins are byte-identical.
 mkdir -p "$tmp/set"
-outputs=(Contents.json SOURCE.sha256)
+outputs=(Contents.json)
 entries=""
 for size in 16 32 128 256 512; do
   for scale in 1 2; do
@@ -87,7 +97,8 @@ for size in 16 32 128 256 512; do
 done
 
 # Rewritten in full rather than patched: that is what makes the step
-# idempotent.
+# idempotent. Xcode's asset editor reformats this file if the set is ever
+# opened there; --check then reports it until the script is rerun.
 cat > "$tmp/set/Contents.json" <<JSON
 {
   "images" : [${entries%,}
@@ -101,24 +112,33 @@ JSON
 
 # The drift guard AppIconTests compares against the SVG's digest: an edited
 # SVG without regenerated PNGs fails on CI, where --check itself never runs.
+# It lives beside the SVG, not in the set, where actool would warn about an
+# unassigned child.
 if command -v shasum >/dev/null 2>&1; then
-  shasum -a 256 "$SVG" | cut -d' ' -f1 > "$tmp/set/SOURCE.sha256"
+  shasum -a 256 "$svg" | cut -d' ' -f1 > "$tmp/AppIcon.sha256"
 else
-  sha256sum "$SVG" | cut -d' ' -f1 > "$tmp/set/SOURCE.sha256"
+  sha256sum "$svg" | cut -d' ' -f1 > "$tmp/AppIcon.sha256"
 fi
 
 # iOS: the plate fills the whole 1024 square (viewBox set to the plate, both
-# plate radii zeroed) and iOS applies its own mask. App Store Connect rejects
-# a 1024 icon with an alpha channel, so it is flattened to RGB here rather
-# than trusting Expo's flattening.
+# plate radii zeroed) and iOS applies its own mask. The sed matches literal
+# attribute values, so a plate edit that renames them would silently keep
+# the mac geometry: refuse an unchanged rewrite. App Store Connect rejects a
+# 1024 icon with an alpha channel, so it is flattened to RGB here rather
+# than trusting Expo's flattening; the opacity probe runs on the render with
+# its alpha still attached, since a flattened image is always opaque.
 sed -e 's/viewBox="0 0 1024 1024"/viewBox="100 100 824 824"/' \
-  -e 's/rx="185"/rx="0"/' -e 's/rx="183"/rx="0"/' "$SVG" > "$tmp/ios.svg"
-magick -background '#141416' -density 96 "$tmp/ios.svg" \
-  -alpha remove -alpha off -strip -define png:exclude-chunks=date,time "PNG24:$tmp/ios.png"
-if [ "$(magick identify -format '%[opaque]' "$tmp/ios.png")" != "True" ]; then
-  echo "error: the iOS icon render still has transparent pixels" >&2
+  -e 's/rx="185"/rx="0"/' -e 's/rx="183"/rx="0"/' "$svg" > "$tmp/ios.svg"
+if cmp -s "$svg" "$tmp/ios.svg"; then
+  echo "error: the iOS rewrite matched nothing in AppIcon.svg; update the sed in $(basename "$0")" >&2
   exit 1
 fi
+if [ "$(magick -background none -density 96 "$tmp/ios.svg" -format '%[opaque]' info:)" != "True" ]; then
+  echo "error: the iOS plate does not cover the 1024 square; the render has transparent pixels" >&2
+  exit 1
+fi
+magick -background '#141416' -density 96 "$tmp/ios.svg" \
+  -alpha remove -alpha off "${png_flags[@]}" "PNG24:$tmp/ios.png"
 
 # Everything below is the only part that touches the tree: --check compares
 # each render with its committed file, the default overwrites it.
@@ -126,7 +146,7 @@ failed=0
 deliver() { # rendered file, committed file
   if [ "$check" = true ]; then
     if ! cmp -s "$1" "$2"; then
-      echo "differs: $2"
+      echo "differs or missing: $2" >&2
       failed=1
     fi
   else
@@ -137,9 +157,29 @@ deliver() { # rendered file, committed file
 }
 
 for name in "${outputs[@]}"; do
-  deliver "$tmp/set/$name" "$SET/$name"
+  deliver "$tmp/set/$name" "$iconset/$name"
 done
-deliver "$tmp/ios.png" "$IOS"
+deliver "$tmp/AppIcon.sha256" "$digest"
+deliver "$tmp/ios.png" "$ios_icon"
+
+# The set is owned by this script in full: a child Contents.json does not
+# name (a renamed slot's old PNG) makes actool warn about an unassigned
+# child on every build, so it is reported or removed like a wrong byte.
+for path in "$iconset"/*; do
+  name="$(basename "$path")"
+  case " ${outputs[*]} " in
+    *" $name "*) ;;
+    *)
+      if [ "$check" = true ]; then
+        echo "stale: $path" >&2
+        failed=1
+      else
+        rm -f "$path"
+        echo "removed $path"
+      fi
+      ;;
+  esac
+done
 
 if [ "$failed" -ne 0 ]; then
   echo "the committed icon files do not match AppIcon.svg; run $(basename "$0") without --check" >&2

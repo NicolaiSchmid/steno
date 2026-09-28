@@ -5,15 +5,9 @@ import XCTest
 /// `Bundle.main`. Weakening any assertion here is the reviewer trap named in
 /// the plan: a missing purpose string surfaces as a silent TCC denial.
 final class InfoPlistTests: XCTestCase {
-  /// The built `Steno.app` beside the test bundle; `AppIconTests` reads its
-  /// resources through the same path.
-  static var builtApp: URL {
-    Bundle(for: InfoPlistTests.self).bundleURL.deletingLastPathComponent()
-      .appendingPathComponent("Steno.app", isDirectory: true)
-  }
-
   static func appInfo() throws -> [String: Any] {
-    let bundle = try XCTUnwrap(Bundle(url: builtApp), "Steno.app not found beside the test bundle")
+    let bundle = try XCTUnwrap(
+      Bundle(url: TestSupport.builtApp), "Steno.app not found beside the test bundle")
     return try XCTUnwrap(bundle.infoDictionary, "Steno.app has no Info.plist")
   }
 

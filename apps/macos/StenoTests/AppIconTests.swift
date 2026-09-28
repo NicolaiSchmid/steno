@@ -21,6 +21,10 @@ final class AppIconTests: XCTestCase {
     resources.appendingPathComponent("AppIcon.svg")
   }
 
+  private static var digest: URL {
+    resources.appendingPathComponent("AppIcon.sha256")
+  }
+
   private static var mobileIcon: URL {
     TestSupport.repositoryRoot.appendingPathComponent("mobile/assets/icon.png")
   }
@@ -30,7 +34,7 @@ final class AppIconTests: XCTestCase {
     return try XCTUnwrap(NSBitmapImageRep(data: data), "\(url.lastPathComponent) is not a bitmap")
   }
 
-  func testAppIconSetListsEveryFileAndEveryFileExists() throws {
+  func testAppIconSetListsEveryFileAtItsPixelSize() throws {
     let data = try Data(contentsOf: Self.iconSet.appendingPathComponent("Contents.json"))
     let json = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
     let images = try XCTUnwrap(json["images"] as? [[String: Any]])
@@ -52,6 +56,29 @@ final class AppIconTests: XCTestCase {
       XCTAssertEqual(rep.pixelsHigh, points * factor, "\(filename) height")
     }
     XCTAssertEqual(filenames.count, 10, "every entry has its own file")
+
+    // A child the manifest does not name (a renamed slot's old PNG) makes
+    // actool warn about an unassigned child on every build.
+    let children = try FileManager.default.contentsOfDirectory(atPath: Self.iconSet.path)
+    XCTAssertEqual(
+      Set(children).subtracting(["Contents.json"]), filenames,
+      "every child of the set is named in Contents.json")
+  }
+
+  /// The script renders the 32, 256 and 512 px slots twice under two names
+  /// from one deterministic render; a hand-exported PNG almost never matches
+  /// its twin byte for byte.
+  func testTwinSlotsAreByteIdentical() throws {
+    let twins = [
+      ("icon_16x16@2x.png", "icon_32x32.png"),
+      ("icon_128x128@2x.png", "icon_256x256.png"),
+      ("icon_256x256@2x.png", "icon_512x512.png"),
+    ]
+    for (retina, plain) in twins {
+      let first = try Data(contentsOf: Self.iconSet.appendingPathComponent(retina))
+      let second = try Data(contentsOf: Self.iconSet.appendingPathComponent(plain))
+      XCTAssertEqual(first, second, "\(retina) and \(plain) are the same render")
+    }
   }
 
   func testBuiltAppCarriesTheIcon() throws {
@@ -59,7 +86,7 @@ final class AppIconTests: XCTestCase {
     let named = [info["CFBundleIconName"], info["CFBundleIconFile"]].compactMap { $0 as? String }
     XCTAssertTrue(named.contains { $0.hasPrefix("AppIcon") }, "Info.plist names AppIcon: \(named)")
 
-    let icns = InfoPlistTests.builtApp.appendingPathComponent("Contents/Resources/AppIcon.icns")
+    let icns = TestSupport.builtApp.appendingPathComponent("Contents/Resources/AppIcon.icns")
     XCTAssertTrue(
       FileManager.default.fileExists(atPath: icns.path), "AppIcon.icns is in the bundle")
     let data = try Data(contentsOf: icns)
@@ -82,19 +109,32 @@ final class AppIconTests: XCTestCase {
   }
 
   /// The SVG is the source of truth and `make-app-icon.sh` writes its digest
-  /// beside the PNGs. An edited SVG without regenerated PNGs fails here,
-  /// since `--check` never runs on CI.
-  func testIconSourceIsCommittedBesideTheSet() throws {
+  /// beside it. An edited SVG without regenerated PNGs fails here, since
+  /// `--check` never runs on CI.
+  func testIconSourceDigestIsCommitted() throws {
     let data = try Data(contentsOf: Self.source)
-    let text = String(decoding: data, as: UTF8.self)
-    XCTAssertTrue(text.contains("id=\"glyph\""), "the glyph group keeps its id")
-    XCTAssertTrue(text.contains("id=\"live\""), "the live line keeps its id")
     let digest = SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
-    let recorded = try String(
-      contentsOf: Self.iconSet.appendingPathComponent("SOURCE.sha256"), encoding: .utf8
-    ).trimmingCharacters(in: .whitespacesAndNewlines)
+    let recorded = try String(contentsOf: Self.digest, encoding: .utf8)
+      .trimmingCharacters(in: .whitespacesAndNewlines)
     XCTAssertEqual(
       digest, recorded, "AppIcon.svg changed; run apps/macos/scripts/make-app-icon.sh")
+  }
+
+  /// `make-app-icon.sh` derives the iOS icon by rewriting these literal
+  /// attribute values with `sed`. The script refuses a rewrite that matched
+  /// nothing, but only on the regenerating machine. The two `id`s are not
+  /// read by the script; they address the groups a menu bar template export
+  /// would use (plan, open questions).
+  func testIconSourceKeepsTheAttributesTheIOSRenderRewrites() throws {
+    let text = try String(contentsOf: Self.source, encoding: .utf8)
+    for attribute in ["viewBox=\"0 0 1024 1024\"", "rx=\"185\"", "rx=\"183\""] {
+      XCTAssertTrue(
+        text.contains(attribute),
+        "\(attribute) is what the iOS sed in make-app-icon.sh rewrites; update both")
+    }
+    for id in ["id=\"glyph\"", "id=\"live\""] {
+      XCTAssertTrue(text.contains(id), "\(id) names the group a template export addresses")
+    }
   }
 
   /// App Store Connect rejects a 1024 icon with an alpha channel; the
@@ -104,5 +144,20 @@ final class AppIconTests: XCTestCase {
     XCTAssertEqual(rep.pixelsWide, 1024)
     XCTAssertEqual(rep.pixelsHigh, 1024)
     XCTAssertFalse(rep.hasAlpha, "mobile/assets/icon.png carries no alpha channel")
+  }
+
+  /// The iOS render sets the viewBox to the plate, so the plate's top
+  /// gradient stop (`#303034`) reaches the top corners. Had the `sed`
+  /// matched nothing, the fill background (`#141416`) would sit there
+  /// instead. The bottom stop equals that background, so only the top
+  /// corners can tell.
+  func testMobileIconPlateFillsTheSquare() throws {
+    let rep = try bitmap(at: Self.mobileIcon)
+    for x in [0, 1023] {
+      let color = try XCTUnwrap(
+        rep.colorAt(x: x, y: 0)?.usingColorSpace(.sRGB), "pixel (\(x), 0) decodes")
+      XCTAssertGreaterThan(
+        color.redComponent, 0.1, "pixel (\(x), 0) carries the plate, not the fill: \(color)")
+    }
   }
 }
