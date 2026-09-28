@@ -103,15 +103,16 @@ public enum SpeakerOptions {
     }
 
     for participant in participants where participant.role == .them {
-      if list.containsName(participant.displayName) { continue }
+      let name = participant.displayName.trimmingCharacters(in: .whitespacesAndNewlines)
+      if name.isEmpty || list.containsName(name) { continue }
       let person =
         participant.personID.flatMap { personsByID[$0] }
-        ?? persons.first { Person.namesMatch($0.displayName, participant.displayName) }
+        ?? persons.first { Person.namesMatch($0.displayName, name) }
       if let person {
         if othersPersonIDs.contains(person.id) { continue }
         list.add(.person(person), tag: .attendee)
       } else {
-        list.add(.create(participant.displayName), tag: .attendee)
+        list.add(.create(name), tag: .attendee)
       }
     }
 
