@@ -2,9 +2,13 @@ import StenoCore
 import SwiftUI
 
 /// Segments grouped into turns: consecutive segments by the same speaker
-/// under one `Name — HH:MM:SS` header. Display only.
+/// under one `Name — HH:MM:SS` header. The text is display only; the name
+/// is a `SpeakerPicker` that opens its own popover, one at a time
+/// (`presentedSpeakerID`), so a speaker can be renamed where they are read.
+/// Closing a picker re-exports when something changed.
 struct TranscriptTab: View {
   let model: MeetingDetailViewModel
+  @State private var presentedSpeakerID: UUID?
 
   var body: some View {
     ScrollView {
@@ -18,9 +22,25 @@ struct TranscriptTab: View {
         ForEach(turns) { turn in
           VStack(alignment: .leading, spacing: Theme.Space.xs) {
             HStack(spacing: Theme.Space.sm) {
-              Text(model.displayName(forSpeaker: turn.speakerID))
-                .font(.steno(Theme.TextSize.xs, weight: .semibold))
-                .foregroundStyle(Color.stenoStrong)
+              if let speakerID = turn.speakerID {
+                SpeakerPicker(
+                  model: model.speakers, speakerID: speakerID,
+                  isExpanded: Binding(
+                    get: { presentedSpeakerID == speakerID },
+                    set: { open in
+                      if open {
+                        presentedSpeakerID = speakerID
+                      } else if presentedSpeakerID == speakerID {
+                        presentedSpeakerID = nil
+                        Task { await model.pickerClosed() }
+                      }
+                    }),
+                  presentation: .popover)
+              } else {
+                Text(model.displayName(forSpeaker: nil))
+                  .font(.steno(Theme.TextSize.xs, weight: .semibold))
+                  .foregroundStyle(Color.stenoStrong)
+              }
               Text(turn.start.timestampText)
                 .font(.steno(Theme.TextSize.xxs).monospacedDigit())
                 .foregroundStyle(Color.stenoFaint)

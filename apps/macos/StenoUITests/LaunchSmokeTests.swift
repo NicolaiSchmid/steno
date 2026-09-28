@@ -64,5 +64,22 @@ final class LaunchSmokeTests: XCTestCase {
     XCTAssertTrue(field.waitForExistence(timeout: 5), "the picker field did not open")
     XCTAssertEqual(field.value as? String, "Jérôme", "pre-filled with the suggested name")
     app.typeKey(.escape, modifierFlags: [])
+    if app.popovers.firstMatch.exists { app.typeKey(.escape, modifierFlags: []) }
+
+    // Transcript: the turn header's name is the same picker, in its own
+    // popover. The screenshot is the review evidence for the speaker
+    // surfaces.
+    app.buttons["tab-transcript"].firstMatch.click()
+    let turnPicker = app.buttons["speaker-picker-\(speakerOne)"].firstMatch
+    XCTAssertTrue(turnPicker.waitForExistence(timeout: 10), "no picker on the turn header")
+    XCTAssertTrue(turnPicker.label.contains("Nicolai"), turnPicker.label)
+    turnPicker.click()
+    let turnField = app.textFields["speaker-field-\(speakerOne)"].firstMatch
+    XCTAssertTrue(turnField.waitForExistence(timeout: 5), "the transcript picker did not open")
+    let screenshot = XCTAttachment(screenshot: XCUIScreen.main.screenshot())
+    screenshot.name = "transcript-speaker-picker"
+    screenshot.lifetime = .keepAlways
+    add(screenshot)
+    app.typeKey(.escape, modifierFlags: [])
   }
 }
