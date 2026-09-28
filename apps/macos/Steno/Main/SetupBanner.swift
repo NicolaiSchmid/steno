@@ -12,7 +12,7 @@ import SwiftUI
 struct SetupBanner: View {
   let controller: AppController
   let hasMeetings: Bool
-  @State private var settings: StenoCore.Settings?
+  @State private var settings: StenoSettings?
   @Environment(\.openSettings) private var openSettings
   @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
