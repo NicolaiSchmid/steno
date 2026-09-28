@@ -32,6 +32,20 @@ extension MeetingStore {
     try await writer.write { db in try SpeakerRow(speaker).save(db) }
   }
 
+  /// Nulls `sampleClipURL`, and nothing else, on exactly the named speakers
+  /// of `meetingID`; `RetentionSweep` calls it once the clips of a meeting's
+  /// confirmed speakers are gone with the audio. IDs of other meetings' rows
+  /// are ignored.
+  public func clearSampleClips(meetingID: UUID, speakerIDs: [UUID]) async throws {
+    guard !speakerIDs.isEmpty else { return }
+    try await writer.write { db in
+      try SpeakerRow
+        .filter(SpeakerRow.Columns.meetingID == meetingID.uuidString)
+        .filter(speakerIDs.map(\.uuidString).contains(SpeakerRow.Columns.id))
+        .updateAll(db, SpeakerRow.Columns.sampleClipURL.set(to: nil))
+    }
+  }
+
   /// One person recorded twice, across meetings: re-points speakers,
   /// participants and task assignees from `remove` to `keep`, stores the
   /// sample-count-weighted renormalised mean embedding on `keep`, and deletes

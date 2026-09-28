@@ -297,6 +297,30 @@ import Testing
       ])
   }
 
+  @Test func clearSampleClipsNullsOnlyTheNamedRows() async throws {
+    let store = try await Self.populated()
+    var speakers = SampleData.speakers()
+    speakers[0].sampleClipURL = URL(fileURLWithPath: "/tmp/steno/named.wav")
+    try await store.replaceTranscript(
+      SampleData.meeting(), segments: SampleData.segments(), speakers: speakers)
+
+    try await store.clearSampleClips(meetingID: SampleData.uuid(2), speakerIDs: [speakers[0].id])
+    #expect(
+      try await store.speakers(meetingID: SampleData.meetingID) == speakers,
+      "another meeting's id touches nothing")
+    try await store.clearSampleClips(meetingID: SampleData.meetingID, speakerIDs: [])
+    #expect(try await store.speakers(meetingID: SampleData.meetingID) == speakers)
+
+    try await store.clearSampleClips(meetingID: SampleData.meetingID, speakerIDs: [speakers[0].id])
+    var expected = speakers
+    expected[0].sampleClipURL = nil
+    let after = try await store.speakers(meetingID: SampleData.meetingID)
+    #expect(after == expected, "only the clip column of the named row changes")
+    #expect(after[1].sampleClipURL == speakers[1].sampleClipURL)
+    #expect(
+      try await store.export(meetingID: SampleData.meetingID).segments == SampleData.segments())
+  }
+
   @Test func handoverRowsRoundTrip() async throws {
     let store = try MeetingStore.inMemory()
     let hash = Data(repeating: 9, count: 32)
