@@ -26,12 +26,10 @@ extension ProcessingPipeline {
   /// `RecordingLayout.sampleClip(speakerID:)` beside the master.
   ///
   /// `buffer` is the last lane `decodeAndTranscribe` decoded, which under
-  /// today's lane rules is the diarized lane (`.system` for a call, the room
-  /// lane otherwise, both last in `orderedLanes`), so the stage reuses it
-  /// and the one-buffer invariant holds without a second decode. The lane
-  /// is decoded here only when no buffer was handed or it carries another
-  /// lane, a branch `process` never takes; a caller who does take it holds
-  /// two buffers for the stage's span.
+  /// today's lane rules is the diarized lane, so the stage reuses it. The
+  /// lane is decoded here only when no buffer was handed or it carries
+  /// another lane, a branch `process` never takes; a caller who does take
+  /// it holds two buffers for the stage's span.
   func diarize(asset: AudioAsset, meeting: Meeting, buffer handed: DecodedLane?) async throws
     -> Diarization
   {

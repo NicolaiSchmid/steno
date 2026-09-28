@@ -1,6 +1,5 @@
 /// The pipeline's stages in execution order. `progress` is posted as each
-/// stage starts, once per lane inside `transcribe`; the value it carries is
-/// a `ProcessingProgress`, never the stage's index.
+/// stage starts, once per lane inside `transcribe`.
 public enum PipelineStage: String, CaseIterable, Sendable, Codable, Equatable, Hashable {
   case decode
   case transcribe

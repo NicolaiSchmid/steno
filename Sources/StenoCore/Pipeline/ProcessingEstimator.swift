@@ -151,7 +151,7 @@ public struct StageRates: Sendable, Equatable, Hashable {
 /// fraction at which the next event is expected. Until the transcript
 /// exists the token count is a guess from the audio duration; the pipeline
 /// replaces it at cleanup start.
-public struct ProcessingEstimator: Sendable, Equatable, Hashable {
+public struct ProcessingEstimator: Sendable {
   /// Tokens of transcript one second of audio yields, before the transcript
   /// exists: around 140 words a minute at 1.5 to 2 tokens a word, labels
   /// and timestamps included.
@@ -254,7 +254,6 @@ public struct ProcessingEstimator: Sendable, Equatable, Hashable {
     from stage: PipelineStage, lane: Int = 0, in stages: [PipelineStage] = PipelineStage.allCases
   ) -> Double {
     let later = stages.drop { $0 != stage }.reduce(0) { $0 + expectedSeconds($1) }
-    guard stage == .transcribe, lane > 0 else { return later }
     return max(0, later - Double(lane) * expectedStep(stage))
   }
 
@@ -282,12 +281,5 @@ public struct ProcessingEstimator: Sendable, Equatable, Hashable {
       nextFraction: max(fraction, next),
       estimatedRemaining: .seconds(remaining),
       isEstimateSeeded: isSeeded(stages))
-  }
-}
-
-extension Duration {
-  /// The duration in seconds, exact for whole seconds.
-  var timeInterval: TimeInterval {
-    Double(components.seconds) + Double(components.attoseconds) / 1e18
   }
 }

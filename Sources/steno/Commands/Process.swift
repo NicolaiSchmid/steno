@@ -164,19 +164,16 @@ struct Process: AsyncParsableCommand {
   /// `stage percent remaining`, the stage padded to the longest name so the
   /// percents line up: `transcribe     3% 1m 20s`.
   static func progressLine(_ progress: ProcessingProgress) -> String {
-    let stage = progress.stage.rawValue
-    let width = PipelineStage.allCases.map(\.rawValue.count).max() ?? stage.count
-    let padded = stage + String(repeating: " ", count: max(0, width - stage.count))
-    let percent = String(Int((progress.fraction * 100).rounded(.down)))
-    let aligned = String(repeating: " ", count: max(0, 3 - percent.count)) + percent
-    return "\(padded) \(aligned)% \(remainingText(progress.estimatedRemaining))"
+    let width = PipelineStage.allCases.map(\.rawValue.count).max() ?? 0
+    let stage = progress.stage.rawValue.padding(toLength: width, withPad: " ", startingAt: 0)
+    let percent = String(format: "%3d", Int((progress.fraction * 100).rounded(.down)))
+    return "\(stage) \(percent)% \(remainingText(progress.estimatedRemaining))"
   }
 
   /// `1m 20s` or `4s`, seconds rounded up so a run never reads as done early.
   static func remainingText(_ remaining: Duration) -> String {
-    let attoseconds = remaining.components.attoseconds
-    let seconds = Int(remaining.components.seconds) + (attoseconds > 0 ? 1 : 0)
-    guard seconds >= 60 else { return "\(max(0, seconds))s" }
+    let seconds = max(0, Int((remaining / .seconds(1)).rounded(.up)))
+    guard seconds >= 60 else { return "\(seconds)s" }
     return "\(seconds / 60)m \(seconds % 60)s"
   }
 }

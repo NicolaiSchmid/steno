@@ -35,44 +35,38 @@ struct ProcessingRun: Sendable {
   /// never recorded.
   private(set) var shared: Set<PipelineStage> = []
 
-  init(estimator: ProcessingEstimator, stages: [PipelineStage], stopwatch: Stopwatch) {
-    self.estimator = estimator
-    self.stages = stages
-    self.stopwatch = stopwatch
-  }
-
   /// The event for `stage` (lane `lane` inside transcribe) at `elapsed`,
   /// clamped: the fraction never falls below the previous event's
   /// `nextFraction`, so a re-estimate never moves the bar backwards and an
-  /// early event lands where the presenter already is; `nextFraction` stays
-  /// within `fraction...1`.
+  /// early event lands where the presenter already is; `nextFraction` is
+  /// lifted with it.
   mutating func progress(_ stage: PipelineStage, lane: Int = 0, elapsed: Duration)
     -> ProcessingProgress
   {
-    var event = estimator.progress(stage, lane: lane, elapsed: elapsed.timeInterval, in: stages)
-    let floor = last?.nextFraction ?? 0
-    event.fraction = max(event.fraction, floor)
-    event.nextFraction = max(event.fraction, min(1, event.nextFraction))
+    var event = estimator.progress(stage, lane: lane, elapsed: elapsed / .seconds(1), in: stages)
+    event.fraction = max(event.fraction, last?.nextFraction ?? 0)
+    event.nextFraction = max(event.fraction, event.nextFraction)
     last = event
     return event
   }
 
-  /// Adds a measured span of `stage`; `alone` false marks the stage shared.
-  mutating func measure(_ stage: PipelineStage, seconds: Double, alone: Bool) {
-    measured[stage, default: 0] += seconds
+  /// Adds a measured span of `stage` (lane `lane` inside transcribe);
+  /// `alone` false marks the stage shared. Returns the rate sample once the
+  /// stage is complete, its last lane for transcribe, or nil when it was
+  /// shared, is never learned, or had no units of work.
+  mutating func measure(
+    _ stage: PipelineStage, lane: Int, seconds: Double, alone: Bool, recordedAt: Date
+  ) -> StageSample? {
+    let total = measured[stage, default: 0] + seconds
+    measured[stage] = total
     if !alone { shared.insert(stage) }
-  }
-
-  /// The sample for a finished stage, or nil when it was shared, is never
-  /// learned, or had no units of work.
-  func sample(_ stage: PipelineStage, recordedAt: Date) -> StageSample? {
-    guard ProcessingEstimator.learns(stage), !shared.contains(stage),
-      let seconds = measured[stage]
+    guard stage != .transcribe || lane == estimator.lanes.count - 1,
+      ProcessingEstimator.learns(stage), !shared.contains(stage)
     else { return nil }
     let units = estimator.units(stage)
     guard units > 0 else { return nil }
     return StageSample(
-      stage: stage, key: estimator.key(stage), secondsPerUnit: seconds / units,
+      stage: stage, key: estimator.key(stage), secondsPerUnit: total / units,
       recordedAt: recordedAt)
   }
 }

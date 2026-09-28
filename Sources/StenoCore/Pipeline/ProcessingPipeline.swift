@@ -58,9 +58,7 @@ public struct PipelineDependencies: Sendable {
 /// second `process`, `rerunSummary` or `redeliver` on a meeting that is in
 /// flight throws instead of interleaving writes with the first. Stage
 /// durations feed `MeetingStore.record` when the meeting was alone in flight
-/// for the whole stage, so overlapping runs never pollute the rates. Both
-/// engines are prepared through one in-flight task shared by `warmUp()` and
-/// `process`, so a warm-up racing a run loads the models once.
+/// for the whole stage, so overlapping runs never pollute the rates.
 public actor ProcessingPipeline {
   let dependencies: PipelineDependencies
   private var running: [UUID: Task<Void, Never>] = [:]
@@ -69,7 +67,7 @@ public actor ProcessingPipeline {
   /// not alone for its whole span.
   private var admissions = 0
   private var runs: [UUID: ProcessingRun] = [:]
-  /// The `prepare()` calls in flight, if any; see `prepared()`.
+  /// The `prepare()` calls in flight, if any; see `warmUp()`.
   private var preparing: Task<Void, any Error>?
 
   public init(dependencies: PipelineDependencies) {
@@ -146,25 +144,16 @@ public actor ProcessingPipeline {
 
   /// Loads the speech engine and the diarizer now, so a run that starts
   /// later finds them resident: the app calls this when a recording starts,
-  /// and the cold CoreML compile lands during the meeting instead of in the
-  /// wait after it. The engines' own `prepare()` is idempotent once loaded,
-  /// so `process` still calls it; only the load moves. A failure is thrown
-  /// to the caller and nothing is remembered: the next `prepare()` tries
-  /// again.
+  /// so the cold CoreML compile lands during the meeting instead of in the
+  /// wait after it, and `process` calls it before its first event. Both
+  /// `prepare()` calls go through one task held on the actor while it is in
+  /// flight, because the engines cannot serialize themselves: their
+  /// `loaded()` methods check a cached manager and then `await` the load,
+  /// and an actor is re-entrant across that `await`. The task is dropped
+  /// once it has settled, so a later run prepares again (a no-op on a loaded
+  /// engine) and a failed load is retried rather than cached. Errors carry
+  /// `.decode` for the engine and `.diarize` for the diarizer.
   public func warmUp() async throws {
-    try await prepared()
-  }
-
-  /// Runs both `prepare()` calls once through one task held on the actor
-  /// while it is in flight. The pipeline is the serialization point because
-  /// the engines cannot be: their `loaded()` methods check a cached manager
-  /// and then `await` the load, and an actor is re-entrant across that
-  /// `await`, so two callers arriving inside the gap would both load. Every
-  /// caller awaits the same task; the task is dropped once it has settled,
-  /// so a later run prepares again (a no-op on a loaded engine) and a failed
-  /// load is retried rather than cached. Errors carry `.decode` for the
-  /// engine and `.diarize` for the diarizer, as the stages did.
-  private func prepared() async throws {
     if let task = preparing {
       try await task.value
       return
@@ -183,7 +172,7 @@ public actor ProcessingPipeline {
       }
     }
     preparing = task
-    defer { if preparing == task { preparing = nil } }
+    defer { preparing = nil }
     try await task.value
   }
 
@@ -192,12 +181,9 @@ public actor ProcessingPipeline {
   /// or summarize failure). Once `persist` has marked the meeting `.ready`
   /// nothing downgrades it: a `retention` error is thrown to the caller and
   /// the meeting stays ready and delivered. Both engines are prepared before
-  /// the first event, through the task `warmUp()` shares, so a cold model
-  /// load lands before the run's clock starts and never enters a rate. The
-  /// last transcribed lane's buffer is handed to `diarize` and released
-  /// before `matchSpeakers`, so at most one buffer is alive and the diarized
-  /// lane is not decoded twice. A meeting processed again starts a new run
-  /// whose first event is `.decode` at fraction 0.
+  /// the first event, so a cold model load lands before the run's clock
+  /// starts and never enters a rate. A meeting processed again starts a new
+  /// run whose first event is `.decode` at fraction 0.
   public func process(assetID: UUID) async throws {
     guard let asset = try await store.asset(id: assetID) else {
       throw PipelineFailure(stage: .decode, reason: "audio asset \(assetID) not found")
@@ -209,15 +195,13 @@ public actor ProcessingPipeline {
       try await store.setState(.processing, meetingID: meeting.id, now: now)
       let persisted: AudioAsset
       do {
-        try await prepared()
+        try await warmUp()
         let settings = try await attributing(.decode) { try await dependencies.settings.load() }
-        let rates = try await attributing(.decode) { try await store.stageRates() }
-        runs[meeting.id] = ProcessingRun(
-          estimator: ProcessingEstimator(
-            duration: meeting.duration, lanes: asset.lanes,
-            speechEngineID: dependencies.speechEngine.id,
-            llmModel: ProcessingEstimator.llmModelKey(settings), rates: rates),
-          stages: PipelineStage.allCases, stopwatch: Stopwatch(dependencies.clock))
+        runs[meeting.id] = try await attributing(.decode) {
+          try await makeRun(
+            meeting: meeting, lanes: asset.lanes, tokens: nil, stages: PipelineStage.allCases,
+            settings: settings)
+        }
         var current = meeting
         current.state = .processing
         let (transcription, diarization) = try await transcribeAndDiarize(
@@ -263,7 +247,7 @@ public actor ProcessingPipeline {
         try await makeRun(
           meeting: meeting, lanes: export.audio?.lanes ?? [],
           tokens: ProcessingEstimator.tokenCount(export.segments),
-          stages: [.summarize, .deliver])
+          stages: [.summarize, .deliver], settings: dependencies.settings.load())
       }
       var current = meeting
       current.templateID = templateID
@@ -282,9 +266,9 @@ public actor ProcessingPipeline {
     }
     try await exclusively(meetingID, stage: .deliver) {
       runs[meetingID] = try await attributing(.deliver) {
-        let asset = try await store.asset(meetingID: meetingID)
-        return try await makeRun(
-          meeting: meeting, lanes: asset?.lanes ?? [], tokens: nil, stages: [.deliver])
+        try await makeRun(
+          meeting: meeting, lanes: store.asset(meetingID: meetingID)?.lanes ?? [], tokens: nil,
+          stages: [.deliver], settings: dependencies.settings.load())
       }
       await deliver(meetingID: meetingID)
     }
@@ -305,18 +289,17 @@ public actor ProcessingPipeline {
 
   // MARK: - Stage plumbing
 
-  /// A run over `stages` for a meeting outside `process`: the stored rates,
-  /// the configured engine and model, the given lanes and token count.
+  /// A run over `stages` on the stored rates, the configured engine and
+  /// model, the given lanes and token count (nil guesses from the duration).
   private func makeRun(
-    meeting: Meeting, lanes: [AudioLane], tokens: Int?, stages: [PipelineStage]
+    meeting: Meeting, lanes: [AudioLane], tokens: Int?, stages: [PipelineStage],
+    settings: Settings
   ) async throws -> ProcessingRun {
-    let settings = try await dependencies.settings.load()
-    let rates = try await store.stageRates()
-    return ProcessingRun(
+    ProcessingRun(
       estimator: ProcessingEstimator(
         duration: meeting.duration, lanes: lanes, tokens: tokens,
         speechEngineID: dependencies.speechEngine.id,
-        llmModel: ProcessingEstimator.llmModelKey(settings), rates: rates),
+        llmModel: ProcessingEstimator.llmModelKey(settings), rates: try await store.stageRates()),
       stages: stages, stopwatch: Stopwatch(dependencies.clock))
   }
 
@@ -348,18 +331,16 @@ public actor ProcessingPipeline {
   /// outside a run (tests reach stages directly) posts over a fresh run on
   /// the seeds that is not kept.
   func post(_ stage: PipelineStage, lane: Int = 0, meetingID: UUID) async {
-    var run = runs[meetingID] ?? standaloneRun()
+    var run =
+      runs[meetingID]
+      ?? ProcessingRun(
+        estimator: ProcessingEstimator(
+          duration: 0, lanes: [], speechEngineID: dependencies.speechEngine.id,
+          llmModel: StageRates.fakeModel, rates: .seeds),
+        stages: PipelineStage.allCases, stopwatch: Stopwatch(dependencies.clock))
     let progress = run.progress(stage, lane: lane, elapsed: run.stopwatch.elapsed)
     if runs[meetingID] != nil { runs[meetingID] = run }
     await dependencies.events.post(.progress(meetingID: meetingID, progress: progress))
-  }
-
-  private func standaloneRun() -> ProcessingRun {
-    ProcessingRun(
-      estimator: ProcessingEstimator(
-        duration: 0, lanes: [], speechEngineID: dependencies.speechEngine.id,
-        llmModel: StageRates.fakeModel, rates: .seeds),
-      stages: PipelineStage.allCases, stopwatch: Stopwatch(dependencies.clock))
   }
 
   /// Turns any error thrown by `body` into a `PipelineFailure` carrying
@@ -388,24 +369,14 @@ public actor ProcessingPipeline {
     let admissionsBefore = admissions
     let watch = Stopwatch(dependencies.clock)
     let value = try await attributing(stage, body)
-    let seconds = watch.elapsed.timeInterval
-    await recordTiming(
-      stage, lane: lane, seconds: seconds, alone: alone && admissions == admissionsBefore,
-      meetingID: meetingID)
+    if var run = runs[meetingID] {
+      let sample = run.measure(
+        stage, lane: lane, seconds: watch.elapsed / .seconds(1),
+        alone: alone && admissions == admissionsBefore, recordedAt: now)
+      runs[meetingID] = run
+      // The rates are a convenience; a bookkeeping failure never fails a run.
+      if let sample { try? await store.record(sample) }
+    }
     return value
-  }
-
-  private func recordTiming(
-    _ stage: PipelineStage, lane: Int, seconds: Double, alone: Bool, meetingID: UUID
-  ) async {
-    guard var run = runs[meetingID] else { return }
-    run.measure(stage, seconds: seconds, alone: alone)
-    runs[meetingID] = run
-    let lastLane = max(run.estimator.lanes.count, 1) - 1
-    guard stage != .transcribe || lane == lastLane,
-      let sample = run.sample(stage, recordedAt: now)
-    else { return }
-    // The rates are a convenience; a bookkeeping failure never fails a run.
-    try? await store.record(sample)
   }
 }

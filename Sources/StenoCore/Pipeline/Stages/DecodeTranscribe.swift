@@ -38,10 +38,10 @@ extension ProcessingPipeline {
   /// lane is decoded, except the last, which is returned beside the
   /// transcription for `diarize` to reuse: it would be alive at that point
   /// anyway, so the one-buffer invariant holds and the diarized lane, which
-  /// `orderedLanes` puts last, is not decoded twice. `lastLane` is nil for
-  /// an asset without lanes. `progress` is posted once for `decode`, on the
-  /// first lane, and once per lane for `transcribe`; the engine was prepared
-  /// by `process` before the run's first event.
+  /// `orderedLanes` puts last, is not decoded twice. `progress` is posted
+  /// once for `decode`, on the first lane, and once per lane for
+  /// `transcribe`; `process` prepared the engine before the run's first
+  /// event.
   func decodeAndTranscribe(asset: AudioAsset, meetingID: UUID) async throws -> (
     transcription: Transcription, lastLane: DecodedLane?
   ) {

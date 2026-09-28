@@ -65,7 +65,7 @@ enum ProgressPresentation {
     let target = max(start, progress.nextFraction - boundaryGap)
     let expected = progress.expectedTimeToNextEvent
     guard expected > .zero else { return target }
-    let share = min(1, max(0, seconds(elapsed) / seconds(expected)))
+    let share = min(1, max(0, elapsed / expected))
     return start + (target - start) * share
   }
 
@@ -75,18 +75,13 @@ enum ProgressPresentation {
     -> String
   {
     if isSlow { return "a bit longer than usual" }
-    let remainingSeconds = seconds(remaining)
-    let minutes = Int((remainingSeconds / 60).rounded(.up))
+    let minutes = Int((remaining / .seconds(60)).rounded(.up))
     if isEstimateSeeded {
-      return remainingSeconds < 90 ? "about a minute" : "about \(minutes) min"
+      return remaining < .seconds(90) ? "about a minute" : "about \(minutes) min"
     }
-    if remainingSeconds < 10 { return "a few seconds" }
-    if remainingSeconds < 60 { return "less than a minute" }
+    if remaining < .seconds(10) { return "a few seconds" }
+    if remaining < .seconds(60) { return "less than a minute" }
     return "~\(minutes) min remaining"
-  }
-
-  private static func seconds(_ duration: Duration) -> Double {
-    Double(duration.components.seconds) + Double(duration.components.attoseconds) / 1e18
   }
 }
 
