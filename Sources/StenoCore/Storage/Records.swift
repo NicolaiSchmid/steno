@@ -214,6 +214,7 @@ struct SpeakerRow: StenoRecord {
     static let clusterLabel = Column(CodingKeys.clusterLabel)
     static let assignment = Column(CodingKeys.assignment)
     static let personID = Column(CodingKeys.personID)
+    static let sampleClipURL = Column(CodingKeys.sampleClipURL)
   }
 
   init(_ speaker: Speaker) {

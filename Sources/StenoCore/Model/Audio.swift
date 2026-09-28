@@ -104,8 +104,11 @@ public struct AudioAsset: Codable, Sendable, Equatable, Hashable, Identifiable {
     self.expiresAt = expiresAt
   }
 
-  /// Master, sidecars and mixdown: what `RetentionSweep` removes together.
-  /// Sample clips are `Speaker.sampleClipURL` and never part of this.
+  /// Master, sidecars and mixdown: the asset's own files, which
+  /// `RetentionSweep` and `MeetingStore.delete` remove together. Sample clips
+  /// are `Speaker.sampleClipURL` and not part of this: the sweep removes the
+  /// clips of confirmed speakers alongside these files, while an unconfirmed
+  /// speaker's clip stays until confirmation or the meeting's deletion.
   public var expirableFiles: [URL] {
     var files = [url]
     files.append(contentsOf: sidecars16k.sorted { $0.key.rawValue < $1.key.rawValue }.map(\.value))
