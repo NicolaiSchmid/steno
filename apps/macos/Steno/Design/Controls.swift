@@ -161,6 +161,12 @@ private struct StenoTextFieldSurface: View {
   @FocusState private var focused: Bool
   @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
+  /// `TextFieldStyle._body` is a nonisolated requirement, so the surface
+  /// must be constructible off the main actor; it only stores the field.
+  nonisolated init(field: TextField<StenoTextFieldStyle._Label>) {
+    self.field = field
+  }
+
   var body: some View {
     field
       .textFieldStyle(.plain)
