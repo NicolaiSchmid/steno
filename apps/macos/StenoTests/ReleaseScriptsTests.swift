@@ -510,6 +510,104 @@ final class ReleaseScriptsTests: XCTestCase {
     XCTAssertTrue(failing.output.contains("did not report '** BUILD SUCCEEDED **'"), failing.output)
   }
 
+  // MARK: bump-homebrew-cask.sh
+
+  /// Against a local bare repository standing in for the tap: `version` and
+  /// `sha256` are rewritten from the DMG on disk and the commit `steno
+  /// <version>` lands on `main`; a second run changes nothing; without a
+  /// token the script says so and exits 0, so the optional step never fails
+  /// a release that is already published.
+  func testBumpHomebrewCaskRewritesTheTapAndSkipsWithoutAToken() throws {
+    let temp = try TestSupport.temporaryDirectory("steno-tap")
+    defer { try? FileManager.default.removeItem(at: temp) }
+    let identity = ["-c", "user.name=Test", "-c", "user.email=test@example.com"]
+
+    func shell(_ executable: String, _ arguments: [String], environment: [String: String] = [:])
+      throws -> (status: Int32, output: String)
+    {
+      let process = Process()
+      process.executableURL = URL(fileURLWithPath: executable)
+      process.arguments = arguments
+      process.currentDirectoryURL = temp
+      process.environment = ["PATH": "/usr/bin:/bin", "HOME": temp.path].merging(environment) {
+        $1
+      }
+      let pipe = Pipe()
+      process.standardOutput = pipe
+      process.standardError = pipe
+      try process.run()
+      let data = pipe.fileHandleForReading.readDataToEndOfFile()
+      process.waitUntilExit()
+      return (process.terminationStatus, String(decoding: data, as: UTF8.self))
+    }
+    func git(_ arguments: [String]) throws -> String {
+      let result = try shell("/usr/bin/git", identity + arguments)
+      XCTAssertEqual(result.status, 0, "git \(arguments.joined(separator: " ")): \(result.output)")
+      return result.output.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    // The tap: a bare repository seeded with a cask at an older version.
+    let bare = temp.appendingPathComponent("tap.git", isDirectory: true)
+    let seed = temp.appendingPathComponent("seed", isDirectory: true)
+    _ = try git(["init", "--quiet", "--bare", "--initial-branch=main", bare.path])
+    _ = try git(["init", "--quiet", "--initial-branch=main", seed.path])
+    let casks = seed.appendingPathComponent("Casks", isDirectory: true)
+    try FileManager.default.createDirectory(at: casks, withIntermediateDirectories: true)
+    let oldSHA = String(repeating: "0", count: 64)
+    try """
+    cask "steno" do
+      version "0.0.1"
+      sha256 "\(oldSHA)"
+
+      url "https://github.com/NicolaiSchmid/steno/releases/download/v#{version}/Steno-#{version}.dmg"
+      app "Steno.app"
+    end
+
+    """.write(to: casks.appendingPathComponent("steno.rb"), atomically: true, encoding: .utf8)
+    _ = try git(["-C", seed.path, "add", "."])
+    _ = try git(["-C", seed.path, "commit", "--quiet", "--message", "seed"])
+    _ = try git(["-C", seed.path, "push", "--quiet", bare.path, "main"])
+
+    // The DMG the workflow would have uploaded a step earlier.
+    let dmg = temp.appendingPathComponent("Steno-0.9.0.dmg")
+    try Data("not really a disk image".utf8).write(to: dmg)
+    let shasum = try shell("/usr/bin/shasum", ["-a", "256", dmg.path])
+    let sha = String(shasum.output.prefix(64))
+    XCTAssertEqual(sha.count, 64)
+
+    let script = Self.scripts.appendingPathComponent("bump-homebrew-cask.sh").path
+    let tapURL = ["HOMEBREW_TAP_URL": "file://" + bare.path]
+
+    let bumped = try shell("/bin/bash", [script, "0.9.0", dmg.path], environment: tapURL)
+    XCTAssertEqual(bumped.status, 0, bumped.output)
+    XCTAssertTrue(bumped.output.contains("bumped to 0.9.0 (\(sha))"), bumped.output)
+    let cask = try git(["-C", bare.path, "show", "main:Casks/steno.rb"])
+    XCTAssertTrue(cask.contains("\n  version \"0.9.0\"\n"), cask)
+    XCTAssertTrue(cask.contains("\n  sha256 \"\(sha)\"\n"), cask)
+    XCTAssertFalse(cask.contains(oldSHA))
+    XCTAssertTrue(cask.contains("app \"Steno.app\""), "the other stanzas are untouched")
+    XCTAssertEqual(try git(["-C", bare.path, "log", "-1", "--format=%s", "main"]), "steno 0.9.0")
+    XCTAssertEqual(
+      try git(["-C", bare.path, "log", "-1", "--format=%an", "main"]), "github-actions[bot]")
+
+    let again = try shell("/bin/bash", [script, "0.9.0", dmg.path], environment: tapURL)
+    XCTAssertEqual(again.status, 0, again.output)
+    XCTAssertTrue(again.output.contains("already at 0.9.0"), again.output)
+    XCTAssertEqual(try git(["-C", bare.path, "rev-list", "--count", "main"]), "2")
+
+    let noToken = try shell("/bin/bash", [script, "0.9.0", dmg.path])
+    XCTAssertEqual(noToken.status, 0, "an absent token never fails the release")
+    XCTAssertTrue(
+      noToken.output.contains("::notice::HOMEBREW_TAP_TOKEN is not set"), noToken.output)
+    XCTAssertEqual(try git(["-C", bare.path, "rev-list", "--count", "main"]), "2")
+
+    let noDMG = try shell(
+      "/bin/bash", [script, "0.9.1", temp.appendingPathComponent("missing.dmg").path],
+      environment: tapURL)
+    XCTAssertEqual(noDMG.status, 1)
+    XCTAssertTrue(noDMG.output.contains("::error::"), noDMG.output)
+  }
+
   func testEveryScriptParsesUnderBash() throws {
     let names = try FileManager.default.contentsOfDirectory(atPath: Self.scripts.path)
       .filter { $0.hasSuffix(".sh") }

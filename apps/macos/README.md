@@ -112,7 +112,12 @@ account `llm-api-key`), the handover identity in the login keychain.
    `SPARKLE_PRIVATE_KEY` on stdin and writes `appcast.xml` for this release alone.
 6. A draft GitHub release is created, the DMG and appcast uploaded, and the release
    published (`--prerelease` when the tag contains a hyphen, so `releases/latest` skips it).
-7. `always()`: the keychain is deleted and the App Store Connect key removed.
+7. `scripts/bump-homebrew-cask.sh <version> <dmg>` rewrites `version` and `sha256` in
+   `Casks/steno.rb` of [NicolaiSchmid/homebrew-tap](https://github.com/NicolaiSchmid/homebrew-tap)
+   and pushes `steno <version>` to its `main`. Pre-releases bump too. Without
+   `HOMEBREW_TAP_TOKEN` the step prints a notice and the release stands; with it, a failed
+   push is a warning (`continue-on-error`), never a failed release.
+8. `always()`: the keychain is deleted and the App Store Connect key removed.
 
 `workflow_dispatch` with `dry_run` builds, signs and verifies without notarising or
 publishing.
@@ -138,6 +143,7 @@ GitHub (`NicolaiSchmid/steno`, Settings > Secrets and variables > Actions):
 | `MACOS_CERTIFICATE_PASSWORD` | its password |
 | `ASC_KEY_ID`, `ASC_ISSUER_ID`, `ASC_PRIVATE_KEY` | the App Store Connect key (contents of the `.p8`) |
 | `SPARKLE_PRIVATE_KEY` | the exported EdDSA private key |
+| `HOMEBREW_TAP_TOKEN` | optional: fine-grained PAT, repository access `homebrew-tap` only, permission Contents read and write; the cask bump is skipped without it |
 
 Variable `MACOS_RUNS_ON`: `"macos-15"` (default) or `["self-hosted","macOS","ARM64"]` once
 the Forge runner is registered. Settings > Actions: keep "Require approval for all outside
@@ -148,3 +154,9 @@ collaborators" on, so a fork never reaches the self-hosted runner.
 Tag `v0.9.0-rc.1` (pre-release), install the DMG on a fresh macOS 15.1+ user, run the manual
 checklist from the plan, tag `v0.9.0`, then `v0.9.1` and confirm Sparkle offers and installs
 it before tagging `v1.0.0`.
+
+### Homebrew
+
+`brew tap nicolaischmid/tap && brew install --cask steno` installs the DMG the cask points at;
+`brew upgrade --cask steno` follows the tap, Sparkle follows `releases/latest`. Plan:
+[`.plans/2026-09-28-homebrew-and-nix.md`](../../.plans/2026-09-28-homebrew-and-nix.md).

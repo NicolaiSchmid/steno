@@ -18,6 +18,17 @@ Steno is a signed and notarized `Steno.app` for macOS 15+ on Apple Silicon. Ever
 release publishes `Steno-<version>.dmg`; drag the app to `/Applications`, or use one of the
 package managers below. Releases so far are pre-releases.
 
+### Homebrew
+
+```sh
+brew tap nicolaischmid/tap && brew install --cask steno
+```
+
+The tap ([NicolaiSchmid/homebrew-tap](https://github.com/NicolaiSchmid/homebrew-tap))
+follows every release, release candidates included, and the app updates itself through
+Sparkle, which offers stable releases only. With nix-darwin: `homebrew.taps = [
+"nicolaischmid/tap" ]; homebrew.casks = [ "nicolaischmid/tap/steno" ];`.
+
 ### Nix
 
 `flake.nix` installs the released `Steno.app` unchanged (no rebuild, no re-signing) on
