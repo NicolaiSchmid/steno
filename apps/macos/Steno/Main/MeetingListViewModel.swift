@@ -186,7 +186,7 @@ final class MeetingListViewModel {
   /// when nothing visible is selected; the last stays.
   func selectNext() {
     let ids = visibleIDs
-    guard let selection, let index = ids.firstIndex(of: selection) else {
+    guard let current = selection, let index = ids.firstIndex(of: current) else {
       selection = ids.first
       return
     }
@@ -197,7 +197,7 @@ final class MeetingListViewModel {
   /// when nothing visible is selected; the first stays.
   func selectPrevious() {
     let ids = visibleIDs
-    guard let selection, let index = ids.firstIndex(of: selection) else {
+    guard let current = selection, let index = ids.firstIndex(of: current) else {
       selection = ids.first
       return
     }
