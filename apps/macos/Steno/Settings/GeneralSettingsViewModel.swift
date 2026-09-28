@@ -111,13 +111,15 @@ final class GeneralSettingsViewModel: SettingsSectionModel {
   nonisolated static func updateStatus(
     outcome: UpdateCheckOutcome, lastCheck: Date?, now: Date
   ) -> String {
+    let formatter = RelativeDateTimeFormatter()
+    formatter.unitsStyle = .full
     switch outcome {
     case .notChecked:
-      return "Not checked yet"
+      // Sparkle persists the date; the outcome starts over per launch.
+      guard let lastCheck else { return "Not checked yet" }
+      return "Checked \(formatter.localizedString(for: lastCheck, relativeTo: now))"
     case .upToDate:
       guard let lastCheck else { return "Up to date" }
-      let formatter = RelativeDateTimeFormatter()
-      formatter.unitsStyle = .full
       return "Up to date, checked \(formatter.localizedString(for: lastCheck, relativeTo: now))"
     case .available(let version):
       return "Update available: \(version)"

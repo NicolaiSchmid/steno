@@ -128,6 +128,9 @@ final class LLMSettingsViewModel: SettingsSectionModel {
   private(set) var isTesting = false
   private(set) var isConfigured = false
   private var stored: Stored?
+  /// Commits queue behind one another: focus loss and disappearing fire
+  /// together, and two overlapping saves would rebuild the pipeline twice.
+  private var commitTask: Task<Void, Never>?
   private let environment: AppEnvironment
 
   init(environment: AppEnvironment) {
@@ -147,6 +150,10 @@ final class LLMSettingsViewModel: SettingsSectionModel {
       stored = Stored(
         baseURL: settings.llmBaseURL, model: settings.llmModel,
         contextTokens: settings.llmContextTokens, apiKey: key)
+      // A fresh install shows the local preset's address without owning it:
+      // opening and leaving the section must not write settings or rebuild
+      // the pipeline. The first real edit saves the address along.
+      if settings.llmBaseURL == nil { stored = draft }
     } catch {
       fail("Settings could not be loaded.", error)
     }
@@ -215,6 +222,16 @@ final class LLMSettingsViewModel: SettingsSectionModel {
   /// probes the endpoint when it is configured. Invalid input stays on
   /// screen as `validationMessage` and saves nothing.
   func commit() async {
+    let previous = commitTask
+    let task = Task { [weak self] in
+      await previous?.value
+      await self?.performCommit()
+    }
+    commitTask = task
+    await task.value
+  }
+
+  private func performCommit() async {
     guard validationMessage == nil else { return }
     guard draft != stored else { return }
     await save()

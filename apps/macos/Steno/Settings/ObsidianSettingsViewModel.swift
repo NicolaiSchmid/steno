@@ -89,7 +89,10 @@ final class ObsidianSettingsViewModel: SettingsSectionModel {
       validationMessage = nil
       return
     }
-    guard draft != stored else { return }
+    guard draft != stored else {
+      validationMessage = nil
+      return
+    }
     await save()
   }
 

@@ -37,6 +37,10 @@ final class UpdateChannelsTests: XCTestCase {
     XCTAssertEqual(
       GeneralSettingsViewModel.updateStatus(outcome: .upToDate, lastCheck: nil, now: now),
       "Up to date")
+    let persisted = GeneralSettingsViewModel.updateStatus(
+      outcome: .notChecked, lastCheck: now.addingTimeInterval(-3_600), now: now)
+    XCTAssertTrue(
+      persisted.hasPrefix("Checked "), "Sparkle's persisted date outlives the launch: \(persisted)")
     let checked = GeneralSettingsViewModel.updateStatus(
       outcome: .upToDate, lastCheck: now.addingTimeInterval(-7_200), now: now)
     XCTAssertTrue(checked.hasPrefix("Up to date, checked "), checked)

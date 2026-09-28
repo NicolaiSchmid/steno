@@ -342,11 +342,9 @@ struct SummariesSettingsView: View {
         }
         TextField("Model", text: $model.model, prompt: Text(model.preset.modelPlaceholder))
           .focused($focus, equals: .model)
-        if model.preset.needsAPIKey || model.preset == .custom {
-          SecureField("API key", text: $model.apiKey, prompt: Text(keyPrompt))
-            .focused($focus, equals: .key)
-          Footnote("Stored in your login keychain and sent only to this service.")
-        }
+        SecureField("API key", text: $model.apiKey, prompt: Text(keyPrompt))
+          .focused($focus, equals: .key)
+        Footnote("Stored in your login keychain and sent only to the server above.")
         if let message = model.validationMessage {
           MessageRow(kind: .warning, text: message)
         }

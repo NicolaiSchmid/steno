@@ -82,6 +82,17 @@ jobs:
           fi
           version="${tag#v}"
           build="$(git rev-list --count HEAD)"
+          # The build number is the commit count, so two tags on one commit
+          # share it and Sparkle (which orders by build number alone) would
+          # never offer the second to installs of the first. Promote a
+          # candidate by tagging a new commit, not the same one.
+          if [ "${GITHUB_REF_TYPE:-}" = "tag" ]; then
+            other="$(git tag --points-at HEAD 'v*' | grep -vx "$tag" || true)"
+            if [ -n "$other" ]; then
+              echo "::error::$tag shares its commit (build $build) with $other; tag a new commit instead"
+              exit 1
+            fi
+          fi
           prerelease=false
           case "$version" in *-*) prerelease=true ;; esac
           {

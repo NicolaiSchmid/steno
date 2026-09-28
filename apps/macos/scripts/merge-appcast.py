@@ -38,6 +38,11 @@ def sparkle_version(item):
         raise SystemExit("::error::sparkle:version %r is not an integer" % text)
 
 
+def short_version(item):
+    element = item.find(SPARKLE + "shortVersionString")
+    return (element.text or "").strip() if element is not None else ""
+
+
 def set_channel(item, channel):
     existing = item.find(SPARKLE + "channel")
     if existing is None:
@@ -83,6 +88,17 @@ def main(argv):
         channel.remove(item)
 
     new_versions = {sparkle_version(item) for item in new_items}
+    for old in existing:
+        for new in new_items:
+            if sparkle_version(old) == sparkle_version(new) and short_version(
+                old
+            ) != short_version(new):
+                raise SystemExit(
+                    "::error::build %d is already published as %s; %s would replace it "
+                    "and installs of the earlier build would never see the later one "
+                    "(tag a new commit instead)"
+                    % (sparkle_version(new), short_version(old), short_version(new))
+                )
     merged = list(new_items) + [
         item for item in existing if sparkle_version(item) not in new_versions
     ]

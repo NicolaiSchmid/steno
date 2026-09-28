@@ -16,7 +16,11 @@ final class UpdaterController: NSObject, UpdaterControlling, SPUUpdaterDelegate 
   nonisolated static let feedOverrideKey = "STENO_FEED_URL"
 
   private nonisolated static let sparkleErrorDomain = "SUSparkleErrorDomain"
+  /// SUNoUpdateError: the check succeeded and found nothing.
   private nonisolated static let noUpdateErrorCode = 1001
+  /// SUInstallation*Error (4000 to 4999): the user cancelled or deferred an
+  /// install that was already found; the check itself did not fail.
+  private nonisolated static let installationErrorCodes = 4000..<5000
 
   @ObservationIgnored private var controller: SPUStandardUpdaterController?
   private(set) var lastOutcome: UpdateCheckOutcome = .notChecked
@@ -70,8 +74,9 @@ final class UpdaterController: NSObject, UpdaterControlling, SPUUpdaterDelegate 
 
   nonisolated func updater(_ updater: SPUUpdater, didAbortWithError error: any Error) {
     let nsError = error as NSError
-    let isNoUpdate =
-      nsError.domain == Self.sparkleErrorDomain && nsError.code == Self.noUpdateErrorCode
+    let isSparkle = nsError.domain == Self.sparkleErrorDomain
+    if isSparkle, Self.installationErrorCodes.contains(nsError.code) { return }
+    let isNoUpdate = isSparkle && nsError.code == Self.noUpdateErrorCode
     let message = nsError.localizedDescription
     MainActor.assumeIsolated { lastOutcome = isNoUpdate ? .upToDate : .failed(message) }
   }

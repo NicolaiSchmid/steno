@@ -27,7 +27,11 @@ test -s "$release_appcast" || { echo "::error::release appcast missing at $relea
 grep -q 'sparkle:edSignature' "$release_appcast" || { echo "::error::release appcast carries no EdDSA signature"; exit 1; }
 
 work="${RUNNER_TEMP:-${TMPDIR:-/tmp}}/steno-appcast-branch-$$"
-cleanup() { git -C "$repo_root" worktree remove --force "$work" 2>/dev/null || rm -rf "$work"; }
+scratch="$branch-publish-$$"
+cleanup() {
+  git -C "$repo_root" worktree remove --force "$work" 2>/dev/null || rm -rf "$work"
+  git -C "$repo_root" branch -D "$scratch" >/dev/null 2>&1 || true
+}
 trap cleanup EXIT
 
 if git -C "$repo_root" fetch --quiet origin "refs/heads/$branch" 2>/dev/null; then
@@ -36,7 +40,10 @@ if git -C "$repo_root" fetch --quiet origin "refs/heads/$branch" 2>/dev/null; th
 else
   echo "==> $branch does not exist yet; creating it"
   git -C "$repo_root" worktree add --quiet --detach "$work" HEAD
-  git -C "$work" checkout --quiet --orphan "$branch"
+  # A throwaway local name: `--orphan` refuses an existing branch, and a
+  # previous run in a persistent workspace may have left one behind. The
+  # push names the remote branch explicitly.
+  git -C "$work" checkout --quiet --orphan "$scratch"
   git -C "$work" rm -rfq . >/dev/null 2>&1 || true
   git -C "$work" clean -fdxq
   printf '# Steno update feed\n\nSparkle reads `appcast.xml` from this branch. It is written by the release workflow; do not edit by hand.\n' > "$work/README.md"

@@ -104,6 +104,10 @@ final class PhonesSettingsViewModel: SettingsSectionModel {
       }
       await refreshAfterPairing()
     }
+    // The window ran out with no phone: close the code so the sheet follows.
+    if !Task.isCancelled, pairing != nil, !pairingIsOpen {
+      await cancelPairing()
+    }
   }
 
   func load() async {

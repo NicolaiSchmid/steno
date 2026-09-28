@@ -125,6 +125,10 @@ account `llm-api-key`), the handover identity in the login keychain.
    `SPARKLE_PRIVATE_KEY` on stdin and writes `appcast.xml` for this release alone.
 6. A draft GitHub release is created, the DMG and appcast uploaded, and the release
    published (`--prerelease` when the tag contains a hyphen).
+   The build number is the commit count, so a tag is refused when another `v*` tag already
+   points at the same commit: promoting `v0.9.0-rc.1` to `v0.9.0` needs a new commit (the
+   version bump), otherwise Sparkle, which orders by build number alone, would never offer
+   the stable build to candidate installs.
 7. `scripts/publish-appcast.sh <tag> <prerelease>` folds the release's item into the rolling
    `appcast.xml` on the `appcast` branch (`scripts/merge-appcast.py`: newest first, one item
    per build number, at most twenty) and pushes. That branch is what `SUFeedURL` reads

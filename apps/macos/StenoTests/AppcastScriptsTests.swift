@@ -177,6 +177,34 @@ final class AppcastScriptsTests: XCTestCase {
     XCTAssertEqual(rerun, feed, "the same release again changes nothing")
   }
 
+  func testMergeRefusesADifferentReleaseWithTheSameBuildNumber() throws {
+    let dir = try TestSupport.temporaryDirectory("steno-appcast")
+    defer { try? FileManager.default.removeItem(at: dir) }
+    let rc = dir.appendingPathComponent("rc.xml")
+    let stable = dir.appendingPathComponent("stable.xml")
+    let rolling = dir.appendingPathComponent("appcast.xml")
+    try Self.appcast(version: 244, short: "0.9.0-rc.1", tag: "v0.9.0-rc.1").write(
+      to: rc, atomically: true, encoding: .utf8)
+    try Self.appcast(version: 244, short: "0.9.0", tag: "v0.9.0").write(
+      to: stable, atomically: true, encoding: .utf8)
+    let merge = Self.scripts.appendingPathComponent("merge-appcast.py").path
+    var result = try run("/usr/bin/env", ["python3", merge, rolling.path, rc.path, rolling.path])
+    XCTAssertEqual(result.status, 0, result.output)
+    let before = try String(contentsOf: rolling, encoding: .utf8)
+
+    // Promoting the candidate on the same commit: Sparkle orders by build
+    // number alone, so the stable item would hide from rc installs.
+    result = try run("/usr/bin/env", ["python3", merge, rolling.path, stable.path, rolling.path])
+    XCTAssertNotEqual(result.status, 0)
+    XCTAssertTrue(result.output.contains("::error::build 244 is already published"), result.output)
+    XCTAssertEqual(
+      try String(contentsOf: rolling, encoding: .utf8), before, "the feed is untouched")
+
+    // The same release again (a re-run of the tag) still replaces cleanly.
+    result = try run("/usr/bin/env", ["python3", merge, rolling.path, rc.path, rolling.path])
+    XCTAssertEqual(result.status, 0, result.output)
+  }
+
   func testMergeRejectsAnItemWithoutABuildNumber() throws {
     let dir = try TestSupport.temporaryDirectory("steno-appcast")
     defer { try? FileManager.default.removeItem(at: dir) }
@@ -336,6 +364,9 @@ final class AppcastScriptsTests: XCTestCase {
     XCTAssertLessThan(publishRelease, rolling, "the feed announces a release that is public")
     XCTAssertLessThan(rolling, homebrew)
     XCTAssertTrue(workflow.contains("permissions:\n  contents: write"), "the push needs contents")
+    XCTAssertTrue(
+      workflow.contains("git tag --points-at HEAD 'v*'"),
+      "two tags on one commit share a build number; the version step refuses the second")
 
     let spec = try String(
       contentsOf: TestSupport.appRoot.appendingPathComponent("project.yml"), encoding: .utf8)
