@@ -155,13 +155,6 @@ final class AppController {
     reviewObservers.removeValue(forKey: meetingID)?.cancel()
   }
 
-  /// Called by the speaker review sheet when it closes. Since the store
-  /// clears reviews on its own this is only an early exit for a sheet
-  /// dismissed with speakers left unconfirmed; it goes with the sheet.
-  func reviewCompleted(meetingID: UUID) {
-    clearReview(meetingID)
-  }
-
   /// The sidebar control's start: the recorder starts as it does from the
   /// menu bar, then the live row is requested so the window selects it.
   /// Starts from the menu bar or the detection prompt call `recorder.start`
