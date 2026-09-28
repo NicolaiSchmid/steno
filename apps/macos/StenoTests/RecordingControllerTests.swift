@@ -1,5 +1,6 @@
 import StenoAudio
 import StenoCore
+import StenoSpeech
 import XCTest
 
 /// The recorder's state machine over the synthetic capture backend and the
@@ -126,6 +127,81 @@ final class RecordingControllerTests: XCTestCase {
     XCTAssertEqual(meetings.first?.title.hasPrefix("Meeting "), true)
     await recorder.stop()
     await environment.pipeline.waitUntilIdle()
+  }
+
+  // MARK: - Warm-up
+
+  /// With both models on disk a recording start loads the engines through
+  /// `AppController`'s hook, so by the time the run prepares them again the
+  /// load is a no-op; the capture lost nothing to it.
+  func testStartWarmsBothEnginesWhenTheirModelsAreInstalled() async throws {
+    let engine = FakeSpeechEngine()
+    let diarizer = FakeDiarizer()
+    let environment = try await TestSupport.environment(
+      seed: false, makeSpeechEngine: { engine }, makeDiarizer: { diarizer })
+    for try await _ in await environment.models.ensure(.parakeetV3) {}
+    for try await _ in await environment.models.ensure(.offlineDiarizer) {}
+    XCTAssertTrue(environment.models.isInstalled(.parakeetV3))
+    XCTAssertTrue(environment.models.isInstalled(.offlineDiarizer))
+    let controller = AppController(environment: environment)
+    let recorder = controller.recorder
+
+    await recorder.start(mode: .call)
+    await TestSupport.waitUntil("both engines warmed during the recording") {
+      let enginePreparations = await engine.preparations.count
+      let diarizerPreparations = await diarizer.preparations.count
+      return enginePreparations == 1 && diarizerPreparations == 1
+    }
+    let transcribedWhileWarm = await engine.transcriptions.count
+    XCTAssertEqual(transcribedWhileWarm, 0, "the warm-up came before any transcription")
+
+    await recorder.stop()
+    await environment.pipeline.waitUntilIdle()
+    let enginePreparations = await engine.preparations.count
+    let diarizerPreparations = await diarizer.preparations.count
+    XCTAssertEqual(enginePreparations, 2, "the warm-up and the run's own prepare")
+    XCTAssertEqual(diarizerPreparations, 2, "the warm-up and the run's own prepare")
+    let transcriptions = await engine.transcriptions.count
+    XCTAssertEqual(transcriptions, 2, "both lanes of the call")
+    let statistics = try XCTUnwrap(recorder.lastStatistics)
+    for lane in [AudioLane.mic, .system] {
+      XCTAssertEqual(statistics.droppedFrames[lane] ?? 0, 0, "\(lane)")
+    }
+    let meeting = try await stoppedMeeting(in: environment)
+    let stored = try await environment.store.meeting(id: meeting.id)
+    XCTAssertEqual(stored?.state, .ready)
+    await controller.shutdown()
+  }
+
+  /// Without the models on disk nothing is prepared during the recording,
+  /// because a `prepare()` may download; the run prepares once after `stop()`.
+  func testStartDoesNotWarmWhenModelsAreAbsent() async throws {
+    let engine = FakeSpeechEngine()
+    let diarizer = FakeDiarizer()
+    let environment = try await TestSupport.environment(
+      seed: false, makeSpeechEngine: { engine }, makeDiarizer: { diarizer })
+    XCTAssertFalse(environment.models.isInstalled(.parakeetV3))
+    XCTAssertFalse(environment.models.isInstalled(.offlineDiarizer))
+    let controller = AppController(environment: environment)
+    let recorder = controller.recorder
+
+    await recorder.start(mode: .call)
+    await TestSupport.settle()
+    let enginePreparationsWhileRecording = await engine.preparations.count
+    let diarizerPreparationsWhileRecording = await diarizer.preparations.count
+    XCTAssertEqual(enginePreparationsWhileRecording, 0)
+    XCTAssertEqual(diarizerPreparationsWhileRecording, 0)
+
+    await recorder.stop()
+    await environment.pipeline.waitUntilIdle()
+    let enginePreparations = await engine.preparations.count
+    let diarizerPreparations = await diarizer.preparations.count
+    XCTAssertEqual(enginePreparations, 1, "only the run prepared; a warm-up would make two")
+    XCTAssertEqual(diarizerPreparations, 1, "only the run prepared; a warm-up would make two")
+    let meeting = try await stoppedMeeting(in: environment)
+    let stored = try await environment.store.meeting(id: meeting.id)
+    XCTAssertEqual(stored?.state, .ready)
+    await controller.shutdown()
   }
 
   func testRecordingStateLabels() {

@@ -33,6 +33,9 @@ public struct FakeSpeechEngine: SpeechEngine, Sendable {
   /// Runs before every `transcribe`; tests advance a `ManualClock` here so a
   /// lane takes a known time.
   public var onTranscribe: (@Sendable () async -> Void)?
+  /// Runs inside every `prepare`, after it is recorded; tests hold it at a
+  /// gate so a warm-up stays in flight while a run arrives.
+  public var onPrepare: (@Sendable () async -> Void)?
   /// Wall-clock time every `transcribe` sleeps on `ContinuousClock` after
   /// `onTranscribe`, so a run stays inside the stage long enough for a UI
   /// test to watch it; nil sleeps not at all. Cancellation ends the sleep
@@ -62,6 +65,7 @@ public struct FakeSpeechEngine: SpeechEngine, Sendable {
 
   public func prepare() async throws {
     await preparations.record(true)
+    await onPrepare?()
   }
 
   public func transcribe(_ audio: AudioBuffer16k, hint: Locale.Language?) async throws
@@ -110,6 +114,7 @@ public struct FakeDiarizer: Diarizer, Sendable {
   /// Runs before every `diarize`; tests use it to observe state mid-pipeline.
   public var onDiarize: (@Sendable () async -> Void)?
   public let diarizations = CallLog<TimeInterval>()
+  public let preparations = CallLog<Bool>()
 
   public init(
     clusterCount: Int = 2, turnSeconds: TimeInterval = 1.5, failure: (any Error & Sendable)? = nil
@@ -126,7 +131,9 @@ public struct FakeDiarizer: Diarizer, Sendable {
     self.result = result
   }
 
-  public func prepare() async throws {}
+  public func prepare() async throws {
+    await preparations.record(true)
+  }
 
   public func diarize(_ audio: AudioBuffer16k) async throws -> DiarizationResult {
     await diarizations.record(audio.duration)
@@ -165,5 +172,28 @@ public struct FakeDiarizer: Diarizer, Sendable {
           clusterConfidence: Float(0.9 - 0.1 * Double(offset)),
           sampleClipRange: clip)
       })
+  }
+}
+
+/// An `AudioDecoder` over any other that records the lane of every `decode`,
+/// so a test can count how often each lane is decoded in a run. `mixdown`
+/// passes through unrecorded.
+public struct RecordingAudioDecoder: AudioDecoder, Sendable {
+  public let inner: any AudioDecoder
+  public let decodes = CallLog<AudioLane>()
+
+  public init(wrapping inner: any AudioDecoder = WAVAudioDecoder()) {
+    self.inner = inner
+  }
+
+  public func decode(_ asset: AudioAsset, lane: AudioLane) async throws -> AudioBuffer16k {
+    await decodes.record(lane)
+    return try await inner.decode(asset, lane: lane)
+  }
+
+  public var mixdownFormat: AudioFormat { inner.mixdownFormat }
+
+  public func mixdown(_ asset: AudioAsset, to url: URL) async throws {
+    try await inner.mixdown(asset, to: url)
   }
 }

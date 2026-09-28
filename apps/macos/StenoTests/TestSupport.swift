@@ -18,12 +18,13 @@ enum TestSupport {
     makeCaptureSession: AppEnvironment.MakeCaptureSession? = nil,
     processActivity: FakeProcessAudioActivity = FakeProcessAudioActivity(),
     makeSpeechEngine: @escaping @Sendable () -> any SpeechEngine = { FakeSpeechEngine() },
+    makeDiarizer: @escaping @Sendable () -> any Diarizer = { FakeDiarizer() },
     calendar: (any CalendarProviding)? = nil
   ) async throws -> AppEnvironment {
     try await AppEnvironment.preview(
       clock: clock, now: { now }, handover: handover, seed: seed,
       makeCaptureSession: makeCaptureSession, processActivity: processActivity,
-      makeSpeechEngine: makeSpeechEngine, calendar: calendar)
+      makeSpeechEngine: makeSpeechEngine, makeDiarizer: makeDiarizer, calendar: calendar)
   }
 
   /// A capture session over the synthetic backend that reports device loss

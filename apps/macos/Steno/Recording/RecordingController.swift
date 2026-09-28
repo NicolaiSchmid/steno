@@ -49,6 +49,10 @@ final class RecordingController {
     }
   }
   private(set) var levels: LaneLevels?
+  /// The capture statistics of the last recording that stopped; tests read
+  /// `droppedFrames` to show a pipeline warm-up during the recording did not
+  /// starve the capture.
+  private(set) var lastStatistics: CaptureStatistics?
   private(set) var lastError: String?
   private(set) var lastWarning: String?
 
@@ -133,6 +137,7 @@ final class RecordingController {
     recording = .stopping
     do {
       let result = try await active.session.stop()
+      lastStatistics = result.statistics
       try await environment.makeLocalIntake().complete(
         meetingID: active.meetingID,
         result: RecordingResult(asset: result.asset, duration: result.statistics.duration))

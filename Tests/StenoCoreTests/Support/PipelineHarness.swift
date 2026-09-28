@@ -10,6 +10,7 @@ struct PipelineHarness {
   let store: MeetingStore
   let settingsStore: SettingsStore
   let events: MeetingEventBus
+  let decoder: any AudioDecoder
   let engine: FakeSpeechEngine
   let diarizer: FakeDiarizer
   let memory: InMemorySpeakerMemory
@@ -26,6 +27,7 @@ struct PipelineHarness {
   static let now = SampleData.updatedAt
 
   init(
+    decoder: any AudioDecoder = WAVAudioDecoder(),
     engine: FakeSpeechEngine = FakeSpeechEngine(),
     diarizer: FakeDiarizer = FakeDiarizer(),
     memory: InMemorySpeakerMemory = InMemorySpeakerMemory(people: SampleData.persons()),
@@ -46,6 +48,7 @@ struct PipelineHarness {
     // person the in-memory fake can suggest must exist as a row.
     for person in SampleData.persons() { try await self.store.save(person) }
     events = MeetingEventBus()
+    self.decoder = decoder
     self.engine = engine
     self.diarizer = diarizer
     self.memory = memory
@@ -58,7 +61,7 @@ struct PipelineHarness {
       store: store, destinations: [destination], now: { Self.now })
     pipeline = ProcessingPipeline(
       dependencies: PipelineDependencies(
-        decoder: WAVAudioDecoder(), speechEngine: engine, diarizer: diarizer, speakerMemory: memory,
+        decoder: decoder, speechEngine: engine, diarizer: diarizer, speakerMemory: memory,
         cleaner: cleaner, summarizer: summarizer, dispatcher: dispatcher, store: store,
         settings: settingsStore, events: events, now: { Self.now }, clock: clock))
   }

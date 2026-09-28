@@ -268,10 +268,12 @@ final class AppEnvironment {
   /// network, no prompts. `handover` stays nil unless a test passes one;
   /// tests that need a failing or device-losing capture pass
   /// `makeCaptureSession`, drive the detector through `processActivity`,
-  /// gate the pipeline through `makeSpeechEngine` (called once per pipeline
-  /// build) and the recording start through `calendar`. Without
-  /// `makeSpeechEngine` the engine is a `FakeSpeechEngine` that honours
-  /// `holdTranscribeArgument`, which also queues the seeded meeting.
+  /// gate or observe the pipeline through `makeSpeechEngine` and
+  /// `makeDiarizer` (each called once per pipeline build) and the recording
+  /// start through `calendar`. Without `makeSpeechEngine` the engine is a
+  /// `FakeSpeechEngine` that honours `holdTranscribeArgument`, which also
+  /// queues the seeded meeting; without `makeDiarizer` the diarizer is a
+  /// `FakeDiarizer`.
   static func preview(
     clock: any Clock<Duration> = ContinuousClock(),
     now: @escaping @Sendable () -> Date = Date.init,
@@ -280,6 +282,7 @@ final class AppEnvironment {
     makeCaptureSession: MakeCaptureSession? = nil,
     processActivity: FakeProcessAudioActivity = FakeProcessAudioActivity(),
     makeSpeechEngine: (@Sendable () -> any SpeechEngine)? = nil,
+    makeDiarizer: (@Sendable () -> any Diarizer)? = nil,
     calendar: (any CalendarProviding)? = nil
   ) async throws -> AppEnvironment {
     let root = FileManager.default.temporaryDirectory
@@ -307,11 +310,12 @@ final class AppEnvironment {
     let memory = CosineSpeakerMemory(store: store)
     let makeSpeechEngine: @Sendable () -> any SpeechEngine =
       makeSpeechEngine ?? { FakeSpeechEngine(holdTranscribe: holdTranscribe) }
+    let makeDiarizer: @Sendable () -> any Diarizer = makeDiarizer ?? { FakeDiarizer() }
     let makeDependencies: MakeDependencies = { _, _ in
       PipelineDependencies(
         decoder: AVFoundationAudioCodec(),
         speechEngine: makeSpeechEngine(),
-        diarizer: FakeDiarizer(),
+        diarizer: makeDiarizer(),
         speakerMemory: memory,
         cleaner: PassthroughCleaner(),
         summarizer: FakeSummarizer(),

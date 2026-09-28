@@ -58,7 +58,9 @@ public struct PipelineDependencies: Sendable {
 /// second `process`, `rerunSummary` or `redeliver` on a meeting that is in
 /// flight throws instead of interleaving writes with the first. Stage
 /// durations feed `MeetingStore.record` when the meeting was alone in flight
-/// for the whole stage, so overlapping runs never pollute the rates.
+/// for the whole stage, so overlapping runs never pollute the rates. Both
+/// engines are prepared through one in-flight task shared by `warmUp()` and
+/// `process`, so a warm-up racing a run loads the models once.
 public actor ProcessingPipeline {
   let dependencies: PipelineDependencies
   private var running: [UUID: Task<Void, Never>] = [:]
@@ -67,6 +69,8 @@ public actor ProcessingPipeline {
   /// not alone for its whole span.
   private var admissions = 0
   private var runs: [UUID: ProcessingRun] = [:]
+  /// The `prepare()` calls in flight, if any; see `prepared()`.
+  private var preparing: Task<Void, any Error>?
 
   public init(dependencies: PipelineDependencies) {
     self.dependencies = dependencies
@@ -140,14 +144,60 @@ public actor ProcessingPipeline {
     running[assetID] = nil
   }
 
+  /// Loads the speech engine and the diarizer now, so a run that starts
+  /// later finds them resident: the app calls this when a recording starts,
+  /// and the cold CoreML compile lands during the meeting instead of in the
+  /// wait after it. The engines' own `prepare()` is idempotent once loaded,
+  /// so `process` still calls it; only the load moves. A failure is thrown
+  /// to the caller and nothing is remembered: the next `prepare()` tries
+  /// again.
+  public func warmUp() async throws {
+    try await prepared()
+  }
+
+  /// Runs both `prepare()` calls once through one task held on the actor
+  /// while it is in flight. The pipeline is the serialization point because
+  /// the engines cannot be: their `loaded()` methods check a cached manager
+  /// and then `await` the load, and an actor is re-entrant across that
+  /// `await`, so two callers arriving inside the gap would both load. Every
+  /// caller awaits the same task; the task is dropped once it has settled,
+  /// so a later run prepares again (a no-op on a loaded engine) and a failed
+  /// load is retried rather than cached. Errors carry `.decode` for the
+  /// engine and `.diarize` for the diarizer, as the stages did.
+  private func prepared() async throws {
+    if let task = preparing {
+      try await task.value
+      return
+    }
+    let dependencies = self.dependencies
+    let task = Task<Void, any Error> {
+      do {
+        try await dependencies.speechEngine.prepare()
+      } catch {
+        throw PipelineFailure.wrapping(error, stage: .decode)
+      }
+      do {
+        try await dependencies.diarizer.prepare()
+      } catch {
+        throw PipelineFailure.wrapping(error, stage: .diarize)
+      }
+    }
+    preparing = task
+    defer { if preparing == task { preparing = nil } }
+    try await task.value
+  }
+
   /// Runs every stage: `queued → processing → ready`, or `failed(reason)`
   /// with whatever was persisted so far (the transcript survives a cleanup
   /// or summarize failure). Once `persist` has marked the meeting `.ready`
   /// nothing downgrades it: a `retention` error is thrown to the caller and
   /// the meeting stays ready and delivered. Both engines are prepared before
-  /// the first event, so a cold model load lands before the run's clock
-  /// starts and never enters a rate. A meeting processed again starts a new
-  /// run whose first event is `.decode` at fraction 0.
+  /// the first event, through the task `warmUp()` shares, so a cold model
+  /// load lands before the run's clock starts and never enters a rate. The
+  /// last transcribed lane's buffer is handed to `diarize` and released
+  /// before `matchSpeakers`, so at most one buffer is alive and the diarized
+  /// lane is not decoded twice. A meeting processed again starts a new run
+  /// whose first event is `.decode` at fraction 0.
   public func process(assetID: UUID) async throws {
     guard let asset = try await store.asset(id: assetID) else {
       throw PipelineFailure(stage: .decode, reason: "audio asset \(assetID) not found")
@@ -159,21 +209,21 @@ public actor ProcessingPipeline {
       try await store.setState(.processing, meetingID: meeting.id, now: now)
       let persisted: AudioAsset
       do {
+        try await prepared()
         let settings = try await attributing(.decode) { try await dependencies.settings.load() }
         let rates = try await attributing(.decode) { try await store.stageRates() }
-        try await attributing(.decode) { try await dependencies.speechEngine.prepare() }
-        try await attributing(.diarize) { try await dependencies.diarizer.prepare() }
         runs[meeting.id] = ProcessingRun(
           estimator: ProcessingEstimator(
             duration: meeting.duration, lanes: asset.lanes,
             speechEngineID: dependencies.speechEngine.id,
             llmModel: ProcessingEstimator.llmModelKey(settings), rates: rates),
           stages: PipelineStage.allCases, stopwatch: Stopwatch(dependencies.clock))
-        let transcription = try await decodeAndTranscribe(asset: asset, meetingID: meeting.id)
         var current = meeting
-        current.language = transcription.language
         current.state = .processing
-        var diarized = try await diarize(asset: asset, meeting: current)
+        let (transcription, diarization) = try await transcribeAndDiarize(
+          asset: asset, meeting: current)
+        current.language = transcription.language
+        var diarized = diarization
         diarized.speakers = try await matchSpeakers(
           diarized.speakers, meetingID: meeting.id, settings: settings)
         let merged = try await merge(
@@ -238,6 +288,19 @@ public actor ProcessingPipeline {
       }
       await deliver(meetingID: meetingID)
     }
+  }
+
+  /// The two stages that share a buffer: `decodeAndTranscribe` hands its
+  /// last lane to `diarize`, and the buffer is local to this call, so it is
+  /// gone before `matchSpeakers` and never outlives `diarize` through
+  /// `merge`.
+  private func transcribeAndDiarize(asset: AudioAsset, meeting: Meeting) async throws -> (
+    Transcription, Diarization
+  ) {
+    let (transcription, lastLane) = try await decodeAndTranscribe(
+      asset: asset, meetingID: meeting.id)
+    let diarization = try await diarize(asset: asset, meeting: meeting, buffer: lastLane)
+    return (transcription, diarization)
   }
 
   // MARK: - Stage plumbing

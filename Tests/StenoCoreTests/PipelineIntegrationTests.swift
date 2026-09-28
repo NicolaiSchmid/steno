@@ -774,6 +774,39 @@ import Testing
       "the held meeting's transcribe overlapped the other run as well")
   }
 
+  /// A warm-up held inside the engine's `prepare()` while a run arrives:
+  /// the run joins the in-flight task instead of preparing again, so each
+  /// engine loads once and the run still lands ready.
+  @Test func warmUpRacingARunLoadsOnce() async throws {
+    let gate = Gate()
+    var engine = FakeSpeechEngine()
+    engine.onPrepare = { await gate.wait() }
+    let harness = try await PipelineHarness(engine: engine)
+    defer { harness.cleanUp() }
+    let (meeting, asset) = try harness.meeting(source: .macInPerson)
+
+    let warm = Task { try await harness.pipeline.warmUp() }
+    await gate.waitUntilBlocked()
+    try await harness.pipeline.enqueue(meeting, asset: asset)
+    // `process` marks the meeting `.processing` and then awaits the shared
+    // task; once the row says so the run is queued behind the warm-up.
+    var iterator = harness.store.observeMeeting(id: meeting.id).makeAsyncIterator()
+    while let next = try await iterator.next(), next?.meeting.state != .processing {}
+    await gate.open()
+
+    try await warm.value
+    await harness.pipeline.waitUntilIdle()
+    #expect(await harness.engine.preparations.count == 1, "one speech engine load")
+    #expect(await harness.diarizer.preparations.count == 1, "one diarizer load")
+    #expect(try await harness.store.meeting(id: meeting.id)?.state == .ready)
+
+    // The task is dropped once settled: the next run prepares again, which
+    // a loaded engine treats as a no-op.
+    try await harness.pipeline.warmUp()
+    #expect(await harness.engine.preparations.count == 2)
+    #expect(await harness.diarizer.preparations.count == 2)
+  }
+
   @Test func resumeUnfinishedStartsAgainAtZero() async throws {
     let harness = try await PipelineHarness()
     defer { harness.cleanUp() }

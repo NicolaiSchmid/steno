@@ -1,12 +1,15 @@
 import Foundation
 import StenoAudio
 import StenoCore
+import StenoSpeech
+import os
 
 /// The running app's object graph over one `AppEnvironment`: the recorder,
 /// the detection controller, the menu bar view model, the processing
 /// progress model, pending speaker reviews, the retention sweep after
-/// processed meetings, the handover listener when phones are paired, and
-/// the first-launch login item registration.
+/// processed meetings, the handover listener when phones are paired, the
+/// first-launch login item registration, and the pipeline warm-up when a
+/// recording starts.
 @MainActor
 @Observable
 final class AppController {
@@ -27,6 +30,8 @@ final class AppController {
 
   static let loginItemRegisteredKey = "steno.loginItemRegistered"
 
+  private static let logger = Logger(subsystem: "uno.schmid.steno.mac", category: "pipeline")
+
   private let defaults: UserDefaults
 
   init(environment: AppEnvironment, defaults: UserDefaults = .standard) {
@@ -38,7 +43,35 @@ final class AppController {
     self.detection = DetectionController(environment: environment)
     detection.startRecording = { [weak self] in await self?.recorder.start(mode: .call) }
     recorder.recordingDidChange = { [weak self] recording in
-      await self?.detection.recordingDidChange(recording)
+      guard let self else { return }
+      if recording { self.warmUpPipeline() }
+      await self.detection.recordingDidChange(recording)
+    }
+  }
+
+  /// Loads the speech engine and the diarizer while the recording runs, so
+  /// the cold model load is over before the meeting ends and never sits in
+  /// the wait the owner watches. In the background: the recording must not
+  /// wait for a CoreML compile. Only when both models are on disk, because a
+  /// `prepare()` may download and nothing downloads during a call; the guard
+  /// reads the engine from the setting, not from the pipeline's engine, so
+  /// the preview's `FakeSpeechEngine` is guarded by the `parakeet-v3` marker
+  /// files like the real one. A failure is logged and swallowed; the run's
+  /// own `prepare()` reports it. A `reloadPipeline()` during the recording
+  /// yields a cold replacement, which is accepted.
+  private func warmUpPipeline() {
+    Task { [environment] in
+      guard let settings = try? await environment.settings.load(),
+        let engine = try? SpeechEngineID(settingsValue: settings.speechEngineID),
+        environment.models.isInstalled(engine.asset),
+        environment.models.isInstalled(.offlineDiarizer)
+      else { return }
+      do {
+        try await environment.pipeline.warmUp()
+      } catch {
+        Self.logger.error(
+          "Pipeline warm-up failed: \(String(describing: error), privacy: .public)")
+      }
     }
   }
 
