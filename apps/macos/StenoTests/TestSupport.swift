@@ -66,11 +66,34 @@ enum TestSupport {
     beforeEach: @MainActor () -> Void = {}
   ) async {
     for step in CaptureSession.restartBackoff {
-      let sleeping = await clock.waitForSleepers(1)
-      XCTAssertTrue(sleeping, "the rebuild sleeps on the injected clock", file: file, line: line)
+      let sleeping = await waitForSleepers(
+        clock, 1, "the rebuild sleeps on the injected clock", file: file, line: line)
+      guard sleeping else { return }
       beforeEach()
       clock.advance(by: step)
     }
+  }
+
+  /// Waits on wall time (10 ms polls, up to `timeout`) until `count` tasks
+  /// sleep on `clock`. `ManualClock.waitForSleepers` only yields, which is
+  /// enough for a main-actor countdown but not for a session whose rebuild
+  /// joins the backend and processing threads before it sleeps.
+  @MainActor
+  @discardableResult
+  static func waitForSleepers(
+    _ clock: ManualClock, _ count: Int, _ description: String, timeout: TimeInterval = 10,
+    file: StaticString = #filePath, line: UInt = #line
+  ) async -> Bool {
+    let deadline = Date().addingTimeInterval(timeout)
+    while clock.pendingSleepers < count {
+      guard Date() < deadline else {
+        XCTFail("timed out waiting for \(description)", file: file, line: line)
+        return false
+      }
+      await Task.yield()
+      try? await Task.sleep(for: .milliseconds(10))
+    }
+    return true
   }
 
   /// Polls `condition` like `waitUntil` and, whenever at least `sleepers`

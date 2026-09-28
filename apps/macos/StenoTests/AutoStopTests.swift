@@ -33,8 +33,9 @@ final class AutoStopTests: XCTestCase {
     _ clock: ManualClock, seconds: Int, file: StaticString = #filePath, line: UInt = #line
   ) async {
     for _ in 0..<seconds {
-      let sleeping = await clock.waitForSleepers(1)
-      XCTAssertTrue(sleeping, "the countdown sleeps on the injected clock", file: file, line: line)
+      let sleeping = await TestSupport.waitForSleepers(
+        clock, 1, "the countdown sleeps on the injected clock", file: file, line: line)
+      guard sleeping else { return }
       clock.advance(by: .seconds(1))
       await TestSupport.settle()
     }
@@ -216,14 +217,12 @@ final class AutoStopTests: XCTestCase {
     await TestSupport.waitUntil("the change was noticed") {
       recorder.lastWarning == "Audio devices changed. Reconnecting…"
     }
-    let restartPending = await clock.waitForSleepers(1)
-    XCTAssertTrue(restartPending, "the first restart failed and the rebuild sleeps")
+    await TestSupport.waitForSleepers(clock, 1, "the first restart failed and the rebuild sleeps")
 
     await recorder.microphoneActivity(.opened(appName: "Zen"))
     await recorder.microphoneActivity(.released)
     XCTAssertEqual(recorder.autoStop?.appName, "Zen")
-    let bothSleeping = await clock.waitForSleepers(2)
-    XCTAssertTrue(bothSleeping, "the rebuild's backoff and the countdown's tick")
+    await TestSupport.waitForSleepers(clock, 2, "the rebuild's backoff and the countdown's tick")
 
     clock.advance(by: CaptureSession.restartBackoff[0])
     await TestSupport.waitDrivingTheClock(clock, sleepers: 2, "the resumed warning") {
