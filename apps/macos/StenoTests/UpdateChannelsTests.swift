@@ -15,6 +15,20 @@ final class UpdateChannelsTests: XCTestCase {
     }
   }
 
+  /// The rule is the hyphen of a semantic-version pre-release suffix and
+  /// nothing else: build metadata, spaces and the hostless "0.0.0"
+  /// fallback stay on the stable lane, and a tag-style "v" prefix does not
+  /// hide the suffix.
+  func testOnlyAHyphenMarksAPreRelease() {
+    for stable in ["", "0.0.0", "0.9.0+42", "0.9.0 rc1", "0.9.0.rc.1"] {
+      XCTAssertTrue(UpdateChannels.allowed(forVersion: stable).isEmpty, "\"\(stable)\"")
+    }
+    for candidate in ["v0.9.0-rc.1", "0.9.0-rc.1+42", "0.9.0-", "1.0.0-alpha"] {
+      XCTAssertEqual(UpdateChannels.allowed(forVersion: candidate), ["beta"], candidate)
+    }
+    XCTAssertEqual(UpdateChannels.preRelease, "beta", "the channel merge-appcast.py writes")
+  }
+
   func testUpdateStatusIsPlainWords() {
     let now = Date(timeIntervalSince1970: 1_790_250_000)
     XCTAssertEqual(

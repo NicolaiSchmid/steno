@@ -10,23 +10,34 @@ final class AppcastScriptsTests: XCTestCase {
   }
 
   private static func appcast(version: Int, short: String, tag: String) -> String {
-    """
-    <?xml version="1.0" standalone="yes"?>
-    <rss xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle" version="2.0">
-        <channel>
-            <title>Steno</title>
-            <item>
-                <title>\(short)</title>
-                <link>https://github.com/NicolaiSchmid/steno/releases</link>
-                <sparkle:version>\(version)</sparkle:version>
-                <sparkle:shortVersionString>\(short)</sparkle:shortVersionString>
-                <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
-                <enclosure url="https://github.com/NicolaiSchmid/steno/releases/download/\(tag)/Steno-\(short).dmg" length="1" type="application/octet-stream" sparkle:edSignature="c2ln"/>
-            </item>
-        </channel>
-    </rss>
+    appcast(items: [(version: version, short: short, tag: tag)])
+  }
 
-    """
+  /// A per-release appcast as `generate_appcast` writes it, with one
+  /// `<item>` per entry.
+  private static func appcast(items: [(version: Int, short: String, tag: String)]) -> String {
+    let body = items.map { item in
+      """
+              <item>
+                  <title>\(item.short)</title>
+                  <link>https://github.com/NicolaiSchmid/steno/releases</link>
+                  <sparkle:version>\(item.version)</sparkle:version>
+                  <sparkle:shortVersionString>\(item.short)</sparkle:shortVersionString>
+                  <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
+                  <enclosure url="https://github.com/NicolaiSchmid/steno/releases/download/\(item.tag)/Steno-\(item.short).dmg" length="1" type="application/octet-stream" sparkle:edSignature="c2ln"/>
+              </item>
+      """
+    }.joined(separator: "\n")
+    return """
+      <?xml version="1.0" standalone="yes"?>
+      <rss xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle" version="2.0">
+          <channel>
+              <title>Steno</title>
+      \(body)
+          </channel>
+      </rss>
+
+      """
   }
 
   @discardableResult
@@ -52,6 +63,12 @@ final class AppcastScriptsTests: XCTestCase {
     let pattern = try! NSRegularExpression(pattern: "<sparkle:version>(\\d+)</sparkle:version>")
     return pattern.matches(in: appcast, range: NSRange(appcast.startIndex..., in: appcast))
       .compactMap { Range($0.range(at: 1), in: appcast).map { String(appcast[$0]) } }
+  }
+
+  /// The text of each `<item>`, in document order.
+  private func items(in appcast: String) -> [String] {
+    appcast.components(separatedBy: "<item>").dropFirst()
+      .map { $0.components(separatedBy: "</item>")[0] }
   }
 
   // MARK: merge-appcast.py
@@ -108,6 +125,58 @@ final class AppcastScriptsTests: XCTestCase {
     XCTAssertEqual(versions(in: feed), ["270", "260"])
   }
 
+  /// A release that carries two items (a re-run of `generate_appcast` over a
+  /// dist folder with two DMGs) adds both; items only the rolling feed knows
+  /// stay; the order is by build number, not by arrival; the channel lands
+  /// on the release's items alone; the namespace declaration survives; and
+  /// the same merge twice is byte-identical, which is what lets
+  /// `publish-appcast.sh` skip an empty commit.
+  func testMergeKeepsRollingItemsAndAddsEveryReleaseItem() throws {
+    let dir = try TestSupport.temporaryDirectory("steno-appcast")
+    defer { try? FileManager.default.removeItem(at: dir) }
+    let rolling = dir.appendingPathComponent("appcast.xml")
+    let release = dir.appendingPathComponent("release.xml")
+    try Self.appcast(items: [
+      (version: 244, short: "0.9.0-rc.1", tag: "v0.9.0-rc.1"),
+      (version: 260, short: "0.9.0", tag: "v0.9.0"),
+    ]).write(to: rolling, atomically: true, encoding: .utf8)
+    try Self.appcast(items: [
+      (version: 250, short: "0.9.0-rc.2", tag: "v0.9.0-rc.2"),
+      (version: 270, short: "0.9.1-rc.1", tag: "v0.9.1-rc.1"),
+    ]).write(to: release, atomically: true, encoding: .utf8)
+    let merge = Self.scripts.appendingPathComponent("merge-appcast.py").path
+    let arguments = [
+      "python3", merge, rolling.path, release.path, rolling.path, "--channel", "beta",
+    ]
+
+    let result = try run("/usr/bin/env", arguments)
+    XCTAssertEqual(result.status, 0, result.output)
+    XCTAssertTrue(result.output.contains("4 item(s), newest build 270"), result.output)
+    let feed = try String(contentsOf: rolling, encoding: .utf8)
+    XCTAssertEqual(versions(in: feed), ["270", "260", "250", "244"])
+    let entries = items(in: feed)
+    XCTAssertEqual(entries.count, 4)
+    for item in entries {
+      let version = versions(in: item).first ?? "?"
+      let tagged = item.contains("<sparkle:channel>beta</sparkle:channel>")
+      XCTAssertEqual(tagged, ["270", "250"].contains(version), "build \(version)")
+      XCTAssertTrue(
+        item.contains("sparkle:edSignature=\"c2ln\""), "build \(version) lost its signature")
+    }
+    XCTAssertEqual(
+      feed.components(
+        separatedBy: "xmlns:sparkle=\"http://www.andymatuschak.org/xml-namespaces/sparkle\""
+      )
+      .count - 1, 1, "the namespace is declared once, on <rss>")
+    XCTAssertTrue(feed.hasPrefix("<?xml"), String(feed.prefix(40)))
+    XCTAssertTrue(feed.hasSuffix("\n"), "ends with a newline so git shows a clean diff")
+
+    let again = try run("/usr/bin/env", arguments)
+    XCTAssertEqual(again.status, 0, again.output)
+    let rerun = try String(contentsOf: rolling, encoding: .utf8)
+    XCTAssertEqual(rerun, feed, "the same release again changes nothing")
+  }
+
   func testMergeRejectsAnItemWithoutABuildNumber() throws {
     let dir = try TestSupport.temporaryDirectory("steno-appcast")
     defer { try? FileManager.default.removeItem(at: dir) }
@@ -125,32 +194,52 @@ final class AppcastScriptsTests: XCTestCase {
 
   // MARK: publish-appcast.sh
 
-  func testPublishCreatesThenUpdatesTheBranchOnOrigin() throws {
-    let dir = try TestSupport.temporaryDirectory("steno-publish")
-    defer { try? FileManager.default.removeItem(at: dir) }
+  private struct Origin {
+    var origin: URL
+    var clone: URL
+    /// A HOME of its own and a fixed author, so no user config leaks in.
+    var git: [String: String]
+  }
+
+  /// A bare origin with `main` pushed from `clone`, as the release job sees
+  /// its checkout.
+  private func seedOrigin(in dir: URL) throws -> Origin {
     let origin = dir.appendingPathComponent("origin.git", isDirectory: true)
     let clone = dir.appendingPathComponent("clone", isDirectory: true)
     let home = dir.appendingPathComponent("home", isDirectory: true)
     try FileManager.default.createDirectory(at: home, withIntermediateDirectories: true)
-    let gitEnvironment = [
+    let git = [
       "HOME": home.path,
       "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@example.com",
       "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@example.com",
       "GIT_CONFIG_NOSYSTEM": "1",
     ]
-    func git(_ arguments: [String], in directory: URL? = nil) throws {
-      let result = try run(
-        "/usr/bin/git", arguments, environment: gitEnvironment, directory: directory)
+    func run(_ arguments: [String], in directory: URL? = nil) throws {
+      let result = try self.run("/usr/bin/git", arguments, environment: git, directory: directory)
       XCTAssertEqual(result.status, 0, "git \(arguments.joined(separator: " ")): \(result.output)")
     }
-    try git(["init", "--quiet", "--bare", origin.path])
-    try git(["clone", "--quiet", origin.path, clone.path])
+    try run(["init", "--quiet", "--bare", origin.path])
+    try run(["clone", "--quiet", origin.path, clone.path])
     try "hello".write(
       to: clone.appendingPathComponent("README.md"), atomically: true, encoding: .utf8)
-    try git(["add", "README.md"], in: clone)
-    try git(["commit", "--quiet", "-m", "init"], in: clone)
-    try git(["push", "--quiet", "origin", "HEAD:refs/heads/main"], in: clone)
+    try run(["add", "README.md"], in: clone)
+    try run(["commit", "--quiet", "-m", "init"], in: clone)
+    try run(["push", "--quiet", "origin", "HEAD:refs/heads/main"], in: clone)
+    return Origin(origin: origin, clone: clone, git: git)
+  }
 
+  private func publishEnvironment(_ seeded: Origin, release: URL, scratch: URL) -> [String: String]
+  {
+    seeded.git.merging([
+      "STENO_REPO_ROOT": seeded.clone.path, "STENO_RELEASE_APPCAST": release.path,
+      "RUNNER_TEMP": scratch.path,
+    ]) { $1 }
+  }
+
+  func testPublishCreatesThenUpdatesTheBranchOnOrigin() throws {
+    let dir = try TestSupport.temporaryDirectory("steno-publish")
+    defer { try? FileManager.default.removeItem(at: dir) }
+    let seeded = try seedOrigin(in: dir)
     let release1 = dir.appendingPathComponent("release1.xml")
     let release2 = dir.appendingPathComponent("release2.xml")
     try Self.appcast(version: 244, short: "0.9.0-rc.1", tag: "v0.9.0-rc.1").write(
@@ -161,38 +250,76 @@ final class AppcastScriptsTests: XCTestCase {
 
     var result = try run(
       "/bin/bash", [publish, "v0.9.0-rc.1", "true"],
-      environment: gitEnvironment.merging([
-        "STENO_REPO_ROOT": clone.path, "STENO_RELEASE_APPCAST": release1.path,
-        "RUNNER_TEMP": dir.path,
-      ]) { $1 })
+      environment: publishEnvironment(seeded, release: release1, scratch: dir))
     XCTAssertEqual(result.status, 0, result.output)
     XCTAssertTrue(result.output.contains("does not exist yet; creating it"), result.output)
 
     result = try run(
       "/bin/bash", [publish, "v0.9.0", "false"],
-      environment: gitEnvironment.merging([
-        "STENO_REPO_ROOT": clone.path, "STENO_RELEASE_APPCAST": release2.path,
-        "RUNNER_TEMP": dir.path,
-      ]) { $1 })
+      environment: publishEnvironment(seeded, release: release2, scratch: dir))
     XCTAssertEqual(result.status, 0, result.output)
     XCTAssertTrue(result.output.contains("exists; updating"), result.output)
 
     let feed = try run(
-      "/usr/bin/git", ["show", "appcast:appcast.xml"], environment: gitEnvironment,
-      directory: origin)
+      "/usr/bin/git", ["show", "appcast:appcast.xml"], environment: seeded.git,
+      directory: seeded.origin)
     XCTAssertEqual(feed.status, 0, feed.output)
     XCTAssertEqual(versions(in: feed.output), ["260", "244"])
     XCTAssertEqual(feed.output.components(separatedBy: "<sparkle:channel>beta").count - 1, 1)
     let tree = try run(
-      "/usr/bin/git", ["ls-tree", "--name-only", "appcast"], environment: gitEnvironment,
-      directory: origin)
+      "/usr/bin/git", ["ls-tree", "--name-only", "appcast"], environment: seeded.git,
+      directory: seeded.origin)
     XCTAssertEqual(
       Set(tree.output.split(separator: "\n").map(String.init)), ["README.md", "appcast.xml"],
       "the orphan branch carries only the feed and a note")
     let worktrees = try run(
-      "/usr/bin/git", ["worktree", "list"], environment: gitEnvironment, directory: clone)
+      "/usr/bin/git", ["worktree", "list"], environment: seeded.git, directory: seeded.clone)
     XCTAssertEqual(
       worktrees.output.split(separator: "\n").count, 1, "the temporary worktree was removed")
+  }
+
+  /// A re-run of the release job for the same tag (a retried workflow, or
+  /// the rehearsal's second pass) finds the feed already holding the item:
+  /// it says so, exits 0, and pushes no commit, so the branch tip and the
+  /// history stay as they were.
+  func testPublishRerunOnTheSameTagPushesNothing() throws {
+    let dir = try TestSupport.temporaryDirectory("steno-publish")
+    defer { try? FileManager.default.removeItem(at: dir) }
+    let seeded = try seedOrigin(in: dir)
+    let release = dir.appendingPathComponent("release.xml")
+    try Self.appcast(version: 244, short: "0.9.0-rc.1", tag: "v0.9.0-rc.1").write(
+      to: release, atomically: true, encoding: .utf8)
+    let publish = Self.scripts.appendingPathComponent("publish-appcast.sh").path
+    let environment = publishEnvironment(seeded, release: release, scratch: dir)
+    func tip() throws -> String {
+      let result = try run(
+        "/usr/bin/git", ["rev-parse", "refs/heads/appcast"], environment: seeded.git,
+        directory: seeded.origin)
+      XCTAssertEqual(result.status, 0, result.output)
+      return result.output.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    var result = try run("/bin/bash", [publish, "v0.9.0-rc.1", "true"], environment: environment)
+    XCTAssertEqual(result.status, 0, result.output)
+    XCTAssertTrue(result.output.contains("published v0.9.0-rc.1 to appcast"), result.output)
+    let first = try tip()
+    XCTAssertEqual(first.count, 40, first)
+
+    result = try run("/bin/bash", [publish, "v0.9.0-rc.1", "true"], environment: environment)
+    XCTAssertEqual(result.status, 0, result.output)
+    XCTAssertTrue(result.output.contains("exists; updating"), result.output)
+    XCTAssertTrue(result.output.contains("appcast unchanged for v0.9.0-rc.1"), result.output)
+    XCTAssertFalse(result.output.contains("published"), result.output)
+    let second = try tip()
+    XCTAssertEqual(second, first, "nothing was pushed")
+    let count = try run(
+      "/usr/bin/git", ["rev-list", "--count", "refs/heads/appcast"], environment: seeded.git,
+      directory: seeded.origin)
+    XCTAssertEqual(count.output.trimmingCharacters(in: .whitespacesAndNewlines), "1")
+    let worktrees = try run(
+      "/usr/bin/git", ["worktree", "list"], environment: seeded.git, directory: seeded.clone)
+    XCTAssertEqual(
+      worktrees.output.split(separator: "\n").count, 1, "the early exit still removes the worktree")
   }
 
   // MARK: release.yml
