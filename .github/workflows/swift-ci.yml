@@ -68,37 +68,44 @@ jobs:
           version="$(swift --version 2>&1 | head -n 1 | tr -c 'A-Za-z0-9.\n' '-')"
           echo "version=$version" >> "$GITHUB_OUTPUT"
 
-      # SwiftPM writes absolute paths into `.build/workspace-state.json`
-      # (binary artifacts such as FluidAudio's NemoTextProcessing.xcframework),
-      # so a `.build` saved by one self-hosted runner does not build on
-      # another: the two runners on Forge share a machine but not a workspace
-      # path, and a run that restored the other runner's cache failed with
-      # "There is no XCFramework found at .../actions-runner-macos-steno-2/...".
-      # Hosted runners get a fresh workspace at the same path every time, so
-      # they share one key.
-      - name: Cache scope
-        id: cache-scope
+      # Where SwiftPM builds. On a self-hosted Forge runner the scratch path
+      # lives outside the workspace, under the runner's own directory in
+      # ~/Library/Caches, so it survives `actions/checkout`'s clean and the
+      # next run starts warm without actions/cache at all. actions/cache was
+      # the bottleneck there: every push misses the exact key and the save at
+      # the end tarred and uploaded ~1.2 GB for 15 to 18 minutes, four to
+      # five times longer than the build and tests themselves. The path is
+      # per runner because SwiftPM writes absolute paths into
+      # `.build/workspace-state.json` (binary artifacts such as FluidAudio's
+      # NemoTextProcessing.xcframework); a `.build` from one runner does not
+      # build on another. Hosted runners keep `.build` in the workspace and
+      # restore it from actions/cache as before.
+      - name: Build location
         run: |
           if [ "$RUNNER_ENVIRONMENT" = "self-hosted" ]; then
-            echo "scope=$RUNNER_NAME" >> "$GITHUB_OUTPUT"
+            scratch="$HOME/Library/Caches/steno-ci/$RUNNER_NAME/swiftpm"
           else
-            echo "scope=hosted" >> "$GITHUB_OUTPUT"
+            scratch="$GITHUB_WORKSPACE/.build"
           fi
+          mkdir -p "$scratch"
+          echo "SWIFT_SCRATCH=$scratch" >> "$GITHUB_ENV"
+          echo "scratch path: $scratch"
 
-      - name: Cache .build
+      - name: Cache .build (hosted runners only)
+        if: runner.environment == 'github-hosted'
         uses: actions/cache@v4
         with:
           path: .build
-          key: swift-build-${{ runner.os }}-${{ steps.cache-scope.outputs.scope }}-${{ steps.swift.outputs.version }}-${{ hashFiles('Package.resolved') }}-${{ hashFiles('Package.swift', 'Sources/**', 'Tests/**') }}
+          key: swift-build-${{ runner.os }}-hosted-${{ steps.swift.outputs.version }}-${{ hashFiles('Package.resolved') }}-${{ hashFiles('Package.swift', 'Sources/**', 'Tests/**') }}
           restore-keys: |
-            swift-build-${{ runner.os }}-${{ steps.cache-scope.outputs.scope }}-${{ steps.swift.outputs.version }}-${{ hashFiles('Package.resolved') }}-
-            swift-build-${{ runner.os }}-${{ steps.cache-scope.outputs.scope }}-${{ steps.swift.outputs.version }}-
+            swift-build-${{ runner.os }}-hosted-${{ steps.swift.outputs.version }}-${{ hashFiles('Package.resolved') }}-
+            swift-build-${{ runner.os }}-hosted-${{ steps.swift.outputs.version }}-
 
       - name: Lint formatting
         run: swift format lint --strict --recursive Sources Tests Package.swift
 
       - name: Build
-        run: swift build --build-tests
+        run: swift build --build-tests --scratch-path "$SWIFT_SCRATCH"
 
       # The reports live outside the cached `.build`, so a run whose test step
       # dies before writing can never summarise an earlier run's XML.
@@ -106,7 +113,7 @@ jobs:
         id: test
         run: |
           rm -rf test-results && mkdir -p test-results
-          swift test --parallel --skip-build --xunit-output test-results/junit.xml
+          swift test --parallel --skip-build --scratch-path "$SWIFT_SCRATCH" --xunit-output test-results/junit.xml
 
       # `--xunit-output` writes XCTest results to junit.xml and Swift Testing
       # results to junit-swift-testing.xml (a `<skipped>` element carries the
@@ -197,11 +204,12 @@ jobs:
     runs-on: ${{ fromJSON(vars.MACOS_RUNS_ON || '"macos-15"') }}
     timeout-minutes: 90
     env:
+      # The DerivedData path is passed per xcodebuild call from $DERIVED_DATA;
+      # the "Build location" step below decides it per runner kind.
       XCODEBUILD_FLAGS: >-
         -project apps/macos/Steno.xcodeproj
         -configuration Debug
         -destination platform=macOS,arch=arm64
-        -derivedDataPath apps/macos/build/DerivedData
         -skipPackagePluginValidation
         -skipMacroValidation
         CODE_SIGN_IDENTITY=-
@@ -225,33 +233,39 @@ jobs:
       - name: Install xcodegen
         run: apps/macos/scripts/install-xcodegen.sh
 
-      # DerivedData holds absolute paths (SourcePackages checkouts, the
-      # build database), so like the package job's `.build` it is scoped per
-      # self-hosted runner: the two Forge runners share a machine but not a
-      # workspace path.
-      - name: Cache scope
-        id: cache-scope
+      # Where xcodebuild keeps DerivedData. Same reasoning as the package
+      # job's "Build location": on a self-hosted Forge runner it lives under
+      # the runner's own ~/Library/Caches directory, survives the checkout
+      # clean, and is never tarred for actions/cache (the save alone took 9
+      # to 18 minutes per run against a 3-minute build). DerivedData holds
+      # absolute paths (SourcePackages checkouts, the build database), so it
+      # is per runner. Hosted runners keep it in the workspace and use
+      # actions/cache.
+      - name: Build location
         run: |
           if [ "$RUNNER_ENVIRONMENT" = "self-hosted" ]; then
-            echo "scope=$RUNNER_NAME" >> "$GITHUB_OUTPUT"
+            derived="$HOME/Library/Caches/steno-ci/$RUNNER_NAME/DerivedData"
           else
-            echo "scope=hosted" >> "$GITHUB_OUTPUT"
+            derived="$GITHUB_WORKSPACE/apps/macos/build/DerivedData"
           fi
+          mkdir -p "$derived"
+          echo "DERIVED_DATA=$derived" >> "$GITHUB_ENV"
+          echo "DerivedData: $derived"
 
-      - name: Cache DerivedData
+      - name: Cache DerivedData (hosted runners only)
+        if: runner.environment == 'github-hosted'
         uses: actions/cache@v4
         with:
           path: |
             apps/macos/build/DerivedData/SourcePackages
             apps/macos/build/DerivedData/Build
-          # The source hash names the source folders, not `apps/macos/**`:
-          # on a self-hosted runner the workspace persists between runs, so
-          # that glob would walk the previous run's DerivedData (hundreds of
-          # thousands of files) and hashFiles times out after 120 s.
-          key: steno-app-${{ runner.os }}-${{ steps.cache-scope.outputs.scope }}-${{ steps.swift.outputs.version }}-${{ hashFiles('apps/macos/project.yml', 'Package.swift') }}-${{ hashFiles('Sources/**', 'apps/macos/Steno/**', 'apps/macos/StenoTests/**', 'apps/macos/StenoUITests/**', 'apps/macos/Config/**') }}
+          # The source hash names the source folders, not `apps/macos/**`, so
+          # it never walks DerivedData (hundreds of thousands of files;
+          # hashFiles times out after 120 s).
+          key: steno-app-${{ runner.os }}-hosted-${{ steps.swift.outputs.version }}-${{ hashFiles('apps/macos/project.yml', 'Package.swift') }}-${{ hashFiles('Sources/**', 'apps/macos/Steno/**', 'apps/macos/StenoTests/**', 'apps/macos/StenoUITests/**', 'apps/macos/Config/**') }}
           restore-keys: |
-            steno-app-${{ runner.os }}-${{ steps.cache-scope.outputs.scope }}-${{ steps.swift.outputs.version }}-${{ hashFiles('apps/macos/project.yml', 'Package.swift') }}-
-            steno-app-${{ runner.os }}-${{ steps.cache-scope.outputs.scope }}-${{ steps.swift.outputs.version }}-
+            steno-app-${{ runner.os }}-hosted-${{ steps.swift.outputs.version }}-${{ hashFiles('apps/macos/project.yml', 'Package.swift') }}-
+            steno-app-${{ runner.os }}-hosted-${{ steps.swift.outputs.version }}-
 
       - name: Generate project
         run: |
@@ -262,7 +276,7 @@ jobs:
       - name: Resolve packages
         run: |
           # shellcheck disable=SC2086
-          xcodebuild -resolvePackageDependencies -scheme Steno $XCODEBUILD_FLAGS
+          xcodebuild -resolvePackageDependencies -scheme Steno $XCODEBUILD_FLAGS -derivedDataPath "$DERIVED_DATA"
 
       # `xcodebuild-quiet.sh` keeps the full log in a file (uploaded below)
       # and shows diagnostics, test lines and the result line only. The app
@@ -276,13 +290,13 @@ jobs:
         run: |
           # shellcheck disable=SC2086
           apps/macos/scripts/xcodebuild-quiet.sh apps/macos/build/build.log 'BUILD SUCCEEDED' -- \
-            build -scheme Steno $XCODEBUILD_FLAGS
+            build -scheme Steno $XCODEBUILD_FLAGS -derivedDataPath "$DERIVED_DATA"
 
       - name: Unit tests
         run: |
           # shellcheck disable=SC2086
           apps/macos/scripts/xcodebuild-quiet.sh apps/macos/build/unit.log 'TEST SUCCEEDED' -- \
-            test -scheme StenoTests $XCODEBUILD_FLAGS \
+            test -scheme StenoTests $XCODEBUILD_FLAGS -derivedDataPath "$DERIVED_DATA" \
             -resultBundlePath apps/macos/build/unit.xcresult
 
       - name: Test summary

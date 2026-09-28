@@ -93,6 +93,17 @@ import Testing
     #expect(options.first { $0.id == "create:Mia Kurz" } != nil)
   }
 
+  @Test func aBlankAttendeeNameAddsNothing() {
+    let blank = Participant(
+      id: SampleData.uuid(36), meetingID: SampleData.meetingID, displayName: "  ", role: .them)
+    let padded = Participant(
+      id: SampleData.uuid(37), meetingID: SampleData.meetingID, displayName: " Mia Kurz ",
+      role: .them)
+    let options = Self.build(participants: [blank, padded])
+    #expect(!options.contains { $0.displayName.isEmpty })
+    #expect(options.contains(Option(kind: .create("Mia Kurz"), tag: .attendee)))
+  }
+
   @Test func anAttendeeWithoutAPersonIDResolvesByName() {
     // A calendar attendee "philipp schroder" is offered as the existing
     // person Philipp Schröder, never as a create row beside them.

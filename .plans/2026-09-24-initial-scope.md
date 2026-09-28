@@ -101,7 +101,9 @@ for Core Audio taps. Rebuilt from scratch, no forks.
 - Editable: speaker assignment and naming, tags, template selection and re-run,
   per-meeting audio "keep" toggle, re-export trigger.
 - Speaker review sheet after processing for unknown speakers (clip, name, pick from
-  known people or calendar attendees).
+  known people or calendar attendees). Amended 2026-09-28: the sheet became inline
+  selects in the meeting header and the transcript, see
+  [`2026-09-28-inline-speaker-assignment.md`](2026-09-28-inline-speaker-assignment.md).
 
 ## iOS companion
 
