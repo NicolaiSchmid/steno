@@ -142,9 +142,15 @@ final class RecordingController {
         startedAt: startedAt)
       meetingID = meeting.id
       await recordingDidChange?(true)
+      // Subscribed before `start`: `notices` carries changes from the moment
+      // of subscription only, and a device that changes in the first
+      // milliseconds of a recording would otherwise go unreported.
+      let states = await session.states
+      let levels = await session.levels
+      let notices = await session.notices
       try await session.start(meetingID: meeting.id)
       var active = Active(session: session, meetingID: meeting.id, mode: mode, observers: [])
-      active.observers = observe(session)
+      active.observers = observe(states: states, levels: levels, notices: notices)
       self.active = active
       recording = .recording(since: startedAt)
     } catch {
@@ -218,10 +224,12 @@ final class RecordingController {
   /// `levels`, and its `notices`: a device change is a warning line while
   /// the recording continues, replaced by the resumed line or, after the
   /// last failed restart, by the failure the states observer reports.
-  private func observe(_ session: CaptureSession) -> [Task<Void, Never>] {
-    let states = Task { [weak self] in
-      let stream = await session.states
-      for await state in stream {
+  private func observe(
+    states: AsyncStream<CaptureState>, levels: AsyncStream<LaneLevels>,
+    notices: AsyncStream<CaptureNotice>
+  ) -> [Task<Void, Never>] {
+    let statesTask = Task { [weak self] in
+      for await state in states {
         guard let self else { return }
         if case .failed(let error, _) = state, case .recording = self.recording {
           self.lastError = "Recording failed: \(error.description)"
@@ -230,16 +238,14 @@ final class RecordingController {
         }
       }
     }
-    let levels = Task { [weak self] in
-      let stream = await session.levels
-      for await levels in stream {
+    let levelsTask = Task { [weak self] in
+      for await levels in levels {
         guard let self else { return }
         self.levels = levels
       }
     }
-    let notices = Task { [weak self] in
-      let stream = await session.notices
-      for await notice in stream {
+    let noticesTask = Task { [weak self] in
+      for await notice in notices {
         guard let self, case .recording = self.recording else { return }
         switch notice {
         case .deviceChanged:
@@ -249,7 +255,7 @@ final class RecordingController {
         }
       }
     }
-    return [states, levels, notices]
+    return [statesTask, levelsTask, noticesTask]
   }
 
   // MARK: - Auto-stop after the call ends
