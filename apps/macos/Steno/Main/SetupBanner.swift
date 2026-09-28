@@ -28,7 +28,7 @@ struct SetupBanner: View {
             HStack(spacing: Theme.Space.sm) {
               if message.offersSummaries {
                 Button(SetupCopy.setUpSummaries) {
-                  controller.openSettings(.llm, with: openSettings)
+                  controller.openSettings(.summaries, with: openSettings)
                 }
                 .buttonStyle(StenoPrimaryButtonStyle())
                 .accessibilityIdentifier("setup-summaries")
@@ -61,7 +61,7 @@ struct SetupBanner: View {
 
   private var chooseVaultButton: some View {
     Button(SetupCopy.chooseVault) {
-      controller.openSettings(.obsidian, with: openSettings)
+      controller.openSettings(.export, with: openSettings)
     }
     .accessibilityIdentifier("choose-vault")
   }

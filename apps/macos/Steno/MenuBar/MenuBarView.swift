@@ -7,6 +7,7 @@ struct MenuBarView: View {
   let controller: AppController
   @Environment(\.openWindow) private var openWindow
   @Environment(\.openSettings) private var openSettings
+  @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
   private var model: MenuBarViewModel { controller.menuBar }
   private var recorder: RecordingController { controller.recorder }
@@ -14,7 +15,8 @@ struct MenuBarView: View {
   /// The same state table the sidebar control and the Record menu render.
   private var presentation: RecordingControlPresentation {
     RecordingControlPresentation.make(
-      state: recorder.recording, denied: recorder.deniedPermissions)
+      state: recorder.recording, denied: recorder.deniedPermissions,
+      autoStop: recorder.autoStop?.presentation)
   }
 
   var body: some View {
@@ -82,6 +84,11 @@ struct MenuBarView: View {
           ProgressView().controlSize(.small)
         }
       }
+      if let autoStop = presentation.autoStop {
+        AutoStopRow(presentation: autoStop, identifier: "keep-recording") {
+          recorder.keepRecording()
+        }
+      }
       if let reason = presentation.disabledReason {
         MessageRow(kind: .warning, text: reason)
       }
@@ -95,23 +102,53 @@ struct MenuBarView: View {
         Button {
           open(meeting: item.meeting.id)
         } label: {
-          VStack(alignment: .leading, spacing: Theme.Space.xs) {
-            HStack {
-              Text(item.meeting.title)
-                .font(.steno(Theme.TextSize.xs, weight: .medium))
-                .foregroundStyle(Color.stenoForeground)
-                .lineLimit(1)
-              Spacer()
-              Text(item.stage?.label ?? "Queued")
-                .font(.steno(Theme.TextSize.xxs))
-                .foregroundStyle(Color.stenoFaint)
-            }
-            ProgressView(value: item.fraction)
-              .progressViewStyle(.linear)
-              .tint(Color.stenoStrong)
-          }
+          queueRow(item)
         }
         .buttonStyle(.plain)
+      }
+    }
+  }
+
+  /// Title, the progress model's title and remaining text, and the bar.
+  /// The remaining text and the bar's value are sampled from
+  /// `ProcessingPresentation` once a second from the entry's `since`, as
+  /// the card samples them, so the row and the card never disagree. Before
+  /// the run's first event (or before the model has seen the meeting) the
+  /// row says "Waiting to process" over an empty bar.
+  private func queueRow(_ item: MenuBarViewModel.QueueItem) -> some View {
+    let entry = controller.progress.entry(for: item.id)
+    return TimelineView(
+      .periodic(from: entry?.since ?? controller.environment.now(), by: Motion.durationCountdown)
+    ) { context in
+      let state: ProcessingPresentation.State? = entry?.progress.map { progress in
+        ProcessingPresentation.state(
+          progress: progress,
+          elapsed: .seconds(max(0, context.date.timeIntervalSince(entry?.since ?? context.date))),
+          reduceMotion: reduceMotion)
+      }
+      VStack(alignment: .leading, spacing: Theme.Space.xs) {
+        HStack(spacing: Theme.Space.sm) {
+          Text(item.meeting.title)
+            .font(.steno(Theme.TextSize.xs, weight: .medium))
+            .foregroundStyle(Color.stenoForeground)
+            .lineLimit(1)
+          Spacer()
+          Text(entry?.title ?? ProcessingProgressModel.Entry.waitingTitle)
+            .font(.steno(Theme.TextSize.xxs))
+            .foregroundStyle(Color.stenoFaint)
+          if let state {
+            Text(state.remainingText)
+              .font(.steno(Theme.TextSize.xxs).monospacedDigit())
+              .foregroundStyle(Color.stenoFaint)
+          }
+        }
+        ProgressView(value: state?.fraction ?? 0)
+          .progressViewStyle(.linear)
+          .tint(Color.stenoStrong)
+          .animation(
+            ProcessingPresentation.tween(reduceMotion: reduceMotion), value: state?.fraction
+          )
+          .accessibilityValue("\(Int(((state?.fraction ?? 0) * 100).rounded())) percent")
       }
     }
   }

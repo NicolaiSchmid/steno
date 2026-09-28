@@ -22,7 +22,7 @@ import Testing
     try roundTrip(
       [
         RecordingEndReason.manual, .callEnded(appName: nil), .callEnded(appName: "Zen"),
-        .deviceLost, .quit,
+        .deviceLost, .quit, .failed,
       ], "[RecordingEndReason]")
     try roundTrip(TitleOrigin.allCases, "[TitleOrigin]")
     try roundTrip(SampleData.summaryDocument(), "SummaryDocument")
@@ -131,6 +131,7 @@ import Testing
       try json(RecordingEndReason.callEnded(appName: nil)) == #""callEnded""#,
       "a nil payload is the bare case name, not a JSON null")
     #expect(try json(RecordingEndReason.deviceLost) == #""deviceLost""#)
+    #expect(try json(RecordingEndReason.failed) == #""failed""#)
     #expect(try json(TitleOrigin.default) == #""default""#)
     #expect(
       try StenoJSON.decode(RecordingEndReason.self, from: Data(#"{"callEnded":null}"#.utf8))
@@ -144,7 +145,7 @@ import Testing
     #expect(RecordingEndReason.callEnded(appName: nil).kind == .callEnded)
     #expect(
       RecordingEndReason.Kind.allCases.map(\.rawValue) == [
-        "manual", "callEnded", "deviceLost", "quit",
+        "manual", "callEnded", "deviceLost", "quit", "failed",
       ]
     )
     #expect(TitleOrigin.allCases.map(\.rawValue) == ["default", "calendar", "summary", "user"])

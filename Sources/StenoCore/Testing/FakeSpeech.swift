@@ -30,6 +30,14 @@ public struct FakeSpeechEngine: SpeechEngine, Sendable {
   public var textPrefix: String
   public var wordTimings: Bool
   public var failure: (any Error & Sendable)?
+  /// Runs before every `transcribe`, after it is recorded; tests advance a
+  /// `ManualClock` here so a lane takes a known time, or sleep so a run
+  /// stays inside the stage. An error thrown here fails the call.
+  public var onTranscribe: (@Sendable () async throws -> Void)?
+  /// Runs inside every `prepare`, after it is recorded; tests hold it at a
+  /// gate so a warm-up stays in flight while a run arrives, or throw to
+  /// make the load fail.
+  public var onPrepare: (@Sendable () async throws -> Void)?
   public let transcriptions = CallLog<TranscribeCall>()
   public let preparations = CallLog<Bool>()
 
@@ -52,12 +60,14 @@ public struct FakeSpeechEngine: SpeechEngine, Sendable {
 
   public func prepare() async throws {
     await preparations.record(true)
+    try await onPrepare?()
   }
 
   public func transcribe(_ audio: AudioBuffer16k, hint: Locale.Language?) async throws
     -> [RawSegment]
   {
     await transcriptions.record(TranscribeCall(duration: audio.duration, hint: hint))
+    try await onTranscribe?()
     if let failure { throw failure }
     return Self.segments(
       duration: audio.duration, segmentSeconds: segmentSeconds, language: language,
@@ -95,9 +105,14 @@ public struct FakeDiarizer: Diarizer, Sendable {
   public var turnSeconds: TimeInterval
   public var result: (@Sendable (AudioBuffer16k) -> DiarizationResult)?
   public var failure: (any Error & Sendable)?
-  /// Runs before every `diarize`; tests use it to observe state mid-pipeline.
-  public var onDiarize: (@Sendable () async -> Void)?
+  /// Runs before every `diarize`, after it is recorded; tests observe state
+  /// mid-pipeline or advance a `ManualClock` here.
+  public var onDiarize: (@Sendable () async throws -> Void)?
+  /// Runs inside every `prepare`, after it is recorded; throw to make the
+  /// load fail.
+  public var onPrepare: (@Sendable () async throws -> Void)?
   public let diarizations = CallLog<TimeInterval>()
+  public let preparations = CallLog<Bool>()
 
   public init(
     clusterCount: Int = 2, turnSeconds: TimeInterval = 1.5, failure: (any Error & Sendable)? = nil
@@ -114,11 +129,14 @@ public struct FakeDiarizer: Diarizer, Sendable {
     self.result = result
   }
 
-  public func prepare() async throws {}
+  public func prepare() async throws {
+    await preparations.record(true)
+    try await onPrepare?()
+  }
 
   public func diarize(_ audio: AudioBuffer16k) async throws -> DiarizationResult {
     await diarizations.record(audio.duration)
-    await onDiarize?()
+    try await onDiarize?()
     if let failure { throw failure }
     if let result { return result(audio) }
     return Self.roundRobin(

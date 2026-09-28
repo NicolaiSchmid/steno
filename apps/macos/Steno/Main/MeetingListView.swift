@@ -5,6 +5,10 @@ import SwiftUI
 /// (context menu and toolbar, behind a confirmation).
 struct MeetingListView: View {
   @Bindable var model: MeetingListViewModel
+  /// Where the pipeline is with each queued or processing meeting, passed
+  /// through from `MainWindow` because the list receives nothing else from
+  /// the controller; the entry's preview line reads it.
+  let progress: ProcessingProgressModel
 
   var body: some View {
     VStack(spacing: 0) {
@@ -12,7 +16,7 @@ struct MeetingListView: View {
       Divider().overlay(Color.stenoBorder)
       List(selection: $model.selection) {
         ForEach(model.meetings) { meeting in
-          MeetingRow(meeting: meeting)
+          MeetingRow(meeting: meeting, statusLine: progress.entry(for: meeting.id)?.title)
             .tag(meeting.id)
             .listRowSeparator(.hidden)
             .contextMenu {
@@ -124,6 +128,10 @@ struct MeetingListView: View {
 
 struct MeetingRow: View {
   let meeting: Meeting
+  /// The row's preview line: the progress model's title while the meeting
+  /// is queued or processing, "Transcribing…", as the card and the header
+  /// chip read it; nil otherwise.
+  var statusLine: String? = nil
 
   var body: some View {
     VStack(alignment: .leading, spacing: Theme.Space.xs) {
@@ -141,6 +149,9 @@ struct MeetingRow: View {
           Text(meeting.duration.clockText)
         }
         Text(meeting.source.label)
+        if let suffix = meeting.endReason?.listSuffix {
+          Text("· \(suffix)")
+        }
         if !meeting.tags.isEmpty {
           Text(meeting.tags.map { "#\($0)" }.joined(separator: " "))
             .lineLimit(1)
@@ -148,6 +159,12 @@ struct MeetingRow: View {
       }
       .font(.steno(Theme.TextSize.xxs))
       .foregroundStyle(Color.stenoFaint)
+      if let statusLine {
+        Text(statusLine)
+          .font(.steno(Theme.TextSize.xs))
+          .foregroundStyle(Color.stenoFaint)
+          .lineLimit(1)
+      }
     }
     .padding(.vertical, Theme.Space.xs)
     .accessibilityIdentifier("meeting-\(meeting.id.uuidString)")

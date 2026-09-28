@@ -177,7 +177,10 @@ The tests that pin the fake output (`Tests/StenoCoreTests/PipelineIntegrationTes
    `AppController` gets `requestedSettingsTab` plus `openSettings(_ tab:)`, which sets the request
    and returns it, mirroring `requestedMeetingID`. Every "Open Settings" button in this plan lands
    on the right tab. The request is set on the controller (unit-tested) and cleared in the view
-   (covered by the UI smoke test that opens Settings on the right tab).
+   (covered by the UI smoke test that opens Settings on the right tab). Shipped over PR #117's
+   Settings redesign: `SettingsSection` and `requestedSettingsSection` replace `SettingsTab` and
+   `requestedSettingsTab`; the LLM and Obsidian tabs are the Summaries and Export sections, and
+   the copy says "Settings > Summaries" and "Settings > Export".
 
 10. The CLI follows the same rule. `Wiring.dependencies` passes nil passes when
     `Wiring.llmComponents` is nil and `steno process` reports the summary as skipped. The fakes

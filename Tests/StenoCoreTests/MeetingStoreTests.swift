@@ -767,4 +767,87 @@ import Testing
       try await store.update(meetingID: SampleData.meetingID, now: SampleData.updatedAt) { _ in }
     }
   }
+
+  @Test func stageRatesRoundTripAndUnknownRowsAreIgnored() async throws {
+    let store = try MeetingStore.inMemory()
+    #expect(try await store.stageRates() == StageRates.seeds, "an empty table is the seeds")
+
+    let first = StageSample(
+      stage: .transcribe, key: "parakeet-v3", secondsPerUnit: 0.02, recordedAt: SampleData.updatedAt
+    )
+    try await store.record(first)
+    var expected = StageRates.seeds
+    expected.set(
+      expected.rate(.transcribe, key: "parakeet-v3").absorbing(0.02), .transcribe,
+      key: "parakeet-v3")
+    #expect(try await store.stageRates() == expected)
+    #expect(
+      try await store.stageRates().rate(.transcribe, key: "parakeet-v3")
+        == StageRate(secondsPerUnit: 0.02, samples: 1), "the first sample replaces the seed")
+
+    let later = SampleData.updatedAt.addingTimeInterval(60)
+    try await store.record(
+      StageSample(stage: .transcribe, key: "parakeet-v3", secondsPerUnit: 0.04, recordedAt: later))
+    let averaged = try await store.stageRates().rate(.transcribe, key: "parakeet-v3")
+    #expect(averaged.samples == 2)
+    #expect(abs(averaged.secondsPerUnit - (0.3 * 0.04 + 0.7 * 0.02)) < 1e-12)
+    // `Row` is not `Sendable` on Apple platforms, so the values leave the
+    // read as plain types.
+    let stored: (samples: Int, updatedAt: Date)? = try await store.writer.read { db in
+      try StageRateRow.fetchOne(db, key: ["stage": "transcribe", "key": "parakeet-v3"])
+        .map { ($0.samples, $0.updatedAt) }
+    }
+    #expect(stored?.samples == 2)
+    #expect(stored?.updatedAt == later)
+    #expect(try await store.writer.read { db in try StageRateRow.fetchCount(db) } == 1)
+
+    // A stage a later version renamed, and a key on a stage that has none:
+    // both stay in the table and out of the rates. A model key on a keyed
+    // stage loads.
+    try await store.writer.write { db in
+      for (stage, key) in [("polish", ""), ("merge", "gpt-4o"), ("cleanup", "gpt-4o")] {
+        try db.execute(
+          sql: """
+            INSERT INTO stageRate (stage, key, samples, secondsPerUnit, updatedAt)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+          arguments: [stage, key, 3, 9.0, SampleData.updatedAt])
+      }
+    }
+    let loaded = try await store.stageRates()
+    #expect(
+      loaded.rate(.merge, key: StageRates.unkeyed)
+        == StageRates.seeds.rate(.merge, key: StageRates.unkeyed))
+    #expect(loaded.entries[StageRates.Key(.merge, "gpt-4o")] == nil)
+    #expect(loaded.rate(.cleanup, key: "gpt-4o") == StageRate(secondsPerUnit: 9, samples: 3))
+    #expect(loaded.entries.count == StageRates.seeds.entries.count + 1)
+  }
+
+  /// A rate that is not a finite non-negative number (a hand-edited or
+  /// corrupted row) stays in the table and out of the rates, so the
+  /// estimator never turns it into a `Duration`.
+  @Test func stageRatesSkipRowsWhoseRateIsNotFiniteOrIsNegative() async throws {
+    let store = try MeetingStore.inMemory()
+    try await store.writer.write { db in
+      for (stage, key, rate) in [
+        ("diarize", "", Double.infinity), ("summarize", "qwen", -Double.infinity),
+        ("merge", "", -1.0), ("cleanup", "qwen", 2.0),
+      ] {
+        try db.execute(
+          sql: """
+            INSERT INTO stageRate (stage, key, samples, secondsPerUnit, updatedAt)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+          arguments: [stage, key, 1, rate, SampleData.updatedAt])
+      }
+    }
+    #expect(try await store.writer.read { db in try StageRateRow.fetchCount(db) } == 4)
+    let loaded = try await store.stageRates()
+    #expect(
+      loaded.rate(.diarize, key: StageRates.unkeyed) == StageRates.seeds.rate(.diarize, key: ""))
+    #expect(loaded.rate(.summarize, key: "qwen") == StageRates.seeds.rate(.summarize, key: ""))
+    #expect(loaded.rate(.merge, key: StageRates.unkeyed) == StageRates.seeds.rate(.merge, key: ""))
+    #expect(loaded.rate(.cleanup, key: "qwen") == StageRate(secondsPerUnit: 2, samples: 1))
+    #expect(loaded.entries.count == StageRates.seeds.entries.count + 1)
+  }
 }

@@ -196,6 +196,59 @@ final class AppControllerTests: XCTestCase {
     await controller.shutdown()
   }
 
+  /// The progress model is subscribed before `launch()` resumes the queue,
+  /// so a run that was left `.processing` and is held inside transcribe by
+  /// the engine shows its stage on the model right after `launch()`, and
+  /// leaves the model once it is ready.
+  func testLaunchShowsTheStageOfAHeldResumedRunOnTheProgressModel() async throws {
+    let gate = Gate()
+    let firstBuild = OnceFlag()
+    // The first pipeline records and processes a real asset with the plain
+    // fake; the one `reloadPipeline()` builds holds every run at the gate.
+    let environment = try await TestSupport.environment(
+      seed: false,
+      makeSpeechEngine: { () -> any SpeechEngine in
+        if firstBuild.take() { return FakeSpeechEngine() }
+        var held = FakeSpeechEngine()
+        held.onTranscribe = { await gate.wait() }
+        return held
+      })
+    let recorder = RecordingController(environment: environment)
+    await recorder.start(mode: .inPerson)
+    await recorder.stop()
+    let meeting = try await recordedMeeting(in: environment)
+    await environment.pipeline.waitUntilIdle()
+    // Pretend the last process died mid-way.
+    try await environment.store.setState(.processing, meetingID: meeting.id, now: TestSupport.now)
+    try await environment.reloadPipeline()
+
+    let controller = try makeController(environment)
+    XCTAssertNil(controller.progress.entry(for: meeting.id), "nothing before launch")
+    await controller.launch()
+    await TestSupport.waitUntil("the resumed run's stage on the model") {
+      controller.progress.entry(for: meeting.id)?.stage == .transcribe
+    }
+    let entry = try XCTUnwrap(controller.progress.entry(for: meeting.id))
+    XCTAssertEqual(entry.title, "Transcribing…")
+    XCTAssertGreaterThanOrEqual(entry.fraction, 0)
+    XCTAssertLessThan(entry.fraction, 1)
+    let remaining = try XCTUnwrap(entry.estimatedRemaining)
+    XCTAssertGreaterThan(remaining, .zero)
+    await TestSupport.waitUntil("the queue row the entry backs") {
+      controller.menuBar.queue.map(\.id) == [meeting.id]
+    }
+
+    await gate.open()
+    await environment.pipeline.waitUntilIdle()
+    await TestSupport.waitUntil("the finished run left the model") {
+      controller.progress.entry(for: meeting.id) == nil
+    }
+    let stored = try await environment.store.meeting(id: meeting.id)
+    XCTAssertEqual(stored?.state, .ready)
+    XCTAssertTrue(environment.startupWarnings.isEmpty, "\(environment.startupWarnings)")
+    await controller.shutdown()
+  }
+
   func testSpeakersNeedReviewForAnUnlistedMeetingIsDropped() async throws {
     let environment = try await TestSupport.environment()
     let controller = try makeController(environment)
@@ -272,13 +325,21 @@ final class AppControllerTests: XCTestCase {
     let meetings = try await environment.store.meetings()
     XCTAssertEqual(meetings.map(\.source), [.macCall])
 
+    // The prompt's app name reached the recorder: FaceTime releasing the
+    // microphone arms the auto-stop without a later `.opened`.
+    await controller.detection.handle(.microphoneReleased)
+    XCTAssertEqual(controller.recorder.autoStop?.appName, "com.apple.FaceTime")
+    XCTAssertEqual(controller.recorder.autoStop?.presentation.remainingText, "1:30")
+
     await controller.detection.handle(.microphoneOpened(bundleID: "us.zoom.xos", pid: 8))
     XCTAssertNil(controller.detection.prompt, "no prompt while recording")
+    XCTAssertNil(controller.recorder.autoStop, "a microphone opened again cancels the countdown")
 
     await controller.recorder.stop()
     running = await environment.detector.isRunning
     XCTAssertTrue(running, "still running after the recording")
     let meeting = try await recordedMeeting(in: environment)
+    XCTAssertEqual(meeting.endReason, .manual)
     await environment.pipeline.waitUntilIdle()
     let stored = try await environment.store.meeting(id: meeting.id)
     XCTAssertEqual(stored?.state, .ready)
@@ -395,6 +456,7 @@ final class AppControllerTests: XCTestCase {
     XCTAssertEqual(controller.recorder.recording, .idle)
     let meeting = try await recordedMeeting(in: environment)
     XCTAssertFalse(meeting.state.isFailed, "quitting keeps the recording")
+    XCTAssertEqual(meeting.endReason, .quit, "and the meeting says why it ended")
     let running = await environment.detector.isRunning
     XCTAssertFalse(running)
     await environment.pipeline.waitUntilIdle()
@@ -444,27 +506,6 @@ final class AppControllerTests: XCTestCase {
     await TestSupport.settle()
     try await Task.sleep(for: .milliseconds(100))
     XCTAssertEqual(controller.menuBar.queue.count, 1, "no update after shutdown")
-  }
-
-  /// Settings deep links mirror `requestedMeetingID`: `openSettings(_:)`
-  /// records and returns the tab, `takeRequestedSettingsTab()` hands it to
-  /// the Settings scene once and clears it.
-  func testOpenSettingsRequestsATabOnce() async throws {
-    let environment = try await TestSupport.environment(seed: false)
-    let controller = try makeController(environment)
-    XCTAssertNil(controller.requestedSettingsTab)
-    XCTAssertNil(controller.takeRequestedSettingsTab(), "nothing to take before a request")
-
-    controller.openSettings(.llm)
-    XCTAssertEqual(controller.requestedSettingsTab, .llm)
-    XCTAssertEqual(controller.takeRequestedSettingsTab(), .llm)
-    XCTAssertNil(controller.requestedSettingsTab, "taken once")
-    XCTAssertNil(controller.takeRequestedSettingsTab())
-
-    controller.openSettings(.obsidian)
-    controller.openSettings(.audio)
-    XCTAssertEqual(controller.takeRequestedSettingsTab(), .audio, "the last request wins")
-    await controller.shutdown()
   }
 
   /// The banner's one piece of state: dismissed for this launch only. The

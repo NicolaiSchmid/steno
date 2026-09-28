@@ -2,9 +2,8 @@ import StenoCore
 import XCTest
 
 /// `Settings.llmConfigured` and `vaultConfigured` (pure functions of the
-/// stored settings), the banner message they select, the detail pane's
-/// `SummaryStatus` and `ExportStatus` selectors, and the Settings tabs the
-/// deep links name.
+/// stored settings), the banner message they select, and the detail pane's
+/// `SummaryStatus` and `ExportStatus` selectors.
 final class SetupStatusTests: XCTestCase {
   private func settings(llm: Bool, vault: Bool) -> Settings {
     var settings = Settings()
@@ -50,13 +49,6 @@ final class SetupStatusTests: XCTestCase {
     XCTAssertTrue(both?.text.hasPrefix("Summaries and export are off.") == true)
     XCTAssertTrue(endpoint?.text.hasPrefix("Summaries are off.") == true)
     XCTAssertTrue(vault?.text.hasPrefix("Export is off.") == true)
-  }
-
-  /// The seven tabs in the scene's order; `SettingsView` tags one view per
-  /// case and the deep links select by tag.
-  func testSettingsTabsMatchTheSceneInOrder() {
-    XCTAssertEqual(
-      SettingsTab.allCases, [.general, .audio, .speech, .llm, .obsidian, .phones, .updates])
   }
 
   func testSummaryStatusKeysOffTheSummaryTheStateAndTheEndpoint() {

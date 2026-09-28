@@ -54,10 +54,12 @@ enum Wiring {
   }
 
   /// `llm` is `llmComponents(settings:)`'s result; nil skips both passes.
+  /// `events` is the bus the pipeline posts progress on; `steno process`
+  /// subscribes to it before it enqueues.
   static func dependencies(
     store: MeetingStore, settings: SettingsStore, engine: SpeechEngineID? = nil,
     modelsDirectory: URL? = nil, dispatcher: (any DeliveryDispatcher)? = nil,
-    llm: LLMPasses? = nil
+    llm: LLMPasses? = nil, events: MeetingEventBus
   ) throws -> PipelineDependencies {
     let models = ModelStore(directory: modelsDirectory)
     let speechEngine: any SpeechEngine =
@@ -76,7 +78,7 @@ enum Wiring {
       dispatcher: dispatcher ?? DeliveryCoordinator(store: store, settings: settings),
       store: store,
       settings: settings,
-      events: MeetingEventBus()
+      events: events
     )
   }
 

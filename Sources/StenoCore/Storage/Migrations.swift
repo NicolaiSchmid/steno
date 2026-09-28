@@ -35,6 +35,7 @@ public enum Migrations {
     Step(identifier: "v1", migrate: v1),
     Step(identifier: "v2", migrate: v2),
     Step(identifier: "v3", migrate: v3),
+    Step(identifier: "v4", migrate: v4),
   ]
 
   /// Every identifier in registration order; tests compare it with what a
@@ -226,6 +227,21 @@ public enum Migrations {
     try db.alter(table: "meeting") { t in
       t.add(column: "endReason", .text)
       t.add(column: "titleOrigin", .text).notNull().defaults(to: "default")
+    }
+  }
+
+  /// The learned per-stage rates behind `progress` estimates
+  /// (`MeetingStore+Timings.swift`): one row per stage and key, the speech
+  /// engine id for transcribe, the LLM model for cleanup and summarize,
+  /// empty for the rest. Measurements, not choices, so not a `setting`.
+  static func v4(_ db: Database) throws {
+    try db.create(table: "stageRate") { t in
+      t.column("stage", .text).notNull()
+      t.column("key", .text).notNull()
+      t.column("samples", .integer).notNull()
+      t.column("secondsPerUnit", .double).notNull()
+      t.column("updatedAt", .datetime).notNull()
+      t.primaryKey(["stage", "key"])
     }
   }
 }

@@ -10,13 +10,13 @@ import Testing
     try Migrations.migrator().migrate(queue)
     try queue.read { (db) throws in
       #expect(try Migrations.migrator().appliedIdentifiers(db) == Set(Migrations.identifiers))
-      #expect(Migrations.identifiers == ["v1", "v2", "v3"])
+      #expect(Migrations.identifiers == ["v1", "v2", "v3", "v4"])
       let tables = try String.fetchAll(
         db, sql: "SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name")
       for expected in [
         "meeting", "participant", "person", "speaker", "transcriptSegment", "meetingTask",
         "decision", "audioAsset", "delivery", "pairedDevice", "handoverReceipt", "setting",
-        "transcriptSegment_ft", "meeting_ft", "speakerNameSuggestion",
+        "transcriptSegment_ft", "meeting_ft", "speakerNameSuggestion", "stageRate",
       ] {
         #expect(tables.contains(expected), "table \(expected)")
       }
@@ -45,7 +45,8 @@ import Testing
   /// A database created before `v2` (a release that shipped `v1` alone)
   /// upgrades in place: the later versions alone are applied, every row
   /// survives, the new cascade holds, the `v3` columns read as "no reason"
-  /// and "default title", and the schema is byte-identical to a fresh
+  /// and "default title", `v4` leaves an empty `stageRate` table, and the
+  /// schema is byte-identical to a fresh
   /// database's.
   @Test func aV1DatabaseUpgradesToTheLatestVersionKeepingItsRows() throws {
     let queue = try DatabaseQueue()
@@ -62,6 +63,7 @@ import Testing
       #expect(try Migrations.migrator().appliedIdentifiers(db) == ["v1"])
       #expect(try !db.tableExists("speakerNameSuggestion"))
       #expect(try !db.columns(in: "meeting").contains { $0.name == "endReason" })
+      #expect(try !db.tableExists("stageRate"))
     }
 
     try Migrations.migrator().migrate(queue)
@@ -80,6 +82,7 @@ import Testing
           == SampleData.speakers())
       #expect(try AudioAssetRow.fetchAll(db).map(\.asset) == [SampleData.audioAsset()])
       #expect(try SpeakerNameSuggestionRow.fetchCount(db) == 0)
+      #expect(try StageRateRow.fetchCount(db) == 0)
       #expect(try Row.fetchAll(db, sql: "PRAGMA foreign_key_check").isEmpty)
       let latest = try #require(Migrations.identifiers.last)
       try Snapshot.assert(SchemaSnapshotTests.dump(db), matches: "snapshots/schema/\(latest).sql")
@@ -118,6 +121,7 @@ import Testing
         try MeetingRow.fetchOne(db, key: SampleData.meetingID)?.meeting == SampleData.meeting())
       let reasons: [RecordingEndReason] = [
         .manual, .callEnded(appName: "Zen"), .callEnded(appName: nil), .deviceLost, .quit,
+        .failed,
       ]
       for (index, reason) in reasons.enumerated() {
         var meeting = SampleData.meeting()

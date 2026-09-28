@@ -84,10 +84,22 @@ protocol CalendarProviding: AnyObject {
   func events(on day: Date) async throws -> [CalendarEvent]
 }
 
+/// What the last update check found, for the General section's status line.
+enum UpdateCheckOutcome: Sendable, Equatable {
+  case notChecked
+  case upToDate
+  case available(String)
+  case failed(String)
+}
+
 @MainActor
 protocol UpdaterControlling: AnyObject {
   var canCheckForUpdates: Bool { get }
   var automaticallyChecksForUpdates: Bool { get set }
+  /// Download and stage updates without asking; the install still waits for
+  /// a relaunch.
+  var automaticallyDownloadsUpdates: Bool { get set }
   var lastUpdateCheckDate: Date? { get }
+  var lastOutcome: UpdateCheckOutcome { get }
   func checkForUpdates()
 }

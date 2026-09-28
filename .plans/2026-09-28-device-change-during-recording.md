@@ -1,6 +1,6 @@
 # Steno: device changes during a recording and an honest auto-stop
 
-Status: accepted, 2026-09-28, revised after the 2026-09-28 reviews; steps 1 to 6 implemented in PR #115, steps 7 to 10 follow in the app PR. Triggered by first-run feedback (second round).
+Status: accepted, 2026-09-28, revised after the 2026-09-28 reviews; steps 1 to 6 implemented in PR #115, steps 7 to 11 in the app PR #125, except the bubble row, which waits for the floating indicator plan. Because the app PR landed before that plan, it created the shared `Countdown` (`apps/macos/Steno/Recording/Countdown.swift`) and `AutoStopPresentation` (in `apps/macos/Steno/Recording/AutoStop.swift`, not `Panels/FloatingContent.swift`) in the shapes that plan specifies, and the detection prompt already runs on the shared `Countdown`; the floating PR consumes them. Triggered by first-run feedback (second round).
 
 Binding context: [`2026-09-24-initial-scope.md`](2026-09-24-initial-scope.md) (Capture (Mac)),
 [`2026-09-25-audio-capture.md`](2026-09-25-audio-capture.md) (the capture design, its
@@ -13,9 +13,10 @@ detection rules). Siblings from the same feedback round:
 [`2026-09-28-start-recording-from-main-window.md`](2026-09-28-start-recording-from-main-window.md)
 (the sidebar control that shows the same countdown). This plan owns the auto-stop behaviour on
 every surface, `Meeting.endReason`, `Meeting.titleOrigin` and migration `v3`; the countdown copy
-string has one owner, `AutoStopPresentation.line` in the floating indicator plan. The auto-stop is
-a new behaviour, approved by the owner on 2026-09-28, and the implementing PR adds one line to the
-scope's Capture (Mac) list and one to the Deferred section of the audio capture plan pointing here.
+string has one owner, `AutoStopPresentation.line` in `apps/macos/Steno/Recording/AutoStop.swift`,
+created by this plan's app PR. The auto-stop is a new behaviour, approved by the owner on
+2026-09-28, and the implementing PR adds one line to the scope's Capture (Mac) list and one to the
+Deferred section of the audio capture plan pointing here.
 Line numbers are as of commit `9cd7cf5` (source identical to `bcf5eef` on `main`).
 
 ## Goal
@@ -204,10 +205,13 @@ labelled with, or the tap delivering zeros.
    `RecordingController`; the detection controller forwards the events through one closure
    wired by `AppController`, the same way the prompt starts a recording today.
 9. **Every recording stores why it ended.** `Meeting.endReason: RecordingEndReason?` with
-   `.manual`, `.callEnded(appName: String?)`, `.deviceLost`, `.quit`, written by
+   `.manual`, `.callEnded(appName: String?)`, `.deviceLost`, `.quit`, `.failed`, written by
    `LocalRecordingIntake.complete` from `RecordingResult.endReason`. Column `endReason` on
    `meeting`, migration `v3`. On the meeting, not the asset: the list and the detail read
-   meetings.
+   meetings. `.failed` was added by the 2026-09-28 review of PR #125 (a writer or Core Audio
+   failure mid-recording that is not a device loss; the session hands back the partial, which
+   was until then stored as `.manual`). The enum is append-only and its case names are stored
+   as text, so no migration.
 9a. **Core also records where the title came from, in the same migration.**
    `Meeting.titleOrigin: TitleOrigin` (`.default`, `.calendar`, `.summary`, `.user`), set by core
    in the three places that write `title` (`LocalRecordingIntake.begin` chooses the default,
@@ -249,11 +253,13 @@ Foreign microphone activity, forwarded by `DetectionController` while `isRecordi
 | Recorder state | Event | Result |
 |---|---|---|
 | `.recording`, mode `.call` | `.microphoneOpened(appName)` | `sawForeignMicrophone = true`, `callAppName = appName`; cancel a pending auto-stop if one is armed |
+| `.starting` | `.microphoneOpened(appName)` | remembered the same way: the detector forwards from the moment the start is announced, and a call joined during the start window arms on its release (`testAMicrophoneOpenedWhileStartingIsRemembered`) |
 | `.recording`, mode `.call`, `sawForeignMicrophone` | `.microphoneReleased` | `autoStop = AutoStop(appName, countdown: Countdown(90 s))` |
 | `.recording`, mode `.call`, not `sawForeignMicrophone` | `.microphoneReleased` | nothing (no call was ever observed) |
-| `.recording`, mode `.inPerson` | any | nothing |
+| `.recording`, mode `.inPerson` | any | nothing observable (an `.opened` is remembered but the mode check at `.microphoneReleased` never arms) |
 | auto-stop armed | `keepRecording()` | `autoStop = nil`; not re-armed until the next `.microphoneOpened` then `.microphoneReleased` |
-| auto-stop armed | `stopNow()` or countdown elapsed | `stop(reason: .callEnded(appName))` |
+| not armed | `keepRecording()` | nothing (a click that lands after the row is gone does not wipe the memory) |
+| auto-stop armed | countdown elapsed | `stop(reason: .callEnded(appName))` |
 | auto-stop armed | user stops from any surface | `stop(reason: .manual)`, `autoStop = nil` (`testManualStopWhileArmedStoresManualAndClearsTheCountdown`) |
 | auto-stop armed | device change notice | countdown unaffected (`testADeviceChangeNoticeLeavesTheCountdownRunning`) |
 | any | `stop()` for any reason | `autoStop = nil`, `sawForeignMicrophone = false`, `callAppName = nil` (`testStopResetsTheForeignMicrophoneMemory`) |
@@ -295,13 +301,15 @@ stay as they are.
 
 - Countdown: `AutoStopPresentation.line`, "<App> closed the microphone. Stopping in m:ss."
   and "Keep recording". When the app name is unknown: "The call app closed the microphone.
-  Stopping in m:ss." The string lives in the floating indicator plan's type; this plan fills it.
+  Stopping in m:ss." The string lives in `AutoStopPresentation.line`
+  (`apps/macos/Steno/Recording/AutoStop.swift`), created by this plan's app PR.
 - Meeting detail, a `MessageRow(kind: .info)` as the end-reason row of the redesign plan's
   header stack (under the meta row, above the retention line), one of: "Ended automatically
   when <App> closed the microphone.", "Ended because an audio device disappeared. The recording
-  up to that point was kept.", "Ended when Steno quit." `.manual` and nil show nothing.
+  up to that point was kept.", "Ended when Steno quit.", "Ended because the recording failed.
+  The recording up to that point was kept." `.manual` and nil show nothing.
 - Meeting list row meta line: append "· ended automatically" for `.callEnded`, "· device lost"
-  for `.deviceLost`; nothing for the others.
+  for `.deviceLost`, "· recording failed" for `.failed`; nothing for the others.
 
 ## Implementation steps
 
@@ -423,8 +431,10 @@ if that has not merged; the sidebar line waits for the start-recording plan.
    if a test pins the statistics output.
 7. **Recorder end reasons and notices** (`apps/macos/Steno/Recording/RecordingController.swift`,
    `apps/macos/Steno/AppController.swift`, `apps/macos/StenoTests/TestSupport.swift`).
-   `stop(reason: RecordingEndReason = .manual)`; the `.failed` observer passes `.deviceLost`;
-   `shutdown()` passes `.quit`; `RecordingResult` gets the reason. A third observer task over
+   `stop(reason: RecordingEndReason = .manual)`; the `.failed` observer passes `.deviceLost` for
+   a device loss and `.failed` for any other capture error, and `stop` stores the reason as
+   given (one owner; it does not re-derive `.deviceLost` from the statistics); `shutdown()`
+   passes `.quit`; `RecordingResult` gets the reason. A third observer task over
    `session.notices` sets `lastWarning` per the spec and clears the stale device-lost warning
    on resume. `TestSupport.deviceLosingCaptureSession` builds `CaptureSession` directly and
    passes `environment.clock` (the `ManualClock`) explicitly; with the default
@@ -436,15 +446,19 @@ if that has not merged; the sidebar line waits for the start-recording plan.
    fourth attempt and `stored.endReason == .deviceLost`; add
    `testADeviceChangeKeepsTheRecordingAndWarns` (state stays `.recording`, `lastWarning` is the
    resumed line, the stored meeting has `endReason == .manual` after a manual stop);
-   `testStopStoresTheManualReason`; `AppControllerTests.testShutdownStopsTheRecordingAndTheDetector`
-   asserts `.quit`.
+   `testStopStoresTheReasonItIsGiven`; `testAChangeInTheFirstMillisecondsStillWarns`
+   (`changeDeviceAfter: 0`, so the notice is emitted the moment `session.start` returns and
+   only a subscription opened before `start` receives it);
+   `AppControllerTests.testShutdownStopsTheRecordingAndTheDetector` asserts `.quit`.
 8. **Auto-stop policy** (new `apps/macos/Steno/Recording/AutoStop.swift`,
    `RecordingController.swift`, `apps/macos/Steno/Detection/DetectionController.swift`,
    `AppController.swift`). `@MainActor struct AutoStop { let appName: String?; let countdown:
-   Countdown; var presentation: AutoStopPresentation }` over the floating indicator plan's
-   shared `Countdown(duration:clock:onElapsed:)` (the same class the detection prompt uses; no
-   second tick loop) and its `AutoStopPresentation` (the `Sendable` value the surfaces render,
-   built from `appName` and `countdown.presentation`). `RecordingController`:
+   Countdown; var presentation: AutoStopPresentation }` over the shared
+   `Countdown(duration:clock:onElapsed:)` (`apps/macos/Steno/Recording/Countdown.swift`, created
+   by this PR in the shape the floating indicator plan specifies; the same class the detection
+   prompt uses; no second tick loop) and `AutoStopPresentation` (the `Sendable` value the
+   surfaces render, built from `appName` and the countdown's text and fraction).
+   `RecordingController`:
    `private(set) var autoStop: AutoStop?`, `private var sawForeignMicrophone = false`,
    `private var callAppName: String?`, `static let autoStopGrace: Duration = .seconds(90)`,
    `func microphoneActivity(_ event: MicrophoneActivity) async` with `enum MicrophoneActivity {
@@ -458,10 +472,12 @@ if that has not merged; the sidebar line waits for the start-recording plan.
    `testMicrophoneReleaseAfterACallArmsAndStopsAfterTheGrace` (advance 90 s, recorder idle,
    `endReason == .callEnded(appName: "Zen")`), `testMicrophoneReopenedCancelsTheCountdown`,
    `testKeepRecordingCancelsUntilTheNextCall`, `testInPersonNeverArms`,
-   `testNoForeignMicrophoneNeverArms`, `testStopNowUsesCallEnded`,
+   `testNoForeignMicrophoneNeverArms`, `testAnUnnamedAppStoresANamelessCallEnded`,
    `testManualStopWhileArmedStoresManualAndClearsTheCountdown`,
+   `testQuitWhileArmedStoresQuitAndWithdrawsTheCountdown`,
    `testADeviceChangeNoticeLeavesTheCountdownRunning` (`changeDeviceAfter` plus
-   `microphoneActivity(.released)`; `remaining` unchanged after the resumed warning),
+   `microphoneActivity(.released)`; the same `Countdown` instance, still running, after the
+   resumed warning), `testAMicrophoneOpenedWhileStartingIsRemembered`,
    `testStopResetsTheForeignMicrophoneMemory` (second recording, `.released` alone does not
    arm), `testAPromptStartedRecordingArmsOnReleaseWithoutAnOpenedEvent`
    (`start(mode: .call, callApp: "Zen")`, then `.released`, expect
@@ -552,3 +568,11 @@ Risks and checks (settled by the steps and the manual list, not by the owner):
 - Whether the grace should be shorter when the recording was started from the prompt and the
   same app that opened the microphone released it, and longer for manual starts. Field use
   first.
+- A manual start after the call app's `.microphoneOpened` already fired (the user joins, then
+  clicks Start in the menu bar) never arms: the recorder saw no `.opened` of its own.
+  `DetectionController` still holds the prompt's `appName` at that moment and could pass it
+  through `start(mode:callApp:)`; not done in the app PR.
+
+Deviations recorded by the 2026-09-28 review of PR #125: `stopNow()` was dropped (no surface in
+either plan calls it; the bubble's and the sidebar's Stop are `stop()`, manual), and
+`testStopNowUsesCallEnded` with it; `RecordingEndReason.failed` was added (decision 9).

@@ -7,6 +7,10 @@ import SwiftUI
 struct TasksTab: View {
   let model: MeetingDetailViewModel
   let controller: AppController
+  /// Where the pipeline is with this meeting while it is queued or
+  /// processing, from `controller.progress.entry(for:)`; nil otherwise. The
+  /// card it drives replaces the pending copy and the spinner.
+  let progress: ProcessingProgressModel.Entry?
 
   var body: some View {
     let tasks = model.export?.tasks ?? []
@@ -15,7 +19,8 @@ struct TasksTab: View {
     } else {
       ScrollView {
         VStack(alignment: .leading, spacing: Theme.Space.sm) {
-          if tasks.isEmpty {
+          ProcessingCardSlot(progress: progress, meeting: model.meeting)
+          if tasks.isEmpty, progress == nil {
             PendingText(
               meeting: model.meeting, none: "No tasks", pending: "Tasks appear after processing")
           }

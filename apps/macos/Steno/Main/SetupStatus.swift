@@ -61,7 +61,7 @@ enum SummaryStatus: Equatable, Sendable {
   /// body, its one action and, for the runnable Summary tab, the footnote.
   struct SkippedRow: Equatable, Sendable {
     enum Action: Equatable, Sendable {
-      /// Opens Settings > LLM.
+      /// Opens Settings > Summaries.
       case setUpSummaries
       /// Calls `rerunSummary()`.
       case runSummary
@@ -132,10 +132,10 @@ enum SetupBannerMessage: Equatable, Sendable {
     }
   }
 
-  /// The "Set up summaries" button (Settings > LLM).
+  /// The "Set up summaries" button (Settings > Summaries).
   var offersSummaries: Bool { self != .vaultMissing }
 
-  /// The "Choose a vault" button (Settings > Obsidian).
+  /// The "Choose a vault" button (Settings > Export).
   var offersVault: Bool { self != .endpointMissing }
 }
 
@@ -164,6 +164,6 @@ enum SetupCopy {
   static let exportNow = "Export now"
   static let notExportedNoVault = "Not exported: no Obsidian vault is configured."
   static let notExportedYet = "Not exported yet."
-  static let rerunHelp = "Set up an LLM endpoint in Settings > LLM first"
-  static let reexportHelp = "Choose an Obsidian vault in Settings > Obsidian first"
+  static let rerunHelp = "Set up an LLM endpoint in Settings > Summaries first"
+  static let reexportHelp = "Choose an Obsidian vault in Settings > Export first"
 }

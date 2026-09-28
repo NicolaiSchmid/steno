@@ -8,13 +8,18 @@ import SwiftUI
 /// Closing a picker re-exports when something changed.
 struct TranscriptTab: View {
   let model: MeetingDetailViewModel
+  /// Where the pipeline is with this meeting while it is queued or
+  /// processing, from `controller.progress.entry(for:)`; nil otherwise. The
+  /// card it drives replaces the pending copy and the spinner.
+  let progress: ProcessingProgressModel.Entry?
   @State private var presentedSpeakerID: UUID?
 
   var body: some View {
     ScrollView {
       LazyVStack(alignment: .leading, spacing: Theme.Space.lg) {
+        ProcessingCardSlot(progress: progress, meeting: model.meeting)
         let turns = TranscriptTurns.group(model.export?.segments ?? [])
-        if turns.isEmpty {
+        if turns.isEmpty, progress == nil {
           PendingText(
             meeting: model.meeting, none: "No transcript",
             pending: "Transcript appears after processing")

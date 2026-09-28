@@ -55,8 +55,8 @@ final class OnboardingViewModel {
     /// Where the fields onboarding leaves out live.
     var footnote: String {
       switch self {
-      case .summaries: "The context window and the rest live in Settings > LLM."
-      case .vault: "People pages, the task tag and the audio copy live in Settings > Obsidian."
+      case .summaries: "The context window and the rest live in Settings > Summaries."
+      case .vault: "People pages, the task tag and the audio copy live in Settings > Export."
       }
     }
   }
