@@ -101,7 +101,7 @@ final class LaunchSmokeTests: XCTestCase {
     // Two lanes at sixty seconds each from the run's start at launch, then
     // the fakes finish in well under a second; the card leaves with the
     // meeting's `.ready` state.
-    XCTAssertTrue(card.waitForNonExistence(withTimeout: 150), "the card outlived the run")
+    XCTAssertTrue(card.waitForNonExistence(timeout: 150), "the card outlived the run")
     XCTAssertTrue(
       app.staticTexts["Executive Summary"].firstMatch.waitForExistence(timeout: 10),
       "the summary did not replace the card")
