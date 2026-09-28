@@ -1,6 +1,7 @@
 # Inline speaker assignment: the review sheet becomes live selects
 
-Status: reviewed, 2026-09-28. Third round of the owner's first-run feedback ("the speaker selection
+Status: reviewed and implemented as a PR stack, 2026-09-28: WP1 #104, WP2 #106, WP3 #109, WP4 #108,
+WP5 #111, WP6 #105, WP7 #113, WP8 #114 (merge order in the execution order note). Third round of the owner's first-run feedback ("the speaker selection
 UI needs major rework. See how Jamie does it: all inline and live-updating selects"). Six reviews
 (simplification, spikes, conflicts, refactoring, tests, elegance) and the execution order that settles
 them live in [`reviews/2026-09-28-inline-speaker-execution-order.md`](reviews/2026-09-28-inline-speaker-execution-order.md);
