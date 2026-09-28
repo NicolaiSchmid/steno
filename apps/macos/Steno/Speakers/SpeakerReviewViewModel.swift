@@ -4,9 +4,9 @@ import StenoCore
 /// The speaker review sheet: every speaker whose assignment is `.unknown`
 /// or `.suggested`, with its clip, cosine candidates from `SpeakerMemory`
 /// and the calendar participants as name suggestions. Naming and assigning
-/// go through `MeetingStore.confirm(speakerID:person:memory:)` (the one
-/// operation that enrols and deletes the clip); `finish()` re-exports once,
-/// and only when something changed.
+/// go through `MeetingStore.confirm(speakerID:person:)` (the one operation
+/// that confirms and recomputes the voice); `finish()` re-exports once, and
+/// only when something changed.
 @MainActor
 @Observable
 final class SpeakerReviewViewModel {
@@ -188,12 +188,11 @@ final class SpeakerReviewViewModel {
     await confirm(id, person: match.person)
   }
 
-  /// Only a speaker the sheet still shows can be confirmed: a second
-  /// confirmation of the same speaker would enrol the embedding twice.
+  /// Only a speaker the sheet still shows can be confirmed.
   private func confirm(_ id: UUID, person: Person) async {
     guard cards.contains(where: { $0.id == id }) else { return }
     do {
-      try await store.confirm(speakerID: id, person: person, memory: memory)
+      try await store.confirm(speakerID: id, person: person)
       didChange = true
       await reload()
     } catch {
