@@ -6,7 +6,7 @@ import Foundation
 /// control, the Record menu and the menu bar item all render from this, so
 /// the state table lives in one place and one test.
 struct RecordingControlPresentation: Equatable, Sendable {
-  enum Role: Equatable, Sendable {
+  enum Role {
     /// Starts a recording.
     case primary
     /// Stops the recording.
@@ -24,8 +24,7 @@ struct RecordingControlPresentation: Equatable, Sendable {
   var disabledReason: String?
 
   /// Only required kinds in `denied` count; an optional kind never disables.
-  nonisolated static func make(state: RecordingState, denied: [PermissionKind])
-    -> RecordingControlPresentation
+  static func make(state: RecordingState, denied: [PermissionKind]) -> RecordingControlPresentation
   {
     let denied = denied.filter(\.isRequired)
     switch state {

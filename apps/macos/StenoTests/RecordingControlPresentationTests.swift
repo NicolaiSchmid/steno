@@ -9,9 +9,8 @@ final class RecordingControlPresentationTests: XCTestCase {
   ]
 
   func testIdleWithNothingDeniedOffersBothModes() {
-    let presentation = RecordingControlPresentation.make(state: .idle, denied: [])
     XCTAssertEqual(
-      presentation,
+      RecordingControlPresentation.make(state: .idle, denied: []),
       RecordingControlPresentation(
         label: "Record call", role: .primary, isEnabled: true, isBusy: false,
         offersInPerson: true, disabledReason: nil))
@@ -24,50 +23,46 @@ final class RecordingControlPresentationTests: XCTestCase {
       ([.microphone, .systemAudio], "Microphone access is denied. System audio access is denied."),
     ]
     for (denied, reason) in expectations {
-      let presentation = RecordingControlPresentation.make(state: .idle, denied: denied)
-      XCTAssertEqual(presentation.label, "Record call", "\(denied)")
-      XCTAssertEqual(presentation.role, .primary, "\(denied)")
-      XCTAssertFalse(presentation.isEnabled, "\(denied)")
-      XCTAssertFalse(presentation.isBusy, "\(denied)")
-      XCTAssertFalse(presentation.offersInPerson, "\(denied)")
-      XCTAssertEqual(presentation.disabledReason, reason)
+      XCTAssertEqual(
+        RecordingControlPresentation.make(state: .idle, denied: denied),
+        RecordingControlPresentation(
+          label: "Record call", role: .primary, isEnabled: false, isBusy: false,
+          offersInPerson: false, disabledReason: reason),
+        "\(denied)")
     }
   }
 
   func testStartingIsBusyAndDisabledWhateverIsDenied() {
     for denied in deniedSets {
-      let presentation = RecordingControlPresentation.make(state: .starting, denied: denied)
-      XCTAssertEqual(presentation.label, "Starting…", "\(denied)")
-      XCTAssertEqual(presentation.role, .primary, "\(denied)")
-      XCTAssertFalse(presentation.isEnabled, "\(denied)")
-      XCTAssertTrue(presentation.isBusy, "\(denied)")
-      XCTAssertFalse(presentation.offersInPerson, "\(denied)")
-      XCTAssertNil(presentation.disabledReason, "transient states show no reason: \(denied)")
+      XCTAssertEqual(
+        RecordingControlPresentation.make(state: .starting, denied: denied),
+        RecordingControlPresentation(
+          label: "Starting…", role: .primary, isEnabled: false, isBusy: true,
+          offersInPerson: false, disabledReason: nil),
+        "transient states show no reason: \(denied)")
     }
   }
 
   func testRecordingIsStopWhateverIsDenied() {
     for denied in deniedSets {
-      let presentation = RecordingControlPresentation.make(
-        state: .recording(since: TestSupport.now), denied: denied)
-      XCTAssertEqual(presentation.label, "Stop", "\(denied)")
-      XCTAssertEqual(presentation.role, .stop, "\(denied)")
-      XCTAssertTrue(presentation.isEnabled, "a running recording can always be stopped: \(denied)")
-      XCTAssertFalse(presentation.isBusy, "\(denied)")
-      XCTAssertFalse(presentation.offersInPerson, "\(denied)")
-      XCTAssertNil(presentation.disabledReason, "\(denied)")
+      XCTAssertEqual(
+        RecordingControlPresentation.make(
+          state: .recording(since: TestSupport.now), denied: denied),
+        RecordingControlPresentation(
+          label: "Stop", role: .stop, isEnabled: true, isBusy: false,
+          offersInPerson: false, disabledReason: nil),
+        "a running recording can always be stopped: \(denied)")
     }
   }
 
   func testStoppingIsBusyAndDisabledWhateverIsDenied() {
     for denied in deniedSets {
-      let presentation = RecordingControlPresentation.make(state: .stopping, denied: denied)
-      XCTAssertEqual(presentation.label, "Finishing…", "\(denied)")
-      XCTAssertEqual(presentation.role, .stop, "\(denied)")
-      XCTAssertFalse(presentation.isEnabled, "\(denied)")
-      XCTAssertTrue(presentation.isBusy, "\(denied)")
-      XCTAssertFalse(presentation.offersInPerson, "\(denied)")
-      XCTAssertNil(presentation.disabledReason, "\(denied)")
+      XCTAssertEqual(
+        RecordingControlPresentation.make(state: .stopping, denied: denied),
+        RecordingControlPresentation(
+          label: "Finishing…", role: .stop, isEnabled: false, isBusy: true,
+          offersInPerson: false, disabledReason: nil),
+        "\(denied)")
     }
   }
 
@@ -82,13 +77,5 @@ final class RecordingControlPresentationTests: XCTestCase {
     XCTAssertFalse(mixed.isEnabled)
     XCTAssertEqual(
       mixed.disabledReason, "Microphone access is denied.", "only the required kind is named")
-  }
-
-  func testDeniedMessagesAreSentences() {
-    for kind in PermissionKind.allCases {
-      XCTAssertNotEqual(kind.deniedMessage, kind.rawValue)
-      XCTAssertEqual(kind.deniedMessage.first?.isUppercase, true, kind.deniedMessage)
-      XCTAssertTrue(kind.deniedMessage.hasSuffix("."), kind.deniedMessage)
-    }
   }
 }

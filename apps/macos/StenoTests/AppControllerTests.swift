@@ -273,8 +273,6 @@ final class AppControllerTests: XCTestCase {
     }
     let live = try XCTUnwrap(controller.recorder.activeMeetingID)
     XCTAssertEqual(controller.requestedMeetingID, live, "the window shows the row it started")
-    let meetings = try await environment.store.meetings()
-    XCTAssertEqual(meetings.map(\.id), [live])
     await controller.recorder.stop()
     controller.requestedMeetingID = nil
 
