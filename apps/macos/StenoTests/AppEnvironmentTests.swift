@@ -18,6 +18,42 @@ final class AppEnvironmentTests: XCTestCase {
     XCTAssertNil(environment.handover)
   }
 
+  /// The `-steno-rich-seed` set: the fixture stays newest, every filter row
+  /// has a count, the meetings span three days, and the processing meeting
+  /// has a master on disk so the pipeline resumes it instead of failing it.
+  func testRichSeedSpansThreeDaysAndEveryState() async throws {
+    let environment = try await TestSupport.environment(seedSet: .rich)
+    let meetings = try await environment.store.meetings().sorted { $0.startedAt > $1.startedAt }
+    XCTAssertEqual(meetings.count, 5)
+    XCTAssertEqual(meetings.first?.id, SampleData.meetingID, "the fixture stays newest")
+
+    func count(_ filter: MeetingListViewModel.StateFilter) -> Int {
+      meetings.filter { filter.matches($0) }.count
+    }
+    XCTAssertEqual(count(.all), 5)
+    XCTAssertEqual(count(.processing), 1)
+    XCTAssertEqual(count(.ready), 3)
+    XCTAssertEqual(count(.failed), 1)
+    XCTAssertEqual(
+      Set(meetings.map(\.titleOrigin)), [.default, .calendar, .summary],
+      "every origin the display title distinguishes, except a user rename")
+
+    var utc = Calendar(identifier: .gregorian)
+    utc.timeZone = TimeZone(identifier: "UTC")!
+    let groups = MeetingListViewModel.DayGroup.group(meetings, calendar: utc)
+    XCTAssertEqual(groups.count, 3)
+    XCTAssertEqual(groups.map(\.meetings.count), [1, 2, 2])
+    XCTAssertEqual(groups.first?.meetings.first?.id, SampleData.meetingID)
+
+    let processing = try XCTUnwrap(meetings.first { $0.state == .processing })
+    let assetOptional = try await environment.store.asset(meetingID: processing.id)
+    let asset = try XCTUnwrap(assetOptional)
+    XCTAssertEqual(asset.meetingID, processing.id)
+    XCTAssertTrue(FileManager.default.fileExists(atPath: asset.url.path), asset.url.path)
+    let ready = meetings.filter { $0.state == .ready && $0.id != SampleData.meetingID }
+    XCTAssertEqual(ready.map { $0.summary?.sections.first?.bullets.count }, [2, 2])
+  }
+
   func testReloadPipelineReplacesTheInstance() async throws {
     let environment = try await TestSupport.environment()
     let before = environment.pipeline

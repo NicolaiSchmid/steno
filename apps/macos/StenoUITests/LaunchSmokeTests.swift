@@ -12,6 +12,14 @@ import XCTest
 /// to other plans.
 @MainActor
 final class LaunchSmokeTests: XCTestCase {
+  /// SampleData's `meetingID`, `uuid(1)`.
+  private static let fixtureID = "00000000-0000-0000-0000-000000000001"
+
+  /// The fixture meeting's list entry, a button carrying `meeting-<uuid>`.
+  private func fixtureEntry(in app: XCUIApplication) -> XCUIElement {
+    app.buttons["meeting-\(Self.fixtureID)"].firstMatch
+  }
+
   /// Launches with `arguments`, waits for the window and selects the
   /// fixture meeting.
   private func launchAndSelectTheFixtureMeeting(_ arguments: [String]) -> XCUIApplication {
@@ -23,10 +31,98 @@ final class LaunchSmokeTests: XCTestCase {
     let window = app.windows.firstMatch
     XCTAssertTrue(window.waitForExistence(timeout: 10), "no window appeared")
 
-    let meeting = app.staticTexts["Produktstrategie 90/10"].firstMatch
-    XCTAssertTrue(meeting.waitForExistence(timeout: 10), "the fixture meeting is not listed")
-    if meeting.isHittable { meeting.click() }
+    let entry = fixtureEntry(in: app)
+    XCTAssertTrue(entry.waitForExistence(timeout: 10), "the fixture meeting is not listed")
+    XCTAssertTrue(
+      entry.label.contains("Produktstrategie 90/10")
+        || app.staticTexts["Produktstrategie 90/10"].firstMatch.exists,
+      "the entry does not carry the fixture title: \(entry.label)")
+    if entry.isHittable { entry.click() }
     return app
+  }
+
+  /// The nav column and the list column of the redesign: the record control
+  /// sits above the filter rows, Failed hides the ready fixture and All
+  /// shows it again, search is a field in the column that ⌘F focuses and
+  /// "Clear filters" empties, and the toolbar carries neither the old delete
+  /// button nor a sidebar toggle.
+  func testNavigationColumnFiltersTheListAndTheToolbarIsEmpty() throws {
+    let app = launchAndSelectTheFixtureMeeting(["-steno-ui-testing"])
+
+    let record = app.buttons["sidebar-record"].firstMatch
+    let failed = app.buttons["nav-failed"].firstMatch
+    XCTAssertTrue(record.waitForExistence(timeout: 10), "the record control is missing")
+    XCTAssertTrue(failed.waitForExistence(timeout: 10), "the Failed row is missing")
+    XCTAssertLessThanOrEqual(
+      record.frame.maxY, failed.frame.minY, "the record control sits above the nav rows")
+    let all = app.buttons["nav-all"].firstMatch
+    XCTAssertTrue(all.isSelected, "All is the selected filter at launch")
+
+    failed.click()
+    XCTAssertTrue(
+      fixtureEntry(in: app).waitForNonExistence(timeout: 5), "Failed still lists the ready fixture")
+    let empty = app.descendants(matching: .any)["empty-meetings"].firstMatch
+    XCTAssertTrue(empty.waitForExistence(timeout: 5), "no empty state for the empty filter")
+    XCTAssertTrue(failed.isSelected)
+    all.click()
+    XCTAssertTrue(fixtureEntry(in: app).waitForExistence(timeout: 5), "All did not show it again")
+
+    let search = app.textFields["search-meetings"].firstMatch
+    XCTAssertTrue(search.exists, "the search field is missing from the list column")
+    XCTAssertFalse(app.buttons["delete-meeting"].firstMatch.exists, "the trash can is gone")
+    let toggles = app.toolbars.buttons.matching(
+      NSPredicate(format: "label CONTAINS[c] %@", "sidebar"))
+    XCTAssertEqual(toggles.count, 0, "no sidebar toggle in the toolbar")
+
+    let screenshot = XCTAttachment(screenshot: XCUIScreen.main.screenshot())
+    screenshot.name = "main-light-selected"
+    screenshot.lifetime = .keepAlways
+    add(screenshot)
+
+    // ⌘F focuses the field; a query nothing matches empties the list and
+    // offers "Clear filters".
+    app.typeKey("f", modifierFlags: .command)
+    app.typeText("zzzznothing")
+    XCTAssertTrue(
+      waitUntil(timeout: 5) { (search.value as? String) == "zzzznothing" },
+      "⌘F did not focus the search field; its value is \(String(describing: search.value))")
+    let clear = app.buttons["clear-filters"].firstMatch
+    XCTAssertTrue(clear.waitForExistence(timeout: 10), "the no-match empty state is missing")
+    XCTAssertFalse(fixtureEntry(in: app).exists)
+    clear.click()
+    XCTAssertTrue(fixtureEntry(in: app).waitForExistence(timeout: 5), "Clear filters did not reset")
+  }
+
+  /// The date-grouped cards under the rich seed: the clicked entry exposes
+  /// the `isSelected` trait, the fixture day's card header names the
+  /// weekday, and the arrow keys move the selection through the entries.
+  func testArrowKeysMoveTheSelectionThroughTheCards() throws {
+    let app = launchAndSelectTheFixtureMeeting(["-steno-ui-testing", "-steno-rich-seed"])
+    let fixture = fixtureEntry(in: app)
+    XCTAssertTrue(
+      waitUntil(timeout: 5) { fixture.isSelected }, "the clicked entry is not marked selected")
+
+    let entries = app.buttons.matching(
+      NSPredicate(format: "identifier MATCHES %@", "meeting-[0-9A-F-]{36}"))
+    XCTAssertTrue(
+      waitUntil(timeout: 10) { entries.count == 5 }, "expected five entries, got \(entries.count)")
+    // 2026-09-24, the fixture's day, is a Thursday in every zone the runner
+    // could sit in.
+    let weekday = app.staticTexts.allElementsBoundByIndex.contains { text in
+      text.label.contains("Thursday") || ((text.value as? String)?.contains("Thursday") ?? false)
+    }
+    XCTAssertTrue(weekday, "no card header names the fixture's weekday")
+
+    app.typeKey(.downArrow, modifierFlags: [])
+    XCTAssertTrue(
+      waitUntil(timeout: 5) { !fixture.isSelected }, "the down arrow left the fixture selected")
+    let selected = entries.allElementsBoundByIndex.filter(\.isSelected)
+    XCTAssertEqual(selected.count, 1, "exactly one entry is selected")
+    XCTAssertNotEqual(selected.first?.identifier, fixture.identifier)
+
+    app.typeKey(.upArrow, modifierFlags: [])
+    XCTAssertTrue(
+      waitUntil(timeout: 5) { fixture.isSelected }, "the up arrow did not return to the fixture")
   }
 
   func testMainWindowOpens() throws {

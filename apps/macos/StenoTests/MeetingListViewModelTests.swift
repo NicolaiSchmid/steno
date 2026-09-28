@@ -78,6 +78,103 @@ final class MeetingListViewModelTests: XCTestCase {
     XCTAssertEqual(people.count, 2, "people stay")
   }
 
+  /// Cards are cut at midnight in the model's calendar (UTC here, so the
+  /// boundary is where the test puts it), the counts read every meeting
+  /// regardless of the tag and query, and the arrow keys walk the visible
+  /// entries across the day boundary and stop at the ends.
+  func testGroupsByDayCountsAndWalksTheSelectionAcrossDays() async throws {
+    let environment = try await TestSupport.environment()
+    var utc = Calendar(identifier: .gregorian)
+    utc.timeZone = TimeZone(identifier: "UTC")!
+    // The fixture starts 2026-09-24 09:00 UTC.
+    var late = SampleData.meeting()
+    late.id = UUID()
+    late.title = "Late the same day"
+    late.startedAt = SampleData.startedAt.addingTimeInterval(14.5 * 3_600)  // 23:30 UTC
+    var eve = SampleData.meeting(state: .processing)
+    eve.id = UUID()
+    eve.title = "Just before midnight"
+    // 23:50 UTC the evening before.
+    eve.startedAt = SampleData.startedAt.addingTimeInterval(-(9 * 3_600 + 10 * 60))
+    var old = SampleData.meeting(state: .failed(reason: "boom"))
+    old.id = UUID()
+    old.title = "Two days ago"
+    old.tags = ["ops"]
+    old.startedAt = SampleData.startedAt.addingTimeInterval(-2 * 86_400)
+    for meeting in [late, eve, old] { try await environment.store.save(meeting) }
+
+    let model = MeetingListViewModel(store: environment.store, clock: ManualClock(), calendar: utc)
+    let observing = Task { await model.observe() }
+    defer { observing.cancel() }
+    await TestSupport.waitUntil("four meetings") { model.meetings.count == 4 }
+
+    XCTAssertEqual(model.dayGroups.count, 3)
+    XCTAssertEqual(model.dayGroups[0].meetings.map(\.id), [late.id, SampleData.meetingID])
+    XCTAssertEqual(model.dayGroups[1].meetings.map(\.id), [eve.id])
+    XCTAssertEqual(model.dayGroups[2].meetings.map(\.id), [old.id])
+    XCTAssertEqual(model.dayGroups[0].day, utc.startOfDay(for: SampleData.startedAt))
+    XCTAssertEqual(model.dayGroups[1].day, model.dayGroups[0].day.addingTimeInterval(-86_400))
+
+    XCTAssertEqual(model.count(for: .all), 4)
+    XCTAssertEqual(model.count(for: .processing), 1)
+    XCTAssertEqual(model.count(for: .ready), 2)
+    XCTAssertEqual(model.count(for: .failed), 1)
+    model.tagFilter = "ops"
+    XCTAssertEqual(model.count(for: .ready), 2, "counts ignore the tag filter")
+    XCTAssertEqual(model.title, "#ops")
+    model.tagFilter = nil
+    XCTAssertEqual(model.title, "Meetings")
+
+    XCTAssertNil(model.selection)
+    model.selectNext()
+    XCTAssertEqual(model.selection, late.id, "nothing selected: the first entry")
+    model.selectNext()
+    XCTAssertEqual(model.selection, SampleData.meetingID)
+    model.selectNext()
+    XCTAssertEqual(model.selection, eve.id, "next crosses the day boundary")
+    model.selectNext()
+    XCTAssertEqual(model.selection, old.id)
+    model.selectNext()
+    XCTAssertEqual(model.selection, old.id, "the last entry stays")
+    model.selectPrevious()
+    XCTAssertEqual(model.selection, eve.id)
+    model.selectPrevious()
+    XCTAssertEqual(model.selection, SampleData.meetingID, "previous crosses the day boundary")
+    model.selectPrevious()
+    model.selectPrevious()
+    XCTAssertEqual(model.selection, late.id, "the first entry stays")
+
+    // A selection the filter hides: the next arrow lands on the first visible entry.
+    model.stateFilter = .failed
+    XCTAssertEqual(model.title, "Failed")
+    XCTAssertEqual(model.selection, late.id, "the filter never drops the selection")
+    model.selectNext()
+    XCTAssertEqual(model.selection, old.id)
+    XCTAssertTrue(model.isFiltering)
+    model.clearFilters()
+    XCTAssertFalse(model.isFiltering)
+    XCTAssertEqual(model.meetings.count, 4)
+  }
+
+  /// The entry's preview: the first summary bullet as "lead: text", else
+  /// the state's line; the failed reason is cut at its first line.
+  func testPreviewLineReadsTheSummaryOrTheState() {
+    XCTAssertEqual(
+      SampleData.meeting().previewLine,
+      "Fokus: Speaker 1 schlägt vor, 90 Prozent auf den Kern zu setzen.")
+    var noSummary = SampleData.meeting()
+    noSummary.summary = nil
+    XCTAssertEqual(noSummary.previewLine, "No summary")
+    XCTAssertEqual(SampleData.meeting(state: .processing).previewLine, "Processing")
+    XCTAssertEqual(SampleData.meeting(state: .queued).previewLine, "Waiting to process")
+    XCTAssertEqual(SampleData.meeting(state: .recording).previewLine, "Recording")
+    XCTAssertEqual(
+      SampleData.meeting(state: .failed(reason: "The LLM endpoint did not answer.\nRetry later."))
+        .previewLine,
+      "The LLM endpoint did not answer.")
+    XCTAssertEqual(SampleData.meeting(state: .failed(reason: " \n")).previewLine, "Failed")
+  }
+
   func testSearchDebouncesOnTheClockAndUsesFTS() async throws {
     let environment = try await TestSupport.environment()
     let clock = ManualClock()

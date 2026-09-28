@@ -1,9 +1,11 @@
 import Foundation
 import StenoCore
 
-/// The sidebar: every meeting from `observeMeetings()`, filtered by state,
-/// tag and an FTS query over `MeetingStore.search`. The selection survives
-/// list updates as long as the meeting exists.
+/// The list column: every meeting from `observeMeetings()`, filtered by
+/// state, tag and an FTS query over `MeetingStore.search`, grouped by
+/// calendar day for the cards. The selection survives list updates as long
+/// as the meeting exists; `selectNext()` and `selectPrevious()` walk the
+/// groups for the arrow keys.
 @MainActor
 @Observable
 final class MeetingListViewModel {
@@ -36,8 +38,34 @@ final class MeetingListViewModel {
     }
   }
 
+  /// One card: the meetings that started on `day` (the day's start in the
+  /// model's calendar), newest first.
+  struct DayGroup: Identifiable, Equatable, Sendable {
+    let day: Date
+    let meetings: [Meeting]
+
+    var id: Date { day }
+
+    /// Buckets `meetings` (already newest first) by the start of their day
+    /// in `calendar`, keeping the order, so the groups run newest first too.
+    static func group(_ meetings: [Meeting], calendar: Calendar) -> [DayGroup] {
+      var groups: [DayGroup] = []
+      for meeting in meetings {
+        let day = calendar.startOfDay(for: meeting.startedAt)
+        if let last = groups.indices.last, groups[last].day == day {
+          groups[last] = DayGroup(day: day, meetings: groups[last].meetings + [meeting])
+        } else {
+          groups.append(DayGroup(day: day, meetings: [meeting]))
+        }
+      }
+      return groups
+    }
+  }
+
   private(set) var all: [Meeting] = []
   private(set) var meetings: [Meeting] = []
+  /// `meetings` grouped by day, rebuilt with them.
+  private(set) var dayGroups: [DayGroup] = []
   private(set) var searchHits: Set<UUID>?
   private(set) var error: String?
   var query = "" {
@@ -53,12 +81,15 @@ final class MeetingListViewModel {
 
   private let store: MeetingStore
   private let clock: any Clock<Duration>
+  /// Day boundaries for the cards; the viewer's calendar and time zone.
+  let calendar: Calendar
   private var searchTask: Task<Void, Never>?
   static let searchDebounce: Duration = .milliseconds(200)
 
-  init(store: MeetingStore, clock: any Clock<Duration>) {
+  init(store: MeetingStore, clock: any Clock<Duration>, calendar: Calendar = .current) {
     self.store = store
     self.clock = clock
+    self.calendar = calendar
   }
 
   /// Follows `observeMeetings()` until cancelled (the window's `.task`).
@@ -77,11 +108,44 @@ final class MeetingListViewModel {
     Array(Set(all.flatMap(\.tags))).sorted()
   }
 
+  /// How many of every meeting a filter row would show, before the tag
+  /// filter and the query; the nav column's counts.
+  func count(for filter: StateFilter) -> Int {
+    all.filter { filter.matches($0) }.count
+  }
+
+  /// The list column's heading: the tag, else the state filter, else
+  /// "Meetings".
+  var title: String {
+    if let tagFilter { return "#\(tagFilter)" }
+    return stateFilter == .all ? "Meetings" : stateFilter.title
+  }
+
+  /// Whether the empty list is empty because of the query or the filters,
+  /// as opposed to an empty store.
+  var isFiltering: Bool {
+    stateFilter != .all || tagFilter != nil || !query.trimmingCharacters(in: .whitespaces).isEmpty
+  }
+
+  /// The "Clear filters" action of the no-match empty state.
+  func clearFilters() {
+    query = ""
+    stateFilter = .all
+    tagFilter = nil
+  }
+
+  /// The selected meeting, when it is still stored.
+  var selectedMeeting: Meeting? {
+    guard let selection else { return nil }
+    return all.first { $0.id == selection }
+  }
+
   private func apply() {
     var filtered = all.filter { stateFilter.matches($0) }
     if let tagFilter { filtered = filtered.filter { $0.tags.contains(tagFilter) } }
     if let searchHits { filtered = filtered.filter { searchHits.contains($0.id) } }
     meetings = filtered
+    dayGroups = DayGroup.group(filtered, calendar: calendar)
     if let selection, !all.contains(where: { $0.id == selection }) {
       self.selection = nil
     }
@@ -108,6 +172,36 @@ final class MeetingListViewModel {
       self.searchHits = Set((hits ?? []).map(\.meetingID))
       self.apply()
     }
+  }
+
+  // MARK: - Keyboard selection
+
+  /// The visible entries in reading order: the groups newest first, the
+  /// meetings inside each newest first.
+  private var visibleIDs: [UUID] {
+    dayGroups.flatMap { $0.meetings.map(\.id) }
+  }
+
+  /// Down arrow: the next visible entry, across day boundaries; the first
+  /// when nothing visible is selected; the last stays.
+  func selectNext() {
+    let ids = visibleIDs
+    guard let selection, let index = ids.firstIndex(of: selection) else {
+      selection = ids.first
+      return
+    }
+    if index + 1 < ids.count { selection = ids[index + 1] }
+  }
+
+  /// Up arrow: the previous visible entry, across day boundaries; the first
+  /// when nothing visible is selected; the first stays.
+  func selectPrevious() {
+    let ids = visibleIDs
+    guard let selection, let index = ids.firstIndex(of: selection) else {
+      selection = ids.first
+      return
+    }
+    if index > 0 { selection = ids[index - 1] }
   }
 
   // MARK: - Actions

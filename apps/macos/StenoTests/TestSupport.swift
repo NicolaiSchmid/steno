@@ -12,9 +12,12 @@ import XCTest
 enum TestSupport {
   static let now = Date(timeIntervalSince1970: 1_790_250_000)
 
+  /// `seed` false leaves the store empty; `seedSet` picks the fixture set
+  /// when it is seeded (`.sample` unless a test asks for `.rich`).
   @MainActor
   static func environment(
-    clock: ManualClock = ManualClock(), seed: Bool = true, handover: HandoverService? = nil,
+    clock: ManualClock = ManualClock(), seed: Bool = true, seedSet: PreviewSeed.Set = .sample,
+    handover: HandoverService? = nil,
     makeCaptureSession: AppEnvironment.MakeCaptureSession? = nil,
     processActivity: FakeProcessAudioActivity = FakeProcessAudioActivity(),
     makeSpeechEngine: @escaping @Sendable () -> any SpeechEngine = { FakeSpeechEngine() },
@@ -23,7 +26,7 @@ enum TestSupport {
     calendar: (any CalendarProviding)? = nil
   ) async throws -> AppEnvironment {
     try await AppEnvironment.preview(
-      clock: clock, now: { now }, handover: handover, seed: seed,
+      clock: clock, now: { now }, handover: handover, seed: seed ? seedSet : nil,
       makeCaptureSession: makeCaptureSession, processActivity: processActivity,
       makeSpeechEngine: makeSpeechEngine, makeDiarizer: makeDiarizer,
       makeSummarizer: makeSummarizer, calendar: calendar)

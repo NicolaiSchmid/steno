@@ -186,6 +186,16 @@ enum Theme {
     /// The empty state's icon well and the glyph inside it.
     static let emptyWellSize: CGFloat = 48
     static let emptySymbolSize: CGFloat = 20
+    /// The Start recording CTA: the glyph well before the label and the
+    /// trailing chevron segment that opens the in-person menu.
+    static let ctaWellSize: CGFloat = 28
+    static let ctaMenuWidth: CGFloat = 28
+    /// The selection rail on a list entry.
+    static let railWidth: CGFloat = 2
+    /// The compact level meter inside the Stop control: one 4 pt bar per
+    /// lane, 40 pt wide.
+    static let meterWidth: CGFloat = 40
+    static let meterHeight: CGFloat = 4
   }
 }
 

@@ -1,8 +1,13 @@
 import StenoCore
 import SwiftUI
 
-/// The main window: sidebar list plus detail. One detail view model per
-/// selected meeting, replaced when the selection changes.
+/// The main window: nav column, list column, detail. Three columns in the
+/// balanced style with the visibility pinned to `.all`, because the nav
+/// column holds the window's only Record control and must never collapse;
+/// the 960 pt minimum is what keeps the split view from collapsing it on
+/// its own. No title, no toolbar items: the window style hides the title
+/// bar and each column paints its own opaque background. One detail view
+/// model per selected meeting, replaced when the selection changes.
 struct MainWindow: View {
   let controller: AppController
   @State private var list: MeetingListViewModel
@@ -16,12 +21,13 @@ struct MainWindow: View {
   }
 
   var body: some View {
-    NavigationSplitView {
-      VStack(spacing: 0) {
-        RecordingControl(controller: controller)
-        MeetingListView(model: list, progress: controller.progress)
-      }
-      .navigationSplitViewColumnWidth(min: 240, ideal: 300, max: 420)
+    NavigationSplitView(columnVisibility: .constant(.all)) {
+      NavigationColumn(controller: controller, list: list)
+        .navigationSplitViewColumnWidth(min: 200, ideal: 220, max: 260)
+        .toolbar(removing: .sidebarToggle)
+    } content: {
+      MeetingListView(model: list, progress: controller.progress)
+        .navigationSplitViewColumnWidth(min: 320, ideal: 380, max: 480)
     } detail: {
       // Row 1 of the detail header stack: the setup banner, over the
       // selected meeting or the empty state alike.
@@ -31,21 +37,19 @@ struct MainWindow: View {
           MeetingDetailView(model: detail, controller: controller)
             .id(detail.id)
         } else {
-          VStack(spacing: Theme.Space.sm) {
-            Image(systemName: "text.alignleft")
-              .font(.system(size: 28))
-              .foregroundStyle(Color.stenoGhost)
-            Text("Select a meeting")
-              .font(.steno(Theme.TextSize.sm, weight: .medium))
-              .foregroundStyle(Color.stenoMutedForeground)
-          }
-          .frame(maxWidth: .infinity, maxHeight: .infinity)
+          EmptyState(
+            symbol: "text.alignleft", title: "Select a meeting",
+            body: "Pick a meeting on the left to read its summary, transcript and tasks.",
+            id: "empty-detail")
         }
       }
+      .frame(minWidth: 480, maxWidth: .infinity, maxHeight: .infinity)
       .background(Color.stenoBackground)
     }
-    .navigationTitle("Steno")
-    .frame(minWidth: 820, minHeight: 520)
+    .navigationSplitViewStyle(.balanced)
+    .toolbar(removing: .title)
+    .toolbarBackground(.hidden, for: .windowToolbar)
+    .frame(minWidth: 960, minHeight: 600)
     .task { await list.observe() }
     .onChange(of: list.selection, initial: true) { _, selection in
       guard selection != detail?.id else { return }

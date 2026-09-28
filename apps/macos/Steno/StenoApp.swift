@@ -17,13 +17,17 @@ struct StenoApp: App {
   }
 
   var body: some Scene {
+    // No title bar: the window carries no title and no toolbar items; each
+    // column of `MainWindow` paints its own opaque background up to the top
+    // edge, so nothing but the traffic lights sits above the content.
     Window("Steno", id: "main") {
       RootView(bootstrap: bootstrap) { controller in
         MainWindow(controller: controller)
           .modifier(OnboardingOpener(controller: controller))
       }
     }
-    .defaultSize(width: 1040, height: 680)
+    .windowStyle(.hiddenTitleBar)
+    .defaultSize(width: 1120, height: 720)
     .commands { AppCommands(bootstrap: bootstrap) }
 
     Window("Welcome to Steno", id: "onboarding") {
@@ -62,9 +66,10 @@ final class AppBootstrap {
   private let panels = DetectionPanelPresenter()
   private var loading = false
 
-  static var isUITesting: Bool {
-    CommandLine.arguments.contains("-steno-ui-testing")
-  }
+  /// The `-steno-*` launch arguments, parsed once.
+  static let scenario = UITestScenario(arguments: CommandLine.arguments)
+
+  static var isUITesting: Bool { scenario.isUITesting }
 
   func load() async {
     guard controller == nil, !loading else { return }
@@ -73,7 +78,7 @@ final class AppBootstrap {
     do {
       let environment: AppEnvironment
       if Self.isUITesting {
-        environment = try await AppEnvironment.preview()
+        environment = try await AppEnvironment.preview(seed: Self.scenario.seed)
       } else {
         environment = try await AppEnvironment.live(updater: UpdaterController())
       }
@@ -81,6 +86,10 @@ final class AppBootstrap {
       controller.detection.promptDidChange = { [panels] prompt in panels.present(prompt) }
       self.controller = controller
       await controller.launch()
+      if Self.isUITesting, Self.scenario.startsRecording {
+        // As the sidebar control would: the live row becomes the selection.
+        await controller.startRecordingFromWindow(mode: .call)
+      }
     } catch {
       self.error = "Steno could not start: \(error)"
     }
@@ -159,6 +168,8 @@ struct OnboardingWindowContent: View {
 @MainActor
 struct AppCommands: Commands {
   let bootstrap: AppBootstrap
+  /// Published by the list column while the main window is key; ⌘F runs it.
+  @FocusedValue(\.searchFocus) private var searchFocus
 
   /// The same state table the sidebar control and the menu bar item render;
   /// without a controller the menu reads as idle and is disabled.
@@ -173,6 +184,13 @@ struct AppCommands: Commands {
     CommandGroup(after: .appInfo) {
       Button("Check for Updates…") { bootstrap.controller?.menuBar.checkForUpdates() }
         .disabled(bootstrap.controller == nil)
+    }
+    // Before the system's Find submenu, so ⌘F reaches the meeting search
+    // whenever the main window is key.
+    CommandGroup(before: .textEditing) {
+      Button("Find Meetings") { searchFocus?.run() }
+        .keyboardShortcut("f", modifiers: .command)
+        .disabled(searchFocus == nil)
     }
     CommandMenu("Record") {
       Button(presentation.menuLabel) {

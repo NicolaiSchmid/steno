@@ -38,6 +38,119 @@ extension ProcessingProgressModel.Entry {
   static let waitingTitle = "Waiting to process"
 }
 
+extension MeetingState {
+  /// The state word: the list entry's accessibility value, the preview line
+  /// while there is nothing better to say.
+  var label: String {
+    switch self {
+    case .recording: "Recording"
+    case .queued: "Queued"
+    case .processing: "Processing"
+    case .ready: "Ready"
+    case .failed: "Failed"
+    }
+  }
+}
+
+extension MeetingListViewModel.StateFilter {
+  /// The nav row's glyph.
+  var symbolName: String {
+    switch self {
+    case .all: "rectangle.stack"
+    case .processing: "clock"
+    case .ready: "checkmark.circle"
+    case .failed: "exclamationmark.triangle"
+    }
+  }
+}
+
+/// Every wall-clock string the list and the header render, through
+/// `Date.FormatStyle` so 12 versus 24 hour, "Sep 28" versus "28. Sept." and
+/// weekday names follow the locale; never a literal pattern. The calendar
+/// carries the time zone, so a test can view a Berlin recording from UTC.
+enum DisplayFormat {
+  private static func style(calendar: Calendar, locale: Locale) -> Date.FormatStyle {
+    Date.FormatStyle(locale: locale, calendar: calendar, timeZone: calendar.timeZone)
+  }
+
+  /// "10:06" or "10:06 AM".
+  static func time(_ date: Date, calendar: Calendar = .current, locale: Locale = .current)
+    -> String
+  {
+    date.formatted(
+      style(calendar: calendar, locale: locale).hour(.defaultDigits(amPM: .abbreviated)).minute())
+  }
+
+  /// "Monday".
+  static func weekday(_ date: Date, calendar: Calendar = .current, locale: Locale = .current)
+    -> String
+  {
+    date.formatted(style(calendar: calendar, locale: locale).weekday(.wide))
+  }
+
+  /// "Sep 28".
+  static func monthDay(_ date: Date, calendar: Calendar = .current, locale: Locale = .current)
+    -> String
+  {
+    date.formatted(style(calendar: calendar, locale: locale).month(.abbreviated).day())
+  }
+}
+
+extension Meeting {
+  /// The last six days read as a weekday in the derived title; older days
+  /// as month and day.
+  static let weekdayTitleDays = 6
+
+  /// The stored `title` came from nobody: the intake's machine default. The
+  /// screen derives a title from `startedAt` instead and shows the source
+  /// as a chip beside it.
+  var isTitleDerived: Bool { titleOrigin == .default }
+
+  /// What the list entry and the detail heading call the meeting: the
+  /// stored title unless it is the intake's default, in which case "Monday
+  /// 10:06" for the last six days and "Sep 28 10:06" before that, in the
+  /// viewer's calendar, time zone and locale. The stored value is never
+  /// touched; exports, search and the Obsidian slug keep it.
+  func displayTitle(now: Date = Date(), calendar: Calendar = .current, locale: Locale = .current)
+    -> String
+  {
+    guard isTitleDerived else { return title }
+    let days =
+      calendar.dateComponents(
+        [.day], from: calendar.startOfDay(for: startedAt), to: calendar.startOfDay(for: now)
+      ).day ?? Int.max
+    let day =
+      (0...Self.weekdayTitleDays).contains(days)
+      ? DisplayFormat.weekday(startedAt, calendar: calendar, locale: locale)
+      : DisplayFormat.monthDay(startedAt, calendar: calendar, locale: locale)
+    return "\(day) \(DisplayFormat.time(startedAt, calendar: calendar, locale: locale))"
+  }
+
+  /// The one-line preview under the entry's title: the first bullet of the
+  /// summary ("lead: text"), else what the state says. Pure: while the
+  /// pipeline runs, the view prefers the progress model's stage title.
+  var previewLine: String {
+    switch state {
+    case .recording: MeetingState.recording.label
+    case .queued: ProcessingProgressModel.Entry.waitingTitle
+    case .processing: MeetingState.processing.label
+    case .failed(let reason): reason.firstLine ?? state.label
+    case .ready: summary?.plainText.firstLine ?? "No summary"
+    }
+  }
+}
+
+extension String {
+  /// The first non-blank line, trimmed; nil when there is none.
+  var firstLine: String? {
+    for line in split(omittingEmptySubsequences: true, whereSeparator: \.isNewline) {
+      let trimmed = line.trimmingCharacters(in: .whitespaces)
+      if !trimmed.isEmpty { return trimmed }
+    }
+    return nil
+  }
+}
+
 extension AudioLane {
   /// The lane a transcript turn came from, as the header shows it.
   var label: String {

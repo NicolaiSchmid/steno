@@ -295,12 +295,14 @@ final class AppEnvironment {
   /// `uiTestingTranscribeHold` under `holdTranscribeArgument`, which also
   /// queues the seeded meeting; without `makeDiarizer` the diarizer is a
   /// `FakeDiarizer`; without `makeSummarizer` the summarizer is a
-  /// `FakeSummarizer`.
+  /// `FakeSummarizer`. `seed` picks the fixture set (`.sample` is the one
+  /// meeting the unit tests count on, `.rich` adds three days of them) or,
+  /// nil, leaves the store empty.
   static func preview(
     clock: any Clock<Duration> = ContinuousClock(),
     now: @escaping @Sendable () -> Date = Date.init,
     handover: HandoverService? = nil,
-    seed: Bool = true,
+    seed: PreviewSeed.Set? = .sample,
     makeCaptureSession: MakeCaptureSession? = nil,
     processActivity: FakeProcessAudioActivity = FakeProcessAudioActivity(),
     makeSpeechEngine: (@Sendable () -> any SpeechEngine)? = nil,
@@ -321,8 +323,8 @@ final class AppEnvironment {
     try await settingsStore.save(settings)
     let holdTranscribe: Duration? =
       CommandLine.arguments.contains(holdTranscribeArgument) ? uiTestingTranscribeHold : nil
-    if seed {
-      try await PreviewSeed.seed(store)
+    if let seed {
+      try await PreviewSeed.seed(store, set: seed, audioFolder: settings.audioFolder)
       if holdTranscribe != nil {
         try await PreviewSeed.queueForProcessing(store, audioFolder: settings.audioFolder)
       }
@@ -403,9 +405,25 @@ final class AppEnvironment {
 
 /// StenoCore's sample meeting written into a store, the way the pipeline
 /// would have left it: meeting plus asset, participants, transcript and
-/// speakers, summary with tasks and decisions.
+/// speakers, summary with tasks and decisions. `.rich` adds four synthetic
+/// meetings over the two days before it, so the grouped list, the counts
+/// and every entry state can be seen and screenshotted.
 enum PreviewSeed {
-  static func seed(_ store: MeetingStore) async throws {
+  /// Which fixtures the preview store starts with.
+  enum Set: Equatable, Sendable {
+    /// The sample meeting alone; the unit tests' counts assume it.
+    case sample
+    /// The sample meeting plus `richMeetings()`: a processing and a failed
+    /// meeting and two more ready ones over three days; the sample stays
+    /// newest. The processing meeting carries a synthetic master, so
+    /// `resumeUnfinishedProcessing()` runs it at launch as the product
+    /// would, instead of failing it for a missing asset.
+    case rich
+  }
+
+  static func seed(_ store: MeetingStore, set: Set = .sample, audioFolder: URL? = nil)
+    async throws
+  {
     for person in SampleData.persons() { try await store.save(person) }
     let meeting = SampleData.meeting()
     try await store.save(meeting, asset: SampleData.audioAsset())
@@ -414,20 +432,96 @@ enum PreviewSeed {
       meeting, segments: SampleData.segments(), speakers: SampleData.speakers())
     try await store.replaceSummary(
       meeting, tasks: SampleData.tasks(), decisions: SampleData.decisions().map(\.text))
+    guard set == .rich else { return }
+    for extra in richMeetings() {
+      if extra.state == .processing, let audioFolder {
+        try await saveWithSyntheticMaster(extra, store: store, audioFolder: audioFolder)
+      } else {
+        try await store.save(extra)
+      }
+    }
+  }
+
+  /// The four extra meetings of `.rich`, placed before `anchor` (the sample
+  /// meeting's start): two ready meetings with two-bullet summaries, one
+  /// processing and one failed, over the two preceding days, with every
+  /// `TitleOrigin` the display title distinguishes. Pure, so a test can pin
+  /// the set without a store.
+  static func richMeetings(before anchor: Date = SampleData.startedAt) -> [Meeting] {
+    let hour: TimeInterval = 3_600
+    func meeting(
+      _ n: Int, title: String, origin: TitleOrigin, hoursBefore: Double, duration: TimeInterval,
+      source: MeetingSource, tags: [String], state: MeetingState, bullets: [(String, String)]
+    ) -> Meeting {
+      let startedAt = anchor.addingTimeInterval(-hoursBefore * hour)
+      let summary =
+        bullets.isEmpty
+        ? nil
+        : SummaryDocument(
+          templateID: SummaryTemplate.defaultID, language: "de",
+          sections: [
+            SummarySection(
+              id: "executive-summary", heading: "Executive Summary",
+              bullets: bullets.map { SummaryBullet(lead: $0.0, text: $0.1) })
+          ])
+      return Meeting(
+        id: SampleData.uuid(n), title: title, startedAt: startedAt, duration: duration,
+        language: "de", source: source, tags: tags, state: state, titleOrigin: origin,
+        summary: summary, createdAt: startedAt, updatedAt: startedAt.addingTimeInterval(duration))
+    }
+    return [
+      meeting(
+        101, title: "Wochenplanung", origin: .summary, hoursBefore: 19, duration: 1_800,
+        source: .macInPerson, tags: ["team"], state: .ready,
+        bullets: [
+          ("Sprintziel", "Die Aufnahme-Ansicht ist bis Freitag im TestFlight."),
+          ("Blocker", "Der Export nach Obsidian wartet auf die Vault-Auswahl."),
+        ]),
+      meeting(
+        102, title: "Call 2026-09-23 12:00", origin: .default, hoursBefore: 23, duration: 12,
+        source: .macCall, tags: [], state: .processing, bullets: []),
+      meeting(
+        103, title: "Interview mit Lena", origin: .calendar, hoursBefore: 41, duration: 2_700,
+        source: .macCall, tags: ["hiring"], state: .ready,
+        bullets: [
+          ("Eindruck", "Klare Antworten zu Priorisierung und Teamarbeit."),
+          ("Nächster Schritt", "Zweites Gespräch mit dem Design-Team vereinbaren."),
+        ]),
+      meeting(
+        104, title: "Call 2026-09-22 11:00", origin: .default, hoursBefore: 48, duration: 600,
+        source: .macCall, tags: [],
+        state: .failed(
+          reason:
+            "The LLM endpoint did not answer.\nRe-run the summary once it is reachable."),
+        bullets: []),
+    ]
   }
 
   /// The sample meeting as a recording the pipeline still has to process:
   /// the meeting `.queued`, so `resumeUnfinishedProcessing()` starts it at
-  /// launch, over a synthetic two-lane master under `audioFolder` in the
-  /// recording layout. The master is 16 kHz Int16 WAV, one channel per
-  /// lane, which `AVFoundationAudioCodec` decodes and mixes down without a
-  /// CAF writer. The seeded transcript and summary stay until the run
-  /// replaces them; the UI test looks for the template heading both carry.
+  /// launch, over a synthetic master under `audioFolder`. The seeded
+  /// transcript and summary stay until the run replaces them; the UI test
+  /// looks for the template heading both carry.
   static func queueForProcessing(_ store: MeetingStore, audioFolder: URL) async throws {
-    let meeting = SampleData.meeting(state: .queued)
+    try await saveWithSyntheticMaster(
+      SampleData.meeting(state: .queued), store: store, audioFolder: audioFolder)
+  }
+
+  /// Saves `meeting` with a synthetic two-lane master under `audioFolder`
+  /// in the recording layout. The master is 16 kHz Int16 WAV, one channel
+  /// per lane, which `AVFoundationAudioCodec` decodes and mixes down without
+  /// a CAF writer. The sample meeting keeps the sample asset's id; any other
+  /// meeting gets its own.
+  private static func saveWithSyntheticMaster(
+    _ meeting: Meeting, store: MeetingStore, audioFolder: URL
+  ) async throws {
     let layout = RecordingLayout(audioFolder: audioFolder, meetingID: meeting.id)
     try layout.createDirectories()
     var asset = SampleData.audioAsset()
+    if meeting.id != SampleData.meetingID {
+      asset.id = UUID()
+      asset.meetingID = meeting.id
+    }
     asset.format = .wav16kInt16
     asset.url = layout.master(.wav16kInt16)
     asset.sidecars16k = [:]
