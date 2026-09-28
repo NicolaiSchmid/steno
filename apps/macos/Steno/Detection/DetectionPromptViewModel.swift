@@ -1,7 +1,8 @@
 import Foundation
 
-/// One detection prompt: the app that opened the microphone, a countdown on
-/// the injected clock, and the two actions. Auto-dismisses after `timeout`.
+/// One detection prompt: the app that opened the microphone, a shared
+/// `Countdown` on the injected clock, and the two actions. Auto-dismisses
+/// after `timeout`.
 @MainActor
 @Observable
 final class DetectionPromptViewModel: Identifiable {
@@ -14,44 +15,31 @@ final class DetectionPromptViewModel: Identifiable {
   let id = UUID()
   let appName: String
   let timeout: Duration
-  private(set) var remaining: Duration
+  let countdown: Countdown
   private(set) var outcome: Outcome?
-  private let clock: any Clock<Duration>
-  private var countdown: Task<Void, Never>?
   /// Runs once, with the outcome, when the prompt closes.
   var onClose: ((Outcome) async -> Void)?
 
   init(appName: String, clock: any Clock<Duration>, timeout: Duration = .seconds(60)) {
     self.appName = appName
-    self.clock = clock
     self.timeout = timeout
-    self.remaining = timeout
+    self.countdown = Countdown(duration: timeout, clock: clock)
+    countdown.onElapsed = { [weak self] in
+      guard let self else { return }
+      Task { await self.close(.timedOut) }
+    }
   }
 
+  var remaining: Duration { countdown.remaining }
+
   var remainingSeconds: Int {
-    Int(remaining.components.seconds)
+    Int(countdown.remaining.components.seconds)
   }
 
   /// Ticks once per second on the clock until the deadline, then times out.
   func begin() {
-    guard countdown == nil, outcome == nil else { return }
-    let clock = self.clock
-    countdown = Task { [weak self] in
-      while true {
-        do {
-          try await clock.sleep(for: .seconds(1))
-        } catch {
-          return
-        }
-        guard let self, self.outcome == nil else { return }
-        self.remaining -= .seconds(1)
-        if self.remaining <= .zero {
-          self.countdown = nil
-          await self.close(.timedOut)
-          return
-        }
-      }
-    }
+    guard outcome == nil else { return }
+    countdown.begin()
   }
 
   func start() async {
@@ -65,8 +53,7 @@ final class DetectionPromptViewModel: Identifiable {
   private func close(_ outcome: Outcome) async {
     guard self.outcome == nil else { return }
     self.outcome = outcome
-    countdown?.cancel()
-    countdown = nil
+    countdown.cancel()
     await onClose?(outcome)
   }
 }

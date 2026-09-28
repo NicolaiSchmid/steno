@@ -43,8 +43,10 @@ struct LevelBars: View {
     .accessibilityValue("\(Int(Self.fraction(level.rms) * 100)) percent")
   }
 
-  /// dBFS from -60 to 0 mapped onto 0...1.
-  static func fraction(_ dbfs: Float) -> CGFloat {
+  /// dBFS from -60 to 0 mapped onto 0...1. `nonisolated`: `View` conformance
+  /// makes the struct main-actor isolated, and `LiveBarsHistory` calls this
+  /// from plain code.
+  nonisolated static func fraction(_ dbfs: Float) -> CGFloat {
     CGFloat(min(1, max(0, (dbfs + 60) / 60)))
   }
 }

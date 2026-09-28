@@ -12,7 +12,7 @@ struct MeetingListView: View {
       Divider().overlay(Color.stenoBorder)
       List(selection: $model.selection) {
         ForEach(model.meetings) { meeting in
-          MeetingRow(meeting: meeting)
+          MeetingRow(meeting: meeting, isSelected: model.selection == meeting.id)
             .tag(meeting.id)
             .listRowSeparator(.hidden)
             .contextMenu {
@@ -124,6 +124,9 @@ struct MeetingListView: View {
 
 struct MeetingRow: View {
   let meeting: Meeting
+  /// Carried as the `isSelected` trait, so the UI smoke test can find the
+  /// selected row by identifier.
+  var isSelected = false
 
   var body: some View {
     VStack(alignment: .leading, spacing: Theme.Space.xs) {
@@ -151,5 +154,6 @@ struct MeetingRow: View {
     }
     .padding(.vertical, Theme.Space.xs)
     .accessibilityIdentifier("meeting-\(meeting.id.uuidString)")
+    .accessibilityAddTraits(isSelected ? [.isSelected] : [])
   }
 }

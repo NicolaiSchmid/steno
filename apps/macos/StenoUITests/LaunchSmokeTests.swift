@@ -116,6 +116,82 @@ final class LaunchSmokeTests: XCTestCase {
     XCTAssertEqual(meetingRowCount(in: app), 2, "the stopped recording keeps its row")
   }
 
+  /// The floating panel: launched with `-steno-show-prompt`, the detection
+  /// prompt for "Zoom" appears; Record turns the same panel into the
+  /// recording bubble; the bubble's stop hides it.
+  func testPromptMorphsIntoTheBubbleAndStopHidesIt() throws {
+    let app = XCUIApplication()
+    app.launchArguments = ["-steno-ui-testing", "-steno-show-prompt"]
+    app.launch()
+
+    let record = app.buttons["prompt-record"].firstMatch
+    XCTAssertTrue(record.waitForExistence(timeout: 10), "the detection prompt did not appear")
+    XCTAssertTrue(
+      app.staticTexts["Zoom opened the microphone"].firstMatch.exists, "the title names the app")
+    attachScreenshot(named: "prompt.png")
+    record.click()
+
+    let stop = app.buttons["bubble-stop"].firstMatch
+    XCTAssertTrue(stop.waitForExistence(timeout: 10), "the prompt did not become the bubble")
+    let promptGone = XCTNSPredicateExpectation(
+      predicate: NSPredicate(format: "exists == false"), object: record)
+    XCTAssertEqual(XCTWaiter().wait(for: [promptGone], timeout: 10), .completed)
+    XCTAssertTrue(
+      waitUntil(timeout: 10) { stop.isEnabled }, "the stop square is enabled once recording")
+    attachScreenshot(named: "bubble.png")
+    stop.click()
+
+    let bubbleGone = XCTNSPredicateExpectation(
+      predicate: NSPredicate(format: "exists == false"), object: stop)
+    XCTAssertEqual(XCTWaiter().wait(for: [bubbleGone], timeout: 10), .completed)
+  }
+
+  /// A recording started from the window shows the bubble too; clicking its
+  /// body brings the window to the live meeting (the selected row).
+  func testBubbleFollowsARecordingStartedFromTheWindow() throws {
+    let app = XCUIApplication()
+    app.launchArguments = ["-steno-ui-testing"]
+    app.launch()
+
+    let window = app.windows.firstMatch
+    XCTAssertTrue(window.waitForExistence(timeout: 10), "no window appeared")
+    let record = app.buttons["sidebar-record"].firstMatch
+    XCTAssertTrue(record.waitForExistence(timeout: 10), "the sidebar record control is missing")
+    XCTAssertFalse(app.buttons["bubble-stop"].exists, "no bubble before the recording")
+    record.click()
+
+    let stop = app.buttons["bubble-stop"].firstMatch
+    XCTAssertTrue(stop.waitForExistence(timeout: 10), "the bubble did not follow the recording")
+    let open = app.buttons["bubble-open"].firstMatch
+    XCTAssertTrue(open.waitForExistence(timeout: 5), "the bubble body is missing")
+    open.click()
+    XCTAssertTrue(
+      waitUntil(timeout: 10) { selectedMeetingRowCount(in: app) == 1 },
+      "expected the live row selected, got \(selectedMeetingRowCount(in: app))")
+
+    stop.click()
+    XCTAssertTrue(
+      app.buttons["sidebar-record"].firstMatch.waitForExistence(timeout: 10),
+      "the control did not return to Record call")
+  }
+
+  private func attachScreenshot(named name: String) {
+    let screenshot = XCTAttachment(screenshot: XCUIScreen.main.screenshot())
+    screenshot.name = name
+    screenshot.lifetime = .keepAlways
+    add(screenshot)
+  }
+
+  /// Distinct `meeting-<uuid>` identifiers among the elements that carry the
+  /// selected trait (SwiftUI may stamp the identifier on the row and on its
+  /// texts, so elements are not counted).
+  private func selectedMeetingRowCount(in app: XCUIApplication) -> Int {
+    let selected = NSPredicate(
+      format: "identifier BEGINSWITH 'meeting-' AND selected == true")
+    let elements = app.descendants(matching: .any).matching(selected)
+    return Set(elements.allElementsBoundByIndex.map(\.identifier)).count
+  }
+
   /// Rows carrying a `meeting-<uuid>` identifier, and only those: the
   /// redesign's `meeting-list` container must not count. The list's cells
   /// are counted with one query when they carry the row identifier; SwiftUI

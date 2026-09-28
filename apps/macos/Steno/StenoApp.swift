@@ -50,8 +50,10 @@ struct StenoApp: App {
   }
 }
 
-/// Builds the environment once and holds the controller and the detection
-/// panel presenter for the app's lifetime.
+/// Builds the environment once and holds the controller and the floating
+/// panel presenter for the app's lifetime. `openMain` is installed by a view
+/// inside a scene (`RootView`, `MenuBarLabel`), because the panel's content
+/// is outside every scene and an `openWindow` read there does nothing.
 @MainActor
 @Observable
 final class AppBootstrap {
@@ -59,12 +61,15 @@ final class AppBootstrap {
 
   private(set) var controller: AppController?
   private(set) var error: String?
-  private let panels = DetectionPanelPresenter()
+  private let panels = FloatingPanelPresenter()
   private var loading = false
+  /// Opens the main window and activates Steno; replaced by a scene's
+  /// `openWindow` as soon as one renders. Until then, activation alone.
+  var openMain: @MainActor () -> Void = { NSApp.activate() }
 
-  static var isUITesting: Bool {
-    CommandLine.arguments.contains("-steno-ui-testing")
-  }
+  static let scenario = UITestScenario(arguments: CommandLine.arguments)
+
+  static var isUITesting: Bool { scenario.isUITesting }
 
   func load() async {
     guard controller == nil, !loading else { return }
@@ -78,11 +83,32 @@ final class AppBootstrap {
         environment = try await AppEnvironment.live(updater: UpdaterController())
       }
       let controller = AppController(environment: environment)
-      controller.detection.promptDidChange = { [panels] prompt in panels.present(prompt) }
       self.controller = controller
       await controller.launch()
+      panels.follow(controller) { [weak self] in self?.openMain() }
+      if Self.isUITesting, Self.scenario.showPrompt {
+        controller.detection.appName = { _ in "Zoom" }
+        await controller.detection.handle(.microphoneOpened(bundleID: "us.zoom.xos", pid: 1))
+      }
     } catch {
       self.error = "Steno could not start: \(error)"
+    }
+  }
+}
+
+/// Installs the scene's `openWindow` as `AppBootstrap.openMain`, so the
+/// floating bubble can bring the main window forward.
+struct OpenMainInstaller: ViewModifier {
+  let bootstrap: AppBootstrap
+  @Environment(\.openWindow) private var openWindow
+
+  func body(content: Content) -> some View {
+    content.onAppear {
+      let openWindow = self.openWindow
+      bootstrap.openMain = {
+        openWindow(id: "main")
+        NSApp.activate()
+      }
     }
   }
 }
@@ -93,32 +119,61 @@ struct RootView<Content: View>: View {
   @ViewBuilder let content: (AppController) -> Content
 
   var body: some View {
-    if let controller = bootstrap.controller {
-      content(controller)
-    } else if let error = bootstrap.error {
-      VStack(spacing: Theme.Space.sm) {
-        MessageRow(kind: .error, text: error)
-        Button("Quit") { NSApp.terminate(nil) }
+    Group {
+      if let controller = bootstrap.controller {
+        content(controller)
+      } else if let error = bootstrap.error {
+        failure(error)
+      } else {
+        ProgressView()
+          .controlSize(.small)
+          .padding(Theme.Space.xl)
+          .frame(minWidth: 320, minHeight: 120)
       }
-      .padding(Theme.Space.xl)
-      .frame(minWidth: 320)
-    } else {
-      ProgressView()
-        .controlSize(.small)
-        .padding(Theme.Space.xl)
-        .frame(minWidth: 320, minHeight: 120)
     }
+    .modifier(OpenMainInstaller(bootstrap: bootstrap))
+  }
+
+  private func failure(_ error: String) -> some View {
+    VStack(spacing: Theme.Space.sm) {
+      MessageRow(kind: .error, text: error)
+      Button("Quit") { NSApp.terminate(nil) }
+    }
+    .padding(Theme.Space.xl)
+    .frame(minWidth: 320)
   }
 }
 
+/// The menu bar item's label: `waveform` idle, `record.circle.fill` while
+/// busy, and the symbol plus the elapsed time while recording, ticking on
+/// its own `TimelineView` (legible at a glance, immune to template
+/// rendering, self-refreshing). Always alive, so it also installs
+/// `openMain` for the floating bubble.
 struct MenuBarLabel: View {
   let bootstrap: AppBootstrap
 
   var body: some View {
-    let recording = bootstrap.controller?.recorder.isRecording ?? false
-    Image(systemName: recording ? "record.circle.fill" : "waveform")
-      .symbolRenderingMode(recording ? .multicolor : .monochrome)
-      .accessibilityLabel(recording ? "Steno, recording" : "Steno")
+    let state = bootstrap.controller?.recorder.recording ?? .idle
+    Group {
+      if case .recording(let since) = state {
+        TimelineView(.periodic(from: since, by: 1)) { context in
+          label(MenuBarLabelPresentation.make(state: state, now: context.date))
+        }
+      } else {
+        label(MenuBarLabelPresentation.make(state: state, now: .now))
+      }
+    }
+    .modifier(OpenMainInstaller(bootstrap: bootstrap))
+  }
+
+  private func label(_ presentation: MenuBarLabelPresentation) -> some View {
+    HStack(spacing: Theme.Space.xs) {
+      Image(systemName: presentation.symbolName)
+      if let elapsed = presentation.elapsedText {
+        Text(elapsed).monospacedDigit()
+      }
+    }
+    .accessibilityLabel(presentation.accessibilityLabel)
   }
 }
 

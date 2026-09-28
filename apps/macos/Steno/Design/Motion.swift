@@ -42,4 +42,25 @@ enum Motion {
   static var spatial: Animation {
     .interpolatingSpring(mass: springMass, stiffness: springStiffness, damping: springDamping)
   }
+
+  /// The clock tempo: a countdown hairline drains one linear step per tick.
+  static let durationCountdown: TimeInterval = 1
+  static var countdown: Animation { .linear(duration: durationCountdown) }
+  /// The countdown steps without animation under Reduce Motion.
+  static func countdown(reduceMotion: Bool) -> Animation? {
+    reduceMotion ? nil : countdown
+  }
+
+  /// The one ambient animation per viewport: opacity 1 to `pulseOpacity`
+  /// and back over a second, ease-in-out, repeating. Only the list entry's
+  /// recording dot pulses; nothing in the floating bubble does.
+  static let durationPulse: TimeInterval = 1
+  static let pulseOpacity: Double = 0.4
+  static var pulse: Animation {
+    .easeInOut(duration: durationPulse).repeatForever(autoreverses: true)
+  }
+  /// The pulse rule: under Reduce Motion the element holds at opacity 1.
+  static func pulse(reduceMotion: Bool) -> Animation? {
+    reduceMotion ? nil : pulse
+  }
 }

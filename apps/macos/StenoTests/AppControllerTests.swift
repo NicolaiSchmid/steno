@@ -261,12 +261,20 @@ final class AppControllerTests: XCTestCase {
     await controller.detection.handle(.microphoneOpened(bundleID: "com.apple.FaceTime", pid: 7))
     let prompt = try XCTUnwrap(controller.detection.prompt)
     XCTAssertEqual(prompt.appName, "com.apple.FaceTime")
+    XCTAssertEqual(
+      FloatingContent.resolve(
+        prompt: controller.detection.prompt, recording: controller.recorder.recording),
+      .prompt(prompt), "the panel shows the prompt")
     await prompt.start()
 
     XCTAssertNil(controller.detection.prompt)
     guard case .recording = controller.recorder.recording else {
       return XCTFail("the prompt's Start should record, got \(controller.recorder.recording)")
     }
+    XCTAssertEqual(
+      FloatingContent.resolve(
+        prompt: controller.detection.prompt, recording: controller.recorder.recording),
+      .bubble, "the same panel becomes the bubble")
     running = await environment.detector.isRunning
     XCTAssertTrue(running, "the detector keeps its view of the open microphone")
     let meetings = try await environment.store.meetings()
@@ -390,6 +398,9 @@ final class AppControllerTests: XCTestCase {
     await controller.launch()
     await controller.recorder.start(mode: .inPerson)
     XCTAssertTrue(controller.recorder.isRecording)
+    // The "Finishing…" bubble during Quit: the panel shows the bubble for
+    // `.stopping`, which `shutdown()` passes through.
+    XCTAssertEqual(FloatingContent.resolve(prompt: nil, recording: .stopping), .bubble)
 
     await controller.shutdown()
     XCTAssertEqual(controller.recorder.recording, .idle)

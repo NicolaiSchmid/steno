@@ -13,11 +13,8 @@ import StenoCore
 @MainActor
 @Observable
 final class DetectionController {
-  private(set) var prompt: DetectionPromptViewModel? {
-    didSet { promptDidChange?(prompt) }
-  }
-  /// The panel presenter follows the prompt through this.
-  var promptDidChange: ((DetectionPromptViewModel?) -> Void)?
+  /// The floating panel presenter observes this; nothing calls it.
+  private(set) var prompt: DetectionPromptViewModel?
   private(set) var enabled = false
   private(set) var isRecording = false
   private let environment: AppEnvironment
