@@ -167,7 +167,7 @@ struct RecordingBubbleView: View {
       presentation: BubblePresentation.make(state: recorder.recording, autoStop: nil),
       history: history,
       elapsedValue: recorder.elapsed?.clockText,
-      open: open,
+      open: { open() },
       stop: { Task { await recorder.stop() } }
     )
     .onChange(of: recorder.levels) { _, levels in
