@@ -73,16 +73,19 @@ final class LaunchSmokeTests: XCTestCase {
     XCTAssertTrue(card.waitForExistence(timeout: 20), "the processing card did not appear")
 
     let stage = app.staticTexts["processing-stage"].firstMatch
+    /// A SwiftUI `Text` exposes its string as the element's value on macOS;
+    /// `label` is empty.
+    func stageTitle() -> String { (stage.value as? String) ?? stage.label }
     let bar = app.descendants(matching: .any)["processing-bar"].firstMatch
     // A failure here names what the card showed instead, so a run that
     // never left "Waiting to process" reads differently from one whose
     // elements were not exposed.
     let deadline = Date().addingTimeInterval(20)
-    while stage.label != "Transcribing…", Date() < deadline {
+    while stageTitle() != "Transcribing…", Date() < deadline {
       RunLoop.current.run(until: Date().addingTimeInterval(0.5))
     }
     XCTAssertEqual(
-      stage.label, "Transcribing…",
+      stageTitle(), "Transcribing…",
       """
       stage exists \(stage.exists), bar exists \(bar.exists), bar label \(bar.label), \
       bar value \(String(describing: bar.value)); card: \
@@ -97,7 +100,7 @@ final class LaunchSmokeTests: XCTestCase {
     }
     let first = try percent()
     XCTAssertTrue((0..<100).contains(first), "\(first) percent is not a fraction under way")
-    XCTAssertEqual(stage.label, "Transcribing…", "the bar was read outside the transcribe stage")
+    XCTAssertEqual(stageTitle(), "Transcribing…", "the bar was read outside the transcribe stage")
     XCTAssertTrue(app.staticTexts["processing-remaining"].firstMatch.exists)
     // The presenter moves the bar from the event's fraction towards the
     // next event once a second; by the second sample it is off zero.
@@ -107,7 +110,7 @@ final class LaunchSmokeTests: XCTestCase {
     let second = try percent()
     XCTAssertGreaterThan(second, 0, "the bar has not moved by the second sample")
     XCTAssertTrue((0..<100).contains(second))
-    XCTAssertEqual(stage.label, "Transcribing…")
+    XCTAssertEqual(stageTitle(), "Transcribing…")
 
     // Two lanes at sixty seconds each from the run's start at launch, then
     // the fakes finish in well under a second; the card leaves with the
