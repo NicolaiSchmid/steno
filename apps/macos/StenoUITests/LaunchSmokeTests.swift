@@ -139,7 +139,7 @@ final class LaunchSmokeTests: XCTestCase {
     XCTAssertTrue(
       waitUntil(timeout: 10) { stop.isEnabled }, "the stop square is enabled once recording")
     attachScreenshot(named: "bubble.png")
-    stop.click()
+    clickCenter(of: stop)
 
     let bubbleGone = XCTNSPredicateExpectation(
       predicate: NSPredicate(format: "exists == false"), object: stop)
@@ -173,6 +173,19 @@ final class LaunchSmokeTests: XCTestCase {
     XCTAssertTrue(
       app.buttons["sidebar-record"].firstMatch.waitForExistence(timeout: 10),
       "the control did not return to Record call")
+  }
+
+  /// Clicks the element's centre. After the prompt has crossfaded into the
+  /// bubble, the accessibility hit test at the stop square resolves to the
+  /// bubble's container, so `click()` reports the button as not hittable
+  /// although its frame is right and a mouse click reaches it; a coordinate
+  /// click is the mouse path. Falls back to `click()` when hittable.
+  private func clickCenter(of element: XCUIElement) {
+    if element.isHittable {
+      element.click()
+    } else {
+      element.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).click()
+    }
   }
 
   private func attachScreenshot(named name: String) {
