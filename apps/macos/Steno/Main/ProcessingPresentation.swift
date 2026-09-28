@@ -199,8 +199,15 @@ struct ProcessingCard: View {
     }
     .frame(height: Self.barHeight)
     .accessibilityElement(children: .ignore)
-    .accessibilityLabel("Processing progress")
-    .accessibilityValue("\(Int(((state?.fraction ?? 0) * 100).rounded())) percent")
+    // The percent sits in the label as well as the value: on macOS XCUITest
+    // reads a group's label reliably and its value not always.
+    .accessibilityLabel("Processing progress, \(Self.percent(state)) percent")
+    .accessibilityValue("\(Self.percent(state)) percent")
     .accessibilityIdentifier("processing-bar")
+  }
+
+  /// The sampled fraction in whole percent, 0 before the first event.
+  static func percent(_ state: ProcessingPresentation.State?) -> Int {
+    Int(((state?.fraction ?? 0) * 100).rounded())
   }
 }

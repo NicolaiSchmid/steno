@@ -73,16 +73,27 @@ final class LaunchSmokeTests: XCTestCase {
     XCTAssertTrue(card.waitForExistence(timeout: 20), "the processing card did not appear")
 
     let stage = app.staticTexts["processing-stage"].firstMatch
-    let transcribing = expectation(
-      for: NSPredicate(format: "label == %@", "Transcribing…"), evaluatedWith: stage)
-    wait(for: [transcribing], timeout: 20)
-
     let bar = app.descendants(matching: .any)["processing-bar"].firstMatch
+    // A failure here names what the card showed instead, so a run that
+    // never left "Waiting to process" reads differently from one whose
+    // elements were not exposed.
+    let deadline = Date().addingTimeInterval(20)
+    while stage.label != "Transcribing…", Date() < deadline {
+      RunLoop.current.run(until: Date().addingTimeInterval(0.5))
+    }
+    XCTAssertEqual(
+      stage.label, "Transcribing…",
+      """
+      stage exists \(stage.exists), bar exists \(bar.exists), bar label \(bar.label), \
+      bar value \(String(describing: bar.value)); card: \
+      \(card.debugDescription.prefix(2500))
+      """)
     XCTAssertTrue(bar.exists, "the bar is missing")
+    /// The percent from the bar's label, "Processing progress, 12 percent".
     func percent() throws -> Int {
-      let value = try XCTUnwrap(bar.value as? String, "the bar has no accessibility value")
-      return try XCTUnwrap(
-        Int(value.split(separator: " ").first ?? ""), "not a percentage: \(value)")
+      let words = bar.label.split(whereSeparator: { $0 == " " || $0 == "," })
+      let digits = words.first { Int($0) != nil }
+      return try XCTUnwrap(digits.flatMap { Int($0) }, "not a percentage: \(bar.label)")
     }
     let first = try percent()
     XCTAssertTrue((0..<100).contains(first), "\(first) percent is not a fraction under way")
