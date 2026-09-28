@@ -141,15 +141,17 @@ final class SpeakerReviewViewModel {
 
   // MARK: - Naming and assignment
 
-  /// A new person with this name (or the existing person of the same name)
-  /// confirmed for the speaker.
+  /// A new person with this name (or the existing person of the same name,
+  /// matched by `MeetingStore.resolvePerson`) confirmed for the speaker.
   func name(_ id: UUID, _ name: String) async {
     let trimmed = name.trimmingCharacters(in: .whitespaces)
     guard !trimmed.isEmpty else { return }
-    let person =
-      knownPeople.first { $0.displayName.caseInsensitiveCompare(trimmed) == .orderedSame }
-      ?? Person(id: UUID(), displayName: trimmed, sampleCount: 0, createdAt: now())
-    await confirm(id, person: person)
+    do {
+      let person = try await store.resolvePerson(named: trimmed, now: now())
+      await confirm(id, person: person)
+    } catch {
+      self.error = "Speaker could not be named: \(error)"
+    }
   }
 
   /// The card's typed draft name, confirmed.
@@ -157,17 +159,18 @@ final class SpeakerReviewViewModel {
     await name(id, draftNames[id] ?? "")
   }
 
-  /// A calendar attendee becomes (or reuses) a person and is confirmed.
+  /// A calendar attendee becomes (or reuses) a person and is confirmed: the
+  /// attendee's linked person when there is one, else whoever
+  /// `MeetingStore.resolvePerson` finds or creates for the name and email.
   func assign(_ id: UUID, attendee: Participant) async {
-    let person =
-      attendee.personID.flatMap(person(id:))
-      ?? knownPeople.first {
-        $0.displayName.caseInsensitiveCompare(attendee.displayName) == .orderedSame
-      }
-      ?? Person(
-        id: UUID(), displayName: attendee.displayName, email: attendee.email, sampleCount: 0,
-        createdAt: now())
-    await confirm(id, person: person)
+    do {
+      let person =
+        try await attendee.personID.flatMap(person(id:))
+        ?? store.resolvePerson(named: attendee.displayName, email: attendee.email, now: now())
+      await confirm(id, person: person)
+    } catch {
+      self.error = "Speaker could not be assigned: \(error)"
+    }
   }
 
   func assign(_ id: UUID, person: Person) async {
