@@ -160,6 +160,18 @@ public final class MeetingStore: Sendable {
     try await update(meetingID: meetingID, now: now) { $0.state = state }
   }
 
+  /// The user's rename: the trimmed `title` with `titleOrigin = .user`, so
+  /// no later default or summary title is mistaken for it. A blank title
+  /// leaves the row alone.
+  public func rename(meetingID: UUID, title: String, now: Date) async throws {
+    let trimmed = title.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !trimmed.isEmpty else { return }
+    try await update(meetingID: meetingID, now: now) {
+      $0.title = trimmed
+      $0.titleOrigin = .user
+    }
+  }
+
   /// One transaction: the meeting's processing columns (see
   /// `Meeting.applyProcessingResults`) plus every speaker and segment of the
   /// meeting, replaced. The pipeline's merge and cleanup stages call this.

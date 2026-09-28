@@ -90,6 +90,12 @@ public struct AudioDeviceInfo: Sendable, Equatable, Hashable, Identifiable {
       return Int(latency) + Int(safety)
     }
 
+    /// `kAudioDevicePropertyDeviceIsAlive`: false once the HAL has dropped
+    /// the device, and when the object cannot be read at all.
+    static func isAlive(_ id: AudioObjectID) -> Bool {
+      (try? id.readBool(AudioObjectPropertyAddress(kAudioDevicePropertyDeviceIsAlive))) ?? false
+    }
+
     static func outputChannelCounts(of id: AudioObjectID) -> [Int] {
       (try? id.readBufferChannelCounts(
         AudioObjectPropertyAddress(

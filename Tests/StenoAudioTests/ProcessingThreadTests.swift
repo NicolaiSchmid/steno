@@ -76,6 +76,48 @@ import Testing
     #expect(abs(thread.systemPeak - 0.5) < 0.01)
   }
 
+  /// The session replaces the processing thread after a device change but
+  /// keeps the writer thread, which reads the slot it was given at start: a
+  /// replacement built with the first thread's slot publishes into that same
+  /// slot, generation counting on from where the first left off.
+  @Test func aReplacementThreadPublishesIntoTheSharedLevelSlot() throws {
+    let lanes: [AudioLane] = [.mic, .system]
+    let sink = LaneFrameSink(lanes: lanes)
+    let relay = FrameRelay(channels: 2, frameSize: 480, capacityFrames: 400)
+    let first = ProcessingThread(
+      sink: sink, relay: relay, configuration: .init(lanes: lanes, echoCanceller: nil))
+    let fresh = ProcessingThread(
+      sink: sink, relay: relay, configuration: .init(lanes: lanes, echoCanceller: nil))
+    #expect(fresh.levels !== first.levels, "without a slot every thread allocates its own")
+
+    let backend = SyntheticCaptureBackend(
+      lanes: lanes, tone: [.mic: 440, .system: 1_000], seconds: 0.5)
+    first.start()
+    _ = try backend.start(lanes: lanes, inputDeviceUID: nil, sink: sink)
+    _ = drain(relay, channels: 2, frameSize: 480, expectedFrames: 50)
+    backend.stop()
+    first.stop()
+    #expect(first.levels.currentGeneration == 5, "10 Hz over half a second")
+
+    let replacement = ProcessingThread(
+      sink: sink, relay: relay,
+      configuration: .init(lanes: lanes, echoCanceller: nil, farEndDelayFrames: 960),
+      levels: first.levels)
+    #expect(replacement.levels === first.levels)
+    let again = SyntheticCaptureBackend(
+      lanes: lanes, tone: [.mic: 440, .system: 1_000], seconds: 0.5)
+    replacement.start()
+    _ = try again.start(lanes: lanes, inputDeviceUID: nil, sink: sink)
+    _ = drain(relay, channels: 2, frameSize: 480, expectedFrames: 50)
+    again.stop()
+    replacement.stop()
+    #expect(first.levels.currentGeneration == 10, "the shared slot counts on")
+    #expect(abs(first.levels.levels.mic.rms - -9.03) < 0.2)
+    #expect(replacement.framesProcessed == 50)
+    #expect(sink.droppedSamples.isEmpty)
+    #expect(relay.droppedFrames == [0, 0])
+  }
+
   @Test func passthroughCancellerAndRawMicChannel() throws {
     let lanes: [AudioLane] = [.mic, .system]
     let backend = SyntheticCaptureBackend(

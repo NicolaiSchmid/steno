@@ -376,6 +376,10 @@ import Testing
     #expect(updated.summary?.templateID == "default")
     #expect(updated.summary?.sections.map(\.id) == SummaryTemplate.bundled[0].sections.map(\.id))
     #expect(updated.title == "Summary of Untitled")
+    #expect(updated.titleOrigin == .summary)
+    #expect(
+      try await harness.store.meeting(id: meeting.id)?.titleOrigin == .summary,
+      "the origin is written with the title")
     #expect(updated.llmUsage == prior + harness.summarizer.usage)
     #expect(updated.updatedAt == PipelineHarness.now)
 
@@ -411,6 +415,7 @@ import Testing
     let kept = try await harness.pipeline.summarize(
       meeting: scheduled, segments: SampleData.segments(), speakers: SampleData.speakers())
     #expect(kept.title == "Untitled", "a calendar title is authoritative")
+    #expect(kept.titleOrigin == meeting.titleOrigin, "and so is its origin")
     #expect(kept.language == LanguageTag(rawValue: "fr"))
     #expect(kept.templateID == "interview")
     #expect(kept.summary?.templateID == "interview")
@@ -419,6 +424,7 @@ import Testing
     let replaced = try await harness.pipeline.summarize(
       meeting: interview, segments: SampleData.segments(), speakers: SampleData.speakers())
     #expect(replaced.title == "Model title")
+    #expect(replaced.titleOrigin == .summary)
 
     canned.title = ""
     let untitled = try await PipelineHarness(
@@ -427,6 +433,7 @@ import Testing
     let unchanged = try await untitled.pipeline.summarize(
       meeting: meeting, segments: SampleData.segments(), speakers: SampleData.speakers())
     #expect(unchanged.title == "Untitled", "an empty model title never replaces the meeting's")
+    #expect(unchanged.titleOrigin == meeting.titleOrigin)
     #expect(try await harness.store.meeting(id: meeting.id)?.title == "Untitled")
   }
 }

@@ -59,6 +59,11 @@ struct MeetingRow: StenoRecord {
   var tags: [String]
   var state: MeetingState.Kind
   var failureReason: String?
+  /// `v3`: the whole `RecordingEndReason` as one StenoJSON text (see the
+  /// `DatabaseValueConvertible` conformance below), nil before `complete`.
+  var endReason: RecordingEndReason?
+  /// `v3`: `TitleOrigin`'s raw value, `'default'` for every earlier row.
+  var titleOrigin: TitleOrigin
   var templateID: String
   var summary: SummaryDocument?
   var summaryText: String
@@ -85,6 +90,8 @@ struct MeetingRow: StenoRecord {
     tags = meeting.tags
     state = meeting.state.kind
     if case .failed(let reason) = meeting.state { failureReason = reason }
+    endReason = meeting.endReason
+    titleOrigin = meeting.titleOrigin
     templateID = meeting.templateID
     summary = meeting.summary
     summaryText = meeting.summary?.plainText ?? ""
@@ -113,6 +120,8 @@ struct MeetingRow: StenoRecord {
       calendarEventID: calendarEventID,
       tags: tags,
       state: meetingState,
+      endReason: endReason,
+      titleOrigin: titleOrigin,
       templateID: templateID,
       summary: summary,
       scratchpad: scratchpad,
@@ -120,6 +129,24 @@ struct MeetingRow: StenoRecord {
       createdAt: createdAt,
       updatedAt: updatedAt
     )
+  }
+}
+
+/// One StenoJSON text per row (`"manual"`, `{"callEnded":"Zen"}`) instead of
+/// the usual case-name and payload columns: the payload is optional, and the
+/// column is only ever read whole. GRDB's default Codable path would store the
+/// bare cases as plain text and the payload case as JSON, and `CaseCoding`
+/// would then read that JSON text back as an unknown case name. An unreadable
+/// value fails the fetch, like an unknown `state`.
+extension RecordingEndReason: DatabaseValueConvertible {
+  public var databaseValue: DatabaseValue {
+    guard let data = try? StenoJSON.columnEncoder().encode(self) else { return .null }
+    return String(decoding: data, as: UTF8.self).databaseValue
+  }
+
+  public static func fromDatabaseValue(_ dbValue: DatabaseValue) -> RecordingEndReason? {
+    guard let text = String.fromDatabaseValue(dbValue) else { return nil }
+    return try? StenoJSON.decoder().decode(RecordingEndReason.self, from: Data(text.utf8))
   }
 }
 

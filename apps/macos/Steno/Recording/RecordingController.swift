@@ -135,7 +135,9 @@ final class RecordingController {
       let result = try await active.session.stop()
       try await environment.makeLocalIntake().complete(
         meetingID: active.meetingID,
-        result: RecordingResult(asset: result.asset, duration: result.statistics.duration))
+        result: RecordingResult(
+          asset: result.asset, duration: result.statistics.duration,
+          endReason: result.statistics.endedOnDeviceLoss ? .deviceLost : .manual))
       if active.mode == .call, result.statistics.systemLaneSilent {
         lastWarning = "The system audio lane stayed silent. Check the system audio permission."
       }

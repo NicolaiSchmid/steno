@@ -118,9 +118,11 @@ struct Record: AsyncParsableCommand {
         }
       }
     }
+    let noticeWatch = session.printNoticesToStandardError()
     await stopSignal.wait()
     deadline?.cancel()
     stateWatch.cancel()
+    noticeWatch.cancel()
     interrupt.cancel()
 
     let result: CaptureResult
@@ -143,6 +145,8 @@ struct Record: AsyncParsableCommand {
       .map { "\($0.key.rawValue)=\($0.value)" }.joined(separator: " ")
     print("dropped frames: \(dropped.isEmpty ? "none" : dropped)")
     print("system lane silent: \(result.statistics.systemLaneSilent)")
+    print("device changes: \(result.statistics.deviceChanges)")
+    print(String(format: "gap filled: %.2f s", result.statistics.gapSeconds))
     print("ended on device loss: \(result.statistics.endedOnDeviceLoss)")
     if case .failed(let error, _) = await session.state {
       throw RuntimeFailure(description: "recording ended with \(error)")
@@ -150,7 +154,32 @@ struct Record: AsyncParsableCommand {
   }
 }
 
+extension CaptureNotice {
+  /// One line for stderr, shared by `steno record` and `steno dev
+  /// capture-spike`.
+  var line: String {
+    switch self {
+    case .deviceChanged(let reason):
+      "audio devices changed (\(String(describing: reason))); reconnecting"
+    case .deviceResumed(let attempt, let gapSeconds):
+      String(
+        format: "audio devices resumed on attempt %d; %.2f s of silence filled the gap", attempt,
+        gapSeconds)
+    }
+  }
+}
+
 extension CaptureSession {
+  /// Prints one line per device-change notice to stderr until the task is
+  /// cancelled.
+  nonisolated func printNoticesToStandardError() -> Task<Void, Never> {
+    Task {
+      for await notice in await self.notices {
+        FileHandle.standardError.write(Data((notice.line + "\n").utf8))
+      }
+    }
+  }
+
   /// Prints one line per level update to stderr until the task is cancelled.
   /// Shared by `steno record` and `steno dev capture-spike`.
   nonisolated func printLevelsToStandardError() -> Task<Void, Never> {

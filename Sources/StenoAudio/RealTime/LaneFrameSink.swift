@@ -3,7 +3,7 @@ import StenoCore
 import Synchronization
 
 /// The ring writer handed to the backend: `LaneRings` with lane names, a
-/// wake per callback and the device-lost signal. Runs on the HAL's IOProc
+/// wake per callback and the device-change signal. Runs on the HAL's IOProc
 /// thread (or the synthetic backend's producer thread).
 ///
 /// Producer protocol (real-time safe, one producer at a time):
@@ -14,19 +14,19 @@ import Synchronization
 public final class LaneFrameSink: @unchecked Sendable {
   public let lanes: [AudioLane]
   let rings: LaneRings
-  private let deviceLost = Atomic<Bool>(false)
-  private let deviceLostHandler: @Sendable () -> Void
+  private let deviceChangeReported = Atomic<Bool>(false)
+  private let deviceChangeHandler: @Sendable (DeviceChangeReason) -> Void
   /// Producer-only scratch for the callback in flight.
   private var pendingFrames = 0
 
   /// `ringSeconds` of headroom per lane absorbs a stalled consumer.
   public init(
     lanes: [AudioLane], sampleRate: Double = StenoAudio.sampleRate, ringSeconds: Double = 2,
-    onDeviceLost: @escaping @Sendable () -> Void = {}
+    onDeviceChange: @escaping @Sendable (DeviceChangeReason) -> Void = { _ in }
   ) {
     self.lanes = lanes
     self.rings = LaneRings(count: lanes.count, capacity: Int(sampleRate * ringSeconds))
-    self.deviceLostHandler = onDeviceLost
+    self.deviceChangeHandler = onDeviceChange
   }
 
   // MARK: Producer (real-time)
@@ -66,12 +66,19 @@ public final class LaneFrameSink: @unchecked Sendable {
 
   // MARK: Backend (any thread)
 
-  /// The backend's device-change or `DeviceIsAlive` listener calls this; the
-  /// first call runs the handler, later calls are ignored.
-  public func reportDeviceLost() {
-    let (exchanged, _) = deviceLost.compareExchange(
+  /// The backend's listener calls this once it has resolved what changed;
+  /// the first call runs the handler, later calls are ignored until
+  /// `rearmDeviceChange()`.
+  public func reportDeviceChange(_ reason: DeviceChangeReason) {
+    let (exchanged, _) = deviceChangeReported.compareExchange(
       expected: false, desired: true, ordering: .acquiringAndReleasing)
-    if exchanged { deviceLostHandler() }
+    if exchanged { deviceChangeHandler(reason) }
+  }
+
+  /// Lets the next `reportDeviceChange` through again. The session calls it
+  /// after a successful restart, never a producer.
+  public func rearmDeviceChange() {
+    deviceChangeReported.store(false, ordering: .releasing)
   }
 
   // MARK: Consumer (processing thread)

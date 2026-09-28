@@ -15,6 +15,16 @@ import Testing
   @Test func everyModelTypeRoundTripsThroughStenoJSON() throws {
     try roundTrip(SampleData.meeting(), "Meeting")
     try roundTrip(SampleData.meeting(state: .failed(reason: "summarize: boom")), "Meeting failed")
+    var ended = SampleData.meeting()
+    ended.endReason = .callEnded(appName: "Zen")
+    ended.titleOrigin = .summary
+    try roundTrip(ended, "Meeting with an end reason and a title origin")
+    try roundTrip(
+      [
+        RecordingEndReason.manual, .callEnded(appName: nil), .callEnded(appName: "Zen"),
+        .deviceLost, .quit,
+      ], "[RecordingEndReason]")
+    try roundTrip(TitleOrigin.allCases, "[TitleOrigin]")
     try roundTrip(SampleData.summaryDocument(), "SummaryDocument")
     try roundTrip(SampleData.participants(), "[Participant]")
     try roundTrip(SampleData.segments(), "[TranscriptSegment]")
@@ -115,6 +125,29 @@ import Testing
     }
     #expect(try json(MeetingState.ready) == #""ready""#)
     #expect(try json(MeetingState.failed(reason: "boom")) == #"{"failed":"boom"}"#)
+    #expect(try json(RecordingEndReason.manual) == #""manual""#)
+    #expect(try json(RecordingEndReason.callEnded(appName: "Zen")) == #"{"callEnded":"Zen"}"#)
+    #expect(
+      try json(RecordingEndReason.callEnded(appName: nil)) == #""callEnded""#,
+      "a nil payload is the bare case name, not a JSON null")
+    #expect(try json(RecordingEndReason.deviceLost) == #""deviceLost""#)
+    #expect(try json(TitleOrigin.default) == #""default""#)
+    #expect(
+      try StenoJSON.decode(RecordingEndReason.self, from: Data(#"{"callEnded":null}"#.utf8))
+        == .callEnded(appName: nil), "a null payload reads as nil too")
+    #expect(throws: DecodingError.self) {
+      try StenoJSON.decode(RecordingEndReason.self, from: Data(#""paused""#.utf8))
+    }
+    #expect(throws: DecodingError.self) {
+      try StenoJSON.decode(TitleOrigin.self, from: Data(#""oracle""#.utf8))
+    }
+    #expect(RecordingEndReason.callEnded(appName: nil).kind == .callEnded)
+    #expect(
+      RecordingEndReason.Kind.allCases.map(\.rawValue) == [
+        "manual", "callEnded", "deviceLost", "quit",
+      ]
+    )
+    #expect(TitleOrigin.allCases.map(\.rawValue) == ["default", "calendar", "summary", "user"])
     #expect(try json(AudioRetention.keepDays(30)) == #"{"keepDays":30}"#)
     #expect(try json(AudioRetention.keepForever) == #""keepForever""#)
     #expect(try json(DeliveryStatus.failed("vault missing")) == #"{"failed":"vault missing"}"#)
@@ -140,6 +173,33 @@ import Testing
         "recording", "queued", "processing", "ready", "failed",
       ])
     #expect(HandoverState.complete(meetingID: SampleData.uuid(1)).kind == .complete)
+  }
+
+  /// The two `v3` fields stay out of `meeting.json` until they carry
+  /// something: nil `endReason` and the `.default` origin are omitted, and a
+  /// document without them (every fixture, every export written before `v3`)
+  /// reads back with exactly those values.
+  @Test func theV3FieldsAreOmittedWhenDefaultAndReadAsDefaultWhenAbsent() throws {
+    let plain = String(decoding: try StenoJSON.encode(SampleData.meeting()), as: UTF8.self)
+    #expect(!plain.contains("endReason"))
+    #expect(!plain.contains("titleOrigin"))
+    let decoded = try StenoJSON.decode(Meeting.self, from: Data(plain.utf8))
+    #expect(decoded.endReason == nil)
+    #expect(decoded.titleOrigin == .default)
+
+    var chosen = SampleData.meeting()
+    chosen.titleOrigin = .user
+    chosen.endReason = .quit
+    let text = String(decoding: try StenoJSON.encode(chosen), as: UTF8.self)
+    #expect(text.contains(#""titleOrigin" : "user""#))
+    #expect(text.contains(#""endReason" : "quit""#))
+    #expect(try StenoJSON.decode(Meeting.self, from: Data(text.utf8)) == chosen)
+
+    let fixture = try Data(
+      contentsOf: Fixtures.root.appendingPathComponent("meetings/produktstrategie.json"))
+    let export = try StenoJSON.decode(MeetingExport.self, from: fixture)
+    #expect(export.meeting.endReason == nil)
+    #expect(export.meeting.titleOrigin == .default)
   }
 
   @Test func anUnknownStateInTheDatabaseFailsTheFetchInsteadOfBecomingFailed() async throws {

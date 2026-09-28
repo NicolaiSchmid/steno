@@ -1,15 +1,48 @@
 import Foundation
 import StenoCore
 
+/// The devices a capture runs on, as resolved at one moment: the default
+/// system output's UID, the microphone's UID (nil when no microphone lane is
+/// recorded, or none resolves), whether the two devices the capture started
+/// on are still alive, and the aggregate's rate. Pure, so the comparison the
+/// live backend makes after a notification burst is unit-tested without a
+/// HAL.
+struct DeviceSnapshot: Sendable, Equatable {
+  var outputUID: String?
+  var inputUID: String?
+  var outputAlive: Bool
+  var inputAlive: Bool
+  var sampleRate: Double
+
+  /// The first thing that differs from `baseline`, or nil when the devices
+  /// are the same, alive and at the same rate. Loss comes before movement:
+  /// a dead device is why a default moved.
+  func difference(from baseline: DeviceSnapshot) -> DeviceChangeReason? {
+    if baseline.outputAlive, !outputAlive { return .outputDeviceGone }
+    if baseline.inputAlive, !inputAlive { return .inputDeviceGone }
+    if outputUID != baseline.outputUID { return .defaultOutputChanged }
+    if inputUID != baseline.inputUID { return .defaultInputChanged }
+    if sampleRate != baseline.sampleRate { return .sampleRateChanged }
+    return nil
+  }
+}
+
 #if canImport(CoreAudio)
   import CoreAudio
+  import os
 
   /// The real backend: process tap + private aggregate device + one IOProc.
   /// `.system` comes from the tap, `.mic` and `.mixed` from the first channel
   /// of the selected input device, which the aggregate resamples to the
-  /// output device's 48 kHz clock. A default-device change or a sub-device
-  /// dying reports device loss; the session then stops cleanly (rebuilding
-  /// mid-meeting is v1.1).
+  /// output device's 48 kHz clock.
+  ///
+  /// Device notifications (a default device moving, a sub-device dying, the
+  /// aggregate leaving 48 kHz) are coalesced for `coalesceDelay` on
+  /// `listenerQueue`, then the devices are resolved again and compared with
+  /// what the capture started on. Nothing changed means the burst is logged
+  /// and ignored; otherwise the sink gets one `DeviceChangeReason` and the
+  /// session rebuilds by calling `stop()` and `start` again. Nothing here
+  /// runs on the IO thread.
   ///
   /// Teardown order: `AudioDeviceStop`, `AudioDeviceDestroyIOProcID`,
   /// `AudioHardwareDestroyAggregateDevice`, `AudioHardwareDestroyProcessTap`.
@@ -20,7 +53,20 @@ import StenoCore
       var aggregate: AggregateDevice
       var runner: IOProcRunner
       var listeners: [AudioPropertyListenerToken]
+      var sink: LaneFrameSink
+      /// The devices the capture started on.
+      var baseline: DeviceSnapshot
+      var outputID: AudioObjectID
+      var micID: AudioObjectID?
+      var inputDeviceUID: String?
+      /// The coalesced look at the devices, if one is scheduled.
+      var pending: DispatchWorkItem?
     }
+
+    /// How long a burst of notifications settles before the devices are
+    /// resolved once. A Bluetooth profile switch fires several within it.
+    static let coalesceDelay: DispatchTimeInterval = .milliseconds(500)
+    private static let log = Logger(subsystem: "uno.schmid.steno", category: "capture")
 
     private let lock = NSLock()
     private var active: Active?
@@ -134,14 +180,19 @@ import StenoCore
         throw error
       }
 
-      // Device loss: the default devices changing, or a sub-device dying. The
-      // tap mirrors the default output device (where the call plays), the
-      // clock follows the system output device (alerts); a change of either
-      // moves the far-end alignment, so both are watched.
+      // Device changes: the default devices moving, a sub-device dying, the
+      // aggregate leaving 48 kHz (a Bluetooth profile switch can change the
+      // rate without moving a default). The tap mirrors the default output
+      // device (where the call plays), the clock follows the system output
+      // device (alerts); a change of either moves the far-end alignment, so
+      // both are watched. The listener carries no value, so every
+      // notification is judged by resolving the devices again after the
+      // burst settles.
       var watched: [(AudioObjectID, AudioObjectPropertySelector)] = [
         (.system, kAudioHardwarePropertyDefaultSystemOutputDevice),
         (.system, kAudioHardwarePropertyDefaultOutputDevice),
         (AudioObjectID(output.id), kAudioDevicePropertyDeviceIsAlive),
+        (aggregate.deviceID, kAudioDevicePropertyNominalSampleRate),
       ]
       if let mic {
         watched.append((AudioObjectID(mic.id), kAudioDevicePropertyDeviceIsAlive))
@@ -149,9 +200,10 @@ import StenoCore
           watched.append((.system, kAudioHardwarePropertyDefaultInputDevice))
         }
       }
-      let lost: @Sendable () -> Void = { sink.reportDeviceLost() }
       let listeners = watched.compactMap { object, selector in
-        try? object.addListener(AudioObjectPropertyAddress(selector), queue: listenerQueue, lost)
+        try? object.addListener(AudioObjectPropertyAddress(selector), queue: listenerQueue) {
+          [weak self] in self?.noteNotification(selector)
+        }
       }
 
       // The far-end delay: the microphone's input path plus the loudspeaker's
@@ -164,7 +216,13 @@ import StenoCore
         } ?? 0
       let outputLatency = AudioDevices.latencyFrames(
         of: AudioObjectID(output.id), scope: kAudioObjectPropertyScopeOutput)
-      active = Active(tap: tap, aggregate: aggregate, runner: runner, listeners: listeners)
+      active = Active(
+        tap: tap, aggregate: aggregate, runner: runner, listeners: listeners, sink: sink,
+        baseline: DeviceSnapshot(
+          outputUID: output.uid, inputUID: mic?.uid, outputAlive: true, inputAlive: mic != nil,
+          sampleRate: sampleRate),
+        outputID: AudioObjectID(output.id), micID: mic.map { AudioObjectID($0.id) },
+        inputDeviceUID: inputDeviceUID)
       return CaptureStream(
         sampleRate: sampleRate, inputLatencyFrames: inputLatency,
         outputLatencyFrames: outputLatency, layout: layout)
@@ -176,10 +234,84 @@ import StenoCore
       self.active = nil
       lock.unlock()
       guard let active else { return }
+      active.pending?.cancel()
       active.runner.stop()
       for listener in active.listeners { listener.remove() }
       active.aggregate.destroy()
       active.tap?.destroy()
+    }
+
+    /// A property listener fired, on `listenerQueue`. Bluetooth transitions
+    /// fire several in a burst, some of which change nothing, so one look at
+    /// the devices is scheduled `coalesceDelay` after the last notification
+    /// and the burst is judged as a whole.
+    private func noteNotification(_ selector: AudioObjectPropertySelector) {
+      lock.lock()
+      defer { lock.unlock() }
+      guard var active else { return }
+      active.pending?.cancel()
+      let item = DispatchWorkItem { [weak self] in self?.evaluateNotification(selector) }
+      active.pending = item
+      self.active = active
+      listenerQueue.asyncAfter(deadline: .now() + Self.coalesceDelay, execute: item)
+    }
+
+    /// Resolves the devices again and compares them with the baseline. The
+    /// HAL reads run outside the lock; the report goes out only if the same
+    /// capture is still running, so a stopped backend never tells a later
+    /// recording's session about the old one's devices.
+    private func evaluateNotification(_ selector: AudioObjectPropertySelector) {
+      lock.lock()
+      guard var current = active else {
+        lock.unlock()
+        return
+      }
+      current.pending = nil
+      active = current
+      lock.unlock()
+
+      let snapshot = Self.resolveSnapshot(
+        outputID: current.outputID, micID: current.micID,
+        inputDeviceUID: current.inputDeviceUID, aggregateID: current.aggregate.deviceID)
+      let name = fourCharCode(OSStatus(bitPattern: selector))
+      guard let reason = snapshot.difference(from: current.baseline) else {
+        Self.log.info("ignored device notification \(name, privacy: .public)")
+        return
+      }
+      lock.lock()
+      let sameCapture = active?.sink === current.sink
+      lock.unlock()
+      guard sameCapture else { return }
+      Self.log.notice(
+        "device notification \(name, privacy: .public) reported \(String(describing: reason), privacy: .public)"
+      )
+      current.sink.reportDeviceChange(reason)
+    }
+
+    /// The devices as they are now: the defaults resolved again (or the
+    /// explicit input by UID), the started devices' `DeviceIsAlive`, the
+    /// aggregate's rate (0 once it is gone).
+    static func resolveSnapshot(
+      outputID: AudioObjectID, micID: AudioObjectID?, inputDeviceUID: String?,
+      aggregateID: AudioObjectID
+    ) -> DeviceSnapshot {
+      let output = try? AudioDevices.defaultSystemOutput()
+      var input: AudioDeviceInfo?
+      if micID != nil {
+        if let inputDeviceUID {
+          input = try? AudioDevices.device(uid: inputDeviceUID)
+        } else {
+          input = try? AudioDevices.defaultInput()
+        }
+      }
+      let rate =
+        (try? aggregateID.readFloat64(
+          AudioObjectPropertyAddress(kAudioDevicePropertyNominalSampleRate))) ?? 0
+      return DeviceSnapshot(
+        outputUID: output?.uid, inputUID: input?.uid,
+        outputAlive: AudioDevices.isAlive(outputID),
+        inputAlive: micID.map(AudioDevices.isAlive) ?? false,
+        sampleRate: rate)
     }
   }
 #else

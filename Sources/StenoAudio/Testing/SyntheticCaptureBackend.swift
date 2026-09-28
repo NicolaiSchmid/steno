@@ -36,17 +36,31 @@ public struct SyntheticLane: Sendable, Equatable {
 /// a producer thread through the same `LaneFrameSink` protocol the IOProc
 /// uses, in callbacks of `callbackFrames`. By default it runs as fast as the
 /// rings accept (a 30 s recording takes milliseconds); `realTime: true`
-/// paces it at wall-clock speed for the CLI. `loseDeviceAfter` reports device
-/// loss at that point and stops delivering, like an unplugged microphone.
+/// paces it at wall-clock speed for the CLI.
+///
+/// Device changes, so the session's rebuild runs on CI exactly as in
+/// production: `changeDeviceAfter` reports `.defaultInputChanged` after
+/// exactly that many seconds of one `start` and ends the producer thread,
+/// like a microphone that moved; it fires `changesRemaining` times per backend
+/// instance (one by default), not once per `start`, or the rebuilt backend
+/// would report again and loop. `restartsThatFail` makes that many `start`
+/// calls after the first throw `CaptureError.inputDeviceUnavailable`, the
+/// device still absent; `streamAfterRestart` is what every restart reports
+/// (new latencies), `.synthetic` when nil. `seconds` counts per `start`, so a
+/// restarted backend delivers again, and `framesDelivered` sums over starts.
 public final class SyntheticCaptureBackend: CaptureBackend, @unchecked Sendable {
   public let signals: [AudioLane: SyntheticLane]
   public let seconds: TimeInterval
   public let callbackFrames: Int
   public let realTime: Bool
-  public let loseDeviceAfter: TimeInterval?
+  public let changeDeviceAfter: TimeInterval?
+  public let streamAfterRestart: CaptureStream?
   private let sampleRate = StenoAudio.sampleRate
   private let lock = NSLock()
   private var thread: Thread?
+  private var changesRemaining: Int
+  private var failingRestartsRemaining: Int
+  private var startCount = 0
   private let stopRequested = Atomic<Bool>(false)
   private let finished = DispatchSemaphore(value: 0)
   private let framesDeliveredCount = Atomic<Int>(0)
@@ -54,34 +68,49 @@ public final class SyntheticCaptureBackend: CaptureBackend, @unchecked Sendable 
 
   public init(
     signals: [AudioLane: SyntheticLane], seconds: TimeInterval, callbackFrames: Int = 512,
-    realTime: Bool = false, loseDeviceAfter: TimeInterval? = nil
+    realTime: Bool = false, changeDeviceAfter: TimeInterval? = nil, changesRemaining: Int = 1,
+    restartsThatFail: Int = 0, streamAfterRestart: CaptureStream? = nil
   ) {
     self.signals = signals
     self.seconds = seconds
     self.callbackFrames = callbackFrames
     self.realTime = realTime
-    self.loseDeviceAfter = loseDeviceAfter
+    self.changeDeviceAfter = changeDeviceAfter
+    self.changesRemaining = changesRemaining
+    self.failingRestartsRemaining = restartsThatFail
+    self.streamAfterRestart = streamAfterRestart
   }
 
   /// The plan's spelling: one tone per lane at amplitude 0.5.
   public convenience init(
     lanes: [AudioLane], tone: [AudioLane: Double], seconds: TimeInterval,
-    loseDeviceAfter: TimeInterval? = nil, realTime: Bool = false
+    changeDeviceAfter: TimeInterval? = nil, changesRemaining: Int = 1, restartsThatFail: Int = 0,
+    streamAfterRestart: CaptureStream? = nil, realTime: Bool = false
   ) {
     var signals: [AudioLane: SyntheticLane] = [:]
     for lane in lanes {
       signals[lane] = tone[lane].map { SyntheticLane(frequency: $0) } ?? .silence
     }
     self.init(
-      signals: signals, seconds: seconds, realTime: realTime, loseDeviceAfter: loseDeviceAfter)
+      signals: signals, seconds: seconds, realTime: realTime, changeDeviceAfter: changeDeviceAfter,
+      changesRemaining: changesRemaining, restartsThatFail: restartsThatFail,
+      streamAfterRestart: streamAfterRestart)
   }
 
-  /// Frames delivered to the sink so far (including refused callbacks).
+  /// Frames delivered to the sink over every `start` so far (including
+  /// refused callbacks).
   public var framesDelivered: Int { framesDeliveredCount.load(ordering: .relaxed) }
 
-  /// Suspends until the producer thread has delivered `seconds` of audio,
-  /// reported device loss or been stopped. Tests wait on this instead of
-  /// wall time.
+  /// `start` calls so far, the failed ones included.
+  public var starts: Int {
+    lock.lock()
+    defer { lock.unlock() }
+    return startCount
+  }
+
+  /// Suspends until the producer thread of the latest `start` has delivered
+  /// `seconds` of audio, reported a device change or been stopped. Tests
+  /// wait on this instead of wall time.
   public func waitUntilFinished() async {
     await completion.wait()
   }
@@ -94,23 +123,37 @@ public final class SyntheticCaptureBackend: CaptureBackend, @unchecked Sendable 
     guard thread == nil else {
       throw CaptureError.invalidState("synthetic backend already started")
     }
+    let isRestart = startCount > 0
+    startCount += 1
+    if isRestart, failingRestartsRemaining > 0 {
+      failingRestartsRemaining -= 1
+      throw CaptureError.inputDeviceUnavailable
+    }
     stopRequested.store(false, ordering: .releasing)
     completion.reset()
     let generator = Generator(
       lanes: lanes, signals: signals, sampleRate: sampleRate, callbackFrames: callbackFrames)
     let totalFrames = Int(seconds * sampleRate)
-    let lossFrame = loseDeviceAfter.map { Int($0 * sampleRate) }
+    let changeFrame =
+      changesRemaining > 0 ? changeDeviceAfter.map { Int($0 * sampleRate) } : nil
     let realTime = self.realTime
     let callbackFrames = self.callbackFrames
+    let deliveredBefore = framesDeliveredCount.load(ordering: .relaxed)
     let thread = Thread { [self] in
       var delivered = 0
       let start = DispatchTime.now().uptimeNanoseconds
       while delivered < totalFrames, !stopRequested.load(ordering: .acquiring) {
-        if let lossFrame, delivered >= lossFrame {
-          sink.reportDeviceLost()
+        if let changeFrame, delivered >= changeFrame {
+          lock.lock()
+          changesRemaining -= 1
+          lock.unlock()
+          sink.reportDeviceChange(.defaultInputChanged)
           break
         }
-        let frames = min(callbackFrames, totalFrames - delivered)
+        // The callback before a change is clipped to it, so the change lands
+        // on the exact frame and a test can count what each start delivered.
+        var frames = min(callbackFrames, totalFrames - delivered)
+        if let changeFrame { frames = min(frames, changeFrame - delivered) }
         if realTime {
           let due = start + UInt64(Double(delivered) / sampleRate * 1_000_000_000)
           let now = DispatchTime.now().uptimeNanoseconds
@@ -132,7 +175,7 @@ public final class SyntheticCaptureBackend: CaptureBackend, @unchecked Sendable 
           sink.endCallback()
         }
         delivered += frames
-        framesDeliveredCount.store(delivered, ordering: .relaxed)
+        framesDeliveredCount.store(deliveredBefore + delivered, ordering: .relaxed)
       }
       completion.finish()
       finished.signal()
@@ -141,7 +184,7 @@ public final class SyntheticCaptureBackend: CaptureBackend, @unchecked Sendable 
     thread.qualityOfService = .userInteractive
     self.thread = thread
     thread.start()
-    return .synthetic
+    return isRestart ? (streamAfterRestart ?? .synthetic) : .synthetic
   }
 
   public func stop() {

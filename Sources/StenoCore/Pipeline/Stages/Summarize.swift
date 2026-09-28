@@ -29,6 +29,7 @@ extension ProcessingPipeline {
       updated.summary?.templateID = template.id
       if meeting.calendarEventID == nil, !output.title.isEmpty {
         updated.title = output.title
+        updated.titleOrigin = .summary
       }
       if let language = output.language { updated.language = language }
       updated.llmUsage = (meeting.llmUsage ?? .zero) + output.usage
