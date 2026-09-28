@@ -241,7 +241,8 @@ import Testing
     let folders = try FileManager.default.contentsOfDirectory(atPath: meetings.path)
     #expect(folders.count == 1)
     let slug = try #require(folders.first)
-    #expect(slug.hasSuffix("-summary-of-sweep"))
+    #expect(
+      slug.hasSuffix("-sweep"), "the folder is named after the meeting title, not a fake summary")
     let files = try FileManager.default.contentsOfDirectory(
       atPath: meetings.appendingPathComponent(slug).path
     ).sorted()
