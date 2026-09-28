@@ -99,8 +99,7 @@ final class SettingsSectionTests: XCTestCase {
     XCTAssertEqual(Mode.keepForever.title(days: 30), "Forever")
     XCTAssertEqual(Mode.keepDays.title(days: 14), "For 14 days")
     XCTAssertEqual(Mode.deleteAfterProcessing.title(days: 30), "Until processed, then delete")
-    XCTAssertTrue(Mode.keepDays.footnote(days: 14).contains("14 days"))
-    XCTAssertTrue(Mode.deleteAfterProcessing.footnote(days: 1).contains("stay"))
+    XCTAssertEqual(Mode.keepDays.title(days: 1), "For 1 day")
     XCTAssertEqual(
       AudioSettingsViewModel.FolderUsage.bytes(4_200_000_000).text.hasPrefix("Recordings use "),
       true)

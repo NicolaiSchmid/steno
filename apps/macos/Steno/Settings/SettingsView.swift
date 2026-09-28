@@ -215,16 +215,6 @@ struct RecordingSettingsView: View {
           choose: { url in Task { await model.setAudioFolder(url) } },
           reveal: { model.revealFolder() })
         Footnote(model.folderUsage.text)
-        Picker(
-          "Keep recordings",
-          selection: .action(
-            { model.retentionMode },
-            { mode in await model.setRetention(mode: mode, days: model.retentionDays) })
-        ) {
-          ForEach(AudioSettingsViewModel.RetentionMode.allCases) { mode in
-            Text(mode.title(days: model.retentionDays)).tag(mode)
-          }
-        }
         HStack {
           Picker(
             "Keep recordings",
@@ -242,12 +232,12 @@ struct RecordingSettingsView: View {
               value: .action(
                 { model.retentionDays },
                 { days in await model.setRetention(mode: .keepDays, days: days) }),
-              in: AudioSettingsViewModel.dayRange)
+              in: AudioSettingsViewModel.dayRange
+            )
             .labelsHidden()
           }
         }
-        Footnote(
-          model.retentionFootnote + " Short voice samples stay until you have named the speaker.")
+        Footnote(model.footnote + " Short voice samples stay until you have named the speaker.")
       }
     }
   }
@@ -572,10 +562,9 @@ struct PairingSheet: View {
             // A scanner needs a white quiet zone around the code in both
             // appearances, so this is the one surface that is not a veil.
             .background(Color.white)
-            .clipShape(RoundedRectangle(cornerRadius: Theme.Space.radius, style: .continuous))
+            .clipShape(Theme.Radius.md.shape)
             .overlay(
-              RoundedRectangle(cornerRadius: Theme.Space.radius, style: .continuous)
-                .strokeBorder(Color.stenoBorder, lineWidth: Theme.Space.hairline)
+              Theme.Radius.md.shape.hairline()
             )
             .accessibilityLabel("Pairing code for the Steno iPhone app")
         }

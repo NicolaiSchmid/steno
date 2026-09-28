@@ -4,11 +4,15 @@ import StenoAudio
 import StenoCore
 
 /// Recording: the two recording permissions, the input device, the
-/// recordings folder with its size, and the default retention.
+/// recordings folder with its disk usage, and the "Keep recordings" rule.
+/// Switching the rule to Forever keeps every recording still on disk
+/// (`RetentionSweep.keepAll()`); a shorter rule applies to new recordings
+/// only.
 @MainActor
 @Observable
 final class AudioSettingsViewModel: SettingsSectionModel {
-  /// Picker order: the safe choice first, the destructive one last.
+  /// The picker's options, in display order: the safe choice first, the
+  /// destructive one last.
   enum RetentionMode: String, CaseIterable, Identifiable, Sendable {
     case keepForever
     case keepDays
@@ -16,28 +20,18 @@ final class AudioSettingsViewModel: SettingsSectionModel {
 
     var id: String { rawValue }
 
-    /// The option's label; the day count is spelled out for `keepDays`.
+    /// The option label; the days option shows the stored number.
     func title(days: Int) -> String {
       switch self {
       case .keepForever: "Forever"
-      case .keepDays: "For \(days) days"
+      case .keepDays: "For \(days) \(days == 1 ? "day" : "days")"
       case .deleteAfterProcessing: "Until processed, then delete"
-      }
-    }
-
-    /// One sentence under the picker, as the retention plan words it.
-    func footnote(days: Int) -> String {
-      switch self {
-      case .keepForever:
-        "Recordings stay in the folder above until you delete a meeting."
-      case .keepDays:
-        "Each recording is deleted \(days) days after it was processed and exported. Transcripts, summaries and exports are never deleted by this rule."
-      case .deleteAfterProcessing:
-        "Each recording is deleted as soon as it was transcribed, summarised and exported. Transcripts, summaries and exports stay."
       }
     }
   }
 
+  /// The recordings folder's logical size, measured off the main actor on
+  /// `load()` and after the folder changes.
   enum FolderUsage: Equatable, Sendable {
     case measuring
     case bytes(Int64)
@@ -46,21 +40,23 @@ final class AudioSettingsViewModel: SettingsSectionModel {
     var text: String {
       switch self {
       case .measuring: "Measuring…"
-      case .bytes(let bytes):
-        "Recordings use \(ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file))"
+      case .bytes(let bytes): "Recordings use \(ByteCountFormatter.fileSize(bytes))"
       case .unavailable: "Size unavailable"
       }
     }
   }
 
+  static let dayRange = 1...3650
   static let recordingPermissions: [PermissionKind] = [.microphone, .systemAudio]
 
   private(set) var devices: [AudioDeviceInfo] = []
   private(set) var inputDeviceUID: String?
   private(set) var audioFolder: URL = Settings.defaultAudioFolder
   private(set) var folderUsage: FolderUsage = .measuring
-  private(set) var retentionMode: RetentionMode = .keepDays
+  private(set) var retentionMode: RetentionMode = .keepForever
   private(set) var retentionDays = 30
+  /// How many recordings the last switch to Forever kept; nil until then.
+  private(set) var keptForever: Int?
   private(set) var permissions: [PermissionKind: PermissionState] = [:]
   private(set) var requesting: PermissionKind?
   var error: String?
@@ -68,8 +64,13 @@ final class AudioSettingsViewModel: SettingsSectionModel {
   private let environment: AppEnvironment
   /// Lists the input devices; the live one asks Core Audio.
   var listInputs: @Sendable () throws -> [AudioDeviceInfo] = { try AudioDevices.inputs() }
-  /// Sums the folder; the live one walks the file system.
-  var measureFolder: @Sendable (URL) throws -> Int64 = { try AudioSettingsViewModel.folderSize($0) }
+  /// Sums the folder; the live one is `AudioFolderUsage.measure`. A folder
+  /// that does not exist yet holds no recordings and reads as zero; one
+  /// that cannot be read throws and reads as "unavailable".
+  var measureFolder: @Sendable (URL) throws -> Int64 = { folder in
+    guard FileManager.default.fileExists(atPath: folder.path) else { return 0 }
+    return try AudioFolderUsage.measure(folder)
+  }
 
   init(environment: AppEnvironment) {
     self.environment = environment
@@ -86,6 +87,8 @@ final class AudioSettingsViewModel: SettingsSectionModel {
 
   /// The sentence under the picker for the current selection.
   var footnote: String { retention.footnote }
+
+  var folderName: String { audioFolder.lastPathComponent }
 
   func load() async {
     do {
@@ -107,10 +110,6 @@ final class AudioSettingsViewModel: SettingsSectionModel {
     await measureFolderUsage()
   }
 
-  var folderName: String { audioFolder.lastPathComponent }
-
-  var retentionFootnote: String { retentionMode.footnote(days: retentionDays) }
-
   // MARK: Devices
 
   func refreshDevices() {
@@ -120,20 +119,6 @@ final class AudioSettingsViewModel: SettingsSectionModel {
       devices = []
       fail("Microphones could not be listed.", error)
     }
-  }
-
-  /// `AudioFolderUsage.measure` off the main actor. A folder that does not
-  /// exist yet holds no recordings and reads as zero; one that cannot be
-  /// read is "unavailable".
-  func measureFolderUsage() async {
-    folderUsage = .measuring
-    let folder = audioFolder
-    let measured = await Task.detached(priority: .utility) { () -> Int64? in
-      guard FileManager.default.fileExists(atPath: folder.path) else { return 0 }
-      return try? AudioFolderUsage.measure(folder)
-    }.value
-    guard folder == audioFolder else { return }
-    folderUsage = measured.map(FolderUsage.bytes) ?? .unavailable
   }
 
   func setInputDevice(_ uid: String?) async {
@@ -153,6 +138,8 @@ final class AudioSettingsViewModel: SettingsSectionModel {
     NSWorkspace.shared.activateFileViewerSelecting([audioFolder])
   }
 
+  /// Measures off the main actor; a result for a folder that changed
+  /// meanwhile is dropped.
   func measureFolderUsage() async {
     folderUsage = .measuring
     let folder = audioFolder
@@ -168,26 +155,10 @@ final class AudioSettingsViewModel: SettingsSectionModel {
     folderUsage = result
   }
 
-  /// Every regular file under `url`, summed; a missing folder is zero bytes.
-  nonisolated static func folderSize(_ url: URL) throws -> Int64 {
-    let manager = FileManager.default
-    guard manager.fileExists(atPath: url.path) else { return 0 }
-    guard
-      let enumerator = manager.enumerator(
-        at: url, includingPropertiesForKeys: [.fileSizeKey, .isRegularFileKey],
-        options: [.skipsHiddenFiles])
-    else { throw CocoaError(.fileReadUnknown) }
-    var total: Int64 = 0
-    for case let file as URL in enumerator {
-      let values = try file.resourceValues(forKeys: [.fileSizeKey, .isRegularFileKey])
-      guard values.isRegularFile == true else { continue }
-      total += Int64(values.fileSize ?? 0)
-    }
-    return total
-  }
-
   // MARK: Retention
 
+  /// Saves the rule; Forever also keeps every recording still on disk and
+  /// reports how many in `keptForever`. Nothing is ever deleted here.
   func setRetention(mode: RetentionMode, days: Int) async {
     retentionMode = mode
     retentionDays = min(max(Self.dayRange.lowerBound, days), Self.dayRange.upperBound)
@@ -197,7 +168,7 @@ final class AudioSettingsViewModel: SettingsSectionModel {
     do {
       keptForever = try await environment.sweep.keepAll()
     } catch {
-      self.error = "Recordings could not be marked as kept: \(error)"
+      fail("Recordings could not be marked as kept.", error)
     }
   }
 

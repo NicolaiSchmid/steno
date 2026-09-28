@@ -557,7 +557,7 @@ final class SettingsViewModelTests: XCTestCase {
     XCTAssertTrue(model.allPermissionsGranted)
     XCTAssertEqual(model.folderUsage, .bytes(4_200))
     XCTAssertEqual(model.folderName, "audio")
-    XCTAssertTrue(model.retentionFootnote.contains("30 days"))
+    XCTAssertTrue(model.footnote.hasPrefix("Recordings stay in the folder above"), model.footnote)
 
     let permissions = try XCTUnwrap(environment.permissions as? FakePermissions)
     permissions.states[.systemAudio] = .unknown
@@ -573,18 +573,6 @@ final class SettingsViewModelTests: XCTestCase {
     await model.measureFolderUsage()
     XCTAssertEqual(model.folderUsage, .unavailable)
     XCTAssertNil(model.error)
-  }
-
-  func testFolderSizeSumsRegularFiles() throws {
-    let folder = try TestSupport.temporaryDirectory("steno-size")
-    defer { try? FileManager.default.removeItem(at: folder) }
-    try Data(count: 10).write(to: folder.appendingPathComponent("a.caf"))
-    let nested = folder.appendingPathComponent("nested", isDirectory: true)
-    try FileManager.default.createDirectory(at: nested, withIntermediateDirectories: true)
-    try Data(count: 5).write(to: nested.appendingPathComponent("b.caf"))
-    XCTAssertEqual(try AudioSettingsViewModel.folderSize(folder), 15)
-    XCTAssertEqual(
-      try AudioSettingsViewModel.folderSize(folder.appendingPathComponent("missing")), 0)
   }
 
   func testGeneralShowsCalendarAndUpdates() async throws {

@@ -28,14 +28,10 @@ extension SettingsSectionModel {
   }
 }
 
-/// The few sizes the settings plan names that `Theme` has no token for yet:
-/// the sidebar icon well and its radius (the visual redesign's `Radius.sm`),
-/// the gap between the two lines of a row (its `Space.xxs`) and the QR
-/// code's edge. Everything else comes from `Theme.Space`.
+/// Sizes the Settings window alone needs; everything else comes from
+/// `Theme`. The icon well matches the design system's icon button.
 enum SettingsMetrics {
-  static let iconWell: CGFloat = 28
-  static let iconWellRadius: CGFloat = 6
-  static let lineGap: CGFloat = 2
+  static let iconWell: CGFloat = Theme.Control.iconButtonSize
   static let qrCodeSize: CGFloat = 220
 }
 
@@ -83,7 +79,7 @@ struct SettingsRowLabel: View {
   var subtitle: String? = nil
 
   var body: some View {
-    VStack(alignment: .leading, spacing: SettingsMetrics.lineGap) {
+    VStack(alignment: .leading, spacing: Theme.Space.xxs) {
       Text(title)
         .font(.steno(Theme.TextSize.xs))
       if let subtitle {
@@ -245,13 +241,12 @@ struct SettingsSidebarRow: View {
         .foregroundStyle(titleStyle)
         .frame(width: SettingsMetrics.iconWell, height: SettingsMetrics.iconWell)
         .background(
-          RoundedRectangle(cornerRadius: SettingsMetrics.iconWellRadius, style: .continuous)
+          Theme.Radius.sm.shape
             .fill(Color.stenoSecondary)
         )
         .overlay(
-          RoundedRectangle(cornerRadius: SettingsMetrics.iconWellRadius, style: .continuous)
-            .strokeBorder(Color.stenoBorder, lineWidth: Theme.Space.hairline))
-      VStack(alignment: .leading, spacing: SettingsMetrics.lineGap) {
+          Theme.Radius.sm.shape.hairline())
+      VStack(alignment: .leading, spacing: Theme.Space.xxs) {
         Text(section.title)
           .font(.steno(Theme.TextSize.xs, weight: .medium))
           .foregroundStyle(titleStyle)

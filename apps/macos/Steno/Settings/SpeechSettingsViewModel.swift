@@ -96,9 +96,7 @@ final class SpeechSettingsViewModel: SettingsSectionModel {
 
   /// "Installed · 485 MB", "Downloading… 40%", "Not downloaded · 485 MB".
   func statusText(of asset: ModelAsset) -> String {
-    func size(_ bytes: Int64) -> String {
-      ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file)
-    }
+    let size = ByteCountFormatter.fileSize
     switch state(of: asset) {
     case .absent, .failed:
       return "Not downloaded · \(size(asset.approximateBytes))"
