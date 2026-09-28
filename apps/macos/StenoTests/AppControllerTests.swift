@@ -208,7 +208,9 @@ final class AppControllerTests: XCTestCase {
       seed: false,
       makeSpeechEngine: { () -> any SpeechEngine in
         if firstBuild.take() { return FakeSpeechEngine() }
-        return GatedSpeechEngine(gate: gate)
+        var held = FakeSpeechEngine()
+        held.onTranscribe = { await gate.wait() }
+        return held
       })
     let recorder = RecordingController(environment: environment)
     await recorder.start(mode: .inPerson)

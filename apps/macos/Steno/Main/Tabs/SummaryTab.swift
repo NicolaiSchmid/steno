@@ -15,9 +15,7 @@ struct SummaryTab: View {
   var body: some View {
     ScrollView {
       VStack(alignment: .leading, spacing: Theme.Space.lg) {
-        if let progress, let meeting = model.meeting {
-          ProcessingCard(entry: progress, meeting: meeting)
-        }
+        ProcessingCardSlot(progress: progress, meeting: model.meeting)
         let sections = model.summarySections
         if sections.isEmpty {
           if progress == nil {

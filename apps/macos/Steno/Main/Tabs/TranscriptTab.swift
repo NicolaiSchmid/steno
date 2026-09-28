@@ -13,9 +13,7 @@ struct TranscriptTab: View {
   var body: some View {
     ScrollView {
       LazyVStack(alignment: .leading, spacing: Theme.Space.lg) {
-        if let progress, let meeting = model.meeting {
-          ProcessingCard(entry: progress, meeting: meeting)
-        }
+        ProcessingCardSlot(progress: progress, meeting: model.meeting)
         let turns = TranscriptTurns.group(model.export?.segments ?? [])
         if turns.isEmpty, progress == nil {
           PendingText(

@@ -46,7 +46,10 @@ final class AppEnvironmentTests: XCTestCase {
     let environment = try await TestSupport.environment(
       seed: false,
       makeSpeechEngine: { () -> any SpeechEngine in
-        firstBuild.take() ? GatedSpeechEngine(gate: gate) : FakeSpeechEngine()
+        guard firstBuild.take() else { return FakeSpeechEngine() }
+        var held = FakeSpeechEngine()
+        held.onTranscribe = { await gate.wait() }
+        return held
       })
     let recorder = RecordingController(environment: environment)
     await recorder.start(mode: .call)

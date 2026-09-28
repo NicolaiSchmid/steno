@@ -161,6 +161,25 @@ final class AppEnvironment {
     }
   }
 
+  /// Loads the speech engine and the diarizer on the current pipeline while
+  /// a recording runs, so the cold model load is over before the meeting
+  /// ends and never sits in the wait the owner watches. Only when both
+  /// models are on disk, because a `prepare()` may download and nothing
+  /// downloads during a call; the guard reads the engine from the setting,
+  /// not from the pipeline's engine, so the preview's `FakeSpeechEngine` is
+  /// guarded by the `parakeet-v3` marker files like the real one. A failure
+  /// is swallowed: the run's own `prepare()` reports it, and a warning here
+  /// would sit in the menu bar during the recording for nothing the owner
+  /// can act on. A `reloadPipeline()` during the recording yields a cold
+  /// replacement, which is accepted.
+  func warmUpPipelineIfModelsInstalled() async {
+    guard let settings = try? await settings.load(),
+      let engine = try? SpeechEngineID(settingsValue: settings.speechEngineID),
+      models.isInstalled(engine.asset), models.isInstalled(.offlineDiarizer)
+    else { return }
+    try? await pipeline.warmUp()
+  }
+
   /// Core's Mac recording transaction over the current pipeline, so a
   /// reload between start and stop never strands the recording.
   func makeLocalIntake() -> LocalRecordingIntake {
@@ -251,15 +270,16 @@ final class AppEnvironment {
     return environment
   }
 
-  /// Beside `-steno-ui-testing`: the preview's `FakeSpeechEngine` holds every
-  /// `transcribe` for `uiTestingTranscribeHold` and the sample meeting is
-  /// queued for processing over a synthetic recording, so the UI test can
+  /// Beside `-steno-ui-testing`: the preview's `FakeSpeechEngine` sleeps in
+  /// every `transcribe` for `uiTestingTranscribeHold` and the sample meeting
+  /// is queued for processing over a synthetic recording, so the UI test can
   /// watch the processing card cross the transcribe stage and vanish.
   static let holdTranscribeArgument = "-steno-ui-testing-hold-transcribe"
-  /// Per lane, so the sample call stays in transcribe for twice this: long
-  /// enough for the UI test to launch, find the card and read the bar once
-  /// on a slow runner.
-  static let uiTestingTranscribeHold: Duration = .seconds(10)
+  /// Per lane, so the sample call stays in transcribe for twice this. The
+  /// run starts at launch, before the test has a window; the hold is long
+  /// enough that a slow first launch on a hosted runner still finds the
+  /// card in transcribe.
+  static let uiTestingTranscribeHold: Duration = .seconds(60)
 
   /// In-memory store seeded with StenoCore's `SampleData` meeting, the
   /// synthetic capture backend, fake engines, `FakeModelDownloader`, a fake
@@ -271,7 +291,8 @@ final class AppEnvironment {
   /// gate or observe the pipeline through `makeSpeechEngine` and
   /// `makeDiarizer` (each called once per pipeline build) and the recording
   /// start through `calendar`. Without `makeSpeechEngine` the engine is a
-  /// `FakeSpeechEngine` that honours `holdTranscribeArgument`, which also
+  /// `FakeSpeechEngine` whose `onTranscribe` sleeps for
+  /// `uiTestingTranscribeHold` under `holdTranscribeArgument`, which also
   /// queues the seeded meeting; without `makeDiarizer` the diarizer is a
   /// `FakeDiarizer`.
   static func preview(
@@ -309,7 +330,13 @@ final class AppEnvironment {
       directory: settings.modelsDirectory, downloader: FakeModelDownloader())
     let memory = CosineSpeakerMemory(store: store)
     let makeSpeechEngine: @Sendable () -> any SpeechEngine =
-      makeSpeechEngine ?? { FakeSpeechEngine(holdTranscribe: holdTranscribe) }
+      makeSpeechEngine ?? {
+        var engine = FakeSpeechEngine()
+        if let holdTranscribe {
+          engine.onTranscribe = { try await ContinuousClock().sleep(for: holdTranscribe) }
+        }
+        return engine
+      }
     let makeDiarizer: @Sendable () -> any Diarizer = makeDiarizer ?? { FakeDiarizer() }
     let makeDependencies: MakeDependencies = { _, _ in
       PipelineDependencies(

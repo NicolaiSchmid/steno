@@ -6,7 +6,7 @@ import StenoCore
 /// `TranscriptTurns`, `MeetingExport.displayName(forSpeaker:)` and
 /// `timestampText` (Transcript), `MeetingExport.assigneeName(for:)` and the
 /// priority chips (Tasks), the meeting's scratchpad (Scratchpad), the
-/// `ProcessingCard`'s title row through `ProgressPresentation.lines` while
+/// `ProcessingCard`'s title row through `ProcessingPresentation.lines` while
 /// `progress` says the meeting is queued or processing, and
 /// `PendingText.text` for a tab without content otherwise. The views add
 /// styling only; the snapshot test pins these lines for the fixture meeting.
@@ -30,7 +30,7 @@ enum TabText {
   private static func card(_ progress: ProcessingProgressModel.Entry?, elapsed: Duration)
     -> [String]
   {
-    progress.map { ProgressPresentation.lines(entry: $0, elapsed: elapsed) } ?? []
+    progress.map { ProcessingPresentation.lines(entry: $0, elapsed: elapsed) } ?? []
   }
 
   /// A tab without content: the card's lines while the meeting is queued or
@@ -39,7 +39,7 @@ enum TabText {
     _ export: MeetingExport, progress: ProcessingProgressModel.Entry?, elapsed: Duration,
     none: String, pending: String
   ) -> [String] {
-    if let progress { return ProgressPresentation.lines(entry: progress, elapsed: elapsed) }
+    if let progress { return ProcessingPresentation.lines(entry: progress, elapsed: elapsed) }
     return [PendingText.text(meeting: export.meeting, none: none, pending: pending)]
   }
 

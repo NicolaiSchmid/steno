@@ -32,13 +32,25 @@ import Testing
       #expect(rate.secondsPerUnit > 0, "\(key)")
       #expect(rate.samples == 0, "\(key)")
     }
+    for stage in PipelineStage.allCases where stage.rateKeying == .none {
+      #expect(
+        StageRates.seeds.entries[StageRates.Key(stage, StageRates.unkeyed)] != nil,
+        "an unkeyed stage is seeded under the empty key: \(stage)")
+      #expect(!StageRates.isKeyed(stage))
+    }
     #expect(Self.estimator().isSeeded())
   }
 
   @Test func remainingAtTranscribeStartIsTheSumOfTheLaterShares() {
     let estimator = Self.estimator()
-    let later = PipelineStage.allCases.drop { $0 != .transcribe }
-      .reduce(0) { $0 + estimator.expectedSeconds($1) }
+    // Spelled out rather than folded over `allCases`, so the sum is not the
+    // implementation's own expression.
+    let later =
+      estimator.expectedSeconds(.transcribe) + estimator.expectedSeconds(.diarize)
+      + estimator.expectedSeconds(.matchSpeakers) + estimator.expectedSeconds(.merge)
+      + estimator.expectedSeconds(.cleanup) + estimator.expectedSeconds(.summarize)
+      + estimator.expectedSeconds(.persist) + estimator.expectedSeconds(.deliver)
+      + estimator.expectedSeconds(.retention)
     #expect(estimator.expectedRemaining(from: .transcribe) == later)
     #expect(
       estimator.expectedRemaining(from: .transcribe, lane: 1)
@@ -53,6 +65,8 @@ import Testing
     #expect(estimator.tokens == 14_400, "four tokens per audio second until the transcript exists")
     #expect(estimator.units(.cleanup) == 14.4)
     #expect(estimator.units(.merge) == 1)
+    #expect(estimator.units(.persist) == 7200, "persist encodes every lane, so per audio second")
+    #expect(estimator.expectedSeconds(.persist) == 36, "0.005 s per audio second over two lanes")
   }
 
   @Test func oneSampleOfEveryStageMakesTheSecondEstimateExact() {
@@ -61,16 +75,14 @@ import Testing
     // reason.
     let durations: [PipelineStage: Double] = [
       .decode: 14.0625, .transcribe: 112.5, .diarize: 225, .matchSpeakers: 0.5, .merge: 0.25,
-      .cleanup: 192, .summarize: 48, .persist: 2, .deliver: 1, .retention: 0.125,
+      .cleanup: 192, .summarize: 48, .persist: 1.7578125, .deliver: 1, .retention: 0.125,
     ]
     let first = Self.estimator(tokens: 16_000)
     var rates = StageRates.seeds
     for stage in PipelineStage.allCases {
-      rates.record(
-        StageSample(
-          stage: stage, key: first.key(stage),
-          secondsPerUnit: durations[stage]! / first.units(stage),
-          recordedAt: SampleData.updatedAt))
+      rates.set(
+        first.rate(stage).absorbing(durations[stage]! / first.units(stage)), stage,
+        key: first.key(stage))
     }
     let second = Self.estimator(rates: rates, tokens: 16_000)
     for stage in PipelineStage.allCases {
@@ -92,10 +104,7 @@ import Testing
     #expect(second.samples == 2)
     #expect(abs(second.secondsPerUnit - 2.6) < 1e-12, "0.3 * 4 + 0.7 * 2")
     var rates = StageRates.seeds
-    rates.record(
-      StageSample(
-        stage: .diarize, key: StageRates.unkeyed, secondsPerUnit: 2,
-        recordedAt: SampleData.updatedAt))
+    rates.set(seed.absorbing(2), .diarize, key: StageRates.unkeyed)
     #expect(rates.rate(.diarize, key: StageRates.unkeyed) == first)
     #expect(
       rates.rate(.merge, key: StageRates.unkeyed).samples == 0, "other stages keep their seed")
@@ -145,6 +154,50 @@ import Testing
     }
   }
 
+  /// A stage that finishes faster than its rate predicted lifts the next
+  /// event's fraction to the boundary the bar already reached, but the next
+  /// window keeps its honest length: `expectedTimeToNextEvent` stays the
+  /// step of the stage that is starting, so the bar neither freezes nor
+  /// reads "a bit longer than usual" while the run is ahead.
+  @Test func anEarlyStageLiftsTheBarWithoutShorteningTheNextWindow() {
+    let estimator = Self.estimator()
+    var run = ProcessingRun(
+      estimator: estimator, stages: PipelineStage.allCases, stopwatch: Stopwatch(ManualClock()))
+    let decode = run.progress(.decode, elapsed: .zero)
+    // Decode ran three times faster than seeded.
+    let early = estimator.expectedStep(.decode) / 3
+    let transcribe = run.progress(.transcribe, lane: 0, elapsed: .seconds(early))
+    #expect(transcribe.fraction == decode.nextFraction, "lifted to the boundary the bar reached")
+    #expect(transcribe.nextFraction > transcribe.fraction)
+    #expect(
+      abs(
+        transcribe.expectedTimeToNextEvent / .seconds(1) - estimator.expectedStep(.transcribe))
+        < 1e-9, "the honest step survives the clamp")
+    #expect(
+      transcribe.estimatedRemaining == .seconds(estimator.expectedRemaining(from: .transcribe)))
+
+    // Every stage a third of its expected time: every window keeps its
+    // honest step and every stage with work ahead of it has a window.
+    var elapsed = 0.0
+    run = ProcessingRun(
+      estimator: estimator, stages: PipelineStage.allCases, stopwatch: Stopwatch(ManualClock()))
+    for stage in PipelineStage.allCases {
+      let lanes = stage == .transcribe ? estimator.lanes.count : 1
+      for lane in 0..<lanes {
+        let event = run.progress(stage, lane: lane, elapsed: .seconds(elapsed))
+        if estimator.expectedSeconds(stage) > 0 {
+          #expect(event.nextFraction > event.fraction, "\(stage) lane \(lane)")
+        }
+        let window = event.expectedTimeToNextEvent / .seconds(1)
+        let step = min(estimator.expectedStep(stage), event.estimatedRemaining / .seconds(1))
+        #expect(abs(window - step) < 1e-9, "\(stage) lane \(lane): \(window) vs \(step)")
+        #expect(event.lane == (stage == .transcribe ? lane : 0))
+        #expect(event.laneCount == (stage == .transcribe ? 2 : 1))
+        elapsed += estimator.expectedStep(stage) / 3
+      }
+    }
+  }
+
   @Test func honestFractionsFollowTheClock() {
     let estimator = Self.estimator()
     let total = estimator.expectedRemaining(from: .decode)
@@ -164,10 +217,7 @@ import Testing
   @Test func nothingLeftAndNothingElapsedReadsAsTheStart() {
     var zero = StageRates.seeds
     for stage in PipelineStage.allCases {
-      zero.record(
-        StageSample(
-          stage: stage, key: Self.estimator().key(stage), secondsPerUnit: 0,
-          recordedAt: SampleData.updatedAt))
+      zero.set(StageRate(secondsPerUnit: 0, samples: 1), stage, key: Self.estimator().key(stage))
     }
     let estimator = Self.estimator(rates: zero)
     let start = estimator.progress(.summarize, elapsed: 0, in: [.summarize, .deliver])
@@ -197,7 +247,7 @@ import Testing
   @Test func anUnknownEngineUsesTheParakeetSeedWithZeroSamples() {
     let fake = ProcessingEstimator(
       duration: 3600, lanes: [.mixed], speechEngineID: "fake-engine",
-      llmModel: StageRates.fakeModel,
+      llmModel: StageRates.noModel,
       rates: .seeds)
     #expect(fake.rate(.transcribe) == StageRates.seeds.rate(.transcribe, key: "parakeet-v3"))
     #expect(fake.rate(.transcribe).samples == 0)
@@ -206,20 +256,18 @@ import Testing
       "a model without a seed of its own uses the stage's seed")
     #expect(fake.isSeeded())
     var learned = StageRates.seeds
-    learned.record(
-      StageSample(
-        stage: .transcribe, key: "fake-engine", secondsPerUnit: 0.5,
-        recordedAt: SampleData.updatedAt))
+    learned.set(
+      learned.rate(.transcribe, key: "fake-engine").absorbing(0.5), .transcribe, key: "fake-engine")
     let second = ProcessingEstimator(
       duration: 3600, lanes: [.mixed], speechEngineID: "fake-engine",
-      llmModel: StageRates.fakeModel,
+      llmModel: StageRates.noModel,
       rates: learned)
     #expect(second.rate(.transcribe) == StageRate(secondsPerUnit: 0.5, samples: 1))
     #expect(
       learned.rate(.transcribe, key: "parakeet-v3").samples == 0,
       "the fake's sample never touches the real engine's seed")
-    #expect(ProcessingEstimator.llmModelKey(Settings()) == StageRates.fakeModel)
-    #expect(ProcessingEstimator.llmModelKey(Settings(llmModel: "")) == StageRates.fakeModel)
+    #expect(ProcessingEstimator.llmModelKey(Settings()) == StageRates.noModel)
+    #expect(ProcessingEstimator.llmModelKey(Settings(llmModel: "")) == StageRates.noModel)
     #expect(ProcessingEstimator.llmModelKey(Settings(llmModel: "qwen")) == "qwen")
     #expect(!ProcessingEstimator.learns(.decode) && ProcessingEstimator.learns(.transcribe))
     #expect(ProcessingEstimator.tokenCount(SampleData.segments()) > 0)

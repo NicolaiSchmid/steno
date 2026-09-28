@@ -1,15 +1,13 @@
 import Foundation
 import StenoAudio
 import StenoCore
-import StenoSpeech
-import os
 
 /// The running app's object graph over one `AppEnvironment`: the recorder,
 /// the detection controller, the menu bar view model, the processing
 /// progress model, pending speaker reviews, the retention sweep after
 /// processed meetings, the handover listener when phones are paired, the
-/// first-launch login item registration, and the pipeline warm-up when a
-/// recording starts.
+/// first-launch login item registration, and the environment's pipeline
+/// warm-up when a recording starts.
 @MainActor
 @Observable
 final class AppController {
@@ -30,8 +28,6 @@ final class AppController {
 
   static let loginItemRegisteredKey = "steno.loginItemRegistered"
 
-  private static let logger = Logger(subsystem: "uno.schmid.steno.mac", category: "pipeline")
-
   private let defaults: UserDefaults
 
   init(environment: AppEnvironment, defaults: UserDefaults = .standard) {
@@ -44,34 +40,9 @@ final class AppController {
     detection.startRecording = { [weak self] in await self?.recorder.start(mode: .call) }
     recorder.recordingDidChange = { [weak self] recording in
       guard let self else { return }
-      if recording { self.warmUpPipeline() }
+      // In the background: the recording must not wait for a model load.
+      if recording { Task { [environment] in await environment.warmUpPipelineIfModelsInstalled() } }
       await self.detection.recordingDidChange(recording)
-    }
-  }
-
-  /// Loads the speech engine and the diarizer while the recording runs, so
-  /// the cold model load is over before the meeting ends and never sits in
-  /// the wait the owner watches. In the background: the recording must not
-  /// wait for a CoreML compile. Only when both models are on disk, because a
-  /// `prepare()` may download and nothing downloads during a call; the guard
-  /// reads the engine from the setting, not from the pipeline's engine, so
-  /// the preview's `FakeSpeechEngine` is guarded by the `parakeet-v3` marker
-  /// files like the real one. A failure is logged and swallowed; the run's
-  /// own `prepare()` reports it. A `reloadPipeline()` during the recording
-  /// yields a cold replacement, which is accepted.
-  private func warmUpPipeline() {
-    Task { [environment] in
-      guard let settings = try? await environment.settings.load(),
-        let engine = try? SpeechEngineID(settingsValue: settings.speechEngineID),
-        environment.models.isInstalled(engine.asset),
-        environment.models.isInstalled(.offlineDiarizer)
-      else { return }
-      do {
-        try await environment.pipeline.warmUp()
-      } catch {
-        Self.logger.error(
-          "Pipeline warm-up failed: \(String(describing: error), privacy: .public)")
-      }
     }
   }
 
@@ -80,12 +51,18 @@ final class AppController {
   /// left queued or processing are processed again, the retention sweep
   /// runs, the login item is registered the first time (when the setting
   /// says so), the detector starts, the handover listener starts when a
-  /// phone is already paired, and the meeting list is observed. The event
-  /// subscription comes first so the first events of resumed runs reach
-  /// the progress model.
+  /// phone is already paired, and the meeting list is observed. The two
+  /// event subscriptions, the progress model's and this controller's, come
+  /// first so the first events of resumed runs reach both.
   func launch() async {
     guard !launched else { return }
     launched = true
+    let progressEvents = await environment.events.subscribe()
+    observers.append(
+      Task { [progress, environment] in
+        await progress.observe(
+          events: progressEvents, meetings: environment.store.observeMeetings())
+      })
     let events = await environment.events.subscribe()
     observers.append(
       Task { [weak self, environment] in
@@ -101,9 +78,8 @@ final class AppController {
             await environment.runRetentionSweep()
           case .deleted(let meetingID):
             self.pendingReviews.remove(meetingID)
-            self.progress.apply(event)
           case .progress:
-            self.progress.apply(event)
+            break
           }
         }
       })
@@ -128,11 +104,9 @@ final class AppController {
   }
 
   /// A pending review for a meeting the store no longer lists is dropped,
-  /// so a badge never points at nothing; the progress model gains an entry
-  /// for every queued or processing meeting and loses the others.
+  /// so a badge never points at nothing.
   private func meetingsChanged(_ meetings: [Meeting]) async {
     pendingReviews.formIntersection(meetings.map(\.id))
-    progress.meetingsChanged(meetings)
   }
 
   func reviewCompleted(meetingID: UUID) {

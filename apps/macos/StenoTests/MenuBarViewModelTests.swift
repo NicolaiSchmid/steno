@@ -29,19 +29,8 @@ final class MenuBarViewModelTests: XCTestCase {
     let events = await environment.events.subscribe()
     observing.append(Task { await model.observe() })
     observing.append(
-      Task {
-        for await event in events { progress.apply(event) }
-      })
-    observing.append(
-      Task {
-        do {
-          for try await meetings in environment.store.observeMeetings() {
-            progress.meetingsChanged(meetings)
-          }
-        } catch {
-          XCTFail("meeting list unavailable: \(error)")
-        }
-      })
+      Task { await progress.observe(events: events, meetings: environment.store.observeMeetings()) }
+    )
     return (model, progress)
   }
 

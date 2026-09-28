@@ -13,9 +13,7 @@ struct ScratchpadTab: View {
 
   var body: some View {
     VStack(alignment: .leading, spacing: Theme.Space.sm) {
-      if let progress, let meeting = model.meeting {
-        ProcessingCard(entry: progress, meeting: meeting)
-      }
+      ProcessingCardSlot(progress: progress, meeting: model.meeting)
       TextEditor(text: $text)
         .font(.steno(Theme.TextSize.sm))
         .foregroundStyle(Color.stenoForeground)
@@ -23,10 +21,12 @@ struct ScratchpadTab: View {
         .padding(Theme.Space.sm)
         .background(
           RoundedRectangle(cornerRadius: Theme.Space.radius, style: .continuous)
-            .fill(Color.stenoCard))
+            .fill(Color.stenoCard)
+        )
         .overlay(
           RoundedRectangle(cornerRadius: Theme.Space.radius, style: .continuous)
-            .strokeBorder(Color.stenoBorder, lineWidth: Theme.Space.hairline))
+            .strokeBorder(Color.stenoBorder, lineWidth: Theme.Space.hairline)
+        )
         .accessibilityIdentifier("scratchpad-editor")
         .onChange(of: text) { _, newValue in
           if newValue != model.meeting?.scratchpad { model.saveScratchpad(newValue) }

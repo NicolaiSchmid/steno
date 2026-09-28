@@ -129,47 +129,6 @@ final class OnceFlag: @unchecked Sendable {
   }
 }
 
-/// Holds callers until opened; opening is idempotent and releases everyone.
-actor Gate {
-  private var isOpen = false
-  private var waiters: [CheckedContinuation<Void, Never>] = []
-
-  func wait() async {
-    if isOpen { return }
-    await withCheckedContinuation { waiters.append($0) }
-  }
-
-  func open() {
-    isOpen = true
-    let waiting = waiters
-    waiters = []
-    for waiter in waiting { waiter.resume() }
-  }
-}
-
-/// `FakeSpeechEngine` whose `transcribe` waits at `gate`: a pipeline built
-/// over it stays busy until the test opens the gate.
-struct GatedSpeechEngine: SpeechEngine {
-  let gate: Gate
-  private let inner = FakeSpeechEngine()
-
-  init(gate: Gate) {
-    self.gate = gate
-  }
-
-  var id: String { inner.id }
-  var supportedLanguages: Set<Locale.Language> { inner.supportedLanguages }
-
-  func prepare() async throws {
-    try await inner.prepare()
-  }
-
-  func transcribe(_ audio: AudioBuffer16k, hint: Locale.Language?) async throws -> [RawSegment] {
-    await gate.wait()
-    return try await inner.transcribe(audio, hint: hint)
-  }
-}
-
 /// A calendar whose lookup waits at `gate`, so a recording sits in
 /// `.starting` until the test lets it through.
 @MainActor

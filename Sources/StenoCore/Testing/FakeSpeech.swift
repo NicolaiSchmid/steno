@@ -30,17 +30,14 @@ public struct FakeSpeechEngine: SpeechEngine, Sendable {
   public var textPrefix: String
   public var wordTimings: Bool
   public var failure: (any Error & Sendable)?
-  /// Runs before every `transcribe`; tests advance a `ManualClock` here so a
-  /// lane takes a known time.
-  public var onTranscribe: (@Sendable () async -> Void)?
+  /// Runs before every `transcribe`, after it is recorded; tests advance a
+  /// `ManualClock` here so a lane takes a known time, or sleep so a run
+  /// stays inside the stage. An error thrown here fails the call.
+  public var onTranscribe: (@Sendable () async throws -> Void)?
   /// Runs inside every `prepare`, after it is recorded; tests hold it at a
-  /// gate so a warm-up stays in flight while a run arrives.
-  public var onPrepare: (@Sendable () async -> Void)?
-  /// Wall-clock time every `transcribe` sleeps on `ContinuousClock` after
-  /// `onTranscribe`, so a run stays inside the stage long enough for a UI
-  /// test to watch it; nil sleeps not at all. Cancellation ends the sleep
-  /// and the call with `CancellationError`.
-  public var holdTranscribe: Duration?
+  /// gate so a warm-up stays in flight while a run arrives, or throw to
+  /// make the load fail.
+  public var onPrepare: (@Sendable () async throws -> Void)?
   public let transcriptions = CallLog<TranscribeCall>()
   public let preparations = CallLog<Bool>()
 
@@ -50,8 +47,7 @@ public struct FakeSpeechEngine: SpeechEngine, Sendable {
     language: LanguageTag? = "de",
     textPrefix: String = "fake",
     wordTimings: Bool = false,
-    failure: (any Error & Sendable)? = nil,
-    holdTranscribe: Duration? = nil
+    failure: (any Error & Sendable)? = nil
   ) {
     self.id = id
     self.supportedLanguages = [LanguageTag("de").language, LanguageTag("en").language]
@@ -60,20 +56,18 @@ public struct FakeSpeechEngine: SpeechEngine, Sendable {
     self.textPrefix = textPrefix
     self.wordTimings = wordTimings
     self.failure = failure
-    self.holdTranscribe = holdTranscribe
   }
 
   public func prepare() async throws {
     await preparations.record(true)
-    await onPrepare?()
+    try await onPrepare?()
   }
 
   public func transcribe(_ audio: AudioBuffer16k, hint: Locale.Language?) async throws
     -> [RawSegment]
   {
     await transcriptions.record(TranscribeCall(duration: audio.duration, hint: hint))
-    await onTranscribe?()
-    if let holdTranscribe { try await ContinuousClock().sleep(for: holdTranscribe) }
+    try await onTranscribe?()
     if let failure { throw failure }
     return Self.segments(
       duration: audio.duration, segmentSeconds: segmentSeconds, language: language,
@@ -111,8 +105,12 @@ public struct FakeDiarizer: Diarizer, Sendable {
   public var turnSeconds: TimeInterval
   public var result: (@Sendable (AudioBuffer16k) -> DiarizationResult)?
   public var failure: (any Error & Sendable)?
-  /// Runs before every `diarize`; tests use it to observe state mid-pipeline.
-  public var onDiarize: (@Sendable () async -> Void)?
+  /// Runs before every `diarize`, after it is recorded; tests observe state
+  /// mid-pipeline or advance a `ManualClock` here.
+  public var onDiarize: (@Sendable () async throws -> Void)?
+  /// Runs inside every `prepare`, after it is recorded; throw to make the
+  /// load fail.
+  public var onPrepare: (@Sendable () async throws -> Void)?
   public let diarizations = CallLog<TimeInterval>()
   public let preparations = CallLog<Bool>()
 
@@ -133,11 +131,12 @@ public struct FakeDiarizer: Diarizer, Sendable {
 
   public func prepare() async throws {
     await preparations.record(true)
+    try await onPrepare?()
   }
 
   public func diarize(_ audio: AudioBuffer16k) async throws -> DiarizationResult {
     await diarizations.record(audio.duration)
-    await onDiarize?()
+    try await onDiarize?()
     if let failure { throw failure }
     if let result { return result(audio) }
     return Self.roundRobin(
@@ -172,28 +171,5 @@ public struct FakeDiarizer: Diarizer, Sendable {
           clusterConfidence: Float(0.9 - 0.1 * Double(offset)),
           sampleClipRange: clip)
       })
-  }
-}
-
-/// An `AudioDecoder` over any other that records the lane of every `decode`,
-/// so a test can count how often each lane is decoded in a run. `mixdown`
-/// passes through unrecorded.
-public struct RecordingAudioDecoder: AudioDecoder, Sendable {
-  public let inner: any AudioDecoder
-  public let decodes = CallLog<AudioLane>()
-
-  public init(wrapping inner: any AudioDecoder = WAVAudioDecoder()) {
-    self.inner = inner
-  }
-
-  public func decode(_ asset: AudioAsset, lane: AudioLane) async throws -> AudioBuffer16k {
-    await decodes.record(lane)
-    return try await inner.decode(asset, lane: lane)
-  }
-
-  public var mixdownFormat: AudioFormat { inner.mixdownFormat }
-
-  public func mixdown(_ asset: AudioAsset, to url: URL) async throws {
-    try await inner.mixdown(asset, to: url)
   }
 }

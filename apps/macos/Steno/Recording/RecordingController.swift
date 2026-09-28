@@ -49,9 +49,8 @@ final class RecordingController {
     }
   }
   private(set) var levels: LaneLevels?
-  /// The capture statistics of the last recording that stopped; tests read
-  /// `droppedFrames` to show a pipeline warm-up during the recording did not
-  /// starve the capture.
+  /// The capture statistics of the last recording that stopped: duration,
+  /// dropped frames per lane, whether the system lane stayed silent.
   private(set) var lastStatistics: CaptureStatistics?
   private(set) var lastError: String?
   private(set) var lastWarning: String?

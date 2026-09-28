@@ -128,18 +128,11 @@ struct Process: AsyncParsableCommand {
         store: opened.store, settings: opened.settings, engine: speech.engine,
         modelsDirectory: settings.modelsDirectory,
         llm: try await Wiring.llmComponents(settings: settings), events: events))
-    let laneCount = asset.lanes.count
     let printer = Task {
-      var transcribeEvents = 0
       for await event in stream {
         switch event {
         case .progress(let id, let progress) where id == meetingID:
-          if progress.stage == .transcribe { transcribeEvents += 1 }
-          let lane =
-            progress.stage == .transcribe && laneCount > 1
-            ? ", lane \(transcribeEvents) of \(laneCount)" : ""
-          FileHandle.standardError.write(
-            Data((Self.progressLine(progress) + lane + "\n").utf8))
+          FileHandle.standardError.write(Data((Self.progressLine(progress) + "\n").utf8))
         default:
           continue
         }
@@ -162,12 +155,15 @@ struct Process: AsyncParsableCommand {
   }
 
   /// `stage percent remaining`, the stage padded to the longest name so the
-  /// percents line up: `transcribe     3% 1m 20s`.
+  /// percents line up, and the lane when the stage runs over more than one:
+  /// `transcribe     3% 1m 20s, lane 2 of 2`.
   static func progressLine(_ progress: ProcessingProgress) -> String {
     let width = PipelineStage.allCases.map(\.rawValue.count).max() ?? 0
     let stage = progress.stage.rawValue.padding(toLength: width, withPad: " ", startingAt: 0)
     let percent = String(format: "%3d", Int((progress.fraction * 100).rounded(.down)))
-    return "\(stage) \(percent)% \(remainingText(progress.estimatedRemaining))"
+    let lane =
+      progress.laneCount > 1 ? ", lane \(progress.lane + 1) of \(progress.laneCount)" : ""
+    return "\(stage) \(percent)% \(remainingText(progress.estimatedRemaining))\(lane)"
   }
 
   /// `1m 20s` or `4s`, seconds rounded up so a run never reads as done early.

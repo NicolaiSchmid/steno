@@ -47,7 +47,7 @@ Launch the app with `-steno-ui-testing` for the preview environment: in-memory d
 with StenoCore's sample meeting, synthetic capture backend, fake engines, every permission
 granted, no Sparkle, no keychain. Add `-steno-ui-testing-hold-transcribe` to queue the sample
 meeting for processing at launch over a synthetic recording, with the fake speech engine
-holding each lane for ten seconds, so the processing card can be watched; the UI smoke test
+holding each lane for sixty seconds, so the processing card can be watched; the UI smoke test
 uses it.
 
 ### Signing Debug builds locally

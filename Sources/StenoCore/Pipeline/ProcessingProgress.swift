@@ -17,19 +17,28 @@ public struct ProcessingProgress: Sendable, Equatable, Hashable {
   public var estimatedRemaining: Duration
   /// True while any rate behind the estimate is still a seed.
   public var isEstimateSeeded: Bool
+  /// The lane this event starts inside `transcribe`, zero based; 0 for
+  /// every other stage.
+  public var lane: Int
+  /// How many lanes `transcribe` runs over; 1 for every other stage.
+  public var laneCount: Int
 
   public init(
     stage: PipelineStage,
     fraction: Double,
     nextFraction: Double,
     estimatedRemaining: Duration,
-    isEstimateSeeded: Bool
+    isEstimateSeeded: Bool,
+    lane: Int = 0,
+    laneCount: Int = 1
   ) {
     self.stage = stage
     self.fraction = fraction
     self.nextFraction = nextFraction
     self.estimatedRemaining = estimatedRemaining
     self.isEstimateSeeded = isEstimateSeeded
+    self.lane = lane
+    self.laneCount = laneCount
   }
 
   /// (nextFraction - fraction) / (1 - fraction) of `estimatedRemaining`, so

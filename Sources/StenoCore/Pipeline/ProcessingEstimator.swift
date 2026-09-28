@@ -16,15 +16,16 @@ public struct StageRate: Sendable, Equatable, Hashable {
     StageRate(secondsPerUnit: secondsPerUnit, samples: 0)
   }
 
+  /// Weight of the newest sample in the moving average.
+  public static let alpha = 0.3
+
   /// The rate after one more measurement: the first sample replaces a seed
   /// outright, so the second run already runs on this Mac's numbers; later
-  /// samples are folded in as an exponential moving average with
-  /// `StageRates.alpha`.
+  /// samples are folded in as an exponential moving average with `alpha`.
   public func absorbing(_ secondsPerUnit: Double) -> StageRate {
     guard samples > 0 else { return StageRate(secondsPerUnit: secondsPerUnit, samples: 1) }
     return StageRate(
-      secondsPerUnit: StageRates.alpha * secondsPerUnit
-        + (1 - StageRates.alpha) * self.secondsPerUnit,
+      secondsPerUnit: Self.alpha * secondsPerUnit + (1 - Self.alpha) * self.secondsPerUnit,
       samples: samples + 1)
   }
 }
@@ -47,6 +48,52 @@ public struct StageSample: Sendable, Equatable, Hashable {
   }
 }
 
+/// What each stage's cost depends on, said once: `units`, `key`,
+/// `isKeyed`, `seedKey` and `isLearned` read this table.
+extension PipelineStage {
+  /// The unit a stage's rate is learned per.
+  enum CostDriver: Sendable {
+    /// Audio seconds summed over the lanes decoded, transcribed or encoded.
+    case audioSecondsAllLanes
+    /// Audio seconds of the one diarized lane.
+    case audioSecondsOneLane
+    /// Thousands of transcript tokens, guessed from the duration until the
+    /// transcript exists.
+    case thousandTokens
+    /// One unit: rows and files, independent of the meeting.
+    case flat
+  }
+
+  /// What a stage's rate is keyed by beside the stage itself.
+  enum RateKeying: Sendable {
+    case none
+    case speechEngine
+    case llmModel
+  }
+
+  var costDriver: CostDriver {
+    switch self {
+    case .decode, .transcribe, .persist: .audioSecondsAllLanes
+    case .diarize: .audioSecondsOneLane
+    case .cleanup, .summarize: .thousandTokens
+    case .matchSpeakers, .merge, .deliver, .retention: .flat
+    }
+  }
+
+  var rateKeying: RateKeying {
+    switch self {
+    case .transcribe: .speechEngine
+    case .cleanup, .summarize: .llmModel
+    case .decode, .diarize, .matchSpeakers, .merge, .persist, .deliver, .retention: .none
+    }
+  }
+
+  /// Whether the pipeline learns the stage's rate. Decode is never learned:
+  /// the CLI and the app decode through different decoders and a shared
+  /// rate would mix them, so it stays on its flat seed.
+  var isLearned: Bool { self != .decode }
+}
+
 /// The per-stage rates the estimator weighs stages with, keyed by stage and
 /// by what the stage depends on. `seeds` is the one source of the seed
 /// constants; a key without a sample falls back to its seed, and a
@@ -54,23 +101,22 @@ public struct StageSample: Sendable, Equatable, Hashable {
 public struct StageRates: Sendable, Equatable, Hashable {
   public struct Key: Sendable, Equatable, Hashable {
     public var stage: PipelineStage
-    public var key: String
+    /// The speech engine id, the LLM model, or `StageRates.unkeyed`.
+    public var dependency: String
 
-    public init(_ stage: PipelineStage, _ key: String) {
+    public init(_ stage: PipelineStage, _ dependency: String) {
       self.stage = stage
-      self.key = key
+      self.dependency = dependency
     }
   }
 
   /// The key of a stage whose cost depends on no engine or model.
   public static let unkeyed = ""
   /// The key of `cleanup` and `summarize` when no LLM model is configured
-  /// and the fake passes run.
-  public static let fakeModel = "fake"
+  /// and the passthrough passes run.
+  public static let noModel = "none"
   /// The transcribe seed an engine without a seed of its own uses.
   public static let fallbackEngine = "parakeet-v3"
-  /// Weight of the newest sample in the moving average.
-  public static let alpha = 0.3
 
   public private(set) var entries: [Key: StageRate]
 
@@ -78,20 +124,10 @@ public struct StageRates: Sendable, Equatable, Hashable {
     self.entries = entries
   }
 
-  /// Seconds per unit before any run was measured on this Mac. Units: audio
-  /// seconds for `decode` (summed over lanes), `transcribe` (summed over
-  /// lanes) and `diarize` (one lane); a thousand transcript tokens for
-  /// `cleanup` and `summarize`; one for the flat stages. Basis: Parakeet v3
-  /// at RTFx 63 to 119 and WhisperKit large-v3 turbo at RTFx 3 to 10 after
-  /// warm-up, the FluidAudio diarizer at RTFx 45 to 90, all measured on the
-  /// fixtures in `.plans/2026-09-25-speech-and-speakers.md`; the Parakeet
-  /// bake-off entrants share the v3 seed until measured; decode is a WAV
-  /// read or an AVFoundation decode, well over 100x real time; the LLM
-  /// seeds sit between a local model at LM Studio (minutes per hour of
-  /// audio) and a hosted one (tens of seconds), per
-  /// `.plans/2026-09-28-processing-progress.md`; the flat stages are row
-  /// and file writes measured under a second. The CLI's `steno process`
-  /// prints the lines that replace these.
+  /// Seconds per unit before any run was measured on this Mac, in the
+  /// units of `PipelineStage.costDriver`. Basis and provenance:
+  /// `.plans/2026-09-28-processing-progress.md` D2; `steno process` prints
+  /// the lines that replace these.
   public static let seeds = StageRates(entries: [
     Key(.decode, unkeyed): .seed(0.005),
     Key(.transcribe, "parakeet-v3"): .seed(1.0 / 90),
@@ -103,7 +139,7 @@ public struct StageRates: Sendable, Equatable, Hashable {
     Key(.merge, unkeyed): .seed(0.1),
     Key(.cleanup, unkeyed): .seed(12),
     Key(.summarize, unkeyed): .seed(3),
-    Key(.persist, unkeyed): .seed(1),
+    Key(.persist, unkeyed): .seed(0.005),
     Key(.deliver, unkeyed): .seed(0.5),
     Key(.retention, unkeyed): .seed(0.05),
   ])
@@ -112,15 +148,12 @@ public struct StageRates: Sendable, Equatable, Hashable {
   /// stage has one rate under `unkeyed`, and a row with another key is
   /// ignored on load.
   public static func isKeyed(_ stage: PipelineStage) -> Bool {
-    switch stage {
-    case .transcribe, .cleanup, .summarize: true
-    case .decode, .diarize, .matchSpeakers, .merge, .persist, .deliver, .retention: false
-    }
+    stage.rateKeying != .none
   }
 
   /// The seed key a key without a seed of its own falls back to.
   static func seedKey(_ stage: PipelineStage) -> String {
-    stage == .transcribe ? fallbackEngine : unkeyed
+    stage.rateKeying == .speechEngine ? fallbackEngine : unkeyed
   }
 
   /// The learned rate for `stage` under `key`, else its seed, else the
@@ -132,16 +165,10 @@ public struct StageRates: Sendable, Equatable, Hashable {
       ?? .seed(0)
   }
 
-  /// Sets a rate outright; `MeetingStore.stageRates()` uses it for the rows.
+  /// Sets a rate outright; `MeetingStore.stageRates()` uses it for the rows
+  /// and `MeetingStore.record` folds a sample into its one row.
   public mutating func set(_ rate: StageRate, _ stage: PipelineStage, key: String) {
     entries[Key(stage, key)] = rate
-  }
-
-  /// Folds one measurement in, per `StageRate.absorbing`.
-  public mutating func record(_ sample: StageSample) {
-    set(
-      rate(sample.stage, key: sample.key).absorbing(sample.secondsPerUnit), sample.stage,
-      key: sample.key)
   }
 }
 
@@ -199,26 +226,24 @@ public struct ProcessingEstimator: Sendable {
   }
 
   /// The `cleanup` and `summarize` key for a settings value: the model, or
-  /// `StageRates.fakeModel` while none is configured and the fakes run.
+  /// `StageRates.noModel` while none is configured and the passthrough
+  /// passes run.
   public static func llmModelKey(_ settings: Settings) -> String {
-    guard let model = settings.llmModel, !model.isEmpty else { return StageRates.fakeModel }
+    guard let model = settings.llmModel, !model.isEmpty else { return StageRates.noModel }
     return model
   }
 
-  /// Whether the pipeline learns a stage's rate. Decode is never learned:
-  /// the CLI and the app decode through different decoders and a shared
-  /// rate would mix them, so it stays on its flat seed.
+  /// Whether the pipeline learns a stage's rate; `PipelineStage.isLearned`.
   public static func learns(_ stage: PipelineStage) -> Bool {
-    stage != .decode
+    stage.isLearned
   }
 
   /// The rate key for `stage` in this run.
   public func key(_ stage: PipelineStage) -> String {
-    switch stage {
-    case .transcribe: speechEngineID
-    case .cleanup, .summarize: llmModel
-    case .decode, .diarize, .matchSpeakers, .merge, .persist, .deliver, .retention:
-      StageRates.unkeyed
+    switch stage.rateKeying {
+    case .speechEngine: speechEngineID
+    case .llmModel: llmModel
+    case .none: StageRates.unkeyed
     }
   }
 
@@ -228,11 +253,11 @@ public struct ProcessingEstimator: Sendable {
 
   /// Units of the stage's cost driver for this meeting.
   public func units(_ stage: PipelineStage) -> Double {
-    switch stage {
-    case .decode, .transcribe: duration * Double(lanes.count)
-    case .diarize: duration
-    case .cleanup, .summarize: Double(tokens) / 1000
-    case .matchSpeakers, .merge, .persist, .deliver, .retention: 1
+    switch stage.costDriver {
+    case .audioSecondsAllLanes: duration * Double(lanes.count)
+    case .audioSecondsOneLane: duration
+    case .thousandTokens: Double(tokens) / 1000
+    case .flat: 1
     }
   }
 
@@ -259,7 +284,7 @@ public struct ProcessingEstimator: Sendable {
 
   /// True while any learned stage in `stages` still runs on a seed.
   public func isSeeded(_ stages: [PipelineStage] = PipelineStage.allCases) -> Bool {
-    stages.contains { Self.learns($0) && rate($0).samples == 0 }
+    stages.contains { $0.isLearned && rate($0).samples == 0 }
   }
 
   /// The honest numbers at an event: elapsed over elapsed plus remaining,
@@ -280,6 +305,8 @@ public struct ProcessingEstimator: Sendable {
       fraction: fraction,
       nextFraction: max(fraction, next),
       estimatedRemaining: .seconds(remaining),
-      isEstimateSeeded: isSeeded(stages))
+      isEstimateSeeded: isSeeded(stages),
+      lane: stage == .transcribe ? lane : 0,
+      laneCount: stage == .transcribe ? max(1, lanes.count) : 1)
   }
 }

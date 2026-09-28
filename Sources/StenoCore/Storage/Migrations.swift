@@ -208,8 +208,8 @@ public enum Migrations {
       t.column("stage", .text).notNull()
       t.column("key", .text).notNull()
       t.column("samples", .integer).notNull()
-      t.column("seconds_per_unit", .double).notNull()
-      t.column("updated_at", .datetime).notNull()
+      t.column("secondsPerUnit", .double).notNull()
+      t.column("updatedAt", .datetime).notNull()
       t.primaryKey(["stage", "key"])
     }
   }

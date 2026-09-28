@@ -214,8 +214,7 @@ final class MeetingDetailViewModel: Identifiable {
     }
   }
 
-  private func update(_ what: String, _ mutate: @escaping @Sendable (inout Meeting) -> Void) async
-  {
+  private func update(_ what: String, _ mutate: @escaping @Sendable (inout Meeting) -> Void) async {
     do {
       try await store.update(meetingID: id, now: now(), mutate)
     } catch {

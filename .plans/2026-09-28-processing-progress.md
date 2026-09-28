@@ -87,6 +87,10 @@ public struct ProcessingProgress: Sendable, Equatable, Hashable {
   public var estimatedRemaining: Duration
   /// True while any rate behind the estimate is still a seed.
   public var isEstimateSeeded: Bool
+  /// The lane this event starts inside transcribe, zero based; 0 elsewhere.
+  public var lane: Int
+  /// How many lanes transcribe runs over; 1 elsewhere.
+  public var laneCount: Int
   /// (nextFraction - fraction) / (1 - fraction) of estimatedRemaining.
   public var expectedTimeToNextEvent: Duration { get }
 }
@@ -97,7 +101,9 @@ case progress(meetingID: UUID, progress: ProcessingProgress)
 seconds of the work not yet done, so a transcription that runs twice as long as planned moves
 the next number the bar shows. It is clamped per run: the pipeline keeps the last posted
 fraction in the run's state and posts `max(previous, computed)`, so a re-estimate never moves
-the bar backwards. The one re-estimate inside a run is at cleanup start, when the transcript's
+the bar backwards; `nextFraction` is rescaled with the clamp so the next step keeps its honest
+share of the remaining time and a stage that finished early does not shorten the next window.
+The one re-estimate inside a run is at cleanup start, when the transcript's
 real token count replaces the guess from audio duration; it may shrink or grow
 `estimatedRemaining` but never lowers `fraction`. `nextFraction` stays on the value so a late
 subscriber shows a correct bar from the next event, and `expectedTimeToNextEvent` is computed
@@ -118,7 +124,8 @@ the list entry or the menu bar row; the detail view's existing `isBusy` spinner 
 re-runs, as it does today.
 
 The CLI's `steno process` prints one line per event to standard error, `stage percent
-remaining`, and keeps the meeting id alone on standard output. `Wiring.dependencies` gains an
+remaining`, with `lane N of M` from the event's `lane` and `laneCount` when a stage runs over
+more than one lane, and keeps the meeting id alone on standard output. `Wiring.dependencies` gains an
 `events:` parameter, `Process` creates the bus, subscribes before `enqueue` and prints until
 `waitUntilIdle` returns. Those lines are also how the rates below get measured on the
 development Mac and on Forge.
@@ -130,9 +137,10 @@ duration, its lanes, the transcript's token count and a `StageRates` value; it r
 expected seconds per stage, the expected remaining time from any point and the next event's
 fraction. Until the transcript exists the token count is estimated from the audio duration, so
 an estimate exists from the first event. Rates are seconds of work per unit of driver: per
-audio second for transcribe and diarize; per thousand transcript tokens for cleanup and
-summarize, because `LLMMeetingSummarizer` map-reduces long transcripts, per F9; a flat cost for
-persist, deliver, retention, matchSpeakers and merge. A rate is keyed by stage and by what it
+audio second for transcribe and diarize, and for persist, which encodes the whole recording to
+AAC; per thousand transcript tokens for cleanup and summarize, because `LLMMeetingSummarizer`
+map-reduces long transcripts, per F9; a flat cost for deliver, retention, matchSpeakers and
+merge. A rate is keyed by stage and by what it
 depends on: the speech engine id for transcribe, the LLM model for cleanup and summarize,
 nothing else for the others. Decode is not learned: it uses a flat seed per audio second,
 because the CLI and the app decode through different decoders, per F8, and a shared rate would
@@ -147,7 +155,7 @@ any rate in the plan has `samples == 0`, and the card then uses the softer wordi
 Rates live in their own table, not in `Settings`, because they are measurements the pipeline
 writes ten times per run and `Settings` holds choices the owner made. One append-only
 migration in `Sources/StenoCore/Storage/Migrations.swift` adds `stageRate` with columns
-`stage`, `key`, `samples`, `seconds_per_unit` and `updated_at`, primary key `(stage, key)`.
+`stage`, `key`, `samples`, `secondsPerUnit` and `updatedAt`, primary key `(stage, key)`.
 `Sources/StenoCore/Storage/MeetingStore+Timings.swift`, in the pattern of
 `MeetingStore+People.swift`, adds `stageRates() async throws -> StageRates` and
 `record(_ sample: StageSample) async throws`, which applies the update inside one write. A
@@ -187,7 +195,7 @@ It replaces `MenuBarViewModel.observeProgress()`, its `stages` map and `QueueIte
 The displayed state is a pure function of the last event and the time since it:
 
 ```swift
-enum ProgressPresentation {
+enum ProcessingPresentation {
   struct State: Equatable { var fraction: Double; var remainingText: String; var isSlow: Bool }
   static func state(progress: ProcessingProgress, elapsed: Duration, reduceMotion: Bool) -> State
 }
@@ -354,8 +362,8 @@ the header, and says so in its PR.
    the Scratchpad branching on the model's entry before `PendingText`, the list entry preview
    and the detail chip reading the model's `title`, the redesign's header bar removed,
    `ProcessingPresentation` with the thresholds from D3, `TabText.lines` taking `progress:`,
-   `FakeSpeechEngine` gaining `holdTranscribe: Duration?` that sleeps on `ContinuousClock`,
-   and `AppEnvironment.preview` honouring `-steno-ui-testing-hold-transcribe`.
+   and `AppEnvironment.preview` honouring `-steno-ui-testing-hold-transcribe` by sleeping on
+   `ContinuousClock` in the fake engine's `onTranscribe` hook.
    New tests: `apps/macos/StenoTests/ProcessingPresentationTests.swift` asserts the fraction at
    zero elapsed is the event's `fraction`, at `expectedTimeToNextEvent` it is
    `nextFraction - 0.01`, at twice that it is unchanged and the text is "a bit longer than

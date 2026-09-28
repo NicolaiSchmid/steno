@@ -23,17 +23,6 @@ import Testing
     #expect(timed.first?.wordTimings?.count == 3)
   }
 
-  @Test func fakeSpeechEngineHoldsTranscribeForTheConfiguredTime() async throws {
-    let engine = FakeSpeechEngine(holdTranscribe: .milliseconds(200))
-    let buffer = AudioBuffer16k(samples: [Float](repeating: 0, count: 16_000))
-    let clock = ContinuousClock()
-    let elapsed = try await clock.measure {
-      _ = try await engine.transcribe(buffer, hint: nil)
-    }
-    #expect(elapsed >= .milliseconds(200))
-    #expect(await engine.transcriptions.count == 1, "the call is recorded before the hold")
-  }
-
   @Test func fakeDiarizerAlternatesClusters() async throws {
     let diarizer = FakeDiarizer(clusterCount: 2, turnSeconds: 1.5)
     let result = try await diarizer.diarize(

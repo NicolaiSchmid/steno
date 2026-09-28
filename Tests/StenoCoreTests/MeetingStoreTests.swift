@@ -481,7 +481,9 @@ import Testing
     )
     try await store.record(first)
     var expected = StageRates.seeds
-    expected.record(first)
+    expected.set(
+      expected.rate(.transcribe, key: "parakeet-v3").absorbing(0.02), .transcribe,
+      key: "parakeet-v3")
     #expect(try await store.stageRates() == expected)
     #expect(
       try await store.stageRates().rate(.transcribe, key: "parakeet-v3")
@@ -510,7 +512,7 @@ import Testing
       for (stage, key) in [("polish", ""), ("merge", "gpt-4o"), ("cleanup", "gpt-4o")] {
         try db.execute(
           sql: """
-            INSERT INTO stageRate (stage, key, samples, seconds_per_unit, updated_at)
+            INSERT INTO stageRate (stage, key, samples, secondsPerUnit, updatedAt)
             VALUES (?, ?, ?, ?, ?)
             """,
           arguments: [stage, key, 3, 9.0, SampleData.updatedAt])
@@ -522,6 +524,34 @@ import Testing
         == StageRates.seeds.rate(.merge, key: StageRates.unkeyed))
     #expect(loaded.entries[StageRates.Key(.merge, "gpt-4o")] == nil)
     #expect(loaded.rate(.cleanup, key: "gpt-4o") == StageRate(secondsPerUnit: 9, samples: 3))
+    #expect(loaded.entries.count == StageRates.seeds.entries.count + 1)
+  }
+
+  /// A rate that is not a finite non-negative number (a hand-edited or
+  /// corrupted row) stays in the table and out of the rates, so the
+  /// estimator never turns it into a `Duration`.
+  @Test func stageRatesSkipRowsWhoseRateIsNotFiniteOrIsNegative() async throws {
+    let store = try MeetingStore.inMemory()
+    try await store.writer.write { db in
+      for (stage, key, rate) in [
+        ("diarize", "", Double.infinity), ("summarize", "qwen", -Double.infinity),
+        ("merge", "", -1.0), ("cleanup", "qwen", 2.0),
+      ] {
+        try db.execute(
+          sql: """
+            INSERT INTO stageRate (stage, key, samples, secondsPerUnit, updatedAt)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+          arguments: [stage, key, 1, rate, SampleData.updatedAt])
+      }
+    }
+    #expect(try await store.writer.read { db in try StageRateRow.fetchCount(db) } == 4)
+    let loaded = try await store.stageRates()
+    #expect(
+      loaded.rate(.diarize, key: StageRates.unkeyed) == StageRates.seeds.rate(.diarize, key: ""))
+    #expect(loaded.rate(.summarize, key: "qwen") == StageRates.seeds.rate(.summarize, key: ""))
+    #expect(loaded.rate(.merge, key: StageRates.unkeyed) == StageRates.seeds.rate(.merge, key: ""))
+    #expect(loaded.rate(.cleanup, key: "qwen") == StageRate(secondsPerUnit: 2, samples: 1))
     #expect(loaded.entries.count == StageRates.seeds.entries.count + 1)
   }
 }

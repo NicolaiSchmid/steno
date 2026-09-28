@@ -3,14 +3,17 @@ import GRDB
 
 extension MeetingStore {
   /// The seeds with every learned rate laid over them. A row whose stage is
-  /// unknown, or whose key is not empty for a stage that is not keyed by an
-  /// engine or a model, is ignored.
+  /// unknown, whose key is not empty for a stage that is not keyed by an
+  /// engine or a model, or whose rate is negative or not a finite number
+  /// (a hand-edited or corrupted database; `Duration.seconds(_:)` would
+  /// trap on it) is ignored.
   public func stageRates() async throws -> StageRates {
     try await writer.read { db in
       var rates = StageRates.seeds
       for row in try StageRateRow.fetchAll(db) {
         guard let stage = PipelineStage(rawValue: row.stage),
-          StageRates.isKeyed(stage) || row.key == StageRates.unkeyed
+          StageRates.isKeyed(stage) || row.key == StageRates.unkeyed,
+          row.secondsPerUnit.isFinite, row.secondsPerUnit >= 0
         else { continue }
         rates.set(row.rate, stage, key: row.key)
       }

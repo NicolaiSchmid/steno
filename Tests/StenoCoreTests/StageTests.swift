@@ -183,6 +183,25 @@ import Testing
     #expect(await decoder.decodes.entries == [.system], "no second decode")
     #expect(await harness.diarizer.diarizations.entries == [6, 3], "the handed three seconds")
   }
+
+  /// An asset without a diarizable lane yields an empty diarization even
+  /// when a buffer is handed in: nothing is decoded, nothing is diarized.
+  @Test func anAssetWithoutLanesDiarizesNothingEvenWhenHandedABuffer() async throws {
+    let decoder = RecordingAudioDecoder()
+    let harness = try await PipelineHarness(decoder: decoder)
+    defer { harness.cleanUp() }
+    let (meeting, original) = try harness.meeting(source: .phone)
+    var asset = original
+    asset.lanes = []
+    let handed = ProcessingPipeline.DecodedLane(
+      lane: .mixed, buffer: AudioBuffer16k(samples: [Float](repeating: 0, count: 16_000)))
+    let diarization = try await harness.pipeline.diarize(
+      asset: asset, meeting: meeting, buffer: handed)
+    #expect(diarization.speakers.isEmpty)
+    #expect(diarization.clusterSpeakers.isEmpty)
+    #expect(await decoder.decodes.entries.isEmpty)
+    #expect(await harness.diarizer.diarizations.entries.isEmpty)
+  }
 }
 
 @Suite struct DiarizeLabelTests {

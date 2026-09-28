@@ -84,7 +84,7 @@ CREATE INDEX "speaker_meetingID" ON "speaker"("meetingID");
 
 CREATE INDEX "speaker_personID" ON "speaker"("personID");
 
-CREATE TABLE "stageRate" ("stage" TEXT NOT NULL, "key" TEXT NOT NULL, "samples" INTEGER NOT NULL, "seconds_per_unit" DOUBLE NOT NULL, "updated_at" DATETIME NOT NULL, PRIMARY KEY ("stage", "key"));
+CREATE TABLE "stageRate" ("stage" TEXT NOT NULL, "key" TEXT NOT NULL, "samples" INTEGER NOT NULL, "secondsPerUnit" DOUBLE NOT NULL, "updatedAt" DATETIME NOT NULL, PRIMARY KEY ("stage", "key"));
 
 CREATE TABLE "transcriptSegment" ("id" TEXT PRIMARY KEY NOT NULL, "meetingID" TEXT NOT NULL REFERENCES "meeting"("id") ON DELETE CASCADE, "start" DOUBLE NOT NULL, "end" DOUBLE NOT NULL, "speakerID" TEXT REFERENCES "speaker"("id") ON DELETE SET NULL, "lane" TEXT NOT NULL, "text" TEXT NOT NULL, "rawText" TEXT NOT NULL);
 

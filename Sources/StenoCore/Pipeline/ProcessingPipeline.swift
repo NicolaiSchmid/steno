@@ -62,7 +62,9 @@ public struct PipelineDependencies: Sendable {
 public actor ProcessingPipeline {
   let dependencies: PipelineDependencies
   private var running: [UUID: Task<Void, Never>] = [:]
-  private var inFlight: Set<UUID> = []
+  /// Meetings with an operation in progress; readable so a test can tell
+  /// that a run has been admitted.
+  private(set) var inFlight: Set<UUID> = []
   /// Counts every admission to `inFlight`; a stage whose count moved was
   /// not alone for its whole span.
   private var admissions = 0
@@ -145,14 +147,12 @@ public actor ProcessingPipeline {
   /// Loads the speech engine and the diarizer now, so a run that starts
   /// later finds them resident: the app calls this when a recording starts,
   /// so the cold CoreML compile lands during the meeting instead of in the
-  /// wait after it, and `process` calls it before its first event. Both
-  /// `prepare()` calls go through one task held on the actor while it is in
-  /// flight, because the engines cannot serialize themselves: their
-  /// `loaded()` methods check a cached manager and then `await` the load,
-  /// and an actor is re-entrant across that `await`. The task is dropped
-  /// once it has settled, so a later run prepares again (a no-op on a loaded
-  /// engine) and a failed load is retried rather than cached. Errors carry
-  /// `.decode` for the engine and `.diarize` for the diarizer.
+  /// wait after it, and `process` calls it before its first event.
+  /// Concurrent calls are serialised here through one task held on the
+  /// actor, until the engines serialise themselves; the task is dropped
+  /// once it has settled, so a later run prepares again (a no-op on a
+  /// loaded engine) and a failed load is retried rather than cached. Errors
+  /// carry `.decode` for the engine and `.diarize` for the diarizer.
   public func warmUp() async throws {
     if let task = preparing {
       try await task.value
@@ -181,9 +181,10 @@ public actor ProcessingPipeline {
   /// or summarize failure). Once `persist` has marked the meeting `.ready`
   /// nothing downgrades it: a `retention` error is thrown to the caller and
   /// the meeting stays ready and delivered. Both engines are prepared before
-  /// the first event, so a cold model load lands before the run's clock
-  /// starts and never enters a rate. A meeting processed again starts a new
-  /// run whose first event is `.decode` at fraction 0.
+  /// the meeting turns `.processing` and before the first event, so a cold
+  /// model load lands before the run's clock starts and never enters a
+  /// rate. A meeting processed again starts a new run whose first event is
+  /// `.decode` at fraction 0.
   public func process(assetID: UUID) async throws {
     guard let asset = try await store.asset(id: assetID) else {
       throw PipelineFailure(stage: .decode, reason: "audio asset \(assetID) not found")
@@ -192,10 +193,10 @@ public actor ProcessingPipeline {
       throw PipelineFailure(stage: .decode, reason: "meeting \(asset.meetingID) not found")
     }
     try await exclusively(meeting.id, stage: .decode) {
-      try await store.setState(.processing, meetingID: meeting.id, now: now)
       let persisted: AudioAsset
       do {
         try await warmUp()
+        try await store.setState(.processing, meetingID: meeting.id, now: now)
         let settings = try await attributing(.decode) { try await dependencies.settings.load() }
         runs[meeting.id] = try await attributing(.decode) {
           try await makeRun(
@@ -336,7 +337,7 @@ public actor ProcessingPipeline {
       ?? ProcessingRun(
         estimator: ProcessingEstimator(
           duration: 0, lanes: [], speechEngineID: dependencies.speechEngine.id,
-          llmModel: StageRates.fakeModel, rates: .seeds),
+          llmModel: StageRates.noModel, rates: .seeds),
         stages: PipelineStage.allCases, stopwatch: Stopwatch(dependencies.clock))
     let progress = run.progress(stage, lane: lane, elapsed: run.stopwatch.elapsed)
     if runs[meetingID] != nil { runs[meetingID] = run }
@@ -360,7 +361,10 @@ public actor ProcessingPipeline {
   /// stage, and measures it on the dependencies' clock. The duration is
   /// recorded as a rate sample once the stage is complete (its last lane
   /// for transcribe) when the meeting was alone in flight for the whole
-  /// stage; a body that threw records nothing.
+  /// stage; a body that threw records nothing. Alone is judged per pipeline
+  /// instance: a retired pipeline still draining after `reloadPipeline()`,
+  /// or the CLI on the same database, is not seen and its load can enter a
+  /// sample.
   func run<T: Sendable>(
     _ stage: PipelineStage, lane: Int = 0, meetingID: UUID, _ body: () async throws -> T
   ) async rethrows -> T {

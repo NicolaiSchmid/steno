@@ -15,8 +15,7 @@ enum Motion {
   static let durationPressIn: TimeInterval = 0.100
   /// One tick of a value sampled at 1 Hz (a countdown, a progress bar): the
   /// tween lasts exactly until the next sample, so the steps read as one
-  /// continuous motion. Named by the floating-indicator plan; added here
-  /// first for the processing card.
+  /// continuous motion. Also the `TimelineView` period of every such view.
   static let durationCountdown: TimeInterval = 1
   /// One half-cycle of an indeterminate pulse.
   static let durationPulse: TimeInterval = 1

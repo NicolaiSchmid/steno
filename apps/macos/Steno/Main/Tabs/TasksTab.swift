@@ -12,9 +12,7 @@ struct TasksTab: View {
   var body: some View {
     ScrollView {
       VStack(alignment: .leading, spacing: Theme.Space.sm) {
-        if let progress, let meeting = model.meeting {
-          ProcessingCard(entry: progress, meeting: meeting)
-        }
+        ProcessingCardSlot(progress: progress, meeting: model.meeting)
         let tasks = model.export?.tasks ?? []
         if tasks.isEmpty, progress == nil {
           PendingText(

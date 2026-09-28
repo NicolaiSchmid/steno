@@ -7,7 +7,7 @@ import SwiftUI
 /// expected and how long the run still needs; this moves the bar towards
 /// the next event, counts the estimate down and words it. Nothing here
 /// divides an estimate: `expectedTimeToNextEvent` is core's.
-enum ProgressPresentation {
+enum ProcessingPresentation {
   struct State: Equatable {
     /// The bar's value: the event's `fraction` at zero elapsed, then
     /// linearly to `nextFraction - boundaryGap` at `expectedTimeToNextEvent`,
@@ -32,6 +32,9 @@ enum ProgressPresentation {
   /// `reduceMotion` is the view's setting passed through so a test pins
   /// that it changes how the bar moves between samples, not what a sample
   /// says: the 1 Hz steps stay, the tween goes (`tween(reduceMotion:)`).
+  /// An `expectedTimeToNextEvent` of zero, which core posts only when every
+  /// rate was learned at zero, puts the bar at its target at once and reads
+  /// as slow from the first positive sample, since nothing was expected.
   static func state(progress: ProcessingProgress, elapsed: Duration, reduceMotion: Bool) -> State {
     let expected = progress.expectedTimeToNextEvent
     let isSlow = elapsed > expected * slowFactor
@@ -51,7 +54,8 @@ enum ProgressPresentation {
 
   /// The card's title row as text: the entry's title, then the remaining
   /// text once the run has posted an event. `TabText` renders these as the
-  /// pending lines of a tab without content.
+  /// pending lines of a tab without content, and the menu bar row shows
+  /// the same two words beside the meeting's title.
   static func lines(entry: ProcessingProgressModel.Entry, elapsed: Duration) -> [String] {
     guard let progress = entry.progress else { return [entry.title] }
     return [
@@ -85,11 +89,25 @@ enum ProgressPresentation {
   }
 }
 
+/// The card above a tab's content while the meeting is queued or
+/// processing, nothing otherwise: the four tabs share this one branch and
+/// keep only their own `PendingText` guard.
+struct ProcessingCardSlot: View {
+  let progress: ProcessingProgressModel.Entry?
+  let meeting: Meeting?
+
+  var body: some View {
+    if let progress, let meeting {
+      ProcessingCard(entry: progress, meeting: meeting)
+    }
+  }
+}
+
 /// The card every content tab shows at the top of its reading column while
 /// the meeting is queued or processing, and the Scratchpad above its
 /// editor: the stage, the time left, a bar that moves between events, and
 /// the privacy line. A `TimelineView` anchored on the entry's `since`
-/// samples `ProgressPresentation` on every whole second after the last
+/// samples `ProcessingPresentation` on every whole second after the last
 /// event, as the menu bar samples its elapsed time; the fill tweens to each
 /// sample with `Motion.countdown` unless Reduce Motion is on. Before the
 /// run's first event the title is "Waiting to process" and the bar pulses,
@@ -110,7 +128,7 @@ struct ProcessingCard: View {
       VStack(alignment: .leading, spacing: Theme.Space.sm) {
         TimelineView(.periodic(from: entry.since, by: Motion.durationCountdown)) { context in
           let state = entry.progress.map {
-            ProgressPresentation.state(
+            ProcessingPresentation.state(
               progress: $0, elapsed: elapsed(at: context.date), reduceMotion: reduceMotion)
           }
           VStack(alignment: .leading, spacing: Theme.Space.sm) {
@@ -137,7 +155,7 @@ struct ProcessingCard: View {
     .seconds(max(0, date.timeIntervalSince(entry.since)))
   }
 
-  private func titleRow(_ state: ProgressPresentation.State?) -> some View {
+  private func titleRow(_ state: ProcessingPresentation.State?) -> some View {
     HStack(alignment: .firstTextBaseline, spacing: Theme.Space.sm) {
       Text(entry.title)
         .font(.steno(Theme.TextSize.sm, weight: .medium))
@@ -157,7 +175,7 @@ struct ProcessingCard: View {
   /// accessibility value the same fraction in percent. Without a state the
   /// fill spans the track and pulses between full and `Motion.pulseOpacity`,
   /// or sits dimmed under Reduce Motion.
-  private func bar(_ state: ProgressPresentation.State?) -> some View {
+  private func bar(_ state: ProcessingPresentation.State?) -> some View {
     GeometryReader { proxy in
       ZStack(alignment: .leading) {
         RoundedRectangle(cornerRadius: Self.barRadius, style: .continuous)
@@ -167,7 +185,7 @@ struct ProcessingCard: View {
             .fill(Color.stenoStrong)
             .frame(width: proxy.size.width * state.fraction)
             .animation(
-              ProgressPresentation.tween(reduceMotion: reduceMotion), value: state.fraction)
+              ProcessingPresentation.tween(reduceMotion: reduceMotion), value: state.fraction)
         } else {
           RoundedRectangle(cornerRadius: Self.barRadius, style: .continuous)
             .fill(Color.stenoStrong)

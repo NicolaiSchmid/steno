@@ -475,41 +475,6 @@ import Testing
     #expect(await harness.engine.transcriptions.count == 1, "processed once")
   }
 
-  /// Blocks tasks until opened; tests use it to hold a stage mid-flight.
-  actor Gate {
-    private var opened = false
-    private var waiting: [CheckedContinuation<Void, Never>] = []
-    private var blocked: [(count: Int, continuation: CheckedContinuation<Void, Never>)] = []
-
-    func wait() async {
-      if opened { return }
-      await withCheckedContinuation { continuation in
-        waiting.append(continuation)
-        let due = blocked.filter { $0.count <= waiting.count }
-        blocked.removeAll { $0.count <= waiting.count }
-        for observer in due { observer.continuation.resume() }
-      }
-    }
-
-    /// Returns once `count` tasks are waiting.
-    func waitUntilBlocked(_ count: Int = 1) async {
-      if waiting.count >= count { return }
-      await withCheckedContinuation { blocked.append((count, $0)) }
-    }
-
-    /// Lets one waiting task through and keeps the gate closed.
-    func releaseOne() {
-      guard !waiting.isEmpty else { return }
-      waiting.removeFirst().resume()
-    }
-
-    func open() {
-      opened = true
-      for continuation in waiting { continuation.resume() }
-      waiting.removeAll()
-    }
-  }
-
   @Test func redeliverHandsTheStoredReceiptToTheDestination() async throws {
     let harness = try await PipelineHarness()
     defer { harness.cleanUp() }
@@ -663,7 +628,7 @@ import Testing
     let segments = try await harness.store.export(meetingID: meeting.id).segments
     let thousands = Double(ProcessingEstimator.tokenCount(segments)) / 1000
     #expect(
-      rates.rate(.cleanup, key: StageRates.fakeModel)
+      rates.rate(.cleanup, key: StageRates.noModel)
         == StageRate(secondsPerUnit: 3 / thousands, samples: 1),
       "per thousand tokens of the merged transcript, keyed by the model")
     for stage in [PipelineStage.matchSpeakers, .merge] {
@@ -672,7 +637,7 @@ import Testing
         "\(stage) took no clock time")
     }
     #expect(
-      rates.rate(.summarize, key: StageRates.fakeModel)
+      rates.rate(.summarize, key: StageRates.noModel)
         == StageRates.seeds.rate(.summarize, key: StageRates.unkeyed),
       "the stage whose fake threw recorded nothing")
     #expect(rates.rate(.decode, key: StageRates.unkeyed).samples == 0, "decode is never learned")
@@ -737,7 +702,7 @@ import Testing
     let rate = try await harness.store.stageRates().rate(.transcribe, key: slow.id)
     #expect(rate.samples == 2)
     let expected: Double = 0.3 * 20 / 6 + 0.7 * 10 / 6
-    #expect(rate.secondsPerUnit == expected, "per audio second, alpha 0.3")
+    #expect(abs(rate.secondsPerUnit - expected) < 1e-12, "per audio second, alpha 0.3")
   }
 
   @Test func concurrentRunsRecordNoRates() async throws {
@@ -788,10 +753,11 @@ import Testing
     let warm = Task { try await harness.pipeline.warmUp() }
     await gate.waitUntilBlocked()
     try await harness.pipeline.enqueue(meeting, asset: asset)
-    // `process` marks the meeting `.processing` and then awaits the shared
-    // task; once the row says so the run is queued behind the warm-up.
-    var iterator = harness.store.observeMeeting(id: meeting.id).makeAsyncIterator()
-    while let next = try await iterator.next(), next?.meeting.state != .processing {}
+    // `process` admits the meeting to `inFlight` and joins the shared task
+    // in one stretch on the actor, with no suspension between the two, so
+    // once the run is in flight it is queued behind the warm-up.
+    while await !harness.pipeline.inFlight.contains(meeting.id) { await Task.yield() }
+    #expect(await harness.engine.preparations.count == 1, "the run joined rather than prepared")
     await gate.open()
 
     try await warm.value
@@ -805,6 +771,56 @@ import Testing
     try await harness.pipeline.warmUp()
     #expect(await harness.engine.preparations.count == 2)
     #expect(await harness.diarizer.preparations.count == 2)
+  }
+
+  /// A `prepare()` that throws fails the warm-up with the engine's stage,
+  /// clears the shared task so the next call prepares again instead of
+  /// rethrowing the old error, and a run whose warm-up fails is marked
+  /// failed at that stage.
+  @Test func warmUpFailureIsRetriedAndAttributed() async throws {
+    struct Boom: Error {}
+    var engine = FakeSpeechEngine()
+    let enginePreparations = engine.preparations
+    engine.onPrepare = { if await enginePreparations.count == 1 { throw Boom() } }
+    var diarizer = FakeDiarizer()
+    let diarizerPreparations = diarizer.preparations
+    diarizer.onPrepare = { if await diarizerPreparations.count == 1 { throw Boom() } }
+    let harness = try await PipelineHarness(engine: engine, diarizer: diarizer)
+    defer { harness.cleanUp() }
+
+    let first = await #expect(throws: PipelineFailure.self) {
+      try await harness.pipeline.warmUp()
+    }
+    #expect(first?.stage == .decode)
+    #expect(first?.reason.contains("Boom") == true)
+    #expect(await enginePreparations.count == 1)
+    #expect(await diarizerPreparations.count == 0, "the diarizer is not reached")
+
+    let second = await #expect(throws: PipelineFailure.self) {
+      try await harness.pipeline.warmUp()
+    }
+    #expect(second?.stage == .diarize, "the engine loaded on the retry, the diarizer threw")
+    #expect(await enginePreparations.count == 2)
+    #expect(await diarizerPreparations.count == 1)
+
+    try await harness.pipeline.warmUp()
+    #expect(await enginePreparations.count == 3)
+    #expect(await diarizerPreparations.count == 2)
+
+    // A run whose warm-up fails is failed at the stage the error carries.
+    var failing = FakeSpeechEngine()
+    failing.onPrepare = { throw Boom() }
+    let cold = try await PipelineHarness(engine: failing)
+    defer { cold.cleanUp() }
+    let (meeting, asset) = try cold.meeting(source: .macInPerson)
+    try await cold.store.save(meeting, asset: asset)
+    let run = await #expect(throws: PipelineFailure.self) {
+      try await cold.pipeline.process(assetID: asset.id)
+    }
+    #expect(run?.stage == .decode)
+    #expect(try await cold.store.meeting(id: meeting.id)?.state.isFailed == true)
+    #expect(await cold.diarizer.preparations.count == 0)
+    #expect(await cold.engine.transcriptions.count == 0, "nothing ran")
   }
 
   @Test func resumeUnfinishedStartsAgainAtZero() async throws {

@@ -44,4 +44,32 @@ import Testing
     var iterator = stream.makeAsyncIterator()
     #expect(await iterator.next() == Self.progress(.transcribe, fraction: 0.1))
   }
+
+  /// `finish()` ends every live subscription: each stream still delivers
+  /// what was posted before, then returns nil; a post after it reaches
+  /// nobody; a subscription made after it is a fresh one and sees later
+  /// posts.
+  @Test func finishEndsEverySubscriptionAndLaterPostsReachNobody() async throws {
+    let bus = MeetingEventBus()
+    let first = await bus.subscribe()
+    let second = await bus.subscribe()
+    await bus.post(Self.progress(.decode))
+    await bus.post(Self.progress(.transcribe, fraction: 0.1))
+    await bus.finish()
+    await bus.post(Self.progress(.diarize, fraction: 0.5))
+
+    for stream in [first, second] {
+      var iterator = stream.makeAsyncIterator()
+      #expect(await iterator.next() == Self.progress(.decode))
+      #expect(await iterator.next() == Self.progress(.transcribe, fraction: 0.1))
+      #expect(await iterator.next() == nil, "the stream ends after what was posted before finish")
+    }
+
+    let late = await bus.subscribe()
+    await bus.post(Self.progress(.cleanup, fraction: 0.7))
+    var iterator = late.makeAsyncIterator()
+    #expect(await iterator.next() == Self.progress(.cleanup, fraction: 0.7))
+    await bus.finish()
+    #expect(await iterator.next() == nil, "a second finish ends the fresh subscription too")
+  }
 }

@@ -605,14 +605,6 @@ struct StageRateRow: StenoRecord {
   var secondsPerUnit: Double
   var updatedAt: Date
 
-  enum CodingKeys: String, CodingKey {
-    case stage
-    case key
-    case samples
-    case secondsPerUnit = "seconds_per_unit"
-    case updatedAt = "updated_at"
-  }
-
   init(stage: PipelineStage, key: String, rate: StageRate, updatedAt: Date) {
     self.stage = stage.rawValue
     self.key = key
