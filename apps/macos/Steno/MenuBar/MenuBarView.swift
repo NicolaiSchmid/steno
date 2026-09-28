@@ -15,7 +15,8 @@ struct MenuBarView: View {
   /// The same state table the sidebar control and the Record menu render.
   private var presentation: RecordingControlPresentation {
     RecordingControlPresentation.make(
-      state: recorder.recording, denied: recorder.deniedPermissions)
+      state: recorder.recording, denied: recorder.deniedPermissions,
+      autoStop: recorder.autoStop?.presentation)
   }
 
   var body: some View {
@@ -81,6 +82,11 @@ struct MenuBarView: View {
           .accessibilityIdentifier("stop-recording")
         case .starting, .stopping:
           ProgressView().controlSize(.small)
+        }
+      }
+      if let autoStop = presentation.autoStop {
+        AutoStopRow(presentation: autoStop, identifier: "keep-recording") {
+          recorder.keepRecording()
         }
       }
       if let reason = presentation.disabledReason {

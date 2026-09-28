@@ -1,5 +1,10 @@
 # Steno v1: macOS app and release
 
+> Amended by [`2026-09-28-settings-redesign.md`](2026-09-28-settings-redesign.md) (Decision 9):
+> the Sparkle feed is a rolling `appcast.xml` on the `appcast` branch, not the latest release's
+> asset, and pre-release items carry a `beta` channel that only release-candidate builds read.
+> The per-release appcast is still uploaded so older installs can hop over.
+
 Status: implementation plan, 2026-09-25, reconciled and then revised the same day after the three reviews (program
 review application log). Binding context: [`2026-09-25-v1-program.md`](2026-09-25-v1-program.md) (boundaries, model,
 protocols) and [`2026-09-24-initial-scope.md`](2026-09-24-initial-scope.md). Owns `apps/macos/`, the release workflow,

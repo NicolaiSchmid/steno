@@ -77,6 +77,10 @@ struct MeetingDetailView: View {
       }
       .font(.steno(Theme.TextSize.xxs))
       .foregroundStyle(Color.stenoFaint)
+      if let sentence = meeting.endReason?.sentence {
+        MessageRow(kind: .info, text: sentence)
+          .accessibilityIdentifier("end-reason")
+      }
       if case .failed(let reason) = meeting.state {
         MessageRow(kind: .error, text: reason)
       }

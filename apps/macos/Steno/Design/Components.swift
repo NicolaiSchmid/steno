@@ -189,6 +189,7 @@ struct MessageRow: View {
     case error
     case warning
     case info
+    case success
   }
 
   var kind: Kind
@@ -199,6 +200,7 @@ struct MessageRow: View {
     case .error: Color.stenoDestructive
     case .warning: Color.stenoWarning
     case .info: Color.stenoInfo
+    case .success: Color.stenoLive
     }
   }
 

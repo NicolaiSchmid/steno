@@ -121,6 +121,7 @@ import Testing
         try MeetingRow.fetchOne(db, key: SampleData.meetingID)?.meeting == SampleData.meeting())
       let reasons: [RecordingEndReason] = [
         .manual, .callEnded(appName: "Zen"), .callEnded(appName: nil), .deviceLost, .quit,
+        .failed,
       ]
       for (index, reason) in reasons.enumerated() {
         var meeting = SampleData.meeting()

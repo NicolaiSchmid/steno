@@ -50,9 +50,11 @@ because it touches every screen.
    `exportStatus`, the banner, the second onboarding page.
 7. Floating recording indicator and detection prompt. Depends on step 1; ships before the
    redesign's layout because the owner cannot see recording state today. Adds `Motion.countdown`,
-   `Motion.pulse`, the shared `Countdown`, `AutoStopPresentation` and `UITestScenario`.
+   `Motion.pulse`, `CountdownHairline` and `UITestScenario`; consumes the shared `Countdown` and
+   `AutoStopPresentation` that step 8 created first.
 8. Device change, app PR (steps 7 to 11 of that plan): end reasons, the auto-stop, the armed row
-   on every surface from steps 1 and 7.
+   in the menu bar and the sidebar (the bubble row follows with step 7). Landed before step 7, so
+   it created the shared `Countdown` and `AutoStopPresentation` in the shapes that plan specifies.
 9. App icon. Independent, can land any time; listed here so the release rehearsal ships with
    it. The bubble's `BubbleGlyph` switches when it lands.
 10. Redesign, layout PRs (steps 3 to 12 of that plan): display helpers over `titleOrigin`,

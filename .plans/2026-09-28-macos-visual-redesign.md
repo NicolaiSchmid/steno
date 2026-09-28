@@ -2,6 +2,10 @@
 
 Status: proposal, 2026-09-28, revised after the 2026-09-28 reviews. Triggered by first-run feedback.
 
+> Superseded in part by [`2026-09-28-settings-redesign.md`](2026-09-28-settings-redesign.md):
+> Decision 12 ("Settings stays native") and implementation step 11 no longer apply. Settings
+> becomes a sidebar window with its own spec there. Everything else in this plan stands.
+
 Binding context: [`2026-09-24-initial-scope.md`](2026-09-24-initial-scope.md) (scope, the
 four tabs, editable surfaces, non-goals) and
 [`2026-09-25-macos-app-and-release.md`](2026-09-25-macos-app-and-release.md) (app

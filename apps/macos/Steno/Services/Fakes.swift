@@ -66,12 +66,18 @@ final class FakeCalendar: CalendarProviding {
 }
 
 @MainActor
+@Observable
 final class FakeUpdater: UpdaterControlling {
   var canCheckForUpdates = true
   var automaticallyChecksForUpdates = true
+  var automaticallyDownloadsUpdates = false
   var lastUpdateCheckDate: Date?
+  var lastOutcome: UpdateCheckOutcome = .notChecked
+  private(set) var checks = 0
 
   init() {}
 
-  func checkForUpdates() {}
+  func checkForUpdates() {
+    checks += 1
+  }
 }

@@ -33,6 +33,9 @@ final class AppController {
   /// The meeting the main window should show next (from the menu bar or the
   /// detection prompt).
   var requestedMeetingID: UUID?
+  /// The Settings section to select next; `SettingsView` applies and clears
+  /// it, as `MainWindow` does for `requestedMeetingID`.
+  var requestedSettingsSection: SettingsSection?
   private(set) var launched = false
   private var observers: [Task<Void, Never>] = []
   private var activationObserver: (any NSObjectProtocol)?
@@ -48,7 +51,12 @@ final class AppController {
     self.menuBar = MenuBarViewModel(environment: environment)
     self.progress = ProcessingProgressModel(now: environment.now)
     self.detection = DetectionController(environment: environment)
-    detection.startRecording = { [weak self] in await self?.recorder.start(mode: .call) }
+    detection.startRecording = { [weak self] callApp in
+      await self?.recorder.start(mode: .call, callApp: callApp)
+    }
+    detection.microphoneActivity = { [weak self] event in
+      await self?.recorder.microphoneActivity(event)
+    }
     recorder.recordingDidChange = { [weak self] recording in
       guard let self else { return }
       // In the background: the recording must not wait for a model load.
@@ -189,6 +197,14 @@ final class AppController {
     }
   }
 
+  /// Deep link into Settings: callers set the request here, then call the
+  /// `openSettings` environment action and activate the app.
+  @discardableResult
+  func openSettings(_ section: SettingsSection) -> SettingsSection {
+    requestedSettingsSection = section
+    return section
+  }
+
   private func registerLoginItemOnFirstLaunch() async {
     guard !environment.isPreview, !defaults.bool(forKey: Self.loginItemRegisteredKey) else {
       return
@@ -213,11 +229,12 @@ final class AppController {
   }
 
   /// Quit: a recording that is still starting is allowed to reach
-  /// `.recording` (or fail) first, then stopped and enqueued like any other;
-  /// then the detector, the handover listener and every observation end.
+  /// `.recording` (or fail) first, then stopped with `.quit` as its reason
+  /// and enqueued like any other; then the detector, the handover listener
+  /// and every observation end.
   func shutdown() async {
     await recorder.awaitSettled()
-    if case .recording = recorder.recording { await recorder.stop() }
+    if case .recording = recorder.recording { await recorder.stop(reason: .quit) }
     await detection.stop()
     if let handover = environment.handover { await handover.stop() }
     for observer in observers { observer.cancel() }

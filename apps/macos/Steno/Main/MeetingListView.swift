@@ -149,6 +149,9 @@ struct MeetingRow: View {
           Text(meeting.duration.clockText)
         }
         Text(meeting.source.label)
+        if let suffix = meeting.endReason?.listSuffix {
+          Text("· \(suffix)")
+        }
         if !meeting.tags.isEmpty {
           Text(meeting.tags.map { "#\($0)" }.joined(separator: " "))
             .lineLimit(1)

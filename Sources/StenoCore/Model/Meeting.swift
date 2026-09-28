@@ -70,11 +70,14 @@ public enum RecordingEndReason: Codable, Sendable, Equatable, Hashable {
   case deviceLost
   /// Steno quit while recording.
   case quit
+  /// The capture failed for a reason other than a device loss (the writer
+  /// or Core Audio); the recording up to that point was kept.
+  case failed
 
   /// The case names, shared by `meeting.json` and the `meeting.endReason`
   /// column.
   public enum Kind: String, CaseIterable, Codable, Sendable {
-    case manual, callEnded, deviceLost, quit
+    case manual, callEnded, deviceLost, quit, failed
   }
 
   public var kind: Kind {
@@ -83,6 +86,7 @@ public enum RecordingEndReason: Codable, Sendable, Equatable, Hashable {
     case .callEnded: .callEnded
     case .deviceLost: .deviceLost
     case .quit: .quit
+    case .failed: .failed
     }
   }
 
@@ -101,6 +105,7 @@ public enum RecordingEndReason: Codable, Sendable, Equatable, Hashable {
       self = .callEnded(appName: try String?(from: payload))
     case .deviceLost: self = .deviceLost
     case .quit: self = .quit
+    case .failed: self = .failed
     }
   }
 
