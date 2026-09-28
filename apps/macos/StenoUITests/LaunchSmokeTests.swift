@@ -63,17 +63,31 @@ final class LaunchSmokeTests: XCTestCase {
 
     let stop = app.buttons["sidebar-stop"].firstMatch
     XCTAssertTrue(stop.waitForExistence(timeout: 10), "the control did not turn into Stop")
-
-    let rows = app.descendants(matching: .any)
-      .matching(NSPredicate(format: "identifier BEGINSWITH 'meeting-'"))
-    let twoRows = XCTNSPredicateExpectation(
-      predicate: NSPredicate(format: "count == 2"), object: rows)
-    XCTAssertEqual(
-      XCTWaiter().wait(for: [twoRows], timeout: 10), .completed,
-      "expected the fixture meeting plus the live row, got \(rows.count)")
+    XCTAssertTrue(
+      waitUntil(timeout: 10) { meetingRowCount(in: app) == 2 },
+      "expected the fixture meeting plus the live row, got \(meetingRowCount(in: app))")
 
     stop.click()
     XCTAssertTrue(record.waitForExistence(timeout: 10), "the control did not return to Record call")
-    XCTAssertEqual(rows.count, 2, "the stopped recording keeps its row")
+    XCTAssertEqual(meetingRowCount(in: app), 2, "the stopped recording keeps its row")
+  }
+
+  /// Distinct `meeting-<id>` identifiers. SwiftUI stamps a row's identifier
+  /// on each of the row's text elements as well, so elements are counted by
+  /// identifier, not by number.
+  private func meetingRowCount(in app: XCUIApplication) -> Int {
+    let elements = app.descendants(matching: .any)
+      .matching(NSPredicate(format: "identifier BEGINSWITH 'meeting-'"))
+    return Set(elements.allElementsBoundByIndex.map(\.identifier)).count
+  }
+
+  /// Polls `condition` on the main run loop until it holds or `timeout` passes.
+  private func waitUntil(timeout: TimeInterval, _ condition: () -> Bool) -> Bool {
+    let deadline = Date().addingTimeInterval(timeout)
+    while !condition() {
+      guard Date() < deadline else { return false }
+      RunLoop.current.run(until: Date().addingTimeInterval(0.5))
+    }
+    return true
   }
 }
