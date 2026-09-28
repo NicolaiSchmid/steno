@@ -18,10 +18,7 @@ struct ScratchpadTab: View {
           Theme.Radius.md.shape
             .fill(Color.stenoCard)
         )
-        .overlay(
-          Theme.Radius.md.shape
-            .strokeBorder(Color.stenoBorder, lineWidth: Theme.Space.hairline)
-        )
+        .overlay(Theme.Radius.md.shape.hairline())
         .accessibilityIdentifier("scratchpad-editor")
         .onChange(of: text) { _, newValue in
           if newValue != model.meeting?.scratchpad { model.saveScratchpad(newValue) }

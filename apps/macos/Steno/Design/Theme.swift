@@ -148,9 +148,6 @@ enum Theme {
     static let xxl: CGFloat = 32
     static let xxxl: CGFloat = 48
     static let hairline: CGFloat = 1
-
-    /// The steps on the 4 pt grid, for the grid test.
-    static let grid: [CGFloat] = [xs, sm, md, lg, xl, xxl, xxxl]
   }
 
   /// Radii descend one step per nest: cards and the CTA `lg`, controls and
@@ -168,7 +165,6 @@ enum Theme {
 
   /// Control boxes: heights and the insets the recipes fix off-grid.
   enum Control {
-    static let ctaHeight: CGFloat = 40
     static let buttonHeight: CGFloat = 32
     static let inputHeight: CGFloat = 28
     static let navRowHeight: CGFloat = 32

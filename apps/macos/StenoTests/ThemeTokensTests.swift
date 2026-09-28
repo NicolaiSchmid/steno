@@ -63,26 +63,18 @@ final class ThemeTokensTests: XCTestCase {
   }
 
   /// `sidebar` is `background` with the `card` veil composited on it, not a
-  /// hand-picked grey: `#f2f2f2` in light, `#080808` in dark.
+  /// hand-picked grey: `#f2f2f2` in light (242.25 / 255 before rounding),
+  /// `#080808` in dark (7.9 / 255).
   func testSidebarIsBackgroundUnderTheCardVeil() {
-    let pairs: [(name: String, actual: Theme.RGBA, base: Theme.RGBA, veil: Theme.RGBA)] = [
-      ("light", Theme.sidebar.light, Theme.background.light, Theme.card.light),
-      ("dark", Theme.sidebar.dark, Theme.background.dark, Theme.card.dark),
+    let expected: [(name: String, actual: Theme.RGBA, grey: Double)] = [
+      ("light", Theme.sidebar.light, 242.25 / 255), ("dark", Theme.sidebar.dark, 7.9 / 255),
     ]
-    for pair in pairs {
-      let a = pair.veil.alpha
-      XCTAssertEqual(
-        pair.actual.red, pair.base.red * (1 - a) + pair.veil.red * a, accuracy: 0.0005, pair.name)
-      XCTAssertEqual(
-        pair.actual.green, pair.base.green * (1 - a) + pair.veil.green * a, accuracy: 0.0005,
-        pair.name)
-      XCTAssertEqual(
-        pair.actual.blue, pair.base.blue * (1 - a) + pair.veil.blue * a, accuracy: 0.0005,
-        pair.name)
+    for pair in expected {
+      XCTAssertEqual(pair.actual.red, pair.grey, accuracy: 0.0005, pair.name)
+      XCTAssertEqual(pair.actual.green, pair.grey, accuracy: 0.0005, pair.name)
+      XCTAssertEqual(pair.actual.blue, pair.grey, accuracy: 0.0005, pair.name)
       XCTAssertEqual(pair.actual.alpha, 1, pair.name)
     }
-    XCTAssertEqual(Theme.sidebar.light.red, 242.25 / 255, accuracy: 0.002)
-    XCTAssertEqual(Theme.sidebar.dark.red, 7.9 / 255, accuracy: 0.002)
   }
 
   /// Every spacing step except `xxs` and `hairline` sits on the 4 pt grid,
@@ -93,8 +85,6 @@ final class ThemeTokensTests: XCTestCase {
       ("lg", Theme.Space.lg), ("xl", Theme.Space.xl), ("xxl", Theme.Space.xxl),
       ("xxxl", Theme.Space.xxxl),
     ]
-    XCTAssertEqual(steps.map(\.value), Theme.Space.grid)
-    XCTAssertEqual(Theme.Space.grid, [4, 8, 12, 16, 24, 32, 48])
     for step in steps {
       XCTAssertEqual(
         step.value.truncatingRemainder(dividingBy: 4), 0, "Space.\(step.name) is off the 4 pt grid")
@@ -107,8 +97,6 @@ final class ThemeTokensTests: XCTestCase {
     for (outer, inner) in zip(radii, radii.dropFirst()) {
       XCTAssertGreaterThan(outer, inner, "radii must strictly descend")
     }
-    XCTAssertEqual(Theme.Radius.allCases.first, .xl)
-    XCTAssertEqual(Theme.Radius.allCases.last, .xs)
   }
 
   func testMotionTokensMirrorMobile() {

@@ -129,10 +129,7 @@ struct SpeakerPicker: View {
       Theme.Radius.sm.shape
         .fill(Color.stenoSecondary)
     )
-    .overlay(
-      Theme.Radius.sm.shape
-        .strokeBorder(Color.stenoRing, lineWidth: Theme.Space.hairline)
-    )
+    .overlay(Theme.Radius.sm.shape.hairline(Color.stenoRing))
     .focused($fieldFocused)
     .onSubmit { commit() }
     .onKeyPress(.downArrow) {

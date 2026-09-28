@@ -76,10 +76,7 @@ struct SpeakersRow: View {
           Theme.Radius.md.shape
             .fill(Color.stenoSecondary)
         )
-        .overlay(
-          Theme.Radius.md.shape
-            .strokeBorder(Color.stenoBorder, lineWidth: Theme.Space.hairline)
-        )
+        .overlay(Theme.Radius.md.shape.hairline())
         .contentShape(Rectangle())
       }
       .buttonStyle(.plain)

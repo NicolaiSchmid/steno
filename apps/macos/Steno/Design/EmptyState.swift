@@ -10,12 +10,6 @@ struct EmptyState: View {
     let title: String
     let id: String
     let run: () -> Void
-
-    init(title: String, id: String, run: @escaping () -> Void) {
-      self.title = title
-      self.id = id
-      self.run = run
-    }
   }
 
   let symbol: String?
@@ -42,9 +36,7 @@ struct EmptyState: View {
           .foregroundStyle(Color.stenoFaint)
           .frame(width: Theme.Control.emptyWellSize, height: Theme.Control.emptyWellSize)
           .background(Theme.Radius.lg.shape.fill(Color.stenoCard))
-          .overlay(
-            Theme.Radius.lg.shape.strokeBorder(Color.stenoBorder, lineWidth: Theme.Space.hairline)
-          )
+          .overlay(Theme.Radius.lg.shape.hairline())
           .accessibilityHidden(true)
       }
       Text(title)

@@ -72,9 +72,7 @@ struct StenoSecondaryButtonStyle: ButtonStyle {
             Theme.Radius.md.shape.fill(hovering ? Color.stenoCard : Color.clear)
           }
         )
-        .overlay(
-          Theme.Radius.md.shape.strokeBorder(Color.stenoBorder, lineWidth: Theme.Space.hairline)
-        )
+        .overlay(Theme.Radius.md.shape.hairline())
         .contentShape(Theme.Radius.md.shape)
         .onHover { hovering = $0 }
         .animation(Motion.swap(reduceMotion: reduceMotion), value: hovering)
@@ -150,9 +148,7 @@ struct StatusChip: View {
     .padding(.horizontal, Theme.Control.chipInset)
     .padding(.vertical, Theme.Space.hairline)
     .background(Theme.Radius.sm.shape.fill(fill))
-    .overlay(
-      Theme.Radius.sm.shape.strokeBorder(
-        isNeutral ? Color.stenoBorder : Color.clear, lineWidth: Theme.Space.hairline))
+    .overlay(Theme.Radius.sm.shape.hairline(isNeutral ? Color.stenoBorder : Color.clear))
   }
 }
 
@@ -170,8 +166,7 @@ struct Card<Content: View>: View {
     content()
       .padding(padding)
       .background(Theme.Radius.lg.shape.fill(Color.stenoRaised))
-      .overlay(
-        Theme.Radius.lg.shape.strokeBorder(Color.stenoBorder, lineWidth: Theme.Space.hairline))
+      .overlay(Theme.Radius.lg.shape.hairline())
   }
 }
 
@@ -280,6 +275,14 @@ extension View {
   func stenoShadowSmall() -> some View {
     shadow(color: .black.opacity(0.1), radius: 1.5, y: 1)
       .shadow(color: .black.opacity(0.1), radius: 1, y: 1)
+  }
+}
+
+extension InsettableShape {
+  /// The 1 pt inner stroke every bordered surface wears, `border` unless a
+  /// state (focus `ring`) says otherwise.
+  func hairline(_ color: Color = Color.stenoBorder) -> some View {
+    strokeBorder(color, lineWidth: Theme.Space.hairline)
   }
 }
 

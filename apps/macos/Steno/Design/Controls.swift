@@ -95,7 +95,7 @@ struct IconButton: View {
         .foregroundStyle(hovering ? Color.stenoStrong : Color.stenoMutedForeground)
         .frame(width: Theme.Control.iconButtonSize, height: Theme.Control.iconButtonSize)
         .background(Circle().fill(hovering ? Color.stenoCard : Color.clear))
-        .overlay(Circle().strokeBorder(Color.stenoBorder, lineWidth: Theme.Space.hairline))
+        .overlay(Circle().hairline())
         .contentShape(Circle())
     }
     .buttonStyle(.plain)
@@ -151,10 +151,7 @@ private struct InputBox: ViewModifier {
       .padding(.horizontal, Theme.Control.rowInset)
       .frame(height: Theme.Control.inputHeight)
       .background(Theme.Radius.md.shape.fill(Color.stenoRaised))
-      .overlay(
-        Theme.Radius.md.shape.strokeBorder(
-          focused ? Color.stenoRing : Color.stenoBorder, lineWidth: Theme.Space.hairline)
-      )
+      .overlay(Theme.Radius.md.shape.hairline(focused ? Color.stenoRing : Color.stenoBorder))
       .animation(Motion.swap(reduceMotion: reduceMotion), value: focused)
   }
 }
