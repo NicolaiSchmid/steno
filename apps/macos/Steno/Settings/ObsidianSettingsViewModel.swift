@@ -2,9 +2,10 @@ import Foundation
 import StenoAdapters
 import StenoCore
 
-/// Obsidian: `Settings.obsidian` (nil means not configured), validated on
-/// save with `ObsidianFolderDestination.validate()`; `ObsidianError`
-/// messages are shown verbatim.
+/// Export: `Settings.obsidian` (nil means off), validated on save with
+/// `ObsidianFolderDestination.validate()`; `ObsidianError` messages are
+/// shown verbatim. `commit()` saves when the form differs from what is
+/// stored; the toggle and the folder chooser call it, text fields on blur.
 @MainActor
 @Observable
 final class ObsidianSettingsViewModel {
@@ -14,8 +15,11 @@ final class ObsidianSettingsViewModel {
   var includeAudio = false
   var taskTag = ""
   private(set) var error: String?
+  private(set) var errorDetails: String?
   private(set) var validationMessage: String?
-  private(set) var saved = false
+  /// True after a save; the view clears it by saving again or leaving.
+  var saved = false
+  private var stored: ObsidianSettings?
   private let environment: AppEnvironment
 
   init(environment: AppEnvironment) {
@@ -25,6 +29,7 @@ final class ObsidianSettingsViewModel {
   func load() async {
     do {
       let settings = try await environment.settings.load()
+      stored = settings.obsidian
       if let obsidian = settings.obsidian {
         enabled = true
         vaultPath = obsidian.vaultPath
@@ -35,9 +40,22 @@ final class ObsidianSettingsViewModel {
         enabled = false
       }
     } catch {
-      self.error = "Settings could not be loaded: \(error)"
+      fail("Settings could not be loaded.", error)
     }
   }
+
+  /// The vault's folder name, for the folder row; empty until chosen.
+  var vaultName: String {
+    vaultPath.isEmpty ? "" : URL(fileURLWithPath: vaultPath).lastPathComponent
+  }
+
+  var vaultURL: URL? {
+    vaultPath.isEmpty ? nil : URL(fileURLWithPath: vaultPath, isDirectory: true)
+  }
+
+  /// On, but no folder chosen yet: the status row asks for one instead of
+  /// reporting a validation failure.
+  var needsVault: Bool { enabled && vaultPath.trimmingCharacters(in: .whitespaces).isEmpty }
 
   /// The typed settings as entered; nil when disabled.
   var draft: ObsidianSettings? {
@@ -49,11 +67,40 @@ final class ObsidianSettingsViewModel {
       includeAudio: includeAudio, taskTag: tag.isEmpty ? nil : tag)
   }
 
+  // MARK: Actions
+
+  func setEnabled(_ on: Bool) async {
+    enabled = on
+    await commit()
+  }
+
+  func chooseVault(_ url: URL) async {
+    vaultPath = url.path
+    await commit()
+  }
+
+  func setIncludeAudio(_ on: Bool) async {
+    includeAudio = on
+    await commit()
+  }
+
+  /// Saves when the draft differs from what is stored. On without a vault
+  /// waits for the chooser and saves nothing.
+  func commit() async {
+    if needsVault {
+      validationMessage = nil
+      return
+    }
+    guard draft != stored else { return }
+    await save()
+  }
+
   /// Validates through the destination and stores the settings; a failed
   /// validation stores nothing and reports the destination's message.
   func save() async {
     saved = false
     validationMessage = nil
+    let draft = self.draft
     if let draft {
       do {
         try await ObsidianFolderDestination(settings: draft).validate()
@@ -67,10 +114,17 @@ final class ObsidianSettingsViewModel {
     }
     do {
       try await environment.updateSettings { $0.obsidian = draft }
+      stored = draft
       saved = true
       error = nil
+      errorDetails = nil
     } catch {
-      self.error = "Settings could not be saved: \(error)"
+      fail("Settings could not be saved.", error)
     }
+  }
+
+  private func fail(_ message: String, _ error: any Error) {
+    self.error = message
+    errorDetails = String(describing: error)
   }
 }

@@ -85,7 +85,9 @@ final class InfoPlistTests: XCTestCase {
     let info = try Self.appInfo()
     XCTAssertEqual(
       info["SUFeedURL"] as? String,
-      "https://github.com/NicolaiSchmid/steno/releases/latest/download/appcast.xml")
+      "https://raw.githubusercontent.com/NicolaiSchmid/steno/appcast/appcast.xml",
+      "the rolling appcast on the appcast branch, never releases/latest (a pre-release is not latest)"
+    )
     let key = try XCTUnwrap(info["SUPublicEDKey"] as? String)
     XCTAssertNotEqual(key, "REPLACE_ME", "the EdDSA public key is still the placeholder")
     let decoded = try XCTUnwrap(Data(base64Encoded: key), "SUPublicEDKey is not base64")

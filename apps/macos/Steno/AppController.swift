@@ -28,6 +28,9 @@ final class AppController {
   /// The meeting the main window should show next (from the menu bar or the
   /// detection prompt).
   var requestedMeetingID: UUID?
+  /// The Settings section to select next; `SettingsView` applies and clears
+  /// it, as `MainWindow` does for `requestedMeetingID`.
+  var requestedSettingsSection: SettingsSection?
   private(set) var launched = false
   private var observers: [Task<Void, Never>] = []
   private var activationObserver: (any NSObjectProtocol)?
@@ -176,6 +179,14 @@ final class AppController {
     case .starting, .stopping:
       break
     }
+  }
+
+  /// Deep link into Settings: callers set the request here, then call the
+  /// `openSettings` environment action and activate the app.
+  @discardableResult
+  func openSettings(_ section: SettingsSection) -> SettingsSection {
+    requestedSettingsSection = section
+    return section
   }
 
   private func registerLoginItemOnFirstLaunch() async {

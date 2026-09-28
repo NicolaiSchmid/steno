@@ -239,7 +239,7 @@ final class SettingsViewModelTests: XCTestCase {
     let environment = try await TestSupport.environment(seed: false)
     let model = LLMSettingsViewModel(environment: environment)
     await model.test()
-    XCTAssertEqual(model.testResult, .failure("Enter a valid base URL first."))
+    XCTAssertEqual(model.testResult, .failure("Enter a valid server address first."))
     model.baseURLText = "http://127.0.0.1:9/v1"
     model.model = "m"
     await model.test()
@@ -448,5 +448,184 @@ final class SettingsViewModelTests: XCTestCase {
     await TestSupport.waitUntil("stopped after the last phone left") {
       model.listener == .stopped
     }
+  }
+
+  // MARK: Save-on-change, presets, permissions, overview
+
+  func testLLMCommitSavesOnlyChangesThenProbes() async throws {
+    let environment = try await TestSupport.environment(seed: false)
+    let model = LLMSettingsViewModel(environment: environment)
+    await model.load()
+    XCTAssertEqual(model.preset, .lmStudio, "a fresh install starts with the local preset")
+    XCTAssertEqual(model.baseURLText, "http://127.0.0.1:1234/v1", "the address is pre-filled")
+    XCTAssertEqual(model.status, .notConfigured)
+
+    // Custom server on a port that refuses, so the probe answers at once.
+    await model.selectPreset(.custom)
+    XCTAssertEqual(model.baseURLText, "http://127.0.0.1:1234/v1", "Custom keeps what is typed")
+    model.baseURLText = "http://127.0.0.1:9/v1"
+    await model.commit()
+    var settings = try await environment.settings.load()
+    XCTAssertEqual(settings.llmBaseURL?.absoluteString, "http://127.0.0.1:9/v1")
+    XCTAssertNil(settings.llmModel)
+    XCTAssertFalse(model.isConfigured)
+    XCTAssertNil(model.testResult, "no probe before the model is named")
+
+    model.model = "qwen"
+    await model.commit()
+    settings = try await environment.settings.load()
+    XCTAssertEqual(settings.llmModel, "qwen")
+    XCTAssertTrue(model.isConfigured)
+    guard case .failed(let report) = model.status else {
+      return XCTFail("port 9 does not answer, so the commit's probe fails: \(model.status)")
+    }
+    XCTAssertFalse(report.isEmpty)
+
+    let pipeline = environment.pipeline
+    await model.commit()
+    XCTAssertTrue(pipeline === environment.pipeline, "an unchanged form saves nothing")
+
+    model.contextTokensText = "12"
+    await model.commit()
+    XCTAssertNotNil(model.validationMessage)
+    XCTAssertNil(model.error, "invalid input is shown, not saved as an error")
+    settings = try await environment.settings.load()
+    XCTAssertEqual(settings.llmContextTokens, LLMSettingsViewModel.defaultContextTokens)
+  }
+
+  func testLLMSelectPresetFillsAndStoresTheAddress() async throws {
+    let environment = try await TestSupport.environment(seed: false)
+    let model = LLMSettingsViewModel(environment: environment)
+    await model.load()
+    await model.selectPreset(.openAI)
+    XCTAssertEqual(model.preset, .openAI)
+    XCTAssertEqual(model.baseURLText, "https://api.openai.com/v1")
+    let settings = try await environment.settings.load()
+    XCTAssertEqual(settings.llmBaseURL?.absoluteString, "https://api.openai.com/v1")
+    XCTAssertFalse(model.isConfigured, "no model yet")
+
+    let reloaded = LLMSettingsViewModel(environment: environment)
+    await reloaded.load()
+    XCTAssertEqual(reloaded.preset, .openAI, "the preset is inferred from the stored address")
+  }
+
+  func testObsidianCommitWaitsForAVaultAndSavesOnChoice() async throws {
+    let environment = try await TestSupport.environment(seed: false)
+    let vault = try TestSupport.temporaryDirectory("steno-vault")
+    defer { try? FileManager.default.removeItem(at: vault) }
+    let model = ObsidianSettingsViewModel(environment: environment)
+    await model.load()
+    XCTAssertFalse(model.enabled)
+    XCTAssertEqual(model.vaultName, "")
+
+    await model.setEnabled(true)
+    XCTAssertTrue(model.needsVault)
+    XCTAssertNil(model.validationMessage, "on without a folder is not an error")
+    XCTAssertFalse(model.saved)
+    var stored = try await environment.settings.load().obsidian
+    XCTAssertNil(stored)
+
+    await model.chooseVault(vault)
+    XCTAssertTrue(model.saved)
+    XCTAssertNil(model.validationMessage)
+    XCTAssertEqual(model.vaultName, vault.lastPathComponent)
+    stored = try await environment.settings.load().obsidian
+    XCTAssertEqual(stored?.vaultPath, vault.path)
+
+    model.saved = false
+    await model.commit()
+    XCTAssertFalse(model.saved, "an unchanged form saves nothing")
+
+    await model.setIncludeAudio(true)
+    XCTAssertTrue(model.saved)
+    stored = try await environment.settings.load().obsidian
+    XCTAssertEqual(stored?.includeAudio, true)
+
+    await model.setEnabled(false)
+    stored = try await environment.settings.load().obsidian
+    XCTAssertNil(stored)
+  }
+
+  func testAudioShowsPermissionsAndFolderSize() async throws {
+    let environment = try await TestSupport.environment(seed: false)
+    let model = AudioSettingsViewModel(environment: environment)
+    model.listInputs = { [] }
+    model.measureFolder = { _ in 4_200 }
+    await model.load()
+    XCTAssertEqual(model.state(of: .microphone), .granted)
+    XCTAssertEqual(model.state(of: .systemAudio), .granted)
+    XCTAssertTrue(model.allPermissionsGranted)
+    XCTAssertEqual(model.folderUsage, .bytes(4_200))
+    XCTAssertEqual(model.folderName, "audio")
+    XCTAssertTrue(model.retentionFootnote.contains("30 days"))
+
+    let permissions = try XCTUnwrap(environment.permissions as? FakePermissions)
+    permissions.states[.systemAudio] = .unknown
+    await model.refreshPermissions()
+    XCTAssertFalse(model.allPermissionsGranted)
+    await model.requestPermission(.systemAudio)
+    XCTAssertEqual(permissions.requests, [.systemAudio])
+    XCTAssertEqual(model.state(of: .systemAudio), .granted)
+    model.openPermissionSettings(.microphone)
+    XCTAssertEqual(permissions.openedPanes, [.microphone])
+
+    model.measureFolder = { _ in throw CocoaError(.fileReadNoPermission) }
+    await model.measureFolderUsage()
+    XCTAssertEqual(model.folderUsage, .unavailable)
+    XCTAssertNil(model.error)
+  }
+
+  func testFolderSizeSumsRegularFiles() throws {
+    let folder = try TestSupport.temporaryDirectory("steno-size")
+    defer { try? FileManager.default.removeItem(at: folder) }
+    try Data(count: 10).write(to: folder.appendingPathComponent("a.caf"))
+    let nested = folder.appendingPathComponent("nested", isDirectory: true)
+    try FileManager.default.createDirectory(at: nested, withIntermediateDirectories: true)
+    try Data(count: 5).write(to: nested.appendingPathComponent("b.caf"))
+    XCTAssertEqual(try AudioSettingsViewModel.folderSize(folder), 15)
+    XCTAssertEqual(
+      try AudioSettingsViewModel.folderSize(folder.appendingPathComponent("missing")), 0)
+  }
+
+  func testGeneralShowsCalendarAndUpdates() async throws {
+    let environment = try await TestSupport.environment(seed: false)
+    let model = GeneralSettingsViewModel(environment: environment)
+    await model.load()
+    XCTAssertEqual(model.calendarPermission, .granted)
+    XCTAssertEqual(model.selectedTemplate?.id, "default")
+
+    let permissions = try XCTUnwrap(environment.permissions as? FakePermissions)
+    permissions.states[.calendar] = .unknown
+    await model.load()
+    XCTAssertEqual(model.calendarPermission, .unknown)
+    await model.requestCalendar()
+    XCTAssertEqual(permissions.requests, [.calendar])
+    XCTAssertEqual(model.calendarPermission, .granted)
+
+    let updater = try XCTUnwrap(environment.updater as? FakeUpdater)
+    XCTAssertEqual(model.updateStatusText(now: TestSupport.now), "Not checked yet")
+    updater.lastOutcome = .available("0.9.1")
+    XCTAssertEqual(model.updateStatusText(now: TestSupport.now), "Update available: 0.9.1")
+    updater.lastOutcome = .failed("SUSparkleErrorDomain 2001")
+    XCTAssertEqual(model.updateStatusText(now: TestSupport.now), "Could not check for updates")
+    XCTAssertEqual(model.updateFailureDetails, "SUSparkleErrorDomain 2001")
+    model.checkForUpdates()
+    XCTAssertEqual(updater.checks, 1)
+    model.automaticallyDownloadsUpdates = true
+    XCTAssertTrue(updater.automaticallyDownloadsUpdates)
+    model.automaticallyChecksForUpdates = false
+    XCTAssertFalse(updater.automaticallyChecksForUpdates)
+  }
+
+  func testErrorsAreSentencesWithDetailsApart() async throws {
+    let environment = try await TestSupport.environment(seed: false)
+    let model = AudioSettingsViewModel(environment: environment)
+    struct Boom: Error, CustomStringConvertible {
+      var description: String { "CoreAudio kAudioHardwareUnknownPropertyError" }
+    }
+    model.listInputs = { throw Boom() }
+    model.refreshDevices()
+    XCTAssertEqual(model.error, "Microphones could not be listed.")
+    XCTAssertEqual(model.errorDetails, "CoreAudio kAudioHardwareUnknownPropertyError")
   }
 }

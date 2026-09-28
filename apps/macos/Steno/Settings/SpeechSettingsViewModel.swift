@@ -2,8 +2,10 @@ import Foundation
 import StenoCore
 import StenoSpeech
 
-/// Speech: the engine and the model assets it needs, with download progress
-/// from `ModelStore.ensure`. Changing the engine rebuilds the pipeline.
+/// Transcription: the engine and the components it needs on this Mac, with
+/// download progress from `ModelStore.ensure`. Changing the engine rebuilds
+/// the pipeline. Licences and repositories are not shown here; the
+/// Acknowledgements sheet lists them.
 @MainActor
 @Observable
 final class SpeechSettingsViewModel {
@@ -17,6 +19,7 @@ final class SpeechSettingsViewModel {
   private(set) var engineID: SpeechEngineID = .parakeetV3
   private(set) var assetStates: [ModelAsset: AssetState] = [:]
   private(set) var error: String?
+  private(set) var errorDetails: String?
   let engines = SpeechEngineID.userSelectable
   private let environment: AppEnvironment
   private var downloads: [ModelAsset: Task<Void, Never>] = [:]
@@ -28,12 +31,22 @@ final class SpeechSettingsViewModel {
   /// The assets the selected engine needs: its model and the diarizer.
   var assets: [ModelAsset] { [engineID.asset, .offlineDiarizer] }
 
+  /// The picker is only worth a row when there is a choice.
+  var showsEnginePicker: Bool { engines.count > 1 }
+
+  var allInstalled: Bool {
+    assets.allSatisfy {
+      if case .installed = state(of: $0) { return true }
+      return false
+    }
+  }
+
   func load() async {
     do {
       let settings = try await environment.settings.load()
       engineID = (try? SpeechEngineID(settingsValue: settings.speechEngineID)) ?? .parakeetV3
     } catch {
-      self.error = "Settings could not be loaded: \(error)"
+      fail("Settings could not be loaded.", error)
     }
     refreshStates()
   }
@@ -51,6 +64,50 @@ final class SpeechSettingsViewModel {
     assetStates[asset] ?? .absent
   }
 
+  // MARK: Copy
+
+  /// What the component does, not what the model is called.
+  nonisolated static func componentTitle(_ asset: ModelAsset) -> String {
+    asset == .offlineDiarizer ? "Speaker recognition" : "Speech recognition"
+  }
+
+  /// "Parakeet · fast · 25 languages".
+  nonisolated static func engineTitle(_ id: SpeechEngineID) -> String {
+    let name: String
+    let speed: String?
+    switch id {
+    case .parakeetV3:
+      name = "Parakeet"
+      speed = "fast"
+    case .parakeetUltra:
+      name = "Parakeet Ultra"
+      speed = nil
+    case .parakeetDE:
+      name = "Parakeet (German)"
+      speed = nil
+    case .whisperKitLargeV3Turbo:
+      name = "Whisper"
+      speed = "slower"
+    }
+    let languages = id.supportedLanguages.count
+    let languageText = languages == 1 ? "1 language" : "\(languages) languages"
+    return [name, speed, languageText].compactMap { $0 }.joined(separator: " · ")
+  }
+
+  /// "Installed · 485 MB", "Downloading… 40%", "Not downloaded · 485 MB".
+  func statusText(of asset: ModelAsset) -> String {
+    switch state(of: asset) {
+    case .absent, .failed:
+      return "Not downloaded · \(Self.formatBytes(asset.approximateBytes))"
+    case .downloading(let fraction, _):
+      return fraction > 0 ? "Downloading… \(Int((fraction * 100).rounded()))%" : "Downloading…"
+    case .installed(let bytes):
+      return "Installed · \(Self.formatBytes(bytes ?? asset.approximateBytes))"
+    }
+  }
+
+  // MARK: Actions
+
   func setEngine(_ id: SpeechEngineID) async {
     guard id != engineID else { return }
     engineID = id
@@ -58,8 +115,9 @@ final class SpeechSettingsViewModel {
       try await environment.updateSettings { $0.speechEngineID = id.rawValue }
       try await environment.reloadPipeline()
       error = nil
+      errorDetails = nil
     } catch {
-      self.error = "Engine could not be changed: \(error)"
+      fail("The language model could not be changed.", error)
     }
     refreshStates()
   }
@@ -91,7 +149,16 @@ final class SpeechSettingsViewModel {
       try await environment.models.remove(asset)
       assetStates[asset] = .absent
     } catch {
-      self.error = "Model could not be removed: \(error)"
+      fail("The download could not be removed.", error)
     }
+  }
+
+  nonisolated static func formatBytes(_ bytes: Int64) -> String {
+    ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file)
+  }
+
+  private func fail(_ message: String, _ error: any Error) {
+    self.error = message
+    errorDetails = String(describing: error)
   }
 }

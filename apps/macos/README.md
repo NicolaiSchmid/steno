@@ -76,7 +76,7 @@ a Debug build read that feed instead of `SUFeedURL`. Serve `dist/` with
 | `Steno/Main/` | meeting list, detail with Summary, Transcript, Tasks, Scratchpad |
 | `Steno/Speakers/` | the speaker review sheet and clip player |
 | `Steno/Detection/` | the detection prompt (floating panel) |
-| `Steno/Settings/` | General, Audio, Speech, LLM, Obsidian, Phones, Updates |
+| `Steno/Settings/` | Sidebar window: General, Recording, Transcription, Summaries, Export, iPhone (`SettingsSection`), one view model each plus the sidebar status (`SettingsOverviewViewModel`) and the Acknowledgements sheet |
 | `Steno/Onboarding/` | permission onboarding |
 | `Steno/Services/` | the four app protocols over system frameworks, their live types and fakes |
 | `StenoTests/` | hostless XCTest unit tests, one file per view model |
@@ -124,13 +124,23 @@ account `llm-api-key`), the handover identity in the login keychain.
 5. `scripts/make-appcast.sh <tag>` runs Sparkle's `generate_appcast --ed-key-file -` with
    `SPARKLE_PRIVATE_KEY` on stdin and writes `appcast.xml` for this release alone.
 6. A draft GitHub release is created, the DMG and appcast uploaded, and the release
-   published (`--prerelease` when the tag contains a hyphen, so `releases/latest` skips it).
-7. `scripts/bump-homebrew-cask.sh <version> <dmg>` rewrites `version` and `sha256` in
+   published (`--prerelease` when the tag contains a hyphen).
+7. `scripts/publish-appcast.sh <tag> <prerelease>` folds the release's item into the rolling
+   `appcast.xml` on the `appcast` branch (`scripts/merge-appcast.py`: newest first, one item
+   per build number, at most twenty) and pushes. That branch is what `SUFeedURL` reads
+   (`https://raw.githubusercontent.com/NicolaiSchmid/steno/appcast/appcast.xml`), so the feed
+   never depends on `releases/latest`, which GitHub never points at a pre-release. A
+   pre-release item carries `<sparkle:channel>beta</sparkle:channel>`; the app allows that
+   channel only when its own version string has a hyphen (`Services/UpdateChannels.swift`),
+   so release candidates are offered candidates and stable builds never are. The
+   per-release appcast stays on the release too, so `v0.9.0-rc.1` installs (which read
+   `releases/latest`) hop to the first stable release and pick up the new feed URL from it.
+8. `scripts/bump-homebrew-cask.sh <version> <dmg>` rewrites `version` and `sha256` in
    `Casks/steno.rb` of [NicolaiSchmid/homebrew-tap](https://github.com/NicolaiSchmid/homebrew-tap)
    and pushes `steno <version>` to its `main`. Pre-releases bump too. Without
    `HOMEBREW_TAP_TOKEN` the step prints a notice and the release stands; with it, a failed
    push is a warning (`continue-on-error`), never a failed release.
-8. `always()`: the keychain is deleted and the App Store Connect key removed.
+9. `always()`: the keychain is deleted and the App Store Connect key removed.
 
 `workflow_dispatch` with `dry_run` builds, signs and verifies without notarising or
 publishing.
@@ -166,10 +176,13 @@ collaborators" on, so a fork never reaches the self-hosted runner.
 
 Tag `v0.9.0-rc.1` (pre-release), install the DMG on a fresh macOS 15.1+ user, run the manual
 checklist from the plan, tag `v0.9.0`, then `v0.9.1` and confirm Sparkle offers and installs
-it before tagging `v1.0.0`.
+it before tagging `v1.0.0`. After each tag, `curl -s
+https://raw.githubusercontent.com/NicolaiSchmid/steno/appcast/appcast.xml` should list the
+new build at the top; a candidate build (`-rc`) must be offered a newer candidate, a stable
+build must not see candidates.
 
 ### Homebrew
 
 `brew tap nicolaischmid/tap && brew install --cask steno` installs the DMG the cask points at;
-`brew upgrade --cask steno` follows the tap, Sparkle follows `releases/latest`. Plan:
+`brew upgrade --cask steno` follows the tap, Sparkle follows the `appcast` branch. Plan:
 [`.plans/2026-09-28-homebrew-and-nix.md`](../../.plans/2026-09-28-homebrew-and-nix.md).

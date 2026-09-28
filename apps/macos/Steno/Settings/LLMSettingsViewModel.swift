@@ -2,9 +2,94 @@ import Foundation
 import StenoCore
 import StenoLLM
 
-/// LLM: OpenAI-compatible base URL, model, context tokens, and the API key
-/// in the keychain through `SecretStore` (never in `Settings`). Saving
-/// rebuilds the pipeline; Test probes the endpoint through `LLMWiring`.
+/// The services the Summaries section offers by name. A preset is a base
+/// URL plus what the form needs to show for it; the stored settings stay
+/// URL, model and context size.
+enum LLMPreset: String, CaseIterable, Identifiable, Sendable {
+  case lmStudio
+  case ollama
+  case openRouter
+  case openAI
+  case anthropic
+  case custom
+
+  var id: String { rawValue }
+
+  var title: String {
+    switch self {
+    case .lmStudio: "LM Studio on this Mac"
+    case .ollama: "Ollama on this Mac"
+    case .openRouter: "OpenRouter"
+    case .openAI: "OpenAI"
+    case .anthropic: "Anthropic"
+    case .custom: "Custom server"
+    }
+  }
+
+  /// nil for Custom: the user types the address.
+  var baseURL: URL? {
+    switch self {
+    case .lmStudio: URL(string: "http://127.0.0.1:1234/v1")
+    case .ollama: URL(string: "http://127.0.0.1:11434/v1")
+    case .openRouter: URL(string: "https://openrouter.ai/api/v1")
+    case .openAI: URL(string: "https://api.openai.com/v1")
+    case .anthropic: URL(string: "https://api.anthropic.com/v1")
+    case .custom: nil
+    }
+  }
+
+  /// Local servers run without a key; the hosted ones need one.
+  var needsAPIKey: Bool {
+    switch self {
+    case .lmStudio, .ollama, .custom: false
+    case .openRouter, .openAI, .anthropic: true
+    }
+  }
+
+  /// Hosted services have one address; local servers may sit on another
+  /// port, so their field stays visible.
+  var showsServerField: Bool {
+    switch self {
+    case .lmStudio, .ollama, .custom: true
+    case .openRouter, .openAI, .anthropic: false
+    }
+  }
+
+  var modelPlaceholder: String {
+    switch self {
+    case .lmStudio: "the model loaded in LM Studio"
+    case .ollama: "llama3.1"
+    case .openRouter: "openai/gpt-4.1-mini"
+    case .openAI: "gpt-4.1-mini"
+    case .anthropic: "claude-sonnet-5"
+    case .custom: "model name"
+    }
+  }
+
+  /// The preset whose address matches; Custom when none does, LM Studio
+  /// when nothing is stored yet.
+  static func infer(from url: URL?) -> LLMPreset {
+    guard let url else { return .lmStudio }
+    let normalized = Self.normalize(url)
+    for preset in allCases where preset != .custom {
+      if let candidate = preset.baseURL, Self.normalize(candidate) == normalized {
+        return preset
+      }
+    }
+    return .custom
+  }
+
+  private static func normalize(_ url: URL) -> String {
+    var text = url.absoluteString.lowercased()
+    while text.hasSuffix("/") { text.removeLast() }
+    return text
+  }
+}
+
+/// Summaries: the preset, the OpenAI-compatible base URL, model, context
+/// tokens, and the API key in the keychain through `SecretStore` (never in
+/// `Settings`). `commit()` saves when the draft differs from what is stored
+/// and then probes the endpoint; `save()` and `test()` stay for direct use.
 @MainActor
 @Observable
 final class LLMSettingsViewModel {
@@ -13,14 +98,36 @@ final class LLMSettingsViewModel {
     case failure(String)
   }
 
+  /// What the status row says.
+  enum Status: Equatable, Sendable {
+    case notConfigured
+    case unchecked
+    case checking
+    case connected(String)
+    case failed(String)
+  }
+
+  static let defaultContextTokens = 32_000
+
+  /// The stored values, for `commit()` to compare against.
+  private struct Stored: Equatable {
+    var baseURL: URL?
+    var model: String?
+    var contextTokens: Int
+    var apiKey: String?
+  }
+
   var baseURLText = ""
   var model = ""
-  var contextTokensText = "32000"
+  var contextTokensText = String(LLMSettingsViewModel.defaultContextTokens)
   var apiKey = ""
+  private(set) var preset: LLMPreset = .lmStudio
   private(set) var error: String?
+  private(set) var errorDetails: String?
   private(set) var testResult: TestResult?
   private(set) var isTesting = false
   private(set) var isConfigured = false
+  private var stored: Stored?
   private let environment: AppEnvironment
 
   init(environment: AppEnvironment) {
@@ -30,15 +137,22 @@ final class LLMSettingsViewModel {
   func load() async {
     do {
       let settings = try await environment.settings.load()
-      baseURLText = settings.llmBaseURL?.absoluteString ?? ""
+      let key = try await environment.secrets.secret(for: .llmAPIKey)
+      preset = LLMPreset.infer(from: settings.llmBaseURL)
+      baseURLText = (settings.llmBaseURL ?? preset.baseURL)?.absoluteString ?? ""
       model = settings.llmModel ?? ""
       contextTokensText = String(settings.llmContextTokens)
+      apiKey = key ?? ""
       isConfigured = LLMEndpoint(settings: settings) != nil
-      apiKey = try await environment.secrets.secret(for: .llmAPIKey) ?? ""
+      stored = Stored(
+        baseURL: settings.llmBaseURL, model: settings.llmModel,
+        contextTokens: settings.llmContextTokens, apiKey: key)
     } catch {
-      self.error = "Settings could not be loaded: \(error)"
+      fail("Settings could not be loaded.", error)
     }
   }
+
+  // MARK: Draft
 
   /// The URL as typed, validated: http or https with a host.
   var baseURL: URL? {
@@ -55,44 +169,88 @@ final class LLMSettingsViewModel {
 
   var validationMessage: String? {
     if !baseURLText.trimmingCharacters(in: .whitespaces).isEmpty, baseURL == nil {
-      return "The base URL must start with http:// or https:// and name a host."
+      return "The server address must start with http:// or https:// and name a host."
     }
     if let tokens = contextTokens, tokens < 1_024 {
-      return "The context window must be at least 1024 tokens."
+      return "The context size must be at least 1024."
     }
     if contextTokens == nil, !contextTokensText.isEmpty {
-      return "The context window must be a number."
+      return "The context size must be a number."
     }
     return nil
+  }
+
+  var status: Status {
+    if isTesting { return .checking }
+    switch testResult {
+    case .success(let text): return .connected(text)
+    case .failure(let text): return .failed(text)
+    case nil: return isConfigured ? .unchecked : .notConfigured
+    }
+  }
+
+  private var draft: Stored {
+    let trimmedModel = model.trimmingCharacters(in: .whitespaces)
+    let trimmedKey = apiKey.trimmingCharacters(in: .whitespaces)
+    return Stored(
+      baseURL: baseURL, model: trimmedModel.isEmpty ? nil : trimmedModel,
+      contextTokens: contextTokens ?? Self.defaultContextTokens,
+      apiKey: trimmedKey.isEmpty ? nil : trimmedKey)
+  }
+
+  // MARK: Actions
+
+  /// Fills the address for the preset (Custom keeps what is typed) and
+  /// stores it right away, so a later model entry completes the setup.
+  func selectPreset(_ preset: LLMPreset) async {
+    self.preset = preset
+    if let url = preset.baseURL {
+      baseURLText = url.absoluteString
+    }
+    testResult = nil
+    await commit()
+  }
+
+  /// Saves when the form differs from what is stored and validates, then
+  /// probes the endpoint when it is configured. Invalid input stays on
+  /// screen as `validationMessage` and saves nothing.
+  func commit() async {
+    guard validationMessage == nil else { return }
+    guard draft != stored else { return }
+    await save()
+    guard error == nil, isConfigured else { return }
+    await test()
   }
 
   func save() async {
     guard validationMessage == nil else {
       error = validationMessage
+      errorDetails = nil
       return
     }
-    let trimmedModel = model.trimmingCharacters(in: .whitespaces)
-    let trimmedKey = apiKey.trimmingCharacters(in: .whitespaces)
+    let draft = self.draft
     do {
       let settings = try await environment.updateSettings {
-        $0.llmBaseURL = baseURL
-        $0.llmModel = trimmedModel.isEmpty ? nil : trimmedModel
-        $0.llmContextTokens = contextTokens ?? 32_000
+        $0.llmBaseURL = draft.baseURL
+        $0.llmModel = draft.model
+        $0.llmContextTokens = draft.contextTokens
       }
-      try await environment.secrets.setSecret(trimmedKey.isEmpty ? nil : trimmedKey, for: .llmAPIKey)
+      try await environment.secrets.setSecret(draft.apiKey, for: .llmAPIKey)
       isConfigured = LLMEndpoint(settings: settings) != nil
+      stored = draft
       try await environment.reloadPipeline()
       error = nil
+      errorDetails = nil
     } catch {
-      self.error = "Settings could not be saved: \(error)"
+      fail("Settings could not be saved.", error)
     }
   }
 
   /// Reachability, model listing and structured output mode, through the
-  /// module's probe once StenoLLM is wired (`LLMWiring.probe`).
+  /// module's probe (`LLMWiring.probe`).
   func test() async {
     guard let baseURL else {
-      testResult = .failure("Enter a valid base URL first.")
+      testResult = .failure("Enter a valid server address first.")
       return
     }
     let trimmedModel = model.trimmingCharacters(in: .whitespaces)
@@ -105,7 +263,7 @@ final class LLMSettingsViewModel {
     var settings = Settings()
     settings.llmBaseURL = baseURL
     settings.llmModel = trimmedModel
-    settings.llmContextTokens = contextTokens ?? 32_000
+    settings.llmContextTokens = contextTokens ?? Self.defaultContextTokens
     let key = apiKey.trimmingCharacters(in: .whitespaces)
     do {
       let report = try await LLMWiring.probe(settings: settings, apiKey: key.isEmpty ? nil : key)
@@ -113,5 +271,10 @@ final class LLMSettingsViewModel {
     } catch {
       testResult = .failure(String(describing: error))
     }
+  }
+
+  private func fail(_ message: String, _ error: any Error) {
+    self.error = message
+    errorDetails = String(describing: error)
   }
 }
