@@ -29,8 +29,6 @@ struct AutoStop {
   let appName: String?
   let countdown: Countdown
 
-  var remaining: Duration { countdown.remaining }
-
   var presentation: AutoStopPresentation {
     let countdown = countdown.presentation
     return AutoStopPresentation(

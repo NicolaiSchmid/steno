@@ -184,6 +184,16 @@ enum TestSupport {
     for _ in 0..<20 { await Task.yield() }
   }
 
+  /// The one meeting row a stopped recording left behind, for tests that
+  /// read the stored end reason and state.
+  static func stoppedMeeting(in environment: AppEnvironment) async throws -> Meeting {
+    let meetings = try await environment.store.meetings()
+    XCTAssertEqual(meetings.count, 1, "one recording, one row")
+    let meeting = try XCTUnwrap(meetings.first)
+    XCTAssertNotEqual(meeting.state, .recording, "stop left the recording state")
+    return meeting
+  }
+
   /// Polls `condition` every 10 ms up to `timeout` (default 10 s). Used only
   /// where a store observation or a pipeline task must be given time to
   /// deliver; every timer under test runs on `ManualClock`.

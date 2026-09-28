@@ -41,12 +41,6 @@ final class AutoStopTests: XCTestCase {
     }
   }
 
-  private func onlyMeeting(in environment: AppEnvironment) async throws -> Meeting {
-    let meetings = try await environment.store.meetings()
-    XCTAssertEqual(meetings.count, 1, "one recording, one row")
-    return try XCTUnwrap(meetings.first)
-  }
-
   func testMicrophoneReleaseAfterACallArmsAndStopsAfterTheGrace() async throws {
     let clock = ManualClock()
     let (environment, recorder) = try await makeRecorder(clock: clock)
@@ -57,7 +51,7 @@ final class AutoStopTests: XCTestCase {
     await recorder.microphoneActivity(.released)
     let armed = try XCTUnwrap(recorder.autoStop)
     XCTAssertEqual(armed.appName, "Zen")
-    XCTAssertEqual(armed.remaining, RecordingController.autoStopGrace)
+    XCTAssertEqual(armed.countdown.remaining, RecordingController.autoStopGrace)
     XCTAssertEqual(armed.presentation.line, "Zen closed the microphone. Stopping in 1:30.")
     XCTAssertEqual(armed.presentation.fractionRemaining, 1)
     await recorder.microphoneActivity(.released)
@@ -78,9 +72,8 @@ final class AutoStopTests: XCTestCase {
     }
     XCTAssertNil(recorder.autoStop)
     XCTAssertNil(recorder.lastError, recorder.lastError ?? "")
-    let meeting = try await onlyMeeting(in: environment)
+    let meeting = try await TestSupport.stoppedMeeting(in: environment)
     XCTAssertEqual(meeting.endReason, .callEnded(appName: "Zen"))
-    XCTAssertNotEqual(meeting.state, .recording)
     await environment.pipeline.waitUntilIdle()
     let stored = try await environment.store.meeting(id: meeting.id)
     XCTAssertEqual(stored?.state, .ready, "an auto-stopped recording is processed like any other")
@@ -104,7 +97,7 @@ final class AutoStopTests: XCTestCase {
 
     await recorder.microphoneActivity(.released)
     XCTAssertEqual(
-      recorder.autoStop?.remaining, RecordingController.autoStopGrace,
+      recorder.autoStop?.countdown.remaining, RecordingController.autoStopGrace,
       "the next release arms a fresh countdown")
     await recorder.stop()
     await environment.pipeline.waitUntilIdle()
@@ -137,7 +130,7 @@ final class AutoStopTests: XCTestCase {
     XCTAssertNil(recorder.autoStop)
     XCTAssertEqual(clock.pendingSleepers, 0)
     await recorder.stop()
-    let meeting = try await onlyMeeting(in: environment)
+    let meeting = try await TestSupport.stoppedMeeting(in: environment)
     XCTAssertEqual(meeting.endReason, .manual)
     await environment.pipeline.waitUntilIdle()
   }
@@ -163,7 +156,7 @@ final class AutoStopTests: XCTestCase {
     XCTAssertEqual(
       armed.presentation.line, "The call app closed the microphone. Stopping in 1:30.")
     await recorder.stopNow()
-    let meeting = try await onlyMeeting(in: environment)
+    let meeting = try await TestSupport.stoppedMeeting(in: environment)
     XCTAssertEqual(meeting.endReason, .callEnded(appName: nil))
     await environment.pipeline.waitUntilIdle()
   }
@@ -174,7 +167,7 @@ final class AutoStopTests: XCTestCase {
     await recorder.stopNow()
     XCTAssertEqual(recorder.recording, .idle)
     XCTAssertNil(recorder.autoStop)
-    let meeting = try await onlyMeeting(in: environment)
+    let meeting = try await TestSupport.stoppedMeeting(in: environment)
     XCTAssertEqual(meeting.endReason, .callEnded(appName: "Zen"))
 
     await recorder.start(mode: .call)
@@ -194,7 +187,7 @@ final class AutoStopTests: XCTestCase {
     XCTAssertEqual(recorder.recording, .idle)
     XCTAssertNil(recorder.autoStop)
     XCTAssertEqual(clock.pendingSleepers, 0, "the countdown went with the recording")
-    let meeting = try await onlyMeeting(in: environment)
+    let meeting = try await TestSupport.stoppedMeeting(in: environment)
     XCTAssertEqual(meeting.endReason, .manual)
 
     clock.advance(by: RecordingController.autoStopGrace)
@@ -232,13 +225,13 @@ final class AutoStopTests: XCTestCase {
       return XCTFail("the recording survived the change, got \(recorder.recording)")
     }
     XCTAssertEqual(
-      recorder.autoStop?.remaining, RecordingController.autoStopGrace,
+      recorder.autoStop?.countdown.remaining, RecordingController.autoStopGrace,
       "the countdown neither ticked nor reset")
 
     await tick(clock, seconds: 1)
     XCTAssertEqual(recorder.autoStop?.presentation.remainingText, "1:29", "and keeps running")
     await recorder.stop()
-    let meeting = try await onlyMeeting(in: environment)
+    let meeting = try await TestSupport.stoppedMeeting(in: environment)
     XCTAssertEqual(meeting.endReason, .manual)
     await environment.pipeline.waitUntilIdle()
   }

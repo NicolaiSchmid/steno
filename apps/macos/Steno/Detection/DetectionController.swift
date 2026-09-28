@@ -80,13 +80,14 @@ final class DetectionController {
   func handle(_ event: MeetingDetector.Event) async {
     switch event {
     case .microphoneOpened(let bundleID, _):
-      let callApp: String? = bundleID == nil ? nil : appName(bundleID)
+      let name = appName(bundleID)
+      let callApp = bundleID == nil ? nil : name
       if isRecording {
         await microphoneActivity?(.opened(appName: callApp))
         return
       }
       guard enabled, prompt == nil else { return }
-      let prompt = DetectionPromptViewModel(appName: appName(bundleID), clock: environment.clock)
+      let prompt = DetectionPromptViewModel(appName: name, clock: environment.clock)
       prompt.onClose = { [weak self] outcome in
         guard let self else { return }
         self.prompt = nil

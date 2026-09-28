@@ -27,8 +27,6 @@ final class DetectionPromptViewModel: Identifiable {
     countdown.onElapsed = { [weak self] in await self?.close(.timedOut) }
   }
 
-  var remaining: Duration { countdown.remaining }
-
   var remainingSeconds: Int {
     Int(countdown.remaining.components.seconds)
   }

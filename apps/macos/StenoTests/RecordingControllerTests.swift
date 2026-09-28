@@ -7,15 +7,6 @@ import XCTest
 /// failure paths. Results are read from the store, never from the model.
 @MainActor
 final class RecordingControllerTests: XCTestCase {
-  /// The one meeting the store holds, once the recording has left `.recording`.
-  private func stoppedMeeting(in environment: AppEnvironment) async throws -> Meeting {
-    let meetings = try await environment.store.meetings()
-    XCTAssertEqual(meetings.count, 1, "one recording, one row")
-    let meeting = try XCTUnwrap(meetings.first)
-    XCTAssertNotEqual(meeting.state, .recording, "stop left the recording state")
-    return meeting
-  }
-
   func testStartWritesARecordingMeetingAndStopEnqueuesIt() async throws {
     let environment = try await TestSupport.environment(seed: false)
     let recorder = RecordingController(environment: environment)
@@ -35,7 +26,7 @@ final class RecordingControllerTests: XCTestCase {
     await recorder.stop()
     XCTAssertEqual(recorder.recording, .idle)
     XCTAssertNil(recorder.lastError, recorder.lastError ?? "")
-    let stopped = try await stoppedMeeting(in: environment)
+    let stopped = try await TestSupport.stoppedMeeting(in: environment)
     XCTAssertEqual(stopped.id, meetings.first?.id)
 
     await environment.pipeline.waitUntilIdle()
@@ -53,7 +44,7 @@ final class RecordingControllerTests: XCTestCase {
     let recorder = RecordingController(environment: environment)
     await recorder.start(mode: .inPerson)
     await recorder.stop()
-    let meeting = try await stoppedMeeting(in: environment)
+    let meeting = try await TestSupport.stoppedMeeting(in: environment)
     let assetOptional = try await environment.store.asset(meetingID: meeting.id)
     let asset = try XCTUnwrap(assetOptional)
     XCTAssertEqual(asset.lanes, [.mixed])
@@ -96,7 +87,7 @@ final class RecordingControllerTests: XCTestCase {
     await recorder.start(mode: .call)
     try await environment.updateSettings { $0.defaultRetention = .deleteAfterProcessing }
     await recorder.stop()
-    let meeting = try await stoppedMeeting(in: environment)
+    let meeting = try await TestSupport.stoppedMeeting(in: environment)
     let assetOptional = try await environment.store.asset(meetingID: meeting.id)
     let asset = try XCTUnwrap(assetOptional)
     XCTAssertEqual(asset.retention, .deleteAfterProcessing)
@@ -161,7 +152,7 @@ final class RecordingControllerTests: XCTestCase {
       XCTAssertEqual(recorder.lastWarning, "Audio devices changed. Reconnecting…")
     }
     await TestSupport.waitUntil("device loss ended the recording") { recorder.recording == .idle }
-    let meeting = try await stoppedMeeting(in: environment)
+    let meeting = try await TestSupport.stoppedMeeting(in: environment)
     XCTAssertEqual(
       recorder.lastError?.hasPrefix("Recording failed:"), true, recorder.lastError ?? "")
     XCTAssertEqual(
@@ -212,7 +203,7 @@ final class RecordingControllerTests: XCTestCase {
 
     await recorder.stop()
     XCTAssertEqual(recorder.recording, .idle)
-    let meeting = try await stoppedMeeting(in: environment)
+    let meeting = try await TestSupport.stoppedMeeting(in: environment)
     XCTAssertEqual(meeting.endReason, .manual, "a survived change is not a loss")
     XCTAssertNotEqual(
       recorder.lastWarning, "An audio device disappeared; the partial recording was kept.")
@@ -228,7 +219,7 @@ final class RecordingControllerTests: XCTestCase {
     let recorder = RecordingController(environment: environment)
     await recorder.start(mode: .inPerson)
     await recorder.stop()
-    let first = try await stoppedMeeting(in: environment)
+    let first = try await TestSupport.stoppedMeeting(in: environment)
     XCTAssertEqual(first.endReason, .manual)
 
     await recorder.start(mode: .call)
@@ -286,7 +277,7 @@ final class RecordingControllerTests: XCTestCase {
     await recorder.toggleRecording()
     XCTAssertEqual(recorder.recording, .idle)
     XCTAssertNil(recorder.elapsed)
-    let meeting = try await stoppedMeeting(in: environment)
+    let meeting = try await TestSupport.stoppedMeeting(in: environment)
     XCTAssertEqual(meeting.source, .macCall, "the shortcut records a call")
     await environment.pipeline.waitUntilIdle()
   }
