@@ -26,6 +26,39 @@ final class MeetingDetailViewModelTests: XCTestCase {
     return model
   }
 
+  /// The header's end-reason row and the list row's suffix: one string per
+  /// reason, from `Labels.swift`; `.manual` shows nothing. The stored reason
+  /// reaches the model through the export like every other column.
+  func testEndReasonCopy() async throws {
+    XCTAssertNil(RecordingEndReason.manual.sentence)
+    XCTAssertEqual(
+      RecordingEndReason.callEnded(appName: "Zen").sentence,
+      "Ended automatically when Zen closed the microphone.")
+    XCTAssertEqual(
+      RecordingEndReason.callEnded(appName: nil).sentence,
+      "Ended automatically when the call app closed the microphone.")
+    XCTAssertEqual(
+      RecordingEndReason.deviceLost.sentence,
+      "Ended because an audio device disappeared. The recording up to that point was kept.")
+    XCTAssertEqual(RecordingEndReason.quit.sentence, "Ended when Steno quit.")
+    XCTAssertEqual(
+      RecordingEndReason.failed.sentence,
+      "Ended because the recording failed. The recording up to that point was kept.")
+    XCTAssertEqual(RecordingEndReason.callEnded(appName: "Zen").listSuffix, "ended automatically")
+    XCTAssertEqual(RecordingEndReason.deviceLost.listSuffix, "device lost")
+    XCTAssertEqual(RecordingEndReason.failed.listSuffix, "recording failed")
+    XCTAssertNil(RecordingEndReason.manual.listSuffix)
+    XCTAssertNil(RecordingEndReason.quit.listSuffix)
+
+    let environment = try await TestSupport.environment()
+    try await environment.store.update(meetingID: SampleData.meetingID, now: TestSupport.now) {
+      $0.endReason = .callEnded(appName: "Zen")
+    }
+    let model = await makeModel(environment)
+    XCTAssertEqual(
+      model.meeting?.endReason?.sentence, "Ended automatically when Zen closed the microphone.")
+  }
+
   /// Points the seeded asset's master at a real file (the seed's URLs under
   /// `/tmp/steno` do not exist), so the files-present cases can render.
   private func placeMaster(
@@ -246,7 +279,8 @@ final class MeetingDetailViewModelTests: XCTestCase {
     XCTAssertEqual(asset.expiresAt, TestSupport.now.addingTimeInterval(7 * 86_400))
     let posted = await environment.events.drain(events)
     XCTAssertTrue(
-      posted.contains(.retentionApplied(meetingID: SampleData.meetingID)), "sweep trigger: \(posted)")
+      posted.contains(.retentionApplied(meetingID: SampleData.meetingID)),
+      "sweep trigger: \(posted)")
 
     // A failed export defers the stamp, as the pipeline's retention stage does.
     var failed = SampleData.delivery()
@@ -297,11 +331,19 @@ final class MeetingDetailViewModelTests: XCTestCase {
     try await updateAsset(environment) { $0.expiresAt = TestSupport.now }
     await TestSupport.waitUntil("today") { model.recordingStatusText == "Deletes today" }
     // A stamp the sweep could not honour yet is overdue, never past tense.
-    try await updateAsset(environment) { $0.expiresAt = TestSupport.now.addingTimeInterval(-3 * 86_400) }
-    await TestSupport.waitUntil("overdue") { model.recordingStatus == .deletes(on: TestSupport.now.addingTimeInterval(-3 * 86_400)) }
+    try await updateAsset(environment) {
+      $0.expiresAt = TestSupport.now.addingTimeInterval(-3 * 86_400)
+    }
+    await TestSupport.waitUntil("overdue") {
+      model.recordingStatus == .deletes(on: TestSupport.now.addingTimeInterval(-3 * 86_400))
+    }
     XCTAssertEqual(model.recordingStatusText, "Deletes today")
-    try await updateAsset(environment) { $0.expiresAt = TestSupport.now.addingTimeInterval(25 * 3_600) }
-    await TestSupport.waitUntil("tomorrow") { model.recordingStatus == .deletes(on: TestSupport.now.addingTimeInterval(25 * 3_600)) }
+    try await updateAsset(environment) {
+      $0.expiresAt = TestSupport.now.addingTimeInterval(25 * 3_600)
+    }
+    await TestSupport.waitUntil("tomorrow") {
+      model.recordingStatus == .deletes(on: TestSupport.now.addingTimeInterval(25 * 3_600))
+    }
     XCTAssertTrue(try XCTUnwrap(model.recordingStatusText).hasPrefix("Deletes on "))
 
     try await updateAsset(environment) {
@@ -333,7 +375,8 @@ final class MeetingDetailViewModelTests: XCTestCase {
     XCTAssertEqual(model.recordingStatusText, "Kept; processing failed")
 
     for state in [MeetingState.processing, .queued, .recording] {
-      try await environment.store.setState(state, meetingID: SampleData.meetingID, now: TestSupport.now)
+      try await environment.store.setState(
+        state, meetingID: SampleData.meetingID, now: TestSupport.now)
       await TestSupport.waitUntil("\(state)") { model.meeting?.state == state }
       XCTAssertEqual(model.recordingStatus, .keptWhileProcessing, "\(state)")
       XCTAssertEqual(model.recordingStatusText, "Kept while processing")

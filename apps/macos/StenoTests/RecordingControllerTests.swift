@@ -7,15 +7,6 @@ import XCTest
 /// failure paths. Results are read from the store, never from the model.
 @MainActor
 final class RecordingControllerTests: XCTestCase {
-  /// The one meeting the store holds, once the recording has left `.recording`.
-  private func stoppedMeeting(in environment: AppEnvironment) async throws -> Meeting {
-    let meetings = try await environment.store.meetings()
-    XCTAssertEqual(meetings.count, 1, "one recording, one row")
-    let meeting = try XCTUnwrap(meetings.first)
-    XCTAssertNotEqual(meeting.state, .recording, "stop left the recording state")
-    return meeting
-  }
-
   func testStartWritesARecordingMeetingAndStopEnqueuesIt() async throws {
     let environment = try await TestSupport.environment(seed: false)
     let recorder = RecordingController(environment: environment)
@@ -35,7 +26,7 @@ final class RecordingControllerTests: XCTestCase {
     await recorder.stop()
     XCTAssertEqual(recorder.recording, .idle)
     XCTAssertNil(recorder.lastError, recorder.lastError ?? "")
-    let stopped = try await stoppedMeeting(in: environment)
+    let stopped = try await TestSupport.stoppedMeeting(in: environment)
     XCTAssertEqual(stopped.id, meetings.first?.id)
 
     await environment.pipeline.waitUntilIdle()
@@ -53,7 +44,7 @@ final class RecordingControllerTests: XCTestCase {
     let recorder = RecordingController(environment: environment)
     await recorder.start(mode: .inPerson)
     await recorder.stop()
-    let meeting = try await stoppedMeeting(in: environment)
+    let meeting = try await TestSupport.stoppedMeeting(in: environment)
     let assetOptional = try await environment.store.asset(meetingID: meeting.id)
     let asset = try XCTUnwrap(assetOptional)
     XCTAssertEqual(asset.lanes, [.mixed])
@@ -96,7 +87,7 @@ final class RecordingControllerTests: XCTestCase {
     await recorder.start(mode: .call)
     try await environment.updateSettings { $0.defaultRetention = .deleteAfterProcessing }
     await recorder.stop()
-    let meeting = try await stoppedMeeting(in: environment)
+    let meeting = try await TestSupport.stoppedMeeting(in: environment)
     let assetOptional = try await environment.store.asset(meetingID: meeting.id)
     let asset = try XCTUnwrap(assetOptional)
     XCTAssertEqual(asset.retention, .deleteAfterProcessing)
@@ -137,27 +128,44 @@ final class RecordingControllerTests: XCTestCase {
 
   // MARK: - Failure paths of the state machine
 
+  /// Four failed restarts on the manual clock end the recording with
+  /// `.deviceLost`; until the fourth the recording continues and says it is
+  /// reconnecting, and the device-lost warning appears only at the end.
   func testDeviceLossStopsAndEnqueuesThePartialRecording() async throws {
+    let clock = ManualClock()
     let environment = try await TestSupport.environment(
-      seed: false, makeCaptureSession: TestSupport.deviceLosingCaptureSession(after: 0.5))
+      clock: clock, seed: false,
+      makeCaptureSession: TestSupport.deviceLosingCaptureSession(after: 0.5, clock: clock))
     let recorder = RecordingController(environment: environment)
     var transitions: [Bool] = []
     recorder.recordingDidChange = { transitions.append($0) }
 
     await recorder.start(mode: .call)
+    await TestSupport.waitUntil("the change was noticed") {
+      recorder.lastWarning == "Audio devices changed. Reconnecting…"
+    }
+    await TestSupport.advanceThroughTheRestartLadder(clock) {
+      guard case .recording = recorder.recording else {
+        return XCTFail("a pending restart keeps recording, got \(recorder.recording)")
+      }
+      XCTAssertNil(recorder.lastError, "no failure before the fourth attempt")
+      XCTAssertEqual(recorder.lastWarning, "Audio devices changed. Reconnecting…")
+    }
     await TestSupport.waitUntil("device loss ended the recording") { recorder.recording == .idle }
-    let meeting = try await stoppedMeeting(in: environment)
+    let meeting = try await TestSupport.stoppedMeeting(in: environment)
     XCTAssertEqual(
       recorder.lastError?.hasPrefix("Recording failed:"), true, recorder.lastError ?? "")
     XCTAssertEqual(
       recorder.lastWarning, "An audio device disappeared; the partial recording was kept.")
     XCTAssertEqual(transitions, [true, false], "the prompt was told once each way")
     XCTAssertNil(recorder.levels)
+    XCTAssertEqual(meeting.endReason, .deviceLost)
 
     await environment.pipeline.waitUntilIdle()
     let storedOptional = try await environment.store.meeting(id: meeting.id)
     let stored = try XCTUnwrap(storedOptional)
     XCTAssertEqual(stored.state, .ready, "the partial recording ran through the pipeline")
+    XCTAssertEqual(stored.endReason, .deviceLost, "the reason survives processing")
     XCTAssertGreaterThan(stored.duration, 0)
     XCTAssertLessThan(stored.duration, 5, "only the audio before the loss")
     let assetOptional = try await environment.store.asset(meetingID: meeting.id)
@@ -167,7 +175,90 @@ final class RecordingControllerTests: XCTestCase {
 
     await recorder.start(mode: .call)
     XCTAssertNotEqual(recorder.recording, .idle, "a fresh recording can start after the loss")
+    await TestSupport.waitUntil("the second change was noticed") {
+      recorder.lastWarning == "Audio devices changed. Reconnecting…"
+    }
+    await TestSupport.advanceThroughTheRestartLadder(clock)
     await TestSupport.waitUntil("second loss") { recorder.recording == .idle }
+    await environment.pipeline.waitUntilIdle()
+  }
+
+  /// A change reported inside `backend.start` (the synthetic producer's first
+  /// loop iteration) is emitted the moment `session.start` returns. The
+  /// recorder subscribes to `notices` before `start`, so the warning still
+  /// lands; opened afterwards, the notice would have no continuation to land
+  /// in. The first restart fails so the rebuild parks on its backoff sleeper
+  /// and nothing else moves until the clock is advanced.
+  func testAChangeInTheFirstMillisecondsStillWarns() async throws {
+    let clock = ManualClock()
+    let environment = try await TestSupport.environment(
+      clock: clock, seed: false,
+      makeCaptureSession: TestSupport.deviceChangingCaptureSession(
+        after: 0, restartsThatFail: 1, clock: clock))
+    let recorder = RecordingController(environment: environment)
+    await recorder.start(mode: .call)
+    await TestSupport.waitUntil("the change was noticed without advancing the clock") {
+      recorder.lastWarning == "Audio devices changed. Reconnecting…"
+    }
+    guard case .recording = recorder.recording else {
+      return XCTFail("a pending restart keeps recording, got \(recorder.recording)")
+    }
+
+    await TestSupport.waitUntilSleeping(on: clock, count: 1, "the rebuild sleeps on its backoff")
+    clock.advance(by: CaptureSession.restartBackoff[0])
+    await TestSupport.waitDrivingTheClock(clock, "the resumed warning") {
+      recorder.lastWarning == "Audio devices changed. Recording continues."
+    }
+    await recorder.stop()
+    let meeting = try await TestSupport.stoppedMeeting(in: environment)
+    XCTAssertEqual(meeting.endReason, .manual)
+    await environment.pipeline.waitUntilIdle()
+  }
+
+  /// A device that comes back keeps the recording on the same row: the
+  /// state never leaves `.recording`, the warning says so, and the meeting
+  /// ends with the reason the user gives it.
+  func testADeviceChangeKeepsTheRecordingAndWarns() async throws {
+    let clock = ManualClock()
+    let environment = try await TestSupport.environment(
+      clock: clock, seed: false,
+      makeCaptureSession: TestSupport.deviceChangingCaptureSession(after: 0.5, clock: clock))
+    let recorder = RecordingController(environment: environment)
+    await recorder.start(mode: .call)
+    await TestSupport.waitDrivingTheClock(clock, "the resumed warning") {
+      recorder.lastWarning == "Audio devices changed. Recording continues."
+    }
+    guard case .recording = recorder.recording else {
+      return XCTFail("a survived change keeps recording, got \(recorder.recording)")
+    }
+    XCTAssertNil(recorder.lastError, recorder.lastError ?? "")
+
+    await recorder.stop()
+    XCTAssertEqual(recorder.recording, .idle)
+    let meeting = try await TestSupport.stoppedMeeting(in: environment)
+    XCTAssertEqual(meeting.endReason, .manual, "a survived change is not a loss")
+    XCTAssertNotEqual(
+      recorder.lastWarning, "An audio device disappeared; the partial recording was kept.")
+    await environment.pipeline.waitUntilIdle()
+    let stored = try await environment.store.meeting(id: meeting.id)
+    XCTAssertEqual(stored?.state, .ready)
+  }
+
+  /// `stop()` stores `.manual`; the reason a caller passes (Quit passes
+  /// `.quit`) is stored as given.
+  func testStopStoresTheReasonItIsGiven() async throws {
+    let environment = try await TestSupport.environment(seed: false)
+    let recorder = RecordingController(environment: environment)
+    await recorder.start(mode: .inPerson)
+    await recorder.stop()
+    let first = try await TestSupport.stoppedMeeting(in: environment)
+    XCTAssertEqual(first.endReason, .manual)
+
+    await recorder.start(mode: .call)
+    await recorder.stop(reason: .quit)
+    let meetings = try await environment.store.meetings()
+    let second = try XCTUnwrap(meetings.first { $0.id != first.id })
+    XCTAssertEqual(second.endReason, .quit)
     await environment.pipeline.waitUntilIdle()
   }
 
@@ -218,7 +309,7 @@ final class RecordingControllerTests: XCTestCase {
     await recorder.toggleRecording()
     XCTAssertEqual(recorder.recording, .idle)
     XCTAssertNil(recorder.elapsed)
-    let meeting = try await stoppedMeeting(in: environment)
+    let meeting = try await TestSupport.stoppedMeeting(in: environment)
     XCTAssertEqual(meeting.source, .macCall, "the shortcut records a call")
     await environment.pipeline.waitUntilIdle()
   }

@@ -272,13 +272,21 @@ final class AppControllerTests: XCTestCase {
     let meetings = try await environment.store.meetings()
     XCTAssertEqual(meetings.map(\.source), [.macCall])
 
+    // The prompt's app name reached the recorder: FaceTime releasing the
+    // microphone arms the auto-stop without a later `.opened`.
+    await controller.detection.handle(.microphoneReleased)
+    XCTAssertEqual(controller.recorder.autoStop?.appName, "com.apple.FaceTime")
+    XCTAssertEqual(controller.recorder.autoStop?.presentation.remainingText, "1:30")
+
     await controller.detection.handle(.microphoneOpened(bundleID: "us.zoom.xos", pid: 8))
     XCTAssertNil(controller.detection.prompt, "no prompt while recording")
+    XCTAssertNil(controller.recorder.autoStop, "a microphone opened again cancels the countdown")
 
     await controller.recorder.stop()
     running = await environment.detector.isRunning
     XCTAssertTrue(running, "still running after the recording")
     let meeting = try await recordedMeeting(in: environment)
+    XCTAssertEqual(meeting.endReason, .manual)
     await environment.pipeline.waitUntilIdle()
     let stored = try await environment.store.meeting(id: meeting.id)
     XCTAssertEqual(stored?.state, .ready)
@@ -395,6 +403,7 @@ final class AppControllerTests: XCTestCase {
     XCTAssertEqual(controller.recorder.recording, .idle)
     let meeting = try await recordedMeeting(in: environment)
     XCTAssertFalse(meeting.state.isFailed, "quitting keeps the recording")
+    XCTAssertEqual(meeting.endReason, .quit, "and the meeting says why it ended")
     let running = await environment.detector.isRunning
     XCTAssertFalse(running)
     await environment.pipeline.waitUntilIdle()
