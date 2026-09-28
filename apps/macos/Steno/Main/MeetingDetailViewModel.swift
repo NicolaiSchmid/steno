@@ -46,6 +46,11 @@ final class MeetingDetailViewModel: Identifiable {
   private(set) var recordingFilesExist = false
   /// `Settings.defaultRetention`, followed by `observeSettings()`.
   private(set) var defaultRetention: AudioRetention = .keepForever
+  /// `Settings.llmConfigured` and `vaultConfigured`, followed by
+  /// `observeSettings()`: they select the skipped-summary rows, the footer
+  /// and the two Actions menu items.
+  private(set) var llmConfigured = false
+  private(set) var vaultConfigured = false
   private(set) var error: String?
   private(set) var isBusy = false
   var tab: Tab = .summary
@@ -117,6 +122,8 @@ final class MeetingDetailViewModel: Identifiable {
     do {
       for try await settings in settings.observe() {
         defaultRetention = settings.defaultRetention
+        llmConfigured = settings.llmConfigured
+        vaultConfigured = settings.vaultConfigured
       }
     } catch {
       self.error = "Settings could not be loaded: \(error)"
@@ -151,9 +158,29 @@ final class MeetingDetailViewModel: Identifiable {
     export?.speakers.filter { !$0.assignment.isConfirmed } ?? []
   }
 
+  /// The pipeline accepts a re-run or a re-export: ready or failed.
   var canRerun: Bool {
     guard let meeting else { return false }
     return meeting.state == .ready || meeting.state.isFailed
+  }
+
+  /// "Re-run summary" and "Run summary": the pipeline would throw without an
+  /// endpoint (`rerunSummary` with a nil summarizer), so the app disables
+  /// the action first.
+  var canRerunSummary: Bool { canRerun && llmConfigured }
+
+  /// "Re-export" and "Export now": without a vault there is nowhere to
+  /// export to.
+  var canReexport: Bool { canRerun && vaultConfigured }
+
+  /// Which empty-tab row the Summary and Tasks tabs show; see `SummaryStatus`.
+  var summaryStatus: SummaryStatus {
+    SummaryStatus(meeting: meeting, llmConfigured: llmConfigured)
+  }
+
+  /// What the footer shows; see `ExportStatus`.
+  var exportStatus: ExportStatus {
+    ExportStatus(deliveries: deliveries, vaultConfigured: vaultConfigured)
   }
 
   func displayName(forSpeaker id: UUID?) -> String {

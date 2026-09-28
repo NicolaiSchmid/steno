@@ -116,6 +116,40 @@ final class LaunchSmokeTests: XCTestCase {
     XCTAssertEqual(meetingRowCount(in: app), 2, "the stopped recording keeps its row")
   }
 
+  /// The preview environment has no LLM endpoint and no vault, so the setup
+  /// banner shows over the detail pane with both fixes. "Set up summaries"
+  /// opens Settings on the LLM tab (`settings-llm` is in the hierarchy only
+  /// while that tab is selected, which also proves the request was applied
+  /// and cleared by the scene); "Not now" hides the banner for the launch.
+  func testSetupBannerLinksToSettingsAndHides() throws {
+    let app = XCUIApplication()
+    app.launchArguments = ["-steno-ui-testing"]
+    app.launch()
+
+    let window = app.windows.firstMatch
+    XCTAssertTrue(window.waitForExistence(timeout: 10), "no window appeared")
+    let setup = app.buttons["setup-summaries"].firstMatch
+    XCTAssertTrue(setup.waitForExistence(timeout: 10), "the banner's summaries button is missing")
+    XCTAssertTrue(
+      app.buttons["choose-vault"].firstMatch.exists, "the banner's vault button is missing")
+    let notNow = app.buttons["banner-not-now"].firstMatch
+    XCTAssertTrue(notNow.exists, "the banner's Not now is missing")
+
+    setup.click()
+    let llmTab = app.descendants(matching: .any)["settings-llm"].firstMatch
+    XCTAssertTrue(llmTab.waitForExistence(timeout: 10), "Settings did not open on the LLM tab")
+    let screenshot = XCTAttachment(screenshot: XCUIScreen.main.screenshot())
+    screenshot.name = "setup-banner-and-llm-settings"
+    screenshot.lifetime = .keepAlways
+    add(screenshot)
+
+    notNow.click()
+    XCTAssertTrue(
+      waitUntil(timeout: 5) { !app.buttons["setup-summaries"].firstMatch.exists },
+      "Not now did not hide the banner")
+    XCTAssertFalse(app.buttons["banner-not-now"].firstMatch.exists)
+  }
+
   /// Rows carrying a `meeting-<uuid>` identifier, and only those: the
   /// redesign's `meeting-list` container must not count. The list's cells
   /// are counted with one query when they carry the row identifier; SwiftUI

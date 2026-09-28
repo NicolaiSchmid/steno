@@ -6,24 +6,37 @@ import StenoCore
 /// `TranscriptTurns`, `MeetingExport.displayName(forSpeaker:)` and
 /// `timestampText` (Transcript), `MeetingExport.assigneeName(for:)` and the
 /// priority chips (Tasks), the meeting's scratchpad (Scratchpad), and
-/// `PendingText.text` for a tab without content. The views add styling only;
-/// the snapshot test pins these lines for the fixture meeting.
+/// `PendingText.text` for a tab without content, or the `SummaryStatus`
+/// skipped row (title, body, footnote) for a ready meeting the pipeline
+/// summarised without an endpoint; `llmConfigured` is the setup state the
+/// row keys off. The views add styling only; the snapshot test pins these
+/// lines for the fixture meeting.
 enum TabText {
   static func lines(
-    _ tab: MeetingDetailViewModel.Tab, export: MeetingExport,
+    _ tab: MeetingDetailViewModel.Tab, export: MeetingExport, llmConfigured: Bool = false,
     locale: Locale = .current, timeZone: TimeZone = .current
   ) -> [String] {
     switch tab {
-    case .summary: summary(export)
+    case .summary: summary(export, llmConfigured: llmConfigured)
     case .transcript: transcript(export)
-    case .tasks: tasks(export, locale: locale, timeZone: timeZone)
+    case .tasks: tasks(export, llmConfigured: llmConfigured, locale: locale, timeZone: timeZone)
     case .scratchpad: [export.meeting.scratchpad]
     }
   }
 
-  private static func summary(_ export: MeetingExport) -> [String] {
+  private static func skippedLines(
+    _ tab: MeetingDetailViewModel.Tab, export: MeetingExport, llmConfigured: Bool
+  ) -> [String]? {
+    SummaryStatus(meeting: export.meeting, llmConfigured: llmConfigured).skippedRow(for: tab)?
+      .lines
+  }
+
+  private static func summary(_ export: MeetingExport, llmConfigured: Bool) -> [String] {
     let sections = SummaryMarkdown.sections(for: export)
     guard !sections.isEmpty else {
+      if let skipped = skippedLines(.summary, export: export, llmConfigured: llmConfigured) {
+        return skipped
+      }
       return [
         PendingText.text(
           meeting: export.meeting, none: "No summary", pending: "Summary appears after processing")
@@ -61,10 +74,13 @@ enum TabText {
     }
   }
 
-  private static func tasks(_ export: MeetingExport, locale: Locale, timeZone: TimeZone)
-    -> [String]
-  {
+  private static func tasks(
+    _ export: MeetingExport, llmConfigured: Bool, locale: Locale, timeZone: TimeZone
+  ) -> [String] {
     guard !export.tasks.isEmpty else {
+      if let skipped = skippedLines(.tasks, export: export, llmConfigured: llmConfigured) {
+        return skipped
+      }
       return [
         PendingText.text(
           meeting: export.meeting, none: "No tasks", pending: "Tasks appear after processing")

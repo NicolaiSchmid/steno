@@ -123,7 +123,8 @@ struct MenuBarLabel: View {
 }
 
 /// Opens the onboarding window at launch when a required permission is
-/// missing (never in the preview environment).
+/// missing or this install has not finished the two pages
+/// (`OnboardingViewModel.shouldOpen`); never in the preview environment.
 struct OnboardingOpener: ViewModifier {
   let controller: AppController
   @Environment(\.openWindow) private var openWindow
@@ -133,12 +134,10 @@ struct OnboardingOpener: ViewModifier {
     content.task {
       guard !checked, !controller.environment.isPreview else { return }
       checked = true
-      let permissions = controller.environment.permissions
-      for kind in PermissionKind.allCases where kind.isRequired {
-        if await permissions.state(of: kind) != .granted {
-          openWindow(id: "onboarding")
-          return
-        }
+      if await OnboardingViewModel.shouldOpen(
+        permissions: controller.environment.permissions, defaults: .standard)
+      {
+        openWindow(id: "onboarding")
       }
     }
   }

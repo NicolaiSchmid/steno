@@ -16,17 +16,22 @@ struct EmptyState: View {
   let title: String
   let message: String
   let action: Action?
+  /// One `faint` line under the action, for a caveat the action needs
+  /// ("Summary only; the transcript stays as recorded.").
+  let footnote: String?
   let id: String
   /// The width the body wraps at; a layout width, not a control box.
   private static let bodyWidth: CGFloat = 280
 
   init(
-    symbol: String? = nil, title: String, body message: String, action: Action? = nil, id: String
+    symbol: String? = nil, title: String, body message: String, action: Action? = nil,
+    footnote: String? = nil, id: String
   ) {
     self.symbol = symbol
     self.title = title
     self.message = message
     self.action = action
+    self.footnote = footnote
     self.id = id
   }
 
@@ -55,6 +60,14 @@ struct EmptyState: View {
           .buttonStyle(StenoSecondaryButtonStyle())
           .accessibilityIdentifier(action.id)
           .padding(.top, Theme.Space.xs)
+      }
+      if let footnote {
+        Text(footnote)
+          .font(.steno(Theme.TextSize.xxs))
+          .foregroundStyle(Color.stenoFaint)
+          .multilineTextAlignment(.center)
+          .frame(maxWidth: Self.bodyWidth)
+          .fixedSize(horizontal: false, vertical: true)
       }
     }
     .frame(maxWidth: .infinity, maxHeight: .infinity)

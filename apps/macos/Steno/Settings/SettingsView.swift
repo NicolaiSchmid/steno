@@ -6,9 +6,12 @@ import SwiftUI
 
 /// The Settings scene: seven tabs, one view model each, built once for the
 /// scene's lifetime (a model created in `body` would be replaced on every
-/// evaluation and its state lost).
+/// evaluation and its state lost). A tab requested through
+/// `AppController.openSettings(_:)` is selected once and the request
+/// cleared, as `MainWindow` does for `requestedMeetingID`.
 struct SettingsView: View {
   let controller: AppController
+  @State private var selection: SettingsTab = .general
   @State private var general: GeneralSettingsViewModel
   @State private var audio: AudioSettingsViewModel
   @State private var speech: SpeechSettingsViewModel
@@ -28,24 +31,35 @@ struct SettingsView: View {
   }
 
   var body: some View {
-    TabView {
+    TabView(selection: $selection) {
       GeneralSettingsView(model: general)
         .tabItem { Label("General", systemImage: "gearshape") }
+        .tag(SettingsTab.general)
       AudioSettingsView(model: audio)
         .tabItem { Label("Audio", systemImage: "mic") }
+        .tag(SettingsTab.audio)
       SpeechSettingsView(model: speech)
         .tabItem { Label("Speech", systemImage: "waveform") }
+        .tag(SettingsTab.speech)
       LLMSettingsView(model: llm)
         .tabItem { Label("LLM", systemImage: "brain") }
+        .tag(SettingsTab.llm)
       ObsidianSettingsView(model: obsidian)
         .tabItem { Label("Obsidian", systemImage: "folder") }
+        .tag(SettingsTab.obsidian)
       PhonesSettingsView(model: phones)
         .tabItem { Label("Phones", systemImage: "iphone") }
+        .tag(SettingsTab.phones)
       UpdatesSettingsView(updater: controller.environment.updater)
         .tabItem { Label("Updates", systemImage: "arrow.down.circle") }
+        .tag(SettingsTab.updates)
     }
     .frame(width: 560)
     .background(Color.stenoBackground)
+    .onChange(of: controller.requestedSettingsTab, initial: true) { _, requested in
+      guard requested != nil, let tab = controller.takeRequestedSettingsTab() else { return }
+      selection = tab
+    }
   }
 }
 
@@ -147,7 +161,8 @@ struct AudioSettingsView: View {
               value: .action(
                 { model.retentionDays },
                 { days in await model.setRetention(mode: .keepDays, days: days) }),
-              in: AudioSettingsViewModel.dayRange)
+              in: AudioSettingsViewModel.dayRange
+            )
             .labelsHidden()
           }
         }
@@ -269,9 +284,11 @@ struct LLMSettingsView: View {
         TextField("Model", text: $model.model, prompt: Text("gpt-4.1-mini"))
         TextField("Context window (tokens)", text: $model.contextTokensText)
         SecureField("API key", text: $model.apiKey, prompt: Text("optional for local servers"))
-        Text("Only transcript text is sent to the endpoint. The key is stored in your login keychain.")
-          .font(.steno(Theme.TextSize.xs))
-          .foregroundStyle(Color.stenoFaint)
+        Text(
+          "Only transcript text is sent to the endpoint. The key is stored in your login keychain."
+        )
+        .font(.steno(Theme.TextSize.xs))
+        .foregroundStyle(Color.stenoFaint)
         if let message = model.validationMessage {
           MessageRow(kind: .warning, text: message)
         }
@@ -288,7 +305,7 @@ struct LLMSettingsView: View {
           MessageRow(
             kind: .info,
             text:
-              "No endpoint configured: cleanup and summary are skipped until a base URL and model are saved."
+              "No endpoint configured: new meetings get a transcript but no summary until a base URL and model are saved."
           )
         }
         switch model.testResult {
@@ -301,6 +318,10 @@ struct LLMSettingsView: View {
     }
     .formStyle(.grouped)
     .task { await model.load() }
+    // The UI smoke test asserts the deep link landed here: only the selected
+    // tab's content is in the hierarchy.
+    .accessibilityElement(children: .contain)
+    .accessibilityIdentifier("settings-llm")
   }
 }
 
@@ -313,6 +334,11 @@ struct ObsidianSettingsView: View {
     Form {
       Section {
         Toggle("Deliver meetings into an Obsidian vault", isOn: $model.enabled)
+        if !model.enabled {
+          MessageRow(
+            kind: .info,
+            text: "No vault configured: meetings stay in Steno until a vault is chosen.")
+        }
       }
       if model.enabled {
         Section("Vault") {
@@ -393,9 +419,10 @@ struct PhonesSettingsView: View {
                   "Paired \(device.pairedAt.formatted(date: .abbreviated, time: .shortened))"
                     + (device.lastSeenAt.map {
                       " · seen \($0.formatted(date: .abbreviated, time: .shortened))"
-                    } ?? ""))
-                  .font(.steno(Theme.TextSize.xxs))
-                  .foregroundStyle(Color.stenoFaint)
+                    } ?? "")
+                )
+                .font(.steno(Theme.TextSize.xxs))
+                .foregroundStyle(Color.stenoFaint)
               }
               Spacer()
               Button("Remove") { Task { await model.revoke(device.id) } }

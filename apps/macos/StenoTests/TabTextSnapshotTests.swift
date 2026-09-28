@@ -71,8 +71,45 @@ final class TabTextSnapshotTests: XCTestCase {
     XCTAssertEqual(lines(.scratchpad, export), [""])
 
     export.meeting.state = .ready
-    XCTAssertEqual(lines(.summary, export), ["No summary"])
+    XCTAssertEqual(
+      lines(.summary, export),
+      [
+        "No summary", "Summary skipped: no LLM endpoint is configured. The transcript is complete.",
+      ],
+      "ready without a summary and no endpoint: the setup row")
     XCTAssertEqual(lines(.transcript, export), ["No transcript"])
+    XCTAssertEqual(lines(.tasks, export), ["No tasks", "No tasks: the summary was skipped."])
+
+    // The template produced nothing: a summary exists, so no setup row.
+    export.meeting.summary = SummaryDocument(templateID: "default", sections: [])
+    XCTAssertEqual(lines(.summary, export), ["No summary"])
     XCTAssertEqual(lines(.tasks, export), ["No tasks"])
+  }
+
+  /// A ready meeting without a summary once an endpoint exists offers the
+  /// re-run, with the Summary tab's footnote; the Tasks tab shares the body.
+  func testSkippedSummaryOffersTheRunOnceAnEndpointExists() {
+    var export = SampleData.export()
+    export.tasks = []
+    export.decisions = []
+    export.meeting.summary = nil
+    export.meeting.state = .ready
+    XCTAssertEqual(
+      TabText.lines(.summary, export: export, llmConfigured: true),
+      [
+        "No summary yet", "This meeting was processed before an LLM endpoint was configured.",
+        "Summary only; the transcript stays as recorded.",
+      ])
+    XCTAssertEqual(
+      TabText.lines(.tasks, export: export, llmConfigured: true),
+      ["No tasks", "No tasks: the summary was skipped."])
+    XCTAssertEqual(
+      TabText.lines(.transcript, export: export, llmConfigured: true).count, 6,
+      "the transcript is untouched by the setup state")
+
+    export.meeting.state = .processing
+    XCTAssertEqual(
+      TabText.lines(.summary, export: export, llmConfigured: true),
+      ["Summary appears after processing"], "pending keeps today's text")
   }
 }

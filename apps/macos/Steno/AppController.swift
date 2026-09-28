@@ -28,6 +28,13 @@ final class AppController {
   /// The meeting the main window should show next (from the menu bar or the
   /// detection prompt).
   var requestedMeetingID: UUID?
+  /// The Settings tab the Settings scene should select next, from the setup
+  /// banner, the detail rows and the footer. Set by `openSettings(_:)`,
+  /// taken by `SettingsView` through `takeRequestedSettingsTab()`.
+  private(set) var requestedSettingsTab: SettingsTab?
+  /// "Not now" on the setup banner hides it for the rest of this launch; it
+  /// comes back on the next launch while the configuration is still missing.
+  private(set) var setupBannerDismissed = false
   private(set) var launched = false
   private var observers: [Task<Void, Never>] = []
   private var activationObserver: (any NSObjectProtocol)?
@@ -171,6 +178,28 @@ final class AppController {
     case .starting, .stopping:
       break
     }
+  }
+
+  /// Every "Set up summaries" and "Choose a vault" button lands here: the tab
+  /// is recorded so `SettingsView` selects it when the scene opens (or is
+  /// already open). The caller then runs the `openSettings` environment
+  /// action and activates the app. Returns the tab for the caller's chaining.
+  @discardableResult
+  func openSettings(_ tab: SettingsTab) -> SettingsTab {
+    requestedSettingsTab = tab
+    return tab
+  }
+
+  /// The pending tab, cleared: `SettingsView` applies it once and a later
+  /// scene evaluation does not re-select it.
+  func takeRequestedSettingsTab() -> SettingsTab? {
+    defer { requestedSettingsTab = nil }
+    return requestedSettingsTab
+  }
+
+  /// "Not now" on the setup banner.
+  func dismissSetupBanner() {
+    setupBannerDismissed = true
   }
 
   private func registerLoginItemOnFirstLaunch() async {

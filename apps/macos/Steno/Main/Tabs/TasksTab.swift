@@ -1,23 +1,30 @@
 import StenoCore
 import SwiftUI
 
-/// The extracted tasks, read only: text, assignee, priority, due date.
+/// The extracted tasks, read only: text, assignee, priority, due date. A
+/// ready meeting the pipeline summarised without an endpoint shows the
+/// `SummaryStatus` row instead, with the same action as the Summary tab.
 struct TasksTab: View {
   let model: MeetingDetailViewModel
+  let controller: AppController
 
   var body: some View {
-    ScrollView {
-      VStack(alignment: .leading, spacing: Theme.Space.sm) {
-        let tasks = model.export?.tasks ?? []
-        if tasks.isEmpty {
-          PendingText(
-            meeting: model.meeting, none: "No tasks", pending: "Tasks appear after processing")
+    let tasks = model.export?.tasks ?? []
+    if tasks.isEmpty, let row = model.summaryStatus.skippedRow(for: .tasks) {
+      SkippedSummaryState(row: row, tab: .tasks, model: model, controller: controller)
+    } else {
+      ScrollView {
+        VStack(alignment: .leading, spacing: Theme.Space.sm) {
+          if tasks.isEmpty {
+            PendingText(
+              meeting: model.meeting, none: "No tasks", pending: "Tasks appear after processing")
+          }
+          ForEach(tasks) { task in
+            TaskRow(task: task, assignee: model.export?.assigneeName(for: task))
+          }
         }
-        ForEach(tasks) { task in
-          TaskRow(task: task, assignee: model.export?.assigneeName(for: task))
-        }
+        .readingColumn()
       }
-      .readingColumn()
     }
   }
 }

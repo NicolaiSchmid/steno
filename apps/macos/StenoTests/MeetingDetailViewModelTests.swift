@@ -246,7 +246,8 @@ final class MeetingDetailViewModelTests: XCTestCase {
     XCTAssertEqual(asset.expiresAt, TestSupport.now.addingTimeInterval(7 * 86_400))
     let posted = await environment.events.drain(events)
     XCTAssertTrue(
-      posted.contains(.retentionApplied(meetingID: SampleData.meetingID)), "sweep trigger: \(posted)")
+      posted.contains(.retentionApplied(meetingID: SampleData.meetingID)),
+      "sweep trigger: \(posted)")
 
     // A failed export defers the stamp, as the pipeline's retention stage does.
     var failed = SampleData.delivery()
@@ -297,11 +298,19 @@ final class MeetingDetailViewModelTests: XCTestCase {
     try await updateAsset(environment) { $0.expiresAt = TestSupport.now }
     await TestSupport.waitUntil("today") { model.recordingStatusText == "Deletes today" }
     // A stamp the sweep could not honour yet is overdue, never past tense.
-    try await updateAsset(environment) { $0.expiresAt = TestSupport.now.addingTimeInterval(-3 * 86_400) }
-    await TestSupport.waitUntil("overdue") { model.recordingStatus == .deletes(on: TestSupport.now.addingTimeInterval(-3 * 86_400)) }
+    try await updateAsset(environment) {
+      $0.expiresAt = TestSupport.now.addingTimeInterval(-3 * 86_400)
+    }
+    await TestSupport.waitUntil("overdue") {
+      model.recordingStatus == .deletes(on: TestSupport.now.addingTimeInterval(-3 * 86_400))
+    }
     XCTAssertEqual(model.recordingStatusText, "Deletes today")
-    try await updateAsset(environment) { $0.expiresAt = TestSupport.now.addingTimeInterval(25 * 3_600) }
-    await TestSupport.waitUntil("tomorrow") { model.recordingStatus == .deletes(on: TestSupport.now.addingTimeInterval(25 * 3_600)) }
+    try await updateAsset(environment) {
+      $0.expiresAt = TestSupport.now.addingTimeInterval(25 * 3_600)
+    }
+    await TestSupport.waitUntil("tomorrow") {
+      model.recordingStatus == .deletes(on: TestSupport.now.addingTimeInterval(25 * 3_600))
+    }
     XCTAssertTrue(try XCTUnwrap(model.recordingStatusText).hasPrefix("Deletes on "))
 
     try await updateAsset(environment) {
@@ -333,7 +342,8 @@ final class MeetingDetailViewModelTests: XCTestCase {
     XCTAssertEqual(model.recordingStatusText, "Kept; processing failed")
 
     for state in [MeetingState.processing, .queued, .recording] {
-      try await environment.store.setState(state, meetingID: SampleData.meetingID, now: TestSupport.now)
+      try await environment.store.setState(
+        state, meetingID: SampleData.meetingID, now: TestSupport.now)
       await TestSupport.waitUntil("\(state)") { model.meeting?.state == state }
       XCTAssertEqual(model.recordingStatus, .keptWhileProcessing, "\(state)")
       XCTAssertEqual(model.recordingStatusText, "Kept while processing")
@@ -406,5 +416,67 @@ final class MeetingDetailViewModelTests: XCTestCase {
     await model.setTags(text: "Ops, ops, Q4")
     let stored = try await environment.store.meeting(id: SampleData.meetingID)
     XCTAssertEqual(stored?.tags, ["ops", "q4"])
+  }
+
+  // MARK: Setup status
+
+  /// `summaryStatus` for a ready meeting with a summary, without one before
+  /// and after an endpoint is configured, and while processing; the
+  /// Actions menu's "Re-run summary" follows the endpoint.
+  func testSummaryStatusFollowsTheSummaryAndTheEndpoint() async throws {
+    let environment = try await TestSupport.environment()
+    let model = await makeModel(environment)
+    await TestSupport.waitUntil("settings observed") { model.defaultRetention == .keepForever }
+    XCTAssertEqual(model.summaryStatus, .present)
+    XCTAssertFalse(model.llmConfigured, "the preview environment has no endpoint")
+    XCTAssertTrue(model.canRerun)
+    XCTAssertFalse(model.canRerunSummary, "no endpoint: the pipeline would throw")
+
+    try await environment.store.update(meetingID: SampleData.meetingID, now: TestSupport.now) {
+      $0.summary = nil
+    }
+    await TestSupport.waitUntil("summary cleared") { model.meeting?.summary == nil }
+    XCTAssertEqual(model.summaryStatus, .skippedUnconfigured)
+    XCTAssertEqual(model.summaryStatus.skippedRow(for: .summary)?.action, .setUpSummaries)
+
+    try await environment.updateSettings {
+      $0.llmBaseURL = URL(string: "http://127.0.0.1:1234/v1")
+      $0.llmModel = "qwen"
+    }
+    await TestSupport.waitUntil("endpoint observed") { model.llmConfigured }
+    XCTAssertEqual(model.summaryStatus, .skippedRunnable)
+    XCTAssertEqual(model.summaryStatus.skippedRow(for: .tasks)?.action, .runSummary)
+    XCTAssertTrue(model.canRerunSummary)
+
+    try await environment.store.setState(
+      .processing, meetingID: SampleData.meetingID, now: TestSupport.now)
+    await TestSupport.waitUntil("processing observed") { model.meeting?.state == .processing }
+    XCTAssertEqual(model.summaryStatus, .pending)
+    XCTAssertFalse(model.canRerunSummary, "the pipeline holds the meeting")
+  }
+
+  /// `exportStatus` with no delivery rows, without and with a vault, then
+  /// with a row; "Re-export" and "Export now" follow the vault.
+  func testExportStatusFollowsTheDeliveriesAndTheVault() async throws {
+    let environment = try await TestSupport.environment()
+    let model = await makeModel(environment)
+    await TestSupport.waitUntil("settings observed") { model.defaultRetention == .keepForever }
+    XCTAssertEqual(model.deliveries, [])
+    XCTAssertEqual(model.exportStatus, .noVault)
+    XCTAssertFalse(model.canReexport)
+
+    let vault = try await configureVault(environment)
+    defer { try? FileManager.default.removeItem(at: vault) }
+    await TestSupport.waitUntil("vault observed") { model.vaultConfigured }
+    XCTAssertEqual(model.exportStatus, .notExported)
+    XCTAssertTrue(model.canReexport)
+
+    await model.reexport()
+    XCTAssertNil(model.error, model.error ?? "")
+    await TestSupport.waitUntil("exported") { model.deliveries.first?.status == .delivered }
+    guard case .exported(let rows) = model.exportStatus else {
+      return XCTFail("expected .exported, got \(model.exportStatus)")
+    }
+    XCTAssertEqual(rows.count, 1)
   }
 }

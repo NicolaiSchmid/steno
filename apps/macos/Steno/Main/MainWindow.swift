@@ -23,21 +23,26 @@ struct MainWindow: View {
       }
       .navigationSplitViewColumnWidth(min: 240, ideal: 300, max: 420)
     } detail: {
-      if let detail {
-        MeetingDetailView(model: detail, controller: controller)
-          .id(detail.id)
-      } else {
-        VStack(spacing: Theme.Space.sm) {
-          Image(systemName: "text.alignleft")
-            .font(.system(size: 28))
-            .foregroundStyle(Color.stenoGhost)
-          Text("Select a meeting")
-            .font(.steno(Theme.TextSize.sm, weight: .medium))
-            .foregroundStyle(Color.stenoMutedForeground)
+      // Row 1 of the detail header stack: the setup banner, over the
+      // selected meeting or the empty state alike.
+      VStack(spacing: 0) {
+        SetupBanner(controller: controller, hasMeetings: !list.all.isEmpty)
+        if let detail {
+          MeetingDetailView(model: detail, controller: controller)
+            .id(detail.id)
+        } else {
+          VStack(spacing: Theme.Space.sm) {
+            Image(systemName: "text.alignleft")
+              .font(.system(size: 28))
+              .foregroundStyle(Color.stenoGhost)
+            Text("Select a meeting")
+              .font(.steno(Theme.TextSize.sm, weight: .medium))
+              .foregroundStyle(Color.stenoMutedForeground)
+          }
+          .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(Color.stenoBackground)
       }
+      .background(Color.stenoBackground)
     }
     .navigationTitle("Steno")
     .frame(minWidth: 820, minHeight: 520)

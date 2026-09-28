@@ -1,3 +1,4 @@
+import AppKit
 import StenoCore
 import SwiftUI
 
@@ -247,6 +248,18 @@ struct PendingText: View {
   /// isolated, and `TabText` calls this from plain code.
   nonisolated static func text(meeting: Meeting?, none: String, pending: String) -> String {
     meeting?.state == .ready ? none : pending
+  }
+}
+
+extension AppController {
+  /// The one way a button lands on a Settings tab: record the request, open
+  /// the scene through the view's `openSettings` environment action and bring
+  /// the app to the front. Used by the setup banner, the detail rows, the
+  /// footer and the Actions menu.
+  func openSettings(_ tab: SettingsTab, with open: OpenSettingsAction) {
+    openSettings(tab)
+    open()
+    NSApp.activate()
   }
 }
 
