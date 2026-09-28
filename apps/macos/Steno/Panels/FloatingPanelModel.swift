@@ -87,11 +87,9 @@ final class FloatingPanelModel {
   /// stale anchor is replaced in the defaults.
   func screensDidChange() {
     let before = anchor
-    let resolved = PanelAnchor.validated(
-      anchor ?? loadAnchor(), screens: host.currentScreens, fallback: fallbackScreen)
-    anchor = resolved
+    let resolved = currentAnchor()
     if let before, resolved != before { saveAnchor(resolved) }
-    guard host.isShown, let lastSize else { return }
+    guard wantsShown, let lastSize else { return }
     host.show(frame: resolved.frame(for: lastSize))
   }
 

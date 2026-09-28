@@ -106,14 +106,6 @@ struct CountdownHairline: View {
   let fractionRemaining: Double
   @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
-  init(fractionRemaining: Double) {
-    self.fractionRemaining = fractionRemaining
-  }
-
-  init(countdown: Countdown) {
-    self.init(fractionRemaining: countdown.fractionRemaining)
-  }
-
   var body: some View {
     GeometryReader { proxy in
       ZStack(alignment: .leading) {

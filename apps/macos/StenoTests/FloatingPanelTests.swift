@@ -9,22 +9,12 @@ import XCTest
 @MainActor
 final class FakePanelHost: PanelHost {
   var currentScreens: [CGRect] = [CGRect(x: 0, y: 0, width: 1512, height: 944)]
-  private(set) var isShown = false
   private(set) var shownFrames: [CGRect] = []
   private(set) var hides = 0
-  private(set) var contents = 0
 
-  func setContent(_ view: AnyView) { contents += 1 }
-
-  func show(frame: CGRect) {
-    isShown = true
-    shownFrames.append(frame)
-  }
-
-  func hide() {
-    isShown = false
-    hides += 1
-  }
+  func setContent(_ view: AnyView) {}
+  func show(frame: CGRect) { shownFrames.append(frame) }
+  func hide() { hides += 1 }
 }
 
 /// The floating panel's pure pieces: what it shows, how the bubble and the
@@ -52,7 +42,7 @@ final class FloatingPanelTests: XCTestCase {
   /// only when idle; nothing otherwise.
   func testResolvePrefersTheBubbleThenThePromptThenNothing() {
     let prompt = makePrompt()
-    let since = Date(timeIntervalSince1970: 1_790_250_000)
+    let since = TestSupport.now
     let busy: [RecordingState] = [.starting, .recording(since: since), .stopping]
     for state in busy {
       XCTAssertEqual(FloatingContent.resolve(prompt: prompt, recording: state), .bubble, "\(state)")
@@ -66,7 +56,7 @@ final class FloatingPanelTests: XCTestCase {
   // MARK: - BubblePresentation
 
   func testBubblePresentationPerState() {
-    let since = Date(timeIntervalSince1970: 1_790_250_000)
+    let since = TestSupport.now
     let idle = BubblePresentation.make(state: .idle, autoStop: nil)
     XCTAssertFalse(idle.showsBars)
     XCTAssertFalse(idle.showsStop)
@@ -108,7 +98,7 @@ final class FloatingPanelTests: XCTestCase {
   // MARK: - MenuBarLabelPresentation
 
   func testMenuBarLabelPerState() {
-    let since = Date(timeIntervalSince1970: 1_790_250_000)
+    let since = TestSupport.now
     let now = since.addingTimeInterval(754)
     let idle = MenuBarLabelPresentation.make(state: .idle, now: now)
     XCTAssertEqual(idle.symbolName, "waveform")

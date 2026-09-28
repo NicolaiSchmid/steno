@@ -10,7 +10,6 @@ import SwiftUI
 protocol PanelHost: AnyObject {
   /// The visible frames of the current screens, the main screen first.
   var currentScreens: [CGRect] { get }
-  var isShown: Bool { get }
   func setContent(_ view: AnyView)
   func show(frame: CGRect)
   func hide()
@@ -26,9 +25,10 @@ protocol PanelHost: AnyObject {
 @MainActor
 final class FloatingPanel: NSPanel, PanelHost {
   private var hosting: NSHostingView<AnyView>?
-  /// True from `show` until `hide` finishes, so a hide that is still fading
-  /// does not order out a panel shown again meanwhile.
-  private(set) var isShown = false
+  /// True from `show` until `hide` starts fading.
+  private var isShown = false
+  /// Bumped by every show and hide, so a hide's fade-out orders the panel
+  /// out only when nothing happened since.
   private var hideGeneration = 0
 
   init() {
@@ -107,7 +107,7 @@ final class FloatingPanel: NSPanel, PanelHost {
       },
       completionHandler: { [weak self] in
         Task { @MainActor [weak self] in
-          guard let self, self.hideGeneration == generation, !self.isShown else { return }
+          guard let self, self.hideGeneration == generation else { return }
           self.orderOut(nil)
         }
       })
