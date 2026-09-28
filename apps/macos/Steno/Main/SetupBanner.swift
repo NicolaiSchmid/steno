@@ -1,26 +1,22 @@
-import StenoCore
 import SwiftUI
 
 /// Row 1 of the detail header stack: a launch-time reminder that summaries
 /// or export are off, shown when at least one meeting exists, the
-/// configuration is incomplete (`SetupBannerMessage(settings:)`) and "Not
-/// now" was not pressed this launch (`AppController.setupBannerDismissed`).
-/// The per-meeting rows in the detail pane carry the signal permanently, so
-/// the banner needs no second flag. Ids `setup-banner`, `setup-summaries`,
-/// `choose-vault` and `banner-not-now`; the UI smoke test matches ids, not
-/// copy.
+/// configuration is incomplete (`AppController.setupBannerMessage`, which
+/// follows the stored settings) and "Not now" was not pressed this launch
+/// (`AppController.setupBannerDismissed`). The per-meeting rows in the
+/// detail pane carry the signal permanently, so the banner needs no second
+/// flag. Ids `setup-banner`, `setup-summaries`, `choose-vault` and
+/// `banner-not-now`; the UI smoke test matches ids, not copy.
 struct SetupBanner: View {
   let controller: AppController
   let hasMeetings: Bool
-  /// What the stored `Settings` are missing; nil while loading or once both
-  /// are configured.
-  @State private var missing: SetupBannerMessage?
   @Environment(\.openSettings) private var openSettings
   @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
   private var message: SetupBannerMessage? {
     guard hasMeetings, !controller.setupBannerDismissed else { return nil }
-    return missing
+    return controller.setupBannerMessage
   }
 
   var body: some View {
@@ -47,9 +43,7 @@ struct SetupBanner: View {
                 }
               }
               Button("Not now") { controller.dismissSetupBanner() }
-                .buttonStyle(.plain)
-                .font(.steno(Theme.TextSize.xs))
-                .foregroundStyle(Color.stenoFaint)
+                .buttonStyle(StenoGhostButtonStyle())
                 .accessibilityIdentifier("banner-not-now")
             }
             .fixedSize()
@@ -63,7 +57,6 @@ struct SetupBanner: View {
       }
     }
     .animation(Motion.swap(reduceMotion: reduceMotion), value: message)
-    .task { await observeSettings() }
   }
 
   private var chooseVaultButton: some View {
@@ -71,18 +64,5 @@ struct SetupBanner: View {
       controller.openSettings(.obsidian, with: openSettings)
     }
     .accessibilityIdentifier("choose-vault")
-  }
-
-  /// Follows `Settings` so the banner appears and disappears with the
-  /// configuration, without a view model of its own.
-  private func observeSettings() async {
-    do {
-      for try await settings in controller.environment.settings.observe() {
-        missing = SetupBannerMessage(settings: settings)
-      }
-    } catch {
-      // The detail pane and Settings report store errors; the banner just
-      // stays hidden.
-    }
   }
 }

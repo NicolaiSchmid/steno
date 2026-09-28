@@ -258,8 +258,9 @@ final class AppEnvironment {
   /// network, no prompts. `handover` stays nil unless a test passes one;
   /// tests that need a failing or device-losing capture pass
   /// `makeCaptureSession`, drive the detector through `processActivity`,
-  /// gate the pipeline through `makeSpeechEngine` (called once per pipeline
-  /// build) and the recording start through `calendar`.
+  /// gate the pipeline through `makeSpeechEngine` and `makeSummarizer`
+  /// (each called once per pipeline build) and the recording start through
+  /// `calendar`.
   static func preview(
     clock: any Clock<Duration> = ContinuousClock(),
     now: @escaping @Sendable () -> Date = Date.init,
@@ -268,6 +269,7 @@ final class AppEnvironment {
     makeCaptureSession: MakeCaptureSession? = nil,
     processActivity: FakeProcessAudioActivity = FakeProcessAudioActivity(),
     makeSpeechEngine: @escaping @Sendable () -> any SpeechEngine = { FakeSpeechEngine() },
+    makeSummarizer: @escaping @Sendable () -> any MeetingSummarizer = { FakeSummarizer() },
     calendar: (any CalendarProviding)? = nil
   ) async throws -> AppEnvironment {
     let root = FileManager.default.temporaryDirectory
@@ -293,7 +295,7 @@ final class AppEnvironment {
         diarizer: FakeDiarizer(),
         speakerMemory: memory,
         cleaner: PassthroughCleaner(),
-        summarizer: FakeSummarizer(),
+        summarizer: makeSummarizer(),
         dispatcher: DeliveryCoordinator(store: store, settings: settingsStore, now: now),
         store: store,
         settings: settingsStore,

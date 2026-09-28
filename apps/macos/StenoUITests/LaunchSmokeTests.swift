@@ -119,8 +119,10 @@ final class LaunchSmokeTests: XCTestCase {
   /// The preview environment has no LLM endpoint and no vault, so the setup
   /// banner shows over the detail pane with both fixes. "Set up summaries"
   /// opens Settings on the LLM tab (`settings-llm` is in the hierarchy only
-  /// while that tab is selected, which also proves the request was applied
-  /// and cleared by the scene); "Not now" hides the banner for the launch.
+  /// while that tab is selected, which proves the request was applied;
+  /// `AppControllerTests` pins that it is cleared); Settings is closed again
+  /// before "Not now", which would otherwise sit under it on the runner's
+  /// one display; "Not now" hides the banner for the launch.
   func testSetupBannerLinksToSettingsAndHides() throws {
     let app = XCUIApplication()
     app.launchArguments = ["-steno-ui-testing"]
@@ -143,6 +145,9 @@ final class LaunchSmokeTests: XCTestCase {
     screenshot.lifetime = .keepAlways
     add(screenshot)
 
+    app.typeKey("w", modifierFlags: .command)
+    XCTAssertTrue(waitUntil(timeout: 5) { !llmTab.exists }, "Settings did not close")
+    XCTAssertTrue(notNow.isHittable, "the banner's Not now is covered")
     notNow.click()
     XCTAssertTrue(
       waitUntil(timeout: 5) { !app.buttons["setup-summaries"].firstMatch.exists },

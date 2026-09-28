@@ -73,12 +73,10 @@ final class TabTextSnapshotTests: XCTestCase {
     export.meeting.state = .ready
     XCTAssertEqual(
       lines(.summary, export),
-      [
-        "No summary", "Summary skipped: no LLM endpoint is configured. The transcript is complete.",
-      ],
+      ["Summary skipped", "No LLM endpoint is configured. The transcript is complete."],
       "ready without a summary and no endpoint: the setup row")
     XCTAssertEqual(lines(.transcript, export), ["No transcript"])
-    XCTAssertEqual(lines(.tasks, export), ["No tasks", "No tasks: the summary was skipped."])
+    XCTAssertEqual(lines(.tasks, export), ["No tasks", "The summary was skipped."])
 
     // The template produced nothing: a summary exists, so no setup row.
     export.meeting.summary = SummaryDocument(templateID: "default", sections: [])
@@ -102,7 +100,7 @@ final class TabTextSnapshotTests: XCTestCase {
       ])
     XCTAssertEqual(
       TabText.lines(.tasks, export: export, llmConfigured: true),
-      ["No tasks", "No tasks: the summary was skipped."])
+      ["No tasks", "The summary was skipped."])
     XCTAssertEqual(
       TabText.lines(.transcript, export: export, llmConfigured: true).count, 6,
       "the transcript is untouched by the setup state")

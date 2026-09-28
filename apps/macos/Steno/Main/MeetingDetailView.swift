@@ -92,6 +92,8 @@ struct MeetingDetailView: View {
               Text(template.displayName).tag(template.id)
             }
           }
+          .disabled(!model.canRerunSummary)
+          .help(model.llmConfigured ? "" : SetupCopy.rerunHelp)
           Button("Re-run summary") { Task { await model.rerunSummary() } }
             .disabled(!model.canRerunSummary)
             .help(model.llmConfigured ? "" : SetupCopy.rerunHelp)
@@ -240,14 +242,12 @@ struct MeetingDetailView: View {
       .accessibilityIdentifier("footer-export-status")
   }
 
-  /// The footer's one plain action beside the status text.
+  /// The footer's one ghost action beside the status text.
   private func footerButton(_ title: String, id: String, action: @escaping () -> Void)
     -> some View
   {
     Button(title, action: action)
-      .buttonStyle(.plain)
-      .font(.steno(Theme.TextSize.xxs))
-      .foregroundStyle(Color.stenoMutedForeground)
+      .buttonStyle(StenoGhostButtonStyle())
       .accessibilityIdentifier(id)
   }
 }

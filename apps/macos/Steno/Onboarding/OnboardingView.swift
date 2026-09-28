@@ -5,8 +5,9 @@ import SwiftUI
 /// current one expanded with its action; Later or Done (and every step
 /// handled) advance to page 2. Page 2, "Summaries and export": the LLM
 /// endpoint and the Obsidian vault rows over the Settings tabs' view
-/// models; Back, Finish, or both rows handled close the window. Finishing
-/// by any route marks onboarding completed.
+/// models; Back returns, Finish or both rows handled set the model's
+/// `finished`, which dismisses the window. The window's own close button
+/// marks onboarding completed too (`onDisappear`).
 struct OnboardingView: View {
   @State var model: OnboardingViewModel
   let onFinished: () -> Void
@@ -25,14 +26,10 @@ struct OnboardingView: View {
     .onChange(of: model.permissionsHandled) { _, handled in
       if handled, model.page == .permissions { model.advance() }
     }
-    .onChange(of: model.setupHandled) { _, handled in
-      if handled, model.page == .setup { finish() }
+    .onChange(of: model.finished) { _, finished in
+      if finished { onFinished() }
     }
-  }
-
-  private func finish() {
-    model.markCompleted()
-    onFinished()
+    .onDisappear { model.markCompleted() }
   }
 
   private func heading(step: Int, title: String, intro: String) -> some View {
@@ -137,7 +134,8 @@ struct OnboardingView: View {
               }
             }
             if !step.isRequired, step.kind != .localNetwork {
-              SkipButton { model.skip(step.kind) }
+              Button("Skip") { model.skip(step.kind) }
+                .buttonStyle(StenoGhostButtonStyle())
             }
           }
         }
@@ -174,7 +172,7 @@ struct OnboardingView: View {
       Button("Back") { model.back() }
         .buttonStyle(StenoSecondaryButtonStyle())
         .accessibilityIdentifier("onboarding-back")
-      Button("Finish") { finish() }
+      Button("Finish") { model.finish() }
         .buttonStyle(StenoPrimaryButtonStyle())
         .keyboardShortcut(.defaultAction)
         .accessibilityIdentifier("onboarding-finish")
@@ -239,18 +237,6 @@ struct OnboardingView: View {
   }
 }
 
-/// The plain "Skip" every optional row offers.
-private struct SkipButton: View {
-  let action: () -> Void
-
-  var body: some View {
-    Button("Skip", action: action)
-      .buttonStyle(.plain)
-      .font(.steno(Theme.TextSize.xs))
-      .foregroundStyle(Color.stenoFaint)
-  }
-}
-
 /// The Summaries row's fields: the LLM tab's base URL, model and API key,
 /// Test connection, Save and Skip, over the LLM tab's own view model.
 private struct SummariesSetupFields: View {
@@ -265,12 +251,9 @@ private struct SummariesSetupFields: View {
       StenoTextField("gpt-4.1-mini", text: $llm.model)
         .accessibilityLabel("Model")
         .accessibilityIdentifier("onboarding-llm-model")
-      SecureField(
-        "API key", text: $llm.apiKey,
-        prompt: Text("optional for local servers").foregroundStyle(Color.stenoFaint)
-      )
-      .stenoTextField()
-      .accessibilityIdentifier("onboarding-llm-key")
+      StenoSecureField("optional for local servers", text: $llm.apiKey)
+        .accessibilityLabel("API key")
+        .accessibilityIdentifier("onboarding-llm-key")
       if let message = llm.validationMessage {
         MessageRow(kind: .warning, text: message)
       }
@@ -282,7 +265,8 @@ private struct SummariesSetupFields: View {
           .buttonStyle(StenoPrimaryButtonStyle())
           .disabled(!model.canSaveSummaries)
           .accessibilityIdentifier("onboarding-llm-save")
-        SkipButton { model.skipSetup(.summaries) }
+        Button("Skip") { model.skipSetup(.summaries) }
+          .buttonStyle(StenoGhostButtonStyle())
         if llm.isTesting { ProgressView().controlSize(.small) }
       }
       switch llm.testResult {
@@ -317,7 +301,8 @@ private struct VaultSetupFields: View {
           .buttonStyle(StenoPrimaryButtonStyle())
           .disabled(obsidian.vaultPath.trimmingCharacters(in: .whitespaces).isEmpty)
           .accessibilityIdentifier("onboarding-vault-save")
-        SkipButton { model.skipSetup(.vault) }
+        Button("Skip") { model.skipSetup(.vault) }
+          .buttonStyle(StenoGhostButtonStyle())
       }
       if let error = obsidian.error { MessageRow(kind: .error, text: error) }
     }

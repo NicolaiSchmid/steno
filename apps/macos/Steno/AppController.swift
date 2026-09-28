@@ -35,6 +35,12 @@ final class AppController {
   /// "Not now" on the setup banner hides it for the rest of this launch; it
   /// comes back on the next launch while the configuration is still missing.
   private(set) var setupBannerDismissed = false
+  /// The stored settings as last emitted by `environment.settings.observe()`,
+  /// nil until the first emission after `launch()`. The setup banner reads
+  /// `setupBannerMessage` from it and a new detail model seeds its configured
+  /// flags from it, so neither shows a wrong frame before its own
+  /// observation lands.
+  private(set) var storedSettings: Settings?
   private(set) var launched = false
   private var observers: [Task<Void, Never>] = []
   private var activationObserver: (any NSObjectProtocol)?
@@ -77,6 +83,18 @@ final class AppController {
     await startHandoverIfPaired()
     observers.append(Task { [menuBar] in await menuBar.observe() })
     observers.append(Task { [menuBar] in await menuBar.observeProgress() })
+    observers.append(
+      Task { [weak self, environment] in
+        do {
+          for try await settings in environment.settings.observe() {
+            guard let self else { return }
+            self.storedSettings = settings
+          }
+        } catch {
+          // Settings and the detail pane report store errors; the banner
+          // just stays hidden.
+        }
+      })
     observers.append(
       Task { [weak self, environment] in
         let stream = await environment.events.subscribe()
@@ -183,11 +201,9 @@ final class AppController {
   /// Every "Set up summaries" and "Choose a vault" button lands here: the tab
   /// is recorded so `SettingsView` selects it when the scene opens (or is
   /// already open). The caller then runs the `openSettings` environment
-  /// action and activates the app. Returns the tab for the caller's chaining.
-  @discardableResult
-  func openSettings(_ tab: SettingsTab) -> SettingsTab {
+  /// action and activates the app (`openSettings(_:with:)`).
+  func openSettings(_ tab: SettingsTab) {
     requestedSettingsTab = tab
-    return tab
   }
 
   /// The pending tab, cleared: `SettingsView` applies it once and a later
@@ -195,6 +211,13 @@ final class AppController {
   func takeRequestedSettingsTab() -> SettingsTab? {
     defer { requestedSettingsTab = nil }
     return requestedSettingsTab
+  }
+
+  /// What the setup banner says; nil before the first settings emission and
+  /// once both the endpoint and the vault are configured. Follows the store,
+  /// so the banner disappears as soon as Settings saves the missing piece.
+  var setupBannerMessage: SetupBannerMessage? {
+    storedSettings.flatMap { SetupBannerMessage(settings: $0) }
   }
 
   /// "Not now" on the setup banner.

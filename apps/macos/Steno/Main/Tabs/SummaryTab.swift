@@ -68,9 +68,7 @@ struct SkippedSummaryState: View {
   var body: some View {
     EmptyState(
       title: row.title, body: row.body, action: action, footnote: row.footnote,
-      id: "empty-\(tab.rawValue)"
-    )
-    .disabled(row.action == .runSummary && (model.isBusy || !model.canRerunSummary))
+      id: "empty-\(tab.rawValue)")
   }
 
   private var action: EmptyState.Action {
@@ -80,7 +78,10 @@ struct SkippedSummaryState: View {
         controller.openSettings(.llm, with: openSettings)
       }
     case .runSummary:
-      EmptyState.Action(title: row.action.title, id: "\(tab.rawValue)-run-summary") {
+      EmptyState.Action(
+        title: row.action.title, id: "\(tab.rawValue)-run-summary",
+        isEnabled: model.canRerunSummary && !model.isBusy
+      ) {
         Task { await model.rerunSummary() }
       }
     }

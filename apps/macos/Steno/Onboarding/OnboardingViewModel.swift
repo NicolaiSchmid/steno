@@ -8,9 +8,12 @@ import StenoCore
 /// recordings under the stored retention rule. Page 2, "Summaries and
 /// export": the LLM endpoint and the Obsidian vault, both optional, written
 /// through the same `LLMSettingsViewModel` and `ObsidianSettingsViewModel`
-/// the Settings tabs use. Finishing by any route sets
-/// `steno.onboardingCompleted`; installs without the flag open once more,
-/// straight on page 2 when the permissions are already granted.
+/// the Settings tabs use. The model owns the exit: Finish, or both rows
+/// handled on page 2, set `steno.onboardingCompleted` and `finished`, which
+/// the view turns into the window's dismissal; the view marks the flag on
+/// the window's close button too. Installs without the flag open once more,
+/// straight on page 2 when the permissions are already granted, and not at
+/// all when Settings already holds an endpoint and a vault.
 @MainActor
 @Observable
 final class OnboardingViewModel {
@@ -67,14 +70,6 @@ final class OnboardingViewModel {
     var isHandled: Bool { self != .open }
   }
 
-  /// Every row of the window in order: the permission steps, then the two
-  /// setup steps.
-  enum StepKind: Equatable, Sendable {
-    case permission(PermissionKind)
-    case summaries
-    case vault
-  }
-
   static let onboardingCompletedKey = "steno.onboardingCompleted"
 
   private(set) var steps = PermissionKind.allCases.map { Step(kind: $0, state: .unknown) }
@@ -82,6 +77,8 @@ final class OnboardingViewModel {
   private(set) var skipped: Set<PermissionKind> = []
   private(set) var page: Page = .permissions
   private(set) var setupStates: [SetupStep: SetupState] = [.summaries: .open, .vault: .open]
+  /// Set by `finish()`: the flag is written and the window should close.
+  private(set) var finished = false
   /// What happens to recordings under the stored rule and where to change
   /// it; nil until `load()` ran with a settings store.
   private(set) var retentionSentence: String?
@@ -114,21 +111,25 @@ final class OnboardingViewModel {
       environment: environment, defaults: defaults)
   }
 
-  /// The order of every row in the window.
-  var stepOrder: [StepKind] {
-    steps.map { .permission($0.kind) } + [.summaries, .vault]
-  }
-
   /// Whether the opener shows the window: a required permission is missing,
   /// or this install has not finished the two pages yet (the flag is unset).
-  static func shouldOpen(permissions: any PermissionsChecking, defaults: UserDefaults) async
-    -> Bool
-  {
-    guard defaults.bool(forKey: onboardingCompletedKey) else { return true }
+  /// An install with the flag unset whose endpoint and vault are already in
+  /// `settings` has nothing left to ask: the flag is written and the window
+  /// stays closed, instead of opening on page 2 only to close at once.
+  static func shouldOpen(
+    permissions: any PermissionsChecking, settings: SettingsStore? = nil, defaults: UserDefaults
+  ) async -> Bool {
     for kind in PermissionKind.allCases where kind.isRequired {
       if await permissions.state(of: kind) != .granted { return true }
     }
-    return false
+    guard !defaults.bool(forKey: onboardingCompletedKey) else { return false }
+    if let settings, let stored = try? await settings.load(), stored.llmConfigured,
+      stored.vaultConfigured
+    {
+      defaults.set(true, forKey: onboardingCompletedKey)
+      return false
+    }
+    return true
   }
 
   func load() async {
@@ -138,6 +139,10 @@ final class OnboardingViewModel {
     if let settings, let stored = try? await settings.load() {
       retentionSentence = Self.retentionSentence(for: stored)
     }
+    // The page 2 rows load once: a later `load()` ("Check again" on page 1)
+    // refreshes the permissions and keeps whatever was typed on page 2.
+    guard !loaded else { return }
+    loaded = true
     if let llm {
       await llm.load()
       if llm.isConfigured { setupStates[.summaries] = .saved(Self.savedLine(llm)) }
@@ -148,8 +153,10 @@ final class OnboardingViewModel {
     }
     // An install that has the permissions but never saw page 2 (the flag is
     // unset) starts there; a fresh install starts on page 1.
-    if !loaded, isComplete { page = .setup }
-    loaded = true
+    if isComplete {
+      page = .setup
+      finishIfSetupHandled()
+    }
   }
 
   /// One sentence on what the rule does to the files, then where to change
@@ -186,15 +193,10 @@ final class OnboardingViewModel {
       }
   }
 
-  /// Both setup rows saved or skipped. The window closes when this turns
-  /// true on page 2.
+  /// Both setup rows saved or skipped. On page 2 this finishes the window
+  /// (`finishIfSetupHandled`).
   var setupHandled: Bool {
     SetupStep.allCases.allSatisfy { setupState(of: $0).isHandled }
-  }
-
-  /// Every row handled: the permissions and the two setup steps.
-  var isFinished: Bool {
-    permissionsHandled && setupHandled
   }
 
   func state(of kind: PermissionKind) -> PermissionState {
@@ -220,9 +222,11 @@ final class OnboardingViewModel {
     skipped.insert(kind)
   }
 
-  /// Done or Later on page 1.
+  /// Done or Later on page 1. Page 2 with both rows already handled (an
+  /// install configured in Settings) has nothing to show, so it finishes.
   func advance() {
     page = .setup
+    finishIfSetupHandled()
   }
 
   /// Back on page 2.
@@ -238,6 +242,7 @@ final class OnboardingViewModel {
 
   func skipSetup(_ step: SetupStep) {
     setupStates[step] = .skipped
+    finishIfSetupHandled()
   }
 
   /// The Summaries row's Save can go: a valid URL, a model name and nothing
@@ -255,6 +260,7 @@ final class OnboardingViewModel {
     await llm.save()
     guard llm.error == nil, llm.isConfigured else { return }
     setupStates[.summaries] = .saved(Self.savedLine(llm))
+    finishIfSetupHandled()
   }
 
   /// Saves through the Obsidian tab's view model (validated by the
@@ -266,12 +272,25 @@ final class OnboardingViewModel {
     await obsidian.save()
     guard obsidian.saved, obsidian.error == nil else { return }
     setupStates[.vault] = .saved(Self.savedLine(obsidian))
+    finishIfSetupHandled()
   }
 
-  /// Finishing by any route: the opener no longer shows the window for the
-  /// flag alone.
+  // MARK: - Exit
+
+  /// The flag alone, for the window's close button: the opener no longer
+  /// shows the window for the flag, only for a missing required permission.
   func markCompleted() {
     defaults.set(true, forKey: Self.onboardingCompletedKey)
+  }
+
+  /// Finish, or both rows handled on page 2: the flag, then `finished`.
+  func finish() {
+    markCompleted()
+    finished = true
+  }
+
+  private func finishIfSetupHandled() {
+    if page == .setup, setupHandled { finish() }
   }
 
   private static func savedLine(_ llm: LLMSettingsViewModel) -> String {

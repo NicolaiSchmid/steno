@@ -422,7 +422,8 @@ final class MeetingDetailViewModelTests: XCTestCase {
 
   /// `summaryStatus` for a ready meeting with a summary, without one before
   /// and after an endpoint is configured, and while processing; the
-  /// Actions menu's "Re-run summary" follows the endpoint.
+  /// Actions menu's "Re-run summary" follows the endpoint, and "Run summary"
+  /// (`rerunSummary()`) writes the summary back.
   func testSummaryStatusFollowsTheSummaryAndTheEndpoint() async throws {
     let environment = try await TestSupport.environment()
     let model = await makeModel(environment)
@@ -448,11 +449,45 @@ final class MeetingDetailViewModelTests: XCTestCase {
     XCTAssertEqual(model.summaryStatus.skippedRow(for: .tasks)?.action, .runSummary)
     XCTAssertTrue(model.canRerunSummary)
 
+    await model.rerunSummary()
+    XCTAssertNil(model.error, model.error ?? "")
+    await TestSupport.waitUntil("summary written") { model.summaryStatus == .present }
+    XCTAssertFalse(model.isBusy)
+
+    try await environment.store.update(meetingID: SampleData.meetingID, now: TestSupport.now) {
+      $0.summary = nil
+    }
+    await TestSupport.waitUntil("summary cleared again") { model.meeting?.summary == nil }
     try await environment.store.setState(
       .processing, meetingID: SampleData.meetingID, now: TestSupport.now)
     await TestSupport.waitUntil("processing observed") { model.meeting?.state == .processing }
     XCTAssertEqual(model.summaryStatus, .pending)
     XCTAssertFalse(model.canRerunSummary, "the pipeline holds the meeting")
+  }
+
+  /// A summarizer that throws: "Run summary" reports the pipeline's failure
+  /// in `error`, the meeting stays ready without a summary (the row still
+  /// offers the run) and the model is not left busy.
+  func testRunSummaryFailureIsReported() async throws {
+    struct Refused: Error, Sendable {}
+    let environment = try await TestSupport.environment(makeSummarizer: {
+      FakeSummarizer(failure: Refused())
+    })
+    let model = await makeModel(environment)
+    try await environment.store.update(meetingID: SampleData.meetingID, now: TestSupport.now) {
+      $0.summary = nil
+    }
+    try await environment.updateSettings {
+      $0.llmBaseURL = URL(string: "http://127.0.0.1:1234/v1")
+      $0.llmModel = "qwen"
+    }
+    await TestSupport.waitUntil("runnable row") { model.summaryStatus == .skippedRunnable }
+
+    await model.rerunSummary()
+    XCTAssertEqual(model.error?.hasPrefix("Summary re-run failed:"), true, model.error ?? "nil")
+    XCTAssertEqual(model.summaryStatus, .skippedRunnable, "no summary was written")
+    XCTAssertEqual(model.meeting?.state, .ready, "a re-run failure does not fail the meeting")
+    XCTAssertFalse(model.isBusy)
   }
 
   /// `exportStatus` with no delivery rows, without and with a vault, then

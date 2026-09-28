@@ -1,8 +1,7 @@
-import AppKit
 import StenoCore
 import SwiftUI
 
-/// The composed controls the app reuses, built from the tokens: the two
+/// The composed controls the app reuses, built from the tokens: the three
 /// button styles, the status chip, the raised card, the status dot and the
 /// message row. Boxes, fills and type follow the redesign plan's components
 /// table; every state swap runs over `Motion.functional` and holds still
@@ -76,6 +75,33 @@ struct StenoSecondaryButtonStyle: ButtonStyle {
         )
         .overlay(Theme.Radius.md.shape.hairline())
         .contentShape(Theme.Radius.md.shape)
+        .onHover { hovering = $0 }
+        .animation(Motion.swap(reduceMotion: reduceMotion), value: hovering)
+        .modifier(PressFeedback(isPressed: configuration.isPressed))
+    }
+  }
+}
+
+/// The ghost action: a bare 13 pt label in `faint`, `strong` on hover, no
+/// box, the button height as the hit height. "Skip" on the onboarding rows,
+/// "Not now" on the setup banner and the detail footer's text actions.
+struct StenoGhostButtonStyle: ButtonStyle {
+  func makeBody(configuration: Configuration) -> some View {
+    Ghost(configuration: configuration)
+  }
+
+  private struct Ghost: View {
+    let configuration: Configuration
+    @State private var hovering = false
+    @Environment(\.isEnabled) private var isEnabled
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    var body: some View {
+      configuration.label
+        .font(.steno(Theme.TextSize.xs))
+        .foregroundStyle(hovering && isEnabled ? Color.stenoStrong : Color.stenoFaint)
+        .frame(height: Theme.Control.buttonHeight)
+        .contentShape(Rectangle())
         .onHover { hovering = $0 }
         .animation(Motion.swap(reduceMotion: reduceMotion), value: hovering)
         .modifier(PressFeedback(isPressed: configuration.isPressed))
@@ -248,18 +274,6 @@ struct PendingText: View {
   /// isolated, and `TabText` calls this from plain code.
   nonisolated static func text(meeting: Meeting?, none: String, pending: String) -> String {
     meeting?.state == .ready ? none : pending
-  }
-}
-
-extension AppController {
-  /// The one way a button lands on a Settings tab: record the request, open
-  /// the scene through the view's `openSettings` environment action and bring
-  /// the app to the front. Used by the setup banner, the detail rows, the
-  /// footer and the Actions menu.
-  func openSettings(_ tab: SettingsTab, with open: OpenSettingsAction) {
-    openSettings(tab)
-    open()
-    NSApp.activate()
   }
 }
 

@@ -455,7 +455,7 @@ final class AppControllerTests: XCTestCase {
     XCTAssertNil(controller.requestedSettingsTab)
     XCTAssertNil(controller.takeRequestedSettingsTab(), "nothing to take before a request")
 
-    XCTAssertEqual(controller.openSettings(.llm), .llm)
+    controller.openSettings(.llm)
     XCTAssertEqual(controller.requestedSettingsTab, .llm)
     XCTAssertEqual(controller.takeRequestedSettingsTab(), .llm)
     XCTAssertNil(controller.requestedSettingsTab, "taken once")
@@ -477,11 +477,14 @@ final class AppControllerTests: XCTestCase {
     let environment = try await TestSupport.environment(seed: false)
     let controller = try makeController(environment)
     XCTAssertFalse(controller.setupBannerDismissed, "a fresh controller shows the banner")
+    XCTAssertNil(controller.setupBannerMessage, "nothing before the store's first emission")
     await controller.launch()
+    await TestSupport.waitUntil("banner message loaded") {
+      controller.setupBannerMessage == .bothMissing
+    }
     let initial = try await environment.settings.load()
     XCTAssertFalse(initial.llmConfigured)
     XCTAssertFalse(initial.vaultConfigured)
-    XCTAssertEqual(SetupBannerMessage(settings: initial), .bothMissing)
 
     let llm = LLMSettingsViewModel(environment: environment)
     await llm.load()
@@ -493,7 +496,9 @@ final class AppControllerTests: XCTestCase {
     let afterLLM = try await environment.settings.load()
     XCTAssertTrue(afterLLM.llmConfigured, "saving the LLM tab configures the endpoint")
     XCTAssertEqual(llm.isConfigured, afterLLM.llmConfigured)
-    XCTAssertEqual(SetupBannerMessage(settings: afterLLM), .vaultMissing)
+    await TestSupport.waitUntil("endpoint observed by the controller") {
+      controller.setupBannerMessage == .vaultMissing
+    }
 
     let vault = try TestSupport.temporaryDirectory("steno-vault")
     defer { try? FileManager.default.removeItem(at: vault) }
@@ -506,7 +511,10 @@ final class AppControllerTests: XCTestCase {
     XCTAssertTrue(obsidian.saved)
     let afterVault = try await environment.settings.load()
     XCTAssertTrue(afterVault.vaultConfigured, "saving the Obsidian tab configures the vault")
-    XCTAssertNil(SetupBannerMessage(settings: afterVault), "nothing left to set up")
+    await TestSupport.waitUntil("vault observed by the controller") {
+      controller.storedSettings?.vaultConfigured == true
+    }
+    XCTAssertNil(controller.setupBannerMessage, "nothing left to set up: the banner live-hides")
 
     controller.dismissSetupBanner()
     XCTAssertTrue(controller.setupBannerDismissed)

@@ -38,15 +38,20 @@ enum SummaryStatus: Equatable, Sendable {
   func skippedRow(for tab: MeetingDetailViewModel.Tab) -> SkippedRow? {
     switch (self, tab) {
     case (.skippedUnconfigured, .summary):
-      SkippedRow(title: "No summary", body: SetupCopy.summarySkipped, action: .setUpSummaries)
+      SkippedRow(
+        title: SetupCopy.summarySkippedTitle, body: SetupCopy.summarySkippedBody,
+        action: .setUpSummaries)
     case (.skippedRunnable, .summary):
       SkippedRow(
-        title: "No summary yet", body: SetupCopy.summaryRunnable, action: .runSummary,
-        footnote: SetupCopy.summaryRunnableFootnote)
+        title: SetupCopy.summaryRunnableTitle, body: SetupCopy.summaryRunnableBody,
+        action: .runSummary, footnote: SetupCopy.summaryRunnableFootnote)
     case (.skippedUnconfigured, .tasks):
-      SkippedRow(title: "No tasks", body: SetupCopy.tasksSkipped, action: .setUpSummaries)
+      SkippedRow(
+        title: SetupCopy.tasksSkippedTitle, body: SetupCopy.tasksSkippedBody,
+        action: .setUpSummaries)
     case (.skippedRunnable, .tasks):
-      SkippedRow(title: "No tasks", body: SetupCopy.tasksSkipped, action: .runSummary)
+      SkippedRow(
+        title: SetupCopy.tasksSkippedTitle, body: SetupCopy.tasksSkippedBody, action: .runSummary)
     case (.pending, _), (.present, _), (_, .transcript), (_, .scratchpad):
       nil
     }
@@ -102,14 +107,57 @@ enum ExportStatus: Equatable, Sendable {
   }
 }
 
-/// The onboarding plan's user-facing strings for the detail pane, in one
-/// place so the tabs, the footer and `TabText` cannot drift.
+/// What the main window's setup banner says, derived from `Settings`; nil
+/// when both the endpoint and the vault are configured. Copy comes from the
+/// onboarding plan's "Main window banner" section, through `SetupCopy`.
+enum SetupBannerMessage: Equatable, Sendable {
+  case bothMissing
+  case endpointMissing
+  case vaultMissing
+
+  init?(settings: Settings) {
+    switch (settings.llmConfigured, settings.vaultConfigured) {
+    case (true, true): return nil
+    case (false, false): self = .bothMissing
+    case (false, true): self = .endpointMissing
+    case (true, false): self = .vaultMissing
+    }
+  }
+
+  var text: String {
+    switch self {
+    case .bothMissing: SetupCopy.bannerBothMissing
+    case .endpointMissing: SetupCopy.bannerEndpointMissing
+    case .vaultMissing: SetupCopy.bannerVaultMissing
+    }
+  }
+
+  /// The "Set up summaries" button (Settings > LLM).
+  var offersSummaries: Bool { self != .vaultMissing }
+
+  /// The "Choose a vault" button (Settings > Obsidian).
+  var offersVault: Bool { self != .endpointMissing }
+}
+
+/// The onboarding plan's user-facing strings for the main window, in one
+/// place so the banner, the tabs, the footer, the Actions menu and `TabText`
+/// cannot drift. A skipped row's title is the plan sentence's clause before
+/// the colon and its body the rest.
 enum SetupCopy {
-  static let summarySkipped =
-    "Summary skipped: no LLM endpoint is configured. The transcript is complete."
-  static let summaryRunnable = "This meeting was processed before an LLM endpoint was configured."
+  static let bannerBothMissing =
+    "Summaries and export are off. Steno has no LLM endpoint and no Obsidian vault yet, so meetings keep a raw transcript on this Mac."
+  static let bannerEndpointMissing =
+    "Summaries are off. Steno has no LLM endpoint yet, so meetings keep a raw transcript."
+  static let bannerVaultMissing =
+    "Export is off. Steno has no Obsidian vault yet, so meetings stay on this Mac."
+  static let summarySkippedTitle = "Summary skipped"
+  static let summarySkippedBody = "No LLM endpoint is configured. The transcript is complete."
+  static let summaryRunnableTitle = "No summary yet"
+  static let summaryRunnableBody =
+    "This meeting was processed before an LLM endpoint was configured."
   static let summaryRunnableFootnote = "Summary only; the transcript stays as recorded."
-  static let tasksSkipped = "No tasks: the summary was skipped."
+  static let tasksSkippedTitle = "No tasks"
+  static let tasksSkippedBody = "The summary was skipped."
   static let setUpSummaries = "Set up summaries"
   static let runSummary = "Run summary"
   static let chooseVault = "Choose a vault"

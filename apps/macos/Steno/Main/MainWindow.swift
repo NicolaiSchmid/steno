@@ -50,7 +50,9 @@ struct MainWindow: View {
     .onChange(of: list.selection, initial: true) { _, selection in
       guard selection != detail?.id else { return }
       detail = selection.map {
-        MeetingDetailViewModel(meetingID: $0, environment: controller.environment)
+        MeetingDetailViewModel(
+          meetingID: $0, environment: controller.environment,
+          initialSettings: controller.storedSettings)
       }
     }
     .onChange(of: controller.requestedMeetingID, initial: true) { _, requested in

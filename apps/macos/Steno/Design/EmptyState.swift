@@ -1,15 +1,25 @@
 import SwiftUI
 
 /// The empty state of a pane or a list: a 48 pt icon well on the `card`
-/// veil, a 14 pt medium title, a 13 pt `muted` body wrapping at 280 pt, and
-/// an optional secondary action 16 pt below. Without a symbol it is the
-/// quieter "no content" variant the ready tabs use. Copy and ids are the
-/// caller's; the plan's states table lists them.
+/// veil, a 14 pt medium title, a 13 pt `muted` body wrapping at 280 pt, an
+/// optional secondary action 16 pt below and an optional `faint` footnote
+/// 12 pt under the action. Without a symbol it is the quieter "no content"
+/// variant the ready tabs use. Copy and ids are the caller's; the plan's
+/// states table lists them.
 struct EmptyState: View {
   struct Action {
     let title: String
     let id: String
+    /// Disables the button alone; the title and body stay readable.
+    let isEnabled: Bool
     let run: () -> Void
+
+    init(title: String, id: String, isEnabled: Bool = true, run: @escaping () -> Void) {
+      self.title = title
+      self.id = id
+      self.isEnabled = isEnabled
+      self.run = run
+    }
   }
 
   let symbol: String?
@@ -58,6 +68,7 @@ struct EmptyState: View {
       if let action {
         Button(action.title, action: action.run)
           .buttonStyle(StenoSecondaryButtonStyle())
+          .disabled(!action.isEnabled)
           .accessibilityIdentifier(action.id)
           .padding(.top, Theme.Space.xs)
       }

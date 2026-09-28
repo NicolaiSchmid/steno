@@ -2,9 +2,10 @@ import StenoCore
 import XCTest
 
 /// `Settings.llmConfigured` and `vaultConfigured` (pure functions of the
-/// stored settings), the banner message they select, and the detail pane's
-/// `SummaryStatus` and `ExportStatus` selectors.
-final class SettingsSetupTests: XCTestCase {
+/// stored settings), the banner message they select, the detail pane's
+/// `SummaryStatus` and `ExportStatus` selectors, and the Settings tabs the
+/// deep links name.
+final class SetupStatusTests: XCTestCase {
   private func settings(llm: Bool, vault: Bool) -> Settings {
     var settings = Settings()
     if llm {
@@ -51,6 +52,13 @@ final class SettingsSetupTests: XCTestCase {
     XCTAssertTrue(vault?.text.hasPrefix("Export is off.") == true)
   }
 
+  /// The seven tabs in the scene's order; `SettingsView` tags one view per
+  /// case and the deep links select by tag.
+  func testSettingsTabsMatchTheSceneInOrder() {
+    XCTAssertEqual(
+      SettingsTab.allCases, [.general, .audio, .speech, .llm, .obsidian, .phones, .updates])
+  }
+
   func testSummaryStatusKeysOffTheSummaryTheStateAndTheEndpoint() {
     var meeting = SampleData.meeting(state: .ready)
     XCTAssertNotNil(meeting.summary)
@@ -74,12 +82,10 @@ final class SettingsSetupTests: XCTestCase {
     let unconfigured = try XCTUnwrap(SummaryStatus.skippedUnconfigured.skippedRow(for: .summary))
     XCTAssertEqual(unconfigured.action, .setUpSummaries)
     XCTAssertNil(unconfigured.footnote)
-    XCTAssertEqual(unconfigured.lines.count, 2)
 
     let runnable = try XCTUnwrap(SummaryStatus.skippedRunnable.skippedRow(for: .summary))
     XCTAssertEqual(runnable.action, .runSummary)
     XCTAssertNotNil(runnable.footnote, "the re-run keeps the transcript as recorded")
-    XCTAssertEqual(runnable.lines.count, 3)
 
     XCTAssertEqual(
       SummaryStatus.skippedUnconfigured.skippedRow(for: .tasks)?.action, .setUpSummaries)

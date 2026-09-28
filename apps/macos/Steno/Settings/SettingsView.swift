@@ -4,6 +4,18 @@ import StenoCore
 import StenoSpeech
 import SwiftUI
 
+/// The Settings tabs, in the order the scene shows them. `AppController.
+/// openSettings(_:)` requests one; `SettingsView` selects it.
+enum SettingsTab: String, CaseIterable, Sendable {
+  case general
+  case audio
+  case speech
+  case llm
+  case obsidian
+  case phones
+  case updates
+}
+
 /// The Settings scene: seven tabs, one view model each, built once for the
 /// scene's lifetime (a model created in `body` would be replaced on every
 /// evaluation and its state lost). A tab requested through
@@ -56,10 +68,24 @@ struct SettingsView: View {
     }
     .frame(width: 560)
     .background(Color.stenoBackground)
-    .onChange(of: controller.requestedSettingsTab, initial: true) { _, requested in
-      guard requested != nil, let tab = controller.takeRequestedSettingsTab() else { return }
+    .onChange(of: controller.requestedSettingsTab, initial: true) { _, _ in
+      guard let tab = controller.takeRequestedSettingsTab() else { return }
       selection = tab
     }
+  }
+}
+
+extension AppController {
+  /// The one way a button lands on a Settings tab: record the request, open
+  /// the scene through the view's `openSettings` environment action and bring
+  /// the app to the front. Used by the setup banner, the detail rows, the
+  /// footer and the Actions menu. Lives here, not in `AppController.swift`,
+  /// because `OpenSettingsAction` needs SwiftUI, whose `Settings` scene would
+  /// shadow the model type the controller names.
+  func openSettings(_ tab: SettingsTab, with open: OpenSettingsAction) {
+    openSettings(tab)
+    open()
+    NSApp.activate()
   }
 }
 

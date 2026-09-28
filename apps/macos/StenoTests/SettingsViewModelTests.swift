@@ -449,5 +449,4 @@ final class SettingsViewModelTests: XCTestCase {
       model.listener == .stopped
     }
   }
-
 }
