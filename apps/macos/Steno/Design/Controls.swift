@@ -156,19 +156,14 @@ struct StenoTextFieldStyle: TextFieldStyle {
   }
 }
 
-private struct StenoTextFieldSurface: View {
-  /// `nonisolated(unsafe)`: assigned once by the nonisolated init below and
-  /// read only from `body` on the main actor; SwiftUI calls `_body` on the
-  /// main thread.
-  nonisolated(unsafe) let field: TextField<StenoTextFieldStyle._Label>
+/// `nonisolated` (SE-0449): `TextFieldStyle._body` is a nonisolated
+/// requirement, so the surface must be constructible off the main actor.
+/// Dropping the `View` protocol's main-actor inference makes the memberwise
+/// init plain; SwiftUI still evaluates `body` on the main thread.
+nonisolated private struct StenoTextFieldSurface: View {
+  let field: TextField<StenoTextFieldStyle._Label>
   @FocusState private var focused: Bool
   @Environment(\.accessibilityReduceMotion) private var reduceMotion
-
-  /// `TextFieldStyle._body` is a nonisolated requirement, so the surface
-  /// must be constructible off the main actor; it only stores the field.
-  nonisolated init(field: TextField<StenoTextFieldStyle._Label>) {
-    self.field = field
-  }
 
   var body: some View {
     field
