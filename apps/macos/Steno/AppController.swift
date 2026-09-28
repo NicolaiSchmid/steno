@@ -147,13 +147,6 @@ final class AppController {
     reviewObservers.removeValue(forKey: meetingID)?.cancel()
   }
 
-  /// Called by the speaker review sheet when it closes. Since the store
-  /// clears reviews on its own this is only an early exit for a sheet
-  /// dismissed with speakers left unconfirmed; it goes with the sheet.
-  func reviewCompleted(meetingID: UUID) {
-    clearReview(meetingID)
-  }
-
   private func registerLoginItemOnFirstLaunch() async {
     guard !environment.isPreview, !defaults.bool(forKey: Self.loginItemRegisteredKey) else {
       return

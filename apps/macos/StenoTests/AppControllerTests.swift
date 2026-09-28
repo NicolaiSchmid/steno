@@ -195,7 +195,7 @@ final class AppControllerTests: XCTestCase {
     await controller.shutdown()
   }
 
-  func testSpeakersNeedReviewStaysPendingUntilTheReviewCompletes() async throws {
+  func testSpeakersNeedReviewForAnUnlistedMeetingIsDropped() async throws {
     let environment = try await TestSupport.environment()
     let controller = try makeController(environment)
     await controller.launch()
@@ -209,8 +209,6 @@ final class AppControllerTests: XCTestCase {
           meetingID: SampleData.meetingID, speakerIDs: [SampleData.speakerTwoID]))
       return controller.pendingReviews.contains(SampleData.meetingID)
     }
-    controller.reviewCompleted(meetingID: SampleData.meetingID)
-    XCTAssertFalse(controller.pendingReviews.contains(SampleData.meetingID))
 
     // A review for a meeting the store does not list is dropped on the next
     // list change, so a badge never points at nothing.
@@ -226,8 +224,7 @@ final class AppControllerTests: XCTestCase {
 
   /// The store clears a review, not the UI: confirming the last unconfirmed
   /// speaker through `MeetingStore.confirm` (a speaker-table write that the
-  /// meeting list observation does not see) drops the pending review
-  /// without `reviewCompleted`.
+  /// meeting list observation does not see) drops the pending review.
   func testSpeakersNeedReviewClearsWhenTheLastSpeakerIsConfirmed() async throws {
     let environment = try await TestSupport.environment()
     let controller = try makeController(environment)
@@ -245,8 +242,7 @@ final class AppControllerTests: XCTestCase {
       "Speaker 2 is only suggested, so the review stays pending")
 
     try await environment.store.confirm(
-      speakerID: SampleData.speakerTwoID, person: SampleData.persons()[0],
-      memory: environment.speakerMemory)
+      speakerID: SampleData.speakerTwoID, person: SampleData.persons()[0])
     await TestSupport.waitUntil("review cleared by the store") {
       !controller.pendingReviews.contains(SampleData.meetingID)
     }
