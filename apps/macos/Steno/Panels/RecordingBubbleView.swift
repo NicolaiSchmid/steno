@@ -9,8 +9,9 @@ import SwiftUI
 /// The geometry of the floating panel's contents.
 enum PanelMetrics {
   static let bubbleHeight: CGFloat = 40
-  /// The bubble with the armed auto-stop row under the controls.
-  static let bubbleArmedHeight: CGFloat = 64
+  /// The bubble with the armed auto-stop row under the controls: the row,
+  /// the line, and clear space between the line and the hairline.
+  static let bubbleArmedHeight: CGFloat = 68
   static let bubbleInset: CGFloat = 6
   static let bubbleGap: CGFloat = 10
   static let bubbleMaxWidth: CGFloat = 480
@@ -31,8 +32,8 @@ enum PanelMetrics {
   static let hairlineHeight: CGFloat = 2
   static let hairlineInset: CGFloat = 12
   static let hairlineBottom: CGFloat = 4
-  static let spinnerSize: CGFloat = 12
   static let hairlineFillOpacity: Double = 0.4
+  static let spinnerSize: CGFloat = 12
 }
 
 /// The panel's bar: `popover` fill (opaque in both appearances), hairline
@@ -158,33 +159,6 @@ struct BubbleStopButton: View {
   }
 }
 
-/// A 28 pt text button for the bubble: `sm` `strong` text in a radius 8
-/// box, the `card` veil on hover. "Keep recording" sits in one, before
-/// the stop square, so the two choices carry equal weight.
-struct BubbleTextButton: View {
-  let title: String
-  let identifier: String
-  let action: () -> Void
-  @State private var hovering = false
-  @Environment(\.accessibilityReduceMotion) private var reduceMotion
-
-  var body: some View {
-    Button(action: action) {
-      Text(title)
-        .font(.steno(Theme.TextSize.sm, weight: .medium))
-        .foregroundStyle(Color.stenoStrong)
-        .padding(.horizontal, Theme.Control.rowInset)
-        .frame(height: PanelMetrics.stopSize)
-        .background(Theme.Radius.md.shape.fill(hovering ? Color.stenoCard : Color.clear))
-        .contentShape(Theme.Radius.md.shape)
-    }
-    .buttonStyle(.plain)
-    .onHover { hovering = $0 }
-    .animation(Motion.swap(reduceMotion: reduceMotion), value: hovering)
-    .accessibilityIdentifier(identifier)
-  }
-}
-
 /// The bubble over the one recorder: shown for every state but `.idle`.
 /// The body opens the live meeting in the main window; the square stops
 /// the recording through the shared `recorder.stop()`; while the auto-stop
@@ -228,8 +202,12 @@ struct RecordingBubbleView: View {
 
 /// The bubble's layout for one presentation, with no recorder behind it,
 /// so the previews render every state. One row of 40 pt; with the auto-stop
-/// armed, 64 pt: the countdown line under the controls and the hairline
-/// along the bottom.
+/// armed, 68 pt: the countdown line under the controls, "Keep recording" as
+/// a secondary button at the stop square's height (the two choices carry
+/// equal weight), and the hairline along the bottom. The body is a button
+/// that opens the meeting; a press-and-drag on it moves the panel through
+/// `WindowDragGesture`, since a SwiftUI control consumes the mouse-down
+/// that `isMovableByWindowBackground` would otherwise use.
 struct BubbleBody: View {
   let presentation: BubblePresentation
   let history: LiveBarsHistory
@@ -256,26 +234,32 @@ struct BubbleBody: View {
           .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+        .simultaneousGesture(WindowDragGesture())
         .accessibilityLabel(presentation.text ?? "Recording")
         .accessibilityValue(elapsedText ?? "")
         .accessibilityHint("Opens the meeting in Steno")
         .accessibilityIdentifier("bubble-open")
         if presentation.autoStop != nil {
           Spacer(minLength: 0)
-          BubbleTextButton(
-            title: AutoStopPresentation.keepRecordingLabel, identifier: "bubble-keep-recording",
-            action: keepRecording)
+          Button(AutoStopPresentation.keepRecordingLabel, action: keepRecording)
+            .buttonStyle(StenoSecondaryButtonStyle(height: PanelMetrics.stopSize))
+            .accessibilityIdentifier("bubble-keep-recording")
         }
         if presentation.showsStop {
           BubbleStopButton(isEnabled: presentation.stopEnabled, action: stop)
         }
       }
       if let autoStop = presentation.autoStop {
+        // The line starts on the hairline's inset and keeps its bottom clear
+        // of the hairline; the middle truncates so the app name and the
+        // countdown both survive a long name.
         Text(autoStop.line)
           .font(.steno(Theme.TextSize.sm))
           .foregroundStyle(Color.stenoStrong)
           .lineLimit(1)
-          .padding(.horizontal, Theme.Space.xs)
+          .truncationMode(.middle)
+          .padding(.horizontal, PanelMetrics.hairlineInset - PanelMetrics.bubbleInset)
+          .padding(.bottom, PanelMetrics.hairlineBottom)
           .accessibilityIdentifier("bubble-auto-stop")
       }
     }
@@ -289,11 +273,13 @@ struct BubbleBody: View {
           .padding(.bottom, PanelMetrics.hairlineBottom)
       }
     }
+    // The accessibility container is declared before the bar's content
+    // shape, so a hit test inside it resolves to a child, not the shape.
+    .accessibilityElement(children: .contain)
+    .accessibilityIdentifier("recording-bubble")
     .modifier(PanelBar(hovering: hovering))
     .onHover { hovering = $0 }
     .animation(Motion.swap(reduceMotion: reduceMotion), value: hovering)
-    .accessibilityElement(children: .contain)
-    .accessibilityIdentifier("recording-bubble")
   }
 
   @ViewBuilder

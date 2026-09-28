@@ -32,6 +32,7 @@ struct PromptBody: View {
           .foregroundStyle(Color.stenoStrong)
           .lineLimit(1)
           .truncationMode(.tail)
+          .accessibilityIdentifier("prompt-title")
         Text("Record with Steno? Audio stays on this Mac.")
           .font(.steno(Theme.TextSize.xxs))
           .foregroundStyle(Color.stenoMutedForeground)

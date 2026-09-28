@@ -5,7 +5,7 @@ import SwiftUI
 import XCTest
 
 /// A `PanelHost` that records what the model asked of it and answers with
-/// the screens and the content size a test sets.
+/// the screens a test sets.
 @MainActor
 final class FakePanelHost: PanelHost {
   var currentScreens: [CGRect] = [CGRect(x: 0, y: 0, width: 1512, height: 944)]
@@ -19,10 +19,13 @@ final class FakePanelHost: PanelHost {
 
 /// The floating panel's pure pieces: what it shows, how the bubble and the
 /// menu bar label render each recorder state, where the panel sits and how
-/// the anchor survives moves and screen changes, and the level history.
+/// the anchor survives moves and screen changes, the level history, and the
+/// presenter's observation of a real controller over the fake host.
 @MainActor
 final class FloatingPanelTests: XCTestCase {
   private let defaultsSuite = "uno.schmid.steno.mac.tests.panel.\(UUID().uuidString)"
+  private let bubbleSize = CGSize(width: 168, height: PanelMetrics.bubbleHeight)
+  private let promptSize = CGSize(width: 420, height: PanelMetrics.promptHeight)
 
   override func tearDown() {
     UserDefaults.standard.removePersistentDomain(forName: defaultsSuite)
@@ -55,49 +58,44 @@ final class FloatingPanelTests: XCTestCase {
 
   // MARK: - BubblePresentation
 
-  func testBubblePresentationPerState() {
+  /// The full cross product of the four recorder states and an armed or
+  /// absent auto-stop: bars, the clock and the auto-stop row only while
+  /// recording; the stop square hidden while starting and disabled while
+  /// stopping; the transient text in the two busy states.
+  func testBubbleShowsBarsOnlyWhileRecordingAndDisablesStopWhileStopping() {
     let since = TestSupport.now
-    let idle = BubblePresentation.make(state: .idle, autoStop: nil)
-    XCTAssertFalse(idle.showsBars)
-    XCTAssertFalse(idle.showsStop)
-
-    let starting = BubblePresentation.make(state: .starting, autoStop: nil)
-    XCTAssertEqual(starting.text, "Starting…")
-    XCTAssertFalse(starting.showsBars)
-    XCTAssertFalse(starting.showsStop)
-    XCTAssertFalse(starting.stopEnabled)
-    XCTAssertTrue(starting.isBusy)
-
-    let autoStop = AutoStopPresentation(
-      appName: "Zoom", remainingText: "1:29", fractionRemaining: 0.5)
-    let recording = BubblePresentation.make(state: .recording(since: since), autoStop: autoStop)
-    XCTAssertNil(recording.text)
-    XCTAssertEqual(recording.since, since)
-    XCTAssertTrue(recording.showsBars)
-    XCTAssertTrue(recording.showsStop)
-    XCTAssertTrue(recording.stopEnabled)
-    XCTAssertFalse(recording.isBusy)
-    XCTAssertEqual(recording.autoStop, autoStop, "passes through unchanged")
-
-    let stopping = BubblePresentation.make(state: .stopping, autoStop: autoStop)
-    XCTAssertEqual(stopping.text, "Finishing…")
-    XCTAssertFalse(stopping.showsBars)
-    XCTAssertTrue(stopping.showsStop)
-    XCTAssertFalse(stopping.stopEnabled)
-    XCTAssertTrue(stopping.isBusy)
-    XCTAssertNil(stopping.autoStop, "no countdown once the stop is under way")
-  }
-
-  func testAutoStopLineNamesTheAppOrTheCallApp() {
-    let named = AutoStopPresentation(appName: "Zoom", remainingText: "1:29", fractionRemaining: 0.9)
-    XCTAssertEqual(named.line, "Zoom closed the microphone. Stopping in 1:29.")
-    let unknown = AutoStopPresentation(appName: nil, remainingText: "0:05", fractionRemaining: 0.1)
-    XCTAssertEqual(unknown.line, "The call app closed the microphone. Stopping in 0:05.")
+    let armed = AutoStopPresentation(appName: "Zoom", remainingText: "1:29", fractionRemaining: 0.5)
+    let states: [RecordingState] = [.idle, .starting, .recording(since: since), .stopping]
+    for autoStop in [nil, armed] {
+      for state in states {
+        let bubble = BubblePresentation.make(state: state, autoStop: autoStop)
+        let isRecording = state == .recording(since: since)
+        let label = "\(state), autoStop \(autoStop == nil ? "nil" : "armed")"
+        XCTAssertEqual(bubble.showsBars, isRecording, label)
+        XCTAssertEqual(bubble.stopEnabled, isRecording, label)
+        XCTAssertEqual(bubble.since, isRecording ? since : nil, label)
+        XCTAssertEqual(bubble.autoStop, isRecording ? autoStop : nil, label)
+        switch state {
+        case .idle:
+          XCTAssertNil(bubble.text, label)
+          XCTAssertFalse(bubble.showsStop, label)
+        case .starting:
+          XCTAssertEqual(bubble.text, "Starting…", label)
+          XCTAssertFalse(bubble.showsStop, label)
+        case .recording:
+          XCTAssertNil(bubble.text, label)
+          XCTAssertTrue(bubble.showsStop, label)
+        case .stopping:
+          XCTAssertEqual(bubble.text, "Finishing…", label)
+          XCTAssertTrue(bubble.showsStop, label)
+        }
+      }
+    }
   }
 
   // MARK: - MenuBarLabelPresentation
 
-  func testMenuBarLabelPerState() {
+  func testMenuBarLabelShowsTheElapsedTimeOnlyWhileRecording() {
     let since = TestSupport.now
     let now = since.addingTimeInterval(754)
     let idle = MenuBarLabelPresentation.make(state: .idle, now: now)
@@ -108,6 +106,7 @@ final class FloatingPanelTests: XCTestCase {
       let busy = MenuBarLabelPresentation.make(state: state, now: now)
       XCTAssertEqual(busy.symbolName, "record.circle.fill", "\(state)")
       XCTAssertNil(busy.elapsedText, "\(state)")
+      XCTAssertEqual(busy.accessibilityLabel, "Steno, recording", "\(state)")
     }
     let recording = MenuBarLabelPresentation.make(state: .recording(since: since), now: now)
     XCTAssertEqual(recording.symbolName, "record.circle.fill")
@@ -119,15 +118,16 @@ final class FloatingPanelTests: XCTestCase {
 
   func testDefaultAnchorSitsAtTheTopCentreOfTheVisibleFrame() {
     let visible = CGRect(x: 0, y: 0, width: 1512, height: 944)
-    let anchor = PanelAnchor.defaultAnchor(in: visible)
-    XCTAssertEqual(anchor.x, 756)
-    XCTAssertEqual(anchor.y, 944 - Theme.Space.sm)
+    let anchor = PanelAnchor.default(in: visible)
+    XCTAssertEqual(anchor.topCenter.x, 756)
+    XCTAssertEqual(anchor.topCenter.y, 944 - Theme.Space.sm)
+    XCTAssertEqual(anchor.screenFrame, visible)
   }
 
   func testFrameForSizeKeepsTheTopCentrePoint() {
     let anchor = PanelAnchor(
       topCenter: CGPoint(x: 756, y: 936), screenFrame: CGRect(x: 0, y: 0, width: 1512, height: 944))
-    for size in [CGSize(width: 400, height: 56), CGSize(width: 160, height: 40)] {
+    for size in [promptSize, bubbleSize] {
       let frame = anchor.frame(for: size)
       XCTAssertEqual(frame.size, size)
       XCTAssertEqual(frame.midX, 756, "\(size)")
@@ -135,17 +135,37 @@ final class FloatingPanelTests: XCTestCase {
     }
   }
 
+  /// Validation checks the panel's frame, not its top-centre point: an
+  /// anchor whose panel would hang below the screen's bottom edge falls
+  /// back although the point itself is on screen.
   func testValidatedKeepsAnAnchorOnASecondScreenAndDropsOneOffEveryScreen() {
     let first = CGRect(x: 0, y: 0, width: 1512, height: 944)
     let second = CGRect(x: 1512, y: 0, width: 2560, height: 1415)
     let onSecond = PanelAnchor(topCenter: CGPoint(x: 2800, y: 1400), screenFrame: second)
     XCTAssertEqual(
-      PanelAnchor.validated(onSecond, screens: [first, second], fallback: first), onSecond)
+      PanelAnchor.validated(onSecond, size: bubbleSize, screens: [first, second], fallback: first),
+      onSecond)
     XCTAssertEqual(
-      PanelAnchor.validated(onSecond, screens: [first], fallback: first), .default(in: first),
-      "a saved anchor off every screen falls back")
+      PanelAnchor.validated(onSecond, size: bubbleSize, screens: [first], fallback: first),
+      .default(in: first), "a saved anchor off every screen falls back")
     XCTAssertEqual(
-      PanelAnchor.validated(nil, screens: [first], fallback: first), .default(in: first))
+      PanelAnchor.validated(nil, size: bubbleSize, screens: [first], fallback: first),
+      .default(in: first))
+
+    let nearTheBottom = PanelAnchor(topCenter: CGPoint(x: 756, y: 20), screenFrame: first)
+    XCTAssertEqual(
+      PanelAnchor.validated(nearTheBottom, size: bubbleSize, screens: [first], fallback: first),
+      .default(in: first), "the point is on screen but the 40 pt panel is not")
+    XCTAssertEqual(
+      PanelAnchor.validated(
+        nearTheBottom, size: CGSize(width: 100, height: 20), screens: [first], fallback: first),
+      nearTheBottom, "a shorter panel fits")
+
+    XCTAssertEqual(
+      PanelAnchor.from(
+        frame: CGRect(x: 2716, y: 1360, width: 168, height: 40), screens: [first, second],
+        fallback: first
+      ).screenFrame, second, "a frame on the second screen is described with that screen")
   }
 
   func testAnchorRoundTripsThroughJSON() throws {
@@ -167,45 +187,52 @@ final class FloatingPanelTests: XCTestCase {
 
     let prompt = makePrompt()
     model.apply(.prompt(prompt))
-    XCTAssertEqual(model.state.content, .prompt(prompt))
+    XCTAssertEqual(model.content, .prompt(prompt))
     XCTAssertTrue(host.shownFrames.isEmpty, "nothing to show before the root has measured")
-    let size = CGSize(width: 400, height: 56)
-    model.contentSizeDidChange(size)
+    model.contentSizeDidChange(promptSize)
     let screen = host.currentScreens[0]
-    XCTAssertEqual(host.shownFrames, [PanelAnchor.default(in: screen).frame(for: size)])
-    model.contentSizeDidChange(CGSize(width: 400.4, height: 56))
+    XCTAssertEqual(host.shownFrames, [PanelAnchor.default(in: screen).frame(for: promptSize)])
+    model.contentSizeDidChange(CGSize(width: promptSize.width + 0.4, height: promptSize.height))
     XCTAssertEqual(host.shownFrames.count, 1, "sub-point rounding is not a new size")
 
     model.apply(nil)
     XCTAssertEqual(host.hides, 2)
-    XCTAssertEqual(model.state.content, .prompt(prompt), "the content stays while fading out")
+    XCTAssertEqual(model.content, .prompt(prompt), "the content stays while fading out")
     model.contentSizeDidChange(CGSize(width: 300, height: 56))
     XCTAssertEqual(host.shownFrames.count, 1, "a hidden panel is not shown by a size change")
+
+    // The same content shown again is placed at once at its known size.
+    model.apply(.prompt(prompt))
+    XCTAssertEqual(host.shownFrames.count, 2)
+    XCTAssertEqual(host.shownFrames.last?.size, CGSize(width: 300, height: 56))
   }
 
-  /// The prompt morphs into the bubble at the same top-centre point.
+  /// The prompt morphs into the bubble at the same top-centre point, and
+  /// the window waits for the bubble's size rather than showing the bubble
+  /// in the prompt's frame.
   func testPromptThenBubbleKeepsTheAnchorAndResizes() throws {
     let host = FakePanelHost()
     let model = FloatingPanelModel(host: host, defaults: try makeDefaults())
     model.apply(.prompt(makePrompt()))
-    model.contentSizeDidChange(CGSize(width: 420, height: 56))
+    model.contentSizeDidChange(promptSize)
+    let shownAsPrompt = host.shownFrames.count
     model.apply(.bubble)
-    XCTAssertEqual(model.state.content, .bubble)
-    // Shown at once at the last known size, then re-placed when the bubble
-    // has measured.
-    model.contentSizeDidChange(CGSize(width: 168, height: 40))
-    XCTAssertEqual(host.shownFrames.count, 3)
+    XCTAssertEqual(model.content, .bubble)
+    XCTAssertEqual(host.shownFrames.count, shownAsPrompt, "not re-placed at the prompt's size")
+    model.contentSizeDidChange(bubbleSize)
+    XCTAssertGreaterThanOrEqual(host.shownFrames.count, 2)
     let prompt = host.shownFrames[0]
     let bubble = try XCTUnwrap(host.shownFrames.last)
-    XCTAssertEqual(prompt.size, CGSize(width: 420, height: 56))
-    XCTAssertEqual(bubble.size, CGSize(width: 168, height: 40))
+    XCTAssertEqual(prompt.size, promptSize)
+    XCTAssertEqual(bubble.size, bubbleSize)
     XCTAssertEqual(prompt.midX, bubble.midX)
     XCTAssertEqual(prompt.maxY, bubble.maxY)
 
     // The armed auto-stop row widens the bubble: the same rule re-anchors it.
-    model.contentSizeDidChange(CGSize(width: 420, height: 64))
+    let armedSize = CGSize(width: 420, height: PanelMetrics.bubbleArmedHeight)
+    model.contentSizeDidChange(armedSize)
     let armed = try XCTUnwrap(host.shownFrames.last)
-    XCTAssertEqual(armed.size, CGSize(width: 420, height: 64))
+    XCTAssertEqual(armed.size, armedSize)
     XCTAssertEqual(armed.midX, bubble.midX)
     XCTAssertEqual(armed.maxY, bubble.maxY)
   }
@@ -215,7 +242,7 @@ final class FloatingPanelTests: XCTestCase {
     let host = FakePanelHost()
     let model = FloatingPanelModel(host: host, defaults: defaults)
     model.apply(.bubble)
-    model.contentSizeDidChange(CGSize(width: 168, height: 40))
+    model.contentSizeDidChange(bubbleSize)
 
     // A resize in flight (size differs from the placed one) is not a move.
     model.panelDidMove(to: CGRect(x: 100, y: 100, width: 300, height: 40))
@@ -232,8 +259,8 @@ final class FloatingPanelTests: XCTestCase {
     // A relaunch reads the saved anchor back.
     let again = FloatingPanelModel(host: host, defaults: defaults)
     again.apply(.bubble)
-    again.contentSizeDidChange(CGSize(width: 168, height: 40))
-    XCTAssertEqual(host.shownFrames.last, saved.frame(for: CGSize(width: 168, height: 40)))
+    again.contentSizeDidChange(bubbleSize)
+    XCTAssertEqual(host.shownFrames.last, saved.frame(for: bubbleSize))
   }
 
   /// The saved screen is unplugged mid-call: the bubble comes to the
@@ -247,16 +274,15 @@ final class FloatingPanelTests: XCTestCase {
     let onSecond = PanelAnchor(topCenter: CGPoint(x: 2800, y: 1400), screenFrame: second)
     defaults.set(try JSONEncoder().encode(onSecond), forKey: FloatingPanelModel.anchorKey)
     let model = FloatingPanelModel(host: host, defaults: defaults)
-    let size = CGSize(width: 168, height: 40)
     model.apply(.bubble)
-    model.contentSizeDidChange(size)
-    XCTAssertEqual(host.shownFrames.last, onSecond.frame(for: size))
+    model.contentSizeDidChange(bubbleSize)
+    XCTAssertEqual(host.shownFrames.last, onSecond.frame(for: bubbleSize))
 
     host.currentScreens = [first]
     model.screensDidChange()
     let fallback = PanelAnchor.default(in: first)
     XCTAssertEqual(model.anchor, fallback)
-    XCTAssertEqual(host.shownFrames.last, fallback.frame(for: size))
+    XCTAssertEqual(host.shownFrames.last, fallback.frame(for: bubbleSize))
     let saved = try JSONDecoder().decode(
       PanelAnchor.self, from: try XCTUnwrap(defaults.data(forKey: FloatingPanelModel.anchorKey)))
     XCTAssertEqual(saved, fallback, "the stale anchor is replaced")
@@ -266,6 +292,61 @@ final class FloatingPanelTests: XCTestCase {
     let shown = host.shownFrames.count
     model.screensDidChange()
     XCTAssertEqual(host.shownFrames.count, shown)
+  }
+
+  // MARK: - FloatingPanelPresenter
+
+  /// The presenter over a real controller and the fake host: the prompt
+  /// shows the panel, Record turns it into the bubble and starts the clock,
+  /// stop hides it and holds the clock, and Quit while recording hides it
+  /// again. This is the one test of the observation loop and of the product
+  /// wiring of `RecordingClock`.
+  func testPresenterFollowsTheControllerAndDrivesTheClock() async throws {
+    let manual = ManualClock()
+    let environment = try await TestSupport.environment(clock: manual, seed: false)
+    let controller = AppController(environment: environment, defaults: try makeDefaults())
+    controller.detection.appName = { $0 ?? "?" }
+    await controller.launch()
+    let host = FakePanelHost()
+    let clock = RecordingClock(clock: manual)
+    let presenter = FloatingPanelPresenter(defaults: try makeDefaults(), makeHost: { host })
+    presenter.follow(controller, clock: clock, openMain: {})
+    let model = try XCTUnwrap(presenter.model)
+    XCTAssertNil(model.content, "idle without a prompt shows nothing")
+    let hidesAtLaunch = host.hides
+
+    await controller.detection.handle(.microphoneOpened(bundleID: "com.apple.FaceTime", pid: 7))
+    let prompt = try XCTUnwrap(controller.detection.prompt)
+    await TestSupport.waitUntil("the presenter to show the prompt") {
+      model.content == .prompt(prompt)
+    }
+    XCTAssertTrue(model.wantsShown)
+    model.contentSizeDidChange(promptSize)
+    XCTAssertEqual(host.shownFrames.count, 1)
+    XCTAssertFalse(clock.isTicking)
+
+    await prompt.start()
+    await TestSupport.waitUntil("the prompt to become the bubble") { model.content == .bubble }
+    await TestSupport.waitUntil("the clock to tick") { clock.isTicking }
+    model.contentSizeDidChange(bubbleSize)
+    XCTAssertEqual(host.shownFrames.count, 2)
+    XCTAssertEqual(host.shownFrames.last?.size, bubbleSize)
+    XCTAssertEqual(host.hides, hidesAtLaunch, "the same panel morphs; nothing hides")
+
+    await controller.recorder.stop()
+    await TestSupport.waitUntil("the panel to hide after stop") { host.hides == hidesAtLaunch + 1 }
+    XCTAssertFalse(clock.isTicking)
+    XCTAssertEqual(model.content, .bubble, "the bubble stays for the fade-out")
+
+    // Quit while recording: the bubble shows during the stop and the panel
+    // hides when the recorder is idle again.
+    await controller.recorder.start(mode: .inPerson)
+    await TestSupport.waitUntil("the bubble to return") { host.shownFrames.count >= 3 }
+    await TestSupport.waitUntil("the clock to tick again") { clock.isTicking }
+    await controller.shutdown()
+    await TestSupport.waitUntil("the panel to hide on quit") { host.hides == hidesAtLaunch + 2 }
+    XCTAssertFalse(clock.isTicking)
+    await environment.pipeline.waitUntilIdle()
   }
 
   // MARK: - LiveBarsHistory

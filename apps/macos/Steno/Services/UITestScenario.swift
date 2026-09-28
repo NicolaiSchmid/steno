@@ -22,4 +22,13 @@ struct UITestScenario: Equatable, Sendable {
     showPrompt = flags.contains(Self.showPromptFlag)
     unknownFlags = flags.filter { !Self.knownFlags.contains($0) }
   }
+
+  /// Under `-steno-ui-testing`, the message `AppBootstrap` shows instead of
+  /// the app when a flag is misspelt, so the smoke test's window and its
+  /// screenshot carry the reason. Nil when every flag is known, and outside
+  /// UI testing, where a stray `-steno-*` argument is not ours to judge.
+  var launchError: String? {
+    guard isUITesting, !unknownFlags.isEmpty else { return nil }
+    return "Unknown UI-test flags: \(unknownFlags.joined(separator: ", "))"
+  }
 }

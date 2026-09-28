@@ -26,13 +26,15 @@ final class RecordingClockTests: XCTestCase {
     XCTAssertTrue(armed, "one ticker, armed once")
     XCTAssertEqual(manual.pendingSleepers, 1)
 
+    // The wall the ticker reads drifts from the tick count on purpose: the
+    // clock reads the wall on each tick instead of adding a second.
     var expected = since
-    for second in 1...3 {
-      expected = since.addingTimeInterval(TimeInterval(second))
+    for (tick, offset) in [1.0, 2.7, 3.7].enumerated() {
+      expected = since.addingTimeInterval(offset)
       wall.withLock { $0 = expected }
       manual.advance(by: .seconds(1))
-      await TestSupport.waitUntil("tick \(second)") { clock.now == expected }
-      XCTAssertEqual(clock.elapsed(since: since), TimeInterval(second))
+      await TestSupport.waitUntil("tick \(tick + 1)") { clock.now == expected }
+      XCTAssertEqual(clock.elapsed(since: since), offset, accuracy: 0.001)
       _ = await manual.waitForSleepers(1)
     }
 

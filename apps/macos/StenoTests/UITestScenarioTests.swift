@@ -1,9 +1,9 @@
 import XCTest
 
 /// The launch-argument parser the UI smoke tests rely on: known flags parse,
-/// a misspelt `-steno-*` flag is reported instead of ignored.
+/// a misspelt `-steno-*` flag becomes the launch error the window shows.
 final class UITestScenarioTests: XCTestCase {
-  func testKnownFlagsParse() {
+  func testTheTwoKnownFlagsParse() {
     let none = UITestScenario(arguments: ["/Applications/Steno.app/Contents/MacOS/Steno"])
     XCTAssertFalse(none.isUITesting)
     XCTAssertFalse(none.showPrompt)
@@ -27,5 +27,19 @@ final class UITestScenarioTests: XCTestCase {
     XCTAssertTrue(scenario.isUITesting)
     XCTAssertFalse(scenario.showPrompt)
     XCTAssertEqual(scenario.unknownFlags, ["-steno-show-promt"])
+  }
+
+  /// `AppBootstrap.load()` shows `launchError` instead of the app, so the
+  /// smoke test fails on the reason and not on a later timeout.
+  func testUnknownFlagsBecomeTheLaunchError() {
+    XCTAssertNil(
+      UITestScenario(arguments: ["Steno", "-steno-ui-testing", "-steno-show-prompt"]).launchError)
+    XCTAssertEqual(
+      UITestScenario(arguments: ["Steno", "-steno-ui-testing", "-steno-show-promt", "-steno-x"])
+        .launchError,
+      "Unknown UI-test flags: -steno-show-promt, -steno-x")
+    XCTAssertNil(
+      UITestScenario(arguments: ["Steno", "-steno-show-promt"]).launchError,
+      "outside UI testing a stray flag is not ours to report")
   }
 }

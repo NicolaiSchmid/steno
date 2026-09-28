@@ -576,3 +576,6 @@ Risks and checks (settled by the steps and the manual list, not by the owner):
 Deviations recorded by the 2026-09-28 review of PR #125: `stopNow()` was dropped (no surface in
 either plan calls it; the bubble's and the sidebar's Stop are `stop()`, manual), and
 `testStopNowUsesCallEnded` with it; `RecordingEndReason.failed` was added (decision 9).
+The bubble row landed in PR #126 at 68 pt with "Keep recording" in the first row before the
+stop square and no `Motion.spatial` frame animation; see the floating indicator plan's
+"Deviations (implementation)".

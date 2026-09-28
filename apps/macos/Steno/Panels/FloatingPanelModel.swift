@@ -3,25 +3,22 @@ import Foundation
 import Observation
 import SwiftUI
 
-/// The content the panel's SwiftUI root renders. The model writes it, the
-/// root crossfades between the prompt and the bubble. It keeps the last
-/// content while the panel fades out, so the exit is opacity only.
-@MainActor
-@Observable
-final class FloatingPanelState {
-  var content: FloatingContent?
-}
-
 /// The panel's rules over a `PanelHost`: content resolution, anchor load,
 /// save and re-validation, and the observation-to-apply sequence. Pure over
 /// the host, so anchor persistence and screen changes are unit tests
-/// against a fake. The window's size comes from the SwiftUI root through
-/// `contentSizeDidChange`; the model never asks AppKit to lay out.
+/// against a fake. `content` is what the SwiftUI root renders; the root
+/// observes it and crossfades between the prompt and the bubble. The
+/// window's size comes from that root through `contentSizeDidChange`,
+/// never from AppKit layout: the plan's `NSHostingController` with
+/// `preferredContentSize` re-entered layout and hung the main thread for
+/// 30 s on the hosted runner once the bubble appeared.
 @MainActor
+@Observable
 final class FloatingPanelModel {
   static let anchorKey = "steno.floatingPanel.anchor"
 
-  let state = FloatingPanelState()
+  /// Kept while the panel fades out, so the exit is opacity only.
+  private(set) var content: FloatingContent?
   private let host: any PanelHost
   private let defaults: UserDefaults
   private(set) var anchor: PanelAnchor?
@@ -37,17 +34,30 @@ final class FloatingPanelModel {
 
   private var fallbackScreen: CGRect { host.currentScreens.first ?? .zero }
 
-  /// The anchor to lay out from: the saved one while it lies on a current
-  /// screen, else the default on the main screen.
+  /// The size the anchor is validated against before the root has measured:
+  /// a one-point-wide bubble row, so the vertical extent is what counts
+  /// (a zero-width rectangle is empty and `contains` would accept it
+  /// anywhere).
+  private var validationSize: CGSize {
+    lastSize ?? CGSize(width: 1, height: PanelMetrics.bubbleHeight)
+  }
+
+  /// The anchor to lay out from: the saved one while a panel there lies on
+  /// a current screen, else the default on the main screen.
   func currentAnchor() -> PanelAnchor {
     let resolved = PanelAnchor.validated(
-      anchor ?? loadAnchor(), screens: host.currentScreens, fallback: fallbackScreen)
+      anchor ?? loadAnchor(), size: validationSize, screens: host.currentScreens,
+      fallback: fallbackScreen)
     anchor = resolved
     return resolved
   }
 
-  /// Nil hides the panel; content shows it at the anchor as soon as its
-  /// size is known (at once when the root has measured before).
+  /// Nil hides the panel. Content shows it at the anchor once its size is
+  /// known: at once when the same content was measured before, otherwise
+  /// when the root reports the new content's size, so the window never
+  /// sits at the previous content's frame (a content change forgets the
+  /// last size; the recorder's `.starting` to `.recording` step arrives
+  /// before the bubble has measured).
   func apply(_ content: FloatingContent?) {
     guard let content else {
       wantsShown = false
@@ -55,8 +65,10 @@ final class FloatingPanelModel {
       return
     }
     wantsShown = true
-    if state.content != content {
-      state.content = content
+    if self.content != content {
+      self.content = content
+      lastSize = nil
+      return
     }
     if let lastSize { place(size: lastSize) }
   }
@@ -120,19 +132,24 @@ final class FloatingPanelModel {
 /// `FloatingContent.resolve`. The tracking is one-shot and `onChange` runs on
 /// whichever thread performed the mutation, so every change hops back to the
 /// main actor and re-registers. The same observation drives the shared
-/// `RecordingClock`. The panel is created in `follow`, after launch, and
-/// ordered in on the first non-hidden content.
+/// `RecordingClock`. The host is created in `follow`, after launch, and
+/// ordered in on the first non-hidden content; the tests inject a fake.
 @MainActor
 final class FloatingPanelPresenter {
   private let defaults: UserDefaults
-  private var panel: FloatingPanel?
-  private var model: FloatingPanelModel?
+  private let makeHost: @MainActor () -> any PanelHost
+  private var host: (any PanelHost)?
+  private(set) var model: FloatingPanelModel?
   private var controller: AppController?
   private var clock: RecordingClock?
   private var observers: [any NSObjectProtocol] = []
 
-  init(defaults: UserDefaults = .standard) {
+  init(
+    defaults: UserDefaults = .standard,
+    makeHost: @escaping @MainActor () -> any PanelHost = { FloatingPanel() }
+  ) {
     self.defaults = defaults
+    self.makeHost = makeHost
   }
 
   /// Starts following the controller. `openMain` opens the main window; it
@@ -145,24 +162,26 @@ final class FloatingPanelPresenter {
     guard self.controller == nil else { return }
     self.controller = controller
     self.clock = clock
-    let panel = FloatingPanel()
-    let model = FloatingPanelModel(host: panel, defaults: defaults)
-    self.panel = panel
+    let host = makeHost()
+    let model = FloatingPanelModel(host: host, defaults: defaults)
+    self.host = host
     self.model = model
-    panel.setContent(
+    host.setContent(
       AnyView(
         FloatingPanelRoot(
-          state: model.state, controller: controller, clock: clock, openMain: openMain,
+          model: model, controller: controller, clock: clock, openMain: openMain,
           onSize: { [weak model] size in
             // Off the layout pass: the window frame changes on the next turn.
             Task { @MainActor [weak model] in model?.contentSizeDidChange(size) }
           })))
     let center = NotificationCenter.default
-    observers.append(
-      center.addObserver(forName: NSWindow.didMoveNotification, object: panel, queue: .main) {
-        [weak self] _ in
-        Task { @MainActor [weak self] in self?.panelDidMove() }
-      })
+    if let window = host as? NSWindow {
+      observers.append(
+        center.addObserver(forName: NSWindow.didMoveNotification, object: window, queue: .main) {
+          [weak self] _ in
+          Task { @MainActor [weak self] in self?.panelDidMove() }
+        })
+    }
     observers.append(
       center.addObserver(
         forName: NSApplication.didChangeScreenParametersNotification, object: nil, queue: .main
@@ -186,8 +205,8 @@ final class FloatingPanelPresenter {
   }
 
   private func panelDidMove() {
-    guard let panel, let model else { return }
-    model.panelDidMove(to: panel.frame)
+    guard let window = host as? NSWindow, let model else { return }
+    model.panelDidMove(to: window.frame)
   }
 }
 
@@ -196,7 +215,7 @@ final class FloatingPanelPresenter {
 /// Motion), pinned to the window's top-leading corner. It reports its size
 /// through `onSize`, which is how the window gets its frame.
 struct FloatingPanelRoot: View {
-  let state: FloatingPanelState
+  let model: FloatingPanelModel
   let controller: AppController
   let clock: RecordingClock
   let openMain: @MainActor () -> Void
@@ -205,10 +224,10 @@ struct FloatingPanelRoot: View {
 
   var body: some View {
     ZStack {
-      switch state.content {
-      case .prompt(let model):
-        DetectionPromptView(model: model)
-          .id(model.id)
+      switch model.content {
+      case .prompt(let prompt):
+        DetectionPromptView(model: prompt)
+          .id(prompt.id)
           .transition(.opacity)
       case .bubble:
         RecordingBubbleView(controller: controller, clock: clock, openMain: openMain)
@@ -217,7 +236,7 @@ struct FloatingPanelRoot: View {
         EmptyView()
       }
     }
-    .animation(Motion.swap(reduceMotion: reduceMotion), value: state.content)
+    .animation(Motion.swap(reduceMotion: reduceMotion), value: model.content)
     .fixedSize()
     .onGeometryChange(for: CGSize.self) { proxy in
       proxy.size

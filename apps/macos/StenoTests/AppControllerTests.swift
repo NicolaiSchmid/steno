@@ -406,9 +406,6 @@ final class AppControllerTests: XCTestCase {
     await controller.launch()
     await controller.recorder.start(mode: .inPerson)
     XCTAssertTrue(controller.recorder.isRecording)
-    // The "Finishing…" bubble during Quit: the panel shows the bubble for
-    // `.stopping`, which `shutdown()` passes through.
-    XCTAssertEqual(FloatingContent.resolve(prompt: nil, recording: .stopping), .bubble)
 
     await controller.shutdown()
     XCTAssertEqual(controller.recorder.recording, .idle)

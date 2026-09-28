@@ -4,8 +4,14 @@ import Observation
 /// One ticking clock for the surfaces outside the main window (the floating
 /// bubble, the menu bar label): `now` advances once a second on the injected
 /// clock while the recorder is `.recording`, and holds otherwise. The views
-/// read `now` and re-render through observation, so no view owns a timer
-/// and no `TimelineView` runs inside a panel or a status item.
+/// read `now` and re-render through observation, so no view owns a timer.
+///
+/// Why this exists beside `ElapsedText` (`Recording/RecordingViews.swift`),
+/// which ticks from a `TimelineView`: a `TimelineView` inside the floating
+/// panel and the status item coincided with a 30 s main-thread hang on the
+/// hosted runner (the `preferredContentSize` sizing changed in the same
+/// commit, so the attribution is not isolated). The window keeps
+/// `ElapsedText`; the panel and the menu bar label tick from here.
 @MainActor
 @Observable
 final class RecordingClock {

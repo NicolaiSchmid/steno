@@ -5,7 +5,9 @@ import SwiftUI
 /// reports the screens. `FloatingPanel` is the product conformance; the
 /// tests use a fake. The content's size reaches the model from SwiftUI
 /// (`FloatingPanelRoot` measures itself), never from AppKit layout, so the
-/// window is sized in exactly one place.
+/// window is sized in exactly one place: letting `NSHostingController` size
+/// the window through `preferredContentSize` re-entered layout and hung the
+/// main thread for 30 s on the hosted runner.
 @MainActor
 protocol PanelHost: AnyObject {
   /// The visible frames of the current screens, the main screen first.
@@ -20,8 +22,9 @@ protocol PanelHost: AnyObject {
 /// and never activates Steno; the user drags it by its background. The
 /// window shadow is the one shadow the "hairlines, not shadows" rule does
 /// not cover: a floating panel over arbitrary content needs separation.
-/// The hosting view fills the window; the model sets the window's frame
-/// from the size the SwiftUI root reports.
+/// The hosting view fills the window with `sizingOptions = []`, so AppKit
+/// never asks SwiftUI for a size; the model sets the window's frame from the
+/// size the SwiftUI root reports.
 @MainActor
 final class FloatingPanel: NSPanel, PanelHost {
   private var hosting: NSHostingView<AnyView>?
@@ -33,7 +36,7 @@ final class FloatingPanel: NSPanel, PanelHost {
 
   init() {
     super.init(
-      contentRect: NSRect(x: 0, y: 0, width: 200, height: Theme.Control.ctaHeight),
+      contentRect: NSRect(x: 0, y: 0, width: 200, height: PanelMetrics.bubbleHeight),
       styleMask: [.nonactivatingPanel, .borderless], backing: .buffered, defer: false)
     level = .floating
     collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary]

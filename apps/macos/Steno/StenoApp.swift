@@ -51,9 +51,10 @@ struct StenoApp: App {
 }
 
 /// Builds the environment once and holds the controller and the floating
-/// panel presenter for the app's lifetime. `openMain` is installed by a view
-/// inside a scene (`RootView`, `MenuBarLabel`), because the panel's content
-/// is outside every scene and an `openWindow` read there does nothing.
+/// panel presenter for the app's lifetime. `openMain` is installed by
+/// `MenuBarLabel`, a view inside the one scene that is never torn down,
+/// because the panel's content is outside every scene and an `openWindow`
+/// read there does nothing.
 @MainActor
 @Observable
 final class AppBootstrap {
@@ -78,6 +79,10 @@ final class AppBootstrap {
     guard controller == nil, !loading else { return }
     loading = true
     defer { loading = false }
+    if let launchError = Self.scenario.launchError {
+      self.error = launchError
+      return
+    }
     do {
       let environment: AppEnvironment
       if Self.isUITesting {
@@ -100,7 +105,9 @@ final class AppBootstrap {
 }
 
 /// Installs the scene's `openWindow` as `AppBootstrap.openMain`, so the
-/// floating bubble can bring the main window forward.
+/// floating bubble can bring the main window forward. Applied from the
+/// `MenuBarExtra` label only: a `Window` scene's `openWindow` would be the
+/// last writer and that window is the one the user closes.
 struct OpenMainInstaller: ViewModifier {
   let bootstrap: AppBootstrap
   @Environment(\.openWindow) private var openWindow
@@ -113,6 +120,13 @@ struct OpenMainInstaller: ViewModifier {
         NSApp.activate()
       }
     }
+  }
+}
+
+extension View {
+  /// Installs this scene's `openWindow` as `bootstrap.openMain`.
+  func installsOpenMain(_ bootstrap: AppBootstrap) -> some View {
+    modifier(OpenMainInstaller(bootstrap: bootstrap))
   }
 }
 
@@ -134,7 +148,6 @@ struct RootView<Content: View>: View {
           .frame(minWidth: 320, minHeight: 120)
       }
     }
-    .modifier(OpenMainInstaller(bootstrap: bootstrap))
   }
 
   private func failure(_ error: String) -> some View {
@@ -158,7 +171,7 @@ struct MenuBarLabel: View {
   var body: some View {
     let state = bootstrap.controller?.recorder.recording ?? .idle
     label(MenuBarLabelPresentation.make(state: state, now: bootstrap.clock.now))
-      .modifier(OpenMainInstaller(bootstrap: bootstrap))
+      .installsOpenMain(bootstrap)
   }
 
   private func label(_ presentation: MenuBarLabelPresentation) -> some View {

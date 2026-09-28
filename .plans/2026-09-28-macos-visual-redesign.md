@@ -419,14 +419,17 @@ hover `card`, whole row hittable. Footer text buttons 13 `muted`, hover `strong`
 
 **Detection prompt and recording bubble**: already restyled by
 `2026-09-28-floating-recording-indicator.md` (`Panels/`); they inherit the button styles
-through the shared components and nothing else here touches them.
+through the shared components and nothing else here touches them. The menu bar label and the
+bubble tick from that plan's `RecordingClock`, not from a `TimelineView` (see its
+"Deviations (implementation)").
 
 ### Recording and processing states
 
 One line of copy per state, one visual per state, the same words in the list entry, the
-detail header and the tab bodies. Elapsed time comes from
+detail header and the tab bodies. Elapsed time in the window comes from
 `RecordingController.recording` (`.recording(since:)`) through a `TimelineView` at 1 s,
-as `MenuBarView.swift:54-58` does today; processing stage names come from
+as `MenuBarView.swift:54-58` does today (the floating bubble and the menu bar label read
+the shared `RecordingClock` instead); processing stage names come from
 `PipelineStage.label` (`Labels.swift:17-33`) via the queue the menu bar already reads.
 The `.ready` rows come verbatim from the onboarding plan and are selected by
 `MeetingDetailViewModel.summaryStatus`, not by `Meeting.state`; that plan owns their copy.
