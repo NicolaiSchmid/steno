@@ -92,9 +92,12 @@ final class AppIconTests: XCTestCase {
     let data = try Data(contentsOf: icns)
     XCTAssertEqual(String(decoding: data.prefix(4), as: UTF8.self), "icns", "icns magic bytes")
     // The container is a list of (4-byte type, 4-byte big-endian length)
-    // elements after the 8-byte header. `ic10` is the 512@2x (1024 px)
-    // image. Read from the bytes rather than `NSImage.representations`, which
-    // lists only the point sizes of an icns, not every element.
+    // elements after the 8-byte header. A Debug build's actool thins the
+    // icns to the elements the build machine's displays need (ic04, ic11,
+    // ic07 and ic13 on CI: 16, 32, 128 and 256 px); only a Release archive
+    // carries all ten, so the pixel sizes are checked against the committed
+    // set above and this test asks only for a real icns with image elements,
+    // not the empty one an appiconset without files compiles to.
     var types: [String] = []
     var offset = 8
     while offset + 8 <= data.count {
@@ -104,8 +107,14 @@ final class AppIconTests: XCTestCase {
       types.append(type)
       offset += length
     }
-    XCTAssertTrue(types.contains("ic10"), "the 512@2x (1024 px) element is present: \(types)")
-    XCTAssertNotNil(NSImage(contentsOf: icns), "AppIcon.icns decodes")
+    let imageTypes: Set<String> = [
+      "ic04", "ic05", "icp4", "icp5", "icp6", "ic07", "ic08", "ic09", "ic10", "ic11", "ic12",
+      "ic13", "ic14", "is32", "il32", "ih32", "it32",
+    ]
+    XCTAssertFalse(
+      types.filter(imageTypes.contains).isEmpty, "the icns carries image elements: \(types)")
+    let image = try XCTUnwrap(NSImage(contentsOf: icns), "AppIcon.icns decodes")
+    XCTAssertFalse(image.representations.isEmpty, "AppIcon.icns has at least one representation")
   }
 
   /// The SVG is the source of truth and `make-app-icon.sh` writes its digest
