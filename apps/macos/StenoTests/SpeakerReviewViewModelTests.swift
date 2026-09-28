@@ -219,7 +219,7 @@ final class SpeakerReviewViewModelTests: XCTestCase {
       model.displayName(card.speaker), "Jérôme", "a suggested speaker reads as the person")
   }
 
-  func testConfirmEnrolsExactlyOnceAndFinishNeverEnrols() async throws {
+  func testConfirmRecomputesTheVoiceAndFinishNeverTouchesIt() async throws {
     let environment = try await TestSupport.environment()
     let model = try await makeModel(environment)
     let before = try await environment.store.person(id: SampleData.personJeromeID)
@@ -228,22 +228,21 @@ final class SpeakerReviewViewModelTests: XCTestCase {
     await model.acceptSuggestion(SampleData.speakerTwoID)
     XCTAssertNil(model.error, model.error ?? "")
     var jerome = try await environment.store.person(id: SampleData.personJeromeID)
-    XCTAssertEqual(jerome?.sampleCount, 2, "one confirm, one enrolment")
+    XCTAssertEqual(
+      jerome?.sampleCount, 1, "the voice is recomputed from his one confirmed speaker")
 
     await model.acceptSuggestion(SampleData.speakerTwoID)
     let person = try XCTUnwrap(jerome)
     await model.assign(SampleData.speakerTwoID, person: person)
     await model.name(SampleData.speakerTwoID, "Jérôme")
     jerome = try await environment.store.person(id: SampleData.personJeromeID)
-    XCTAssertEqual(
-      jerome?.sampleCount, 2,
-      "a confirmed speaker has no card, so the sheet cannot confirm it again")
+    XCTAssertEqual(jerome?.sampleCount, 1, "confirming the same person again changes nothing")
     XCTAssertNil(model.error, model.error ?? "")
 
     await model.finish()
     await model.finish()
     jerome = try await environment.store.person(id: SampleData.personJeromeID)
-    XCTAssertEqual(jerome?.sampleCount, 2, "finish re-exports, it does not enrol")
+    XCTAssertEqual(jerome?.sampleCount, 1, "finish re-exports, it does not touch the voice")
     XCTAssertTrue(model.didChange)
   }
 
