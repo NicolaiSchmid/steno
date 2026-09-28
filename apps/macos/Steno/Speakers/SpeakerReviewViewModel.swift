@@ -164,9 +164,13 @@ final class SpeakerReviewViewModel {
   /// `MeetingStore.resolvePerson` finds or creates for the name and email.
   func assign(_ id: UUID, attendee: Participant) async {
     do {
-      let person =
-        try await attendee.personID.flatMap(person(id:))
-        ?? store.resolvePerson(named: attendee.displayName, email: attendee.email, now: now())
+      let person: Person
+      if let known = attendee.personID.flatMap(person(id:)) {
+        person = known
+      } else {
+        person = try await store.resolvePerson(
+          named: attendee.displayName, email: attendee.email, now: now())
+      }
       await confirm(id, person: person)
     } catch {
       self.error = "Speaker could not be assigned: \(error)"
