@@ -4,7 +4,9 @@ import Testing
 @testable import StenoCore
 
 /// A pipeline over an in-memory store, temp audio folder and every fake,
-/// with hooks to swap single dependencies.
+/// with hooks to swap single dependencies. `cleaner` and `summarizer` are
+/// optional the way `PipelineDependencies` has them: pass nil for the
+/// "no LLM endpoint" case.
 struct PipelineHarness {
   let directory: URL
   let store: MeetingStore
@@ -13,8 +15,8 @@ struct PipelineHarness {
   let engine: FakeSpeechEngine
   let diarizer: FakeDiarizer
   let memory: InMemorySpeakerMemory
-  let cleaner: any TranscriptCleaner
-  let summarizer: FakeSummarizer
+  let cleaner: (any TranscriptCleaner)?
+  let summarizer: FakeSummarizer?
   let destination: FakeDestination
   let dispatcher: FakeDeliveryDispatcher
   let pipeline: ProcessingPipeline
@@ -26,8 +28,8 @@ struct PipelineHarness {
     engine: FakeSpeechEngine = FakeSpeechEngine(),
     diarizer: FakeDiarizer = FakeDiarizer(),
     memory: InMemorySpeakerMemory = InMemorySpeakerMemory(people: SampleData.persons()),
-    cleaner: any TranscriptCleaner = PassthroughCleaner(),
-    summarizer: FakeSummarizer = FakeSummarizer(),
+    cleaner: (any TranscriptCleaner)? = PassthroughCleaner(),
+    summarizer: FakeSummarizer? = FakeSummarizer(),
     retention: AudioRetention = .keepDays(30),
     failDeliveriesUntil: Int = 0,
     sharedStore: MeetingStore? = nil

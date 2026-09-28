@@ -297,7 +297,7 @@ struct LLMSettingsView: View {
           MessageRow(
             kind: .info,
             text:
-              "No endpoint configured: summaries use a placeholder until a base URL and model are saved."
+              "No endpoint configured: cleanup and summary are skipped until a base URL and model are saved."
           )
         }
         switch model.testResult {

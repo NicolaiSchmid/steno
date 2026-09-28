@@ -155,6 +155,72 @@ final class MeetingDetailViewModelTests: XCTestCase {
         atPath: vault.appendingPathComponent("Meetings").path), "the vault received the folder")
   }
 
+  /// A vault for the obsidian destination, so `redeliver` has somewhere to
+  /// deliver.
+  private func configureVault(_ environment: AppEnvironment) async throws -> URL {
+    let vault = try TestSupport.temporaryDirectory("steno-vault")
+    var settings = try await environment.settings.load()
+    settings.obsidian = ObsidianSettings(
+      vaultPath: vault.path, peopleFolder: nil, includeAudio: false, taskTag: nil)
+    try await environment.settings.save(settings)
+    return vault
+  }
+
+  /// Two speaker changes, then the popover closes: one re-export.
+  func testClosingThePickerRedeliversOnceAfterChanges() async throws {
+    let environment = try await TestSupport.environment()
+    let vault = try await configureVault(environment)
+    defer { try? FileManager.default.removeItem(at: vault) }
+    let model = await makeModel(environment)
+
+    await model.speakers.select(
+      SpeakerOptions.Option(kind: .person(SampleData.persons()[0])), for: SampleData.speakerTwoID)
+    await model.speakers.select(
+      SpeakerOptions.Option(kind: .create("Anna")), for: SampleData.speakerTwoID)
+    XCTAssertNil(model.speakers.error, model.speakers.error ?? "")
+    XCTAssertTrue(model.speakersDirty)
+    XCTAssertTrue(model.deliveries.isEmpty, "nothing is exported while the popover is open")
+
+    await model.pickerClosed()
+    await TestSupport.waitUntil("delivered on close") {
+      model.deliveries.first?.status == .delivered
+    }
+    XCTAssertEqual(model.deliveries.count, 1)
+    XCTAssertFalse(model.speakersDirty)
+    XCTAssertTrue(
+      FileManager.default.fileExists(atPath: vault.appendingPathComponent("Meetings").path))
+  }
+
+  func testClosingWithoutChangesDoesNotRedeliver() async throws {
+    let environment = try await TestSupport.environment()
+    let vault = try await configureVault(environment)
+    defer { try? FileManager.default.removeItem(at: vault) }
+    let model = await makeModel(environment)
+
+    await model.pickerClosed()
+    await TestSupport.settle()
+    try await Task.sleep(for: .milliseconds(100))
+    XCTAssertTrue(model.deliveries.isEmpty)
+    XCTAssertFalse(model.speakersDirty)
+  }
+
+  func testDisappearFlushesAPendingRedeliver() async throws {
+    let environment = try await TestSupport.environment()
+    let vault = try await configureVault(environment)
+    defer { try? FileManager.default.removeItem(at: vault) }
+    let model = await makeModel(environment)
+    await model.speakers.select(
+      SpeakerOptions.Option(kind: .person(SampleData.persons()[0])), for: SampleData.speakerTwoID)
+    XCTAssertTrue(model.speakersDirty)
+
+    model.viewDisappeared()
+    XCTAssertFalse(model.speakersDirty)
+    await TestSupport.waitUntil("delivered after the view went away") {
+      (try? await environment.store.deliveries(meetingID: SampleData.meetingID))?.first?.status
+        == .delivered
+    }
+  }
+
   func testKeepAudioTogglesRetention() async throws {
     let environment = try await TestSupport.environment()
     try await environment.updateSettings { $0.defaultRetention = .keepDays(7) }

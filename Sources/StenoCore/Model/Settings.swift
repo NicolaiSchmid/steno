@@ -3,7 +3,7 @@ import Foundation
 /// The one settings type, persisted by `SettingsStore` as one row per property
 /// in the `setting` table. API keys never live here; see `SecretStore`.
 public struct Settings: Codable, Sendable, Equatable, Hashable {
-  /// Where recordings live; the user picks it in onboarding.
+  /// Where recordings live; the user changes it in Settings > Audio.
   public var audioFolder: URL
   /// `.keepForever` for a new install: deletion is irreversible and the
   /// Audio tab shows the disk cost next to the choice. A stored row wins.
