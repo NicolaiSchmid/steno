@@ -81,32 +81,35 @@ struct SpeakerPicker: View {
         set: { text in
           state.queryChanged(text)
           refresh()
-        }))
-      .textFieldStyle(.plain)
-      .font(.steno(Theme.TextSize.sm))
-      .padding(.horizontal, Theme.Space.sm)
-      .padding(.vertical, Theme.Space.xs + 2)
-      .background(
-        RoundedRectangle(cornerRadius: Theme.Space.radiusSmall, style: .continuous)
-          .fill(Color.stenoSecondary))
-      .overlay(
-        RoundedRectangle(cornerRadius: Theme.Space.radiusSmall, style: .continuous)
-          .strokeBorder(Color.stenoRing, lineWidth: Theme.Space.hairline))
-      .focused($fieldFocused)
-      .onSubmit { commit() }
-      .onKeyPress(.downArrow) {
-        state.move(.down)
-        return .handled
-      }
-      .onKeyPress(.upArrow) {
-        state.move(.up)
-        return .handled
-      }
-      .onKeyPress(.escape) {
-        isExpanded = false
-        return .handled
-      }
-      .accessibilityIdentifier("speaker-field-\(speakerID.uuidString)")
+        })
+    )
+    .textFieldStyle(.plain)
+    .font(.steno(Theme.TextSize.sm))
+    .padding(.horizontal, Theme.Space.sm)
+    .padding(.vertical, Theme.Space.xs + 2)
+    .background(
+      RoundedRectangle(cornerRadius: Theme.Space.radiusSmall, style: .continuous)
+        .fill(Color.stenoSecondary)
+    )
+    .overlay(
+      RoundedRectangle(cornerRadius: Theme.Space.radiusSmall, style: .continuous)
+        .strokeBorder(Color.stenoRing, lineWidth: Theme.Space.hairline)
+    )
+    .focused($fieldFocused)
+    .onSubmit { commit() }
+    .onKeyPress(.downArrow) {
+      state.move(.down)
+      return .handled
+    }
+    .onKeyPress(.upArrow) {
+      state.move(.up)
+      return .handled
+    }
+    .onKeyPress(.escape) {
+      isExpanded = false
+      return .handled
+    }
+    .accessibilityIdentifier("speaker-field-\(speakerID.uuidString)")
   }
 
   private var optionList: some View {
@@ -156,7 +159,8 @@ struct SpeakerPicker: View {
     .frame(height: 24)
     .background(
       RoundedRectangle(cornerRadius: Theme.Space.radiusSmall, style: .continuous)
-        .fill(highlighted ? Color.stenoSecondary : Color.clear))
+        .fill(highlighted ? Color.stenoSecondary : Color.clear)
+    )
     .contentShape(Rectangle())
   }
 

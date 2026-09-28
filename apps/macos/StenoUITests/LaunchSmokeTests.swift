@@ -41,5 +41,28 @@ final class LaunchSmokeTests: XCTestCase {
       button.click()
       XCTAssertTrue(expectation.check(), "tab \(expectation.tab) content missing")
     }
+
+    // Speakers: the header row names the confirmed speaker and counts the
+    // unnamed one; its popover lists both, and the unnamed speaker's picker
+    // opens pre-filled with the suggested name. Ids are SampleData's
+    // `uuid(20)` and `uuid(21)`.
+    let speakersRow = app.buttons["speakers-row"].firstMatch
+    XCTAssertTrue(speakersRow.waitForExistence(timeout: 10), "no speakers row")
+    XCTAssertTrue(speakersRow.label.contains("Nicolai"), speakersRow.label)
+    XCTAssertTrue(speakersRow.label.contains("1 to confirm"), speakersRow.label)
+    speakersRow.click()
+    XCTAssertTrue(app.popovers.firstMatch.waitForExistence(timeout: 10), "no speakers popover")
+    let speakerOne = "00000000-0000-0000-0000-000000000014"
+    let speakerTwo = "00000000-0000-0000-0000-000000000015"
+    let firstPicker = app.buttons["speaker-picker-\(speakerOne)"].firstMatch
+    XCTAssertTrue(firstPicker.waitForExistence(timeout: 5), "Speaker 1 row missing")
+    XCTAssertTrue(firstPicker.label.contains("Nicolai"), firstPicker.label)
+    let secondPicker = app.buttons["speaker-picker-\(speakerTwo)"].firstMatch
+    XCTAssertTrue(secondPicker.waitForExistence(timeout: 5), "Speaker 2 row missing")
+    secondPicker.click()
+    let field = app.textFields["speaker-field-\(speakerTwo)"].firstMatch
+    XCTAssertTrue(field.waitForExistence(timeout: 5), "the picker field did not open")
+    XCTAssertEqual(field.value as? String, "Jérôme", "pre-filled with the suggested name")
+    app.typeKey(.escape, modifierFlags: [])
   }
 }
