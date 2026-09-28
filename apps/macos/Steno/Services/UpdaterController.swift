@@ -15,8 +15,8 @@ final class UpdaterController: NSObject, UpdaterControlling, SPUUpdaterDelegate 
   /// local appcast spike.
   nonisolated static let feedOverrideKey = "STENO_FEED_URL"
 
-  private static let sparkleErrorDomain = "SUSparkleErrorDomain"
-  private static let noUpdateErrorCode = 1001
+  private nonisolated static let sparkleErrorDomain = "SUSparkleErrorDomain"
+  private nonisolated static let noUpdateErrorCode = 1001
 
   @ObservationIgnored private var controller: SPUStandardUpdaterController?
   private(set) var lastOutcome: UpdateCheckOutcome = .notChecked
