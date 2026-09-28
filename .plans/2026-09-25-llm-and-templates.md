@@ -81,7 +81,7 @@ public; ours below.
 6. Output language is `Meeting.language` (elected by the core pipeline from tagged segments; fallback
    English); the model writes headings in that language from the English template heading.
 7. Speaker names are suggestions with confidence and evidence. StenoLLM never renames a `Speaker`;
-   the review sheet prefills from them.
+   the speaker picker (inline since 2026-09-28) offers them as an option tagged "Mentioned".
 8. `SummaryOutput.usage` and `CleanupOutput.usage` sum `usage` over every call of a meeting; the
    pipeline stores the total on `Meeting.llmUsage`.
 9. The API key is never part of a `Codable` value: `LLMEndpoint` carries URL, model and limits only;
@@ -339,8 +339,8 @@ script removed; any `Codable` type gaining an `apiKey` property.
 - Adapters (`Destination`): render the summary through core's `SummaryMarkdown` (headings start at
   level 2); use `MeetingTask.assigneeName` when `assigneePersonID` is nil.
 - macOS app (`SecretStore`): API key from Keychain into `OpenAICompatibleClient.init`; settings UI for
-  base URL, model, context tokens; review sheet prefills from `SpeakerNameSuggestion`; renaming a
-  speaker re-exports (no LLM re-run).
+  base URL, model, context tokens; the speaker picker offers `SpeakerNameSuggestion` as an option;
+  renaming a speaker re-exports (no LLM re-run).
 
 ## Deferred
 

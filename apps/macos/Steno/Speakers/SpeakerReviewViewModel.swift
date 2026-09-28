@@ -4,9 +4,9 @@ import StenoCore
 /// The speaker review sheet: every speaker whose assignment is `.unknown`
 /// or `.suggested`, with its clip, cosine candidates from `SpeakerMemory`
 /// and the calendar participants as name suggestions. Naming and assigning
-/// go through `MeetingStore.confirm(speakerID:person:memory:)` (the one
-/// operation that enrols and deletes the clip); `finish()` re-exports once,
-/// and only when something changed.
+/// go through `MeetingStore.confirm(speakerID:person:)` (the one operation
+/// that confirms and recomputes the voice); `finish()` re-exports once, and
+/// only when something changed.
 @MainActor
 @Observable
 final class SpeakerReviewViewModel {
@@ -141,15 +141,17 @@ final class SpeakerReviewViewModel {
 
   // MARK: - Naming and assignment
 
-  /// A new person with this name (or the existing person of the same name)
-  /// confirmed for the speaker.
+  /// A new person with this name (or the existing person of the same name,
+  /// matched by `MeetingStore.resolvePerson`) confirmed for the speaker.
   func name(_ id: UUID, _ name: String) async {
     let trimmed = name.trimmingCharacters(in: .whitespaces)
     guard !trimmed.isEmpty else { return }
-    let person =
-      knownPeople.first { $0.displayName.caseInsensitiveCompare(trimmed) == .orderedSame }
-      ?? Person(id: UUID(), displayName: trimmed, sampleCount: 0, createdAt: now())
-    await confirm(id, person: person)
+    do {
+      let person = try await store.resolvePerson(named: trimmed, now: now())
+      await confirm(id, person: person)
+    } catch {
+      self.error = "Speaker could not be named: \(error)"
+    }
   }
 
   /// The card's typed draft name, confirmed.
@@ -157,17 +159,22 @@ final class SpeakerReviewViewModel {
     await name(id, draftNames[id] ?? "")
   }
 
-  /// A calendar attendee becomes (or reuses) a person and is confirmed.
+  /// A calendar attendee becomes (or reuses) a person and is confirmed: the
+  /// attendee's linked person when there is one, else whoever
+  /// `MeetingStore.resolvePerson` finds or creates for the name and email.
   func assign(_ id: UUID, attendee: Participant) async {
-    let person =
-      attendee.personID.flatMap(person(id:))
-      ?? knownPeople.first {
-        $0.displayName.caseInsensitiveCompare(attendee.displayName) == .orderedSame
+    do {
+      let person: Person
+      if let known = attendee.personID.flatMap(person(id:)) {
+        person = known
+      } else {
+        person = try await store.resolvePerson(
+          named: attendee.displayName, email: attendee.email, now: now())
       }
-      ?? Person(
-        id: UUID(), displayName: attendee.displayName, email: attendee.email, sampleCount: 0,
-        createdAt: now())
-    await confirm(id, person: person)
+      await confirm(id, person: person)
+    } catch {
+      self.error = "Speaker could not be assigned: \(error)"
+    }
   }
 
   func assign(_ id: UUID, person: Person) async {
@@ -181,12 +188,11 @@ final class SpeakerReviewViewModel {
     await confirm(id, person: match.person)
   }
 
-  /// Only a speaker the sheet still shows can be confirmed: a second
-  /// confirmation of the same speaker would enrol the embedding twice.
+  /// Only a speaker the sheet still shows can be confirmed.
   private func confirm(_ id: UUID, person: Person) async {
     guard cards.contains(where: { $0.id == id }) else { return }
     do {
-      try await store.confirm(speakerID: id, person: person, memory: memory)
+      try await store.confirm(speakerID: id, person: person)
       didChange = true
       await reload()
     } catch {

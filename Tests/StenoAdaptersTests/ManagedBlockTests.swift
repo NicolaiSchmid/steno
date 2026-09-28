@@ -95,6 +95,73 @@ import Testing
       ManagedBlock.merge(newer, meetingID: SampleData.uuid(8), into: again) == again, "idempotent")
   }
 
+  @Test func removeDropsOnlyThisMeetingsLineAndKeepsBytesOutside() {
+    let older =
+      "- 2026-08-01 [[2026-08-01-kickoff|Kickoff]] %%steno:00000000-0000-0000-0000-000000000009%%"
+    let newer =
+      "- 2026-10-02 [[2026-10-02-retro|Retro]] %%steno:00000000-0000-0000-0000-000000000008%%"
+    let page = """
+      ---
+      steno_person_id: "00000000-0000-0000-0000-00000000000a"
+      type: "person"
+      ---
+      # Anna Müller
+
+      Her notes above the block.
+      <!-- steno:meetings:start -->
+      \(newer)
+      \(line)
+      \(older)
+      <!-- steno:meetings:end -->
+      Her notes below the block, with %%steno:00000000-0000-0000-0000-000000000001%% mentioned.
+
+      """
+    let removed = ManagedBlock.remove(meetingID: export.meeting.id, from: page)
+    #expect(
+      removed == """
+        ---
+        steno_person_id: "00000000-0000-0000-0000-00000000000a"
+        type: "person"
+        ---
+        # Anna Müller
+
+        Her notes above the block.
+        <!-- steno:meetings:start -->
+        \(newer)
+        \(older)
+        <!-- steno:meetings:end -->
+        Her notes below the block, with %%steno:00000000-0000-0000-0000-000000000001%% mentioned.
+
+        """)
+    #expect(
+      ManagedBlock.remove(meetingID: export.meeting.id, from: removed) == removed,
+      "a second removal changes nothing")
+    #expect(
+      ManagedBlock.merge(line, meetingID: export.meeting.id, into: removed) == page,
+      "merge puts the line back where it was")
+  }
+
+  @Test func removeLeavesAPageWithoutABlockOrWithoutTheLineUnchanged() {
+    let noBlock = "# Anna\n\nSome notes with %%steno:00000000-0000-0000-0000-000000000001%%.\n"
+    #expect(ManagedBlock.remove(meetingID: export.meeting.id, from: noBlock) == noBlock)
+    #expect(ManagedBlock.remove(meetingID: export.meeting.id, from: "") == "")
+    let otherMeeting = "# Anna\n\n" + ManagedBlock.block(lines: [line])
+    #expect(ManagedBlock.remove(meetingID: SampleData.uuid(8), from: otherMeeting) == otherMeeting)
+    let openEnded = "# Anna\n\n<!-- steno:meetings:start -->\n\(line)\n"
+    #expect(
+      ManagedBlock.remove(meetingID: export.meeting.id, from: openEnded) == openEnded,
+      "a start marker without an end is not a block")
+  }
+
+  @Test func removeLeavesAnEmptyBlockWithItsMarkers() {
+    let page = "# Anna\n\n" + ManagedBlock.block(lines: [line]) + "\nBelow.\n"
+    let removed = ManagedBlock.remove(meetingID: export.meeting.id, from: page)
+    #expect(removed == "# Anna\n\n" + ManagedBlock.block(lines: []) + "\nBelow.\n")
+    #expect(
+      ManagedBlock.merge(line, meetingID: export.meeting.id, into: removed) == page,
+      "the empty block takes the line back without a second block")
+  }
+
   @Test func sortsByDateThenText() {
     let lines = ["- 2026-01-01 b", "- 2026-03-01 a", "- 2026-01-01 a", "no date at all"]
     #expect(
