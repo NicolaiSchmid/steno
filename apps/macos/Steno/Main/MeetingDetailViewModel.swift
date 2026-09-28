@@ -2,11 +2,14 @@ import Foundation
 import StenoCore
 
 /// One meeting's detail: the export from `observeMeeting(id:)`, deliveries
-/// from `observeDeliveries`, the bundled templates and the selected tab.
-/// Summary, Transcript and Tasks are display only; the scratchpad is the
-/// one editable text and saves once after a debounce on the injected clock.
-/// `observe()` runs from the view's `.task`, so SwiftUI ends the store
-/// observations when the selection changes.
+/// from `observeDeliveries`, the bundled templates, the selected tab and
+/// the speakers (`speakers`, fed from every export tick). Summary,
+/// Transcript and Tasks are display only; the scratchpad is the one editable
+/// text and saves once after a debounce on the injected clock. Speaker
+/// changes apply at once and mark the meeting dirty; the vault re-exports
+/// when the picker closes or the view goes away (`pickerClosed`,
+/// `viewDisappeared`). `observe()` runs from the view's `.task`, so SwiftUI
+/// ends the store observations when the selection changes.
 @MainActor
 @Observable
 final class MeetingDetailViewModel: Identifiable {
@@ -26,7 +29,12 @@ final class MeetingDetailViewModel: Identifiable {
   private(set) var error: String?
   private(set) var isBusy = false
   var tab: Tab = .summary
-  var showsSpeakerReview = false
+  let speakers: SpeakersViewModel
+  /// A speaker was named or reassigned since the last re-export.
+  private(set) var speakersDirty = false
+  /// The last re-export was refused because the pipeline held the meeting;
+  /// try again when the export shows it `.ready`.
+  private var retryRedeliverWhenReady = false
   let templates = SummaryTemplate.bundled
   static let scratchpadDebounce: Duration = .seconds(1)
 
@@ -50,6 +58,8 @@ final class MeetingDetailViewModel: Identifiable {
     self.pipeline = pipeline
     self.clock = clock
     self.now = now
+    self.speakers = SpeakersViewModel(store: store, now: now)
+    speakers.onWrite = { [weak self] in self?.speakersDirty = true }
   }
 
   convenience init(meetingID: UUID, environment: AppEnvironment) {
@@ -58,11 +68,18 @@ final class MeetingDetailViewModel: Identifiable {
       pipeline: { environment.pipeline }, clock: environment.clock, now: environment.now)
   }
 
-  /// Follows the export until cancelled (one view `.task`).
+  /// Follows the export until cancelled (one view `.task`), feeding the
+  /// speakers and retrying a refused re-export once the meeting is ready.
   func observe() async {
     do {
       for try await export in store.observeMeeting(id: id) {
         self.export = export
+        guard let export else { continue }
+        speakers.update(export: export)
+        if retryRedeliverWhenReady, export.meeting.state == .ready {
+          retryRedeliverWhenReady = false
+          await redeliverSpeakerChanges()
+        }
       }
     } catch {
       self.error = "Meeting could not be loaded: \(error)"
@@ -148,6 +165,45 @@ final class MeetingDetailViewModel: Identifiable {
   /// The only re-export entry point.
   func reexport() async {
     await run("Re-export") { try await self.pipeline().redeliver(meetingID: self.id) }
+  }
+
+  // MARK: - Speakers
+
+  /// The header popover or a transcript picker closed: re-export once when a
+  /// speaker changed, else nothing. A refusal (the pipeline holds the
+  /// meeting) keeps the flag and retries at the next `.ready` tick.
+  func pickerClosed() async {
+    guard speakersDirty else { return }
+    await redeliverSpeakerChanges()
+  }
+
+  private func redeliverSpeakerChanges() async {
+    do {
+      try await pipeline().redeliver(meetingID: id)
+      speakersDirty = false
+    } catch {
+      retryRedeliverWhenReady = true
+    }
+  }
+
+  /// The view is going away (selection change, window closed): flush a
+  /// pending re-export in a task that outlives this model, with one retry
+  /// after a short pause for a pipeline that was still busy.
+  func viewDisappeared() {
+    speakers.stopPlayback()
+    guard speakersDirty else { return }
+    speakersDirty = false
+    retryRedeliverWhenReady = false
+    let pipeline = self.pipeline
+    let meetingID = id
+    Task { @MainActor in
+      do {
+        try await pipeline().redeliver(meetingID: meetingID)
+      } catch {
+        try? await Task.sleep(for: .seconds(3))
+        try? await pipeline().redeliver(meetingID: meetingID)
+      }
+    }
   }
 
   /// `keep` sets `.keepForever` and clears `expiresAt`; off restores the

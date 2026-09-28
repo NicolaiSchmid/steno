@@ -3,12 +3,15 @@ import StenoAdapters
 import StenoCore
 import SwiftUI
 
-/// Header (title, meta, actions), the four tabs and the delivery footer.
+/// Header (title, meta, the speakers row, tags, actions), the four tabs and
+/// the delivery footer. Speakers are named from the header row's popover;
+/// closing it re-exports when something changed.
 struct MeetingDetailView: View {
   @Bindable var model: MeetingDetailViewModel
   let controller: AppController
   @State private var tagsText = ""
   @State private var editingTags = false
+  @State private var showsSpeakers = false
 
   var body: some View {
     VStack(alignment: .leading, spacing: 0) {
@@ -26,21 +29,15 @@ struct MeetingDetailView: View {
     .background(Color.stenoBackground)
     .task { await model.observe() }
     .task { await model.observeDeliveries() }
-    .sheet(isPresented: $model.showsSpeakerReview) {
-      if let export = model.export {
-        SpeakerReviewSheet(
-          model: SpeakerReviewViewModel(export: export, environment: controller.environment),
-          onFinish: {
-            controller.reviewCompleted(meetingID: model.id)
-            model.showsSpeakerReview = false
-          })
-      }
+    .onChange(of: showsSpeakers) { _, shown in
+      if !shown { Task { await model.pickerClosed() } }
     }
-    .onChange(of: controller.pendingReviews.contains(model.id), initial: true) { _, pending in
-      if pending, NSApp.isActive, !model.unconfirmedSpeakers.isEmpty {
-        model.showsSpeakerReview = true
-      }
-    }
+    .onDisappear { model.viewDisappeared() }
+  }
+
+  private var showsSpeakersRow: Bool {
+    guard let export = model.export else { return false }
+    return export.meeting.state == .ready && !export.speakers.isEmpty
   }
 
   private func header(_ meeting: Meeting) -> some View {
@@ -67,16 +64,15 @@ struct MeetingDetailView: View {
       if case .failed(let reason) = meeting.state {
         MessageRow(kind: .error, text: reason)
       }
+      if showsSpeakersRow {
+        SpeakersRow(model: model.speakers, isPresented: $showsSpeakers)
+          .popover(isPresented: $showsSpeakers, arrowEdge: .bottom) {
+            SpeakersPopover(model: model.speakers)
+          }
+      }
       HStack(spacing: Theme.Space.sm) {
         tagsEditor(meeting)
         Spacer()
-        if !model.unconfirmedSpeakers.isEmpty {
-          Button("Review speakers (\(model.unconfirmedSpeakers.count))") {
-            model.showsSpeakerReview = true
-          }
-          .buttonStyle(StenoPrimaryButtonStyle())
-          .accessibilityIdentifier("review-speakers")
-        }
         Menu {
           Picker("Template", selection: .action({ meeting.templateID }, model.setTemplate)) {
             ForEach(model.templates) { template in
