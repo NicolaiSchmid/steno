@@ -16,8 +16,15 @@ final class AppController {
   let recorder: RecordingController
   let menuBar: MenuBarViewModel
   let detection: DetectionController
-  /// Meetings the pipeline flagged with unconfirmed speakers.
+  /// Meetings the pipeline flagged with unconfirmed speakers. The set
+  /// clears itself from the store, see `reviewChanged(_:speakers:)`.
   private(set) var pendingReviews: Set<UUID> = []
+  /// One `observeMeeting(id:)` subscription per pending review, ended when
+  /// the review clears. `observeMeetings` tracks the meeting table only, so
+  /// a speaker confirmed through `MeetingStore.confirm` (a speaker-table
+  /// write) would not reach `meetingsChanged(_:)`; the per-meeting export
+  /// observation includes the speakers and fires on every such write.
+  private var reviewObservers: [UUID: Task<Void, Never>] = [:]
   /// The meeting the main window should show next (from the menu bar or the
   /// detection prompt).
   var requestedMeetingID: UUID?
@@ -70,14 +77,14 @@ final class AppController {
           guard let self else { return }
           switch event {
           case .speakersNeedReview(let meetingID, _):
-            self.pendingReviews.insert(meetingID)
+            self.reviewRequested(meetingID)
           case .retentionApplied:
             // The stage has written `expiresAt`; the `.ready` row change
             // came earlier, before deliver and retention ran, so it is not
             // the trigger.
             await environment.runRetentionSweep()
           case .deleted(let meetingID):
-            self.pendingReviews.remove(meetingID)
+            self.clearReview(meetingID)
           case .progress:
             break
           }
@@ -97,13 +104,62 @@ final class AppController {
   }
 
   /// A pending review for a meeting the store no longer lists is dropped,
-  /// so a badge never points at nothing.
+  /// so a badge never points at nothing; one whose speakers are all
+  /// confirmed by now is dropped too, so a badge never asks for a review
+  /// that has nothing left to review.
   private func meetingsChanged(_ meetings: [Meeting]) async {
-    pendingReviews.formIntersection(meetings.map(\.id))
+    let listed = Set(meetings.map(\.id))
+    for meetingID in pendingReviews where !listed.contains(meetingID) {
+      clearReview(meetingID)
+    }
+    for meetingID in pendingReviews {
+      guard let speakers = try? await environment.store.speakers(meetingID: meetingID) else {
+        continue
+      }
+      reviewChanged(meetingID, speakers: speakers)
+    }
   }
 
-  func reviewCompleted(meetingID: UUID) {
+  /// Marks the meeting pending and starts following its export, so the
+  /// review clears as soon as the last speaker is confirmed, from any
+  /// caller of `MeetingStore.confirm`. A nil export (a meeting the store
+  /// never had, or one deleted meanwhile) is left to `meetingsChanged(_:)`
+  /// and the `.deleted` event, which own that rule.
+  private func reviewRequested(_ meetingID: UUID) {
+    pendingReviews.insert(meetingID)
+    guard reviewObservers[meetingID] == nil else { return }
+    reviewObservers[meetingID] = Task { [weak self, environment] in
+      do {
+        for try await export in environment.store.observeMeeting(id: meetingID) {
+          guard let self else { return }
+          guard let export else { continue }
+          self.reviewChanged(meetingID, speakers: export.speakers)
+        }
+      } catch {
+        // The detail view reports store errors; nothing to do here.
+      }
+    }
+  }
+
+  /// The one rule: a review is pending while any speaker of the meeting is
+  /// not `.confirmed`. No speakers at all is nothing to review.
+  private func reviewChanged(_ meetingID: UUID, speakers: [Speaker]) {
+    guard pendingReviews.contains(meetingID) else { return }
+    if speakers.allSatisfy(\.assignment.isConfirmed) {
+      clearReview(meetingID)
+    }
+  }
+
+  private func clearReview(_ meetingID: UUID) {
     pendingReviews.remove(meetingID)
+    reviewObservers.removeValue(forKey: meetingID)?.cancel()
+  }
+
+  /// Called by the speaker review sheet when it closes. Since the store
+  /// clears reviews on its own this is only an early exit for a sheet
+  /// dismissed with speakers left unconfirmed; it goes with the sheet.
+  func reviewCompleted(meetingID: UUID) {
+    clearReview(meetingID)
   }
 
   /// The sidebar control's start: the recorder starts as it does from the
@@ -157,6 +213,8 @@ final class AppController {
     if let handover = environment.handover { await handover.stop() }
     for observer in observers { observer.cancel() }
     observers = []
+    for observer in reviewObservers.values { observer.cancel() }
+    reviewObservers = [:]
     if let activationObserver { NotificationCenter.default.removeObserver(activationObserver) }
     activationObserver = nil
   }

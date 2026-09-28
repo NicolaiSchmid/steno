@@ -225,6 +225,35 @@ final class AppControllerTests: XCTestCase {
     await controller.shutdown()
   }
 
+  /// The store clears a review, not the UI: confirming the last unconfirmed
+  /// speaker through `MeetingStore.confirm` (a speaker-table write that the
+  /// meeting list observation does not see) drops the pending review
+  /// without `reviewCompleted`.
+  func testSpeakersNeedReviewClearsWhenTheLastSpeakerIsConfirmed() async throws {
+    let environment = try await TestSupport.environment()
+    let controller = try makeController(environment)
+    await controller.launch()
+
+    await TestSupport.waitUntil("review pending") {
+      await environment.events.post(
+        .speakersNeedReview(
+          meetingID: SampleData.meetingID, speakerIDs: [SampleData.speakerTwoID]))
+      return controller.pendingReviews.contains(SampleData.meetingID)
+    }
+    try await Task.sleep(for: .milliseconds(50))
+    XCTAssertTrue(
+      controller.pendingReviews.contains(SampleData.meetingID),
+      "Speaker 2 is only suggested, so the review stays pending")
+
+    try await environment.store.confirm(
+      speakerID: SampleData.speakerTwoID, person: SampleData.persons()[0],
+      memory: environment.speakerMemory)
+    await TestSupport.waitUntil("review cleared by the store") {
+      !controller.pendingReviews.contains(SampleData.meetingID)
+    }
+    await controller.shutdown()
+  }
+
   func testDetectionPromptStartsACallRecordingWhileTheDetectorRunsOn() async throws {
     let environment = try await TestSupport.environment(seed: false)
     let controller = try makeController(environment)

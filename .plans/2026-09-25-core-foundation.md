@@ -154,7 +154,7 @@ public final class MeetingStore: Sendable {
     public func persons() async throws -> [Person]; public func save(_ person: Person) async throws
     public func mergePersons(keep: UUID, remove: UUID) async throws                      // re-points speakers and participants; sample-count-weighted mean, renormalised
     public func mergeSpeakers(_ source: UUID, into target: UUID, meetingID: UUID) async throws   // in-meeting cluster merge
-    public func confirm(speakerID: UUID, person: Person, memory: any SpeakerMemory) async throws  // saves person if new, .confirmed, enroll, deletes sampleClipURL
+    public func confirm(speakerID: UUID, person: Person) async throws  // 2026-09-28: saves person if new, .confirmed, merges into the person's other speaker of this meeting, recomputes both voices; clip deleted only when the audio is gone (was: memory:, enroll, deletes sampleClipURL)
     public func save(_ delivery: Delivery) async throws; public func deliveries(meetingID: UUID) async throws -> [Delivery]
     public func export(meetingID: UUID) async throws -> MeetingExport
     public func search(_ query: String, limit: Int) async throws -> [SearchHit]           // FTS5, .order(Column.rank)
@@ -166,7 +166,7 @@ public final class MeetingStore: Sendable {
     // handover rows: pairedDevices(), save(_ device:, tokenHash:), device(forTokenHash:), delete(deviceID:), receipt(_ recordingID:), save(_ receipt:)
 }
 public struct SearchHit: Sendable, Equatable { meetingID: UUID; segmentID: UUID?; snippet: String; rank: Double }
-public struct RetentionSweep: Sendable {                                                  // removes master, sidecars, mixdown; never sample clips
+public struct RetentionSweep: Sendable {                                                  // removes master, sidecars, mixdown, and (2026-09-28) the clips of confirmed speakers; unconfirmed clips stay
     public init(store: MeetingStore, fileManager: FileManager = .default)
     public func run(now: Date) async throws -> [URL]                                     // clears expiresAt, continues past missing files
 }
@@ -391,7 +391,9 @@ executable (spike S2).
 ## Deferred
 
 - `SpeakerMemory.forget(personID:)` and person deletion: not in v1 scope; merging split speakers
-  is covered by `mergePersons` and `mergeSpeakers`.
+  is covered by `mergePersons` and `mergeSpeakers`. 2026-09-28: `forget` stays deferred; a person's
+  voice is recomputed from their confirmed speakers instead of enrolled, so reassignment needs no
+  inverse (inline speaker assignment plan).
 - Core's own sample-clip range picker: the diarizer chooses the range; core writes the file.
 
 ## Deviations (implementation)

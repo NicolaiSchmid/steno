@@ -531,6 +531,46 @@ import Testing
     #expect(try await sweep.run(now: .distantFuture).isEmpty)
   }
 
+  /// Confirming a speaker keeps the clip while the recording exists, gives
+  /// the person the speaker's voice, and naming somebody else moves it.
+  @Test func confirmThenReassignKeepsTheClipAndMovesTheVoice() async throws {
+    let harness = try await PipelineHarness()
+    defer { harness.cleanUp() }
+    let (meeting, asset) = try harness.meeting(source: .macCall)
+    try await harness.pipeline.enqueue(meeting, asset: asset)
+    await harness.pipeline.waitUntilIdle()
+    let export = try await harness.store.export(meetingID: meeting.id)
+    let speaker = try #require(export.speakers.first { $0.embedding != nil })
+    let clip = try #require(speaker.sampleClipURL)
+    #expect(FileManager.default.fileExists(atPath: clip.path))
+    let anna = Person(id: SampleData.uuid(12), displayName: "Anna", createdAt: PipelineHarness.now)
+    let bea = Person(id: SampleData.uuid(13), displayName: "Bea", createdAt: PipelineHarness.now)
+
+    try await harness.store.confirm(speakerID: speaker.id, person: anna)
+    var stored = try #require(
+      try await harness.store.speakers(meetingID: meeting.id)
+        .first { $0.id == speaker.id })
+    #expect(stored.assignment == .confirmed(personID: anna.id))
+    #expect(stored.sampleClipURL == clip)
+    #expect(FileManager.default.fileExists(atPath: clip.path))
+    var annaRow = try #require(try await harness.store.person(id: anna.id))
+    #expect(annaRow.sampleCount == 1)
+    #expect(annaRow.embedding == speaker.embedding?.normalized())
+
+    try await harness.store.confirm(speakerID: speaker.id, person: bea)
+    stored = try #require(
+      try await harness.store.speakers(meetingID: meeting.id)
+        .first { $0.id == speaker.id })
+    #expect(stored.assignment == .confirmed(personID: bea.id))
+    #expect(FileManager.default.fileExists(atPath: clip.path))
+    annaRow = try #require(try await harness.store.person(id: anna.id))
+    #expect(annaRow.sampleCount == 0)
+    #expect(annaRow.embedding == nil)
+    let beaRow = try #require(try await harness.store.person(id: bea.id))
+    #expect(beaRow.sampleCount == 1)
+    #expect(beaRow.embedding == speaker.embedding?.normalized())
+  }
+
   @Test func aPhoneAACRecordingIsNotMixedDownAgain() async throws {
     let harness = try await PipelineHarness()
     defer { harness.cleanUp() }

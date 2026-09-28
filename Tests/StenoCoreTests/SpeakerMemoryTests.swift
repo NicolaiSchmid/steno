@@ -4,7 +4,7 @@ import Testing
 @testable import StenoCore
 
 /// The provided `SpeakerMemory.match` (threshold plus a 0.05 margin over the
-/// runner-up) and the in-memory fake's running-mean enrol.
+/// runner-up) over the in-memory fake.
 @Suite struct SpeakerMemoryTests {
   static func tilted(_ first: Float, _ second: Float) -> Embedding {
     var values = [Float](repeating: 0, count: Embedding.dimension)
@@ -37,33 +37,5 @@ import Testing
     let ranked = try await memory.candidates(for: Self.tilted(0.6, 0.8), limit: 5)
     #expect(ranked.map(\.person.id) == [SampleData.personJeromeID, SampleData.personNicolaiID])
     #expect(try await memory.candidates(for: Self.tilted(0.6, 0.8), limit: 1).count == 1)
-  }
-
-  @Test func enrolFoldsIntoARunningMeanWithACappedSampleCount() async throws {
-    let memory = InMemorySpeakerMemory(people: SampleData.persons(), maxSamples: 2)
-    let jerome = SampleData.persons()[0]
-    try await memory.enroll(SampleData.embedding(axis: 0), as: jerome)
-    var updated = try #require(await memory.people[jerome.id])
-    #expect(updated.sampleCount == 2)
-    var embedding = try #require(updated.embedding)
-    #expect(abs(embedding.values[0] - 0.7071) < 0.001)
-    #expect(abs(embedding.values[1] - 0.7071) < 0.001)
-
-    // Nicolai has three samples but the cap weighs the known mean as two.
-    let nicolai = SampleData.persons()[1]
-    try await memory.enroll(SampleData.embedding(axis: 1), as: nicolai)
-    updated = try #require(await memory.people[nicolai.id])
-    #expect(updated.sampleCount == 3)
-    embedding = try #require(updated.embedding)
-    #expect(abs(embedding.values[0] - 0.8944) < 0.001)
-    #expect(abs(embedding.values[1] - 0.4472) < 0.001)
-
-    let newcomer = Person(
-      id: SampleData.uuid(12), displayName: "Anna", createdAt: SampleData.createdAt)
-    try await memory.enroll(Embedding([3, 4]), as: newcomer)
-    updated = try #require(await memory.people[newcomer.id])
-    #expect(updated.sampleCount == 1)
-    #expect(updated.embedding == Embedding([0.6, 0.8]))
-    #expect(await memory.enrolments.map(\.personID) == [jerome.id, nicolai.id, newcomer.id])
   }
 }
