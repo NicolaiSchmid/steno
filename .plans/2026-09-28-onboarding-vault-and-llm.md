@@ -8,7 +8,11 @@ row in the window inventory, "Settings tabs" and "LLM wiring" deviations); LLM p
 [`2026-09-25-llm-and-templates.md`](2026-09-25-llm-and-templates.md); adapters plan
 [`2026-09-25-adapters-obsidian.md`](2026-09-25-adapters-obsidian.md) ("no destination configured"
 is an empty delivery list). This plan amends the onboarding row and the LLM wiring note of the app
-plan; nothing else in those plans changes.
+plan; nothing else in those plans changes. This plan owns the onboarding window's pages, rows and
+copy; the retention sentence under the intro comes from
+[`2026-09-28-audio-retention-keep-forever.md`](2026-09-28-audio-retention-keep-forever.md) (step 6
+there) and the window's look from
+[`2026-09-28-macos-visual-redesign.md`](2026-09-28-macos-visual-redesign.md).
 
 ## Goal
 
@@ -16,11 +20,11 @@ The owner ran the app for the first time and asked: "the onboarding didn't ask m
 vault or the post-processing LLM APIs. I assume that will be flagged as missing once the first
 recording is completed?"
 
-The answer today is no. Nothing flags it, and worse, the first meeting gets a fabricated summary.
-This plan (a) records what happens today with file and line evidence, (b) stops the pipeline from
-running a test double in the product, (c) makes the missing configuration visible where the user
-looks (onboarding, main window, meeting detail), and (d) reuses the existing re-run and re-export
-paths so a meeting processed before configuration can still get its summary and its export.
+The answer today is no. Nothing flags it, and the first meeting gets a fabricated summary. This
+plan records what happens today with file and line evidence, stops the pipeline from running a
+test double in the product, makes the missing configuration visible where the user looks
+(onboarding, main window, meeting detail), and reuses the existing re-run and re-export paths so
+a meeting processed before configuration can still get its summary and its export.
 
 ## Findings
 
@@ -31,8 +35,7 @@ What happens today when the first recording completes with no LLM endpoint and n
    window closes itself the moment every step is granted or skipped
    (`OnboardingView.swift:138-140`). The opener runs once per launch and opens the window only
    while a required permission is missing (`apps/macos/Steno/StenoApp.swift:132-143`). Once
-   microphone and system audio are granted the window never appears again, so a user never sees a
-   hint that anything else needs setting up.
+   microphone and system audio are granted the window never appears again.
 
 2. Without an endpoint the product runs test doubles. `AppEnvironment.live` builds the pipeline
    with `LLMWiring.passes(settings:apiKey:)` (`apps/macos/Steno/AppEnvironment.swift:207`), which
@@ -56,10 +59,10 @@ What happens today when the first recording completes with no LLM endpoint and n
    header line "450 tokens" although no request was made (:297-299), a Summary tab with a heading
    per section and a bullet quoting the first sentence (`Main/Tabs/SummaryTab.swift:49-77`), a
    Tasks tab with the fake task, a Decisions block with the fake decision, and a meeting renamed to
-   "Summary of Untitled" unless the calendar supplied a title. There is no error, no warning and
-   no chip that says any of this is a placeholder. The transcript itself is real but uncleaned:
-   `PassthroughCleaner` returns segments untouched (`FakeLLM.swift:38-42`), so the Denglish and
-   casing cleanup the scope promises did not run.
+   "Summary of Untitled" unless the calendar supplied a title. No error, no warning, no chip says
+   any of this is a placeholder. The transcript is real but uncleaned: `PassthroughCleaner`
+   returns segments untouched (`FakeLLM.swift:38-42`), so the Denglish and casing cleanup the scope
+   promises did not run.
 
 5. Delivery is silently absent. `DeliveryCoordinator.destinations(for:)` returns `[]` when
    `settings.obsidian == nil` (`Sources/StenoAdapters/Runtime/DeliveryCoordinator.swift:32-35`)
@@ -86,8 +89,7 @@ What happens today when the first recording completes with no LLM endpoint and n
    it is not (it lives in Settings > Audio).
 
 The tests that pin the fake output (`Tests/StenoCoreTests/PipelineIntegrationTests.swift:31`,
-`FakesTests.swift:63`, `StageTests.swift:378`) inject the fake explicitly and stay valid; they are
-not evidence that the product should run it.
+`FakesTests.swift:63`, `StageTests.swift:378`) inject the fake explicitly and stay valid.
 
 ## Non-goals
 
@@ -95,8 +97,8 @@ not evidence that the product should run it.
   client keeps sending text only.
 - A second destination, or moving the people folder, task tag and audio copy options into
   onboarding. Those stay in Settings > Obsidian.
-- Bulk re-processing of every unsummarised meeting after the endpoint is configured. Each meeting
-  has its own Run summary action; a bulk action is an open question below.
+- Bulk re-processing of every unsummarised meeting after the endpoint is configured (open
+  question).
 - Re-running the cleanup pass on an already processed meeting. That needs a "process again from
   decode" path and its own plan.
 - Retroactively detecting summaries the fake produced under earlier builds. The owner's first
@@ -111,8 +113,8 @@ not evidence that the product should run it.
    nil), which existing call sites that pass a value still satisfy. Nil means "no LLM endpoint":
    the cleanup stage posts its progress event and persists nothing (the merge stage already wrote
    the transcript in its own transaction, `Sources/StenoCore/Pipeline/Stages/Merge.swift:9-11`
-   and `:32`, which is why a cleanup failure keeps the transcript today); the summarize stage posts its progress event and leaves `summary`, `llmUsage`, tasks
-   and decisions empty and the title untouched. The meeting still lands `.ready` and still
+   and `:32`); the summarize stage posts its progress event and leaves `summary`, `llmUsage`,
+   tasks and decisions empty and the title untouched. The meeting still lands `.ready` and still
    delivers. Reason: a `.ready` meeting whose summary is nil is an honest state the UI already has
    words for ("No summary"), and it needs no migration. A fabricated summary is a data integrity
    problem in SQLite and in every exported file.
@@ -127,77 +129,66 @@ not evidence that the product should run it.
    endpoint is configured")` instead of writing a fake. The app disables the action first, so the
    throw is for the CLI and for races between Save and Re-run.
 
-4. Onboarding asks, and the app nudges afterwards. Both, not one. Asking during onboarding is
-   justified because the first recording is the one that cannot be repaired: the cleanup pass runs
-   once, at processing time (finding 7), so a user who configures the endpoint after the first
-   meeting keeps a raw transcript for that meeting. Nudging afterwards is still needed because both
-   steps are optional (a local-only transcript recorder is a legitimate way to use Steno, and a
-   local LLM server may not be running on day one), and because existing installs have already
-   passed onboarding.
+4. Onboarding asks, and the app nudges afterwards. Asking during onboarding matters because the
+   first recording cannot be repaired: the cleanup pass runs once, at processing time (finding
+   7). Nudging afterwards is still needed because both steps are optional (a local-only
+   transcript recorder is a legitimate way to use Steno) and because existing installs have
+   already passed onboarding.
 
-5. The two new steps reuse `LLMSettingsViewModel` and `ObsidianSettingsViewModel` as they are.
+5. The two setup steps reuse `LLMSettingsViewModel` and `ObsidianSettingsViewModel` as they are.
    Same validation, same `Test connection`, same Save that rebuilds the pipeline, same
    `ObsidianFolderDestination.validate()`. Onboarding shows fewer fields (no context window, no
    people folder, no task tag, no audio copy) and says where the rest lives. Reason: one code path
    for writing these settings; the onboarding view is layout only.
 
-6. Onboarding opens once more for installs that have not seen the setup steps. A `UserDefaults`
-   flag `steno.onboardingCompleted` (same pattern as `AppController.loginItemRegisteredKey`) is set
-   when the window finishes, by Done, by Later or by the auto-close. The opener shows the window
-   when a required permission is missing or the flag is unset. Existing installs therefore see the
-   window one more time with the permission rows already green and only the two setup rows open,
-   which is exactly the owner's situation. An app menu item "Set Up Steno…" reopens it at any time.
+6. The setup steps are a second page, not rows on the permissions screen. Owner instruction,
+   2026-09-28: "additional onboarding steps, later on, not in the first screen". Page 1 is the
+   permissions screen as it is; page 2, "Summaries and export", holds the two optional steps and
+   appears when page 1 finishes by Done or Later. Reason: the first screen stays about the one
+   thing recording cannot do without, and a local-only user is one click from done on page 2.
 
-8. The setup steps are a second page, not rows on the permissions screen. Owner instruction,
-   2026-09-28: "additional onboarding steps, later on, not in the first screen". The window
-   becomes two pages: page 1 is the permissions screen exactly as it is; page 2, "Summaries and
-   export", holds the two optional steps and appears when page 1 finishes by Done or Later.
-   Existing installs with the flag unset open straight on page 2. Reason: the first screen
-   stays about the one thing recording cannot do without, and a user who wants a local-only
-   recorder is one click from done on page 2 as well.
+7. Onboarding opens once more for installs that have not seen page 2. A `UserDefaults` flag
+   `steno.onboardingCompleted` (same pattern as `AppController.loginItemRegisteredKey`) is set
+   when the window finishes by any route. The opener shows the window when a required permission
+   is missing or the flag is unset; existing installs with the flag unset open straight on page
+   2, which is the owner's situation.
 
-7. The main window gets one setup banner, the detail pane gets per-meeting status rows. The banner
+8. The main window gets one setup banner, the detail pane gets per-meeting status rows. The banner
    is a launch-time reminder and hides for the rest of the launch on "Not now"; it comes back on the
    next launch while the configuration is still missing. The detail rows are factual per-meeting
    states and are never dismissed. Reason: a permanently dismissable banner would need a second
    flag and a reset rule when configuration changes; the per-meeting rows already carry the signal
-   permanently, so the banner can stay simple.
+   permanently.
 
-8. Settings gets deep links. `SettingsView` binds its `TabView` to a `SettingsTab` selection and
+9. Settings gets deep links. `SettingsView` binds its `TabView` to a `SettingsTab` selection and
    `AppController` gets `requestedSettingsTab`, mirroring `requestedMeetingID`. Every "Open
    Settings" button in this plan lands on the right tab.
 
-9. The CLI follows the same rule. `Wiring.dependencies` passes nil passes when
-   `Wiring.llmComponents` is nil and `steno process` reports the summary as skipped. One rule for
-   the app and the CLI; the fakes stay reachable for tests through the existing injection points.
+10. The CLI follows the same rule. `Wiring.dependencies` passes nil passes when
+    `Wiring.llmComponents` is nil and `steno process` reports the summary as skipped. The fakes
+    stay reachable for tests through the existing injection points.
 
 ## UX spec
 
 ### Onboarding window
 
-Title stays "Welcome to Steno". Intro copy becomes:
+Two pages in the same window, with a "Step 1 of 2" / "Step 2 of 2" caption above the title.
+
+Page 1: title stays "Welcome to Steno". Intro copy becomes:
 
 > A few permissions, then where summaries come from and where meetings go. Audio never leaves this Mac.
 
-Directly under the intro copy sits the one-line retention sentence from
-[`2026-09-28-audio-retention-keep-forever.md`](2026-09-28-audio-retention-keep-forever.md)
-(step 7 there), for example "Recordings are kept forever in Steno. Change this any time in
-Settings > Audio." Visual treatment of the whole window (hidden title bar, raised cards,
-neutral chips) comes from
-[`2026-09-28-macos-visual-redesign.md`](2026-09-28-macos-visual-redesign.md); this plan adds
-rows and copy only.
+Directly under the intro sits the retention plan's one-line sentence (for example "Recordings
+are kept forever in Steno. Change this any time in Settings > Audio."). Rows 1 to 4 are today's
+Microphone (required), System audio (required), Calendar (optional) and Local network (optional,
+"Got it"), unchanged. Bottom buttons: "Later" until the required permissions are granted, then
+"Done"; both advance to page 2 instead of closing. The auto-close on page 1 is replaced by the
+advance to page 2.
 
-Two pages in the same window, with a "Step 1 of 2" / "Step 2 of 2" caption above the title.
-Page 1 keeps the current title and rows 1 to 4. Page 2 is titled "Summaries and export" with
-the intro "Optional. Steno works as a local transcript recorder without either." and holds
-rows 5 and 6, each with the "Optional" chip. Page 2 appears after page 1 finishes by Done or
-Later, or on its own for installs whose flag is unset. Rows, in order:
+Page 2: title "Summaries and export", intro "Optional. Steno works as a local transcript recorder
+without either." Two rows, each with the "Optional" chip:
 
-1. Microphone (required, unchanged).
-2. System audio (required, unchanged).
-3. Calendar (optional, unchanged).
-4. Local network (optional, unchanged, "Got it").
-5. Summaries (optional). Explanation:
+5. Summaries. Explanation:
 
    > Steno sends the transcript text, never audio, to an OpenAI-compatible endpoint to clean it up and write the summary, tasks and decisions. Without one, meetings keep a raw transcript and no summary.
 
@@ -206,10 +197,9 @@ Later, or on its own for installs whose flag is unset. Rows, in order:
    (secondary, disabled until the URL validates), "Save" (primary, disabled while
    `validationMessage` is set), "Skip" (plain). The test result line and the validation message
    are the view model's strings, shown as in Settings. Footnote: "The context window and the rest
-   live in Settings > LLM." When saved and configured the row collapses to a check and
-   "Saved: <model> at <host>".
+   live in Settings > LLM." When saved the row collapses to a check and "Saved: <model> at <host>".
 
-6. Obsidian vault (optional). Explanation:
+6. Obsidian vault. Explanation:
 
    > Steno writes each meeting into Meetings/<date>-<slug>/ inside the vault: a folder note, transcript, tasks, VTT and JSON. It never touches files it did not write. Without a vault, meetings stay in Steno.
 
@@ -218,20 +208,16 @@ Later, or on its own for installs whose flag is unset. Rows, in order:
    on failure), "Skip" (plain). Footnote: "People pages, the task tag and the audio copy live in
    Settings > Obsidian." When saved the row collapses to a check and "Saved: <vault folder name>".
 
-Page 1 bottom buttons unchanged: "Later" until the required permissions are granted, then
-"Done"; both advance to page 2 instead of closing. Page 2 bottom buttons: "Back" (plain) and
-"Finish" (primary, always enabled); the window closes when both rows are saved or skipped or on
-Finish. Finishing by any route sets `steno.onboardingCompleted`. The auto-close on page 1 is
-replaced by the advance to page 2.
-
-App menu (after "About"): "Set Up Steno…" opens the onboarding window.
+Page 2 bottom buttons: "Back" (plain) and "Finish" (primary, always enabled). The window closes
+when both rows are saved or skipped, or on Finish. Finishing by any route sets
+`steno.onboardingCompleted`.
 
 ### Main window banner
 
-Shown at the top of the detail column, above the selected meeting or the "Select a meeting" empty
-state, when at least one meeting exists, the configuration is incomplete and the banner was not
-dismissed this launch. Never in the preview environment's onboarding sense; the banner does show in
-preview because preview settings have no endpoint and no vault, and the UI smoke test uses that.
+Shown at the top of the detail column, above the selected meeting or the detail empty state,
+when at least one meeting exists, the configuration is incomplete and the banner was not
+dismissed this launch. The preview environment has no endpoint and no vault, so the banner shows
+there and the UI smoke test uses that.
 
 - Both missing:
 
@@ -323,9 +309,8 @@ and clears it, like `MainWindow` does for `requestedMeetingID`.
    fallbacks. `Sources/steno/Commands/Process.swift` keeps printing only the meeting id on stdout
    (`Process.swift:136`, scripts depend on it) and writes "summary skipped: no LLM endpoint
    configured" to stderr when the meeting lands ready without a summary. Update any
-   `Tests/stenoTests` expectation that relies on the fake summary (a title starting "Summary of",
-   a task, a decision) from the default wiring; end-to-end tests already use the stub server for
-   real summaries.
+   `Tests/stenoTests` expectation that relies on the fake summary from the default wiring;
+   end-to-end tests already use the stub server for real summaries.
 
 3. App wiring: `apps/macos/Steno/AppEnvironment.swift` `live()` passes `llm?.cleaner` and
    `llm?.summarizer` without fallbacks. `preview()` keeps its explicit fakes so seeded meetings
@@ -365,21 +350,24 @@ and clears it, like `MainWindow` does for `requestedMeetingID`.
    the detail column content. UI smoke test in `apps/macos/StenoUITests`: in the preview
    environment the banner is present with both buttons, "Not now" hides it.
 
-8. Onboarding: `apps/macos/Steno/Onboarding/OnboardingViewModel.swift` gets a `StepKind` enum
-   (`permission(PermissionKind)`, `summaries`, `vault`), builds the six steps in the order above,
-   owns an `LLMSettingsViewModel` and an `ObsidianSettingsViewModel` from the environment,
-   `isFinished` requires the setup steps saved or skipped, `markCompleted()` writes
-   `steno.onboardingCompleted`, and a static `shouldOpen(permissions:defaults:)` replaces the loop
-   in `OnboardingOpener`. `OnboardingView.swift` renders the two new rows.
-   `apps/macos/Steno/StenoApp.swift`: `OnboardingOpener` uses `shouldOpen`,
-   `OnboardingWindowContent` calls `markCompleted()` on finish, `AppCommands` adds "Set Up Steno…".
+8. Onboarding: `apps/macos/Steno/Onboarding/OnboardingViewModel.swift` gets `enum Page { case
+   permissions, setup }` with `page`, a `StepKind` enum (`permission(PermissionKind)`,
+   `summaries`, `vault`) so the two setup rows sit in the same `steps` array as the permission
+   rows, owns an `LLMSettingsViewModel` and an `ObsidianSettingsViewModel` from the environment,
+   `advance()` (page 1 Done or Later), `back()`, `isFinished` requires the setup steps saved or
+   skipped, `markCompleted()` writes `steno.onboardingCompleted`, and a static
+   `shouldOpen(permissions:defaults:)` replaces the loop in `OnboardingOpener` (opening on page 2
+   when the permissions are granted and the flag is unset). `OnboardingView.swift` renders the two
+   pages, the caption and the two new rows. `apps/macos/Steno/StenoApp.swift`: `OnboardingOpener`
+   uses `shouldOpen`, `OnboardingWindowContent` calls `markCompleted()` on finish.
    Tests in `apps/macos/StenoTests/OnboardingViewModelTests.swift`: the step order; the 81 x 4
-   permission matrix still holds with the setup steps skipped; `isFinished` stays false with all
-   permissions granted until Summaries and Obsidian vault are saved or skipped; saving Summaries
-   with a valid URL and model marks the step done and rebuilds the pipeline; saving Obsidian vault
-   with a temp directory marks it done and an unwritable path shows the destination's message;
-   `shouldOpen` is true when the flag is unset even with every permission granted and false once
-   `markCompleted()` ran; the preview guard stays in the opener.
+   permission matrix still holds with the setup steps skipped; Done and Later on page 1 advance
+   instead of finishing; `isFinished` stays false with all permissions granted until Summaries and
+   Obsidian vault are saved or skipped; saving Summaries with a valid URL and model marks the step
+   done and rebuilds the pipeline; saving Obsidian vault with a temp directory marks it done and an
+   unwritable path shows the destination's message; `shouldOpen` is true when the flag is unset
+   even with every permission granted and false once `markCompleted()` ran; the preview guard stays
+   in the opener.
 
 9. Settings copy from the UX spec in `apps/macos/Steno/Settings/SettingsView.swift`.
 
@@ -397,20 +385,20 @@ next opens.
   container; the new pipeline test is the one that pins decision 2.
 - `xcodebuild test -scheme StenoTests` and `-scheme Steno` (UI smoke test with the banner) on the
   macOS runner.
-- Manual, fresh user account: launch; onboarding shows six rows; grant microphone and system audio;
-  skip Calendar and Local network; enter a local LM Studio URL and model, Test connection reports
-  "Connected: ...", Save; choose a vault folder, Save; the window closes. Record a two-minute call;
-  the meeting lands Ready with a real summary, a token count and an "obsidian-folder: delivered"
-  badge.
-- Manual, existing install (the owner's): launch; onboarding opens once with the four permission
-  rows green and the two setup rows open; press Later; the main window shows the "Summaries and
-  export are off" banner; open the first meeting; the Summary tab reads "Summary skipped: no LLM
-  endpoint is configured."; the footer reads "Not exported: no Obsidian vault is configured."
-  Configure the endpoint from the banner; the Summary tab switches to "No summary yet" with Run
-  summary; run it; the summary appears and the header shows the token count. Configure the vault;
-  the footer switches to "Not exported yet" with Export now; run it; the badge reads delivered and
-  the folder opens from the Finder button. Press Not now on the banner; it hides; relaunch with the
-  vault removed from settings and the banner returns.
+- Manual, fresh user account: launch; page 1 shows the four permission rows; grant microphone and
+  system audio; skip Calendar and Local network; Done advances to page 2; enter a local LM Studio
+  URL and model, Test connection reports "Connected: ...", Save; choose a vault folder, Save; the
+  window closes. Record a two-minute call; the meeting lands Ready with a real summary, a token
+  count and an "obsidian-folder: delivered" badge.
+- Manual, existing install (the owner's): launch; onboarding opens on page 2 with both rows open;
+  press Finish; the main window shows the "Summaries and export are off" banner; open the first
+  meeting; the Summary tab reads "Summary skipped: no LLM endpoint is configured."; the footer
+  reads "Not exported: no Obsidian vault is configured." Configure the endpoint from the banner;
+  the Summary tab switches to "No summary yet" with Run summary; run it; the summary appears and
+  the header shows the token count. Configure the vault; the footer switches to "Not exported yet"
+  with Export now; run it; the badge reads delivered and the folder opens from the Finder button.
+  Press Not now on the banner; it hides; relaunch with the vault removed from settings and the
+  banner returns.
 - Manual, no configuration at all: record a call; the meeting lands Ready with the transcript, no
   summary, no tasks, no token line and the original title. Nothing in the export folder because
   there is none.
@@ -425,5 +413,7 @@ next opens.
 - Should "Run summary" on a meeting processed without cleanup warn more loudly that the transcript
   was never cleaned, or should a "Process again" action (decode onward) exist? Needs its own plan;
   it re-transcribes and re-diarizes.
+- Should an app menu item reopen the onboarding window later ("Set Up Steno…")? Not added; the
+  banner and the Settings tabs cover the same ground after the first run.
 - Does `steno process` need a `--fake-llm` flag for local development without an endpoint? The
   end-to-end tests inject the stub server directly, so probably not.

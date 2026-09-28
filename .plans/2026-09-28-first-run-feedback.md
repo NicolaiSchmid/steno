@@ -21,21 +21,22 @@ widens the scope; every plan below restyles, surfaces or wires what v1 already h
 
 ## Order
 
-1. Start recording from the main window. Smallest change, unblocks the owner's testing,
-   no visual dependency (the redesign restyles the control later).
+1. Start recording from the main window. Smallest change, unblocks the owner's testing;
+   supplies the recorder seams every later plan reads.
 2. Onboarding, core part (PR 1 of that plan): stop running the fake cleaner and summariser in
    the product so the next test recording produces honest output.
 3. Audio retention: default to keep forever for new installs, the delivery guard, and the
    visible setting. The owner flips the stored 30-day row once.
-4. Onboarding, app part (PRs 2 and 3 of that plan): status rows, banner, the two optional
-   onboarding rows.
-5. Floating recording indicator and detection prompt. Depends on the shared recorder from
-   step 1; ships before the redesign because the owner cannot see recording state today.
-6. Device changes during a recording. Correctness work in StenoAudio; independent of the UI
-   plans except for the bubble state it adds.
+4. Onboarding, app part (PRs 2 and 3 of that plan): status rows, banner, the second
+   onboarding page.
+5. Floating recording indicator and detection prompt. Depends on step 1; ships before the
+   redesign because the owner cannot see recording state today. Adds `radiusXL`,
+   `Motion.countdown` and `Motion.pulse`.
+6. Device changes during a recording. Correctness work in StenoAudio; its app part adds the
+   auto-stop row to the surfaces from steps 1 and 5.
 7. App icon. Independent, can land any time; listed here so the release rehearsal ships with
    it.
-8. Visual redesign, in its own step order. Last because it touches every screen and the four
+8. Visual redesign, in its own step order. Last because it touches every screen and the
    plans above change copy and controls it restyles.
 
 ## Shared decisions
@@ -45,7 +46,19 @@ widens the scope; every plan below restyles, surfaces or wires what v1 already h
 - Light mode is the first review target; both appearances ship.
 - The accent stays achromatic. A brand hue is an open question in the redesign plan and the
   icon plan, to be decided together if at all.
-- Record control semantics (labels, call-first split button, ids) belong to the
-  start-recording plan; its geometry, fills and motion belong to the redesign plan.
-- Onboarding copy is owned by the onboarding plan; the retention sentence beneath the intro
-  comes from the retention plan; the window's look comes from the redesign plan.
+- The menu bar item stays; the bubble, the sidebar control and the detail header Stop are
+  additional surfaces over the one `RecordingController`, never replacements.
+
+## Ownership
+
+One plan specifies each shared thing; the others reference it.
+
+| Thing | Owner |
+|---|---|
+| Record control behaviour, labels, ids, `RecordingControlPresentation`, `activeMeetingID`, `refreshPermissions`, `LevelBars` and `StopLabel` in `Recording/RecordingViews.swift`, the Stop treatment (secondary button, `destructive` dot and label, elapsed time inside), list empty-state copy | start-recording plan |
+| Record control geometry, fills, type and motion; detail header Stop control (`stop-recording-header`); detail empty state; every window token except the three below; per-state copy for list entry, header and tab bodies | redesign plan |
+| `radiusXL`, `Motion.countdown`, `Motion.pulse`; the panel, prompt and bubble | floating indicator plan |
+| Auto-stop countdown, its copy and the armed row on every surface (bubble, menu bar, sidebar); `RecordingEndReason` | device-change plan |
+| Onboarding pages, rows and copy; `steno.onboardingCompleted`; setup banner and detail status rows; Settings deep links | onboarding plan |
+| Retention default, the Audio tab, the detail "Recording" line, the onboarding retention sentence | retention plan |
+| App icon and its script; the menu bar keeps SF Symbols | icon plan |

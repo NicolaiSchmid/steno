@@ -5,14 +5,15 @@ Status: proposal, 2026-09-28. Triggered by first-run feedback.
 Binding context: [`2026-09-24-initial-scope.md`](2026-09-24-initial-scope.md) (scope, the
 four tabs, editable surfaces, non-goals) and
 [`2026-09-25-macos-app-and-release.md`](2026-09-25-macos-app-and-release.md) (app
-structure, view models, tests, CI). Sibling:
+structure, view models, tests, CI). Siblings, all of which land before this plan:
 [`2026-09-28-start-recording-from-main-window.md`](2026-09-28-start-recording-from-main-window.md)
-owns the behaviour of a Start recording control in the main window (mode choice,
-permission gating, errors); this plan owns where it sits and how it looks. Second
-sibling: [`2026-09-28-floating-recording-indicator.md`](2026-09-28-floating-recording-indicator.md)
-(being written) owns the floating recording bubble and the detection prompt; the
-detection panel's restyle moves there, and the header Stop control in this plan, the
-bubble and the menu bar item all drive the one `RecordingController`, never each other.
+owns the behaviour, labels, ids and shared views of the record control in the main window;
+this plan owns where it sits and how it looks, and the detail header's Stop control.
+[`2026-09-28-floating-recording-indicator.md`](2026-09-28-floating-recording-indicator.md)
+owns the floating recording bubble and the detection prompt, and adds `radiusXL`,
+`Motion.countdown` and `Motion.pulse`, which this plan reuses.
+[`2026-09-28-onboarding-vault-and-llm.md`](2026-09-28-onboarding-vault-and-llm.md) owns the
+onboarding window's pages, rows and copy; this plan owns its look.
 
 This plan amends one line of the macOS plan: "Pixel design" stops being a non-goal, and
 "tokens are dark-first and mirror `mobile/global.css`" becomes "token names and the
@@ -64,7 +65,7 @@ over the canvas, radii descending 16 > 12 > 8 > 6 > 4, one functional tempo
 | F12 | `MeetingListView.swift:95` | `.searchable(placement: .sidebar)` | The system grey capsule dominates the top of the sidebar and fights the veil surfaces |
 | F13 | `MeetingListView.swift:73-85, 184-214` | `List(.sidebar)` rows with separators hidden; `MeetingRow` packs title, status chip, `Sep 24, 10:02`, duration, source and tags into two lines at 14/12 pt | Dense, no grouping by day, no summary preview, a "Ready" chip on every finished meeting. Jamie shows one card per day with title, time and a one-line summary |
 | F14 | `MeetingListView.swift:96` and the sidebar column material | `.background(Color.stenoBackground)` sits under the `NavigationSplitView` sidebar vibrancy | Two unrelated greys meet at the column edge (sidebar darker than the detail pane in the screenshot) |
-| F15 | `MeetingListView.swift:166-181`, `MainWindow.swift:27-37` | Empty states are a 28 pt ghost symbol plus two lines of centred text | Reads as a placeholder. "Start a recording from the menu bar item." sends the user away from the window (the sibling plan fixes the copy and the action; this plan gives it a shape) |
+| F15 | `MeetingListView.swift:166-181`, `MainWindow.swift:27-37` | Empty states are a 28 pt ghost symbol plus two lines of centred text | Reads as a placeholder. "Start a recording from the menu bar item." sends the user away from the window (the start-recording plan fixes the copy; this plan gives it a shape) |
 | F16 | `MainWindow.swift:40`, `apps/macos/Steno/StenoApp.swift:26` | `minWidth 820`, default 1040 x 680 | Fine for two columns; three columns need a 960 pt minimum |
 
 ### Detail pane and tabs
@@ -108,7 +109,7 @@ beauty pass". The screenshot adds these to F9 to F22.
 | # | Where | What is wrong | Why it reads unpolished |
 |---|---|---|---|
 | F26 | `apps/macos/Steno/MenuBar/MenuBarView.swift:131-157, 180-196, 228-248` | 320 pt, 12 pt padding, buttons from F4, recent rows without hover or hit shape | Acceptable structure; it inherits the token and button fixes and needs row hit shapes |
-| F27 | `apps/macos/Steno/Detection/DetectionPanel.swift:54-86` | Uses the popover fill and the two button styles | Correct; inherits F4. Its restyle belongs to the floating recording indicator plan |
+| F27 | `apps/macos/Steno/Detection/DetectionPanel.swift:54-86` | Uses the popover fill and the two button styles | Inherits F4. Replaced by the floating recording indicator plan before this plan lands |
 | F28 | `SpeakerReviewSheet.swift:387, 401, 464-479` | Fixed 560 x 520, veil cards, a horizontal scroller of secondary buttons for candidates | Busy; candidates should be quiet neutral chips, cards raised |
 | F29 | `apps/macos/Steno/Settings/SettingsView.swift:31-49, 212-215, 116-117 vs 142-143` | Native `TabView` plus grouped `Form`: correct idiom. Only the capsule chip and inconsistent note tiers (`mutedForeground` here, `faint` there for the same role) | Light touch only |
 
@@ -120,7 +121,7 @@ beauty pass". The screenshot adds these to F9 to F22.
   filters, its tag filters, Settings.
 - Editing summary, transcript or task text. Copy changes are limited to labels this plan
   names.
-- Wiring the Start recording control (mode choice, permissions, errors): the sibling plan.
+- Wiring the record control (mode choice, permissions, errors): the start-recording plan.
 - The floating recording bubble and the detection prompt's look: the floating recording
   indicator plan. This plan only places a Stop control in the detail header and states
   that it shares the recorder with the bubble.
@@ -130,7 +131,8 @@ beauty pass". The screenshot adds these to F9 to F22.
 - Forcing light or dark. The app follows the system appearance; both must pass review.
 - Changes under `mobile/`, to `Settings` structure, to view models beyond pure display
   helpers, or to StenoCore.
-- Animations beyond the existing `Motion` tokens.
+- Animations beyond the existing `Motion` tokens plus `Motion.pulse` from the floating
+  indicator plan.
 
 ## Decisions
 
@@ -190,17 +192,18 @@ beauty pass". The screenshot adds these to F9 to F22.
     behind a selected `List` row in every list style and above `.listRowBackground`, so
     the plan's rail-plus-veil selection cannot coexist with it (Selection styling below).
 15. **The detail header owns a Stop control while recording.** It calls the shared
-    `RecordingController.stop()` with the sibling plan's semantics (confirmation and
-    error surfacing there); this plan places and styles it.
-13. **Record control semantics come from the sibling plan.** Labels ("Record call",
-    "Record in person", "Stop"), the call-first split button, the permission-denied
-    state and the accessibility ids are decided in
+    `RecordingController.stop()`, the same call the sidebar control, the menu bar item
+    and the bubble make; this plan places and styles it, and the bubble does not replace
+    it (floating indicator plan, decision 11).
+16. **Record control semantics come from the start-recording plan.** Labels ("Record
+    call", "Record in person", "Stop"), the call-first split button, the permission-denied
+    state, the accessibility ids (`sidebar-record`, `sidebar-record-in-person`,
+    `sidebar-stop`) and the `RecordingControl(controller:)` signature are decided in
     [`2026-09-28-start-recording-from-main-window.md`](2026-09-28-start-recording-from-main-window.md).
-    This plan sets the box, fills, type and motion, and resolves that plan's open
-    question on where the status line sits: the elapsed time lives inside the button,
-    and the recorder's `label` line above the button is dropped in the nav column.
-    Destructive is expressed as the dot and the "Stop" label on a `raised` surface, not
-    as a red fill, so the one hue stays a status signal.
+    This plan sets the box, fills, type and motion. The elapsed time lives inside the
+    Stop button and there is no status line in the nav column; destructive is the dot and
+    the "Stop" label on a `raised` surface, not a red fill, so the one hue stays a status
+    signal.
 
 ## Design spec
 
@@ -249,9 +252,9 @@ Monospaced digits for every clock and timestamp.
 ### Spacing and radii
 
 `Theme.Space` becomes: `xxs 2`, `xs 4`, `sm 8`, `md 12`, `lg 16`, `xl 24`, `xxl 32`,
-`xxxl 48`, `hairline 1`. Radii: `radiusXL 16`, `radiusLG 12`, `radius 8`,
-`radiusSM 6`, `radiusXS 4` (`radiusSmall` is removed; call sites move to `radiusSM` or
-`radius`). Everything on the 4 pt grid except `xxs`, `hairline` and `radiusSM`.
+`xxxl 48`, `hairline 1`. Radii: `radiusXL 16` (already added by the floating indicator
+plan), `radiusLG 12`, `radius 8`, `radiusSM 6`, `radiusXS 4` (`radiusSmall` is removed;
+call sites move to `radiusSM` or `radius`). Everything on the 4 pt grid except `xxs`, `hairline` and `radiusSM`.
 
 Control heights: CTA 40, buttons 32, inputs 28, nav rows 32, icon buttons 28,
 segmented cells 24 inside a 28 container.
@@ -262,7 +265,7 @@ segmented cells 24 inside a 28 container.
 |---|---|---|---|---|
 | `StenoPrimaryButtonStyle` | height 32, padding 0 x 14, radius 8 | vertical gradient `accent-from` to `accent-to`, no border | 14 medium `on-accent` | pressed: opacity 0.95 and scale 0.98 over `Motion.functional`; disabled: opacity 0.5 |
 | `StenoSecondaryButtonStyle` | same box | `raised`, hairline `border` | 14 regular `strong` | hover: `card` veil; pressed as primary |
-| `RecordingControl` (the sibling plan's control, restyled here; state and presentation in, `onStart(mode:)`/`onStop` out) | full nav width minus 12 gutters, height 40, radius 12; split button: main segment plus a 28 pt trailing chevron segment separated by a hairline in `on-accent` at 20 % | idle: primary gradient; starting/stopping: same, label replaced by a 16 pt spinner; recording: `raised` with hairline `border`; permission denied: primary at opacity 0.5 with the reason as a `MessageRow(kind: .warning)` below | idle: 16 pt `record.circle` glyph in a 28 pt well (radius 8, `on-accent` at 12 %) then "Record call" 14 medium `on-accent`; the chevron segment opens a menu with "Record in person"; recording: 8 pt `destructive` dot then "Stop" 14 medium `destructive` then elapsed `mm:ss` 14 mono `muted`, level bars 12 pt tall to the right | the dot pulses opacity 1 to 0.4 at 1 s ease-in-out; disabled while starting/stopping. Accessibility ids `sidebar-record` and `sidebar-stop` (from the sibling plan), `record-cta` as the container |
+| `RecordingControl` (the start-recording plan's `RecordingControl(controller:)`, restyled here; presentation, ids and actions unchanged) | full nav width minus 12 gutters, height 40, radius 12; split button: main segment plus a 28 pt trailing chevron segment separated by a hairline in `on-accent` at 20 % | idle: primary gradient; starting/stopping: same, label replaced by a 16 pt spinner; recording: `raised` with hairline `border`; permission denied: primary at opacity 0.5 with the reason `MessageRow(kind: .warning)` and the fix button below | idle: 16 pt `record.circle` glyph in a 28 pt well (radius 8, `on-accent` at 12 %) then "Record call" 14 medium `on-accent`; the chevron segment opens a menu with "Record in person"; recording: 8 pt `destructive` dot then "Stop" 14 medium `destructive` then elapsed `mm:ss` 14 mono `muted`, level bars 12 pt tall to the right | the dot pulses with `Motion.pulse`; disabled while starting/stopping |
 | `NavRow` | height 32, padding 0 x 10, radius 8, gap 10 | selected: `secondary`; hover: `card` | 16 pt SF Symbol `muted` (selected `strong`), label 14 medium (`muted`, selected `strong`), optional trailing count 12 `faint` mono | id `nav-<name>` |
 | `Card` | padding 16 (parameter), radius 12 | `raised`, hairline `border`, no shadow | content | none |
 | `MeetingCard` (one per day) | `Card` with padding 16 | as `Card` | header: date `MMM d` 12 semibold `strong`, " / " and weekday `EEEE` 12 `faint`; 12 pt below; entries stacked with 12 pt gaps | none on the card |
@@ -276,8 +279,9 @@ segmented cells 24 inside a 28 container.
 | `SectionLabel` | unchanged | | 11 semibold uppercase tracking 0.6 `faint` | |
 | `MessageRow` | padding 8 x 10, radius 8 | colour at 8 % fill | 6 pt dot, 13 `foreground` | |
 
-Motion: every state swap uses `Motion.functional`; the recording dot pulse is the one
-ambient animation and honours Reduce Motion by holding at opacity 1.
+Motion: every state swap uses `Motion.functional`; the recording dot pulse
+(`Motion.pulse`) is the one ambient animation and honours Reduce Motion by holding at
+opacity 1.
 
 ### Per-screen layout
 
@@ -301,9 +305,9 @@ ambient animation and honours Reduce Motion by holding at opacity 1.
    and 12 pt gaps, 24 pt bottom. The column is focusable; up and down arrows move the
    selection through entries (`onMoveCommand`), the selection scrolls into view. Error
    text (`model.error`) appears as a `MessageRow` under the search field. Empty:
-   `EmptyState` centred in the scroll area (`waveform`, "No meetings yet", body and
-   action from the sibling plan; or "No meetings match" with a secondary "Clear filters"
-   that resets query, state and tag).
+   `EmptyState` centred in the scroll area (`waveform`, "No meetings yet", body from the
+   start-recording plan, no action button because the control sits above; or "No meetings
+   match" with a secondary "Clear filters" that resets query, state and tag).
 3. **Detail pane** (`MeetingDetailView.swift`), min 480, fill `background`. Header at 32
    pt sides, 24 pt top: title row (`displayTitle` 21 semibold, `textSelection`, trailing
    status chip only for queued, processing and failed, the Stop control while
@@ -332,16 +336,18 @@ editor in a `raised` hairline surface, radius 12, padding 12, min height 240, te
 14/20; hint 12 `faint` below. Pending and failed bodies follow the Recording and
 processing states table.
 
-**Onboarding** (`OnboardingView.swift`, `StenoApp.swift`): `.hiddenTitleBar`, content
-width 560, padding 40 top, 32 sides and bottom. H1 26 semibold tracking -0.3; 6 pt;
-subtitle 14 `muted` wrapping (`fixedSize(horizontal: false, vertical: true)`); 24 pt;
-step cards (`Card`, padding 16, gap 12): row of a 24 pt frame holding an 18 pt state
+**Onboarding** (`OnboardingView.swift`, `StenoApp.swift`), both pages of the onboarding
+plan: `.hiddenTitleBar`, content width 560, padding 40 top, 32 sides and bottom. Step
+caption 12 `faint`; 4 pt; H1 26 semibold tracking -0.3; 6 pt; subtitle 14 `muted` wrapping
+(`fixedSize(horizontal: false, vertical: true)`), the retention sentence beneath it 13
+`faint`; 24 pt; step cards (`Card`, padding 16, gap 12): row of a 24 pt frame holding an 18 pt state
 glyph (`checkmark.circle.fill` `live-bright`, `xmark.circle.fill` `destructive`,
 `circle` `ghost`), title 14 semibold `strong`, neutral "Optional" chip, trailing
 "Skipped" 12 `faint`; expanded: 12 pt, explanation 13 `muted` `lineSpacing(4)`, 12 pt,
 action row (primary, secondary, ghost "Skip" 13 `faint`), spinner and the listening note
-12 `faint` while requesting. 24 pt; footer right-aligned Later (secondary) or Done
-(primary).
+12 `faint` while requesting; the setup rows' fields use `StenoTextFieldStyle`. 24 pt;
+footer right-aligned, buttons per the onboarding plan (Later or Done on page 1, Back and
+Finish on page 2; secondary and primary).
 
 **Menu bar** (`MenuBarView.swift`): 320 wide, padding 16, fill `popover`. Status row
 unchanged; level bars unchanged; buttons: "Record call" primary with a 14 pt
@@ -350,9 +356,9 @@ treatment as the sidebar control (`raised` surface, `destructive` dot and label)
 recent rows: padding 6 x 8, radius 6, hover `card`, whole row hittable. Footer text
 buttons 13 `muted`, hover `strong`.
 
-**Detection panel** (`DetectionPanel.swift`): not restyled here. It inherits the button
-styles through the shared components; its layout and the floating recording bubble are
-specified in `2026-09-28-floating-recording-indicator.md`.
+**Detection prompt and recording bubble**: already restyled by
+`2026-09-28-floating-recording-indicator.md` (`Panels/`); they inherit the button styles
+through the shared components and nothing else here touches them.
 
 ### Recording and processing states
 
@@ -364,7 +370,7 @@ as `MenuBarView.swift:170-174` does today; processing stage names come from
 
 | State | List entry | Detail header | Tab bodies |
 |---|---|---|---|
-| Recording | Title `displayTitle`; time row shows the start time, then a `destructive` 6 pt dot pulsing (1 s ease-in-out, 1 to 0.4 opacity, held at 1 under Reduce Motion) and "Recording · 12:34" in 12 pt mono `muted`; no chip; preview line omitted | Title row: `displayTitle` 21 semibold; trailing, in place of the status chip, a "Stop" secondary button (32 pt, radius 8, `raised` with hairline, 8 pt `destructive` dot before the label, elapsed `mm:ss` mono after it, id `stop-recording-header`) that calls the shared `RecordingController.stop()`. Meta line: full date, start time, source label. Below the meta line the two `LevelBars` (`MenuBarView.swift:293-331`) at 4 pt height and 240 pt width, labels 11 `faint`, fills `live-bright` | Every tab: `EmptyState` centred in the pane, well glyph `waveform`, title "Recording", body "The summary, transcript and tasks appear a few minutes after you stop." Scratchpad stays editable (notes during the call are in scope) with the same hint under the editor |
+| Recording | Title `displayTitle`; time row shows the start time, then a `destructive` 6 pt dot pulsing with `Motion.pulse` and "Recording · 12:34" in 12 pt mono `muted`; no chip; preview line omitted | Title row: `displayTitle` 21 semibold; trailing, in place of the status chip, a "Stop" secondary button (32 pt, radius 8, `raised` with hairline, 8 pt `destructive` dot before the label, elapsed `mm:ss` mono after it, id `stop-recording-header`) that calls the shared `RecordingController.stop()`. Meta line: full date, start time, source label. Below the meta line the two `LevelBars` (`MenuBarView.swift:293-331`) at 4 pt height and 240 pt width, labels 11 `faint`, fills `live-bright` | Every tab: `EmptyState` centred in the pane, well glyph `waveform`, title "Recording", body "The summary, transcript and tasks appear a few minutes after you stop." Scratchpad stays editable (notes during the call are in scope) with the same hint under the editor |
 | Queued | `info` chip "Queued" trailing the title; time row start time only; preview "Waiting to process" 13 `faint` | Status chip `info` "Queued"; meta line adds duration `clockText`; no level bars, no Stop | `EmptyState`, glyph `clock`, title "Queued", body "Processing starts when the current meeting finishes." |
 | Processing | `info` chip "Processing"; preview shows the stage label ("Transcribing", "Finding speakers", ...) 13 `faint` | Status chip `info` with the stage label; under the meta line a 240 pt linear `ProgressView(value:)` tinted `strong` with the stage label 12 `faint` beside it (the queue fraction the menu bar shows) | `EmptyState`, glyph `waveform.badge.magnifyingglass`, title = stage label, body "Audio stays on this Mac. This usually takes a minute or two.", a small spinner under the body |
 | Failed | `destructive` chip "Failed"; preview shows the first line of the reason 13 `faint` | Status chip `destructive` "Failed"; the reason as a `MessageRow(.error)` under the title row; "Re-run summary" stays in the Actions menu | `EmptyState`, glyph `exclamationmark.triangle`, title "Processing failed", body = first sentence of the reason, a secondary "Try again" button that calls the existing `rerunSummary()` (disabled while busy) |
@@ -421,8 +427,8 @@ Each step is one PR or one commit in a PR, in this order. Build and test command
 Verification.
 
 1. **Tokens.** `apps/macos/Steno/Design/Theme.swift`: add `sidebar` and `raised` as
-   `Theme.macTokens`, extend `Space`, replace the radii, add `Color.stenoSidebar`,
-   `Color.stenoRaised`. `apps/macos/StenoTests/ThemeTokensTests.swift`: a test that every
+   `Theme.macTokens`, extend `Space`, add the radii below `radiusXL`, add
+   `Color.stenoSidebar`, `Color.stenoRaised`. `apps/macos/StenoTests/ThemeTokensTests.swift`: a test that every
    `macTokens` entry resolves in both appearances and that no `macTokens` name collides
    with a CSS name; a test that every `Space` value except `xxs`, `hairline` and
    `radiusSM` is a multiple of 4 and that the radii strictly descend 16 > 12 > 8 > 6 > 4.
@@ -456,12 +462,10 @@ Verification.
    `MainWindow.swift` (three columns, `.balanced`, empty detail via `EmptyState`), new
    `Main/NavigationColumn.swift` (`RecordingControl` moved in from `MainWindow`, filter and
    tag rows, Settings row), `MeetingListView.swift` (remove the picker row, the toolbar
-   item and `.searchable`). `RecordingControl` keeps the sibling plan's presentation
-   struct and closures and only changes geometry, fills and type; if this step lands
-   before the sibling plan, the column renders a temporary `RecordButton` bound to
-   `controller.recorder.toggleRecording()` so the control is never dead. Done when `LaunchSmokeTests` passes and new assertions
-   hold: `app.buttons["record-cta"]` exists and sits above `app.buttons["nav-failed"]`
-   (compare frames), clicking `nav-failed` hides the fixture meeting and clicking
+   item and `.searchable`). `RecordingControl` keeps the start-recording plan's
+   presentation struct, ids and actions and only changes geometry, fills and type. Done
+   when `LaunchSmokeTests` passes and new assertions hold: `app.buttons["sidebar-record"]`
+   sits above `app.buttons["nav-failed"]` (compare frames), clicking `nav-failed` hides the fixture meeting and clicking
    `nav-all` shows it again, `app.textFields["search-meetings"]` exists and
    `app.buttons["delete-meeting"]` does not.
 6. **Meeting cards and selection.** New `Main/MeetingCard.swift` (`MeetingCard`,
@@ -483,8 +487,8 @@ Verification.
 7a. **Recording and processing states.** `MeetingDetailView.swift` (header Stop control,
    level bars, progress row), `Main/MeetingCard.swift` (entry variants),
    `Design/EmptyState.swift` variants. The Stop control calls
-   `controller.recorder.stop()` through the sibling plan's entry point when it has
-   merged, else directly; it is disabled while `.starting` or `.stopping`. The preview
+   `controller.recorder.stop()` and renders the start-recording plan's `StopLabel`; it
+   is disabled while `.starting` or `.stopping`. The preview
    environment seeds one meeting in each of recording (with a fake session so the
    recorder reports `.recording(since:)`), queued, processing and failed. Done when a UI
    test selects the recording meeting and finds `stop-recording-header` and the
@@ -493,10 +497,9 @@ Verification.
 8. **Onboarding.** `OnboardingView.swift`, `StenoApp.swift` (window style). Honour a
    `-steno-show-onboarding` argument in the UI-testing environment that opens the window
    with all permissions unknown. Done when a UI test opens it and finds the full subtitle
-   and four step titles, `OnboardingViewModelTests` is unchanged, and the light and dark
+   and the four page 1 step titles, `OnboardingViewModelTests` is unchanged, and the light and dark
    previews show white cards on the canvas with no truncated text.
-9. **Menu bar.** `MenuBarView.swift` only; `DetectionPanel.swift` is left to the
-   floating recording indicator plan. Done when `MenuBarViewModelTests` is unchanged and
+9. **Menu bar.** `MenuBarView.swift` only. Done when `MenuBarViewModelTests` is unchanged and
    the previews show hover veils on queue and recent rows.
 10. **Speaker review sheet.** `SpeakerReviewSheet.swift`. Done when
     `SpeakerReviewViewModelTests` is unchanged and no `.roundedBorder` remains in
@@ -560,6 +563,3 @@ Verification.
 7. Display title window: weekday for the last six days, then `MMM d`. Jamie uses the
    calendar event title and otherwise "Meeting" plus time; if the owner prefers the
    calendar title only, `displayTitle` collapses to the stored title.
-8. Resolved: [`2026-09-28-floating-recording-indicator.md`](2026-09-28-floating-recording-indicator.md)
-   (decision 12) keeps the header Stop alongside the bubble; both call the shared
-   recorder.
