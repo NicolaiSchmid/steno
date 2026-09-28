@@ -101,7 +101,7 @@ struct MenuBarView: View {
   private func queueRow(_ item: MenuBarViewModel.QueueItem) -> some View {
     let entry =
       controller.progress.entry(for: item.id)
-      ?? ProcessingProgressModel.Entry(meetingID: item.id)
+      ?? ProcessingProgressModel.Entry(meetingID: item.id, since: controller.environment.now())
     return VStack(alignment: .leading, spacing: Theme.Space.xs) {
       HStack(spacing: Theme.Space.sm) {
         Text(item.meeting.title)

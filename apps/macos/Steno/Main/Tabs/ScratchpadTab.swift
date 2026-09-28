@@ -2,13 +2,20 @@ import StenoCore
 import SwiftUI
 
 /// The one editable text: free notes typed by the user, saved once after a
-/// short pause and flushed when the view goes away.
+/// short pause and flushed when the view goes away. While the meeting is
+/// queued or processing the card sits above the editor.
 struct ScratchpadTab: View {
   let model: MeetingDetailViewModel
+  /// Where the pipeline is with this meeting while it is queued or
+  /// processing, from `controller.progress.entry(for:)`; nil otherwise.
+  let progress: ProcessingProgressModel.Entry?
   @State private var text = ""
 
   var body: some View {
     VStack(alignment: .leading, spacing: Theme.Space.sm) {
+      if let progress, let meeting = model.meeting {
+        ProcessingCard(entry: progress, meeting: meeting)
+      }
       TextEditor(text: $text)
         .font(.steno(Theme.TextSize.sm))
         .foregroundStyle(Color.stenoForeground)

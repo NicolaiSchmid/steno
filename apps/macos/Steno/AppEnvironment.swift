@@ -251,6 +251,16 @@ final class AppEnvironment {
     return environment
   }
 
+  /// Beside `-steno-ui-testing`: the preview's `FakeSpeechEngine` holds every
+  /// `transcribe` for `uiTestingTranscribeHold` and the sample meeting is
+  /// queued for processing over a synthetic recording, so the UI test can
+  /// watch the processing card cross the transcribe stage and vanish.
+  static let holdTranscribeArgument = "-steno-ui-testing-hold-transcribe"
+  /// Per lane, so the sample call stays in transcribe for twice this: long
+  /// enough for the UI test to launch, find the card and read the bar once
+  /// on a slow runner.
+  static let uiTestingTranscribeHold: Duration = .seconds(10)
+
   /// In-memory store seeded with StenoCore's `SampleData` meeting, the
   /// synthetic capture backend, fake engines, `FakeModelDownloader`, a fake
   /// HAL source for the detector and the app-protocol fakes with every
@@ -259,7 +269,9 @@ final class AppEnvironment {
   /// tests that need a failing or device-losing capture pass
   /// `makeCaptureSession`, drive the detector through `processActivity`,
   /// gate the pipeline through `makeSpeechEngine` (called once per pipeline
-  /// build) and the recording start through `calendar`.
+  /// build) and the recording start through `calendar`. Without
+  /// `makeSpeechEngine` the engine is a `FakeSpeechEngine` that honours
+  /// `holdTranscribeArgument`, which also queues the seeded meeting.
   static func preview(
     clock: any Clock<Duration> = ContinuousClock(),
     now: @escaping @Sendable () -> Date = Date.init,
@@ -267,7 +279,7 @@ final class AppEnvironment {
     seed: Bool = true,
     makeCaptureSession: MakeCaptureSession? = nil,
     processActivity: FakeProcessAudioActivity = FakeProcessAudioActivity(),
-    makeSpeechEngine: @escaping @Sendable () -> any SpeechEngine = { FakeSpeechEngine() },
+    makeSpeechEngine: (@Sendable () -> any SpeechEngine)? = nil,
     calendar: (any CalendarProviding)? = nil
   ) async throws -> AppEnvironment {
     let root = FileManager.default.temporaryDirectory
@@ -281,11 +293,20 @@ final class AppEnvironment {
     settings.modelsDirectory = root.appendingPathComponent("models", isDirectory: true)
     settings.launchAtLogin = false
     try await settingsStore.save(settings)
-    if seed { try await PreviewSeed.seed(store) }
+    let holdTranscribe: Duration? =
+      CommandLine.arguments.contains(holdTranscribeArgument) ? uiTestingTranscribeHold : nil
+    if seed {
+      try await PreviewSeed.seed(store)
+      if holdTranscribe != nil {
+        try await PreviewSeed.queueForProcessing(store, audioFolder: settings.audioFolder)
+      }
+    }
 
     let models = ModelStore(
       directory: settings.modelsDirectory, downloader: FakeModelDownloader())
     let memory = CosineSpeakerMemory(store: store)
+    let makeSpeechEngine: @Sendable () -> any SpeechEngine =
+      makeSpeechEngine ?? { FakeSpeechEngine(holdTranscribe: holdTranscribe) }
     let makeDependencies: MakeDependencies = { _, _ in
       PipelineDependencies(
         decoder: AVFoundationAudioCodec(),
@@ -358,5 +379,42 @@ enum PreviewSeed {
       meeting, segments: SampleData.segments(), speakers: SampleData.speakers())
     try await store.replaceSummary(
       meeting, tasks: SampleData.tasks(), decisions: SampleData.decisions().map(\.text))
+  }
+
+  /// The sample meeting as a recording the pipeline still has to process:
+  /// the meeting `.queued`, so `resumeUnfinishedProcessing()` starts it at
+  /// launch, over a synthetic two-lane master under `audioFolder` in the
+  /// recording layout. The master is 16 kHz Int16 WAV, one channel per
+  /// lane, which `AVFoundationAudioCodec` decodes and mixes down without a
+  /// CAF writer. The seeded transcript and summary stay until the run
+  /// replaces them; the UI test looks for the template heading both carry.
+  static func queueForProcessing(_ store: MeetingStore, audioFolder: URL) async throws {
+    let meeting = SampleData.meeting(state: .queued)
+    let layout = RecordingLayout(audioFolder: audioFolder, meetingID: meeting.id)
+    try layout.createDirectories()
+    var asset = SampleData.audioAsset()
+    asset.format = .wav16kInt16
+    asset.url = layout.master(.wav16kInt16)
+    asset.sidecars16k = [:]
+    asset.mixdownURL = nil
+    let samples = tone(seconds: meeting.duration, channels: asset.lanes.count)
+    try WAVWriter.data(
+      samples, sampleRate: Int(AudioBuffer16k.sampleRate), channels: asset.lanes.count
+    ).write(to: asset.url, options: .atomic)
+    try await store.save(meeting, asset: asset)
+  }
+
+  /// `seconds` of a 440 Hz sine at half scale, the same on every channel,
+  /// interleaved.
+  private static func tone(seconds: TimeInterval, channels: Int) -> [Int16] {
+    let rate = AudioBuffer16k.sampleRate
+    let frames = Int(seconds * rate)
+    var samples: [Float] = []
+    samples.reserveCapacity(frames * channels)
+    for frame in 0..<frames {
+      let value = Float(0.5 * sin(2 * Double.pi * 440 * Double(frame) / rate))
+      for _ in 0..<channels { samples.append(value) }
+    }
+    return WAVWriter.int16(samples)
   }
 }

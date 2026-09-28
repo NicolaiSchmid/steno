@@ -4,12 +4,19 @@ import SwiftUI
 /// The extracted tasks, read only: text, assignee, priority, due date.
 struct TasksTab: View {
   let model: MeetingDetailViewModel
+  /// Where the pipeline is with this meeting while it is queued or
+  /// processing, from `controller.progress.entry(for:)`; nil otherwise. The
+  /// card it drives replaces the pending copy and the spinner.
+  let progress: ProcessingProgressModel.Entry?
 
   var body: some View {
     ScrollView {
       VStack(alignment: .leading, spacing: Theme.Space.sm) {
+        if let progress, let meeting = model.meeting {
+          ProcessingCard(entry: progress, meeting: meeting)
+        }
         let tasks = model.export?.tasks ?? []
-        if tasks.isEmpty {
+        if tasks.isEmpty, progress == nil {
           PendingText(
             meeting: model.meeting, none: "No tasks", pending: "Tasks appear after processing")
         }

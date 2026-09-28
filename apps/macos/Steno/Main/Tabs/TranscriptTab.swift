@@ -5,12 +5,19 @@ import SwiftUI
 /// under one `Name — HH:MM:SS` header. Display only.
 struct TranscriptTab: View {
   let model: MeetingDetailViewModel
+  /// Where the pipeline is with this meeting while it is queued or
+  /// processing, from `controller.progress.entry(for:)`; nil otherwise. The
+  /// card it drives replaces the pending copy and the spinner.
+  let progress: ProcessingProgressModel.Entry?
 
   var body: some View {
     ScrollView {
       LazyVStack(alignment: .leading, spacing: Theme.Space.lg) {
+        if let progress, let meeting = model.meeting {
+          ProcessingCard(entry: progress, meeting: meeting)
+        }
         let turns = TranscriptTurns.group(model.export?.segments ?? [])
-        if turns.isEmpty {
+        if turns.isEmpty, progress == nil {
           PendingText(
             meeting: model.meeting, none: "No transcript",
             pending: "Transcript appears after processing")

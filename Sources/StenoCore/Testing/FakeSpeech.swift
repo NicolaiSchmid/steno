@@ -33,6 +33,11 @@ public struct FakeSpeechEngine: SpeechEngine, Sendable {
   /// Runs before every `transcribe`; tests advance a `ManualClock` here so a
   /// lane takes a known time.
   public var onTranscribe: (@Sendable () async -> Void)?
+  /// Wall-clock time every `transcribe` sleeps on `ContinuousClock` after
+  /// `onTranscribe`, so a run stays inside the stage long enough for a UI
+  /// test to watch it; nil sleeps not at all. Cancellation ends the sleep
+  /// and the call with `CancellationError`.
+  public var holdTranscribe: Duration?
   public let transcriptions = CallLog<TranscribeCall>()
   public let preparations = CallLog<Bool>()
 
@@ -42,7 +47,8 @@ public struct FakeSpeechEngine: SpeechEngine, Sendable {
     language: LanguageTag? = "de",
     textPrefix: String = "fake",
     wordTimings: Bool = false,
-    failure: (any Error & Sendable)? = nil
+    failure: (any Error & Sendable)? = nil,
+    holdTranscribe: Duration? = nil
   ) {
     self.id = id
     self.supportedLanguages = [LanguageTag("de").language, LanguageTag("en").language]
@@ -51,6 +57,7 @@ public struct FakeSpeechEngine: SpeechEngine, Sendable {
     self.textPrefix = textPrefix
     self.wordTimings = wordTimings
     self.failure = failure
+    self.holdTranscribe = holdTranscribe
   }
 
   public func prepare() async throws {
@@ -62,6 +69,7 @@ public struct FakeSpeechEngine: SpeechEngine, Sendable {
   {
     await transcriptions.record(TranscribeCall(duration: audio.duration, hint: hint))
     await onTranscribe?()
+    if let holdTranscribe { try await ContinuousClock().sleep(for: holdTranscribe) }
     if let failure { throw failure }
     return Self.segments(
       duration: audio.duration, segmentSeconds: segmentSeconds, language: language,

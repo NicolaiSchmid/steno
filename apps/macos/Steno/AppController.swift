@@ -34,7 +34,7 @@ final class AppController {
     self.defaults = defaults
     self.recorder = RecordingController(environment: environment)
     self.menuBar = MenuBarViewModel(environment: environment)
-    self.progress = ProcessingProgressModel()
+    self.progress = ProcessingProgressModel(now: environment.now)
     self.detection = DetectionController(environment: environment)
     detection.startRecording = { [weak self] in await self?.recorder.start(mode: .call) }
     recorder.recordingDidChange = { [weak self] recording in

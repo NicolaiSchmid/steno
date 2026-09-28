@@ -16,7 +16,7 @@ struct MeetingListView: View {
       Divider().overlay(Color.stenoBorder)
       List(selection: $model.selection) {
         ForEach(model.meetings) { meeting in
-          MeetingRow(meeting: meeting)
+          MeetingRow(meeting: meeting, progress: progress.entry(for: meeting.id))
             .tag(meeting.id)
             .listRowSeparator(.hidden)
             .contextMenu {
@@ -127,6 +127,10 @@ struct MeetingListView: View {
 
 struct MeetingRow: View {
   let meeting: Meeting
+  /// The pipeline's stage while the meeting is queued or processing,
+  /// "Transcribing…", as the card and the header chip read it; nil
+  /// otherwise. Shown as the row's preview line.
+  var progress: ProcessingProgressModel.Entry? = nil
 
   var body: some View {
     VStack(alignment: .leading, spacing: Theme.Space.xs) {
@@ -151,6 +155,12 @@ struct MeetingRow: View {
       }
       .font(.steno(Theme.TextSize.xxs))
       .foregroundStyle(Color.stenoFaint)
+      if let progress {
+        Text(progress.title)
+          .font(.steno(Theme.TextSize.xs))
+          .foregroundStyle(Color.stenoFaint)
+          .lineLimit(1)
+      }
     }
     .padding(.vertical, Theme.Space.xs)
     .accessibilityIdentifier("meeting-\(meeting.id.uuidString)")

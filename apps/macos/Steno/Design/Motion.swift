@@ -13,6 +13,15 @@ enum Motion {
   static let durationEntrance: TimeInterval = 0.250
   /// Press-in is near-instant; release relaxes at the functional tempo.
   static let durationPressIn: TimeInterval = 0.100
+  /// One tick of a value sampled at 1 Hz (a countdown, a progress bar): the
+  /// tween lasts exactly until the next sample, so the steps read as one
+  /// continuous motion. Named by the floating-indicator plan; added here
+  /// first for the processing card.
+  static let durationCountdown: TimeInterval = 1
+  /// One half-cycle of an indeterminate pulse.
+  static let durationPulse: TimeInterval = 1
+  /// The pulse's low opacity; the high is 1.
+  static let pulseOpacity: Double = 0.5
 
   /// The one spatial spring: about 250 ms settle, no visible bounce.
   static let springDamping: Double = 28
@@ -31,4 +40,9 @@ enum Motion {
   static var spatial: Animation {
     .interpolatingSpring(mass: springMass, stiffness: springStiffness, damping: springDamping)
   }
+  /// Linear, so consecutive 1 Hz samples join without a visible ease.
+  static var countdown: Animation { .linear(duration: durationCountdown) }
+  /// Ease-in-out between opacity 1 and `pulseOpacity`; callers repeat it
+  /// with `repeatForever(autoreverses: true)` and drop it under Reduce Motion.
+  static var pulse: Animation { .easeInOut(duration: durationPulse) }
 }

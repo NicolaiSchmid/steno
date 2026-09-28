@@ -7,40 +7,24 @@ import StenoCore
 /// meeting list; the menu bar queue row, the list entry and the detail
 /// view read `entry(for:)`, so the three surfaces never disagree. The
 /// fraction and the estimate are core's numbers untouched; motion between
-/// events is the presenter's job and stays out of here.
+/// events is the presenter's job (`ProgressPresentation`) and stays out of
+/// here, which only stamps each entry with `now` when its event landed.
 @MainActor
 @Observable
 final class ProcessingProgressModel {
-  struct Entry: Equatable, Sendable {
-    let meetingID: UUID
-    /// The last `progress` event of the run; nil before the run's first
-    /// event, while the meeting waits in the queue or the engines load.
-    var progress: ProcessingProgress?
-
-    init(meetingID: UUID, progress: ProcessingProgress? = nil) {
-      self.meetingID = meetingID
-      self.progress = progress
-    }
-
-    var stage: PipelineStage? { progress?.stage }
-
-    /// `PipelineStage.label` plus an ellipsis, "Transcribing…"; "Waiting to
-    /// process" before the first event. The card, the chip and the menu bar
-    /// row all read this.
-    var title: String {
-      guard let progress else { return "Waiting to process" }
-      return "\(progress.stage.label)…"
-    }
-
-    /// The bar's value; 0 before the first event.
-    var fraction: Double { progress?.fraction ?? 0 }
-
-    /// Wall clock the run is expected to still take; nil before the first
-    /// event.
-    var estimatedRemaining: Duration? { progress?.estimatedRemaining }
-  }
+  /// Spelled `ProcessingProgressModel.Entry` at every call site; a top-level
+  /// struct so that `TabText`, which is plain code, builds and reads
+  /// entries without inheriting the model's isolation.
+  typealias Entry = ProcessingEntry
 
   private(set) var entries: [UUID: Entry] = [:]
+  private let now: @Sendable () -> Date
+
+  /// `now` stamps `Entry.since`; the app passes the environment's clock so
+  /// tests run on a fixed date.
+  init(now: @escaping @Sendable () -> Date = Date.init) {
+    self.now = now
+  }
 
   func entry(for meetingID: UUID) -> Entry? {
     entries[meetingID]
@@ -55,12 +39,12 @@ final class ProcessingProgressModel {
     switch event {
     case .progress(let meetingID, let progress):
       if progress.stage == .decode {
-        entries[meetingID] = Entry(meetingID: meetingID, progress: progress)
+        entries[meetingID] = Entry(meetingID: meetingID, progress: progress, since: now())
       } else if let current = entries[meetingID] {
         var next = progress
         next.fraction = max(next.fraction, current.fraction)
         next.nextFraction = max(next.nextFraction, next.fraction)
-        entries[meetingID] = Entry(meetingID: meetingID, progress: next)
+        entries[meetingID] = Entry(meetingID: meetingID, progress: next, since: now())
       }
     case .deleted(let meetingID):
       entries[meetingID] = nil
@@ -76,10 +60,44 @@ final class ProcessingProgressModel {
     let live = Set(
       meetings.filter { $0.state == .queued || $0.state == .processing }.map(\.id))
     for id in live where entries[id] == nil {
-      entries[id] = Entry(meetingID: id)
+      entries[id] = Entry(meetingID: id, since: now())
     }
     for id in Array(entries.keys) where !live.contains(id) {
       entries[id] = nil
     }
   }
+}
+
+/// One queued or processing meeting as `ProcessingProgressModel` tracks it.
+struct ProcessingEntry: Equatable, Sendable {
+  let meetingID: UUID
+  /// The last `progress` event of the run; nil before the run's first
+  /// event, while the meeting waits in the queue or the engines load.
+  var progress: ProcessingProgress?
+  /// When `progress` landed, or when the entry was created before any
+  /// event; the presenter measures its elapsed time from here.
+  var since: Date
+
+  init(meetingID: UUID, progress: ProcessingProgress? = nil, since: Date) {
+    self.meetingID = meetingID
+    self.progress = progress
+    self.since = since
+  }
+
+  var stage: PipelineStage? { progress?.stage }
+
+  /// `PipelineStage.label` plus an ellipsis, "Transcribing…"; "Waiting to
+  /// process" before the first event. The card, the chip, the list entry
+  /// and the menu bar row all read this.
+  var title: String {
+    guard let progress else { return "Waiting to process" }
+    return "\(progress.stage.label)…"
+  }
+
+  /// The bar's value; 0 before the first event.
+  var fraction: Double { progress?.fraction ?? 0 }
+
+  /// Wall clock the run is expected to still take; nil before the first
+  /// event.
+  var estimatedRemaining: Duration? { progress?.estimatedRemaining }
 }
