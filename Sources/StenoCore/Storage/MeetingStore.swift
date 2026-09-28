@@ -239,7 +239,7 @@ public final class MeetingStore: Sendable {
   /// The model's guess who each speaker is, at most one per speaker, in
   /// speaker id order: written with every summary, removed by `confirm` and
   /// with the speaker or the meeting. Never applied automatically; the
-  /// review sheet offers it beside the cosine match and the calendar
+  /// speaker picker offers it beside the cosine match and the calendar
   /// attendees (#78).
   public func nameSuggestions(meetingID: UUID) async throws -> [SpeakerNameSuggestion] {
     try await writer.read { db in

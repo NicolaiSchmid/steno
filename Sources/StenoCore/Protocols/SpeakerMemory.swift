@@ -1,11 +1,11 @@
 /// Known voices across meetings: pure math over `MeetingStore.persons()`.
+/// A person's voice (`Person.embedding` and `sampleCount`) is written by the
+/// store: `MeetingStore.confirm` and the merges recompute it from the
+/// person's confirmed speakers (`refreshVoice`). This protocol only reads it.
 public protocol SpeakerMemory: Sendable {
-  /// Candidates ranked by cosine similarity, best first; feeds the review
-  /// sheet.
+  /// Candidates ranked by cosine similarity, best first; feeds `match` and
+  /// the speaker picker.
   func candidates(for embedding: Embedding, limit: Int) async throws -> [SpeakerMatch]
-  /// Folds the embedding into the person's running mean with a capped sample
-  /// count, and saves the person.
-  func enroll(_ embedding: Embedding, as person: Person) async throws
 }
 
 extension SpeakerMemory {
