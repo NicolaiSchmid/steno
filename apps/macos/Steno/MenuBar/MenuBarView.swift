@@ -215,8 +215,9 @@ struct MenuBarView: View {
   }
 }
 
-/// A section of the popover: the label, inset to the rows' horizontal
-/// padding, over the rows at 2 pt.
+/// A section of the popover: the label at the content edge over the rows
+/// at 2 pt. The rows bleed their horizontal padding into the gutter so the
+/// hover veil runs past the text while every text edge stays at 16 pt.
 private struct PopoverSection<Rows: View>: View {
   let title: String
   @ViewBuilder var rows: () -> Rows
@@ -224,8 +225,8 @@ private struct PopoverSection<Rows: View>: View {
   var body: some View {
     VStack(alignment: .leading, spacing: Theme.Space.xs) {
       SectionLabel(text: title)
-        .padding(.horizontal, Theme.Space.sm)
       VStack(spacing: Theme.Space.xxs, content: rows)
+        .padding(.horizontal, -Theme.Space.sm)
     }
   }
 }
