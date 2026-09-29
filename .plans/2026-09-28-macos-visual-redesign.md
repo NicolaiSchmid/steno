@@ -174,13 +174,15 @@ beauty pass". The screenshot adds these to F9 to F22.
    Reason: design-craft's one-hue rule, parity with mobile, and a black CTA on a light
    canvas is a proven premium idiom. Open question 1 keeps the door open.
 4. **Three columns: nav, list, detail.** `NavigationSplitView(sidebar:content:detail:)`
-   with `.balanced` style and `columnVisibility` fixed to `.all`; the sidebar toggle is removed
+   with `.balanced` style and `columnVisibility` held at `.all`; the sidebar toggle is removed
    from the toolbar. Jamie navigates page-by-page; a Mac app keeps the list visible next to the
    meeting. The nav column never collapses because it holds the only Record control in the
-   window, and a window with no way to record is the complaint that started this round; the
-   960 pt minimum (F16) is what keeps the split view from collapsing it on its own. If the
-   first build shows 220 pt of mostly empty column, the fallback is two columns with the
-   control in the list header, decided then.
+   window, and a window with no way to record is the complaint that started this round. A
+   constant binding does not stop AppKit collapsing the column on a drag past its minimum, so
+   the visibility is `@State` and reverted to `.all` in `onChange`; the column minimums
+   (200 + 320 + 440) add up to the 960 pt window minimum (F16), so the layout is never
+   over-constrained. If the first build shows 220 pt of mostly empty column, the fallback is
+   two columns with the control in the list header, decided then.
 5. **Filters become nav rows; tags become a nav group.** The state picker (F11) turns
    into four rows (All, In progress, Ready, Failed) with counts; tags list under a
    "Tags" label. Same `MeetingListViewModel.stateFilter` and `tagFilter`, new placement.
@@ -192,8 +194,9 @@ beauty pass". The screenshot adds these to F9 to F22.
 7. **Hidden title bar, no window title.** `.windowStyle(.hiddenTitleBar)` on the main
    and onboarding windows; the toolbar is empty and hidden. Each column paints its own opaque
    background so the split view's vibrancy never shows (F14).
-8. **System font.** SF Pro at the token sizes; headings get the ladder's `-0.025 em` tracking
-   (`-0.65`, `-0.5`, `-0.45` pt at 26, 21 and 18), body and controls none.
+8. **System font.** SF Pro at the token sizes; headings get a light negative tracking
+   (`-0.3`, `-0.2`, `-0.2` pt at 26, 21 and 18, as the type table has it), body and
+   controls none.
 9. **Radii ladder 16 / 12 / 8 / 6 / 4** as `Theme.Radius.xl / lg / md / sm / xs`, one enum
    that reads like `Space` and iterates `allCases` in the descent test. Cards and the CTA at
    12, controls and inputs at 8, chips and segmented cells at 6, tiny wells at 4. 16 is
@@ -336,8 +339,8 @@ The pulse honours Reduce Motion by holding at opacity 1.
 
 **Main window** (`StenoApp.swift`, `MainWindow.swift`): `.windowStyle(.hiddenTitleBar)`,
 `.toolbar(removing: .title)`, `.toolbarBackground(.hidden, for: .windowToolbar)`, no toolbar
-items, `columnVisibility: .constant(.all)`, `minWidth 960, minHeight 600`, default 1120 x 720.
-Three columns:
+items, `columnVisibility` held at `.all` (decision 4), `minWidth 960, minHeight 600`, default
+1120 x 720. Three columns:
 
 1. **Nav column** (`Main/NavigationColumn.swift`), width min 200 ideal 220 max 260,
    fill `sidebar`, right hairline. From the top: 8 pt below the toolbar, `RecordingControl`;
@@ -358,7 +361,8 @@ Three columns:
    `EmptyState` centred in the scroll area (`waveform`, "No meetings yet", body from the
    start-recording plan, no action button because the control sits above; or "No meetings
    match" with a secondary "Clear filters" that resets query, state and tag).
-3. **Detail pane** (`MeetingDetailView.swift`), min 480, fill `background`. The header
+3. **Detail pane** (`MeetingDetailView.swift`), min 440 (so the three minimums meet the 960
+   pt window), fill `background`. The header
    stack (decision 17), at 32 pt sides, 24 pt top:
    1. Setup banner (onboarding plan): a `Card` with `MessageRow(kind: .info)` and its
       buttons, full width, 32 pt insets like the header, 16 pt below; present only when the
@@ -469,8 +473,12 @@ selection altogether, and `.listStyle(.plain)` keeps the highlight. The list col
   its full 8 pt padded frame, `.accessibilityAddTraits(isSelected ? [.isSelected] : [])`,
   `.accessibilityIdentifier("meeting-<uuid>")`; the click sets `model.selection`.
 - The selected entry draws the 2 pt rail in `strong` and a `secondary` veil at radius 8;
-  hover draws a `card` veil; both swap over `Motion.functional`. No system colour is
-  used anywhere in the column.
+  hover draws a `card` veil; both swap over `Motion.functional`. While the column has
+  keyboard focus the selected entry also wears the `ring` hairline the focused search field
+  uses, so focus reads as one rule; the column takes focus once when the store first fills
+  after the window opens and on a click, so the arrows work without a click first (not
+  `defaultFocus`, which re-asserted the list against the ⌘F move into the search field). No
+  system colour is used anywhere in the column.
 - The column root is `.focusable()`, `.focusEffectDisabled()`, `.onMoveCommand` moves
   the selection to the previous or next entry across day boundaries in `dayGroups`
   order, `.onKeyPress(.return)` is a no-op (the detail already follows selection),
@@ -696,6 +704,10 @@ Risks and checks (settled by the steps, not by the owner):
 4. Display title window: weekday for the last six days, then month and day. Jamie uses the
    calendar event title and otherwise "Meeting" plus time; if the owner prefers the
    calendar title only, `displayTitle` collapses to the stored title.
+5. Derived titles are computed at render time, so a window left open across midnight shows
+   "Monday 10:06" for a meeting that is now seven days old until the list next changes. A
+   `TimelineView(.everyMinute)` around the cards would fix it at the cost of a timer; not
+   done in step 6.
 
 ## Deviations (implementation)
 
@@ -707,13 +719,16 @@ Recorded 2026-09-29 while implementing steps 7, 7a, 8 and 11 (layout PR B1).
   of every tab while the progress model has an entry, with the status chip as the header's only
   processing signal. The states table's queued and processing rows cover the moment before the
   model has seen the meeting. The level bars (row 6 while recording) are as specified.
-- **Step 7, display title.** The header reads `meeting.title` until step 3's
-  `Meeting.displayTitle` (PR #128) merges; the meta line therefore keeps date, time and source
-  for every meeting. Decision 13's swap is one edit in `MeetingDetailView.metaRow` once the
-  helper exists.
-- **Step 7a, `-steno-start-recording`.** Defined in `UITestScenario` on this branch in the shape
-  PR #128 uses (`startRecordingFlag`, `startsRecording`); the seed sets and the failed and
-  processing entries the smoke test was to select come with PR #128's rich seed.
+- **Step 7, display title.** The header reads `meeting.displayTitle()` (step 3, PR #128); for a
+  derived title the meta line drops the date, time and source, and the source sits beside the
+  title as a neutral chip (decision 13). A stored title keeps the full meta line.
+- **Step 7a, smoke criterion.** `testHeaderStopEndsTheRecording` runs on the sample seed and
+  reads the header's elapsed label and level bars; `testFailedMeetingShowsItsRowAndTryAgain`
+  selects the rich seed's failed entry and reads "Processing failed" and the disabled "Try
+  again". The processing entry is not selected: the fakes resume and finish it within a second
+  of launch, so its chip cannot be read reliably, and the entries carry no
+  `meeting-<uuid>-state` value (the cards expose `meeting-<uuid>` alone). Stop's outcome is read
+  through the header control disappearing and the row count, not a state value.
 - **Step 7, processing row title.** The tab body's processing row is titled "Processing", not the
   stage label the table gives: the stage lives in the `ProcessingCard` now (above), and the row
   shows only before the progress model has seen the meeting.

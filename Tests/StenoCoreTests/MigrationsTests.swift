@@ -71,7 +71,10 @@ import Testing
     try queue.read { (db) throws in
       #expect(try Migrations.migrator().appliedIdentifiers(db) == Set(Migrations.identifiers))
       let meeting = try MeetingRow.fetchOne(db, key: SampleData.meetingID)?.meeting
-      #expect(meeting == SampleData.meeting())
+      // A v1 row has no origin; the v3 column's default applies.
+      var expected = SampleData.meeting()
+      expected.titleOrigin = .default
+      #expect(meeting == expected)
       #expect(meeting?.endReason == nil)
       #expect(meeting?.titleOrigin == .default)
       #expect(
@@ -117,8 +120,10 @@ import Testing
     try Migrations.migrator().migrate(queue)
     try queue.write { db in
       #expect(try Migrations.migrator().appliedIdentifiers(db) == Set(Migrations.identifiers))
-      #expect(
-        try MeetingRow.fetchOne(db, key: SampleData.meetingID)?.meeting == SampleData.meeting())
+      // The pre-v3 insert carries no origin; the new column's default applies.
+      var expected = SampleData.meeting()
+      expected.titleOrigin = .default
+      #expect(try MeetingRow.fetchOne(db, key: SampleData.meetingID)?.meeting == expected)
       let reasons: [RecordingEndReason] = [
         .manual, .callEnded(appName: "Zen"), .callEnded(appName: nil), .deviceLost, .quit,
         .failed,

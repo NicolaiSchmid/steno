@@ -33,10 +33,7 @@ struct NavRow: View {
 
   private var tint: Color { isSelected ? Color.stenoStrong : Color.stenoMutedForeground }
 
-  private var fill: Color {
-    if isSelected { return Color.stenoSecondary }
-    return hovering ? Color.stenoCard : Color.clear
-  }
+  private var fill: Color { Color.stenoRowVeil(isSelected: isSelected, hovering: hovering) }
 
   var body: some View {
     Button(action: action) {

@@ -139,16 +139,24 @@ struct MeetingDetailView: View {
   /// success, and the Stop takes over the moment the recorder holds the row.
   private func titleRow(_ meeting: Meeting, stop: HeaderStop?) -> some View {
     HStack(alignment: .center, spacing: Theme.Space.md) {
-      Text(meeting.title)
+      Text(meeting.displayTitle())
         .font(.steno(Theme.TextSize.xl, weight: .semibold))
         .tracking(-0.2)
         .foregroundStyle(Color.stenoStrong)
         .textSelection(.enabled)
         .lineLimit(2)
         .fixedSize(horizontal: false, vertical: true)
+        .accessibilityIdentifier("meeting-title")
+      if meeting.isTitleDerived {
+        // Decision 13: a derived title ("Monday 10:06") carries the source
+        // as a neutral chip beside it, not as a word in it.
+        StatusChip(text: meeting.source.label, style: .neutral)
+      }
       Spacer(minLength: Theme.Space.sm)
       if let stop {
-        StopButton(state: stop, id: "header-stop") { Task { await recorder.stop() } }
+        StopButton(state: stop, surface: .header, id: "header-stop") {
+          Task { await recorder.stop() }
+        }
       } else if let entry = controller.progress.entry(for: meeting.id) {
         StatusChip(text: entry.title, color: Color.stenoInfo)
       } else {
@@ -160,13 +168,15 @@ struct MeetingDetailView: View {
     }
   }
 
-  /// One 12 pt `muted` line, facts joined by " · ": date and time, source,
+  /// One 12 pt `muted` line, facts joined by " · ": date and time and the
+  /// source (unless the derived title and its chip already say them),
   /// duration once known, language, token count.
   private func metaRow(_ meeting: Meeting) -> some View {
-    var facts: [String] = [
-      meeting.startedAt.formatted(.dateTime.year().month().day().hour().minute()),
-      meeting.source.label,
-    ]
+    var facts: [String] = []
+    if !meeting.isTitleDerived {
+      facts.append(meeting.startedAt.formatted(.dateTime.year().month().day().hour().minute()))
+      facts.append(meeting.source.label)
+    }
     if meeting.duration > 0 { facts.append(meeting.duration.clockText) }
     if let language = meeting.language { facts.append(language.localizedName()) }
     if let usage = meeting.llmUsage {

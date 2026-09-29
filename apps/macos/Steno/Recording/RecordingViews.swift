@@ -80,37 +80,138 @@ struct StopLabel: View {
   }
 }
 
-/// The Stop control both surfaces share: a secondary button carrying
-/// `StopLabel` while recording, with `id` naming the surface (`sidebar-stop`,
-/// `header-stop`), and a disabled button holding a spinner in its place while
-/// the stop is finishing, so the control keeps its box. `fillsWidth`
-/// stretches the label across the sidebar column; the header's hugs it.
+/// The Stop control both surfaces share: a button carrying `StopLabel` while
+/// recording, with `id` naming the surface (`sidebar-stop`, `header-stop`),
+/// and a disabled button holding a spinner in its place while the stop is
+/// finishing, so the control keeps its box. The header's is a secondary
+/// button hugging its label; the sidebar's is the 40 pt `StopControlStyle`
+/// box across the nav column with the compact level meter trailing.
 struct StopButton: View {
+  enum Surface {
+    case header
+    case sidebar(levels: LaneLevels?)
+  }
+
   let state: HeaderStop
-  var fillsWidth = false
+  let surface: Surface
   let id: String
   let stop: () -> Void
 
   var body: some View {
     switch state {
     case .stop(let since):
-      Button(action: stop) {
-        StopLabel(since: since)
-          .frame(maxWidth: fillsWidth ? .infinity : nil)
-      }
-      .buttonStyle(StenoSecondaryButtonStyle())
-      .help("Stop recording (⌘⇧R)")
-      .accessibilityIdentifier(id)
+      styled(Button(action: stop) { label(since: since) })
+        .help("Stop recording (⌘⇧R)")
+        .accessibilityIdentifier(id)
     case .stopping:
-      Button(action: {}) {
-        ProgressView()
-          .controlSize(.small)
-          .frame(maxWidth: fillsWidth ? .infinity : nil)
-      }
-      .buttonStyle(StenoSecondaryButtonStyle())
+      styled(
+        Button(action: {}) {
+          ProgressView()
+            .controlSize(.small)
+            .frame(maxWidth: fillsWidth ? .infinity : nil)
+        }
+      )
       .disabled(true)
       .accessibilityLabel(RecordingState.stopping.label)
     }
+  }
+
+  private var fillsWidth: Bool {
+    if case .sidebar = surface { return true }
+    return false
+  }
+
+  @ViewBuilder
+  private func label(since: Date) -> some View {
+    switch surface {
+    case .header:
+      StopLabel(since: since)
+    case .sidebar(let levels):
+      HStack(spacing: Theme.Space.sm) {
+        StopLabel(since: since)
+        Spacer(minLength: Theme.Space.sm)
+        if let levels {
+          CompactLevelBars(levels: levels)
+        }
+      }
+      .padding(.horizontal, Theme.Control.buttonInset)
+    }
+  }
+
+  @ViewBuilder
+  private func styled(_ button: Button<some View>) -> some View {
+    switch surface {
+    case .header: button.buttonStyle(StenoSecondaryButtonStyle())
+    case .sidebar: button.buttonStyle(StopControlStyle())
+    }
+  }
+}
+
+/// The recording box: the CTA's 40 pt and radius 12 on a `raised` surface
+/// with a hairline, the `card` veil on hover, 14 pt medium; destructive is
+/// the dot and the word inside `StopLabel`, never a fill.
+private struct StopControlStyle: ButtonStyle {
+  func makeBody(configuration: Configuration) -> some View {
+    Box(configuration: configuration)
+  }
+
+  private struct Box: View {
+    let configuration: Configuration
+    @State private var hovering = false
+    @Environment(\.isEnabled) private var isEnabled
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    var body: some View {
+      configuration.label
+        .font(.steno(Theme.TextSize.sm, weight: .medium))
+        .foregroundStyle(Color.stenoStrong)
+        .frame(height: Theme.Control.ctaHeight)
+        .frame(maxWidth: .infinity)
+        .background(
+          ZStack {
+            Theme.Radius.lg.shape.fill(Color.stenoRaised)
+            Theme.Radius.lg.shape.fill(hovering && isEnabled ? Color.stenoCard : Color.clear)
+          }
+        )
+        .overlay(Theme.Radius.lg.shape.hairline())
+        .contentShape(Theme.Radius.lg.shape)
+        .onHover { hovering = $0 }
+        .animation(Motion.swap(reduceMotion: reduceMotion), value: hovering)
+        .opacity(configuration.isPressed ? Motion.controlPressOpacity : 1)
+        .opacity(isEnabled ? 1 : Motion.disabledOpacity)
+        .animation(Motion.swap(reduceMotion: reduceMotion), value: configuration.isPressed)
+    }
+  }
+}
+
+/// The level meter inside the Stop control: one 4 pt bar per lane, 40 pt
+/// wide, 4 pt apart (12 pt tall for a call), `strong` over a `border`
+/// track, no labels. The labelled `LevelBars` stay on the menu bar item.
+private struct CompactLevelBars: View {
+  let levels: LaneLevels
+
+  var body: some View {
+    VStack(alignment: .leading, spacing: Theme.Space.xs) {
+      bar(levels.mic)
+      if let system = levels.system {
+        bar(system)
+      }
+    }
+    .frame(width: Theme.Control.meterWidth)
+    .accessibilityElement(children: .ignore)
+    .accessibilityLabel("Input level")
+    .accessibilityValue("\(Int(LevelBars.fraction(levels.mic.rms) * 100)) percent")
+  }
+
+  private func bar(_ level: LaneLevel) -> some View {
+    ZStack(alignment: .leading) {
+      Capsule().fill(Color.stenoBorder)
+      Capsule()
+        .fill(Color.stenoStrong)
+        .frame(width: Theme.Control.meterWidth * LevelBars.fraction(level.rms))
+        .animation(Motion.functional, value: level.rms)
+    }
+    .frame(height: Theme.Control.meterHeight)
   }
 }
 

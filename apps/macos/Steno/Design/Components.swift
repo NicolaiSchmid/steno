@@ -89,13 +89,17 @@ struct StenoSecondaryButtonStyle: ButtonStyle {
 /// The ghost action: a bare 13 pt label in `faint`, `strong` on hover, no
 /// box, the button height as the hit height. "Skip" on the onboarding rows,
 /// "Not now" on the setup banner and the detail footer's text actions.
+/// `tint` is the resting colour; the menu bar footer passes `muted`.
 struct StenoGhostButtonStyle: ButtonStyle {
+  var tint: Color = Color.stenoFaint
+
   func makeBody(configuration: Configuration) -> some View {
-    Ghost(configuration: configuration)
+    Ghost(configuration: configuration, tint: tint)
   }
 
   private struct Ghost: View {
     let configuration: Configuration
+    let tint: Color
     @State private var hovering = false
     @Environment(\.isEnabled) private var isEnabled
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -103,7 +107,7 @@ struct StenoGhostButtonStyle: ButtonStyle {
     var body: some View {
       configuration.label
         .font(.steno(Theme.TextSize.xs))
-        .foregroundStyle(hovering && isEnabled ? Color.stenoStrong : Color.stenoFaint)
+        .foregroundStyle(hovering && isEnabled ? Color.stenoStrong : tint)
         .frame(height: Theme.Control.buttonHeight)
         .contentShape(Rectangle())
         .onHover { hovering = $0 }

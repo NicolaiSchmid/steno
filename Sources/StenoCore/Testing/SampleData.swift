@@ -39,6 +39,7 @@ public enum SampleData {
       calendarEventID: "event-1",
       tags: ["strategie", "q4"],
       state: state,
+      titleOrigin: .calendar,
       templateID: SummaryTemplate.defaultID,
       summary: summaryDocument(),
       scratchpad: "Nachfassen wegen Budget.",

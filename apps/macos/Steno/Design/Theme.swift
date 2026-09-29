@@ -182,6 +182,9 @@ enum Theme {
     static let chipInset: CGFloat = 6
     /// Horizontal padding inside nav rows, inputs and the search field.
     static let rowInset: CGFloat = 10
+    /// Vertical padding inside the menu bar popover's queue and recent rows
+    /// (8 pt horizontally, from `Space`).
+    static let menuRowInset: CGFloat = 6
     /// The glyph column in a nav row.
     static let navGlyphWidth: CGFloat = 20
     /// The glyph inside a chip, one point under its 11 pt text.
@@ -189,6 +192,16 @@ enum Theme {
     /// The empty state's icon well and the glyph inside it.
     static let emptyWellSize: CGFloat = 48
     static let emptySymbolSize: CGFloat = 20
+    /// The Record call CTA: the glyph well before the label and the
+    /// trailing chevron segment that opens the in-person menu.
+    static let ctaWellSize: CGFloat = 28
+    static let ctaMenuWidth: CGFloat = 28
+    /// The selection rail on a list entry.
+    static let railWidth: CGFloat = 2
+    /// The compact level meter inside the Stop control: one 4 pt bar per
+    /// lane, 40 pt wide.
+    static let meterWidth: CGFloat = 40
+    static let meterHeight: CGFloat = 4
   }
 }
 
@@ -220,6 +233,13 @@ extension Color {
   static var stenoDestructive: Color { Theme.destructive.color }
   static var stenoDestructiveStrong: Color { Theme.destructiveStrong.color }
   static var stenoCodeBackground: Color { Theme.codeBackground.color }
+
+  /// The one veil behind a row the user picks (`NavRow`, `MeetingEntry`):
+  /// `secondary` while selected, `card` while hovered, nothing otherwise.
+  static func stenoRowVeil(isSelected: Bool, hovering: Bool) -> Color {
+    if isSelected { return stenoSecondary }
+    return hovering ? stenoCard : .clear
+  }
 }
 
 extension Font {

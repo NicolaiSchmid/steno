@@ -92,6 +92,7 @@ final class ThemeTokensTests: XCTestCase {
     XCTAssertEqual(Theme.Control.buttonInset, 14)
     XCTAssertEqual(Theme.Control.chipInset, 6)
     XCTAssertEqual(Theme.Control.rowInset, 10)
+    XCTAssertEqual(Theme.Control.menuRowInset, 6)
   }
 
   func testMotionTokensMirrorMobile() {

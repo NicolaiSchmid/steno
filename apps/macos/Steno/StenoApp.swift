@@ -17,13 +17,17 @@ struct StenoApp: App {
   }
 
   var body: some Scene {
+    // No title bar: the window carries no title and no toolbar items; each
+    // column of `MainWindow` paints its own opaque background up to the top
+    // edge, so nothing but the traffic lights sits above the content.
     Window("Steno", id: "main") {
       RootView(bootstrap: bootstrap) { controller in
         MainWindow(controller: controller)
           .modifier(OnboardingOpener(controller: controller))
       }
     }
-    .defaultSize(width: 1040, height: 680)
+    .windowStyle(.hiddenTitleBar)
+    .defaultSize(width: 1120, height: 720)
     .commands { AppCommands(bootstrap: bootstrap) }
 
     // No title bar: the H1 inside is the window's one title.
@@ -73,6 +77,7 @@ final class AppBootstrap {
   /// `openWindow` as soon as one renders. Until then, activation alone.
   var openMain: @MainActor () -> Void = { NSApp.activate() }
 
+  /// The `-steno-*` launch arguments, parsed once.
   static let scenario = UITestScenario(arguments: CommandLine.arguments)
 
   static var isUITesting: Bool { scenario.isUITesting }
@@ -88,9 +93,11 @@ final class AppBootstrap {
     do {
       let environment: AppEnvironment
       if Self.isUITesting {
-        // Every permission unknown under `-steno-show-onboarding`, so the
-        // window opens on page 1 with its rows open.
+        // The scenario's seed set; every permission unknown under
+        // `-steno-show-onboarding`, so the window opens on page 1 with its
+        // rows open.
         environment = try await AppEnvironment.preview(
+          seed: Self.scenario.seed,
           permissions: Self.scenario.showsOnboarding ? FakePermissions() : nil)
       } else {
         environment = try await AppEnvironment.live(updater: UpdaterController())
@@ -239,6 +246,8 @@ struct OnboardingWindowContent: View {
 @MainActor
 struct AppCommands: Commands {
   let bootstrap: AppBootstrap
+  /// Published by the list column while the main window is key; ⌘F runs it.
+  @FocusedValue(\.searchFocus) private var searchFocus
 
   /// The same state table the sidebar control and the menu bar item render;
   /// without a controller the menu reads as idle and is disabled.
@@ -253,6 +262,13 @@ struct AppCommands: Commands {
     CommandGroup(after: .appInfo) {
       Button("Check for Updates…") { bootstrap.controller?.menuBar.checkForUpdates() }
         .disabled(bootstrap.controller == nil)
+    }
+    // Before the system's Find submenu, so ⌘F reaches the meeting search
+    // whenever the main window is key.
+    CommandGroup(before: .textEditing) {
+      Button("Find Meetings") { searchFocus?.run() }
+        .keyboardShortcut("f", modifiers: .command)
+        .disabled(searchFocus == nil)
     }
     CommandMenu("Record") {
       Button(presentation.menuLabel) {
