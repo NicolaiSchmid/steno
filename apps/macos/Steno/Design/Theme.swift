@@ -179,6 +179,9 @@ enum Theme {
     static let chipInset: CGFloat = 6
     /// Horizontal padding inside nav rows, inputs and the search field.
     static let rowInset: CGFloat = 10
+    /// Vertical padding inside the menu bar popover's queue and recent rows
+    /// (8 pt horizontally, from `Space`).
+    static let menuRowInset: CGFloat = 6
     /// The glyph column in a nav row.
     static let navGlyphWidth: CGFloat = 20
     /// The glyph inside a chip, one point under its 11 pt text.
