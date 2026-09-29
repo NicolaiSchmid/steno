@@ -36,7 +36,7 @@ struct StenoApp: App {
       .background(UITestWindowSizer())
     }
     .windowStyle(.hiddenTitleBar)
-    .defaultSize(width: Self.mainWindowSize.width, height: Self.mainWindowSize.height)
+    .defaultSize(Self.mainWindowSize)
     .commands { AppCommands(bootstrap: bootstrap) }
 
     // No title bar: the H1 inside is the window's one title.
@@ -125,10 +125,10 @@ final class AppBootstrap {
         await controller.startRecordingFromWindow(mode: .call)
       }
       if Self.isUITesting, let section = Self.scenario.settingsSection {
-        // As the setup banner's deep link would: `SettingsView` selects the
-        // section when its window opens (the test opens it from the nav
-        // column's Settings row).
-        controller.requestedSettingsSection = section
+        // The setup banner's deep link: `SettingsView` selects the section
+        // when its window opens (the test opens it from the nav column's
+        // Settings row).
+        controller.openSettings(section)
       }
     } catch {
       self.error = "Steno could not start: \(error)"

@@ -592,80 +592,96 @@ final class LaunchSmokeTests: XCTestCase {
   /// page 2; Settings on the Recording section (the plan's "Audio", named
   /// Recording since the settings redesign), opened from the nav column's
   /// Settings row with the section deep-linked by `-steno-settings-section`.
-  /// Each step waits on the ids the other tests rely on and asserts nothing
+  /// Each state waits on the ids the other tests rely on and asserts nothing
   /// else; the numeric review is a reading of the attachments. 960 x 600
   /// fits the runner's 1024 x 768 display, as does the 760 x 520 Settings
   /// window over it.
   private func captureScreenshotMatrix(appearance: String) {
-    let base = [
-      "-steno-ui-testing", "-steno-appearance", appearance, "-steno-window", "960x600",
-    ]
+    /// Launches under the matrix flags plus `arguments`.
+    func launched(_ arguments: [String]) -> XCUIApplication {
+      launch(
+        ["-steno-ui-testing", "-steno-appearance", appearance, "-steno-window", "960x600"]
+          + arguments)
+    }
+    /// Runs `ready` on `app`, then attaches the screen as
+    /// `<window>-<appearance>-<state>.png`, inside an activity named for the
+    /// state so a failure names it.
+    func capture(
+      _ window: String, _ state: String, in app: XCUIApplication,
+      ready: (XCUIApplication) -> Void
+    ) {
+      XCTContext.runActivity(named: "\(window) \(state) in \(appearance)") { _ in
+        ready(app)
+        attachScreenshot(named: "\(window)-\(appearance)-\(state).png")
+      }
+    }
 
-    var app = launch(base + ["-steno-empty"])
-    XCTAssertTrue(
-      app.staticTexts["empty-meetings-title"].firstMatch.waitForExistence(timeout: 10),
-      "\(appearance): the list's empty state is missing")
-    XCTAssertTrue(
-      app.staticTexts["empty-detail-title"].firstMatch.waitForExistence(timeout: 10),
-      "\(appearance): the detail's empty state is missing")
-    attachScreenshot(named: "main-\(appearance)-empty.png")
+    capture("main", "empty", in: launched(["-steno-empty"])) { app in
+      XCTAssertTrue(
+        app.staticTexts["empty-meetings-title"].firstMatch.waitForExistence(timeout: 10),
+        "the list's empty state is missing")
+      XCTAssertTrue(
+        app.staticTexts["empty-detail-title"].firstMatch.waitForExistence(timeout: 10),
+        "the detail's empty state is missing")
+    }
 
-    app = launch(base + ["-steno-rich-seed"])
-    let entry = fixtureEntry(in: app)
-    XCTAssertTrue(entry.waitForExistence(timeout: 10), "\(appearance): the fixture is not listed")
-    entry.click()
-    XCTAssertTrue(
-      app.buttons["tab-summary"].firstMatch.waitForExistence(timeout: 10),
-      "\(appearance): the detail pane did not show the fixture")
-    XCTAssertTrue(
-      waitUntil(timeout: 5) { entry.isSelected }, "\(appearance): the entry is not selected")
-    attachScreenshot(named: "main-\(appearance)-selected.png")
+    capture("main", "selected", in: launched(["-steno-rich-seed"])) { app in
+      let entry = fixtureEntry(in: app)
+      XCTAssertTrue(entry.waitForExistence(timeout: 10), "the fixture is not listed")
+      entry.click()
+      XCTAssertTrue(
+        app.buttons["tab-summary"].firstMatch.waitForExistence(timeout: 10),
+        "the detail pane did not show the fixture")
+      XCTAssertTrue(waitUntil(timeout: 5) { entry.isSelected }, "the entry is not selected")
+    }
 
-    app = launch(base + ["-steno-start-recording"])
-    XCTAssertTrue(
-      app.buttons["header-stop"].firstMatch.waitForExistence(timeout: 20),
-      "\(appearance): the header Stop control did not appear")
-    XCTAssertTrue(
-      app.staticTexts["empty-summary-title"].firstMatch.waitForExistence(timeout: 10),
-      "\(appearance): the Summary tab shows no state row")
-    attachScreenshot(named: "main-\(appearance)-recording.png")
+    capture("main", "recording", in: launched(["-steno-start-recording"])) { app in
+      XCTAssertTrue(
+        app.buttons["header-stop"].firstMatch.waitForExistence(timeout: 20),
+        "the header Stop control did not appear")
+      XCTAssertTrue(
+        app.staticTexts["empty-summary-title"].firstMatch.waitForExistence(timeout: 10),
+        "the Summary tab shows no state row")
+    }
 
-    app = launch(base + ["-steno-show-onboarding"])
-    XCTAssertTrue(
-      app.staticTexts["onboarding-intro"].firstMatch.waitForExistence(timeout: 20),
-      "\(appearance): the onboarding window did not open")
-    XCTAssertTrue(
-      app.staticTexts["onboarding-step-microphone"].firstMatch.waitForExistence(timeout: 5),
-      "\(appearance): page 1 rows are missing")
-    attachScreenshot(named: "onboarding-\(appearance)-page-1.png")
-    let later = app.buttons["onboarding-later"].firstMatch
-    XCTAssertTrue(later.waitForExistence(timeout: 5), "\(appearance): Later is missing")
-    later.click()
-    XCTAssertTrue(
-      app.buttons["onboarding-finish"].firstMatch.waitForExistence(timeout: 10),
-      "\(appearance): Later did not reach page 2")
-    XCTAssertTrue(
-      app.staticTexts["onboarding-setup-summaries"].firstMatch.waitForExistence(timeout: 5),
-      "\(appearance): page 2 rows are missing")
-    attachScreenshot(named: "onboarding-\(appearance)-page-2.png")
+    let onboarding = launched(["-steno-show-onboarding"])
+    capture("onboarding", "page-1", in: onboarding) { app in
+      XCTAssertTrue(
+        app.staticTexts["onboarding-intro"].firstMatch.waitForExistence(timeout: 20),
+        "the onboarding window did not open")
+      XCTAssertTrue(
+        app.staticTexts["onboarding-step-microphone"].firstMatch.waitForExistence(timeout: 5),
+        "page 1 rows are missing")
+    }
+    capture("onboarding", "page-2", in: onboarding) { app in
+      let later = app.buttons["onboarding-later"].firstMatch
+      XCTAssertTrue(later.waitForExistence(timeout: 5), "Later is missing")
+      later.click()
+      XCTAssertTrue(
+        app.buttons["onboarding-finish"].firstMatch.waitForExistence(timeout: 10),
+        "Later did not reach page 2")
+      XCTAssertTrue(
+        app.staticTexts["onboarding-setup-summaries"].firstMatch.waitForExistence(timeout: 5),
+        "page 2 rows are missing")
+    }
 
     // The section comes from the scenario's deep link, not a click on the
     // sidebar row: the rows' accessibility frames sit off the rendered rows
     // in the Settings window, so a click at the Recording row's centre
     // lands on General.
-    app = launch(base + ["-steno-settings-section", "recording"])
-    let settings = app.buttons["nav-settings"].firstMatch
-    XCTAssertTrue(
-      settings.waitForExistence(timeout: 10), "\(appearance): the nav Settings row is missing")
-    settings.click()
-    XCTAssertTrue(
-      app.descendants(matching: .any)["settings-header-recording"].firstMatch
-        .waitForExistence(timeout: 10),
-      "\(appearance): Settings did not open on Recording")
-    XCTAssertTrue(
-      app.descendants(matching: .any)["settings-recording"].firstMatch.exists,
-      "\(appearance): the Recording sidebar row is missing")
-    attachScreenshot(named: "settings-\(appearance)-recording.png")
+    capture("settings", "recording", in: launched(["-steno-settings-section", "recording"])) {
+      app in
+      let settings = app.buttons["nav-settings"].firstMatch
+      XCTAssertTrue(settings.waitForExistence(timeout: 10), "the nav Settings row is missing")
+      settings.click()
+      XCTAssertTrue(
+        app.descendants(matching: .any)["settings-header-recording"].firstMatch
+          .waitForExistence(timeout: 10),
+        "Settings did not open on Recording")
+      XCTAssertTrue(
+        app.descendants(matching: .any)["settings-recording"].firstMatch.exists,
+        "the Recording sidebar row is missing")
+    }
   }
 
   /// The entries, each a button carrying a `meeting-<uuid>` identifier and

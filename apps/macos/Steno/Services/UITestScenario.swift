@@ -44,25 +44,10 @@ struct UITestScenario: Equatable, Sendable {
     case dark
   }
 
-  /// A window size in points, parsed from `WxH`.
+  /// A window size in points.
   struct WindowSize: Equatable, Sendable {
     var width: Double
     var height: Double
-
-    init(width: Double, height: Double) {
-      self.width = width
-      self.height = height
-    }
-
-    /// `960x600`; nil for anything else, including a missing height or a
-    /// zero side.
-    init?(_ text: String) {
-      let parts = text.split(separator: "x", omittingEmptySubsequences: false)
-      guard parts.count == 2, let width = Double(parts[0]), let height = Double(parts[1]),
-        width > 0, height > 0
-      else { return nil }
-      self.init(width: width, height: height)
-    }
   }
 
   /// The preview environment: in-memory database, fakes, synthetic audio.
@@ -92,29 +77,17 @@ struct UITestScenario: Equatable, Sendable {
 
   init(arguments: [String]) {
     let flags = arguments.filter { $0.hasPrefix(Self.prefix) }
-    var invalidValues: [String] = []
-    if let text = Self.value(of: Self.appearanceFlag, in: arguments, invalid: &invalidValues) {
-      if let parsed = Appearance(rawValue: text) {
-        appearance = parsed
-      } else {
-        invalidValues.append("\(Self.appearanceFlag) \(text)")
-      }
+    var invalid: [String] = []
+    appearance = Self.value(of: Self.appearanceFlag, in: arguments, invalid: &invalid) {
+      Appearance(rawValue: $0)
     }
-    if let text = Self.value(of: Self.windowFlag, in: arguments, invalid: &invalidValues) {
-      if let parsed = WindowSize(text) {
-        windowSize = parsed
-      } else {
-        invalidValues.append("\(Self.windowFlag) \(text)")
-      }
+    windowSize = Self.value(of: Self.windowFlag, in: arguments, invalid: &invalid) {
+      WindowSize($0)
     }
-    if let text = Self.value(of: Self.settingsSectionFlag, in: arguments, invalid: &invalidValues) {
-      if let parsed = SettingsSection(rawValue: text) {
-        settingsSection = parsed
-      } else {
-        invalidValues.append("\(Self.settingsSectionFlag) \(text)")
-      }
+    settingsSection = Self.value(of: Self.settingsSectionFlag, in: arguments, invalid: &invalid) {
+      SettingsSection(rawValue: $0)
     }
-    self.invalidValues = invalidValues
+    invalidValues = invalid
     isUITesting = flags.contains(Self.uiTestingFlag)
     showPrompt = flags.contains(Self.showPromptFlag)
     if flags.contains(Self.emptyFlag) {
@@ -146,18 +119,35 @@ struct UITestScenario: Equatable, Sendable {
     return lines.isEmpty ? nil : lines.joined(separator: "\n")
   }
 
-  /// The argument after the first `flag`, when there is one and it is not a
-  /// flag itself; a `flag` without a value is recorded in `invalid`. Nil
-  /// when `flag` is absent.
-  private static func value(
-    of flag: String, in arguments: [String], invalid: inout [String]
-  ) -> String? {
+  /// The parsed argument after the first `flag`; nil when `flag` is absent.
+  /// A `flag` without a value (followed by another flag, or by nothing) or
+  /// with one `parse` rejects is recorded in `invalid` as `"<flag> <value>"`.
+  private static func value<Value>(
+    of flag: String, in arguments: [String], invalid: inout [String],
+    _ parse: (String) -> Value?
+  ) -> Value? {
     guard let index = arguments.firstIndex(of: flag) else { return nil }
     let next = arguments.index(after: index)
     guard next < arguments.endIndex, !arguments[next].hasPrefix("-") else {
       invalid.append("\(flag) (no value)")
       return nil
     }
-    return arguments[next]
+    guard let parsed = parse(arguments[next]) else {
+      invalid.append("\(flag) \(arguments[next])")
+      return nil
+    }
+    return parsed
+  }
+}
+
+extension UITestScenario.WindowSize {
+  /// `960x600`; nil for anything else, including a missing height or a
+  /// zero side.
+  init?(_ text: String) {
+    let parts = text.split(separator: "x", omittingEmptySubsequences: false)
+    guard parts.count == 2, let width = Double(parts[0]), let height = Double(parts[1]),
+      width > 0, height > 0
+    else { return nil }
+    self.init(width: width, height: height)
   }
 }
