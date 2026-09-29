@@ -55,16 +55,44 @@ public struct LLMEndpoint: Sendable, Equatable {
     self.structuredOutputMode = structuredOutputMode
   }
 
-  /// `llmBaseURL`, `llmModel` and `llmContextTokens` from the settings; nil
-  /// until both the URL and the model are set.
+  /// The endpoint the settings describe, or nil while summaries are off.
+  /// For `.endpoint`: `llmBaseURL`, `llmModel` and `llmContextTokens`, nil
+  /// until both the URL and the model are set. For `.codex`: nil until a
+  /// model is picked and the user has confirmed the credential use
+  /// (`codexConfirmedAt`), so every "configured" check stays one call.
   public init?(settings: Settings) {
-    guard let baseURL = settings.llmBaseURL, let model = settings.llmModel, !model.isEmpty else {
-      return nil
+    switch settings.llmProvider {
+    case .endpoint:
+      guard let baseURL = settings.llmBaseURL, let model = settings.llmModel, !model.isEmpty
+      else { return nil }
+      self.init(
+        baseURL: baseURL, model: model, contextTokens: max(settings.llmContextTokens, 1_024))
+    case .codex:
+      guard settings.codexConfirmedAt != nil, let model = settings.codexModel, !model.isEmpty
+      else { return nil }
+      self = .codex(model: model, contextTokens: settings.codexContextTokens)
     }
-    self.init(baseURL: baseURL, model: model, contextTokens: max(settings.llmContextTokens, 1_024))
+  }
+
+  /// OpenAI's Codex backend, the root the Codex CLI talks to with a ChatGPT
+  /// sign-in. `CodexResponsesClient` appends `/responses` and `/models`.
+  public static let codexBackendURL = URL(string: "https://chatgpt.com/backend-api/codex")!
+
+  /// Whether this endpoint is the Codex backend (Responses API, Codex
+  /// credentials) rather than a chat completions server.
+  public var isCodexBackend: Bool { baseURL == Self.codexBackendURL }
+
+  /// The Codex backend with `model`. The backend takes no output ceiling, so
+  /// `maxOutputTokens` only shapes prompts and budgets; 16k leaves the
+  /// summary room without starving the input.
+  public static func codex(model: String, contextTokens: Int) -> LLMEndpoint {
+    LLMEndpoint(
+      baseURL: codexBackendURL, model: model, contextTokens: max(contextTokens, 1_024),
+      maxOutputTokens: 16_000)
   }
 
   public var chatCompletionsURL: URL { baseURL.appendingPathComponent("chat/completions") }
+  public var responsesURL: URL { baseURL.appendingPathComponent("responses") }
   public var modelsURL: URL { baseURL.appendingPathComponent("models") }
 }
 

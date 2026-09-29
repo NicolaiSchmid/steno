@@ -61,6 +61,18 @@ final class SettingsSectionTests: XCTestCase {
     XCTAssertEqual(custom[.summaries], "gpt-4.1-mini", "a custom server shows the model")
     XCTAssertEqual(custom[.iphone], "1 iPhone paired")
     XCTAssertEqual(custom[.general], "Update check failed")
+
+    settings.llmProvider = .codex
+    settings.codexModel = "gpt-5.6-terra"
+    let unconfirmed = SettingsOverviewViewModel.subtitles(
+      settings: settings, recordingReady: true, modelsInstalled: true, pairedCount: 0,
+      handoverAvailable: true, updateOutcome: .notChecked, version: "0.9.0")
+    XCTAssertEqual(unconfirmed[.summaries], "Not set up", "ChatGPT without confirmation is off")
+    settings.codexConfirmedAt = Date()
+    let codex = SettingsOverviewViewModel.subtitles(
+      settings: settings, recordingReady: true, modelsInstalled: true, pairedCount: 0,
+      handoverAvailable: true, updateOutcome: .notChecked, version: "0.9.0")
+    XCTAssertEqual(codex[.summaries], "ChatGPT (Codex)")
   }
 
   func testOverviewRefreshReadsTheEnvironment() async throws {
@@ -83,10 +95,20 @@ final class SettingsSectionTests: XCTestCase {
     XCTAssertEqual(LLMPreset.infer(from: URL(string: "HTTPS://API.OPENAI.COM/v1")), .openAI)
     XCTAssertEqual(LLMPreset.infer(from: URL(string: "https://api.anthropic.com/v1")), .anthropic)
     XCTAssertEqual(LLMPreset.infer(from: URL(string: "http://10.0.0.5:8080/v1")), .custom)
-    for preset in LLMPreset.allCases where preset != .custom {
+    for preset in LLMPreset.allCases where preset.baseURL != nil {
       XCTAssertEqual(LLMPreset.infer(from: preset.baseURL), preset)
     }
     XCTAssertNil(LLMPreset.custom.baseURL)
+    XCTAssertNil(LLMPreset.codex.baseURL, "ChatGPT is a provider, not an address")
+    XCTAssertEqual(LLMPreset.codex.provider, .codex)
+    XCTAssertEqual(LLMPreset.openAI.provider, .endpoint)
+    XCTAssertFalse(LLMPreset.codex.needsAPIKey)
+    XCTAssertFalse(LLMPreset.codex.showsServerField)
+    var settings = Settings()
+    settings.llmBaseURL = URL(string: "https://api.openai.com/v1")
+    XCTAssertEqual(LLMPreset.infer(from: settings), .openAI)
+    settings.llmProvider = .codex
+    XCTAssertEqual(LLMPreset.infer(from: settings), .codex, "the stored provider wins")
     XCTAssertFalse(LLMPreset.lmStudio.needsAPIKey)
     XCTAssertTrue(LLMPreset.openAI.needsAPIKey)
     XCTAssertFalse(LLMPreset.openAI.showsServerField)

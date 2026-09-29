@@ -22,6 +22,8 @@ public struct RecordedRequest: Sendable {
   public var body: Data
   /// The body decoded as a chat completion request, when it is one.
   var chat: ChatCompletionRequest?
+  /// The body decoded as a Responses API request, when it is one.
+  var responses: ResponsesRequest?
   /// The `X-Steno-Purpose` header the client sends with every completion.
   public var purpose: String?
   /// Requests in flight (including this one) when it arrived.
@@ -310,6 +312,7 @@ public final class StubChatServer: Sendable {
         headers: raw.headers,
         body: raw.body,
         chat: try? WireJSON.decode(ChatCompletionRequest.self, from: raw.body),
+        responses: try? WireJSON.decode(ResponsesRequest.self, from: raw.body),
         purpose: raw.headers["x-steno-purpose"],
         inFlightOnArrival: state.inFlight)
       state.requests.append(request)

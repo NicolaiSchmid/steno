@@ -58,7 +58,7 @@ final class SettingsOverviewViewModel {
     result[.recording] = recordingReady ? "Ready" : "Permission needed"
     result[.transcription] = modelsInstalled ? "Ready" : "Download needed"
     if let settings, LLMEndpoint(settings: settings) != nil {
-      let preset = LLMPreset.infer(from: settings.llmBaseURL)
+      let preset = LLMPreset.infer(from: settings)
       result[.summaries] = preset == .custom ? (settings.llmModel ?? "Custom server") : preset.title
     } else {
       result[.summaries] = "Not set up"

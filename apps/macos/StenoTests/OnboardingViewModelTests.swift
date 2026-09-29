@@ -263,6 +263,46 @@ final class OnboardingViewModelTests: XCTestCase {
 
   // MARK: Page 2
 
+  /// The ChatGPT way on the Summaries row: no Save, the consent button is
+  /// the save, and without a sign-in on this Mac the row stays open and
+  /// says what to do.
+  func testChatGPTWayOnTheSummariesRow() async throws {
+    let environment = try await TestSupport.environment(seed: false)
+    let model = OnboardingViewModel(environment: environment, defaults: try makeDefaults())
+    await model.load()
+    let llm = try XCTUnwrap(model.llm)
+    await llm.selectPreset(.codex)
+    XCTAssertFalse(model.canSaveSummaries, "ChatGPT has no Save button")
+    await model.saveSummaries()
+    XCTAssertEqual(model.setupState(of: .summaries), .open)
+
+    await model.confirmSummariesWithCodex()
+    XCTAssertEqual(model.setupState(of: .summaries), .open, "no sign-in, no model, still open")
+    guard case .unavailable(let text) = llm.codexStatus else {
+      return XCTFail("expected the missing sign-in to be reported: \(llm.codexStatus)")
+    }
+    XCTAssertTrue(text.contains("codex login"), text)
+    let settings = try await environment.settings.load()
+    XCTAssertEqual(settings.llmProvider, .codex)
+    XCTAssertNotNil(settings.codexConfirmedAt, "the user did confirm")
+    XCTAssertFalse(settings.llmConfigured)
+    XCTAssertFalse(model.finished)
+  }
+
+  /// A Codex configuration made in Settings collapses the row with its own
+  /// line.
+  func testAStoredCodexConfigurationCollapsesTheSummariesRow() async throws {
+    let environment = try await TestSupport.environment(seed: false)
+    try await environment.updateSettings {
+      $0.llmProvider = .codex
+      $0.codexModel = "gpt-5.6-terra"
+      $0.codexConfirmedAt = Date()
+    }
+    let model = OnboardingViewModel(environment: environment, defaults: try makeDefaults())
+    await model.load()
+    XCTAssertEqual(model.setupState(of: .summaries), .saved("Saved: gpt-5.6-terra via ChatGPT"))
+  }
+
   /// Saving Summaries goes through the LLM tab's view model: a valid URL and
   /// a model mark the step done, store the endpoint and rebuild the pipeline.
   func testSavingSummariesConfiguresTheEndpointAndRebuildsThePipeline() async throws {

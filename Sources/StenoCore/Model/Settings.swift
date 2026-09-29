@@ -2,6 +2,13 @@ import Foundation
 
 /// The one settings type, persisted by `SettingsStore` as one row per property
 /// in the `setting` table. API keys never live here; see `SecretStore`.
+public enum LLMProvider: String, Codable, Sendable, Equatable, Hashable, CaseIterable {
+  /// Any OpenAI-compatible chat completions server, base URL plus API key.
+  case endpoint
+  /// OpenAI's Codex backend with the ChatGPT sign-in the Codex CLI stored.
+  case codex
+}
+
 public struct Settings: Codable, Sendable, Equatable, Hashable {
   /// Where recordings live; the user changes it in Settings > Audio.
   public var audioFolder: URL
@@ -16,9 +23,21 @@ public struct Settings: Codable, Sendable, Equatable, Hashable {
   public var speakerMatchThreshold: Float
   /// nil means the speech module's default location.
   public var modelsDirectory: URL?
+  /// Which service writes the summaries: an OpenAI-compatible endpoint
+  /// (`llmBaseURL`, `llmModel`, `llmContextTokens`) or the user's ChatGPT
+  /// plan through the Codex sign-in on this Mac (`codexModel`,
+  /// `codexContextTokens`, gated by `codexConfirmedAt`). Both keep their
+  /// fields, so switching back loses nothing.
+  public var llmProvider: LLMProvider
   public var llmBaseURL: URL?
   public var llmModel: String?
   public var llmContextTokens: Int
+  /// The Codex model slug (`gpt-5.6-terra`); nil until one is picked.
+  public var codexModel: String?
+  public var codexContextTokens: Int
+  /// When the user confirmed that Steno may use the Codex sign-in stored on
+  /// this Mac. nil means never: no code path reads the credentials file.
+  public var codexConfirmedAt: Date?
   public var defaultTemplateID: String
   public var launchAtLogin: Bool
   /// nil means the Obsidian destination is not configured.
@@ -32,9 +51,13 @@ public struct Settings: Codable, Sendable, Equatable, Hashable {
     speechEngineID: String = "parakeet-v3",
     speakerMatchThreshold: Float = 0.60,
     modelsDirectory: URL? = nil,
+    llmProvider: LLMProvider = .endpoint,
     llmBaseURL: URL? = nil,
     llmModel: String? = nil,
     llmContextTokens: Int = 32_000,
+    codexModel: String? = nil,
+    codexContextTokens: Int = Settings.defaultCodexContextTokens,
+    codexConfirmedAt: Date? = nil,
     defaultTemplateID: String = SummaryTemplate.defaultID,
     launchAtLogin: Bool = true,
     obsidian: ObsidianSettings? = nil
@@ -46,13 +69,21 @@ public struct Settings: Codable, Sendable, Equatable, Hashable {
     self.speechEngineID = speechEngineID
     self.speakerMatchThreshold = speakerMatchThreshold
     self.modelsDirectory = modelsDirectory
+    self.llmProvider = llmProvider
     self.llmBaseURL = llmBaseURL
     self.llmModel = llmModel
     self.llmContextTokens = llmContextTokens
+    self.codexModel = codexModel
+    self.codexContextTokens = codexContextTokens
+    self.codexConfirmedAt = codexConfirmedAt
     self.defaultTemplateID = defaultTemplateID
     self.launchAtLogin = launchAtLogin
     self.obsidian = obsidian
   }
+
+  /// Until the model list has told us better: every Codex model on offer in
+  /// September 2026 reads 272k, and a lower guess only costs smaller chunks.
+  public static let defaultCodexContextTokens = 128_000
 
   /// `~/Library/Application Support/Steno/Audio`, until the user picks a
   /// folder.

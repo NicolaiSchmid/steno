@@ -5,6 +5,7 @@ import StenoAdapters
 import StenoAudio
 import StenoCore
 import StenoHandover
+import StenoLLM
 import StenoSpeech
 
 /// The composition root. Module types are injected as they are; the four
@@ -22,6 +23,10 @@ final class AppEnvironment {
   let store: MeetingStore
   let settings: SettingsStore
   let secrets: any SecretStore
+  /// The Codex CLI's sign-in on this Mac, for the ChatGPT summaries choice.
+  /// The product reads `~/.codex` (or `CODEX_HOME`); the preview points at
+  /// an empty folder so no test ever meets a real sign-in.
+  let codexCredentials: CodexCredentialStore
   let events: MeetingEventBus
   let makeCaptureSession: MakeCaptureSession
   let detector: MeetingDetector
@@ -51,6 +56,7 @@ final class AppEnvironment {
     store: MeetingStore,
     settings: SettingsStore,
     secrets: any SecretStore,
+    codexCredentials: CodexCredentialStore,
     events: MeetingEventBus,
     makeCaptureSession: @escaping MakeCaptureSession,
     detector: MeetingDetector,
@@ -71,6 +77,7 @@ final class AppEnvironment {
     self.store = store
     self.settings = settings
     self.secrets = secrets
+    self.codexCredentials = codexCredentials
     self.events = events
     self.makeCaptureSession = makeCaptureSession
     self.detector = detector
@@ -222,9 +229,10 @@ final class AppEnvironment {
     }
     let models = ModelStore(directory: settings.modelsDirectory)
     let memory = CosineSpeakerMemory(store: store)
+    let codexCredentials = CodexCredentialStore()
     let makeDependencies: MakeDependencies = { settings, apiKey in
       let engineID = (try? SpeechEngineID(settingsValue: settings.speechEngineID)) ?? .parakeetV3
-      let llm = LLMWiring.passes(settings: settings, apiKey: apiKey)
+      let llm = LLMWiring.passes(settings: settings, apiKey: apiKey, codex: codexCredentials)
       return PipelineDependencies(
         decoder: AVFoundationAudioCodec(),
         speechEngine: try makeSpeechEngine(engineID, models: models),
@@ -242,6 +250,7 @@ final class AppEnvironment {
       store: store,
       settings: settingsStore,
       secrets: secrets,
+      codexCredentials: codexCredentials,
       events: events,
       makeCaptureSession: { configuration in try CaptureSession(configuration: configuration) },
       detector: MeetingDetector(),
@@ -368,6 +377,8 @@ final class AppEnvironment {
       settings: settingsStore,
       secrets: FileSecretStore(
         url: root.appendingPathComponent("secrets.json"), environment: [:]),
+      codexCredentials: CodexCredentialStore(
+        home: root.appendingPathComponent("codex-home", isDirectory: true)),
       events: events,
       makeCaptureSession: makeCaptureSession ?? { configuration in
         try CaptureSession(

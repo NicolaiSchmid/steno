@@ -323,29 +323,35 @@ struct SummariesSettingsView: View {
             Text(preset.title).tag(preset)
           }
         }
-        if model.preset.showsServerField {
-          TextField(
-            "Server address", text: $model.baseURLText,
-            prompt: Text(model.preset.baseURL?.absoluteString ?? "https://example.com/v1")
-          )
-          .focused($focus, equals: .server)
+        if model.preset == .codex {
+          codexFields
+        } else {
+          if model.preset.showsServerField {
+            TextField(
+              "Server address", text: $model.baseURLText,
+              prompt: Text(model.preset.baseURL?.absoluteString ?? "https://example.com/v1")
+            )
+            .focused($focus, equals: .server)
+          }
+          TextField("Model", text: $model.model, prompt: Text(model.preset.modelPlaceholder))
+            .focused($focus, equals: .model)
+          SecureField("API key", text: $model.apiKey, prompt: Text(keyPrompt))
+            .focused($focus, equals: .key)
+          Footnote("Stored in your login keychain and sent only to the server above.")
         }
-        TextField("Model", text: $model.model, prompt: Text(model.preset.modelPlaceholder))
-          .focused($focus, equals: .model)
-        SecureField("API key", text: $model.apiKey, prompt: Text(keyPrompt))
-          .focused($focus, equals: .key)
-        Footnote("Stored in your login keychain and sent only to the server above.")
         if let message = model.validationMessage {
           MessageRow(kind: .warning, text: message)
         }
       }
-      Section {
-        DisclosureGroup("Advanced") {
-          TextField("Context size", text: $model.contextTokensText)
-            .focused($focus, equals: .context)
-          Footnote(
-            "How much text the model can read at once. Leave the default of \(LLMSettingsViewModel.defaultContextTokens.formatted()) unless the service reports a shorter limit."
-          )
+      if model.preset != .codex {
+        Section {
+          DisclosureGroup("Advanced") {
+            TextField("Context size", text: $model.contextTokensText)
+              .focused($focus, equals: .context)
+            Footnote(
+              "How much text the model can read at once. Leave the default of \(LLMSettingsViewModel.defaultContextTokens.formatted()) unless the service reports a shorter limit."
+            )
+          }
         }
       }
       Section {
@@ -365,6 +371,44 @@ struct SummariesSettingsView: View {
   private var keyPrompt: String {
     model.preset.needsAPIKey
       ? "Paste the key from your \(model.preset.title) account" : "Only if the server needs one"
+  }
+
+  /// The ChatGPT preset: the consent card until confirmed, then the account
+  /// line, the model picker and the way out.
+  @ViewBuilder
+  private var codexFields: some View {
+    if model.codexConfirmed {
+      switch model.codexStatus {
+      case .signedIn(let account):
+        MessageRow(kind: .success, text: "Using ChatGPT as \(account).")
+      case .unavailable(let text):
+        MessageRow(kind: .error, text: text)
+      case .unknown:
+        EmptyView()
+      }
+      HStack {
+        Picker("Model", selection: .action({ model.codexModel }, model.selectCodexModel)) {
+          ForEach(model.codexModelChoices) { choice in
+            Text(choice.displayName).tag(choice.slug)
+          }
+        }
+        .disabled(model.codexModelChoices.isEmpty)
+        if model.isLoadingCodexModels {
+          ProgressView().controlSize(.small)
+        } else {
+          Button("Refresh") { Task { await model.refreshCodexModels() } }
+            .accessibilityIdentifier("settings-codex-refresh")
+        }
+      }
+      Footnote(CodexConsentCopy.usageFootnote)
+      Button("Stop using ChatGPT") { Task { await model.stopUsingCodex() } }
+        .accessibilityIdentifier("settings-codex-stop")
+    } else {
+      CodexConsentCard(
+        status: model.codexStatus,
+        confirm: { await model.confirmCodex() },
+        checkAgain: { await model.refreshCodexStatus() })
+    }
   }
 
   @ViewBuilder

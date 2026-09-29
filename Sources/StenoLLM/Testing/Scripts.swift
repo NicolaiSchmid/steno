@@ -194,3 +194,123 @@ public enum Scripts {
     }
   }
 }
+
+// MARK: - Codex backend
+
+extension Scripts {
+  /// One `text/event-stream` body as the Codex backend streams a finished
+  /// response: created, one message item done, then `response.completed`
+  /// (or `response.incomplete` with `incompleteReason`).
+  public static func responsesStream(
+    _ text: String,
+    status: String = "completed",
+    incompleteReason: String? = nil,
+    usage: LLMUsage? = LLMUsage(promptTokens: 10, completionTokens: 5, requests: 1),
+    model: String = "gpt-stub"
+  ) -> StubResponse {
+    let item = ResponsesOutputItem(
+      type: "message", id: "msg_stub", role: "assistant",
+      content: [.init(type: "output_text", text: text)])
+    let response = ResponsesResponse(
+      id: "resp_stub", status: status, model: model, output: [item],
+      usage: usage.map { .init(inputTokens: $0.promptTokens, outputTokens: $0.completionTokens) },
+      incompleteDetails: incompleteReason.map { .init(reason: $0) })
+    let terminal = status == "completed" ? "response.completed" : "response.incomplete"
+    return eventStream([
+      ("response.created", ResponsesStreamEvent(type: "response.created", response: response)),
+      (
+        "response.output_item.done",
+        ResponsesStreamEvent(type: "response.output_item.done", item: item)
+      ),
+      (terminal, ResponsesStreamEvent(type: terminal, response: response)),
+    ])
+  }
+
+  /// A stream that ends in `response.failed` with `message`.
+  public static func responsesFailed(_ message: String) -> StubResponse {
+    let response = ResponsesResponse(
+      id: "resp_stub", status: "failed", error: .init(code: "server_error", message: message))
+    return eventStream([
+      ("response.created", ResponsesStreamEvent(type: "response.created", response: response)),
+      ("response.failed", ResponsesStreamEvent(type: "response.failed", response: response)),
+    ])
+  }
+
+  /// A stream with a `refusal` part instead of text.
+  public static func responsesRefusal(_ reason: String) -> StubResponse {
+    let item = ResponsesOutputItem(
+      type: "message", id: "msg_stub", role: "assistant",
+      content: [.init(type: "refusal", refusal: reason)])
+    let response = ResponsesResponse(id: "resp_stub", status: "completed", output: [item])
+    return eventStream([
+      (
+        "response.output_item.done",
+        ResponsesStreamEvent(type: "response.output_item.done", item: item)
+      ),
+      ("response.completed", ResponsesStreamEvent(type: "response.completed", response: response)),
+    ])
+  }
+
+  /// A stream cut before its terminal event.
+  public static func responsesTruncatedStream() -> StubResponse {
+    eventStream([
+      (
+        "response.created",
+        ResponsesStreamEvent(
+          type: "response.created",
+          response: ResponsesResponse(id: "resp_stub", status: "in_progress"))
+      )
+    ])
+  }
+
+  static func eventStream(_ events: [(String, ResponsesStreamEvent)]) -> StubResponse {
+    var body = ""
+    for (name, event) in events {
+      let data = String(decoding: (try? WireJSON.encode(event)) ?? Data("{}".utf8), as: UTF8.self)
+      body += "event: \(name)\ndata: \(data)\n\n"
+    }
+    return StubResponse(
+      status: 200, headers: ["Content-Type": "text/event-stream"], body: Data(body.utf8))
+  }
+
+  /// The Codex backend's 400 for a request field it does not take.
+  public static func codexUnsupportedParameter(_ name: String) -> StubResponse {
+    StubResponse(
+      status: 400, headers: ["Content-Type": "application/json"],
+      body: Data(#"{"detail":"Unsupported parameter: \#(name)"}"#.utf8))
+  }
+
+  /// The plan's usage limit: a 429 whose `error.type` names it, which the
+  /// client must not retry.
+  public static func codexUsageLimit() -> StubResponse {
+    .json(
+      ChatErrorEnvelope(
+        error: .init(
+          message: "You have hit your usage limit.", type: "usage_limit_reached",
+          code: "usage_limit_reached")),
+      status: 429, headers: ["Retry-After": "3600"])
+  }
+
+  public static func codexModels(_ models: [CodexModel]) -> StubResponse {
+    .json(CodexModelList(models: models))
+  }
+
+  /// A refreshed token triple from the OAuth token endpoint.
+  public static func tokenRefresh(access: String, refresh: String, id: String? = nil)
+    -> StubResponse
+  {
+    var body: [String: String] = ["access_token": access, "refresh_token": refresh]
+    if let id { body["id_token"] = id }
+    return .json(body)
+  }
+
+  /// The token endpoint refusing a refresh token for good.
+  public static func tokenRefreshRejected(code: String, status: Int = 400) -> StubResponse {
+    .json(
+      [
+        "error": "invalid_grant", "error_code": code,
+        "error_description": "The refresh token is \(code).",
+      ],
+      status: status)
+  }
+}
