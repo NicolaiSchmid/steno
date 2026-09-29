@@ -115,6 +115,18 @@ final class ThemeTokensTests: XCTestCase {
     XCTAssertEqual(Motion.swap(reduceMotion: false), Motion.functional)
   }
 
+  /// The two 1 Hz tokens and their Reduce Motion rules: the countdown
+  /// hairline steps without animation, the pulse holds at opacity 1.
+  func testCountdownAndPulseHoldUnderReduceMotion() {
+    XCTAssertEqual(Motion.durationCountdown, 1)
+    XCTAssertEqual(Motion.durationPulse, 1)
+    XCTAssertEqual(Motion.pulseOpacity, 0.5)
+    XCTAssertNil(Motion.countdown(reduceMotion: true))
+    XCTAssertEqual(Motion.countdown(reduceMotion: false), Motion.countdown)
+    XCTAssertNil(Motion.pulse(reduceMotion: true))
+    XCTAssertEqual(Motion.pulse(reduceMotion: false), Motion.pulse)
+  }
+
   // MARK: - Helpers
 
   /// The `--color-*` names declared in `mobile/global.css`.

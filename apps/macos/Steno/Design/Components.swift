@@ -49,14 +49,18 @@ struct StenoPrimaryButtonStyle: ButtonStyle {
 }
 
 /// The secondary action: the same box on a `raised` surface with a hairline,
-/// the `card` veil on hover while enabled.
+/// the `card` veil on hover while enabled. `height` defaults to the button
+/// height; the floating bubble passes its 28 pt control height.
 struct StenoSecondaryButtonStyle: ButtonStyle {
+  var height: CGFloat = Theme.Control.buttonHeight
+
   func makeBody(configuration: Configuration) -> some View {
-    Surface(configuration: configuration)
+    Surface(configuration: configuration, height: height)
   }
 
   private struct Surface: View {
     let configuration: Configuration
+    let height: CGFloat
     @State private var hovering = false
     @Environment(\.isEnabled) private var isEnabled
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -66,7 +70,7 @@ struct StenoSecondaryButtonStyle: ButtonStyle {
         .font(.steno(Theme.TextSize.sm))
         .foregroundStyle(Color.stenoStrong)
         .padding(.horizontal, Theme.Control.buttonInset)
-        .frame(height: Theme.Control.buttonHeight)
+        .frame(height: height)
         .background(
           ZStack {
             Theme.Radius.md.shape.fill(Color.stenoRaised)

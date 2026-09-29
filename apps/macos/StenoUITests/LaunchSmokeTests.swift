@@ -4,7 +4,8 @@ import XCTest
 /// environment: in-memory database seeded with StenoCore's sample meeting,
 /// fakes, synthetic audio, no permission prompts), the main window appears,
 /// the fixture meeting is listed and each of the four tabs is selectable and
-/// shows its content; the sidebar control starts and stops a recording; and
+/// shows its content; the sidebar control starts and stops a recording; the
+/// floating panel shows the detection prompt and the recording bubble; and
 /// with the transcribe hold the processing card follows the run and makes
 /// way for the summary. The app cannot join the SwiftPM end-to-end test
 /// target, so these tests and the manual checklist are its end-to-end
@@ -224,6 +225,120 @@ final class LaunchSmokeTests: XCTestCase {
     XCTAssertEqual(meetingRowCount(in: app), 2, "the stopped recording keeps its row")
   }
 
+  /// The floating panel: launched with `-steno-show-prompt`, the detection
+  /// prompt for "Zoom" appears; Record turns the same panel into the
+  /// recording bubble; the bubble's stop hides it.
+  func testPromptMorphsIntoTheBubbleAndStopHidesIt() throws {
+    let app = XCUIApplication()
+    app.launchArguments = ["-steno-ui-testing", "-steno-show-prompt"]
+    app.launch()
+
+    let record = app.buttons["prompt-record"].firstMatch
+    XCTAssertTrue(record.waitForExistence(timeout: 10), "the detection prompt did not appear")
+    let title = app.staticTexts["prompt-title"].firstMatch
+    XCTAssertTrue(title.exists, "the prompt title is missing")
+    // A SwiftUI `Text` exposes its string as the element's value on macOS;
+    // `label` is empty.
+    let titleText = (title.value as? String) ?? title.label
+    XCTAssertTrue(titleText.hasPrefix("Zoom"), "the title names the app: \(titleText)")
+    attachScreenshot(named: "prompt.png")
+    record.click()
+
+    let stop = app.buttons["bubble-stop"].firstMatch
+    XCTAssertTrue(stop.waitForExistence(timeout: 10), "the prompt did not become the bubble")
+    let promptGone = XCTNSPredicateExpectation(
+      predicate: NSPredicate(format: "exists == false"), object: record)
+    XCTAssertEqual(XCTWaiter().wait(for: [promptGone], timeout: 10), .completed)
+    XCTAssertTrue(
+      waitUntil(timeout: 10) { stop.isEnabled }, "the stop square is enabled once recording")
+    attachScreenshot(named: "bubble.png")
+    clickCenter(of: stop, in: app)
+
+    let bubbleGone = XCTNSPredicateExpectation(
+      predicate: NSPredicate(format: "exists == false"), object: stop)
+    XCTAssertEqual(XCTWaiter().wait(for: [bubbleGone], timeout: 10), .completed)
+  }
+
+  /// A recording started from the window shows the bubble too; its elapsed
+  /// time advances (the one check of the product's 1 Hz clock); clicking its
+  /// body brings the window to the live meeting (the selected row). On this
+  /// path the stop square must be reachable through accessibility, which
+  /// pins the asymmetry `clickCenter` works around.
+  func testBubbleFollowsARecordingStartedFromTheWindow() throws {
+    let app = XCUIApplication()
+    app.launchArguments = ["-steno-ui-testing"]
+    app.launch()
+
+    let window = app.windows.firstMatch
+    XCTAssertTrue(window.waitForExistence(timeout: 10), "no window appeared")
+    let record = app.buttons["sidebar-record"].firstMatch
+    XCTAssertTrue(record.waitForExistence(timeout: 10), "the sidebar record control is missing")
+    XCTAssertFalse(app.buttons["bubble-stop"].exists, "no bubble before the recording")
+    record.click()
+
+    let stop = app.buttons["bubble-stop"].firstMatch
+    XCTAssertTrue(stop.waitForExistence(timeout: 10), "the bubble did not follow the recording")
+    let open = app.buttons["bubble-open"].firstMatch
+    XCTAssertTrue(open.waitForExistence(timeout: 5), "the bubble body is missing")
+    XCTAssertTrue(
+      waitUntil(timeout: 10) { !((open.value as? String) ?? "").isEmpty },
+      "the bubble shows no elapsed time")
+    let firstValue = open.value as? String
+    XCTAssertTrue(
+      waitUntil(timeout: 5) { (open.value as? String) != firstValue },
+      "the elapsed time did not advance from \(firstValue ?? "nil")")
+    open.click()
+    XCTAssertTrue(
+      waitUntil(timeout: 10) { selectedMeetingRowCount(in: app) == 1 },
+      "expected the live row selected, got \(selectedMeetingRowCount(in: app))")
+
+    XCTAssertTrue(
+      stop.isHittable, "the stop square must stay AX-hittable when the bubble appears fresh")
+    stop.click()
+    XCTAssertTrue(
+      app.buttons["sidebar-record"].firstMatch.waitForExistence(timeout: 10),
+      "the control did not return to Record call")
+  }
+
+  /// The case the bubble exists for: with the main window closed, clicking
+  /// the bubble's body reopens it (`openWindow` captured by `MenuBarLabel`).
+  /// Ids only; the window's presence is read through `sidebar-stop`, since
+  /// the panel may be listed among `app.windows`.
+  func testBubbleOpenReopensAClosedMainWindow() throws {
+    let app = XCUIApplication()
+    app.launchArguments = ["-steno-ui-testing"]
+    app.launch()
+
+    let window = app.windows.firstMatch
+    XCTAssertTrue(window.waitForExistence(timeout: 10), "no window appeared")
+    let record = app.buttons["sidebar-record"].firstMatch
+    XCTAssertTrue(record.waitForExistence(timeout: 10), "the sidebar record control is missing")
+    record.click()
+    let stop = app.buttons["bubble-stop"].firstMatch
+    XCTAssertTrue(stop.waitForExistence(timeout: 10), "the bubble did not follow the recording")
+    XCTAssertTrue(app.buttons["sidebar-stop"].firstMatch.waitForExistence(timeout: 10))
+
+    let close = window.buttons[XCUIIdentifierCloseWindow].firstMatch
+    if close.exists {
+      close.click()
+    } else {
+      app.typeKey("w", modifierFlags: .command)
+    }
+    XCTAssertTrue(
+      waitUntil(timeout: 10) { !app.buttons["sidebar-stop"].firstMatch.exists },
+      "the main window did not close")
+
+    app.buttons["bubble-open"].firstMatch.click()
+    XCTAssertTrue(
+      app.buttons["sidebar-stop"].firstMatch.waitForExistence(timeout: 10),
+      "the bubble did not bring the main window back")
+
+    stop.click()
+    XCTAssertTrue(
+      app.buttons["sidebar-record"].firstMatch.waitForExistence(timeout: 10),
+      "the control did not return to Record call")
+  }
+
   /// The preview environment has no LLM endpoint and no vault, so the setup
   /// banner shows over the detail pane with both fixes. "Set up summaries"
   /// opens Settings on the Summaries section (`settings-header-summaries` is
@@ -262,6 +377,51 @@ final class LaunchSmokeTests: XCTestCase {
       waitUntil(timeout: 5) { !app.buttons["setup-summaries"].firstMatch.exists },
       "Not now did not hide the banner")
     XCTAssertFalse(app.buttons["banner-not-now"].firstMatch.exists)
+  }
+
+  /// Clicks the element's centre. After the prompt has crossfaded into the
+  /// bubble, the accessibility hit test at the stop square has resolved to
+  /// the bubble's container, so `click()` reports the button as not hittable
+  /// although its frame is right and a mouse click reaches it; a coordinate
+  /// click is the mouse path. The fallback is loud: an activity names it and
+  /// the bubble's accessibility tree is attached, so the log shows whether
+  /// the morph still leaves the square unreachable. Never used on the path
+  /// where the bubble appears without a prompt; that path asserts
+  /// `isHittable`.
+  private func clickCenter(of element: XCUIElement, in app: XCUIApplication) {
+    if element.isHittable {
+      element.click()
+      return
+    }
+    XCTContext.runActivity(
+      named: "stop square not AX-hittable after the morph; clicking by coordinate"
+    ) { activity in
+      let tree = app.debugDescription.split(separator: "\n")
+        .filter { $0.contains("bubble") || $0.contains("recording-bubble") }
+        .joined(separator: "\n")
+      let attachment = XCTAttachment(string: tree.isEmpty ? app.debugDescription : tree)
+      attachment.name = "recording-bubble-accessibility-tree"
+      attachment.lifetime = .keepAlways
+      activity.add(attachment)
+      element.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).click()
+    }
+  }
+
+  private func attachScreenshot(named name: String) {
+    let screenshot = XCTAttachment(screenshot: XCUIScreen.main.screenshot())
+    screenshot.name = name
+    screenshot.lifetime = .keepAlways
+    add(screenshot)
+  }
+
+  /// Distinct `meeting-<uuid>` identifiers among the elements that carry the
+  /// selected trait (SwiftUI may stamp the identifier on the row and on its
+  /// texts, so elements are not counted).
+  private func selectedMeetingRowCount(in app: XCUIApplication) -> Int {
+    let selected = NSPredicate(
+      format: "identifier BEGINSWITH 'meeting-' AND selected == true")
+    let elements = app.descendants(matching: .any).matching(selected)
+    return Set(elements.allElementsBoundByIndex.map(\.identifier)).count
   }
 
   /// Rows carrying a `meeting-<uuid>` identifier, and only those: the

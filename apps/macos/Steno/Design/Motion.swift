@@ -52,7 +52,17 @@ enum Motion {
   }
   /// Linear, so consecutive 1 Hz samples join without a visible ease.
   static var countdown: Animation { .linear(duration: durationCountdown) }
+  /// The countdown steps without animation under Reduce Motion.
+  static func countdown(reduceMotion: Bool) -> Animation? {
+    reduceMotion ? nil : countdown
+  }
   /// Ease-in-out between opacity 1 and `pulseOpacity`; callers repeat it
   /// with `repeatForever(autoreverses: true)` and drop it under Reduce Motion.
+  /// Only the list entry's recording dot and the processing bar pulse;
+  /// nothing in the floating bubble does.
   static var pulse: Animation { .easeInOut(duration: durationPulse) }
+  /// The pulse rule: under Reduce Motion the element holds at opacity 1.
+  static func pulse(reduceMotion: Bool) -> Animation? {
+    reduceMotion ? nil : pulse
+  }
 }
