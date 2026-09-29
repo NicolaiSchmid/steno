@@ -20,9 +20,6 @@ struct OnboardingView: View {
   /// so every state glyph shares one optical size beside the 14 pt title.
   static let glyphFrame: CGFloat = 24
   static let glyphSize: CGFloat = 18
-  /// The explanation's leading, 13/17.
-  private static let explanationLeading = Theme.TextSize.xs.lineHeight - Theme.TextSize.xs.size
-
   var body: some View {
     VStack(alignment: .leading, spacing: Theme.Space.xl) {
       switch model.page {
@@ -108,61 +105,46 @@ struct OnboardingView: View {
     }
   }
 
-  /// A permission row: the 24 pt glyph frame, the title, the neutral
-  /// "Optional" chip and "Skipped" trailing; expanded, the explanation at
-  /// 13/17 and the action row 12 pt below each.
+  /// A permission row: the state glyph, the title, the neutral "Optional"
+  /// chip and "Skipped" trailing; expanded, the explanation and the action
+  /// row.
   private func stepRow(_ step: OnboardingViewModel.Step) -> some View {
     let isCurrent = model.current == step.kind && step.state != .granted
-    return Card {
-      VStack(alignment: .leading, spacing: Theme.Space.md) {
+    return row(
+      glyph: stateIcon(step), title: step.kind.title,
+      id: "onboarding-step-\(step.kind.rawValue)", optional: !step.isRequired
+    ) {
+      if model.skipped.contains(step.kind) { skippedLabel }
+    } details: {
+      if isCurrent || step.state == .denied {
+        explanation(step.kind.explanation)
         HStack(spacing: Theme.Space.sm) {
-          stateIcon(step)
-          Text(step.kind.title)
-            .font(.steno(Theme.TextSize.sm, weight: .semibold))
-            .foregroundStyle(Color.stenoStrong)
-            .accessibilityIdentifier("onboarding-step-\(step.kind.rawValue)")
-          if !step.isRequired {
-            StatusChip(text: "Optional", style: .neutral)
-          }
-          Spacer()
-          if model.skipped.contains(step.kind) {
-            Text("Skipped").font(.steno(Theme.TextSize.xxs)).foregroundStyle(Color.stenoFaint)
-          }
-        }
-        if isCurrent || step.state == .denied {
-          Text(step.kind.explanation)
-            .font(.steno(Theme.TextSize.xs))
-            .lineSpacing(Self.explanationLeading)
-            .foregroundStyle(Color.stenoMutedForeground)
-            .fixedSize(horizontal: false, vertical: true)
-          HStack(spacing: Theme.Space.sm) {
-            if step.state == .denied {
-              Button("Open System Settings") { model.openSystemSettings(step.kind) }
-                .buttonStyle(StenoPrimaryButtonStyle())
-              Button("Check again") { Task { await model.load() } }
-                .buttonStyle(StenoSecondaryButtonStyle())
-            } else if step.kind == .localNetwork {
-              Button("Got it") { model.skip(step.kind) }
-                .buttonStyle(StenoSecondaryButtonStyle())
-            } else {
-              Button(step.kind == .systemAudio ? "Run the test recording" : "Allow") {
-                Task { await model.request(step.kind) }
-              }
+          if step.state == .denied {
+            Button("Open System Settings") { model.openSystemSettings(step.kind) }
               .buttonStyle(StenoPrimaryButtonStyle())
-              .disabled(model.requesting != nil)
-              if model.requesting == step.kind {
-                ProgressView().controlSize(.small)
-                if step.kind == .systemAudio {
-                  Text("Listening for the test tone, up to 30 seconds…")
-                    .font(.steno(Theme.TextSize.xxs))
-                    .foregroundStyle(Color.stenoFaint)
-                }
+            Button("Check again") { Task { await model.load() } }
+              .buttonStyle(StenoSecondaryButtonStyle())
+          } else if step.kind == .localNetwork {
+            Button("Got it") { model.skip(step.kind) }
+              .buttonStyle(StenoSecondaryButtonStyle())
+          } else {
+            Button(step.kind == .systemAudio ? "Run the test recording" : "Allow") {
+              Task { await model.request(step.kind) }
+            }
+            .buttonStyle(StenoPrimaryButtonStyle())
+            .disabled(model.requesting != nil)
+            if model.requesting == step.kind {
+              ProgressView().controlSize(.small)
+              if step.kind == .systemAudio {
+                Text("Listening for the test tone, up to 30 seconds…")
+                  .font(.steno(Theme.TextSize.xxs))
+                  .foregroundStyle(Color.stenoFaint)
               }
             }
-            if !step.isRequired, step.kind != .localNetwork {
-              Button("Skip") { model.skip(step.kind) }
-                .buttonStyle(StenoGhostButtonStyle())
-            }
+          }
+          if !step.isRequired, step.kind != .localNetwork {
+            Button("Skip") { model.skip(step.kind) }
+              .buttonStyle(StenoGhostButtonStyle())
           }
         }
       }
@@ -212,49 +194,37 @@ struct OnboardingView: View {
 
   private func setupRow(_ step: OnboardingViewModel.SetupStep) -> some View {
     let state = model.setupState(of: step)
-    return Card {
-      VStack(alignment: .leading, spacing: Theme.Space.md) {
-        HStack(spacing: Theme.Space.sm) {
-          setupIcon(state)
-          Text(step.title)
-            .font(.steno(Theme.TextSize.sm, weight: .semibold))
-            .foregroundStyle(Color.stenoStrong)
-            .accessibilityIdentifier("onboarding-setup-\(step.id)")
-          StatusChip(text: "Optional", style: .neutral)
-          Spacer()
-          switch state {
-          case .saved(let line):
-            Text(line)
-              .font(.steno(Theme.TextSize.xxs))
-              .foregroundStyle(Color.stenoFaint)
-              .lineLimit(1)
-              .truncationMode(.middle)
-          case .skipped:
-            Text("Skipped").font(.steno(Theme.TextSize.xxs)).foregroundStyle(Color.stenoFaint)
-          case .open:
-            EmptyView()
+    return row(
+      glyph: setupIcon(state), title: step.title, id: "onboarding-setup-\(step.id)", optional: true
+    ) {
+      switch state {
+      case .saved(let line):
+        Text(line)
+          .font(.steno(Theme.TextSize.xxs))
+          .foregroundStyle(Color.stenoFaint)
+          .lineLimit(1)
+          .truncationMode(.middle)
+      case .skipped:
+        skippedLabel
+      case .open:
+        EmptyView()
+      }
+    } details: {
+      if state == .open {
+        explanation(step.explanation)
+        switch step {
+        case .summaries:
+          if let llm = model.llm {
+            SummariesSetupFields(model: model, llm: llm)
+          }
+        case .vault:
+          if let obsidian = model.obsidian {
+            VaultSetupFields(model: model, obsidian: obsidian)
           }
         }
-        if state == .open {
-          Text(step.explanation)
-            .font(.steno(Theme.TextSize.xs))
-            .lineSpacing(Self.explanationLeading)
-            .foregroundStyle(Color.stenoMutedForeground)
-            .fixedSize(horizontal: false, vertical: true)
-          switch step {
-          case .summaries:
-            if let llm = model.llm {
-              SummariesSetupFields(model: model, llm: llm)
-            }
-          case .vault:
-            if let obsidian = model.obsidian {
-              VaultSetupFields(model: model, obsidian: obsidian)
-            }
-          }
-          Text(step.footnote)
-            .font(.steno(Theme.TextSize.xxs))
-            .foregroundStyle(Color.stenoFaint)
-        }
+        Text(step.footnote)
+          .font(.steno(Theme.TextSize.xxs))
+          .foregroundStyle(Color.stenoFaint)
       }
     }
   }
@@ -264,6 +234,50 @@ struct OnboardingView: View {
     case .saved: glyph("checkmark.circle.fill", Color.stenoLiveBright)
     case .open, .skipped: glyph("circle", Color.stenoGhost)
     }
+  }
+
+  // MARK: - Row chrome
+
+  /// The card both pages' rows share: the 24 pt glyph frame, the 14 pt
+  /// semibold title carrying `id`, the neutral "Optional" chip, whatever
+  /// trails, and 12 pt under each detail row while the row is open.
+  private func row<Trailing: View, Details: View>(
+    glyph: some View, title: String, id: String, optional: Bool,
+    @ViewBuilder trailing: () -> Trailing, @ViewBuilder details: () -> Details
+  ) -> some View {
+    // Built here: `Card`'s content closure escapes, the builders do not.
+    let trailing = trailing()
+    let details = details()
+    return Card {
+      VStack(alignment: .leading, spacing: Theme.Space.md) {
+        HStack(spacing: Theme.Space.sm) {
+          glyph
+          Text(title)
+            .font(.steno(Theme.TextSize.sm, weight: .semibold))
+            .foregroundStyle(Color.stenoStrong)
+            .accessibilityIdentifier(id)
+          if optional {
+            StatusChip(text: "Optional", style: .neutral)
+          }
+          Spacer()
+          trailing
+        }
+        details
+      }
+    }
+  }
+
+  /// A row's explanation at 13/17 `muted`, wrapping.
+  private func explanation(_ text: String) -> some View {
+    Text(text)
+      .font(.steno(Theme.TextSize.xs))
+      .stenoLeading(Theme.TextSize.xs)
+      .foregroundStyle(Color.stenoMutedForeground)
+      .fixedSize(horizontal: false, vertical: true)
+  }
+
+  private var skippedLabel: some View {
+    Text("Skipped").font(.steno(Theme.TextSize.xxs)).foregroundStyle(Color.stenoFaint)
   }
 }
 

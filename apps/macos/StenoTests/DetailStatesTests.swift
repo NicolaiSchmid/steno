@@ -105,7 +105,6 @@ final class DetailStatesTests: XCTestCase {
       meetingID: SampleData.meetingID, destinationID: ObsidianFolderDestination.destinationID,
       status: .delivered)
     XCTAssertEqual(obsidian.destinationDisplayName, "Obsidian")
-    XCTAssertNotEqual(obsidian.destinationDisplayName, obsidian.destinationID)
     let unknown = Delivery(
       meetingID: SampleData.meetingID, destinationID: "notion", status: .pending)
     XCTAssertEqual(

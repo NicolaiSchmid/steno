@@ -26,17 +26,13 @@ struct SummaryTab: View {
         PendingText(tab: .summary, model: model)
       } else {
         ScrollView {
-          VStack(alignment: .leading, spacing: 0) {
+          VStack(alignment: .leading, spacing: Theme.Space.xl) {
             ProcessingCardSlot(progress: progress, meeting: model.meeting)
-            ForEach(Array(sections.enumerated()), id: \.element.id) { index, section in
-              SummarySectionView(
-                heading: section.heading, bullets: section.bullets,
-                isFirst: index == 0 && progress == nil)
+            ForEach(sections, id: \.id) { section in
+              SummarySectionView(heading: section.heading, bullets: section.bullets)
             }
             if let decisions = model.export?.decisions, !decisions.isEmpty {
-              SummarySectionView(
-                heading: "Decisions", bullets: decisions.map(\.text),
-                isFirst: sections.isEmpty && progress == nil)
+              SummarySectionView(heading: "Decisions", bullets: decisions.map(\.text))
             }
           }
           .readingColumn()
@@ -46,12 +42,12 @@ struct SummaryTab: View {
   }
 }
 
-/// One section of the summary: the 16 pt semibold heading with 24 pt above
-/// it (none for the first), then the bullets 8 pt apart.
+/// One section of the summary: the 16 pt semibold heading, then the
+/// bullets 8 pt apart. The column's 24 pt spacing separates sections (and
+/// the card above the first).
 struct SummarySectionView: View {
   let heading: String
   let bullets: [String]
-  let isFirst: Bool
 
   var body: some View {
     VStack(alignment: .leading, spacing: Theme.Space.sm) {
@@ -60,7 +56,6 @@ struct SummarySectionView: View {
         MarkdownBlockView(block: .bullet(bullet))
       }
     }
-    .padding(.top, isFirst ? 0 : Theme.Space.xl)
   }
 }
 

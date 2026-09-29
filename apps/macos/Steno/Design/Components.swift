@@ -287,10 +287,15 @@ extension View {
       .textSelection(.enabled)
   }
 
-  /// Body prose at 14/19: `TextSize.sm` with the ladder's leading applied
-  /// through `lineSpacing`, the one place the 5 pt is spelled out.
+  /// The ladder's leading for a text size applied through `lineSpacing`,
+  /// the one place `lineHeight - size` is spelled out.
+  func stenoLeading(_ size: (size: CGFloat, lineHeight: CGFloat)) -> some View {
+    lineSpacing(size.lineHeight - size.size)
+  }
+
+  /// Body prose at 14/19: `TextSize.sm` with its leading.
   func proseLeading() -> some View {
-    lineSpacing(Theme.TextSize.sm.lineHeight - Theme.TextSize.sm.size)
+    stenoLeading(Theme.TextSize.sm)
   }
 
   /// `shadow-sm`, the one shadow in the system: on the active segmented cell.
