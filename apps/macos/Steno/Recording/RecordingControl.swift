@@ -1,14 +1,17 @@
 import StenoAudio
 import SwiftUI
 
-/// The primary control at the top of the sidebar: starts a call recording
-/// (in person one click away in the chevron menu), turns into Stop with the
-/// elapsed time and the level bars while recording, and is disabled with a
-/// reason while a required permission is denied. Drives the one recorder
-/// through `AppController.startRecordingFromWindow`, so the live row is
-/// selected; the menu bar item drives the same recorder and never moves the
-/// selection. The permission report refreshes when the control appears;
-/// `AppController` refreshes it again whenever the app becomes active.
+/// The primary control at the top of the nav column: starts a call recording
+/// (in person one click away in the chevron segment), turns into Stop with
+/// the elapsed time and the level meter while recording, and is disabled
+/// with a reason while a required permission is denied. Drives the one
+/// recorder through `AppController.startRecordingFromWindow`, so the live
+/// row is selected; the menu bar item drives the same recorder and never
+/// moves the selection. The permission report refreshes when the control
+/// appears; `AppController` refreshes it again whenever the app becomes
+/// active. Presentation, ids and actions are the start-recording plan's;
+/// the box (40 pt, radius 12, the glyph well, the `raised` Stop) is the
+/// redesign's.
 struct RecordingControl: View {
   let controller: AppController
   @Environment(\.openWindow) private var openWindow
@@ -23,30 +26,23 @@ struct RecordingControl: View {
 
   var body: some View {
     let presentation = self.presentation
-    VStack(spacing: 0) {
-      VStack(alignment: .leading, spacing: Theme.Space.sm) {
-        control(presentation)
-          .frame(maxWidth: .infinity)
-        if let autoStop = presentation.autoStop {
-          AutoStopRow(presentation: autoStop, identifier: "sidebar-keep-recording") {
-            recorder.keepRecording()
-          }
+    VStack(alignment: .leading, spacing: Theme.Space.sm) {
+      control(presentation)
+        .frame(maxWidth: .infinity)
+      if let autoStop = presentation.autoStop {
+        AutoStopRow(presentation: autoStop, identifier: "sidebar-keep-recording") {
+          recorder.keepRecording()
         }
-        if let levels = recorder.levels, case .recording = recorder.recording {
-          LevelBars(levels: levels)
-        }
-        if let reason = presentation.disabledReason {
-          MessageRow(kind: .warning, text: reason)
-          Button("Fix permissions…") { openWindow(id: "onboarding") }
-            .buttonStyle(StenoSecondaryButtonStyle())
-            .accessibilityIdentifier("sidebar-fix-permissions")
-        }
-        RecordingMessages(warning: recorder.lastWarning, error: recorder.lastError)
       }
-      .padding(Theme.Space.md)
-      .frame(maxWidth: .infinity)
-      Divider().overlay(Color.stenoBorder)
+      if let reason = presentation.disabledReason {
+        MessageRow(kind: .warning, text: reason)
+        Button("Fix permissions…") { openWindow(id: "onboarding") }
+          .buttonStyle(StenoSecondaryButtonStyle())
+          .accessibilityIdentifier("sidebar-fix-permissions")
+      }
+      RecordingMessages(warning: recorder.lastWarning, error: recorder.lastError)
     }
+    .frame(maxWidth: .infinity)
     .task { await recorder.refreshPermissions() }
   }
 
@@ -58,54 +54,72 @@ struct RecordingControl: View {
         Button {
           start(.call)
         } label: {
-          Text(presentation.label)
-            .frame(maxWidth: .infinity)
+          HStack(spacing: Theme.Space.sm) {
+            Image(systemName: "record.circle")
+              .font(.system(size: Theme.TextSize.base.size, weight: .medium))
+              .frame(width: Theme.Control.ctaWellSize, height: Theme.Control.ctaWellSize)
+              .background(Theme.Radius.md.shape.fill(Color.stenoOnAccent.opacity(0.12)))
+              .accessibilityHidden(true)
+            Text(presentation.label)
+            Spacer(minLength: 0)
+          }
+          .padding(.leading, Theme.Space.sm)
+          .padding(.trailing, Theme.Control.buttonInset)
         }
-        .buttonStyle(StenoPrimaryButtonStyle())
+        .buttonStyle(CTASegmentStyle())
         .disabled(!presentation.isEnabled)
         .help("Record a call (⌘⇧R)")
         .accessibilityIdentifier("sidebar-record")
         if presentation.offersInPerson {
           Rectangle()
-            .fill(Color.stenoPrimaryForeground.opacity(0.24))
+            .fill(Color.stenoOnAccent.opacity(0.2))
             .frame(width: Theme.Space.hairline)
           Menu {
             Button("Record in person") { start(.inPerson) }
           } label: {
             Image(systemName: "chevron.down")
               .font(.steno(Theme.TextSize.xxs, weight: .semibold))
+              .frame(width: Theme.Control.ctaMenuWidth)
           }
           .menuStyle(.button)
-          .buttonStyle(StenoPrimaryButtonStyle())
+          .buttonStyle(CTASegmentStyle())
           .menuIndicator(.hidden)
-          .fixedSize()
+          .fixedSize(horizontal: true, vertical: false)
           .help("Record in person")
           .accessibilityLabel("Record in person")
           .accessibilityIdentifier("sidebar-record-in-person")
         }
       }
-      .fixedSize(horizontal: false, vertical: true)
-    // The busy states are a disabled button so the control keeps its box
-    // while the spinner stands in for the label; the redesign owns the
-    // spinner size.
+      .modifier(CTABox())
+      .opacity(presentation.isEnabled ? 1 : Motion.disabledOpacity)
+    // The busy states keep the box, and the button, while a spinner stands
+    // in for the label, so VoiceOver reads one disabled control through the
+    // transition.
     case .starting:
       Button(action: {}) {
         ProgressView()
           .controlSize(.small)
-          .tint(Color.stenoPrimaryForeground)
+          .tint(Color.stenoOnAccent)
           .frame(maxWidth: .infinity)
       }
-      .buttonStyle(StenoPrimaryButtonStyle())
+      .buttonStyle(CTASegmentStyle())
+      .modifier(CTABox())
       .disabled(true)
       .accessibilityLabel(presentation.label)
     case .recording(let since):
       Button {
         Task { await recorder.stop() }
       } label: {
-        StopLabel(since: since)
-          .frame(maxWidth: .infinity)
+        HStack(spacing: Theme.Space.sm) {
+          StopLabel(since: since)
+          Spacer(minLength: Theme.Space.sm)
+          if let levels = recorder.levels {
+            CompactLevelBars(levels: levels)
+          }
+        }
+        .padding(.horizontal, Theme.Control.buttonInset)
       }
-      .buttonStyle(StenoSecondaryButtonStyle())
+      .buttonStyle(StopControlStyle())
       .help("Stop recording (⌘⇧R)")
       .accessibilityIdentifier("sidebar-stop")
     case .stopping:
@@ -114,7 +128,7 @@ struct RecordingControl: View {
           .controlSize(.small)
           .frame(maxWidth: .infinity)
       }
-      .buttonStyle(StenoSecondaryButtonStyle())
+      .buttonStyle(StopControlStyle())
       .disabled(true)
       .accessibilityLabel(presentation.label)
     }
@@ -122,5 +136,108 @@ struct RecordingControl: View {
 
   private func start(_ mode: CaptureMode) {
     Task { await controller.startRecordingFromWindow(mode: mode) }
+  }
+}
+
+/// The CTA's box: 40 pt tall, radius 12, the accent gradient, clipped so the
+/// two segments share one shape.
+private struct CTABox: ViewModifier {
+  func body(content: Content) -> some View {
+    content
+      .frame(height: Theme.Control.ctaHeight)
+      .background(Theme.Radius.lg.shape.fill(LinearGradient.stenoAccent))
+      .clipShape(Theme.Radius.lg.shape)
+  }
+}
+
+/// One segment of the CTA: 14 pt medium `on-accent` on a transparent box
+/// the container fills and clips; pressed dims 5 % over `Motion.functional`.
+/// The disabled dim is the container's, so both segments fade together.
+private struct CTASegmentStyle: ButtonStyle {
+  func makeBody(configuration: Configuration) -> some View {
+    Segment(configuration: configuration)
+  }
+
+  private struct Segment: View {
+    let configuration: Configuration
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    var body: some View {
+      configuration.label
+        .font(.steno(Theme.TextSize.sm, weight: .medium))
+        .foregroundStyle(Color.stenoOnAccent)
+        .frame(maxHeight: .infinity)
+        .contentShape(Rectangle())
+        .opacity(configuration.isPressed ? Motion.controlPressOpacity : 1)
+        .animation(Motion.swap(reduceMotion: reduceMotion), value: configuration.isPressed)
+    }
+  }
+}
+
+/// The recording box: the CTA's 40 pt and radius 12 on a `raised` surface
+/// with a hairline, the `card` veil on hover, 14 pt medium; destructive is
+/// the dot and the word inside `StopLabel`, never a fill.
+private struct StopControlStyle: ButtonStyle {
+  func makeBody(configuration: Configuration) -> some View {
+    Box(configuration: configuration)
+  }
+
+  private struct Box: View {
+    let configuration: Configuration
+    @State private var hovering = false
+    @Environment(\.isEnabled) private var isEnabled
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    var body: some View {
+      configuration.label
+        .font(.steno(Theme.TextSize.sm, weight: .medium))
+        .foregroundStyle(Color.stenoStrong)
+        .frame(height: Theme.Control.ctaHeight)
+        .frame(maxWidth: .infinity)
+        .background(
+          ZStack {
+            Theme.Radius.lg.shape.fill(Color.stenoRaised)
+            Theme.Radius.lg.shape.fill(hovering && isEnabled ? Color.stenoCard : Color.clear)
+          }
+        )
+        .overlay(Theme.Radius.lg.shape.hairline())
+        .contentShape(Theme.Radius.lg.shape)
+        .onHover { hovering = $0 }
+        .animation(Motion.swap(reduceMotion: reduceMotion), value: hovering)
+        .opacity(configuration.isPressed ? Motion.controlPressOpacity : 1)
+        .opacity(isEnabled ? 1 : Motion.disabledOpacity)
+        .animation(Motion.swap(reduceMotion: reduceMotion), value: configuration.isPressed)
+    }
+  }
+}
+
+/// The level meter inside the Stop control: one 4 pt bar per lane, 40 pt
+/// wide, 4 pt apart (12 pt tall for a call), `strong` over a `border`
+/// track, no labels. The labelled `LevelBars` stay on the menu bar item.
+private struct CompactLevelBars: View {
+  let levels: LaneLevels
+
+  var body: some View {
+    VStack(alignment: .leading, spacing: Theme.Space.xs) {
+      bar(levels.mic)
+      if let system = levels.system {
+        bar(system)
+      }
+    }
+    .frame(width: Theme.Control.meterWidth)
+    .accessibilityElement(children: .ignore)
+    .accessibilityLabel("Input level")
+    .accessibilityValue("\(Int(LevelBars.fraction(levels.mic.rms) * 100)) percent")
+  }
+
+  private func bar(_ level: LaneLevel) -> some View {
+    ZStack(alignment: .leading) {
+      Capsule().fill(Color.stenoBorder)
+      Capsule()
+        .fill(Color.stenoStrong)
+        .frame(width: Theme.Control.meterWidth * LevelBars.fraction(level.rms))
+        .animation(Motion.functional, value: level.rms)
+    }
+    .frame(height: Theme.Control.meterHeight)
   }
 }

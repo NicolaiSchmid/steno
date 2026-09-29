@@ -179,9 +179,12 @@ import Testing
   /// The two `v3` fields stay out of `meeting.json` until they carry
   /// something: nil `endReason` and the `.default` origin are omitted, and a
   /// document without them (every fixture, every export written before `v3`)
-  /// reads back with exactly those values.
+  /// reads back with exactly those values. The sample meeting is a calendar
+  /// meeting, so the origin is reset here.
   @Test func theV3FieldsAreOmittedWhenDefaultAndReadAsDefaultWhenAbsent() throws {
-    let plain = String(decoding: try StenoJSON.encode(SampleData.meeting()), as: UTF8.self)
+    var untitled = SampleData.meeting()
+    untitled.titleOrigin = .default
+    let plain = String(decoding: try StenoJSON.encode(untitled), as: UTF8.self)
     #expect(!plain.contains("endReason"))
     #expect(!plain.contains("titleOrigin"))
     let decoded = try StenoJSON.decode(Meeting.self, from: Data(plain.utf8))

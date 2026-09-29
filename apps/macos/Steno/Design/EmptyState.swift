@@ -5,7 +5,9 @@ import SwiftUI
 /// optional secondary action 16 pt below and an optional `faint` footnote
 /// 12 pt under the action. Without a symbol it is the quieter "no content"
 /// variant the ready tabs use. Copy and ids are the caller's; the plan's
-/// states table lists them.
+/// states table lists them. The title carries `<id>-title`, because the
+/// container's own id is not exposed as an element to the UI tests on
+/// macOS while a static text's is.
 struct EmptyState: View {
   struct Action {
     let title: String
@@ -59,6 +61,7 @@ struct EmptyState: View {
       Text(title)
         .font(.steno(Theme.TextSize.sm, weight: .medium))
         .foregroundStyle(Color.stenoStrong)
+        .accessibilityIdentifier("\(id)-title")
       Text(message)
         .font(.steno(Theme.TextSize.xs))
         .foregroundStyle(Color.stenoMutedForeground)

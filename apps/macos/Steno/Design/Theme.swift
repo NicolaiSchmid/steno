@@ -189,6 +189,16 @@ enum Theme {
     /// The empty state's icon well and the glyph inside it.
     static let emptyWellSize: CGFloat = 48
     static let emptySymbolSize: CGFloat = 20
+    /// The Record call CTA: the glyph well before the label and the
+    /// trailing chevron segment that opens the in-person menu.
+    static let ctaWellSize: CGFloat = 28
+    static let ctaMenuWidth: CGFloat = 28
+    /// The selection rail on a list entry.
+    static let railWidth: CGFloat = 2
+    /// The compact level meter inside the Stop control: one 4 pt bar per
+    /// lane, 40 pt wide.
+    static let meterWidth: CGFloat = 40
+    static let meterHeight: CGFloat = 4
   }
 }
 
@@ -220,6 +230,13 @@ extension Color {
   static var stenoDestructive: Color { Theme.destructive.color }
   static var stenoDestructiveStrong: Color { Theme.destructiveStrong.color }
   static var stenoCodeBackground: Color { Theme.codeBackground.color }
+
+  /// The one veil behind a row the user picks (`NavRow`, `MeetingEntry`):
+  /// `secondary` while selected, `card` while hovered, nothing otherwise.
+  static func stenoRowVeil(isSelected: Bool, hovering: Bool) -> Color {
+    if isSelected { return stenoSecondary }
+    return hovering ? stenoCard : .clear
+  }
 }
 
 extension Font {

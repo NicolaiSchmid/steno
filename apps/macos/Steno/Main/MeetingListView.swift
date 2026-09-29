@@ -1,60 +1,45 @@
 import StenoCore
 import SwiftUI
 
-/// The sidebar list with search, a state filter, a tag filter, and delete
-/// (context menu and toolbar, behind a confirmation).
+/// The list column: the heading (the tag, the state filter or "Meetings"),
+/// the search field, then the day cards in a `ScrollView`, and delete behind
+/// a confirmation (the entry's context menu, the Delete key). Not a `List`:
+/// AppKit's row selection follows the system accent and cannot be
+/// recoloured, so the entries own their rail-and-veil selection and the
+/// column owns the arrow keys. The list takes keyboard focus once when the
+/// store first fills after the window opens (the moment `MainWindow` picks
+/// the first selection), so the arrows work before a click, and the
+/// selected entry wears the `ring` hairline while it has focus. Not
+/// `defaultFocus`: that re-asserts the list whenever focus is reset and
+/// fought the ⌘F move into the search field. The selection scrolls into
+/// view.
 struct MeetingListView: View {
   @Bindable var model: MeetingListViewModel
   /// Where the pipeline is with each queued or processing meeting, passed
   /// through from `MainWindow` because the list receives nothing else from
   /// the controller; the entry's preview line reads it.
   let progress: ProcessingProgressModel
+  @FocusState private var searchFocused: Bool
+  @FocusState private var listFocused: Bool
+  @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
   var body: some View {
-    VStack(spacing: 0) {
-      filters
-      Divider().overlay(Color.stenoBorder)
-      List(selection: $model.selection) {
-        ForEach(model.meetings) { meeting in
-          MeetingRow(
-            meeting: meeting, isSelected: model.selection == meeting.id,
-            statusLine: progress.entry(for: meeting.id)?.title
-          )
-          .tag(meeting.id)
-          .listRowSeparator(.hidden)
-          .contextMenu {
-            Button("Delete Meeting…", role: .destructive) { model.pendingDeletion = meeting }
-              .disabled(!Self.canDelete(meeting))
-          }
-        }
-      }
-      .listStyle(.sidebar)
-      .scrollContentBackground(.hidden)
-      .overlay {
-        if model.meetings.isEmpty {
-          emptyState
-        }
-      }
-      if let error = model.error {
-        MessageRow(kind: .error, text: error).padding(Theme.Space.md)
-      }
+    VStack(alignment: .leading, spacing: 0) {
+      header
+      cards
     }
-    .searchable(text: $model.query, placement: .sidebar, prompt: "Search meetings")
+    .frame(maxWidth: .infinity, maxHeight: .infinity)
     .background(Color.stenoBackground)
-    .toolbar {
-      ToolbarItem {
-        Button {
-          model.pendingDeletion = selectedMeeting
-        } label: {
-          Label("Delete Meeting", systemImage: "trash")
-        }
-        .disabled(selectedMeeting.map { !Self.canDelete($0) } ?? true)
-        .help("Delete the selected meeting and its recording")
-        .accessibilityIdentifier("delete-meeting")
-      }
+    .overlay(alignment: .trailing) {
+      Color.stenoBorder.frame(width: Theme.Space.hairline)
     }
+    .onChange(of: model.all.isEmpty, initial: true) { _, empty in
+      // First fill after the window opened: the arrows work without a click.
+      if !empty, !searchFocused { listFocused = true }
+    }
+    .focusedSceneValue(\.searchFocus, SearchFocusAction { searchFocused = true })
     .confirmationDialog(
-      "Delete “\(model.pendingDeletion?.title ?? "")”?",
+      "Delete “\(model.pendingDeletion?.displayTitle(calendar: model.calendar) ?? "")”?",
       isPresented: Binding(
         get: { model.pendingDeletion != nil },
         set: { if !$0 { model.pendingDeletion = nil } }),
@@ -72,108 +57,122 @@ struct MeetingListView: View {
     }
   }
 
-  private var selectedMeeting: Meeting? {
-    guard let selection = model.selection else { return nil }
-    return model.all.first { $0.id == selection }
-  }
-
-  /// The store refuses while the capture writer or the pipeline holds the
-  /// meeting's files; the controls say so before the attempt.
-  static func canDelete(_ meeting: Meeting) -> Bool {
-    switch meeting.state {
-    case .recording, .processing: false
-    case .queued, .ready, .failed: true
-    }
-  }
-
-  private var filters: some View {
-    HStack(spacing: Theme.Space.sm) {
-      Picker("State", selection: $model.stateFilter) {
-        ForEach(MeetingListViewModel.StateFilter.allCases) { filter in
-          Text(filter.title).tag(filter)
-        }
+  private var header: some View {
+    VStack(alignment: .leading, spacing: 0) {
+      Text(model.title)
+        .font(.steno(Theme.TextSize.lg, weight: .semibold))
+        .tracking(-0.2)
+        .foregroundStyle(Color.stenoStrong)
+        .lineLimit(1)
+        .accessibilityAddTraits(.isHeader)
+      SearchField(
+        text: $model.query, placeholder: "Search meetings", id: "search-meetings",
+        focus: $searchFocused
+      )
+      .padding(.top, Theme.Space.md)
+      if let error = model.error {
+        MessageRow(kind: .error, text: error)
+          .padding(.top, Theme.Space.md)
       }
-      .labelsHidden()
-      .pickerStyle(.menu)
-      if !model.tags.isEmpty {
-        Picker("Tag", selection: $model.tagFilter) {
-          Text("All tags").tag(String?.none)
-          ForEach(model.tags, id: \.self) { tag in
-            Text("#\(tag)").tag(String?.some(tag))
+    }
+    .padding(.top, Theme.Space.xl)
+    .padding(.horizontal, Theme.Space.lg)
+    .padding(.bottom, Theme.Space.lg)
+  }
+
+  private var cards: some View {
+    listBehaviour(
+      ZStack {
+        if model.meetings.isEmpty {
+          emptyState
+            .padding(Theme.Space.lg)
+        } else {
+          ScrollViewReader { proxy in
+            ScrollView {
+              LazyVStack(spacing: Theme.Space.md) {
+                ForEach(model.dayGroups) { group in
+                  MeetingCard(
+                    group: group, selection: model.selection, listFocused: listFocused,
+                    calendar: model.calendar,
+                    statusLine: { progress.entry(for: $0.id)?.title },
+                    select: { id in
+                      model.selection = id
+                      listFocused = true
+                    },
+                    delete: { model.pendingDeletion = $0 })
+                }
+              }
+              .padding(.horizontal, Theme.Space.lg)
+              .padding(.bottom, Theme.Space.xl)
+            }
+            .onChange(of: model.selection) { _, selection in
+              guard let selection else { return }
+              withAnimation(reduceMotion ? nil : Motion.spatial) {
+                proxy.scrollTo(selection)
+              }
+            }
           }
         }
-        .labelsHidden()
-        .pickerStyle(.menu)
       }
-    }
-    .padding(.horizontal, Theme.Space.md)
-    .padding(.vertical, Theme.Space.sm)
+      .frame(maxWidth: .infinity, maxHeight: .infinity))
   }
 
-  private var emptyState: some View {
-    VStack(spacing: Theme.Space.sm) {
-      Image(systemName: "waveform")
-        .font(.system(size: 28))
-        .foregroundStyle(Color.stenoGhost)
-      Text(model.all.isEmpty ? "No meetings yet" : "No meetings match")
-        .font(.steno(Theme.TextSize.sm, weight: .medium))
-        .foregroundStyle(Color.stenoMutedForeground)
-      if model.all.isEmpty {
-        Text("Press Record call above, or ⌘⇧R. The menu bar item works too.")
-          .multilineTextAlignment(.center)
-          .font(.steno(Theme.TextSize.xs))
-          .foregroundStyle(Color.stenoFaint)
+  /// The column's keyboard and accessibility behaviour, kept apart from the
+  /// scroll layout: focus without the system ring, the arrow keys, the
+  /// Delete key behind `canDelete`, and the labelled container.
+  private func listBehaviour(_ content: some View) -> some View {
+    content
+      .focusable()
+      .focusEffectDisabled()
+      .focused($listFocused)
+      .onMoveCommand { direction in
+        switch direction {
+        case .down: model.selectNext()
+        case .up: model.selectPrevious()
+        default: break
+        }
       }
+      .onDeleteCommand {
+        guard let meeting = model.selectedMeeting, MeetingListViewModel.canDelete(meeting)
+        else { return }
+        model.pendingDeletion = meeting
+      }
+      .accessibilityElement(children: .contain)
+      .accessibilityLabel("Meetings")
+      .accessibilityIdentifier("meeting-list")
+  }
+
+  @ViewBuilder
+  private var emptyState: some View {
+    if model.all.isEmpty {
+      EmptyState(
+        symbol: "waveform", title: "No meetings yet",
+        body: "Press Record call above, or ⌘⇧R. The menu bar item works too.",
+        id: "empty-meetings")
+    } else {
+      EmptyState(
+        symbol: "magnifyingglass", title: "No meetings match",
+        body: "Nothing matches this search or filter.",
+        action: .init(title: "Clear filters", id: "clear-filters") { model.clearFilters() },
+        id: "empty-meetings")
     }
-    .padding(Theme.Space.xl)
   }
 }
 
-struct MeetingRow: View {
-  let meeting: Meeting
-  /// Carried as the `isSelected` trait, so the UI smoke test can find the
-  /// selected row by identifier.
-  var isSelected = false
-  /// The row's preview line: the progress model's title while the meeting
-  /// is queued or processing, "Transcribing…", as the card and the header
-  /// chip read it; nil otherwise.
-  var statusLine: String? = nil
+/// The list column's "focus the search field" action, published as a
+/// focused scene value while the main window is key, so ⌘F in
+/// `AppCommands` reaches the field without the commands knowing the view.
+struct SearchFocusAction {
+  let run: @MainActor () -> Void
+}
 
-  var body: some View {
-    VStack(alignment: .leading, spacing: Theme.Space.xs) {
-      HStack(alignment: .firstTextBaseline) {
-        Text(meeting.title)
-          .font(.steno(Theme.TextSize.sm, weight: .medium))
-          .foregroundStyle(Color.stenoStrong)
-          .lineLimit(1)
-        Spacer(minLength: Theme.Space.sm)
-        StatusChip(meeting.state)
-      }
-      HStack(spacing: Theme.Space.sm) {
-        Text(meeting.startedAt, format: .dateTime.day().month(.abbreviated).hour().minute())
-        if meeting.duration > 0 {
-          Text(meeting.duration.clockText)
-        }
-        Text(meeting.source.label)
-        if let suffix = meeting.endReason?.listSuffix {
-          Text("· \(suffix)")
-        }
-        if !meeting.tags.isEmpty {
-          Text(meeting.tags.map { "#\($0)" }.joined(separator: " "))
-            .lineLimit(1)
-        }
-      }
-      .font(.steno(Theme.TextSize.xxs))
-      .foregroundStyle(Color.stenoFaint)
-      if let statusLine {
-        Text(statusLine)
-          .font(.steno(Theme.TextSize.xs))
-          .foregroundStyle(Color.stenoFaint)
-          .lineLimit(1)
-      }
-    }
-    .padding(.vertical, Theme.Space.xs)
-    .accessibilityIdentifier("meeting-\(meeting.id.uuidString)")
-    .accessibilityAddTraits(isSelected ? [.isSelected] : [])
+private struct SearchFocusKey: FocusedValueKey {
+  typealias Value = SearchFocusAction
+}
+
+extension FocusedValues {
+  var searchFocus: SearchFocusAction? {
+    get { self[SearchFocusKey.self] }
+    set { self[SearchFocusKey.self] = newValue }
   }
 }
