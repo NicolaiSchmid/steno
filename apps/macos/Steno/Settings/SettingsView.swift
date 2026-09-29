@@ -48,13 +48,14 @@ struct SettingsView: View {
       .listStyle(.sidebar)
       .navigationSplitViewColumnWidth(Self.sidebarWidth)
     } detail: {
-      // The detail keeps a fixed height. On macOS 26 the split view sizes
-      // itself from the detail's ideal height, and a flexible detail (min,
-      // ideal or max) makes it the width of the screen instead, so both
-      // columns overflow the window and read as empty. On macOS 15 the
-      // column is this tall anyway.
+      // Fixed height on purpose: on macOS 26 the split view sizes itself
+      // from the detail's ideal size, and a detail with a flexible height
+      // grows to the width of the screen, so both columns overflow the
+      // window and it reads as empty. Constraining the split view or the
+      // sidebar instead does not help. On macOS 15 the column is this tall
+      // anyway.
       detail
-        .frame(maxWidth: .infinity, alignment: .top)
+        .frame(maxWidth: .infinity)
         .frame(height: Self.height, alignment: .top)
         .background(Color.stenoBackground)
     }
