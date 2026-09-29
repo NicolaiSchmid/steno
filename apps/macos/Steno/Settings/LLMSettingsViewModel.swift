@@ -460,10 +460,10 @@ final class LLMSettingsViewModel: SettingsSectionModel {
     }
     isTesting = true
     defer { isTesting = false }
-    let settings = settings(from: draft)
+    let probed = settings(from: draft)
     do {
       let report = try await LLMWiring.probe(
-        settings: settings, apiKey: draft.apiKey, codex: environment.codexCredentials)
+        settings: probed, apiKey: draft.apiKey, codex: environment.codexCredentials)
       testResult = .success(report)
     } catch {
       testResult = .failure(String(describing: error))
