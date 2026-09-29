@@ -35,7 +35,11 @@ struct EmptyState: View {
   /// ("Summary only; the transcript stays as recorded.").
   let footnote: String?
   let id: String
-  /// The width the body wraps at; a layout width, not a control box.
+  /// The width the body and the footnote wrap at; a layout width, not a
+  /// control box. Fixed, not a maximum: with `fixedSize(vertical:)` a
+  /// `maxWidth` answers the minimum-size probe (width 0) with one character
+  /// per line, and in a split view's detail column that minimum becomes the
+  /// window's, which then grows past the screen.
   private static let bodyWidth: CGFloat = 280
 
   init(
@@ -70,7 +74,7 @@ struct EmptyState: View {
         .font(.steno(Theme.TextSize.xs))
         .foregroundStyle(Color.stenoMutedForeground)
         .multilineTextAlignment(.center)
-        .frame(maxWidth: Self.bodyWidth)
+        .frame(width: Self.bodyWidth)
         .fixedSize(horizontal: false, vertical: true)
       if showsSpinner {
         ProgressView().controlSize(.small)
@@ -87,7 +91,7 @@ struct EmptyState: View {
           .font(.steno(Theme.TextSize.xxs))
           .foregroundStyle(Color.stenoFaint)
           .multilineTextAlignment(.center)
-          .frame(maxWidth: Self.bodyWidth)
+          .frame(width: Self.bodyWidth)
           .fixedSize(horizontal: false, vertical: true)
       }
     }

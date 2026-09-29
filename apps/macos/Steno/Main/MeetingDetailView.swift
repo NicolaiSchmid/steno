@@ -279,7 +279,10 @@ struct MeetingDetailView: View {
     } label: {
       IconButton.Glyph(systemName: "ellipsis", hovering: hoveringActions)
     }
-    .menuStyle(.borderlessButton)
+    // `.button` with a plain button style keeps the 28 pt face; the
+    // borderless menu style draws only the bare glyph.
+    .menuStyle(.button)
+    .buttonStyle(.plain)
     .menuIndicator(.hidden)
     .fixedSize()
     .onHover { hoveringActions = $0 }
