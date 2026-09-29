@@ -573,6 +573,106 @@ final class LaunchSmokeTests: XCTestCase {
     attachScreenshot(named: "onboarding-page-2.png")
   }
 
+  /// The redesign's review evidence in light (`testScreenshotMatrixLight`).
+  func testScreenshotMatrixLight() throws {
+    captureScreenshotMatrix(appearance: "light")
+  }
+
+  /// The same set in dark, since the hosted runner is light and one
+  /// screenshot per window cannot show that both appearances ship.
+  func testScreenshotMatrixDark() throws {
+    captureScreenshotMatrix(appearance: "dark")
+  }
+
+  /// One launch per window state under `-steno-appearance` and
+  /// `-steno-window 960x600`, each attached with `.keepAlways` as
+  /// `<window>-<appearance>-<state>.png`, so `xcrun xcresulttool export
+  /// attachments` on the CI bundle yields the review set: the main window
+  /// empty, with the fixture selected, and recording; onboarding page 1 and
+  /// page 2; Settings on the Recording section (the plan's "Audio", named
+  /// Recording since the settings redesign). Each step waits on the ids the
+  /// other tests rely on and asserts nothing else; the numeric review is a
+  /// reading of the attachments. 960 x 600 fits the runner's 1024 x 768
+  /// display, as does the 760 x 520 Settings window over it.
+  private func captureScreenshotMatrix(appearance: String) {
+    let base = [
+      "-steno-ui-testing", "-steno-appearance", appearance, "-steno-window", "960x600",
+    ]
+
+    var app = launch(base + ["-steno-empty"])
+    XCTAssertTrue(
+      app.staticTexts["empty-meetings-title"].firstMatch.waitForExistence(timeout: 10),
+      "\(appearance): the list's empty state is missing")
+    XCTAssertTrue(
+      app.staticTexts["empty-detail-title"].firstMatch.waitForExistence(timeout: 10),
+      "\(appearance): the detail's empty state is missing")
+    attachScreenshot(named: "main-\(appearance)-empty.png")
+
+    app = launch(base + ["-steno-rich-seed"])
+    let entry = fixtureEntry(in: app)
+    XCTAssertTrue(entry.waitForExistence(timeout: 10), "\(appearance): the fixture is not listed")
+    entry.click()
+    XCTAssertTrue(
+      app.buttons["tab-summary"].firstMatch.waitForExistence(timeout: 10),
+      "\(appearance): the detail pane did not show the fixture")
+    XCTAssertTrue(
+      waitUntil(timeout: 5) { entry.isSelected }, "\(appearance): the entry is not selected")
+    attachScreenshot(named: "main-\(appearance)-selected.png")
+
+    app = launch(base + ["-steno-start-recording"])
+    XCTAssertTrue(
+      app.buttons["header-stop"].firstMatch.waitForExistence(timeout: 20),
+      "\(appearance): the header Stop control did not appear")
+    XCTAssertTrue(
+      app.staticTexts["empty-summary-title"].firstMatch.waitForExistence(timeout: 10),
+      "\(appearance): the Summary tab shows no state row")
+    attachScreenshot(named: "main-\(appearance)-recording.png")
+
+    app = launch(base + ["-steno-show-onboarding"])
+    XCTAssertTrue(
+      app.staticTexts["onboarding-intro"].firstMatch.waitForExistence(timeout: 20),
+      "\(appearance): the onboarding window did not open")
+    XCTAssertTrue(
+      app.staticTexts["onboarding-step-microphone"].firstMatch.waitForExistence(timeout: 5),
+      "\(appearance): page 1 rows are missing")
+    attachScreenshot(named: "onboarding-\(appearance)-page-1.png")
+    let later = app.buttons["onboarding-later"].firstMatch
+    XCTAssertTrue(later.waitForExistence(timeout: 5), "\(appearance): Later is missing")
+    later.click()
+    XCTAssertTrue(
+      app.buttons["onboarding-finish"].firstMatch.waitForExistence(timeout: 10),
+      "\(appearance): Later did not reach page 2")
+    XCTAssertTrue(
+      app.staticTexts["onboarding-setup-summaries"].firstMatch.waitForExistence(timeout: 5),
+      "\(appearance): page 2 rows are missing")
+    attachScreenshot(named: "onboarding-\(appearance)-page-2.png")
+
+    app = launch(base)
+    let settings = app.buttons["nav-settings"].firstMatch
+    XCTAssertTrue(
+      settings.waitForExistence(timeout: 10), "\(appearance): the nav Settings row is missing")
+    settings.click()
+    XCTAssertTrue(
+      app.descendants(matching: .any)["settings-header-general"].firstMatch
+        .waitForExistence(timeout: 10),
+      "\(appearance): Settings did not open on General")
+    // The sidebar row is a combined accessibility element inside a `List`
+    // cell; when the hit test resolves to the cell instead, the mouse path
+    // through its centre selects the section all the same.
+    let row = app.descendants(matching: .any)["settings-recording"].firstMatch
+    XCTAssertTrue(row.waitForExistence(timeout: 5), "\(appearance): the Recording row is missing")
+    if row.isHittable {
+      row.click()
+    } else {
+      row.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).click()
+    }
+    XCTAssertTrue(
+      app.descendants(matching: .any)["settings-header-recording"].firstMatch
+        .waitForExistence(timeout: 10),
+      "\(appearance): Settings did not select Recording")
+    attachScreenshot(named: "settings-\(appearance)-recording.png")
+  }
+
   /// The entries, each a button carrying a `meeting-<uuid>` identifier and
   /// nothing else in the window does: the `meeting-list` container and the
   /// entry's texts are not buttons, so one query counts rows.
