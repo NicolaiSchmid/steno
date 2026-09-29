@@ -46,11 +46,11 @@ import Testing
   }
 
   @Test func wallClockBackstopIsTwiceTheTimeoutAndAtLeastThirtySeconds() {
-    #expect(OpenAICompatibleClient.wallClockBackstop(for: .seconds(240)) == 480)
-    #expect(OpenAICompatibleClient.wallClockBackstop(for: .seconds(30)) == 60)
-    #expect(OpenAICompatibleClient.wallClockBackstop(for: .seconds(5)) == 30)
-    #expect(OpenAICompatibleClient.wallClockBackstop(for: .milliseconds(1_500)) == 30)
-    #expect(OpenAICompatibleClient.wallClockBackstop(for: .zero) == 30)
+    #expect(LLMTransport.wallClockBackstop(for: .seconds(240)) == 480)
+    #expect(LLMTransport.wallClockBackstop(for: .seconds(30)) == 60)
+    #expect(LLMTransport.wallClockBackstop(for: .seconds(5)) == 30)
+    #expect(LLMTransport.wallClockBackstop(for: .milliseconds(1_500)) == 30)
+    #expect(LLMTransport.wallClockBackstop(for: .zero) == 30)
   }
 
   /// A `URLProtocol` that fails the first transfer with `URLError.timedOut`

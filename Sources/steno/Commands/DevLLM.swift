@@ -6,7 +6,8 @@ import StenoLLM
 /// `steno dev llm probe|cleanup|summarize`: the two passes and the endpoint
 /// probe against the configured endpoint (settings, overridable by flags).
 /// The API key comes from `STENO_LLM_API_KEY` or the secrets file, never
-/// from the command line.
+/// from the command line. `--codex <model>` runs against the Codex backend
+/// with the Codex CLI's sign-in instead.
 struct DevLLM: AsyncParsableCommand {
   static let configuration = CommandConfiguration(
     commandName: "llm",
@@ -26,6 +27,11 @@ struct DevLLM: AsyncParsableCommand {
     @Option(name: .customLong("context-tokens"), help: "The model's context window.")
     var contextTokens: Int?
 
+    @Option(
+      name: .customLong("codex"),
+      help: "Use the Codex backend with this model and the Codex CLI's sign-in (~/.codex).")
+    var codexModel: String?
+
     @Option(name: .customLong("max-output-tokens"), help: "Ceiling for one answer.")
     var maxOutputTokens: Int?
 
@@ -41,8 +47,14 @@ struct DevLLM: AsyncParsableCommand {
     /// `probe --base-url … --model …` opens no database.
     func endpoint() async throws -> LLMEndpoint {
       var settings =
-        baseURL != nil && model != nil
+        (baseURL != nil && model != nil) || codexModel != nil
         ? Settings() : try await Wiring.open(database).settings.load()
+      if let codexModel {
+        settings.llmProvider = .codex
+        settings.codexModel = codexModel
+        settings.codexConfirmedAt = Date()
+        if let contextTokens { settings.codexContextTokens = contextTokens }
+      }
       if let baseURL {
         guard let url = URL(string: baseURL), url.scheme != nil else {
           throw ValidationError("--base-url is not a URL: \(baseURL)")
@@ -53,7 +65,7 @@ struct DevLLM: AsyncParsableCommand {
       if let contextTokens { settings.llmContextTokens = contextTokens }
       guard var endpoint = LLMEndpoint(settings: settings) else {
         throw ValidationError(
-          "No LLM endpoint configured. Pass --base-url and --model or set Settings.llmBaseURL and llmModel."
+          "No LLM endpoint configured. Pass --base-url and --model, --codex <model>, or set it up in the app."
         )
       }
       if let maxOutputTokens { endpoint.maxOutputTokens = maxOutputTokens }
@@ -61,11 +73,9 @@ struct DevLLM: AsyncParsableCommand {
       return endpoint
     }
 
-    func client() async throws -> OpenAICompatibleClient {
-      OpenAICompatibleClient(
-        endpoint: try await endpoint(),
-        apiKey: try await Wiring.secretStore().secret(for: .llmAPIKey),
-        observer: verbose ? Self.log : nil)
+    func client() async throws -> any LLMClient {
+      try await Wiring.makeClient(
+        endpoint: try await endpoint(), observer: verbose ? Self.log : nil)
     }
 
     static func log(_ event: LLMClientEvent) {
@@ -106,6 +116,7 @@ struct DevLLM: AsyncParsableCommand {
       var modelListed: Bool?
       var structuredOutput: String
       var roundTripMilliseconds: Int
+      var account: String?
     }
 
     func run() async throws {
@@ -114,18 +125,20 @@ struct DevLLM: AsyncParsableCommand {
       let probe: EndpointProbe
       do {
         probe = try await client.probe()
-      } catch let error as LLMError {
+      } catch let error where error is LLMError || error is CodexCredentialError {
         throw RuntimeFailure(description: "probe failed: \(error)")
       }
+      let account = probe.accountLine
       let milliseconds = Int(probe.roundTrip / .milliseconds(1))
       if json {
         let report = Report(
           modelListed: probe.modelListed, structuredOutput: probe.resolvedMode.rawValue,
-          roundTripMilliseconds: milliseconds)
+          roundTripMilliseconds: milliseconds, account: account)
         print(String(decoding: try StenoJSON.encode(report), as: UTF8.self))
         return
       }
       print("endpoint: \(endpoint.baseURL.absoluteString) model \(endpoint.model)")
+      if let account { print("account: \(account)") }
       print("model listed: \(probe.modelListed.map { $0 ? "yes" : "no" } ?? "no model list")")
       print("structured output: \(probe.resolvedMode.rawValue)")
       print("round trip: \(milliseconds) ms")

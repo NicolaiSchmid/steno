@@ -1,4 +1,5 @@
 import AppKit
+import StenoCore
 import SwiftUI
 
 /// The onboarding window, two pages. Page 1: one row per permission, the
@@ -286,37 +287,27 @@ struct OnboardingView: View {
   }
 }
 
-/// The Summaries row's fields: the LLM tab's base URL, model and API key,
-/// Test connection, Save and Skip, over the LLM tab's own view model.
+/// The Summaries row's fields over the LLM tab's own view model: a choice
+/// between a server or API key (base URL, model and key, Test connection,
+/// Save) and the ChatGPT plan (the consent card, whose button is the save),
+/// and Skip.
 private struct SummariesSetupFields: View {
   let model: OnboardingViewModel
   @Bindable var llm: LLMSettingsViewModel
 
   var body: some View {
     VStack(alignment: .leading, spacing: Theme.Space.sm) {
-      StenoTextField("http://127.0.0.1:1234/v1", text: $llm.baseURLText)
-        .accessibilityLabel("Base URL")
-        .accessibilityIdentifier("onboarding-llm-url")
-      StenoTextField("gpt-4.1-mini", text: $llm.model)
-        .accessibilityLabel("Model")
-        .accessibilityIdentifier("onboarding-llm-model")
-      StenoSecureField("optional for local servers", text: $llm.apiKey)
-        .accessibilityLabel("API key")
-        .accessibilityIdentifier("onboarding-llm-key")
-      if let message = llm.validationMessage {
-        MessageRow(kind: .warning, text: message)
+      Picker("Service", selection: .action({ llm.preset.provider }, llm.selectProvider)) {
+        Text("Server or API key").tag(LLMProvider.endpoint)
+        Text("ChatGPT (Codex)").tag(LLMProvider.codex)
       }
-      HStack(spacing: Theme.Space.sm) {
-        Button("Test connection") { Task { await llm.test() } }
-          .buttonStyle(StenoSecondaryButtonStyle())
-          .disabled(llm.isTesting || llm.baseURL == nil)
-        Button("Save") { Task { await model.saveSummaries() } }
-          .buttonStyle(StenoPrimaryButtonStyle())
-          .disabled(!model.canSaveSummaries)
-          .accessibilityIdentifier("onboarding-llm-save")
-        Button("Skip") { model.skipSetup(.summaries) }
-          .buttonStyle(StenoGhostButtonStyle())
-        if llm.isTesting { ProgressView().controlSize(.small) }
+      .pickerStyle(.segmented)
+      .labelsHidden()
+      .accessibilityIdentifier("onboarding-llm-provider")
+      if llm.preset == .codex {
+        codexFields
+      } else {
+        endpointFields
       }
       switch llm.testResult {
       case .success(let text): MessageRow(kind: .info, text: text)
@@ -325,6 +316,68 @@ private struct SummariesSetupFields: View {
       }
       if let error = llm.error { MessageRow(kind: .error, text: error) }
     }
+  }
+
+  @ViewBuilder
+  private var endpointFields: some View {
+    StenoTextField("http://127.0.0.1:1234/v1", text: $llm.baseURLText)
+      .accessibilityLabel("Base URL")
+      .accessibilityIdentifier("onboarding-llm-url")
+    StenoTextField("gpt-4.1-mini", text: $llm.model)
+      .accessibilityLabel("Model")
+      .accessibilityIdentifier("onboarding-llm-model")
+    StenoSecureField("optional for local servers", text: $llm.apiKey)
+      .accessibilityLabel("API key")
+      .accessibilityIdentifier("onboarding-llm-key")
+    if let message = llm.validationMessage {
+      MessageRow(kind: .warning, text: message)
+    }
+    HStack(spacing: Theme.Space.sm) {
+      Button("Test connection") { Task { await llm.test() } }
+        .buttonStyle(StenoSecondaryButtonStyle())
+        .disabled(llm.isTesting || llm.baseURL == nil)
+      Button("Save") { Task { await model.saveSummaries() } }
+        .buttonStyle(StenoPrimaryButtonStyle())
+        .disabled(!model.canSaveSummaries)
+        .accessibilityIdentifier("onboarding-llm-save")
+      skipButton
+      if llm.isTesting { ProgressView().controlSize(.small) }
+    }
+  }
+
+  @ViewBuilder
+  private var codexFields: some View {
+    if llm.codexConfirmed {
+      // Confirmed, but the row has not collapsed: the model list or the
+      // sign-in failed, or the confirmation came from Settings earlier.
+      switch llm.codexStatus {
+      case .signedIn(let account):
+        MessageRow(kind: .success, text: "Using ChatGPT as \(account).")
+      case .unavailable(let text):
+        MessageRow(kind: .error, text: text)
+      case .notChecked:
+        EmptyView()
+      }
+      if let text = llm.codexModelsError {
+        MessageRow(kind: .warning, text: text)
+      }
+      HStack(spacing: Theme.Space.sm) {
+        Button(CodexConsentCopy.checkAgain) { Task { await model.confirmSummariesWithCodex() } }
+          .buttonStyle(StenoSecondaryButtonStyle())
+        skipButton
+      }
+    } else {
+      CodexConsentCard(
+        status: llm.codexStatus,
+        confirm: { await model.confirmSummariesWithCodex() },
+        checkAgain: { await llm.refreshCodexStatus() },
+        trailing: AnyView(skipButton))
+    }
+  }
+
+  private var skipButton: some View {
+    Button("Skip") { model.skipSetup(.summaries) }
+      .buttonStyle(StenoGhostButtonStyle())
   }
 }
 

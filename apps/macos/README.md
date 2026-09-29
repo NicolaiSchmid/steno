@@ -114,7 +114,11 @@ re-render and commit, not a bug. Design and geometry:
 Where things live at runtime: the database in `~/Library/Application Support/Steno/steno.sqlite`,
 recordings in the folder chosen in Audio settings (default `…/Steno/Audio`), models in
 `…/Steno/Models`, the LLM API key in the login keychain (service `uno.schmid.steno.mac`,
-account `llm-api-key`), the handover identity in the login keychain.
+account `llm-api-key`), the handover identity in the login keychain. With the ChatGPT (Codex)
+summaries choice, Steno reads and refreshes the Codex CLI's own sign-in in `~/.codex/auth.json`
+(or `$CODEX_HOME/auth.json`) and stores nothing of it elsewhere; the choice is off until the
+user confirms it in onboarding or Settings > Summaries
+([`.plans/2026-09-29-codex-chatgpt-provider.md`](../../.plans/2026-09-29-codex-chatgpt-provider.md)).
 
 ## Cutting a release
 

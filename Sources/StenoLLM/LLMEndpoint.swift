@@ -36,6 +36,10 @@ public struct LLMEndpoint: Sendable, Equatable {
   /// Per attempt, on the injected clock.
   public var requestTimeout: Duration
   public var structuredOutputMode: StructuredOutputMode
+  /// Which client speaks to it. Only `.codex(model:contextTokens:)` sets
+  /// `.codex`: a pasted Codex URL under the endpoint provider stays an
+  /// endpoint, so the confirmation gate cannot be walked around by address.
+  public var provider: LLMProvider = .endpoint
 
   public init(
     baseURL: URL,
@@ -55,25 +59,65 @@ public struct LLMEndpoint: Sendable, Equatable {
     self.structuredOutputMode = structuredOutputMode
   }
 
-  /// `llmBaseURL`, `llmModel` and `llmContextTokens` from the settings; nil
-  /// until both the URL and the model are set.
+  /// The endpoint the settings describe, or nil while summaries are off.
+  /// For `.endpoint`: `llmBaseURL`, `llmModel` and `llmContextTokens`, nil
+  /// until both the URL and the model are set. For `.codex`: nil until a
+  /// model is picked and the user has confirmed the credential use
+  /// (`codexConfirmedAt`), so every "configured" check stays one call.
   public init?(settings: Settings) {
-    guard let baseURL = settings.llmBaseURL, let model = settings.llmModel, !model.isEmpty else {
-      return nil
+    switch settings.llmProvider {
+    case .endpoint:
+      guard let baseURL = settings.llmBaseURL, let model = settings.llmModel, !model.isEmpty
+      else { return nil }
+      self.init(
+        baseURL: baseURL, model: model, contextTokens: max(settings.llmContextTokens, 1_024))
+    case .codex:
+      guard settings.codexConfirmedAt != nil, let model = settings.codexModel, !model.isEmpty
+      else { return nil }
+      self = .codex(model: model, contextTokens: settings.codexContextTokens)
     }
-    self.init(baseURL: baseURL, model: model, contextTokens: max(settings.llmContextTokens, 1_024))
+  }
+
+  /// OpenAI's Codex backend, the root the Codex CLI talks to with a ChatGPT
+  /// sign-in. `CodexResponsesClient` appends `/responses` and `/models`.
+  public static let codexBackendURL = URL(string: "https://chatgpt.com/backend-api/codex")!
+
+  /// Whether this endpoint is the Codex backend (Responses API, Codex
+  /// credentials) rather than a chat completions server.
+  public var isCodexBackend: Bool { provider == .codex }
+
+  /// The Codex backend with `model`. The backend takes no output ceiling, so
+  /// `maxOutputTokens` only shapes prompts and budgets; 16k leaves the
+  /// summary room without starving the input.
+  public static func codex(model: String, contextTokens: Int) -> LLMEndpoint {
+    var endpoint = LLMEndpoint(
+      baseURL: codexBackendURL, model: model, contextTokens: max(contextTokens, 1_024),
+      maxOutputTokens: 16_000)
+    endpoint.provider = .codex
+    return endpoint
   }
 
   public var chatCompletionsURL: URL { baseURL.appendingPathComponent("chat/completions") }
+  public var responsesURL: URL { baseURL.appendingPathComponent("responses") }
   public var modelsURL: URL { baseURL.appendingPathComponent("models") }
 }
 
-/// What `OpenAICompatibleClient.probe()` learned about an endpoint whose
-/// probe completion succeeded; a probe that could not complete throws.
+/// What a client's `probe()` learned about an endpoint whose probe
+/// completion succeeded; a probe that could not complete throws.
 public struct EndpointProbe: Sendable, Equatable {
   /// Whether `GET /models` lists the configured model; nil when the server
   /// has no model list.
   public var modelListed: Bool?
   public var resolvedMode: StructuredOutputMode
   public var roundTrip: Duration
+  /// "name@example.com (Plus)" from the Codex sign-in; nil for an endpoint.
+  public var accountLine: String? = nil
+}
+
+/// A `LanguageModel` bound to one `LLMEndpoint` that can check its own
+/// setup: the two clients, so the wiring that picks one by provider needs
+/// no cast to probe it.
+public protocol LLMClient: LanguageModel {
+  var endpoint: LLMEndpoint { get }
+  func probe() async throws -> EndpointProbe
 }

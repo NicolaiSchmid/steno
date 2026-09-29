@@ -76,7 +76,9 @@ for Core Audio taps. Rebuilt from scratch, no forks.
    match against known voices, running-average refinement. Unknown speakers get a
    ten-second sample clip for manual naming. LLM infers names from conversational context
    and calendar attendees as a prior. User can merge split speakers.
-4. LLM post-processing over any OpenAI-compatible endpoint (base URL + API key only).
+4. LLM post-processing over any OpenAI-compatible endpoint (base URL + API key only), or,
+   since [`2026-09-29-codex-chatgpt-provider.md`](2026-09-29-codex-chatgpt-provider.md), over
+   OpenAI's Codex backend with the user's own ChatGPT sign-in after an explicit confirmation.
    Responsibilities: fix Denglish and anglicisms, casing and product names; produce summary
    from the selected template; extract tasks with assignee, priority, due date; infer
    speaker names. Output language follows the meeting language.

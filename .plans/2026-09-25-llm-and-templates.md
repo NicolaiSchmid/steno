@@ -20,9 +20,13 @@ injected clock.
 
 ## Non-goals
 
-- Streaming; the UI shows a processing state, not partial text.
-- Provider-specific APIs (Anthropic Messages, Gemini, OpenAI Responses API), tool calling,
-  embeddings, vision. Only `POST {baseURL}/chat/completions` and `GET {baseURL}/models`.
+- Streaming; the UI shows a processing state, not partial text. (The Codex provider added by
+  [`2026-09-29-codex-chatgpt-provider.md`](2026-09-29-codex-chatgpt-provider.md) receives an
+  event stream because its backend sends nothing else; it is buffered whole, and the UI is
+  unchanged.)
+- Provider-specific APIs (Anthropic Messages, Gemini), tool calling, embeddings, vision. Only
+  `POST {baseURL}/chat/completions` and `GET {baseURL}/models`, plus, for the Codex provider
+  only, the Responses API on OpenAI's Codex backend.
 - Custom templates, template editing, template parsing (data is StenoCore's JSON), auto-picking a
   template from content. Four fixed templates.
 - Cross-meeting context, Ask AI, translating the transcript, a per-meeting output-language override,

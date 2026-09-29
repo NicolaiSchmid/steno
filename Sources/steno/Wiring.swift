@@ -84,19 +84,33 @@ enum Wiring {
 
   typealias LLMPasses = (cleaner: LLMTranscriptCleaner, summarizer: LLMMeetingSummarizer)
 
-  /// The real cleaner and summarizer on one shared `OpenAICompatibleClient`
-  /// (so a structured output mode learned during cleanup carries over to the
-  /// summary), or nil when `Settings.llmBaseURL` or `llmModel` is unset and
-  /// the pipeline skips both passes. The key comes from `secretStore()`:
+  /// The real cleaner and summarizer on one shared client (so a structured
+  /// output mode learned during cleanup carries over to the summary), or nil
+  /// when the settings describe no endpoint and the pipeline skips both
+  /// passes. The endpoint provider's key comes from `secretStore()`:
   /// `STENO_LLM_API_KEY` or the 0600 secrets file in the support directory.
+  /// The Codex provider reads the Codex CLI's own sign-in (`CODEX_HOME`).
   static func llmComponents(settings: Settings) async throws -> LLMPasses? {
     guard let endpoint = LLMEndpoint(settings: settings) else { return nil }
-    let client = OpenAICompatibleClient(
-      endpoint: endpoint, apiKey: try await secretStore().secret(for: .llmAPIKey))
+    let client = try await makeClient(endpoint: endpoint, observer: nil)
     return (
       LLMTranscriptCleaner(model: client, endpoint: endpoint),
       LLMMeetingSummarizer(model: client, endpoint: endpoint)
     )
+  }
+
+  /// The client for `endpoint`: the Codex backend gets the credential
+  /// store, everything else the API key.
+  static func makeClient(endpoint: LLMEndpoint, observer: (@Sendable (LLMClientEvent) -> Void)?)
+    async throws -> any LLMClient
+  {
+    if endpoint.isCodexBackend {
+      return CodexResponsesClient(
+        endpoint: endpoint, credentials: CodexCredentialStore(), observer: observer)
+    }
+    return OpenAICompatibleClient(
+      endpoint: endpoint, apiKey: try await secretStore().secret(for: .llmAPIKey),
+      observer: observer)
   }
 
   static func secretStore() throws -> FileSecretStore {

@@ -11,6 +11,10 @@ import Testing
     #expect(settings.defaultRetention == .keepForever, "a new install keeps every recording")
     #expect(settings.speakerMatchThreshold == 0.60)
     #expect(settings.llmContextTokens == 32_000)
+    #expect(settings.llmProvider == .endpoint, "a new install summarises over an endpoint")
+    #expect(settings.codexModel == nil)
+    #expect(settings.codexContextTokens == 128_000)
+    #expect(settings.codexConfirmedAt == nil, "nothing reads the Codex sign-in until confirmed")
     #expect(settings.obsidian == nil)
     #expect(settings.launchAtLogin)
     #expect(settings.meetingDetectionEnabled)
@@ -91,6 +95,53 @@ import Testing
     #expect(settings.speakerMatchThreshold == 0.60)
     #expect(settings.llmContextTokens == 32_000)
     #expect(settings.obsidian == nil)
+  }
+
+  /// An install from before the provider existed has none of the Codex
+  /// rows: it loads as the endpoint provider with its own rows intact.
+  /// Switching to Codex stores the four new rows (the confirmation as an
+  /// ISO 8601 instant) beside the endpoint's, and "Stop using ChatGPT"
+  /// removes only the confirmation row.
+  @Test func codexRowsRoundTripAndAnOldInstallLoadsTheirDefaults() async throws {
+    let store = try MeetingStore.inMemory()
+    let settings = SettingsStore(writer: store.writer)
+    try await store.writer.write { db in
+      try SettingRow(key: "llmModel", value: "\"local\"").insert(db)
+      try SettingRow(key: "llmContextTokens", value: "16000").insert(db)
+    }
+    let old = try await settings.load()
+    #expect(old.llmProvider == .endpoint)
+    #expect(old.codexModel == nil)
+    #expect(old.codexContextTokens == 128_000)
+    #expect(old.codexConfirmedAt == nil)
+    #expect(old.llmModel == "local")
+    #expect(old.llmContextTokens == 16_000)
+
+    var confirmed = old
+    confirmed.llmProvider = .codex
+    confirmed.codexModel = "gpt-5.6-terra"
+    confirmed.codexContextTokens = 272_000
+    confirmed.codexConfirmedAt = Date(timeIntervalSince1970: 1_790_000_000.25)
+    try await settings.save(confirmed)
+    #expect(try await settings.load() == confirmed)
+    let rows = try await store.writer.read { db in
+      Dictionary(uniqueKeysWithValues: try SettingRow.fetchAll(db).map { ($0.key, $0.value) })
+    }
+    #expect(rows["llmProvider"] == "\"codex\"")
+    #expect(rows["codexModel"] == "\"gpt-5.6-terra\"")
+    #expect(rows["codexContextTokens"] == "272000")
+    #expect(rows["codexConfirmedAt"] == "\"2026-09-21T14:13:20.250Z\"")
+    #expect(rows["llmModel"] == "\"local\"", "the endpoint's rows survive the switch")
+    #expect(rows["llmContextTokens"] == "16000")
+
+    var stopped = confirmed
+    stopped.codexConfirmedAt = nil
+    try await settings.save(stopped)
+    #expect(try await settings.load() == stopped)
+    let keys = try await store.writer.read { db in try SettingRow.fetchAll(db).map(\.key) }
+    #expect(!keys.contains("codexConfirmedAt"))
+    #expect(keys.contains("codexModel"), "the model is kept for the next confirmation")
+    #expect(keys.contains("llmProvider"))
   }
 
   @Test func observeYieldsAgainAfterASave() async throws {

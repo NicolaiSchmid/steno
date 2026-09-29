@@ -19,9 +19,7 @@ final class ClientHarness: Sendable {
   let clock: ManualClock
   let client: OpenAICompatibleClient
   let endpoint: LLMEndpoint
-  private let log: EventLog
-  private let stream: AsyncStream<LLMClientEvent>
-  private let continuation: AsyncStream<LLMClientEvent>.Continuation
+  private let recorder = EventRecorder()
 
   init(
     retry: RetryPolicy = .default,
@@ -32,48 +30,29 @@ final class ClientHarness: Sendable {
     var endpoint = LLMEndpoint(baseURL: server.baseURL, model: "stub-model")
     configure(&endpoint)
     let clock = ManualClock()
-    let (stream, continuation) = AsyncStream<LLMClientEvent>.makeStream()
-    let log = EventLog()
     self.server = server
     self.clock = clock
     self.endpoint = endpoint
-    self.stream = stream
-    self.continuation = continuation
-    self.log = log
     self.client = OpenAICompatibleClient(
-      endpoint: endpoint, apiKey: apiKey, retry: retry, clock: clock,
-      observer: { event in
-        log.append(event)
-        continuation.yield(event)
-      })
+      endpoint: endpoint, apiKey: apiKey, retry: retry, clock: clock, observer: recorder.observer)
   }
 
-  var events: [LLMClientEvent] { log.entries }
+  var events: [LLMClientEvent] { recorder.events }
 
   func stop() {
-    continuation.finish()
+    recorder.finish()
     server.stop()
   }
 
   /// The next event matching `predicate`, consuming earlier ones.
   func next(where predicate: (LLMClientEvent) -> Bool) async -> LLMClientEvent? {
-    for await event in stream where predicate(event) {
-      return event
-    }
-    return nil
+    await recorder.next(where: predicate)
   }
 
   /// Consumes events in the background and advances the clock by each
   /// announced backoff once the client is asleep.
   func driveRetries() -> Task<Void, Never> {
-    Task { [clock, stream] in
-      for await event in stream {
-        if case .retrying(let delay, _, _) = event {
-          _ = await clock.waitForSleepers(1, attempts: ClientHarness.sleeperAttempts)
-          clock.advance(by: delay)
-        }
-      }
-    }
+    recorder.driveRetries(clock: clock)
   }
 
   static func request(
@@ -88,6 +67,50 @@ final class ClientHarness: Sendable {
       temperature: 0,
       maxTokens: 64,
       purpose: purpose)
+  }
+}
+
+/// A client observer for tests: every event logged for later assertions and
+/// streamed once for `next(where:)` or `driveRetries(clock:)`.
+final class EventRecorder: Sendable {
+  private let log = EventLog()
+  private let stream: AsyncStream<LLMClientEvent>
+  private let continuation: AsyncStream<LLMClientEvent>.Continuation
+
+  init() {
+    (stream, continuation) = AsyncStream<LLMClientEvent>.makeStream()
+  }
+
+  var observer: @Sendable (LLMClientEvent) -> Void {
+    { [log, continuation] event in
+      log.append(event)
+      continuation.yield(event)
+    }
+  }
+
+  var events: [LLMClientEvent] { log.entries }
+
+  func finish() { continuation.finish() }
+
+  /// The next event matching `predicate`, consuming earlier ones.
+  func next(where predicate: (LLMClientEvent) -> Bool) async -> LLMClientEvent? {
+    for await event in stream where predicate(event) {
+      return event
+    }
+    return nil
+  }
+
+  /// Consumes events in the background and advances the clock by each
+  /// announced backoff once the client is asleep.
+  func driveRetries(clock: ManualClock) -> Task<Void, Never> {
+    Task { [stream] in
+      for await event in stream {
+        if case .retrying(let delay, _, _) = event {
+          _ = await clock.waitForSleepers(1, attempts: ClientHarness.sleeperAttempts)
+          clock.advance(by: delay)
+        }
+      }
+    }
   }
 }
 

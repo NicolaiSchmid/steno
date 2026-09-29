@@ -19,14 +19,15 @@ public enum LLMClientEvent: Sendable, Equatable {
   case parameterRejected(String)
 }
 
-/// The one `LanguageModel` implementation: `POST {baseURL}/chat/completions`
-/// with Bearer auth, a per-attempt timeout and exponential retries on the
+/// The endpoint `LLMClient`: `POST {baseURL}/chat/completions` with
+/// Bearer auth, a per-attempt timeout and exponential retries on the
 /// injected clock, structured output mode fallback remembered per endpoint,
 /// and the API key redacted from every error. Text only ever leaves through
-/// here.
-public actor OpenAICompatibleClient: LanguageModel {
+/// here or `CodexResponsesClient`.
+public actor OpenAICompatibleClient: LLMClient {
   public nonisolated let endpoint: LLMEndpoint
   private let apiKey: String?
+  private var secrets: [String] { apiKey.map { [$0] } ?? [] }
   private let session: URLSession
   private let retry: RetryPolicy
   private let clock: any Clock<Duration>
@@ -92,12 +93,8 @@ public actor OpenAICompatibleClient: LanguageModel {
         if error == .timeout { observer?(.timedOut(attempt: attempt)) }
         failure = error
       }
-      guard failure.isRetryable, attempt < retry.maxAttempts else { throw failure }
-      var retryAfter: Duration?
-      if case .rateLimited(let after) = failure { retryAfter = after }
-      let delay = retry.delay(beforeRetry: attempt, retryAfter: retryAfter)
-      observer?(.retrying(after: delay, attempt: attempt, reason: failure))
-      try await clock.sleep(for: delay)
+      try await LLMTransport.backOff(
+        after: failure, attempt: attempt, retry: retry, clock: clock, observer: observer)
       attempt += 1
     }
   }
@@ -139,15 +136,6 @@ public actor OpenAICompatibleClient: LanguageModel {
 
   // MARK: Requests
 
-  struct Reply: Sendable {
-    var status: Int
-    /// Header names lowercased.
-    var headers: [String: String]
-    var body: Data
-
-    var bodyText: String { String(decoding: body.prefix(4_096), as: UTF8.self) }
-  }
-
   private func makeRequest(_ request: LLMRequest, mode: StructuredOutputMode) throws -> URLRequest {
     let ceiling = request.maxTokens ?? endpoint.maxOutputTokens
     let renamesMaxTokens = rejectedParameters.contains("max_tokens")
@@ -175,15 +163,6 @@ public actor OpenAICompatibleClient: LanguageModel {
     }
   }
 
-  /// `URLRequest.timeoutInterval`: a wall-clock backstop well past the
-  /// clock-driven timeout (twice it, at least 30 s), so a stuck socket
-  /// cannot outlive the process when the injected clock never advances.
-  /// The transfer then fails with `URLError.timedOut`, which `send` reports
-  /// as `LLMError.timeout` like the clock-driven timeout.
-  static func wallClockBackstop(for timeout: Duration) -> TimeInterval {
-    max(timeout / .seconds(1) * 2, 30)
-  }
-
   /// The wire `response_format` for a request under `mode`; nil sends none.
   static func responseFormat(for format: LLMResponseFormat, mode: StructuredOutputMode)
     -> ChatResponseFormat?
@@ -198,68 +177,15 @@ public actor OpenAICompatibleClient: LanguageModel {
     }
   }
 
-  /// One attempt: the request raced against `requestTimeout` on the clock,
-  /// with `URLRequest.timeoutInterval` set to the wall-clock backstop.
-  /// Cancellation of the caller cancels the transfer and rethrows
-  /// `CancellationError`; the timeout throws `LLMError.timeout`.
-  private func perform(_ request: URLRequest) async throws -> Reply {
-    let session = self.session
-    let clock = self.clock
-    let timeout = endpoint.requestTimeout
-    let apiKey = self.apiKey
-    let backstopped: URLRequest = {
-      var copy = request
-      copy.timeoutInterval = Self.wallClockBackstop(for: timeout)
-      return copy
-    }()
-    return try await withThrowingTaskGroup(of: Reply?.self) { group in
-      group.addTask {
-        try await Self.send(backstopped, session: session, apiKey: apiKey)
-      }
-      group.addTask {
-        // Checked first so an already-cancelled child never registers a
-        // sleeper that nothing wakes.
-        try Task.checkCancellation()
-        try await clock.sleep(for: timeout)
-        return nil
-      }
-      defer { group.cancelAll() }
-      guard let first = try await group.next() else { throw LLMError.timeout }
-      guard let reply = first else { throw LLMError.timeout }
-      return reply
-    }
-  }
-
-  private nonisolated static func send(_ request: URLRequest, session: URLSession, apiKey: String?)
-    async throws -> Reply
-  {
-    let data: Data
-    let response: URLResponse
-    do {
-      (data, response) = try await session.data(for: request)
-    } catch {
-      if Task.isCancelled { throw CancellationError() }
-      if let urlError = error as? URLError {
-        if urlError.code == .cancelled { throw CancellationError() }
-        if urlError.code == .timedOut { throw LLMError.timeout }
-      }
-      throw LLMError.transport(redact(String(describing: error), apiKey: apiKey))
-    }
-    guard let http = response as? HTTPURLResponse else {
-      throw LLMError.transport("not an HTTP response")
-    }
-    var headers: [String: String] = [:]
-    for (name, value) in http.allHeaderFields {
-      if let name = name as? String, let value = value as? String {
-        headers[name.lowercased()] = value
-      }
-    }
-    return Reply(status: http.statusCode, headers: headers, body: data)
+  /// One attempt raced against `endpoint.requestTimeout` on the clock.
+  private func perform(_ request: URLRequest) async throws -> HTTPReply {
+    try await LLMTransport.perform(
+      request, session: session, clock: clock, timeout: endpoint.requestTimeout, secrets: secrets)
   }
 
   // MARK: Replies
 
-  private func parse(_ reply: Reply) throws -> LLMResponse {
+  private func parse(_ reply: HTTPReply) throws -> LLMResponse {
     let decoded: ChatCompletionResponse
     do {
       decoded = try WireJSON.decode(ChatCompletionResponse.self, from: reply.body)
@@ -287,15 +213,15 @@ public actor OpenAICompatibleClient: LanguageModel {
       model: decoded.model)
   }
 
-  private func classify(_ reply: Reply) -> LLMError {
+  private func classify(_ reply: HTTPReply) -> LLMError {
     if reply.status == 429 {
-      return .rateLimited(retryAfter: Self.retryAfter(reply.headers["retry-after"]))
+      return .rateLimited(retryAfter: LLMTransport.retryAfter(reply.headers["retry-after"]))
     }
     return .http(status: reply.status, body: redact(Self.errorMessage(reply)))
   }
 
   /// The server's `error.message`, else the first 500 characters of the body.
-  static func errorMessage(_ reply: Reply) -> String {
+  static func errorMessage(_ reply: HTTPReply) -> String {
     if let envelope = try? WireJSON.decode(ChatErrorEnvelope.self, from: reply.body) {
       return envelope.error.message
     }
@@ -314,33 +240,11 @@ public actor OpenAICompatibleClient: LanguageModel {
   static let adjustableParameters: Set<String> = ["max_tokens", "temperature"]
 
   /// `error.param` of a 400 envelope, when the server sent one.
-  static func rejectedParameter(_ reply: Reply) -> String? {
+  static func rejectedParameter(_ reply: HTTPReply) -> String? {
     (try? WireJSON.decode(ChatErrorEnvelope.self, from: reply.body))?.error.param
   }
 
-  /// `Retry-After` in delta seconds, capped at an hour before it becomes a
-  /// `Duration` (`Duration.seconds(Double)` traps past about 1.7e20 s, and
-  /// `Double("inf")` parses). Anything that is not a finite, non-negative
-  /// number, including the HTTP-date form, falls back to the policy's
-  /// backoff.
-  static let retryAfterCap: Double = 3_600
-
-  static func retryAfter(_ header: String?) -> Duration? {
-    guard let header, let seconds = Double(header.trimmingCharacters(in: .whitespaces)),
-      seconds.isFinite, seconds >= 0
-    else { return nil }
-    return .seconds(min(seconds, retryAfterCap))
-  }
-
-  // MARK: Redaction
-
   private func redact(_ text: String) -> String {
-    Self.redact(text, apiKey: apiKey)
-  }
-
-  /// Removes the key wherever a server or transport echoed it.
-  nonisolated static func redact(_ text: String, apiKey: String?) -> String {
-    guard let apiKey, !apiKey.isEmpty else { return text }
-    return text.replacingOccurrences(of: apiKey, with: "[redacted]")
+    LLMTransport.redact(text, secrets: secrets)
   }
 }

@@ -46,7 +46,7 @@ final class OnboardingViewModel {
     var explanation: String {
       switch self {
       case .summaries:
-        "Steno sends the transcript text, never audio, to an OpenAI-compatible endpoint to clean it up and write the summary, tasks and decisions. Without one, meetings keep a raw transcript and no summary."
+        "Steno sends the transcript text, never audio, to a model to clean it up and write the summary, tasks and decisions: a server or API key of your choice, or your ChatGPT plan through the Codex sign-in on this Mac. Without one, meetings keep a raw transcript and no summary."
       case .vault:
         "Steno writes each meeting into Meetings/<date>-<slug>/ inside the vault: a folder note, transcript, tasks, VTT and JSON. It never touches files it did not write. Without a vault, meetings stay in Steno."
       }
@@ -63,7 +63,8 @@ final class OnboardingViewModel {
 
   enum SetupState: Equatable, Sendable {
     case open
-    /// Saved, with the collapsed row's line ("Saved: <model> at <host>").
+    /// Saved, with the collapsed row's line ("Saved: <model> at <host>" or
+    /// "Saved: <model> via ChatGPT as <account>").
     case saved(String)
     case skipped
 
@@ -246,9 +247,10 @@ final class OnboardingViewModel {
   }
 
   /// The Summaries row's Save can go: a valid URL, a model name and nothing
-  /// the view model rejects.
+  /// the view model rejects. The ChatGPT choice has no Save: its consent
+  /// button is the save (`confirmSummariesWithCodex`).
   var canSaveSummaries: Bool {
-    guard let llm else { return false }
+    guard let llm, llm.preset != .codex else { return false }
     return llm.validationMessage == nil && llm.baseURL != nil
       && !llm.model.trimmingCharacters(in: .whitespaces).isEmpty
   }
@@ -258,6 +260,18 @@ final class OnboardingViewModel {
   func saveSummaries() async {
     guard let llm, canSaveSummaries else { return }
     await llm.save()
+    guard llm.error == nil, llm.isConfigured else { return }
+    setupStates[.summaries] = .saved(Self.savedLine(llm))
+    finishIfSetupHandled()
+  }
+
+  /// The consent card's button on the Summaries row: the LLM tab's own
+  /// `confirmCodex()` (stores the confirmation and provider, picks the
+  /// first listed model, saves, probes), then the row collapses when the
+  /// endpoint is configured.
+  func confirmSummariesWithCodex() async {
+    guard let llm, llm.preset == .codex else { return }
+    await llm.confirmCodex()
     guard llm.error == nil, llm.isConfigured else { return }
     setupStates[.summaries] = .saved(Self.savedLine(llm))
     finishIfSetupHandled()
@@ -294,6 +308,11 @@ final class OnboardingViewModel {
   }
 
   private static func savedLine(_ llm: LLMSettingsViewModel) -> String {
+    if llm.preset == .codex {
+      let account: String =
+        if case .signedIn(let line) = llm.codexStatus { " as \(line)" } else { "" }
+      return "Saved: \(llm.codexModel) via ChatGPT\(account)"
+    }
     let host = llm.baseURL?.host() ?? ""
     return "Saved: \(llm.model.trimmingCharacters(in: .whitespaces)) at \(host)"
   }

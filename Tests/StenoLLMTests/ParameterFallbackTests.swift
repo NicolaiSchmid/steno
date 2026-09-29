@@ -89,13 +89,13 @@ import Testing
   }
 
   @Test func theParamIsReadFromTheEnvelope() {
-    let reply = OpenAICompatibleClient.Reply(
+    let reply = HTTPReply(
       status: 400, headers: [:],
       body: Data(
         "{\"error\":{\"message\":\"Unsupported value\",\"type\":\"invalid_request_error\",\"param\":\"temperature\",\"code\":\"unsupported_value\"}}"
           .utf8))
     #expect(OpenAICompatibleClient.rejectedParameter(reply) == "temperature")
-    let plain = OpenAICompatibleClient.Reply(
+    let plain = HTTPReply(
       status: 400, headers: [:], body: Data("{\"error\":{\"message\":\"nope\"}}".utf8))
     #expect(OpenAICompatibleClient.rejectedParameter(plain) == nil)
     #expect(OpenAICompatibleClient.adjustableParameters == ["max_tokens", "temperature"])

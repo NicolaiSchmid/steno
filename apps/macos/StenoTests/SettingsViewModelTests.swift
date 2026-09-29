@@ -280,7 +280,8 @@ final class SettingsViewModelTests: XCTestCase {
       XCTAssertFalse(text.contains(key), text)
     }
     do {
-      _ = try await LLMWiring.probe(settings: settings, apiKey: key)
+      _ = try await LLMWiring.probe(
+        settings: settings, apiKey: key, codexCredentials: environment.codexCredentials)
       XCTFail("port 9 does not answer")
     } catch {
       XCTAssertFalse(String(describing: error).contains(key))
@@ -312,6 +313,127 @@ final class SettingsViewModelTests: XCTestCase {
     let stored = try await environment.secrets.secret(for: .llmAPIKey)
     XCTAssertNil(stored, "the key is not written either")
     XCTAssertTrue(pipeline === environment.pipeline, "no pipeline reload")
+  }
+
+  // MARK: ChatGPT (Codex)
+
+  /// Picking ChatGPT stores nothing and configures nothing until the consent
+  /// button; the sign-in file is looked at only for the account line.
+  func testCodexPresetIsOffUntilConfirmed() async throws {
+    let environment = try await TestSupport.environment(seed: false)
+    let model = LLMSettingsViewModel(environment: environment)
+    await model.load()
+    let before = try await environment.settings.load()
+    let pipeline = environment.pipeline
+
+    await model.selectPreset(.codex)
+    XCTAssertEqual(model.preset, .codex)
+    XCTAssertFalse(model.codexConfirmed)
+    XCTAssertFalse(model.isConfigured)
+    XCTAssertNil(model.validationMessage, "the endpoint fields do not apply")
+    guard case .unavailable(let text) = model.codexStatus else {
+      return XCTFail("no sign-in on a test machine: \(model.codexStatus)")
+    }
+    XCTAssertTrue(text.contains("codex login"), text)
+    let after = try await environment.settings.load()
+    XCTAssertEqual(after, before, "showing the card writes nothing")
+    XCTAssertTrue(pipeline === environment.pipeline, "no pipeline reload")
+
+    await model.test()
+    XCTAssertEqual(model.testResult, .failure("Confirm the use of your ChatGPT account first."))
+
+    // Back to a server: the endpoint fields are as they were.
+    await model.selectPreset(.lmStudio)
+    XCTAssertEqual(model.preset, .lmStudio)
+    XCTAssertEqual(model.baseURLText, "http://127.0.0.1:1234/v1")
+  }
+
+  /// The pane closing (or focus leaving) with the consent card on screen
+  /// commits like any other edit; that commit must store nothing, or the
+  /// working endpoint would be switched off without a word.
+  func testClosingThePaneWithTheConsentCardOnScreenStoresNothing() async throws {
+    let environment = try await TestSupport.environment(seed: false)
+    try await environment.updateSettings {
+      $0.llmBaseURL = URL(string: "http://127.0.0.1:9/v1")
+      $0.llmModel = "qwen"
+    }
+    let model = LLMSettingsViewModel(environment: environment)
+    await model.load()
+    XCTAssertTrue(model.isConfigured)
+    let before = try await environment.settings.load()
+    let pipeline = environment.pipeline
+    await model.selectPreset(.codex)
+    await model.commit()
+    let after = try await environment.settings.load()
+    XCTAssertEqual(after, before, "the card on screen is not a decision")
+    XCTAssertEqual(after.llmProvider, .endpoint)
+    XCTAssertTrue(after.llmConfigured, "the server setup keeps working")
+    XCTAssertTrue(pipeline === environment.pipeline)
+  }
+
+  /// Confirming without a sign-in on this Mac stores the confirmation and
+  /// the provider (the user said yes) but the endpoint stays off until a
+  /// model can be picked, and the failure names the fix.
+  func testConfirmingCodexWithoutASignInStaysUnconfigured() async throws {
+    let environment = try await TestSupport.environment(seed: false)
+    let model = LLMSettingsViewModel(environment: environment)
+    await model.load()
+    await model.selectPreset(.codex)
+    await model.confirmCodex()
+    XCTAssertTrue(model.codexConfirmed)
+    XCTAssertFalse(model.isConfigured, "no model list without a sign-in, so no model")
+    let settings = try await environment.settings.load()
+    XCTAssertEqual(settings.llmProvider, .codex)
+    XCTAssertNotNil(settings.codexConfirmedAt)
+    XCTAssertNil(settings.codexModel)
+    XCTAssertFalse(settings.llmConfigured)
+    guard case .unavailable(let text) = model.codexStatus else {
+      return XCTFail("expected the missing sign-in to be reported: \(model.codexStatus)")
+    }
+    XCTAssertTrue(text.contains("codex login"), text)
+
+    await model.stopUsingCodex()
+    XCTAssertFalse(model.codexConfirmed)
+    XCTAssertEqual(model.preset, .lmStudio)
+    let reverted = try await environment.settings.load()
+    XCTAssertEqual(reverted.llmProvider, .endpoint)
+    XCTAssertNil(reverted.codexConfirmedAt)
+  }
+
+  /// A stored Codex configuration loads as such and switching the provider
+  /// back and forth keeps both sides' fields.
+  func testCodexConfigurationRoundTripsAndKeepsTheEndpointFields() async throws {
+    let environment = try await TestSupport.environment(seed: false)
+    try await environment.updateSettings {
+      // Port 9 refuses, so the commit's probe fails fast without a network.
+      $0.llmBaseURL = URL(string: "http://127.0.0.1:9/v1")
+      $0.llmModel = "qwen"
+      $0.llmProvider = .codex
+      $0.codexModel = "gpt-5.6-terra"
+      $0.codexContextTokens = 272_000
+      $0.codexConfirmedAt = Date()
+    }
+    let model = LLMSettingsViewModel(environment: environment)
+    await model.load()
+    XCTAssertEqual(model.preset, .codex)
+    XCTAssertTrue(model.codexConfirmed)
+    XCTAssertTrue(model.isConfigured)
+    XCTAssertEqual(model.codexModel, "gpt-5.6-terra")
+    XCTAssertEqual(
+      model.codexModelChoices.map(\.slug), ["gpt-5.6-terra"], "the stored slug stays pickable")
+    XCTAssertEqual(model.baseURLText, "http://127.0.0.1:9/v1", "the endpoint side is kept")
+    XCTAssertEqual(model.model, "qwen")
+    guard case .unavailable = model.codexStatus else {
+      return XCTFail("no sign-in on a test machine: \(model.codexStatus)")
+    }
+
+    await model.selectPreset(.custom)
+    let switched = try await environment.settings.load()
+    XCTAssertEqual(switched.llmProvider, .endpoint)
+    XCTAssertEqual(switched.llmModel, "qwen")
+    XCTAssertEqual(switched.codexModel, "gpt-5.6-terra", "the Codex side is kept too")
+    XCTAssertNotNil(switched.codexConfirmedAt, "switching the service is not a revocation")
+    XCTAssertTrue(switched.llmConfigured)
   }
 
   // MARK: Obsidian
