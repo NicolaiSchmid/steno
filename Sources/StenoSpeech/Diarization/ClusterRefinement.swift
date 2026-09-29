@@ -76,7 +76,9 @@ enum ClusterRefinement {
       }
       guard let best = scored.max(by: { $0.cosine < $1.cosine }),
         best.cosine >= rules.absorbThreshold
-      else { continue }
+      else {
+        continue
+      }
       // The big cluster keeps its embedding, clip and confidence; only the
       // ranges grow.
       substantive[best.index].ranges = DiarizationMapping.merged(
