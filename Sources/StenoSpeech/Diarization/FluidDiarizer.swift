@@ -1,9 +1,11 @@
 import Foundation
 import StenoCore
 
-/// Knobs of the offline diarizer that Steno exposes. Everything else stays
-/// at FluidAudio's community defaults; the sample clip length is core's
-/// contract (`SampleClipPicker.targetSeconds`), not a knob.
+/// Steno's diarizer settings: the clustering knobs handed to FluidAudio's
+/// offline pipeline and whether the refinement pass runs after it.
+/// Everything else in the pipeline stays at FluidAudio's community defaults;
+/// the sample clip length is core's contract (`SampleClipPicker.targetSeconds`),
+/// not a knob.
 public struct FluidDiarizerConfig: Sendable, Equatable {
   /// Passed to `OfflineDiarizerConfig.clustering.threshold`: a Euclidean cut
   /// on unit embeddings, larger merges more. 0.8 instead of the community
@@ -13,18 +15,19 @@ public struct FluidDiarizerConfig: Sendable, Equatable {
   public var clusteringThreshold: Double
   public var minSpeakers: Int?
   public var maxSpeakers: Int?
-  /// Whether `ClusterRefinement` runs after the mapping. Off only for the
-  /// sweep tool, which reports the raw clusters.
-  public var refines: Bool
+  /// Whether `ClusterRefinement` runs after the mapping; off, the clusters
+  /// come back as the mapping produced them (what the sweep tool reports
+  /// with `--no-refinement`).
+  public var refinesClusters: Bool
 
   public init(
     clusteringThreshold: Double = 0.8, minSpeakers: Int? = nil, maxSpeakers: Int? = nil,
-    refines: Bool = true
+    refinesClusters: Bool = true
   ) {
     self.clusteringThreshold = clusteringThreshold
     self.minSpeakers = minSpeakers
     self.maxSpeakers = maxSpeakers
-    self.refines = refines
+    self.refinesClusters = refinesClusters
   }
 
   public static let `default` = FluidDiarizerConfig()
@@ -41,12 +44,13 @@ public struct FluidDiarizerConfig: Sendable, Equatable {
 
   /// `OfflineDiarizerManager` is a non-Sendable class whose `process` is an
   /// async method: calling it with an actor-owned instance would send that
-  /// instance to the generic executor. The box owns the manager and is the
-  /// only thing the actor holds. What makes `@unchecked Sendable` true is
-  /// not the actor (it is re-entrant across the awaited `process`) but the
-  /// caller: core's `Diarize` stage runs one lane per meeting, one meeting
-  /// at a time, so no two calls are ever in flight on one diarizer. A second
-  /// concurrent caller would need an in-flight guard here (follow-up).
+  /// instance to the generic executor. The box owns the manager; the actor
+  /// holds two boxes (the full pipeline and the one-speaker instance) and
+  /// the models they share. What makes `@unchecked Sendable` true is not
+  /// the actor (it is re-entrant across the awaited `process`) but
+  /// `FluidDiarizer.diarize`, which runs its calls one after another, so no
+  /// two `process` calls are ever in flight on one box even when the
+  /// pipeline processes two meetings at once.
   private final class OfflineDiarizerBox: @unchecked Sendable {
     private let manager: OfflineDiarizerManager
 
@@ -75,10 +79,30 @@ public struct FluidDiarizerConfig: Sendable, Equatable {
     }
   }
 
+  /// A box capped at one speaker over a slice of speech: whatever it hears
+  /// is one voice, and the cluster embedding of that voice is the slice's
+  /// embedding. `noSpeechDetected` and audio under one embedding window are
+  /// nil.
+  private struct SingleSpeakerEmbedder: SliceEmbedder {
+    let box: OfflineDiarizerBox
+
+    func embedding(of audio: AudioBuffer16k) async throws -> Embedding? {
+      guard audio.duration >= FluidDiarizer.minimumAudioSeconds else { return nil }
+      do {
+        return try await box.process(audio.samples).clusters.first?.embedding
+      } catch OfflineDiarizationError.noSpeechDetected {
+        return nil
+      }
+    }
+  }
+
   /// The pyannote community-1 offline pipeline through FluidAudio's
   /// `OfflineDiarizerManager`, wrapped in an actor because the manager is
   /// not `Sendable`. Chunk embeddings are exposed so the cluster embedding
-  /// is a normalised mean of unit vectors, not the VBx centroid.
+  /// is a normalised mean of unit vectors, not the VBx centroid. That mean
+  /// is what `ClusterRefinement` starts from; after the pass each
+  /// substantive cluster carries the embedding of its own concatenated
+  /// speech instead.
   actor FluidDiarizer: Diarizer {
     /// Audio shorter than one embedding window has nothing to cluster;
     /// FluidAudio reports it as `noSpeechDetected`, so it is answered here
@@ -91,7 +115,11 @@ public struct FluidDiarizerConfig: Sendable, Equatable {
     /// The one-speaker instance behind `ClusterRefinement`, sharing the
     /// loaded models with `manager`.
     private var single: OfflineDiarizerBox?
-    private var loadedModels: OfflineDiarizerModels?
+    /// One load for every caller, however many arrive while it runs.
+    private var loadingModels: Task<OfflineDiarizerModels, any Error>?
+    /// The most recent `diarize` call; the next one waits for it, so the
+    /// boxes see one `process` at a time (the actor itself is re-entrant).
+    private var lastDiarization: Task<Void, Never>?
 
     init(models: ModelStore, config: FluidDiarizerConfig = .default) {
       self.models = models
@@ -102,14 +130,16 @@ public struct FluidDiarizerConfig: Sendable, Equatable {
       _ = try await loaded()
     }
 
-    /// The full pipeline at `config`, built on first use.
+    /// The full pipeline at `config`, built on first use. The check repeats
+    /// after the await because a concurrent `prepare` may have built it.
     private func loaded() async throws -> OfflineDiarizerBox {
       if let manager { return manager }
-      let manager = try await makeBox(
+      let built = try await makePipeline(
         threshold: config.clusteringThreshold, minSpeakers: config.minSpeakers,
         maxSpeakers: config.maxSpeakers)
-      self.manager = manager
-      return manager
+      if let manager { return manager }
+      manager = built
+      return built
     }
 
     /// The pipeline behind the slice embedder: the same models, the
@@ -117,14 +147,15 @@ public struct FluidDiarizerConfig: Sendable, Equatable {
     /// resolves min = max = 1 to), the threshold at the community default.
     private func singleSpeaker() async throws -> OfflineDiarizerBox {
       if let single { return single }
-      let single = try await makeBox(threshold: nil, minSpeakers: 1, maxSpeakers: 1)
-      self.single = single
-      return single
+      let built = try await makePipeline(threshold: nil, minSpeakers: 1, maxSpeakers: 1)
+      if let single { return single }
+      single = built
+      return built
     }
 
     /// FluidAudio's defaults with the clustering knobs set and the chunk
     /// embeddings exposed, over the shared models.
-    private func makeBox(threshold: Double?, minSpeakers: Int?, maxSpeakers: Int?)
+    private func makePipeline(threshold: Double?, minSpeakers: Int?, maxSpeakers: Int?)
       async throws -> OfflineDiarizerBox
     {
       var fluidConfig = OfflineDiarizerConfig.default
@@ -135,43 +166,48 @@ public struct FluidDiarizerConfig: Sendable, Equatable {
       return OfflineDiarizerBox(config: fluidConfig, models: try await loadModels())
     }
 
-    /// The pipeline capped at one speaker over a slice of speech: whatever it
-    /// hears is one voice, and the cluster embedding of that voice is the
-    /// slice's embedding. `noSpeechDetected` and audio under one embedding
-    /// window are nil.
-    private struct SingleSpeakerEmbedder: SliceEmbedder {
-      let box: OfflineDiarizerBox
-
-      func embedding(of audio: AudioBuffer16k) async throws -> Embedding? {
-        guard audio.duration >= FluidDiarizer.minimumAudioSeconds else { return nil }
-        do {
-          return try await box.process(audio.samples).clusters.first?.embedding
-        } catch OfflineDiarizationError.noSpeechDetected {
-          return nil
-        }
-      }
-    }
-
     /// Downloads the asset when needed, then loads the models once from the
     /// framework root (`load(from:)` takes the parent of the repository
-    /// folder).
+    /// folder). A failed load is forgotten, so the next call retries.
     private func loadModels() async throws -> OfflineDiarizerModels {
-      if let loadedModels { return loadedModels }
-      try await models.ensureInstalled(.offlineDiarizer)
-      let loaded = try await OfflineDiarizerModels.load(
-        from: models.frameworkRoot(for: .offlineDiarizer))
-      loadedModels = loaded
-      return loaded
+      if let loadingModels { return try await loadingModels.value }
+      let store = models
+      let task = Task {
+        try await store.ensureInstalled(.offlineDiarizer)
+        return try await OfflineDiarizerModels.load(
+          from: store.frameworkRoot(for: .offlineDiarizer))
+      }
+      loadingModels = task
+      do {
+        return try await task.value
+      } catch {
+        loadingModels = nil
+        throw error
+      }
     }
 
     /// Silence, room noise or a lane nobody spoke on is not a failed meeting:
     /// FluidAudio throws `noSpeechDetected` when no embedding survives, and
     /// that becomes a result with no speakers, like audio under
-    /// `minimumAudioSeconds`.
+    /// `minimumAudioSeconds`. With `config.refinesClusters`, the mapped
+    /// clusters then go through `ClusterRefinement` over the one-speaker
+    /// instance, a single cluster included, so every stored embedding is of
+    /// the same kind. Calls run one after another: the pipeline processes
+    /// meetings concurrently, and the boxes take one `process` at a time.
     func diarize(_ audio: AudioBuffer16k) async throws -> DiarizationResult {
       guard audio.duration >= Self.minimumAudioSeconds else {
         return DiarizationResult(clusters: [])
       }
+      let previous = lastDiarization
+      let run = Task {
+        await previous?.value
+        return try await self.diarizeNow(audio)
+      }
+      lastDiarization = Task { _ = try? await run.value }
+      return try await run.value
+    }
+
+    private func diarizeNow(_ audio: AudioBuffer16k) async throws -> DiarizationResult {
       let manager = try await loaded()
       let mapped: DiarizationResult
       do {
@@ -179,7 +215,7 @@ public struct FluidDiarizerConfig: Sendable, Equatable {
       } catch OfflineDiarizationError.noSpeechDetected {
         return DiarizationResult(clusters: [])
       }
-      guard config.refines, mapped.clusters.count > 1 else { return mapped }
+      guard config.refinesClusters, !mapped.clusters.isEmpty else { return mapped }
       let embedder = SingleSpeakerEmbedder(box: try await singleSpeaker())
       let refined = try await ClusterRefinement.refine(
         mapped.clusters, in: audio, embedder: embedder)

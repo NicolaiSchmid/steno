@@ -2,8 +2,8 @@ import Foundation
 import StenoCore
 
 /// Embeds one stretch of speech as a single speaker. `FluidDiarizer` fulfils
-/// it with a second pipeline instance capped at one speaker; tests use a
-/// fake that reads the speaker off the samples.
+/// it with a second pipeline instance capped at one speaker; pure, so the
+/// refinement is tested without models.
 protocol SliceEmbedder: Sendable {
   /// nil when the audio holds no usable speech.
   func embedding(of audio: AudioBuffer16k) async throws -> Embedding?
@@ -12,28 +12,33 @@ protocol SliceEmbedder: Sendable {
 /// The post-pass over the mapped clusters decided in
 /// `.plans/2026-09-29-speaker-calibration.md`: a speaker's short turns embed
 /// far from the same voice speaking at length, because each ten-second
-/// window holds little of them, so the pipeline splits every 1:1 into a main
-/// cluster and one or two clusters of interjections. Re-embedding each
-/// cluster over its own concatenated speech gives comparable vectors; on the
-/// calibration corpus the same person then scores 0.68 to 0.94 and different
-/// people at most 0.50.
+/// window holds little of them, so a 1:1 call comes out as a main cluster
+/// and one or two clusters of interjections. Re-embedding each cluster over
+/// its own concatenated speech gives vectors that compare the way the long
+/// clusters do.
 ///
-/// Rules, in order: clusters with at least `minimumSeconds` of speech are
+/// The pass, in order: clusters with at least `minimumSeconds` of speech are
 /// re-embedded and merged greedily, highest cosine first, while a pair
 /// reaches `mergeThreshold`; each merged cluster is re-embedded over the
-/// union. Clusters under `minimumSeconds` join the substantive cluster they
+/// union. Fragments under `minimumSeconds` join the substantive cluster they
 /// are closest to when that cosine reaches `absorbThreshold`, otherwise
 /// they are dropped (their segments stay speaker-less). Labels are handed
-/// out again as "Speaker n" in order of first speech. A result without any
-/// substantive cluster is returned unchanged, so short fixtures keep their
-/// speakers.
+/// out again as "Speaker n" in order of first speech. A result without a
+/// substantive cluster is returned unchanged, so a short recording keeps
+/// its speakers.
 enum ClusterRefinement {
   struct Rules: Sendable, Equatable {
     /// Speech a cluster needs to count as a speaker on its own.
     var minimumSeconds: TimeInterval = 30
     /// How much of a cluster's speech is embedded; the first stretches win.
     var maximumEmbedSeconds: TimeInterval = 180
+    /// Re-embedded, the same person scores 0.68 and up on the calibration
+    /// corpus and different people at most 0.50; 0.60 sits between.
     var mergeThreshold: Float = 0.60
+    /// A fragment joins the substantive cluster it is closest to at this
+    /// cosine or above; below it, its segments stay speaker-less. Loose on
+    /// purpose: a fragment carries little evidence, and a wrong speaker on
+    /// ten seconds costs less than a phantom speaker.
     var absorbThreshold: Float = 0.30
 
     static let `default` = Rules()
@@ -45,10 +50,11 @@ enum ClusterRefinement {
   ) async throws -> [SpeakerCluster] {
     var substantive = clusters.filter { speechSeconds($0) >= rules.minimumSeconds }
     guard !substantive.isEmpty else { return clusters }
-    let small = clusters.filter { speechSeconds($0) < rules.minimumSeconds }
+    let fragments = clusters.filter { speechSeconds($0) < rules.minimumSeconds }
 
     for index in substantive.indices {
-      substantive[index] = try await reembedded(substantive[index], in: audio, rules, embedder)
+      substantive[index] = try await reembedded(
+        substantive[index], in: audio, rules: rules, embedder: embedder)
     }
 
     // Greedy merge, highest cosine first. Each merge re-embeds the union, so
@@ -56,22 +62,24 @@ enum ClusterRefinement {
     while substantive.count > 1, let pair = closestPair(substantive),
       pair.cosine >= rules.mergeThreshold
     {
-      let merged = joined(substantive[pair.lhs], substantive[pair.rhs])
-      substantive[pair.lhs] = try await reembedded(merged, in: audio, rules, embedder)
-      substantive.remove(at: pair.rhs)
+      let union = merged(substantive[pair.first], substantive[pair.second])
+      substantive[pair.first] = try await reembedded(
+        union, in: audio, rules: rules, embedder: embedder)
+      substantive.remove(at: pair.second)
     }
 
-    for cluster in small {
-      let embedding = try await reembedded(cluster, in: audio, rules, embedder).embedding
+    for fragment in fragments {
+      let embedding =
+        try await reembedded(fragment, in: audio, rules: rules, embedder: embedder).embedding
       guard let embedding, let best = closest(to: embedding, in: substantive),
         best.cosine >= rules.absorbThreshold
       else {
         continue
       }
-      // The big cluster keeps its embedding, clip and confidence; only the
+      // The speaker keeps their embedding, clip and confidence; only the
       // ranges grow.
       substantive[best.index].ranges = DiarizationMapping.merged(
-        substantive[best.index].ranges + cluster.ranges)
+        substantive[best.index].ranges + fragment.ranges)
     }
 
     return
@@ -97,8 +105,8 @@ enum ClusterRefinement {
   /// concatenated up to `rules.maximumEmbedSeconds`, embedded as one voice.
   /// Unchanged when there is no audio or the embedder hears no speech.
   private static func reembedded(
-    _ cluster: SpeakerCluster, in audio: AudioBuffer16k, _ rules: Rules,
-    _ embedder: any SliceEmbedder
+    _ cluster: SpeakerCluster, in audio: AudioBuffer16k, rules: Rules,
+    embedder: any SliceEmbedder
   ) async throws -> SpeakerCluster {
     var cluster = cluster
     let speech = concatenated(cluster.ranges, in: audio, cap: rules.maximumEmbedSeconds)
@@ -125,18 +133,18 @@ enum ClusterRefinement {
     return AudioBuffer16k(samples: samples)
   }
 
-  /// The two clusters whose embeddings have the highest cosine, `lhs` before
-  /// `rhs`; nil when fewer than two carry an embedding.
+  /// The two clusters whose embeddings have the highest cosine, as indices
+  /// with `first < second`; nil when fewer than two carry an embedding.
   private static func closestPair(_ clusters: [SpeakerCluster])
-    -> (lhs: Int, rhs: Int, cosine: Float)?
+    -> (first: Int, second: Int, cosine: Float)?
   {
-    var best: (lhs: Int, rhs: Int, cosine: Float)?
-    for lhs in clusters.indices {
-      guard let left = clusters[lhs].embedding else { continue }
-      for rhs in clusters.indices where rhs > lhs {
-        guard let right = clusters[rhs].embedding else { continue }
+    var best: (first: Int, second: Int, cosine: Float)?
+    for first in clusters.indices {
+      guard let left = clusters[first].embedding else { continue }
+      for second in clusters.indices where second > first {
+        guard let right = clusters[second].embedding else { continue }
         let cosine = left.cosineSimilarity(to: right)
-        if cosine > (best?.cosine ?? -.infinity) { best = (lhs, rhs, cosine) }
+        if cosine > (best?.cosine ?? -.infinity) { best = (first, second, cosine) }
       }
     }
     return best
@@ -154,16 +162,16 @@ enum ClusterRefinement {
     return scored.max { $0.cosine < $1.cosine }
   }
 
-  /// One cluster from two: ranges joined, the label, clip and confidence of
-  /// the one with more speech, the embedding of the larger until the caller
-  /// re-embeds the union.
-  private static func joined(_ lhs: SpeakerCluster, _ rhs: SpeakerCluster) -> SpeakerCluster {
-    let (big, small) = speechSeconds(lhs) >= speechSeconds(rhs) ? (lhs, rhs) : (rhs, lhs)
+  /// One cluster from two: ranges merged; clip, confidence and, until the
+  /// caller re-embeds the union, embedding of the one with more speech. The
+  /// label is provisional: `refine` relabels every survivor by first speech.
+  private static func merged(_ lhs: SpeakerCluster, _ rhs: SpeakerCluster) -> SpeakerCluster {
+    let (longer, shorter) = speechSeconds(lhs) >= speechSeconds(rhs) ? (lhs, rhs) : (rhs, lhs)
     return SpeakerCluster(
-      label: big.label,
+      label: longer.label,
       ranges: DiarizationMapping.merged(lhs.ranges + rhs.ranges),
-      embedding: big.embedding ?? small.embedding,
-      clusterConfidence: big.clusterConfidence,
-      sampleClipRange: big.sampleClipRange ?? small.sampleClipRange)
+      embedding: longer.embedding ?? shorter.embedding,
+      clusterConfidence: longer.clusterConfidence,
+      sampleClipRange: longer.sampleClipRange ?? shorter.sampleClipRange)
   }
 }

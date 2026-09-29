@@ -5,16 +5,16 @@ import Testing
 @testable import StenoSpeech
 
 /// Reads the speaker off the samples: every range of one speaker in these
-/// tests is filled with one constant, and the embedding of a slice is the
-/// unit vector whose axes carry how much of each constant it holds. Two
+/// tests is filled with one constant c, and the embedding of a slice is the
+/// unit vector whose axis c carries how many samples of c it holds. Two
 /// slices of the same constant have cosine 1, of different constants 0, and
-/// a mixed slice sits in between with the mix as weights. Records every
-/// slice it saw.
+/// a mixed slice sits in between with the mix as weights. Records the
+/// duration of every slice it embedded.
 private actor FakeSliceEmbedder: SliceEmbedder {
-  private(set) var seen: [TimeInterval] = []
+  private(set) var embeddedDurations: [TimeInterval] = []
 
   func embedding(of audio: AudioBuffer16k) async throws -> Embedding? {
-    seen.append(audio.duration)
+    embeddedDurations.append(audio.duration)
     var values = [Float](repeating: 0, count: Embedding.dimension)
     for sample in audio.samples where sample > 0 {
       values[Int(sample)] += 1
@@ -23,16 +23,17 @@ private actor FakeSliceEmbedder: SliceEmbedder {
   }
 }
 
-private func seconds(_ seconds: Double) -> Int { Int(seconds * AudioBuffer16k.sampleRate) }
+/// The sample index at `seconds`.
+private func sampleIndex(_ seconds: Double) -> Int { Int(seconds * AudioBuffer16k.sampleRate) }
 
 /// Audio where `layout` says which speaker constant fills each range; the
 /// rest is zero (silence).
 private func audio(_ layout: [(Float, ClosedRange<TimeInterval>)], duration: TimeInterval)
   -> AudioBuffer16k
 {
-  var samples = [Float](repeating: 0, count: seconds(duration))
+  var samples = [Float](repeating: 0, count: sampleIndex(duration))
   for (speaker, range) in layout {
-    for index in seconds(range.lowerBound)..<min(seconds(range.upperBound), samples.count) {
+    for index in sampleIndex(range.lowerBound)..<min(sampleIndex(range.upperBound), samples.count) {
       samples[index] = speaker
     }
   }
@@ -69,7 +70,7 @@ private func cluster(
     // The embedding is the re-embedded union, not the window mean.
     #expect(refined.first?.embedding?.values[1] ?? 0 > 0.99)
     // Two clusters embedded, then the union once.
-    #expect(await embedder.seen.count == 3)
+    #expect(await embedder.embeddedDurations.count == 3)
   }
 
   /// Two people who each speak for long: different constants, cosine 0,
@@ -105,6 +106,27 @@ private func cluster(
     #expect(refined[0].ranges == [0...60, 70...80])
     #expect(refined[0].clusterConfidence == 0.9)
     #expect(refined[0].sampleClipRange == 0...60)
+    #expect(refined[0].embedding?.values[1] ?? 0 > 0.99, "the speaker's own embedding stays")
+  }
+
+  /// Three clusters of one voice with different admixtures: C first in the
+  /// input with cosine 0.86 to A, but A and B at 0.92 are the closest pair,
+  /// so their union is the first one embedded (110 s), not C's with A
+  /// (100 s). A merge that took the first pair over the cut in index order
+  /// would embed 100 s first.
+  @Test func theClosestPairMergesFirst() async throws {
+    let buffer = audio(
+      [(1, 0...25), (3, 25...40), (1, 50...110), (1, 120...155), (2, 155...170)], duration: 180)
+    let embedder = FakeSliceEmbedder()
+    let refined = try await ClusterRefinement.refine(
+      [
+        cluster("Speaker 1", [0...40], axis: 7), cluster("Speaker 2", [50...110], axis: 8),
+        cluster("Speaker 3", [120...170], axis: 9),
+      ],
+      in: buffer, embedder: embedder)
+    #expect(await embedder.embeddedDurations.prefix(4) == [40, 60, 50, 110])
+    #expect(refined.count == 1)
+    #expect(refined[0].ranges == [0...40, 50...110, 120...170])
   }
 
   /// Without a single substantive cluster (a nine-second fixture) nothing is
@@ -118,28 +140,29 @@ private func cluster(
     let refined = try await ClusterRefinement.refine(
       clusters, in: audio([], duration: 10), embedder: embedder)
     #expect(refined == clusters)
-    #expect(await embedder.seen.isEmpty)
+    #expect(await embedder.embeddedDurations.isEmpty)
   }
 
   /// Merging is greedy by the highest cosine and re-embeds each union, so
   /// three fragments of one voice collapse into one cluster while a second
   /// voice survives; the embedder never sees more than the cap per slice.
   @Test func mergesGreedilyAndCapsTheEmbeddedSpeech() async throws {
-    let one: [[ClosedRange<TimeInterval>]] = [[0...200], [210...250], [260...300]]
-    let two: [ClosedRange<TimeInterval>] = [310...400]
-    let layout = one.flatMap { $0 }.map { (Float(1), $0) } + two.map { (Float(2), $0) }
+    let firstVoice: [[ClosedRange<TimeInterval>]] = [[0...200], [210...250], [260...300]]
+    let secondVoice: [ClosedRange<TimeInterval>] = [310...400]
+    let layout =
+      firstVoice.flatMap { $0 }.map { (Float(1), $0) } + secondVoice.map { (Float(2), $0) }
     let buffer = audio(layout, duration: 410)
     let embedder = FakeSliceEmbedder()
     let refined = try await ClusterRefinement.refine(
       [
-        cluster("Speaker 1", one[0], axis: 3), cluster("Speaker 2", one[1], axis: 4),
-        cluster("Speaker 3", one[2], axis: 5), cluster("Speaker 4", two, axis: 6),
+        cluster("Speaker 1", firstVoice[0], axis: 3), cluster("Speaker 2", firstVoice[1], axis: 4),
+        cluster("Speaker 3", firstVoice[2], axis: 5), cluster("Speaker 4", secondVoice, axis: 6),
       ],
       in: buffer, rules: ClusterRefinement.Rules(maximumEmbedSeconds: 120), embedder: embedder)
     #expect(refined.map(\.label) == ["Speaker 1", "Speaker 2"])
     #expect(refined[0].ranges == [0...200, 210...250, 260...300])
-    #expect(refined[1].ranges == two)
-    let longest = await embedder.seen.max() ?? 0
+    #expect(refined[1].ranges == secondVoice)
+    let longest = await embedder.embeddedDurations.max() ?? 0
     #expect(longest <= 120 + 1e-6)
   }
 
@@ -149,8 +172,8 @@ private func cluster(
     let buffer = audio([(1, 0...10), (2, 10...20)], duration: 20)
     let joined = ClusterRefinement.concatenated([15...30, 2...4], in: buffer, cap: 6)
     #expect(abs(joined.duration - 6) < 1e-6)
-    #expect(joined.samples.prefix(seconds(2)).allSatisfy { $0 == 1 })
-    #expect(joined.samples.suffix(seconds(4)).allSatisfy { $0 == 2 })
+    #expect(joined.samples.prefix(sampleIndex(2)).allSatisfy { $0 == 1 })
+    #expect(joined.samples.suffix(sampleIndex(4)).allSatisfy { $0 == 2 })
   }
 
   /// The plan's constants: 30 s to count as a speaker, 180 s embedded at
@@ -233,7 +256,7 @@ private func cluster(
     #expect(refined.first?.ranges == [0...90, 100...140])
     #expect(refined.first?.embedding == big.embedding)
     // Both clusters and the union were offered to the embedder.
-    #expect(await embedder.seen.count == 3)
+    #expect(await embedder.embeddedDurations.count == 3)
   }
 
   /// A substantive cluster that came without an embedding and whose speech
@@ -281,6 +304,6 @@ private func cluster(
     let refined = try await ClusterRefinement.refine(
       clusters, in: audio([], duration: 50), embedder: embedder)
     #expect(refined == clusters)
-    #expect(await embedder.seen.isEmpty)
+    #expect(await embedder.embeddedDurations.isEmpty)
   }
 }

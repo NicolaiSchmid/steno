@@ -4,15 +4,17 @@ import StenoCore
 import StenoSpeech
 
 /// `steno dev diarize-sweep <wav>... [--thresholds 0.6 0.8 1.0] [--max-speakers n]
-/// [--raw] [--out report.json]`: runs the FluidAudio diarizer over 16 kHz
-/// mono WAV files at several clustering thresholds and prints, per file and
-/// threshold, the speaker count, each cluster's speech time and the
-/// cosine range between the cluster embeddings. `--raw` skips the
-/// refinement pass, so its effect can be read off two runs. `--out` writes the same
-/// data with every cluster embedding as JSON, so the match threshold and a
-/// merge cutoff can be calibrated on real recordings kept outside the
-/// repository (the plan's step 6 calibration, issue #34). Audio never
-/// leaves the machine; the report holds embeddings and durations only.
+/// [--no-refinement] [--out report.json]`: runs the FluidAudio diarizer over
+/// 16 kHz mono WAV files at several clustering thresholds and prints, per
+/// file and threshold, the speaker count, each cluster's speech time and
+/// the cosine range between the cluster embeddings. `--no-refinement`
+/// reports the clusters as the mapping produced them, so the pass's effect
+/// can be read off two runs. `--out` writes the same data with every cluster
+/// embedding as JSON. This is the tool `.plans/2026-09-29-speaker-calibration.md`
+/// was measured with (the step 6 calibration that
+/// `.plans/2026-09-25-speech-and-speakers.md` deferred to #34); recordings
+/// stay outside the repository, and the report holds embeddings and
+/// durations only.
 struct DevDiarizeSweep: AsyncParsableCommand {
   static let configuration = CommandConfiguration(
     commandName: "diarize-sweep",
@@ -33,8 +35,8 @@ struct DevDiarizeSweep: AsyncParsableCommand {
   @Option(name: .customLong("out"), help: "Write the report with every cluster embedding as JSON.")
   var output: String?
 
-  @Flag(help: "Report the mapped clusters without the refinement pass.")
-  var raw = false
+  @Flag(inversion: .prefixedNo, help: "Run the refinement pass after the mapping.")
+  var refinement = true
 
   @OptionGroup var models: DevModels.Options
 
@@ -71,14 +73,16 @@ struct DevDiarizeSweep: AsyncParsableCommand {
       let url = URL(fileURLWithPath: file)
       let buffer = try WAVAudioDecoder.read(url)
       let name = url.pathComponents.suffix(2).joined(separator: "/")
-      print("## \(name) (\(Self.minutes(buffer.duration)))")
-      print("| threshold | speakers | minutes per cluster | cosine between clusters |")
-      print("|---|---|---|---|")
+      let mode = refinement ? "refined" : "mapping only"
+      print("## \(name) (\(Self.minutes(buffer.duration))), \(mode)")
+      print("| Threshold | Speakers | Minutes per cluster | Cosine between clusters |")
+      print("|---:|---:|---|---|")
       for threshold in thresholds {
         let diarizer = try makeDiarizer(
           models: store,
           config: FluidDiarizerConfig(
-            clusteringThreshold: threshold, maxSpeakers: maxSpeakers, refines: !raw))
+            clusteringThreshold: threshold, maxSpeakers: maxSpeakers,
+            refinesClusters: refinement))
         let started = Date()
         let result = try await diarizer.diarize(buffer)
         let wall = Date().timeIntervalSince(started)

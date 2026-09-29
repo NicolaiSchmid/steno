@@ -284,13 +284,14 @@ import Testing
     #expect(SpeechEngineID(rawValue: "Parakeet-V3") == nil, "ids are case-sensitive")
   }
 
-  /// 0.8 and the refinement pass since `.plans/2026-09-29-speaker-calibration.md`.
+  /// The defaults `.plans/2026-09-29-speaker-calibration.md` settled: threshold
+  /// 0.8, refinement on.
   @Test func diarizerConfigDefaultsArePlanConstants() {
     let config = FluidDiarizerConfig.default
     #expect(config.clusteringThreshold == 0.8)
     #expect(config.minSpeakers == nil && config.maxSpeakers == nil)
-    #expect(config.refines)
+    #expect(config.refinesClusters)
     #expect(config == FluidDiarizerConfig(clusteringThreshold: 0.8))
-    #expect(config != FluidDiarizerConfig(refines: false), "equality carries refines")
+    #expect(config != FluidDiarizerConfig(refinesClusters: false), "equality carries refines")
   }
 }
