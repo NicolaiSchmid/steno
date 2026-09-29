@@ -266,7 +266,7 @@ final class OnboardingViewModelTests: XCTestCase {
   /// The ChatGPT way on the Summaries row: no Save, the consent button is
   /// the save, and without a sign-in on this Mac the row stays open and
   /// says what to do.
-  func testChatGPTWayOnTheSummariesRow() async throws {
+  func testChatGPTChoiceOnTheSummariesRow() async throws {
     let environment = try await TestSupport.environment(seed: false)
     let model = OnboardingViewModel(environment: environment, defaults: try makeDefaults())
     await model.load()

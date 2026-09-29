@@ -19,7 +19,7 @@ public enum LLMClientEvent: Sendable, Equatable {
   case parameterRejected(String)
 }
 
-/// The endpoint `LanguageModel`: `POST {baseURL}/chat/completions` with
+/// The endpoint `LLMClient`: `POST {baseURL}/chat/completions` with
 /// Bearer auth, a per-attempt timeout and exponential retries on the
 /// injected clock, structured output mode fallback remembered per endpoint,
 /// and the API key redacted from every error. Text only ever leaves through
@@ -136,8 +136,6 @@ public actor OpenAICompatibleClient: LLMClient {
 
   // MARK: Requests
 
-  typealias Reply = HTTPReply
-
   private func makeRequest(_ request: LLMRequest, mode: StructuredOutputMode) throws -> URLRequest {
     let ceiling = request.maxTokens ?? endpoint.maxOutputTokens
     let renamesMaxTokens = rejectedParameters.contains("max_tokens")
@@ -180,14 +178,14 @@ public actor OpenAICompatibleClient: LLMClient {
   }
 
   /// One attempt raced against `endpoint.requestTimeout` on the clock.
-  private func perform(_ request: URLRequest) async throws -> Reply {
+  private func perform(_ request: URLRequest) async throws -> HTTPReply {
     try await LLMTransport.perform(
       request, session: session, clock: clock, timeout: endpoint.requestTimeout, secrets: secrets)
   }
 
   // MARK: Replies
 
-  private func parse(_ reply: Reply) throws -> LLMResponse {
+  private func parse(_ reply: HTTPReply) throws -> LLMResponse {
     let decoded: ChatCompletionResponse
     do {
       decoded = try WireJSON.decode(ChatCompletionResponse.self, from: reply.body)
@@ -215,7 +213,7 @@ public actor OpenAICompatibleClient: LLMClient {
       model: decoded.model)
   }
 
-  private func classify(_ reply: Reply) -> LLMError {
+  private func classify(_ reply: HTTPReply) -> LLMError {
     if reply.status == 429 {
       return .rateLimited(retryAfter: LLMTransport.retryAfter(reply.headers["retry-after"]))
     }
@@ -223,7 +221,7 @@ public actor OpenAICompatibleClient: LLMClient {
   }
 
   /// The server's `error.message`, else the first 500 characters of the body.
-  static func errorMessage(_ reply: Reply) -> String {
+  static func errorMessage(_ reply: HTTPReply) -> String {
     if let envelope = try? WireJSON.decode(ChatErrorEnvelope.self, from: reply.body) {
       return envelope.error.message
     }
@@ -242,7 +240,7 @@ public actor OpenAICompatibleClient: LLMClient {
   static let adjustableParameters: Set<String> = ["max_tokens", "temperature"]
 
   /// `error.param` of a 400 envelope, when the server sent one.
-  static func rejectedParameter(_ reply: Reply) -> String? {
+  static func rejectedParameter(_ reply: HTTPReply) -> String? {
     (try? WireJSON.decode(ChatErrorEnvelope.self, from: reply.body))?.error.param
   }
 

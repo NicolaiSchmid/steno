@@ -92,7 +92,7 @@ enum Wiring {
   /// The Codex provider reads the Codex CLI's own sign-in (`CODEX_HOME`).
   static func llmComponents(settings: Settings) async throws -> LLMPasses? {
     guard let endpoint = LLMEndpoint(settings: settings) else { return nil }
-    let client = try await llmClient(endpoint: endpoint, observer: nil)
+    let client = try await makeClient(endpoint: endpoint, observer: nil)
     return (
       LLMTranscriptCleaner(model: client, endpoint: endpoint),
       LLMMeetingSummarizer(model: client, endpoint: endpoint)
@@ -101,7 +101,7 @@ enum Wiring {
 
   /// The client for `endpoint`: the Codex backend gets the credential
   /// store, everything else the API key.
-  static func llmClient(endpoint: LLMEndpoint, observer: (@Sendable (LLMClientEvent) -> Void)?)
+  static func makeClient(endpoint: LLMEndpoint, observer: (@Sendable (LLMClientEvent) -> Void)?)
     async throws -> any LLMClient
   {
     if endpoint.isCodexBackend {

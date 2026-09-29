@@ -1,4 +1,5 @@
 import AppKit
+import StenoCore
 import SwiftUI
 
 /// The onboarding window, two pages. Page 1: one row per permission, the
@@ -296,13 +297,13 @@ private struct SummariesSetupFields: View {
 
   var body: some View {
     VStack(alignment: .leading, spacing: Theme.Space.sm) {
-      Picker("Service", selection: .action({ llm.preset == .codex }, llm.selectCodexWay)) {
-        Text("Server or API key").tag(false)
-        Text("ChatGPT (Codex)").tag(true)
+      Picker("Service", selection: .action({ llm.preset.provider }, llm.selectProvider)) {
+        Text("Server or API key").tag(LLMProvider.endpoint)
+        Text("ChatGPT (Codex)").tag(LLMProvider.codex)
       }
       .pickerStyle(.segmented)
       .labelsHidden()
-      .accessibilityIdentifier("onboarding-llm-way")
+      .accessibilityIdentifier("onboarding-llm-provider")
       if llm.preset == .codex {
         codexFields
       } else {
@@ -347,11 +348,24 @@ private struct SummariesSetupFields: View {
   @ViewBuilder
   private var codexFields: some View {
     if llm.codexConfirmed {
-      // Confirmed in Settings earlier, or the row is about to collapse.
-      if case .signedIn(let account) = llm.codexStatus {
+      // Confirmed, but the row has not collapsed: the model list or the
+      // sign-in failed, or the confirmation came from Settings earlier.
+      switch llm.codexStatus {
+      case .signedIn(let account):
         MessageRow(kind: .success, text: "Using ChatGPT as \(account).")
+      case .unavailable(let text):
+        MessageRow(kind: .error, text: text)
+      case .notChecked:
+        EmptyView()
       }
-      HStack(spacing: Theme.Space.sm) { skipButton }
+      if let text = llm.codexModelsError {
+        MessageRow(kind: .warning, text: text)
+      }
+      HStack(spacing: Theme.Space.sm) {
+        Button(CodexConsentCopy.checkAgain) { Task { await model.confirmSummariesWithCodex() } }
+          .buttonStyle(StenoSecondaryButtonStyle())
+        skipButton
+      }
     } else {
       CodexConsentCard(
         status: llm.codexStatus,

@@ -36,6 +36,10 @@ public struct LLMEndpoint: Sendable, Equatable {
   /// Per attempt, on the injected clock.
   public var requestTimeout: Duration
   public var structuredOutputMode: StructuredOutputMode
+  /// Which client speaks to it. Only `.codex(model:contextTokens:)` sets
+  /// `.codex`: a pasted Codex URL under the endpoint provider stays an
+  /// endpoint, so the confirmation gate cannot be walked around by address.
+  public var provider: LLMProvider = .endpoint
 
   public init(
     baseURL: URL,
@@ -80,15 +84,17 @@ public struct LLMEndpoint: Sendable, Equatable {
 
   /// Whether this endpoint is the Codex backend (Responses API, Codex
   /// credentials) rather than a chat completions server.
-  public var isCodexBackend: Bool { baseURL == Self.codexBackendURL }
+  public var isCodexBackend: Bool { provider == .codex }
 
   /// The Codex backend with `model`. The backend takes no output ceiling, so
   /// `maxOutputTokens` only shapes prompts and budgets; 16k leaves the
   /// summary room without starving the input.
   public static func codex(model: String, contextTokens: Int) -> LLMEndpoint {
-    LLMEndpoint(
+    var endpoint = LLMEndpoint(
       baseURL: codexBackendURL, model: model, contextTokens: max(contextTokens, 1_024),
       maxOutputTokens: 16_000)
+    endpoint.provider = .codex
+    return endpoint
   }
 
   public var chatCompletionsURL: URL { baseURL.appendingPathComponent("chat/completions") }

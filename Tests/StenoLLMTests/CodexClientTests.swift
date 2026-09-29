@@ -96,7 +96,7 @@ final class CodexHarness: Sendable {
     #expect(CodexResponsesClient.reasoningEffort(for: "summary-map") == "medium")
     #expect(CodexResponsesClient.reasoningEffort(for: "cleanup") == "low")
     #expect(CodexResponsesClient.reasoningEffort(for: "probe") == "low")
-    let body = CodexResponsesClient.body(
+    let body = CodexResponsesClient.requestBody(
       for: LLMRequest(
         messages: [
           LLMMessage(role: .system, content: "A"), LLMMessage(role: .system, content: "B"),
@@ -108,7 +108,7 @@ final class CodexHarness: Sendable {
     #expect(body.input.map(\.role) == ["user", "assistant", "user"])
     #expect(body.input[1].content.first?.type == "output_text")
     #expect(body.text?.format == .jsonObject)
-    let plain = CodexResponsesClient.body(
+    let plain = CodexResponsesClient.requestBody(
       for: LLMRequest(messages: [LLMMessage(role: .user, content: "Q")], purpose: "x"),
       model: "m", mode: .jsonSchema)
     #expect(plain.instructions == nil)
@@ -127,7 +127,7 @@ final class CodexHarness: Sendable {
     #expect(harness.home.server.requests.count == 1)
   }
 
-  @Test func aFourOhOneRefreshesOnceThenStands() async throws {
+  @Test func unauthorizedRefreshesTheSignInOnceThenStands() async throws {
     let harness = try CodexHarness()
     defer { harness.stop() }
     let fresh = CodexHome.accessToken(expiresIn: 3_600, plan: "pro")
@@ -605,5 +605,107 @@ final class CodexHarness: Sendable {
     #expect(LLMEndpoint(settings: settings)?.requestTimeout == .seconds(240))
     #expect(LLMEndpoint(settings: settings)?.structuredOutputMode == .jsonSchema)
     #expect(LLMEndpoint.codex(model: "m", contextTokens: 0).contextTokens == 1_024)
+  }
+}
+
+/// The findings of the 2026-09-30 review as seen through the client.
+@Suite struct CodexClientReviewTests {
+  /// A plan limit delivered inside the stream is as final as one on the
+  /// status line: no backoff.
+  @Test func aPlanLimitInsideTheStreamIsFinal() async throws {
+    let harness = try CodexHarness()
+    defer { harness.stop() }
+    harness.backend.enqueue(
+      Scripts.responsesErrorEvent("Your plan does not include this.", code: "usage_not_included"))
+    let error = await #expect(throws: LLMError.self) {
+      try await harness.client.complete(ClientHarness.request(format: .text))
+    }
+    #expect(
+      error
+        == .http(status: 400, body: "ChatGPT plan limit reached: Your plan does not include this."))
+    #expect(error?.isRetryable == false)
+    #expect(harness.backend.requests.count == 1)
+
+    let overloaded = try CodexHarness()
+    defer { overloaded.stop() }
+    overloaded.backend.enqueue(
+      Scripts.responsesErrorEvent("busy", code: "server_is_overloaded"),
+      Scripts.responsesStream("ok"))
+    let driver = overloaded.driveRetries()
+    defer { driver.cancel() }
+    let response = try await overloaded.client.complete(ClientHarness.request(format: .text))
+    #expect(response.text == "ok", "an overload is retried like a dropped connection")
+    #expect(overloaded.backend.requests.count == 2)
+  }
+
+  /// A 5xx from the token endpoint is a transport failure: one backoff,
+  /// then the refresh is tried again.
+  @Test func aTokenEndpointHiccupBacksOffLikeATransportError() async throws {
+    let harness = try CodexHarness()
+    defer { harness.stop() }
+    try harness.home.write(access: CodexHome.accessToken(expiresIn: 10))
+    let fresh = CodexHome.accessToken(expiresIn: 3_600)
+    harness.home.server.enqueue(
+      Scripts.serverError(503), Scripts.tokenRefresh(access: fresh, refresh: "rt_2"))
+    harness.backend.enqueue(Scripts.responsesStream("ok"))
+    let driver = harness.driveRetries()
+    defer { driver.cancel() }
+    let response = try await harness.client.complete(ClientHarness.request(format: .text))
+    #expect(response.text == "ok")
+    #expect(harness.home.server.requests.count == 2)
+    #expect(harness.backend.requests.first?.authorization == "Bearer \(fresh)")
+    #expect(
+      harness.events.contains {
+        if case .retrying(_, 1, .transport) = $0 { return true } else { return false }
+      })
+
+    // A spent token stays final: no backoff, the credential error surfaces.
+    let expired = try CodexHarness()
+    defer { expired.stop() }
+    try expired.home.write(access: CodexHome.accessToken(expiresIn: 10))
+    expired.home.server.enqueue(Scripts.tokenRefreshRejected(code: "refresh_token_expired"))
+    let error = await #expect(throws: CodexCredentialError.self) {
+      try await expired.client.complete(ClientHarness.request(format: .text))
+    }
+    guard case .signInExpired? = error else {
+      Issue.record("expected signInExpired, got \(String(describing: error))")
+      return
+    }
+    #expect(expired.backend.requests.isEmpty)
+  }
+
+  /// A 401 when the CLI has rotated the file meanwhile: the file's token
+  /// goes out next, the token endpoint is not called.
+  @Test func unauthorizedWithARotatedFileRereadsInsteadOfRefreshing() async throws {
+    let harness = try CodexHarness()
+    defer { harness.stop() }
+    let rotated = CodexHome.accessToken(expiresIn: 3_600, plan: "pro")
+    let home = harness.home
+    harness.backend.respond { request in
+      if request.index == 0 {
+        try? home.write(access: rotated, refresh: "rt_cli")
+        return Scripts.unauthorized()
+      }
+      return Scripts.responsesStream("ok")
+    }
+    let response = try await harness.client.complete(ClientHarness.request(format: .text))
+    #expect(response.text == "ok")
+    #expect(
+      harness.backend.requests.map(\.authorization) == [
+        "Bearer \(CodexHome.accessToken(expiresIn: 3_600))", "Bearer \(rotated)",
+      ])
+    #expect(harness.home.server.requests.isEmpty)
+  }
+
+  /// The confirmation gate cannot be walked around by pasting the backend's
+  /// address as a server: that stays an endpoint with the API key.
+  @Test func aCodexAddressUnderTheEndpointProviderIsNotTheCodexBackend() throws {
+    var settings = Settings()
+    settings.llmBaseURL = LLMEndpoint.codexBackendURL
+    settings.llmModel = "gpt-5.6-terra"
+    let endpoint = try #require(LLMEndpoint(settings: settings))
+    #expect(!endpoint.isCodexBackend)
+    #expect(endpoint.provider == .endpoint)
+    #expect(LLMEndpoint.codex(model: "m", contextTokens: 1).isCodexBackend)
   }
 }

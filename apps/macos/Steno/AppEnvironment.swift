@@ -232,7 +232,8 @@ final class AppEnvironment {
     let codexCredentials = CodexCredentialStore()
     let makeDependencies: MakeDependencies = { settings, apiKey in
       let engineID = (try? SpeechEngineID(settingsValue: settings.speechEngineID)) ?? .parakeetV3
-      let llm = LLMWiring.passes(settings: settings, apiKey: apiKey, codex: codexCredentials)
+      let llm = LLMWiring.passes(
+        settings: settings, apiKey: apiKey, codexCredentials: codexCredentials)
       return PipelineDependencies(
         decoder: AVFoundationAudioCodec(),
         speechEngine: try makeSpeechEngine(engineID, models: models),

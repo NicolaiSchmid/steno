@@ -64,7 +64,7 @@ struct CodexConsentCard: View {
         MessageRow(kind: .info, text: "Signed in as \(account).")
       case .unavailable(let text):
         MessageRow(kind: .warning, text: text)
-      case .unknown:
+      case .notChecked:
         EmptyView()
       }
       HStack(spacing: Theme.Space.sm) {

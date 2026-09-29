@@ -14,12 +14,15 @@ enum LLMWiring {
   typealias Passes = (cleaner: any TranscriptCleaner, summarizer: any MeetingSummarizer)
 
   struct NotConfigured: Error, CustomStringConvertible {
-    var description: String { "Enter a base URL and a model name first." }
+    var description: String { "Set up a summaries service first." }
   }
 
-  static func passes(settings: Settings, apiKey: String?, codex: CodexCredentialStore) -> Passes? {
+  static func passes(settings: Settings, apiKey: String?, codexCredentials: CodexCredentialStore)
+    -> Passes?
+  {
     guard let endpoint = LLMEndpoint(settings: settings) else { return nil }
-    let client = makeClient(endpoint: endpoint, apiKey: apiKey, codex: codex, retry: .default)
+    let client = makeClient(
+      endpoint: endpoint, apiKey: apiKey, codexCredentials: codexCredentials, retry: .default)
     return (
       LLMTranscriptCleaner(model: client, endpoint: endpoint),
       LLMMeetingSummarizer(model: client, endpoint: endpoint)
@@ -27,10 +30,11 @@ enum LLMWiring {
   }
 
   static func makeClient(
-    endpoint: LLMEndpoint, apiKey: String?, codex: CodexCredentialStore, retry: RetryPolicy
+    endpoint: LLMEndpoint, apiKey: String?, codexCredentials: CodexCredentialStore,
+    retry: RetryPolicy
   ) -> any LLMClient {
     if endpoint.isCodexBackend {
-      return CodexResponsesClient(endpoint: endpoint, credentials: codex, retry: retry)
+      return CodexResponsesClient(endpoint: endpoint, credentials: codexCredentials, retry: retry)
     }
     return OpenAICompatibleClient(endpoint: endpoint, apiKey: apiKey, retry: retry)
   }
@@ -40,13 +44,15 @@ enum LLMWiring {
   /// the client's `LLMError` (its description is the failure text) when the
   /// endpoint does not answer or rejects the key, or the
   /// `CodexCredentialError` when there is no usable Codex sign-in.
-  static func probe(settings: Settings, apiKey: String?, codex: CodexCredentialStore) async throws
+  static func probe(settings: Settings, apiKey: String?, codexCredentials: CodexCredentialStore)
+    async throws
     -> String
   {
     guard let endpoint = LLMEndpoint(settings: settings) else { throw NotConfigured() }
     // One attempt: a button press should answer at once, not after the
     // pipeline's retry backoff.
-    let client = makeClient(endpoint: endpoint, apiKey: apiKey, codex: codex, retry: .none)
+    let client = makeClient(
+      endpoint: endpoint, apiKey: apiKey, codexCredentials: codexCredentials, retry: .none)
     let report = try await client.probe()
     let listed: String
     switch report.modelListed {
@@ -63,11 +69,12 @@ enum LLMWiring {
   }
 
   /// The Codex models on offer, listed ones only, for the Summaries picker.
-  /// Requires a confirmed sign-in; the model in `settings` is irrelevant.
-  static func codexModels(codex: CodexCredentialStore) async throws -> [CodexModel] {
+  /// Requires a confirmed sign-in; the model list does not depend on the
+  /// endpoint's model, so a placeholder stands in.
+  static func codexModels(codexCredentials: CodexCredentialStore) async throws -> [CodexModel] {
     let client = CodexResponsesClient(
       endpoint: .codex(model: "list", contextTokens: Settings.defaultCodexContextTokens),
-      credentials: codex, retry: .none)
+      credentials: codexCredentials, retry: .none)
     return try await client.listModels().filter(\.isListed)
   }
 }

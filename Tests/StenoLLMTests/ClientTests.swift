@@ -186,7 +186,7 @@ import Testing
       OpenAICompatibleClient.complainsAboutResponseFormat("Invalid parameter: 'response_format'"))
     #expect(OpenAICompatibleClient.complainsAboutResponseFormat("json_schema is not supported"))
     #expect(!OpenAICompatibleClient.complainsAboutResponseFormat("model not found"))
-    let html = OpenAICompatibleClient.Reply(
+    let html = HTTPReply(
       status: 502, headers: [:], body: Data("<html>bad gateway</html>".utf8))
     #expect(OpenAICompatibleClient.errorMessage(html) == "<html>bad gateway</html>")
   }

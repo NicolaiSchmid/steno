@@ -118,7 +118,7 @@ final class LLMSettingsViewModel: SettingsSectionModel {
   /// What the ChatGPT card knows about the sign-in on this Mac.
   enum CodexStatus: Equatable, Sendable {
     /// Not looked yet (the preset is not ChatGPT, or `load()` has not run).
-    case unknown
+    case notChecked
     /// `auth.json` with a ChatGPT login: the account line to show.
     case signedIn(String)
     /// No file or no ChatGPT tokens: the `CodexCredentialError` text.
@@ -165,9 +165,12 @@ final class LLMSettingsViewModel: SettingsSectionModel {
   private(set) var isConfigured = false
   /// ChatGPT: whether `codexConfirmedAt` is stored.
   private(set) var codexConfirmed = false
-  private(set) var codexStatus: CodexStatus = .unknown
+  private(set) var codexStatus: CodexStatus = .notChecked
   /// The backend's listed models, once fetched after confirmation.
   private(set) var codexModels: [CodexModel] = []
+  /// Why the last model list failed (offline, plan limit); nil when it
+  /// arrived. Separate from `codexStatus`, which is about the file.
+  private(set) var codexModelsError: String?
   private(set) var isLoadingCodexModels = false
   /// The picked Codex model slug; empty until the list arrives or the user
   /// picks.
@@ -221,31 +224,35 @@ final class LLMSettingsViewModel: SettingsSectionModel {
   /// ChatGPT preset is on screen.
   func refreshCodexStatus() async {
     do {
-      let credentials = try await environment.codexCredentials.status()
+      let credentials = try await environment.codexCredentials.stored()
       codexStatus = .signedIn(credentials.accountLine)
     } catch {
       codexStatus = .unavailable(String(describing: error))
     }
   }
 
-  /// The consent card's primary button: stores the confirmation and the
-  /// provider, fetches the model list, defaults the model to the first
-  /// listed one, saves and probes.
+  /// The consent card's primary button. The confirmation is stored before
+  /// the tokens are used for anything: first the provider and
+  /// `codexConfirmedAt` are saved (no model yet, so the endpoint stays off
+  /// and nothing is probed), then the model list is fetched, the first
+  /// listed model picked, and the result saved and probed.
   func confirmCodex() async {
     codexConfirmed = true
+    testResult = nil
+    await commit()
+    guard error == nil else { return }
     await refreshCodexModels()
     if codexModel.isEmpty, let first = codexModels.first {
       codexModel = first.slug
       codexContextTokens = first.contextWindow ?? Settings.defaultCodexContextTokens
     }
-    testResult = nil
     await commit()
   }
 
-  /// Onboarding's segmented choice: ChatGPT, or the preset the typed
-  /// address belongs to.
-  func selectCodexWay(_ codex: Bool) async {
-    await selectPreset(codex ? .codex : LLMPreset.infer(from: baseURL))
+  /// Onboarding's segmented choice: the ChatGPT preset, or the preset the
+  /// typed address belongs to.
+  func selectProvider(_ provider: LLMProvider) async {
+    await selectPreset(provider == .codex ? .codex : LLMPreset.infer(from: baseURL))
   }
 
   /// "Stop using ChatGPT": clears the confirmation and returns to the
@@ -253,7 +260,8 @@ final class LLMSettingsViewModel: SettingsSectionModel {
   func stopUsingCodex() async {
     codexConfirmed = false
     codexModels = []
-    codexStatus = .unknown
+    codexModelsError = nil
+    codexStatus = .notChecked
     preset = LLMPreset.infer(from: baseURL)
     testResult = nil
     await commit()
@@ -265,16 +273,21 @@ final class LLMSettingsViewModel: SettingsSectionModel {
     guard codexConfirmed else { return }
     isLoadingCodexModels = true
     defer { isLoadingCodexModels = false }
+    await refreshCodexStatus()
     do {
-      codexModels = try await LLMWiring.codexModels(codex: environment.codexCredentials)
+      codexModels = try await LLMWiring.codexModels(codexCredentials: environment.codexCredentials)
+      codexModelsError = nil
       if let current = codexModels.first(where: { $0.slug == codexModel }),
         let window = current.contextWindow
       {
         codexContextTokens = window
       }
-      await refreshCodexStatus()
-    } catch {
+    } catch let error as CodexCredentialError {
+      // The sign-in itself is the problem; the card says so.
       codexStatus = .unavailable(String(describing: error))
+      codexModelsError = nil
+    } catch {
+      codexModelsError = "The model list could not be loaded. \(error)"
     }
   }
 
@@ -289,6 +302,8 @@ final class LLMSettingsViewModel: SettingsSectionModel {
     await commit()
   }
 
+  // MARK: Draft
+
   /// The picker's rows: the listed models plus the stored slug when the
   /// list does not carry it (a retired model keeps working until changed).
   var codexModelChoices: [CodexModel] {
@@ -298,8 +313,6 @@ final class LLMSettingsViewModel: SettingsSectionModel {
     }
     return choices
   }
-
-  // MARK: Draft
 
   /// The URL as typed, validated: http or https with a host.
   var baseURL: URL? {
@@ -342,7 +355,9 @@ final class LLMSettingsViewModel: SettingsSectionModel {
     let trimmedKey = apiKey.trimmingCharacters(in: .whitespaces)
     return Stored(
       provider: preset.provider,
-      baseURL: baseURL, model: trimmedModel.isEmpty ? nil : trimmedModel,
+      // Under ChatGPT the server field is off screen; whatever it held stays.
+      baseURL: preset == .codex ? (baseURL ?? stored?.baseURL) : baseURL,
+      model: trimmedModel.isEmpty ? nil : trimmedModel,
       contextTokens: contextTokens ?? Self.defaultContextTokens,
       apiKey: trimmedKey.isEmpty ? nil : trimmedKey,
       codexModel: codexModel.isEmpty ? nil : codexModel,
@@ -398,6 +413,9 @@ final class LLMSettingsViewModel: SettingsSectionModel {
 
   private func performCommit() async {
     guard validationMessage == nil else { return }
+    // The ChatGPT choice stores nothing until its button: the pane closing
+    // with the card on screen must not switch the provider.
+    guard !(preset == .codex && !codexConfirmed) else { return }
     guard draft != stored else { return }
     await save()
     guard error == nil, isConfigured else { return }
@@ -463,7 +481,7 @@ final class LLMSettingsViewModel: SettingsSectionModel {
     let probed = settings(from: draft)
     do {
       let report = try await LLMWiring.probe(
-        settings: probed, apiKey: draft.apiKey, codex: environment.codexCredentials)
+        settings: probed, apiKey: draft.apiKey, codexCredentials: environment.codexCredentials)
       testResult = .success(report)
     } catch {
       testResult = .failure(String(describing: error))

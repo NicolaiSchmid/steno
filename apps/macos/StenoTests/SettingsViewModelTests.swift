@@ -281,7 +281,7 @@ final class SettingsViewModelTests: XCTestCase {
     }
     do {
       _ = try await LLMWiring.probe(
-        settings: settings, apiKey: key, codex: environment.codexCredentials)
+        settings: settings, apiKey: key, codexCredentials: environment.codexCredentials)
       XCTFail("port 9 does not answer")
     } catch {
       XCTAssertFalse(String(describing: error).contains(key))
@@ -346,6 +346,29 @@ final class SettingsViewModelTests: XCTestCase {
     await model.selectPreset(.lmStudio)
     XCTAssertEqual(model.preset, .lmStudio)
     XCTAssertEqual(model.baseURLText, "http://127.0.0.1:1234/v1")
+  }
+
+  /// The pane closing (or focus leaving) with the consent card on screen
+  /// commits like any other edit; that commit must store nothing, or the
+  /// working endpoint would be switched off without a word.
+  func testClosingThePaneWithTheConsentCardOnScreenStoresNothing() async throws {
+    let environment = try await TestSupport.environment(seed: false)
+    try await environment.updateSettings {
+      $0.llmBaseURL = URL(string: "http://127.0.0.1:9/v1")
+      $0.llmModel = "qwen"
+    }
+    let model = LLMSettingsViewModel(environment: environment)
+    await model.load()
+    XCTAssertTrue(model.isConfigured)
+    let before = try await environment.settings.load()
+    let pipeline = environment.pipeline
+    await model.selectPreset(.codex)
+    await model.commit()
+    let after = try await environment.settings.load()
+    XCTAssertEqual(after, before, "the card on screen is not a decision")
+    XCTAssertEqual(after.llmProvider, .endpoint)
+    XCTAssertTrue(after.llmConfigured, "the server setup keeps working")
+    XCTAssertTrue(pipeline === environment.pipeline)
   }
 
   /// Confirming without a sign-in on this Mac stores the confirmation and

@@ -74,7 +74,8 @@ struct DevLLM: AsyncParsableCommand {
     }
 
     func client() async throws -> any LLMClient {
-      try await Wiring.llmClient(endpoint: try await endpoint(), observer: verbose ? Self.log : nil)
+      try await Wiring.makeClient(
+        endpoint: try await endpoint(), observer: verbose ? Self.log : nil)
     }
 
     static func log(_ event: LLMClientEvent) {

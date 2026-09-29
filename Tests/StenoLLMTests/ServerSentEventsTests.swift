@@ -75,7 +75,7 @@ import Testing
     let stub = Scripts.responsesStream(
       "{\"ok\":true}", usage: LLMUsage(promptTokens: 43, completionTokens: 12, requests: 1),
       model: "gpt-5.6-luna")
-    let response = try CodexResponsesClient.parseStream(stub.body, redact: { $0 })
+    let response = try CodexResponsesClient.parseStream(stub.body, secrets: [])
     #expect(response.text == "{\"ok\":true}")
     #expect(response.finishReason == .stop)
     #expect(response.usage == LLMUsage(promptTokens: 43, completionTokens: 12, requests: 1))
@@ -85,30 +85,30 @@ import Testing
   @Test func incompleteFailedRefusedAndCutStreams() throws {
     let cut = Scripts.responsesStream(
       "partial", status: "incomplete", incompleteReason: "max_output_tokens")
-    #expect(try CodexResponsesClient.parseStream(cut.body, redact: { $0 }).finishReason == .length)
+    #expect(try CodexResponsesClient.parseStream(cut.body, secrets: []).finishReason == .length)
     let filtered = Scripts.responsesStream(
       "", status: "incomplete", incompleteReason: "content_filter")
     #expect(
-      try CodexResponsesClient.parseStream(filtered.body, redact: { $0 }).finishReason
+      try CodexResponsesClient.parseStream(filtered.body, secrets: []).finishReason
         == .contentFilter)
     #expect(throws: LLMError.transport("boom")) {
-      try CodexResponsesClient.parseStream(Scripts.responsesFailed("boom").body, redact: { $0 })
+      try CodexResponsesClient.parseStream(Scripts.responsesFailed("boom").body, secrets: [])
     }
     #expect(throws: LLMError.refused("no")) {
-      try CodexResponsesClient.parseStream(Scripts.responsesRefusal("no").body, redact: { $0 })
+      try CodexResponsesClient.parseStream(Scripts.responsesRefusal("no").body, secrets: [])
     }
     #expect(throws: LLMError.transport("stream closed before response.completed")) {
-      try CodexResponsesClient.parseStream(Scripts.responsesTruncatedStream().body, redact: { $0 })
+      try CodexResponsesClient.parseStream(Scripts.responsesTruncatedStream().body, secrets: [])
     }
     let unknownReason = Scripts.responsesStream(
       "x", status: "incomplete", incompleteReason: "something_new")
     #expect(
-      try CodexResponsesClient.parseStream(unknownReason.body, redact: { $0 }).finishReason
+      try CodexResponsesClient.parseStream(unknownReason.body, secrets: []).finishReason
         == .other)
     #expect(throws: LLMError.transport("[redacted] said no")) {
       try CodexResponsesClient.parseStream(
         Scripts.responsesErrorEvent("acct_1 said no").body,
-        redact: { $0.replacingOccurrences(of: "acct_1", with: "[redacted]") })
+        secrets: ["acct_1"])
     }
   }
 
@@ -140,7 +140,7 @@ import Testing
       data: {"type":"response.completed","response":{"id":"r","status":"completed","model":"gpt-x","output":[{"type":"message","id":"m1","role":"assistant","content":[{"type":"output_text","text":"not this"}]}]}}
 
       """#
-    let response = try CodexResponsesClient.parseStream(Data(body.utf8), redact: { $0 })
+    let response = try CodexResponsesClient.parseStream(Data(body.utf8), secrets: [])
     #expect(response.text == "{\"ok\":true}")
     #expect(response.finishReason == .stop)
     #expect(response.usage == LLMUsage(promptTokens: 0, completionTokens: 0, requests: 1))
@@ -158,7 +158,7 @@ import Testing
       data: {"type":"response.in_progress","response":{"status":"completed","output":[{"type":"reasoning","id":"rs"},{"type":"message","role":"assistant","content":[{"type":"output_text","text":"from "},{"type":"refusal","refusal":""}]},{"type":"message","role":"assistant","content":[{"type":"output_text","text":"output"}]}],"usage":{"input_tokens":3}}}
 
       """#
-    let response = try CodexResponsesClient.parseStream(Data(body.utf8), redact: { $0 })
+    let response = try CodexResponsesClient.parseStream(Data(body.utf8), secrets: [])
     #expect(response.text == "from output")
     #expect(response.usage == LLMUsage(promptTokens: 3, completionTokens: 0, requests: 1))
     #expect(response.model == nil)
@@ -170,7 +170,7 @@ import Testing
 
       """#
     #expect(throws: LLMError.transport("stream closed before response.completed")) {
-      try CodexResponsesClient.parseStream(Data(items.utf8), redact: { $0 })
+      try CodexResponsesClient.parseStream(Data(items.utf8), secrets: [])
     }
   }
 }

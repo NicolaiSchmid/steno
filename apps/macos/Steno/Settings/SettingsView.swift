@@ -383,7 +383,7 @@ struct SummariesSettingsView: View {
         MessageRow(kind: .success, text: "Using ChatGPT as \(account).")
       case .unavailable(let text):
         MessageRow(kind: .error, text: text)
-      case .unknown:
+      case .notChecked:
         EmptyView()
       }
       HStack {
@@ -399,6 +399,9 @@ struct SummariesSettingsView: View {
           Button("Refresh") { Task { await model.refreshCodexModels() } }
             .accessibilityIdentifier("settings-codex-refresh")
         }
+      }
+      if let text = model.codexModelsError {
+        MessageRow(kind: .warning, text: text)
       }
       Footnote(CodexConsentCopy.usageFootnote)
       Button("Stop using ChatGPT") { Task { await model.stopUsingCodex() } }

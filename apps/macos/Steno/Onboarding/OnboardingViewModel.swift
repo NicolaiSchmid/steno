@@ -63,7 +63,8 @@ final class OnboardingViewModel {
 
   enum SetupState: Equatable, Sendable {
     case open
-    /// Saved, with the collapsed row's line ("Saved: <model> at <host>").
+    /// Saved, with the collapsed row's line ("Saved: <model> at <host>" or
+    /// "Saved: <model> via ChatGPT as <account>").
     case saved(String)
     case skipped
 
@@ -309,7 +310,7 @@ final class OnboardingViewModel {
   private static func savedLine(_ llm: LLMSettingsViewModel) -> String {
     if llm.preset == .codex {
       let account: String =
-        if case .signedIn(let line) = llm.codexStatus { " (\(line))" } else { "" }
+        if case .signedIn(let line) = llm.codexStatus { " as \(line)" } else { "" }
       return "Saved: \(llm.codexModel) via ChatGPT\(account)"
     }
     let host = llm.baseURL?.host() ?? ""

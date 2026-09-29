@@ -141,10 +141,11 @@ Risk assessment given to the owner before this plan, kept here so the decision i
    "configured" check keeps working.
 9. **Concurrency stays at 2 for Codex** (the endpoint default). Codex plan limits are shared
    with the user's coding sessions; the consent copy says so.
-10. **Errors that name the plan are not retried.** A 429 or a body whose `error.type` is
-    `usage_limit_reached` or `rate_limit_exceeded` becomes a non-retryable `LLMError` with the
-    server's message, so the meeting detail shows "ChatGPT plan limit reached" rather than
-    hanging through backoff.
+10. **Errors that name the plan are not retried.** A body whose `error.type` or code is
+    `usage_limit_reached` or `usage_not_included`, whether on an HTTP error or inside the
+    stream as `response.failed`, becomes a non-retryable `LLMError` prefixed "ChatGPT plan
+    limit reached", so the meeting detail shows that rather than hanging through backoff. An
+    ordinary 429 keeps the endpoint client's `Retry-After` backoff: it clears on its own.
 11. **Tokens are redacted** from every error string with the existing `redact` helper,
     extended to take a list of secrets (access token, refresh token, account id).
 
@@ -183,7 +184,7 @@ A segmented picker above the existing fields: **Server or API key** | **ChatGPT 
 The first shows today's URL, model and key fields. The second shows the consent card above.
 "Use my ChatGPT account" saves `llmProvider = .codex`, `codexConfirmedAt = now`, fetches the
 model list, stores the first listed model, probes, and marks the row
-"Saved: <model> via ChatGPT (name@example.com)". Skip stays available.
+"Saved: <model> via ChatGPT as name@example.com (Plus)". Skip stays available.
 
 ### Settings, Summaries pane
 
@@ -212,10 +213,12 @@ which the user needs verbatim. "OAuth", "JWT", "Responses API" and "originator" 
    `init?(settings:)` provider-aware, `LLMEndpoint.codex(model:contextTokens:)`. Tests in
    `Tests/StenoLLMTests/ClientTests.swift` (settings → endpoint cases).
 3. **Credential store** (`Sources/StenoLLM/Codex/CodexCredentialStore.swift`): actor over a
-   `CODEX_HOME` directory. `load()` parses `auth.json` into `CodexCredentials` (access token,
-   refresh token, account id, email, plan, expiry from the JWT `exp` claim, `lastRefresh`).
-   `current()` returns fresh credentials, refreshing through an injected `URLSession` when
-   needed. `invalidateAndRefresh()` for the 401 path. Write-back preserves unknown keys. JWT
+   `CODEX_HOME` directory. `stored()` reads `auth.json` into `CodexCredentials` (access token,
+   refresh token, account id, email, plan, expiry from the JWT `exp` claim, `lastRefresh`)
+   without the network. `current()` returns credentials fit to send, refreshing through an
+   injected `URLSession` when due; `refreshed(ifStillUsing:)` is the 401 path and skips the
+   network when the CLI has rotated the file meanwhile. Concurrent callers share one refresh.
+   Write-back overlays the new tokens on the file's latest contents and preserves unknown keys. JWT
    payload decoding lives in `Sources/StenoLLM/Codex/JWTClaims.swift`. Tests in
    `Tests/StenoLLMTests/CodexCredentialStoreTests.swift` with a temp directory and the stub
    server as the token endpoint: parse, missing file, API-key-only file, expiry detection,

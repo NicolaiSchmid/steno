@@ -36,11 +36,13 @@ public struct CodexCredentials: Sendable, Equatable {
   }
 }
 
+/// Why the sign-in could not be used. `description` is the sentence the
+/// user reads; `detail` is the technical text for logs and "Details".
 public enum CodexCredentialError: Error, Sendable, Equatable, CustomStringConvertible {
   /// No `auth.json`, or one without ChatGPT tokens.
   case notSignedIn
   /// The file holds an API key login, which the Codex backend does not
-  /// take; the endpoint provider with the OpenAI preset is the way.
+  /// take; the OpenAI preset of the endpoint provider is the way.
   case apiKeyLogin
   case malformed(String)
   /// The refresh token is spent, expired or revoked: only `codex login`
@@ -54,13 +56,22 @@ public enum CodexCredentialError: Error, Sendable, Equatable, CustomStringConver
     case .notSignedIn:
       "No Codex sign-in found. Run `codex login` in Terminal, then try again."
     case .apiKeyLogin:
-      "Codex is signed in with an API key, not a ChatGPT account. Use the server or API key option instead."
-    case .malformed(let detail):
-      "The Codex sign-in file could not be read: \(detail)"
-    case .signInExpired(let detail):
-      "The Codex sign-in has expired. Run `codex login` in Terminal, then try again. (\(detail))"
-    case .refreshFailed(let detail):
-      "The Codex sign-in could not be refreshed: \(detail)"
+      "Codex is signed in with an API key, not a ChatGPT account. Pick OpenAI as the service and paste that key instead."
+    case .malformed:
+      "The Codex sign-in file could not be read."
+    case .signInExpired:
+      "The Codex sign-in has expired. Run `codex login` in Terminal, then try again."
+    case .refreshFailed:
+      "The Codex sign-in could not be refreshed. Check the connection and try again."
+    }
+  }
+
+  /// The technical reason, already redacted; nil for the two cases that
+  /// have none.
+  public var detail: String? {
+    switch self {
+    case .notSignedIn, .apiKeyLogin: nil
+    case .malformed(let detail), .signInExpired(let detail), .refreshFailed(let detail): detail
     }
   }
 }
@@ -68,9 +79,12 @@ public enum CodexCredentialError: Error, Sendable, Equatable, CustomStringConver
 /// Reads and refreshes `$CODEX_HOME/auth.json` the way the Codex CLI does,
 /// so the two stay signed in together. Every read goes back to the file
 /// (the CLI may have rotated the tokens meanwhile); a refresh is written
-/// back atomically with every unknown key preserved, because refresh tokens
-/// rotate and the CLI would otherwise be signed out. Callers never see the
-/// file: they get `CodexCredentials` and attach the access token themselves.
+/// back atomically over the file's latest contents with every unknown key
+/// preserved, because refresh tokens rotate and the CLI would otherwise be
+/// signed out. Concurrent callers share one refresh: the actor is
+/// reentrant, and two refreshes with the same token would spend it twice.
+/// Callers never see the file: they get `CodexCredentials` and attach the
+/// access token themselves.
 public actor CodexCredentialStore {
   /// `CODEX_HOME`, else `~/.codex`.
   public static func defaultHome(
@@ -100,6 +114,9 @@ public actor CodexCredentialStore {
   private let tokenEndpoint: URL
   private let clientID: String
   private let now: @Sendable () -> Date
+  /// The refresh in progress, awaited by every caller that arrives while
+  /// it runs.
+  private var refreshInFlight: Task<CodexCredentials, any Error>?
 
   public init(
     home: URL = CodexCredentialStore.defaultHome(),
@@ -119,7 +136,7 @@ public actor CodexCredentialStore {
 
   /// What the file says, without touching the network. For the consent
   /// card and the status row.
-  public func status() throws -> CodexCredentials {
+  public func stored() throws -> CodexCredentials {
     try read().credentials
   }
 
@@ -127,14 +144,20 @@ public actor CodexCredentialStore {
   /// access token is within `expiryWindow` of its expiry or the file is
   /// older than `staleAfter`.
   public func current() async throws -> CodexCredentials {
+    if let refreshInFlight { return try await refreshInFlight.value }
     let file = try read()
     guard needsRefresh(file.credentials) else { return file.credentials }
     return try await refresh(file)
   }
 
-  /// A refresh regardless of age, for the 401 path.
-  public func refreshed() async throws -> CodexCredentials {
-    try await refresh(try read())
+  /// The 401 path: the file's credentials when they have changed since
+  /// `accessToken` was read (the CLI rotated them; no network), else one
+  /// refresh regardless of age.
+  public func refreshed(ifStillUsing accessToken: String) async throws -> CodexCredentials {
+    if let refreshInFlight { return try await refreshInFlight.value }
+    let file = try read()
+    guard file.credentials.accessToken == accessToken else { return file.credentials }
+    return try await refresh(file)
   }
 
   func needsRefresh(_ credentials: CodexCredentials) -> Bool {
@@ -234,8 +257,11 @@ public actor CodexCredentialStore {
     }
   }
 
+  /// The token endpoint's rejection, in the two shapes it uses:
+  /// `{"error": {"code": …}}` and `{"error": "invalid_grant", "error_code":
+  /// …, "error_description": …}`.
   private struct RefreshError: Decodable {
-    var error: String?
+    var error: JSONValue?
     var errorDescription: String?
     var errorCode: String?
 
@@ -244,6 +270,34 @@ public actor CodexCredentialStore {
       case errorDescription = "error_description"
       case errorCode = "error_code"
     }
+
+    var code: String? {
+      if let errorCode, !errorCode.isEmpty { return errorCode.lowercased() }
+      switch error {
+      case .string(let code)?: return code.isEmpty ? nil : code.lowercased()
+      case .object(let object)?:
+        if case .string(let code)? = object["code"], !code.isEmpty { return code.lowercased() }
+        return nil
+      default: return nil
+      }
+    }
+
+    var message: String? {
+      if let errorDescription, !errorDescription.isEmpty { return errorDescription }
+      if case .object(let object)? = error, case .string(let text)? = object["message"] {
+        return text
+      }
+      return nil
+    }
+  }
+
+  /// A refresh the token endpoint turned down, before it is mapped to the
+  /// public error: `refresh()` needs the code to decide on a re-read.
+  private struct RefreshRejected: Error {
+    var code: String?
+    var permanent: Bool
+    /// Already redacted.
+    var message: String
   }
 
   /// The error codes the token endpoint uses for a refresh token that will
@@ -252,21 +306,42 @@ public actor CodexCredentialStore {
     "refresh_token_expired", "refresh_token_reused", "refresh_token_invalidated", "invalid_grant",
   ]
 
+  /// One refresh shared by everyone who needs it while it runs.
   private func refresh(_ file: AuthFile) async throws -> CodexCredentials {
+    if let refreshInFlight { return try await refreshInFlight.value }
+    let task = Task { try await self.refreshRereadingOnReuse(file) }
+    refreshInFlight = task
+    defer { refreshInFlight = nil }
+    return try await task.value
+  }
+
+  private func refreshRereadingOnReuse(_ file: AuthFile) async throws -> CodexCredentials {
     do {
       return try await refreshOnce(file)
-    } catch CodexCredentialError.signInExpired(let detail) where detail.contains("reused") {
-      // The CLI may have rotated the token since our read; its file is the
-      // truth. One more read, one more try, then the failure stands.
-      let latest = try read()
-      guard latest.credentials.refreshToken != file.credentials.refreshToken else {
-        throw CodexCredentialError.signInExpired(detail)
+    } catch let rejected as RefreshRejected {
+      if rejected.code == "refresh_token_reused" {
+        // The CLI may have rotated the token since our read; its file is the
+        // truth. One more read, one more try, then the failure stands.
+        let latest = try read()
+        if latest.credentials.refreshToken != file.credentials.refreshToken {
+          do {
+            return try await refreshOnce(latest)
+          } catch let again as RefreshRejected {
+            throw Self.error(for: again)
+          }
+        }
       }
-      return try await refreshOnce(latest)
+      throw Self.error(for: rejected)
     }
   }
 
+  private static func error(for rejected: RefreshRejected) -> CodexCredentialError {
+    let detail = rejected.code.map { "\($0): \(rejected.message)" } ?? rejected.message
+    return rejected.permanent ? .signInExpired(detail) : .refreshFailed(detail)
+  }
+
   private func refreshOnce(_ file: AuthFile) async throws -> CodexCredentials {
+    let secrets = [file.credentials.refreshToken, file.credentials.accessToken]
     var request = URLRequest(url: tokenEndpoint)
     request.httpMethod = "POST"
     request.setValue("application/json", forHTTPHeaderField: "Content-Type")
@@ -285,26 +360,29 @@ public actor CodexCredentialStore {
       (data, response) = try await session.data(for: request)
     } catch {
       throw CodexCredentialError.refreshFailed(
-        LLMTransport.redact(String(describing: error), secrets: [file.credentials.refreshToken]))
+        LLMTransport.redact(String(describing: error), secrets: secrets))
     }
     guard let http = response as? HTTPURLResponse else {
       throw CodexCredentialError.refreshFailed("not an HTTP response")
     }
     guard (200..<300).contains(http.statusCode) else {
-      let detail = try? JSONDecoder().decode(RefreshError.self, from: data)
-      let code = (detail?.errorCode ?? detail?.error ?? "").lowercased()
+      let rejection = try? JSONDecoder().decode(RefreshError.self, from: data)
+      let code = rejection?.code.map { LLMTransport.redact($0, secrets: secrets) }
       let message = LLMTransport.redact(
-        "HTTP \(http.statusCode): \(detail?.errorDescription ?? detail?.error ?? String(decoding: data.prefix(300), as: UTF8.self))",
-        secrets: [file.credentials.refreshToken])
-      if http.statusCode == 401 || Self.permanentRefreshCodes.contains(code) {
-        throw CodexCredentialError.signInExpired(code.isEmpty ? message : "\(code): \(message)")
-      }
-      throw CodexCredentialError.refreshFailed(message)
+        "HTTP \(http.statusCode): \(rejection?.message ?? String(decoding: data.prefix(300), as: UTF8.self))",
+        secrets: secrets)
+      throw RefreshRejected(
+        code: code,
+        permanent: http.statusCode == 401 || code.map(Self.permanentRefreshCodes.contains) ?? false,
+        message: message)
     }
     guard let refreshed = try? JSONDecoder().decode(RefreshResponse.self, from: data) else {
       throw CodexCredentialError.refreshFailed("undecodable token response")
     }
-    var document = file.document
+    // Overlay the new tokens on what the file holds now, not on the copy
+    // read before the round trip: the CLI may have written other keys
+    // meanwhile, and those must survive.
+    var document = (try? read().document) ?? file.document
     var tokens: [String: JSONValue] =
       if case .object(let existing)? = document["tokens"] { existing } else { [:] }
     if let accessToken = refreshed.accessToken, !accessToken.isEmpty {
