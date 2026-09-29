@@ -6,10 +6,13 @@ import SwiftUI
 /// a confirmation (the entry's context menu, the Delete key). Not a `List`:
 /// AppKit's row selection follows the system accent and cannot be
 /// recoloured, so the entries own their rail-and-veil selection and the
-/// column owns the arrow keys. The list takes keyboard focus when the
-/// window opens, so the arrows work before a click, and the selected entry
-/// wears the `ring` hairline while it has focus. The selection scrolls
-/// into view.
+/// column owns the arrow keys. The list takes keyboard focus once when the
+/// store first fills after the window opens (the moment `MainWindow` picks
+/// the first selection), so the arrows work before a click, and the
+/// selected entry wears the `ring` hairline while it has focus. Not
+/// `defaultFocus`: that re-asserts the list whenever focus is reset and
+/// fought the ⌘F move into the search field. The selection scrolls into
+/// view.
 struct MeetingListView: View {
   @Bindable var model: MeetingListViewModel
   /// Where the pipeline is with each queued or processing meeting, passed
@@ -30,7 +33,10 @@ struct MeetingListView: View {
     .overlay(alignment: .trailing) {
       Color.stenoBorder.frame(width: Theme.Space.hairline)
     }
-    .defaultFocus($listFocused, true)
+    .onChange(of: model.all.isEmpty, initial: true) { _, empty in
+      // First fill after the window opened: the arrows work without a click.
+      if !empty, !searchFocused { listFocused = true }
+    }
     .focusedSceneValue(\.searchFocus, SearchFocusAction { searchFocused = true })
     .confirmationDialog(
       "Delete “\(model.pendingDeletion?.displayTitle(calendar: model.calendar) ?? "")”?",

@@ -475,9 +475,10 @@ selection altogether, and `.listStyle(.plain)` keeps the highlight. The list col
 - The selected entry draws the 2 pt rail in `strong` and a `secondary` veil at radius 8;
   hover draws a `card` veil; both swap over `Motion.functional`. While the column has
   keyboard focus the selected entry also wears the `ring` hairline the focused search field
-  uses, so focus reads as one rule; the column takes focus when the window opens
-  (`defaultFocus`) and on a click, so the arrows work without a click first. No system
-  colour is used anywhere in the column.
+  uses, so focus reads as one rule; the column takes focus once when the store first fills
+  after the window opens and on a click, so the arrows work without a click first (not
+  `defaultFocus`, which re-asserted the list against the ⌘F move into the search field). No
+  system colour is used anywhere in the column.
 - The column root is `.focusable()`, `.focusEffectDisabled()`, `.onMoveCommand` moves
   the selection to the previous or next entry across day boundaries in `dayGroups`
   order, `.onKeyPress(.return)` is a no-op (the detail already follows selection),
