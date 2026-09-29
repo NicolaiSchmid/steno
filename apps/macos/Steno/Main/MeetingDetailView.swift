@@ -170,7 +170,9 @@ struct MeetingDetailView: View {
 
   /// One 12 pt `muted` line, facts joined by " · ": date and time and the
   /// source (unless the derived title and its chip already say them),
-  /// duration once known, language, token count.
+  /// duration once known, language. The token count stays in the data and
+  /// off the screen: it is developer vocabulary, not a fact about the
+  /// meeting.
   private func metaRow(_ meeting: Meeting) -> some View {
     var facts: [String] = []
     if !meeting.isTitleDerived {
@@ -179,9 +181,6 @@ struct MeetingDetailView: View {
     }
     if meeting.duration > 0 { facts.append(meeting.duration.clockText) }
     if let language = meeting.language { facts.append(language.localizedName()) }
-    if let usage = meeting.llmUsage {
-      facts.append("\(usage.promptTokens + usage.completionTokens) tokens")
-    }
     return Text(facts.joined(separator: " · "))
       .font(.steno(Theme.TextSize.xxs))
       .monospacedDigit()
@@ -334,10 +333,14 @@ struct MeetingDetailView: View {
     .padding(.vertical, Theme.Space.md)
   }
 
+  /// The status line wraps to a second line at the pane minimum rather than
+  /// truncating mid-word beside its button.
   private func footerText(_ text: String) -> some View {
     Text(text)
       .font(.steno(Theme.TextSize.xxs))
       .foregroundStyle(Color.stenoMutedForeground)
+      .lineLimit(2)
+      .fixedSize(horizontal: false, vertical: true)
       .accessibilityIdentifier("footer-export-status")
   }
 

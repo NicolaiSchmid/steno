@@ -6,7 +6,11 @@ import SwiftUI
 /// follows the stored settings) and "Not now" was not pressed this launch
 /// (`AppController.setupBannerDismissed`). The per-meeting rows in the
 /// detail pane carry the signal permanently, so the banner needs no second
-/// flag. Ids `setup-banner`, `setup-summaries`, `choose-vault` and
+/// flag. One `Card`: the `info` dot and the sentence on the first row, the
+/// actions on the second, so the sentence never competes with the buttons
+/// for width (at the 440 pt pane minimum it wrapped to one character per
+/// line beside them) and the card is not a tinted box inside a white box.
+/// Ids `setup-banner`, `setup-summaries`, `choose-vault` and
 /// `banner-not-now`; the UI smoke test matches ids, not copy.
 struct SetupBanner: View {
   let controller: AppController
@@ -22,9 +26,15 @@ struct SetupBanner: View {
   var body: some View {
     VStack(spacing: 0) {
       if let message {
-        Card(padding: Theme.Space.md) {
-          HStack(alignment: .center, spacing: Theme.Space.md) {
-            MessageRow(kind: .info, text: message.text)
+        Card {
+          VStack(alignment: .leading, spacing: Theme.Space.md) {
+            HStack(alignment: .top, spacing: Theme.Space.sm) {
+              StatusDot(color: Color.stenoInfo).padding(.top, 5)
+              Text(message.text)
+                .font(.steno(Theme.TextSize.xs))
+                .foregroundStyle(Color.stenoForeground)
+                .fixedSize(horizontal: false, vertical: true)
+            }
             HStack(spacing: Theme.Space.sm) {
               if message.offersSummaries {
                 Button(SetupCopy.setUpSummaries) {
@@ -46,8 +56,8 @@ struct SetupBanner: View {
                 .buttonStyle(StenoGhostButtonStyle())
                 .accessibilityIdentifier("banner-not-now")
             }
-            .fixedSize()
           }
+          .frame(maxWidth: .infinity, alignment: .leading)
         }
         .padding(.horizontal, Theme.Space.xxl)
         .padding(.top, Theme.Space.lg)

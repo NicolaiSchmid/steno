@@ -90,7 +90,7 @@ final class ThemeTokensTests: XCTestCase {
     XCTAssertEqual(Theme.Control.segmentHeight, 24)
     XCTAssertEqual(Theme.Control.segmentContainerHeight, 28)
     XCTAssertEqual(Theme.Control.buttonInset, 14)
-    XCTAssertEqual(Theme.Control.chipInset, 6)
+    XCTAssertEqual(Theme.Control.chipInset, 8)
     XCTAssertEqual(Theme.Control.rowInset, 10)
     XCTAssertEqual(Theme.Control.menuRowInset, 6)
   }

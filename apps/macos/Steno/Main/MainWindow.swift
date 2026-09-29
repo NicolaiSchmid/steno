@@ -7,7 +7,11 @@ import SwiftUI
 /// a drag past the first divider's minimum still collapses the AppKit
 /// column, so the state is reverted to `.all` as soon as it changes, and
 /// the column minimums (200 + 320 + 440) add up to the window's 960 pt
-/// minimum so the layout is never over-constrained. No title, no toolbar
+/// minimum so the layout is never over-constrained. The ideals add up to
+/// it too: the split view lays the content and detail columns out at their
+/// ideals before it honours the sidebar's minimum, and 220 + 380 + 440
+/// squeezed the nav column to 140 pt at 960, truncating the Record control
+/// and every nav row. No title, no toolbar
 /// items: the window style hides the title bar and each column paints its
 /// own opaque background. One detail view model per selected meeting,
 /// replaced when the selection changes.
@@ -27,11 +31,11 @@ struct MainWindow: View {
   var body: some View {
     NavigationSplitView(columnVisibility: $columns) {
       NavigationColumn(controller: controller, list: list)
-        .navigationSplitViewColumnWidth(min: 200, ideal: 220, max: 260)
+        .navigationSplitViewColumnWidth(min: 200, ideal: 200, max: 260)
         .toolbar(removing: .sidebarToggle)
     } content: {
       MeetingListView(model: list, progress: controller.progress)
-        .navigationSplitViewColumnWidth(min: 320, ideal: 380, max: 480)
+        .navigationSplitViewColumnWidth(min: 320, ideal: 320, max: 480)
     } detail: {
       // Row 1 of the detail header stack: the setup banner, over the
       // selected meeting or the empty state alike.

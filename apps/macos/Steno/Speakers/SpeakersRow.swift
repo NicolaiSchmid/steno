@@ -1,14 +1,22 @@
 import StenoCore
 import SwiftUI
 
-/// The header's Speakers row: a label and one pill button with the first
-/// avatars, the confirmed names, "+n" for the rest and "n to confirm" while
-/// speakers are unnamed. Clicking it toggles the `SpeakersPopover`.
+/// The header's Speakers row: a 13 pt `muted` label and one pill button
+/// with the first avatars, the confirmed names, "+n" for the rest and "n to
+/// confirm" while speakers are unnamed. The pill is the secondary button it
+/// behaves like: the button height, `raised` with a hairline, the `card`
+/// veil on hover, never a grey block. Clicking it toggles the
+/// `SpeakersPopover`.
 struct SpeakersRow: View {
   let model: SpeakersViewModel
   @Binding var isPresented: Bool
+  @State private var hovering = false
+  @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
   static let shownAvatars = 3
+  /// The stacked avatars inside the pill; 5 pt under the button height's
+  /// text box so the ring has room.
+  static let avatarSize: CGFloat = 22
 
   private var named: [String] {
     model.rows.filter(\.isConfirmed).compactMap { $0.person?.displayName }
@@ -34,18 +42,17 @@ struct SpeakersRow: View {
   }
 
   var body: some View {
-    HStack(spacing: Theme.Space.sm) {
+    HStack(spacing: Theme.Space.md) {
       Text("Speakers")
-        .font(.steno(Theme.TextSize.xxs))
-        .foregroundStyle(Color.stenoFaint)
-        .frame(width: 88, alignment: .leading)
+        .font(.steno(Theme.TextSize.xs))
+        .foregroundStyle(Color.stenoMutedForeground)
       Button {
         isPresented.toggle()
       } label: {
         HStack(spacing: Theme.Space.sm) {
           HStack(spacing: -6) {
             ForEach(model.rows.prefix(Self.shownAvatars)) { row in
-              Avatar(name: row.isConfirmed ? row.person?.displayName : nil, size: 20)
+              Avatar(name: row.isConfirmed ? row.person?.displayName : nil, size: Self.avatarSize)
                 .overlay(Circle().strokeBorder(Color.stenoBackground, lineWidth: 1.5))
             }
           }
@@ -71,15 +78,19 @@ struct SpeakersRow: View {
             .foregroundStyle(Color.stenoFaint)
         }
         .padding(.horizontal, Theme.Space.md)
-        .frame(height: 28)
+        .frame(height: Theme.Control.buttonHeight)
         .background(
-          Theme.Radius.md.shape
-            .fill(Color.stenoSecondary)
+          ZStack {
+            Theme.Radius.md.shape.fill(Color.stenoRaised)
+            Theme.Radius.md.shape.fill(hovering ? Color.stenoCard : Color.clear)
+          }
         )
         .overlay(Theme.Radius.md.shape.hairline())
-        .contentShape(Rectangle())
+        .contentShape(Theme.Radius.md.shape)
       }
       .buttonStyle(.plain)
+      .onHover { hovering = $0 }
+      .animation(Motion.swap(reduceMotion: reduceMotion), value: hovering)
       .accessibilityIdentifier("speakers-row")
       .accessibilityLabel(summary)
       .help("Who spoke; click to name speakers")

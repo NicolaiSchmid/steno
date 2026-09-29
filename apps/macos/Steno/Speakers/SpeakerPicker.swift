@@ -125,9 +125,11 @@ struct SpeakerPicker: View {
     .font(.steno(Theme.TextSize.sm))
     .padding(.horizontal, Theme.Space.sm)
     .padding(.vertical, Theme.Space.xs + 2)
+    // The focused input box: `raised` under a `ring` hairline, as `InputBox`
+    // draws every other field while it has focus.
     .background(
       Theme.Radius.sm.shape
-        .fill(Color.stenoSecondary)
+        .fill(Color.stenoRaised)
     )
     .overlay(Theme.Radius.sm.shape.hairline(Color.stenoRing))
     .focused($fieldFocused)
