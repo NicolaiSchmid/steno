@@ -33,7 +33,9 @@ struct StenoApp: App {
         MainWindow(controller: controller)
           .modifier(OnboardingOpener(controller: controller))
       }
-      .background(UITestWindowSizer())
+      .background {
+        if AppBootstrap.isUITesting { UITestWindowSizer() }
+      }
     }
     .windowStyle(.hiddenTitleBar)
     .defaultSize(Self.mainWindowSize)
@@ -166,7 +168,7 @@ extension View {
 /// exists, and once more a second later: SwiftUI restores the frame a
 /// previous launch saved over `defaultSize`, and the smoke suite launches
 /// the app many times per run. Zero-sized, in the window content's
-/// background; outside UI testing, or without the flag, it does nothing.
+/// background under UI testing only; without the flag it does nothing.
 struct UITestWindowSizer: NSViewRepresentable {
   func makeNSView(context: Context) -> SizerView {
     SizerView(frame: .zero)

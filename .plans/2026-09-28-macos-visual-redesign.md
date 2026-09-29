@@ -780,10 +780,12 @@ Recorded 2026-09-29 while implementing steps 7, 7a, 8 and 11 (layout PR B1).
   `defaultSize`, and the smoke suite launches the app many times per run, so `-steno-window`
   is applied twice: as the scene's `defaultSize` and by `UITestWindowSizer`, a zero-sized
   `NSViewRepresentable` in the main window's content that sets the content size once its
-  `NSWindow` exists and again a second later. `-steno-appearance` is applied in
+  `NSWindow` exists and again a second later; the test waits for the main window to be 960
+  wide before each screenshot. `-steno-appearance` is applied in
   `AppDelegate.applicationWillFinishLaunching`. A bad value (`-steno-appearance sepia`,
   `-steno-window 960`) or a missing one is a `launchError` line beside the unknown-flag line.
 - **Step 12, artefact.** The `ui-smoke` job runs `xcrun xcresulttool export attachments` on
   `ui.xcresult` into `apps/macos/build/attachments`, uploads that directory with the bundle and
-  prints the names from its `manifest.json` (`scripts/attachment-names.py`) into the step
-  summary, so the done criterion can be read from the artefact on a Linux checkout.
+  prints the names from its `manifest.json` (`scripts/attachment-names.py`, the `_<n>_<uuid>`
+  Xcode appends dropped) into the step summary and fails when one of the twelve is missing, so
+  the done criterion is checked by the job and readable from the artefact on a Linux checkout.

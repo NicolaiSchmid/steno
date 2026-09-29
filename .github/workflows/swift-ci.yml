@@ -441,15 +441,24 @@ jobs:
 
       # The screenshots the smoke tests attach with `.keepAlways` (the
       # redesign's review evidence), exported beside the bundle so the
-      # artefact lists them by name without a Mac; the manifest names each.
+      # artefact lists them by name without a Mac. The script prints every
+      # name into the step summary and fails when one of the matrix's twelve
+      # is missing, which an incomplete smoke run already is.
       - name: Export attachments
         if: always()
         run: |
+          set -o pipefail
           if [ -d apps/macos/build/ui.xcresult ]; then
             mkdir -p apps/macos/build/attachments
             xcrun xcresulttool export attachments --path apps/macos/build/ui.xcresult \
               --output-path apps/macos/build/attachments
             python3 apps/macos/scripts/attachment-names.py apps/macos/build/attachments \
+              main-light-empty.png main-light-selected.png main-light-recording.png \
+              onboarding-light-page-1.png onboarding-light-page-2.png \
+              settings-light-recording.png \
+              main-dark-empty.png main-dark-selected.png main-dark-recording.png \
+              onboarding-dark-page-1.png onboarding-dark-page-2.png \
+              settings-dark-recording.png \
               | tee -a "$GITHUB_STEP_SUMMARY"
           fi
 

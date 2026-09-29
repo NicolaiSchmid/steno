@@ -603,15 +603,23 @@ final class LaunchSmokeTests: XCTestCase {
         ["-steno-ui-testing", "-steno-appearance", appearance, "-steno-window", "960x600"]
           + arguments)
     }
-    /// Runs `ready` on `app`, then attaches the screen as
+    /// Runs `ready` on `app`, waits for the main window (the one with the
+    /// nav column) to be 960 wide, then attaches the screen as
     /// `<window>-<appearance>-<state>.png`, inside an activity named for the
-    /// state so a failure names it.
+    /// state so a failure names it. The width wait covers
+    /// `UITestWindowSizer`'s second pass, which undoes the frame SwiftUI
+    /// restores from the previous launch a second after the window shows,
+    /// and proves the size fits the display.
     func capture(
       _ window: String, _ state: String, in app: XCUIApplication,
       ready: (XCUIApplication) -> Void
     ) {
       XCTContext.runActivity(named: "\(window) \(state) in \(appearance)") { _ in
         ready(app)
+        let main = app.windows.containing(.button, identifier: "nav-settings").firstMatch
+        XCTAssertTrue(
+          waitUntil(timeout: 5) { abs(main.frame.width - 960) < 1 },
+          "the main window is \(main.frame.width) wide, not 960")
         attachScreenshot(named: "\(window)-\(appearance)-\(state).png")
       }
     }
