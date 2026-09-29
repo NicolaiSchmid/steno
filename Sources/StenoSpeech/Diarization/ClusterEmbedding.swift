@@ -1,7 +1,8 @@
 import Foundation
 import StenoCore
 
-/// The cluster embedding a `Speaker` row stores: each chunk vector brought to
+/// The embedding the mapping gives a cluster, and what a `Speaker` row
+/// stores unless `ClusterRefinement` replaces it: each chunk vector brought to
 /// unit length, summed with its duration as weight, then L2-normalised
 /// (normalising removes the scale, so dividing by the total weight first
 /// would change nothing). FluidAudio hands `embedding256` over as the raw

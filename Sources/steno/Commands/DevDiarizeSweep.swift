@@ -4,14 +4,17 @@ import StenoCore
 import StenoSpeech
 
 /// `steno dev diarize-sweep <wav>... [--thresholds 0.6 0.8 1.0] [--max-speakers n]
-/// [--out report.json]`: runs the FluidAudio diarizer over 16 kHz mono WAV
-/// files at several clustering thresholds and prints, per file and
-/// threshold, the speaker count, each cluster's speech time and the
-/// cosine range between the cluster embeddings. `--out` writes the same
-/// data with every cluster embedding as JSON, so the match threshold and a
-/// merge cutoff can be calibrated on real recordings kept outside the
-/// repository (the plan's step 6 calibration, issue #34). Audio never
-/// leaves the machine; the report holds embeddings and durations only.
+/// [--no-refinement] [--out report.json]`: runs the FluidAudio diarizer over
+/// 16 kHz mono WAV files at several clustering thresholds and prints, per
+/// file and threshold, the speaker count, each cluster's speech time and
+/// the cosine range between the cluster embeddings. `--no-refinement`
+/// reports the clusters as the mapping produced them, so the pass's effect
+/// can be read off two runs. `--out` writes the same data with every cluster
+/// embedding as JSON. This is the tool `.plans/2026-09-29-speaker-calibration.md`
+/// was measured with (the step 6 calibration that
+/// `.plans/2026-09-25-speech-and-speakers.md` deferred to #34); recordings
+/// stay outside the repository, and the report holds embeddings and
+/// durations only.
 struct DevDiarizeSweep: AsyncParsableCommand {
   static let configuration = CommandConfiguration(
     commandName: "diarize-sweep",
@@ -32,6 +35,9 @@ struct DevDiarizeSweep: AsyncParsableCommand {
   @Option(name: .customLong("out"), help: "Write the report with every cluster embedding as JSON.")
   var output: String?
 
+  @Flag(inversion: .prefixedNo, help: "Run the refinement pass after the mapping.")
+  var refinement = true
+
   @OptionGroup var models: DevModels.Options
 
   /// One diarization of one file at one threshold.
@@ -40,7 +46,8 @@ struct DevDiarizeSweep: AsyncParsableCommand {
       var label: String
       var seconds: Double
       var confidence: Float
-      var embedding: [Float]?
+      /// Encodes as the flat array of values.
+      var embedding: Embedding?
     }
 
     var file: String
@@ -65,14 +72,17 @@ struct DevDiarizeSweep: AsyncParsableCommand {
     for file in files {
       let url = URL(fileURLWithPath: file)
       let buffer = try WAVAudioDecoder.read(url)
-      let name = url.deletingLastPathComponent().lastPathComponent + "/" + url.lastPathComponent
-      print("## \(name) (\(Self.minutes(buffer.duration)))")
-      print("| threshold | speakers | minutes per cluster | cosine between clusters |")
-      print("|---|---|---|---|")
+      let name = url.pathComponents.suffix(2).joined(separator: "/")
+      let mode = refinement ? "refined" : "mapping only"
+      print("## \(name) (\(Self.minutes(buffer.duration))), \(mode)")
+      print("| Threshold | Speakers | Minutes per cluster | Cosine between clusters |")
+      print("|---:|---:|---|---|")
       for threshold in thresholds {
         let diarizer = try makeDiarizer(
           models: store,
-          config: FluidDiarizerConfig(clusteringThreshold: threshold, maxSpeakers: maxSpeakers))
+          config: FluidDiarizerConfig(
+            clusteringThreshold: threshold, maxSpeakers: maxSpeakers,
+            refinesClusters: refinement))
         let started = Date()
         let result = try await diarizer.diarize(buffer)
         let wall = Date().timeIntervalSince(started)
@@ -81,7 +91,7 @@ struct DevDiarizeSweep: AsyncParsableCommand {
             label: cluster.label,
             seconds: cluster.ranges.reduce(0) { $0 + $1.upperBound - $1.lowerBound },
             confidence: cluster.clusterConfidence,
-            embedding: cluster.embedding?.values)
+            embedding: cluster.embedding)
         }
         .sorted { $0.seconds > $1.seconds }
         runs.append(
@@ -109,17 +119,11 @@ struct DevDiarizeSweep: AsyncParsableCommand {
   /// "min – max" cosine over every pair of cluster embeddings; "–" for fewer
   /// than two.
   static func cosineRange(_ clusters: [Run.Cluster]) -> String {
-    let embeddings = clusters.compactMap { $0.embedding.map(Embedding.init) }
-    var low = Float.greatestFiniteMagnitude
-    var high = -Float.greatestFiniteMagnitude
-    for (index, lhs) in embeddings.enumerated() {
-      for rhs in embeddings[(index + 1)...] {
-        let cosine = lhs.cosineSimilarity(to: rhs)
-        low = min(low, cosine)
-        high = max(high, cosine)
-      }
+    let embeddings = clusters.compactMap(\.embedding)
+    let cosines = embeddings.indices.flatMap { lhs in
+      embeddings[(lhs + 1)...].map { embeddings[lhs].cosineSimilarity(to: $0) }
     }
-    guard embeddings.count > 1 else { return "–" }
+    guard let low = cosines.min(), let high = cosines.max() else { return "–" }
     return String(format: "%.2f – %.2f", low, high)
   }
 }
