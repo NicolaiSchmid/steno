@@ -170,4 +170,30 @@ final class UITestScenarioTests: XCTestCase {
       UITestScenario(arguments: ["Steno", "-steno-appearance", "sepia"]).launchError,
       "outside UI testing a bad value is not ours to report")
   }
+
+  /// `-steno-settings-section <rawValue>`: the section Settings opens on,
+  /// any `SettingsSection` case; anything else is a launch error.
+  func testTheSettingsSectionFlagParses() {
+    XCTAssertNil(UITestScenario(arguments: ["Steno", "-steno-ui-testing"]).settingsSection)
+
+    let recording = UITestScenario(arguments: [
+      "Steno", "-steno-ui-testing", "-steno-settings-section", "recording",
+    ])
+    XCTAssertEqual(recording.settingsSection, .recording)
+    XCTAssertEqual(recording.unknownFlags, [])
+    XCTAssertNil(recording.launchError)
+
+    for section in SettingsSection.allCases {
+      let scenario = UITestScenario(arguments: [
+        "Steno", "-steno-ui-testing", "-steno-settings-section", section.rawValue,
+      ])
+      XCTAssertEqual(scenario.settingsSection, section)
+    }
+
+    let audio = UITestScenario(arguments: [
+      "Steno", "-steno-ui-testing", "-steno-settings-section", "audio",
+    ])
+    XCTAssertNil(audio.settingsSection)
+    XCTAssertEqual(audio.launchError, "Invalid UI-test values: -steno-settings-section audio")
+  }
 }

@@ -770,8 +770,12 @@ Recorded 2026-09-29 while implementing steps 7, 7a, 8 and 11 (layout PR B1).
   components, its notes are `faint` and the QR image has radius 8 and a hairline.
 - **Step 12, Settings section.** The plan's "Settings > Audio" is the Recording section since
   the settings redesign (`SettingsSection.recording`, `settings-header-recording`), so the
-  attachment is `settings-<appearance>-recording.png`; the test opens Settings through the nav
-  column's Settings row and clicks the sidebar row `settings-recording`.
+  attachment is `settings-<appearance>-recording.png`. The test opens Settings through the nav
+  column's Settings row; the section comes from `-steno-settings-section recording`, which
+  `AppBootstrap` hands to `AppController.requestedSettingsSection` (the setup banner's deep
+  link), not from a click on the sidebar row: in the Settings window the `List` rows'
+  accessibility frames sit off the rendered rows (the first run's hierarchy dump put the General
+  row above the window's top edge), so a click at the Recording row's centre selects General.
 - **Step 12, window size.** SwiftUI restores the frame a previous launch saved over
   `defaultSize`, and the smoke suite launches the app many times per run, so `-steno-window`
   is applied twice: as the scene's `defaultSize` and by `UITestWindowSizer`, a zero-sized

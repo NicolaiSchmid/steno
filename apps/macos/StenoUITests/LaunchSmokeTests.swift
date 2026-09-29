@@ -590,10 +590,12 @@ final class LaunchSmokeTests: XCTestCase {
   /// attachments` on the CI bundle yields the review set: the main window
   /// empty, with the fixture selected, and recording; onboarding page 1 and
   /// page 2; Settings on the Recording section (the plan's "Audio", named
-  /// Recording since the settings redesign). Each step waits on the ids the
-  /// other tests rely on and asserts nothing else; the numeric review is a
-  /// reading of the attachments. 960 x 600 fits the runner's 1024 x 768
-  /// display, as does the 760 x 520 Settings window over it.
+  /// Recording since the settings redesign), opened from the nav column's
+  /// Settings row with the section deep-linked by `-steno-settings-section`.
+  /// Each step waits on the ids the other tests rely on and asserts nothing
+  /// else; the numeric review is a reading of the attachments. 960 x 600
+  /// fits the runner's 1024 x 768 display, as does the 760 x 520 Settings
+  /// window over it.
   private func captureScreenshotMatrix(appearance: String) {
     let base = [
       "-steno-ui-testing", "-steno-appearance", appearance, "-steno-window", "960x600",
@@ -647,29 +649,22 @@ final class LaunchSmokeTests: XCTestCase {
       "\(appearance): page 2 rows are missing")
     attachScreenshot(named: "onboarding-\(appearance)-page-2.png")
 
-    app = launch(base)
+    // The section comes from the scenario's deep link, not a click on the
+    // sidebar row: the rows' accessibility frames sit off the rendered rows
+    // in the Settings window, so a click at the Recording row's centre
+    // lands on General.
+    app = launch(base + ["-steno-settings-section", "recording"])
     let settings = app.buttons["nav-settings"].firstMatch
     XCTAssertTrue(
       settings.waitForExistence(timeout: 10), "\(appearance): the nav Settings row is missing")
     settings.click()
     XCTAssertTrue(
-      app.descendants(matching: .any)["settings-header-general"].firstMatch
-        .waitForExistence(timeout: 10),
-      "\(appearance): Settings did not open on General")
-    // The sidebar row is a combined accessibility element inside a `List`
-    // cell; when the hit test resolves to the cell instead, the mouse path
-    // through its centre selects the section all the same.
-    let row = app.descendants(matching: .any)["settings-recording"].firstMatch
-    XCTAssertTrue(row.waitForExistence(timeout: 5), "\(appearance): the Recording row is missing")
-    if row.isHittable {
-      row.click()
-    } else {
-      row.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).click()
-    }
-    XCTAssertTrue(
       app.descendants(matching: .any)["settings-header-recording"].firstMatch
         .waitForExistence(timeout: 10),
-      "\(appearance): Settings did not select Recording")
+      "\(appearance): Settings did not open on Recording")
+    XCTAssertTrue(
+      app.descendants(matching: .any)["settings-recording"].firstMatch.exists,
+      "\(appearance): the Recording sidebar row is missing")
     attachScreenshot(named: "settings-\(appearance)-recording.png")
   }
 

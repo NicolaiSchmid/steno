@@ -124,6 +124,12 @@ final class AppBootstrap {
         // and the detail header shows its Stop control.
         await controller.startRecordingFromWindow(mode: .call)
       }
+      if Self.isUITesting, let section = Self.scenario.settingsSection {
+        // As the setup banner's deep link would: `SettingsView` selects the
+        // section when its window opens (the test opens it from the nav
+        // column's Settings row).
+        controller.requestedSettingsSection = section
+      }
     } catch {
       self.error = "Steno could not start: \(error)"
     }

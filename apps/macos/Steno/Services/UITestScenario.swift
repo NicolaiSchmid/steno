@@ -29,9 +29,14 @@ struct UITestScenario: Equatable, Sendable {
   /// Takes a value, `WxH` in points (`960x600`): the main window's size at
   /// launch, applied over SwiftUI's `defaultSize` and its restored frame.
   static let windowFlag = "-steno-window"
+  /// Takes a value, a `SettingsSection` raw value (`recording`): the section
+  /// Settings opens on, through `AppController.requestedSettingsSection`,
+  /// the deep link the setup banner uses. The smoke test cannot click a
+  /// sidebar row: the rows' accessibility frames sit off the rendered rows.
+  static let settingsSectionFlag = "-steno-settings-section"
   static let knownFlags: Set<String> = [
     uiTestingFlag, showPromptFlag, emptyFlag, richSeedFlag, startRecordingFlag,
-    showOnboardingFlag, holdTranscribeFlag, appearanceFlag, windowFlag,
+    showOnboardingFlag, holdTranscribeFlag, appearanceFlag, windowFlag, settingsSectionFlag,
   ]
 
   enum Appearance: String, Sendable {
@@ -77,6 +82,8 @@ struct UITestScenario: Equatable, Sendable {
   var appearance: Appearance?
   /// The main window's size at launch; nil leaves SwiftUI's default.
   var windowSize: WindowSize?
+  /// The section Settings opens on once its window shows; nil leaves General.
+  var settingsSection: SettingsSection?
   /// `-steno-*` arguments that name no flag, in order.
   var unknownFlags: [String]
   /// Flags whose value is missing or malformed, each as
@@ -98,6 +105,13 @@ struct UITestScenario: Equatable, Sendable {
         windowSize = parsed
       } else {
         invalidValues.append("\(Self.windowFlag) \(text)")
+      }
+    }
+    if let text = Self.value(of: Self.settingsSectionFlag, in: arguments, invalid: &invalidValues) {
+      if let parsed = SettingsSection(rawValue: text) {
+        settingsSection = parsed
+      } else {
+        invalidValues.append("\(Self.settingsSectionFlag) \(text)")
       }
     }
     self.invalidValues = invalidValues
