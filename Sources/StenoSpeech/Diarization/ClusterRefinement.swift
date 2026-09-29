@@ -85,7 +85,8 @@ enum ClusterRefinement {
         substantive[best.index].ranges + cluster.ranges)
     }
 
-    return substantive
+    return
+      substantive
       .sorted { firstSpeech($0) < firstSpeech($1) }
       .enumerated()
       .map { index, cluster in
