@@ -1,0 +1,286 @@
+<!doctype html>
+<!--
+  Steno main window, web UI direction mockup (2026-09-29). Static HTML, no
+  build step. Open in a browser at 1200 x 760 or wider; append ?dark for the
+  dark appearance. The wallpaper gradient stands in for the desktop behind
+  the window: in the app the sidebar is transparent web content over a
+  native NSGlassEffectView, so the real material shows through. See
+  .plans/2026-09-29-macos-webview-ui.md.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Steno mockup: main window</title>
+<style>
+  :root {
+    color-scheme: light dark;
+    --label: rgba(0,0,0,0.85);
+    --label-2: rgba(0,0,0,0.5);
+    --label-3: rgba(0,0,0,0.25);
+    --separator: rgba(0,0,0,0.08);
+    --canvas: #ffffff;
+    --canvas-2: #f5f5f7;
+    --fill: rgba(0,0,0,0.05);
+    --fill-2: rgba(0,0,0,0.08);
+    --accent: #0a7aff;
+    --accent-text: #ffffff;
+    --red: #ff3b30;
+    --green: #34c759;
+    --glass: rgba(255,255,255,0.55);
+    --glass-edge: rgba(255,255,255,0.7);
+    --glass-shadow: 0 8px 30px rgba(0,0,0,0.12), 0 1px 0 rgba(255,255,255,0.6) inset;
+    --sel: rgba(0,0,0,0.07);
+    --chip: rgba(0,0,0,0.06);
+    --window-shadow: 0 30px 80px rgba(0,0,0,0.35), 0 0 0 0.5px rgba(0,0,0,0.25);
+  }
+  html.dark {
+    --label: rgba(255,255,255,0.9);
+    --label-2: rgba(255,255,255,0.55);
+    --label-3: rgba(255,255,255,0.3);
+    --separator: rgba(255,255,255,0.1);
+    --canvas: #1e1e20;
+    --canvas-2: #262628;
+    --fill: rgba(255,255,255,0.07);
+    --fill-2: rgba(255,255,255,0.11);
+    --accent: #3b8dff;
+    --glass: rgba(40,40,44,0.55);
+    --glass-edge: rgba(255,255,255,0.14);
+    --glass-shadow: 0 8px 30px rgba(0,0,0,0.4), 0 1px 0 rgba(255,255,255,0.08) inset;
+    --sel: rgba(255,255,255,0.09);
+    --chip: rgba(255,255,255,0.09);
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; min-height: 100vh; display: grid; place-items: center;
+    font: 13px/1.4 -apple-system, system-ui, "SF Pro Text", "Inter", Helvetica, Arial, sans-serif;
+    color: var(--label);
+    background:
+      radial-gradient(1200px 700px at 20% 10%, #8fb7ff 0%, transparent 60%),
+      radial-gradient(900px 600px at 85% 80%, #ffb38a 0%, transparent 55%),
+      radial-gradient(800px 800px at 60% 30%, #c9a3ff 0%, transparent 60%),
+      linear-gradient(160deg, #6f8ff5, #b58bf0 50%, #f0a06a);
+    -webkit-font-smoothing: antialiased;
+  }
+  html.dark body {
+    background:
+      radial-gradient(1200px 700px at 20% 10%, #2b4a8a 0%, transparent 60%),
+      radial-gradient(900px 600px at 85% 80%, #7a3d2a 0%, transparent 55%),
+      radial-gradient(800px 800px at 60% 30%, #4a2f7a 0%, transparent 60%),
+      linear-gradient(160deg, #1b2a52, #2e1f4e 50%, #4a2a1f);
+  }
+
+  /* Window */
+  .window {
+    width: 1200px; height: 760px; border-radius: 12px; overflow: hidden;
+    background: var(--canvas); box-shadow: var(--window-shadow);
+    display: grid; grid-template-columns: 236px 340px 1fr; position: relative;
+  }
+  .lights { position: absolute; top: 20px; left: 20px; display: flex; gap: 8px; z-index: 5; }
+  .lights i { width: 12px; height: 12px; border-radius: 50%; display: block; box-shadow: inset 0 0 0 0.5px rgba(0,0,0,0.2); }
+  .lights i:nth-child(1) { background: #ff5f57; }
+  .lights i:nth-child(2) { background: #febc2e; }
+  .lights i:nth-child(3) { background: #28c840; }
+
+  /* Sidebar: floating glass pane. The wallpaper shows through; in the app
+     this is an NSGlassEffectView under a transparent WKWebView. */
+  .sidebar-well {
+    padding: 8px; position: relative;
+    background:
+      radial-gradient(400px 300px at 0% 0%, rgba(143,183,255,0.55), transparent 70%),
+      radial-gradient(300px 300px at 100% 100%, rgba(255,179,138,0.35), transparent 70%),
+      var(--canvas-2);
+  }
+  html.dark .sidebar-well {
+    background:
+      radial-gradient(400px 300px at 0% 0%, rgba(43,74,138,0.6), transparent 70%),
+      radial-gradient(300px 300px at 100% 100%, rgba(122,61,42,0.4), transparent 70%),
+      var(--canvas-2);
+  }
+  .sidebar {
+    height: 100%; border-radius: 14px; padding: 46px 8px 8px;
+    background: var(--glass); backdrop-filter: blur(30px) saturate(1.6);
+    box-shadow: var(--glass-shadow), 0 0 0 0.5px var(--glass-edge) inset;
+    display: flex; flex-direction: column; gap: 4px;
+  }
+  .record {
+    display: flex; align-items: center; gap: 10px; margin: 0 2px 14px;
+    height: 40px; padding: 0 6px 0 12px; border-radius: 20px;
+    background: rgba(255,255,255,0.72); box-shadow: 0 1px 2px rgba(0,0,0,0.08), 0 0 0 0.5px rgba(0,0,0,0.06);
+    font-weight: 600; font-size: 13px;
+  }
+  html.dark .record { background: rgba(255,255,255,0.12); box-shadow: 0 0 0 0.5px rgba(255,255,255,0.12); }
+  .record .dot { width: 18px; height: 18px; border-radius: 50%; background: var(--red); box-shadow: 0 0 0 3px rgba(255,59,48,0.2); }
+  .record .spacer { flex: 1; }
+  .record .menu { width: 28px; height: 28px; border-radius: 50%; display: grid; place-items: center; background: var(--fill); color: var(--label-2); font-size: 11px; }
+  .group-title { font-size: 11px; font-weight: 600; color: var(--label-2); letter-spacing: 0.02em; padding: 10px 10px 4px; }
+  .row {
+    display: flex; align-items: center; gap: 9px; height: 28px; padding: 0 10px; border-radius: 7px;
+    color: var(--label);
+  }
+  .row.selected { background: var(--sel); }
+  .row .icon { width: 16px; text-align: center; color: var(--accent); font-size: 14px; }
+  .row.selected .icon { color: var(--accent); }
+  .row .count { margin-left: auto; color: var(--label-2); font-size: 12px; font-variant-numeric: tabular-nums; }
+  .sidebar .bottom { margin-top: auto; }
+
+  /* Meeting list column */
+  .list { border-right: 0.5px solid var(--separator); display: flex; flex-direction: column; background: var(--canvas); }
+  .list header { padding: 52px 16px 8px; }
+  .list h1 { margin: 0 0 10px; font-size: 20px; font-weight: 700; letter-spacing: -0.01em; }
+  .search { height: 28px; border-radius: 8px; background: var(--fill); color: var(--label-3); display: flex; align-items: center; gap: 6px; padding: 0 9px; font-size: 13px; }
+  .day { font-size: 11px; font-weight: 600; color: var(--label-2); padding: 14px 16px 4px; }
+  .meeting { margin: 0 8px; padding: 9px 10px 10px; border-radius: 9px; }
+  .meeting.selected { background: var(--accent); color: var(--accent-text); }
+  .meeting .t { font-weight: 600; font-size: 13px; display: flex; justify-content: space-between; }
+  .meeting .t time { font-weight: 400; opacity: 0.75; font-size: 12px; font-variant-numeric: tabular-nums; }
+  .meeting .p { font-size: 12px; margin-top: 2px; color: var(--label-2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .meeting.selected .p { color: rgba(255,255,255,0.8); }
+  .meeting .s { display: flex; gap: 6px; margin-top: 6px; align-items: center; font-size: 11px; color: var(--label-2); }
+  .meeting.selected .s { color: rgba(255,255,255,0.85); }
+  .pill { padding: 1px 7px; border-radius: 99px; background: var(--chip); font-size: 11px; }
+  .meeting.selected .pill { background: rgba(255,255,255,0.22); }
+
+  /* Detail */
+  .detail { display: flex; flex-direction: column; min-width: 0; background: var(--canvas); position: relative; }
+  .toolbar {
+    position: absolute; top: 12px; right: 16px; display: flex; gap: 8px; z-index: 3;
+  }
+  .glassbtn {
+    height: 32px; min-width: 32px; padding: 0 12px; border-radius: 16px; display: flex; align-items: center; gap: 6px;
+    background: rgba(255,255,255,0.6); backdrop-filter: blur(20px);
+    box-shadow: 0 1px 3px rgba(0,0,0,0.08), 0 0 0 0.5px rgba(0,0,0,0.06);
+    font-size: 13px; font-weight: 500; color: var(--label);
+  }
+  html.dark .glassbtn { background: rgba(255,255,255,0.1); box-shadow: 0 0 0 0.5px rgba(255,255,255,0.12); }
+  .glassbtn.icon { padding: 0; justify-content: center; }
+  .scroll { overflow: auto; padding: 56px 40px 40px; flex: 1; }
+  .reading { max-width: 680px; }
+  .eyebrow { font-size: 12px; color: var(--label-2); display: flex; gap: 8px; align-items: center; }
+  .eyebrow .sep::before { content: "·"; }
+  h2.title { font-size: 28px; font-weight: 700; letter-spacing: -0.02em; margin: 4px 0 14px; display: flex; align-items: center; gap: 10px; }
+  .tag { font-size: 12px; font-weight: 500; padding: 2px 8px; border-radius: 6px; background: var(--chip); color: var(--label-2); }
+  .speakers { display: flex; align-items: center; gap: 10px; margin: 0 0 18px; font-size: 13px; color: var(--label-2); }
+  .avatars { display: flex; }
+  .avatars b { width: 24px; height: 24px; border-radius: 50%; border: 2px solid var(--canvas); margin-left: -6px; display: grid; place-items: center; font-size: 10px; font-weight: 600; color: white; }
+  .avatars b:first-child { margin-left: 0; }
+  .avatars b:nth-child(1) { background: #5e5ce6; } .avatars b:nth-child(2) { background: #ff9f0a; } .avatars b:nth-child(3) { background: #30b0c7; } .avatars b:nth-child(4) { background: #8e8e93; }
+  .confirm { padding: 3px 9px; border-radius: 99px; background: var(--fill); color: var(--label); font-size: 12px; }
+  .segmented {
+    display: inline-flex; padding: 3px; border-radius: 10px; background: var(--fill); gap: 2px; margin-bottom: 26px;
+  }
+  .segmented span { padding: 4px 14px; border-radius: 7px; font-size: 13px; color: var(--label-2); }
+  .segmented span.on { background: var(--canvas); color: var(--label); box-shadow: 0 1px 3px rgba(0,0,0,0.12), 0 0 0 0.5px rgba(0,0,0,0.04); font-weight: 500; }
+  html.dark .segmented span.on { background: rgba(255,255,255,0.14); box-shadow: none; }
+  h3 { font-size: 15px; font-weight: 600; margin: 22px 0 8px; }
+  ul.sum { margin: 0; padding-left: 18px; }
+  ul.sum li { margin: 6px 0; font-size: 14px; line-height: 1.5; }
+  .task { display: flex; gap: 10px; align-items: flex-start; font-size: 14px; margin: 8px 0; }
+  .task i { width: 16px; height: 16px; border-radius: 50%; border: 1.5px solid var(--label-3); margin-top: 3px; flex: none; }
+  .keep {
+    margin-top: 32px; padding: 12px 14px; border-radius: 10px; background: var(--fill);
+    display: flex; align-items: center; gap: 12px; font-size: 13px; color: var(--label-2);
+  }
+  .keep .switch { margin-left: auto; width: 26px; height: 15px; border-radius: 99px; background: rgba(120,120,128,0.32); position: relative; }
+  .keep .switch::after { content: ""; position: absolute; top: 1px; left: 1px; width: 13px; height: 13px; border-radius: 50%; background: white; box-shadow: 0 1px 2px rgba(0,0,0,0.25); }
+  .banner {
+    margin: 0 0 22px; padding: 12px 14px; border-radius: 12px;
+    background: color-mix(in srgb, var(--accent) 8%, transparent); border: 0.5px solid color-mix(in srgb, var(--accent) 25%, transparent);
+    display: flex; align-items: center; gap: 14px; font-size: 13px;
+  }
+  .banner .txt { flex: 1; min-width: 0; }
+  .banner .txt b { display: block; font-weight: 600; }
+  .banner .txt span { color: var(--label-2); }
+  .btn { height: 28px; padding: 0 12px; border-radius: 8px; display: inline-flex; align-items: center; font-size: 13px; font-weight: 500; white-space: nowrap; }
+  .btn.primary { background: var(--accent); color: white; }
+  .btn.plain { color: var(--label-2); }
+</style>
+</head>
+<body>
+<script>if (location.search.includes('dark')) document.documentElement.classList.add('dark');</script>
+<div class="window">
+  <div class="lights"><i></i><i></i><i></i></div>
+
+  <aside class="sidebar-well"><div class="sidebar">
+    <div class="record"><span class="dot"></span>Record call<span class="spacer"></span><span class="menu">⌄</span></div>
+    <div class="group-title">Meetings</div>
+    <div class="row selected"><span class="icon">▤</span>All<span class="count">7</span></div>
+    <div class="row"><span class="icon">◔</span>In progress<span class="count">0</span></div>
+    <div class="row"><span class="icon">✓</span>Ready<span class="count">7</span></div>
+    <div class="row"><span class="icon">⚠</span>Failed<span class="count">0</span></div>
+    <div class="group-title">Tags</div>
+    <div class="row"><span class="icon">#</span>strategie</div>
+    <div class="row"><span class="icon">#</span>q4</div>
+    <div class="row bottom"><span class="icon">⚙</span>Settings</div>
+  </div></aside>
+
+  <section class="list">
+    <header><h1>Meetings</h1><div class="search">⌕ Search</div></header>
+    <div class="day">Today · Tuesday, Sep 29</div>
+    <div class="meeting selected">
+      <div class="t">Produktstrategie 90/10 <time>14:50</time></div>
+      <div class="p">Nicolai schlägt vor, 90 Prozent auf den Kern zu setzen. Jérôme prüft die Zahlen bis Freitag.</div>
+      <div class="s"><span class="pill">Call</span><span>45 min</span><span>·</span><span>4 speakers</span></div>
+    </div>
+    <div class="meeting">
+      <div class="t">Standup <time>14:06</time></div>
+      <div class="p">Kurzer Abgleich zum Release, rc.3 ist draußen, Settings-Fenster noch offen.</div>
+      <div class="s"><span class="pill">Call</span><span>12 min</span></div>
+    </div>
+    <div class="meeting">
+      <div class="t">Tuesday 10:08 <time>10:08</time></div>
+      <div class="p">No summary yet. Summaries are off until an AI service is set up.</div>
+      <div class="s"><span class="pill">In person</span><span>38 min</span></div>
+    </div>
+    <div class="day">Yesterday · Monday, Sep 28</div>
+    <div class="meeting">
+      <div class="t">Investor update prep <time>15:46</time></div>
+      <div class="p">Deck bis Donnerstag, Zahlen aus dem Q3-Report, Anna übernimmt die Grafiken.</div>
+      <div class="s"><span class="pill">Call</span><span>27 min</span><span>·</span><span>2 speakers</span></div>
+    </div>
+    <div class="meeting">
+      <div class="t">Monday 11:20 <time>11:20</time></div>
+      <div class="p">Transcript only.</div>
+      <div class="s"><span class="pill">In person</span><span>52 min</span></div>
+    </div>
+  </section>
+
+  <main class="detail">
+    <div class="toolbar">
+      <div class="glassbtn">↥ Export</div>
+      <div class="glassbtn icon">…</div>
+    </div>
+    <div class="scroll"><div class="reading">
+      <div class="banner">
+        <div class="txt"><b>Summaries are off</b><span>Choose an AI service and Steno will write a summary and tasks for every meeting. Only the transcript text is sent.</span></div>
+        <span class="btn primary">Set up summaries</span>
+        <span class="btn plain">Not now</span>
+      </div>
+      <div class="eyebrow"><span>Tuesday, Sep 29 · 14:50</span><span class="sep"></span><span>45:38</span><span class="sep"></span><span>German</span><span class="sep"></span><span>Deletes Oct 29</span></div>
+      <h2 class="title">Produktstrategie 90/10 <span class="tag">Call</span></h2>
+      <div class="speakers">
+        <div class="avatars"><b>N</b><b>J</b><b>A</b><b>?</b></div>
+        <span>Nicolai, Jérôme, Anna</span>
+        <span class="confirm">1 to confirm ⌄</span>
+        <span class="tag">#strategie</span><span class="tag">#q4</span>
+      </div>
+      <div class="segmented"><span class="on">Summary</span><span>Transcript</span><span>Tasks</span><span>Notes</span></div>
+
+      <h3>Executive summary</h3>
+      <ul class="sum">
+        <li><b>Fokus:</b> Nicolai schlägt vor, 90 Prozent der Kapazität auf den Kern zu setzen und Nebenprojekte bis Q1 zu pausieren.</li>
+        <li><b>Budget:</b> Jérôme prüft die Zahlen bis Freitag und bringt zwei Szenarien mit.</li>
+        <li><b>Team:</b> Anna übernimmt die Kommunikation an die Partner, sobald die Entscheidung steht.</li>
+      </ul>
+      <h3>Open questions</h3>
+      <ul class="sum">
+        <li><b>Zeitplan:</b> Start im Oktober oder erst im November nach dem Investor-Update?</li>
+      </ul>
+      <h3>Tasks</h3>
+      <div class="task"><i></i><span>Jérôme: Zahlen für beide Szenarien bis Freitag</span></div>
+      <div class="task"><i></i><span>Anna: Partner-Mail vorbereiten, warten auf Go</span></div>
+      <div class="keep">Recording deletes on Oct 29, 2026 <span>Keep this recording</span><span class="switch"></span></div>
+    </div></div>
+  </main>
+</div>
+</body>
+</html>

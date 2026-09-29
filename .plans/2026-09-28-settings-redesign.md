@@ -1,5 +1,10 @@
 # Steno: Settings redesign and a working update feed
 
+> Superseded in part by [`2026-09-29-macos-webview-ui.md`](2026-09-29-macos-webview-ui.md)
+> (2026-09-29): the Settings window is rebuilt as web UI in `WKWebView`. The sections, their
+> subtitles, copy, view models and the update feed decisions stand; the SwiftUI layout spec
+> (UX spec, `NavigationSplitView`, `Form(.grouped)`) does not.
+
 Status: accepted, 2026-09-28. Triggered by the owner's review of the Settings window after the
 first-run feedback round ("everything is not user-facing designed", "updates are broken").
 
