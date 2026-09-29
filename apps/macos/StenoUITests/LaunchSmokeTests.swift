@@ -138,7 +138,10 @@ final class LaunchSmokeTests: XCTestCase {
     XCTAssertTrue(record.waitForExistence(timeout: 10), "the detection prompt did not appear")
     let title = app.staticTexts["prompt-title"].firstMatch
     XCTAssertTrue(title.exists, "the prompt title is missing")
-    XCTAssertTrue(title.label.hasPrefix("Zoom"), "the title names the app: \(title.label)")
+    // A SwiftUI `Text` exposes its string as the element's value on macOS;
+    // `label` is empty.
+    let titleText = (title.value as? String) ?? title.label
+    XCTAssertTrue(titleText.hasPrefix("Zoom"), "the title names the app: \(titleText)")
     attachScreenshot(named: "prompt.png")
     record.click()
 
