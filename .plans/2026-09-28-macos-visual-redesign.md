@@ -1,6 +1,6 @@
 # Steno: macOS visual redesign
 
-Status: implemented, PRs #124, #128, #131, #130, this PR (2026-09-29). Proposed 2026-09-28,
+Status: implemented, PRs #124, #128, #131, #130, #132 (2026-09-29). Proposed 2026-09-28,
 revised after the 2026-09-28 reviews. Triggered by first-run feedback.
 
 > Superseded in part by [`2026-09-28-settings-redesign.md`](2026-09-28-settings-redesign.md):

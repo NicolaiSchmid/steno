@@ -23,7 +23,7 @@ Every plan in this note is implemented and merged, in the order below; the numbe
 | [`2026-09-28-device-change-during-recording.md`](2026-09-28-device-change-during-recording.md) | #115 (capture), #125 (auto-stop and end reasons) |
 | [`2026-09-28-app-icon.md`](2026-09-28-app-icon.md) | #122 |
 | [`2026-09-28-audio-retention-keep-forever.md`](2026-09-28-audio-retention-keep-forever.md) | #123 |
-| [`2026-09-28-macos-visual-redesign.md`](2026-09-28-macos-visual-redesign.md) | #124 (design system), #128 (window and cards), #131 (detail pane and onboarding look), #130 (menu bar), this PR (screenshots in both appearances) |
+| [`2026-09-28-macos-visual-redesign.md`](2026-09-28-macos-visual-redesign.md) | #124 (design system), #128 (window and cards), #131 (detail pane and onboarding look), #130 (menu bar), #132 (screenshots in both appearances) |
 | [`2026-09-28-floating-recording-indicator.md`](2026-09-28-floating-recording-indicator.md) | #126 |
 
 What remains are owner decisions, not work: the open questions of each plan, gathered in the
