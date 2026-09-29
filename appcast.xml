@@ -3,6 +3,17 @@
     <channel>
         <title>Steno</title>
         <item>
+            <title>0.9.0-rc.3</title>
+            <pubDate>Tue, 29 Sep 2026 10:08:35 +0200</pubDate>
+            <link>https://github.com/NicolaiSchmid/steno/releases</link>
+            <sparkle:version>419</sparkle:version>
+            <sparkle:shortVersionString>0.9.0-rc.3</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
+            <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
+            <enclosure url="https://github.com/NicolaiSchmid/steno/releases/download/v0.9.0-rc.3/Steno-0.9.0-rc.3.dmg" length="18604989" type="application/octet-stream" sparkle:edSignature="R8XnNrVWLspMkwXgMctM7Y66xpS8JaqIVz4pq3ShuLpKb37IpaiIUAob6gQmLTLPOMUnLsPDLVRbP3ZX37XuBA==" />
+            <sparkle:channel>beta</sparkle:channel>
+        </item>
+        <item>
             <title>0.9.0-rc.2</title>
             <pubDate>Tue, 29 Sep 2026 01:39:48 +0200</pubDate>
             <link>https://github.com/NicolaiSchmid/steno/releases</link>
