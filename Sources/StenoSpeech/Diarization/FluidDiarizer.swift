@@ -5,17 +5,26 @@ import StenoCore
 /// at FluidAudio's community defaults; the sample clip length is core's
 /// contract (`SampleClipPicker.targetSeconds`), not a knob.
 public struct FluidDiarizerConfig: Sendable, Equatable {
-  /// Passed to `OfflineDiarizerConfig.clustering.threshold`.
+  /// Passed to `OfflineDiarizerConfig.clustering.threshold`: a Euclidean cut
+  /// on unit embeddings, larger merges more. 0.8 instead of the community
+  /// 0.6 since the calibration on real calls
+  /// (`.plans/2026-09-29-speaker-calibration.md`): the same substantive
+  /// clusters on every call, fewer fragments for the refinement pass.
   public var clusteringThreshold: Double
   public var minSpeakers: Int?
   public var maxSpeakers: Int?
+  /// Whether `ClusterRefinement` runs after the mapping. Off only for the
+  /// sweep tool, which reports the raw clusters.
+  public var refines: Bool
 
   public init(
-    clusteringThreshold: Double = 0.6, minSpeakers: Int? = nil, maxSpeakers: Int? = nil
+    clusteringThreshold: Double = 0.8, minSpeakers: Int? = nil, maxSpeakers: Int? = nil,
+    refines: Bool = true
   ) {
     self.clusteringThreshold = clusteringThreshold
     self.minSpeakers = minSpeakers
     self.maxSpeakers = maxSpeakers
+    self.refines = refines
   }
 
   public static let `default` = FluidDiarizerConfig()
@@ -66,6 +75,24 @@ public struct FluidDiarizerConfig: Sendable, Equatable {
     }
   }
 
+  /// The pipeline capped at one speaker over a slice of speech: whatever it
+  /// hears is one voice, and the cluster embedding of that voice is the
+  /// slice's embedding. `noSpeechDetected` and audio under one embedding
+  /// window are nil.
+  private struct SingleSpeakerEmbedder: SliceEmbedder {
+    let box: OfflineDiarizerBox
+
+    func embedding(of audio: AudioBuffer16k) async throws -> Embedding? {
+      guard audio.duration >= FluidDiarizer.minimumAudioSeconds else { return nil }
+      do {
+        let (turns, chunks) = try await box.process(audio.samples)
+        return DiarizationMapping.result(turns: turns, chunks: chunks).clusters.first?.embedding
+      } catch OfflineDiarizationError.noSpeechDetected {
+        return nil
+      }
+    }
+  }
+
   /// The pyannote community-1 offline pipeline through FluidAudio's
   /// `OfflineDiarizerManager`, wrapped in an actor because the manager is
   /// not `Sendable`. Chunk embeddings are exposed so the cluster embedding
@@ -79,6 +106,10 @@ public struct FluidDiarizerConfig: Sendable, Equatable {
     let config: FluidDiarizerConfig
     private let models: ModelStore
     private var manager: OfflineDiarizerBox?
+    /// The one-speaker instance behind `ClusterRefinement`, sharing the
+    /// loaded models with `manager`.
+    private var single: OfflineDiarizerBox?
+    private var loadedModels: OfflineDiarizerModels?
 
     init(models: ModelStore, config: FluidDiarizerConfig = .default) {
       self.models = models
@@ -89,22 +120,42 @@ public struct FluidDiarizerConfig: Sendable, Equatable {
       _ = try await loaded()
     }
 
-    /// Downloads the asset when needed, then loads the models from the
-    /// framework root (`load(from:)` takes the parent of the repository
-    /// folder).
+    /// The full pipeline at `config`, built on first use.
     private func loaded() async throws -> OfflineDiarizerBox {
       if let manager { return manager }
-      try await models.ensureInstalled(.offlineDiarizer)
-      let loaded = try await OfflineDiarizerModels.load(
-        from: models.frameworkRoot(for: .offlineDiarizer))
       var fluidConfig = OfflineDiarizerConfig.default
       fluidConfig.clustering.threshold = config.clusteringThreshold
       fluidConfig.clustering.minSpeakers = config.minSpeakers
       fluidConfig.clustering.maxSpeakers = config.maxSpeakers
       fluidConfig.exposeChunkEmbeddings = true
-      let manager = OfflineDiarizerBox(config: fluidConfig, models: loaded)
+      let manager = OfflineDiarizerBox(config: fluidConfig, models: try await loadModels())
       self.manager = manager
       return manager
+    }
+
+    /// The slice embedder: the same models, the clustering forced to one
+    /// speaker (`numSpeakers` is what FluidAudio resolves min = max = 1 to).
+    private func singleSpeaker() async throws -> OfflineDiarizerBox {
+      if let single { return single }
+      var fluidConfig = OfflineDiarizerConfig.default
+      fluidConfig.clustering.minSpeakers = 1
+      fluidConfig.clustering.maxSpeakers = 1
+      fluidConfig.exposeChunkEmbeddings = true
+      let single = OfflineDiarizerBox(config: fluidConfig, models: try await loadModels())
+      self.single = single
+      return single
+    }
+
+    /// Downloads the asset when needed, then loads the models once from the
+    /// framework root (`load(from:)` takes the parent of the repository
+    /// folder).
+    private func loadModels() async throws -> OfflineDiarizerModels {
+      if let loadedModels { return loadedModels }
+      try await models.ensureInstalled(.offlineDiarizer)
+      let loaded = try await OfflineDiarizerModels.load(
+        from: models.frameworkRoot(for: .offlineDiarizer))
+      loadedModels = loaded
+      return loaded
     }
 
     /// Silence, room noise or a lane nobody spoke on is not a failed meeting:
@@ -116,12 +167,18 @@ public struct FluidDiarizerConfig: Sendable, Equatable {
         return DiarizationResult(clusters: [])
       }
       let manager = try await loaded()
+      let mapped: DiarizationResult
       do {
         let (turns, chunks) = try await manager.process(audio.samples)
-        return DiarizationMapping.result(turns: turns, chunks: chunks)
+        mapped = DiarizationMapping.result(turns: turns, chunks: chunks)
       } catch OfflineDiarizationError.noSpeechDetected {
         return DiarizationResult(clusters: [])
       }
+      guard config.refines, mapped.clusters.count > 1 else { return mapped }
+      let embedder = SingleSpeakerEmbedder(box: try await singleSpeaker())
+      let refined = try await ClusterRefinement.refine(
+        mapped.clusters, in: audio, embedder: embedder)
+      return DiarizationResult(clusters: refined)
     }
   }
 #endif

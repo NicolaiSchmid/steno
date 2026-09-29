@@ -4,10 +4,11 @@ import StenoCore
 import StenoSpeech
 
 /// `steno dev diarize-sweep <wav>... [--thresholds 0.6 0.8 1.0] [--max-speakers n]
-/// [--out report.json]`: runs the FluidAudio diarizer over 16 kHz mono WAV
-/// files at several clustering thresholds and prints, per file and
+/// [--raw] [--out report.json]`: runs the FluidAudio diarizer over 16 kHz
+/// mono WAV files at several clustering thresholds and prints, per file and
 /// threshold, the speaker count, each cluster's speech time and the
-/// cosine range between the cluster embeddings. `--out` writes the same
+/// cosine range between the cluster embeddings. `--raw` skips the
+/// refinement pass, so its effect can be read off two runs. `--out` writes the same
 /// data with every cluster embedding as JSON, so the match threshold and a
 /// merge cutoff can be calibrated on real recordings kept outside the
 /// repository (the plan's step 6 calibration, issue #34). Audio never
@@ -31,6 +32,9 @@ struct DevDiarizeSweep: AsyncParsableCommand {
 
   @Option(name: .customLong("out"), help: "Write the report with every cluster embedding as JSON.")
   var output: String?
+
+  @Flag(help: "Report the mapped clusters without the refinement pass.")
+  var raw = false
 
   @OptionGroup var models: DevModels.Options
 
@@ -72,7 +76,8 @@ struct DevDiarizeSweep: AsyncParsableCommand {
       for threshold in thresholds {
         let diarizer = try makeDiarizer(
           models: store,
-          config: FluidDiarizerConfig(clusteringThreshold: threshold, maxSpeakers: maxSpeakers))
+          config: FluidDiarizerConfig(
+            clusteringThreshold: threshold, maxSpeakers: maxSpeakers, refines: !raw))
         let started = Date()
         let result = try await diarizer.diarize(buffer)
         let wall = Date().timeIntervalSince(started)
