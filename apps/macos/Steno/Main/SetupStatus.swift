@@ -34,7 +34,7 @@ enum SummaryStatus: Equatable, Sendable {
   }
 
   /// The empty-tab row for a skipped summary; nil for `pending` and
-  /// `present`, which keep `PendingText`.
+  /// `present`, which keep `PendingText` (the states table).
   func skippedRow(for tab: MeetingDetailViewModel.Tab) -> SkippedRow? {
     switch (self, tab) {
     case (.skippedUnconfigured, .summary):

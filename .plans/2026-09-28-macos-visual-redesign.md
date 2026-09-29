@@ -696,3 +696,28 @@ Risks and checks (settled by the steps, not by the owner):
 4. Display title window: weekday for the last six days, then month and day. Jamie uses the
    calendar event title and otherwise "Meeting" plus time; if the owner prefers the
    calendar title only, `displayTitle` collapses to the stored title.
+
+## Deviations (implementation)
+
+Recorded 2026-09-29 while implementing steps 7, 7a, 8 and 11 (layout PR B1).
+
+- **Step 7a, progress row.** The header carries no `ProgressView` row 6 and the processing
+  tab body is not an `EmptyState`: [`2026-09-28-processing-progress.md`](2026-09-28-processing-progress.md)
+  D4 landed first and puts one `ProcessingCard` (stage, remaining time, the one bar) at the top
+  of every tab while the progress model has an entry, with the status chip as the header's only
+  processing signal. The states table's queued and processing rows cover the moment before the
+  model has seen the meeting. The level bars (row 6 while recording) are as specified.
+- **Step 7, display title.** The header reads `meeting.title` until step 3's
+  `Meeting.displayTitle` (PR #128) merges; the meta line therefore keeps date, time and source
+  for every meeting. Decision 13's swap is one edit in `MeetingDetailView.metaRow` once the
+  helper exists.
+- **Step 7a, `-steno-start-recording`.** Defined in `UITestScenario` on this branch in the shape
+  PR #128 uses (`startRecordingFlag`, `startsRecording`); the seed sets and the failed and
+  processing entries the smoke test was to select come with PR #128's rich seed.
+- **Step 8.** `-steno-show-onboarding` builds the preview with a `FakePermissions()` whose kinds
+  are all unknown (`AppEnvironment.preview(permissions:)`) and `OnboardingOpener` opens the window
+  in the preview under that flag alone.
+- **Step 10.** Skipped: `SpeakerReviewSheet.swift` no longer exists; the inline speaker
+  assignment replaced it.
+- **Step 11.** Nothing to change: the Settings sidebar redesign already composes from the shared
+  components, its notes are `faint` and the QR image has radius 8 and a hairline.

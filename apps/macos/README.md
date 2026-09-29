@@ -45,7 +45,10 @@ rewrites the tab goldens under `Tests/Fixtures/snapshots/macos/`, and
 
 Launch the app with `-steno-ui-testing` for the preview environment: in-memory database seeded
 with StenoCore's sample meeting, synthetic capture backend, fake engines, every permission
-granted, no Sparkle, no keychain. Add `-steno-ui-testing-hold-transcribe` to queue the sample
+granted, no Sparkle, no keychain. Add `-steno-start-recording` to start a call recording from the
+window at launch (the live row selected, the header and sidebar Stop controls showing),
+`-steno-show-onboarding` to open the onboarding window over unknown permissions, or
+`-steno-ui-testing-hold-transcribe` to queue the sample
 meeting for processing at launch over a synthetic recording, with the fake speech engine
 holding each lane for sixty seconds, so the processing card can be watched; the UI smoke test
 uses it.

@@ -6,7 +6,9 @@ import SwiftUI
 /// substituted), then the decisions. The tab never parses Markdown back;
 /// inline styling (bold names) goes through `AttributedString`. A ready
 /// meeting the pipeline summarised without an endpoint shows the
-/// `SummaryStatus` row instead, with its fix or re-run.
+/// `SummaryStatus` row instead, with its fix or re-run; any other tab
+/// without content shows the states table's row (`PendingText`), unless
+/// the progress model has an entry, when the `ProcessingCard` stands in.
 struct SummaryTab: View {
   let model: MeetingDetailViewModel
   let controller: AppController
@@ -20,37 +22,45 @@ struct SummaryTab: View {
     if sections.isEmpty, let row = model.summaryStatus.skippedRow(for: .summary) {
       SkippedSummaryState(row: row, tab: .summary, model: model, controller: controller)
     } else {
-      ScrollView {
-        VStack(alignment: .leading, spacing: Theme.Space.lg) {
-          ProcessingCardSlot(progress: progress, meeting: model.meeting)
-          if sections.isEmpty {
-            if progress == nil {
-              PendingText(
-                meeting: model.meeting, none: "No summary",
-                pending: "Summary appears after processing")
-            }
-          } else {
-            ForEach(sections, id: \.id) { section in
-              VStack(alignment: .leading, spacing: Theme.Space.sm) {
-                MarkdownBlockView(block: .heading(section.heading))
-                ForEach(Array(section.bullets.enumerated()), id: \.offset) { _, bullet in
-                  MarkdownBlockView(block: .bullet(bullet))
-                }
-              }
+      if sections.isEmpty, progress == nil {
+        PendingText(tab: .summary, model: model)
+      } else {
+        ScrollView {
+          VStack(alignment: .leading, spacing: 0) {
+            ProcessingCardSlot(progress: progress, meeting: model.meeting)
+            ForEach(Array(sections.enumerated()), id: \.element.id) { index, section in
+              SummarySectionView(
+                heading: section.heading, bullets: section.bullets,
+                isFirst: index == 0 && progress == nil)
             }
             if let decisions = model.export?.decisions, !decisions.isEmpty {
-              VStack(alignment: .leading, spacing: Theme.Space.sm) {
-                MarkdownBlockView(block: .heading("Decisions"))
-                ForEach(decisions) { decision in
-                  MarkdownBlockView(block: .bullet(decision.text))
-                }
-              }
+              SummarySectionView(
+                heading: "Decisions", bullets: decisions.map(\.text),
+                isFirst: sections.isEmpty && progress == nil)
             }
           }
+          .readingColumn()
         }
-        .readingColumn()
       }
     }
+  }
+}
+
+/// One section of the summary: the 16 pt semibold heading with 24 pt above
+/// it (none for the first), then the bullets 8 pt apart.
+struct SummarySectionView: View {
+  let heading: String
+  let bullets: [String]
+  let isFirst: Bool
+
+  var body: some View {
+    VStack(alignment: .leading, spacing: Theme.Space.sm) {
+      MarkdownBlockView(block: .heading(heading))
+      ForEach(Array(bullets.enumerated()), id: \.offset) { _, bullet in
+        MarkdownBlockView(block: .bullet(bullet))
+      }
+    }
+    .padding(.top, isFirst ? 0 : Theme.Space.xl)
   }
 }
 
@@ -104,8 +114,15 @@ enum MarkdownBlocks {
   }
 }
 
+/// A heading at 16 semibold `strong`, or a bullet: a 4 pt `faint` dot
+/// hung 8 pt from the top of 14/19 prose, so it sits on the first line's
+/// x-height instead of a glyph at the baseline.
 struct MarkdownBlockView: View {
   let block: MarkdownBlocks.Block
+
+  /// The bullet dot and where it hangs; the plan's 4 pt at 8 pt.
+  static let bulletSize: CGFloat = 4
+  static let bulletOffset: CGFloat = 8
 
   var body: some View {
     switch block {
@@ -113,12 +130,16 @@ struct MarkdownBlockView: View {
       Text(text)
         .font(.steno(Theme.TextSize.base, weight: .semibold))
         .foregroundStyle(Color.stenoStrong)
-        .padding(.top, Theme.Space.xs)
     case .bullet(let text):
-      HStack(alignment: .firstTextBaseline, spacing: Theme.Space.sm) {
-        Text("•").foregroundStyle(Color.stenoFaint)
+      HStack(alignment: .top, spacing: Theme.Space.sm) {
+        Circle()
+          .fill(Color.stenoFaint)
+          .frame(width: Self.bulletSize, height: Self.bulletSize)
+          .padding(.top, Self.bulletOffset)
+          .accessibilityHidden(true)
         Text(MarkdownBlocks.inline(text))
           .font(.steno(Theme.TextSize.sm))
+          .proseLeading()
           .foregroundStyle(Color.stenoForeground)
           .fixedSize(horizontal: false, vertical: true)
       }

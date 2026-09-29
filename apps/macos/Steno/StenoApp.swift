@@ -26,11 +26,13 @@ struct StenoApp: App {
     .defaultSize(width: 1040, height: 680)
     .commands { AppCommands(bootstrap: bootstrap) }
 
+    // No title bar: the H1 inside is the window's one title.
     Window("Welcome to Steno", id: "onboarding") {
       RootView(bootstrap: bootstrap) { controller in
         OnboardingWindowContent(controller: controller)
       }
     }
+    .windowStyle(.hiddenTitleBar)
     .windowResizability(.contentSize)
 
     MenuBarExtra {
@@ -86,7 +88,10 @@ final class AppBootstrap {
     do {
       let environment: AppEnvironment
       if Self.isUITesting {
-        environment = try await AppEnvironment.preview()
+        // Every permission unknown under `-steno-show-onboarding`, so the
+        // window opens on page 1 with its rows open.
+        environment = try await AppEnvironment.preview(
+          permissions: Self.scenario.showsOnboarding ? FakePermissions() : nil)
       } else {
         environment = try await AppEnvironment.live(updater: UpdaterController())
       }
@@ -97,6 +102,11 @@ final class AppBootstrap {
       if Self.isUITesting, Self.scenario.showPrompt {
         controller.detection.appName = { _ in "Zoom" }
         await controller.detection.handle(.microphoneOpened(bundleID: "us.zoom.xos", pid: 1))
+      }
+      if Self.isUITesting, Self.scenario.startsRecording {
+        // As the sidebar control would: the live row becomes the selection
+        // and the detail header shows its Stop control.
+        await controller.startRecordingFromWindow(mode: .call)
       }
     } catch {
       self.error = "Steno could not start: \(error)"
@@ -188,7 +198,8 @@ struct MenuBarLabel: View {
 /// Opens the onboarding window at launch when a required permission is
 /// missing or this install has not finished the two pages and is not
 /// already configured in Settings (`OnboardingViewModel.shouldOpen`); never
-/// in the preview environment.
+/// in the preview environment, except under `-steno-show-onboarding`, which
+/// opens it outright so the smoke test can read the pages.
 struct OnboardingOpener: ViewModifier {
   let controller: AppController
   @Environment(\.openWindow) private var openWindow
@@ -196,8 +207,14 @@ struct OnboardingOpener: ViewModifier {
 
   func body(content: Content) -> some View {
     content.task {
-      guard !checked, !controller.environment.isPreview else { return }
+      guard !checked else { return }
       checked = true
+      if controller.environment.isPreview {
+        if AppBootstrap.isUITesting, AppBootstrap.scenario.showsOnboarding {
+          openWindow(id: "onboarding")
+        }
+        return
+      }
       if await OnboardingViewModel.shouldOpen(
         permissions: controller.environment.permissions,
         settings: controller.environment.settings, defaults: .standard)

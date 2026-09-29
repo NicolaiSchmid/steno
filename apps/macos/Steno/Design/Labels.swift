@@ -1,4 +1,5 @@
 import Foundation
+import StenoAdapters
 import StenoCore
 
 // User-facing words for core's enums. Raw values are storage and wire
@@ -92,6 +93,15 @@ extension AudioRetention {
     case .deleteAfterProcessing:
       "Each recording is deleted as soon as it was transcribed, summarised and exported. Transcripts, summaries and exports stay."
     }
+  }
+}
+
+extension Delivery {
+  /// The destination as the footer names it. Ids are storage spellings
+  /// ("obsidian-folder") and never reach a chip; a destination this app
+  /// does not know is shown by its id, the only name it has.
+  var destinationDisplayName: String {
+    destinationID == ObsidianFolderDestination.destinationID ? "Obsidian" : destinationID
   }
 }
 

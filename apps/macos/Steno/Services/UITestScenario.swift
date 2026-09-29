@@ -7,16 +7,28 @@ struct UITestScenario: Equatable, Sendable {
   static let prefix = "-steno-"
   static let uiTestingFlag = "-steno-ui-testing"
   static let showPromptFlag = "-steno-show-prompt"
+  /// After launch, a call recording starts from the window, as the sidebar
+  /// control would start it, so the live row and the Stop controls show.
+  static let startRecordingFlag = "-steno-start-recording"
+  /// The preview's permissions are all `.unknown` and the onboarding window
+  /// opens at launch, on page 1.
+  static let showOnboardingFlag = "-steno-show-onboarding"
   /// Read by `AppEnvironment.preview()` itself (`holdTranscribeArgument`,
   /// main-actor isolated, so the literal is repeated here and a test pins
   /// the two equal); named here so it is known.
   static let holdTranscribeFlag = "-steno-ui-testing-hold-transcribe"
-  static let knownFlags: Set<String> = [uiTestingFlag, showPromptFlag, holdTranscribeFlag]
+  static let knownFlags: Set<String> = [
+    uiTestingFlag, showPromptFlag, startRecordingFlag, showOnboardingFlag, holdTranscribeFlag,
+  ]
 
   /// The preview environment: in-memory database, fakes, synthetic audio.
   var isUITesting: Bool
   /// After launch, a detection prompt for "Zoom" is shown.
   var showPrompt: Bool
+  /// A call recording starts once the controller has launched.
+  var startsRecording: Bool
+  /// The onboarding window opens at launch over unknown permissions.
+  var showsOnboarding: Bool
   /// The preview's speech engine holds each transcribe for a minute and the
   /// sample meeting is queued at launch (`AppEnvironment.preview()`).
   var holdTranscribe: Bool
@@ -27,6 +39,8 @@ struct UITestScenario: Equatable, Sendable {
     let flags = arguments.filter { $0.hasPrefix(Self.prefix) }
     isUITesting = flags.contains(Self.uiTestingFlag)
     showPrompt = flags.contains(Self.showPromptFlag)
+    startsRecording = flags.contains(Self.startRecordingFlag)
+    showsOnboarding = flags.contains(Self.showOnboardingFlag)
     holdTranscribe = flags.contains(Self.holdTranscribeFlag)
     unknownFlags = flags.filter { !Self.knownFlags.contains($0) }
   }

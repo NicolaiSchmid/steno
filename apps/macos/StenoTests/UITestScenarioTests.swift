@@ -30,6 +30,29 @@ final class UITestScenarioTests: XCTestCase {
     XCTAssertNil(hold.launchError)
   }
 
+  /// The redesign's two flags: a recording started from the window at
+  /// launch, and the onboarding window opened over unknown permissions.
+  func testTheRecordingAndOnboardingFlagsParse() {
+    let recording = UITestScenario(arguments: [
+      "Steno", "-steno-ui-testing", "-steno-start-recording",
+    ])
+    XCTAssertTrue(recording.startsRecording)
+    XCTAssertFalse(recording.showsOnboarding)
+    XCTAssertEqual(recording.unknownFlags, [])
+    XCTAssertNil(recording.launchError)
+
+    let onboarding = UITestScenario(arguments: [
+      "Steno", "-steno-ui-testing", "-steno-show-onboarding",
+    ])
+    XCTAssertTrue(onboarding.showsOnboarding)
+    XCTAssertFalse(onboarding.startsRecording)
+    XCTAssertEqual(onboarding.unknownFlags, [])
+
+    let none = UITestScenario(arguments: ["Steno", "-steno-ui-testing"])
+    XCTAssertFalse(none.startsRecording)
+    XCTAssertFalse(none.showsOnboarding)
+  }
+
   /// The flag `AppEnvironment.preview()` reads is the one the parser knows.
   @MainActor func testTheHoldTranscribeFlagIsTheEnvironmentsArgument() {
     XCTAssertEqual(UITestScenario.holdTranscribeFlag, AppEnvironment.holdTranscribeArgument)

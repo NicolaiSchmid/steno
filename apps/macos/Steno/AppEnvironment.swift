@@ -295,7 +295,9 @@ final class AppEnvironment {
   /// `uiTestingTranscribeHold` under `holdTranscribeArgument`, which also
   /// queues the seeded meeting; without `makeDiarizer` the diarizer is a
   /// `FakeDiarizer`; without `makeSummarizer` the summarizer is a
-  /// `FakeSummarizer`.
+  /// `FakeSummarizer`; without `permissions` every permission is granted
+  /// (`-steno-show-onboarding` passes a `FakePermissions()` with every kind
+  /// unknown, so the onboarding window has something to ask).
   static func preview(
     clock: any Clock<Duration> = ContinuousClock(),
     now: @escaping @Sendable () -> Date = Date.init,
@@ -306,7 +308,8 @@ final class AppEnvironment {
     makeSpeechEngine: (@Sendable () -> any SpeechEngine)? = nil,
     makeDiarizer: (@Sendable () -> any Diarizer)? = nil,
     makeSummarizer: (@Sendable () -> any MeetingSummarizer)? = nil,
-    calendar: (any CalendarProviding)? = nil
+    calendar: (any CalendarProviding)? = nil,
+    permissions: (any PermissionsChecking)? = nil
   ) async throws -> AppEnvironment {
     let root = FileManager.default.temporaryDirectory
       .appendingPathComponent("steno-preview-\(UUID().uuidString)", isDirectory: true)
@@ -379,7 +382,7 @@ final class AppEnvironment {
       sweep: RetentionSweep(store: store),
       calendar: calendar ?? FakeCalendar(),
       loginItem: FakeLoginItem(),
-      permissions: FakePermissions.allGranted(),
+      permissions: permissions ?? FakePermissions.allGranted(),
       updater: FakeUpdater(),
       clock: clock,
       now: now,

@@ -325,6 +325,84 @@ final class LaunchSmokeTests: XCTestCase {
     return Set(elements.allElementsBoundByIndex.map(\.identifier)).count
   }
 
+  /// `-steno-start-recording` starts a call recording from the window at
+  /// launch, so the live row is selected: the detail header shows the Stop
+  /// control (`header-stop`) and every content tab body is the states
+  /// table's "Recording" row (read through the title's id, since the
+  /// `EmptyState` container id is not queryable on macOS). Stop ends the
+  /// recording: the header control goes, the sidebar returns to Record
+  /// call, and the row stays.
+  func testHeaderStopEndsTheRecording() throws {
+    let app = XCUIApplication()
+    app.launchArguments = ["-steno-ui-testing", "-steno-start-recording"]
+    app.launch()
+
+    let window = app.windows.firstMatch
+    XCTAssertTrue(window.waitForExistence(timeout: 10), "no window appeared")
+    let stop = app.buttons["header-stop"].firstMatch
+    XCTAssertTrue(stop.waitForExistence(timeout: 20), "the header Stop control did not appear")
+    XCTAssertTrue(app.buttons["sidebar-stop"].firstMatch.exists, "the sidebar shows Stop too")
+    XCTAssertTrue(
+      waitUntil(timeout: 10) { meetingRowCount(in: app) == 2 },
+      "expected the fixture meeting plus the live row, got \(meetingRowCount(in: app))")
+
+    let title = app.staticTexts["empty-summary-title"].firstMatch
+    XCTAssertTrue(title.waitForExistence(timeout: 10), "the Summary tab shows no state row")
+    // A SwiftUI `Text` exposes its string as the element's value on macOS;
+    // `label` is empty.
+    XCTAssertEqual((title.value as? String) ?? title.label, "Recording")
+    XCTAssertTrue(app.buttons["tab-summary"].firstMatch.isSelected)
+    app.buttons["tab-transcript"].firstMatch.click()
+    let transcriptTitle = app.staticTexts["empty-transcript-title"].firstMatch
+    XCTAssertTrue(transcriptTitle.waitForExistence(timeout: 5), "the Transcript tab shows no row")
+    XCTAssertEqual((transcriptTitle.value as? String) ?? transcriptTitle.label, "Recording")
+    app.buttons["tab-scratchpad"].firstMatch.click()
+    XCTAssertTrue(
+      app.textViews.firstMatch.waitForExistence(timeout: 5),
+      "the scratchpad stays editable during the call")
+    attachScreenshot(named: "detail-recording.png")
+
+    stop.click()
+    XCTAssertTrue(
+      waitUntil(timeout: 10) { !app.buttons["header-stop"].firstMatch.exists },
+      "the header Stop control did not go away")
+    XCTAssertTrue(
+      app.buttons["sidebar-record"].firstMatch.waitForExistence(timeout: 10),
+      "the sidebar control did not return to Record call")
+    XCTAssertEqual(meetingRowCount(in: app), 2, "the stopped recording keeps its row")
+  }
+
+  /// `-steno-show-onboarding` builds the preview with every permission
+  /// unknown and opens the onboarding window: the step caption, the title,
+  /// the subtitle and the four page 1 rows are there (ids, not copy), and
+  /// Later moves to page 2 with its two rows and the Back and Finish pair.
+  func testOnboardingWindowShowsBothPages() throws {
+    let app = XCUIApplication()
+    app.launchArguments = ["-steno-ui-testing", "-steno-show-onboarding"]
+    app.launch()
+
+    let intro = app.staticTexts["onboarding-intro"].firstMatch
+    XCTAssertTrue(intro.waitForExistence(timeout: 20), "the onboarding window did not open")
+    XCTAssertTrue(app.staticTexts["onboarding-step"].firstMatch.exists, "no step caption")
+    XCTAssertTrue(app.staticTexts["onboarding-title"].firstMatch.exists, "no title")
+    for kind in ["microphone", "systemAudio", "calendar", "localNetwork"] {
+      XCTAssertTrue(
+        app.staticTexts["onboarding-step-\(kind)"].firstMatch.exists, "row \(kind) missing")
+    }
+    attachScreenshot(named: "onboarding-page-1.png")
+
+    let later = app.buttons["onboarding-later"].firstMatch
+    XCTAssertTrue(later.waitForExistence(timeout: 5), "Later is missing on page 1")
+    later.click()
+    XCTAssertTrue(
+      app.buttons["onboarding-finish"].firstMatch.waitForExistence(timeout: 10),
+      "Later did not reach page 2")
+    XCTAssertTrue(app.buttons["onboarding-back"].firstMatch.exists)
+    XCTAssertTrue(app.staticTexts["onboarding-setup-summaries"].firstMatch.exists)
+    XCTAssertTrue(app.staticTexts["onboarding-setup-vault"].firstMatch.exists)
+    attachScreenshot(named: "onboarding-page-2.png")
+  }
+
   /// Rows carrying a `meeting-<uuid>` identifier, and only those: the
   /// redesign's `meeting-list` container must not count. The list's cells
   /// are counted with one query when they carry the row identifier; SwiftUI

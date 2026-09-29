@@ -10,9 +10,9 @@ import StenoCore
 /// `progress` says the meeting is queued or processing, the `SummaryStatus`
 /// skipped row (title, body, footnote) for a ready meeting the pipeline
 /// summarised without an endpoint (`llmConfigured` is the setup state it
-/// keys off), and `PendingText.text` for a tab without content otherwise.
-/// The views add styling only; the snapshot test pins these lines for the
-/// fixture meeting.
+/// keys off), and the `TabPlaceholder` row (title, body) for a tab without
+/// content otherwise. The views add styling only; the snapshot test pins
+/// these lines for the fixture meeting.
 enum TabText {
   static func lines(
     _ tab: MeetingDetailViewModel.Tab, export: MeetingExport,
@@ -49,13 +49,13 @@ enum TabText {
   }
 
   /// A tab without content: the card's lines while the meeting is queued or
-  /// processing, else the `PendingText` copy.
+  /// processing, else the states table's row for the meeting's state.
   private static func pending(
-    _ export: MeetingExport, progress: ProcessingProgressModel.Entry?, elapsed: Duration,
-    none: String, pending: String
+    _ tab: MeetingDetailViewModel.Tab, _ export: MeetingExport,
+    progress: ProcessingProgressModel.Entry?, elapsed: Duration
   ) -> [String] {
     if let progress { return ProcessingPresentation.lines(entry: progress, elapsed: elapsed) }
-    return [PendingText.text(meeting: export.meeting, none: none, pending: pending)]
+    return TabPlaceholder(tab: tab, state: export.meeting.state).lines
   }
 
   private static func summary(
@@ -67,9 +67,7 @@ enum TabText {
       if let skipped = skippedLines(.summary, export: export, llmConfigured: llmConfigured) {
         return skipped
       }
-      return pending(
-        export, progress: progress, elapsed: elapsed, none: "No summary",
-        pending: "Summary appears after processing")
+      return pending(.summary, export, progress: progress, elapsed: elapsed)
     }
     var lines = card(progress, elapsed: elapsed)
     lines += sections.flatMap { section in
@@ -94,9 +92,7 @@ enum TabText {
   ) -> [String] {
     let turns = TranscriptTurns.group(export.segments)
     guard !turns.isEmpty else {
-      return pending(
-        export, progress: progress, elapsed: elapsed, none: "No transcript",
-        pending: "Transcript appears after processing")
+      return pending(.transcript, export, progress: progress, elapsed: elapsed)
     }
     let rows: [String] = turns.flatMap { turn in
       let name = turn.speakerID.map(export.displayName(forSpeaker:)) ?? "Unknown"
@@ -113,9 +109,7 @@ enum TabText {
       if let skipped = skippedLines(.tasks, export: export, llmConfigured: llmConfigured) {
         return skipped
       }
-      return pending(
-        export, progress: progress, elapsed: elapsed, none: "No tasks",
-        pending: "Tasks appear after processing")
+      return pending(.tasks, export, progress: progress, elapsed: elapsed)
     }
     let rows: [String] = export.tasks.flatMap { task in
       var meta: [String] = []

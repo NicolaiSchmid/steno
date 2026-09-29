@@ -91,7 +91,8 @@ enum ProcessingPresentation {
 
 /// The card above a tab's content while the meeting is queued or
 /// processing, nothing otherwise: the four tabs share this one branch and
-/// keep only their own `PendingText` guard.
+/// keep only their own `PendingText` guard (the states table row a tab
+/// without content shows when the model has no entry).
 struct ProcessingCardSlot: View {
   let progress: ProcessingProgressModel.Entry?
   let meeting: Meeting?
