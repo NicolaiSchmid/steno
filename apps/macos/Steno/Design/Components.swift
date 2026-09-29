@@ -258,7 +258,7 @@ extension StatusChip {
   /// How a `MeetingState` reads in the list, the header and the queue.
   init(_ state: MeetingState) {
     switch state {
-    case .recording: self.init(text: "Recording", color: Color.stenoLiveBright)
+    case .recording: self.init(text: "Recording", color: Color.stenoDestructive)
     case .queued: self.init(text: "Queued", color: Color.stenoInfo)
     case .processing: self.init(text: "Processing", color: Color.stenoInfo)
     case .ready: self.init(text: "Ready", color: Color.stenoLive)
