@@ -291,5 +291,6 @@ import Testing
     #expect(config.minSpeakers == nil && config.maxSpeakers == nil)
     #expect(config.refines)
     #expect(config == FluidDiarizerConfig(clusteringThreshold: 0.8))
+    #expect(config != FluidDiarizerConfig(refines: false), "equality carries refines")
   }
 }

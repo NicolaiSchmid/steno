@@ -152,4 +152,135 @@ private func cluster(
     #expect(joined.samples.prefix(seconds(2)).allSatisfy { $0 == 1 })
     #expect(joined.samples.suffix(seconds(4)).allSatisfy { $0 == 2 })
   }
+
+  /// The plan's constants: 30 s to count as a speaker, 180 s embedded at
+  /// most, merge at 0.60, absorb at 0.30. Without this a drifted default
+  /// would pass every relative test above and still change real results.
+  @Test func rulesDefaultToThePlanConstants() {
+    let rules = ClusterRefinement.Rules.default
+    #expect(rules.minimumSeconds == 30 && rules.maximumEmbedSeconds == 180)
+    #expect(rules.mergeThreshold == 0.60 && rules.absorbThreshold == 0.30)
+  }
+
+  /// Exactly thirty seconds of speech is a speaker; a hair under is not.
+  /// With `>` in place of `>=` both clusters would be small, nothing would
+  /// be substantive and the pair would come back untouched.
+  @Test func thirtySecondsOfSpeechIsTheSubstantiveCut() async throws {
+    let anna: [ClosedRange<TimeInterval>] = [0...30]
+    let ben: [ClosedRange<TimeInterval>] = [40...69.9]
+    let buffer = audio([(1, anna[0]), (2, ben[0])], duration: 80)
+    let refined = try await ClusterRefinement.refine(
+      [cluster("Speaker 1", anna, axis: 1), cluster("Speaker 2", ben, axis: 2)],
+      in: buffer, embedder: FakeSliceEmbedder())
+    #expect(refined.count == 1)
+    #expect(refined.first?.ranges == anna, "Ben's 29.9 s sound like nobody and are dropped")
+  }
+
+  /// When the bigger half of a merge is the later cluster, `joined` keeps
+  /// its label and clip, so the pass must hand labels out again: the union
+  /// opens the recording and is "Speaker 1", the other voice moves up to
+  /// "Speaker 2".
+  @Test func labelsAreReassignedWhenAMergeKeepsTheLaterLabel() async throws {
+    let opening: [ClosedRange<TimeInterval>] = [0...35]
+    let other: [ClosedRange<TimeInterval>] = [40...100]
+    let main: [ClosedRange<TimeInterval>] = [110...200]
+    let buffer = audio([(1, opening[0]), (2, other[0]), (1, main[0])], duration: 210)
+    let refined = try await ClusterRefinement.refine(
+      [
+        cluster("Speaker 1", opening, axis: 1), cluster("Speaker 2", other, axis: 2),
+        cluster("Speaker 3", main, axis: 3),
+      ],
+      in: buffer, embedder: FakeSliceEmbedder())
+    #expect(refined.map(\.label) == ["Speaker 1", "Speaker 2"])
+    #expect(refined[0].ranges == [0...35, 110...200])
+    #expect(refined[0].sampleClipRange == main[0], "the clip follows the bigger half")
+    #expect(refined[1].ranges == other)
+  }
+
+  /// A small cluster joins the substantive cluster with the highest cosine,
+  /// not the first one over the absorb cut: a ten-second aside that is
+  /// mostly Ben with a little Anna (0.83 to Ben, 0.55 to Anna) ends up with
+  /// Ben.
+  @Test func aSmallClusterJoinsTheClosestSpeakerNotTheFirstOverTheCut() async throws {
+    let anna: [ClosedRange<TimeInterval>] = [0...60]
+    let ben: [ClosedRange<TimeInterval>] = [70...130]
+    let aside: [ClosedRange<TimeInterval>] = [140...150]
+    let buffer = audio(
+      [(1, anna[0]), (2, ben[0]), (1, 140...144), (2, 144...150)], duration: 160)
+    let refined = try await ClusterRefinement.refine(
+      [
+        cluster("Speaker 1", anna, axis: 1), cluster("Speaker 2", ben, axis: 2),
+        cluster("Speaker 3", aside, axis: 3),
+      ],
+      in: buffer, embedder: FakeSliceEmbedder())
+    #expect(refined.map(\.label) == ["Speaker 1", "Speaker 2"])
+    #expect(refined[0].ranges == anna)
+    #expect(refined[1].ranges == [70...130, 140...150])
+  }
+
+  /// The union of two merged clusters can embed to nothing (the one-speaker
+  /// pipeline hears no speech in it); the merged cluster then keeps the
+  /// embedding of the side with more speech instead of losing it.
+  @Test func aUnionThatEmbedsToNothingKeepsTheLargerSidesEmbedding() async throws {
+    let big = cluster("Speaker 1", [0...90], axis: 4)
+    var small = cluster("Speaker 2", [100...140], axis: 4)
+    small.embedding?.values[5] = 1  // cosine 0.71 to `big`, over the merge cut
+    let embedder = FakeSliceEmbedder()
+    let refined = try await ClusterRefinement.refine(
+      [big, small], in: audio([], duration: 150), embedder: embedder)
+    #expect(refined.count == 1)
+    #expect(refined.first?.label == "Speaker 1")
+    #expect(refined.first?.ranges == [0...90, 100...140])
+    #expect(refined.first?.embedding == big.embedding)
+    // Both clusters and the union were offered to the embedder.
+    #expect(await embedder.seen.count == 3)
+  }
+
+  /// A substantive cluster that came without an embedding and whose speech
+  /// the embedder hears nothing in stays a speaker of its own: the merge
+  /// and the absorb skip it, nothing drops it.
+  @Test func aSubstantiveClusterWithoutAnEmbeddingSurvivesOnItsOwn() async throws {
+    let anna: [ClosedRange<TimeInterval>] = [0...60]
+    let silent: [ClosedRange<TimeInterval>] = [70...110]
+    let buffer = audio([(1, anna[0])], duration: 120)
+    let refined = try await ClusterRefinement.refine(
+      [
+        cluster("Speaker 1", anna, axis: 1),
+        SpeakerCluster(label: "Speaker 2", ranges: silent, clusterConfidence: 0.5),
+      ],
+      in: buffer, embedder: FakeSliceEmbedder())
+    #expect(refined.map(\.label) == ["Speaker 1", "Speaker 2"])
+    #expect(refined[1].ranges == silent)
+    #expect(refined[1].embedding == nil)
+  }
+
+  /// With no substantive cluster carrying an embedding there is nothing to
+  /// compare a small cluster against, so it is dropped rather than attached
+  /// to an arbitrary speaker.
+  @Test func smallClustersAreDroppedWhenNoSpeakerHasAnEmbedding() async throws {
+    let silent: [ClosedRange<TimeInterval>] = [0...40]
+    let aside: [ClosedRange<TimeInterval>] = [50...60]
+    let buffer = audio([(2, aside[0])], duration: 70)
+    let refined = try await ClusterRefinement.refine(
+      [
+        SpeakerCluster(label: "Speaker 1", ranges: silent, clusterConfidence: 1),
+        cluster("Speaker 2", aside, axis: 2),
+      ],
+      in: buffer, embedder: FakeSliceEmbedder())
+    #expect(refined.count == 1)
+    #expect(refined.first?.ranges == silent)
+    #expect(refined.first?.embedding == nil)
+  }
+
+  /// Ranges past the end of the lane (a mapping a little longer than the
+  /// audio) yield no samples, and a slice without samples is never offered
+  /// to the embedder; the cluster keeps the embedding it came with.
+  @Test func rangesBeyondTheBufferAreNotEmbedded() async throws {
+    let clusters = [cluster("Speaker 1", [100...140], axis: 1)]
+    let embedder = FakeSliceEmbedder()
+    let refined = try await ClusterRefinement.refine(
+      clusters, in: audio([], duration: 50), embedder: embedder)
+    #expect(refined == clusters)
+    #expect(await embedder.seen.isEmpty)
+  }
 }
