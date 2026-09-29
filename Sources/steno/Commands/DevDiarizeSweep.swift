@@ -44,7 +44,8 @@ struct DevDiarizeSweep: AsyncParsableCommand {
       var label: String
       var seconds: Double
       var confidence: Float
-      var embedding: [Float]?
+      /// Encodes as the flat array of values.
+      var embedding: Embedding?
     }
 
     var file: String
@@ -69,7 +70,7 @@ struct DevDiarizeSweep: AsyncParsableCommand {
     for file in files {
       let url = URL(fileURLWithPath: file)
       let buffer = try WAVAudioDecoder.read(url)
-      let name = url.deletingLastPathComponent().lastPathComponent + "/" + url.lastPathComponent
+      let name = url.pathComponents.suffix(2).joined(separator: "/")
       print("## \(name) (\(Self.minutes(buffer.duration)))")
       print("| threshold | speakers | minutes per cluster | cosine between clusters |")
       print("|---|---|---|---|")
@@ -86,7 +87,7 @@ struct DevDiarizeSweep: AsyncParsableCommand {
             label: cluster.label,
             seconds: cluster.ranges.reduce(0) { $0 + $1.upperBound - $1.lowerBound },
             confidence: cluster.clusterConfidence,
-            embedding: cluster.embedding?.values)
+            embedding: cluster.embedding)
         }
         .sorted { $0.seconds > $1.seconds }
         runs.append(
@@ -114,17 +115,11 @@ struct DevDiarizeSweep: AsyncParsableCommand {
   /// "min – max" cosine over every pair of cluster embeddings; "–" for fewer
   /// than two.
   static func cosineRange(_ clusters: [Run.Cluster]) -> String {
-    let embeddings = clusters.compactMap { $0.embedding.map(Embedding.init) }
-    var low = Float.greatestFiniteMagnitude
-    var high = -Float.greatestFiniteMagnitude
-    for (index, lhs) in embeddings.enumerated() {
-      for rhs in embeddings[(index + 1)...] {
-        let cosine = lhs.cosineSimilarity(to: rhs)
-        low = min(low, cosine)
-        high = max(high, cosine)
-      }
+    let embeddings = clusters.compactMap(\.embedding)
+    let cosines = embeddings.indices.flatMap { lhs in
+      embeddings[(lhs + 1)...].map { embeddings[lhs].cosineSimilarity(to: $0) }
     }
-    guard embeddings.count > 1 else { return "–" }
+    guard let low = cosines.min(), let high = cosines.max() else { return "–" }
     return String(format: "%.2f – %.2f", low, high)
   }
 }

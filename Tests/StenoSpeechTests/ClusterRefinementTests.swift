@@ -15,7 +15,6 @@ private actor FakeSliceEmbedder: SliceEmbedder {
 
   func embedding(of audio: AudioBuffer16k) async throws -> Embedding? {
     seen.append(audio.duration)
-    guard !audio.samples.isEmpty else { return nil }
     var values = [Float](repeating: 0, count: Embedding.dimension)
     for sample in audio.samples where sample > 0 {
       values[Int(sample)] += 1

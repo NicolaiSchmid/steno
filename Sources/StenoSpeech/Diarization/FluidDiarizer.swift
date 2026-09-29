@@ -55,11 +55,11 @@ public struct FluidDiarizerConfig: Sendable, Equatable {
       manager.initialize(models: models)
     }
 
-    /// Runs the pipeline and copies the framework result field for field
-    /// into the module's own turns and chunks, so no FluidAudio type appears
-    /// in a signature; every decision about them lives in `DiarizationMapping`.
-    func process(_ samples: [Float]) async throws -> (turns: [SpeakerTurn], chunks: [ClusterChunk])
-    {
+    /// Runs the pipeline, copies the framework result field for field into
+    /// the module's own turns and chunks and hands them to
+    /// `DiarizationMapping`, so no FluidAudio type appears in a signature
+    /// and every decision about them lives there.
+    func process(_ samples: [Float]) async throws -> DiarizationResult {
       let result = try await manager.process(audio: samples)
       let turns = result.segments.map {
         SpeakerTurn(
@@ -71,25 +71,7 @@ public struct FluidDiarizerConfig: Sendable, Equatable {
           speakerLabel: $0.speakerId, start: $0.startTimeSeconds, end: $0.endTimeSeconds,
           embedding: $0.embedding256)
       }
-      return (turns, chunks)
-    }
-  }
-
-  /// The pipeline capped at one speaker over a slice of speech: whatever it
-  /// hears is one voice, and the cluster embedding of that voice is the
-  /// slice's embedding. `noSpeechDetected` and audio under one embedding
-  /// window are nil.
-  private struct SingleSpeakerEmbedder: SliceEmbedder {
-    let box: OfflineDiarizerBox
-
-    func embedding(of audio: AudioBuffer16k) async throws -> Embedding? {
-      guard audio.duration >= FluidDiarizer.minimumAudioSeconds else { return nil }
-      do {
-        let (turns, chunks) = try await box.process(audio.samples)
-        return DiarizationMapping.result(turns: turns, chunks: chunks).clusters.first?.embedding
-      } catch OfflineDiarizationError.noSpeechDetected {
-        return nil
-      }
+      return DiarizationMapping.result(turns: turns, chunks: chunks)
     }
   }
 
@@ -123,27 +105,51 @@ public struct FluidDiarizerConfig: Sendable, Equatable {
     /// The full pipeline at `config`, built on first use.
     private func loaded() async throws -> OfflineDiarizerBox {
       if let manager { return manager }
-      var fluidConfig = OfflineDiarizerConfig.default
-      fluidConfig.clustering.threshold = config.clusteringThreshold
-      fluidConfig.clustering.minSpeakers = config.minSpeakers
-      fluidConfig.clustering.maxSpeakers = config.maxSpeakers
-      fluidConfig.exposeChunkEmbeddings = true
-      let manager = OfflineDiarizerBox(config: fluidConfig, models: try await loadModels())
+      let manager = try await makeBox(
+        threshold: config.clusteringThreshold, minSpeakers: config.minSpeakers,
+        maxSpeakers: config.maxSpeakers)
       self.manager = manager
       return manager
     }
 
-    /// The slice embedder: the same models, the clustering forced to one
-    /// speaker (`numSpeakers` is what FluidAudio resolves min = max = 1 to).
+    /// The pipeline behind the slice embedder: the same models, the
+    /// clustering forced to one speaker (`numSpeakers` is what FluidAudio
+    /// resolves min = max = 1 to), the threshold at the community default.
     private func singleSpeaker() async throws -> OfflineDiarizerBox {
       if let single { return single }
-      var fluidConfig = OfflineDiarizerConfig.default
-      fluidConfig.clustering.minSpeakers = 1
-      fluidConfig.clustering.maxSpeakers = 1
-      fluidConfig.exposeChunkEmbeddings = true
-      let single = OfflineDiarizerBox(config: fluidConfig, models: try await loadModels())
+      let single = try await makeBox(threshold: nil, minSpeakers: 1, maxSpeakers: 1)
       self.single = single
       return single
+    }
+
+    /// FluidAudio's defaults with the clustering knobs set and the chunk
+    /// embeddings exposed, over the shared models.
+    private func makeBox(threshold: Double?, minSpeakers: Int?, maxSpeakers: Int?)
+      async throws -> OfflineDiarizerBox
+    {
+      var fluidConfig = OfflineDiarizerConfig.default
+      if let threshold { fluidConfig.clustering.threshold = threshold }
+      fluidConfig.clustering.minSpeakers = minSpeakers
+      fluidConfig.clustering.maxSpeakers = maxSpeakers
+      fluidConfig.exposeChunkEmbeddings = true
+      return OfflineDiarizerBox(config: fluidConfig, models: try await loadModels())
+    }
+
+    /// The pipeline capped at one speaker over a slice of speech: whatever it
+    /// hears is one voice, and the cluster embedding of that voice is the
+    /// slice's embedding. `noSpeechDetected` and audio under one embedding
+    /// window are nil.
+    private struct SingleSpeakerEmbedder: SliceEmbedder {
+      let box: OfflineDiarizerBox
+
+      func embedding(of audio: AudioBuffer16k) async throws -> Embedding? {
+        guard audio.duration >= FluidDiarizer.minimumAudioSeconds else { return nil }
+        do {
+          return try await box.process(audio.samples).clusters.first?.embedding
+        } catch OfflineDiarizationError.noSpeechDetected {
+          return nil
+        }
+      }
     }
 
     /// Downloads the asset when needed, then loads the models once from the
@@ -169,8 +175,7 @@ public struct FluidDiarizerConfig: Sendable, Equatable {
       let manager = try await loaded()
       let mapped: DiarizationResult
       do {
-        let (turns, chunks) = try await manager.process(audio.samples)
-        mapped = DiarizationMapping.result(turns: turns, chunks: chunks)
+        mapped = try await manager.process(audio.samples)
       } catch OfflineDiarizationError.noSpeechDetected {
         return DiarizationResult(clusters: [])
       }

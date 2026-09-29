@@ -48,9 +48,7 @@ enum ClusterRefinement {
     let small = clusters.filter { speechSeconds($0) < rules.minimumSeconds }
 
     for index in substantive.indices {
-      if let embedding = try await embed(substantive[index].ranges, in: audio, rules, embedder) {
-        substantive[index].embedding = embedding
-      }
+      substantive[index] = try await reembedded(substantive[index], in: audio, rules, embedder)
     }
 
     // Greedy merge, highest cosine first. Each merge re-embeds the union, so
@@ -58,23 +56,14 @@ enum ClusterRefinement {
     while substantive.count > 1, let pair = closestPair(substantive),
       pair.cosine >= rules.mergeThreshold
     {
-      let (keep, drop) = pair.lhs >= pair.rhs ? (pair.rhs, pair.lhs) : (pair.lhs, pair.rhs)
-      var merged = joined(substantive[keep], substantive[drop])
-      if let embedding = try await embed(merged.ranges, in: audio, rules, embedder) {
-        merged.embedding = embedding
-      }
-      substantive[keep] = merged
-      substantive.remove(at: drop)
+      let merged = joined(substantive[pair.lhs], substantive[pair.rhs])
+      substantive[pair.lhs] = try await reembedded(merged, in: audio, rules, embedder)
+      substantive.remove(at: pair.rhs)
     }
 
     for cluster in small {
-      let embedding =
-        try await embed(cluster.ranges, in: audio, rules, embedder) ?? cluster.embedding
-      guard let embedding else { continue }
-      let scored = substantive.indices.map { index -> (index: Int, cosine: Float) in
-        (index, substantive[index].embedding?.cosineSimilarity(to: embedding) ?? -1)
-      }
-      guard let best = scored.max(by: { $0.cosine < $1.cosine }),
+      let embedding = try await reembedded(cluster, in: audio, rules, embedder).embedding
+      guard let embedding, let best = closest(to: embedding, in: substantive),
         best.cosine >= rules.absorbThreshold
       else {
         continue
@@ -96,7 +85,7 @@ enum ClusterRefinement {
       }
   }
 
-  static func speechSeconds(_ cluster: SpeakerCluster) -> TimeInterval {
+  private static func speechSeconds(_ cluster: SpeakerCluster) -> TimeInterval {
     cluster.ranges.reduce(0) { $0 + $1.upperBound - $1.lowerBound }
   }
 
@@ -104,16 +93,19 @@ enum ClusterRefinement {
     cluster.ranges.map(\.lowerBound).min() ?? .greatestFiniteMagnitude
   }
 
-  /// The cluster's speech, ranges in time order, concatenated up to
-  /// `rules.maximumEmbedSeconds`, then embedded. nil when there is no audio
-  /// or the embedder hears no speech.
-  private static func embed(
-    _ ranges: [ClosedRange<TimeInterval>], in audio: AudioBuffer16k, _ rules: Rules,
+  /// `cluster` with the embedding of its own speech: ranges in time order,
+  /// concatenated up to `rules.maximumEmbedSeconds`, embedded as one voice.
+  /// Unchanged when there is no audio or the embedder hears no speech.
+  private static func reembedded(
+    _ cluster: SpeakerCluster, in audio: AudioBuffer16k, _ rules: Rules,
     _ embedder: any SliceEmbedder
-  ) async throws -> Embedding? {
-    let speech = concatenated(ranges, in: audio, cap: rules.maximumEmbedSeconds)
-    guard !speech.samples.isEmpty else { return nil }
-    return try await embedder.embedding(of: speech)
+  ) async throws -> SpeakerCluster {
+    var cluster = cluster
+    let speech = concatenated(cluster.ranges, in: audio, cap: rules.maximumEmbedSeconds)
+    if !speech.samples.isEmpty, let embedding = try await embedder.embedding(of: speech) {
+      cluster.embedding = embedding
+    }
+    return cluster
   }
 
   /// The samples under `ranges`, sorted and clipped to the buffer, joined
@@ -133,6 +125,8 @@ enum ClusterRefinement {
     return AudioBuffer16k(samples: samples)
   }
 
+  /// The two clusters whose embeddings have the highest cosine, `lhs` before
+  /// `rhs`; nil when fewer than two carry an embedding.
   private static func closestPair(_ clusters: [SpeakerCluster])
     -> (lhs: Int, rhs: Int, cosine: Float)?
   {
@@ -142,10 +136,22 @@ enum ClusterRefinement {
       for rhs in clusters.indices where rhs > lhs {
         guard let right = clusters[rhs].embedding else { continue }
         let cosine = left.cosineSimilarity(to: right)
-        if best == nil || cosine > best!.cosine { best = (lhs, rhs, cosine) }
+        if cosine > (best?.cosine ?? -.infinity) { best = (lhs, rhs, cosine) }
       }
     }
     return best
+  }
+
+  /// The cluster whose embedding is closest to `embedding`, with the cosine;
+  /// nil when none carries an embedding.
+  private static func closest(to embedding: Embedding, in clusters: [SpeakerCluster])
+    -> (index: Int, cosine: Float)?
+  {
+    let scored = clusters.indices.compactMap { index -> (index: Int, cosine: Float)? in
+      guard let candidate = clusters[index].embedding else { return nil }
+      return (index, candidate.cosineSimilarity(to: embedding))
+    }
+    return scored.max { $0.cosine < $1.cosine }
   }
 
   /// One cluster from two: ranges joined, the label, clip and confidence of
