@@ -69,7 +69,7 @@
 <body>
 <script>
   const q = new URLSearchParams(location.search);
-  if (q.has('dark')) document.documentElement.classList.add('dark');
+  if (q.has('dark')) { document.documentElement.classList.add('dark'); document.documentElement.style.colorScheme = 'dark'; }
   document.documentElement.dataset.tab = q.get('tab') || 'summary';
 </script>
 <div class="measure">
