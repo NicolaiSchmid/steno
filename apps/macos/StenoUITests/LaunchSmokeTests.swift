@@ -592,10 +592,12 @@ final class LaunchSmokeTests: XCTestCase {
   /// page 2; Settings on the Recording section (the plan's "Audio", named
   /// Recording since the settings redesign), opened from the nav column's
   /// Settings row with the section deep-linked by `-steno-settings-section`.
-  /// Each state waits on the ids the other tests rely on and asserts nothing
-  /// else; the numeric review is a reading of the attachments. 960 x 600
-  /// fits the runner's 1024 x 768 display, as does the 760 x 520 Settings
-  /// window over it.
+  /// Each state waits on the ids the other tests rely on; the Settings state
+  /// also checks that the header and the sidebar row land inside the
+  /// Settings window, since a split view that overflows its window still has
+  /// both in the hierarchy. The numeric review is a reading of the
+  /// attachments. 960 x 600 fits the runner's 1024 x 768 display, as does
+  /// the 760 x 520 Settings window over it.
   private func captureScreenshotMatrix(appearance: String) {
     /// Launches under the matrix flags plus `arguments`.
     func launched(_ arguments: [String]) -> XCUIApplication {
@@ -682,13 +684,28 @@ final class LaunchSmokeTests: XCTestCase {
       let settings = app.buttons["nav-settings"].firstMatch
       XCTAssertTrue(settings.waitForExistence(timeout: 10), "the nav Settings row is missing")
       settings.click()
+      let header = app.descendants(matching: .any)["settings-header-recording"].firstMatch
+      XCTAssertTrue(header.waitForExistence(timeout: 10), "Settings did not open on Recording")
+      let row = app.descendants(matching: .any)["settings-recording"].firstMatch
+      XCTAssertTrue(row.exists, "the Recording sidebar row is missing")
+
+      // Existence is not enough: on macOS 26 a flexible detail column made
+      // the split view as tall as the screen is wide, so both columns hung
+      // above the window with every id still in the hierarchy
+      // (`SettingsView` fixes the detail's height for that). The header is
+      // checked to lie inside the window; the row only to overlap it, since
+      // the rows' accessibility frames sit off the rendered rows.
+      let window = app.windows.containing(.any, identifier: "settings-header-recording")
+        .firstMatch
       XCTAssertTrue(
-        app.descendants(matching: .any)["settings-header-recording"].firstMatch
-          .waitForExistence(timeout: 10),
-        "Settings did not open on Recording")
+        waitUntil(timeout: 5) { abs(window.frame.width - 760) < 1 },
+        "the Settings window is \(window.frame.width) wide, not 760")
       XCTAssertTrue(
-        app.descendants(matching: .any)["settings-recording"].firstMatch.exists,
-        "the Recording sidebar row is missing")
+        window.frame.contains(header.frame),
+        "the Recording header \(header.frame) lies outside the Settings window \(window.frame)")
+      XCTAssertTrue(
+        window.frame.intersects(row.frame),
+        "the Recording sidebar row \(row.frame) lies outside the Settings window \(window.frame)")
     }
   }
 
