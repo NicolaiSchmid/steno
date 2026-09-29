@@ -1,4 +1,5 @@
 import StenoAudio
+import StenoCore
 import SwiftUI
 
 /// The menu bar item's window: record controls, the processing queue,
@@ -37,7 +38,7 @@ struct MenuBarView: View {
       Divider().overlay(Color.stenoBorder)
       footer
     }
-    .padding(Theme.Space.md)
+    .padding(Theme.Space.lg)
     .frame(width: 320)
     .background(Color.stenoPopover)
     .onAppear { model.refreshLoginItem() }
@@ -64,15 +65,26 @@ struct MenuBarView: View {
       HStack(spacing: Theme.Space.sm) {
         switch recorder.recording {
         case .idle:
-          Button(presentation.label) { Task { await recorder.start(mode: .call) } }
-            .buttonStyle(StenoPrimaryButtonStyle())
-            .disabled(!presentation.isEnabled)
-            .accessibilityIdentifier("record-call")
+          Button {
+            Task { await recorder.start(mode: .call) }
+          } label: {
+            HStack(spacing: Theme.Space.sm) {
+              Image(systemName: "record.circle")
+                .font(.system(size: Theme.TextSize.sm.size, weight: .medium))
+                .accessibilityHidden(true)
+              Text(presentation.label)
+            }
+          }
+          .buttonStyle(StenoPrimaryButtonStyle())
+          .disabled(!presentation.isEnabled)
+          .accessibilityIdentifier("record-call")
           Button("Record in person") { Task { await recorder.start(mode: .inPerson) } }
             .buttonStyle(StenoSecondaryButtonStyle())
             .disabled(!presentation.offersInPerson)
             .accessibilityIdentifier("record-in-person")
         case .recording(let since):
+          // The same destructive treatment as the sidebar control: `raised`
+          // surface with a hairline, the `destructive` dot and label.
           Button {
             Task { await recorder.stop() }
           } label: {
@@ -96,15 +108,17 @@ struct MenuBarView: View {
   }
 
   private var queueSection: some View {
-    VStack(alignment: .leading, spacing: Theme.Space.sm) {
+    VStack(alignment: .leading, spacing: Theme.Space.xs) {
       SectionLabel(text: "Processing")
-      ForEach(model.queue) { item in
-        Button {
-          open(meeting: item.meeting.id)
-        } label: {
-          queueRow(item)
+        .padding(.horizontal, Theme.Space.sm)
+      VStack(spacing: Theme.Space.xxs) {
+        ForEach(model.queue) { item in
+          PopoverRow {
+            open(meeting: item.meeting.id)
+          } content: {
+            queueRow(item)
+          }
         }
-        .buttonStyle(.plain)
       }
     }
   }
@@ -156,21 +170,15 @@ struct MenuBarView: View {
   private var recentSection: some View {
     VStack(alignment: .leading, spacing: Theme.Space.xs) {
       SectionLabel(text: "Recent")
-      ForEach(model.recent) { meeting in
-        Button {
-          open(meeting: meeting.id)
-        } label: {
-          HStack {
-            Text(meeting.title)
-              .font(.steno(Theme.TextSize.xs))
-              .foregroundStyle(Color.stenoForeground)
-              .lineLimit(1)
-            Spacer()
-            StatusChip(meeting.state)
+        .padding(.horizontal, Theme.Space.sm)
+      VStack(spacing: Theme.Space.xxs) {
+        ForEach(model.recent) { meeting in
+          PopoverRow {
+            open(meeting: meeting.id)
+          } content: {
+            RecentLine(title: meeting.title, state: meeting.state)
           }
-          .padding(.vertical, 2)
         }
-        .buttonStyle(.plain)
       }
     }
   }
@@ -204,9 +212,7 @@ struct MenuBarView: View {
         Spacer()
         Button("Quit") { NSApp.terminate(nil) }
       }
-      .buttonStyle(.plain)
-      .font(.steno(Theme.TextSize.xs))
-      .foregroundStyle(Color.stenoMutedForeground)
+      .buttonStyle(StenoGhostButtonStyle(tint: Color.stenoMutedForeground))
     }
   }
 
@@ -216,3 +222,89 @@ struct MenuBarView: View {
     NSApp.activate()
   }
 }
+
+/// A queue or recent row in the popover: padding 6 x 8, radius 6, the
+/// `card` veil while hovered, the whole row hittable. The row owns no
+/// content of its own; the caller passes the action and the line.
+private struct PopoverRow<Content: View>: View {
+  let action: () -> Void
+  let content: () -> Content
+  @State private var hovering = false
+  @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+  init(action: @escaping () -> Void, @ViewBuilder content: @escaping () -> Content) {
+    self.action = action
+    self.content = content
+  }
+
+  var body: some View {
+    Button(action: action) {
+      content()
+        .modifier(PopoverRowBox(fill: hovering ? Color.stenoCard : Color.clear))
+    }
+    .buttonStyle(.plain)
+    .onHover { hovering = $0 }
+    .animation(Motion.swap(reduceMotion: reduceMotion), value: hovering)
+  }
+}
+
+/// The row's box, separate from the hover state so the preview can render
+/// the hovered veil statically.
+private struct PopoverRowBox: ViewModifier {
+  let fill: Color
+
+  func body(content: Content) -> some View {
+    content
+      .padding(.vertical, Theme.Control.menuRowInset)
+      .padding(.horizontal, Theme.Space.sm)
+      .frame(maxWidth: .infinity, alignment: .leading)
+      .background(Theme.Radius.sm.shape.fill(fill))
+      .contentShape(Theme.Radius.sm.shape)
+  }
+}
+
+/// A recent meeting's line: the title, one line, and its state chip.
+private struct RecentLine: View {
+  let title: String
+  let state: MeetingState
+
+  var body: some View {
+    HStack(spacing: Theme.Space.sm) {
+      Text(title)
+        .font(.steno(Theme.TextSize.xs))
+        .foregroundStyle(Color.stenoForeground)
+        .lineLimit(1)
+      Spacer()
+      StatusChip(state)
+    }
+  }
+}
+
+#if DEBUG
+  /// The recent rows without a controller: one at rest, one rendered with
+  /// the hover veil, since a preview cannot hold the pointer.
+  private struct PopoverRowsPreview: View {
+    var body: some View {
+      VStack(alignment: .leading, spacing: Theme.Space.xs) {
+        SectionLabel(text: "Recent")
+          .padding(.horizontal, Theme.Space.sm)
+        VStack(spacing: Theme.Space.xxs) {
+          PopoverRow {
+          } content: {
+            RecentLine(title: "Produktstrategie 90/10", state: .ready)
+          }
+          RecentLine(title: "Weekly sync", state: .failed(reason: "Timed out"))
+            .modifier(PopoverRowBox(fill: Color.stenoCard))
+        }
+      }
+      .padding(Theme.Space.lg)
+      .frame(width: 320)
+      .background(Color.stenoPopover)
+    }
+  }
+
+  #Preview("Popover rows") {
+    PreviewPair { PopoverRowsPreview() }
+      .frame(width: 800, height: 200)
+  }
+#endif
