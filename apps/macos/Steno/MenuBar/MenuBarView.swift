@@ -108,16 +108,12 @@ struct MenuBarView: View {
   }
 
   private var queueSection: some View {
-    VStack(alignment: .leading, spacing: Theme.Space.xs) {
-      SectionLabel(text: "Processing")
-        .padding(.horizontal, Theme.Space.sm)
-      VStack(spacing: Theme.Space.xxs) {
-        ForEach(model.queue) { item in
-          PopoverRow {
-            open(meeting: item.meeting.id)
-          } content: {
-            queueRow(item)
-          }
+    PopoverSection(title: "Processing") {
+      ForEach(model.queue) { item in
+        PopoverRow {
+          open(meeting: item.meeting.id)
+        } content: {
+          queueRow(item)
         }
       }
     }
@@ -168,16 +164,12 @@ struct MenuBarView: View {
   }
 
   private var recentSection: some View {
-    VStack(alignment: .leading, spacing: Theme.Space.xs) {
-      SectionLabel(text: "Recent")
-        .padding(.horizontal, Theme.Space.sm)
-      VStack(spacing: Theme.Space.xxs) {
-        ForEach(model.recent) { meeting in
-          PopoverRow {
-            open(meeting: meeting.id)
-          } content: {
-            RecentLine(title: meeting.title, state: meeting.state)
-          }
+    PopoverSection(title: "Recent") {
+      ForEach(model.recent) { meeting in
+        PopoverRow {
+          open(meeting: meeting.id)
+        } content: {
+          RecentLine(title: meeting.title, state: meeting.state)
         }
       }
     }
@@ -223,19 +215,29 @@ struct MenuBarView: View {
   }
 }
 
+/// A section of the popover: the label, inset to the rows' horizontal
+/// padding, over the rows at 2 pt.
+private struct PopoverSection<Rows: View>: View {
+  let title: String
+  @ViewBuilder var rows: () -> Rows
+
+  var body: some View {
+    VStack(alignment: .leading, spacing: Theme.Space.xs) {
+      SectionLabel(text: title)
+        .padding(.horizontal, Theme.Space.sm)
+      VStack(spacing: Theme.Space.xxs, content: rows)
+    }
+  }
+}
+
 /// A queue or recent row in the popover: padding 6 x 8, radius 6, the
 /// `card` veil while hovered, the whole row hittable. The row owns no
 /// content of its own; the caller passes the action and the line.
 private struct PopoverRow<Content: View>: View {
   let action: () -> Void
-  let content: () -> Content
+  @ViewBuilder var content: () -> Content
   @State private var hovering = false
   @Environment(\.accessibilityReduceMotion) private var reduceMotion
-
-  init(action: @escaping () -> Void, @ViewBuilder content: @escaping () -> Content) {
-    self.action = action
-    self.content = content
-  }
 
   var body: some View {
     Button(action: action) {
@@ -285,17 +287,13 @@ private struct RecentLine: View {
   /// the hover veil, since a preview cannot hold the pointer.
   private struct PopoverRowsPreview: View {
     var body: some View {
-      VStack(alignment: .leading, spacing: Theme.Space.xs) {
-        SectionLabel(text: "Recent")
-          .padding(.horizontal, Theme.Space.sm)
-        VStack(spacing: Theme.Space.xxs) {
-          PopoverRow {
-          } content: {
-            RecentLine(title: "Produktstrategie 90/10", state: .ready)
-          }
-          RecentLine(title: "Weekly sync", state: .failed(reason: "Timed out"))
-            .modifier(PopoverRowBox(fill: Color.stenoCard))
+      PopoverSection(title: "Recent") {
+        PopoverRow {
+        } content: {
+          RecentLine(title: "Produktstrategie 90/10", state: .ready)
         }
+        RecentLine(title: "Weekly sync", state: .failed(reason: "Timed out"))
+          .modifier(PopoverRowBox(fill: Color.stenoCard))
       }
       .padding(Theme.Space.lg)
       .frame(width: 320)
