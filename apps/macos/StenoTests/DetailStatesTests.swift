@@ -1,7 +1,5 @@
-import AppKit
 import StenoAdapters
 import StenoCore
-import SwiftUI
 import XCTest
 
 /// The pure state mapping behind the detail pane: the states table row a
@@ -99,30 +97,5 @@ final class DetailStatesTests: XCTestCase {
       meetingID: SampleData.meetingID, destinationID: "notion", status: .pending)
     XCTAssertEqual(
       unknown.destinationDisplayName, "notion", "an unknown destination has only its id")
-  }
-}
-
-/// `EmptyState` answers the minimum-size probe with a real width. The body
-/// wraps at a fixed 280 pt, not a maximum: under `fixedSize(vertical:)` a
-/// `maxWidth` answers a zero-width proposal with one character per line, a
-/// split view's detail column inherits that minimum, and on the hosted
-/// runner's 1024 x 768 display the main window grew past the screen and the
-/// smoke test failed. Hosted in AppKit, as the window hosts it.
-@MainActor
-final class EmptyStateLayoutTests: XCTestCase {
-  func testEmptyStateHasAFiniteMinimumWidth() {
-    let row = TabPlaceholder(tab: .summary, state: .recording)
-    let view = EmptyState(
-      symbol: row.symbol, title: row.title, body: row.body, id: "empty-summary")
-    let fitting = NSHostingView(rootView: view).fittingSize
-    XCTAssertTrue(fitting.width.isFinite && fitting.height.isFinite, "\(fitting)")
-    XCTAssertGreaterThanOrEqual(fitting.width, EmptyState.bodyWidth)
-
-    // The probe a split view sends: zero width, unbounded height.
-    let probe = NSHostingController(rootView: view)
-      .sizeThatFits(in: NSSize(width: 0, height: 10_000))
-    XCTAssertGreaterThanOrEqual(
-      probe.width, EmptyState.bodyWidth, "a zero-width proposal must not wrap per character")
-    XCTAssertLessThan(probe.height, 400, "the body wrapped per character: \(probe)")
   }
 }

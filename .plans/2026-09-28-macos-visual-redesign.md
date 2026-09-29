@@ -751,6 +751,12 @@ Recorded 2026-09-29 while implementing steps 7, 7a, 8 and 11 (layout PR B1).
 - **Step 7a, scratchpad hint.** The hint under the editor during a recording is the tab's own
   "Saved with the meeting and exported into the folder note." (`scratchpad-hint`), the same line
   in every state; there is no recording-specific hint.
+- **Step 7a, `EmptyState` minimum width.** The body wraps at a fixed 280 pt so the minimum-size
+  probe has a real width (a `maxWidth` under `fixedSize(vertical:)` answers it with one character
+  per line, the split view inherits that, and the window outgrew the hosted runner's 1024 x 768
+  display). No unit test pins it: `StenoTests` is deliberately unhosted (`project.yml`), and
+  hosting the view in an `NSHostingView` there spawns a second `NSApplication` and kills the
+  runner. The UI smoke run on that display is the proof; the README names the budget.
 - **Step 8.** `-steno-show-onboarding` builds the preview with a `FakePermissions()` whose kinds
   are all unknown (`AppEnvironment.preview(permissions:)`) and `OnboardingOpener` opens the window
   in the preview under that flag alone.

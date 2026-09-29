@@ -46,8 +46,10 @@ struct EmptyState: View {
   /// control box. Fixed, not a maximum: with `fixedSize(vertical:)` a
   /// `maxWidth` answers the minimum-size probe (width 0) with one character
   /// per line, and in a split view's detail column that minimum becomes the
-  /// window's, which then grows past the screen (the hosted runner's 1024 x
-  /// 768 display is the budget; `EmptyStateLayoutTests` pins the minimum).
+  /// window's, which then grows past the screen. The hosted runner's 1024 x
+  /// 768 display is the budget and the UI smoke run there is the proof: the
+  /// unit bundle is unhosted, so an `NSHostingView` test would spawn a second
+  /// `NSApplication` and take the runner down.
   static let bodyWidth: CGFloat = 280
 
   init(
