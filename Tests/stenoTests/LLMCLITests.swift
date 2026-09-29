@@ -147,4 +147,41 @@ import Testing
     #expect(badURL.status == 1)
     #expect(badURL.stderr.contains("--base-url is not a URL"))
   }
+
+  /// `--codex <model>` picks the Codex client by provider, not by URL: with
+  /// endpoint flags on the same command line the stub sees nothing. With
+  /// an empty `CODEX_HOME` the probe fails on the missing sign-in before
+  /// any request, opens no database, and an API-key-only `auth.json` is
+  /// told apart without the key reaching the output.
+  @Test func codexFlagPicksTheCodexClientAndFailsWithoutASignIn() async throws {
+    let home = try Fixtures.temporaryDirectory("steno-llm-home")
+    defer { try? FileManager.default.removeItem(at: home) }
+    let codexHome = home.appendingPathComponent("codex", isDirectory: true)
+    try FileManager.default.createDirectory(at: codexHome, withIntermediateDirectories: true)
+    let server = try StubChatServer()
+    defer { server.stop() }
+    let endpoint = ["--base-url", server.baseURL.absoluteString, "--model", "stub-model"]
+    let environment = ["CODEX_HOME": codexHome.path, "STENO_LLM_API_KEY": "sk-cli-secret"]
+
+    let missing = try CLITests.run(
+      ["dev", "llm", "probe", "--codex", "gpt-5.6-terra"] + endpoint, home: home,
+      environment: environment)
+    #expect(missing.status == 2)
+    #expect(missing.stderr.contains("probe failed: No Codex sign-in found"))
+    #expect(missing.stderr.contains("codex login"))
+    #expect(server.requests.isEmpty, "the endpoint flags do not win over --codex")
+    #expect(
+      !FileManager.default.fileExists(atPath: home.appendingPathComponent("steno.sqlite").path))
+
+    try Data(#"{"OPENAI_API_KEY":"sk-codex-key","tokens":null}"#.utf8)
+      .write(to: codexHome.appendingPathComponent("auth.json"))
+    let apiKey = try CLITests.run(
+      ["dev", "llm", "probe", "--codex", "gpt-5.6-terra", "--json"], home: home,
+      environment: environment)
+    #expect(apiKey.status == 2)
+    #expect(apiKey.stderr.contains("signed in with an API key, not a ChatGPT account"))
+    #expect(!apiKey.stderr.contains("sk-codex-key"))
+    #expect(!apiKey.stdout.contains("sk-codex-key"))
+    #expect(server.requests.isEmpty)
+  }
 }

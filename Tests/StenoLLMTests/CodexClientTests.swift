@@ -181,6 +181,22 @@ final class CodexHarness: Sendable {
     #expect(body.hasPrefix("ChatGPT plan limit reached"))
     #expect(error?.isRetryable == false)
     #expect(harness.backend.requests.count == 1)
+    #expect(harness.clock.pendingSleepers == 0, "the Retry-After of an hour is not waited on")
+    #expect(
+      harness.events.filter { if case .retrying = $0 { return true } else { return false } }.isEmpty
+    )
+    // The other spelling of the plan limit, on a 402-style status, is the same.
+    harness.backend.enqueue(
+      .json(
+        ChatErrorEnvelope(
+          error: .init(message: "Not included in your plan.", type: "usage_not_included")),
+        status: 403))
+    let notIncluded = await #expect(throws: LLMError.self) {
+      try await harness.client.complete(ClientHarness.request())
+    }
+    #expect(
+      notIncluded
+        == .http(status: 403, body: "ChatGPT plan limit reached: Not included in your plan."))
   }
 
   @Test func anOrdinaryRateLimitBacksOff() async throws {
@@ -246,7 +262,6 @@ final class CodexHarness: Sendable {
     defer { harness.stop() }
     harness.backend.respond { request in
       if request.method == "GET", request.path.hasPrefix("/v1/models") {
-        #expect(request.path.contains("client_version=99.0.0"))
         return Scripts.codexModels([
           CodexModel(slug: "gpt-a", displayName: "A", contextWindow: 272_000),
           CodexModel(slug: "gpt-b", displayName: "B", visibility: "hide"),
@@ -257,6 +272,13 @@ final class CodexHarness: Sendable {
     let models = try await harness.client.listModels()
     #expect(models.map(\.slug) == ["gpt-a", "gpt-b"])
     #expect(models.filter(\.isListed).map(\.slug) == ["gpt-a"])
+    let listed = try #require(harness.backend.requests.first)
+    #expect(listed.path == "/v1/models?client_version=99.0.0")
+    #expect(listed.purpose == "models")
+    #expect(listed.headers["accept"] == "application/json")
+    #expect(listed.headers["originator"] == "steno")
+    #expect(listed.headers["chatgpt-account-id"] == "acct_stored")
+    #expect(listed.authorization == "Bearer \(CodexHome.accessToken(expiresIn: 3_600))")
     let probe = try await harness.client.probe()
     #expect(probe.modelListed == true)
     #expect(probe.resolvedMode == .jsonSchema)
@@ -296,5 +318,292 @@ final class CodexHarness: Sendable {
     settings.llmProvider = .endpoint
     #expect(LLMEndpoint(settings: settings)?.model == "local")
     #expect(LLMEndpoint(settings: settings)?.isCodexBackend == false)
+  }
+
+  @Test func cancellationMidRequestRethrowsAfterExactlyOneRequest() async throws {
+    let harness = try CodexHarness()
+    defer { harness.stop() }
+    harness.backend.enqueue(.hang)
+    let task = Task { try await harness.client.complete(ClientHarness.request()) }
+    await harness.backend.received(atLeast: 1)
+    task.cancel()
+    await #expect(throws: CancellationError.self) { try await task.value }
+    #expect(harness.backend.requests.count == 1)
+    #expect(harness.home.server.requests.isEmpty, "a cancelled call refreshes nothing")
+    #expect(harness.clock.pendingSleepers == 0)
+  }
+
+  /// 5xx and 408 back off on the clock with the policy's doubling delays
+  /// and the same sign-in each time; `.none` throws the first failure;
+  /// the default policy gives up after three attempts.
+  @Test func serverErrorsRetryWithBackoffUnlessThePolicySaysOtherwise() async throws {
+    let harness = try CodexHarness()
+    defer { harness.stop() }
+    harness.backend.enqueue(
+      Scripts.serverError(503), Scripts.serverError(408), Scripts.responsesStream("ok"))
+    let driver = harness.driveRetries()
+    defer { driver.cancel() }
+    let response = try await harness.client.complete(ClientHarness.request(format: .text))
+    #expect(response.text == "ok")
+    #expect(harness.backend.requests.count == 3)
+    let failed = "The server had an error"
+    #expect(
+      harness.events.contains(
+        .retrying(after: .seconds(2), attempt: 1, reason: .http(status: 503, body: failed))))
+    #expect(
+      harness.events.contains(
+        .retrying(after: .seconds(4), attempt: 2, reason: .http(status: 408, body: failed))))
+    #expect(Set(harness.backend.requests.compactMap(\.authorization)).count == 1)
+    #expect(harness.home.server.requests.isEmpty, "a server error is not a sign-in problem")
+
+    let once = try CodexHarness(retry: .none)
+    defer { once.stop() }
+    once.backend.enqueue(Scripts.serverError(502))
+    let error = await #expect(throws: LLMError.self) {
+      try await once.client.complete(ClientHarness.request(format: .text))
+    }
+    #expect(error == .http(status: 502, body: failed))
+    #expect(once.backend.requests.count == 1)
+    #expect(once.clock.pendingSleepers == 0)
+
+    let exhausted = try CodexHarness()
+    defer { exhausted.stop() }
+    exhausted.backend.enqueue(
+      Scripts.serverError(500), Scripts.serverError(500), Scripts.serverError(500),
+      Scripts.responsesStream("never reached"))
+    let exhaustedDriver = exhausted.driveRetries()
+    defer { exhaustedDriver.cancel() }
+    let last = await #expect(throws: LLMError.self) {
+      try await exhausted.client.complete(ClientHarness.request(format: .text))
+    }
+    #expect(last == .http(status: 500, body: failed))
+    #expect(exhausted.backend.requests.count == 3)
+  }
+
+  /// Only a 400 that names the structured output request downgrades the
+  /// mode: a 400 about anything else is the answer; a format complaint on a
+  /// plain-text request has nothing to downgrade; `.promptOnly` is the floor.
+  @Test func aFourHundredThatDoesNotNameTheFormatIsNotDowngraded() async throws {
+    let harness = try CodexHarness()
+    defer { harness.stop() }
+    harness.backend.enqueue(Scripts.badRequest("The model `gpt-stub` does not exist"))
+    let schema = ClientHarness.request(
+      format: .jsonSchema(name: "r", schema: ["type": "object"], strict: true))
+    let unknownModel = await #expect(throws: LLMError.self) {
+      try await harness.client.complete(schema)
+    }
+    #expect(unknownModel == .http(status: 400, body: "The model `gpt-stub` does not exist"))
+    #expect(await harness.client.resolvedMode == .jsonSchema)
+    #expect(harness.backend.requests.count == 1)
+
+    harness.backend.enqueue(Scripts.badRequest("Invalid value for text.format"))
+    let plain = await #expect(throws: LLMError.self) {
+      try await harness.client.complete(ClientHarness.request(format: .text))
+    }
+    #expect(plain == .http(status: 400, body: "Invalid value for text.format"))
+    #expect(await harness.client.resolvedMode == .jsonSchema)
+    #expect(harness.backend.requests.count == 2)
+    #expect(harness.clock.pendingSleepers == 0)
+
+    let floor = try CodexHarness { $0.structuredOutputMode = .promptOnly }
+    defer { floor.stop() }
+    floor.backend.enqueue(Scripts.badRequest("text.format is not supported"))
+    let last = await #expect(throws: LLMError.self) { try await floor.client.complete(schema) }
+    #expect(last == .http(status: 400, body: "text.format is not supported"))
+    #expect(floor.backend.requests.count == 1)
+    #expect(floor.backend.requests.first?.responses?.text == nil)
+    #expect(await floor.client.resolvedMode == .promptOnly)
+  }
+
+  /// The downgrade runs the whole ladder within one call and the learned
+  /// mode sticks for the next request, whatever format it asks for.
+  @Test func theDowngradeRunsToPromptOnlyAndSticks() async throws {
+    let harness = try CodexHarness()
+    defer { harness.stop() }
+    harness.backend.respond { request in
+      request.responses?.text != nil
+        ? Scripts.badRequest("text.format is not supported by this model")
+        : Scripts.responsesStream("{}")
+    }
+    _ = try await harness.client.complete(
+      ClientHarness.request(
+        format: .jsonSchema(name: "r", schema: ["type": "object"], strict: true)))
+    #expect(
+      harness.backend.requests.map { $0.responses?.text?.format.type } == [
+        "json_schema", "json_object", nil,
+      ])
+    #expect(await harness.client.resolvedMode == .promptOnly)
+    #expect(harness.events.contains(.modeDowngraded(to: .jsonObject)))
+    #expect(harness.events.contains(.modeDowngraded(to: .promptOnly)))
+    #expect(harness.clock.pendingSleepers == 0, "a downgrade is a resend, not a retry")
+
+    _ = try await harness.client.complete(ClientHarness.request(format: .jsonObject))
+    #expect(harness.backend.requests.count == 4)
+    #expect(harness.backend.requests.last?.responses?.text == nil)
+  }
+
+  /// `text.format` follows the request and the resolved mode: `json_object`
+  /// requests never carry a schema, a schema request under `.jsonObject`
+  /// mode is sent as `json_object`, and `.promptOnly` sends no `text`.
+  @Test func textFormatFollowsTheRequestAndTheMode() async throws {
+    typealias Client = CodexResponsesClient
+    let schema = LLMResponseFormat.jsonSchema(name: "r", schema: ["type": "object"], strict: false)
+    #expect(
+      Client.textFormat(for: schema, mode: .jsonSchema)
+        == .jsonSchema(name: "r", schema: ["type": "object"], strict: false))
+    #expect(Client.textFormat(for: schema, mode: .jsonObject) == .jsonObject)
+    #expect(Client.textFormat(for: schema, mode: .promptOnly) == nil)
+    #expect(Client.textFormat(for: .jsonObject, mode: .jsonSchema) == .jsonObject)
+    #expect(Client.textFormat(for: .jsonObject, mode: .jsonObject) == .jsonObject)
+    #expect(Client.textFormat(for: .jsonObject, mode: .promptOnly) == nil)
+    for mode in StructuredOutputMode.allCases {
+      #expect(Client.textFormat(for: .text, mode: mode) == nil, "\(mode)")
+    }
+
+    let harness = try CodexHarness()
+    defer { harness.stop() }
+    harness.backend.enqueue(Scripts.responsesStream("{}"))
+    _ = try await harness.client.complete(ClientHarness.request(format: .jsonObject))
+    let recorded = try #require(harness.backend.requests.first)
+    #expect(recorded.responses?.text?.format == .jsonObject)
+    let raw = String(decoding: recorded.body, as: UTF8.self)
+    #expect(!raw.contains("schema"))
+    #expect(!raw.contains("strict"))
+    #expect(recorded.responses?.reasoning?.effort == "medium")
+  }
+
+  /// A model list that answers does not make the backend usable: the probe
+  /// completion's own failure is thrown, whether a status, a failed stream
+  /// or a missing sign-in. And a model list that fails is tolerated when the
+  /// completion works.
+  @Test func probeThrowsWhenTheCompletionFailsAndToleratesAFailedModelList() async throws {
+    let harness = try CodexHarness(retry: .none)
+    defer { harness.stop() }
+    let models = Scripts.codexModels([CodexModel(slug: "gpt-stub", displayName: "Stub")])
+    harness.backend.respond { request in
+      request.method == "GET"
+        ? models
+        : .json(
+          ChatErrorEnvelope(error: .init(message: "model `gpt-stub` does not exist")),
+          status: 404)
+    }
+    let notFound = await #expect(throws: LLMError.self) { try await harness.client.probe() }
+    #expect(notFound == .http(status: 404, body: "model `gpt-stub` does not exist"))
+    #expect(harness.backend.requests.count == 2)
+
+    harness.backend.respond { request in
+      request.method == "GET" ? models : Scripts.responsesFailed("boom")
+    }
+    let failed = await #expect(throws: LLMError.self) { try await harness.client.probe() }
+    #expect(failed == .transport("boom"))
+    #expect(harness.backend.requests.count == 4)
+
+    harness.backend.respond { request in
+      request.method == "GET" ? Scripts.unauthorized() : Scripts.responsesStream("{\"ok\":true}")
+    }
+    let probe = try await harness.client.probe()
+    #expect(probe.modelListed == nil)
+    #expect(probe.accountLine == "nicolai@example.com (Plus)")
+    #expect(harness.backend.requests.count == 6)
+
+    harness.backend.respond { request in
+      request.method == "GET" ? Scripts.rawCompletion("<html>") : Scripts.responsesStream("{}")
+    }
+    let undecodable = await #expect(throws: LLMError.self) {
+      try await harness.client.listModels()
+    }
+    #expect(undecodable == .transport("undecodable model list: <html>"))
+
+    try FileManager.default.removeItem(at: harness.home.file)
+    await #expect(throws: CodexCredentialError.notSignedIn) { try await harness.client.probe() }
+    #expect(harness.backend.requests.count == 7, "no request without a sign-in")
+    #expect(harness.clock.pendingSleepers == 0)
+  }
+
+  /// A stream that ends in an `error` event and a connection the backend
+  /// closes early are transport errors, and neither names a secret.
+  @Test func streamErrorsAndDroppedConnectionsAreRedactedTransportErrors() async throws {
+    let harness = try CodexHarness(retry: .none)
+    defer { harness.stop() }
+    let token = CodexHome.accessToken(expiresIn: 3_600)
+    harness.backend.enqueue(
+      Scripts.responsesErrorEvent("upstream rejected \(token) for acct_stored"))
+    let error = await #expect(throws: LLMError.self) {
+      try await harness.client.complete(ClientHarness.request(format: .text))
+    }
+    #expect(error == .transport("upstream rejected [redacted] for [redacted]"))
+    #expect(error?.isRetryable == true)
+
+    harness.backend.enqueue(.drop)
+    let dropped = await #expect(throws: LLMError.self) {
+      try await harness.client.complete(ClientHarness.request(format: .text))
+    }
+    guard case .transport(let message)? = dropped else {
+      Issue.record("expected a transport error, got \(String(describing: dropped))")
+      return
+    }
+    #expect(!message.contains(token))
+    #expect(!message.contains("acct_stored"))
+    for event in harness.events {
+      #expect(!String(describing: event).contains(token), "\(event)")
+      #expect(!String(describing: event).contains("acct_stored"), "\(event)")
+    }
+  }
+
+  /// The client reads what the backend sends whether the events are named
+  /// or carry their `type` in the JSON, and a backend that answers with the
+  /// whole response object as JSON is understood too.
+  @Test func dataOnlyStreamsAndPlainJSONRepliesAreParsed() async throws {
+    let harness = try CodexHarness(retry: .none)
+    defer { harness.stop() }
+    harness.backend.enqueue(
+      Scripts.rawEventStream(
+        "data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"typed\"}]}}\n\n"
+          + "data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"usage\":{\"input_tokens\":1,\"output_tokens\":2}}}\n\n"
+      ))
+    let typed = try await harness.client.complete(ClientHarness.request(format: .text))
+    #expect(typed.text == "typed")
+    #expect(typed.usage == LLMUsage(promptTokens: 1, completionTokens: 2, requests: 1))
+
+    harness.backend.enqueue(
+      .json(
+        ResponsesResponse(
+          id: "resp_1", status: "incomplete", model: "gpt-json",
+          output: [
+            ResponsesOutputItem(
+              type: "message", role: "assistant",
+              content: [.init(type: "output_text", text: "whole")])
+          ],
+          usage: .init(inputTokens: 5, outputTokens: 6),
+          incompleteDetails: .init(reason: "max_output_tokens"))))
+    let whole = try await harness.client.complete(ClientHarness.request(format: .text))
+    #expect(whole.text == "whole")
+    #expect(whole.finishReason == .length)
+    #expect(whole.model == "gpt-json")
+
+    harness.backend.enqueue(Scripts.rawCompletion("<html>not an API</html>"))
+    let undecodable = await #expect(throws: LLMError.self) {
+      try await harness.client.complete(ClientHarness.request(format: .text))
+    }
+    #expect(undecodable == .transport("undecodable response body: <html>not an API</html>"))
+    #expect(harness.clock.pendingSleepers == 0)
+  }
+
+  @Test func settingsClampTheCodexContextAndRejectAnEmptyModel() throws {
+    var settings = Settings()
+    settings.llmProvider = .codex
+    settings.codexConfirmedAt = Date()
+    settings.codexModel = ""
+    #expect(LLMEndpoint(settings: settings) == nil)
+    settings.codexModel = "gpt-5.6-terra"
+    settings.codexContextTokens = 10
+    let endpoint = try #require(LLMEndpoint(settings: settings))
+    #expect(endpoint.contextTokens == 1_024)
+    settings.codexContextTokens = 272_000
+    #expect(LLMEndpoint(settings: settings)?.contextTokens == 272_000)
+    #expect(LLMEndpoint(settings: settings)?.maxConcurrentRequests == 2)
+    #expect(LLMEndpoint(settings: settings)?.requestTimeout == .seconds(240))
+    #expect(LLMEndpoint(settings: settings)?.structuredOutputMode == .jsonSchema)
+    #expect(LLMEndpoint.codex(model: "m", contextTokens: 0).contextTokens == 1_024)
   }
 }

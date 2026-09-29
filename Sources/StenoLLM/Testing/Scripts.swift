@@ -251,6 +251,29 @@ extension Scripts {
     ])
   }
 
+  /// A stream that ends in a top-level `error` event with `message`, the
+  /// shape the backend uses for a failure that has no response object.
+  public static func responsesErrorEvent(_ message: String, code: String = "server_error")
+    -> StubResponse
+  {
+    eventStream([
+      (
+        "response.created",
+        ResponsesStreamEvent(
+          type: "response.created",
+          response: ResponsesResponse(id: "resp_stub", status: "in_progress"))
+      ),
+      ("error", ResponsesStreamEvent(type: "error", code: code, message: message)),
+    ])
+  }
+
+  /// A `text/event-stream` body written verbatim, for shapes the typed
+  /// events cannot produce (data-only events, `[DONE]`, unknown names).
+  public static func rawEventStream(_ body: String) -> StubResponse {
+    StubResponse(
+      status: 200, headers: ["Content-Type": "text/event-stream"], body: Data(body.utf8))
+  }
+
   /// A stream cut before its terminal event.
   public static func responsesTruncatedStream() -> StubResponse {
     eventStream([
@@ -295,11 +318,14 @@ extension Scripts {
     .json(CodexModelList(models: models))
   }
 
-  /// A refreshed token triple from the OAuth token endpoint.
-  public static func tokenRefresh(access: String, refresh: String, id: String? = nil)
+  /// A refreshed token triple from the OAuth token endpoint. Every field is
+  /// optional there; nil for `refresh` plays an endpoint that did not rotate
+  /// the refresh token.
+  public static func tokenRefresh(access: String, refresh: String? = nil, id: String? = nil)
     -> StubResponse
   {
-    var body: [String: String] = ["access_token": access, "refresh_token": refresh]
+    var body: [String: String] = ["access_token": access]
+    if let refresh { body["refresh_token"] = refresh }
     if let id { body["id_token"] = id }
     return .json(body)
   }

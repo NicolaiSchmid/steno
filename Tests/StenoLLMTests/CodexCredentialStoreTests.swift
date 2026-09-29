@@ -264,11 +264,206 @@ final class CodexHome: Sendable {
     }
   }
 
-  @Test func defaultHomeHonoursCodexHome() {
+  @Test func defaultHomeHonoursCodexHome() async {
     #expect(
       CodexCredentialStore.defaultHome(environment: ["CODEX_HOME": "/tmp/elsewhere"]).path
         == "/tmp/elsewhere")
     #expect(CodexCredentialStore.defaultHome(environment: [:]).lastPathComponent == ".codex")
+    // A trailing slash, as a shell export often has, does not double up;
+    // an empty override is no override.
+    let slashed = CodexCredentialStore.defaultHome(environment: ["CODEX_HOME": "/tmp/elsewhere/"])
+    #expect(await CodexCredentialStore(home: slashed).fileURL.path == "/tmp/elsewhere/auth.json")
+    #expect(
+      CodexCredentialStore.defaultHome(environment: ["CODEX_HOME": ""]).lastPathComponent
+        == ".codex")
+  }
+
+  /// Older CLI files have no `auth_mode`; tokens alone mean a ChatGPT login.
+  @Test func aFileWithoutAuthModeIsAChatGPTLogin() async throws {
+    let home = try CodexHome()
+    defer { home.stop() }
+    try home.write(authMode: nil)
+    let credentials = try await home.store().status()
+    #expect(credentials.accountID == "acct_stored")
+    #expect(credentials.email == "nicolai@example.com")
+    // The mode is compared without regard to case.
+    try home.write(authMode: "ChatGPT")
+    #expect(try await home.store().status().accountID == "acct_stored")
+  }
+
+  @Test func missingOrEmptyTokensAndNoAccountIDAreMalformed() async throws {
+    let home = try CodexHome()
+    defer { home.stop() }
+    try home.write(id: nil, accountID: nil)
+    await #expect(throws: CodexCredentialError.malformed("no account id")) {
+      try await home.store().status()
+    }
+    // An id token without the account claim is as good as none, and an
+    // empty stored id does not shadow the claim.
+    try home.write(
+      id: JWTClaims.unsignedToken(payload: .object(["email": .string("a@b.c")])), accountID: nil)
+    await #expect(throws: CodexCredentialError.malformed("no account id")) {
+      try await home.store().status()
+    }
+    try home.write(accountID: "")
+    #expect(try await home.store().status().accountID == "acct_jwt")
+    try home.write(access: "")
+    await #expect(throws: CodexCredentialError.malformed("no access token")) {
+      try await home.store().status()
+    }
+    try home.write(refresh: "")
+    await #expect(throws: CodexCredentialError.malformed("no refresh token")) {
+      try await home.store().status()
+    }
+    // An access token that is not a JWT still works: no expiry, no plan.
+    try home.write(access: "opaque-token")
+    let opaque = try await home.store().status()
+    #expect(opaque.expiresAt == nil)
+    #expect(opaque.planType == "plus", "from the id token")
+    #expect(try await home.store().current() == opaque, "never refreshed by expiry")
+    #expect(home.server.requests.isEmpty)
+  }
+
+  /// `needsRefresh` at its edges: no `last_refresh` (a file the CLI wrote
+  /// at login and never refreshed) is not stale; exactly eight days is not
+  /// stale; the token is refreshed strictly inside five minutes of `exp`.
+  @Test func aFileNeverRefreshedIsNotStaleAndTheWindowsAreExact() async throws {
+    let home = try CodexHome()
+    defer { home.stop() }
+    try home.write(lastRefresh: nil)
+    let credentials = try await home.store().current()
+    #expect(credentials.lastRefresh == nil)
+    #expect(home.server.requests.isEmpty)
+
+    try home.write(lastRefresh: CodexHome.now.addingTimeInterval(-8 * 24 * 3_600))
+    _ = try await home.store().current()
+    #expect(home.server.requests.isEmpty, "eight days is the limit, not past it")
+
+    try home.write(access: CodexHome.accessToken(expiresIn: 300))
+    _ = try await home.store().current()
+    #expect(home.server.requests.isEmpty, "five minutes left is enough")
+
+    try home.write(access: CodexHome.accessToken(expiresIn: 299))
+    home.server.enqueue(
+      Scripts.tokenRefresh(access: CodexHome.accessToken(expiresIn: 3_600), refresh: "rt_2"))
+    #expect(try await home.store().current().refreshToken == "rt_2")
+    #expect(home.server.requests.count == 1)
+
+    // An already-expired token is refreshed too, not rejected.
+    try home.write(access: CodexHome.accessToken(expiresIn: -3_600))
+    home.server.enqueue(
+      Scripts.tokenRefresh(access: CodexHome.accessToken(expiresIn: 3_600), refresh: "rt_3"))
+    #expect(try await home.store().current().refreshToken == "rt_3")
+  }
+
+  /// The token endpoint may answer without a rotated refresh token or id
+  /// token: the old ones stay in the file. And a `CODEX_HOME` holds more
+  /// than `auth.json` (config, sessions, logs): the write-back leaves every
+  /// other entry alone.
+  @Test func aRefreshWithoutRotationKeepsTheOldTokensAndTouchesOnlyAuthJSON() async throws {
+    let home = try CodexHome()
+    defer { home.stop() }
+    try home.write(access: CodexHome.accessToken(expiresIn: 10))
+    let config = home.directory.appendingPathComponent("config.toml")
+    let configBytes = Data("model = \"gpt-5.6-terra\"\n".utf8)
+    try configBytes.write(to: config)
+    let sessions = home.directory.appendingPathComponent("sessions", isDirectory: true)
+    try FileManager.default.createDirectory(at: sessions, withIntermediateDirectories: true)
+    try Data("{}".utf8).write(to: sessions.appendingPathComponent("rollout.jsonl"))
+    let fresh = CodexHome.accessToken(expiresIn: 3_600)
+    home.server.enqueue(Scripts.tokenRefresh(access: fresh))
+
+    let credentials = try await home.store().current()
+    #expect(credentials.accessToken == fresh)
+    #expect(credentials.refreshToken == "rt_original")
+    #expect(credentials.email == "nicolai@example.com")
+    #expect(credentials.lastRefresh == CodexHome.now)
+    let document = try home.document()
+    guard case .object(let tokens)? = document["tokens"] else {
+      Issue.record("tokens gone")
+      return
+    }
+    #expect(tokens["access_token"] == .string(fresh))
+    #expect(tokens["refresh_token"] == .string("rt_original"))
+    #expect(tokens["id_token"] == .string(CodexHome.idToken()))
+    #expect(tokens["account_id"] == .string("acct_stored"))
+    #expect(
+      try FileManager.default.contentsOfDirectory(atPath: home.directory.path).sorted() == [
+        "auth.json", "config.toml", "sessions",
+      ])
+    #expect(try Data(contentsOf: config) == configBytes)
+    #expect(try FileManager.default.contentsOfDirectory(atPath: sessions.path) == ["rollout.jsonl"])
+    // The next read sees the written file, so no second refresh.
+    #expect(try await home.store().current() == credentials)
+    #expect(home.server.requests.count == 1)
+  }
+
+  /// The token endpoint's other answers: a 401 without a known code is a
+  /// dead sign-in, a 200 that is not JSON and a cut connection are transient,
+  /// and none of them names the refresh token or changes the file.
+  @Test func otherTokenEndpointAnswersAreClassifiedAndRedacted() async throws {
+    let home = try CodexHome()
+    defer { home.stop() }
+    try home.write(access: CodexHome.accessToken(expiresIn: 10))
+    let before = try Data(contentsOf: home.file)
+
+    home.server.enqueue(
+      .json(
+        ["error": "unauthorized", "error_description": "token rt_original rejected"], status: 401))
+    let unauthorized = await #expect(throws: CodexCredentialError.self) {
+      try await home.store().current()
+    }
+    guard case .signInExpired(let detail)? = unauthorized else {
+      Issue.record("expected signInExpired, got \(String(describing: unauthorized))")
+      return
+    }
+    #expect(detail == "unauthorized: HTTP 401: token [redacted] rejected")
+
+    home.server.enqueue(Scripts.rawCompletion("<html>gateway</html>"))
+    await #expect(throws: CodexCredentialError.refreshFailed("undecodable token response")) {
+      try await home.store().current()
+    }
+
+    home.server.enqueue(.drop)
+    let dropped = await #expect(throws: CodexCredentialError.self) {
+      try await home.store().current()
+    }
+    guard case .refreshFailed(let message)? = dropped else {
+      Issue.record("expected refreshFailed, got \(String(describing: dropped))")
+      return
+    }
+    #expect(!message.contains("rt_original"))
+
+    // A permanent code on an unexpected status is still permanent.
+    home.server.enqueue(
+      Scripts.tokenRefreshRejected(code: "refresh_token_invalidated", status: 403))
+    let invalidated = await #expect(throws: CodexCredentialError.self) {
+      try await home.store().current()
+    }
+    guard case .signInExpired? = invalidated else {
+      Issue.record("expected signInExpired, got \(String(describing: invalidated))")
+      return
+    }
+    #expect(try Data(contentsOf: home.file) == before, "a failed refresh never writes")
+    #expect(home.server.requests.count == 4)
+  }
+
+  /// A reused-token answer when the file has not changed is final: one
+  /// re-read, no second request.
+  @Test func aReusedTokenWithAnUnchangedFileIsFinal() async throws {
+    let home = try CodexHome()
+    defer { home.stop() }
+    try home.write(access: CodexHome.accessToken(expiresIn: 10))
+    home.server.enqueue(Scripts.tokenRefreshRejected(code: "refresh_token_reused"))
+    let error = await #expect(throws: CodexCredentialError.self) {
+      try await home.store().current()
+    }
+    guard case .signInExpired(let detail)? = error else {
+      Issue.record("expected signInExpired, got \(String(describing: error))")
+      return
+    }
+    #expect(detail.contains("refresh_token_reused"))
+    #expect(home.server.requests.count == 1)
   }
 
   @Test func jwtClaimsDecodeBase64URLWithoutPadding() {
