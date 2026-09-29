@@ -573,6 +573,125 @@ final class LaunchSmokeTests: XCTestCase {
     attachScreenshot(named: "onboarding-page-2.png")
   }
 
+  /// The redesign's review evidence in light (`testScreenshotMatrixLight`).
+  func testScreenshotMatrixLight() throws {
+    captureScreenshotMatrix(appearance: "light")
+  }
+
+  /// The same set in dark, since the hosted runner is light and one
+  /// screenshot per window cannot show that both appearances ship.
+  func testScreenshotMatrixDark() throws {
+    captureScreenshotMatrix(appearance: "dark")
+  }
+
+  /// One launch per window state under `-steno-appearance` and
+  /// `-steno-window 960x600`, each attached with `.keepAlways` as
+  /// `<window>-<appearance>-<state>.png`, so `xcrun xcresulttool export
+  /// attachments` on the CI bundle yields the review set: the main window
+  /// empty, with the fixture selected, and recording; onboarding page 1 and
+  /// page 2; Settings on the Recording section (the plan's "Audio", named
+  /// Recording since the settings redesign), opened from the nav column's
+  /// Settings row with the section deep-linked by `-steno-settings-section`.
+  /// Each state waits on the ids the other tests rely on and asserts nothing
+  /// else; the numeric review is a reading of the attachments. 960 x 600
+  /// fits the runner's 1024 x 768 display, as does the 760 x 520 Settings
+  /// window over it.
+  private func captureScreenshotMatrix(appearance: String) {
+    /// Launches under the matrix flags plus `arguments`.
+    func launched(_ arguments: [String]) -> XCUIApplication {
+      launch(
+        ["-steno-ui-testing", "-steno-appearance", appearance, "-steno-window", "960x600"]
+          + arguments)
+    }
+    /// Runs `ready` on `app`, waits for the main window (the one with the
+    /// nav column) to be 960 wide, then attaches the screen as
+    /// `<window>-<appearance>-<state>.png`, inside an activity named for the
+    /// state so a failure names it. The width wait covers
+    /// `UITestWindowSizer`'s second pass, which undoes the frame SwiftUI
+    /// restores from the previous launch a second after the window shows,
+    /// and proves the size fits the display.
+    func capture(
+      _ window: String, _ state: String, in app: XCUIApplication,
+      ready: (XCUIApplication) -> Void
+    ) {
+      XCTContext.runActivity(named: "\(window) \(state) in \(appearance)") { _ in
+        ready(app)
+        let main = app.windows.containing(.button, identifier: "nav-settings").firstMatch
+        XCTAssertTrue(
+          waitUntil(timeout: 5) { abs(main.frame.width - 960) < 1 },
+          "the main window is \(main.frame.width) wide, not 960")
+        attachScreenshot(named: "\(window)-\(appearance)-\(state).png")
+      }
+    }
+
+    capture("main", "empty", in: launched(["-steno-empty"])) { app in
+      XCTAssertTrue(
+        app.staticTexts["empty-meetings-title"].firstMatch.waitForExistence(timeout: 10),
+        "the list's empty state is missing")
+      XCTAssertTrue(
+        app.staticTexts["empty-detail-title"].firstMatch.waitForExistence(timeout: 10),
+        "the detail's empty state is missing")
+    }
+
+    capture("main", "selected", in: launched(["-steno-rich-seed"])) { app in
+      let entry = fixtureEntry(in: app)
+      XCTAssertTrue(entry.waitForExistence(timeout: 10), "the fixture is not listed")
+      entry.click()
+      XCTAssertTrue(
+        app.buttons["tab-summary"].firstMatch.waitForExistence(timeout: 10),
+        "the detail pane did not show the fixture")
+      XCTAssertTrue(waitUntil(timeout: 5) { entry.isSelected }, "the entry is not selected")
+    }
+
+    capture("main", "recording", in: launched(["-steno-start-recording"])) { app in
+      XCTAssertTrue(
+        app.buttons["header-stop"].firstMatch.waitForExistence(timeout: 20),
+        "the header Stop control did not appear")
+      XCTAssertTrue(
+        app.staticTexts["empty-summary-title"].firstMatch.waitForExistence(timeout: 10),
+        "the Summary tab shows no state row")
+    }
+
+    let onboarding = launched(["-steno-show-onboarding"])
+    capture("onboarding", "page-1", in: onboarding) { app in
+      XCTAssertTrue(
+        app.staticTexts["onboarding-intro"].firstMatch.waitForExistence(timeout: 20),
+        "the onboarding window did not open")
+      XCTAssertTrue(
+        app.staticTexts["onboarding-step-microphone"].firstMatch.waitForExistence(timeout: 5),
+        "page 1 rows are missing")
+    }
+    capture("onboarding", "page-2", in: onboarding) { app in
+      let later = app.buttons["onboarding-later"].firstMatch
+      XCTAssertTrue(later.waitForExistence(timeout: 5), "Later is missing")
+      later.click()
+      XCTAssertTrue(
+        app.buttons["onboarding-finish"].firstMatch.waitForExistence(timeout: 10),
+        "Later did not reach page 2")
+      XCTAssertTrue(
+        app.staticTexts["onboarding-setup-summaries"].firstMatch.waitForExistence(timeout: 5),
+        "page 2 rows are missing")
+    }
+
+    // The section comes from the scenario's deep link, not a click on the
+    // sidebar row: the rows' accessibility frames sit off the rendered rows
+    // in the Settings window, so a click at the Recording row's centre
+    // lands on General.
+    capture("settings", "recording", in: launched(["-steno-settings-section", "recording"])) {
+      app in
+      let settings = app.buttons["nav-settings"].firstMatch
+      XCTAssertTrue(settings.waitForExistence(timeout: 10), "the nav Settings row is missing")
+      settings.click()
+      XCTAssertTrue(
+        app.descendants(matching: .any)["settings-header-recording"].firstMatch
+          .waitForExistence(timeout: 10),
+        "Settings did not open on Recording")
+      XCTAssertTrue(
+        app.descendants(matching: .any)["settings-recording"].firstMatch.exists,
+        "the Recording sidebar row is missing")
+    }
+  }
+
   /// The entries, each a button carrying a `meeting-<uuid>` identifier and
   /// nothing else in the window does: the `meeting-list` container and the
   /// entry's texts are not buttons, so one query counts rows.

@@ -54,7 +54,14 @@ window at launch (the live row selected, the header and sidebar Stop controls sh
 `-steno-ui-testing-hold-transcribe` to queue the sample
 meeting for processing at launch over a synthetic recording, with the fake speech engine
 holding each lane for sixty seconds, so the processing card can be watched; the UI smoke test
-uses it.
+uses it. `-steno-appearance light|dark` renders the app in that appearance whatever the
+system setting, `-steno-window 960x600` sizes the main window at launch and
+`-steno-settings-section recording` (any `SettingsSection` raw value) is the section Settings
+opens on; the screenshot matrix (`testScreenshotMatrixLight` and `Dark`) uses them. The
+`ui-smoke` job exports the attachments beside the result bundle
+(`apps/macos/build/attachments`, named in `manifest.json`; `scripts/attachment-names.py` lists
+them and fails when one of the matrix's twelve is missing). A misspelt `-steno-*` flag or a
+bad value shows a launch error instead of the app.
 
 ### Signing Debug builds locally
 

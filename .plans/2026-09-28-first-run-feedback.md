@@ -11,6 +11,26 @@ list), the floating recording bubble (a new surface beyond the scope's "menu bar
 visible recording indicator"), and the audio folder's disk usage line (retention plan,
 Decision 5). Nothing else here changes the scope document.
 
+## Status (2026-09-29)
+
+Every plan in this note is implemented and merged, in the order below; the numbers are the PRs.
+
+| Plan | PRs |
+|---|---|
+| This note and the seven plans | #103 |
+| [`2026-09-28-start-recording-from-main-window.md`](2026-09-28-start-recording-from-main-window.md) | #110 |
+| [`2026-09-28-onboarding-vault-and-llm.md`](2026-09-28-onboarding-vault-and-llm.md) | #112 (optional LLM passes), #127 (onboarding setup page) |
+| [`2026-09-28-device-change-during-recording.md`](2026-09-28-device-change-during-recording.md) | #115 (capture), #125 (auto-stop and end reasons) |
+| [`2026-09-28-app-icon.md`](2026-09-28-app-icon.md) | #122 |
+| [`2026-09-28-audio-retention-keep-forever.md`](2026-09-28-audio-retention-keep-forever.md) | #123 |
+| [`2026-09-28-macos-visual-redesign.md`](2026-09-28-macos-visual-redesign.md) | #124 (design system), #128 (window and cards), #131 (detail pane and onboarding look), #130 (menu bar), #132 (screenshots in both appearances) |
+| [`2026-09-28-floating-recording-indicator.md`](2026-09-28-floating-recording-indicator.md) | #126 |
+
+What remains are owner decisions, not work: the open questions of each plan, gathered in the
+redesign plan's "Open questions" (accent hue, relative day labels, onboarding as a sheet, the
+display-title window, midnight refresh) and the icon plan's brand-hue question, to be decided
+together if at all.
+
 ## Feedback and where it is answered
 
 | Feedback (2026-09-28) | Finding | Plan |

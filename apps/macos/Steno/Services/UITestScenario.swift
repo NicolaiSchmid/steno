@@ -22,10 +22,33 @@ struct UITestScenario: Equatable, Sendable {
   /// main-actor isolated, so the literal is repeated here and a test pins
   /// the two equal); named here so it is known.
   static let holdTranscribeFlag = "-steno-ui-testing-hold-transcribe"
+  /// Takes a value, `light` or `dark`: `AppDelegate` sets `NSApp.appearance`
+  /// to it at launch, so the smoke test can screenshot both appearances on
+  /// the hosted runner, which is light.
+  static let appearanceFlag = "-steno-appearance"
+  /// Takes a value, `WxH` in points (`960x600`): the main window's size at
+  /// launch, applied over SwiftUI's `defaultSize` and its restored frame.
+  static let windowFlag = "-steno-window"
+  /// Takes a value, a `SettingsSection` raw value (`recording`): the section
+  /// Settings opens on, through `AppController.requestedSettingsSection`,
+  /// the deep link the setup banner uses. The smoke test cannot click a
+  /// sidebar row: the rows' accessibility frames sit off the rendered rows.
+  static let settingsSectionFlag = "-steno-settings-section"
   static let knownFlags: Set<String> = [
     uiTestingFlag, showPromptFlag, emptyFlag, richSeedFlag, startRecordingFlag,
-    showOnboardingFlag, holdTranscribeFlag,
+    showOnboardingFlag, holdTranscribeFlag, appearanceFlag, windowFlag, settingsSectionFlag,
   ]
+
+  enum Appearance: String, Sendable {
+    case light
+    case dark
+  }
+
+  /// A window size in points.
+  struct WindowSize: Equatable, Sendable {
+    var width: Double
+    var height: Double
+  }
 
   /// The preview environment: in-memory database, fakes, synthetic audio.
   var isUITesting: Bool
@@ -40,11 +63,31 @@ struct UITestScenario: Equatable, Sendable {
   /// The preview's speech engine holds each transcribe for a minute and the
   /// sample meeting is queued at launch (`AppEnvironment.preview()`).
   var holdTranscribe: Bool
+  /// `NSApp.appearance` at launch; nil leaves the system appearance.
+  var appearance: Appearance?
+  /// The main window's size at launch; nil leaves SwiftUI's default.
+  var windowSize: WindowSize?
+  /// The section Settings opens on once its window shows; nil leaves General.
+  var settingsSection: SettingsSection?
   /// `-steno-*` arguments that name no flag, in order.
   var unknownFlags: [String]
+  /// Flags whose value is missing or malformed, each as
+  /// `"<flag> <value>"`, in order.
+  var invalidValues: [String]
 
   init(arguments: [String]) {
     let flags = arguments.filter { $0.hasPrefix(Self.prefix) }
+    var invalid: [String] = []
+    appearance = Self.value(of: Self.appearanceFlag, in: arguments, invalid: &invalid) {
+      Appearance(rawValue: $0)
+    }
+    windowSize = Self.value(of: Self.windowFlag, in: arguments, invalid: &invalid) {
+      WindowSize($0)
+    }
+    settingsSection = Self.value(of: Self.settingsSectionFlag, in: arguments, invalid: &invalid) {
+      SettingsSection(rawValue: $0)
+    }
+    invalidValues = invalid
     isUITesting = flags.contains(Self.uiTestingFlag)
     showPrompt = flags.contains(Self.showPromptFlag)
     if flags.contains(Self.emptyFlag) {
@@ -65,7 +108,46 @@ struct UITestScenario: Equatable, Sendable {
   /// screenshot carry the reason. Nil when every flag is known, and outside
   /// UI testing, where a stray `-steno-*` argument is not ours to judge.
   var launchError: String? {
-    guard isUITesting, !unknownFlags.isEmpty else { return nil }
-    return "Unknown UI-test flags: \(unknownFlags.joined(separator: ", "))"
+    guard isUITesting else { return nil }
+    var lines: [String] = []
+    if !unknownFlags.isEmpty {
+      lines.append("Unknown UI-test flags: \(unknownFlags.joined(separator: ", "))")
+    }
+    if !invalidValues.isEmpty {
+      lines.append("Invalid UI-test values: \(invalidValues.joined(separator: ", "))")
+    }
+    return lines.isEmpty ? nil : lines.joined(separator: "\n")
+  }
+
+  /// The parsed argument after the first `flag`; nil when `flag` is absent.
+  /// A `flag` without a value (followed by another flag, or by nothing) or
+  /// with one `parse` rejects is recorded in `invalid` as `"<flag> <value>"`.
+  private static func value<Value>(
+    of flag: String, in arguments: [String], invalid: inout [String],
+    _ parse: (String) -> Value?
+  ) -> Value? {
+    guard let index = arguments.firstIndex(of: flag) else { return nil }
+    let next = arguments.index(after: index)
+    guard next < arguments.endIndex, !arguments[next].hasPrefix("-") else {
+      invalid.append("\(flag) (no value)")
+      return nil
+    }
+    guard let parsed = parse(arguments[next]) else {
+      invalid.append("\(flag) \(arguments[next])")
+      return nil
+    }
+    return parsed
+  }
+}
+
+extension UITestScenario.WindowSize {
+  /// `960x600`; nil for anything else, including a missing height or a
+  /// zero side.
+  init?(_ text: String) {
+    let parts = text.split(separator: "x", omittingEmptySubsequences: false)
+    guard parts.count == 2, let width = Double(parts[0]), let height = Double(parts[1]),
+      width > 0, height > 0
+    else { return nil }
+    self.init(width: width, height: height)
   }
 }

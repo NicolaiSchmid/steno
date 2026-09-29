@@ -16,6 +16,14 @@ struct StenoApp: App {
     Task { @MainActor in await bootstrap.load() }
   }
 
+  /// 1120 x 720, or `-steno-window WxH` under UI testing.
+  @MainActor private static var mainWindowSize: CGSize {
+    if AppBootstrap.isUITesting, let size = AppBootstrap.scenario.windowSize {
+      return CGSize(width: size.width, height: size.height)
+    }
+    return CGSize(width: 1120, height: 720)
+  }
+
   var body: some Scene {
     // No title bar: the window carries no title and no toolbar items; each
     // column of `MainWindow` paints its own opaque background up to the top
@@ -25,9 +33,12 @@ struct StenoApp: App {
         MainWindow(controller: controller)
           .modifier(OnboardingOpener(controller: controller))
       }
+      .background {
+        if AppBootstrap.isUITesting { UITestWindowSizer() }
+      }
     }
     .windowStyle(.hiddenTitleBar)
-    .defaultSize(width: 1120, height: 720)
+    .defaultSize(Self.mainWindowSize)
     .commands { AppCommands(bootstrap: bootstrap) }
 
     // No title bar: the H1 inside is the window's one title.
@@ -115,6 +126,12 @@ final class AppBootstrap {
         // and the detail header shows its Stop control.
         await controller.startRecordingFromWindow(mode: .call)
       }
+      if Self.isUITesting, let section = Self.scenario.settingsSection {
+        // The setup banner's deep link: `SettingsView` selects the section
+        // when its window opens (the test opens it from the nav column's
+        // Settings row).
+        controller.openSettings(section)
+      }
     } catch {
       self.error = "Steno could not start: \(error)"
     }
@@ -144,6 +161,41 @@ extension View {
   /// Installs this scene's `openWindow` as `bootstrap.openMain`.
   func installsOpenMain(_ bootstrap: AppBootstrap) -> some View {
     modifier(OpenMainInstaller(bootstrap: bootstrap))
+  }
+}
+
+/// Applies `-steno-window WxH` to the main window once its `NSWindow`
+/// exists, and once more a second later: SwiftUI restores the frame a
+/// previous launch saved over `defaultSize`, and the smoke suite launches
+/// the app many times per run. Zero-sized, in the window content's
+/// background under UI testing only; without the flag it does nothing.
+struct UITestWindowSizer: NSViewRepresentable {
+  func makeNSView(context: Context) -> SizerView {
+    SizerView(frame: .zero)
+  }
+
+  func updateNSView(_ nsView: SizerView, context: Context) {}
+
+  final class SizerView: NSView {
+    override func viewDidMoveToWindow() {
+      super.viewDidMoveToWindow()
+      UITestWindowSizer.apply(to: window)
+      Task { @MainActor [weak self] in
+        try? await Task.sleep(for: .seconds(1))
+        UITestWindowSizer.apply(to: self?.window)
+      }
+    }
+  }
+
+  /// Sets the content size and centres the window when the scenario asks
+  /// for a size the window does not already have.
+  @MainActor static func apply(to window: NSWindow?) {
+    guard AppBootstrap.isUITesting, let size = AppBootstrap.scenario.windowSize, let window
+    else { return }
+    let content = NSSize(width: size.width, height: size.height)
+    guard window.contentRect(forFrameRect: window.frame).size != content else { return }
+    window.setContentSize(content)
+    window.center()
   }
 }
 
@@ -302,6 +354,17 @@ struct AppCommands: Commands {
 
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
+  /// `-steno-appearance light|dark`: the whole app renders in that
+  /// appearance whatever the runner's system setting, so the smoke test can
+  /// screenshot both.
+  func applicationWillFinishLaunching(_ notification: Notification) {
+    guard AppBootstrap.isUITesting, let appearance = AppBootstrap.scenario.appearance else {
+      return
+    }
+    let name: NSAppearance.Name = appearance == .dark ? .darkAqua : .aqua
+    NSApplication.shared.appearance = NSAppearance(named: name)
+  }
+
   func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
     // The menu bar item keeps running when the window closes.
     false

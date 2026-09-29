@@ -1,6 +1,7 @@
 # Steno: macOS visual redesign
 
-Status: proposal, 2026-09-28, revised after the 2026-09-28 reviews. Triggered by first-run feedback.
+Status: implemented, PRs #124, #128, #131, #130, #132 (2026-09-29). Proposed 2026-09-28,
+revised after the 2026-09-28 reviews. Triggered by first-run feedback.
 
 > Superseded in part by [`2026-09-28-settings-redesign.md`](2026-09-28-settings-redesign.md):
 > Decision 12 ("Settings stays native") and implementation step 11 no longer apply. Settings
@@ -767,3 +768,24 @@ Recorded 2026-09-29 while implementing steps 7, 7a, 8 and 11 (layout PR B1).
   assignment replaced it.
 - **Step 11.** Nothing to change: the Settings sidebar redesign already composes from the shared
   components, its notes are `faint` and the QR image has radius 8 and a hairline.
+- **Step 12, Settings section.** The plan's "Settings > Audio" is the Recording section since
+  the settings redesign (`SettingsSection.recording`, `settings-header-recording`), so the
+  attachment is `settings-<appearance>-recording.png`. The test opens Settings through the nav
+  column's Settings row; the section comes from `-steno-settings-section recording`, which
+  `AppBootstrap` hands to `AppController.requestedSettingsSection` (the setup banner's deep
+  link), not from a click on the sidebar row: in the Settings window the `List` rows'
+  accessibility frames sit off the rendered rows (the first run's hierarchy dump put the General
+  row above the window's top edge), so a click at the Recording row's centre selects General.
+- **Step 12, window size.** SwiftUI restores the frame a previous launch saved over
+  `defaultSize`, and the smoke suite launches the app many times per run, so `-steno-window`
+  is applied twice: as the scene's `defaultSize` and by `UITestWindowSizer`, a zero-sized
+  `NSViewRepresentable` in the main window's content that sets the content size once its
+  `NSWindow` exists and again a second later; the test waits for the main window to be 960
+  wide before each screenshot. `-steno-appearance` is applied in
+  `AppDelegate.applicationWillFinishLaunching`. A bad value (`-steno-appearance sepia`,
+  `-steno-window 960`) or a missing one is a `launchError` line beside the unknown-flag line.
+- **Step 12, artefact.** The `ui-smoke` job runs `xcrun xcresulttool export attachments` on
+  `ui.xcresult` into `apps/macos/build/attachments`, uploads that directory with the bundle and
+  prints the names from its `manifest.json` (`scripts/attachment-names.py`, the `_<n>_<uuid>`
+  Xcode appends dropped) into the step summary and fails when one of the twelve is missing, so
+  the done criterion is checked by the job and readable from the artefact on a Linux checkout.

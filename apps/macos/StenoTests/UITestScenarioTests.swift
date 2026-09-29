@@ -103,4 +103,97 @@ final class UITestScenarioTests: XCTestCase {
       UITestScenario(arguments: ["Steno", "-steno-show-promt"]).launchError,
       "outside UI testing a stray flag is not ours to report")
   }
+
+  /// The screenshot matrix's valued flags: `-steno-appearance light|dark`
+  /// and `-steno-window WxH`. Without them nothing is set; their values are
+  /// not `-steno-*` arguments, so they never count as unknown flags.
+  func testTheAppearanceAndWindowFlagsParse() {
+    let plain = UITestScenario(arguments: ["Steno", "-steno-ui-testing"])
+    XCTAssertNil(plain.appearance)
+    XCTAssertNil(plain.windowSize)
+    XCTAssertEqual(plain.invalidValues, [])
+
+    let dark = UITestScenario(arguments: [
+      "Steno", "-steno-ui-testing", "-steno-appearance", "dark", "-steno-window", "960x600",
+      "-steno-empty",
+    ])
+    XCTAssertEqual(dark.appearance, .dark)
+    XCTAssertEqual(dark.windowSize, UITestScenario.WindowSize(width: 960, height: 600))
+    XCTAssertNil(dark.seed, "the flags after the values still parse")
+    XCTAssertEqual(dark.unknownFlags, [], "values are not flags")
+    XCTAssertEqual(dark.invalidValues, [])
+    XCTAssertNil(dark.launchError)
+
+    let light = UITestScenario(arguments: [
+      "Steno", "-steno-ui-testing", "-steno-appearance", "light",
+    ])
+    XCTAssertEqual(light.appearance, .light)
+    XCTAssertNil(light.windowSize)
+    XCTAssertNil(light.launchError)
+  }
+
+  /// A bad or missing value is a launch error of its own line, beside the
+  /// unknown-flag line, so the smoke test fails on the reason.
+  func testBadAppearanceAndWindowValuesBecomeTheLaunchError() {
+    let sepia = UITestScenario(arguments: [
+      "Steno", "-steno-ui-testing", "-steno-appearance", "sepia",
+    ])
+    XCTAssertNil(sepia.appearance)
+    XCTAssertEqual(sepia.invalidValues, ["-steno-appearance sepia"])
+    XCTAssertEqual(sepia.launchError, "Invalid UI-test values: -steno-appearance sepia")
+
+    let noHeight = UITestScenario(arguments: ["Steno", "-steno-ui-testing", "-steno-window", "960"])
+    XCTAssertNil(noHeight.windowSize)
+    XCTAssertEqual(noHeight.launchError, "Invalid UI-test values: -steno-window 960")
+
+    for bad in ["960x", "x600", "0x600", "960x-1", "960 600", "wide"] {
+      XCTAssertNil(UITestScenario.WindowSize(bad), bad)
+    }
+
+    let missing = UITestScenario(arguments: [
+      "Steno", "-steno-ui-testing", "-steno-window", "-steno-appearance",
+    ])
+    XCTAssertNil(missing.windowSize)
+    XCTAssertEqual(
+      missing.invalidValues, ["-steno-appearance (no value)", "-steno-window (no value)"],
+      "a flag followed by another flag, or by nothing, has no value")
+    XCTAssertEqual(missing.unknownFlags, [], "both flags are known")
+
+    let both = UITestScenario(arguments: [
+      "Steno", "-steno-ui-testing", "-steno-apearance", "dark", "-steno-window", "960",
+    ])
+    XCTAssertEqual(
+      both.launchError,
+      "Unknown UI-test flags: -steno-apearance\nInvalid UI-test values: -steno-window 960")
+
+    XCTAssertNil(
+      UITestScenario(arguments: ["Steno", "-steno-appearance", "sepia"]).launchError,
+      "outside UI testing a bad value is not ours to report")
+  }
+
+  /// `-steno-settings-section <rawValue>`: the section Settings opens on,
+  /// any `SettingsSection` case; anything else is a launch error.
+  func testTheSettingsSectionFlagParses() {
+    XCTAssertNil(UITestScenario(arguments: ["Steno", "-steno-ui-testing"]).settingsSection)
+
+    let recording = UITestScenario(arguments: [
+      "Steno", "-steno-ui-testing", "-steno-settings-section", "recording",
+    ])
+    XCTAssertEqual(recording.settingsSection, .recording)
+    XCTAssertEqual(recording.unknownFlags, [])
+    XCTAssertNil(recording.launchError)
+
+    for section in SettingsSection.allCases {
+      let scenario = UITestScenario(arguments: [
+        "Steno", "-steno-ui-testing", "-steno-settings-section", section.rawValue,
+      ])
+      XCTAssertEqual(scenario.settingsSection, section)
+    }
+
+    let audio = UITestScenario(arguments: [
+      "Steno", "-steno-ui-testing", "-steno-settings-section", "audio",
+    ])
+    XCTAssertNil(audio.settingsSection)
+    XCTAssertEqual(audio.launchError, "Invalid UI-test values: -steno-settings-section audio")
+  }
 }
