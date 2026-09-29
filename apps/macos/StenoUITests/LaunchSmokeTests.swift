@@ -99,10 +99,10 @@ final class LaunchSmokeTests: XCTestCase {
 
     // ⌘F focuses the field; a query nothing matches empties the list and
     // offers "Clear filters". SwiftUI moves focus on the next run-loop
-    // pass, so the typing waits for it (the value check below is the
-    // assertion; `hasFocus` alone is not trusted on a SwiftUI field).
+    // pass and `XCUIElement` exposes no focus attribute on macOS, so the
+    // typing lets one pass go by; the value check below is the assertion.
     app.typeKey("f", modifierFlags: .command)
-    _ = waitUntil(timeout: 5) { search.hasFocus }
+    RunLoop.current.run(until: Date().addingTimeInterval(0.5))
     app.typeText("zzzznothing")
     XCTAssertTrue(
       waitUntil(timeout: 5) { (search.value as? String) == "zzzznothing" },

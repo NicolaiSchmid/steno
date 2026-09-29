@@ -1,3 +1,4 @@
+import AVFoundation
 import EventKit
 import Foundation
 import StenoAdapters
@@ -508,10 +509,12 @@ enum PreviewSeed {
   }
 
   /// Saves `meeting` with a synthetic two-lane master under `audioFolder`
-  /// in the recording layout. The master is 16 kHz Int16 WAV, one channel
-  /// per lane, which `AVFoundationAudioCodec` decodes and mixes down without
-  /// a CAF writer. The sample meeting keeps the sample asset's id; any other
-  /// meeting gets its own.
+  /// in the recording layout. The master is the Mac recorder's format, CAF
+  /// 48 kHz Float32 with one channel per lane (a 440 Hz tone at half scale
+  /// on each), so the pipeline decodes and mixes it down exactly as it does
+  /// a real recording; a 16 kHz WAV would make persist's 64 kbps AAC mixdown
+  /// a low-rate encode that some machines' encoders refuse. The sample
+  /// meeting keeps the sample asset's id; any other meeting gets its own.
   private static func saveWithSyntheticMaster(
     _ meeting: Meeting, store: MeetingStore, audioFolder: URL
   ) async throws {
@@ -522,28 +525,45 @@ enum PreviewSeed {
       asset.id = UUID()
       asset.meetingID = meeting.id
     }
-    asset.format = .wav16kInt16
-    asset.url = layout.master(.wav16kInt16)
+    asset.format = .caf48kFloat32
+    asset.url = layout.master(.caf48kFloat32)
     asset.sidecars16k = [:]
     asset.mixdownURL = nil
-    let samples = tone(seconds: meeting.duration, channels: asset.lanes.count)
-    try WAVWriter.data(
-      samples, sampleRate: Int(AudioBuffer16k.sampleRate), channels: asset.lanes.count
-    ).write(to: asset.url, options: .atomic)
+    try writeToneMaster(to: asset.url, channels: asset.lanes.count, seconds: meeting.duration)
     try await store.save(meeting, asset: asset)
   }
 
-  /// `seconds` of a 440 Hz sine at half scale, the same on every channel,
-  /// interleaved.
-  private static func tone(seconds: TimeInterval, channels: Int) -> [Int16] {
-    let rate = AudioBuffer16k.sampleRate
-    let frames = Int(seconds * rate)
-    var samples: [Float] = []
-    samples.reserveCapacity(frames * channels)
-    for frame in 0..<frames {
-      let value = Float(0.5 * sin(2 * Double.pi * 440 * Double(frame) / rate))
-      for _ in 0..<channels { samples.append(value) }
+  /// A CAF of `seconds` of a 440 Hz tone at half scale on each of `channels`,
+  /// 48 kHz Float32 interleaved: the recorder's master layout.
+  private static func writeToneMaster(to url: URL, channels: Int, seconds: TimeInterval) throws {
+    let count = AVAudioChannelCount(channels)
+    guard
+      let format = AVAudioFormat(
+        standardFormatWithSampleRate: AudioFixtures.sampleRate, channels: count)
+    else { throw CocoaError(.fileWriteUnknown) }
+    let tone = AudioFixtures.tone(frequency: 440, seconds: seconds)
+    guard
+      let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: AVAudioFrameCount(tone.count))
+    else { throw CocoaError(.fileWriteUnknown) }
+    buffer.frameLength = AVAudioFrameCount(tone.count)
+    for channel in 0..<channels {
+      tone.withUnsafeBufferPointer {
+        buffer.floatChannelData![channel].update(from: $0.baseAddress!, count: tone.count)
+      }
     }
-    return WAVWriter.int16(samples)
+    if FileManager.default.fileExists(atPath: url.path) {
+      try FileManager.default.removeItem(at: url)
+    }
+    let settings: [String: Any] = [
+      AVFormatIDKey: kAudioFormatLinearPCM,
+      AVSampleRateKey: AudioFixtures.sampleRate,
+      AVNumberOfChannelsKey: channels,
+      AVLinearPCMBitDepthKey: 32,
+      AVLinearPCMIsFloatKey: true,
+      AVLinearPCMIsNonInterleaved: false,
+    ]
+    let file = try AVAudioFile(
+      forWriting: url, settings: settings, commonFormat: .pcmFormatFloat32, interleaved: false)
+    try file.write(from: buffer)
   }
 }
