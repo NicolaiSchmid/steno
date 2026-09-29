@@ -73,13 +73,8 @@ struct DevLLM: AsyncParsableCommand {
       return endpoint
     }
 
-    /// The client and its endpoint; `client.endpoint` differs per type, so
-    /// the pair travels together.
-    func client() async throws -> (model: any LanguageModel, endpoint: LLMEndpoint) {
-      let endpoint = try await endpoint()
-      return (
-        try await Wiring.llmClient(endpoint: endpoint, observer: verbose ? Self.log : nil), endpoint
-      )
+    func client() async throws -> any LLMClient {
+      try await Wiring.llmClient(endpoint: try await endpoint(), observer: verbose ? Self.log : nil)
     }
 
     static func log(_ event: LLMClientEvent) {
@@ -124,24 +119,15 @@ struct DevLLM: AsyncParsableCommand {
     }
 
     func run() async throws {
-      let (model, endpoint) = try await options.client()
+      let client = try await options.client()
+      let endpoint = client.endpoint
       let probe: EndpointProbe
-      var account: String?
       do {
-        if let codex = model as? CodexResponsesClient {
-          let report = try await codex.probe()
-          probe = report.endpoint
-          account = report.accountLine
-        } else if let client = model as? OpenAICompatibleClient {
-          probe = try await client.probe()
-        } else {
-          throw RuntimeFailure(description: "probe: unknown client type")
-        }
-      } catch let error as LLMError {
-        throw RuntimeFailure(description: "probe failed: \(error)")
-      } catch let error as CodexCredentialError {
+        probe = try await client.probe()
+      } catch let error where error is LLMError || error is CodexCredentialError {
         throw RuntimeFailure(description: "probe failed: \(error)")
       }
+      let account = probe.accountLine
       let milliseconds = Int(probe.roundTrip / .milliseconds(1))
       if json {
         let report = Report(
@@ -174,8 +160,8 @@ struct DevLLM: AsyncParsableCommand {
 
     func run() async throws {
       var export = try DevLLM.loadExport(input)
-      let (client, endpoint) = try await options.client()
-      let cleaner = LLMTranscriptCleaner(model: client, endpoint: endpoint)
+      let client = try await options.client()
+      let cleaner = LLMTranscriptCleaner(model: client, endpoint: client.endpoint)
       let output: CleanupOutput
       do {
         output = try await cleaner.clean(CleanupInput(export: export))
@@ -234,8 +220,8 @@ struct DevLLM: AsyncParsableCommand {
 
     func run() async throws {
       var export = try DevLLM.loadExport(input)
-      let (client, endpoint) = try await options.client()
-      let summarizer = LLMMeetingSummarizer(model: client, endpoint: endpoint)
+      let client = try await options.client()
+      let summarizer = LLMMeetingSummarizer(model: client, endpoint: client.endpoint)
       let selected = template.flatMap { SummaryTemplate.bundled(id: $0) }
       let output: SummaryOutput
       do {

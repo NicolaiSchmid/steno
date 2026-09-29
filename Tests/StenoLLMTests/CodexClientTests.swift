@@ -13,9 +13,7 @@ final class CodexHarness: Sendable {
   let clock: ManualClock
   let client: CodexResponsesClient
   let endpoint: LLMEndpoint
-  private let log: EventLog
-  private let stream: AsyncStream<LLMClientEvent>
-  private let continuation: AsyncStream<LLMClientEvent>.Continuation
+  private let recorder = EventRecorder()
 
   init(
     retry: RetryPolicy = .default, model: String = "gpt-stub",
@@ -29,36 +27,21 @@ final class CodexHarness: Sendable {
     configure(&endpoint)
     self.endpoint = endpoint
     clock = ManualClock()
-    let (stream, continuation) = AsyncStream<LLMClientEvent>.makeStream()
-    let log = EventLog()
-    self.stream = stream
-    self.continuation = continuation
-    self.log = log
     client = CodexResponsesClient(
       endpoint: endpoint, credentials: home.store(), retry: retry, clock: clock,
-      observer: { event in
-        log.append(event)
-        continuation.yield(event)
-      })
+      observer: recorder.observer)
   }
 
-  var events: [LLMClientEvent] { log.entries }
+  var events: [LLMClientEvent] { recorder.events }
 
   func stop() {
-    continuation.finish()
+    recorder.finish()
     backend.stop()
     home.stop()
   }
 
   func driveRetries() -> Task<Void, Never> {
-    Task { [clock, stream] in
-      for await event in stream {
-        if case .retrying(let delay, _, _) = event {
-          _ = await clock.waitForSleepers(1, attempts: ClientHarness.sleeperAttempts)
-          clock.advance(by: delay)
-        }
-      }
-    }
+    recorder.driveRetries(clock: clock)
   }
 }
 
@@ -275,8 +258,8 @@ final class CodexHarness: Sendable {
     #expect(models.map(\.slug) == ["gpt-a", "gpt-b"])
     #expect(models.filter(\.isListed).map(\.slug) == ["gpt-a"])
     let probe = try await harness.client.probe()
-    #expect(probe.endpoint.modelListed == true)
-    #expect(probe.endpoint.resolvedMode == .jsonSchema)
+    #expect(probe.modelListed == true)
+    #expect(probe.resolvedMode == .jsonSchema)
     #expect(probe.accountLine == "nicolai@example.com (Plus)")
     #expect(harness.backend.requests.last?.purpose == "probe")
 

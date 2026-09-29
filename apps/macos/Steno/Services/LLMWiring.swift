@@ -28,7 +28,7 @@ enum LLMWiring {
 
   static func makeClient(
     endpoint: LLMEndpoint, apiKey: String?, codex: CodexCredentialStore, retry: RetryPolicy
-  ) -> any LanguageModel {
+  ) -> any LLMClient {
     if endpoint.isCodexBackend {
       return CodexResponsesClient(endpoint: endpoint, credentials: codex, retry: retry)
     }
@@ -47,17 +47,7 @@ enum LLMWiring {
     // One attempt: a button press should answer at once, not after the
     // pipeline's retry backoff.
     let client = makeClient(endpoint: endpoint, apiKey: apiKey, codex: codex, retry: .none)
-    let report: EndpointProbe
-    var account: String?
-    if let codex = client as? CodexResponsesClient {
-      let probe = try await codex.probe()
-      report = probe.endpoint
-      account = probe.accountLine
-    } else if let compatible = client as? OpenAICompatibleClient {
-      report = try await compatible.probe()
-    } else {
-      throw NotConfigured()
-    }
+    let report = try await client.probe()
     let listed: String
     switch report.modelListed {
     case .some(true): listed = "model listed"
@@ -67,7 +57,7 @@ enum LLMWiring {
     let milliseconds =
       report.roundTrip.components.seconds * 1000
       + report.roundTrip.components.attoseconds / 1_000_000_000_000_000
-    let who = account.map { " as \($0)" } ?? ""
+    let who = report.accountLine.map { " as \($0)" } ?? ""
     return
       "Connected\(who): \(listed), structured output \(report.resolvedMode.rawValue), \(milliseconds) ms."
   }

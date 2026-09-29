@@ -5,13 +5,6 @@ import StenoCore
   import FoundationNetworking
 #endif
 
-/// What the Codex probe learned beyond the endpoint probe.
-public struct CodexProbe: Sendable, Equatable {
-  public var endpoint: EndpointProbe
-  /// "name@example.com (Plus)" from the sign-in.
-  public var accountLine: String
-}
-
 /// The second `LanguageModel`: the Responses API on OpenAI's Codex backend
 /// with the ChatGPT sign-in from `CodexCredentialStore`. Same shape as
 /// `OpenAICompatibleClient` (per-attempt timeout on the injected clock,
@@ -21,7 +14,7 @@ public struct CodexProbe: Sendable, Equatable {
 /// buffered whole, a 401 refreshes the sign-in once before it counts, and
 /// no output ceiling or temperature is sent because the backend rejects
 /// them. Identifies itself as Steno (`User-Agent`, `originator`).
-public actor CodexResponsesClient: LanguageModel {
+public actor CodexResponsesClient: LLMClient {
   public nonisolated let endpoint: LLMEndpoint
   private let credentials: CodexCredentialStore
   private let session: URLSession
@@ -93,12 +86,8 @@ public actor CodexResponsesClient: LanguageModel {
         if error == .timeout { observer?(.timedOut(attempt: attempt)) }
         failure = error
       }
-      guard failure.isRetryable, attempt < retry.maxAttempts else { throw failure }
-      var retryAfter: Duration?
-      if case .rateLimited(let after) = failure { retryAfter = after }
-      let delay = retry.delay(beforeRetry: attempt, retryAfter: retryAfter)
-      observer?(.retrying(after: delay, attempt: attempt, reason: failure))
-      try await clock.sleep(for: delay)
+      try await LLMTransport.backOff(
+        after: failure, attempt: attempt, retry: retry, clock: clock, observer: observer)
       attempt += 1
     }
   }
@@ -112,14 +101,15 @@ public actor CodexResponsesClient: LanguageModel {
     do {
       return try WireJSON.decode(CodexModelList.self, from: reply.body).models
     } catch {
-      throw LLMError.transport("undecodable model list: \(redact(reply.bodyText, signIn.secrets))")
+      throw LLMError.transport(
+        "undecodable model list: \(Self.redact(reply.bodyText, signIn.secrets))")
     }
   }
 
   /// The sign-in's account line (no network), the model list (tolerated
   /// when it fails) and one tiny structured completion. Any failure of the
   /// completion is thrown.
-  public func probe() async throws -> CodexProbe {
+  public func probe() async throws -> EndpointProbe {
     let signIn = try await credentials.current()
     var modelListed: Bool?
     let roundTrip = try await clock.measure {
@@ -128,14 +118,14 @@ public actor CodexResponsesClient: LanguageModel {
       }
       _ = try await complete(OpenAICompatibleClient.probeRequest)
     }
-    return CodexProbe(
-      endpoint: EndpointProbe(modelListed: modelListed, resolvedMode: mode, roundTrip: roundTrip),
+    return EndpointProbe(
+      modelListed: modelListed, resolvedMode: mode, roundTrip: roundTrip,
       accountLine: signIn.accountLine)
   }
 
   // MARK: Requests
 
-  typealias Reply = OpenAICompatibleClient.Reply
+  typealias Reply = HTTPReply
 
   /// `low` for the many small cleanup chunks and the probe, `medium` for the
   /// summary passes.
@@ -203,60 +193,10 @@ public actor CodexResponsesClient: LanguageModel {
     request.setValue(sessionID, forHTTPHeaderField: "session-id")
   }
 
-  /// One attempt raced against the endpoint's timeout on the clock, the
-  /// wall-clock backstop set like the endpoint client's.
+  /// One attempt raced against `endpoint.requestTimeout` on the clock.
   private func perform(_ request: URLRequest, secrets: [String]) async throws -> Reply {
-    let session = self.session
-    let clock = self.clock
-    let timeout = endpoint.requestTimeout
-    let backstopped: URLRequest = {
-      var copy = request
-      copy.timeoutInterval = OpenAICompatibleClient.wallClockBackstop(for: timeout)
-      return copy
-    }()
-    return try await withThrowingTaskGroup(of: Reply?.self) { group in
-      group.addTask {
-        try await Self.send(backstopped, session: session, secrets: secrets)
-      }
-      group.addTask {
-        try Task.checkCancellation()
-        try await clock.sleep(for: timeout)
-        return nil
-      }
-      defer { group.cancelAll() }
-      guard let first = try await group.next() else { throw LLMError.timeout }
-      guard let reply = first else { throw LLMError.timeout }
-      return reply
-    }
-  }
-
-  private nonisolated static func send(
-    _ request: URLRequest, session: URLSession, secrets: [String]
-  )
-    async throws -> Reply
-  {
-    let data: Data
-    let response: URLResponse
-    do {
-      (data, response) = try await session.data(for: request)
-    } catch {
-      if Task.isCancelled { throw CancellationError() }
-      if let urlError = error as? URLError {
-        if urlError.code == .cancelled { throw CancellationError() }
-        if urlError.code == .timedOut { throw LLMError.timeout }
-      }
-      throw LLMError.transport(redact(String(describing: error), secrets))
-    }
-    guard let http = response as? HTTPURLResponse else {
-      throw LLMError.transport("not an HTTP response")
-    }
-    var headers: [String: String] = [:]
-    for (name, value) in http.allHeaderFields {
-      if let name = name as? String, let value = value as? String {
-        headers[name.lowercased()] = value
-      }
-    }
-    return Reply(status: http.statusCode, headers: headers, body: data)
+    try await LLMTransport.perform(
+      request, session: session, clock: clock, timeout: endpoint.requestTimeout, secrets: secrets)
   }
 
   // MARK: Replies
@@ -265,14 +205,15 @@ public actor CodexResponsesClient: LanguageModel {
     if ServerSentEvents.looksLikeEventStream(
       contentType: reply.headers["content-type"], body: reply.body)
     {
-      return try Self.parseStream(reply.body, redact: { self.redact($0, secrets) })
+      return try Self.parseStream(reply.body, redact: { Self.redact($0, secrets) })
     }
     // A backend that answered the whole response object at once.
     guard let response = try? WireJSON.decode(ResponsesResponse.self, from: reply.body) else {
-      throw LLMError.transport("undecodable response body: \(redact(reply.bodyText, secrets))")
+      throw LLMError.transport(
+        "undecodable response body: \(Self.redact(reply.bodyText, secrets))")
     }
     return try Self.result(
-      from: response, items: response.output ?? [], redact: { self.redact($0, secrets) })
+      from: response, items: response.output ?? [], redact: { Self.redact($0, secrets) })
   }
 
   /// The buffered event stream to one response: message items from
@@ -337,41 +278,27 @@ public actor CodexResponsesClient: LanguageModel {
   /// are `http`, not retried unless 408 or 5xx.
   private func classify(_ reply: Reply, secrets: [String]) -> LLMError {
     let envelope = try? WireJSON.decode(CodexErrorEnvelope.self, from: reply.body)
-    let message = redact(envelope?.message ?? String(reply.bodyText.prefix(500)), secrets)
+    let message = Self.redact(envelope?.message ?? String(reply.bodyText.prefix(500)), secrets)
     if let kind = envelope?.kind, Self.planLimitKinds.contains(kind) {
       return .http(status: reply.status, body: "ChatGPT plan limit reached: \(message)")
     }
     if reply.status == 429 {
-      return .rateLimited(
-        retryAfter: OpenAICompatibleClient.retryAfter(reply.headers["retry-after"]))
+      return .rateLimited(retryAfter: LLMTransport.retryAfter(reply.headers["retry-after"]))
     }
     return .http(status: reply.status, body: message)
   }
 
   static let planLimitKinds: Set<String> = ["usage_limit_reached", "usage_not_included"]
 
-  /// A 400 that names the structured output request: the cue to fall back
-  /// one mode.
+  /// A 400 that names the structured output request (the Responses API
+  /// spells it `text.format`): the cue to fall back one mode.
   static func complainsAboutTextFormat(_ body: String) -> Bool {
-    let lowered = body.lowercased()
-    return lowered.contains("text.format") || lowered.contains("json_schema")
-      || lowered.contains("json schema") || lowered.contains("structured output")
-      || lowered.contains("response_format")
+    body.lowercased().contains("text.format")
+      || OpenAICompatibleClient.complainsAboutResponseFormat(body)
   }
 
-  // MARK: Redaction
-
-  private nonisolated func redact(_ text: String, _ secrets: [String]) -> String {
-    Self.redact(text, secrets)
-  }
-
-  /// Removes every secret wherever a server or transport echoed it.
-  nonisolated static func redact(_ text: String, _ secrets: [String]) -> String {
-    var result = text
-    for secret in secrets where !secret.isEmpty {
-      result = result.replacingOccurrences(of: secret, with: "[redacted]")
-    }
-    return result
+  private nonisolated static func redact(_ text: String, _ secrets: [String]) -> String {
+    LLMTransport.redact(text, secrets: secrets)
   }
 }
 

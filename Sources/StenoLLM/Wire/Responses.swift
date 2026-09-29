@@ -167,7 +167,6 @@ struct CodexErrorEnvelope: Codable, Sendable, Equatable {
     var message: String?
     var type: String?
     var code: JSONValue?
-    var param: String?
   }
 
   var detail: JSONValue?
@@ -200,20 +199,17 @@ public struct CodexModel: Codable, Sendable, Equatable, Hashable, Identifiable {
   public var displayName: String
   public var visibility: String?
   public var contextWindow: Int?
-  public var supportedInAPI: Bool?
 
   public var id: String { slug }
   public var isListed: Bool { (visibility ?? "list") == "list" }
 
   public init(
-    slug: String, displayName: String, visibility: String? = "list", contextWindow: Int? = nil,
-    supportedInAPI: Bool? = nil
+    slug: String, displayName: String, visibility: String? = "list", contextWindow: Int? = nil
   ) {
     self.slug = slug
     self.displayName = displayName
     self.visibility = visibility
     self.contextWindow = contextWindow
-    self.supportedInAPI = supportedInAPI
   }
 
   enum CodingKeys: String, CodingKey {
@@ -221,7 +217,6 @@ public struct CodexModel: Codable, Sendable, Equatable, Hashable, Identifiable {
     case displayName = "display_name"
     case visibility
     case contextWindow = "context_window"
-    case supportedInAPI = "supported_in_api"
   }
 }
 

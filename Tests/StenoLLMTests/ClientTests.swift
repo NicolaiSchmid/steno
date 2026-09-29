@@ -117,8 +117,8 @@ import Testing
     for event in harness.events {
       #expect(!String(describing: event).contains(key), "\(event)")
     }
-    #expect(OpenAICompatibleClient.redact("a \(key) b", apiKey: key) == "a [redacted] b")
-    #expect(OpenAICompatibleClient.redact("a b", apiKey: nil) == "a b")
+    #expect(LLMTransport.redact("a \(key) b", secrets: [key]) == "a [redacted] b")
+    #expect(LLMTransport.redact("a b", secrets: []) == "a b")
   }
 
   @Test func probeReportsModelsModeAndRoundTrip() async throws {
@@ -169,19 +169,19 @@ import Testing
   }
 
   @Test func retryAfterAndErrorMessageParsing() {
-    #expect(OpenAICompatibleClient.retryAfter("7") == .seconds(7))
-    #expect(OpenAICompatibleClient.retryAfter(" 1.5 ") == .milliseconds(1500))
-    #expect(OpenAICompatibleClient.retryAfter("Wed, 21 Oct 2026 07:28:00 GMT") == nil)
-    #expect(OpenAICompatibleClient.retryAfter(nil) == nil)
+    #expect(LLMTransport.retryAfter("7") == .seconds(7))
+    #expect(LLMTransport.retryAfter(" 1.5 ") == .milliseconds(1500))
+    #expect(LLMTransport.retryAfter("Wed, 21 Oct 2026 07:28:00 GMT") == nil)
+    #expect(LLMTransport.retryAfter(nil) == nil)
     // Values `Double` parses but `Duration.seconds` would trap on, or that
     // make no sense as a wait: nil or the cap, never a crash.
-    #expect(OpenAICompatibleClient.retryAfter("inf") == nil)
-    #expect(OpenAICompatibleClient.retryAfter("infinity") == nil)
-    #expect(OpenAICompatibleClient.retryAfter("nan") == nil)
-    #expect(OpenAICompatibleClient.retryAfter("-1") == nil)
-    #expect(OpenAICompatibleClient.retryAfter("1e300") == .seconds(3_600))
-    #expect(OpenAICompatibleClient.retryAfter("1e19") == .seconds(3_600))
-    #expect(OpenAICompatibleClient.retryAfter("3601") == .seconds(3_600))
+    #expect(LLMTransport.retryAfter("inf") == nil)
+    #expect(LLMTransport.retryAfter("infinity") == nil)
+    #expect(LLMTransport.retryAfter("nan") == nil)
+    #expect(LLMTransport.retryAfter("-1") == nil)
+    #expect(LLMTransport.retryAfter("1e300") == .seconds(3_600))
+    #expect(LLMTransport.retryAfter("1e19") == .seconds(3_600))
+    #expect(LLMTransport.retryAfter("3601") == .seconds(3_600))
     #expect(
       OpenAICompatibleClient.complainsAboutResponseFormat("Invalid parameter: 'response_format'"))
     #expect(OpenAICompatibleClient.complainsAboutResponseFormat("json_schema is not supported"))

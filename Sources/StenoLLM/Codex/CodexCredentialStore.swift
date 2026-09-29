@@ -164,10 +164,6 @@ public actor CodexCredentialStore {
     let data: Data
     do {
       data = try Data(contentsOf: fileURL)
-    } catch let error as CocoaError where error.code == .fileReadNoSuchFile {
-      throw CodexCredentialError.notSignedIn
-    } catch let error as NSError where error.domain == NSCocoaErrorDomain && error.code == 260 {
-      throw CodexCredentialError.notSignedIn
     } catch {
       if !FileManager.default.fileExists(atPath: fileURL.path) {
         throw CodexCredentialError.notSignedIn
@@ -211,7 +207,8 @@ public actor CodexCredentialStore {
     }
     var lastRefresh: Date?
     if case .string(let text)? = document["last_refresh"] {
-      lastRefresh = parseDate(text)
+      // RFC 3339 with or without fractional seconds, as chrono writes it.
+      lastRefresh = StenoJSON.parse(text)
     }
     return CodexCredentials(
       accessToken: accessToken,
@@ -221,22 +218,6 @@ public actor CodexCredentialStore {
       planType: idToken.flatMap(JWTClaims.planType(of:)) ?? JWTClaims.planType(of: accessToken),
       expiresAt: JWTClaims.expiry(of: accessToken),
       lastRefresh: lastRefresh)
-  }
-
-  /// RFC 3339 with or without fractional seconds, as chrono writes it.
-  static func parseDate(_ text: String) -> Date? {
-    let fractional = ISO8601DateFormatter()
-    fractional.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-    if let date = fractional.date(from: text) { return date }
-    let whole = ISO8601DateFormatter()
-    whole.formatOptions = [.withInternetDateTime]
-    return whole.date(from: text)
-  }
-
-  static func formatDate(_ date: Date) -> String {
-    let formatter = ISO8601DateFormatter()
-    formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-    return formatter.string(from: date)
   }
 
   // MARK: Refresh
@@ -304,7 +285,7 @@ public actor CodexCredentialStore {
       (data, response) = try await session.data(for: request)
     } catch {
       throw CodexCredentialError.refreshFailed(
-        redact(String(describing: error), secrets: [file.credentials.refreshToken]))
+        LLMTransport.redact(String(describing: error), secrets: [file.credentials.refreshToken]))
     }
     guard let http = response as? HTTPURLResponse else {
       throw CodexCredentialError.refreshFailed("not an HTTP response")
@@ -312,7 +293,7 @@ public actor CodexCredentialStore {
     guard (200..<300).contains(http.statusCode) else {
       let detail = try? JSONDecoder().decode(RefreshError.self, from: data)
       let code = (detail?.errorCode ?? detail?.error ?? "").lowercased()
-      let message = redact(
+      let message = LLMTransport.redact(
         "HTTP \(http.statusCode): \(detail?.errorDescription ?? detail?.error ?? String(decoding: data.prefix(300), as: UTF8.self))",
         secrets: [file.credentials.refreshToken])
       if http.statusCode == 401 || Self.permanentRefreshCodes.contains(code) {
@@ -336,7 +317,7 @@ public actor CodexCredentialStore {
       tokens["id_token"] = .string(idToken)
     }
     document["tokens"] = .object(tokens)
-    document["last_refresh"] = .string(Self.formatDate(now()))
+    document["last_refresh"] = .string(StenoJSON.format(now()))
     try write(document)
     return try Self.credentials(in: document)
   }
@@ -361,13 +342,5 @@ public actor CodexCredentialStore {
       throw CodexCredentialError.refreshFailed(
         "could not replace the sign-in file: \(String(cString: strerror(code)))")
     }
-  }
-
-  private func redact(_ text: String, secrets: [String]) -> String {
-    var result = text
-    for secret in secrets where !secret.isEmpty {
-      result = result.replacingOccurrences(of: secret, with: "[redacted]")
-    }
-    return result
   }
 }

@@ -4,6 +4,25 @@ import Testing
 
 @testable import StenoLLM
 
+extension JWTClaims {
+  /// A JWT with `payload` and a throwaway header and signature; the store
+  /// never checks the signature.
+  static func unsignedToken(payload: JSONValue) -> String {
+    let header = base64URLEncode(Data(#"{"alg":"none","typ":"JWT"}"#.utf8))
+    let encoder = JSONEncoder()
+    encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
+    let body = base64URLEncode((try? encoder.encode(payload)) ?? Data("{}".utf8))
+    return "\(header).\(body).signature"
+  }
+
+  static func base64URLEncode(_ data: Data) -> String {
+    data.base64EncodedString()
+      .replacingOccurrences(of: "+", with: "-")
+      .replacingOccurrences(of: "/", with: "_")
+      .replacingOccurrences(of: "=", with: "")
+  }
+}
+
 /// A temporary `CODEX_HOME` with an `auth.json` the tests write, and a stub
 /// server standing in for the token endpoint.
 final class CodexHome: Sendable {
@@ -75,7 +94,7 @@ final class CodexHome: Sendable {
     var document: [String: JSONValue] = ["OPENAI_API_KEY": .null, "tokens": .object(tokens)]
     if let authMode { document["auth_mode"] = .string(authMode) }
     if let lastRefresh {
-      document["last_refresh"] = .string(CodexCredentialStore.formatDate(lastRefresh))
+      document["last_refresh"] = .string(StenoJSON.format(lastRefresh))
     }
     for (key, value) in extra { document[key] = value }
     let data = try JSONEncoder().encode(JSONValue.object(document))

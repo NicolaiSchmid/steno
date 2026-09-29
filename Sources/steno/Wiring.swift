@@ -102,7 +102,7 @@ enum Wiring {
   /// The client for `endpoint`: the Codex backend gets the credential
   /// store, everything else the API key.
   static func llmClient(endpoint: LLMEndpoint, observer: (@Sendable (LLMClientEvent) -> Void)?)
-    async throws -> any LanguageModel
+    async throws -> any LLMClient
   {
     if endpoint.isCodexBackend {
       return CodexResponsesClient(

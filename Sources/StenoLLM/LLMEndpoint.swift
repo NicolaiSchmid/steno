@@ -96,12 +96,22 @@ public struct LLMEndpoint: Sendable, Equatable {
   public var modelsURL: URL { baseURL.appendingPathComponent("models") }
 }
 
-/// What `OpenAICompatibleClient.probe()` learned about an endpoint whose
-/// probe completion succeeded; a probe that could not complete throws.
+/// What a client's `probe()` learned about an endpoint whose probe
+/// completion succeeded; a probe that could not complete throws.
 public struct EndpointProbe: Sendable, Equatable {
   /// Whether `GET /models` lists the configured model; nil when the server
   /// has no model list.
   public var modelListed: Bool?
   public var resolvedMode: StructuredOutputMode
   public var roundTrip: Duration
+  /// "name@example.com (Plus)" from the Codex sign-in; nil for an endpoint.
+  public var accountLine: String? = nil
+}
+
+/// A `LanguageModel` bound to one `LLMEndpoint` that can check its own
+/// setup: the two clients, so the wiring that picks one by provider needs
+/// no cast to probe it.
+public protocol LLMClient: LanguageModel {
+  var endpoint: LLMEndpoint { get }
+  func probe() async throws -> EndpointProbe
 }
