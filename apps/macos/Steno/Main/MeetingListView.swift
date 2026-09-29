@@ -16,13 +16,16 @@ struct MeetingListView: View {
       Divider().overlay(Color.stenoBorder)
       List(selection: $model.selection) {
         ForEach(model.meetings) { meeting in
-          MeetingRow(meeting: meeting, statusLine: progress.entry(for: meeting.id)?.title)
-            .tag(meeting.id)
-            .listRowSeparator(.hidden)
-            .contextMenu {
-              Button("Delete Meeting…", role: .destructive) { model.pendingDeletion = meeting }
-                .disabled(!Self.canDelete(meeting))
-            }
+          MeetingRow(
+            meeting: meeting, isSelected: model.selection == meeting.id,
+            statusLine: progress.entry(for: meeting.id)?.title
+          )
+          .tag(meeting.id)
+          .listRowSeparator(.hidden)
+          .contextMenu {
+            Button("Delete Meeting…", role: .destructive) { model.pendingDeletion = meeting }
+              .disabled(!Self.canDelete(meeting))
+          }
         }
       }
       .listStyle(.sidebar)
@@ -128,6 +131,9 @@ struct MeetingListView: View {
 
 struct MeetingRow: View {
   let meeting: Meeting
+  /// Carried as the `isSelected` trait, so the UI smoke test can find the
+  /// selected row by identifier.
+  var isSelected = false
   /// The row's preview line: the progress model's title while the meeting
   /// is queued or processing, "Transcribing…", as the card and the header
   /// chip read it; nil otherwise.
@@ -168,5 +174,6 @@ struct MeetingRow: View {
     }
     .padding(.vertical, Theme.Space.xs)
     .accessibilityIdentifier("meeting-\(meeting.id.uuidString)")
+    .accessibilityAddTraits(isSelected ? [.isSelected] : [])
   }
 }

@@ -251,7 +251,7 @@ the app usable even when the menu bar cannot show the item.
 | Part | Value |
 |---|---|
 | Bar fill and edge | `popover` fill (opaque in both appearances), hairline `border`, radius `Theme.Radius.xl` 16 (from the redesign's system PR; at 40 pt tall this is a rounded bar, not a capsule, and the spec calls it that), system window shadow |
-| Bubble box | height 40 (64 while the auto-stop is armed, see the device-change plan), padding 6 leading 6 trailing 6, gap 10; contents glyph 20, bars 5 x 3 pt with 2 pt gaps and heights 4 to 16, elapsed `xxs` mono `mutedForeground`, stop 28 x 28 radius 8 |
+| Bubble box | height 40 (64 while the auto-stop is armed, see the device-change plan), padding 6 leading 6 trailing 6, gap 10; contents glyph 20, bars 5 x 3 pt with 2 pt gaps and heights 4 to 16, elapsed `xxs` mono `mutedForeground`, stop 28 x 28 radius 8 (two radius steps under the bar's 16 rather than one, because at 28 pt a 12 pt radius would read as a capsule) |
 | Prompt box | height 56, padding 16 leading 8 trailing, gap 16; min width 360, max 480, title one line tail-truncated |
 | Prompt text | title `sm` 14 semibold `strong`, subtitle `xxs` 12 regular `mutedForeground`, 2 pt between |
 | Prompt Record button | `StenoPrimaryButtonStyle` (the redesign plan restyles it later), label: glyph 16 then "Record" |
@@ -488,3 +488,45 @@ Risks and checks (settled by the steps, not by the owner):
   bar has room for a menu on the X if it comes.
 - Brand hue: if the redesign or icon plan ever adopts one, the stop glyph is the first
   candidate to carry it; until then it stays `destructive`.
+
+## Deviations (implementation)
+
+Recorded from PR #126 and its 2026-09-28 reviews; one line each, the plan text above is the
+decision as taken.
+
+- The panel is created hidden in `FloatingPanelPresenter.follow()` right after launch, not
+  lazily on the first non-hidden content; it is ordered in on the first content.
+- Sizing: the `NSHostingController` with `sizingOptions = .preferredContentSize` (decision 4)
+  re-entered layout and hung the main thread for 30 s on the hosted runner once the bubble
+  appeared. `FloatingPanelRoot` measures itself with `onGeometryChange` and
+  `FloatingPanelModel.contentSizeDidChange` sets the window frame; `NSHostingView` has
+  `sizingOptions = []`. There is no `Motion.spatial` frame animation on a content or size
+  change; the frame is set in one step at the held anchor and only the content crossfades.
+- A content change (prompt to bubble) waits for the new content's measurement before the
+  window is placed, so the bubble never shows in the prompt's frame.
+- Elapsed time in the bubble and in the menu bar label comes from one `@Observable`
+  `RecordingClock` (`Recording/RecordingClock.swift`) that ticks while `.recording`, not from
+  `TimelineView` (states table, step 6). A `TimelineView` inside the panel and the status item
+  coincided with the same hang; the sizing changed in the same commit, so the attribution is
+  not isolated. The window keeps `ElapsedText`.
+- `CountdownHairline(fractionRemaining:)` takes the fraction, not the `Countdown`, so the
+  auto-stop row can render the recorder's `AutoStopPresentation` value; `BubblePresentation`
+  carries `since` and `MenuBarLabelPresentation.make(state:now:)` carries the label table.
+- The armed bubble is 68 pt, not 64: 6 inset, 28 row, 4 gap, 19 line, 4 clear above the
+  hairline zone (2 + 4), 6 inset. "Keep recording" is a `StenoSecondaryButtonStyle` button at
+  the stop square's 28 pt height, in the first row before the stop square (the device-change
+  plan put it trailing in the second row); the line truncates in the middle so the app name
+  and the countdown both survive.
+- The bubble body is a `Button`, so `isMovableByWindowBackground` alone does not drag it; the
+  body carries `.simultaneousGesture(WindowDragGesture())`.
+- Anchor validation checks the panel's frame (`PanelAnchor.validated(_:size:screens:fallback:)`),
+  not the top-centre point, so a bubble dragged to the bottom edge is re-anchored on relaunch.
+- `openMain` is installed from `MenuBarLabel` only (decision 8); the `RootView` install was
+  dropped because the main window's `openWindow` would be the last writer.
+- `UITestScenario.launchError` surfaces a misspelt `-steno-*` flag as the bootstrap error under
+  `-steno-ui-testing`, so the smoke suite fails on the reason.
+- Smoke tests: after the prompt crossfades into the bubble, the accessibility hit test at the
+  stop square resolves to the bubble's container although a mouse click reaches it; the morph
+  test clicks by coordinate inside a named activity with the tree attached, and the
+  window-start tests assert `isHittable`. A closed-window test clicks `bubble-open` and waits
+  for `sidebar-stop` to come back.

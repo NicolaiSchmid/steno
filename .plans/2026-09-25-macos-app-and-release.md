@@ -396,6 +396,10 @@ Recorded 2026-09-25 while implementing steps 1 to 13 in PR #75 (`feat/macos-app`
 - **`mobile-cd.yml`** also guards `setup-xcode` on `runner.environment == 'github-hosted'`, the same pattern as the other macOS jobs.
 - **Tests** are XCTest (`@MainActor` classes with async methods) in the hostless bundle; the handover test identity import is repeated in `TestSupport` because the app cannot import the handover test target. Timers run on `ManualClock`; store observations and pipeline runs are awaited with a bounded poll.
 - **Step 14 (release rehearsal)** and every `[manual]` check remain for a human on a Mac; none were run here.
+- **Floating panel (2026-09-28).** The detection prompt and the recording bubble share one borderless
+  non-activating `FloatingPanel` at a remembered top-centre anchor; `DetectionPanel.swift` is gone and the
+  presenter observes the controller instead of being called. See
+  [`2026-09-28-floating-recording-indicator.md`](2026-09-28-floating-recording-indicator.md).
 - **Retention (2026-09-28).** The default is `.keepForever` for new installs, the detail header carries a
   "Recording" line with the per-meeting "Keep this recording" toggle (out of the Actions menu), and Settings > Audio
   shows the folder's disk usage next to the rule; see

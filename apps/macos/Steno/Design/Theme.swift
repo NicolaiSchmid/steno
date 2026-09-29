@@ -215,6 +215,7 @@ extension Color {
   static var stenoWarning: Color { Theme.warning.color }
   static var stenoInfo: Color { Theme.info.color }
   static var stenoDestructive: Color { Theme.destructive.color }
+  static var stenoDestructiveStrong: Color { Theme.destructiveStrong.color }
   static var stenoCodeBackground: Color { Theme.codeBackground.color }
 }
 
