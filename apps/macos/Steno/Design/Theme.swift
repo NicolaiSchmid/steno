@@ -226,6 +226,13 @@ extension Color {
   static var stenoInfo: Color { Theme.info.color }
   static var stenoDestructive: Color { Theme.destructive.color }
   static var stenoCodeBackground: Color { Theme.codeBackground.color }
+
+  /// The one veil behind a row the user picks (`NavRow`, `MeetingEntry`):
+  /// `secondary` while selected, `card` while hovered, nothing otherwise.
+  static func stenoRowVeil(isSelected: Bool, hovering: Bool) -> Color {
+    if isSelected { return stenoSecondary }
+    return hovering ? stenoCard : .clear
+  }
 }
 
 extension Font {

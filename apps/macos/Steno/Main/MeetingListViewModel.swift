@@ -182,26 +182,24 @@ final class MeetingListViewModel {
     dayGroups.flatMap { $0.meetings.map(\.id) }
   }
 
-  /// Down arrow: the next visible entry, across day boundaries; the first
-  /// when nothing visible is selected; the last stays.
-  func selectNext() {
-    let ids = visibleIDs
-    guard let current = selection, let index = ids.firstIndex(of: current) else {
-      selection = ids.first
-      return
-    }
-    if index + 1 < ids.count { selection = ids[index + 1] }
-  }
+  /// Down arrow: the next visible entry, across day boundaries; the last
+  /// stays.
+  func selectNext() { moveSelection(by: 1) }
 
   /// Up arrow: the previous visible entry, across day boundaries; the first
-  /// when nothing visible is selected; the first stays.
-  func selectPrevious() {
+  /// stays.
+  func selectPrevious() { moveSelection(by: -1) }
+
+  /// Both arrows land on the first visible entry when nothing visible is
+  /// selected, and stay put at either end.
+  private func moveSelection(by offset: Int) {
     let ids = visibleIDs
     guard let current = selection, let index = ids.firstIndex(of: current) else {
       selection = ids.first
       return
     }
-    if index > 0 { selection = ids[index - 1] }
+    let target = index + offset
+    if ids.indices.contains(target) { selection = ids[target] }
   }
 
   // MARK: - Actions

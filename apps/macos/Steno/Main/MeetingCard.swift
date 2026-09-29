@@ -77,10 +77,7 @@ struct MeetingEntry: View {
     }
   }
 
-  private var veil: Color {
-    if isSelected { return Color.stenoSecondary }
-    return hovering ? Color.stenoCard : Color.clear
-  }
+  private var veil: Color { Color.stenoRowVeil(isSelected: isSelected, hovering: hovering) }
 
   var body: some View {
     Button(action: select) {
