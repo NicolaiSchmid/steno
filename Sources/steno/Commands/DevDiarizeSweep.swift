@@ -22,7 +22,8 @@ struct DevDiarizeSweep: AsyncParsableCommand {
 
   @Option(
     parsing: .upToNextOption,
-    help: "FluidAudio clustering thresholds (Euclidean cut on unit embeddings, larger merges more).")
+    help:
+      "FluidAudio clustering thresholds (Euclidean cut on unit embeddings, larger merges more).")
   var thresholds: [Double] = [0.6, 0.7, 0.8, 0.9, 1.0]
 
   @Option(name: .customLong("max-speakers"), help: "Cap the speaker count per file.")
