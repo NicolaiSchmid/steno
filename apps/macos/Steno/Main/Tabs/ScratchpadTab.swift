@@ -38,6 +38,7 @@ struct ScratchpadTab: View {
       Text("Saved with the meeting and exported into the folder note.")
         .font(.steno(Theme.TextSize.xxs))
         .foregroundStyle(Color.stenoFaint)
+        .accessibilityIdentifier("scratchpad-hint")
     }
     .readingColumn()
     .onAppear { text = model.meeting?.scratchpad ?? "" }

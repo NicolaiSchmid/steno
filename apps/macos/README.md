@@ -36,7 +36,10 @@ xcodebuild test  -project Steno.xcodeproj -scheme Steno -only-testing:StenoUITes
 CI runs the first two on `MACOS_RUNS_ON` (the `app` job) and the UI smoke test in its own
 GitHub-hosted `macos-15` job (`ui-smoke`): Xcode 27 on the Forge runner aborts inside
 `IDELaunchServicesLauncher` (`INTERNAL ERROR: childPID > 0`) when `xcodebuild test` launches
-an XCUITest runner, so the smoke test stays where spike S1 passed.
+an XCUITest runner, so the smoke test stays where spike S1 passed. That runner's display is
+1024 x 768, the layout budget: every window must fit it at its minimum size, so no view may
+answer the minimum-size probe with an unbounded width (a `maxWidth` under
+`fixedSize(vertical:)` does; `EmptyState` wraps at a fixed width for that reason).
 
 xcodebuild does not hand its own environment to the test process; prefix a variable with
 `TEST_RUNNER_` to pass it through. `TEST_RUNNER_STENO_UPDATE_SNAPSHOTS=1 xcodebuild test …`

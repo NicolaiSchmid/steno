@@ -15,12 +15,19 @@ struct EmptyState: View {
     let id: String
     /// Disables the button alone; the title and body stay readable.
     let isEnabled: Bool
+    /// The button's help, for the reason a disabled action cannot run
+    /// ("Set up an LLM endpoint in Settings > Summaries first").
+    let help: String?
     let run: () -> Void
 
-    init(title: String, id: String, isEnabled: Bool = true, run: @escaping () -> Void) {
+    init(
+      title: String, id: String, isEnabled: Bool = true, help: String? = nil,
+      run: @escaping () -> Void
+    ) {
       self.title = title
       self.id = id
       self.isEnabled = isEnabled
+      self.help = help
       self.run = run
     }
   }
@@ -39,8 +46,9 @@ struct EmptyState: View {
   /// control box. Fixed, not a maximum: with `fixedSize(vertical:)` a
   /// `maxWidth` answers the minimum-size probe (width 0) with one character
   /// per line, and in a split view's detail column that minimum becomes the
-  /// window's, which then grows past the screen.
-  private static let bodyWidth: CGFloat = 280
+  /// window's, which then grows past the screen (the hosted runner's 1024 x
+  /// 768 display is the budget; `EmptyStateLayoutTests` pins the minimum).
+  static let bodyWidth: CGFloat = 280
 
   init(
     symbol: String? = nil, title: String, body message: String, showsSpinner: Bool = false,
@@ -83,6 +91,7 @@ struct EmptyState: View {
         Button(action.title, action: action.run)
           .buttonStyle(StenoSecondaryButtonStyle())
           .disabled(!action.isEnabled)
+          .help(action.help ?? "")
           .accessibilityIdentifier(action.id)
           .padding(.top, Theme.Space.xs)
       }

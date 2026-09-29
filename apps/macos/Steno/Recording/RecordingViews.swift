@@ -80,6 +80,40 @@ struct StopLabel: View {
   }
 }
 
+/// The Stop control both surfaces share: a secondary button carrying
+/// `StopLabel` while recording, with `id` naming the surface (`sidebar-stop`,
+/// `header-stop`), and a disabled button holding a spinner in its place while
+/// the stop is finishing, so the control keeps its box. `fillsWidth`
+/// stretches the label across the sidebar column; the header's hugs it.
+struct StopButton: View {
+  let state: HeaderStop
+  var fillsWidth = false
+  let id: String
+  let stop: () -> Void
+
+  var body: some View {
+    switch state {
+    case .stop(let since):
+      Button(action: stop) {
+        StopLabel(since: since)
+          .frame(maxWidth: fillsWidth ? .infinity : nil)
+      }
+      .buttonStyle(StenoSecondaryButtonStyle())
+      .help("Stop recording (⌘⇧R)")
+      .accessibilityIdentifier(id)
+    case .stopping:
+      Button(action: {}) {
+        ProgressView()
+          .controlSize(.small)
+          .frame(maxWidth: fillsWidth ? .infinity : nil)
+      }
+      .buttonStyle(StenoSecondaryButtonStyle())
+      .disabled(true)
+      .accessibilityLabel(RecordingState.stopping.label)
+    }
+  }
+}
+
 /// The armed auto-stop under the Stop control on both surfaces: the one
 /// countdown line the recorder exposes as a warning row, and "Keep
 /// recording" next to it. The Stop control right above is the other choice,

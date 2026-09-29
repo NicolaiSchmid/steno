@@ -12,7 +12,7 @@ import SwiftUI
 /// progress plan's D4); the queued and processing rows here cover the
 /// moment before the model has seen the meeting. The `.ready` rows for a
 /// skipped summary are `SummaryStatus.skippedRow(for:)`, not this table.
-struct TabPlaceholder: Equatable, Sendable {
+struct TabPlaceholder: Hashable, Sendable {
   /// The icon well's symbol; nil for the quieter ready variant.
   var symbol: String?
   var title: String
@@ -23,6 +23,11 @@ struct TabPlaceholder: Equatable, Sendable {
   var offersTryAgain = false
 
   static let tryAgainTitle = "Try again"
+  /// The help on a disabled "Try again" when the failure left no transcript:
+  /// the re-run covers summarize and deliver only (`rerunSummary`), so it
+  /// would mark the meeting ready with nothing in it.
+  static let tryAgainNeedsTranscript =
+    "The transcript was never produced, so there is nothing to summarise again."
 
   /// The row as text lines, what `TabText` reports for the tab.
   var lines: [String] { [title, body] }
@@ -91,11 +96,12 @@ struct TabPlaceholder: Equatable, Sendable {
 }
 
 /// What the detail header shows in place of the status chip while the
-/// recorder holds this meeting: the Stop control, enabled while recording
-/// and disabled (with a spinner) while the stop is finishing. Nil for every
-/// meeting the recorder is not on, so a `.recording` row the recorder does
-/// not own (never after `reconcileInterruptedRecordings`) falls back to its
-/// chip.
+/// recorder holds this meeting: the `StopButton`'s state, enabled while
+/// recording and disabled (with a spinner) while the stop is finishing. Nil
+/// for every meeting the recorder is not on, so a `.recording` row the
+/// recorder does not yet hold (while `.starting`; never after
+/// `reconcileInterruptedRecordings`) shows nothing in its place. The sidebar
+/// builds the same value from `RecordingState` alone.
 enum HeaderStop: Equatable, Sendable {
   case stop(since: Date)
   case stopping
@@ -114,10 +120,11 @@ enum HeaderStop: Equatable, Sendable {
 
 /// A tab without content: the `TabPlaceholder` row for the meeting's state
 /// as a centred `EmptyState`, id `empty-<tab>`. The failed row's "Try
-/// again" runs `rerunSummary()` and is disabled while the model is busy or
-/// no endpoint is configured (the pipeline would throw without one). The
-/// `.ready` rows for a skipped summary are `SkippedSummaryState`; the
-/// callers pick.
+/// again" runs `rerunSummary()`, which re-runs the summary over the stored
+/// transcript, so it is enabled only when `canRerunSummary` holds (a
+/// transcript and an endpoint) and the model is not busy; a disabled button
+/// carries the reason as its help. The `.ready` rows for a skipped summary
+/// are `SkippedSummaryState`; the callers pick.
 struct PendingText: View {
   let tab: MeetingDetailViewModel.Tab
   let model: MeetingDetailViewModel
@@ -134,9 +141,17 @@ struct PendingText: View {
   private var tryAgain: EmptyState.Action {
     EmptyState.Action(
       title: TabPlaceholder.tryAgainTitle, id: "\(tab.rawValue)-try-again",
-      isEnabled: model.canRerunSummary && !model.isBusy
+      isEnabled: model.canRerunSummary && !model.isBusy, help: tryAgainHelp
     ) {
       Task { await model.rerunSummary() }
     }
+  }
+
+  /// Why "Try again" cannot run: no endpoint (the Actions menu's line) or no
+  /// transcript. Nil when it can, or is only busy.
+  private var tryAgainHelp: String? {
+    if !model.llmConfigured { return SetupCopy.rerunHelp }
+    if !model.hasTranscript { return TabPlaceholder.tryAgainNeedsTranscript }
+    return nil
   }
 }

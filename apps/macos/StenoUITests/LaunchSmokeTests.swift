@@ -342,6 +342,16 @@ final class LaunchSmokeTests: XCTestCase {
     let stop = app.buttons["header-stop"].firstMatch
     XCTAssertTrue(stop.waitForExistence(timeout: 20), "the header Stop control did not appear")
     XCTAssertTrue(app.buttons["sidebar-stop"].firstMatch.exists, "the sidebar shows Stop too")
+    // "Stop" plus the elapsed time, ticking once a second (the synthetic
+    // backend is faster than real time, the clock is not).
+    let firstLabel = stop.label
+    XCTAssertTrue(firstLabel.contains("Stop"), "the header Stop reads \(firstLabel)")
+    XCTAssertTrue(
+      waitUntil(timeout: 5) { stop.label != firstLabel },
+      "the header elapsed time did not tick from \(firstLabel)")
+    XCTAssertTrue(
+      app.descendants(matching: .any)["header-levels"].firstMatch.waitForExistence(timeout: 5),
+      "the header shows no level bars while recording")
     XCTAssertTrue(
       waitUntil(timeout: 10) { meetingRowCount(in: app) == 2 },
       "expected the fixture meeting plus the live row, got \(meetingRowCount(in: app))")
@@ -352,6 +362,9 @@ final class LaunchSmokeTests: XCTestCase {
     // `label` is empty.
     XCTAssertEqual((title.value as? String) ?? title.label, "Recording")
     XCTAssertTrue(app.buttons["tab-summary"].firstMatch.isSelected)
+    // The recording state as the review sees it: header Stop, level bars,
+    // the "Recording" row on the Summary tab.
+    attachScreenshot(named: "detail-recording.png")
     app.buttons["tab-transcript"].firstMatch.click()
     let transcriptTitle = app.staticTexts["empty-transcript-title"].firstMatch
     XCTAssertTrue(transcriptTitle.waitForExistence(timeout: 5), "the Transcript tab shows no row")
@@ -360,7 +373,9 @@ final class LaunchSmokeTests: XCTestCase {
     XCTAssertTrue(
       app.textViews.firstMatch.waitForExistence(timeout: 5),
       "the scratchpad stays editable during the call")
-    attachScreenshot(named: "detail-recording.png")
+    XCTAssertTrue(
+      app.staticTexts["scratchpad-hint"].firstMatch.exists,
+      "the scratchpad keeps its hint under the editor during the call")
 
     stop.click()
     XCTAssertTrue(
@@ -383,6 +398,10 @@ final class LaunchSmokeTests: XCTestCase {
 
     let intro = app.staticTexts["onboarding-intro"].firstMatch
     XCTAssertTrue(intro.waitForExistence(timeout: 20), "the onboarding window did not open")
+    XCTAssertFalse(((intro.value as? String) ?? "").isEmpty, "the subtitle is empty")
+    let window = app.windows.containing(.staticText, identifier: "onboarding-intro").firstMatch
+    XCTAssertLessThanOrEqual(
+      intro.frame.maxX, window.frame.maxX, "the subtitle runs past the window instead of wrapping")
     XCTAssertTrue(app.staticTexts["onboarding-step"].firstMatch.exists, "no step caption")
     XCTAssertTrue(app.staticTexts["onboarding-title"].firstMatch.exists, "no title")
     for kind in ["microphone", "systemAudio", "calendar", "localNetwork"] {
@@ -397,6 +416,9 @@ final class LaunchSmokeTests: XCTestCase {
     XCTAssertTrue(
       app.buttons["onboarding-finish"].firstMatch.waitForExistence(timeout: 10),
       "Later did not reach page 2")
+    XCTAssertTrue(
+      waitUntil(timeout: 5) { !app.staticTexts["onboarding-step-microphone"].firstMatch.exists },
+      "page 1 rows are still showing under page 2")
     XCTAssertTrue(app.buttons["onboarding-back"].firstMatch.exists)
     XCTAssertTrue(app.staticTexts["onboarding-setup-summaries"].firstMatch.exists)
     XCTAssertTrue(app.staticTexts["onboarding-setup-vault"].firstMatch.exists)

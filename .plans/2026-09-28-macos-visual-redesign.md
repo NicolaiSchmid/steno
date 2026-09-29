@@ -714,9 +714,34 @@ Recorded 2026-09-29 while implementing steps 7, 7a, 8 and 11 (layout PR B1).
 - **Step 7a, `-steno-start-recording`.** Defined in `UITestScenario` on this branch in the shape
   PR #128 uses (`startRecordingFlag`, `startsRecording`); the seed sets and the failed and
   processing entries the smoke test was to select come with PR #128's rich seed.
+- **Step 7, processing row title.** The tab body's processing row is titled "Processing", not the
+  stage label the table gives: the stage lives in the `ProcessingCard` now (above), and the row
+  shows only before the progress model has seen the meeting.
+- **Step 7, Actions control.** The Actions menu is a `Menu` wearing `IconButton.Glyph`, not an
+  `IconButton("ellipsis")`: a `Menu` cannot be an `IconButton`, so the face is shared and the menu
+  tracks its own hover.
+- **Step 7a, failed reason.** The reason's `MessageRow(.error)` sits under the meta line, not
+  directly under the title row, so the stack reads title, meta, messages.
+- **Step 7a, "Try again".** The failed row's button runs `rerunSummary()`, which re-runs
+  summarize and deliver only and marks the meeting ready. It is therefore enabled only when a
+  transcript exists (`MeetingDetailViewModel.hasTranscript`, mirrored in `canRerunSummary` so
+  the Actions menu agrees), an endpoint is configured and the model is not busy; a failure before
+  transcription keeps the button disabled rather than losing its reason. The reason a disabled
+  button cannot run is its help (`EmptyState.Action.help`: the endpoint line the Actions menu
+  uses, or the no-transcript line). The table said "disabled while busy" only.
+- **Step 7a, `.recording` row while starting.** A `.recording` row the recorder does not yet hold
+  (the intake writes it before `activeMeetingID` is set) shows no header chip: decision 3 keeps
+  green for success, and the Stop takes over once the recorder holds the row. The green
+  "Recording" chip stays for the list entry only.
+- **Step 7a, scratchpad hint.** The hint under the editor during a recording is the tab's own
+  "Saved with the meeting and exported into the folder note." (`scratchpad-hint`), the same line
+  in every state; there is no recording-specific hint.
 - **Step 8.** `-steno-show-onboarding` builds the preview with a `FakePermissions()` whose kinds
   are all unknown (`AppEnvironment.preview(permissions:)`) and `OnboardingOpener` opens the window
   in the preview under that flag alone.
+- **Step 8, width.** `OnboardingView.contentWidth` (560) is the window's width, the padded frame,
+  as the window before the redesign was; the text column inside 32 pt sides is 496 pt. The layout
+  spec's "content width 560" names the window.
 - **Step 10.** Skipped: `SpeakerReviewSheet.swift` no longer exists; the inline speaker
   assignment replaced it.
 - **Step 11.** Nothing to change: the Settings sidebar redesign already composes from the shared

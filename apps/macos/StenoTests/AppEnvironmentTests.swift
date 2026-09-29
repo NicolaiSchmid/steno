@@ -18,6 +18,22 @@ final class AppEnvironmentTests: XCTestCase {
     XCTAssertNil(environment.handover)
   }
 
+  /// `preview()` grants every permission; `preview(permissions:)` takes the
+  /// checker it is given (`-steno-show-onboarding` passes one with every
+  /// kind unknown, so the window opens on page 1).
+  func testPreviewTakesThePermissionsItIsGiven() async throws {
+    let granted = try await AppEnvironment.preview()
+    for kind in PermissionKind.allCases {
+      let state = await granted.permissions.state(of: kind)
+      XCTAssertEqual(state, .granted, "\(kind.rawValue) by default")
+    }
+    let unknown = try await AppEnvironment.preview(permissions: FakePermissions())
+    for kind in PermissionKind.allCases {
+      let state = await unknown.permissions.state(of: kind)
+      XCTAssertEqual(state, .unknown, "\(kind.rawValue) as given")
+    }
+  }
+
   func testReloadPipelineReplacesTheInstance() async throws {
     let environment = try await TestSupport.environment()
     let before = environment.pipeline

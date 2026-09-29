@@ -8,13 +8,16 @@ import SwiftUI
 /// models; Back returns, Finish or both rows handled set the model's
 /// `finished`, which dismisses the window. The window's own close button
 /// marks onboarding completed too (`onDisappear`). The look is the
-/// redesign plan's: a hidden title bar (the H1 is the only title), 560 pt
-/// of content at 40 pt top and 32 pt sides and bottom, raised cards 12 pt
-/// apart, neutral chips, and a subtitle that wraps instead of truncating.
+/// redesign plan's: a hidden title bar (the H1 is the only title), a 560 pt
+/// window with 40 pt top and 32 pt sides and bottom inside it, raised cards
+/// 12 pt apart, neutral chips, and a subtitle that wraps instead of
+/// truncating.
 struct OnboardingView: View {
   @State var model: OnboardingViewModel
   let onFinished: () -> Void
 
+  /// The window's width; the plan's 560 is the padded frame, as the window
+  /// before the redesign was, so the text column is 496 pt.
   static let contentWidth: CGFloat = 560
   /// The row glyph's frame and size: a 24 pt box holding an 18 pt symbol,
   /// so every state glyph shares one optical size beside the 14 pt title.
@@ -55,7 +58,7 @@ struct OnboardingView: View {
         .tracking(-0.3)
         .foregroundStyle(Color.stenoStrong)
         .accessibilityIdentifier("onboarding-title")
-        .padding(.bottom, Theme.Space.sm - Theme.Space.xxs)
+        .padding(.bottom, Theme.Space.titleGap)
       Text(intro)
         .font(.steno(Theme.TextSize.sm))
         .foregroundStyle(Color.stenoMutedForeground)
@@ -112,7 +115,7 @@ struct OnboardingView: View {
     let isCurrent = model.current == step.kind && step.state != .granted
     return row(
       glyph: stateIcon(step), title: step.kind.title,
-      id: "onboarding-step-\(step.kind.rawValue)", optional: !step.isRequired
+      titleID: "onboarding-step-\(step.kind.rawValue)", optional: !step.isRequired
     ) {
       if model.skipped.contains(step.kind) { skippedLabel }
     } details: {
@@ -195,7 +198,8 @@ struct OnboardingView: View {
   private func setupRow(_ step: OnboardingViewModel.SetupStep) -> some View {
     let state = model.setupState(of: step)
     return row(
-      glyph: setupIcon(state), title: step.title, id: "onboarding-setup-\(step.id)", optional: true
+      glyph: setupIcon(state), title: step.title, titleID: "onboarding-setup-\(step.id)",
+      optional: true
     ) {
       switch state {
       case .saved(let line):
@@ -239,10 +243,11 @@ struct OnboardingView: View {
   // MARK: - Row chrome
 
   /// The card both pages' rows share: the 24 pt glyph frame, the 14 pt
-  /// semibold title carrying `id`, the neutral "Optional" chip, whatever
-  /// trails, and 12 pt under each detail row while the row is open.
+  /// semibold title carrying `titleID` (what the smoke test reads), the
+  /// neutral "Optional" chip, whatever trails, and 12 pt under each detail
+  /// row while the row is open.
   private func row<Trailing: View, Details: View>(
-    glyph: some View, title: String, id: String, optional: Bool,
+    glyph: some View, title: String, titleID: String, optional: Bool,
     @ViewBuilder trailing: () -> Trailing, @ViewBuilder details: () -> Details
   ) -> some View {
     // Built here: `Card`'s content closure escapes, the builders do not.
@@ -255,7 +260,7 @@ struct OnboardingView: View {
           Text(title)
             .font(.steno(Theme.TextSize.sm, weight: .semibold))
             .foregroundStyle(Color.stenoStrong)
-            .accessibilityIdentifier(id)
+            .accessibilityIdentifier(titleID)
           if optional {
             StatusChip(text: "Optional", style: .neutral)
           }
@@ -363,3 +368,19 @@ private struct VaultSetupFields: View {
     }
   }
 }
+
+#if DEBUG
+  /// Page 1 over unknown permissions, light beside dark: white cards on the
+  /// canvas, the subtitle wrapping. The flag goes to a preview suite, never
+  /// the developer's own defaults.
+  #Preview("Onboarding") {
+    PreviewPair {
+      OnboardingView(
+        model: OnboardingViewModel(
+          permissions: FakePermissions(),
+          defaults: UserDefaults(suiteName: "uno.schmid.steno.preview") ?? .standard),
+        onFinished: {})
+    }
+    .frame(width: 1216, height: 760)
+  }
+#endif

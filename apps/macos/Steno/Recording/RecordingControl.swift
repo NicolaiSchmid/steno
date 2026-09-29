@@ -99,24 +99,11 @@ struct RecordingControl: View {
       .disabled(true)
       .accessibilityLabel(presentation.label)
     case .recording(let since):
-      Button {
+      StopButton(state: .stop(since: since), fillsWidth: true, id: "sidebar-stop") {
         Task { await recorder.stop() }
-      } label: {
-        StopLabel(since: since)
-          .frame(maxWidth: .infinity)
       }
-      .buttonStyle(StenoSecondaryButtonStyle())
-      .help("Stop recording (⌘⇧R)")
-      .accessibilityIdentifier("sidebar-stop")
     case .stopping:
-      Button(action: {}) {
-        ProgressView()
-          .controlSize(.small)
-          .frame(maxWidth: .infinity)
-      }
-      .buttonStyle(StenoSecondaryButtonStyle())
-      .disabled(true)
-      .accessibilityLabel(presentation.label)
+      StopButton(state: .stopping, fillsWidth: true, id: "sidebar-stop") {}
     }
   }
 

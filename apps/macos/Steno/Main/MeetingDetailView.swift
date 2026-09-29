@@ -86,7 +86,7 @@ struct MeetingDetailView: View {
     let stop = headerStop(meeting)
     return VStack(alignment: .leading, spacing: 0) {
       titleRow(meeting, stop: stop)
-        .padding(.bottom, Theme.Space.sm - Theme.Space.xxs)
+        .padding(.bottom, Theme.Space.titleGap)
       metaRow(meeting)
         .padding(.bottom, Theme.Space.md)
       if case .failed(let reason) = meeting.state {
@@ -106,9 +106,13 @@ struct MeetingDetailView: View {
         recordingLine
           .padding(.bottom, Theme.Space.sm)
       }
-      if stop != nil, let levels = recorder.levels {
+      // While recording only: the recorder keeps the last reading through
+      // `.stopping`, and a frozen bar under a spinner reads as live.
+      if case .stop = stop, let levels = recorder.levels {
         LevelBars(levels: levels)
           .frame(width: Self.levelBarsWidth)
+          .accessibilityElement(children: .contain)
+          .accessibilityIdentifier("header-levels")
           .padding(.bottom, Theme.Space.md)
       }
       if showsSpeakersRow {
@@ -129,7 +133,10 @@ struct MeetingDetailView: View {
   /// The title at 21 semibold with the ladder's tracking; trailing, the Stop
   /// control while the recorder holds the meeting, else a status chip only
   /// for queued, processing and failed (the progress model's title while it
-  /// has an entry). Ready says nothing: the content is the signal.
+  /// has an entry). Ready says nothing: the content is the signal. A
+  /// `.recording` row the recorder does not hold yet (the intake writes it
+  /// while `.starting`) says nothing either: decision 3 keeps green for
+  /// success, and the Stop takes over the moment the recorder holds the row.
   private func titleRow(_ meeting: Meeting, stop: HeaderStop?) -> some View {
     HStack(alignment: .center, spacing: Theme.Space.md) {
       Text(meeting.title)
@@ -141,40 +148,15 @@ struct MeetingDetailView: View {
         .fixedSize(horizontal: false, vertical: true)
       Spacer(minLength: Theme.Space.sm)
       if let stop {
-        stopControl(stop)
+        StopButton(state: stop, id: "header-stop") { Task { await recorder.stop() } }
       } else if let entry = controller.progress.entry(for: meeting.id) {
         StatusChip(text: entry.title, color: Color.stenoInfo)
       } else {
         switch meeting.state {
-        case .recording, .queued, .processing, .failed: StatusChip(meeting.state)
-        case .ready: EmptyView()
+        case .queued, .processing, .failed: StatusChip(meeting.state)
+        case .recording, .ready: EmptyView()
         }
       }
-    }
-  }
-
-  /// The plan's Stop: a secondary button carrying the start plan's
-  /// `StopLabel` (static dot, "Stop", the ticking elapsed time); disabled
-  /// with a spinner while the stop is finishing.
-  @ViewBuilder
-  private func stopControl(_ stop: HeaderStop) -> some View {
-    switch stop {
-    case .stop(let since):
-      Button {
-        Task { await recorder.stop() }
-      } label: {
-        StopLabel(since: since)
-      }
-      .buttonStyle(StenoSecondaryButtonStyle())
-      .help("Stop recording (⌘⇧R)")
-      .accessibilityIdentifier("header-stop")
-    case .stopping:
-      Button(action: {}) {
-        ProgressView().controlSize(.small)
-      }
-      .buttonStyle(StenoSecondaryButtonStyle())
-      .disabled(true)
-      .accessibilityLabel(RecordingState.stopping.label)
     }
   }
 
@@ -382,14 +364,21 @@ struct DeliveryBadge: View {
 
   private var name: String { delivery.destinationDisplayName }
 
-  private var chip: StatusChip {
+  /// The status word after the name: "Pending", "Exported 10:02", "Failed".
+  private var status: String {
     switch delivery.status {
-    case .pending:
-      StatusChip(text: "\(name) · Pending", color: Color.stenoInfo, systemImage: "folder")
-    case .delivered:
-      StatusChip(text: "\(name) · \(exportedText)", style: .neutral, systemImage: "folder")
-    case .failed:
-      StatusChip(text: "\(name) · Failed", color: Color.stenoDestructive, systemImage: "folder")
+    case .pending: "Pending"
+    case .delivered: exportedText
+    case .failed: "Failed"
+    }
+  }
+
+  private var chip: StatusChip {
+    let text = "\(name) · \(status)"
+    return switch delivery.status {
+    case .pending: StatusChip(text: text, color: Color.stenoInfo, systemImage: "folder")
+    case .delivered: StatusChip(text: text, style: .neutral, systemImage: "folder")
+    case .failed: StatusChip(text: text, color: Color.stenoDestructive, systemImage: "folder")
     }
   }
 
@@ -414,7 +403,10 @@ struct DeliveryBadge: View {
       }
       .buttonStyle(.plain)
       .help(help)
-      .accessibilityLabel("Reveal the \(name) export in Finder")
+      // The status stays the label, so VoiceOver hears "Obsidian, Exported
+      // 10:02"; the click is the hint.
+      .accessibilityLabel("\(name), \(status)")
+      .accessibilityHint("Reveals the export in Finder")
     } else {
       chip.help(help)
     }

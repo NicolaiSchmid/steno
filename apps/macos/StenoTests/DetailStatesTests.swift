@@ -1,58 +1,45 @@
+import AppKit
 import StenoAdapters
 import StenoCore
+import SwiftUI
 import XCTest
 
 /// The pure state mapping behind the detail pane: the states table row a
 /// tab without content shows (`TabPlaceholder`), when the header carries
-/// the Stop control (`HeaderStop`), and the footer's destination name.
+/// the Stop control (`HeaderStop`), and the footer's destination name. The
+/// rows' words are pinned once, in
+/// `TabTextSnapshotTests.testEmptyTabsSayWhetherContentIsStillComing`; here
+/// the shape: glyph, spinner, Try again, and which tabs share a row.
 final class DetailStatesTests: XCTestCase {
   private let tabs: [MeetingDetailViewModel.Tab] = [.summary, .transcript, .tasks]
 
-  /// Recording, queued, processing and failed read the same on every
-  /// content tab; only the ready rows differ per tab.
-  func testRecordingQueuedProcessingAndFailedRowsAreTheSameOnEveryTab() {
-    for tab in tabs {
-      let recording = TabPlaceholder(tab: tab, state: .recording)
-      XCTAssertEqual(recording.symbol, "waveform")
-      XCTAssertEqual(recording.title, "Recording")
-      XCTAssertEqual(
-        recording.body, "The summary, transcript and tasks appear a few minutes after you stop.")
-      XCTAssertFalse(recording.showsSpinner)
-      XCTAssertFalse(recording.offersTryAgain)
-
-      let queued = TabPlaceholder(tab: tab, state: .queued)
-      XCTAssertEqual(queued.symbol, "clock")
-      XCTAssertEqual(
-        queued.lines, ["Queued", "Processing starts when the current meeting finishes."])
-
-      let processing = TabPlaceholder(tab: tab, state: .processing)
-      XCTAssertEqual(processing.symbol, "waveform.badge.magnifyingglass")
-      XCTAssertEqual(
-        processing.lines,
-        ["Processing", "Audio stays on this Mac. This usually takes a minute or two."])
-      XCTAssertTrue(processing.showsSpinner, "the processing row has the one spinner")
-
-      let failed = TabPlaceholder(
-        tab: tab, state: .failed(reason: "The LLM endpoint did not answer. Try again later."))
-      XCTAssertEqual(failed.symbol, "exclamationmark.triangle")
-      XCTAssertEqual(failed.lines, ["Processing failed", "The LLM endpoint did not answer."])
-      XCTAssertTrue(failed.offersTryAgain)
-      XCTAssertFalse(failed.showsSpinner)
+  /// Recording, queued, processing and failed are one row for every content
+  /// tab; only the ready rows differ per tab.
+  func testTransientRowsAreTheSameOnEveryTab() {
+    let reason = "The LLM endpoint did not answer. Try again later."
+    for state in [.recording, .queued, .processing, .failed(reason: reason)] as [MeetingState] {
+      let rows = tabs.map { TabPlaceholder(tab: $0, state: state) }
+      XCTAssertEqual(Set(rows).count, 1, "\(state): the tabs disagree")
+      let row = rows[0]
+      XCTAssertNotNil(row.symbol, "\(state) has a well")
+      XCTAssertEqual(row.lines, [row.title, row.body])
+      XCTAssertEqual(row.showsSpinner, state == .processing, "only processing spins")
+      XCTAssertEqual(row.offersTryAgain, state.isFailed, "only the failed row retries")
     }
+    let failed = TabPlaceholder(tab: .summary, state: .failed(reason: reason))
+    XCTAssertEqual(failed.body, TabPlaceholder.firstSentence(of: reason))
   }
 
   func testReadyRowsNameTheMissingContentWithoutAWell() {
-    let summary = TabPlaceholder(tab: .summary, state: .ready)
-    XCTAssertNil(summary.symbol)
-    XCTAssertEqual(summary.lines, ["No summary", "The template produced no sections."])
-    let transcript = TabPlaceholder(tab: .transcript, state: .ready)
-    XCTAssertNil(transcript.symbol)
-    XCTAssertEqual(transcript.lines, ["No transcript", "No speech was recognised."])
-    let tasks = TabPlaceholder(tab: .tasks, state: .ready)
-    XCTAssertNil(tasks.symbol)
-    XCTAssertEqual(tasks.lines, ["No tasks", "No tasks were found."])
-    XCTAssertFalse(summary.offersTryAgain)
-    XCTAssertFalse(summary.showsSpinner)
+    let rows = tabs.map { TabPlaceholder(tab: $0, state: .ready) }
+    XCTAssertEqual(Set(rows).count, tabs.count, "each tab names its own missing content")
+    for row in rows {
+      XCTAssertNil(row.symbol, "\(row.title): the ready variant has no well")
+      XCTAssertFalse(row.offersTryAgain)
+      XCTAssertFalse(row.showsSpinner)
+      XCTAssertFalse(row.title.isEmpty)
+      XCTAssertFalse(row.body.isEmpty)
+    }
   }
 
   /// The failed row's body is the reason's first sentence: a full stop that
@@ -95,6 +82,9 @@ final class DetailStatesTests: XCTestCase {
       HeaderStop.make(meetingID: live, recording: .starting, activeMeetingID: nil),
       "no row is the recorder's while starting")
     XCTAssertNil(
+      HeaderStop.make(meetingID: live, recording: .starting, activeMeetingID: live),
+      "starting shows no Stop even once the intake has named the row")
+    XCTAssertNil(
       HeaderStop.make(meetingID: live, recording: .idle, activeMeetingID: live),
       "an idle recorder shows no Stop even if a stale id lingers")
   }
@@ -109,5 +99,30 @@ final class DetailStatesTests: XCTestCase {
       meetingID: SampleData.meetingID, destinationID: "notion", status: .pending)
     XCTAssertEqual(
       unknown.destinationDisplayName, "notion", "an unknown destination has only its id")
+  }
+}
+
+/// `EmptyState` answers the minimum-size probe with a real width. The body
+/// wraps at a fixed 280 pt, not a maximum: under `fixedSize(vertical:)` a
+/// `maxWidth` answers a zero-width proposal with one character per line, a
+/// split view's detail column inherits that minimum, and on the hosted
+/// runner's 1024 x 768 display the main window grew past the screen and the
+/// smoke test failed. Hosted in AppKit, as the window hosts it.
+@MainActor
+final class EmptyStateLayoutTests: XCTestCase {
+  func testEmptyStateHasAFiniteMinimumWidth() {
+    let row = TabPlaceholder(tab: .summary, state: .recording)
+    let view = EmptyState(
+      symbol: row.symbol, title: row.title, body: row.body, id: "empty-summary")
+    let fitting = NSHostingView(rootView: view).fittingSize
+    XCTAssertTrue(fitting.width.isFinite && fitting.height.isFinite, "\(fitting)")
+    XCTAssertGreaterThanOrEqual(fitting.width, EmptyState.bodyWidth)
+
+    // The probe a split view sends: zero width, unbounded height.
+    let probe = NSHostingController(rootView: view)
+      .sizeThatFits(in: NSSize(width: 0, height: 10_000))
+    XCTAssertGreaterThanOrEqual(
+      probe.width, EmptyState.bodyWidth, "a zero-width proposal must not wrap per character")
+    XCTAssertLessThan(probe.height, 400, "the body wrapped per character: \(probe)")
   }
 }

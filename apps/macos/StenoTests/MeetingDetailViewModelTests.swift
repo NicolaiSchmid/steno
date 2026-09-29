@@ -498,6 +498,57 @@ final class MeetingDetailViewModelTests: XCTestCase {
     XCTAssertFalse(model.canRerunSummary, "the pipeline holds the meeting")
   }
 
+  /// The failed row's "Try again" runs `rerunSummary()`, which covers
+  /// summarize and deliver only: it is offered with a transcript and an
+  /// endpoint, never without either (a failure before transcription would
+  /// otherwise be marked ready with no transcript), and the model is busy
+  /// while the summarizer runs.
+  func testTryAgainFollowsTheEndpointAndTheBusyFlag() async throws {
+    let gate = Gate()
+    let environment = try await TestSupport.environment(makeSummarizer: {
+      var held = FakeSummarizer()
+      held.onSummarize = { await gate.wait() }
+      return held
+    })
+    try await environment.store.setState(
+      .failed(reason: "The LLM endpoint did not answer."), meetingID: SampleData.meetingID,
+      now: TestSupport.now)
+    let model = await makeModel(environment)
+    await TestSupport.waitUntil("failed observed") { model.meeting?.state.isFailed == true }
+    XCTAssertTrue(model.canRerun)
+    XCTAssertTrue(model.hasTranscript, "the fixture failed after transcription")
+    XCTAssertFalse(model.canRerunSummary, "no endpoint: Try again is disabled")
+
+    try await environment.updateSettings {
+      $0.llmBaseURL = URL(string: "http://127.0.0.1:1234/v1")
+      $0.llmModel = "qwen"
+    }
+    await TestSupport.waitUntil("endpoint observed") { model.llmConfigured }
+    XCTAssertTrue(model.canRerunSummary, "a transcript and an endpoint: Try again runs")
+    XCTAssertFalse(model.isBusy)
+
+    let rerun = Task { await model.rerunSummary() }
+    await TestSupport.waitUntil("busy while the summarizer is held") { model.isBusy }
+    await gate.open()
+    await rerun.value
+    XCTAssertFalse(model.isBusy)
+    XCTAssertNil(model.error, model.error ?? "")
+    await TestSupport.waitUntil("ready after the re-run") { model.meeting?.state == .ready }
+
+    // Failed before transcription: no segments, so nothing to summarise
+    // again, endpoint or not.
+    var untranscribed = SampleData.meeting(state: .failed(reason: "Speech model missing."))
+    untranscribed.id = UUID()
+    try await environment.store.save(untranscribed)
+    let bare = MeetingDetailViewModel(meetingID: untranscribed.id, environment: environment)
+    observing.append(Task { await bare.observe() })
+    observing.append(Task { await bare.observeSettings() })
+    await TestSupport.waitUntil("bare export loaded") { bare.export != nil && bare.llmConfigured }
+    XCTAssertTrue(bare.canRerun)
+    XCTAssertFalse(bare.hasTranscript)
+    XCTAssertFalse(bare.canRerunSummary, "no transcript: the re-run would lose the failure")
+  }
+
   /// A summarizer that throws: "Run summary" reports the pipeline's failure
   /// in `error`, the meeting stays ready without a summary (the row still
   /// offers the run) and the model is not left busy.
