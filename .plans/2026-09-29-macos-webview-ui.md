@@ -1,268 +1,219 @@
-# Steno: macOS windows as web UI in WKWebView
+# Steno: system chrome, web content
 
-Status: proposal, 2026-09-29. Triggered by the owner's review of rc.3 ("UI is better, but still
-horrible", "still just a gray blob", Settings clipping the window) and the decision that followed:
-the Mac UI moves off SwiftUI to a web UI hosted in the Swift app, and it must still feel native,
-Liquid Glass included.
+Status: proposal, 2026-09-29, revised 2026-09-30 after the owner rejected the first draft's
+mockups ("fake macOS, like all of those Linux distros"). Triggered by the review of rc.3 ("still
+horrible", "still just a gray blob", Settings clipping the window).
 
 Binding context: [`2026-09-24-initial-scope.md`](2026-09-24-initial-scope.md) (scope, audio never
 leaves the device, the LLM client sends text only) and
 [`2026-09-25-macos-app-and-release.md`](2026-09-25-macos-app-and-release.md) (app target
 boundaries, view models, CI and release).
 
-This plan **amends** the scope plan's stack row ("Swift, SwiftUI") and **supersedes in part**
-[`2026-09-28-macos-visual-redesign.md`](2026-09-28-macos-visual-redesign.md) (layout steps 3 to 13
-and the Mac side of the token mirror),
-[`2026-09-28-settings-redesign.md`](2026-09-28-settings-redesign.md) (the SwiftUI layout spec; the
-sections, copy, view models and update feed stand) and the window rows of the macOS app plan. All
-four files carry a note at the top. The mockups that set the direction are
-[`docs/design/webview-mockup/main.html`](../docs/design/webview-mockup/main.html) and
-[`docs/design/webview-mockup/settings.html`](../docs/design/webview-mockup/settings.html);
-open them in a browser, append `?dark` for the dark appearance.
+This plan **amends** the scope plan's stack row and **supersedes in part**
+[`2026-09-28-macos-visual-redesign.md`](2026-09-28-macos-visual-redesign.md) (the custom
+components and tokens in the three windows, layout steps 3 to 13),
+[`2026-09-28-settings-redesign.md`](2026-09-28-settings-redesign.md) (the custom sidebar row and
+metrics; the sections, copy, view models and update feed stand) and the window rows of the macOS
+app plan. All four files carry a note at the top.
+
+## The rule
+
+Nothing the user reads as chrome is drawn by Steno. The window, the sidebar and its glass, the
+toolbar and its buttons, the lists, the forms, the switches, pop-ups, menus, popovers and sheets
+are the system's own SwiftUI and AppKit components with their default appearance. Steno draws
+exactly one surface: the reading pane of a meeting (summary, transcript, tasks, notes), and that
+surface is web content in a `WKWebView`, styled as a document, never as chrome.
+
+The first draft of this plan put the whole window in the web view and imitated macOS in CSS. The
+mockups looked like a Linux theme of macOS because that is what imitated chrome always looks like.
+Web cannot get a real toolbar button, a real sidebar selection or a real segmented control. The
+draft's mockups were removed with the revision; the direction they showed is rejected.
 
 ## Goal
 
-The main window, the Settings window and the onboarding window are one React application rendered
-by `WKWebView` inside the existing Swift app. Everything that touches the operating system, the
-audio path, the database, Sparkle or the iPhone stays Swift and stays where it is. The result
-looks and behaves like a macOS 26 app: a floating Liquid Glass sidebar over the desktop, system
-typography, the system accent colour, native menus, native switches and pop-up buttons, native
-scrolling, correct light and dark appearance, Reduce Transparency and Reduce Motion honoured. On
-macOS 15 the same UI runs over the classic sidebar material.
-
-The second goal is the loop. The web UI builds, renders and screenshots on Linux in seconds with
-Playwright, so a design iteration no longer needs a Mac build. The macOS 26 bugs that hosted
-macOS 15 CI cannot show (the Settings split view overflow, PR #134) cannot happen in a layout
-engine we control.
+After this plan the Mac app looks like Notes or Mail with Steno's content in it, on macOS 26 with
+Liquid Glass and on macOS 15 with the classic materials, because every visible frame, list,
+button and form is the system's. The reading pane, the one surface where typography and rich
+layout carry the product, is web content with a document identity: SF Pro through the system
+font stack, a 680 pt measure, generous spacing, speaker labels, inline speaker selection through
+native pop-up menus, an editable notes tab. That pane builds, renders and screenshots on Linux in
+seconds, so its design iterates without a Mac build.
 
 ## Findings
 
-Why SwiftUI is being replaced rather than fixed again, from the 2026-09-28 and 2026-09-29 rounds:
-
-- Three layout defects in rc.3 (banner wrapping one word per line, the nav column squeezed to
-  140 pt, the Settings columns overflowing the window on macOS 26) each cost a Forge round trip
-  and depended on modifier order or a hard-coded height (`SettingsView.height`).
-- The hosted UI smoke job runs macOS 15, so macOS 26 layout is never reviewed before the owner
-  sees it. Forge (macOS 26) exists but is the release runner, not a design loop.
-- The design-craft token ladder (3 percent alpha veils, hairlines, one achromatic accent) on a
-  light canvas reads as grey on grey. The owner's "gray blob" verdict holds on `main` after PR
-  #135. A toolkit change alone would not fix that; this plan changes the design direction too.
-- Expo has no macOS platform; `react-native-macos` is at React Native 0.81 against upstream 0.87
-  and Expo's own team names that lag as the blocker for desktop support. React Native on the Mac
-  would still render AppKit views and inherit their layout problems. The web target is the way to
-  reuse the React and Tailwind stack that works for the iPhone app.
-- `NSGlassEffectView` is public AppKit in macOS 26 (styles `.regular` and `.clear`, `cornerRadius`,
-  `tintColor`, `contentView`). A transparent `WKWebView` over it is the pattern hosted-content apps
-  use for glass chrome; Apple's own Terminal ships "glass chrome, opaque content".
-- WebKit renders native controls for `<select>` (a real `NSMenu` pop-up in `WKWebView`),
-  `<input type="checkbox" switch>` (the system switch, WebKit since Safari 17.4, so macOS 14.4+),
-  `<button>` and `<input type="search">`. `-apple-system` is SF Pro. CSS system colours
-  (`Canvas`, `CanvasText`, `AccentColor`, the `-apple-system-*` label and fill colours) follow the
-  window appearance and the user's accent. `prefers-color-scheme`, `prefers-reduced-motion` and
-  `prefers-reduced-transparency` follow the system.
+- The grey blob is not SwiftUI. It is the design-craft layer painted over it: `Card`, `NavRow`,
+  `StenoPrimaryButtonStyle`, `StatusChip`, `SettingsSidebarRow`, 3 percent alpha veils, hairlines
+  and one achromatic accent, in `apps/macos/Steno/Design/` and `Settings/SettingsComponents.swift`.
+  The system components those replaced are the ones every Mac app the owner likes is made of.
+- The rc.3 defects (banner wrapping, nav column at 140 pt, Settings overflow on macOS 26) all
+  came from custom layout fighting `NavigationSplitView`. Standard `List(.sidebar)` content and a
+  standard toolbar are what the split view is sized for.
+- The reading pane is where SwiftUI is weakest for this product: long attributed text with
+  speaker turns, per-line controls, hover states, selection across turns, an editable notes area.
+  It is also where an LLM designs well and where a Linux screenshot loop has the most value.
+- Expo has no macOS platform and `react-native-macos` lags upstream by six minor versions; the
+  web target is the way to reuse the React and Tailwind stack. Recorded in the first draft, still
+  true, now scoped to one pane.
+- `WKWebView` inside a SwiftUI detail column is ordinary hosting: transparent background over the
+  window's own background, native scrolling, native text selection, `<select>` opens a real
+  `NSMenu`, `-apple-system` is SF Pro, CSS system colours and `prefers-color-scheme` follow the
+  window appearance, `prefers-reduced-motion` follows the system.
 
 ## Non-goals
 
-- No Electron, Tauri or a second process. One app bundle, one process, WebKit from the system.
-- No network from the web layer, ever. Content security policy and the navigation delegate block
-  it; the LLM client, the Obsidian adapter and the iPhone listener stay in Swift.
-- No change to the product: same windows, same sections, same copy unless a step says so, no new
-  data, no editing of generated text.
-- The menu bar item, the floating recording bubble and the detection prompt stay SwiftUI in this
-  plan. They are small, animation-heavy and already accepted. Revisit only if the split hurts.
-- No shared component library with `mobile/` yet. The phone app has three screens; sharing the
-  Tailwind token names and the spacing scale is enough. A workspace package is a later plan.
-- No support below macOS 15 and no Intel, unchanged.
+- No web chrome. No CSS traffic lights, glass, sidebars, toolbars, tabs, switches or buttons.
+- No Electron, Tauri or second process. No network from the web layer, ever.
+- No product change: same windows, sections, copy, data and editable surfaces.
+- The menu bar item, the floating recording bubble and the detection prompt are untouched.
+- No shared component package with `mobile/`; the pane shares Tailwind token names only.
+- No support below macOS 15, no Intel, unchanged.
 
 ## Decisions
 
-1. **Architecture: Swift shell, web pixels.** `apps/macos/Steno` keeps `AppController`,
-   `AppEnvironment`, every view model, `RecordingController`, the panels, the menu bar item,
-   Sparkle and the commands. A new `Steno/Web/` group holds the host: `WebWindowView`
-   (`NSViewRepresentable` for a container view with the glass view at the back and the web view in
-   front), `WebBridge` (message runtime), `AppSchemeHandler` (serves the bundle) and one
-   `*Bridge.swift` adapter per window that maps view model state to snapshots and commands to view
-   model calls. The three SwiftUI `Window` scenes stay; their content becomes `WebWindowView`.
-   Settings changes from the `Settings` scene to a `Window(id: "settings")` with a hidden title
-   bar, fixed 760 by 520, so it gets the same glass sidebar and no `NavigationSplitView`.
-   `⌘,` keeps working through `AppCommands`.
+1. **Chrome is system SwiftUI with default appearance.** The main window keeps its three-column
+   `NavigationSplitView` in the `.balanced` style with the system title bar and toolbar back (the
+   hidden title bar goes; on macOS 26 the toolbar and sidebar glass come for free, on macOS 15 the
+   standard sidebar material). The sidebar is a `List(selection:)` with `.listStyle(.sidebar)`,
+   `Section("Meetings")` and `Section("Tags")` of `Label`s with badges, Settings reachable from
+   the app menu and `⌘,` only, as in every Mac app. The Record control is a toolbar item in the
+   sidebar column's `.toolbar` (`.primaryAction`), a `Menu` with "Record call" and "Record in
+   person" and a red stop state while recording; the level meter stays in the detail header while
+   recording. The meeting list is a `List` in `.inset` style with `Section` headers per day and
+   the system row selection; the row shows title, time and one preview line with system text
+   styles. The detail column is a `VStack`: a native header (title, meta line, speakers row,
+   tags, retention line, the setup banner as a plain `HStack` of system buttons), a native
+   `Picker(.segmented)` for Summary, Transcript, Tasks and Notes in the detail toolbar, then the
+   web pane. Actions live in a toolbar `Menu`. Confirmations are `.confirmationDialog`, sheets and
+   popovers stay native.
 
-2. **Web stack.** `apps/macos/web/`: React 19, TypeScript, Vite, Tailwind 4, Biome as the only
-   linter and formatter with the `mobile/` rules (tabs, double quotes, sorted imports and classes),
-   Vitest with Testing Library, Playwright for screenshots. pnpm 11 and Node 24 as in `mobile/`,
-   own lockfile, own `package.json` `packageManager`. `pnpm check` runs lint, typecheck and tests.
-   Files kebab-case, components PascalCase, functional components only.
+2. **Settings and onboarding are plain system forms.** Settings keeps the sidebar window and its
+   six sections, view models and copy, but the sidebar rows are `Label`s with SF Symbols and the
+   subtitle as the system secondary text, no icon wells, no custom metrics; the detail is
+   `Form(.grouped)` with `Toggle`, `Picker`, `TextField`, `LabeledContent` and default buttons.
+   The fixed-height workaround from PR #134 stays until measured unnecessary. Onboarding keeps its
+   pages and rows on `Form` and system buttons. Nothing in either window imports `Design/`.
 
-3. **Glass.** The web page is transparent (`drawsBackground` false on the web view,
-   `underPageBackgroundColor` clear, `html { background: transparent }`). The sidebar region draws
-   nothing behind its rows; the content region paints `Canvas`. Behind the web view the host
-   places one glass view in the sidebar's frame: `NSGlassEffectView(style: .regular)` with a 14 pt
-   corner radius on macOS 26, `NSVisualEffectView(material: .sidebar, blendingMode:
-   .behindWindow)` on macOS 15. The web layer reports the sidebar frame through the bridge
-   (`layout.sidebar`) whenever it changes; the host resizes the glass view. Reduce Transparency is
-   handled by AppKit for the material and by `prefers-reduced-transparency` for the web side, which
-   then paints an opaque sidebar fill. No private `NSGlassEffectView` variants: `.regular` only,
-   so the look survives macOS updates.
+3. **One web surface: the reading pane.** `ReadingPaneView` (`NSViewRepresentable`) hosts one
+   `WKWebView` per detail column, transparent (`drawsBackground` false, `underPageBackgroundColor`
+   clear) so the window background shows through and the pane joins the native header without a
+   seam. It renders the selected tab's content: summary sections, the transcript with speaker
+   turns and inline speaker `<select>`s, the task list, the editable notes. The native segmented
+   control drives which tab the page shows; the page never draws tabs. Scroll position is per
+   tab and per meeting in the page.
 
-4. **Native controls where WebKit has them, native surfaces through the bridge otherwise.**
-   Switches are `<input type="checkbox" switch>`, choices are `<select>`, standard buttons are
-   `<button>` with the default appearance, search is `<input type="search">`. Context menus,
-   pull-down menus with more than a flat list, confirmations, open and save panels, "Reveal in
-   Finder", opening URLs and the Sparkle check all go through bridge calls that end in `NSMenu`,
-   `NSAlert`, `NSOpenPanel`, `NSWorkspace` and `SPUUpdater`. Tooltips are `title` attributes.
-   Text is `-apple-system` at the system sizes (13 pt body, 11 pt secondary, 22 to 28 pt titles).
-   Colours are CSS system colours plus a short semantic layer in `theme.css`; the accent is
-   `AccentColor` so it follows System Settings. Icons are SF Symbols: the scheme handler serves
-   `steno-app://symbol/<name>?pointSize=&weight=` as a template PNG rendered with
-   `NSImage(systemSymbolName:)`, and CSS applies it as a mask so it takes `currentColor`.
+4. **Document identity, not app identity.** The pane's CSS is a document: `-apple-system` at the
+   system sizes (15 pt body for reading, 13 pt secondary, 11 pt captions), CSS system colours
+   (`CanvasText`, `-apple-system-secondary-label`, `AccentColor`) so it follows the window's
+   appearance and the user's accent, a 680 pt measure, no borders, no cards, no buttons except
+   the inline controls the content needs. Empty and error states are text. Motion follows
+   `prefers-reduced-motion`. The mockup is
+   [`docs/design/webview-mockup/reading-pane.html`](../docs/design/webview-mockup/reading-pane.html),
+   rendered on its own because it is the only thing Steno draws.
 
-5. **Bridge.** One channel each way. Web to Swift: `WKScriptMessageHandlerWithReply`, so
-   `bridge.call("meeting.setSpeaker", params)` returns a promise that resolves with the reply or
-   rejects with a typed error. Swift to web: `evaluateJavaScript("steno.emit(<event>)")` with the
-   event serialised once per change. The contract is JSON with `Codable` structs in
-   `Steno/Web/BridgeContract.swift` as the source of truth and hand-written TypeScript types in
-   `web/src/bridge/contract.ts`. `BridgeContractTests` writes every message type as a fixture to
-   `apps/macos/web/fixtures/bridge/` when `STENO_RECORD_FIXTURES=1` and otherwise asserts the
-   fixtures still decode; the web tests parse the same files through zod schemas. A drift fails
-   both sides.
+5. **Web stack.** `apps/macos/web/`: React 19, TypeScript, Vite, Tailwind 4, Biome with the
+   `mobile/` rules, Vitest with Testing Library, Playwright for screenshots, pnpm 11, Node 24, own
+   lockfile, `pnpm check` runs lint, typecheck and tests. Files kebab-case, components PascalCase,
+   functional components only.
 
-6. **State model: snapshots in, commands out.** The web layer holds no domain state. Each
-   window bridge observes its view models with `withObservationTracking` and emits full snapshots
-   per topic (`meetings.list`, `meeting.detail`, `recording`, `progress`, `settings.general` and
-   the other five sections, `onboarding`, `setup`). Snapshots are coalesced to the next run loop
-   turn and, for `recording.level`, throttled to 20 Hz on the main actor; nothing on the audio
-   thread changes. Commands call the existing view model methods, so the view model tests keep
-   their value and nothing is re-implemented in TypeScript.
+6. **Bridge.** Web to Swift through `WKScriptMessageHandlerWithReply` (`bridge.call(method,
+   params)` returns a promise); Swift to web through `evaluateJavaScript("steno.emit(...)")`. The
+   contract is `Codable` structs in `Steno/Web/BridgeContract.swift` as the source of truth and
+   hand-written TypeScript types in `web/src/bridge/contract.ts`. `BridgeContractTests` records
+   fixtures to `apps/macos/web/fixtures/bridge/` under `STENO_RECORD_FIXTURES=1` and asserts them
+   otherwise; the web tests parse the same files through zod. Topics and commands:
 
-7. **Loading and isolation.** Production loads `steno-app://app/index.html` through
+   | Direction | Name | Contents |
+   |---|---|---|
+   | emit | `pane` | selected tab, appearance hints, the meeting id |
+   | emit | `summary` | rendered sections from `MeetingDetailViewModel.summarySections`, `summaryStatus`, template id |
+   | emit | `transcript` | turns with speaker id, display name, confirmed flag, options for the inline select from `SpeakersViewModel.options`, playback state |
+   | emit | `tasks` | tasks with done state and assignee |
+   | emit | `notes` | scratchpad text and save state |
+   | call | `speakers.select(speakerID, optionID)` | maps to `SpeakersViewModel.select` |
+   | call | `speakers.play(speakerID)`, `speakers.stop()` | playback stays `AVAudioPlayer` |
+   | call | `notes.save(text)` | `saveScratchpad`, debounce stays in the view model |
+   | call | `notes.flush()` | on tab or meeting change |
+   | call | `summary.tryAgain()` | `rerunSummary` |
+   | call | `system.openURL(url)` | links in content, `NSWorkspace` |
+   | call | `pane.ready()` | first paint gate |
+
+   Snapshots come from `withObservationTracking` on the detail view model, coalesced to the next
+   run loop turn. Nothing on the audio thread changes.
+
+7. **Loading and isolation.** Production loads `steno-app://pane/index.html` through a
    `WKURLSchemeHandler` from the bundled `Web/` folder, never `file://`. Content security policy:
-   `default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:
-   blob:; font-src 'self'; connect-src 'none'`. The navigation delegate cancels every navigation
-   that is not the app scheme; external links go through `system.openURL`. In Debug, when
-   `STENO_WEB_DEV_URL` is set, the host loads the Vite dev server instead, with hot reload inside
-   the real window, and the policy admits that origin and its websocket. Text selection, copy and
-   find work as in any web view. The web view has no access to the file system, the keychain or
-   the network, so the privacy rule is enforced by the platform, not by review.
+   `default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:;
+   font-src 'self'; connect-src 'none'`. The navigation delegate cancels every navigation that is
+   not the app scheme. In Debug, `STENO_WEB_DEV_URL` loads the Vite dev server with hot reload
+   inside the real window and the policy admits that origin. The web view has no file, keychain
+   or network access; the privacy rule is enforced by the platform.
 
-8. **Design direction: a macOS 26 app, not the design-craft ladder.** The mockups define it:
-   floating glass sidebar with the Record control as a capsule at the top under the traffic
-   lights, a plain list column with grouped day headers and accent-filled selection, a detail
-   column with a 680 pt reading measure, a large title, a segmented control for Summary,
-   Transcript, Tasks and Notes, glass capsule toolbar buttons floating over the content, and
-   grouped form cards in Settings. Spacing and radii keep the shared scale (4, 8, 12, 16; 6, 8,
-   10, 14). `Theme.swift` shrinks to what the menu bar item and the panels still use; the
-   `ThemeTokensTests` mirror check against `global.css` is dropped for the Mac.
+8. **Build.** `scripts/build-web.sh` runs `pnpm install --frozen-lockfile` and `pnpm build` in
+   `apps/macos/web/` and copies `dist/` into the app resources as `Web/`. `project.yml` runs it as
+   a pre-build script with `dist/` as output and a clear failure when `pnpm` is missing. CI
+   installs Node 24 and pnpm on the macOS jobs as `mobile-cd.yml` does. Forge needs both.
 
-9. **Build.** `scripts/build-web.sh` runs `pnpm install --frozen-lockfile` and `pnpm build` in
-   `apps/macos/web/` and copies `dist/` to the app's resources as `Web/`. `project.yml` gets it as
-   a pre-build script with `dist/` as its output, so Xcode reruns it when the web sources change
-   and the script fails with a clear message when `pnpm` is missing. CI installs Node 24 and pnpm
-   on the macOS jobs the way `mobile-cd.yml` does. Forge needs the same two tools; that is a
-   prerequisite, see Open questions.
+9. **Tests and review evidence.** `web-ci.yml` on `ubuntu-latest`: `pnpm check`, `pnpm build`,
+   Playwright renders the four tabs in light and dark at 440, 680 and 900 pt widths against the
+   fixture bridge and uploads `web-screens`. That artifact is the review evidence for the pane.
+   The macOS `ui-smoke` job keeps its screenshots for the chrome, which is now the system's and
+   is reviewed for content, not pixels. `ReadingPaneTests` loads the bundled page in an
+   in-process `WKWebView` with a fake bridge and asserts through JavaScript that the fixture
+   meeting's summary and transcript render, that an `https:` navigation is cancelled and that
+   `fetch` is blocked. The former `tab-*` and `speaker-*` accessibility identifiers move into the
+   page as `data-testid` and are asserted there; XCUITest keeps the native identifiers only.
 
-10. **Tests and review evidence.** `web-ci.yml` on `ubuntu-latest`: `pnpm check`, `pnpm build`,
-    then Playwright renders every window in light and dark at 960 by 600 and 1200 by 760 against
-    the fixture bridge and uploads the PNGs as the `web-screens` artifact. That artifact replaces
-    the `ui-smoke` attachments as the review evidence for layout. The macOS `ui-smoke` job keeps
-    one XCUITest per window that launches the app in the UI-test environment, waits for the web
-    view to report `ready`, and asserts through `WebShellTests` (an in-process `WKWebView` with the
-    bundled UI and a fake bridge) that the fixture meeting renders and that the glass view sits
-    exactly under the sidebar frame. Unit tests for the bridges cover snapshot shape and command
-    routing. The SwiftUI accessibility identifiers (`meeting-<uuid>`, `nav-all`, `tab-summary`,
-    `settings-<section>`, the onboarding ids) become `data-testid` attributes and are asserted
-    by Playwright and `WebShellTests`; XCUITest is not relied on for elements inside the web
-    view because WebKit exposes HTML through `app.webViews` by role and label, not by
-    identifier. WP1 spikes that once and records what XCUITest can see.
+10. **Rollout.** rc.4 ships from `main` first with the three merged fixes. Then WP1 to WP4, each
+    PR deleting what it replaces. The release after WP4 is 0.10.0.
 
-11. **Rollout, window by window, each PR deleting what it replaces.** rc.4 ships from `main`
-    first with the three SwiftUI fixes, so the owner reviews the current state while this lands.
-    Then WP0 to WP5 below. The release after WP5 is 0.10.0.
-
-12. **Deviation rule.** Anything that turns out to need a private API, a network origin or a
-    second process is recorded as a deviation entry here before it is written.
-
-## Bridge contract, first cut
-
-Topics the web layer subscribes to and the view model each maps from. Names are final; fields
-follow the view models and are pinned by the fixtures in WP0.
-
-| Topic | Source | Contents |
-|---|---|---|
-| `app` | `AppController` | version, appearance, permissions summary, requested section or meeting (deep links), setup banner state |
-| `recording` | `RecordingController` via `RecordingControlPresentation` | state, elapsed, source, device, level at 20 Hz, auto-stop countdown, denied permissions |
-| `progress` | `ProcessingProgressModel` | queue and per-meeting stage |
-| `meetings.list` | `MeetingListViewModel` | filters, counts, tags, grouped rows, selection |
-| `meeting.detail` | `MeetingDetailViewModel` and `SpeakersViewModel` | header facts, speaker rows with suggestions and playback state, tags, templates, retention, summary sections, transcript, tasks, notes, export status, error |
-| `settings.<section>` | the six Settings view models and `SettingsOverviewViewModel` | the section's fields, statuses, errors, sidebar subtitles; the pairing QR crosses as PNG data |
-| `onboarding` | `OnboardingViewModel` | page, permissions, choices |
-
-Commands mirror the view models' public methods one to one (`meetings.setFilter`,
-`meetings.delete`, `meeting.selectSpeaker`, `meeting.setKeepAudio`, `meeting.reexport`,
-`meeting.saveScratchpad` with the debounce kept in the view model, `speakers.options(query)`
-with a reply, `speakers.play` and `speakers.stop` (playback stays `AVAudioPlayer`),
-`recording.start`, `recording.stop`, `settings.general.setLaunchAtLogin` and so on). Native
-surfaces: `ui.contextMenu`, `ui.confirm`, `ui.openPanel`, `system.openURL`,
-`system.revealInFinder`, `system.openSystemSettings(kind)`, `updates.check`,
-`window.open(settings | onboarding | main, section?)`, `window.close(onboarding)`,
-`layout.sidebar`. Events from the menu bar commands reach the page as `ui.focusSearch` (⌘F)
-and the existing deep links as fields of `app`. Sheets and popovers (speaker picker,
-acknowledgements, pairing QR) become in-page dialogs. The UI-test launch flags in
-`UITestScenario.swift` and the preview seed are unchanged; they still drive the fixtures.
+11. **Deviation rule.** Anything that needs a custom-drawn control in a window, a private API, a
+    network origin or a second process is recorded here as a deviation before it is written.
 
 ## Implementation steps
 
-WP0, scaffold and contract (no visible change):
-1. `apps/macos/web/` with Vite, React, Tailwind 4, Biome, Vitest, Playwright; `theme.css` with the
-   system-colour layer; `pnpm check` green; `web-ci.yml`.
-2. `BridgeContract.swift`, `contract.ts`, the fixture round trip and `BridgeContractTests`.
-3. `scripts/build-web.sh`, the `project.yml` script phase, Node and pnpm on the macOS CI jobs.
+WP1, system chrome (pure SwiftUI, deletion-heavy, visible at once):
+1. Main window: system title bar and toolbar, sidebar as `List(.sidebar)`, Record as a toolbar
+   `Menu`, meeting list as `List(.inset)` with day sections, native detail header and segmented
+   tab picker, actions in a toolbar `Menu`. Delete `NavigationColumn`, `NavRow`, `MeetingCard`'s
+   custom drawing, `Card`, the `Steno*ButtonStyle`s, `StatusChip`, `SectionLabel` and every
+   `Design/` symbol no longer referenced outside the menu bar and the panels. The four tab views
+   stay SwiftUI for one more PR so the window is never without content.
+2. Settings: `Label` rows, `Form(.grouped)` with default controls, `SettingsComponents.swift`
+   reduced to the shared rows that remain, `SettingsRedesignTests` updated.
+3. Onboarding: system forms and buttons; `OnboardingView.swift` loses its `Design/` imports.
 
-WP1, host:
-4. `AppSchemeHandler` (bundle files, SF Symbol endpoint, CSP headers), `WebBridge`,
-   `WebWindowView` with the glass view under a transparent web view, the navigation delegate,
-   the Debug dev-server switch. A Debug-only menu item opens an empty web window to prove the
-   pipeline on macOS 15 and 26 (Forge dump of the view tree as in PR #134). Spike in the same
-   PR: what XCUITest sees inside the web view (`app.webViews`, roles, labels) and whether a
-   transparent web view over `NSGlassEffectView` renders without a first-paint flash.
+WP2, web scaffold and contract (no visible change):
+4. `apps/macos/web/` with the stack in Decision 5 and `web-ci.yml`.
+5. `BridgeContract.swift`, `contract.ts`, fixtures, `BridgeContractTests`.
+6. `scripts/build-web.sh`, the `project.yml` script phase, Node and pnpm on the macOS CI jobs and
+   on Forge.
 
-WP2, main window:
-5. Sidebar, list and detail in React from the mockup; `MainWindowBridge`; the SwiftUI files under
-   `Main/` and the parts of `Design/` only they used are deleted in the same PR; `ui-smoke` and the
-   Playwright screens updated.
+WP3, the reading pane:
+7. `AppSchemeHandler`, `WebBridge`, `ReadingPaneView`, `ReadingPaneBridge`, the Debug dev-server
+   switch; the page with the four tabs from the mockup; `Main/Tabs/*.swift` and `SpeakerPicker`'s
+   in-transcript use deleted; `ReadingPaneTests`; Playwright screens; Forge check on macOS 26 that
+   the transparent pane has no first-paint flash and joins the header without a seam.
 
-WP3, Settings:
-6. The six sections as grouped cards; `SettingsBridge`; the `Settings` scene becomes a `Window`;
-   `Settings/*View*.swift` and `SettingsComponents.swift` deleted; `SettingsRedesignTests` reduced
-   to the view model parts.
-
-WP4, onboarding:
-7. Pages from `OnboardingView.swift` rebuilt; `OnboardingBridge`; SwiftUI onboarding deleted.
-
-WP5, cleanup:
-8. `Theme.swift` trimmed to the menu bar and panel needs, `ThemeTokensTests` reduced, the README
-   and `AGENTS.md` workspace table updated, deviations recorded here, version 0.10.0.
+WP4, cleanup:
+8. `Theme.swift` trimmed to the menu bar and panel needs, `ThemeTokensTests` reduced, README and
+   `AGENTS.md` workspace table updated, deviations recorded here, version 0.10.0.
 
 ## Verification
 
-- `pnpm check` and `web-ci.yml` green; the `web-screens` artifact reviewed for every PR from WP2 on.
-- `swift format lint --strict`, `app` and `ui-smoke` green; `WebShellTests` pass on macOS 15 CI
-  and on Forge (macOS 26).
-- A Forge view-tree dump for each window shows the glass view frame equal to the sidebar frame
-  reported over the bridge, in both appearances and with Reduce Transparency on.
-- The navigation delegate test proves an `https:` navigation from the page is cancelled and that
-  `connect-src 'none'` blocks `fetch`.
-- `AudioNeverLeavesTests`-style check: the web bundle contains no absolute `http` or `https` URL.
-- The owner reviews rc.4 before WP2, and a 0.10.0 pre-release after WP3.
+- WP1: `ui-smoke` attachments on macOS 15 and a Forge screenshot on macOS 26 show only system
+  components; a grep proves no file under `Main/`, `Settings/` or `Onboarding/` imports or
+  references `Design/` symbols other than `Theme.Space`.
+- WP2 and WP3: `pnpm check`, `web-ci.yml` and `web-screens` green and reviewed; `swift format lint
+  --strict`, `app`, `ui-smoke` and `ReadingPaneTests` green on macOS 15 CI and on Forge.
+- The web bundle contains no absolute `http` or `https` URL; the CSP and navigation tests pass.
+- The owner reviews rc.4 before WP1 merges, a pre-release after WP1, and 0.10.0 after WP3.
 
 ## Open questions
 
-- Forge tooling: Node 24 and pnpm 11 must be on the runner before WP1 merges. Nix is already
-  used for the Swift toolchain container; the same flake can pin both.
-- Whether the menu bar popover should follow in a later plan once the web components exist. The
-  mockup deliberately leaves it native.
-- `drawsBackground` on `WKWebView` is set through key-value coding; it is the established way to
-  get a transparent web view on macOS and Steno ships outside the App Store. If a macOS release
-  removes it, the fallback is an opaque sidebar fill sampled from the desktop, recorded as a
-  deviation.
-- SF Symbols served as raster masks scale with the backing factor; if a symbol needs multicolour
-  rendering the endpoint gains a `?rendering=` parameter.
+- Forge tooling: Node 24 and pnpm 11 before WP3 merges; the flake can pin both.
+- Whether the speakers row in the native header and the inline selects in the web transcript
+  should share one popover style or keep the system pop-up in the page and the native popover in
+  the header. Default: each uses its platform's own control.
+- `drawsBackground` on `WKWebView` is key-value coded; it is the established way to a transparent
+  web view on macOS and Steno ships outside the App Store. Fallback is an opaque pane painted in
+  the window background colour, recorded as a deviation.
