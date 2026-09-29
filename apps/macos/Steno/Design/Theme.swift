@@ -178,8 +178,7 @@ enum Theme {
     static let segmentContainerHeight: CGFloat = 28
     /// Horizontal padding inside a button.
     static let buttonInset: CGFloat = 14
-    /// Horizontal padding inside a chip; with 2 pt vertical the 12 pt text
-    /// makes a 20 pt chip.
+    /// Horizontal padding inside a chip.
     static let chipInset: CGFloat = 8
     /// Horizontal padding inside nav rows, inputs and the search field.
     static let rowInset: CGFloat = 10

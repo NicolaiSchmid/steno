@@ -129,11 +129,11 @@ struct StatusDot: View {
   }
 }
 
-/// A small chip, radius 6, 20 pt tall: 12 pt medium text at 2 x 8. Semantic
-/// state gets the colour at 12 % with the text in the colour; neutral
-/// metadata (tags, assignees, "Optional") gets a hairline and `muted` text,
-/// so only state reads as state. (The plan's 11 pt at 1 x 6 made a 15 pt
-/// sliver that read as a mistake beside the 21 pt title and 14 pt rows.)
+/// A small chip, radius 6, 20 pt tall. Semantic state gets the colour at
+/// 12 % with the text in the colour; neutral metadata (tags, assignees,
+/// "Optional") gets a hairline and `muted` text, so only state reads as
+/// state. (12 pt text, not the plan's 11: the 15 pt chip read as a sliver
+/// beside the 21 pt title.)
 struct StatusChip: View {
   enum Style: Equatable {
     case semantic(Color)

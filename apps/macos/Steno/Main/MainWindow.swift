@@ -11,10 +11,10 @@ import SwiftUI
 /// it too: the split view lays the content and detail columns out at their
 /// ideals before it honours the sidebar's minimum, and 220 + 380 + 440
 /// squeezed the nav column to 140 pt at 960, truncating the Record control
-/// and every nav row. No title, no toolbar
-/// items: the window style hides the title bar and each column paints its
-/// own opaque background. One detail view model per selected meeting,
-/// replaced when the selection changes.
+/// and every nav row. No title, no toolbar items: the window style hides
+/// the title bar and each column paints its own opaque background. One
+/// detail view model per selected meeting, replaced when the selection
+/// changes.
 struct MainWindow: View {
   let controller: AppController
   @State private var list: MeetingListViewModel

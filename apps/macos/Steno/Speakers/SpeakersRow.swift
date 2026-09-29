@@ -1,21 +1,17 @@
 import StenoCore
 import SwiftUI
 
-/// The header's Speakers row: a 13 pt `muted` label and one pill button
-/// with the first avatars, the confirmed names, "+n" for the rest and "n to
-/// confirm" while speakers are unnamed. The pill is the secondary button it
-/// behaves like: the button height, `raised` with a hairline, the `card`
-/// veil on hover, never a grey block. Clicking it toggles the
+/// The header's Speakers row: a 13 pt `muted` label and one secondary
+/// button with the first avatars, the confirmed names, "+n" for the rest
+/// and "n to confirm" while speakers are unnamed. Clicking it toggles the
 /// `SpeakersPopover`.
 struct SpeakersRow: View {
   let model: SpeakersViewModel
   @Binding var isPresented: Bool
-  @State private var hovering = false
-  @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
   static let shownAvatars = 3
-  /// The stacked avatars inside the pill; 5 pt under the button height's
-  /// text box so the ring has room.
+  /// The stacked avatars inside the button, 5 pt under its 32 pt height so
+  /// the ring around each has room.
   static let avatarSize: CGFloat = 22
 
   private var named: [String] {
@@ -57,7 +53,9 @@ struct SpeakersRow: View {
             }
           }
           if !shownNames.isEmpty {
-            Text("·").foregroundStyle(Color.stenoGhost)
+            Text("·")
+              .font(.steno(Theme.TextSize.xs))
+              .foregroundStyle(Color.stenoGhost)
             Text(shownNames.joined(separator: ", "))
               .font(.steno(Theme.TextSize.xs, weight: .medium))
               .foregroundStyle(Color.stenoStrong)
@@ -77,20 +75,8 @@ struct SpeakersRow: View {
             .font(.system(size: 10, weight: .semibold))
             .foregroundStyle(Color.stenoFaint)
         }
-        .padding(.horizontal, Theme.Space.md)
-        .frame(height: Theme.Control.buttonHeight)
-        .background(
-          ZStack {
-            Theme.Radius.md.shape.fill(Color.stenoRaised)
-            Theme.Radius.md.shape.fill(hovering ? Color.stenoCard : Color.clear)
-          }
-        )
-        .overlay(Theme.Radius.md.shape.hairline())
-        .contentShape(Theme.Radius.md.shape)
       }
-      .buttonStyle(.plain)
-      .onHover { hovering = $0 }
-      .animation(Motion.swap(reduceMotion: reduceMotion), value: hovering)
+      .buttonStyle(StenoSecondaryButtonStyle())
       .accessibilityIdentifier("speakers-row")
       .accessibilityLabel(summary)
       .help("Who spoke; click to name speakers")
