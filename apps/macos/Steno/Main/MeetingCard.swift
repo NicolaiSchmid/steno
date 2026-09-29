@@ -8,6 +8,9 @@ import SwiftUI
 struct MeetingCard: View {
   let group: MeetingListViewModel.DayGroup
   let selection: UUID?
+  /// Whether the list column has keyboard focus; the selected entry shows
+  /// it.
+  let listFocused: Bool
   let calendar: Calendar
   /// The progress model's stage title for a queued or processing meeting;
   /// nil otherwise.
@@ -25,7 +28,8 @@ struct MeetingCard: View {
         VStack(spacing: Theme.Space.md) {
           ForEach(group.meetings) { meeting in
             MeetingEntry(
-              meeting: meeting, isSelected: meeting.id == selection, calendar: calendar,
+              meeting: meeting, isSelected: meeting.id == selection,
+              isFocused: listFocused && meeting.id == selection, calendar: calendar,
               statusLine: statusLine(meeting), select: { select(meeting.id) },
               delete: { delete(meeting) }
             )
@@ -53,14 +57,19 @@ struct MeetingCard: View {
 
 /// One meeting in a card: a 2 pt rail, the display title, the start time
 /// with a chip only for queued, processing and failed, and a one-line
-/// preview. The whole 8 pt padded frame is the click target; selection is
-/// the `strong` rail and a `secondary` veil, hover a `card` veil, both over
-/// `Motion.functional`. No system selection colour anywhere. Id
-/// `meeting-<uuid>`, the state word as the accessibility value, the
-/// `isSelected` trait while selected.
+/// preview (the live entry's elapsed time comes with step 7a). The whole
+/// 8 pt padded frame is the click target; selection is the `strong` rail
+/// and a `secondary` veil, hover a `card` veil, both over
+/// `Motion.functional`; while the list has keyboard focus the selected
+/// entry wears the `ring` hairline the search field uses, so focus reads as
+/// one rule. No system selection colour anywhere. Id `meeting-<uuid>`, the
+/// state word as the accessibility value, the `isSelected` trait while
+/// selected.
 struct MeetingEntry: View {
   let meeting: Meeting
   let isSelected: Bool
+  /// The selected entry while the list column has keyboard focus.
+  let isFocused: Bool
   let calendar: Calendar
   let statusLine: String?
   let select: () -> Void
@@ -119,15 +128,17 @@ struct MeetingEntry: View {
       .padding(Theme.Space.sm)
       .frame(maxWidth: .infinity, alignment: .leading)
       .background(Theme.Radius.md.shape.fill(veil))
+      .overlay(Theme.Radius.md.shape.hairline(isFocused ? Color.stenoRing : Color.clear))
       .contentShape(Theme.Radius.md.shape)
     }
     .buttonStyle(.plain)
     .onHover { hovering = $0 }
     .animation(Motion.swap(reduceMotion: reduceMotion), value: hovering)
     .animation(Motion.swap(reduceMotion: reduceMotion), value: isSelected)
+    .animation(Motion.swap(reduceMotion: reduceMotion), value: isFocused)
     .contextMenu {
       Button("Delete Meeting…", role: .destructive, action: delete)
-        .disabled(!MeetingListView.canDelete(meeting))
+        .disabled(!MeetingListViewModel.canDelete(meeting))
     }
     .accessibilityIdentifier("meeting-\(meeting.id.uuidString)")
     .accessibilityValue(meeting.state.label)
@@ -173,7 +184,8 @@ private struct PulsingDot: View {
         LazyVStack(spacing: Theme.Space.md) {
           ForEach(groups) { group in
             MeetingCard(
-              group: group, selection: SampleData.meetingID, calendar: Self.utc,
+              group: group, selection: SampleData.meetingID, listFocused: true,
+              calendar: Self.utc,
               statusLine: { $0.state == .processing ? "Transcribing…" : nil },
               select: { _ in }, delete: { _ in })
           }

@@ -141,8 +141,9 @@ extension Meeting {
 }
 
 extension String {
-  /// The first non-blank line, trimmed; nil when there is none.
-  var firstLine: String? {
+  /// The first non-blank line, trimmed; nil when there is none. Only
+  /// `previewLine` reads it.
+  fileprivate var firstLine: String? {
     for line in split(omittingEmptySubsequences: true, whereSeparator: \.isNewline) {
       let trimmed = line.trimmingCharacters(in: .whitespaces)
       if !trimmed.isEmpty { return trimmed }

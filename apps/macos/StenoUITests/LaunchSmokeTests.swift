@@ -5,9 +5,11 @@ import XCTest
 /// fakes, synthetic audio, no permission prompts), the main window appears,
 /// the fixture meeting is listed and each of the four tabs is selectable and
 /// shows its content; the sidebar control starts and stops a recording; the
-/// floating panel shows the detection prompt and the recording bubble; and
-/// with the transcribe hold the processing card follows the run and makes
-/// way for the summary. The app cannot join the SwiftPM end-to-end test
+/// floating panel shows the detection prompt and the recording bubble; an
+/// empty store shows both empty states; and with the transcribe hold the
+/// processing card follows the run and makes way for the summary. Every
+/// launch runs in UTC so the card headers and derived titles do not move
+/// with the runner. The app cannot join the SwiftPM end-to-end test
 /// target, so these tests and the manual checklist are its end-to-end
 /// proof. Identifiers are pinned, never copy: titles and chip texts belong
 /// to other plans.
@@ -21,12 +23,21 @@ final class LaunchSmokeTests: XCTestCase {
     app.buttons["meeting-\(Self.fixtureID)"].firstMatch
   }
 
-  /// Launches with `arguments`, waits for the window and selects the
-  /// fixture meeting.
-  private func launchAndSelectTheFixtureMeeting(_ arguments: [String]) -> XCUIApplication {
+  /// The app under test, launched in UTC with `arguments`.
+  private func launch(_ arguments: [String]) -> XCUIApplication {
     let app = XCUIApplication()
     app.launchArguments = arguments
+    app.launchEnvironment["TZ"] = "UTC"
     app.launch()
+    return app
+  }
+
+  /// Launches with `arguments`, waits for the window and selects the
+  /// fixture meeting by clicking its entry, which also gives the list
+  /// keyboard focus. The entry carries the fixture's calendar title; the
+  /// detail heading is not consulted, so the list is what is proven.
+  private func launchAndSelectTheFixtureMeeting(_ arguments: [String]) -> XCUIApplication {
+    let app = launch(arguments)
 
     XCTAssertEqual(app.state, .runningForeground)
     let window = app.windows.firstMatch
@@ -35,10 +46,10 @@ final class LaunchSmokeTests: XCTestCase {
     let entry = fixtureEntry(in: app)
     XCTAssertTrue(entry.waitForExistence(timeout: 10), "the fixture meeting is not listed")
     XCTAssertTrue(
-      entry.label.contains("Produktstrategie 90/10")
-        || app.staticTexts["Produktstrategie 90/10"].firstMatch.exists,
+      entry.label.contains("Produktstrategie 90/10"),
       "the entry does not carry the fixture title: \(entry.label)")
-    if entry.isHittable { entry.click() }
+    XCTAssertTrue(entry.isHittable, "the fixture entry cannot be clicked")
+    entry.click()
     return app
   }
 
@@ -62,11 +73,14 @@ final class LaunchSmokeTests: XCTestCase {
     failed.click()
     XCTAssertTrue(
       fixtureEntry(in: app).waitForNonExistence(timeout: 5), "Failed still lists the ready fixture")
-    // The no-match empty state is read through its button: the `EmptyState`
-    // container's own id is not exposed as an element on macOS.
+    // The no-match empty state is read through its button and its title:
+    // the `EmptyState` container's own id is not exposed as an element on
+    // macOS, its title's `<id>-title` is.
     XCTAssertTrue(
       app.buttons["clear-filters"].firstMatch.waitForExistence(timeout: 5),
       "no empty state for the empty filter")
+    XCTAssertTrue(
+      app.staticTexts["empty-meetings-title"].firstMatch.exists, "the empty state has no title")
     XCTAssertTrue(failed.isSelected)
     all.click()
     XCTAssertTrue(fixtureEntry(in: app).waitForExistence(timeout: 5), "All did not show it again")
@@ -84,8 +98,11 @@ final class LaunchSmokeTests: XCTestCase {
     add(screenshot)
 
     // ⌘F focuses the field; a query nothing matches empties the list and
-    // offers "Clear filters".
+    // offers "Clear filters". SwiftUI moves focus on the next run-loop
+    // pass, so the typing waits for it (the value check below is the
+    // assertion; `hasFocus` alone is not trusted on a SwiftUI field).
     app.typeKey("f", modifierFlags: .command)
+    _ = waitUntil(timeout: 5) { search.hasFocus }
     app.typeText("zzzznothing")
     XCTAssertTrue(
       waitUntil(timeout: 5) { (search.value as? String) == "zzzznothing" },
@@ -110,8 +127,9 @@ final class LaunchSmokeTests: XCTestCase {
       NSPredicate(format: "identifier MATCHES %@", "meeting-[0-9A-F-]{36}"))
     XCTAssertTrue(
       waitUntil(timeout: 10) { entries.count == 5 }, "expected five entries, got \(entries.count)")
-    // 2026-09-24, the fixture's day, is a Thursday in every zone the runner
-    // could sit in.
+    // 2026-09-24, the fixture's day, is a Thursday in the launch's UTC zone;
+    // the fixture's own title is its calendar title, so only the card
+    // header can say so.
     let weekday = app.staticTexts.allElementsBoundByIndex.contains { text in
       text.label.contains("Thursday") || ((text.value as? String)?.contains("Thursday") ?? false)
     }
@@ -127,6 +145,29 @@ final class LaunchSmokeTests: XCTestCase {
     app.typeKey(.upArrow, modifierFlags: [])
     XCTAssertTrue(
       waitUntil(timeout: 5) { fixture.isSelected }, "the up arrow did not return to the fixture")
+  }
+
+  /// `-steno-empty`: nothing is seeded, so the list shows "No meetings yet"
+  /// and the detail pane its own empty state, both read through their title
+  /// ids; no entry is listed, no "Clear filters" is offered, and the record
+  /// control is still there.
+  func testEmptyStoreShowsBothEmptyStates() throws {
+    let app = launch(["-steno-ui-testing", "-steno-empty"])
+
+    let window = app.windows.firstMatch
+    XCTAssertTrue(window.waitForExistence(timeout: 10), "no window appeared")
+    XCTAssertTrue(
+      app.buttons["sidebar-record"].firstMatch.waitForExistence(timeout: 10),
+      "the record control is missing")
+    XCTAssertTrue(
+      app.staticTexts["empty-meetings-title"].firstMatch.waitForExistence(timeout: 10),
+      "the list's empty state is missing")
+    XCTAssertTrue(
+      app.staticTexts["empty-detail-title"].firstMatch.waitForExistence(timeout: 10),
+      "the detail's empty state is missing")
+    XCTAssertEqual(meetingRowCount(in: app), 0, "nothing is listed")
+    XCTAssertFalse(
+      app.buttons["clear-filters"].firstMatch.exists, "an empty store offers no Clear filters")
   }
 
   func testMainWindowOpens() throws {
@@ -199,9 +240,7 @@ final class LaunchSmokeTests: XCTestCase {
   /// row. The synthetic backend delivers audio at once, so this stays well
   /// under 30 seconds.
   func testSidebarStartsAndStopsARecording() throws {
-    let app = XCUIApplication()
-    app.launchArguments = ["-steno-ui-testing"]
-    app.launch()
+    let app = launch(["-steno-ui-testing"])
 
     let window = app.windows.firstMatch
     XCTAssertTrue(window.waitForExistence(timeout: 10), "no window appeared")
@@ -229,9 +268,7 @@ final class LaunchSmokeTests: XCTestCase {
   /// prompt for "Zoom" appears; Record turns the same panel into the
   /// recording bubble; the bubble's stop hides it.
   func testPromptMorphsIntoTheBubbleAndStopHidesIt() throws {
-    let app = XCUIApplication()
-    app.launchArguments = ["-steno-ui-testing", "-steno-show-prompt"]
-    app.launch()
+    let app = launch(["-steno-ui-testing", "-steno-show-prompt"])
 
     let record = app.buttons["prompt-record"].firstMatch
     XCTAssertTrue(record.waitForExistence(timeout: 10), "the detection prompt did not appear")
@@ -265,9 +302,7 @@ final class LaunchSmokeTests: XCTestCase {
   /// path the stop square must be reachable through accessibility, which
   /// pins the asymmetry `clickCenter` works around.
   func testBubbleFollowsARecordingStartedFromTheWindow() throws {
-    let app = XCUIApplication()
-    app.launchArguments = ["-steno-ui-testing"]
-    app.launch()
+    let app = launch(["-steno-ui-testing"])
 
     let window = app.windows.firstMatch
     XCTAssertTrue(window.waitForExistence(timeout: 10), "no window appeared")
@@ -305,9 +340,7 @@ final class LaunchSmokeTests: XCTestCase {
   /// Ids only; the window's presence is read through `sidebar-stop`, since
   /// the panel may be listed among `app.windows`.
   func testBubbleOpenReopensAClosedMainWindow() throws {
-    let app = XCUIApplication()
-    app.launchArguments = ["-steno-ui-testing"]
-    app.launch()
+    let app = launch(["-steno-ui-testing"])
 
     let window = app.windows.firstMatch
     XCTAssertTrue(window.waitForExistence(timeout: 10), "no window appeared")
@@ -348,9 +381,7 @@ final class LaunchSmokeTests: XCTestCase {
   /// before "Not now", which would otherwise sit under it on the runner's
   /// one display; "Not now" hides the banner for the launch.
   func testSetupBannerLinksToSettingsAndHides() throws {
-    let app = XCUIApplication()
-    app.launchArguments = ["-steno-ui-testing"]
-    app.launch()
+    let app = launch(["-steno-ui-testing"])
 
     let window = app.windows.firstMatch
     XCTAssertTrue(window.waitForExistence(timeout: 10), "no window appeared")
@@ -424,17 +455,13 @@ final class LaunchSmokeTests: XCTestCase {
     return Set(elements.allElementsBoundByIndex.map(\.identifier)).count
   }
 
-  /// Rows carrying a `meeting-<uuid>` identifier, and only those: the
-  /// redesign's `meeting-list` container must not count. The list's cells
-  /// are counted with one query when they carry the row identifier; SwiftUI
-  /// otherwise stamps a row's identifier on each of the row's text elements
-  /// as well, so the fallback counts distinct identifiers, not elements.
+  /// The entries, each a button carrying a `meeting-<uuid>` identifier and
+  /// nothing else in the window does: the `meeting-list` container and the
+  /// entry's texts are not buttons, so one query counts rows.
   private func meetingRowCount(in app: XCUIApplication) -> Int {
-    let row = NSPredicate(format: "identifier MATCHES %@", "meeting-[0-9A-F-]{36}")
-    let cells = app.descendants(matching: .cell).matching(row).count
-    if cells > 0 { return cells }
-    let elements = app.descendants(matching: .any).matching(row)
-    return Set(elements.allElementsBoundByIndex.map(\.identifier)).count
+    app.buttons.matching(
+      NSPredicate(format: "identifier MATCHES %@", "meeting-[0-9A-F-]{36}")
+    ).count
   }
 
   /// Polls `condition` on the main run loop until it holds or `timeout` passes.

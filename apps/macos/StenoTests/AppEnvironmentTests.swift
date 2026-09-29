@@ -22,7 +22,7 @@ final class AppEnvironmentTests: XCTestCase {
   /// has a count, the meetings span three days, and the processing meeting
   /// has a master on disk so the pipeline resumes it instead of failing it.
   func testRichSeedSpansThreeDaysAndEveryState() async throws {
-    let environment = try await TestSupport.environment(seedSet: .rich)
+    let environment = try await TestSupport.environment(fixtures: .rich)
     let meetings = try await environment.store.meetings().sorted { $0.startedAt > $1.startedAt }
     XCTAssertEqual(meetings.count, 5)
     XCTAssertEqual(meetings.first?.id, SampleData.meetingID, "the fixture stays newest")
@@ -52,6 +52,33 @@ final class AppEnvironmentTests: XCTestCase {
     XCTAssertTrue(FileManager.default.fileExists(atPath: asset.url.path), asset.url.path)
     let ready = meetings.filter { $0.state == .ready && $0.id != SampleData.meetingID }
     XCTAssertEqual(ready.map { $0.summary?.sections.first?.bullets.count }, [2, 2])
+  }
+
+  /// The seeded fixture is a calendar meeting, so the list entry shows its
+  /// calendar title and not a derived weekday; the smoke tests find it by
+  /// that title in the entry.
+  func testSampleMeetingKeepsItsCalendarTitle() {
+    let meeting = SampleData.meeting()
+    XCTAssertEqual(meeting.titleOrigin, .calendar)
+    XCTAssertEqual(
+      meeting.displayTitle(now: TestSupport.now, calendar: .current, locale: .current),
+      "Produktstrategie 90/10")
+  }
+
+  /// The rich seed's processing meeting resumes at launch as the product
+  /// resumes one left over by a crash: the synthetic master is found under
+  /// the remapped asset, the fakes finish it, the failed fixture is left
+  /// alone and nothing is warned about.
+  func testRichSeedProcessingMeetingResumesInsteadOfFailing() async throws {
+    let environment = try await TestSupport.environment(fixtures: .rich)
+    let resumed = await environment.resumeUnfinishedProcessing()
+    XCTAssertEqual(resumed, [SampleData.uuid(102)])
+    await environment.pipeline.waitUntilIdle()
+    let processed = try await environment.store.meeting(id: SampleData.uuid(102))
+    XCTAssertEqual(processed?.state, .ready, String(describing: processed?.state))
+    let failed = try await environment.store.meeting(id: SampleData.uuid(104))
+    XCTAssertEqual(failed?.state.isFailed, true, "the failed fixture is left alone")
+    XCTAssertEqual(environment.startupWarnings, [])
   }
 
   func testReloadPipelineReplacesTheInstance() async throws {

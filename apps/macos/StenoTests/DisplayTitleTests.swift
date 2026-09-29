@@ -47,6 +47,22 @@ final class DisplayTitleTests: XCTestCase {
     XCTAssertTrue(title.contains("9:00"), title)
   }
 
+  /// The weekday window is six days inclusive: on the seventh day the
+  /// title switches to the month and day.
+  func testDefaultTitleSevenDaysOldReadsMonthDay() {
+    let now = startedAt.addingTimeInterval(7 * 86_400 + 3_600)
+    let title = meeting(.default).displayTitle(now: now, calendar: calendar("UTC"), locale: locale)
+    XCTAssertTrue(title.hasPrefix("Sep 24 "), title)
+  }
+
+  /// A meeting dated after `now` (a clock set back) reads as month and day
+  /// rather than claiming a weekday.
+  func testDefaultTitleInTheFutureReadsMonthDay() {
+    let now = startedAt.addingTimeInterval(-86_400)
+    let title = meeting(.default).displayTitle(now: now, calendar: calendar("UTC"), locale: locale)
+    XCTAssertTrue(title.hasPrefix("Sep 24 "), title)
+  }
+
   func testCalendarTitleRendersUnchanged() {
     let title = meeting(.calendar, title: "Produktstrategie 90/10")
       .displayTitle(now: startedAt, calendar: calendar("UTC"), locale: locale)

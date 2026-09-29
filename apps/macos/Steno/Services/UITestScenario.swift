@@ -10,7 +10,7 @@ struct UITestScenario: Equatable, Sendable {
   /// The preview store stays empty: the empty states of the list and the
   /// detail pane.
   static let emptyFlag = "-steno-empty"
-  /// The preview store gets `PreviewSeed.Set.rich`: three days, every state.
+  /// The preview store gets `PreviewSeed.Fixtures.rich`: three days, every state.
   static let richSeedFlag = "-steno-rich-seed"
   /// After launch, a call recording starts from the window, as the sidebar
   /// control would start it, so the live row and the Stop controls show.
@@ -29,7 +29,7 @@ struct UITestScenario: Equatable, Sendable {
   /// After launch, a detection prompt for "Zoom" is shown.
   var showPrompt: Bool
   /// What the preview store is seeded with; nil under `-steno-empty`.
-  var seed: PreviewSeed.Set?
+  var seed: PreviewSeed.Fixtures?
   /// A call recording starts once the controller has launched.
   var startsRecording: Bool
   /// The preview's speech engine holds each transcribe for a minute and the

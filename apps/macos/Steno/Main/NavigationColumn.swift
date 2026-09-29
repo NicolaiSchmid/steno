@@ -5,7 +5,8 @@ import SwiftUI
 /// bottom; the rows in between scroll if the tags overflow. Filters are
 /// `NavRow` buttons over the same `stateFilter` and `tagFilter` the list
 /// model always had, so nothing here is new behaviour. The column paints
-/// its own opaque `sidebar` fill so the split view's vibrancy never shows.
+/// its own opaque `sidebar` fill so the split view's vibrancy never shows,
+/// and a `border` hairline on its right edge.
 struct NavigationColumn: View {
   let controller: AppController
   let list: MeetingListViewModel
@@ -60,5 +61,8 @@ struct NavigationColumn: View {
     }
     .frame(maxWidth: .infinity, maxHeight: .infinity)
     .background(Color.stenoSidebar)
+    .overlay(alignment: .trailing) {
+      Color.stenoBorder.frame(width: Theme.Space.hairline)
+    }
   }
 }

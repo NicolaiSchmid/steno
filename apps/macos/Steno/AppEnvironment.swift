@@ -302,7 +302,7 @@ final class AppEnvironment {
     clock: any Clock<Duration> = ContinuousClock(),
     now: @escaping @Sendable () -> Date = Date.init,
     handover: HandoverService? = nil,
-    seed: PreviewSeed.Set? = .sample,
+    seed: PreviewSeed.Fixtures? = .sample,
     makeCaptureSession: MakeCaptureSession? = nil,
     processActivity: FakeProcessAudioActivity = FakeProcessAudioActivity(),
     makeSpeechEngine: (@Sendable () -> any SpeechEngine)? = nil,
@@ -324,7 +324,7 @@ final class AppEnvironment {
     let holdTranscribe: Duration? =
       CommandLine.arguments.contains(holdTranscribeArgument) ? uiTestingTranscribeHold : nil
     if let seed {
-      try await PreviewSeed.seed(store, set: seed, audioFolder: settings.audioFolder)
+      try await PreviewSeed.seed(store, fixtures: seed, audioFolder: settings.audioFolder)
       if holdTranscribe != nil {
         try await PreviewSeed.queueForProcessing(store, audioFolder: settings.audioFolder)
       }
@@ -410,7 +410,7 @@ final class AppEnvironment {
 /// and every entry state can be seen and screenshotted.
 enum PreviewSeed {
   /// Which fixtures the preview store starts with.
-  enum Set: Equatable, Sendable {
+  enum Fixtures: Equatable, Sendable {
     /// The sample meeting alone; the unit tests' counts assume it.
     case sample
     /// The sample meeting plus `richMeetings()`: a processing and a failed
@@ -421,9 +421,9 @@ enum PreviewSeed {
     case rich
   }
 
-  static func seed(_ store: MeetingStore, set: Set = .sample, audioFolder: URL? = nil)
-    async throws
-  {
+  static func seed(
+    _ store: MeetingStore, fixtures: Fixtures = .sample, audioFolder: URL? = nil
+  ) async throws {
     for person in SampleData.persons() { try await store.save(person) }
     let meeting = SampleData.meeting()
     try await store.save(meeting, asset: SampleData.audioAsset())
@@ -432,7 +432,7 @@ enum PreviewSeed {
       meeting, segments: SampleData.segments(), speakers: SampleData.speakers())
     try await store.replaceSummary(
       meeting, tasks: SampleData.tasks(), decisions: SampleData.decisions().map(\.text))
-    guard set == .rich else { return }
+    guard fixtures == .rich else { return }
     for extra in richMeetings() {
       if extra.state == .processing, let audioFolder {
         try await saveWithSyntheticMaster(extra, store: store, audioFolder: audioFolder)

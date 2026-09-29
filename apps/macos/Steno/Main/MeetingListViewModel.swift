@@ -3,9 +3,9 @@ import StenoCore
 
 /// The list column: every meeting from `observeMeetings()`, filtered by
 /// state, tag and an FTS query over `MeetingStore.search`, grouped by
-/// calendar day for the cards. The selection survives list updates as long
-/// as the meeting exists; `selectNext()` and `selectPrevious()` walk the
-/// groups for the arrow keys.
+/// calendar day for the cards. The selection survives list updates and
+/// clears only when a meeting the list had is gone; `selectNext()` and
+/// `selectPrevious()` walk the groups for the arrow keys.
 @MainActor
 @Observable
 final class MeetingListViewModel {
@@ -49,16 +49,16 @@ final class MeetingListViewModel {
     /// Buckets `meetings` (already newest first) by the start of their day
     /// in `calendar`, keeping the order, so the groups run newest first too.
     static func group(_ meetings: [Meeting], calendar: Calendar) -> [DayGroup] {
-      var groups: [DayGroup] = []
+      var buckets: [(day: Date, meetings: [Meeting])] = []
       for meeting in meetings {
         let day = calendar.startOfDay(for: meeting.startedAt)
-        if let last = groups.indices.last, groups[last].day == day {
-          groups[last] = DayGroup(day: day, meetings: groups[last].meetings + [meeting])
+        if let last = buckets.indices.last, buckets[last].day == day {
+          buckets[last].meetings.append(meeting)
         } else {
-          groups.append(DayGroup(day: day, meetings: [meeting]))
+          buckets.append((day: day, meetings: [meeting]))
         }
       }
-      return groups
+      return buckets.map { DayGroup(day: $0.day, meetings: $0.meetings) }
     }
   }
 
@@ -93,11 +93,16 @@ final class MeetingListViewModel {
   }
 
   /// Follows `observeMeetings()` until cancelled (the window's `.task`).
+  /// Each update names the meetings it removed, so a selection made ahead
+  /// of its row (`AppController.requestedMeetingID` right after a recording
+  /// starts) survives an emission snapshotted before the insert.
   func observe() async {
     do {
       for try await meetings in store.observeMeetings() {
+        let previous = all
         all = meetings.sorted { $0.startedAt > $1.startedAt }
-        apply()
+        let current = Set(all.map(\.id))
+        apply(removed: previous.filter { !current.contains($0.id) })
       }
     } catch {
       self.error = "Meetings could not be loaded: \(error)"
@@ -121,12 +126,6 @@ final class MeetingListViewModel {
     return stateFilter == .all ? "Meetings" : stateFilter.title
   }
 
-  /// Whether the empty list is empty because of the query or the filters,
-  /// as opposed to an empty store.
-  var isFiltering: Bool {
-    stateFilter != .all || tagFilter != nil || !query.trimmingCharacters(in: .whitespaces).isEmpty
-  }
-
   /// The "Clear filters" action of the no-match empty state.
   func clearFilters() {
     query = ""
@@ -140,13 +139,17 @@ final class MeetingListViewModel {
     return all.first { $0.id == selection }
   }
 
-  private func apply() {
+  /// Rebuilds the visible list; `removed` are the meetings the last store
+  /// update dropped, the only thing that clears the selection. A filter
+  /// never drops it, and neither does an update that has not yet caught up
+  /// with a selection made ahead of its row.
+  private func apply(removed: [Meeting] = []) {
     var filtered = all.filter { stateFilter.matches($0) }
     if let tagFilter { filtered = filtered.filter { $0.tags.contains(tagFilter) } }
     if let searchHits { filtered = filtered.filter { searchHits.contains($0.id) } }
     meetings = filtered
     dayGroups = DayGroup.group(filtered, calendar: calendar)
-    if let selection, !all.contains(where: { $0.id == selection }) {
+    if let selection, removed.contains(where: { $0.id == selection }) {
       self.selection = nil
     }
   }
@@ -191,11 +194,13 @@ final class MeetingListViewModel {
   func selectPrevious() { moveSelection(by: -1) }
 
   /// Both arrows land on the first visible entry when nothing visible is
-  /// selected, and stay put at either end.
+  /// selected, stay put at either end, and do nothing when the filter shows
+  /// no entry, so a hidden selection is never dropped.
   private func moveSelection(by offset: Int) {
     let ids = visibleIDs
+    guard let first = ids.first else { return }
     guard let current = selection, let index = ids.firstIndex(of: current) else {
-      selection = ids.first
+      selection = first
       return
     }
     let target = index + offset
@@ -206,6 +211,15 @@ final class MeetingListViewModel {
 
   /// The meeting the view is asking the user to confirm deleting.
   var pendingDeletion: Meeting?
+
+  /// The store refuses while the capture writer or the pipeline holds the
+  /// meeting's files; the controls say so before the attempt.
+  static func canDelete(_ meeting: Meeting) -> Bool {
+    switch meeting.state {
+    case .recording, .processing: false
+    case .queued, .ready, .failed: true
+    }
+  }
 
   /// Core's `MeetingStore.delete(meetingID:)`: rows, receipt and the
   /// meeting's files go; a meeting still recording or processing is

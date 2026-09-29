@@ -6,7 +6,10 @@ import SwiftUI
 /// a confirmation (the entry's context menu, the Delete key). Not a `List`:
 /// AppKit's row selection follows the system accent and cannot be
 /// recoloured, so the entries own their rail-and-veil selection and the
-/// column owns the arrow keys. The selection scrolls into view.
+/// column owns the arrow keys. The list takes keyboard focus when the
+/// window opens, so the arrows work before a click, and the selected entry
+/// wears the `ring` hairline while it has focus. The selection scrolls
+/// into view.
 struct MeetingListView: View {
   @Bindable var model: MeetingListViewModel
   /// Where the pipeline is with each queued or processing meeting, passed
@@ -24,6 +27,10 @@ struct MeetingListView: View {
     }
     .frame(maxWidth: .infinity, maxHeight: .infinity)
     .background(Color.stenoBackground)
+    .overlay(alignment: .trailing) {
+      Color.stenoBorder.frame(width: Theme.Space.hairline)
+    }
+    .defaultFocus($listFocused, true)
     .focusedSceneValue(\.searchFocus, SearchFocusAction { searchFocused = true })
     .confirmationDialog(
       "Delete “\(model.pendingDeletion?.displayTitle(calendar: model.calendar) ?? "")”?",
@@ -41,15 +48,6 @@ struct MeetingListView: View {
       Text(
         "The transcript, summary, tasks and the recording on this Mac are removed. Files already exported to Obsidian stay. People stay."
       )
-    }
-  }
-
-  /// The store refuses while the capture writer or the pipeline holds the
-  /// meeting's files; the controls say so before the attempt.
-  static func canDelete(_ meeting: Meeting) -> Bool {
-    switch meeting.state {
-    case .recording, .processing: false
-    case .queued, .ready, .failed: true
     }
   }
 
@@ -77,55 +75,65 @@ struct MeetingListView: View {
   }
 
   private var cards: some View {
-    ZStack {
-      if model.meetings.isEmpty {
-        emptyState
-          .padding(Theme.Space.lg)
-      } else {
-        ScrollViewReader { proxy in
-          ScrollView {
-            LazyVStack(spacing: Theme.Space.md) {
-              ForEach(model.dayGroups) { group in
-                MeetingCard(
-                  group: group, selection: model.selection, calendar: model.calendar,
-                  statusLine: { progress.entry(for: $0.id)?.title },
-                  select: { id in
-                    model.selection = id
-                    listFocused = true
-                  },
-                  delete: { model.pendingDeletion = $0 })
+    listBehaviour(
+      ZStack {
+        if model.meetings.isEmpty {
+          emptyState
+            .padding(Theme.Space.lg)
+        } else {
+          ScrollViewReader { proxy in
+            ScrollView {
+              LazyVStack(spacing: Theme.Space.md) {
+                ForEach(model.dayGroups) { group in
+                  MeetingCard(
+                    group: group, selection: model.selection, listFocused: listFocused,
+                    calendar: model.calendar,
+                    statusLine: { progress.entry(for: $0.id)?.title },
+                    select: { id in
+                      model.selection = id
+                      listFocused = true
+                    },
+                    delete: { model.pendingDeletion = $0 })
+                }
               }
+              .padding(.horizontal, Theme.Space.lg)
+              .padding(.bottom, Theme.Space.xl)
             }
-            .padding(.horizontal, Theme.Space.lg)
-            .padding(.bottom, Theme.Space.xl)
-          }
-          .onChange(of: model.selection) { _, selection in
-            guard let selection else { return }
-            withAnimation(reduceMotion ? nil : Motion.spatial) {
-              proxy.scrollTo(selection)
+            .onChange(of: model.selection) { _, selection in
+              guard let selection else { return }
+              withAnimation(reduceMotion ? nil : Motion.spatial) {
+                proxy.scrollTo(selection)
+              }
             }
           }
         }
       }
-    }
-    .frame(maxWidth: .infinity, maxHeight: .infinity)
-    .focusable()
-    .focusEffectDisabled()
-    .focused($listFocused)
-    .onMoveCommand { direction in
-      switch direction {
-      case .down: model.selectNext()
-      case .up: model.selectPrevious()
-      default: break
+      .frame(maxWidth: .infinity, maxHeight: .infinity))
+  }
+
+  /// The column's keyboard and accessibility behaviour, kept apart from the
+  /// scroll layout: focus without the system ring, the arrow keys, the
+  /// Delete key behind `canDelete`, and the labelled container.
+  private func listBehaviour(_ content: some View) -> some View {
+    content
+      .focusable()
+      .focusEffectDisabled()
+      .focused($listFocused)
+      .onMoveCommand { direction in
+        switch direction {
+        case .down: model.selectNext()
+        case .up: model.selectPrevious()
+        default: break
+        }
       }
-    }
-    .onDeleteCommand {
-      guard let meeting = model.selectedMeeting, Self.canDelete(meeting) else { return }
-      model.pendingDeletion = meeting
-    }
-    .accessibilityElement(children: .contain)
-    .accessibilityLabel("Meetings")
-    .accessibilityIdentifier("meeting-list")
+      .onDeleteCommand {
+        guard let meeting = model.selectedMeeting, MeetingListViewModel.canDelete(meeting)
+        else { return }
+        model.pendingDeletion = meeting
+      }
+      .accessibilityElement(children: .contain)
+      .accessibilityLabel("Meetings")
+      .accessibilityIdentifier("meeting-list")
   }
 
   @ViewBuilder
@@ -138,7 +146,7 @@ struct MeetingListView: View {
     } else {
       EmptyState(
         symbol: "magnifyingglass", title: "No meetings match",
-        body: "Nothing matches the search and the filters.",
+        body: "Nothing matches this search or filter.",
         action: .init(title: "Clear filters", id: "clear-filters") { model.clearFilters() },
         id: "empty-meetings")
     }

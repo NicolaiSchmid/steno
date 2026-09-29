@@ -186,7 +186,7 @@ enum Theme {
     /// The empty state's icon well and the glyph inside it.
     static let emptyWellSize: CGFloat = 48
     static let emptySymbolSize: CGFloat = 20
-    /// The Start recording CTA: the glyph well before the label and the
+    /// The Record call CTA: the glyph well before the label and the
     /// trailing chevron segment that opens the in-person menu.
     static let ctaWellSize: CGFloat = 28
     static let ctaMenuWidth: CGFloat = 28

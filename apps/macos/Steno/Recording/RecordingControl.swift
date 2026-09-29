@@ -92,14 +92,20 @@ struct RecordingControl: View {
       }
       .modifier(CTABox())
       .opacity(presentation.isEnabled ? 1 : Motion.disabledOpacity)
-    // The busy states keep the box while a spinner stands in for the label.
+    // The busy states keep the box, and the button, while a spinner stands
+    // in for the label, so VoiceOver reads one disabled control through the
+    // transition.
     case .starting:
-      ProgressView()
-        .controlSize(.small)
-        .tint(Color.stenoOnAccent)
-        .frame(maxWidth: .infinity)
-        .modifier(CTABox())
-        .accessibilityLabel(presentation.label)
+      Button(action: {}) {
+        ProgressView()
+          .controlSize(.small)
+          .tint(Color.stenoOnAccent)
+          .frame(maxWidth: .infinity)
+      }
+      .buttonStyle(CTASegmentStyle())
+      .modifier(CTABox())
+      .disabled(true)
+      .accessibilityLabel(presentation.label)
     case .recording(let since):
       Button {
         Task { await recorder.stop() }
