@@ -168,26 +168,34 @@ struct MeetingDetailView: View {
     }
   }
 
-  /// One 12 pt `muted` line, facts joined by " · ": date and time and the
-  /// source (unless the derived title and its chip already say them),
-  /// duration once known, language, token count.
+  /// One 12 pt `muted` line, `metaFacts(for:)` joined by " · ".
   private func metaRow(_ meeting: Meeting) -> some View {
-    var facts: [String] = []
-    if !meeting.isTitleDerived {
-      facts.append(meeting.startedAt.formatted(.dateTime.year().month().day().hour().minute()))
-      facts.append(meeting.source.label)
-    }
-    if meeting.duration > 0 { facts.append(meeting.duration.clockText) }
-    if let language = meeting.language { facts.append(language.localizedName()) }
-    if let usage = meeting.llmUsage {
-      facts.append("\(usage.promptTokens + usage.completionTokens) tokens")
-    }
-    return Text(facts.joined(separator: " · "))
+    Text(Self.metaFacts(for: meeting).joined(separator: " · "))
       .font(.steno(Theme.TextSize.xxs))
       .monospacedDigit()
       .foregroundStyle(Color.stenoMutedForeground)
       .textSelection(.enabled)
       .accessibilityIdentifier("meeting-meta")
+  }
+
+  /// The meta line's facts, in order: date and time and the source (unless
+  /// the derived title and its chip already say them), duration once known,
+  /// language. The token count stays in the data and off the screen: it is
+  /// developer vocabulary, not a fact about the meeting. `DetailStatesTests`
+  /// pins the list.
+  nonisolated static func metaFacts(
+    for meeting: Meeting, locale: Locale = .current, timeZone: TimeZone = .current
+  ) -> [String] {
+    var facts: [String] = []
+    if !meeting.isTitleDerived {
+      let when = Date.FormatStyle(locale: locale, timeZone: timeZone)
+        .year().month().day().hour().minute()
+      facts.append(meeting.startedAt.formatted(when))
+      facts.append(meeting.source.label)
+    }
+    if meeting.duration > 0 { facts.append(meeting.duration.clockText) }
+    if let language = meeting.language { facts.append(language.localizedName(in: locale)) }
+    return facts
   }
 
   /// The retention row of the header: what happens to the audio file when
@@ -334,10 +342,14 @@ struct MeetingDetailView: View {
     .padding(.vertical, Theme.Space.md)
   }
 
+  /// The status line wraps to a second line at the pane minimum rather than
+  /// truncating mid-word beside its button.
   private func footerText(_ text: String) -> some View {
     Text(text)
       .font(.steno(Theme.TextSize.xxs))
       .foregroundStyle(Color.stenoMutedForeground)
+      .lineLimit(2)
+      .fixedSize(horizontal: false, vertical: true)
       .accessibilityIdentifier("footer-export-status")
   }
 
@@ -351,8 +363,8 @@ struct MeetingDetailView: View {
   }
 }
 
-/// "Add tag" as the plan draws it: a 10 pt `plus` before 12 pt text, both in
-/// the ghost button's colour.
+/// "Add tag": the chip glyph (`chipGlyphSize`, one under the 12 pt text)
+/// before 12 pt text, both in the ghost button's colour.
 private struct TagButtonLabelStyle: LabelStyle {
   func makeBody(configuration: Configuration) -> some View {
     HStack(spacing: Theme.Space.xs) {

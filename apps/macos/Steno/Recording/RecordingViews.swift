@@ -127,12 +127,18 @@ struct StopButton: View {
     case .header:
       StopLabel(since: since)
     case .sidebar(let levels):
-      HStack(spacing: Theme.Space.sm) {
-        StopLabel(since: since)
-        Spacer(minLength: Theme.Space.sm)
-        if let levels {
-          CompactLevelBars(levels: levels)
+      // The label never wraps (a clock split over two lines read as
+      // "00:0 / 2" in the 200 pt column); the meter is what gives way when
+      // the box cannot hold both.
+      ViewThatFits(in: .horizontal) {
+        HStack(spacing: Theme.Space.sm) {
+          StopLabel(since: since).fixedSize()
+          Spacer(minLength: Theme.Space.sm)
+          if let levels {
+            CompactLevelBars(levels: levels)
+          }
         }
+        StopLabel(since: since).fixedSize()
       }
       .padding(.horizontal, Theme.Control.buttonInset)
     }

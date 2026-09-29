@@ -43,14 +43,15 @@ struct SummaryTab: View {
 }
 
 /// One section of the summary: the 16 pt semibold heading, then the
-/// bullets 8 pt apart. The column's 24 pt spacing separates sections (and
-/// the card above the first).
+/// bullets 12 pt apart, so multi-line bullets read as items and not as one
+/// block. The column's 24 pt spacing separates sections (and the card above
+/// the first).
 struct SummarySectionView: View {
   let heading: String
   let bullets: [String]
 
   var body: some View {
-    VStack(alignment: .leading, spacing: Theme.Space.sm) {
+    VStack(alignment: .leading, spacing: Theme.Space.md) {
       MarkdownBlockView(block: .heading(heading))
       ForEach(Array(bullets.enumerated()), id: \.offset) { _, bullet in
         MarkdownBlockView(block: .bullet(bullet))

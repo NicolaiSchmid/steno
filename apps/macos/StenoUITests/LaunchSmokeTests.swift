@@ -69,6 +69,11 @@ final class LaunchSmokeTests: XCTestCase {
       record.frame.maxY, failed.frame.minY, "the record control sits above the nav rows")
     let all = app.buttons["nav-all"].firstMatch
     XCTAssertTrue(all.isSelected, "All is the selected filter at launch")
+    // The nav column's 200 pt minimum less its 12 pt gutters: narrower, the
+    // Record control and every row truncate ("Re c…", "In…").
+    XCTAssertGreaterThanOrEqual(
+      all.frame.width, 175,
+      "the nav column is about \(all.frame.width + 24) wide, under its 200 pt minimum")
 
     failed.click()
     XCTAssertTrue(

@@ -179,7 +179,7 @@ enum Theme {
     /// Horizontal padding inside a button.
     static let buttonInset: CGFloat = 14
     /// Horizontal padding inside a chip.
-    static let chipInset: CGFloat = 6
+    static let chipInset: CGFloat = 8
     /// Horizontal padding inside nav rows, inputs and the search field.
     static let rowInset: CGFloat = 10
     /// Vertical padding inside the menu bar popover's queue and recent rows
@@ -187,8 +187,8 @@ enum Theme {
     static let menuRowInset: CGFloat = 6
     /// The glyph column in a nav row.
     static let navGlyphWidth: CGFloat = 20
-    /// The glyph inside a chip, one point under its 11 pt text.
-    static let chipGlyphSize: CGFloat = 10
+    /// The glyph inside a chip, one point under its 12 pt text.
+    static let chipGlyphSize: CGFloat = 11
     /// The empty state's icon well and the glyph inside it.
     static let emptyWellSize: CGFloat = 48
     static let emptySymbolSize: CGFloat = 20
