@@ -7,20 +7,32 @@ import SwiftUI
 /// endpoint and the Obsidian vault rows over the Settings tabs' view
 /// models; Back returns, Finish or both rows handled set the model's
 /// `finished`, which dismisses the window. The window's own close button
-/// marks onboarding completed too (`onDisappear`).
+/// marks onboarding completed too (`onDisappear`). The look is the
+/// redesign plan's: a hidden title bar (the H1 is the only title), a 560 pt
+/// window with 40 pt top and 32 pt sides and bottom inside it, raised cards
+/// 12 pt apart, neutral chips, and a subtitle that wraps instead of
+/// truncating.
 struct OnboardingView: View {
   @State var model: OnboardingViewModel
   let onFinished: () -> Void
 
+  /// The window's width; the plan's 560 is the padded frame, as the window
+  /// before the redesign was, so the text column is 496 pt.
+  static let contentWidth: CGFloat = 560
+  /// The row glyph's frame and size: a 24 pt box holding an 18 pt symbol,
+  /// so every state glyph shares one optical size beside the 14 pt title.
+  static let glyphFrame: CGFloat = 24
+  static let glyphSize: CGFloat = 18
   var body: some View {
-    VStack(alignment: .leading, spacing: Theme.Space.lg) {
+    VStack(alignment: .leading, spacing: Theme.Space.xl) {
       switch model.page {
       case .permissions: permissionsPage
       case .setup: setupPage
       }
     }
-    .padding(Theme.Space.xl)
-    .frame(width: 560)
+    .padding(.top, Theme.Space.xxl + Theme.Space.sm)
+    .padding([.horizontal, .bottom], Theme.Space.xxl)
+    .frame(width: Self.contentWidth)
     .background(Color.stenoBackground)
     .task { await model.load() }
     .onChange(of: model.permissionsHandled) { _, handled in
@@ -32,19 +44,27 @@ struct OnboardingView: View {
     .onDisappear { model.markCompleted() }
   }
 
+  /// Step caption 12 `faint`, 4 pt, H1 26 semibold with the ladder's
+  /// tracking, 6 pt, the subtitle 14 `muted` wrapping to the content width.
   private func heading(step: Int, title: String, intro: String) -> some View {
-    VStack(alignment: .leading, spacing: Theme.Space.xs) {
+    VStack(alignment: .leading, spacing: 0) {
       Text("Step \(step) of 2")
         .font(.steno(Theme.TextSize.xxs))
         .foregroundStyle(Color.stenoFaint)
         .accessibilityIdentifier("onboarding-step")
+        .padding(.bottom, Theme.Space.xs)
       Text(title)
         .font(.steno(Theme.TextSize.xxl, weight: .semibold))
+        .tracking(-0.3)
         .foregroundStyle(Color.stenoStrong)
+        .accessibilityIdentifier("onboarding-title")
+        .padding(.bottom, Theme.Space.titleGap)
       Text(intro)
         .font(.steno(Theme.TextSize.sm))
         .foregroundStyle(Color.stenoMutedForeground)
+        .frame(maxWidth: .infinity, alignment: .leading)
         .fixedSize(horizontal: false, vertical: true)
+        .accessibilityIdentifier("onboarding-intro")
     }
   }
 
@@ -62,11 +82,12 @@ struct OnboardingView: View {
         Text(sentence)
           .font(.steno(Theme.TextSize.xs))
           .foregroundStyle(Color.stenoFaint)
+          .frame(maxWidth: .infinity, alignment: .leading)
           .fixedSize(horizontal: false, vertical: true)
           .accessibilityIdentifier("onboarding-retention")
       }
     }
-    VStack(spacing: Theme.Space.sm) {
+    VStack(spacing: Theme.Space.md) {
       ForEach(model.steps) { step in
         stepRow(step)
       }
@@ -87,72 +108,67 @@ struct OnboardingView: View {
     }
   }
 
+  /// A permission row: the state glyph, the title, the neutral "Optional"
+  /// chip and "Skipped" trailing; expanded, the explanation and the action
+  /// row.
   private func stepRow(_ step: OnboardingViewModel.Step) -> some View {
     let isCurrent = model.current == step.kind && step.state != .granted
-    return Card {
-      VStack(alignment: .leading, spacing: Theme.Space.sm) {
+    return row(
+      glyph: stateIcon(step), title: step.kind.title,
+      titleID: "onboarding-step-\(step.kind.rawValue)", optional: !step.isRequired
+    ) {
+      if model.skipped.contains(step.kind) { skippedLabel }
+    } details: {
+      if isCurrent || step.state == .denied {
+        explanation(step.kind.explanation)
         HStack(spacing: Theme.Space.sm) {
-          stateIcon(step)
-          Text(step.kind.title)
-            .font(.steno(Theme.TextSize.sm, weight: .semibold))
-            .foregroundStyle(Color.stenoStrong)
-          if !step.isRequired {
-            StatusChip(text: "Optional", style: .neutral)
-          }
-          Spacer()
-          if model.skipped.contains(step.kind) {
-            Text("Skipped").font(.steno(Theme.TextSize.xxs)).foregroundStyle(Color.stenoFaint)
-          }
-        }
-        if isCurrent || step.state == .denied {
-          Text(step.kind.explanation)
-            .font(.steno(Theme.TextSize.xs))
-            .foregroundStyle(Color.stenoMutedForeground)
-            .fixedSize(horizontal: false, vertical: true)
-          HStack(spacing: Theme.Space.sm) {
-            if step.state == .denied {
-              Button("Open System Settings") { model.openSystemSettings(step.kind) }
-                .buttonStyle(StenoPrimaryButtonStyle())
-              Button("Check again") { Task { await model.load() } }
-                .buttonStyle(StenoSecondaryButtonStyle())
-            } else if step.kind == .localNetwork {
-              Button("Got it") { model.skip(step.kind) }
-                .buttonStyle(StenoSecondaryButtonStyle())
-            } else {
-              Button(step.kind == .systemAudio ? "Run the test recording" : "Allow") {
-                Task { await model.request(step.kind) }
-              }
+          if step.state == .denied {
+            Button("Open System Settings") { model.openSystemSettings(step.kind) }
               .buttonStyle(StenoPrimaryButtonStyle())
-              .disabled(model.requesting != nil)
-              if model.requesting == step.kind {
-                ProgressView().controlSize(.small)
-                if step.kind == .systemAudio {
-                  Text("Listening for the test tone, up to 30 seconds…")
-                    .font(.steno(Theme.TextSize.xxs))
-                    .foregroundStyle(Color.stenoFaint)
-                }
+            Button("Check again") { Task { await model.load() } }
+              .buttonStyle(StenoSecondaryButtonStyle())
+          } else if step.kind == .localNetwork {
+            Button("Got it") { model.skip(step.kind) }
+              .buttonStyle(StenoSecondaryButtonStyle())
+          } else {
+            Button(step.kind == .systemAudio ? "Run the test recording" : "Allow") {
+              Task { await model.request(step.kind) }
+            }
+            .buttonStyle(StenoPrimaryButtonStyle())
+            .disabled(model.requesting != nil)
+            if model.requesting == step.kind {
+              ProgressView().controlSize(.small)
+              if step.kind == .systemAudio {
+                Text("Listening for the test tone, up to 30 seconds…")
+                  .font(.steno(Theme.TextSize.xxs))
+                  .foregroundStyle(Color.stenoFaint)
               }
             }
-            if !step.isRequired, step.kind != .localNetwork {
-              Button("Skip") { model.skip(step.kind) }
-                .buttonStyle(StenoGhostButtonStyle())
-            }
+          }
+          if !step.isRequired, step.kind != .localNetwork {
+            Button("Skip") { model.skip(step.kind) }
+              .buttonStyle(StenoGhostButtonStyle())
           }
         }
       }
     }
   }
 
-  @ViewBuilder
   private func stateIcon(_ step: OnboardingViewModel.Step) -> some View {
     switch step.state {
-    case .granted:
-      Image(systemName: "checkmark.circle.fill").foregroundStyle(Color.stenoLiveBright)
-    case .denied:
-      Image(systemName: "xmark.circle.fill").foregroundStyle(Color.stenoDestructive)
-    case .unknown:
-      Image(systemName: "circle").foregroundStyle(Color.stenoGhost)
+    case .granted: glyph("checkmark.circle.fill", Color.stenoLiveBright)
+    case .denied: glyph("xmark.circle.fill", Color.stenoDestructive)
+    case .unknown: glyph("circle", Color.stenoGhost)
     }
+  }
+
+  /// An 18 pt state symbol in a 24 pt frame.
+  private func glyph(_ systemName: String, _ color: Color) -> some View {
+    Image(systemName: systemName)
+      .font(.system(size: Self.glyphSize))
+      .foregroundStyle(color)
+      .frame(width: Self.glyphFrame, height: Self.glyphFrame)
+      .accessibilityHidden(true)
   }
 
   // MARK: - Page 2
@@ -162,7 +178,7 @@ struct OnboardingView: View {
     heading(
       step: 2, title: "Summaries and export",
       intro: "Optional. Steno works as a local transcript recorder without either.")
-    VStack(spacing: Theme.Space.sm) {
+    VStack(spacing: Theme.Space.md) {
       ForEach(OnboardingViewModel.SetupStep.allCases) { step in
         setupRow(step)
       }
@@ -181,59 +197,92 @@ struct OnboardingView: View {
 
   private func setupRow(_ step: OnboardingViewModel.SetupStep) -> some View {
     let state = model.setupState(of: step)
-    return Card {
-      VStack(alignment: .leading, spacing: Theme.Space.sm) {
-        HStack(spacing: Theme.Space.sm) {
-          setupIcon(state)
-          Text(step.title)
-            .font(.steno(Theme.TextSize.sm, weight: .semibold))
-            .foregroundStyle(Color.stenoStrong)
-          StatusChip(text: "Optional", style: .neutral)
-          Spacer()
-          switch state {
-          case .saved(let line):
-            Text(line)
-              .font(.steno(Theme.TextSize.xxs))
-              .foregroundStyle(Color.stenoFaint)
-              .lineLimit(1)
-              .truncationMode(.middle)
-          case .skipped:
-            Text("Skipped").font(.steno(Theme.TextSize.xxs)).foregroundStyle(Color.stenoFaint)
-          case .open:
-            EmptyView()
+    return row(
+      glyph: setupIcon(state), title: step.title, titleID: "onboarding-setup-\(step.id)",
+      optional: true
+    ) {
+      switch state {
+      case .saved(let line):
+        Text(line)
+          .font(.steno(Theme.TextSize.xxs))
+          .foregroundStyle(Color.stenoFaint)
+          .lineLimit(1)
+          .truncationMode(.middle)
+      case .skipped:
+        skippedLabel
+      case .open:
+        EmptyView()
+      }
+    } details: {
+      if state == .open {
+        explanation(step.explanation)
+        switch step {
+        case .summaries:
+          if let llm = model.llm {
+            SummariesSetupFields(model: model, llm: llm)
+          }
+        case .vault:
+          if let obsidian = model.obsidian {
+            VaultSetupFields(model: model, obsidian: obsidian)
           }
         }
-        if state == .open {
-          Text(step.explanation)
-            .font(.steno(Theme.TextSize.xs))
-            .foregroundStyle(Color.stenoMutedForeground)
-            .fixedSize(horizontal: false, vertical: true)
-          switch step {
-          case .summaries:
-            if let llm = model.llm {
-              SummariesSetupFields(model: model, llm: llm)
-            }
-          case .vault:
-            if let obsidian = model.obsidian {
-              VaultSetupFields(model: model, obsidian: obsidian)
-            }
-          }
-          Text(step.footnote)
-            .font(.steno(Theme.TextSize.xxs))
-            .foregroundStyle(Color.stenoFaint)
-        }
+        Text(step.footnote)
+          .font(.steno(Theme.TextSize.xxs))
+          .foregroundStyle(Color.stenoFaint)
       }
     }
   }
 
-  @ViewBuilder
   private func setupIcon(_ state: OnboardingViewModel.SetupState) -> some View {
     switch state {
-    case .saved:
-      Image(systemName: "checkmark.circle.fill").foregroundStyle(Color.stenoLiveBright)
-    case .open, .skipped:
-      Image(systemName: "circle").foregroundStyle(Color.stenoGhost)
+    case .saved: glyph("checkmark.circle.fill", Color.stenoLiveBright)
+    case .open, .skipped: glyph("circle", Color.stenoGhost)
     }
+  }
+
+  // MARK: - Row chrome
+
+  /// The card both pages' rows share: the 24 pt glyph frame, the 14 pt
+  /// semibold title carrying `titleID` (what the smoke test reads), the
+  /// neutral "Optional" chip, whatever trails, and 12 pt under each detail
+  /// row while the row is open.
+  private func row<Trailing: View, Details: View>(
+    glyph: some View, title: String, titleID: String, optional: Bool,
+    @ViewBuilder trailing: () -> Trailing, @ViewBuilder details: () -> Details
+  ) -> some View {
+    // Built here: `Card`'s content closure escapes, the builders do not.
+    let trailing = trailing()
+    let details = details()
+    return Card {
+      VStack(alignment: .leading, spacing: Theme.Space.md) {
+        HStack(spacing: Theme.Space.sm) {
+          glyph
+          Text(title)
+            .font(.steno(Theme.TextSize.sm, weight: .semibold))
+            .foregroundStyle(Color.stenoStrong)
+            .accessibilityIdentifier(titleID)
+          if optional {
+            StatusChip(text: "Optional", style: .neutral)
+          }
+          Spacer()
+          trailing
+        }
+        details
+      }
+    }
+  }
+
+  /// A row's explanation at 13/17 `muted`, wrapping.
+  private func explanation(_ text: String) -> some View {
+    Text(text)
+      .font(.steno(Theme.TextSize.xs))
+      .stenoLeading(Theme.TextSize.xs)
+      .foregroundStyle(Color.stenoMutedForeground)
+      .fixedSize(horizontal: false, vertical: true)
+  }
+
+  private var skippedLabel: some View {
+    Text("Skipped").font(.steno(Theme.TextSize.xxs)).foregroundStyle(Color.stenoFaint)
   }
 }
 
@@ -319,3 +368,19 @@ private struct VaultSetupFields: View {
     }
   }
 }
+
+#if DEBUG
+  /// Page 1 over unknown permissions, light beside dark: white cards on the
+  /// canvas, the subtitle wrapping. The flag goes to a preview suite, never
+  /// the developer's own defaults.
+  #Preview("Onboarding") {
+    PreviewPair {
+      OnboardingView(
+        model: OnboardingViewModel(
+          permissions: FakePermissions(),
+          defaults: UserDefaults(suiteName: "uno.schmid.steno.preview") ?? .standard),
+        onFinished: {})
+    }
+    .frame(width: 1216, height: 760)
+  }
+#endif

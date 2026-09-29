@@ -10,6 +10,7 @@ final class UITestScenarioTests: XCTestCase {
     XCTAssertFalse(none.holdTranscribe)
     XCTAssertEqual(none.seed, .sample)
     XCTAssertFalse(none.startsRecording)
+    XCTAssertFalse(none.showsOnboarding)
     XCTAssertEqual(none.unknownFlags, [])
 
     let testing = UITestScenario(arguments: [
@@ -30,6 +31,24 @@ final class UITestScenarioTests: XCTestCase {
     XCTAssertTrue(hold.holdTranscribe, "the processing card's flag is known")
     XCTAssertEqual(hold.unknownFlags, [])
     XCTAssertNil(hold.launchError)
+  }
+
+  /// The onboarding flag: the window opens over unknown permissions, apart
+  /// from the recording flag.
+  func testTheOnboardingFlagParses() {
+    let onboarding = UITestScenario(arguments: [
+      "Steno", "-steno-ui-testing", "-steno-show-onboarding",
+    ])
+    XCTAssertTrue(onboarding.showsOnboarding)
+    XCTAssertFalse(onboarding.startsRecording)
+    XCTAssertEqual(onboarding.seed, .sample)
+    XCTAssertEqual(onboarding.unknownFlags, [])
+    XCTAssertNil(onboarding.launchError)
+
+    let recording = UITestScenario(arguments: [
+      "Steno", "-steno-ui-testing", "-steno-start-recording",
+    ])
+    XCTAssertFalse(recording.showsOnboarding)
   }
 
   /// The seed and recording flags of the redesign's smoke tests: rich seed,

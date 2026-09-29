@@ -170,10 +170,17 @@ final class MeetingDetailViewModel: Identifiable {
     return meeting.state == .ready || meeting.state.isFailed
   }
 
-  /// "Re-run summary" and "Run summary": the pipeline would throw without an
-  /// endpoint (`rerunSummary` with a nil summarizer), so the app disables
-  /// the action first.
-  var canRerunSummary: Bool { canRerun && llmConfigured }
+  /// A transcript to summarise. `ProcessingPipeline.rerunSummary` runs
+  /// summarize and deliver only and marks the meeting ready, so a meeting
+  /// that failed before transcription (no segments) must not be re-run: it
+  /// would read "Ready" with no transcript and its failure reason gone.
+  var hasTranscript: Bool { !(export?.segments.isEmpty ?? true) }
+
+  /// "Re-run summary", "Run summary" and the failed row's "Try again": the
+  /// pipeline would throw without an endpoint (`rerunSummary` with a nil
+  /// summarizer) and would lose the transcript-less failure (`hasTranscript`),
+  /// so the app disables the action first.
+  var canRerunSummary: Bool { canRerun && llmConfigured && hasTranscript }
 
   /// "Re-export" and "Export now": without a vault there is nowhere to
   /// export to.

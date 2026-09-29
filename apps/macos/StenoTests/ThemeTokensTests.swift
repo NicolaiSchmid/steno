@@ -74,6 +74,7 @@ final class ThemeTokensTests: XCTestCase {
         step.value.truncatingRemainder(dividingBy: 4), 0, "Space.\(step.name) is off the 4 pt grid")
     }
     XCTAssertEqual(Theme.Space.xxs, 2)
+    XCTAssertEqual(Theme.Space.titleGap, 6, "the plan's title gap, off the grid on purpose")
     XCTAssertEqual(Theme.Space.hairline, 1)
     XCTAssertEqual(Theme.Radius.allCases.map(\.rawValue), [16, 12, 8, 6, 4])
   }

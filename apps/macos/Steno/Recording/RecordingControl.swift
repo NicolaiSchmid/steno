@@ -107,30 +107,13 @@ struct RecordingControl: View {
       .disabled(true)
       .accessibilityLabel(presentation.label)
     case .recording(let since):
-      Button {
+      StopButton(
+        state: .stop(since: since), surface: .sidebar(levels: recorder.levels), id: "sidebar-stop"
+      ) {
         Task { await recorder.stop() }
-      } label: {
-        HStack(spacing: Theme.Space.sm) {
-          StopLabel(since: since)
-          Spacer(minLength: Theme.Space.sm)
-          if let levels = recorder.levels {
-            CompactLevelBars(levels: levels)
-          }
-        }
-        .padding(.horizontal, Theme.Control.buttonInset)
       }
-      .buttonStyle(StopControlStyle())
-      .help("Stop recording (⌘⇧R)")
-      .accessibilityIdentifier("sidebar-stop")
     case .stopping:
-      Button(action: {}) {
-        ProgressView()
-          .controlSize(.small)
-          .frame(maxWidth: .infinity)
-      }
-      .buttonStyle(StopControlStyle())
-      .disabled(true)
-      .accessibilityLabel(presentation.label)
+      StopButton(state: .stopping, surface: .sidebar(levels: nil), id: "sidebar-stop") {}
     }
   }
 
@@ -171,73 +154,5 @@ private struct CTASegmentStyle: ButtonStyle {
         .opacity(configuration.isPressed ? Motion.controlPressOpacity : 1)
         .animation(Motion.swap(reduceMotion: reduceMotion), value: configuration.isPressed)
     }
-  }
-}
-
-/// The recording box: the CTA's 40 pt and radius 12 on a `raised` surface
-/// with a hairline, the `card` veil on hover, 14 pt medium; destructive is
-/// the dot and the word inside `StopLabel`, never a fill.
-private struct StopControlStyle: ButtonStyle {
-  func makeBody(configuration: Configuration) -> some View {
-    Box(configuration: configuration)
-  }
-
-  private struct Box: View {
-    let configuration: Configuration
-    @State private var hovering = false
-    @Environment(\.isEnabled) private var isEnabled
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
-
-    var body: some View {
-      configuration.label
-        .font(.steno(Theme.TextSize.sm, weight: .medium))
-        .foregroundStyle(Color.stenoStrong)
-        .frame(height: Theme.Control.ctaHeight)
-        .frame(maxWidth: .infinity)
-        .background(
-          ZStack {
-            Theme.Radius.lg.shape.fill(Color.stenoRaised)
-            Theme.Radius.lg.shape.fill(hovering && isEnabled ? Color.stenoCard : Color.clear)
-          }
-        )
-        .overlay(Theme.Radius.lg.shape.hairline())
-        .contentShape(Theme.Radius.lg.shape)
-        .onHover { hovering = $0 }
-        .animation(Motion.swap(reduceMotion: reduceMotion), value: hovering)
-        .opacity(configuration.isPressed ? Motion.controlPressOpacity : 1)
-        .opacity(isEnabled ? 1 : Motion.disabledOpacity)
-        .animation(Motion.swap(reduceMotion: reduceMotion), value: configuration.isPressed)
-    }
-  }
-}
-
-/// The level meter inside the Stop control: one 4 pt bar per lane, 40 pt
-/// wide, 4 pt apart (12 pt tall for a call), `strong` over a `border`
-/// track, no labels. The labelled `LevelBars` stay on the menu bar item.
-private struct CompactLevelBars: View {
-  let levels: LaneLevels
-
-  var body: some View {
-    VStack(alignment: .leading, spacing: Theme.Space.xs) {
-      bar(levels.mic)
-      if let system = levels.system {
-        bar(system)
-      }
-    }
-    .frame(width: Theme.Control.meterWidth)
-    .accessibilityElement(children: .ignore)
-    .accessibilityLabel("Input level")
-    .accessibilityValue("\(Int(LevelBars.fraction(levels.mic.rms) * 100)) percent")
-  }
-
-  private func bar(_ level: LaneLevel) -> some View {
-    ZStack(alignment: .leading) {
-      Capsule().fill(Color.stenoBorder)
-      Capsule()
-        .fill(Color.stenoStrong)
-        .frame(width: Theme.Control.meterWidth * LevelBars.fraction(level.rms))
-        .animation(Motion.functional, value: level.rms)
-    }
-    .frame(height: Theme.Control.meterHeight)
   }
 }

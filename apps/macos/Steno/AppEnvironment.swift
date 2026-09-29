@@ -298,7 +298,9 @@ final class AppEnvironment {
   /// `FakeDiarizer`; without `makeSummarizer` the summarizer is a
   /// `FakeSummarizer`. `seed` picks the fixture set (`.sample` is the one
   /// meeting the unit tests count on, `.rich` adds three days of them) or,
-  /// nil, leaves the store empty.
+  /// nil, leaves the store empty. Without `permissions` every permission is
+  /// granted (`-steno-show-onboarding` passes a `FakePermissions()` with
+  /// every kind unknown, so the onboarding window has something to ask).
   static func preview(
     clock: any Clock<Duration> = ContinuousClock(),
     now: @escaping @Sendable () -> Date = Date.init,
@@ -309,7 +311,8 @@ final class AppEnvironment {
     makeSpeechEngine: (@Sendable () -> any SpeechEngine)? = nil,
     makeDiarizer: (@Sendable () -> any Diarizer)? = nil,
     makeSummarizer: (@Sendable () -> any MeetingSummarizer)? = nil,
-    calendar: (any CalendarProviding)? = nil
+    calendar: (any CalendarProviding)? = nil,
+    permissions: (any PermissionsChecking)? = nil
   ) async throws -> AppEnvironment {
     let root = FileManager.default.temporaryDirectory
       .appendingPathComponent("steno-preview-\(UUID().uuidString)", isDirectory: true)
@@ -382,7 +385,7 @@ final class AppEnvironment {
       sweep: RetentionSweep(store: store),
       calendar: calendar ?? FakeCalendar(),
       loginItem: FakeLoginItem(),
-      permissions: FakePermissions.allGranted(),
+      permissions: permissions ?? FakePermissions.allGranted(),
       updater: FakeUpdater(),
       clock: clock,
       now: now,

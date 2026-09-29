@@ -87,6 +87,23 @@ struct IconButton: View {
 
   var body: some View {
     Button(action: action) {
+      Glyph(systemName: systemName, hovering: hovering)
+    }
+    .buttonStyle(.plain)
+    .onHover { hovering = $0 }
+    .animation(Motion.swap(reduceMotion: reduceMotion), value: hovering)
+    .help(label)
+    .accessibilityLabel(label)
+  }
+
+  /// The button's face on its own, for a `Menu` that must look like an
+  /// icon button (the detail header's Actions menu): the caller tracks
+  /// hover, since a menu label cannot.
+  struct Glyph: View {
+    let systemName: String
+    let hovering: Bool
+
+    var body: some View {
       Image(systemName: systemName)
         .font(.system(size: Theme.TextSize.sm.size, weight: .medium))
         .foregroundStyle(hovering ? Color.stenoStrong : Color.stenoMutedForeground)
@@ -95,11 +112,6 @@ struct IconButton: View {
         .overlay(Circle().hairline())
         .contentShape(Circle())
     }
-    .buttonStyle(.plain)
-    .onHover { hovering = $0 }
-    .animation(Motion.swap(reduceMotion: reduceMotion), value: hovering)
-    .help(label)
-    .accessibilityLabel(label)
   }
 }
 

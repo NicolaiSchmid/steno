@@ -1,9 +1,10 @@
 import StenoCore
 import SwiftUI
 
-/// The extracted tasks, read only: text, assignee, priority, due date. A
-/// ready meeting the pipeline summarised without an endpoint shows the
-/// `SummaryStatus` row instead, with the same action as the Summary tab.
+/// The extracted tasks, read only: text, assignee, priority, due date, rows
+/// 8 pt apart. A ready meeting the pipeline summarised without an endpoint
+/// shows the `SummaryStatus` row instead, with the same action as the
+/// Summary tab; any other tab without content shows the states table's row.
 struct TasksTab: View {
   let model: MeetingDetailViewModel
   let controller: AppController
@@ -17,34 +18,40 @@ struct TasksTab: View {
     if tasks.isEmpty, let row = model.summaryStatus.skippedRow(for: .tasks) {
       SkippedSummaryState(row: row, tab: .tasks, model: model, controller: controller)
     } else {
-      ScrollView {
-        VStack(alignment: .leading, spacing: Theme.Space.sm) {
-          ProcessingCardSlot(progress: progress, meeting: model.meeting)
-          if tasks.isEmpty, progress == nil {
-            PendingText(
-              meeting: model.meeting, none: "No tasks", pending: "Tasks appear after processing")
+      if tasks.isEmpty, progress == nil {
+        PendingText(tab: .tasks, model: model)
+      } else {
+        ScrollView {
+          VStack(alignment: .leading, spacing: Theme.Space.sm) {
+            ProcessingCardSlot(progress: progress, meeting: model.meeting)
+            ForEach(tasks) { task in
+              TaskRow(task: task, assignee: model.export?.assigneeName(for: task))
+            }
           }
-          ForEach(tasks) { task in
-            TaskRow(task: task, assignee: model.export?.assigneeName(for: task))
-          }
+          .readingColumn()
         }
-        .readingColumn()
       }
     }
   }
 }
 
+/// One task: a 16 pt `square` or `checkmark.square`, the text at 14/19,
+/// then the assignee as a neutral chip, the priority as a semantic chip and
+/// the due date 12 `faint`.
 struct TaskRow: View {
   let task: MeetingTask
   let assignee: String?
 
   var body: some View {
-    HStack(alignment: .firstTextBaseline, spacing: Theme.Space.sm) {
+    HStack(alignment: .top, spacing: Theme.Space.sm) {
       Image(systemName: task.done ? "checkmark.square" : "square")
+        .font(.system(size: Theme.TextSize.base.size))
         .foregroundStyle(task.done ? Color.stenoLive : Color.stenoFaint)
+        .frame(height: Theme.TextSize.sm.lineHeight)
       VStack(alignment: .leading, spacing: Theme.Space.xs) {
         Text(task.text)
           .font(.steno(Theme.TextSize.sm))
+          .proseLeading()
           .foregroundStyle(task.done ? Color.stenoMutedForeground : Color.stenoForeground)
           .strikethrough(task.done)
           .fixedSize(horizontal: false, vertical: true)
@@ -61,7 +68,6 @@ struct TaskRow: View {
         }
       }
     }
-    .padding(.vertical, Theme.Space.xs)
   }
 
   @ViewBuilder

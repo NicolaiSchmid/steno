@@ -455,6 +455,124 @@ final class LaunchSmokeTests: XCTestCase {
     return Set(elements.allElementsBoundByIndex.map(\.identifier)).count
   }
 
+  /// `-steno-start-recording` starts a call recording from the window at
+  /// launch, so the live row is selected: the detail header shows the Stop
+  /// control (`header-stop`) and every content tab body is the states
+  /// table's "Recording" row (read through the title's id, since the
+  /// `EmptyState` container id is not queryable on macOS). Stop ends the
+  /// recording: the header control goes, the sidebar returns to Record
+  /// call, and the row stays.
+  func testHeaderStopEndsTheRecording() throws {
+    let app = launch(["-steno-ui-testing", "-steno-start-recording"])
+
+    let window = app.windows.firstMatch
+    XCTAssertTrue(window.waitForExistence(timeout: 10), "no window appeared")
+    let stop = app.buttons["header-stop"].firstMatch
+    XCTAssertTrue(stop.waitForExistence(timeout: 20), "the header Stop control did not appear")
+    XCTAssertTrue(app.buttons["sidebar-stop"].firstMatch.exists, "the sidebar shows Stop too")
+    // "Stop" plus the elapsed time, ticking once a second (the synthetic
+    // backend is faster than real time, the clock is not).
+    let firstLabel = stop.label
+    XCTAssertTrue(firstLabel.contains("Stop"), "the header Stop reads \(firstLabel)")
+    XCTAssertTrue(
+      waitUntil(timeout: 5) { stop.label != firstLabel },
+      "the header elapsed time did not tick from \(firstLabel)")
+    XCTAssertTrue(
+      app.descendants(matching: .any)["header-levels"].firstMatch.waitForExistence(timeout: 5),
+      "the header shows no level bars while recording")
+    XCTAssertTrue(
+      waitUntil(timeout: 10) { meetingRowCount(in: app) == 2 },
+      "expected the fixture meeting plus the live row, got \(meetingRowCount(in: app))")
+
+    let title = app.staticTexts["empty-summary-title"].firstMatch
+    XCTAssertTrue(title.waitForExistence(timeout: 10), "the Summary tab shows no state row")
+    // A SwiftUI `Text` exposes its string as the element's value on macOS;
+    // `label` is empty.
+    XCTAssertEqual((title.value as? String) ?? title.label, "Recording")
+    XCTAssertTrue(app.buttons["tab-summary"].firstMatch.isSelected)
+    // The recording state as the review sees it: header Stop, level bars,
+    // the "Recording" row on the Summary tab.
+    attachScreenshot(named: "detail-recording.png")
+    app.buttons["tab-transcript"].firstMatch.click()
+    let transcriptTitle = app.staticTexts["empty-transcript-title"].firstMatch
+    XCTAssertTrue(transcriptTitle.waitForExistence(timeout: 5), "the Transcript tab shows no row")
+    XCTAssertEqual((transcriptTitle.value as? String) ?? transcriptTitle.label, "Recording")
+    app.buttons["tab-scratchpad"].firstMatch.click()
+    XCTAssertTrue(
+      app.textViews.firstMatch.waitForExistence(timeout: 5),
+      "the scratchpad stays editable during the call")
+    XCTAssertTrue(
+      app.staticTexts["scratchpad-hint"].firstMatch.exists,
+      "the scratchpad keeps its hint under the editor during the call")
+
+    stop.click()
+    XCTAssertTrue(
+      waitUntil(timeout: 10) { !app.buttons["header-stop"].firstMatch.exists },
+      "the header Stop control did not go away")
+    XCTAssertTrue(
+      app.buttons["sidebar-record"].firstMatch.waitForExistence(timeout: 10),
+      "the sidebar control did not return to Record call")
+    XCTAssertEqual(meetingRowCount(in: app), 2, "the stopped recording keeps its row")
+  }
+
+  /// The rich seed's failed meeting (`uuid(104)`, failed after transcription
+  /// with a two-line reason): its entry selects it, the header carries the
+  /// reason, the Summary tab shows the states table's "Processing failed"
+  /// row with its "Try again" (present; enabled only with an endpoint, which
+  /// the preview has none of). The processing entry is not read: the fakes
+  /// resume and finish it within a second of launch.
+  func testFailedMeetingShowsItsRowAndTryAgain() throws {
+    let app = launch(["-steno-ui-testing", "-steno-rich-seed"])
+    XCTAssertTrue(app.windows.firstMatch.waitForExistence(timeout: 10), "no window appeared")
+    let entry = app.buttons["meeting-00000000-0000-0000-0000-000000000068"].firstMatch
+    XCTAssertTrue(entry.waitForExistence(timeout: 10), "the failed meeting is not listed")
+    entry.click()
+
+    let title = app.staticTexts["empty-summary-title"].firstMatch
+    XCTAssertTrue(title.waitForExistence(timeout: 10), "the Summary tab shows no state row")
+    XCTAssertEqual((title.value as? String) ?? title.label, "Processing failed")
+    let tryAgain = app.buttons["summary-try-again"].firstMatch
+    XCTAssertTrue(tryAgain.waitForExistence(timeout: 5), "the failed row offers no Try again")
+    XCTAssertFalse(tryAgain.isEnabled, "no endpoint in the preview: Try again is disabled")
+    attachScreenshot(named: "detail-failed.png")
+  }
+
+  /// `-steno-show-onboarding` builds the preview with every permission
+  /// unknown and opens the onboarding window: the step caption, the title,
+  /// the subtitle and the four page 1 rows are there (ids, not copy), and
+  /// Later moves to page 2 with its two rows and the Back and Finish pair.
+  func testOnboardingWindowShowsBothPages() throws {
+    let app = launch(["-steno-ui-testing", "-steno-show-onboarding"])
+
+    let intro = app.staticTexts["onboarding-intro"].firstMatch
+    XCTAssertTrue(intro.waitForExistence(timeout: 20), "the onboarding window did not open")
+    XCTAssertFalse(((intro.value as? String) ?? "").isEmpty, "the subtitle is empty")
+    let window = app.windows.containing(.staticText, identifier: "onboarding-intro").firstMatch
+    XCTAssertLessThanOrEqual(
+      intro.frame.maxX, window.frame.maxX, "the subtitle runs past the window instead of wrapping")
+    XCTAssertTrue(app.staticTexts["onboarding-step"].firstMatch.exists, "no step caption")
+    XCTAssertTrue(app.staticTexts["onboarding-title"].firstMatch.exists, "no title")
+    for kind in ["microphone", "systemAudio", "calendar", "localNetwork"] {
+      XCTAssertTrue(
+        app.staticTexts["onboarding-step-\(kind)"].firstMatch.exists, "row \(kind) missing")
+    }
+    attachScreenshot(named: "onboarding-page-1.png")
+
+    let later = app.buttons["onboarding-later"].firstMatch
+    XCTAssertTrue(later.waitForExistence(timeout: 5), "Later is missing on page 1")
+    later.click()
+    XCTAssertTrue(
+      app.buttons["onboarding-finish"].firstMatch.waitForExistence(timeout: 10),
+      "Later did not reach page 2")
+    XCTAssertTrue(
+      waitUntil(timeout: 5) { !app.staticTexts["onboarding-step-microphone"].firstMatch.exists },
+      "page 1 rows are still showing under page 2")
+    XCTAssertTrue(app.buttons["onboarding-back"].firstMatch.exists)
+    XCTAssertTrue(app.staticTexts["onboarding-setup-summaries"].firstMatch.exists)
+    XCTAssertTrue(app.staticTexts["onboarding-setup-vault"].firstMatch.exists)
+    attachScreenshot(named: "onboarding-page-2.png")
+  }
+
   /// The entries, each a button carrying a `meeting-<uuid>` identifier and
   /// nothing else in the window does: the `meeting-list` container and the
   /// entry's texts are not buttons, so one query counts rows.

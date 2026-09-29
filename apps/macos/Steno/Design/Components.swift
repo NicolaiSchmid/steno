@@ -267,26 +267,6 @@ extension StatusChip {
   }
 }
 
-/// What a display tab shows until the pipeline has produced its content:
-/// `none` once the meeting is ready, `pending` before.
-struct PendingText: View {
-  let meeting: Meeting?
-  let none: String
-  let pending: String
-
-  var body: some View {
-    Text(Self.text(meeting: meeting, none: none, pending: pending))
-      .font(.steno(Theme.TextSize.sm, weight: .medium))
-      .foregroundStyle(Color.stenoMutedForeground)
-  }
-
-  /// `nonisolated`: `View` conformance makes the struct main-actor
-  /// isolated, and `TabText` calls this from plain code.
-  nonisolated static func text(meeting: Meeting?, none: String, pending: String) -> String {
-    meeting?.state == .ready ? none : pending
-  }
-}
-
 extension Binding where Value: Sendable {
   /// A binding whose reads come from the model and whose writes run an
   /// async main-actor view-model action, for controls that mirror a
@@ -299,14 +279,27 @@ extension Binding where Value: Sendable {
 }
 
 extension View {
-  /// The 720 pt reading column the Summary, Transcript and Tasks tabs share:
-  /// 32 pt sides, 24 pt above, 32 pt below.
+  /// The 720 pt reading column the four tabs share: 32 pt sides, 24 pt
+  /// above, 32 pt below, pinned to the leading edge (a `ScrollView` would
+  /// otherwise centre a column narrower than the pane).
   func readingColumn() -> some View {
     frame(maxWidth: 720, alignment: .leading)
       .padding(.horizontal, Theme.Space.xxl)
       .padding(.top, Theme.Space.xl)
       .padding(.bottom, Theme.Space.xxl)
+      .frame(maxWidth: .infinity, alignment: .leading)
       .textSelection(.enabled)
+  }
+
+  /// The ladder's leading for a text size applied through `lineSpacing`,
+  /// the one place `lineHeight - size` is spelled out.
+  func stenoLeading(_ size: (size: CGFloat, lineHeight: CGFloat)) -> some View {
+    lineSpacing(size.lineHeight - size.size)
+  }
+
+  /// Body prose at 14/19: `TextSize.sm` with its leading.
+  func proseLeading() -> some View {
+    stenoLeading(Theme.TextSize.sm)
   }
 
   /// `shadow-sm`, the one shadow in the system: on the active segmented cell.

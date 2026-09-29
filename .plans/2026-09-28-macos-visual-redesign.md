@@ -708,3 +708,62 @@ Risks and checks (settled by the steps, not by the owner):
    "Monday 10:06" for a meeting that is now seven days old until the list next changes. A
    `TimelineView(.everyMinute)` around the cards would fix it at the cost of a timer; not
    done in step 6.
+
+## Deviations (implementation)
+
+Recorded 2026-09-29 while implementing steps 7, 7a, 8 and 11 (layout PR B1).
+
+- **Step 7a, progress row.** The header carries no `ProgressView` row 6 and the processing
+  tab body is not an `EmptyState`: [`2026-09-28-processing-progress.md`](2026-09-28-processing-progress.md)
+  D4 landed first and puts one `ProcessingCard` (stage, remaining time, the one bar) at the top
+  of every tab while the progress model has an entry, with the status chip as the header's only
+  processing signal. The states table's queued and processing rows cover the moment before the
+  model has seen the meeting. The level bars (row 6 while recording) are as specified.
+- **Step 7, display title.** The header reads `meeting.displayTitle()` (step 3, PR #128); for a
+  derived title the meta line drops the date, time and source, and the source sits beside the
+  title as a neutral chip (decision 13). A stored title keeps the full meta line.
+- **Step 7a, smoke criterion.** `testHeaderStopEndsTheRecording` runs on the sample seed and
+  reads the header's elapsed label and level bars; `testFailedMeetingShowsItsRowAndTryAgain`
+  selects the rich seed's failed entry and reads "Processing failed" and the disabled "Try
+  again". The processing entry is not selected: the fakes resume and finish it within a second
+  of launch, so its chip cannot be read reliably, and the entries carry no
+  `meeting-<uuid>-state` value (the cards expose `meeting-<uuid>` alone). Stop's outcome is read
+  through the header control disappearing and the row count, not a state value.
+- **Step 7, processing row title.** The tab body's processing row is titled "Processing", not the
+  stage label the table gives: the stage lives in the `ProcessingCard` now (above), and the row
+  shows only before the progress model has seen the meeting.
+- **Step 7, Actions control.** The Actions menu is a `Menu` wearing `IconButton.Glyph`, not an
+  `IconButton("ellipsis")`: a `Menu` cannot be an `IconButton`, so the face is shared and the menu
+  tracks its own hover.
+- **Step 7a, failed reason.** The reason's `MessageRow(.error)` sits under the meta line, not
+  directly under the title row, so the stack reads title, meta, messages.
+- **Step 7a, "Try again".** The failed row's button runs `rerunSummary()`, which re-runs
+  summarize and deliver only and marks the meeting ready. It is therefore enabled only when a
+  transcript exists (`MeetingDetailViewModel.hasTranscript`, mirrored in `canRerunSummary` so
+  the Actions menu agrees), an endpoint is configured and the model is not busy; a failure before
+  transcription keeps the button disabled rather than losing its reason. The reason a disabled
+  button cannot run is its help (`EmptyState.Action.help`: the endpoint line the Actions menu
+  uses, or the no-transcript line). The table said "disabled while busy" only.
+- **Step 7a, `.recording` row while starting.** A `.recording` row the recorder does not yet hold
+  (the intake writes it before `activeMeetingID` is set) shows no header chip: decision 3 keeps
+  green for success, and the Stop takes over once the recorder holds the row. The green
+  "Recording" chip stays for the list entry only.
+- **Step 7a, scratchpad hint.** The hint under the editor during a recording is the tab's own
+  "Saved with the meeting and exported into the folder note." (`scratchpad-hint`), the same line
+  in every state; there is no recording-specific hint.
+- **Step 7a, `EmptyState` minimum width.** The body wraps at a fixed 280 pt so the minimum-size
+  probe has a real width (a `maxWidth` under `fixedSize(vertical:)` answers it with one character
+  per line, the split view inherits that, and the window outgrew the hosted runner's 1024 x 768
+  display). No unit test pins it: `StenoTests` is deliberately unhosted (`project.yml`), and
+  hosting the view in an `NSHostingView` there spawns a second `NSApplication` and kills the
+  runner. The UI smoke run on that display is the proof; the README names the budget.
+- **Step 8.** `-steno-show-onboarding` builds the preview with a `FakePermissions()` whose kinds
+  are all unknown (`AppEnvironment.preview(permissions:)`) and `OnboardingOpener` opens the window
+  in the preview under that flag alone.
+- **Step 8, width.** `OnboardingView.contentWidth` (560) is the window's width, the padded frame,
+  as the window before the redesign was; the text column inside 32 pt sides is 496 pt. The layout
+  spec's "content width 560" names the window.
+- **Step 10.** Skipped: `SpeakerReviewSheet.swift` no longer exists; the inline speaker
+  assignment replaced it.
+- **Step 11.** Nothing to change: the Settings sidebar redesign already composes from the shared
+  components, its notes are `faint` and the QR image has radius 8 and a hairline.

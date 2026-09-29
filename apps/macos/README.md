@@ -36,7 +36,10 @@ xcodebuild test  -project Steno.xcodeproj -scheme Steno -only-testing:StenoUITes
 CI runs the first two on `MACOS_RUNS_ON` (the `app` job) and the UI smoke test in its own
 GitHub-hosted `macos-15` job (`ui-smoke`): Xcode 27 on the Forge runner aborts inside
 `IDELaunchServicesLauncher` (`INTERNAL ERROR: childPID > 0`) when `xcodebuild test` launches
-an XCUITest runner, so the smoke test stays where spike S1 passed.
+an XCUITest runner, so the smoke test stays where spike S1 passed. That runner's display is
+1024 x 768, the layout budget: every window must fit it at its minimum size, so no view may
+answer the minimum-size probe with an unbounded width (a `maxWidth` under
+`fixedSize(vertical:)` does; `EmptyState` wraps at a fixed width for that reason).
 
 xcodebuild does not hand its own environment to the test process; prefix a variable with
 `TEST_RUNNER_` to pass it through. `TEST_RUNNER_STENO_UPDATE_SNAPSHOTS=1 xcodebuild test …`
@@ -45,7 +48,10 @@ rewrites the tab goldens under `Tests/Fixtures/snapshots/macos/`, and
 
 Launch the app with `-steno-ui-testing` for the preview environment: in-memory database seeded
 with StenoCore's sample meeting, synthetic capture backend, fake engines, every permission
-granted, no Sparkle, no keychain. Add `-steno-ui-testing-hold-transcribe` to queue the sample
+granted, no Sparkle, no keychain. Add `-steno-start-recording` to start a call recording from the
+window at launch (the live row selected, the header and sidebar Stop controls showing),
+`-steno-show-onboarding` to open the onboarding window over unknown permissions, or
+`-steno-ui-testing-hold-transcribe` to queue the sample
 meeting for processing at launch over a synthetic recording, with the fake speech engine
 holding each lane for sixty seconds, so the processing card can be watched; the UI smoke test
 uses it.

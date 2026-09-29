@@ -137,9 +137,12 @@ enum Theme {
   }
 
   /// Spacing used across the app, so call sites carry no numbers. Every
-  /// step except `xxs` and `hairline` sits on the 4 pt grid.
+  /// step except `xxs`, `titleGap` and `hairline` sits on the 4 pt grid.
   enum Space {
     static let xxs: CGFloat = 2
+    /// The 6 pt between a title and the line under it (the detail header's
+    /// meta line, the onboarding subtitle); the plan puts it off the grid.
+    static let titleGap: CGFloat = 6
     static let xs: CGFloat = 4
     static let sm: CGFloat = 8
     static let md: CGFloat = 12

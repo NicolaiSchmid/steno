@@ -10,6 +10,11 @@ import XCTest
 final class TabTextSnapshotTests: XCTestCase {
   private let locale = Locale(identifier: "en_US_POSIX")
   private let utc = TimeZone(identifier: "UTC")!
+  /// The states table's processing row, before the progress model has an
+  /// entry for the meeting.
+  private let processingRow = [
+    "Processing", "Audio stays on this Mac. This usually takes a minute or two.",
+  ]
 
   private func lines(
     _ tab: MeetingDetailViewModel.Tab, _ export: MeetingExport,
@@ -86,12 +91,29 @@ final class TabTextSnapshotTests: XCTestCase {
     let waiting = ProcessingProgressModel.Entry(
       meetingID: export.meeting.id, since: TestSupport.now)
     XCTAssertEqual(lines(.summary, export, progress: waiting), ["Waiting to process"])
-    // Without an entry (the model has not seen the meeting yet) the copy
-    // from `PendingText` stands.
-    XCTAssertEqual(lines(.summary, export), ["Summary appears after processing"])
-    XCTAssertEqual(lines(.transcript, export), ["Transcript appears after processing"])
-    XCTAssertEqual(lines(.tasks, export), ["Tasks appear after processing"])
+    // Without an entry (the model has not seen the meeting yet) the states
+    // table's processing row stands, the same on every content tab.
+    XCTAssertEqual(lines(.summary, export), processingRow)
+    XCTAssertEqual(lines(.transcript, export), processingRow)
+    XCTAssertEqual(lines(.tasks, export), processingRow)
     XCTAssertEqual(lines(.scratchpad, export), [""])
+
+    // Recording, queued and failed: the table's rows, one line of copy each.
+    // The view reads the same `TabPlaceholder` these lines come from.
+    export.meeting.state = .recording
+    XCTAssertEqual(
+      lines(.summary, export),
+      ["Recording", "The summary, transcript and tasks appear a few minutes after you stop."])
+    XCTAssertEqual(
+      lines(.summary, export), TabPlaceholder(tab: .summary, state: .recording).lines)
+    export.meeting.state = .queued
+    XCTAssertEqual(
+      lines(.transcript, export),
+      ["Queued", "Processing starts when the current meeting finishes."])
+    export.meeting.state = .failed(reason: "The LLM endpoint did not answer.\nRe-run later.")
+    XCTAssertEqual(
+      lines(.tasks, export), ["Processing failed", "The LLM endpoint did not answer."])
+    export.meeting.state = .processing
 
     // Content that is still there while the meeting is processed again sits
     // under the card.
@@ -105,13 +127,13 @@ final class TabTextSnapshotTests: XCTestCase {
       lines(.summary, export),
       ["Summary skipped", "No LLM endpoint is configured. The transcript is complete."],
       "ready without a summary and no endpoint: the setup row")
-    XCTAssertEqual(lines(.transcript, export), ["No transcript"])
+    XCTAssertEqual(lines(.transcript, export), ["No transcript", "No speech was recognised."])
     XCTAssertEqual(lines(.tasks, export), ["No tasks", "The summary was skipped."])
 
     // The template produced nothing: a summary exists, so no setup row.
     export.meeting.summary = SummaryDocument(templateID: "default", sections: [])
-    XCTAssertEqual(lines(.summary, export), ["No summary"])
-    XCTAssertEqual(lines(.tasks, export), ["No tasks"])
+    XCTAssertEqual(lines(.summary, export), ["No summary", "The template produced no sections."])
+    XCTAssertEqual(lines(.tasks, export), ["No tasks", "No tasks were found."])
   }
 
   /// A ready meeting without a summary once an endpoint exists offers the
@@ -137,7 +159,7 @@ final class TabTextSnapshotTests: XCTestCase {
 
     export.meeting.state = .processing
     XCTAssertEqual(
-      TabText.lines(.summary, export: export, llmConfigured: true),
-      ["Summary appears after processing"], "pending keeps today's text")
+      TabText.lines(.summary, export: export, llmConfigured: true), processingRow,
+      "pending keeps the states table's row")
   }
 }

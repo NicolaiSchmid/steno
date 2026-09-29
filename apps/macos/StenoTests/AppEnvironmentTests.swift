@@ -18,6 +18,22 @@ final class AppEnvironmentTests: XCTestCase {
     XCTAssertNil(environment.handover)
   }
 
+  /// `preview()` grants every permission; `preview(permissions:)` takes the
+  /// checker it is given (`-steno-show-onboarding` passes one with every
+  /// kind unknown, so the window opens on page 1).
+  func testPreviewTakesThePermissionsItIsGiven() async throws {
+    let granted = try await AppEnvironment.preview()
+    for kind in PermissionKind.allCases {
+      let state = await granted.permissions.state(of: kind)
+      XCTAssertEqual(state, .granted, "\(kind.rawValue) by default")
+    }
+    let unknown = try await AppEnvironment.preview(permissions: FakePermissions())
+    for kind in PermissionKind.allCases {
+      let state = await unknown.permissions.state(of: kind)
+      XCTAssertEqual(state, .unknown, "\(kind.rawValue) as given")
+    }
+  }
+
   /// The `-steno-rich-seed` set: the fixture stays newest, every filter row
   /// has a count, the meetings span three days, and the processing meeting
   /// has a master on disk so the pipeline resumes it instead of failing it.

@@ -14,53 +14,63 @@ struct TranscriptTab: View {
   let progress: ProcessingProgressModel.Entry?
   @State private var presentedSpeakerID: UUID?
 
+  /// The gap between turns; the plan's 20 pt.
+  static let turnGap: CGFloat = 20
+
   var body: some View {
-    ScrollView {
-      LazyVStack(alignment: .leading, spacing: Theme.Space.lg) {
-        ProcessingCardSlot(progress: progress, meeting: model.meeting)
-        let turns = TranscriptTurns.group(model.export?.segments ?? [])
-        if turns.isEmpty, progress == nil {
-          PendingText(
-            meeting: model.meeting, none: "No transcript",
-            pending: "Transcript appears after processing")
-        }
-        ForEach(turns) { turn in
-          VStack(alignment: .leading, spacing: Theme.Space.xs) {
-            HStack(spacing: Theme.Space.sm) {
-              if let speakerID = turn.speakerID {
-                SpeakerPicker(
-                  model: model.speakers, speakerID: speakerID,
-                  isExpanded: Binding(
-                    get: { presentedSpeakerID == speakerID },
-                    set: { open in
-                      if open {
-                        presentedSpeakerID = speakerID
-                      } else if presentedSpeakerID == speakerID {
-                        presentedSpeakerID = nil
-                        Task { await model.pickerClosed() }
-                      }
-                    }),
-                  presentation: .popover)
-              } else {
-                Text(model.displayName(forSpeaker: nil))
-                  .font(.steno(Theme.TextSize.xs, weight: .semibold))
-                  .foregroundStyle(Color.stenoStrong)
-              }
-              Text(turn.start.timestampText)
-                .font(.steno(Theme.TextSize.xxs).monospacedDigit())
-                .foregroundStyle(Color.stenoFaint)
-              Text(turn.lane.label)
-                .font(.steno(Theme.TextSize.xxxs))
-                .foregroundStyle(Color.stenoGhost)
-            }
-            Text(turn.text)
-              .font(.steno(Theme.TextSize.sm))
-              .foregroundStyle(Color.stenoForeground)
-              .fixedSize(horizontal: false, vertical: true)
+    let turns = TranscriptTurns.group(model.export?.segments ?? [])
+    if turns.isEmpty, progress == nil {
+      PendingText(tab: .transcript, model: model)
+    } else {
+      ScrollView {
+        LazyVStack(alignment: .leading, spacing: Self.turnGap) {
+          ProcessingCardSlot(progress: progress, meeting: model.meeting)
+          ForEach(turns) { turn in
+            turnView(turn)
           }
         }
+        .readingColumn()
       }
-      .readingColumn()
+    }
+  }
+
+  /// One turn: the speaker (a picker), the timestamp 12 mono `muted`, the
+  /// lane as a neutral chip only for a call (in person has one lane), then
+  /// the text at 14/19.
+  private func turnView(_ turn: TranscriptTurns.Turn) -> some View {
+    VStack(alignment: .leading, spacing: Theme.Space.xs) {
+      HStack(spacing: Theme.Space.sm) {
+        if let speakerID = turn.speakerID {
+          SpeakerPicker(
+            model: model.speakers, speakerID: speakerID,
+            isExpanded: Binding(
+              get: { presentedSpeakerID == speakerID },
+              set: { open in
+                if open {
+                  presentedSpeakerID = speakerID
+                } else if presentedSpeakerID == speakerID {
+                  presentedSpeakerID = nil
+                  Task { await model.pickerClosed() }
+                }
+              }),
+            presentation: .popover)
+        } else {
+          Text(model.displayName(forSpeaker: nil))
+            .font(.steno(Theme.TextSize.xs, weight: .semibold))
+            .foregroundStyle(Color.stenoStrong)
+        }
+        Text(turn.start.timestampText)
+          .font(.steno(Theme.TextSize.xxs).monospacedDigit())
+          .foregroundStyle(Color.stenoMutedForeground)
+        if model.meeting?.source == .macCall {
+          StatusChip(text: turn.lane.label, style: .neutral)
+        }
+      }
+      Text(turn.text)
+        .font(.steno(Theme.TextSize.sm))
+        .proseLeading()
+        .foregroundStyle(Color.stenoForeground)
+        .fixedSize(horizontal: false, vertical: true)
     }
   }
 }

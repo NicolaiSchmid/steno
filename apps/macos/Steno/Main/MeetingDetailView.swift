@@ -1,27 +1,41 @@
 import AppKit
-import StenoAdapters
 import StenoCore
 import SwiftUI
 
-/// Header (title, meta, the speakers row, tags, actions), the four tabs and
-/// the delivery footer. Speakers are named from the header row's popover;
-/// closing it re-exports when something changed. While the meeting is
-/// queued or processing the header chip reads the progress model's title
-/// and every tab shows the `ProcessingCard`; the chip is the header's only
-/// processing signal, the card has the one bar.
+/// The detail pane: the header stack of the redesign plan's decision 17
+/// (title row, meta row, messages, end reason, retention line, level bars,
+/// speakers, tags and actions), the segmented tabs, the tab content and the
+/// export footer. Speakers are named from the header row's popover; closing
+/// it re-exports when something changed. While the recorder holds this
+/// meeting the title row carries the Stop control (id `header-stop`) that
+/// calls the shared `RecordingController.stop()`, the same call the sidebar
+/// control, the menu bar item and the bubble make, and the level bars sit
+/// under the meta line. While the meeting is queued or processing the
+/// header chip reads the progress model's title and every tab shows the
+/// `ProcessingCard`; the chip is the header's only processing signal, the
+/// card has the one bar.
 struct MeetingDetailView: View {
   @Bindable var model: MeetingDetailViewModel
   let controller: AppController
   @State private var tagsText = ""
   @State private var editingTags = false
   @State private var showsSpeakers = false
+  @State private var hoveringActions = false
   @Environment(\.openSettings) private var openSettings
+  @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+  /// The level bars' width in the header; the plan's 240 pt.
+  private static let levelBarsWidth: CGFloat = 240
+  /// The tags field's width while editing; the plan's 240 pt.
+  private static let tagsFieldWidth: CGFloat = 240
 
   var body: some View {
     VStack(alignment: .leading, spacing: 0) {
       if let meeting = model.meeting {
         header(meeting)
-        tabBar
+        SegmentedTabs(MeetingDetailViewModel.Tab.allCases, selection: $model.tab) { $0.title }
+          .padding(.horizontal, Theme.Space.xxl)
+          .padding(.bottom, Theme.Space.lg)
         Divider().overlay(Color.stenoBorder)
         content
         Divider().overlay(Color.stenoBorder)
@@ -48,88 +62,132 @@ struct MeetingDetailView: View {
     .onDisappear { model.viewDisappeared() }
   }
 
+  private var recorder: RecordingController { controller.recorder }
+
   private var showsSpeakersRow: Bool {
     guard let export = model.export else { return false }
     return export.meeting.state == .ready && !export.speakers.isEmpty
   }
 
+  /// The Stop control's state for this meeting; nil unless the recorder
+  /// holds it.
+  private func headerStop(_ meeting: Meeting) -> HeaderStop? {
+    HeaderStop.make(
+      meetingID: meeting.id, recording: recorder.recording,
+      activeMeetingID: recorder.activeMeetingID)
+  }
+
+  // MARK: - Header
+
+  /// Decision 17's stack at 32 pt sides and 24 pt top. Gaps are the plan's:
+  /// 6 under the title, 12 under the meta line, 8 under each message row,
+  /// 12 under the level bars, 16 under the tags row.
   private func header(_ meeting: Meeting) -> some View {
-    VStack(alignment: .leading, spacing: Theme.Space.sm) {
-      HStack(alignment: .firstTextBaseline) {
-        Text(meeting.title)
-          .font(.steno(Theme.TextSize.xl, weight: .semibold))
-          .foregroundStyle(Color.stenoStrong)
-          .textSelection(.enabled)
-        Spacer()
-        if let entry = controller.progress.entry(for: meeting.id) {
-          StatusChip(text: entry.title, color: Color.stenoInfo)
-        } else {
-          StatusChip(meeting.state)
-        }
+    let stop = headerStop(meeting)
+    return VStack(alignment: .leading, spacing: 0) {
+      titleRow(meeting, stop: stop)
+        .padding(.bottom, Theme.Space.titleGap)
+      metaRow(meeting)
+        .padding(.bottom, Theme.Space.md)
+      if case .failed(let reason) = meeting.state {
+        MessageRow(kind: .error, text: reason)
+          .padding(.bottom, Theme.Space.sm)
       }
-      HStack(spacing: Theme.Space.md) {
-        Text(meeting.startedAt, format: .dateTime.year().month().day().hour().minute())
-        if meeting.duration > 0 { Text(meeting.duration.clockText) }
-        Text(meeting.source.label)
-        if let language = meeting.language { Text(language.localizedName()) }
-        if let usage = meeting.llmUsage {
-          Text("\(usage.promptTokens + usage.completionTokens) tokens")
-        }
+      if let error = model.error {
+        MessageRow(kind: .error, text: error)
+          .padding(.bottom, Theme.Space.sm)
       }
-      .font(.steno(Theme.TextSize.xxs))
-      .foregroundStyle(Color.stenoFaint)
       if let sentence = meeting.endReason?.sentence {
         MessageRow(kind: .info, text: sentence)
           .accessibilityIdentifier("end-reason")
-      }
-      if case .failed(let reason) = meeting.state {
-        MessageRow(kind: .error, text: reason)
+          .padding(.bottom, Theme.Space.sm)
       }
       if model.recordingStatusText != nil || model.showsKeepToggle {
         recordingLine
+          .padding(.bottom, Theme.Space.sm)
+      }
+      // While recording only: the recorder keeps the last reading through
+      // `.stopping`, and a frozen bar under a spinner reads as live.
+      if case .stop = stop, let levels = recorder.levels {
+        LevelBars(levels: levels)
+          .frame(width: Self.levelBarsWidth)
+          .accessibilityElement(children: .contain)
+          .accessibilityIdentifier("header-levels")
+          .padding(.bottom, Theme.Space.md)
       }
       if showsSpeakersRow {
         SpeakersRow(model: model.speakers, isPresented: $showsSpeakers)
           .popover(isPresented: $showsSpeakers, arrowEdge: .bottom) {
             SpeakersPopover(model: model.speakers)
           }
+          .padding(.bottom, Theme.Space.md)
       }
-      HStack(spacing: Theme.Space.sm) {
-        tagsEditor(meeting)
-        Spacer()
-        Menu {
-          Picker("Template", selection: .action({ meeting.templateID }, model.setTemplate)) {
-            ForEach(model.templates) { template in
-              Text(template.displayName).tag(template.id)
-            }
-          }
-          .disabled(!model.canRerunSummary)
-          .help(model.llmConfigured ? "" : SetupCopy.rerunHelp)
-          Button("Re-run summary") { Task { await model.rerunSummary() } }
-            .disabled(!model.canRerunSummary)
-            .help(model.llmConfigured ? "" : SetupCopy.rerunHelp)
-          Button("Re-export") { Task { await model.reexport() } }
-            .disabled(!model.canReexport)
-            .help(model.vaultConfigured ? "" : SetupCopy.reexportHelp)
-          if let url = model.export?.audio?.url {
-            Divider()
-            Button("Reveal recording in Finder") {
-              NSWorkspace.shared.activateFileViewerSelecting([url])
-            }
-            .disabled(!model.recordingFilesExist)
-          }
-        } label: {
-          Label("Actions", systemImage: "ellipsis.circle")
+      tagsRow(meeting)
+    }
+    .padding(.horizontal, Theme.Space.xxl)
+    .padding(.top, Theme.Space.xl)
+    .padding(.bottom, Theme.Space.lg)
+    .animation(Motion.swap(reduceMotion: reduceMotion), value: stop)
+  }
+
+  /// The title at 21 semibold with the ladder's tracking; trailing, the Stop
+  /// control while the recorder holds the meeting, else a status chip only
+  /// for queued, processing and failed (the progress model's title while it
+  /// has an entry). Ready says nothing: the content is the signal. A
+  /// `.recording` row the recorder does not hold yet (the intake writes it
+  /// while `.starting`) says nothing either: decision 3 keeps green for
+  /// success, and the Stop takes over the moment the recorder holds the row.
+  private func titleRow(_ meeting: Meeting, stop: HeaderStop?) -> some View {
+    HStack(alignment: .center, spacing: Theme.Space.md) {
+      Text(meeting.displayTitle())
+        .font(.steno(Theme.TextSize.xl, weight: .semibold))
+        .tracking(-0.2)
+        .foregroundStyle(Color.stenoStrong)
+        .textSelection(.enabled)
+        .lineLimit(2)
+        .fixedSize(horizontal: false, vertical: true)
+        .accessibilityIdentifier("meeting-title")
+      if meeting.isTitleDerived {
+        // Decision 13: a derived title ("Monday 10:06") carries the source
+        // as a neutral chip beside it, not as a word in it.
+        StatusChip(text: meeting.source.label, style: .neutral)
+      }
+      Spacer(minLength: Theme.Space.sm)
+      if let stop {
+        StopButton(state: stop, surface: .header, id: "header-stop") {
+          Task { await recorder.stop() }
         }
-        .menuStyle(.borderlessButton)
-        .fixedSize()
-        .disabled(model.isBusy)
-      }
-      if let error = model.error {
-        MessageRow(kind: .error, text: error)
+      } else if let entry = controller.progress.entry(for: meeting.id) {
+        StatusChip(text: entry.title, color: Color.stenoInfo)
+      } else {
+        switch meeting.state {
+        case .queued, .processing, .failed: StatusChip(meeting.state)
+        case .recording, .ready: EmptyView()
+        }
       }
     }
-    .padding(Theme.Space.lg)
+  }
+
+  /// One 12 pt `muted` line, facts joined by " · ": date and time and the
+  /// source (unless the derived title and its chip already say them),
+  /// duration once known, language, token count.
+  private func metaRow(_ meeting: Meeting) -> some View {
+    var facts: [String] = []
+    if !meeting.isTitleDerived {
+      facts.append(meeting.startedAt.formatted(.dateTime.year().month().day().hour().minute()))
+      facts.append(meeting.source.label)
+    }
+    if meeting.duration > 0 { facts.append(meeting.duration.clockText) }
+    if let language = meeting.language { facts.append(language.localizedName()) }
+    if let usage = meeting.llmUsage {
+      facts.append("\(usage.promptTokens + usage.completionTokens) tokens")
+    }
+    return Text(facts.joined(separator: " · "))
+      .font(.steno(Theme.TextSize.xxs))
+      .monospacedDigit()
+      .foregroundStyle(Color.stenoMutedForeground)
+      .textSelection(.enabled)
+      .accessibilityIdentifier("meeting-meta")
   }
 
   /// The retention row of the header: what happens to the audio file when
@@ -153,55 +211,81 @@ struct MeetingDetailView: View {
     }
   }
 
-  private func tagsEditor(_ meeting: Meeting) -> some View {
-    HStack(spacing: Theme.Space.xs) {
+  /// Neutral tag chips, the "Add tag" ghost button (a hairline field while
+  /// editing), and the Actions menu as an icon button trailing.
+  private func tagsRow(_ meeting: Meeting) -> some View {
+    HStack(alignment: .center, spacing: Theme.Space.sm) {
       if editingTags {
         StenoTextField("tags, comma separated", text: $tagsText)
-          .frame(width: 240)
+          .frame(width: Self.tagsFieldWidth)
+          .accessibilityIdentifier("tags-field")
           .onSubmit {
             editingTags = false
             let text = tagsText
             Task { await model.setTags(text: text) }
           }
+          .onExitCommand { editingTags = false }
       } else {
         ForEach(meeting.tags, id: \.self) { tag in
           StatusChip(text: "#\(tag)", style: .neutral)
         }
-        Button(meeting.tags.isEmpty ? "Add tags" : "Edit tags") {
+        Button {
           tagsText = meeting.tags.joined(separator: ", ")
           editingTags = true
+        } label: {
+          Label(meeting.tags.isEmpty ? "Add tag" : "Edit tags", systemImage: "plus")
+            .labelStyle(TagButtonLabelStyle())
         }
-        .buttonStyle(.plain)
-        .font(.steno(Theme.TextSize.xxs))
-        .foregroundStyle(Color.stenoFaint)
+        .buttonStyle(StenoGhostButtonStyle())
+        .accessibilityIdentifier("edit-tags")
       }
+      Spacer(minLength: Theme.Space.sm)
+      actionsMenu(meeting)
     }
   }
 
-  private var tabBar: some View {
-    HStack(spacing: Theme.Space.xs) {
-      ForEach(MeetingDetailViewModel.Tab.allCases) { tab in
-        Button {
-          withAnimation(Motion.functional) { model.tab = tab }
-        } label: {
-          Text(tab.title)
-            .font(.steno(Theme.TextSize.xs, weight: model.tab == tab ? .semibold : .regular))
-            .foregroundStyle(model.tab == tab ? Color.stenoStrong : Color.stenoMutedForeground)
-            .padding(.horizontal, Theme.Space.md)
-            .padding(.vertical, Theme.Space.xs + 2)
-            .background(
-              Theme.Radius.sm.shape
-                .fill(model.tab == tab ? Color.stenoSecondary : Color.clear))
+  /// The existing Actions menu behind an icon button face: template,
+  /// re-run, re-export, reveal the recording.
+  private func actionsMenu(_ meeting: Meeting) -> some View {
+    Menu {
+      Picker("Template", selection: .action({ meeting.templateID }, model.setTemplate)) {
+        ForEach(model.templates) { template in
+          Text(template.displayName).tag(template.id)
         }
-        .buttonStyle(.plain)
-        .accessibilityIdentifier("tab-\(tab.rawValue)")
-        .accessibilityAddTraits(model.tab == tab ? [.isSelected] : [])
       }
-      Spacer()
+      .disabled(!model.canRerunSummary)
+      .help(model.llmConfigured ? "" : SetupCopy.rerunHelp)
+      Button("Re-run summary") { Task { await model.rerunSummary() } }
+        .disabled(!model.canRerunSummary)
+        .help(model.llmConfigured ? "" : SetupCopy.rerunHelp)
+      Button("Re-export") { Task { await model.reexport() } }
+        .disabled(!model.canReexport)
+        .help(model.vaultConfigured ? "" : SetupCopy.reexportHelp)
+      if let url = model.export?.audio?.url {
+        Divider()
+        Button("Reveal recording in Finder") {
+          NSWorkspace.shared.activateFileViewerSelecting([url])
+        }
+        .disabled(!model.recordingFilesExist)
+      }
+    } label: {
+      IconButton.Glyph(systemName: "ellipsis", hovering: hoveringActions)
     }
-    .padding(.horizontal, Theme.Space.lg)
-    .padding(.bottom, Theme.Space.sm)
+    // `.button` with a plain button style keeps the 28 pt face; the
+    // borderless menu style draws only the bare glyph.
+    .menuStyle(.button)
+    .buttonStyle(.plain)
+    .menuIndicator(.hidden)
+    .fixedSize()
+    .onHover { hoveringActions = $0 }
+    .animation(Motion.swap(reduceMotion: reduceMotion), value: hoveringActions)
+    .disabled(model.isBusy)
+    .help("Actions")
+    .accessibilityLabel("Actions")
+    .accessibilityIdentifier("meeting-actions")
   }
+
+  // MARK: - Content
 
   @ViewBuilder
   private var content: some View {
@@ -219,8 +303,11 @@ struct MeetingDetailView: View {
     .accessibilityIdentifier("tab-content-\(model.tab.rawValue)")
   }
 
-  /// Selected by `exportStatus`: no vault, not exported yet, or one badge
-  /// per delivery. Ids `footer-choose-vault` and `footer-export-now`.
+  // MARK: - Footer
+
+  /// Selected by `exportStatus`: no vault, not exported yet, or one chip per
+  /// delivery. 32 pt sides, 12 pt vertical. Ids `footer-choose-vault` and
+  /// `footer-export-now`. The word is "export" everywhere.
   private func footer(_ meeting: Meeting) -> some View {
     HStack(spacing: Theme.Space.md) {
       switch model.exportStatus {
@@ -243,14 +330,14 @@ struct MeetingDetailView: View {
       Spacer()
       if model.isBusy { ProgressView().controlSize(.small) }
     }
-    .padding(.horizontal, Theme.Space.lg)
-    .padding(.vertical, Theme.Space.sm)
+    .padding(.horizontal, Theme.Space.xxl)
+    .padding(.vertical, Theme.Space.md)
   }
 
   private func footerText(_ text: String) -> some View {
     Text(text)
       .font(.steno(Theme.TextSize.xxs))
-      .foregroundStyle(Color.stenoFaint)
+      .foregroundStyle(Color.stenoMutedForeground)
       .accessibilityIdentifier("footer-export-status")
   }
 
@@ -264,36 +351,74 @@ struct MeetingDetailView: View {
   }
 }
 
+/// "Add tag" as the plan draws it: a 10 pt `plus` before 12 pt text, both in
+/// the ghost button's colour.
+private struct TagButtonLabelStyle: LabelStyle {
+  func makeBody(configuration: Configuration) -> some View {
+    HStack(spacing: Theme.Space.xs) {
+      configuration.icon
+        .font(.system(size: Theme.Control.chipGlyphSize, weight: .medium))
+      configuration.title
+        .font(.steno(Theme.TextSize.xxs))
+    }
+  }
+}
+
+/// One delivery in the footer: a chip with the `folder` glyph, the
+/// destination's display name and "Exported 10:02"; `info` while pending,
+/// `destructive` "Failed" with the message as help. Clicking a chip with a
+/// receipt reveals the exported folder in Finder. The raw destination id
+/// never reaches the chip.
 struct DeliveryBadge: View {
   let delivery: Delivery
 
+  private var name: String { delivery.destinationDisplayName }
+
+  /// The status word after the name: "Pending", "Exported 10:02", "Failed".
+  private var status: String {
+    switch delivery.status {
+    case .pending: "Pending"
+    case .delivered: exportedText
+    case .failed: "Failed"
+    }
+  }
+
+  private var chip: StatusChip {
+    let text = "\(name) · \(status)"
+    return switch delivery.status {
+    case .pending: StatusChip(text: text, color: Color.stenoInfo, systemImage: "folder")
+    case .delivered: StatusChip(text: text, style: .neutral, systemImage: "folder")
+    case .failed: StatusChip(text: text, color: Color.stenoDestructive, systemImage: "folder")
+    }
+  }
+
+  /// "Exported 10:02", the hour following the locale's clock; "Exported"
+  /// alone when the attempt time was not recorded.
+  private var exportedText: String {
+    guard let at = delivery.lastAttemptAt else { return "Exported" }
+    return "Exported \(at.formatted(.dateTime.hour(.defaultDigits(amPM: .abbreviated)).minute()))"
+  }
+
+  private var help: String {
+    if case .failed(let message) = delivery.status { return message }
+    return delivery.receipt == nil ? "" : "Reveal in Finder"
+  }
+
   var body: some View {
-    HStack(spacing: Theme.Space.xs) {
-      switch delivery.status {
-      case .pending:
-        StatusChip(text: "\(delivery.destinationID): pending", color: Color.stenoInfo)
-      case .delivered:
-        StatusChip(text: "\(delivery.destinationID): exported", color: Color.stenoLive)
-      case .failed(let message):
-        StatusChip(text: "\(delivery.destinationID): failed", color: Color.stenoDestructive)
-          .help(message)
+    if let folder = delivery.receipt?.folderURL {
+      Button {
+        NSWorkspace.shared.activateFileViewerSelecting([folder])
+      } label: {
+        chip
       }
-      if let folder = delivery.receipt.map({ $0.folderURL }) {
-        Button {
-          NSWorkspace.shared.activateFileViewerSelecting([folder])
-        } label: {
-          Image(systemName: "folder")
-        }
-        .buttonStyle(.plain)
-        .foregroundStyle(Color.stenoFaint)
-        .help("Reveal in Finder")
-        .accessibilityLabel("Reveal \(delivery.destinationID) folder in Finder")
-      }
-      if let at = delivery.lastAttemptAt {
-        Text(at, format: .dateTime.hour().minute())
-          .font(.steno(Theme.TextSize.xxxs))
-          .foregroundStyle(Color.stenoGhost)
-      }
+      .buttonStyle(.plain)
+      .help(help)
+      // The status stays the label, so VoiceOver hears "Obsidian, Exported
+      // 10:02"; the click is the hint.
+      .accessibilityLabel("\(name), \(status)")
+      .accessibilityHint("Reveals the export in Finder")
+    } else {
+      chip.help(help)
     }
   }
 }
