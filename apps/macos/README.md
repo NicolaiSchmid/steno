@@ -97,7 +97,7 @@ a Debug build read that feed instead of `SUFeedURL`. Serve `dist/` with
 | `Steno/Services/` | the four app protocols over system frameworks, their live types and fakes |
 | `StenoTests/` | hostless XCTest unit tests, one file per view model |
 | `StenoUITests/` | `LaunchSmokeTests` |
-| `scripts/` | `install-xcodegen.sh` (release zip pinned by version and SHA-256; an `xcodegen` on PATH counts only at the pinned version), `xcodebuild-quiet.sh` (log to file, diagnostics to the console, fails without the `** … SUCCEEDED **` marker; used by CI and `build-release.sh`), `xcresult-summary.py`, `build-release.sh`, `make-dmg.sh`, `make-appcast.sh`, `make-app-icon.sh` |
+| `scripts/` | `install-xcodegen.sh` (release zip pinned by version and SHA-256; an `xcodegen` on PATH counts only at the pinned version), `install-gh.sh` (the GitHub CLI for the publish step, same pinned-zip scheme; a `gh` already on PATH is used as is, so hosted runners skip the download and Forge needs nothing preinstalled), `xcodebuild-quiet.sh` (log to file, diagnostics to the console, fails without the `** … SUCCEEDED **` marker; used by CI and `build-release.sh`), `xcresult-summary.py`, `build-release.sh`, `make-dmg.sh`, `make-appcast.sh`, `make-app-icon.sh` |
 
 ### App icon
 

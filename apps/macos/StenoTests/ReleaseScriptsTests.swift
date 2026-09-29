@@ -149,7 +149,8 @@ final class ReleaseScriptsTests: XCTestCase {
       workflow.range(of: "run: apps/macos/scripts/check-release-secrets.sh")?.lowerBound,
       "release.yml runs the secrets guard")
     for later in [
-      "Install xcodegen", "setup-xcode", "build-release.sh", "make-dmg.sh", "make-appcast.sh",
+      "Install xcodegen", "Install gh", "setup-xcode", "build-release.sh", "make-dmg.sh",
+      "make-appcast.sh",
     ] {
       let index = try XCTUnwrap(workflow.range(of: later)?.lowerBound, later)
       XCTAssertLessThan(guardIndex, index, "\(later) runs after the secrets guard")
@@ -494,6 +495,56 @@ final class ReleaseScriptsTests: XCTestCase {
     XCTAssertEqual(rejected.status, 1, rejected.output)
     XCTAssertTrue(rejected.output.contains("is '2.40.0', want 2.46.0"), rejected.output)
     XCTAssertTrue(rejected.output.contains("checksum mismatch"), rejected.output)
+  }
+
+  // MARK: install-gh.sh
+
+  private func installGh(runnerTemp: URL, path: String) throws -> (
+    status: Int32, output: String
+  ) {
+    let process = Process()
+    process.executableURL = URL(fileURLWithPath: "/bin/bash")
+    process.arguments = [Self.scripts.appendingPathComponent("install-gh.sh").path]
+    process.environment = ["PATH": path, "RUNNER_TEMP": runnerTemp.path]
+    let pipe = Pipe()
+    process.standardOutput = pipe
+    process.standardError = pipe
+    try process.run()
+    let data = pipe.fileHandleForReading.readDataToEndOfFile()
+    process.waitUntilExit()
+    return (process.terminationStatus, String(decoding: data, as: UTF8.self))
+  }
+
+  /// Forge has no `gh`; the publish step must not depend on one being
+  /// preinstalled. The installer trusts the pinned checksum only, and a
+  /// `gh` already on PATH (the hosted images) is used without a download.
+  func testInstallGhRefusesAZipWithTheWrongChecksumAndKeepsAGhOnPath() throws {
+    let temp = try TestSupport.temporaryDirectory("steno-gh")
+    defer { try? FileManager.default.removeItem(at: temp) }
+    let root = temp.appendingPathComponent("gh-2.101.0", isDirectory: true)
+    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    #if arch(arm64)
+      let arch = "arm64"
+    #else
+      let arch = "amd64"
+    #endif
+    let zip = root.appendingPathComponent("gh_2.101.0_macOS_\(arch).zip")
+    try Data("not the release".utf8).write(to: zip)
+    let rejected = try installGh(runnerTemp: temp, path: "/usr/bin:/bin")
+    XCTAssertEqual(rejected.status, 1, rejected.output)
+    XCTAssertTrue(rejected.output.contains("::error::gh zip checksum mismatch"), rejected.output)
+    XCTAssertFalse(
+      FileManager.default.fileExists(atPath: zip.path), "the bad zip is removed for a clean retry")
+
+    let bin = try TestSupport.temporaryDirectory("steno-fake-bin")
+    defer { try? FileManager.default.removeItem(at: bin) }
+    let tool = bin.appendingPathComponent("gh")
+    try "#!/bin/bash\necho \"gh version 9.9.9 (fake)\"\n".write(
+      to: tool, atomically: true, encoding: .utf8)
+    try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: tool.path)
+    let accepted = try installGh(runnerTemp: temp, path: "\(bin.path):/usr/bin:/bin")
+    XCTAssertEqual(accepted.status, 0, accepted.output)
+    XCTAssertTrue(accepted.output.contains("already on PATH: gh version 9.9.9"), accepted.output)
   }
 
   // MARK: xcodebuild-quiet.sh

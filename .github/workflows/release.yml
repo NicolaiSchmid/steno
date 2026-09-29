@@ -72,6 +72,13 @@ jobs:
       - name: Install xcodegen
         run: apps/macos/scripts/install-xcodegen.sh
 
+      # The publish step needs `gh`. Hosted images ship it; Forge does not,
+      # and the first tag built there (v0.9.0-rc.2) notarised fine and then
+      # died on `gh: command not found`. Installed before the build so a
+      # broken download fails in seconds, not after twenty minutes of Xcode.
+      - name: Install gh
+        run: apps/macos/scripts/install-gh.sh
+
       - name: Versions from the tag
         id: version
         run: |
