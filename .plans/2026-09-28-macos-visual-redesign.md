@@ -792,14 +792,15 @@ Recorded 2026-09-29 while implementing steps 7, 7a, 8 and 11 (layout PR B1).
 
 - **Detail pass (2026-09-29).** Read from the light and dark attachments of the `ui-smoke` run
   on `main` at 960 x 600, side by side with the Jamie reference, after the owner called the
-  details clunky. `StatusChip` is 12 pt medium at 2 x 8 (20 pt tall), not 11 pt at 1 x 6: the
+  details clunky. `StatusChip` is 12 pt medium at 2 x 8, not 11 pt at 1 x 6: the
   15 pt sliver read as a mistake beside the 21 pt title and the 14 pt entries. The setup banner
   is one `Card` with the `info` `StatusDot` and the sentence on the first row and the buttons on
   the second, not a `MessageRow` inside a `Card`: the tinted box inside the white box was a box
   in a box, and at the 440 pt detail minimum the sentence wrapped to one character per line
-  beside the `fixedSize` buttons. The Speakers pill is the secondary button it behaves like
-  (32 pt, `raised`, hairline, `card` on hover, 22 pt avatars) with a 13 pt `muted` label, not a
-  28 pt `secondary` block under a 12 pt `faint` label; the inline speaker field is `raised`
+  beside the `fixedSize` buttons. The Speakers pill is a `StenoSecondaryButtonStyle` button
+  (the shared 32 pt `raised` hairline box with its hover veil and press feedback) holding 22 pt
+  avatars, with a 13 pt `muted` label, not a hand-drawn 28 pt `secondary` block under a 12 pt
+  `faint` label; the inline speaker field is `raised`
   under its `ring` hairline like every other focused field. The meta row drops the token count
   (developer vocabulary, the settings redesign's rule). The footer's status line wraps to two
   lines instead of truncating mid-word. Summary bullets are 12 pt apart. The three columns'

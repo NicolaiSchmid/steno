@@ -129,7 +129,7 @@ struct StatusDot: View {
   }
 }
 
-/// A small chip, radius 6, 20 pt tall. Semantic state gets the colour at
+/// A small chip, radius 6, 12 pt text at 2 x 8. Semantic state gets the colour at
 /// 12 % with the text in the colour; neutral metadata (tags, assignees,
 /// "Optional") gets a hairline and `muted` text, so only state reads as
 /// state. (12 pt text, not the plan's 11: the 15 pt chip read as a sliver
@@ -219,8 +219,29 @@ struct SectionLabel: View {
   }
 }
 
-/// An inline message row for errors, warnings and notes: the status dot,
-/// 13 pt body text, the colour at 8 % behind, radius 8.
+/// The status dot hung on the first line of a 13 pt sentence: the body of
+/// `MessageRow`, and on its own inside a `Card` (the setup banner), where
+/// the row's tint would be a box in a box.
+struct StatusLine: View {
+  var color: Color
+  var text: String
+
+  /// Centres the 6 pt dot on the 17 pt first line.
+  static let dotOffset: CGFloat = 5
+
+  var body: some View {
+    HStack(alignment: .top, spacing: Theme.Space.sm) {
+      StatusDot(color: color).padding(.top, Self.dotOffset)
+      Text(text)
+        .font(.steno(Theme.TextSize.xs))
+        .foregroundStyle(Color.stenoForeground)
+        .textSelection(.enabled)
+    }
+  }
+}
+
+/// An inline message row for errors, warnings and notes: a `StatusLine`
+/// on the colour at 8 %, radius 8.
 struct MessageRow: View {
   enum Kind {
     case error
@@ -242,14 +263,8 @@ struct MessageRow: View {
   }
 
   var body: some View {
-    HStack(alignment: .top, spacing: Theme.Space.sm) {
-      StatusDot(color: color).padding(.top, 5)
-      Text(text)
-        .font(.steno(Theme.TextSize.xs))
-        .foregroundStyle(Color.stenoForeground)
-        .textSelection(.enabled)
-    }
-    .padding(.vertical, Theme.Space.sm)
+    StatusLine(color: color, text: text)
+      .padding(.vertical, Theme.Space.sm)
     .padding(.horizontal, Theme.Control.rowInset)
     .frame(maxWidth: .infinity, alignment: .leading)
     .background(Theme.Radius.md.shape.fill(color.opacity(0.08)))

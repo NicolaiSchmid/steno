@@ -28,13 +28,12 @@ struct SetupBanner: View {
       if let message {
         Card {
           VStack(alignment: .leading, spacing: Theme.Space.md) {
-            HStack(alignment: .top, spacing: Theme.Space.sm) {
-              StatusDot(color: Color.stenoInfo).padding(.top, 5)
-              Text(message.text)
-                .font(.steno(Theme.TextSize.xs))
-                .foregroundStyle(Color.stenoForeground)
-                .fixedSize(horizontal: false, vertical: true)
-            }
+            // The line limit bounds the width-0 layout probe, which the
+            // empty state paid for once (`EmptyState.bodyWidth`); the
+            // longest sentence takes three lines at the pane minimum.
+            StatusLine(color: Color.stenoInfo, text: message.text)
+              .lineLimit(4)
+              .fixedSize(horizontal: false, vertical: true)
             HStack(spacing: Theme.Space.sm) {
               if message.offersSummaries {
                 Button(SetupCopy.setUpSummaries) {

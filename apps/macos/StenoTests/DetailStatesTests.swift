@@ -4,7 +4,8 @@ import XCTest
 
 /// The pure state mapping behind the detail pane: the states table row a
 /// tab without content shows (`TabPlaceholder`), when the header carries
-/// the Stop control (`HeaderStop`), and the footer's destination name. The
+/// the Stop control (`HeaderStop`), the header's meta line
+/// (`MeetingDetailView.metaFacts`) and the footer's destination name. The
 /// rows' words are pinned once, in
 /// `TabTextSnapshotTests.testEmptyTabsSayWhetherContentIsStillComing`; here
 /// the shape: glyph, spinner, Try again, and which tabs share a row.
@@ -85,6 +86,35 @@ final class DetailStatesTests: XCTestCase {
     XCTAssertNil(
       HeaderStop.make(meetingID: live, recording: .idle, activeMeetingID: live),
       "an idle recorder shows no Stop even if a stale id lingers")
+  }
+
+  /// The meta line: date and time and the source, duration, language, in
+  /// that order; a derived title (and its source chip) drops the first two;
+  /// the token count never appears, however much the LLM used.
+  func testMetaFactsSayWhenWhereHowLongAndInWhatLanguageButNotTokens() {
+    let locale = Locale(identifier: "en_US")
+    let utc = TimeZone(identifier: "UTC")!
+    var meeting = SampleData.meeting()
+    XCTAssertNotNil(meeting.llmUsage, "the fixture has a token count to hide")
+    XCTAssertFalse(meeting.isTitleDerived)
+
+    let facts = MeetingDetailView.metaFacts(for: meeting, locale: locale, timeZone: utc)
+    XCTAssertEqual(facts.count, 4, "\(facts)")
+    XCTAssertTrue(facts[0].hasPrefix("Sep 24, 2026"), facts[0])
+    XCTAssertTrue(facts[0].contains("9:00"), facts[0])
+    XCTAssertEqual(Array(facts.dropFirst()), ["Call", "00:06", "German"])
+    XCTAssertFalse(facts.contains { $0.hasSuffix("tokens") }, "\(facts)")
+
+    meeting.titleOrigin = .default
+    XCTAssertEqual(
+      MeetingDetailView.metaFacts(for: meeting, locale: locale, timeZone: utc),
+      ["00:06", "German"], "the derived title and its chip already say when and where")
+
+    meeting.duration = 0
+    meeting.language = nil
+    XCTAssertEqual(
+      MeetingDetailView.metaFacts(for: meeting, locale: locale, timeZone: utc), [],
+      "nothing known yet: an empty line, not a placeholder")
   }
 
   /// The footer names the destination, never its storage id.

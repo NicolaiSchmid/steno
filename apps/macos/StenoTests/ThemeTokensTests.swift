@@ -4,8 +4,8 @@ import XCTest
 
 /// Every `--color-*` token in `mobile/global.css` has a Swift counterpart in
 /// `Theme.tokens`, and nothing in `Theme.tokens` is unknown to the CSS. The
-/// Mac-only tokens, control boxes and press rules are pinned to the plan's
-/// tables in `.plans/2026-09-28-macos-visual-redesign.md`.
+/// Mac-only tokens, control boxes, main window columns and press rules are
+/// pinned to the plan's tables in `.plans/2026-09-28-macos-visual-redesign.md`.
 final class ThemeTokensTests: XCTestCase {
   func testEveryCSSColorTokenHasASwiftCounterpart() throws {
     let cssNames = try cssColorNames()
@@ -80,7 +80,8 @@ final class ThemeTokensTests: XCTestCase {
   }
 
   /// The plan's control heights (CTA 40, buttons 32, inputs 28, nav rows 32,
-  /// icon buttons 28, segmented cells 24 in a 28 container) and insets.
+  /// icon buttons 28, segmented cells 24 in a 28 container) and insets; the
+  /// chip's glyph one point under its 12 pt text.
   func testControlBoxesMatchThePlan() {
     XCTAssertEqual(Theme.Control.ctaHeight, 40)
     XCTAssertEqual(Theme.Control.buttonHeight, 32)
@@ -93,6 +94,25 @@ final class ThemeTokensTests: XCTestCase {
     XCTAssertEqual(Theme.Control.chipInset, 8)
     XCTAssertEqual(Theme.Control.rowInset, 10)
     XCTAssertEqual(Theme.Control.menuRowInset, 6)
+    XCTAssertEqual(Theme.Control.chipGlyphSize, 11)
+    XCTAssertEqual(Theme.Control.chipGlyphSize, Theme.TextSize.xxs.size - 1)
+  }
+
+  /// The main window's three columns: their minimums and their ideals each
+  /// add up to the 960 pt window minimum (the UI smoke test's review size),
+  /// so the split view is never over-constrained and never squeezes the nav
+  /// column under its minimum to honour the other two ideals.
+  func testMainWindowColumnsAddUpToTheWindowMinimum() {
+    let columns = [MainWindow.Columns.nav, MainWindow.Columns.list]
+    let detail = MainWindow.Columns.detailMinimum
+    let window = MainWindow.Columns.windowMinimum
+    XCTAssertEqual(window, CGSize(width: 960, height: 600))
+    XCTAssertEqual(columns.map(\.min).reduce(detail, +), window.width, "minimums")
+    XCTAssertEqual(columns.map(\.ideal).reduce(detail, +), window.width, "ideals")
+    for column in columns {
+      XCTAssertLessThanOrEqual(column.min, column.ideal)
+      XCTAssertLessThanOrEqual(column.ideal, column.max)
+    }
   }
 
   func testMotionTokensMirrorMobile() {

@@ -10,9 +10,12 @@ struct SpeakersRow: View {
   @Binding var isPresented: Bool
 
   static let shownAvatars = 3
-  /// The stacked avatars inside the button, 5 pt under its 32 pt height so
-  /// the ring around each has room.
+  /// The stacked avatars inside the 32 pt button: 22 pt, overlapping by 6,
+  /// each with a 1.5 pt `background` ring so they read as separate circles
+  /// where they cross.
   static let avatarSize: CGFloat = 22
+  static let avatarOverlap: CGFloat = 6
+  static let avatarRingWidth: CGFloat = 1.5
 
   private var named: [String] {
     model.rows.filter(\.isConfirmed).compactMap { $0.person?.displayName }
@@ -46,25 +49,22 @@ struct SpeakersRow: View {
         isPresented.toggle()
       } label: {
         HStack(spacing: Theme.Space.sm) {
-          HStack(spacing: -6) {
+          HStack(spacing: -Self.avatarOverlap) {
             ForEach(model.rows.prefix(Self.shownAvatars)) { row in
               Avatar(name: row.isConfirmed ? row.person?.displayName : nil, size: Self.avatarSize)
-                .overlay(Circle().strokeBorder(Color.stenoBackground, lineWidth: 1.5))
+                .overlay(
+                  Circle().strokeBorder(Color.stenoBackground, lineWidth: Self.avatarRingWidth))
             }
           }
           if !shownNames.isEmpty {
-            Text("·")
-              .font(.steno(Theme.TextSize.xs))
-              .foregroundStyle(Color.stenoGhost)
+            Text("·").foregroundStyle(Color.stenoGhost)
             Text(shownNames.joined(separator: ", "))
               .font(.steno(Theme.TextSize.xs, weight: .medium))
               .foregroundStyle(Color.stenoStrong)
               .lineLimit(1)
           }
           if overflow > 0 {
-            Text("+\(overflow)")
-              .font(.steno(Theme.TextSize.xs))
-              .foregroundStyle(Color.stenoFaint)
+            Text("+\(overflow)").foregroundStyle(Color.stenoFaint)
           }
           if let pendingText {
             Text(pendingText)
@@ -75,6 +75,8 @@ struct SpeakersRow: View {
             .font(.system(size: 10, weight: .semibold))
             .foregroundStyle(Color.stenoFaint)
         }
+        // 13 pt inside the style's 14 pt box: the row is a summary, not a label.
+        .font(.steno(Theme.TextSize.xs))
       }
       .buttonStyle(StenoSecondaryButtonStyle())
       .accessibilityIdentifier("speakers-row")
