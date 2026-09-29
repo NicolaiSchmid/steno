@@ -61,8 +61,11 @@ final class LaunchSmokeTests: XCTestCase {
     failed.click()
     XCTAssertTrue(
       fixtureEntry(in: app).waitForNonExistence(timeout: 5), "Failed still lists the ready fixture")
-    let empty = app.descendants(matching: .any)["empty-meetings"].firstMatch
-    XCTAssertTrue(empty.waitForExistence(timeout: 5), "no empty state for the empty filter")
+    // The no-match empty state is read through its button: the `EmptyState`
+    // container's own id is not exposed as an element on macOS.
+    XCTAssertTrue(
+      app.buttons["clear-filters"].firstMatch.waitForExistence(timeout: 5),
+      "no empty state for the empty filter")
     XCTAssertTrue(failed.isSelected)
     all.click()
     XCTAssertTrue(fixtureEntry(in: app).waitForExistence(timeout: 5), "All did not show it again")
