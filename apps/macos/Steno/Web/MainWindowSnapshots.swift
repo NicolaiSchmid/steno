@@ -60,17 +60,6 @@ enum MainWindowSnapshots {
     Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0"
   }
 
-  /// The banner sentence split at its first full stop: "Summaries are off."
-  /// is the title, the rest the body. A message without a full stop is all
-  /// title.
-  static func bannerParts(_ text: String) -> (title: String, body: String) {
-    guard let stop = text.range(of: ". ") else { return (text, "") }
-    return (
-      String(text[..<stop.upperBound]).trimmingCharacters(in: .whitespaces),
-      String(text[stop.upperBound...]).trimmingCharacters(in: .whitespaces)
-    )
-  }
-
   /// A rendered bullet (`SummaryMarkdown.sections`: `**lead**: text`, names
   /// already substituted) back into its lead and text, the bold markers
   /// dropped: the page shows plain sentences.
@@ -197,9 +186,8 @@ extension AppSnapshot {
   ) {
     var banner: SetupBanner?
     if hasMeetings, !controller.setupBannerDismissed, let message = controller.setupBannerMessage {
-      let parts = MainWindowSnapshots.bannerParts(message.text)
       banner = SetupBanner(
-        title: parts.title, body: parts.body, offersSummaries: message.offersSummaries,
+        title: message.title, body: message.body, offersSummaries: message.offersSummaries,
         offersVault: message.offersVault)
     }
     self.init(

@@ -4,8 +4,8 @@ import StenoCore
 /// One meeting's detail: the export from `observeMeeting(id:)`, deliveries
 /// from `observeDeliveries`, the bundled templates, the selected tab and
 /// the speakers (`speakers`, fed from every export tick). Summary,
-/// Transcript and Tasks are display only; the scratchpad is the one editable
-/// text and saves once after a debounce on the injected clock. Speaker
+/// Transcript and Tasks are display only; notes are saved by the bridge as
+/// the page sends them, debounced there. Speaker
 /// changes apply at once and mark the meeting dirty; the vault re-exports
 /// when the picker closes or the view goes away (`pickerClosed`,
 /// `viewDisappeared`). `observe()` runs from the view's `.task`, so SwiftUI
@@ -65,16 +65,12 @@ final class MeetingDetailViewModel: Identifiable {
   /// try again when the export shows it `.ready`.
   private var retryRedeliverWhenReady = false
   let templates = SummaryTemplate.bundled
-  static let scratchpadDebounce: Duration = .seconds(1)
 
   private let store: MeetingStore
   private let settings: SettingsStore
   private let pipeline: () -> ProcessingPipeline
   private let clock: any Clock<Duration>
   private let now: @Sendable () -> Date
-  private var scratchpadTask: Task<Void, Never>?
-  private var pendingScratchpad: String?
-  private var scratchpadEdits = 0
 
   init(
     meetingID: UUID, store: MeetingStore, settings: SettingsStore,
@@ -363,47 +359,6 @@ final class MeetingDetailViewModel: Identifiable {
   var wouldDeleteNow: Bool {
     defaultRetention == .deleteAfterProcessing && meeting?.state == .ready
       && deliveries.allDelivered
-  }
-
-  /// Debounced on the injected clock with one sleeper: edits within the
-  /// window keep it sleeping, and the last text saves once after a quiet
-  /// debounce interval.
-  func saveScratchpad(_ text: String) {
-    pendingScratchpad = text
-    scratchpadEdits += 1
-    guard scratchpadTask == nil else { return }
-    let clock = self.clock
-    scratchpadTask = Task { [weak self] in
-      var seen = -1
-      while let edits = self?.scratchpadEdits, edits != seen {
-        seen = edits
-        do {
-          try await clock.sleep(for: Self.scratchpadDebounce)
-        } catch {
-          return
-        }
-      }
-      guard let self else { return }
-      // Clear the handle first: `flushScratchpad` cancels a pending task,
-      // and cancelling this one would abort the GRDB write inside it.
-      self.scratchpadTask = nil
-      await self.flushScratchpad()
-    }
-  }
-
-  /// Saves the pending text now (the view going away, a selection change).
-  /// A failed write keeps the text pending for the next flush.
-  func flushScratchpad() async {
-    scratchpadTask?.cancel()
-    scratchpadTask = nil
-    guard let text = pendingScratchpad else { return }
-    pendingScratchpad = nil
-    do {
-      try await store.update(meetingID: id, now: now()) { $0.scratchpad = text }
-    } catch {
-      if pendingScratchpad == nil { pendingScratchpad = text }
-      self.error = "Scratchpad could not be saved: \(error)"
-    }
   }
 
   private func update(_ what: String, _ mutate: @escaping @Sendable (inout Meeting) -> Void) async {

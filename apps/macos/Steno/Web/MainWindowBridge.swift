@@ -47,7 +47,6 @@ final class MainWindowBridge: BridgeHost {
   private var running = false
   /// True while `run()` observes the store; tests wait for it before
   /// `page.ready`, since publishes before it are dropped by design.
-  var isRunning: Bool { running }
   private var pending: Set<BridgeTopic> = []
   private var detailTasks: [Task<Void, Never>] = []
   private var lastRecordingPublish: ContinuousClock.Instant?
@@ -84,9 +83,17 @@ final class MainWindowBridge: BridgeHost {
   /// Runs for the window's lifetime (`MainWindow`'s `.task`): arms every
   /// topic's tracking, follows the meeting list, and on cancellation tears
   /// the detail model down.
-  func run() async {
+  /// Publishes every topic now and lets later changes publish; `run()`
+  /// calls it before following the list, and a test that dispatches at once
+  /// calls it directly.
+  func start() {
+    guard !running else { return }
     running = true
     for topic in Self.topics { flush(topic) }
+  }
+
+  func run() async {
+    start()
     await list.observe()
     running = false
     recordingThrottle?.cancel()
@@ -231,14 +238,13 @@ final class MainWindowBridge: BridgeHost {
   }
 
   /// The old view's `onDisappear`: playback stops, a pending re-export is
-  /// flushed by the model itself, and pending notes are saved.
+  /// flushed by the model itself.
   private func tearDownDetail() {
     guard let leaving = detail else { return }
     for task in detailTasks { task.cancel() }
     detailTasks = []
     detail = nil
     leaving.viewDisappeared()
-    Task { await leaving.flushScratchpad() }
   }
 
   // MARK: - Commands
@@ -321,17 +327,9 @@ final class MainWindowBridge: BridgeHost {
       await detail.setKeepAudio(false)
       return try reply(ConfirmReply(confirmed: true))
     case .meetingSaveNotes:
-      let notes = try params(SaveNotesParams.self, request)
-      if let detail, detail.id == notes.meetingID {
-        detail.saveScratchpad(notes.text)
-      } else {
-        try await saveNotes(notes)
-      }
-    case .meetingFlushNotes:
-      let id = try params(MeetingIDParams.self, request).meetingID
-      // Another meeting's notes were written when they arrived, so only the
-      // selection's debounce can have anything to flush.
-      if let detail, detail.id == id { await detail.flushScratchpad() }
+      // The page debounces typing and names the meeting, so the text is
+      // written where it says, selected or not, the moment it arrives.
+      try await saveNotes(try params(SaveNotesParams.self, request))
     case .meetingRevealRecording:
       let detail = try requireDetail()
       guard let url = detail.export?.audio?.url, detail.recordingFilesExist else {

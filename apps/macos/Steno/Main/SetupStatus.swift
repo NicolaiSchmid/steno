@@ -124,13 +124,26 @@ enum SetupBannerMessage: Equatable, Sendable {
     }
   }
 
-  var text: String {
+  /// The banner's first sentence, "Summaries are off."
+  var title: String {
     switch self {
-    case .bothMissing: SetupCopy.bannerBothMissing
-    case .endpointMissing: SetupCopy.bannerEndpointMissing
-    case .vaultMissing: SetupCopy.bannerVaultMissing
+    case .bothMissing: SetupCopy.bannerBothMissingTitle
+    case .endpointMissing: SetupCopy.bannerEndpointMissingTitle
+    case .vaultMissing: SetupCopy.bannerVaultMissingTitle
     }
   }
+
+  /// The rest of the banner: what is missing and what happens meanwhile.
+  var body: String {
+    switch self {
+    case .bothMissing: SetupCopy.bannerBothMissingBody
+    case .endpointMissing: SetupCopy.bannerEndpointMissingBody
+    case .vaultMissing: SetupCopy.bannerVaultMissingBody
+    }
+  }
+
+  /// Title and body as one sentence pair.
+  var text: String { "\(title) \(body)" }
 
   /// The "Set up summaries" button (Settings > Summaries).
   var offersSummaries: Bool { self != .vaultMissing }
@@ -144,12 +157,15 @@ enum SetupBannerMessage: Equatable, Sendable {
 /// cannot drift. A skipped row's title is the plan sentence's clause before
 /// the colon and its body the rest.
 enum SetupCopy {
-  static let bannerBothMissing =
-    "Summaries and export are off. Steno has no LLM endpoint and no Obsidian vault yet, so meetings keep a raw transcript on this Mac."
-  static let bannerEndpointMissing =
-    "Summaries are off. Steno has no LLM endpoint yet, so meetings keep a raw transcript."
-  static let bannerVaultMissing =
-    "Export is off. Steno has no Obsidian vault yet, so meetings stay on this Mac."
+  static let bannerBothMissingTitle = "Summaries and export are off."
+  static let bannerBothMissingBody =
+    "Steno has no LLM endpoint and no Obsidian vault yet, so meetings keep a raw transcript on this Mac."
+  static let bannerEndpointMissingTitle = "Summaries are off."
+  static let bannerEndpointMissingBody =
+    "Steno has no LLM endpoint yet, so meetings keep a raw transcript."
+  static let bannerVaultMissingTitle = "Export is off."
+  static let bannerVaultMissingBody =
+    "Steno has no Obsidian vault yet, so meetings stay on this Mac."
   static let summarySkippedTitle = "Summary skipped"
   static let summarySkippedBody = "No LLM endpoint is configured. The transcript is complete."
   static let summaryRunnableTitle = "No summary yet"

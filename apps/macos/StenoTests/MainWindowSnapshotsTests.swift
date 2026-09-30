@@ -83,13 +83,6 @@ private func request(_ id: String, _ method: String, _ params: Any = NSNull()) -
     #expect(MainWindowSnapshots.bullet("") == .init(lead: "", text: ""))
   }
 
-  @Test func theBannerSplitsAtItsFirstSentence() {
-    let parts = MainWindowSnapshots.bannerParts(SetupCopy.bannerEndpointMissing)
-    #expect(parts.title == "Summaries are off.")
-    #expect(parts.body == "Steno has no LLM endpoint yet, so meetings keep a raw transcript.")
-    #expect(MainWindowSnapshots.bannerParts("No stop here").title == "No stop here")
-  }
-
   @Test func daysAndColoursAreStable() {
     #expect(MainWindowSnapshots.dayString(SampleData.startedAt, calendar: utc) == "2026-09-24")
     let index = MainWindowSnapshots.colorIndex(for: SampleData.personNicolaiID)
@@ -425,9 +418,9 @@ private func request(_ id: String, _ method: String, _ params: Any = NSNull()) -
     await host.controller.launch()
     defer { Task { await host.controller.shutdown() } }
     await eventually("settings observed") { host.controller.storedSettings != nil }
+    host.start()
     let running = Task { await host.run() }
     defer { running.cancel() }
-    await eventually("the bridge runs") { host.isRunning }
 
     let ready = await BridgeDispatcher.dispatch(request("r1", "page.ready"), host: host)
     #expect(ready == BridgeReply(id: "r1"))
@@ -463,12 +456,10 @@ private func request(_ id: String, _ method: String, _ params: Any = NSNull()) -
       "a list change that keeps the list filled does not re-publish app")
   }
 
-  /// Notes carry their meeting id. A save for the selected meeting goes
-  /// through its detail model and waits for the debounce; one for another
-  /// meeting (typed before the selection moved, saved after) is written to
-  /// that meeting at once and never touches the selection. A flush names
-  /// its meeting too, so another meeting's flush never writes the
-  /// selection's pending text; an unknown meeting is `notFound`.
+  /// Notes carry their meeting id and are written where it says as they
+  /// arrive, selected meeting or not (the page debounces typing), so a note
+  /// typed before the selection moved lands on its own meeting and never
+  /// touches the selection's; an unknown meeting is `notFound`.
   @Test func notesLandOnTheMeetingTheyWereTypedFor() async throws {
     let environment = try await TestSupport.environment(fixtures: .rich)
     let host = bridge(environment)
@@ -494,19 +485,6 @@ private func request(_ id: String, _ method: String, _ params: Any = NSNull()) -
         ["meetingID": SampleData.meetingID.uuidString, "text": "Mine"]),
       host: host)
     #expect(mine == BridgeReply(id: "r2"))
-    #expect(
-      try await environment.store.meeting(id: SampleData.meetingID)?.scratchpad
-        == original.scratchpad, "the selection's notes wait for the debounce")
-    let otherFlush = await BridgeDispatcher.dispatch(
-      request("r3", "meeting.flushNotes", ["meetingID": other.id.uuidString]), host: host)
-    #expect(otherFlush == BridgeReply(id: "r3"))
-    #expect(
-      try await environment.store.meeting(id: SampleData.meetingID)?.scratchpad
-        == original.scratchpad, "another meeting's flush leaves the selection's text pending")
-    let flush = await BridgeDispatcher.dispatch(
-      request("r4", "meeting.flushNotes", ["meetingID": SampleData.meetingID.uuidString]),
-      host: host)
-    #expect(flush == BridgeReply(id: "r4"))
     #expect(try await environment.store.meeting(id: SampleData.meetingID)?.scratchpad == "Mine")
     #expect(try await environment.store.meeting(id: other.id)?.scratchpad == "Late note")
 

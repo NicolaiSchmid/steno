@@ -121,15 +121,17 @@ final class MeetingListViewModel {
   }
 
   /// One read for the speakers of every listed meeting and one for the
-  /// people, after each list update; an update that lands mid-pass drops
+  /// people, side by side, after each list update; an update that lands mid-pass drops
   /// the pass and starts over, so the map never mixes two lists.
   private func reloadSpeakers() {
     speakersTask?.cancel()
     let ids = all.map(\.id)
     let store = self.store
     speakersTask = Task { [weak self] in
-      let speakers = (try? await store.speakers(forMeetings: ids)) ?? [:]
-      let persons = (try? await store.persons()) ?? []
+      async let speakerRows = store.speakers(forMeetings: ids)
+      async let personRows = store.persons()
+      let speakers = (try? await speakerRows) ?? [:]
+      let persons = (try? await personRows) ?? []
       guard let self, !Task.isCancelled else { return }
       self.speakersByMeeting = speakers
       self.personsByID = Dictionary(

@@ -31,7 +31,7 @@ describe("NotesTab", () => {
 		]);
 	});
 
-	it("saves what is pending and flushes on unmount", async () => {
+	it("saves what is pending on unmount", async () => {
 		const user = userEvent.setup();
 		const harness = await createBridgeHarness();
 		const { unmount } = renderWithBridge(
@@ -42,7 +42,6 @@ describe("NotesTab", () => {
 		unmount();
 		expect(harness.transport.calls.map((call) => call.method)).toEqual([
 			"meeting.saveNotes",
-			"meeting.flushNotes",
 		]);
 		expect(callsTo(harness.transport, "meeting.saveNotes")[0]?.params).toEqual({
 			meetingID: "00000000-0000-0000-0000-000000000001",

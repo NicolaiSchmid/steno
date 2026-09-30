@@ -110,47 +110,6 @@ final class MeetingDetailViewModelTests: XCTestCase {
     XCTAssertEqual(model.meeting?.title, "Produktstrategie 90/10")
   }
 
-  /// Three edits within the window save once, with the last text, after one
-  /// quiet debounce interval on the injected clock (one sleeper re-arms
-  /// while edits keep coming).
-  func testScratchpadSavesOnceAfterTheDebounce() async throws {
-    let clock = ManualClock()
-    let environment = try await TestSupport.environment(clock: clock)
-    let model = await makeModel(environment)
-
-    func scratchpad() async throws -> String? {
-      try await environment.store.meeting(id: SampleData.meetingID)?.scratchpad
-    }
-    model.saveScratchpad("a")
-    model.saveScratchpad("ab")
-    model.saveScratchpad("abc")
-    _ = await clock.waitForSleepers(1)
-    XCTAssertEqual(clock.pendingSleepers, 1, "one debounce sleeper for three edits")
-    var stored = try await scratchpad()
-    XCTAssertEqual(stored, "Nachfassen wegen Budget.", "nothing saved yet")
-    clock.advance(by: MeetingDetailViewModel.scratchpadDebounce)
-    await TestSupport.waitUntil("saved once") { (try? await scratchpad()) == "abc" }
-    let meeting = try await environment.store.meeting(id: SampleData.meetingID)
-    XCTAssertEqual(meeting?.updatedAt, TestSupport.now)
-    XCTAssertEqual(clock.pendingSleepers, 0, "no sleeper left once saved")
-
-    // An edit that lands while the sleeper sleeps re-arms the same sleeper
-    // instead of starting a second one; the save waits for a quiet window.
-    model.saveScratchpad("abcd")
-    _ = await clock.waitForSleepers(1)
-    model.saveScratchpad("abcde")
-    XCTAssertEqual(clock.pendingSleepers, 1, "still one sleeper")
-    clock.advance(by: MeetingDetailViewModel.scratchpadDebounce)
-    _ = await clock.waitForSleepers(1)
-    stored = try await scratchpad()
-    XCTAssertEqual(stored, "abc", "the late edit pushed the save out by one interval")
-    clock.advance(by: MeetingDetailViewModel.scratchpadDebounce)
-    await TestSupport.waitUntil("saved with the last text") {
-      (try? await scratchpad()) == "abcde"
-    }
-    XCTAssertEqual(clock.pendingSleepers, 0)
-  }
-
   func testTemplateChangeRerunsSummaryAndReexportRedelivers() async throws {
     let environment = try await TestSupport.environment()
     let vault = FileManager.default.temporaryDirectory

@@ -34,10 +34,12 @@ enum UITestDiagnostics {
     }
   }
 
-  /// Appends one line with a timestamp; safe from any thread.
-  static func note(_ message: String) {
+  /// Appends one line with a timestamp; safe from any thread. The message
+  /// is built only when the log is on, so a production launch pays nothing
+  /// for the window summaries.
+  static func note(_ message: @autoclosure () -> String) {
     guard enabled else { return }
-    let line = "\(Date().timeIntervalSince1970) \(message)\n"
+    let line = "\(Date().timeIntervalSince1970) \(message())\n"
     queue.sync {
       guard let handle = try? FileHandle(forWritingTo: logURL) else { return }
       defer { try? handle.close() }

@@ -11,9 +11,9 @@ export interface NotesTabProps {
 
 /**
  * Your own notes for the meeting. Typing saves a second after the last
- * keystroke; leaving the tab or the meeting saves at once and asks the
- * host to flush. The host's snapshot is adopted only while nothing is
- * pending, so an echo never overwrites what is being typed.
+ * keystroke; leaving the tab or the meeting saves at once. The host writes
+ * each save where its meeting id says. The host's snapshot is adopted only
+ * while nothing is pending, so an echo never overwrites what is being typed.
  */
 export function NotesTab({ meetingID, notes }: NotesTabProps) {
 	const client = useBridge();
@@ -36,7 +36,6 @@ export function NotesTab({ meetingID, notes }: NotesTabProps) {
 				dirty.current = false;
 				send(client, "meeting.saveNotes", { meetingID, text: latest.current });
 			}
-			send(client, "meeting.flushNotes", { meetingID });
 		};
 	}, [client, meetingID]);
 
