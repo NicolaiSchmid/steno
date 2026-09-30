@@ -70,10 +70,16 @@ public struct SetStringParams: Codable, Sendable, Equatable {
   public init(value: String) { self.value = value }
 }
 
+/// Notes carry their meeting so a save that arrives after the selection
+/// moved on lands on the meeting it was typed for.
 public struct SaveNotesParams: Codable, Sendable, Equatable {
+  public var meetingID: UUID
   public var text: String
 
-  public init(text: String) { self.text = text }
+  public init(meetingID: UUID, text: String) {
+    self.meetingID = meetingID
+    self.text = text
+  }
 }
 
 /// `speakers.options` reply: what the speaker picker offers for one speaker.

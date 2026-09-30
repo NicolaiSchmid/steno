@@ -339,7 +339,8 @@ extension BridgeSamples {
     BridgeFixture("params.bool", SetBoolParams(value: true)),
     BridgeFixture("params.string", SetStringParams(value: "BuiltInMicrophoneDevice")),
     BridgeFixture(
-      "params.meeting.saveNotes", SaveNotesParams(text: "Follow up with Anna on Monday.")),
+      "params.meeting.saveNotes",
+      SaveNotesParams(meetingID: meetingID, text: "Follow up with Anna on Monday.")),
     BridgeFixture(
       "params.speakers.options", SpeakerOptionsParams(speakerID: speakerUnknown, query: "an")),
     BridgeFixture(

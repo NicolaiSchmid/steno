@@ -695,7 +695,9 @@ export const setTagsParams = z.object({ tags: z.array(z.string()) }).strict();
 export const setTemplateParams = z.object({ templateID: z.string() }).strict();
 export const setBoolParams = z.object({ value: z.boolean() }).strict();
 export const setStringParams = z.object({ value: z.string() }).strict();
-export const saveNotesParams = z.object({ text: z.string() }).strict();
+export const saveNotesParams = z
+	.object({ meetingID: uuid, text: z.string() })
+	.strict();
 export const speakerOptionsParams = z
 	.object({ speakerID: uuid, query: z.string() })
 	.strict();
@@ -778,7 +780,7 @@ export const methodParams = {
 	"meeting.setKeepAudio": setBoolParams,
 	"meeting.deleteRecordingNow": null,
 	"meeting.saveNotes": saveNotesParams,
-	"meeting.flushNotes": null,
+	"meeting.flushNotes": meetingIDParams,
 	"meeting.revealRecording": null,
 	"meeting.revealExport": null,
 	"speakers.options": speakerOptionsParams,
@@ -833,6 +835,9 @@ export const methodParams = {
 /** Reply schema per method that returns a value; others resolve to `undefined`. */
 export const methodReplies = {
 	"speakers.options": speakerOptionsReply,
+	"meetings.delete": confirmReply,
+	"meeting.deleteRecordingNow": confirmReply,
+	"meeting.setKeepAudio": confirmReply,
 	"settings.recording.chooseFolder": chosenPathReply,
 	"settings.export.chooseVault": chosenPathReply,
 	"ui.confirmDestructive": confirmReply,

@@ -284,7 +284,7 @@ function DetailBody({
 					{working ? (
 						<ProcessingCard entry={entry} state={detail.state} />
 					) : null}
-					<NotesTab notes={detail.notes} />
+					<NotesTab meetingID={detail.id} notes={detail.notes} />
 				</>
 			);
 		}

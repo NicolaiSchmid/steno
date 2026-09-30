@@ -5,6 +5,7 @@ import { Textarea } from "@/components/ui";
 export const NOTES_DEBOUNCE_MS = 1000;
 
 export interface NotesTabProps {
+	meetingID: string;
 	notes: string;
 }
 
@@ -14,7 +15,7 @@ export interface NotesTabProps {
  * host to flush. The host's snapshot is adopted only while nothing is
  * pending, so an echo never overwrites what is being typed.
  */
-export function NotesTab({ notes }: NotesTabProps) {
+export function NotesTab({ meetingID, notes }: NotesTabProps) {
 	const client = useBridge();
 	const [text, setText] = useState(notes);
 	const latest = useRef(notes);
@@ -33,11 +34,11 @@ export function NotesTab({ notes }: NotesTabProps) {
 			clearTimeout(timer.current);
 			if (dirty.current) {
 				dirty.current = false;
-				send(client, "meeting.saveNotes", { text: latest.current });
+				send(client, "meeting.saveNotes", { meetingID, text: latest.current });
 			}
-			send(client, "meeting.flushNotes");
+			send(client, "meeting.flushNotes", { meetingID });
 		};
-	}, [client]);
+	}, [client, meetingID]);
 
 	function onChange(event: ChangeEvent<HTMLTextAreaElement>) {
 		const value = event.target.value;
@@ -47,7 +48,7 @@ export function NotesTab({ notes }: NotesTabProps) {
 		clearTimeout(timer.current);
 		timer.current = setTimeout(() => {
 			dirty.current = false;
-			send(client, "meeting.saveNotes", { text: latest.current });
+			send(client, "meeting.saveNotes", { meetingID, text: latest.current });
 		}, NOTES_DEBOUNCE_MS);
 	}
 
