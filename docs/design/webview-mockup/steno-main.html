@@ -7,8 +7,8 @@
   controls and motion. Append ?dark for the dark appearance.
 
   Identity: a charcoal sidebar that is the app icon's plate, warm paper for
-  the content, Geist for the interface, Instrument Serif for meeting
-  titles (no wordmark: the mark sits in the Record button), the icon's live green as the one accent, muted warm colours for
+  the content, Geist for everything including titles
+  (no wordmark: the mark sits in the Record button), the icon's live green as the one accent, muted warm colours for
   people. Fonts load from Google Fonts here so the mockup renders anywhere;
   the app bundles the woff2 files and loads nothing from the network. See
   .plans/2026-09-29-macos-webview-ui.md, Decision 2.
@@ -18,7 +18,7 @@
 <meta charset="utf-8" />
 <title>Steno mockup: main window</title>
 <link rel="preconnect" href="https://fonts.googleapis.com" />
-<link href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600&family=Geist+Mono:wght@400;500&family=Instrument+Serif:ital@0;1&display=swap" rel="stylesheet" />
+<link href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600&family=Geist+Mono:wght@400;500&display=swap" rel="stylesheet" />
 <style>
   :root {
     --plate: #1a1a1d; --plate-2: #121214;            /* sidebar, the icon's plate */
@@ -58,7 +58,7 @@
     -webkit-font-smoothing: antialiased; font-feature-settings: "cv11", "ss01";
   }
   .mono { font-family: "Geist Mono", ui-monospace, monospace; font-variant-numeric: tabular-nums; letter-spacing: -0.01em; }
-  .serif { font-family: "Instrument Serif", Georgia, serif; font-weight: 400; }
+  .serif { font-family: "Geist", ui-sans-serif, system-ui, sans-serif; font-weight: 600; letter-spacing: -0.02em; }
   svg.i { width: 16px; height: 16px; stroke: currentColor; fill: none; stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; flex: none; }
 
   .window {
@@ -76,10 +76,10 @@
   .record .mark i:nth-child(1){height:6px} .record .mark i:nth-child(2){height:14px} .record .mark i:nth-child(3){height:8px;background:var(--live-bright)} .record .mark i:nth-child(4){height:11px}
   .record {
     display: flex; align-items: center; gap: 10px; height: 40px; padding: 0 6px 0 14px; margin: 0 0 22px;
-    border-radius: 20px; background: #fff; color: #141416; font-weight: 500; box-shadow: 0 6px 18px rgba(0,0,0,0.35);
+    border-radius: 10px; background: #fff; color: #141416; font-weight: 500; box-shadow: 0 6px 18px rgba(0,0,0,0.35);
   }
   .record .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--live-bright); box-shadow: 0 0 0 4px var(--live-soft); }
-  .record .chev { margin-left: auto; width: 28px; height: 28px; border-radius: 50%; display: grid; place-items: center; background: rgba(0,0,0,0.06); color: #141416; }
+  .record .chev { margin-left: auto; width: 28px; height: 28px; border-radius: 7px; display: grid; place-items: center; background: rgba(0,0,0,0.06); color: #141416; }
   .label { font-size: 10.5px; font-weight: 500; letter-spacing: 0.08em; text-transform: uppercase; color: var(--on-plate-3); padding: 10px 10px 6px; }
   .nav { display: flex; align-items: center; gap: 10px; height: 32px; padding: 0 10px; border-radius: 7px; color: var(--on-plate-2); }
   .nav.on { background: var(--plate-hover); color: var(--on-plate); }
@@ -93,7 +93,7 @@
   /* List: paper */
   .list { background: var(--paper); border-right: 1px solid var(--line); display: flex; flex-direction: column; min-height: 0; overflow: hidden; }
   .list header { padding: 54px 18px 12px; display: flex; flex-direction: column; gap: 14px; }
-  .list h1 { margin: 0; font-size: 28px; line-height: 1; letter-spacing: -0.01em; }
+  .list h1 { margin: 0; font-size: 22px; line-height: 1.1; }
   .search { height: 32px; border-radius: 8px; background: var(--raised); box-shadow: var(--shadow-card); display: flex; align-items: center; gap: 8px; padding: 0 10px; color: var(--ink-3); }
   .search kbd { margin-left: auto; font: 11px "Geist Mono", monospace; color: var(--ink-3); }
   .day { font-size: 11px; font-weight: 500; letter-spacing: 0.06em; text-transform: uppercase; color: var(--ink-3); padding: 18px 18px 8px; }
@@ -132,7 +132,7 @@
   .eyebrow { display: flex; align-items: center; gap: 10px; color: var(--ink-3); font-size: 12px; }
   .eyebrow i { width: 3px; height: 3px; border-radius: 50%; background: var(--line-strong); }
   .eyebrow .kind { color: var(--ink-2); }
-  h2.title { margin: 10px 0 18px; font-size: 44px; line-height: 1.05; letter-spacing: -0.01em; color: var(--ink); }
+  h2.title { margin: 8px 0 18px; font-size: 30px; line-height: 1.2; color: var(--ink); }
   .people { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-bottom: 30px; }
   .people .avs b { width: 26px; height: 26px; font-size: 10px; border-color: var(--canvas); margin-left: -7px; }
   .people .names { color: var(--ink-2); }
@@ -144,7 +144,7 @@
   .tabs span.on::after { content: ""; position: absolute; left: 0; right: 0; bottom: -1px; height: 2px; background: var(--ink); border-radius: 1px; }
   .tabs span small { font-size: 11px; color: var(--ink-3); margin-left: 6px; font-weight: 400; }
   .reading { font-size: 15.5px; line-height: 1.62; color: var(--ink); }
-  .reading h3 { font-size: 24px; margin: 30px 0 10px; letter-spacing: -0.005em; }
+  .reading h3 { font-size: 18px; margin: 30px 0 10px; }
   .reading h3:first-child { margin-top: 0; }
   .reading ul { margin: 0; padding-left: 0; list-style: none; }
   .reading li { margin: 8px 0; padding-left: 18px; position: relative; }
