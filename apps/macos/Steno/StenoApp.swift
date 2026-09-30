@@ -224,7 +224,8 @@ struct RootView<Content: View>: View {
 
   var body: some View {
     let _ = UITestDiagnostics.note(
-      "root view: controller \(bootstrap.controller == nil ? "nil" : "set"), error \(bootstrap.error ?? "none")")
+      "root view: controller \(bootstrap.controller == nil ? "nil" : "set"), error \(bootstrap.error ?? "none")"
+    )
     Group {
       if let controller = bootstrap.controller {
         content(controller)
@@ -391,7 +392,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     UITestDiagnostics.note("appearance \(appearance.rawValue)")
   }
 
+  /// Bare launch arguments (a flag's value such as `960x600`) reach AppKit as
+  /// documents to open; logged so the smoke suite can see it happen.
+  func application(_ application: NSApplication, open urls: [URL]) {
+    UITestDiagnostics.note("open urls: \(urls.map(\.absoluteString))")
+  }
+
   func applicationDidFinishLaunching(_ notification: Notification) {
+    UITestDiagnostics.note(
+      "arguments \(CommandLine.arguments.dropFirst()); scenario window \(String(describing: AppBootstrap.scenario.windowSize)) appearance \(String(describing: AppBootstrap.scenario.appearance)) invalid \(AppBootstrap.scenario.invalidValues) unknown \(AppBootstrap.scenario.unknownFlags)"
+    )
     UITestDiagnostics.note("did finish launching; \(Self.windowSummary())")
     guard AppBootstrap.isUITesting else { return }
     Task { @MainActor in

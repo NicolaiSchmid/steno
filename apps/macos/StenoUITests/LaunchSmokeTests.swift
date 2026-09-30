@@ -105,6 +105,12 @@ final class LaunchSmokeTests: XCTestCase {
     launchMainWindow(["-steno-ui-testing", "-steno-appearance", "dark"])
   }
 
+  /// A bare token the scenario ignores: if this launch shows no window,
+  /// AppKit is treating flag values as documents to open.
+  func testMainWindowOpensWithABareArgument() throws {
+    launchMainWindow(["-steno-ui-testing", "bare"])
+  }
+
   /// The floating panel: launched with `-steno-show-prompt`, the detection
   /// prompt for "Zoom" appears; Record turns the same panel into the
   /// recording bubble; the bubble's stop hides it.
