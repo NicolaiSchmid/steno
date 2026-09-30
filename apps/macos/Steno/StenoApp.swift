@@ -172,11 +172,12 @@ extension View {
   }
 }
 
-/// Applies `-steno-window=WxH` to the main window on the turn after its
-/// `NSWindow` exists, and once more a second later: SwiftUI restores the
-/// frame a previous launch saved over `defaultSize`, and the smoke suite
-/// launches the app many times per run. Zero-sized, in the window content's
-/// background under UI testing only; without the flag it does nothing.
+/// Marks the main window `main-window` for the smoke tests, which have no
+/// title bar to match on, and applies `-steno-window=WxH` to it on the turn
+/// after its `NSWindow` exists, and once more a second later: SwiftUI
+/// restores the frame a previous launch saved over `defaultSize`, and the
+/// smoke suite launches the app many times per run. Zero-sized, in the
+/// window content's background under UI testing only.
 ///
 /// Never on the window's own setup pass: `viewDidMoveToWindow` fires while
 /// SwiftUI is still installing the content (the web view among it), and a
@@ -184,6 +185,9 @@ extension View {
 /// window has shown. The frame changes on the next main-actor turn, as the
 /// floating panel's does.
 struct UITestWindowSizer: NSViewRepresentable {
+  /// The main window's accessibility identifier under UI testing.
+  static let mainWindowIdentifier = "main-window"
+
   func makeNSView(context: Context) -> SizerView {
     SizerView(frame: .zero)
   }
@@ -194,6 +198,7 @@ struct UITestWindowSizer: NSViewRepresentable {
     override func viewDidMoveToWindow() {
       super.viewDidMoveToWindow()
       UITestDiagnostics.note("sizer: moved to window \(window == nil ? "nil" : "yes")")
+      window?.setAccessibilityIdentifier(UITestWindowSizer.mainWindowIdentifier)
       Task { @MainActor [weak self] in
         UITestWindowSizer.apply(to: self?.window)
         try? await Task.sleep(for: .seconds(1))

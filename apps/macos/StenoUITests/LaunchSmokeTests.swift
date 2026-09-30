@@ -36,11 +36,14 @@ final class LaunchSmokeTests: XCTestCase {
     return app
   }
 
-  /// The main window: the one holding the `#/main` web view
-  /// (`WebWindowView.accessibilityIdentifier(for:)`). No window has a title
-  /// bar, and the onboarding and Settings windows come to the front over it.
+  /// The main window: `main-window`, the identifier `UITestWindowSizer`
+  /// gives its `NSWindow`, or the scene's title as a fallback. No window has
+  /// a title bar to match on, and the onboarding and Settings windows come
+  /// to the front over it, so the first window is not it.
   private func mainWindow(in app: XCUIApplication) -> XCUIElement {
-    app.windows.containing(.webView, identifier: "web-view-main").firstMatch
+    app.windows.matching(
+      NSPredicate(format: "identifier == %@ OR title == %@", "main-window", "Steno")
+    ).firstMatch
   }
 
   /// Waits for the main window. When none appears the app's state is
@@ -60,7 +63,8 @@ final class LaunchSmokeTests: XCTestCase {
       let logURL = URL(fileURLWithPath: "/tmp/steno-ui-test.log")
       let log = (try? String(contentsOf: logURL, encoding: .utf8)) ?? "(no launch log)"
       let note = XCTAttachment(
-        string: "app state \(app.state.rawValue); windows \(app.windows.count)\n\(log)")
+        string: "app state \(app.state.rawValue); windows \(app.windows.count)\n\(log)\n"
+          + "hierarchy:\n\(app.debugDescription.prefix(30_000))")
       note.name = name
       note.lifetime = .keepAlways
       activity.add(note)
