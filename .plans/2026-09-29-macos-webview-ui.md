@@ -98,18 +98,18 @@ Why this direction, from the 2026-09-29 and 2026-09-30 rounds and the Jamie anal
      `#121214`, white text at 92, 56 and 34 percent), a 328 pt meeting list on warm paper
      (`#F6F4EF`), a reading canvas (`#FDFCFA`). Dark: `#101012`, `#17171A`, `#1D1D21`. Three
      materials, so the eye knows where it is without borders doing the work.
-   - Sidebar: the Record control first, a white capsule with the icon's bars as its mark (the
+   - Sidebar: the Record control first, a white 10 pt-radius button with the icon's bars as its mark (the
      live bar in green) and a disclosure for call or in person; then the Meetings filters (All,
      In progress, Ready, Failed) with counts, the Tags section, and a footer with the paired
      iPhone card and Settings. No wordmark: the mark in the Record button is the brand.
-   - List: a serif column title, search with its shortcut, day groups, rows with title, time,
+   - List: the column title at 22, search with its shortcut, day groups, rows with title, time,
      two preview lines, a coloured dot for the meeting kind, the duration in mono and an avatar
      stack; the selected row is a raised white card.
    - Meeting body: a 12 pt eyebrow (kind dot, date, duration, language, retention), the
-     meeting title in Instrument Serif at 44, a people row (avatar stack, names, a live-green
+     meeting title in Geist 600 at 30, a people row (avatar stack, names, a live-green
      "Confirm speaker" pill when a speaker is unnamed, tag pills), underline tabs with counts
      (Summary, Transcript, Tasks, Notes), then the content at a 720 pt measure. The setup notice
-     sits above the eyebrow as a paper callout. Summary: serif section headings at 24, 15.5 pt
+     sits above the eyebrow as a paper callout. Summary: section headings at 18, 15.5 pt
      bullets with 500-weight lead-ins and a mono timestamp where the summary cites the
      transcript; tasks as raised cards with a round check and the owner's colour dot.
      Transcript: a tool row ("Copy transcript", "Play from here"), then one two-column block per
@@ -118,9 +118,8 @@ Why this direction, from the 2026-09-29 and 2026-09-30 rounds and the Jamie anal
      1.62; find in transcript highlights matches. Jamie contributed only the reminder that the
      transcript reads best as name, time and paragraph; nothing else of Jamie's page is copied.
    - Type: Geist, the phone app's typeface, for the interface and the body; Geist Mono with
-     tabular numerals for times and durations; Instrument Serif for the list column title, the
-     meeting title and the summary section headings. All bundled as woff2 under the SIL Open
-     Font License.
+     tabular numerals for times and durations. Titles are Geist 600 with tight tracking; no
+     display face. Both bundled as woff2 under the SIL Open Font License.
    - Colour: a warm achromatic ladder with real contrast (light ink `#1C1B18`, `#6B675E`,
      `#9D988C`; lines `#E8E4DC`, `#D3CEC3`). The icon's live green (`#62B06F`, `#3F8A4C`) for
      recording and confirmation only; attention `#B0651A` (dark `#E0954A`) for what needs the
