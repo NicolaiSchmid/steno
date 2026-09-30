@@ -34,9 +34,6 @@ final class MainWindowBridge: BridgeHost {
     didSet { if appearance != oldValue { schedule(.app) } }
   }
   var openWindow: OpenWindow = { _ in }
-  /// The page's last reported size. Nothing reads it yet; a later plan's
-  /// layout-dependent replies will.
-  private(set) var layout: PageLayoutParams?
 
   private let confirm: Confirm
   private weak var events: (any BridgeEventSink)?
@@ -256,7 +253,8 @@ final class MainWindowBridge: BridgeHost {
       pageReady = true
       for topic in Self.topics { flush(topic) }
     case .pageLayout:
-      layout = try params(PageLayoutParams.self, request)
+      // Validated and dropped: nothing reads the page's size yet.
+      _ = try params(PageLayoutParams.self, request)
 
     case .meetingsSetFilter:
       list.stateFilter = try params(SetFilterParams.self, request).filter.modelFilter
@@ -298,7 +296,7 @@ final class MainWindowBridge: BridgeHost {
     case .meetingSetTags:
       let tags = try params(SetTagsParams.self, request).tags
       let detail = try requireDetail()
-      await detail.setTags(MeetingDetailViewModel.tags(from: tags.joined(separator: ",")))
+      await detail.setTags(MeetingDetailViewModel.tags(from: tags))
     case .meetingSetTemplate:
       let templateID = try params(SetTemplateParams.self, request).templateID
       let detail = try requireDetail()
@@ -312,20 +310,9 @@ final class MainWindowBridge: BridgeHost {
     case .meetingSetKeepAudio:
       let keep = try params(SetBoolParams.self, request).value
       let detail = try requireDetail()
-      if !keep, detail.wouldDeleteNow {
-        guard await confirm(Self.deleteRecordingPrompt) else {
-          return try reply(ConfirmReply(confirmed: false))
-        }
-      }
-      await detail.setKeepAudio(keep)
-      return try reply(ConfirmReply(confirmed: true))
+      return try await setKeepAudio(keep, on: detail, confirming: !keep && detail.wouldDeleteNow)
     case .meetingDeleteRecordingNow:
-      let detail = try requireDetail()
-      guard await confirm(Self.deleteRecordingPrompt) else {
-        return try reply(ConfirmReply(confirmed: false))
-      }
-      await detail.setKeepAudio(false)
-      return try reply(ConfirmReply(confirmed: true))
+      return try await setKeepAudio(false, on: try requireDetail(), confirming: true)
     case .meetingSaveNotes:
       // The page debounces typing and names the meeting, so the text is
       // written where it says, selected or not, the moment it arrives.
@@ -427,6 +414,18 @@ final class MainWindowBridge: BridgeHost {
   /// selection moved and saved after, they are written to that meeting at
   /// once, so they never land on the meeting selected now. The debounce is
   /// the detail model's; a late save is one write.
+  /// Applies the keep flag, after the delete-recording prompt when
+  /// `confirming`; the reply says whether the user went ahead.
+  private func setKeepAudio(
+    _ keep: Bool, on detail: MeetingDetailViewModel, confirming: Bool
+  ) async throws -> JSONValue? {
+    if confirming, !(await confirm(Self.deleteRecordingPrompt)) {
+      return try reply(ConfirmReply(confirmed: false))
+    }
+    await detail.setKeepAudio(keep)
+    return try reply(ConfirmReply(confirmed: true))
+  }
+
   private func saveNotes(_ notes: SaveNotesParams) async throws {
     let environment = controller.environment
     do {

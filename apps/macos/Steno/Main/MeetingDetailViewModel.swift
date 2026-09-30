@@ -202,8 +202,12 @@ final class MeetingDetailViewModel: Identifiable {
   /// Tags as typed, comma separated: trimmed, lower-cased, deduplicated and
   /// sorted. "Q4, q4 , Strategie" becomes `["q4", "strategie"]`.
   static func tags(from text: String) -> [String] {
-    let tags = text.split(separator: ",")
-      .map { $0.trimmingCharacters(in: .whitespaces).lowercased() }
+    tags(from: text.split(separator: ",").map(String.init))
+  }
+
+  /// Trimmed, lowercased, de-duplicated and sorted; empties dropped.
+  static func tags(from list: [String]) -> [String] {
+    let tags = list.map { $0.trimmingCharacters(in: .whitespaces).lowercased() }
       .filter { !$0.isEmpty }
     return Array(Set(tags)).sorted()
   }
@@ -256,25 +260,6 @@ final class MeetingDetailViewModel: Identifiable {
       return .keptProcessingFailed
     case .recording, .queued, .processing:
       return .keptWhileProcessing
-    }
-  }
-
-  /// The line's text; the date in the user's locale, "today" once the
-  /// expiry falls on or before the current day. Never past tense for a
-  /// date to come.
-  var recordingStatusText: String? {
-    guard let status = recordingStatus else { return nil }
-    switch status {
-    case .deleted: return "Recording deleted"
-    case .deletes(let date):
-      let today = now()
-      if date <= today || Calendar.current.isDate(date, inSameDayAs: today) {
-        return "Deletes today"
-      }
-      return "Deletes on \(date.formatted(date: .abbreviated, time: .omitted))"
-    case .keptUntilExportSucceeds: return "Kept until the export succeeds"
-    case .keptProcessingFailed: return "Kept; processing failed"
-    case .keptWhileProcessing: return "Kept while processing"
     }
   }
 

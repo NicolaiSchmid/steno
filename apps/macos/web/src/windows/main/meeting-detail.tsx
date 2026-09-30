@@ -17,6 +17,7 @@ import type {
 	MeetingDetailSnapshot,
 	RecordingSnapshot,
 } from "@/bridge/contract";
+import { detailTab } from "@/bridge/contract";
 import { send, useBridge, useSnapshot } from "@/bridge/hooks";
 import {
 	Avatar,
@@ -57,10 +58,10 @@ import { TranscriptTab } from "./transcript-tab";
 import { useElapsedSeconds } from "./use-now";
 
 type Tab = MeetingDetailSnapshot["tab"];
-const TABS: readonly Tab[] = ["summary", "transcript", "tasks", "notes"];
+const TABS: readonly Tab[] = detailTab.options;
 
 function isTab(value: unknown): value is Tab {
-	return TABS.some((tab) => tab === value);
+	return detailTab.safeParse(value).success;
 }
 
 /**
@@ -543,11 +544,7 @@ function DetailBody({
 						<MenuItem
 							data-testid="delete-meeting"
 							icon={<Trash2Icon />}
-							onClick={() => {
-								deleteMeeting(client, detail.id).catch((cause: unknown) => {
-									console.error("bridge: delete failed", cause);
-								});
-							}}
+							onClick={() => deleteMeeting(client, detail.id)}
 							variant="destructive"
 						>
 							Delete meeting…

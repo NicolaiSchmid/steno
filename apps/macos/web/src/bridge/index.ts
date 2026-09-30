@@ -16,13 +16,11 @@ export type {
 	MockTransport,
 	MockTransportOptions,
 	RecordedCall,
-	Scenario,
 } from "./mock-transport";
 export {
 	applyScenario,
 	createMockTransport,
 	fixtureKey,
-	isScenario,
 	isSnapshotKey,
 	loadFixtureReplies,
 	loadFixtureSnapshots,

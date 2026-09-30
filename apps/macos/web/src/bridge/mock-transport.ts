@@ -142,9 +142,9 @@ export const scenarios = [
 	"processing",
 	"export-failed",
 ] as const;
-export type Scenario = (typeof scenarios)[number];
+type Scenario = (typeof scenarios)[number];
 
-export function isScenario(value: string | null): value is Scenario {
+function isScenario(value: string | null): value is Scenario {
 	return scenarios.some((scenario) => scenario === value);
 }
 

@@ -76,34 +76,28 @@ function RecordButton({
 		state === "recording" ? recording?.startedAt : undefined,
 	);
 
-	if (state === "recording") {
-		return (
-			<Button
-				className="h-9 w-full justify-start"
-				data-testid="sidebar-stop"
-				onClick={() => send(client, "recording.stop")}
-				size="lg"
-				variant="primary"
-			>
-				<RecordMark />
-				Stop
-				<span className="ml-auto font-mono font-normal text-[12.5px] tabular-nums">
-					{format.duration(elapsed)}
-				</span>
-			</Button>
-		);
-	}
-	if (state === "starting" || state === "stopping") {
+	if (state === "recording" || state === "starting" || state === "stopping") {
+		const busy = state !== "recording";
 		return (
 			<Button
 				className="h-9 w-full justify-start"
 				data-testid={state === "starting" ? "sidebar-record" : "sidebar-stop"}
-				disabled
+				disabled={busy}
+				onClick={busy ? undefined : () => send(client, "recording.stop")}
 				size="lg"
 				variant="primary"
 			>
 				<RecordMark />
-				{state === "starting" ? "Starting…" : "Stopping…"}
+				{state === "recording"
+					? "Stop"
+					: state === "starting"
+						? "Starting…"
+						: "Stopping…"}
+				{state === "recording" ? (
+					<span className="ml-auto font-mono font-normal text-[12.5px] tabular-nums">
+						{format.duration(elapsed)}
+					</span>
+				) : null}
 			</Button>
 		);
 	}

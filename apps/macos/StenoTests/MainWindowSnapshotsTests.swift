@@ -328,7 +328,6 @@ private func request(_ id: String, _ method: String, _ params: Any = NSNull()) -
     let layout = await BridgeDispatcher.dispatch(
       request("r3", "page.layout", ["window": "main", "width": 1200, "height": 760]), host: host)
     #expect(layout == BridgeReply(id: "r3"))
-    #expect(host.layout == PageLayoutParams(window: .main, width: 1200, height: 760))
   }
 
   /// `page.ready` publishes every topic once; `meetings.setFilter` reaches

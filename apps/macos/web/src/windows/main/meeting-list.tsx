@@ -108,12 +108,6 @@ function flatIDs(list: MeetingsListSnapshot): string[] {
 	);
 }
 
-function deleteQuietly(client: ReturnType<typeof useBridge>, id: string) {
-	deleteMeeting(client, id).catch((cause: unknown) => {
-		console.error("bridge: delete failed", cause);
-	});
-}
-
 /**
  * The 320 pt column: the heading and search, then the day groups with one
  * row per meeting. The selected row is a raised card and stays in view.
@@ -162,7 +156,7 @@ export function MeetingList() {
 		if (event.key === "Delete" || event.key === "Backspace") {
 			if (list.selection) {
 				event.preventDefault();
-				deleteQuietly(client, list.selection);
+				deleteMeeting(client, list.selection);
 			}
 			return;
 		}
@@ -335,7 +329,7 @@ function MeetingRowView({
 			<ContextMenuPopup>
 				<ContextMenuItem
 					icon={<Trash2Icon />}
-					onClick={() => deleteQuietly(client, meeting.id)}
+					onClick={() => deleteMeeting(client, meeting.id)}
 					variant="destructive"
 				>
 					Delete meeting…

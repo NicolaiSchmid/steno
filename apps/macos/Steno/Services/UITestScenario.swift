@@ -147,7 +147,7 @@ struct UITestScenario: Equatable, Sendable {
   ) -> Value? {
     guard let argument = flags.first(where: { name(of: $0) == flag }) else { return nil }
     let text = String(argument.dropFirst(flag.count + 1))
-    guard argument.count > flag.count, !text.isEmpty else {
+    guard !text.isEmpty else {
       invalid.append("\(flag) (no value)")
       return nil
     }

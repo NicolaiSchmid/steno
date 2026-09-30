@@ -113,8 +113,7 @@ enum MainWindowSnapshots {
       status = "Pending"
     case .delivered:
       if let at = delivery.lastAttemptAt {
-        status =
-          "Exported \(at.formatted(.dateTime.hour(.defaultDigits(amPM: .abbreviated)).minute()))"
+        status = "Exported \(DisplayFormat.time(at))"
       } else {
         status = "Exported"
       }
@@ -149,22 +148,14 @@ extension MeetingDetailSnapshot.Tab {
 }
 
 extension BridgeListFilter {
+  /// The two enums share their raw values (a case one gains without the
+  /// other is a crash in tests, not a silent `.all`).
   init(_ filter: MeetingListViewModel.StateFilter) {
-    switch filter {
-    case .all: self = .all
-    case .processing: self = .processing
-    case .ready: self = .ready
-    case .failed: self = .failed
-    }
+    self.init(rawValue: filter.rawValue)!
   }
 
   var modelFilter: MeetingListViewModel.StateFilter {
-    switch self {
-    case .all: .all
-    case .processing: .processing
-    case .ready: .ready
-    case .failed: .failed
-    }
+    MeetingListViewModel.StateFilter(rawValue: rawValue)!
   }
 }
 

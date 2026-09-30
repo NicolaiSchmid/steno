@@ -191,32 +191,6 @@ final class MeetingListViewModelTests: XCTestCase {
     XCTAssertEqual(model.meetings.first?.id, live.id, "newest first")
   }
 
-  /// The entry's preview: the first summary bullet as "lead: text", else
-  /// the state's line; a summary without bullets reads as none and the
-  /// failed reason is cut at its first line.
-  func testPreviewLineReadsTheSummaryOrTheState() {
-    XCTAssertEqual(
-      SampleData.meeting().previewLine,
-      "Fokus: Speaker 1 schlägt vor, 90 Prozent auf den Kern zu setzen.")
-    var noSummary = SampleData.meeting()
-    noSummary.summary = nil
-    XCTAssertEqual(noSummary.previewLine, "No summary")
-    var noBullets = SampleData.meeting()
-    noBullets.summary = SummaryDocument(
-      templateID: SummaryTemplate.defaultID, language: "de",
-      sections: [SummarySection(id: "executive-summary", heading: "Executive Summary", bullets: [])]
-    )
-    XCTAssertEqual(noBullets.previewLine, "No summary", "a summary without bullets reads as none")
-    XCTAssertEqual(SampleData.meeting(state: .processing).previewLine, "Processing")
-    XCTAssertEqual(SampleData.meeting(state: .queued).previewLine, "Waiting to process")
-    XCTAssertEqual(SampleData.meeting(state: .recording).previewLine, "Recording")
-    XCTAssertEqual(
-      SampleData.meeting(state: .failed(reason: "The LLM endpoint did not answer.\nRetry later."))
-        .previewLine,
-      "The LLM endpoint did not answer.")
-    XCTAssertEqual(SampleData.meeting(state: .failed(reason: " \n")).previewLine, "Failed")
-  }
-
   func testSearchDebouncesOnTheClockAndUsesFTS() async throws {
     let environment = try await TestSupport.environment()
     let clock = ManualClock()

@@ -54,34 +54,27 @@ function pad(n: number): string {
 export function createFormatter(options: FormatOptions = {}): Formatter {
 	const locale = options.locale;
 	const zone = options.timeZone ? { timeZone: options.timeZone } : {};
+	/** A date formatter in the configured zone, or in `timeZone` when given. */
+	function formatter(parts: Intl.DateTimeFormatOptions, timeZone?: string) {
+		return new Intl.DateTimeFormat(
+			locale,
+			timeZone ? { ...parts, timeZone } : { ...parts, ...zone },
+		);
+	}
+	const DATE = { weekday: "long", month: "short", day: "numeric" } as const;
+	const SHORT = { month: "short", day: "numeric" } as const;
+	const SHORT_YEAR = { ...SHORT, year: "numeric" } as const;
+	const WEEKDAY = { weekday: "long" } as const;
 
-	const timeFormat = new Intl.DateTimeFormat(locale, {
+	const timeFormat = formatter({
 		hour: "2-digit",
 		minute: "2-digit",
 		hourCycle: "h23",
-		...zone,
 	});
-	const dateFormat = new Intl.DateTimeFormat(locale, {
-		weekday: "long",
-		month: "short",
-		day: "numeric",
-		...zone,
-	});
-	const shortDateFormat = new Intl.DateTimeFormat(locale, {
-		month: "short",
-		day: "numeric",
-		...zone,
-	});
-	const shortDateYearFormat = new Intl.DateTimeFormat(locale, {
-		month: "short",
-		day: "numeric",
-		year: "numeric",
-		...zone,
-	});
-	const weekdayFormat = new Intl.DateTimeFormat(locale, {
-		weekday: "long",
-		...zone,
-	});
+	const dateFormat = formatter(DATE);
+	const shortDateFormat = formatter(SHORT);
+	const shortDateYearFormat = formatter(SHORT_YEAR);
+	const weekdayFormat = formatter(WEEKDAY);
 	// `en-CA` writes YYYY-MM-DD; the calendar key the host uses for groups.
 	const dayKeyFormat = new Intl.DateTimeFormat("en-CA", {
 		year: "numeric",
@@ -101,27 +94,10 @@ export function createFormatter(options: FormatOptions = {}): Formatter {
 	// A `YYYY-MM-DD` key as a Date at noon UTC, so weekday formatting in UTC
 	// gives that calendar day whatever the zone.
 	const dayFormats = {
-		weekday: new Intl.DateTimeFormat(locale, {
-			weekday: "long",
-			timeZone: "UTC",
-		}),
-		date: new Intl.DateTimeFormat(locale, {
-			weekday: "long",
-			month: "short",
-			day: "numeric",
-			timeZone: "UTC",
-		}),
-		short: new Intl.DateTimeFormat(locale, {
-			month: "short",
-			day: "numeric",
-			timeZone: "UTC",
-		}),
-		shortYear: new Intl.DateTimeFormat(locale, {
-			month: "short",
-			day: "numeric",
-			year: "numeric",
-			timeZone: "UTC",
-		}),
+		weekday: formatter(WEEKDAY, "UTC"),
+		date: formatter(DATE, "UTC"),
+		short: formatter(SHORT, "UTC"),
+		shortYear: formatter(SHORT_YEAR, "UTC"),
 	};
 
 	function dayKeyToDate(day: string): Date {

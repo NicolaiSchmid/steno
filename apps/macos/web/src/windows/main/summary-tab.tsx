@@ -1,5 +1,5 @@
 import { ClockIcon, FileTextIcon, SparklesIcon } from "lucide-react";
-import { Fragment } from "react";
+import type { ReactNode } from "react";
 import type { MeetingDetailSnapshot } from "@/bridge/contract";
 import { Button, Callout, EmptyState } from "@/components/ui";
 import { TaskCard } from "./tasks-tab";
@@ -103,10 +103,7 @@ export function SummaryTab({
 	return (
 		<div data-testid="tab-content-summary">
 			{detail.summary.map((section) => (
-				<Fragment key={section.id}>
-					<h3 className="mt-[26px] mb-2 font-semibold text-base first:mt-0">
-						{section.heading}
-					</h3>
+				<Section key={section.id} title={section.heading}>
 					<ul className="my-0 list-disc pl-[22px]">
 						{section.bullets.map((bullet) => (
 							<li className="my-1.5" key={`${bullet.lead}:${bullet.text}`}>
@@ -115,13 +112,10 @@ export function SummaryTab({
 							</li>
 						))}
 					</ul>
-				</Fragment>
+				</Section>
 			))}
 			{detail.decisions.length > 0 ? (
-				<>
-					<h3 className="mt-[26px] mb-2 font-semibold text-base first:mt-0">
-						Decisions
-					</h3>
+				<Section title="Decisions">
 					<ul className="my-0 list-disc pl-[22px]">
 						{detail.decisions.map((decision) => (
 							<li className="my-1.5" key={decision}>
@@ -129,18 +123,27 @@ export function SummaryTab({
 							</li>
 						))}
 					</ul>
-				</>
+				</Section>
 			) : null}
 			{detail.tasks.length > 0 ? (
-				<>
-					<h3 className="mt-[26px] mb-2 font-semibold text-base first:mt-0">
-						Tasks
-					</h3>
+				<Section title="Tasks">
 					{detail.tasks.map((task) => (
 						<TaskCard key={task.id} task={task} />
 					))}
-				</>
+				</Section>
 			) : null}
 		</div>
+	);
+}
+
+/** A heading and its content; the first section sits flush with the top. */
+function Section({ title, children }: { title: string; children: ReactNode }) {
+	return (
+		<>
+			<h3 className="mt-[26px] mb-2 font-semibold text-base first:mt-0">
+				{title}
+			</h3>
+			{children}
+		</>
 	);
 }

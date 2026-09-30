@@ -15,6 +15,7 @@ import {
 	PopoverPopup,
 	PopoverTrigger,
 } from "@/components/ui";
+import { menuItemVariants } from "@/components/ui/menu";
 
 export type Speaker = MeetingDetailSnapshot["speakers"][number];
 
@@ -143,7 +144,7 @@ export function SpeakerPicker({
 					{options.map((option, index) => (
 						<button
 							aria-selected={index === 0}
-							className="flex h-[30px] cursor-default select-none items-center gap-2 rounded-[6px] px-2 text-left text-[13px] outline-none transition-colors duration-(--duration-functional) ease-standard hover:bg-accent focus-visible:bg-accent [&>svg]:size-4 [&>svg]:shrink-0 [&>svg]:stroke-[1.75] [&>svg]:text-muted-foreground"
+							className={menuItemVariants()}
 							key={`${option.kind}-${option.label}`}
 							onClick={() => pick(option)}
 							role="option"

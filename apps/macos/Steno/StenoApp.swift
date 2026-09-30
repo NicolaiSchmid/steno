@@ -197,7 +197,6 @@ struct UITestWindowSizer: NSViewRepresentable {
   final class SizerView: NSView {
     override func viewDidMoveToWindow() {
       super.viewDidMoveToWindow()
-      UITestDiagnostics.note("sizer: moved to window \(window == nil ? "nil" : "yes")")
       window?.setAccessibilityIdentifier(UITestWindowSizer.mainWindowIdentifier)
       Task { @MainActor [weak self] in
         UITestWindowSizer.apply(to: self?.window)
@@ -213,12 +212,9 @@ struct UITestWindowSizer: NSViewRepresentable {
     guard AppBootstrap.isUITesting, let size = AppBootstrap.scenario.windowSize, let window
     else { return }
     let content = NSSize(width: size.width, height: size.height)
-    UITestDiagnostics.note(
-      "sizer: window \(window.frame) visible \(window.isVisible) content \(content)")
     guard window.contentRect(forFrameRect: window.frame).size != content else { return }
     window.setContentSize(content)
     window.center()
-    UITestDiagnostics.note("sizer: resized to \(window.frame)")
   }
 }
 
@@ -228,9 +224,6 @@ struct RootView<Content: View>: View {
   @ViewBuilder let content: (AppController) -> Content
 
   var body: some View {
-    let _ = UITestDiagnostics.note(
-      "root view: controller \(bootstrap.controller == nil ? "nil" : "set"), error \(bootstrap.error ?? "none")"
-    )
     Group {
       if let controller = bootstrap.controller {
         content(controller)
@@ -402,10 +395,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     UITestDiagnostics.note("did finish launching; \(Self.windowSummary())")
     guard AppBootstrap.isUITesting else { return }
     Task { @MainActor in
-      for delay in [1, 3, 8] {
-        try? await Task.sleep(for: .seconds(delay))
-        UITestDiagnostics.note("after \(delay)s: \(Self.windowSummary())")
-      }
+      try? await Task.sleep(for: .seconds(3))
+      UITestDiagnostics.note("after 3s: \(Self.windowSummary())")
     }
   }
 
