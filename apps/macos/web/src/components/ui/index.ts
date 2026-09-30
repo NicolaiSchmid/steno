@@ -13,6 +13,20 @@ export { Card, cardVariants } from "./card";
 export type { CheckboxProps } from "./checkbox";
 export { Checkbox } from "./checkbox";
 export type {
+	ContextMenuItemProps,
+	ContextMenuPopupProps,
+	ContextMenuProps,
+	ContextMenuSeparatorProps,
+	ContextMenuTriggerProps,
+} from "./context-menu";
+export {
+	ContextMenu,
+	ContextMenuItem,
+	ContextMenuPopup,
+	ContextMenuSeparator,
+	ContextMenuTrigger,
+} from "./context-menu";
+export type {
 	DialogCloseProps,
 	DialogPopupProps,
 	DialogProps,
@@ -27,6 +41,8 @@ export {
 	DialogTitle,
 	DialogTrigger,
 } from "./dialog";
+export type { EmptyStateProps } from "./empty-state";
+export { EmptyState, emptyStateIconVariants } from "./empty-state";
 export type { InputProps, SearchInputProps } from "./input";
 export { Input, inputVariants, SearchInput } from "./input";
 export type { KbdProps } from "./kbd";
@@ -62,6 +78,8 @@ export {
 	PopoverTitle,
 	PopoverTrigger,
 } from "./popover";
+export type { ProgressBarProps } from "./progress-bar";
+export { ProgressBar } from "./progress-bar";
 export { RecordMark } from "./record-mark";
 export type { ScrollAreaProps } from "./scroll-area";
 export { ScrollArea } from "./scroll-area";
@@ -70,6 +88,8 @@ export type { SelectOption, SelectProps } from "./select";
 export { Select } from "./select";
 export type { SidebarRowProps } from "./sidebar-row";
 export { SidebarRow, sidebarRowVariants } from "./sidebar-row";
+export type { SplitButtonProps } from "./split-button";
+export { SplitButton, splitButtonVariants } from "./split-button";
 export type { SwitchProps } from "./switch";
 export { Switch } from "./switch";
 export type {
@@ -79,5 +99,7 @@ export type {
 	TabsTabProps,
 } from "./tabs";
 export { Tabs, TabsList, TabsPanel, TabsTab, tabsPanelVariants } from "./tabs";
+export type { TextareaProps } from "./textarea";
+export { Textarea } from "./textarea";
 export type { TooltipProps } from "./tooltip";
 export { Tooltip, TooltipProvider } from "./tooltip";

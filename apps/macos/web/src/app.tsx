@@ -1,12 +1,13 @@
 import { useEffect, useState } from "react";
 import { TooltipProvider } from "@/components/ui";
-import { AppShellPreview, type ShellTab } from "@/stories/app-shell-preview";
 import { StoriesPage } from "@/stories/stories-page";
+import { MainWindow } from "@/windows/main/main-window";
 
 /**
- * Hash routes for WP0: `#/shell` (the mockup rebuilt), `#/stories` (every
- * component). Query flags: `dark`, `tab=summary|transcript|tasks|notes`,
- * `menu`. The real windows replace this router in WP2.
+ * Hash routes: `#/main` (the default when the hash is empty) and
+ * `#/stories` (every component). Query flags: `dark`; for the main window
+ * `menu` and `picker` open the actions menu and the speaker picker on mount,
+ * and the mock bridge reads `scenario` and `tab` (`src/bridge/mock-transport.ts`).
  */
 
 export interface Route {
@@ -17,7 +18,7 @@ export interface Route {
 export function parseHash(hash: string): Route {
 	const raw = hash.startsWith("#") ? hash.slice(1) : hash;
 	const [path = "", query = ""] = raw.split("?");
-	return { path: path || "/shell", params: new URLSearchParams(query) };
+	return { path: path || "/main", params: new URLSearchParams(query) };
 }
 
 function useRoute(): Route {
@@ -36,17 +37,6 @@ function useDocumentScheme(dark: boolean) {
 	}, [dark]);
 }
 
-const SHELL_TABS: readonly ShellTab[] = [
-	"summary",
-	"transcript",
-	"tasks",
-	"notes",
-];
-
-function shellTab(value: string | null): ShellTab {
-	return SHELL_TABS.find((tab) => tab === value) ?? "summary";
-}
-
 export function App() {
 	const route = useRoute();
 	useDocumentScheme(route.params.has("dark"));
@@ -56,10 +46,10 @@ export function App() {
 		page = <StoriesPage />;
 	} else {
 		page = (
-			<AppShellPreview
-				key={`${route.params.get("tab")}-${route.params.has("menu")}`}
+			<MainWindow
+				key={`${route.params.has("menu")}-${route.params.has("picker")}`}
 				menuOpen={route.params.has("menu")}
-				tab={shellTab(route.params.get("tab"))}
+				pickerOpen={route.params.has("picker")}
 			/>
 		);
 	}

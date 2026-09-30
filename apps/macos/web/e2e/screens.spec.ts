@@ -2,9 +2,11 @@ import { mkdirSync } from "node:fs";
 import { expect, type Page, test } from "@playwright/test";
 
 /**
- * Renders the stories and the shell preview in light and dark at both
- * reference window sizes and writes PNGs to screens/. Every page must make
- * zero requests to anything but the preview server (plan Decision 9).
+ * Renders the main window in every state and the stories, in light and dark
+ * at both reference window sizes, and writes PNGs to screens/. Every page
+ * must make zero requests to anything but the preview server (plan
+ * Decision 9). The main window runs over the fixture bridge; `scenario=`
+ * and `tab=` bend the fixtures (`src/bridge/mock-transport.ts`).
  */
 
 const OUT = "screens";
@@ -13,11 +15,53 @@ const SIZES = [
 	{ width: 1200, height: 760 },
 ] as const;
 const SCHEMES = ["light", "dark"] as const;
-const SHELL_STATES = [
-	{ name: "summary", query: "tab=summary" },
-	{ name: "transcript", query: "tab=transcript" },
-	{ name: "transcript-menu", query: "tab=transcript&menu" },
-] as const;
+
+interface MainState {
+	name: string;
+	query: string;
+	/** What must be on screen before the shot. */
+	expect: { testId?: string; role?: "menu" | "dialog" | "option" };
+}
+
+const MAIN_STATES: readonly MainState[] = [
+	{ name: "summary", query: "tab=summary", expect: { testId: "tab-summary" } },
+	{
+		name: "transcript-picker",
+		query: "tab=transcript&picker",
+		expect: { role: "option" },
+	},
+	{
+		name: "tasks",
+		query: "tab=tasks",
+		expect: { testId: "tab-content-tasks" },
+	},
+	{
+		name: "notes",
+		query: "tab=notes",
+		expect: { testId: "scratchpad-editor" },
+	},
+	{ name: "menu", query: "tab=summary&menu", expect: { role: "menu" } },
+	{
+		name: "empty",
+		query: "scenario=empty",
+		expect: { testId: "empty-meetings-title" },
+	},
+	{
+		name: "recording",
+		query: "scenario=recording",
+		expect: { testId: "sidebar-stop" },
+	},
+	{
+		name: "failed",
+		query: "scenario=failed",
+		expect: { testId: "summary-try-again" },
+	},
+	{
+		name: "processing",
+		query: "scenario=processing",
+		expect: { testId: "processing-card" },
+	},
+];
 
 mkdirSync(OUT, { recursive: true });
 
@@ -49,21 +93,28 @@ async function settle(page: Page) {
 
 for (const size of SIZES) {
 	for (const scheme of SCHEMES) {
-		for (const state of SHELL_STATES) {
-			test(`shell ${scheme} ${size.width}x${size.height} ${state.name}`, async ({
+		for (const state of MAIN_STATES) {
+			test(`main ${scheme} ${size.width}x${size.height} ${state.name}`, async ({
 				page,
 			}) => {
 				const external = watchExternalRequests(page);
 				await page.setViewportSize(size);
 				const dark = scheme === "dark" ? "&dark" : "";
-				await page.goto(`/#/shell?${state.query}${dark}`);
+				await page.goto(`/#/main?${state.query}${dark}`);
 				await settle(page);
-				await expect(page.getByTestId("shell")).toBeVisible();
-				if (state.name === "transcript-menu") {
-					await expect(page.getByRole("menu")).toBeVisible();
+				await expect(page.getByTestId("main-window")).toBeVisible();
+				if (state.expect.testId) {
+					await expect(page.getByTestId(state.expect.testId)).toBeVisible();
 				}
+				if (state.expect.role) {
+					await expect(page.getByRole(state.expect.role).first()).toBeVisible();
+				}
+				if (state.name === "empty") {
+					await expect(page.getByTestId("empty-detail-title")).toBeVisible();
+				}
+				await settle(page);
 				await page.screenshot({
-					path: `${OUT}/shell-${scheme}-${size.width}x${size.height}-${state.name}.png`,
+					path: `${OUT}/main-${scheme}-${size.width}x${size.height}-${state.name}.png`,
 				});
 				expect(external).toEqual([]);
 			});

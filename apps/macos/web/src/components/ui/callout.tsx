@@ -5,7 +5,8 @@ import { Card } from "./card";
 
 /**
  * A notice that needs the user ("Summaries are off."): an icon well, one
- * sentence of title and text, and the actions at the trailing edge.
+ * sentence of title and text, and the actions at the trailing edge. When
+ * the text would fall under 220 px the actions wrap onto their own line.
  */
 export const calloutIconVariants = cva(
 	"grid size-7 shrink-0 place-items-center rounded-[8px] [&_svg]:size-[15px] [&_svg]:stroke-2",
@@ -43,14 +44,14 @@ export function Callout({
 	return (
 		<Card
 			className={cn(
-				"flex items-center gap-3 py-2.5 pr-3 pl-3.5 text-[13px]",
+				"flex flex-wrap items-center gap-x-3 gap-y-2 py-2.5 pr-3 pl-3.5 text-[13px]",
 				className,
 			)}
 			role="status"
 			{...props}
 		>
 			<span className={calloutIconVariants({ variant })}>{icon}</span>
-			<span className="min-w-0 flex-1 leading-[1.4]">
+			<span className="min-w-0 flex-[1_1_220px] leading-[1.4]">
 				<span className="font-medium">{title}</span>
 				{description ? (
 					<>
@@ -60,7 +61,9 @@ export function Callout({
 				) : null}
 			</span>
 			{actions ? (
-				<span className="flex shrink-0 items-center gap-1">{actions}</span>
+				<span className="ml-auto flex shrink-0 items-center gap-1">
+					{actions}
+				</span>
 			) : null}
 		</Card>
 	);

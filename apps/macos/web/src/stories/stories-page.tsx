@@ -53,8 +53,24 @@ import {
 	TabsTab,
 	Tooltip,
 } from "@/components/ui";
-import { scrollLines } from "./sample-data";
 import { ThemePair } from "./theme-pair";
+
+const scrollLines = [
+	"Lass uns kurz auf die Prioritäten schauen.",
+	"Neunzig Prozent auf den Kern, der Rest ruht.",
+	"Zu viel parallel in den letzten zwei Quartalen.",
+	"Das geht nur mit umgeschichtetem Budget.",
+	"Zwei Szenarien bis Freitag.",
+	"Die Zahlen als Grundlage nehmen.",
+	"Die Partner nicht aus zweiter Hand informieren.",
+	"Erst nach dem Investor-Update schreiben.",
+	"Nebenprojekte pausieren bis Q1.",
+	"Kommunikation nach dem Update.",
+	"Jérôme bringt die Budget-Szenarien mit.",
+	"Anna übernimmt die Partner-Mail.",
+	"Entscheidung im Investor-Update ansprechen.",
+	"Nächster Abgleich am Freitag.",
+];
 
 const languages = [
 	{ value: "de", label: "German" },
