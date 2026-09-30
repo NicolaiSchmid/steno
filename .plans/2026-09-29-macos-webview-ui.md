@@ -293,3 +293,10 @@ WP5, cleanup:
   `backgroundColor` set from the page's canvas token) named in Decision 1 is deferred to WP5 with
   the appearance work; until then the window paints the system window background under a
   transparent page.
+- WP2 (2026-09-30): three gaps carried forward. ⌘F "Find Meetings" stays disabled until the
+  contract gains a host-to-page event for focusing the search field (Decision 6 names
+  `ui.focusSearch`; adding it means a `StenoBridge` change and re-recorded fixtures). The `app`
+  snapshot's `phone` is `nil` until the handover service exposes its paired devices
+  synchronously. The fixture JSON chunks the mock transport imports are emitted into the
+  production bundle as separate files that the app never loads; WP5 gates the mock behind a
+  build flag so they leave the bundle.

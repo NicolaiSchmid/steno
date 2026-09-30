@@ -665,7 +665,8 @@ export const topicSchemas = {
 	recording: recordingSnapshot,
 	progress: progressSnapshot,
 	"meetings.list": meetingsListSnapshot,
-	"meeting.detail": meetingDetailSnapshot,
+	// `null` while no meeting is selected or its export has not loaded.
+	"meeting.detail": meetingDetailSnapshot.nullable(),
 	"settings.general": generalSettingsSnapshot,
 	"settings.recording": recordingSettingsSnapshot,
 	"settings.transcription": transcriptionSettingsSnapshot,
