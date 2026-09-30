@@ -44,6 +44,7 @@ on:
       - 'Sources/**'
       - 'Tests/**'
       - 'apps/macos/**'
+      - 'scripts/build-web.sh'
       - '.github/workflows/swift-ci.yml'
   push:
     branches: ['main']
@@ -53,6 +54,7 @@ on:
       - 'Sources/**'
       - 'Tests/**'
       - 'apps/macos/**'
+      - 'scripts/build-web.sh'
       - '.github/workflows/swift-ci.yml'
   workflow_dispatch:
     inputs:
@@ -316,6 +318,23 @@ jobs:
             steno-app-${{ runner.os }}-hosted-${{ steps.swift.outputs.version }}-${{ hashFiles('apps/macos/project.yml', 'Package.swift', 'Package.resolved') }}-
             steno-app-${{ runner.os }}-hosted-${{ steps.swift.outputs.version }}-
 
+      # The web UI is built here with pnpm so the Xcode pre-build phase only
+      # copies dist/ into the bundle (scripts/build-web.sh).
+      - uses: pnpm/action-setup@v4
+        with:
+          package_json_file: apps/macos/web/package.json
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: apps/macos/web/pnpm-lock.yaml
+
+      - name: Build web UI
+        run: |
+          pnpm --dir apps/macos/web install --frozen-lockfile
+          pnpm --dir apps/macos/web build
+
       - name: Generate project
         run: |
           xcodegen generate --spec apps/macos/project.yml
@@ -419,6 +438,23 @@ jobs:
           restore-keys: |
             steno-ui-${{ runner.os }}-${{ steps.swift.outputs.version }}-${{ hashFiles('apps/macos/project.yml', 'Package.swift', 'Package.resolved') }}-
             steno-ui-${{ runner.os }}-${{ steps.swift.outputs.version }}-
+
+      # The web UI is built here with pnpm so the Xcode pre-build phase only
+      # copies dist/ into the bundle (scripts/build-web.sh).
+      - uses: pnpm/action-setup@v4
+        with:
+          package_json_file: apps/macos/web/package.json
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: apps/macos/web/pnpm-lock.yaml
+
+      - name: Build web UI
+        run: |
+          pnpm --dir apps/macos/web install --frozen-lockfile
+          pnpm --dir apps/macos/web build
 
       - name: Generate project
         run: xcodegen generate --spec apps/macos/project.yml

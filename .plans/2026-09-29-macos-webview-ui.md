@@ -277,3 +277,13 @@ WP5, cleanup:
 - `drawsBackground` on `WKWebView` is key-value coded; it is the established way to a
   non-flashing transparent web view on macOS and Steno ships outside the App Store. If a macOS
   release removes it, the window background colour follow in Decision 1 is the fallback.
+
+## Deviations (implementation)
+
+- WP0 (2026-09-30): the bridge contract lives in the Swift package as the `StenoBridge` module
+  (`Sources/StenoBridge/`, tests in `Tests/StenoBridgeTests/`), not in
+  `apps/macos/Steno/Web/BridgeContract.swift` as Decision 5 said. Pure Foundation plus
+  `StenoCore` for the JSON convention, so it builds and its fixture test runs on Linux in the
+  `steno-swift:6.1` container as well as on macOS CI. The app target imports it; the fixture
+  directory `apps/macos/web/fixtures/bridge/` is unchanged. `BridgeSamples` holds one realistic
+  value per type and is the sample the web UI's mock transport serves.
