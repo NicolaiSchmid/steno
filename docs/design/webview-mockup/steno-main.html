@@ -1,166 +1,165 @@
 <!doctype html>
 <!--
-  Steno main window, web design language (2026-09-30). Static HTML, no build
-  step. The whole window is web content in a WKWebView with a hidden title
-  bar; only the traffic lights are native (the three dots mark where they
-  sit). Nothing here imitates macOS: these are Steno's own surfaces, type,
+  Steno main window, web design language (2026-09-30, second pass). Static
+  HTML, no build step. The whole window is web content in a WKWebView with
+  a hidden title bar; only the traffic lights are native (the three dots
+  mark where they sit). Nothing imitates macOS: Steno's own surfaces, type,
   controls and motion. Append ?dark for the dark appearance.
 
-  Fonts: the mockup loads Geist from Google Fonts so it renders anywhere; the
-  app bundles the same woff2 files and loads nothing from the network. See
-  .plans/2026-09-29-macos-webview-ui.md, Decisions 2 and 3.
+  Identity: a charcoal sidebar that is the app icon's plate, warm paper for
+  the content, Geist for the interface, Instrument Serif for meeting
+  titles, the icon's live green as the one accent, muted warm colours for
+  people. Fonts load from Google Fonts here so the mockup renders anywhere;
+  the app bundles the woff2 files and loads nothing from the network. See
+  .plans/2026-09-29-macos-webview-ui.md, Decision 2.
 -->
 <html lang="en">
 <head>
 <meta charset="utf-8" />
 <title>Steno mockup: main window</title>
 <link rel="preconnect" href="https://fonts.googleapis.com" />
-<link href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600;700&family=Geist+Mono:wght@400;500&display=swap" rel="stylesheet" />
+<link href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600&family=Geist+Mono:wght@400;500&family=Instrument+Serif:ital@0;1&display=swap" rel="stylesheet" />
 <style>
   :root {
-    /* Steno web design language, light. Warm achromatic ladder, one live
-       accent (the icon's green), near-black primary. */
-    --bg: #f4f4f2;          /* app background: sidebar and list */
-    --canvas: #ffffff;      /* reading canvas */
-    --raised: #ffffff;      /* cards on --bg */
-    --hover: rgba(20,20,18,0.045);
-    --line: #e4e3df;
-    --line-strong: #cfcdc7;
-    --ink: #1b1b19;
-    --ink-2: #61605b;
-    --ink-3: #93918a;
-    --primary: #1b1b19; --on-primary: #ffffff;
-    --live: #4c8c57; --live-bright: #62b06f; --live-soft: rgba(98,176,111,0.14);
-    --warn: #d4a72c; --warn-soft: rgba(212,167,44,0.14);
-    --shadow-card: 0 1px 2px rgba(20,20,18,0.06), 0 0 0 1px var(--line);
-    --shadow-pop: 0 12px 32px rgba(20,20,18,0.14), 0 0 0 1px var(--line);
+    --plate: #1a1a1d; --plate-2: #121214;            /* sidebar, the icon's plate */
+    --on-plate: rgba(255,255,255,0.92); --on-plate-2: rgba(255,255,255,0.56); --on-plate-3: rgba(255,255,255,0.34);
+    --plate-hover: rgba(255,255,255,0.07); --plate-line: rgba(255,255,255,0.08);
+    --paper: #f6f4ef;       /* list column */
+    --canvas: #fdfcfa;      /* reading canvas */
+    --raised: #ffffff;
+    --hover: rgba(30,28,22,0.05);
+    --line: #e8e4dc; --line-strong: #d3cec3;
+    --ink: #1c1b18; --ink-2: #6b675e; --ink-3: #9d988c;
+    --primary: #1c1b18; --on-primary: #ffffff;
+    --live: #3f8a4c; --live-bright: #62b06f; --live-soft: rgba(98,176,111,0.16);
+    --warn-ink: #8a6512; --warn-soft: rgba(212,167,44,0.16);
+    --shadow-card: 0 1px 2px rgba(30,28,22,0.05), 0 0 0 1px var(--line);
+    --shadow-sel: 0 2px 6px rgba(30,28,22,0.08), 0 0 0 1px var(--line-strong);
     --r-sm: 6px; --r-md: 10px; --r-lg: 14px;
+    /* people */
+    --p1: #b3573e; --p2: #b9862a; --p3: #5f7f6b; --p4: #6d6f8e; --p5: #a56a8a;
   }
   html.dark {
-    --bg: #131316; --canvas: #1a1a1e; --raised: #1f1f24;
+    --plate: #101012; --plate-2: #0b0b0c;
+    --paper: #17171a; --canvas: #1d1d21; --raised: #24242a;
     --hover: rgba(255,255,255,0.05);
-    --line: #2a2a30; --line-strong: #3a3a42;
-    --ink: #ededf0; --ink-2: #a2a2aa; --ink-3: #6f6f79;
-    --primary: #ffffff; --on-primary: #131316;
-    --live-soft: rgba(98,176,111,0.18);
-    --shadow-card: 0 1px 2px rgba(0,0,0,0.4), 0 0 0 1px var(--line);
-    --shadow-pop: 0 12px 32px rgba(0,0,0,0.5), 0 0 0 1px var(--line-strong);
+    --line: #2c2c32; --line-strong: #3c3c44;
+    --ink: #ecebe7; --ink-2: #a3a19a; --ink-3: #6f6d67;
+    --primary: #ecebe7; --on-primary: #17171a;
+    --live: #7cc487; --live-soft: rgba(98,176,111,0.2);
+    --warn-ink: #d4a72c;
+    --shadow-card: 0 1px 2px rgba(0,0,0,0.5), 0 0 0 1px var(--line);
+    --shadow-sel: 0 2px 8px rgba(0,0,0,0.5), 0 0 0 1px var(--line-strong);
   }
   * { box-sizing: border-box; }
   body {
-    margin: 0; min-height: 100vh; display: grid; place-items: center; background: #2b2b2e;
+    margin: 0; min-height: 100vh; display: grid; place-items: center; background: #26262a;
     font: 13px/1.45 "Geist", ui-sans-serif, system-ui, sans-serif; color: var(--ink);
     -webkit-font-smoothing: antialiased; font-feature-settings: "cv11", "ss01";
   }
   .mono { font-family: "Geist Mono", ui-monospace, monospace; font-variant-numeric: tabular-nums; letter-spacing: -0.01em; }
+  .serif { font-family: "Instrument Serif", Georgia, serif; font-weight: 400; }
+  svg.i { width: 16px; height: 16px; stroke: currentColor; fill: none; stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; flex: none; }
 
   .window {
     width: 1200px; height: 760px; border-radius: 12px; overflow: hidden; position: relative;
-    background: var(--bg); box-shadow: 0 40px 100px rgba(0,0,0,0.5), 0 0 0 1px rgba(0,0,0,0.5);
-    display: grid; grid-template-columns: 232px 336px 1fr;
+    box-shadow: 0 40px 100px rgba(0,0,0,0.5), 0 0 0 1px rgba(0,0,0,0.6);
+    display: grid; grid-template-columns: 224px 328px 1fr; background: var(--canvas);
   }
   .lights { position: absolute; top: 18px; left: 18px; display: flex; gap: 8px; z-index: 5; }
-  .lights i { width: 12px; height: 12px; border-radius: 50%; background: #d0cfca; }
-  html.dark .lights i { background: #3a3a42; }
+  .lights i { width: 12px; height: 12px; border-radius: 50%; background: rgba(255,255,255,0.22); }
 
-  /* Sidebar */
-  .side { padding: 52px 12px 12px; display: flex; flex-direction: column; gap: 2px; border-right: 1px solid var(--line); }
-  .brand { display: flex; align-items: center; gap: 8px; padding: 0 10px 14px; font-weight: 600; letter-spacing: -0.01em; color: var(--ink); }
-  .brand .mark { width: 18px; height: 18px; border-radius: 5px; background: linear-gradient(180deg,#303034,#141416); display: grid; grid-auto-flow: column; gap: 2px; padding: 4px 3px; align-items: end; }
-  .brand .mark i { display: block; width: 2px; background: #fff; border-radius: 1px; }
-  .brand .mark i:nth-child(1){height:5px} .brand .mark i:nth-child(2){height:9px} .brand .mark i:nth-child(3){height:6px;background:var(--live-bright)} .brand .mark i:nth-child(4){height:8px}
+  /* Sidebar: the plate */
+  .side { background: linear-gradient(180deg, var(--plate), var(--plate-2)); color: var(--on-plate); padding: 54px 12px 14px; display: flex; flex-direction: column; }
+  .brand { display: flex; align-items: center; gap: 9px; padding: 0 10px 18px; font-weight: 500; letter-spacing: 0.01em; font-size: 14px; }
+  .brand .mark { display: grid; grid-auto-flow: column; gap: 2.5px; align-items: end; height: 12px; }
+  .brand .mark i { display: block; width: 2.5px; background: #fff; border-radius: 1px; }
+  .brand .mark i:nth-child(1){height:5px} .brand .mark i:nth-child(2){height:12px} .brand .mark i:nth-child(3){height:7px;background:var(--live-bright)} .brand .mark i:nth-child(4){height:10px}
   .record {
-    display: flex; align-items: center; gap: 10px; height: 38px; padding: 0 6px 0 12px; margin: 0 0 16px;
-    border-radius: var(--r-md); background: var(--primary); color: var(--on-primary); font-weight: 500;
-    box-shadow: 0 1px 2px rgba(0,0,0,0.2);
+    display: flex; align-items: center; gap: 10px; height: 40px; padding: 0 6px 0 14px; margin: 0 0 22px;
+    border-radius: 20px; background: #fff; color: #141416; font-weight: 500; box-shadow: 0 6px 18px rgba(0,0,0,0.35);
   }
-  .record .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--live-bright); box-shadow: 0 0 0 4px var(--live-soft); }
-  .record .chev { margin-left: auto; width: 26px; height: 26px; border-radius: 7px; display: grid; place-items: center; color: inherit; opacity: 0.7; background: rgba(255,255,255,0.08); }
-  html.dark .record .chev { background: rgba(0,0,0,0.08); }
-  .label { font-size: 11px; font-weight: 500; letter-spacing: 0.04em; text-transform: uppercase; color: var(--ink-3); padding: 12px 10px 6px; }
-  .nav { display: flex; align-items: center; gap: 10px; height: 32px; padding: 0 10px; border-radius: var(--r-sm); color: var(--ink-2); font-weight: 500; }
-  .nav svg { width: 16px; height: 16px; stroke: currentColor; fill: none; stroke-width: 1.75; stroke-linecap: round; stroke-linejoin: round; }
-  .nav.on { background: var(--hover); color: var(--ink); }
-  .nav .n { margin-left: auto; color: var(--ink-3); font-size: 12px; }
-  .nav.tag::before { content: "#"; color: var(--ink-3); width: 16px; text-align: center; font-weight: 500; }
-  .side .foot { margin-top: auto; }
-  .phone { display: flex; align-items: center; gap: 8px; padding: 10px; border-radius: var(--r-md); background: var(--raised); box-shadow: var(--shadow-card); font-size: 12px; color: var(--ink-2); margin-bottom: 8px; }
-  .phone b { color: var(--ink); font-weight: 500; display: block; font-size: 12px; }
+  .record .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--live-bright); box-shadow: 0 0 0 4px var(--live-soft); }
+  .record .chev { margin-left: auto; width: 28px; height: 28px; border-radius: 50%; display: grid; place-items: center; background: rgba(0,0,0,0.06); color: #141416; }
+  .label { font-size: 10.5px; font-weight: 500; letter-spacing: 0.08em; text-transform: uppercase; color: var(--on-plate-3); padding: 10px 10px 6px; }
+  .nav { display: flex; align-items: center; gap: 10px; height: 32px; padding: 0 10px; border-radius: 7px; color: var(--on-plate-2); }
+  .nav.on { background: var(--plate-hover); color: var(--on-plate); }
+  .nav .n { margin-left: auto; color: var(--on-plate-3); font-size: 12px; }
+  .nav.tag::before { content: "#"; color: var(--on-plate-3); width: 16px; text-align: center; }
+  .side .foot { margin-top: auto; display: flex; flex-direction: column; gap: 4px; }
+  .phone { display: flex; align-items: center; gap: 9px; padding: 10px 10px; border-radius: var(--r-md); border: 1px solid var(--plate-line); font-size: 12px; color: var(--on-plate-2); }
+  .phone b { color: var(--on-plate); font-weight: 500; display: block; }
   .phone .st { width: 6px; height: 6px; border-radius: 50%; background: var(--live-bright); margin-left: auto; }
 
-  /* List */
-  .list { border-right: 1px solid var(--line); display: flex; flex-direction: column; min-height: 0; }
-  .list header { padding: 50px 16px 10px; display: flex; flex-direction: column; gap: 12px; }
-  .list h1 { margin: 0; font-size: 18px; font-weight: 600; letter-spacing: -0.02em; }
-  .search { height: 32px; border-radius: var(--r-sm); background: var(--raised); box-shadow: var(--shadow-card); display: flex; align-items: center; gap: 8px; padding: 0 10px; color: var(--ink-3); }
-  .search svg { width: 14px; height: 14px; stroke: currentColor; fill: none; stroke-width: 2; }
-  .search kbd { margin-left: auto; font: 11px "Geist Mono", monospace; color: var(--ink-3); border: 1px solid var(--line); border-radius: 4px; padding: 1px 5px; }
-  .day { font-size: 11px; font-weight: 500; letter-spacing: 0.04em; text-transform: uppercase; color: var(--ink-3); padding: 16px 16px 6px; display: flex; gap: 8px; }
-  .day span { color: var(--ink-2); text-transform: none; letter-spacing: 0; font-weight: 400; }
-  .row { margin: 0 8px 4px; padding: 10px 12px 11px; border-radius: var(--r-md); }
-  .row.on { background: var(--raised); box-shadow: var(--shadow-card); }
-  .row .t { display: flex; align-items: baseline; gap: 10px; font-weight: 500; letter-spacing: -0.005em; }
+  /* List: paper */
+  .list { background: var(--paper); border-right: 1px solid var(--line); display: flex; flex-direction: column; min-height: 0; }
+  .list header { padding: 54px 18px 12px; display: flex; flex-direction: column; gap: 14px; }
+  .list h1 { margin: 0; font-size: 28px; line-height: 1; letter-spacing: -0.01em; }
+  .search { height: 32px; border-radius: 8px; background: var(--raised); box-shadow: var(--shadow-card); display: flex; align-items: center; gap: 8px; padding: 0 10px; color: var(--ink-3); }
+  .search kbd { margin-left: auto; font: 11px "Geist Mono", monospace; color: var(--ink-3); }
+  .day { font-size: 11px; font-weight: 500; letter-spacing: 0.06em; text-transform: uppercase; color: var(--ink-3); padding: 18px 18px 8px; }
+  .day span { color: var(--ink-2); text-transform: none; letter-spacing: 0; font-weight: 400; margin-left: 8px; }
+  .row { margin: 0 10px 6px; padding: 11px 13px 12px; border-radius: var(--r-md); }
+  .row.on { background: var(--raised); box-shadow: var(--shadow-sel); }
+  .row .t { display: flex; align-items: baseline; gap: 10px; font-weight: 500; letter-spacing: -0.005em; font-size: 13.5px; }
   .row .t time { margin-left: auto; font-size: 11px; color: var(--ink-3); }
-  .row .p { color: var(--ink-2); font-size: 12.5px; line-height: 1.4; margin-top: 3px; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
-  .row .m { display: flex; gap: 6px; margin-top: 8px; align-items: center; }
-  .chip { font-size: 11px; padding: 2px 7px; border-radius: 5px; background: var(--hover); color: var(--ink-2); font-weight: 500; }
-  .chip.live { background: var(--live-soft); color: var(--live); }
-  .chip.warn { background: var(--warn-soft); color: #8a6a12; }
-  html.dark .chip.warn { color: var(--warn); }
-  .dur { font-size: 11px; color: var(--ink-3); }
+  .row .p { color: var(--ink-2); font-size: 12.5px; line-height: 1.45; margin-top: 4px; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+  .row .m { display: flex; gap: 8px; margin-top: 9px; align-items: center; font-size: 11.5px; color: var(--ink-3); }
+  .kind { display: inline-flex; align-items: center; gap: 5px; color: var(--ink-2); font-weight: 500; }
+  .kind i { width: 6px; height: 6px; border-radius: 50%; background: var(--ink-3); }
+  .kind.call i { background: #6d6f8e; } .kind.person i { background: #b9862a; }
+  .state { color: var(--warn-ink); font-weight: 500; }
   .avs { display: flex; margin-left: auto; }
-  .avs b { width: 18px; height: 18px; border-radius: 50%; border: 2px solid var(--bg); margin-left: -6px; font-size: 9px; font-weight: 600; display: grid; place-items: center; color: #fff; }
+  .avs b { width: 18px; height: 18px; border-radius: 50%; border: 2px solid var(--paper); margin-left: -6px; font-size: 9px; font-weight: 600; display: grid; place-items: center; color: #fff; font-family: "Geist"; }
   .row.on .avs b { border-color: var(--raised); }
   .avs b:first-child { margin-left: 0; }
-  .a1{background:#5b5b63} .a2{background:#8a8a94} .a3{background:#3d3d44} .a4{background:#b3b3ba}
+  .p1{background:var(--p1)} .p2{background:var(--p2)} .p3{background:var(--p3)} .p4{background:var(--p4)} .p5{background:var(--p5)}
+  .avs b.unk { background: var(--line-strong); color: var(--ink-2); }
 
-  /* Detail */
-  .detail { background: var(--canvas); display: flex; flex-direction: column; min-width: 0; }
-  .top { height: 52px; display: flex; align-items: center; justify-content: flex-end; gap: 8px; padding: 0 16px; }
-  .btn { height: 30px; padding: 0 12px; border-radius: var(--r-sm); display: inline-flex; align-items: center; gap: 7px; font-weight: 500; font-size: 13px; white-space: nowrap; }
-  .btn svg { width: 15px; height: 15px; stroke: currentColor; fill: none; stroke-width: 1.75; stroke-linecap: round; stroke-linejoin: round; }
+  /* Detail: canvas */
+  .detail { display: flex; flex-direction: column; min-width: 0; }
+  .top { height: 54px; display: flex; align-items: center; justify-content: flex-end; gap: 6px; padding: 0 18px; }
+  .btn { height: 30px; padding: 0 12px; border-radius: 8px; display: inline-flex; align-items: center; gap: 7px; font-weight: 500; white-space: nowrap; color: var(--ink-2); }
   .btn.primary { background: var(--primary); color: var(--on-primary); }
-  .btn.outline { box-shadow: 0 0 0 1px var(--line-strong) inset; color: var(--ink); background: var(--canvas); }
-  .btn.ghost { color: var(--ink-2); }
+  .btn.outline { box-shadow: 0 0 0 1px var(--line-strong) inset; color: var(--ink); }
   .btn.icon { width: 30px; padding: 0; justify-content: center; }
-  .scroll { overflow: auto; padding: 8px 44px 48px; }
-  .measure { max-width: 700px; }
-  .notice { display: flex; align-items: center; gap: 14px; padding: 12px 14px; border-radius: var(--r-md); background: var(--bg); box-shadow: var(--shadow-card); margin-bottom: 28px; }
-  .notice .ic { width: 28px; height: 28px; border-radius: 8px; background: var(--warn-soft); display: grid; place-items: center; flex: none; }
-  .notice .ic svg { width: 15px; height: 15px; stroke: #8a6a12; fill: none; stroke-width: 2; } html.dark .notice .ic svg { stroke: var(--warn); }
-  .notice .tx { flex: 1; min-width: 0; }
-  .notice .tx b { display: block; font-weight: 500; }
-  .notice .tx span { color: var(--ink-2); font-size: 12.5px; }
-  .meta { display: flex; align-items: center; gap: 8px; color: var(--ink-3); font-size: 12px; }
-  .meta i { width: 3px; height: 3px; border-radius: 50%; background: var(--ink-3); }
-  h2.title { margin: 6px 0 14px; font-size: 26px; font-weight: 600; letter-spacing: -0.025em; line-height: 1.2; }
-  .people { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 26px; }
-  .people .avs b { width: 24px; height: 24px; font-size: 10px; border-color: var(--canvas); }
+  .scroll { overflow: auto; padding: 14px 56px 56px; }
+  .measure { max-width: 720px; }
+  .notice { display: flex; align-items: center; gap: 14px; padding: 12px 14px 12px 16px; border-radius: var(--r-lg); background: var(--paper); box-shadow: 0 0 0 1px var(--line); margin-bottom: 34px; }
+  .notice .ic { width: 30px; height: 30px; border-radius: 50%; background: var(--warn-soft); color: var(--warn-ink); display: grid; place-items: center; flex: none; }
+  .notice .tx { flex: 1; min-width: 0; line-height: 1.4; }
+  .notice .tx b { font-weight: 500; }
+  .notice .tx span { color: var(--ink-2); }
+  .eyebrow { display: flex; align-items: center; gap: 10px; color: var(--ink-3); font-size: 12px; }
+  .eyebrow i { width: 3px; height: 3px; border-radius: 50%; background: var(--line-strong); }
+  .eyebrow .kind { color: var(--ink-2); }
+  h2.title { margin: 10px 0 18px; font-size: 44px; line-height: 1.05; letter-spacing: -0.01em; color: var(--ink); }
+  .people { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-bottom: 30px; }
+  .people .avs b { width: 26px; height: 26px; font-size: 10px; border-color: var(--canvas); margin-left: -7px; }
   .people .names { color: var(--ink-2); }
-  .pill { height: 26px; padding: 0 10px; border-radius: 13px; display: inline-flex; align-items: center; gap: 6px; font-size: 12px; font-weight: 500; box-shadow: 0 0 0 1px var(--line-strong) inset; }
+  .pill { height: 26px; padding: 0 10px; border-radius: 13px; display: inline-flex; align-items: center; gap: 6px; font-size: 12px; font-weight: 500; box-shadow: 0 0 0 1px var(--line-strong) inset; color: var(--ink-2); }
   .pill.live { box-shadow: none; background: var(--live-soft); color: var(--live); }
-  .pill svg { width: 12px; height: 12px; stroke: currentColor; fill: none; stroke-width: 2; }
-  .tabs { display: flex; gap: 22px; border-bottom: 1px solid var(--line); margin-bottom: 26px; }
-  .tabs span { padding: 0 0 10px; color: var(--ink-2); font-weight: 500; position: relative; }
+  .tabs { display: flex; gap: 26px; border-bottom: 1px solid var(--line); margin-bottom: 30px; }
+  .tabs span { padding: 0 0 11px; color: var(--ink-2); font-weight: 500; position: relative; }
   .tabs span.on { color: var(--ink); }
   .tabs span.on::after { content: ""; position: absolute; left: 0; right: 0; bottom: -1px; height: 2px; background: var(--ink); border-radius: 1px; }
-  .tabs span small { font-size: 11px; color: var(--ink-3); margin-left: 5px; font-weight: 400; }
-  .reading { font-size: 15px; line-height: 1.6; }
-  .reading h3 { font-size: 15px; font-weight: 600; margin: 24px 0 8px; letter-spacing: -0.01em; }
+  .tabs span small { font-size: 11px; color: var(--ink-3); margin-left: 6px; font-weight: 400; }
+  .reading { font-size: 15.5px; line-height: 1.62; color: var(--ink); }
+  .reading h3 { font-size: 24px; margin: 30px 0 10px; letter-spacing: -0.005em; }
   .reading h3:first-child { margin-top: 0; }
-  .reading ul { margin: 0; padding-left: 20px; }
-  .reading li { margin: 5px 0; }
-  .reading li b { font-weight: 600; }
-  .reading li em { font-style: normal; color: var(--ink-2); font-size: 13px; margin-left: 6px; }
-  .task { display: flex; gap: 12px; align-items: flex-start; padding: 10px 12px; border-radius: var(--r-md); box-shadow: var(--shadow-card); background: var(--raised); margin: 8px 0; font-size: 14px; }
-  .task .box { width: 16px; height: 16px; border-radius: 5px; box-shadow: 0 0 0 1.5px var(--line-strong) inset; margin-top: 3px; flex: none; }
-  .task .box.done { background: var(--ink); box-shadow: none; position: relative; }
-  .task .box.done::after { content: ""; position: absolute; left: 5px; top: 2px; width: 4px; height: 8px; border: solid var(--canvas); border-width: 0 2px 2px 0; transform: rotate(45deg); }
+  .reading ul { margin: 0; padding-left: 0; list-style: none; }
+  .reading li { margin: 8px 0; padding-left: 18px; position: relative; }
+  .reading li::before { content: ""; position: absolute; left: 0; top: 11px; width: 6px; height: 6px; border-radius: 50%; background: var(--line-strong); }
+  .reading li b { font-weight: 500; }
+  .reading li .ts { font-family: "Geist Mono", monospace; font-size: 11.5px; color: var(--ink-3); margin-left: 8px; vertical-align: 1px; }
+  .task { display: flex; gap: 12px; align-items: flex-start; padding: 11px 14px; border-radius: var(--r-md); background: var(--raised); box-shadow: var(--shadow-card); margin: 8px 0; font-size: 14px; line-height: 1.4; }
+  .task .box { width: 17px; height: 17px; border-radius: 50%; box-shadow: 0 0 0 1.5px var(--line-strong) inset; margin-top: 2px; flex: none; }
+  .task .box.done { background: var(--live); box-shadow: none; position: relative; }
+  .task .box.done::after { content: ""; position: absolute; left: 6px; top: 3px; width: 4px; height: 8px; border: solid #fff; border-width: 0 1.8px 1.8px 0; transform: rotate(45deg); }
   .task small { display: block; color: var(--ink-3); font-size: 12px; margin-top: 2px; }
+  .task .owner { display: inline-flex; align-items: center; gap: 5px; }
+  .task .owner b { width: 14px; height: 14px; border-radius: 50%; display: inline-block; }
   .task .done-t { color: var(--ink-3); text-decoration: line-through; }
-  .foot { margin-top: 32px; padding-top: 16px; border-top: 1px solid var(--line); display: flex; align-items: center; gap: 10px; color: var(--ink-3); font-size: 12px; }
-  .foot .sw { margin-left: auto; width: 30px; height: 18px; border-radius: 9px; background: var(--line-strong); position: relative; }
-  .foot .sw::after { content: ""; position: absolute; top: 2px; left: 2px; width: 14px; height: 14px; border-radius: 50%; background: #fff; box-shadow: 0 1px 2px rgba(0,0,0,0.25); }
 </style>
 </head>
 <body>
@@ -184,94 +183,93 @@
 
   <aside class="side">
     <div class="brand"><span class="mark"><i></i><i></i><i></i><i></i></span>Steno</div>
-    <div class="record"><span class="dot"></span>Record<span class="chev"><svg width="12" height="12" viewBox="0 0 24 24" stroke="currentColor" fill="none" stroke-width="2.2"><use href="#i-chev"/></svg></span></div>
+    <div class="record"><span class="dot"></span>Record<span class="chev"><svg class="i" style="width:12px;height:12px;stroke-width:2.2"><use href="#i-chev"/></svg></span></div>
     <div class="label">Meetings</div>
-    <div class="nav on"><svg><use href="#i-inbox"/></svg>All<span class="n">7</span></div>
-    <div class="nav"><svg><use href="#i-clock"/></svg>In progress<span class="n">0</span></div>
-    <div class="nav"><svg><use href="#i-check"/></svg>Ready<span class="n">7</span></div>
-    <div class="nav"><svg><use href="#i-alert"/></svg>Failed<span class="n">0</span></div>
+    <div class="nav on"><svg class="i"><use href="#i-inbox"/></svg>All<span class="n">7</span></div>
+    <div class="nav"><svg class="i"><use href="#i-clock"/></svg>In progress<span class="n">0</span></div>
+    <div class="nav"><svg class="i"><use href="#i-check"/></svg>Ready<span class="n">7</span></div>
+    <div class="nav"><svg class="i"><use href="#i-alert"/></svg>Failed<span class="n">0</span></div>
     <div class="label">Tags</div>
     <div class="nav tag">strategie</div>
     <div class="nav tag">q4</div>
     <div class="nav tag">investors</div>
     <div class="foot">
-      <div class="phone"><svg width="16" height="16" viewBox="0 0 24 24" stroke="currentColor" fill="none" stroke-width="1.75"><use href="#i-phone"/></svg><span><b>Nicolai's iPhone</b>Synced 2 min ago</span><span class="st"></span></div>
-      <div class="nav"><svg><use href="#i-settings"/></svg>Settings</div>
+      <div class="phone"><svg class="i"><use href="#i-phone"/></svg><span><b>Nicolai's iPhone</b>Synced 2 min ago</span><span class="st"></span></div>
+      <div class="nav"><svg class="i"><use href="#i-settings"/></svg>Settings</div>
     </div>
   </aside>
 
   <section class="list">
     <header>
-      <h1>Meetings</h1>
-      <div class="search"><svg><use href="#i-search"/></svg>Search meetings<kbd>⌘F</kbd></div>
+      <h1 class="serif">Meetings</h1>
+      <div class="search"><svg class="i" style="width:14px;height:14px"><use href="#i-search"/></svg>Search<kbd>⌘F</kbd></div>
     </header>
-    <div class="day">Today <span>Tuesday, Sep 29</span></div>
+    <div class="day">Today<span>Tuesday, Sep 29</span></div>
     <div class="row on">
       <div class="t">Produktstrategie 90/10<time class="mono">14:50</time></div>
       <div class="p">Nicolai schlägt vor, 90 Prozent auf den Kern zu setzen. Jérôme prüft die Zahlen bis Freitag, Anna informiert die Partner.</div>
-      <div class="m"><span class="chip">Call</span><span class="dur mono">45:38</span><span class="avs"><b class="a1">N</b><b class="a2">J</b><b class="a3">A</b><b class="a4">?</b></span></div>
+      <div class="m"><span class="kind call"><i></i>Call</span><span class="mono">45:38</span><span class="avs"><b class="p1">N</b><b class="p2">J</b><b class="p3">A</b><b class="unk">?</b></span></div>
     </div>
     <div class="row">
       <div class="t">Standup<time class="mono">14:06</time></div>
       <div class="p">Kurzer Abgleich zum Release. rc.3 ist draußen, das Settings-Fenster bleibt offen.</div>
-      <div class="m"><span class="chip">Call</span><span class="dur mono">12:04</span><span class="avs"><b class="a1">N</b><b class="a2">J</b></span></div>
+      <div class="m"><span class="kind call"><i></i>Call</span><span class="mono">12:04</span><span class="avs"><b class="p1">N</b><b class="p2">J</b></span></div>
     </div>
     <div class="row">
       <div class="t">Tuesday 10:08<time class="mono">10:08</time></div>
-      <div class="p">Transcript ready. No summary: summaries are off until an AI service is set up.</div>
-      <div class="m"><span class="chip">In person</span><span class="chip warn">No summary</span><span class="dur mono">38:11</span></div>
+      <div class="p">Transcript ready. No summary yet: summaries are off until an AI service is set up.</div>
+      <div class="m"><span class="kind person"><i></i>In person</span><span class="mono">38:11</span><span class="state">No summary</span></div>
     </div>
-    <div class="day">Yesterday <span>Monday, Sep 28</span></div>
+    <div class="day">Yesterday<span>Monday, Sep 28</span></div>
     <div class="row">
       <div class="t">Investor update prep<time class="mono">15:46</time></div>
       <div class="p">Deck bis Donnerstag, Zahlen aus dem Q3-Report, Anna übernimmt die Grafiken.</div>
-      <div class="m"><span class="chip">Call</span><span class="dur mono">27:30</span><span class="avs"><b class="a1">N</b><b class="a3">A</b></span></div>
+      <div class="m"><span class="kind call"><i></i>Call</span><span class="mono">27:30</span><span class="avs"><b class="p1">N</b><b class="p3">A</b></span></div>
     </div>
     <div class="row">
       <div class="t">Monday 11:20<time class="mono">11:20</time></div>
       <div class="p">Transcript only. Recording kept.</div>
-      <div class="m"><span class="chip">In person</span><span class="dur mono">52:02</span></div>
+      <div class="m"><span class="kind person"><i></i>In person</span><span class="mono">52:02</span></div>
     </div>
   </section>
 
   <main class="detail">
     <div class="top">
-      <span class="btn outline"><svg><use href="#i-export"/></svg>Export</span>
-      <span class="btn outline icon"><svg><use href="#i-more"/></svg></span>
+      <span class="btn outline"><svg class="i" style="width:15px;height:15px"><use href="#i-export"/></svg>Export</span>
+      <span class="btn outline icon"><svg class="i" style="width:15px;height:15px"><use href="#i-more"/></svg></span>
     </div>
     <div class="scroll"><div class="measure">
       <div class="notice">
-        <span class="ic"><svg><use href="#i-spark"/></svg></span>
-        <span class="tx"><b>Summaries are off</b><span>Choose an AI service and Steno writes a summary and tasks for every meeting. Only the transcript text is sent.</span></span>
-        <span class="btn primary">Set up summaries</span>
-        <span class="btn ghost">Not now</span>
+        <span class="ic"><svg class="i" style="width:15px;height:15px;stroke-width:2"><use href="#i-spark"/></svg></span>
+        <span class="tx"><b>Summaries are off.</b> <span>Choose an AI service and Steno writes a summary and tasks for every meeting. Only the transcript text is sent.</span></span>
+        <span class="btn primary">Set up</span>
+        <span class="btn">Not now</span>
       </div>
-      <div class="meta"><span>Tuesday, Sep 29 · 14:50</span><i></i><span class="mono">45:38</span><i></i><span>German</span><i></i><span>Deletes Oct 29</span></div>
-      <h2 class="title">Produktstrategie 90/10</h2>
+      <div class="eyebrow"><span class="kind call"><i></i>Call</span><i></i><span>Tuesday, Sep 29 · 14:50</span><i></i><span class="mono">45:38</span><i></i><span>German</span><i></i><span>Deletes Oct 29</span></div>
+      <h2 class="title serif">Produktstrategie 90/10</h2>
       <div class="people">
-        <span class="avs"><b class="a1">N</b><b class="a2">J</b><b class="a3">A</b><b class="a4">?</b></span>
-        <span class="names">Nicolai, Jérôme, Anna</span>
-        <span class="pill live"><svg viewBox="0 0 24 24"><use href="#i-check"/></svg>1 speaker to confirm</span>
+        <span class="avs"><b class="p1">N</b><b class="p2">J</b><b class="p3">A</b><b class="unk">?</b></span>
+        <span class="names">Nicolai, Jérôme, Anna +1</span>
+        <span class="pill live"><svg class="i" style="width:12px;height:12px;stroke-width:2"><use href="#i-check"/></svg>Confirm speaker</span>
         <span class="pill">#strategie</span><span class="pill">#q4</span>
       </div>
       <div class="tabs"><span class="on">Summary</span><span>Transcript<small>142</small></span><span>Tasks<small>3</small></span><span>Notes</span></div>
       <div class="reading">
-        <h3>Executive summary</h3>
+        <h3 class="serif">Executive summary</h3>
         <ul>
           <li><b>Fokus.</b> Nicolai schlägt vor, 90 Prozent der Kapazität auf den Kern zu setzen und Nebenprojekte bis Q1 zu pausieren.</li>
           <li><b>Budget.</b> Jérôme prüft die Zahlen bis Freitag und bringt zwei Szenarien mit.</li>
           <li><b>Team.</b> Anna übernimmt die Kommunikation an die Partner, sobald die Entscheidung steht.</li>
         </ul>
-        <h3>Open questions</h3>
+        <h3 class="serif">Open questions</h3>
         <ul>
-          <li><b>Zeitplan.</b> Start im Oktober oder erst im November nach dem Investor-Update? <em>01:30</em></li>
+          <li><b>Zeitplan.</b> Start im Oktober oder erst im November nach dem Investor-Update?<span class="ts">01:30</span></li>
         </ul>
-        <h3>Tasks</h3>
-        <div class="task"><span class="box"></span><span>Zahlen für beide Szenarien<small>Jérôme · Friday</small></span></div>
-        <div class="task"><span class="box"></span><span>Partner-Mail vorbereiten<small>Anna · after the investor update</small></span></div>
-        <div class="task"><span class="box done"></span><span class="done-t">Entscheidung im Investor-Update ansprechen<small>Nicolai</small></span></div>
+        <h3 class="serif">Tasks</h3>
+        <div class="task"><span class="box"></span><span>Zahlen für beide Szenarien<small><span class="owner"><b class="p2"></b>Jérôme</span> · Friday</small></span></div>
+        <div class="task"><span class="box"></span><span>Partner-Mail vorbereiten<small><span class="owner"><b class="p3"></b>Anna</span> · after the investor update</small></span></div>
+        <div class="task"><span class="box done"></span><span class="done-t">Entscheidung im Investor-Update ansprechen<small><span class="owner"><b class="p1"></b>Nicolai</span></small></span></div>
       </div>
-      <div class="foot">Recording deletes on Oct 29, 2026<span class="sw"></span></div>
     </div></div>
   </main>
 </div>

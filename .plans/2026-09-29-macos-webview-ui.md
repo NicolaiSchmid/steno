@@ -92,26 +92,33 @@ Why this direction, from the 2026-09-29 and 2026-09-30 rounds and the Jamie anal
    on appearance change so resizing never flashes.
 
 2. **Design language.** Steno's, derived from what already exists, not from macOS and not from
-   Jamie. The mockup fixes it:
-   - Type: Geist, the phone app's typeface, bundled as woff2 at 400 to 700; Geist Mono for
-     timestamps and durations with tabular numerals. Sizes 13 UI, 12 and 11 secondary, 15 reading,
-     18 column titles, 26 meeting title, tight tracking on titles.
-   - Colour: a warm achromatic ladder with real contrast. Light: app background `#F4F4F2` for the
-     sidebar and list, canvas `#FFFFFF` for reading, lines `#E4E3DF` and `#CFCDC7`, ink `#1B1B19`,
-     `#61605B`, `#93918A`. Dark: `#131316`, `#1A1A1E`, `#1F1F24`, lines `#2A2A30` and `#3A3A42`,
-     ink `#EDEDF0`, `#A2A2AA`, `#6F6F79`. One accent, the icon's live green `#62B06F` and
-     `#4C8C57`, for recording and confirmation states only. Primary actions are near-black on
-     light and white on dark, as the phone app's CTA. Warning `#D4A72C`, destructive `#D05252`.
-   - Surfaces: cards are raised by a 1 px line and a 1 to 2 px shadow, radii 6, 10 and 14, popovers
-     carry a real shadow. Selection is a raised card, not a filled row. No alpha veils under 6
-     percent, no hairlines under 1 px.
+   Jamie. The mockup fixes it (second pass, accepted as direction on 2026-09-30):
+   - Structure: a charcoal sidebar that is the app icon's plate (`#1A1A1D` to `#121214`, white
+     text at 92, 56 and 34 percent), warm paper for the meeting list (`#F6F4EF`), a near-white
+     canvas for reading (`#FDFCFA`). Dark: `#101012`, `#17171A`, `#1D1D21`. The three columns
+     are three materials, so the eye knows where it is without borders doing the work.
+   - Type: Geist, the phone app's typeface, for the interface at 13, 12 and 11; Geist Mono with
+     tabular numerals for timestamps and durations; Instrument Serif for the column title, the
+     meeting title (44) and the summary section headings (24), which gives the reading side an
+     editorial voice without touching the controls. All three are SIL Open Font License and are
+     bundled as woff2.
+   - Colour: a warm achromatic ladder with real contrast (light ink `#1C1B18`, `#6B675E`,
+     `#9D988C`; lines `#E8E4DC`, `#D3CEC3`). One accent, the icon's live green (`#62B06F`,
+     `#3F8A4C`), for recording and confirmation states only; warning `#8A6512` on `#D4A72C` at
+     16 percent; destructive `#D05252`. People carry a fixed muted palette (`#B3573E`,
+     `#B9862A`, `#5F7F6B`, `#6D6F8E`, `#A56A8A`) assigned per person, so avatars and task owners
+     are the only saturated marks on the page. Meeting kinds are a coloured dot, not a chip.
+   - Surfaces: the Record control is a white capsule with a live dot and a real shadow on the
+     plate; selection is a raised white card on the paper; tasks are cards on the canvas;
+     popovers carry a real shadow. Radii 6, 10, 14 and full. No alpha veils under 6 percent, no
+     hairlines under 1 px.
    - Components: Steno's own, built on Radix primitives for accessibility (menus, popovers,
-     dialogs, selects, tooltips, tabs), styled with Tailwind 4. Lucide icons. Underline tabs,
-     pill filters, chips for meeting kind and state, avatar stacks, a dark Record button with the
-     live dot, a callout for setup notices, a search field with its shortcut shown.
+     dialogs, selects, tooltips, tabs), styled with Tailwind 4, Lucide icons at 1.6 stroke.
+     Underline tabs with counts, pill filters, avatar stacks, a callout for setup notices, a
+     search field with its shortcut shown.
    - Motion: the phone app's tokens ported to CSS (`150 ms` functional, `120 ms` exit, `250 ms`
      entrance, one spatial spring), `prefers-reduced-motion` honoured.
-   - Sound of the copy unchanged: no developer vocabulary, sentences not labels.
+   - Copy unchanged in tone: no developer vocabulary, sentences not labels.
 
 3. **Served locally, offline by construction.** Production loads `steno-app://app/index.html`
    through a `WKURLSchemeHandler` from the bundled `Web/` folder. Not `file://` (relative URLs and
