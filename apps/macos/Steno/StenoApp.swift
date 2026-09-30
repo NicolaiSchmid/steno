@@ -101,7 +101,9 @@ final class AppBootstrap {
     guard controller == nil, !loading else { return }
     loading = true
     defer { loading = false }
+    UITestDiagnostics.note("bootstrap: load begins")
     if let launchError = Self.scenario.launchError {
+      UITestDiagnostics.note("bootstrap: launch error \(launchError)")
       self.error = launchError
       return
     }
@@ -119,7 +121,9 @@ final class AppBootstrap {
       }
       let controller = AppController(environment: environment)
       self.controller = controller
+      UITestDiagnostics.note("bootstrap: controller set")
       await controller.launch()
+      UITestDiagnostics.note("bootstrap: controller launched")
       panels.follow(controller, clock: clock) { [weak self] in self?.openMain() }
       if Self.isUITesting, Self.scenario.showPrompt {
         controller.detection.appName = { _ in "Zoom" }
@@ -219,6 +223,8 @@ struct RootView<Content: View>: View {
   @ViewBuilder let content: (AppController) -> Content
 
   var body: some View {
+    let _ = UITestDiagnostics.note(
+      "root view: controller \(bootstrap.controller == nil ? "nil" : "set"), error \(bootstrap.error ?? "none")")
     Group {
       if let controller = bootstrap.controller {
         content(controller)
@@ -386,7 +392,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
   }
 
   func applicationDidFinishLaunching(_ notification: Notification) {
-    UITestDiagnostics.note("did finish launching; windows \(NSApp.windows.count)")
+    UITestDiagnostics.note("did finish launching; \(Self.windowSummary())")
+    guard AppBootstrap.isUITesting else { return }
+    Task { @MainActor in
+      for delay in [1, 3, 8] {
+        try? await Task.sleep(for: .seconds(delay))
+        UITestDiagnostics.note("after \(delay)s: \(Self.windowSummary())")
+      }
+    }
+  }
+
+  /// Every window's frame, visibility and content class, for the launch log.
+  @MainActor private static func windowSummary() -> String {
+    let windows = NSApp.windows.map { window in
+      "\(type(of: window)) \(NSStringFromRect(window.frame)) visible=\(window.isVisible) "
+        + "content=\(window.contentView.map { String(describing: type(of: $0)) } ?? "nil")"
+    }
+    return "windows \(windows.count): \(windows.joined(separator: " | "))"
   }
 
   func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
