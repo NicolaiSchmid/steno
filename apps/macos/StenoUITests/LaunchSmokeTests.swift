@@ -81,6 +81,7 @@ final class LaunchSmokeTests: XCTestCase {
     XCTAssertEqual(app.state, .runningForeground)
     requireMainWindow(in: app)
     waitForPage(in: app)
+    attachLaunchLog(named: "launch-log", state: app)
     return app
   }
 

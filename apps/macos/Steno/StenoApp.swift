@@ -18,6 +18,7 @@ struct StenoApp: App {
 
   /// 1120 x 720, or `-steno-window WxH` under UI testing.
   @MainActor private static var mainWindowSize: CGSize {
+    UITestDiagnostics.note("scene: main window size read")
     if AppBootstrap.isUITesting, let size = AppBootstrap.scenario.windowSize {
       return CGSize(width: size.width, height: size.height)
     }
@@ -222,6 +223,12 @@ struct RootView<Content: View>: View {
   let bootstrap: AppBootstrap
   @ViewBuilder let content: (AppController) -> Content
 
+  init(bootstrap: AppBootstrap, @ViewBuilder content: @escaping (AppController) -> Content) {
+    self.bootstrap = bootstrap
+    self.content = content
+    UITestDiagnostics.note("root view: created")
+  }
+
   var body: some View {
     let _ = UITestDiagnostics.note(
       "root view: controller \(bootstrap.controller == nil ? "nil" : "set"), error \(bootstrap.error ?? "none")"
@@ -398,6 +405,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     UITestDiagnostics.note("open urls: \(urls.map(\.absoluteString))")
   }
 
+  /// AppKit asks this before it opens the untitled document, the path on
+  /// which SwiftUI shows the primary `Window` at launch; logged so the
+  /// smoke suite can see whether the question is asked.
+  func applicationShouldOpenUntitledFile(_ sender: NSApplication) -> Bool {
+    UITestDiagnostics.note("should open untitled file asked; \(Self.windowSummary())")
+    return true
+  }
+
   func applicationDidFinishLaunching(_ notification: Notification) {
     UITestDiagnostics.note(
       "arguments \(CommandLine.arguments.dropFirst()); scenario window \(String(describing: AppBootstrap.scenario.windowSize)) appearance \(String(describing: AppBootstrap.scenario.appearance)) invalid \(AppBootstrap.scenario.invalidValues) unknown \(AppBootstrap.scenario.unknownFlags)"
@@ -418,7 +433,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
       "\(type(of: window)) \(NSStringFromRect(window.frame)) visible=\(window.isVisible) "
         + "content=\(window.contentView.map { String(describing: type(of: $0)) } ?? "nil")"
     }
-    return "windows \(windows.count): \(windows.joined(separator: " | "))"
+    return
+      "active=\(NSApp.isActive) hidden=\(NSApp.isHidden) policy=\(NSApp.activationPolicy().rawValue) "
+      + "windows \(windows.count): \(windows.joined(separator: " | "))"
   }
 
   func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {

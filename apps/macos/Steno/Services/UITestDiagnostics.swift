@@ -21,6 +21,10 @@ enum UITestDiagnostics {
   static func start(enabled isEnabled: Bool) {
     guard isEnabled else { return }
     enabled = true
+    // AppKit otherwise catches an exception raised on the main run loop,
+    // logs it to stderr nobody collects and carries on without the window;
+    // with this default it re-raises, so the handler below records it.
+    UserDefaults.standard.register(defaults: ["NSApplicationCrashOnExceptions": true])
     try? "".write(to: logURL, atomically: true, encoding: .utf8)
     note("start pid \(ProcessInfo.processInfo.processIdentifier)")
     NSSetUncaughtExceptionHandler { exception in
