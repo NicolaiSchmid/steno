@@ -114,6 +114,23 @@ jobs:
       # Temporary keychain per run on both runner kinds; nothing release
       # related is pre-installed anywhere. The partition list lets codesign
       # use the key without a UI prompt.
+      # The web UI is built here with pnpm so the Xcode pre-build phase only
+      # copies dist/ into the bundle (scripts/build-web.sh).
+      - uses: pnpm/action-setup@v4
+        with:
+          package_json_file: apps/macos/web/package.json
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: apps/macos/web/pnpm-lock.yaml
+
+      - name: Build web UI
+        run: |
+          pnpm --dir apps/macos/web install --frozen-lockfile
+          pnpm --dir apps/macos/web build
+
       - name: Import signing certificate
         env:
           P12: ${{ secrets.MACOS_CERTIFICATE_P12_BASE64 }}
@@ -137,23 +154,6 @@ jobs:
           rm -f "$cert_path"
           security find-identity -v -p codesigning "$KEYCHAIN_PATH" | grep -q 'Developer ID Application' \
             || { echo "::error::the imported certificate is not a Developer ID Application identity"; exit 1; }
-
-      # The web UI is built here with pnpm so the Xcode pre-build phase only
-      # copies dist/ into the bundle (scripts/build-web.sh).
-      - uses: pnpm/action-setup@v4
-        with:
-          package_json_file: apps/macos/web/package.json
-
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 24
-          cache: pnpm
-          cache-dependency-path: apps/macos/web/pnpm-lock.yaml
-
-      - name: Build web UI
-        run: |
-          pnpm --dir apps/macos/web install --frozen-lockfile
-          pnpm --dir apps/macos/web build
 
       - name: Archive, export, verify
         run: apps/macos/scripts/build-release.sh "${{ steps.version.outputs.version }}" "${{ steps.version.outputs.build }}"
