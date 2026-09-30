@@ -91,46 +91,45 @@ Why this direction, from the 2026-09-29 and 2026-09-30 rounds and the Jamie anal
    leaves them a 52 pt inset. The window background colour is set from the page's canvas token
    on appearance change so resizing never flashes.
 
-2. **Design language.** Steno's, derived from what already exists, not from macOS. The
-   mockup fixes it (`steno-main.html`, `?tab=summary|transcript`, `?dark`; accepted as direction
-   on 2026-09-30 after five passes):
-   - Structure: three columns. A 224 pt sidebar that is the app icon's plate (`#1A1A1D` to
-     `#121214`, white text at 92, 56 and 34 percent), a 328 pt meeting list on warm paper
-     (`#F6F4EF`), a reading canvas (`#FDFCFA`). Dark: `#101012`, `#17171A`, `#1D1D21`. Three
-     materials, so the eye knows where it is without borders doing the work.
-   - Sidebar: the Record control first, a white 10 pt-radius button with the icon's bars as its mark (the
-     live bar in green) and a disclosure for call or in person; then the Meetings filters (All,
-     In progress, Ready, Failed) with counts, the Tags section, and a footer with the paired
-     iPhone card and Settings. No wordmark: the mark in the Record button is the brand.
-   - List: the column title at 22, search with its shortcut, day groups, rows with title, time,
-     two preview lines, a coloured dot for the meeting kind, the duration in mono and an avatar
-     stack; the selected row is a raised white card.
-   - Meeting body: a 12 pt eyebrow (kind dot, date, duration, language, retention), the
-     meeting title in Geist 600 at 30, a people row (avatar stack, names, a live-green
-     "Confirm speaker" pill when a speaker is unnamed, tag pills), underline tabs with counts
-     (Summary, Transcript, Tasks, Notes), then the content at a 720 pt measure. The setup notice
-     sits above the eyebrow as a paper callout. Summary: section headings at 18, 15.5 pt
-     bullets with 500-weight lead-ins and a mono timestamp where the summary cites the
-     transcript; tasks as raised cards with a round check and the owner's colour dot.
-     Transcript: a tool row ("Copy transcript", "Play from here"), then one two-column block per
-     turn, 150 pt for the speaker name in 500 weight with the time range in mono beneath it
-     (and a "Who is this?" pill for an unnamed speaker), the paragraph beside it at 15.5 pt over
-     1.62; find in transcript highlights matches. Jamie contributed only the reminder that the
-     transcript reads best as name, time and paragraph; nothing else of Jamie's page is copied.
-   - Type: Geist, the phone app's typeface, for the interface and the body; Geist Mono with
-     tabular numerals for times and durations. Titles are Geist 600 with tight tracking; no
-     display face. Both bundled as woff2 under the SIL Open Font License.
-   - Colour: a warm achromatic ladder with real contrast (light ink `#1C1B18`, `#6B675E`,
-     `#9D988C`; lines `#E8E4DC`, `#D3CEC3`). The icon's live green (`#62B06F`, `#3F8A4C`) for
-     recording and confirmation only; attention `#B0651A` (dark `#E0954A`) for what needs the
-     user (unnamed speakers, missing summary); destructive `#D05252`. People carry a fixed
-     muted palette (`#B3573E`, `#B9862A`, `#5F7F6B`, `#6D6F8E`, `#A56A8A`) per person, the only
-     saturated marks besides the green.
-   - Surfaces: cards raised by a 1 px line and a 1 to 2 px shadow, radii 6, 10, 14 and full;
-     popovers carry a real shadow. No alpha veils under 6 percent, no hairlines under 1 px.
-   - Components: Steno's own on Radix primitives (menus, popovers, dialogs, selects, tooltips,
-     tabs) styled with Tailwind 4, Lucide icons at 1.6 stroke. Motion from the phone app's
-     tokens; `prefers-reduced-motion` honoured.
+2. **Design language: T3 Code's recipe on Steno's layout.** On 2026-09-30 the owner named
+   `pingdotgg/t3code` as the target look ("clean, modern, rounded, glassy"). Its recipe was read
+   from `apps/web/src/index.css` and `apps/web/src/components/ui` in that repository and is
+   adopted here with two Steno-specific changes: three columns instead of two, and the icon's
+   live green as the accent instead of T3's blue. The mockup is `steno-main.html`
+   (`?tab=summary|transcript`, `?dark`, `?menu` opens the glass actions menu).
+   - Structure: a 236 pt sidebar (`sidebar` surface with a faint grain), a 320 pt meeting list
+     on the `background` surface, the reading canvas on `background` with a faint grain. The
+     Record control is the one primary button at the top of the sidebar, mark inside, no
+     wordmark; then the Meetings filters with counts, Tags, and a footer with the paired
+     iPhone card and Settings. Toolbar actions (Export, more) are glass pills floating over
+     the scrolled content in a 52 pt top bar; the actions menu is a glass popover.
+   - Type: the system font stack (`-apple-system, BlinkMacSystemFont, system-ui`), which is
+     SF Pro in the app, and `ui-monospace` for times. No bundled fonts. Sizes 13 UI, 12 and 11
+     secondary, 15 reading, 26 meeting title at 600 with tight tracking, 16 section headings.
+   - Colour, light: background `#FCFCFC` (zinc-25), sidebar `#FAFAFA` (zinc-50), card and
+     popover white, foreground `#27272A`, muted `#71717A`, faint `#A1A1AA`, border `#E4E4E7`,
+     accent (hover) `#F4F4F5`. Dark: background `#0A0A0A`, sidebar and card the background
+     mixed with 3 percent white, border white at 6 percent, accent white at 4 percent, muted
+     white at 3 percent, foreground `#F5F5F5`. Primary is the live green (`#3F8A4C`, `#4C9A5A`)
+     for the Record button, confirm states, checked boxes and the iPhone status dot; warning
+     amber for what needs the user (unnamed speaker, missing summary); people keep a fixed
+     muted palette. Meeting kinds are a coloured dot.
+   - Geometry: `--radius` 10 pt with sm 6, md 8, lg 10, xl 14, 2xl 18; `--control-radius` 8 pt for
+     buttons, rows and inputs; dialogs 2xl; glass pills and tag pills full. Cards are a 1 px
+     border plus a 1 px 5 percent shadow. Selected rows are a white card on the surface.
+   - Controls: primary button with a 1 px inner top highlight at 16 percent white and an
+     extra-small shadow, hover at 90 percent, pressed scale 0.97; outline button on the popover
+     surface with a 1 px 4 percent shadow (dark: a 6 percent top edge); ghost; glass. Segmented
+     tabs as a pill group on the accent surface with the active tab a raised white pill.
+     Switch, checkbox, select, menu, popover, dialog, tooltip and toast from the same recipe.
+   - Glass: surface at 80 percent over a 12 pt blur with saturation 1.14 (dark 16 pt, 1.08), a
+     10 percent foreground border, menus and popovers with a `0 16px 40px -18px` shadow at 55
+     percent (dark 80 percent), dialog backdrops at 60 percent with a 4 pt blur. Falls back to
+     an opaque surface when `backdrop-filter` is unavailable.
+   - Motion: open and close at 200 ms with scale 0.98 and opacity through Base UI's starting
+     and ending styles; the drawer curve `cubic-bezier(0.32, 0.72, 0, 1)` for surfaces that
+     slide in; status indicators duty-cycled with stepped keyframes; nothing repaints
+     continuously; panel motion defaults to none; `prefers-reduced-motion` honoured.
    - Copy unchanged in tone: no developer vocabulary, sentences not labels.
 
 3. **Served locally, offline by construction.** Production loads `steno-app://app/index.html`
@@ -144,12 +143,18 @@ Why this direction, from the 2026-09-29 and 2026-09-30 rounds and the Jamie anal
    real window and the policy admits that origin. The web view has no file, keychain or network
    access; the privacy rule and the offline rule are enforced by the platform, not by review.
 
-4. **Web stack.** `apps/macos/web/`: React 19, TypeScript, Vite, Tailwind 4, Radix primitives,
-   Lucide, Biome as the only linter and formatter with the `mobile/` rules (tabs, double quotes,
-   sorted imports and classes), Vitest with Testing Library, Playwright for screenshots, pnpm 11
-   and Node 24 as in `mobile/`, own lockfile, `packageManager` pinned. `pnpm check` runs lint,
-   typecheck and tests. Files kebab-case, components PascalCase, functional components only.
-   Tokens live in `src/theme.css` with the names from `mobile/global.css` where they overlap.
+4. **Web stack.** `apps/macos/web/`: React 19, TypeScript, Vite, Tailwind 4, Base UI
+   (`@base-ui/react`, the headless primitives T3 Code uses) with `class-variance-authority` and
+   `tailwind-merge`, Lucide, Biome as the only linter and formatter with the `mobile/` rules
+   (tabs, double quotes, sorted imports and classes), Vitest with Testing Library, Playwright for
+   screenshots, pnpm 11 and Node 24 as in `mobile/`, own lockfile, `packageManager` pinned.
+   `pnpm check` runs lint, typecheck and tests. Files kebab-case, components PascalCase,
+   functional components only. `src/components/ui` owns every look: callers pick a `variant` or
+   `size` and never restyle with `className`; layout classes belong on the parent (T3 Code's
+   rule, enforced by a lint check in WP0). Tokens live in `src/theme.css` as semantic variables
+   (`--background`, `--sidebar`, `--card`, `--popover`, `--accent`, `--border`, `--primary`,
+   `--radius`, `--control-radius`, the glass and shadow tokens) with the `mobile/global.css`
+   names where they overlap.
 
 5. **Bridge.** Web to Swift through `WKScriptMessageHandlerWithReply`: `bridge.call(method,
    params)` returns a promise that resolves with the reply or rejects with a typed error. Swift
@@ -226,7 +231,7 @@ Why this direction, from the 2026-09-29 and 2026-09-30 rounds and the Jamie anal
 
 WP0, scaffold and contract (no visible change):
 1. `apps/macos/web/` with the stack in Decision 4, `theme.css` with the tokens in Decision 2,
-   bundled Geist and Geist Mono, the component set from the mockup with stories rendered by
+   the system font stack, the component set from the mockup with stories rendered by
    Playwright; `pnpm check` green; `web-ci.yml`.
 2. `BridgeContract.swift`, `contract.ts`, fixtures and `BridgeContractTests`.
 3. `scripts/build-web.sh`, the `project.yml` script phase, Node and pnpm on the macOS CI jobs
@@ -272,5 +277,3 @@ WP5, cleanup:
 - `drawsBackground` on `WKWebView` is key-value coded; it is the established way to a
   non-flashing transparent web view on macOS and Steno ships outside the App Store. If a macOS
   release removes it, the window background colour follow in Decision 1 is the fallback.
-- Geist is licensed under the SIL Open Font License, so bundling is fine; the licence file ships
-  in `Web/fonts/`.
