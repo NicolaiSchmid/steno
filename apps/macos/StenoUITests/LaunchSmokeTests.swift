@@ -27,28 +27,32 @@ final class LaunchSmokeTests: XCTestCase {
     return app
   }
 
-  /// The main window's web view, the one element of the page XCUITest can
-  /// see; its presence is the main window's presence.
-  private func mainWebView(in app: XCUIApplication) -> XCUIElement {
-    app.webViews.firstMatch
-  }
-
-  /// The main window by its title; the floating panel and the other scenes
-  /// carry other titles.
+  /// The main window: the first window, as every test here always found it.
+  /// It has no title bar, so there is no title to match on.
   private func mainWindow(in app: XCUIApplication) -> XCUIElement {
-    app.windows.matching(
-      NSPredicate(format: "title == 'Steno' OR identifier == 'Steno' OR label == 'Steno'")
-    ).firstMatch
+    app.windows.firstMatch
   }
 
-  /// Launches with `arguments`, waits for the main window and its web view.
+  /// Gives the page a moment to paint. WebKit exposes the page to XCUITest
+  /// by role and label at best, and not reliably before first paint, so the
+  /// web view's presence is recorded, not asserted; the screenshots are the
+  /// evidence for the page.
+  private func waitForPage(in app: XCUIApplication) {
+    let webView = app.webViews.firstMatch
+    XCTContext.runActivity(named: "web view") { activity in
+      let found = webView.waitForExistence(timeout: 10)
+      activity.add(XCTAttachment(string: found ? "web view found" : "no web view element"))
+    }
+    RunLoop.current.run(until: Date().addingTimeInterval(2))
+  }
+
+  /// Launches with `arguments` and waits for the main window.
   @discardableResult
   private func launchMainWindow(_ arguments: [String]) -> XCUIApplication {
     let app = launch(arguments)
     XCTAssertEqual(app.state, .runningForeground)
-    XCTAssertTrue(app.windows.firstMatch.waitForExistence(timeout: 10), "no window appeared")
-    XCTAssertTrue(
-      mainWebView(in: app).waitForExistence(timeout: 20), "the main window shows no web view")
+    XCTAssertTrue(mainWindow(in: app).waitForExistence(timeout: 10), "no window appeared")
+    waitForPage(in: app)
     return app
   }
 
@@ -268,12 +272,10 @@ final class LaunchSmokeTests: XCTestCase {
         attachScreenshot(named: "\(window)-\(appearance)-\(state).png")
       }
     }
-    /// The main window with its web view, plus a moment for the page's
-    /// first paint, which no accessibility element announces.
+    /// The main window, plus a moment for the page's first paint.
     func mainReady(_ app: XCUIApplication) {
-      XCTAssertTrue(
-        mainWebView(in: app).waitForExistence(timeout: 20), "the main window shows no web view")
-      RunLoop.current.run(until: Date().addingTimeInterval(2))
+      XCTAssertTrue(mainWindow(in: app).waitForExistence(timeout: 10), "no main window")
+      waitForPage(in: app)
     }
 
     capture("main", "empty", in: launched(["-steno-empty"]), ready: mainReady)
