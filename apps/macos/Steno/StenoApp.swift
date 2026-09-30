@@ -64,6 +64,10 @@ struct StenoApp: App {
         SettingsView(controller: controller)
       }
     }
+
+    #if DEBUG
+      WebPreviewWindow()
+    #endif
   }
 }
 
@@ -300,6 +304,7 @@ struct AppCommands: Commands {
   let bootstrap: AppBootstrap
   /// Published by the list column while the main window is key; ⌘F runs it.
   @FocusedValue(\.searchFocus) private var searchFocus
+  @Environment(\.openWindow) private var openWindow
 
   /// The same state table the sidebar control and the menu bar item render;
   /// without a controller the menu reads as idle and is disabled.
@@ -347,6 +352,9 @@ struct AppCommands: Commands {
           }
         }
         .disabled(bootstrap.controller == nil)
+        // The WP1 pipeline check: the bundled page in a transparent web view
+        // over the sample snapshots, no controller needed.
+        Button("Open Web Preview") { openWindow(id: WebPreviewWindow.id) }
       }
     #endif
   }
