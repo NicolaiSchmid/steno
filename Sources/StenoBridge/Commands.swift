@@ -143,13 +143,9 @@ public struct StartRecordingParams: Codable, Sendable, Equatable {
 }
 
 public struct SetRetentionParams: Codable, Sendable, Equatable {
-  public var mode: RecordingSettingsSnapshot.Retention.Mode
-  public var days: Int
+  public var retention: RecordingSettingsSnapshot.Retention
 
-  public init(mode: RecordingSettingsSnapshot.Retention.Mode, days: Int) {
-    self.mode = mode
-    self.days = days
-  }
+  public init(retention: RecordingSettingsSnapshot.Retention) { self.retention = retention }
 }
 
 public struct PermissionKindParams: Codable, Sendable, Equatable {

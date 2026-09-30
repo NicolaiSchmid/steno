@@ -1,3 +1,4 @@
+import type { z } from "zod";
 import {
 	type BridgeMethod,
 	type BridgeTopic,
@@ -70,30 +71,16 @@ export function createBridgeClient(
 					"method takes no params",
 				);
 			}
-			const reply = await transport.call<unknown, unknown>(
-				method,
-				params ?? null,
-			);
+			const reply = await transport.call(method, params);
 			const replySchema = (
-				methodReplies as Partial<
-					Record<
-						BridgeMethod,
-						{
-							safeParse: (v: unknown) => {
-								success: boolean;
-								data?: unknown;
-								error?: { issues: unknown };
-							};
-						}
-					>
-				>
+				methodReplies as Partial<Record<BridgeMethod, z.ZodTypeAny>>
 			)[method];
 			if (!replySchema) {
 				return undefined as MethodReply<typeof method>;
 			}
 			const parsed = replySchema.safeParse(reply);
 			if (!parsed.success) {
-				throw new ContractViolation(`reply of ${method}`, parsed.error?.issues);
+				throw new ContractViolation(`reply of ${method}`, parsed.error.issues);
 			}
 			return parsed.data as MethodReply<typeof method>;
 		},

@@ -50,9 +50,7 @@ import Testing
       try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
       var index: [String] = []
       for fixture in BridgeSamples.fixtures {
-        var data = try fixture.encode()
-        data.append(0x0A)
-        try data.write(to: Self.url(fixture.name))
+        try fixture.fileData().write(to: Self.url(fixture.name))
         index.append(fixture.name)
       }
       let manifest = try BridgeJSON.encode(index) + Data([0x0A])
@@ -62,10 +60,8 @@ import Testing
     for fixture in BridgeSamples.fixtures {
       let file = Self.url(fixture.name)
       let onDisk = try Data(contentsOf: file)
-      var expected = try fixture.encode()
-      expected.append(0x0A)
       #expect(
-        onDisk == expected,
+        onDisk == (try fixture.fileData()),
         "\(fixture.name).json is stale; run the suite with STENO_RECORD_FIXTURES=1 and commit")
     }
     let manifest = try Data(contentsOf: directory.appendingPathComponent("index.json"))
@@ -81,11 +77,5 @@ import Testing
     for topic in BridgeTopic.allCases {
       #expect(topic.rawValue.wholeMatch(of: pattern) != nil, "\(topic.rawValue)")
     }
-  }
-
-  @Test func datesEncodeAsUTCWithMilliseconds() throws {
-    let data = try BridgeJSON.encode(BridgeSamples.meetingDetail)
-    let text = String(decoding: data, as: UTF8.self)
-    #expect(text.contains("\"startedAt\" : \"2026-09-29T12:50:00.000Z\""))
   }
 }

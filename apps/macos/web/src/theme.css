@@ -49,7 +49,7 @@
 	--shadow-pop: 0 16px 40px -18px rgba(0, 0, 0, 0.55);
 	--grain-opacity: 0.035;
 
-	/* Motion, mirrored in src/lib/motion.ts. */
+	/* Motion: the phone app's tokens (mobile/src/lib/motion.ts) as CSS. */
 	--duration-functional: 150ms;
 	--duration-exit: 120ms;
 	--duration-entrance: 250ms;
@@ -158,10 +158,6 @@
 	}
 
 	/* The traffic lights are native; the page must not be draggable text. */
-	.select-none-ui {
-		user-select: none;
-		-webkit-user-select: none;
-	}
 
 	@media (prefers-reduced-motion: reduce) {
 		*,

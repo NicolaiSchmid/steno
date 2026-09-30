@@ -8,7 +8,7 @@
  * Usage: node scripts/check-ui-restyle.mjs [--root src] [--ui src/components/ui]
  * Exit 1 lists every offending class as `file:line: <Component> "class"`.
  */
-import { readdirSync, readFileSync, statSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
 import { join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -52,7 +52,6 @@ const LAYOUT_TOKENS = [
 	"inline",
 	"overflow-",
 	"truncate",
-	"shrink-0",
 ];
 
 function parseArgs(argv) {
@@ -70,19 +69,13 @@ function parseArgs(argv) {
 	return options;
 }
 
-function walk(directory, predicate, out = []) {
-	for (const entry of readdirSync(directory)) {
-		const path = join(directory, entry);
-		if (entry === "node_modules") {
-			continue;
-		}
-		if (statSync(path).isDirectory()) {
-			walk(path, predicate, out);
-		} else if (predicate(path)) {
-			out.push(path);
-		}
-	}
-	return out;
+function walk(directory, predicate) {
+	return readdirSync(directory, { recursive: true, withFileTypes: true })
+		.filter((entry) => entry.isFile())
+		.map((entry) => join(entry.parentPath, entry.name))
+		.filter(
+			(path) => !path.split("/").includes("node_modules") && predicate(path),
+		);
 }
 
 /** Every PascalCase export from the ui folder. */

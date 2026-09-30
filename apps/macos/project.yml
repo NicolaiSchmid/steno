@@ -81,11 +81,6 @@ targets:
         basedOnDependencyAnalysis: false
         script: |
           "$SRCROOT/../../scripts/build-web.sh"
-        inputFiles:
-          - $(SRCROOT)/web/package.json
-          - $(SRCROOT)/web/pnpm-lock.yaml
-        outputFiles:
-          - $(BUILT_PRODUCTS_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/Web/index.html
     settings:
       base:
         PRODUCT_NAME: Steno

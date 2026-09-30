@@ -1,24 +1,23 @@
 import Foundation
+import StenoCore
 
 /// One realistic value per contract type. `BridgeFixturesTests` encodes them
 /// into `apps/macos/web/fixtures/bridge/`, the web tests parse those files,
 /// and the page's mock transport serves them, so the sample meeting the web
 /// UI shows in development is the one the Mac's `SampleData` seeds.
 public enum BridgeSamples {
-  public static func uuid(_ n: Int) -> UUID {
-    UUID(uuidString: String(format: "00000000-0000-0000-0000-%012d", n))!
-  }
+  public static func uuid(_ n: Int) -> UUID { SampleData.uuid(n) }
 
   /// 2026-09-29 14:50 in Europe/Berlin (UTC+2).
   public static let startedAt = Date(timeIntervalSince1970: 1_790_686_200)
-  public static let meetingID = uuid(1)
+  public static let meetingID = SampleData.meetingID
   public static let failedMeetingID = uuid(68)
-  public static let speakerNicolai = uuid(20)
-  public static let speakerJerome = uuid(21)
+  public static let speakerNicolai = SampleData.speakerOneID
+  public static let speakerJerome = SampleData.speakerTwoID
   public static let speakerAnna = uuid(22)
   public static let speakerUnknown = uuid(23)
-  public static let personNicolai = uuid(10)
-  public static let personJerome = uuid(11)
+  public static let personNicolai = SampleData.personNicolaiID
+  public static let personJerome = SampleData.personJeromeID
   public static let personAnna = uuid(12)
   public static let phoneID = uuid(40)
 
@@ -254,15 +253,16 @@ public enum BridgeSamples {
 
   // MARK: Envelope
 
+  public static let selectSpeaker = SelectSpeakerParams(
+    speakerID: speakerUnknown, option: .init(kind: .person, label: "Anna", personID: personAnna))
+
   public static let request = BridgeRequest(
-    id: "req-1", method: .speakersSelect,
-    params: .object([
-      "speakerID": .string(speakerUnknown.uuidString),
-      "option": .object([
-        "kind": .string("person"), "label": .string("Anna"),
-        "personID": .string(personAnna.uuidString),
-      ]),
-    ]))
+    id: "req-1", method: .speakersSelect, params: try? jsonValue(selectSpeaker))
+
+  /// The `JSONValue` form of a typed params value, for envelopes.
+  static func jsonValue<T: Encodable>(_ value: T) throws -> JSONValue {
+    try BridgeJSON.decode(JSONValue.self, from: BridgeJSON.encode(value))
+  }
 
   public static let reply = BridgeReply(id: "req-1")
 
@@ -298,6 +298,13 @@ public struct BridgeFixture: Sendable {
     self.name = name
     encode = { try BridgeJSON.encode(value) }
     reencode = { data in try BridgeJSON.encode(BridgeJSON.decode(T.self, from: data)) }
+  }
+
+  /// The bytes written to `<name>.json`: the encoding plus a trailing newline.
+  public func fileData() throws -> Data {
+    var data = try encode()
+    data.append(0x0A)
+    return data
   }
 }
 
@@ -343,7 +350,8 @@ extension BridgeSamples {
     BridgeFixture("params.speakerID", SpeakerIDParams(speakerID: speakerNicolai)),
     BridgeFixture("params.recording.start", StartRecordingParams(mode: .inPerson)),
     BridgeFixture(
-      "params.settings.recording.setRetention", SetRetentionParams(mode: .keepDays, days: 30)),
+      "params.settings.recording.setRetention",
+      SetRetentionParams(retention: RecordingSettingsSnapshot.Retention(mode: .keepDays, days: 30))),
     BridgeFixture("params.permissionKind", PermissionKindParams(kind: .systemAudio)),
     BridgeFixture("params.assetID", AssetIDParams(assetID: "parakeetV3")),
     BridgeFixture(

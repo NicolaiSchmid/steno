@@ -48,10 +48,13 @@ fi
 
 [[ -f "$dist/index.html" ]] || fail "$dist/index.html is missing after the build."
 
-# The bundle must not reach the network (connect-src 'none'); one allow-list
-# lives in the web project's own check so the two never disagree.
-command -v node >/dev/null 2>&1 || fail "node is not on PATH; the bundle gate needs it."
-(cd "$web" && node scripts/check-offline.mjs) || fail "dist contains a fetchable URL (see above)."
+# The bundle must not reach the network (connect-src 'none'). `pnpm build`
+# already runs the web project's check; a copied dist is checked here so a
+# stale or foreign dist never reaches the bundle unchecked.
+if [[ "$mode" == "--copy-only" ]]; then
+  command -v node >/dev/null 2>&1 || fail "node is not on PATH; the bundle gate needs it."
+  (cd "$web" && node scripts/check-offline.mjs) || fail "dist contains a fetchable URL (see above)."
+fi
 
 # Inside Xcode, copy into the product's Resources; standalone, just report.
 if [[ -n "${BUILT_PRODUCTS_DIR:-}" && -n "${UNLOCALIZED_RESOURCES_FOLDER_PATH:-}" ]]; then

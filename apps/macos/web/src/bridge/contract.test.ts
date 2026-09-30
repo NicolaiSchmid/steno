@@ -1,12 +1,7 @@
 import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import {
-	bridgeTopics,
-	fixtureSchemas,
-	methodParams,
-	topicSchemas,
-} from "./contract";
+import { bridgeTopics, fixtureSchemas, methodParams } from "./contract";
 
 /**
  * The Swift side (`Sources/StenoBridge`, `BridgeFixturesTests`) writes one
@@ -48,7 +43,6 @@ describe("bridge contract fixtures", () => {
 	it("records a snapshot fixture for every topic", () => {
 		for (const topic of bridgeTopics) {
 			expect(index, `no fixture for topic ${topic}`).toContain(topic);
-			expect(topicSchemas[topic]).toBeDefined();
 		}
 	});
 

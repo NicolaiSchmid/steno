@@ -122,11 +122,8 @@ export function createMockTransport(
 		ready() {
 			return loading;
 		},
-		async call<TParams, TReply>(
-			method: string,
-			params: TParams,
-		): Promise<TReply> {
-			calls.push({ method, params });
+		async call(method: string, params: unknown): Promise<unknown> {
+			calls.push({ method, params: params ?? null });
 			if (!options.replies && !repliesLoaded) {
 				repliesLoaded = true;
 				replies = await loadFixtureReplies().catch(() => ({}));
@@ -135,7 +132,7 @@ export function createMockTransport(
 			if (reply instanceof Error) {
 				throw new BridgeError(method, "mock", reply.message);
 			}
-			return reply as TReply;
+			return reply;
 		},
 		subscribe: hub.subscribe.bind(hub),
 	};

@@ -29,9 +29,9 @@
       "colorIndex" : 0,
       "displayName" : "Nicolai",
       "hasClip" : true,
-      "id" : "00000000-0000-0000-0000-000000000020",
+      "id" : "00000000-0000-0000-0000-000000000014",
       "isPlaying" : false,
-      "personID" : "00000000-0000-0000-0000-000000000010"
+      "personID" : "00000000-0000-0000-0000-00000000000A"
     },
     {
       "assignment" : "confirmed",
@@ -39,9 +39,9 @@
       "colorIndex" : 1,
       "displayName" : "Jérôme",
       "hasClip" : true,
-      "id" : "00000000-0000-0000-0000-000000000021",
+      "id" : "00000000-0000-0000-0000-000000000015",
       "isPlaying" : false,
-      "personID" : "00000000-0000-0000-0000-000000000011"
+      "personID" : "00000000-0000-0000-0000-00000000000B"
     },
     {
       "assignment" : "suggested",
@@ -49,9 +49,9 @@
       "colorIndex" : 2,
       "displayName" : "Anna",
       "hasClip" : true,
-      "id" : "00000000-0000-0000-0000-000000000022",
+      "id" : "00000000-0000-0000-0000-000000000016",
       "isPlaying" : false,
-      "personID" : "00000000-0000-0000-0000-000000000012",
+      "personID" : "00000000-0000-0000-0000-00000000000C",
       "suggestionName" : "Anna"
     },
     {
@@ -60,7 +60,7 @@
       "colorIndex" : 3,
       "displayName" : "Speaker 4",
       "hasClip" : false,
-      "id" : "00000000-0000-0000-0000-000000000023",
+      "id" : "00000000-0000-0000-0000-000000000017",
       "isPlaying" : false
     }
   ],
@@ -106,7 +106,7 @@
       "assigneeName" : "Jérôme",
       "done" : false,
       "dueDate" : "2026-10-02T12:50:00.000Z",
-      "id" : "00000000-0000-0000-0000-000000000200",
+      "id" : "00000000-0000-0000-0000-0000000000C8",
       "priority" : "normal",
       "text" : "Zahlen für beide Szenarien"
     },
@@ -114,7 +114,7 @@
       "assigneeColorIndex" : 0,
       "assigneeName" : "Nicolai",
       "done" : true,
-      "id" : "00000000-0000-0000-0000-000000000201",
+      "id" : "00000000-0000-0000-0000-0000000000C9",
       "priority" : "high",
       "text" : "Entscheidung im Investor-Update ansprechen"
     }
@@ -134,24 +134,24 @@
   "transcript" : [
     {
       "endSeconds" : 41,
-      "id" : "00000000-0000-0000-0000-000000000100",
-      "speakerID" : "00000000-0000-0000-0000-000000000020",
+      "id" : "00000000-0000-0000-0000-000000000064",
+      "speakerID" : "00000000-0000-0000-0000-000000000014",
       "speakerName" : "Nicolai",
       "startSeconds" : 12,
       "text" : "Lass uns kurz auf die Prioritäten schauen. Ich würde vorschlagen, dass wir neunzig Prozent auf den Kern setzen."
     },
     {
       "endSeconds" : 65,
-      "id" : "00000000-0000-0000-0000-000000000101",
-      "speakerID" : "00000000-0000-0000-0000-000000000021",
+      "id" : "00000000-0000-0000-0000-000000000065",
+      "speakerID" : "00000000-0000-0000-0000-000000000015",
       "speakerName" : "Jérôme",
       "startSeconds" : 41,
       "text" : "Das geht nur, wenn wir das Budget entsprechend umschichten. Ich rechne bis Freitag zwei Szenarien."
     },
     {
       "endSeconds" : 90,
-      "id" : "00000000-0000-0000-0000-000000000102",
-      "speakerID" : "00000000-0000-0000-0000-000000000023",
+      "id" : "00000000-0000-0000-0000-000000000066",
+      "speakerID" : "00000000-0000-0000-0000-000000000017",
       "speakerName" : "Speaker 4",
       "startSeconds" : 65,
       "text" : "Die Partner sollten das nicht aus zweiter Hand hören."

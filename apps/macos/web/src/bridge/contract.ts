@@ -182,6 +182,9 @@ export const bridgeReply = z
 	})
 	.strict();
 
+export type BridgeRequest = z.infer<typeof bridgeRequest>;
+export type BridgeReply = z.infer<typeof bridgeReply>;
+
 export const bridgeEvent = z
 	.object({
 		topic: z.enum(bridgeTopics),
@@ -473,6 +476,9 @@ export const retentionMode = z.enum([
 	"keepDays",
 	"keepForever",
 ]);
+export const retention = z
+	.object({ mode: retentionMode, days: z.number().int() })
+	.strict();
 
 export const recordingSettingsSnapshot = z
 	.object({
@@ -482,9 +488,7 @@ export const recordingSettingsSnapshot = z
 		audioFolderPath: z.string(),
 		audioFolderName: z.string(),
 		folderUsageBytes: z.number().optional(),
-		retention: z
-			.object({ mode: retentionMode, days: z.number().int() })
-			.strict(),
+		retention,
 		keptForeverCount: z.number().int().optional(),
 		permissions: z.array(
 			z
@@ -712,9 +716,7 @@ export const selectSpeakerParams = z
 	.strict();
 export const speakerIDParams = z.object({ speakerID: uuid }).strict();
 export const startRecordingParams = z.object({ mode: captureMode }).strict();
-export const setRetentionParams = z
-	.object({ mode: retentionMode, days: z.number().int() })
-	.strict();
+export const setRetentionParams = z.object({ retention }).strict();
 export const permissionKindParams = z.object({ kind: permissionKind }).strict();
 export const assetIDParams = z.object({ assetID: z.string() }).strict();
 export const setAutomaticUpdatesParams = z
@@ -850,19 +852,8 @@ export type MethodReply<M extends BridgeMethod> = ReplyOf<M>;
  * lists the same names; `contract.test.ts` checks both directions.
  */
 export const fixtureSchemas = {
-	app: appSnapshot,
-	recording: recordingSnapshot,
+	...topicSchemas,
 	"recording.live": recordingSnapshot,
-	progress: progressSnapshot,
-	"meetings.list": meetingsListSnapshot,
-	"meeting.detail": meetingDetailSnapshot,
-	"settings.general": generalSettingsSnapshot,
-	"settings.recording": recordingSettingsSnapshot,
-	"settings.transcription": transcriptionSettingsSnapshot,
-	"settings.summaries": summariesSettingsSnapshot,
-	"settings.export": exportSettingsSnapshot,
-	"settings.iphone": phoneSettingsSnapshot,
-	onboarding: onboardingSnapshot,
 	"envelope.request": bridgeRequest,
 	"envelope.reply": bridgeReply,
 	"envelope.error": bridgeReply,

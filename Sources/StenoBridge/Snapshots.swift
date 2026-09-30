@@ -1,4 +1,5 @@
 import Foundation
+import StenoCore
 
 // MARK: - app
 
@@ -295,11 +296,7 @@ public struct MeetingDetailSnapshot: Codable, Sendable, Equatable {
   }
 
   public struct Speaker: Codable, Sendable, Equatable {
-    public enum Assignment: String, Codable, Sendable, CaseIterable {
-      case unknown
-      case suggested
-      case confirmed
-    }
+    public typealias Assignment = SpeakerAssignment.Kind
 
     public var id: UUID
     public var clusterLabel: String
@@ -382,11 +379,7 @@ public struct MeetingDetailSnapshot: Codable, Sendable, Equatable {
   }
 
   public struct Task: Codable, Sendable, Equatable {
-    public enum Priority: String, Codable, Sendable, CaseIterable {
-      case low
-      case normal
-      case high
-    }
+    public typealias Priority = TaskPriority
 
     public var id: UUID
     public var text: String

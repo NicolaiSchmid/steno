@@ -1,4 +1,5 @@
 import Foundation
+import StenoCore
 
 /// One snapshot per Settings section. Each carries the section's subtitle for
 /// the Settings sidebar so the page never derives status text itself.
@@ -83,11 +84,7 @@ public struct RecordingSettingsSnapshot: Codable, Sendable, Equatable {
   }
 
   public struct Retention: Codable, Sendable, Equatable {
-    public enum Mode: String, Codable, Sendable, CaseIterable {
-      case deleteAfterProcessing
-      case keepDays
-      case keepForever
-    }
+    public typealias Mode = AudioRetention.Kind
 
     public var mode: Mode
     public var days: Int

@@ -10,12 +10,9 @@ import StenoCore
 ///
 /// Plan: `.plans/2026-09-29-macos-webview-ui.md`, Decisions 5 and 6.
 public enum BridgeJSON {
-  /// Sorted keys and indentation so the fixtures diff cleanly in git.
-  public static func encoder() -> JSONEncoder {
-    let encoder = StenoJSON.encoder()
-    encoder.outputFormatting = [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]
-    return encoder
-  }
+  /// `StenoJSON`'s convention: sorted keys, indentation, ISO dates, so the
+  /// fixtures diff cleanly in git and two encodes of equal values match.
+  public static func encoder() -> JSONEncoder { StenoJSON.encoder() }
 
   public static func decoder() -> JSONDecoder { StenoJSON.decoder() }
 
@@ -221,13 +218,7 @@ public enum BridgeMeetingSource: String, Codable, Sendable, CaseIterable {
   case phone
 }
 
-public enum BridgeMeetingState: String, Codable, Sendable, CaseIterable {
-  case recording
-  case queued
-  case processing
-  case ready
-  case failed
-}
+public typealias BridgeMeetingState = MeetingState.Kind
 
 public enum BridgeCaptureMode: String, Codable, Sendable, CaseIterable {
   case call

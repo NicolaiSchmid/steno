@@ -1,12 +1,12 @@
 /**
  * The wire between the page and its host (plan Decisions 5 and 6): commands
  * out through `call`, full snapshots in through `subscribe`. Topic and method
- * names are plain strings here; the typed contract (`contract.ts`, authored
- * separately) wraps this interface.
+ * names are plain strings here; the typed contract (`contract.ts`) and the
+ * client (`client.ts`) wrap this interface.
  */
 export interface BridgeTransport {
 	/** Sends a command and resolves with the host's reply (or `undefined`). */
-	call<TParams, TReply>(method: string, params: TParams): Promise<TReply>;
+	call(method: string, params: unknown): Promise<unknown>;
 	/**
 	 * Subscribes to a topic. The handler receives the latest snapshot at once
 	 * when one is known, then every later snapshot. Returns the unsubscribe.
@@ -66,13 +66,5 @@ export class SnapshotHub {
 		return () => {
 			set?.delete(untyped);
 		};
-	}
-
-	has(topic: string): boolean {
-		return this.latest.has(topic);
-	}
-
-	topics(): string[] {
-		return [...this.latest.keys()];
 	}
 }

@@ -1,4 +1,6 @@
 {
-  "days" : 30,
-  "mode" : "keepDays"
+  "retention" : {
+    "days" : 30,
+    "mode" : "keepDays"
+  }
 }

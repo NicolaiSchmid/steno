@@ -5,7 +5,7 @@
  * allow-list names strings that are never requested: XML namespaces and the
  * error-decoder prefixes React and Base UI put in their messages.
  */
-import { readdirSync, readFileSync, statSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
 import { join, relative } from "node:path";
 
 const ALLOWED = [
@@ -14,16 +14,10 @@ const ALLOWED = [
 	"https://base-ui.com/production-error",
 ];
 
-function walk(directory, out = []) {
-	for (const entry of readdirSync(directory)) {
-		const path = join(directory, entry);
-		if (statSync(path).isDirectory()) {
-			walk(path, out);
-		} else {
-			out.push(path);
-		}
-	}
-	return out;
+function walk(directory) {
+	return readdirSync(directory, { recursive: true, withFileTypes: true })
+		.filter((entry) => entry.isFile())
+		.map((entry) => join(entry.parentPath, entry.name));
 }
 
 const root = process.argv[2] ?? "dist";

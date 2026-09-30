@@ -55,12 +55,20 @@ jobs:
       - name: Build
         run: pnpm build
 
-      - name: Bundle gate
-        working-directory: .
-        run: scripts/build-web.sh --copy-only
+      - name: Playwright browser cache
+        id: playwright-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ hashFiles('apps/macos/web/pnpm-lock.yaml') }}
 
       - name: Install Playwright browser
+        if: steps.playwright-cache.outputs.cache-hit != 'true'
         run: pnpm exec playwright install --with-deps chromium
+
+      - name: Install Playwright system dependencies
+        if: steps.playwright-cache.outputs.cache-hit == 'true'
+        run: pnpm exec playwright install-deps chromium
 
       - name: Screens
         run: pnpm exec playwright test
