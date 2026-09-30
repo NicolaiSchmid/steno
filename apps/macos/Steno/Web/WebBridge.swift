@@ -40,19 +40,30 @@ final class WebBridge: NSObject, WKScriptMessageHandlerWithReply, BridgeEventSin
   /// statement throws inside the page and the event is lost, which is fine:
   /// hosts publish on `page.ready`, and every snapshot is full state.
   func emit(_ event: BridgeEvent) {
-    guard let webView else { return }
-    let statement: String
     do {
-      statement = try BridgeDispatcher.emitStatement(for: event)
+      run(BridgeDispatcher.emitStatement(for: event), topic: event.topic)
     } catch {
-      return
+      NSLog("WebBridge: \(event.topic.rawValue) could not be encoded: \(error)")
+      assertionFailure("unencodable event payload: \(error)")
     }
+  }
+
+  func emit(_ topic: BridgeTopic, snapshot: some Encodable) {
+    do {
+      let payload = try BridgeDispatcher.encoder().encode(snapshot)
+      run(BridgeDispatcher.emitStatement(topic: topic, payloadJSON: payload), topic: topic)
+    } catch {
+      NSLog("WebBridge: \(topic.rawValue) snapshot could not be encoded: \(error)")
+      assertionFailure("unencodable snapshot: \(error)")
+    }
+  }
+
+  private func run(_ statement: String, topic: BridgeTopic) {
+    guard let webView else { return }
     webView.evaluateJavaScript(statement) { _, error in
-      #if DEBUG
-        if let error {
-          NSLog("WebBridge: emit \(event.topic.rawValue) failed: \(error)")
-        }
-      #endif
+      if let error {
+        NSLog("WebBridge: emit \(topic.rawValue) failed: \(error)")
+      }
     }
   }
 }

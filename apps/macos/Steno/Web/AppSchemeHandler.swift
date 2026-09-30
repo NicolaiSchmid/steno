@@ -28,18 +28,24 @@ final class AppSchemeHandler: NSObject, WKURLSchemeHandler {
       respondNotFound(key, url: URL(string: "\(Self.scheme)://\(WebNavigationPolicy.appHost)/")!)
       return
     }
-    guard let resource = site.resolve(path: url.path) else {
+    // One origin only: the navigation policy admits `steno-app://app`, and
+    // subresource requests never reach the policy, so the handler must not
+    // serve the bundle under any other host.
+    guard url.host?.lowercased() == WebNavigationPolicy.appHost,
+      let resource = site.resolve(path: url.path)
+    else {
       respondNotFound(key, url: url)
       return
     }
-    // The read leaves the main thread; only the file URL crosses over and
-    // the task is looked up again by key once the bytes are back.
+    // The read leaves the main thread; only the file URL crosses over. The
+    // task is checked by identity when the bytes are back: WebKit may have
+    // stopped it and reused the address for a newer task in the meantime.
     let fileURL = resource.fileURL
     Task { [weak self] in
       let data = await Task.detached(priority: .userInitiated) {
         try? Data(contentsOf: fileURL)
       }.value
-      guard let self else { return }
+      guard let self, self.active[key] === urlSchemeTask else { return }
       if let data {
         self.respond(
           key, url: url, status: 200, headers: self.site.headers(for: resource, length: data.count),

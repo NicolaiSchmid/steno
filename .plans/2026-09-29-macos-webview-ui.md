@@ -287,3 +287,9 @@ WP5, cleanup:
   `steno-swift:6.1` container as well as on macOS CI. The app target imports it; the fixture
   directory `apps/macos/web/fixtures/bridge/` is unchanged. `BridgeSamples` holds one realistic
   value per type and is the sample the web UI's mock transport serves.
+- WP1 (2026-09-30): the transparent web view relies on the key-value coded `drawsBackground`
+  switch, WebKit's undocumented setter, guarded by `responds(to:)` so a WebKit without it falls
+  back to painting the window background. The window background colour follow (the window's
+  `backgroundColor` set from the page's canvas token) named in Decision 1 is deferred to WP5 with
+  the appearance work; until then the window paints the system window background under a
+  transparent page.

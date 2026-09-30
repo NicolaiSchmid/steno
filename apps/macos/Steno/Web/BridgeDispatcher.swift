@@ -25,6 +25,17 @@ extension BridgeHost {
 @MainActor
 protocol BridgeEventSink: AnyObject {
   func emit(_ event: BridgeEvent)
+  /// Publishes a snapshot, encoding it once; the hosts' publish path.
+  func emit(_ topic: BridgeTopic, snapshot: some Encodable)
+}
+
+extension BridgeEventSink {
+  /// Recording sinks get the event form for free; `WebBridge` overrides this
+  /// to encode once.
+  func emit(_ topic: BridgeTopic, snapshot: some Encodable) {
+    guard let event = try? BridgeEvent(topic: topic, snapshot: snapshot) else { return }
+    emit(event)
+  }
 }
 
 /// The pure half of `WebBridge`: the message body from
@@ -51,7 +62,20 @@ enum BridgeDispatcher {
   static func encoder() -> JSONEncoder {
     let encoder = BridgeJSON.encoder()
     encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
+    // A NaN or infinity in a snapshot (a meter level from a silent buffer,
+    // say) must not abort the publish and freeze the topic; the page treats
+    // the string as "no value".
+    encoder.nonConformingFloatEncodingStrategy = .convertToString(
+      positiveInfinity: "Infinity", negativeInfinity: "-Infinity", nan: "NaN")
     return encoder
+  }
+
+  /// The envelope before the method name is checked, so an unknown method
+  /// and a malformed request are told apart by one decode.
+  private struct RawRequest: Decodable {
+    var id: String
+    var method: String
+    var params: JSONValue?
   }
 
   /// Reads the envelope from a script message body (a JavaScript object,
@@ -73,21 +97,26 @@ enum BridgeDispatcher {
           id: id,
           error: BridgeError(code: .invalidParams, message: "The message is not JSON.")))
     }
+    let raw: RawRequest
     do {
-      return .request(try BridgeJSON.decode(BridgeRequest.self, from: data))
+      raw = try BridgeJSON.decode(RawRequest.self, from: data)
     } catch {
-      if let method = object["method"] as? String, BridgeMethod(rawValue: method) == nil {
-        return .rejected(
-          BridgeReply(
-            id: id,
-            error: BridgeError(code: .unknownMethod, message: "Unknown method '\(method)'.")))
-      }
+      #if DEBUG
+        NSLog("BridgeDispatcher: request rejected: \(error)")
+      #endif
       return .rejected(
         BridgeReply(
           id: id,
-          error: BridgeError(
-            code: .invalidParams, message: "The message is not a bridge request: \(error)")))
+          error: BridgeError(code: .invalidParams, message: "The message is not a bridge request."))
+      )
     }
+    guard let method = BridgeMethod(rawValue: raw.method) else {
+      return .rejected(
+        BridgeReply(
+          id: raw.id,
+          error: BridgeError(code: .unknownMethod, message: "Unknown method '\(raw.method)'.")))
+    }
+    return .request(BridgeRequest(id: raw.id, method: method, params: raw.params))
   }
 
   /// One call end to end: decode, run on the host, wrap the outcome. Never
@@ -132,9 +161,15 @@ enum BridgeDispatcher {
   /// rule (JavaScript string) instead of trusting JSON to be a JavaScript
   /// subset, which U+2028 and U+2029 break.
   static func emitStatement(for event: BridgeEvent) throws -> String {
-    let payload = String(decoding: try encoder().encode(event.payload), as: UTF8.self)
+    emitStatement(topic: event.topic, payloadJSON: try encoder().encode(event.payload))
+  }
+
+  /// The statement for an already encoded payload, so a snapshot is
+  /// serialised once on its way to the page.
+  static func emitStatement(topic: BridgeTopic, payloadJSON: Data) -> String {
+    let payload = String(decoding: payloadJSON, as: UTF8.self)
     return
-      "window.steno.emit(\(javaScriptStringLiteral(event.topic.rawValue)), "
+      "window.steno.emit(\(javaScriptStringLiteral(topic.rawValue)), "
       + "JSON.parse(\(javaScriptStringLiteral(payload))))"
   }
 
@@ -163,8 +198,8 @@ enum BridgeDispatcher {
 }
 
 extension BridgeEvent {
-  /// A snapshot as the host publishes it: encoded with the contract's
-  /// convention and carried as the event's `JSONValue` payload.
+  /// A snapshot as a `JSONValue` event, for tests and recording sinks; the
+  /// live sink encodes once through `emit(_:snapshot:)` instead.
   init(topic: BridgeTopic, snapshot: some Encodable) throws {
     let data = try BridgeDispatcher.encoder().encode(snapshot)
     self.init(topic: topic, payload: try BridgeJSON.decode(JSONValue.self, from: data))

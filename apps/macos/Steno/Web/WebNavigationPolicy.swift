@@ -38,9 +38,15 @@ struct WebNavigationPolicy: Equatable, Sendable {
   /// and host; the bundled policy otherwise. Callers gate this on `DEBUG`:
   /// a release build never reads the variable.
   static func fromEnvironment(_ environment: [String: String]) -> WebNavigationPolicy {
-    guard let raw = environment[devServerVariable]?.trimmingCharacters(in: .whitespaces),
-      !raw.isEmpty, let url = URL(string: raw), WebOrigin(url: url) != nil
+    guard let raw = environment[devServerVariable]?.trimmingCharacters(in: .whitespacesAndNewlines),
+      !raw.isEmpty
     else { return bundled }
+    guard let url = URL(string: raw), WebOrigin(url: url) != nil else {
+      #if DEBUG
+        NSLog("\(devServerVariable) is not a URL with a scheme and host: \(raw)")
+      #endif
+      return bundled
+    }
     return WebNavigationPolicy(devServer: url)
   }
 

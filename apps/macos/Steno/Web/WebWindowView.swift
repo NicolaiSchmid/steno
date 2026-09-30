@@ -13,6 +13,8 @@ import WebKit
 struct WebWindowView: NSViewRepresentable {
   /// A hash route, `#/shell` or `#/settings?section=general`.
   let route: String
+  /// Fixed for the view's lifetime: the coordinator captures it once, so a
+  /// window that needs another host makes another view (`.id(...)`).
   let host: any BridgeHost
 
   func makeCoordinator() -> Coordinator {
@@ -36,8 +38,12 @@ struct WebWindowView: NSViewRepresentable {
     webView.underPageBackgroundColor = .clear
     // Key-value coded: WebKit has no public switch for the view's own
     // background on macOS, and this is the established way to a web view that
-    // never flashes white before the page paints (plan, open questions).
-    webView.setValue(false, forKey: "drawsBackground")
+    // never flashes white before the page paints (plan, Deviations). Guarded so
+    // a WebKit that drops the private setter falls back to the window's own
+    // background instead of raising an unknown-key exception.
+    if webView.responds(to: NSSelectorFromString("_setDrawsBackground:")) {
+      webView.setValue(false, forKey: "drawsBackground")
+    }
     #if DEBUG
       webView.isInspectable = true
     #endif
