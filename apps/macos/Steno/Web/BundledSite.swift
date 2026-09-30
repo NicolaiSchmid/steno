@@ -14,10 +14,12 @@ struct BundledSite: Equatable, Sendable {
   }
 
   /// Decision 3's policy. Attached to every response, the 404 included, so
-  /// no document from this origin ever runs without it.
+  /// no document from this origin ever runs without it. The scheme source
+  /// sits beside `'self'` because WebKit does not reliably match `'self'`
+  /// against a custom-scheme origin, and a mismatch is a silently blank page.
   static let contentSecurityPolicy =
-    "default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; "
-    + "img-src 'self' data: blob:; font-src 'self'; connect-src 'none'"
+    "default-src 'none'; script-src 'self' steno-app:; style-src 'self' steno-app: 'unsafe-inline'; "
+    + "img-src 'self' steno-app: data: blob:; font-src 'self' steno-app:; connect-src 'none'"
 
   /// Everything Vite emits for this app. Deliberately closed: a file with
   /// another extension is a 404, not a guess.
