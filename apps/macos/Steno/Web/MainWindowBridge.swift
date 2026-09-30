@@ -45,6 +45,9 @@ final class MainWindowBridge: BridgeHost {
   private var pageReady = false
   /// True between `run()`'s start and its cancellation.
   private var running = false
+  /// True while `run()` observes the store; tests wait for it before
+  /// `page.ready`, since publishes before it are dropped by design.
+  var isRunning: Bool { running }
   private var pending: Set<BridgeTopic> = []
   private var detailTasks: [Task<Void, Never>] = []
   private var lastRecordingPublish: ContinuousClock.Instant?

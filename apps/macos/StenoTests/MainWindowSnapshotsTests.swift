@@ -427,9 +427,11 @@ private func request(_ id: String, _ method: String, _ params: Any = NSNull()) -
     await eventually("settings observed") { host.controller.storedSettings != nil }
     let running = Task { await host.run() }
     defer { running.cancel() }
+    await eventually("the bridge runs") { host.isRunning }
 
     let ready = await BridgeDispatcher.dispatch(request("r1", "page.ready"), host: host)
     #expect(ready == BridgeReply(id: "r1"))
+    await eventually("every topic published") { sink.events.count >= MainWindowBridge.topics.count }
     #expect(Array(sink.events.prefix(5).map(\.topic)) == MainWindowBridge.topics)
     #expect(sink.last(.meetingsList)?["groups"] == .array([]))
     #expect(sink.last(.meetingsList)?["tags"] == .array([]))

@@ -80,6 +80,20 @@ final class LaunchSmokeTests: XCTestCase {
     launchMainWindow(["-steno-ui-testing"])
   }
 
+  /// The screenshot matrix adds three flags to the plain launch; each on
+  /// its own, so a window that fails to appear names the flag responsible.
+  func testMainWindowOpensOverAnEmptyStore() throws {
+    launchMainWindow(["-steno-ui-testing", "-steno-empty"])
+  }
+
+  func testMainWindowOpensAtTheRequestedSize() throws {
+    launchMainWindow(["-steno-ui-testing", "-steno-window", "960x600"])
+  }
+
+  func testMainWindowOpensInDarkAppearance() throws {
+    launchMainWindow(["-steno-ui-testing", "-steno-appearance", "dark"])
+  }
+
   /// The floating panel: launched with `-steno-show-prompt`, the detection
   /// prompt for "Zoom" appears; Record turns the same panel into the
   /// recording bubble; the bubble's stop hides it.
