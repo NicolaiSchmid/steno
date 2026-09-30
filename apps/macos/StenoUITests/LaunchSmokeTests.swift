@@ -112,6 +112,23 @@ final class LaunchSmokeTests: XCTestCase {
     launchMainWindow(["-steno-ui-testing", "bare"])
   }
 
+  /// The size flag first, so its value is consumed by Foundation's argument
+  /// parsing and nothing is left over.
+  func testMainWindowOpensAtTheRequestedSizeFlagFirst() throws {
+    launchMainWindow(["-steno-window", "960x600", "-steno-ui-testing"])
+  }
+
+  /// A value for the UI-testing flag, so the size flag's own value pairs
+  /// with it and nothing is left over.
+  func testMainWindowOpensAtTheRequestedSizeWithPairedFlags() throws {
+    launchMainWindow(["-steno-ui-testing", "1", "-steno-window", "960x600"])
+  }
+
+  /// A genuine leftover token after two valueless flags.
+  func testMainWindowOpensWithALeftoverToken() throws {
+    launchMainWindow(["-steno-ui-testing", "-steno-empty", "leftover"])
+  }
+
   /// The floating panel: launched with `-steno-show-prompt`, the detection
   /// prompt for "Zoom" appears; Record turns the same panel into the
   /// recording bubble; the bubble's stop hides it.
