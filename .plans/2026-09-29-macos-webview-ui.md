@@ -93,7 +93,7 @@ Why this direction, from the 2026-09-29 and 2026-09-30 rounds and the Jamie anal
 
 2. **Design language.** Steno's, derived from what already exists, not from macOS. The
    mockup fixes it (`steno-main.html`, `?tab=summary|transcript`, `?dark`; accepted as direction
-   on 2026-09-30 after four passes):
+   on 2026-09-30 after five passes):
    - Structure: three columns. A 224 pt sidebar that is the app icon's plate (`#1A1A1D` to
      `#121214`, white text at 92, 56 and 34 percent), a 328 pt meeting list on warm paper
      (`#F6F4EF`), a reading canvas (`#FDFCFA`). Dark: `#101012`, `#17171A`, `#1D1D21`. Three
@@ -105,21 +105,22 @@ Why this direction, from the 2026-09-29 and 2026-09-30 rounds and the Jamie anal
    - List: a serif column title, search with its shortcut, day groups, rows with title, time,
      two preview lines, a coloured dot for the meeting kind, the duration in mono and an avatar
      stack; the selected row is a raised white card.
-   - Meeting body: follows Jamie's meeting page (owner's reference screenshot, 2026-09-30) in
-     structure. A 13.5 pt eyebrow (date, duration, language), a 28 pt semibold sans title, then
-     label and value rows at 150 pt label width: Speakers (avatar stack in a bordered pill with
-     "1 needs a name" in the attention colour and a disclosure), Tags (pills and a dashed "Add
-     tag"), Recording (retention sentence with the keep action). Underline tabs with counts:
-     Summary, Transcript, Tasks, Notes. A tool row under the tabs ("Copy transcript", "Play from
-     here"). Transcript turns at 16 pt over 1.6: speaker name in semibold, time range in mono in
-     the secondary colour, paragraph; an unnamed speaker carries a "Who is this?" chip in the
-     attention colour that opens the speaker picker; find in transcript highlights matches.
-     Summary at 16 pt with 19 pt semibold section headings and bold lead-ins; tasks as cards
-     with a round check and the owner's colour dot. The setup notice sits above the eyebrow as
-     a paper callout. Measure 820 pt.
+   - Meeting body: a 12 pt eyebrow (kind dot, date, duration, language, retention), the
+     meeting title in Instrument Serif at 44, a people row (avatar stack, names, a live-green
+     "Confirm speaker" pill when a speaker is unnamed, tag pills), underline tabs with counts
+     (Summary, Transcript, Tasks, Notes), then the content at a 720 pt measure. The setup notice
+     sits above the eyebrow as a paper callout. Summary: serif section headings at 24, 15.5 pt
+     bullets with 500-weight lead-ins and a mono timestamp where the summary cites the
+     transcript; tasks as raised cards with a round check and the owner's colour dot.
+     Transcript: a tool row ("Copy transcript", "Play from here"), then one two-column block per
+     turn, 150 pt for the speaker name in 500 weight with the time range in mono beneath it
+     (and a "Who is this?" pill for an unnamed speaker), the paragraph beside it at 15.5 pt over
+     1.62; find in transcript highlights matches. Jamie contributed only the reminder that the
+     transcript reads best as name, time and paragraph; nothing else of Jamie's page is copied.
    - Type: Geist, the phone app's typeface, for the interface and the body; Geist Mono with
-     tabular numerals for times and durations; Instrument Serif only for the list column title.
-     All bundled as woff2 under the SIL Open Font License.
+     tabular numerals for times and durations; Instrument Serif for the list column title, the
+     meeting title and the summary section headings. All bundled as woff2 under the SIL Open
+     Font License.
    - Colour: a warm achromatic ladder with real contrast (light ink `#1C1B18`, `#6B675E`,
      `#9D988C`; lines `#E8E4DC`, `#D3CEC3`). The icon's live green (`#62B06F`, `#3F8A4C`) for
      recording and confirmation only; attention `#B0651A` (dark `#E0954A`) for what needs the
