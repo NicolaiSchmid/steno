@@ -9,8 +9,9 @@ import Foundation
 /// UI-testing flag every call is a no-op.
 enum UITestDiagnostics {
   /// Where `LaunchSmokeTests` looks: one file, truncated at each launch.
-  static let logURL = FileManager.default.temporaryDirectory
-    .appendingPathComponent("steno-ui-test.log")
+  /// `/tmp` rather than the process's temporary directory, which macOS
+  /// gives every process separately, so the test runner can read it.
+  static let logURL = URL(fileURLWithPath: "/tmp/steno-ui-test.log")
 
   private static let queue = DispatchQueue(label: "uno.schmid.steno.ui-test-diagnostics")
   private nonisolated(unsafe) static var enabled = false

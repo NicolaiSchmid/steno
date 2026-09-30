@@ -43,13 +43,12 @@ final class LaunchSmokeTests: XCTestCase {
     XCTFail("no main window appeared")
   }
 
-  /// The app's UI-test launch log (`UITestDiagnostics`, in the shared
-  /// temporary directory) beside the app state, for a window or page that
+  /// The app's UI-test launch log (`UITestDiagnostics`, in `/tmp`, which
+  /// both processes see) beside the app state, for a window or page that
   /// never showed.
   private func attachLaunchLog(named name: String, state app: XCUIApplication) {
     XCTContext.runActivity(named: name) { activity in
-      let logURL = FileManager.default.temporaryDirectory
-        .appendingPathComponent("steno-ui-test.log")
+      let logURL = URL(fileURLWithPath: "/tmp/steno-ui-test.log")
       let log = (try? String(contentsOf: logURL, encoding: .utf8)) ?? "(no launch log)"
       let note = XCTAttachment(
         string: "app state \(app.state.rawValue); windows \(app.windows.count)\n\(log)")
