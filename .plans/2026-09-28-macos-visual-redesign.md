@@ -4,11 +4,11 @@ Status: implemented, PRs #124, #128, #131, #130, #132 (2026-09-29). Proposed 202
 revised after the 2026-09-28 reviews. Triggered by first-run feedback.
 
 > Superseded in part by [`2026-09-29-macos-webview-ui.md`](2026-09-29-macos-webview-ui.md)
-> (2026-09-30): the three windows drop the custom components and tokens of this plan for
-> system SwiftUI components with their default appearance, and the reading pane (the four
-> tabs) becomes web content in a `WKWebView`. The token mirror between `Theme.swift` and
-> `mobile/global.css` (steps 1 and 2) stays only for the menu bar item and the floating
-> panels. Steps 3 to 13 are replaced as that plan lands.
+> (2026-09-30): the main window, Settings and onboarding become one web app in a `WKWebView`
+> with Steno's own design language (Geist, a warm achromatic ladder with real contrast, the
+> live green as the one accent). The token mirror between `Theme.swift` and `mobile/global.css`
+> (steps 1 and 2) stays only for the menu bar item and the floating panels. Steps 3 to 13 are
+> replaced window by window as that plan lands.
 >
 > Superseded in part by [`2026-09-28-settings-redesign.md`](2026-09-28-settings-redesign.md):
 > Decision 12 ("Settings stays native") and implementation step 11 no longer apply. Settings

@@ -13,8 +13,9 @@ the module workstreams have merged; its step 1 skeleton ships early because the 
 needs a bundled, signed app.
 
 > Amended by [`2026-09-29-macos-webview-ui.md`](2026-09-29-macos-webview-ui.md) (2026-09-29):
-> the windows use system SwiftUI components only, and the meeting reading pane is web content
-> in a `WKWebView`; the view models and the app target boundaries below stand.
+> the main window, Settings and onboarding are one web app in a `WKWebView`, served from the
+> bundle; the view models and the app target boundaries below stand, the SwiftUI views for
+> those three windows do not.
 
 ## Goal
 

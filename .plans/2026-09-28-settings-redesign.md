@@ -1,9 +1,9 @@
 # Steno: Settings redesign and a working update feed
 
 > Superseded in part by [`2026-09-29-macos-webview-ui.md`](2026-09-29-macos-webview-ui.md)
-> (2026-09-30): the Settings window keeps its sidebar, sections, subtitles, copy, view models
-> and update feed decisions, but the custom sidebar row, icon wells and metrics go; rows are
-> system `Label`s and the detail is `Form(.grouped)` with default controls.
+> (2026-09-30): the Settings window is rebuilt in the web app with Steno's design language.
+> The sections, their subtitles, copy, view models and the update feed decisions stand; the
+> SwiftUI layout spec (UX spec, `NavigationSplitView`, `Form(.grouped)`) does not.
 
 Status: accepted, 2026-09-28. Triggered by the owner's review of the Settings window after the
 first-run feedback round ("everything is not user-facing designed", "updates are broken").
