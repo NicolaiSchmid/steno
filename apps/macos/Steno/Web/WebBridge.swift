@@ -41,7 +41,7 @@ final class WebBridge: NSObject, WKScriptMessageHandlerWithReply, BridgeEventSin
   /// hosts publish on `page.ready`, and every snapshot is full state.
   func emit(_ event: BridgeEvent) {
     do {
-      run(BridgeDispatcher.emitStatement(for: event), topic: event.topic)
+      run(try BridgeDispatcher.emitStatement(for: event), topic: event.topic)
     } catch {
       NSLog("WebBridge: \(event.topic.rawValue) could not be encoded: \(error)")
       assertionFailure("unencodable event payload: \(error)")
