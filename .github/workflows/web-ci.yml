@@ -1,0 +1,85 @@
+# The web UI (apps/macos/web): lint, typecheck, tests, production build, and
+# Playwright screenshots of every window in light and dark. The screenshots
+# are the review evidence for layout (.plans/2026-09-29-macos-webview-ui.md,
+# Decision 9); the run also proves the page loads nothing from the network.
+name: Web CI
+
+on:
+  pull_request:
+    paths:
+      - 'apps/macos/web/**'
+      - 'scripts/build-web.sh'
+      - '.github/workflows/web-ci.yml'
+  push:
+    branches: ['main']
+    paths:
+      - 'apps/macos/web/**'
+      - 'scripts/build-web.sh'
+      - '.github/workflows/web-ci.yml'
+
+concurrency:
+  group: web-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    working-directory: apps/macos/web
+
+jobs:
+  web:
+    name: Check, build, screens
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          package_json_file: apps/macos/web/package.json
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: apps/macos/web/pnpm-lock.yaml
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Check
+        run: pnpm check
+
+      - name: Build
+        run: pnpm build
+
+      - name: Playwright browser cache
+        id: playwright-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ hashFiles('apps/macos/web/pnpm-lock.yaml') }}
+
+      - name: Install Playwright browser
+        if: steps.playwright-cache.outputs.cache-hit != 'true'
+        run: pnpm exec playwright install --with-deps chromium
+
+      - name: Install Playwright system dependencies
+        if: steps.playwright-cache.outputs.cache-hit == 'true'
+        run: pnpm exec playwright install-deps chromium
+
+      - name: Screens
+        run: pnpm exec playwright test
+
+      - name: Upload screens
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: web-screens
+          path: |
+            apps/macos/web/screens
+            apps/macos/web/playwright-report
+          if-no-files-found: warn
+          retention-days: 14

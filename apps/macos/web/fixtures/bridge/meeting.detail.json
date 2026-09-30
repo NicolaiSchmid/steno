@@ -1,0 +1,160 @@
+{
+  "canRerunSummary" : true,
+  "decisions" : [
+    "Wir setzen neunzig Prozent auf den Kern. Nebenprojekte pausieren bis zur Q1-Planung."
+  ],
+  "durationSeconds" : 2738,
+  "export" : {
+    "canReexport" : false,
+    "canReveal" : false,
+    "message" : "Not exported: no Obsidian vault is configured.",
+    "status" : "notConfigured"
+  },
+  "id" : "00000000-0000-0000-0000-000000000001",
+  "isBusy" : false,
+  "language" : "de",
+  "notes" : "",
+  "retention" : {
+    "deletesAt" : "2026-10-29T12:50:00.000Z",
+    "filesExist" : true,
+    "keepsAudio" : false,
+    "kind" : "deletesOn",
+    "showsKeepToggle" : true
+  },
+  "source" : "call",
+  "speakers" : [
+    {
+      "assignment" : "confirmed",
+      "clusterLabel" : "Speaker 1",
+      "colorIndex" : 0,
+      "displayName" : "Nicolai",
+      "hasClip" : true,
+      "id" : "00000000-0000-0000-0000-000000000014",
+      "isPlaying" : false,
+      "personID" : "00000000-0000-0000-0000-00000000000A"
+    },
+    {
+      "assignment" : "confirmed",
+      "clusterLabel" : "Speaker 2",
+      "colorIndex" : 1,
+      "displayName" : "Jérôme",
+      "hasClip" : true,
+      "id" : "00000000-0000-0000-0000-000000000015",
+      "isPlaying" : false,
+      "personID" : "00000000-0000-0000-0000-00000000000B"
+    },
+    {
+      "assignment" : "suggested",
+      "clusterLabel" : "Speaker 3",
+      "colorIndex" : 2,
+      "displayName" : "Anna",
+      "hasClip" : true,
+      "id" : "00000000-0000-0000-0000-000000000016",
+      "isPlaying" : false,
+      "personID" : "00000000-0000-0000-0000-00000000000C",
+      "suggestionName" : "Anna"
+    },
+    {
+      "assignment" : "unknown",
+      "clusterLabel" : "Speaker 4",
+      "colorIndex" : 3,
+      "displayName" : "Speaker 4",
+      "hasClip" : false,
+      "id" : "00000000-0000-0000-0000-000000000017",
+      "isPlaying" : false
+    }
+  ],
+  "startedAt" : "2026-09-29T12:50:00.000Z",
+  "state" : "ready",
+  "summary" : [
+    {
+      "bullets" : [
+        {
+          "lead" : "Fokus",
+          "text" : "Nicolai schlägt vor, 90 Prozent der Kapazität auf den Kern zu setzen und Nebenprojekte bis Q1 zu pausieren."
+        },
+        {
+          "lead" : "Budget",
+          "text" : "Jérôme prüft die Zahlen bis Freitag und bringt zwei Szenarien mit."
+        }
+      ],
+      "heading" : "Executive summary",
+      "id" : "executive-summary"
+    },
+    {
+      "bullets" : [
+        {
+          "lead" : "Zeitplan",
+          "text" : "Start im Oktober oder erst im November nach dem Investor-Update?"
+        }
+      ],
+      "heading" : "Open questions",
+      "id" : "open-questions"
+    }
+  ],
+  "summaryStatus" : {
+    "kind" : "present"
+  },
+  "tab" : "summary",
+  "tags" : [
+    "strategie",
+    "q4"
+  ],
+  "tasks" : [
+    {
+      "assigneeColorIndex" : 1,
+      "assigneeName" : "Jérôme",
+      "done" : false,
+      "dueDate" : "2026-10-02T12:50:00.000Z",
+      "id" : "00000000-0000-0000-0000-0000000000C8",
+      "priority" : "normal",
+      "text" : "Zahlen für beide Szenarien"
+    },
+    {
+      "assigneeColorIndex" : 0,
+      "assigneeName" : "Nicolai",
+      "done" : true,
+      "id" : "00000000-0000-0000-0000-0000000000C9",
+      "priority" : "high",
+      "text" : "Entscheidung im Investor-Update ansprechen"
+    }
+  ],
+  "templateID" : "default",
+  "templates" : [
+    {
+      "id" : "default",
+      "name" : "Meeting notes"
+    },
+    {
+      "id" : "standup",
+      "name" : "Standup"
+    }
+  ],
+  "title" : "Produktstrategie 90/10",
+  "transcript" : [
+    {
+      "endSeconds" : 41,
+      "id" : "00000000-0000-0000-0000-000000000064",
+      "speakerID" : "00000000-0000-0000-0000-000000000014",
+      "speakerName" : "Nicolai",
+      "startSeconds" : 12,
+      "text" : "Lass uns kurz auf die Prioritäten schauen. Ich würde vorschlagen, dass wir neunzig Prozent auf den Kern setzen."
+    },
+    {
+      "endSeconds" : 65,
+      "id" : "00000000-0000-0000-0000-000000000065",
+      "speakerID" : "00000000-0000-0000-0000-000000000015",
+      "speakerName" : "Jérôme",
+      "startSeconds" : 41,
+      "text" : "Das geht nur, wenn wir das Budget entsprechend umschichten. Ich rechne bis Freitag zwei Szenarien."
+    },
+    {
+      "endSeconds" : 90,
+      "id" : "00000000-0000-0000-0000-000000000066",
+      "speakerID" : "00000000-0000-0000-0000-000000000017",
+      "speakerName" : "Speaker 4",
+      "startSeconds" : 65,
+      "text" : "Die Partner sollten das nicht aus zweiter Hand hören."
+    }
+  ]
+}

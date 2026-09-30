@@ -1,0 +1,379 @@
+import Foundation
+import StenoCore
+
+/// One realistic value per contract type. `BridgeFixturesTests` encodes them
+/// into `apps/macos/web/fixtures/bridge/`, the web tests parse those files,
+/// and the page's mock transport serves them, so the sample meeting the web
+/// UI shows in development is the one the Mac's `SampleData` seeds.
+public enum BridgeSamples {
+  public static func uuid(_ n: Int) -> UUID { SampleData.uuid(n) }
+
+  /// 2026-09-29 14:50 in Europe/Berlin (UTC+2).
+  public static let startedAt = Date(timeIntervalSince1970: 1_790_686_200)
+  public static let meetingID = SampleData.meetingID
+  public static let failedMeetingID = uuid(68)
+  public static let speakerNicolai = SampleData.speakerOneID
+  public static let speakerJerome = SampleData.speakerTwoID
+  public static let speakerAnna = uuid(22)
+  public static let speakerUnknown = uuid(23)
+  public static let personNicolai = SampleData.personNicolaiID
+  public static let personJerome = SampleData.personJeromeID
+  public static let personAnna = uuid(12)
+  public static let phoneID = uuid(40)
+
+  // MARK: Snapshots
+
+  public static let app = AppSnapshot(
+    version: "0.10.0", appearance: .light,
+    setupBanner: .init(
+      title: "Summaries are off.",
+      body:
+        "Choose an AI service and Steno writes a summary and tasks for every meeting. Only the transcript text is sent.",
+      offersSummaries: true, offersVault: true),
+    phone: .init(
+      name: "Nicolai's iPhone", lastSyncAt: startedAt.addingTimeInterval(-120), isReachable: true),
+    requestedMeetingID: nil, requestedSettingsSection: nil)
+
+  public static let recordingIdle = RecordingSnapshot(state: .idle)
+
+  public static let recordingLive = RecordingSnapshot(
+    state: .recording, startedAt: startedAt, mode: .call, callApp: "Zoom", meetingID: meetingID,
+    level: .init(mic: 0.42, system: 0.18),
+    autoStop: .init(remainingSeconds: 42, totalSeconds: 60, reason: "Zoom closed"),
+    deniedPermissions: [], warning: nil, error: nil)
+
+  public static let progress = ProgressSnapshot(entries: [
+    .init(
+      meetingID: uuid(2), stage: "transcribing", title: "Transcribing", fraction: 0.62,
+      estimatedRemainingSeconds: 95)
+  ])
+
+  static let chips: [SpeakerChip] = [
+    .init(id: speakerNicolai, initial: "N", colorIndex: 0, isConfirmed: true),
+    .init(id: speakerJerome, initial: "J", colorIndex: 1, isConfirmed: true),
+    .init(id: speakerAnna, initial: "A", colorIndex: 2, isConfirmed: true),
+    .init(id: speakerUnknown, initial: "?", colorIndex: 3, isConfirmed: false),
+  ]
+
+  public static let meetingsList = MeetingsListSnapshot(
+    filter: .all, tagFilter: nil, query: "",
+    counts: .init(all: 3, processing: 0, ready: 2, failed: 1),
+    tags: [.init(name: "strategie", count: 1), .init(name: "q4", count: 1)],
+    groups: [
+      .init(
+        day: "2026-09-29",
+        meetings: [
+          MeetingRow(
+            id: meetingID, title: "Produktstrategie 90/10", startedAt: startedAt,
+            durationSeconds: 2738, source: .call, state: .ready,
+            preview:
+              "Nicolai schlägt vor, 90 Prozent auf den Kern zu setzen. Jérôme prüft die Zahlen bis Freitag.",
+            hasSummary: true, speakers: chips, tags: ["strategie", "q4"]),
+          MeetingRow(
+            id: uuid(3), title: "Tuesday 10:08", startedAt: startedAt.addingTimeInterval(-17_000),
+            durationSeconds: 2291, source: .inPerson, state: .ready, preview: nil,
+            hasSummary: false,
+            speakers: [], tags: []),
+        ]),
+      .init(
+        day: "2026-09-28",
+        meetings: [
+          MeetingRow(
+            id: failedMeetingID, title: "Investor update prep",
+            startedAt: startedAt.addingTimeInterval(-83_000), durationSeconds: 1650, source: .call,
+            state: .failed, failureReason: "Transcription failed: model not installed",
+            preview: nil,
+            hasSummary: false, speakers: [], tags: ["investors"])
+        ]),
+    ],
+    selection: meetingID)
+
+  public static let meetingDetail = MeetingDetailSnapshot(
+    id: meetingID, title: "Produktstrategie 90/10", startedAt: startedAt, durationSeconds: 2738,
+    language: "de", source: .call, state: .ready, tags: ["strategie", "q4"], tab: .summary,
+    retention: .init(
+      kind: .deletesOn, deletesAt: startedAt.addingTimeInterval(30 * 86_400), keepsAudio: false,
+      showsKeepToggle: true, filesExist: true),
+    speakers: [
+      .init(
+        id: speakerNicolai, clusterLabel: "Speaker 1", displayName: "Nicolai",
+        assignment: .confirmed,
+        personID: personNicolai, colorIndex: 0, hasClip: true, isPlaying: false),
+      .init(
+        id: speakerJerome, clusterLabel: "Speaker 2", displayName: "Jérôme", assignment: .confirmed,
+        personID: personJerome, colorIndex: 1, hasClip: true, isPlaying: false),
+      .init(
+        id: speakerAnna, clusterLabel: "Speaker 3", displayName: "Anna", assignment: .suggested,
+        personID: personAnna, suggestionName: "Anna", colorIndex: 2, hasClip: true, isPlaying: false
+      ),
+      .init(
+        id: speakerUnknown, clusterLabel: "Speaker 4", displayName: "Speaker 4",
+        assignment: .unknown,
+        colorIndex: 3, hasClip: false, isPlaying: false),
+    ],
+    templates: [
+      .init(id: "default", name: "Meeting notes"), .init(id: "standup", name: "Standup"),
+    ],
+    templateID: "default",
+    summaryStatus: .init(kind: .present),
+    summary: [
+      .init(
+        id: "executive-summary", heading: "Executive summary",
+        bullets: [
+          .init(
+            lead: "Fokus",
+            text:
+              "Nicolai schlägt vor, 90 Prozent der Kapazität auf den Kern zu setzen und Nebenprojekte bis Q1 zu pausieren."
+          ),
+          .init(
+            lead: "Budget",
+            text: "Jérôme prüft die Zahlen bis Freitag und bringt zwei Szenarien mit."),
+        ]),
+      .init(
+        id: "open-questions", heading: "Open questions",
+        bullets: [
+          .init(
+            lead: "Zeitplan",
+            text: "Start im Oktober oder erst im November nach dem Investor-Update?")
+        ]),
+    ],
+    transcript: [
+      .init(
+        id: uuid(100), speakerID: speakerNicolai, speakerName: "Nicolai", startSeconds: 12,
+        endSeconds: 41,
+        text:
+          "Lass uns kurz auf die Prioritäten schauen. Ich würde vorschlagen, dass wir neunzig Prozent auf den Kern setzen."
+      ),
+      .init(
+        id: uuid(101), speakerID: speakerJerome, speakerName: "Jérôme", startSeconds: 41,
+        endSeconds: 65,
+        text:
+          "Das geht nur, wenn wir das Budget entsprechend umschichten. Ich rechne bis Freitag zwei Szenarien."
+      ),
+      .init(
+        id: uuid(102), speakerID: speakerUnknown, speakerName: "Speaker 4", startSeconds: 65,
+        endSeconds: 90, text: "Die Partner sollten das nicht aus zweiter Hand hören."),
+    ],
+    tasks: [
+      .init(
+        id: uuid(200), text: "Zahlen für beide Szenarien", assigneeName: "Jérôme",
+        assigneeColorIndex: 1,
+        dueDate: startedAt.addingTimeInterval(3 * 86_400), priority: .normal, done: false),
+      .init(
+        id: uuid(201), text: "Entscheidung im Investor-Update ansprechen", assigneeName: "Nicolai",
+        assigneeColorIndex: 0, dueDate: nil, priority: .high, done: true),
+    ],
+    decisions: [
+      "Wir setzen neunzig Prozent auf den Kern. Nebenprojekte pausieren bis zur Q1-Planung."
+    ],
+    notes: "",
+    export: .init(
+      status: .notConfigured, message: "Not exported: no Obsidian vault is configured.",
+      canReexport: false, canReveal: false),
+    canRerunSummary: true, isBusy: false)
+
+  public static let settingsGeneral = GeneralSettingsSnapshot(
+    subtitle: "Steno 0.10.0", version: "0.10.0", loginItem: .enabled, detectionEnabled: true,
+    defaultTemplateID: "default", templates: meetingDetail.templates, calendarPermission: .granted,
+    requestingCalendar: false,
+    updates: .init(
+      canCheck: true, automaticallyChecks: true, automaticallyDownloads: false,
+      lastCheckAt: startedAt.addingTimeInterval(-3_600), outcome: .upToDate))
+
+  public static let settingsRecording = RecordingSettingsSnapshot(
+    subtitle: "Ready",
+    devices: [
+      .init(uid: "BuiltInMicrophoneDevice", name: "MacBook Pro Microphone"),
+      .init(uid: "AirPodsPro", name: "Nicolai's AirPods Pro"),
+    ],
+    inputDeviceUID: nil, audioFolderPath: "/Users/nicolai/Library/Application Support/Steno/audio",
+    audioFolderName: "audio", folderUsageBytes: 734_003_200,
+    retention: .init(mode: .keepDays, days: 30),
+    keptForeverCount: 2,
+    permissions: [
+      .init(kind: .microphone, state: .granted, isRequesting: false),
+      .init(kind: .systemAudio, state: .granted, isRequesting: false),
+    ])
+
+  public static let settingsTranscription = TranscriptionSettingsSnapshot(
+    subtitle: "Ready", engineID: "parakeet",
+    engines: [.init(id: "parakeet", name: "Parakeet"), .init(id: "whisper", name: "Whisper")],
+    showsEnginePicker: true,
+    assets: [
+      .init(
+        id: "parakeetV3", name: "Parakeet v3", detail: "Speech to text, 25 languages",
+        state: .installed, installedBytes: 485_000_000),
+      .init(
+        id: "offlineDiarizer", name: "Speaker separation", detail: "Who spoke when",
+        state: .downloading, downloadFraction: 0.35, downloadPhase: "Downloading"),
+    ],
+    allInstalled: false)
+
+  public static let settingsSummaries = SummariesSettingsSnapshot(
+    subtitle: "Not set up",
+    presets: [
+      .init(
+        id: "lmStudio", title: "LM Studio on this Mac", needsAPIKey: false, showsServerField: true,
+        modelPlaceholder: "the model loaded in LM Studio"),
+      .init(
+        id: "codex", title: "ChatGPT (Codex)", needsAPIKey: false, showsServerField: false,
+        modelPlaceholder: "pick a model"),
+      .init(
+        id: "openAI", title: "OpenAI", needsAPIKey: true, showsServerField: false,
+        modelPlaceholder: "gpt-4.1-mini"),
+    ],
+    presetID: "lmStudio", baseURL: "http://127.0.0.1:1234/v1", model: "", contextTokens: "32000",
+    hasAPIKey: false, isConfigured: false, isTesting: false,
+    validationMessage: "Choose a service and enter a model name; summaries stay off until then.")
+
+  public static let settingsExport = ExportSettingsSnapshot(
+    subtitle: "Off", enabled: false, vaultPath: nil, vaultName: nil, peopleFolder: "People",
+    includeAudio: false, taskTag: "#steno", saved: false)
+
+  public static let settingsPhone = PhoneSettingsSnapshot(
+    subtitle: "Nicolai's iPhone", macID: "steno-mac-7f3a",
+    devices: [
+      .init(
+        id: phoneID, name: "Nicolai's iPhone", pairedAt: startedAt.addingTimeInterval(-5 * 86_400),
+        lastSeenAt: startedAt.addingTimeInterval(-120))
+    ],
+    listener: .init(state: .listening, port: 52_431), pairing: nil, receipts: [])
+
+  public static let onboarding = OnboardingSnapshot(
+    page: .permissions,
+    permissions: [
+      .init(kind: .microphone, state: .granted, isRequesting: false, isSkipped: false),
+      .init(kind: .systemAudio, state: .unknown, isRequesting: true, isSkipped: false),
+      .init(kind: .calendar, state: .unknown, isRequesting: false, isSkipped: false),
+      .init(kind: .localNetwork, state: .unknown, isRequesting: false, isSkipped: true),
+    ],
+    setup: [.init(kind: .summaries, state: .open), .init(kind: .vault, state: .open)],
+    canSaveSummaries: false, retentionSentence: "Recordings are deleted 30 days after the meeting.",
+    finished: false)
+
+  // MARK: Envelope
+
+  public static let selectSpeaker = SelectSpeakerParams(
+    speakerID: speakerUnknown, option: .init(kind: .person, label: "Anna", personID: personAnna))
+
+  public static let request = BridgeRequest(
+    id: "req-1", method: .speakersSelect, params: try? jsonValue(selectSpeaker))
+
+  /// The `JSONValue` form of a typed params value, for envelopes.
+  static func jsonValue<T: Encodable>(_ value: T) throws -> JSONValue {
+    try BridgeJSON.decode(JSONValue.self, from: BridgeJSON.encode(value))
+  }
+
+  public static let reply = BridgeReply(id: "req-1")
+
+  public static let errorReply = BridgeReply(
+    id: "req-2", error: .init(code: .notFound, message: "No meeting with that id."))
+
+  public static let event = BridgeEvent(
+    topic: .recording,
+    payload: .object(["state": .string("idle"), "deniedPermissions": .array([])]))
+
+  // MARK: Commands
+
+  public static let speakerOptions = SpeakerOptionsReply(
+    prefill: "Anna",
+    options: [
+      .init(kind: .person, label: "Anna", detail: "Suggested, 87% match", personID: personAnna),
+      .init(kind: .person, label: "Nicolai", personID: personNicolai),
+      .init(kind: .create, label: "Add “Anna Berger”"),
+      .init(kind: .unknown, label: "Leave unnamed"),
+    ])
+}
+
+/// Every fixture the contract records, by file name. Snapshots and command
+/// types share one catalog so the web side can iterate it.
+public struct BridgeFixture: Sendable {
+  public let name: String
+  public let encode: @Sendable () throws -> Data
+  /// Decodes the data as the fixture's type and re-encodes it; the result
+  /// must be byte-identical to `encode()` for the round trip to hold.
+  public let reencode: @Sendable (Data) throws -> Data
+
+  public init<T: Codable & Sendable>(_ name: String, _ value: T) {
+    self.name = name
+    encode = { try BridgeJSON.encode(value) }
+    reencode = { data in try BridgeJSON.encode(BridgeJSON.decode(T.self, from: data)) }
+  }
+
+  /// The bytes written to `<name>.json`: the encoding plus a trailing newline.
+  public func fileData() throws -> Data {
+    var data = try encode()
+    data.append(0x0A)
+    return data
+  }
+}
+
+extension BridgeSamples {
+  public static let fixtures: [BridgeFixture] = [
+    BridgeFixture("app", app),
+    BridgeFixture("recording", recordingIdle),
+    BridgeFixture("recording.live", recordingLive),
+    BridgeFixture("progress", progress),
+    BridgeFixture("meetings.list", meetingsList),
+    BridgeFixture("meeting.detail", meetingDetail),
+    BridgeFixture("settings.general", settingsGeneral),
+    BridgeFixture("settings.recording", settingsRecording),
+    BridgeFixture("settings.transcription", settingsTranscription),
+    BridgeFixture("settings.summaries", settingsSummaries),
+    BridgeFixture("settings.export", settingsExport),
+    BridgeFixture("settings.iphone", settingsPhone),
+    BridgeFixture("onboarding", onboarding),
+    BridgeFixture("envelope.request", request),
+    BridgeFixture("envelope.reply", reply),
+    BridgeFixture("envelope.error", errorReply),
+    BridgeFixture("envelope.event", event),
+    BridgeFixture("speakers.options.reply", speakerOptions),
+    BridgeFixture("params.page.layout", PageLayoutParams(window: .main, width: 1200, height: 760)),
+    BridgeFixture("params.meetings.setFilter", SetFilterParams(filter: .ready)),
+    BridgeFixture("params.meetings.setTagFilter", SetTagFilterParams(tag: "q4")),
+    BridgeFixture("params.meetings.setQuery", SetQueryParams(query: "budget")),
+    BridgeFixture("params.meetingID", MeetingIDParams(meetingID: meetingID)),
+    BridgeFixture("params.meeting.setTab", SetTabParams(tab: .transcript)),
+    BridgeFixture("params.meeting.setTags", SetTagsParams(tags: ["strategie", "q4"])),
+    BridgeFixture("params.meeting.setTemplate", SetTemplateParams(templateID: "standup")),
+    BridgeFixture("params.bool", SetBoolParams(value: true)),
+    BridgeFixture("params.string", SetStringParams(value: "BuiltInMicrophoneDevice")),
+    BridgeFixture(
+      "params.meeting.saveNotes", SaveNotesParams(text: "Follow up with Anna on Monday.")),
+    BridgeFixture(
+      "params.speakers.options", SpeakerOptionsParams(speakerID: speakerUnknown, query: "an")),
+    BridgeFixture(
+      "params.speakers.select",
+      SelectSpeakerParams(
+        speakerID: speakerUnknown, option: .init(kind: .person, label: "Anna", personID: personAnna)
+      )),
+    BridgeFixture("params.speakerID", SpeakerIDParams(speakerID: speakerNicolai)),
+    BridgeFixture("params.recording.start", StartRecordingParams(mode: .inPerson)),
+    BridgeFixture(
+      "params.settings.recording.setRetention",
+      SetRetentionParams(retention: RecordingSettingsSnapshot.Retention(mode: .keepDays, days: 30))),
+    BridgeFixture("params.permissionKind", PermissionKindParams(kind: .systemAudio)),
+    BridgeFixture("params.assetID", AssetIDParams(assetID: "parakeetV3")),
+    BridgeFixture(
+      "params.settings.general.setAutomaticUpdates",
+      SetAutomaticUpdatesParams(automaticallyChecks: true, automaticallyDownloads: false)),
+    BridgeFixture(
+      "params.settings.summaries.update",
+      SummariesUpdateParams(model: "gpt-4.1-mini", apiKey: "sk-…")),
+    BridgeFixture(
+      "params.settings.export.update", ExportUpdateParams(includeAudio: true, taskTag: "#todo")),
+    BridgeFixture("params.deviceID", DeviceIDParams(deviceID: phoneID)),
+    BridgeFixture("params.onboarding.setupStep", SetupStepParams(step: .vault)),
+    BridgeFixture(
+      "params.system.openURL", OpenURLParams(url: "https://github.com/NicolaiSchmid/steno")),
+    BridgeFixture("params.window", WindowParams(window: .settings, section: .summaries)),
+    BridgeFixture(
+      "params.ui.confirmDestructive",
+      ConfirmDestructiveParams(
+        title: "Delete this meeting?",
+        message: "The recording, transcript and summary are removed.",
+        confirmTitle: "Delete")),
+    BridgeFixture("reply.confirm", ConfirmReply(confirmed: true)),
+    BridgeFixture("reply.chosenPath", ChosenPathReply(path: "/Users/nicolai/Notes")),
+  ]
+}

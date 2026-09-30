@@ -1,0 +1,18 @@
+# Standalone pnpm project (no packages key on purpose), like mobile/.
+# pnpm 11 holds back very new releases by default; the versions the scaffold
+# was created with are allowed explicitly so a fresh install reproduces the
+# lockfile.
+minimumReleaseAgeExclude:
+  - '@biomejs/biome@2.5.15'
+  - '@biomejs/cli-darwin-arm64@2.5.15'
+  - '@biomejs/cli-darwin-x64@2.5.15'
+  - '@biomejs/cli-linux-arm64-musl@2.5.15'
+  - '@biomejs/cli-linux-arm64@2.5.15'
+  - '@biomejs/cli-linux-x64-musl@2.5.15'
+  - '@biomejs/cli-linux-x64@2.5.15'
+  - '@biomejs/cli-win32-arm64@2.5.15'
+  - '@biomejs/cli-win32-x64@2.5.15'
+  - '@vitest/mocker@5.0.3'
+  - '@vitest/spy@5.0.3'
+  - lucide-react@1.49.0
+  - vitest@5.0.3

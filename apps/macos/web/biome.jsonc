@@ -1,0 +1,68 @@
+{
+	"$schema": "./node_modules/@biomejs/biome/configuration_schema.json",
+	"root": true,
+	"vcs": {
+		"enabled": true,
+		"useIgnoreFile": true,
+		"clientKind": "git"
+	},
+	"assist": {
+		"enabled": true,
+		"actions": {
+			"preset": "recommended",
+			"source": {
+				"preset": "recommended",
+				"organizeImports": "on",
+				"useSortedAttributes": "on"
+			}
+		}
+	},
+	"formatter": {
+		"enabled": true
+	},
+	"css": {
+		"parser": {
+			// theme.css uses Tailwind v4 at-rules (@theme, @custom-variant, @utility).
+			"tailwindDirectives": true
+		}
+	},
+	"files": {
+		"includes": [
+			"**",
+			"!dist",
+			"!screens",
+			"!playwright-report",
+			"!test-results",
+			"!pnpm-lock.yaml",
+			// Written by the Swift side's JSONEncoder; never hand-formatted.
+			"!fixtures/bridge/*.json"
+		]
+	},
+	"linter": {
+		"enabled": true,
+		"rules": {
+			"preset": "recommended",
+			"nursery": {
+				"useSortedClasses": {
+					"level": "warn",
+					"fix": "safe",
+					"options": {
+						"functions": ["clsx", "cn", "cva"]
+					}
+				}
+			}
+		}
+	},
+	"overrides": [
+		{
+			// The prefers-reduced-motion reset must beat every component
+			// transition; !important is the accepted way to do that.
+			"includes": ["src/theme.css"],
+			"linter": {
+				"rules": {
+					"complexity": { "noImportantStyles": "off" }
+				}
+			}
+		}
+	]
+}

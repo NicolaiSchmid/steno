@@ -1,0 +1,24 @@
+{
+  "options" : [
+    {
+      "detail" : "Suggested, 87% match",
+      "kind" : "person",
+      "label" : "Anna",
+      "personID" : "00000000-0000-0000-0000-00000000000C"
+    },
+    {
+      "kind" : "person",
+      "label" : "Nicolai",
+      "personID" : "00000000-0000-0000-0000-00000000000A"
+    },
+    {
+      "kind" : "create",
+      "label" : "Add “Anna Berger”"
+    },
+    {
+      "kind" : "unknown",
+      "label" : "Leave unnamed"
+    }
+  ],
+  "prefill" : "Anna"
+}

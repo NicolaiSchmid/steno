@@ -1,0 +1,33 @@
+{
+  "allInstalled" : false,
+  "assets" : [
+    {
+      "detail" : "Speech to text, 25 languages",
+      "id" : "parakeetV3",
+      "installedBytes" : 485000000,
+      "name" : "Parakeet v3",
+      "state" : "installed"
+    },
+    {
+      "detail" : "Who spoke when",
+      "downloadFraction" : 0.35,
+      "downloadPhase" : "Downloading",
+      "id" : "offlineDiarizer",
+      "name" : "Speaker separation",
+      "state" : "downloading"
+    }
+  ],
+  "engineID" : "parakeet",
+  "engines" : [
+    {
+      "id" : "parakeet",
+      "name" : "Parakeet"
+    },
+    {
+      "id" : "whisper",
+      "name" : "Whisper"
+    }
+  ],
+  "showsEnginePicker" : true,
+  "subtitle" : "Ready"
+}
