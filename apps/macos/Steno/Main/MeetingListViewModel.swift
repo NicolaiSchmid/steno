@@ -68,6 +68,13 @@ final class MeetingListViewModel {
   private(set) var dayGroups: [DayGroup] = []
   private(set) var searchHits: Set<UUID>?
   private(set) var error: String?
+  /// The speakers of every listed meeting and the people they resolve to,
+  /// reloaded after each list update, for the rows' speaker chips. The
+  /// speaker table is not part of `observeMeetings()`, so a name confirmed
+  /// in the detail pane reaches the chips with the next meeting-table write
+  /// (the re-export the confirmation schedules), not at once.
+  private(set) var speakersByMeeting: [UUID: [Speaker]] = [:]
+  private(set) var personsByID: [UUID: Person] = [:]
   var query = "" {
     didSet { if query != oldValue { scheduleSearch() } }
   }
@@ -84,6 +91,7 @@ final class MeetingListViewModel {
   /// Day boundaries for the cards; the viewer's calendar and time zone.
   let calendar: Calendar
   private var searchTask: Task<Void, Never>?
+  private var speakersTask: Task<Void, Never>?
   static let searchDebounce: Duration = .milliseconds(200)
 
   init(store: MeetingStore, clock: any Clock<Duration>, calendar: Calendar = .current) {
@@ -103,9 +111,33 @@ final class MeetingListViewModel {
         all = meetings.sorted { $0.startedAt > $1.startedAt }
         let current = Set(all.map(\.id))
         apply(removed: previous.filter { !current.contains($0.id) })
+        reloadSpeakers()
       }
     } catch {
       self.error = "Meetings could not be loaded: \(error)"
+    }
+  }
+
+  /// One pass over the listed meetings for their speakers, then the people;
+  /// a list update that lands mid-pass drops the pass and starts over, so
+  /// the map never mixes two lists.
+  private func reloadSpeakers() {
+    speakersTask?.cancel()
+    let ids = all.map(\.id)
+    let store = self.store
+    speakersTask = Task { [weak self] in
+      var byMeeting: [UUID: [Speaker]] = [:]
+      for id in ids {
+        guard !Task.isCancelled else { return }
+        if let speakers = try? await store.speakers(meetingID: id), !speakers.isEmpty {
+          byMeeting[id] = speakers
+        }
+      }
+      let persons = (try? await store.persons()) ?? []
+      guard let self, !Task.isCancelled else { return }
+      self.speakersByMeeting = byMeeting
+      self.personsByID = Dictionary(
+        persons.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
     }
   }
 

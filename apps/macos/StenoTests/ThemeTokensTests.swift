@@ -98,21 +98,11 @@ final class ThemeTokensTests: XCTestCase {
     XCTAssertEqual(Theme.Control.chipGlyphSize, Theme.TextSize.xxs.size - 1)
   }
 
-  /// The main window's three columns: their minimums and their ideals each
-  /// add up to the 960 pt window minimum (the UI smoke test's review size),
-  /// so the split view is never over-constrained and never squeezes the nav
-  /// column under its minimum to honour the other two ideals.
-  func testMainWindowColumnsAddUpToTheWindowMinimum() {
-    let columns = [MainWindow.Columns.nav, MainWindow.Columns.list]
-    let detail = MainWindow.Columns.detailMinimum
-    let window = MainWindow.Columns.windowMinimum
-    XCTAssertEqual(window, CGSize(width: 960, height: 600))
-    XCTAssertEqual(columns.map(\.min).reduce(detail, +), window.width, "minimums")
-    XCTAssertEqual(columns.map(\.ideal).reduce(detail, +), window.width, "ideals")
-    for column in columns {
-      XCTAssertLessThanOrEqual(column.min, column.ideal)
-      XCTAssertLessThanOrEqual(column.ideal, column.max)
-    }
+  /// The main window's minimum is the UI smoke test's review size; the page
+  /// lays its columns out inside it (the split view and its widths left
+  /// with WP2 of the webview plan).
+  @MainActor func testMainWindowMinimumIsTheReviewSize() {
+    XCTAssertEqual(MainWindow.minimumSize, CGSize(width: 960, height: 600))
   }
 
   func testMotionTokensMirrorMobile() {

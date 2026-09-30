@@ -80,6 +80,28 @@ struct StopLabel: View {
   }
 }
 
+/// What a Stop control renders while the recorder holds a meeting: enabled
+/// while recording and disabled (with a spinner) while the stop is
+/// finishing. Nil for every meeting the recorder is not on, so a
+/// `.recording` row the recorder does not yet hold (while `.starting`;
+/// never after `reconcileInterruptedRecordings`) shows nothing in its
+/// place. The sidebar builds the same value from `RecordingState` alone.
+enum HeaderStop: Equatable, Sendable {
+  case stop(since: Date)
+  case stopping
+
+  static func make(meetingID: UUID, recording: RecordingState, activeMeetingID: UUID?)
+    -> HeaderStop?
+  {
+    guard activeMeetingID == meetingID else { return nil }
+    switch recording {
+    case .recording(let since): return .stop(since: since)
+    case .stopping: return .stopping
+    case .idle, .starting: return nil
+    }
+  }
+}
+
 /// The Stop control both surfaces share: a button carrying `StopLabel` while
 /// recording, with `id` naming the surface (`sidebar-stop`, `header-stop`),
 /// and a disabled button holding a spinner in its place while the stop is

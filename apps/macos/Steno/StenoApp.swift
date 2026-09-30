@@ -25,9 +25,9 @@ struct StenoApp: App {
   }
 
   var body: some Scene {
-    // No title bar: the window carries no title and no toolbar items; each
-    // column of `MainWindow` paints its own opaque background up to the top
-    // edge, so nothing but the traffic lights sits above the content.
+    // No title bar: the window carries no title and no toolbar items; the
+    // web page in `MainWindow` paints up to the top edge and leaves the
+    // traffic lights their inset, so nothing else sits above the content.
     Window("Steno", id: "main") {
       RootView(bootstrap: bootstrap) { controller in
         MainWindow(controller: controller)

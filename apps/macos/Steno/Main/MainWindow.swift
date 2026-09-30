@@ -1,110 +1,77 @@
-import StenoCore
+import AppKit
+import StenoBridge
 import SwiftUI
 
-/// The main window: nav column, list column, detail. Three columns in the
-/// balanced style with the visibility held at `.all`, because the nav
-/// column holds the window's only Record control and must never collapse:
-/// a drag past the first divider's minimum still collapses the AppKit
-/// column, so the state is reverted to `.all` as soon as it changes, and
-/// the column widths (`Columns`) add up to the window's minimum so the
-/// layout is never over-constrained. No title, no toolbar items: the
-/// window style hides the title bar and each column paints its own opaque
-/// background. One detail view model per selected meeting, replaced when
-/// the selection changes.
+/// The main window: the web UI at `#/main` over `MainWindowBridge` (plan
+/// Decision 1). The bridge is created once with the window's content and
+/// driven by `.task` for the window's lifetime; it owns the list and detail
+/// models and every rule of the window. The view hands it only what a
+/// host cannot reach on its own: the window's appearance for the `app`
+/// snapshot and the scene actions behind `window.open`. No title bar and no
+/// toolbar: the page paints up to the top edge and leaves the traffic
+/// lights their inset.
 struct MainWindow: View {
   let controller: AppController
-  @State private var list: MeetingListViewModel
-  @State private var detail: MeetingDetailViewModel?
-  @State private var columns: NavigationSplitViewVisibility = .all
+  @State private var bridge: MainWindowBridge
+  @Environment(\.colorScheme) private var colorScheme
+  @Environment(\.openWindow) private var openWindow
+  @Environment(\.openSettings) private var openSettings
+
+  /// 960 x 600, the size the UI smoke test reviews the window at.
+  static let minimumSize = CGSize(width: 960, height: 600)
 
   init(controller: AppController) {
     self.controller = controller
-    _list = State(
-      initialValue: MeetingListViewModel(
-        store: controller.environment.store, clock: controller.environment.clock))
+    _bridge = State(initialValue: MainWindowBridge(controller: controller))
   }
 
   var body: some View {
-    NavigationSplitView(columnVisibility: $columns) {
-      // The width modifier is the column's outermost modifier. Behind the
-      // toolbar modifier the split view never saw it: the column sat at its
-      // rows' intrinsic 140 pt in every window size, whatever the ideals
-      // added up to, and the Record control and every row truncated.
-      // `LaunchSmokeTests` pins the width.
-      NavigationColumn(controller: controller, list: list)
-        .toolbar(removing: .sidebarToggle)
-        .navigationSplitViewColumnWidth(
-          min: Columns.nav.min, ideal: Columns.nav.ideal, max: Columns.nav.max)
-    } content: {
-      MeetingListView(model: list, progress: controller.progress)
-        .navigationSplitViewColumnWidth(
-          min: Columns.list.min, ideal: Columns.list.ideal, max: Columns.list.max)
-    } detail: {
-      // Row 1 of the detail header stack: the setup banner, over the
-      // selected meeting or the empty state alike.
-      VStack(spacing: 0) {
-        SetupBanner(controller: controller, hasMeetings: !list.all.isEmpty)
-        if let detail {
-          MeetingDetailView(model: detail, controller: controller)
-            .id(detail.id)
-        } else {
-          EmptyState(
-            symbol: "text.alignleft", title: "Select a meeting",
-            body: "Pick a meeting on the left to read its summary, transcript and tasks.",
-            id: "empty-detail")
+    WebWindowView(route: "#/main", host: bridge)
+      .frame(minWidth: Self.minimumSize.width, minHeight: Self.minimumSize.height)
+      .onChange(of: colorScheme, initial: true) { _, scheme in
+        bridge.appearance = scheme == .dark ? .dark : .light
+      }
+      .task {
+        bridge.openWindow = { [controller, openWindow, openSettings] request in
+          switch request.window {
+          case .main:
+            if let meetingID = request.meetingID { controller.requestedMeetingID = meetingID }
+            openWindow(id: "main")
+            NSApp.activate()
+          case .settings:
+            // The section is a deep link `SettingsView` applies when it
+            // opens, the same path the setup banner used.
+            if let section = request.section.flatMap({ SettingsSection(rawValue: $0.rawValue) }) {
+              controller.openSettings(section, with: openSettings)
+            } else {
+              openSettings()
+              NSApp.activate()
+            }
+          case .onboarding:
+            openWindow(id: "onboarding")
+            NSApp.activate()
+          }
         }
+        await bridge.run()
       }
-      .frame(minWidth: Columns.detailMinimum, maxWidth: .infinity, maxHeight: .infinity)
-      .background(Color.stenoBackground)
-    }
-    .navigationSplitViewStyle(.balanced)
-    .toolbar(removing: .title)
-    .toolbarBackground(.hidden, for: .windowToolbar)
-    .frame(minWidth: Columns.windowMinimum.width, minHeight: Columns.windowMinimum.height)
-    .onChange(of: columns) { _, visibility in
-      // A collapsed nav column would hide the Record control; bring it back.
-      if visibility != .all { columns = .all }
-    }
-    .task { await list.observe() }
-    .onChange(of: list.selection, initial: true) { _, selection in
-      guard selection != detail?.id else { return }
-      detail = selection.map {
-        MeetingDetailViewModel(
-          meetingID: $0, environment: controller.environment,
-          initialSettings: controller.storedSettings)
-      }
-    }
-    .onChange(of: controller.requestedMeetingID, initial: true) { _, requested in
-      guard let requested else { return }
-      list.selection = requested
-      controller.requestedMeetingID = nil
-    }
-    .onChange(of: list.all.isEmpty, initial: true) { _, empty in
-      // First launch of the window: show the newest meeting.
-      if !empty, list.selection == nil, let first = list.meetings.first {
-        list.selection = first.id
-      }
-    }
   }
 }
 
-extension MainWindow {
-  /// The split view's widths. The minimums (200 + 320 + 440) add up to the
-  /// window's 960 pt minimum so the layout is never over-constrained, and
-  /// so do the ideals, so at the review size no column has to give way to
-  /// another's preference. `ThemeTokensTests` pins the sums.
-  enum Columns {
-    struct Width: Sendable {
-      let min: CGFloat
-      let ideal: CGFloat
-      let max: CGFloat
-    }
+/// The "focus the meeting search" action `AppCommands` runs for ⌘F. Nothing
+/// publishes it yet: the field now lives in the page and the contract has
+/// no `ui.focusSearch` event for the host to send, so the menu item stays
+/// disabled until that topic lands (plan Decision 6 names it).
+struct SearchFocusAction {
+  let run: @MainActor () -> Void
+}
 
-    static let nav = Width(min: 200, ideal: 200, max: 260)
-    static let list = Width(min: 320, ideal: 320, max: 480)
-    /// The detail column has a minimum only; it takes the rest.
-    static let detailMinimum: CGFloat = 440
-    /// 960 x 600, the size the UI smoke test reviews the window at.
-    static let windowMinimum = CGSize(width: 960, height: 600)
+private struct SearchFocusKey: FocusedValueKey {
+  typealias Value = SearchFocusAction
+}
+
+extension FocusedValues {
+  var searchFocus: SearchFocusAction? {
+    get { self[SearchFocusKey.self] }
+    set { self[SearchFocusKey.self] = newValue }
   }
 }

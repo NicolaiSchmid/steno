@@ -265,9 +265,9 @@ struct MessageRow: View {
   var body: some View {
     StatusLine(color: color, text: text)
       .padding(.vertical, Theme.Space.sm)
-    .padding(.horizontal, Theme.Control.rowInset)
-    .frame(maxWidth: .infinity, alignment: .leading)
-    .background(Theme.Radius.md.shape.fill(color.opacity(0.08)))
+      .padding(.horizontal, Theme.Control.rowInset)
+      .frame(maxWidth: .infinity, alignment: .leading)
+      .background(Theme.Radius.md.shape.fill(color.opacity(0.08)))
   }
 }
 
@@ -296,33 +296,10 @@ extension Binding where Value: Sendable {
 }
 
 extension View {
-  /// The 720 pt reading column the four tabs share: 32 pt sides, 24 pt
-  /// above, 32 pt below, pinned to the leading edge (a `ScrollView` would
-  /// otherwise centre a column narrower than the pane).
-  func readingColumn() -> some View {
-    frame(maxWidth: 720, alignment: .leading)
-      .padding(.horizontal, Theme.Space.xxl)
-      .padding(.top, Theme.Space.xl)
-      .padding(.bottom, Theme.Space.xxl)
-      .frame(maxWidth: .infinity, alignment: .leading)
-      .textSelection(.enabled)
-  }
-
   /// The ladder's leading for a text size applied through `lineSpacing`,
   /// the one place `lineHeight - size` is spelled out.
   func stenoLeading(_ size: (size: CGFloat, lineHeight: CGFloat)) -> some View {
     lineSpacing(size.lineHeight - size.size)
-  }
-
-  /// Body prose at 14/19: `TextSize.sm` with its leading.
-  func proseLeading() -> some View {
-    stenoLeading(Theme.TextSize.sm)
-  }
-
-  /// `shadow-sm`, the one shadow in the system: on the active segmented cell.
-  func stenoShadowSmall() -> some View {
-    shadow(color: .black.opacity(0.1), radius: 1.5, y: 1)
-      .shadow(color: .black.opacity(0.1), radius: 1, y: 1)
   }
 }
 
