@@ -401,6 +401,31 @@ import Testing
       try await store.export(meetingID: SampleData.meetingID).segments == SampleData.segments())
   }
 
+  /// One read for a whole list's speaker chips: grouped by meeting, a
+  /// meeting without speakers absent, an empty list an empty map, and ids
+  /// outside the list left out.
+  @Test func speakersForMeetingsGroupsOneReadByMeeting() async throws {
+    let store = try await Self.populated()
+    var other = SampleData.meeting()
+    other.id = SampleData.uuid(2)
+    try await store.save(other)
+    let lonely = Speaker(
+      id: SampleData.uuid(22), meetingID: other.id, clusterLabel: "Speaker 1",
+      clusterConfidence: 0.5)
+    try await store.save(lonely)
+    var silent = SampleData.meeting()
+    silent.id = SampleData.uuid(3)
+    try await store.save(silent)
+
+    let grouped = try await store.speakers(forMeetings: [SampleData.meetingID, other.id, silent.id])
+    #expect(grouped.count == 2)
+    #expect(grouped[SampleData.meetingID] == SampleData.speakers())
+    #expect(grouped[other.id] == [lonely])
+    #expect(grouped[silent.id] == nil, "a meeting without speakers has no key")
+    #expect(try await store.speakers(forMeetings: [other.id]) == [other.id: [lonely]])
+    #expect(try await store.speakers(forMeetings: []).isEmpty)
+  }
+
   @Test func confirmTwiceWithTheSamePersonIsANoOp() async throws {
     let store = try await Self.populated()
     try await store.confirm(speakerID: SampleData.speakerTwoID, person: Self.anna)

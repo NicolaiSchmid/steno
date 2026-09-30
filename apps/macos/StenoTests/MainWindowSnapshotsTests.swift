@@ -107,7 +107,8 @@ private func request(_ id: String, _ method: String, _ params: Any = NSNull()) -
   /// The rich seed: the sample meeting on the 24th, two meetings on the
   /// 23rd (one processing), two on the 22nd (one failed), grouped on a UTC
   /// calendar, with the nav counts, the tag counts, the first bullet as the
-  /// preview and the sample meeting's two speakers as chips.
+  /// preview (none for the processing one) and the sample meeting's two
+  /// speakers as chips.
   @Test func theListGroupsTheRichSeedByDayWithPreviewsAndChips() async throws {
     let environment = try await TestSupport.environment(fixtures: .rich)
     let list = MeetingListViewModel(store: environment.store, clock: ManualClock(), calendar: utc)
@@ -115,9 +116,8 @@ private func request(_ id: String, _ method: String, _ params: Any = NSNull()) -
     defer { observing.cancel() }
     await eventually("five meetings") { list.all.count == 5 }
     await eventually("speaker chips") { list.speakersByMeeting[SampleData.meetingID] != nil }
-    let progress = ProcessingProgressModel(now: { TestSupport.now })
 
-    let snapshot = MeetingsListSnapshot(list: list, progress: progress)
+    let snapshot = MeetingsListSnapshot(list: list)
     #expect(snapshot.filter == .all)
     #expect(snapshot.tagFilter == nil)
     #expect(snapshot.query == "")
@@ -156,18 +156,14 @@ private func request(_ id: String, _ method: String, _ params: Any = NSNull()) -
     #expect(failed.hasSummary == false)
     #expect(failed.failureReason?.hasPrefix("The LLM endpoint did not answer.") == true)
 
-    // A processing meeting previews the progress model's title once it has
-    // an entry, and nothing before.
+    // A processing meeting carries no preview: the page shows the stage from
+    // the `progress` topic, so a progress tick never re-publishes the list.
     let processing = try #require(snapshot.groups[1].meetings.first { $0.state == .processing })
     #expect(processing.preview == nil)
-    progress.meetingsChanged(list.all)
-    let tracked = MeetingsListSnapshot(list: list, progress: progress)
-    #expect(
-      tracked.groups[1].meetings.first { $0.id == processing.id }?.preview == "Waiting to process")
 
     list.stateFilter = .failed
     list.selection = SampleData.meetingID
-    let filtered = MeetingsListSnapshot(list: list, progress: progress)
+    let filtered = MeetingsListSnapshot(list: list)
     #expect(filtered.filter == .failed)
     #expect(filtered.groups.map { $0.meetings.map(\.id) } == [[failed.id]])
     #expect(filtered.counts.all == 5, "counts ignore the filter")
@@ -413,5 +409,168 @@ private func request(_ id: String, _ method: String, _ params: Any = NSNull()) -
       host: confirming)
     #expect(confirmed.result?["confirmed"] == .bool(true))
     await eventually("the meeting left the store") { confirming.list.all.isEmpty }
+  }
+
+  /// `-steno-empty`: over a store without meetings, `page.ready` publishes
+  /// every topic (the list with no groups and no selection, the detail as
+  /// `null`, the app without the setup banner) and nothing traps. The first
+  /// meeting to arrive fills the list and selects itself, and flips the app
+  /// topic once so the banner shows; a later list change that keeps the
+  /// list filled leaves `app` alone.
+  @Test func anEmptyStorePublishesEveryTopicAndTheFirstMeetingFlipsTheApp() async throws {
+    let environment = try await TestSupport.environment(seed: false)
+    let host = bridge(environment)
+    let sink = RecordingSink()
+    host.attach(sink)
+    await host.controller.launch()
+    defer { Task { await host.controller.shutdown() } }
+    await eventually("settings observed") { host.controller.storedSettings != nil }
+    let running = Task { await host.run() }
+    defer { running.cancel() }
+
+    let ready = await BridgeDispatcher.dispatch(request("r1", "page.ready"), host: host)
+    #expect(ready == BridgeReply(id: "r1"))
+    #expect(Array(sink.events.prefix(5).map(\.topic)) == MainWindowBridge.topics)
+    #expect(sink.last(.meetingsList)?["groups"] == .array([]))
+    #expect(sink.last(.meetingsList)?["tags"] == .array([]))
+    #expect((sink.last(.meetingsList)?["selection"] ?? .null) == .null)
+    #expect(sink.last(.meetingDetail) == .null)
+    #expect((sink.last(.app)?["setupBanner"] ?? .null) == .null, "no banner over an empty store")
+    #expect(sink.last(.recording)?["state"] == .string("idle"))
+    #expect(host.detail == nil)
+    #expect(host.list.error == nil)
+
+    try await environment.store.save(SampleData.meeting())
+    await eventually("the first meeting listed and selected itself") {
+      sink.last(.meetingsList)?["selection"] == .string(SampleData.meetingID.uuidString)
+    }
+    await eventually("the app topic flipped and carries the banner") {
+      (sink.last(.app)?["setupBanner"] ?? .null) != .null
+    }
+    #expect(host.detail?.id == SampleData.meetingID)
+
+    let appPublishes = sink.events.filter { $0.topic == .app }.count
+    let filtered = await BridgeDispatcher.dispatch(
+      request("r2", "meetings.setFilter", ["filter": "failed"]), host: host)
+    #expect(filtered == BridgeReply(id: "r2"))
+    await eventually("the list republished") {
+      sink.last(.meetingsList)?["filter"] == .string("failed")
+    }
+    #expect(
+      sink.events.filter { $0.topic == .app }.count == appPublishes,
+      "a list change that keeps the list filled does not re-publish app")
+  }
+
+  /// Notes carry their meeting id. A save for the selected meeting goes
+  /// through its detail model and waits for the debounce; one for another
+  /// meeting (typed before the selection moved, saved after) is written to
+  /// that meeting at once and never touches the selection. A flush names
+  /// its meeting too, so another meeting's flush never writes the
+  /// selection's pending text; an unknown meeting is `notFound`.
+  @Test func notesLandOnTheMeetingTheyWereTypedFor() async throws {
+    let environment = try await TestSupport.environment(fixtures: .rich)
+    let host = bridge(environment)
+    let running = Task { await host.run() }
+    defer { running.cancel() }
+    await eventually("the newest meeting is selected") { host.detail?.id == SampleData.meetingID }
+    let other = try #require(host.list.all.first { $0.id != SampleData.meetingID })
+    let original = try #require(try await environment.store.meeting(id: SampleData.meetingID))
+
+    let late = await BridgeDispatcher.dispatch(
+      request(
+        "r1", "meeting.saveNotes", ["meetingID": other.id.uuidString, "text": "Late note"]),
+      host: host)
+    #expect(late == BridgeReply(id: "r1"))
+    #expect(try await environment.store.meeting(id: other.id)?.scratchpad == "Late note")
+    #expect(
+      try await environment.store.meeting(id: SampleData.meetingID)?.scratchpad
+        == original.scratchpad, "the selection's notes are untouched")
+
+    let mine = await BridgeDispatcher.dispatch(
+      request(
+        "r2", "meeting.saveNotes",
+        ["meetingID": SampleData.meetingID.uuidString, "text": "Mine"]),
+      host: host)
+    #expect(mine == BridgeReply(id: "r2"))
+    #expect(
+      try await environment.store.meeting(id: SampleData.meetingID)?.scratchpad
+        == original.scratchpad, "the selection's notes wait for the debounce")
+    let otherFlush = await BridgeDispatcher.dispatch(
+      request("r3", "meeting.flushNotes", ["meetingID": other.id.uuidString]), host: host)
+    #expect(otherFlush == BridgeReply(id: "r3"))
+    #expect(
+      try await environment.store.meeting(id: SampleData.meetingID)?.scratchpad
+        == original.scratchpad, "another meeting's flush leaves the selection's text pending")
+    let flush = await BridgeDispatcher.dispatch(
+      request("r4", "meeting.flushNotes", ["meetingID": SampleData.meetingID.uuidString]),
+      host: host)
+    #expect(flush == BridgeReply(id: "r4"))
+    #expect(try await environment.store.meeting(id: SampleData.meetingID)?.scratchpad == "Mine")
+    #expect(try await environment.store.meeting(id: other.id)?.scratchpad == "Late note")
+
+    let unknown = await BridgeDispatcher.dispatch(
+      request("r5", "meeting.saveNotes", ["meetingID": UUID().uuidString, "text": "x"]),
+      host: host)
+    #expect(unknown.error?.code == .notFound)
+  }
+
+  /// `meetings.select` for a meeting the list does not have yet (a deep link
+  /// racing the store) is no error and no selection: the id waits until
+  /// its row is listed, then becomes the selection with its detail model.
+  @Test func selectingAnUnlistedMeetingWaitsForItsRow() async throws {
+    let environment = try await TestSupport.environment()
+    let host = bridge(environment)
+    let running = Task { await host.run() }
+    defer { running.cancel() }
+    await eventually("the newest meeting is selected") { host.detail?.id == SampleData.meetingID }
+
+    var live = SampleData.meeting(state: .recording)
+    live.id = UUID()
+    live.title = "Just started"
+    live.startedAt = SampleData.startedAt.addingTimeInterval(3_600)
+    let reply = await BridgeDispatcher.dispatch(
+      request("r1", "meetings.select", ["meetingID": live.id.uuidString]), host: host)
+    #expect(reply == BridgeReply(id: "r1"))
+    #expect(host.list.selection == SampleData.meetingID, "nothing moves before the row exists")
+    #expect(host.detail?.id == SampleData.meetingID)
+
+    try await environment.store.save(live)
+    await eventually("the row arrived and was selected") { host.list.selection == live.id }
+    await eventually("its detail model follows") { host.detail?.id == live.id }
+  }
+
+  /// The page's "Clear filters" is three commands: `meetings.setFilter(all)`,
+  /// `meetings.setTagFilter(null)` and `meetings.setQuery("")` together show
+  /// every meeting again.
+  @Test func theThreeFilterSettersClearEveryFilter() async throws {
+    let host = bridge(try await TestSupport.environment(fixtures: .rich))
+    let running = Task { await host.run() }
+    defer { running.cancel() }
+    await eventually("five meetings") { host.list.all.count == 5 }
+
+    _ = await BridgeDispatcher.dispatch(
+      request("r1", "meetings.setFilter", ["filter": "failed"]), host: host)
+    _ = await BridgeDispatcher.dispatch(
+      request("r2", "meetings.setTagFilter", ["tag": "q4"]), host: host)
+    _ = await BridgeDispatcher.dispatch(
+      request("r3", "meetings.setQuery", ["query": "budget"]), host: host)
+    #expect(host.list.stateFilter == .failed)
+    #expect(host.list.tagFilter == "q4")
+    #expect(host.list.query == "budget")
+    #expect(host.list.meetings.count < 5)
+
+    let filter = await BridgeDispatcher.dispatch(
+      request("r4", "meetings.setFilter", ["filter": "all"]), host: host)
+    let tag = await BridgeDispatcher.dispatch(request("r5", "meetings.setTagFilter"), host: host)
+    let query = await BridgeDispatcher.dispatch(
+      request("r6", "meetings.setQuery", ["query": ""]), host: host)
+    #expect(filter == BridgeReply(id: "r4"))
+    #expect(tag == BridgeReply(id: "r5"))
+    #expect(query == BridgeReply(id: "r6"))
+    #expect(host.list.stateFilter == .all)
+    #expect(host.list.tagFilter == nil)
+    #expect(host.list.query == "")
+    #expect(host.list.searchHits == nil)
+    #expect(host.list.meetings.count == 5)
   }
 }

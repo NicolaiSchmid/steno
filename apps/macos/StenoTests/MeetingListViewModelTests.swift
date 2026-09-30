@@ -17,7 +17,6 @@ final class MeetingListViewModelTests: XCTestCase {
     defer { observing.cancel() }
     await TestSupport.waitUntil("two meetings") { model.meetings.count == 2 }
     XCTAssertEqual(model.meetings.first?.id, SampleData.meetingID, "newest first")
-    XCTAssertEqual(model.tags, ["ops", "q4", "strategie"])
 
     model.selection = SampleData.meetingID
     model.stateFilter = .failed
@@ -64,10 +63,8 @@ final class MeetingListViewModelTests: XCTestCase {
     XCTAssertEqual(model.meetings.count, 2, "a busy meeting stays")
 
     model.selection = SampleData.meetingID
-    model.pendingDeletion = model.all.first { $0.id == SampleData.meetingID }
     await model.delete(SampleData.meetingID)
     XCTAssertNil(model.error)
-    XCTAssertNil(model.pendingDeletion)
     await TestSupport.waitUntil("the meeting left the list") { model.meetings.count == 1 }
     XCTAssertNil(model.selection, "the deleted selection clears")
     let gone = try await environment.store.meeting(id: SampleData.meetingID)
@@ -135,9 +132,9 @@ final class MeetingListViewModelTests: XCTestCase {
   }
 
   /// The nav column's counts read every meeting regardless of the tag
-  /// filter; the column title follows the tag, then the state filter, and
-  /// "Clear filters" resets both.
-  func testCountsIgnoreTheTagFilterAndTheTitleFollowsIt() async throws {
+  /// filter; the page's "Clear filters" is the three setters back to their
+  /// defaults, and together they show every meeting again.
+  func testCountsIgnoreTheTagFilterAndTheSettersClearIt() async throws {
     let seeded = try await seedThreeDays()
     defer { seeded.observing.cancel() }
     let model = seeded.model
@@ -149,67 +146,15 @@ final class MeetingListViewModelTests: XCTestCase {
     model.tagFilter = "ops"
     XCTAssertEqual(model.meetings.map(\.id), [seeded.old.id])
     XCTAssertEqual(model.count(for: .ready), 2, "counts ignore the tag filter")
-    XCTAssertEqual(model.title, "#ops")
+    model.stateFilter = .ready
+    XCTAssertTrue(model.meetings.isEmpty, "the failed meeting is the only one tagged ops")
+    model.query = "nothing"
+
+    model.stateFilter = .all
     model.tagFilter = nil
-    XCTAssertEqual(model.title, "Meetings")
-    model.stateFilter = .failed
-    XCTAssertEqual(model.title, "Failed")
-    model.tagFilter = "ops"
-    XCTAssertEqual(model.title, "#ops", "the tag wins over the state filter")
-    model.clearFilters()
-    XCTAssertEqual(model.title, "Meetings")
+    model.query = ""
     XCTAssertEqual(model.meetings.count, 4)
-  }
-
-  /// The arrow keys walk the visible entries across the day boundary, stop
-  /// at the ends, and land on the first visible entry when the selection is
-  /// hidden by a filter.
-  func testArrowKeysWalkTheVisibleEntriesAcrossDays() async throws {
-    let seeded = try await seedThreeDays()
-    defer { seeded.observing.cancel() }
-    let model = seeded.model
-    let (late, eve, old) = (seeded.late, seeded.eve, seeded.old)
-
-    XCTAssertNil(model.selection)
-    model.selectNext()
-    XCTAssertEqual(model.selection, late.id, "nothing selected: the first entry")
-    model.selectNext()
-    XCTAssertEqual(model.selection, SampleData.meetingID)
-    model.selectNext()
-    XCTAssertEqual(model.selection, eve.id, "next crosses the day boundary")
-    model.selectNext()
-    XCTAssertEqual(model.selection, old.id)
-    model.selectNext()
-    XCTAssertEqual(model.selection, old.id, "the last entry stays")
-    model.selectPrevious()
-    XCTAssertEqual(model.selection, eve.id)
-    model.selectPrevious()
-    XCTAssertEqual(model.selection, SampleData.meetingID, "previous crosses the day boundary")
-    model.selectPrevious()
-    model.selectPrevious()
-    XCTAssertEqual(model.selection, late.id, "the first entry stays")
-
-    // A selection the filter hides: the next arrow lands on the first visible entry.
-    model.stateFilter = .failed
-    XCTAssertEqual(model.selection, late.id, "the filter never drops the selection")
-    model.selectNext()
-    XCTAssertEqual(model.selection, old.id)
-  }
-
-  /// A filter that shows nothing leaves a hidden selection alone: the
-  /// arrows have nowhere to go and must not clear the detail pane.
-  func testArrowKeysKeepTheSelectionWhenNothingIsVisible() async throws {
-    let seeded = try await seedThreeDays()
-    defer { seeded.observing.cancel() }
-    let model = seeded.model
-
-    model.selection = SampleData.meetingID
-    model.tagFilter = "nonexistent"
-    XCTAssertTrue(model.meetings.isEmpty)
-    model.selectNext()
-    XCTAssertEqual(model.selection, SampleData.meetingID)
-    model.selectPrevious()
-    XCTAssertEqual(model.selection, SampleData.meetingID, "an empty list never drops the selection")
+    XCTAssertNil(model.searchHits, "an empty query drops the search")
   }
 
   /// `AppController.requestedMeetingID` selects the live meeting right after

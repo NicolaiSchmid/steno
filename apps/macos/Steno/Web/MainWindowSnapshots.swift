@@ -183,8 +183,9 @@ extension BridgeListFilter {
 
 extension AppSnapshot {
   /// The setup banner shows while at least one meeting exists (`hasMeetings`
-  /// is the list's `all.isEmpty` negated), the configuration is incomplete
-  /// and "Not now" was not pressed this launch. `phone` stays nil: the
+  /// is the bridge's flag, flipped when the list empties or fills, so this
+  /// topic does not follow every list change), the configuration is
+  /// incomplete and "Not now" was not pressed this launch. `phone` stays nil: the
   /// handover service is an actor and its paired devices are an async
   /// query, which a synchronous snapshot cannot make; the iPhone card comes
   /// with the Settings bridge. Deep links are the controller's pending
@@ -281,9 +282,12 @@ extension ProgressSnapshot {
 extension MeetingsListSnapshot {
   /// The list column: the filters as set, the nav counts (every meeting,
   /// before the tag filter and the query), the tags with how many meetings
-  /// carry each, and the day groups in the model's calendar.
+  /// carry each, and the day groups in the model's calendar. Reads the list
+  /// model alone: a queued or processing row's stage comes from the
+  /// `progress` topic on the page, so a progress tick never re-publishes
+  /// the list.
   @MainActor
-  init(list: MeetingListViewModel, progress: ProcessingProgressModel) {
+  init(list: MeetingListViewModel) {
     var tagCounts: [String: Int] = [:]
     for meeting in list.all {
       for tag in meeting.tags { tagCounts[tag, default: 0] += 1 }
@@ -291,7 +295,7 @@ extension MeetingsListSnapshot {
     let groups = list.dayGroups.map { group in
       DayGroup(
         day: MainWindowSnapshots.dayString(group.day, calendar: list.calendar),
-        meetings: group.meetings.map { MeetingRow(meeting: $0, list: list, progress: progress) })
+        meetings: group.meetings.map { MeetingRow(meeting: $0, list: list) })
     }
     self.init(
       filter: BridgeListFilter(list.stateFilter), tagFilter: list.tagFilter, query: list.query,
@@ -305,16 +309,16 @@ extension MeetingsListSnapshot {
 
 extension MeetingRow {
   /// One entry: the display title (derived for the intake's default), the
-  /// preview as the first summary bullet, or the progress model's stage
-  /// title while the meeting is queued or processing, else nil; the
+  /// preview as the first summary bullet (nil while the meeting is queued or
+  /// processing: the page shows the stage from the `progress` topic), the
   /// speaker chips from the list's speaker map.
   @MainActor
-  init(meeting: Meeting, list: MeetingListViewModel, progress: ProcessingProgressModel) {
+  init(meeting: Meeting, list: MeetingListViewModel) {
     let bullets = meeting.summary?.sections.flatMap(\.bullets) ?? []
     let preview: String?
     switch meeting.state {
     case .queued, .processing:
-      preview = progress.entry(for: meeting.id)?.title
+      preview = nil
     case .recording, .ready, .failed:
       preview = bullets.first.map { $0.lead.isEmpty ? $0.text : "\($0.lead): \($0.text)" }
     }

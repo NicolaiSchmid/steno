@@ -11,10 +11,11 @@ import StenoCore
 /// recorder, progress model and setup state with observation tracking, and
 /// publishes one full snapshot per topic to the attached sink, coalesced to
 /// the next main-actor turn; `recording` at most 20 Hz. Commands map one to
-/// one onto the view models' public methods, so no rule lives here. The two
-/// destructive ones (`meetings.delete`, `meeting.deleteRecordingNow`) and a
-/// keep toggled off that would delete the recording now ask through
-/// `NSAlert` first, the one native surface the page cannot draw.
+/// one onto the view models' public methods, so no rule lives here. The
+/// destructive ones (`meetings.delete`, `meeting.deleteRecordingNow`, and
+/// `meeting.setKeepAudio` turning keep off when that deletes the recording
+/// now) ask through `NSAlert` first, the one native surface the page cannot
+/// draw, and reply whether the user confirmed; a decline changes nothing.
 @MainActor
 final class MainWindowBridge: BridgeHost {
   /// What the page asks the host to open: another window, or Settings on a
@@ -48,9 +49,14 @@ final class MainWindowBridge: BridgeHost {
   private var detailTasks: [Task<Void, Never>] = []
   private var lastRecordingPublish: ContinuousClock.Instant?
   private var recordingThrottle: Task<Void, Never>?
-  /// Whether the list has been non-empty before; the first fill selects
-  /// the newest meeting, as the window always did.
-  private var hadMeetings = false
+  /// Whether the list had meetings at its last flush. The `app` snapshot
+  /// reads this instead of `list.all`, so the app topic is re-published
+  /// when the list empties or fills and not with every list change; the
+  /// first fill also selects the newest meeting, as the window always did.
+  private var hasMeetings = false
+  /// `meetings.select` for a meeting the list does not have yet (a deep
+  /// link racing the store): kept until its row is listed, then selected.
+  private var pendingSelection: UUID?
 
   /// 20 Hz: the level meter's rate on the page.
   static let recordingInterval: Duration = .milliseconds(50)
@@ -114,14 +120,15 @@ final class MainWindowBridge: BridgeHost {
   /// Builds the topic's snapshot inside observation tracking, so the next
   /// change to anything it read schedules the next publish, and emits it
   /// once the page is ready. The list flush also owns the selection's side
-  /// effects (first fill, detail model swap); the app flush consumes the
+  /// effects (first fill, a selection waiting for its row, detail model
+  /// swap) and the `hasMeetings` flag; the app flush consumes the
   /// controller's meeting request after the snapshot has carried it once.
   private func flush(_ topic: BridgeTopic) {
     guard running else { return }
     pending.remove(topic)
     switch topic {
     case .meetingsList:
-      selectNewestOnFirstFill()
+      followListFill()
       syncDetail()
     case .meetingDetail:
       syncDetail()
@@ -151,18 +158,19 @@ final class MainWindowBridge: BridgeHost {
 
   /// The topic's snapshot from the view models as they stand; nil for a
   /// detail without an export yet, and for topics this window never
-  /// publishes.
+  /// publishes. Each reads only its own inputs: the `app` snapshot reads
+  /// the bridge's `hasMeetings`, not the list, and the list snapshot reads
+  /// the list model, not the progress model.
   private func snapshot(for topic: BridgeTopic) -> (any Encodable)? {
     switch topic {
     case .app:
-      return AppSnapshot(
-        controller: controller, appearance: appearance, hasMeetings: !list.all.isEmpty)
+      return AppSnapshot(controller: controller, appearance: appearance, hasMeetings: hasMeetings)
     case .recording:
       return RecordingSnapshot(recorder: controller.recorder)
     case .progress:
       return ProgressSnapshot(model: controller.progress)
     case .meetingsList:
-      return MeetingsListSnapshot(list: list, progress: controller.progress)
+      return MeetingsListSnapshot(list: list)
     case .meetingDetail:
       return detail.flatMap { MeetingDetailSnapshot(detail: $0) }
     default:
@@ -179,12 +187,23 @@ final class MainWindowBridge: BridgeHost {
     controller.requestedMeetingID = nil
   }
 
-  /// First fill of the list after the window opened: the newest meeting.
-  private func selectNewestOnFirstFill() {
-    let empty = list.all.isEmpty
-    defer { hadMeetings = !empty }
-    if !empty, !hadMeetings, list.selection == nil, let first = list.meetings.first {
+  /// The list flush's side effects, outside observation tracking: a
+  /// selection asked for ahead of its row is applied once the row is
+  /// listed, the first fill after the window opened selects the newest
+  /// meeting, and `hasMeetings` flips (re-publishing `app`) only when the
+  /// list empties or fills.
+  private func followListFill() {
+    let filled = !list.all.isEmpty
+    if let pending = pendingSelection, list.all.contains(where: { $0.id == pending }) {
+      pendingSelection = nil
+      list.selection = pending
+    }
+    if filled, !hasMeetings, list.selection == nil, let first = list.meetings.first {
       list.selection = first.id
+    }
+    if filled != hasMeetings {
+      hasMeetings = filled
+      schedule(.app)
     }
   }
 
@@ -238,8 +257,14 @@ final class MainWindowBridge: BridgeHost {
       list.query = try params(SetQueryParams.self, request).query
     case .meetingsSelect:
       let id = try params(MeetingIDParams.self, request).meetingID
-      guard list.all.contains(where: { $0.id == id }) else { throw Self.noSuchMeeting }
-      list.selection = id
+      if list.all.contains(where: { $0.id == id }) {
+        pendingSelection = nil
+        list.selection = id
+      } else {
+        // A deep link ahead of its row (a recording that just started, a
+        // meeting the phone is handing over): selected when the row lands.
+        pendingSelection = id
+      }
     case .meetingsDelete:
       let id = try params(MeetingIDParams.self, request).meetingID
       guard let meeting = list.all.first(where: { $0.id == id }) else { throw Self.noSuchMeeting }
@@ -292,12 +317,17 @@ final class MainWindowBridge: BridgeHost {
       await detail.setKeepAudio(false)
       return try reply(ConfirmReply(confirmed: true))
     case .meetingSaveNotes:
-      let text = try params(SaveNotesParams.self, request).text
-      let detail = try requireDetail()
-      detail.saveScratchpad(text)
+      let notes = try params(SaveNotesParams.self, request)
+      if let detail, detail.id == notes.meetingID {
+        detail.saveScratchpad(notes.text)
+      } else {
+        try await saveNotes(notes)
+      }
     case .meetingFlushNotes:
-      let detail = try requireDetail()
-      await detail.flushScratchpad()
+      let id = try params(MeetingIDParams.self, request).meetingID
+      // Another meeting's notes were written when they arrived, so only the
+      // selection's debounce can have anything to flush.
+      if let detail, detail.id == id { await detail.flushScratchpad() }
     case .meetingRevealRecording:
       let detail = try requireDetail()
       guard let url = detail.export?.audio?.url, detail.recordingFilesExist else {
@@ -389,6 +419,24 @@ final class MainWindowBridge: BridgeHost {
   private func requireDetail() throws -> MeetingDetailViewModel {
     guard let detail else { throw BridgeError(code: .notFound, message: "No meeting is selected.") }
     return detail
+  }
+
+  /// Notes for a meeting that is not the selection: typed before the
+  /// selection moved and saved after, they are written to that meeting at
+  /// once, so they never land on the meeting selected now. The debounce is
+  /// the detail model's; a late save is one write.
+  private func saveNotes(_ notes: SaveNotesParams) async throws {
+    let environment = controller.environment
+    do {
+      try await environment.store.update(meetingID: notes.meetingID, now: environment.now()) {
+        $0.scratchpad = notes.text
+      }
+    } catch let failure as MeetingStoreError {
+      if case .meetingNotFound = failure { throw Self.noSuchMeeting }
+      throw BridgeError(code: .failed, message: "Notes could not be saved: \(failure.description)")
+    } catch {
+      throw BridgeError(code: .failed, message: "Notes could not be saved: \(error)")
+    }
   }
 
   /// The method's params decoded into its contract type; a missing or

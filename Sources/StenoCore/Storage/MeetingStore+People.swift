@@ -28,6 +28,26 @@ extension MeetingStore {
     }
   }
 
+  /// The speakers of every meeting in `meetingIDs`, keyed by meeting, in one
+  /// read; a meeting without speakers has no key. Within a meeting the order
+  /// is `speakers(meetingID:)`'s. The meeting list reads its speaker chips
+  /// through this once per list update instead of once per row.
+  public func speakers(forMeetings meetingIDs: [UUID]) async throws -> [UUID: [Speaker]] {
+    guard !meetingIDs.isEmpty else { return [:] }
+    let keys = meetingIDs.map(\.uuidString)
+    return try await writer.read { db in
+      let speakers =
+        try SpeakerRow
+        .filter(keys.contains(SpeakerRow.Columns.meetingID))
+        .order(
+          SpeakerRow.Columns.meetingID, SpeakerRow.Columns.clusterLabel, SpeakerRow.Columns.id
+        )
+        .fetchAll(db)
+        .map(\.speaker)
+      return Dictionary(grouping: speakers, by: \.meetingID)
+    }
+  }
+
   public func save(_ speaker: Speaker) async throws {
     try await writer.write { db in try SpeakerRow(speaker).save(db) }
   }

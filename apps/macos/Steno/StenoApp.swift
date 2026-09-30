@@ -168,11 +168,17 @@ extension View {
   }
 }
 
-/// Applies `-steno-window WxH` to the main window once its `NSWindow`
-/// exists, and once more a second later: SwiftUI restores the frame a
-/// previous launch saved over `defaultSize`, and the smoke suite launches
-/// the app many times per run. Zero-sized, in the window content's
+/// Applies `-steno-window WxH` to the main window on the turn after its
+/// `NSWindow` exists, and once more a second later: SwiftUI restores the
+/// frame a previous launch saved over `defaultSize`, and the smoke suite
+/// launches the app many times per run. Zero-sized, in the window content's
 /// background under UI testing only; without the flag it does nothing.
+///
+/// Never on the window's own setup pass: `viewDidMoveToWindow` fires while
+/// SwiftUI is still installing the content (the web view among it), and a
+/// synchronous `setContentSize` there re-enters that layout before the
+/// window has shown. The frame changes on the next main-actor turn, as the
+/// floating panel's does.
 struct UITestWindowSizer: NSViewRepresentable {
   func makeNSView(context: Context) -> SizerView {
     SizerView(frame: .zero)
@@ -183,8 +189,8 @@ struct UITestWindowSizer: NSViewRepresentable {
   final class SizerView: NSView {
     override func viewDidMoveToWindow() {
       super.viewDidMoveToWindow()
-      UITestWindowSizer.apply(to: window)
       Task { @MainActor [weak self] in
+        UITestWindowSizer.apply(to: self?.window)
         try? await Task.sleep(for: .seconds(1))
         UITestWindowSizer.apply(to: self?.window)
       }

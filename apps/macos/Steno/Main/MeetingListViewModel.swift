@@ -4,8 +4,9 @@ import StenoCore
 /// The list column: every meeting from `observeMeetings()`, filtered by
 /// state, tag and an FTS query over `MeetingStore.search`, grouped by
 /// calendar day for the cards. The selection survives list updates and
-/// clears only when a meeting the list had is gone; `selectNext()` and
-/// `selectPrevious()` walk the groups for the arrow keys.
+/// clears only when a meeting the list had is gone. The page renders the
+/// model through `MeetingsListSnapshot`; its "Clear filters" is the three
+/// setters (`stateFilter`, `tagFilter`, `query`) back to their defaults.
 @MainActor
 @Observable
 final class MeetingListViewModel {
@@ -69,10 +70,11 @@ final class MeetingListViewModel {
   private(set) var searchHits: Set<UUID>?
   private(set) var error: String?
   /// The speakers of every listed meeting and the people they resolve to,
-  /// reloaded after each list update, for the rows' speaker chips. The
-  /// speaker table is not part of `observeMeetings()`, so a name confirmed
-  /// in the detail pane reaches the chips with the next meeting-table write
-  /// (the re-export the confirmation schedules), not at once.
+  /// reloaded in two reads after each list update, for the rows' speaker
+  /// chips. The speaker table is not part of `observeMeetings()`, so a name
+  /// confirmed in the detail pane reaches the chips with the next
+  /// meeting-table write (the re-export the confirmation schedules), not at
+  /// once.
   private(set) var speakersByMeeting: [UUID: [Speaker]] = [:]
   private(set) var personsByID: [UUID: Person] = [:]
   var query = "" {
@@ -118,51 +120,27 @@ final class MeetingListViewModel {
     }
   }
 
-  /// One pass over the listed meetings for their speakers, then the people;
-  /// a list update that lands mid-pass drops the pass and starts over, so
-  /// the map never mixes two lists.
+  /// One read for the speakers of every listed meeting and one for the
+  /// people, after each list update; an update that lands mid-pass drops
+  /// the pass and starts over, so the map never mixes two lists.
   private func reloadSpeakers() {
     speakersTask?.cancel()
     let ids = all.map(\.id)
     let store = self.store
     speakersTask = Task { [weak self] in
-      var byMeeting: [UUID: [Speaker]] = [:]
-      for id in ids {
-        guard !Task.isCancelled else { return }
-        if let speakers = try? await store.speakers(meetingID: id), !speakers.isEmpty {
-          byMeeting[id] = speakers
-        }
-      }
+      let speakers = (try? await store.speakers(forMeetings: ids)) ?? [:]
       let persons = (try? await store.persons()) ?? []
       guard let self, !Task.isCancelled else { return }
-      self.speakersByMeeting = byMeeting
+      self.speakersByMeeting = speakers
       self.personsByID = Dictionary(
         persons.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
     }
-  }
-
-  var tags: [String] {
-    Array(Set(all.flatMap(\.tags))).sorted()
   }
 
   /// How many of every meeting a filter row would show, before the tag
   /// filter and the query; the nav column's counts.
   func count(for filter: StateFilter) -> Int {
     all.filter { filter.matches($0) }.count
-  }
-
-  /// The list column's heading: the tag, else the state filter, else
-  /// "Meetings".
-  var title: String {
-    if let tagFilter { return "#\(tagFilter)" }
-    return stateFilter == .all ? "Meetings" : stateFilter.title
-  }
-
-  /// The "Clear filters" action of the no-match empty state.
-  func clearFilters() {
-    query = ""
-    stateFilter = .all
-    tagFilter = nil
   }
 
   /// The selected meeting, when it is still stored.
@@ -209,40 +187,7 @@ final class MeetingListViewModel {
     }
   }
 
-  // MARK: - Keyboard selection
-
-  /// The visible entries in reading order: the groups newest first, the
-  /// meetings inside each newest first.
-  private var visibleIDs: [UUID] {
-    dayGroups.flatMap { $0.meetings.map(\.id) }
-  }
-
-  /// Down arrow: the next visible entry, across day boundaries; the last
-  /// stays.
-  func selectNext() { moveSelection(by: 1) }
-
-  /// Up arrow: the previous visible entry, across day boundaries; the first
-  /// stays.
-  func selectPrevious() { moveSelection(by: -1) }
-
-  /// Both arrows land on the first visible entry when nothing visible is
-  /// selected, stay put at either end, and do nothing when the filter shows
-  /// no entry, so a hidden selection is never dropped.
-  private func moveSelection(by offset: Int) {
-    let ids = visibleIDs
-    guard let first = ids.first else { return }
-    guard let current = selection, let index = ids.firstIndex(of: current) else {
-      selection = first
-      return
-    }
-    let target = index + offset
-    if ids.indices.contains(target) { selection = ids[target] }
-  }
-
   // MARK: - Actions
-
-  /// The meeting the view is asking the user to confirm deleting.
-  var pendingDeletion: Meeting?
 
   /// The store refuses while the capture writer or the pipeline holds the
   /// meeting's files; the controls say so before the attempt.
@@ -258,7 +203,6 @@ final class MeetingListViewModel {
   /// refused and the reason shown. A deleted selection clears itself when
   /// the list updates.
   func delete(_ id: UUID) async {
-    pendingDeletion = nil
     do {
       try await store.delete(meetingID: id)
       error = nil

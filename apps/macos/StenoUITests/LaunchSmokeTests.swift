@@ -12,10 +12,11 @@ import XCTest
 ///
 /// The main window's content is the web UI (plan
 /// `2026-09-29-macos-webview-ui.md`, WP2). WebKit exposes HTML by role and
-/// label, not by identifier, so nothing inside the page is asserted here:
-/// Playwright and `WebShellTests` cover the page's states, and the main
-/// window tests below launch, wait for the web view and take the review
-/// screenshots. Identifiers on the SwiftUI surfaces are pinned, never copy.
+/// label, not by identifier, so the main window tests assert the two things
+/// it does expose, the web view element and the list column's "Meetings"
+/// heading by its text, and take the review screenshots; Playwright and
+/// `WebShellTests` cover the page's states. Identifiers on the SwiftUI
+/// surfaces are pinned, never copy.
 @MainActor
 final class LaunchSmokeTests: XCTestCase {
   /// The app under test, launched in UTC with `arguments`.
@@ -33,31 +34,48 @@ final class LaunchSmokeTests: XCTestCase {
     app.windows.firstMatch
   }
 
-  /// Gives the page a moment to paint. WebKit exposes the page to XCUITest
-  /// by role and label at best, and not reliably before first paint, so the
-  /// web view's presence is recorded, not asserted; the screenshots are the
-  /// evidence for the page.
-  private func waitForPage(in app: XCUIApplication) {
-    let webView = app.webViews.firstMatch
-    XCTContext.runActivity(named: "web view") { activity in
-      let found = webView.waitForExistence(timeout: 10)
-      activity.add(XCTAttachment(string: found ? "web view found" : "no web view element"))
+  /// Waits for the main window. When none appears the app's state is
+  /// attached beside XCTest's own hierarchy dump, since a window that never
+  /// shows leaves no other trace in the result bundle.
+  private func requireMainWindow(in app: XCUIApplication) {
+    if mainWindow(in: app).waitForExistence(timeout: 10) { return }
+    XCTContext.runActivity(named: "no main window") { activity in
+      let note = XCTAttachment(
+        string: "app state \(app.state.rawValue); windows \(app.windows.count)")
+      note.name = "no-main-window"
+      note.lifetime = .keepAlways
+      activity.add(note)
     }
-    RunLoop.current.run(until: Date().addingTimeInterval(2))
+    XCTFail("no main window appeared")
   }
 
-  /// Launches with `arguments` and waits for the main window.
+  /// The page, through the two things WebKit exposes to XCUITest: the web
+  /// view element and the page's text by label, here the list column's
+  /// "Meetings" heading. WebKit's processes start slowly on a hosted runner,
+  /// hence the long waits; a further moment lets the paint settle before a
+  /// screenshot.
+  private func waitForPage(in app: XCUIApplication) {
+    XCTAssertTrue(
+      app.webViews.firstMatch.waitForExistence(timeout: 20), "no web view in the main window")
+    XCTAssertTrue(
+      app.staticTexts["Meetings"].firstMatch.waitForExistence(timeout: 20),
+      "the page did not render its Meetings heading")
+    RunLoop.current.run(until: Date().addingTimeInterval(1))
+  }
+
+  /// Launches with `arguments` and waits for the main window and its page.
   @discardableResult
   private func launchMainWindow(_ arguments: [String]) -> XCUIApplication {
     let app = launch(arguments)
     XCTAssertEqual(app.state, .runningForeground)
-    XCTAssertTrue(mainWindow(in: app).waitForExistence(timeout: 10), "no window appeared")
+    requireMainWindow(in: app)
     waitForPage(in: app)
     return app
   }
 
-  /// The main window launches in the UI-testing environment and hosts the
-  /// web view; everything inside it is the web tests' business.
+  /// The main window launches in the UI-testing environment, hosts the web
+  /// view and the page renders its list heading; everything else inside it
+  /// is the web tests' business.
   func testMainWindowOpens() throws {
     launchMainWindow(["-steno-ui-testing"])
   }
@@ -240,8 +258,9 @@ final class LaunchSmokeTests: XCTestCase {
   /// empty, with the rich seed (the page selects the newest meeting), and
   /// recording; onboarding page 1 and page 2; Settings on the Recording
   /// section, opened with ⌘, and deep-linked by `-steno-settings-section`.
-  /// The main window states wait for the web view only; what the page
-  /// renders is the web tests' evidence. The Settings state checks that the
+  /// The main window states wait for the web view and the page's list
+  /// heading; the rest of what the page renders is the web tests' evidence.
+  /// The Settings state checks that the
   /// header and the sidebar row land inside the Settings window, since a
   /// split view that overflows its window still has both in the hierarchy.
   /// 960 x 600 fits the runner's 1024 x 768 display, as does the 760 x 520
@@ -272,9 +291,9 @@ final class LaunchSmokeTests: XCTestCase {
         attachScreenshot(named: "\(window)-\(appearance)-\(state).png")
       }
     }
-    /// The main window, plus a moment for the page's first paint.
+    /// The main window and its page.
     func mainReady(_ app: XCUIApplication) {
-      XCTAssertTrue(mainWindow(in: app).waitForExistence(timeout: 10), "no main window")
+      requireMainWindow(in: app)
       waitForPage(in: app)
     }
 
