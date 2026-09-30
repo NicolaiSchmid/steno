@@ -142,11 +142,11 @@ final class LaunchSmokeTests: XCTestCase {
       app.typeKey("w", modifierFlags: .command)
     }
     XCTAssertTrue(
-      waitUntil(timeout: 10) { !mainWebView(in: app).exists }, "the main window did not close")
+      waitUntil(timeout: 10) { !mainWindow(in: app).exists }, "the main window did not close")
 
     app.buttons["bubble-open"].firstMatch.click()
     XCTAssertTrue(
-      mainWebView(in: app).waitForExistence(timeout: 10),
+      mainWindow(in: app).waitForExistence(timeout: 10),
       "the bubble did not bring the main window back")
 
     stop.click()
