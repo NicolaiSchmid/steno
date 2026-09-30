@@ -1,0 +1,33 @@
+{
+  "audioFolderName" : "audio",
+  "audioFolderPath" : "/Users/nicolai/Library/Application Support/Steno/audio",
+  "devices" : [
+    {
+      "name" : "MacBook Pro Microphone",
+      "uid" : "BuiltInMicrophoneDevice"
+    },
+    {
+      "name" : "Nicolai's AirPods Pro",
+      "uid" : "AirPodsPro"
+    }
+  ],
+  "folderUsageBytes" : 734003200,
+  "keptForeverCount" : 2,
+  "permissions" : [
+    {
+      "isRequesting" : false,
+      "kind" : "microphone",
+      "state" : "granted"
+    },
+    {
+      "isRequesting" : false,
+      "kind" : "systemAudio",
+      "state" : "granted"
+    }
+  ],
+  "retention" : {
+    "days" : 30,
+    "mode" : "keepDays"
+  },
+  "subtitle" : "Ready"
+}

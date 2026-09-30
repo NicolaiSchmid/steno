@@ -1,0 +1,12 @@
+{
+  "id" : "req-1",
+  "method" : "speakers.select",
+  "params" : {
+    "option" : {
+      "kind" : "person",
+      "label" : "Anna",
+      "personID" : "00000000-0000-0000-0000-000000000012"
+    },
+    "speakerID" : "00000000-0000-0000-0000-000000000023"
+  }
+}

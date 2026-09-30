@@ -1,0 +1,104 @@
+{
+  "counts" : {
+    "all" : 3,
+    "failed" : 1,
+    "processing" : 0,
+    "ready" : 2
+  },
+  "filter" : "all",
+  "groups" : [
+    {
+      "day" : "2026-09-29",
+      "meetings" : [
+        {
+          "durationSeconds" : 2738,
+          "hasSummary" : true,
+          "id" : "00000000-0000-0000-0000-000000000001",
+          "preview" : "Nicolai schlägt vor, 90 Prozent auf den Kern zu setzen. Jérôme prüft die Zahlen bis Freitag.",
+          "source" : "call",
+          "speakers" : [
+            {
+              "colorIndex" : 0,
+              "id" : "00000000-0000-0000-0000-000000000020",
+              "initial" : "N",
+              "isConfirmed" : true
+            },
+            {
+              "colorIndex" : 1,
+              "id" : "00000000-0000-0000-0000-000000000021",
+              "initial" : "J",
+              "isConfirmed" : true
+            },
+            {
+              "colorIndex" : 2,
+              "id" : "00000000-0000-0000-0000-000000000022",
+              "initial" : "A",
+              "isConfirmed" : true
+            },
+            {
+              "colorIndex" : 3,
+              "id" : "00000000-0000-0000-0000-000000000023",
+              "initial" : "?",
+              "isConfirmed" : false
+            }
+          ],
+          "startedAt" : "2026-09-29T12:50:00.000Z",
+          "state" : "ready",
+          "tags" : [
+            "strategie",
+            "q4"
+          ],
+          "title" : "Produktstrategie 90/10"
+        },
+        {
+          "durationSeconds" : 2291,
+          "hasSummary" : false,
+          "id" : "00000000-0000-0000-0000-000000000003",
+          "source" : "inPerson",
+          "speakers" : [
+
+          ],
+          "startedAt" : "2026-09-29T08:06:40.000Z",
+          "state" : "ready",
+          "tags" : [
+
+          ],
+          "title" : "Tuesday 10:08"
+        }
+      ]
+    },
+    {
+      "day" : "2026-09-28",
+      "meetings" : [
+        {
+          "durationSeconds" : 1650,
+          "failureReason" : "Transcription failed: model not installed",
+          "hasSummary" : false,
+          "id" : "00000000-0000-0000-0000-000000000068",
+          "source" : "call",
+          "speakers" : [
+
+          ],
+          "startedAt" : "2026-09-28T13:46:40.000Z",
+          "state" : "failed",
+          "tags" : [
+            "investors"
+          ],
+          "title" : "Investor update prep"
+        }
+      ]
+    }
+  ],
+  "query" : "",
+  "selection" : "00000000-0000-0000-0000-000000000001",
+  "tags" : [
+    {
+      "count" : 1,
+      "name" : "strategie"
+    },
+    {
+      "count" : 1,
+      "name" : "q4"
+    }
+  ]
+}

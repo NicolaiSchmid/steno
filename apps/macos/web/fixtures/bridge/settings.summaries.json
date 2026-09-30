@@ -1,0 +1,34 @@
+{
+  "baseURL" : "http://127.0.0.1:1234/v1",
+  "contextTokens" : "32000",
+  "hasAPIKey" : false,
+  "isConfigured" : false,
+  "isTesting" : false,
+  "model" : "",
+  "presetID" : "lmStudio",
+  "presets" : [
+    {
+      "id" : "lmStudio",
+      "modelPlaceholder" : "the model loaded in LM Studio",
+      "needsAPIKey" : false,
+      "showsServerField" : true,
+      "title" : "LM Studio on this Mac"
+    },
+    {
+      "id" : "codex",
+      "modelPlaceholder" : "pick a model",
+      "needsAPIKey" : false,
+      "showsServerField" : false,
+      "title" : "ChatGPT (Codex)"
+    },
+    {
+      "id" : "openAI",
+      "modelPlaceholder" : "gpt-4.1-mini",
+      "needsAPIKey" : true,
+      "showsServerField" : false,
+      "title" : "OpenAI"
+    }
+  ],
+  "subtitle" : "Not set up",
+  "validationMessage" : "Choose a service and enter a model name; summaries stay off until then."
+}

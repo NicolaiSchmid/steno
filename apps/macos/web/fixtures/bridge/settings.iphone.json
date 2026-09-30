@@ -1,0 +1,19 @@
+{
+  "devices" : [
+    {
+      "id" : "00000000-0000-0000-0000-000000000040",
+      "lastSeenAt" : "2026-09-29T12:48:00.000Z",
+      "name" : "Nicolai's iPhone",
+      "pairedAt" : "2026-09-24T12:50:00.000Z"
+    }
+  ],
+  "listener" : {
+    "port" : 52431,
+    "state" : "listening"
+  },
+  "macID" : "steno-mac-7f3a",
+  "receipts" : [
+
+  ],
+  "subtitle" : "Nicolai's iPhone"
+}

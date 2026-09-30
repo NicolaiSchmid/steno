@@ -1,0 +1,11 @@
+{
+  "entries" : [
+    {
+      "estimatedRemainingSeconds" : 95,
+      "fraction" : 0.62,
+      "meetingID" : "00000000-0000-0000-0000-000000000002",
+      "stage" : "transcribing",
+      "title" : "Transcribing"
+    }
+  ]
+}

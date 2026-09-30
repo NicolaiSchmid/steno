@@ -1,0 +1,15 @@
+{
+  "appearance" : "light",
+  "phone" : {
+    "isReachable" : true,
+    "lastSyncAt" : "2026-09-29T12:48:00.000Z",
+    "name" : "Nicolai's iPhone"
+  },
+  "setupBanner" : {
+    "body" : "Choose an AI service and Steno writes a summary and tasks for every meeting. Only the transcript text is sent.",
+    "offersSummaries" : true,
+    "offersVault" : true,
+    "title" : "Summaries are off."
+  },
+  "version" : "0.10.0"
+}

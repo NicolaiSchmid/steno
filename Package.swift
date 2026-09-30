@@ -17,6 +17,7 @@ let package = Package(
     .library(name: "StenoLLM", targets: ["StenoLLM"]),
     .library(name: "StenoAdapters", targets: ["StenoAdapters"]),
     .library(name: "StenoHandover", targets: ["StenoHandover"]),
+    .library(name: "StenoBridge", targets: ["StenoBridge"]),
     .executable(name: "steno", targets: ["steno"]),
   ],
   dependencies: [
@@ -56,6 +57,9 @@ let package = Package(
       ]
     ),
     .target(name: "StenoLLM", dependencies: ["StenoCore"]),
+    // The JSON contract with the web UI; pure Foundation so it builds and
+    // tests on Linux (.plans/2026-09-29-macos-webview-ui.md, Decision 5).
+    .target(name: "StenoBridge", dependencies: ["StenoCore"]),
     .target(name: "StenoAdapters", dependencies: ["StenoCore"]),
     .target(
       name: "StenoHandover",
@@ -86,6 +90,7 @@ let package = Package(
     .testTarget(name: "StenoAudioTests", dependencies: ["StenoAudio"]),
     .testTarget(name: "StenoSpeechTests", dependencies: ["StenoSpeech"]),
     .testTarget(name: "StenoLLMTests", dependencies: ["StenoLLM"]),
+    .testTarget(name: "StenoBridgeTests", dependencies: ["StenoBridge"]),
     // GRDB only to corrupt a settings row in the coordinator tests.
     .testTarget(
       name: "StenoAdaptersTests",

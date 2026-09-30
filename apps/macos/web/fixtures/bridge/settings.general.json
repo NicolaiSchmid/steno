@@ -1,0 +1,26 @@
+{
+  "calendarPermission" : "granted",
+  "defaultTemplateID" : "default",
+  "detectionEnabled" : true,
+  "loginItem" : "enabled",
+  "requestingCalendar" : false,
+  "subtitle" : "Steno 0.10.0",
+  "templates" : [
+    {
+      "id" : "default",
+      "name" : "Meeting notes"
+    },
+    {
+      "id" : "standup",
+      "name" : "Standup"
+    }
+  ],
+  "updates" : {
+    "automaticallyChecks" : true,
+    "automaticallyDownloads" : false,
+    "canCheck" : true,
+    "lastCheckAt" : "2026-09-29T11:50:00.000Z",
+    "outcome" : "upToDate"
+  },
+  "version" : "0.10.0"
+}

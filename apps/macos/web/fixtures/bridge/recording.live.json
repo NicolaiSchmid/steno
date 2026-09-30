@@ -1,0 +1,19 @@
+{
+  "autoStop" : {
+    "reason" : "Zoom closed",
+    "remainingSeconds" : 42,
+    "totalSeconds" : 60
+  },
+  "callApp" : "Zoom",
+  "deniedPermissions" : [
+
+  ],
+  "level" : {
+    "mic" : 0.42,
+    "system" : 0.18
+  },
+  "meetingID" : "00000000-0000-0000-0000-000000000001",
+  "mode" : "call",
+  "startedAt" : "2026-09-29T12:50:00.000Z",
+  "state" : "recording"
+}

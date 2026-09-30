@@ -1,0 +1,42 @@
+{
+  "canSaveSummaries" : false,
+  "finished" : false,
+  "page" : "permissions",
+  "permissions" : [
+    {
+      "isRequesting" : false,
+      "isSkipped" : false,
+      "kind" : "microphone",
+      "state" : "granted"
+    },
+    {
+      "isRequesting" : true,
+      "isSkipped" : false,
+      "kind" : "systemAudio",
+      "state" : "unknown"
+    },
+    {
+      "isRequesting" : false,
+      "isSkipped" : false,
+      "kind" : "calendar",
+      "state" : "unknown"
+    },
+    {
+      "isRequesting" : false,
+      "isSkipped" : true,
+      "kind" : "localNetwork",
+      "state" : "unknown"
+    }
+  ],
+  "retentionSentence" : "Recordings are deleted 30 days after the meeting.",
+  "setup" : [
+    {
+      "kind" : "summaries",
+      "state" : "open"
+    },
+    {
+      "kind" : "vault",
+      "state" : "open"
+    }
+  ]
+}

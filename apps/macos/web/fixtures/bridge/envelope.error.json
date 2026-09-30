@@ -1,0 +1,7 @@
+{
+  "error" : {
+    "code" : "notFound",
+    "message" : "No meeting with that id."
+  },
+  "id" : "req-2"
+}

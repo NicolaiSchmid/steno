@@ -1,0 +1,9 @@
+{
+  "payload" : {
+    "deniedPermissions" : [
+
+    ],
+    "state" : "idle"
+  },
+  "topic" : "recording"
+}
