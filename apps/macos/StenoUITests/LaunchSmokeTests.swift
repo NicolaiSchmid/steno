@@ -19,8 +19,16 @@ import XCTest
 /// surfaces are pinned, never copy.
 @MainActor
 final class LaunchSmokeTests: XCTestCase {
-  /// The app under test, launched in UTC with `arguments`.
+  /// The app under test, launched in UTC with `arguments`. Every argument
+  /// is a `-steno-*` flag with any value in the same token
+  /// (`-steno-window=960x600`): AppKit pairs dash-prefixed arguments blindly
+  /// at launch and opens whatever is left over as a document, after which
+  /// SwiftUI leaves the primary window closed, so a value in its own token
+  /// is refused here rather than found as a missing window.
   private func launch(_ arguments: [String]) -> XCUIApplication {
+    for argument in arguments where !argument.hasPrefix("-steno-") {
+      XCTFail("\(argument) is not a flag; write the value into the flag's own argument")
+    }
     let app = XCUIApplication()
     app.launchArguments = arguments
     app.launchEnvironment["TZ"] = "UTC"
@@ -81,7 +89,6 @@ final class LaunchSmokeTests: XCTestCase {
     XCTAssertEqual(app.state, .runningForeground)
     requireMainWindow(in: app)
     waitForPage(in: app)
-    attachLaunchLog(named: "launch-log", state: app)
     return app
   }
 
@@ -90,43 +97,6 @@ final class LaunchSmokeTests: XCTestCase {
   /// is the web tests' business.
   func testMainWindowOpens() throws {
     launchMainWindow(["-steno-ui-testing"])
-  }
-
-  /// The screenshot matrix adds three flags to the plain launch; each on
-  /// its own, so a window that fails to appear names the flag responsible.
-  func testMainWindowOpensOverAnEmptyStore() throws {
-    launchMainWindow(["-steno-ui-testing", "-steno-empty"])
-  }
-
-  func testMainWindowOpensAtTheRequestedSize() throws {
-    launchMainWindow(["-steno-ui-testing", "-steno-window", "960x600"])
-  }
-
-  func testMainWindowOpensInDarkAppearance() throws {
-    launchMainWindow(["-steno-ui-testing", "-steno-appearance", "dark"])
-  }
-
-  /// A bare token the scenario ignores: if this launch shows no window,
-  /// AppKit is treating flag values as documents to open.
-  func testMainWindowOpensWithABareArgument() throws {
-    launchMainWindow(["-steno-ui-testing", "bare"])
-  }
-
-  /// The size flag first, so its value is consumed by Foundation's argument
-  /// parsing and nothing is left over.
-  func testMainWindowOpensAtTheRequestedSizeFlagFirst() throws {
-    launchMainWindow(["-steno-window", "960x600", "-steno-ui-testing"])
-  }
-
-  /// A value for the UI-testing flag, so the size flag's own value pairs
-  /// with it and nothing is left over.
-  func testMainWindowOpensAtTheRequestedSizeWithPairedFlags() throws {
-    launchMainWindow(["-steno-ui-testing", "1", "-steno-window", "960x600"])
-  }
-
-  /// A genuine leftover token after two valueless flags.
-  func testMainWindowOpensWithALeftoverToken() throws {
-    launchMainWindow(["-steno-ui-testing", "-steno-empty", "leftover"])
   }
 
   /// The floating panel: launched with `-steno-show-prompt`, the detection
@@ -301,7 +271,7 @@ final class LaunchSmokeTests: XCTestCase {
   }
 
   /// One launch per window state under `-steno-appearance` and
-  /// `-steno-window 960x600`, each attached with `.keepAlways` as
+  /// `-steno-window=960x600`, each attached with `.keepAlways` as
   /// `<window>-<appearance>-<state>.png`, so `xcrun xcresulttool export
   /// attachments` on the CI bundle yields the review set: the main window
   /// empty, with the rich seed (the page selects the newest meeting), and
@@ -318,7 +288,7 @@ final class LaunchSmokeTests: XCTestCase {
     /// Launches under the matrix flags plus `arguments`.
     func launched(_ arguments: [String]) -> XCUIApplication {
       launch(
-        ["-steno-ui-testing", "-steno-appearance", appearance, "-steno-window", "960x600"]
+        ["-steno-ui-testing", "-steno-appearance=\(appearance)", "-steno-window=960x600"]
           + arguments)
     }
     /// Runs `ready` on `app`, waits for the main window to be 960 wide, then
@@ -378,7 +348,7 @@ final class LaunchSmokeTests: XCTestCase {
 
     // The section comes from the scenario's deep link, applied when the
     // Settings scene opens; ⌘, opens it as `AppCommands` does.
-    capture("settings", "recording", in: launched(["-steno-settings-section", "recording"])) {
+    capture("settings", "recording", in: launched(["-steno-settings-section=recording"])) {
       app in
       mainReady(app)
       app.typeKey(",", modifierFlags: .command)

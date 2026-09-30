@@ -16,9 +16,8 @@ struct StenoApp: App {
     Task { @MainActor in await bootstrap.load() }
   }
 
-  /// 1120 x 720, or `-steno-window WxH` under UI testing.
+  /// 1120 x 720, or `-steno-window=WxH` under UI testing.
   @MainActor private static var mainWindowSize: CGSize {
-    UITestDiagnostics.note("scene: main window size read")
     if AppBootstrap.isUITesting, let size = AppBootstrap.scenario.windowSize {
       return CGSize(width: size.width, height: size.height)
     }
@@ -173,7 +172,7 @@ extension View {
   }
 }
 
-/// Applies `-steno-window WxH` to the main window on the turn after its
+/// Applies `-steno-window=WxH` to the main window on the turn after its
 /// `NSWindow` exists, and once more a second later: SwiftUI restores the
 /// frame a previous launch saved over `defaultSize`, and the smoke suite
 /// launches the app many times per run. Zero-sized, in the window content's
@@ -222,12 +221,6 @@ struct UITestWindowSizer: NSViewRepresentable {
 struct RootView<Content: View>: View {
   let bootstrap: AppBootstrap
   @ViewBuilder let content: (AppController) -> Content
-
-  init(bootstrap: AppBootstrap, @ViewBuilder content: @escaping (AppController) -> Content) {
-    self.bootstrap = bootstrap
-    self.content = content
-    UITestDiagnostics.note("root view: created")
-  }
 
   var body: some View {
     let _ = UITestDiagnostics.note(
@@ -386,7 +379,7 @@ struct AppCommands: Commands {
 
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
-  /// `-steno-appearance light|dark`: the whole app renders in that
+  /// `-steno-appearance=light|dark`: the whole app renders in that
   /// appearance whatever the runner's system setting, so the smoke test can
   /// screenshot both.
   func applicationWillFinishLaunching(_ notification: Notification) {
@@ -399,36 +392,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     UITestDiagnostics.note("appearance \(appearance.rawValue)")
   }
 
-  /// Bare launch arguments (a flag's value such as `960x600`) reach AppKit as
-  /// documents to open; logged so the smoke suite can see it happen.
-  func application(_ application: NSApplication, open urls: [URL]) {
-    UITestDiagnostics.note("open urls: \(urls.map(\.absoluteString))")
-  }
-
-  func application(_ sender: NSApplication, openFile filename: String) -> Bool {
-    UITestDiagnostics.note("open file: \(filename)")
-    return true
-  }
-
-  func application(_ sender: NSApplication, openFiles filenames: [String]) {
-    UITestDiagnostics.note("open files: \(filenames)")
-  }
-
-  /// AppKit asks this before it opens the untitled document, the path on
-  /// which SwiftUI shows the primary `Window` at launch; logged so the
-  /// smoke suite can see whether the question is asked.
-  func applicationShouldOpenUntitledFile(_ sender: NSApplication) -> Bool {
-    UITestDiagnostics.note("should open untitled file asked; \(Self.windowSummary())")
-    return true
-  }
-
   func applicationDidFinishLaunching(_ notification: Notification) {
-    UITestDiagnostics.note(
-      "arguments \(CommandLine.arguments.dropFirst()); scenario window \(String(describing: AppBootstrap.scenario.windowSize)) appearance \(String(describing: AppBootstrap.scenario.appearance)) invalid \(AppBootstrap.scenario.invalidValues) unknown \(AppBootstrap.scenario.unknownFlags)"
-    )
-    UITestDiagnostics.note(
-      "argument domain \(UserDefaults.standard.volatileDomain(forName: UserDefaults.argumentDomain))"
-    )
+    UITestDiagnostics.note("arguments \(CommandLine.arguments.dropFirst())")
     UITestDiagnostics.note("did finish launching; \(Self.windowSummary())")
     guard AppBootstrap.isUITesting else { return }
     Task { @MainActor in

@@ -2,7 +2,11 @@ import Foundation
 
 /// The launch arguments the UI smoke tests pass, parsed once. Every flag
 /// starts with `-steno-`; an unknown one is reported, so a typo in the smoke
-/// suite is not a silent no-op.
+/// suite is not a silent no-op. A flag that takes a value carries it in the
+/// same argument, `-steno-window=960x600`, never in the next one: AppKit
+/// pairs dash-prefixed arguments blindly at launch and opens whatever is
+/// left over as a document, after which SwiftUI leaves the primary window
+/// closed. A value in its own argument is therefore reported as missing.
 struct UITestScenario: Equatable, Sendable {
   static let prefix = "-steno-"
   static let uiTestingFlag = "-steno-ui-testing"
@@ -22,14 +26,14 @@ struct UITestScenario: Equatable, Sendable {
   /// main-actor isolated, so the literal is repeated here and a test pins
   /// the two equal); named here so it is known.
   static let holdTranscribeFlag = "-steno-ui-testing-hold-transcribe"
-  /// Takes a value, `light` or `dark`: `AppDelegate` sets `NSApp.appearance`
+  /// `-steno-appearance=light|dark`: `AppDelegate` sets `NSApp.appearance`
   /// to it at launch, so the smoke test can screenshot both appearances on
   /// the hosted runner, which is light.
   static let appearanceFlag = "-steno-appearance"
-  /// Takes a value, `WxH` in points (`960x600`): the main window's size at
+  /// `-steno-window=WxH` in points (`960x600`): the main window's size at
   /// launch, applied over SwiftUI's `defaultSize` and its restored frame.
   static let windowFlag = "-steno-window"
-  /// Takes a value, a `SettingsSection` raw value (`recording`): the section
+  /// `-steno-settings-section=<rawValue>` (`recording`): the section
   /// Settings opens on, through `AppController.requestedSettingsSection`,
   /// the deep link the setup banner uses. The smoke test cannot click a
   /// sidebar row: the rows' accessibility frames sit off the rendered rows.
@@ -38,6 +42,8 @@ struct UITestScenario: Equatable, Sendable {
     uiTestingFlag, showPromptFlag, emptyFlag, richSeedFlag, startRecordingFlag,
     showOnboardingFlag, holdTranscribeFlag, appearanceFlag, windowFlag, settingsSectionFlag,
   ]
+  /// The flags that take a `=value`; every other known flag takes none.
+  static let valuedFlags: Set<String> = [appearanceFlag, windowFlag, settingsSectionFlag]
 
   enum Appearance: String, Sendable {
     case light
@@ -77,30 +83,37 @@ struct UITestScenario: Equatable, Sendable {
 
   init(arguments: [String]) {
     let flags = arguments.filter { $0.hasPrefix(Self.prefix) }
+    let names = flags.map(Self.name(of:))
     var invalid: [String] = []
-    appearance = Self.value(of: Self.appearanceFlag, in: arguments, invalid: &invalid) {
+    appearance = Self.value(of: Self.appearanceFlag, in: flags, invalid: &invalid) {
       Appearance(rawValue: $0)
     }
-    windowSize = Self.value(of: Self.windowFlag, in: arguments, invalid: &invalid) {
+    windowSize = Self.value(of: Self.windowFlag, in: flags, invalid: &invalid) {
       WindowSize($0)
     }
-    settingsSection = Self.value(of: Self.settingsSectionFlag, in: arguments, invalid: &invalid) {
+    settingsSection = Self.value(of: Self.settingsSectionFlag, in: flags, invalid: &invalid) {
       SettingsSection(rawValue: $0)
     }
+    for flag in flags where flag.contains("=") {
+      let name = Self.name(of: flag)
+      if Self.knownFlags.contains(name), !Self.valuedFlags.contains(name) {
+        invalid.append("\(name) takes no value")
+      }
+    }
     invalidValues = invalid
-    isUITesting = flags.contains(Self.uiTestingFlag)
-    showPrompt = flags.contains(Self.showPromptFlag)
-    if flags.contains(Self.emptyFlag) {
+    isUITesting = names.contains(Self.uiTestingFlag)
+    showPrompt = names.contains(Self.showPromptFlag)
+    if names.contains(Self.emptyFlag) {
       seed = nil
-    } else if flags.contains(Self.richSeedFlag) {
+    } else if names.contains(Self.richSeedFlag) {
       seed = .rich
     } else {
       seed = .sample
     }
-    startsRecording = flags.contains(Self.startRecordingFlag)
-    showsOnboarding = flags.contains(Self.showOnboardingFlag)
-    holdTranscribe = flags.contains(Self.holdTranscribeFlag)
-    unknownFlags = flags.filter { !Self.knownFlags.contains($0) }
+    startsRecording = names.contains(Self.startRecordingFlag)
+    showsOnboarding = names.contains(Self.showOnboardingFlag)
+    holdTranscribe = names.contains(Self.holdTranscribeFlag)
+    unknownFlags = names.filter { !Self.knownFlags.contains($0) }
   }
 
   /// Under `-steno-ui-testing`, the message `AppBootstrap` shows instead of
@@ -119,21 +132,27 @@ struct UITestScenario: Equatable, Sendable {
     return lines.isEmpty ? nil : lines.joined(separator: "\n")
   }
 
-  /// The parsed argument after the first `flag`; nil when `flag` is absent.
-  /// A `flag` without a value (followed by another flag, or by nothing) or
-  /// with one `parse` rejects is recorded in `invalid` as `"<flag> <value>"`.
+  /// The part of `argument` before its first `=`: the flag itself.
+  static func name(of argument: String) -> String {
+    guard let equals = argument.firstIndex(of: "=") else { return argument }
+    return String(argument[..<equals])
+  }
+
+  /// The text after `=` in the first of `flags` named `flag`; nil when the
+  /// flag is absent. A flag with no `=`, or nothing after it, or a value
+  /// `parse` rejects is recorded in `invalid` as `"<flag> <value>"`.
   private static func value<Value>(
-    of flag: String, in arguments: [String], invalid: inout [String],
+    of flag: String, in flags: [String], invalid: inout [String],
     _ parse: (String) -> Value?
   ) -> Value? {
-    guard let index = arguments.firstIndex(of: flag) else { return nil }
-    let next = arguments.index(after: index)
-    guard next < arguments.endIndex, !arguments[next].hasPrefix("-") else {
+    guard let argument = flags.first(where: { name(of: $0) == flag }) else { return nil }
+    let text = String(argument.dropFirst(flag.count + 1))
+    guard argument.count > flag.count, !text.isEmpty else {
       invalid.append("\(flag) (no value)")
       return nil
     }
-    guard let parsed = parse(arguments[next]) else {
-      invalid.append("\(flag) \(arguments[next])")
+    guard let parsed = parse(text) else {
+      invalid.append("\(flag) \(text)")
       return nil
     }
     return parsed
