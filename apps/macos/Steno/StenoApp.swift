@@ -189,6 +189,7 @@ struct UITestWindowSizer: NSViewRepresentable {
   final class SizerView: NSView {
     override func viewDidMoveToWindow() {
       super.viewDidMoveToWindow()
+      UITestDiagnostics.note("sizer: moved to window \(window == nil ? "nil" : "yes")")
       Task { @MainActor [weak self] in
         UITestWindowSizer.apply(to: self?.window)
         try? await Task.sleep(for: .seconds(1))
@@ -203,9 +204,12 @@ struct UITestWindowSizer: NSViewRepresentable {
     guard AppBootstrap.isUITesting, let size = AppBootstrap.scenario.windowSize, let window
     else { return }
     let content = NSSize(width: size.width, height: size.height)
+    UITestDiagnostics.note(
+      "sizer: window \(window.frame) visible \(window.isVisible) content \(content)")
     guard window.contentRect(forFrameRect: window.frame).size != content else { return }
     window.setContentSize(content)
     window.center()
+    UITestDiagnostics.note("sizer: resized to \(window.frame)")
   }
 }
 
@@ -372,11 +376,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
   /// appearance whatever the runner's system setting, so the smoke test can
   /// screenshot both.
   func applicationWillFinishLaunching(_ notification: Notification) {
+    UITestDiagnostics.start(enabled: AppBootstrap.isUITesting)
     guard AppBootstrap.isUITesting, let appearance = AppBootstrap.scenario.appearance else {
       return
     }
     let name: NSAppearance.Name = appearance == .dark ? .darkAqua : .aqua
     NSApplication.shared.appearance = NSAppearance(named: name)
+    UITestDiagnostics.note("appearance \(appearance.rawValue)")
+  }
+
+  func applicationDidFinishLaunching(_ notification: Notification) {
+    UITestDiagnostics.note("did finish launching; windows \(NSApp.windows.count)")
   }
 
   func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {

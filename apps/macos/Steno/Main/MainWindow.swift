@@ -23,6 +23,7 @@ struct MainWindow: View {
   init(controller: AppController) {
     self.controller = controller
     _bridge = State(initialValue: MainWindowBridge(controller: controller))
+    UITestDiagnostics.note("main window view created")
   }
 
   var body: some View {
@@ -52,6 +53,7 @@ struct MainWindow: View {
             NSApp.activate()
           }
         }
+        UITestDiagnostics.note("main window bridge runs")
         await bridge.run()
       }
   }

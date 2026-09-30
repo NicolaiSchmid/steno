@@ -39,14 +39,24 @@ final class LaunchSmokeTests: XCTestCase {
   /// shows leaves no other trace in the result bundle.
   private func requireMainWindow(in app: XCUIApplication) {
     if mainWindow(in: app).waitForExistence(timeout: 10) { return }
-    XCTContext.runActivity(named: "no main window") { activity in
+    attachLaunchLog(named: "no-main-window", state: app)
+    XCTFail("no main window appeared")
+  }
+
+  /// The app's UI-test launch log (`UITestDiagnostics`, in the shared
+  /// temporary directory) beside the app state, for a window or page that
+  /// never showed.
+  private func attachLaunchLog(named name: String, state app: XCUIApplication) {
+    XCTContext.runActivity(named: name) { activity in
+      let logURL = FileManager.default.temporaryDirectory
+        .appendingPathComponent("steno-ui-test.log")
+      let log = (try? String(contentsOf: logURL, encoding: .utf8)) ?? "(no launch log)"
       let note = XCTAttachment(
-        string: "app state \(app.state.rawValue); windows \(app.windows.count)")
-      note.name = "no-main-window"
+        string: "app state \(app.state.rawValue); windows \(app.windows.count)\n\(log)")
+      note.name = name
       note.lifetime = .keepAlways
       activity.add(note)
     }
-    XCTFail("no main window appeared")
   }
 
   /// The page, through the two things WebKit exposes to XCUITest: the web
@@ -55,8 +65,10 @@ final class LaunchSmokeTests: XCTestCase {
   /// hence the long waits; a further moment lets the paint settle before a
   /// screenshot.
   private func waitForPage(in app: XCUIApplication) {
-    XCTAssertTrue(
-      app.webViews.firstMatch.waitForExistence(timeout: 20), "no web view in the main window")
+    if !app.webViews.firstMatch.waitForExistence(timeout: 20) {
+      attachLaunchLog(named: "no-web-view", state: app)
+      XCTFail("no web view in the main window")
+    }
     XCTAssertTrue(
       app.staticTexts["Meetings"].firstMatch.waitForExistence(timeout: 20),
       "the page did not render its Meetings heading")

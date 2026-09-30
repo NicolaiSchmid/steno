@@ -246,6 +246,7 @@ final class MainWindowBridge: BridgeHost {
   func handle(_ request: BridgeRequest) async throws -> JSONValue? {
     switch request.method {
     case .pageReady:
+      UITestDiagnostics.note("page ready")
       pageReady = true
       for topic in Self.topics { flush(topic) }
     case .pageLayout:

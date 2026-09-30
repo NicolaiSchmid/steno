@@ -50,6 +50,7 @@ struct WebWindowView: NSViewRepresentable {
 
     coordinator.bridge.attach(to: webView)
     host.attach(coordinator.bridge)
+    UITestDiagnostics.note("web view created for \(route)")
     coordinator.load(route, in: webView)
     return webView
   }
@@ -96,6 +97,26 @@ struct WebWindowView: NSViewRepresentable {
     ) async -> WKNavigationActionPolicy {
       guard let url = navigationAction.request.url, policy.allows(url) else { return .cancel }
       return .allow
+    }
+
+    func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+      UITestDiagnostics.note("web view finished \(webView.url?.absoluteString ?? "-")")
+    }
+
+    func webView(
+      _ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!,
+      withError error: any Error
+    ) {
+      UITestDiagnostics.note("web view failed to load: \(error)")
+    }
+
+    func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: any Error)
+    {
+      UITestDiagnostics.note("web view failed: \(error)")
+    }
+
+    func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
+      UITestDiagnostics.note("web content process terminated")
     }
   }
 }
