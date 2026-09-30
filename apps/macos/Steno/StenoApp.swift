@@ -16,7 +16,7 @@ struct StenoApp: App {
     Task { @MainActor in await bootstrap.load() }
   }
 
-  /// 1120 x 720, or `-steno-window WxH` under UI testing.
+  /// 1120 x 720, or `-steno-window=WxH` under UI testing.
   @MainActor private static var mainWindowSize: CGSize {
     if AppBootstrap.isUITesting, let size = AppBootstrap.scenario.windowSize {
       return CGSize(width: size.width, height: size.height)
@@ -25,9 +25,9 @@ struct StenoApp: App {
   }
 
   var body: some Scene {
-    // No title bar: the window carries no title and no toolbar items; each
-    // column of `MainWindow` paints its own opaque background up to the top
-    // edge, so nothing but the traffic lights sits above the content.
+    // No title bar: the window carries no title and no toolbar items; the
+    // web page in `MainWindow` paints up to the top edge and leaves the
+    // traffic lights their inset, so nothing else sits above the content.
     Window("Steno", id: "main") {
       RootView(bootstrap: bootstrap) { controller in
         MainWindow(controller: controller)
@@ -101,7 +101,9 @@ final class AppBootstrap {
     guard controller == nil, !loading else { return }
     loading = true
     defer { loading = false }
+    UITestDiagnostics.note("bootstrap: load begins")
     if let launchError = Self.scenario.launchError {
+      UITestDiagnostics.note("bootstrap: launch error \(launchError)")
       self.error = launchError
       return
     }
@@ -119,7 +121,9 @@ final class AppBootstrap {
       }
       let controller = AppController(environment: environment)
       self.controller = controller
+      UITestDiagnostics.note("bootstrap: controller set")
       await controller.launch()
+      UITestDiagnostics.note("bootstrap: controller launched")
       panels.follow(controller, clock: clock) { [weak self] in self?.openMain() }
       if Self.isUITesting, Self.scenario.showPrompt {
         controller.detection.appName = { _ in "Zoom" }
@@ -168,12 +172,22 @@ extension View {
   }
 }
 
-/// Applies `-steno-window WxH` to the main window once its `NSWindow`
-/// exists, and once more a second later: SwiftUI restores the frame a
-/// previous launch saved over `defaultSize`, and the smoke suite launches
-/// the app many times per run. Zero-sized, in the window content's
-/// background under UI testing only; without the flag it does nothing.
+/// Marks the main window `main-window` for the smoke tests, which have no
+/// title bar to match on, and applies `-steno-window=WxH` to it on the turn
+/// after its `NSWindow` exists, and once more a second later: SwiftUI
+/// restores the frame a previous launch saved over `defaultSize`, and the
+/// smoke suite launches the app many times per run. Zero-sized, in the
+/// window content's background under UI testing only.
+///
+/// Never on the window's own setup pass: `viewDidMoveToWindow` fires while
+/// SwiftUI is still installing the content (the web view among it), and a
+/// synchronous `setContentSize` there re-enters that layout before the
+/// window has shown. The frame changes on the next main-actor turn, as the
+/// floating panel's does.
 struct UITestWindowSizer: NSViewRepresentable {
+  /// The main window's accessibility identifier under UI testing.
+  static let mainWindowIdentifier = "main-window"
+
   func makeNSView(context: Context) -> SizerView {
     SizerView(frame: .zero)
   }
@@ -183,8 +197,9 @@ struct UITestWindowSizer: NSViewRepresentable {
   final class SizerView: NSView {
     override func viewDidMoveToWindow() {
       super.viewDidMoveToWindow()
-      UITestWindowSizer.apply(to: window)
+      window?.setAccessibilityIdentifier(UITestWindowSizer.mainWindowIdentifier)
       Task { @MainActor [weak self] in
+        UITestWindowSizer.apply(to: self?.window)
         try? await Task.sleep(for: .seconds(1))
         UITestWindowSizer.apply(to: self?.window)
       }
@@ -362,15 +377,38 @@ struct AppCommands: Commands {
 
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
-  /// `-steno-appearance light|dark`: the whole app renders in that
+  /// `-steno-appearance=light|dark`: the whole app renders in that
   /// appearance whatever the runner's system setting, so the smoke test can
   /// screenshot both.
   func applicationWillFinishLaunching(_ notification: Notification) {
+    UITestDiagnostics.start(enabled: AppBootstrap.isUITesting)
     guard AppBootstrap.isUITesting, let appearance = AppBootstrap.scenario.appearance else {
       return
     }
     let name: NSAppearance.Name = appearance == .dark ? .darkAqua : .aqua
     NSApplication.shared.appearance = NSAppearance(named: name)
+    UITestDiagnostics.note("appearance \(appearance.rawValue)")
+  }
+
+  func applicationDidFinishLaunching(_ notification: Notification) {
+    UITestDiagnostics.note("arguments \(CommandLine.arguments.dropFirst())")
+    UITestDiagnostics.note("did finish launching; \(Self.windowSummary())")
+    guard AppBootstrap.isUITesting else { return }
+    Task { @MainActor in
+      try? await Task.sleep(for: .seconds(3))
+      UITestDiagnostics.note("after 3s: \(Self.windowSummary())")
+    }
+  }
+
+  /// Every window's frame, visibility and content class, for the launch log.
+  @MainActor private static func windowSummary() -> String {
+    let windows = NSApp.windows.map { window in
+      "\(type(of: window)) \(NSStringFromRect(window.frame)) visible=\(window.isVisible) "
+        + "content=\(window.contentView.map { String(describing: type(of: $0)) } ?? "nil")"
+    }
+    return
+      "active=\(NSApp.isActive) hidden=\(NSApp.isHidden) policy=\(NSApp.activationPolicy().rawValue) "
+      + "windows \(windows.count): \(windows.joined(separator: " | "))"
   }
 
   func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {

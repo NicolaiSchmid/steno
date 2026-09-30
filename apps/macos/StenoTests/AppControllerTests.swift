@@ -265,7 +265,14 @@ final class AppControllerTests: XCTestCase {
     }
 
     // A review for a meeting the store does not list is dropped on the next
-    // list change, so a badge never points at nothing.
+    // list change, so a badge never points at nothing. `observeMeetings()`
+    // is the last subscription `launch()` starts and its first list lands
+    // on a later turn; a ghost posted before that list would be dropped by
+    // it at once, before the poll below could see it pending, so the first
+    // list is waited for.
+    await TestSupport.waitUntil("the controller saw the list") {
+      controller.listedMeetingIDs.contains(SampleData.meetingID)
+    }
     let ghost = UUID()
     await environment.events.post(.speakersNeedReview(meetingID: ghost, speakerIDs: []))
     await TestSupport.waitUntil("ghost pending") { controller.pendingReviews.contains(ghost) }

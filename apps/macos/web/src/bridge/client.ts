@@ -43,6 +43,13 @@ export class ContractViolation extends Error {
 	}
 }
 
+/**
+ * The parsed form of each snapshot object the transport fanned out, so a
+ * topic with several subscribers is validated once per publish, not once
+ * per subscriber. Snapshots are never mutated after they arrive.
+ */
+const parsedSnapshots = new WeakMap<object, unknown>();
+
 export function createBridgeClient(
 	transport: BridgeTransport,
 	options: BridgeClientOptions = {},
@@ -87,11 +94,20 @@ export function createBridgeClient(
 		subscribe(topic, handler) {
 			const schema = topicSchemas[topic];
 			return transport.subscribe<unknown>(topic, (snapshot) => {
+				const key =
+					typeof snapshot === "object" && snapshot !== null
+						? snapshot
+						: undefined;
+				if (key && parsedSnapshots.has(key)) {
+					handler(parsedSnapshots.get(key) as TopicSnapshot<typeof topic>);
+					return;
+				}
 				const parsed = schema.safeParse(snapshot);
 				if (!parsed.success) {
 					onInvalidSnapshot(topic, parsed.error.issues);
 					return;
 				}
+				if (key) parsedSnapshots.set(key, parsed.data);
 				handler(parsed.data as TopicSnapshot<typeof topic>);
 			});
 		},

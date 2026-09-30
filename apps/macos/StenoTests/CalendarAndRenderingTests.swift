@@ -26,35 +26,19 @@ final class CalendarAndRenderingTests: XCTestCase {
     XCTAssertNil(CalendarEvent.match(in: [], now: now))
   }
 
-  func testTranscriptTurnsGroupConsecutiveSegmentsOfOneSpeaker() {
-    let segments = SampleData.segments()
-    let turns = TranscriptTurns.group(segments)
-    XCTAssertEqual(turns.count, 3, "two speakers plus an unassigned segment")
-    var extra = segments[1]
-    extra.id = UUID()
-    extra.start = 5.6
-    extra.end = 6
-    extra.text = "Und Montag."
-    let grouped = TranscriptTurns.group([segments[0], segments[1], extra])
-    XCTAssertEqual(grouped.count, 2)
-    XCTAssertEqual(grouped[1].text, "Ich prüfe das Budget bis Freitag. Und Montag.")
-    XCTAssertEqual(grouped[1].start, 2.5)
-  }
-
-  /// The tab renders core's sections, so what it shows is exactly what
-  /// `render` joins; no Markdown is parsed back.
-  func testSummaryTabRendersCoresSectionsNotReparsedMarkdown() {
+  /// The detail snapshot renders core's sections, so what the page shows is
+  /// exactly what `render` joins; no Markdown is parsed back. The turn
+  /// grouping and the bullet split are pinned in `MainWindowSnapshotsTests`.
+  func testSummarySectionsAreTheRender() {
     let export = SampleData.export()
     let sections = SummaryMarkdown.sections(for: export)
     XCTAssertEqual(sections.map(\.heading), ["Executive Summary", "Offene Fragen"])
     XCTAssertTrue(
       sections[0].bullets.contains { $0.contains("**Nicolai**") },
-      "the confirmed speaker's name is substituted before the tab sees it")
+      "the confirmed speaker's name is substituted before the page sees it")
     XCTAssertEqual(
       sections.map(\.markdown).joined(separator: "\n\n") + "\n", SummaryMarkdown.render(export),
       "the sections are the render")
-    let inline = MarkdownBlocks.inline("**Nicolai**: prüft")
-    XCTAssertEqual(String(inline.characters), "Nicolai: prüft", "bold markers become styling")
   }
 
   func testClockTexts() {

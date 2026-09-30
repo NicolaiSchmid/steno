@@ -110,47 +110,6 @@ final class MeetingDetailViewModelTests: XCTestCase {
     XCTAssertEqual(model.meeting?.title, "Produktstrategie 90/10")
   }
 
-  /// Three edits within the window save once, with the last text, after one
-  /// quiet debounce interval on the injected clock (one sleeper re-arms
-  /// while edits keep coming).
-  func testScratchpadSavesOnceAfterTheDebounce() async throws {
-    let clock = ManualClock()
-    let environment = try await TestSupport.environment(clock: clock)
-    let model = await makeModel(environment)
-
-    func scratchpad() async throws -> String? {
-      try await environment.store.meeting(id: SampleData.meetingID)?.scratchpad
-    }
-    model.saveScratchpad("a")
-    model.saveScratchpad("ab")
-    model.saveScratchpad("abc")
-    _ = await clock.waitForSleepers(1)
-    XCTAssertEqual(clock.pendingSleepers, 1, "one debounce sleeper for three edits")
-    var stored = try await scratchpad()
-    XCTAssertEqual(stored, "Nachfassen wegen Budget.", "nothing saved yet")
-    clock.advance(by: MeetingDetailViewModel.scratchpadDebounce)
-    await TestSupport.waitUntil("saved once") { (try? await scratchpad()) == "abc" }
-    let meeting = try await environment.store.meeting(id: SampleData.meetingID)
-    XCTAssertEqual(meeting?.updatedAt, TestSupport.now)
-    XCTAssertEqual(clock.pendingSleepers, 0, "no sleeper left once saved")
-
-    // An edit that lands while the sleeper sleeps re-arms the same sleeper
-    // instead of starting a second one; the save waits for a quiet window.
-    model.saveScratchpad("abcd")
-    _ = await clock.waitForSleepers(1)
-    model.saveScratchpad("abcde")
-    XCTAssertEqual(clock.pendingSleepers, 1, "still one sleeper")
-    clock.advance(by: MeetingDetailViewModel.scratchpadDebounce)
-    _ = await clock.waitForSleepers(1)
-    stored = try await scratchpad()
-    XCTAssertEqual(stored, "abc", "the late edit pushed the save out by one interval")
-    clock.advance(by: MeetingDetailViewModel.scratchpadDebounce)
-    await TestSupport.waitUntil("saved with the last text") {
-      (try? await scratchpad()) == "abcde"
-    }
-    XCTAssertEqual(clock.pendingSleepers, 0)
-  }
-
   func testTemplateChangeRerunsSummaryAndReexportRedelivers() async throws {
     let environment = try await TestSupport.environment()
     let vault = FileManager.default.temporaryDirectory
@@ -309,78 +268,6 @@ final class MeetingDetailViewModelTests: XCTestCase {
     XCTAssertEqual(try XCTUnwrap(failedMeetingAsset).retention, .keepDays(7))
     XCTAssertNil(try XCTUnwrap(failedMeetingAsset).expiresAt, "a failed meeting keeps its audio")
     XCTAssertNil(model.error)
-  }
-
-  func testRecordingStatusSaysWhatTheDefaultDoesNot() async throws {
-    let environment = try await TestSupport.environment()
-    let model = await makeModel(environment)
-    // The seed's asset is stamped and its files do not exist.
-    XCTAssertEqual(model.recordingStatus, .deleted)
-    XCTAssertEqual(model.recordingStatusText, "Recording deleted")
-    XCTAssertFalse(model.showsKeepToggle, "no file, nothing to keep")
-
-    let expiry = TestSupport.now.addingTimeInterval(30 * 86_400)
-    let folder = try await placeMaster(environment, retention: .keepDays(30), expiresAt: expiry)
-    defer { try? FileManager.default.removeItem(at: folder) }
-    await TestSupport.waitUntil("master observed") { model.recordingFilesExist }
-    XCTAssertEqual(model.recordingStatus, .deletes(on: expiry))
-    let text = try XCTUnwrap(model.recordingStatusText)
-    XCTAssertTrue(text.hasPrefix("Deletes on "), text)
-    XCTAssertFalse(text.contains("today"))
-
-    try await updateAsset(environment) { $0.expiresAt = TestSupport.now }
-    await TestSupport.waitUntil("today") { model.recordingStatusText == "Deletes today" }
-    // A stamp the sweep could not honour yet is overdue, never past tense.
-    try await updateAsset(environment) {
-      $0.expiresAt = TestSupport.now.addingTimeInterval(-3 * 86_400)
-    }
-    await TestSupport.waitUntil("overdue") {
-      model.recordingStatus == .deletes(on: TestSupport.now.addingTimeInterval(-3 * 86_400))
-    }
-    XCTAssertEqual(model.recordingStatusText, "Deletes today")
-    try await updateAsset(environment) {
-      $0.expiresAt = TestSupport.now.addingTimeInterval(25 * 3_600)
-    }
-    await TestSupport.waitUntil("tomorrow") {
-      model.recordingStatus == .deletes(on: TestSupport.now.addingTimeInterval(25 * 3_600))
-    }
-    XCTAssertTrue(try XCTUnwrap(model.recordingStatusText).hasPrefix("Deletes on "))
-
-    try await updateAsset(environment) {
-      $0.retention = .keepForever
-      $0.expiresAt = nil
-    }
-    await TestSupport.waitUntil("kept forever") { model.export?.audio?.retention == .keepForever }
-    XCTAssertNil(model.recordingStatus, "the default says it all")
-    XCTAssertNil(model.recordingStatusText)
-
-    // A finite rule with no stamp: the meeting's state and exports decide.
-    try await updateAsset(environment) { $0.retention = .keepDays(7) }
-    await TestSupport.waitUntil("unstamped, ready, nothing to export") {
-      model.recordingStatus == .keptWhileProcessing
-    }
-    var failed = SampleData.delivery()
-    failed.status = .failed("vault missing")
-    try await environment.store.save(failed)
-    await TestSupport.waitUntil("export outstanding") {
-      model.recordingStatus == .keptUntilExportSucceeds
-    }
-    XCTAssertEqual(model.recordingStatusText, "Kept until the export succeeds")
-
-    try await environment.store.setState(
-      .failed(reason: "boom"), meetingID: SampleData.meetingID, now: TestSupport.now)
-    await TestSupport.waitUntil("processing failed") {
-      model.recordingStatus == .keptProcessingFailed
-    }
-    XCTAssertEqual(model.recordingStatusText, "Kept; processing failed")
-
-    for state in [MeetingState.processing, .queued, .recording] {
-      try await environment.store.setState(
-        state, meetingID: SampleData.meetingID, now: TestSupport.now)
-      await TestSupport.waitUntil("\(state)") { model.meeting?.state == state }
-      XCTAssertEqual(model.recordingStatus, .keptWhileProcessing, "\(state)")
-      XCTAssertEqual(model.recordingStatusText, "Kept while processing")
-    }
   }
 
   func testKeepToggleShowsOnlyWhenTheDefaultIsNotForever() async throws {

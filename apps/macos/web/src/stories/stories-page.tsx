@@ -1,5 +1,6 @@
 import {
 	CheckCircle2Icon,
+	CircleAlertIcon,
 	ClockIcon,
 	FolderIcon,
 	InboxIcon,
@@ -9,6 +10,7 @@ import {
 	SettingsIcon,
 	ShareIcon,
 	SparklesIcon,
+	TimerIcon,
 	Trash2Icon,
 } from "lucide-react";
 import { useState } from "react";
@@ -53,8 +55,24 @@ import {
 	TabsTab,
 	Tooltip,
 } from "@/components/ui";
-import { scrollLines } from "./sample-data";
 import { ThemePair } from "./theme-pair";
+
+const scrollLines = [
+	"Lass uns kurz auf die Prioritäten schauen.",
+	"Neunzig Prozent auf den Kern, der Rest ruht.",
+	"Zu viel parallel in den letzten zwei Quartalen.",
+	"Das geht nur mit umgeschichtetem Budget.",
+	"Zwei Szenarien bis Freitag.",
+	"Die Zahlen als Grundlage nehmen.",
+	"Die Partner nicht aus zweiter Hand informieren.",
+	"Erst nach dem Investor-Update schreiben.",
+	"Nebenprojekte pausieren bis Q1.",
+	"Kommunikation nach dem Update.",
+	"Jérôme bringt die Budget-Szenarien mit.",
+	"Anna übernimmt die Partner-Mail.",
+	"Entscheidung im Investor-Update ansprechen.",
+	"Nächster Abgleich am Freitag.",
+];
 
 const languages = [
 	{ value: "de", label: "German" },
@@ -79,6 +97,7 @@ function SwitchStory() {
 
 /** Every component in every variant, light beside dark. */
 export function StoriesPage() {
+	const countdown = <span className="font-mono tabular-nums">0:42</span>;
 	return (
 		<div
 			className="mx-auto flex max-w-[1160px] flex-col gap-8 p-8 text-foreground"
@@ -398,6 +417,36 @@ export function StoriesPage() {
 						<Kbd>⇧⌘E</Kbd>
 						<Kbd variant="plain">⌘,</Kbd>
 					</>
+				)}
+			</ThemePair>
+
+			<ThemePair title="Callout: small, the sidebar's">
+				{() => (
+					<div className="flex w-[220px] flex-col gap-1.5">
+						<Callout
+							actions={
+								<Button size="sm" variant="outline">
+									Keep recording
+								</Button>
+							}
+							description="Zoom closed."
+							icon={<TimerIcon aria-hidden="true" />}
+							size="sm"
+							title={<>Stops in {countdown}</>}
+							variant="live"
+						/>
+						<Callout
+							actions={
+								<Button size="sm" variant="outline">
+									Fix in System Settings
+								</Button>
+							}
+							description="Allow it in System Settings to record."
+							icon={<CircleAlertIcon aria-hidden="true" />}
+							size="sm"
+							title="Steno can't use the microphone."
+						/>
+					</div>
 				)}
 			</ThemePair>
 

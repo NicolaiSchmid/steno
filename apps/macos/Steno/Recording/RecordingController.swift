@@ -105,6 +105,15 @@ final class RecordingController {
   /// stop has handed the row over, nil when idle or while starting.
   var activeMeetingID: UUID? { active?.meetingID }
 
+  /// The live recording's capture mode, nil when idle or while starting;
+  /// the main window's `recording` snapshot reads it.
+  var activeMode: CaptureMode? { active?.mode }
+
+  /// The call app the recording is attributed to: the one the detection
+  /// prompt named at start, or the last foreign microphone opener seen
+  /// while recording. Nil for in-person recordings and unnamed apps.
+  var activeCallApp: String? { callAppName }
+
   var elapsed: TimeInterval? {
     if case .recording(let since) = recording { return environment.now().timeIntervalSince(since) }
     return nil

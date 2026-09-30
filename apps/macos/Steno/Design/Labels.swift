@@ -127,30 +127,6 @@ extension Meeting {
     return "\(day) \(DisplayFormat.time(startedAt, calendar: calendar, locale: locale))"
   }
 
-  /// The one-line preview under the entry's title: the first bullet of the
-  /// summary ("lead: text"), else what the state says. Pure: while the
-  /// pipeline runs, the view prefers the progress model's stage title.
-  var previewLine: String {
-    switch state {
-    case .recording: MeetingState.recording.label
-    case .queued: ProcessingProgressModel.Entry.waitingTitle
-    case .processing: MeetingState.processing.label
-    case .failed(let reason): reason.firstLine ?? state.label
-    case .ready: summary?.plainText.firstLine ?? "No summary"
-    }
-  }
-}
-
-extension String {
-  /// The first non-blank line, trimmed; nil when there is none. Only
-  /// `previewLine` reads it.
-  fileprivate var firstLine: String? {
-    for line in split(omittingEmptySubsequences: true, whereSeparator: \.isNewline) {
-      let trimmed = line.trimmingCharacters(in: .whitespaces)
-      if !trimmed.isEmpty { return trimmed }
-    }
-    return nil
-  }
 }
 
 extension AudioLane {

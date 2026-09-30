@@ -69,7 +69,6 @@ export const bridgeMethods = [
 	"meeting.setKeepAudio",
 	"meeting.deleteRecordingNow",
 	"meeting.saveNotes",
-	"meeting.flushNotes",
 	"meeting.revealRecording",
 	"meeting.revealExport",
 	"speakers.options",
@@ -665,7 +664,8 @@ export const topicSchemas = {
 	recording: recordingSnapshot,
 	progress: progressSnapshot,
 	"meetings.list": meetingsListSnapshot,
-	"meeting.detail": meetingDetailSnapshot,
+	// `null` while no meeting is selected or its export has not loaded.
+	"meeting.detail": meetingDetailSnapshot.nullable(),
 	"settings.general": generalSettingsSnapshot,
 	"settings.recording": recordingSettingsSnapshot,
 	"settings.transcription": transcriptionSettingsSnapshot,
@@ -694,7 +694,9 @@ export const setTagsParams = z.object({ tags: z.array(z.string()) }).strict();
 export const setTemplateParams = z.object({ templateID: z.string() }).strict();
 export const setBoolParams = z.object({ value: z.boolean() }).strict();
 export const setStringParams = z.object({ value: z.string() }).strict();
-export const saveNotesParams = z.object({ text: z.string() }).strict();
+export const saveNotesParams = z
+	.object({ meetingID: uuid, text: z.string() })
+	.strict();
 export const speakerOptionsParams = z
 	.object({ speakerID: uuid, query: z.string() })
 	.strict();
@@ -777,7 +779,6 @@ export const methodParams = {
 	"meeting.setKeepAudio": setBoolParams,
 	"meeting.deleteRecordingNow": null,
 	"meeting.saveNotes": saveNotesParams,
-	"meeting.flushNotes": null,
 	"meeting.revealRecording": null,
 	"meeting.revealExport": null,
 	"speakers.options": speakerOptionsParams,
@@ -832,6 +833,9 @@ export const methodParams = {
 /** Reply schema per method that returns a value; others resolve to `undefined`. */
 export const methodReplies = {
 	"speakers.options": speakerOptionsReply,
+	"meetings.delete": confirmReply,
+	"meeting.deleteRecordingNow": confirmReply,
+	"meeting.setKeepAudio": confirmReply,
 	"settings.recording.chooseFolder": chosenPathReply,
 	"settings.export.chooseVault": chosenPathReply,
 	"ui.confirmDestructive": confirmReply,

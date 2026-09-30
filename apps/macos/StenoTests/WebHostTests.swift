@@ -82,8 +82,9 @@ private struct Boom: Error, CustomStringConvertible {
     #expect(headers["Cache-Control"] == "no-store")
     #expect(
       headers["Content-Security-Policy"]
-        == "default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; "
-        + "img-src 'self' data: blob:; font-src 'self'; connect-src 'none'")
+        == "default-src 'none'; script-src 'self' steno-app:; "
+        + "style-src 'self' steno-app: 'unsafe-inline'; "
+        + "img-src 'self' steno-app: data: blob:; font-src 'self' steno-app:; connect-src 'none'")
     let notFound = BundledSite.notFoundHeaders(length: 9)
     #expect(notFound["Content-Security-Policy"] == BundledSite.contentSecurityPolicy)
     #expect(notFound["Content-Type"] == "text/plain; charset=utf-8")

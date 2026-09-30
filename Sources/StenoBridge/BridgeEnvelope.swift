@@ -62,7 +62,6 @@ public enum BridgeMethod: String, Codable, Sendable, CaseIterable {
   case meetingSetKeepAudio = "meeting.setKeepAudio"
   case meetingDeleteRecordingNow = "meeting.deleteRecordingNow"
   case meetingSaveNotes = "meeting.saveNotes"
-  case meetingFlushNotes = "meeting.flushNotes"
   case meetingRevealRecording = "meeting.revealRecording"
   case meetingRevealExport = "meeting.revealExport"
 

@@ -33,7 +33,7 @@ export interface SidebarRowProps
 	extends ComponentProps<"button">,
 		VariantProps<typeof sidebarRowVariants> {
 	icon?: ReactNode;
-	count?: number | string;
+	count?: number | string | undefined;
 }
 
 export function SidebarRow({

@@ -30,6 +30,11 @@ final class AppController {
   /// write) would not reach `meetingsChanged(_:)`; the per-meeting export
   /// observation includes the speakers and fires on every such write.
   private var reviewObservers: [UUID: Task<Void, Never>] = [:]
+  /// The ids of the last `observeMeetings()` emission, empty before the
+  /// first. `meetingsChanged(_:)` keeps it, so a caller can tell that the
+  /// list has been seen once (the subscription is the last thing `launch()`
+  /// starts and its first list lands on a later turn).
+  private(set) var listedMeetingIDs: Set<UUID> = []
   /// The meeting the main window should show next (from the menu bar or the
   /// detection prompt).
   var requestedMeetingID: UUID?
@@ -155,6 +160,7 @@ final class AppController {
   /// that has nothing left to review.
   private func meetingsChanged(_ meetings: [Meeting]) async {
     let listed = Set(meetings.map(\.id))
+    listedMeetingIDs = listed
     for meetingID in pendingReviews where !listed.contains(meetingID) {
       clearReview(meetingID)
     }

@@ -1,7 +1,9 @@
 import {
+	applyScenario,
 	createMockTransport,
 	loadFixtureSnapshots,
 	type MockTransport,
+	queryFromLocation,
 } from "./mock-transport";
 import type { BridgeTransport } from "./transport";
 import { createWebKitTransport, hasWebKitBridge } from "./webkit-transport";
@@ -16,12 +18,16 @@ export type {
 	RecordedCall,
 } from "./mock-transport";
 export {
+	applyScenario,
 	createMockTransport,
 	fixtureKey,
 	isSnapshotKey,
 	loadFixtureReplies,
 	loadFixtureSnapshots,
+	queryFromLocation,
 	replyMethod,
+	replyMethods,
+	scenarios,
 } from "./mock-transport";
 export type { BridgeTransport, SnapshotHandler } from "./transport";
 export { BridgeError, SnapshotHub } from "./transport";
@@ -41,7 +47,10 @@ export function createBridge(): BridgeTransport | MockTransport {
 	if (typeof location !== "undefined" && location.protocol === "steno-app:") {
 		throw new Error("The steno message handler is not installed");
 	}
-	return createMockTransport({ snapshots: loadFixtureSnapshots });
+	return createMockTransport({
+		snapshots: async () =>
+			applyScenario(await loadFixtureSnapshots(), queryFromLocation()),
+	});
 }
 
 let shared: BridgeTransport | MockTransport | undefined;

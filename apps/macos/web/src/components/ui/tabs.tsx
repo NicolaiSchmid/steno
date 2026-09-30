@@ -37,7 +37,7 @@ export interface TabsTabProps
 	extends Omit<ComponentProps<typeof BaseTabs.Tab>, "className"> {
 	className?: string;
 	/** A small count after the label, for example the number of turns. */
-	count?: number | string;
+	count?: number | string | undefined;
 }
 
 export function TabsTab({

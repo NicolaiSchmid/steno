@@ -11,10 +11,30 @@ draws snapshots and sends commands over the bridge (`src/bridge/`). Plan:
 | Command | What it does |
 |---|---|
 | `pnpm install` | pnpm 11, Node 24. Own lockfile. |
-| `pnpm dev` | Vite dev server on 5173 with the fixture bridge. `#/shell`, `#/stories`, `#/shell?dark&tab=transcript&menu`. |
+| `pnpm dev` | Vite dev server on 5173 with the fixture bridge. `#/main` (the default), `#/stories`. Flags: `dark`, `tab=summary\|transcript\|tasks\|notes`, `menu`, `picker`, `scenario=empty\|recording\|failed\|processing`, for example `#/main?dark&tab=transcript&picker`. |
 | `pnpm check` | `lint`, `lint:ui`, `typecheck`, `test`. Must pass before a PR. |
 | `pnpm build` | Writes `dist/` with relative asset URLs. |
-| `pnpm screens` | Builds, then Playwright renders the shell and the stories in light and dark to `screens/` and asserts the page made no network request. Run `pnpm exec playwright install chromium` once. |
+| `pnpm screens` | Builds, then Playwright renders the main window in every state and the stories, light and dark at 960 by 600 and 1200 by 760, to `screens/` and asserts the page made no network request. Run `pnpm exec playwright install chromium` once. |
+
+## Layout
+
+| Path | What lives there |
+|---|---|
+| `src/bridge/` | The contract (`contract.ts`), the typed client, the WebKit and mock transports, and `hooks.ts` (`useSnapshot`, `useBridge`, `send`). |
+| `src/windows/main/` | The main window over the bridge: sidebar, meeting list, detail with its tabs, `format.ts` for every date and duration. |
+| `src/components/ui/` | The component set; the only place a look is defined. |
+| `src/stories/` | Every component in every variant, rendered by the screens. |
+| `fixtures/bridge/` | Snapshots and replies recorded by the Swift side; the mock transport serves them. |
+
+The mock transport answers a `?scenario=` in the page's query by bending the
+fixtures (`applyScenario` in `src/bridge/mock-transport.ts`): `empty` clears
+the list, `recording` makes `recording.live` the recording, `failed` selects
+the failed meeting, `processing` adds and selects a meeting in the progress
+entry. `?tab=` picks the detail tab. Interactive elements carry the
+`data-testid` the SwiftUI views exposed as accessibility identifiers
+(`sidebar-record`, `nav-all`, `meeting-<uuid>`, `tab-summary`,
+`speaker-picker-<uuid>`, `processing-card`, `empty-detail-title`, …) so the
+screens and `WebShellTests` find them by the same names.
 
 ## Two rules
 
