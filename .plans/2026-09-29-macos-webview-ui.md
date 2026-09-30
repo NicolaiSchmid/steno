@@ -83,42 +83,58 @@ Why this direction, from the 2026-09-29 and 2026-09-30 rounds and the Jamie anal
    Sparkle, the handover listener and the commands. A new `Steno/Web/` group holds the host:
    `WebWindowView` (`NSViewRepresentable` around one `WKWebView`), `WebBridge` (message
    runtime), `AppSchemeHandler` (serves the bundle) and one `*Bridge.swift` per window that maps
-   view model state to snapshots and commands to view model calls. The three `Window` scenes stay
-   with `.windowStyle(.hiddenTitleBar)`; their content becomes `WebWindowView` at a route. The
-   `Settings` scene becomes `Window(id: "settings")` at `/settings`, fixed 760 by 520, opened by
-   `⌘,` through `AppCommands` and by `window.open("settings", section)` from the page. Onboarding
-   is `/onboarding`. Traffic lights are the only native pixels in the three windows; the page
+   view model state to snapshots and commands to view model calls. The main and onboarding `Window`
+   scenes stay with `.windowStyle(.hiddenTitleBar)`; their content becomes `WebWindowView` at a
+   route. The `Settings` scene is removed: Settings is the `/settings` page of the main window,
+   reached by `⌘,` through `AppCommands` (which opens the main window and navigates) and by
+   `window.navigate("settings", section)` from the page. Onboarding is `/onboarding` in its own
+   window. Traffic lights are the only native pixels in the three windows; the page
    leaves them a 52 pt inset. The window background colour is set from the page's canvas token
    on appearance change so resizing never flashes.
 
-2. **Design language.** Steno's, derived from what already exists, not from macOS and not from
-   Jamie. The mockup fixes it (second pass, accepted as direction on 2026-09-30):
-   - Structure: a charcoal sidebar that is the app icon's plate (`#1A1A1D` to `#121214`, white
-     text at 92, 56 and 34 percent), warm paper for the meeting list (`#F6F4EF`), a near-white
-     canvas for reading (`#FDFCFA`). Dark: `#101012`, `#17171A`, `#1D1D21`. The three columns
-     are three materials, so the eye knows where it is without borders doing the work.
-   - Type: Geist, the phone app's typeface, for the interface at 13, 12 and 11; Geist Mono with
-     tabular numerals for timestamps and durations; Instrument Serif for the column title, the
-     meeting title (44) and the summary section headings (24), which gives the reading side an
-     editorial voice without touching the controls. All three are SIL Open Font License and are
-     bundled as woff2.
-   - Colour: a warm achromatic ladder with real contrast (light ink `#1C1B18`, `#6B675E`,
-     `#9D988C`; lines `#E8E4DC`, `#D3CEC3`). One accent, the icon's live green (`#62B06F`,
-     `#3F8A4C`), for recording and confirmation states only; warning `#8A6512` on `#D4A72C` at
-     16 percent; destructive `#D05252`. People carry a fixed muted palette (`#B3573E`,
-     `#B9862A`, `#5F7F6B`, `#6D6F8E`, `#A56A8A`) assigned per person, so avatars and task owners
-     are the only saturated marks on the page. Meeting kinds are a coloured dot, not a chip.
-   - Surfaces: the Record control is a white capsule with a live dot and a real shadow on the
-     plate; selection is a raised white card on the paper; tasks are cards on the canvas;
-     popovers carry a real shadow. Radii 6, 10, 14 and full. No alpha veils under 6 percent, no
-     hairlines under 1 px.
-   - Components: Steno's own, built on Radix primitives for accessibility (menus, popovers,
-     dialogs, selects, tooltips, tabs), styled with Tailwind 4, Lucide icons at 1.6 stroke.
-     Underline tabs with counts, pill filters, avatar stacks, a callout for setup notices, a
-     search field with its shortcut shown.
-   - Motion: the phone app's tokens ported to CSS (`150 ms` functional, `120 ms` exit, `250 ms`
-     entrance, one spatial spring), `prefers-reduced-motion` honoured.
+2. **Design language: Jamie's structure, Steno's content and colour.** The owner's reference is
+   Jamie's meeting page (screenshot of 2026-09-30) and the direction is to follow it closely.
+   The mockup fixes it (third pass, `steno-main.html`, `?tab=transcript|summary`, `?dark`):
+   - Structure: two columns, not three. A 240 pt light sidebar (`#F6F6F7`, dark `#18181B`) and
+     one content area with a 60 pt bar that carries a breadcrumb ("Meetings › title") on the
+     left and the page actions on the right (export to the vault, Export menu, more). The
+     meetings list is a page of its own, grouped by day with filter chips (All, In progress,
+     Ready, Failed) and search; a meeting is a page reached from it, back through the
+     breadcrumb. Settings is a page in the same window at `/settings`, reached from the gear in
+     the sidebar footer and from `⌘,`; onboarding keeps its own window.
+   - Sidebar: the search icon top right under the traffic lights; one full-width 44 pt "Start
+     recording" button in the live green (`#4C9A5A` to `#3F8A4C`, white text, the icon's bars as
+     the mark); navigation rows at 15 pt (Meetings, Tasks, People); a "Tags" section with a
+     disclosure, a more menu, counts and a hint when empty; a footer with the paired iPhone card
+     and the user row (avatar, name, gear, help).
+   - Meeting page: a 1090 pt page with the date, duration and language as a 15 pt eyebrow, a
+     30 pt semibold title, then label and value rows at 180 pt label width: Speakers (avatar
+     stack in a bordered pill with "1 needs a name" in the attention colour and a disclosure),
+     Tags (pills plus a dashed "Add tag"), Recording (retention sentence with the keep action).
+     Underline tabs at 18 pt: Summary, Transcript, Tasks, Notes. Below the tabs a tool row
+     ("Copy transcript", "Play from here") and the content.
+   - Transcript: one block per turn at 19 pt over 1.55: the speaker name in semibold, the time
+     range in the secondary colour, the paragraph; an unnamed speaker carries a "Who is this?"
+     chip in the attention colour that opens the speaker picker. Find in transcript is a
+     floating bar top right with match count, case and whole-word toggles, previous, next and
+     close; matches are highlighted in the text.
+   - Summary: 22 pt semibold section headings and 18 pt bullets with bold lead-ins, the whole
+     measure wide.
+   - Type: Inter at 400, 500 and 600 for everything, tabular numerals on. No display face. The
+     phone app keeps Geist; the two are cousins and this is the price of following the
+     reference.
+   - Colour: neutral greys (ink `#1B1B1F`, `#5F6068`, `#8B8C94`; lines `#E9E9EB`, `#DCDCE0`),
+     white canvas; the live green as the one accent and the one saturated surface; an attention
+     orange (`#C2731C`) for things that need the user (unnamed speakers, missing summary); a
+     fixed palette for people (`#4C9A5A`, `#C65C5C`, `#5B7FD6`, `#B07AD1`). Dark mode inverts
+     the ladder (`#1F1F23` canvas, `#ECECEF` ink) and keeps the accents.
+   - Components: Steno's own on Radix primitives (menus, popovers, dialogs, selects, tooltips,
+     tabs) styled with Tailwind 4, Lucide icons at 1.7 stroke. Motion from the phone app's
+     tokens; `prefers-reduced-motion` honoured.
    - Copy unchanged in tone: no developer vocabulary, sentences not labels.
+   - Scope note: the Tasks and People navigation rows appear in the mockup because the
+     reference has them, but neither surface exists in the scope plan. WP2 ships Meetings and
+     Tags only; Tasks and People get their own plan before a row is shown.
 
 3. **Served locally, offline by construction.** Production loads `steno-app://app/index.html`
    through a `WKURLSchemeHandler` from the bundled `Web/` folder. Not `file://` (relative URLs and
@@ -156,7 +172,7 @@ Why this direction, from the 2026-09-29 and 2026-09-30 rounds and the Jamie anal
 
    | Topic | Source | Contents |
    |---|---|---|
-   | `app` | `AppController` | version, appearance, deep links (requested meeting or section), setup banner state, iPhone sync status |
+   | `app` | `AppController` | version, appearance, route requests (meeting, settings section), setup banner state, iPhone sync status |
    | `recording` | `RecordingController` via `RecordingControlPresentation` | state, elapsed, mode, device, level at 20 Hz, auto-stop countdown, denied permissions |
    | `progress` | `ProcessingProgressModel` | queue and per-meeting stage, fraction, estimate |
    | `meetings.list` | `MeetingListViewModel` | filters, counts, tags, grouped rows with preview and speakers, selection |
@@ -231,8 +247,8 @@ WP2, main window:
    Playwright screens and `WebShellTests` cover the states the deleted views covered.
 
 WP3, Settings:
-6. The six sections in the web language (sidebar of sections with subtitles, form cards with
-   Steno's controls); `SettingsBridge`; the `Settings` scene becomes a `Window`;
+6. The six sections as the `/settings` page (section list with subtitles on the left, form
+   cards with Steno's controls on the right); `SettingsBridge`; the `Settings` scene removed;
    `Settings/*View*.swift` and `SettingsComponents.swift` deleted; `SettingsRedesignTests`
    reduced to the view model parts.
 
