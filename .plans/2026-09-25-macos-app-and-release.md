@@ -12,6 +12,11 @@ and the `MACOS_RUNS_ON` runner variable in every macOS workflow (including `mobi
 the module workstreams have merged; its step 1 skeleton ships early because the audio workstream's permission spike
 needs a bundled, signed app.
 
+> Amended by [`2026-09-29-macos-webview-ui.md`](2026-09-29-macos-webview-ui.md) (2026-09-29):
+> the main window, Settings and onboarding are one web app in a `WKWebView`, served from the
+> bundle; the view models and the app target boundaries below stand, the SwiftUI views for
+> those three windows do not.
+
 ## Goal
 
 Ship the SwiftUI shell that turns the Swift package into a product: a menu bar recorder with a main window (meeting
