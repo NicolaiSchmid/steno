@@ -44,7 +44,11 @@ export class SnapshotHub {
 			return;
 		}
 		for (const handler of set) {
-			handler(snapshot);
+			try {
+				handler(snapshot);
+			} catch (cause) {
+				console.error(`bridge: a ${topic} subscriber threw`, cause);
+			}
 		}
 	}
 

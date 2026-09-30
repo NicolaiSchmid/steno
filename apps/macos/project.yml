@@ -78,6 +78,7 @@ targets:
     # (.plans/2026-09-29-macos-webview-ui.md, Decision 8).
     preBuildScripts:
       - name: Build web UI
+        basedOnDependencyAnalysis: false
         script: |
           "$SRCROOT/../../scripts/build-web.sh"
         inputFiles:

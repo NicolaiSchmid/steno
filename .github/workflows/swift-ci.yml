@@ -250,6 +250,7 @@ jobs:
     runs-on: ${{ fromJSON(vars.MACOS_RUNS_ON || '"macos-15"') }}
     timeout-minutes: 90
     env:
+      STENO_WEB_PREBUILT: "1"
       # The DerivedData path is passed per xcodebuild call from $DERIVED_DATA;
       # the "Build location" step below decides it per runner kind.
       XCODEBUILD_FLAGS: >-
@@ -400,6 +401,7 @@ jobs:
     runs-on: macos-15
     timeout-minutes: 60
     env:
+      STENO_WEB_PREBUILT: "1"
       XCODEBUILD_FLAGS: >-
         -project apps/macos/Steno.xcodeproj
         -configuration Debug

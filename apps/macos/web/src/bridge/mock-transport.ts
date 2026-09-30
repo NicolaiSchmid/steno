@@ -101,6 +101,7 @@ export function createMockTransport(
 	const hub = new SnapshotHub();
 	const calls: RecordedCall[] = [];
 	let replies: FixtureMap = options.replies ?? {};
+	let repliesLoaded = false;
 
 	const loading: Promise<void> = (async () => {
 		const source = options.snapshots;
@@ -126,7 +127,8 @@ export function createMockTransport(
 			params: TParams,
 		): Promise<TReply> {
 			calls.push({ method, params });
-			if (replies === options.replies && !options.replies) {
+			if (!options.replies && !repliesLoaded) {
+				repliesLoaded = true;
 				replies = await loadFixtureReplies().catch(() => ({}));
 			}
 			const reply = replies[method];

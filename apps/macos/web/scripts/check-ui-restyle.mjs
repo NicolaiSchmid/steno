@@ -10,6 +10,7 @@
  */
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { join, relative, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 
 const LAYOUT_TOKENS = [
 	"w-",
@@ -265,7 +266,7 @@ export function run({ root, ui, cwd = process.cwd() }) {
 
 const invokedDirectly =
 	process.argv[1] &&
-	resolve(process.argv[1]) === new URL(import.meta.url).pathname;
+	resolve(process.argv[1]) === fileURLToPath(import.meta.url);
 
 if (invokedDirectly) {
 	const options = parseArgs(process.argv.slice(2));

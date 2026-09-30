@@ -36,6 +36,11 @@ export function createBridge(): BridgeTransport | MockTransport {
 	if (typeof window !== "undefined" && hasWebKitBridge(window)) {
 		return createWebKitTransport(window);
 	}
+	// Inside the app the page is served from the steno-app scheme; a missing
+	// handler there is a host bug and must not be papered over with fixtures.
+	if (typeof location !== "undefined" && location.protocol === "steno-app:") {
+		throw new Error("The steno message handler is not installed");
+	}
 	return createMockTransport({ snapshots: loadFixtureSnapshots });
 }
 

@@ -55,7 +55,7 @@ jobs:
       - name: Build
         run: pnpm build
 
-      - name: No network URLs in the bundle
+      - name: Bundle gate
         working-directory: .
         run: scripts/build-web.sh --copy-only
 
@@ -63,7 +63,7 @@ jobs:
         run: pnpm exec playwright install --with-deps chromium
 
       - name: Screens
-        run: pnpm screens
+        run: pnpm exec playwright test
 
       - name: Upload screens
         if: always()

@@ -44,6 +44,7 @@ jobs:
     runs-on: ${{ fromJSON(vars.MACOS_RUNS_ON || '"macos-15"') }}
     timeout-minutes: 90
     env:
+      STENO_WEB_PREBUILT: "1"
       # One place decides what a dry run is; every conditional step reads it.
       DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run }}
     steps:
