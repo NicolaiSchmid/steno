@@ -36,10 +36,11 @@ final class LaunchSmokeTests: XCTestCase {
     return app
   }
 
-  /// The main window: the first window, as every test here always found it.
-  /// It has no title bar, so there is no title to match on.
+  /// The main window: the one holding the `#/main` web view
+  /// (`WebWindowView.accessibilityIdentifier(for:)`). No window has a title
+  /// bar, and the onboarding and Settings windows come to the front over it.
   private func mainWindow(in app: XCUIApplication) -> XCUIElement {
-    app.windows.firstMatch
+    app.windows.containing(.webView, identifier: "web-view-main").firstMatch
   }
 
   /// Waits for the main window. When none appears the app's state is

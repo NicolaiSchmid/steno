@@ -47,6 +47,7 @@ struct WebWindowView: NSViewRepresentable {
     #if DEBUG
       webView.isInspectable = true
     #endif
+    webView.setAccessibilityIdentifier(Self.accessibilityIdentifier(for: route))
 
     coordinator.bridge.attach(to: webView)
     host.attach(coordinator.bridge)
@@ -57,6 +58,14 @@ struct WebWindowView: NSViewRepresentable {
 
   func updateNSView(_ webView: WKWebView, context: Context) {
     context.coordinator.load(route, in: webView)
+  }
+
+  /// `web-view-main` for `#/main`, `web-view-settings` for
+  /// `#/settings?section=general`: the route's path, so the UI smoke tests
+  /// can tell the windows apart, none of which has a title bar.
+  static func accessibilityIdentifier(for route: String) -> String {
+    let path = route.drop(while: { $0 == "#" || $0 == "/" }).prefix(while: { $0 != "?" })
+    return "web-view-\(path)"
   }
 
   /// Debug builds may point at the dev server; release builds serve the
@@ -110,8 +119,9 @@ struct WebWindowView: NSViewRepresentable {
       UITestDiagnostics.note("web view failed to load: \(error)")
     }
 
-    func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: any Error)
-    {
+    func webView(
+      _ webView: WKWebView, didFail navigation: WKNavigation!, withError error: any Error
+    ) {
       UITestDiagnostics.note("web view failed: \(error)")
     }
 
