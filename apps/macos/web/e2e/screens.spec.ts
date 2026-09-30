@@ -21,6 +21,8 @@ interface MainState {
 	query: string;
 	/** What must be on screen before the shot. */
 	expect: { testId?: string; role?: "menu" | "dialog" | "option" };
+	/** Scrolled into view before the shot (the footer sits below the fold). */
+	scrollTo?: string;
 }
 
 const MAIN_STATES: readonly MainState[] = [
@@ -49,7 +51,12 @@ const MAIN_STATES: readonly MainState[] = [
 	{
 		name: "recording",
 		query: "scenario=recording",
-		expect: { testId: "sidebar-stop" },
+		expect: { testId: "auto-stop" },
+	},
+	{
+		name: "denied",
+		query: "scenario=denied",
+		expect: { testId: "denied-microphone" },
 	},
 	{
 		name: "failed",
@@ -60,6 +67,12 @@ const MAIN_STATES: readonly MainState[] = [
 		name: "processing",
 		query: "scenario=processing",
 		expect: { testId: "processing-card" },
+	},
+	{
+		name: "export-failed",
+		query: "scenario=export-failed&tab=summary",
+		expect: { testId: "export-again" },
+		scrollTo: "meeting-footer",
 	},
 ];
 
@@ -111,6 +124,9 @@ for (const size of SIZES) {
 				}
 				if (state.name === "empty") {
 					await expect(page.getByTestId("empty-detail-title")).toBeVisible();
+				}
+				if (state.scrollTo) {
+					await page.getByTestId(state.scrollTo).scrollIntoViewIfNeeded();
 				}
 				await settle(page);
 				await page.screenshot({

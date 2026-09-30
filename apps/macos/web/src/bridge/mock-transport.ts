@@ -71,11 +71,16 @@ export function replyMethod(key: string): string | null {
 
 /**
  * The generic reply shapes stand in for the methods that answer with them,
- * so the native confirm and folder panels resolve in the browser (always
+ * so the native alerts and folder panels resolve in the browser (always
  * confirmed; the recorded path).
  */
 const REPLY_ALIASES: Record<string, readonly string[]> = {
-	"reply.confirm": ["ui.confirmDestructive"],
+	"reply.confirm": [
+		"ui.confirmDestructive",
+		"meetings.delete",
+		"meeting.deleteRecordingNow",
+		"meeting.setKeepAudio",
+	],
 	"reply.chosenPath": [
 		"settings.recording.chooseFolder",
 		"settings.export.chooseVault",
@@ -132,8 +137,10 @@ export function loadFixtureReplies(): Promise<FixtureMap> {
 export const scenarios = [
 	"empty",
 	"recording",
+	"denied",
 	"failed",
 	"processing",
+	"export-failed",
 ] as const;
 export type Scenario = (typeof scenarios)[number];
 
@@ -206,9 +213,11 @@ function bareDetail(
 /**
  * Overrides the fixture snapshots for a scenario named in the query:
  * `empty` (no meetings, no selection), `recording` (`recording.live` as the
- * recording, started 12:34 ago), `failed` (the failed meeting selected),
- * `processing` (a meeting in the progress entry, selected). `tab=` picks the
- * detail tab. Without either, the fixtures pass through unchanged.
+ * recording, started 12:34 ago, its auto-stop counting down), `denied` (idle
+ * with the microphone denied), `failed` (the failed meeting selected),
+ * `processing` (a meeting in the progress entry, selected), `export-failed`
+ * (the selected meeting's export failed). `tab=` picks the detail tab.
+ * Without either, the fixtures pass through unchanged.
  */
 export function applyScenario(
 	snapshots: FixtureMap,
@@ -240,6 +249,28 @@ export function applyScenario(
 				startedAt: new Date(Date.now() - RECORDING_ELAPSED_MS).toISOString(),
 			} satisfies RecordingSnapshot;
 		}
+	}
+
+	if (scenario === "denied") {
+		const idle = snapshots.recording as RecordingSnapshot | undefined;
+		if (idle) {
+			result.recording = {
+				...idle,
+				deniedPermissions: ["microphone"],
+			} satisfies RecordingSnapshot;
+		}
+	}
+
+	if (scenario === "export-failed" && detail) {
+		result["meeting.detail"] = {
+			...detail,
+			export: {
+				status: "failed",
+				message: "Obsidian · Failed: the vault folder could not be written.",
+				canReexport: true,
+				canReveal: false,
+			},
+		} satisfies MeetingDetailSnapshot;
 	}
 
 	if (scenario === "failed" && list && detail) {

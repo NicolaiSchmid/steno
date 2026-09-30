@@ -76,6 +76,73 @@ describe("Sidebar", () => {
 		expect(callsTo(harness.transport, "recording.stop")).toHaveLength(1);
 	});
 
+	it("counts down to the auto-stop and keeps recording on request", async () => {
+		const user = userEvent.setup();
+		const harness = await createBridgeHarness("scenario=recording");
+		renderWithBridge(<Sidebar />, harness);
+		const notice = screen.getByTestId("auto-stop");
+		expect(notice).toHaveTextContent(/Stops in 0:4[12]/);
+		expect(notice).toHaveTextContent("Zoom closed.");
+		await user.click(screen.getByTestId("keep-recording"));
+		expect(callsTo(harness.transport, "recording.keepGoing")).toHaveLength(1);
+	});
+
+	it("shows no countdown once the recorder is idle", async () => {
+		const harness = await createBridgeHarness();
+		renderWithBridge(<Sidebar />, harness);
+		expect(screen.queryByTestId("auto-stop")).not.toBeInTheDocument();
+		expect(screen.queryByTestId("recorder-warning")).not.toBeInTheDocument();
+	});
+
+	it("names a denied permission and opens System Settings for it", async () => {
+		const user = userEvent.setup();
+		const harness = await createBridgeHarness("scenario=denied");
+		renderWithBridge(<Sidebar />, harness);
+		expect(screen.getByTestId("denied-microphone")).toHaveTextContent(
+			"Steno can't use the microphone.",
+		);
+		expect(screen.getByTestId("sidebar-record")).toBeInTheDocument();
+		await user.click(screen.getByTestId("fix-microphone"));
+		expect(callsTo(harness.transport, "system.openSystemSettings")).toEqual([
+			{ method: "system.openSystemSettings", params: { kind: "microphone" } },
+		]);
+	});
+
+	it("keeps the recorder's warning until it is dismissed", async () => {
+		const user = userEvent.setup();
+		const harness = await createBridgeHarness("", {
+			recording: {
+				state: "idle",
+				deniedPermissions: [],
+				warning: "The microphone went quiet for a while.",
+			},
+		});
+		renderWithBridge(<Sidebar />, harness);
+		expect(screen.getByTestId("recorder-warning")).toHaveTextContent(
+			"The microphone went quiet for a while.",
+		);
+		await user.click(screen.getByTestId("dismiss-recorder-message"));
+		expect(callsTo(harness.transport, "recording.clearMessages")).toHaveLength(
+			1,
+		);
+	});
+
+	it("shows the error over the warning", async () => {
+		const harness = await createBridgeHarness("", {
+			recording: {
+				state: "idle",
+				deniedPermissions: [],
+				warning: "A warning.",
+				error: "The recording could not be saved.",
+			},
+		});
+		renderWithBridge(<Sidebar />, harness);
+		expect(screen.getByTestId("recorder-error")).toHaveTextContent(
+			"The recording could not be saved.",
+		);
+		expect(screen.queryByTestId("recorder-warning")).not.toBeInTheDocument();
+	});
+
 	it("opens Settings and shows the paired iPhone", async () => {
 		const user = userEvent.setup();
 		const harness = await createBridgeHarness();

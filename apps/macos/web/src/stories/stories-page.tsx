@@ -1,5 +1,6 @@
 import {
 	CheckCircle2Icon,
+	CircleAlertIcon,
 	ClockIcon,
 	FolderIcon,
 	InboxIcon,
@@ -9,6 +10,7 @@ import {
 	SettingsIcon,
 	ShareIcon,
 	SparklesIcon,
+	TimerIcon,
 	Trash2Icon,
 } from "lucide-react";
 import { useState } from "react";
@@ -95,6 +97,7 @@ function SwitchStory() {
 
 /** Every component in every variant, light beside dark. */
 export function StoriesPage() {
+	const countdown = <span className="font-mono tabular-nums">0:42</span>;
 	return (
 		<div
 			className="mx-auto flex max-w-[1160px] flex-col gap-8 p-8 text-foreground"
@@ -414,6 +417,36 @@ export function StoriesPage() {
 						<Kbd>⇧⌘E</Kbd>
 						<Kbd variant="plain">⌘,</Kbd>
 					</>
+				)}
+			</ThemePair>
+
+			<ThemePair title="Callout: small, the sidebar's">
+				{() => (
+					<div className="flex w-[220px] flex-col gap-1.5">
+						<Callout
+							actions={
+								<Button size="sm" variant="outline">
+									Keep recording
+								</Button>
+							}
+							description="Zoom closed."
+							icon={<TimerIcon aria-hidden="true" />}
+							size="sm"
+							title={<>Stops in {countdown}</>}
+							variant="live"
+						/>
+						<Callout
+							actions={
+								<Button size="sm" variant="outline">
+									Fix in System Settings
+								</Button>
+							}
+							description="Allow it in System Settings to record."
+							icon={<CircleAlertIcon aria-hidden="true" />}
+							size="sm"
+							title="Steno can't use the microphone."
+						/>
+					</div>
 				)}
 			</ThemePair>
 

@@ -7,7 +7,7 @@ export { Badge, badgeVariants } from "./badge";
 export type { ButtonProps } from "./button";
 export { Button, buttonVariants } from "./button";
 export type { CalloutProps } from "./callout";
-export { Callout, calloutIconVariants } from "./callout";
+export { Callout, calloutIconVariants, calloutVariants } from "./callout";
 export type { CardProps } from "./card";
 export { Card, cardVariants } from "./card";
 export type { CheckboxProps } from "./checkbox";

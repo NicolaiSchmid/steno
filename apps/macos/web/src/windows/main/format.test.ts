@@ -19,6 +19,13 @@ describe("durations", () => {
 		expect(f.duration(-4)).toBe("00:00");
 	});
 
+	it("counts down without a leading zero on the minutes", () => {
+		expect(f.countdown(42)).toBe("0:42");
+		expect(f.countdown(65)).toBe("1:05");
+		expect(f.countdown(0.4)).toBe("0:01");
+		expect(f.countdown(-3)).toBe("0:00");
+	});
+
 	it("writes a turn's range", () => {
 		expect(f.range(12, 41)).toBe("00:12 – 00:41");
 	});

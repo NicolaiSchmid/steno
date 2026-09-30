@@ -21,6 +21,8 @@ export interface DayLabel {
 export interface Formatter {
 	/** `45:38`, or `1:02:03` past an hour. */
 	duration(seconds: number): string;
+	/** `0:42`, `1:05`: seconds left, the minutes without a leading zero. */
+	countdown(seconds: number): string;
 	/** `00:12 – 00:41`. */
 	range(startSeconds: number, endSeconds: number): string;
 	/** `14:50`. */
@@ -141,6 +143,10 @@ export function createFormatter(options: FormatOptions = {}): Formatter {
 			return hours > 0
 				? `${hours}:${pad(minutes)}:${pad(rest)}`
 				: `${pad(minutes)}:${pad(rest)}`;
+		},
+		countdown(seconds) {
+			const total = Math.max(0, Math.ceil(seconds));
+			return `${Math.floor(total / 60)}:${pad(total % 60)}`;
 		},
 		range(start, end) {
 			return `${this.duration(start)} – ${this.duration(end)}`;

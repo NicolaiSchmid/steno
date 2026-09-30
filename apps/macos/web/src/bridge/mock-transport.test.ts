@@ -31,14 +31,21 @@ describe("fixture replies", () => {
 });
 
 describe("scenarios", () => {
-	it("aliases the generic reply shapes onto the native panels", async () => {
-		expect(replyMethods("reply.confirm")).toEqual(["ui.confirmDestructive"]);
+	it("aliases the generic reply shapes onto the native alerts and panels", async () => {
+		expect(replyMethods("reply.confirm")).toEqual([
+			"ui.confirmDestructive",
+			"meetings.delete",
+			"meeting.deleteRecordingNow",
+			"meeting.setKeepAudio",
+		]);
 		expect(replyMethods("speakers.options.reply")).toEqual([
 			"speakers.options",
 		]);
 		expect(replyMethods("meetings.list")).toEqual([]);
 		const replies = await loadFixtureReplies();
 		expect(replies["ui.confirmDestructive"]).toEqual({ confirmed: true });
+		expect(replies["meetings.delete"]).toEqual({ confirmed: true });
+		expect(replies["meeting.setKeepAudio"]).toEqual({ confirmed: true });
 		expect(replies["settings.export.chooseVault"]).toBeDefined();
 	});
 
@@ -85,6 +92,50 @@ describe("scenarios", () => {
 		const started = new Date(recording.startedAt ?? "").getTime();
 		expect(after - started).toBeGreaterThanOrEqual(754_000);
 		expect(before - started).toBeLessThanOrEqual(754_000);
+	});
+
+	it("keeps the live recording's auto-stop so the countdown shows", async () => {
+		const result = applyScenario(
+			await loadFixtureSnapshots(),
+			new URLSearchParams("scenario=recording"),
+		);
+		const recording = topicSchemas.recording.parse(
+			result.recording,
+		) as RecordingSnapshot;
+		expect(recording.autoStop).toEqual({
+			reason: "Zoom closed",
+			remainingSeconds: 42,
+			totalSeconds: 60,
+		});
+	});
+
+	it("denies the microphone while idle", async () => {
+		const result = applyScenario(
+			await loadFixtureSnapshots(),
+			new URLSearchParams("scenario=denied"),
+		);
+		const recording = topicSchemas.recording.parse(
+			result.recording,
+		) as RecordingSnapshot;
+		expect(recording.state).toBe("idle");
+		expect(recording.deniedPermissions).toEqual(["microphone"]);
+	});
+
+	it("fails the selected meeting's export", async () => {
+		const snapshots = await loadFixtureSnapshots();
+		const result = applyScenario(
+			snapshots,
+			new URLSearchParams("scenario=export-failed"),
+		);
+		const detail = topicSchemas["meeting.detail"].parse(
+			result["meeting.detail"],
+		) as MeetingDetailSnapshot;
+		expect(detail.id).toBe(
+			(snapshots["meeting.detail"] as MeetingDetailSnapshot).id,
+		);
+		expect(detail.export.status).toBe("failed");
+		expect(detail.export.canReexport).toBe(true);
+		expect(detail.export.message).toContain("Failed");
 	});
 
 	it("selects the failed meeting with a failed detail", async () => {

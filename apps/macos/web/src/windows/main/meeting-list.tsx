@@ -17,6 +17,7 @@ import {
 	Avatar,
 	AvatarStack,
 	Badge,
+	Button,
 	ContextMenu,
 	ContextMenuItem,
 	ContextMenuPopup,
@@ -26,7 +27,7 @@ import {
 	SearchInput,
 } from "@/components/ui";
 import { cn } from "@/lib/cn";
-import { confirmAndDeleteMeeting } from "./delete-meeting";
+import { deleteMeeting } from "./delete-meeting";
 import { firstSentence, format, formatSource } from "./format";
 
 export const QUERY_DEBOUNCE_MS = 200;
@@ -107,10 +108,17 @@ function flatIDs(list: MeetingsListSnapshot): string[] {
 	);
 }
 
+function deleteQuietly(client: ReturnType<typeof useBridge>, id: string) {
+	deleteMeeting(client, id).catch((cause: unknown) => {
+		console.error("bridge: delete failed", cause);
+	});
+}
+
 /**
  * The 320 pt column: the heading and search, then the day groups with one
- * row per meeting. The selected row is a raised card. Right-click deletes
- * behind the host's confirmation; the arrow keys move the selection.
+ * row per meeting. The selected row is a raised card and stays in view.
+ * Right-click or the Delete key deletes behind the host's confirmation; the
+ * arrow keys move the selection.
  */
 export function MeetingList() {
 	const client = useBridge();
@@ -138,8 +146,24 @@ export function MeetingList() {
 		}, QUERY_DEBOUNCE_MS);
 	}
 
+	function clearFilters() {
+		clearTimeout(pending.current);
+		pending.current = undefined;
+		setQuery("");
+		send(client, "meetings.setFilter", { filter: "all" });
+		send(client, "meetings.setTagFilter", {});
+		send(client, "meetings.setQuery", { query: "" });
+	}
+
 	function onKeyDown(event: KeyboardEvent<HTMLElement>) {
 		if (!list || (event.target as HTMLElement).tagName === "INPUT") {
+			return;
+		}
+		if (event.key === "Delete" || event.key === "Backspace") {
+			if (list.selection) {
+				event.preventDefault();
+				deleteQuietly(client, list.selection);
+			}
 			return;
 		}
 		if (event.key !== "ArrowDown" && event.key !== "ArrowUp") {
@@ -182,6 +206,18 @@ export function MeetingList() {
 			<ScrollArea className="flex-1">
 				{list && list.groups.length === 0 ? (
 					<EmptyState
+						action={
+							list.counts.all > 0 ? (
+								<Button
+									data-testid="clear-filters"
+									onClick={clearFilters}
+									size="sm"
+									variant="outline"
+								>
+									Clear filters
+								</Button>
+							) : undefined
+						}
 						icon={
 							list.counts.all === 0 ? (
 								<AudioWaveformIcon aria-hidden="true" />
@@ -229,6 +265,14 @@ function MeetingRowView({
 	progress: ProgressSnapshot["entries"][number] | undefined;
 }) {
 	const client = useBridge();
+	const row = useRef<HTMLButtonElement>(null);
+
+	useEffect(() => {
+		if (active) {
+			row.current?.scrollIntoView?.({ block: "nearest" });
+		}
+	}, [active]);
+
 	return (
 		<ContextMenu>
 			<ContextMenuTrigger className="mx-2 mb-1 block">
@@ -244,6 +288,7 @@ function MeetingRowView({
 					onClick={() =>
 						send(client, "meetings.select", { meetingID: meeting.id })
 					}
+					ref={row}
 					type="button"
 				>
 					<div className="flex items-baseline gap-2.5 font-medium text-[13px]">
@@ -290,11 +335,7 @@ function MeetingRowView({
 			<ContextMenuPopup>
 				<ContextMenuItem
 					icon={<Trash2Icon />}
-					onClick={() => {
-						confirmAndDeleteMeeting(client, meeting).catch((cause: unknown) => {
-							console.error("bridge: delete failed", cause);
-						});
-					}}
+					onClick={() => deleteQuietly(client, meeting.id)}
 					variant="destructive"
 				>
 					Delete meeting…

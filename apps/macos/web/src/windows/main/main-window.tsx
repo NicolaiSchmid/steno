@@ -1,5 +1,5 @@
 import { useEffect, useRef } from "react";
-import { send, useBridge, useSnapshot } from "@/bridge/hooks";
+import { send, useBridge } from "@/bridge/hooks";
 import { MeetingDetail } from "./meeting-detail";
 import { MeetingList } from "./meeting-list";
 import { Sidebar } from "./sidebar";
@@ -15,18 +15,16 @@ export interface MainWindowProps {
 
 /**
  * The main window: sidebar (236), meeting list (320) and the reading
- * column. Tells the host the page is ready once, reports the window size
- * after a resize settles, and follows a deep link to a meeting.
+ * column. Tells the host the page is ready once and reports the window size
+ * after a resize settles. A deep link to a meeting is the host's to follow:
+ * it selects the meeting and the page shows `list.selection`.
  */
 export function MainWindow({
 	menuOpen = false,
 	pickerOpen = false,
 }: MainWindowProps) {
 	const client = useBridge();
-	const app = useSnapshot("app");
-	const list = useSnapshot("meetings.list");
 	const readySent = useRef(false);
-	const followed = useRef<string | undefined>(undefined);
 
 	useEffect(() => {
 		if (readySent.current) {
@@ -54,18 +52,6 @@ export function MainWindow({
 			window.removeEventListener("resize", onResize);
 		};
 	}, [client]);
-
-	const requested = app?.requestedMeetingID;
-	const selection = list?.selection;
-	useEffect(() => {
-		if (!requested || followed.current === requested) {
-			return;
-		}
-		followed.current = requested;
-		if (requested !== selection) {
-			send(client, "meetings.select", { meetingID: requested });
-		}
-	}, [client, requested, selection]);
 
 	return (
 		<div

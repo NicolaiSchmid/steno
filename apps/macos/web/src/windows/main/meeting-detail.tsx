@@ -2,6 +2,7 @@ import {
 	AudioWaveformIcon,
 	CheckCircle2Icon,
 	CircleAlertIcon,
+	ClockIcon,
 	FolderIcon,
 	MoreHorizontalIcon,
 	RefreshCwIcon,
@@ -10,7 +11,7 @@ import {
 	TextAlignStartIcon,
 	Trash2Icon,
 } from "lucide-react";
-import { useEffect, useState } from "react";
+import { type ReactNode, useEffect, useState } from "react";
 import type {
 	AppSnapshot,
 	MeetingDetailSnapshot,
@@ -31,13 +32,15 @@ import {
 	Pill,
 	RecordMark,
 	ScrollArea,
+	Select,
+	Switch,
 	Tabs,
 	TabsList,
 	TabsPanel,
 	TabsTab,
 } from "@/components/ui";
 import { cn } from "@/lib/cn";
-import { confirmAndDeleteMeeting } from "./delete-meeting";
+import { deleteMeeting } from "./delete-meeting";
 import {
 	firstSentence,
 	format,
@@ -173,10 +176,137 @@ function HeaderStop({ recording }: { recording: RecordingSnapshot }) {
 }
 
 /**
+ * "Keep the recording": the switch follows the host, shows the new position
+ * at once, and slides back when the host's alert was declined.
+ */
+function KeepAudioToggle({
+	keepsAudio,
+	disabled,
+}: {
+	keepsAudio: boolean;
+	disabled: boolean;
+}) {
+	const client = useBridge();
+	const [keeps, setKeeps] = useState(keepsAudio);
+
+	useEffect(() => {
+		setKeeps(keepsAudio);
+	}, [keepsAudio]);
+
+	async function change(next: boolean) {
+		const previous = keeps;
+		setKeeps(next);
+		try {
+			const reply = await client.call("meeting.setKeepAudio", { value: next });
+			if (!reply.confirmed) {
+				setKeeps(previous);
+			}
+		} catch (cause: unknown) {
+			console.error("bridge: meeting.setKeepAudio failed", cause);
+			setKeeps(previous);
+		}
+	}
+
+	return (
+		<span className="flex shrink-0 items-center gap-2 text-foreground">
+			<Switch
+				aria-label="Keep the recording"
+				checked={keeps}
+				data-testid="keep-audio"
+				disabled={disabled}
+				onCheckedChange={(next) => {
+					void change(next);
+				}}
+			/>
+			Keep the recording
+		</span>
+	);
+}
+
+const EXPORT_ICON: Record<
+	MeetingDetailSnapshot["export"]["status"],
+	{ icon: ReactNode; className: string }
+> = {
+	notConfigured: { icon: <ShareIcon />, className: "text-faint" },
+	pending: { icon: <ClockIcon />, className: "text-muted-foreground" },
+	delivered: { icon: <CheckCircle2Icon />, className: "text-primary" },
+	failed: { icon: <CircleAlertIcon />, className: "text-warning" },
+};
+
+/**
+ * The foot of the reading column: what happens to the recording, with the
+ * keep switch when the host offers it, and where the export stands, with
+ * Reveal in Finder and Export again when they apply.
+ */
+function DetailFooter({ detail }: { detail: MeetingDetailSnapshot }) {
+	const client = useBridge();
+	const status = EXPORT_ICON[detail.export.status];
+	return (
+		<footer
+			className="mt-10 flex flex-col gap-3 border-border border-t pt-4 text-[13px] text-muted-foreground leading-[1.4]"
+			data-testid="meeting-footer"
+		>
+			{detail.retention.showsKeepToggle ? (
+				<div className="flex items-center gap-3" data-testid="retention-row">
+					<AudioWaveformIcon
+						aria-hidden="true"
+						className="size-4 shrink-0 stroke-[1.75] text-faint"
+					/>
+					<span className="min-w-0 flex-1">
+						{formatRetention(detail.retention)}.
+					</span>
+					<KeepAudioToggle
+						disabled={detail.isBusy}
+						keepsAudio={detail.retention.keepsAudio}
+					/>
+				</div>
+			) : null}
+			<div
+				className="flex flex-wrap items-center gap-x-3 gap-y-2"
+				data-testid="export-status"
+			>
+				<span
+					className={cn(
+						"flex shrink-0 [&_svg]:size-4 [&_svg]:stroke-[1.75]",
+						status.className,
+					)}
+				>
+					{status.icon}
+				</span>
+				<span className="min-w-0 flex-1">{detail.export.message}</span>
+				{detail.export.canReveal ? (
+					<Button
+						data-testid="reveal-export"
+						onClick={() => send(client, "meeting.revealExport")}
+						size="sm"
+						variant="ghost"
+					>
+						<FolderIcon aria-hidden="true" />
+						Reveal in Finder
+					</Button>
+				) : null}
+				{detail.export.canReexport ? (
+					<Button
+						data-testid="export-again"
+						disabled={detail.isBusy}
+						onClick={() => send(client, "meeting.reexport")}
+						size="sm"
+						variant="outline"
+					>
+						<ShareIcon aria-hidden="true" />
+						Export again
+					</Button>
+				) : null}
+			</div>
+		</footer>
+	);
+}
+
+/**
  * The reading column for the selected meeting: the top bar with Export and
  * the actions menu, the setup banner, the eyebrow, title, people and tags,
- * then the tabs. Processing and failure replace the tab content; the notes
- * stay editable throughout.
+ * then the tabs and the footer. Processing and failure replace the tab
+ * content; the notes stay editable throughout.
  */
 export function MeetingDetail({
 	initialMenuOpen = false,
@@ -399,14 +529,24 @@ function DetailBody({
 							Reveal recording
 						</MenuItem>
 						<MenuSeparator />
+						{detail.retention.filesExist ? (
+							<MenuItem
+								data-testid="delete-recording"
+								disabled={detail.isBusy}
+								icon={<AudioWaveformIcon />}
+								onClick={() => send(client, "meeting.deleteRecordingNow")}
+								variant="destructive"
+							>
+								Delete recording now…
+							</MenuItem>
+						) : null}
 						<MenuItem
+							data-testid="delete-meeting"
 							icon={<Trash2Icon />}
 							onClick={() => {
-								confirmAndDeleteMeeting(client, detail).catch(
-									(cause: unknown) => {
-										console.error("bridge: delete failed", cause);
-									},
-								);
+								deleteMeeting(client, detail.id).catch((cause: unknown) => {
+									console.error("bridge: delete failed", cause);
+								});
 							}}
 							variant="destructive"
 						>
@@ -504,28 +644,55 @@ function DetailBody({
 						}}
 						value={tab}
 					>
-						<TabsList className="mb-[26px]">
-							<TabsTab data-testid="tab-summary" value="summary">
-								Summary
-							</TabsTab>
-							<TabsTab
-								count={detail.transcript.length || undefined}
-								data-testid="tab-transcript"
-								value="transcript"
-							>
-								Transcript
-							</TabsTab>
-							<TabsTab
-								count={detail.tasks.length || undefined}
-								data-testid="tab-tasks"
-								value="tasks"
-							>
-								Tasks
-							</TabsTab>
-							<TabsTab data-testid="tab-notes" value="notes">
-								Notes
-							</TabsTab>
-						</TabsList>
+						<div className="mb-[26px] flex flex-wrap items-center justify-between gap-3">
+							<TabsList>
+								<TabsTab data-testid="tab-summary" value="summary">
+									Summary
+								</TabsTab>
+								<TabsTab
+									count={detail.transcript.length || undefined}
+									data-testid="tab-transcript"
+									value="transcript"
+								>
+									Transcript
+								</TabsTab>
+								<TabsTab
+									count={detail.tasks.length || undefined}
+									data-testid="tab-tasks"
+									value="tasks"
+								>
+									Tasks
+								</TabsTab>
+								<TabsTab data-testid="tab-notes" value="notes">
+									Notes
+								</TabsTab>
+							</TabsList>
+							{tab === "summary" && detail.templates.length > 0 ? (
+								<span
+									className="flex items-center gap-2 text-muted-foreground text-xs"
+									data-testid="template-row"
+								>
+									Template
+									<Select
+										aria-label="Summary template"
+										className="max-w-[180px]"
+										data-testid="template-select"
+										disabled={detail.isBusy}
+										onValueChange={(templateID) => {
+											if (templateID && templateID !== detail.templateID) {
+												send(client, "meeting.setTemplate", { templateID });
+											}
+										}}
+										options={detail.templates.map((template) => ({
+											value: template.id,
+											label: template.name,
+										}))}
+										size="sm"
+										value={detail.templateID}
+									/>
+								</span>
+							) : null}
+						</div>
 						{TABS.map((item) => (
 							<TabsPanel
 								key={item}
@@ -536,6 +703,7 @@ function DetailBody({
 							</TabsPanel>
 						))}
 					</Tabs>
+					<DetailFooter detail={detail} />
 				</div>
 			</ScrollArea>
 		</>

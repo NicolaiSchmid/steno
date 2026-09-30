@@ -1,22 +1,14 @@
 import type { BridgeClient } from "@/bridge/client";
 
 /**
- * Deleting a meeting is the one destructive step the page asks the host to
- * confirm natively (Decision 6). The copy matches the SwiftUI dialog.
+ * Asks the host to delete a meeting. The host shows the confirmation alert
+ * itself (Decision 6) and replies with whether the user confirmed; the page
+ * changes nothing either way, the list snapshot that follows does.
  */
-export async function confirmAndDeleteMeeting(
+export async function deleteMeeting(
 	client: BridgeClient,
-	meeting: { id: string; title: string },
+	meetingID: string,
 ): Promise<boolean> {
-	const reply = await client.call("ui.confirmDestructive", {
-		title: `Delete “${meeting.title}”?`,
-		message:
-			"The transcript, summary, tasks and the recording on this Mac are removed. Files already exported to Obsidian stay. People stay.",
-		confirmTitle: "Delete",
-	});
-	if (!reply.confirmed) {
-		return false;
-	}
-	await client.call("meetings.delete", { meetingID: meeting.id });
-	return true;
+	const reply = await client.call("meetings.delete", { meetingID });
+	return reply.confirmed;
 }

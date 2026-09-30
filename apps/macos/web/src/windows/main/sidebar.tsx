@@ -3,12 +3,14 @@ import {
 	CircleAlertIcon,
 	ClockIcon,
 	InboxIcon,
+	MicOffIcon,
 	PhoneIcon,
 	SettingsIcon,
 	SmartphoneIcon,
+	TimerIcon,
 	UsersIcon,
 } from "lucide-react";
-import type { ReactNode } from "react";
+import { type ReactNode, useMemo } from "react";
 import type {
 	MeetingsListSnapshot,
 	RecordingSnapshot,
@@ -16,6 +18,7 @@ import type {
 import { send, useBridge, useSnapshot } from "@/bridge/hooks";
 import {
 	Button,
+	Callout,
 	Card,
 	MenuItem,
 	MenuPopup,
@@ -26,9 +29,10 @@ import {
 } from "@/components/ui";
 import { cn } from "@/lib/cn";
 import { format } from "./format";
-import { useElapsedSeconds } from "./use-now";
+import { useElapsedSeconds, useNow } from "./use-now";
 
 type Filter = MeetingsListSnapshot["filter"];
+type PermissionKind = RecordingSnapshot["deniedPermissions"][number];
 
 const FILTERS: readonly { id: Filter; label: string; icon: ReactNode }[] = [
 	{ id: "all", label: "All", icon: <InboxIcon /> },
@@ -37,8 +41,31 @@ const FILTERS: readonly { id: Filter; label: string; icon: ReactNode }[] = [
 	{ id: "failed", label: "Failed", icon: <CircleAlertIcon /> },
 ];
 
+/** What a denied permission stops Steno from doing, and what allows it. */
+const DENIED_COPY: Record<
+	PermissionKind,
+	{ title: string; description: string }
+> = {
+	microphone: {
+		title: "Steno can't use the microphone.",
+		description: "Allow it in System Settings to record.",
+	},
+	systemAudio: {
+		title: "Steno can't hear the other side of calls.",
+		description: "Allow system audio recording in System Settings.",
+	},
+	calendar: {
+		title: "Steno can't see your calendar.",
+		description: "Allow calendar access in System Settings.",
+	},
+	localNetwork: {
+		title: "Steno can't reach your iPhone.",
+		description: "Allow local network access in System Settings.",
+	},
+};
+
 /** The Record control: one primary button whose words follow the recorder. */
-function RecordControl({
+function RecordButton({
 	recording,
 }: {
 	recording: RecordingSnapshot | undefined;
@@ -52,7 +79,7 @@ function RecordControl({
 	if (state === "recording") {
 		return (
 			<Button
-				className="mb-3 h-9 w-full justify-start"
+				className="h-9 w-full justify-start"
 				data-testid="sidebar-stop"
 				onClick={() => send(client, "recording.stop")}
 				size="lg"
@@ -69,7 +96,7 @@ function RecordControl({
 	if (state === "starting" || state === "stopping") {
 		return (
 			<Button
-				className="mb-3 h-9 w-full justify-start"
+				className="h-9 w-full justify-start"
 				data-testid={state === "starting" ? "sidebar-record" : "sidebar-stop"}
 				disabled
 				size="lg"
@@ -82,7 +109,7 @@ function RecordControl({
 	}
 	return (
 		<SplitButton
-			className="mb-3 w-full"
+			className="w-full"
 			data-testid="sidebar-record"
 			menu={
 				<MenuPopup align="end" sideOffset={4}>
@@ -113,6 +140,136 @@ function RecordControl({
 			<RecordMark />
 			Record
 		</SplitButton>
+	);
+}
+
+/**
+ * The recorder is about to stop on its own (the call ended): the seconds
+ * left, counted down from the snapshot's figure, and a way to keep going.
+ */
+function AutoStopNotice({
+	autoStop,
+}: {
+	autoStop: NonNullable<RecordingSnapshot["autoStop"]>;
+}) {
+	const client = useBridge();
+	// The host's figure is taken as of the moment it arrived; the page counts
+	// down from there until a snapshot with a new figure resets it.
+	const anchor = useMemo(
+		() => ({ at: Date.now(), seconds: autoStop.remainingSeconds }),
+		[autoStop.remainingSeconds],
+	);
+	const now = useNow(true);
+	const remaining = anchor.seconds - (now - anchor.at) / 1000;
+	const countdown = (
+		<span className="font-mono tabular-nums">
+			{format.countdown(remaining)}
+		</span>
+	);
+	return (
+		<Callout
+			actions={
+				<Button
+					data-testid="keep-recording"
+					onClick={() => send(client, "recording.keepGoing")}
+					size="sm"
+					variant="outline"
+				>
+					Keep recording
+				</Button>
+			}
+			data-testid="auto-stop"
+			description={
+				/[.!?]$/.test(autoStop.reason) ? autoStop.reason : `${autoStop.reason}.`
+			}
+			icon={<TimerIcon aria-hidden="true" />}
+			size="sm"
+			title={<>Stops in {countdown}</>}
+			variant="live"
+		/>
+	);
+}
+
+/** A warning or error from the recorder, kept until the user dismisses it. */
+function RecorderMessage({
+	message,
+	kind,
+}: {
+	message: string;
+	kind: "warning" | "error";
+}) {
+	const client = useBridge();
+	return (
+		<Callout
+			actions={
+				<Button
+					data-testid="dismiss-recorder-message"
+					onClick={() => send(client, "recording.clearMessages")}
+					size="sm"
+					variant="ghost"
+				>
+					Dismiss
+				</Button>
+			}
+			data-testid={`recorder-${kind}`}
+			icon={<CircleAlertIcon aria-hidden="true" />}
+			size="sm"
+			title={message}
+			variant="warning"
+		/>
+	);
+}
+
+/** A permission the recorder needs and does not have. */
+function DeniedPermission({ kind }: { kind: PermissionKind }) {
+	const client = useBridge();
+	const copy = DENIED_COPY[kind];
+	return (
+		<Callout
+			actions={
+				<Button
+					data-testid={`fix-${kind}`}
+					onClick={() => send(client, "system.openSystemSettings", { kind })}
+					size="sm"
+					variant="outline"
+				>
+					Fix in System Settings
+				</Button>
+			}
+			data-testid={`denied-${kind}`}
+			description={copy.description}
+			icon={<MicOffIcon aria-hidden="true" />}
+			size="sm"
+			title={copy.title}
+			variant="warning"
+		/>
+	);
+}
+
+/**
+ * The Record control and what the recorder has to say beneath it: the
+ * auto-stop countdown, a warning or error, and any permission it is missing.
+ */
+function RecordControl({
+	recording,
+}: {
+	recording: RecordingSnapshot | undefined;
+}) {
+	return (
+		<div className="mb-3 flex flex-col gap-1.5">
+			<RecordButton recording={recording} />
+			{recording?.autoStop && recording.state === "recording" ? (
+				<AutoStopNotice autoStop={recording.autoStop} />
+			) : null}
+			{recording?.error ? (
+				<RecorderMessage kind="error" message={recording.error} />
+			) : recording?.warning ? (
+				<RecorderMessage kind="warning" message={recording.warning} />
+			) : null}
+			{recording?.deniedPermissions.map((kind) => (
+				<DeniedPermission key={kind} kind={kind} />
+			))}
+		</div>
 	);
 }
 

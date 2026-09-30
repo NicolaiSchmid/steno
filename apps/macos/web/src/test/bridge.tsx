@@ -19,14 +19,16 @@ export interface BridgeHarness {
 
 /**
  * A client over the mock transport with the fixture snapshots (bent by
- * `query`, as the page's `?scenario=` would) and the fixture replies, ready
- * before it returns so the first render sees the data.
+ * `query`, as the page's `?scenario=` would, then by `overrides`) and the
+ * fixture replies (`replyOverrides` win, per method), ready before it
+ * returns so the first render sees the data.
  */
 export async function createBridgeHarness(
 	query = "",
 	overrides: FixtureMap = {},
+	replyOverrides: FixtureMap = {},
 ): Promise<BridgeHarness> {
-	const replies = await loadFixtureReplies();
+	const replies = { ...(await loadFixtureReplies()), ...replyOverrides };
 	const transport = createMockTransport({
 		snapshots: async () => ({
 			...applyScenario(
