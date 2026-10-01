@@ -135,7 +135,6 @@ final class OnboardingViewModel {
       page = .setup
       finishIfSetupHandled()
     }
-    advanceIfPermissionsHandled()
   }
 
   /// One sentence on what the rule does to the files, then where to change
@@ -189,7 +188,6 @@ final class OnboardingViewModel {
       steps[index].state = state
     }
     requesting = nil
-    advanceIfPermissionsHandled()
   }
 
   func openSystemSettings(_ kind: PermissionKind) {
@@ -200,14 +198,6 @@ final class OnboardingViewModel {
   func skip(_ kind: PermissionKind) {
     guard !kind.isRequired else { return }
     skipped.insert(kind)
-    advanceIfPermissionsHandled()
-  }
-
-  /// Page 1 moves on by itself once every step is handled (required ones
-  /// granted, optional ones granted or skipped), as page 2 finishes by
-  /// itself; only from a change to a step, so Back stays on page 1.
-  private func advanceIfPermissionsHandled() {
-    if page == .permissions, permissionsHandled { advance() }
   }
 
   /// Done or Later on page 1. Page 2 with both rows already handled (an

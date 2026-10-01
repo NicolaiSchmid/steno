@@ -252,9 +252,13 @@ final class LaunchSmokeTests: XCTestCase {
   /// exact and on the full text. The "Optional" badge beside a row title is
   /// a static text of its own.
   private func pageText(_ text: String, in window: XCUIElement) -> XCUIElement {
-    // A predicate, not the subscript: a sentence with a colon is not a valid
-    // subscript identifier.
-    window.staticTexts.matching(NSPredicate(format: "identifier == %@", text)).firstMatch
+    // A predicate, not the subscript (a sentence with a colon is not a valid
+    // subscript identifier), over the attributes WebKit may carry the text
+    // in: `value` for a paragraph or a row title, `label` or `identifier`
+    // where it sets them.
+    window.staticTexts.matching(
+      NSPredicate(format: "value == %@ OR label == %@ OR identifier == %@", text, text, text)
+    ).firstMatch
   }
 
   /// The onboarding window hosts the web page: page 1 renders its intro
@@ -386,9 +390,10 @@ final class LaunchSmokeTests: XCTestCase {
       let later = window.buttons["Later"].firstMatch
       XCTAssertTrue(later.waitForExistence(timeout: 5), "Later is missing")
       later.click()
-      XCTAssertTrue(
-        window.buttons["Finish"].firstMatch.waitForExistence(timeout: 10),
-        "Later did not reach page 2")
+      if !window.buttons["Finish"].firstMatch.waitForExistence(timeout: 10) {
+        attachLaunchLog(named: "no-page-2", state: app)
+        XCTFail("Later did not reach page 2")
+      }
       XCTAssertTrue(
         pageText("Obsidian vault", in: window).waitForExistence(timeout: 5),
         "page 2 rows are missing")

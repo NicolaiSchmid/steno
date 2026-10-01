@@ -126,10 +126,13 @@ final class OnboardingBridge: BridgeHost {
 
     case .onboardingRequest:
       await model.request(try permission(request))
+      advanceIfHandled()
     case .onboardingSkip:
       model.skip(try permission(request))
+      advanceIfHandled()
     case .onboardingRefresh:
       await model.load()
+      advanceIfHandled()
     case .onboardingAdvance:
       model.advance()
     case .onboardingBack:
@@ -173,6 +176,15 @@ final class OnboardingBridge: BridgeHost {
         message: "The onboarding window does not answer \(request.method.rawValue).")
     }
     return nil
+  }
+
+  /// Page 1 moves on by itself once every step is handled (required ones
+  /// granted, optional ones granted or skipped), as the SwiftUI page did on
+  /// that change. A window rule, not the model's: the model's own tests pin
+  /// that page 1 never finishes by itself. Only after a command that can
+  /// change a step, so Back from page 2 stays on page 1.
+  private func advanceIfHandled() {
+    if model.page == .permissions, model.permissionsHandled { model.advance() }
   }
 
   private func permission(_ request: BridgeRequest) throws -> PermissionKind {
