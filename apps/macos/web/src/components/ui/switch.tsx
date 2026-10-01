@@ -15,8 +15,8 @@ export function Switch({ className, ...props }: SwitchProps) {
 	return (
 		<BaseSwitch.Root
 			className={cn(
-				"group relative inline-flex h-[18px] w-[30px] shrink-0 items-center rounded-full p-[2px] outline-none",
-				"transition-[background-color,box-shadow] duration-200 ease-standard",
+				"group relative inline-flex h-[18px] w-[30px] shrink-0 items-center rounded-full p-0.5 outline-none",
+				"transition-[background-color,box-shadow] duration-(--duration-surface) ease-standard",
 				"data-checked:bg-primary data-unchecked:bg-input",
 				"focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-1 focus-visible:ring-offset-background",
 				"data-disabled:opacity-64",
@@ -24,7 +24,7 @@ export function Switch({ className, ...props }: SwitchProps) {
 			)}
 			{...props}
 		>
-			<BaseSwitch.Thumb className="size-[14px] rounded-full bg-background shadow-sm transition-[translate,scale] duration-(--duration-functional) ease-standard group-active:scale-x-110 data-checked:translate-x-[12px] dark:bg-foreground" />
+			<BaseSwitch.Thumb className="size-3.5 rounded-full bg-background shadow-sm transition-[translate,scale] duration-(--duration-functional) ease-standard group-active:scale-x-110 data-checked:translate-x-3 dark:bg-foreground" />
 		</BaseSwitch.Root>
 	);
 }

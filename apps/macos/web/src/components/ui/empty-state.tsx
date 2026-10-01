@@ -8,7 +8,7 @@ import { cn } from "@/lib/cn";
  * optional action beneath. `id` names the block and its title
  * (`<id>-title`) for the screens and the host tests.
  */
-export const emptyStateVariants = cva(
+const emptyStateVariants = cva(
 	"flex min-w-0 flex-col items-center justify-center text-balance text-center",
 	{
 		variants: {
@@ -21,8 +21,14 @@ export const emptyStateVariants = cva(
 	},
 );
 
+/** The icon tile and the two ghosts fanned behind it share one face. */
+const tileClass = "rounded-md border border-border bg-card";
+
 export const emptyStateIconVariants = cva(
-	"relative isolate flex size-9 items-center justify-center rounded-md border border-border bg-card shadow-xs [&>svg]:size-[18px]",
+	[
+		tileClass,
+		"relative isolate flex size-9 items-center justify-center shadow-xs [&>svg]:size-[18px]",
+	],
 	{
 		variants: {
 			variant: {
@@ -34,8 +40,7 @@ export const emptyStateIconVariants = cva(
 	},
 );
 
-const ghostClass =
-	"absolute inset-0 -z-10 rounded-md border border-border bg-card";
+const ghostClass = cn(tileClass, "absolute inset-0 -z-10");
 
 const emptyStateTitleVariants = cva("m-0 font-semibold text-foreground", {
 	variants: {

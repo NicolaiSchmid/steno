@@ -40,14 +40,14 @@ export function DialogPopup({
 		<BaseDialog.Portal container={container}>
 			<BaseDialog.Backdrop
 				className={cn(
-					"dialog-backdrop fixed inset-0 z-40 transition-opacity duration-200 ease-in-out",
+					"dialog-backdrop fixed inset-0 z-40 transition-opacity duration-(--duration-surface) ease-in-out",
 					"data-ending-style:opacity-0 data-starting-style:opacity-0",
 				)}
 			/>
 			<BaseDialog.Popup
 				className={cn(
 					"dialog-glass fixed top-1/2 left-1/2 z-50 flex max-h-[calc(100vh-32px)] w-full max-w-md -translate-x-1/2 -translate-y-1/2 flex-col rounded-2xl border text-foreground shadow-dialog outline-none",
-					"transition-[opacity,scale] duration-200 ease-in-out",
+					"transition-[opacity,scale] duration-(--duration-surface) ease-in-out",
 					"data-starting-style:scale-[0.98] data-starting-style:opacity-0",
 					"data-ending-style:scale-[0.98] data-ending-style:opacity-0",
 					className,
@@ -132,12 +132,17 @@ export function DialogCloseButton({
 	);
 }
 
+/** The action band at the foot of a dialog or a page: trailing buttons on the muted fill. */
+export const footerBandClass =
+	"flex items-center justify-end gap-2 border-border border-t bg-muted/72 px-6 py-4";
+
 /** The action row at the bottom of a dialog on the muted band. */
 export function DialogFooter({ className, ...props }: ComponentProps<"div">) {
 	return (
 		<div
 			className={cn(
-				"flex items-center justify-end gap-2 rounded-b-[calc(var(--radius-2xl)-1px)] border-border border-t bg-muted/72 px-6 py-4",
+				footerBandClass,
+				"rounded-b-[calc(var(--radius-2xl)-1px)]",
 				className,
 			)}
 			{...props}

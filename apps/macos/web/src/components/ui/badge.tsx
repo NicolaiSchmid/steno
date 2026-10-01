@@ -3,7 +3,7 @@ import type { ComponentProps } from "react";
 import { cn } from "@/lib/cn";
 
 /**
- * An 18 px label in a row's meta line: meeting kind, "No summary", "Live".
+ * An 18 px label in a row's meta line: a tag, "No summary", "Allowed".
  * Tints use the 8 percent surface with the 700-weight text (16 percent and
  * the 400 in dark); `sm` is the 16 px counter.
  */
@@ -13,11 +13,8 @@ export const badgeVariants = cva(
 		variants: {
 			variant: {
 				outline: "border-input bg-background text-foreground dark:bg-input/32",
-				secondary: "bg-accent text-muted-foreground",
 				warning: "bg-warning-surface text-warning-foreground",
-				destructive: "bg-destructive-surface text-destructive-foreground",
 				success: "bg-success/8 text-success-foreground dark:bg-success/16",
-				live: "bg-primary/8 text-primary dark:bg-primary/16",
 			},
 			size: {
 				default: "",

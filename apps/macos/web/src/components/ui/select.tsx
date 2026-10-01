@@ -3,6 +3,7 @@ import { cva } from "class-variance-authority";
 import { CheckIcon, ChevronDownIcon } from "lucide-react";
 import type { ComponentProps, ReactNode } from "react";
 import { cn } from "@/lib/cn";
+import { fieldFrameClass } from "./input";
 import { popupSurfaceClass } from "./menu";
 
 export interface SelectOption<V extends string = string> {
@@ -12,23 +13,21 @@ export interface SelectOption<V extends string = string> {
 }
 
 /**
- * The trigger: a field at 10 px radius on the canvas colour with the 1 px
- * edge highlight at rest and the field ring on focus. Heights: xs 24,
+ * The trigger: the field frame with the field ring on focus. Heights: xs 24,
  * sm 28, md 32.
  */
-export const selectTriggerVariants = cva(
+const selectTriggerVariants = cva(
 	[
-		"relative inline-flex min-w-0 select-none items-center justify-between gap-2 rounded-lg border border-input bg-background text-left text-foreground text-sm shadow-xs outline-none",
-		"transition-[color,box-shadow,background-color] duration-(--duration-functional) ease-standard",
-		"before:pointer-events-none before:absolute before:inset-0 before:rounded-[calc(var(--radius-lg)-1px)] before:shadow-[var(--edge-highlight)]",
-		"focus-visible:border-ring focus-visible:shadow-none focus-visible:ring-[3px] focus-visible:ring-ring/24",
+		fieldFrameClass,
+		"inline-flex min-w-0 select-none items-center justify-between gap-2 text-left text-sm outline-none",
+		"focus-visible:border-ring focus-visible:shadow-none focus-visible:ring-[3px] focus-visible:ring-ring/24 focus-visible:before:shadow-none",
 		"data-disabled:pointer-events-none data-placeholder:text-faint data-disabled:opacity-64",
-		"dark:bg-input/32 [&_svg]:pointer-events-none [&_svg]:shrink-0",
+		"[&_svg]:pointer-events-none [&_svg]:shrink-0",
 	],
 	{
 		variants: {
 			size: {
-				xs: "h-6 gap-1 rounded-md px-[7px] text-xs before:rounded-[calc(var(--radius-md)-1px)]",
+				xs: "h-6 gap-1 rounded-md px-[7px] text-xs",
 				sm: "h-7 px-[9px]",
 				md: "h-8 px-[11px]",
 			},
@@ -109,7 +108,7 @@ export function Select<V extends string = string>({
 					sideOffset={4}
 				>
 					<BaseSelect.Popup
-						className={cn(popupSurfaceClass, "min-w-(--anchor-width)")}
+						className={cn(popupSurfaceClass, "min-w-(--anchor-width) p-1")}
 					>
 						<BaseSelect.List>
 							{options.map((option) => (

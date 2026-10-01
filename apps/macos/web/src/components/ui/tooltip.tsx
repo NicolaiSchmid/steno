@@ -35,9 +35,8 @@ export function Tooltip({
 				>
 					<BaseTooltip.Popup
 						className={cn(
-							"relative max-w-80 rounded-md border border-border bg-popover px-2 py-1 text-foreground text-xs shadow-md outline-none",
+							"edge-highlight max-w-80 rounded-md border border-border bg-popover px-2 py-1 text-foreground text-xs shadow-md outline-none",
 							"origin-(--transform-origin) transition-[opacity,scale] duration-(--duration-functional) ease-standard",
-							"before:pointer-events-none before:absolute before:inset-0 before:rounded-[calc(var(--radius-md)-1px)] before:shadow-[var(--edge-highlight)]",
 							"data-starting-style:scale-[0.98] data-starting-style:opacity-0",
 							"data-ending-style:scale-[0.98] data-ending-style:opacity-0",
 						)}

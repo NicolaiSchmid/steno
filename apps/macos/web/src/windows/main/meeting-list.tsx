@@ -1,15 +1,7 @@
-import {
-	AudioWaveformIcon,
-	PhoneIcon,
-	SearchIcon,
-	SmartphoneIcon,
-	Trash2Icon,
-	UsersIcon,
-} from "lucide-react";
+import { AudioWaveformIcon, SearchIcon, Trash2Icon } from "lucide-react";
 import {
 	type ChangeEvent,
 	type KeyboardEvent,
-	type ReactNode,
 	useEffect,
 	useRef,
 	useState,
@@ -38,14 +30,9 @@ import {
 import { cn } from "@/lib/cn";
 import { deleteMeeting } from "./delete-meeting";
 import { firstSentence, format, formatSource } from "./format";
+import { SOURCE } from "./source";
 
 export const QUERY_DEBOUNCE_MS = 200;
-
-const SOURCE_ICON: Record<MeetingRow["source"], ReactNode> = {
-	call: <PhoneIcon aria-hidden="true" />,
-	inPerson: <UsersIcon aria-hidden="true" />,
-	phone: <SmartphoneIcon aria-hidden="true" />,
-};
 
 /** The third line of a row when the host sent no preview. */
 export function rowPreview(
@@ -267,42 +254,45 @@ export function MeetingList() {
 	);
 }
 
+type RowState = Exclude<MeetingRow["state"], "ready">;
+
+const TONE: Record<RowState, string> = {
+	recording: "inline-flex items-center gap-1 text-primary",
+	failed: "text-destructive-foreground",
+	processing: "text-info-foreground",
+	queued: "text-info-foreground",
+};
+
+const LABEL: Record<RowState, string> = {
+	recording: "Live",
+	failed: "Failed",
+	processing: "Working",
+	queued: "Working",
+};
+
 /** Line 1's trailing word: the row's state while it is not simply done. */
 function RowStatus({ meeting }: { meeting: MeetingRow }) {
-	switch (meeting.state) {
-		case "recording":
-			return (
-				<span className="ml-auto inline-flex items-center gap-1 font-medium text-primary">
-					<span
-						aria-hidden="true"
-						className="size-1.5 animate-status-pulse rounded-full bg-primary"
-					/>
-					Live
-				</span>
-			);
-		case "failed":
-			return (
-				<span className="ml-auto font-medium text-destructive-foreground">
-					Failed
-				</span>
-			);
-		case "processing":
-		case "queued":
-			return (
-				<span className="ml-auto font-medium text-info-foreground">
-					Working
-				</span>
-			);
-		case "ready":
-			return (
-				<time
-					className="ml-auto text-muted-foreground tabular-nums"
-					dateTime={meeting.startedAt}
-				>
-					{format.time(meeting.startedAt)}
-				</time>
-			);
+	if (meeting.state === "ready") {
+		return (
+			<time
+				className="text-muted-foreground tabular-nums"
+				dateTime={meeting.startedAt}
+			>
+				{format.time(meeting.startedAt)}
+			</time>
+		);
 	}
+	return (
+		<span className={cn("font-medium", TONE[meeting.state])}>
+			{meeting.state === "recording" ? (
+				<span
+					aria-hidden="true"
+					className="size-1.5 animate-status-pulse rounded-full bg-primary"
+				/>
+			) : null}
+			{LABEL[meeting.state]}
+		</span>
+	);
 }
 
 /** One meeting as T3 Code's thread card row: source and state, title, meta. */
@@ -341,7 +331,7 @@ function MeetingRowView({
 					type="button"
 				>
 					<div className="flex h-5 min-w-0 items-center gap-1.5 text-xs [&>svg]:size-4 [&>svg]:shrink-0 [&>svg]:text-sidebar-icon">
-						{SOURCE_ICON[meeting.source]}
+						{SOURCE[meeting.source].icon}
 						<span className="min-w-0 flex-1 truncate font-medium text-muted-foreground">
 							{formatSource(meeting.source)}
 						</span>

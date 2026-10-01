@@ -43,15 +43,12 @@ export {
 	DialogPopup,
 	DialogTitle,
 	DialogTrigger,
+	footerBandClass,
 } from "./dialog";
 export type { DisclosureProps } from "./disclosure";
 export { Disclosure } from "./disclosure";
 export type { EmptyStateProps } from "./empty-state";
-export {
-	EmptyState,
-	emptyStateIconVariants,
-	emptyStateVariants,
-} from "./empty-state";
+export { EmptyState, emptyStateIconVariants } from "./empty-state";
 export type { FormCardProps, FormRowProps, FormValueProps } from "./form-row";
 export {
 	FormCard,
@@ -61,14 +58,9 @@ export {
 	formValueVariants,
 } from "./form-row";
 export type { BreadcrumbProps, HeaderRowProps } from "./header";
-export { Breadcrumb, HeaderRow, headerRowVariants } from "./header";
+export { Breadcrumb, HeaderRow } from "./header";
 export type { InputProps, SearchInputProps } from "./input";
-export {
-	Input,
-	inputVariants,
-	SearchInput,
-	searchInputVariants,
-} from "./input";
+export { fieldFrameClass, Input, inputVariants, SearchInput } from "./input";
 export type { KbdProps } from "./kbd";
 export { Kbd, kbdVariants } from "./kbd";
 export type {
@@ -88,8 +80,6 @@ export {
 	menuItemVariants,
 	popupSurfaceClass,
 } from "./menu";
-export type { PillProps } from "./pill";
-export { Pill, pillVariants } from "./pill";
 export type {
 	PopoverPopupProps,
 	PopoverProps,
@@ -113,7 +103,9 @@ export { ScrollArea } from "./scroll-area";
 export type { SectionLabelProps } from "./section-label";
 export { SectionLabel } from "./section-label";
 export type { SelectOption, SelectProps } from "./select";
-export { Select, selectTriggerVariants } from "./select";
+export { Select } from "./select";
+export type { SidebarColumnProps } from "./sidebar-column";
+export { SidebarColumn } from "./sidebar-column";
 export type { SidebarRowProps } from "./sidebar-row";
 export { SidebarRow, sidebarRowVariants } from "./sidebar-row";
 export type { SplitButtonProps } from "./split-button";

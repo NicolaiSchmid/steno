@@ -20,11 +20,11 @@ import {
 	Button,
 	Callout,
 	Card,
-	HeaderRow,
 	MenuItem,
 	MenuPopup,
 	RecordMark,
 	SectionLabel,
+	SidebarColumn,
 	SidebarRow,
 	SplitButton,
 } from "@/components/ui";
@@ -88,7 +88,7 @@ function RecordButton({
 				size="lg"
 				variant="primary"
 			>
-				{state === "recording" ? <RecordMark pulse /> : <RecordMark />}
+				<RecordMark pulse={state === "recording"} />
 				{state === "recording"
 					? "Stop"
 					: state === "starting"
@@ -281,91 +281,91 @@ export function Sidebar() {
 	const phone = app?.phone;
 
 	return (
-		<aside className="surface-grain flex min-h-0 flex-col border-sidebar-border border-r bg-sidebar">
-			<HeaderRow inset="sm" />
-			<div className="flex flex-col gap-1 p-2">
-				<RecordControl recording={recording} />
-				<SectionLabel>Meetings</SectionLabel>
-				{FILTERS.map((item) => (
-					<SidebarRow
-						active={list?.filter === item.id}
-						count={list?.counts[item.id]}
-						data-testid={`nav-${item.id}`}
-						icon={item.icon}
-						key={item.id}
-						onClick={() =>
-							send(client, "meetings.setFilter", { filter: item.id })
-						}
-					>
-						{item.label}
-					</SidebarRow>
-				))}
-				{list && list.tags.length > 0 ? (
-					<>
-						<SectionLabel>Tags</SectionLabel>
-						{list.tags.map((tag) => {
-							const active = list.tagFilter === tag.name;
-							return (
-								<SidebarRow
-									active={active}
-									data-testid={`tag-${tag.name}`}
-									key={tag.name}
-									onClick={() =>
-										send(
-											client,
-											"meetings.setTagFilter",
-											active ? {} : { tag: tag.name },
-										)
-									}
-									variant="tag"
-								>
-									{tag.name}
-								</SidebarRow>
-							);
-						})}
-					</>
-				) : null}
-			</div>
-			<div className="mt-auto flex flex-col gap-2 px-2 py-2">
-				{phone ? (
-					<Card
-						className="flex items-center gap-2"
-						data-testid="phone-card"
-						padding="sm"
-						variant="sidebar"
-					>
-						<SmartphoneIcon
-							aria-hidden="true"
-							className="size-4 shrink-0 text-sidebar-icon"
-						/>
-						<span className="min-w-0 flex-1 text-2xs text-sidebar-muted-foreground">
-							<span className="block truncate font-medium text-foreground text-xs">
-								{phone.name}
+		<SidebarColumn
+			footer={
+				<>
+					{phone ? (
+						<Card
+							className="flex items-center gap-2"
+							data-testid="phone-card"
+							padding="sm"
+							variant="sidebar"
+						>
+							<SmartphoneIcon
+								aria-hidden="true"
+								className="size-4 shrink-0 text-sidebar-icon"
+							/>
+							<span className="min-w-0 flex-1 text-2xs text-sidebar-muted-foreground">
+								<span className="block truncate font-medium text-foreground text-xs">
+									{phone.name}
+								</span>
+								{phone.lastSyncAt
+									? `Synced ${format.relative(phone.lastSyncAt)}`
+									: "Not synced yet"}
 							</span>
-							{phone.lastSyncAt
-								? `Synced ${format.relative(phone.lastSyncAt)}`
-								: "Not synced yet"}
-						</span>
-						<span
-							aria-label={phone.isReachable ? "Connected" : "Not connected"}
-							className={cn(
-								"size-[7px] shrink-0 rounded-full",
-								phone.isReachable
-									? "bg-primary-2 shadow-[0_0_0_3px_var(--primary-soft)]"
-									: "bg-faint",
-							)}
-							role="img"
-						/>
-					</Card>
-				) : null}
+							<span
+								aria-label={phone.isReachable ? "Connected" : "Not connected"}
+								className={cn(
+									"size-[7px] shrink-0 rounded-full",
+									phone.isReachable
+										? "bg-primary-2 shadow-[0_0_0_3px_var(--primary-soft)]"
+										: "bg-faint",
+								)}
+								role="img"
+							/>
+						</Card>
+					) : null}
+					<SidebarRow
+						data-testid="nav-settings"
+						icon={<SettingsIcon />}
+						onClick={() => send(client, "window.open", { window: "settings" })}
+					>
+						Settings
+					</SidebarRow>
+				</>
+			}
+		>
+			<RecordControl recording={recording} />
+			<SectionLabel>Meetings</SectionLabel>
+			{FILTERS.map((item) => (
 				<SidebarRow
-					data-testid="nav-settings"
-					icon={<SettingsIcon />}
-					onClick={() => send(client, "window.open", { window: "settings" })}
+					active={list?.filter === item.id}
+					count={list?.counts[item.id]}
+					data-testid={`nav-${item.id}`}
+					icon={item.icon}
+					key={item.id}
+					onClick={() =>
+						send(client, "meetings.setFilter", { filter: item.id })
+					}
 				>
-					Settings
+					{item.label}
 				</SidebarRow>
-			</div>
-		</aside>
+			))}
+			{list && list.tags.length > 0 ? (
+				<>
+					<SectionLabel>Tags</SectionLabel>
+					{list.tags.map((tag) => {
+						const active = list.tagFilter === tag.name;
+						return (
+							<SidebarRow
+								active={active}
+								data-testid={`tag-${tag.name}`}
+								key={tag.name}
+								onClick={() =>
+									send(
+										client,
+										"meetings.setTagFilter",
+										active ? {} : { tag: tag.name },
+									)
+								}
+								variant="tag"
+							>
+								{tag.name}
+							</SidebarRow>
+						);
+					})}
+				</>
+			) : null}
+		</SidebarColumn>
 	);
 }

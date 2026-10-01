@@ -7,18 +7,15 @@ import { cn } from "@/lib/cn";
  * leading edge, the actions at the trailing edge. `inset` is the horizontal
  * padding: `sm` for the sidebar and list columns, `md` for content.
  */
-export const headerRowVariants = cva(
-	"flex h-[52px] min-h-[52px] shrink-0 items-center gap-3",
-	{
-		variants: {
-			inset: {
-				sm: "px-3",
-				md: "px-5",
-			},
+const headerRowVariants = cva("flex h-[52px] shrink-0 items-center gap-3", {
+	variants: {
+		inset: {
+			sm: "px-3",
+			md: "px-5",
 		},
-		defaultVariants: { inset: "md" },
 	},
-);
+	defaultVariants: { inset: "md" },
+});
 
 export interface HeaderRowProps
 	extends ComponentProps<"header">,
@@ -39,8 +36,6 @@ export interface BreadcrumbProps
 	items: ReactNode[];
 }
 
-const itemClass = "min-w-0 truncate";
-
 /** The trail in a header row: muted parents, a faint slash, the page in full colour. */
 export function Breadcrumb({ className, items, ...props }: BreadcrumbProps) {
 	const last = items.length - 1;
@@ -53,11 +48,12 @@ export function Breadcrumb({ className, items, ...props }: BreadcrumbProps) {
 			{...props}
 		>
 			{items.map((item, index) => {
+				// The trail is positional; a repeated title is still a distinct crumb.
 				const key = index;
 				return index === last ? (
 					<li
 						aria-current="page"
-						className={cn(itemClass, "text-foreground")}
+						className="min-w-0 truncate text-foreground"
 						key={key}
 					>
 						{item}

@@ -64,7 +64,6 @@ export function SetupPage({ onboarding }: { onboarding: OnboardingSnapshot }) {
 					<Button
 						data-testid="onboarding-back"
 						onClick={() => send(client, "onboarding.back")}
-						size="md"
 						variant="outline"
 					>
 						Back
@@ -72,7 +71,6 @@ export function SetupPage({ onboarding }: { onboarding: OnboardingSnapshot }) {
 					<Button
 						data-testid="onboarding-finish"
 						onClick={() => send(client, "onboarding.finish")}
-						size="md"
 						variant="primary"
 					>
 						Finish

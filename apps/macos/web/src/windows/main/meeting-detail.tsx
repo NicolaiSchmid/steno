@@ -27,6 +27,7 @@ import {
 	Button,
 	Callout,
 	EmptyState,
+	formRowIconVariants,
 	HeaderRow,
 	Menu,
 	MenuItem,
@@ -53,6 +54,7 @@ import {
 } from "./format";
 import { NotesTab } from "./notes-tab";
 import { ProcessingCard } from "./processing-card";
+import { SOURCE } from "./source";
 import { SummaryTab } from "./summary-tab";
 import { TagEditor } from "./tag-editor";
 import { TasksTab } from "./tasks-tab";
@@ -80,12 +82,6 @@ function firstPickable(detail: MeetingDetailSnapshot) {
 		) ?? unconfirmed[0]
 	);
 }
-
-const SOURCE_DOT: Record<MeetingDetailSnapshot["source"], string> = {
-	call: "before:bg-p4",
-	inPerson: "before:bg-p3",
-	phone: "before:bg-p2",
-};
 
 export interface MeetingDetailProps {
 	/** Opens the actions menu on mount (the screens). */
@@ -169,7 +165,7 @@ function HeaderStop({ recording }: { recording: RecordingSnapshot }) {
 			size="sm"
 			variant="primary"
 		>
-			{stopping ? <RecordMark /> : <RecordMark pulse />}
+			<RecordMark pulse={!stopping} />
 			{stopping ? "Stopping…" : "Stop"}
 			{!stopping ? (
 				<span className="font-mono font-normal text-xs tabular-nums">
@@ -230,12 +226,12 @@ function KeepAudioToggle({
 
 const EXPORT_ICON: Record<
 	MeetingDetailSnapshot["export"]["status"],
-	{ icon: ReactNode; className: string }
+	{ icon: ReactNode; tone: "faint" | "muted" | "primary" | "warning" }
 > = {
-	notConfigured: { icon: <ShareIcon />, className: "text-faint" },
-	pending: { icon: <ClockIcon />, className: "text-muted-foreground" },
-	delivered: { icon: <CheckCircle2Icon />, className: "text-primary" },
-	failed: { icon: <CircleAlertIcon />, className: "text-warning-foreground" },
+	notConfigured: { icon: <ShareIcon />, tone: "faint" },
+	pending: { icon: <ClockIcon />, tone: "muted" },
+	delivered: { icon: <CheckCircle2Icon />, tone: "primary" },
+	failed: { icon: <CircleAlertIcon />, tone: "warning" },
 };
 
 /**
@@ -270,7 +266,7 @@ function DetailFooter({ detail }: { detail: MeetingDetailSnapshot }) {
 				className="flex flex-wrap items-center gap-x-3 gap-y-2"
 				data-testid="export-status"
 			>
-				<span className={cn("flex shrink-0 [&_svg]:size-4", status.className)}>
+				<span className={formRowIconVariants({ tone: status.tone })}>
 					{status.icon}
 				</span>
 				<span className="min-w-0 flex-1">{detail.export.message}</span>
@@ -303,6 +299,35 @@ function DetailFooter({ detail }: { detail: MeetingDetailSnapshot }) {
 }
 
 /**
+ * The reading column's frame: the header row with the breadcrumb and the
+ * actions at its trailing edge, then the content scrolling under it at the
+ * reading width.
+ */
+function DetailColumn({
+	crumbs,
+	actions,
+	children,
+}: {
+	crumbs: ReactNode[];
+	actions?: ReactNode;
+	children: ReactNode;
+}) {
+	return (
+		<>
+			<HeaderRow>
+				<Breadcrumb items={crumbs} />
+				{actions}
+			</HeaderRow>
+			<ScrollArea className="flex-1" fade>
+				<div className="mx-auto w-full max-w-3xl px-6 pt-4 pb-12">
+					{children}
+				</div>
+			</ScrollArea>
+		</>
+	);
+}
+
+/**
  * The reading column for the selected meeting: the header row with the
  * breadcrumb, Export and the actions menu, then the setup banner, the
  * eyebrow, title, people and tags, the tabs and the footer. Processing and
@@ -328,24 +353,17 @@ export function MeetingDetail({
 					setupBanner={app?.setupBanner}
 				/>
 			) : list && !hasSelection ? (
-				<>
-					<HeaderRow inset="md">
-						<Breadcrumb items={["Meetings"]} />
-					</HeaderRow>
-					<ScrollArea className="flex-1" fade>
-						<div className="mx-auto w-full max-w-3xl px-6 pt-4 pb-12">
-							<SetupBanner banner={app?.setupBanner} />
-							<EmptyState
-								body="Pick a meeting on the left to read its summary, transcript and tasks."
-								className="mt-24"
-								icon={<TextAlignStartIcon aria-hidden="true" />}
-								id="empty-detail"
-								size="lg"
-								title="Select a meeting"
-							/>
-						</div>
-					</ScrollArea>
-				</>
+				<DetailColumn crumbs={["Meetings"]}>
+					<SetupBanner banner={app?.setupBanner} />
+					<EmptyState
+						body="Pick a meeting on the left to read its summary, transcript and tasks."
+						className="mt-24"
+						icon={<TextAlignStartIcon aria-hidden="true" />}
+						id="empty-detail"
+						size="lg"
+						title="Select a meeting"
+					/>
+				</DetailColumn>
 			) : null}
 		</main>
 	);
@@ -479,247 +497,229 @@ function DetailBody({
 		}
 	}
 
-	return (
-		<>
-			<HeaderRow inset="md">
-				<Breadcrumb items={["Meetings", detail.title]} />
-				<div className="ml-auto flex shrink-0 items-center gap-2">
-					{holdsRecorder && recording ? (
-						<HeaderStop recording={recording} />
-					) : null}
-					<Button
-						data-testid="export-meeting"
+	const actions = (
+		<div className="flex shrink-0 items-center gap-2">
+			{holdsRecorder && recording ? <HeaderStop recording={recording} /> : null}
+			<Button
+				data-testid="export-meeting"
+				disabled={!detail.export.canReexport || detail.isBusy}
+				onClick={() => send(client, "meeting.reexport")}
+				size="sm"
+				variant="outline"
+			>
+				<ShareIcon aria-hidden="true" />
+				Export
+			</Button>
+			<Menu onOpenChange={setMenuOpen} open={menuOpen}>
+				<MenuTrigger
+					data-testid="meeting-actions"
+					render={
+						<Button aria-label="More actions" size="icon-sm" variant="ghost" />
+					}
+				>
+					<EllipsisIcon aria-hidden="true" />
+				</MenuTrigger>
+				<MenuPopup align="end" sideOffset={4}>
+					<MenuItem
+						disabled={!detail.canRerunSummary || detail.isBusy}
+						icon={<RefreshCwIcon />}
+						onClick={rerun}
+					>
+						Re-run summary
+					</MenuItem>
+					<MenuItem
 						disabled={!detail.export.canReexport || detail.isBusy}
+						icon={<ShareIcon />}
 						onClick={() => send(client, "meeting.reexport")}
-						size="sm"
-						variant="outline"
+						shortcut="⇧⌘E"
 					>
-						<ShareIcon aria-hidden="true" />
-						Export
-					</Button>
-					<Menu onOpenChange={setMenuOpen} open={menuOpen}>
-						<MenuTrigger
-							data-testid="meeting-actions"
-							render={
-								<Button
-									aria-label="More actions"
-									size="icon-sm"
-									variant="ghost"
-								/>
-							}
+						Export again
+					</MenuItem>
+					{detail.export.canReveal ? (
+						<MenuItem
+							icon={<FolderIcon />}
+							onClick={() => send(client, "meeting.revealExport")}
 						>
-							<EllipsisIcon aria-hidden="true" />
-						</MenuTrigger>
-						<MenuPopup align="end" sideOffset={4}>
-							<MenuItem
-								disabled={!detail.canRerunSummary || detail.isBusy}
-								icon={<RefreshCwIcon />}
-								onClick={rerun}
-							>
-								Re-run summary
-							</MenuItem>
-							<MenuItem
-								disabled={!detail.export.canReexport || detail.isBusy}
-								icon={<ShareIcon />}
-								onClick={() => send(client, "meeting.reexport")}
-								shortcut="⇧⌘E"
-							>
-								Export again
-							</MenuItem>
-							{detail.export.canReveal ? (
-								<MenuItem
-									icon={<FolderIcon />}
-									onClick={() => send(client, "meeting.revealExport")}
-								>
-									Reveal export
-								</MenuItem>
-							) : null}
-							<MenuItem
-								disabled={!detail.retention.filesExist}
-								icon={<FolderIcon />}
-								onClick={() => send(client, "meeting.revealRecording")}
-							>
-								Reveal recording
-							</MenuItem>
-							<MenuSeparator />
-							{detail.retention.filesExist ? (
-								<MenuItem
-									data-testid="delete-recording"
-									disabled={detail.isBusy}
-									icon={<AudioWaveformIcon />}
-									onClick={() => send(client, "meeting.deleteRecordingNow")}
-									variant="destructive"
-								>
-									Delete recording now…
-								</MenuItem>
-							) : null}
-							<MenuItem
-								data-testid="delete-meeting"
-								icon={<Trash2Icon />}
-								onClick={() => deleteMeeting(client, detail.id)}
-								variant="destructive"
-							>
-								Delete meeting…
-							</MenuItem>
-						</MenuPopup>
-					</Menu>
-				</div>
-			</HeaderRow>
-			<ScrollArea className="flex-1" fade>
-				<div className="mx-auto w-full max-w-3xl px-6 pt-4 pb-12">
-					<SetupBanner banner={setupBanner} />
-					{detail.error ? (
-						<Callout
-							className="mb-6"
-							icon={<CircleAlertIcon aria-hidden="true" />}
-							title={detail.error}
-							variant="destructive"
-						/>
+							Reveal export
+						</MenuItem>
 					) : null}
-					<div
-						className="flex flex-wrap items-center gap-2 text-muted-foreground text-xs [&>i]:size-[3px] [&>i]:rounded-full [&>i]:bg-border"
-						data-testid="meeting-meta"
+					<MenuItem
+						disabled={!detail.retention.filesExist}
+						icon={<FolderIcon />}
+						onClick={() => send(client, "meeting.revealRecording")}
 					>
-						<span
-							className={cn(
-								"inline-flex items-center gap-[5px] font-medium text-muted-foreground before:size-1.5 before:rounded-full before:content-['']",
-								SOURCE_DOT[detail.source],
-							)}
+						Reveal recording
+					</MenuItem>
+					<MenuSeparator />
+					{detail.retention.filesExist ? (
+						<MenuItem
+							data-testid="delete-recording"
+							disabled={detail.isBusy}
+							icon={<AudioWaveformIcon />}
+							onClick={() => send(client, "meeting.deleteRecordingNow")}
+							variant="destructive"
 						>
-							{formatSource(detail.source)}
-						</span>
-						<i />
-						<span>{format.when(detail.startedAt)}</span>
-						<i />
-						<span className="tabular-nums">
-							{format.duration(detail.durationSeconds)}
-						</span>
-						{detail.language ? (
-							<>
-								<i />
-								<span>{format.language(detail.language)}</span>
-							</>
-						) : null}
-						<i />
-						<span>{formatRetention(detail.retention)}</span>
-					</div>
-					<h2
-						className="mt-2 mb-3 font-semibold text-2xl leading-tight tracking-tight"
-						data-testid="meeting-title"
+							Delete recording now…
+						</MenuItem>
+					) : null}
+					<MenuItem
+						data-testid="delete-meeting"
+						icon={<Trash2Icon />}
+						onClick={() => deleteMeeting(client, detail.id)}
+						variant="destructive"
 					>
-						{detail.title}
-					</h2>
-					<div
-						className="mb-6 flex flex-wrap items-center gap-2"
-						data-testid="speakers-row"
-					>
-						{detail.speakers.length > 0 ? (
-							<AvatarStack ring="background">
-								{detail.speakers.map((speaker) => (
-									<Avatar
-										index={speaker.colorIndex}
-										key={speaker.id}
-										name={speaker.displayName}
-										size="md"
-										unknown={speaker.assignment === "unknown"}
-									/>
-								))}
-							</AvatarStack>
-						) : null}
-						<span className="text-muted-foreground text-sm">
-							{formatPeople(detail.speakers)}
-						</span>
-						{unconfirmed.length > 0 && detail.transcript.length > 0 ? (
-							<Button
-								data-testid="confirm-speaker"
-								onClick={confirmSpeaker}
-								size="xs"
-								variant="warning-outline"
-							>
-								<CheckCircle2Icon aria-hidden="true" />
-								{unconfirmed.length === 1
-									? "Confirm speaker"
-									: "Confirm speakers"}
-							</Button>
-						) : null}
-						{detail.tags.map((tag) => (
-							<Badge key={tag} variant="outline">
-								#{tag}
-							</Badge>
-						))}
-						<TagEditor tags={detail.tags} />
-					</div>
+						Delete meeting…
+					</MenuItem>
+				</MenuPopup>
+			</Menu>
+		</div>
+	);
 
-					<Tabs
-						onValueChange={(value) => {
-							if (isTab(value)) {
-								changeTab(value);
-							}
-						}}
-						value={tab}
-					>
-						<div className="mb-6 flex flex-wrap items-center justify-between gap-3">
-							<TabsList>
-								<TabsTab data-testid="tab-summary" value="summary">
-									Summary
-								</TabsTab>
-								<TabsTab
-									count={detail.transcript.length || undefined}
-									data-testid="tab-transcript"
-									value="transcript"
-								>
-									Transcript
-								</TabsTab>
-								<TabsTab
-									count={detail.tasks.length || undefined}
-									data-testid="tab-tasks"
-									value="tasks"
-								>
-									Tasks
-								</TabsTab>
-								<TabsTab data-testid="tab-notes" value="notes">
-									Notes
-								</TabsTab>
-							</TabsList>
-							{tab === "summary" && detail.templates.length > 0 ? (
-								<span
-									className="flex items-center gap-2 text-muted-foreground text-xs"
-									data-testid="template-row"
-								>
-									Template
-									<Select
-										aria-label="Summary template"
-										className="max-w-[180px]"
-										data-testid="template-select"
-										disabled={detail.isBusy}
-										onValueChange={(templateID) => {
-											if (templateID && templateID !== detail.templateID) {
-												send(client, "meeting.setTemplate", { templateID });
-											}
-										}}
-										options={detail.templates.map((template) => ({
-											value: template.id,
-											label: template.name,
-										}))}
-										size="xs"
-										value={detail.templateID}
-									/>
-								</span>
-							) : null}
-						</div>
-						{TABS.map((item) => (
-							<TabsPanel
-								key={item}
-								value={item}
-								variant={item === "transcript" ? "default" : "reading"}
-							>
-								{tab === item ? panel(item) : null}
-							</TabsPanel>
+	return (
+		<DetailColumn actions={actions} crumbs={["Meetings", detail.title]}>
+			<SetupBanner banner={setupBanner} />
+			{detail.error ? (
+				<Callout
+					className="mb-6"
+					icon={<CircleAlertIcon aria-hidden="true" />}
+					title={detail.error}
+					variant="destructive"
+				/>
+			) : null}
+			<div
+				className="flex flex-wrap items-center gap-2 text-muted-foreground text-xs [&>i]:size-[3px] [&>i]:rounded-full [&>i]:bg-border"
+				data-testid="meeting-meta"
+			>
+				<span
+					className={cn(
+						"inline-flex items-center gap-[5px] font-medium text-muted-foreground before:size-1.5 before:rounded-full before:content-['']",
+						SOURCE[detail.source].dot,
+					)}
+				>
+					{formatSource(detail.source)}
+				</span>
+				<i />
+				<span>{format.when(detail.startedAt)}</span>
+				<i />
+				<span className="tabular-nums">
+					{format.duration(detail.durationSeconds)}
+				</span>
+				{detail.language ? (
+					<>
+						<i />
+						<span>{format.language(detail.language)}</span>
+					</>
+				) : null}
+				<i />
+				<span>{formatRetention(detail.retention)}</span>
+			</div>
+			<h2
+				className="mt-2 mb-3 font-semibold text-2xl leading-tight tracking-tight"
+				data-testid="meeting-title"
+			>
+				{detail.title}
+			</h2>
+			<div
+				className="mb-6 flex flex-wrap items-center gap-2"
+				data-testid="speakers-row"
+			>
+				{detail.speakers.length > 0 ? (
+					<AvatarStack ring="background">
+						{detail.speakers.map((speaker) => (
+							<Avatar
+								index={speaker.colorIndex}
+								key={speaker.id}
+								name={speaker.displayName}
+								size="md"
+								unknown={speaker.assignment === "unknown"}
+							/>
 						))}
-					</Tabs>
-					<DetailFooter detail={detail} />
+					</AvatarStack>
+				) : null}
+				<span className="text-muted-foreground text-sm">
+					{formatPeople(detail.speakers)}
+				</span>
+				{unconfirmed.length > 0 && detail.transcript.length > 0 ? (
+					<Button
+						data-testid="confirm-speaker"
+						onClick={confirmSpeaker}
+						size="xs"
+						variant="warning-outline"
+					>
+						<CheckCircle2Icon aria-hidden="true" />
+						{unconfirmed.length === 1 ? "Confirm speaker" : "Confirm speakers"}
+					</Button>
+				) : null}
+				{detail.tags.map((tag) => (
+					<Badge key={tag}>#{tag}</Badge>
+				))}
+				<TagEditor tags={detail.tags} />
+			</div>
+
+			<Tabs
+				onValueChange={(value) => {
+					if (isTab(value)) {
+						changeTab(value);
+					}
+				}}
+				value={tab}
+			>
+				<div className="mb-6 flex flex-wrap items-center justify-between gap-3">
+					<TabsList>
+						<TabsTab data-testid="tab-summary" value="summary">
+							Summary
+						</TabsTab>
+						<TabsTab
+							count={detail.transcript.length || undefined}
+							data-testid="tab-transcript"
+							value="transcript"
+						>
+							Transcript
+						</TabsTab>
+						<TabsTab
+							count={detail.tasks.length || undefined}
+							data-testid="tab-tasks"
+							value="tasks"
+						>
+							Tasks
+						</TabsTab>
+						<TabsTab data-testid="tab-notes" value="notes">
+							Notes
+						</TabsTab>
+					</TabsList>
+					{tab === "summary" && detail.templates.length > 0 ? (
+						<span
+							className="flex items-center gap-2 text-muted-foreground text-xs"
+							data-testid="template-row"
+						>
+							Template
+							<Select
+								aria-label="Summary template"
+								className="max-w-[180px]"
+								data-testid="template-select"
+								disabled={detail.isBusy}
+								onValueChange={(templateID) => {
+									if (templateID && templateID !== detail.templateID) {
+										send(client, "meeting.setTemplate", { templateID });
+									}
+								}}
+								options={detail.templates.map((template) => ({
+									value: template.id,
+									label: template.name,
+								}))}
+								size="xs"
+								value={detail.templateID}
+							/>
+						</span>
+					) : null}
 				</div>
-			</ScrollArea>
-		</>
+				{TABS.map((item) => (
+					<TabsPanel key={item} value={item} variant="reading">
+						{tab === item ? panel(item) : null}
+					</TabsPanel>
+				))}
+			</Tabs>
+			<DetailFooter detail={detail} />
+		</DetailColumn>
 	);
 }

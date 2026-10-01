@@ -7,7 +7,8 @@ import { cn } from "@/lib/cn";
  * with the icon inline, one sentence of title and text, and the actions at
  * the trailing edge. When the text would fall under 360 px the actions wrap
  * onto their own line. The `sm` size is the sidebar's: smaller type, the
- * actions always on their own line under the text.
+ * actions always on their own line under the text. The variant colours the
+ * surface, the icon slot and the description slot from the root.
  */
 export const calloutVariants = cva(
 	"flex flex-wrap items-center rounded-xl border",
@@ -19,12 +20,14 @@ export const calloutVariants = cva(
 			},
 			variant: {
 				/** A quiet notice on the card surface (T3's default alert). */
-				default: "border-border bg-card text-foreground",
-				warning: "border-warning/32 bg-warning-surface text-warning-foreground",
-				info: "border-info/32 bg-info/4 text-foreground",
-				live: "border-primary/32 bg-primary/4 text-foreground",
+				default:
+					"border-border bg-card text-foreground [&_[data-slot=icon]]:text-muted-foreground",
+				warning:
+					"border-warning/32 bg-warning-surface text-warning-foreground [&_[data-slot=description]]:text-warning-foreground/80 [&_[data-slot=icon]]:text-warning",
+				info: "border-info/32 bg-info/4 text-foreground [&_[data-slot=icon]]:text-info",
+				live: "border-primary/32 bg-primary/4 text-foreground [&_[data-slot=icon]]:text-primary",
 				destructive:
-					"border-destructive/32 bg-destructive-surface text-destructive-foreground",
+					"border-destructive/32 bg-destructive-surface text-destructive-foreground [&_[data-slot=description]]:text-destructive-foreground/80 [&_[data-slot=icon]]:text-destructive",
 			},
 		},
 		defaultVariants: { size: "md", variant: "warning" },
@@ -32,39 +35,25 @@ export const calloutVariants = cva(
 );
 
 /** The icon and the words as one group, so the icon never wraps alone. */
-const calloutLeadVariants = cva("flex min-w-0 items-center [&>svg]:shrink-0", {
+const calloutLeadVariants = cva("flex min-w-0 items-center", {
 	variants: {
 		size: {
-			md: "flex-[1_1_360px] gap-3 [&>svg]:size-4",
-			sm: "flex-[1_1_120px] gap-2.5 [&>svg]:size-3.5",
-		},
-		variant: {
-			default: "[&>svg]:text-muted-foreground",
-			warning: "[&>svg]:text-warning",
-			info: "[&>svg]:text-info",
-			live: "[&>svg]:text-primary",
-			destructive: "[&>svg]:text-destructive",
+			md: "flex-[1_1_360px] gap-3 [&>[data-slot=icon]>svg]:size-4",
+			sm: "flex-[1_1_120px] gap-2.5 [&>[data-slot=icon]>svg]:size-3.5",
 		},
 	},
-	defaultVariants: { size: "md", variant: "warning" },
+	defaultVariants: { size: "md" },
 });
 
 /** In `sm` the title and text stack; in `md` they run on as one sentence. */
-const calloutDescriptionVariants = cva("", {
+const calloutDescriptionVariants = cva("text-muted-foreground", {
 	variants: {
 		size: {
 			md: "",
 			sm: "block",
 		},
-		variant: {
-			default: "text-muted-foreground",
-			warning: "text-warning-foreground/80",
-			info: "text-muted-foreground",
-			live: "text-muted-foreground",
-			destructive: "text-destructive-foreground/80",
-		},
 	},
-	defaultVariants: { size: "md", variant: "warning" },
+	defaultVariants: { size: "md" },
 });
 
 const calloutActionsVariants = cva("flex items-center gap-1", {
@@ -103,14 +92,19 @@ export function Callout({
 			role="status"
 			{...props}
 		>
-			<span className={calloutLeadVariants({ size, variant })}>
-				{icon}
+			<span className={calloutLeadVariants({ size })}>
+				<span className="flex shrink-0" data-slot="icon">
+					{icon}
+				</span>
 				<span className="min-w-0 leading-[1.4]">
 					<span className="font-medium">{title}</span>
 					{description ? (
 						<>
-							{size === "sm" ? null : " "}
-							<span className={calloutDescriptionVariants({ size, variant })}>
+							{" "}
+							<span
+								className={calloutDescriptionVariants({ size })}
+								data-slot="description"
+							>
 								{description}
 							</span>
 						</>

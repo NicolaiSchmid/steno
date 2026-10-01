@@ -33,12 +33,7 @@ export function FormCard({
 					{title}
 				</h3>
 			) : null}
-			<Card
-				className="[&>*+*]:border-border/50 [&>*+*]:border-t"
-				variant="group"
-			>
-				{children}
-			</Card>
+			<Card variant="group">{children}</Card>
 			{footer ? (
 				<p className="m-0 px-4 text-muted-foreground/80 text-xs leading-normal">
 					{footer}
@@ -48,19 +43,21 @@ export function FormCard({
 	);
 }
 
-/** The colour of a row's state glyph. */
-export const formRowIconVariants = cva("flex shrink-0 [&>svg]:size-4", {
-	variants: {
-		tone: {
-			muted: "text-muted-foreground",
-			faint: "text-faint",
-			primary: "text-primary",
-			warning: "text-warning",
-			success: "text-success",
+/** A row's state glyph, centred on the label's first line, in `tone`. */
+export const formRowIconVariants = cva(
+	"flex h-5 shrink-0 items-center [&>svg]:size-4",
+	{
+		variants: {
+			tone: {
+				muted: "text-muted-foreground",
+				faint: "text-faint",
+				primary: "text-primary",
+				warning: "text-warning",
+			},
 		},
+		defaultVariants: { tone: "muted" },
 	},
-	defaultVariants: { tone: "muted" },
-});
+);
 
 /**
  * One row of a `FormCard`: a label with an optional description at the
@@ -94,9 +91,7 @@ export function FormRow({
 			<div className="flex @lg/form:grid @lg/form:grid-cols-[minmax(0,1fr)_minmax(10rem,auto)] flex-col @lg/form:items-center @lg/form:gap-8 gap-3">
 				<div className="flex min-w-0 items-start gap-3">
 					{icon ? (
-						<span className="flex h-5 items-center">
-							<span className={formRowIconVariants({ tone })}>{icon}</span>
-						</span>
+						<span className={formRowIconVariants({ tone })}>{icon}</span>
 					) : null}
 					<div className="flex min-w-0 flex-col gap-0.5">
 						<span className="flex min-h-5 items-center gap-1.5 font-medium text-foreground text-sm">
@@ -110,7 +105,7 @@ export function FormRow({
 					</div>
 				</div>
 				{control ? (
-					<div className="flex shrink-0 flex-wrap items-center justify-end gap-2">
+					<div className="flex flex-wrap items-center justify-end gap-2">
 						{control}
 					</div>
 				) : null}

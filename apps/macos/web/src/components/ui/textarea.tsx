@@ -1,22 +1,20 @@
 import { cva, type VariantProps } from "class-variance-authority";
 import type { ComponentProps } from "react";
 import { cn } from "@/lib/cn";
+import { fieldFrameClass } from "./input";
 
 /**
- * The multi-line field: the input's frame (10 px radius, canvas colour, the
- * edge highlight at rest, the ring on focus) around a textarea that does not
+ * The multi-line field: the input's frame around a textarea that does not
  * resize because its column scrolls. `reading` sets the notes' larger type.
  */
-export const textareaFrameClass = cn(
-	"relative flex w-full rounded-lg border border-input bg-background text-foreground shadow-xs",
-	"outline-none transition-[border-color,box-shadow] duration-(--duration-functional) ease-standard",
-	"before:pointer-events-none before:absolute before:inset-0 before:rounded-[calc(var(--radius-lg)-1px)] before:shadow-[var(--edge-highlight)]",
+const textareaFrameClass = cn(
+	fieldFrameClass,
+	"flex w-full",
 	"focus-within:border-ring focus-within:shadow-none focus-within:ring-[3px] focus-within:ring-ring/24 focus-within:before:shadow-none",
-	"has-[textarea:disabled]:opacity-64 has-[textarea:disabled]:shadow-none",
-	"dark:bg-input/32",
+	"has-[:disabled]:opacity-64 has-[:disabled]:shadow-none",
 );
 
-export const textareaVariants = cva(
+const textareaVariants = cva(
 	"block w-full min-w-0 resize-none rounded-[inherit] bg-transparent px-[11px] py-[7px] outline-none placeholder:text-faint",
 	{
 		variants: {

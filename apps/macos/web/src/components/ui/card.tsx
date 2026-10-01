@@ -4,18 +4,17 @@ import { cn } from "@/lib/cn";
 
 /**
  * A bordered surface. `default` is the white card with the 1 px shadow;
- * `group` is the settings group (a lighter border and fill at 14 px);
- * `sidebar` is the alert surface on the sidebar (the paired iPhone).
+ * `group` is the settings group (a lighter border and fill at 14 px, its
+ * rows divided by hairlines); `sidebar` is the alert surface on the sidebar
+ * (the paired iPhone).
  */
-export const cardVariants = cva("", {
+export const cardVariants = cva("border text-foreground", {
 	variants: {
 		variant: {
-			default:
-				"rounded-lg border border-border bg-card text-foreground shadow-xs",
+			default: "rounded-lg border-border bg-card shadow-xs",
 			group:
-				"rounded-xl border border-border/60 bg-card/40 text-foreground shadow-xs",
-			sidebar:
-				"rounded-lg border border-sidebar-border bg-sidebar-control-surface text-foreground",
+				"rounded-xl border-border/60 bg-card/40 shadow-xs [&>*+*]:border-border/50 [&>*+*]:border-t",
+			sidebar: "rounded-lg border-sidebar-border bg-sidebar-control-surface",
 		},
 		padding: {
 			none: "",

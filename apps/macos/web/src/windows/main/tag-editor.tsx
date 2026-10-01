@@ -4,7 +4,6 @@ import { send, useBridge } from "@/bridge/hooks";
 import {
 	Button,
 	Input,
-	Pill,
 	Popover,
 	PopoverDescription,
 	PopoverPopup,
@@ -63,7 +62,7 @@ export function TagEditor({ tags }: TagEditorProps) {
 				<PlusIcon aria-hidden="true" />
 				{tags.length === 0 ? "Add tag" : null}
 			</PopoverTrigger>
-			<PopoverPopup align="start" size="md">
+			<PopoverPopup align="start">
 				<PopoverTitle>Tags</PopoverTitle>
 				<PopoverDescription>
 					Tags group meetings in the sidebar and travel with the export.
@@ -71,15 +70,17 @@ export function TagEditor({ tags }: TagEditorProps) {
 				{tags.length > 0 ? (
 					<div className="mt-3 flex flex-wrap gap-1.5">
 						{tags.map((tag) => (
-							<Pill
+							<Button
 								aria-label={`Remove tag ${tag}`}
 								data-testid={`remove-tag-${tag}`}
 								key={tag}
 								onClick={() => save(tags.filter((other) => other !== tag))}
+								size="xs"
+								variant="outline"
 							>
 								#{tag}
 								<XIcon aria-hidden="true" />
-							</Pill>
+							</Button>
 						))}
 					</div>
 				) : null}

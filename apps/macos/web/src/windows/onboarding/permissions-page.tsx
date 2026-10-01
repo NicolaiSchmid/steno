@@ -29,7 +29,6 @@ export function PermissionsPage({
 					<Button
 						data-testid="onboarding-done"
 						onClick={() => send(client, "onboarding.advance")}
-						size="md"
 						variant="primary"
 					>
 						Done
@@ -38,7 +37,6 @@ export function PermissionsPage({
 					<Button
 						data-testid="onboarding-later"
 						onClick={() => send(client, "onboarding.advance")}
-						size="md"
 						variant="outline"
 					>
 						Later

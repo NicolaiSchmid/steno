@@ -24,8 +24,9 @@ export function MenuTrigger(props: MenuTriggerProps) {
 	return <BaseMenu.Trigger {...props} />;
 }
 
+/** The glass popup surface shared by menus, selects and popovers; padding is the caller's. */
 export const popupSurfaceClass =
-	"dropdown-glass rounded-lg border p-1 text-foreground shadow-pop outline-none";
+	"dropdown-glass rounded-lg border text-foreground shadow-pop outline-none";
 
 export interface MenuPopupProps
 	extends Omit<ComponentProps<typeof BaseMenu.Popup>, "className"> {
@@ -54,7 +55,7 @@ export function MenuPopup({
 				sideOffset={sideOffset}
 			>
 				<BaseMenu.Popup
-					className={cn(popupSurfaceClass, "min-w-44", className)}
+					className={cn(popupSurfaceClass, "min-w-44 p-1", className)}
 					{...props}
 				/>
 			</BaseMenu.Positioner>

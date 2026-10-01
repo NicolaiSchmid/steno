@@ -120,10 +120,7 @@ export function TranscriptTab({ detail, pickerRequest }: TranscriptTabProps) {
 				const unconfirmed =
 					speaker !== undefined && speaker.assignment !== "confirmed";
 				return (
-					<div
-						className="mb-5 grid grid-cols-[140px_1fr] gap-4 text-[15px] leading-[1.6]"
-						key={turn.id}
-					>
+					<div className="mb-5 grid grid-cols-[140px_1fr] gap-4" key={turn.id}>
 						<div className="flex flex-col gap-0.5 pt-0.5 font-medium text-sm">
 							{unconfirmed && speaker ? (
 								<SpeakerPicker

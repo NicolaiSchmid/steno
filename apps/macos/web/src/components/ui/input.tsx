@@ -6,17 +6,23 @@ import { cn } from "@/lib/cn";
 import { Kbd } from "./kbd";
 
 /**
- * The field frame: a 10 px radius on the canvas colour, the 1 px edge
- * highlight at rest, the ring on focus. Heights: sm 26, md 30, lg 34.
+ * The field frame shared by `Input`, `Textarea` and `Select`: a 10 px radius
+ * on the canvas colour, the 1 px edge highlight at rest, the border and
+ * shadow in motion at the functional tempo.
  */
+export const fieldFrameClass =
+	"relative rounded-lg border border-input bg-background text-foreground shadow-xs edge-highlight transition-[border-color,box-shadow] duration-(--duration-functional) ease-standard dark:bg-input/32";
+
+/** The frame while its field has focus, and while the field is disabled. */
+const fieldStateClass =
+	"focus-within:border-ring focus-within:shadow-none focus-within:ring-[3px] focus-within:ring-ring/24 focus-within:before:shadow-none has-[:disabled]:opacity-64 has-[:disabled]:shadow-none";
+
+/** The single-line field. Heights: sm 26, md 30, lg 34. */
 export const inputVariants = cva(
 	[
-		"relative flex w-full min-w-0 items-center gap-2 rounded-lg border border-input bg-background text-foreground text-sm shadow-xs",
-		"outline-none transition-[border-color,box-shadow] duration-(--duration-functional) ease-standard",
-		"before:pointer-events-none before:absolute before:inset-0 before:rounded-[calc(var(--radius-lg)-1px)] before:shadow-[var(--edge-highlight)]",
-		"focus-within:border-ring focus-within:shadow-none focus-within:ring-[3px] focus-within:ring-ring/24 focus-within:before:shadow-none",
-		"has-[input:disabled]:opacity-64 has-[input:disabled]:shadow-none",
-		"dark:bg-input/32",
+		fieldFrameClass,
+		"flex w-full min-w-0 items-center gap-2 text-sm",
+		fieldStateClass,
 	],
 	{
 		variants: {
@@ -31,7 +37,7 @@ export const inputVariants = cva(
 );
 
 const fieldClass =
-	"size-full min-w-0 rounded-[inherit] bg-transparent text-foreground outline-none placeholder:text-faint";
+	"min-w-0 rounded-[inherit] bg-transparent text-foreground outline-none placeholder:text-faint";
 
 export interface InputProps
 	extends Omit<ComponentProps<typeof BaseInput>, "className" | "size">,
@@ -43,16 +49,16 @@ export interface InputProps
 export function Input({ className, size, ...props }: InputProps) {
 	return (
 		<span className={cn(inputVariants({ size }), className)}>
-			<BaseInput className={fieldClass} {...props} />
+			<BaseInput className={cn(fieldClass, "size-full")} {...props} />
 		</span>
 	);
 }
 
-export const searchInputVariants = cva("", {
+const searchInputVariants = cva("", {
 	variants: {
 		variant: {
 			/** The framed field. */
-			field: "",
+			field: "[&>svg]:text-faint",
 			/**
 			 * A quiet row in a list column: no frame, the row hover, the words
 			 * in the muted weight until something is typed.
@@ -61,6 +67,7 @@ export const searchInputVariants = cva("", {
 				"flex h-8 w-full min-w-0 items-center gap-2 rounded-md px-2 font-medium text-sidebar-muted-foreground text-sm",
 				"transition-colors duration-(--duration-functional) ease-standard",
 				"focus-within:bg-row-hover focus-within:text-foreground hover:bg-row-hover hover:text-foreground",
+				"[&>svg]:text-sidebar-icon [&_input]:font-medium [&_input]:placeholder:text-current",
 			],
 		},
 	},
@@ -78,7 +85,7 @@ export interface SearchInputProps
 export function SearchInput({
 	className,
 	size,
-	variant = "field",
+	variant,
 	shortcut,
 	placeholder = "Search",
 	...props
@@ -86,25 +93,14 @@ export function SearchInput({
 	return (
 		<div
 			className={cn(
-				variant === "row"
-					? searchInputVariants({ variant })
-					: inputVariants({ size }),
+				variant !== "row" && inputVariants({ size }),
+				searchInputVariants({ variant }),
 				className,
 			)}
 		>
-			<SearchIcon
-				aria-hidden="true"
-				className={cn(
-					"shrink-0",
-					variant === "row" ? "size-4 text-sidebar-icon" : "size-4 text-faint",
-				)}
-			/>
+			<SearchIcon aria-hidden="true" className="size-4 shrink-0" />
 			<BaseInput
-				className={cn(
-					fieldClass,
-					"h-auto flex-1",
-					variant === "row" && "font-medium placeholder:text-current",
-				)}
+				className={cn(fieldClass, "flex-1")}
 				placeholder={placeholder}
 				type="search"
 				{...props}

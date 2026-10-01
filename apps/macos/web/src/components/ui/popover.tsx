@@ -2,6 +2,7 @@ import { Popover as BasePopover } from "@base-ui/react/popover";
 import { cva, type VariantProps } from "class-variance-authority";
 import type { ComponentProps } from "react";
 import { cn } from "@/lib/cn";
+import { popupSurfaceClass } from "./menu";
 
 /**
  * A glass surface anchored to its trigger for a small form or explanation.
@@ -22,9 +23,8 @@ export function PopoverTrigger(props: PopoverTriggerProps) {
 
 export const popoverPopupVariants = cva(
 	[
-		"dropdown-glass relative rounded-lg border text-foreground shadow-pop outline-none",
-		"origin-(--transform-origin) transition-[opacity,scale] duration-(--duration-surface) ease-standard",
-		"before:pointer-events-none before:absolute before:inset-0 before:rounded-[calc(var(--radius-lg)-1px)] before:shadow-[var(--edge-highlight)]",
+		popupSurfaceClass,
+		"edge-highlight origin-(--transform-origin) transition-[opacity,scale] duration-(--duration-surface) ease-standard",
 		"data-starting-style:scale-[0.98] data-starting-style:opacity-0",
 		"data-ending-style:scale-[0.98] data-ending-style:opacity-0",
 	],

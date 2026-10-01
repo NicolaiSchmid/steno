@@ -12,6 +12,13 @@ export interface ScrollAreaProps
 	fade?: boolean;
 }
 
+const scrollbarClass = cn(
+	"flex touch-none select-none opacity-0 transition-opacity delay-300 duration-100",
+	"data-hovering:opacity-100 data-scrolling:opacity-100 data-hovering:delay-0 data-scrolling:delay-0",
+);
+const thumbClass =
+	"flex-1 rounded-full bg-(--scrollbar-thumb) hover:bg-(--scrollbar-thumb-hover)";
+
 /**
  * A scroll container with a 6 px overlay scrollbar that fades in while the
  * pointer rests over it or the content moves, and fades out 300 ms after.
@@ -24,12 +31,6 @@ export function ScrollArea({
 	children,
 	...props
 }: ScrollAreaProps) {
-	const scrollbarClass = cn(
-		"flex touch-none select-none p-0 opacity-0 transition-opacity delay-300 duration-100",
-		"data-hovering:opacity-100 data-scrolling:opacity-100 data-hovering:delay-0 data-scrolling:delay-0",
-	);
-	const thumbClass =
-		"flex-1 rounded-full bg-(--scrollbar-thumb) hover:bg-(--scrollbar-thumb-hover)";
 	return (
 		<BaseScrollArea.Root
 			className={cn("relative min-h-0 min-w-0 overflow-hidden", className)}

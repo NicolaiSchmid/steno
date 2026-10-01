@@ -18,7 +18,6 @@ export const splitButtonVariants = cva(
 		"rounded-control border font-medium text-sm leading-none",
 		"transition-[background-color,border-color,box-shadow,color,scale,opacity]",
 		"duration-(--duration-functional) ease-standard",
-		"before:pointer-events-none before:absolute before:inset-0 before:rounded-[calc(var(--control-radius)-1px)]",
 		"active:scale-[0.97] active:duration-(--duration-press-in)",
 		"has-[button:disabled]:pointer-events-none has-[button:disabled]:opacity-64",
 		"[&_svg]:size-4 [&_svg]:shrink-0",

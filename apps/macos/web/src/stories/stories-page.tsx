@@ -48,7 +48,6 @@ import {
 	MenuPopup,
 	MenuSeparator,
 	MenuTrigger,
-	Pill,
 	Popover,
 	PopoverDescription,
 	PopoverPopup,
@@ -103,17 +102,9 @@ const buttonVariantNames = [
 	"ghost-muted",
 	"destructive",
 	"warning-outline",
-	"glass",
 ] as const;
 
-const badgeVariantNames = [
-	"outline",
-	"secondary",
-	"warning",
-	"destructive",
-	"success",
-	"live",
-] as const;
+const badgeVariantNames = ["outline", "warning", "success"] as const;
 
 function SwitchStory() {
 	const [on, setOn] = useState(true);
@@ -140,7 +131,7 @@ export function StoriesPage() {
 		>
 			<h1 className="m-0 font-semibold text-xl">Steno ui</h1>
 
-			<ThemePair title="Button: the eight variants">
+			<ThemePair title="Button: the seven variants">
 				{() => (
 					<>
 						{buttonVariantNames.map((variant) => (
@@ -181,7 +172,7 @@ export function StoriesPage() {
 						<Button aria-label="Settings" size="icon-sm" variant="outline">
 							<SettingsIcon aria-hidden="true" />
 						</Button>
-						<Button aria-label="More" size="icon" variant="glass">
+						<Button aria-label="More" size="icon" variant="ghost">
 							<MoreHorizontalIcon aria-hidden="true" />
 						</Button>
 						<Button size="sm" variant="primary">
@@ -192,7 +183,7 @@ export function StoriesPage() {
 				)}
 			</ThemePair>
 
-			<ThemePair title="Badge: the six variants, then sm">
+			<ThemePair title="Badge: the three variants, then sm">
 				{() => (
 					<>
 						{badgeVariantNames.map((variant) => (
@@ -205,23 +196,6 @@ export function StoriesPage() {
 								{variant}
 							</Badge>
 						))}
-					</>
-				)}
-			</ThemePair>
-
-			<ThemePair title="Pill: default, interactive, live">
-				{() => (
-					<>
-						<Pill>#strategie</Pill>
-						<Pill onClick={() => undefined}>#q4</Pill>
-						<Pill variant="live">
-							<CheckCircle2Icon aria-hidden="true" />
-							Confirm speaker
-						</Pill>
-						<Pill onClick={() => undefined} variant="live">
-							<CheckCircle2Icon aria-hidden="true" />
-							Confirm speaker
-						</Pill>
 					</>
 				)}
 			</ThemePair>
@@ -385,7 +359,7 @@ export function StoriesPage() {
 									<Button
 										aria-label="More actions"
 										size="icon"
-										variant="glass"
+										variant="outline"
 									/>
 								}
 							>
@@ -453,7 +427,7 @@ export function StoriesPage() {
 							defaultOpen
 							label="Export as Markdown"
 						>
-							<Button variant="glass">
+							<Button variant="outline">
 								<ShareIcon aria-hidden="true" />
 								Export
 							</Button>
@@ -702,7 +676,7 @@ export function StoriesPage() {
 							control={<Badge variant="success">Allowed</Badge>}
 							icon={<CheckCircle2Icon aria-hidden="true" />}
 							label="Microphone"
-							tone="success"
+							tone="primary"
 						/>
 						<FormRow
 							control={<Badge variant="warning">Not allowed</Badge>}
@@ -727,9 +701,7 @@ export function StoriesPage() {
 							label={
 								<>
 									Summaries
-									<Badge size="sm" variant="secondary">
-										Beta
-									</Badge>
+									<Badge size="sm">Beta</Badge>
 								</>
 							}
 						/>
@@ -737,7 +709,7 @@ export function StoriesPage() {
 				)}
 			</ThemePair>
 
-			<ThemePair title="Disclosure (open) and SidebarRow with a subtitle">
+			<ThemePair title="Disclosure (open) and SidebarRow on the Settings sidebar">
 				{() => (
 					<>
 						<Disclosure defaultOpen>
@@ -745,16 +717,10 @@ export function StoriesPage() {
 							to be offline.
 						</Disclosure>
 						<div className="flex w-[200px] flex-col gap-0.5 rounded-lg bg-sidebar p-2">
-							<SidebarRow
-								active
-								icon={<SettingsIcon />}
-								subtitle="Steno 0.10.0"
-							>
+							<SidebarRow active icon={<SettingsIcon />}>
 								General
 							</SidebarRow>
-							<SidebarRow icon={<SparklesIcon />} subtitle="Not set up">
-								Summaries
-							</SidebarRow>
+							<SidebarRow icon={<SparklesIcon />}>Summaries</SidebarRow>
 						</div>
 					</>
 				)}

@@ -192,7 +192,6 @@
 	--color-p3: var(--p3);
 	--color-p4: var(--p4);
 	--color-white: #ffffff;
-	--color-black: #000000;
 
 	--font-sans:
 		-apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui, sans-serif;
@@ -210,7 +209,6 @@
 	--radius-lg: var(--radius);
 	--radius-xl: calc(var(--radius) + 4px);
 	--radius-2xl: calc(var(--radius) + 8px);
-	--radius-3xl: calc(var(--radius) + 12px);
 	--radius-control: var(--control-radius);
 	--radius-full: 9999px;
 
@@ -241,6 +239,23 @@
 		100% {
 			opacity: 1;
 		}
+	}
+}
+
+/*
+ * The 1 px edge highlight under a control: a `::before` the size of the
+ * element, clipped to its radius, with `--edge-highlight` as its shadow.
+ * Toggle it off with `focus-within:before:shadow-none` and the like.
+ */
+@utility edge-highlight {
+	position: relative;
+	&::before {
+		content: "";
+		position: absolute;
+		inset: 0;
+		pointer-events: none;
+		border-radius: inherit;
+		box-shadow: var(--edge-highlight);
 	}
 }
 
@@ -370,39 +385,21 @@
 	 * instead of being cut; the lane on the right stays opaque for the bar.
 	 */
 	.scroll-fade-top {
-		-webkit-mask-image:
-			linear-gradient(
-				to bottom,
-				transparent 0%,
-				rgba(0, 0, 0, 0.1) 10%,
-				rgba(0, 0, 0, 0.3) 24%,
-				rgba(0, 0, 0, 0.58) 42%,
-				rgba(0, 0, 0, 0.82) 62%,
-				rgba(0, 0, 0, 0.96) 82%,
-				black 100%
-			),
-			linear-gradient(black, black);
-		mask-image:
-			linear-gradient(
-				to bottom,
-				transparent 0%,
-				rgba(0, 0, 0, 0.1) 10%,
-				rgba(0, 0, 0, 0.3) 24%,
-				rgba(0, 0, 0, 0.58) 42%,
-				rgba(0, 0, 0, 0.82) 62%,
-				rgba(0, 0, 0, 0.96) 82%,
-				black 100%
-			),
-			linear-gradient(black, black);
-		-webkit-mask-size:
-			100% calc(1.5rem + 1px),
-			100% calc(100% - 1.5rem);
+		--fade-top: linear-gradient(
+			to bottom,
+			transparent 0%,
+			rgba(0, 0, 0, 0.1) 10%,
+			rgba(0, 0, 0, 0.3) 24%,
+			rgba(0, 0, 0, 0.58) 42%,
+			rgba(0, 0, 0, 0.82) 62%,
+			rgba(0, 0, 0, 0.96) 82%,
+			black 100%
+		);
+		mask-image: var(--fade-top), linear-gradient(black, black);
 		mask-size:
 			100% calc(1.5rem + 1px),
 			100% calc(100% - 1.5rem);
-		-webkit-mask-position: top, bottom;
 		mask-position: top, bottom;
-		-webkit-mask-repeat: no-repeat;
 		mask-repeat: no-repeat;
 	}
 

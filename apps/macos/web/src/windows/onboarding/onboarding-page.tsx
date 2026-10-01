@@ -1,5 +1,6 @@
 import type { ReactNode } from "react";
-import { ScrollArea } from "@/components/ui";
+import { footerBandClass, ScrollArea } from "@/components/ui";
+import { cn } from "@/lib/cn";
 
 export interface OnboardingPageProps {
 	step: 1 | 2;
@@ -18,7 +19,8 @@ export interface OnboardingPageProps {
  * The frame both onboarding pages share: the step caption, the title as the
  * window's only heading (there is no title bar), the intro, then the cards,
  * scrolling under a pinned footer band with the page's buttons (the dialog
- * footer). The 52 px top inset leaves the traffic lights their room.
+ * footer). The 52 px top inset leaves the traffic lights their room and
+ * keeps the step caption clear of the scroll fade.
  */
 export function OnboardingPage({
 	step,
@@ -67,9 +69,7 @@ export function OnboardingPage({
 					{children}
 				</div>
 			</ScrollArea>
-			<footer className="flex shrink-0 items-center justify-end gap-2 border-border border-t bg-muted/72 px-6 py-4">
-				{footer}
-			</footer>
+			<footer className={cn(footerBandClass, "shrink-0")}>{footer}</footer>
 		</>
 	);
 }

@@ -46,7 +46,7 @@ GitHub-hosted `macos-15` job (`ui-smoke`): Xcode 27 on the Forge runner aborts i
 `IDELaunchServicesLauncher` (`INTERNAL ERROR: childPID > 0`) when `xcodebuild test` launches
 an XCUITest runner, so the smoke test stays where spike S1 passed. That runner's display is
 1024 x 768, the layout budget: every window must fit it at its minimum size (the main window's
-960 by 600, Settings' 760 by 520, onboarding's 560 by 620); the pages lay out inside those
+960 by 600, Settings' 960 by 640 by default, resizable down to 760 by 520, onboarding's 560 by 620); the pages lay out inside those
 frames, and the Playwright screens in `web/` review them at the same sizes.
 
 xcodebuild does not hand its own environment to the test process; prefix a variable with
@@ -106,7 +106,7 @@ a Debug build read that feed instead of `SUFeedURL`. Serve `dist/` with
 | `Steno/Main/` | The main window (`MainWindow`, the web page at `#/main` over `Web/MainWindowBridge`, 960 by 600 minimum) and its models: `MeetingListViewModel`, `MeetingDetailViewModel`, `ProcessingProgressModel` with the `ProcessingPresentation` card, `SetupStatus` |
 | `Steno/Speakers/` | `SpeakersViewModel` and `SpeakerPickerState` behind the detail's speaker rows, the clip player |
 | `Steno/Detection/` | Meeting detection and the prompt's model |
-| `Steno/Settings/` | The Settings window (`SettingsWindow`, the web page at `#/settings` over `Web/SettingsBridge`, 760 by 520): General, Recording, Transcription, Summaries, Export, iPhone (`SettingsSection`), one view model each plus the sidebar status (`SettingsOverviewViewModel`) |
+| `Steno/Settings/` | The Settings window (`SettingsWindow`, the web page at `#/settings` over `Web/SettingsBridge`, 960 by 640 by default, resizable down to 760 by 520): General, Recording, Transcription, Summaries, Export, iPhone (`SettingsSection`), one view model each plus the sidebar status (`SettingsOverviewViewModel`) |
 | `Steno/Web/` | The web host: `AppSchemeHandler` (the bundle over `steno-app://`), `WebBridge` and `BridgeDispatcher` (the message runtime), `WebWindowView` (one `WKWebView` per window; `CanvasWebView` paints the window in the page's canvas colour), `TopicPublisher` (the one publishing loop: tracked snapshots, coalescing, page readiness), and one `*Bridge` plus `*Snapshots` per window (`MainWindowBridge`, `SettingsBridge`, `OnboardingBridge`) |
 | `Steno/Onboarding/` | The onboarding window (`OnboardingWindow`, the web page at `#/onboarding` over `Web/OnboardingBridge`, 560 by 620) and `OnboardingViewModel`, the two pages' rules: permissions, then Summaries and the Obsidian vault over the Settings view models |
 | `Steno/Services/` | the four app protocols over system frameworks, their live types and fakes |

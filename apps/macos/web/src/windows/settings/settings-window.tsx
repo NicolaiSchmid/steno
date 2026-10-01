@@ -8,7 +8,13 @@ import {
 } from "lucide-react";
 import { type ReactNode, useEffect, useState } from "react";
 import { useBridge, usePageReady } from "@/bridge/hooks";
-import { Breadcrumb, HeaderRow, ScrollArea, SidebarRow } from "@/components/ui";
+import {
+	Breadcrumb,
+	HeaderRow,
+	ScrollArea,
+	SidebarColumn,
+	SidebarRow,
+} from "@/components/ui";
 import { ExportSection } from "./export-section";
 import { GeneralSection } from "./general-section";
 import { PhoneSection } from "./iphone-section";
@@ -91,27 +97,21 @@ export function SettingsWindow({ section: routeSection }: SettingsWindowProps) {
 			className="grid h-full min-h-0 grid-cols-[256px_minmax(0,1fr)] overflow-hidden bg-background text-foreground"
 			data-testid="settings-window"
 		>
-			<nav
-				aria-label="Settings sections"
-				className="surface-grain flex min-h-0 flex-col border-sidebar-border border-r bg-sidebar"
-			>
-				<HeaderRow inset="sm" />
-				<div className="flex flex-col gap-1 p-2">
-					{SECTIONS.map((info) => (
-						<SidebarRow
-							active={info.id === section}
-							data-testid={`settings-${info.id}`}
-							icon={ICONS[info.id]}
-							key={info.id}
-							onClick={() => setSection(info.id)}
-						>
-							{info.title}
-						</SidebarRow>
-					))}
-				</div>
-			</nav>
+			<SidebarColumn aria-label="Settings sections" as="nav">
+				{SECTIONS.map((info) => (
+					<SidebarRow
+						active={info.id === section}
+						data-testid={`settings-${info.id}`}
+						icon={ICONS[info.id]}
+						key={info.id}
+						onClick={() => setSection(info.id)}
+					>
+						{info.title}
+					</SidebarRow>
+				))}
+			</SidebarColumn>
 			<div className="flex min-h-0 flex-col">
-				<HeaderRow inset="md">
+				<HeaderRow>
 					<Breadcrumb items={["Settings", sectionInfo(section).title]} />
 				</HeaderRow>
 				<ScrollArea className="min-h-0 flex-1" fade>
