@@ -44,11 +44,6 @@ final class MeetingDetailViewModelTests: XCTestCase {
     XCTAssertEqual(
       RecordingEndReason.failed.sentence,
       "Ended because the recording failed. The recording up to that point was kept.")
-    XCTAssertEqual(RecordingEndReason.callEnded(appName: "Zen").listSuffix, "ended automatically")
-    XCTAssertEqual(RecordingEndReason.deviceLost.listSuffix, "device lost")
-    XCTAssertEqual(RecordingEndReason.failed.listSuffix, "recording failed")
-    XCTAssertNil(RecordingEndReason.manual.listSuffix)
-    XCTAssertNil(RecordingEndReason.quit.listSuffix)
 
     let environment = try await TestSupport.environment()
     try await environment.store.update(meetingID: SampleData.meetingID, now: TestSupport.now) {

@@ -5,10 +5,9 @@ import StenoCore
 import StenoSpeech
 
 /// The Settings window's host (plan Decisions 5 and 6). Owns the six section
-/// view models and the sidebar overview, loads them when the window opens,
-/// follows them with observation tracking and publishes one full snapshot
-/// per section to the attached sink, coalesced to the next main-actor turn.
-/// Commands map one to one onto the view models' public methods, so no rule
+/// view models and the sidebar overview, loads them when the window opens
+/// and maps each onto its section topic; `TopicPublisher` follows them and
+/// publishes. Commands map one to one onto the view models' public methods, so no rule
 /// lives here. The folder choosers (`settings.recording.chooseFolder`,
 /// `settings.export.chooseVault`) are the one native surface the page cannot
 /// draw: an `NSOpenPanel`, answered with the chosen path or nil.
@@ -18,7 +17,7 @@ import StenoSpeech
 /// publish itself clears the request, as the main window's does for a
 /// meeting.
 @MainActor
-final class SettingsBridge: BridgeHost {
+final class SettingsBridge: BridgeHost, TopicSource {
   /// What the page asks the host to open; `SettingsWindow` installs the
   /// scene's `openWindow` here.
   typealias OpenWindow = @MainActor (WindowParams) -> Void
@@ -37,13 +36,7 @@ final class SettingsBridge: BridgeHost {
   var openWindow: OpenWindow = { _ in }
 
   private let chooseFolder: ChooseFolder
-  private weak var events: (any BridgeEventSink)?
-  /// True from `page.ready`: before it the page has no `window.steno` and
-  /// an emit would be lost, so tracking is armed but nothing is sent.
-  private var pageReady = false
-  /// True between `start()` and `stop()`.
-  private var running = false
-  private var pending: Set<BridgeTopic> = []
+  private lazy var publisher = TopicPublisher(topics: Self.topics, source: self)
   /// Polls the paired devices while a pairing code is shown.
   private var pairingPoll: Task<Void, Never>?
 
@@ -69,9 +62,7 @@ final class SettingsBridge: BridgeHost {
 
   /// Arms every topic's tracking and lets later changes publish.
   func start() {
-    guard !running else { return }
-    running = true
-    for topic in Self.topics { flush(topic) }
+    publisher.start()
   }
 
   /// Runs for the window's lifetime (`SettingsWindow`'s `.task`): loads
@@ -92,7 +83,7 @@ final class SettingsBridge: BridgeHost {
     await withTaskGroup(of: Void.self) { group in
       group.addTask { await phones.observe() }
       group.addTask { await phones.observeReceipts() }
-      group.addTask { await BridgeHostSupport.untilCancelled() }
+      group.addTask { await TopicPublisher.untilCancelled() }
     }
     stop()
   }
@@ -112,51 +103,20 @@ final class SettingsBridge: BridgeHost {
   }
 
   func stop() {
-    running = false
+    publisher.stop()
     pairingPoll?.cancel()
     pairingPoll = nil
   }
 
   func attach(_ events: any BridgeEventSink) {
-    self.events = events
+    publisher.attach(events)
   }
 
-  // MARK: - Publishing
-
-  /// Asks for a publish of `topic` on a later main-actor turn; a second ask
-  /// before that turn is folded into it.
-  private func schedule(_ topic: BridgeTopic) {
-    guard running, pending.insert(topic).inserted else { return }
-    Task { @MainActor [weak self] in self?.flush(topic) }
-  }
-
-  /// Builds the topic's snapshot inside observation tracking, so the next
-  /// change to anything it read schedules the next publish, and emits it
-  /// once the page is ready.
-  private func flush(_ topic: BridgeTopic) {
-    guard running else { return }
-    pending.remove(topic)
-    var snapshot: (any Encodable)?
-    withObservationTracking {
-      snapshot = self.snapshot(for: topic)
-    } onChange: { [weak self] in
-      Task { @MainActor [weak self] in self?.schedule(topic) }
-    }
-    guard pageReady, let events, let snapshot else { return }
-    events.emit(topic, snapshot: snapshot)
-    // A deep link is consumed by the publish that carries it, as the main
-    // window consumes its meeting request: the page shows the section from
-    // this snapshot and the next `app` snapshot carries nil. Only when one
-    // is set: the clear is itself an observed change that republishes
-    // `app`, and clearing nil again would republish without end.
-    if topic == .app, controller.requestedSettingsSection != nil {
-      controller.requestedSettingsSection = nil
-    }
-  }
+  // MARK: - Topics
 
   /// The topic's snapshot from the view models as they stand; nil for the
   /// topics this window never publishes.
-  private func snapshot(for topic: BridgeTopic) -> (any Encodable)? {
+  func snapshot(for topic: BridgeTopic) -> (any Encodable)? {
     switch topic {
     case .app:
       return AppSnapshot(controller: controller)
@@ -174,6 +134,17 @@ final class SettingsBridge: BridgeHost {
       return PhoneSettingsSnapshot(phones: phones, subtitle: subtitle(.iphone))
     default:
       return nil
+    }
+  }
+
+  /// A deep link is consumed by the publish that carries it, as the main
+  /// window consumes its meeting request: the page shows the section from
+  /// that snapshot and the next `app` snapshot carries nil. Only when one
+  /// is set: the clear is itself an observed change that republishes
+  /// `app`, and clearing nil again would republish without end.
+  func didPublish(_ topic: BridgeTopic, emitted: Bool) {
+    if topic == .app, emitted, controller.requestedSettingsSection != nil {
+      controller.requestedSettingsSection = nil
     }
   }
 
@@ -213,8 +184,7 @@ final class SettingsBridge: BridgeHost {
     switch request.method {
     case .pageReady:
       UITestDiagnostics.note("settings page ready")
-      pageReady = true
-      for topic in Self.topics { flush(topic) }
+      publisher.pageDidBecomeReady()
     case .pageLayout:
       // Validated and dropped: the window has one size.
       _ = try request.params(PageLayoutParams.self)

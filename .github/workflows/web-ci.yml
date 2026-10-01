@@ -71,7 +71,7 @@ jobs:
         run: pnpm exec playwright install-deps chromium
 
       - name: Screens
-        run: pnpm exec playwright test
+        run: pnpm screens
 
       - name: Upload screens
         if: always()

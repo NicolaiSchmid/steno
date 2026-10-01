@@ -5,50 +5,15 @@ import Testing
 
 // The main window's snapshots over the preview store, and the bridge's
 // command routing, hostless: no web view anywhere, a recording sink where
-// `WebBridge` would be. The view models' rules stay pinned by their own
-// tests; here the wire shape the page renders, and that a command reaches
-// its view model and comes back as a publish.
-
-@MainActor
-private final class RecordingSink: BridgeEventSink {
-  private(set) var events: [BridgeEvent] = []
-
-  func emit(_ event: BridgeEvent) {
-    events.append(event)
-  }
-
-  func last(_ topic: BridgeTopic) -> JSONValue? {
-    events.last { $0.topic == topic }?.payload
-  }
-}
-
-/// Polls `condition` every 10 ms up to `timeout` and records an issue on
-/// timeout. Used only where a store observation or a main-actor hop must be
-/// given time to deliver.
-@MainActor
-private func eventually(
-  _ description: String, timeout: Duration = .seconds(10), _ condition: @MainActor () -> Bool
-) async {
-  let clock = ContinuousClock()
-  let deadline = clock.now + timeout
-  while !condition() {
-    if clock.now >= deadline {
-      Issue.record("timed out waiting for \(description)")
-      return
-    }
-    try? await Task.sleep(for: .milliseconds(10))
-  }
-}
+// `WebBridge` would be (`BridgeTestSupport.swift`). The view models' rules
+// stay pinned by their own tests; here the wire shape the page renders, and
+// that a command reaches its view model and comes back as a publish.
 
 /// The day boundaries the list tests count on, wherever the runner is.
 private var utc: Calendar {
   var calendar = Calendar(identifier: .gregorian)
   calendar.timeZone = TimeZone(identifier: "UTC")!
   return calendar
-}
-
-private func request(_ id: String, _ method: String, _ params: Any = NSNull()) -> [String: Any] {
-  ["id": id, "method": method, "params": params]
 }
 
 // MARK: - Pure helpers

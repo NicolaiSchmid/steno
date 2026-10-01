@@ -13,6 +13,10 @@ import {
 } from "@/components/codex-consent-card";
 import { DraftField } from "@/components/draft-field";
 import {
+	SummariesEndpointForm,
+	type SummariesUpdate,
+} from "@/components/summaries-endpoint-form";
+import {
 	Badge,
 	Button,
 	Callout,
@@ -166,25 +170,13 @@ export function SummariesSection() {
 	if (!summaries) {
 		return <SectionPage id="summaries" />;
 	}
-	const preset = summaries.presets.find(
-		(candidate) => candidate.id === summaries.presetID,
-	);
 	const codex = summaries.codex;
-	const update = (fields: {
-		baseURL?: string;
-		model?: string;
-		contextTokens?: string;
-		apiKey?: string;
-	}) => {
+	// Every field is stored as it is left: one update, then the save.
+	const update = (fields: SummariesUpdate & { contextTokens?: string }) => {
 		send(client, "settings.summaries.update", fields);
 		send(client, "settings.summaries.save");
 	};
 	const status = statusOf(summaries);
-	const keyPlaceholder = summaries.hasAPIKey
-		? "Saved in your keychain"
-		: preset?.needsAPIKey
-			? `Paste the key from your ${preset.title} account`
-			: "Only if the server needs one";
 
 	return (
 		<SectionPage
@@ -201,82 +193,13 @@ export function SummariesSection() {
 						: "Stored in your login keychain and sent only to the server above."
 				}
 			>
-				<FormRow
-					control={
-						<Select
-							aria-label="Service"
-							className="w-[220px]"
-							data-testid="preset"
-							onValueChange={(value) => {
-								if (value) {
-									send(client, "settings.summaries.selectPreset", { value });
-								}
-							}}
-							options={summaries.presets.map((candidate) => ({
-								value: candidate.id,
-								label: candidate.title,
-							}))}
-							size="sm"
-							value={summaries.presetID}
-						/>
-					}
-					label="Service"
+				<SummariesEndpointForm
+					clearKeyOnCommit
+					layout="rows"
+					onUpdate={update}
+					renderCodex={(state) => <CodexFields codex={state} />}
+					summaries={summaries}
 				/>
-				{codex ? (
-					<CodexFields codex={codex} />
-				) : (
-					<>
-						{preset?.showsServerField ? (
-							<FormRow
-								control={
-									<DraftField
-										label="Server address"
-										onCommit={(baseURL) => update({ baseURL })}
-										placeholder="Starts with http or https"
-										testId="base-url"
-										value={summaries.baseURL}
-									/>
-								}
-								label="Server address"
-							/>
-						) : null}
-						<FormRow
-							control={
-								<DraftField
-									label="Model"
-									onCommit={(model) => update({ model })}
-									placeholder={preset?.modelPlaceholder}
-									testId="model"
-									value={summaries.model}
-								/>
-							}
-							label="Model"
-						/>
-						<FormRow
-							control={
-								<DraftField
-									clearOnCommit
-									label="API key"
-									onCommit={(apiKey) => {
-										if (apiKey.trim()) {
-											update({ apiKey });
-										}
-									}}
-									placeholder={keyPlaceholder}
-									testId="api-key"
-									type="password"
-									value=""
-								/>
-							}
-							description={
-								summaries.hasAPIKey
-									? "A key is stored. Paste a new one to replace it."
-									: undefined
-							}
-							label="API key"
-						/>
-					</>
-				)}
 			</FormCard>
 			{summaries.validationMessage ? (
 				<Callout

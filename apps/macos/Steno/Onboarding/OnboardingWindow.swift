@@ -36,9 +36,7 @@ struct OnboardingWindow: View {
       .ignoresSafeArea()
       .frame(width: Self.size.width, height: Self.size.height)
       .task {
-        bridge.openWindow = { [controller, openWindow] request in
-          openRequestedWindow(request, controller: controller, openWindow: openWindow)
-        }
+        bridge.openWindow = windowOpener(controller: controller, openWindow: openWindow)
         bridge.closeWindow = { [dismissWindow] in dismissWindow(id: "onboarding") }
         await bridge.run()
       }

@@ -1,6 +1,7 @@
 # Steno: the Mac windows as a local web app with Steno's own design language
 
-Status: proposal, 2026-09-29, revised 2026-09-30 (third draft). Triggered by the review of rc.3
+Status: implemented, 2026-10-01 (WP0 to WP5; proposed 2026-09-29, revised 2026-09-30, third
+draft). Deviations per work package are recorded at the end. Triggered by the review of rc.3
 ("still horrible", "still just a gray blob", Settings clipping the window). The first draft
 imitated macOS chrome in CSS and was rejected as "fake macOS"; the second kept system SwiftUI
 chrome with a web reading pane and was found too plain. The owner then had the Jamie binary
@@ -349,3 +350,31 @@ WP5, cleanup:
   `onboarding-window` and the pages by their visible words (the intro sentence, the row titles,
   the page 2 heading, the button labels); a second fixture, `onboarding.setup`, feeds the page 2
   scenarios. `pnpm screens` adds `onboarding-<scheme>-<state>.png` at 560 by 620.
+- WP5 (2026-10-01): the cleanup. The three bridges' hand-copied publishing loops became one
+  `TopicPublisher` (`apps/macos/Steno/Web/TopicPublisher.swift`): it owns the sink, the page's
+  readiness, the pending set, the tracked snapshot build and the per-topic minimum interval;
+  each bridge is a `TopicSource` with its snapshot mapping and two hooks for its own side
+  effects. `Design/` was trimmed to what the menu bar popover, the bubble, the detection prompt
+  and the processing card still draw (`Controls.swift` deleted; the native surfaces keep the
+  `mobile/global.css` ladder, as the non-goals say); `ThemeTokensTests` checks that direction
+  only. Decision 1's window background colour follow landed as `CanvasWebView` with the page's
+  `--background` from `theme.css` (`#FCFCFC` light, `#0A0A0A` dark, the values Decision 2
+  names; not `Theme.background`, which is the mobile ladder's `#FAFAFA` and `#000000`), set
+  when the web view joins a window (the colour is dynamic, so an appearance switch re-resolves
+  it without a second assignment), pinned against the CSS by
+  test. The WP2 deviation about the fixture chunks is closed: `#bridge-fallback` resolves per
+  Vite mode to the fixture mock (dev server, Vitest, a new `vite build --mode screens` into
+  `dist-screens/` that `pnpm screens` builds and previews) or to a thrown error (the production
+  `dist/`), and `scripts/check-bundle.mjs` fails `pnpm build` and `build-web.sh --copy-only`
+  when a fixture chunk, a fixture string the page never spells itself or a mock literal reaches
+  `dist/`. So the screens no longer render byte-for-byte the files the app serves (Decision 8):
+  they render the same pages plus the fixture bridge. The Summaries endpoint form is one
+  component (`src/components/summaries-endpoint-form.tsx`) with the layout as a prop; the two
+  pages keep their own ChatGPT blocks, whose commands differ. Left as they were, as not worth a
+  contract change in this step: `settings-format.ts` still spells `folderUsageText`,
+  `retentionTitle` and `updateStatusText` on the page although the host could send them
+  formatted, the onboarding footers have no Enter and Escape defaults (Enter already commits a
+  text field's draft, so a page default needs a focus rule first), and the Debug-only web
+  preview window still names the WP1 route `#/shell`, which the page treats as `#/main`. The app
+  version comes from the release tag (`release.yml` derives it); nothing in the repository is
+  bumped for 0.10.0, and `flake.nix` is bumped after the release once its hash exists.

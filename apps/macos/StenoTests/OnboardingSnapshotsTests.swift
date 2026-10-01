@@ -5,42 +5,11 @@ import Testing
 
 // The onboarding window's snapshot over the preview environment, and the
 // bridge's command routing, hostless: no web view anywhere, a recording sink
-// where `WebBridge` would be, a stub where the folder panel would be, fake
-// permissions and a throwaway defaults suite. The model's rules stay pinned
-// by `OnboardingViewModelTests`; here the wire shape the page renders, and
-// that a command reaches the model and comes back as a publish.
-
-@MainActor
-private final class RecordingSink: BridgeEventSink {
-  private(set) var events: [BridgeEvent] = []
-
-  func emit(_ event: BridgeEvent) {
-    events.append(event)
-  }
-
-  var last: JSONValue? { events.last?.payload }
-}
-
-/// Polls `condition` every 10 ms up to `timeout` and records an issue on
-/// timeout. Used only where a main-actor hop must be given time to deliver.
-@MainActor
-private func eventually(
-  _ description: String, timeout: Duration = .seconds(10), _ condition: @MainActor () -> Bool
-) async {
-  let clock = ContinuousClock()
-  let deadline = clock.now + timeout
-  while !condition() {
-    if clock.now >= deadline {
-      Issue.record("timed out waiting for \(description)")
-      return
-    }
-    try? await Task.sleep(for: .milliseconds(10))
-  }
-}
-
-private func request(_ id: String, _ method: String, _ params: Any = NSNull()) -> [String: Any] {
-  ["id": id, "method": method, "params": params]
-}
+// where `WebBridge` would be (`BridgeTestSupport.swift`), a stub where the
+// folder panel would be, fake permissions and a throwaway defaults suite.
+// The model's rules stay pinned by `OnboardingViewModelTests`; here the wire
+// shape the page renders, and that a command reaches the model and comes
+// back as a publish.
 
 extension JSONValue {
   /// An array element, for reading one row of a published list.

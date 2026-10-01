@@ -1,13 +1,13 @@
 import StenoCore
 import SwiftUI
 
-/// The composed controls the app reuses, built from the tokens: the three
-/// button styles, the status chip, the raised card, the status dot and the
-/// message row. Boxes, fills and type follow the redesign plan's components
-/// table; every state swap runs over `Motion.functional` and holds still
-/// under Reduce Motion. `Design/Controls.swift` holds the nav row, the
-/// icon button, the fields and the segmented tabs; `Design/EmptyState.swift`
-/// the empty state.
+/// The composed controls the native surfaces still draw (the menu bar
+/// popover, the floating bubble, the detection prompt, the processing
+/// card), built from the tokens: the three button styles, the status chip,
+/// the raised card, the status dot and the message row. Every state swap
+/// runs over `Motion.functional` and holds still under Reduce Motion. The
+/// fields, nav rows, tabs and empty states left with the windows the web UI
+/// renders (plan `2026-09-29-macos-webview-ui.md`).
 
 extension LinearGradient {
   /// The achromatic CTA fill: `accent-from` over `accent-to`, top to bottom.
@@ -87,9 +87,8 @@ struct StenoSecondaryButtonStyle: ButtonStyle {
 }
 
 /// The ghost action: a bare 13 pt label in `faint`, `strong` on hover, no
-/// box, the button height as the hit height. "Skip" on the onboarding rows,
-/// "Not now" on the setup banner and the detail footer's text actions.
-/// `tint` is the resting colour; the menu bar footer passes `muted`.
+/// box, the button height as the hit height. `tint` is the resting colour;
+/// the menu bar footer passes `muted`.
 struct StenoGhostButtonStyle: ButtonStyle {
   var tint: Color = Color.stenoFaint
 
@@ -220,8 +219,7 @@ struct SectionLabel: View {
 }
 
 /// The status dot hung on the first line of a 13 pt sentence: the body of
-/// `MessageRow`, and on its own inside a `Card` (the setup banner), where
-/// the row's tint would be a box in a box.
+/// `MessageRow`.
 struct StatusLine: View {
   var color: Color
   var text: String
@@ -295,14 +293,6 @@ extension Binding where Value: Sendable {
   }
 }
 
-extension View {
-  /// The ladder's leading for a text size applied through `lineSpacing`,
-  /// the one place `lineHeight - size` is spelled out.
-  func stenoLeading(_ size: (size: CGFloat, lineHeight: CGFloat)) -> some View {
-    lineSpacing(size.lineHeight - size.size)
-  }
-}
-
 extension InsettableShape {
   /// The 1 pt inner stroke every bordered surface wears, `border` unless a
   /// state (focus `ring`) says otherwise.
@@ -320,11 +310,6 @@ extension TimeInterval {
       .time(
         pattern: self >= 3600
           ? .hourMinuteSecond(padHourToLength: 1) : .minuteSecond(padMinuteToLength: 2)))
-  }
-
-  /// `HH:MM:SS` for transcript timestamps.
-  var timestampText: String {
-    wholeSeconds.formatted(.time(pattern: .hourMinuteSecond(padHourToLength: 2)))
   }
 }
 

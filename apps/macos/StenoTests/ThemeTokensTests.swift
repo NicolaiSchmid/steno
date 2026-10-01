@@ -2,94 +2,81 @@ import AppKit
 import SwiftUI
 import XCTest
 
-/// Every `--color-*` token in `mobile/global.css` has a Swift counterpart in
-/// `Theme.tokens`, and nothing in `Theme.tokens` is unknown to the CSS. The
-/// Mac-only tokens, control boxes, main window columns and press rules are
-/// pinned to the plan's tables in `.plans/2026-09-28-macos-visual-redesign.md`.
+/// The native surfaces' tokens: every entry in `Theme.tokens` is a `--color-*`
+/// name in `mobile/global.css` (the ladder they mirror), the one Mac-only
+/// surface resolves in both appearances, and the window canvas behind the
+/// web pages is the page's own `--background` from
+/// `apps/macos/web/src/theme.css` in light and dark. Spacing, radii, the
+/// remaining control boxes and the motion rules are pinned to the values the
+/// menu bar popover, the bubble and the detection prompt were drawn with.
 final class ThemeTokensTests: XCTestCase {
-  func testEveryCSSColorTokenHasASwiftCounterpart() throws {
-    let cssNames = try cssColorNames()
+  func testEverySwiftTokenIsAMobileCSSToken() throws {
+    let cssNames = try mobileColorNames()
     let swiftNames = Set(Theme.tokens.map(\.cssName))
-    XCTAssertEqual(cssNames.subtracting(swiftNames), [], "CSS tokens without a Swift token")
     XCTAssertEqual(swiftNames.subtracting(cssNames), [], "Swift tokens without a CSS token")
     XCTAssertEqual(Theme.tokens.count, swiftNames.count, "duplicate token names")
   }
 
   func testTokensResolveToDynamicColors() {
-    for token in Theme.tokens {
+    for token in Theme.tokens + Theme.macTokens {
       let color = token.nsColor
       XCTAssertNotNil(color.usingColorSpace(.sRGB), token.cssName)
     }
   }
 
-  /// The Mac-only surfaces resolve to their light and dark values under the
-  /// matching appearance and never take a name the CSS owns.
-  @MainActor func testMacTokensResolveInBothAppearancesAndAvoidCSSNames() throws {
-    XCTAssertEqual(Set(Theme.macTokens.map(\.cssName)), ["sidebar", "raised"])
-    let cssNames = try cssColorNames()
+  /// `raised` is the one Mac-only surface: opaque white on the light canvas,
+  /// the 3.1 % white veil on the dark one, resolved under the matching
+  /// appearance, and never a name the CSS owns.
+  @MainActor func testRaisedResolvesInBothAppearancesAndAvoidsCSSNames() throws {
+    XCTAssertEqual(Theme.macTokens.map(\.cssName), ["raised"])
+    let cssNames = try mobileColorNames()
     for token in Theme.macTokens {
       XCTAssertFalse(cssNames.contains(token.cssName), "\(token.cssName) collides with the CSS")
       try assertResolves(token, under: .aqua, to: token.light)
       try assertResolves(token, under: .darkAqua, to: token.dark)
     }
-  }
-
-  /// `raised` is opaque white on the light canvas and the 3.1 % white veil
-  /// on the dark one.
-  func testRaisedMatchesThePlan() {
     assertEqual(Theme.raised.light, (red: 1, green: 1, blue: 1, alpha: 1), "raised light")
     assertEqual(Theme.raised.dark, (red: 1, green: 1, blue: 1, alpha: 0.031), "raised dark")
   }
 
-  /// `sidebar` is `background` with the `card` veil composited on it, not a
-  /// hand-picked grey: `#f2f2f2` in light (242.25 / 255 before rounding),
-  /// `#080808` in dark (7.9 / 255).
-  func testSidebarIsBackgroundUnderTheCardVeil() {
-    assertEqual(
-      Theme.sidebar.light, Theme.composite(Theme.card.light, over: Theme.background.light),
-      "sidebar light is the composite")
-    assertEqual(
-      Theme.sidebar.dark, Theme.composite(Theme.card.dark, over: Theme.background.dark),
-      "sidebar dark is the composite")
-
-    let expected: [(name: String, actual: Theme.RGBA, grey: Double)] = [
-      ("light", Theme.sidebar.light, 242.25 / 255), ("dark", Theme.sidebar.dark, 7.9 / 255),
-    ]
-    for pair in expected {
-      assertEqual(
-        pair.actual, (red: pair.grey, green: pair.grey, blue: pair.grey, alpha: 1), pair.name)
-    }
+  /// The window behind a web page paints the page's canvas colour (plan
+  /// Decision 1): `--background` on `:root` in light, on `.dark` in dark, so
+  /// nothing but the page's own colour shows while it loads.
+  @MainActor func testWindowCanvasMatchesThePageTheme() throws {
+    let css = try String(
+      contentsOf: TestSupport.repositoryRoot.appendingPathComponent(
+        "apps/macos/web/src/theme.css"), encoding: .utf8)
+    let light = try XCTUnwrap(cssColor("--background", inBlock: ":root", of: css))
+    let dark = try XCTUnwrap(cssColor("--background", inBlock: ".dark", of: css))
+    assertEqual(WebCanvas.token.light, light, "canvas light is the page's --background")
+    assertEqual(WebCanvas.token.dark, dark, "canvas dark is the page's --background")
+    try assertResolves(WebCanvas.token, under: .aqua, to: light)
+    try assertResolves(WebCanvas.token, under: .darkAqua, to: dark)
+    XCTAssertEqual(WebCanvas.token.light.alpha, 1, "the canvas is opaque")
+    XCTAssertEqual(WebCanvas.token.dark.alpha, 1, "the canvas is opaque")
   }
 
   /// Every spacing step except `xxs` and `hairline` sits on the 4 pt grid,
-  /// and the radii descend one step per nest: 16 > 12 > 8 > 6 > 4.
+  /// and the radii descend one step per nest: 16 > 12 > 8 > 6.
   func testSpaceSitsOnTheGridAndRadiiDescend() {
     let steps: [(name: String, value: CGFloat)] = [
       ("xs", Theme.Space.xs), ("sm", Theme.Space.sm), ("md", Theme.Space.md),
-      ("lg", Theme.Space.lg), ("xl", Theme.Space.xl), ("xxl", Theme.Space.xxl),
-      ("xxxl", Theme.Space.xxxl),
+      ("lg", Theme.Space.lg), ("xl", Theme.Space.xl),
     ]
     for step in steps {
       XCTAssertEqual(
         step.value.truncatingRemainder(dividingBy: 4), 0, "Space.\(step.name) is off the 4 pt grid")
     }
     XCTAssertEqual(Theme.Space.xxs, 2)
-    XCTAssertEqual(Theme.Space.titleGap, 6, "the plan's title gap, off the grid on purpose")
     XCTAssertEqual(Theme.Space.hairline, 1)
-    XCTAssertEqual(Theme.Radius.allCases.map(\.rawValue), [16, 12, 8, 6, 4])
+    XCTAssertEqual(Theme.Radius.allCases.map(\.rawValue), [16, 12, 8, 6])
   }
 
-  /// The plan's control heights (CTA 40, buttons 32, inputs 28, nav rows 32,
-  /// icon buttons 28, segmented cells 24 in a 28 container) and insets; the
+  /// The control boxes the native surfaces still draw: 32 pt buttons with a
+  /// 14 pt inset, chips at 8, message rows at 10, menu rows at 6, and the
   /// chip's glyph one point under its 12 pt text.
   func testControlBoxesMatchThePlan() {
-    XCTAssertEqual(Theme.Control.ctaHeight, 40)
     XCTAssertEqual(Theme.Control.buttonHeight, 32)
-    XCTAssertEqual(Theme.Control.inputHeight, 28)
-    XCTAssertEqual(Theme.Control.navRowHeight, 32)
-    XCTAssertEqual(Theme.Control.iconButtonSize, 28)
-    XCTAssertEqual(Theme.Control.segmentHeight, 24)
-    XCTAssertEqual(Theme.Control.segmentContainerHeight, 28)
     XCTAssertEqual(Theme.Control.buttonInset, 14)
     XCTAssertEqual(Theme.Control.chipInset, 8)
     XCTAssertEqual(Theme.Control.rowInset, 10)
@@ -99,22 +86,15 @@ final class ThemeTokensTests: XCTestCase {
   }
 
   /// The main window's minimum is the UI smoke test's review size; the page
-  /// lays its columns out inside it (the split view and its widths left
-  /// with WP2 of the webview plan).
+  /// lays its columns out inside it.
   @MainActor func testMainWindowMinimumIsTheReviewSize() {
     XCTAssertEqual(MainWindow.minimumSize, CGSize(width: 960, height: 600))
   }
 
-  func testMotionTokensMirrorMobile() {
+  func testMotionTokensMirrorMobileAndTheWebUI() {
     XCTAssertEqual(Motion.durationFunctional, 0.150)
     XCTAssertEqual(Motion.durationExit, 0.120)
     XCTAssertEqual(Motion.durationEntrance, 0.250)
-    XCTAssertEqual(Motion.durationPressIn, 0.100)
-    XCTAssertEqual(Motion.springDamping, 28)
-    XCTAssertEqual(Motion.springStiffness, 320)
-    XCTAssertEqual(Motion.pressScale, 0.97)
-    XCTAssertEqual(Motion.pressOpacity, 0.85)
-    XCTAssertEqual(Motion.hitSlop, 10)
   }
 
   /// The Mac press recipe (2 % scale, 5 % dim, half opacity disabled) and
@@ -142,7 +122,7 @@ final class ThemeTokensTests: XCTestCase {
   // MARK: - Helpers
 
   /// The `--color-*` names declared in `mobile/global.css`.
-  private func cssColorNames() throws -> Set<String> {
+  private func mobileColorNames() throws -> Set<String> {
     let css = try String(
       contentsOf: TestSupport.repositoryRoot.appendingPathComponent("mobile/global.css"),
       encoding: .utf8)
@@ -155,6 +135,29 @@ final class ThemeTokensTests: XCTestCase {
       })
     XCTAssertFalse(names.isEmpty, "no --color-* tokens found in global.css")
     return names
+  }
+
+  /// The six-digit hex value of `variable` inside the `selector { ... }`
+  /// block of `css`, as an opaque colour; nil when the block or the
+  /// variable is missing or not a plain hex value.
+  private func cssColor(_ variable: String, inBlock selector: String, of css: String) throws
+    -> Theme.RGBA?
+  {
+    let block = try NSRegularExpression(
+      pattern: NSRegularExpression.escapedPattern(for: selector) + "\\s*\\{([^}]*)\\}")
+    let range = NSRange(css.startIndex..., in: css)
+    guard let match = block.firstMatch(in: css, range: range),
+      let bodyRange = Range(match.range(at: 1), in: css)
+    else { return nil }
+    let body = String(css[bodyRange])
+    let declaration = try NSRegularExpression(
+      pattern: NSRegularExpression.escapedPattern(for: variable) + ":\\s*#([0-9a-fA-F]{6})\\s*;")
+    guard
+      let value = declaration.firstMatch(in: body, range: NSRange(body.startIndex..., in: body)),
+      let hexRange = Range(value.range(at: 1), in: body),
+      let number = UInt32(body[hexRange], radix: 16)
+    else { return nil }
+    return Theme.hex(number)
   }
 
   private func assertEqual(

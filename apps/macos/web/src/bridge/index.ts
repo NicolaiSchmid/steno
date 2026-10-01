@@ -1,44 +1,25 @@
-import {
-	applyScenario,
-	createMockTransport,
-	loadFixtureSnapshots,
-	type MockTransport,
-	queryFromLocation,
-} from "./mock-transport";
+import { createFallbackTransport } from "#bridge-fallback";
 import type { BridgeTransport } from "./transport";
 import { createWebKitTransport, hasWebKitBridge } from "./webkit-transport";
 
 export type { BridgeClient, BridgeClientOptions } from "./client";
 export { ContractViolation, createBridgeClient } from "./client";
 export * from "./contract";
-export type {
-	FixtureMap,
-	MockTransport,
-	MockTransportOptions,
-	RecordedCall,
-} from "./mock-transport";
-export {
-	applyScenario,
-	createMockTransport,
-	fixtureKey,
-	isSnapshotKey,
-	loadFixtureReplies,
-	loadFixtureSnapshots,
-	queryFromLocation,
-	replyMethod,
-	replyMethods,
-	scenarios,
-} from "./mock-transport";
 export type { BridgeTransport, SnapshotHandler } from "./transport";
 export { BridgeError, SnapshotHub } from "./transport";
 export type { StenoHostApi } from "./webkit-transport";
 export { createWebKitTransport, hasWebKitBridge } from "./webkit-transport";
 
 /**
- * Picks the WebKit transport inside the app and the fixture-backed mock
- * everywhere else (Vite dev server, `vite preview`, Playwright, tests).
+ * Picks the WebKit transport inside the app and the `#bridge-fallback`
+ * module everywhere else: the fixture-backed mock on the Vite dev server,
+ * `vite preview --mode screens`, Playwright and Vitest
+ * (`fallback-mock.ts`), and a thrown error in the production bundle
+ * (`fallback-none.ts`), which `vite.config.ts` picks by mode. The mock and
+ * the fixtures are imported from `./mock-transport` directly by the tests
+ * and never re-exported here, so nothing pulls them into the app.
  */
-export function createBridge(): BridgeTransport | MockTransport {
+export function createBridge(): BridgeTransport {
 	if (typeof window !== "undefined" && hasWebKitBridge(window)) {
 		return createWebKitTransport(window);
 	}
@@ -47,16 +28,13 @@ export function createBridge(): BridgeTransport | MockTransport {
 	if (typeof location !== "undefined" && location.protocol === "steno-app:") {
 		throw new Error("The steno message handler is not installed");
 	}
-	return createMockTransport({
-		snapshots: async () =>
-			applyScenario(await loadFixtureSnapshots(), queryFromLocation()),
-	});
+	return createFallbackTransport();
 }
 
-let shared: BridgeTransport | MockTransport | undefined;
+let shared: BridgeTransport | undefined;
 
 /** The one transport the page uses; created on first access. */
-export function bridge(): BridgeTransport | MockTransport {
+export function bridge(): BridgeTransport {
 	shared ??= createBridge();
 	return shared;
 }

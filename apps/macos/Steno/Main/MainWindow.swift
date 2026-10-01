@@ -31,9 +31,7 @@ struct MainWindow: View {
       .ignoresSafeArea()
       .frame(minWidth: Self.minimumSize.width, minHeight: Self.minimumSize.height)
       .task {
-        bridge.openWindow = { [controller, openWindow] request in
-          openRequestedWindow(request, controller: controller, openWindow: openWindow)
-        }
+        bridge.openWindow = windowOpener(controller: controller, openWindow: openWindow)
         await bridge.run()
       }
   }

@@ -185,6 +185,5 @@ final class MenuBarViewModelTests: XCTestCase {
     XCTAssertEqual(MeetingSource.macInPerson.label, "In person")
     XCTAssertEqual(PermissionKind.microphone.deniedMessage, "Microphone access is denied.")
     XCTAssertEqual(PermissionKind.systemAudio.deniedMessage, "System audio access is denied.")
-    XCTAssertEqual(LanguageTag("de").localizedName(in: Locale(identifier: "en_US")), "German")
   }
 }

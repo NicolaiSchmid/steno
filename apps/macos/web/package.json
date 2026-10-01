@@ -8,15 +8,17 @@
 		"node": ">=24"
 	},
 	"scripts": {
-		"build": "vite build && node scripts/check-offline.mjs",
+		"build": "vite build && node scripts/check-offline.mjs && node scripts/check-bundle.mjs",
+		"build:screens": "vite build --mode screens",
 		"check": "pnpm lint && pnpm lint:ui && pnpm typecheck && pnpm test",
+		"check:bundle": "node scripts/check-bundle.mjs",
 		"check:offline": "node scripts/check-offline.mjs",
 		"dev": "vite",
 		"lint": "biome check .",
 		"lint:fix": "biome check --write .",
 		"lint:ui": "node scripts/check-ui-restyle.mjs",
-		"preview": "vite preview",
-		"screens": "pnpm build && playwright test",
+		"preview": "vite preview --mode screens",
+		"screens": "pnpm build:screens && playwright test",
 		"test": "vitest run",
 		"typecheck": "tsc --noEmit"
 	},
