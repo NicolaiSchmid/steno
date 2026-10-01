@@ -114,9 +114,12 @@ export const bridgeMethods = [
 	"settings.iphone.revoke",
 	"onboarding.request",
 	"onboarding.skip",
+	"onboarding.refresh",
 	"onboarding.advance",
 	"onboarding.back",
 	"onboarding.saveSummaries",
+	"onboarding.confirmSummariesWithCodex",
+	"onboarding.chooseVault",
 	"onboarding.saveVault",
 	"onboarding.skipSetup",
 	"onboarding.finish",
@@ -673,11 +676,13 @@ export const onboardingSnapshot = z
 				.object({
 					kind: permissionKind,
 					state: permissionState,
+					isRequired: z.boolean(),
 					isRequesting: z.boolean(),
 					isSkipped: z.boolean(),
 				})
 				.strict(),
 		),
+		permissionsComplete: z.boolean(),
 		setup: z.array(
 			z
 				.object({
@@ -688,6 +693,18 @@ export const onboardingSnapshot = z
 				.strict(),
 		),
 		canSaveSummaries: z.boolean(),
+		// The Settings page's Summaries snapshot, its `subtitle` empty: the
+		// consent card and the endpoint form are one component on both pages.
+		summaries: summariesSettingsSnapshot.optional(),
+		vault: z
+			.object({
+				path: z.string().optional(),
+				name: z.string().optional(),
+				validationMessage: z.string().optional(),
+				...errorFields,
+			})
+			.strict()
+			.optional(),
 		retentionSentence: z.string().optional(),
 		finished: z.boolean(),
 	})
@@ -860,9 +877,12 @@ export const methodParams = {
 	"settings.iphone.revoke": deviceIDParams,
 	"onboarding.request": permissionKindParams,
 	"onboarding.skip": permissionKindParams,
+	"onboarding.refresh": null,
 	"onboarding.advance": null,
 	"onboarding.back": null,
 	"onboarding.saveSummaries": null,
+	"onboarding.confirmSummariesWithCodex": null,
+	"onboarding.chooseVault": null,
 	"onboarding.saveVault": null,
 	"onboarding.skipSetup": setupStepParams,
 	"onboarding.finish": null,
@@ -882,6 +902,7 @@ export const methodReplies = {
 	"meeting.setKeepAudio": confirmReply,
 	"settings.recording.chooseFolder": chosenPathReply,
 	"settings.export.chooseVault": chosenPathReply,
+	"onboarding.chooseVault": chosenPathReply,
 	"ui.confirmDestructive": confirmReply,
 } as const satisfies Partial<Record<BridgeMethod, z.ZodTypeAny>>;
 
@@ -904,6 +925,7 @@ export const fixtureSchemas = {
 	"recording.live": recordingSnapshot,
 	"settings.summaries.codex": summariesSettingsSnapshot,
 	"settings.iphone.pairing": phoneSettingsSnapshot,
+	"onboarding.setup": onboardingSnapshot,
 	"envelope.request": bridgeRequest,
 	"envelope.reply": bridgeReply,
 	"envelope.error": bridgeReply,

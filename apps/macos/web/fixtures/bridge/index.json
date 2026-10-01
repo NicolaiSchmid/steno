@@ -14,6 +14,7 @@
   "settings.iphone",
   "settings.iphone.pairing",
   "onboarding",
+  "onboarding.setup",
   "envelope.request",
   "envelope.reply",
   "envelope.error",

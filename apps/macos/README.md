@@ -97,8 +97,8 @@ a Debug build read that feed instead of `SUFeedURL`. Serve `dist/` with
 | `Steno/Speakers/` | the speaker review sheet and clip player |
 | `Steno/Detection/` | the detection prompt (floating panel) |
 | `Steno/Settings/` | The Settings window (`SettingsWindow`, the web page at `#/settings` over `Web/SettingsBridge`): General, Recording, Transcription, Summaries, Export, iPhone (`SettingsSection`), one view model each plus the sidebar status (`SettingsOverviewViewModel`) |
-| `Steno/Web/` | The web host: scheme handler, bridge, `WebWindowView`, and one `*Bridge` plus `*Snapshots` per window (`MainWindowBridge`, `SettingsBridge`) |
-| `Steno/Onboarding/` | permission onboarding |
+| `Steno/Web/` | The web host: scheme handler, bridge, `WebWindowView`, and one `*Bridge` plus `*Snapshots` per window (`MainWindowBridge`, `SettingsBridge`, `OnboardingBridge`) |
+| `Steno/Onboarding/` | The onboarding window (`OnboardingWindow`, the web page at `#/onboarding` over `Web/OnboardingBridge`, 560 by 620) and `OnboardingViewModel`, the two pages' rules: permissions, then Summaries and the Obsidian vault over the Settings view models |
 | `Steno/Services/` | the four app protocols over system frameworks, their live types and fakes |
 | `StenoTests/` | hostless XCTest unit tests, one file per view model |
 | `StenoUITests/` | `LaunchSmokeTests` |

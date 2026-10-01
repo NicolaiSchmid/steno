@@ -1,7 +1,7 @@
 {
-  "canSaveSummaries" : false,
+  "canSaveSummaries" : true,
   "finished" : false,
-  "page" : "permissions",
+  "page" : "setup",
   "permissions" : [
     {
       "isRequesting" : false,
@@ -11,18 +11,18 @@
       "state" : "granted"
     },
     {
-      "isRequesting" : true,
+      "isRequesting" : false,
       "isRequired" : true,
       "isSkipped" : false,
       "kind" : "systemAudio",
-      "state" : "unknown"
+      "state" : "granted"
     },
     {
       "isRequesting" : false,
       "isRequired" : false,
       "isSkipped" : false,
       "kind" : "calendar",
-      "state" : "unknown"
+      "state" : "granted"
     },
     {
       "isRequesting" : false,
@@ -32,12 +32,13 @@
       "state" : "unknown"
     }
   ],
-  "permissionsComplete" : false,
+  "permissionsComplete" : true,
   "retentionSentence" : "Each recording is deleted 30 days after it was processed and exported. Change this any time in Settings > Audio.",
   "setup" : [
     {
       "kind" : "summaries",
-      "state" : "open"
+      "savedLine" : "Saved: qwen3-8b at 127.0.0.1",
+      "state" : "saved"
     },
     {
       "kind" : "vault",
@@ -49,9 +50,9 @@
     "contextTokens" : "32000",
     "defaultContextTokens" : 32000,
     "hasAPIKey" : false,
-    "isConfigured" : false,
+    "isConfigured" : true,
     "isTesting" : false,
-    "model" : "",
+    "model" : "qwen3-8b",
     "presetID" : "lmStudio",
     "presets" : [
       {
@@ -79,6 +80,8 @@
     "subtitle" : ""
   },
   "vault" : {
-
+    "name" : "Work Vault",
+    "path" : "/Users/nicolai/Notes/Work Vault",
+    "validationMessage" : "The Obsidian vault at /Users/nicolai/Notes/Work Vault does not exist."
   }
 }

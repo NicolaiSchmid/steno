@@ -78,8 +78,12 @@ final class SettingsBridge: BridgeHost {
   /// every section, follows the phone listener and the transfers, and stays
   /// alive until cancelled, when it stops following.
   func run() async {
-    start()
+    // Armed after the loads: each load writes many properties across its
+    // awaits, and tracking armed before them would rebuild every snapshot
+    // a dozen times for nothing. `page.ready` before this is a no-op flush;
+    // `start()` then publishes once.
     await load()
+    start()
     // Lives until the window's task is cancelled. The phone observers run
     // alongside, but they return at once without a handover service, and
     // the page may become ready at any time, so the host's lifetime is the
@@ -88,15 +92,9 @@ final class SettingsBridge: BridgeHost {
     await withTaskGroup(of: Void.self) { group in
       group.addTask { await phones.observe() }
       group.addTask { await phones.observeReceipts() }
-      group.addTask { await Self.untilCancelled() }
+      group.addTask { await BridgeHostSupport.untilCancelled() }
     }
     stop()
-  }
-
-  private static func untilCancelled() async {
-    while !Task.isCancelled {
-      try? await Task.sleep(for: .seconds(3_600))
-    }
   }
 
   /// Every section's `load()`, then the sidebar subtitles.
@@ -211,6 +209,7 @@ final class SettingsBridge: BridgeHost {
   }
 
   private func route(_ request: BridgeRequest) async throws -> JSONValue? {
+    if try await SummariesCommands.handle(request, llm: llm) { return nil }
     switch request.method {
     case .pageReady:
       UITestDiagnostics.note("settings page ready")
@@ -271,28 +270,10 @@ final class SettingsBridge: BridgeHost {
     case .settingsTranscriptionRemove:
       await speech.remove(try Self.asset(request))
 
-    case .settingsSummariesSelectPreset:
-      let id = try request.params(SetStringParams.self).value
-      guard let preset = LLMPreset(rawValue: id) else {
-        throw BridgeError(code: .invalidParams, message: "Unknown summaries service \(id).")
-      }
-      await llm.selectPreset(preset)
-    case .settingsSummariesUpdate:
-      // The page keeps the draft while typing and sends the fields on blur;
-      // nothing is stored until `settings.summaries.save`.
-      let update = try request.params(SummariesUpdateParams.self)
-      if let baseURL = update.baseURL { llm.baseURLText = baseURL }
-      if let model = update.model { llm.model = model }
-      if let tokens = update.contextTokens { llm.contextTokensText = tokens }
-      if let key = update.apiKey { llm.apiKey = key }
     case .settingsSummariesSave:
       await llm.commit()
-    case .settingsSummariesTest:
-      await llm.test()
     case .settingsSummariesConfirmCodex:
       await llm.confirmCodex()
-    case .settingsSummariesRefreshCodexStatus:
-      await llm.refreshCodexStatus()
     case .settingsSummariesRefreshCodexModels:
       await llm.refreshCodexModels()
     case .settingsSummariesSelectCodexModel:

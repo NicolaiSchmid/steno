@@ -4,6 +4,7 @@ import type {
 	MeetingDetailSnapshot,
 	MeetingRow,
 	MeetingsListSnapshot,
+	OnboardingSnapshot,
 	PhoneSettingsSnapshot,
 	RecordingSnapshot,
 	SummariesSettingsSnapshot,
@@ -89,6 +90,7 @@ const REPLY_ALIASES: Record<string, readonly string[]> = {
 	"reply.chosenPath": [
 		"settings.recording.chooseFolder",
 		"settings.export.chooseVault",
+		"onboarding.chooseVault",
 	],
 };
 
@@ -156,6 +158,14 @@ export const scenarios = [
 	"export-on",
 	"pairing",
 	"phone-unavailable",
+	// Onboarding
+	"onboarding-unknown",
+	"onboarding-denied",
+	"onboarding-granted",
+	"onboarding-setup",
+	"onboarding-setup-open",
+	"onboarding-codex",
+	"onboarding-vault-saved",
 ] as const;
 
 /**
@@ -344,14 +354,126 @@ export function applyScenario(
 	}
 
 	applySettingsScenario(result, snapshots, scenario);
+	applyOnboardingScenario(result, snapshots, scenario);
 
-	// `recording.live`, `settings.summaries.codex` and
-	// `settings.iphone.pairing` are fixtures, not topics; the page never
-	// sees them by those names.
+	// `recording.live`, `settings.summaries.codex`, `settings.iphone.pairing`
+	// and `onboarding.setup` are fixtures, not topics; the page never sees
+	// them by those names.
 	delete result["recording.live"];
 	delete result["settings.summaries.codex"];
 	delete result["settings.iphone.pairing"];
+	delete result["onboarding.setup"];
 	return result;
+}
+
+/**
+ * The onboarding states: `onboarding-unknown` (a fresh install, nothing
+ * asked yet), `onboarding-denied` (the microphone refused),
+ * `onboarding-granted` (every permission granted, Done instead of Later),
+ * `onboarding-setup` (page 2 from `onboarding.setup`: Summaries saved, a
+ * vault chosen but refused), `onboarding-setup-open` (page 2 with both rows
+ * open), `onboarding-codex` (page 2 with ChatGPT chosen and its consent
+ * card), `onboarding-vault-saved` (page 2 with the vault saved and the
+ * Summaries form open).
+ */
+function applyOnboardingScenario(
+	result: FixtureMap,
+	snapshots: FixtureMap,
+	scenario: string | null,
+) {
+	const onboarding = snapshots.onboarding as OnboardingSnapshot | undefined;
+	const setup = snapshots["onboarding.setup"] as OnboardingSnapshot | undefined;
+	if (!onboarding || !setup) {
+		return;
+	}
+	const untouched = onboarding.permissions.map((step) => ({
+		...step,
+		state: "unknown" as const,
+		isRequesting: false,
+		isSkipped: false,
+	}));
+	const openRows = setup.setup.map((row) => {
+		const { savedLine: _line, ...rest } = row;
+		return { ...rest, state: "open" as const };
+	});
+	const { validationMessage: _refused, ...chosenVault } = setup.vault ?? {};
+	// The saved row's form names its model; an open row has none yet.
+	const openSummaries = setup.summaries
+		? { ...setup.summaries, model: "", isConfigured: false }
+		: undefined;
+
+	if (scenario === "onboarding-unknown") {
+		result.onboarding = {
+			...onboarding,
+			permissions: untouched,
+		} satisfies OnboardingSnapshot;
+	}
+
+	if (scenario === "onboarding-denied") {
+		result.onboarding = {
+			...onboarding,
+			permissions: untouched.map((step) =>
+				step.kind === "microphone" ? { ...step, state: "denied" } : step,
+			),
+		} satisfies OnboardingSnapshot;
+	}
+
+	if (scenario === "onboarding-granted") {
+		result.onboarding = {
+			...onboarding,
+			permissions: untouched.map((step) => ({ ...step, state: "granted" })),
+			permissionsComplete: true,
+		} satisfies OnboardingSnapshot;
+	}
+
+	if (scenario === "onboarding-setup") {
+		result.onboarding = setup;
+	}
+
+	if (scenario === "onboarding-setup-open") {
+		result.onboarding = {
+			...setup,
+			setup: openRows,
+			canSaveSummaries: false,
+			summaries: openSummaries,
+			vault: {},
+		} satisfies OnboardingSnapshot;
+	}
+
+	if (scenario === "onboarding-codex" && openSummaries) {
+		result.onboarding = {
+			...setup,
+			setup: openRows,
+			canSaveSummaries: false,
+			summaries: {
+				...openSummaries,
+				presetID: "codex",
+				codex: {
+					confirmed: false,
+					signIn: "signedIn",
+					signInDetail: "nicolai@example.com (Plus)",
+					model: "",
+					models: [],
+					isLoadingModels: false,
+				},
+			},
+			vault: {},
+		} satisfies OnboardingSnapshot;
+	}
+
+	if (scenario === "onboarding-vault-saved") {
+		result.onboarding = {
+			...setup,
+			setup: openRows.map((row) =>
+				row.kind === "vault"
+					? { ...row, state: "saved", savedLine: "Saved: Work Vault" }
+					: row,
+			),
+			canSaveSummaries: false,
+			summaries: openSummaries,
+			vault: chosenVault,
+		} satisfies OnboardingSnapshot;
+	}
 }
 
 /**

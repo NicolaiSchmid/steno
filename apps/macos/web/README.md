@@ -11,10 +11,10 @@ draws snapshots and sends commands over the bridge (`src/bridge/`). Plan:
 | Command | What it does |
 |---|---|
 | `pnpm install` | pnpm 11, Node 24. Own lockfile. |
-| `pnpm dev` | Vite dev server on 5173 with the fixture bridge. `#/main` (the default), `#/settings?section=general\|recording\|transcription\|summaries\|export\|iphone`, `#/stories`. Flags: `dark`, `tab=summary\|transcript\|tasks\|notes`, `menu`, `picker`, `scenario=…` (below), for example `#/main?dark&tab=transcript&picker` or `#/settings?section=iphone&scenario=pairing`. |
+| `pnpm dev` | Vite dev server on 5173 with the fixture bridge. `#/main` (the default), `#/settings?section=general\|recording\|transcription\|summaries\|export\|iphone`, `#/onboarding`, `#/stories`. Flags: `dark`, `tab=summary\|transcript\|tasks\|notes`, `menu`, `picker`, `scenario=…` (below), for example `#/main?dark&tab=transcript&picker`, `#/settings?section=iphone&scenario=pairing` or `#/onboarding?scenario=onboarding-codex`. |
 | `pnpm check` | `lint`, `lint:ui`, `typecheck`, `test`. Must pass before a PR. |
 | `pnpm build` | Writes `dist/` with relative asset URLs, then `scripts/check-offline.mjs` greps it for fetchable URLs. |
-| `pnpm screens` | Builds, then Playwright renders the main window in every state at 960 by 600 and 1200 by 760, the Settings window's sections and states at its fixed 760 by 520, and the stories, light and dark, to `screens/` and asserts the page made no network request. Run `pnpm exec playwright install chromium` once. |
+| `pnpm screens` | Builds, then Playwright renders the main window in every state at 960 by 600 and 1200 by 760, the Settings window's sections and states at its fixed 760 by 520, the onboarding window's two pages and their states at its fixed 560 by 620, and the stories, light and dark, to `screens/` and asserts the page made no network request. Run `pnpm exec playwright install chromium` once. |
 
 ## Layout
 
@@ -22,7 +22,9 @@ draws snapshots and sends commands over the bridge (`src/bridge/`). Plan:
 |---|---|
 | `src/bridge/` | The contract (`contract.ts`), the typed client, the WebKit and mock transports, and `hooks.ts` (`useSnapshot`, `useBridge`, `send`). |
 | `src/windows/main/` | The main window over the bridge: sidebar, meeting list, detail with its tabs, `format.ts` for every date and duration. |
-| `src/windows/settings/` | The Settings window: a sidebar of the six sections with the subtitles their snapshots carry, one `*-section.tsx` per section built from `FormCard` and `FormRow`, `settings-format.ts` for sizes and relative times. Text fields keep a draft (`use-draft.ts`) and send one `update` plus a `save` when focus leaves. |
+| `src/windows/settings/` | The Settings window: a sidebar of the six sections with the subtitles their snapshots carry, one `*-section.tsx` per section built from `FormCard` and `FormRow`, `settings-format.ts` for sizes and relative times. Text fields keep a draft (`src/lib/use-draft.ts`) and send one `update` plus a `save` when focus leaves. |
+| `src/windows/onboarding/` | The onboarding window over the `onboarding` snapshot: `permissions-page.tsx` (one `PermissionRow` per permission, Later or Done) and `setup-page.tsx` (the Summaries row with the service form or the ChatGPT consent card, the Obsidian vault row with the native chooser, Back and Finish) in the frame `onboarding-page.tsx` draws. The host says which page is current; `finished` in the snapshot makes the page ask for `window.close`. |
+| `src/components/` | Pieces two windows share, built from `ui/`: `permission-row.tsx` (Settings and onboarding), `codex-consent-card.tsx` (the ChatGPT consent words, once), `draft-field.tsx`. |
 | `src/components/ui/` | The component set; the only place a look is defined. |
 | `src/stories/` | Every component in every variant, rendered by the screens. |
 | `fixtures/bridge/` | Snapshots and replies recorded by the Swift side; the mock transport serves them. |
@@ -35,7 +37,12 @@ entry. `?tab=` picks the detail tab. For Settings: `settings-error` (an error
 with its details, a login item awaiting approval, an update available),
 `download-failed`, `summaries-connected`, `summaries-failed`, `codex-consent`,
 `codex` (from `settings.summaries.codex`), `export-on`, `pairing` (from
-`settings.iphone.pairing`) and `phone-unavailable`. Interactive elements carry the
+`settings.iphone.pairing`) and `phone-unavailable`. For onboarding:
+`onboarding-unknown` (a fresh install), `onboarding-denied`,
+`onboarding-granted` (Done instead of Later), `onboarding-setup` (page 2 from
+`onboarding.setup`: Summaries saved, a vault chosen but refused),
+`onboarding-setup-open`, `onboarding-codex` (the consent card) and
+`onboarding-vault-saved`. Interactive elements carry the
 `data-testid` the SwiftUI views exposed as accessibility identifiers
 (`sidebar-record`, `nav-all`, `meeting-<uuid>`, `tab-summary`,
 `speaker-picker-<uuid>`, `processing-card`, `empty-detail-title`, …) so the
