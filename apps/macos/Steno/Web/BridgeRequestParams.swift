@@ -95,13 +95,3 @@ enum SummariesCommands {
     return true
   }
 }
-
-/// A bridge host lives as long as its window's task: this returns only when
-/// that task is cancelled, whatever its observers do meanwhile.
-enum BridgeHostSupport {
-  static func untilCancelled() async {
-    while !Task.isCancelled {
-      try? await Task.sleep(for: .seconds(3_600))
-    }
-  }
-}

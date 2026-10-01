@@ -7,17 +7,17 @@ import StenoCore
 
 /// The main window's host (plan Decisions 5 and 6). Owns the list model and
 /// the detail model of the selected meeting (recreated when the selection
-/// changes, as the SwiftUI window did), follows them and the controller's
-/// recorder, progress model and setup state with observation tracking, and
-/// publishes one full snapshot per topic to the attached sink, coalesced to
-/// the next main-actor turn; `recording` at most 20 Hz. Commands map one to
-/// one onto the view models' public methods, so no rule lives here. The
+/// changes, as the SwiftUI window did) and maps them, the controller's
+/// recorder, progress model and setup state onto the window's five topics;
+/// `TopicPublisher` follows them and publishes, `recording` at most 20 Hz.
+/// Commands map one to one onto the view models' public methods, so no rule
+/// lives here. The
 /// destructive ones (`meetings.delete`, `meeting.deleteRecordingNow`, and
 /// `meeting.setKeepAudio` turning keep off when that deletes the recording
 /// now) ask through `NSAlert` first, the one native surface the page cannot
 /// draw, and reply whether the user confirmed; a decline changes nothing.
 @MainActor
-final class MainWindowBridge: BridgeHost {
+final class MainWindowBridge: BridgeHost, TopicSource {
   /// What the page asks the host to open: another window, or Settings on a
   /// section. `MainWindow` installs the scene's `openWindow` action here;
   /// until it does, nothing opens.
@@ -31,18 +31,9 @@ final class MainWindowBridge: BridgeHost {
   var openWindow: OpenWindow = { _ in }
 
   private let confirm: Confirm
-  private weak var events: (any BridgeEventSink)?
-  /// True from `page.ready`: before it the page has no `window.steno` and
-  /// an emit would be lost, so tracking is armed but nothing is sent.
-  private var pageReady = false
-  /// True between `run()`'s start and its cancellation.
-  private var running = false
-  /// True while `run()` observes the store; tests wait for it before
-  /// `page.ready`, since publishes before it are dropped by design.
-  private var pending: Set<BridgeTopic> = []
+  private lazy var publisher = TopicPublisher(
+    topics: Self.topics, source: self, minimumInterval: [.recording: Self.recordingInterval])
   private var detailTasks: [Task<Void, Never>] = []
-  private var lastRecordingPublish: ContinuousClock.Instant?
-  private var recordingThrottle: Task<Void, Never>?
   /// Whether the list had meetings at its last flush. The `app` snapshot
   /// reads this instead of `list.all`, so the app topic is re-published
   /// when the list empties or fills and not with every list change; the
@@ -72,98 +63,36 @@ final class MainWindowBridge: BridgeHost {
     self.confirm = confirm ?? alert
   }
 
-  /// Runs for the window's lifetime (`MainWindow`'s `.task`): arms every
-  /// topic's tracking, follows the meeting list, and on cancellation tears
-  /// the detail model down.
   /// Publishes every topic now and lets later changes publish; `run()`
   /// calls it before following the list, and a test that dispatches at once
   /// calls it directly.
   func start() {
-    guard !running else { return }
-    running = true
-    for topic in Self.topics { flush(topic) }
+    publisher.start()
   }
 
+  /// Runs for the window's lifetime (`MainWindow`'s `.task`): arms every
+  /// topic's tracking, follows the meeting list, and on cancellation tears
+  /// the detail model down.
   func run() async {
     start()
     await list.observe()
-    running = false
-    recordingThrottle?.cancel()
-    recordingThrottle = nil
+    publisher.stop()
     tearDownDetail()
   }
 
   func attach(_ events: any BridgeEventSink) {
-    self.events = events
+    publisher.attach(events)
   }
 
-  // MARK: - Publishing
+  // MARK: - Topics
 
-  /// Asks for a publish of `topic` on a later main-actor turn; a second ask
-  /// before that turn is folded into it. `recording` waits out the rest of
-  /// its 50 ms interval first.
-  private func schedule(_ topic: BridgeTopic) {
-    guard running, pending.insert(topic).inserted else { return }
-    if topic == .recording, let last = lastRecordingPublish {
-      let wait = Self.recordingInterval - (ContinuousClock.now - last)
-      if wait > .zero {
-        recordingThrottle?.cancel()
-        recordingThrottle = Task { @MainActor [weak self] in
-          try? await Task.sleep(for: wait)
-          guard !Task.isCancelled else { return }
-          self?.flush(.recording)
-        }
-        return
-      }
-    }
-    Task { @MainActor [weak self] in self?.flush(topic) }
-  }
-
-  /// Builds the topic's snapshot inside observation tracking, so the next
-  /// change to anything it read schedules the next publish, and emits it
-  /// once the page is ready. The list flush also owns the selection's side
-  /// effects (first fill, a selection waiting for its row, detail model
-  /// swap) and the `hasMeetings` flag; the app flush consumes the
-  /// controller's meeting request after the snapshot has carried it once.
-  private func flush(_ topic: BridgeTopic) {
-    guard running else { return }
-    pending.remove(topic)
-    switch topic {
-    case .meetingsList:
-      followListFill()
-      syncDetail()
-    case .meetingDetail:
-      syncDetail()
-    default:
-      break
-    }
-    var snapshot: (any Encodable)?
-    withObservationTracking {
-      snapshot = self.snapshot(for: topic)
-    } onChange: { [weak self] in
-      Task { @MainActor [weak self] in self?.schedule(topic) }
-    }
-    if topic == .recording { lastRecordingPublish = ContinuousClock.now }
-    if pageReady, let events {
-      if let snapshot {
-        // The sink encodes once (`emit(_:snapshot:)`); the existential is
-        // opened onto its generic parameter.
-        events.emit(topic, snapshot: snapshot)
-      } else if topic == .meetingDetail {
-        // `null` until a meeting is selected and its export has loaded; the
-        // page shows its empty pane.
-        events.emit(BridgeEvent(topic: .meetingDetail, payload: .null))
-      }
-    }
-    if topic == .app { consumeMeetingRequest() }
-  }
-
-  /// The topic's snapshot from the view models as they stand; nil for a
-  /// detail without an export yet, and for topics this window never
-  /// publishes. Each reads only its own inputs: the `app` snapshot reads
-  /// the bridge's `hasMeetings`, not the list, and the list snapshot reads
-  /// the list model, not the progress model.
-  private func snapshot(for topic: BridgeTopic) -> (any Encodable)? {
+  /// The topic's snapshot from the view models as they stand; `null` for a
+  /// detail without a selection or an export yet (the page shows its empty
+  /// pane), nil for topics this window never publishes. Each reads only its
+  /// own inputs: the `app` snapshot reads the bridge's `hasMeetings`, not
+  /// the list, and the list snapshot reads the list model, not the progress
+  /// model.
+  func snapshot(for topic: BridgeTopic) -> (any Encodable)? {
     switch topic {
     case .app:
       return AppSnapshot(controller: controller, hasMeetings: hasMeetings)
@@ -174,10 +103,32 @@ final class MainWindowBridge: BridgeHost {
     case .meetingsList:
       return MeetingsListSnapshot(list: list)
     case .meetingDetail:
-      return detail.flatMap { MeetingDetailSnapshot(detail: $0) }
+      if let detail, let snapshot = MeetingDetailSnapshot(detail: detail) { return snapshot }
+      return JSONValue.null
     default:
       return nil
     }
+  }
+
+  /// The list publish owns the selection's side effects (first fill, a
+  /// selection waiting for its row, detail model swap) and the
+  /// `hasMeetings` flag, outside observation tracking.
+  func willPublish(_ topic: BridgeTopic) {
+    switch topic {
+    case .meetingsList:
+      followListFill()
+      syncDetail()
+    case .meetingDetail:
+      syncDetail()
+    default:
+      break
+    }
+  }
+
+  /// The app publish consumes the controller's meeting request after the
+  /// snapshot has carried it once.
+  func didPublish(_ topic: BridgeTopic, emitted: Bool) {
+    if topic == .app { consumeMeetingRequest() }
   }
 
   /// The menu bar or the detection prompt asked for a meeting: it becomes
@@ -205,7 +156,7 @@ final class MainWindowBridge: BridgeHost {
     }
     if filled != hasMeetings {
       hasMeetings = filled
-      schedule(.app)
+      publisher.schedule(.app)
     }
   }
 
@@ -226,7 +177,7 @@ final class MainWindowBridge: BridgeHost {
         Task { await model.observeSettings() },
       ]
     }
-    schedule(.meetingDetail)
+    publisher.schedule(.meetingDetail)
   }
 
   /// The old view's `onDisappear`: playback stops, a pending re-export is
@@ -245,8 +196,7 @@ final class MainWindowBridge: BridgeHost {
     switch request.method {
     case .pageReady:
       UITestDiagnostics.note("page ready")
-      pageReady = true
-      for topic in Self.topics { flush(topic) }
+      publisher.pageDidBecomeReady()
     case .pageLayout:
       // Validated and dropped: nothing reads the page's size yet.
       _ = try request.params(PageLayoutParams.self)

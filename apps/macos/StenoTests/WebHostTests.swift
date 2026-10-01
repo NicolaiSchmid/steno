@@ -22,15 +22,6 @@ private final class RecordingHost: BridgeHost {
   }
 }
 
-@MainActor
-private final class RecordingSink: BridgeEventSink {
-  private(set) var events: [BridgeEvent] = []
-
-  func emit(_ event: BridgeEvent) {
-    events.append(event)
-  }
-}
-
 private struct Boom: Error, CustomStringConvertible {
   var description: String { "the disk is full" }
 }

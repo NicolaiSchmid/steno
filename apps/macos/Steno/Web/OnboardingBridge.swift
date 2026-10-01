@@ -5,9 +5,8 @@ import StenoCore
 
 /// The onboarding window's host (plan Decisions 5 and 6). Owns the
 /// `OnboardingViewModel` (and through it the Summaries and Export view
-/// models page 2 writes), loads it when the window opens, follows it with
-/// observation tracking and publishes the one `onboarding` snapshot to the
-/// attached sink, coalesced to the next main-actor turn. Commands map one
+/// models page 2 writes), loads it when the window opens and maps it onto
+/// the one `onboarding` topic; `TopicPublisher` follows it and publishes. Commands map one
 /// to one onto the model's public methods, so no rule lives here; the two
 /// pieces of view glue the SwiftUI page had stay glue: page 1 moves on by
 /// itself once every permission step is handled, and the folder chooser
@@ -18,7 +17,7 @@ import StenoCore
 /// `finished`, the page sees it in the snapshot and calls
 /// `window.close(onboarding)`, which runs `closeWindow`.
 @MainActor
-final class OnboardingBridge: BridgeHost {
+final class OnboardingBridge: BridgeHost, TopicSource {
   /// What the page asks the host to open; `OnboardingWindow` installs the
   /// scene's `openWindow` here.
   typealias OpenWindow = @MainActor (WindowParams) -> Void
@@ -33,14 +32,7 @@ final class OnboardingBridge: BridgeHost {
   var closeWindow: CloseWindow = {}
 
   private let chooseFolder: ChooseFolder
-  private weak var events: (any BridgeEventSink)?
-  /// True from `page.ready`: before it the page has no `window.steno` and
-  /// an emit would be lost, so tracking is armed but nothing is sent.
-  private var pageReady = false
-  /// True between `start()` and `stop()`.
-  private var running = false
-  /// A publish is already scheduled for a later turn.
-  private var pending = false
+  private lazy var publisher = TopicPublisher(topics: [.onboarding], source: self)
 
   /// Over the controller's environment, or over `model` when a test brings
   /// its own permissions and defaults.
@@ -56,9 +48,7 @@ final class OnboardingBridge: BridgeHost {
 
   /// Arms the tracking and lets later changes publish.
   func start() {
-    guard !running else { return }
-    running = true
-    flush()
+    publisher.start()
   }
 
   /// Runs for the window's lifetime (`OnboardingWindow`'s `.task`): loads
@@ -69,43 +59,29 @@ final class OnboardingBridge: BridgeHost {
     // before this is a no-op flush and `start()` then publishes once.
     await model.load()
     start()
-    await BridgeHostSupport.untilCancelled()
+    await TopicPublisher.untilCancelled()
     stop()
   }
 
   func stop() {
-    running = false
+    publisher.stop()
   }
 
   func attach(_ events: any BridgeEventSink) {
-    self.events = events
+    publisher.attach(events)
   }
 
-  // MARK: - Publishing
+  // MARK: - Topics
 
-  /// Asks for a publish on a later main-actor turn; a second ask before
-  /// that turn is folded into it.
-  private func schedule() {
-    guard running, !pending else { return }
-    pending = true
-    Task { @MainActor [weak self] in self?.flush() }
+  func snapshot(for topic: BridgeTopic) -> (any Encodable)? {
+    guard topic == .onboarding else { return nil }
+    return OnboardingSnapshot(model: model)
   }
 
-  /// Builds the snapshot inside observation tracking, so the next change to
-  /// anything it read schedules the next publish, and emits it once the
-  /// page is ready.
-  private func flush() {
-    guard running else { return }
-    pending = false
-    var snapshot: OnboardingSnapshot?
-    withObservationTracking {
-      snapshot = OnboardingSnapshot(model: self.model)
-    } onChange: { [weak self] in
-      Task { @MainActor [weak self] in self?.schedule() }
-    }
-    guard pageReady, let events, let snapshot else { return }
-    events.emit(.onboarding, snapshot: snapshot)
-    UITestDiagnostics.note("onboarding published page \(snapshot.page.rawValue)")
+  func didPublish(_ topic: BridgeTopic, emitted: Bool) {
+    guard emitted else { return }
+    UITestDiagnostics.note(
+      "onboarding published page \(model.page == .permissions ? "permissions" : "setup")")
   }
 
   // MARK: - Commands
@@ -118,8 +94,7 @@ final class OnboardingBridge: BridgeHost {
     switch request.method {
     case .pageReady:
       UITestDiagnostics.note("onboarding page ready")
-      pageReady = true
-      flush()
+      publisher.pageDidBecomeReady()
     case .pageLayout:
       // Validated and dropped: the window has one size.
       _ = try request.params(PageLayoutParams.self)
