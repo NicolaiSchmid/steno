@@ -1,7 +1,15 @@
 # Steno for macOS
 
-The SwiftUI app over the Swift package at the repository root. Plan:
-[`.plans/2026-09-25-macos-app-and-release.md`](../../.plans/2026-09-25-macos-app-and-release.md).
+The Mac app over the Swift package at the repository root: a Swift shell (`AppController`, the
+view models, the services, Sparkle, the iPhone listener) whose three windows, the main window,
+Settings and onboarding, are pages of the web UI in [`web/`](web/README.md) rendered by
+`WKWebView` from the app bundle, with one bridge per window mapping view model state to
+snapshots and page commands to view model calls. SwiftUI draws only the menu bar item and the
+floating panels (the recording bubble, the detection prompt). Plans:
+[`.plans/2026-09-25-macos-app-and-release.md`](../../.plans/2026-09-25-macos-app-and-release.md)
+(app target, CI, release) and
+[`.plans/2026-09-29-macos-webview-ui.md`](../../.plans/2026-09-29-macos-webview-ui.md) (the web
+windows, the bridge, the design language).
 
 ## Generate and build
 
@@ -37,9 +45,9 @@ CI runs the first two on `MACOS_RUNS_ON` (the `app` job) and the UI smoke test i
 GitHub-hosted `macos-15` job (`ui-smoke`): Xcode 27 on the Forge runner aborts inside
 `IDELaunchServicesLauncher` (`INTERNAL ERROR: childPID > 0`) when `xcodebuild test` launches
 an XCUITest runner, so the smoke test stays where spike S1 passed. That runner's display is
-1024 x 768, the layout budget: every window must fit it at its minimum size, so no view may
-answer the minimum-size probe with an unbounded width (a `maxWidth` under
-`fixedSize(vertical:)` does; `EmptyState` wraps at a fixed width for that reason).
+1024 x 768, the layout budget: every window must fit it at its minimum size (the main window's
+960 by 600, Settings' 760 by 520, onboarding's 560 by 620); the pages lay out inside those
+frames, and the Playwright screens in `web/` review them at the same sizes.
 
 xcodebuild does not hand its own environment to the test process; prefix a variable with
 `TEST_RUNNER_` to pass it through. `TEST_RUNNER_STENO_UPDATE_SNAPSHOTS=1 xcodebuild test …`
@@ -90,17 +98,19 @@ a Debug build read that feed instead of `SUFeedURL`. Serve `dist/` with
 | `Steno/StenoApp.swift` | scenes, commands, `AppBootstrap` |
 | `Steno/AppEnvironment.swift` | composition root: `live()` and `preview()` |
 | `Steno/AppController.swift` | the running object graph over one environment |
-| `Steno/Design/` | `Theme` (tokens mirroring `mobile/global.css`), `Motion`, shared controls |
+| `Steno/Design/` | `Theme` and `Motion` (the tokens the native surfaces draw with, mirroring `mobile/global.css`), `Components` (the button styles, chip, card, dot and message row the menu bar and panels share), `Labels` (user-facing words for core's enums, read by the snapshots too) |
 | `Steno/Resources/` | `AppIcon.svg`, the icon's source of truth, and `Assets.xcassets` with the `AppIcon` set it renders to |
-| `Steno/MenuBar/` | recording, queue, launch at login |
-| `Steno/Main/` | meeting list, detail with Summary, Transcript, Tasks, Scratchpad |
-| `Steno/Speakers/` | the speaker review sheet and clip player |
-| `Steno/Detection/` | the detection prompt (floating panel) |
-| `Steno/Settings/` | The Settings window (`SettingsWindow`, the web page at `#/settings` over `Web/SettingsBridge`): General, Recording, Transcription, Summaries, Export, iPhone (`SettingsSection`), one view model each plus the sidebar status (`SettingsOverviewViewModel`) |
-| `Steno/Web/` | The web host: scheme handler, bridge, `WebWindowView`, and one `*Bridge` plus `*Snapshots` per window (`MainWindowBridge`, `SettingsBridge`, `OnboardingBridge`) |
+| `Steno/MenuBar/` | The menu bar item (SwiftUI): recording, queue, launch at login |
+| `Steno/Panels/` | The floating panels (SwiftUI): the recording bubble and the detection prompt |
+| `Steno/Recording/` | `RecordingController`, auto-stop, the countdown and clock, the Stop and level views the bubble and the menu bar share |
+| `Steno/Main/` | The main window (`MainWindow`, the web page at `#/main` over `Web/MainWindowBridge`, 960 by 600 minimum) and its models: `MeetingListViewModel`, `MeetingDetailViewModel`, `ProcessingProgressModel` with the `ProcessingPresentation` card, `SetupStatus` |
+| `Steno/Speakers/` | `SpeakersViewModel` and `SpeakerPickerState` behind the detail's speaker rows, the clip player |
+| `Steno/Detection/` | Meeting detection and the prompt's model |
+| `Steno/Settings/` | The Settings window (`SettingsWindow`, the web page at `#/settings` over `Web/SettingsBridge`, 760 by 520): General, Recording, Transcription, Summaries, Export, iPhone (`SettingsSection`), one view model each plus the sidebar status (`SettingsOverviewViewModel`) |
+| `Steno/Web/` | The web host: `AppSchemeHandler` (the bundle over `steno-app://`), `WebBridge` and `BridgeDispatcher` (the message runtime), `WebWindowView` (one `WKWebView` per window; `CanvasWebView` paints the window in the page's canvas colour), `TopicPublisher` (the one publishing loop: tracked snapshots, coalescing, page readiness), and one `*Bridge` plus `*Snapshots` per window (`MainWindowBridge`, `SettingsBridge`, `OnboardingBridge`) |
 | `Steno/Onboarding/` | The onboarding window (`OnboardingWindow`, the web page at `#/onboarding` over `Web/OnboardingBridge`, 560 by 620) and `OnboardingViewModel`, the two pages' rules: permissions, then Summaries and the Obsidian vault over the Settings view models |
 | `Steno/Services/` | the four app protocols over system frameworks, their live types and fakes |
-| `StenoTests/` | hostless XCTest unit tests, one file per view model |
+| `StenoTests/` | hostless unit tests: one file per view model, the bridges' snapshots and command routing (`*SnapshotsTests` over `BridgeTestSupport`), the web host's pure rules (`WebHostTests`), the theme tokens against both CSS files |
 | `StenoUITests/` | `LaunchSmokeTests` |
 | `scripts/` | `install-xcodegen.sh` (release zip pinned by version and SHA-256; an `xcodegen` on PATH counts only at the pinned version), `install-gh.sh` (the GitHub CLI for the publish step, same pinned-zip scheme; a `gh` already on PATH is used as is, so hosted runners skip the download and Forge needs nothing preinstalled), `xcodebuild-quiet.sh` (log to file, diagnostics to the console, fails without the `** … SUCCEEDED **` marker; used by CI and `build-release.sh`), `xcresult-summary.py`, `build-release.sh`, `make-dmg.sh`, `make-appcast.sh`, `make-app-icon.sh` |
 
