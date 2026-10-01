@@ -1,3 +1,4 @@
+import { useEffect, useRef } from "react";
 import { Input } from "@/components/ui";
 import { useDraft } from "@/lib/use-draft";
 
@@ -28,14 +29,21 @@ export function DraftField({
 	clearOnCommit?: boolean;
 }) {
 	const [draft, setDraft] = useDraft(value);
+	// What the host last published or the field last sent: a secret the host
+	// never echoes would otherwise be re-sent on every blur.
+	const committed = useRef(value);
+	useEffect(() => {
+		committed.current = value;
+	}, [value]);
 	return (
 		<Input
 			aria-label={label}
 			className={className}
 			data-testid={testId}
 			onBlur={() => {
-				if (draft !== value) {
+				if (draft !== committed.current) {
 					onCommit(draft);
+					committed.current = clearOnCommit ? value : draft;
 					if (clearOnCommit) setDraft("");
 				}
 			}}

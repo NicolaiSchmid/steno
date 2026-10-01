@@ -238,9 +238,7 @@ final class LaunchSmokeTests: XCTestCase {
     "A few permissions, then where summaries come from and where meetings go. Audio never leaves this Mac."
   private static let setupTitle = "Summaries and export"
   private static let summariesSentence =
-    """
-    Steno sends the transcript text, never audio, to a model to clean it up and write the summary, tasks and decisions: a server or API key of your choice, or your ChatGPT plan through the Codex sign-in on this Mac. Without one, meetings keep a raw transcript and no summary.
-    """
+    "Steno sends the transcript text, never audio, to a model to clean it up and write the summary, tasks and decisions: a server or API key of your choice, or your ChatGPT plan through the Codex sign-in on this Mac. Without one, meetings keep a raw transcript and no summary."
 
   /// The onboarding window: `onboarding-window`, the identifier
   /// `UITestWindowMarker` gives its `NSWindow`.

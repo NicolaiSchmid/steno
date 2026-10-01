@@ -184,7 +184,7 @@ function SummariesFields({
 		baseURL?: string;
 		model?: string;
 		apiKey?: string;
-	}) => send(client, "onboarding.updateSummaries", fields);
+	}) => send(client, "settings.summaries.update", fields);
 	const keyPlaceholder = summaries.hasAPIKey
 		? "Saved in your keychain"
 		: preset?.needsAPIKey
@@ -199,7 +199,7 @@ function SummariesFields({
 				data-testid="onboarding-preset"
 				onValueChange={(value) => {
 					if (value) {
-						send(client, "onboarding.selectPreset", { value });
+						send(client, "settings.summaries.selectPreset", { value });
 					}
 				}}
 				options={summaries.presets.map((candidate) => ({
@@ -259,7 +259,9 @@ function SummariesFields({
 					<CodexConsentCard
 						codex={codex}
 						compact
-						onCheckAgain={() => send(client, "onboarding.refreshCodexStatus")}
+						onCheckAgain={() =>
+							send(client, "settings.summaries.refreshCodexStatus")
+						}
 						onConfirm={() =>
 							send(client, "onboarding.confirmSummariesWithCodex")
 						}
@@ -331,7 +333,7 @@ function SummariesFields({
 								summaries.baseURL.trim() === "" ||
 								summaries.validationMessage !== undefined
 							}
-							onClick={() => send(client, "onboarding.testSummaries")}
+							onClick={() => send(client, "settings.summaries.test")}
 							size="sm"
 							variant="outline"
 						>

@@ -60,3 +60,48 @@ enum BridgeSystemCommands {
     return permission
   }
 }
+
+/// The Summaries endpoint commands both the Settings and the onboarding
+/// window answer on their own `LLMSettingsViewModel`, so the shared form
+/// sends one set of method names. `handle` returns false for any other
+/// method, which the caller's own switch then takes.
+enum SummariesCommands {
+  @MainActor
+  static func handle(_ request: BridgeRequest, llm: LLMSettingsViewModel) async throws -> Bool {
+    switch request.method {
+    case .settingsSummariesSelectPreset:
+      let id = try request.params(SetStringParams.self).value
+      guard let preset = LLMPreset(rawValue: id) else {
+        throw BridgeError(code: .invalidParams, message: "Unknown summaries service \(id).")
+      }
+      // The preset's address and model are committed and probed at once
+      // when they validate, as the pickers always did.
+      await llm.selectPreset(preset)
+    case .settingsSummariesUpdate:
+      // The page keeps the draft while typing and sends the fields on blur;
+      // the fields are stored by the window's own save command.
+      let update = try request.params(SummariesUpdateParams.self)
+      if let baseURL = update.baseURL { llm.baseURLText = baseURL }
+      if let model = update.model { llm.model = model }
+      if let tokens = update.contextTokens { llm.contextTokensText = tokens }
+      if let key = update.apiKey { llm.apiKey = key }
+    case .settingsSummariesTest:
+      await llm.test()
+    case .settingsSummariesRefreshCodexStatus:
+      await llm.refreshCodexStatus()
+    default:
+      return false
+    }
+    return true
+  }
+}
+
+/// A bridge host lives as long as its window's task: this returns only when
+/// that task is cancelled, whatever its observers do meanwhile.
+enum BridgeHostSupport {
+  static func untilCancelled() async {
+    while !Task.isCancelled {
+      try? await Task.sleep(for: .seconds(3_600))
+    }
+  }
+}

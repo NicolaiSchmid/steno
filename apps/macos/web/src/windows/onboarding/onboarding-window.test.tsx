@@ -34,27 +34,4 @@ describe("OnboardingWindow", () => {
 		});
 		expect(screen.getByTestId("onboarding-permissions")).toBeInTheDocument();
 	});
-
-	it("asks the host to close the window once onboarding finished, once", async () => {
-		const harness = await createBridgeHarness();
-		renderWithBridge(<OnboardingWindow />, harness);
-		expect(callsTo(harness.transport, "window.close")).toHaveLength(0);
-		const onboarding = (await loadFixtureSnapshots())
-			.onboarding as OnboardingSnapshot;
-		const finished = {
-			...onboarding,
-			page: "setup",
-			finished: true,
-		} satisfies OnboardingSnapshot;
-		act(() => {
-			harness.transport.emit("onboarding", finished);
-		});
-		expect(callsTo(harness.transport, "window.close")).toEqual([
-			{ method: "window.close", params: { window: "onboarding" } },
-		]);
-		act(() => {
-			harness.transport.emit("onboarding", { ...finished });
-		});
-		expect(callsTo(harness.transport, "window.close")).toHaveLength(1);
-	});
 });

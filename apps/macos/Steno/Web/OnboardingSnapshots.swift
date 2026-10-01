@@ -25,10 +25,13 @@ extension OnboardingSnapshot {
           kind: step == .summaries ? .summaries : .vault, modelState: model.setupState(of: step))
       },
       canSaveSummaries: model.canSaveSummaries,
-      // The Settings page's Summaries snapshot without a sidebar subtitle,
-      // so the consent card and the endpoint form are one component.
-      summaries: model.llm.map { SummariesSettingsSnapshot(llm: $0, subtitle: "") },
-      vault: model.obsidian.map { Vault(obsidian: $0) },
+      // Page 2 only: page 1 never renders them, and the permission steps
+      // would otherwise republish the whole form with every change. The
+      // Settings page's Summaries snapshot without a sidebar subtitle, so
+      // the consent card and the endpoint form are one component.
+      summaries: model.page == .setup
+        ? model.llm.map { SummariesSettingsSnapshot(llm: $0, subtitle: "") } : nil,
+      vault: model.page == .setup ? model.obsidian.map { Vault(obsidian: $0) } : nil,
       retentionSentence: model.retentionSentence, finished: model.finished)
   }
 }

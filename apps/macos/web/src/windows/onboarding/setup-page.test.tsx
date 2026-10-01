@@ -43,11 +43,11 @@ describe("SetupPage", () => {
 
 		await user.type(screen.getByTestId("onboarding-model"), "qwen");
 		expect(
-			callsTo(harness.transport, "onboarding.updateSummaries"),
+			callsTo(harness.transport, "settings.summaries.update"),
 		).toHaveLength(0);
 		await user.tab();
-		expect(callsTo(harness.transport, "onboarding.updateSummaries")).toEqual([
-			{ method: "onboarding.updateSummaries", params: { model: "qwen" } },
+		expect(callsTo(harness.transport, "settings.summaries.update")).toEqual([
+			{ method: "settings.summaries.update", params: { model: "qwen" } },
 		]);
 		expect(callsTo(harness.transport, "onboarding.saveSummaries")).toHaveLength(
 			0,
@@ -57,13 +57,13 @@ describe("SetupPage", () => {
 			"sk-typed{Enter}",
 		);
 		expect(
-			callsTo(harness.transport, "onboarding.updateSummaries").at(-1)?.params,
+			callsTo(harness.transport, "settings.summaries.update").at(-1)?.params,
 		).toEqual({ apiKey: "sk-typed" });
 		// Nothing is stored before Save, so the masked draft stays in the field.
 		expect(screen.getByTestId("onboarding-api-key")).toHaveValue("sk-typed");
 
 		await user.click(screen.getByTestId("onboarding-test-summaries"));
-		expect(callsTo(harness.transport, "onboarding.testSummaries")).toHaveLength(
+		expect(callsTo(harness.transport, "settings.summaries.test")).toHaveLength(
 			1,
 		);
 		await user.click(screen.getByTestId("onboarding-choose-vault"));

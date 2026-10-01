@@ -118,14 +118,12 @@ public enum BridgeMethod: String, Codable, Sendable, CaseIterable {
   case onboardingRefresh = "onboarding.refresh"
   case onboardingAdvance = "onboarding.advance"
   case onboardingBack = "onboarding.back"
-  /// `SetStringParams`: the summaries preset id.
-  case onboardingSelectPreset = "onboarding.selectPreset"
-  /// `SummariesUpdateParams`: the draft fields; nothing is stored until save.
-  case onboardingUpdateSummaries = "onboarding.updateSummaries"
-  case onboardingTestSummaries = "onboarding.testSummaries"
+  /// The Summaries form's own commands (`settings.summaries.selectPreset`,
+  /// `update`, `test`, `refreshCodexStatus`) are answered by the onboarding
+  /// window as well, on its own Summaries model; these two carry the rules
+  /// that are onboarding's alone (the row collapsing once saved).
   case onboardingSaveSummaries = "onboarding.saveSummaries"
   case onboardingConfirmSummariesWithCodex = "onboarding.confirmSummariesWithCodex"
-  case onboardingRefreshCodexStatus = "onboarding.refreshCodexStatus"
   /// The folder panel; a chosen folder is saved as the vault at once.
   /// Replies `ChosenPathReply`.
   case onboardingChooseVault = "onboarding.chooseVault"

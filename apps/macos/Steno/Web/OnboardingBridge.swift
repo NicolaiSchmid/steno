@@ -65,11 +65,11 @@ final class OnboardingBridge: BridgeHost {
   /// the model, then stays alive so later changes keep publishing, until
   /// the window closes and cancels it.
   func run() async {
-    start()
+    // Armed after the load, which writes across many awaits; `page.ready`
+    // before this is a no-op flush and `start()` then publishes once.
     await model.load()
-    while !Task.isCancelled {
-      try? await Task.sleep(for: .seconds(3600))
-    }
+    start()
+    await BridgeHostSupport.untilCancelled()
     stop()
   }
 
@@ -110,6 +110,9 @@ final class OnboardingBridge: BridgeHost {
   // MARK: - Commands
 
   func handle(_ request: BridgeRequest) async throws -> JSONValue? {
+    // The Summaries form sends the Settings window's method names; this
+    // window answers them on its own model.
+    if let llm = model.llm, try await SummariesCommands.handle(request, llm: llm) { return nil }
     switch request.method {
     case .pageReady:
       UITestDiagnostics.note("onboarding page ready")
@@ -121,54 +124,24 @@ final class OnboardingBridge: BridgeHost {
 
     case .onboardingRequest:
       await model.request(try permission(request))
-      advanceIfHandled()
     case .onboardingSkip:
       model.skip(try permission(request))
-      advanceIfHandled()
     case .onboardingRefresh:
       await model.load()
-      advanceIfHandled()
     case .onboardingAdvance:
       model.advance()
     case .onboardingBack:
       model.back()
 
-    case .onboardingSelectPreset:
-      let id = try request.params(SetStringParams.self).value
-      guard let preset = LLMPreset(rawValue: id) else {
-        throw BridgeError(code: .invalidParams, message: "Unknown summaries service \(id).")
-      }
-      let llm = try requireLLM()
-      // Settings semantics, as the deleted picker had: the preset's address
-      // and model are committed and probed at once when they validate.
-      await llm.selectPreset(preset)
-    case .onboardingUpdateSummaries:
-      // The page keeps the draft while typing and sends the fields on blur;
-      // the fields themselves are stored by `onboarding.saveSummaries`.
-      let update = try request.params(SummariesUpdateParams.self)
-      let llm = try requireLLM()
-      if let baseURL = update.baseURL { llm.baseURLText = baseURL }
-      if let model = update.model { llm.model = model }
-      if let tokens = update.contextTokens { llm.contextTokensText = tokens }
-      if let key = update.apiKey { llm.apiKey = key }
-    case .onboardingTestSummaries:
-      let llm = try requireLLM()
-      await llm.test()
     case .onboardingSaveSummaries:
       await model.saveSummaries()
     case .onboardingConfirmSummariesWithCodex:
       await model.confirmSummariesWithCodex()
-    case .onboardingRefreshCodexStatus:
-      let llm = try requireLLM()
-      await llm.refreshCodexStatus()
 
     case .onboardingChooseVault:
       let obsidian = try requireObsidian()
       let chosen = await chooseFolder(obsidian.vaultURL)
-      if let chosen {
-        obsidian.vaultPath = chosen.path
-        await model.saveVault()
-      }
+      if let chosen { await model.chooseVault(chosen) }
       return try BridgeReplies.value(ChosenPathReply(path: chosen?.path))
     case .onboardingSaveVault:
       await model.saveVault()
@@ -200,23 +173,8 @@ final class OnboardingBridge: BridgeHost {
     return nil
   }
 
-  /// Page 1 moves on by itself once every step is handled (required ones
-  /// granted, optional ones granted or skipped), as the SwiftUI page did on
-  /// that change. Only after a command that can change a step, so Back from
-  /// page 2 stays on page 1.
-  private func advanceIfHandled() {
-    if model.page == .permissions, model.permissionsHandled { model.advance() }
-  }
-
   private func permission(_ request: BridgeRequest) throws -> PermissionKind {
     try BridgeSystemCommands.permissionKind(try request.params(PermissionKindParams.self).kind)
-  }
-
-  private func requireLLM() throws -> LLMSettingsViewModel {
-    guard let llm = model.llm else {
-      throw BridgeError(code: .failed, message: "This window has no summaries settings to write.")
-    }
-    return llm
   }
 
   private func requireObsidian() throws -> ObsidianSettingsViewModel {

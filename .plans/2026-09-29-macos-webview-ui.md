@@ -331,20 +331,20 @@ WP5, cleanup:
   are one React component on both pages (`src/components/codex-consent-card.tsx`; the Swift
   `CodexConsentCard.swift` and its words are gone), and a `vault` block with the chosen folder
   and why a save was refused. New methods beside the WP0 eight: `onboarding.refresh` ("Check
-  again" after System Settings), `onboarding.selectPreset`, `onboarding.updateSummaries`,
-  `onboarding.testSummaries`, `onboarding.confirmSummariesWithCodex`,
-  `onboarding.refreshCodexStatus` and `onboarding.chooseVault`, the `NSOpenPanel` whose choice
+  again" after System Settings), `onboarding.confirmSummariesWithCodex` and `onboarding.chooseVault`;
+  the Summaries form's own commands (`settings.summaries.selectPreset`, `update`, `test`,
+  `refreshCodexStatus`) are answered by the onboarding bridge on its own model, so the shared
+  form sends one set of names, the `NSOpenPanel` whose choice
   is saved as the vault at once (`onboarding.saveVault` stays for the retry after a refused
   folder). The Summaries row offers the same service list as Settings instead of the SwiftUI
-  page's two-way provider picker, since the view model method behind that picker left in WP3. Choosing a service through `onboarding.selectPreset` commits the preset's
+  page's two-way provider picker, since the view model method behind that picker left in WP3. Choosing a service through `settings.summaries.selectPreset` commits the preset's
   address and model at once and probes the endpoint, as the deleted provider picker did; only
   the typed fields wait for Save.
   `system.openSystemSettings` is routed onto the onboarding model rather than duplicated as an
   `onboarding.*` method. Two pieces of view glue stay glue, in the bridge and the window: page
   1 moves on by itself once every step is handled (only after a step-changing command, so Back
   works), and the window's close button marks onboarding completed. The exit is page-driven:
-  `finished` in the snapshot makes the page call `window.close(onboarding)`, which the bridge
-  turns into `dismissWindow`. `PermissionRow` and `DraftField` moved from `src/windows/settings/`
+  The host dismisses the window itself when the model's `finished` turns true, as the SwiftUI window did; `window.close(onboarding)` stays in the contract for the page's own use. `PermissionRow` and `DraftField` moved from `src/windows/settings/`
   to `src/components/` for both windows. The smoke tests find the window as
   `onboarding-window` and the pages by their visible words (the intro sentence, the row titles,
   the page 2 heading, the button labels); a second fixture, `onboarding.setup`, feeds the page 2

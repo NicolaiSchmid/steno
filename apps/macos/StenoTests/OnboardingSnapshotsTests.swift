@@ -81,7 +81,7 @@ private func model(
     #expect(before.permissions.map(\.isRequired) == [true, true, false, false])
     #expect(before.permissions.allSatisfy { $0.state == .unknown }, "nothing read before load")
     #expect(before.retentionSentence == nil)
-    #expect(before.summaries != nil, "the environment's Summaries model is there before load")
+    #expect(before.summaries == nil, "page 1 carries no Summaries form")
 
     await onboarding.load()
     let loaded = OnboardingSnapshot(model: onboarding)
@@ -91,11 +91,14 @@ private func model(
     #expect(loaded.setup.map(\.kind) == [.summaries, .vault])
     #expect(loaded.setup.allSatisfy { $0.state == .open && $0.savedLine == nil })
     #expect(!loaded.canSaveSummaries, "no model name yet")
-    let summaries = try #require(loaded.summaries)
+    #expect(loaded.summaries == nil && loaded.vault == nil, "page 1 carries no forms")
+    onboarding.advance()
+    let setup = OnboardingSnapshot(model: onboarding)
+    let summaries = try #require(setup.summaries)
     #expect(summaries.subtitle == "", "no sidebar to subtitle")
     #expect(summaries.presetID == LLMPreset.lmStudio.rawValue)
     #expect(summaries.baseURL == "http://127.0.0.1:1234/v1")
-    let vault = try #require(loaded.vault)
+    let vault = try #require(setup.vault)
     #expect(vault.path == nil && vault.name == nil && vault.validationMessage == nil)
     #expect(loaded.retentionSentence?.hasPrefix("Recordings are kept forever in ") == true)
     #expect(!loaded.finished)
@@ -211,7 +214,7 @@ private func model(
 
     let update = await BridgeDispatcher.dispatch(
       request(
-        "r1", "onboarding.updateSummaries",
+        "r1", "settings.summaries.update",
         ["baseURL": "http://127.0.0.1:9/v1", "model": "qwen", "apiKey": "sk-typed"]),
       host: host)
     #expect(update == BridgeReply(id: "r1"))
@@ -290,7 +293,7 @@ private func model(
       request("r2", "settings.summaries.save"), host: host)
     #expect(settings.error?.code == .unknownMethod)
     let preset = await BridgeDispatcher.dispatch(
-      request("r3", "onboarding.selectPreset", ["value": "nope"]), host: host)
+      request("r3", "settings.summaries.selectPreset", ["value": "nope"]), host: host)
     #expect(preset.error?.code == .invalidParams)
     let missing = await BridgeDispatcher.dispatch(request("r4", "onboarding.request"), host: host)
     #expect(missing.error?.code == .invalidParams)

@@ -3,8 +3,8 @@ import StenoBridge
 import SwiftUI
 
 /// The onboarding window: the web UI at `#/onboarding` over
-/// `OnboardingBridge` (plan Decision 1). Fixed at 560 by 700 (the tallest
-/// that fits the smoke runner's 1024 by 768 display), no title bar:
+/// `OnboardingBridge` (plan Decision 1). Fixed at 560 by 700 (page 2's open
+/// forms set the height), no title bar:
 /// the page's H1 is the window's one title and the page paints up to the top
 /// edge, leaving the traffic lights their inset. The bridge is created once
 /// with the window's content and driven by `.task` for the window's
@@ -43,5 +43,10 @@ struct OnboardingWindow: View {
       // The window's own close button counts as having seen the pages, as
       // before: the opener then returns only for a missing required permission.
       .onDisappear { bridge.model.markCompleted() }
+      // Finish, or both setup rows handled: the host closes its own window,
+      // as the SwiftUI window did on the same change.
+      .onChange(of: bridge.model.finished) { _, finished in
+        if finished { dismissWindow(id: "onboarding") }
+      }
   }
 }

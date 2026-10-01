@@ -36,29 +36,6 @@ final class OnboardingViewModel {
 
     var id: Self { self }
 
-    var title: String {
-      switch self {
-      case .summaries: "Summaries"
-      case .vault: "Obsidian vault"
-      }
-    }
-
-    var explanation: String {
-      switch self {
-      case .summaries:
-        "Steno sends the transcript text, never audio, to a model to clean it up and write the summary, tasks and decisions: a server or API key of your choice, or your ChatGPT plan through the Codex sign-in on this Mac. Without one, meetings keep a raw transcript and no summary."
-      case .vault:
-        "Steno writes each meeting into Meetings/<date>-<slug>/ inside the vault: a folder note, transcript, tasks, VTT and JSON. It never touches files it did not write. Without a vault, meetings stay in Steno."
-      }
-    }
-
-    /// Where the fields onboarding leaves out live.
-    var footnote: String {
-      switch self {
-      case .summaries: "The context window and the rest live in Settings > Summaries."
-      case .vault: "People pages, the task tag and the audio copy live in Settings > Export."
-      }
-    }
   }
 
   enum SetupState: Equatable, Sendable {
@@ -158,6 +135,7 @@ final class OnboardingViewModel {
       page = .setup
       finishIfSetupHandled()
     }
+    advanceIfPermissionsHandled()
   }
 
   /// One sentence on what the rule does to the files, then where to change
@@ -211,6 +189,7 @@ final class OnboardingViewModel {
       steps[index].state = state
     }
     requesting = nil
+    advanceIfPermissionsHandled()
   }
 
   func openSystemSettings(_ kind: PermissionKind) {
@@ -221,6 +200,14 @@ final class OnboardingViewModel {
   func skip(_ kind: PermissionKind) {
     guard !kind.isRequired else { return }
     skipped.insert(kind)
+    advanceIfPermissionsHandled()
+  }
+
+  /// Page 1 moves on by itself once every step is handled (required ones
+  /// granted, optional ones granted or skipped), as page 2 finishes by
+  /// itself; only from a change to a step, so Back stays on page 1.
+  private func advanceIfPermissionsHandled() {
+    if page == .permissions, permissionsHandled { advance() }
   }
 
   /// Done or Later on page 1. Page 2 with both rows already handled (an
@@ -280,6 +267,12 @@ final class OnboardingViewModel {
   /// Saves through the Obsidian tab's view model (validated by the
   /// destination; `ObsidianError` verbatim in `obsidian.validationMessage`)
   /// and collapses the row on success.
+  /// A folder from the chooser becomes the vault and is saved at once.
+  func chooseVault(_ url: URL) async {
+    obsidian?.vaultPath = url.path
+    await saveVault()
+  }
+
   func saveVault() async {
     guard let obsidian else { return }
     obsidian.enabled = true
@@ -319,29 +312,5 @@ final class OnboardingViewModel {
 
   private static func savedLine(_ obsidian: ObsidianSettingsViewModel) -> String {
     "Saved: \(URL(fileURLWithPath: obsidian.vaultPath).lastPathComponent)"
-  }
-}
-
-extension PermissionKind {
-  var title: String {
-    switch self {
-    case .microphone: "Microphone"
-    case .systemAudio: "System audio"
-    case .calendar: "Calendar"
-    case .localNetwork: "Local network"
-    }
-  }
-
-  var explanation: String {
-    switch self {
-    case .microphone:
-      "Steno records your side of a meeting from the microphone. Required."
-    case .systemAudio:
-      "Steno records the other side from the apps playing audio on this Mac. macOS asks once, during a short test recording. Required."
-    case .calendar:
-      "Steno names recordings after the calendar event they overlap and suggests the attendees as speakers. Optional."
-    case .localNetwork:
-      "The Steno iPhone app sends recordings over your Wi-Fi. macOS asks when you pair the first phone. Optional."
-    }
   }
 }
