@@ -6,8 +6,10 @@ import WebKit
 /// One window's content: a `WKWebView` at a hash route of the bundled web UI
 /// (plan Decision 1), talking to `host` through `WebBridge`. The web view has
 /// no persistent storage, cannot open windows, paints no background of its
-/// own (the page's canvas token shows through the window), and its delegate
-/// cancels every navigation off the app's origin. In Debug,
+/// own, and its delegate cancels every navigation off the app's origin. The
+/// window behind it is painted in the page's canvas colour (`WebCanvas`) for
+/// the window's appearance, so while the page loads, and whenever the web
+/// view is briefly empty, nothing but the page's own colour shows. In Debug,
 /// `STENO_WEB_DEV_URL` swaps the bundle for the Vite dev server with hot
 /// reload inside the real window; a release build never reads it.
 struct WebWindowView: NSViewRepresentable {
@@ -31,7 +33,7 @@ struct WebWindowView: NSViewRepresentable {
     configuration.userContentController.addScriptMessageHandler(
       coordinator.bridge, contentWorld: .page, name: WebBridge.messageHandlerName)
 
-    let webView = WKWebView(frame: .zero, configuration: configuration)
+    let webView: WKWebView = CanvasWebView(frame: .zero, configuration: configuration)
     webView.navigationDelegate = coordinator
     webView.allowsBackForwardNavigationGestures = false
     webView.allowsMagnification = false
@@ -40,7 +42,7 @@ struct WebWindowView: NSViewRepresentable {
     // background on macOS, and this is the established way to a web view that
     // never flashes white before the page paints (plan, Deviations). Guarded so
     // a WebKit that drops the private setter falls back to the window's own
-    // background instead of raising an unknown-key exception.
+    // background, which `CanvasWebView` paints in the page's colour anyway.
     if webView.responds(to: NSSelectorFromString("_setDrawsBackground:")) {
       webView.setValue(false, forKey: "drawsBackground")
     }
@@ -119,5 +121,39 @@ struct WebWindowView: NSViewRepresentable {
     func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
       UITestDiagnostics.note("web content process terminated")
     }
+  }
+}
+
+/// The page's canvas colour on the host side: `--background` in
+/// `apps/macos/web/src/theme.css`, light on `:root` and dark on `.dark`.
+/// `ThemeTokensTests` reads the CSS and fails when the two drift. The
+/// native surfaces keep their own `Theme.background` (the mobile ladder);
+/// this is the one value the host shares with the pages.
+enum WebCanvas {
+  static let token = Theme.Token(
+    cssName: "web-background", dark: Theme.hex(0x0A0A0A), light: Theme.hex(0xFCFCFC))
+
+  /// Dynamic: resolves per the window's effective appearance when drawn.
+  static var color: NSColor { token.nsColor }
+}
+
+/// A web view that paints the window behind it in the page's canvas colour
+/// when it joins a window and whenever the window's appearance changes
+/// (plan Decision 1). The colour is dynamic, so a resize or an appearance
+/// switch never shows the system window background under the transparent
+/// page.
+final class CanvasWebView: WKWebView {
+  override func viewDidMoveToWindow() {
+    super.viewDidMoveToWindow()
+    paintWindow()
+  }
+
+  override func viewDidChangeEffectiveAppearance() {
+    super.viewDidChangeEffectiveAppearance()
+    paintWindow()
+  }
+
+  private func paintWindow() {
+    window?.backgroundColor = WebCanvas.color
   }
 }

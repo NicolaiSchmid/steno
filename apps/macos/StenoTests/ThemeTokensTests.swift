@@ -3,8 +3,10 @@ import SwiftUI
 import XCTest
 
 /// The native surfaces' tokens: every entry in `Theme.tokens` is a `--color-*`
-/// name in `mobile/global.css` (the ladder they mirror) and the one Mac-only
-/// surface resolves in both appearances. Spacing, radii, the
+/// name in `mobile/global.css` (the ladder they mirror), the one Mac-only
+/// surface resolves in both appearances, and the window canvas behind the
+/// web pages is the page's own `--background` from
+/// `apps/macos/web/src/theme.css` in light and dark. Spacing, radii, the
 /// remaining control boxes and the motion rules are pinned to the values the
 /// menu bar popover, the bubble and the detection prompt were drawn with.
 final class ThemeTokensTests: XCTestCase {
@@ -35,6 +37,23 @@ final class ThemeTokensTests: XCTestCase {
     }
     assertEqual(Theme.raised.light, (red: 1, green: 1, blue: 1, alpha: 1), "raised light")
     assertEqual(Theme.raised.dark, (red: 1, green: 1, blue: 1, alpha: 0.031), "raised dark")
+  }
+
+  /// The window behind a web page paints the page's canvas colour (plan
+  /// Decision 1): `--background` on `:root` in light, on `.dark` in dark, so
+  /// nothing but the page's own colour shows while it loads.
+  @MainActor func testWindowCanvasMatchesThePageTheme() throws {
+    let css = try String(
+      contentsOf: TestSupport.repositoryRoot.appendingPathComponent(
+        "apps/macos/web/src/theme.css"), encoding: .utf8)
+    let light = try XCTUnwrap(cssColor("--background", inBlock: ":root", of: css))
+    let dark = try XCTUnwrap(cssColor("--background", inBlock: ".dark", of: css))
+    assertEqual(WebCanvas.token.light, light, "canvas light is the page's --background")
+    assertEqual(WebCanvas.token.dark, dark, "canvas dark is the page's --background")
+    try assertResolves(WebCanvas.token, under: .aqua, to: light)
+    try assertResolves(WebCanvas.token, under: .darkAqua, to: dark)
+    XCTAssertEqual(WebCanvas.token.light.alpha, 1, "the canvas is opaque")
+    XCTAssertEqual(WebCanvas.token.dark.alpha, 1, "the canvas is opaque")
   }
 
   /// Every spacing step except `xxs` and `hairline` sits on the 4 pt grid,
