@@ -48,12 +48,14 @@ fi
 
 [[ -f "$dist/index.html" ]] || fail "$dist/index.html is missing after the build."
 
-# The bundle must not reach the network (connect-src 'none'). `pnpm build`
-# already runs the web project's check; a copied dist is checked here so a
-# stale or foreign dist never reaches the bundle unchecked.
+# The bundle must not reach the network (connect-src 'none') and must not
+# carry the mock bridge or the recorded fixtures. `pnpm build` already runs
+# both checks; a copied dist is checked here so a stale or foreign dist (a
+# screens build, say) never reaches the bundle unchecked.
 if [[ "$mode" == "--copy-only" ]]; then
   command -v node >/dev/null 2>&1 || fail "node is not on PATH; the bundle gate needs it."
   (cd "$web" && node scripts/check-offline.mjs) || fail "dist contains a fetchable URL (see above)."
+  (cd "$web" && node scripts/check-bundle.mjs) || fail "dist contains the mock bridge or a fixture (see above)."
 fi
 
 # Inside Xcode, copy into the product's Resources; standalone, just report.

@@ -18,7 +18,8 @@
 		"noEmit": true,
 		"types": ["vite/client", "node"],
 		"paths": {
-			"@/*": ["./src/*"]
+			"@/*": ["./src/*"],
+			"#bridge-fallback": ["./src/bridge/fallback-mock.ts"]
 		}
 	},
 	"include": [
@@ -29,5 +30,5 @@
 		"vite.config.ts",
 		"playwright.config.ts"
 	],
-	"exclude": ["node_modules", "dist"]
+	"exclude": ["node_modules", "dist", "dist-screens"]
 }
