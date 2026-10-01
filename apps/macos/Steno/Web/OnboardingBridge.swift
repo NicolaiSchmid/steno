@@ -105,11 +105,13 @@ final class OnboardingBridge: BridgeHost {
     }
     guard pageReady, let events, let snapshot else { return }
     events.emit(.onboarding, snapshot: snapshot)
+    UITestDiagnostics.note("onboarding published page \(snapshot.page.rawValue)")
   }
 
   // MARK: - Commands
 
   func handle(_ request: BridgeRequest) async throws -> JSONValue? {
+    UITestDiagnostics.note("onboarding handles \(request.method.rawValue)")
     // The Summaries form sends the Settings window's method names; this
     // window answers them on its own model.
     if let llm = model.llm, try await SummariesCommands.handle(request, llm: llm) { return nil }

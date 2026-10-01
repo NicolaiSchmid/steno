@@ -252,7 +252,9 @@ final class LaunchSmokeTests: XCTestCase {
   /// exact and on the full text. The "Optional" badge beside a row title is
   /// a static text of its own.
   private func pageText(_ text: String, in window: XCUIElement) -> XCUIElement {
-    window.staticTexts[text].firstMatch
+    // A predicate, not the subscript: a sentence with a colon is not a valid
+    // subscript identifier.
+    window.staticTexts.matching(NSPredicate(format: "identifier == %@", text)).firstMatch
   }
 
   /// The onboarding window hosts the web page: page 1 renders its intro
@@ -282,9 +284,10 @@ final class LaunchSmokeTests: XCTestCase {
     let later = window.buttons["Later"].firstMatch
     XCTAssertTrue(later.waitForExistence(timeout: 5), "Later is missing on page 1")
     later.click()
-    XCTAssertTrue(
-      window.buttons["Finish"].firstMatch.waitForExistence(timeout: 10),
-      "Later did not reach page 2")
+    if !window.buttons["Finish"].firstMatch.waitForExistence(timeout: 10) {
+      attachLaunchLog(named: "no-page-2", state: app)
+      XCTFail("Later did not reach page 2")
+    }
     XCTAssertTrue(
       pageText(Self.setupTitle, in: window).waitForExistence(timeout: 5),
       "page 2 has no heading")
