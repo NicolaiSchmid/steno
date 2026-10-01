@@ -139,8 +139,12 @@ final class SettingsBridge: BridgeHost {
     events.emit(topic, snapshot: snapshot)
     // A deep link is consumed by the publish that carries it, as the main
     // window consumes its meeting request: the page shows the section from
-    // this snapshot and the next `app` snapshot carries nil.
-    if topic == .app { controller.requestedSettingsSection = nil }
+    // this snapshot and the next `app` snapshot carries nil. Only when one
+    // is set: the clear is itself an observed change that republishes
+    // `app`, and clearing nil again would republish without end.
+    if topic == .app, controller.requestedSettingsSection != nil {
+      controller.requestedSettingsSection = nil
+    }
   }
 
   /// The topic's snapshot from the view models as they stand; nil for the

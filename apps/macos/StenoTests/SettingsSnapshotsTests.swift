@@ -423,16 +423,24 @@ private func request(_ id: String, _ method: String, _ params: Any = NSNull()) -
       host.controller.requestedSettingsSection == .recording,
       "nothing is consumed before the page is ready")
     _ = await BridgeDispatcher.dispatch(request("r0", "page.ready"), host: host)
-    #expect(sink.last(.app)?["requestedSettingsSection"] == .string("recording"))
-    #expect(host.controller.requestedSettingsSection == nil)
+    func carrying() -> Int {
+      sink.events.filter {
+        $0.topic == .app && $0.payload["requestedSettingsSection"] == .string("recording")
+      }.count
+    }
+    #expect(carrying() == 1, "the first app publish carries the request")
+    #expect(host.controller.requestedSettingsSection == nil, "and consumes it")
     await eventually("the clean app snapshot follows") {
       (sink.last(.app)?["requestedSettingsSection"] ?? .null) == .null
     }
+    let settled = sink.events.filter { $0.topic == .app }.count
+    try await Task.sleep(for: .milliseconds(100))
+    #expect(
+      sink.events.filter { $0.topic == .app }.count == settled,
+      "a cleared request does not keep republishing app")
 
     host.controller.openSettings(.recording)
-    await eventually("the same section again is a new snapshot") {
-      sink.last(.app)?["requestedSettingsSection"] == .string("recording")
-    }
+    await eventually("the same section again is a new snapshot") { carrying() == 2 }
     #expect(host.controller.requestedSettingsSection == nil)
   }
 }
