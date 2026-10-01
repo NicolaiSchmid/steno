@@ -59,7 +59,8 @@ describe("SetupPage", () => {
 		expect(
 			callsTo(harness.transport, "onboarding.updateSummaries").at(-1)?.params,
 		).toEqual({ apiKey: "sk-typed" });
-		expect(screen.getByTestId("onboarding-api-key")).toHaveValue("");
+		// Nothing is stored before Save, so the masked draft stays in the field.
+		expect(screen.getByTestId("onboarding-api-key")).toHaveValue("sk-typed");
 
 		await user.click(screen.getByTestId("onboarding-test-summaries"));
 		expect(callsTo(harness.transport, "onboarding.testSummaries")).toHaveLength(

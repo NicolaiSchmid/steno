@@ -397,6 +397,10 @@ function applyOnboardingScenario(
 		return { ...rest, state: "open" as const };
 	});
 	const { validationMessage: _refused, ...chosenVault } = setup.vault ?? {};
+	// The saved row's form names its model; an open row has none yet.
+	const openSummaries = setup.summaries
+		? { ...setup.summaries, model: "", isConfigured: false }
+		: undefined;
 
 	if (scenario === "onboarding-unknown") {
 		result.onboarding = {
@@ -431,17 +435,18 @@ function applyOnboardingScenario(
 			...setup,
 			setup: openRows,
 			canSaveSummaries: false,
+			summaries: openSummaries,
 			vault: {},
 		} satisfies OnboardingSnapshot;
 	}
 
-	if (scenario === "onboarding-codex" && setup.summaries) {
+	if (scenario === "onboarding-codex" && openSummaries) {
 		result.onboarding = {
 			...setup,
 			setup: openRows,
 			canSaveSummaries: false,
 			summaries: {
-				...setup.summaries,
+				...openSummaries,
 				presetID: "codex",
 				codex: {
 					confirmed: false,
@@ -465,6 +470,7 @@ function applyOnboardingScenario(
 					: row,
 			),
 			canSaveSummaries: false,
+			summaries: openSummaries,
 			vault: chosenVault,
 		} satisfies OnboardingSnapshot;
 	}

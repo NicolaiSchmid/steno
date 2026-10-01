@@ -329,6 +329,15 @@ public enum BridgeSamples {
     return summaries
   }
 
+  /// The Summaries form behind a saved row: the model named in the row's
+  /// line, configured, as the view model has it after Save.
+  static var onboardingSummariesSaved: SummariesSettingsSnapshot {
+    var summaries = onboardingSummaries
+    summaries.model = "qwen3-8b"
+    summaries.isConfigured = true
+    return summaries
+  }
+
   /// Page 2 with the Summaries row saved and a vault chosen but refused:
   /// what the `onboarding-setup` scenario and its page-2 screens start from.
   public static let onboardingSetup = OnboardingSnapshot(
@@ -352,7 +361,7 @@ public enum BridgeSamples {
       .init(kind: .summaries, state: .saved, savedLine: "Saved: qwen3-8b at 127.0.0.1"),
       .init(kind: .vault, state: .open),
     ],
-    canSaveSummaries: true, summaries: onboardingSummaries,
+    canSaveSummaries: true, summaries: onboardingSummariesSaved,
     vault: .init(
       path: "/Users/nicolai/Notes/Work Vault", name: "Work Vault",
       validationMessage: "The Obsidian vault at /Users/nicolai/Notes/Work Vault does not exist."),

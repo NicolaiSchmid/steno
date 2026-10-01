@@ -50,9 +50,9 @@
     "contextTokens" : "32000",
     "defaultContextTokens" : 32000,
     "hasAPIKey" : false,
-    "isConfigured" : false,
+    "isConfigured" : true,
     "isTesting" : false,
-    "model" : "",
+    "model" : "qwen3-8b",
     "presetID" : "lmStudio",
     "presets" : [
       {
