@@ -513,7 +513,7 @@ final class SettingsViewModelTests: XCTestCase {
     XCTAssertFalse(model.isAvailable)
     await model.beginPairing()
     XCTAssertNil(model.pairing)
-    XCTAssertNil(model.qrImage)
+    XCTAssertNil(model.qrPNG)
   }
 
   func testPhonesPairingListsDevicesAndRevokes() async throws {
@@ -545,7 +545,7 @@ final class SettingsViewModelTests: XCTestCase {
     XCTAssertNil(model.error, model.error ?? "")
     let payload = try XCTUnwrap(model.pairing)
     XCTAssertTrue(payload.urlString.hasPrefix("steno://"), payload.urlString)
-    XCTAssertNotNil(model.qrImage)
+    XCTAssertNotNil(model.qrPNG)
     XCTAssertTrue(model.pairingIsOpen)
     await TestSupport.waitUntil("listening") {
       if case .listening = model.listener { return true }

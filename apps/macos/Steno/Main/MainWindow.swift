@@ -15,7 +15,6 @@ struct MainWindow: View {
   @State private var bridge: MainWindowBridge
   @Environment(\.colorScheme) private var colorScheme
   @Environment(\.openWindow) private var openWindow
-  @Environment(\.openSettings) private var openSettings
 
   /// 960 x 600, the size the UI smoke test reviews the window at.
   static let minimumSize = CGSize(width: 960, height: 600)
@@ -32,21 +31,21 @@ struct MainWindow: View {
         bridge.appearance = scheme == .dark ? .dark : .light
       }
       .task {
-        bridge.openWindow = { [controller, openWindow, openSettings] request in
+        bridge.openWindow = { [controller, openWindow] request in
           switch request.window {
           case .main:
             if let meetingID = request.meetingID { controller.requestedMeetingID = meetingID }
             openWindow(id: "main")
             NSApp.activate()
           case .settings:
-            // The section is a deep link `SettingsView` applies when it
-            // opens, the same path the setup banner used.
+            // The section is a deep link the Settings page applies from the
+            // `app` snapshot when its window opens, the same path the setup
+            // banner used.
             if let section = request.section.flatMap({ SettingsSection(rawValue: $0.rawValue) }) {
-              controller.openSettings(section, with: openSettings)
-            } else {
-              openSettings()
-              NSApp.activate()
+              controller.openSettings(section)
             }
+            openWindow(id: "settings")
+            NSApp.activate()
           case .onboarding:
             openWindow(id: "onboarding")
             NSApp.activate()

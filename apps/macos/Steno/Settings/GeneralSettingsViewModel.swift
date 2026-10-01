@@ -94,6 +94,12 @@ final class GeneralSettingsViewModel: SettingsSectionModel {
     environment.updater.checkForUpdates()
   }
 
+  /// What the last check found, for the page's status line.
+  var updateOutcome: UpdateCheckOutcome { environment.updater.lastOutcome }
+
+  /// When the last check ran; Sparkle persists it across launches.
+  var lastUpdateCheckDate: Date? { environment.updater.lastUpdateCheckDate }
+
   /// "Up to date, checked 2 hours ago", "Update available: 0.9.1", "Could not
   /// check for updates" or "Not checked yet".
   func updateStatusText(now: Date) -> String {

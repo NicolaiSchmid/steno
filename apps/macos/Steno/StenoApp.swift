@@ -34,7 +34,9 @@ struct StenoApp: App {
           .modifier(OnboardingOpener(controller: controller))
       }
       .background {
-        if AppBootstrap.isUITesting { UITestWindowSizer() }
+        if AppBootstrap.isUITesting {
+          UITestWindowMarker(identifier: UITestWindowMarker.mainWindow, sizesToScenario: true)
+        }
       }
     }
     .windowStyle(.hiddenTitleBar)
@@ -59,11 +61,22 @@ struct StenoApp: App {
     }
     .menuBarExtraStyle(.window)
 
-    Settings {
+    // A `Window`, not the `Settings` scene: the page is the whole content at
+    // one fixed size, opened by ⌘, through `AppCommands` and by
+    // `window.open("settings")` from the pages (plan Decision 1).
+    Window("Settings", id: "settings") {
       RootView(bootstrap: bootstrap) { controller in
-        SettingsView(controller: controller)
+        SettingsWindow(controller: controller)
+      }
+      .background {
+        if AppBootstrap.isUITesting {
+          UITestWindowMarker(identifier: UITestWindowMarker.settingsWindow)
+        }
       }
     }
+    .windowStyle(.hiddenTitleBar)
+    .windowResizability(.contentSize)
+    .defaultSize(SettingsWindow.size)
 
     #if DEBUG
       WebPreviewWindow()
@@ -135,9 +148,9 @@ final class AppBootstrap {
         await controller.startRecordingFromWindow(mode: .call)
       }
       if Self.isUITesting, let section = Self.scenario.settingsSection {
-        // The setup banner's deep link: `SettingsView` selects the section
-        // when its window opens (the test opens it from the nav column's
-        // Settings row).
+        // The setup banner's deep link: the Settings page selects the
+        // section from the `app` snapshot when its window opens (the test
+        // opens it with ⌘,).
         controller.openSettings(section)
       }
     } catch {
@@ -172,8 +185,9 @@ extension View {
   }
 }
 
-/// Marks the main window `main-window` for the smoke tests, which have no
-/// title bar to match on, and applies `-steno-window=WxH` to it on the turn
+/// Marks a window with an accessibility identifier for the smoke tests,
+/// which have no title bar to match on (`main-window`, `settings-window`),
+/// and, for the main window, applies `-steno-window=WxH` to it on the turn
 /// after its `NSWindow` exists, and once more a second later: SwiftUI
 /// restores the frame a previous launch saved over `defaultSize`, and the
 /// smoke suite launches the app many times per run. Zero-sized, in the
@@ -184,24 +198,45 @@ extension View {
 /// synchronous `setContentSize` there re-enters that layout before the
 /// window has shown. The frame changes on the next main-actor turn, as the
 /// floating panel's does.
-struct UITestWindowSizer: NSViewRepresentable {
+struct UITestWindowMarker: NSViewRepresentable {
   /// The main window's accessibility identifier under UI testing.
-  static let mainWindowIdentifier = "main-window"
+  static let mainWindow = "main-window"
+  /// The Settings window's accessibility identifier under UI testing.
+  static let settingsWindow = "settings-window"
 
-  func makeNSView(context: Context) -> SizerView {
-    SizerView(frame: .zero)
+  let identifier: String
+  /// Whether `-steno-window=WxH` applies to this window.
+  var sizesToScenario = false
+
+  func makeNSView(context: Context) -> MarkerView {
+    MarkerView(identifier: identifier, sizesToScenario: sizesToScenario)
   }
 
-  func updateNSView(_ nsView: SizerView, context: Context) {}
+  func updateNSView(_ nsView: MarkerView, context: Context) {}
 
-  final class SizerView: NSView {
+  final class MarkerView: NSView {
+    let identifier: String
+    let sizesToScenario: Bool
+
+    init(identifier: String, sizesToScenario: Bool) {
+      self.identifier = identifier
+      self.sizesToScenario = sizesToScenario
+      super.init(frame: .zero)
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) {
+      fatalError("MarkerView is built in code")
+    }
+
     override func viewDidMoveToWindow() {
       super.viewDidMoveToWindow()
-      window?.setAccessibilityIdentifier(UITestWindowSizer.mainWindowIdentifier)
+      window?.setAccessibilityIdentifier(identifier)
+      guard sizesToScenario else { return }
       Task { @MainActor [weak self] in
-        UITestWindowSizer.apply(to: self?.window)
+        UITestWindowMarker.apply(to: self?.window)
         try? await Task.sleep(for: .seconds(1))
-        UITestWindowSizer.apply(to: self?.window)
+        UITestWindowMarker.apply(to: self?.window)
       }
     }
   }
@@ -334,6 +369,15 @@ struct AppCommands: Commands {
     CommandGroup(after: .appInfo) {
       Button("Check for Updates…") { bootstrap.controller?.menuBar.checkForUpdates() }
         .disabled(bootstrap.controller == nil)
+    }
+    // Settings is a `Window` scene, so the system's ⌘, item is replaced with
+    // one that opens it; the same path the pages take through `window.open`.
+    CommandGroup(replacing: .appSettings) {
+      Button("Settings…") {
+        openWindow(id: "settings")
+        NSApp.activate()
+      }
+      .keyboardShortcut(",", modifiers: .command)
     }
     // Before the system's Find submenu, so ⌘F reaches the meeting search
     // whenever the main window is key.

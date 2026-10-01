@@ -19,8 +19,8 @@ import StenoCore
 @MainActor
 final class MainWindowBridge: BridgeHost {
   /// What the page asks the host to open: another window, or Settings on a
-  /// section. `MainWindow` installs the scene's `openWindow` and
-  /// `openSettings` actions here; until it does, nothing opens.
+  /// section. `MainWindow` installs the scene's `openWindow` action here;
+  /// until it does, nothing opens.
   typealias OpenWindow = @MainActor (WindowParams) -> Void
   /// The destructive confirmation: `NSAlert` in the app, a stub in tests.
   typealias Confirm = @MainActor (ConfirmDestructiveParams) async -> Bool
@@ -254,17 +254,17 @@ final class MainWindowBridge: BridgeHost {
       for topic in Self.topics { flush(topic) }
     case .pageLayout:
       // Validated and dropped: nothing reads the page's size yet.
-      _ = try params(PageLayoutParams.self, request)
+      _ = try request.params(PageLayoutParams.self)
 
     case .meetingsSetFilter:
-      list.stateFilter = try params(SetFilterParams.self, request).filter.modelFilter
+      list.stateFilter = try request.params(SetFilterParams.self).filter.modelFilter
     case .meetingsSetTagFilter:
       // `null` params clear the tag too.
-      list.tagFilter = try optionalParams(SetTagFilterParams.self, request)?.tag
+      list.tagFilter = try request.optionalParams(SetTagFilterParams.self)?.tag
     case .meetingsSetQuery:
-      list.query = try params(SetQueryParams.self, request).query
+      list.query = try request.params(SetQueryParams.self).query
     case .meetingsSelect:
-      let id = try params(MeetingIDParams.self, request).meetingID
+      let id = try request.params(MeetingIDParams.self).meetingID
       if list.all.contains(where: { $0.id == id }) {
         pendingSelection = nil
         list.selection = id
@@ -274,7 +274,7 @@ final class MainWindowBridge: BridgeHost {
         pendingSelection = id
       }
     case .meetingsDelete:
-      let id = try params(MeetingIDParams.self, request).meetingID
+      let id = try request.params(MeetingIDParams.self).meetingID
       guard let meeting = list.all.first(where: { $0.id == id }) else { throw Self.noSuchMeeting }
       guard MeetingListViewModel.canDelete(meeting) else {
         throw BridgeError(
@@ -287,18 +287,18 @@ final class MainWindowBridge: BridgeHost {
           title: "Delete “\(meeting.displayTitle(calendar: list.calendar))”?",
           message: Self.deleteMeetingMessage, confirmTitle: "Delete"))
       if confirmed { await list.delete(id) }
-      return try reply(ConfirmReply(confirmed: confirmed))
+      return try BridgeReplies.value(ConfirmReply(confirmed: confirmed))
 
     case .meetingSetTab:
-      let tab = try params(SetTabParams.self, request).tab
+      let tab = try request.params(SetTabParams.self).tab
       let detail = try requireDetail()
       detail.tab = tab.modelTab
     case .meetingSetTags:
-      let tags = try params(SetTagsParams.self, request).tags
+      let tags = try request.params(SetTagsParams.self).tags
       let detail = try requireDetail()
       await detail.setTags(MeetingDetailViewModel.tags(from: tags))
     case .meetingSetTemplate:
-      let templateID = try params(SetTemplateParams.self, request).templateID
+      let templateID = try request.params(SetTemplateParams.self).templateID
       let detail = try requireDetail()
       await detail.setTemplate(templateID)
     case .meetingRerunSummary:
@@ -308,7 +308,7 @@ final class MainWindowBridge: BridgeHost {
       let detail = try requireDetail()
       await detail.reexport()
     case .meetingSetKeepAudio:
-      let keep = try params(SetBoolParams.self, request).value
+      let keep = try request.params(SetBoolParams.self).value
       let detail = try requireDetail()
       return try await setKeepAudio(keep, on: detail, confirming: !keep && detail.wouldDeleteNow)
     case .meetingDeleteRecordingNow:
@@ -316,7 +316,7 @@ final class MainWindowBridge: BridgeHost {
     case .meetingSaveNotes:
       // The page debounces typing and names the meeting, so the text is
       // written where it says, selected or not, the moment it arrives.
-      try await saveNotes(try params(SaveNotesParams.self, request))
+      try await saveNotes(try request.params(SaveNotesParams.self))
     case .meetingRevealRecording:
       let detail = try requireDetail()
       guard let url = detail.export?.audio?.url, detail.recordingFilesExist else {
@@ -331,15 +331,15 @@ final class MainWindowBridge: BridgeHost {
       NSWorkspace.shared.activateFileViewerSelecting([folder])
 
     case .speakersOptions:
-      let query = try params(SpeakerOptionsParams.self, request)
+      let query = try request.params(SpeakerOptionsParams.self)
       let speakers = try requireDetail().speakers
-      return try reply(
+      return try BridgeReplies.value(
         SpeakerOptionsReply(
           prefill: speakers.prefill(for: query.speakerID),
           options: speakers.options(for: query.speakerID, query: query.query)
             .map(SpeakerOption.init)))
     case .speakersSelect:
-      let selection = try params(SelectSpeakerParams.self, request)
+      let selection = try request.params(SelectSpeakerParams.self)
       let detail = try requireDetail()
       let option = try Self.option(from: selection.option, speakers: detail.speakers)
       await detail.speakers.select(option, for: selection.speakerID)
@@ -347,13 +347,13 @@ final class MainWindowBridge: BridgeHost {
       // re-export per change is idempotent and the model retries a refusal.
       await detail.pickerClosed()
     case .speakersPlay:
-      let speakerID = try params(SpeakerIDParams.self, request).speakerID
+      let speakerID = try request.params(SpeakerIDParams.self).speakerID
       try requireDetail().speakers.play(speakerID)
     case .speakersStop:
       try requireDetail().speakers.stopPlayback()
 
     case .recordingStart:
-      let mode = try params(StartRecordingParams.self, request).mode
+      let mode = try request.params(StartRecordingParams.self).mode
       await controller.startRecordingFromWindow(mode: mode == .call ? .call : .inPerson)
     case .recordingStop:
       await controller.recorder.stop()
@@ -368,29 +368,20 @@ final class MainWindowBridge: BridgeHost {
       controller.dismissSetupBanner()
 
     case .systemOpenURL:
-      let text = try params(OpenURLParams.self, request).url
-      guard let url = URL(string: text), let scheme = url.scheme?.lowercased(),
-        scheme == "https" || scheme == "mailto"
-      else {
-        throw BridgeError(
-          code: .invalidParams, message: "Only https: and mailto: links open from the page.")
-      }
-      NSWorkspace.shared.open(url)
+      try BridgeSystemCommands.openURL(try request.params(OpenURLParams.self).url)
     case .systemOpenSystemSettings:
-      let kind = try params(PermissionKindParams.self, request).kind
-      guard let permission = PermissionKind(rawValue: kind.rawValue) else {
-        throw BridgeError(code: .invalidParams, message: "Unknown permission \(kind.rawValue).")
-      }
-      controller.environment.permissions.openSystemSettings(for: permission)
+      let kind = try request.params(PermissionKindParams.self).kind
+      controller.environment.permissions.openSystemSettings(
+        for: try BridgeSystemCommands.permissionKind(kind))
     case .updatesCheck:
       controller.menuBar.checkForUpdates()
     case .windowOpen:
-      let target = try params(WindowParams.self, request)
+      let target = try request.params(WindowParams.self)
       openWindow(target)
     case .uiConfirmDestructive:
-      let prompt = try params(ConfirmDestructiveParams.self, request)
+      let prompt = try request.params(ConfirmDestructiveParams.self)
       let confirmed = await confirm(prompt)
-      return try reply(ConfirmReply(confirmed: confirmed))
+      return try BridgeReplies.value(ConfirmReply(confirmed: confirmed))
 
     default:
       // `window.close`, the Settings and the onboarding methods belong to
@@ -420,10 +411,10 @@ final class MainWindowBridge: BridgeHost {
     _ keep: Bool, on detail: MeetingDetailViewModel, confirming: Bool
   ) async throws -> JSONValue? {
     if confirming, !(await confirm(Self.deleteRecordingPrompt)) {
-      return try reply(ConfirmReply(confirmed: false))
+      return try BridgeReplies.value(ConfirmReply(confirmed: false))
     }
     await detail.setKeepAudio(keep)
-    return try reply(ConfirmReply(confirmed: true))
+    return try BridgeReplies.value(ConfirmReply(confirmed: true))
   }
 
   private func saveNotes(_ notes: SaveNotesParams) async throws {
@@ -438,31 +429,6 @@ final class MainWindowBridge: BridgeHost {
     } catch {
       throw BridgeError(code: .failed, message: "Notes could not be saved: \(error)")
     }
-  }
-
-  /// The method's params decoded into its contract type; a missing or
-  /// unreadable value is `invalidParams`.
-  private func params<T: Decodable>(_ type: T.Type, _ request: BridgeRequest) throws -> T {
-    guard let decoded = try optionalParams(type, request) else {
-      throw BridgeError(
-        code: .invalidParams, message: "\(request.method.rawValue) needs params.")
-    }
-    return decoded
-  }
-
-  private func optionalParams<T: Decodable>(_ type: T.Type, _ request: BridgeRequest) throws -> T? {
-    guard let value = request.params, value != .null else { return nil }
-    do {
-      return try BridgeJSON.decode(T.self, from: BridgeJSON.encode(value))
-    } catch {
-      throw BridgeError(
-        code: .invalidParams, message: "\(request.method.rawValue): \(error)")
-    }
-  }
-
-  /// A reply value as the dispatcher carries it.
-  private func reply(_ value: some Encodable) throws -> JSONValue {
-    try BridgeJSON.decode(JSONValue.self, from: BridgeDispatcher.encoder().encode(value))
   }
 
   /// The page's option back into the model's: a person is looked up among

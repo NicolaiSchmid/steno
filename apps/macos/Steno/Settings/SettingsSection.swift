@@ -3,7 +3,7 @@ import Foundation
 /// The six sections of the Settings window, named by what the user gets,
 /// not by the subsystem behind it. Also the deep-link target:
 /// `AppController.openSettings(_:)` sets `requestedSettingsSection` and
-/// `SettingsView` selects it.
+/// the Settings page selects it from the `app` snapshot.
 enum SettingsSection: String, CaseIterable, Identifiable, Sendable, Hashable {
   case general
   case recording

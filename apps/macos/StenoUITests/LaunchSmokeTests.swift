@@ -36,7 +36,7 @@ final class LaunchSmokeTests: XCTestCase {
     return app
   }
 
-  /// The main window: `main-window`, the identifier `UITestWindowSizer`
+  /// The main window: `main-window`, the identifier `UITestWindowMarker`
   /// gives its `NSWindow`, or the scene's title as a fallback. No window has
   /// a title bar to match on, and the onboarding and Settings windows come
   /// to the front over it, so the first window is not it.
@@ -284,11 +284,9 @@ final class LaunchSmokeTests: XCTestCase {
   /// section, opened with ⌘, and deep-linked by `-steno-settings-section`.
   /// The main window states wait for the web view and the page's list
   /// heading; the rest of what the page renders is the web tests' evidence.
-  /// The Settings state checks that the
-  /// header and the sidebar row land inside the Settings window, since a
-  /// split view that overflows its window still has both in the hierarchy.
-  /// 960 x 600 fits the runner's 1024 x 768 display, as does the 760 x 520
-  /// Settings window over it.
+  /// The Settings state checks that the page's Recording heading lands
+  /// inside the Settings window. 960 x 600 fits the runner's 1024 x 768
+  /// display, as does the 760 x 520 Settings window over it.
   private func captureScreenshotMatrix(appearance: String) {
     /// Launches under the matrix flags plus `arguments`.
     func launched(_ arguments: [String]) -> XCUIApplication {
@@ -299,7 +297,7 @@ final class LaunchSmokeTests: XCTestCase {
     /// Runs `ready` on `app`, waits for the main window to be 960 wide, then
     /// attaches the screen as `<window>-<appearance>-<state>.png`, inside an
     /// activity named for the state so a failure names it. The width wait
-    /// covers `UITestWindowSizer`'s second pass, which undoes the frame
+    /// covers `UITestWindowMarker`'s second pass, which undoes the frame
     /// SwiftUI restores from the previous launch a second after the window
     /// shows, and proves the size fits the display.
     func capture(
@@ -351,34 +349,32 @@ final class LaunchSmokeTests: XCTestCase {
         "page 2 rows are missing")
     }
 
-    // The section comes from the scenario's deep link, applied when the
-    // Settings scene opens; ⌘, opens it as `AppCommands` does.
+    // The section comes from the scenario's deep link, which the Settings
+    // page reads from the `app` snapshot when its window opens; ⌘, opens it
+    // as `AppCommands` does. The window is `settings-window`
+    // (`UITestWindowMarker`); the page inside is web content, so its
+    // Recording heading is found by text, the one thing WebKit exposes.
     capture("settings", "recording", in: launched(["-steno-settings-section=recording"])) {
       app in
       mainReady(app)
       app.typeKey(",", modifierFlags: .command)
-      let header = app.descendants(matching: .any)["settings-header-recording"].firstMatch
-      XCTAssertTrue(header.waitForExistence(timeout: 10), "Settings did not open on Recording")
-      let row = app.descendants(matching: .any)["settings-recording"].firstMatch
-      XCTAssertTrue(row.exists, "the Recording sidebar row is missing")
+      let window = app.windows["settings-window"].firstMatch
+      XCTAssertTrue(window.waitForExistence(timeout: 10), "the Settings window did not open")
+      XCTAssertTrue(
+        window.webViews.firstMatch.waitForExistence(timeout: 20),
+        "no web view in the Settings window")
+      let header = window.staticTexts["Recording"].firstMatch
+      XCTAssertTrue(header.waitForExistence(timeout: 20), "Settings did not open on Recording")
 
-      // Existence is not enough: on macOS 26 a flexible detail column made
-      // the split view as tall as the screen is wide, so both columns hung
-      // above the window with every id still in the hierarchy
-      // (`SettingsView` fixes the detail's height for that). The header is
-      // checked to lie inside the window; the row only to overlap it, since
-      // the rows' accessibility frames sit off the rendered rows.
-      let window = app.windows.containing(.any, identifier: "settings-header-recording")
-        .firstMatch
+      // The page paints inside its window: the heading is checked to lie
+      // inside the 760 by 520 frame, as the SwiftUI split view once failed to.
       XCTAssertTrue(
         waitUntil(timeout: 5) { abs(window.frame.width - 760) < 1 },
         "the Settings window is \(window.frame.width) wide, not 760")
       XCTAssertTrue(
         window.frame.contains(header.frame),
-        "the Recording header \(header.frame) lies outside the Settings window \(window.frame)")
-      XCTAssertTrue(
-        window.frame.intersects(row.frame),
-        "the Recording sidebar row \(row.frame) lies outside the Settings window \(window.frame)")
+        "the Recording heading \(header.frame) lies outside the Settings window \(window.frame)")
+      RunLoop.current.run(until: Date().addingTimeInterval(1))
     }
   }
 

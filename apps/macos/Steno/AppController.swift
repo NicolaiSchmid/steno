@@ -39,7 +39,7 @@ final class AppController {
   /// detection prompt).
   var requestedMeetingID: UUID?
   /// The Settings section to select next, from the setup banner, the detail
-  /// rows and the footer (`openSettings(_:)`); `SettingsView` applies and
+  /// rows and the footer (`openSettings(_:)`); the Settings page applies and
   /// clears it, as `MainWindow` does for `requestedMeetingID`.
   var requestedSettingsSection: SettingsSection?
   /// "Not now" on the setup banner hides it for the rest of this launch; it
@@ -226,9 +226,9 @@ final class AppController {
   }
 
   /// Deep link into Settings: callers set the request here, then call the
-  /// `openSettings` environment action and activate the app
-  /// (`openSettings(_:with:)` does all three for the setup banner, the
-  /// detail rows and the footer).
+  /// scene's `openWindow(id: "settings")` and activate the app; the page
+  /// selects the section from the `app` snapshot (the setup banner, the
+  /// detail rows and the footer take this path).
   @discardableResult
   func openSettings(_ section: SettingsSection) -> SettingsSection {
     requestedSettingsSection = section

@@ -18,7 +18,8 @@ final class PhonesSettingsViewModel: SettingsSectionModel {
   private(set) var listener: ListenerState = .stopped
   private(set) var receipts: [HandoverReceipt] = []
   private(set) var pairing: PairingPayload?
-  private(set) var qrImage: NSImage?
+  /// The pairing code as a PNG; the page draws it.
+  private(set) var qrPNG: Data?
   var error: String?
   var errorDetails: String?
   let handover: HandoverService?
@@ -130,7 +131,7 @@ final class PhonesSettingsViewModel: SettingsSectionModel {
     }
     let payload = await handover.beginPairing()
     pairing = payload
-    qrImage = QRCode.image(for: payload.urlString)
+    qrPNG = QRCode.png(for: payload.urlString)
     clearError()
   }
 
@@ -138,7 +139,7 @@ final class PhonesSettingsViewModel: SettingsSectionModel {
     guard let handover else { return }
     await handover.cancelPairing()
     pairing = nil
-    qrImage = nil
+    qrPNG = nil
     await load()
     if devices.isEmpty { await handover.stop() }
   }
@@ -160,7 +161,7 @@ final class PhonesSettingsViewModel: SettingsSectionModel {
     await load()
     if Set(devices.map(\.id)) != before {
       pairing = nil
-      qrImage = nil
+      qrPNG = nil
     }
   }
 
