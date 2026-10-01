@@ -25,7 +25,11 @@ struct MainWindow: View {
   }
 
   var body: some View {
+    // `ignoresSafeArea` inside the frame: the page covers the hidden title
+    // bar's region too, so the traffic lights float over its own inset and no
+    // bare strip shows above it.
     WebWindowView(route: "#/main", host: bridge)
+      .ignoresSafeArea()
       .frame(minWidth: Self.minimumSize.width, minHeight: Self.minimumSize.height)
       .onChange(of: colorScheme, initial: true) { _, scheme in
         bridge.appearance = scheme == .dark ? .dark : .light

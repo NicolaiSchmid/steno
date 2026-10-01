@@ -25,12 +25,14 @@ struct SettingsWindow: View {
   }
 
   var body: some View {
+    // The page under the hidden title bar: `ignoresSafeArea` inside the
+    // frame lets the web view cover the title bar's region as well, so no
+    // bare strip shows above it and the traffic lights float over the page's
+    // own inset. The frame fixes the page's size; the window adds the title
+    // bar's height to it.
     WebWindowView(route: "#/settings", host: bridge)
-      .frame(width: Self.size.width, height: Self.size.height)
-      // Under the hidden title bar, as the main window's page is: a fixed
-      // frame otherwise sits below the title bar's safe area and leaves a
-      // bare strip above the page.
       .ignoresSafeArea()
+      .frame(width: Self.size.width, height: Self.size.height)
       .onChange(of: colorScheme, initial: true) { _, scheme in
         bridge.appearance = scheme == .dark ? .dark : .light
       }
