@@ -3,8 +3,8 @@ import { expect, type Page, test } from "@playwright/test";
 
 /**
  * Renders the main window in every state at both reference window sizes,
- * the Settings window's six sections and notable states at its fixed 760 by
- * 520, and the stories, each in light and dark, and writes PNGs to
+ * the Settings window's six sections and notable states at its 960 by 640
+ * default size, and the stories, each in light and dark, and writes PNGs to
  * screens/. Every page must make zero requests to anything but the preview
  * server (plan Decision 9). The windows run over the fixture bridge;
  * `scenario=` and `tab=` bend the fixtures (`src/bridge/mock-transport.ts`).
@@ -139,8 +139,8 @@ for (const size of SIZES) {
 	}
 }
 
-/** The Settings window is one fixed size (plan Decision 1). */
-const SETTINGS_SIZE = { width: 760, height: 520 } as const;
+/** The Settings window's default size; it is resizable down to 760 by 520. */
+const SETTINGS_SIZE = { width: 960, height: 640 } as const;
 
 interface SettingsState {
 	name: string;

@@ -4,8 +4,8 @@ import type { ComponentProps, ReactNode } from "react";
 import { cn } from "@/lib/cn";
 
 /**
- * Segmented tabs: a pill group on the accent surface, the active tab a
- * raised card (a translucent lift in dark).
+ * Segmented tabs: a 2 px frame on the field tint, each tab a 24 px pill;
+ * the active one lifts onto the canvas colour (a translucent lift in dark).
  */
 export const Tabs = BaseTabs.Root;
 
@@ -25,7 +25,7 @@ export function TabsList({
 		<BaseTabs.List
 			activateOnFocus={activateOnFocus}
 			className={cn(
-				"flex w-max shrink-0 gap-1 rounded-lg bg-accent p-[3px]",
+				"inline-flex w-max shrink-0 gap-0.5 rounded-lg bg-input/40 p-0.5",
 				className,
 			)}
 			{...props}
@@ -49,18 +49,18 @@ export function TabsTab({
 	return (
 		<BaseTabs.Tab
 			className={cn(
-				"inline-flex h-7 cursor-default select-none items-center gap-1.5 rounded-[7px] px-3 font-medium text-[13px] text-muted-foreground outline-none",
+				"inline-flex h-6 min-w-0 cursor-default select-none items-center gap-1 rounded-md px-2.5 font-medium text-muted-foreground text-xs outline-none",
 				"transition-[background-color,color,box-shadow] duration-(--duration-functional) ease-standard",
-				"hover:text-foreground focus-visible:ring-2 focus-visible:ring-primary/50",
-				"data-active:bg-card data-active:text-foreground data-active:shadow-[var(--shadow-xs),0_0_0_1px_var(--border)]",
-				"dark:data-active:bg-[rgb(255_255_255/8%)] dark:data-active:shadow-none",
+				"hover:bg-background/55 hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring",
+				"data-active:bg-background data-active:text-foreground data-active:shadow-xs",
+				"dark:data-active:bg-input/72 dark:hover:bg-input/32",
 				className,
 			)}
 			{...props}
 		>
 			{children}
 			{count !== undefined ? (
-				<small className="font-normal text-[11px] text-faint tabular-nums">
+				<small className="font-semibold text-3xs text-muted-foreground/70 tabular-nums">
 					{count}
 				</small>
 			) : null}

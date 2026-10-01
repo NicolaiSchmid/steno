@@ -1,9 +1,12 @@
 import { Popover as BasePopover } from "@base-ui/react/popover";
+import { cva, type VariantProps } from "class-variance-authority";
 import type { ComponentProps } from "react";
 import { cn } from "@/lib/cn";
-import { popupSurfaceClass } from "./menu";
 
-/** A glass surface anchored to its trigger for a small form or explanation. */
+/**
+ * A glass surface anchored to its trigger for a small form or explanation.
+ * Unlike menus, popovers scale in from 0.98 at the surface tempo.
+ */
 export const Popover = BasePopover.Root;
 
 export type PopoverProps = ComponentProps<typeof BasePopover.Root>;
@@ -17,8 +20,33 @@ export function PopoverTrigger(props: PopoverTriggerProps) {
 	return <BasePopover.Trigger {...props} />;
 }
 
+export const popoverPopupVariants = cva(
+	[
+		"dropdown-glass relative rounded-lg border text-foreground shadow-pop outline-none",
+		"origin-(--transform-origin) transition-[opacity,scale] duration-(--duration-surface) ease-standard",
+		"before:pointer-events-none before:absolute before:inset-0 before:rounded-[calc(var(--radius-lg)-1px)] before:shadow-[var(--edge-highlight)]",
+		"data-starting-style:scale-[0.98] data-starting-style:opacity-0",
+		"data-ending-style:scale-[0.98] data-ending-style:opacity-0",
+	],
+	{
+		variants: {
+			size: {
+				sm: "w-64",
+				md: "w-80",
+				lg: "w-96",
+			},
+			padding: {
+				default: "p-4",
+				compact: "px-3 py-2",
+			},
+		},
+		defaultVariants: { size: "md", padding: "default" },
+	},
+);
+
 export interface PopoverPopupProps
-	extends Omit<ComponentProps<typeof BasePopover.Popup>, "className"> {
+	extends Omit<ComponentProps<typeof BasePopover.Popup>, "className">,
+		VariantProps<typeof popoverPopupVariants> {
 	className?: string;
 	side?: ComponentProps<typeof BasePopover.Positioner>["side"];
 	align?: ComponentProps<typeof BasePopover.Positioner>["align"];
@@ -28,9 +56,11 @@ export interface PopoverPopupProps
 
 export function PopoverPopup({
 	className,
+	size,
+	padding,
 	side = "bottom",
 	align = "center",
-	sideOffset = 8,
+	sideOffset = 4,
 	container,
 	...props
 }: PopoverPopupProps) {
@@ -43,7 +73,7 @@ export function PopoverPopup({
 				sideOffset={sideOffset}
 			>
 				<BasePopover.Popup
-					className={cn(popupSurfaceClass, "w-72 p-3.5", className)}
+					className={cn(popoverPopupVariants({ size, padding }), className)}
 					{...props}
 				/>
 			</BasePopover.Positioner>
@@ -57,7 +87,7 @@ export function PopoverTitle({
 }: ComponentProps<typeof BasePopover.Title> & { className?: string }) {
 	return (
 		<BasePopover.Title
-			className={cn("m-0 font-medium text-[13px]", className)}
+			className={cn("m-0 font-semibold text-sm leading-none", className)}
 			{...props}
 		/>
 	);
@@ -69,10 +99,7 @@ export function PopoverDescription({
 }: ComponentProps<typeof BasePopover.Description> & { className?: string }) {
 	return (
 		<BasePopover.Description
-			className={cn(
-				"mt-1 mb-0 text-[12.5px] text-muted-foreground leading-[1.45]",
-				className,
-			)}
+			className={cn("mt-2 mb-0 text-muted-foreground text-sm", className)}
 			{...props}
 		/>
 	);

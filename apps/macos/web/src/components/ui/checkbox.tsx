@@ -8,23 +8,28 @@ export interface CheckboxProps
 	className?: string;
 }
 
-/** A 16 px rounded box; primary with the inner top highlight when checked. */
+/**
+ * A 16 px box with a 4 px radius on the field colours and the edge
+ * highlight at rest; primary with a 3-stroke check when checked.
+ */
 export function Checkbox({ className, ...props }: CheckboxProps) {
 	return (
 		<BaseCheckbox.Root
 			className={cn(
-				"inline-grid size-4 shrink-0 place-items-center rounded-[5px] border-[1.5px] border-input bg-card outline-none",
-				"transition-[background-color,border-color] duration-(--duration-functional) ease-standard",
-				"data-checked:border-primary data-checked:bg-primary data-checked:shadow-[inset_0_1px_rgb(255_255_255/16%)]",
+				"relative inline-grid size-4 shrink-0 place-items-center rounded-[4px] border border-input bg-background shadow-xs outline-none",
+				"transition-[background-color,border-color,box-shadow] duration-(--duration-functional) ease-standard",
+				"before:pointer-events-none before:absolute before:inset-0 before:rounded-[3px] before:shadow-[var(--edge-highlight)]",
+				"data-checked:border-primary data-checked:bg-primary data-checked:shadow-none data-checked:before:shadow-none",
 				"data-indeterminate:border-primary data-indeterminate:bg-primary",
-				"focus-visible:ring-2 focus-visible:ring-primary/50 focus-visible:ring-offset-1 focus-visible:ring-offset-background",
-				"data-disabled:opacity-50",
+				"focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-1 focus-visible:ring-offset-background",
+				"data-disabled:opacity-64",
+				"dark:not-data-checked:bg-input/32",
 				className,
 			)}
 			{...props}
 		>
 			<BaseCheckbox.Indicator className="grid place-items-center text-primary-fg data-unchecked:hidden">
-				<CheckIcon aria-hidden="true" className="size-3 stroke-[2.5]" />
+				<CheckIcon aria-hidden="true" className="size-3 stroke-[3]" />
 			</BaseCheckbox.Indicator>
 		</BaseCheckbox.Root>
 	);

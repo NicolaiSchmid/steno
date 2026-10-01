@@ -3,25 +3,28 @@ import type { ComponentProps } from "react";
 import { cn } from "@/lib/cn";
 
 /**
- * A capsule beside the meeting title: tags and the "Confirm speaker" prompt.
- * Renders a button when `onClick` is given, a span otherwise.
+ * The control-sized (24 px) badge beside the meeting title: tags and the
+ * "Confirm speaker" prompt. Renders a button when `onClick` is given, a span
+ * otherwise.
  */
 export const pillVariants = cva(
 	[
-		"inline-flex h-[26px] shrink-0 items-center gap-1.5 whitespace-nowrap rounded-full border px-2.5",
-		"font-medium text-xs leading-none outline-none [&_svg]:size-3 [&_svg]:stroke-2",
-		"transition-[background-color,color,border-color] duration-(--duration-functional) ease-standard",
-		"focus-visible:ring-2 focus-visible:ring-primary/50",
+		"relative inline-flex h-6 shrink-0 items-center gap-1.5 whitespace-nowrap rounded-control border px-[7px]",
+		"font-medium text-xs leading-none outline-none",
+		"transition-[background-color,color,border-color,scale] duration-(--duration-functional) ease-standard",
+		"focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-1 focus-visible:ring-offset-background",
+		"[&_svg]:-mx-0.5 [&_svg]:size-3.5 [&_svg]:shrink-0 [&_svg]:opacity-80",
+		"before:pointer-events-none before:absolute before:inset-0 before:rounded-[calc(var(--control-radius)-1px)]",
 	],
 	{
 		variants: {
 			variant: {
 				default:
-					"border-border bg-card text-muted-foreground shadow-[0_1px_rgb(0_0_0/4%)]",
-				live: "border-transparent bg-primary-soft text-primary shadow-none",
+					"border-input bg-background text-foreground shadow-xs before:shadow-[var(--edge-highlight)] dark:bg-input/32",
+				live: "border-primary/32 bg-primary/8 text-primary dark:bg-primary/16",
 			},
 			interactive: {
-				true: "cursor-default hover:bg-accent active:scale-[0.97]",
+				true: "hover:bg-accent/50 active:scale-[0.97]",
 				false: "",
 			},
 		},
@@ -29,7 +32,7 @@ export const pillVariants = cva(
 			{
 				variant: "live",
 				interactive: true,
-				className: "hover:bg-primary-soft hover:brightness-95",
+				className: "hover:bg-primary/12",
 			},
 		],
 		defaultVariants: { variant: "default", interactive: false },

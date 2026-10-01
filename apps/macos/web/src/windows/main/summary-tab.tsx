@@ -60,7 +60,7 @@ export function SummaryTab({
 							data-testid="summary-status-action"
 							disabled={detail.isBusy}
 							onClick={action}
-							size="sm"
+							size="xs"
 							variant="primary"
 						>
 							{status.actionTitle ??
@@ -104,7 +104,7 @@ export function SummaryTab({
 		<div data-testid="tab-content-summary">
 			{detail.summary.map((section) => (
 				<Section key={section.id} title={section.heading}>
-					<ul className="my-0 list-disc pl-[22px]">
+					<ul className="my-0 list-disc pl-5">
 						{section.bullets.map((bullet) => (
 							<li className="my-1.5" key={`${bullet.lead}:${bullet.text}`}>
 								<b className="font-semibold">{leadText(bullet.lead)}</b>{" "}
@@ -116,7 +116,7 @@ export function SummaryTab({
 			))}
 			{detail.decisions.length > 0 ? (
 				<Section title="Decisions">
-					<ul className="my-0 list-disc pl-[22px]">
+					<ul className="my-0 list-disc pl-5">
 						{detail.decisions.map((decision) => (
 							<li className="my-1.5" key={decision}>
 								{decision}
@@ -140,9 +140,7 @@ export function SummaryTab({
 function Section({ title, children }: { title: string; children: ReactNode }) {
 	return (
 		<>
-			<h3 className="mt-[26px] mb-2 font-semibold text-base first:mt-0">
-				{title}
-			</h3>
+			<h3 className="mt-6 mb-2 font-semibold text-base first:mt-0">{title}</h3>
 			{children}
 		</>
 	);

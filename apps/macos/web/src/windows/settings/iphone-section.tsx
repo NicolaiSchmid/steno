@@ -42,7 +42,7 @@ function PairingCard({
 				pngBase64={pairing.qrPNGBase64}
 				size={180}
 			/>
-			<p className="m-0 max-w-[320px] text-center text-[13px] text-muted-foreground leading-[1.45]">
+			<p className="m-0 max-w-[320px] text-center text-muted-foreground text-sm">
 				Scan this code with the Steno app on your iPhone.{" "}
 				<span data-testid="pairing-expiry">
 					{expiry ?? "The code has expired."}

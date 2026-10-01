@@ -100,7 +100,7 @@ export function PermissionRow({
 
 	let control: ReactNode;
 	if (state === "granted") {
-		control = <Badge variant="live">Allowed</Badge>;
+		control = <Badge variant="success">Allowed</Badge>;
 	} else if (skipped) {
 		control = <Badge data-testid={`permission-${kind}-skipped`}>Skipped</Badge>;
 	} else if (state === "denied") {

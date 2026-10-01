@@ -79,7 +79,7 @@ function RetentionRow({
 					) : null}
 					<Select
 						aria-label="Keep recordings"
-						className="w-[200px]"
+						className="w-56"
 						data-testid="retention-mode"
 						onValueChange={(mode) => {
 							if (mode) {
@@ -161,7 +161,7 @@ export function RecordingSection() {
 						<>
 							<Select
 								aria-label="Microphone"
-								className="w-[220px]"
+								className="w-56"
 								data-testid="input-device"
 								onValueChange={(value) =>
 									send(client, "settings.recording.setInputDevice", {
@@ -185,7 +185,7 @@ export function RecordingSection() {
 								onClick={() =>
 									send(client, "settings.recording.refreshDevices")
 								}
-								size="icon"
+								size="icon-sm"
 								variant="ghost"
 							>
 								<RefreshCwIcon aria-hidden="true" />

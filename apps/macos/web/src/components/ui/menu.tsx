@@ -7,7 +7,8 @@ import { Kbd } from "./kbd";
 /**
  * The actions menu: a glass popup with the deep popover shadow. The popup
  * mounts on open and unmounts on close (never `display: none`, which blanks
- * headless Chromium under `backdrop-filter`).
+ * headless Chromium under `backdrop-filter`). Menus appear in place;
+ * popovers and tooltips are the surfaces that scale in.
  */
 export const Menu = BaseMenu.Root;
 
@@ -18,17 +19,13 @@ export interface MenuTriggerProps
 	className?: string;
 }
 
-/** Wrap a `Button` with `render`: `<MenuTrigger render={<Button variant="glass" />} />`. */
+/** Wrap a `Button` with `render`: `<MenuTrigger render={<Button variant="ghost" />} />`. */
 export function MenuTrigger(props: MenuTriggerProps) {
 	return <BaseMenu.Trigger {...props} />;
 }
 
-export const popupSurfaceClass = cn(
-	"dropdown-glass rounded-lg border p-1 text-foreground shadow-pop outline-none",
-	"origin-(--transform-origin) transition-[opacity,transform] duration-(--duration-surface) ease-standard",
-	"data-starting-style:scale-[0.98] data-starting-style:opacity-0",
-	"data-ending-style:scale-[0.98] data-ending-style:opacity-0",
-);
+export const popupSurfaceClass =
+	"dropdown-glass rounded-lg border p-1 text-foreground shadow-pop outline-none";
 
 export interface MenuPopupProps
 	extends Omit<ComponentProps<typeof BaseMenu.Popup>, "className"> {
@@ -44,7 +41,7 @@ export function MenuPopup({
 	className,
 	side = "bottom",
 	align = "end",
-	sideOffset = 6,
+	sideOffset = 4,
 	container,
 	...props
 }: MenuPopupProps) {
@@ -57,7 +54,7 @@ export function MenuPopup({
 				sideOffset={sideOffset}
 			>
 				<BaseMenu.Popup
-					className={cn(popupSurfaceClass, "min-w-[220px]", className)}
+					className={cn(popupSurfaceClass, "min-w-44", className)}
 					{...props}
 				/>
 			</BaseMenu.Positioner>
@@ -65,17 +62,18 @@ export function MenuPopup({
 	);
 }
 
+/** A 28 px row: icon at 80 percent, the words, a shortcut at the trailing edge. */
 export const menuItemVariants = cva(
 	[
-		"flex h-[30px] cursor-default select-none items-center gap-2 rounded-[6px] px-2 text-[13px] outline-none",
-		"[&>svg]:size-4 [&>svg]:shrink-0 [&>svg]:stroke-[1.75]",
-		"data-highlighted:bg-accent data-disabled:opacity-50",
+		"flex min-h-7 cursor-default select-none items-center gap-2 rounded-sm px-2 py-1 text-sm outline-none",
+		"[&>svg]:-mx-0.5 [&>svg]:size-4 [&>svg]:shrink-0 [&>svg]:opacity-80",
+		"data-highlighted:bg-accent data-disabled:opacity-64",
 	],
 	{
 		variants: {
 			variant: {
 				default: "text-foreground [&>svg]:text-muted-foreground",
-				destructive: "text-destructive [&>svg]:text-destructive",
+				destructive: "text-destructive-foreground [&>svg]:text-current",
 			},
 		},
 		defaultVariants: { variant: "default" },

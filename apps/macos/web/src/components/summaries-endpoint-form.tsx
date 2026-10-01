@@ -60,12 +60,12 @@ export function SummariesEndpointForm({
 			: stacked
 				? "API key, only if the server needs one"
 				: "Only if the server needs one";
-	const fieldClass = stacked ? "w-full" : "w-[200px]";
+	const fieldClass = stacked ? "w-full" : "w-56";
 
 	const service = (
 		<Select
 			aria-label="Service"
-			className={stacked ? "w-[260px]" : "w-[220px]"}
+			className={stacked ? "w-64" : "w-56"}
 			data-testid={`${testIdPrefix}preset`}
 			onValueChange={(value) => {
 				if (value) {

@@ -98,11 +98,11 @@ export function TranscriptTab({ detail, pickerRequest }: TranscriptTabProps) {
 
 	return (
 		<div data-testid="tab-content-transcript">
-			<div className="mb-[26px] flex items-center gap-[18px] text-[13px] text-muted-foreground">
+			<div className="mb-6 flex items-center gap-4 text-muted-foreground text-sm">
 				<Button
 					data-testid="copy-transcript"
 					onClick={copy}
-					size="sm"
+					size="xs"
 					variant="ghost"
 				>
 					{copied ? (
@@ -121,10 +121,10 @@ export function TranscriptTab({ detail, pickerRequest }: TranscriptTabProps) {
 					speaker !== undefined && speaker.assignment !== "confirmed";
 				return (
 					<div
-						className="mb-[22px] grid grid-cols-[140px_1fr] gap-[18px] text-[15px] leading-[1.6]"
+						className="mb-5 grid grid-cols-[140px_1fr] gap-4 text-[15px] leading-[1.6]"
 						key={turn.id}
 					>
-						<div className="flex flex-col gap-[3px] pt-0.5 font-medium text-[13.5px]">
+						<div className="flex flex-col gap-0.5 pt-0.5 font-medium text-sm">
 							{unconfirmed && speaker ? (
 								<SpeakerPicker
 									onOpenChange={(open) => setOpenTurnID(open ? turn.id : null)}
@@ -134,11 +134,11 @@ export function TranscriptTab({ detail, pickerRequest }: TranscriptTabProps) {
 							) : (
 								<span className="truncate">{turn.speakerName}</span>
 							)}
-							<span className="font-mono font-normal text-[11.5px] text-faint">
+							<span className="font-mono font-normal text-2xs text-faint tabular-nums">
 								{format.range(turn.startSeconds, turn.endSeconds)}
 							</span>
 							{unconfirmed && speaker ? (
-								<Badge className="mt-1 self-start" variant="warn">
+								<Badge className="mt-1 self-start" size="sm" variant="warning">
 									{speaker.assignment === "suggested"
 										? "Suggested"
 										: "Who is this?"}
@@ -151,10 +151,10 @@ export function TranscriptTab({ detail, pickerRequest }: TranscriptTabProps) {
 											? `Stop the sample of ${speaker.displayName}`
 											: `Play a sample of ${speaker.displayName}`
 									}
-									className="mt-1 -ml-2.5 self-start"
+									className="mt-1 -ml-[7px] self-start"
 									data-testid={`speaker-play-${speaker.id}`}
 									onClick={() => togglePlay(speaker)}
-									size="sm"
+									size="xs"
 									variant="ghost"
 								>
 									{speaker.isPlaying ? (

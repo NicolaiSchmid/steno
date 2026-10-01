@@ -61,6 +61,7 @@ export function NotesTab({ meetingID, notes }: NotesTabProps) {
 				rows={14}
 				spellCheck
 				value={text}
+				variant="reading"
 			/>
 			<p className="my-0 text-faint text-xs" data-testid="scratchpad-hint">
 				Saved with the meeting and exported alongside the summary.

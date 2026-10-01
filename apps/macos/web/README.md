@@ -15,7 +15,7 @@ draws snapshots and sends commands over the bridge (`src/bridge/`). Plan:
 | `pnpm check` | `lint`, `lint:ui`, `typecheck`, `test`. Must pass before a PR. |
 | `pnpm build` | Writes `dist/`, the bundle the app ships, with relative asset URLs and without the mock bridge or the fixtures; then `scripts/check-offline.mjs` greps it for fetchable URLs and `scripts/check-bundle.mjs` for any trace of the mock or a fixture. |
 | `pnpm build:screens` | Writes `dist-screens/`: the same pages over the fixture bridge (`vite build --mode screens`), for the screens and `vite preview --mode screens`. |
-| `pnpm screens` | Builds the screens bundle, then Playwright renders the main window in every state at 960 by 600 and 1200 by 760, the Settings window's sections and states at its fixed 760 by 520, the onboarding window's two pages and their states at its fixed 560 by 620, and the stories, light and dark, to `screens/` and asserts the page made no network request. Run `pnpm exec playwright install chromium` once. |
+| `pnpm screens` | Builds the screens bundle, then Playwright renders the main window in every state at 960 by 600 and 1200 by 760, the Settings window's sections and states at its default 960 by 640, the onboarding window's two pages and their states at its fixed 560 by 620, and the stories, light and dark, to `screens/` and asserts the page made no network request. Run `pnpm exec playwright install chromium` once. |
 
 ## Layout
 

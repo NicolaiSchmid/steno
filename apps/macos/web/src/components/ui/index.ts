@@ -5,9 +5,9 @@ export { AvatarStack, avatarStackVariants } from "./avatar-stack";
 export type { BadgeProps } from "./badge";
 export { Badge, badgeVariants } from "./badge";
 export type { ButtonProps } from "./button";
-export { Button, buttonVariants } from "./button";
+export { Button, buttonLook, buttonVariants } from "./button";
 export type { CalloutProps } from "./callout";
-export { Callout, calloutIconVariants, calloutVariants } from "./callout";
+export { Callout, calloutVariants } from "./callout";
 export type { CardProps } from "./card";
 export { Card, cardVariants } from "./card";
 export type { CheckboxProps } from "./checkbox";
@@ -34,9 +34,12 @@ export type {
 } from "./dialog";
 export {
 	Dialog,
+	DialogBody,
 	DialogClose,
+	DialogCloseButton,
 	DialogDescription,
 	DialogFooter,
+	DialogHeader,
 	DialogPopup,
 	DialogTitle,
 	DialogTrigger,
@@ -44,7 +47,11 @@ export {
 export type { DisclosureProps } from "./disclosure";
 export { Disclosure } from "./disclosure";
 export type { EmptyStateProps } from "./empty-state";
-export { EmptyState, emptyStateIconVariants } from "./empty-state";
+export {
+	EmptyState,
+	emptyStateIconVariants,
+	emptyStateVariants,
+} from "./empty-state";
 export type { FormCardProps, FormRowProps, FormValueProps } from "./form-row";
 export {
 	FormCard,
@@ -53,8 +60,15 @@ export {
 	formRowIconVariants,
 	formValueVariants,
 } from "./form-row";
+export type { BreadcrumbProps, HeaderRowProps } from "./header";
+export { Breadcrumb, HeaderRow, headerRowVariants } from "./header";
 export type { InputProps, SearchInputProps } from "./input";
-export { Input, inputVariants, SearchInput } from "./input";
+export {
+	Input,
+	inputVariants,
+	SearchInput,
+	searchInputVariants,
+} from "./input";
 export type { KbdProps } from "./kbd";
 export { Kbd, kbdVariants } from "./kbd";
 export type {
@@ -92,12 +106,14 @@ export type { ProgressBarProps } from "./progress-bar";
 export { ProgressBar } from "./progress-bar";
 export type { QRCodeProps } from "./qr-code";
 export { QRCode } from "./qr-code";
+export type { RecordMarkProps } from "./record-mark";
 export { RecordMark } from "./record-mark";
 export type { ScrollAreaProps } from "./scroll-area";
 export { ScrollArea } from "./scroll-area";
+export type { SectionLabelProps } from "./section-label";
 export { SectionLabel } from "./section-label";
 export type { SelectOption, SelectProps } from "./select";
-export { Select } from "./select";
+export { Select, selectTriggerVariants } from "./select";
 export type { SidebarRowProps } from "./sidebar-row";
 export { SidebarRow, sidebarRowVariants } from "./sidebar-row";
 export type { SplitButtonProps } from "./split-button";

@@ -3,25 +3,53 @@ import type { ComponentProps, ReactNode } from "react";
 import { cn } from "@/lib/cn";
 
 /**
- * A column with nothing to show yet: an icon well, one line of title and one
- * of body, centred, with an optional action beneath. `id` names the block
- * and its title (`<id>-title`) for the screens and the host tests.
+ * A column with nothing to show yet: an icon tile with two ghost copies
+ * fanned behind it, a title and a sentence of body, centred, with an
+ * optional action beneath. `id` names the block and its title
+ * (`<id>-title`) for the screens and the host tests.
  */
+export const emptyStateVariants = cva(
+	"flex min-w-0 flex-col items-center justify-center text-balance text-center",
+	{
+		variants: {
+			size: {
+				md: "gap-4 px-6 py-10",
+				lg: "gap-6 px-6 py-12",
+			},
+		},
+		defaultVariants: { size: "md" },
+	},
+);
+
 export const emptyStateIconVariants = cva(
-	"mb-1 grid size-9 place-items-center rounded-[10px] [&_svg]:size-[18px] [&_svg]:stroke-[1.75]",
+	"relative isolate flex size-9 items-center justify-center rounded-md border border-border bg-card shadow-xs [&>svg]:size-[18px]",
 	{
 		variants: {
 			variant: {
-				quiet: "bg-accent text-muted-foreground",
-				warning: "bg-warning-surface text-warning",
+				quiet: "text-muted-foreground",
+				warning: "text-warning",
 			},
 		},
 		defaultVariants: { variant: "quiet" },
 	},
 );
 
+const ghostClass =
+	"absolute inset-0 -z-10 rounded-md border border-border bg-card";
+
+const emptyStateTitleVariants = cva("m-0 font-semibold text-foreground", {
+	variants: {
+		size: {
+			md: "text-base",
+			lg: "text-xl",
+		},
+	},
+	defaultVariants: { size: "md" },
+});
+
 export interface EmptyStateProps
 	extends Omit<ComponentProps<"div">, "title" | "id">,
+		VariantProps<typeof emptyStateVariants>,
 		VariantProps<typeof emptyStateIconVariants> {
 	id: string;
 	icon?: ReactNode;
@@ -33,6 +61,7 @@ export interface EmptyStateProps
 export function EmptyState({
 	className,
 	variant,
+	size,
 	id,
 	icon,
 	title,
@@ -42,28 +71,35 @@ export function EmptyState({
 }: EmptyStateProps) {
 	return (
 		<div
-			className={cn(
-				"flex flex-col items-center gap-2 px-6 py-10 text-center",
-				className,
-			)}
+			className={cn(emptyStateVariants({ size }), className)}
 			data-testid={id}
 			{...props}
 		>
 			{icon ? (
-				<span className={emptyStateIconVariants({ variant })}>{icon}</span>
+				<span className={emptyStateIconVariants({ variant })}>
+					<span
+						aria-hidden="true"
+						className={cn(ghostClass, "-rotate-[10deg] scale-[0.84]")}
+					/>
+					<span
+						aria-hidden="true"
+						className={cn(ghostClass, "rotate-[10deg] scale-[0.84]")}
+					/>
+					{icon}
+				</span>
 			) : null}
-			<p
-				className="m-0 font-semibold text-[15px] text-foreground leading-[1.3]"
-				data-testid={`${id}-title`}
-			>
-				{title}
-			</p>
-			{body ? (
-				<p className="m-0 max-w-[340px] text-[13px] text-muted-foreground leading-[1.45]">
-					{body}
+			<div className="flex max-w-sm flex-col items-center gap-2">
+				<p
+					className={emptyStateTitleVariants({ size })}
+					data-testid={`${id}-title`}
+				>
+					{title}
 				</p>
-			) : null}
-			{action ? <div className="mt-2 flex gap-2">{action}</div> : null}
+				{body ? (
+					<p className="m-0 text-muted-foreground text-sm">{body}</p>
+				) : null}
+			</div>
+			{action ? <div className="flex gap-2">{action}</div> : null}
 		</div>
 	);
 }

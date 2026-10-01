@@ -68,9 +68,10 @@ struct StenoApp: App {
     }
     .menuBarExtraStyle(.window)
 
-    // A `Window`, not the `Settings` scene: the page is the whole content at
-    // one fixed size, opened by ⌘, through `AppCommands` and by
-    // `window.open("settings")` from the pages (plan Decision 1).
+    // A `Window`, not the `Settings` scene: the page is the whole content,
+    // 960 by 640 by default and resizable down to the page's minimum, opened
+    // by ⌘, through `AppCommands` and by `window.open("settings")` from the
+    // pages (plan Decision 1).
     Window("Settings", id: "settings") {
       RootView(bootstrap: bootstrap) { controller in
         SettingsWindow(controller: controller)
@@ -82,7 +83,7 @@ struct StenoApp: App {
       }
     }
     .windowStyle(.hiddenTitleBar)
-    .windowResizability(.contentSize)
+    .windowResizability(.contentMinSize)
     .defaultSize(SettingsWindow.size)
 
     #if DEBUG

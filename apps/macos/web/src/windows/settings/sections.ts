@@ -3,8 +3,8 @@ import type { BridgeTopic } from "@/bridge/contract";
 /**
  * The six sections, named by what the user gets, not by the subsystem
  * behind it; the same words as `SettingsSection` on the Swift side, whose
- * test pins them. The subtitle under each title comes from the section's
- * snapshot, so the page never derives status text itself.
+ * test pins them. Each section's snapshot still carries a one-line
+ * `subtitle`; the sidebar rows are single-line and no longer show it.
  */
 export const SECTION_IDS = [
 	"general",
@@ -17,15 +17,15 @@ export const SECTION_IDS = [
 
 export type SectionId = (typeof SECTION_IDS)[number];
 
-/** The six `settings.*` topics, each with the `subtitle` the sidebar shows. */
+/** The six `settings.*` topics, one per section. */
 export type SettingsTopic = Extract<BridgeTopic, `settings.${string}`>;
 
 export interface SectionInfo {
 	id: SectionId;
 	title: string;
-	/** One sentence under the section title. */
+	/** One sentence at the top of the section page. */
 	purpose: string;
-	/** The snapshot topic whose `subtitle` the sidebar shows. */
+	/** The section's snapshot topic. */
 	topic: SettingsTopic;
 }
 

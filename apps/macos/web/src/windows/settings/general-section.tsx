@@ -6,9 +6,12 @@ import {
 	Button,
 	Callout,
 	Dialog,
+	DialogBody,
 	DialogClose,
+	DialogCloseButton,
 	DialogDescription,
 	DialogFooter,
+	DialogHeader,
 	DialogPopup,
 	DialogTitle,
 	DialogTrigger,
@@ -43,52 +46,56 @@ function AcknowledgementsDialog({
 			>
 				Acknowledgements…
 			</DialogTrigger>
-			<DialogPopup className="w-[480px]" data-testid="acknowledgements-dialog">
-				<DialogTitle>Acknowledgements</DialogTitle>
-				<DialogDescription>
-					The speech models and libraries Steno is built on.
-				</DialogDescription>
-				<ScrollArea className="mt-3 max-h-[320px]">
-					<div className="flex flex-col gap-4">
-						{groups.map(({ title, group }) => (
-							<FormCard key={group} title={title}>
-								{acknowledgements
-									.filter((item) => item.group === group)
-									.map((item) => (
-										<FormRow
-											control={
-												<FormValue variant="faint">{item.licence}</FormValue>
-											}
-											description={
-												item.source.startsWith("https://") ? (
-													<Button
-														className="h-auto"
-														onClick={() =>
-															send(client, "system.openURL", {
-																url: item.source,
-															})
-														}
-														size="sm"
-														variant="ghost"
-													>
-														{item.source.replace("https://", "")}
-														<ExternalLinkIcon aria-hidden="true" />
-													</Button>
-												) : (
-													item.source
-												)
-											}
-											key={item.name}
-											label={item.name}
-										/>
-									))}
-							</FormCard>
-						))}
-					</div>
-				</ScrollArea>
+			<DialogPopup className="max-w-lg" data-testid="acknowledgements-dialog">
+				<DialogHeader>
+					<DialogTitle>Acknowledgements</DialogTitle>
+					<DialogDescription>
+						The speech models and libraries Steno is built on.
+					</DialogDescription>
+				</DialogHeader>
+				<DialogBody>
+					<ScrollArea className="max-h-[320px]">
+						<div className="flex flex-col gap-4">
+							{groups.map(({ title, group }) => (
+								<FormCard key={group} title={title}>
+									{acknowledgements
+										.filter((item) => item.group === group)
+										.map((item) => (
+											<FormRow
+												control={
+													<FormValue variant="faint">{item.licence}</FormValue>
+												}
+												description={
+													item.source.startsWith("https://") ? (
+														<Button
+															onClick={() =>
+																send(client, "system.openURL", {
+																	url: item.source,
+																})
+															}
+															size="xs"
+															variant="ghost"
+														>
+															{item.source.replace("https://", "")}
+															<ExternalLinkIcon aria-hidden="true" />
+														</Button>
+													) : (
+														item.source
+													)
+												}
+												key={item.name}
+												label={item.name}
+											/>
+										))}
+								</FormCard>
+							))}
+						</div>
+					</ScrollArea>
+				</DialogBody>
 				<DialogFooter>
 					<DialogClose render={<Button variant="primary" />}>Done</DialogClose>
 				</DialogFooter>
+				<DialogCloseButton />
 			</DialogPopup>
 		</Dialog>
 	);
@@ -184,7 +191,7 @@ export function GeneralSection() {
 					control={
 						<Select
 							aria-label="Summary template"
-							className="w-[180px]"
+							className="w-40"
 							data-testid="default-template"
 							onValueChange={(templateID) => {
 								if (templateID) {

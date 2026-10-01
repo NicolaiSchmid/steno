@@ -5,7 +5,9 @@ import {
 	FolderIcon,
 	InboxIcon,
 	InfoIcon,
+	MicOffIcon,
 	MoreHorizontalIcon,
+	PlusIcon,
 	RefreshCwIcon,
 	SettingsIcon,
 	ShareIcon,
@@ -18,21 +20,27 @@ import {
 	Avatar,
 	AvatarStack,
 	Badge,
+	Breadcrumb,
 	Button,
 	Callout,
 	Card,
 	Checkbox,
 	Dialog,
+	DialogBody,
 	DialogClose,
+	DialogCloseButton,
 	DialogDescription,
 	DialogFooter,
+	DialogHeader,
 	DialogPopup,
 	DialogTitle,
 	DialogTrigger,
 	Disclosure,
+	EmptyState,
 	FormCard,
 	FormRow,
 	FormValue,
+	HeaderRow,
 	Input,
 	Kbd,
 	Menu,
@@ -59,6 +67,7 @@ import {
 	TabsList,
 	TabsPanel,
 	TabsTab,
+	Textarea,
 	Tooltip,
 } from "@/components/ui";
 import { ThemePair } from "./theme-pair";
@@ -86,6 +95,26 @@ const languages = [
 	{ value: "fr", label: "French" },
 ];
 
+const buttonVariantNames = [
+	"primary",
+	"secondary",
+	"outline",
+	"ghost",
+	"ghost-muted",
+	"destructive",
+	"warning-outline",
+	"glass",
+] as const;
+
+const badgeVariantNames = [
+	"outline",
+	"secondary",
+	"warning",
+	"destructive",
+	"success",
+	"live",
+] as const;
+
 function SwitchStory() {
 	const [on, setOn] = useState(true);
 	return (
@@ -109,56 +138,87 @@ export function StoriesPage() {
 			className="mx-auto flex max-w-[1160px] flex-col gap-8 p-8 text-foreground"
 			data-testid="stories"
 		>
-			<h1 className="m-0 font-semibold text-[20px] tracking-[-0.01em]">
-				Steno ui
-			</h1>
+			<h1 className="m-0 font-semibold text-xl">Steno ui</h1>
 
-			<ThemePair title="Button: primary, outline, ghost, glass, destructive; sm, md, lg, icon">
+			<ThemePair title="Button: the eight variants">
 				{() => (
 					<>
-						<Button variant="primary">
-							<RecordMark />
-							Record
-						</Button>
-						<Button variant="outline">Choose folder…</Button>
-						<Button variant="ghost">Not now</Button>
-						<Button variant="glass">
-							<ShareIcon aria-hidden="true" />
-							Export
-						</Button>
-						<Button variant="destructive">Delete</Button>
-						<Button size="sm" variant="primary">
-							Set up
-						</Button>
-						<Button size="sm" variant="outline">
-							Small
-						</Button>
-						<Button size="lg" variant="outline">
-							Large
-						</Button>
-						<Button aria-label="More" size="icon" variant="glass">
-							<MoreHorizontalIcon aria-hidden="true" />
-						</Button>
-						<Button aria-label="Settings" size="icon" variant="outline">
-							<SettingsIcon aria-hidden="true" />
-						</Button>
+						{buttonVariantNames.map((variant) => (
+							<Button key={variant} variant={variant}>
+								{variant === "primary" ? <RecordMark /> : null}
+								{variant}
+							</Button>
+						))}
 						<Button disabled variant="primary">
+							Disabled
+						</Button>
+						<Button disabled variant="outline">
 							Disabled
 						</Button>
 					</>
 				)}
 			</ThemePair>
 
-			<ThemePair title="Badge and Pill">
+			<ThemePair title="Button: xs, sm, md, lg; icon-xs, icon-sm, icon">
 				{() => (
 					<>
-						<Badge>Call</Badge>
-						<Badge>In person</Badge>
-						<Badge variant="warn">No summary</Badge>
-						<Badge variant="live">Live</Badge>
+						<Button size="xs" variant="outline">
+							<PlusIcon aria-hidden="true" />
+							Extra small
+						</Button>
+						<Button size="sm" variant="outline">
+							Small
+						</Button>
+						<Button size="md" variant="outline">
+							Medium
+						</Button>
+						<Button size="lg" variant="outline">
+							Large
+						</Button>
+						<Button aria-label="Add" size="icon-xs" variant="ghost">
+							<PlusIcon aria-hidden="true" />
+						</Button>
+						<Button aria-label="Settings" size="icon-sm" variant="outline">
+							<SettingsIcon aria-hidden="true" />
+						</Button>
+						<Button aria-label="More" size="icon" variant="glass">
+							<MoreHorizontalIcon aria-hidden="true" />
+						</Button>
+						<Button size="sm" variant="primary">
+							<ShareIcon aria-hidden="true" />
+							Export
+						</Button>
+					</>
+				)}
+			</ThemePair>
+
+			<ThemePair title="Badge: the six variants, then sm">
+				{() => (
+					<>
+						{badgeVariantNames.map((variant) => (
+							<Badge key={variant} variant={variant}>
+								{variant}
+							</Badge>
+						))}
+						{badgeVariantNames.map((variant) => (
+							<Badge key={`${variant}-sm`} size="sm" variant={variant}>
+								{variant}
+							</Badge>
+						))}
+					</>
+				)}
+			</ThemePair>
+
+			<ThemePair title="Pill: default, interactive, live">
+				{() => (
+					<>
 						<Pill>#strategie</Pill>
 						<Pill onClick={() => undefined}>#q4</Pill>
 						<Pill variant="live">
+							<CheckCircle2Icon aria-hidden="true" />
+							Confirm speaker
+						</Pill>
+						<Pill onClick={() => undefined} variant="live">
 							<CheckCircle2Icon aria-hidden="true" />
 							Confirm speaker
 						</Pill>
@@ -189,10 +249,18 @@ export function StoriesPage() {
 				)}
 			</ThemePair>
 
-			<ThemePair title="Card">
+			<ThemePair title="Card: default, group, sidebar; interactive">
 				{() => (
 					<>
-						<Card padding="md">A card with padding.</Card>
+						<Card padding="md">Default card</Card>
+						<Card padding="md" variant="group">
+							Group card
+						</Card>
+						<div className="rounded-lg bg-sidebar p-2">
+							<Card padding="sm" variant="sidebar">
+								Sidebar card
+							</Card>
+						</div>
 						<Card className="w-40" interactive padding="sm">
 							Interactive
 						</Card>
@@ -200,26 +268,59 @@ export function StoriesPage() {
 				)}
 			</ThemePair>
 
-			<ThemePair title="Input and SearchInput">
+			<ThemePair title="Input: sm, md, lg; disabled; SearchInput as field and row">
 				{() => (
 					<>
-						<Input
-							aria-label="Name"
-							className="w-48"
-							placeholder="Meeting title"
-						/>
 						<Input
 							aria-label="Small"
 							className="w-40"
 							placeholder="Small"
 							size="sm"
 						/>
-						<SearchInput aria-label="Search" className="w-56" shortcut="⌘F" />
+						<Input
+							aria-label="Name"
+							className="w-48"
+							placeholder="Meeting title"
+						/>
+						<Input
+							aria-label="Large"
+							className="w-48"
+							placeholder="Large"
+							size="lg"
+						/>
 						<Input
 							aria-label="Disabled"
 							className="w-40"
 							disabled
 							value="Disabled"
+						/>
+						<SearchInput aria-label="Search" className="w-56" shortcut="⌘F" />
+						<div className="w-56 rounded-lg bg-sidebar p-2">
+							<SearchInput
+								aria-label="Search meetings"
+								shortcut="⌘F"
+								variant="row"
+							/>
+						</div>
+					</>
+				)}
+			</ThemePair>
+
+			<ThemePair title="Textarea: default and reading">
+				{() => (
+					<>
+						<Textarea
+							aria-label="Notes"
+							className="w-64"
+							defaultValue="Zwei Szenarien bis Freitag."
+							rows={3}
+						/>
+						<Textarea
+							aria-label="Summary"
+							className="w-64"
+							defaultValue="Die Partner nicht aus zweiter Hand informieren."
+							rows={3}
+							variant="reading"
 						/>
 					</>
 				)}
@@ -236,22 +337,16 @@ export function StoriesPage() {
 				)}
 			</ThemePair>
 
-			<ThemePair title="Select">
+			<ThemePair title="Select: xs, sm, md; placeholder">
 				{({ container }) => (
 					<>
 						<Select
-							aria-label="Language"
-							className="w-40"
+							aria-label="Extra small"
+							className="w-32"
 							container={container}
-							defaultValue="de"
+							defaultValue="fr"
 							options={languages}
-						/>
-						<Select
-							aria-label="Empty"
-							className="w-40"
-							container={container}
-							options={languages}
-							placeholder="Choose a language"
+							size="xs"
 						/>
 						<Select
 							aria-label="Small"
@@ -260,6 +355,21 @@ export function StoriesPage() {
 							defaultValue="en"
 							options={languages}
 							size="sm"
+						/>
+						<Select
+							aria-label="Language"
+							className="w-40"
+							container={container}
+							defaultValue="de"
+							options={languages}
+							size="md"
+						/>
+						<Select
+							aria-label="Empty"
+							className="w-44"
+							container={container}
+							options={languages}
+							placeholder="Choose a language"
 						/>
 					</>
 				)}
@@ -297,9 +407,9 @@ export function StoriesPage() {
 				)}
 			</ThemePair>
 
-			<ThemePair title="Popover (open)">
+			<ThemePair title="Popover (open): md, and sm compact">
 				{({ container }) => (
-					<div className="relative h-36 w-full">
+					<div className="relative h-44 w-full">
 						<Popover defaultOpen modal={false}>
 							<PopoverTrigger
 								className="absolute top-0 left-0"
@@ -313,6 +423,22 @@ export function StoriesPage() {
 									The recording is deleted on Oct 29. The transcript and summary
 									stay.
 								</PopoverDescription>
+							</PopoverPopup>
+						</Popover>
+						<Popover defaultOpen modal={false}>
+							<PopoverTrigger
+								className="absolute top-0 right-0"
+								render={<Button variant="outline" />}
+							>
+								Compact
+							</PopoverTrigger>
+							<PopoverPopup
+								align="end"
+								container={container}
+								padding="compact"
+								size="sm"
+							>
+								<PopoverDescription>Three speakers found.</PopoverDescription>
 							</PopoverPopup>
 						</Popover>
 					</div>
@@ -336,22 +462,26 @@ export function StoriesPage() {
 				)}
 			</ThemePair>
 
-			<ThemePair title="Dialog">
+			<ThemePair title="Dialog: header, body, footer and the close button">
 				{({ container }) => (
 					<Dialog>
 						<DialogTrigger render={<Button variant="outline" />}>
 							Rename meeting…
 						</DialogTrigger>
 						<DialogPopup container={container}>
-							<DialogTitle>Rename meeting</DialogTitle>
-							<DialogDescription>
-								The new name shows in the list and in exports.
-							</DialogDescription>
-							<Input
-								aria-label="Meeting title"
-								className="mt-4"
-								defaultValue="Produktstrategie 90/10"
-							/>
+							<DialogHeader>
+								<DialogTitle>Rename meeting</DialogTitle>
+								<DialogDescription>
+									The new name shows in the list and in exports.
+								</DialogDescription>
+								<DialogCloseButton />
+							</DialogHeader>
+							<DialogBody>
+								<Input
+									aria-label="Meeting title"
+									defaultValue="Produktstrategie 90/10"
+								/>
+							</DialogBody>
 							<DialogFooter>
 								<DialogClose render={<Button variant="ghost" />}>
 									Cancel
@@ -397,7 +527,7 @@ export function StoriesPage() {
 			<ThemePair title="SidebarRow and SectionLabel on the sidebar surface">
 				{() => (
 					<div className="flex w-56 flex-col gap-0.5 rounded-lg bg-sidebar p-2">
-						<SectionLabel>Meetings</SectionLabel>
+						<SectionLabel trailing={<span>Today</span>}>Meetings</SectionLabel>
 						<SidebarRow active count={7} icon={<InboxIcon />}>
 							All
 						</SidebarRow>
@@ -426,12 +556,31 @@ export function StoriesPage() {
 				)}
 			</ThemePair>
 
-			<ThemePair title="Callout: small, the sidebar's">
+			<ThemePair title="Callout sm: warning, info, live, destructive (the sidebar's)">
 				{() => (
 					<div className="flex w-[220px] flex-col gap-1.5">
 						<Callout
 							actions={
-								<Button size="sm" variant="outline">
+								<Button size="xs" variant="outline">
+									Fix in System Settings
+								</Button>
+							}
+							description="Allow it in System Settings to record."
+							icon={<CircleAlertIcon aria-hidden="true" />}
+							size="sm"
+							title="Steno can't use the microphone."
+							variant="warning"
+						/>
+						<Callout
+							description="Steno keeps recording while you switch apps."
+							icon={<InfoIcon aria-hidden="true" />}
+							size="sm"
+							title="Recording in the background."
+							variant="info"
+						/>
+						<Callout
+							actions={
+								<Button size="xs" variant="outline">
 									Keep recording
 								</Button>
 							}
@@ -442,21 +591,17 @@ export function StoriesPage() {
 							variant="live"
 						/>
 						<Callout
-							actions={
-								<Button size="sm" variant="outline">
-									Fix in System Settings
-								</Button>
-							}
-							description="Allow it in System Settings to record."
-							icon={<CircleAlertIcon aria-hidden="true" />}
+							description="Nothing was heard for two minutes."
+							icon={<MicOffIcon aria-hidden="true" />}
 							size="sm"
-							title="Steno can't use the microphone."
+							title="The microphone went quiet."
+							variant="destructive"
 						/>
 					</div>
 				)}
 			</ThemePair>
 
-			<ThemePair title="Callout: warning, info, live">
+			<ThemePair title="Callout md: warning, info, live, destructive">
 				{() => (
 					<div className="flex w-full flex-col gap-3">
 						<Callout
@@ -473,6 +618,7 @@ export function StoriesPage() {
 							description="Choose an AI service and Steno writes a summary and tasks for every meeting. Only the transcript text is sent."
 							icon={<SparklesIcon aria-hidden="true" />}
 							title="Summaries are off."
+							variant="warning"
 						/>
 						<Callout
 							description="Steno keeps recording while you switch apps."
@@ -491,21 +637,43 @@ export function StoriesPage() {
 							title="A new recording arrived."
 							variant="live"
 						/>
+						<Callout
+							actions={
+								<Button size="sm" variant="outline">
+									Try again
+								</Button>
+							}
+							description="The export folder is no longer reachable."
+							icon={<CircleAlertIcon aria-hidden="true" />}
+							title="Export failed."
+							variant="destructive"
+						/>
 					</div>
 				)}
 			</ThemePair>
 
-			<ThemePair title="ScrollArea">
+			<ThemePair title="ScrollArea: plain, and with the top fade">
 				{() => (
-					<Card className="h-32 w-full overflow-hidden">
-						<ScrollArea className="h-full">
-							<div className="flex flex-col gap-2 p-3 text-muted-foreground">
-								{scrollLines.map((line) => (
-									<div key={line}>{line}</div>
-								))}
-							</div>
-						</ScrollArea>
-					</Card>
+					<>
+						<Card className="h-32 flex-1 overflow-hidden">
+							<ScrollArea className="h-full">
+								<div className="flex flex-col gap-2 p-3 text-muted-foreground">
+									{scrollLines.map((line) => (
+										<div key={line}>{line}</div>
+									))}
+								</div>
+							</ScrollArea>
+						</Card>
+						<Card className="h-32 flex-1 overflow-hidden">
+							<ScrollArea className="h-full" fade>
+								<div className="flex flex-col gap-2 p-3 text-muted-foreground">
+									{scrollLines.map((line) => (
+										<div key={line}>{line}</div>
+									))}
+								</div>
+							</ScrollArea>
+						</Card>
+					</>
 				)}
 			</ThemePair>
 
@@ -531,10 +699,17 @@ export function StoriesPage() {
 							label="Folder"
 						/>
 						<FormRow
-							control={<Badge variant="live">Allowed</Badge>}
+							control={<Badge variant="success">Allowed</Badge>}
 							icon={<CheckCircle2Icon aria-hidden="true" />}
 							label="Microphone"
-							tone="primary"
+							tone="success"
+						/>
+						<FormRow
+							control={<Badge variant="warning">Not allowed</Badge>}
+							description="Allow it in System Settings to record."
+							icon={<CircleAlertIcon aria-hidden="true" />}
+							label="Screen and system audio"
+							tone="warning"
 						/>
 						<FormRow
 							control={<FormValue variant="mono">35%</FormValue>}
@@ -546,6 +721,17 @@ export function StoriesPage() {
 						<FormRow
 							control={<Switch aria-label="Keep" defaultChecked />}
 							label="Open Steno at login"
+						/>
+						<FormRow
+							control={<FormValue variant="faint">Not set up</FormValue>}
+							label={
+								<>
+									Summaries
+									<Badge size="sm" variant="secondary">
+										Beta
+									</Badge>
+								</>
+							}
 						/>
 					</FormCard>
 				)}
@@ -571,6 +757,71 @@ export function StoriesPage() {
 							</SidebarRow>
 						</div>
 					</>
+				)}
+			</ThemePair>
+
+			<ThemePair title="HeaderRow and Breadcrumb: md inset, then sm">
+				{() => (
+					<div className="flex w-full flex-col gap-2">
+						<Card className="w-full" padding="none">
+							<HeaderRow>
+								<Breadcrumb
+									items={["Meetings", "Strategie", "Produktstrategie 90/10"]}
+								/>
+								<Button size="sm" variant="outline">
+									<ShareIcon aria-hidden="true" />
+									Export
+								</Button>
+								<Button aria-label="More" size="icon-sm" variant="ghost">
+									<MoreHorizontalIcon aria-hidden="true" />
+								</Button>
+							</HeaderRow>
+						</Card>
+						<Card className="w-full" padding="none">
+							<HeaderRow inset="sm">
+								<Breadcrumb items={["Settings"]} />
+								<Button aria-label="Add" size="icon-sm" variant="ghost">
+									<PlusIcon aria-hidden="true" />
+								</Button>
+							</HeaderRow>
+						</Card>
+					</div>
+				)}
+			</ThemePair>
+
+			<ThemePair title="EmptyState: md, then lg with a warning">
+				{() => (
+					<div className="flex w-full flex-col gap-2">
+						<Card className="w-full" padding="none">
+							<EmptyState
+								action={
+									<Button size="sm" variant="outline">
+										<RecordMark />
+										Record
+									</Button>
+								}
+								body="Start a recording and the meeting shows up here."
+								icon={<InboxIcon aria-hidden="true" />}
+								id="stories-empty-md"
+								title="No meetings yet"
+							/>
+						</Card>
+						<Card className="w-full" padding="none">
+							<EmptyState
+								action={
+									<Button size="sm" variant="outline">
+										Fix in System Settings
+									</Button>
+								}
+								body="Allow the microphone in System Settings to record."
+								icon={<MicOffIcon aria-hidden="true" />}
+								id="stories-empty-lg"
+								size="lg"
+								title="Steno can't hear anything"
+								variant="warning"
+							/>
+						</Card>
+					</div>
 				)}
 			</ThemePair>
 

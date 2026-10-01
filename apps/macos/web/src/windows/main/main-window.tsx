@@ -14,7 +14,7 @@ export interface MainWindowProps {
 }
 
 /**
- * The main window: sidebar (236), meeting list (320) and the reading
+ * The main window: sidebar (256), meeting list (300) and the reading
  * column. Tells the host the page is ready once and reports the window size
  * after a resize settles. A deep link to a meeting is the host's to follow:
  * it selects the meeting and the page shows `list.selection`.
@@ -47,7 +47,7 @@ export function MainWindow({
 
 	return (
 		<div
-			className="grid h-full min-h-0 grid-cols-[236px_320px_minmax(0,1fr)] overflow-hidden bg-background text-foreground"
+			className="grid h-full min-h-0 grid-cols-[256px_300px_minmax(0,1fr)] overflow-hidden bg-background text-foreground"
 			data-testid="main-window"
 		>
 			<Sidebar />

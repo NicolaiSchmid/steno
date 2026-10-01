@@ -124,6 +124,7 @@ export function ExportSection() {
 					<FormRow
 						control={
 							<DraftField
+								className="w-40"
 								label="People folder"
 								onCommit={(peopleFolder) => update({ peopleFolder })}
 								placeholder="People"
@@ -136,6 +137,7 @@ export function ExportSection() {
 					<FormRow
 						control={
 							<DraftField
+								className="w-40"
 								label="Tag for tasks"
 								onCommit={(taskTag) => update({ taskTag })}
 								placeholder="task"

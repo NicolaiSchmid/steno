@@ -2,15 +2,15 @@ import { cva, type VariantProps } from "class-variance-authority";
 import type { ComponentProps } from "react";
 import { cn } from "@/lib/cn";
 
+/** A key hint: a filled 20 px chip without a border, set in the UI font. */
 export const kbdVariants = cva(
-	"inline-flex shrink-0 items-center font-mono text-[11px] text-faint leading-none",
+	"inline-flex shrink-0 select-none items-center justify-center gap-1 font-medium font-sans text-muted-foreground text-xs leading-none",
 	{
 		variants: {
 			variant: {
-				/** In a field: a keycap with a border on the muted surface. */
-				key: "h-[18px] rounded-[5px] border border-border bg-muted px-[5px]",
-				/** In a menu row: bare text at the trailing edge. */
-				plain: "",
+				key: "h-5 min-w-5 rounded-[4px] bg-accent px-1",
+				/** Bare text at the trailing edge of a menu row. */
+				plain: "tracking-widest",
 			},
 		},
 		defaultVariants: { variant: "key" },
