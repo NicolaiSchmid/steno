@@ -232,35 +232,69 @@ final class LaunchSmokeTests: XCTestCase {
     add(screenshot)
   }
 
+  /// Page 1's intro sentence (`permissions-page.tsx`) and page 2's heading
+  /// (`setup-page.tsx`): what the onboarding pages are found by.
+  private static let onboardingIntro =
+    "A few permissions, then where summaries come from and where meetings go. Audio never leaves this Mac."
+  private static let setupTitle = "Summaries and export"
+
+  /// The onboarding window: `onboarding-window`, the identifier
+  /// `UITestWindowMarker` gives its `NSWindow`.
+  private func onboardingWindow(in app: XCUIApplication) -> XCUIElement {
+    app.windows["onboarding-window"].firstMatch
+  }
+
+  /// A text the page shows, by its first words and whatever element WebKit
+  /// exposes it as: a static text for a paragraph or a row title, a heading
+  /// for the H1. A row title is matched by its start since the "Optional"
+  /// badge beside it may share its accessibility element.
+  private func pageText(startingWith text: String, in window: XCUIElement) -> XCUIElement {
+    window.descendants(matching: .any)
+      .matching(NSPredicate(format: "label BEGINSWITH %@", text)).firstMatch
+  }
+
+  /// The onboarding window hosts the web page: page 1 renders its intro
+  /// inside the window and the four permission rows; Later reaches page 2
+  /// with its heading, the two setup rows and Back and Finish. The buttons
+  /// are found by their labels, the one thing WebKit exposes; the rows'
+  /// states and actions are the web tests' evidence.
   func testOnboardingWindowShowsBothPages() throws {
     let app = launch(["-steno-ui-testing", "-steno-show-onboarding"])
-
-    let intro = app.staticTexts["onboarding-intro"].firstMatch
-    XCTAssertTrue(intro.waitForExistence(timeout: 20), "the onboarding window did not open")
-    XCTAssertFalse(((intro.value as? String) ?? "").isEmpty, "the subtitle is empty")
-    let window = app.windows.containing(.staticText, identifier: "onboarding-intro").firstMatch
-    XCTAssertLessThanOrEqual(
-      intro.frame.maxX, window.frame.maxX, "the subtitle runs past the window instead of wrapping")
-    XCTAssertTrue(app.staticTexts["onboarding-step"].firstMatch.exists, "no step caption")
-    XCTAssertTrue(app.staticTexts["onboarding-title"].firstMatch.exists, "no title")
-    for kind in ["microphone", "systemAudio", "calendar", "localNetwork"] {
+    let window = onboardingWindow(in: app)
+    XCTAssertTrue(window.waitForExistence(timeout: 20), "the onboarding window did not open")
+    XCTAssertTrue(
+      window.webViews.firstMatch.waitForExistence(timeout: 20),
+      "no web view in the onboarding window")
+    let intro = pageText(startingWith: Self.onboardingIntro, in: window)
+    XCTAssertTrue(intro.waitForExistence(timeout: 20), "page 1 did not render its intro")
+    XCTAssertTrue(
+      window.frame.contains(intro.frame),
+      "the intro \(intro.frame) runs past the window \(window.frame) instead of wrapping")
+    for title in ["Microphone", "System audio", "Calendar", "Local network"] {
       XCTAssertTrue(
-        app.staticTexts["onboarding-step-\(kind)"].firstMatch.exists, "row \(kind) missing")
+        pageText(startingWith: title, in: window).waitForExistence(timeout: 5),
+        "row \(title) missing")
     }
     attachScreenshot(named: "onboarding-page-1.png")
 
-    let later = app.buttons["onboarding-later"].firstMatch
+    let later = window.buttons["Later"].firstMatch
     XCTAssertTrue(later.waitForExistence(timeout: 5), "Later is missing on page 1")
     later.click()
     XCTAssertTrue(
-      app.buttons["onboarding-finish"].firstMatch.waitForExistence(timeout: 10),
+      window.buttons["Finish"].firstMatch.waitForExistence(timeout: 10),
       "Later did not reach page 2")
     XCTAssertTrue(
-      waitUntil(timeout: 5) { !app.staticTexts["onboarding-step-microphone"].firstMatch.exists },
+      pageText(startingWith: Self.setupTitle, in: window).waitForExistence(timeout: 5),
+      "page 2 has no heading")
+    XCTAssertTrue(
+      waitUntil(timeout: 5) { !pageText(startingWith: "Microphone", in: window).exists },
       "page 1 rows are still showing under page 2")
-    XCTAssertTrue(app.buttons["onboarding-back"].firstMatch.exists)
-    XCTAssertTrue(app.staticTexts["onboarding-setup-summaries"].firstMatch.exists)
-    XCTAssertTrue(app.staticTexts["onboarding-setup-vault"].firstMatch.exists)
+    XCTAssertTrue(window.buttons["Back"].firstMatch.exists)
+    XCTAssertTrue(
+      pageText(startingWith: "Steno sends the transcript text, never audio", in: window).exists,
+      "the Summaries row is missing")
+    XCTAssertTrue(
+      pageText(startingWith: "Obsidian vault", in: window).exists, "the vault row is missing")
     attachScreenshot(named: "onboarding-page-2.png")
   }
 
@@ -328,24 +362,30 @@ final class LaunchSmokeTests: XCTestCase {
         "the recording started from the window shows no bubble")
     }
 
+    // The onboarding window is `onboarding-window` (`UITestWindowMarker`);
+    // its pages are web content, found by their words as in
+    // `testOnboardingWindowShowsBothPages`.
     let onboarding = launched(["-steno-show-onboarding"])
     capture("onboarding", "page-1", in: onboarding) { app in
+      let window = onboardingWindow(in: app)
+      XCTAssertTrue(window.waitForExistence(timeout: 20), "the onboarding window did not open")
       XCTAssertTrue(
-        app.staticTexts["onboarding-intro"].firstMatch.waitForExistence(timeout: 20),
-        "the onboarding window did not open")
+        pageText(startingWith: Self.onboardingIntro, in: window).waitForExistence(timeout: 20),
+        "page 1 did not render its intro")
       XCTAssertTrue(
-        app.staticTexts["onboarding-step-microphone"].firstMatch.waitForExistence(timeout: 5),
+        pageText(startingWith: "Microphone", in: window).waitForExistence(timeout: 5),
         "page 1 rows are missing")
     }
     capture("onboarding", "page-2", in: onboarding) { app in
-      let later = app.buttons["onboarding-later"].firstMatch
+      let window = onboardingWindow(in: app)
+      let later = window.buttons["Later"].firstMatch
       XCTAssertTrue(later.waitForExistence(timeout: 5), "Later is missing")
       later.click()
       XCTAssertTrue(
-        app.buttons["onboarding-finish"].firstMatch.waitForExistence(timeout: 10),
+        window.buttons["Finish"].firstMatch.waitForExistence(timeout: 10),
         "Later did not reach page 2")
       XCTAssertTrue(
-        app.staticTexts["onboarding-setup-summaries"].firstMatch.waitForExistence(timeout: 5),
+        pageText(startingWith: "Obsidian vault", in: window).waitForExistence(timeout: 5),
         "page 2 rows are missing")
     }
 

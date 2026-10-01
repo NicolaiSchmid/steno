@@ -43,14 +43,21 @@ struct StenoApp: App {
     .defaultSize(Self.mainWindowSize)
     .commands { AppCommands(bootstrap: bootstrap) }
 
-    // No title bar: the H1 inside is the window's one title.
+    // No title bar: the page's H1 is the window's one title. The page is the
+    // whole content at one fixed size (plan Decision 1).
     Window("Welcome to Steno", id: "onboarding") {
       RootView(bootstrap: bootstrap) { controller in
-        OnboardingWindowContent(controller: controller)
+        OnboardingWindow(controller: controller)
+      }
+      .background {
+        if AppBootstrap.isUITesting {
+          UITestWindowMarker(identifier: UITestWindowMarker.onboardingWindow)
+        }
       }
     }
     .windowStyle(.hiddenTitleBar)
     .windowResizability(.contentSize)
+    .defaultSize(OnboardingWindow.size)
 
     MenuBarExtra {
       RootView(bootstrap: bootstrap) { controller in
@@ -186,8 +193,8 @@ extension View {
 }
 
 /// Marks a window with an accessibility identifier for the smoke tests,
-/// which have no title bar to match on (`main-window`, `settings-window`),
-/// and, for the main window, applies `-steno-window=WxH` to it on the turn
+/// which have no title bar to match on (`main-window`, `settings-window`,
+/// `onboarding-window`), and, for the main window, applies `-steno-window=WxH` to it on the turn
 /// after its `NSWindow` exists, and once more a second later: SwiftUI
 /// restores the frame a previous launch saved over `defaultSize`, and the
 /// smoke suite launches the app many times per run. Zero-sized, in the
@@ -203,6 +210,8 @@ struct UITestWindowMarker: NSViewRepresentable {
   static let mainWindow = "main-window"
   /// The Settings window's accessibility identifier under UI testing.
   static let settingsWindow = "settings-window"
+  /// The onboarding window's accessibility identifier under UI testing.
+  static let onboardingWindow = "onboarding-window"
 
   let identifier: String
   /// Whether `-steno-window=WxH` applies to this window.
@@ -336,17 +345,6 @@ struct OnboardingOpener: ViewModifier {
         openWindow(id: "onboarding")
       }
     }
-  }
-}
-
-struct OnboardingWindowContent: View {
-  let controller: AppController
-  @Environment(\.dismissWindow) private var dismissWindow
-
-  var body: some View {
-    OnboardingView(
-      model: OnboardingViewModel(environment: controller.environment),
-      onFinished: { dismissWindow(id: "onboarding") })
   }
 }
 
