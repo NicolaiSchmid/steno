@@ -80,14 +80,23 @@ final class SettingsBridge: BridgeHost {
   func run() async {
     start()
     await load()
-    // The phone observers run for the window's lifetime; cancelling the
-    // window's task cancels them and ends this.
+    // Lives until the window's task is cancelled. The phone observers run
+    // alongside, but they return at once without a handover service, and
+    // the page may become ready at any time, so the host's lifetime is the
+    // window's, not theirs.
     let phones = self.phones
     await withTaskGroup(of: Void.self) { group in
       group.addTask { await phones.observe() }
       group.addTask { await phones.observeReceipts() }
+      group.addTask { await Self.untilCancelled() }
     }
     stop()
+  }
+
+  private static func untilCancelled() async {
+    while !Task.isCancelled {
+      try? await Task.sleep(for: .seconds(3_600))
+    }
   }
 
   /// Every section's `load()`, then the sidebar subtitles.
@@ -139,8 +148,12 @@ final class SettingsBridge: BridgeHost {
     events.emit(topic, snapshot: snapshot)
     // A deep link is consumed by the publish that carries it, as the main
     // window consumes its meeting request: the page shows the section from
-    // this snapshot and the next `app` snapshot carries nil.
-    if topic == .app { controller.requestedSettingsSection = nil }
+    // this snapshot and the next `app` snapshot carries nil. Only when one
+    // is set: the clear is itself an observed change that republishes
+    // `app`, and clearing nil again would republish without end.
+    if topic == .app, controller.requestedSettingsSection != nil {
+      controller.requestedSettingsSection = nil
+    }
   }
 
   /// The topic's snapshot from the view models as they stand; nil for the
