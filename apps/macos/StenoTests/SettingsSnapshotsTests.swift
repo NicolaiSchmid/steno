@@ -443,4 +443,19 @@ private func request(_ id: String, _ method: String, _ params: Any = NSNull()) -
     await eventually("the same section again is a new snapshot") { carrying() == 2 }
     #expect(host.controller.requestedSettingsSection == nil)
   }
+
+  /// `run()` outlives its phone observers: without a handover service they
+  /// return at once, and the page that becomes ready afterwards must still
+  /// get its snapshots.
+  @Test func runStaysAliveWithoutAHandoverService() async throws {
+    let host = bridge(try await TestSupport.environment(seed: false))
+    let sink = RecordingSink()
+    host.attach(sink)
+    let running = Task { await host.run() }
+    defer { running.cancel() }
+    try await Task.sleep(for: .milliseconds(200))
+    _ = await BridgeDispatcher.dispatch(request("r0", "page.ready"), host: host)
+    #expect(sink.last(.app) != nil, "the host still publishes after its observers returned")
+    #expect(sink.last(.settingsGeneral) != nil)
+  }
 }

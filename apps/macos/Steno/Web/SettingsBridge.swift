@@ -80,14 +80,23 @@ final class SettingsBridge: BridgeHost {
   func run() async {
     start()
     await load()
-    // The phone observers run for the window's lifetime; cancelling the
-    // window's task cancels them and ends this.
+    // Lives until the window's task is cancelled. The phone observers run
+    // alongside, but they return at once without a handover service, and
+    // the page may become ready at any time, so the host's lifetime is the
+    // window's, not theirs.
     let phones = self.phones
     await withTaskGroup(of: Void.self) { group in
       group.addTask { await phones.observe() }
       group.addTask { await phones.observeReceipts() }
+      group.addTask { await Self.untilCancelled() }
     }
     stop()
+  }
+
+  private static func untilCancelled() async {
+    while !Task.isCancelled {
+      try? await Task.sleep(for: .seconds(3_600))
+    }
   }
 
   /// Every section's `load()`, then the sidebar subtitles.
