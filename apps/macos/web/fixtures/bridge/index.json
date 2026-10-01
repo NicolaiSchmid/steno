@@ -41,7 +41,6 @@
   "params.settings.summaries.update",
   "params.settings.export.update",
   "params.deviceID",
-  "params.settings.showSection",
   "params.onboarding.setupStep",
   "params.system.openURL",
   "params.window",

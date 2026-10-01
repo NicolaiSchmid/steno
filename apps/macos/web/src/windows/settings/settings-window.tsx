@@ -7,13 +7,13 @@ import {
 	UploadIcon,
 } from "lucide-react";
 import { type ReactNode, useEffect, useRef, useState } from "react";
-import { send, useBridge, useSnapshot } from "@/bridge/hooks";
+import { send, useBridge, usePageReady, useSnapshot } from "@/bridge/hooks";
 import { ScrollArea, SidebarRow } from "@/components/ui";
 import { ExportSection } from "./export-section";
 import { GeneralSection } from "./general-section";
 import { PhoneSection } from "./iphone-section";
 import { RecordingSection } from "./recording-section";
-import { SECTIONS, type SectionId } from "./sections";
+import { SECTIONS, type SectionId, type SectionInfo } from "./sections";
 import { SummariesSection } from "./summaries-section";
 import { TranscriptionSection } from "./transcription-section";
 
@@ -34,30 +34,15 @@ export interface SettingsWindowProps {
 /**
  * The Settings window: a 200 pt sidebar of the six sections, each with the
  * one-line status its snapshot carries, and the selected section's form
- * cards. Tells the host the page is ready once, and which section is shown
- * whenever that changes, so the host refreshes the subtitles and clears a
- * deep link once it has landed. A deep link arrives as the `app` snapshot's
- * `requestedSettingsSection` and wins over the route.
+ * cards. Tells the host the page is ready once. A deep link arrives as the
+ * `app` snapshot's `requestedSettingsSection`, consumed by the host with
+ * that publish, and wins over the route.
  */
 export function SettingsWindow({ section: routeSection }: SettingsWindowProps) {
 	const client = useBridge();
 	const app = useSnapshot("app");
-	const general = useSnapshot("settings.general");
-	const recording = useSnapshot("settings.recording");
-	const transcription = useSnapshot("settings.transcription");
-	const summaries = useSnapshot("settings.summaries");
-	const exportSettings = useSnapshot("settings.export");
-	const phone = useSnapshot("settings.iphone");
 	const [section, setSection] = useState<SectionId>(routeSection ?? "general");
-	const readySent = useRef(false);
-
-	useEffect(() => {
-		if (readySent.current) {
-			return;
-		}
-		readySent.current = true;
-		send(client, "page.ready");
-	}, [client]);
+	usePageReady(client);
 
 	useEffect(() => {
 		if (routeSection) {
@@ -65,29 +50,13 @@ export function SettingsWindow({ section: routeSection }: SettingsWindowProps) {
 		}
 	}, [routeSection]);
 
-	// Keyed on the snapshot, not the section string: the host republishes
-	// `app` for every deep link, including one to the section already shown
-	// or the same section twice, and each must be shown and reported so the
-	// host clears its request.
+	// Keyed on the snapshot, not the section string: the host publishes
+	// `app` once per deep link and clears the request with that publish, so
+	// the same section twice arrives as two snapshots and each is shown.
 	useEffect(() => {
 		const requested = app?.requestedSettingsSection;
-		if (!requested) return;
-		setSection(requested);
-		send(client, "settings.showSection", { section: requested });
-	}, [app, client]);
-
-	useEffect(() => {
-		send(client, "settings.showSection", { section });
-	}, [client, section]);
-
-	const subtitles: Record<SectionId, string | undefined> = {
-		general: general?.subtitle,
-		recording: recording?.subtitle,
-		transcription: transcription?.subtitle,
-		summaries: summaries?.subtitle,
-		export: exportSettings?.subtitle,
-		iphone: phone?.subtitle,
-	};
+		if (requested) setSection(requested);
+	}, [app]);
 
 	let page: ReactNode;
 	switch (section) {
@@ -121,21 +90,41 @@ export function SettingsWindow({ section: routeSection }: SettingsWindowProps) {
 				className="surface-grain flex min-h-0 flex-col gap-0.5 border-border border-r bg-sidebar px-2 pt-[52px] pb-2"
 			>
 				{SECTIONS.map((info) => (
-					<SidebarRow
+					<SectionRow
 						active={info.id === section}
-						data-testid={`settings-${info.id}`}
-						icon={ICONS[info.id]}
+						info={info}
 						key={info.id}
-						onClick={() => setSection(info.id)}
-						subtitle={subtitles[info.id] ?? "…"}
-					>
-						{info.title}
-					</SidebarRow>
+						onSelect={() => setSection(info.id)}
+					/>
 				))}
 			</nav>
 			<ScrollArea className="min-h-0">
 				<div className="mx-auto max-w-[640px]">{page}</div>
 			</ScrollArea>
 		</div>
+	);
+}
+
+/** One sidebar row: the section's title over the subtitle its own snapshot carries. */
+function SectionRow({
+	info,
+	active,
+	onSelect,
+}: {
+	info: SectionInfo;
+	active: boolean;
+	onSelect: () => void;
+}) {
+	const snapshot = useSnapshot(info.topic);
+	return (
+		<SidebarRow
+			active={active}
+			data-testid={`settings-${info.id}`}
+			icon={ICONS[info.id]}
+			onClick={onSelect}
+			subtitle={snapshot?.subtitle ?? "…"}
+		>
+			{info.title}
+		</SidebarRow>
 	);
 }

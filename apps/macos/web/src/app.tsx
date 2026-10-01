@@ -53,7 +53,6 @@ function usePrefersDark(): boolean {
 	useEffect(() => {
 		if (!query) return;
 		const update = () => setDark(query.matches);
-		update();
 		query.addEventListener("change", update);
 		return () => query.removeEventListener("change", update);
 	}, [query]);

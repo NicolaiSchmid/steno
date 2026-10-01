@@ -24,7 +24,7 @@ public enum BridgeSamples {
   // MARK: Snapshots
 
   public static let app = AppSnapshot(
-    version: "0.10.0", appearance: .light,
+    version: "0.10.0",
     setupBanner: .init(
       title: "Summaries are off.",
       body:
@@ -424,7 +424,6 @@ extension BridgeSamples {
     BridgeFixture(
       "params.settings.export.update", ExportUpdateParams(includeAudio: true, taskTag: "#todo")),
     BridgeFixture("params.deviceID", DeviceIDParams(deviceID: phoneID)),
-    BridgeFixture("params.settings.showSection", ShowSectionParams(section: .recording)),
     BridgeFixture("params.onboarding.setupStep", SetupStepParams(step: .vault)),
     BridgeFixture(
       "params.system.openURL", OpenURLParams(url: "https://github.com/NicolaiSchmid/steno")),

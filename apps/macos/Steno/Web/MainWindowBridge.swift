@@ -28,11 +28,6 @@ final class MainWindowBridge: BridgeHost {
   let controller: AppController
   let list: MeetingListViewModel
   private(set) var detail: MeetingDetailViewModel?
-  /// The window's appearance as `MainWindow` reads it from the environment;
-  /// part of the `app` snapshot.
-  var appearance: BridgeAppearance = .light {
-    didSet { if appearance != oldValue { schedule(.app) } }
-  }
   var openWindow: OpenWindow = { _ in }
 
   private let confirm: Confirm
@@ -171,7 +166,7 @@ final class MainWindowBridge: BridgeHost {
   private func snapshot(for topic: BridgeTopic) -> (any Encodable)? {
     switch topic {
     case .app:
-      return AppSnapshot(controller: controller, appearance: appearance, hasMeetings: hasMeetings)
+      return AppSnapshot(controller: controller, hasMeetings: hasMeetings)
     case .recording:
       return RecordingSnapshot(recorder: controller.recorder)
     case .progress:

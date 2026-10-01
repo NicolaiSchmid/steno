@@ -7,13 +7,10 @@ import { callsTo, createBridgeHarness, renderWithBridge } from "@/test/bridge";
 import { SettingsWindow } from "./settings-window";
 
 describe("SettingsWindow", () => {
-	it("tells the host the page is ready once and which section it shows", async () => {
+	it("tells the host the page is ready once and opens on General", async () => {
 		const harness = await createBridgeHarness();
 		renderWithBridge(<SettingsWindow />, harness);
 		expect(callsTo(harness.transport, "page.ready")).toHaveLength(1);
-		expect(callsTo(harness.transport, "settings.showSection")).toEqual([
-			{ method: "settings.showSection", params: { section: "general" } },
-		]);
 		expect(screen.getByTestId("section-title-general")).toHaveTextContent(
 			"General",
 		);
@@ -42,17 +39,13 @@ describe("SettingsWindow", () => {
 		);
 	});
 
-	it("switches sections from the sidebar and reports each", async () => {
+	it("switches sections from the sidebar", async () => {
 		const user = userEvent.setup();
 		const harness = await createBridgeHarness();
 		renderWithBridge(<SettingsWindow />, harness);
 		await user.click(screen.getByTestId("settings-recording"));
 		expect(screen.getByTestId("section-title-recording")).toBeInTheDocument();
 		expect(screen.queryByTestId("section-general")).not.toBeInTheDocument();
-		expect(callsTo(harness.transport, "settings.showSection").at(-1)).toEqual({
-			method: "settings.showSection",
-			params: { section: "recording" },
-		});
 	});
 
 	it("opens on the route's section", async () => {
@@ -72,10 +65,6 @@ describe("SettingsWindow", () => {
 			} satisfies AppSnapshot);
 		});
 		expect(screen.getByTestId("section-title-summaries")).toBeInTheDocument();
-		expect(callsTo(harness.transport, "settings.showSection").at(-1)).toEqual({
-			method: "settings.showSection",
-			params: { section: "summaries" },
-		});
 		// The host clears the request; the page keeps its selection.
 		act(() => {
 			harness.transport.emit("app", app);
@@ -83,36 +72,28 @@ describe("SettingsWindow", () => {
 		expect(screen.getByTestId("section-title-summaries")).toBeInTheDocument();
 	});
 
-	it("reports a deep link to the section already shown, and the same link twice", async () => {
+	it("follows the same deep link twice, after the user moved away", async () => {
+		const user = userEvent.setup();
 		const harness = await createBridgeHarness();
 		renderWithBridge(<SettingsWindow />, harness);
 		const app = (await loadFixtureSnapshots()).app as AppSnapshot;
-		const before = callsTo(harness.transport, "settings.showSection").length;
+		const toRecording = {
+			...app,
+			requestedSettingsSection: "recording",
+		} satisfies AppSnapshot;
 		act(() => {
-			harness.transport.emit("app", {
-				...app,
-				requestedSettingsSection: "general",
-			} satisfies AppSnapshot);
+			harness.transport.emit("app", toRecording);
 		});
-		expect(callsTo(harness.transport, "settings.showSection")).toHaveLength(
-			before + 1,
-		);
+		expect(screen.getByTestId("section-title-recording")).toBeInTheDocument();
 		act(() => {
 			harness.transport.emit("app", app);
 		});
+		await user.click(screen.getByTestId("settings-general"));
+		expect(screen.getByTestId("section-title-general")).toBeInTheDocument();
+		// The host publishes the same request again: a new snapshot, shown again.
 		act(() => {
-			harness.transport.emit("app", {
-				...app,
-				requestedSettingsSection: "general",
-			} satisfies AppSnapshot);
+			harness.transport.emit("app", { ...toRecording });
 		});
-		expect(callsTo(harness.transport, "settings.showSection")).toHaveLength(
-			before + 2,
-		);
-		expect(
-			callsTo(harness.transport, "settings.showSection").at(-1)?.params,
-		).toEqual({
-			section: "general",
-		});
+		expect(screen.getByTestId("section-title-recording")).toBeInTheDocument();
 	});
 });

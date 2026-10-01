@@ -66,12 +66,11 @@ enum SettingsSnapshots {
       source: "https://github.com/sbooth/CSpeex"),
   ]
 
-  static var acknowledgements: [GeneralSettingsSnapshot.Acknowledgement] {
+  static let acknowledgements: [GeneralSettingsSnapshot.Acknowledgement] =
     ModelAsset.allCases.map {
       GeneralSettingsSnapshot.Acknowledgement(
         group: .speechModels, name: $0.displayName, licence: $0.licence, source: $0.sourceRepo)
     } + libraries
-  }
 
   /// Bytes received so far: whole chunks, never past the declared size.
   static func receivedBytes(_ receipt: HandoverReceipt) -> Int64 {
@@ -269,8 +268,8 @@ extension PhoneSettingsSnapshot {
       }
     }
     var pairing: Pairing?
-    if let payload = phones.pairing, let png = phones.qrPNG {
-      pairing = Pairing(expiresAt: payload.expiresAt, qrPNGBase64: png.base64EncodedString())
+    if let payload = phones.pairing, let png = phones.qrPNGBase64 {
+      pairing = Pairing(expiresAt: payload.expiresAt, qrPNGBase64: png)
     }
     self.init(
       subtitle: subtitle, macID: phones.macID,

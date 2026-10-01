@@ -111,9 +111,6 @@ public enum BridgeMethod: String, Codable, Sendable, CaseIterable {
   case settingsPhoneBeginPairing = "settings.iphone.beginPairing"
   case settingsPhoneCancelPairing = "settings.iphone.cancelPairing"
   case settingsPhoneRevoke = "settings.iphone.revoke"
-  /// `ShowSectionParams`: the page shows a section; the host refreshes the
-  /// sidebar subtitles and clears a matching `requestedSettingsSection`.
-  case settingsShowSection = "settings.showSection"
 
   case onboardingRequest = "onboarding.request"
   case onboardingSkip = "onboarding.skip"
@@ -190,11 +187,6 @@ public struct BridgeEvent: Codable, Sendable, Equatable {
 }
 
 // MARK: - Shared vocabulary
-
-public enum BridgeAppearance: String, Codable, Sendable, CaseIterable {
-  case light
-  case dark
-}
 
 public enum BridgePermissionKind: String, Codable, Sendable, CaseIterable {
   case microphone

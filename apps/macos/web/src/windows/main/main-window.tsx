@@ -1,5 +1,5 @@
 import { useEffect, useRef } from "react";
-import { send, useBridge } from "@/bridge/hooks";
+import { send, useBridge, usePageReady } from "@/bridge/hooks";
 import { MeetingDetail } from "./meeting-detail";
 import { MeetingList } from "./meeting-list";
 import { Sidebar } from "./sidebar";
@@ -24,15 +24,7 @@ export function MainWindow({
 	pickerOpen = false,
 }: MainWindowProps) {
 	const client = useBridge();
-	const readySent = useRef(false);
-
-	useEffect(() => {
-		if (readySent.current) {
-			return;
-		}
-		readySent.current = true;
-		send(client, "page.ready");
-	}, [client]);
+	usePageReady(client);
 
 	useEffect(() => {
 		let timer: ReturnType<typeof setTimeout> | undefined;

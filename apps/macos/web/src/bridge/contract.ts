@@ -112,7 +112,6 @@ export const bridgeMethods = [
 	"settings.iphone.beginPairing",
 	"settings.iphone.cancelPairing",
 	"settings.iphone.revoke",
-	"settings.showSection",
 	"onboarding.request",
 	"onboarding.skip",
 	"onboarding.advance",
@@ -130,7 +129,6 @@ export const bridgeMethods = [
 ] as const;
 export type BridgeMethod = (typeof bridgeMethods)[number];
 
-export const appearance = z.enum(["light", "dark"]);
 export const permissionKind = z.enum([
 	"microphone",
 	"systemAudio",
@@ -205,7 +203,6 @@ export const bridgeEvent = z
 export const appSnapshot = z
 	.object({
 		version: z.string(),
-		appearance,
 		setupBanner: z
 			.object({
 				title: z.string(),
@@ -782,9 +779,6 @@ export const exportUpdateParams = z
 	})
 	.strict();
 export const deviceIDParams = z.object({ deviceID: uuid }).strict();
-export const showSectionParams = z
-	.object({ section: settingsSection })
-	.strict();
 export const setupStepParams = z
 	.object({ step: z.enum(["summaries", "vault"]) })
 	.strict();
@@ -864,7 +858,6 @@ export const methodParams = {
 	"settings.iphone.beginPairing": null,
 	"settings.iphone.cancelPairing": null,
 	"settings.iphone.revoke": deviceIDParams,
-	"settings.showSection": showSectionParams,
 	"onboarding.request": permissionKindParams,
 	"onboarding.skip": permissionKindParams,
 	"onboarding.advance": null,
@@ -938,7 +931,6 @@ export const fixtureSchemas = {
 	"params.settings.summaries.update": summariesUpdateParams,
 	"params.settings.export.update": exportUpdateParams,
 	"params.deviceID": deviceIDParams,
-	"params.settings.showSection": showSectionParams,
 	"params.onboarding.setupStep": setupStepParams,
 	"params.system.openURL": openURLParams,
 	"params.window": windowParams,

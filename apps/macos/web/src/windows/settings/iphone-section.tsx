@@ -28,7 +28,8 @@ function PairingCard({
 	pairing: NonNullable<PhoneSettingsSnapshot["pairing"]>;
 }) {
 	const client = useBridge();
-	const now = useNow(true);
+	// The expiry sentence changes by the minute; a 15 s tick is plenty.
+	const now = useNow(true, 15_000);
 	const expiry = pairingExpiryText(pairing.expiresAt, new Date(now));
 	return (
 		<Card

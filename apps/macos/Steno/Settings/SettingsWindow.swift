@@ -16,7 +16,6 @@ struct SettingsWindow: View {
 
   let controller: AppController
   @State private var bridge: SettingsBridge
-  @Environment(\.colorScheme) private var colorScheme
   @Environment(\.openWindow) private var openWindow
 
   init(controller: AppController) {
@@ -33,24 +32,9 @@ struct SettingsWindow: View {
     WebWindowView(route: "#/settings", host: bridge)
       .ignoresSafeArea()
       .frame(width: Self.size.width, height: Self.size.height)
-      .onChange(of: colorScheme, initial: true) { _, scheme in
-        bridge.appearance = scheme == .dark ? .dark : .light
-      }
       .task {
         bridge.openWindow = { [controller, openWindow] request in
-          switch request.window {
-          case .main:
-            if let meetingID = request.meetingID { controller.requestedMeetingID = meetingID }
-            openWindow(id: "main")
-            NSApp.activate()
-          case .settings:
-            if let section = request.section.flatMap({ SettingsSection(rawValue: $0.rawValue) }) {
-              controller.openSettings(section)
-            }
-          case .onboarding:
-            openWindow(id: "onboarding")
-            NSApp.activate()
-          }
+          openRequestedWindow(request, controller: controller, openWindow: openWindow)
         }
         await bridge.run()
       }

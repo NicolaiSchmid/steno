@@ -14,8 +14,9 @@ import StenoSpeech
 /// draw: an `NSOpenPanel`, answered with the chosen path or nil.
 ///
 /// The `app` topic is published too, for the deep link: the page selects
-/// `requestedSettingsSection` when it arrives and reports the section back
-/// through `settings.showSection`, which clears the request.
+/// `requestedSettingsSection` from the snapshot that carries it, and the
+/// publish itself clears the request, as the main window's does for a
+/// meeting.
 @MainActor
 final class SettingsBridge: BridgeHost {
   /// What the page asks the host to open; `SettingsWindow` installs the
@@ -33,11 +34,6 @@ final class SettingsBridge: BridgeHost {
   let llm: LLMSettingsViewModel
   let obsidian: ObsidianSettingsViewModel
   let phones: PhonesSettingsViewModel
-  /// The window's appearance as `SettingsWindow` reads it from the
-  /// environment; part of the `app` snapshot.
-  var appearance: BridgeAppearance = .light {
-    didSet { if appearance != oldValue { schedule(.app) } }
-  }
   var openWindow: OpenWindow = { _ in }
 
   private let chooseFolder: ChooseFolder
@@ -48,7 +44,6 @@ final class SettingsBridge: BridgeHost {
   /// True between `start()` and `stop()`.
   private var running = false
   private var pending: Set<BridgeTopic> = []
-  private var phoneTasks: [Task<Void, Never>] = []
   /// Polls the paired devices while a pairing code is shown.
   private var pairingPoll: Task<Void, Never>?
 
@@ -85,36 +80,32 @@ final class SettingsBridge: BridgeHost {
   func run() async {
     start()
     await load()
+    // The phone observers run for the window's lifetime; cancelling the
+    // window's task cancels them and ends this.
     let phones = self.phones
-    phoneTasks = [
-      Task { await phones.observe() },
-      Task { await phones.observeReceipts() },
-    ]
-    while !Task.isCancelled {
-      do {
-        try await Task.sleep(for: .seconds(3_600))
-      } catch {
-        break
-      }
+    await withTaskGroup(of: Void.self) { group in
+      group.addTask { await phones.observe() }
+      group.addTask { await phones.observeReceipts() }
     }
     stop()
   }
 
   /// Every section's `load()`, then the sidebar subtitles.
   func load() async {
-    await general.load()
-    await audio.load()
-    await speech.load()
-    await llm.load()
-    await obsidian.load()
-    await phones.load()
+    // Side by side: the folder walk, the keychain read and the device list
+    // are independent, and the window should not wait for them in turn.
+    async let generalLoad: Void = general.load()
+    async let audioLoad: Void = audio.load()
+    async let speechLoad: Void = speech.load()
+    async let llmLoad: Void = llm.load()
+    async let obsidianLoad: Void = obsidian.load()
+    async let phonesLoad: Void = phones.load()
+    _ = await (generalLoad, audioLoad, speechLoad, llmLoad, obsidianLoad, phonesLoad)
     await overview.refresh()
   }
 
   func stop() {
     running = false
-    for task in phoneTasks { task.cancel() }
-    phoneTasks = []
     pairingPoll?.cancel()
     pairingPoll = nil
   }
@@ -146,6 +137,10 @@ final class SettingsBridge: BridgeHost {
     }
     guard pageReady, let events, let snapshot else { return }
     events.emit(topic, snapshot: snapshot)
+    // A deep link is consumed by the publish that carries it, as the main
+    // window consumes its meeting request: the page shows the section from
+    // this snapshot and the next `app` snapshot carries nil.
+    if topic == .app { controller.requestedSettingsSection = nil }
   }
 
   /// The topic's snapshot from the view models as they stand; nil for the
@@ -153,7 +148,7 @@ final class SettingsBridge: BridgeHost {
   private func snapshot(for topic: BridgeTopic) -> (any Encodable)? {
     switch topic {
     case .app:
-      return AppSnapshot(controller: controller, appearance: appearance)
+      return AppSnapshot(controller: controller)
     case .settingsGeneral:
       return GeneralSettingsSnapshot(general: general, subtitle: subtitle(.general))
     case .settingsRecording:
@@ -211,14 +206,6 @@ final class SettingsBridge: BridgeHost {
     case .pageLayout:
       // Validated and dropped: the window has one size.
       _ = try request.params(PageLayoutParams.self)
-    case .settingsShowSection:
-      // The deep link is consumed once the page has shown its section, so a
-      // later request for the same section reads as a change again.
-      let section = try request.params(ShowSectionParams.self).section
-      if controller.requestedSettingsSection?.rawValue == section.rawValue {
-        controller.requestedSettingsSection = nil
-      }
-
     case .settingsGeneralSetLaunchAtLogin:
       let enabled = try request.params(SetBoolParams.self).value
       await general.setLaunchAtLogin(enabled)

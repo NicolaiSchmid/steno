@@ -3,11 +3,11 @@ import type { RecordingSettingsSnapshot } from "@/bridge/contract";
 import { Badge, Button, FormRow } from "@/components/ui";
 
 type Permission = RecordingSettingsSnapshot["permissions"][number];
-export type PermissionKind = Permission["kind"];
-export type PermissionState = Permission["state"];
+type PermissionKind = Permission["kind"];
+type PermissionState = Permission["state"];
 
 /** The permission's name and what Steno does with it; the onboarding's words. */
-export function permissionCopy(kind: PermissionKind): {
+function permissionCopy(kind: PermissionKind): {
 	title: string;
 	explanation: string;
 } {

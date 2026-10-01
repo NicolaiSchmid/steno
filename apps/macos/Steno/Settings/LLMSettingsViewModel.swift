@@ -252,12 +252,6 @@ final class LLMSettingsViewModel: SettingsSectionModel {
     await commit()
   }
 
-  /// Onboarding's segmented choice: the ChatGPT preset, or the preset the
-  /// typed address belongs to.
-  func selectProvider(_ provider: LLMProvider) async {
-    await selectPreset(provider == .codex ? .codex : LLMPreset.infer(from: baseURL))
-  }
-
   /// "Stop using ChatGPT": clears the confirmation and returns to the
   /// endpoint provider with whatever it had.
   func stopUsingCodex() async {

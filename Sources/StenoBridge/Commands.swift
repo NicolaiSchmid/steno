@@ -225,13 +225,6 @@ public struct OpenURLParams: Codable, Sendable, Equatable {
   public init(url: String) { self.url = url }
 }
 
-/// `settings.showSection`: the section the page has just shown.
-public struct ShowSectionParams: Codable, Sendable, Equatable {
-  public var section: BridgeSettingsSection
-
-  public init(section: BridgeSettingsSection) { self.section = section }
-}
-
 public struct WindowParams: Codable, Sendable, Equatable {
   public var window: BridgeWindow
   public var section: BridgeSettingsSection?

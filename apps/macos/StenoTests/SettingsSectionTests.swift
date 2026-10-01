@@ -25,7 +25,6 @@ final class SettingsSectionTests: XCTestCase {
       for word in ["LLM", "Sparkle", "Obsidian", "listener", "diariz", "token"] {
         XCTAssertFalse(section.title.contains(word), "\(section) title says \(word)")
       }
-      XCTAssertFalse(section.purpose.isEmpty)
     }
   }
 

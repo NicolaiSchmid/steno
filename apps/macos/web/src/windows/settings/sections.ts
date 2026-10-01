@@ -17,13 +17,16 @@ export const SECTION_IDS = [
 
 export type SectionId = (typeof SECTION_IDS)[number];
 
+/** The six `settings.*` topics, each with the `subtitle` the sidebar shows. */
+export type SettingsTopic = Extract<BridgeTopic, `settings.${string}`>;
+
 export interface SectionInfo {
 	id: SectionId;
 	title: string;
 	/** One sentence under the section title. */
 	purpose: string;
 	/** The snapshot topic whose `subtitle` the sidebar shows. */
-	topic: BridgeTopic;
+	topic: SettingsTopic;
 }
 
 export const SECTIONS: readonly SectionInfo[] = [

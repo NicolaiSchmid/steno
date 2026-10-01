@@ -271,30 +271,29 @@ private func request(_ id: String, _ method: String, _ params: Any = NSNull()) -
     let environment = try await TestSupport.environment()
     let controller = AppController(environment: environment)
     #expect(
-      AppSnapshot(controller: controller, appearance: .dark, version: "1.2.3").setupBanner == nil,
+      AppSnapshot(controller: controller, version: "1.2.3").setupBanner == nil,
       "nothing before the first settings emission")
     await controller.launch()
     defer { Task { await controller.shutdown() } }
     await eventually("settings observed") { controller.storedSettings != nil }
 
-    let shown = AppSnapshot(controller: controller, appearance: .dark, version: "1.2.3")
+    let shown = AppSnapshot(controller: controller, version: "1.2.3")
     #expect(shown.version == "1.2.3")
-    #expect(shown.appearance == .dark)
     #expect(shown.phone == nil)
     let banner = try #require(shown.setupBanner)
     #expect(banner.title == "Summaries and export are off.")
     #expect(banner.offersSummaries)
     #expect(banner.offersVault)
     #expect(
-      AppSnapshot(controller: controller, appearance: .light, hasMeetings: false).setupBanner
+      AppSnapshot(controller: controller, hasMeetings: false).setupBanner
         == nil,
       "an empty store shows no banner")
 
     controller.dismissSetupBanner()
-    #expect(AppSnapshot(controller: controller, appearance: .light).setupBanner == nil)
+    #expect(AppSnapshot(controller: controller).setupBanner == nil)
     controller.requestedMeetingID = SampleData.meetingID
     #expect(
-      AppSnapshot(controller: controller, appearance: .light).requestedMeetingID
+      AppSnapshot(controller: controller).requestedMeetingID
         == SampleData.meetingID)
   }
 }

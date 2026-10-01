@@ -15,46 +15,8 @@ import {
 	Input,
 	Switch,
 } from "@/components/ui";
+import { DraftField } from "./draft-field";
 import { SectionPage } from "./section-page";
-import { useDraft } from "./use-draft";
-
-/** A text field saved as one `update` and a `save` when focus leaves it. */
-function DraftField({
-	value,
-	placeholder,
-	testId,
-	label,
-	onCommit,
-}: {
-	value: string;
-	placeholder?: string;
-	testId: string;
-	label: string;
-	onCommit: (draft: string) => void;
-}) {
-	const [draft, setDraft] = useDraft(value);
-	return (
-		<Input
-			aria-label={label}
-			className="w-[200px]"
-			data-testid={testId}
-			onBlur={() => {
-				if (draft !== value) {
-					onCommit(draft);
-				}
-			}}
-			onChange={(event) => setDraft(event.target.value)}
-			onKeyDown={(event) => {
-				if (event.key === "Enter") {
-					event.currentTarget.blur();
-				}
-			}}
-			placeholder={placeholder}
-			size="sm"
-			value={draft}
-		/>
-	);
-}
 
 /**
  * What exporting amounts to right now; null while the page's own error row

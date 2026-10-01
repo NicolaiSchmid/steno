@@ -29,7 +29,9 @@ final class SettingsOverviewViewModel {
     if let handover = environment.handover {
       pairedCount = (try? await handover.pairedDevices())?.count ?? 0
     }
-    subtitles = Self.subtitles(
+    // Assigned only on change: every section snapshot reads this map, so an
+    // equal reassignment would republish all six for nothing.
+    let next = Self.subtitles(
       settings: settings,
       recordingReady: microphone == .granted && systemAudio == .granted,
       modelsInstalled: modelsInstalled,
@@ -37,6 +39,7 @@ final class SettingsOverviewViewModel {
       handoverAvailable: environment.handover != nil,
       updateOutcome: environment.updater.lastOutcome,
       version: AppVersion.marketing)
+    if next != subtitles { subtitles = next }
   }
 
   nonisolated static func subtitles(

@@ -329,32 +329,6 @@ private func request(_ id: String, _ method: String, _ params: Any = NSNull()) -
     #expect(choosing.obsidian.vaultPath == folder.path, "the form shows the choice")
   }
 
-  /// The deep link rides the `app` snapshot and is cleared when the page
-  /// reports that section shown, not any other.
-  @Test func showSectionConsumesTheMatchingDeepLink() async throws {
-    let host = bridge(try await TestSupport.environment(seed: false))
-    let sink = RecordingSink()
-    host.attach(sink)
-    host.controller.openSettings(.recording)
-    host.start()
-    await host.load()
-    _ = await BridgeDispatcher.dispatch(request("r0", "page.ready"), host: host)
-    #expect(sink.last(.app)?["requestedSettingsSection"] == .string("recording"))
-
-    let other = await BridgeDispatcher.dispatch(
-      request("r1", "settings.showSection", ["section": "general"]), host: host)
-    #expect(other == BridgeReply(id: "r1"))
-    #expect(host.controller.requestedSettingsSection == .recording, "another section leaves it")
-
-    let shown = await BridgeDispatcher.dispatch(
-      request("r2", "settings.showSection", ["section": "recording"]), host: host)
-    #expect(shown == BridgeReply(id: "r2"))
-    #expect(host.controller.requestedSettingsSection == nil)
-    await eventually("app republished without the request") {
-      (sink.last(.app)?["requestedSettingsSection"] ?? .null) == .null
-    }
-  }
-
   @Test func methodsOfOtherWindowsAndBadIdsAreTypedErrors() async throws {
     let host = bridge(try await TestSupport.environment(seed: false))
     host.start()
@@ -433,5 +407,32 @@ private func request(_ id: String, _ method: String, _ params: Any = NSNull()) -
       sink.last(.settingsExport)?["enabled"] == .bool(true)
         && sink.last(.settingsExport)?["peopleFolder"] == .string("Team")
     }
+  }
+
+  /// A deep link rides on the `app` snapshot once: the publish that carries
+  /// it clears the controller's request, so the next `app` snapshot is
+  /// clean and a second request for the same section is a new snapshot.
+  @Test func theAppPublishCarryingADeepLinkConsumesIt() async throws {
+    let host = bridge(try await TestSupport.environment(seed: false))
+    let sink = RecordingSink()
+    host.attach(sink)
+    host.controller.openSettings(.recording)
+    host.start()
+    await host.load()
+    #expect(
+      host.controller.requestedSettingsSection == .recording,
+      "nothing is consumed before the page is ready")
+    _ = await BridgeDispatcher.dispatch(request("r0", "page.ready"), host: host)
+    #expect(sink.last(.app)?["requestedSettingsSection"] == .string("recording"))
+    #expect(host.controller.requestedSettingsSection == nil)
+    await eventually("the clean app snapshot follows") {
+      (sink.last(.app)?["requestedSettingsSection"] ?? .null) == .null
+    }
+
+    host.controller.openSettings(.recording)
+    await eventually("the same section again is a new snapshot") {
+      sink.last(.app)?["requestedSettingsSection"] == .string("recording")
+    }
+    #expect(host.controller.requestedSettingsSection == nil)
   }
 }

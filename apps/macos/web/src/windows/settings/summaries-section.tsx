@@ -17,13 +17,13 @@ import {
 	Input,
 	Select,
 } from "@/components/ui";
+import { DraftField } from "./draft-field";
 import { SectionPage } from "./section-page";
-import { useDraft } from "./use-draft";
 
 type Codex = NonNullable<SummariesSettingsSnapshot["codex"]>;
 
 /** The words the user reads before Steno may use the Codex sign-in. */
-export const CODEX_CONSENT = {
+const CODEX_CONSENT = {
 	title: "Use your ChatGPT plan for summaries",
 	body: "Steno will use the sign-in that the Codex command-line tool saved on this Mac (~/.codex/auth.json) and send your meeting transcripts to OpenAI under your ChatGPT plan. Audio never leaves your Mac.",
 	points: [
@@ -36,54 +36,6 @@ export const CODEX_CONSENT = {
 	usageFootnote:
 		"Transcript text goes to OpenAI under your ChatGPT plan and counts against its Codex limits. Audio never leaves your Mac.",
 };
-
-/**
- * A text field of the form: typed into a draft, sent as one `update` and a
- * `save` when focus leaves or Return is pressed, and only when it changed.
- */
-function DraftField({
-	value,
-	placeholder,
-	type = "text",
-	testId,
-	label,
-	onCommit,
-	clearOnCommit = false,
-}: {
-	value: string;
-	placeholder?: string | undefined;
-	type?: "text" | "password";
-	testId: string;
-	label: string;
-	onCommit: (draft: string) => void;
-	/** Empty the field once committed: a secret the page must not keep. */
-	clearOnCommit?: boolean;
-}) {
-	const [draft, setDraft] = useDraft(value);
-	return (
-		<Input
-			aria-label={label}
-			className="w-[260px]"
-			data-testid={testId}
-			onBlur={() => {
-				if (draft !== value) {
-					onCommit(draft);
-					if (clearOnCommit) setDraft("");
-				}
-			}}
-			onChange={(event) => setDraft(event.target.value)}
-			onKeyDown={(event) => {
-				if (event.key === "Enter") {
-					event.currentTarget.blur();
-				}
-			}}
-			placeholder={placeholder}
-			size="sm"
-			type={type}
-			value={draft}
-		/>
-	);
-}
 
 /** The consent card until confirmed, then the account line and the model. */
 function CodexFields({ codex }: { codex: Codex }) {

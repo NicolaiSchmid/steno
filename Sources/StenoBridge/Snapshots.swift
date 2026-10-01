@@ -32,7 +32,6 @@ public struct AppSnapshot: Codable, Sendable, Equatable {
   }
 
   public var version: String
-  public var appearance: BridgeAppearance
   public var setupBanner: SetupBanner?
   public var phone: Phone?
   /// Deep links: set once, consumed by the page, then cleared by the host.
@@ -40,12 +39,11 @@ public struct AppSnapshot: Codable, Sendable, Equatable {
   public var requestedSettingsSection: BridgeSettingsSection?
 
   public init(
-    version: String, appearance: BridgeAppearance, setupBanner: SetupBanner? = nil,
+    version: String, setupBanner: SetupBanner? = nil,
     phone: Phone? = nil, requestedMeetingID: UUID? = nil,
     requestedSettingsSection: BridgeSettingsSection? = nil
   ) {
     self.version = version
-    self.appearance = appearance
     self.setupBanner = setupBanner
     self.phone = phone
     self.requestedMeetingID = requestedMeetingID

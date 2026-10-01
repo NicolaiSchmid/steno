@@ -13,7 +13,6 @@ import SwiftUI
 struct MainWindow: View {
   let controller: AppController
   @State private var bridge: MainWindowBridge
-  @Environment(\.colorScheme) private var colorScheme
   @Environment(\.openWindow) private var openWindow
 
   /// 960 x 600, the size the UI smoke test reviews the window at.
@@ -31,29 +30,9 @@ struct MainWindow: View {
     WebWindowView(route: "#/main", host: bridge)
       .ignoresSafeArea()
       .frame(minWidth: Self.minimumSize.width, minHeight: Self.minimumSize.height)
-      .onChange(of: colorScheme, initial: true) { _, scheme in
-        bridge.appearance = scheme == .dark ? .dark : .light
-      }
       .task {
         bridge.openWindow = { [controller, openWindow] request in
-          switch request.window {
-          case .main:
-            if let meetingID = request.meetingID { controller.requestedMeetingID = meetingID }
-            openWindow(id: "main")
-            NSApp.activate()
-          case .settings:
-            // The section is a deep link the Settings page applies from the
-            // `app` snapshot when its window opens, the same path the setup
-            // banner used.
-            if let section = request.section.flatMap({ SettingsSection(rawValue: $0.rawValue) }) {
-              controller.openSettings(section)
-            }
-            openWindow(id: "settings")
-            NSApp.activate()
-          case .onboarding:
-            openWindow(id: "onboarding")
-            NSApp.activate()
-          }
+          openRequestedWindow(request, controller: controller, openWindow: openWindow)
         }
         await bridge.run()
       }

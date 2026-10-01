@@ -20,6 +20,8 @@ final class PhonesSettingsViewModel: SettingsSectionModel {
   private(set) var pairing: PairingPayload?
   /// The pairing code as a PNG; the page draws it.
   private(set) var qrPNG: Data?
+  /// `qrPNG` as the page receives it, encoded once per pairing window.
+  private(set) var qrPNGBase64: String?
   var error: String?
   var errorDetails: String?
   let handover: HandoverService?
@@ -49,32 +51,10 @@ final class PhonesSettingsViewModel: SettingsSectionModel {
     return pairing.expiresAt > now()
   }
 
-  /// "It expires in 4 minutes."
-  var pairingExpiryText: String? {
-    guard let pairing else { return nil }
-    let seconds = max(0, pairing.expiresAt.timeIntervalSince(now()))
-    let minutes = Int((seconds / 60).rounded(.up))
-    return minutes <= 1 ? "It expires in a minute." : "It expires in \(minutes) minutes."
-  }
-
   /// Transfers still arriving, oldest first.
   var activeReceipts: [HandoverReceipt] {
     receipts.filter { $0.state.kind == .receiving || $0.state.kind == .verifying }
       .sorted { $0.createdAt < $1.createdAt }
-  }
-
-  /// The paired phone a transfer comes from, by name.
-  func deviceName(for receipt: HandoverReceipt) -> String {
-    devices.first { $0.id == receipt.deviceID }?.name ?? "your iPhone"
-  }
-
-  /// "Paired 12 Sep 2026 · last seen today at 10:06".
-  func pairedText(_ device: PairedDevice) -> String {
-    var text = "Paired \(device.pairedAt.formatted(date: .abbreviated, time: .omitted))"
-    if let seen = device.lastSeenAt {
-      text += " · last seen \(seen.formatted(date: .abbreviated, time: .shortened))"
-    }
-    return text
   }
 
   /// Follows the listener state until cancelled (one view `.task`).
@@ -114,7 +94,10 @@ final class PhonesSettingsViewModel: SettingsSectionModel {
   func load() async {
     guard let handover else { return }
     do {
-      devices = try await handover.pairedDevices()
+      // Assigned only on change: the pairing poll reloads every two seconds
+      // and an equal reassignment would republish the section each time.
+      let loaded = try await handover.pairedDevices()
+      if loaded != devices { devices = loaded }
     } catch {
       fail("Paired phones could not be loaded.", error)
     }
@@ -132,6 +115,7 @@ final class PhonesSettingsViewModel: SettingsSectionModel {
     let payload = await handover.beginPairing()
     pairing = payload
     qrPNG = QRCode.png(for: payload.urlString)
+    qrPNGBase64 = qrPNG?.base64EncodedString()
     clearError()
   }
 
@@ -140,6 +124,7 @@ final class PhonesSettingsViewModel: SettingsSectionModel {
     await handover.cancelPairing()
     pairing = nil
     qrPNG = nil
+    qrPNGBase64 = nil
     await load()
     if devices.isEmpty { await handover.stop() }
   }
@@ -162,18 +147,9 @@ final class PhonesSettingsViewModel: SettingsSectionModel {
     if Set(devices.map(\.id)) != before {
       pairing = nil
       qrPNG = nil
+      qrPNGBase64 = nil
+      qrPNGBase64 = nil
     }
   }
 
-  /// The listener's failure, if any, for the details disclosure.
-  var listenerFailure: String? {
-    if case .failed(let message) = listener { return message }
-    return nil
-  }
-
-  static func progress(_ receipt: HandoverReceipt) -> Double {
-    guard receipt.byteCount > 0, receipt.chunkSize > 0 else { return 0 }
-    let received = Double(receipt.receivedChunks.count) * Double(receipt.chunkSize)
-    return min(1, received / Double(receipt.byteCount))
-  }
 }
