@@ -6,6 +6,7 @@ import {
 } from "lucide-react";
 import type { ExportSettingsSnapshot } from "@/bridge/contract";
 import { send, useBridge, useSnapshot } from "@/bridge/hooks";
+import { DraftField } from "@/components/draft-field";
 import {
 	Button,
 	Callout,
@@ -14,7 +15,6 @@ import {
 	FormValue,
 	Switch,
 } from "@/components/ui";
-import { DraftField } from "./draft-field";
 import { SectionPage } from "./section-page";
 
 /**

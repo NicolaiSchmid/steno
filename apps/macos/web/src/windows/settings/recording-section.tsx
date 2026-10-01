@@ -1,6 +1,7 @@
 import { FolderIcon, RefreshCwIcon } from "lucide-react";
 import type { RecordingSettingsSnapshot } from "@/bridge/contract";
 import { send, useBridge, useSnapshot } from "@/bridge/hooks";
+import { PermissionRow } from "@/components/permission-row";
 import {
 	Button,
 	FormCard,
@@ -9,10 +10,9 @@ import {
 	Input,
 	Select,
 } from "@/components/ui";
-import { PermissionRow } from "./permission-row";
+import { useDraft } from "@/lib/use-draft";
 import { SectionPage } from "./section-page";
 import { folderUsageText, retentionTitle } from "./settings-format";
-import { useDraft } from "./use-draft";
 
 type RetentionMode = RecordingSettingsSnapshot["retention"]["mode"];
 

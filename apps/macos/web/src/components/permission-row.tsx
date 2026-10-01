@@ -1,13 +1,14 @@
 import { CheckCircle2Icon, CircleIcon, XCircleIcon } from "lucide-react";
+import type { ReactNode } from "react";
 import type { RecordingSettingsSnapshot } from "@/bridge/contract";
 import { Badge, Button, FormRow } from "@/components/ui";
 
 type Permission = RecordingSettingsSnapshot["permissions"][number];
-type PermissionKind = Permission["kind"];
-type PermissionState = Permission["state"];
+export type PermissionKind = Permission["kind"];
+export type PermissionState = Permission["state"];
 
 /** The permission's name and what Steno does with it; the onboarding's words. */
-function permissionCopy(kind: PermissionKind): {
+export function permissionCopy(kind: PermissionKind): {
 	title: string;
 	explanation: string;
 } {
@@ -45,11 +46,28 @@ export interface PermissionRowProps {
 	isRequesting: boolean;
 	onRequest: () => void;
 	onOpenSystemSettings: () => void;
+	/** Shows the "Optional" badge beside the title (onboarding). */
+	optional?: boolean;
+	/** The step was skipped: no action, a "Skipped" badge. */
+	skipped?: boolean;
+	/** Offers a ghost "Skip" beside the action (optional steps in onboarding). */
+	onSkip?: (() => void) | undefined;
+	/** Offers "Check again" beside "Open System Settings" once denied. */
+	onCheckAgain?: (() => void) | undefined;
+	/**
+	 * The permission is granted by macOS later, not here (the local network
+	 * prompt comes with the first pairing): the one action is "Got it", which
+	 * skips the step.
+	 */
+	acknowledgeOnly?: boolean;
+	/** The row's action is the page's main one (onboarding): a primary button. */
+	prominent?: boolean;
 }
 
 /**
  * One permission: its state glyph, title, the explanation while it is not
- * granted, and the action that fits the state.
+ * granted, and the action that fits the state. Settings and onboarding
+ * share it; onboarding adds the optional badge, Skip and Check again.
  */
 export function PermissionRow({
 	kind,
@@ -57,45 +75,95 @@ export function PermissionRow({
 	isRequesting,
 	onRequest,
 	onOpenSystemSettings,
+	optional = false,
+	skipped = false,
+	onSkip,
+	onCheckAgain,
+	acknowledgeOnly = false,
+	prominent = false,
 }: PermissionRowProps) {
 	const copy = permissionCopy(kind);
 	let description: string | undefined;
-	if (state !== "granted") {
+	if (state !== "granted" && !skipped) {
 		description = copy.explanation;
 	}
 	if (isRequesting && kind === "systemAudio") {
 		description = "Listening for the test tone, up to 30 seconds…";
 	}
+	const action = prominent && !optional ? "primary" : "outline";
+
+	let control: ReactNode;
+	if (state === "granted") {
+		control = <Badge variant="live">Allowed</Badge>;
+	} else if (skipped) {
+		control = <Badge data-testid={`permission-${kind}-skipped`}>Skipped</Badge>;
+	} else if (state === "denied") {
+		control = (
+			<>
+				<Button
+					data-testid={`permission-${kind}-open`}
+					onClick={onOpenSystemSettings}
+					size="sm"
+					variant={action}
+				>
+					Open System Settings
+				</Button>
+				{onCheckAgain ? (
+					<Button
+						data-testid={`permission-${kind}-check`}
+						onClick={onCheckAgain}
+						size="sm"
+						variant="outline"
+					>
+						Check again
+					</Button>
+				) : null}
+			</>
+		);
+	} else if (acknowledgeOnly && onSkip) {
+		control = (
+			<Button
+				data-testid={`permission-${kind}-skip`}
+				onClick={onSkip}
+				size="sm"
+				variant="outline"
+			>
+				Got it
+			</Button>
+		);
+	} else {
+		control = (
+			<>
+				<Button
+					data-testid={`permission-${kind}-request`}
+					disabled={isRequesting}
+					onClick={onRequest}
+					size="sm"
+					variant={action}
+				>
+					{isRequesting
+						? "Asking…"
+						: kind === "systemAudio"
+							? "Run the test recording"
+							: "Allow"}
+				</Button>
+				{onSkip ? (
+					<Button
+						data-testid={`permission-${kind}-skip`}
+						onClick={onSkip}
+						size="sm"
+						variant="ghost"
+					>
+						Skip
+					</Button>
+				) : null}
+			</>
+		);
+	}
+
 	return (
 		<FormRow
-			control={
-				state === "granted" ? (
-					<Badge variant="live">Allowed</Badge>
-				) : state === "denied" ? (
-					<Button
-						data-testid={`permission-${kind}-open`}
-						onClick={onOpenSystemSettings}
-						size="sm"
-						variant="outline"
-					>
-						Open System Settings
-					</Button>
-				) : (
-					<Button
-						data-testid={`permission-${kind}-request`}
-						disabled={isRequesting}
-						onClick={onRequest}
-						size="sm"
-						variant="outline"
-					>
-						{isRequesting
-							? "Asking…"
-							: kind === "systemAudio"
-								? "Run the test recording"
-								: "Allow"}
-					</Button>
-				)
-			}
+			control={control}
 			data-testid={`permission-${kind}`}
 			description={description}
 			icon={
@@ -107,7 +175,16 @@ export function PermissionRow({
 					<CircleIcon aria-hidden="true" />
 				)
 			}
-			label={copy.title}
+			label={
+				optional ? (
+					<span className="inline-flex items-center gap-2">
+						{copy.title}
+						<Badge>Optional</Badge>
+					</span>
+				) : (
+					copy.title
+				)
+			}
 			tone={
 				state === "granted"
 					? "primary"

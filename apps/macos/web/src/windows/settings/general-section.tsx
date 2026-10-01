@@ -1,6 +1,7 @@
 import { ExternalLinkIcon, TriangleAlertIcon } from "lucide-react";
 import type { Acknowledgement } from "@/bridge/contract";
 import { send, useBridge, useSnapshot } from "@/bridge/hooks";
+import { PermissionRow } from "@/components/permission-row";
 import {
 	Button,
 	Callout,
@@ -19,7 +20,6 @@ import {
 	Select,
 	Switch,
 } from "@/components/ui";
-import { PermissionRow } from "./permission-row";
 import { SectionPage } from "./section-page";
 import { updateStatusText } from "./settings-format";
 

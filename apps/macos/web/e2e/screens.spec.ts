@@ -238,6 +238,77 @@ for (const scheme of SCHEMES) {
 	}
 }
 
+/** The onboarding window is one fixed size (`OnboardingWindow.size`). */
+const ONBOARDING_SIZE = { width: 560, height: 700 } as const;
+
+interface OnboardingState {
+	name: string;
+	/** The scenario the state needs; empty for the recorded fixture. */
+	query: string;
+	/** What must be on screen before the shot. */
+	testId: string;
+}
+
+const ONBOARDING_STATES: readonly OnboardingState[] = [
+	{ name: "page-1", query: "", testId: "permission-systemAudio-request" },
+	{
+		name: "page-1-unknown",
+		query: "scenario=onboarding-unknown",
+		testId: "permission-microphone-request",
+	},
+	{
+		name: "page-1-denied",
+		query: "scenario=onboarding-denied",
+		testId: "permission-microphone-open",
+	},
+	{
+		name: "page-1-granted",
+		query: "scenario=onboarding-granted",
+		testId: "onboarding-done",
+	},
+	{
+		name: "page-2",
+		query: "scenario=onboarding-setup-open",
+		testId: "onboarding-save-summaries",
+	},
+	{
+		name: "page-2-codex",
+		query: "scenario=onboarding-codex",
+		testId: "codex-confirm",
+	},
+	{
+		name: "page-2-saved",
+		query: "scenario=onboarding-setup",
+		testId: "onboarding-vault-validation",
+	},
+	{
+		name: "page-2-vault-saved",
+		query: "scenario=onboarding-vault-saved",
+		testId: "setup-vault-saved",
+	},
+];
+
+for (const scheme of SCHEMES) {
+	for (const state of ONBOARDING_STATES) {
+		test(`onboarding ${scheme} ${state.name}`, async ({ page }) => {
+			const external = watchExternalRequests(page);
+			await page.setViewportSize(ONBOARDING_SIZE);
+			const query = [state.query, scheme === "dark" ? "dark" : ""]
+				.filter(Boolean)
+				.join("&");
+			await page.goto(`/#/onboarding${query ? `?${query}` : ""}`);
+			await settle(page);
+			await expect(page.getByTestId("onboarding-window")).toBeVisible();
+			await expect(page.getByTestId(state.testId)).toBeVisible();
+			await settle(page);
+			await page.screenshot({
+				path: `${OUT}/onboarding-${scheme}-${state.name}.png`,
+			});
+			expect(external).toEqual([]);
+		});
+	}
+}
+
 for (const scheme of SCHEMES) {
 	test(`stories ${scheme}`, async ({ page }) => {
 		const external = watchExternalRequests(page);

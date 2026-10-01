@@ -1,5 +1,5 @@
 import { Input } from "@/components/ui";
-import { useDraft } from "./use-draft";
+import { useDraft } from "@/lib/use-draft";
 
 /**
  * A text field that commits on blur or Enter when its draft differs from the
