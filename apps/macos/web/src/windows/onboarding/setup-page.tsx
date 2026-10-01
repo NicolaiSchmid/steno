@@ -10,7 +10,10 @@ import type { BridgeClient } from "@/bridge/client";
 import type { OnboardingSnapshot } from "@/bridge/contract";
 import { send, useBridge } from "@/bridge/hooks";
 import { CodexConsentCard } from "@/components/codex-consent-card";
-import { DraftField } from "@/components/draft-field";
+import {
+	SummariesEndpointForm,
+	type SummariesUpdate,
+} from "@/components/summaries-endpoint-form";
 import {
 	Badge,
 	Button,
@@ -19,7 +22,6 @@ import {
 	FormCard,
 	FormRow,
 	FormValue,
-	Select,
 } from "@/components/ui";
 import { OnboardingPage } from "./onboarding-page";
 
@@ -176,131 +178,80 @@ function SummariesFields({
 	if (!summaries) {
 		return <div className="flex items-center gap-2">{skip}</div>;
 	}
-	const preset = summaries.presets.find(
-		(candidate) => candidate.id === summaries.presetID,
-	);
-	const codex = summaries.codex;
-	const update = (fields: {
-		baseURL?: string;
-		model?: string;
-		apiKey?: string;
-	}) => send(client, "settings.summaries.update", fields);
-	const keyPlaceholder = summaries.hasAPIKey
-		? "Saved in your keychain"
-		: preset?.needsAPIKey
-			? `Paste the key from your ${preset.title} account`
-			: "API key, only if the server needs one";
+	// The draft stays on the page until Save; nothing is stored by an update.
+	const update = (fields: SummariesUpdate) =>
+		send(client, "settings.summaries.update", fields);
 
 	return (
 		<div className="flex flex-col gap-3" data-testid="setup-summaries-form">
-			<Select
-				aria-label="Service"
-				className="w-[260px]"
-				data-testid="onboarding-preset"
-				onValueChange={(value) => {
-					if (value) {
-						send(client, "settings.summaries.selectPreset", { value });
-					}
-				}}
-				options={summaries.presets.map((candidate) => ({
-					value: candidate.id,
-					label: candidate.title,
-				}))}
-				size="sm"
-				value={summaries.presetID}
-			/>
-			{codex ? (
-				codex.confirmed ? (
-					<>
-						{codex.signIn === "signedIn" ? (
-							<Callout
-								data-testid="onboarding-codex-account"
-								icon={<CheckCircle2Icon aria-hidden="true" />}
-								size="sm"
-								title={`Using ChatGPT as ${codex.signInDetail ?? "your account"}.`}
-								variant="live"
-							/>
-						) : codex.signIn === "unavailable" ? (
-							<Callout
-								data-testid="codex-unavailable"
-								icon={<CircleAlertIcon aria-hidden="true" />}
-								size="sm"
-								title={
-									codex.signInDetail ??
-									"No ChatGPT sign-in was found on this Mac."
-								}
-								variant="warning"
-							/>
-						) : null}
-						{codex.modelsError ? (
-							<Callout
-								data-testid="codex-models-error"
-								icon={<TriangleAlertIcon aria-hidden="true" />}
-								size="sm"
-								title={codex.modelsError}
-								variant="warning"
-							/>
-						) : null}
-						<div className="flex items-center gap-2">
-							<Button
-								data-testid="onboarding-codex-check"
-								onClick={() =>
-									send(client, "onboarding.confirmSummariesWithCodex")
-								}
-								size="sm"
-								variant="outline"
-							>
-								Check again
-							</Button>
-							{skip}
-						</div>
-					</>
-				) : (
-					<CodexConsentCard
-						codex={codex}
-						compact
-						onCheckAgain={() =>
-							send(client, "settings.summaries.refreshCodexStatus")
-						}
-						onConfirm={() =>
-							send(client, "onboarding.confirmSummariesWithCodex")
-						}
-						trailing={skip}
-					/>
-				)
-			) : (
-				<>
-					{preset?.showsServerField ? (
-						<DraftField
-							className="w-full"
-							label="Server address"
-							onCommit={(baseURL) => update({ baseURL })}
-							placeholder="Server address, starting with http or https"
-							testId="onboarding-base-url"
-							value={summaries.baseURL}
-						/>
-					) : null}
-					<DraftField
-						className="w-full"
-						label="Model"
-						onCommit={(model) => update({ model })}
-						placeholder={`Model: ${preset?.modelPlaceholder ?? "the model name"}`}
-						testId="onboarding-model"
-						value={summaries.model}
-					/>
-					<DraftField
-						className="w-full"
-						label="API key"
-						onCommit={(apiKey) => {
-							if (apiKey.trim()) {
-								update({ apiKey });
+			<SummariesEndpointForm
+				layout="stack"
+				onUpdate={update}
+				renderCodex={(codex) =>
+					codex.confirmed ? (
+						<>
+							{codex.signIn === "signedIn" ? (
+								<Callout
+									data-testid="onboarding-codex-account"
+									icon={<CheckCircle2Icon aria-hidden="true" />}
+									size="sm"
+									title={`Using ChatGPT as ${codex.signInDetail ?? "your account"}.`}
+									variant="live"
+								/>
+							) : codex.signIn === "unavailable" ? (
+								<Callout
+									data-testid="codex-unavailable"
+									icon={<CircleAlertIcon aria-hidden="true" />}
+									size="sm"
+									title={
+										codex.signInDetail ??
+										"No ChatGPT sign-in was found on this Mac."
+									}
+									variant="warning"
+								/>
+							) : null}
+							{codex.modelsError ? (
+								<Callout
+									data-testid="codex-models-error"
+									icon={<TriangleAlertIcon aria-hidden="true" />}
+									size="sm"
+									title={codex.modelsError}
+									variant="warning"
+								/>
+							) : null}
+							<div className="flex items-center gap-2">
+								<Button
+									data-testid="onboarding-codex-check"
+									onClick={() =>
+										send(client, "onboarding.confirmSummariesWithCodex")
+									}
+									size="sm"
+									variant="outline"
+								>
+									Check again
+								</Button>
+								{skip}
+							</div>
+						</>
+					) : (
+						<CodexConsentCard
+							codex={codex}
+							compact
+							onCheckAgain={() =>
+								send(client, "settings.summaries.refreshCodexStatus")
 							}
-						}}
-						placeholder={keyPlaceholder}
-						testId="onboarding-api-key"
-						type="password"
-						value=""
-					/>
+							onConfirm={() =>
+								send(client, "onboarding.confirmSummariesWithCodex")
+							}
+							trailing={skip}
+						/>
+					)
+				}
+				summaries={summaries}
+				testIdPrefix="onboarding-"
+			/>
+			{summaries.codex ? null : (
+				<>
 					{summaries.validationMessage ? (
 						<Callout
 							data-testid="onboarding-summaries-validation"
