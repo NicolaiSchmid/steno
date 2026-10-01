@@ -11,10 +11,10 @@ draws snapshots and sends commands over the bridge (`src/bridge/`). Plan:
 | Command | What it does |
 |---|---|
 | `pnpm install` | pnpm 11, Node 24. Own lockfile. |
-| `pnpm dev` | Vite dev server on 5173 with the fixture bridge. `#/main` (the default), `#/stories`. Flags: `dark`, `tab=summary\|transcript\|tasks\|notes`, `menu`, `picker`, `scenario=empty\|recording\|failed\|processing`, for example `#/main?dark&tab=transcript&picker`. |
+| `pnpm dev` | Vite dev server on 5173 with the fixture bridge. `#/main` (the default), `#/settings?section=general\|recording\|transcription\|summaries\|export\|iphone`, `#/stories`. Flags: `dark`, `tab=summary\|transcript\|tasks\|notes`, `menu`, `picker`, `scenario=…` (below), for example `#/main?dark&tab=transcript&picker` or `#/settings?section=iphone&scenario=pairing`. |
 | `pnpm check` | `lint`, `lint:ui`, `typecheck`, `test`. Must pass before a PR. |
-| `pnpm build` | Writes `dist/` with relative asset URLs. |
-| `pnpm screens` | Builds, then Playwright renders the main window in every state and the stories, light and dark at 960 by 600 and 1200 by 760, to `screens/` and asserts the page made no network request. Run `pnpm exec playwright install chromium` once. |
+| `pnpm build` | Writes `dist/` with relative asset URLs, then `scripts/check-offline.mjs` greps it for fetchable URLs. |
+| `pnpm screens` | Builds, then Playwright renders the main window in every state at 960 by 600 and 1200 by 760, the Settings window's sections and states at its fixed 760 by 520, and the stories, light and dark, to `screens/` and asserts the page made no network request. Run `pnpm exec playwright install chromium` once. |
 
 ## Layout
 
@@ -22,6 +22,7 @@ draws snapshots and sends commands over the bridge (`src/bridge/`). Plan:
 |---|---|
 | `src/bridge/` | The contract (`contract.ts`), the typed client, the WebKit and mock transports, and `hooks.ts` (`useSnapshot`, `useBridge`, `send`). |
 | `src/windows/main/` | The main window over the bridge: sidebar, meeting list, detail with its tabs, `format.ts` for every date and duration. |
+| `src/windows/settings/` | The Settings window: a sidebar of the six sections with the subtitles their snapshots carry, one `*-section.tsx` per section built from `FormCard` and `FormRow`, `settings-format.ts` for sizes and relative times. Text fields keep a draft (`use-draft.ts`) and send one `update` plus a `save` when focus leaves. |
 | `src/components/ui/` | The component set; the only place a look is defined. |
 | `src/stories/` | Every component in every variant, rendered by the screens. |
 | `fixtures/bridge/` | Snapshots and replies recorded by the Swift side; the mock transport serves them. |
@@ -30,7 +31,11 @@ The mock transport answers a `?scenario=` in the page's query by bending the
 fixtures (`applyScenario` in `src/bridge/mock-transport.ts`): `empty` clears
 the list, `recording` makes `recording.live` the recording, `failed` selects
 the failed meeting, `processing` adds and selects a meeting in the progress
-entry. `?tab=` picks the detail tab. Interactive elements carry the
+entry. `?tab=` picks the detail tab. For Settings: `settings-error` (an error
+with its details, a login item awaiting approval, an update available),
+`download-failed`, `summaries-connected`, `summaries-failed`, `codex-consent`,
+`codex` (from `settings.summaries.codex`), `export-on`, `pairing` (from
+`settings.iphone.pairing`) and `phone-unavailable`. Interactive elements carry the
 `data-testid` the SwiftUI views exposed as accessibility identifiers
 (`sidebar-record`, `nav-all`, `meeting-<uuid>`, `tab-summary`,
 `speaker-picker-<uuid>`, `processing-card`, `empty-detail-title`, …) so the

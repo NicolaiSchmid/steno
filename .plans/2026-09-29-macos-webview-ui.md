@@ -300,3 +300,26 @@ WP5, cleanup:
   synchronously. The fixture JSON chunks the mock transport imports are emitted into the
   production bundle as separate files that the app never loads; WP5 gates the mock behind a
   build flag so they leave the bundle.
+- WP3 (2026-10-01): the contract grew where the SwiftUI window had more than the WP0 snapshots
+  carried. `settings.summaries` gained a `codex` block (confirmation, sign-in, model list) in
+  place of the bare `codexStatus` string, plus `defaultContextTokens`; `settings.general` gained
+  template descriptions and the `acknowledgements` list that replaces the Acknowledgements
+  sheet; `settings.recording` gained `folderUsage` (measuring, measured, unavailable) and the
+  `retentionFootnote` sentence. New methods: `settings.general.openLoginItems`,
+  `settings.recording.refreshDevices`, `settings.recording.revealFolder`, the five
+  `settings.summaries.*Codex*` methods, and `settings.showSection`. The last one is how the deep
+  link is consumed: the host publishes `requestedSettingsSection` in the `app` snapshot, the
+  page selects it and reports the shown section back, and the host clears a matching request
+  and refreshes the sidebar subtitles (as the SwiftUI window did on every selection change). A
+  host-side clear on publish would lose a request published before `page.ready`, and it would
+  not tell the host when to refresh the subtitles. Two extra fixtures
+  (`settings.summaries.codex`, `settings.iphone.pairing`) feed the `codex` and `pairing`
+  scenarios; the pairing fixture's PNG is a 29 by 29 placeholder shaped like a code. The six
+  section titles and purpose sentences are spelled twice, in `SettingsSection.swift` (pinned by
+  `SettingsSectionTests`) and in `src/windows/settings/sections.ts`, rather than carried in
+  every snapshot. `CodexConsentCard.swift` moved to `Onboarding/` instead of being deleted:
+  the SwiftUI onboarding still renders it until WP4; the Settings page has its own copy of the
+  consent words. Text fields on the page keep a draft and send one `update` plus a `save` when
+  focus leaves, so the host's `@Observable` echo never fights a keystroke. The mock scenarios
+  carry no absolute URL (the OpenAI preset's address is empty there) so the production bundle
+  passes the offline grep. `pnpm screens` adds `settings-<scheme>-<state>.png` at 760 by 520.
