@@ -322,3 +322,28 @@ WP5, cleanup:
   focus leaves, so the host's `@Observable` echo never fights a keystroke. The mock scenarios
   carry no absolute URL (the OpenAI preset's address is empty there) so the production bundle
   passes the offline grep. `pnpm screens` adds `settings-<scheme>-<state>.png` at 760 by 520.
+- WP4 (2026-10-01): the onboarding window is fixed at 560 by 700 (the SwiftUI window was 560
+  wide and sized to its content; a web page needs a frame, and page 2's open forms set the
+  height), with the page's body scrolling under a pinned footer that holds Later or Done, Back
+  and Finish. The contract's `onboarding` snapshot grew: `permissionsComplete`, `isRequired` per
+  permission step, a `summaries` block that is the Settings page's own `SummariesSettingsSnapshot`
+  (its `subtitle` empty, there is no sidebar) so the ChatGPT consent card and the endpoint form
+  are one React component on both pages (`src/components/codex-consent-card.tsx`; the Swift
+  `CodexConsentCard.swift` and its words are gone), and a `vault` block with the chosen folder
+  and why a save was refused. New methods beside the WP0 eight: `onboarding.refresh` ("Check
+  again" after System Settings), `onboarding.selectPreset`, `onboarding.updateSummaries`,
+  `onboarding.testSummaries`, `onboarding.confirmSummariesWithCodex`,
+  `onboarding.refreshCodexStatus` and `onboarding.chooseVault`, the `NSOpenPanel` whose choice
+  is saved as the vault at once (`onboarding.saveVault` stays for the retry after a refused
+  folder). The Summaries row offers the same service list as Settings instead of the SwiftUI
+  page's two-way provider picker, since the view model method behind that picker left in WP3.
+  `system.openSystemSettings` is routed onto the onboarding model rather than duplicated as an
+  `onboarding.*` method. Two pieces of view glue stay glue, in the bridge and the window: page
+  1 moves on by itself once every step is handled (only after a step-changing command, so Back
+  works), and the window's close button marks onboarding completed. The exit is page-driven:
+  `finished` in the snapshot makes the page call `window.close(onboarding)`, which the bridge
+  turns into `dismissWindow`. `PermissionRow` and `DraftField` moved from `src/windows/settings/`
+  to `src/components/` for both windows. The smoke tests find the window as
+  `onboarding-window` and the pages by their visible words (the intro sentence, the row titles,
+  the page 2 heading, the button labels); a second fixture, `onboarding.setup`, feeds the page 2
+  scenarios. `pnpm screens` adds `onboarding-<scheme>-<state>.png` at 560 by 700.
