@@ -322,10 +322,10 @@ WP5, cleanup:
   focus leaves, so the host's `@Observable` echo never fights a keystroke. The mock scenarios
   carry no absolute URL (the OpenAI preset's address is empty there) so the production bundle
   passes the offline grep. `pnpm screens` adds `settings-<scheme>-<state>.png` at 760 by 520.
-- WP4 (2026-10-01): the onboarding window is fixed at 560 by 700 (the SwiftUI window was 560
-  wide and sized to its content; a web page needs a frame, and page 2's open forms set the
-  height), with the page's body scrolling under a pinned footer that holds Later or Done, Back
-  and Finish. The contract's `onboarding` snapshot grew: `permissionsComplete`, `isRequired` per
+- WP4 (2026-10-01): the onboarding window is fixed at 560 by 620 (the SwiftUI window was 560
+  wide and sized to its content; a web page needs a frame, and 620 is what sits above the Dock
+  on a 768-point display with the footer reachable, which a 700-tall first cut did not), with
+  the page's body scrolling under a pinned footer that holds Later or Done, Back and Finish. The contract's `onboarding` snapshot grew: `permissionsComplete`, `isRequired` per
   permission step, a `summaries` block that is the Settings page's own `SummariesSettingsSnapshot`
   (its `subtitle` empty, there is no sidebar) so the ChatGPT consent card and the endpoint form
   are one React component on both pages (`src/components/codex-consent-card.tsx`; the Swift
@@ -348,4 +348,4 @@ WP5, cleanup:
   to `src/components/` for both windows. The smoke tests find the window as
   `onboarding-window` and the pages by their visible words (the intro sentence, the row titles,
   the page 2 heading, the button labels); a second fixture, `onboarding.setup`, feeds the page 2
-  scenarios. `pnpm screens` adds `onboarding-<scheme>-<state>.png` at 560 by 700.
+  scenarios. `pnpm screens` adds `onboarding-<scheme>-<state>.png` at 560 by 620.

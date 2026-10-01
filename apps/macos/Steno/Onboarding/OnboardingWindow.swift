@@ -3,8 +3,10 @@ import StenoBridge
 import SwiftUI
 
 /// The onboarding window: the web UI at `#/onboarding` over
-/// `OnboardingBridge` (plan Decision 1). Fixed at 560 by 700 (page 2's open
-/// forms set the height), no title bar:
+/// `OnboardingBridge` (plan Decision 1). Fixed at 560 by 620: tall enough for
+/// page 1's four rows, short enough to sit above the Dock on a 768-point
+/// display (the smoke runner's) with its footer reachable; page 2's forms
+/// scroll under the pinned footer. No title bar:
 /// the page's H1 is the window's one title and the page paints up to the top
 /// edge, leaving the traffic lights their inset. The bridge is created once
 /// with the window's content and driven by `.task` for the window's
@@ -12,7 +14,7 @@ import SwiftUI
 /// a host cannot reach on its own: the scene actions behind `window.open`
 /// and `window.close`.
 struct OnboardingWindow: View {
-  static let size = CGSize(width: 560, height: 700)
+  static let size = CGSize(width: 560, height: 620)
 
   let controller: AppController
   @State private var bridge: OnboardingBridge

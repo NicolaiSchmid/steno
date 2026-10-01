@@ -14,7 +14,7 @@ draws snapshots and sends commands over the bridge (`src/bridge/`). Plan:
 | `pnpm dev` | Vite dev server on 5173 with the fixture bridge. `#/main` (the default), `#/settings?section=general\|recording\|transcription\|summaries\|export\|iphone`, `#/onboarding`, `#/stories`. Flags: `dark`, `tab=summary\|transcript\|tasks\|notes`, `menu`, `picker`, `scenario=…` (below), for example `#/main?dark&tab=transcript&picker`, `#/settings?section=iphone&scenario=pairing` or `#/onboarding?scenario=onboarding-codex`. |
 | `pnpm check` | `lint`, `lint:ui`, `typecheck`, `test`. Must pass before a PR. |
 | `pnpm build` | Writes `dist/` with relative asset URLs, then `scripts/check-offline.mjs` greps it for fetchable URLs. |
-| `pnpm screens` | Builds, then Playwright renders the main window in every state at 960 by 600 and 1200 by 760, the Settings window's sections and states at its fixed 760 by 520, the onboarding window's two pages and their states at its fixed 560 by 700, and the stories, light and dark, to `screens/` and asserts the page made no network request. Run `pnpm exec playwright install chromium` once. |
+| `pnpm screens` | Builds, then Playwright renders the main window in every state at 960 by 600 and 1200 by 760, the Settings window's sections and states at its fixed 760 by 520, the onboarding window's two pages and their states at its fixed 560 by 620, and the stories, light and dark, to `screens/` and asserts the page made no network request. Run `pnpm exec playwright install chromium` once. |
 
 ## Layout
 

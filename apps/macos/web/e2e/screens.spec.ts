@@ -239,7 +239,7 @@ for (const scheme of SCHEMES) {
 }
 
 /** The onboarding window is one fixed size (`OnboardingWindow.size`). */
-const ONBOARDING_SIZE = { width: 560, height: 700 } as const;
+const ONBOARDING_SIZE = { width: 560, height: 620 } as const;
 
 interface OnboardingState {
 	name: string;
