@@ -2,12 +2,16 @@ import { useEffect, useState } from "react";
 import { TooltipProvider } from "@/components/ui";
 import { StoriesPage } from "@/stories/stories-page";
 import { MainWindow } from "@/windows/main/main-window";
+import { isSectionId } from "@/windows/settings/sections";
+import { SettingsWindow } from "@/windows/settings/settings-window";
 
 /**
- * Hash routes: `#/main` (the default when the hash is empty) and
- * `#/stories` (every component). Query flags: `dark`; for the main window
+ * Hash routes: `#/main` (the default when the hash is empty),
+ * `#/settings?section=<general|recording|transcription|summaries|export|iphone>`
+ * and `#/stories` (every component). Query flags: `dark`; for the main window
  * `menu` and `picker` open the actions menu and the speaker picker on mount,
  * and the mock bridge reads `scenario` and `tab` (`src/bridge/mock-transport.ts`).
+ * A hash change re-renders the page in place; nothing reloads.
  */
 
 export interface Route {
@@ -44,6 +48,11 @@ export function App() {
 	let page: React.ReactNode;
 	if (route.path === "/stories") {
 		page = <StoriesPage />;
+	} else if (route.path === "/settings") {
+		const section = route.params.get("section");
+		page = (
+			<SettingsWindow section={isSectionId(section) ? section : undefined} />
+		);
 	} else {
 		page = (
 			<MainWindow
