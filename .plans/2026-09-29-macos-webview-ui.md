@@ -300,3 +300,25 @@ WP5, cleanup:
   synchronously. The fixture JSON chunks the mock transport imports are emitted into the
   production bundle as separate files that the app never loads; WP5 gates the mock behind a
   build flag so they leave the bundle.
+- WP3 (2026-10-01): the contract grew where the SwiftUI window had more than the WP0 snapshots
+  carried. `settings.summaries` gained a `codex` block (confirmation, sign-in, model list) in
+  place of the bare `codexStatus` string, plus `defaultContextTokens`; `settings.general` gained
+  template descriptions and the `acknowledgements` list that replaces the Acknowledgements
+  sheet; `settings.recording` gained `folderUsage` (measuring, measured, unavailable) and the
+  `retentionFootnote` sentence. New methods: `settings.general.openLoginItems`,
+  `settings.recording.refreshDevices`, `settings.recording.revealFolder`, the five
+  `settings.summaries.*Codex*` methods. The deep link is consumed host-side, as the main window
+  consumes its meeting request: the `app` publish that carries `requestedSettingsSection`
+  clears it (only once the page is ready, since nothing is published before), the page selects
+  the section from that snapshot, and the sidebar subtitles refresh after every Settings
+  command rather than on selection. (A page-driven `settings.showSection` round trip was tried
+  first and removed in review.) Two extra fixtures
+  (`settings.summaries.codex`, `settings.iphone.pairing`) feed the `codex` and `pairing`
+  scenarios; the pairing fixture's PNG is a 29 by 29 placeholder shaped like a code. The six
+  section titles and purpose sentences live in `src/windows/settings/sections.ts`;
+  `SettingsSection.swift` keeps only the raw values, the deep-link target. `CodexConsentCard.swift` moved to `Onboarding/` instead of being deleted:
+  the SwiftUI onboarding still renders it until WP4; the Settings page has its own copy of the
+  consent words. Text fields on the page keep a draft and send one `update` plus a `save` when
+  focus leaves, so the host's `@Observable` echo never fights a keystroke. The mock scenarios
+  carry no absolute URL (the OpenAI preset's address is empty there) so the production bundle
+  passes the offline grep. `pnpm screens` adds `settings-<scheme>-<state>.png` at 760 by 520.

@@ -2,11 +2,12 @@ import { mkdirSync } from "node:fs";
 import { expect, type Page, test } from "@playwright/test";
 
 /**
- * Renders the main window in every state and the stories, in light and dark
- * at both reference window sizes, and writes PNGs to screens/. Every page
- * must make zero requests to anything but the preview server (plan
- * Decision 9). The main window runs over the fixture bridge; `scenario=`
- * and `tab=` bend the fixtures (`src/bridge/mock-transport.ts`).
+ * Renders the main window in every state at both reference window sizes,
+ * the Settings window's six sections and notable states at its fixed 760 by
+ * 520, and the stories, each in light and dark, and writes PNGs to
+ * screens/. Every page must make zero requests to anything but the preview
+ * server (plan Decision 9). The windows run over the fixture bridge;
+ * `scenario=` and `tab=` bend the fixtures (`src/bridge/mock-transport.ts`).
  */
 
 const OUT = "screens";
@@ -135,6 +136,105 @@ for (const size of SIZES) {
 				expect(external).toEqual([]);
 			});
 		}
+	}
+}
+
+/** The Settings window is one fixed size (plan Decision 1). */
+const SETTINGS_SIZE = { width: 760, height: 520 } as const;
+
+interface SettingsState {
+	name: string;
+	/** `section=` plus any scenario the state needs. */
+	query: string;
+	/** What must be on screen before the shot. */
+	testId: string;
+	/** Clicked before the shot (a dialog trigger). */
+	click?: string;
+}
+
+const SETTINGS_STATES: readonly SettingsState[] = [
+	{ name: "general", query: "section=general", testId: "update-status" },
+	{
+		name: "general-error",
+		query: "section=general&scenario=settings-error",
+		testId: "login-item-approval",
+	},
+	{
+		name: "acknowledgements",
+		query: "section=general",
+		testId: "acknowledgements-dialog",
+		click: "acknowledgements",
+	},
+	{ name: "recording", query: "section=recording", testId: "retention-mode" },
+	{
+		name: "transcription",
+		query: "section=transcription",
+		testId: "asset-offlineDiarizer-progress",
+	},
+	{
+		name: "transcription-failed",
+		query: "section=transcription&scenario=download-failed",
+		testId: "asset-parakeetV3-retry",
+	},
+	{ name: "summaries", query: "section=summaries", testId: "summaries-status" },
+	{
+		name: "summaries-connected",
+		query: "section=summaries&scenario=summaries-connected",
+		testId: "test-connection",
+	},
+	{
+		name: "summaries-failed",
+		query: "section=summaries&scenario=summaries-failed",
+		testId: "test-result-details",
+	},
+	{
+		name: "codex-consent",
+		query: "section=summaries&scenario=codex-consent",
+		testId: "codex-confirm",
+	},
+	{
+		name: "codex",
+		query: "section=summaries&scenario=codex",
+		testId: "codex-model",
+	},
+	{ name: "export", query: "section=export", testId: "export-enabled" },
+	{
+		name: "export-on",
+		query: "section=export&scenario=export-on",
+		testId: "export-status",
+	},
+	{ name: "iphone", query: "section=iphone", testId: "begin-pairing" },
+	{
+		name: "pairing",
+		query: "section=iphone&scenario=pairing",
+		testId: "pairing-card",
+	},
+	{
+		name: "iphone-unavailable",
+		query: "section=iphone&scenario=phone-unavailable",
+		testId: "phone-unavailable",
+	},
+];
+
+for (const scheme of SCHEMES) {
+	for (const state of SETTINGS_STATES) {
+		test(`settings ${scheme} ${state.name}`, async ({ page }) => {
+			const external = watchExternalRequests(page);
+			await page.setViewportSize(SETTINGS_SIZE);
+			const dark = scheme === "dark" ? "&dark" : "";
+			await page.goto(`/#/settings?${state.query}${dark}`);
+			await settle(page);
+			await expect(page.getByTestId("settings-window")).toBeVisible();
+			if (state.click) {
+				await page.getByTestId(state.click).click();
+			}
+			await expect(page.getByTestId(state.testId)).toBeVisible();
+			await settle(page);
+			await page.screenshot({
+				path: `${OUT}/settings-${scheme}-${state.name}.png`,
+			});
+			expect(external).toEqual([]);
+		});
 	}
 }
 

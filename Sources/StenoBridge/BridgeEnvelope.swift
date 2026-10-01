@@ -83,8 +83,12 @@ public enum BridgeMethod: String, Codable, Sendable, CaseIterable {
   case settingsGeneralSetDefaultTemplate = "settings.general.setDefaultTemplate"
   case settingsGeneralRequestCalendar = "settings.general.requestCalendar"
   case settingsGeneralSetAutomaticUpdates = "settings.general.setAutomaticUpdates"
+  case settingsGeneralOpenLoginItems = "settings.general.openLoginItems"
+  /// `SetStringParams`; an empty value means the system default input.
   case settingsRecordingSetInputDevice = "settings.recording.setInputDevice"
+  case settingsRecordingRefreshDevices = "settings.recording.refreshDevices"
   case settingsRecordingChooseFolder = "settings.recording.chooseFolder"
+  case settingsRecordingRevealFolder = "settings.recording.revealFolder"
   case settingsRecordingSetRetention = "settings.recording.setRetention"
   case settingsRecordingRequestPermission = "settings.recording.requestPermission"
   case settingsTranscriptionSetEngine = "settings.transcription.setEngine"
@@ -94,6 +98,12 @@ public enum BridgeMethod: String, Codable, Sendable, CaseIterable {
   case settingsSummariesUpdate = "settings.summaries.update"
   case settingsSummariesSave = "settings.summaries.save"
   case settingsSummariesTest = "settings.summaries.test"
+  case settingsSummariesConfirmCodex = "settings.summaries.confirmCodex"
+  case settingsSummariesRefreshCodexStatus = "settings.summaries.refreshCodexStatus"
+  case settingsSummariesRefreshCodexModels = "settings.summaries.refreshCodexModels"
+  /// `SetStringParams`: the model slug.
+  case settingsSummariesSelectCodexModel = "settings.summaries.selectCodexModel"
+  case settingsSummariesStopUsingCodex = "settings.summaries.stopUsingCodex"
   case settingsExportSetEnabled = "settings.export.setEnabled"
   case settingsExportChooseVault = "settings.export.chooseVault"
   case settingsExportUpdate = "settings.export.update"
@@ -177,11 +187,6 @@ public struct BridgeEvent: Codable, Sendable, Equatable {
 }
 
 // MARK: - Shared vocabulary
-
-public enum BridgeAppearance: String, Codable, Sendable, CaseIterable {
-  case light
-  case dark
-}
 
 public enum BridgePermissionKind: String, Codable, Sendable, CaseIterable {
   case microphone

@@ -7,7 +7,6 @@ import SwiftUI
 struct MenuBarView: View {
   let controller: AppController
   @Environment(\.openWindow) private var openWindow
-  @Environment(\.openSettings) private var openSettings
   @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
   private var model: MenuBarViewModel { controller.menuBar }
@@ -198,7 +197,7 @@ struct MenuBarView: View {
           NSApp.activate()
         }
         Button("Settings…") {
-          openSettings()
+          openWindow(id: "settings")
           NSApp.activate()
         }
         Spacer()

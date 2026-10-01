@@ -186,19 +186,11 @@ final class AudioSettingsViewModel: SettingsSectionModel {
     permissions[kind] ?? .unknown
   }
 
-  var allPermissionsGranted: Bool {
-    Self.recordingPermissions.allSatisfy { state(of: $0) == .granted }
-  }
-
   func requestPermission(_ kind: PermissionKind) async {
     guard requesting == nil else { return }
     requesting = kind
     defer { requesting = nil }
     permissions[kind] = await environment.permissions.request(kind)
-  }
-
-  func openPermissionSettings(_ kind: PermissionKind) {
-    environment.permissions.openSystemSettings(for: kind)
   }
 
   // MARK: Saving

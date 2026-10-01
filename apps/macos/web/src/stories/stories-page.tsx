@@ -29,6 +29,10 @@ import {
 	DialogPopup,
 	DialogTitle,
 	DialogTrigger,
+	Disclosure,
+	FormCard,
+	FormRow,
+	FormValue,
 	Input,
 	Kbd,
 	Menu,
@@ -42,6 +46,8 @@ import {
 	PopoverPopup,
 	PopoverTitle,
 	PopoverTrigger,
+	ProgressBar,
+	QRCode,
 	RecordMark,
 	ScrollArea,
 	SearchInput,
@@ -502,6 +508,81 @@ export function StoriesPage() {
 					</Card>
 				)}
 			</ThemePair>
+
+			<ThemePair title="FormCard, FormRow and FormValue (the Settings sections)">
+				{() => (
+					<FormCard
+						className="w-full"
+						footer="Each recording is deleted 30 days after it was processed and exported."
+						title="Recordings"
+					>
+						<FormRow
+							control={
+								<>
+									<FormValue icon={<FolderIcon aria-hidden="true" />}>
+										audio
+									</FormValue>
+									<Button size="sm" variant="outline">
+										Choose…
+									</Button>
+								</>
+							}
+							description="Recordings use 734 MB"
+							label="Folder"
+						/>
+						<FormRow
+							control={<Badge variant="live">Allowed</Badge>}
+							icon={<CheckCircle2Icon aria-hidden="true" />}
+							label="Microphone"
+							tone="primary"
+						/>
+						<FormRow
+							control={<FormValue variant="mono">35%</FormValue>}
+							description="Downloading… 35%"
+							label="Speaker recognition"
+						>
+							<ProgressBar aria-label="Downloading" value={35} />
+						</FormRow>
+						<FormRow
+							control={<Switch aria-label="Keep" defaultChecked />}
+							label="Open Steno at login"
+						/>
+					</FormCard>
+				)}
+			</ThemePair>
+
+			<ThemePair title="Disclosure (open) and SidebarRow with a subtitle">
+				{() => (
+					<>
+						<Disclosure defaultOpen>
+							URLError.notConnectedToInternet: The Internet connection appears
+							to be offline.
+						</Disclosure>
+						<div className="flex w-[200px] flex-col gap-0.5 rounded-lg bg-sidebar p-2">
+							<SidebarRow
+								active
+								icon={<SettingsIcon />}
+								subtitle="Steno 0.10.0"
+							>
+								General
+							</SidebarRow>
+							<SidebarRow icon={<SparklesIcon />} subtitle="Not set up">
+								Summaries
+							</SidebarRow>
+						</div>
+					</>
+				)}
+			</ThemePair>
+
+			<ThemePair title="QRCode">
+				{() => (
+					<QRCode alt="Pairing code" pngBase64={QR_PLACEHOLDER} size={120} />
+				)}
+			</ThemePair>
 		</div>
 	);
 }
+
+/** A 29 by 29 placeholder in the shape of a code, not a scannable one. */
+const QR_PLACEHOLDER =
+	"iVBORw0KGgoAAAANSUhEUgAAAB0AAAAdCAAAAABz+DjTAAAAtUlEQVR42m1TCRIDIQjL/z+dtmIOnO41chgCcYG5qC/J7wtd5HH8FvMca7yzS9a4TtSRsS8ebe9o10pEmBCyyhe3527KQ6a3LWeYCx3TH9wun410CVlKF+lUcxOohJsPOdAD8GxNCk0TjXHTt0ZUB5u4yzCxtA6PxOhhSc843FCzuq2ZKeHBNbYOT4gny8NBtczSV8oXaLRJPeCPshQnHYOte8/Q5Ku3XrL/hecslpolluuf2AdYtKtjEhSZQwAAAABJRU5ErkJggg==";

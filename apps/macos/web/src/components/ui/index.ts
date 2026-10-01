@@ -41,8 +41,18 @@ export {
 	DialogTitle,
 	DialogTrigger,
 } from "./dialog";
+export type { DisclosureProps } from "./disclosure";
+export { Disclosure } from "./disclosure";
 export type { EmptyStateProps } from "./empty-state";
 export { EmptyState, emptyStateIconVariants } from "./empty-state";
+export type { FormCardProps, FormRowProps, FormValueProps } from "./form-row";
+export {
+	FormCard,
+	FormRow,
+	FormValue,
+	formRowIconVariants,
+	formValueVariants,
+} from "./form-row";
 export type { InputProps, SearchInputProps } from "./input";
 export { Input, inputVariants, SearchInput } from "./input";
 export type { KbdProps } from "./kbd";
@@ -80,6 +90,8 @@ export {
 } from "./popover";
 export type { ProgressBarProps } from "./progress-bar";
 export { ProgressBar } from "./progress-bar";
+export type { QRCodeProps } from "./qr-code";
+export { QRCode } from "./qr-code";
 export { RecordMark } from "./record-mark";
 export type { ScrollAreaProps } from "./scroll-area";
 export { ScrollArea } from "./scroll-area";

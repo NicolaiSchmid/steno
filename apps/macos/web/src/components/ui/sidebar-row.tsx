@@ -4,11 +4,12 @@ import { cn } from "@/lib/cn";
 
 /**
  * A sidebar filter or tag: icon, label and a trailing count. The active row
- * is a raised card on the sidebar surface.
+ * is a raised card on the sidebar surface. With a `subtitle` the row grows to
+ * two lines (the Settings sections: title over a one-line status).
  */
 export const sidebarRowVariants = cva(
 	[
-		"flex h-[30px] w-full shrink-0 select-none items-center gap-2 rounded-control px-2.5 text-left text-[13px] text-foreground outline-none",
+		"flex w-full shrink-0 select-none items-center gap-2 rounded-control px-2.5 text-left text-[13px] text-foreground outline-none",
 		"transition-[background-color,box-shadow] duration-(--duration-functional) ease-standard",
 		"hover:bg-accent focus-visible:ring-2 focus-visible:ring-primary/50",
 		"[&>svg]:size-4 [&>svg]:shrink-0 [&>svg]:stroke-[1.75] [&>svg]:text-muted-foreground/60",
@@ -24,16 +25,22 @@ export const sidebarRowVariants = cva(
 				/** A tag row: a faint "#" where the icon would be. */
 				tag: "before:w-4 before:shrink-0 before:text-center before:text-faint before:content-['#']",
 			},
+			stacked: {
+				true: "min-h-[44px] gap-2.5 py-1.5",
+				false: "h-[30px]",
+			},
 		},
-		defaultVariants: { active: false, variant: "default" },
+		defaultVariants: { active: false, variant: "default", stacked: false },
 	},
 );
 
 export interface SidebarRowProps
 	extends ComponentProps<"button">,
-		VariantProps<typeof sidebarRowVariants> {
+		Omit<VariantProps<typeof sidebarRowVariants>, "stacked"> {
 	icon?: ReactNode;
 	count?: number | string | undefined;
+	/** A one-line status under the label; the row becomes two lines. */
+	subtitle?: ReactNode;
 }
 
 export function SidebarRow({
@@ -42,18 +49,32 @@ export function SidebarRow({
 	variant,
 	icon,
 	count,
+	subtitle,
 	children,
 	...props
 }: SidebarRowProps) {
+	const stacked = subtitle !== undefined && subtitle !== null;
 	return (
 		<button
 			aria-current={active ? "true" : undefined}
-			className={cn(sidebarRowVariants({ active, variant }), className)}
+			className={cn(
+				sidebarRowVariants({ active, variant, stacked }),
+				className,
+			)}
 			type="button"
 			{...props}
 		>
 			{icon}
-			<span className="min-w-0 flex-1 truncate">{children}</span>
+			{stacked ? (
+				<span className="flex min-w-0 flex-1 flex-col gap-px">
+					<span className="truncate leading-[1.3]">{children}</span>
+					<span className="truncate font-normal text-[11px] text-faint leading-[1.3]">
+						{subtitle}
+					</span>
+				</span>
+			) : (
+				<span className="min-w-0 flex-1 truncate">{children}</span>
+			)}
 			{count !== undefined ? (
 				<span className="text-faint text-xs tabular-nums">{count}</span>
 			) : null}

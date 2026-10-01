@@ -177,6 +177,9 @@ final class LLMSettingsViewModel: SettingsSectionModel {
   private(set) var codexModel = ""
   private var codexContextTokens = Settings.defaultCodexContextTokens
   private var stored: Stored?
+  /// Whether a key is in the keychain, as last loaded or saved; the draft
+  /// `apiKey` may differ until `save()`.
+  var hasStoredAPIKey: Bool { !(stored?.apiKey ?? "").isEmpty }
   /// Commits queue behind one another: focus loss and disappearing fire
   /// together, and two overlapping saves would rebuild the pipeline twice.
   private var commitTask: Task<Void, Never>?
@@ -250,7 +253,7 @@ final class LLMSettingsViewModel: SettingsSectionModel {
   }
 
   /// Onboarding's segmented choice: the ChatGPT preset, or the preset the
-  /// typed address belongs to.
+  /// typed address belongs to. Goes with `OnboardingView` in WP4.
   func selectProvider(_ provider: LLMProvider) async {
     await selectPreset(provider == .codex ? .codex : LLMPreset.infer(from: baseURL))
   }

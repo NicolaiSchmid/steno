@@ -1,0 +1,28 @@
+{
+  "devices" : [
+    {
+      "id" : "00000000-0000-0000-0000-000000000028",
+      "lastSeenAt" : "2026-09-29T12:48:00.000Z",
+      "name" : "Nicolai's iPhone",
+      "pairedAt" : "2026-09-24T12:50:00.000Z"
+    }
+  ],
+  "listener" : {
+    "port" : 52431,
+    "state" : "listening"
+  },
+  "macID" : "steno-mac-7f3a",
+  "pairing" : {
+    "expiresAt" : "2026-09-29T12:54:00.000Z",
+    "qrPNGBase64" : "iVBORw0KGgoAAAANSUhEUgAAAB0AAAAdCAAAAABz+DjTAAAAtUlEQVR42m1TCRIDIQjL/z+dtmIOnO41chgCcYG5qC/J7wtd5HH8FvMca7yzS9a4TtSRsS8ebe9o10pEmBCyyhe3527KQ6a3LWeYCx3TH9wun410CVlKF+lUcxOohJsPOdAD8GxNCk0TjXHTt0ZUB5u4yzCxtA6PxOhhSc843FCzuq2ZKeHBNbYOT4gny8NBtczSV8oXaLRJPeCPshQnHYOte8/Q5Ku3XrL/hecslpolluuf2AdYtKtjEhSZQwAAAABJRU5ErkJggg=="
+  },
+  "receipts" : [
+    {
+      "deviceID" : "00000000-0000-0000-0000-000000000028",
+      "receivedBytes" : 12500000,
+      "recordingID" : "00000000-0000-0000-0000-000000000029",
+      "totalBytes" : 25000000
+    }
+  ],
+  "subtitle" : "Nicolai's iPhone"
+}

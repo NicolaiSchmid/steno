@@ -513,7 +513,7 @@ final class SettingsViewModelTests: XCTestCase {
     XCTAssertFalse(model.isAvailable)
     await model.beginPairing()
     XCTAssertNil(model.pairing)
-    XCTAssertNil(model.qrImage)
+    XCTAssertNil(model.qrPNG)
   }
 
   func testPhonesPairingListsDevicesAndRevokes() async throws {
@@ -545,7 +545,7 @@ final class SettingsViewModelTests: XCTestCase {
     XCTAssertNil(model.error, model.error ?? "")
     let payload = try XCTUnwrap(model.pairing)
     XCTAssertTrue(payload.urlString.hasPrefix("steno://"), payload.urlString)
-    XCTAssertNotNil(model.qrImage)
+    XCTAssertNotNil(model.qrPNG)
     XCTAssertTrue(model.pairingIsOpen)
     await TestSupport.waitUntil("listening") {
       if case .listening = model.listener { return true }
@@ -676,7 +676,6 @@ final class SettingsViewModelTests: XCTestCase {
     await model.load()
     XCTAssertEqual(model.state(of: .microphone), .granted)
     XCTAssertEqual(model.state(of: .systemAudio), .granted)
-    XCTAssertTrue(model.allPermissionsGranted)
     XCTAssertEqual(model.folderUsage, .bytes(4_200))
     XCTAssertEqual(model.folderName, "audio")
     XCTAssertTrue(model.footnote.hasPrefix("Recordings stay in the folder above"), model.footnote)
@@ -684,12 +683,9 @@ final class SettingsViewModelTests: XCTestCase {
     let permissions = try XCTUnwrap(environment.permissions as? FakePermissions)
     permissions.states[.systemAudio] = .unknown
     await model.refreshPermissions()
-    XCTAssertFalse(model.allPermissionsGranted)
     await model.requestPermission(.systemAudio)
     XCTAssertEqual(permissions.requests, [.systemAudio])
     XCTAssertEqual(model.state(of: .systemAudio), .granted)
-    model.openPermissionSettings(.microphone)
-    XCTAssertEqual(permissions.openedPanes, [.microphone])
 
     model.measureFolder = { _ in throw CocoaError(.fileReadNoPermission) }
     await model.measureFolderUsage()
@@ -702,7 +698,6 @@ final class SettingsViewModelTests: XCTestCase {
     let model = GeneralSettingsViewModel(environment: environment)
     await model.load()
     XCTAssertEqual(model.calendarPermission, .granted)
-    XCTAssertEqual(model.selectedTemplate?.id, "default")
 
     let permissions = try XCTUnwrap(environment.permissions as? FakePermissions)
     permissions.states[.calendar] = .unknown
@@ -713,12 +708,6 @@ final class SettingsViewModelTests: XCTestCase {
     XCTAssertEqual(model.calendarPermission, .granted)
 
     let updater = try XCTUnwrap(environment.updater as? FakeUpdater)
-    XCTAssertEqual(model.updateStatusText(now: TestSupport.now), "Not checked yet")
-    updater.lastOutcome = .available("0.9.1")
-    XCTAssertEqual(model.updateStatusText(now: TestSupport.now), "Update available: 0.9.1")
-    updater.lastOutcome = .failed("SUSparkleErrorDomain 2001")
-    XCTAssertEqual(model.updateStatusText(now: TestSupport.now), "Could not check for updates")
-    XCTAssertEqual(model.updateFailureDetails, "SUSparkleErrorDomain 2001")
     model.checkForUpdates()
     XCTAssertEqual(updater.checks, 1)
     model.automaticallyDownloadsUpdates = true

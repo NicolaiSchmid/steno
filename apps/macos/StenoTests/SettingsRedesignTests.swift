@@ -209,7 +209,7 @@ final class SettingsRedesignTests: XCTestCase {
 
   // MARK: iPhone
 
-  func testPhonesPairingExpiryFollowsTheClockAndTransfersNameTheDevice() async throws {
+  func testPhonesPairingWindowFollowsTheClock() async throws {
     let store = try MeetingStore.inMemory()
     let inbox = try TestSupport.temporaryDirectory("steno-inbox")
     defer { try? FileManager.default.removeItem(at: inbox) }
@@ -222,57 +222,17 @@ final class SettingsRedesignTests: XCTestCase {
       store: store, intake: FakeHandoverIntake(), identity: identity, now: { now.date })
     let model = PhonesSettingsViewModel(
       handover: handover, now: { now.date }, clock: ManualClock())
-    XCTAssertNil(model.pairingExpiryText, "no code, no sentence")
+    XCTAssertFalse(model.pairingIsOpen, "no code, no window")
 
     await model.beginPairing()
     XCTAssertNil(model.error, model.error ?? "")
-    XCTAssertEqual(model.pairingExpiryText, "It expires in 4 minutes.")
-    now.advance(by: 150)
-    XCTAssertEqual(model.pairingExpiryText, "It expires in 2 minutes.", "90 s rounds up")
-    now.advance(by: 60)
-    XCTAssertEqual(model.pairingExpiryText, "It expires in a minute.")
+    XCTAssertNotNil(model.qrPNGBase64, "the code is encoded once for the page")
     XCTAssertTrue(model.pairingIsOpen)
-    now.advance(by: 60)
+    now.advance(by: 270)
     XCTAssertFalse(model.pairingIsOpen, "past the window the code is closed")
     await model.cancelPairing()
-    XCTAssertNil(model.pairingExpiryText)
+    XCTAssertNil(model.qrPNGBase64)
     XCTAssertEqual(handover.state, .stopped, "no phone paired, so the listener stops")
-
-    let device = PairedDevice(
-      id: UUID(), name: "Nicolai's iPhone", pairedAt: TestSupport.now,
-      lastSeenAt: TestSupport.now)
-    try await store.save(device, tokenHash: Data(repeating: 1, count: 32))
-    await model.load()
-    let known = Self.receipt(deviceID: device.id, byteCount: 1_000, received: [0, 1])
-    XCTAssertEqual(model.deviceName(for: known), "Nicolai's iPhone")
-    XCTAssertEqual(
-      model.deviceName(for: Self.receipt(deviceID: UUID(), byteCount: 1_000, received: [])),
-      "your iPhone", "a transfer from a phone that is gone still reads as a sentence")
-    XCTAssertEqual(PhonesSettingsViewModel.progress(known), 0.5)
-    XCTAssertEqual(
-      PhonesSettingsViewModel.progress(
-        Self.receipt(deviceID: device.id, byteCount: 1_000, received: [0, 1, 2, 3, 4])),
-      1, "the last chunk is short; progress never passes 1")
-    XCTAssertEqual(
-      PhonesSettingsViewModel.progress(
-        Self.receipt(deviceID: device.id, byteCount: 0, received: [])),
-      0, "an empty declaration is not a division by zero")
-
-    let seen = model.pairedText(device)
-    XCTAssertTrue(seen.hasPrefix("Paired "), seen)
-    XCTAssertTrue(seen.contains(" · last seen "), seen)
-    let unseen = model.pairedText(PairedDevice(id: UUID(), name: "x", pairedAt: TestSupport.now))
-    XCTAssertFalse(unseen.contains("last seen"), unseen)
-    XCTAssertFalse(seen.contains(device.id.uuidString), "no identifiers in the row")
-  }
-
-  private static func receipt(deviceID: UUID, byteCount: Int64, received: [Int])
-    -> HandoverReceipt
-  {
-    HandoverReceipt(
-      recordingID: UUID(), deviceID: deviceID, state: .receiving, byteCount: byteCount,
-      sha256: Data(count: 32), chunkSize: 250, receivedChunks: received,
-      createdAt: TestSupport.now, updatedAt: TestSupport.now)
   }
 
   // MARK: Recording

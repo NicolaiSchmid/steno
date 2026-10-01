@@ -86,8 +86,11 @@ export const bridgeMethods = [
 	"settings.general.setDefaultTemplate",
 	"settings.general.requestCalendar",
 	"settings.general.setAutomaticUpdates",
+	"settings.general.openLoginItems",
 	"settings.recording.setInputDevice",
+	"settings.recording.refreshDevices",
 	"settings.recording.chooseFolder",
+	"settings.recording.revealFolder",
 	"settings.recording.setRetention",
 	"settings.recording.requestPermission",
 	"settings.transcription.setEngine",
@@ -97,6 +100,11 @@ export const bridgeMethods = [
 	"settings.summaries.update",
 	"settings.summaries.save",
 	"settings.summaries.test",
+	"settings.summaries.confirmCodex",
+	"settings.summaries.refreshCodexStatus",
+	"settings.summaries.refreshCodexModels",
+	"settings.summaries.selectCodexModel",
+	"settings.summaries.stopUsingCodex",
 	"settings.export.setEnabled",
 	"settings.export.chooseVault",
 	"settings.export.update",
@@ -121,7 +129,6 @@ export const bridgeMethods = [
 ] as const;
 export type BridgeMethod = (typeof bridgeMethods)[number];
 
-export const appearance = z.enum(["light", "dark"]);
 export const permissionKind = z.enum([
 	"microphone",
 	"systemAudio",
@@ -196,7 +203,6 @@ export const bridgeEvent = z
 export const appSnapshot = z
 	.object({
 		version: z.string(),
-		appearance,
 		setupBanner: z
 			.object({
 				title: z.string(),
@@ -440,6 +446,19 @@ const errorFields = {
 	errorDetails: z.string().optional(),
 };
 
+export const settingsTemplate = z
+	.object({ id: z.string(), name: z.string(), description: z.string() })
+	.strict();
+export const acknowledgement = z
+	.object({
+		group: z.enum(["speechModels", "libraries"]),
+		name: z.string(),
+		licence: z.string(),
+		source: z.string(),
+	})
+	.strict();
+export type Acknowledgement = z.infer<typeof acknowledgement>;
+
 export const generalSettingsSnapshot = z
 	.object({
 		subtitle: z.string(),
@@ -452,7 +471,7 @@ export const generalSettingsSnapshot = z
 		]),
 		detectionEnabled: z.boolean(),
 		defaultTemplateID: z.string(),
-		templates: z.array(template),
+		templates: z.array(settingsTemplate),
 		calendarPermission: permissionState,
 		requestingCalendar: z.boolean(),
 		updates: z
@@ -465,6 +484,7 @@ export const generalSettingsSnapshot = z
 				detail: z.string().optional(),
 			})
 			.strict(),
+		acknowledgements: z.array(acknowledgement),
 		...errorFields,
 	})
 	.strict();
@@ -486,8 +506,10 @@ export const recordingSettingsSnapshot = z
 		inputDeviceUID: z.string().optional(),
 		audioFolderPath: z.string(),
 		audioFolderName: z.string(),
+		folderUsage: z.enum(["measuring", "measured", "unavailable"]),
 		folderUsageBytes: z.number().optional(),
 		retention,
+		retentionFootnote: z.string(),
 		keptForeverCount: z.number().int().optional(),
 		permissions: z.array(
 			z
@@ -551,6 +573,7 @@ export const summariesSettingsSnapshot = z
 		baseURL: z.string(),
 		model: z.string(),
 		contextTokens: z.string(),
+		defaultContextTokens: z.number().int(),
 		hasAPIKey: z.boolean(),
 		isConfigured: z.boolean(),
 		isTesting: z.boolean(),
@@ -559,7 +582,20 @@ export const summariesSettingsSnapshot = z
 			.strict()
 			.optional(),
 		validationMessage: z.string().optional(),
-		codexStatus: z.string().optional(),
+		codex: z
+			.object({
+				confirmed: z.boolean(),
+				signIn: z.enum(["notChecked", "signedIn", "unavailable"]),
+				signInDetail: z.string().optional(),
+				model: z.string(),
+				models: z.array(
+					z.object({ slug: z.string(), name: z.string() }).strict(),
+				),
+				isLoadingModels: z.boolean(),
+				modelsError: z.string().optional(),
+			})
+			.strict()
+			.optional(),
 		...errorFields,
 	})
 	.strict();
@@ -796,8 +832,11 @@ export const methodParams = {
 	"settings.general.setDefaultTemplate": setTemplateParams,
 	"settings.general.requestCalendar": null,
 	"settings.general.setAutomaticUpdates": setAutomaticUpdatesParams,
+	"settings.general.openLoginItems": null,
 	"settings.recording.setInputDevice": setStringParams,
+	"settings.recording.refreshDevices": null,
 	"settings.recording.chooseFolder": null,
+	"settings.recording.revealFolder": null,
 	"settings.recording.setRetention": setRetentionParams,
 	"settings.recording.requestPermission": permissionKindParams,
 	"settings.transcription.setEngine": setStringParams,
@@ -807,6 +846,11 @@ export const methodParams = {
 	"settings.summaries.update": summariesUpdateParams,
 	"settings.summaries.save": null,
 	"settings.summaries.test": null,
+	"settings.summaries.confirmCodex": null,
+	"settings.summaries.refreshCodexStatus": null,
+	"settings.summaries.refreshCodexModels": null,
+	"settings.summaries.selectCodexModel": setStringParams,
+	"settings.summaries.stopUsingCodex": null,
 	"settings.export.setEnabled": setBoolParams,
 	"settings.export.chooseVault": null,
 	"settings.export.update": exportUpdateParams,
@@ -858,6 +902,8 @@ export type MethodReply<M extends BridgeMethod> = ReplyOf<M>;
 export const fixtureSchemas = {
 	...topicSchemas,
 	"recording.live": recordingSnapshot,
+	"settings.summaries.codex": summariesSettingsSnapshot,
+	"settings.iphone.pairing": phoneSettingsSnapshot,
 	"envelope.request": bridgeRequest,
 	"envelope.reply": bridgeReply,
 	"envelope.error": bridgeReply,

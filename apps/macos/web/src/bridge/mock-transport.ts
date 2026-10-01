@@ -1,8 +1,13 @@
 import type {
+	ExportSettingsSnapshot,
+	GeneralSettingsSnapshot,
 	MeetingDetailSnapshot,
 	MeetingRow,
 	MeetingsListSnapshot,
+	PhoneSettingsSnapshot,
 	RecordingSnapshot,
+	SummariesSettingsSnapshot,
+	TranscriptionSettingsSnapshot,
 } from "./contract";
 import { detailTab } from "./contract";
 import { BridgeError, type BridgeTransport, SnapshotHub } from "./transport";
@@ -141,12 +146,17 @@ export const scenarios = [
 	"failed",
 	"processing",
 	"export-failed",
+	// Settings
+	"settings-error",
+	"download-failed",
+	"summaries-connected",
+	"summaries-failed",
+	"codex",
+	"codex-consent",
+	"export-on",
+	"pairing",
+	"phone-unavailable",
 ] as const;
-type Scenario = (typeof scenarios)[number];
-
-function isScenario(value: string | null): value is Scenario {
-	return scenarios.some((scenario) => scenario === value);
-}
 
 /**
  * The page's query, wherever it sits: `?scenario=empty#/main` and
@@ -333,9 +343,167 @@ export function applyScenario(
 		result["meeting.detail"] = { ...current, tab: tab.data };
 	}
 
-	// `recording.live` is a fixture, not a topic; the page never sees it.
+	applySettingsScenario(result, snapshots, scenario);
+
+	// `recording.live`, `settings.summaries.codex` and
+	// `settings.iphone.pairing` are fixtures, not topics; the page never
+	// sees them by those names.
 	delete result["recording.live"];
+	delete result["settings.summaries.codex"];
+	delete result["settings.iphone.pairing"];
 	return result;
+}
+
+/**
+ * The Settings states: `settings-error` (General with an error and its
+ * details, a login item awaiting approval, an update available),
+ * `download-failed` (the speech model's download failed), `summaries-connected`
+ * and `summaries-failed` (a configured OpenAI endpoint with its test result),
+ * `codex` (ChatGPT confirmed, from `settings.summaries.codex`), `codex-consent`
+ * (ChatGPT chosen, not yet confirmed), `export-on` (a vault chosen and saved),
+ * `pairing` (a code open and a transfer arriving, from
+ * `settings.iphone.pairing`), `phone-unavailable` (no handover service).
+ */
+function applySettingsScenario(
+	result: FixtureMap,
+	snapshots: FixtureMap,
+	scenario: string | null,
+) {
+	const general = snapshots["settings.general"] as
+		| GeneralSettingsSnapshot
+		| undefined;
+	const transcription = snapshots["settings.transcription"] as
+		| TranscriptionSettingsSnapshot
+		| undefined;
+	const summaries = snapshots["settings.summaries"] as
+		| SummariesSettingsSnapshot
+		| undefined;
+	const exportSettings = snapshots["settings.export"] as
+		| ExportSettingsSnapshot
+		| undefined;
+	const phone = snapshots["settings.iphone"] as
+		| PhoneSettingsSnapshot
+		| undefined;
+
+	if (scenario === "settings-error" && general) {
+		result["settings.general"] = {
+			...general,
+			subtitle: "Update available: 0.10.1",
+			loginItem: "requiresApproval",
+			updates: {
+				...general.updates,
+				outcome: "available",
+				detail: "0.10.1",
+			},
+			error: "The setting could not be saved.",
+			errorDetails:
+				"SettingsStoreError.writeFailed: The file “settings.json” couldn’t be saved in the folder “Steno”.",
+		} satisfies GeneralSettingsSnapshot;
+	}
+
+	if (scenario === "download-failed" && transcription) {
+		result["settings.transcription"] = {
+			...transcription,
+			subtitle: "Download needed",
+			assets: transcription.assets.map((asset, index) =>
+				index === 0
+					? {
+							...asset,
+							state: "failed",
+							detail: "Not downloaded · 485 MB",
+							failure:
+								"URLError.notConnectedToInternet: The Internet connection appears to be offline.",
+						}
+					: asset,
+			),
+		} satisfies TranscriptionSettingsSnapshot;
+	}
+
+	if (
+		(scenario === "summaries-connected" || scenario === "summaries-failed") &&
+		summaries
+	) {
+		const ok = scenario === "summaries-connected";
+		result["settings.summaries"] = {
+			...summaries,
+			subtitle: "OpenAI",
+			presetID: "openAI",
+			// The hosted preset hides its address; an empty one keeps the
+			// production bundle free of fetchable URLs (scripts/check-offline.mjs).
+			baseURL: "",
+			model: "gpt-4.1-mini",
+			hasAPIKey: true,
+			isConfigured: true,
+			testResult: ok
+				? {
+						ok: true,
+						message: "Connected. 12 models listed; structured output works.",
+					}
+				: {
+						ok: false,
+						message:
+							"HTTP 401 from the service's models list: Incorrect API key provided.",
+					},
+		} satisfies SummariesSettingsSnapshot;
+	}
+
+	if (scenario === "codex") {
+		const codex = snapshots["settings.summaries.codex"];
+		if (codex) {
+			result["settings.summaries"] = codex;
+		}
+	}
+
+	if (scenario === "codex-consent" && summaries) {
+		result["settings.summaries"] = {
+			...summaries,
+			presetID: "codex",
+			codex: {
+				confirmed: false,
+				signIn: "signedIn",
+				signInDetail: "nicolai@example.com (Plus)",
+				model: "",
+				models: [],
+				isLoadingModels: false,
+			},
+		} satisfies SummariesSettingsSnapshot;
+	}
+
+	if (scenario === "export-on" && exportSettings) {
+		result["settings.export"] = {
+			...exportSettings,
+			subtitle: "Work Vault",
+			enabled: true,
+			vaultPath: "/Users/nicolai/Notes/Work Vault",
+			vaultName: "Work Vault",
+			saved: true,
+		} satisfies ExportSettingsSnapshot;
+	}
+
+	if (scenario === "pairing") {
+		const pairing = snapshots["settings.iphone.pairing"] as
+			| PhoneSettingsSnapshot
+			| undefined;
+		if (pairing?.pairing) {
+			result["settings.iphone"] = {
+				...pairing,
+				pairing: {
+					...pairing.pairing,
+					expiresAt: new Date(Date.now() + 4 * 60_000).toISOString(),
+				},
+			} satisfies PhoneSettingsSnapshot;
+		}
+	}
+
+	if (scenario === "phone-unavailable" && phone) {
+		const { macID: _macID, ...rest } = phone;
+		result["settings.iphone"] = {
+			...rest,
+			subtitle: "Unavailable",
+			devices: [],
+			listener: { state: "unavailable" },
+		} satisfies PhoneSettingsSnapshot;
+	}
 }
 
 export function createMockTransport(

@@ -4,6 +4,7 @@ import {
 	type ReactNode,
 	useContext,
 	useEffect,
+	useRef,
 	useState,
 } from "react";
 import { type BridgeClient, createBridgeClient } from "./client";
@@ -78,4 +79,17 @@ export function send<M extends BridgeMethod>(
 	client.call(method, ...params).catch((cause: unknown) => {
 		console.error(`bridge: ${method} failed`, cause);
 	});
+}
+
+/**
+ * Tells the host the page is ready, once per mount: the host publishes its
+ * first snapshots on `page.ready` and holds them until then.
+ */
+export function usePageReady(client: BridgeClient): void {
+	const sent = useRef(false);
+	useEffect(() => {
+		if (sent.current) return;
+		sent.current = true;
+		send(client, "page.ready");
+	}, [client]);
 }

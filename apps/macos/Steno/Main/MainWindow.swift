@@ -13,9 +13,7 @@ import SwiftUI
 struct MainWindow: View {
   let controller: AppController
   @State private var bridge: MainWindowBridge
-  @Environment(\.colorScheme) private var colorScheme
   @Environment(\.openWindow) private var openWindow
-  @Environment(\.openSettings) private var openSettings
 
   /// 960 x 600, the size the UI smoke test reviews the window at.
   static let minimumSize = CGSize(width: 960, height: 600)
@@ -26,31 +24,15 @@ struct MainWindow: View {
   }
 
   var body: some View {
+    // `ignoresSafeArea` inside the frame: the page covers the hidden title
+    // bar's region too, so the traffic lights float over its own inset and no
+    // bare strip shows above it.
     WebWindowView(route: "#/main", host: bridge)
+      .ignoresSafeArea()
       .frame(minWidth: Self.minimumSize.width, minHeight: Self.minimumSize.height)
-      .onChange(of: colorScheme, initial: true) { _, scheme in
-        bridge.appearance = scheme == .dark ? .dark : .light
-      }
       .task {
-        bridge.openWindow = { [controller, openWindow, openSettings] request in
-          switch request.window {
-          case .main:
-            if let meetingID = request.meetingID { controller.requestedMeetingID = meetingID }
-            openWindow(id: "main")
-            NSApp.activate()
-          case .settings:
-            // The section is a deep link `SettingsView` applies when it
-            // opens, the same path the setup banner used.
-            if let section = request.section.flatMap({ SettingsSection(rawValue: $0.rawValue) }) {
-              controller.openSettings(section, with: openSettings)
-            } else {
-              openSettings()
-              NSApp.activate()
-            }
-          case .onboarding:
-            openWindow(id: "onboarding")
-            NSApp.activate()
-          }
+        bridge.openWindow = { [controller, openWindow] request in
+          openRequestedWindow(request, controller: controller, openWindow: openWindow)
         }
         await bridge.run()
       }

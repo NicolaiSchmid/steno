@@ -57,7 +57,9 @@ holding each lane for sixty seconds, so the processing card can be watched; the 
 uses it. `-steno-appearance=light|dark` renders the app in that appearance whatever the
 system setting, `-steno-window=960x600` sizes the main window at launch and
 `-steno-settings-section=recording` (any `SettingsSection` raw value) is the section Settings
-opens on; the screenshot matrix (`testScreenshotMatrixLight` and `Dark`) uses them. A value
+opens on (the page reads it from the `app` snapshot's `requestedSettingsSection` once ⌘, opens
+the window, which is `settings-window` to XCUITest); the screenshot matrix
+(`testScreenshotMatrixLight` and `Dark`) uses them. A value
 always sits in the flag's own argument: AppKit opens a separate token as a document at launch
 and SwiftUI then leaves the main window closed. The
 `ui-smoke` job exports the attachments beside the result bundle
@@ -94,7 +96,8 @@ a Debug build read that feed instead of `SUFeedURL`. Serve `dist/` with
 | `Steno/Main/` | meeting list, detail with Summary, Transcript, Tasks, Scratchpad |
 | `Steno/Speakers/` | the speaker review sheet and clip player |
 | `Steno/Detection/` | the detection prompt (floating panel) |
-| `Steno/Settings/` | Sidebar window: General, Recording, Transcription, Summaries, Export, iPhone (`SettingsSection`), one view model each plus the sidebar status (`SettingsOverviewViewModel`) and the Acknowledgements sheet |
+| `Steno/Settings/` | The Settings window (`SettingsWindow`, the web page at `#/settings` over `Web/SettingsBridge`): General, Recording, Transcription, Summaries, Export, iPhone (`SettingsSection`), one view model each plus the sidebar status (`SettingsOverviewViewModel`) |
+| `Steno/Web/` | The web host: scheme handler, bridge, `WebWindowView`, and one `*Bridge` plus `*Snapshots` per window (`MainWindowBridge`, `SettingsBridge`) |
 | `Steno/Onboarding/` | permission onboarding |
 | `Steno/Services/` | the four app protocols over system frameworks, their live types and fakes |
 | `StenoTests/` | hostless XCTest unit tests, one file per view model |

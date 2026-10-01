@@ -36,10 +36,6 @@ final class GeneralSettingsViewModel: SettingsSectionModel {
 
   var launchAtLogin: Bool { loginItem.isOn }
 
-  var selectedTemplate: SummaryTemplate? {
-    templates.first { $0.id == defaultTemplateID }
-  }
-
   func setLaunchAtLogin(_ enabled: Bool) async {
     do {
       try await environment.setLaunchAtLogin(enabled)
@@ -72,10 +68,6 @@ final class GeneralSettingsViewModel: SettingsSectionModel {
     calendarPermission = await environment.permissions.request(.calendar)
   }
 
-  func openCalendarSettings() {
-    environment.permissions.openSystemSettings(for: .calendar)
-  }
-
   // MARK: Updates
 
   var canCheckForUpdates: Bool { environment.updater.canCheckForUpdates }
@@ -94,19 +86,11 @@ final class GeneralSettingsViewModel: SettingsSectionModel {
     environment.updater.checkForUpdates()
   }
 
-  /// "Up to date, checked 2 hours ago", "Update available: 0.9.1", "Could not
-  /// check for updates" or "Not checked yet".
-  func updateStatusText(now: Date) -> String {
-    Self.updateStatus(
-      outcome: environment.updater.lastOutcome, lastCheck: environment.updater.lastUpdateCheckDate,
-      now: now)
-  }
+  /// What the last check found, for the page's status line.
+  var updateOutcome: UpdateCheckOutcome { environment.updater.lastOutcome }
 
-  /// The failure text of the last check, for the details disclosure.
-  var updateFailureDetails: String? {
-    if case .failed(let message) = environment.updater.lastOutcome { return message }
-    return nil
-  }
+  /// When the last check ran; Sparkle persists it across launches.
+  var lastUpdateCheckDate: Date? { environment.updater.lastUpdateCheckDate }
 
   nonisolated static func updateStatus(
     outcome: UpdateCheckOutcome, lastCheck: Date?, now: Date

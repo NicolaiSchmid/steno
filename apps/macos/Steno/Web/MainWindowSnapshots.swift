@@ -172,7 +172,7 @@ extension AppSnapshot {
   /// requests as they stand; the bridge consumes the meeting request.
   @MainActor
   init(
-    controller: AppController, appearance: BridgeAppearance, hasMeetings: Bool = true,
+    controller: AppController, hasMeetings: Bool = true,
     version: String = MainWindowSnapshots.bundleVersion
   ) {
     var banner: SetupBanner?
@@ -182,7 +182,7 @@ extension AppSnapshot {
         offersVault: message.offersVault)
     }
     self.init(
-      version: version, appearance: appearance, setupBanner: banner, phone: nil,
+      version: version, setupBanner: banner, phone: nil,
       requestedMeetingID: controller.requestedMeetingID,
       requestedSettingsSection: controller.requestedSettingsSection.flatMap {
         BridgeSettingsSection(rawValue: $0.rawValue)

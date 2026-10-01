@@ -1,6 +1,7 @@
 {
   "baseURL" : "http://127.0.0.1:1234/v1",
   "contextTokens" : "32000",
+  "defaultContextTokens" : 32000,
   "hasAPIKey" : false,
   "isConfigured" : false,
   "isTesting" : false,
@@ -29,6 +30,5 @@
       "title" : "OpenAI"
     }
   ],
-  "subtitle" : "Not set up",
-  "validationMessage" : "Choose a service and enter a model name; summaries stay off until then."
+  "subtitle" : "Not set up"
 }
