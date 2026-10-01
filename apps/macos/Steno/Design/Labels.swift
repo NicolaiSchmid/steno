@@ -53,19 +53,7 @@ extension MeetingState {
   }
 }
 
-extension MeetingListViewModel.StateFilter {
-  /// The nav row's glyph.
-  var symbolName: String {
-    switch self {
-    case .all: "rectangle.stack"
-    case .processing: "clock"
-    case .ready: "checkmark.circle"
-    case .failed: "exclamationmark.triangle"
-    }
-  }
-}
-
-/// Every wall-clock string the list and the header render, through
+/// Every wall-clock string the list and the header snapshots carry, through
 /// `Date.FormatStyle` so 12 versus 24 hour, "Sep 28" versus "28. Sept." and
 /// weekday names follow the locale; never a literal pattern. The calendar
 /// carries the time zone, so a test can view a Berlin recording from UTC.
@@ -157,17 +145,6 @@ extension RecordingEndReason {
       "Ended because the recording failed. The recording up to that point was kept."
     }
   }
-
-  /// What the list row appends to its meta line; nil when there is nothing
-  /// worth a glance.
-  var listSuffix: String? {
-    switch self {
-    case .callEnded: "ended automatically"
-    case .deviceLost: "device lost"
-    case .failed: "recording failed"
-    case .manual, .quit: nil
-    }
-  }
 }
 
 extension AudioRetention {
@@ -199,12 +176,5 @@ extension ByteCountFormatter {
   /// "4.2 GB": model sizes and the recordings folder alike.
   static func fileSize(_ bytes: Int64) -> String {
     string(fromByteCount: bytes, countStyle: .file)
-  }
-}
-
-extension LanguageTag {
-  /// "German" for `de`, the tag itself when the locale has no name for it.
-  func localizedName(in locale: Locale = .current) -> String {
-    locale.localizedString(forLanguageCode: rawValue) ?? rawValue
   }
 }
