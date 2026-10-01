@@ -174,11 +174,37 @@ public enum BridgeSamples {
 
   public static let settingsGeneral = GeneralSettingsSnapshot(
     subtitle: "Steno 0.10.0", version: "0.10.0", loginItem: .enabled, detectionEnabled: true,
-    defaultTemplateID: "default", templates: meetingDetail.templates, calendarPermission: .granted,
-    requestingCalendar: false,
+    defaultTemplateID: "default",
+    templates: [
+      .init(
+        id: "default", name: "Standard",
+        description: "Executive summary, decisions, open questions and the tasks."),
+      .init(
+        id: "standup", name: "Standup",
+        description: "What each person did, does next and is blocked by."),
+      .init(
+        id: "oneOnOne", name: "One-on-one",
+        description: "Topics raised, agreements and follow-ups for two people."),
+    ],
+    calendarPermission: .granted, requestingCalendar: false,
     updates: .init(
       canCheck: true, automaticallyChecks: true, automaticallyDownloads: false,
-      lastCheckAt: startedAt.addingTimeInterval(-3_600), outcome: .upToDate))
+      lastCheckAt: startedAt.addingTimeInterval(-3_600), outcome: .upToDate),
+    acknowledgements: [
+      .init(
+        group: .speechModels, name: "Parakeet TDT 0.6B v3 (int8)", licence: "CC-BY-4.0",
+        source: "FluidInference/parakeet-tdt-0.6b-v3-coreml"),
+      .init(
+        group: .speechModels, name: "Speaker diarization (pyannote community-1)",
+        licence: "Apache-2.0 (pyannote and WeSpeaker upstream)",
+        source: "FluidInference/speaker-diarization-coreml"),
+      .init(
+        group: .libraries, name: "Sparkle", licence: "MIT",
+        source: "https://github.com/sparkle-project/Sparkle"),
+      .init(
+        group: .libraries, name: "GRDB.swift", licence: "MIT",
+        source: "https://github.com/groue/GRDB.swift"),
+    ])
 
   public static let settingsRecording = RecordingSettingsSnapshot(
     subtitle: "Ready",
@@ -187,8 +213,10 @@ public enum BridgeSamples {
       .init(uid: "AirPodsPro", name: "Nicolai's AirPods Pro"),
     ],
     inputDeviceUID: nil, audioFolderPath: "/Users/nicolai/Library/Application Support/Steno/audio",
-    audioFolderName: "audio", folderUsageBytes: 734_003_200,
+    audioFolderName: "audio", folderUsage: .measured, folderUsageBytes: 734_003_200,
     retention: .init(mode: .keepDays, days: 30),
+    retentionFootnote:
+      "Each recording is deleted 30 days after it was processed and exported. Transcripts, summaries and exports are never deleted by this rule.",
     keptForeverCount: 2,
     permissions: [
       .init(kind: .microphone, state: .granted, isRequesting: false),
@@ -223,8 +251,22 @@ public enum BridgeSamples {
         modelPlaceholder: "gpt-4.1-mini"),
     ],
     presetID: "lmStudio", baseURL: "http://127.0.0.1:1234/v1", model: "", contextTokens: "32000",
-    hasAPIKey: false, isConfigured: false, isTesting: false,
-    validationMessage: "Choose a service and enter a model name; summaries stay off until then.")
+    hasAPIKey: false, isConfigured: false, isTesting: false)
+
+  /// The ChatGPT preset after confirmation, with the model list: what the
+  /// `codex` scenario serves as `settings.summaries`.
+  public static let settingsSummariesCodex = SummariesSettingsSnapshot(
+    subtitle: "ChatGPT (Codex)", presets: settingsSummaries.presets, presetID: "codex",
+    baseURL: "http://127.0.0.1:1234/v1", model: "", contextTokens: "32000", hasAPIKey: false,
+    isConfigured: true, isTesting: false,
+    testResult: .init(ok: true, message: "Connected. 3 models listed; structured output works."),
+    codex: .init(
+      confirmed: true, signIn: .signedIn, signInDetail: "nicolai@example.com (Plus)",
+      model: "gpt-5.1-codex",
+      models: [
+        .init(slug: "gpt-5.1-codex", name: "GPT-5.1 Codex"),
+        .init(slug: "gpt-5.1-codex-mini", name: "GPT-5.1 Codex mini"),
+      ]))
 
   public static let settingsExport = ExportSettingsSnapshot(
     subtitle: "Off", enabled: false, vaultPath: nil, vaultName: nil, peopleFolder: "People",
@@ -238,6 +280,22 @@ public enum BridgeSamples {
         lastSeenAt: startedAt.addingTimeInterval(-120))
     ],
     listener: .init(state: .listening, port: 52_431), pairing: nil, receipts: [])
+
+  /// A pairing code open for four minutes and a transfer half received: what
+  /// the `pairing` scenario serves as `settings.iphone`. The PNG is a 29 by 29
+  /// placeholder in the shape of a code, not a scannable one.
+  public static let settingsPhonePairing = PhoneSettingsSnapshot(
+    subtitle: "Nicolai's iPhone", macID: "steno-mac-7f3a", devices: settingsPhone.devices,
+    listener: .init(state: .listening, port: 52_431),
+    pairing: .init(
+      expiresAt: startedAt.addingTimeInterval(240),
+      qrPNGBase64:
+        "iVBORw0KGgoAAAANSUhEUgAAAB0AAAAdCAAAAABz+DjTAAAAtUlEQVR42m1TCRIDIQjL/z+dtmIOnO41chgCcYG5qC/J7wtd5HH8FvMca7yzS9a4TtSRsS8ebe9o10pEmBCyyhe3527KQ6a3LWeYCx3TH9wun410CVlKF+lUcxOohJsPOdAD8GxNCk0TjXHTt0ZUB5u4yzCxtA6PxOhhSc843FCzuq2ZKeHBNbYOT4gny8NBtczSV8oXaLRJPeCPshQnHYOte8/Q5Ku3XrL/hecslpolluuf2AdYtKtjEhSZQwAAAABJRU5ErkJggg=="
+    ),
+    receipts: [
+      .init(
+        deviceID: phoneID, recordingID: uuid(41), receivedBytes: 12_500_000, totalBytes: 25_000_000)
+    ])
 
   public static let onboarding = OnboardingSnapshot(
     page: .permissions,
@@ -320,8 +378,10 @@ extension BridgeSamples {
     BridgeFixture("settings.recording", settingsRecording),
     BridgeFixture("settings.transcription", settingsTranscription),
     BridgeFixture("settings.summaries", settingsSummaries),
+    BridgeFixture("settings.summaries.codex", settingsSummariesCodex),
     BridgeFixture("settings.export", settingsExport),
     BridgeFixture("settings.iphone", settingsPhone),
+    BridgeFixture("settings.iphone.pairing", settingsPhonePairing),
     BridgeFixture("onboarding", onboarding),
     BridgeFixture("envelope.request", request),
     BridgeFixture("envelope.reply", reply),
@@ -364,6 +424,7 @@ extension BridgeSamples {
     BridgeFixture(
       "params.settings.export.update", ExportUpdateParams(includeAudio: true, taskTag: "#todo")),
     BridgeFixture("params.deviceID", DeviceIDParams(deviceID: phoneID)),
+    BridgeFixture("params.settings.showSection", ShowSectionParams(section: .recording)),
     BridgeFixture("params.onboarding.setupStep", SetupStepParams(step: .vault)),
     BridgeFixture(
       "params.system.openURL", OpenURLParams(url: "https://github.com/NicolaiSchmid/steno")),

@@ -1,4 +1,30 @@
 {
+  "acknowledgements" : [
+    {
+      "group" : "speechModels",
+      "licence" : "CC-BY-4.0",
+      "name" : "Parakeet TDT 0.6B v3 (int8)",
+      "source" : "FluidInference/parakeet-tdt-0.6b-v3-coreml"
+    },
+    {
+      "group" : "speechModels",
+      "licence" : "Apache-2.0 (pyannote and WeSpeaker upstream)",
+      "name" : "Speaker diarization (pyannote community-1)",
+      "source" : "FluidInference/speaker-diarization-coreml"
+    },
+    {
+      "group" : "libraries",
+      "licence" : "MIT",
+      "name" : "Sparkle",
+      "source" : "https://github.com/sparkle-project/Sparkle"
+    },
+    {
+      "group" : "libraries",
+      "licence" : "MIT",
+      "name" : "GRDB.swift",
+      "source" : "https://github.com/groue/GRDB.swift"
+    }
+  ],
   "calendarPermission" : "granted",
   "defaultTemplateID" : "default",
   "detectionEnabled" : true,
@@ -7,12 +33,19 @@
   "subtitle" : "Steno 0.10.0",
   "templates" : [
     {
+      "description" : "Executive summary, decisions, open questions and the tasks.",
       "id" : "default",
-      "name" : "Meeting notes"
+      "name" : "Standard"
     },
     {
+      "description" : "What each person did, does next and is blocked by.",
       "id" : "standup",
       "name" : "Standup"
+    },
+    {
+      "description" : "Topics raised, agreements and follow-ups for two people.",
+      "id" : "oneOnOne",
+      "name" : "One-on-one"
     }
   ],
   "updates" : {

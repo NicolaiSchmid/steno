@@ -1,12 +1,29 @@
 {
   "baseURL" : "http://127.0.0.1:1234/v1",
+  "codex" : {
+    "confirmed" : true,
+    "isLoadingModels" : false,
+    "model" : "gpt-5.1-codex",
+    "models" : [
+      {
+        "name" : "GPT-5.1 Codex",
+        "slug" : "gpt-5.1-codex"
+      },
+      {
+        "name" : "GPT-5.1 Codex mini",
+        "slug" : "gpt-5.1-codex-mini"
+      }
+    ],
+    "signIn" : "signedIn",
+    "signInDetail" : "nicolai@example.com (Plus)"
+  },
   "contextTokens" : "32000",
   "defaultContextTokens" : 32000,
   "hasAPIKey" : false,
-  "isConfigured" : false,
+  "isConfigured" : true,
   "isTesting" : false,
   "model" : "",
-  "presetID" : "lmStudio",
+  "presetID" : "codex",
   "presets" : [
     {
       "id" : "lmStudio",
@@ -30,5 +47,9 @@
       "title" : "OpenAI"
     }
   ],
-  "subtitle" : "Not set up"
+  "subtitle" : "ChatGPT (Codex)",
+  "testResult" : {
+    "message" : "Connected. 3 models listed; structured output works.",
+    "ok" : true
+  }
 }

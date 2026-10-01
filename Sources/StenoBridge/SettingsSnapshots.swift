@@ -40,23 +40,59 @@ public struct GeneralSettingsSnapshot: Codable, Sendable, Equatable {
     }
   }
 
+  /// A summary template with the sentence shown under the picker.
+  public struct Template: Codable, Sendable, Equatable {
+    public var id: String
+    public var name: String
+    public var description: String
+
+    public init(id: String, name: String, description: String) {
+      self.id = id
+      self.name = name
+      self.description = description
+    }
+  }
+
+  /// One line of the Acknowledgements dialog: a speech model or a library,
+  /// its licence and where it comes from (a URL for libraries, a repository
+  /// path for models).
+  public struct Acknowledgement: Codable, Sendable, Equatable {
+    public enum Group: String, Codable, Sendable, CaseIterable {
+      case speechModels
+      case libraries
+    }
+
+    public var group: Group
+    public var name: String
+    public var licence: String
+    public var source: String
+
+    public init(group: Group, name: String, licence: String, source: String) {
+      self.group = group
+      self.name = name
+      self.licence = licence
+      self.source = source
+    }
+  }
+
   public var subtitle: String
   public var version: String
   public var loginItem: LoginItem
   public var detectionEnabled: Bool
   public var defaultTemplateID: String
-  public var templates: [MeetingDetailSnapshot.Template]
+  public var templates: [Template]
   public var calendarPermission: BridgePermissionState
   public var requestingCalendar: Bool
   public var updates: Updates
+  public var acknowledgements: [Acknowledgement]
   public var error: String?
   public var errorDetails: String?
 
   public init(
     subtitle: String, version: String, loginItem: LoginItem, detectionEnabled: Bool,
-    defaultTemplateID: String, templates: [MeetingDetailSnapshot.Template],
+    defaultTemplateID: String, templates: [Template],
     calendarPermission: BridgePermissionState, requestingCalendar: Bool, updates: Updates,
-    error: String? = nil, errorDetails: String? = nil
+    acknowledgements: [Acknowledgement] = [], error: String? = nil, errorDetails: String? = nil
   ) {
     self.subtitle = subtitle
     self.version = version
@@ -67,6 +103,7 @@ public struct GeneralSettingsSnapshot: Codable, Sendable, Equatable {
     self.calendarPermission = calendarPermission
     self.requestingCalendar = requestingCalendar
     self.updates = updates
+    self.acknowledgements = acknowledgements
     self.error = error
     self.errorDetails = errorDetails
   }
@@ -107,14 +144,25 @@ public struct RecordingSettingsSnapshot: Codable, Sendable, Equatable {
     }
   }
 
+  /// Whether `folderUsageBytes` is a figure, still being measured, or could
+  /// not be measured.
+  public enum FolderUsage: String, Codable, Sendable, CaseIterable {
+    case measuring
+    case measured
+    case unavailable
+  }
+
   public var subtitle: String
   public var devices: [Device]
   /// nil means the system default input.
   public var inputDeviceUID: String?
   public var audioFolderPath: String
   public var audioFolderName: String
+  public var folderUsage: FolderUsage
   public var folderUsageBytes: Int64?
   public var retention: Retention
+  /// The sentence under the retention picker for the current rule.
+  public var retentionFootnote: String
   public var keptForeverCount: Int?
   public var permissions: [Permission]
   public var error: String?
@@ -122,7 +170,8 @@ public struct RecordingSettingsSnapshot: Codable, Sendable, Equatable {
 
   public init(
     subtitle: String, devices: [Device], inputDeviceUID: String?, audioFolderPath: String,
-    audioFolderName: String, folderUsageBytes: Int64?, retention: Retention, keptForeverCount: Int?,
+    audioFolderName: String, folderUsage: FolderUsage = .measured, folderUsageBytes: Int64?,
+    retention: Retention, retentionFootnote: String = "", keptForeverCount: Int?,
     permissions: [Permission], error: String? = nil, errorDetails: String? = nil
   ) {
     self.subtitle = subtitle
@@ -130,8 +179,10 @@ public struct RecordingSettingsSnapshot: Codable, Sendable, Equatable {
     self.inputDeviceUID = inputDeviceUID
     self.audioFolderPath = audioFolderPath
     self.audioFolderName = audioFolderName
+    self.folderUsage = folderUsage
     self.folderUsageBytes = folderUsageBytes
     self.retention = retention
+    self.retentionFootnote = retentionFootnote
     self.keptForeverCount = keptForeverCount
     self.permissions = permissions
     self.error = error
@@ -235,26 +286,72 @@ public struct SummariesSettingsSnapshot: Codable, Sendable, Equatable {
     }
   }
 
+  /// The ChatGPT (Codex) preset: what the sign-in on this Mac looks like,
+  /// whether the user has confirmed its use, and the model list once
+  /// confirmed. Present only while that preset is selected.
+  public struct Codex: Codable, Sendable, Equatable {
+    public enum SignIn: String, Codable, Sendable, CaseIterable {
+      case notChecked
+      case signedIn
+      case unavailable
+    }
+
+    public struct Model: Codable, Sendable, Equatable {
+      public var slug: String
+      public var name: String
+
+      public init(slug: String, name: String) {
+        self.slug = slug
+        self.name = name
+      }
+    }
+
+    public var confirmed: Bool
+    public var signIn: SignIn
+    /// The account line while signed in; the reason while unavailable.
+    public var signInDetail: String?
+    /// The picked model slug; empty until the list arrives or the user picks.
+    public var model: String
+    public var models: [Model]
+    public var isLoadingModels: Bool
+    public var modelsError: String?
+
+    public init(
+      confirmed: Bool, signIn: SignIn, signInDetail: String? = nil, model: String,
+      models: [Model] = [], isLoadingModels: Bool = false, modelsError: String? = nil
+    ) {
+      self.confirmed = confirmed
+      self.signIn = signIn
+      self.signInDetail = signInDetail
+      self.model = model
+      self.models = models
+      self.isLoadingModels = isLoadingModels
+      self.modelsError = modelsError
+    }
+  }
+
   public var subtitle: String
   public var presets: [Preset]
   public var presetID: String
   public var baseURL: String
   public var model: String
   public var contextTokens: String
+  public var defaultContextTokens: Int
   public var hasAPIKey: Bool
   public var isConfigured: Bool
   public var isTesting: Bool
   public var testResult: TestResult?
   public var validationMessage: String?
-  public var codexStatus: String?
+  public var codex: Codex?
   public var error: String?
   public var errorDetails: String?
 
   public init(
     subtitle: String, presets: [Preset], presetID: String, baseURL: String, model: String,
-    contextTokens: String, hasAPIKey: Bool, isConfigured: Bool, isTesting: Bool,
-    testResult: TestResult? = nil, validationMessage: String? = nil, codexStatus: String? = nil,
-    error: String? = nil, errorDetails: String? = nil
+    contextTokens: String, defaultContextTokens: Int = 32_000, hasAPIKey: Bool,
+    isConfigured: Bool, isTesting: Bool, testResult: TestResult? = nil,
+    validationMessage: String? = nil, codex: Codex? = nil, error: String? = nil,
+    errorDetails: String? = nil
   ) {
     self.subtitle = subtitle
     self.presets = presets
@@ -262,12 +359,13 @@ public struct SummariesSettingsSnapshot: Codable, Sendable, Equatable {
     self.baseURL = baseURL
     self.model = model
     self.contextTokens = contextTokens
+    self.defaultContextTokens = defaultContextTokens
     self.hasAPIKey = hasAPIKey
     self.isConfigured = isConfigured
     self.isTesting = isTesting
     self.testResult = testResult
     self.validationMessage = validationMessage
-    self.codexStatus = codexStatus
+    self.codex = codex
     self.error = error
     self.errorDetails = errorDetails
   }
