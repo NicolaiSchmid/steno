@@ -20,6 +20,7 @@ export function PermissionsPage({
 	onboarding: OnboardingSnapshot;
 }) {
 	const client = useBridge();
+	const busy = onboarding.permissions.some((step) => step.isRequesting);
 	return (
 		<OnboardingPage
 			aside={onboarding.retentionSentence}
@@ -68,6 +69,7 @@ export function PermissionsPage({
 						}
 						optional={!step.isRequired}
 						prominent
+						requestDisabled={busy}
 						skipped={step.isSkipped}
 						state={step.state}
 					/>

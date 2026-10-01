@@ -237,6 +237,10 @@ final class LaunchSmokeTests: XCTestCase {
   private static let onboardingIntro =
     "A few permissions, then where summaries come from and where meetings go. Audio never leaves this Mac."
   private static let setupTitle = "Summaries and export"
+  private static let summariesSentence =
+    """
+    Steno sends the transcript text, never audio, to a model to clean it up and write the summary, tasks and decisions: a server or API key of your choice, or your ChatGPT plan through the Codex sign-in on this Mac. Without one, meetings keep a raw transcript and no summary.
+    """
 
   /// The onboarding window: `onboarding-window`, the identifier
   /// `UITestWindowMarker` gives its `NSWindow`.
@@ -244,13 +248,13 @@ final class LaunchSmokeTests: XCTestCase {
     app.windows["onboarding-window"].firstMatch
   }
 
-  /// A text the page shows, by its first words and whatever element WebKit
-  /// exposes it as: a static text for a paragraph or a row title, a heading
-  /// for the H1. A row title is matched by its start since the "Optional"
-  /// badge beside it may share its accessibility element.
-  private func pageText(startingWith text: String, in window: XCUIElement) -> XCUIElement {
-    window.descendants(matching: .any)
-      .matching(NSPredicate(format: "label BEGINSWITH %@", text)).firstMatch
+  /// A text the page shows, as the static text WebKit exposes it as: the
+  /// whole text is its identifier (a paragraph, a row title, the H1's inner
+  /// text), while `label` is not set for every element, so the match is
+  /// exact and on the full text. The "Optional" badge beside a row title is
+  /// a static text of its own.
+  private func pageText(_ text: String, in window: XCUIElement) -> XCUIElement {
+    window.staticTexts[text].firstMatch
   }
 
   /// The onboarding window hosts the web page: page 1 renders its intro
@@ -265,14 +269,14 @@ final class LaunchSmokeTests: XCTestCase {
     XCTAssertTrue(
       window.webViews.firstMatch.waitForExistence(timeout: 20),
       "no web view in the onboarding window")
-    let intro = pageText(startingWith: Self.onboardingIntro, in: window)
+    let intro = pageText(Self.onboardingIntro, in: window)
     XCTAssertTrue(intro.waitForExistence(timeout: 20), "page 1 did not render its intro")
     XCTAssertTrue(
       window.frame.contains(intro.frame),
       "the intro \(intro.frame) runs past the window \(window.frame) instead of wrapping")
     for title in ["Microphone", "System audio", "Calendar", "Local network"] {
       XCTAssertTrue(
-        pageText(startingWith: title, in: window).waitForExistence(timeout: 5),
+        pageText(title, in: window).waitForExistence(timeout: 5),
         "row \(title) missing")
     }
     attachScreenshot(named: "onboarding-page-1.png")
@@ -284,17 +288,17 @@ final class LaunchSmokeTests: XCTestCase {
       window.buttons["Finish"].firstMatch.waitForExistence(timeout: 10),
       "Later did not reach page 2")
     XCTAssertTrue(
-      pageText(startingWith: Self.setupTitle, in: window).waitForExistence(timeout: 5),
+      pageText(Self.setupTitle, in: window).waitForExistence(timeout: 5),
       "page 2 has no heading")
     XCTAssertTrue(
-      waitUntil(timeout: 5) { !pageText(startingWith: "Microphone", in: window).exists },
+      waitUntil(timeout: 5) { !pageText("Microphone", in: window).exists },
       "page 1 rows are still showing under page 2")
     XCTAssertTrue(window.buttons["Back"].firstMatch.exists)
     XCTAssertTrue(
-      pageText(startingWith: "Steno sends the transcript text, never audio", in: window).exists,
+      pageText(Self.summariesSentence, in: window).exists,
       "the Summaries row is missing")
     XCTAssertTrue(
-      pageText(startingWith: "Obsidian vault", in: window).exists, "the vault row is missing")
+      pageText("Obsidian vault", in: window).exists, "the vault row is missing")
     attachScreenshot(named: "onboarding-page-2.png")
   }
 
@@ -370,10 +374,10 @@ final class LaunchSmokeTests: XCTestCase {
       let window = onboardingWindow(in: app)
       XCTAssertTrue(window.waitForExistence(timeout: 20), "the onboarding window did not open")
       XCTAssertTrue(
-        pageText(startingWith: Self.onboardingIntro, in: window).waitForExistence(timeout: 20),
+        pageText(Self.onboardingIntro, in: window).waitForExistence(timeout: 20),
         "page 1 did not render its intro")
       XCTAssertTrue(
-        pageText(startingWith: "Microphone", in: window).waitForExistence(timeout: 5),
+        pageText("Microphone", in: window).waitForExistence(timeout: 5),
         "page 1 rows are missing")
     }
     capture("onboarding", "page-2", in: onboarding) { app in
@@ -385,7 +389,7 @@ final class LaunchSmokeTests: XCTestCase {
         window.buttons["Finish"].firstMatch.waitForExistence(timeout: 10),
         "Later did not reach page 2")
       XCTAssertTrue(
-        pageText(startingWith: "Obsidian vault", in: window).waitForExistence(timeout: 5),
+        pageText("Obsidian vault", in: window).waitForExistence(timeout: 5),
         "page 2 rows are missing")
     }
 

@@ -1,7 +1,7 @@
 import { InfoIcon, TriangleAlertIcon } from "lucide-react";
 import type { ReactNode } from "react";
 import type { SummariesSettingsSnapshot } from "@/bridge/contract";
-import { Button, Callout, Card } from "@/components/ui";
+import { Button, Callout, Card, Disclosure } from "@/components/ui";
 
 export type CodexState = NonNullable<SummariesSettingsSnapshot["codex"]>;
 
@@ -32,6 +32,11 @@ export interface CodexConsentCardProps {
 	onCheckAgain: () => void;
 	/** Onboarding adds its own Skip beside the buttons. */
 	trailing?: ReactNode;
+	/**
+	 * Onboarding's narrow window: the three points fold into a disclosure so
+	 * the confirm button stays above the fold; Settings shows them in full.
+	 */
+	compact?: boolean;
 }
 
 /**
@@ -44,8 +49,16 @@ export function CodexConsentCard({
 	onConfirm,
 	onCheckAgain,
 	trailing,
+	compact = false,
 }: CodexConsentCardProps) {
 	const signedIn = codex.signIn === "signedIn";
+	const points = (
+		<ul className="m-0 flex list-disc flex-col gap-1 pl-4 text-[12px] text-muted-foreground leading-[1.45]">
+			{CODEX_CONSENT.points.map((point) => (
+				<li key={point}>{point}</li>
+			))}
+		</ul>
+	);
 	return (
 		<Card
 			className="flex flex-col gap-3"
@@ -58,11 +71,13 @@ export function CodexConsentCard({
 					{CODEX_CONSENT.body}
 				</p>
 			</div>
-			<ul className="m-0 flex list-disc flex-col gap-1 pl-4 text-[12px] text-muted-foreground leading-[1.45]">
-				{CODEX_CONSENT.points.map((point) => (
-					<li key={point}>{point}</li>
-				))}
-			</ul>
+			{compact ? (
+				<Disclosure data-testid="codex-points" summary="What this means">
+					{points}
+				</Disclosure>
+			) : (
+				points
+			)}
 			{codex.signIn === "signedIn" ? (
 				<Callout
 					data-testid="codex-signed-in"

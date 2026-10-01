@@ -139,10 +139,12 @@ final class OnboardingBridge: BridgeHost {
         throw BridgeError(code: .invalidParams, message: "Unknown summaries service \(id).")
       }
       let llm = try requireLLM()
+      // Settings semantics, as the deleted picker had: the preset's address
+      // and model are committed and probed at once when they validate.
       await llm.selectPreset(preset)
     case .onboardingUpdateSummaries:
       // The page keeps the draft while typing and sends the fields on blur;
-      // nothing is stored until `onboarding.saveSummaries`.
+      // the fields themselves are stored by `onboarding.saveSummaries`.
       let update = try request.params(SummariesUpdateParams.self)
       let llm = try requireLLM()
       if let baseURL = update.baseURL { llm.baseURLText = baseURL }

@@ -62,6 +62,11 @@ export interface PermissionRowProps {
 	acknowledgeOnly?: boolean;
 	/** The row's action is the page's main one (onboarding): a primary button. */
 	prominent?: boolean;
+	/**
+	 * Another row's request is in flight: the host handles one at a time, so
+	 * every Allow waits while one runs (the test recording takes 30 s).
+	 */
+	requestDisabled?: boolean;
 }
 
 /**
@@ -81,6 +86,7 @@ export function PermissionRow({
 	onCheckAgain,
 	acknowledgeOnly = false,
 	prominent = false,
+	requestDisabled = false,
 }: PermissionRowProps) {
 	const copy = permissionCopy(kind);
 	let description: string | undefined;
@@ -136,7 +142,7 @@ export function PermissionRow({
 			<>
 				<Button
 					data-testid={`permission-${kind}-request`}
-					disabled={isRequesting}
+					disabled={isRequesting || requestDisabled}
 					onClick={onRequest}
 					size="sm"
 					variant={action}

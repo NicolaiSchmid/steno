@@ -336,7 +336,9 @@ WP5, cleanup:
   `onboarding.refreshCodexStatus` and `onboarding.chooseVault`, the `NSOpenPanel` whose choice
   is saved as the vault at once (`onboarding.saveVault` stays for the retry after a refused
   folder). The Summaries row offers the same service list as Settings instead of the SwiftUI
-  page's two-way provider picker, since the view model method behind that picker left in WP3.
+  page's two-way provider picker, since the view model method behind that picker left in WP3. Choosing a service through `onboarding.selectPreset` commits the preset's
+  address and model at once and probes the endpoint, as the deleted provider picker did; only
+  the typed fields wait for Save.
   `system.openSystemSettings` is routed onto the onboarding model rather than duplicated as an
   `onboarding.*` method. Two pieces of view glue stay glue, in the bridge and the window: page
   1 moves on by itself once every step is handled (only after a step-changing command, so Back

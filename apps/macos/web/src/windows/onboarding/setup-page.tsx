@@ -81,7 +81,7 @@ export function SetupPage({ onboarding }: { onboarding: OnboardingSnapshot }) {
 			title={SETUP_TITLE}
 		>
 			{onboarding.setup.map((row) => (
-				<SetupRow key={row.kind} onboarding={onboarding} row={row}>
+				<SetupRow key={row.kind} row={row}>
 					{row.kind === "summaries" ? (
 						<SummariesFields client={client} onboarding={onboarding} />
 					) : (
@@ -98,14 +98,7 @@ export function SetupPage({ onboarding }: { onboarding: OnboardingSnapshot }) {
  * saved line or Skipped badge trailing, and, while open, the explanation
  * with the fields under it and the footnote under the card.
  */
-function SetupRow({
-	row,
-	children,
-}: {
-	row: SetupStep;
-	onboarding: OnboardingSnapshot;
-	children: ReactNode;
-}) {
+function SetupRow({ row, children }: { row: SetupStep; children: ReactNode }) {
 	const copy = COPY[row.kind];
 	const open = row.state === "open";
 	return (
@@ -265,6 +258,7 @@ function SummariesFields({
 				) : (
 					<CodexConsentCard
 						codex={codex}
+						compact
 						onCheckAgain={() => send(client, "onboarding.refreshCodexStatus")}
 						onConfirm={() =>
 							send(client, "onboarding.confirmSummariesWithCodex")
@@ -294,7 +288,6 @@ function SummariesFields({
 					/>
 					<DraftField
 						className="w-full"
-						clearOnCommit
 						label="API key"
 						onCommit={(apiKey) => {
 							if (apiKey.trim()) {
