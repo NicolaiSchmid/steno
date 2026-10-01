@@ -215,11 +215,12 @@ struct UITestWindowMarker: NSViewRepresentable {
   func updateNSView(_ nsView: MarkerView, context: Context) {}
 
   final class MarkerView: NSView {
-    let identifier: String
+    /// Not `identifier`: `NSView` already has one of another type.
+    let windowIdentifier: String
     let sizesToScenario: Bool
 
     init(identifier: String, sizesToScenario: Bool) {
-      self.identifier = identifier
+      self.windowIdentifier = identifier
       self.sizesToScenario = sizesToScenario
       super.init(frame: .zero)
     }
@@ -231,7 +232,7 @@ struct UITestWindowMarker: NSViewRepresentable {
 
     override func viewDidMoveToWindow() {
       super.viewDidMoveToWindow()
-      window?.setAccessibilityIdentifier(identifier)
+      window?.setAccessibilityIdentifier(windowIdentifier)
       guard sizesToScenario else { return }
       Task { @MainActor [weak self] in
         UITestWindowMarker.apply(to: self?.window)
