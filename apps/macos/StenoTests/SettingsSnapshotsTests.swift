@@ -189,7 +189,7 @@ private func request(_ id: String, _ method: String, _ params: Any = NSNull()) -
     llm.apiKey = "sk-live-STENO-SECRET"
     llm.baseURLText = "ftp://nope"
     let invalid = SummariesSettingsSnapshot(llm: llm, subtitle: "")
-    #expect(invalid.hasAPIKey, "only whether a key is there")
+    #expect(!invalid.hasAPIKey, "a typed key is not stored until save; the page keeps its draft")
     #expect(invalid.validationMessage != nil)
     let encoded = String(decoding: try BridgeJSON.encode(invalid), as: UTF8.self)
     #expect(!encoded.contains("STENO-SECRET"), "the key never reaches the wire")
@@ -400,7 +400,7 @@ private func request(_ id: String, _ method: String, _ params: Any = NSNull()) -
     #expect(try await environment.settings.load().llmModel == nil, "nothing stored before save")
     await eventually("the draft republished") {
       sink.last(.settingsSummaries)?["model"] == .string("qwen")
-        && sink.last(.settingsSummaries)?["hasAPIKey"] == .bool(true)
+        && sink.last(.settingsSummaries)?["hasAPIKey"] == .bool(false)
     }
     let published = try #require(sink.last(.settingsSummaries))
     let encoded = String(decoding: try BridgeJSON.encode(published), as: UTF8.self)

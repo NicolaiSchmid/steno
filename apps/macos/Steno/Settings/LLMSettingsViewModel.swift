@@ -177,6 +177,9 @@ final class LLMSettingsViewModel: SettingsSectionModel {
   private(set) var codexModel = ""
   private var codexContextTokens = Settings.defaultCodexContextTokens
   private var stored: Stored?
+  /// Whether a key is in the keychain, as last loaded or saved; the draft
+  /// `apiKey` may differ until `save()`.
+  var hasStoredAPIKey: Bool { !(stored?.apiKey ?? "").isEmpty }
   /// Commits queue behind one another: focus loss and disappearing fire
   /// together, and two overlapping saves would rebuild the pipeline twice.
   private var commitTask: Task<Void, Never>?

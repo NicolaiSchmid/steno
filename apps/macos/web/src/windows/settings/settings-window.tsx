@@ -65,12 +65,16 @@ export function SettingsWindow({ section: routeSection }: SettingsWindowProps) {
 		}
 	}, [routeSection]);
 
-	const requested = app?.requestedSettingsSection;
+	// Keyed on the snapshot, not the section string: the host republishes
+	// `app` for every deep link, including one to the section already shown
+	// or the same section twice, and each must be shown and reported so the
+	// host clears its request.
 	useEffect(() => {
-		if (requested) {
-			setSection(requested);
-		}
-	}, [requested]);
+		const requested = app?.requestedSettingsSection;
+		if (!requested) return;
+		setSection(requested);
+		send(client, "settings.showSection", { section: requested });
+	}, [app, client]);
 
 	useEffect(() => {
 		send(client, "settings.showSection", { section });

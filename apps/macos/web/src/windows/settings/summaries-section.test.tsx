@@ -54,6 +54,17 @@ describe("SummariesSection", () => {
 		expect(
 			callsTo(harness.transport, "settings.summaries.update").at(-1)?.params,
 		).toEqual({ apiKey: "sk-typed" });
+		// The key leaves the field once sent and a later blur sends nothing.
+		expect(screen.getByTestId("api-key")).toHaveValue("");
+		const updates = callsTo(
+			harness.transport,
+			"settings.summaries.update",
+		).length;
+		await user.click(screen.getByTestId("api-key"));
+		await user.tab();
+		expect(
+			callsTo(harness.transport, "settings.summaries.update"),
+		).toHaveLength(updates);
 	});
 
 	it("shows a connected endpoint with its report and tests again", async () => {

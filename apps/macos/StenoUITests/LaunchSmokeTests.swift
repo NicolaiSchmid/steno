@@ -363,7 +363,9 @@ final class LaunchSmokeTests: XCTestCase {
       XCTAssertTrue(
         window.webViews.firstMatch.waitForExistence(timeout: 20),
         "no web view in the Settings window")
-      let header = window.staticTexts["Recording"].firstMatch
+      // The section's purpose sentence, not its title: the sidebar row says
+      // "Recording" on every section, the sentence only on the right one.
+      let header = window.staticTexts["Audio is recorded and kept on this Mac only."].firstMatch
       XCTAssertTrue(header.waitForExistence(timeout: 20), "Settings did not open on Recording")
 
       // The page paints inside its window: the heading is checked to lie

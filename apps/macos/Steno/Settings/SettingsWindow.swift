@@ -27,6 +27,10 @@ struct SettingsWindow: View {
   var body: some View {
     WebWindowView(route: "#/settings", host: bridge)
       .frame(width: Self.size.width, height: Self.size.height)
+      // Under the hidden title bar, as the main window's page is: a fixed
+      // frame otherwise sits below the title bar's safe area and leaves a
+      // bare strip above the page.
+      .ignoresSafeArea()
       .onChange(of: colorScheme, initial: true) { _, scheme in
         bridge.appearance = scheme == .dark ? .dark : .light
       }

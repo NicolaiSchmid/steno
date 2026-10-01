@@ -232,7 +232,7 @@ extension SummariesSettingsSnapshot {
       contextTokens: llm.contextTokensText,
       defaultContextTokens: LLMSettingsViewModel.defaultContextTokens,
       // Whether a key is stored, never the key: the page shows a placeholder.
-      hasAPIKey: !llm.apiKey.isEmpty, isConfigured: llm.isConfigured, isTesting: llm.isTesting,
+      hasAPIKey: llm.hasStoredAPIKey, isConfigured: llm.isConfigured, isTesting: llm.isTesting,
       testResult: result, validationMessage: llm.validationMessage, codex: codex,
       error: llm.error, errorDetails: llm.errorDetails)
   }

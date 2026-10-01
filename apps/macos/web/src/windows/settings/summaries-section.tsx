@@ -48,6 +48,7 @@ function DraftField({
 	testId,
 	label,
 	onCommit,
+	clearOnCommit = false,
 }: {
 	value: string;
 	placeholder?: string | undefined;
@@ -55,6 +56,8 @@ function DraftField({
 	testId: string;
 	label: string;
 	onCommit: (draft: string) => void;
+	/** Empty the field once committed: a secret the page must not keep. */
+	clearOnCommit?: boolean;
 }) {
 	const [draft, setDraft] = useDraft(value);
 	return (
@@ -65,6 +68,7 @@ function DraftField({
 			onBlur={() => {
 				if (draft !== value) {
 					onCommit(draft);
+					if (clearOnCommit) setDraft("");
 				}
 			}}
 			onChange={(event) => setDraft(event.target.value)}
@@ -368,6 +372,7 @@ export function SummariesSection() {
 						<FormRow
 							control={
 								<DraftField
+									clearOnCommit
 									label="API key"
 									onCommit={(apiKey) => {
 										if (apiKey.trim()) {

@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { TooltipProvider } from "@/components/ui";
 import { StoriesPage } from "@/stories/stories-page";
 import { MainWindow } from "@/windows/main/main-window";
@@ -35,6 +35,31 @@ function useRoute(): Route {
 	return route;
 }
 
+/**
+ * Whether the host wants dark: `WKWebView` reports the app's appearance as
+ * `prefers-color-scheme`, so the pages follow the Mac's (or the UI test's)
+ * appearance without a bridge round trip. Playwright and jsdom have no
+ * dark preference, so screens force it with the `dark` query flag.
+ */
+function usePrefersDark(): boolean {
+	const query = useMemo(
+		() =>
+			typeof window.matchMedia === "function"
+				? window.matchMedia("(prefers-color-scheme: dark)")
+				: null,
+		[],
+	);
+	const [dark, setDark] = useState(query?.matches ?? false);
+	useEffect(() => {
+		if (!query) return;
+		const update = () => setDark(query.matches);
+		update();
+		query.addEventListener("change", update);
+		return () => query.removeEventListener("change", update);
+	}, [query]);
+	return dark;
+}
+
 function useDocumentScheme(dark: boolean) {
 	useEffect(() => {
 		document.documentElement.classList.toggle("dark", dark);
@@ -43,7 +68,8 @@ function useDocumentScheme(dark: boolean) {
 
 export function App() {
 	const route = useRoute();
-	useDocumentScheme(route.params.has("dark"));
+	const prefersDark = usePrefersDark();
+	useDocumentScheme(route.params.has("dark") || prefersDark);
 
 	let page: React.ReactNode;
 	if (route.path === "/stories") {

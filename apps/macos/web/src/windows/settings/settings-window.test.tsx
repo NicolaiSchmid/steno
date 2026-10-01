@@ -82,4 +82,37 @@ describe("SettingsWindow", () => {
 		});
 		expect(screen.getByTestId("section-title-summaries")).toBeInTheDocument();
 	});
+
+	it("reports a deep link to the section already shown, and the same link twice", async () => {
+		const harness = await createBridgeHarness();
+		renderWithBridge(<SettingsWindow />, harness);
+		const app = (await loadFixtureSnapshots()).app as AppSnapshot;
+		const before = callsTo(harness.transport, "settings.showSection").length;
+		act(() => {
+			harness.transport.emit("app", {
+				...app,
+				requestedSettingsSection: "general",
+			} satisfies AppSnapshot);
+		});
+		expect(callsTo(harness.transport, "settings.showSection")).toHaveLength(
+			before + 1,
+		);
+		act(() => {
+			harness.transport.emit("app", app);
+		});
+		act(() => {
+			harness.transport.emit("app", {
+				...app,
+				requestedSettingsSection: "general",
+			} satisfies AppSnapshot);
+		});
+		expect(callsTo(harness.transport, "settings.showSection")).toHaveLength(
+			before + 2,
+		);
+		expect(
+			callsTo(harness.transport, "settings.showSection").at(-1)?.params,
+		).toEqual({
+			section: "general",
+		});
+	});
 });
