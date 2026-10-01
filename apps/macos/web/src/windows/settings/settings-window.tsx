@@ -40,7 +40,6 @@ export interface SettingsWindowProps {
  */
 export function SettingsWindow({ section: routeSection }: SettingsWindowProps) {
 	const client = useBridge();
-	const app = useSnapshot("app");
 	const [section, setSection] = useState<SectionId>(routeSection ?? "general");
 	usePageReady(client);
 
@@ -50,13 +49,19 @@ export function SettingsWindow({ section: routeSection }: SettingsWindowProps) {
 		}
 	}, [routeSection]);
 
-	// Keyed on the snapshot, not the section string: the host publishes
-	// `app` once per deep link and clears the request with that publish, so
-	// the same section twice arrives as two snapshots and each is shown.
-	useEffect(() => {
-		const requested = app?.requestedSettingsSection;
-		if (requested) setSection(requested);
-	}, [app]);
+	// A subscription of its own, not an effect over the `app` state: the host
+	// publishes the snapshot that carries a deep link and, having cleared the
+	// request, the clean one right after. React batches both into one render,
+	// so an effect would only ever see the clean snapshot; the subscription
+	// sees each publish, and the same section twice is two publishes.
+	useEffect(
+		() =>
+			client.subscribe("app", (snapshot) => {
+				const requested = snapshot.requestedSettingsSection;
+				if (requested) setSection(requested);
+			}),
+		[client],
+	);
 
 	let page: ReactNode;
 	switch (section) {
