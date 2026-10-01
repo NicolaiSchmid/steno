@@ -507,6 +507,12 @@ public struct MeetingDetailSnapshot: Codable, Sendable, Equatable {
 
 // MARK: - onboarding
 
+/// The onboarding window: page 1's permission steps and page 2's two setup
+/// rows. The Summaries row carries the same `SummariesSettingsSnapshot` the
+/// Settings page renders (its `subtitle` is empty here; the row has no
+/// sidebar), so the consent card and the endpoint form are one component on
+/// both pages; the vault row carries only what its chooser needs. Both are
+/// nil when the window has no settings to write (a bare permissions run).
 public struct OnboardingSnapshot: Codable, Sendable, Equatable {
   public enum Page: String, Codable, Sendable, CaseIterable {
     case permissions
@@ -516,14 +522,18 @@ public struct OnboardingSnapshot: Codable, Sendable, Equatable {
   public struct PermissionStep: Codable, Sendable, Equatable {
     public var kind: BridgePermissionKind
     public var state: BridgePermissionState
+    /// Required steps gate page 1's Done; optional ones can be skipped.
+    public var isRequired: Bool
     public var isRequesting: Bool
     public var isSkipped: Bool
 
     public init(
-      kind: BridgePermissionKind, state: BridgePermissionState, isRequesting: Bool, isSkipped: Bool
+      kind: BridgePermissionKind, state: BridgePermissionState, isRequired: Bool,
+      isRequesting: Bool, isSkipped: Bool
     ) {
       self.kind = kind
       self.state = state
+      self.isRequired = isRequired
       self.isRequesting = isRequesting
       self.isSkipped = isSkipped
     }
@@ -543,6 +553,7 @@ public struct OnboardingSnapshot: Codable, Sendable, Equatable {
 
     public var kind: Kind
     public var state: State
+    /// The collapsed row's line once saved ("Saved: <model> at <host>").
     public var savedLine: String?
 
     public init(kind: Kind, state: State, savedLine: String? = nil) {
@@ -552,21 +563,51 @@ public struct OnboardingSnapshot: Codable, Sendable, Equatable {
     }
   }
 
+  /// The Obsidian vault row: the chosen folder (nil until chosen), why the
+  /// last save was refused, and the store's error if saving failed.
+  public struct Vault: Codable, Sendable, Equatable {
+    public var path: String?
+    public var name: String?
+    public var validationMessage: String?
+    public var error: String?
+    public var errorDetails: String?
+
+    public init(
+      path: String? = nil, name: String? = nil, validationMessage: String? = nil,
+      error: String? = nil, errorDetails: String? = nil
+    ) {
+      self.path = path
+      self.name = name
+      self.validationMessage = validationMessage
+      self.error = error
+      self.errorDetails = errorDetails
+    }
+  }
+
   public var page: Page
   public var permissions: [PermissionStep]
+  /// Every required permission granted: page 1 offers Done instead of Later.
+  public var permissionsComplete: Bool
   public var setup: [SetupStep]
   public var canSaveSummaries: Bool
+  public var summaries: SummariesSettingsSnapshot?
+  public var vault: Vault?
   public var retentionSentence: String?
+  /// Set once onboarding is over; the page closes the window.
   public var finished: Bool
 
   public init(
-    page: Page, permissions: [PermissionStep], setup: [SetupStep], canSaveSummaries: Bool,
+    page: Page, permissions: [PermissionStep], permissionsComplete: Bool, setup: [SetupStep],
+    canSaveSummaries: Bool, summaries: SummariesSettingsSnapshot? = nil, vault: Vault? = nil,
     retentionSentence: String? = nil, finished: Bool
   ) {
     self.page = page
     self.permissions = permissions
+    self.permissionsComplete = permissionsComplete
     self.setup = setup
     self.canSaveSummaries = canSaveSummaries
+    self.summaries = summaries
+    self.vault = vault
     self.retentionSentence = retentionSentence
     self.finished = finished
   }

@@ -297,17 +297,66 @@ public enum BridgeSamples {
         deviceID: phoneID, recordingID: uuid(41), receivedBytes: 12_500_000, totalBytes: 25_000_000)
     ])
 
+  /// Page 1 with the microphone granted and the test recording running; the
+  /// Summaries row carries the Settings sample without a subtitle.
   public static let onboarding = OnboardingSnapshot(
     page: .permissions,
     permissions: [
-      .init(kind: .microphone, state: .granted, isRequesting: false, isSkipped: false),
-      .init(kind: .systemAudio, state: .unknown, isRequesting: true, isSkipped: false),
-      .init(kind: .calendar, state: .unknown, isRequesting: false, isSkipped: false),
-      .init(kind: .localNetwork, state: .unknown, isRequesting: false, isSkipped: true),
+      .init(
+        kind: .microphone, state: .granted, isRequired: true, isRequesting: false, isSkipped: false
+      ),
+      .init(
+        kind: .systemAudio, state: .unknown, isRequired: true, isRequesting: true, isSkipped: false
+      ),
+      .init(
+        kind: .calendar, state: .unknown, isRequired: false, isRequesting: false, isSkipped: false
+      ),
+      .init(
+        kind: .localNetwork, state: .unknown, isRequired: false, isRequesting: false,
+        isSkipped: true),
     ],
+    permissionsComplete: false,
     setup: [.init(kind: .summaries, state: .open), .init(kind: .vault, state: .open)],
-    canSaveSummaries: false, retentionSentence: "Recordings are deleted 30 days after the meeting.",
-    finished: false)
+    canSaveSummaries: false, summaries: onboardingSummaries, vault: .init(),
+    retentionSentence: onboardingRetention, finished: false)
+
+  static let onboardingRetention =
+    "Each recording is deleted 30 days after it was processed and exported. Change this any time in Settings > Audio."
+
+  static var onboardingSummaries: SummariesSettingsSnapshot {
+    var summaries = settingsSummaries
+    summaries.subtitle = ""
+    return summaries
+  }
+
+  /// Page 2 with the Summaries row saved and a vault chosen but refused:
+  /// what the `onboarding-setup` scenario and its page-2 screens start from.
+  public static let onboardingSetup = OnboardingSnapshot(
+    page: .setup,
+    permissions: [
+      .init(
+        kind: .microphone, state: .granted, isRequired: true, isRequesting: false, isSkipped: false
+      ),
+      .init(
+        kind: .systemAudio, state: .granted, isRequired: true, isRequesting: false, isSkipped: false
+      ),
+      .init(
+        kind: .calendar, state: .granted, isRequired: false, isRequesting: false, isSkipped: false
+      ),
+      .init(
+        kind: .localNetwork, state: .unknown, isRequired: false, isRequesting: false,
+        isSkipped: true),
+    ],
+    permissionsComplete: true,
+    setup: [
+      .init(kind: .summaries, state: .saved, savedLine: "Saved: qwen3-8b at 127.0.0.1"),
+      .init(kind: .vault, state: .open),
+    ],
+    canSaveSummaries: true, summaries: onboardingSummaries,
+    vault: .init(
+      path: "/Users/nicolai/Notes/Work Vault", name: "Work Vault",
+      validationMessage: "The Obsidian vault at /Users/nicolai/Notes/Work Vault does not exist."),
+    retentionSentence: onboardingRetention, finished: false)
 
   // MARK: Envelope
 
@@ -383,6 +432,7 @@ extension BridgeSamples {
     BridgeFixture("settings.iphone", settingsPhone),
     BridgeFixture("settings.iphone.pairing", settingsPhonePairing),
     BridgeFixture("onboarding", onboarding),
+    BridgeFixture("onboarding.setup", onboardingSetup),
     BridgeFixture("envelope.request", request),
     BridgeFixture("envelope.reply", reply),
     BridgeFixture("envelope.error", errorReply),

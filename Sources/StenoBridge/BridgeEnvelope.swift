@@ -114,9 +114,22 @@ public enum BridgeMethod: String, Codable, Sendable, CaseIterable {
 
   case onboardingRequest = "onboarding.request"
   case onboardingSkip = "onboarding.skip"
+  /// Reads every permission's state again ("Check again" after System Settings).
+  case onboardingRefresh = "onboarding.refresh"
   case onboardingAdvance = "onboarding.advance"
   case onboardingBack = "onboarding.back"
+  /// `SetStringParams`: the summaries preset id.
+  case onboardingSelectPreset = "onboarding.selectPreset"
+  /// `SummariesUpdateParams`: the draft fields; nothing is stored until save.
+  case onboardingUpdateSummaries = "onboarding.updateSummaries"
+  case onboardingTestSummaries = "onboarding.testSummaries"
   case onboardingSaveSummaries = "onboarding.saveSummaries"
+  case onboardingConfirmSummariesWithCodex = "onboarding.confirmSummariesWithCodex"
+  case onboardingRefreshCodexStatus = "onboarding.refreshCodexStatus"
+  /// The folder panel; a chosen folder is saved as the vault at once.
+  /// Replies `ChosenPathReply`.
+  case onboardingChooseVault = "onboarding.chooseVault"
+  /// Saves the vault row as it stands (a retry after a refused folder).
   case onboardingSaveVault = "onboarding.saveVault"
   case onboardingSkipSetup = "onboarding.skipSetup"
   case onboardingFinish = "onboarding.finish"
