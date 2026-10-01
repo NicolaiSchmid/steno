@@ -8,11 +8,11 @@ import { cn } from "@/lib/cn";
  * index in the meeting (wraps at four); `unknown` is an unnamed speaker.
  */
 export const avatarVariants = cva(
-	"inline-grid shrink-0 place-items-center rounded-full border-2 border-transparent font-semibold text-primary-fg leading-none",
+	"inline-grid shrink-0 place-items-center rounded-full border-2 border-transparent font-semibold text-primary-foreground leading-none",
 	{
 		variants: {
 			size: {
-				sm: "size-[18px] text-[9px]",
+				sm: "size-4.5 text-[9px]",
 				md: "size-6 text-[10px]",
 				lg: "size-8 text-xs",
 			},

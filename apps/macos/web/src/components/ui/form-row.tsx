@@ -2,6 +2,7 @@ import { cva, type VariantProps } from "class-variance-authority";
 import type { ComponentProps, ReactNode } from "react";
 import { cn } from "@/lib/cn";
 import { Card } from "./card";
+import { StatusIcon, type statusIconVariants } from "./status-icon";
 
 /**
  * A group of settings: a heading, a group card of rows divided by
@@ -43,22 +44,6 @@ export function FormCard({
 	);
 }
 
-/** A row's state glyph, centred on the label's first line, in `tone`. */
-export const formRowIconVariants = cva(
-	"flex h-5 shrink-0 items-center [&>svg]:size-4",
-	{
-		variants: {
-			tone: {
-				muted: "text-muted-foreground",
-				faint: "text-faint",
-				primary: "text-primary",
-				warning: "text-warning",
-			},
-		},
-		defaultVariants: { tone: "muted" },
-	},
-);
-
 /**
  * One row of a `FormCard`: a label with an optional description at the
  * leading edge, the control at the trailing edge (on its own line when the
@@ -67,7 +52,7 @@ export const formRowIconVariants = cva(
  */
 export interface FormRowProps
 	extends Omit<ComponentProps<"div">, "title">,
-		VariantProps<typeof formRowIconVariants> {
+		VariantProps<typeof statusIconVariants> {
 	label: ReactNode;
 	description?: ReactNode;
 	/** The control at the trailing edge. */
@@ -90,9 +75,7 @@ export function FormRow({
 		<div className={cn("flex flex-col gap-3 px-4 py-3", className)} {...props}>
 			<div className="flex @lg/form:grid @lg/form:grid-cols-[minmax(0,1fr)_minmax(10rem,auto)] flex-col @lg/form:items-center @lg/form:gap-8 gap-3">
 				<div className="flex min-w-0 items-start gap-3">
-					{icon ? (
-						<span className={formRowIconVariants({ tone })}>{icon}</span>
-					) : null}
+					{icon ? <StatusIcon tone={tone}>{icon}</StatusIcon> : null}
 					<div className="flex min-w-0 flex-col gap-0.5">
 						<span className="flex min-h-5 items-center gap-1.5 font-medium text-foreground text-sm">
 							{label}
@@ -120,7 +103,7 @@ export function FormRow({
  * a licence, a percentage. `mono` for figures that change width.
  */
 export const formValueVariants = cva(
-	"inline-flex max-w-[200px] items-center gap-1.5 text-xs [&>svg]:size-3.5 [&>svg]:shrink-0",
+	"inline-flex max-w-50 items-center gap-1.5 text-xs [&>svg]:size-3.5 [&>svg]:shrink-0",
 	{
 		variants: {
 			variant: {

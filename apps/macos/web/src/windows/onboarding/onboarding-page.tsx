@@ -1,6 +1,5 @@
 import type { ReactNode } from "react";
-import { footerBandClass, ScrollArea } from "@/components/ui";
-import { cn } from "@/lib/cn";
+import { FooterBand, ScrollArea } from "@/components/ui";
 
 export interface OnboardingPageProps {
 	step: 1 | 2;
@@ -35,7 +34,7 @@ export function OnboardingPage({
 		<>
 			<ScrollArea className="min-h-0 flex-1" fade>
 				<div
-					className="flex flex-col gap-6 px-6 pt-[52px] pb-6"
+					className="flex flex-col gap-6 px-6 pt-13 pb-6"
 					data-testid={testId}
 				>
 					<header className="flex flex-col gap-2">
@@ -69,7 +68,7 @@ export function OnboardingPage({
 					{children}
 				</div>
 			</ScrollArea>
-			<footer className={cn(footerBandClass, "shrink-0")}>{footer}</footer>
+			<FooterBand className="shrink-0">{footer}</FooterBand>
 		</>
 	);
 }

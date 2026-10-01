@@ -4,7 +4,7 @@ import { SidebarColumn } from "./sidebar-column";
 import { SidebarRow } from "./sidebar-row";
 
 describe("SidebarColumn", () => {
-	it("is an aside by default with the rows under an empty header row", () => {
+	it("is an aside by default with the rows under a header-high spacer", () => {
 		render(
 			<SidebarColumn data-testid="column">
 				<SidebarRow>All</SidebarRow>
@@ -13,7 +13,9 @@ describe("SidebarColumn", () => {
 		const column = screen.getByTestId("column");
 		expect(column.tagName).toBe("ASIDE");
 		expect(column).toBe(screen.getByRole("complementary"));
-		expect(column.firstElementChild?.tagName).toBe("HEADER");
+		expect(column.firstElementChild).toHaveAttribute("aria-hidden", "true");
+		expect(column.firstElementChild).toHaveClass("h-13");
+		expect(screen.queryByRole("banner")).not.toBeInTheDocument();
 		expect(screen.getByRole("button", { name: "All" })).toBeInTheDocument();
 		expect(screen.queryByTestId("footer")).not.toBeInTheDocument();
 	});

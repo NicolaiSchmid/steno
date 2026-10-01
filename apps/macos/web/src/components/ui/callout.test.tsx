@@ -4,7 +4,14 @@ import { describe, expect, it } from "vitest";
 import { Button } from "./button";
 import { Callout, calloutVariants } from "./callout";
 
-const VARIANTS = ["default", "warning", "info", "live", "destructive"] as const;
+const VARIANTS = [
+	"default",
+	"warning",
+	"info",
+	"live",
+	"success",
+	"destructive",
+] as const;
 
 describe("Callout", () => {
 	it.each(VARIANTS)(
@@ -48,8 +55,11 @@ describe("Callout", () => {
 		expect(calloutVariants({ variant: "destructive" })).toContain(
 			"bg-destructive-surface",
 		);
+		expect(calloutVariants({ variant: "success" })).toContain(
+			"bg-success-surface",
+		);
 		expect(calloutVariants({ variant: "default" })).toContain("bg-card");
-		expect(calloutVariants({})).toContain("bg-warning-surface");
+		expect(calloutVariants({})).toContain("bg-card");
 	});
 
 	it("leaves out the description and actions when not given", () => {

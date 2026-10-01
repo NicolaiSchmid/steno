@@ -38,7 +38,7 @@ export const splitButtonVariants = cva(
 );
 
 const partClass =
-	"outline-none focus-visible:ring-2 focus-visible:ring-primary-fg/60 focus-visible:ring-inset";
+	"outline-none focus-visible:ring-2 focus-visible:ring-primary-foreground/60 focus-visible:ring-inset";
 
 export interface SplitButtonProps
 	extends Omit<ComponentProps<typeof BaseButton>, "className">,
@@ -84,7 +84,7 @@ export function SplitButton({
 					aria-label={menuLabel}
 					className={cn(
 						partClass,
-						"grid w-8 shrink-0 place-items-center rounded-r-control transition-colors duration-(--duration-functional) ease-standard hover:bg-primary-fg/10 data-popup-open:bg-primary-fg/10 [&_svg]:size-3.5",
+						"grid w-8 shrink-0 place-items-center rounded-r-control transition-colors duration-(--duration-functional) ease-standard hover:bg-primary-foreground/10 data-popup-open:bg-primary-foreground/10 [&_svg]:size-3.5",
 					)}
 					data-testid={menuTestId}
 				>

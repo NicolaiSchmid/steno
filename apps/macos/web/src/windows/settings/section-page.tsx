@@ -25,13 +25,10 @@ export function SectionPage({
 }: SectionPageProps) {
 	const info = sectionInfo(id);
 	return (
-		<div
-			className="flex flex-col gap-8 px-6 pt-4 pb-12"
-			data-testid={`section-${id}`}
-		>
+		<div className="flex flex-col gap-8" data-testid={`section-${id}`}>
 			<p
 				className="m-0 text-muted-foreground text-sm"
-				data-testid={`section-title-${id}`}
+				data-testid={`section-purpose-${id}`}
 			>
 				{info.purpose}
 			</p>

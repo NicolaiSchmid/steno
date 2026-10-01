@@ -1,6 +1,6 @@
 # Design polish: match T3 Code (pingdotgg/t3code)
 
-Status: proposed, 2026-10-01. Follows `2026-09-29-macos-webview-ui.md` Decision 2
+Status: implemented 2026-10-01 (PR #148). Follows `2026-09-29-macos-webview-ui.md` Decision 2
 ("T3 Code's recipe on Steno's layout") and refines it against the current upstream.
 
 Reference: `pingdotgg/t3code` at `5cc99e1c` (origin/main, 2026-10-01), local
@@ -347,3 +347,16 @@ Changes:
    `SettingsWindow.swift` and the UI-test sizer.
 5. **Verify** on a Mac: `pnpm screens` on Forge or a local build; compare against
    `/tmp/t3-app-desktop.png` (the T3 marketing screenshot at 2×).
+
+## Deviations (implementation)
+
+- Separator, Toast, Spinner, Skeleton and the segmented ToggleGroup were not
+  added: nothing calls them yet. Tabs stayed Tabs and Callout stayed Callout
+  (no Alert rename).
+- The meeting list column sits on the sidebar surface (`bg-sidebar`, the
+  sidebar hairline and grain) rather than the canvas, so the white selected
+  row and the row hover read in light mode.
+- The Settings purpose sentence stays as a muted intro line under the
+  breadcrumb; the XCUI tests anchor on it (`section-purpose-<id>`).
+- The Settings window shipped at 960×640, resizable, as proposed.
+- The sidebar stays fixed at 256 px; no resizer.

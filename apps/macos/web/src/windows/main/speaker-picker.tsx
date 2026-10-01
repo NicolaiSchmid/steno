@@ -124,7 +124,7 @@ export function SpeakerPicker({
 			>
 				{speaker.displayName}
 			</PopoverTrigger>
-			<PopoverPopup align="start" padding="compact" size="sm">
+			<PopoverPopup align="start" padding="sm" size="sm">
 				<Input
 					aria-label={`Name for ${speaker.clusterLabel}`}
 					autoFocus

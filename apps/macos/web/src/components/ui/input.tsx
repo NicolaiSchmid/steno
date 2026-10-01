@@ -14,7 +14,7 @@ export const fieldFrameClass =
 	"relative rounded-lg border border-input bg-background text-foreground shadow-xs edge-highlight transition-[border-color,box-shadow] duration-(--duration-functional) ease-standard dark:bg-input/32";
 
 /** The frame while its field has focus, and while the field is disabled. */
-const fieldStateClass =
+export const fieldStateClass =
 	"focus-within:border-ring focus-within:shadow-none focus-within:ring-[3px] focus-within:ring-ring/24 focus-within:before:shadow-none has-[:disabled]:opacity-64 has-[:disabled]:shadow-none";
 
 /** The single-line field. Heights: sm 26, md 30, lg 34. */
@@ -27,9 +27,9 @@ export const inputVariants = cva(
 	{
 		variants: {
 			size: {
-				sm: "h-[26px] px-[9px]",
-				md: "h-[30px] px-[11px]",
-				lg: "h-[34px] px-[11px]",
+				sm: "h-6.5 px-[9px]",
+				md: "h-7.5 px-[11px]",
+				lg: "h-8.5 px-[11px]",
 			},
 		},
 		defaultVariants: { size: "md" },

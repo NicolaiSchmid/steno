@@ -4,7 +4,7 @@ import type { ComponentProps, ReactNode } from "react";
 import { cn } from "@/lib/cn";
 
 /**
- * Segmented tabs: a 2 px frame on the field tint, each tab a 24 px pill;
+ * Segmented tabs: a 2 px frame on the field tint, each tab a 24 px segment;
  * the active one lifts onto the canvas colour (a translucent lift in dark).
  */
 export const Tabs = BaseTabs.Root;
@@ -72,8 +72,8 @@ export const tabsPanelVariants = cva("outline-none", {
 	variants: {
 		variant: {
 			default: "",
-			/** Long-form content: 15 px on a 1.6 line height. */
-			reading: "text-[15px] leading-[1.6]",
+			/** Long-form content: the reading type, 15 px on a 1.6 line height. */
+			reading: "text-reading",
 		},
 	},
 	defaultVariants: { variant: "default" },

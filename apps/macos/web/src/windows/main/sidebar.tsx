@@ -269,7 +269,7 @@ function RecordControl({
 }
 
 /**
- * The 256 pt column: an empty header row under the traffic lights, the
+ * The 256 px column: a header-high spacer under the traffic lights, the
  * Record control, the filters with counts, the tags, then the paired iPhone
  * and Settings at the foot.
  */

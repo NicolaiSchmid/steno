@@ -36,11 +36,11 @@ export const popoverPopupVariants = cva(
 				lg: "w-96",
 			},
 			padding: {
-				default: "p-4",
-				compact: "px-3 py-2",
+				md: "p-4",
+				sm: "px-3 py-2",
 			},
 		},
-		defaultVariants: { size: "md", padding: "default" },
+		defaultVariants: { size: "md", padding: "md" },
 	},
 );
 

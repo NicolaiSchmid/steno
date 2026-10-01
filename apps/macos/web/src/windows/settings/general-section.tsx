@@ -54,7 +54,7 @@ function AcknowledgementsDialog({
 					</DialogDescription>
 				</DialogHeader>
 				<DialogBody>
-					<ScrollArea className="max-h-[320px]">
+					<ScrollArea viewportClassName="max-h-80">
 						<div className="flex flex-col gap-4">
 							{groups.map(({ title, group }) => (
 								<FormCard key={group} title={title}>

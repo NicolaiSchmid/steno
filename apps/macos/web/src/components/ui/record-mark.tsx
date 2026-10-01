@@ -16,7 +16,7 @@ export function RecordMark({
 		<span
 			aria-hidden="true"
 			className={cn(
-				"grid h-[13px] shrink-0 grid-flow-col items-end gap-[2.5px] [&>i]:block [&>i]:w-[2.5px] [&>i]:rounded-px [&>i]:bg-current",
+				"grid h-[13px] shrink-0 grid-flow-col items-end gap-[2.5px] [&>i]:block [&>i]:w-[2.5px] [&>i]:rounded-[1px] [&>i]:bg-current",
 				pulse && "animate-status-pulse",
 				className,
 			)}

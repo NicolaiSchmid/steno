@@ -16,7 +16,7 @@ export function Checkbox({ className, ...props }: CheckboxProps) {
 	return (
 		<BaseCheckbox.Root
 			className={cn(
-				"edge-highlight inline-grid size-4 shrink-0 place-items-center rounded-[4px] border border-input bg-background shadow-xs outline-none",
+				"edge-highlight inline-grid size-4 shrink-0 place-items-center rounded-xs border border-input bg-background shadow-xs outline-none",
 				"transition-[background-color,border-color,box-shadow] duration-(--duration-functional) ease-standard",
 				"data-checked:border-primary data-checked:bg-primary data-checked:shadow-none data-checked:before:shadow-none",
 				"data-indeterminate:border-primary data-indeterminate:bg-primary",
@@ -27,7 +27,7 @@ export function Checkbox({ className, ...props }: CheckboxProps) {
 			)}
 			{...props}
 		>
-			<BaseCheckbox.Indicator className="grid place-items-center text-primary-fg data-unchecked:hidden">
+			<BaseCheckbox.Indicator className="grid place-items-center text-primary-foreground data-unchecked:hidden">
 				<CheckIcon aria-hidden="true" className="size-3 stroke-[3]" />
 			</BaseCheckbox.Indicator>
 		</BaseCheckbox.Root>

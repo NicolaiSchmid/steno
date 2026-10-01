@@ -4,14 +4,15 @@ import { cn } from "@/lib/cn";
 
 /**
  * A sidebar filter or tag: icon, label and a trailing count. A 32 px row in
- * the sidebar's muted colour that fills in on hover; the active row sits on
- * the selected fill with no shadow and no ring.
+ * the sidebar's muted colour that fills in on hover and darkens while
+ * pressed; the active row sits on the selected fill with no shadow and no
+ * ring.
  */
 export const sidebarRowVariants = cva(
 	[
 		"flex h-8 w-full shrink-0 select-none items-center gap-2 rounded-control px-2.5 py-1.5 text-left font-medium text-sidebar-muted-foreground/80 text-sm outline-none",
 		"transition-[background-color,color] duration-(--duration-functional) ease-standard",
-		"hover:bg-row-hover hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring active:bg-row-active",
+		"hover:bg-row-hover hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring active:bg-row-pressed",
 		"[&>svg]:size-4 [&>svg]:shrink-0 [&>svg]:text-sidebar-icon hover:[&>svg]:text-foreground",
 	],
 	{

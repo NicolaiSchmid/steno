@@ -96,7 +96,6 @@ const languages = [
 
 const buttonVariantNames = [
 	"primary",
-	"secondary",
 	"outline",
 	"ghost",
 	"ghost-muted",
@@ -409,7 +408,7 @@ export function StoriesPage() {
 							<PopoverPopup
 								align="end"
 								container={container}
-								padding="compact"
+								padding="sm"
 								size="sm"
 							>
 								<PopoverDescription>Three speakers found.</PopoverDescription>
@@ -575,9 +574,14 @@ export function StoriesPage() {
 				)}
 			</ThemePair>
 
-			<ThemePair title="Callout md: warning, info, live, destructive">
+			<ThemePair title="Callout md: default, warning, info, success, destructive">
 				{() => (
 					<div className="flex w-full flex-col gap-3">
+						<Callout
+							description="Choose a vault folder to start exporting."
+							icon={<InfoIcon aria-hidden="true" />}
+							title="Export is off."
+						/>
 						<Callout
 							actions={
 								<>
@@ -609,7 +613,7 @@ export function StoriesPage() {
 							description="Synced from your iPhone 2 minutes ago."
 							icon={<CheckCircle2Icon aria-hidden="true" />}
 							title="A new recording arrived."
-							variant="live"
+							variant="success"
 						/>
 						<Callout
 							actions={

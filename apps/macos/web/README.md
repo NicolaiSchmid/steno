@@ -4,7 +4,7 @@ The pixels of the Mac windows: one React app, bundled by Vite and served by
 the app from its own URL scheme. Swift keeps the state and the audio; the page
 draws snapshots and sends commands over the bridge (`src/bridge/`). Plan:
 `.plans/2026-09-29-macos-webview-ui.md`. Spec for the look:
-`docs/design/webview-mockup/steno-main.html`.
+`.plans/2026-10-01-t3code-design-polish.md`.
 
 ## Commands
 
@@ -23,7 +23,7 @@ draws snapshots and sends commands over the bridge (`src/bridge/`). Plan:
 |---|---|
 | `src/bridge/` | The contract (`contract.ts`), the typed client, the WebKit and mock transports, and `hooks.ts` (`useSnapshot`, `useBridge`, `send`). `createBridge()` picks WebKit inside the app and otherwise the `#bridge-fallback` module, which `vite.config.ts` resolves to `fallback-mock.ts` (dev server, Vitest, the screens bundle) or `fallback-none.ts` (the production bundle; it throws). |
 | `src/windows/main/` | The main window over the bridge: sidebar, meeting list, detail with its tabs, `format.ts` for every date and duration. |
-| `src/windows/settings/` | The Settings window: a sidebar of the six sections with the subtitles their snapshots carry, one `*-section.tsx` per section built from `FormCard` and `FormRow`, `settings-format.ts` for sizes and relative times. Text fields keep a draft (`src/lib/use-draft.ts`) and send one `update` plus a `save` when focus leaves. |
+| `src/windows/settings/` | The Settings window: a sidebar of the six sections as single-line rows, one `*-section.tsx` per section built from `FormCard` and `FormRow`, `settings-format.ts` for sizes and relative times. Text fields keep a draft (`src/lib/use-draft.ts`) and send one `update` plus a `save` when focus leaves. |
 | `src/windows/onboarding/` | The onboarding window over the `onboarding` snapshot: `permissions-page.tsx` (one `PermissionRow` per permission, Later or Done) and `setup-page.tsx` (the Summaries row with the service form or the ChatGPT consent card, the Obsidian vault row with the native chooser, Back and Finish) in the frame `onboarding-page.tsx` draws. The host says which page is current; `finished` in the snapshot makes the page ask for `window.close`. |
 | `src/components/` | Pieces two windows share, built from `ui/`: `permission-row.tsx` (Settings and onboarding), `summaries-endpoint-form.tsx` (the service and its server, model and key fields, laid out as rows or a stack), `codex-consent-card.tsx` (the ChatGPT consent words, once), `draft-field.tsx`. |
 | `src/components/ui/` | The component set; the only place a look is defined. |

@@ -27,7 +27,7 @@ const tileClass = "rounded-md border border-border bg-card";
 export const emptyStateIconVariants = cva(
 	[
 		tileClass,
-		"relative isolate flex size-9 items-center justify-center shadow-xs [&>svg]:size-[18px]",
+		"relative isolate flex size-9 items-center justify-center shadow-xs [&>svg]:size-4.5",
 	],
 	{
 		variants: {

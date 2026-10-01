@@ -8,7 +8,7 @@ export const kbdVariants = cva(
 	{
 		variants: {
 			variant: {
-				key: "h-5 min-w-5 rounded-[4px] bg-accent px-1",
+				key: "h-5 min-w-5 rounded-xs bg-accent px-1",
 				/** Bare text at the trailing edge of a menu row. */
 				plain: "tracking-widest",
 			},

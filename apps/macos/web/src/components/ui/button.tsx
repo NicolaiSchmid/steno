@@ -19,10 +19,8 @@ const ghost = "border-transparent hover:bg-accent data-popup-open:bg-accent";
 export const buttonLook = {
 	primary: [
 		filled,
-		"border-primary bg-primary text-primary-fg shadow-primary/24 hover:bg-primary/90",
+		"border-primary bg-primary text-primary-foreground hover:bg-primary/90",
 	],
-	secondary:
-		"border-transparent bg-secondary text-foreground hover:bg-secondary/90 active:bg-secondary/80",
 	outline: [
 		"edge-highlight border-input bg-popover text-foreground shadow-xs",
 		"hover:bg-accent/50 active:shadow-none active:before:shadow-none disabled:before:shadow-none",
@@ -36,7 +34,7 @@ export const buttonLook = {
 	"ghost-muted": [ghost, "text-muted-foreground hover:text-foreground"],
 	destructive: [
 		filled,
-		"border-destructive bg-destructive text-primary-fg shadow-destructive/24 hover:bg-destructive/90",
+		"border-destructive bg-destructive text-primary-foreground hover:bg-destructive/90",
 	],
 	"warning-outline": [
 		"border-warning/32 bg-warning-surface text-warning-foreground shadow-xs",
@@ -47,7 +45,7 @@ export const buttonLook = {
 /**
  * The one button. Callers pick `variant` and `size`; layout classes
  * (`w-full`, `justify-start`, `ml-auto`) are the only classes they may add.
- * Heights: xs 24, sm 28, md 32, lg 36; the icon sizes match.
+ * Heights: xs 24, sm 28, md 32, lg 36; icons are 14 px at xs, 16 px otherwise.
  */
 export const buttonVariants = cva(
 	[
@@ -63,6 +61,7 @@ export const buttonVariants = cva(
 	{
 		variants: {
 			variant: buttonLook,
+			// x-padding is `--spacing(n)` minus the 1 px border so text aligns with borderless controls
 			size: {
 				xs: "h-6 gap-1 rounded-md px-[7px] text-xs [&_svg]:size-3.5",
 				sm: "h-7 gap-1.5 px-[9px]",

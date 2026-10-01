@@ -20,7 +20,7 @@ describe("MeetingList", () => {
 		vi.restoreAllMocks();
 	});
 
-	it("renders the day groups with the selected row raised", async () => {
+	it("renders the day groups with the selected row filled", async () => {
 		const harness = await createBridgeHarness();
 		renderWithBridge(<MeetingList />, harness);
 		expect(screen.getByTestId(`meeting-${FIRST}`)).toHaveAttribute(
@@ -225,12 +225,12 @@ describe("MeetingList rows", () => {
 		expect(screen.getAllByText("No summary")).toHaveLength(1);
 	});
 
-	it("shows Failed in place of the time and the reason as the preview", async () => {
+	it("shows Failed before the time and the reason as the preview", async () => {
 		const harness = await createBridgeHarness();
 		renderWithBridge(<MeetingList />, harness);
 		const row = screen.getByTestId(`meeting-${FAILED}`);
-		expect(row).toHaveTextContent(/^CallFailed/);
-		expect(row.querySelector("time")).toBeNull();
+		expect(row).toHaveTextContent(/^CallFailed\d{1,2}:\d{2}/);
+		expect(row.querySelector("time")).not.toBeNull();
 		expect(row).toHaveTextContent("Transcription failed: model not installed");
 	});
 
@@ -239,9 +239,9 @@ describe("MeetingList rows", () => {
 		renderWithBridge(<MeetingList />, harness);
 		const row = screen.getByTestId(`meeting-${PROCESSING}`);
 		expect(row).toHaveAttribute("aria-current", "true");
-		expect(row).toHaveTextContent(/^CallWorking/);
+		expect(row).toHaveTextContent(/^CallWorking\d{1,2}:\d{2}/);
 		expect(row).toHaveTextContent("Standup");
-		expect(row.querySelector("time")).toBeNull();
+		expect(row.querySelector("time")).not.toBeNull();
 	});
 
 	it("shows Live with the pulse while a meeting records", async () => {
@@ -271,7 +271,7 @@ describe("MeetingList rows", () => {
 		});
 		renderWithBridge(<MeetingList />, harness);
 		const element = screen.getByTestId(`meeting-${FIRST}`);
-		expect(element).toHaveTextContent(/^CallLive/);
+		expect(element).toHaveTextContent(/^CallLive\d{1,2}:\d{2}/);
 		expect(element).toHaveTextContent("Recording now.");
 		expect(element.querySelector(".animate-status-pulse")).not.toBeNull();
 		expect(element).not.toHaveTextContent("No summary");

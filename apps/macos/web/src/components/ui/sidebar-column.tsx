@@ -1,6 +1,5 @@
 import type { ComponentProps, ReactNode } from "react";
 import { cn } from "@/lib/cn";
-import { HeaderRow } from "./header";
 
 export interface SidebarColumnProps extends ComponentProps<"aside"> {
 	/** `aside` (the main window) or `nav` (the Settings sections). */
@@ -11,7 +10,7 @@ export interface SidebarColumnProps extends ComponentProps<"aside"> {
 
 /**
  * The sidebar column of a window: the grained sidebar surface with its
- * trailing hairline, an empty header row under the traffic lights, then the
+ * trailing hairline, a header-high spacer under the traffic lights, then the
  * rows at a 1 px gap inside 8 px of padding, and the footer pinned at the
  * bottom in the same padding.
  */
@@ -30,7 +29,7 @@ export function SidebarColumn({
 			)}
 			{...props}
 		>
-			<HeaderRow inset="sm" />
+			<div aria-hidden="true" className="h-13 shrink-0" />
 			<div className="flex flex-col gap-1 p-2">{children}</div>
 			{footer ? (
 				<div className="mt-auto flex flex-col gap-2 p-2">{footer}</div>

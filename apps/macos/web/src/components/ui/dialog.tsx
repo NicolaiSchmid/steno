@@ -132,16 +132,21 @@ export function DialogCloseButton({
 	);
 }
 
-/** The action band at the foot of a dialog or a page: trailing buttons on the muted fill. */
-export const footerBandClass =
+/** The action band shared by `FooterBand` and `DialogFooter`: trailing buttons on the muted fill. */
+const bandClass =
 	"flex items-center justify-end gap-2 border-border border-t bg-muted/72 px-6 py-4";
+
+/** The action band at the foot of a page (onboarding): a `footer` landmark. */
+export function FooterBand({ className, ...props }: ComponentProps<"footer">) {
+	return <footer className={cn(bandClass, className)} {...props} />;
+}
 
 /** The action row at the bottom of a dialog on the muted band. */
 export function DialogFooter({ className, ...props }: ComponentProps<"div">) {
 	return (
 		<div
 			className={cn(
-				footerBandClass,
+				bandClass,
 				"rounded-b-[calc(var(--radius-2xl)-1px)]",
 				className,
 			)}

@@ -23,20 +23,18 @@ import {
 	Avatar,
 	AvatarStack,
 	Badge,
-	Breadcrumb,
 	Button,
 	Callout,
+	ContentColumn,
 	EmptyState,
-	formRowIconVariants,
-	HeaderRow,
 	Menu,
 	MenuItem,
 	MenuPopup,
 	MenuSeparator,
 	MenuTrigger,
 	RecordMark,
-	ScrollArea,
 	Select,
+	StatusIcon,
 	Switch,
 	Tabs,
 	TabsList,
@@ -90,7 +88,7 @@ export interface MeetingDetailProps {
 	initialPickerOpen?: boolean;
 }
 
-/** Row 1 of the reading column: summaries or export still need setting up. */
+/** The notice at the top of the reading column: summaries or export still need setting up. */
 function SetupBanner({ banner }: { banner: AppSnapshot["setupBanner"] }) {
 	const client = useBridge();
 	if (!banner) {
@@ -266,9 +264,7 @@ function DetailFooter({ detail }: { detail: MeetingDetailSnapshot }) {
 				className="flex flex-wrap items-center gap-x-3 gap-y-2"
 				data-testid="export-status"
 			>
-				<span className={formRowIconVariants({ tone: status.tone })}>
-					{status.icon}
-				</span>
+				<StatusIcon tone={status.tone}>{status.icon}</StatusIcon>
 				<span className="min-w-0 flex-1">{detail.export.message}</span>
 				{detail.export.canReveal ? (
 					<Button
@@ -299,35 +295,6 @@ function DetailFooter({ detail }: { detail: MeetingDetailSnapshot }) {
 }
 
 /**
- * The reading column's frame: the header row with the breadcrumb and the
- * actions at its trailing edge, then the content scrolling under it at the
- * reading width.
- */
-function DetailColumn({
-	crumbs,
-	actions,
-	children,
-}: {
-	crumbs: ReactNode[];
-	actions?: ReactNode;
-	children: ReactNode;
-}) {
-	return (
-		<>
-			<HeaderRow>
-				<Breadcrumb items={crumbs} />
-				{actions}
-			</HeaderRow>
-			<ScrollArea className="flex-1" fade>
-				<div className="mx-auto w-full max-w-3xl px-6 pt-4 pb-12">
-					{children}
-				</div>
-			</ScrollArea>
-		</>
-	);
-}
-
-/**
  * The reading column for the selected meeting: the header row with the
  * breadcrumb, Export and the actions menu, then the setup banner, the
  * eyebrow, title, people and tags, the tabs and the footer. Processing and
@@ -353,7 +320,7 @@ export function MeetingDetail({
 					setupBanner={app?.setupBanner}
 				/>
 			) : list && !hasSelection ? (
-				<DetailColumn crumbs={["Meetings"]}>
+				<ContentColumn crumbs={["Meetings"]}>
 					<SetupBanner banner={app?.setupBanner} />
 					<EmptyState
 						body="Pick a meeting on the left to read its summary, transcript and tasks."
@@ -363,7 +330,7 @@ export function MeetingDetail({
 						size="lg"
 						title="Select a meeting"
 					/>
-				</DetailColumn>
+				</ContentColumn>
 			) : null}
 		</main>
 	);
@@ -576,7 +543,7 @@ function DetailBody({
 	);
 
 	return (
-		<DetailColumn actions={actions} crumbs={["Meetings", detail.title]}>
+		<ContentColumn actions={actions} crumbs={["Meetings", detail.title]}>
 			<SetupBanner banner={setupBanner} />
 			{detail.error ? (
 				<Callout
@@ -695,7 +662,7 @@ function DetailBody({
 							Template
 							<Select
 								aria-label="Summary template"
-								className="max-w-[180px]"
+								className="max-w-45"
 								data-testid="template-select"
 								disabled={detail.isBusy}
 								onValueChange={(templateID) => {
@@ -720,6 +687,6 @@ function DetailBody({
 				))}
 			</Tabs>
 			<DetailFooter detail={detail} />
-		</DetailColumn>
+		</ContentColumn>
 	);
 }

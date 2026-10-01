@@ -3,25 +3,25 @@ import type { ComponentProps } from "react";
 import { cn } from "@/lib/cn";
 
 /**
- * An 18 px label in a row's meta line: a tag, "No summary", "Allowed".
+ * An 18 px label in a row's meta line: "#tag", "No summary", "Allowed".
  * Tints use the 8 percent surface with the 700-weight text (16 percent and
  * the 400 in dark); `sm` is the 16 px counter.
  */
 export const badgeVariants = cva(
-	"inline-flex h-[18px] min-w-[18px] shrink-0 items-center justify-center gap-1 whitespace-nowrap rounded-sm border border-transparent px-[5px] font-medium text-xs leading-none [&_svg]:size-3 [&_svg]:shrink-0 [&_svg]:opacity-80",
+	"inline-flex h-4.5 min-w-4.5 shrink-0 items-center justify-center gap-1 whitespace-nowrap rounded-sm border border-transparent px-[5px] font-medium text-xs leading-none [&_svg]:size-3 [&_svg]:shrink-0 [&_svg]:opacity-80",
 	{
 		variants: {
 			variant: {
 				outline: "border-input bg-background text-foreground dark:bg-input/32",
 				warning: "bg-warning-surface text-warning-foreground",
-				success: "bg-success/8 text-success-foreground dark:bg-success/16",
+				success: "bg-success-surface text-success-foreground",
 			},
 			size: {
-				default: "",
-				sm: "h-4 min-w-4 rounded-[4px] px-1 text-3xs",
+				md: "",
+				sm: "h-4 min-w-4 rounded-xs px-1 text-3xs",
 			},
 		},
-		defaultVariants: { variant: "outline", size: "default" },
+		defaultVariants: { variant: "outline", size: "md" },
 	},
 );
 

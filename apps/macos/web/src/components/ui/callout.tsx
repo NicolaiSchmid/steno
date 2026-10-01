@@ -24,13 +24,17 @@ export const calloutVariants = cva(
 					"border-border bg-card text-foreground [&_[data-slot=icon]]:text-muted-foreground",
 				warning:
 					"border-warning/32 bg-warning-surface text-warning-foreground [&_[data-slot=description]]:text-warning-foreground/80 [&_[data-slot=icon]]:text-warning",
-				info: "border-info/32 bg-info/4 text-foreground [&_[data-slot=icon]]:text-info",
+				info: "border-info/32 bg-info-surface text-foreground [&_[data-slot=icon]]:text-info",
+				/** The recorder's own notices (the auto-stop countdown). */
 				live: "border-primary/32 bg-primary/4 text-foreground [&_[data-slot=icon]]:text-primary",
+				/** A connected or saved state ("Using ChatGPT as …", a passed test). */
+				success:
+					"border-success/32 bg-success-surface text-success-foreground [&_[data-slot=icon]]:text-success",
 				destructive:
 					"border-destructive/32 bg-destructive-surface text-destructive-foreground [&_[data-slot=description]]:text-destructive-foreground/80 [&_[data-slot=icon]]:text-destructive",
 			},
 		},
-		defaultVariants: { size: "md", variant: "warning" },
+		defaultVariants: { size: "md", variant: "default" },
 	},
 );
 

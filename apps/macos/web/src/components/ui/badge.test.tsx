@@ -22,14 +22,14 @@ describe("Badge", () => {
 
 	it("shrinks to the 16 px counter in sm and merges the height", () => {
 		const { rerender } = render(<Badge data-testid="b">1</Badge>);
-		expect(screen.getByTestId("b")).toHaveClass("h-[18px]");
+		expect(screen.getByTestId("b")).toHaveClass("h-4.5");
 		rerender(
 			<Badge data-testid="b" size="sm">
 				1
 			</Badge>,
 		);
 		expect(screen.getByTestId("b")).toHaveClass("h-4");
-		expect(screen.getByTestId("b")).not.toHaveClass("h-[18px]");
+		expect(screen.getByTestId("b")).not.toHaveClass("h-4.5");
 	});
 
 	it("keeps caller layout classes on the element", () => {

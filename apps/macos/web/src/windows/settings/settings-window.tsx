@@ -8,13 +8,7 @@ import {
 } from "lucide-react";
 import { type ReactNode, useEffect, useState } from "react";
 import { useBridge, usePageReady } from "@/bridge/hooks";
-import {
-	Breadcrumb,
-	HeaderRow,
-	ScrollArea,
-	SidebarColumn,
-	SidebarRow,
-} from "@/components/ui";
+import { ContentColumn, SidebarColumn, SidebarRow } from "@/components/ui";
 import { ExportSection } from "./export-section";
 import { GeneralSection } from "./general-section";
 import { PhoneSection } from "./iphone-section";
@@ -111,12 +105,12 @@ export function SettingsWindow({ section: routeSection }: SettingsWindowProps) {
 				))}
 			</SidebarColumn>
 			<div className="flex min-h-0 flex-col">
-				<HeaderRow>
-					<Breadcrumb items={["Settings", sectionInfo(section).title]} />
-				</HeaderRow>
-				<ScrollArea className="min-h-0 flex-1" fade>
-					<div className="mx-auto w-full max-w-4xl">{page}</div>
-				</ScrollArea>
+				<ContentColumn
+					crumbs={["Settings", sectionInfo(section).title]}
+					width="settings"
+				>
+					{page}
+				</ContentColumn>
 			</div>
 		</div>
 	);

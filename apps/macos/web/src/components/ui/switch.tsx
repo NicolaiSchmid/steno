@@ -15,7 +15,7 @@ export function Switch({ className, ...props }: SwitchProps) {
 	return (
 		<BaseSwitch.Root
 			className={cn(
-				"group relative inline-flex h-[18px] w-[30px] shrink-0 items-center rounded-full p-0.5 outline-none",
+				"group relative inline-flex h-4.5 w-7.5 shrink-0 items-center rounded-full p-0.5 outline-none",
 				"transition-[background-color,box-shadow] duration-(--duration-surface) ease-standard",
 				"data-checked:bg-primary data-unchecked:bg-input",
 				"focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-1 focus-visible:ring-offset-background",

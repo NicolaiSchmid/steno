@@ -111,7 +111,8 @@ function flatIDs(list: MeetingsListSnapshot): string[] {
 }
 
 /**
- * The 300 pt column: the header row and the search row, then the day groups
+ * The 300 px column on the sidebar surface: the header row and the search
+ * row, then the day groups
  * with one row per meeting. The selected row is filled and stays in view.
  * Right-click or the Delete key deletes behind the host's confirmation; the
  * arrow keys move the selection.
@@ -181,7 +182,7 @@ export function MeetingList() {
 	return (
 		<section
 			aria-label="Meetings"
-			className="flex min-h-0 flex-col overflow-hidden border-border border-r"
+			className="surface-grain flex min-h-0 flex-col overflow-hidden border-sidebar-border border-r bg-sidebar"
 			data-testid="meeting-list"
 			onKeyDown={onKeyDown}
 		>
@@ -257,7 +258,7 @@ export function MeetingList() {
 type RowState = Exclude<MeetingRow["state"], "ready">;
 
 const TONE: Record<RowState, string> = {
-	recording: "inline-flex items-center gap-1 text-primary",
+	recording: "text-primary",
 	failed: "text-destructive-foreground",
 	processing: "text-info-foreground",
 	queued: "text-info-foreground",
@@ -270,27 +271,39 @@ const LABEL: Record<RowState, string> = {
 	queued: "Working",
 };
 
-/** Line 1's trailing word: the row's state while it is not simply done. */
+/**
+ * Line 1's trailing slot: the start time, led by the row's state word while
+ * it is not simply done.
+ */
 function RowStatus({ meeting }: { meeting: MeetingRow }) {
+	const time = (
+		<time
+			className="text-muted-foreground tabular-nums"
+			dateTime={meeting.startedAt}
+		>
+			{format.time(meeting.startedAt)}
+		</time>
+	);
 	if (meeting.state === "ready") {
-		return (
-			<time
-				className="text-muted-foreground tabular-nums"
-				dateTime={meeting.startedAt}
-			>
-				{format.time(meeting.startedAt)}
-			</time>
-		);
+		return time;
 	}
 	return (
-		<span className={cn("font-medium", TONE[meeting.state])}>
-			{meeting.state === "recording" ? (
-				<span
-					aria-hidden="true"
-					className="size-1.5 animate-status-pulse rounded-full bg-primary"
-				/>
-			) : null}
-			{LABEL[meeting.state]}
+		<span className="inline-flex items-center gap-1.5">
+			<span
+				className={cn(
+					"inline-flex items-center gap-1 font-medium",
+					TONE[meeting.state],
+				)}
+			>
+				{meeting.state === "recording" ? (
+					<span
+						aria-hidden="true"
+						className="size-1.5 animate-status-pulse rounded-full bg-primary"
+					/>
+				) : null}
+				{LABEL[meeting.state]}
+			</span>
+			{time}
 		</span>
 	);
 }
@@ -321,7 +334,7 @@ function MeetingRowView({
 					aria-current={active ? "true" : undefined}
 					className={cn(
 						"relative block w-full rounded-md px-2.5 py-2 text-left outline-none transition-colors duration-(--duration-functional) ease-standard focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-inset",
-						active ? "bg-row-active text-foreground" : "hover:bg-row-hover",
+						active ? "bg-row-selected text-foreground" : "hover:bg-row-hover",
 					)}
 					data-testid={`meeting-${meeting.id}`}
 					onClick={() =>
@@ -353,7 +366,7 @@ function MeetingRowView({
 							</Badge>
 						) : null}
 						{meeting.speakers.length > 0 ? (
-							<AvatarStack className="shrink-0" ring="background">
+							<AvatarStack className="shrink-0" ring="sidebar">
 								{meeting.speakers.map((chip) => (
 									<Avatar
 										index={chip.colorIndex}
