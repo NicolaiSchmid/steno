@@ -6,8 +6,8 @@ import {
 	TextQuoteIcon,
 	UploadIcon,
 } from "lucide-react";
-import { type ReactNode, useEffect, useRef, useState } from "react";
-import { send, useBridge, usePageReady, useSnapshot } from "@/bridge/hooks";
+import { type ReactNode, useEffect, useState } from "react";
+import { useBridge, usePageReady, useSnapshot } from "@/bridge/hooks";
 import { ScrollArea, SidebarRow } from "@/components/ui";
 import { ExportSection } from "./export-section";
 import { GeneralSection } from "./general-section";

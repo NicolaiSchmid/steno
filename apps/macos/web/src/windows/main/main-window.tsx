@@ -1,4 +1,4 @@
-import { useEffect, useRef } from "react";
+import { useEffect } from "react";
 import { send, useBridge, usePageReady } from "@/bridge/hooks";
 import { MeetingDetail } from "./meeting-detail";
 import { MeetingList } from "./meeting-list";

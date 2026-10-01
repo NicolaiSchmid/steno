@@ -157,11 +157,6 @@ export const scenarios = [
 	"pairing",
 	"phone-unavailable",
 ] as const;
-type Scenario = (typeof scenarios)[number];
-
-function isScenario(value: string | null): value is Scenario {
-	return scenarios.some((scenario) => scenario === value);
-}
 
 /**
  * The page's query, wherever it sits: `?scenario=empty#/main` and
