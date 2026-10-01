@@ -35,7 +35,11 @@ const srcDir = fileURLToPath(new URL("./src", import.meta.url));
 // `vite preview --mode screens`; the dev server and Vitest keep it too.
 export default defineConfig(({ command, mode }) => {
 	const screens = mode === "screens";
-	const mockBridge = command === "serve" || mode !== "production";
+	// Opt-in, not the default for an unknown mode: the dev server, Vitest
+	// and the screens build get the fixture-backed mock; anything else gets
+	// the fallback that throws.
+	const mockBridge =
+		command === "serve" || mode === "screens" || mode === "test";
 	return {
 		base: "./",
 		plugins: [react(), tailwindcss(), stripCssBanners()],

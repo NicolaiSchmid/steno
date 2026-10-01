@@ -360,7 +360,8 @@ WP5, cleanup:
   only. Decision 1's window background colour follow landed as `CanvasWebView` with the page's
   `--background` from `theme.css` (`#FCFCFC` light, `#0A0A0A` dark, the values Decision 2
   names; not `Theme.background`, which is the mobile ladder's `#FAFAFA` and `#000000`), set
-  when the web view joins a window and when the appearance changes, pinned against the CSS by
+  when the web view joins a window (the colour is dynamic, so an appearance switch re-resolves
+  it without a second assignment), pinned against the CSS by
   test. The WP2 deviation about the fixture chunks is closed: `#bridge-fallback` resolves per
   Vite mode to the fixture mock (dev server, Vitest, a new `vite build --mode screens` into
   `dist-screens/` that `pnpm screens` builds and previews) or to a thrown error (the production

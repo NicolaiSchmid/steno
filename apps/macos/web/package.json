@@ -17,7 +17,7 @@
 		"lint": "biome check .",
 		"lint:fix": "biome check --write .",
 		"lint:ui": "node scripts/check-ui-restyle.mjs",
-		"preview": "vite preview",
+		"preview": "vite preview --mode screens",
 		"screens": "pnpm build:screens && playwright test",
 		"test": "vitest run",
 		"typecheck": "tsc --noEmit"

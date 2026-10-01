@@ -16,11 +16,7 @@ import { basename, join, relative } from "node:path";
 
 const FIXTURES = "fixtures/bridge";
 /** Strings the mock transport alone spells; minification keeps literals. */
-const MOCK_MARKERS = [
-	"reply.chosenPath",
-	"onboarding-vault-saved",
-	"summaries-connected",
-];
+const MOCK_MARKERS = ["onboarding-vault-saved", "summaries-connected"];
 /** A fixture string shorter than this is too common to be a marker. */
 const MIN_MARKER_LENGTH = 16;
 /** Sources that may spell fixture strings without being fixtures. */

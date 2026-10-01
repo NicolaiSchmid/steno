@@ -60,7 +60,7 @@ export function SummariesEndpointForm({
 			: stacked
 				? "API key, only if the server needs one"
 				: "Only if the server needs one";
-	const fieldClass = stacked ? "w-full" : undefined;
+	const fieldClass = stacked ? "w-full" : "w-[200px]";
 
 	const service = (
 		<Select
@@ -82,7 +82,7 @@ export function SummariesEndpointForm({
 	);
 	const server = preset?.showsServerField ? (
 		<DraftField
-			{...(fieldClass ? { className: fieldClass } : {})}
+			className={fieldClass}
 			label="Server address"
 			onCommit={(baseURL) => onUpdate({ baseURL })}
 			placeholder={
@@ -96,7 +96,7 @@ export function SummariesEndpointForm({
 	) : null;
 	const model = (
 		<DraftField
-			{...(fieldClass ? { className: fieldClass } : {})}
+			className={fieldClass}
 			label="Model"
 			onCommit={(value) => onUpdate({ model: value })}
 			placeholder={
@@ -110,7 +110,7 @@ export function SummariesEndpointForm({
 	);
 	const apiKey = (
 		<DraftField
-			{...(fieldClass ? { className: fieldClass } : {})}
+			className={fieldClass}
 			clearOnCommit={clearKeyOnCommit}
 			label="API key"
 			onCommit={(value) => {

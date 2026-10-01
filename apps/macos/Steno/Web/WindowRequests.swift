@@ -24,3 +24,12 @@ func openRequestedWindow(
   }
   NSApp.activate()
 }
+
+/// The closure a web window installs on its bridge for `window.open`: each
+/// scene hands over its own `openWindow` action.
+@MainActor
+func windowOpener(controller: AppController, openWindow: OpenWindowAction)
+  -> @MainActor (WindowParams) -> Void
+{
+  { request in openRequestedWindow(request, controller: controller, openWindow: openWindow) }
+}

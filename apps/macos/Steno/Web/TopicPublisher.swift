@@ -93,7 +93,6 @@ final class TopicPublisher {
     if let interval = minimumInterval[topic], let last = lastPublish[topic] {
       let wait = interval - (ContinuousClock.now - last)
       if wait > .zero {
-        throttles[topic]?.cancel()
         throttles[topic] = Task { @MainActor [weak self] in
           try? await Task.sleep(for: wait)
           guard !Task.isCancelled else { return }
@@ -130,7 +129,7 @@ final class TopicPublisher {
 
   /// A bridge host lives as long as its window's task: this returns only
   /// when that task is cancelled, whatever its observers do meanwhile.
-  static func untilCancelled() async {
+  nonisolated static func untilCancelled() async {
     while !Task.isCancelled {
       try? await Task.sleep(for: .seconds(3_600))
     }

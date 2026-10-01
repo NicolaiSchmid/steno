@@ -133,27 +133,18 @@ enum WebCanvas {
   static let token = Theme.Token(
     cssName: "web-background", dark: Theme.hex(0x0A0A0A), light: Theme.hex(0xFCFCFC))
 
-  /// Dynamic: resolves per the window's effective appearance when drawn.
-  static var color: NSColor { token.nsColor }
+  /// Dynamic: AppKit resolves it per the window's effective appearance each
+  /// time the window draws, so one assignment follows every appearance switch.
+  static let color: NSColor = token.nsColor
 }
 
 /// A web view that paints the window behind it in the page's canvas colour
-/// when it joins a window and whenever the window's appearance changes
-/// (plan Decision 1). The colour is dynamic, so a resize or an appearance
-/// switch never shows the system window background under the transparent
-/// page.
+/// when it joins a window (plan Decision 1). The colour is dynamic, so a
+/// resize or an appearance switch never shows the system window background
+/// under the transparent page.
 final class CanvasWebView: WKWebView {
   override func viewDidMoveToWindow() {
     super.viewDidMoveToWindow()
-    paintWindow()
-  }
-
-  override func viewDidChangeEffectiveAppearance() {
-    super.viewDidChangeEffectiveAppearance()
-    paintWindow()
-  }
-
-  private func paintWindow() {
     window?.backgroundColor = WebCanvas.color
   }
 }
