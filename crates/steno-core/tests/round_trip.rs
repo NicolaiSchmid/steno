@@ -3,21 +3,51 @@
 
 mod common;
 
+use std::process::Command;
+
 use rusqlite::Connection;
 use steno_core::*;
 
 use common::{MEETING_ID, PERSON_ID, date, populate, uuid};
 
-/// Raw column text through a second rusqlite connection, formatted the way
-/// the `sqlite3` CLI prints a `-noheader` row (`|` between columns, an
-/// empty cell for NULL, one decimal for an integral REAL).
-///
-/// Not the `sqlite3` CLI: the test needs FTS5 for the `_ft` queries and the
-/// system binary's feature set varies by machine (the hosted `macos-15`
-/// runner ships one without it, 2026-10-02). The bundled SQLite behind
-/// rusqlite is the same on every platform, and it reads the stored bytes
-/// without going through the store's decoders.
+/// Raw column text through `sqlite3` when a usable CLI is available (the
+/// independent reader), else through a second rusqlite connection. A CLI
+/// built without FTS5 cannot open the file at all (the schema has the
+/// `transcriptSearch` virtual table), so it counts as absent too.
 fn raw(path: &std::path::Path, sql: &str) -> String {
+    let cli = match Command::new("sqlite3")
+        .arg("-batch")
+        .arg("-noheader")
+        .arg(path)
+        .arg(sql)
+        .output()
+    {
+        Ok(output) if output.status.success() => Some(
+            String::from_utf8(output.stdout)
+                .unwrap()
+                .trim_end()
+                .replace("\r\n", "\n"),
+        ),
+        Ok(output) => {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert!(
+                stderr.contains("no such module"),
+                "sqlite3 failed: {stderr}"
+            );
+            eprintln!(
+                "sqlite3 CLI lacks FTS5 ({}); reading raw columns through rusqlite",
+                stderr.trim()
+            );
+            None
+        }
+        Err(error) => {
+            eprintln!("sqlite3 CLI not available ({error}); reading raw columns through rusqlite");
+            None
+        }
+    };
+    if let Some(text) = cli {
+        return text;
+    }
     let connection = Connection::open(path).unwrap();
     let mut statement = connection.prepare(sql).unwrap();
     let columns = statement.column_count();

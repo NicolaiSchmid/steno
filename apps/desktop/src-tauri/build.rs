@@ -1,8 +1,15 @@
 //! Two jobs before `tauri_build`: stand in for the web `dist/` when it has
 //! not been built so a debug `cargo build` works on a bare checkout (a
 //! release build fails instead), then let `tauri_build` do its own work
-//! (configuration, ACL, Windows resources) with the static Visual C++
-//! runtime reserved for release builds.
+//! (configuration, ACL, Windows resources).
+//!
+//! The static Visual C++ runtime is a release-only choice. To get it,
+//! `tauri_build` writes an empty `msvcrt.lib` into this crate's `OUT_DIR`
+//! and puts that directory on the native search path; rustdoc links every
+//! doctest in the workspace against the same search path, so in a debug
+//! build the real `msvcrt.lib` is shadowed and every doctest fails to link
+//! (`unresolved external symbol memcpy`, `_fltused`, ...). A release bundle
+//! keeps the static runtime so users need no redistributable.
 
 use std::{
     env,
@@ -12,25 +19,12 @@ use std::{
 fn main() {
     let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR"));
     ensure_frontend_dist(&manifest_dir);
+    let release = env::var("PROFILE").as_deref() == Ok("release");
     let attributes = tauri_build::Attributes::new()
-        .windows_attributes(tauri_build::WindowsAttributes::new().static_vc_runtime(is_release()));
+        .windows_attributes(tauri_build::WindowsAttributes::new().static_vc_runtime(release));
     if let Err(error) = tauri_build::try_build(attributes) {
-        panic!("tauri_build: {error:#}");
+        panic!("tauri-build: {error:#}");
     }
-}
-
-/// Why the static Visual C++ runtime is a release-only choice: `tauri_build`
-/// links it by writing a stub `msvcrt.lib` into `OUT_DIR` and adding that
-/// directory to the link search path, with `/DEFAULTLIB:libcmt` link
-/// arguments that reach only this crate's binaries. Cargo hands every build
-/// script's link search path to rustdoc, so in a `cargo test --workspace`
-/// the stub shadows the real `msvcrt.lib` in every workspace doctest link
-/// (`steno-bridge`'s doctests failed with `__CxxFrameHandler3` and `memcpy`
-/// unresolved; MSVC 14.51 also rejects the stub, LNK4003). A debug build
-/// links the runtime dynamically, as any Rust binary does; the release
-/// bundle, which ships without a VC redistributable, keeps it static.
-fn is_release() -> bool {
-    env::var("PROFILE").as_deref() == Ok("release")
 }
 
 /// `tauri::generate_context!` embeds `frontendDist` and fails when the
