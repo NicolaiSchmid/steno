@@ -3,6 +3,7 @@
 //! database `steno dev db migrate` created (`scripts/dump-swift-schema.sh`,
 //! macOS); the Rust store dumps a fresh database the same way.
 
+use similar::TextDiff;
 use steno_core::Store;
 use steno_core::store::migrator;
 
@@ -26,7 +27,10 @@ fn rust_migrations_produce_the_swift_schema() {
     assert!(
         rust == swift,
         "schema differs from the Swift one; regenerate the fixture with \
-         scripts/dump-swift-schema.sh if Migrations.swift changed.\n--- swift\n{swift}\n--- rust\n{rust}"
+         scripts/dump-swift-schema.sh if Migrations.swift changed.\n{}",
+        TextDiff::from_lines(&swift, &rust)
+            .unified_diff()
+            .header("swift", "rust")
     );
 }
 
