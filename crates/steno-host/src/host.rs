@@ -20,7 +20,7 @@ use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
 use std::time::{Duration, Instant};
 
 use chrono::{DateTime, FixedOffset, Utc};
-use serde_json::Value;
+use serde_json::{Value, to_value};
 use steno_bridge::{
     AppPhone, AssetIdParams, BridgeError, BridgeHost, BridgeTopic, BridgeWindow, ChosenPathReply,
     ConfirmDestructiveParams, ConfirmReply, DeviceIdParams, EventSink, ExportUpdateParams,
@@ -317,22 +317,21 @@ impl Host {
     }
 
     fn build(&self, inner: &mut Inner, topic: BridgeTopic) -> Option<Value> {
-        let encode = |value: &dyn erased::Serialize| value.to_value();
         let now = self.now();
         let snapshot = match topic {
-            BridgeTopic::App => encode(&main_snapshots::app_snapshot(
+            BridgeTopic::App => to_value(main_snapshots::app_snapshot(
                 &inner.app,
                 inner.has_meetings,
                 &self.config.version,
             )),
-            BridgeTopic::Recording => encode(&main_snapshots::recording_snapshot(
+            BridgeTopic::Recording => to_value(main_snapshots::recording_snapshot(
                 &self.services.recorder.status(),
             )),
-            BridgeTopic::Progress => encode(&main_snapshots::progress_snapshot(&inner.progress)),
+            BridgeTopic::Progress => to_value(main_snapshots::progress_snapshot(&inner.progress)),
             BridgeTopic::MeetingsList => {
                 Self::follow_list_fill(inner);
                 self.sync_detail(inner);
-                encode(&main_snapshots::list_snapshot(&inner.list, now))
+                to_value(main_snapshots::list_snapshot(&inner.list, now))
             }
             BridgeTopic::MeetingDetail => {
                 self.sync_detail(inner);
@@ -340,41 +339,42 @@ impl Host {
                     .detail
                     .as_ref()
                     .and_then(|detail| detail.speakers.playing(&*self.services.clip_player));
-                match inner.detail.as_ref().and_then(|detail| {
-                    main_snapshots::detail_snapshot(detail, playing, self.config.zone)
-                }) {
-                    Some(detail) => encode(&detail),
-                    None => Ok(Value::Null),
-                }
+                inner
+                    .detail
+                    .as_ref()
+                    .and_then(|detail| {
+                        main_snapshots::detail_snapshot(detail, playing, self.config.zone)
+                    })
+                    .map_or(Ok(Value::Null), to_value)
             }
-            BridgeTopic::SettingsGeneral => encode(&settings_snapshots::general(
+            BridgeTopic::SettingsGeneral => to_value(settings_snapshots::general(
                 &inner.general,
                 &self.services,
                 inner.subtitle(SettingsSection::General),
                 &self.config.version,
             )),
-            BridgeTopic::SettingsRecording => encode(&settings_snapshots::recording(
+            BridgeTopic::SettingsRecording => to_value(settings_snapshots::recording(
                 &inner.audio,
                 inner.subtitle(SettingsSection::Recording),
             )),
-            BridgeTopic::SettingsTranscription => encode(&settings_snapshots::transcription(
+            BridgeTopic::SettingsTranscription => to_value(settings_snapshots::transcription(
                 &inner.speech,
                 inner.subtitle(SettingsSection::Transcription),
             )),
-            BridgeTopic::SettingsSummaries => encode(&settings_snapshots::summaries(
+            BridgeTopic::SettingsSummaries => to_value(settings_snapshots::summaries(
                 &inner.llm,
                 inner.subtitle(SettingsSection::Summaries),
             )),
-            BridgeTopic::SettingsExport => encode(&settings_snapshots::export(
+            BridgeTopic::SettingsExport => to_value(settings_snapshots::export(
                 &inner.obsidian,
                 inner.subtitle(SettingsSection::Export),
             )),
-            BridgeTopic::SettingsPhone => encode(&settings_snapshots::phone(
+            BridgeTopic::SettingsPhone => to_value(settings_snapshots::phone(
                 &inner.phones,
                 &self.services,
                 inner.subtitle(SettingsSection::Phone),
             )),
-            BridgeTopic::Onboarding => encode(&onboarding::snapshot(&inner.onboarding)),
+            BridgeTopic::Onboarding => to_value(onboarding::snapshot(&inner.onboarding)),
         };
         snapshot.ok()
     }
@@ -489,20 +489,19 @@ impl Host {
     /// republish it.
     pub fn store_changed(&self) {
         {
-            let mut inner = self.lock();
+            let mut guard = self.lock();
+            let inner = &mut *guard;
             let now = self.now();
             inner.list.reload(&self.store);
-            let meetings = inner.list.all.clone();
-            inner.progress.meetings_changed(&meetings, now);
+            inner.progress.meetings_changed(&inner.list.all, now);
             inner.app.stored_settings = self.store.settings().ok();
-            let settings = inner.app.stored_settings.clone();
             if let Some(detail) = inner.detail.as_mut() {
                 detail.reload(
                     &self.store,
                     &*self.services.file_system,
                     &*self.services.pipeline,
                 );
-                if let Some(settings) = &settings {
+                if let Some(settings) = &inner.app.stored_settings {
                     detail.apply_settings(settings);
                 }
             }
@@ -514,7 +513,7 @@ impl Host {
             ] {
                 inner.publisher.schedule(topic);
             }
-            self.refresh_subtitles(&mut inner);
+            self.refresh_subtitles(inner);
         }
         self.publish();
     }
@@ -617,6 +616,49 @@ impl Host {
         inner.detail.as_mut().map(body).ok_or_else(no_selection)
     }
 
+    /// A command on the selected meeting's detail (`no_selection` without
+    /// one) that changes only the detail's own state: the detail topic
+    /// republishes.
+    fn detail_command<R>(&self, body: impl FnOnce(&mut MeetingDetailViewModel) -> R) -> Outcome<R> {
+        self.on_detail(body, |inner| {
+            inner.publisher.schedule(BridgeTopic::MeetingDetail);
+        })
+    }
+
+    /// A command on the selected meeting's detail after which the detail,
+    /// or the pipeline on its behalf, wrote to the store: the detail and
+    /// the list reload before publishing.
+    fn detail_write<R>(&self, body: impl FnOnce(&mut MeetingDetailViewModel) -> R) -> Outcome<R> {
+        self.on_detail(body, |inner| self.reload_detail(inner))
+    }
+
+    fn on_detail<R>(
+        &self,
+        body: impl FnOnce(&mut MeetingDetailViewModel) -> R,
+        after: impl FnOnce(&mut Inner),
+    ) -> Outcome<R> {
+        let outcome = {
+            let mut inner = self.lock();
+            let outcome = Self::with_detail(&mut inner, body);
+            after(&mut inner);
+            outcome
+        };
+        self.publish();
+        outcome
+    }
+
+    /// Runs the shell's folder chooser from `current` and `apply` on the
+    /// chosen folder; the reply carries the choice, `None` when cancelled.
+    fn choose(&self, current: Option<&Path>, apply: impl FnOnce(&Path)) -> ChosenPathReply {
+        let chosen = (self.choose_folder)(current);
+        if let Some(folder) = &chosen {
+            apply(folder);
+        }
+        ChosenPathReply {
+            path: chosen.map(|path| path.to_string_lossy().into_owned()),
+        }
+    }
+
     /// The detail's store state after a write the detail made itself.
     fn reload_detail(&self, inner: &mut Inner) {
         if let Some(detail) = inner.detail.as_mut() {
@@ -682,16 +724,10 @@ impl Host {
         if confirming && !(self.confirm)(&delete_recording_prompt()) {
             return Ok(ConfirmReply { confirmed: false });
         }
-        let outcome = {
-            let mut inner = self.lock();
-            let outcome = Self::with_detail(&mut inner, |detail| {
-                detail.set_keep_audio(keep, &self.store, &*self.services.pipeline);
-            });
-            self.reload_detail(&mut inner);
-            outcome
-        };
-        self.publish();
-        outcome.map(|()| ConfirmReply { confirmed: true })
+        self.detail_write(|detail| {
+            detail.set_keep_audio(keep, &self.store, &*self.services.pipeline);
+        })
+        .map(|()| ConfirmReply { confirmed: true })
     }
 
     /// Page 1 moves on by itself once every step is handled, as the Swift
@@ -857,73 +893,33 @@ impl BridgeHost for Host {
     // meeting
 
     fn meeting_set_tab(&self, params: SetTabParams) -> Outcome<()> {
-        let outcome = {
-            let mut inner = self.lock();
-            let outcome = Self::with_detail(&mut inner, |detail| detail.tab = params.tab);
-            inner.publisher.schedule(BridgeTopic::MeetingDetail);
-            outcome
-        };
-        self.publish();
-        outcome
+        self.detail_command(|detail| detail.tab = params.tab)
     }
 
     fn meeting_set_tags(&self, params: SetTagsParams) -> Outcome<()> {
         let tags = MeetingDetailViewModel::tags_from(&params.tags);
         let now = self.now();
-        let outcome = {
-            let mut inner = self.lock();
-            let outcome =
-                Self::with_detail(&mut inner, |detail| detail.set_tags(tags, &self.store, now));
-            self.reload_detail(&mut inner);
-            outcome
-        };
-        self.publish();
-        outcome
+        self.detail_write(|detail| detail.set_tags(tags, &self.store, now))
     }
 
     fn meeting_set_template(&self, params: SetTemplateParams) -> Outcome<()> {
         let now = self.now();
-        let outcome = {
-            let mut inner = self.lock();
-            let outcome = Self::with_detail(&mut inner, |detail| {
-                detail.set_template(
-                    &params.template_id,
-                    &self.store,
-                    now,
-                    &*self.services.pipeline,
-                );
-            });
-            self.reload_detail(&mut inner);
-            outcome
-        };
-        self.publish();
-        outcome
+        self.detail_write(|detail| {
+            detail.set_template(
+                &params.template_id,
+                &self.store,
+                now,
+                &*self.services.pipeline,
+            );
+        })
     }
 
     fn meeting_rerun_summary(&self) -> Outcome<()> {
-        let outcome = {
-            let mut inner = self.lock();
-            let outcome = Self::with_detail(&mut inner, |detail| {
-                detail.rerun_summary(&*self.services.pipeline);
-            });
-            self.reload_detail(&mut inner);
-            outcome
-        };
-        self.publish();
-        outcome
+        self.detail_write(|detail| detail.rerun_summary(&*self.services.pipeline))
     }
 
     fn meeting_reexport(&self) -> Outcome<()> {
-        let outcome = {
-            let mut inner = self.lock();
-            let outcome = Self::with_detail(&mut inner, |detail| {
-                detail.reexport(&*self.services.pipeline);
-            });
-            self.reload_detail(&mut inner);
-            outcome
-        };
-        self.publish();
-        outcome
+        self.detail_write(|detail| detail.reexport(&*self.services.pipeline))
     }
 
     fn meeting_set_keep_audio(&self, params: SetBoolParams) -> Outcome<ConfirmReply> {
@@ -1033,31 +1029,15 @@ impl BridgeHost for Host {
     }
 
     fn speakers_play(&self, params: SpeakerIdParams) -> Outcome<()> {
-        let outcome = {
-            let mut inner = self.lock();
-            let outcome = Self::with_detail(&mut inner, |detail| {
-                detail
-                    .speakers
-                    .play(params.speaker_id, &*self.services.clip_player);
-            });
-            inner.publisher.schedule(BridgeTopic::MeetingDetail);
-            outcome
-        };
-        self.publish();
-        outcome
+        self.detail_command(|detail| {
+            detail
+                .speakers
+                .play(params.speaker_id, &*self.services.clip_player);
+        })
     }
 
     fn speakers_stop(&self) -> Outcome<()> {
-        let outcome = {
-            let mut inner = self.lock();
-            let outcome = Self::with_detail(&mut inner, |detail| {
-                detail.speakers.stop_playback(&*self.services.clip_player);
-            });
-            inner.publisher.schedule(BridgeTopic::MeetingDetail);
-            outcome
-        };
-        self.publish();
-        outcome
+        self.detail_command(|detail| detail.speakers.stop_playback(&*self.services.clip_player))
     }
 
     // recording
@@ -1185,17 +1165,13 @@ impl BridgeHost for Host {
 
     fn settings_recording_choose_folder(&self) -> Outcome<ChosenPathReply> {
         let current = self.lock().audio.audio_folder.clone();
-        let chosen = (self.choose_folder)(Some(&current));
-        if let Some(folder) = &chosen {
+        Ok(self.choose(Some(&current), |folder| {
             self.settings_command(BridgeTopic::SettingsRecording, |inner| {
                 inner
                     .audio
                     .set_audio_folder(folder, &self.store, &self.services);
             });
-        }
-        Ok(ChosenPathReply {
-            path: chosen.map(|path| path.to_string_lossy().into_owned()),
-        })
+        }))
     }
 
     fn settings_recording_reveal_folder(&self) -> Outcome<()> {
@@ -1382,17 +1358,13 @@ impl BridgeHost for Host {
 
     fn settings_export_choose_vault(&self) -> Outcome<ChosenPathReply> {
         let current = self.lock().obsidian.vault_url();
-        let chosen = (self.choose_folder)(current.as_deref());
-        if let Some(folder) = &chosen {
+        Ok(self.choose(current.as_deref(), |folder| {
             self.settings_command(BridgeTopic::SettingsExport, |inner| {
                 inner
                     .obsidian
                     .choose_vault(folder, &self.store, &self.services);
             });
-        }
-        Ok(ChosenPathReply {
-            path: chosen.map(|path| path.to_string_lossy().into_owned()),
-        })
+        }))
     }
 
     fn settings_export_update(&self, params: ExportUpdateParams) -> Outcome<()> {
@@ -1504,17 +1476,13 @@ impl BridgeHost for Host {
 
     fn onboarding_choose_vault(&self) -> Outcome<ChosenPathReply> {
         let current = self.lock().onboarding.obsidian.vault_url();
-        let chosen = (self.choose_folder)(current.as_deref());
-        if let Some(folder) = &chosen {
+        Ok(self.choose(current.as_deref(), |folder| {
             self.onboarding_command(|inner| {
                 inner
                     .onboarding
                     .choose_vault(folder, &self.store, &self.services);
             });
-        }
-        Ok(ChosenPathReply {
-            path: chosen.map(|path| path.to_string_lossy().into_owned()),
-        })
+        }))
     }
 
     fn onboarding_save_vault(&self) -> Outcome<()> {
@@ -1606,20 +1574,4 @@ fn parse_asset(params: &AssetIdParams) -> Outcome<ModelAsset> {
 /// host down with it.
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
-}
-
-/// `serde_json::to_value` over a trait object, so one `encode` closure
-/// serves every snapshot type in [`Host::build`].
-mod erased {
-    use serde_json::Value;
-
-    pub trait Serialize {
-        fn to_value(&self) -> Result<Value, serde_json::Error>;
-    }
-
-    impl<T: serde::Serialize> Serialize for T {
-        fn to_value(&self) -> Result<Value, serde_json::Error> {
-            serde_json::to_value(self)
-        }
-    }
 }
