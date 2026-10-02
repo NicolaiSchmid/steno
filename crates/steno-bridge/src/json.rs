@@ -7,7 +7,17 @@
 //! The printer walks a [`serde_json::Value`] rather than trusting
 //! `serde_json::to_string_pretty`: Foundation puts a space on both sides of the
 //! colon, prints an empty container as an open bracket, a blank line and a
-//! closing bracket, and writes integral doubles without a fraction.
+//! closing bracket, and spells doubles its own way (see [`write_number`]).
+//!
+//! NaN and infinity: `serde_json::to_value` turns a non-finite `f64` into
+//! `null` before the printer sees it, so both styles here write `null`. Swift
+//! differs: `BridgeJSON.encode` (the fixtures) throws, and the dispatcher's
+//! compact encoder writes the strings `"NaN"`, `"Infinity"` and
+//! `"-Infinity"`. Mirroring the strings would need a `serde::Serializer` of
+//! our own, since the `Value` tree cannot tell a `null` from a NaN after the
+//! fact; the page's schema (`z.number()`) rejects both spellings alike and
+//! treats the field as "no value", so `null` is the recorded choice until a
+//! plan says otherwise. `nan_and_infinity_are_null` pins it.
 
 use std::fmt::Write as _;
 
@@ -16,6 +26,17 @@ use serde_json::Value;
 
 /// `BridgeJSON.encode`: pretty printed, sorted keys, no trailing newline. The
 /// fixture files are this plus one `\n` (`BridgeFixture.fileData()`).
+///
+/// ```
+/// use serde_json::json;
+/// use steno_bridge::json::to_canonical_string;
+///
+/// let value = json!({"tags": [], "durationSeconds": 1200.0, "title": "Sync / weekly"});
+/// assert_eq!(
+///     to_canonical_string(&value).unwrap(),
+///     "{\n  \"durationSeconds\" : 1200,\n  \"tags\" : [\n\n  ],\n  \"title\" : \"Sync / weekly\"\n}"
+/// );
+/// ```
 pub fn to_canonical_string<T: Serialize + ?Sized>(value: &T) -> Result<String, serde_json::Error> {
     let mut out = String::new();
     write_value(&mut out, &serde_json::to_value(value)?, Some(0));
@@ -99,21 +120,34 @@ fn write_container(
     out.push(close);
 }
 
-/// Integers as they are; doubles in the shortest round-trip form, and an
-/// integral double without a fraction (`1200`, not `1200.0`), as Foundation
-/// writes a `Double`.
+/// Integers as they are. Doubles as Foundation's `JSONEncoder` spells a
+/// `Double` (measured with `StenoJSON.encoder()` on macOS 26, Swift 6.4; the
+/// table is in `numbers_print_like_foundation`): the shortest digits that
+/// round-trip, in plain notation when the decimal exponent is in `-5 < e < 16`
+/// (`0.0001`, `1200`, `1000000000000000`), otherwise `d.ddde±XX` with a
+/// signed exponent of at least two digits (`1e-05`, `1e+16`,
+/// `1.7976931348623157e+308`). An integral double has no fraction and a
+/// negative zero keeps its sign (`-0`).
+///
+/// Rust's `Display` for `f64` is the same shortest-digit algorithm in plain
+/// notation, so it covers the plain range as is; the exponent range is
+/// re-spelt from `{:e}`.
 fn write_number(out: &mut String, number: &serde_json::Number) {
     if let Some(i) = number.as_i64() {
         let _ = write!(out, "{i}");
     } else if let Some(u) = number.as_u64() {
         let _ = write!(out, "{u}");
     } else if let Some(f) = number.as_f64() {
-        if f.fract() == 0.0 && f.abs() < 1e15 {
-            // Within range, so the cast is exact.
-            #[allow(clippy::cast_possible_truncation)]
-            let _ = write!(out, "{}", f as i64);
-        } else {
+        let scientific = format!("{f:e}");
+        let (mantissa, exponent) = scientific
+            .split_once('e')
+            .expect("`{:e}` always writes an exponent");
+        let exponent: i32 = exponent.parse().expect("`{:e}` writes a decimal exponent");
+        if (-4..=15).contains(&exponent) {
             let _ = write!(out, "{f}");
+        } else {
+            let sign = if exponent < 0 { '-' } else { '+' };
+            let _ = write!(out, "{mantissa}e{sign}{:02}", exponent.abs());
         }
     }
 }
@@ -270,12 +304,103 @@ mod tests {
         );
     }
 
+    /// The oracle: `StenoJSON.encoder().encode([value])` on macOS 26 (Swift
+    /// 6.4, Xcode 27), one `Double` per line as `input => output`.
+    ///
+    /// ```text
+    /// 0.0 => 0                        -0.0 => -0
+    /// 1.0 => 1                        -1.0 => -1
+    /// 1200.0 => 1200                  0.42 => 0.42
+    /// 0.62 => 0.62                    2.5 => 2.5
+    /// -3.25 => -3.25                  1234.5678 => 1234.5678
+    /// 0.1+0.2 => 0.30000000000000004  0.7307184925394371 => 0.7307184925394371
+    /// 0.001 => 0.001                  0.0001234 => 0.0001234
+    /// 1e-4 => 0.0001                  1e-5 => 1e-05
+    /// 0.00001234 => 1.234e-05         0.0000999 => 9.99e-05
+    /// 1e-6 => 1e-06                   1e-7 => 1e-07
+    /// 3.2e-5 => 3.2e-05               5.5e-9 => 5.5e-09
+    /// 1e14 => 100000000000000         1e15 => 1000000000000000
+    /// 9007199254740992.0 => 9007199254740992
+    /// 9007199254740993.0 => 9007199254740992
+    /// 99999999999999990.0 => 9.999999999999998e+16
+    /// 1e16 => 1e+16                   1.234e16 => 1.234e+16
+    /// 1e17 => 1e+17                   4.5e17 => 4.5e+17
+    /// 123456789012345680.0 => 1.2345678901234568e+17
+    /// 12345678901234567890.0 => 1.2345678901234567e+19
+    /// 1.1e19 => 1.1e+19               1.1e20 => 1.1e+20
+    /// 1e21 => 1e+21                   1.5e300 => 1.5e+300
+    /// f64::MAX => 1.7976931348623157e+308
+    /// 1e-308 => 1e-308                f64::MIN_POSITIVE => 2.2250738585072014e-308
+    /// 5e-324 (smallest subnormal) => 5e-324
+    /// ```
     #[test]
     fn numbers_print_like_foundation() {
-        let value = json!([1200.0, 0.62, 42, -3, 1e21, 0.1]);
+        let cases: &[(f64, &str)] = &[
+            (0.0, "0"),
+            (-0.0, "-0"),
+            (1.0, "1"),
+            (-1.0, "-1"),
+            (1200.0, "1200"),
+            (0.42, "0.42"),
+            (0.62, "0.62"),
+            (2.5, "2.5"),
+            (-3.25, "-3.25"),
+            (1234.5678, "1234.5678"),
+            (0.1 + 0.2, "0.30000000000000004"),
+            (0.730_718_492_539_437_1, "0.7307184925394371"),
+            (0.001, "0.001"),
+            (0.000_123_4, "0.0001234"),
+            (1e-4, "0.0001"),
+            (1e-5, "1e-05"),
+            (0.000_012_34, "1.234e-05"),
+            (0.000_099_9, "9.99e-05"),
+            (1e-6, "1e-06"),
+            (1e-7, "1e-07"),
+            (3.2e-5, "3.2e-05"),
+            (5.5e-9, "5.5e-09"),
+            (1e14, "100000000000000"),
+            (1e15, "1000000000000000"),
+            (9_007_199_254_740_992.0, "9007199254740992"),
+            (9_007_199_254_740_993.0, "9007199254740992"),
+            (99_999_999_999_999_990.0, "9.999999999999998e+16"),
+            (1e16, "1e+16"),
+            (1.234e16, "1.234e+16"),
+            (1e17, "1e+17"),
+            (4.5e17, "4.5e+17"),
+            (123_456_789_012_345_680.0, "1.2345678901234568e+17"),
+            (12_345_678_901_234_567_890.0, "1.2345678901234567e+19"),
+            (1.1e19, "1.1e+19"),
+            (1.1e20, "1.1e+20"),
+            (1e21, "1e+21"),
+            (1.5e300, "1.5e+300"),
+            (f64::MAX, "1.7976931348623157e+308"),
+            (1e-308, "1e-308"),
+            (f64::MIN_POSITIVE, "2.2250738585072014e-308"),
+            (5e-324, "5e-324"),
+        ];
+        for (value, expected) in cases {
+            assert_eq!(
+                to_compact_string(value).unwrap(),
+                *expected,
+                "for {value:e}"
+            );
+        }
+        // Integers stay integers.
         assert_eq!(
-            to_compact_string(&value).unwrap(),
-            "[1200,0.62,42,-3,1000000000000000000000,0.1]"
+            to_compact_string(&json!([42, -3, 9_007_199_254_740_993_i64])).unwrap(),
+            "[42,-3,9007199254740993]"
+        );
+    }
+
+    /// The decision recorded in the module doc: a non-finite double is `null`
+    /// here, where Swift's compact encoder writes `"NaN"` and `"Infinity"`.
+    #[test]
+    fn nan_and_infinity_are_null() {
+        let value = [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, 1.0];
+        assert_eq!(to_compact_string(&value).unwrap(), "[null,null,null,1]");
+        assert_eq!(
+            to_canonical_string(&value).unwrap(),
+            "[\n  null,\n  null,\n  null,\n  1\n]"
         );
     }
 
