@@ -46,12 +46,12 @@ export function currentWindowLabel(target: Window = window): string {
 	return label;
 }
 
-export function createTauriTransport(): BridgeTransport {
+export function createTauriTransport(target: Window = window): BridgeTransport {
 	const hub = new SnapshotHub();
 	// Registered before the first command leaves: the host publishes its
 	// first snapshots in reply to `page.ready`, and a listener that is still
 	// being installed would miss them.
-	const label = currentWindowLabel();
+	const label = currentWindowLabel(target);
 	const listening = listen<BridgeEventPayload>(
 		BRIDGE_EVENT_NAME,
 		(event) => {
@@ -59,13 +59,22 @@ export function createTauriTransport(): BridgeTransport {
 			hub.emit(topic, payload);
 		},
 		{ target: { kind: "WebviewWindow", label } },
-	).catch((cause: unknown) => {
-		console.error("bridge: listening for steno:event failed", cause);
-	});
+	);
+	// A failure surfaces through the first `call` below; this branch only
+	// keeps it from being reported as unhandled before that call arrives.
+	listening.catch(() => {});
 
 	return {
 		async call(method: string, params: unknown): Promise<unknown> {
-			await listening;
+			try {
+				await listening;
+			} catch (cause) {
+				throw new BridgeError(
+					method,
+					"failed",
+					`listening for ${BRIDGE_EVENT_NAME} failed: ${describe(cause)}`,
+				);
+			}
 			try {
 				return await invoke<unknown>(BRIDGE_CALL_COMMAND, {
 					method,
@@ -76,10 +85,13 @@ export function createTauriTransport(): BridgeTransport {
 				if (parsed.success) {
 					throw new BridgeError(method, parsed.data.code, parsed.data.message);
 				}
-				const text = cause instanceof Error ? cause.message : String(cause);
-				throw new BridgeError(method, "failed", text);
+				throw new BridgeError(method, "failed", describe(cause));
 			}
 		},
 		subscribe: hub.subscribe.bind(hub),
 	};
+}
+
+function describe(cause: unknown): string {
+	return cause instanceof Error ? cause.message : String(cause);
 }

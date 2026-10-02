@@ -84,6 +84,21 @@ describe("tauri transport", () => {
 		});
 	});
 
+	it("rejects the first command when the event listener cannot be installed", async () => {
+		listen.mockRejectedValue(new Error("event.listen not allowed"));
+		const transport = createTauriTransport();
+		const failure = await transport
+			.call("page.ready", null)
+			.catch((cause: unknown) => cause);
+		expect(failure).toBeInstanceOf(BridgeError);
+		expect(failure).toMatchObject({
+			method: "page.ready",
+			code: "failed",
+			message: "listening for steno:event failed: event.listen not allowed",
+		});
+		expect(invoke).not.toHaveBeenCalled();
+	});
+
 	it("waits for the event listener before the first command", async () => {
 		const order: string[] = [];
 		listen.mockImplementation(async () => {
@@ -126,8 +141,13 @@ describe("tauri transport", () => {
 
 	it("reads the window label from the shell's metadata", () => {
 		expect(currentWindowLabel()).toBe("settings");
-		expect(() =>
-			currentWindowLabel({ __TAURI_INTERNALS__: {} } as unknown as Window),
-		).toThrow("the Tauri window label is missing");
+		const unlabelled = { __TAURI_INTERNALS__: {} } as unknown as Window;
+		expect(() => currentWindowLabel(unlabelled)).toThrow(
+			"the Tauri window label is missing",
+		);
+		expect(() => createTauriTransport(unlabelled)).toThrow(
+			"the Tauri window label is missing",
+		);
+		expect(listen).not.toHaveBeenCalled();
 	});
 });
