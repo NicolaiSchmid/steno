@@ -433,7 +433,7 @@ PR off `main`.
 | WP4b CoreML speech backend | `feat/rust-speech-coreml` | #163 | merged |
 | WP7a LLM (`steno-llm`) | `feat/rust-llm` | #167 | merged |
 | WP7b adapters | `feat/rust-adapters` | #165 | merged |
-| WP6a host | `feat/rust-host` | TBD | open |
+| WP6a host | `feat/rust-host` | #170 | open |
 
 WP4b is `crates/steno-speech-coreml`: `objc2-core-ml` behind one safe module,
 the four backend calls, the FluidAudio 0.17.4 heuristics ported
