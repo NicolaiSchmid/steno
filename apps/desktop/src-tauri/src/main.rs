@@ -5,9 +5,11 @@
 //! recorded fixtures, so the whole UI runs on Linux and Windows before any
 //! pipeline exists; WP6 swaps the host for the real one.
 //!
-//! `BridgeErrorCode`, `BridgeError`, `BridgeWindow` and `WindowParams`
-//! duplicate the `steno-bridge` crate's types until that crate merges; they
-//! then become `use` lines.
+//! Seven shapes duplicate the `steno-bridge` crate's until that crate merges,
+//! then become `use` lines: `BridgeErrorCode`, `BridgeError`, `BridgeEvent`
+//! (whose `topic` becomes the `BridgeTopic` enum), `OpenUrlParams`,
+//! `SettingsSection` and `WindowParams` in `bridge.rs`, `BridgeWindow` in
+//! `windows.rs`; `bridge::uuid_text` becomes `json::uuid::format`.
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 // Without the fixture host nothing emits a snapshot or publishes a request
@@ -36,6 +38,10 @@ fn main() {
         })
         .build(tauri::generate_context!())
         .expect("steno-desktop failed to build");
+    // WP6: on macOS the menu's Quit item (muda's predefined `terminate:`) ends
+    // the process without `ExitRequested`; tao implements only
+    // `applicationWillTerminate`. Once the shell holds state, a graceful
+    // shutdown needs a custom Quit item that calls `AppHandle::exit`.
     app.run(|_app, event| {
         let tauri::RunEvent::ExitRequested { code, api, .. } = &event else {
             return;

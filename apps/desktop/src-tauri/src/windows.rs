@@ -5,22 +5,44 @@
 //! Swift: the sizes live in `StenoApp.swift` (main), `SettingsWindow.swift`
 //! and `OnboardingWindow.swift`, main's minimum in `MainWindow.swift`.
 
+use std::fmt;
+
 use serde::Deserialize;
-use tauri::{AppHandle, Manager, Url, WebviewUrl, WebviewWindow, WebviewWindowBuilder};
+use tauri::{
+    AppHandle, Manager, Url, WebviewUrl, WebviewWindow, WebviewWindowBuilder,
+    webview::NewWindowResponse,
+};
 
 use crate::{
-    bridge::{BridgeError, WindowParams},
+    bridge::{self, BridgeError, WindowParams},
     host::Host,
     navigation,
 };
 
-/// `params.window.json`'s `window`.
+/// `params.window.json`'s `window`; the raw value is also the window label.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum BridgeWindow {
     Main,
     Settings,
     Onboarding,
+}
+
+impl BridgeWindow {
+    /// The raw value on the wire.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Main => "main",
+            Self::Settings => "settings",
+            Self::Onboarding => "onboarding",
+        }
+    }
+}
+
+impl fmt::Display for BridgeWindow {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
 }
 
 /// One window as the Swift app sizes it, in logical points.
@@ -34,9 +56,11 @@ pub struct Spec {
     pub min_size: Option<(f64, f64)>,
 }
 
-impl BridgeWindow {
-    pub const fn spec(self) -> Spec {
-        match self {
+impl Spec {
+    /// The shell's own knowledge of a window, kept off `BridgeWindow` so the
+    /// enum can come from `steno-bridge` unchanged.
+    pub const fn of(window: BridgeWindow) -> Spec {
+        match window {
             BridgeWindow::Main => Spec {
                 label: "main",
                 title: "Steno",
@@ -60,16 +84,12 @@ impl BridgeWindow {
             },
         }
     }
-
-    pub fn label(self) -> &'static str {
-        self.spec().label
-    }
 }
 
 /// The document a window loads: `index.html` plus the hash route and its
 /// query, resolved against the app origin by Tauri.
 pub fn start_path(window: BridgeWindow, query: Option<&str>) -> String {
-    let route = window.spec().route;
+    let route = Spec::of(window).route;
     match query {
         Some(query) if !query.is_empty() => format!("index.html{route}?{query}"),
         _ => format!("index.html{route}"),
@@ -85,7 +105,7 @@ pub fn open(
     query: Option<&str>,
     position: Option<(f64, f64)>,
 ) -> tauri::Result<WebviewWindow> {
-    let spec = window.spec();
+    let spec = Spec::of(window);
     if let Some(existing) = app.get_webview_window(spec.label) {
         existing.show()?;
         existing.set_focus()?;
@@ -108,7 +128,13 @@ pub fn open(
     .title(spec.title)
     .inner_size(spec.size.0, spec.size.1)
     .resizable(spec.min_size.is_some())
-    .on_navigation(move |url| navigation::allows(url, dev_server.as_ref()));
+    .on_navigation(move |url| navigation::allows(url, dev_server.as_ref()))
+    // A `target="_blank"` link or `window.open` from the page opens nothing:
+    // external links go through `system.openURL`. wry already opens no
+    // window when no handler is set (WebKitGTK's `create` signal unhandled,
+    // WKWebView's delegate answering nil); the explicit `Deny` pins that
+    // against a default change. Needs a webview to exercise, so no test.
+    .on_new_window(|_url, _features| NewWindowResponse::Deny);
     if let Some((width, height)) = spec.min_size {
         builder = builder.min_inner_size(width, height);
     }
@@ -139,25 +165,31 @@ pub fn open_requested(
     host: &Host,
     request: &WindowParams,
 ) -> Result<(), BridgeError> {
-    let existed = app.get_webview_window(request.window.label()).is_some();
+    let failed = |error: tauri::Error| BridgeError::failed(error.to_string());
+    let existed = app.get_webview_window(request.window.as_str()).is_some();
     match request.window {
         BridgeWindow::Onboarding => {
-            open(app, BridgeWindow::Onboarding, None, None)?;
+            open(app, BridgeWindow::Onboarding, None, None).map_err(failed)?;
         }
         BridgeWindow::Main => {
-            let window = open(app, BridgeWindow::Main, None, None)?;
-            if let Some(meeting_id) = request.meeting_id.as_deref() {
+            let window = open(app, BridgeWindow::Main, None, None).map_err(failed)?;
+            if let Some(meeting_id) = request.meeting_id {
                 // The main window exists for the app's lifetime, so the
                 // request always rides on its `app` snapshot.
-                host.publish_request(&window, "requestedMeetingID", meeting_id)?;
+                host.publish_request(
+                    &window,
+                    "requestedMeetingID",
+                    &bridge::uuid_text(&meeting_id),
+                )?;
             }
         }
         BridgeWindow::Settings => {
-            let section = request.section.as_deref();
+            let section = request.section;
             let query = section.map(|section| format!("section={section}"));
-            let window = open(app, BridgeWindow::Settings, query.as_deref(), None)?;
+            let window =
+                open(app, BridgeWindow::Settings, query.as_deref(), None).map_err(failed)?;
             if let (true, Some(section)) = (existed, section) {
-                host.publish_request(&window, "requestedSettingsSection", section)?;
+                host.publish_request(&window, "requestedSettingsSection", section.as_str())?;
             }
         }
     }
@@ -166,7 +198,7 @@ pub fn open_requested(
 
 /// Closes the window when it exists; nothing otherwise.
 pub fn close(app: &AppHandle, window: BridgeWindow) -> tauri::Result<()> {
-    if let Some(window) = app.get_webview_window(window.label()) {
+    if let Some(window) = app.get_webview_window(window.as_str()) {
         window.close()?;
     }
     Ok(())
@@ -191,26 +223,26 @@ mod tests {
 
     #[test]
     fn sizes_follow_the_swift_windows() {
-        assert_eq!(BridgeWindow::Main.spec().size, (1120.0, 720.0));
-        assert_eq!(BridgeWindow::Main.spec().min_size, Some((960.0, 600.0)));
-        assert_eq!(BridgeWindow::Settings.spec().size, (960.0, 640.0));
-        assert_eq!(BridgeWindow::Settings.spec().min_size, Some((760.0, 520.0)));
-        assert_eq!(BridgeWindow::Onboarding.spec().size, (560.0, 620.0));
-        assert_eq!(BridgeWindow::Onboarding.spec().min_size, None);
+        assert_eq!(Spec::of(BridgeWindow::Main).size, (1120.0, 720.0));
+        assert_eq!(Spec::of(BridgeWindow::Main).min_size, Some((960.0, 600.0)));
+        assert_eq!(Spec::of(BridgeWindow::Settings).size, (960.0, 640.0));
+        assert_eq!(
+            Spec::of(BridgeWindow::Settings).min_size,
+            Some((760.0, 520.0))
+        );
+        assert_eq!(Spec::of(BridgeWindow::Onboarding).size, (560.0, 620.0));
+        assert_eq!(Spec::of(BridgeWindow::Onboarding).min_size, None);
     }
 
     #[test]
-    fn window_params_read_the_recorded_shape() {
-        let params: WindowParams =
-            serde_json::from_str(r#"{"section":"summaries","window":"settings"}"#).unwrap();
-        assert_eq!(params.window, BridgeWindow::Settings);
-        assert_eq!(params.section.as_deref(), Some("summaries"));
-        assert!(params.meeting_id.is_none());
-        let main: WindowParams = serde_json::from_str(
-            r#"{"window":"main","meetingID":"00000000-0000-0000-0000-000000000001"}"#,
-        )
-        .unwrap();
-        assert_eq!(main.window, BridgeWindow::Main);
-        assert!(serde_json::from_str::<WindowParams>(r#"{"window":"panel"}"#).is_err());
+    fn the_label_is_the_wire_value() {
+        for window in [
+            BridgeWindow::Main,
+            BridgeWindow::Settings,
+            BridgeWindow::Onboarding,
+        ] {
+            assert_eq!(Spec::of(window).label, window.as_str());
+            assert_eq!(window.to_string(), window.as_str());
+        }
     }
 }

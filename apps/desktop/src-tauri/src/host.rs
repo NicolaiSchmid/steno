@@ -70,10 +70,9 @@ impl Host {
         method: &str,
         _params: Value,
     ) -> Result<Value, BridgeError> {
-        Err(BridgeError::new(
-            crate::bridge::BridgeErrorCode::Failed,
-            format!("{method}: no bridge host is wired yet"),
-        ))
+        Err(BridgeError::failed(format!(
+            "{method}: no bridge host is wired yet"
+        )))
     }
 
     pub fn publish_request(

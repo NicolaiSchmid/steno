@@ -7,10 +7,13 @@
 //!
 //! Swift: `BridgeRequestParams.swift`, `WindowRequests.swift`.
 
+use std::fmt;
+
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tauri::{AppHandle, Emitter, EventTarget, Manager, State, Url, WebviewWindow};
 use tauri_plugin_opener::OpenerExt;
+use uuid::Uuid;
 
 use crate::{
     host::Host,
@@ -23,19 +26,37 @@ use crate::{
 pub const EVENT_NAME: &str = "steno:event";
 
 /// The contract's error codes the shell raises, spelled as the page reads
-/// them. The full set (`unknownMethod`, `notFound`, `cancelled` as well) is
-/// the host's and comes with `steno-bridge`.
+/// them. The full set (`notFound` and `cancelled` as well) is the host's and
+/// comes with `steno-bridge`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub enum BridgeErrorCode {
+    UnknownMethod,
     InvalidParams,
     Failed,
+}
+
+impl BridgeErrorCode {
+    /// The raw value on the wire.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::UnknownMethod => "unknownMethod",
+            Self::InvalidParams => "invalidParams",
+            Self::Failed => "failed",
+        }
+    }
+}
+
+impl fmt::Display for BridgeErrorCode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
 }
 
 /// A rejected command, serialised as the contract's error envelope; the
 /// transport turns it into the page's `BridgeError`.
 #[derive(Debug, Clone, Serialize, thiserror::Error)]
-#[error("{code:?}: {message}")]
+#[error("{code}: {message}")]
 pub struct BridgeError {
     pub code: BridgeErrorCode,
     pub message: String,
@@ -49,42 +70,52 @@ impl BridgeError {
         }
     }
 
-    pub fn failed(error: impl std::fmt::Display) -> Self {
-        Self::new(BridgeErrorCode::Failed, error.to_string())
+    pub fn unknown_method(message: impl Into<String>) -> Self {
+        Self::new(BridgeErrorCode::UnknownMethod, message)
     }
 
-    pub fn invalid_params(method: &str, error: impl std::fmt::Display) -> Self {
-        Self::new(BridgeErrorCode::InvalidParams, format!("{method}: {error}"))
+    pub fn invalid_params(message: impl Into<String>) -> Self {
+        Self::new(BridgeErrorCode::InvalidParams, message)
     }
-}
 
-impl From<tauri::Error> for BridgeError {
-    fn from(error: tauri::Error) -> Self {
-        Self::failed(error)
+    pub fn failed(message: impl Into<String>) -> Self {
+        Self::new(BridgeErrorCode::Failed, message)
     }
 }
 
-/// The event envelope (`envelope.event.json`).
+/// `invalidParams` for a method whose params did not decode, named after
+/// the method so the page's log says which.
+fn invalid_params_for(method: &str, error: impl fmt::Display) -> BridgeError {
+    BridgeError::invalid_params(format!("{method}: {error}"))
+}
+
+/// The event envelope (`envelope.event.json`). `topic` becomes the
+/// `BridgeTopic` enum with `steno-bridge`.
 #[derive(Debug, Clone, Serialize)]
 struct BridgeEvent<'a> {
     topic: &'a str,
     payload: Value,
 }
 
-/// Publishes one topic's snapshot to one window, and to that window only.
-/// An `onboarding` snapshot that says `finished` also closes the onboarding
-/// window: the page shows what the host says and the host ends the window.
+/// Publishes one topic's snapshot to one window, and to that window only;
+/// the smoke run counts what reaches main. An `onboarding` snapshot that
+/// says `finished` also closes the onboarding window: the page shows what
+/// the host says and the host ends the window.
 ///
 /// Swift: `OnboardingWindow.swift` (`onChange(of: finished)`).
-pub fn emit(window: &WebviewWindow, topic: &str, payload: Value) -> tauri::Result<()> {
+pub fn emit(window: &WebviewWindow, topic: &str, payload: Value) -> Result<(), BridgeError> {
     let finished = finishes_onboarding(topic, &payload);
-    window.emit_to(
-        EventTarget::webview_window(window.label()),
-        EVENT_NAME,
-        BridgeEvent { topic, payload },
-    )?;
+    window
+        .emit_to(
+            EventTarget::webview_window(window.label()),
+            EVENT_NAME,
+            BridgeEvent { topic, payload },
+        )
+        .map_err(|error| BridgeError::failed(error.to_string()))?;
+    window.state::<Smoke>().note_snapshot(window.label());
     if finished {
-        windows::close(window.app_handle(), BridgeWindow::Onboarding)?;
+        windows::close(window.app_handle(), BridgeWindow::Onboarding)
+            .map_err(|error| BridgeError::failed(error.to_string()))?;
     }
     Ok(())
 }
@@ -104,21 +135,65 @@ pub fn openable_url(text: &str) -> Result<Url, BridgeError> {
         .ok()
         .filter(|url| matches!(url.scheme(), "https" | "mailto"))
         .ok_or_else(|| {
-            BridgeError::new(
-                BridgeErrorCode::InvalidParams,
-                "Only https: and mailto: links open from the page.",
-            )
+            BridgeError::invalid_params("Only https: and mailto: links open from the page.")
         })
 }
 
-/// `params.window.json`.
-#[derive(Debug, Deserialize)]
+/// `settingsSection` in `contract.ts`: the six Settings sections, as the
+/// route's `section=` and the `app` snapshot's `requestedSettingsSection`
+/// spell them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SettingsSection {
+    General,
+    Recording,
+    Transcription,
+    Summaries,
+    Export,
+    Iphone,
+}
+
+impl SettingsSection {
+    /// The raw value on the wire.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::General => "general",
+            Self::Recording => "recording",
+            Self::Transcription => "transcription",
+            Self::Summaries => "summaries",
+            Self::Export => "export",
+            Self::Iphone => "iphone",
+        }
+    }
+}
+
+impl fmt::Display for SettingsSection {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// `params.window.json`, typed as `windowParams` in `contract.ts`: a window,
+/// an optional section for Settings and an optional meeting for main. A
+/// section outside the six or a meeting ID that is not a UUID is
+/// `invalidParams`, so what reaches a route or a snapshot needs no escaping.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct WindowParams {
     pub window: BridgeWindow,
-    pub section: Option<String>,
-    #[serde(rename = "meetingID")]
-    pub meeting_id: Option<String>,
+    #[serde(default)]
+    pub section: Option<SettingsSection>,
+    #[serde(rename = "meetingID", default)]
+    pub meeting_id: Option<Uuid>,
+}
+
+/// A UUID as the Swift host writes it (`UUID.uuidString`, upper case), so a
+/// `requestedMeetingID` matches the list's ids by string. `steno-bridge`
+/// brings this as `json::uuid::format`.
+pub fn uuid_text(id: &Uuid) -> String {
+    id.hyphenated()
+        .encode_upper(&mut Uuid::encode_buffer())
+        .to_string()
 }
 
 /// `params.system.openURL.json`.
@@ -129,7 +204,28 @@ struct OpenUrlParams {
 }
 
 fn parse<T: for<'de> Deserialize<'de>>(method: &str, params: Value) -> Result<T, BridgeError> {
-    serde_json::from_value(params).map_err(|error| BridgeError::invalid_params(method, error))
+    serde_json::from_value(params).map_err(|error| invalid_params_for(method, error))
+}
+
+/// Which window a `window.close` from `caller` may close: the onboarding
+/// window, and only on its own request. The main and Settings windows do
+/// not answer the method (`unknownMethod`, as their Swift hosts route it,
+/// `MainWindowBridge.swift` and `SettingsBridge.swift`); the onboarding
+/// window closes nothing but itself (`invalidParams`,
+/// `OnboardingBridge.swift`). The page does not send the method today: the
+/// host closes the window on a finished `onboarding` snapshot (`emit`).
+pub fn close_target(caller: &str, request: &WindowParams) -> Result<BridgeWindow, BridgeError> {
+    if caller != BridgeWindow::Onboarding.as_str() {
+        return Err(BridgeError::unknown_method(format!(
+            "The {caller} window does not answer window.close."
+        )));
+    }
+    if request.window != BridgeWindow::Onboarding {
+        return Err(BridgeError::invalid_params(
+            "The onboarding window closes only itself.",
+        ));
+    }
+    Ok(BridgeWindow::Onboarding)
 }
 
 #[tauri::command]
@@ -154,16 +250,9 @@ pub async fn bridge_call(
             Ok(Value::Null)
         }
         "window.close" => {
-            // In the contract for the onboarding window alone; the page does
-            // not call it today, the host closes that window on `finished`.
             let request: WindowParams = parse(&method, params)?;
-            if request.window != BridgeWindow::Onboarding {
-                return Err(BridgeError::invalid_params(
-                    &method,
-                    "only the onboarding window closes on request",
-                ));
-            }
-            windows::close(&app, request.window)?;
+            let target = close_target(window.label(), &request)?;
+            windows::close(&app, target).map_err(|error| BridgeError::failed(error.to_string()))?;
             Ok(Value::Null)
         }
         "system.openURL" => {
@@ -171,7 +260,7 @@ pub async fn bridge_call(
             let url = openable_url(&request.url)?;
             app.opener()
                 .open_url(url, None::<&str>)
-                .map_err(BridgeError::failed)?;
+                .map_err(|error| BridgeError::failed(error.to_string()))?;
             Ok(Value::Null)
         }
         _ => host.call(&window, &method, params),
@@ -183,6 +272,10 @@ mod tests {
     use super::*;
 
     const REFUSAL: &str = "Only https: and mailto: links open from the page.";
+
+    fn window_params(json: &str) -> Result<WindowParams, BridgeError> {
+        parse("window.open", serde_json::from_str(json).unwrap())
+    }
 
     #[test]
     fn https_and_mailto_links_open() {
@@ -220,14 +313,109 @@ mod tests {
 
     #[test]
     fn the_error_serialises_as_the_contract_envelope() {
-        let error = BridgeError::invalid_params("window.open", "missing field `window`");
+        let error = invalid_params_for("window.open", "missing field `window`");
         let json = serde_json::to_value(&error).unwrap();
         assert_eq!(json["code"], "invalidParams");
         assert_eq!(json["message"], "window.open: missing field `window`");
+        // `Display` spells the code as the wire does, so this holds once the
+        // types come from `steno-bridge`.
         assert_eq!(
             error.to_string(),
-            "InvalidParams: window.open: missing field `window`"
+            "invalidParams: window.open: missing field `window`"
         );
+        assert_eq!(BridgeErrorCode::UnknownMethod.to_string(), "unknownMethod");
+        assert_eq!(BridgeErrorCode::Failed.to_string(), "failed");
+    }
+
+    #[test]
+    fn window_params_read_the_recorded_shapes() {
+        let settings = window_params(include_str!(
+            "../../../macos/web/fixtures/bridge/params.window.json"
+        ))
+        .unwrap();
+        assert_eq!(settings.window, BridgeWindow::Settings);
+        assert_eq!(settings.section, Some(SettingsSection::Summaries));
+        assert!(settings.meeting_id.is_none());
+
+        let main = window_params(
+            r#"{"window":"main","meetingID":"00000000-0000-0000-0000-000000000001"}"#,
+        )
+        .unwrap();
+        assert_eq!(main.window, BridgeWindow::Main);
+        assert_eq!(
+            main.meeting_id.map(|id| uuid_text(&id)).as_deref(),
+            Some("00000000-0000-0000-0000-000000000001")
+        );
+        assert_eq!(
+            uuid_text(&Uuid::nil()),
+            "00000000-0000-0000-0000-000000000000"
+        );
+        assert_eq!(
+            uuid_text(&"6ba7b810-9dad-11d1-80b4-00c04fd430c8".parse().unwrap()),
+            "6BA7B810-9DAD-11D1-80B4-00C04FD430C8"
+        );
+    }
+
+    #[test]
+    fn every_contract_section_parses_and_nothing_else() {
+        for section in [
+            "general",
+            "recording",
+            "transcription",
+            "summaries",
+            "export",
+            "iphone",
+        ] {
+            let params =
+                window_params(&format!(r#"{{"window":"settings","section":"{section}"}}"#))
+                    .unwrap_or_else(|error| panic!("{section}: {error}"));
+            assert_eq!(params.section.unwrap().as_str(), section);
+        }
+        for json in [
+            r#"{"window":"settings","section":"advanced"}"#,
+            r#"{"window":"settings","section":"General"}"#,
+            r#"{"window":"settings","section":"iphone&dark"}"#,
+            r#"{"window":"panel"}"#,
+            r#"{"window":"main","extra":true}"#,
+        ] {
+            let error = window_params(json).expect_err(json);
+            assert_eq!(error.code, BridgeErrorCode::InvalidParams, "{json}");
+            assert!(error.message.starts_with("window.open: "), "{json}");
+        }
+    }
+
+    #[test]
+    fn a_meeting_id_must_be_a_uuid() {
+        for json in [
+            r#"{"window":"main","meetingID":"m-1"}"#,
+            r#"{"window":"main","meetingID":""}"#,
+            r#"{"window":"main","meetingID":"00000000-0000-0000-0000-00000000000g"}"#,
+            r#"{"window":"main","meetingID":1}"#,
+        ] {
+            let error = window_params(json).expect_err(json);
+            assert_eq!(error.code, BridgeErrorCode::InvalidParams, "{json}");
+        }
+    }
+
+    #[test]
+    fn only_the_onboarding_window_closes_and_only_itself() {
+        let onboarding = window_params(r#"{"window":"onboarding"}"#).unwrap();
+        let settings = window_params(r#"{"window":"settings"}"#).unwrap();
+        assert_eq!(
+            close_target("onboarding", &onboarding).unwrap(),
+            BridgeWindow::Onboarding
+        );
+        let other = close_target("onboarding", &settings).unwrap_err();
+        assert_eq!(other.code, BridgeErrorCode::InvalidParams);
+        assert_eq!(other.message, "The onboarding window closes only itself.");
+        for caller in ["main", "settings"] {
+            let error = close_target(caller, &onboarding).unwrap_err();
+            assert_eq!(error.code, BridgeErrorCode::UnknownMethod, "{caller}");
+            assert_eq!(
+                error.message,
+                format!("The {caller} window does not answer window.close.")
+            );
+        }
     }
 
     #[test]
