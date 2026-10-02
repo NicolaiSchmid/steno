@@ -53,6 +53,7 @@ Cargo.toml                 workspace
 crates/
   steno-core/              domain types, protocols (the pluggable boundaries), SQLite store and migrations, pipeline orchestration, settings
   steno-bridge/            the JSON contract (topics, methods, snapshots, params, envelope), fixture tests
+  steno-host/              the view models behind the three windows, the bridge host over the store, the shell-side service traits and their fakes
   steno-audio/             capture backends (CoreAudio taps, PipeWire, WASAPI), ring buffer, AEC, writer
   steno-speech/            VAD, chunker, merge, TDT decoder; CoreML and ONNX Runtime backends; model store
   steno-llm/               OpenAI-compatible and Codex clients, cleanup and summary passes
@@ -68,12 +69,19 @@ spikes/                    frozen evidence; code moves into crates and is delete
 
 Dependency direction is the Swift one: `steno-core` depends on nothing of ours; every
 other crate depends on `steno-core`; the shell and the CLI wire them. The shell holds
-no logic: view models and the bridge host live in `steno-core` (host module) so the
-CLI, tests and the shell share them, which is the extraction the spikes plan asked for
-in Swift and which happens in Rust instead. One temporary exception: from WP3 until
-WP6 the shell carries a fixture host behind its `fixture-host` feature that answers
-the bridge from the recorded fixtures, so the UI runs on every platform before the
-pipeline exists.
+no logic: view models and the bridge host live in `steno-host` so the CLI, tests and
+the shell share them, which is the extraction the spikes plan asked for in Swift and
+which happens in Rust instead. (This plan first put them in a host module of
+`steno-core`; the bridge depends on the core and the host needs both, so the host sits
+above the two in its own crate, WP6a.) Everything the Swift app reached through a
+system framework or a package the port has not written yet (permissions, login item,
+updater, the recorder, the pipeline, speech models, the LLM probe, vault validation,
+the handover listener, devices, files, the Finder) is a trait in `steno_host::services`
+with a fake in `steno_host::fakes`, so the whole host runs hostlessly on a temporary
+database; the core's own boundaries (`steno_core::protocols`) are used where one exists.
+One temporary exception: from WP3 until WP6 the shell carries a fixture host behind its
+`fixture-host` feature that answers the bridge from the recorded fixtures, so the UI
+runs on every platform before the pipeline exists.
 
 Platform backends behind traits, two implementations before generalising: `Capture`
 (CoreAudio, PipeWire, WASAPI, synthetic), `SpeechBackend` (CoreML, ONNX Runtime, fake),
@@ -144,10 +152,14 @@ bridge's copies of the macro and codecs. Packages after WP3 branch from `main`.
   **WP5 audio.** `steno-audio` from `spikes/capture-rs`: CoreAudio backend with
   device-change rebuild, synthetic backend, writer, AEC; capture tests from
   `Tests/StenoAudioTests` ported. PipeWire backend. WASAPI backend last.
-- **WP6 pipeline and host.** Orchestration (`process`, retention, speaker matching,
-  export), the host module with view models and the bridge host over the real store,
-  the CLI; the shell's `fixture-host` feature is switched off and removed. Parity: the
-  Swift `steno export` of a calibration meeting equals the Rust one field for field.
+- **WP6 pipeline and host.** In two PRs. **WP6a host** (`steno-host`): the view
+  models and the bridge host over the real store, the service traits and fakes, the
+  fixture parity suite and the ported view model tests; the parity list below is
+  filled from it. **WP6b pipeline**: orchestration (`process`, retention, speaker
+  matching, export), the CLI, the shell switched from its `fixture-host` feature to
+  `steno-host` (the feature is removed), the real `Recorder` and `Pipeline` behind the
+  host's traits. Parity: the Swift `steno export` of a calibration meeting equals the
+  Rust one field for field.
 - **WP7 LLM, adapters, handover.** Ports of `StenoLLM` (Codex and OpenAI-compatible),
   `StenoAdapters`, `StenoHandover` (rustls, the pinned trust evaluation, the shared
   `wire.ts` contract test). Lands as three PRs: WP7a LLM, WP7b adapters, WP7c handover.
@@ -173,9 +185,120 @@ bridge's copies of the macro and codecs. Packages after WP3 branch from `main`.
 
 ## Parity list
 
-Filled in by WP6 from the Swift app's bridge methods and topics (one line per method and
-topic, plus menu bar, panels, deep links, auto-stop, detection, retention, updates,
-login item, calendar, phone pairing). Until then, only what the first crates turned up.
+Every user-visible behaviour of the Swift app, one line each, ticked when the Rust side
+matches it. `[x]` means the host crate (WP6a) covers the rule hostlessly, through a
+service trait where the Swift app reached a framework; the crate named on the line
+still has to put the real implementation behind that trait, and the shell (WP6b, WP8)
+still has to draw the window side. `[ ]` is not ported yet.
+
+### Topics
+
+- [x] `app`: version, the setup banner (while meetings exist, the configuration is
+  incomplete and "Not now" was not pressed), the deep-link requests consumed by the
+  publish that carried them. Difference: `phone` is filled from the handover service
+  (the Swift main window left it nil).
+- [x] `recording`: from the `Recorder` trait, at most 20 Hz; the levels and the
+  auto-stop countdown arrive with WP5's recorder.
+- [x] `progress`: one entry per queued or processing meeting, fed by
+  `Host::apply_meeting_event` and the meeting list.
+- [x] `meetings.list`: filters, tag filter, FTS query, counts before the tag filter and
+  the query, day groups in the viewer's zone, speaker chips, the selection that survives
+  updates and clears only when its meeting is gone, the first fill's selection.
+- [x] `meeting.detail`: `null` without a selection; retention line, keep toggle,
+  summary status rows, export footer, speaker rows, turns, tasks, templates, re-run and
+  re-export guards. Difference: the speakers model's error rides on the detail's
+  `error` (the page has one error line).
+- [x] `settings.general`, `settings.recording`, `settings.transcription`,
+  `settings.summaries`, `settings.export`, `settings.iphone`: with the sidebar
+  subtitles, refreshed after every Settings command, store change and onboarding save.
+- [x] `onboarding`: the two pages, the required steps gating Done, page 1 advancing
+  on its own once every step is handled, page 2's saved lines and the exit.
+
+### Methods
+
+- [x] `page.ready` (publishes every topic once, in order), `page.layout` (validated
+  and dropped).
+- [x] `meetings.setFilter`, `meetings.setTagFilter`, `meetings.setQuery`,
+  `meetings.select` (a meeting not listed yet waits for its row),
+  `meetings.delete` (asks first through the shell's `confirm`; refuses a recording or
+  processing meeting with the Swift messages).
+- [x] `meeting.setTab`, `meeting.setTags` (trimmed, lower-cased, de-duplicated,
+  sorted), `meeting.setTemplate` (stores and re-runs; unknown ids change nothing),
+  `meeting.rerunSummary`, `meeting.reexport`, `meeting.setKeepAudio` (asks first when
+  turning keep off would delete now), `meeting.deleteRecordingNow`,
+  `meeting.saveNotes` (to the named meeting, selected or not),
+  `meeting.revealRecording`, `meeting.revealExport` (through the `Opener` trait).
+- [x] `speakers.options`, `speakers.select` (confirm, merge, create with an attendee's
+  email, the own person as a no-op, one re-export per change), `speakers.play`,
+  `speakers.stop` (through the `ClipPlayer` trait).
+- [x] `recording.start` (the live row becomes the requested meeting; a start that fails
+  re-reads the permissions), `recording.stop`, `recording.toggle`,
+  `recording.keepGoing`, `recording.clearMessages`: through the `Recorder` trait,
+  which WP5 implements.
+- [x] `setup.dismissBanner`.
+- [x] `settings.general.setLaunchAtLogin`, `.setDetectionEnabled`,
+  `.setDefaultTemplate`, `.requestCalendar`, `.setAutomaticUpdates`, `.openLoginItems`:
+  through the `LoginItem`, `Permissions` and `Updater` traits, which WP8 implements.
+- [x] `settings.recording.setInputDevice`, `.refreshDevices`, `.chooseFolder` (the
+  shell's chooser), `.revealFolder`, `.setRetention` (Forever keeps every recording on
+  disk through `Pipeline::keep_all_recordings`), `.requestPermission`.
+- [x] `settings.transcription.setEngine` (rebuilds the pipeline), `.download`
+  (every progress report publishes), `.remove`: through `SpeechModels`, which WP4
+  implements.
+- [x] `settings.summaries.selectPreset`, `.update`, `.save` (saves on change, then
+  probes), `.test`, `.confirmCodex`, `.refreshCodexStatus`, `.refreshCodexModels`,
+  `.selectCodexModel`, `.stopUsingCodex`: the API key through
+  `steno_core::SecretStore`, the probe and the Codex sign-in through `LlmService`,
+  which WP7 implements.
+- [x] `settings.export.setEnabled`, `.chooseVault`, `.update`, `.save`: validated
+  through `ExportValidator`, which WP7's Obsidian destination implements.
+- [x] `settings.iphone.beginPairing`, `.cancelPairing`, `.revoke`: through `Handover`,
+  which WP7 implements; the two-second pairing poll is the shell's timer calling
+  `Host::refresh_pairing`.
+- [x] `onboarding.request` (the page sees `isRequesting` while the prompt is up),
+  `.skip`, `.refresh`, `.advance`, `.back`, `.saveSummaries`,
+  `.confirmSummariesWithCodex`, `.chooseVault`, `.saveVault`, `.skipSetup`, `.finish`.
+- [x] `updates.check`, `system.openURL` (web and mail links only),
+  `system.openSystemSettings`, `window.open` (the request rides on `app`),
+  `window.close` (onboarding only), `ui.confirmDestructive`.
+
+### Beyond the bridge
+
+- [ ] Menu bar item: the processing queue, the five recent meetings, record and stop,
+  the login item toggle, check for updates (`MenuBarViewModel`); the shell's tray, WP8.
+- [ ] Floating panels: the recording bubble and the detection prompt with its
+  60-second countdown; the shell, WP8.
+- [x] Deep links: a requested meeting or Settings section rides on the next `app`
+  snapshot and is consumed by that publish (`Host::request_meeting`,
+  `Host::open_settings`).
+- [ ] Auto-stop after a call ends (the 90-second grace, "Keep recording", the end
+  reasons): the recorder's policy, WP5; the snapshot side is covered.
+- [ ] Meeting detection (`DetectionController`: one prompt at a time, suppressed while
+  recording or when the setting is off): WP5.
+- [ ] Retention sweep at launch and after `retentionApplied`, interrupted recordings
+  marked failed at launch, unfinished processing resumed at launch: WP6b.
+- [ ] Pending speaker reviews (`speakersNeedReview`): not on the bridge; WP6b.
+- [ ] Updates: Sparkle today, the Tauri updater at cutover; the `Updater` trait is the
+  seam, WP8.
+- [x] Login item: registered on the first launch when the setting says so
+  (`Host::register_login_item_on_first_launch`), toggled from General, the pane opened;
+  the `LoginItem` trait, WP8 implements.
+- [ ] Calendar: the event that names a recording and its attendees, looked up at
+  recording start: the recorder, WP5.
+- [x] Phone pairing: the QR code, a phone's arrival closing the code, a code running
+  out, revoke, the listener stopping when no phone is left; the `Handover` trait, WP7
+  implements.
+- [x] Onboarding opener rule (`Host::should_open_onboarding`): a missing required
+  permission, or the flag unset; an install already configured writes the flag and
+  stays closed.
+- Known differences, settled in WP6a: the search runs when `meetings.setQuery` arrives
+  (Swift debounced 200 ms; the page debounces typing); dates are worded in English with
+  a 24-hour clock in the zone the shell passes (Swift used the locale); the Swift
+  speakers popover's own error line is the detail's; `settings.transcription.download`
+  publishes its progress from the download's thread; a retried re-export after a refusal
+  happens on the next store change (Swift retried on the next `.ready` tick). Fixture
+  values the view models never compute are listed, with the host's value and the
+  reason, in `crates/steno-host/tests/parity.rs`.
 
 ### Store
 
@@ -308,8 +431,9 @@ PR off `main`.
 | Core protocols and fakes | `feat/rust-protocols` | #162 | merged |
 | Bridge on core | `refactor/rust-bridge-on-core` | #161 | merged |
 | WP4b CoreML speech backend | `feat/rust-speech-coreml` | #163 | merged |
-| WP7a LLM (`steno-llm`) | `feat/rust-llm` | #167 | open |
+| WP7a LLM (`steno-llm`) | `feat/rust-llm` | #167 | merged |
 | WP7b adapters | `feat/rust-adapters` | #165 | merged |
+| WP6a host | `feat/rust-host` | TBD | open |
 
 WP4b is `crates/steno-speech-coreml`: `objc2-core-ml` behind one safe module,
 the four backend calls, the FluidAudio 0.17.4 heuristics ported
