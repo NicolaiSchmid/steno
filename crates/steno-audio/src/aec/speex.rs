@@ -236,11 +236,8 @@ impl Drop for SpeexEchoCanceller {
 fn to_i16(source: &[f32], destination: &mut [i16]) {
     let available = source.len().min(destination.len());
     for (dst, &src) in destination[..available].iter_mut().zip(source) {
-        let scaled = (src * 32767.0).round();
         // Clamped to the i16 range first, so the cast is exact.
-        {
-            *dst = scaled.clamp(-32768.0, 32767.0) as i16;
-        }
+        *dst = (src * 32767.0).round().clamp(-32768.0, 32767.0) as i16;
     }
     for sample in &mut destination[available..] {
         *sample = 0;

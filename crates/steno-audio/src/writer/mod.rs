@@ -3,11 +3,21 @@
 //! into them, and the readers the tests and the bench tools use.
 //! Swift: `Sources/StenoAudio/Writer/`.
 
+use std::path::Path;
+
+use crate::capture::CaptureError;
+
 pub mod caf;
 pub mod recording_writer;
 pub mod resampler;
 pub mod wav;
 pub mod writer_thread;
+
+/// A failed file operation as the session reports it: the path, then the
+/// OS's description.
+pub(crate) fn io_error(path: &Path, error: &std::io::Error) -> CaptureError {
+    CaptureError::WriterFailed(format!("{}: {error}", path.display()))
+}
 
 pub use caf::{CafFile, CafReadError, CafStreamWriter};
 pub use recording_writer::{LaneFrames, RecordingFiles, RecordingWriter, RecordingWriting};

@@ -26,7 +26,7 @@
 
 pub mod sinc;
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use steno_core::{
     AudioAsset, AudioBuffer16k, AudioDecoder, AudioFormat, AudioLane, BoundaryResult, async_trait,
@@ -92,56 +92,48 @@ impl SymphoniaAudioCodec {
         )))
     }
 
-    /// One channel at the source rate. The crate's own CAF reader goes
-    /// first so an unfinished master reads to its last whole frame.
+    /// One channel at the source rate.
     pub fn read_channel(
         path: &Path,
         channel: usize,
         lane: AudioLane,
     ) -> Result<DecodedChannel, CodecError> {
-        if path
-            .extension()
-            .is_some_and(|e| e.eq_ignore_ascii_case("caf"))
-            && let Ok(file) = CafFile::read(path)
-        {
-            let channels = file.channels.len();
-            let samples =
-                file.channels
-                    .into_iter()
-                    .nth(channel)
-                    .ok_or(CodecError::ChannelMissing {
-                        lane,
-                        channel,
-                        channels,
-                    })?;
-            // The writer's rate is whole hertz.
-            return Ok(DecodedChannel {
-                sample_rate: file.sample_rate as u32,
-                channels,
-                samples,
-            });
-        }
-        let all = Self::read_all_channels(path)?;
+        let (sample_rate, all) = Self::read_all(path)?;
         let channels = all.len();
-        let mut iter = all.into_iter();
-        let Some((rate, samples)) = iter.nth(channel) else {
-            return Err(CodecError::ChannelMissing {
+        let samples = all
+            .into_iter()
+            .nth(channel)
+            .ok_or(CodecError::ChannelMissing {
                 lane,
                 channel,
                 channels,
-            });
-        };
+            })?;
         Ok(DecodedChannel {
-            sample_rate: rate,
+            sample_rate,
             channels,
             samples,
         })
     }
 
+    /// Every channel of the file at the source rate. The crate's own CAF
+    /// reader goes first so an unfinished master reads to its last whole
+    /// frame; everything else, and a CAF it cannot read, goes through
+    /// symphonia.
+    fn read_all(path: &Path) -> Result<(u32, Vec<Vec<f32>>), CodecError> {
+        if path
+            .extension()
+            .is_some_and(|e| e.eq_ignore_ascii_case("caf"))
+            && let Ok(file) = CafFile::read(path)
+        {
+            // The writer's rate is whole hertz.
+            return Ok((file.sample_rate as u32, file.channels));
+        }
+        Self::read_all_channels(path)
+    }
+
     /// Every channel of the file through symphonia, with the rate.
-    fn read_all_channels(path: &Path) -> Result<Vec<(u32, Vec<f32>)>, CodecError> {
-        let file = std::fs::File::open(path)
-            .map_err(|e| CodecError::Io(format!("{}: {e}", path.display())))?;
+    fn read_all_channels(path: &Path) -> Result<(u32, Vec<Vec<f32>>), CodecError> {
+        let file = std::fs::File::open(path).map_err(|e| io_error(path, &e))?;
         let stream = MediaSourceStream::new(Box::new(file), MediaSourceStreamOptions::default());
         let mut hint = Hint::new();
         if let Some(extension) = path.extension().and_then(|e| e.to_str()) {
@@ -207,7 +199,7 @@ impl SymphoniaAudioCodec {
                 path.display()
             )));
         }
-        Ok(channels.into_iter().map(|c| (rate, c)).collect())
+        Ok((rate, channels))
     }
 
     /// `samples` at `rate` to 16 kHz: exact length `round(len * 16000 /
@@ -235,10 +227,9 @@ impl SymphoniaAudioCodec {
     fn decimate_48k(samples: &[f32]) -> Vec<f32> {
         let mut resampler = crate::writer::Resampler48kTo16k::new(FRAME_SIZE);
         let delay_in = (crate::writer::Resampler48kTo16k::TAPS - 1) / 2;
+        // The tail is padded by the group delay (dropped from the front of
+        // the output below) plus a frame, then up to a whole frame.
         let mut padded = Vec::with_capacity(samples.len() + FRAME_SIZE * 2);
-        // Pre-roll of the group delay so the first output sample lines up
-        // with the first input sample; the tail then needs the same more.
-        padded.extend(std::iter::repeat_n(0.0f32, 0));
         padded.extend_from_slice(samples);
         padded.extend(std::iter::repeat_n(0.0f32, delay_in + FRAME_SIZE));
         let remainder = padded.len() % FRAME_SIZE;
@@ -261,33 +252,21 @@ impl SymphoniaAudioCodec {
     /// Averages every channel of `source` to mono and writes 16 kHz Int16
     /// WAV to `destination`.
     pub fn mixdown_path(source: &Path, destination: &Path) -> Result<(), CodecError> {
-        let channels: Vec<(u32, Vec<f32>)> = if source
-            .extension()
-            .is_some_and(|e| e.eq_ignore_ascii_case("caf"))
-            && let Ok(file) = CafFile::read(source)
-        {
-            let rate = file.sample_rate as u32;
-            file.channels.into_iter().map(|c| (rate, c)).collect()
-        } else {
-            Self::read_all_channels(source)?
-        };
-        let Some((rate, first)) = channels.first() else {
+        let (rate, channels) = Self::read_all(source)?;
+        let Some(first) = channels.first() else {
             return Err(CodecError::UnsupportedFormat("no channels".into()));
         };
-        let rate = *rate;
-        let frames = first.len();
         // Channel counts are tiny.
-        let scale = 1.0 / channels.len().max(1) as f32;
-        let mut mono = vec![0.0f32; frames];
-        for (_, channel) in &channels {
+        let scale = 1.0 / channels.len() as f32;
+        let mut mono = vec![0.0f32; first.len()];
+        for channel in &channels {
             for (out, sample) in mono.iter_mut().zip(channel) {
                 *out += sample * scale;
             }
         }
         let resampled = Self::to_16k(&mono, rate);
         if let Some(parent) = destination.parent() {
-            std::fs::create_dir_all(parent)
-                .map_err(|e| CodecError::Io(format!("{}: {e}", parent.display())))?;
+            std::fs::create_dir_all(parent).map_err(|e| io_error(parent, &e))?;
         }
         let mut writer = WavStreamWriter::create(destination, 16_000)
             .map_err(|e| CodecError::Io(e.to_string()))?;
@@ -318,9 +297,7 @@ impl AudioDecoder for SymphoniaAudioCodec {
             .iter()
             .position(|l| *l == lane)
             .ok_or(CodecError::LaneNotInAsset(lane))?;
-        let path = path_from_file_url(&asset.url)
-            .ok_or_else(|| CodecError::Io(format!("not a file URL: {}", asset.url)))?;
-        Ok(Self::decode_path(&path, channel, lane)?)
+        Ok(Self::decode_path(&master_path(asset)?, channel, lane)?)
     }
 
     /// `Wav16kInt16`: there is no AAC encoder in pure Rust (see the module
@@ -330,21 +307,27 @@ impl AudioDecoder for SymphoniaAudioCodec {
     }
 
     async fn mixdown(&self, asset: &AudioAsset, to: &Path) -> BoundaryResult<()> {
-        let source = path_from_file_url(&asset.url)
-            .ok_or_else(|| CodecError::Io(format!("not a file URL: {}", asset.url)))?;
+        let source = master_path(asset)?;
         if let Some(parent) = to.parent() {
-            std::fs::create_dir_all(parent)
-                .map_err(|e| CodecError::Io(format!("{}: {e}", parent.display())))?;
+            std::fs::create_dir_all(parent).map_err(|e| io_error(parent, &e))?;
         }
         if to.exists() {
-            std::fs::remove_file(to)
-                .map_err(|e| CodecError::Io(format!("{}: {e}", to.display())))?;
+            std::fs::remove_file(to).map_err(|e| io_error(to, &e))?;
         }
         if asset.format == AudioFormat::Wav16kInt16 {
-            std::fs::copy(&source, to)
-                .map_err(|e| CodecError::Io(format!("{}: {e}", to.display())))?;
+            std::fs::copy(&source, to).map_err(|e| io_error(to, &e))?;
             return Ok(());
         }
         Ok(Self::mixdown_path(&source, to)?)
     }
+}
+
+/// The asset's master as a path; the URL must be a file URL.
+fn master_path(asset: &AudioAsset) -> Result<PathBuf, CodecError> {
+    path_from_file_url(&asset.url)
+        .ok_or_else(|| CodecError::Io(format!("not a file URL: {}", asset.url)))
+}
+
+fn io_error(path: &Path, error: &std::io::Error) -> CodecError {
+    CodecError::Io(format!("{}: {error}", path.display()))
 }

@@ -13,6 +13,7 @@ use std::fs::File;
 use std::io::{Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
+use super::io_error;
 use crate::capture::CaptureError;
 
 pub struct CafStreamWriter {
@@ -160,10 +161,6 @@ impl CafStreamWriter {
         debug_assert_eq!(data.len(), Self::HEADER_SIZE);
         data
     }
-}
-
-fn io_error(path: &Path, error: &std::io::Error) -> CaptureError {
-    CaptureError::WriterFailed(format!("{}: {error}", path.display()))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]

@@ -7,6 +7,7 @@ use std::fs::File;
 use std::io::{Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
+use super::io_error;
 use crate::capture::CaptureError;
 
 /// Streams 16 kHz mono Int16 PCM into a RIFF/WAVE file: header with zero
@@ -125,10 +126,6 @@ impl WavStreamWriter {
         data.extend_from_slice(&data_size.to_le_bytes());
         data
     }
-}
-
-fn io_error(path: &Path, error: &std::io::Error) -> CaptureError {
-    CaptureError::WriterFailed(format!("{}: {error}", path.display()))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]

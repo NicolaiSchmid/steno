@@ -60,9 +60,7 @@ impl Resampler48kTo16k {
                 accumulator += coefficient * self.history[newest - k];
             }
             // Clamped to [-1, 1] first, so the cast cannot truncate.
-            {
-                *out = (accumulator.clamp(-1.0, 1.0) * 32767.0).round() as i16;
-            }
+            *out = (accumulator.clamp(-1.0, 1.0) * 32767.0).round() as i16;
         }
         // Keep the last taps - 1 input samples for the next call.
         self.history
