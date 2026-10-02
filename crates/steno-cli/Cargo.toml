@@ -1,0 +1,42 @@
+[package]
+name = "steno-cli"
+description = "The steno command line tool: record, process, export, deliver and the developer tools"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "steno"
+path = "src/main.rs"
+
+[dependencies]
+chrono.workspace = true
+clap.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+steno-adapters = { path = "../steno-adapters" }
+steno-audio = { path = "../steno-audio" }
+steno-bridge = { path = "../steno-bridge" }
+steno-core = { path = "../steno-core", features = ["testing"] }
+steno-diarize = { path = "../steno-diarize", default-features = false, features = ["onnx"] }
+steno-handover = { path = "../steno-handover" }
+steno-host = { path = "../steno-host" }
+steno-llm = { path = "../steno-llm" }
+steno-pipeline = { path = "../steno-pipeline" }
+steno-services = { path = "../steno-services" }
+steno-speech = { path = "../steno-speech" }
+steno-speech-coreml = { path = "../steno-speech-coreml" }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "signal", "time", "sync"] }
+tracing.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+steno-llm = { path = "../steno-llm", features = ["testing"] }
+tempfile.workspace = true
+
+[lints]
+workspace = true

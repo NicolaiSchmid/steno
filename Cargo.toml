@@ -65,6 +65,8 @@ cc = "1"
 # Keychain, the Windows credential store and the kernel keyring on Linux
 # (`linux-native` needs no D-Bus library at build time).
 keyring = { version = "3", default-features = false, features = ["apple-native", "windows-native", "linux-native"] }
+# The `steno` CLI's argument parser.
+clap = { version = "4", features = ["derive"] }
 # Test only
 similar = "2"
 # Temporary directories in tests; `steno-diarize` also downloads each model
