@@ -170,6 +170,19 @@ bridge's copies of the macro and codecs. Packages after WP3 branch from `main`.
   removed, web app moved to `apps/web`, Swift rows removed from `AGENTS.md`.
 - **WP10 Windows.** WASAPI capture, DirectML provider (speech-stack G4), installer.
 
+## Progress
+
+One row per work package as it lands; the PR column is the package's PR
+against `main`.
+
+| Package | State | PR | Notes |
+|---------|-------|----|-------|
+| WP1 workspace and bridge | merged | #153 | |
+| WP2 store | merged | #155 | |
+| WP3 Tauri shell on fixtures | merged | #156 | |
+| protocols (traits and value types) | in review | feat/rust-protocols | `EchoCanceller`, `AudioDecoder`, `AudioBuffer16k`, ... |
+| WP5a audio (`steno-audio`) | in review | feat/rust-audio | Rings, Speex AEC, writer, session with rebuild, synthetic backend, macOS live backend, detector, symphonia decoder; PipeWire (WP5b) and WASAPI (WP10) are stubs. Zero-allocation proof in `crates/steno-audio/tests/realtime.rs`; ERLE table identical to Swift's `aec-bench --synthetic`. |
+
 ## Risks
 
 - The spike decoder is validated above the joint only; the ONNX logits split is WP4's
@@ -357,6 +370,31 @@ still has to draw the window side. `[ ]` is not ported yet.
 - The person-page writer should write file names NFC-normalised, as the Rust writer
   does; Foundation writes `Anna Müller.md` in NFD on APFS, which maps both to one
   file, but a vault synced to a normalisation-sensitive filesystem gets two files.
+
+### Audio
+
+What the audio crate (WP5a) does differently from `StenoAudio`, each a
+parity item until a plan says otherwise:
+
+- **Mixdown is 16 kHz mono Int16 WAV, not AAC.** There is no AAC encoder in
+  pure Rust; `SymphoniaAudioCodec::mixdown_format()` says `Wav16kInt16` so
+  the persist stage names `audio.wav` correctly. Options at cutover: ship a
+  small AAC encoder (`fdk-aac` is non-free; `ffmpeg` is too large), accept
+  WAV for the optional export, or encode through the platform (AudioToolbox
+  on the Mac, Media Foundation on Windows) behind a `cfg`.
+- **Whole-file decode.** The decoder reads a lane to one `Vec<f32>` at the
+  source rate before resampling; the AVFoundation codec converted in 32 768
+  frame chunks. A two-hour 48 kHz lane is 1.4 GB transiently. Chunk the
+  symphonia path before the Linux release.
+- **Resampling.** 48 kHz masters go through the writer's exact 3:1 FIR
+  (group delay compensated, within a sample of the sidecar); other rates
+  (the phone's 44.1 kHz) through a 64-tap, 128-phase windowed sinc. The
+  Swift codec used `AVAudioConverter` at maximum quality; the two are not
+  bit-identical, both are flat to 6.5 kHz.
+- **AAC-LC only** through symphonia; HE-AAC is not expected from the iOS
+  recorder.
+- **`steno dev` tooling** (`capture-spike`, `aec-bench`, `audio-devices`)
+  is not ported; it arrives with the CLI in WP6.
 
 ### Bridge
 
