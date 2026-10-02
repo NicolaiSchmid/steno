@@ -4,23 +4,24 @@ import type { ComponentProps } from "react";
 import { cn } from "@/lib/cn";
 
 /**
- * A person's initial on the fixed people palette. `tone` is the person's
- * index in the meeting (wraps at four); `unknown` is an unnamed speaker.
+ * A person's initial in one of the four people hues on its own 16 % tint.
+ * `tone` is the person's index in the meeting (wraps at four); `unknown` is
+ * an unnamed speaker in grey.
  */
 export const avatarVariants = cva(
-	"inline-grid shrink-0 place-items-center rounded-full border-2 border-transparent font-semibold text-primary-fg leading-none",
+	"inline-grid shrink-0 place-items-center rounded-full border-2 border-transparent font-semibold leading-none",
 	{
 		variants: {
 			size: {
-				sm: "size-[18px] text-[9px]",
+				sm: "size-4.5 text-[9px]",
 				md: "size-6 text-[10px]",
 				lg: "size-8 text-xs",
 			},
 			tone: {
-				0: "bg-p1",
-				1: "bg-p2",
-				2: "bg-p3",
-				3: "bg-p4",
+				0: "bg-p1/16 text-p1",
+				1: "bg-p2/16 text-p2",
+				2: "bg-p3/16 text-p3",
+				3: "bg-p4/16 text-p4",
 				unknown: "bg-border text-muted-foreground",
 			},
 		},

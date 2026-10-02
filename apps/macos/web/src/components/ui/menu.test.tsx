@@ -7,7 +7,7 @@ import { Menu, MenuItem, MenuPopup, MenuSeparator, MenuTrigger } from "./menu";
 function Subject({ onDelete }: { onDelete?: () => void }) {
 	return (
 		<Menu>
-			<MenuTrigger render={<Button variant="glass" />}>More</MenuTrigger>
+			<MenuTrigger render={<Button variant="outline" />}>More</MenuTrigger>
 			<MenuPopup>
 				<MenuItem shortcut="⇧⌘E">Export again</MenuItem>
 				<MenuSeparator />

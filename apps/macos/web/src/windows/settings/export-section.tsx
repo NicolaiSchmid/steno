@@ -23,7 +23,7 @@ import { SectionPage } from "./section-page";
  */
 export function exportStatus(
 	snapshot: ExportSettingsSnapshot,
-): { kind: "info" | "warning" | "live"; text: string } | null {
+): { kind: "info" | "warning" | "success"; text: string } | null {
 	if (!snapshot.enabled) {
 		return null;
 	}
@@ -37,7 +37,7 @@ export function exportStatus(
 		return null;
 	}
 	return {
-		kind: "live",
+		kind: "success",
 		text: `Exporting to ${snapshot.vaultName ?? "the vault"}. New meetings are written there when they finish.`,
 	};
 }
@@ -124,6 +124,7 @@ export function ExportSection() {
 					<FormRow
 						control={
 							<DraftField
+								className="w-40"
 								label="People folder"
 								onCommit={(peopleFolder) => update({ peopleFolder })}
 								placeholder="People"
@@ -136,6 +137,7 @@ export function ExportSection() {
 					<FormRow
 						control={
 							<DraftField
+								className="w-40"
 								label="Tag for tasks"
 								onCommit={(taskTag) => update({ taskTag })}
 								placeholder="task"
@@ -165,7 +167,7 @@ export function ExportSection() {
 				<Callout
 					data-testid="export-status"
 					icon={
-						status.kind === "live" ? (
+						status.kind === "success" ? (
 							<CheckCircle2Icon aria-hidden="true" />
 						) : status.kind === "warning" ? (
 							<TriangleAlertIcon aria-hidden="true" />

@@ -31,11 +31,11 @@ export function ProcessingCard({ state, entry }: ProcessingCardProps) {
 				: undefined;
 	return (
 		<Card
-			className="mb-[26px] flex flex-col gap-2.5"
+			className="mb-6 flex flex-col gap-2.5"
 			data-testid="processing-card"
 			padding="lg"
 		>
-			<div className="flex items-baseline justify-between gap-3 text-[13px]">
+			<div className="flex items-baseline justify-between gap-3 text-sm">
 				<span className="font-medium" data-testid="processing-stage">
 					{title}
 				</span>

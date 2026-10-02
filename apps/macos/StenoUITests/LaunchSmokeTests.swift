@@ -329,7 +329,7 @@ final class LaunchSmokeTests: XCTestCase {
   /// heading; the rest of what the page renders is the web tests' evidence.
   /// The Settings state checks that the page's Recording heading lands
   /// inside the Settings window. 960 x 600 fits the runner's 1024 x 768
-  /// display, as does the 760 x 520 Settings window over it.
+  /// display, as does the 960 x 640 Settings window over it.
   private func captureScreenshotMatrix(appearance: String) {
     /// Launches under the matrix flags plus `arguments`.
     func launched(_ arguments: [String]) -> XCUIApplication {
@@ -419,10 +419,10 @@ final class LaunchSmokeTests: XCTestCase {
       XCTAssertTrue(header.waitForExistence(timeout: 20), "Settings did not open on Recording")
 
       // The page paints inside its window: the heading is checked to lie
-      // inside the 760 by 520 frame, as the SwiftUI split view once failed to.
+      // inside the 960 by 640 frame, as the SwiftUI split view once failed to.
       XCTAssertTrue(
-        waitUntil(timeout: 5) { abs(window.frame.width - 760) < 1 },
-        "the Settings window is \(window.frame.width) wide, not 760")
+        waitUntil(timeout: 5) { abs(window.frame.width - 960) < 1 },
+        "the Settings window is \(window.frame.width) wide, not 960")
       XCTAssertTrue(
         window.frame.contains(header.frame),
         "the Recording heading \(header.frame) lies outside the Settings window \(window.frame)")

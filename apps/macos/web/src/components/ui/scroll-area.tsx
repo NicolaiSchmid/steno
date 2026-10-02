@@ -8,23 +8,29 @@ export interface ScrollAreaProps
 	/** Layout classes for the scrolling viewport (padding belongs to children). */
 	viewportClassName?: string;
 	orientation?: "vertical" | "horizontal" | "both";
+	/** Fade the top 1.5 rem of content scrolling under a header row. */
+	fade?: boolean;
 }
 
+const scrollbarClass = cn(
+	"flex touch-none select-none opacity-0 transition-opacity delay-300 duration-100",
+	"data-hovering:opacity-100 data-scrolling:opacity-100 data-hovering:delay-0 data-scrolling:delay-0",
+);
+const thumbClass =
+	"flex-1 rounded-full bg-(--scrollbar-thumb) hover:bg-(--scrollbar-thumb-hover)";
+
 /**
- * A scroll container with a thin overlay scrollbar that shows while the
- * pointer is over it or the content moves.
+ * A scroll container with a 6 px overlay scrollbar that fades in while the
+ * pointer rests over it or the content moves, and fades out 300 ms after.
  */
 export function ScrollArea({
 	className,
 	viewportClassName,
 	orientation = "vertical",
+	fade = false,
 	children,
 	...props
 }: ScrollAreaProps) {
-	const scrollbarClass = cn(
-		"flex touch-none select-none p-0.5 opacity-0 transition-opacity duration-(--duration-functional) ease-standard",
-		"data-hovering:opacity-100 data-scrolling:opacity-100",
-	);
 	return (
 		<BaseScrollArea.Root
 			className={cn("relative min-h-0 min-w-0 overflow-hidden", className)}
@@ -33,6 +39,7 @@ export function ScrollArea({
 			<BaseScrollArea.Viewport
 				className={cn(
 					"size-full overscroll-contain outline-none",
+					fade && "scroll-fade-top",
 					viewportClassName,
 				)}
 			>
@@ -40,18 +47,18 @@ export function ScrollArea({
 			</BaseScrollArea.Viewport>
 			{orientation !== "horizontal" ? (
 				<BaseScrollArea.Scrollbar
-					className={cn(scrollbarClass, "absolute inset-y-1 right-0.5 w-2")}
+					className={cn(scrollbarClass, "absolute inset-y-1 right-px w-1.5")}
 					orientation="vertical"
 				>
-					<BaseScrollArea.Thumb className="w-full flex-1 rounded-full bg-foreground/25" />
+					<BaseScrollArea.Thumb className={cn(thumbClass, "w-full")} />
 				</BaseScrollArea.Scrollbar>
 			) : null}
 			{orientation !== "vertical" ? (
 				<BaseScrollArea.Scrollbar
-					className={cn(scrollbarClass, "absolute inset-x-1 bottom-0.5 h-2")}
+					className={cn(scrollbarClass, "absolute inset-x-1 bottom-px h-1.5")}
 					orientation="horizontal"
 				>
-					<BaseScrollArea.Thumb className="h-full flex-1 rounded-full bg-foreground/25" />
+					<BaseScrollArea.Thumb className={cn(thumbClass, "h-full")} />
 				</BaseScrollArea.Scrollbar>
 			) : null}
 		</BaseScrollArea.Root>

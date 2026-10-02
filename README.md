@@ -45,7 +45,7 @@ and keep your notes behind their login. Steno takes the opposite route:
 | **Works for** | Supported video platforms | Zoom, Teams, Meet, FaceTime, Slack, phone calls via Continuity, in-person meetings |
 | **Cost** | Monthly subscription | Free, open source, your own LLM endpoint |
 
-It was built to match the day-to-day quality of [Jamie](https://www.meetjamie.ai) for one
+It was built to match the day-to-day quality of commercial meeting recorders for one
 person and their friends, with files instead of lock-in.
 
 ## Install
@@ -324,7 +324,7 @@ Package.swift       Swift package: StenoCore, StenoAudio, StenoSpeech, StenoLLM,
 apps/macos/         SwiftUI app over the package, xcodegen project, own README
 mobile/             Expo iOS recorder, own pnpm project, own README
 .plans/             scope and dated implementation plans
-docs/research/      teardown of Jamie and the open-source landscape
+docs/research/      teardown of commercial recorders and the open-source landscape
 .github/workflows/  repository, Swift and mobile CI; macOS release on `v*` tags
 ```
 
@@ -342,8 +342,8 @@ the CLI, the macOS app and any future surface share one implementation.
 
 ## Background
 
-Steno started as an attempt to replicate [Jamie](https://www.meetjamie.ai) as open
-source. Along the way it borrows ideas from [anarlog](https://github.com/fastrepl/anarlog),
+Steno started as an open-source alternative to commercial meeting recorders. Along the
+way it borrows ideas from [anarlog](https://github.com/fastrepl/anarlog),
 [Parrot](https://github.com/turantekin/Parrot) and
 [AudioCap](https://github.com/insidegui/AudioCap), all rebuilt rather than forked. The
 name is a nod to stenographers and is known to collide with a few commercial products;

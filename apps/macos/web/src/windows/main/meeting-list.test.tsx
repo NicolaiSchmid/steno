@@ -1,4 +1,4 @@
-import { act, fireEvent, screen } from "@testing-library/react";
+import { act, fireEvent, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { MeetingsListSnapshot } from "@/bridge/contract";
@@ -20,7 +20,7 @@ describe("MeetingList", () => {
 		vi.restoreAllMocks();
 	});
 
-	it("renders the day groups with the selected row raised", async () => {
+	it("renders the day groups with the selected row filled", async () => {
 		const harness = await createBridgeHarness();
 		renderWithBridge(<MeetingList />, harness);
 		expect(screen.getByTestId(`meeting-${FIRST}`)).toHaveAttribute(
@@ -191,5 +191,103 @@ describe("MeetingList", () => {
 			{ method: "meetings.setQuery", params: { query: "" } },
 		]);
 		expect(screen.getByTestId("search-meetings")).toHaveValue("");
+	});
+});
+
+const THIRD = "00000000-0000-0000-0000-000000000003";
+const PROCESSING = "00000000-0000-0000-0000-000000000002";
+
+describe("MeetingList rows", () => {
+	it("leads with the source and ends line 1 with the start time once ready", async () => {
+		const harness = await createBridgeHarness();
+		renderWithBridge(<MeetingList />, harness);
+		const row = screen.getByTestId(`meeting-${FIRST}`);
+		expect(row).toHaveTextContent(/^Call/);
+		const time = row.querySelector("time");
+		expect(time).toHaveAttribute("dateTime", "2026-09-29T12:50:00.000Z");
+		expect(time).toHaveTextContent(/\d{1,2}:\d{2}/);
+		expect(row).toHaveTextContent("Produktstrategie 90/10");
+		expect(row).toHaveTextContent("45:38");
+		expect(row).not.toHaveTextContent("No summary");
+		expect(within(row).getByLabelText("Unnamed speaker")).toBeInTheDocument();
+		expect(row.querySelectorAll("[aria-label]")).toHaveLength(4);
+	});
+
+	it("flags a ready meeting without a summary, and only that one", async () => {
+		const harness = await createBridgeHarness();
+		renderWithBridge(<MeetingList />, harness);
+		expect(screen.getByTestId(`meeting-${THIRD}`)).toHaveTextContent(
+			/^In person.*No summary/,
+		);
+		expect(screen.getByTestId(`meeting-${FAILED}`)).not.toHaveTextContent(
+			"No summary",
+		);
+		expect(screen.getAllByText("No summary")).toHaveLength(1);
+	});
+
+	it("shows Failed before the time and the reason as the preview", async () => {
+		const harness = await createBridgeHarness();
+		renderWithBridge(<MeetingList />, harness);
+		const row = screen.getByTestId(`meeting-${FAILED}`);
+		expect(row).toHaveTextContent(/^CallFailed\d{1,2}:\d{2}/);
+		expect(row.querySelector("time")).not.toBeNull();
+		expect(row).toHaveTextContent("Transcription failed: model not installed");
+	});
+
+	it("shows Working while processing with the host's step as the preview", async () => {
+		const harness = await createBridgeHarness("scenario=processing");
+		renderWithBridge(<MeetingList />, harness);
+		const row = screen.getByTestId(`meeting-${PROCESSING}`);
+		expect(row).toHaveAttribute("aria-current", "true");
+		expect(row).toHaveTextContent(/^CallWorking\d{1,2}:\d{2}/);
+		expect(row).toHaveTextContent("Standup");
+		expect(row.querySelector("time")).not.toBeNull();
+	});
+
+	it("shows Live with the pulse while a meeting records", async () => {
+		const list = await fixtureList();
+		const first = list.groups[0];
+		if (!first) {
+			throw new Error("fixture has no day group");
+		}
+		const [row, ...rest] = first.meetings;
+		if (!row) {
+			throw new Error("fixture has no meeting");
+		}
+		const harness = await createBridgeHarness("", {
+			"meetings.list": {
+				...list,
+				groups: [
+					{
+						...first,
+						meetings: [
+							{ ...row, state: "recording", preview: undefined },
+							...rest,
+						],
+					},
+					...list.groups.slice(1),
+				],
+			} satisfies MeetingsListSnapshot,
+		});
+		renderWithBridge(<MeetingList />, harness);
+		const element = screen.getByTestId(`meeting-${FIRST}`);
+		expect(element).toHaveTextContent(/^CallLive\d{1,2}:\d{2}/);
+		expect(element).toHaveTextContent("Recording now.");
+		expect(element.querySelector(".animate-status-pulse")).not.toBeNull();
+		expect(element).not.toHaveTextContent("No summary");
+	});
+
+	it("labels each day group with its date after the hairline", async () => {
+		const harness = await createBridgeHarness();
+		renderWithBridge(<MeetingList />, harness);
+		const list = screen.getByTestId("meeting-list");
+		expect(list).toHaveTextContent(/Sep 29/);
+		expect(list).toHaveTextContent(/Sep 28/);
+		expect(screen.getByRole("heading", { level: 1 })).toHaveTextContent(
+			"Meetings",
+		);
+		expect(
+			screen.getByRole("searchbox", { name: "Search meetings" }),
+		).toHaveAttribute("type", "search");
 	});
 });

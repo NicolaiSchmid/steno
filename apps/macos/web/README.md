@@ -4,7 +4,7 @@ The pixels of the Mac windows: one React app, bundled by Vite and served by
 the app from its own URL scheme. Swift keeps the state and the audio; the page
 draws snapshots and sends commands over the bridge (`src/bridge/`). Plan:
 `.plans/2026-09-29-macos-webview-ui.md`. Spec for the look:
-`docs/design/webview-mockup/steno-main.html`.
+`.plans/2026-10-01-t3code-design-polish.md`.
 
 ## Commands
 
@@ -15,7 +15,7 @@ draws snapshots and sends commands over the bridge (`src/bridge/`). Plan:
 | `pnpm check` | `lint`, `lint:ui`, `typecheck`, `test`. Must pass before a PR. |
 | `pnpm build` | Writes `dist/`, the bundle the app ships, with relative asset URLs and without the mock bridge or the fixtures; then `scripts/check-offline.mjs` greps it for fetchable URLs and `scripts/check-bundle.mjs` for any trace of the mock or a fixture. |
 | `pnpm build:screens` | Writes `dist-screens/`: the same pages over the fixture bridge (`vite build --mode screens`), for the screens and `vite preview --mode screens`. |
-| `pnpm screens` | Builds the screens bundle, then Playwright renders the main window in every state at 960 by 600 and 1200 by 760, the Settings window's sections and states at its fixed 760 by 520, the onboarding window's two pages and their states at its fixed 560 by 620, and the stories, light and dark, to `screens/` and asserts the page made no network request. Run `pnpm exec playwright install chromium` once. |
+| `pnpm screens` | Builds the screens bundle, then Playwright renders the main window in every state at 960 by 600 and 1200 by 760, the Settings window's sections and states at its default 960 by 640, the onboarding window's two pages and their states at its fixed 560 by 620, and the stories, light and dark, to `screens/` and asserts the page made no network request. Run `pnpm exec playwright install chromium` once. |
 
 ## Layout
 
@@ -23,7 +23,7 @@ draws snapshots and sends commands over the bridge (`src/bridge/`). Plan:
 |---|---|
 | `src/bridge/` | The contract (`contract.ts`), the typed client, the WebKit and mock transports, and `hooks.ts` (`useSnapshot`, `useBridge`, `send`). `createBridge()` picks WebKit inside the app and otherwise the `#bridge-fallback` module, which `vite.config.ts` resolves to `fallback-mock.ts` (dev server, Vitest, the screens bundle) or `fallback-none.ts` (the production bundle; it throws). |
 | `src/windows/main/` | The main window over the bridge: sidebar, meeting list, detail with its tabs, `format.ts` for every date and duration. |
-| `src/windows/settings/` | The Settings window: a sidebar of the six sections with the subtitles their snapshots carry, one `*-section.tsx` per section built from `FormCard` and `FormRow`, `settings-format.ts` for sizes and relative times. Text fields keep a draft (`src/lib/use-draft.ts`) and send one `update` plus a `save` when focus leaves. |
+| `src/windows/settings/` | The Settings window: a sidebar of the six sections as single-line rows, one `*-section.tsx` per section built from `FormCard` and `FormRow`, `settings-format.ts` for sizes and relative times. Text fields keep a draft (`src/lib/use-draft.ts`) and send one `update` plus a `save` when focus leaves. |
 | `src/windows/onboarding/` | The onboarding window over the `onboarding` snapshot: `permissions-page.tsx` (one `PermissionRow` per permission, Later or Done) and `setup-page.tsx` (the Summaries row with the service form or the ChatGPT consent card, the Obsidian vault row with the native chooser, Back and Finish) in the frame `onboarding-page.tsx` draws. The host says which page is current; `finished` in the snapshot makes the page ask for `window.close`. |
 | `src/components/` | Pieces two windows share, built from `ui/`: `permission-row.tsx` (Settings and onboarding), `summaries-endpoint-form.tsx` (the service and its server, model and key fields, laid out as rows or a stack), `codex-consent-card.tsx` (the ChatGPT consent words, once), `draft-field.tsx`. |
 | `src/components/ui/` | The component set; the only place a look is defined. |

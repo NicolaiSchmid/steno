@@ -1,8 +1,7 @@
 import { ContextMenu as BaseContextMenu } from "@base-ui/react/context-menu";
 import type { ComponentProps, ReactNode } from "react";
 import { cn } from "@/lib/cn";
-import { Kbd } from "./kbd";
-import { menuItemVariants, popupSurfaceClass } from "./menu";
+import { MenuShortcut, menuItemVariants, popupSurfaceClass } from "./menu";
 
 /**
  * The right-click menu on a meeting row: the same glass popup and rows as
@@ -38,7 +37,7 @@ export function ContextMenuPopup({
 		<BaseContextMenu.Portal container={container}>
 			<BaseContextMenu.Positioner className="z-50 outline-none">
 				<BaseContextMenu.Popup
-					className={cn(popupSurfaceClass, "min-w-[200px]", className)}
+					className={cn(popupSurfaceClass, "min-w-44 p-1", className)}
 					{...props}
 				/>
 			</BaseContextMenu.Positioner>
@@ -69,11 +68,7 @@ export function ContextMenuItem({
 		>
 			{icon}
 			<span className="min-w-0 flex-1 truncate">{children}</span>
-			{shortcut ? (
-				<Kbd className="ml-auto" variant="plain">
-					{shortcut}
-				</Kbd>
-			) : null}
+			{shortcut ? <MenuShortcut>{shortcut}</MenuShortcut> : null}
 		</BaseContextMenu.Item>
 	);
 }

@@ -378,3 +378,5 @@ WP5, cleanup:
   preview window still names the WP1 route `#/shell`, which the page treats as `#/main`. The app
   version comes from the release tag (`release.yml` derives it); nothing in the repository is
   bumped for 0.10.0, and `flake.nix` is bumped after the release once its hash exists.
+- 2026-10-01: Settings is 960 by 640 and resizable, minimum 760 by 520, so the T3 Code settings
+  layout fits; see [`2026-10-01-t3code-design-polish.md`](2026-10-01-t3code-design-polish.md).

@@ -133,7 +133,7 @@ function SetupRow({ row, children }: { row: SetupStep; children: ReactNode }) {
 						<Badge>Optional</Badge>
 					</span>
 				}
-				tone={row.state === "saved" ? "primary" : "faint"}
+				tone={row.state === "saved" ? "success" : "faint"}
 			>
 				{open ? children : null}
 			</FormRow>
@@ -196,7 +196,7 @@ function SummariesFields({
 									icon={<CheckCircle2Icon aria-hidden="true" />}
 									size="sm"
 									title={`Using ChatGPT as ${codex.signInDetail ?? "your account"}.`}
-									variant="live"
+									variant="success"
 								/>
 							) : codex.signIn === "unavailable" ? (
 								<Callout
@@ -273,7 +273,7 @@ function SummariesFields({
 							}
 							size="sm"
 							title={summaries.testResult.message}
-							variant={summaries.testResult.ok ? "live" : "warning"}
+							variant={summaries.testResult.ok ? "success" : "warning"}
 						/>
 					) : null}
 					<div className="flex items-center gap-2">
