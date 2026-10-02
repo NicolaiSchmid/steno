@@ -174,8 +174,11 @@ once that chain has merged.
 
 Filled in by WP6 from the Swift app's bridge methods and topics (one line per method and
 topic, plus menu bar, panels, deep links, auto-stop, detection, retention, updates,
-login item, calendar, phone pairing). Empty until then, bar one request to the Swift
-fixture writer:
+login item, calendar, phone pairing). Empty until then.
+
+### Bridge
+
+What the bridge crate (WP1) asks of the Swift side before WP6 fills the list:
 
 - Fixtures: one `<topic>.full` fixture per snapshot topic with every optional field
   set, written by `BridgeSamples` next to the existing ones, so the Rust round-trip
