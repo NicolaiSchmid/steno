@@ -1,0 +1,54 @@
+# The landing page (apps/site): lint, typecheck and a production static build
+# from the root pnpm workspace. Vercel runs the same commands
+# (apps/site/vercel.json), so a green run here means the deploy will build too.
+name: Site CI
+
+on:
+  pull_request:
+    paths:
+      - 'apps/site/**'
+      - 'package.json'
+      - 'pnpm-workspace.yaml'
+      - 'pnpm-lock.yaml'
+      - '.github/workflows/site-ci.yml'
+  push:
+    branches: ['main']
+    paths:
+      - 'apps/site/**'
+      - 'package.json'
+      - 'pnpm-workspace.yaml'
+      - 'pnpm-lock.yaml'
+      - '.github/workflows/site-ci.yml'
+
+concurrency:
+  group: site-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  site:
+    name: Check and build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile --filter @steno/site...
+
+      - name: Check
+        run: pnpm check:site
+
+      - name: Build
+        run: pnpm build:site
+        env:
+          NEXT_TELEMETRY_DISABLED: '1'

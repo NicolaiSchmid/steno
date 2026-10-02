@@ -322,10 +322,11 @@ AGENTS.md           conventions for coding agents (CLAUDE.md links here)
 Package.swift       Swift package: StenoCore, StenoAudio, StenoSpeech, StenoLLM,
                     StenoAdapters, StenoHandover and the `steno` CLI
 apps/macos/         SwiftUI app over the package, xcodegen project, own README
+apps/site/          landing page (steno.nicolaischmid.com), Next.js static export in the root pnpm workspace
 mobile/             Expo iOS recorder, own pnpm project, own README
 .plans/             scope and dated implementation plans
 docs/research/      teardown of commercial recorders and the open-source landscape
-.github/workflows/  repository, Swift and mobile CI; macOS release on `v*` tags
+.github/workflows/  repository, Swift, web, site and mobile CI; macOS release on `v*` tags
 ```
 
 ```sh

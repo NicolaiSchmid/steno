@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg height="1024" viewBox="0 0 1024 1024" width="1024" xmlns="http://www.w3.org/2000/svg" >
+  <defs>
+    <linearGradient id="plate-gradient" x1="0" x2="0" y1="0" y2="1">
+      <stop offset="0" stop-color="#303034"/>
+      <stop offset="1" stop-color="#141416"/>
+    </linearGradient>
+  </defs>
+  <!-- Plate: the macOS icon grid's 824 pt rounded square centred on the
+       1024 pt canvas. The system draws the drop shadow. -->
+  <g id="plate">
+    <rect fill="url(#plate-gradient)" height="824" id="plate-fill" rx="185" width="824" x="100" y="100" />
+    <rect fill="none" height="820" id="plate-hairline" rx="183" stroke="#ffffff" stroke-opacity="0.1" stroke-width="3" width="820" x="102" y="102" />
+  </g>
+  <!-- Glyph: a steno pad. The centre rule splits the page into two columns,
+       "them" on the left and "me" on the right; the newest line, the one
+       being written right now on this Mac, is live green. -->
+  <g id="glyph">
+    <rect fill="#a3a3a3" height="440" id="rule" rx="12" width="24" x="500" y="292" />
+    <rect fill="#ffffff" height="68" rx="34" width="212" x="232" y="318" />
+    <rect fill="#ffffff" height="68" rx="34" width="148" x="296" y="478" />
+    <rect fill="#ffffff" height="68" rx="34" width="188" x="256" y="638" />
+    <rect fill="#ffffff" height="68" rx="34" width="168" x="580" y="318" />
+    <rect fill="#ffffff" height="68" rx="34" width="128" x="580" y="478" />
+    <rect fill="#62b06f" height="68" id="live" rx="34" width="212" x="580" y="638" />
+  </g>
+</svg>
