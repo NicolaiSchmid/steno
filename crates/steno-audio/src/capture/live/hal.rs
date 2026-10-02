@@ -420,7 +420,7 @@ impl ProcessTap {
         };
         let mut id: Id = UNKNOWN;
         // SAFETY: valid description and out-pointer.
-        let status = unsafe { AudioHardwareCreateProcessTap(Some(&description), &mut id) };
+        let status = unsafe { AudioHardwareCreateProcessTap(Some(&description), &raw mut id) };
         if status != 0 {
             return Err(CaptureError::CoreAudio {
                 operation: "AudioHardwareCreateProcessTap".into(),
@@ -481,10 +481,10 @@ fn ns_str(s: &str) -> Retained<NSObject> {
 }
 fn ns_dict(
     keys: &[Retained<NSString>],
-    values: Vec<Retained<NSObject>>,
+    values: &[Retained<NSObject>],
 ) -> Retained<NSDictionary<NSString, NSObject>> {
     let refs: Vec<&NSString> = keys.iter().map(|k| &**k).collect();
-    NSDictionary::from_retained_objects(&refs, &values)
+    NSDictionary::from_retained_objects(&refs, values)
 }
 
 /// A private aggregate device: the output device as clock master
@@ -525,7 +525,7 @@ impl AggregateDevice {
                         key(kAudioSubDeviceUIDKey),
                         key(kAudioSubDeviceDriftCompensationKey),
                     ],
-                    vec![
+                    &[
                         ns_str(device_uid),
                         ns_bool(device_uid != main_sub_device_uid),
                     ],
@@ -540,7 +540,7 @@ impl AggregateDevice {
                         key(kAudioSubTapUIDKey),
                         key(kAudioSubTapDriftCompensationKey),
                     ],
-                    vec![ns_str(tap_uid), ns_bool(true)],
+                    &[ns_str(tap_uid), ns_bool(true)],
                 ))
             })
             .collect();
@@ -555,7 +555,7 @@ impl AggregateDevice {
                 key(kAudioAggregateDeviceSubDeviceListKey),
                 key(kAudioAggregateDeviceTapListKey),
             ],
-            vec![
+            &[
                 ns_str(name),
                 ns_str(&uid),
                 ns_str(main_sub_device_uid),

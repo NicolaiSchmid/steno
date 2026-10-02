@@ -8,8 +8,10 @@
 //! processes: PipeWire's node graph (WP5b) and WASAPI's session manager
 //! (WP10) fill it in.
 
+#[cfg(not(target_os = "macos"))]
 use std::sync::mpsc::Receiver;
 
+#[cfg(not(target_os = "macos"))]
 use super::activity::{ActivityError, ProcessAudioActivity, ProcessAudioActivitySource};
 
 #[cfg(target_os = "macos")]
@@ -51,8 +53,8 @@ mod macos {
         kAudioProcessPropertyIsRunningOutput, kAudioProcessPropertyPID,
     };
 
-    use super::{ActivityError, ProcessAudioActivity, ProcessAudioActivitySource};
     use crate::capture::live::hal::{self, Id, PropertyListener, SYSTEM};
+    use crate::detection::{ActivityError, ProcessAudioActivity, ProcessAudioActivitySource};
 
     /// Holds the listener registrations of every `changes()` call for as
     /// long as the source lives.
@@ -61,10 +63,11 @@ mod macos {
         registrations: Mutex<Vec<Registration>>,
     }
 
+    /// Kept only for its drop: the listeners unregister with it.
     struct Registration {
-        fixed: Vec<PropertyListener>,
-        devices: Vec<PropertyListener>,
-        sender: Sender<()>,
+        _fixed: Vec<PropertyListener>,
+        _devices: Vec<PropertyListener>,
+        _sender: Sender<()>,
     }
 
     impl std::fmt::Debug for LiveProcessAudioActivity {
@@ -181,9 +184,9 @@ mod macos {
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .push(Registration {
-                    fixed,
-                    devices,
-                    sender,
+                    _fixed: fixed,
+                    _devices: devices,
+                    _sender: sender,
                 });
             receiver
         }

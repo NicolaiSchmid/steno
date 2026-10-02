@@ -139,7 +139,7 @@ impl AudioDevices {
                 .sum(),
             nominal_sample_rate: hal::read_f64(id, kAudioDevicePropertyNominalSampleRate)
                 .unwrap_or(0.0),
-            transport_type: Self::transport_name(transport).to_owned(),
+            transport_type: Self::transport_name(transport),
             is_running_somewhere: hal::read_bool(id, kAudioDevicePropertyDeviceIsRunningSomewhere),
             is_default_input: false,
             is_default_output: false,

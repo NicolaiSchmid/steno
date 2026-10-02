@@ -271,6 +271,9 @@ impl LiveCaptureBackend {
 impl CaptureBackend for LiveCaptureBackend {
     /// Returns the stream it opened: the confirmed 48 kHz rate, both device
     /// latencies for the far-end delay, and the resolved [`StreamLayout`].
+    /// One long function on purpose: it is the Swift `start` step for
+    /// step, and every early return tears down what was created by drop.
+    #[allow(clippy::too_many_lines)]
     fn start(
         &self,
         lanes: &[AudioLane],
@@ -365,7 +368,7 @@ impl CaptureBackend for LiveCaptureBackend {
             callbacks: AtomicU64::new(0),
             frames: AtomicU64::new(0),
         });
-        let context_ptr: *const CallbackContext = &*context;
+        let context_ptr: *const CallbackContext = &raw const *context;
         // SAFETY: `context` is boxed and stored in `Active` beside the
         // `IoProc`, whose drop (stop + destroy) runs before the box is
         // freed by field order below.
@@ -384,23 +387,23 @@ impl CaptureBackend for LiveCaptureBackend {
         // alignment, so both are watched. The listener carries no value,
         // so every notification is judged by resolving the devices again
         // after the burst settles.
-        let mut watched: Vec<(Id, AudioObjectPropertySelector)> = vec![
+        let mut selectors: Vec<(Id, AudioObjectPropertySelector)> = vec![
             (SYSTEM, kAudioHardwarePropertyDefaultSystemOutputDevice),
             (SYSTEM, kAudioHardwarePropertyDefaultOutputDevice),
             (output.id, kAudioDevicePropertyDeviceIsAlive),
             (aggregate.id, kAudioDevicePropertyNominalSampleRate),
         ];
         if let Some(mic) = &mic {
-            watched.push((mic.id, kAudioDevicePropertyDeviceIsAlive));
+            selectors.push((mic.id, kAudioDevicePropertyDeviceIsAlive));
             if input_device_uid.is_none() {
-                watched.push((SYSTEM, kAudioHardwarePropertyDefaultInputDevice));
+                selectors.push((SYSTEM, kAudioHardwarePropertyDefaultInputDevice));
             }
         }
         let watcher = Arc::new(Watcher {
             state: Mutex::new(WatchState::default()),
             condvar: Condvar::new(),
         });
-        let listeners: Vec<PropertyListener> = watched
+        let listeners: Vec<PropertyListener> = selectors
             .into_iter()
             .filter_map(|(object, selector)| {
                 let watcher = Arc::clone(&watcher);
@@ -492,21 +495,21 @@ impl CaptureBackend for LiveCaptureBackend {
         if let Some(thread) = active.watcher_thread.take() {
             let _ = thread.join();
         }
-        // Field drop order of `Active` does the rest: IOProc (stop, destroy)
-        // before the context it reads, then listeners, aggregate, tap.
+        // The teardown order: IOProc (stop, destroy) before the context it
+        // reads, then listeners, aggregate, tap.
         let Active {
-            _io_proc,
-            _context,
-            _listeners,
-            _aggregate,
-            _tap,
+            _io_proc: io_proc,
+            _context: context,
+            _listeners: listeners,
+            _aggregate: aggregate,
+            _tap: tap,
             ..
         } = active;
-        drop(_io_proc);
-        drop(_listeners);
-        drop(_aggregate);
-        drop(_tap);
-        drop(_context);
+        drop(io_proc);
+        drop(listeners);
+        drop(aggregate);
+        drop(tap);
+        drop(context);
     }
 }
 
