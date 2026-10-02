@@ -12,17 +12,16 @@ use std::fmt;
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
 use tauri::{AppHandle, Emitter, EventTarget, Manager, State, Url, WebviewWindow};
-use tauri_plugin_opener::OpenerExt;
 use uuid::Uuid;
 
 use crate::{
-    autostart, dialogs,
+    actions, autostart, dialogs,
     host::Host,
     panels::{self, Panel},
     permissions::{self, PermissionKindParams},
     recording::RecordingState,
     smoke::Smoke,
-    tray, updater,
+    tray,
     windows::{self, BridgeWindow},
 };
 
@@ -88,6 +87,19 @@ impl BridgeError {
     }
 }
 
+/// A window or opener call that failed is `failed` with the error's text.
+impl From<tauri::Error> for BridgeError {
+    fn from(error: tauri::Error) -> Self {
+        Self::failed(error.to_string())
+    }
+}
+
+impl From<tauri_plugin_opener::Error> for BridgeError {
+    fn from(error: tauri_plugin_opener::Error) -> Self {
+        Self::failed(error.to_string())
+    }
+}
+
 /// `invalidParams` for a method whose params did not decode, named after
 /// the method so the page's log says which.
 fn invalid_params_for(method: &str, error: impl fmt::Display) -> BridgeError {
@@ -113,17 +125,14 @@ struct BridgeEvent<'a> {
 pub fn emit(window: &WebviewWindow, topic: &str, payload: Value) -> Result<(), BridgeError> {
     let finished = finishes_onboarding(topic, &payload);
     let recording = recording_state_for_shell(window.label(), topic, &payload);
-    window
-        .emit_to(
-            EventTarget::webview_window(window.label()),
-            EVENT_NAME,
-            BridgeEvent { topic, payload },
-        )
-        .map_err(|error| BridgeError::failed(error.to_string()))?;
+    window.emit_to(
+        EventTarget::webview_window(window.label()),
+        EVENT_NAME,
+        BridgeEvent { topic, payload },
+    )?;
     window.state::<Smoke>().note_snapshot(window.label());
     if finished {
-        windows::close(window.app_handle(), BridgeWindow::Onboarding)
-            .map_err(|error| BridgeError::failed(error.to_string()))?;
+        windows::close(window.app_handle(), BridgeWindow::Onboarding)?;
     }
     if let Some(state) = recording {
         tray::note_recording(window.app_handle(), state);
@@ -323,15 +332,13 @@ pub async fn bridge_call(
         "window.close" => {
             let request: WindowParams = parse(&method, params)?;
             let target = close_target(window.label(), &request)?;
-            windows::close(&app, target).map_err(|error| BridgeError::failed(error.to_string()))?;
+            windows::close(&app, target)?;
             Ok(Value::Null)
         }
         "system.openURL" => {
             let request: OpenUrlParams = parse(&method, params)?;
             let url = openable_url(&request.url)?;
-            app.opener()
-                .open_url(url, None::<&str>)
-                .map_err(|error| BridgeError::failed(error.to_string()))?;
+            dialogs::open_url(&app, url.as_str())?;
             Ok(Value::Null)
         }
         // The OS plumbing the Swift host did inside its view models and
@@ -360,15 +367,14 @@ pub async fn bridge_call(
             Ok(Value::Null)
         }
         "updates.check" => {
-            let handle = app.clone();
-            tauri::async_runtime::spawn(async move { updater::check_and_offer(&handle).await });
+            actions::check_for_updates(&app);
             Ok(Value::Null)
         }
         _ => match dialogs::FolderChooser::for_method(&method) {
             Some(chooser) => {
                 let chosen = dialogs::choose_folder(&window, chooser).await?;
                 if let Some(path) = &chosen {
-                    host.call(&window, &method, dialogs::chosen_path_params(path))?;
+                    host.call(&window, &method, dialogs::chosen_path_reply(Some(path)))?;
                 }
                 Ok(dialogs::chosen_path_reply(chosen.as_deref()))
             }
@@ -396,8 +402,7 @@ pub async fn panel_call(
             let size: ResizeParams = parse(&action, params)?;
             app.state::<Smoke>()
                 .note_panel_size(panel.label(), (size.width, size.height));
-            panels::resize(&app, panel, (size.width, size.height))
-                .map_err(|error| BridgeError::failed(error.to_string()))?;
+            panels::resize(&app, panel, (size.width, size.height))?;
             Ok(Value::Null)
         }
         "dismissPrompt" => {

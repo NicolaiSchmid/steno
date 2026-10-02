@@ -121,25 +121,30 @@ pub async fn check(app: &AppHandle) -> Result<Option<tauri_plugin_updater::Updat
     outcome
 }
 
+/// A one-button message from the updater.
+fn notify(app: &AppHandle, kind: MessageDialogKind, message: impl Into<String>) {
+    app.dialog()
+        .message(message)
+        .title("Steno")
+        .kind(kind)
+        .show(|_| {});
+}
+
 /// The tray's "Check for Updates…": checks, then asks before installing,
 /// as Sparkle's standard driver does, and relaunches when the user agrees.
 pub async fn check_and_offer(app: &AppHandle) {
     let update = match check(app).await {
         Ok(Some(update)) => update,
         Ok(None) => {
-            app.dialog()
-                .message("Steno is up to date.")
-                .title("Steno")
-                .kind(MessageDialogKind::Info)
-                .show(|_| {});
+            notify(app, MessageDialogKind::Info, "Steno is up to date.");
             return;
         }
         Err(message) => {
-            app.dialog()
-                .message(format!("The update check failed: {message}"))
-                .title("Steno")
-                .kind(MessageDialogKind::Error)
-                .show(|_| {});
+            notify(
+                app,
+                MessageDialogKind::Error,
+                format!("The update check failed: {message}"),
+            );
             return;
         }
     };
@@ -166,11 +171,11 @@ pub async fn check_and_offer(app: &AppHandle) {
         Err(error) => {
             app.state::<Updates>()
                 .record(UpdateOutcome::Failed(error.to_string()));
-            app.dialog()
-                .message(format!("The update could not be installed: {error}"))
-                .title("Steno")
-                .kind(MessageDialogKind::Error)
-                .show(|_| {});
+            notify(
+                app,
+                MessageDialogKind::Error,
+                format!("The update could not be installed: {error}"),
+            );
         }
     }
 }

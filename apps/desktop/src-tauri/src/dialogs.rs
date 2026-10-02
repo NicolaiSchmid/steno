@@ -57,17 +57,13 @@ impl FolderChooser {
 }
 
 /// `reply.chosenPath`: `{ "path": … }`, or `{}` when the panel was
-/// cancelled (`ChosenPathReply(path: nil)` encodes without the key).
+/// cancelled (`ChosenPathReply(path: nil)` encodes without the key). The
+/// `Some` shape is also what the host is told.
 pub fn chosen_path_reply(path: Option<&Path>) -> Value {
     match path {
         Some(path) => json!({ "path": path.to_string_lossy() }),
         None => json!({}),
     }
-}
-
-/// What the host is told: the path, as a string.
-pub fn chosen_path_params(path: &Path) -> Value {
-    json!({ "path": path.to_string_lossy() })
 }
 
 /// Shows the folder panel over `window` and waits for the choice off the
@@ -104,17 +100,13 @@ pub async fn choose_folder(
 /// this (`WP6b`).
 #[allow(dead_code)]
 pub fn reveal(app: &AppHandle, path: &Path) -> Result<(), BridgeError> {
-    app.opener()
-        .reveal_item_in_dir(path)
-        .map_err(|error| BridgeError::failed(error.to_string()))
+    Ok(app.opener().reveal_item_in_dir(path)?)
 }
 
 /// Opens a URL the shell itself composed (a settings pane); the page's own
 /// links go through `bridge::openable_url` first.
 pub fn open_url(app: &AppHandle, url: &str) -> Result<(), BridgeError> {
-    app.opener()
-        .open_url(url, None::<&str>)
-        .map_err(|error| BridgeError::failed(error.to_string()))
+    Ok(app.opener().open_url(url, None::<&str>)?)
 }
 
 #[cfg(test)]
@@ -160,6 +152,5 @@ mod tests {
         let path = PathBuf::from(recorded["path"].as_str().unwrap());
         assert_eq!(chosen_path_reply(Some(&path)), recorded);
         assert_eq!(chosen_path_reply(None), json!({}));
-        assert_eq!(chosen_path_params(&path), recorded);
     }
 }

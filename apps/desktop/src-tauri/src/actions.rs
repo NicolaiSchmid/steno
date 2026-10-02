@@ -13,6 +13,7 @@ use tauri::{AppHandle, Manager, WebviewWindow};
 use crate::{
     bridge::BridgeError,
     host::Host,
+    updater,
     windows::{self, BridgeWindow},
 };
 
@@ -52,8 +53,7 @@ pub fn host_window(app: &AppHandle) -> Result<WebviewWindow, BridgeError> {
     if let Some(window) = app.get_webview_window(BridgeWindow::Main.as_str()) {
         return Ok(window);
     }
-    windows::open(app, BridgeWindow::Main, None, None)
-        .map_err(|error| BridgeError::failed(error.to_string()))
+    Ok(windows::open(app, BridgeWindow::Main, None, None)?)
 }
 
 /// Starts (`Some(mode)`) or toggles (`None`) the recorder through the host.
@@ -70,6 +70,13 @@ pub fn open(app: &AppHandle, window: BridgeWindow) {
     if let Err(error) = windows::open(app, window, None, None) {
         eprintln!("[steno-desktop] opening the {window} window failed: {error}");
     }
+}
+
+/// Checks for an update and offers it, off the caller's thread; the
+/// tray's item and `updates.check` from Settings both ask.
+pub fn check_for_updates(app: &AppHandle) {
+    let app = app.clone();
+    tauri::async_runtime::spawn(async move { updater::check_and_offer(&app).await });
 }
 
 /// Ends the process through the run loop, so `ExitRequested` carries a code

@@ -25,7 +25,6 @@ use crate::{
     actions::{self, CaptureMode},
     autostart,
     recording::RecordingState,
-    updater,
     windows::BridgeWindow,
 };
 
@@ -136,20 +135,11 @@ pub struct Tray {
 
 /// Builds the menu and the icon and manages `Tray`.
 pub fn build(app: &AppHandle) -> tauri::Result<()> {
-    let record = MenuItem::with_id(
-        app,
-        MenuAction::Record.id(),
-        MenuAction::Record.label(),
-        true,
-        Some("CmdOrCtrl+Shift+R"),
-    )?;
-    let in_person = MenuItem::with_id(
-        app,
-        MenuAction::RecordInPerson.id(),
-        MenuAction::RecordInPerson.label(),
-        true,
-        None::<&str>,
-    )?;
+    let plain = |action: MenuAction, accelerator: Option<&str>| {
+        MenuItem::with_id(app, action.id(), action.label(), true, accelerator)
+    };
+    let record = plain(MenuAction::Record, Some("CmdOrCtrl+Shift+R"))?;
+    let in_person = plain(MenuAction::RecordInPerson, None)?;
     let launch_at_login = CheckMenuItem::with_id(
         app,
         MenuAction::LaunchAtLogin.id(),
@@ -158,9 +148,6 @@ pub fn build(app: &AppHandle) -> tauri::Result<()> {
         autostart::status(app).is_on(),
         None::<&str>,
     )?;
-    let plain = |action: MenuAction, accelerator: Option<&str>| {
-        MenuItem::with_id(app, action.id(), action.label(), true, accelerator)
-    };
     let menu = Menu::with_items(
         app,
         &[
@@ -245,10 +232,7 @@ fn on_menu_event(app: &AppHandle, event: &MenuEvent) {
             }
             note_login_item(app);
         }
-        MenuAction::CheckForUpdates => {
-            let app = app.clone();
-            tauri::async_runtime::spawn(async move { updater::check_and_offer(&app).await });
-        }
+        MenuAction::CheckForUpdates => actions::check_for_updates(app),
         MenuAction::Quit => actions::quit(app),
     }
 }
