@@ -1,0 +1,319 @@
+/*
+ * Steno landing page tokens, after t3.codes (pingdotgg/t3code,
+ * apps/marketing/src/layouts/Layout.astro): a dark-only page on #09090b with
+ * a five-step neutral text ladder, hairline borders at 8 and 14 % white,
+ * radii 16 / 12 / 8 and a 0.18 s functional tempo. Hue is spent on exactly
+ * one thing, the red live state, as in the app
+ * (.plans/2026-10-02-neutral-accent.md).
+ */
+@import "tailwindcss";
+
+:root {
+	color-scheme: dark;
+
+	--bg: #09090b;
+	--bg-elev: #0c0c0e;
+	--bg-card: #111113;
+	--fg: #fafafa;
+	--fg-muted: #a1a1aa;
+	--fg-dim: #71717a;
+	--fg-faint: #52525b;
+	--border: rgba(255, 255, 255, 0.08);
+	--border-strong: rgba(255, 255, 255, 0.14);
+
+	--live: #ef4444;
+	--live-text: #f87171;
+	--live-dim: rgba(239, 68, 68, 0.15);
+	--ok: oklch(0.72 0.16 150);
+	--ok-dim: oklch(0.72 0.16 150 / 0.15);
+	--warn: oklch(0.76 0.15 75);
+
+	--p1: #fb7185;
+	--p2: #fbbf24;
+	--p3: #34d399;
+	--p4: #818cf8;
+
+	--ease-out: cubic-bezier(0.2, 0.7, 0.2, 1);
+}
+
+@theme inline {
+	--color-*: initial;
+	--color-bg: var(--bg);
+	--color-bg-elev: var(--bg-elev);
+	--color-bg-card: var(--bg-card);
+	--color-fg: var(--fg);
+	--color-fg-muted: var(--fg-muted);
+	--color-fg-dim: var(--fg-dim);
+	--color-fg-faint: var(--fg-faint);
+	--color-border: var(--border);
+	--color-border-strong: var(--border-strong);
+	--color-live: var(--live);
+	--color-live-text: var(--live-text);
+	--color-live-dim: var(--live-dim);
+	--color-ok: var(--ok);
+	--color-ok-dim: var(--ok-dim);
+	--color-warn: var(--warn);
+	--color-p1: var(--p1);
+	--color-p2: var(--p2);
+	--color-p3: var(--p3);
+	--color-p4: var(--p4);
+	--color-white: #ffffff;
+	--color-black: #000000;
+
+	--font-sans:
+		var(--font-dm-sans), -apple-system, BlinkMacSystemFont, system-ui,
+		sans-serif;
+	--font-mono:
+		var(--font-jetbrains-mono), ui-monospace, SFMono-Regular, Menlo, Monaco,
+		monospace;
+
+	--radius-*: initial;
+	--radius-xs: 4px;
+	--radius-sm: 8px;
+	--radius-md: 10px;
+	--radius-lg: 12px;
+	--radius-xl: 16px;
+	--radius-full: 9999px;
+
+	--shadow-*: initial;
+	--shadow-frame: 0 28px 64px -28px rgba(0, 0, 0, 0.75);
+	--shadow-button: 0 8px 24px -8px rgba(255, 255, 255, 0.2);
+	--shadow-card:
+		0 20px 48px -16px rgba(0, 0, 0, 0.65),
+		inset 0 2px 0 0 rgba(255, 255, 255, 0.04);
+
+	--ease-out: var(--ease-out);
+
+	--animate-live-pulse: live-pulse 2s infinite;
+	--animate-blink: blink 1s steps(2) infinite;
+
+	/* Duty-cycled steps, as in the app: never a continuous repaint. */
+	@keyframes live-pulse {
+		0%,
+		40% {
+			opacity: 1;
+			animation-timing-function: steps(6);
+		}
+		50%,
+		90% {
+			opacity: 0.5;
+			animation-timing-function: steps(6);
+		}
+		100% {
+			opacity: 1;
+		}
+	}
+
+	@keyframes blink {
+		50% {
+			opacity: 0;
+		}
+	}
+}
+
+/* The hero's faint 48 px grid, masked to an ellipse behind the headline. */
+@utility bg-hero-grid {
+	background-image:
+		linear-gradient(to right, rgba(255, 255, 255, 0.035) 1px, transparent 1px),
+		linear-gradient(to bottom, rgba(255, 255, 255, 0.035) 1px, transparent 1px);
+	background-size: 48px 48px;
+	mask-image: radial-gradient(
+		ellipse 80% 60% at 50% 40%,
+		black 40%,
+		transparent 100%
+	);
+}
+
+/* The tile surface: hairline border over a 1.5 % top-lit gradient. */
+@utility tile {
+	position: relative;
+	overflow: hidden;
+	border: 1px solid var(--border);
+	border-radius: 12px;
+	background: linear-gradient(
+		180deg,
+		rgba(255, 255, 255, 0.015),
+		rgba(255, 255, 255, 0)
+	);
+}
+
+@layer base {
+	html {
+		scroll-behavior: smooth;
+		scroll-padding-top: 72px;
+	}
+
+	body {
+		margin: 0;
+		min-height: 100vh;
+		overflow-x: hidden;
+		background: var(--bg);
+		color: var(--fg);
+		font-family: var(--font-sans);
+		font-feature-settings: "ss01", "ss02";
+		line-height: 1.5;
+		-webkit-font-smoothing: antialiased;
+		-moz-osx-font-smoothing: grayscale;
+	}
+
+	/* The grain over everything, so flat colour does not band. Inline SVG. */
+	body::after {
+		content: "";
+		position: fixed;
+		inset: 0;
+		z-index: 9999;
+		pointer-events: none;
+		opacity: 0.035;
+		background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+		background-repeat: repeat;
+		background-size: 256px 256px;
+	}
+
+	a {
+		color: inherit;
+		text-decoration: none;
+	}
+
+	button {
+		font: inherit;
+		color: inherit;
+		cursor: pointer;
+		border: 0;
+		background: none;
+	}
+
+	img,
+	svg {
+		display: block;
+		max-width: 100%;
+	}
+
+	* {
+		border-color: var(--border);
+	}
+
+	:focus-visible {
+		outline: 2px solid var(--fg-muted);
+		outline-offset: 2px;
+		border-radius: 4px;
+	}
+
+	/* Page-load sequence: [data-rise] plays once with delay --d. */
+	@keyframes rise {
+		from {
+			opacity: 0;
+			transform: translateY(16px);
+		}
+		to {
+			opacity: 1;
+			transform: none;
+		}
+	}
+	[data-rise] {
+		animation: rise 0.7s var(--ease-out) both;
+		animation-delay: var(--d, 0ms);
+	}
+
+	@media (prefers-reduced-motion: reduce) {
+		html {
+			scroll-behavior: auto;
+		}
+		[data-rise] {
+			animation: none;
+		}
+		*,
+		*::before,
+		*::after {
+			animation-duration: 0.01ms !important;
+			animation-iteration-count: 1 !important;
+			transition-duration: 0.01ms !important;
+		}
+	}
+}
+
+@layer components {
+	/* The mono eyebrow above a heading. */
+	.eyebrow {
+		display: block;
+		font-family: var(--font-mono);
+		font-size: 11px;
+		font-weight: 500;
+		letter-spacing: 0.14em;
+		text-transform: uppercase;
+		color: var(--fg-dim);
+	}
+
+	/* Display type: headings and the closing statement. */
+	.display {
+		font-weight: 500;
+		letter-spacing: -0.035em;
+		line-height: 1.05;
+	}
+
+	/* Buttons: one footprint, two fills, one size step. */
+	.btn {
+		display: inline-flex;
+		align-items: center;
+		justify-content: center;
+		gap: 8px;
+		padding: 10px 18px;
+		border-radius: 8px;
+		font-size: 14px;
+		font-weight: 500;
+		white-space: nowrap;
+		transition:
+			transform 0.18s ease,
+			background 0.18s ease,
+			border-color 0.18s ease,
+			color 0.18s ease;
+	}
+	.btn-primary {
+		background: var(--fg);
+		color: var(--bg);
+		font-weight: 600;
+	}
+	.btn-primary:hover {
+		transform: translateY(-1px);
+		background: #ffffff;
+	}
+	.btn-primary:active {
+		transform: translateY(0);
+	}
+	.btn-ghost {
+		color: var(--fg-muted);
+		border: 1px solid var(--border);
+		background: transparent;
+	}
+	.btn-ghost:hover {
+		color: var(--fg);
+		border-color: var(--border-strong);
+		background: rgba(255, 255, 255, 0.02);
+	}
+	.btn-lg {
+		padding: 14px 22px;
+		border-radius: 10px;
+		font-size: 15px;
+	}
+
+	/* The sticky nav: blur over the canvas, a hairline once scrolled. */
+	.nav-glass {
+		background: color-mix(in srgb, var(--bg) 75%, transparent);
+		-webkit-backdrop-filter: blur(18px);
+		backdrop-filter: blur(18px);
+	}
+
+	/* The 1180 px screenshot frame leans back 2° and stands up on hover. */
+	.hero-preview {
+		transform: perspective(2000px) rotateX(2deg);
+		transition: transform 0.6s ease;
+	}
+	.hero-preview:hover {
+		transform: perspective(2000px) rotateX(0deg);
+	}
+	@media (prefers-reduced-motion: reduce) {
+		.hero-preview,
+		.hero-preview:hover {
+			transform: none;
+		}
+	}
+}

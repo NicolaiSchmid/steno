@@ -1,0 +1,33 @@
+# The JavaScript workspace, laid out like pingdotgg/t3code: apps under apps/*
+# share one lockfile at the repository root.
+#
+# Two packages stay out of it on purpose and carry their own
+# pnpm-workspace.yaml (a file without a `packages` key marks a standalone
+# project, so pnpm stops walking up when run inside them):
+#   - mobile/          EAS builds install from that directory and the Expo
+#                      native fingerprint is computed there.
+#   - apps/macos/web/  scripts/build-web.sh installs it inside the Xcode build
+#                      on a machine that has no reason to install the rest.
+# Moving either in here is a plan of its own.
+packages:
+  - apps/site
+
+# pnpm 11 holds back very new releases by default; the versions the site was
+# scaffolded with are allowed explicitly so a fresh install reproduces the
+# lockfile.
+minimumReleaseAgeExclude:
+  - '@biomejs/biome@2.5.15'
+  - '@biomejs/cli-darwin-arm64@2.5.15'
+  - '@biomejs/cli-darwin-x64@2.5.15'
+  - '@biomejs/cli-linux-arm64-musl@2.5.15'
+  - '@biomejs/cli-linux-arm64@2.5.15'
+  - '@biomejs/cli-linux-x64-musl@2.5.15'
+  - '@biomejs/cli-linux-x64@2.5.15'
+  - '@biomejs/cli-win32-arm64@2.5.15'
+  - '@biomejs/cli-win32-x64@2.5.15'
+  - lucide-react@1.49.0
+
+# pnpm 11 requires dependency build scripts to be approved explicitly.
+allowBuilds:
+  '@biomejs/biome': true
+  sharp: true

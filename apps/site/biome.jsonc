@@ -1,0 +1,65 @@
+{
+	"$schema": "./node_modules/@biomejs/biome/configuration_schema.json",
+	"root": true,
+	"vcs": {
+		"enabled": true,
+		"useIgnoreFile": true,
+		"clientKind": "git"
+	},
+	"assist": {
+		"enabled": true,
+		"actions": {
+			"preset": "recommended",
+			"source": {
+				"preset": "recommended",
+				"organizeImports": "on",
+				"useSortedAttributes": "on"
+			}
+		}
+	},
+	"formatter": {
+		"enabled": true
+	},
+	"css": {
+		"parser": {
+			// globals.css uses Tailwind v4 at-rules (@theme, @utility).
+			"tailwindDirectives": true
+		}
+	},
+	"files": {
+		"includes": [
+			"**",
+			"!.next",
+			"!out",
+			"!pnpm-lock.yaml",
+			"!next-env.d.ts",
+			"!src/app/icon.svg"
+		]
+	},
+	"linter": {
+		"enabled": true,
+		"rules": {
+			"preset": "recommended",
+			"nursery": {
+				"useSortedClasses": {
+					"level": "warn",
+					"fix": "safe",
+					"options": {
+						"functions": ["clsx", "cn", "cva"]
+					}
+				}
+			}
+		}
+	},
+	"overrides": [
+		{
+			// The prefers-reduced-motion reset must beat every transition.
+			"includes": ["src/app/globals.css"],
+			"linter": {
+				"rules": {
+					"complexity": { "noImportantStyles": "off" }
+				}
+			}
+		}
+	]
+}
