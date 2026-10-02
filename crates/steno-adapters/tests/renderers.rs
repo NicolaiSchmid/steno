@@ -81,6 +81,25 @@ fn folder_note_body_has_title_info_line_summary_decisions_and_scratchpad() {
 }
 
 #[test]
+fn the_info_line_end_adds_the_raw_duration_like_swift() {
+    let mut export = export();
+    export.meeting.duration = 5399.9995;
+    let note = renderer().render_folder_note(&export, &wikilink(), None);
+    assert!(
+        note.contains("\n2026-09-24 14:00–15:29 · 1 h 30 min · "),
+        "half a millisecond under the boundary stays at 15:29, not rounded onto 15:30: {note}"
+    );
+    for duration in [-5.0, f64::NAN, f64::INFINITY, 1e300] {
+        export.meeting.duration = duration;
+        let note = renderer().render_folder_note(&export, &wikilink(), None);
+        assert!(
+            note.contains("\n2026-09-24 14:00–14:00 · "),
+            "{duration}: nothing is added: {note}"
+        );
+    }
+}
+
+#[test]
 fn plain_style_links_nothing_and_uses_markdown_links_for_the_notes() {
     let note = renderer().render_folder_note(&export(), &plain(), None);
     assert!(!note.contains("[["));

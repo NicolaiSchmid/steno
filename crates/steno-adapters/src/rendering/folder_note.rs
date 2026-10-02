@@ -5,8 +5,8 @@
 use steno_core::{MeetingExport, MeetingSource, summary};
 
 use super::{
-    ArtifactRenderer, Frontmatter, FrontmatterValue, LinkStyle, Names, RenderOptions, Timecode,
-    date_text, markdown_text,
+    ArtifactRenderer, Frontmatter, FrontmatterValue, LinkStyle, Names, RenderOptions, date_text,
+    markdown_text,
 };
 use crate::naming::{MeetingFolder, Note};
 
@@ -103,7 +103,15 @@ impl FolderNoteRenderer<'_> {
     pub fn info_line(&self) -> String {
         let meeting = &self.export.meeting;
         let start = meeting.started_at;
-        let end = start + chrono::Duration::milliseconds(Timecode::milliseconds(meeting.duration));
+        // The raw seconds, as Swift's `addingTimeInterval(max(0, duration))`:
+        // rounding to milliseconds first would move an end a hair under a
+        // minute boundary onto it. Negative, NaN and absurd durations add
+        // nothing.
+        let end = start
+            + std::time::Duration::try_from_secs_f64(meeting.duration)
+                .ok()
+                .and_then(|duration| chrono::Duration::from_std(duration).ok())
+                .unwrap_or_default();
         let links = match self.options.link_style {
             LinkStyle::Wikilink => [
                 markdown_text::wikilink(
