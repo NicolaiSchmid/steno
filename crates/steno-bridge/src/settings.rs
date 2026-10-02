@@ -6,15 +6,16 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::envelope::{BridgeTopic, PermissionKind, PermissionState, string_enum};
+use crate::envelope::{BridgeTopic, PermissionKind, PermissionState};
 use crate::json;
 use crate::snapshots::Snapshot;
+use crate::string_enum::string_enum;
 
 // settings.general
 
 string_enum! {
     /// Swift: `GeneralSettingsSnapshot.LoginItem`.
-    pub enum LoginItem {
+    pub enum GeneralLoginItem {
         NotRegistered = "notRegistered",
         Enabled = "enabled",
         RequiresApproval = "requiresApproval",
@@ -24,7 +25,7 @@ string_enum! {
 
 string_enum! {
     /// Swift: `GeneralSettingsSnapshot.Updates.Outcome`.
-    pub enum UpdatesOutcome {
+    pub enum GeneralUpdatesOutcome {
         NotChecked = "notChecked",
         UpToDate = "upToDate",
         Available = "available",
@@ -35,7 +36,7 @@ string_enum! {
 /// Swift: `GeneralSettingsSnapshot.Updates`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct Updates {
+pub struct GeneralUpdates {
     pub can_check: bool,
     pub automatically_checks: bool,
     pub automatically_downloads: bool,
@@ -45,7 +46,7 @@ pub struct Updates {
         with = "json::date::option"
     )]
     pub last_check_at: Option<DateTime<Utc>>,
-    pub outcome: UpdatesOutcome,
+    pub outcome: GeneralUpdatesOutcome,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub detail: Option<String>,
 }
@@ -53,7 +54,7 @@ pub struct Updates {
 /// A summary template with the sentence shown under the picker.
 /// Swift: `GeneralSettingsSnapshot.Template`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SettingsTemplate {
+pub struct GeneralTemplate {
     pub id: String,
     pub name: String,
     pub description: String,
@@ -61,7 +62,7 @@ pub struct SettingsTemplate {
 
 string_enum! {
     /// Swift: `GeneralSettingsSnapshot.Acknowledgement.Group`.
-    pub enum AcknowledgementGroup {
+    pub enum GeneralAcknowledgementGroup {
         SpeechModels = "speechModels",
         Libraries = "libraries",
     }
@@ -70,8 +71,8 @@ string_enum! {
 /// One line of the Acknowledgements dialog. Swift:
 /// `GeneralSettingsSnapshot.Acknowledgement`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Acknowledgement {
-    pub group: AcknowledgementGroup,
+pub struct GeneralAcknowledgement {
+    pub group: GeneralAcknowledgementGroup,
     pub name: String,
     pub licence: String,
     pub source: String,
@@ -83,15 +84,15 @@ pub struct Acknowledgement {
 pub struct GeneralSettingsSnapshot {
     pub subtitle: String,
     pub version: String,
-    pub login_item: LoginItem,
+    pub login_item: GeneralLoginItem,
     pub detection_enabled: bool,
     #[serde(rename = "defaultTemplateID")]
     pub default_template_id: String,
-    pub templates: Vec<SettingsTemplate>,
+    pub templates: Vec<GeneralTemplate>,
     pub calendar_permission: PermissionState,
     pub requesting_calendar: bool,
-    pub updates: Updates,
-    pub acknowledgements: Vec<Acknowledgement>,
+    pub updates: GeneralUpdates,
+    pub acknowledgements: Vec<GeneralAcknowledgement>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -106,13 +107,13 @@ impl Snapshot for GeneralSettingsSnapshot {
 
 /// Swift: `RecordingSettingsSnapshot.Device`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct InputDevice {
+pub struct RecordingDevice {
     pub uid: String,
     pub name: String,
 }
 
 string_enum! {
-    /// Swift: `AudioRetention.Kind` (`RecordingSettingsSnapshot.Retention.Mode`).
+    /// Swift: `RecordingSettingsSnapshot.Retention.Mode`.
     pub enum RetentionMode {
         DeleteAfterProcessing = "deleteAfterProcessing",
         KeepDays = "keepDays",
@@ -122,7 +123,7 @@ string_enum! {
 
 /// Swift: `RecordingSettingsSnapshot.Retention`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Retention {
+pub struct RecordingRetention {
     pub mode: RetentionMode,
     pub days: i64,
 }
@@ -139,7 +140,7 @@ pub struct RecordingPermission {
 string_enum! {
     /// Whether `folder_usage_bytes` is a figure, still being measured, or
     /// could not be measured. Swift: `RecordingSettingsSnapshot.FolderUsage`.
-    pub enum FolderUsage {
+    pub enum RecordingFolderUsage {
         Measuring = "measuring",
         Measured = "measured",
         Unavailable = "unavailable",
@@ -151,7 +152,7 @@ string_enum! {
 #[serde(rename_all = "camelCase")]
 pub struct RecordingSettingsSnapshot {
     pub subtitle: String,
-    pub devices: Vec<InputDevice>,
+    pub devices: Vec<RecordingDevice>,
     /// Absent means the system default input.
     #[serde(
         rename = "inputDeviceUID",
@@ -161,10 +162,10 @@ pub struct RecordingSettingsSnapshot {
     pub input_device_uid: Option<String>,
     pub audio_folder_path: String,
     pub audio_folder_name: String,
-    pub folder_usage: FolderUsage,
+    pub folder_usage: RecordingFolderUsage,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub folder_usage_bytes: Option<i64>,
-    pub retention: Retention,
+    pub retention: RecordingRetention,
     /// The sentence under the retention picker for the current rule.
     pub retention_footnote: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -184,14 +185,14 @@ impl Snapshot for RecordingSettingsSnapshot {
 
 /// Swift: `TranscriptionSettingsSnapshot.Engine`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Engine {
+pub struct TranscriptionEngine {
     pub id: String,
     pub name: String,
 }
 
 string_enum! {
     /// Swift: `TranscriptionSettingsSnapshot.Asset.State`.
-    pub enum AssetState {
+    pub enum TranscriptionAssetState {
         Absent = "absent",
         Downloading = "downloading",
         Installed = "installed",
@@ -202,11 +203,11 @@ string_enum! {
 /// Swift: `TranscriptionSettingsSnapshot.Asset`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct Asset {
+pub struct TranscriptionAsset {
     pub id: String,
     pub name: String,
     pub detail: String,
-    pub state: AssetState,
+    pub state: TranscriptionAssetState,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub download_fraction: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -224,9 +225,9 @@ pub struct TranscriptionSettingsSnapshot {
     pub subtitle: String,
     #[serde(rename = "engineID")]
     pub engine_id: String,
-    pub engines: Vec<Engine>,
+    pub engines: Vec<TranscriptionEngine>,
     pub shows_engine_picker: bool,
-    pub assets: Vec<Asset>,
+    pub assets: Vec<TranscriptionAsset>,
     pub all_installed: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
@@ -243,7 +244,7 @@ impl Snapshot for TranscriptionSettingsSnapshot {
 /// Swift: `SummariesSettingsSnapshot.Preset`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct Preset {
+pub struct SummariesPreset {
     pub id: String,
     pub title: String,
     #[serde(rename = "needsAPIKey")]
@@ -254,14 +255,14 @@ pub struct Preset {
 
 /// Swift: `SummariesSettingsSnapshot.TestResult`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct TestResult {
+pub struct SummariesTestResult {
     pub ok: bool,
     pub message: String,
 }
 
 string_enum! {
     /// Swift: `SummariesSettingsSnapshot.Codex.SignIn`.
-    pub enum CodexSignIn {
+    pub enum SummariesCodexSignIn {
         NotChecked = "notChecked",
         SignedIn = "signedIn",
         Unavailable = "unavailable",
@@ -270,7 +271,7 @@ string_enum! {
 
 /// Swift: `SummariesSettingsSnapshot.Codex.Model`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct CodexModel {
+pub struct SummariesCodexModel {
     pub slug: String,
     pub name: String,
 }
@@ -280,15 +281,15 @@ pub struct CodexModel {
 /// that preset is selected. Swift: `SummariesSettingsSnapshot.Codex`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct Codex {
+pub struct SummariesCodex {
     pub confirmed: bool,
-    pub sign_in: CodexSignIn,
+    pub sign_in: SummariesCodexSignIn,
     /// The account line while signed in; the reason while unavailable.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sign_in_detail: Option<String>,
     /// The picked model slug; empty until the list arrives or the user picks.
     pub model: String,
-    pub models: Vec<CodexModel>,
+    pub models: Vec<SummariesCodexModel>,
     pub is_loading_models: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub models_error: Option<String>,
@@ -299,7 +300,7 @@ pub struct Codex {
 #[serde(rename_all = "camelCase")]
 pub struct SummariesSettingsSnapshot {
     pub subtitle: String,
-    pub presets: Vec<Preset>,
+    pub presets: Vec<SummariesPreset>,
     #[serde(rename = "presetID")]
     pub preset_id: String,
     #[serde(rename = "baseURL")]
@@ -312,11 +313,11 @@ pub struct SummariesSettingsSnapshot {
     pub is_configured: bool,
     pub is_testing: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub test_result: Option<TestResult>,
+    pub test_result: Option<SummariesTestResult>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub validation_message: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub codex: Option<Codex>,
+    pub codex: Option<SummariesCodex>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -376,7 +377,7 @@ pub struct PhoneDevice {
 
 string_enum! {
     /// Swift: `PhoneSettingsSnapshot.Listener.State`.
-    pub enum ListenerState {
+    pub enum PhoneListenerState {
         Unavailable = "unavailable",
         Stopped = "stopped",
         Starting = "starting",
@@ -387,8 +388,8 @@ string_enum! {
 
 /// Swift: `PhoneSettingsSnapshot.Listener`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Listener {
-    pub state: ListenerState,
+pub struct PhoneListener {
+    pub state: PhoneListenerState,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub port: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -398,7 +399,7 @@ pub struct Listener {
 /// Swift: `PhoneSettingsSnapshot.Pairing`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct Pairing {
+pub struct PhonePairing {
     #[serde(with = "json::date")]
     pub expires_at: DateTime<Utc>,
     /// The QR code as a base64 PNG; the page draws it in an `img`.
@@ -409,7 +410,7 @@ pub struct Pairing {
 /// Swift: `PhoneSettingsSnapshot.Receipt`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct Receipt {
+pub struct PhoneReceipt {
     #[serde(rename = "deviceID", with = "json::uuid")]
     pub device_id: Uuid,
     #[serde(rename = "recordingID", with = "json::uuid")]
@@ -427,10 +428,10 @@ pub struct PhoneSettingsSnapshot {
     #[serde(rename = "macID", default, skip_serializing_if = "Option::is_none")]
     pub mac_id: Option<String>,
     pub devices: Vec<PhoneDevice>,
-    pub listener: Listener,
+    pub listener: PhoneListener,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub pairing: Option<Pairing>,
-    pub receipts: Vec<Receipt>,
+    pub pairing: Option<PhonePairing>,
+    pub receipts: Vec<PhoneReceipt>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

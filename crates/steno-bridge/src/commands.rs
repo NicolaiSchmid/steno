@@ -5,10 +5,11 @@
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::envelope::{BridgeWindow, CaptureMode, PermissionKind, SettingsSection, string_enum};
+use crate::envelope::{BridgeWindow, CaptureMode, PermissionKind, SettingsSection};
 use crate::json;
-use crate::settings::Retention;
-use crate::snapshots::{DetailTab, ListFilter, SetupStepKind};
+use crate::settings::RecordingRetention;
+use crate::snapshots::{DetailTab, ListFilter, OnboardingSetupStepKind};
+use crate::string_enum::string_enum;
 
 /// Swift: `PageLayoutParams`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -153,7 +154,7 @@ pub struct StartRecordingParams {
 /// Swift: `SetRetentionParams`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SetRetentionParams {
-    pub retention: Retention,
+    pub retention: RecordingRetention,
 }
 
 /// Swift: `PermissionKindParams`.
@@ -215,7 +216,7 @@ pub struct DeviceIdParams {
 /// Swift: `SetupStepParams`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SetupStepParams {
-    pub step: SetupStepKind,
+    pub step: OnboardingSetupStepKind,
 }
 
 /// Swift: `OpenURLParams`.

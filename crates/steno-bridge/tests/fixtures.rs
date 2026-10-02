@@ -1,9 +1,8 @@
-//! Invariant 1 of `.plans/2026-10-02-rust-core-and-tauri-shell.md`: every
-//! fixture in `apps/macos/web/fixtures/bridge/` decodes into its Rust type and
-//! re-encodes byte for byte. The mapping from file name to type mirrors
-//! `BridgeSamples.fixtures` in `Sources/StenoBridge/BridgeSamples.swift`;
-//! `contract.ts` is checked for topics, methods and error codes the crate
-//! does not know.
+//! Every fixture in `apps/macos/web/fixtures/bridge/` decodes into its Rust
+//! type and re-encodes byte for byte. The mapping from file name to type
+//! mirrors `BridgeSamples.fixtures` in `Sources/StenoBridge/BridgeSamples.swift`;
+//! `contract.ts` is checked for every string enum the crate spells, top level
+//! and nested. Plan: `.plans/2026-10-02-rust-core-and-tauri-shell.md`.
 
 use std::collections::BTreeSet;
 use std::fs;
@@ -208,18 +207,28 @@ fn every_topic_has_a_snapshot_fixture() {
     }
 }
 
-/// The string literals of `export const <name> = [ ... ] as const;` in
-/// `contract.ts`, or of the first `z.enum([ ... ])` inside `export const <name> = ...`.
-fn contract_ts_strings(name: &str) -> Vec<String> {
+/// The string literals of one list in `contract.ts`, found by walking the
+/// anchors in order: the last anchor ends in the list's `[`, the earlier ones
+/// narrow the search to the right declaration (`export const
+/// recordingSnapshot = z`, then `state: z.enum([`). Both spellings the file
+/// uses, `export const bridgeTopics = [` and `export const listFilter = z.enum([`,
+/// are anchors in this sense.
+fn contract_ts_strings(anchors: &[&str]) -> Vec<String> {
     let path = repository_root().join("apps/macos/web/src/bridge/contract.ts");
     let source = fs::read_to_string(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
-    let start = source
-        .find(&format!("export const {name} "))
-        .unwrap_or_else(|| panic!("contract.ts has no `export const {name}`"));
-    let rest = &source[start..];
-    let open = rest.find('[').expect("a list after the declaration");
-    let close = rest[open..].find(']').expect("the list closes") + open;
-    rest[open + 1..close]
+    let mut rest = source.as_str();
+    for anchor in anchors {
+        let at = rest
+            .find(anchor)
+            .unwrap_or_else(|| panic!("contract.ts has no `{anchor}` after {anchors:?}"));
+        rest = &rest[at + anchor.len()..];
+    }
+    assert!(
+        anchors.last().is_some_and(|last| last.ends_with('[')),
+        "the last anchor opens the list: {anchors:?}"
+    );
+    let close = rest.find(']').expect("the list closes");
+    rest[..close]
         .split('"')
         .skip(1)
         .step_by(2)
@@ -227,42 +236,137 @@ fn contract_ts_strings(name: &str) -> Vec<String> {
         .collect()
 }
 
+/// `export const <name> = [` or `export const <name> = z.enum([`.
+fn top_level(name: &str) -> Vec<String> {
+    let path = repository_root().join("apps/macos/web/src/bridge/contract.ts");
+    let source = fs::read_to_string(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+    let plain = format!("export const {name} = [");
+    let zod = format!("export const {name} = z.enum([");
+    if source.contains(&plain) {
+        contract_ts_strings(&[&plain])
+    } else {
+        contract_ts_strings(&[&zod])
+    }
+}
+
 #[test]
 fn contract_ts_topics_methods_and_error_codes_match() {
-    assert_eq!(contract_ts_strings("bridgeTopics"), raw(BridgeTopic::ALL));
-    assert_eq!(contract_ts_strings("bridgeMethods"), raw(BridgeMethod::ALL));
+    assert_eq!(top_level("bridgeTopics"), raw(BridgeTopic::ALL));
+    assert_eq!(top_level("bridgeMethods"), raw(BridgeMethod::ALL));
     assert_eq!(
-        contract_ts_strings("bridgeError"),
+        contract_ts_strings(&["export const bridgeError = z", "code: z.enum(["]),
         raw(BridgeErrorCode::ALL)
     );
 }
 
 #[test]
 fn contract_ts_shared_vocabulary_matches() {
+    assert_eq!(top_level("permissionKind"), raw(PermissionKind::ALL));
+    assert_eq!(top_level("permissionState"), raw(PermissionState::ALL));
+    assert_eq!(top_level("settingsSection"), raw(SettingsSection::ALL));
+    assert_eq!(top_level("bridgeWindow"), raw(BridgeWindow::ALL));
+    assert_eq!(top_level("meetingSource"), raw(MeetingSource::ALL));
+    assert_eq!(top_level("meetingState"), raw(MeetingState::ALL));
+    assert_eq!(top_level("captureMode"), raw(CaptureMode::ALL));
+    assert_eq!(top_level("listFilter"), raw(ListFilter::ALL));
+    assert_eq!(top_level("detailTab"), raw(DetailTab::ALL));
+    assert_eq!(top_level("retentionMode"), raw(RetentionMode::ALL));
+}
+
+/// The `z.enum` lists nested in a snapshot or params schema, against the
+/// Rust enum the matching field uses; a new case on either side fails here.
+#[test]
+fn contract_ts_nested_enums_match() {
+    let nested = |anchors: &[&str]| contract_ts_strings(anchors);
     assert_eq!(
-        contract_ts_strings("permissionKind"),
-        raw(PermissionKind::ALL)
+        nested(&["export const recordingSnapshot = z", "state: z.enum(["]),
+        raw(RecordingState::ALL)
+    );
+    let detail = "export const meetingDetailSnapshot = z";
+    assert_eq!(
+        nested(&[detail, "retention: z", "kind: z.enum(["]),
+        raw(DetailRetentionKind::ALL)
     );
     assert_eq!(
-        contract_ts_strings("permissionState"),
-        raw(PermissionState::ALL)
+        nested(&[detail, "speakers: z.array(", "assignment: z.enum(["]),
+        raw(SpeakerAssignment::ALL)
     );
     assert_eq!(
-        contract_ts_strings("settingsSection"),
-        raw(SettingsSection::ALL)
+        nested(&[detail, "summaryStatus: z", "kind: z.enum(["]),
+        raw(DetailSummaryStatusKind::ALL)
     );
-    assert_eq!(contract_ts_strings("bridgeWindow"), raw(BridgeWindow::ALL));
     assert_eq!(
-        contract_ts_strings("meetingSource"),
-        raw(MeetingSource::ALL)
+        nested(&[detail, "tasks: z.array(", "priority: z.enum(["]),
+        raw(TaskPriority::ALL)
     );
-    assert_eq!(contract_ts_strings("meetingState"), raw(MeetingState::ALL));
-    assert_eq!(contract_ts_strings("captureMode"), raw(CaptureMode::ALL));
-    assert_eq!(contract_ts_strings("listFilter"), raw(ListFilter::ALL));
-    assert_eq!(contract_ts_strings("detailTab"), raw(DetailTab::ALL));
     assert_eq!(
-        contract_ts_strings("retentionMode"),
-        raw(RetentionMode::ALL)
+        nested(&[detail, "export: z", "status: z.enum(["]),
+        raw(DetailExportStatus::ALL)
+    );
+    assert_eq!(
+        nested(&["export const acknowledgement = z", "group: z.enum(["]),
+        raw(GeneralAcknowledgementGroup::ALL)
+    );
+    let general = "export const generalSettingsSnapshot = z";
+    assert_eq!(
+        nested(&[general, "loginItem: z.enum(["]),
+        raw(GeneralLoginItem::ALL)
+    );
+    assert_eq!(
+        nested(&[general, "updates: z", "outcome: z.enum(["]),
+        raw(GeneralUpdatesOutcome::ALL)
+    );
+    assert_eq!(
+        nested(&[
+            "export const recordingSettingsSnapshot = z",
+            "folderUsage: z.enum(["
+        ]),
+        raw(RecordingFolderUsage::ALL)
+    );
+    assert_eq!(
+        nested(&[
+            "export const transcriptionSettingsSnapshot = z",
+            "assets: z.array(",
+            "state: z.enum(["
+        ]),
+        raw(TranscriptionAssetState::ALL)
+    );
+    assert_eq!(
+        nested(&[
+            "export const summariesSettingsSnapshot = z",
+            "codex: z",
+            "signIn: z.enum(["
+        ]),
+        raw(SummariesCodexSignIn::ALL)
+    );
+    assert_eq!(
+        nested(&[
+            "export const phoneSettingsSnapshot = z",
+            "listener: z",
+            "state: z.enum(["
+        ]),
+        raw(PhoneListenerState::ALL)
+    );
+    let onboarding = "export const onboardingSnapshot = z";
+    assert_eq!(
+        nested(&[onboarding, "page: z.enum(["]),
+        raw(OnboardingPage::ALL)
+    );
+    assert_eq!(
+        nested(&[onboarding, "setup: z.array(", "kind: z.enum(["]),
+        raw(OnboardingSetupStepKind::ALL)
+    );
+    assert_eq!(
+        nested(&[onboarding, "setup: z.array(", "state: z.enum(["]),
+        raw(OnboardingSetupStepState::ALL)
+    );
+    assert_eq!(
+        nested(&["export const speakerOption = z", "kind: z.enum(["]),
+        raw(SpeakerOptionKind::ALL)
+    );
+    assert_eq!(
+        nested(&["export const setupStepParams = z", "step: z.enum(["]),
+        raw(OnboardingSetupStepKind::ALL)
     );
 }
 

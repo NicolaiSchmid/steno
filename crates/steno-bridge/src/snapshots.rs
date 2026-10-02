@@ -7,10 +7,11 @@ use uuid::Uuid;
 
 use crate::envelope::{
     BridgeTopic, CaptureMode, MeetingSource, MeetingState, PermissionKind, PermissionState,
-    SettingsSection, string_enum,
+    SettingsSection,
 };
 use crate::json;
 use crate::settings::SummariesSettingsSnapshot;
+use crate::string_enum::string_enum;
 
 /// A payload the host publishes on a fixed topic; `EventSinkExt::publish`
 /// derives the topic from the type.
@@ -27,7 +28,7 @@ pub trait Snapshot: Serialize {
 pub struct AppSnapshot {
     pub version: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub setup_banner: Option<SetupBanner>,
+    pub setup_banner: Option<AppSetupBanner>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub phone: Option<AppPhone>,
     /// Deep links: set once, consumed by the page, then cleared by the host.
@@ -49,7 +50,7 @@ impl Snapshot for AppSnapshot {
 /// Swift: `AppSnapshot.SetupBanner`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct SetupBanner {
+pub struct AppSetupBanner {
     pub title: String,
     pub body: String,
     pub offers_summaries: bool,
@@ -93,7 +94,7 @@ pub struct RecordingLevel {
 /// Swift: `RecordingSnapshot.AutoStop`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct AutoStop {
+pub struct RecordingAutoStop {
     pub remaining_seconds: f64,
     pub total_seconds: f64,
     pub reason: String,
@@ -124,7 +125,7 @@ pub struct RecordingSnapshot {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub level: Option<RecordingLevel>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub auto_stop: Option<AutoStop>,
+    pub auto_stop: Option<RecordingAutoStop>,
     pub denied_permissions: Vec<PermissionKind>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub warning: Option<String>,
@@ -224,7 +225,7 @@ pub struct ListTag {
 
 /// Swift: `MeetingsListSnapshot.DayGroup`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct DayGroup {
+pub struct ListDayGroup {
     /// Calendar day in the user's zone, `YYYY-MM-DD`; the page formats labels.
     pub day: String,
     pub meetings: Vec<MeetingRow>,
@@ -240,7 +241,7 @@ pub struct MeetingsListSnapshot {
     pub query: String,
     pub counts: ListCounts,
     pub tags: Vec<ListTag>,
-    pub groups: Vec<DayGroup>,
+    pub groups: Vec<ListDayGroup>,
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
@@ -296,7 +297,7 @@ pub struct DetailRetention {
 }
 
 string_enum! {
-    /// Swift: `SpeakerAssignment.Kind` (`MeetingDetailSnapshot.Speaker.Assignment`).
+    /// Swift: `MeetingDetailSnapshot.Speaker.Assignment`.
     pub enum SpeakerAssignment {
         Unknown = "unknown",
         Suggested = "suggested",
@@ -336,23 +337,23 @@ pub struct DetailTemplate {
 
 /// Swift: `MeetingDetailSnapshot.SummarySection.Bullet`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SummaryBullet {
+pub struct DetailSummaryBullet {
     pub lead: String,
     pub text: String,
 }
 
 /// Swift: `MeetingDetailSnapshot.SummarySection`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SummarySection {
+pub struct DetailSummarySection {
     pub id: String,
     pub heading: String,
-    pub bullets: Vec<SummaryBullet>,
+    pub bullets: Vec<DetailSummaryBullet>,
 }
 
 /// Swift: `MeetingDetailSnapshot.Turn`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct TranscriptTurn {
+pub struct DetailTurn {
     #[serde(with = "json::uuid")]
     pub id: Uuid,
     #[serde(
@@ -369,7 +370,7 @@ pub struct TranscriptTurn {
 }
 
 string_enum! {
-    /// Swift: `TaskPriority` (`MeetingDetailSnapshot.Task.Priority`).
+    /// Swift: `MeetingDetailSnapshot.Task.Priority`.
     pub enum TaskPriority {
         Low = "low",
         Normal = "normal",
@@ -400,7 +401,7 @@ pub struct DetailTask {
 
 string_enum! {
     /// Swift: `MeetingDetailSnapshot.Export.Status`.
-    pub enum ExportStatus {
+    pub enum DetailExportStatus {
         NotConfigured = "notConfigured",
         Pending = "pending",
         Delivered = "delivered",
@@ -412,7 +413,7 @@ string_enum! {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DetailExport {
-    pub status: ExportStatus,
+    pub status: DetailExportStatus,
     pub message: String,
     pub can_reexport: bool,
     pub can_reveal: bool,
@@ -420,7 +421,7 @@ pub struct DetailExport {
 
 string_enum! {
     /// Swift: `MeetingDetailSnapshot.SummaryStatus.Kind`.
-    pub enum SummaryStatusKind {
+    pub enum DetailSummaryStatusKind {
         Pending = "pending",
         Present = "present",
         SkippedUnconfigured = "skippedUnconfigured",
@@ -431,8 +432,8 @@ string_enum! {
 /// Swift: `MeetingDetailSnapshot.SummaryStatus`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct SummaryStatus {
-    pub kind: SummaryStatusKind,
+pub struct DetailSummaryStatus {
+    pub kind: DetailSummaryStatusKind,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -467,9 +468,9 @@ pub struct MeetingDetailSnapshot {
     pub templates: Vec<DetailTemplate>,
     #[serde(rename = "templateID")]
     pub template_id: String,
-    pub summary_status: SummaryStatus,
-    pub summary: Vec<SummarySection>,
-    pub transcript: Vec<TranscriptTurn>,
+    pub summary_status: DetailSummaryStatus,
+    pub summary: Vec<DetailSummarySection>,
+    pub transcript: Vec<DetailTurn>,
     pub tasks: Vec<DetailTask>,
     pub decisions: Vec<String>,
     pub notes: String,
@@ -502,7 +503,7 @@ string_enum! {
 /// Swift: `OnboardingSnapshot.PermissionStep`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct PermissionStep {
+pub struct OnboardingPermissionStep {
     pub kind: PermissionKind,
     pub state: PermissionState,
     /// Required steps gate page 1's Done; optional ones can be skipped.
@@ -513,7 +514,7 @@ pub struct PermissionStep {
 
 string_enum! {
     /// Swift: `OnboardingSnapshot.SetupStep.Kind`.
-    pub enum SetupStepKind {
+    pub enum OnboardingSetupStepKind {
         Summaries = "summaries",
         Vault = "vault",
     }
@@ -521,7 +522,7 @@ string_enum! {
 
 string_enum! {
     /// Swift: `OnboardingSnapshot.SetupStep.State`.
-    pub enum SetupStepState {
+    pub enum OnboardingSetupStepState {
         Open = "open",
         Saved = "saved",
         Skipped = "skipped",
@@ -531,9 +532,9 @@ string_enum! {
 /// Swift: `OnboardingSnapshot.SetupStep`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct SetupStep {
-    pub kind: SetupStepKind,
-    pub state: SetupStepState,
+pub struct OnboardingSetupStep {
+    pub kind: OnboardingSetupStepKind,
+    pub state: OnboardingSetupStepState,
     /// The collapsed row's line once saved ("Saved: <model> at <host>").
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub saved_line: Option<String>,
@@ -563,10 +564,10 @@ pub struct OnboardingVault {
 #[serde(rename_all = "camelCase")]
 pub struct OnboardingSnapshot {
     pub page: OnboardingPage,
-    pub permissions: Vec<PermissionStep>,
+    pub permissions: Vec<OnboardingPermissionStep>,
     /// Every required permission granted: page 1 offers Done instead of Later.
     pub permissions_complete: bool,
-    pub setup: Vec<SetupStep>,
+    pub setup: Vec<OnboardingSetupStep>,
     pub can_save_summaries: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub summaries: Option<SummariesSettingsSnapshot>,

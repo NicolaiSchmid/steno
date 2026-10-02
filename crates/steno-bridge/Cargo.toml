@@ -9,12 +9,19 @@ repository.workspace = true
 publish.workspace = true
 
 [dependencies]
-chrono.workspace = true
+# chrono and uuid are declared here rather than inherited: the workspace
+# table turns on `chrono/clock` and `uuid/v4`, which this crate does not use
+# (it formats and parses, it never reads the clock or mints ids). Fold them
+# back into `workspace = true` when the root table is next edited.
+chrono = { version = "0.4", default-features = false, features = ["serde", "std"] }
 serde.workspace = true
 serde_json.workspace = true
-uuid.workspace = true
+thiserror.workspace = true
+uuid = { version = "1", features = ["serde"] }
 
 [dev-dependencies]
+# Pinned here only because the root Cargo.toml is out of this branch's scope;
+# the workspace table should take it when that file is next edited.
 similar = "2"
 
 [lints]

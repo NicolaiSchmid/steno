@@ -5,9 +5,16 @@
 //! contract type, calls the host and wraps the outcome, so the page's promise
 //! always settles with an envelope, never a rejection.
 //!
-//! Calls are synchronous and take `&self`: the shell runs the dispatcher off
-//! its UI thread and the host uses interior mutability for its view models,
-//! which is what the Swift `@MainActor` host amounts to.
+//! Hosts run blocking. Every method takes `&self` and returns when the work
+//! is done, including a method that waits on a dialog; the host uses interior
+//! mutability for its view models, which is what the Swift `@MainActor` host
+//! amounts to. The Tauri shell runs [`Dispatcher::dispatch`] on a blocking
+//! thread (the command handler is `async` and awaits a `spawn_blocking`) and
+//! bounces anything that needs the UI, such as `ui.confirmDestructive` and
+//! the folder panels, to the main thread from inside the host method. A host
+//! behind an `Arc` is a host ([`BridgeHost`] is implemented for
+//! `Arc<T: BridgeHost + ?Sized>`), so the shell can share one host between
+//! the dispatcher and the event publisher.
 
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -47,255 +54,121 @@ impl<T: EventSink + ?Sized> EventSinkExt for T {}
 /// contract error.
 pub type Outcome<T> = Result<T, BridgeError>;
 
-macro_rules! unanswered {
-    ($method:ident) => {
-        Err(BridgeError::not_answered(BridgeMethod::$method))
+/// Writes [`BridgeHost`] from one list of `Variant => fn name(params) -> Reply;`
+/// lines, and the delegating `impl BridgeHost for Arc<T>` from the same list,
+/// so a method is spelt once.
+macro_rules! bridge_host {
+    ($(
+        $variant:ident => fn $method:ident($($param:ident: $params:ty)?) -> $reply:ty;
+    )+) => {
+        /// What answers the page's commands: one method per [`BridgeMethod`], params
+        /// and reply typed per `commands.rs`. Every method defaults to the error the
+        /// Swift window hosts throw for a method they do not route (`unknownMethod`,
+        /// "The host does not answer <method>."), so a host implements what its
+        /// window answers and nothing else. Swift: `BridgeHost`.
+        pub trait BridgeHost: Send + Sync {
+            $(
+                #[allow(unused_variables)]
+                fn $method(&self $(, $param: $params)?) -> Outcome<$reply> {
+                    Err(BridgeError::not_answered(BridgeMethod::$variant))
+                }
+            )+
+        }
+
+        impl<T: BridgeHost + ?Sized> BridgeHost for std::sync::Arc<T> {
+            $(
+                fn $method(&self $(, $param: $params)?) -> Outcome<$reply> {
+                    (**self).$method($($param)?)
+                }
+            )+
+        }
     };
 }
 
-/// What answers the page's commands: one method per [`BridgeMethod`], params
-/// and reply typed per `commands.rs`. Every method defaults to the error the
-/// Swift window hosts throw for a method they do not route (`unknownMethod`,
-/// "The host does not answer <method>."), so a host implements what its
-/// window answers and nothing else. Swift: `BridgeHost`.
-#[allow(unused_variables)]
-pub trait BridgeHost: Send + Sync {
-    fn page_ready(&self) -> Outcome<()> {
-        unanswered!(PageReady)
-    }
-    fn page_layout(&self, params: PageLayoutParams) -> Outcome<()> {
-        unanswered!(PageLayout)
-    }
+bridge_host! {
+    PageReady => fn page_ready() -> ();
+    PageLayout => fn page_layout(params: PageLayoutParams) -> ();
 
-    fn meetings_set_filter(&self, params: SetFilterParams) -> Outcome<()> {
-        unanswered!(MeetingsSetFilter)
-    }
-    fn meetings_set_tag_filter(&self, params: SetTagFilterParams) -> Outcome<()> {
-        unanswered!(MeetingsSetTagFilter)
-    }
-    fn meetings_set_query(&self, params: SetQueryParams) -> Outcome<()> {
-        unanswered!(MeetingsSetQuery)
-    }
-    fn meetings_select(&self, params: MeetingIdParams) -> Outcome<()> {
-        unanswered!(MeetingsSelect)
-    }
-    fn meetings_delete(&self, params: MeetingIdParams) -> Outcome<ConfirmReply> {
-        unanswered!(MeetingsDelete)
-    }
+    MeetingsSetFilter => fn meetings_set_filter(params: SetFilterParams) -> ();
+    MeetingsSetTagFilter => fn meetings_set_tag_filter(params: SetTagFilterParams) -> ();
+    MeetingsSetQuery => fn meetings_set_query(params: SetQueryParams) -> ();
+    MeetingsSelect => fn meetings_select(params: MeetingIdParams) -> ();
+    MeetingsDelete => fn meetings_delete(params: MeetingIdParams) -> ConfirmReply;
 
-    fn meeting_set_tab(&self, params: SetTabParams) -> Outcome<()> {
-        unanswered!(MeetingSetTab)
-    }
-    fn meeting_set_tags(&self, params: SetTagsParams) -> Outcome<()> {
-        unanswered!(MeetingSetTags)
-    }
-    fn meeting_set_template(&self, params: SetTemplateParams) -> Outcome<()> {
-        unanswered!(MeetingSetTemplate)
-    }
-    fn meeting_rerun_summary(&self) -> Outcome<()> {
-        unanswered!(MeetingRerunSummary)
-    }
-    fn meeting_reexport(&self) -> Outcome<()> {
-        unanswered!(MeetingReexport)
-    }
-    fn meeting_set_keep_audio(&self, params: SetBoolParams) -> Outcome<ConfirmReply> {
-        unanswered!(MeetingSetKeepAudio)
-    }
-    fn meeting_delete_recording_now(&self) -> Outcome<ConfirmReply> {
-        unanswered!(MeetingDeleteRecordingNow)
-    }
-    fn meeting_save_notes(&self, params: SaveNotesParams) -> Outcome<()> {
-        unanswered!(MeetingSaveNotes)
-    }
-    fn meeting_reveal_recording(&self) -> Outcome<()> {
-        unanswered!(MeetingRevealRecording)
-    }
-    fn meeting_reveal_export(&self) -> Outcome<()> {
-        unanswered!(MeetingRevealExport)
-    }
+    MeetingSetTab => fn meeting_set_tab(params: SetTabParams) -> ();
+    MeetingSetTags => fn meeting_set_tags(params: SetTagsParams) -> ();
+    MeetingSetTemplate => fn meeting_set_template(params: SetTemplateParams) -> ();
+    MeetingRerunSummary => fn meeting_rerun_summary() -> ();
+    MeetingReexport => fn meeting_reexport() -> ();
+    MeetingSetKeepAudio => fn meeting_set_keep_audio(params: SetBoolParams) -> ConfirmReply;
+    MeetingDeleteRecordingNow => fn meeting_delete_recording_now() -> ConfirmReply;
+    MeetingSaveNotes => fn meeting_save_notes(params: SaveNotesParams) -> ();
+    MeetingRevealRecording => fn meeting_reveal_recording() -> ();
+    MeetingRevealExport => fn meeting_reveal_export() -> ();
 
-    fn speakers_options(&self, params: SpeakerOptionsParams) -> Outcome<SpeakerOptionsReply> {
-        unanswered!(SpeakersOptions)
-    }
-    fn speakers_select(&self, params: SelectSpeakerParams) -> Outcome<()> {
-        unanswered!(SpeakersSelect)
-    }
-    fn speakers_play(&self, params: SpeakerIdParams) -> Outcome<()> {
-        unanswered!(SpeakersPlay)
-    }
-    fn speakers_stop(&self) -> Outcome<()> {
-        unanswered!(SpeakersStop)
-    }
+    SpeakersOptions => fn speakers_options(params: SpeakerOptionsParams) -> SpeakerOptionsReply;
+    SpeakersSelect => fn speakers_select(params: SelectSpeakerParams) -> ();
+    SpeakersPlay => fn speakers_play(params: SpeakerIdParams) -> ();
+    SpeakersStop => fn speakers_stop() -> ();
 
-    fn recording_start(&self, params: StartRecordingParams) -> Outcome<()> {
-        unanswered!(RecordingStart)
-    }
-    fn recording_stop(&self) -> Outcome<()> {
-        unanswered!(RecordingStop)
-    }
-    fn recording_toggle(&self) -> Outcome<()> {
-        unanswered!(RecordingToggle)
-    }
-    fn recording_keep_going(&self) -> Outcome<()> {
-        unanswered!(RecordingKeepGoing)
-    }
-    fn recording_clear_messages(&self) -> Outcome<()> {
-        unanswered!(RecordingClearMessages)
-    }
+    RecordingStart => fn recording_start(params: StartRecordingParams) -> ();
+    RecordingStop => fn recording_stop() -> ();
+    RecordingToggle => fn recording_toggle() -> ();
+    RecordingKeepGoing => fn recording_keep_going() -> ();
+    RecordingClearMessages => fn recording_clear_messages() -> ();
 
-    fn setup_dismiss_banner(&self) -> Outcome<()> {
-        unanswered!(SetupDismissBanner)
-    }
+    SetupDismissBanner => fn setup_dismiss_banner() -> ();
 
-    fn settings_general_set_launch_at_login(&self, params: SetBoolParams) -> Outcome<()> {
-        unanswered!(SettingsGeneralSetLaunchAtLogin)
-    }
-    fn settings_general_set_detection(&self, params: SetBoolParams) -> Outcome<()> {
-        unanswered!(SettingsGeneralSetDetection)
-    }
-    fn settings_general_set_default_template(&self, params: SetTemplateParams) -> Outcome<()> {
-        unanswered!(SettingsGeneralSetDefaultTemplate)
-    }
-    fn settings_general_request_calendar(&self) -> Outcome<()> {
-        unanswered!(SettingsGeneralRequestCalendar)
-    }
-    fn settings_general_set_automatic_updates(
-        &self,
-        params: SetAutomaticUpdatesParams,
-    ) -> Outcome<()> {
-        unanswered!(SettingsGeneralSetAutomaticUpdates)
-    }
-    fn settings_general_open_login_items(&self) -> Outcome<()> {
-        unanswered!(SettingsGeneralOpenLoginItems)
-    }
-    fn settings_recording_set_input_device(&self, params: SetStringParams) -> Outcome<()> {
-        unanswered!(SettingsRecordingSetInputDevice)
-    }
-    fn settings_recording_refresh_devices(&self) -> Outcome<()> {
-        unanswered!(SettingsRecordingRefreshDevices)
-    }
-    fn settings_recording_choose_folder(&self) -> Outcome<ChosenPathReply> {
-        unanswered!(SettingsRecordingChooseFolder)
-    }
-    fn settings_recording_reveal_folder(&self) -> Outcome<()> {
-        unanswered!(SettingsRecordingRevealFolder)
-    }
-    fn settings_recording_set_retention(&self, params: SetRetentionParams) -> Outcome<()> {
-        unanswered!(SettingsRecordingSetRetention)
-    }
-    fn settings_recording_request_permission(&self, params: PermissionKindParams) -> Outcome<()> {
-        unanswered!(SettingsRecordingRequestPermission)
-    }
-    fn settings_transcription_set_engine(&self, params: SetStringParams) -> Outcome<()> {
-        unanswered!(SettingsTranscriptionSetEngine)
-    }
-    fn settings_transcription_download(&self, params: AssetIdParams) -> Outcome<()> {
-        unanswered!(SettingsTranscriptionDownload)
-    }
-    fn settings_transcription_remove(&self, params: AssetIdParams) -> Outcome<()> {
-        unanswered!(SettingsTranscriptionRemove)
-    }
-    fn settings_summaries_select_preset(&self, params: SetStringParams) -> Outcome<()> {
-        unanswered!(SettingsSummariesSelectPreset)
-    }
-    fn settings_summaries_update(&self, params: SummariesUpdateParams) -> Outcome<()> {
-        unanswered!(SettingsSummariesUpdate)
-    }
-    fn settings_summaries_save(&self) -> Outcome<()> {
-        unanswered!(SettingsSummariesSave)
-    }
-    fn settings_summaries_test(&self) -> Outcome<()> {
-        unanswered!(SettingsSummariesTest)
-    }
-    fn settings_summaries_confirm_codex(&self) -> Outcome<()> {
-        unanswered!(SettingsSummariesConfirmCodex)
-    }
-    fn settings_summaries_refresh_codex_status(&self) -> Outcome<()> {
-        unanswered!(SettingsSummariesRefreshCodexStatus)
-    }
-    fn settings_summaries_refresh_codex_models(&self) -> Outcome<()> {
-        unanswered!(SettingsSummariesRefreshCodexModels)
-    }
-    fn settings_summaries_select_codex_model(&self, params: SetStringParams) -> Outcome<()> {
-        unanswered!(SettingsSummariesSelectCodexModel)
-    }
-    fn settings_summaries_stop_using_codex(&self) -> Outcome<()> {
-        unanswered!(SettingsSummariesStopUsingCodex)
-    }
-    fn settings_export_set_enabled(&self, params: SetBoolParams) -> Outcome<()> {
-        unanswered!(SettingsExportSetEnabled)
-    }
-    fn settings_export_choose_vault(&self) -> Outcome<ChosenPathReply> {
-        unanswered!(SettingsExportChooseVault)
-    }
-    fn settings_export_update(&self, params: ExportUpdateParams) -> Outcome<()> {
-        unanswered!(SettingsExportUpdate)
-    }
-    fn settings_export_save(&self) -> Outcome<()> {
-        unanswered!(SettingsExportSave)
-    }
-    fn settings_phone_begin_pairing(&self) -> Outcome<()> {
-        unanswered!(SettingsPhoneBeginPairing)
-    }
-    fn settings_phone_cancel_pairing(&self) -> Outcome<()> {
-        unanswered!(SettingsPhoneCancelPairing)
-    }
-    fn settings_phone_revoke(&self, params: DeviceIdParams) -> Outcome<()> {
-        unanswered!(SettingsPhoneRevoke)
-    }
+    SettingsGeneralSetLaunchAtLogin => fn settings_general_set_launch_at_login(params: SetBoolParams) -> ();
+    SettingsGeneralSetDetection => fn settings_general_set_detection(params: SetBoolParams) -> ();
+    SettingsGeneralSetDefaultTemplate => fn settings_general_set_default_template(params: SetTemplateParams) -> ();
+    SettingsGeneralRequestCalendar => fn settings_general_request_calendar() -> ();
+    SettingsGeneralSetAutomaticUpdates => fn settings_general_set_automatic_updates(params: SetAutomaticUpdatesParams) -> ();
+    SettingsGeneralOpenLoginItems => fn settings_general_open_login_items() -> ();
+    SettingsRecordingSetInputDevice => fn settings_recording_set_input_device(params: SetStringParams) -> ();
+    SettingsRecordingRefreshDevices => fn settings_recording_refresh_devices() -> ();
+    SettingsRecordingChooseFolder => fn settings_recording_choose_folder() -> ChosenPathReply;
+    SettingsRecordingRevealFolder => fn settings_recording_reveal_folder() -> ();
+    SettingsRecordingSetRetention => fn settings_recording_set_retention(params: SetRetentionParams) -> ();
+    SettingsRecordingRequestPermission => fn settings_recording_request_permission(params: PermissionKindParams) -> ();
+    SettingsTranscriptionSetEngine => fn settings_transcription_set_engine(params: SetStringParams) -> ();
+    SettingsTranscriptionDownload => fn settings_transcription_download(params: AssetIdParams) -> ();
+    SettingsTranscriptionRemove => fn settings_transcription_remove(params: AssetIdParams) -> ();
+    SettingsSummariesSelectPreset => fn settings_summaries_select_preset(params: SetStringParams) -> ();
+    SettingsSummariesUpdate => fn settings_summaries_update(params: SummariesUpdateParams) -> ();
+    SettingsSummariesSave => fn settings_summaries_save() -> ();
+    SettingsSummariesTest => fn settings_summaries_test() -> ();
+    SettingsSummariesConfirmCodex => fn settings_summaries_confirm_codex() -> ();
+    SettingsSummariesRefreshCodexStatus => fn settings_summaries_refresh_codex_status() -> ();
+    SettingsSummariesRefreshCodexModels => fn settings_summaries_refresh_codex_models() -> ();
+    SettingsSummariesSelectCodexModel => fn settings_summaries_select_codex_model(params: SetStringParams) -> ();
+    SettingsSummariesStopUsingCodex => fn settings_summaries_stop_using_codex() -> ();
+    SettingsExportSetEnabled => fn settings_export_set_enabled(params: SetBoolParams) -> ();
+    SettingsExportChooseVault => fn settings_export_choose_vault() -> ChosenPathReply;
+    SettingsExportUpdate => fn settings_export_update(params: ExportUpdateParams) -> ();
+    SettingsExportSave => fn settings_export_save() -> ();
+    SettingsPhoneBeginPairing => fn settings_phone_begin_pairing() -> ();
+    SettingsPhoneCancelPairing => fn settings_phone_cancel_pairing() -> ();
+    SettingsPhoneRevoke => fn settings_phone_revoke(params: DeviceIdParams) -> ();
 
-    fn onboarding_request(&self, params: PermissionKindParams) -> Outcome<()> {
-        unanswered!(OnboardingRequest)
-    }
-    fn onboarding_skip(&self, params: PermissionKindParams) -> Outcome<()> {
-        unanswered!(OnboardingSkip)
-    }
-    fn onboarding_refresh(&self) -> Outcome<()> {
-        unanswered!(OnboardingRefresh)
-    }
-    fn onboarding_advance(&self) -> Outcome<()> {
-        unanswered!(OnboardingAdvance)
-    }
-    fn onboarding_back(&self) -> Outcome<()> {
-        unanswered!(OnboardingBack)
-    }
-    fn onboarding_save_summaries(&self) -> Outcome<()> {
-        unanswered!(OnboardingSaveSummaries)
-    }
-    fn onboarding_confirm_summaries_with_codex(&self) -> Outcome<()> {
-        unanswered!(OnboardingConfirmSummariesWithCodex)
-    }
-    fn onboarding_choose_vault(&self) -> Outcome<ChosenPathReply> {
-        unanswered!(OnboardingChooseVault)
-    }
-    fn onboarding_save_vault(&self) -> Outcome<()> {
-        unanswered!(OnboardingSaveVault)
-    }
-    fn onboarding_skip_setup(&self, params: SetupStepParams) -> Outcome<()> {
-        unanswered!(OnboardingSkipSetup)
-    }
-    fn onboarding_finish(&self) -> Outcome<()> {
-        unanswered!(OnboardingFinish)
-    }
+    OnboardingRequest => fn onboarding_request(params: PermissionKindParams) -> ();
+    OnboardingSkip => fn onboarding_skip(params: PermissionKindParams) -> ();
+    OnboardingRefresh => fn onboarding_refresh() -> ();
+    OnboardingAdvance => fn onboarding_advance() -> ();
+    OnboardingBack => fn onboarding_back() -> ();
+    OnboardingSaveSummaries => fn onboarding_save_summaries() -> ();
+    OnboardingConfirmSummariesWithCodex => fn onboarding_confirm_summaries_with_codex() -> ();
+    OnboardingChooseVault => fn onboarding_choose_vault() -> ChosenPathReply;
+    OnboardingSaveVault => fn onboarding_save_vault() -> ();
+    OnboardingSkipSetup => fn onboarding_skip_setup(params: SetupStepParams) -> ();
+    OnboardingFinish => fn onboarding_finish() -> ();
 
-    fn updates_check(&self) -> Outcome<()> {
-        unanswered!(UpdatesCheck)
-    }
-    fn system_open_url(&self, params: OpenUrlParams) -> Outcome<()> {
-        unanswered!(SystemOpenUrl)
-    }
-    fn system_open_system_settings(&self, params: PermissionKindParams) -> Outcome<()> {
-        unanswered!(SystemOpenSystemSettings)
-    }
-    fn window_open(&self, params: WindowParams) -> Outcome<()> {
-        unanswered!(WindowOpen)
-    }
-    fn window_close(&self, params: WindowParams) -> Outcome<()> {
-        unanswered!(WindowClose)
-    }
-    fn ui_confirm_destructive(&self, params: ConfirmDestructiveParams) -> Outcome<ConfirmReply> {
-        unanswered!(UiConfirmDestructive)
-    }
+    UpdatesCheck => fn updates_check() -> ();
+    SystemOpenUrl => fn system_open_url(params: OpenUrlParams) -> ();
+    SystemOpenSystemSettings => fn system_open_system_settings(params: PermissionKindParams) -> ();
+    WindowOpen => fn window_open(params: WindowParams) -> ();
+    WindowClose => fn window_close(params: WindowParams) -> ();
+    UiConfirmDestructive => fn ui_confirm_destructive(params: ConfirmDestructiveParams) -> ConfirmReply;
 }
 
 /// The envelope before the method name is checked, so an unknown method and
@@ -365,16 +238,35 @@ impl<H: BridgeHost> Dispatcher<H> {
             Decoding::Rejected(reply) => return reply,
         };
         match self.route(&request) {
-            Ok(result) => BridgeReply {
-                id: request.id,
-                result,
-                error: None,
-            },
+            Ok(Some(result)) => BridgeReply::result(request.id, result),
+            Ok(None) => BridgeReply::empty(request.id),
             Err(error) => BridgeReply::error(request.id, error),
         }
     }
 
     /// `dispatch` with the reply encoded in the dispatcher's compact style.
+    ///
+    /// ```
+    /// use steno_bridge::{BridgeHost, Dispatcher, Outcome};
+    ///
+    /// struct Host;
+    ///
+    /// impl BridgeHost for Host {
+    ///     fn recording_stop(&self) -> Outcome<()> {
+    ///         Ok(())
+    ///     }
+    /// }
+    ///
+    /// let dispatcher = Dispatcher::new(Host);
+    /// assert_eq!(
+    ///     dispatcher.dispatch_json(r#"{"id":"req-1","method":"recording.stop","params":null}"#),
+    ///     r#"{"id":"req-1"}"#
+    /// );
+    /// assert_eq!(
+    ///     dispatcher.dispatch_json(r#"{"id":"req-2","method":"recording.start","params":{"mode":"call"}}"#),
+    ///     r#"{"error":{"code":"unknownMethod","message":"The host does not answer recording.start."},"id":"req-2"}"#
+    /// );
+    /// ```
     pub fn dispatch_json(&self, body: &str) -> String {
         json::to_compact_string(&self.dispatch(body))
             .expect("an envelope of strings and JSON values encodes")

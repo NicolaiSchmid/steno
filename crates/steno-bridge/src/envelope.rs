@@ -2,78 +2,10 @@
 //! `Sources/StenoBridge/BridgeEnvelope.swift`. Snapshots flow host to page as
 //! events; commands flow page to host as method calls with a reply.
 
-use std::fmt;
-
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-/// A string enum with the exact raw values Swift's `String` enums encode:
-/// serde renames, `ALL` (Swift's `CaseIterable`), `as_str`, `Display` and
-/// `FromStr` (Swift's `init?(rawValue:)`).
-macro_rules! string_enum {
-    (
-        $(#[$meta:meta])*
-        $vis:vis enum $name:ident {
-            $( $(#[$vmeta:meta])* $variant:ident = $raw:literal ),+ $(,)?
-        }
-    ) => {
-        $(#[$meta])*
-        #[derive(
-            Debug, Clone, Copy, PartialEq, Eq, Hash, ::serde::Serialize, ::serde::Deserialize,
-        )]
-        $vis enum $name {
-            $( $(#[$vmeta])* #[serde(rename = $raw)] $variant ),+
-        }
-
-        impl $name {
-            /// Every case, in declaration order.
-            pub const ALL: &'static [Self] = &[$(Self::$variant),+];
-
-            /// The raw value on the wire.
-            #[must_use]
-            pub const fn as_str(self) -> &'static str {
-                match self { $(Self::$variant => $raw),+ }
-            }
-        }
-
-        impl ::std::fmt::Display for $name {
-            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
-                f.write_str(self.as_str())
-            }
-        }
-
-        impl ::std::str::FromStr for $name {
-            type Err = $crate::envelope::UnknownRawValue;
-
-            fn from_str(raw: &str) -> Result<Self, Self::Err> {
-                match raw {
-                    $($raw => Ok(Self::$variant),)+
-                    _ => Err($crate::envelope::UnknownRawValue {
-                        type_name: stringify!($name),
-                        raw: raw.to_owned(),
-                    }),
-                }
-            }
-        }
-    };
-}
-pub(crate) use string_enum;
-
-/// A raw string that is not a case of the enum (Swift's `init?(rawValue:)`
-/// returning nil).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct UnknownRawValue {
-    pub type_name: &'static str,
-    pub raw: String,
-}
-
-impl fmt::Display for UnknownRawValue {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "'{}' is not a {}", self.raw, self.type_name)
-    }
-}
-
-impl std::error::Error for UnknownRawValue {}
+use crate::string_enum::string_enum;
 
 string_enum! {
     /// Topics the host publishes; every publish carries a full snapshot.
@@ -263,7 +195,8 @@ string_enum! {
 
 /// A contract or host error the page receives in the reply envelope.
 /// Swift: `BridgeError`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, thiserror::Error)]
+#[error("{code}: {message}")]
 pub struct BridgeError {
     pub code: BridgeErrorCode,
     pub message: String,
@@ -304,14 +237,6 @@ impl BridgeError {
         Self::unknown_method(format!("The host does not answer {method}."))
     }
 }
-
-impl fmt::Display for BridgeError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}: {}", self.code, self.message)
-    }
-}
-
-impl std::error::Error for BridgeError {}
 
 /// One publish from the host. The page dispatches on `topic` and decodes
 /// `payload` as that topic's snapshot type. Swift: `BridgeEvent`.
@@ -390,7 +315,7 @@ string_enum! {
 }
 
 string_enum! {
-    /// Swift: `MeetingState.Kind` (`BridgeMeetingState`).
+    /// Swift: `BridgeMeetingState`.
     pub enum MeetingState {
         Recording = "recording",
         Queued = "queued",
