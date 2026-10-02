@@ -28,29 +28,18 @@ pub struct TemplateSection {
     pub required: bool,
 }
 
-/// The bundled template files in menu order, `(id, JSON)`.
-const BUNDLED_JSON: [(&str, &str); 4] = [
-    (
-        "default",
-        include_str!("../../../../Sources/StenoCore/Resources/Templates/default.json"),
-    ),
-    (
-        "customer-discovery",
-        include_str!("../../../../Sources/StenoCore/Resources/Templates/customer-discovery.json"),
-    ),
-    (
-        "daily-standup",
-        include_str!("../../../../Sources/StenoCore/Resources/Templates/daily-standup.json"),
-    ),
-    (
-        "interview",
-        include_str!("../../../../Sources/StenoCore/Resources/Templates/interview.json"),
-    ),
+/// The bundled template files in [`SummaryTemplate::BUNDLED_IDS`] order.
+const BUNDLED_JSON: [&str; 4] = [
+    include_str!("../../../../Sources/StenoCore/Resources/Templates/default.json"),
+    include_str!("../../../../Sources/StenoCore/Resources/Templates/customer-discovery.json"),
+    include_str!("../../../../Sources/StenoCore/Resources/Templates/daily-standup.json"),
+    include_str!("../../../../Sources/StenoCore/Resources/Templates/interview.json"),
 ];
 
 static BUNDLED: LazyLock<Vec<SummaryTemplate>> = LazyLock::new(|| {
-    BUNDLED_JSON
+    SummaryTemplate::BUNDLED_IDS
         .iter()
+        .zip(BUNDLED_JSON)
         .map(|(id, json)| {
             let template: SummaryTemplate = serde_json::from_str(json).unwrap_or_else(|error| {
                 panic!("summary template {id}.json failed to load: {error}")
