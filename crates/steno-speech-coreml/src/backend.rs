@@ -92,6 +92,11 @@ pub struct JointDecision {
     pub duration_bin: usize,
 }
 
+/// `value` as the `Int32` the models take, or [`SpeechError::Range`].
+fn int32(name: &'static str, value: usize) -> Result<i32, SpeechError> {
+    i32::try_from(value).map_err(|_| SpeechError::Range { name, value })
+}
+
 /// The preprocessor's mel spectrogram and its declared length.
 pub struct Mel {
     mel: Array,
@@ -235,11 +240,7 @@ impl Backend {
         let declared = declared_length
             .unwrap_or(MAX_MODEL_SAMPLES)
             .min(MAX_MODEL_SAMPLES);
-        scratch.audio_length.as_i32_mut()?[0] =
-            i32::try_from(declared).map_err(|_| SpeechError::Range {
-                name: "audio_length",
-                value: declared,
-            })?;
+        scratch.audio_length.as_i32_mut()?[0] = int32("audio_length", declared)?;
         let input = inputs(&[
             ("audio_signal", &scratch.audio),
             ("audio_length", &scratch.audio_length),
@@ -268,11 +269,7 @@ impl Backend {
     /// the cached projection in `scratch` (`TdtModelInference.runDecoder`
     /// followed by the `predictorOutput` cache).
     pub fn decoder_step(&self, scratch: &mut Scratch, token: usize) -> Result<(), SpeechError> {
-        scratch.targets.as_i32_mut()?[0] =
-            i32::try_from(token).map_err(|_| SpeechError::Range {
-                name: "token",
-                value: token,
-            })?;
+        scratch.targets.as_i32_mut()?[0] = int32("token", token)?;
         let input = inputs(&[
             ("targets", &scratch.targets),
             ("target_length", &scratch.target_length),
