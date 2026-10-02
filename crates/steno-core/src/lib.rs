@@ -22,6 +22,7 @@
 //! - [`paths`]: where the database lives on each platform, and the file URL
 //!   codec the store's audio paths use.
 //! - [`content_hash`]: the SHA-256 every receipt carries.
+//! - [`recording_layout`]: where one meeting's audio files live.
 //!
 //! Two rules hold the crate together. It depends on nothing else of ours
 //! (every other crate depends on it), so the pipeline, the CLI and the
@@ -38,6 +39,7 @@ pub mod json;
 pub mod model;
 pub mod paths;
 pub mod protocols;
+pub mod recording_layout;
 pub mod store;
 pub mod string_enum;
 pub mod summary;
@@ -51,5 +53,6 @@ pub use protocols::{
     Diarizer, EchoCanceller, HandoverIntake, LanguageModel, MeetingSummarizer, SecretKey,
     SecretStore, SpeakerMemory, SpeechEngine, TranscriptCleaner, async_trait,
 };
+pub use recording_layout::RecordingLayout;
 pub use store::{DeletedMeeting, SearchHit, Store, StoreError};
 pub use string_enum::UnknownCase;

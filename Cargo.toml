@@ -39,6 +39,14 @@ uuid = { version = "1", features = ["serde", "v4"] }
 # round-trip digits with ties to even, as Foundation breaks them and Rust's
 # `Display` does not. Already in the lock through serde_json.
 zmij = "1"
+# The audio crate (WP5): decoding of recordings and phone files in pure
+# Rust, and the CoreAudio HAL bindings behind the macOS capture backend.
+symphonia = { version = "0.5", default-features = false, features = ["aac", "caf", "isomp4", "mp3", "pcm", "wav"] }
+objc2-core-audio = { version = "0.3", default-features = false, features = ["std", "AudioHardware", "objc2", "objc2-foundation", "objc2-core-audio-types"] }
+objc2-core-audio-types = { version = "0.3", default-features = false, features = ["std", "CoreAudioBaseTypes"] }
+objc2-core-foundation = { version = "0.3", default-features = false, features = ["std", "CFBase", "CFDictionary", "CFString"] }
+# Build only
+cc = "1"
 # Test only
 similar = "2"
 tempfile = "3"
@@ -48,12 +56,12 @@ async-trait = "0.1"
 sha2 = "0.10"
 tokio = { version = "1", default-features = false, features = ["macros", "rt", "rt-multi-thread"] }
 # Apple frameworks through madsmtm's generated bindings (one objc2 runtime
-# for CoreML now, CoreAudio and AppKit later). Pulled in only by crates'
+# for CoreML and CoreAudio now, AppKit later). Pulled in only by crates'
 # `cfg(target_os = "macos")` dependency tables, so the other platforms never
 # build them.
 objc2 = "0.6"
 objc2-core-ml = "0.3.2"
-objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "NSArray", "NSDictionary", "NSEnumerator", "NSError", "NSObject", "NSString", "NSURL", "NSValue"] }
+objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "NSArray", "NSDictionary", "NSEnumerator", "NSError", "NSObject", "NSString", "NSURL", "NSUUID", "NSValue"] }
 # Adapters: IANA time zones for the dates in the notes (Swift's `TimeZone`),
 # the machine's zone name, and the canonical decomposition `Slug` strips
 # diacritics with (the core's `Person::names_match` folds names with it too).

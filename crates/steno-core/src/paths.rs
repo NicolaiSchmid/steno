@@ -111,6 +111,43 @@ pub fn file_url(path: &Path, is_directory: bool) -> String {
     url
 }
 
+/// The inverse of [`file_url`]: the path of a `file://` URL as this
+/// machine spells it, percent-decoding what `file_url` encoded. `None` for
+/// any other scheme or a host other than the local one.
+#[must_use]
+pub fn path_from_file_url(url: &str) -> Option<PathBuf> {
+    let rest = url.strip_prefix("file://")?;
+    let rest = rest.strip_prefix("localhost").unwrap_or(rest);
+    if !rest.starts_with('/') {
+        return None;
+    }
+    let mut bytes = Vec::with_capacity(rest.len());
+    let raw = rest.as_bytes();
+    let mut index = 0;
+    while index < raw.len() {
+        if raw[index] == b'%' && index + 2 < raw.len() {
+            let hex = std::str::from_utf8(&raw[index + 1..index + 3]).ok()?;
+            bytes.push(u8::from_str_radix(hex, 16).ok()?);
+            index += 3;
+        } else {
+            bytes.push(raw[index]);
+            index += 1;
+        }
+    }
+    let mut text = String::from_utf8(bytes).ok()?;
+    if text.ends_with('/') && text.len() > 1 {
+        text.pop();
+    }
+    if cfg!(windows) {
+        // `/C:/...` becomes `C:\...`.
+        if text.len() >= 3 && text.as_bytes()[2] == b':' {
+            text.remove(0);
+        }
+        text = text.replace('/', "\\");
+    }
+    Some(PathBuf::from(text))
+}
+
 /// RFC 3986 unreserved and sub-delims plus `:`, `@` and `/`: the characters
 /// Foundation leaves alone in a file URL's path.
 fn is_path_allowed(byte: u8) -> bool {
@@ -182,6 +219,23 @@ fn drop_trailing_slash(bytes: &mut Vec<u8>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn file_urls_round_trip_through_the_path() {
+        for path in [
+            "/Users/me/Audio Files/a b.caf",
+            "/tmp/plain.caf",
+            "/ü/ß.wav",
+        ] {
+            let url = file_url(Path::new(path), false);
+            assert_eq!(path_from_file_url(&url), Some(PathBuf::from(path)), "{url}");
+        }
+        assert_eq!(
+            path_from_file_url("file:///tmp/dir/"),
+            Some(PathBuf::from("/tmp/dir"))
+        );
+        assert_eq!(path_from_file_url("https://example.com/a"), None);
+    }
 
     #[test]
     fn file_urls_match_foundation() {
