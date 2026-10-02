@@ -2,11 +2,22 @@
 //! UTC text, UUIDs as uppercase text, JSON columns through `StenoJSON`,
 //! string enums by case name. Each wrapper is a `ToSql` for `params!` and a
 //! `FromSql` that [`RowExt::col`] unwraps again.
+//!
+//! Swift: `Sources/StenoCore/Storage/Records.swift` and GRDB's
+//! `DatabaseDateEncodingStrategy.deferredToDate`.
+//!
+//! GRDB rounds a date to the nearest millisecond on the way into a column;
+//! [`date_text`] does the same. Swift's `StenoJSON.format`
+//! (`Sources/StenoCore/Model/StenoJSON.swift`) truncates instead, so a
+//! Swift export of a date that is not on a whole millisecond can read one
+//! millisecond lower than the column text. `json::format_date` mirrors the
+//! Swift formatter until that is fixed on the Swift side (parity list in
+//! `.plans/2026-10-02-rust-core-and-tauri-shell.md`).
 
 use std::fmt::Display;
 use std::str::FromStr;
 
-use chrono::{DateTime, NaiveDate, NaiveDateTime, Utc};
+use chrono::{DateTime, NaiveDate, NaiveDateTime, TimeDelta, Utc};
 use rusqlite::Row;
 use rusqlite::types::{FromSql, FromSqlError, FromSqlResult, ToSql, ToSqlOutput, ValueRef};
 use serde::Serialize;
@@ -18,10 +29,12 @@ use crate::json;
 /// GRDB's storage format for `Date`.
 pub const GRDB_DATE_FORMAT: &str = "%Y-%m-%d %H:%M:%S%.3f";
 
-/// `2026-09-29 13:49:11.135`, UTC, milliseconds truncated.
+/// `2026-09-29 13:49:11.135`, UTC, rounded to the nearest millisecond
+/// (half up) as GRDB's formatter rounds.
 #[must_use]
 pub fn date_text(date: DateTime<Utc>) -> String {
-    date.format(GRDB_DATE_FORMAT).to_string()
+    let rounded = date + TimeDelta::microseconds(500);
+    rounded.format(GRDB_DATE_FORMAT).to_string()
 }
 
 /// GRDB's reading of a date column: the storage format first, then the
@@ -204,5 +217,23 @@ mod tests {
         );
         assert_eq!(parse_date_text("2026-09-29T13:49:11.135Z"), Some(date));
         assert!(parse_date_text("13:49").is_none());
+    }
+
+    #[test]
+    fn dates_round_to_the_nearest_millisecond_like_grdb() {
+        let whole = parse_date_text("2026-09-29 13:49:11.135").unwrap();
+        assert_eq!(
+            date_text(whole + TimeDelta::microseconds(500)),
+            "2026-09-29 13:49:11.136"
+        );
+        assert_eq!(
+            date_text(whole + TimeDelta::microseconds(499)),
+            "2026-09-29 13:49:11.135"
+        );
+        let end_of_second = parse_date_text("2026-09-29 13:49:11.999").unwrap();
+        assert_eq!(
+            date_text(end_of_second + TimeDelta::microseconds(500)),
+            "2026-09-29 13:49:12.000"
+        );
     }
 }
