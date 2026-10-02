@@ -9,7 +9,7 @@
 //! then become `use` lines: `BridgeErrorCode`, `BridgeError`, `BridgeEvent`
 //! (whose `topic` becomes the `BridgeTopic` enum), `OpenUrlParams`,
 //! `SettingsSection` and `WindowParams` in `bridge.rs`, `BridgeWindow` in
-//! `windows.rs`; `bridge::uuid_text` becomes `json::uuid::format`.
+//! `windows.rs`; `bridge::uuid_text` becomes `steno_core::json::uuid_string`.
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 // Without the fixture host nothing emits a snapshot or publishes a request

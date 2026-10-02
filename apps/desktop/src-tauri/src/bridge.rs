@@ -194,7 +194,7 @@ pub struct WindowParams {
 /// `meetingID` as `UUID(uuidString:)` reads it: the hyphenated 36-character
 /// form only, either case. The `uuid` crate would also read the 32-digit,
 /// braced and `urn:uuid:` forms, which Foundation rejects. `steno-bridge`
-/// brings this as `json::uuid::option`.
+/// brings this as `steno_core::json::uuid_text_opt`.
 fn deserialize_meeting_id<'de, D: Deserializer<'de>>(
     deserializer: D,
 ) -> Result<Option<Uuid>, D::Error> {
@@ -210,7 +210,7 @@ fn deserialize_meeting_id<'de, D: Deserializer<'de>>(
 
 /// A UUID as the Swift host writes it (`UUID.uuidString`, upper case), so a
 /// `requestedMeetingID` matches the list's ids by string. `steno-bridge`
-/// brings this as `json::uuid::format`.
+/// brings this as `steno_core::json::uuid_string`.
 pub fn uuid_text(id: &Uuid) -> String {
     id.hyphenated()
         .encode_upper(&mut Uuid::encode_buffer())
