@@ -14,7 +14,7 @@ xcuserdata/
 *.dSYM
 
 # Rust
-target/
+/target/
 apps/desktop/src-tauri/gen/
 
 # Downloaded ML models never go into git
