@@ -12,7 +12,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use chrono::FixedOffset;
 use steno_bridge::ListFilter;
 use steno_core::paths::path_from_file_url;
-use steno_core::{Meeting, MeetingStateKind, Person, Speaker, Store, StoreError};
+use steno_core::{Meeting, MeetingStateKind, Person, Speaker, Store};
 use uuid::Uuid;
 
 use crate::labels::day_string;
@@ -250,9 +250,6 @@ impl MeetingListViewModel {
                     }
                 }
                 self.error = None;
-            }
-            Err(error @ (StoreError::MeetingBusy(..) | StoreError::MeetingNotFound(_))) => {
-                self.error = Some(format!("Meeting could not be deleted: {error}"));
             }
             Err(error) => self.error = Some(format!("Meeting could not be deleted: {error}")),
         }

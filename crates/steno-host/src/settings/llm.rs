@@ -130,16 +130,11 @@ fn normalize(url: &str) -> String {
 #[must_use]
 pub fn valid_base_url(text: &str) -> Option<String> {
     let trimmed = text.trim();
-    if trimmed.is_empty() {
-        return None;
-    }
-    let (scheme, rest) = trimmed.split_once("://")?;
+    let (scheme, _) = trimmed.split_once("://")?;
     if !matches!(scheme.to_lowercase().as_str(), "http" | "https") {
         return None;
     }
-    let authority = rest.split(['/', '?', '#']).next()?;
-    let host = authority.rsplit('@').next()?.split(':').next()?;
-    (!host.is_empty()).then(|| trimmed.to_owned())
+    url_host(trimmed).map(|_| trimmed.to_owned())
 }
 
 /// The host of a valid base URL ("127.0.0.1").
@@ -333,12 +328,7 @@ impl LlmSettingsViewModel {
             Ok(models) => {
                 self.codex_models = models;
                 self.codex_models_error = None;
-                if let Some(window) = self
-                    .codex_models
-                    .iter()
-                    .find(|model| model.slug == self.codex_model)
-                    .and_then(|model| model.context_window)
-                {
+                if let Some(window) = self.listed_context_window(&self.codex_model) {
                     self.codex_context_tokens = window;
                 }
             }
@@ -363,16 +353,19 @@ impl LlmSettingsViewModel {
         now: DateTime<Utc>,
     ) {
         slug.clone_into(&mut self.codex_model);
-        if let Some(window) = self
-            .codex_models
-            .iter()
-            .find(|model| model.slug == slug)
-            .and_then(|model| model.context_window)
-        {
+        if let Some(window) = self.listed_context_window(slug) {
             self.codex_context_tokens = window;
         }
         self.test_result = None;
         self.commit(store, services, now);
+    }
+
+    /// The context window the backend lists for `slug`, when it lists one.
+    fn listed_context_window(&self, slug: &str) -> Option<i64> {
+        self.codex_models
+            .iter()
+            .find(|model| model.slug == slug)
+            .and_then(|model| model.context_window)
     }
 
     // Draft

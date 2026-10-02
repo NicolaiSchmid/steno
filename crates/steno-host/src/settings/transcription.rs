@@ -177,41 +177,6 @@ impl SpeechSettingsViewModel {
         self.refresh_states(services);
     }
 
-    /// Downloads the asset, following its progress; the blocking host runs
-    /// the download in place, so the states a page would see mid-download
-    /// are the ones `progress` reports to the given sink.
-    pub fn download(
-        &mut self,
-        asset: ModelAsset,
-        services: &Services,
-        mut progress: impl FnMut(&AssetState),
-    ) {
-        if matches!(self.state_of(asset), AssetState::Downloading { .. }) {
-            return;
-        }
-        let starting = AssetState::Downloading {
-            fraction: 0.0,
-            phase: "starting".to_owned(),
-        };
-        self.asset_states.insert(asset, starting.clone());
-        progress(&starting);
-        let outcome = services
-            .speech_models
-            .download(asset, &mut |fraction, phase| {
-                progress(&AssetState::Downloading {
-                    fraction,
-                    phase: phase.to_owned(),
-                });
-            });
-        let state = match outcome {
-            Ok(()) => AssetState::Installed {
-                bytes: services.speech_models.installed_size(asset),
-            },
-            Err(error) => AssetState::Failed(error),
-        };
-        self.asset_states.insert(asset, state);
-    }
-
     pub fn remove(&mut self, asset: ModelAsset, services: &Services) {
         match services.speech_models.remove(asset) {
             Ok(()) => {

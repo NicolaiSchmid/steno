@@ -320,14 +320,7 @@ impl OnboardingViewModel {
             return;
         }
         self.llm.save(store, services, now);
-        if self.llm.errors.error.is_some() || !self.llm.is_configured {
-            return;
-        }
-        self.setup_states.insert(
-            OnboardingSetupStepKind::Summaries,
-            SetupState::Saved(Self::saved_line_llm(&self.llm)),
-        );
-        self.finish_if_setup_handled(services);
+        self.collapse_summaries_if_saved(services);
     }
 
     /// The consent card's button on the Summaries row.
@@ -341,6 +334,12 @@ impl OnboardingViewModel {
             return;
         }
         self.llm.confirm_codex(store, services, now);
+        self.collapse_summaries_if_saved(services);
+    }
+
+    /// The Summaries row collapses once the LLM view model saved a
+    /// configured endpoint without error.
+    fn collapse_summaries_if_saved(&mut self, services: &Services) {
         if self.llm.errors.error.is_some() || !self.llm.is_configured {
             return;
         }
