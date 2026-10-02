@@ -263,6 +263,8 @@ fn stages(events: &[MeetingEvent]) -> Vec<PipelineStage> {
         .collect()
 }
 
+// One flow, as the Swift test: every assertion reads the run before it.
+#[allow(clippy::too_many_lines)]
 #[tokio::test(flavor = "multi_thread")]
 async fn a_mac_call_runs_every_stage_to_ready_and_delivers() {
     let world = world(
