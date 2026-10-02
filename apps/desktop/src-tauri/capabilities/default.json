@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "The three Steno windows: the core event API for the bridge's steno:event listener and nothing else. Every other native capability is reached through the bridge_call command, never from the page directly.",
+  "windows": ["main", "settings", "onboarding"],
+  "permissions": ["core:default"]
+}

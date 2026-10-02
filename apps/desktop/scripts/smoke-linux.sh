@@ -1,0 +1,48 @@
+#!/usr/bin/env bash
+# Headless smoke of the Tauri shell on Linux: runs the built binary under
+# xvfb-run with STENO_SMOKE_SECONDS, which makes the shell open all three
+# windows side by side and exit 0 once the main window has sent page.ready
+# (1 when it did not). When ImageMagick's `import` is available, the Xvfb
+# root is captured near the end of the wait into apps/desktop/screens/ as
+# review evidence; the windows carry only fixture data.
+#
+#   apps/desktop/scripts/smoke-linux.sh [path/to/steno-desktop] [seconds]
+#
+# Needs the web dist embedded (pnpm build in apps/macos/web before cargo
+# build) and the runtime libraries the binary links; on NixOS run it inside
+# the nix-shell apps/desktop/README.md names, with xvfb-run and imagemagick.
+set -euo pipefail
+
+root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
+binary="${1:-$root/target/debug/steno-desktop}"
+seconds="${2:-${STENO_SMOKE_SECONDS:-12}}"
+screens="$root/apps/desktop/screens"
+
+[[ -x "$binary" ]] || { echo "smoke: $binary is not an executable" >&2; exit 2; }
+command -v xvfb-run >/dev/null || { echo "smoke: xvfb-run is not on PATH" >&2; exit 2; }
+
+mkdir -p "$screens"
+export STENO_SMOKE_SECONDS="$seconds"
+# Software rendering: Xvfb has no GPU and WebKitGTK's DMA-BUF path fails
+# without one.
+export WEBKIT_DISABLE_DMABUF_RENDERER=1
+export WEBKIT_DISABLE_COMPOSITING_MODE=1
+export LIBGL_ALWAYS_SOFTWARE=1
+export GDK_BACKEND=x11
+
+# 1120x720 main at the origin, Settings to its right, onboarding below.
+xvfb-run --auto-servernum --server-args="-screen 0 2200x1500x24" bash -c '
+  set -u
+  "$1" & app=$!
+  if command -v import >/dev/null; then
+    sleep "$(( $2 > 3 ? $2 - 3 : 1 ))"
+    import -window root "$3/smoke-root.png" && echo "smoke: captured $3/smoke-root.png"
+    # One file per window, at the positions smoke.rs lays them out.
+    if command -v magick >/dev/null; then
+      magick "$3/smoke-root.png" -crop 1120x720+0+0 +repage "$3/main.png"
+      magick "$3/smoke-root.png" -crop 960x640+1160+0 +repage "$3/settings.png"
+      magick "$3/smoke-root.png" -crop 560x620+0+780 +repage "$3/onboarding.png"
+    fi
+  fi
+  wait "$app"
+' _ "$binary" "$seconds" "$screens"

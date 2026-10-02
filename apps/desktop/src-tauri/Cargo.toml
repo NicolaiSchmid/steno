@@ -1,0 +1,32 @@
+[package]
+name = "steno-desktop"
+description = "The Tauri shell: three windows around the Steno web UI"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "steno-desktop"
+path = "src/main.rs"
+
+[build-dependencies]
+serde_json.workspace = true
+tauri-build = { version = "2.7", features = [] }
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+tauri = { version = "2.12", features = [] }
+tauri-plugin-opener = "2.7"
+
+[features]
+default = ["fixture-host"]
+# Answers the bridge from the recorded fixtures (WP3). WP6 turns it off and
+# wires the real host.
+fixture-host = []
+
+[lints]
+workspace = true
