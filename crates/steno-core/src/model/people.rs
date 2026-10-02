@@ -126,6 +126,46 @@ impl Embedding {
             0.0
         }
     }
+
+    /// The normalised weighted mean of two embeddings of one dimension;
+    /// `lhs` unchanged when the weights sum to nothing or the dimensions
+    /// differ. Swift: `Embedding.weightedMean`.
+    #[must_use]
+    pub fn weighted_mean(
+        lhs: &Embedding,
+        lhs_weight: f32,
+        rhs: &Embedding,
+        rhs_weight: f32,
+    ) -> Embedding {
+        let total = lhs_weight + rhs_weight;
+        if total <= 0.0 || lhs.0.len() != rhs.0.len() {
+            return lhs.clone();
+        }
+        Embedding(
+            lhs.0
+                .iter()
+                .zip(&rhs.0)
+                .map(|(left, right)| (left * lhs_weight + right * rhs_weight) / total)
+                .collect(),
+        )
+        .normalized()
+    }
+
+    /// The normalised mean of `embeddings`, each taken at unit length so a
+    /// sample's scale is never a weight; `None` for none. Embeddings of
+    /// another dimension than the first are skipped. Swift: `Embedding.mean`.
+    #[must_use]
+    pub fn mean(embeddings: &[Embedding]) -> Option<Embedding> {
+        let first = embeddings.first()?;
+        let width = first.0.len();
+        let mut sum = vec![0.0f32; width];
+        for sample in embeddings.iter().filter(|sample| sample.0.len() == width) {
+            for (slot, value) in sum.iter_mut().zip(sample.normalized().0) {
+                *slot += value;
+            }
+        }
+        Some(Embedding(sum).normalized())
+    }
 }
 
 /// A known person ranked against a new voice, what `SpeakerMemory` returns.
@@ -324,6 +364,30 @@ impl Speaker {
     }
 }
 
+impl Person {
+    /// Whether two display names name the same person for lookup purposes:
+    /// equal ignoring case, diacritics and surrounding whitespace, so
+    /// "jerome" finds "Jérôme". Used by `Store::resolve_person` and the
+    /// speaker picker's filter. Swift: `Person.namesMatch`.
+    #[must_use]
+    pub fn names_match(lhs: &str, rhs: &str) -> bool {
+        fold_name(lhs) == fold_name(rhs)
+    }
+}
+
+/// `text` trimmed, lower-cased and with its combining marks removed:
+/// Foundation's `caseInsensitive` plus `diacriticInsensitive` compare.
+#[must_use]
+pub fn fold_name(text: &str) -> String {
+    use unicode_normalization::UnicodeNormalization as _;
+    use unicode_normalization::char::is_combining_mark;
+    text.trim()
+        .nfd()
+        .filter(|character| !is_combining_mark(*character))
+        .flat_map(char::to_lowercase)
+        .collect()
+}
+
 /// The model's guess who a speaker is (#78), one per speaker.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -368,6 +432,29 @@ mod tests {
     fn normalized_has_unit_magnitude_except_for_the_zero_vector() {
         assert_eq!(Embedding(vec![3.0, 3.0]).normalized().magnitude(), 1.0);
         assert_eq!(Embedding(vec![0.0]).normalized(), Embedding(vec![0.0]));
+    }
+
+    #[test]
+    fn names_match_ignores_case_diacritics_and_whitespace() {
+        assert!(Person::names_match(" jerome", "Jérôme "));
+        assert!(Person::names_match("ANNA", "anna"));
+        assert!(!Person::names_match("Anna", "Anne"));
+        assert_eq!(fold_name("Jérôme Müller"), "jerome muller");
+    }
+
+    #[test]
+    fn embedding_means_are_unit_length() {
+        let left = Embedding(vec![2.0, 0.0]);
+        let right = Embedding(vec![0.0, 2.0]);
+        let mean = Embedding::mean(&[left.clone(), right.clone()]).unwrap();
+        assert!((mean.magnitude() - 1.0).abs() < 1e-6);
+        assert!((mean.0[0] - mean.0[1]).abs() < 1e-6);
+        assert_eq!(Embedding::weighted_mean(&left, 1.0, &right, 1.0), mean);
+        assert_eq!(
+            Embedding::weighted_mean(&left, 1.0, &Embedding(vec![1.0]), 1.0),
+            left
+        );
+        assert_eq!(Embedding::mean(&[]), None);
     }
 
     #[test]

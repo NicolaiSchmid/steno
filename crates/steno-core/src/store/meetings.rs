@@ -148,6 +148,18 @@ impl Store {
         self.read(|connection| fetch(connection, id))
     }
 
+    /// Every meeting, newest first by `startedAt`: the list column's source.
+    pub fn all_meetings(&self) -> Result<Vec<Meeting>> {
+        self.read(|connection| {
+            query_all(
+                connection,
+                &format!("SELECT {COLUMNS} FROM meeting ORDER BY startedAt DESC, id"),
+                [],
+                from_row,
+            )
+        })
+    }
+
     /// Newest first by `startedAt`.
     pub fn meetings(&self, limit: i64, offset: i64) -> Result<Vec<Meeting>> {
         self.read(|connection| {

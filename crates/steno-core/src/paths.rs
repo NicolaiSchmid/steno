@@ -111,6 +111,42 @@ pub fn file_url(path: &Path, is_directory: bool) -> String {
     url
 }
 
+/// The path of a `file://` URL string as [`file_url`] writes it: the
+/// percent-encoding undone, a trailing directory slash dropped, and on
+/// Windows the leading slash before the drive letter removed. `None` for a
+/// URL of another scheme or one whose escapes are not UTF-8.
+#[must_use]
+pub fn path_from_file_url(url: &str) -> Option<PathBuf> {
+    let rest = url.strip_prefix("file://")?;
+    let rest = rest.strip_prefix("localhost").unwrap_or(rest);
+    let bytes = rest.as_bytes();
+    let mut decoded = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'%' {
+            let hex = bytes.get(index + 1..index + 3)?;
+            let hex = std::str::from_utf8(hex).ok()?;
+            decoded.push(u8::from_str_radix(hex, 16).ok()?);
+            index += 3;
+        } else {
+            decoded.push(bytes[index]);
+            index += 1;
+        }
+    }
+    let mut text = String::from_utf8(decoded).ok()?;
+    if text.len() > 1 && text.ends_with('/') {
+        text.pop();
+    }
+    if cfg!(windows)
+        && let Some(rest) = text
+            .strip_prefix('/')
+            .filter(|rest| rest.as_bytes().get(1) == Some(&b':'))
+    {
+        text = rest.replace('/', "\\");
+    }
+    Some(PathBuf::from(text))
+}
+
 /// RFC 3986 unreserved and sub-delims plus `:`, `@` and `/`: the characters
 /// Foundation leaves alone in a file URL's path.
 fn is_path_allowed(byte: u8) -> bool {
@@ -210,6 +246,28 @@ mod tests {
         assert_eq!(file_url_path("file:///tmp/%FF.wav"), None, "not UTF-8");
         assert_eq!(file_url_path("https://example.com/x"), None);
         assert_eq!(file_url_path("file://host-only"), None);
+    }
+
+    #[test]
+    fn file_urls_read_back_as_paths() {
+        if cfg!(windows) {
+            assert_eq!(
+                path_from_file_url("file:///C:/Users/x/Steno/Audio/"),
+                Some(PathBuf::from(r"C:\Users\x\Steno\Audio"))
+            );
+        } else {
+            let path = Path::new("/Users/x/Library/Application Support/Steno/Audio");
+            assert_eq!(
+                path_from_file_url(&file_url(path, true)).as_deref(),
+                Some(path)
+            );
+            assert_eq!(
+                path_from_file_url("file:///tmp/a%20b/%C3%BC.wav"),
+                Some(PathBuf::from("/tmp/a b/ü.wav"))
+            );
+        }
+        assert_eq!(path_from_file_url("https://example.com/a"), None);
+        assert_eq!(path_from_file_url("file:///tmp/%ZZ"), None);
     }
 
     #[test]

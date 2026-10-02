@@ -34,6 +34,8 @@ tauri-build = "2.7"
 tauri-plugin-opener = "2.7"
 thiserror = "2"
 tracing = "0.1"
+# Case- and diacritic-insensitive name matching (`Person::names_match`).
+unicode-normalization = "0.1"
 uuid = { version = "1", features = ["serde", "v4"] }
 # The digit source of `steno-bridge`'s `json::write_number`: shortest
 # round-trip digits with ties to even, as Foundation breaks them and Rust's
@@ -59,7 +61,6 @@ objc2-foundation = { version = "0.3.2", default-features = false, features = ["s
 # diacritics with.
 chrono-tz = "0.10"
 iana-time-zone = "0.1"
-unicode-normalization = "0.1"
 # The LLM crate: the HTTP client over rustls (no OpenSSL; the `ring`
 # provider, which builds with `cc` on all three platforms, installed by
 # `steno-llm` itself), bounded concurrency for the chunked passes, the path

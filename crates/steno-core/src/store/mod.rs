@@ -18,6 +18,7 @@ mod export;
 mod meetings;
 pub mod migrator;
 mod people;
+mod search;
 mod settings;
 mod tasks;
 mod transcript;
@@ -31,6 +32,7 @@ use thiserror::Error;
 use uuid::Uuid;
 
 pub use meetings::DeletedMeeting;
+pub use search::{SearchHit, fts5_pattern};
 
 use crate::model::MeetingStateKind;
 
@@ -59,6 +61,15 @@ pub enum StoreError {
     Io(#[from] std::io::Error),
     #[error("meeting {0} not found")]
     MeetingNotFound(Uuid),
+    #[error("speaker {0} not found")]
+    SpeakerNotFound(Uuid),
+    #[error("person {0} not found")]
+    PersonNotFound(Uuid),
+    #[error("speakers {0} and {1} belong to different meetings")]
+    SpeakersInDifferentMeetings(Uuid, Uuid),
+    /// `resolve_person` with nothing but whitespace.
+    #[error("a person needs a name")]
+    BlankPersonName,
     /// `delete_meeting` while the capture writer or the pipeline still holds
     /// the meeting's files.
     #[error("meeting {0} is {1} and cannot be deleted")]
