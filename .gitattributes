@@ -12,3 +12,6 @@
 # The bridge fixtures are compared byte for byte by the Swift, web and Rust
 # contract tests; keep them LF on every platform.
 apps/macos/web/fixtures/bridge/*.json text eol=lf
+# Goldens and fixtures compared byte for byte by the Swift and Rust tests:
+# never converted, so a Windows checkout keeps their LF line endings.
+Tests/Fixtures/** -text
