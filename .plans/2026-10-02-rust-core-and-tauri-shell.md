@@ -185,7 +185,7 @@ work, the notes at what the next package needs to know.
 
 | Package | Branch | PR | State | Notes |
 |---------|--------|----|-------|-------|
-| WP7 handover | `feat/rust-handover` | #TBD | PR open | `crates/steno-handover`: rustls (ring) listener, TLS 1.3 only, hyper 1 HTTP/1.1, pinned verifier (`pinning`), rcgen identity in the `SecretStore` as one PEM bundle, pairing, seven routes, inbox, mdns-sd advertiser; `tests/wire_contract.rs` reads `wire.ts`. Store gains `paired_device*` and `handover_receipt` queries. Core's `RecordingIntake` (copy into the audio folder, enqueue) waits for WP6: no `RecordingLayout` and no file-URL to path helper in Rust core yet. |
+| WP7 handover | `feat/rust-handover` | #169 | PR open | `crates/steno-handover`: rustls (ring) listener, TLS 1.3 only, hyper 1 HTTP/1.1, pinned verifier (`pinning`), rcgen identity in the `SecretStore` as one PEM bundle, pairing, seven routes, inbox, mdns-sd advertiser; `tests/wire_contract.rs` reads `wire.ts`. Store gains `paired_device*` and `handover_receipt` queries. Core's `RecordingIntake` (copy into the audio folder, enqueue) waits for WP6: no `RecordingLayout` and no file-URL to path helper in Rust core yet. |
 
 ## Risks
 
