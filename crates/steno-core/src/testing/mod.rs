@@ -1,9 +1,8 @@
 //! Deterministic implementations of every boundary, so the pipeline, the
 //! CLI and the shell test without models, a network or a keyring. Behind
 //! the `testing` cargo feature (and always present in this crate's own
-//! tests). One for one with `Sources/StenoCore/Testing` where the Rust
-//! store already supports it; the delivery dispatcher fake waits for the
-//! store's export (WP6).
+//! tests). One for one with `Sources/StenoCore/Testing`, except the
+//! dispatcher fake, which waits for the store's export.
 //!
 //! - [`CallLog`]: what a fake was asked to do, from any thread.
 //! - [`FakeSpeechEngine`] and [`FakeDiarizer`]: one segment per second,
