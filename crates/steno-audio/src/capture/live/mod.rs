@@ -15,10 +15,41 @@ pub mod hal;
 #[cfg(target_os = "macos")]
 pub use backend::LiveCaptureBackend;
 #[cfg(target_os = "macos")]
-pub use devices::{AudioDeviceInfo, AudioDevices};
+pub use devices::AudioDevices;
 
 #[cfg(not(target_os = "macos"))]
-pub use stub::{AudioDeviceInfo, LiveCaptureBackend};
+pub use stub::LiveCaptureBackend;
+
+/// One device as `steno dev audio-devices` and the app's input picker see
+/// it. `uid` is the stable identifier `Settings.input_device_uid` stores.
+/// Filled in by Core Audio here, by PipeWire (WP5b) and WASAPI (WP10) on
+/// the other platforms.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AudioDeviceInfo {
+    pub id: u32,
+    pub uid: String,
+    pub name: String,
+    pub input_channels: usize,
+    pub output_channels: usize,
+    pub nominal_sample_rate: f64,
+    pub transport_type: String,
+    pub is_running_somewhere: bool,
+    pub is_default_input: bool,
+    pub is_default_output: bool,
+    pub is_default_system_output: bool,
+}
+
+impl AudioDeviceInfo {
+    #[must_use]
+    pub fn is_input(&self) -> bool {
+        self.input_channels > 0
+    }
+
+    #[must_use]
+    pub fn is_output(&self) -> bool {
+        self.output_channels > 0
+    }
+}
 
 #[cfg(not(target_os = "macos"))]
 mod stub {
@@ -28,23 +59,6 @@ mod stub {
 
     use crate::capture::{CaptureBackend, CaptureError, CaptureStream};
     use crate::realtime::LaneFrameSink;
-
-    /// One audio device as the input picker sees it; filled in by the
-    /// PipeWire (WP5b) and WASAPI (WP10) backends.
-    #[derive(Debug, Clone, PartialEq)]
-    pub struct AudioDeviceInfo {
-        pub id: u32,
-        pub uid: String,
-        pub name: String,
-        pub input_channels: usize,
-        pub output_channels: usize,
-        pub nominal_sample_rate: f64,
-        pub transport_type: String,
-        pub is_running_somewhere: bool,
-        pub is_default_input: bool,
-        pub is_default_output: bool,
-        pub is_default_system_output: bool,
-    }
 
     /// On platforms without Core Audio the live backend exists so callers
     /// compile, and fails at `start`.

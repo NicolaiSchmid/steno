@@ -38,10 +38,10 @@ use objc2_core_audio::{
 use objc2_core_audio_types::{AudioBufferList, AudioTimeStamp};
 use steno_core::AudioLane;
 
-use super::devices::{AudioDeviceInfo, AudioDevices};
 use super::hal::{
     self, AggregateDevice, Id, IoProc, OSStatus, ProcessTap, PropertyListener, SYSTEM,
 };
+use super::{AudioDeviceInfo, AudioDevices};
 use crate::SAMPLE_RATE;
 use crate::capture::{
     CaptureBackend, CaptureError, CaptureStream, DeviceSnapshot, LaneSource, NominalSampleRate,

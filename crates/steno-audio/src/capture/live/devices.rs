@@ -16,37 +16,8 @@ use objc2_core_audio::{
     kAudioObjectPropertyScopeOutput,
 };
 
+use super::AudioDeviceInfo;
 use super::hal::{self, CoreAudioError, Id, SYSTEM, UNKNOWN};
-
-/// One HAL device as `steno dev audio-devices` and the app's input picker
-/// see it. `uid` is the stable identifier `Settings.input_device_uid`
-/// stores.
-#[derive(Debug, Clone, PartialEq)]
-pub struct AudioDeviceInfo {
-    pub id: u32,
-    pub uid: String,
-    pub name: String,
-    pub input_channels: usize,
-    pub output_channels: usize,
-    pub nominal_sample_rate: f64,
-    pub transport_type: String,
-    pub is_running_somewhere: bool,
-    pub is_default_input: bool,
-    pub is_default_output: bool,
-    pub is_default_system_output: bool,
-}
-
-impl AudioDeviceInfo {
-    #[must_use]
-    pub fn is_input(&self) -> bool {
-        self.input_channels > 0
-    }
-
-    #[must_use]
-    pub fn is_output(&self) -> bool {
-        self.output_channels > 0
-    }
-}
 
 pub struct AudioDevices;
 
