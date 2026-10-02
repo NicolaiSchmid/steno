@@ -3,7 +3,19 @@
 //!
 //! Swift: `WebNavigationPolicy.swift`.
 
-use tauri::Url;
+use tauri::{AppHandle, Url};
+
+/// The dev server a window may navigate to. `dev` is Tauri's alias for a
+/// build without `custom-protocol`: the one that loads `devUrl` instead
+/// of the embedded bundle, so the one that may navigate there; a release
+/// has none.
+pub fn dev_server(app: &AppHandle) -> Option<Url> {
+    if cfg!(dev) {
+        app.config().build.dev_url.clone()
+    } else {
+        None
+    }
+}
 
 /// `tauri://localhost` on Linux and macOS, `http://tauri.localhost` on
 /// Windows; `about:blank` is the webview's own empty document.

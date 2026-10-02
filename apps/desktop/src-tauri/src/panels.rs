@@ -27,8 +27,8 @@ use std::{collections::HashMap, fs, path::PathBuf, sync::Mutex};
 
 use serde::{Deserialize, Serialize};
 use tauri::{
-    AppHandle, LogicalPosition, LogicalSize, Manager, PhysicalPosition, Url, WebviewUrl,
-    WebviewWindow, WebviewWindowBuilder, webview::NewWindowResponse,
+    AppHandle, LogicalPosition, LogicalSize, Manager, PhysicalPosition, WebviewUrl, WebviewWindow,
+    WebviewWindowBuilder, webview::NewWindowResponse,
 };
 
 use crate::{navigation, recording::RecordingState};
@@ -190,15 +190,9 @@ impl PanelAnchor {
         }
     }
 
-    /// The frame of a panel of `size` hanging from the anchor, on whole
-    /// points.
+    /// The frame of a panel of `size` hanging from the anchor.
     pub fn frame_for(&self, size: (f64, f64)) -> Rect {
-        Rect::new(
-            (self.top_center.0 - size.0 / 2.0).round(),
-            self.top_center.1.round(),
-            size.0,
-            size.1,
-        )
+        frame_hanging_from(self.top_center, size)
     }
 
     /// The anchor that describes a panel at `frame`, on the screen among
@@ -368,11 +362,7 @@ pub fn show_at(
         }
     }
     let size = app.state::<Panels>().size_of(panel);
-    let dev_server: Option<Url> = if cfg!(dev) {
-        app.config().build.dev_url.clone()
-    } else {
-        None
-    };
+    let dev_server = navigation::dev_server(app);
     let window = WebviewWindowBuilder::new(
         app,
         panel.label(),
@@ -497,20 +487,21 @@ pub fn resize(app: &AppHandle, panel: Panel, size: (f64, f64)) -> tauri::Result<
         f64::from(position.x) / scale + f64::from(current.width) / scale / 2.0,
         f64::from(position.y) / scale,
     );
-    let frame = resized_frame(top_center, size);
+    let frame = frame_hanging_from(top_center, size);
     window.set_size(LogicalSize::new(size.0, size.1))?;
     window.set_position(LogicalPosition::new(frame.x, frame.y))?;
     Ok(())
 }
 
-/// The frame of a panel of `size` whose top-centre point stays at
-/// `top_center`.
-pub fn resized_frame(top_center: (f64, f64), size: (f64, f64)) -> Rect {
-    PanelAnchor {
-        top_center,
-        screen: Rect::new(0.0, 0.0, 0.0, 0.0),
-    }
-    .frame_for(size)
+/// The frame of a panel of `size` whose top-centre point is `top_center`,
+/// on whole points.
+pub fn frame_hanging_from(top_center: (f64, f64), size: (f64, f64)) -> Rect {
+    Rect::new(
+        (top_center.0 - size.0 / 2.0).round(),
+        top_center.1.round(),
+        size.0,
+        size.1,
+    )
 }
 
 /// The window moved. A move with the size the page last reported is a
@@ -686,10 +677,10 @@ mod tests {
     #[test]
     fn a_resize_keeps_the_top_centre() {
         let before = Rect::new(1160.0, 700.0, 480.0, 56.0);
-        let after = resized_frame((before.mid_x(), before.y), (384.0, 56.0));
+        let after = frame_hanging_from((before.mid_x(), before.y), (384.0, 56.0));
         assert_eq!(after, Rect::new(1208.0, 700.0, 384.0, 56.0));
         assert_eq!(after.mid_x(), before.mid_x());
-        let taller = resized_frame((after.mid_x(), after.y), (384.0, 68.0));
+        let taller = frame_hanging_from((after.mid_x(), after.y), (384.0, 68.0));
         assert_eq!((taller.x, taller.y), (after.x, after.y));
     }
 

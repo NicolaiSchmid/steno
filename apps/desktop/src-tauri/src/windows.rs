@@ -9,8 +9,7 @@ use std::fmt;
 
 use serde::Deserialize;
 use tauri::{
-    AppHandle, Manager, Url, WebviewUrl, WebviewWindow, WebviewWindowBuilder,
-    webview::NewWindowResponse,
+    AppHandle, Manager, WebviewUrl, WebviewWindow, WebviewWindowBuilder, webview::NewWindowResponse,
 };
 
 use crate::{
@@ -112,14 +111,7 @@ pub fn open(
         return Ok(existing);
     }
 
-    // `dev` is Tauri's alias for a build without `custom-protocol`: the one
-    // that loads `devUrl` instead of the embedded bundle, so the one that
-    // may navigate there.
-    let dev_server: Option<Url> = if cfg!(dev) {
-        app.config().build.dev_url.clone()
-    } else {
-        None
-    };
+    let dev_server = navigation::dev_server(app);
     let mut builder = WebviewWindowBuilder::new(
         app,
         spec.label,
