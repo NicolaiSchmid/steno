@@ -315,7 +315,7 @@ string_enum! {
 }
 
 string_enum! {
-    /// Swift: `BridgeMeetingState`.
+    /// Swift: `BridgeMeetingState`, an alias of `StenoCore.MeetingState.Kind`.
     pub enum MeetingState {
         Recording = "recording",
         Queued = "queued",

@@ -113,7 +113,8 @@ pub struct RecordingDevice {
 }
 
 string_enum! {
-    /// Swift: `RecordingSettingsSnapshot.Retention.Mode`.
+    /// Swift: `RecordingSettingsSnapshot.Retention.Mode`, an alias of
+    /// `StenoCore.AudioRetention.Kind`; hence the core name, no topic word.
     pub enum RetentionMode {
         DeleteAfterProcessing = "deleteAfterProcessing",
         KeepDays = "keepDays",
@@ -276,8 +277,9 @@ pub struct SummariesCodexModel {
     pub name: String,
 }
 
-/// The `ChatGPT` (Codex) preset: the sign-in on this machine, whether the user
-/// confirmed its use, and the model list once confirmed. Present only while
+/// The Codex preset, which summarises through the Codex sign-in on this Mac
+/// instead of an API key: what that sign-in looks like, whether the user has
+/// confirmed using it, and the model list once confirmed. Set only while
 /// that preset is selected. Swift: `SummariesSettingsSnapshot.Codex`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

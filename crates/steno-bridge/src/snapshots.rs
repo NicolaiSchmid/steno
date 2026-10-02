@@ -297,7 +297,8 @@ pub struct DetailRetention {
 }
 
 string_enum! {
-    /// Swift: `MeetingDetailSnapshot.Speaker.Assignment`.
+    /// Swift: `MeetingDetailSnapshot.Speaker.Assignment`, an alias of
+    /// `StenoCore.SpeakerAssignment.Kind`; hence the core name, no topic word.
     pub enum SpeakerAssignment {
         Unknown = "unknown",
         Suggested = "suggested",
@@ -370,7 +371,8 @@ pub struct DetailTurn {
 }
 
 string_enum! {
-    /// Swift: `MeetingDetailSnapshot.Task.Priority`.
+    /// Swift: `MeetingDetailSnapshot.Task.Priority`, an alias of
+    /// `StenoCore.TaskPriority`; hence the core name, no topic word.
     pub enum TaskPriority {
         Low = "low",
         Normal = "normal",
