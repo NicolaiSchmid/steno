@@ -531,7 +531,8 @@ PR off `main`.
 | WP7a LLM (`steno-llm`) | `feat/rust-llm` | #167 | merged |
 | WP7b adapters | `feat/rust-adapters` | #165 | merged |
 | WP6a host | `feat/rust-host` | #170 | merged |
-| WP5a audio (`steno-audio`) | `feat/rust-audio` | #166 | in review |
+| WP5a audio (`steno-audio`) | `feat/rust-audio` | #166 | merged |
+| WP4d diarization: `steno-diarize` (segmentation, embedding, Steno's clustering and refinement, ONNX Runtime and CoreML backends, G3 calibration harness) | `feat/rust-diarize` | #164 | open |
 
 WP4b is `crates/steno-speech-coreml`: `objc2-core-ml` behind one safe module,
 the four backend calls, the FluidAudio 0.17.4 heuristics ported
