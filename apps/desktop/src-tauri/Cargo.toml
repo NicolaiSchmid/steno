@@ -1,0 +1,34 @@
+[package]
+name = "steno-desktop"
+description = "The Tauri shell: three windows around the Steno web UI"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[build-dependencies]
+serde_json.workspace = true
+tauri-build.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+tauri.workspace = true
+tauri-plugin-opener.workspace = true
+thiserror.workspace = true
+uuid.workspace = true
+
+# The work packages named here are in .plans/2026-10-02-rust-core-and-tauri-shell.md.
+[features]
+default = ["fixture-host"]
+# Answers the bridge from the recorded fixtures in apps/macos/web/fixtures/bridge/
+# (WP3 of the plan); WP6 turns it off and wires the real host.
+fixture-host = []
+# Embeds the web `dist/` instead of loading `devUrl`; `cargo tauri build`
+# turns it on. A release build without it still loads the Vite dev server.
+custom-protocol = ["tauri/custom-protocol"]
+
+[lints]
+workspace = true

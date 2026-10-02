@@ -46,3 +46,6 @@ apps/macos/Config/Steno.entitlements
 apps/macos/Config/Local.xcconfig
 apps/macos/build/
 apps/macos/dist/
+
+# Tauri shell: smoke screenshots (apps/desktop/scripts/smoke-linux.sh)
+apps/desktop/screens/
