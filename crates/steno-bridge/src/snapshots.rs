@@ -297,10 +297,8 @@ pub struct DetailRetention {
 }
 
 /// Swift: `MeetingDetailSnapshot.Speaker.Assignment`, an alias of
-/// `StenoCore.SpeakerAssignment.Kind`; hence `steno_core`'s own type, and
-/// `MeetingDetailSnapshot.Task.Priority`, an alias of `StenoCore.TaskPriority`,
-/// the same way.
-pub use steno_core::{SpeakerAssignmentKind, TaskPriority};
+/// `StenoCore.SpeakerAssignment.Kind`; hence the core type itself.
+pub use steno_core::SpeakerAssignmentKind;
 
 /// Swift: `MeetingDetailSnapshot.Speaker`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -368,6 +366,10 @@ pub struct DetailTurn {
     pub end_seconds: f64,
     pub text: String,
 }
+
+/// Swift: `MeetingDetailSnapshot.Task.Priority`, an alias of
+/// `StenoCore.TaskPriority`; hence the core type itself.
+pub use steno_core::TaskPriority;
 
 /// Swift: `MeetingDetailSnapshot.Task`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
