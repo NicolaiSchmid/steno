@@ -21,6 +21,13 @@ name: Rust CI
 #     restores the compiled dependencies in every run and saves only from
 #     pushes to `main`.
 #
+# Linux also builds the web UI (its bridge transports are the shell's other
+# half), checks it, and runs the Tauri shell's headless smoke under Xvfb
+# (apps/desktop/scripts/smoke-linux.sh); the screenshots are uploaded as
+# `desktop-smoke-screens`. Windows and macOS build the shell against
+# `apps/desktop/src-tauri/placeholder/`, which build.rs embeds when the web
+# dist is missing.
+#
 # The `msrv` job checks the workspace against `rust-version` from Cargo.toml
 # on Linux, so the number stays true.
 
@@ -34,6 +41,10 @@ on:
       - 'crates/**'
       - 'apps/desktop/**'
       - 'apps/macos/web/fixtures/bridge/**'
+      - 'apps/macos/web/src/bridge/**'
+      - 'apps/macos/web/package.json'
+      - 'apps/macos/web/pnpm-lock.yaml'
+      - 'scripts/setup-linux.sh'
       - '.github/workflows/rust-ci.yml'
   push:
     branches: ['main']
@@ -45,6 +56,10 @@ on:
       - 'crates/**'
       - 'apps/desktop/**'
       - 'apps/macos/web/fixtures/bridge/**'
+      - 'apps/macos/web/src/bridge/**'
+      - 'apps/macos/web/package.json'
+      - 'apps/macos/web/pnpm-lock.yaml'
+      - 'scripts/setup-linux.sh'
       - '.github/workflows/rust-ci.yml'
 
 concurrency:
@@ -74,6 +89,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Linux prerequisites
+        if: matrix.name == 'linux'
+        run: scripts/setup-linux.sh
+
       - name: Use the installed rustup (self-hosted runners only)
         if: runner.environment == 'self-hosted'
         run: |
@@ -97,12 +116,46 @@ jobs:
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
+      # The web UI, so the shell embeds the real bundle and the Tauri
+      # transport's tests run beside the shell's.
+      - uses: pnpm/action-setup@v4
+        if: matrix.name == 'linux'
+        with:
+          package_json_file: apps/macos/web/package.json
+      - uses: actions/setup-node@v4
+        if: matrix.name == 'linux'
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: apps/macos/web/pnpm-lock.yaml
+      - name: Web install, check and build
+        if: matrix.name == 'linux'
+        run: pnpm install --frozen-lockfile && pnpm check && pnpm build
+        working-directory: apps/macos/web
+
       - name: Format
         run: cargo fmt --all --check
       - name: Lint
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - name: Test
         run: cargo test --workspace --locked
+
+      # A debug build loads devUrl; the smoke needs the embedded bundle, so
+      # the dev URL is dropped through Tauri's configuration merge.
+      - name: Desktop smoke
+        if: matrix.name == 'linux'
+        env:
+          TAURI_CONFIG: '{"build":{"devUrl":null}}'
+        run: |
+          cargo build -p steno-desktop --locked
+          apps/desktop/scripts/smoke-linux.sh target/debug/steno-desktop 15
+      - name: Upload smoke screenshots
+        if: matrix.name == 'linux' && always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: desktop-smoke-screens
+          path: apps/desktop/screens
+          if-no-files-found: ignore
 
   msrv:
     name: msrv
