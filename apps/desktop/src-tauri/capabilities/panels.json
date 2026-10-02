@@ -1,0 +1,11 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "panels",
+  "description": "The two floating panels: the same steno:event listening as the windows (the bubble reads the recording snapshot), plus start-dragging so the page's data-tauri-drag-region moves the panel by its background, as the Swift panel moved by isMovableByWindowBackground. panel_call is an app command.",
+  "windows": ["bubble", "prompt"],
+  "permissions": [
+    "core:event:allow-listen",
+    "core:event:allow-unlisten",
+    "core:window:allow-start-dragging"
+  ]
+}
