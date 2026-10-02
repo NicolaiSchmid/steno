@@ -535,7 +535,7 @@ string_enum! {
 pub struct OnboardingSetupStep {
     pub kind: OnboardingSetupStepKind,
     pub state: OnboardingSetupStepState,
-    /// The collapsed row's line once saved ("Saved: <model> at <host>").
+    /// The collapsed row's line once saved (`Saved: <model> at <host>`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub saved_line: Option<String>,
 }

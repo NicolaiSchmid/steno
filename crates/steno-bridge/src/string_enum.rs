@@ -1,4 +1,4 @@
-//! [`string_enum!`], the one way this crate spells a Swift `String` enum, and
+//! `string_enum!`, the one way this crate spells a Swift `String` enum, and
 //! the error its `FromStr` returns.
 //!
 //! A macro rather than `strum`: the raw values live next to the variants, and

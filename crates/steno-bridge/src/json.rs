@@ -7,7 +7,7 @@
 //! The printer walks a [`serde_json::Value`] rather than trusting
 //! `serde_json::to_string_pretty`: Foundation puts a space on both sides of the
 //! colon, prints an empty container as an open bracket, a blank line and a
-//! closing bracket, and spells doubles its own way (see [`write_number`]).
+//! closing bracket, and spells doubles its own way (see `write_number`).
 //!
 //! NaN and infinity: `serde_json::to_value` turns a non-finite `f64` into
 //! `null` before the printer sees it, so both styles here write `null`. Swift

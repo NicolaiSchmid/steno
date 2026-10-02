@@ -8,7 +8,7 @@
 //! Type mapping from Swift: `Int`/`Int64` are `i64`, `Double` is `f64`,
 //! `Date` is `chrono::DateTime<Utc>` written as `2026-09-29T12:48:00.000Z`,
 //! `UUID` is `uuid::Uuid` written upper case, a nil optional is an omitted
-//! key, `String` enums are [`string_enum!`] enums with the same raw values.
+//! key, `String` enums are `string_enum!` enums with the same raw values.
 //!
 //! Naming: a top-level Swift type keeps its name without the `Bridge` prefix
 //! (`BridgeMeetingSource` is [`MeetingSource`]). A type nested in a snapshot,

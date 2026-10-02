@@ -64,7 +64,7 @@ macro_rules! bridge_host {
         /// What answers the page's commands: one method per [`BridgeMethod`], params
         /// and reply typed per `commands.rs`. Every method defaults to the error the
         /// Swift window hosts throw for a method they do not route (`unknownMethod`,
-        /// "The host does not answer <method>."), so a host implements what its
+        /// "The host does not answer `<method>`."), so a host implements what its
         /// window answers and nothing else. Swift: `BridgeHost`.
         pub trait BridgeHost: Send + Sync {
             $(
