@@ -5,7 +5,7 @@ mod common;
 
 use steno_core::*;
 
-use common::{PERSON_ID, date, populate, uuid};
+use common::{PERSON_ID, date, populated, uuid};
 
 fn count(store: &Store, table: &str) -> i64 {
     store
@@ -21,8 +21,7 @@ fn count(store: &Store, table: &str) -> i64 {
 
 #[test]
 fn a_meeting_with_everything_reads_back_equal() {
-    let store = Store::in_memory().unwrap();
-    let meeting = populate(&store);
+    let (store, meeting) = populated();
     assert_eq!(store.meeting(meeting.id).unwrap().unwrap(), meeting);
     assert_eq!(store.meetings(10, 0).unwrap(), vec![meeting.clone()]);
     assert_eq!(
@@ -73,8 +72,7 @@ fn a_meeting_with_everything_reads_back_equal() {
 
 #[test]
 fn state_updates_touch_only_their_columns() {
-    let store = Store::in_memory().unwrap();
-    let meeting = populate(&store);
+    let (store, meeting) = populated();
     let now = date("2026-09-30T09:00:00.000Z");
     store
         .set_state(
@@ -154,8 +152,7 @@ fn interrupted_recordings_fail_at_launch() {
 
 #[test]
 fn deleting_a_meeting_cascades_and_keeps_persons() {
-    let store = Store::in_memory().unwrap();
-    let meeting = populate(&store);
+    let (store, meeting) = populated();
     for table in [
         "participant",
         "speaker",

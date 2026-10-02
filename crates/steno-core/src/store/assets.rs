@@ -1,38 +1,32 @@
 use rusqlite::{Connection, OptionalExtension, Row, params};
 use uuid::Uuid;
 
-use super::convert::{DbDate, DbEnum, DbJson, DbUuid, Unwrap as _};
-use super::{Result, Store};
+use super::convert::{DbDate, DbEnum, DbJson, DbUuid, RowExt as _};
+use super::{Result, Store, query_all, upsert_sql};
 use crate::model::{AudioAsset, AudioRetention};
 
 const COLUMNS: &str = "id, meetingID, url, format, lanes, sidecars16k, mixdownURL, retention, \
      retentionDays, expiresAt";
 
 fn from_row(row: &Row<'_>) -> rusqlite::Result<AudioAsset> {
-    let kind: DbEnum<_> = row.get("retention")?;
-    let days: Option<i64> = row.get("retentionDays")?;
+    let kind = row.col::<DbEnum<_>>("retention")?;
+    let days = row.get("retentionDays")?;
     Ok(AudioAsset {
-        id: row.get::<_, DbUuid>("id")?.0,
-        meeting_id: row.get::<_, DbUuid>("meetingID")?.0,
+        id: row.col::<DbUuid>("id")?,
+        meeting_id: row.col::<DbUuid>("meetingID")?,
         url: row.get("url")?,
-        format: row.get::<_, DbEnum<_>>("format")?.0,
-        lanes: row.get::<_, DbJson<_>>("lanes")?.0,
-        sidecars_16k: row.get::<_, DbJson<_>>("sidecars16k")?.0,
+        format: row.col::<DbEnum<_>>("format")?,
+        lanes: row.col::<DbJson<_>>("lanes")?,
+        sidecars_16k: row.col::<DbJson<_>>("sidecars16k")?,
         mixdown_url: row.get("mixdownURL")?,
-        retention: AudioRetention::from_columns(kind.0, days),
-        expires_at: row.get::<_, Option<DbDate>>("expiresAt")?.unwrap_db(),
+        retention: AudioRetention::from_columns(kind, days),
+        expires_at: row.col::<Option<DbDate>>("expiresAt")?,
     })
 }
 
 pub(super) fn save(connection: &Connection, asset: &AudioAsset) -> Result<()> {
     connection.execute(
-        &format!(
-            "INSERT INTO audioAsset ({COLUMNS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10) \
-             ON CONFLICT(id) DO UPDATE SET meetingID = excluded.meetingID, url = excluded.url, \
-             format = excluded.format, lanes = excluded.lanes, sidecars16k = excluded.sidecars16k, \
-             mixdownURL = excluded.mixdownURL, retention = excluded.retention, \
-             retentionDays = excluded.retentionDays, expiresAt = excluded.expiresAt"
-        ),
+        &upsert_sql("audioAsset", COLUMNS),
         params![
             DbUuid(asset.id),
             DbUuid(asset.meeting_id),
@@ -50,11 +44,12 @@ pub(super) fn save(connection: &Connection, asset: &AudioAsset) -> Result<()> {
 }
 
 pub(super) fn for_meeting(connection: &Connection, meeting_id: Uuid) -> Result<Vec<AudioAsset>> {
-    let mut statement = connection.prepare(&format!(
-        "SELECT {COLUMNS} FROM audioAsset WHERE meetingID = ?1 ORDER BY id"
-    ))?;
-    let rows = statement.query_map([DbUuid(meeting_id)], from_row)?;
-    Ok(rows.collect::<rusqlite::Result<_>>()?)
+    query_all(
+        connection,
+        &format!("SELECT {COLUMNS} FROM audioAsset WHERE meetingID = ?1 ORDER BY id"),
+        [DbUuid(meeting_id)],
+        from_row,
+    )
 }
 
 impl Store {
@@ -81,10 +76,12 @@ impl Store {
     /// files on disk.
     pub fn assets(&self) -> Result<Vec<AudioAsset>> {
         self.read(|connection| {
-            let mut statement =
-                connection.prepare(&format!("SELECT {COLUMNS} FROM audioAsset ORDER BY id"))?;
-            let rows = statement.query_map([], from_row)?;
-            Ok(rows.collect::<rusqlite::Result<_>>()?)
+            query_all(
+                connection,
+                &format!("SELECT {COLUMNS} FROM audioAsset ORDER BY id"),
+                [],
+                from_row,
+            )
         })
     }
 }

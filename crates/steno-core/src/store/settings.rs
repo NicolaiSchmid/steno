@@ -6,19 +6,14 @@
 use rusqlite::params;
 use serde_json::Value;
 
-use super::{Result, Store, StoreError};
+use super::{Result, Store, query_all};
 use crate::json;
 use crate::model::Settings;
 
 /// `settings` as a JSON object. Through text, not `to_value`, so an `f32`
 /// keeps its shortest form (`0.6`) as in [`json::to_column_string`].
 fn object(settings: &Settings) -> Result<serde_json::Map<String, Value>> {
-    match serde_json::from_str::<Value>(&serde_json::to_string(settings)?)? {
-        Value::Object(map) => Ok(map),
-        _ => Err(StoreError::Json(serde::ser::Error::custom(
-            "Settings is not a JSON object",
-        ))),
-    }
+    Ok(serde_json::from_str(&serde_json::to_string(settings)?)?)
 }
 
 impl Store {
@@ -30,18 +25,15 @@ impl Store {
     /// [`Store::settings`] over explicit defaults (tests pass one with a
     /// known audio folder).
     pub fn settings_with_defaults(&self, defaults: &Settings) -> Result<Settings> {
-        let mut merged = object(defaults)?;
-        self.read(|connection| {
-            let mut statement = connection.prepare("SELECT key, value FROM setting")?;
-            let rows = statement.query_map([], |row| {
+        let rows = self.read(|connection| {
+            query_all(connection, "SELECT key, value FROM setting", [], |row| {
                 Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-            })?;
-            for row in rows {
-                let (key, value) = row?;
-                merged.insert(key, json::from_column_str(&value)?);
-            }
-            Ok(())
+            })
         })?;
+        let mut merged = object(defaults)?;
+        for (key, value) in rows {
+            merged.insert(key, json::from_column_str(&value)?);
+        }
         Ok(serde_json::from_value(Value::Object(merged))?)
     }
 

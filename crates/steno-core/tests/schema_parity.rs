@@ -32,7 +32,11 @@ fn rust_migrations_produce_the_swift_schema() {
 
 #[test]
 fn identifiers_match_migrations_swift() {
-    assert_eq!(migrator::identifiers(), ["v1", "v2", "v3", "v4"]);
+    let identifiers: Vec<_> = migrator::MIGRATIONS
+        .iter()
+        .map(|migration| migration.identifier)
+        .collect();
+    assert_eq!(identifiers, ["v1", "v2", "v3", "v4"]);
     let store = Store::in_memory().unwrap();
     assert_eq!(
         store.applied_migrations().unwrap(),

@@ -28,9 +28,6 @@ macro_rules! string_enum {
         }
 
         impl $name {
-            /// Every case in declaration order.
-            pub const ALL: &'static [$name] = &[$($name::$variant),+];
-
             /// The case name Swift writes to JSON and to the database.
             #[must_use]
             pub const fn as_str(self) -> &'static str {

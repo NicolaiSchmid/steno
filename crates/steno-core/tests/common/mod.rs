@@ -234,3 +234,11 @@ pub fn populate(store: &Store) -> Meeting {
         .unwrap();
     meeting
 }
+
+/// A fresh in-memory store with the sample written: where the behaviour
+/// tests start.
+pub fn populated() -> (Store, Meeting) {
+    let store = Store::in_memory().unwrap();
+    let meeting = populate(&store);
+    (store, meeting)
+}

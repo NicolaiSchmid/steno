@@ -1,11 +1,13 @@
 //! Column encodings shared with GRDB: dates as `yyyy-MM-dd HH:mm:ss.SSS`
 //! UTC text, UUIDs as uppercase text, JSON columns through `StenoJSON`,
-//! string enums by case name.
+//! string enums by case name. Each wrapper is a `ToSql` for `params!` and a
+//! `FromSql` that [`RowExt::col`] unwraps again.
 
 use std::fmt::Display;
 use std::str::FromStr;
 
 use chrono::{DateTime, NaiveDate, NaiveDateTime, Utc};
+use rusqlite::Row;
 use rusqlite::types::{FromSql, FromSqlError, FromSqlResult, ToSql, ToSqlOutput, ValueRef};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -55,7 +57,7 @@ fn text_of(value: ValueRef<'_>) -> FromSqlResult<&str> {
     }
 }
 
-/// A `DATETIME` column.
+/// A `DATETIME` column; text both ways, which is all Swift ever writes.
 pub struct DbDate(pub DateTime<Utc>);
 
 impl ToSql for DbDate {
@@ -66,24 +68,9 @@ impl ToSql for DbDate {
 
 impl FromSql for DbDate {
     fn column_result(value: ValueRef<'_>) -> FromSqlResult<Self> {
-        match value {
-            ValueRef::Text(_) => parse_date_text(text_of(value)?)
-                .map(DbDate)
-                .ok_or(FromSqlError::InvalidType),
-            ValueRef::Real(seconds) => DateTime::from_timestamp_millis(
-                // GRDB reads a number as seconds since 1970.
-                #[allow(clippy::cast_possible_truncation)]
-                {
-                    (seconds * 1000.0).round() as i64
-                },
-            )
+        parse_date_text(text_of(value)?)
             .map(DbDate)
-            .ok_or(FromSqlError::InvalidType),
-            ValueRef::Integer(seconds) => DateTime::from_timestamp(seconds, 0)
-                .map(DbDate)
-                .ok_or(FromSqlError::InvalidType),
-            _ => Err(FromSqlError::InvalidType),
-        }
+            .ok_or(FromSqlError::InvalidType)
     }
 }
 
@@ -145,30 +132,60 @@ where
     }
 }
 
-/// `Option<DbUuid>` → `Option<Uuid>` and friends, for row reads.
-pub trait Unwrap {
+/// A wrapper and the domain value inside it, for [`RowExt::col`].
+pub trait Wrapped: FromSql {
     type Inner;
-    fn unwrap_db(self) -> Self::Inner;
+    fn inner(self) -> Self::Inner;
 }
 
-impl Unwrap for Option<DbUuid> {
-    type Inner = Option<Uuid>;
-    fn unwrap_db(self) -> Option<Uuid> {
-        self.map(|value| value.0)
+impl Wrapped for DbUuid {
+    type Inner = Uuid;
+    fn inner(self) -> Uuid {
+        self.0
     }
 }
 
-impl Unwrap for Option<DbDate> {
-    type Inner = Option<DateTime<Utc>>;
-    fn unwrap_db(self) -> Option<DateTime<Utc>> {
-        self.map(|value| value.0)
+impl Wrapped for DbDate {
+    type Inner = DateTime<Utc>;
+    fn inner(self) -> DateTime<Utc> {
+        self.0
     }
 }
 
-impl<T> Unwrap for Option<DbJson<T>> {
-    type Inner = Option<T>;
-    fn unwrap_db(self) -> Option<T> {
-        self.map(|value| value.0)
+impl<T: DeserializeOwned> Wrapped for DbJson<T> {
+    type Inner = T;
+    fn inner(self) -> T {
+        self.0
+    }
+}
+
+impl<T> Wrapped for DbEnum<T>
+where
+    T: FromStr,
+    T::Err: std::error::Error + Send + Sync + 'static,
+{
+    type Inner = T;
+    fn inner(self) -> T {
+        self.0
+    }
+}
+
+impl<W: Wrapped> Wrapped for Option<W> {
+    type Inner = Option<W::Inner>;
+    fn inner(self) -> Self::Inner {
+        self.map(Wrapped::inner)
+    }
+}
+
+/// `row.col::<DbUuid>("id")?`, `row.col::<Option<DbDate>>("expiresAt")?`:
+/// a column read through its wrapper and handed back as the domain value.
+pub trait RowExt {
+    fn col<W: Wrapped>(&self, name: &str) -> rusqlite::Result<W::Inner>;
+}
+
+impl RowExt for Row<'_> {
+    fn col<W: Wrapped>(&self, name: &str) -> rusqlite::Result<W::Inner> {
+        self.get::<_, W>(name).map(Wrapped::inner)
     }
 }
 

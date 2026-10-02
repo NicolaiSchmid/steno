@@ -15,10 +15,10 @@ mod tasks;
 mod transcript;
 
 use std::path::Path;
-use std::sync::{Mutex, MutexGuard};
+use std::sync::{Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
-use rusqlite::{Connection, Transaction};
+use rusqlite::{Connection, Params, Row, Transaction};
 use thiserror::Error;
 use uuid::Uuid;
 
@@ -45,8 +45,10 @@ pub enum StoreError {
     /// wrote it, and this one must not touch it.
     #[error("the database was migrated by a newer version ({0})")]
     UnknownMigration(String),
-    #[error("the store's connection lock was poisoned")]
-    Poisoned,
+    /// GRDB's check after migrating: the schema went in but the rows no
+    /// longer satisfy its foreign keys.
+    #[error("{0} foreign key violations after migrating")]
+    ForeignKeyViolations(i64),
 }
 
 pub type Result<T> = std::result::Result<T, StoreError>;
@@ -91,19 +93,22 @@ impl Store {
         })
     }
 
-    fn lock(&self) -> Result<MutexGuard<'_, Connection>> {
-        self.connection.lock().map_err(|_| StoreError::Poisoned)
+    /// A panic while a caller held the connection has already rolled its
+    /// transaction back, so a poisoned lock is reused, not an error.
+    fn lock(&self) -> MutexGuard<'_, Connection> {
+        self.connection
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
     }
 
     /// Runs `body` on the connection outside a transaction.
     pub fn read<T>(&self, body: impl FnOnce(&Connection) -> Result<T>) -> Result<T> {
-        let connection = self.lock()?;
-        body(&connection)
+        body(&self.lock())
     }
 
     /// Runs `body` inside one transaction, committed when it returns `Ok`.
     pub fn write<T>(&self, body: impl FnOnce(&Transaction<'_>) -> Result<T>) -> Result<T> {
-        let mut connection = self.lock()?;
+        let mut connection = self.lock();
         let transaction = connection.transaction()?;
         let value = body(&transaction)?;
         transaction.commit()?;
@@ -113,7 +118,7 @@ impl Store {
     /// The migration identifiers recorded in `grdb_migrations`, in
     /// application order.
     pub fn applied_migrations(&self) -> Result<Vec<String>> {
-        self.read(|connection| Ok(migrator::applied(connection)?))
+        self.read(migrator::applied)
     }
 
     /// The schema in the normalised form `scripts/dump-swift-schema.sh`
@@ -123,11 +128,9 @@ impl Store {
         self.read(|connection| {
             let mut lines = Vec::new();
             for query in SCHEMA_DUMP_QUERIES {
-                let mut statement = connection.prepare(query)?;
-                let rows = statement.query_map([], |row| row.get::<_, String>(0))?;
-                for row in rows {
-                    lines.push(row?);
-                }
+                lines.extend(query_all(connection, query, [], |row| {
+                    row.get::<_, String>(0)
+                })?);
             }
             Ok(lines.join("\n"))
         })
@@ -151,3 +154,42 @@ pub const SCHEMA_DUMP_QUERIES: &[&str] = &[
     "SELECT type || '|' || name || '|' || tbl_name || '|' || coalesce(sql, '') FROM sqlite_master ORDER BY type, name",
     "SELECT 'migration|' || identifier FROM grdb_migrations ORDER BY rowid",
 ];
+
+/// Every row of `sql` through `map`: GRDB's `fetchAll`.
+fn query_all<T>(
+    connection: &Connection,
+    sql: &str,
+    params: impl Params,
+    map: impl FnMut(&Row<'_>) -> rusqlite::Result<T>,
+) -> Result<Vec<T>> {
+    let mut statement = connection.prepare(sql)?;
+    let rows = statement.query_map(params, map)?;
+    Ok(rows.collect::<rusqlite::Result<_>>()?)
+}
+
+/// `INSERT INTO table (columns) VALUES (?1, …)`: GRDB's `insert`.
+fn insert_sql(table: &str, columns: &str) -> String {
+    let placeholders: Vec<String> = (1..=columns.split(',').count())
+        .map(|index| format!("?{index}"))
+        .collect();
+    format!(
+        "INSERT INTO {table} ({columns}) VALUES ({})",
+        placeholders.join(", ")
+    )
+}
+
+/// [`insert_sql`] with `ON CONFLICT DO UPDATE` on every column but the
+/// first, the primary key: GRDB's `save`, which replaces the row in place
+/// when it exists (so the FTS update triggers fire) and inserts it otherwise.
+fn upsert_sql(table: &str, columns: &str) -> String {
+    let mut names = columns.split(',').map(str::trim);
+    let key = names.next().expect("the key column comes first");
+    let updates: Vec<String> = names
+        .map(|column| format!("{column} = excluded.{column}"))
+        .collect();
+    format!(
+        "{} ON CONFLICT({key}) DO UPDATE SET {}",
+        insert_sql(table, columns),
+        updates.join(", ")
+    )
+}

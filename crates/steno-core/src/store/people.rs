@@ -1,9 +1,8 @@
-use rusqlite::types::ToSql;
 use rusqlite::{Connection, OptionalExtension, Row, params};
 use uuid::Uuid;
 
-use super::convert::{DbDate, DbEnum, DbUuid, Unwrap as _};
-use super::{Result, Store};
+use super::convert::{DbDate, DbEnum, DbUuid, RowExt as _};
+use super::{Result, Store, insert_sql, query_all, upsert_sql};
 use crate::model::{
     Embedding, Participant, Person, Speaker, SpeakerAssignment, SpeakerNameSuggestion, TimeRange,
 };
@@ -19,22 +18,18 @@ const PERSON_COLUMNS: &str = "id, displayName, email, embedding, sampleCount, cr
 
 fn person_from_row(row: &Row<'_>) -> rusqlite::Result<Person> {
     Ok(Person {
-        id: row.get::<_, DbUuid>("id")?.0,
+        id: row.col::<DbUuid>("id")?,
         display_name: row.get("displayName")?,
         email: row.get("email")?,
         embedding: embedding_of(row, "embedding")?,
         sample_count: row.get("sampleCount")?,
-        created_at: row.get::<_, DbDate>("createdAt")?.0,
+        created_at: row.col::<DbDate>("createdAt")?,
     })
 }
 
 pub(super) fn save_person(connection: &Connection, person: &Person) -> Result<()> {
     connection.execute(
-        "INSERT INTO person (id, displayName, email, embedding, sampleCount, createdAt) \
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6) \
-         ON CONFLICT(id) DO UPDATE SET displayName = excluded.displayName, email = excluded.email, \
-         embedding = excluded.embedding, sampleCount = excluded.sampleCount, \
-         createdAt = excluded.createdAt",
+        &upsert_sql("person", PERSON_COLUMNS),
         params![
             DbUuid(person.id),
             person.display_name,
@@ -53,21 +48,18 @@ const PARTICIPANT_COLUMNS: &str = "id, meetingID, personID, displayName, role, e
 
 fn participant_from_row(row: &Row<'_>) -> rusqlite::Result<Participant> {
     Ok(Participant {
-        id: row.get::<_, DbUuid>("id")?.0,
-        meeting_id: row.get::<_, DbUuid>("meetingID")?.0,
-        person_id: row.get::<_, Option<DbUuid>>("personID")?.unwrap_db(),
+        id: row.col::<DbUuid>("id")?,
+        meeting_id: row.col::<DbUuid>("meetingID")?,
+        person_id: row.col::<Option<DbUuid>>("personID")?,
         display_name: row.get("displayName")?,
-        role: row.get::<_, DbEnum<_>>("role")?.0,
+        role: row.col::<DbEnum<_>>("role")?,
         email: row.get("email")?,
     })
 }
 
 pub(super) fn save_participant(connection: &Connection, participant: &Participant) -> Result<()> {
     connection.execute(
-        "INSERT INTO participant (id, meetingID, personID, displayName, role, email) \
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6) \
-         ON CONFLICT(id) DO UPDATE SET meetingID = excluded.meetingID, personID = excluded.personID, \
-         displayName = excluded.displayName, role = excluded.role, email = excluded.email",
+        &upsert_sql("participant", PARTICIPANT_COLUMNS),
         params![
             DbUuid(participant.id),
             DbUuid(participant.meeting_id),
@@ -86,8 +78,8 @@ const SPEAKER_COLUMNS: &str = "id, meetingID, clusterLabel, assignment, personID
      embedding, sampleClipStart, sampleClipEnd, sampleClipURL, clusterConfidence";
 
 fn speaker_from_row(row: &Row<'_>) -> rusqlite::Result<Speaker> {
-    let kind: DbEnum<_> = row.get("assignment")?;
-    let person_id = row.get::<_, Option<DbUuid>>("personID")?.unwrap_db();
+    let kind = row.col::<DbEnum<_>>("assignment")?;
+    let person_id = row.col::<Option<DbUuid>>("personID")?;
     let similarity: Option<f64> = row.get("similarity")?;
     let clip_start: Option<f64> = row.get("sampleClipStart")?;
     let clip_end: Option<f64> = row.get("sampleClipEnd")?;
@@ -97,10 +89,10 @@ fn speaker_from_row(row: &Row<'_>) -> rusqlite::Result<Speaker> {
     #[allow(clippy::cast_possible_truncation)]
     let narrow = |value: f64| value as f32;
     Ok(Speaker {
-        id: row.get::<_, DbUuid>("id")?.0,
-        meeting_id: row.get::<_, DbUuid>("meetingID")?.0,
+        id: row.col::<DbUuid>("id")?,
+        meeting_id: row.col::<DbUuid>("meetingID")?,
         cluster_label: row.get("clusterLabel")?,
-        assignment: SpeakerAssignment::from_columns(kind.0, person_id, similarity.map(narrow)),
+        assignment: SpeakerAssignment::from_columns(kind, person_id, similarity.map(narrow)),
         embedding: embedding_of(row, "embedding")?,
         sample_clip_range: match (clip_start, clip_end) {
             (Some(lower), Some(upper)) if lower <= upper => Some(TimeRange { lower, upper }),
@@ -111,57 +103,48 @@ fn speaker_from_row(row: &Row<'_>) -> rusqlite::Result<Speaker> {
     })
 }
 
-fn speaker_params(speaker: &Speaker) -> [Box<dyn ToSql + '_>; 11] {
-    [
-        Box::new(DbUuid(speaker.id)),
-        Box::new(DbUuid(speaker.meeting_id)),
-        Box::new(&speaker.cluster_label),
-        Box::new(DbEnum(speaker.assignment.kind())),
-        Box::new(speaker.assignment.person_id().map(DbUuid)),
-        Box::new(speaker.assignment.similarity().map(f64::from)),
-        Box::new(speaker.embedding.as_ref().map(Embedding::to_bytes)),
-        Box::new(speaker.sample_clip_range.map(|range| range.lower)),
-        Box::new(speaker.sample_clip_range.map(|range| range.upper)),
-        Box::new(&speaker.sample_clip_url),
-        Box::new(f64::from(speaker.cluster_confidence)),
-    ]
+fn write_speaker(connection: &Connection, speaker: &Speaker, sql: &str) -> Result<()> {
+    connection.execute(
+        sql,
+        params![
+            DbUuid(speaker.id),
+            DbUuid(speaker.meeting_id),
+            speaker.cluster_label,
+            DbEnum(speaker.assignment.kind()),
+            speaker.assignment.person_id().map(DbUuid),
+            speaker.assignment.similarity().map(f64::from),
+            speaker.embedding.as_ref().map(Embedding::to_bytes),
+            speaker.sample_clip_range.map(|range| range.lower),
+            speaker.sample_clip_range.map(|range| range.upper),
+            speaker.sample_clip_url,
+            f64::from(speaker.cluster_confidence),
+        ],
+    )?;
+    Ok(())
 }
 
 pub(super) fn insert_speaker(connection: &Connection, speaker: &Speaker) -> Result<()> {
-    connection.execute(
-        &format!(
-            "INSERT INTO speaker ({SPEAKER_COLUMNS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)"
-        ),
-        speaker_params(speaker),
-    )?;
-    Ok(())
+    write_speaker(connection, speaker, &insert_sql("speaker", SPEAKER_COLUMNS))
 }
 
 pub(super) fn save_speaker(connection: &Connection, speaker: &Speaker) -> Result<()> {
-    connection.execute(
-        &format!(
-            "INSERT INTO speaker ({SPEAKER_COLUMNS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11) \
-             ON CONFLICT(id) DO UPDATE SET meetingID = excluded.meetingID, \
-             clusterLabel = excluded.clusterLabel, assignment = excluded.assignment, \
-             personID = excluded.personID, similarity = excluded.similarity, \
-             embedding = excluded.embedding, sampleClipStart = excluded.sampleClipStart, \
-             sampleClipEnd = excluded.sampleClipEnd, sampleClipURL = excluded.sampleClipURL, \
-             clusterConfidence = excluded.clusterConfidence"
-        ),
-        speaker_params(speaker),
-    )?;
-    Ok(())
+    write_speaker(connection, speaker, &upsert_sql("speaker", SPEAKER_COLUMNS))
 }
 
 pub(super) fn speakers(connection: &Connection, meeting_id: Uuid) -> Result<Vec<Speaker>> {
-    let mut statement = connection.prepare(&format!(
-        "SELECT {SPEAKER_COLUMNS} FROM speaker WHERE meetingID = ?1 ORDER BY clusterLabel, id"
-    ))?;
-    let rows = statement.query_map([DbUuid(meeting_id)], speaker_from_row)?;
-    Ok(rows.collect::<rusqlite::Result<_>>()?)
+    query_all(
+        connection,
+        &format!(
+            "SELECT {SPEAKER_COLUMNS} FROM speaker WHERE meetingID = ?1 ORDER BY clusterLabel, id"
+        ),
+        [DbUuid(meeting_id)],
+        speaker_from_row,
+    )
 }
 
 // MARK: speaker name suggestions
+
+const SUGGESTION_COLUMNS: &str = "speakerID, meetingID, name, confidence, evidence";
 
 /// Replaces the meeting's suggestions with those of `suggestions` that carry
 /// a name and point at one of the meeting's speakers; ascending by
@@ -175,10 +158,12 @@ pub(super) fn replace_name_suggestions(
         "DELETE FROM speakerNameSuggestion WHERE meetingID = ?1",
         [DbUuid(meeting_id)],
     )?;
-    let speaker_ids: Vec<Uuid> = speakers(connection, meeting_id)?
-        .into_iter()
-        .map(|speaker| speaker.id)
-        .collect();
+    let speaker_ids = query_all(
+        connection,
+        "SELECT id FROM speaker WHERE meetingID = ?1",
+        [DbUuid(meeting_id)],
+        |row| row.col::<DbUuid>("id"),
+    )?;
     let mut sorted: Vec<&SpeakerNameSuggestion> = suggestions
         .iter()
         .filter(|suggestion| speaker_ids.contains(&suggestion.speaker_id))
@@ -194,10 +179,7 @@ pub(super) fn replace_name_suggestions(
             continue;
         };
         connection.execute(
-            "INSERT INTO speakerNameSuggestion (speakerID, meetingID, name, confidence, evidence) \
-             VALUES (?1, ?2, ?3, ?4, ?5) \
-             ON CONFLICT(speakerID) DO UPDATE SET meetingID = excluded.meetingID, \
-             name = excluded.name, confidence = excluded.confidence, evidence = excluded.evidence",
+            &upsert_sql("speakerNameSuggestion", SUGGESTION_COLUMNS),
             params![
                 DbUuid(suggestion.speaker_id),
                 DbUuid(meeting_id),
@@ -214,11 +196,12 @@ impl Store {
     /// Every known person, by display name.
     pub fn persons(&self) -> Result<Vec<Person>> {
         self.read(|connection| {
-            let mut statement = connection.prepare(&format!(
-                "SELECT {PERSON_COLUMNS} FROM person ORDER BY displayName, id"
-            ))?;
-            let rows = statement.query_map([], person_from_row)?;
-            Ok(rows.collect::<rusqlite::Result<_>>()?)
+            query_all(
+                connection,
+                &format!("SELECT {PERSON_COLUMNS} FROM person ORDER BY displayName, id"),
+                [],
+                person_from_row,
+            )
         })
     }
 
@@ -245,12 +228,15 @@ impl Store {
     /// The meeting's participants by display name.
     pub fn participants(&self, meeting_id: Uuid) -> Result<Vec<Participant>> {
         self.read(|connection| {
-            let mut statement = connection.prepare(&format!(
-                "SELECT {PARTICIPANT_COLUMNS} FROM participant WHERE meetingID = ?1 \
-                 ORDER BY displayName, id"
-            ))?;
-            let rows = statement.query_map([DbUuid(meeting_id)], participant_from_row)?;
-            Ok(rows.collect::<rusqlite::Result<_>>()?)
+            query_all(
+                connection,
+                &format!(
+                    "SELECT {PARTICIPANT_COLUMNS} FROM participant WHERE meetingID = ?1 \
+                     ORDER BY displayName, id"
+                ),
+                [DbUuid(meeting_id)],
+                participant_from_row,
+            )
         })
     }
 
@@ -267,19 +253,20 @@ impl Store {
     /// speaker id order.
     pub fn name_suggestions(&self, meeting_id: Uuid) -> Result<Vec<SpeakerNameSuggestion>> {
         self.read(|connection| {
-            let mut statement = connection.prepare(
+            query_all(
+                connection,
                 "SELECT speakerID, name, confidence, evidence FROM speakerNameSuggestion \
                  WHERE meetingID = ?1 ORDER BY speakerID",
-            )?;
-            let rows = statement.query_map([DbUuid(meeting_id)], |row| {
-                Ok(SpeakerNameSuggestion {
-                    speaker_id: row.get::<_, DbUuid>("speakerID")?.0,
-                    name: Some(row.get("name")?),
-                    confidence: row.get("confidence")?,
-                    evidence: row.get("evidence")?,
-                })
-            })?;
-            Ok(rows.collect::<rusqlite::Result<_>>()?)
+                [DbUuid(meeting_id)],
+                |row| {
+                    Ok(SpeakerNameSuggestion {
+                        speaker_id: row.col::<DbUuid>("speakerID")?,
+                        name: Some(row.get("name")?),
+                        confidence: row.get("confidence")?,
+                        evidence: row.get("evidence")?,
+                    })
+                },
+            )
         })
     }
 }

@@ -2,11 +2,12 @@ use chrono::{DateTime, Utc};
 use rusqlite::{Connection, OptionalExtension, Row, params, params_from_iter};
 use uuid::Uuid;
 
-use super::convert::{DbDate, DbEnum, DbJson, DbUuid, Unwrap as _};
-use super::{Result, Store, StoreError, assets, people, tasks, transcript};
+use super::convert::{DbDate, DbEnum, DbJson, DbUuid, RowExt as _};
+use super::{Result, Store, StoreError, assets, people, query_all, tasks, transcript, upsert_sql};
 use crate::model::{
     AudioAsset, Decision, LanguageTag, Meeting, MeetingState, MeetingStateKind, MeetingTask,
-    Participant, Speaker, SpeakerNameSuggestion, TranscriptSegment, derived_uuid,
+    Participant, Speaker, SpeakerNameSuggestion, SummaryDocument, TitleOrigin, TranscriptSegment,
+    derived_uuid,
 };
 
 const COLUMNS: &str = "id, title, startedAt, duration, language, source, calendarEventID, tags, \
@@ -14,45 +15,33 @@ const COLUMNS: &str = "id, title, startedAt, duration, language, source, calenda
      updatedAt, endReason, titleOrigin";
 
 pub(super) fn from_row(row: &Row<'_>) -> rusqlite::Result<Meeting> {
-    let kind: DbEnum<MeetingStateKind> = row.get("state")?;
-    let failure_reason: Option<String> = row.get("failureReason")?;
+    let kind = row.col::<DbEnum<_>>("state")?;
+    let failure_reason = row.get("failureReason")?;
     Ok(Meeting {
-        id: row.get::<_, DbUuid>("id")?.0,
+        id: row.col::<DbUuid>("id")?,
         title: row.get("title")?,
-        started_at: row.get::<_, DbDate>("startedAt")?.0,
+        started_at: row.col::<DbDate>("startedAt")?,
         duration: row.get("duration")?,
         language: row.get::<_, Option<String>>("language")?.map(Into::into),
-        source: row.get::<_, DbEnum<_>>("source")?.0,
+        source: row.col::<DbEnum<_>>("source")?,
         calendar_event_id: row.get("calendarEventID")?,
-        tags: row.get::<_, DbJson<Vec<String>>>("tags")?.0,
-        state: MeetingState::from_columns(kind.0, failure_reason),
-        end_reason: row.get::<_, Option<DbJson<_>>>("endReason")?.unwrap_db(),
-        title_origin: row.get::<_, DbEnum<_>>("titleOrigin")?.0,
+        tags: row.col::<DbJson<_>>("tags")?,
+        state: MeetingState::from_columns(kind, failure_reason),
+        end_reason: row.col::<Option<DbJson<_>>>("endReason")?,
+        title_origin: row.col::<DbEnum<_>>("titleOrigin")?,
         template_id: row.get("templateID")?,
-        summary: row.get::<_, Option<DbJson<_>>>("summary")?.unwrap_db(),
+        summary: row.col::<Option<DbJson<_>>>("summary")?,
         scratchpad: row.get("scratchpad")?,
-        llm_usage: row.get::<_, Option<DbJson<_>>>("llmUsage")?.unwrap_db(),
-        created_at: row.get::<_, DbDate>("createdAt")?.0,
-        updated_at: row.get::<_, DbDate>("updatedAt")?.0,
+        llm_usage: row.col::<Option<DbJson<_>>>("llmUsage")?,
+        created_at: row.col::<DbDate>("createdAt")?,
+        updated_at: row.col::<DbDate>("updatedAt")?,
     })
 }
 
-/// GRDB's `save`: the row is replaced in place when it exists (the FTS
-/// update trigger fires), inserted otherwise.
+/// GRDB's `save`; `summaryText` is derived from `summary` on every write.
 pub(super) fn save(connection: &Connection, meeting: &Meeting) -> Result<()> {
     connection.execute(
-        "INSERT INTO meeting (id, title, startedAt, duration, language, source, calendarEventID, \
-         tags, state, failureReason, templateID, summary, summaryText, scratchpad, llmUsage, \
-         createdAt, updatedAt, endReason, titleOrigin) \
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19) \
-         ON CONFLICT(id) DO UPDATE SET title = excluded.title, startedAt = excluded.startedAt, \
-         duration = excluded.duration, language = excluded.language, source = excluded.source, \
-         calendarEventID = excluded.calendarEventID, tags = excluded.tags, state = excluded.state, \
-         failureReason = excluded.failureReason, templateID = excluded.templateID, \
-         summary = excluded.summary, summaryText = excluded.summaryText, \
-         scratchpad = excluded.scratchpad, llmUsage = excluded.llmUsage, \
-         createdAt = excluded.createdAt, updatedAt = excluded.updatedAt, \
-         endReason = excluded.endReason, titleOrigin = excluded.titleOrigin",
+        &upsert_sql("meeting", COLUMNS),
         params![
             DbUuid(meeting.id),
             meeting.title,
@@ -66,7 +55,11 @@ pub(super) fn save(connection: &Connection, meeting: &Meeting) -> Result<()> {
             meeting.state.failure_reason(),
             meeting.template_id,
             meeting.summary.as_ref().map(DbJson),
-            meeting.summary.as_ref().map(SummaryDocumentExt::plain_text).unwrap_or_default(),
+            meeting
+                .summary
+                .as_ref()
+                .map(SummaryDocument::plain_text)
+                .unwrap_or_default(),
             meeting.scratchpad,
             meeting.llm_usage.as_ref().map(DbJson),
             DbDate(meeting.created_at),
@@ -76,16 +69,6 @@ pub(super) fn save(connection: &Connection, meeting: &Meeting) -> Result<()> {
         ],
     )?;
     Ok(())
-}
-
-trait SummaryDocumentExt {
-    fn plain_text(&self) -> String;
-}
-
-impl SummaryDocumentExt for crate::model::SummaryDocument {
-    fn plain_text(&self) -> String {
-        crate::model::SummaryDocument::plain_text(self)
-    }
 }
 
 pub(super) fn fetch(connection: &Connection, id: Uuid) -> Result<Option<Meeting>> {
@@ -159,11 +142,14 @@ impl Store {
     /// Newest first by `startedAt`.
     pub fn meetings(&self, limit: i64, offset: i64) -> Result<Vec<Meeting>> {
         self.read(|connection| {
-            let mut statement = connection.prepare(&format!(
-                "SELECT {COLUMNS} FROM meeting ORDER BY startedAt DESC, id LIMIT ?1 OFFSET ?2"
-            ))?;
-            let rows = statement.query_map(params![limit, offset], from_row)?;
-            Ok(rows.collect::<rusqlite::Result<_>>()?)
+            query_all(
+                connection,
+                &format!(
+                    "SELECT {COLUMNS} FROM meeting ORDER BY startedAt DESC, id LIMIT ?1 OFFSET ?2"
+                ),
+                params![limit, offset],
+                from_row,
+            )
         })
     }
 
@@ -175,15 +161,15 @@ impl Store {
         }
         self.read(|connection| {
             let placeholders = vec!["?"; kinds.len()].join(", ");
-            let mut statement = connection.prepare(&format!(
-                "SELECT {COLUMNS} FROM meeting WHERE state IN ({placeholders}) \
-                 ORDER BY startedAt, id"
-            ))?;
-            let rows = statement.query_map(
+            query_all(
+                connection,
+                &format!(
+                    "SELECT {COLUMNS} FROM meeting WHERE state IN ({placeholders}) \
+                     ORDER BY startedAt, id"
+                ),
                 params_from_iter(kinds.iter().map(|kind| kind.as_str())),
                 from_row,
-            )?;
-            Ok(rows.collect::<rusqlite::Result<_>>()?)
+            )
         })
     }
 
@@ -197,21 +183,20 @@ impl Store {
         now: DateTime<Utc>,
     ) -> Result<Vec<Uuid>> {
         self.write(|transaction| {
-            let rows: Vec<Meeting> = {
-                let mut statement = transaction.prepare(&format!(
-                    "SELECT {COLUMNS} FROM meeting WHERE state = ?1 ORDER BY startedAt, id"
-                ))?;
-                let rows = statement.query_map([MeetingStateKind::Recording.as_str()], from_row)?;
-                rows.collect::<rusqlite::Result<_>>()?
-            };
-            for mut meeting in rows.iter().cloned() {
+            let mut meetings = query_all(
+                transaction,
+                &format!("SELECT {COLUMNS} FROM meeting WHERE state = ?1 ORDER BY startedAt, id"),
+                [MeetingStateKind::Recording.as_str()],
+                from_row,
+            )?;
+            for meeting in &mut meetings {
                 meeting.state = MeetingState::Failed {
                     reason: reason.to_owned(),
                 };
                 meeting.updated_at = now;
-                save(transaction, &meeting)?;
+                save(transaction, meeting)?;
             }
-            Ok(rows.into_iter().map(|meeting| meeting.id).collect())
+            Ok(meetings.into_iter().map(|meeting| meeting.id).collect())
         })
     }
 
@@ -250,7 +235,7 @@ impl Store {
         }
         self.update_meeting(id, now, |meeting| {
             trimmed.clone_into(&mut meeting.title);
-            meeting.title_origin = crate::model::TitleOrigin::User;
+            meeting.title_origin = TitleOrigin::User;
             Ok(())
         })
         .map(drop)
