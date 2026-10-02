@@ -138,4 +138,9 @@ Swift app does. The identifier is `uno.schmid.steno.desktop` so the shell
 installs beside the Swift app; WP9 changes it to `uno.schmid.steno.mac` for
 the cutover. Linux and Windows keep their native title bar; macOS gets the
 overlay title bar the Swift windows have. The page's traffic light inset is a
-WP8 design question for the other two platforms.
+WP8 design question for the other two platforms. On Linux, WebKitGTK leaks one
+shared-memory file descriptor per destroyed webview that lived longer than
+about 250 ms (29 to 107 fds over 70 Settings open/close cycles; wry/WebKitGTK
+level, not the shell), so long sessions with many Settings opens should be
+watched until [#160](https://github.com/NicolaiSchmid/steno/issues/160) is
+resolved.
