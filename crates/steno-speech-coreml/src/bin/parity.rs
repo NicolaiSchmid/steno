@@ -2,7 +2,7 @@
 //! pipeline, scored against the Swift app's transcripts.
 //!
 //! ```text
-//! steno-coreml-parity [--models DIR] [--out DIR] [--concurrency N] [--sort-by-timestamp] <corpus-dir> <baseline-dir>
+//! steno-coreml-parity [--models DIR] [--out DIR] [--concurrency N] <corpus-dir> <baseline-dir>
 //! ```
 //!
 //! `corpus-dir` holds `<name>.wav` (16 kHz mono), `baseline-dir` holds
@@ -32,7 +32,6 @@ fn main() {
                     .and_then(|s| s.parse().ok())
                     .unwrap_or(options.concurrency);
             }
-            "--sort-by-timestamp" => options.sort_by_timestamp = true,
             _ => positional.push(PathBuf::from(arg)),
         }
     }

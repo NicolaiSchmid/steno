@@ -37,10 +37,6 @@ pub struct Options {
     pub out: Option<PathBuf>,
     /// Parallel windows.
     pub concurrency: usize,
-    /// Sort the merged tokens by frame before rendering, as the Swift
-    /// `createTokenTimings` does; off by default so the harness measures
-    /// the merge order itself.
-    pub sort_by_timestamp: bool,
 }
 
 impl Default for Options {
@@ -49,7 +45,6 @@ impl Default for Options {
             models: None,
             out: None,
             concurrency: Config::default().concurrency,
-            sort_by_timestamp: false,
         }
     }
 }
@@ -271,10 +266,7 @@ pub fn run(
         let transcript = transcriber.transcribe(&audio)?;
         let wall_seconds = started.elapsed().as_secs_f64();
 
-        let mut tokens = transcript.tokens;
-        if options.sort_by_timestamp {
-            tokens.sort_by_key(|token| token.frame);
-        }
+        let tokens = transcript.tokens;
         let segments = raw_segments(&tokens, transcriber.vocab(), audio_seconds);
         let errors = word_errors(&joined_text(&baseline), &joined_text(&segments));
         let timing = timing_agreement(&timed_words(&baseline), &timed_words(&segments));
