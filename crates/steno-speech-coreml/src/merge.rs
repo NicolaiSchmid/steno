@@ -177,16 +177,8 @@ fn merge_using_matches(
         }
         let next_left = left_indices[idx + 1];
         let next_right = right_indices[idx + 1];
-        let gap_left: &[Token] = if next_left > left_index + 1 {
-            &left[left_index + 1..next_left]
-        } else {
-            &[]
-        };
-        let gap_right: &[Token] = if next_right > right_index + 1 {
-            &right[right_index + 1..next_right]
-        } else {
-            &[]
-        };
+        let gap_left = left.get(left_index + 1..next_left).unwrap_or(&[]);
+        let gap_right = right.get(right_index + 1..next_right).unwrap_or(&[]);
         if gap_right.len() > gap_left.len() {
             result.extend_from_slice(gap_right);
         } else {
@@ -218,11 +210,11 @@ fn merge_using_matches(
     // Right begins mid-word: left owns the seam word; resume right at its
     // next word-initial piece instead of gluing.
     if let Some(&last_left) = left_indices.last() {
-        let mut cursor = last_left + 1;
-        while cursor < left.len() && !vocab.is_splice_safe(left[cursor].id) {
-            result.push(left[cursor]);
-            cursor += 1;
-        }
+        result.extend(
+            left[last_left + 1..]
+                .iter()
+                .take_while(|token| !vocab.is_splice_safe(token.id)),
+        );
     }
     match tail.iter().position(|token| vocab.is_splice_safe(token.id)) {
         Some(resume) => result.extend_from_slice(&tail[resume..]),
@@ -267,21 +259,19 @@ fn merge_by_midpoint(
 ) -> Vec<Token> {
     let cutoff = f64::midpoint(left_end, right_start);
     let at_or_after = |token: &Token| frame_seconds(token.frame) >= cutoff;
+    let splice_safe = |token: &Token| vocab.is_splice_safe(token.id);
     let mut left_end_index = left.iter().position(at_or_after).unwrap_or(left.len());
     let mut right_start_index = right.iter().position(at_or_after).unwrap_or(right.len());
     if left_end_index > 0 {
-        while left_end_index < left.len() && !vocab.is_splice_safe(left[left_end_index].id) {
-            left_end_index += 1;
-        }
+        left_end_index = left[left_end_index..]
+            .iter()
+            .position(splice_safe)
+            .map_or(left.len(), |offset| left_end_index + offset);
     }
     // Adopt the advanced cutoff only if a splice-safe token exists ahead;
     // otherwise the whole right window would be discarded (PR #759).
-    let mut scan = right_start_index;
-    while scan < right.len() && !vocab.is_splice_safe(right[scan].id) {
-        scan += 1;
-    }
-    if scan < right.len() {
-        right_start_index = scan;
+    if let Some(offset) = right[right_start_index..].iter().position(splice_safe) {
+        right_start_index += offset;
     }
     [&left[..left_end_index], &right[right_start_index..]].concat()
 }
