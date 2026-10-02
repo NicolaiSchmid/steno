@@ -25,9 +25,7 @@ pub mod obsidian;
 pub mod rendering;
 pub mod runtime;
 
+// The entry points a caller wires up; everything else through its module.
 pub use obsidian::{ObsidianError, ObsidianFolderDestination};
-pub use rendering::{
-    ArtifactRenderer, Frontmatter, FrontmatterValue, LinkStyle, PersonPage, RenderOptions,
-    RenderedArtifact, RenderedArtifactKind, Timecode,
-};
+pub use rendering::{ArtifactRenderer, LinkStyle, RenderOptions};
 pub use runtime::DeliveryCoordinator;

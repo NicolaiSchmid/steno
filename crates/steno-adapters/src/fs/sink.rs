@@ -60,12 +60,14 @@ impl LocalFolderSink {
             .unwrap_or_default()
     }
 
-    /// `None` when there is no such file.
+    /// `None` when there is no such file; one read, so a file that appears
+    /// or vanishes between a probe and the read cannot be misreported.
     pub fn read(&self, relative: &str) -> std::io::Result<Option<Vec<u8>>> {
-        if !self.exists(relative) {
-            return Ok(None);
+        match fs::read(self.path(relative)) {
+            Ok(data) => Ok(Some(data)),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(error),
         }
-        fs::read(self.path(relative)).map(Some)
     }
 
     pub fn write(&self, data: &[u8], relative: &str) -> Result<(), WriteFailure> {

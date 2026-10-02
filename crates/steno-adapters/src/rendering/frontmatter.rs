@@ -1,10 +1,11 @@
 //! A YAML frontmatter block built from typed values.
 //! Swift: `Sources/StenoAdapters/Rendering/Frontmatter.swift`.
 
+use std::fmt::Write as _;
+
 use chrono::{DateTime, Utc};
 use chrono_tz::Tz;
 
-use super::Timecode;
 use super::date_text;
 
 /// One typed frontmatter value.
@@ -101,8 +102,7 @@ impl Frontmatter {
                 '\t' => result.push_str("\\t"),
                 '\r' => result.push_str("\\r"),
                 other if Self::needs_escape(other) => {
-                    result.push_str("\\u");
-                    result.push_str(&Timecode::pad_hex(u32::from(other), 4));
+                    let _ = write!(result, "\\u{:04X}", u32::from(other));
                 }
                 other => result.push(other),
             }

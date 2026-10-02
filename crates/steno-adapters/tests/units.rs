@@ -124,7 +124,6 @@ fn timecode_pads_to_the_requested_width() {
     assert_eq!(Timecode::pad(7, 2), "07");
     assert_eq!(Timecode::pad(123, 2), "123");
     assert_eq!(Timecode::pad(5, 3), "005");
-    assert_eq!(Timecode::pad_hex(0x7F, 4), "007F");
 }
 
 fn sample_frontmatter() -> Frontmatter {

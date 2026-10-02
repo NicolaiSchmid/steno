@@ -4,11 +4,11 @@
 
 use steno_core::{MeetingExport, Person};
 
+use super::ManagedBlock;
 use super::{
     Frontmatter, FrontmatterValue, LinkStyle, PersonPage, RenderOptions, date_text, markdown_text,
 };
 use crate::naming::{MeetingFolder, Note, Slug};
-use crate::obsidian::ManagedBlock;
 
 pub(crate) struct PersonPageRenderer<'a> {
     pub export: &'a MeetingExport,

@@ -224,15 +224,7 @@ impl ObsidianFolderDestination {
         meeting_id: Uuid,
         ledger: &mut DeliveryLedger,
     ) -> Result<(), ObsidianError> {
-        let stale: Vec<String> = ledger
-            .previous()
-            .into_iter()
-            .flat_map(|receipt| &receipt.files)
-            .filter(|file| file.ownership == FileOwnership::ManagedBlock)
-            .filter(|file| !rendered.contains(&file.relative_path))
-            .map(|file| file.relative_path.clone())
-            .collect();
-        for path in &stale {
+        for path in &ledger.stale_managed_pages(rendered) {
             let Some(existing) = self.reading(path, || self.sink.read(path))? else {
                 continue;
             };
@@ -251,7 +243,7 @@ impl ObsidianFolderDestination {
     }
 
     /// The folder of a first delivery: the scope's path with the ledger's
-    /// collision rule, fed by the two things only this transport knows.
+    /// collision rule, fed by the two things only this destination knows.
     pub(crate) fn resolve_folder(&self, meeting: &MeetingExport) -> String {
         DeliveryLedger::resolve_folder(
             &MeetingFolder::path(&meeting.meeting, self.time_zone),

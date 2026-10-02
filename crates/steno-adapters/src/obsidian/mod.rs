@@ -2,7 +2,8 @@
 //! person pages.
 
 mod destination;
-mod managed_block;
 
+/// The block is pure text and lives with the renderers; the destination is
+/// what writes it into the vault.
+pub use crate::rendering::ManagedBlock;
 pub use destination::{ObsidianError, ObsidianFolderDestination};
-pub use managed_block::ManagedBlock;

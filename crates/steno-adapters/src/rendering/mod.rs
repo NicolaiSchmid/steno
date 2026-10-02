@@ -7,6 +7,7 @@ mod artifact;
 pub mod date_text;
 mod folder_note;
 mod frontmatter;
+mod managed_block;
 pub mod markdown_text;
 mod names;
 mod options;
@@ -18,6 +19,7 @@ mod vtt;
 
 pub use artifact::{ArtifactRenderer, PersonPage, RenderedArtifact, RenderedArtifactKind};
 pub use frontmatter::{Frontmatter, FrontmatterValue};
+pub use managed_block::ManagedBlock;
 pub use options::{LinkStyle, RenderOptions};
 pub use timecode::Timecode;
 

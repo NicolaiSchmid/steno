@@ -156,10 +156,12 @@ impl DeliveryDispatcher for DeliveryCoordinator {
     }
 }
 
-/// The machine's IANA time zone, UTC when it cannot be read or is not a
-/// zone the tables know. Swift: `TimeZone.current`.
-#[must_use]
-pub fn local_time_zone() -> Tz {
+/// The machine's IANA time zone. Swift: `TimeZone.current`. When the name
+/// cannot be read or the zone tables do not know it, the destination runs
+/// in UTC: the folder dates and the times in the notes shift to UTC and
+/// nothing is logged, since the crate has no logger; the shell shows the
+/// zone it resolved in Settings.
+fn local_time_zone() -> Tz {
     iana_time_zone::get_timezone()
         .ok()
         .and_then(|name| name.parse().ok())

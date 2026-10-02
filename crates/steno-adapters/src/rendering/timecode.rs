@@ -50,11 +50,4 @@ impl Timecode {
     pub fn pad(value: i64, width: usize) -> String {
         format!("{value:0width$}")
     }
-
-    /// `value` in uppercase hex, zero-padded on the left to at least `width`
-    /// digits (`"007F"`).
-    #[must_use]
-    pub fn pad_hex(value: u32, width: usize) -> String {
-        format!("{value:0width$X}")
-    }
 }

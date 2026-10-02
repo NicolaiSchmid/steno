@@ -1,4 +1,5 @@
-//! The region of a person page that Steno owns.
+//! The region of a person page that Steno owns, as text; the Obsidian
+//! destination writes it.
 //! Swift: `Sources/StenoAdapters/Obsidian/ManagedBlock.swift`.
 
 use uuid::Uuid;

@@ -49,7 +49,7 @@ fn a_first_delivery_writes_everything() {
 }
 
 #[test]
-fn files_the_app_never_wrote_are_not_opened_on_reexport() {
+fn may_write_refuses_a_file_the_app_never_wrote_on_reexport() {
     let previous = receipt(
         ROOT,
         &[

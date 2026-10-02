@@ -1,7 +1,7 @@
 //! The delivery policy with no I/O in it.
 //! Swift: `Sources/StenoAdapters/Runtime/DeliveryLedger.swift`.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::path::{Component, Path, PathBuf};
 
 use steno_core::content_hash::sha256;
@@ -13,7 +13,7 @@ use uuid::Uuid;
 /// destination renders, asks the ledger and calls its sink; the rules live
 /// here once, so a second destination reuses them untouched and the "files
 /// the app never wrote are never opened for writing" rule cannot drift
-/// between transports.
+/// between destinations.
 #[derive(Debug, Clone)]
 pub struct DeliveryLedger {
     /// The destination root this delivery writes to (the vault path).
@@ -58,12 +58,6 @@ impl DeliveryLedger {
         &self.root
     }
 
-    /// The previous receipt, when it applies to this root.
-    #[must_use]
-    pub fn previous(&self) -> Option<&DeliveryReceipt> {
-        self.previous.as_ref()
-    }
-
     #[must_use]
     pub fn is_first_delivery(&self) -> bool {
         self.previous.is_none()
@@ -102,8 +96,23 @@ impl DeliveryLedger {
         );
     }
 
+    /// The managed-block pages of the previous receipt that this delivery
+    /// did not render (`rendered` holds the paths it did): the pages a
+    /// person who left the meeting is still listed on.
+    #[must_use]
+    pub fn stale_managed_pages(&self, rendered: &HashSet<String>) -> Vec<String> {
+        self.previous
+            .iter()
+            .flat_map(|receipt| &receipt.files)
+            .filter(|file| file.ownership == FileOwnership::ManagedBlock)
+            .filter(|file| !rendered.contains(&file.relative_path))
+            .map(|file| file.relative_path.clone())
+            .collect()
+    }
+
     /// Whether a listed file sits directly in `folder` with a name that
     /// satisfies `name`.
+    #[must_use]
     pub fn lists(&self, folder: &str, name: impl Fn(&str) -> bool) -> bool {
         let prefix = format!("{folder}/");
         self.files.keys().any(|path| {
@@ -149,7 +158,9 @@ impl DeliveryLedger {
     /// The folder of a first delivery: `base`, with `-2`, `-3`, … appended
     /// while the candidate exists and holds another meeting's `meeting.json`
     /// (or none); a candidate holding `meeting_id` is a crashed attempt and
-    /// is reused. `exists` and `meeting_of` are the transport's two lookups.
+    /// is reused. `exists` and `meeting_of` are the destination's two
+    /// lookups.
+    #[must_use]
     pub fn resolve_folder(
         base: &str,
         meeting_id: Uuid,
