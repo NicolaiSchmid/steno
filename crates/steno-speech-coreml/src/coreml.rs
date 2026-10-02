@@ -313,13 +313,19 @@ impl Array {
         true
     }
 
-    fn require(&self, data_type: DataType) -> Result<(), SpeechError> {
+    fn require_type(&self, data_type: DataType) -> Result<(), SpeechError> {
         if self.data_type != data_type {
             return Err(SpeechError::CoreMl(format!(
                 "array is {:?}, wanted {data_type:?}",
                 self.data_type
             )));
         }
+        Ok(())
+    }
+
+    /// `require_type` plus contiguity, the precondition of the typed slices.
+    fn require(&self, data_type: DataType) -> Result<(), SpeechError> {
+        self.require_type(data_type)?;
         if !self.is_contiguous() {
             return Err(SpeechError::CoreMl(format!(
                 "array {:?} with strides {:?} is not contiguous",
@@ -525,18 +531,6 @@ impl EncoderView {
             // buffer under CoreML's own strides; the array is alive for
             // `&self`.
             *slot = unsafe { base.add(offset).read() };
-        }
-        Ok(())
-    }
-}
-
-impl Array {
-    fn require_type(&self, data_type: DataType) -> Result<(), SpeechError> {
-        if self.data_type != data_type {
-            return Err(SpeechError::CoreMl(format!(
-                "array is {:?}, wanted {data_type:?}",
-                self.data_type
-            )));
         }
         Ok(())
     }

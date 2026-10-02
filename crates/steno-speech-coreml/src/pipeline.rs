@@ -17,7 +17,7 @@ use crate::SpeechError;
 use crate::Token;
 use crate::backend::{Backend, Scratch};
 use crate::chunking::{
-    FRAME_SAMPLES, FRAME_SECONDS, Layout, MAX_MODEL_SAMPLES, MEL_HOP, SAMPLE_RATE, Window,
+    FRAME_SAMPLES, FRAME_SECONDS, Layout, MAX_MODEL_SAMPLES, SAMPLE_RATE, Window,
     adaptive_speech_rms_threshold, encoder_frames, plan_windows, silence_aligned_chunk_starts,
     speech_end_samples, speech_like_seconds,
 };
@@ -262,28 +262,26 @@ impl Transcriber {
         let windows = plan_windows(total, speech_end, &chunk_starts, layout, 0);
         let (outputs, mut stats) = self.decode_windows(audio, &windows)?;
         stats.windows = outputs.len();
+        let several = outputs.len() > 1;
 
-        let Some(first) = outputs.first() else {
+        let mut outputs = outputs.into_iter();
+        let Some(first) = outputs.next() else {
             return Ok(Transcript {
                 tokens: Vec::new(),
                 stats,
             });
         };
         let vocab = self.vocab();
-        let mut merged = first.clone();
-        if outputs.len() > 1 {
-            for window in &outputs[1..] {
-                merged = merge_chunks(&merged, window, vocab);
-            }
-            // Text order is the merge order; frames are clamped, never
-            // sorted (issue #825).
-            merged = enforce_monotonic(merged);
+        // Text order is the merge order; frames are clamped, never sorted
+        // (issue #825).
+        let mut merged = enforce_monotonic(outputs.fold(first, |merged, window| {
+            merge_chunks(&merged, &window, vocab)
+        }));
+        if several {
             merged = collapse_seam_word_duplicates(&merged, vocab);
-        } else {
-            merged = enforce_monotonic(merged);
         }
 
-        if outputs.len() > 1 && merged.len() > 1 && self.config.seam_gap_repair {
+        if several && merged.len() > 1 && self.config.seam_gap_repair {
             let threshold = adaptive_speech_rms_threshold(audio);
             let mut scratch = self.backend.scratch()?;
             merged = self.repair_seam_gaps(&mut scratch, audio, merged, threshold, &mut stats)?;
@@ -416,11 +414,7 @@ impl Transcriber {
         let after_preprocessor = Instant::now();
         let encoder = self.backend.encode(&mel)?;
         let after_encoder = Instant::now();
-        let actual_frames = encoder_frames(if policy.trimmed_tail {
-            effective_len
-        } else {
-            full_len
-        });
+        let actual_frames = encoder_frames(effective_len);
         let mut counts = DecodeCounts::default();
         let hypothesis = decode_window(
             &self.backend,
@@ -462,8 +456,8 @@ impl Transcriber {
         #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
         let min_gap_frames =
             ((self.config.seam_gap_min_gap_seconds / FRAME_SECONDS) as usize).max(2);
-        let window_samples =
-            ((MAX_MODEL_SAMPLES - MEL_HOP) / FRAME_SAMPLES * FRAME_SAMPLES).max(FRAME_SAMPLES);
+        // The probe window is the chunk window without mel context.
+        let window_samples = Layout::v3().chunk_samples;
 
         let mut working = tokens;
         let mut probes = 0usize;
