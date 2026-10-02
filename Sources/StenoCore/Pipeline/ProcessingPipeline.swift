@@ -294,13 +294,22 @@ public actor ProcessingPipeline {
   /// The two stages that share a buffer: `decodeAndTranscribe` hands its
   /// last lane to `diarize`, and the buffer is local to this call, so it is
   /// gone before `matchSpeakers` and never outlives `diarize` through
-  /// `merge`.
+  /// `merge`. The lane to diarize is decided from the transcription (a call
+  /// whose tap carried nothing falls back to its mic lane); a handed buffer
+  /// of another lane is dropped before `diarize` decodes the right one, so
+  /// one buffer is alive at a time.
   private func transcribeAndDiarize(asset: AudioAsset, meeting: Meeting) async throws -> (
     Transcription, Diarization
   ) {
     let (transcription, lastLane) = try await decodeAndTranscribe(
       asset: asset, meetingID: meeting.id)
-    let diarization = try await diarize(asset: asset, meeting: meeting, buffer: lastLane)
+    let lane = Self.diarizedLane(
+      source: meeting.source, lanes: asset.lanes, transcription: transcription.lanes)
+    // Moved, not copied, so the last lane's buffer is gone before `diarize`
+    // decodes another lane.
+    var handed = consume lastLane
+    if handed?.lane != lane { handed = nil }
+    let diarization = try await diarize(asset: asset, meeting: meeting, buffer: handed, lane: lane)
     return (transcription, diarization)
   }
 

@@ -47,6 +47,39 @@ public struct CleanupDraft: Codable, Sendable, Equatable {
     return problems
   }
 
+  /// The draft with the framing of a prompt line stripped from the front
+  /// of every text: an optional `[n]` index, then a speaker label from
+  /// `labels` and its colon. The model reads `[3] Me: words` and some
+  /// models answer `Me: words`; the label is one word, so the word-count
+  /// check alone lets it through into the transcript.
+  public func strippingSpeakerLabels(_ labels: SpeakerLabels) -> CleanupDraft {
+    var stripped = self
+    for index in stripped.segments.indices {
+      stripped.segments[index].text = Self.strippingLabel(
+        from: stripped.segments[index].text, labels: labels)
+    }
+    return stripped
+  }
+
+  /// `text` without a leading `[n]` index and `Label:`; `text` itself when
+  /// neither is there, so a text that happens to start with a colon-bearing
+  /// word ("Meeting: agenda") is left alone unless the word is a label.
+  static func strippingLabel(from text: String, labels: SpeakerLabels) -> String {
+    var rest = text[...].drop(while: \.isWhitespace)
+    var stripped = false
+    if rest.first == "[", let close = rest.firstIndex(of: "]"),
+      Int(rest[rest.index(after: rest.startIndex)..<close]) != nil
+    {
+      rest = rest[rest.index(after: close)...].drop(while: \.isWhitespace)
+      stripped = true
+    }
+    if let colon = rest.firstIndex(of: ":"), labels.isLabel(String(rest[..<colon])) {
+      rest = rest[rest.index(after: colon)...].drop(while: \.isWhitespace)
+      stripped = true
+    }
+    return stripped ? String(rest) : text
+  }
+
   /// The cleaned texts in segment order, trimmed; meaningful once
   /// `problems(against:)` is empty.
   public var orderedTexts: [String] {

@@ -3,7 +3,11 @@ import Foundation
 /// Pure lane merge: one ordered transcript from per-lane raw segments.
 /// `.mic` segments belong to the deterministic "me" speaker; `.system` and
 /// `.mixed` segments get the diarization cluster covering their midpoint,
-/// and a `.mixed` segment is never assigned to "me".
+/// and a `.mixed` segment is never assigned to "me". When the mic lane is
+/// the diarized lane (a call whose tap carried no conversation), its
+/// segments get clusters like a room lane and the tap's stray segments are
+/// dropped: with the conversation in the room, whatever the tap heard was
+/// a chime or a hallucination, never a speaker.
 public enum LaneMerger {
   /// A diarization cluster and the `Speaker` row it became.
   public struct ClusterSpeaker: Sendable, Equatable {
@@ -49,17 +53,20 @@ public enum LaneMerger {
     meetingID: UUID,
     lanes: [AudioLane: [RawSegment]],
     clusters: [ClusterSpeaker],
-    meSpeakerID: UUID?
+    meSpeakerID: UUID?,
+    diarizedLane: AudioLane? = nil
   ) -> [TranscriptSegment] {
+    let micIsRoom = diarizedLane == .mic
     var merged: [(order: (TimeInterval, Int, Int), segment: TranscriptSegment)] = []
     for (laneIndex, lane) in AudioLane.allCases.enumerated() {
       guard let raw = lanes[lane] else { continue }
+      if lane == .system, micIsRoom { continue }
       for (index, segment) in raw.enumerated() {
         let speakerID: UUID?
         switch lane {
-        case .mic:
+        case .mic where !micIsRoom:
           speakerID = meSpeakerID
-        case .system, .mixed:
+        case .mic, .system, .mixed:
           speakerID = cluster(covering: segment, in: clusters)
         }
         let transcript = TranscriptSegment(

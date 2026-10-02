@@ -9,8 +9,9 @@ extension ProcessingPipeline {
   /// Merges the lanes into one ordered transcript and persists it, together
   /// with the speakers and the meeting's elected language, in one
   /// transaction, so it survives a later failure. When the asset has a
-  /// `.mic` lane, the "me" participant (created if the app did not write
-  /// one) and the "me" speaker exist before any segment points at them.
+  /// `.mic` lane that is "me" (not the lane diarized as the room), the "me"
+  /// participant (created if the app did not write one) and the "me"
+  /// speaker exist before any segment points at them.
   func merge(meeting: Meeting, lanes: [AudioLane: [RawSegment]], diarization: Diarization)
     async throws -> Merged
   {
@@ -18,7 +19,7 @@ extension ProcessingPipeline {
     return try await run(.merge, meetingID: meeting.id) {
       var allSpeakers = diarization.speakers
       var meSpeakerID: UUID?
-      if lanes[.mic] != nil {
+      if lanes[.mic] != nil, diarization.lane != .mic {
         let me = try await Self.ensureMeParticipant(meetingID: meeting.id, store: store)
         let meSpeaker = LaneMerger.meSpeaker(meetingID: meeting.id, personID: me.personID)
         allSpeakers.append(meSpeaker)
@@ -26,7 +27,7 @@ extension ProcessingPipeline {
       }
       let segments = LaneMerger.merge(
         meetingID: meeting.id, lanes: lanes, clusters: diarization.clusterSpeakers,
-        meSpeakerID: meSpeakerID)
+        meSpeakerID: meSpeakerID, diarizedLane: diarization.lane)
       var updated = meeting
       updated.updatedAt = self.now
       try await store.replaceTranscript(updated, segments: segments, speakers: allSpeakers)

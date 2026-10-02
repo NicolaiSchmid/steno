@@ -159,6 +159,37 @@ import Testing
     #expect(Set(export.segments.compactMap(\.speakerID)) == Set(export.speakers.map(\.id)))
   }
 
+  /// A phone call on speaker next to the Mac: the tap records silence and
+  /// the microphone hears both people. The mic lane is diarized like a
+  /// room, nobody is "me", the mic is decoded a second time for the
+  /// diarizer, and the kept recording and lanes are untouched.
+  @Test func aCallWithASilentTapDiarizesTheMicLaneAndHasNoMe() async throws {
+    var engine = FakeSpeechEngine()
+    engine.silentBelowPeak = 1e-4
+    let decoder = RecordingAudioDecoder()
+    let harness = try await PipelineHarness(decoder: decoder, engine: engine)
+    defer { harness.cleanUp() }
+    let (meeting, asset) = try harness.meeting(source: .macCall)
+    let layout = RecordingLayout(asset: asset)
+    try WAVWriter.write(
+      AudioBuffer16k(samples: [Float](repeating: 0, count: 6 * 16_000)),
+      to: layout.sidecar(.system))
+    try await harness.pipeline.enqueue(meeting, asset: asset)
+    await harness.pipeline.waitUntilIdle()
+
+    let export = try await harness.store.export(meetingID: meeting.id)
+    #expect(export.meeting.state == .ready)
+    #expect(export.meeting.source == .macCall, "it was a call, just not through the Mac")
+    #expect(export.speakers.map(\.clusterLabel) == ["Speaker 1", "Speaker 2"])
+    #expect(export.participants.isEmpty, "no \"me\" participant is invented")
+    #expect(export.segments.count == 6)
+    #expect(export.segments.allSatisfy { $0.lane == .mic && $0.speakerID != nil })
+    #expect(Set(export.segments.compactMap(\.speakerID)) == Set(export.speakers.map(\.id)))
+    #expect(await decoder.decodes.entries == [.mic, .system, .mic])
+    #expect(await harness.diarizer.diarizations.entries == [6])
+    #expect(export.audio?.lanes == [.mic, .system])
+  }
+
   @Test func summarizeFailureMarksFailedAndKeepsTheTranscript() async throws {
     struct Boom: Error {}
     let harness = try await PipelineHarness(summarizer: FakeSummarizer(failure: Boom()))

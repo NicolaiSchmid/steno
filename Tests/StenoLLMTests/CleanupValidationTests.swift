@@ -22,6 +22,42 @@ import Testing
     Array(repeating: "wort", count: count).joined(separator: " ")
   }
 
+  /// The model reads `[3] Me: words` and some answer `Me: words`. The
+  /// label is one word, so the word-count check alone would pass it; the
+  /// draft strips a leading index and any known label first, and nothing
+  /// else: a colon-bearing first word that is no label stays.
+  @Test func anEchoedSpeakerLabelIsStrippedBeforeValidation() {
+    let labels = SpeakerLabels(
+      speakers: Self.standup.speakers + [
+        Speaker(
+          id: SampleData.uuid(300), meetingID: Self.standup.meeting.id, clusterLabel: "Me",
+          clusterConfidence: 1)
+      ])
+    func strip(_ text: String) -> String {
+      CleanupDraft.strippingLabel(from: text, labels: labels)
+    }
+    #expect(strip("Me: Danke dir.") == "Danke dir.")
+    #expect(strip("me:Danke dir.") == "Danke dir.")
+    #expect(strip("[3] Speaker 1: Hallo.") == "Hallo.")
+    #expect(strip("[3] Hallo.") == "Hallo.")
+    #expect(strip("Unknown speaker: Hallo.") == "Hallo.")
+    #expect(strip("  Speaker 2 : Hallo.") == "Hallo.")
+    #expect(strip("Speaker 10: Hallo.") == "Speaker 10: Hallo.", "not a label of this meeting")
+    #expect(strip("Meeting: agenda") == "Meeting: agenda")
+    #expect(strip("Me, I think so: yes") == "Me, I think so: yes")
+    #expect(strip(" Hallo.") == " Hallo.", "untouched when nothing is stripped")
+    #expect(strip("Me:") == "", "an emptied text is then a validation problem")
+
+    let chunk = Self.chunk
+    var echoed = Self.echo(chunk)
+    for index in echoed.segments.indices {
+      echoed.segments[index].text = "Me: " + echoed.segments[index].text
+    }
+    #expect(echoed.problems(against: chunk) == [], "one extra word slips past the word count")
+    let stripped = echoed.strippingSpeakerLabels(labels)
+    #expect(stripped.orderedTexts == chunk.segments.map(\.text))
+  }
+
   @Test func mergedAnswersAreRejectedByCountAndByDuplicateIndex() {
     let chunk = Self.chunk
     let count = chunk.segments.count

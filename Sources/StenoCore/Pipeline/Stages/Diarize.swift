@@ -6,6 +6,8 @@ extension ProcessingPipeline {
   struct Diarization: Sendable {
     var speakers: [Speaker]
     var clusterSpeakers: [LaneMerger.ClusterSpeaker]
+    /// The lane the clusters cover; nil when nothing was diarized.
+    var lane: AudioLane? = nil
   }
 
   /// Which lane carries the voices to diarize: the tap in a call, else the
@@ -14,6 +16,33 @@ extension ProcessingPipeline {
     let preferred: AudioLane = source == .macCall ? .system : .mixed
     if lanes.contains(preferred) { return preferred }
     return orderedLanes(lanes).last
+  }
+
+  /// `diarizedLane(source:lanes:)`, except for a call whose tap carried no
+  /// conversation: then the microphone heard everyone (a phone on speaker
+  /// next to the Mac, a call app the tap missed) and the mic lane is the
+  /// room lane to diarize, instead of being "me" wholesale.
+  static func diarizedLane(
+    source: MeetingSource, lanes: [AudioLane], transcription: [AudioLane: [RawSegment]]
+  ) -> AudioLane? {
+    if source == .macCall, lanes.contains(.mic), tapCarriedNoConversation(transcription) {
+      return .mic
+    }
+    return diarizedLane(source: source, lanes: lanes)
+  }
+
+  /// Speech on the tap below this share of the mic's speech means the tap
+  /// carried no conversation. A notification chime or a hallucinated word
+  /// on a silent tap stays under it; a real call partner never does.
+  static let tapConversationMinimumShare: TimeInterval = 0.05
+
+  /// True when the mic lane holds speech and the system lane holds less
+  /// than `tapConversationMinimumShare` of it.
+  static func tapCarriedNoConversation(_ lanes: [AudioLane: [RawSegment]]) -> Bool {
+    guard let mic = lanes[.mic], let system = lanes[.system] else { return false }
+    let micSpeech = mic.reduce(0.0) { $0 + $1.duration }
+    let tapSpeech = system.reduce(0.0) { $0 + $1.duration }
+    return micSpeech > 0 && tapSpeech < micSpeech * tapConversationMinimumShare
   }
 
   /// The sample clip is at most ten seconds.
@@ -25,19 +54,21 @@ extension ProcessingPipeline {
   /// sample clip range. Each cluster's clip is written as 16 kHz WAV to
   /// `RecordingLayout.sampleClip(speakerID:)` beside the master.
   ///
-  /// `buffer` is the last lane `decodeAndTranscribe` decoded, which under
-  /// today's lane rules is the diarized lane, so the stage reuses it. The
-  /// lane is decoded here only when no buffer was handed or it carries
-  /// another lane, a branch `process` never takes; a caller who does take
-  /// it holds two buffers for the stage's span.
-  func diarize(asset: AudioAsset, meeting: Meeting, buffer handed: DecodedLane?) async throws
-    -> Diarization
-  {
+  /// `lane` is the lane to diarize, `diarizedLane(source:lanes:)` when nil.
+  /// `buffer` is the last lane `decodeAndTranscribe` decoded, which is the
+  /// diarized lane unless a call fell back to its mic lane, so the stage
+  /// reuses it. The lane is decoded here only when no buffer was handed or
+  /// it carries another lane; a caller who hands another lane's buffer holds
+  /// two buffers for the stage's span.
+  func diarize(
+    asset: AudioAsset, meeting: Meeting, buffer handed: DecodedLane?, lane chosen: AudioLane? = nil
+  ) async throws -> Diarization {
     let decoder = dependencies.decoder
     let diarizer = dependencies.diarizer
     let layout = RecordingLayout(asset: asset)
     return try await run(.diarize, meetingID: meeting.id) {
-      guard let lane = Self.diarizedLane(source: meeting.source, lanes: asset.lanes) else {
+      guard let lane = chosen ?? Self.diarizedLane(source: meeting.source, lanes: asset.lanes)
+      else {
         return Diarization(speakers: [], clusterSpeakers: [])
       }
       let buffer: AudioBuffer16k
@@ -81,7 +112,7 @@ extension ProcessingPipeline {
           ))
         clusterSpeakers.append(LaneMerger.ClusterSpeaker(speakerID: id, ranges: cluster.ranges))
       }
-      return Diarization(speakers: speakers, clusterSpeakers: clusterSpeakers)
+      return Diarization(speakers: speakers, clusterSpeakers: clusterSpeakers, lane: lane)
     }
   }
 }
