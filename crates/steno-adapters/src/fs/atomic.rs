@@ -31,16 +31,14 @@ impl AtomicFileWriter {
     pub fn write(data: &[u8], target: &Path) -> Result<(), WriteFailure> {
         let temporary = Self::temporary_path(target);
         let outcome = Self::write_bytes(data, &temporary, target).and_then(|()| {
-            fs::rename(&temporary, target).map_err(|error| WriteFailure {
-                path: target.to_string_lossy().into_owned(),
-                underlying: format!("rename: {error}"),
-            })
+            fs::rename(&temporary, target).map_err(|error| Self::failure(target, "rename", &error))
         });
-        if outcome.is_err() {
-            let _ = fs::remove_file(&temporary);
-            return outcome;
+        match &outcome {
+            Ok(()) => Self::sync_directory(target),
+            Err(_) => {
+                let _ = fs::remove_file(&temporary);
+            }
         }
-        Self::sync_directory(target);
         outcome
     }
 
@@ -114,10 +112,7 @@ impl AtomicFileWriter {
     /// Open, write every byte, `fsync`; failures name the target the caller
     /// asked for, not the temp file.
     fn write_bytes(data: &[u8], temporary: &Path, target: &Path) -> Result<(), WriteFailure> {
-        let failure = |step: &str, error: std::io::Error| WriteFailure {
-            path: target.to_string_lossy().into_owned(),
-            underlying: format!("{step}: {error}"),
-        };
+        let failure = |step: &str, error: std::io::Error| Self::failure(target, step, &error);
         let mut options = OpenOptions::new();
         options.write(true).create(true).truncate(true);
         #[cfg(unix)]
@@ -131,5 +126,13 @@ impl AtomicFileWriter {
         file.write_all(data)
             .map_err(|error| failure("write", error))?;
         file.sync_all().map_err(|error| failure("fsync", error))
+    }
+
+    /// The failure of `step` (`open`, `write`, `fsync`, `rename`) on `target`.
+    fn failure(target: &Path, step: &str, error: &std::io::Error) -> WriteFailure {
+        WriteFailure {
+            path: target.to_string_lossy().into_owned(),
+            underlying: format!("{step}: {error}"),
+        }
     }
 }
