@@ -23,6 +23,10 @@ impl Vocab {
     /// Reads `tokens.txt`.
     pub fn load(path: &Path) -> Result<Self, SpeechError> {
         let text = std::fs::read_to_string(path).map_err(|source| SpeechError::io(path, source))?;
+        let invalid = |detail: String| SpeechError::Vocabulary {
+            path: path.to_path_buf(),
+            detail,
+        };
         let mut pieces = Vec::new();
         for (line_number, line) in text.lines().enumerate() {
             if line.is_empty() {
@@ -30,31 +34,24 @@ impl Vocab {
             }
             let (piece, id) = line
                 .rsplit_once(' ')
-                .ok_or_else(|| SpeechError::Vocabulary {
-                    path: path.to_path_buf(),
-                    detail: format!("line {} has no id: {line:?}", line_number + 1),
-                })?;
-            let id: usize = id.parse().map_err(|_| SpeechError::Vocabulary {
-                path: path.to_path_buf(),
-                detail: format!("line {} has a non-numeric id: {line:?}", line_number + 1),
+                .ok_or_else(|| invalid(format!("line {} has no id: {line:?}", line_number + 1)))?;
+            let id: usize = id.parse().map_err(|_| {
+                invalid(format!(
+                    "line {} has a non-numeric id: {line:?}",
+                    line_number + 1
+                ))
             })?;
             if id != pieces.len() {
-                return Err(SpeechError::Vocabulary {
-                    path: path.to_path_buf(),
-                    detail: format!(
-                        "line {} has id {id}, expected {}",
-                        line_number + 1,
-                        pieces.len()
-                    ),
-                });
+                return Err(invalid(format!(
+                    "line {} has id {id}, expected {}",
+                    line_number + 1,
+                    pieces.len()
+                )));
             }
             pieces.push(piece.to_owned());
         }
         if pieces.len() < 2 {
-            return Err(SpeechError::Vocabulary {
-                path: path.to_path_buf(),
-                detail: "fewer than two pieces".to_owned(),
-            });
+            return Err(invalid("fewer than two pieces".to_owned()));
         }
         Ok(Self::from_pieces(pieces))
     }

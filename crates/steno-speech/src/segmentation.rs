@@ -9,7 +9,7 @@ use steno_core::{RawSegment, TimedWord};
 
 use crate::backend::FRAME_SECONDS;
 use crate::decoder::Token;
-use crate::vocab::{Vocab, WORD_BOUNDARY};
+use crate::vocab::{Vocab, starts_word, strip_boundary};
 
 /// One timed piece per token: start one frame before the emission frame
 /// (TDT emits after the frame it describes), end after the token's
@@ -52,25 +52,21 @@ impl TokenAggregator {
             if let Some(mut word) = current.take()
                 && !word.text.is_empty()
             {
-                let mean = confidences.iter().sum::<f32>() / confidences.len().max(1) as f32;
-                word.confidence = if confidences.is_empty() { 1.0 } else { mean };
+                word.confidence = if confidences.is_empty() {
+                    1.0
+                } else {
+                    confidences.iter().sum::<f32>() / confidences.len() as f32
+                };
                 words.push(word);
             }
             confidences.clear();
         };
 
         for token in tokens {
-            let starts_word = token.text.starts_with(' ') || token.text.starts_with(WORD_BOUNDARY);
-            let text = if starts_word {
-                let mut chars = token.text.chars();
-                chars.next();
-                chars.as_str()
-            } else {
-                token.text.as_str()
-            }
-            .trim();
+            let is_word_start = starts_word(&token.text);
+            let text = strip_boundary(&token.text).trim();
             if text.is_empty() {
-                if starts_word {
+                if is_word_start {
                     boundary_pending = true;
                 }
                 continue;
@@ -83,7 +79,7 @@ impl TokenAggregator {
                 boundary_pending = false;
                 continue;
             }
-            if starts_word || boundary_pending || current.is_none() {
+            if is_word_start || boundary_pending || current.is_none() {
                 flush(&mut current, &mut confidences, &mut words);
                 current = Some(TimedWord {
                     text: text.to_owned(),

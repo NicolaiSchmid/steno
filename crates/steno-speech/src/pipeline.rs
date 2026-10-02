@@ -67,12 +67,16 @@ impl Transcript {
     /// The words joined by spaces.
     #[must_use]
     pub fn text(&self) -> String {
-        self.words
-            .iter()
-            .map(|w| w.text.as_str())
-            .collect::<Vec<_>>()
-            .join(" ")
+        join_words(&self.words)
     }
+}
+
+fn join_words(words: &[TimedWord]) -> String {
+    words
+        .iter()
+        .map(|w| w.text.as_str())
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// One backend, its vocabulary, a detector and the configuration; owns
@@ -177,12 +181,7 @@ impl<B: SpeechBackend> Transcriber<B> {
     /// The text of `tokens`, for probes and tests.
     #[must_use]
     pub fn render(&self, tokens: &[Token]) -> String {
-        TokenAggregator
-            .words(&timed_pieces(tokens, &self.vocab))
-            .iter()
-            .map(|w| w.text.as_str())
-            .collect::<Vec<_>>()
-            .join(" ")
+        join_words(&TokenAggregator.words(&timed_pieces(tokens, &self.vocab)))
     }
 
     fn word_count(&self, tokens: &[Token]) -> usize {

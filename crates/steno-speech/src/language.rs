@@ -81,7 +81,16 @@ impl LanguageTagger {
                     .flatten()
             })
             .collect();
-        let fallback = hint.cloned().or_else(|| dominant(&decided, &segments));
+        let fallback = hint.cloned().or_else(|| {
+            dominant(
+                decided
+                    .iter()
+                    .zip(&segments)
+                    .filter_map(|(language, segment)| {
+                        Some((language.as_ref()?, segment.duration()))
+                    }),
+            )
+        });
         let mut previous: Option<LanguageTag> = None;
         for index in 0..segments.len() {
             if decided[index].is_some() {
@@ -101,9 +110,11 @@ impl LanguageTagger {
     /// nothing is tagged.
     #[must_use]
     pub fn dominant_language(&self, segments: &[RawSegment]) -> Option<LanguageTag> {
-        let languages: Vec<Option<LanguageTag>> =
-            segments.iter().map(|s| s.language.clone()).collect();
-        dominant(&languages, segments)
+        dominant(
+            segments
+                .iter()
+                .filter_map(|s| Some((s.language.as_ref()?, s.duration()))),
+        )
     }
 
     /// Adjacent tagged segments with different languages. Untagged segments
@@ -119,12 +130,10 @@ impl LanguageTagger {
 }
 
 /// Most seconds wins; ties go to the alphabetically first tag.
-fn dominant(languages: &[Option<LanguageTag>], segments: &[RawSegment]) -> Option<LanguageTag> {
+fn dominant<'a>(tagged: impl Iterator<Item = (&'a LanguageTag, f64)>) -> Option<LanguageTag> {
     let mut seconds: BTreeMap<&LanguageTag, f64> = BTreeMap::new();
-    for (language, segment) in languages.iter().zip(segments) {
-        if let Some(language) = language {
-            *seconds.entry(language).or_default() += segment.duration().max(0.001);
-        }
+    for (language, duration) in tagged {
+        *seconds.entry(language).or_default() += duration.max(0.001);
     }
     let mut best: Option<(&LanguageTag, f64)> = None;
     for (language, &total) in &seconds {

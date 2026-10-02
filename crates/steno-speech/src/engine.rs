@@ -12,7 +12,7 @@ use steno_core::{AudioBuffer16k, LanguageTag, RawSegment, SpeechEngine};
 
 use crate::error::SpeechError;
 use crate::language::LanguageTagger;
-use crate::model_store::{ModelAsset, ModelStore};
+use crate::model_store::{DownloadProgress, ModelAsset, ModelStore};
 use crate::onnx::{OnnxBackend, OnnxOptions};
 use crate::pipeline::{PipelineConfig, Transcriber};
 use crate::vad::{SileroVad, VadConfig};
@@ -76,7 +76,7 @@ impl OnnxSpeechEngine {
         config: &PipelineConfig,
         vad: &VadConfig,
     ) -> Result<Transcriber<OnnxBackend>, SpeechError> {
-        let mut report = |progress: crate::model_store::DownloadProgress<'_>| {
+        let mut report = |progress: DownloadProgress<'_>| {
             tracing::debug!(
                 file = progress.file,
                 received = progress.received,

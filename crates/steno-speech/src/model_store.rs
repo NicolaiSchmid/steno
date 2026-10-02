@@ -269,11 +269,14 @@ impl ModelStore {
         let mut hasher = Sha256::new();
         let mut received = 0u64;
         let mut buffer = vec![0u8; 1 << 16];
-        progress(DownloadProgress {
-            file: &file.name,
-            received,
-            total,
-        });
+        let mut report = |received: u64| {
+            progress(DownloadProgress {
+                file: &file.name,
+                received,
+                total,
+            });
+        };
+        report(received);
         loop {
             let n = reader
                 .read(&mut buffer)
@@ -285,11 +288,7 @@ impl ModelStore {
                 .map_err(|e| SpeechError::io(&partial, e))?;
             hasher.update(&buffer[..n]);
             received += n as u64;
-            progress(DownloadProgress {
-                file: &file.name,
-                received,
-                total,
-            });
+            report(received);
         }
         out.flush().map_err(|e| SpeechError::io(&partial, e))?;
         drop(out);

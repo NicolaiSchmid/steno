@@ -15,7 +15,7 @@ use realfft::{RealFftPlanner, RealToComplex};
 
 use crate::backend::Features;
 
-pub const SAMPLE_RATE: usize = 16_000;
+pub use crate::chunker::SAMPLE_RATE;
 pub const N_FFT: usize = 512;
 pub const WINDOW_LENGTH: usize = 400;
 pub const HOP_LENGTH: usize = 160;
