@@ -86,13 +86,15 @@ pub fn uuid_string(id: Uuid) -> String {
 /// forms, which Foundation rejects.
 #[must_use]
 pub fn parse_uuid(text: &str) -> Option<Uuid> {
-    (text.len() == 36)
-        .then(|| Uuid::try_parse(text).ok())
-        .flatten()
+    if text.len() != 36 {
+        return None;
+    }
+    Uuid::try_parse(text).ok()
 }
 
-fn not_a_uuid<E: de::Error>(text: &str) -> E {
-    E::custom(format!("not a UUID: {text}"))
+/// [`parse_uuid`] with serde's error, for the `with` modules.
+fn uuid_from_text<E: de::Error>(text: &str) -> Result<Uuid, E> {
+    parse_uuid(text).ok_or_else(|| E::custom(format!("not a UUID: {text}")))
 }
 
 /// `Uuid` as uppercase text.
@@ -105,7 +107,7 @@ pub mod uuid_text {
 
     pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Uuid, D::Error> {
         let text = String::deserialize(deserializer)?;
-        super::parse_uuid(&text).ok_or_else(|| super::not_a_uuid(&text))
+        super::uuid_from_text(&text)
     }
 }
 
@@ -125,8 +127,7 @@ pub mod uuid_text_opt {
         deserializer: D,
     ) -> Result<Option<Uuid>, D::Error> {
         let text = Option::<String>::deserialize(deserializer)?;
-        text.map(|text| super::parse_uuid(&text).ok_or_else(|| super::not_a_uuid(&text)))
-            .transpose()
+        text.as_deref().map(super::uuid_from_text).transpose()
     }
 }
 
