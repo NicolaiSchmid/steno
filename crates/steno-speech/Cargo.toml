@@ -1,0 +1,26 @@
+[package]
+name = "steno-speech"
+description = "Steno's speech pipeline: VAD, pause-aligned chunker, TDT greedy decoder, overlap merge, the ONNX Runtime backend and the model store"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+steno-core = { path = "../steno-core" }
+ort.workspace = true
+realfft.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+ureq.workspace = true
+whatlang.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true
