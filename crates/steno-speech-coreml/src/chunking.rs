@@ -107,6 +107,16 @@ pub struct ChunkStart {
     pub use_warmup_prefix: bool,
 }
 
+impl ChunkStart {
+    /// A start without a warm-up prefix.
+    fn plain(start: usize) -> ChunkStart {
+        ChunkStart {
+            start,
+            use_warmup_prefix: false,
+        }
+    }
+}
+
 /// Mean of squares over `samples`; zero for an empty slice.
 fn mean_square(samples: &[f32]) -> f32 {
     if samples.is_empty() {
@@ -174,19 +184,10 @@ pub fn last_chunk_warmup_samples(
 /// path FluidAudio takes for non-v3 models, kept for tests and comparison.
 #[must_use]
 pub fn regular_chunk_starts(total_samples: usize, stride_samples: usize) -> Vec<ChunkStart> {
-    let mut starts = vec![ChunkStart {
-        start: 0,
-        use_warmup_prefix: false,
-    }];
-    let mut start = stride_samples;
-    while start < total_samples {
-        starts.push(ChunkStart {
-            start,
-            use_warmup_prefix: false,
-        });
-        start += stride_samples;
-    }
-    starts
+    std::iter::once(0)
+        .chain((stride_samples..total_samples).step_by(stride_samples))
+        .map(ChunkStart::plain)
+        .collect()
 }
 
 /// A boundary candidate: the quietest frame near the target, its energy and
@@ -223,10 +224,7 @@ pub fn silence_aligned_chunk_starts(
     let half_energy_window = FRAME_SAMPLES;
     let minimum_overlap = FRAME_SAMPLES * 6;
 
-    let mut starts = vec![ChunkStart {
-        start: 0,
-        use_warmup_prefix: false,
-    }];
+    let mut starts = vec![ChunkStart::plain(0)];
     let mut previous_start = 0usize;
     let mut target = stride;
 
@@ -478,13 +476,10 @@ pub fn plan_windows(
     warmup_prefix_samples: usize,
 ) -> Vec<Window> {
     let mut windows = Vec::new();
-    let mut decision = starts.first().copied().unwrap_or(ChunkStart {
-        start: 0,
-        use_warmup_prefix: false,
-    });
-    let mut chunk_start = decision.start;
+    let mut decision = starts.first().copied().unwrap_or(ChunkStart::plain(0));
     let mut index = 0usize;
-    while chunk_start < total_samples {
+    while decision.start < total_samples {
+        let chunk_start = decision.start;
         let default_warmup = if index > 0 && decision.use_warmup_prefix {
             warmup_prefix_samples.min(chunk_start)
         } else {
@@ -526,16 +521,10 @@ pub fn plan_windows(
         if is_last {
             break;
         }
-        if let Some(next) = starts.get(index) {
-            decision = *next;
-            chunk_start = next.start;
-        } else {
-            chunk_start += layout.stride_samples;
-            decision = ChunkStart {
-                start: chunk_start,
-                use_warmup_prefix: false,
-            };
-        }
+        decision = starts
+            .get(index)
+            .copied()
+            .unwrap_or_else(|| ChunkStart::plain(chunk_start + layout.stride_samples));
     }
     windows
 }
