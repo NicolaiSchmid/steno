@@ -117,6 +117,48 @@ fn is_path_allowed(byte: u8) -> bool {
     byte.is_ascii_alphanumeric() || b"-._~!$&'()*+,;=:@/".contains(&byte)
 }
 
+/// The local path of a `file://` URL as [`file_url`] spells it: the
+/// percent-encoding undone, the host part (empty or `localhost`) dropped,
+/// and on Windows the drive path restored with backslashes. A `%` that is
+/// not followed by two hex digits is kept as it is. `None` for any other
+/// scheme.
+#[must_use]
+pub fn file_url_path(url: &str) -> Option<PathBuf> {
+    let rest = url.strip_prefix("file://")?;
+    let path = match rest.find('/') {
+        Some(0) => rest,
+        Some(slash) => &rest[slash..],
+        None => return None,
+    };
+    let raw = path.as_bytes();
+    let mut bytes = Vec::with_capacity(raw.len());
+    let mut index = 0;
+    while index < raw.len() {
+        if raw[index] == b'%'
+            && let [high, low, ..] = &raw[index + 1..]
+            && high.is_ascii_hexdigit()
+            && low.is_ascii_hexdigit()
+            && let Ok(byte) = u8::from_str_radix(&path[index + 1..index + 3], 16)
+        {
+            bytes.push(byte);
+            index += 3;
+        } else {
+            bytes.push(raw[index]);
+            index += 1;
+        }
+    }
+    let decoded = String::from_utf8(bytes).ok()?;
+    // `file_url` spelt a Windows path with forward slashes behind a leading
+    // `/`; both are undone so the path reads back as the OS spells it.
+    #[cfg(windows)]
+    let decoded = decoded
+        .strip_prefix('/')
+        .filter(|rest| rest.as_bytes().get(1) == Some(&b':'))
+        .unwrap_or(&decoded)
+        .replace('/', "\\");
+    Some(PathBuf::from(decoded))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -141,6 +183,33 @@ mod tests {
                 "file:///tmp/a%20b/%C3%BC.wav"
             );
         }
+    }
+
+    #[test]
+    fn file_url_paths_round_trip() {
+        let path = if cfg!(windows) {
+            Path::new(r"C:\Users\x\a b\ü.wav")
+        } else {
+            Path::new("/Users/x/a b/ü.wav")
+        };
+        assert_eq!(file_url_path(&file_url(path, false)).as_deref(), Some(path));
+        assert_eq!(
+            file_url_path("file://localhost/tmp/x.wav"),
+            Some(PathBuf::from("/tmp/x.wav")),
+            "a host part is dropped"
+        );
+        assert_eq!(
+            file_url_path("file:///tmp/100%25/x.wav"),
+            Some(PathBuf::from("/tmp/100%/x.wav"))
+        );
+        assert_eq!(
+            file_url_path("file:///tmp/%€/%4/%"),
+            Some(PathBuf::from("/tmp/%€/%4/%")),
+            "a percent sign without two hex digits stays as it is"
+        );
+        assert_eq!(file_url_path("file:///tmp/%FF.wav"), None, "not UTF-8");
+        assert_eq!(file_url_path("https://example.com/x"), None);
+        assert_eq!(file_url_path("file://host-only"), None);
     }
 
     #[test]

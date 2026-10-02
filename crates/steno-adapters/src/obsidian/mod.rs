@@ -4,5 +4,5 @@
 mod destination;
 mod managed_block;
 
-pub use destination::{ObsidianError, ObsidianFolderDestination, file_url_path};
+pub use destination::{ObsidianError, ObsidianFolderDestination};
 pub use managed_block::ManagedBlock;

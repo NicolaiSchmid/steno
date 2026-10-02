@@ -4,10 +4,9 @@
 use std::collections::BTreeMap;
 use std::path::{Component, Path, PathBuf};
 
+use steno_core::content_hash::sha256;
 use steno_core::{DeliveredFile, DeliveryReceipt, FileOwnership};
 use uuid::Uuid;
-
-use crate::sha256;
 
 /// Which receipt applies to this root, whether a path may be opened for
 /// writing, what has been written, and the receipt that results. A

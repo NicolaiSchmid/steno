@@ -31,11 +31,3 @@ pub use rendering::{
     RenderedArtifact, RenderedArtifactKind, Timecode,
 };
 pub use runtime::DeliveryCoordinator;
-
-/// SHA-256 of `data`, the digest delivery receipts carry. Swift:
-/// `ContentHash.sha256`.
-#[must_use]
-pub fn sha256(data: &[u8]) -> Vec<u8> {
-    use sha2::Digest as _;
-    sha2::Sha256::digest(data).to_vec()
-}

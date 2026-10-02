@@ -42,8 +42,8 @@ zmij = "1"
 # Test only
 similar = "2"
 tempfile = "3"
-# Dyn-compatible async traits for the boundaries, the content hash the
-# fakes write into receipts, and the executor the trait tests run on.
+# Dyn-compatible async traits for the boundaries, the content hash every
+# delivery receipt carries, and the executor the trait tests run on.
 async-trait = "0.1"
 sha2 = "0.10"
 tokio = { version = "1", default-features = false, features = ["macros", "rt", "rt-multi-thread"] }
@@ -54,9 +54,9 @@ tokio = { version = "1", default-features = false, features = ["macros", "rt", "
 objc2 = "0.6"
 objc2-core-ml = "0.3.2"
 objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "NSArray", "NSDictionary", "NSEnumerator", "NSError", "NSObject", "NSString", "NSURL", "NSValue"] }
-# Added by the adapters package: IANA time zones for the dates in the notes
-# (Swift's `TimeZone`), the machine's zone name, and the canonical
-# decomposition `Slug` strips diacritics with.
+# Adapters: IANA time zones for the dates in the notes (Swift's `TimeZone`),
+# the machine's zone name, and the canonical decomposition `Slug` strips
+# diacritics with.
 chrono-tz = "0.10"
 iana-time-zone = "0.1"
 unicode-normalization = "0.1"

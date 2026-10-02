@@ -11,9 +11,9 @@ use common::*;
 use steno_adapters::fs::AtomicFileWriter;
 use steno_adapters::obsidian::{ManagedBlock, ObsidianError, ObsidianFolderDestination};
 use steno_adapters::rendering::ArtifactRenderer;
-use steno_adapters::sha256;
+use steno_core::content_hash::sha256;
 use steno_core::json::uuid_string;
-use steno_core::paths::file_url;
+use steno_core::paths::{file_url, file_url_path};
 use steno_core::{
     DeliveryReceipt, FileOwnership, MeetingExport, ObsidianSettings, Person, SpeakerAssignment,
 };
@@ -1100,18 +1100,15 @@ fn the_sample_clip_url_round_trips_as_a_file_url() {
         uuid_string(meeting_id())
     );
     assert_eq!(
-        steno_adapters::obsidian::file_url_path(&clip),
+        file_url_path(&clip),
         Some(PathBuf::from(format!(
             "/tmp/steno/{}/speakers/x.wav",
             uuid_string(meeting_id())
         )))
     );
     assert_eq!(
-        steno_adapters::obsidian::file_url_path("file:///tmp/a%20b/%C3%BC.wav"),
+        file_url_path("file:///tmp/a%20b/%C3%BC.wav"),
         Some(PathBuf::from("/tmp/a b/ü.wav"))
     );
-    assert_eq!(
-        steno_adapters::obsidian::file_url_path("https://example.com/x"),
-        None
-    );
+    assert_eq!(file_url_path("https://example.com/x"), None);
 }

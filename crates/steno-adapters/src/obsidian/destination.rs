@@ -6,6 +6,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use chrono_tz::Tz;
+use steno_core::paths::file_url_path;
 use steno_core::{
     BoundaryResult, DeliveryReceipt, Destination, FileOwnership, MeetingExport, ObsidianSettings,
     async_trait,
@@ -362,43 +363,4 @@ impl Destination for ObsidianFolderDestination {
     ) -> BoundaryResult<DeliveryReceipt> {
         Ok(self.deliver_meeting(meeting, previous)?)
     }
-}
-
-/// The local path of a `file://` URL as the store holds it
-/// (`steno_core::paths::file_url`): the percent-encoding undone, the host
-/// part (empty or `localhost`) dropped, and on Windows the drive path
-/// restored with backslashes. `None` for any other scheme.
-#[must_use]
-pub fn file_url_path(url: &str) -> Option<PathBuf> {
-    let rest = url.strip_prefix("file://")?;
-    let path = match rest.find('/') {
-        Some(0) => rest,
-        Some(slash) => &rest[slash..],
-        None => return None,
-    };
-    let mut bytes = Vec::with_capacity(path.len());
-    let raw = path.as_bytes();
-    let mut index = 0;
-    while index < raw.len() {
-        if raw[index] == b'%'
-            && index + 2 < raw.len()
-            && let Ok(byte) = u8::from_str_radix(&path[index + 1..index + 3], 16)
-        {
-            bytes.push(byte);
-            index += 3;
-        } else {
-            bytes.push(raw[index]);
-            index += 1;
-        }
-    }
-    let decoded = String::from_utf8(bytes).ok()?;
-    // `file_url` spelt a Windows path with forward slashes behind a leading
-    // `/`; both are undone so the path reads back as the OS spells it.
-    #[cfg(windows)]
-    let decoded = decoded
-        .strip_prefix('/')
-        .filter(|rest| rest.as_bytes().get(1) == Some(&b':'))
-        .unwrap_or(&decoded)
-        .replace('/', "\\");
-    Some(PathBuf::from(decoded))
 }

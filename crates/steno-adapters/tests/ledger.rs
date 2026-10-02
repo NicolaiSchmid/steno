@@ -7,7 +7,7 @@ use std::collections::BTreeMap;
 use common::*;
 use steno_adapters::rendering::ArtifactRenderer;
 use steno_adapters::runtime::{DeliveryLedger, receipt_folder_path};
-use steno_adapters::sha256;
+use steno_core::content_hash::sha256;
 use steno_core::{DeliveredFile, DeliveryReceipt, FileOwnership};
 use uuid::Uuid;
 

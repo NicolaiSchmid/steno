@@ -3378,7 +3378,6 @@ dependencies = [
  "chrono-tz",
  "iana-time-zone",
  "serde_json",
- "sha2",
  "steno-bridge",
  "steno-core",
  "tempfile",
