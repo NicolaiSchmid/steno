@@ -124,65 +124,98 @@ fn write_container(
 /// `Double` (measured with `StenoJSON.encoder()` on macOS 26, Swift 6.4:
 /// the table in `numbers_print_like_foundation` and the corpus in
 /// `tests/fixtures/foundation-doubles.txt`): the shortest digits that
-/// round-trip, in plain notation when the decimal exponent is at least -4
-/// and `|f|` is at most 2^53 (`0.0001`, `1200`, `9007199254740992`),
-/// otherwise `d.ddde±XX` with a signed exponent of at least two digits
-/// (`1e-05`, `9.007199254740994e+15`, `1.7976931348623157e+308`). An
-/// integral double has no fraction and a negative zero keeps its sign (`-0`).
+/// round-trip, a tie between two shortest candidates broken to the even
+/// digit, in plain notation when the decimal exponent is at least -4 and
+/// `|f|` is at most 2^53 (`0.0001`, `1200`, `9007199254740992`), otherwise
+/// `d.ddde±XX` with a signed exponent of at least two digits (`1e-05`,
+/// `9.007199254740994e+15`, `1.7976931348623157e+308`). An integral double
+/// has no fraction and a negative zero keeps its sign (`-0`).
 ///
-/// Rust's `Display` for `f64` is the same shortest-digit algorithm in plain
-/// notation and covers the plain range, bar one tie (`write_tie_break`); the
-/// exponent range is re-spelt from `{:e}`.
+/// The digits come from `zmij` (Schubfach: shortest round-trip digits, ties
+/// to even, as `SwiftDtoa` breaks them) and are re-spelt here. Rust's own
+/// `Display` and `LowerExp` take the upper candidate at a tie, at every digit
+/// count (`999999999999999.3` and `-3981.6287231445313` where Foundation
+/// writes `.2` and `…312`), which is why they are not the digit source.
 fn write_number(out: &mut String, number: &serde_json::Number) {
     if let Some(i) = number.as_i64() {
         let _ = write!(out, "{i}");
     } else if let Some(u) = number.as_u64() {
         let _ = write!(out, "{u}");
     } else if let Some(f) = number.as_f64() {
-        const TWO_53: f64 = 9_007_199_254_740_992.0;
-        let scientific = format!("{f:e}");
-        let (mantissa, exponent) = scientific
-            .split_once('e')
-            .expect("`{:e}` always writes an exponent");
-        let exponent: i32 = exponent.parse().expect("`{:e}` writes a decimal exponent");
-        if exponent < -4 || f.abs() > TWO_53 {
-            let sign = if exponent < 0 { '-' } else { '+' };
-            let _ = write!(out, "{mantissa}e{sign}{:02}", exponent.abs());
-        } else if !write_tie_break(out, f) {
-            let _ = write!(out, "{f}");
-        }
+        write_double(out, f);
     }
 }
 
-/// The one place Rust and Foundation pick different shortest digits. For
-/// 2^49 <= |f| < 2^51 doubles are 1/8 or 1/4 apart, so a value ending in
-/// `.25` or `.75` lies exactly halfway between two one-digit decimals that
-/// both round-trip to it (`…999.25` is `.2` or `.3`). Rust's `Display` takes
-/// the upper one, Foundation the one whose last digit is even, which
-/// differs for `.25` (`999999999999999.2`, not `.3`) and agrees for `.75`.
-/// Below 2^49 the neighbours are too close for a one-digit candidate, from
-/// 2^51 no double has such a fraction. Returns whether it wrote the number.
-fn write_tie_break(out: &mut String, f: f64) -> bool {
-    const TWO_49: f64 = 562_949_953_421_312.0;
-    const TWO_51: f64 = 2_251_799_813_685_248.0;
-    let magnitude = f.abs();
-    if !(TWO_49..TWO_51).contains(&magnitude) {
-        return false;
+/// `write_number` for a double. `f` is finite: a `serde_json::Number` holds
+/// no NaN or infinity (the module doc says where they went).
+fn write_double(out: &mut String, f: f64) {
+    const TWO_53: f64 = 9_007_199_254_740_992.0;
+    if f.is_sign_negative() {
+        out.push('-');
     }
-    // Exact: the value has at most three fraction bits in this range.
-    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-    let eighths = (magnitude * 8.0) as u64;
-    // In tenths, `value = eighths * 5 / 4`; a tie is a remainder of 2.
-    let tenths = eighths * 5;
-    if tenths % 4 != 2 {
-        return false;
+    if f == 0.0 {
+        out.push('0');
+        return;
     }
-    let lower = tenths / 4;
-    // The even one of `lower` and `lower + 1`.
-    let even = lower + (lower & 1);
-    let sign = if f.is_sign_negative() { "-" } else { "" };
-    let _ = write!(out, "{sign}{}.{}", even / 10, even % 10);
-    true
+    let (digits, exponent) = shortest_digits(f.abs());
+    if exponent >= -4 && f.abs() <= TWO_53 {
+        // Plain: the point sits `exponent + 1` digits in, padded with zeros
+        // on whichever side runs out of digits.
+        if exponent < 0 {
+            out.push_str("0.");
+            for _ in exponent..-1 {
+                out.push('0');
+            }
+            out.push_str(&digits);
+        } else {
+            let point = usize::try_from(exponent).expect("non-negative") + 1;
+            if point >= digits.len() {
+                out.push_str(&digits);
+                for _ in digits.len()..point {
+                    out.push('0');
+                }
+            } else {
+                let (whole, fraction) = digits.split_at(point);
+                out.push_str(whole);
+                out.push('.');
+                out.push_str(fraction);
+            }
+        }
+    } else {
+        let (first, rest) = digits.split_at(1);
+        out.push_str(first);
+        if !rest.is_empty() {
+            out.push('.');
+            out.push_str(rest);
+        }
+        let sign = if exponent < 0 { '-' } else { '+' };
+        let _ = write!(out, "e{sign}{:02}", exponent.abs());
+    }
+}
+
+/// The shortest digits that read back to a finite, positive `f`, without
+/// leading or trailing zeros, and the decimal exponent of the first one
+/// (`f = d.ddd × 10^exponent`). `zmij` spells the number its own way (a
+/// plain or an exponent form); this reads the digits back out of that.
+fn shortest_digits(f: f64) -> (String, i32) {
+    let mut buffer = zmij::Buffer::new();
+    let printed = buffer.format_finite(f);
+    let (mantissa, exponent) = printed.split_once('e').unwrap_or((printed, "0"));
+    let exponent: i32 = exponent.parse().expect("zmij writes a decimal exponent");
+    let (whole, fraction) = mantissa.split_once('.').unwrap_or((mantissa, ""));
+    // `point` is where the decimal point sits in `whole ++ fraction`; every
+    // leading zero dropped moves it one left.
+    let mut point = i32::try_from(whole.len()).expect("at most 17 digits") + exponent;
+    let mut digits = format!("{whole}{fraction}");
+    while digits.starts_with('0') {
+        digits.remove(0);
+        point -= 1;
+    }
+    while digits.ends_with('0') {
+        digits.pop();
+    }
+    debug_assert!(!digits.is_empty(), "a non-zero double has a digit");
+    (digits, point - 1)
 }
 
 /// Foundation's escaping with `.withoutEscapingSlashes`: the quote, the
@@ -361,6 +394,10 @@ mod tests {
     /// 99999999999999990.0 => 9.999999999999998e+16
     /// bits 430c6bf52633fffa => 999999999999999.2
     /// bits c30bde3eb7e97982 => -980523165757232.2
+    /// bits c0af1b41e8000000 => -3981.6287231445312
+    /// bits c050c2ca80000000 => -67.04360961914062
+    /// bits 3f8f010000000000 => 0.015138626098632812
+    /// bits beba000000000000 => -1.5497207641601562e-06
     /// 1e16 => 1e+16                   1.234e16 => 1.234e+16
     /// 1e17 => 1e+17                   4.5e17 => 4.5e+17
     /// 123456789012345680.0 => 1.2345678901234568e+17
@@ -404,9 +441,20 @@ mod tests {
             (9.5e15, "9.5e+15"),
             (9_999_999_999_999_998.0, "9.999999999999998e+15"),
             (99_999_999_999_999_990.0, "9.999999999999998e+16"),
-            // The `.25` ties of `write_tie_break`, as measured.
+            // Ties between two shortest candidates go to the even digit, as
+            // measured; Rust's `Display` would write `.3`, `…313`, `…063`.
             (f64::from_bits(0x430c_6bf5_2633_fffa), "999999999999999.2"),
             (f64::from_bits(0xc30b_de3e_b7e9_7982), "-980523165757232.2"),
+            (f64::from_bits(0xc0af_1b41_e800_0000), "-3981.6287231445312"),
+            (f64::from_bits(0xc050_c2ca_8000_0000), "-67.04360961914062"),
+            (
+                f64::from_bits(0x3f8f_0100_0000_0000),
+                "0.015138626098632812",
+            ),
+            (
+                f64::from_bits(0xbeba_0000_0000_0000),
+                "-1.5497207641601562e-06",
+            ),
             // A `.75` tie: the even digit is the upper one, as Rust prints it.
             (562_949_953_421_312.0 + 0.75, "562949953421312.8"),
             (1e16, "1e+16"),

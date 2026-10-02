@@ -17,6 +17,11 @@ serde.workspace = true
 serde_json = { workspace = true, features = ["float_roundtrip"] }
 thiserror.workspace = true
 uuid.workspace = true
+# The digit source of `json::write_number`: shortest round-trip digits with
+# ties to even, as Foundation breaks them and Rust's `Display` does not.
+# Already in the lock through serde_json; pinned here, not in the workspace
+# table, because only this crate reads it and the table belongs to WP1's PR.
+zmij = "1"
 
 [dev-dependencies]
 similar.workspace = true

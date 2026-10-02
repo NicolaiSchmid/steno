@@ -8,8 +8,11 @@ use serde_json::{Map, Value};
 use steno_bridge::json::{to_canonical_string, to_compact_string};
 
 /// Every line of `tests/fixtures/foundation-doubles.txt` (its header says
-/// how it was measured): both styles write the string Foundation wrote, and
-/// the string reads back to the same bits.
+/// how it was measured and trimmed): both styles write the string Foundation
+/// wrote, and the string reads back to the same bits. The ties between two
+/// shortest candidates are the lines that matter most: Rust's own `Display`
+/// rounds them up, Foundation to the even digit, and the printer must follow
+/// Foundation at every digit count.
 #[test]
 fn foundation_corpus() {
     let corpus = common::crate_fixture("foundation-doubles.txt");
@@ -27,7 +30,7 @@ fn foundation_corpus() {
         assert_eq!(back.to_bits(), value.to_bits(), "bits {bits} reads back");
         lines += 1;
     }
-    assert!(lines > 200, "the corpus has {lines} values");
+    assert!(lines > 450, "the corpus has {lines} values");
 }
 
 /// `parse(print(v)) == v` and `print(parse(print(v))) == print(v)` for
