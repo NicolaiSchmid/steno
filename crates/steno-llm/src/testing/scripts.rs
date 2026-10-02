@@ -343,30 +343,9 @@ impl Scripts {
             "response.incomplete"
         };
         event_stream(&[
-            (
-                "response.created",
-                ResponsesStreamEvent {
-                    kind: "response.created".to_owned(),
-                    response: Some(response.clone()),
-                    ..ResponsesStreamEvent::default()
-                },
-            ),
-            (
-                "response.output_item.done",
-                ResponsesStreamEvent {
-                    kind: "response.output_item.done".to_owned(),
-                    item: Some(item),
-                    ..ResponsesStreamEvent::default()
-                },
-            ),
-            (
-                terminal,
-                ResponsesStreamEvent {
-                    kind: terminal.to_owned(),
-                    response: Some(response),
-                    ..ResponsesStreamEvent::default()
-                },
-            ),
+            event("response.created", Some(response.clone()), None),
+            event("response.output_item.done", None, Some(item)),
+            event(terminal, Some(response), None),
         ])
     }
 
@@ -390,22 +369,8 @@ impl Scripts {
             ..ResponsesResponse::default()
         };
         event_stream(&[
-            (
-                "response.created",
-                ResponsesStreamEvent {
-                    kind: "response.created".to_owned(),
-                    response: Some(response.clone()),
-                    ..ResponsesStreamEvent::default()
-                },
-            ),
-            (
-                "response.failed",
-                ResponsesStreamEvent {
-                    kind: "response.failed".to_owned(),
-                    response: Some(response),
-                    ..ResponsesStreamEvent::default()
-                },
-            ),
+            event("response.created", Some(response.clone()), None),
+            event("response.failed", Some(response), None),
         ])
     }
 
@@ -429,22 +394,8 @@ impl Scripts {
             ..ResponsesResponse::default()
         };
         event_stream(&[
-            (
-                "response.output_item.done",
-                ResponsesStreamEvent {
-                    kind: "response.output_item.done".to_owned(),
-                    item: Some(item),
-                    ..ResponsesStreamEvent::default()
-                },
-            ),
-            (
-                "response.completed",
-                ResponsesStreamEvent {
-                    kind: "response.completed".to_owned(),
-                    response: Some(response),
-                    ..ResponsesStreamEvent::default()
-                },
-            ),
+            event("response.output_item.done", None, Some(item)),
+            event("response.completed", Some(response), None),
         ])
     }
 
@@ -453,17 +404,14 @@ impl Scripts {
     #[must_use]
     pub fn responses_error_event(&self, message: &str, code: &str) -> StubResponse {
         event_stream(&[
-            (
+            event(
                 "response.created",
-                ResponsesStreamEvent {
-                    kind: "response.created".to_owned(),
-                    response: Some(ResponsesResponse {
-                        id: Some("resp_stub".to_owned()),
-                        status: Some("in_progress".to_owned()),
-                        ..ResponsesResponse::default()
-                    }),
-                    ..ResponsesStreamEvent::default()
-                },
+                Some(ResponsesResponse {
+                    id: Some("resp_stub".to_owned()),
+                    status: Some("in_progress".to_owned()),
+                    ..ResponsesResponse::default()
+                }),
+                None,
             ),
             (
                 "error",
@@ -488,17 +436,14 @@ impl Scripts {
     /// A stream cut before its terminal event.
     #[must_use]
     pub fn responses_truncated_stream(&self) -> StubResponse {
-        event_stream(&[(
+        event_stream(&[event(
             "response.created",
-            ResponsesStreamEvent {
-                kind: "response.created".to_owned(),
-                response: Some(ResponsesResponse {
-                    id: Some("resp_stub".to_owned()),
-                    status: Some("in_progress".to_owned()),
-                    ..ResponsesResponse::default()
-                }),
-                ..ResponsesStreamEvent::default()
-            },
+            Some(ResponsesResponse {
+                id: Some("resp_stub".to_owned()),
+                status: Some("in_progress".to_owned()),
+                ..ResponsesResponse::default()
+            }),
+            None,
         )])
     }
 
@@ -603,6 +548,24 @@ pub fn parse_segments(user_message: &str) -> Vec<(i64, String)> {
         segments.push((index, rest[colon + 1..].trim().to_owned()));
     }
     segments
+}
+
+/// A `response.*` event with `kind` as its name; `item` only for
+/// `response.output_item.done`.
+fn event(
+    kind: &'static str,
+    response: Option<ResponsesResponse>,
+    item: Option<ResponsesOutputItem>,
+) -> (&'static str, ResponsesStreamEvent) {
+    (
+        kind,
+        ResponsesStreamEvent {
+            kind: kind.to_owned(),
+            response,
+            item,
+            ..ResponsesStreamEvent::default()
+        },
+    )
 }
 
 /// `event: name\ndata: json\n\n` per event, as `text/event-stream`.

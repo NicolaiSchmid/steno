@@ -76,17 +76,7 @@ impl ManualClock {
     /// Waits until at least `count` sleepers are registered; `false` when
     /// that has not happened within `timeout` of wall time.
     pub async fn wait_for_sleepers(&self, count: usize, timeout: Duration) -> bool {
-        let wait = async {
-            loop {
-                let notified = self.sleepers_changed.notified();
-                tokio::pin!(notified);
-                notified.as_mut().enable();
-                if self.pending_sleepers() >= count {
-                    return;
-                }
-                notified.await;
-            }
-        };
+        let wait = super::wait_until(&self.sleepers_changed, || self.pending_sleepers() >= count);
         tokio::time::timeout(timeout, wait).await.is_ok()
     }
 

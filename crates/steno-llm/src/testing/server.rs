@@ -232,18 +232,11 @@ impl StubChatServer {
     /// Waits until at least `count` requests have been recorded, or the
     /// server was stopped. Never polls.
     pub async fn received(&self, count: usize) {
-        loop {
-            let notified = self.inner.requests_changed.notified();
-            tokio::pin!(notified);
-            notified.as_mut().enable();
-            {
-                let state = self.inner.state();
-                if state.requests.len() >= count || state.stopped {
-                    return;
-                }
-            }
-            notified.await;
-        }
+        super::wait_until(&self.inner.requests_changed, || {
+            let state = self.inner.state();
+            state.requests.len() >= count || state.stopped
+        })
+        .await;
     }
 
     /// Stops accepting, releases every parked or hanging connection and
@@ -314,15 +307,7 @@ async fn serve(inner: Arc<Inner>, mut stream: TcpStream) {
 }
 
 async fn wait_while(inner: &Inner, condition: impl Fn(&State) -> bool) {
-    loop {
-        let notified = inner.hold_changed.notified();
-        tokio::pin!(notified);
-        notified.as_mut().enable();
-        if !condition(&inner.state()) {
-            return;
-        }
-        notified.await;
-    }
+    super::wait_until(&inner.hold_changed, || !condition(&inner.state())).await;
 }
 
 fn record(inner: &Inner, raw: RawRequest) -> RecordedRequest {
