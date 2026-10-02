@@ -14,7 +14,7 @@ export const statusIconVariants = cva(
 			tone: {
 				muted: "text-muted-foreground",
 				faint: "text-faint",
-				primary: "text-primary",
+				success: "text-success",
 				warning: "text-warning",
 			},
 		},

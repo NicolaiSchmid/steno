@@ -24,7 +24,7 @@ export function Switch({ className, ...props }: SwitchProps) {
 			)}
 			{...props}
 		>
-			<BaseSwitch.Thumb className="size-3.5 rounded-full bg-background shadow-sm transition-[translate,scale] duration-(--duration-functional) ease-standard group-active:scale-x-110 data-checked:translate-x-3 dark:bg-foreground" />
+			<BaseSwitch.Thumb className="size-3.5 rounded-full shadow-sm transition-[translate,scale] duration-(--duration-functional) ease-standard group-active:scale-x-110 data-unchecked:bg-background dark:data-unchecked:bg-foreground data-checked:translate-x-3 data-checked:bg-primary-foreground" />
 		</BaseSwitch.Root>
 	);
 }

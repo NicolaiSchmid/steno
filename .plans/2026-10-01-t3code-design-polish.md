@@ -27,7 +27,10 @@ system font stack, `ui-monospace` for times, grain on sidebar and canvas,
 
 ## Deviations we keep on purpose
 
-Green primary instead of blue; three columns; the Record split button at the top of
+The green primary was dropped on 2026-10-02 for an achromatic one with red for
+the live state; see `2026-10-02-neutral-accent.md`.
+
+Three columns; the Record split button at the top of
 the sidebar; no theme engine, contrast slider or font settings; no wordmark.
 
 ## 1. Type scale (the biggest visible difference)

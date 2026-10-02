@@ -680,7 +680,7 @@ export function StoriesPage() {
 							control={<Badge variant="success">Allowed</Badge>}
 							icon={<CheckCircle2Icon aria-hidden="true" />}
 							label="Microphone"
-							tone="primary"
+							tone="success"
 						/>
 						<FormRow
 							control={<Badge variant="warning">Not allowed</Badge>}

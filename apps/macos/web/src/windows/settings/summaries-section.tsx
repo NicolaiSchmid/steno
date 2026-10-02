@@ -258,7 +258,7 @@ export function SummariesSection() {
 					label={status.title}
 					tone={
 						status.kind === "ok"
-							? "primary"
+							? "success"
 							: status.kind === "failed"
 								? "warning"
 								: "faint"

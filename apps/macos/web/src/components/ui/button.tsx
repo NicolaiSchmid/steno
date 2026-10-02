@@ -34,7 +34,7 @@ export const buttonLook = {
 	"ghost-muted": [ghost, "text-muted-foreground hover:text-foreground"],
 	destructive: [
 		filled,
-		"border-destructive bg-destructive text-primary-foreground hover:bg-destructive/90",
+		"border-destructive bg-destructive text-white hover:bg-destructive/90",
 	],
 	"warning-outline": [
 		"border-warning/32 bg-warning-surface text-warning-foreground shadow-xs",
