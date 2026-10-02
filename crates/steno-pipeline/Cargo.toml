@@ -1,0 +1,26 @@
+[package]
+name = "steno-pipeline"
+description = "The post-meeting pipeline: orchestration, intakes and the retention sweep over steno-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+async-trait.workspace = true
+chrono.workspace = true
+steno-core = { path = "../steno-core" }
+thiserror.workspace = true
+tokio = { workspace = true, features = ["sync", "rt", "macros"] }
+tracing.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+steno-core = { path = "../steno-core", features = ["testing"] }
+tempfile.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "time"] }
+
+[lints]
+workspace = true

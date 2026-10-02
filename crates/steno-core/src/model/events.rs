@@ -32,7 +32,7 @@ pub struct ProcessingProgress {
 }
 
 impl ProcessingProgress {
-    /// (next_fraction - fraction) / (1 - fraction) of the remaining time,
+    /// `(next_fraction - fraction) / (1 - fraction)` of the remaining time,
     /// so no presenter divides.
     #[must_use]
     pub fn expected_seconds_to_next_event(&self) -> f64 {
