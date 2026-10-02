@@ -227,11 +227,14 @@ fn migrate_generate_process_export_and_deliver() {
     );
     assert_eq!(deliver.status, 0, "{}", deliver.stderr);
     let ad_hoc = format!("obsidian-folder@{}", vault.display());
+    // The receipt folder is joined onto the vault with the platform's
+    // separator, so the printed path is compared piecewise.
+    let delivered_folder = deliver
+        .stdout
+        .strip_prefix(&format!("{ad_hoc}\tdelivered\t"))
+        .unwrap_or_else(|| panic!("{}", deliver.stdout));
     assert!(
-        deliver.stdout.starts_with(&format!(
-            "{ad_hoc}\tdelivered\t{}/Meetings/",
-            vault.display()
-        )),
+        delivered_folder.starts_with(&vault.join("Meetings").display().to_string()),
         "{}",
         deliver.stdout
     );
