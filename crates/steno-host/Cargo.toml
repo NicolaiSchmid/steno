@@ -1,0 +1,30 @@
+[package]
+name = "steno-host"
+description = "The view models behind Steno's windows and the bridge host over the store"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+async-trait.workspace = true
+chrono.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+steno-bridge = { path = "../steno-bridge" }
+# `testing` for the core's fakes behind the boundaries the host consumes
+# (`InMemorySecretStore`), re-used by `fakes::FakeServices`.
+steno-core = { path = "../steno-core", features = ["testing"] }
+thiserror.workspace = true
+# The core's boundaries are async; the host runs blocking (see the crate
+# doc), so it owns one current-thread runtime to wait on them.
+tokio = { workspace = true, features = ["rt"] }
+uuid.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true
