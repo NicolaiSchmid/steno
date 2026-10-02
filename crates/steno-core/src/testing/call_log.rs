@@ -1,7 +1,9 @@
 //! What a fake was asked to do.
 //! Swift: `CallLog` in `Sources/StenoCore/Testing/FakeSpeech.swift`.
 
-use std::sync::{Mutex, PoisonError};
+use std::sync::Mutex;
+
+use super::lock;
 
 /// Records what a fake was asked to do, from any thread. Fakes expose one
 /// named for what it records (`transcriptions`, `summaries`, `admissions`).
@@ -25,23 +27,17 @@ impl<Entry> CallLog<Entry> {
     }
 
     pub fn record(&self, entry: Entry) {
-        self.lock().push(entry);
+        lock(&self.entries).push(entry);
     }
 
     #[must_use]
     pub fn count(&self) -> usize {
-        self.lock().len()
+        lock(&self.entries).len()
     }
 
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.lock().is_empty()
-    }
-
-    /// A poisoned log is still a log: a fake that panicked mid-call keeps
-    /// the entries recorded before.
-    fn lock(&self) -> std::sync::MutexGuard<'_, Vec<Entry>> {
-        self.entries.lock().unwrap_or_else(PoisonError::into_inner)
+        lock(&self.entries).is_empty()
     }
 }
 
@@ -49,7 +45,7 @@ impl<Entry: Clone> CallLog<Entry> {
     /// Every entry so far, in call order.
     #[must_use]
     pub fn entries(&self) -> Vec<Entry> {
-        self.lock().clone()
+        lock(&self.entries).clone()
     }
 }
 

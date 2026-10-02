@@ -2,12 +2,12 @@
 //! Swift: `Sources/StenoCore/Testing/InMemorySpeakerMemory.swift`.
 
 use std::collections::BTreeMap;
-use std::sync::{Mutex, PoisonError};
+use std::sync::Mutex;
 
 use async_trait::async_trait;
 use uuid::Uuid;
 
-use crate::json::uuid_string;
+use super::lock;
 use crate::{BoundaryResult, Embedding, Person, SpeakerMatch, SpeakerMemory};
 
 /// A `SpeakerMemory` over an in-memory list of people: cosine ranking over
@@ -32,17 +32,13 @@ impl InMemorySpeakerMemory {
 
     /// Adds or replaces one person.
     pub fn insert(&self, person: Person) {
-        self.lock().insert(person.id, person);
+        lock(&self.people).insert(person.id, person);
     }
 
     /// Every person, by id.
     #[must_use]
     pub fn people(&self) -> Vec<Person> {
-        self.lock().values().cloned().collect()
-    }
-
-    fn lock(&self) -> std::sync::MutexGuard<'_, BTreeMap<Uuid, Person>> {
-        self.people.lock().unwrap_or_else(PoisonError::into_inner)
+        lock(&self.people).values().cloned().collect()
     }
 }
 
@@ -53,8 +49,7 @@ impl SpeakerMemory for InMemorySpeakerMemory {
         embedding: &Embedding,
         limit: usize,
     ) -> BoundaryResult<Vec<SpeakerMatch>> {
-        let mut ranked: Vec<SpeakerMatch> = self
-            .lock()
+        let mut ranked: Vec<SpeakerMatch> = lock(&self.people)
             .values()
             .filter_map(|person| {
                 let known = person.embedding.as_ref()?;
@@ -64,12 +59,13 @@ impl SpeakerMemory for InMemorySpeakerMemory {
                 })
             })
             .collect();
-        // Best first; ties broken by the uppercase id text, as in Swift.
+        // Best first; ties broken by id. Swift compares the uppercase id
+        // text, which orders like the bytes.
         ranked.sort_by(|left, right| {
             right
                 .similarity
                 .total_cmp(&left.similarity)
-                .then_with(|| uuid_string(left.person.id).cmp(&uuid_string(right.person.id)))
+                .then_with(|| left.person.id.cmp(&right.person.id))
         });
         ranked.truncate(limit);
         Ok(ranked)

@@ -28,6 +28,8 @@ mod in_memory_secret_store;
 mod in_memory_speaker_memory;
 pub mod sample_data;
 
+use std::sync::{Mutex, MutexGuard, PoisonError};
+
 use thiserror::Error;
 
 pub use call_log::CallLog;
@@ -50,4 +52,10 @@ impl FakeFailure {
             None => Ok(()),
         }
     }
+}
+
+/// A poisoned fake is still a fake: a test that panicked mid-call keeps
+/// what the others recorded before.
+fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }

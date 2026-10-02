@@ -158,10 +158,7 @@ mod tests {
             Some(&Transient { attempt: 1 })
         );
         let receipt = destination.deliver(&export, None).await.unwrap();
-        assert_eq!(
-            receipt.folder,
-            sample_data::meeting_id().to_string().to_uppercase()
-        );
+        assert_eq!(receipt.folder, uuid_string(export.meeting.id));
         let path = destination.export_path(export.meeting.id);
         let written = std::fs::read(&path).unwrap();
         assert_eq!(receipt.files[0].sha256, Sha256::digest(&written).to_vec());

@@ -2,12 +2,12 @@
 //! Swift: `Sources/StenoCore/Testing/FakeLLM.swift`.
 
 use std::collections::VecDeque;
-use std::sync::{Mutex, PoisonError};
+use std::sync::Mutex;
 
 use async_trait::async_trait;
 use thiserror::Error;
 
-use super::{CallLog, FakeFailure};
+use super::{CallLog, FakeFailure, lock};
 use crate::{
     BoundaryResult, BoxError, CleanupInput, CleanupOutput, LanguageModel, LlmRequest, LlmResponse,
     LlmUsage, MeetingSummarizer, MeetingTask, SpeakerNameSuggestion, SummaryBullet,
@@ -40,10 +40,7 @@ impl FakeLanguageModel {
     /// Responses not yet handed out.
     #[must_use]
     pub fn remaining(&self) -> usize {
-        self.responses
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .len()
+        lock(&self.responses).len()
     }
 }
 
@@ -51,9 +48,7 @@ impl FakeLanguageModel {
 impl LanguageModel for FakeLanguageModel {
     async fn complete(&self, request: &LlmRequest) -> BoundaryResult<LlmResponse> {
         self.requests.record(request.clone());
-        self.responses
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
+        lock(&self.responses)
             .pop_front()
             .ok_or_else(|| Box::new(Exhausted) as BoxError)
     }

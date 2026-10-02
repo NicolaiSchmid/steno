@@ -2,10 +2,11 @@
 //! package has a 0600 file store instead; that one belongs to the CLI crate.
 
 use std::collections::BTreeMap;
-use std::sync::{Mutex, PoisonError};
+use std::sync::Mutex;
 
 use async_trait::async_trait;
 
+use super::lock;
 use crate::{BoundaryResult, SecretKey, SecretStore};
 
 #[derive(Debug, Default)]
@@ -35,22 +36,18 @@ impl InMemorySecretStore {
     /// Every stored key, sorted.
     #[must_use]
     pub fn keys(&self) -> Vec<SecretKey> {
-        self.lock().keys().cloned().map(SecretKey).collect()
-    }
-
-    fn lock(&self) -> std::sync::MutexGuard<'_, BTreeMap<String, String>> {
-        self.secrets.lock().unwrap_or_else(PoisonError::into_inner)
+        lock(&self.secrets).keys().cloned().map(SecretKey).collect()
     }
 }
 
 #[async_trait]
 impl SecretStore for InMemorySecretStore {
     async fn secret(&self, key: &SecretKey) -> BoundaryResult<Option<String>> {
-        Ok(self.lock().get(key.as_str()).cloned())
+        Ok(lock(&self.secrets).get(key.as_str()).cloned())
     }
 
     async fn set_secret(&self, key: &SecretKey, value: Option<&str>) -> BoundaryResult<()> {
-        let mut secrets = self.lock();
+        let mut secrets = lock(&self.secrets);
         match value {
             Some(value) => secrets.insert(key.0.clone(), value.to_owned()),
             None => secrets.remove(key.as_str()),
