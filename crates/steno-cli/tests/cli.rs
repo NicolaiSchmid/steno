@@ -284,6 +284,8 @@ fn migrate_generate_process_export_and_deliver() {
     assert_eq!(steno(&["deliver", "nope", "--db", db], home).status, 1);
 }
 
+// Every usage error of the Swift test in one place.
+#[allow(clippy::too_many_lines)]
 #[test]
 fn usage_errors_exit_one_and_name_the_known_values() {
     let home = tempfile::tempdir().unwrap();

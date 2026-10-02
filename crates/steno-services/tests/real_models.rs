@@ -27,6 +27,8 @@ fn fixture(relative: &str) -> PathBuf {
         .join(relative)
 }
 
+// One flow: the setup is most of it.
+#[allow(clippy::too_many_lines)]
 #[tokio::test(flavor = "multi_thread")]
 async fn the_synthetic_call_runs_through_the_real_engines_to_a_well_formed_export() {
     if std::env::var("STENO_MODEL_TESTS").as_deref() != Ok("1") {
