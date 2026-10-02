@@ -2,6 +2,7 @@
 //! ChatGPT sign-in from the credential store.
 //! Swift: `Sources/StenoLLM/Codex/CodexResponsesClient.swift`.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 
 use steno_core::{
@@ -11,7 +12,7 @@ use steno_core::{
 
 use super::{CodexCredentialError, CodexCredentialStore, CodexCredentials};
 use crate::endpoint::WireFormat;
-use crate::transport::{self, HttpReply, LlmClientEvent, Observer, notify};
+use crate::transport::{self, Attempt, HttpReply, LlmClientEvent, Observer, notify};
 use crate::wire::{
     self, CodexErrorEnvelope, CodexModel, CodexModelList, ResponsesFormat, ResponsesOutputItem,
     ResponsesReasoning, ResponsesRequest, ResponsesResponse, ResponsesStreamEvent, ResponsesText,
@@ -63,12 +64,6 @@ pub struct CodexResponsesClient {
     mode: Mutex<StructuredOutputMode>,
     /// One per client, so the backend can group a meeting's requests.
     session_id: String,
-}
-
-enum Outcome {
-    Done(LlmResponse),
-    Resend,
-    Failed(LlmError),
 }
 
 impl CodexResponsesClient {
@@ -137,50 +132,41 @@ impl CodexResponsesClient {
 
     /// One completion with this crate's own error types.
     pub async fn complete_llm(&self, request: &LlmRequest) -> Result<LlmResponse, CodexError> {
-        let mut attempt: u32 = 1;
-        let mut refreshed_after_unauthorized = false;
-        loop {
-            let failure = match self
-                .attempt(request, attempt, &mut refreshed_after_unauthorized)
-                .await
-            {
-                Ok(Outcome::Done(response)) => return Ok(response),
-                Ok(Outcome::Resend) => continue,
-                Ok(Outcome::Failed(failure)) => {
-                    if failure == LlmError::Timeout {
-                        notify(self.observer.as_ref(), LlmClientEvent::TimedOut { attempt });
+        // Shared by every attempt of this completion; atomic only so the
+        // attempt futures borrow nothing from the loop's closure.
+        let refreshed_after_unauthorized = AtomicBool::new(false);
+        let refreshed = &refreshed_after_unauthorized;
+        transport::run_attempts(
+            &self.retry,
+            self.clock.as_ref(),
+            self.observer.as_ref(),
+            move |attempt| async move {
+                match self.attempt(request, attempt, refreshed).await {
+                    Ok(outcome) => Ok(outcome),
+                    // The token endpoint hiccuped: a transport failure like
+                    // any other, worth the same backoff. The other credential
+                    // errors are final.
+                    Err(CodexCredentialError::RefreshFailed(detail)) => {
+                        Ok(Attempt::Failed(LlmError::Transport(detail)))
                     }
-                    failure
+                    Err(error) => Err(CodexError::Credential(error)),
                 }
-                // The token endpoint hiccuped: a transport failure like any
-                // other, worth the same backoff. The other credential errors
-                // are final.
-                Err(CodexCredentialError::RefreshFailed(detail)) => LlmError::Transport(detail),
-                Err(error) => return Err(CodexError::Credential(error)),
-            };
-            transport::back_off(
-                failure,
-                attempt,
-                &self.retry,
-                self.clock.as_ref(),
-                self.observer.as_ref(),
-            )
-            .await?;
-            attempt += 1;
-        }
+            },
+        )
+        .await
     }
 
     async fn attempt(
         &self,
         request: &LlmRequest,
         attempt: u32,
-        refreshed_after_unauthorized: &mut bool,
-    ) -> Result<Outcome, CodexCredentialError> {
+        refreshed_after_unauthorized: &AtomicBool,
+    ) -> Result<Attempt, CodexCredentialError> {
         let credentials = self.credentials.current().await?;
         let mode = self.mode();
         let wire = match self.make_request(request, mode, &credentials) {
             Ok(wire) => wire,
-            Err(failure) => return Ok(Outcome::Failed(failure)),
+            Err(failure) => return Ok(Attempt::Failed(failure)),
         };
         notify(
             self.observer.as_ref(),
@@ -193,7 +179,7 @@ impl CodexResponsesClient {
         let secrets = credentials.secrets();
         let reply = match self.perform(wire, &secrets).await {
             Ok(reply) => reply,
-            Err(failure) => return Ok(Outcome::Failed(failure)),
+            Err(failure) => return Ok(Attempt::Failed(failure)),
         };
         notify(
             self.observer.as_ref(),
@@ -204,18 +190,18 @@ impl CodexResponsesClient {
         );
         if reply.is_success() {
             return Ok(match Self::parse(&reply, &secrets) {
-                Ok(response) => Outcome::Done(response),
-                Err(failure) => Outcome::Failed(failure),
+                Ok(response) => Attempt::Done(response),
+                Err(failure) => Attempt::Failed(failure),
             });
         }
-        if reply.status == 401 && !*refreshed_after_unauthorized {
+        if reply.status == 401 && !refreshed_after_unauthorized.load(Ordering::Relaxed) {
             // The file may hold a token the CLI already rotated (no
             // network), else one refresh; then a 401 is the answer.
-            *refreshed_after_unauthorized = true;
+            refreshed_after_unauthorized.store(true, Ordering::Relaxed);
             self.credentials
                 .refreshed_if_still_using(&credentials.access_token)
                 .await?;
-            return Ok(Outcome::Resend);
+            return Ok(Attempt::Resend);
         }
         if reply.status == 400
             && request.response_format.kind() != LlmResponseFormatKind::Text
@@ -224,9 +210,9 @@ impl CodexResponsesClient {
         {
             self.set_mode(next);
             notify(self.observer.as_ref(), LlmClientEvent::ModeDowngraded(next));
-            return Ok(Outcome::Resend);
+            return Ok(Attempt::Resend);
         }
-        Ok(Outcome::Failed(Self::classify(&reply, &secrets)))
+        Ok(Attempt::Failed(Self::classify(&reply, &secrets)))
     }
 
     /// Every model the backend offers this account, in the server's order;
@@ -530,11 +516,7 @@ impl CodexResponsesClient {
             };
         }
         if reply.status == 429 {
-            return LlmError::RateLimited {
-                retry_after: transport::retry_after(
-                    reply.headers.get("retry-after").map(String::as_str),
-                ),
-            };
+            return transport::rate_limited(reply);
         }
         LlmError::Http {
             status: reply.status,

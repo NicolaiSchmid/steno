@@ -4,10 +4,11 @@
 //! Swift: `Sources/StenoLLM/Transport.swift`.
 
 use std::collections::HashMap;
+use std::future::Future;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use steno_core::async_trait;
+use steno_core::{LlmResponse, async_trait};
 
 use crate::{LlmError, RetryPolicy, StructuredOutputMode};
 
@@ -158,13 +159,10 @@ async fn send(
     request: reqwest::Request,
     secrets: &[String],
 ) -> Result<HttpReply, LlmError> {
-    let response = client.execute(request).await.map_err(|error| {
-        if error.is_timeout() {
-            LlmError::Timeout
-        } else {
-            LlmError::Transport(redact(&error_chain(&error), secrets))
-        }
-    })?;
+    let response = client
+        .execute(request)
+        .await
+        .map_err(|error| transport_error(&error, secrets))?;
     let status = response.status().as_u16();
     let headers = response
         .headers()
@@ -179,19 +177,23 @@ async fn send(
     let body = response
         .bytes()
         .await
-        .map_err(|error| {
-            if error.is_timeout() {
-                LlmError::Timeout
-            } else {
-                LlmError::Transport(redact(&error_chain(&error), secrets))
-            }
-        })?
+        .map_err(|error| transport_error(&error, secrets))?
         .to_vec();
     Ok(HttpReply {
         status,
         headers,
         body,
     })
+}
+
+/// reqwest's own timeout (the wall-clock backstop) as [`LlmError::Timeout`],
+/// anything else as a redacted [`LlmError::Transport`].
+fn transport_error(error: &reqwest::Error, secrets: &[String]) -> LlmError {
+    if error.is_timeout() {
+        LlmError::Timeout
+    } else {
+        LlmError::Transport(redact(&error_chain(error), secrets))
+    }
 }
 
 /// reqwest's message plus every source, so "connection refused" reaches the
@@ -235,6 +237,53 @@ pub async fn back_off(
     );
     clock.sleep(delay).await;
     Ok(())
+}
+
+/// What one attempt of a client came to.
+pub(crate) enum Attempt {
+    Done(LlmResponse),
+    /// Sent again without counting as an attempt: a mode downgrade, a
+    /// parameter adjustment, a refreshed sign-in.
+    Resend,
+    /// The failure to back off from, or to return when the policy is spent.
+    Failed(LlmError),
+}
+
+/// The loop both clients run: `attempt` with the attempt number, 1 first,
+/// until it is done; a resend goes straight back round, a failure
+/// announces a timeout and goes through [`back_off`]. An `Err` from
+/// `attempt` ends the loop at once.
+pub(crate) async fn run_attempts<E, F, Fut>(
+    retry: &RetryPolicy,
+    clock: &dyn Clock,
+    observer: Option<&Observer>,
+    mut attempt: F,
+) -> Result<LlmResponse, E>
+where
+    E: From<LlmError>,
+    F: FnMut(u32) -> Fut,
+    Fut: Future<Output = Result<Attempt, E>>,
+{
+    let mut number: u32 = 1;
+    loop {
+        let failure = match attempt(number).await? {
+            Attempt::Done(response) => return Ok(response),
+            Attempt::Resend => continue,
+            Attempt::Failed(failure) => failure,
+        };
+        if failure == LlmError::Timeout {
+            notify(observer, LlmClientEvent::TimedOut { attempt: number });
+        }
+        back_off(failure, number, retry, clock, observer).await?;
+        number += 1;
+    }
+}
+
+/// A 429 as [`LlmError::RateLimited`] with the reply's `Retry-After`.
+pub(crate) fn rate_limited(reply: &HttpReply) -> LlmError {
+    LlmError::RateLimited {
+        retry_after: retry_after(reply.headers.get("retry-after").map(String::as_str)),
+    }
 }
 
 /// `Retry-After` in delta seconds, capped at an hour. Anything that is not

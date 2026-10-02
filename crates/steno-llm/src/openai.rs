@@ -11,7 +11,7 @@ use steno_core::{
 };
 
 use crate::endpoint::WireFormat;
-use crate::transport::{self, HttpReply, LlmClientEvent, Observer, notify};
+use crate::transport::{self, Attempt, HttpReply, LlmClientEvent, Observer, notify};
 use crate::wire::{
     self, ChatCompletionRequest, ChatCompletionResponse, ChatErrorEnvelope, ChatResponseFormat,
     ModelList,
@@ -112,65 +112,45 @@ impl OpenAiCompatibleClient {
     /// One completion with this crate's own error type; the
     /// [`LanguageModel`] impl boxes it.
     pub async fn complete_llm(&self, request: &LlmRequest) -> Result<LlmResponse, LlmError> {
-        let mut attempt: u32 = 1;
-        loop {
-            let mode = self.state().mode;
-            let wire = self.make_request(request, mode)?;
-            notify(
-                self.observer.as_ref(),
-                LlmClientEvent::Request {
-                    attempt,
-                    purpose: request.purpose.clone(),
-                    mode,
-                },
-            );
-            let failure = match self.perform(wire).await {
-                Ok(reply) => {
-                    notify(
-                        self.observer.as_ref(),
-                        LlmClientEvent::Response {
-                            attempt,
-                            status: reply.status,
-                        },
-                    );
-                    match self.handle(request, mode, &reply) {
-                        Outcome::Done(result) => match result {
-                            Ok(response) => return Ok(response),
-                            Err(failure) => failure,
-                        },
-                        Outcome::Resend => continue,
-                    }
-                }
-                Err(failure) => {
-                    if failure == LlmError::Timeout {
-                        notify(self.observer.as_ref(), LlmClientEvent::TimedOut { attempt });
-                    }
-                    failure
-                }
-            };
-            transport::back_off(
-                failure,
-                attempt,
-                &self.retry,
-                self.clock.as_ref(),
-                self.observer.as_ref(),
-            )
-            .await?;
-            attempt += 1;
-        }
+        transport::run_attempts(
+            &self.retry,
+            self.clock.as_ref(),
+            self.observer.as_ref(),
+            move |attempt| self.attempt(request, attempt),
+        )
+        .await
     }
 
-    /// A reply's consequence: the parsed answer or the failure to back off
-    /// from, or a resend after a mode downgrade or a parameter adjustment
-    /// (neither consumes an attempt).
-    fn handle(
-        &self,
-        request: &LlmRequest,
-        mode: StructuredOutputMode,
-        reply: &HttpReply,
-    ) -> Outcome {
+    /// One attempt: the parsed answer or the failure to back off from, or a
+    /// resend after a mode downgrade or a parameter adjustment (neither
+    /// consumes an attempt). A request that cannot be built is final.
+    async fn attempt(&self, request: &LlmRequest, attempt: u32) -> Result<Attempt, LlmError> {
+        let mode = self.state().mode;
+        let wire = self.make_request(request, mode)?;
+        notify(
+            self.observer.as_ref(),
+            LlmClientEvent::Request {
+                attempt,
+                purpose: request.purpose.clone(),
+                mode,
+            },
+        );
+        let reply = match self.perform(wire).await {
+            Ok(reply) => reply,
+            Err(failure) => return Ok(Attempt::Failed(failure)),
+        };
+        notify(
+            self.observer.as_ref(),
+            LlmClientEvent::Response {
+                attempt,
+                status: reply.status,
+            },
+        );
         if reply.is_success() {
-            return Outcome::Done(self.parse(reply));
+            return Ok(match self.parse(&reply) {
+                Ok(response) => Attempt::Done(response),
+                Err(failure) => Attempt::Failed(failure),
+            });
         }
         if reply.status == 400
             && request.response_format.kind() != LlmResponseFormatKind::Text
@@ -179,10 +159,10 @@ impl OpenAiCompatibleClient {
         {
             self.state().mode = next;
             notify(self.observer.as_ref(), LlmClientEvent::ModeDowngraded(next));
-            return Outcome::Resend;
+            return Ok(Attempt::Resend);
         }
         if reply.status == 400
-            && let Some(param) = Self::rejected_parameter(reply)
+            && let Some(param) = Self::rejected_parameter(&reply)
             && Self::ADJUSTABLE_PARAMETERS.contains(&param.as_str())
             && self.state().rejected_parameters.insert(param.clone())
         {
@@ -190,9 +170,9 @@ impl OpenAiCompatibleClient {
                 self.observer.as_ref(),
                 LlmClientEvent::ParameterRejected(param),
             );
-            return Outcome::Resend;
+            return Ok(Attempt::Resend);
         }
-        Outcome::Done(Err(self.classify(reply)))
+        Ok(Attempt::Failed(self.classify(&reply)))
     }
 
     /// `GET /models` (whether the model is listed; a server without a list
@@ -388,11 +368,7 @@ impl OpenAiCompatibleClient {
 
     fn classify(&self, reply: &HttpReply) -> LlmError {
         if reply.status == 429 {
-            return LlmError::RateLimited {
-                retry_after: transport::retry_after(
-                    reply.headers.get("retry-after").map(String::as_str),
-                ),
-            };
+            return transport::rate_limited(reply);
         }
         LlmError::Http {
             status: reply.status,
@@ -436,11 +412,6 @@ impl OpenAiCompatibleClient {
     fn redact(&self, text: &str) -> String {
         transport::redact(text, &self.secrets())
     }
-}
-
-enum Outcome {
-    Done(Result<LlmResponse, LlmError>),
-    Resend,
 }
 
 #[async_trait]
