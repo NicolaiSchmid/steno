@@ -7,14 +7,14 @@ use std::path::{Path, PathBuf};
 
 use chrono_tz::Tz;
 use steno_core::{
-    BoundaryResult, DeliveredFile, DeliveryReceipt, Destination, FileOwnership, MeetingExport,
-    ObsidianSettings, async_trait,
+    BoundaryResult, DeliveryReceipt, Destination, FileOwnership, MeetingExport, ObsidianSettings,
+    async_trait,
 };
 use thiserror::Error;
 use uuid::Uuid;
 
 use super::ManagedBlock;
-use crate::fs::{AtomicFileWriter, LocalFolderSink, WriteFailure};
+use crate::fs::{AtomicFileWriter, LocalFolderSink};
 use crate::naming::MeetingFolder;
 use crate::rendering::{ArtifactRenderer, LinkStyle, RenderOptions};
 use crate::runtime::DeliveryLedger;
@@ -160,13 +160,7 @@ impl ObsidianFolderDestination {
                 self.writing(&path, || self.sink.write(&data, &path))?;
                 ledger.record(&path, FileOwnership::ManagedBlock, &data);
             }
-            let previous_files = ledger.previous().map(|receipt| receipt.files.clone());
-            self.remove_meeting_line(
-                previous_files.as_deref().unwrap_or(&[]),
-                &rendered_pages,
-                meeting.meeting.id,
-                &mut ledger,
-            )?;
+            self.remove_meeting_line(&rendered_pages, meeting.meeting.id, &mut ledger)?;
         }
 
         if self.settings.include_audio {
@@ -225,19 +219,19 @@ impl ObsidianFolderDestination {
     /// the app wrote does.
     fn remove_meeting_line(
         &self,
-        previous: &[DeliveredFile],
         rendered: &HashSet<String>,
         meeting_id: Uuid,
         ledger: &mut DeliveryLedger,
     ) -> Result<(), ObsidianError> {
-        for file in previous
-            .iter()
+        let stale: Vec<String> = ledger
+            .previous()
+            .into_iter()
+            .flat_map(|receipt| &receipt.files)
             .filter(|file| file.ownership == FileOwnership::ManagedBlock)
-        {
-            let path = &file.relative_path;
-            if rendered.contains(path) {
-                continue;
-            }
+            .filter(|file| !rendered.contains(&file.relative_path))
+            .map(|file| file.relative_path.clone())
+            .collect();
+        for path in &stale {
             let Some(existing) = self.reading(path, || self.sink.read(path))? else {
                 continue;
             };
@@ -327,20 +321,16 @@ impl ObsidianFolderDestination {
         })
     }
 
-    fn writing<T, E: Into<WriteError>>(
+    /// A `WriteFailure` names the same absolute target the sink resolves
+    /// `path` to, so one mapping serves it and the plain `io::Error`s.
+    fn writing<T, E: std::fmt::Display>(
         &self,
         path: &str,
         body: impl FnOnce() -> Result<T, E>,
     ) -> Result<T, ObsidianError> {
-        body().map_err(|error| match error.into() {
-            WriteError::Atomic(failure) => ObsidianError::WriteFailed {
-                path: failure.path,
-                underlying: failure.underlying,
-            },
-            WriteError::Io(error) => ObsidianError::WriteFailed {
-                path: self.absolute(path),
-                underlying: error.to_string(),
-            },
+        body().map_err(|error| ObsidianError::WriteFailed {
+            path: self.absolute(path),
+            underlying: error.to_string(),
         })
     }
 
@@ -352,24 +342,6 @@ impl ObsidianFolderDestination {
         } else {
             self.sink.path(path).to_string_lossy().into_owned()
         }
-    }
-}
-
-/// The two ways a write step fails, folded into one message by `writing`.
-enum WriteError {
-    Atomic(WriteFailure),
-    Io(std::io::Error),
-}
-
-impl From<WriteFailure> for WriteError {
-    fn from(failure: WriteFailure) -> Self {
-        WriteError::Atomic(failure)
-    }
-}
-
-impl From<std::io::Error> for WriteError {
-    fn from(error: std::io::Error) -> Self {
-        WriteError::Io(error)
     }
 }
 

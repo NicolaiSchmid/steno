@@ -65,15 +65,14 @@ impl DeliveryCoordinator {
     pub fn destinations_for(settings: &Settings) -> Vec<Arc<dyn Destination>> {
         settings
             .obsidian
-            .as_ref()
+            .iter()
             .map(|obsidian| {
-                let destination: Arc<dyn Destination> = Arc::new(ObsidianFolderDestination::new(
+                Arc::new(ObsidianFolderDestination::new(
                     obsidian.clone(),
                     local_time_zone(),
-                ));
-                vec![destination]
+                )) as Arc<dyn Destination>
             })
-            .unwrap_or_default()
+            .collect()
     }
 
     /// Fails every stored row with `reason`: settings that do not load
