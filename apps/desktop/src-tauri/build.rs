@@ -2,6 +2,14 @@
 //! not been built so a debug `cargo build` works on a bare checkout (a
 //! release build fails instead), then let `tauri_build` do its own work
 //! (configuration, ACL, Windows resources).
+//!
+//! The static Visual C++ runtime is a release-only choice. To get it,
+//! `tauri_build` writes an empty `msvcrt.lib` into this crate's `OUT_DIR`
+//! and puts that directory on the native search path; rustdoc links every
+//! doctest in the workspace against the same search path, so in a debug
+//! build the real `msvcrt.lib` is shadowed and every doctest fails to link
+//! (`unresolved external symbol memcpy`, `_fltused`, ...). A release bundle
+//! keeps the static runtime so users need no redistributable.
 
 use std::{
     env,
@@ -11,7 +19,12 @@ use std::{
 fn main() {
     let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR"));
     ensure_frontend_dist(&manifest_dir);
-    tauri_build::build();
+    let release = env::var("PROFILE").as_deref() == Ok("release");
+    let attributes = tauri_build::Attributes::new()
+        .windows_attributes(tauri_build::WindowsAttributes::new().static_vc_runtime(release));
+    if let Err(error) = tauri_build::try_build(attributes) {
+        panic!("tauri-build: {error:#}");
+    }
 }
 
 /// `tauri::generate_context!` embeds `frontendDist` and fails when the

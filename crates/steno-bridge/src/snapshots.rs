@@ -322,6 +322,9 @@ pub struct DetailSpeaker {
         with = "json::uuid::option"
     )]
     pub person_id: Option<Uuid>,
+    /// The confirmed or suggested person's email, when known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub email: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub suggestion_name: Option<String>,
     pub color_index: i64,

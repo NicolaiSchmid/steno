@@ -10,56 +10,72 @@ use steno_core::*;
 
 use common::{MEETING_ID, PERSON_ID, date, populate, uuid};
 
-/// Raw column text through `sqlite3` when the CLI is available (the
-/// independent reader), else through a second rusqlite connection.
+/// Raw column text through `sqlite3` when a usable CLI is available (the
+/// independent reader), else through a second rusqlite connection. A CLI
+/// built without FTS5 cannot open the file at all (the schema has the
+/// `transcriptSearch` virtual table), so it counts as absent too.
 fn raw(path: &std::path::Path, sql: &str) -> String {
-    match Command::new("sqlite3")
+    let cli = match Command::new("sqlite3")
         .arg("-batch")
         .arg("-noheader")
         .arg(path)
         .arg(sql)
         .output()
     {
-        Ok(output) if output.status.success() => String::from_utf8(output.stdout)
-            .unwrap()
-            .trim_end()
-            .replace("\r\n", "\n"),
-        Ok(output) => panic!(
-            "sqlite3 failed: {}",
-            String::from_utf8_lossy(&output.stderr)
+        Ok(output) if output.status.success() => Some(
+            String::from_utf8(output.stdout)
+                .unwrap()
+                .trim_end()
+                .replace("\r\n", "\n"),
         ),
+        Ok(output) => {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert!(
+                stderr.contains("no such module"),
+                "sqlite3 failed: {stderr}"
+            );
+            eprintln!(
+                "sqlite3 CLI lacks FTS5 ({}); reading raw columns through rusqlite",
+                stderr.trim()
+            );
+            None
+        }
         Err(error) => {
             eprintln!("sqlite3 CLI not available ({error}); reading raw columns through rusqlite");
-            let connection = Connection::open(path).unwrap();
-            let mut statement = connection.prepare(sql).unwrap();
-            let columns = statement.column_count();
-            let rows = statement
-                .query_map([], |row| {
-                    (0..columns)
-                        .map(|index| {
-                            row.get::<_, rusqlite::types::Value>(index)
-                                .map(|value| match value {
-                                    rusqlite::types::Value::Null => String::new(),
-                                    rusqlite::types::Value::Integer(i) => i.to_string(),
-                                    rusqlite::types::Value::Real(f) if f.fract() == 0.0 => {
-                                        format!("{f:.1}")
-                                    }
-                                    rusqlite::types::Value::Real(f) => f.to_string(),
-                                    rusqlite::types::Value::Text(t) => t,
-                                    rusqlite::types::Value::Blob(b) => {
-                                        format!("<{} bytes>", b.len())
-                                    }
-                                })
-                        })
-                        .collect::<rusqlite::Result<Vec<_>>>()
-                        .map(|cells| cells.join("|"))
-                })
-                .unwrap();
-            rows.collect::<rusqlite::Result<Vec<_>>>()
-                .unwrap()
-                .join("\n")
+            None
         }
+    };
+    if let Some(text) = cli {
+        return text;
     }
+    let connection = Connection::open(path).unwrap();
+    let mut statement = connection.prepare(sql).unwrap();
+    let columns = statement.column_count();
+    let rows = statement
+        .query_map([], |row| {
+            (0..columns)
+                .map(|index| {
+                    row.get::<_, rusqlite::types::Value>(index)
+                        .map(|value| match value {
+                            rusqlite::types::Value::Null => String::new(),
+                            rusqlite::types::Value::Integer(i) => i.to_string(),
+                            rusqlite::types::Value::Real(f) if f.fract() == 0.0 => {
+                                format!("{f:.1}")
+                            }
+                            rusqlite::types::Value::Real(f) => f.to_string(),
+                            rusqlite::types::Value::Text(t) => t,
+                            rusqlite::types::Value::Blob(b) => {
+                                format!("<{} bytes>", b.len())
+                            }
+                        })
+                })
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .map(|cells| cells.join("|"))
+        })
+        .unwrap();
+    rows.collect::<rusqlite::Result<Vec<_>>>()
+        .unwrap()
+        .join("\n")
 }
 
 #[test]
