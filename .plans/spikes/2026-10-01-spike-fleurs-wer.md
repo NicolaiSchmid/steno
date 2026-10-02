@@ -2,18 +2,18 @@
 
 Status: measured 2026-10-01, time-boxed to about 75 minutes. Parent:
 `.plans/2026-10-01-cross-platform-speech-stack.md` (WP1b, reading gate G1). Previous:
-`.plans/spikes/2026-10-01-spike-own-export.md` (the fp32 export and its 11.5 % mean
+`.plans/spikes/2026-10-01-spike-own-export.md` (our fp32 export and its 11.5 % mean
 disagreement with CoreML). Code: `spikes/onnx-speech/fleurs/` (data builder, Forge run
 script, batch ORT decoder, scorer, README with the exact commands).
 
 ## Question
 
 Spikes D and E only measured how much the ONNX path *disagrees* with the CoreML
-transcript (11.5 % mean for the own fp32 export). The CoreML encoder is a 6-bit
+transcript (11.5 % mean for our fp32 export). The CoreML encoder is a 6-bit
 palettised approximation, so that number says nothing about which side is wrong. Against
-human references on public German speech: what is the absolute word error rate of
+human references on public German speech: what is the absolute word error rate (WER) of
 (a) Parakeet TDT 0.6B v3 on CoreML through the Swift app's pipeline, (b) WhisperKit
-large-v3-turbo on CoreML, (c) the own fp32 ONNX export of Parakeet v3 on CPU through the
+large-v3-turbo on CoreML, (c) our fp32 ONNX export of Parakeet v3 on CPU through the
 spike-D harness? Is (c) within about 1 WER point of (a)?
 
 ## Data and licence
@@ -27,8 +27,8 @@ kept as digits (57 of the 300 references contain one), abbreviations stay as wri
 
 | Set | Files | Audio | Reference words | How |
 |---|---:|---:|---:|---|
-| `utt/` | 300 | 67.8 min (mean 13.6 s, 3 to 30 s) | 6578 | first 300 rows of the split, 16 kHz mono Int16 WAV + `<name>.ref.txt` |
-| `cat/` | 10 | 67.8 min (6.1 to 8.7 min each) | 6578 | the same 300 in groups of 30 with 0.7 s of silence between utterances; references joined with spaces |
+| `utt/` | 300 | 67.8 min (mean 13.6 s, 4 to 47 s) | 6578 | first 300 rows of the split, 16 kHz mono Int16 WAV + `<name>.ref.txt` |
+| `cat/` | 10 | 71.2 min including the gaps (6.1 to 8.7 min each) | 6578 | the same 300 in groups of 30 with 0.7 s of silence between utterances; references joined with spaces |
 
 `cat/` exists because Steno transcribes long recordings and the chunker (VAD, 25 s
 target, 1.5 s overlap, LCS merge) is part of what we measure for the ONNX path; `utt/`
@@ -45,7 +45,7 @@ meeting audio (spike E's 7eb51e56) is far harder for every engine.
 
 | Item | Value |
 |---|---|
-| Host | Forge, M4 Pro (10 cores, 24 GB), macOS 26.7; other users' load averaged 2 to 6 throughout (recorded per step below) |
+| Host | Forge, M4 Pro (10 cores, 24 GB), macOS 26.7 |
 | (a) CoreML Parakeet | `steno dev bakeoff <set> --engines parakeet-v3 whisperkit-large-v3-turbo`, binary `~/steno-calibration/repo/.build/release/steno` (main as of this morning), models in `~/Library/Application Support/Steno/Models` (FluidAudio Parakeet v3 CoreML); the app's own chunking and language lanes |
 | (b) WhisperKit | same bake-off run, `whisperkit-large-v3-turbo` CoreML |
 | (c) own fp32 ONNX | spike-D harness `~/steno-spikes/chunker/target/release/onnx-speech-spike` (sherpa-rs-sys 0.6.8, sherpa-onnx 1.12.9, bundled onnxruntime 1.17.1), `--asr-dir ~/steno-spikes/models-own/fp32 --asr-files fp32 --chunker vad --target-seconds 25 --slid-dir models/sherpa-onnx-whisper-tiny --vote --threads 4`, CPU provider. Tag `f-fp32` |
@@ -53,23 +53,14 @@ meeting audio (spike E's 7eb51e56) is far harder for every engine.
 | Scoring | `spikes/onnx-speech/fleurs/score_fleurs.py` over the raw per-file JSON of every engine, one normaliser for reference and hypothesis: NFC, lowercase, `%` to `prozent`, anything that is not a letter or digit is a word boundary. "Mean WER" is the mean of per-file WERs; "pooled" is total errors over total reference words. The Swift bake-off's own `report.md` (which additionally folds umlauts) agrees with the scorer to 0.1 point on every row |
 | Sequencing | the steps ran one after another under `nohup` (`spikes/onnx-speech/fleurs/run-forge.sh cat utt ort`), never concurrently |
 
-Verbatim errors: none from the engines during the measurement. The `utt/` harness pass
-was stopped on purpose after 151 files (`pkill -f onnx-speech-spike`; `run.log` shows
-`Terminated: 15 ... exit 143` at 23:28, load 4.89), and the ORT loop's second `cat/`
-pass was killed when its output proved unusable. During data preparation, the first
-Docker run failed with `ImportError: To support decoding audio files, please install
-'librosa' and 'soundfile'.` (the FLEURS loader decodes its own tar; `datasets<3` plus
-`librosa` fixed it; the 2 GB archive was already cached). On Forge the system
-`python3` (3.13, Nix) has no onnxruntime (`ModuleNotFoundError: No module named
-'onnxruntime'`); a `uv` venv solved it without `brew` or `sudo`.
+Measurement conditions: Forge shared with other users; 1-minute load 1.9 to 5.6 across
+the bake-off and harness steps and up to 9 during the ORT loop, recorded per step in
+the Load column of each table. No engine produced an error during the measurement; the
+`utt/` harness pass was stopped on purpose after 151 files (see below).
 
 ## Results
 
 ### `cat/` (10 files of about 7 minutes, the chunker in the loop)
-
-Load averages from `uptime` before and after each step: bake-off 2.63 to 2.20, harness
-2.20 to 5.57 (the harness itself is 4 threads; per-file 1-minute load before each file
-is in its JSON), ORT loop 4.89 to 9.05 (other users arrived during it).
 
 | Engine | Files | Mean WER | Median | Pooled | S/D/I | Mean RTFx | Load (1-min, mean) |
 |---|---:|---:|---:|---:|---|---:|---:|
@@ -80,7 +71,9 @@ is in its JSON), ORT loop 4.89 to 9.05 (other users arrived during it).
 
 With digits spelled out as German number words on both sides (`--numbers`): (a) 5.3 %,
 (b) 6.0 %, (c) 5.1 %, (c') 64.3 %; every row moves by 0.0 to 0.2 points and the order does
-not change. With the Swift bake-off's umlaut folding: 5.5 / 5.9 / 5.3 %.
+not change. With the Swift bake-off's umlaut folding: 5.5 / 5.9 / 5.3 %. The
+`--numbers` rows in this report are as reported by the run and were not re-verified:
+`num2words` was not installed in the venv when the verification pass ran on 2026-10-02.
 
 Per file (raw normalisation):
 
@@ -99,16 +92,16 @@ Per file (raw normalisation):
 | **mean** | 6578 | **5.5 %** | **6.0 %** | **5.3 %** | 64.4 % |
 
 Peak RSS of the harness with the fp32 model: 3.4 GB; model load 5.4 s. The harness cut
-every file into 20 to 25 segments, all at `long-pause` boundaries (the 0.7 s gaps), all
-voted `de`, and flagged nothing; the chunker was never the problem on this material.
+every file into 20 to 25 segments, at `long-pause` boundaries (the 0.7 s gaps) apart
+from 18 `pause` cuts and one energy cut across the ten files; every lane voted `de`;
+two files raised a flag, and on cat-02 the vote changed 2 segments. The chunker was
+never the problem on this material.
 
 ### `utt/` (300 single utterances, no chunker decisions to speak of)
 
-Load from `uptime`: bake-off 5.57 to 1.86 (the harness had just finished), harness
-1.86 to 4.89. The harness was stopped after 151 of 300 files to stay inside the time
-box (2 to 4 s per file, most of it the SLID pass; see below), so its row is over the
-first 151 utterances and the CoreML rows are given both over all 300 and over the same
-151.
+The harness was stopped after 151 of 300 files (2 to 4 s per file, most of it the SLID
+pass; see below), so its row is over the first 151 utterances and the CoreML rows are
+given both over all 300 and over the same 151.
 
 | Engine | Files | Mean WER | Median | Pooled | S/D/I | Mean RTFx | Load (1-min, mean) |
 |---|---:|---:|---:|---:|---|---:|---:|
@@ -120,7 +113,7 @@ first 151 utterances and the CoreML rows are given both over all 300 and over th
 
 With `--numbers`: (a) 5.5 % (300) and 5.6 % (151), (b) 4.4 % and 4.3 %, (c) 5.4 %.
 
-The harness had no WAV-reader or chunker failure on 3 to 30 s inputs (each file became
+The harness had no WAV-reader or chunker failure on 4 to 47 s inputs (each file became
 one VAD segment with a `tail` cut). Its RTFx on short files is dominated by the SLID
 pass (24 whisper-tiny windows, 2 to 3 s per file regardless of length) and by the
 per-call setup, so the `utt/` RTFx of (c) is not a fair speed number; `cat/` is.
@@ -158,7 +151,7 @@ few tenths equally; it was not done.
 
 ## Conclusion
 
-**Yes: the own fp32 ONNX export is within one WER point of CoreML Parakeet in absolute
+**Yes: our fp32 ONNX export is within one WER point of CoreML Parakeet in absolute
 terms, and on this data it is marginally better, not worse.** On the ten
 meeting-length files (chunker included) fp32 ONNX scores 5.3 % mean WER against 5.5 %
 for CoreML Parakeet; on the single utterances 5.7 % against 5.9 % over the same 151
@@ -172,8 +165,8 @@ references, the ONNX path passes with margin (parity within 0.2 to 0.4 points).
 WhisperKit large-v3-turbo is the best engine on isolated sentences (4.5 % against 5.7
 and 5.7) and the worst on long recordings (6.0 % against 5.5 and 5.3) because it
 drops whole stretches of speech; for Steno's workload (long recordings) both Parakeets
-beat it, and the Parakeets are 20 times (ONNX on 4 CPU threads) to 400 times (CoreML)
-faster than real time against WhisperKit's 20.
+beat it, and the Parakeets run at RTFx 20 (ONNX, 4 CPU threads) to 400 (CoreML) against
+WhisperKit's 20.
 
 What this does not settle: this is clean read speech by one speaker; the ranking on
 noisy multi-speaker meeting audio with code-switching (spike E's corpus) is not
@@ -200,6 +193,7 @@ through onnxruntime directly" and therefore that the defect is in sherpa-onnx's 
 unverified: the loop it used does not produce a correct transcript anywhere, so it
 cannot tell a glue bug from a decoder bug. The sherpa-onnx recognizer, with all its
 faults, is the only ONNX decode of this export that has been shown to be accurate.
-Finding the bug in the 40-line loop (feature extraction against NeMo's preprocessor, or
+Finding the bug in the loop (`spikes/onnx-speech/export/ort_decode.py`: feature
+extraction against NeMo's preprocessor, or
 the decoder state hand-off) is the first task of WP2 if the sidecar is to own the decode
 loop, and it should be validated against FLEURS, not against word counts.

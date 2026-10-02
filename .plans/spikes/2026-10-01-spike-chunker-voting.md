@@ -2,12 +2,15 @@
 
 Status: measured 2026-10-01, time-boxed to about 90 minutes. Parent:
 `.plans/2026-10-01-cross-platform-speech-stack.md` (decisions 1 and 2, gate G1).
+Verdict below is against G1 as first defined (agreement with CoreML); spike F restated
+G1 as absolute WER and the ONNX path passed.
 Baseline and setup: `.plans/spikes/2026-10-01-spike-onnx-speech.md`. Code:
 `spikes/onnx-speech/` (extended in place).
 
 ## Question
 
-Spike B measured 17.9 % word disagreement between Parakeet TDT 0.6b v3 int8 on
+Spike B measured 17.9 % word disagreement (the word error rate, WER, of one transcript
+against the other) between Parakeet TDT 0.6B v3 int8 on
 ONNX (CPU, 20 s quiet-point chunks) and the same model on CoreML (FluidAudio). How
 much of that disappears with (a) a VAD-driven, pause-aligned chunker with overlap
 merge and (b) language voting at lane and segment level? Gate G1: mean under 8 %,
@@ -17,13 +20,18 @@ no file over 15 %.
 
 | Item | Value |
 |---|---|
-| Machine | Forge, M4 Pro (10 cores, 24 GB), macOS 26.7, no other agents; 1-minute load recorded before each file (3 to 5 throughout, from system daemons) |
+| Machine | Forge, M4 Pro (10 cores, 24 GB), macOS 26.7 |
 | Build | `sherpa-rs-sys` 0.6.8 with sherpa-onnx v1.12.9 prebuilt, as in spike B; `CARGO_BUILD_JOBS=4`; cold build 38 s; one new crate dependency, `whatlang` 0.16 (text language detection, pure Rust) |
 | ASR | `sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8`, greedy search, CPU provider, 4 threads (10 threads for the final row) |
 | VAD | `silero_vad.onnx` (630 KB) from the sherpa-onnx `asr-models` release, through `SherpaOnnxCreateVoiceActivityDetector`: threshold 0.5, `min_silence_duration` 0.25 s, `min_speech_duration` 0.1 s, window 512 samples, `max_speech_duration` 120 s, buffer 180 s. One pass over the whole file, 512 samples at a time, then `Flush`; the speech segments become speech regions and the gaps between them are the pauses |
 | SLID | `sherpa-onnx-whisper-tiny` (multilingual, int8 encoder and decoder, 116 MB archive) through `SherpaOnnxCreateSpokenLanguageIdentification`; the 1.12.9 C API has it |
 | Text language | `whatlang::detect` on the rendered segment text; only segments with at least 4 words are judged; `deu`/`eng` mapped to `de`/`en` |
 | Corpus and references | the seven 10-minute 16 kHz clips and the CoreML Parakeet and WhisperKit texts from the baseline bake-off, scored with `spikes/onnx-speech/scripts/score.py` (lowercase, punctuation stripped) |
+
+Measurement conditions: Forge with no other builds on the host; 1-minute load 3 to 5
+from system daemons, recorded before each file in the Load column, except 7 to 12
+during the 15 s-target and 10-thread rows (indexing of the fresh output files and one
+5 s incremental rebuild), whose wall times are therefore upper bounds.
 
 ## What was built
 
@@ -39,8 +47,9 @@ to spike B's.
   closes ends the chunk early at the pause start plus 0.25 s and the next chunk
   starts 0.25 s before the following speech, so long silence is never decoded. A
   chunk start that lands in a pause snaps forward to the next speech. Consecutive
-  chunks share `--overlap-seconds` (1.5 s). Every chunk is clamped to 190 s (the
-  export aborts at 2500 encoder frames, about 200 s) and to at least 2 s.
+  chunks share `--overlap-seconds` (1.5 s). Every chunk is clamped to 190 s (set when
+  the export's cap was read as 2500 encoder frames, about 200 s; the cap is 5000 frames,
+  400 s; spike E) and to at least 2 s.
 - `merge.rs`: the LCS overlap merger ported from `spikes/coreml-rs/src/pipeline.rs`
   (`merge_windows`, `merge_by_midpoint`, splice-safe pieces, monotonic timestamps).
   Tokens are sherpa-onnx pieces with absolute seconds instead of vocabulary ids with
@@ -82,20 +91,13 @@ to spike B's.
   than 0.4 words per speech second is re-decoded at the two shifted boundaries and as
   two halves split at the longest pause near the middle; the candidate with the most
   words wins among those whose language is in the lane set or undecidable.
-- Nothing crashed and no verbatim error appeared during this spike: the build was
-  clean apart from a dead-code warning, the VAD and SLID loaded first time, and the
-  190 s clamp was never reached (longest chunk under 35 s). The first `score.py`
-  had a latent glob bug (`*.<tag>.json` also matched its own `score.<tag>.json` on a
-  second run: `AttributeError: 'list' object has no attribute 'get'`); fixed.
-- The 1-minute load during the 15 s-target run and the 10-thread run was 7 to 12
-  rather than 3 to 6, from indexing of the fresh output files and one 5 s
-  incremental rebuild; wall times in those two rows are upper bounds. Texts are
-  deterministic: the stage 0 re-run reproduced spike B's 20 s transcripts word for
-  word on every file.
+- The 190 s clamp was never reached (longest chunk under 35 s).
+- Texts are deterministic: the stage 0 re-run reproduced spike B's 20 s transcripts
+  word for word on every file.
 
 ## Results
 
-All rows: Parakeet TDT 0.6b v3 int8, greedy, CPU provider, Forge. WER is against
+All rows: Parakeet TDT 0.6B v3 int8, greedy, CPU provider, Forge. WER is against
 the named engine's text; S/D/I against CoreML Parakeet. "Decoded s" is the audio
 the encoder actually saw (chunks including overlap); "Load" is the 1-minute average
 before the file. Wall time includes VAD, SLID and extra decodes, not model load.
@@ -291,7 +293,7 @@ reject a text-detector confusion. The two findings that matter for the plan:
   (FluidAudio-style policies), not only shifts it; the 2 s shifts and halving that
   were specified here did not escape the defect, a 5 to 12 s extension did.
 
-Not done in the time box: a clean 10-thread timing, the window-extension recovery
+Not done: a clean 10-thread timing, the window-extension recovery
 policy, restricting SLID to an allowlist, and whisper cross-engine voting on
 flagged segments (nothing was flagged that it would have helped).
 

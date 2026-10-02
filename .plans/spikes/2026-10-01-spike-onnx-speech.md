@@ -1,6 +1,6 @@
-# Spike B: Parakeet TDT v3 and pyannote through sherpa-onnx on CPU
+# Spike B: Parakeet TDT 0.6B v3 and pyannote through sherpa-onnx on CPU
 
-Status: measured 2026-10-01, time-boxed to about 90 minutes; two rows marked "not measured" were still running when the box closed. Parent:
+Status: measured 2026-10-01, time-boxed to about 90 minutes. Parent:
 `.plans/2026-10-01-cross-platform-spikes.md`. Code: `spikes/onnx-speech/`.
 
 ## Question
@@ -20,13 +20,17 @@ and speed?
 | Build tools | bindgen 0.69 needs libclang: Xcode's on Forge, `nix-build '<nixpkgs>' -A libclang.lib` on atlas. cmake is pulled in by the build script but not invoked when the prebuilt download succeeds |
 | Build time | atlas: 48 s cold (`cargo build --release`, 152% CPU, includes the 20 MB download). Forge: 44 s cold with `CARGO_BUILD_JOBS=4`. Incremental 1.5 s |
 | Binary size | 690 KB (Linux x86_64) / 657 KB (macOS arm64) for the spike binary, plus the shared libraries it dlopens: Linux `libonnxruntime.so` 15 MB + `libsherpa-onnx-c-api.so` 5.0 MB; macOS universal2 `libonnxruntime.1.17.1.dylib` 50 MB + `libsherpa-onnx-c-api.dylib` 8.9 MB |
-| Models | `sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8`: encoder 622 MB, decoder 12 MB, joiner 6.1 MB, tokens 92 KB (464 MB compressed). No non-int8 v3 asset exists in the `asr-models` release (the `.../parakeet-tdt-0.6b-v3.tar.bz2` URL returns 404), so int8 is the only option without exporting from NeMo. `sherpa-onnx-pyannote-segmentation-3-0/model.onnx` 5.8 MB (int8 1.5 MB). Embedding `3dspeaker_speech_eres2net_sv_en_voxceleb_16k.onnx` 26 MB; `wespeaker_en_voxceleb_CAM++.onnx` 28 MB tried as a second embedding |
+| Models | `sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8`: encoder 652 MB, decoder 12 MB, joiner 6.1 MB, tokens 92 KB (464 MB compressed). No non-int8 v3 asset exists in the `asr-models` release (the `.../parakeet-tdt-0.6b-v3.tar.bz2` URL returns 404), so int8 is the only option without exporting from NeMo. `sherpa-onnx-pyannote-segmentation-3-0/model.onnx` 5.8 MB (int8 1.5 MB). Embedding `3dspeaker_speech_eres2net_sv_en_voxceleb_16k.onnx` 26 MB; `wespeaker_en_voxceleb_CAM++.onnx` 28 MB tried as a second embedding |
 | Diarization pipeline | sherpa-onnx `OfflineSpeakerDiarization`: pyannote segmentation 3.0 sliding windows, speaker embeddings per local speaker, agglomerative "fast clustering" with a cosine-distance threshold. Same shape as FluidAudio's community-1 pipeline (segmentation + embedding + clustering), but FluidAudio uses pyannote's own community-1 WeSpeaker embedding and a Euclidean cut on unit embeddings at 0.8; the thresholds are therefore not directly comparable, only the counts are |
-| Machines | atlas: AMD Ryzen 7 7700 desktop CPU (8 cores / 12 threads visible, 50 GB), Linux x86_64. A desktop part, faster than most Linux laptops. It was heavily loaded by other users' GitHub runners and other agent sessions throughout (1-minute load 40 to 100 on a 12-thread box), so atlas timings are upper bounds. Forge: M4 Pro (10 cores, 24 GB), macOS 26.7, shared with two other agents' Rust builds (load 2 to 6) |
+| Machines | atlas: AMD Ryzen 7 7700 desktop CPU (8 cores / 12 threads visible, 50 GB), Linux x86_64. A desktop part, faster than most Linux laptops. Forge: M4 Pro (10 cores, 24 GB), macOS 26.7 |
 
-Thread count is `num_threads` in the sherpa-onnx model config (onnxruntime intra-op
-threads). Peak RSS is `getrusage(RUSAGE_SELF).ru_maxrss`. Load is the 1-minute
-average read just before each file.
+Measurement conditions: atlas was heavily loaded by other users' GitHub runners and
+other users' jobs throughout (1-minute load 31 to 92 on a 12-thread box), so every
+atlas timing is an upper bound, not a laptop estimate; Forge was shared with two
+concurrent Rust builds (load 2 to 6). Load is the 1-minute average read just before
+each file and is recorded in the Load column of every table. Thread count is
+`num_threads` in the sherpa-onnx model config (onnxruntime intra-op threads). Peak RSS
+is `getrusage(RUSAGE_SELF).ru_maxrss`.
 
 ## What failed
 
@@ -58,7 +62,7 @@ average read just before each file.
    `libstdc++.so.6` which the host lacks (`error while loading shared libraries:
    libstdc++.so.6`); `LD_LIBRARY_PATH` to a nix gcc lib fixed it. The `static` feature
    exists (and on Linux wants `RUSTFLAGS="-C relocation-model=dynamic-no-pic"`) but was
-   not tried within the time box; the Rust linking question for a shippable bundle
+   not tried; the Rust linking question for a shippable bundle
    stays open.
 
 3. `sherpa-onnx` 1.12.9's `SherpaOnnxOfflineRecognizerResult` has no `durations`
@@ -69,8 +73,8 @@ average read just before each file.
 
 ## Results
 
-All runs: Parakeet TDT 0.6b v3 int8, greedy search, `provider = cpu` unless stated.
-WER is the ONNX text scored against the named engine's text after lowercasing,
+All runs: Parakeet TDT 0.6B v3 int8, greedy search, `provider = cpu` unless stated.
+WER (word error rate) is the ONNX text scored against the named engine's text after lowercasing,
 stripping punctuation and collapsing whitespace (`spikes/onnx-speech/scripts/score.py`).
 S/D/I are substitutions, deletions and insertions against CoreML Parakeet. "Load" is the
 1-minute load average just before the file ran.
@@ -113,14 +117,13 @@ not the model, is the first-order variable; production needs VAD-driven segments
 
 | Configuration | Files | Wall s | RTFx | Load | Peak RSS MB | Note |
 |---|---|---:|---:|---:|---:|---|
-| CPU, 10 threads, 60 s chunks | bfbeef67, 5ea9e7e8 | not measured, run still in progress at time box (queued behind the CoreML-provider run in `spikes/onnx-speech/scripts/run-forge2.sh`; results land in `~/steno-spikes/onnx/out-forge/*.forge-t10.json` on Forge) | | | | |
+| CPU, 10 threads, 60 s chunks | bfbeef67, 5ea9e7e8 | 38.07, 46.55 | 15.8, 12.9 | 10.6, 6.1 | 3023 | Measured 2026-10-02 by the verification pass (`spikes/onnx-speech/scripts/run-forge2.sh`), after the box closed. Against 45.45 s and 46.59 s at 4 threads in the 60 s table: 10 threads helped bfbeef67 under load 10.6 and did nothing for 5ea9e7e8 under load 6.1 |
 | `provider = coreml`, 4 threads, 60 s chunks | 5ea9e7e8 | 379.6 | 1.6 | 8.2 | 13275 | Model load 22.8 s (2.2 s on CPU). Eight times slower than the CPU provider and 13.3 GB peak RSS: onnxruntime 1.17.1 partitions the int8 graph, runs the unsupported nodes on CPU and copies tensors back and forth. The CoreML provider is accepted without error but is unusable for this model. bfbeef67: 180.0 s, RTFx 3.3, load 5.8, peak RSS 14758 MB. |
 
 ### Transcription, atlas (Ryzen 7 7700 desktop, Linux x86_64), CPU provider, 60 s chunks
 
-atlas was shared with other users' GitHub runners and other agent sessions for the
-whole window (1-minute load 31 to 92 on 12 hardware threads), so these are upper
-bounds on wall time, not laptop estimates. An idle run was not possible in the time box.
+Upper bounds on wall time, not laptop estimates (see "Measurement conditions"); an
+idle run was not done.
 
 | File | Threads | Wall s | RTFx | Load | Peak RSS MB | WER vs CoreML (S/D/I) | WER vs WhisperKit |
 |---|---:|---:|---:|---:|---:|---:|---:|
@@ -193,12 +196,12 @@ At the sherpa-onnx default threshold 0.5, bfbeef67 (one speaker) came out as 15
 speakers on both machines. No threshold in the sweep gets a 1:1 call down to one
 speaker; the stock pipeline over-counts by 3 to 16 on this audio, while FluidAudio's
 counts match truth on all five 1:1 calls and under-count the group calls. The
-wespeaker CAM++ embedding was queued but not reached in the time box. FluidAudio's
+wespeaker CAM++ embedding was queued but not reached. FluidAudio's
 own sweep (five thresholds, seven files, CoreML) took 2 min 3 s wall in total, about
 3.5 s per file per threshold, against 43 to 150 s per file per threshold here.
 
 Diarization on atlas: bfbeef67 at threshold 0.5, 4 threads, load 101: 124 s per pass
-(RTFx 4.8), 15 speakers. At threshold 0.8, 12 threads, load 46: 374 s per pass (RTFx 1.6), 6 speakers, the same count as Forge at 0.8, so the over-counting is not a platform artefact. The 0.9 pass on atlas was still running at the time box (not measured).
+(RTFx 4.8), 15 speakers. At threshold 0.8, 12 threads, load 46: 374 s per pass (RTFx 1.6), 6 speakers, the same count as Forge at 0.8, so the over-counting is not a platform artefact.
 
 ### Memory
 
@@ -216,7 +219,10 @@ pipeline, 4 to 15 more minutes to diarize, against well under a minute today. Th
 usable for post-meeting processing in the background, not for the near-live summary
 Steno shows at meeting end. On the Ryzen 7 7700 the measured RTFx of 2.6 to 7.8 was
 taken under a load of 30 to 90 and is not a laptop number; an idle measurement is the
-first thing to redo. Thread scaling on Forge was not resolved (10-thread row above).
+first thing to redo. Thread scaling on Forge (10-thread row above, measured after the
+box closed): 38.07 s and 46.55 s on the two files against 45.45 s and 46.59 s at 4
+threads, under load 6 to 11, so 10 threads bought between nothing and a sixth of the
+wall time and a clean figure is still owed.
 
 **Agreement.** Same weights do not give the same text. After the segmentation fix to
 20 s chunks the ONNX transcript disagrees with the CoreML one by 17.9% WER on average
@@ -244,18 +250,18 @@ labels or a diarizer that has to be rebuilt.
 **Risks.**
 - German accuracy: per-chunk language ID flips German to English filler; only an int8
   export of v3 exists; x86 and arm64 int8 outputs differ from each other.
-- Model licensing: Parakeet TDT 0.6b v3 is CC-BY-4.0 (attribution in the app),
+- Model licensing: Parakeet TDT 0.6B v3 is CC-BY-4.0 (attribution in the app),
   sherpa-onnx is Apache-2.0, onnxruntime MIT, pyannote segmentation 3.0 is MIT but
   gated on Hugging Face (the sherpa-onnx redistribution bypasses the gate; pyannote's
   community-1 pipeline that FluidAudio mirrors is also gated), 3D-Speaker and WeSpeaker
   embeddings are Apache-2.0. Confirm the embedding licences before shipping.
-- Binary and download size: 640 MB of model files plus 20 MB (Linux) or 59 MB
+- Binary and download size: 671 MB of model files plus 20 MB (Linux) or 59 MB
   (macOS universal) of shared libraries; the published crate links dynamically with
   no rpath, so packaging needs the `static` feature (untested here, Linux wants
   `-C relocation-model=dynamic-no-pic`) or an installer that lays out the libraries.
 - Robustness: onnxruntime errors are C++ exceptions that cross the FFI and abort the
-  process; every call needs a length guard (2500 encoder frames) before it reaches
-  the model.
+  process; every call needs a length guard (5000 encoder frames, 400 s; spike E)
+  before it reaches the model.
 - Memory: 2.1 to 3.0 GB peak for ASR is high for a background job on an 8 GB laptop.
 - GPU story: sherpa-rs exposes `cuda` and `directml` features (untested); the CoreML
   provider through onnxruntime is accepted but eight times slower than CPU with 13 GB RSS (table above), so ONNX offers no acceleration on the Mac either; CoreML Parakeet stays the Mac path. On Linux laptops without CUDA there is no acceleration

@@ -1,7 +1,8 @@
-# Spike C: driving FluidAudio's Parakeet TDT v3 CoreML models from Rust
+# Spike C: driving FluidAudio's Parakeet TDT 0.6B v3 CoreML models from Rust
 
-Date: 2026-10-01. Time box: 90 minutes. Status: complete, with precise gaps.
-Parent: `.plans/2026-10-01-cross-platform-spikes.md`.
+Status: measured 2026-10-01 on Forge (Mac16,1, M4 Pro, macOS 26.7), time-boxed to
+about 90 minutes; complete, with precise gaps. Parent:
+`.plans/2026-10-01-cross-platform-spikes.md`.
 
 Question: can a Rust process load the exact `.mlmodelc` bundles the Swift app
 uses today (FluidAudio 0.17.4, `parakeet-tdt-0.6b-v3`, encoder precision
@@ -11,8 +12,9 @@ ONNX elsewhere.
 
 Crate: `spikes/coreml-rs/` (source only; build on a Mac). Measurements on
 Forge (Mac16,1, M4 Pro 10 cores, 24 GB, macOS 26.7, Xcode 27, Rust 1.99,
-`CARGO_BUILD_JOBS=4`). Two other agents built Rust on Forge during the spike,
-so the 1-minute load is recorded next to every timing.
+`CARGO_BUILD_JOBS=4`). Measurement conditions: two concurrent Rust builds ran
+on Forge during the spike, so the 1-minute load is recorded next to every
+timing.
 
 ## Short answer
 
@@ -23,11 +25,13 @@ Yes for the models, yes for the speed, "almost" for the transcript.
   `encoder_length`. The binding adds no measurable overhead.
 - A 1,061-line Rust port of the pipeline (chunking, preprocessor, encoder,
   TDT greedy decode, merge, text and word timings) transcribes a 10-minute
-  file in 2.4 to 3.5 s serially (RTFx 170 to 255) against FluidAudio's 1.9 to
-  5.5 s with four parallel chunk workers (RTFx 110 to 316).
+  file serially in 3.2 to 4.4 s (mean RTFx 161, load 2.4 to 3.2) as committed,
+  with the empty-decode recovery retries; the pre-recovery build measured 2.4
+  to 3.5 s (RTFx 170 to 255). FluidAudio takes 1.9 to 5.5 s with four parallel
+  chunk workers (RTFx 110 to 316).
 - Word timings match the Swift output to the hundredth of a second where the
   text matches. WER of the Rust text against the Swift text is 2.7 to 15.1 %
-  per file, 8.7 % overall. Every residual difference traced in the time box is
+  per file, 8.7 % overall. Every residual difference traced is
   a FluidAudio heuristic around the decoder (silence-aligned window starts,
   seam-gap repair, the empty-window retry's confidence gate, inverse text
   normalisation), not the decoder itself.
@@ -156,20 +160,24 @@ stripped, whitespace collapsed.
 | f5fd585d-system-10min.wav | 5.45 | 110 | 2.44 | 246 | 47 | 1203 | 0.06 | 1.22 | 1.16 | 1472 | 3652 | 10.29 % |
 | mean | 2.96 | 233 | 2.90 | 211 | | | | | | | | 8.73 % (673 edits / 7,712 words) |
 
-The timing columns are from the pre-recovery build; the recovery port adds
-retries only on windows that decoded empty (5 to 49 retries per file, each a
-preprocessor, encoder and decode pass) and changed the WER by 0.06 points
-overall, because almost no retry clears the 0.7 confidence gate (see below).
-A second full run at load 7.0 to 7.1 measured 5.1 to 7.4 s per file and is
-not a valid timing; the queued rerun never got a load below 4 (see the
-appendix).
+The timing columns are from the pre-recovery build. The committed crate, with
+the recovery port, retries only on windows that decoded empty (5 to 49 retries
+per file, each a preprocessor, encoder and decode pass); it measures 3.2 to
+4.4 s per file, mean RTFx 161, at load 2.4 to 3.2, with `Enc s` 1.35 to 2.49
+instead of 1.2 because every retry is another encoder pass (measured
+2026-10-02). The retries changed the WER by 0.06 points overall, because
+almost no retry clears the 0.7 confidence gate (see below). A second full run
+at load 7.0 to 7.1 measured 5.1 to 7.4 s per file and is not a valid timing;
+the rerun in the appendix ran at load 13 to 19.
 
-Where the time goes (serial): the encoder is a fixed 1.2 s per 10-minute file
-(47 windows at 25.5 ms); the decoder loop is 1.1 to 2.2 s, proportional to the
+Where the time goes (serial, pre-recovery build): the encoder is a fixed 1.2 s
+per 10-minute file (47 windows at 25.5 ms; 1.35 to 2.49 s with the recovery
+retries); the decoder loop is 1.1 to 2.2 s, proportional to the
 number of tokens (one Decoder call per emitted token, one Joint call per frame
 step, about 0.3 ms each as CoreML round trips, not compute). The preprocessor
 is 0.06 s. Four worker threads with their own `DecoderBuffers` would bring the
-serial 2.4 to 3.5 s to roughly the Swift 1.9 to 5.5 s band or better; CoreML
+serial 2.4 to 3.5 s (3.2 to 4.4 s with recovery) to roughly the Swift 1.9 to
+5.5 s band or better; CoreML
 `MLModel.prediction` is thread-safe and FluidAudio does exactly this.
 
 ### Why the text differs from Swift, with evidence
@@ -227,7 +235,8 @@ that move WER; both are pure Swift logic over sample energy and token lists.
 Rust can keep CoreML speech on the Mac at FluidAudio's speed with
 FluidAudio's models: the binding is a thin, zero-overhead layer over the same
 `MLModel` the Swift app calls, and a 1,061-line port already reproduces the
-decoder output frame for frame. What Rust cannot do is call FluidAudio: the
+decoder output frame for frame where the text agrees. What Rust cannot do is
+call FluidAudio: the
 transcript parity comes from re-implementing FluidAudio's Swift heuristics
 around the decoder, and that is where the cost and the drift risk live.
 
@@ -278,10 +287,9 @@ COREML_RS_DEBUG=1 ./target/release/coreml-rs transcribe ...   # per-window and r
 
 ## Appendix: queued rerun under heavy load
 
-The rerun waited 13 minutes for the 1-minute load to fall below 4 and never
-got it (two other agents' Rust builds; load 13.4 at start, 19.4 at the end),
-so it ran anyway. Not a valid speed measurement, but it shows where the port
-is sensitive to CPU contention and where it is not:
+The rerun ran at load 13.4 at start and 19.4 at the end (two concurrent Rust
+builds). Not a valid speed measurement, but it shows where the port is
+sensitive to CPU contention and where it is not:
 
 | Measurement at load 13 to 19 | Rust | Swift |
 |---|---:|---:|

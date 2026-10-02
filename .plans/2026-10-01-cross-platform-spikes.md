@@ -1,6 +1,8 @@
 # Cross-platform spikes: can Rust and Tauri carry Steno to Linux and Windows?
 
-Status: spikes A to C measured 2026-10-01; position below. This file owns the question,
+Status: spikes A to C measured 2026-10-01. Answer: Rust is not the obstacle; no rewrite
+now. The non-Apple speech stack gates any Linux or Windows build and is taken up in the
+speech-stack plan. Position in full under "Decision". This file owns the question,
 the method, the shared baseline and the results of spikes A to C. The follow-up plan
 `.plans/2026-10-01-cross-platform-speech-stack.md` owns the decisions, the gates, the work
 packages and spikes D to F. Each spike has its own report in `.plans/spikes/`. Nothing here
@@ -34,7 +36,7 @@ Three unknowns gate option 2. Spikes A to C answer them with numbers; spikes D t
 | Spike | Question | Report |
 |---|---|---|
 | A | Can Rust do the two-lane tap + mic capture with Speex echo cancellation on macOS, allocation-free on the audio thread, at the Swift spike's quality? | `.plans/spikes/2026-10-01-spike-rust-capture.md` |
-| B | How do Parakeet TDT v3 and pyannote through sherpa-onnx on CPU (Apple Silicon and x86 Linux) compare with the CoreML pipeline in agreement and speed? | `.plans/spikes/2026-10-01-spike-onnx-speech.md` |
+| B | How do Parakeet TDT 0.6B v3 and pyannote through sherpa-onnx on CPU (Apple Silicon and x86 Linux) compare with the CoreML pipeline in agreement and speed? | `.plans/spikes/2026-10-01-spike-onnx-speech.md` |
 | C | Can a Rust process drive FluidAudio's CoreML Parakeet models and reproduce the Swift transcript at the Swift speed? | `.plans/spikes/2026-10-01-spike-coreml-rust.md` |
 | D, E, F | Chunker and language voting, own ONNX export, absolute WER on FLEURS German | `.plans/2026-10-01-cross-platform-speech-stack.md` (work packages) |
 
@@ -51,14 +53,15 @@ part of any product target.
 - Baseline: `steno dev bakeoff` at commit `756c2cc` with the production models on an
   idle machine.
 
+RTFx is audio seconds divided by wall seconds; higher is faster.
+
 | Engine (CoreML, Swift) | Wall s per 10-min file | RTFx | Mean RTFx |
 |---|---:|---:|---:|
 | parakeet-v3 | 1.9 to 5.5 | 110 to 316 | 233 |
 | whisperkit-large-v3-turbo | 20 to 46 | 13 to 29 | 21.5 |
 
-RTFx is audio seconds divided by wall seconds; higher is faster. Agreement between
-engines is measured as word error rate of one transcript against the other after
-lowercasing, stripping punctuation and collapsing whitespace. For speech the CoreML
+Disagreement between engines is measured as the word error rate (WER) of one transcript
+against the other after lowercasing, stripping punctuation and collapsing whitespace. For speech the CoreML
 Parakeet transcript is the reference, since the ONNX model has the same weights.
 
 ## Results
@@ -67,12 +70,16 @@ Parakeet transcript is the reference, since the ONNX model has the same weights.
 
 Feasible, and the port is close to line for line. `objc2-core-audio` exposes every
 HAL call `Sources/StenoAudio` uses (tap description, aggregate device, IOProc,
-property reads); 1,518 lines of Rust reproduce the Swift backend's layout resolution,
-48 kHz aggregate, 512-frame callbacks and 50 and 108 frame latencies exactly. The
-audio-thread path has no lock and no allocation, proven by a counting global
-allocator rather than by discipline; the IOProc took at most 13.7 µs of a 10.67 ms
-budget. SpeexDSP vendored through `cc` gives echo-return-loss figures identical to
-the Swift CSpeex build on the synthetic fixtures. Clean build 4 s, 16 crates, 788 KB.
+property reads).
+
+| Measure | Result |
+|---|---|
+| Port size | 1,489 lines of Rust in `src/` (1,518 with `build.rs`) against about 2,200 lines in the Swift files it ports |
+| HAL parity | Layout resolution, 48 kHz aggregate, 512-frame callbacks and 50 and 108 frame latencies identical to the Swift backend |
+| Audio-thread safety | No lock, no allocation; proven by a counting global allocator rather than by discipline (0 allocations inside the IOProc, 123 to 137 in the whole process) |
+| IOProc duration | Max 13.7 µs of a 10.67 ms budget, mean 3.0 to 3.3 µs |
+| Echo cancellation | SpeexDSP vendored through `cc`; ERLE identical to the Swift CSpeex build on the synthetic fixtures (12.3 dB overall, 24.7 dB after 3 s) |
+| Build | Clean build 4 s, 12 dependencies (6 direct), 788 KB binary |
 
 Not shown: live levels and lane alignment. TCC hands zero-filled buffers to processes
 started over SSH, for the Swift binary and the Rust binary alike, with no error
@@ -88,11 +95,11 @@ device-change rebuild path is not ported.
 
 Transcription works, diarization does not, and neither is close to the Mac.
 
-| Measure | CoreML Parakeet (Swift) | ONNX Parakeet int8, M4 Pro CPU, 4 threads | WhisperKit turbo (Swift) |
+| Measure | CoreML Parakeet (Swift) | ONNX Parakeet int8, M4 Pro CPU, 4 threads | WhisperKit large-v3-turbo (Swift) |
 |---|---:|---:|---:|
 | Wall s per 10-minute file | 1.9 to 5.5 | 43 to 56 | 20 to 46 |
 | Mean RTFx | 233 | 12 to 13 | 21.5 |
-| WER against CoreML Parakeet text | reference | 17.9 % (3.4 to 41 %) | 21.3 % |
+| Disagreement with CoreML Parakeet text (WER) | reference | 17.9 % (3.4 to 41 %) | 21.3 % |
 | Peak RSS | | 2.5 to 3.0 GB | |
 
 Same weights do not give the same text: int8 kernels, per-chunk language detection
@@ -102,7 +109,7 @@ as about 200 s, spike E measured it at 400 s), so production needs VAD-driven
 segmentation. The ONNX Runtime CoreML provider was eight times slower than CPU at 13 GB
 RSS, so ONNX offers no acceleration on the Mac. Linux numbers from atlas were taken at
 load 30 to 90 and are upper bounds only (RTFx 2.6 to 7.8); an idle laptop measurement is
-still missing. Spikes D to F took the agreement and segmentation findings further; the
+still missing. Spikes D to F took the disagreement and segmentation findings further; the
 speech-stack plan has the outcome.
 
 The stock sherpa-onnx diarizer (pyannote segmentation 3.0, ERes2Net embeddings,
@@ -111,21 +118,24 @@ threshold, where FluidAudio returns exactly one. Reproducing FluidAudio's qualit
 means exporting the community-1 embedding, porting the clustering and Steno's
 refinement pass, and recalibrating on the corpus: weeks, not a spike.
 
-Packaging risks: 640 MB of models, dynamic libraries without an rpath in the
+Packaging risks: 671 MB of models, dynamic libraries without an rpath in the
 published crate, bindgen needing libclang on every build host, CC-BY attribution for
 Parakeet, gated pyannote weights.
 
 ### Spike C: FluidAudio's CoreML models from Rust
 
-Yes. `objc2-core-ml` loads the app's own `.mlmodelc` bundles; the encoder runs from
-Rust at the same steady-state latency as from Swift (25.5 ms per 15 s window on all
-compute units, identical output length). A 1,061-line port of the pipeline
-(chunking, preprocessor, encoder, TDT greedy decode, overlap merge, word timings)
-transcribes the corpus at mean RTFx 211 single-threaded against Swift's 233 with four
-workers, and word timings agree to 0.01 s where the text agrees.
+Yes. `objc2-core-ml` loads the app's own `.mlmodelc` bundles.
 
-WER against the Swift transcript is 8.7 % overall (2.7 to 15.1 % per file). Every
-difference traced is a FluidAudio heuristic around the decoder that the time box did
+| Measure | Result |
+|---|---|
+| Encoder latency from Rust | 25.5 ms per 15 s window on all compute units, the same as from Swift, identical output length |
+| Port size | 1,061 lines of Rust: chunking, preprocessor, encoder, TDT greedy decode, overlap merge, word timings |
+| Speed, committed crate | 3.2 to 4.4 s per 10-minute file single-threaded, mean RTFx 161 at load 2.4 to 3.2 (includes the empty-decode recovery retries) |
+| Speed, pre-recovery build | 2.4 to 3.5 s, mean RTFx 211, against Swift's 233 with four workers |
+| Word timings | Agree to 0.01 s where the text agrees |
+| Disagreement with the Swift transcript | 8.7 % WER overall (2.7 to 15.1 % per file) |
+
+Every difference traced is a FluidAudio heuristic around the decoder that the spike did
 not port: silence-aligned window starts, seam-gap repair, the empty-window retry gate
 and inverse text normalisation. Estimated cost of parity: about 1,500 more lines and
 two to three weeks, plus a parity harness against FluidAudio output, because
@@ -147,7 +157,7 @@ on the same evening; its state is the current position on quality:
 
 | Question from spike B | State (see the speech-stack plan) |
 |---|---|
-| Transcript quality on CPU | Settled. Gate G1 passed: our own fp32 export scores 5.3 % WER on FLEURS German long files against 5.5 % for CoreML Parakeet |
+| Transcript quality on CPU | Settled on arm64. Gate G1 passed: our own fp32 export scores 5.3 % WER on FLEURS German long files against 5.5 % for CoreML Parakeet; the x86 run is owed with G2 |
 | Speed on an idle Linux laptop | Open (gate G2); every Linux number so far is from a loaded desktop |
 | Diarization | Open (gate G3); needs the embedding export, our clustering and a calibration run |
 | GPU | Open (gate G4); no suitable machine in the fleet |
@@ -163,6 +173,8 @@ Position:
    on them.
 3. Independently of platforms, move the view models and window bridges out of
    `apps/macos/Steno` into the Swift package behind `BridgeHost`. It makes the host
-   logic testable on Linux today and keeps every option open.
+   logic testable on Linux today and keeps every option open. Needs its own plan file
+   under `.plans/` before work starts; none exists yet.
 4. Follow up in the Swift app on the two capture environment findings from spike A:
-   silent TCC denial and the IOProc waiting for an output client.
+   silent TCC denial and the IOProc waiting for an output client. Needs a GitHub issue
+   against the Swift app; none is open yet.

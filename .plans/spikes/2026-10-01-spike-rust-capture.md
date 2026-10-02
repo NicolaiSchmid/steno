@@ -28,7 +28,8 @@ on a Mac with `cargo build --release`, then
 | Ring buffer | own SPSC in `src/ring.rs` | `rtrb` 0.4 | The Swift contract is all-or-nothing across lanes per callback with a drop counter per lane (`LaneRings.reserve`). Writing the 160 lines keeps that contract visible for review; `rtrb` would do for a single lane. |
 | WAV | `hound` 3.5 | | Float32 WAV, which `steno dev aec-bench` reads. |
 
-Dependency tree: 6 direct crates, 16 in total, `cc` as the only build
+Dependency tree: 6 direct crates, 12 dependencies in total (13 packages in
+`Cargo.lock` including the spike), `cc` as the only build
 dependency. Release binary 788 KB, linking only CoreAudio, Foundation,
 CoreFoundation, libobjc and libSystem. `cargo clean && cargo build --release`
 at `CARGO_BUILD_JOBS=4`: 4.0 s wall (load 6.28). Incremental release build
@@ -61,8 +62,8 @@ Build errors hit along the way, verbatim:
 | `synthetic.rs` | 82 | `AudioFixtures.speechLikeFar`, `roomImpulseResponse`, `echoMic`, `convolve`, same SplitMix64 and seeds |
 | `main.rs` | 469 | `LiveCaptureBackend.start/stop` (without device-change listeners), consumer thread with far-end delay line as in `ProcessingThread.swift`, `DevCaptureSpike` + `DevAECBench` reporting |
 
-1518 lines of Rust (plus 29 in `build.rs` and 5250 vendored C) against 1892
-lines for the Swift files listed above. The Swift figure includes the device
+1,489 lines of Rust in `src/` (1,518 with the 29 in `build.rs`, plus 5250 vendored
+C) against about 2,200 lines in the Swift files named above. The Swift figure includes the device
 notification coalescing and rebuild path in `LiveCaptureBackend`, which the
 spike does not port.
 
