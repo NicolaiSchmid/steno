@@ -43,7 +43,7 @@ use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::{Arc, Mutex, MutexGuard, Weak};
 use std::time::Duration;
 
-use chrono::{DateTime, Utc};
+use chrono::Utc;
 use steno_core::paths::file_url;
 use steno_core::{
     AudioAsset, AudioFormat, AudioLane, AudioRetention, EchoCanceller, RecordingLayout,
@@ -101,7 +101,6 @@ struct Inner {
 
 struct Active {
     meeting_id: Uuid,
-    started_at: DateTime<Utc>,
     stream: CaptureStream,
     sink: Arc<LaneFrameSink>,
     relay: Arc<FrameRelay>,
@@ -507,10 +506,8 @@ impl Core {
         writer_thread.start();
         processing.start();
 
-        let started_at = Utc::now();
         inner.active = Some(Active {
             meeting_id,
-            started_at,
             stream,
             sink,
             relay,
@@ -524,7 +521,12 @@ impl Core {
             rebuild: None,
             pending_change: None,
         });
-        Self::set_state(&mut inner, &CaptureState::Recording { started_at });
+        Self::set_state(
+            &mut inner,
+            &CaptureState::Recording {
+                started_at: Utc::now(),
+            },
+        );
         Ok(())
     }
 
@@ -629,7 +631,6 @@ impl Core {
             retention: AudioRetention::KeepForever,
             expires_at: None,
         };
-        let _ = active.started_at;
         Some((CaptureResult { asset, statistics }, failure))
     }
 

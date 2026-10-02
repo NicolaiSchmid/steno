@@ -23,7 +23,7 @@
 
 use std::ffi::c_void;
 use std::ptr::NonNull;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
@@ -160,6 +160,14 @@ struct Watcher {
     condvar: Condvar,
 }
 
+impl Watcher {
+    fn lock(&self) -> std::sync::MutexGuard<'_, WatchState> {
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+}
+
 /// What one started capture holds.
 struct Active {
     _tap: Option<ProcessTap>,
@@ -175,7 +183,6 @@ pub struct LiveCaptureBackend {
     active: Mutex<Option<Active>>,
     /// `start` calls so far; the generation the watcher reports under.
     start_generation: AtomicU64,
-    stopped: AtomicBool,
 }
 
 impl Default for LiveCaptureBackend {
@@ -200,7 +207,6 @@ impl LiveCaptureBackend {
         Self {
             active: Mutex::new(None),
             start_generation: AtomicU64::new(0),
-            stopped: AtomicBool::new(false),
         }
     }
 
@@ -221,10 +227,7 @@ impl LiveCaptureBackend {
         generation: u64,
         current_generation: &AtomicU64,
     ) {
-        let mut state = watcher
-            .state
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut state = watcher.lock();
         loop {
             if state.stop {
                 return;
@@ -260,10 +263,7 @@ impl LiveCaptureBackend {
                     }
                 }
             }
-            state = watcher
-                .state
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            state = watcher.lock();
         }
     }
 }
@@ -285,7 +285,6 @@ impl CaptureBackend for LiveCaptureBackend {
             return Err(CaptureError::InvalidState("backend already started".into()));
         }
         let generation = self.start_generation.fetch_add(1, Ordering::AcqRel) + 1;
-        self.stopped.store(false, Ordering::Release);
 
         let needs_mic = lanes.contains(&AudioLane::Mic) || lanes.contains(&AudioLane::Mixed);
         let needs_tap = lanes.contains(&AudioLane::System);
@@ -412,11 +411,7 @@ impl CaptureBackend for LiveCaptureBackend {
                     selector,
                     kAudioObjectPropertyScopeGlobal,
                     Box::new(move |selector| {
-                        let mut state = watcher
-                            .state
-                            .lock()
-                            .unwrap_or_else(std::sync::PoisonError::into_inner);
-                        state.pending = Some((selector, Instant::now()));
+                        watcher.lock().pending = Some((selector, Instant::now()));
                         watcher.condvar.notify_all();
                     }),
                 )
@@ -482,13 +477,8 @@ impl CaptureBackend for LiveCaptureBackend {
         let Some(mut active) = self.lock().take() else {
             return;
         };
-        self.stopped.store(true, Ordering::Release);
         {
-            let mut state = active
-                .watcher
-                .state
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let mut state = active.watcher.lock();
             state.stop = true;
             active.watcher.condvar.notify_all();
         }

@@ -223,12 +223,9 @@ impl ProcessingThread {
             .lanes
             .iter()
             .position(|l| *l == AudioLane::System);
-        let aec = match (configuration.echo_canceller, mic_index, system_index) {
-            (Some(canceller), Some(_), Some(_)) => Some(canceller),
-            // A canceller without both lanes is kept so the session gets it
-            // back, but never runs.
-            (canceller, _, _) => canceller,
-        };
+        // A canceller without both lanes is kept so the session gets it
+        // back, but never runs (`process_frame` checks the lanes).
+        let aec = configuration.echo_canceller;
         let runs_aec = aec.is_some() && mic_index.is_some() && system_index.is_some();
         let delay_line = if runs_aec && configuration.far_end_delay_frames > 0 {
             let line = LaneRingBuffer::new(configuration.far_end_delay_frames + frame_size);

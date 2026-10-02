@@ -53,7 +53,8 @@ mod macos {
         kAudioProcessPropertyIsRunningOutput, kAudioProcessPropertyPID,
     };
 
-    use crate::capture::live::hal::{self, Id, PropertyListener, SYSTEM};
+    use crate::capture::live::AudioDevices;
+    use crate::capture::live::hal::{self, Id, ListenerHandler, PropertyListener, SYSTEM};
     use crate::detection::{ActivityError, ProcessAudioActivity, ProcessAudioActivitySource};
 
     /// Holds the listener registrations of every `changes()` call for as
@@ -118,23 +119,28 @@ mod macos {
         }
 
         fn device_listeners(sender: &Sender<()>) -> Vec<PropertyListener> {
-            hal::AudioDevices::inputs()
+            AudioDevices::inputs()
                 .unwrap_or_default()
                 .into_iter()
                 .filter_map(|device| {
-                    let sender = sender.clone();
                     PropertyListener::add(
                         device.id,
                         kAudioDevicePropertyDeviceIsRunningSomewhere,
                         kAudioObjectPropertyScopeGlobal,
-                        Box::new(move |_| {
-                            let _ = sender.send(());
-                        }),
+                        notify(sender),
                     )
                     .ok()
                 })
                 .collect()
         }
+    }
+
+    /// A listener handler that fires `sender` once per notification.
+    fn notify(sender: &Sender<()>) -> ListenerHandler {
+        let sender = sender.clone();
+        Box::new(move |_| {
+            let _ = sender.send(());
+        })
     }
 
     impl ProcessAudioActivitySource for LiveProcessAudioActivity {
@@ -147,38 +153,26 @@ mod macos {
 
         fn changes(&self) -> Receiver<()> {
             let (sender, receiver) = channel();
-            let mut fixed = Vec::new();
-            {
-                let sender = sender.clone();
-                if let Ok(listener) = PropertyListener::add(
-                    SYSTEM,
-                    kAudioHardwarePropertyProcessObjectList,
-                    kAudioObjectPropertyScopeGlobal,
-                    Box::new(move |_| {
-                        let _ = sender.send(());
-                    }),
-                ) {
-                    fixed.push(listener);
-                }
-            }
-            let devices = Self::device_listeners(&sender);
             // Input devices come and go: the device-list listener fires a
             // change, and `snapshot()` reads the processes afresh; the
             // per-device running listeners are rebuilt lazily on the next
             // `changes()` call rather than from inside a listener callback.
-            {
-                let sender = sender.clone();
-                if let Ok(listener) = PropertyListener::add(
+            let fixed: Vec<PropertyListener> = [
+                kAudioHardwarePropertyProcessObjectList,
+                kAudioHardwarePropertyDevices,
+            ]
+            .into_iter()
+            .filter_map(|selector| {
+                PropertyListener::add(
                     SYSTEM,
-                    kAudioHardwarePropertyDevices,
+                    selector,
                     kAudioObjectPropertyScopeGlobal,
-                    Box::new(move |_| {
-                        let _ = sender.send(());
-                    }),
-                ) {
-                    fixed.push(listener);
-                }
-            }
+                    notify(&sender),
+                )
+                .ok()
+            })
+            .collect();
+            let devices = Self::device_listeners(&sender);
             let _ = sender.send(());
             self.registrations
                 .lock()

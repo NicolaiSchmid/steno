@@ -54,8 +54,6 @@ pub type OSStatus = i32;
 pub const SYSTEM: Id = kAudioObjectSystemObject as Id;
 pub const UNKNOWN: Id = kAudioObjectUnknown;
 
-pub use super::devices::AudioDevices;
-
 /// A failed Core Audio call: which property or function, on which object,
 /// with which `OSStatus`.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
