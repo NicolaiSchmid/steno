@@ -1,15 +1,19 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const invoke = vi.hoisted(() => vi.fn());
 const listen = vi.hoisted(() => vi.fn());
 vi.mock("@tauri-apps/api/core", () => ({ invoke }));
 vi.mock("@tauri-apps/api/event", () => ({ listen }));
-vi.mock("@tauri-apps/api/webviewWindow", () => ({
-	getCurrentWebviewWindow: () => ({ label: "settings" }),
-}));
 
-import { createTauriTransport, hasTauriBridge } from "./tauri-transport";
+import {
+	createTauriTransport,
+	currentWindowLabel,
+	hasTauriBridge,
+} from "./tauri-transport";
 import { BridgeError } from "./transport";
+
+/** What the shell injects before the page runs: the window's own label. */
+const internals = { metadata: { currentWebview: { label: "settings" } } };
 
 type Handler = (event: { event: string; id: number; payload: unknown }) => void;
 
@@ -33,6 +37,11 @@ describe("tauri transport", () => {
 		invoke.mockReset();
 		listen.mockReset();
 		listen.mockResolvedValue(() => {});
+		vi.stubGlobal("__TAURI_INTERNALS__", internals);
+	});
+
+	afterEach(() => {
+		vi.unstubAllGlobals();
 	});
 
 	it("invokes bridge_call with the method and params and returns the result", async () => {
@@ -92,6 +101,8 @@ describe("tauri transport", () => {
 	it("routes steno:event payloads into subscribers by topic", async () => {
 		const emit = captureListener();
 		const transport = createTauriTransport();
+		// `listen` is mocked async, so its implementation (which captures the
+		// handler) runs a microtask after the call; one tick lets it land.
 		await Promise.resolve();
 		const seen: unknown[] = [];
 		transport.subscribe("recording", (snapshot) => seen.push(snapshot));
@@ -111,5 +122,12 @@ describe("tauri transport", () => {
 		expect(
 			hasTauriBridge({ __TAURI_INTERNALS__: {} } as unknown as Window),
 		).toBe(true);
+	});
+
+	it("reads the window label from the shell's metadata", () => {
+		expect(currentWindowLabel()).toBe("settings");
+		expect(() =>
+			currentWindowLabel({ __TAURI_INTERNALS__: {} } as unknown as Window),
+		).toThrow("the Tauri window label is missing");
 	});
 });
