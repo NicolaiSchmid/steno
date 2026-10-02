@@ -19,8 +19,9 @@ pub struct DeliveryLedger {
     /// The destination root this delivery writes to (the vault path).
     root: String,
     /// The receipt that applies to `root`: `None` on a first delivery, which
-    /// is also what a receipt from another root becomes. A moved vault or a
-    /// scratch run does not pin a folder or protect a file here.
+    /// is also what a receipt from another root becomes, or one whose folder
+    /// or file paths would leave the root. A moved vault, a scratch run or a
+    /// tampered receipt does not pin a folder or protect a file here.
     previous: Option<DeliveryReceipt>,
     files: BTreeMap<String, DeliveredFile>,
     owned: Vec<String>,
@@ -31,6 +32,7 @@ impl DeliveryLedger {
     pub fn new(previous: Option<&DeliveryReceipt>, root: &str) -> Self {
         let previous = previous
             .filter(|receipt| Self::same_root(&receipt.root, root))
+            .filter(|receipt| Self::stays_inside_root(receipt))
             .cloned();
         // Files from the previous receipt stay listed unless rewritten, so
         // an opted-out audio copy or a disabled people folder keeps its
@@ -141,18 +143,43 @@ impl DeliveryLedger {
         Self::standardized(left) == Self::standardized(right)
     }
 
+    /// `..` pops a plain component, vanishes against the root (`/..` is
+    /// `/`) and otherwise stays, so `../vault` is not `vault`.
     fn standardized(path: &str) -> PathBuf {
         let mut result = PathBuf::new();
         for component in Path::new(path).components() {
             match component {
                 Component::CurDir => {}
-                Component::ParentDir => {
-                    result.pop();
-                }
+                Component::ParentDir => match result.components().next_back() {
+                    Some(Component::Normal(_)) => {
+                        result.pop();
+                    }
+                    Some(Component::RootDir | Component::Prefix(_)) => {}
+                    _ => result.push(component),
+                },
                 other => result.push(other),
             }
         }
         result
+    }
+
+    /// The receipt's folder and every file path are plain relative paths
+    /// (non-empty, only named components: no `..`, no `.`, no root, no
+    /// drive), the rule the destination applies to its people folder. A
+    /// stored path that fails it would be joined with the root blindly, so
+    /// such a receipt applies to nothing.
+    fn stays_inside_root(receipt: &DeliveryReceipt) -> bool {
+        Self::is_plain_relative(&receipt.folder)
+            && receipt
+                .files
+                .iter()
+                .all(|file| Self::is_plain_relative(&file.relative_path))
+    }
+
+    fn is_plain_relative(path: &str) -> bool {
+        let mut components = Path::new(path).components().peekable();
+        components.peek().is_some()
+            && components.all(|component| matches!(component, Component::Normal(_)))
     }
 
     /// The folder of a first delivery: `base`, with `-2`, `-3`, … appended

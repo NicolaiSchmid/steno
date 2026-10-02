@@ -83,12 +83,54 @@ fn a_receipt_from_another_root_is_a_first_delivery() {
 }
 
 #[test]
+fn a_receipt_whose_paths_leave_the_root_is_a_first_delivery() {
+    let with = |folder: &str, path: &str| DeliveryReceipt {
+        folder: folder.to_owned(),
+        files: vec![DeliveredFile {
+            relative_path: path.to_owned(),
+            ownership: FileOwnership::Owned,
+            sha256: vec![1; 32],
+        }],
+        ..receipt(ROOT, &[])
+    };
+    for (folder, path) in [
+        ("../elsewhere", NOTE),
+        ("/Meetings/2026-09-24-sync", NOTE),
+        ("Meetings/../2026-09-24-sync", NOTE),
+        ("./Meetings", NOTE),
+        ("", NOTE),
+        (LEDGER_FOLDER, "/etc/hosts"),
+        (LEDGER_FOLDER, "Meetings/../../hosts"),
+        (LEDGER_FOLDER, ""),
+    ] {
+        let ledger = DeliveryLedger::new(Some(&with(folder, path)), ROOT);
+        assert!(ledger.is_first_delivery(), "{folder:?} {path:?}");
+        assert_eq!(ledger.pinned_folder(), None, "{folder:?} {path:?}");
+        assert!(ledger.files().is_empty(), "{folder:?} {path:?}");
+        assert!(ledger.may_write(NOTE, true), "{folder:?} {path:?}");
+    }
+    let ledger = DeliveryLedger::new(Some(&with(LEDGER_FOLDER, NOTE)), ROOT);
+    assert!(!ledger.is_first_delivery(), "plain relative paths apply");
+    assert_eq!(ledger.pinned_folder(), Some(LEDGER_FOLDER));
+}
+
+#[test]
 fn spellings_of_one_root_are_the_same_root() {
     assert!(DeliveryLedger::same_root("/vault", "/vault/"));
     assert!(DeliveryLedger::same_root("/vault", "/vault/./Meetings/.."));
     assert!(DeliveryLedger::same_root("/a/b", "/a//b"));
     assert!(!DeliveryLedger::same_root("/vault", "/vault2"));
     assert!(!DeliveryLedger::same_root("/vault", "/other/vault"));
+    assert!(
+        !DeliveryLedger::same_root("../vault", "vault"),
+        "a leading `..` is not dropped"
+    );
+    assert!(DeliveryLedger::same_root("../vault", "../vault"));
+    assert!(DeliveryLedger::same_root("a/../../vault", "../vault"));
+    assert!(
+        DeliveryLedger::same_root("/../vault", "/vault"),
+        "nothing is above the root"
+    );
     let previous = receipt("/vault/", &[(NOTE, FileOwnership::Owned)]);
     assert_eq!(
         DeliveryLedger::new(Some(&previous), "/vault").pinned_folder(),
