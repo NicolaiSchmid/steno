@@ -260,12 +260,12 @@ fn a_stalled_writer_is_counted_not_waited_for() {
     backend.start(&lanes, None, Arc::clone(&sink)).unwrap();
     backend.wait_until_finished();
     backend.stop();
-    let frames = thread.frames_processed();
+    // `stop` drains the whole frames still in the rings before it returns.
     thread.stop();
     // The ring rounds up to a power of two, so the exact headroom is derived.
     let headroom = relay.ring_capacity_frames();
     assert!(headroom >= 20);
-    assert_eq!(frames, 100);
+    assert_eq!(thread.frames_processed(), 100);
     assert_eq!(relay.dropped_frames(), vec![100 - headroom]);
     assert_eq!(relay.available_frames(), headroom);
 }

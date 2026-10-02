@@ -10,10 +10,11 @@
 //! the count is zero. The report prints the count; anything above zero
 //! means the callback path allocated.
 //!
-//! The current thread is identified by the address of a `const`
-//! thread-local, which the allocator may read re-entrantly: a `const`
-//! initialiser without a destructor is a plain TLS slot, no lazy
-//! allocation.
+//! The current thread is identified by the OS (`pthread_self` on Unix,
+//! `GetCurrentThreadId` on Windows), the two calls that neither allocate
+//! nor touch Rust's thread-local machinery, so the allocator may make them
+//! re-entrantly. (A `thread_local!` address worked on Linux and macOS but
+//! counted nothing on the Windows runner.)
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
@@ -25,13 +26,29 @@ static COUNTED_THREAD: AtomicUsize = AtomicUsize::new(0);
 static COUNTED: AtomicU64 = AtomicU64::new(0);
 static TOTAL: AtomicU64 = AtomicU64::new(0);
 
-thread_local! {
-    static MARKER: u8 = const { 0 };
+#[cfg(unix)]
+unsafe extern "C" {
+    fn pthread_self() -> usize;
+}
+
+#[cfg(windows)]
+#[link(name = "kernel32")]
+unsafe extern "system" {
+    fn GetCurrentThreadId() -> u32;
 }
 
 #[inline(always)]
 fn thread_id() -> usize {
-    MARKER.with(|marker| std::ptr::from_ref(marker) as usize)
+    // SAFETY: both are plain, always-available OS calls without
+    // preconditions.
+    #[cfg(unix)]
+    unsafe {
+        pthread_self()
+    }
+    #[cfg(windows)]
+    unsafe {
+        GetCurrentThreadId() as usize
+    }
 }
 
 #[inline(always)]
