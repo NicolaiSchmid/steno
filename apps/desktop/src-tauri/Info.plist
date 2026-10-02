@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<!-- Merged into the bundle's Info.plist by the Tauri CLI. The purpose
+     strings the TCC prompts show (permissions.rs) and the Bonjour service
+     the handover listener advertises, verbatim from the Swift app's
+     apps/macos/project.yml. NSAudioCaptureUsageDescription gates Core Audio
+     process taps. -->
+<dict>
+	<key>NSAudioCaptureUsageDescription</key>
+	<string>Steno records the audio of your calls on this Mac so it can transcribe and summarise them afterwards. Audio never leaves your Mac.</string>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>Steno records your microphone during meetings so it can transcribe what you said. Audio never leaves your Mac.</string>
+	<key>NSCalendarsFullAccessUsageDescription</key>
+	<string>Steno reads the title and attendees of the calendar event that overlaps a recording to name the meeting and its speakers.</string>
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>Steno receives recordings from your paired iPhone over your local network.</string>
+	<key>NSBonjourServices</key>
+	<array>
+		<string>_steno._tcp</string>
+	</array>
+	<key>NSSupportsAutomaticTermination</key>
+	<false/>
+	<key>NSSupportsSuddenTermination</key>
+	<false/>
+</dict>
+</plist>
