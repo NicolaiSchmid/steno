@@ -1,17 +1,20 @@
 import { createFallbackTransport } from "#bridge-fallback";
+import { createTauriTransport, hasTauriBridge } from "./tauri-transport";
 import type { BridgeTransport } from "./transport";
 import { createWebKitTransport, hasWebKitBridge } from "./webkit-transport";
 
 export type { BridgeClient, BridgeClientOptions } from "./client";
 export { ContractViolation, createBridgeClient } from "./client";
 export * from "./contract";
+export { createTauriTransport, hasTauriBridge } from "./tauri-transport";
 export type { BridgeTransport, SnapshotHandler } from "./transport";
 export { BridgeError, SnapshotHub } from "./transport";
 export type { StenoHostApi } from "./webkit-transport";
 export { createWebKitTransport, hasWebKitBridge } from "./webkit-transport";
 
 /**
- * Picks the WebKit transport inside the app and the `#bridge-fallback`
+ * Picks the WebKit transport inside the Swift app, the Tauri transport
+ * inside the Tauri shell (`apps/desktop`), and the `#bridge-fallback`
  * module everywhere else: the fixture-backed mock on the Vite dev server,
  * `vite preview --mode screens`, Playwright and Vitest
  * (`fallback-mock.ts`), and a thrown error in the production bundle
@@ -22,6 +25,9 @@ export { createWebKitTransport, hasWebKitBridge } from "./webkit-transport";
 export function createBridge(): BridgeTransport {
 	if (typeof window !== "undefined" && hasWebKitBridge(window)) {
 		return createWebKitTransport(window);
+	}
+	if (typeof window !== "undefined" && hasTauriBridge(window)) {
+		return createTauriTransport();
 	}
 	// Inside the app the page is served from the steno-app scheme; a missing
 	// handler there is a host bug and must not be papered over with fixtures.
