@@ -1,0 +1,341 @@
+//! Host behaviour as `BridgeDispatcher.swift` defines it and as the web
+//! transports expect it (`apps/macos/web/src/bridge/webkit-transport.test.ts`):
+//! a request envelope in, a reply envelope out, typed errors for every way a
+//! call can go wrong.
+
+use std::sync::{Arc, Mutex};
+
+use serde_json::{Value, json};
+use steno_bridge::*;
+use uuid::Uuid;
+
+/// A spy host: answers a handful of methods across the three windows, with
+/// and without params, with and without a reply value, with a host error and
+/// with a cancelled dialog, and records what it was asked.
+#[derive(Default)]
+struct SpyHost {
+    calls: Mutex<Vec<String>>,
+}
+
+impl SpyHost {
+    fn record(&self, call: impl Into<String>) {
+        self.calls.lock().unwrap().push(call.into());
+    }
+
+    /// What the host was asked, in order.
+    fn calls(&self) -> Vec<String> {
+        self.calls.lock().unwrap().clone()
+    }
+}
+
+impl BridgeHost for SpyHost {
+    fn page_ready(&self) -> Outcome<()> {
+        self.record("page.ready");
+        Ok(())
+    }
+
+    fn meetings_select(&self, params: MeetingIdParams) -> Outcome<()> {
+        self.record(format!(
+            "meetings.select {}",
+            json::uuid::format(&params.meeting_id)
+        ));
+        if params.meeting_id.is_nil() {
+            return Err(BridgeError::not_found("No meeting with that id."));
+        }
+        Ok(())
+    }
+
+    fn settings_export_choose_vault(&self) -> Outcome<ChosenPathReply> {
+        self.record("settings.export.chooseVault");
+        Ok(ChosenPathReply {
+            path: Some("/Users/nicolai/Notes".into()),
+        })
+    }
+
+    fn speakers_options(&self, params: SpeakerOptionsParams) -> Outcome<SpeakerOptionsReply> {
+        self.record(format!("speakers.options {}", params.query));
+        Ok(SpeakerOptionsReply {
+            prefill: None,
+            options: vec![SpeakerOption {
+                kind: SpeakerOptionKind::Create,
+                label: format!("Add \u{201c}{}\u{201d}", params.query),
+                detail: None,
+                person_id: None,
+            }],
+        })
+    }
+
+    fn ui_confirm_destructive(&self, params: ConfirmDestructiveParams) -> Outcome<ConfirmReply> {
+        self.record(format!("ui.confirmDestructive {}", params.title));
+        Err(BridgeError::cancelled("The user cancelled."))
+    }
+}
+
+/// The spy and a dispatcher over it; the test keeps the spy to read its calls.
+fn dispatcher() -> (Arc<SpyHost>, Dispatcher<Arc<SpyHost>>) {
+    let host = Arc::new(SpyHost::default());
+    (Arc::clone(&host), Dispatcher::new(host))
+}
+
+fn call<H: BridgeHost>(dispatcher: &Dispatcher<H>, body: &Value) -> Value {
+    serde_json::from_str(&dispatcher.dispatch_json(&body.to_string())).unwrap()
+}
+
+#[test]
+fn routes_a_method_without_params_and_replies_with_the_id_only() {
+    let (host, dispatcher) = dispatcher();
+    let reply = call(
+        &dispatcher,
+        &json!({"id": "req-1", "method": "page.ready", "params": null}),
+    );
+    assert_eq!(reply, json!({"id": "req-1"}));
+    assert_eq!(host.calls(), ["page.ready"]);
+}
+
+#[test]
+fn a_typed_reply_without_params_lands_in_result() {
+    let (host, dispatcher) = dispatcher();
+    let reply = call(
+        &dispatcher,
+        &json!({"id": "req-2", "method": "settings.export.chooseVault", "params": null}),
+    );
+    assert_eq!(
+        reply,
+        json!({"id": "req-2", "result": {"path": "/Users/nicolai/Notes"}})
+    );
+    assert_eq!(host.calls(), ["settings.export.chooseVault"]);
+}
+
+#[test]
+fn a_typed_reply_with_params_lands_in_result_with_its_optionals_omitted() {
+    let (host, dispatcher) = dispatcher();
+    let reply = call(
+        &dispatcher,
+        &json!({"id": "req-3", "method": "speakers.options",
+               "params": {"speakerID": "00000000-0000-0000-0000-000000000017", "query": "an"}}),
+    );
+    assert_eq!(
+        reply,
+        json!({"id": "req-3", "result": {"options": [{"kind": "create", "label": "Add \u{201c}an\u{201d}"}]}})
+    );
+    assert_eq!(host.calls(), ["speakers.options an"]);
+}
+
+#[test]
+fn decodes_params_as_the_contract_type() {
+    let (host, dispatcher) = dispatcher();
+    let id = "00000000-0000-0000-0000-00000000000c";
+    let reply = call(
+        &dispatcher,
+        &json!({"id": "r", "method": "meetings.select", "params": {"meetingID": id}}),
+    );
+    assert_eq!(reply, json!({"id": "r"}));
+    assert_eq!(
+        host.calls(),
+        ["meetings.select 00000000-0000-0000-0000-00000000000C"]
+    );
+}
+
+#[test]
+fn a_host_error_becomes_the_error_envelope_with_its_code() {
+    let (_, dispatcher) = dispatcher();
+    let nil = Uuid::nil().to_string();
+    let reply = call(
+        &dispatcher,
+        &json!({"id": "r", "method": "meetings.select", "params": {"meetingID": nil}}),
+    );
+    assert_eq!(
+        reply,
+        json!({"id": "r", "error": {"code": "notFound", "message": "No meeting with that id."}})
+    );
+}
+
+#[test]
+fn a_cancelled_dialog_is_the_cancelled_code_not_a_result() {
+    let (host, dispatcher) = dispatcher();
+    let reply = call(
+        &dispatcher,
+        &json!({"id": "r2", "method": "ui.confirmDestructive",
+               "params": {"title": "Delete?", "message": "Gone.", "confirmTitle": "Delete"}}),
+    );
+    assert_eq!(
+        reply,
+        json!({"id": "r2", "error": {"code": "cancelled", "message": "The user cancelled."}})
+    );
+    assert_eq!(host.calls(), ["ui.confirmDestructive Delete?"]);
+}
+
+#[test]
+fn unknown_method_is_rejected_before_the_host_sees_it() {
+    let (host, dispatcher) = dispatcher();
+    let reply = call(
+        &dispatcher,
+        &json!({"id": "r", "method": "meetings.explode", "params": null}),
+    );
+    assert_eq!(
+        reply,
+        json!({"id": "r", "error": {"code": "unknownMethod", "message": "Unknown method 'meetings.explode'."}})
+    );
+    assert!(host.calls().is_empty(), "the host saw an unknown method");
+}
+
+#[test]
+fn a_method_the_host_does_not_answer_is_unknown_method() {
+    let (_, dispatcher) = dispatcher();
+    let reply = call(&dispatcher, &json!({"id": "r", "method": "recording.stop"}));
+    assert_eq!(
+        reply,
+        json!({"id": "r", "error": {"code": "unknownMethod", "message": "The host does not answer recording.stop."}})
+    );
+}
+
+#[test]
+fn missing_or_bad_params_are_invalid_params() {
+    let (host, dispatcher) = dispatcher();
+    let reply = call(
+        &dispatcher,
+        &json!({"id": "r", "method": "meetings.select"}),
+    );
+    assert_eq!(
+        reply,
+        json!({"id": "r", "error": {"code": "invalidParams", "message": "meetings.select needs params."}})
+    );
+    let reply = call(
+        &dispatcher,
+        &json!({"id": "r", "method": "meetings.select", "params": null}),
+    );
+    assert_eq!(reply["error"]["code"], "invalidParams");
+    let reply = call(
+        &dispatcher,
+        &json!({"id": "r", "method": "meetings.select", "params": {"meetingID": "x"}}),
+    );
+    assert_eq!(reply["error"]["code"], "invalidParams");
+    let message = reply["error"]["message"].as_str().unwrap();
+    assert!(message.starts_with("meetings.select: "), "{message}");
+    assert!(
+        host.calls().is_empty(),
+        "the host was called with bad params"
+    );
+}
+
+#[test]
+fn a_body_that_is_not_a_request_still_gets_a_reply() {
+    let (_, dispatcher) = dispatcher();
+    assert_eq!(
+        call(&dispatcher, &json!([1, 2])),
+        json!({"id": "", "error": {"code": "invalidParams", "message": "The message is not an object."}})
+    );
+    assert_eq!(
+        call(&dispatcher, &json!({"id": "r", "params": {}})),
+        json!({"id": "r", "error": {"code": "invalidParams", "message": "The message is not a bridge request."}})
+    );
+    assert_eq!(
+        call(&dispatcher, &json!({"id": 7, "method": "page.ready"})),
+        json!({"id": "", "error": {"code": "invalidParams", "message": "The message is not a bridge request."}})
+    );
+    let garbage: Value = serde_json::from_str(&dispatcher.dispatch_json("{not json")).unwrap();
+    assert_eq!(garbage["error"]["code"], "invalidParams");
+    assert_eq!(garbage["error"]["message"], "The message is not JSON.");
+}
+
+/// The Tauri command's path: a method and its params, no envelope; the
+/// outcome is the `result` value or `None`, and the error keeps its code.
+#[test]
+fn call_answers_a_method_without_an_envelope() {
+    let (host, dispatcher) = dispatcher();
+    assert_eq!(
+        dispatcher
+            .call(BridgeMethod::SettingsExportChooseVault, None)
+            .unwrap(),
+        Some(json!({"path": "/Users/nicolai/Notes"}))
+    );
+    assert_eq!(
+        dispatcher
+            .call(BridgeMethod::PageReady, Some(Value::Null))
+            .unwrap(),
+        None
+    );
+    let error = dispatcher
+        .call(BridgeMethod::MeetingsSelect, None)
+        .unwrap_err();
+    assert_eq!(error.code, BridgeErrorCode::InvalidParams);
+    assert_eq!(error.message, "meetings.select needs params.");
+    assert_eq!(host.calls(), ["settings.export.chooseVault", "page.ready"]);
+}
+
+#[test]
+fn replies_are_compact_with_sorted_keys() {
+    let (_, dispatcher) = dispatcher();
+    let nil = Uuid::nil().to_string();
+    let body =
+        json!({"id": "r", "method": "meetings.select", "params": {"meetingID": nil}}).to_string();
+    assert_eq!(
+        dispatcher.dispatch_json(&body),
+        r#"{"error":{"code":"notFound","message":"No meeting with that id."},"id":"r"}"#
+    );
+}
+
+/// The shell shares one host between the dispatcher and its publisher: a
+/// host behind an `Arc`, sized or as a trait object, is a host.
+#[test]
+fn a_shared_host_behind_an_arc_answers_like_the_host_itself() {
+    let host = Arc::new(SpyHost::default());
+    let dispatcher = Dispatcher::new(Arc::clone(&host));
+    assert_eq!(
+        call(&dispatcher, &json!({"id": "r", "method": "page.ready"})),
+        json!({"id": "r"})
+    );
+    assert_eq!(host.calls(), ["page.ready"]);
+
+    let erased: Arc<dyn BridgeHost> = host;
+    let dispatcher = Dispatcher::new(erased);
+    assert_eq!(
+        call(
+            &dispatcher,
+            &json!({"id": "r2", "method": "recording.stop"})
+        ),
+        json!({"id": "r2", "error": {"code": "unknownMethod", "message": "The host does not answer recording.stop."}})
+    );
+}
+
+#[derive(Default)]
+struct SpySink {
+    events: Mutex<Vec<BridgeEvent>>,
+}
+
+impl EventSink for SpySink {
+    fn emit(&self, event: BridgeEvent) {
+        self.events.lock().unwrap().push(event);
+    }
+}
+
+#[test]
+fn an_event_sink_publishes_snapshots_on_their_topic() {
+    let sink = SpySink::default();
+    let snapshot = RecordingSnapshot {
+        state: RecordingState::Idle,
+        started_at: None,
+        mode: None,
+        call_app: None,
+        meeting_id: None,
+        level: None,
+        auto_stop: None,
+        denied_permissions: vec![],
+        warning: None,
+        error: None,
+    };
+    sink.publish(&snapshot).unwrap();
+    sink.publish(&None::<MeetingDetailSnapshot>).unwrap();
+    sink.emit(BridgeEvent::new(BridgeTopic::App, json!({"version": "1"})));
+    let events = sink.events.lock().unwrap();
+    assert_eq!(events[0].topic, BridgeTopic::Recording);
+    assert_eq!(
+        events[0].payload,
+        json!({"state": "idle", "deniedPermissions": []})
+    );
+    assert_eq!(
+        events[1],
+        BridgeEvent::new(BridgeTopic::MeetingDetail, Value::Null)
+    );
+    assert_eq!(events[2].payload["version"], "1");
+}
