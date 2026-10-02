@@ -19,6 +19,8 @@ seconds="${2:-${STENO_SMOKE_SECONDS:-12}}"
 screens="$root/apps/desktop/screens"
 
 [[ -x "$binary" ]] || { echo "smoke: $binary is not an executable" >&2; exit 2; }
+[[ "$seconds" =~ ^[1-9][0-9]*$ ]] \
+  || { echo "smoke: seconds must be a positive number, got \"$seconds\"" >&2; exit 2; }
 command -v xvfb-run >/dev/null || { echo "smoke: xvfb-run is not on PATH" >&2; exit 2; }
 
 mkdir -p "$screens"

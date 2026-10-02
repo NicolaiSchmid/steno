@@ -1,6 +1,7 @@
-//! Where a window may navigate, as `WebNavigationPolicy.swift` decides for
-//! the Swift host: the app's own origin and, in a debug build, the Vite dev
-//! server. External links go through `system.openURL`.
+//! Where a window may navigate: the app's own origin and, in a build that
+//! loads it, the Vite dev server. External links go through `system.openURL`.
+//!
+//! Swift: `WebNavigationPolicy.swift`.
 
 use tauri::Url;
 

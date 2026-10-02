@@ -17,12 +17,16 @@ serde.workspace = true
 serde_json.workspace = true
 tauri = "2.12"
 tauri-plugin-opener = "2.7"
+thiserror.workspace = true
 
 [features]
 default = ["fixture-host"]
 # Answers the bridge from the recorded fixtures (WP3). WP6 turns it off and
 # wires the real host.
 fixture-host = []
+# Embeds the web `dist/` instead of loading `devUrl`; `cargo tauri build`
+# turns it on. A release build without it still loads the Vite dev server.
+custom-protocol = ["tauri/custom-protocol"]
 
 [lints]
 workspace = true

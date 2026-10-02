@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "The three Steno windows: the core event API for the bridge's steno:event listener and nothing else. Every other native capability is reached through the bridge_call command, never from the page directly.",
+  "description": "The three Steno windows: listen and unlisten for the bridge's steno:event, the only core IPC the page uses. bridge_call is an app command and needs no permission; every other native capability is reached through it, never from the page directly.",
   "windows": ["main", "settings", "onboarding"],
-  "permissions": ["core:default"]
+  "permissions": ["core:event:allow-listen", "core:event:allow-unlisten"]
 }

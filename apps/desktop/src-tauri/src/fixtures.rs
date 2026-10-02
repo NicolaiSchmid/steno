@@ -2,6 +2,8 @@
 //! with `include_str!` in `index.json` order, and the mock transport's rules
 //! for serving them: topic files become snapshots, `<method>.reply.json` and
 //! the two generic reply shapes answer commands, everything else is `null`.
+//! Temporary: WP6 wires the real host and deletes this module with the
+//! `fixture-host` feature.
 
 use serde_json::Value;
 
@@ -140,12 +142,18 @@ pub fn reply(method: &str) -> Value {
         .unwrap_or(Value::Null)
 }
 
-/// The `app` snapshot with one request field set (`requestedMeetingID` or
-/// `requestedSettingsSection`), the deep link a page follows.
-pub fn app_snapshot_requesting(field: &str, value: &str) -> Option<Value> {
-    let mut app = parsed("app")?;
-    app[field] = Value::String(value.to_owned());
-    Some(app)
+/// The two `app` snapshots a deep link takes: the recorded one with the
+/// request field set (`requestedMeetingID` or `requestedSettingsSection`),
+/// which the page follows, then the recorded one unchanged, as the Swift
+/// host clears the request with the publish that carried it and publishes
+/// again.
+pub fn app_snapshots_requesting(field: &str, value: &str) -> Vec<Value> {
+    let Some(clean) = parsed("app") else {
+        return Vec::new();
+    };
+    let mut requesting = clean.clone();
+    requesting[field] = Value::String(value.to_owned());
+    vec![requesting, clean]
 }
 
 #[cfg(test)]
@@ -215,10 +223,18 @@ mod tests {
     }
 
     #[test]
-    fn the_settings_deep_link_rides_on_the_app_snapshot() {
-        let app =
-            app_snapshot_requesting("requestedSettingsSection", "summaries").expect("app fixture");
-        assert_eq!(app["requestedSettingsSection"], "summaries");
-        assert_eq!(app["version"], parsed("app").unwrap()["version"]);
+    fn a_deep_link_rides_on_the_app_snapshot_and_is_cleared_right_after() {
+        let snapshots = app_snapshots_requesting("requestedSettingsSection", "summaries");
+        let [requesting, clean] = snapshots.as_slice() else {
+            panic!("two app snapshots, got {}", snapshots.len());
+        };
+        assert_eq!(requesting["requestedSettingsSection"], "summaries");
+        assert_eq!(requesting["version"], clean["version"]);
+        assert!(clean.get("requestedSettingsSection").is_none());
+        assert_eq!(*clean, parsed("app").unwrap());
+        let meeting = app_snapshots_requesting("requestedMeetingID", "m-1");
+        assert_eq!(meeting.len(), 2);
+        assert_eq!(meeting[0]["requestedMeetingID"], "m-1");
+        assert!(meeting[1].get("requestedMeetingID").is_none());
     }
 }
