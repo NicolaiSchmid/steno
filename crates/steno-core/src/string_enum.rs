@@ -7,9 +7,8 @@
 //! time. The enums are deliberately not `#[non_exhaustive]`: a case Swift
 //! adds fails to compile here until every match handles it.
 //!
-//! `steno-core` owns this macro. The bridge crate carries its own copy until
-//! both land; an integration commit after that switches it to this one and
-//! to the text codecs in [`crate::json`].
+//! `steno-core` owns this macro; the bridge crate switches to it once both
+//! have landed.
 
 use thiserror::Error;
 

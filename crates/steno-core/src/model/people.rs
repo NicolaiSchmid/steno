@@ -59,9 +59,9 @@ pub struct Person {
 }
 
 /// A speaker embedding: [`Embedding::DIMENSION`] `f32` values, L2-normalised
-/// when produced by the diarizer. Stored as little-endian `f32` bytes.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(transparent)]
+/// when produced by the diarizer. Stored as little-endian `f32` bytes and
+/// never written to JSON, so it has no serde form.
+#[derive(Debug, Clone, PartialEq)]
 pub struct Embedding(pub Vec<f32>);
 
 impl Embedding {
@@ -81,15 +81,9 @@ impl Embedding {
     /// multiple of four.
     #[must_use]
     pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
-        if bytes.len() % 4 != 0 {
-            return None;
-        }
-        Some(Embedding(
-            bytes
-                .chunks_exact(4)
-                .map(|chunk| f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
-                .collect(),
-        ))
+        let (chunks, rest) = bytes.as_chunks::<4>();
+        rest.is_empty()
+            .then(|| Embedding(chunks.iter().copied().map(f32::from_le_bytes).collect()))
     }
 }
 

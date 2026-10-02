@@ -6,7 +6,7 @@ use std::ops::Add;
 use serde::{Deserialize, Serialize};
 
 /// Token accounting summed over every LLM call of a meeting.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LlmUsage {
     pub prompt_tokens: i64,

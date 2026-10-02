@@ -180,7 +180,10 @@ login item, calendar, phone pairing). Until then, only what the first crates tur
 
 - `StenoJSON` date output truncates to the millisecond; Rust rounds like GRDB; fix the
   Swift formatter before cutover.
-
+- `MeetingStore.init` should check the migrator's `hasBeenSuperseded` and refuse a
+  database with an identifier it does not know, as the Rust store does
+  (`StoreError::UnknownMigration`); today GRDB ignores unknown identifiers and the
+  Swift app would run on a newer schema without noticing.
 
 ### Bridge
 

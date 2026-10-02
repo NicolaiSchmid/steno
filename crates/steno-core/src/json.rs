@@ -5,8 +5,7 @@
 //!
 //! The date and UUID text codecs ([`format_date`], [`parse_date`],
 //! [`uuid_string`] and the `with` modules) are the one implementation for
-//! every Steno crate; the bridge crate switches to them in the integration
-//! commit after it and this crate have both landed.
+//! every Steno crate; the bridge crate switches to them once both have landed.
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de};

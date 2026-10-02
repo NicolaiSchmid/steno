@@ -9,8 +9,8 @@
 #        [--out <fixture path>]
 #
 # Without --steno the CLI is built with `swift build -c release`. The query
-# below and `steno_core::store::schema_dump` must stay the same text; the
-# parity test fails when they drift.
+# below and `SCHEMA_DUMP_QUERIES` in `crates/steno-core/src/store/mod.rs` must
+# stay the same text; the parity test fails when they drift.
 
 set -euo pipefail
 

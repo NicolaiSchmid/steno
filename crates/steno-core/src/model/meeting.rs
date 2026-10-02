@@ -65,7 +65,7 @@ impl MeetingState {
         matches!(self, MeetingState::Failed { .. })
     }
 
-    /// The `failed` payload; nil for every other case.
+    /// The `failed` payload; `None` for every other case.
     #[must_use]
     pub fn failure_reason(&self) -> Option<&str> {
         match self {
@@ -124,7 +124,7 @@ string_enum! {
     }
 }
 
-/// Why a recording ended; nil for meetings recorded before it was stored
+/// Why a recording ended; `None` for meetings recorded before it was stored
 /// and for phone recordings. One `StenoJSON` text per row: `"manual"`,
 /// `{"callEnded":"Zen"}`; a nameless `callEnded` is the bare `"callEnded"`.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]

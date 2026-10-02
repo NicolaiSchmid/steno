@@ -4,16 +4,11 @@
 use rusqlite::{Connection, OptionalExtension, Row, params};
 use uuid::Uuid;
 
-use super::convert::{DbDate, DbEnum, DbUuid, RowExt as _};
-use super::{Result, Store, insert_sql, query_all, upsert_sql};
+use super::convert::{DbDate, DbEmbedding, DbEnum, DbUuid, RowExt as _};
+use super::{Result, Store, execute_cached, insert_sql, query_all, upsert_sql};
 use crate::model::{
-    Embedding, Participant, Person, Speaker, SpeakerAssignment, SpeakerNameSuggestion, TimeRange,
+    Participant, Person, Speaker, SpeakerAssignment, SpeakerNameSuggestion, TimeRange,
 };
-
-fn embedding_of(row: &Row<'_>, column: &str) -> rusqlite::Result<Option<Embedding>> {
-    let bytes: Option<Vec<u8>> = row.get(column)?;
-    Ok(bytes.as_deref().and_then(Embedding::from_bytes))
-}
 
 // Persons
 
@@ -24,7 +19,7 @@ fn person_from_row(row: &Row<'_>) -> rusqlite::Result<Person> {
         id: row.col::<DbUuid>("id")?,
         display_name: row.get("displayName")?,
         email: row.get("email")?,
-        embedding: embedding_of(row, "embedding")?,
+        embedding: row.col::<Option<DbEmbedding<_>>>("embedding")?,
         sample_count: row.get("sampleCount")?,
         created_at: row.col::<DbDate>("createdAt")?,
     })
@@ -37,7 +32,7 @@ pub(super) fn save_person(connection: &Connection, person: &Person) -> Result<()
             DbUuid(person.id),
             person.display_name,
             person.email,
-            person.embedding.as_ref().map(Embedding::to_bytes),
+            person.embedding.as_ref().map(DbEmbedding),
             person.sample_count,
             DbDate(person.created_at),
         ],
@@ -61,7 +56,8 @@ fn participant_from_row(row: &Row<'_>) -> rusqlite::Result<Participant> {
 }
 
 pub(super) fn save_participant(connection: &Connection, participant: &Participant) -> Result<()> {
-    connection.execute(
+    execute_cached(
+        connection,
         &upsert_sql("participant", PARTICIPANT_COLUMNS),
         params![
             DbUuid(participant.id),
@@ -71,8 +67,7 @@ pub(super) fn save_participant(connection: &Connection, participant: &Participan
             DbEnum(participant.role),
             participant.email,
         ],
-    )?;
-    Ok(())
+    )
 }
 
 // Speakers
@@ -96,7 +91,7 @@ fn speaker_from_row(row: &Row<'_>) -> rusqlite::Result<Speaker> {
         meeting_id: row.col::<DbUuid>("meetingID")?,
         cluster_label: row.get("clusterLabel")?,
         assignment: SpeakerAssignment::from_columns(kind, person_id, similarity.map(narrow)),
-        embedding: embedding_of(row, "embedding")?,
+        embedding: row.col::<Option<DbEmbedding<_>>>("embedding")?,
         sample_clip_range: match (clip_start, clip_end) {
             (Some(lower), Some(upper)) if lower <= upper => Some(TimeRange { lower, upper }),
             _ => None,
@@ -107,7 +102,8 @@ fn speaker_from_row(row: &Row<'_>) -> rusqlite::Result<Speaker> {
 }
 
 fn write_speaker(connection: &Connection, speaker: &Speaker, sql: &str) -> Result<()> {
-    connection.execute(
+    execute_cached(
+        connection,
         sql,
         params![
             DbUuid(speaker.id),
@@ -116,14 +112,13 @@ fn write_speaker(connection: &Connection, speaker: &Speaker, sql: &str) -> Resul
             DbEnum(speaker.assignment.kind()),
             speaker.assignment.person_id().map(DbUuid),
             speaker.assignment.similarity().map(f64::from),
-            speaker.embedding.as_ref().map(Embedding::to_bytes),
+            speaker.embedding.as_ref().map(DbEmbedding),
             speaker.sample_clip_range.map(|range| range.lower),
             speaker.sample_clip_range.map(|range| range.upper),
             speaker.sample_clip_url,
             f64::from(speaker.cluster_confidence),
         ],
-    )?;
-    Ok(())
+    )
 }
 
 pub(super) fn insert_speaker(connection: &Connection, speaker: &Speaker) -> Result<()> {
@@ -184,7 +179,8 @@ pub(super) fn replace_name_suggestions(
         else {
             continue;
         };
-        connection.execute(
+        execute_cached(
+            connection,
             &upsert_sql("speakerNameSuggestion", SUGGESTION_COLUMNS),
             params![
                 DbUuid(suggestion.speaker_id),
@@ -211,6 +207,7 @@ impl Store {
         })
     }
 
+    /// The person with `id`.
     pub fn person(&self, id: Uuid) -> Result<Option<Person>> {
         self.read(|connection| {
             Ok(connection
@@ -223,10 +220,12 @@ impl Store {
         })
     }
 
+    /// Inserts or replaces the person (GRDB's `save`).
     pub fn save_person(&self, person: &Person) -> Result<()> {
         self.write(|transaction| save_person(transaction, person))
     }
 
+    /// Inserts or replaces the participant (GRDB's `save`).
     pub fn save_participant(&self, participant: &Participant) -> Result<()> {
         self.write(|transaction| save_participant(transaction, participant))
     }
@@ -251,6 +250,8 @@ impl Store {
         self.read(|connection| speakers_of_meeting(connection, meeting_id))
     }
 
+    /// Inserts or replaces the speaker (GRDB's `save`): the user's
+    /// confirmation of who a cluster is.
     pub fn save_speaker(&self, speaker: &Speaker) -> Result<()> {
         self.write(|transaction| save_speaker(transaction, speaker))
     }

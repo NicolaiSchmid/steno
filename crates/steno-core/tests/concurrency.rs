@@ -5,8 +5,6 @@
 
 mod common;
 
-use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -14,53 +12,63 @@ use steno_core::Store;
 
 use common::populate;
 
+/// Writes each worker makes: enough for the two to collide on the lock
+/// many times over, few enough that the loser's busy-handler sleeps (up to
+/// 100 ms a turn) keep the test under a few seconds on a CI runner.
+const WRITES_PER_WORKER: usize = 40;
+
+/// Past this a worker stops and the test fails on its count, so a stuck
+/// lock shows up as a failure rather than a hang.
+const GUARD: Duration = Duration::from_secs(60);
+
 /// Each store on its own connection, each writer reading the row and
 /// writing it back in one transaction (the shape that made a deferred
 /// transaction fail with `database is locked` once the other side had
-/// written in between), for about a second.
+/// written in between), a fixed number of times each.
 #[test]
 fn two_stores_write_the_same_file_without_errors() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("steno.sqlite");
     let meeting = populate(&Store::open(&path).unwrap());
-    let writes = Arc::new(AtomicUsize::new(0));
 
     let workers: Vec<_> = (0..2)
         .map(|worker| {
             let path = path.clone();
-            let writes = Arc::clone(&writes);
             thread::spawn(move || {
                 let store = Store::open(&path).unwrap();
-                let deadline = Instant::now() + Duration::from_millis(800);
+                let guard = Instant::now() + GUARD;
+                let mut writes = 0;
                 let mut errors = Vec::new();
-                while Instant::now() < deadline {
+                for _ in 0..WRITES_PER_WORKER {
+                    if Instant::now() > guard {
+                        break;
+                    }
                     let now = chrono::Utc::now();
                     let outcome = store.update_meeting(meeting.id, now, |meeting| {
                         meeting.scratchpad = format!("worker {worker} at {now}");
                         Ok(())
                     });
                     match outcome {
-                        Ok(_) => {
-                            writes.fetch_add(1, Ordering::Relaxed);
-                        }
+                        Ok(_) => writes += 1,
                         Err(error) => errors.push(error.to_string()),
                     }
                 }
-                errors
+                (writes, errors)
             })
         })
         .collect();
-    let errors: Vec<String> = workers
-        .into_iter()
-        .flat_map(|worker| worker.join().unwrap())
-        .collect();
-
-    assert!(
-        errors.is_empty(),
-        "{} failed writes: {errors:?}",
-        errors.len()
-    );
-    assert!(writes.load(Ordering::Relaxed) > 2, "both writers wrote");
+    for (worker, handle) in workers.into_iter().enumerate() {
+        let (writes, errors) = handle.join().unwrap();
+        assert!(
+            errors.is_empty(),
+            "worker {worker}: {} failed writes: {errors:?}",
+            errors.len()
+        );
+        assert_eq!(
+            writes, WRITES_PER_WORKER,
+            "worker {worker} made {writes} of {WRITES_PER_WORKER} writes within {GUARD:?}"
+        );
+    }
     let store = Store::open(&path).unwrap();
     let integrity: String = store
         .read(

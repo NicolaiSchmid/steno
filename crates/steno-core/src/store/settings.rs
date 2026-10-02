@@ -7,7 +7,7 @@
 use rusqlite::params;
 use serde_json::Value;
 
-use super::{Result, Store, query_all};
+use super::{Result, Store, execute_cached, query_all};
 use crate::json;
 use crate::model::Settings;
 
@@ -48,7 +48,8 @@ impl Store {
             transaction.execute("DELETE FROM setting", [])?;
             for key in keys {
                 let fragment = json::to_column_string(&object[key])?;
-                transaction.execute(
+                execute_cached(
+                    transaction,
                     "INSERT INTO setting (key, value) VALUES (?1, ?2)",
                     params![key, fragment],
                 )?;

@@ -1,13 +1,23 @@
 //! Column encodings shared with GRDB: dates as `yyyy-MM-dd HH:mm:ss.SSS`
 //! UTC text, UUIDs as uppercase text, JSON columns through `StenoJSON`,
-//! string enums by case name. Each wrapper is a `ToSql` for `params!` and a
-//! `FromSql` that [`RowExt::col`] unwraps again.
+//! string enums by case name, embeddings as little-endian `f32` blobs.
+//! Each wrapper is a `ToSql` for `params!` and a `FromSql` that
+//! [`RowExt::col`] unwraps again:
+//!
+//! ```ignore
+//! connection.execute(sql, params![DbUuid(id), DbDate(at), DbJson(&tags)])?;
+//! let id = row.col::<DbUuid>("id")?;
+//! let expires_at = row.col::<Option<DbDate>>("expiresAt")?;
+//! ```
 //!
 //! Swift: `Sources/StenoCore/Storage/Records.swift` and GRDB's
 //! `DatabaseDateEncodingStrategy.deferredToDate`.
 //!
-//! GRDB rounds a date to the nearest millisecond on the way into a column;
-//! [`date_text`] does the same. Swift's `StenoJSON.format`
+//! GRDB writes a `Date` column through Foundation's `DateFormatter` with
+//! `yyyy-MM-dd HH:mm:ss.SSS` (GRDB `Date.swift`, not
+//! `DatabaseDateComponents`), which rounds to the nearest millisecond;
+//! [`date_text`] does the same, measured identical on 10,000 timestamps
+//! against the Swift CLI. Swift's `StenoJSON.format`
 //! (`Sources/StenoCore/Model/StenoJSON.swift`) truncates instead, so a
 //! Swift export of a date that is not on a whole millisecond can read one
 //! millisecond lower than the column text. `json::format_date` mirrors the
@@ -25,6 +35,7 @@ use serde::de::DeserializeOwned;
 use uuid::Uuid;
 
 use crate::json;
+use crate::model::Embedding;
 
 /// GRDB's storage format for `Date`.
 pub const GRDB_DATE_FORMAT: &str = "%Y-%m-%d %H:%M:%S%.3f";
@@ -145,6 +156,28 @@ where
     }
 }
 
+/// A `BLOB` column holding an [`Embedding`]. A blob whose length is not a
+/// multiple of four is a read error, not a missing embedding.
+pub struct DbEmbedding<T>(pub T);
+
+impl ToSql for DbEmbedding<&Embedding> {
+    fn to_sql(&self) -> rusqlite::Result<ToSqlOutput<'_>> {
+        Ok(ToSqlOutput::from(self.0.to_bytes()))
+    }
+}
+
+impl FromSql for DbEmbedding<Embedding> {
+    fn column_result(value: ValueRef<'_>) -> FromSqlResult<Self> {
+        let bytes = value.as_blob()?;
+        Embedding::from_bytes(bytes)
+            .map(DbEmbedding)
+            .ok_or(FromSqlError::InvalidBlobSize {
+                expected_size: bytes.len() - bytes.len() % 4,
+                blob_size: bytes.len(),
+            })
+    }
+}
+
 /// A wrapper and the domain value inside it, for [`RowExt::col`].
 pub trait Wrapped: FromSql {
     type Inner;
@@ -168,6 +201,13 @@ impl Wrapped for DbDate {
 impl<T: DeserializeOwned> Wrapped for DbJson<T> {
     type Inner = T;
     fn inner(self) -> T {
+        self.0
+    }
+}
+
+impl Wrapped for DbEmbedding<Embedding> {
+    type Inner = Embedding;
+    fn inner(self) -> Embedding {
         self.0
     }
 }

@@ -42,6 +42,10 @@ impl StenoPaths {
     ///   `HOME` first because not every Foundation honours it otherwise)
     /// - Linux: `$XDG_DATA_HOME/Steno`, else `$HOME/.local/share/Steno`
     /// - Windows: `%APPDATA%\Steno`
+    ///
+    /// A variable holding a relative path counts as unset, as the XDG base
+    /// directory specification requires for `XDG_DATA_HOME`; `HOME` and
+    /// `APPDATA` get the same treatment.
     #[must_use]
     pub fn support_directory(environment: &HashMap<String, String>) -> PathBuf {
         let absolute = |key: &str| {

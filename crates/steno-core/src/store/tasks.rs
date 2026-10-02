@@ -6,7 +6,7 @@ use rusqlite::{Connection, Row, params};
 use uuid::Uuid;
 
 use super::convert::{DbDate, DbEnum, DbUuid, RowExt as _};
-use super::{Result, Store, insert_sql, query_all};
+use super::{Result, Store, execute_cached, insert_sql, query_all};
 use crate::model::{Decision, MeetingTask};
 
 const TASK_COLUMNS: &str =
@@ -26,7 +26,8 @@ fn task_from_row(row: &Row<'_>) -> rusqlite::Result<MeetingTask> {
 }
 
 pub(super) fn insert_task(connection: &Connection, task: &MeetingTask) -> Result<()> {
-    connection.execute(
+    execute_cached(
+        connection,
         &insert_sql("meetingTask", TASK_COLUMNS),
         params![
             DbUuid(task.id),
@@ -38,8 +39,7 @@ pub(super) fn insert_task(connection: &Connection, task: &MeetingTask) -> Result
             task.due_date.map(DbDate),
             task.done,
         ],
-    )?;
-    Ok(())
+    )
 }
 
 const DECISION_COLUMNS: &str = "id, meetingID, text";
@@ -53,15 +53,15 @@ fn decision_from_row(row: &Row<'_>) -> rusqlite::Result<Decision> {
 }
 
 pub(super) fn insert_decision(connection: &Connection, decision: &Decision) -> Result<()> {
-    connection.execute(
+    execute_cached(
+        connection,
         &insert_sql("decision", DECISION_COLUMNS),
         params![
             DbUuid(decision.id),
             DbUuid(decision.meeting_id),
             decision.text
         ],
-    )?;
-    Ok(())
+    )
 }
 
 impl Store {

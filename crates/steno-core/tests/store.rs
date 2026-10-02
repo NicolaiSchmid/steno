@@ -269,3 +269,44 @@ fn persons_are_saved_and_listed_by_name() {
     assert_eq!(store.persons().unwrap(), vec![person.clone()]);
     assert_eq!(store.person(uuid(PERSON_ID)).unwrap(), Some(person));
 }
+
+#[test]
+fn a_malformed_embedding_blob_is_a_read_error() {
+    let store = Store::in_memory().unwrap();
+    let person = common::person();
+    store.save_person(&person).unwrap();
+    store
+        .write(|transaction| {
+            transaction.execute(
+                "UPDATE person SET embedding = ?1",
+                [rusqlite::types::Value::Blob(vec![0, 1, 2, 3, 4])],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    let error = store.person(person.id).unwrap_err();
+    assert!(
+        matches!(
+            error,
+            StoreError::Sqlite(rusqlite::Error::FromSqlConversionFailure(..))
+        ),
+        "{error}"
+    );
+    assert!(error.to_string().contains("out of 5 byte blob"), "{error}");
+    assert!(!error.is_busy());
+}
+
+#[test]
+fn is_busy_names_the_lock_errors() {
+    let busy = |code| {
+        StoreError::Sqlite(rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error::new(code),
+            None,
+        ))
+    };
+    assert!(busy(rusqlite::ffi::SQLITE_BUSY).is_busy());
+    assert!(busy(rusqlite::ffi::SQLITE_BUSY_SNAPSHOT).is_busy());
+    assert!(busy(rusqlite::ffi::SQLITE_LOCKED).is_busy());
+    assert!(!busy(rusqlite::ffi::SQLITE_CONSTRAINT).is_busy());
+    assert!(!StoreError::MeetingNotFound(uuid(PERSON_ID)).is_busy());
+}

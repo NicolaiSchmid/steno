@@ -59,6 +59,7 @@ pub(super) fn assets_of_meeting(
 }
 
 impl Store {
+    /// Inserts or replaces the asset (GRDB's `save`).
     pub fn save_asset(&self, asset: &AudioAsset) -> Result<()> {
         self.write(|transaction| save(transaction, asset))
     }

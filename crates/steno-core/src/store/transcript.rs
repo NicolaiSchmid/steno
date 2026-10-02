@@ -5,7 +5,7 @@ use rusqlite::{Connection, Row, params};
 use uuid::Uuid;
 
 use super::convert::{DbEnum, DbUuid, RowExt as _};
-use super::{Result, Store, insert_sql, query_all};
+use super::{Result, Store, execute_cached, insert_sql, query_all};
 use crate::model::TranscriptSegment;
 
 const COLUMNS: &str = "id, meetingID, start, end, speakerID, lane, text, rawText";
@@ -24,7 +24,8 @@ fn from_row(row: &Row<'_>) -> rusqlite::Result<TranscriptSegment> {
 }
 
 pub(super) fn insert_segment(connection: &Connection, segment: &TranscriptSegment) -> Result<()> {
-    connection.execute(
+    execute_cached(
+        connection,
         &insert_sql("transcriptSegment", COLUMNS),
         params![
             DbUuid(segment.id),
@@ -36,8 +37,7 @@ pub(super) fn insert_segment(connection: &Connection, segment: &TranscriptSegmen
             segment.text,
             segment.raw_text,
         ],
-    )?;
-    Ok(())
+    )
 }
 
 impl Store {

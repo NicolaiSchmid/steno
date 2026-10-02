@@ -103,7 +103,7 @@ fn write_processing_results(connection: &Connection, results: &Meeting) -> Resul
 /// What `delete_meeting` leaves for the caller: the files the rows pointed
 /// at, which the caller removes once the transaction has committed (the
 /// folder-versus-files rule lives with the recording layout).
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DeletedMeeting {
     pub assets: Vec<AudioAsset>,
     /// The speakers' sample clip URLs.
@@ -111,6 +111,8 @@ pub struct DeletedMeeting {
 }
 
 impl Store {
+    /// Inserts or replaces the meeting row (GRDB's `save`); `summaryText`
+    /// is derived from `summary`.
     pub fn save_meeting(&self, meeting: &Meeting) -> Result<()> {
         self.write(|transaction| save(transaction, meeting))
     }
@@ -141,6 +143,7 @@ impl Store {
         })
     }
 
+    /// The meeting with `id`.
     pub fn meeting(&self, id: Uuid) -> Result<Option<Meeting>> {
         self.read(|connection| fetch(connection, id))
     }

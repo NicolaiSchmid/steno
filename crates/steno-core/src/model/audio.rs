@@ -124,7 +124,7 @@ impl<'de> Deserialize<'de> for AudioRetention {
 /// The recording files of one meeting. `url` is the master, `sidecars_16k`
 /// the per-lane 16 kHz decodes, `mixdown_url` the AAC mono export. URLs are
 /// `file://` strings, as Swift stores them.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AudioAsset {
     #[serde(with = "json::uuid_text")]

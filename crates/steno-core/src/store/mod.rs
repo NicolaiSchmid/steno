@@ -1,8 +1,13 @@
 //! The SQLite store over the file the Swift app writes: the same
 //! migrations, recorded in `grdb_migrations` the way GRDB records them, the
 //! same column encodings, and the read and write paths the pipeline and the
-//! host need. UI-specific queries follow with the host module.
+//! host need. The queries only the windows ask for (search, the sidebar
+//! list with its counts) arrive with the Tauri host in WP6, next to the
+//! commands that call them.
 //! Swift: `Sources/StenoCore/Storage/MeetingStore.swift`.
+//!
+//! The migration procedure both sides follow is in
+//! `crates/steno-core/migrations/README.md`.
 
 mod assets;
 mod convert;
@@ -50,9 +55,32 @@ pub enum StoreError {
     UnknownMigration(String),
     /// GRDB's check before a migration commits: its rows no longer satisfy
     /// the foreign keys, so it was rolled back and the database is as it
-    /// was.
-    #[error("{0} foreign key violations after migrating")]
-    ForeignKeyViolations(i64),
+    /// was. `count` is every violating row, `table` the one the first of
+    /// them is in.
+    #[error("{count} foreign key violations after migrating, the first in {table}")]
+    ForeignKeyViolations { table: String, count: i64 },
+    /// `PRAGMA journal_mode = WAL` left the file in another mode: a
+    /// read-only file, or a volume without shared memory. The store refuses
+    /// it rather than run two processes on a rollback journal.
+    #[error("the database is in journal mode {0}, not wal")]
+    JournalModeNotWal(String),
+}
+
+impl StoreError {
+    /// Another connection held the lock past the busy timeout
+    /// (`SQLITE_BUSY`, its WAL `SQLITE_BUSY_SNAPSHOT` form, or
+    /// `SQLITE_LOCKED` from a shared-cache table lock): nothing is wrong
+    /// with the call, and a caller that can wait should retry it.
+    #[must_use]
+    pub fn is_busy(&self) -> bool {
+        match self {
+            StoreError::Sqlite(rusqlite::Error::SqliteFailure(error, _)) => matches!(
+                error.code,
+                ErrorCode::DatabaseBusy | ErrorCode::DatabaseLocked
+            ),
+            _ => false,
+        }
+    }
 }
 
 pub type Result<T> = std::result::Result<T, StoreError>;
@@ -63,6 +91,19 @@ const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// The one store over the database. One connection behind a mutex: SQLite
 /// serialises writes anyway, and the host reads on the same thread pool.
+///
+/// Every method blocks on the lock and on SQLite; an async host calls them
+/// from `spawn_blocking`. The mutex is `std`'s and not reentrant: a `Store`
+/// method called from inside a [`Store::read`] or [`Store::write`] closure
+/// deadlocks. Use the free functions of the submodules on the connection
+/// the closure was given instead.
+///
+/// The five-second busy timeout is a margin, not a guarantee. Measured
+/// against the Swift app rebuilding its FTS index over 600,000 segments,
+/// Rust writers waited up to 2.5 s of it; a Swift transaction longer than
+/// the timeout surfaces here as `database is locked`, which
+/// [`StoreError::is_busy`] recognises and the host (WP6) treats as
+/// retryable.
 pub struct Store {
     connection: Mutex<Connection>,
 }
@@ -165,22 +206,29 @@ impl Store {
     }
 }
 
-/// `PRAGMA journal_mode = WAL`. Switching a fresh file's mode rewrites the
-/// header under an exclusive lock, and when two connections have both read
-/// the old header and race for it SQLite hands the loser a plain
-/// `SQLITE_BUSY` without consulting the busy handler. The loser retries
-/// until the winner is done (then the pragma finds WAL set and does
-/// nothing) or the busy timeout is spent.
+/// `PRAGMA journal_mode = WAL`, checked: the pragma answers with the mode
+/// the file ended up in, and anything but `wal` is
+/// [`StoreError::JournalModeNotWal`]. Switching a fresh file's mode
+/// rewrites the header under an exclusive lock, and when two connections
+/// have both read the old header and race for it SQLite hands the loser a
+/// plain `SQLITE_BUSY` without consulting the busy handler. The loser
+/// retries until the winner is done (then the pragma finds WAL set and
+/// does nothing) or the busy timeout is spent.
 fn enable_wal(connection: &Connection) -> Result<()> {
     let deadline = Instant::now() + BUSY_TIMEOUT;
     loop {
-        match connection.pragma_update(None, "journal_mode", "WAL") {
+        let outcome = connection.query_row("PRAGMA journal_mode = WAL", [], |row| {
+            row.get::<_, String>(0)
+        });
+        match outcome {
             Err(rusqlite::Error::SqliteFailure(error, _))
                 if error.code == ErrorCode::DatabaseBusy && Instant::now() < deadline =>
             {
                 std::thread::sleep(Duration::from_millis(10));
             }
-            outcome => return Ok(outcome?),
+            Ok(mode) if mode.eq_ignore_ascii_case("wal") => return Ok(()),
+            Ok(mode) => return Err(StoreError::JournalModeNotWal(mode)),
+            Err(error) => return Err(error.into()),
         }
     }
 }
@@ -191,6 +239,13 @@ const SCHEMA_DUMP_QUERIES: &[&str] = &[
     "SELECT type || '|' || name || '|' || tbl_name || '|' || coalesce(sql, '') FROM sqlite_master ORDER BY type, name",
     "SELECT 'migration|' || identifier FROM grdb_migrations ORDER BY rowid",
 ];
+
+/// `sql` with `params` through the connection's statement cache: the
+/// per-row inserts of a transaction prepare their statement once.
+fn execute_cached(connection: &Connection, sql: &str, params: impl Params) -> Result<()> {
+    connection.prepare_cached(sql)?.execute(params)?;
+    Ok(())
+}
 
 /// Every row of `sql` through `map`: GRDB's `fetchAll`.
 fn query_all<T>(
