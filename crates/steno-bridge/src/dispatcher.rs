@@ -4,11 +4,21 @@
 //! [`BridgeMethod`]; the [`Dispatcher`] reads the params as the method's
 //! contract type, calls the host and wraps the outcome. Two entry points for
 //! the two transports: [`Dispatcher::call`] takes a method and its params,
-//! which is what the Tauri `bridge_call` command receives
-//! (`apps/macos/web/src/bridge/tauri-transport.ts` sends `{ method, params }`
-//! and no id); [`Dispatcher::dispatch`] takes the request envelope with its
-//! `id` and always answers with a reply envelope, never a rejection, as
+//! which is what the Tauri `bridge_call` command receives (the Tauri
+//! transport added by WP3 sends `{ method, params }` and no id);
+//! [`Dispatcher::dispatch`] takes the request envelope with its `id` and
+//! always answers with a reply envelope, never a rejection, as
 //! `webkit-transport.ts` expects.
+//!
+//! The params reader is more lenient than Swift's in one place, in the
+//! direction of accepting what the page never sends: serde reads a params
+//! struct from a positional array as well as from an object (`["abc"]` for
+//! `{ "meetingId": "abc" }`), where Swift's keyed decoder rejects the array.
+//! Not pinned either way. The UUID codec (`json::uuid`) used to be lenient
+//! too (the `uuid` crate reads un-hyphenated and `urn:uuid:` forms that
+//! `UUID(uuidString:)` rejects); it now takes only the hyphenated
+//! 36-character form, since ids on the wire come from the host's own
+//! snapshots.
 //!
 //! Hosts run blocking. Every method takes `&self` and returns when the work
 //! is done, including a method that waits on a dialog; the host uses interior
@@ -331,8 +341,11 @@ fn decode_request(body: &str) -> Result<BridgeRequest, BridgeReply> {
 }
 
 /// The method's params as its contract type; a missing, `null` or unreadable
-/// value is `invalidParams`. Swift: `BridgeRequest.params(_:)`.
-fn decode<T: DeserializeOwned>(method: BridgeMethod, params: Option<Value>) -> Outcome<T> {
+/// value is `invalidParams`. Swift: `BridgeRequest.params(_:)`. Public so a
+/// shell that answers `window.*` and `system.openURL` itself, before the
+/// dispatcher, reads their params with the same errors (`"<method> needs
+/// params."`) the dispatcher would give.
+pub fn decode<T: DeserializeOwned>(method: BridgeMethod, params: Option<Value>) -> Outcome<T> {
     match params {
         None | Some(Value::Null) => Err(BridgeError::invalid_params(format!(
             "{method} needs params."
