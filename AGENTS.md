@@ -87,7 +87,8 @@ missing local setup, run it. Do not ask first.
   runtime, no API routes.
 - Installed from the repository root (`pnpm install`), run with
   `pnpm dev:site`; `pnpm check:site` and `pnpm build:site` must pass before a
-  PR (`.github/workflows/site-ci.yml`). `mobile/` and `apps/macos/web/` stay
+  PR (`.github/workflows/site-ci.yml`). Vercel builds from the root
+  `vercel.json`; keep its paths in step with the workspace. `mobile/` and `apps/macos/web/` stay
   outside the root workspace; `pnpm-workspace.yaml` says why.
 - Design and structure follow t3.codes (pingdotgg/t3code `apps/marketing`):
   dark only, DM Sans and JetBrains Mono, hero → feature blocks → closing CTA.

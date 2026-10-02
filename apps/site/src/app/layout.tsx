@@ -1,23 +1,7 @@
 import type { Metadata, Viewport } from "next";
-import { DM_Sans, JetBrains_Mono } from "next/font/google";
 import type { ReactNode } from "react";
 import { site } from "@/lib/site";
 import "./globals.css";
-
-/* DM Sans and JetBrains Mono, as on t3.codes; next/font self-hosts them. */
-const sans = DM_Sans({
-	subsets: ["latin", "latin-ext"],
-	weight: ["400", "500", "600", "700"],
-	variable: "--font-dm-sans",
-	display: "swap",
-});
-
-const mono = JetBrains_Mono({
-	subsets: ["latin", "latin-ext"],
-	weight: ["400", "500"],
-	variable: "--font-jetbrains-mono",
-	display: "swap",
-});
 
 export const metadata: Metadata = {
 	metadataBase: new URL(site.url),
@@ -65,7 +49,17 @@ export const viewport: Viewport = {
 
 export default function RootLayout({ children }: { children: ReactNode }) {
 	return (
-		<html className={`${sans.variable} ${mono.variable}`} lang="en">
+		<html lang="en">
+			<head>
+				{/* The latin DM Sans file carries the headline; everything else may swap in. */}
+				<link
+					as="font"
+					crossOrigin="anonymous"
+					href="/fonts/dm-sans-latin.woff2"
+					rel="preload"
+					type="font/woff2"
+				/>
+			</head>
 			<body className="flex min-h-dvh flex-col overflow-x-clip">
 				{children}
 			</body>
