@@ -4,23 +4,15 @@
 //! `.optional()` string, number, uuid or enum that appears under its camelCase
 //! key when set and is absent when `None`.
 
-use std::fs;
-use std::path::Path;
+mod common;
 
 use chrono::{TimeZone, Utc};
+use common::bridge_fixture as fixture;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 use steno_bridge::*;
 use uuid::Uuid;
-
-fn fixture<T: DeserializeOwned>(name: &str) -> T {
-    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../apps/macos/web/fixtures/bridge")
-        .join(format!("{name}.json"));
-    let bytes = fs::read(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
-    serde_json::from_slice(&bytes).unwrap_or_else(|e| panic!("{name}.json: {e}"))
-}
 
 /// Encodes, checks the value decodes back to itself, and returns the JSON.
 fn encoded<T: Serialize + DeserializeOwned + PartialEq + std::fmt::Debug>(value: &T) -> Value {
@@ -52,33 +44,45 @@ fn app_snapshot_deep_link_fields() {
 }
 
 #[test]
-fn recording_snapshot_warning() {
+fn recording_snapshot_warning_and_error() {
     let mut recording: RecordingSnapshot = fixture("recording.live");
-    assert!(encoded(&recording).get("warning").is_none());
+    let before = encoded(&recording);
+    assert!(before.get("warning").is_none());
+    assert!(before.get("error").is_none());
 
     recording.warning = Some("The microphone went quiet.".into());
-    assert_eq!(encoded(&recording)["warning"], "The microphone went quiet.");
+    recording.error = Some("System audio stopped.".into());
+    let json = encoded(&recording);
+    assert_eq!(json["warning"], "The microphone went quiet.");
+    assert_eq!(json["error"], "System audio stopped.");
 }
 
 #[test]
-fn meetings_list_snapshot_tag_filter() {
+fn meetings_list_snapshot_tag_filter_and_error() {
     let mut list: MeetingsListSnapshot = fixture("meetings.list");
-    assert!(encoded(&list).get("tagFilter").is_none());
+    let before = encoded(&list);
+    assert!(before.get("tagFilter").is_none());
+    assert!(before.get("error").is_none());
 
     list.tag_filter = Some("hiring".into());
-    assert_eq!(encoded(&list)["tagFilter"], "hiring");
+    list.error = Some("The database is locked.".into());
+    let json = encoded(&list);
+    assert_eq!(json["tagFilter"], "hiring");
+    assert_eq!(json["error"], "The database is locked.");
 }
 
 #[test]
-fn meeting_detail_snapshot_end_reason() {
+fn meeting_detail_snapshot_end_reason_and_error() {
     let mut detail: MeetingDetailSnapshot = fixture("meeting.detail");
-    assert!(encoded(&detail).get("endReason").is_none());
+    let before = encoded(&detail);
+    assert!(before.get("endReason").is_none());
+    assert!(before.get("error").is_none());
 
     detail.end_reason = Some("Stopped after 20 minutes of silence.".into());
-    assert_eq!(
-        encoded(&detail)["endReason"],
-        "Stopped after 20 minutes of silence."
-    );
+    detail.error = Some("The notes could not be saved.".into());
+    let json = encoded(&detail);
+    assert_eq!(json["endReason"], "Stopped after 20 minutes of silence.");
+    assert_eq!(json["error"], "The notes could not be saved.");
 }
 
 #[test]
@@ -112,7 +116,7 @@ fn onboarding_vault_error_details() {
     let vault = OnboardingVault {
         path: Some("/Users/nicolai/Notes".into()),
         name: Some("Notes".into()),
-        validation_message: None,
+        validation_message: Some("Pick a folder inside your vault.".into()),
         error: Some("The vault could not be saved.".into()),
         error_details: Some("EACCES: permission denied".into()),
     };
@@ -121,6 +125,7 @@ fn onboarding_vault_error_details() {
         json!({
             "path": "/Users/nicolai/Notes",
             "name": "Notes",
+            "validationMessage": "Pick a folder inside your vault.",
             "error": "The vault could not be saved.",
             "errorDetails": "EACCES: permission denied",
         })
@@ -138,6 +143,29 @@ fn general_settings_snapshot_error_details() {
     let json = encoded(&general);
     assert_eq!(json["error"], "Could not read login item state.");
     assert_eq!(json["errorDetails"], "SMAppService returned 1");
+}
+
+#[test]
+fn general_updates_last_check_and_detail() {
+    let updates = GeneralUpdates {
+        can_check: true,
+        automatically_checks: true,
+        automatically_downloads: false,
+        last_check_at: Some(Utc.with_ymd_and_hms(2026, 9, 29, 12, 48, 0).unwrap()),
+        outcome: GeneralUpdatesOutcome::Failed,
+        detail: Some("The update server did not answer.".into()),
+    };
+    assert_eq!(
+        encoded(&updates),
+        json!({
+            "canCheck": true,
+            "automaticallyChecks": true,
+            "automaticallyDownloads": false,
+            "lastCheckAt": "2026-09-29T12:48:00.000Z",
+            "outcome": "failed",
+            "detail": "The update server did not answer.",
+        })
+    );
 }
 
 #[test]
@@ -191,12 +219,17 @@ fn transcription_asset_failure() {
 }
 
 #[test]
-fn summaries_settings_snapshot_error_details() {
+fn summaries_settings_snapshot_validation_message_and_error_details() {
     let mut summaries: SummariesSettingsSnapshot = fixture("settings.summaries");
-    assert!(encoded(&summaries).get("errorDetails").is_none());
+    let before = encoded(&summaries);
+    assert!(before.get("validationMessage").is_none());
+    assert!(before.get("errorDetails").is_none());
 
+    summaries.validation_message = Some("Enter a model name.".into());
     summaries.error_details = Some("401 Unauthorized".into());
-    assert_eq!(encoded(&summaries)["errorDetails"], "401 Unauthorized");
+    let json = encoded(&summaries);
+    assert_eq!(json["validationMessage"], "Enter a model name.");
+    assert_eq!(json["errorDetails"], "401 Unauthorized");
 }
 
 #[test]
@@ -225,19 +258,29 @@ fn summaries_codex_models_error() {
 }
 
 #[test]
-fn export_settings_snapshot_vault_and_error_details() {
+fn export_settings_snapshot_vault_validation_and_error_details() {
     let mut export: ExportSettingsSnapshot = fixture("settings.export");
     let before = encoded(&export);
-    for key in ["vaultPath", "vaultName", "errorDetails"] {
+    for key in [
+        "vaultPath",
+        "vaultName",
+        "validationMessage",
+        "errorDetails",
+    ] {
         assert!(before.get(key).is_none(), "{key} is set in the fixture");
     }
 
     export.vault_path = Some("/Users/nicolai/Notes".into());
     export.vault_name = Some("Notes".into());
+    export.validation_message = Some("The people folder must be inside the vault.".into());
     export.error_details = Some("EACCES: permission denied".into());
     let json = encoded(&export);
     assert_eq!(json["vaultPath"], "/Users/nicolai/Notes");
     assert_eq!(json["vaultName"], "Notes");
+    assert_eq!(
+        json["validationMessage"],
+        "The people folder must be inside the vault."
+    );
     assert_eq!(json["errorDetails"], "EACCES: permission denied");
 }
 
@@ -300,4 +343,61 @@ fn bridge_reply_result_carries_any_json_value() {
             "result": {"expiresAt": "2026-09-29T12:48:00.000Z", "qrPNGBase64": "iVBORw0KGgo="},
         })
     );
+}
+
+#[test]
+fn window_params_section_and_meeting_id() {
+    let params = WindowParams {
+        window: BridgeWindow::Main,
+        section: Some(SettingsSection::Export),
+        meeting_id: Some(uuid(0x2a)),
+    };
+    assert_eq!(
+        encoded(&params),
+        json!({
+            "window": "main",
+            "section": "export",
+            "meetingID": "00000000-0000-0000-0000-00000000002A",
+        })
+    );
+    let bare = WindowParams {
+        window: BridgeWindow::Settings,
+        section: None,
+        meeting_id: None,
+    };
+    assert_eq!(encoded(&bare), json!({"window": "settings"}));
+}
+
+#[test]
+fn summaries_update_params_every_field() {
+    let params = SummariesUpdateParams {
+        base_url: Some("https://api.openai.com/v1".into()),
+        model: Some("gpt-5".into()),
+        context_tokens: Some("128000".into()),
+        api_key: Some("sk-test".into()),
+    };
+    assert_eq!(
+        encoded(&params),
+        json!({
+            "baseURL": "https://api.openai.com/v1",
+            "model": "gpt-5",
+            "contextTokens": "128000",
+            "apiKey": "sk-test",
+        })
+    );
+    assert_eq!(encoded(&SummariesUpdateParams::default()), json!({}));
+}
+
+#[test]
+fn export_update_params_every_field() {
+    let params = ExportUpdateParams {
+        people_folder: Some("People".into()),
+        include_audio: Some(true),
+        task_tag: Some("#todo".into()),
+    };
+    assert_eq!(
+        encoded(&params),
+        json!({"peopleFolder": "People", "includeAudio": true, "taskTag": "#todo"})
+    );
+    assert_eq!(encoded(&ExportUpdateParams::default()), json!({}));
 }

@@ -4,22 +4,16 @@
 //! `contract.ts` is checked for every string enum the crate spells, top level
 //! and nested. Plan: `.plans/2026-10-02-rust-core-and-tauri-shell.md`.
 
+mod common;
+
 use std::collections::BTreeSet;
 use std::fs;
-use std::path::{Path, PathBuf};
 
+use common::{bridge_fixtures_dir as fixtures_dir, repository_root};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use similar::TextDiff;
 use steno_bridge::*;
-
-fn repository_root() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
-}
-
-fn fixtures_dir() -> PathBuf {
-    repository_root().join("apps/macos/web/fixtures/bridge")
-}
 
 /// Raw values in declaration order, for the `contract.ts` comparisons.
 fn raw<T: std::fmt::Display>(all: &[T]) -> Vec<String> {
