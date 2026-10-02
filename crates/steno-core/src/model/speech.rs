@@ -81,7 +81,10 @@ pub struct SpeakerCluster {
     /// The diarizer's label, "Speaker 1" onwards in order of first speech.
     pub label: String,
     pub ranges: Vec<TimeRange>,
-    /// Never written to JSON, like `Speaker::embedding`.
+    /// The cluster's voice: its chunk embeddings at unit length, summed
+    /// with duration as weight and L2-normalised (`ClusterEmbedding` in the
+    /// speech crate); `None` when no chunk carried a usable vector. Skipped
+    /// by serde like `Speaker::embedding`; Swift never encodes a cluster.
     #[serde(skip)]
     pub embedding: Option<Embedding>,
     pub cluster_confidence: f32,
@@ -199,6 +202,34 @@ mod tests {
         let parsed: DiarizationResult = serde_json::from_str(&text).unwrap();
         assert_eq!(parsed.clusters[0].embedding, None);
         assert_eq!(parsed.clusters[0].ranges, result.clusters[0].ranges);
+    }
+
+    #[test]
+    fn inverted_segments_and_turns_have_zero_duration() {
+        let segment = RawSegment {
+            start: 2.0,
+            end: 1.0,
+            text: String::new(),
+            language: None,
+            word_timings: None,
+        };
+        assert_eq!(segment.duration(), 0.0);
+        assert_eq!(
+            RawSegment {
+                end: 2.75,
+                ..segment
+            }
+            .duration(),
+            0.75
+        );
+        let turn = SpeakerTurn {
+            speaker_label: "Speaker 1".to_owned(),
+            start: 5.0,
+            end: 4.0,
+            quality: 1.0,
+        };
+        assert_eq!(turn.duration(), 0.0);
+        assert_eq!(SpeakerTurn { end: 5.5, ..turn }.duration(), 0.5);
     }
 
     #[test]

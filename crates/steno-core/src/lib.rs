@@ -40,9 +40,9 @@ pub mod testing;
 pub use model::*;
 pub use paths::StenoPaths;
 pub use protocols::{
-    AudioDecoder, BoundaryResult, BoxError, DeliveryDispatcher, Destination, Diarizer,
-    EchoCanceller, HandoverIntake, LanguageModel, MeetingSummarizer, SecretKey, SecretStore,
-    SpeakerMemory, SpeechEngine, TranscriptCleaner, async_trait,
+    AudioDecoder, BoundaryResult, BoxError, DEFAULT_MATCH_MARGIN, DeliveryDispatcher, Destination,
+    Diarizer, EchoCanceller, HandoverIntake, LanguageModel, MeetingSummarizer, SecretKey,
+    SecretStore, SpeakerMemory, SpeechEngine, TranscriptCleaner, async_trait,
 };
 pub use store::{DeletedMeeting, Store, StoreError};
 pub use string_enum::UnknownCase;

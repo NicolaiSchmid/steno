@@ -24,7 +24,9 @@ pub trait SpeakerMemory: Send + Sync {
     ) -> BoundaryResult<Vec<SpeakerMatch>>;
 
     /// The best candidate at or above `threshold` that is at least `margin`
-    /// above the runner-up; `None` otherwise. Swift's default `margin` is
+    /// above the runner-up; `None` otherwise, and `None` when the best
+    /// similarity is not finite (a NaN compares false against every
+    /// threshold and would pass). Swift's default `margin` is
     /// [`DEFAULT_MATCH_MARGIN`].
     async fn match_voice(
         &self,
@@ -36,7 +38,7 @@ pub trait SpeakerMemory: Send + Sync {
         let Some(best) = ranked.first() else {
             return Ok(None);
         };
-        if best.similarity < threshold {
+        if !best.similarity.is_finite() || best.similarity < threshold {
             return Ok(None);
         }
         if let Some(runner_up) = ranked.get(1)
@@ -45,5 +47,70 @@ pub trait SpeakerMemory: Send + Sync {
             return Ok(None);
         }
         Ok(Some(ranked.swap_remove(0)))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::testing::sample_data;
+
+    /// A memory that answers with a fixed ranking, so the default
+    /// `match_voice` is tested on its own.
+    struct Fixed(Vec<SpeakerMatch>);
+
+    #[async_trait]
+    impl SpeakerMemory for Fixed {
+        async fn candidates(
+            &self,
+            _embedding: &Embedding,
+            limit: usize,
+        ) -> BoundaryResult<Vec<SpeakerMatch>> {
+            Ok(self.0.iter().take(limit).cloned().collect())
+        }
+    }
+
+    fn ranked(similarities: &[f32]) -> Fixed {
+        Fixed(
+            similarities
+                .iter()
+                .enumerate()
+                .map(|(axis, similarity)| SpeakerMatch {
+                    person: sample_data::person(axis, "Someone"),
+                    similarity: *similarity,
+                })
+                .collect(),
+        )
+    }
+
+    async fn matched(memory: &Fixed, threshold: f32, margin: f32) -> Option<f32> {
+        memory
+            .match_voice(&sample_data::embedding(0), threshold, margin)
+            .await
+            .unwrap()
+            .map(|found| found.similarity)
+    }
+
+    #[tokio::test]
+    async fn a_similarity_exactly_at_the_threshold_matches() {
+        let memory = ranked(&[0.8, 0.5]);
+        assert_eq!(matched(&memory, 0.8, DEFAULT_MATCH_MARGIN).await, Some(0.8));
+        assert_eq!(matched(&memory, 0.800_01, DEFAULT_MATCH_MARGIN).await, None);
+    }
+
+    #[tokio::test]
+    async fn a_lead_exactly_equal_to_the_margin_matches() {
+        let memory = ranked(&[0.75, 0.5]);
+        assert_eq!(matched(&memory, 0.0, 0.25).await, Some(0.75));
+        assert_eq!(matched(&memory, 0.0, 0.250_01).await, None);
+        assert_eq!(matched(&ranked(&[0.75]), 0.0, 1.0).await, Some(0.75));
+        assert_eq!(matched(&ranked(&[]), 0.0, 0.0).await, None);
+    }
+
+    #[tokio::test]
+    async fn a_nan_similarity_never_matches() {
+        assert_eq!(matched(&ranked(&[f32::NAN]), 0.0, 0.0).await, None);
+        assert_eq!(matched(&ranked(&[f32::NAN, 0.9]), 0.0, 0.0).await, None);
+        assert_eq!(matched(&ranked(&[f32::INFINITY]), 0.0, 0.0).await, None);
     }
 }

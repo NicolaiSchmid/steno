@@ -52,9 +52,9 @@ impl Default for FakeSpeechEngine {
 }
 
 impl FakeSpeechEngine {
-    /// The segments for `duration` seconds: one per `segment_seconds`, the
-    /// last one clipped to the end; three evenly spaced word timings each
-    /// when asked.
+    /// The segments for `duration` seconds: one per `segment_seconds`, each
+    /// starting exactly where the previous one ended, the last one clipped
+    /// to the end; three evenly spaced word timings each when asked.
     #[must_use]
     pub fn segments(
         duration: f64,
@@ -71,10 +71,13 @@ impl FakeSpeechEngine {
         let count = (duration / segment_seconds).ceil() as usize;
         (0..count)
             .map(|index| {
-                // Exact: segment indexes are small.
+                // Exact: segment indexes are small. Both bounds come from
+                // the index so neighbouring segments share a boundary bit
+                // for bit.
                 #[allow(clippy::cast_precision_loss)]
                 let start = index as f64 * segment_seconds;
-                let end = duration.min(start + segment_seconds);
+                #[allow(clippy::cast_precision_loss)]
+                let end = duration.min((index + 1) as f64 * segment_seconds);
                 let text = format!("{text_prefix} segment {}", index + 1);
                 let timings = word_timings.then(|| {
                     let step = (end - start) / 3.0;
@@ -297,6 +300,23 @@ mod tests {
                 hint: Some(hint)
             }]
         );
+    }
+
+    #[test]
+    fn segments_share_their_boundaries_bit_for_bit() {
+        // 0.7 s steps over 10 s: a boundary summed from the previous end
+        // would drift by an ulp from one computed from the index.
+        let segments = FakeSpeechEngine::segments(10.0, 0.7, None, "fake", true);
+        assert_eq!(segments.len(), 15);
+        assert_eq!(segments[0].start, 0.0);
+        assert_eq!(segments[14].end, 10.0);
+        for pair in segments.windows(2) {
+            assert_eq!(pair[0].end, pair[1].start, "{pair:?}");
+            let words = pair[0].word_timings.as_ref().unwrap();
+            assert_eq!(words[0].start, pair[0].start);
+            assert_eq!(words[1].start, words[0].end);
+            assert_eq!(words[2].start, words[1].end);
+        }
     }
 
     #[tokio::test]
