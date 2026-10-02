@@ -166,6 +166,10 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
+      # The shell's GTK and WebKitGTK crates run pkg-config in their build
+      # scripts, so the check needs the same libraries as the Linux job.
+      - name: Linux prerequisites
+        run: scripts/setup-linux.sh
       - name: Read rust-version from Cargo.toml
         id: msrv
         run: |
