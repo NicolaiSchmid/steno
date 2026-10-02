@@ -1,0 +1,520 @@
+//! Onboarding through the host and the view model, ported from
+//! `OnboardingViewModelTests` and `OnboardingBridgeTests`.
+
+// The ported suites keep one Swift test per function, long as some are.
+#![allow(clippy::too_many_lines)]
+
+mod common;
+
+use steno_host::services::Preferences as _;
+
+use common::*;
+use serde_json::json;
+use steno_bridge::{
+    BridgeErrorCode, BridgeHost, BridgeTopic, BridgeWindow, OnboardingSetupStepKind,
+    PermissionKind, PermissionKindParams, PermissionState, SetupStepParams, SummariesUpdateParams,
+    WindowParams,
+};
+use steno_core::AudioRetention;
+use steno_host::onboarding::OnboardingViewModel;
+
+fn permissions(
+    mic: PermissionState,
+    system: PermissionState,
+    calendar: PermissionState,
+) -> impl FnOnce(&steno_core::Store, &steno_host::fakes::FakeServices) + 'static {
+    move |_, fakes| {
+        fakes.permissions.set(PermissionKind::Microphone, mic);
+        fakes.permissions.set(PermissionKind::SystemAudio, system);
+        fakes.permissions.set(PermissionKind::Calendar, calendar);
+        fakes
+            .permissions
+            .set(PermissionKind::LocalNetwork, PermissionState::Unknown);
+    }
+}
+
+/// Swift: `testRetentionSentenceFollowsTheStoredRule`.
+#[test]
+fn the_retention_sentence_follows_the_stored_rule() {
+    let harness = Harness::builder().build();
+    let sentence = harness.snapshot(BridgeTopic::Onboarding)["retentionSentence"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert_eq!(
+        sentence,
+        "Recordings are kept forever in audio. Change this any time in Settings > Audio."
+    );
+    set_retention(&harness.store, AudioRetention::KeepDays(7));
+    harness.host.onboarding_refresh().unwrap();
+    let sentence = harness.snapshot(BridgeTopic::Onboarding)["retentionSentence"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert!(
+        sentence.contains("deleted 7 days after it was processed and exported"),
+        "{sentence}"
+    );
+    assert!(sentence.ends_with("Change this any time in Settings > Audio."));
+    set_retention(&harness.store, AudioRetention::DeleteAfterProcessing);
+    harness.host.onboarding_refresh().unwrap();
+    assert!(
+        harness.snapshot(BridgeTopic::Onboarding)["retentionSentence"]
+            .as_str()
+            .unwrap()
+            .starts_with("Each recording is deleted as soon as")
+    );
+}
+
+/// Swift: `testStepsRunInOrderAndRequiredOnesGateCompletion`, `testOptionalStepsCanBeSkippedRequiredCannot`,
+/// `testRequestUpdatesOnlyTheRequestedStep`, `pageReadyPublishesAndPermissionCommandsRepublish`.
+#[test]
+fn steps_run_in_order_required_ones_gate_completion_and_optional_ones_can_be_skipped() {
+    let harness = Harness::builder()
+        .seed(permissions(
+            PermissionState::Unknown,
+            PermissionState::Unknown,
+            PermissionState::Unknown,
+        ))
+        .build();
+    let onboarding = harness.snapshot(BridgeTopic::Onboarding);
+    assert_eq!(onboarding["page"], "permissions");
+    assert_eq!(onboarding["permissionsComplete"], false);
+    let kinds: Vec<&str> = onboarding["permissions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|step| step["kind"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        kinds,
+        ["microphone", "systemAudio", "calendar", "localNetwork"]
+    );
+    assert_eq!(onboarding["permissions"][0]["isRequired"], true);
+    assert_eq!(onboarding["permissions"][2]["isRequired"], false);
+    assert!(
+        onboarding.get("summaries").is_none(),
+        "page 1 carries no form"
+    );
+
+    harness
+        .host
+        .onboarding_skip(PermissionKindParams {
+            kind: PermissionKind::Microphone,
+        })
+        .unwrap();
+    assert_eq!(
+        harness.snapshot(BridgeTopic::Onboarding)["permissions"][0]["isSkipped"],
+        false,
+        "required steps cannot be skipped"
+    );
+
+    harness.sink.clear();
+    harness
+        .host
+        .onboarding_request(PermissionKindParams {
+            kind: PermissionKind::Microphone,
+        })
+        .unwrap();
+    let published = harness.sink.all(BridgeTopic::Onboarding);
+    assert_eq!(
+        published[0]["permissions"][0]["isRequesting"], true,
+        "the prompt is up"
+    );
+    let after = published.last().unwrap();
+    assert_eq!(after["permissions"][0]["state"], "granted");
+    assert_eq!(after["permissions"][0]["isRequesting"], false);
+    assert_eq!(
+        after["permissions"][1]["state"], "unknown",
+        "only the requested step changes"
+    );
+    assert_eq!(after["permissionsComplete"], false);
+
+    harness
+        .fakes
+        .permissions
+        .answer(PermissionKind::SystemAudio, PermissionState::Denied);
+    harness
+        .host
+        .onboarding_request(PermissionKindParams {
+            kind: PermissionKind::SystemAudio,
+        })
+        .unwrap();
+    let onboarding = harness.snapshot(BridgeTopic::Onboarding);
+    assert_eq!(onboarding["permissions"][1]["state"], "denied");
+    assert_eq!(
+        onboarding["page"], "permissions",
+        "a denied required step stays"
+    );
+    harness
+        .host
+        .system_open_system_settings(PermissionKindParams {
+            kind: PermissionKind::SystemAudio,
+        })
+        .unwrap();
+    assert_eq!(
+        *harness.fakes.permissions.opened_panes.lock().unwrap(),
+        vec![PermissionKind::SystemAudio]
+    );
+
+    // The user fixed it in System Settings: "Check again" reads the states.
+    harness
+        .fakes
+        .permissions
+        .set(PermissionKind::SystemAudio, PermissionState::Granted);
+    harness.host.onboarding_refresh().unwrap();
+    let onboarding = harness.snapshot(BridgeTopic::Onboarding);
+    assert_eq!(onboarding["permissionsComplete"], true);
+    assert_eq!(
+        onboarding["page"], "permissions",
+        "optional steps are still open"
+    );
+
+    harness
+        .host
+        .onboarding_skip(PermissionKindParams {
+            kind: PermissionKind::Calendar,
+        })
+        .unwrap();
+    harness
+        .host
+        .onboarding_skip(PermissionKindParams {
+            kind: PermissionKind::LocalNetwork,
+        })
+        .unwrap();
+    let onboarding = harness.snapshot(BridgeTopic::Onboarding);
+    assert_eq!(
+        onboarding["page"], "setup",
+        "page 1 moves on by itself once every step is handled"
+    );
+    assert_eq!(onboarding["permissions"][3]["isSkipped"], true);
+    assert!(onboarding.get("summaries").is_some());
+    assert_eq!(onboarding["vault"], json!({}));
+
+    harness.host.onboarding_back().unwrap();
+    assert_eq!(
+        harness.snapshot(BridgeTopic::Onboarding)["page"],
+        "permissions",
+        "Back stays on page 1"
+    );
+    harness.host.onboarding_advance().unwrap();
+    assert_eq!(harness.snapshot(BridgeTopic::Onboarding)["page"], "setup");
+}
+
+/// Swift: `testAlreadyGrantedPermissionsOpenOnTheSetupPage`, `testSkippingBothRowsFinishesAndSetsTheFlag`,
+/// `testFinishWithRowsOpenSetsTheFlag`, `cancelledChooserSkipAndFinish`.
+#[test]
+fn granted_permissions_open_on_the_setup_page_and_handled_rows_finish() {
+    let harness = Harness::builder().choose(None).build();
+    let onboarding = harness.snapshot(BridgeTopic::Onboarding);
+    assert_eq!(onboarding["page"], "setup", "every permission granted");
+    assert_eq!(onboarding["finished"], false);
+    assert_eq!(
+        onboarding["setup"],
+        json!([{"kind": "summaries", "state": "open"}, {"kind": "vault", "state": "open"}])
+    );
+
+    let reply = harness.host.onboarding_choose_vault().unwrap();
+    assert_eq!(reply.path, None);
+    assert_eq!(
+        harness.store.settings().unwrap().obsidian,
+        None,
+        "a cancelled chooser saves nothing"
+    );
+
+    harness
+        .host
+        .onboarding_skip_setup(SetupStepParams {
+            step: OnboardingSetupStepKind::Summaries,
+        })
+        .unwrap();
+    assert_eq!(harness.snapshot(BridgeTopic::Onboarding)["finished"], false);
+    harness
+        .host
+        .onboarding_skip_setup(SetupStepParams {
+            step: OnboardingSetupStepKind::Vault,
+        })
+        .unwrap();
+    let onboarding = harness.snapshot(BridgeTopic::Onboarding);
+    assert_eq!(onboarding["finished"], true, "both rows handled finishes");
+    assert_eq!(onboarding["setup"][1]["state"], "skipped");
+    assert!(
+        harness
+            .fakes
+            .preferences
+            .flag(OnboardingViewModel::COMPLETED_KEY)
+    );
+
+    harness
+        .host
+        .window_close(WindowParams {
+            window: BridgeWindow::Onboarding,
+            section: None,
+            meeting_id: None,
+        })
+        .unwrap();
+    assert_eq!(
+        *harness.fakes.opener.windows_closed.lock().unwrap(),
+        vec![BridgeWindow::Onboarding]
+    );
+    let error = harness
+        .host
+        .window_close(WindowParams {
+            window: BridgeWindow::Settings,
+            section: None,
+            meeting_id: None,
+        })
+        .unwrap_err();
+    assert_eq!(error.code, BridgeErrorCode::InvalidParams);
+
+    let open_rows = Harness::builder().build();
+    open_rows.host.onboarding_finish().unwrap();
+    assert_eq!(
+        open_rows.snapshot(BridgeTopic::Onboarding)["finished"],
+        true,
+        "Finish with rows open sets the flag"
+    );
+    assert!(
+        open_rows
+            .fakes
+            .preferences
+            .flag(OnboardingViewModel::COMPLETED_KEY)
+    );
+}
+
+/// Swift: `testSavingSummariesConfiguresTheEndpointAndRebuildsThePipeline`, `setupCommandsReachTheModelsAndFinish`.
+#[test]
+fn saving_summaries_configures_the_endpoint_and_rebuilds_the_pipeline() {
+    let harness = Harness::builder()
+        .choose(Some("/Users/nicolai/Notes"))
+        .build();
+    assert_eq!(
+        harness.snapshot(BridgeTopic::Onboarding)["canSaveSummaries"],
+        false,
+        "no model yet"
+    );
+    harness.host.onboarding_save_summaries().unwrap();
+    assert_eq!(harness.store.settings().unwrap().llm_model, None);
+
+    harness
+        .host
+        .settings_summaries_update(SummariesUpdateParams {
+            base_url: None,
+            model: Some("qwen3-8b".to_owned()),
+            context_tokens: None,
+            api_key: None,
+        })
+        .unwrap();
+    assert_eq!(
+        harness.snapshot(BridgeTopic::Onboarding)["canSaveSummaries"],
+        true
+    );
+    harness.host.onboarding_save_summaries().unwrap();
+    let settings = harness.store.settings().unwrap();
+    assert_eq!(settings.llm_model.as_deref(), Some("qwen3-8b"));
+    assert_eq!(
+        settings.llm_base_url.as_deref(),
+        Some("http://127.0.0.1:1234/v1")
+    );
+    assert_eq!(*harness.fakes.pipeline.reloads.lock().unwrap(), 1);
+    let onboarding = harness.snapshot(BridgeTopic::Onboarding);
+    assert_eq!(
+        onboarding["setup"][0],
+        json!({"kind": "summaries", "savedLine": "Saved: qwen3-8b at 127.0.0.1", "state": "saved"})
+    );
+    assert_eq!(onboarding["summaries"]["isConfigured"], true);
+    assert!(
+        onboarding["summaries"].get("testResult").is_none(),
+        "the onboarding save does not probe"
+    );
+    assert_eq!(onboarding["finished"], false);
+
+    let reply = harness.host.onboarding_choose_vault().unwrap();
+    assert_eq!(reply.path.as_deref(), Some("/Users/nicolai/Notes"));
+    let onboarding = harness.snapshot(BridgeTopic::Onboarding);
+    assert_eq!(
+        onboarding["setup"][1],
+        json!({"kind": "vault", "savedLine": "Saved: Notes", "state": "saved"})
+    );
+    assert_eq!(onboarding["finished"], true, "both rows saved finishes");
+    assert_eq!(
+        harness
+            .store
+            .settings()
+            .unwrap()
+            .obsidian
+            .unwrap()
+            .vault_path,
+        "/Users/nicolai/Notes"
+    );
+}
+
+/// Swift: `testSavingTheVaultValidatesThroughTheDestination`, `vaultRowReadsTheObsidianModel`.
+#[test]
+fn saving_the_vault_validates_through_the_destination() {
+    let harness = Harness::builder()
+        .choose(Some("/Users/nicolai/Notes/Work Vault"))
+        .seed(|_, fakes| {
+            *fakes.export_validator.failure.lock().unwrap() = Some(
+                "The Obsidian vault at /Users/nicolai/Notes/Work Vault does not exist.".to_owned(),
+            );
+        })
+        .build();
+    harness.host.onboarding_choose_vault().unwrap();
+    let onboarding = harness.snapshot(BridgeTopic::Onboarding);
+    assert_eq!(
+        onboarding["vault"],
+        json!({"name": "Work Vault", "path": "/Users/nicolai/Notes/Work Vault", "validationMessage": "The Obsidian vault at /Users/nicolai/Notes/Work Vault does not exist."})
+    );
+    assert_eq!(onboarding["setup"][1]["state"], "open");
+    assert_eq!(harness.store.settings().unwrap().obsidian, None);
+
+    // The folder exists now: Save again goes through.
+    *harness.fakes.export_validator.failure.lock().unwrap() = None;
+    harness.host.onboarding_save_vault().unwrap();
+    assert_eq!(
+        harness.snapshot(BridgeTopic::Onboarding)["setup"][1]["state"],
+        "saved"
+    );
+    assert!(harness.store.settings().unwrap().obsidian.is_some());
+}
+
+/// Swift: `testChatGPTChoiceOnTheSummariesRow`, `testAStoredCodexConfigurationCollapsesTheSummariesRow`.
+#[test]
+fn the_chatgpt_choice_collapses_the_summaries_row_once_confirmed() {
+    let harness = Harness::builder()
+        .seed(|_, fakes| {
+            *fakes.llm.codex_account.lock().unwrap() = Ok("nicolai@example.com (Plus)".to_owned());
+            *fakes.llm.codex_models.lock().unwrap() = Ok(vec![steno_host::services::CodexModel {
+                slug: "gpt-5.1-codex".to_owned(),
+                display_name: "GPT-5.1 Codex".to_owned(),
+                context_window: None,
+            }]);
+        })
+        .build();
+    harness
+        .host
+        .onboarding_confirm_summaries_with_codex()
+        .unwrap();
+    assert_eq!(
+        harness.store.settings().unwrap().codex_confirmed_at,
+        None,
+        "the row's preset is not ChatGPT"
+    );
+
+    // The onboarding form's own preset switch is the Settings method on the
+    // host's Summaries model; the onboarding model follows the store on its
+    // next load, as a stored Codex configuration collapses the row.
+    let mut settings = harness.store.settings().unwrap();
+    settings.llm_provider = steno_core::LlmProvider::Codex;
+    settings.codex_model = Some("gpt-5.1-codex".to_owned());
+    settings.codex_confirmed_at = Some(now());
+    harness.store.save_settings(&settings).unwrap();
+    let stored = Harness::builder()
+        .seed(|store, fakes| {
+            let mut settings = store.settings().unwrap();
+            settings.llm_provider = steno_core::LlmProvider::Codex;
+            settings.codex_model = Some("gpt-5.1-codex".to_owned());
+            settings.codex_confirmed_at = Some(now());
+            store.save_settings(&settings).unwrap();
+            *fakes.llm.codex_account.lock().unwrap() = Ok("nicolai@example.com (Plus)".to_owned());
+        })
+        .build();
+    let onboarding = stored.snapshot(BridgeTopic::Onboarding);
+    assert_eq!(onboarding["setup"][0]["state"], "saved");
+    assert_eq!(
+        onboarding["setup"][0]["savedLine"],
+        "Saved: gpt-5.1-codex via ChatGPT as nicolai@example.com (Plus)"
+    );
+    assert_eq!(onboarding["canSaveSummaries"], false, "ChatGPT has no Save");
+}
+
+/// Swift: `testShouldOpenFollowsTheFlagAndTheRequiredPermissions`, `testConfiguredInstallWithoutTheFlagDoesNotOpen`.
+#[test]
+fn should_open_follows_the_flag_and_the_required_permissions() {
+    let harness = Harness::builder().build();
+    assert!(harness.host.should_open_onboarding(), "the flag is unset");
+    harness
+        .fakes
+        .preferences
+        .set_flag(OnboardingViewModel::COMPLETED_KEY, true);
+    assert!(!harness.host.should_open_onboarding());
+    harness
+        .fakes
+        .permissions
+        .set(PermissionKind::SystemAudio, PermissionState::Denied);
+    assert!(
+        harness.host.should_open_onboarding(),
+        "a missing required permission reopens it"
+    );
+    harness
+        .fakes
+        .permissions
+        .set(PermissionKind::Calendar, PermissionState::Denied);
+    harness
+        .fakes
+        .permissions
+        .set(PermissionKind::SystemAudio, PermissionState::Granted);
+    assert!(
+        !harness.host.should_open_onboarding(),
+        "optional permissions do not"
+    );
+
+    let configured = Harness::builder()
+        .seed(|store, _| {
+            configure_llm(store, "qwen3-8b");
+            let mut settings = store.settings().unwrap();
+            settings.obsidian = Some(steno_core::ObsidianSettings {
+                vault_path: "/vault".to_owned(),
+                people_folder: None,
+                include_audio: false,
+                task_tag: None,
+            });
+            store.save_settings(&settings).unwrap();
+        })
+        .build();
+    assert!(
+        !configured.host.should_open_onboarding(),
+        "nothing left to ask"
+    );
+    assert!(
+        configured
+            .fakes
+            .preferences
+            .flag(OnboardingViewModel::COMPLETED_KEY),
+        "and the flag is written"
+    );
+    let onboarding = configured.snapshot(BridgeTopic::Onboarding);
+    assert_eq!(
+        onboarding["finished"], true,
+        "both rows saved from the store finish at once"
+    );
+}
+
+/// Swift: `testCurrentIsDerivedForEveryPermissionCombination` and `testDeniedStepsStayCurrentAndOpenSettings`,
+/// on the model alone.
+#[test]
+fn current_is_the_first_unhandled_step() {
+    let mut model = OnboardingViewModel::new();
+    assert_eq!(model.current(), PermissionKind::Microphone);
+    model.finish_request(PermissionKind::Microphone, PermissionState::Granted);
+    assert_eq!(model.current(), PermissionKind::SystemAudio);
+    model.finish_request(PermissionKind::SystemAudio, PermissionState::Denied);
+    assert_eq!(
+        model.current(),
+        PermissionKind::SystemAudio,
+        "a denied step stays current"
+    );
+    model.finish_request(PermissionKind::SystemAudio, PermissionState::Granted);
+    assert!(model.is_complete());
+    assert!(!model.permissions_handled());
+    model.skip(PermissionKind::Calendar);
+    assert_eq!(model.current(), PermissionKind::LocalNetwork);
+    model.skip(PermissionKind::LocalNetwork);
+    assert!(model.permissions_handled());
+    assert_eq!(
+        model.current(),
+        PermissionKind::LocalNetwork,
+        "the last one when everything is handled"
+    );
+}
