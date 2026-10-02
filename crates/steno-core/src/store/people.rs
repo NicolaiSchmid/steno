@@ -194,6 +194,43 @@ pub(super) fn replace_name_suggestions(
     Ok(())
 }
 
+/// The meeting's participants by display name, ties by id: the order
+/// `meeting.json` lists them in.
+pub(super) fn participants_of_meeting(
+    connection: &Connection,
+    meeting_id: Uuid,
+) -> Result<Vec<Participant>> {
+    query_all(
+        connection,
+        &format!(
+            "SELECT {PARTICIPANT_COLUMNS} FROM participant WHERE meetingID = ?1 \
+             ORDER BY displayName, id"
+        ),
+        [DbUuid(meeting_id)],
+        participant_from_row,
+    )
+}
+
+/// The persons among `ids`, by display name, ties by id. Empty `ids` is an
+/// empty result without a query.
+pub(super) fn persons_with_ids(connection: &Connection, ids: &[Uuid]) -> Result<Vec<Person>> {
+    if ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let placeholders: Vec<String> = (1..=ids.len()).map(|index| format!("?{index}")).collect();
+    let sql = format!(
+        "SELECT {PERSON_COLUMNS} FROM person WHERE id IN ({}) ORDER BY displayName, id",
+        placeholders.join(", ")
+    );
+    let keys: Vec<DbUuid> = ids.iter().copied().map(DbUuid).collect();
+    query_all(
+        connection,
+        &sql,
+        rusqlite::params_from_iter(keys.iter()),
+        person_from_row,
+    )
+}
+
 impl Store {
     /// Every known person, by display name.
     pub fn persons(&self) -> Result<Vec<Person>> {
@@ -232,17 +269,7 @@ impl Store {
 
     /// The meeting's participants by display name.
     pub fn participants(&self, meeting_id: Uuid) -> Result<Vec<Participant>> {
-        self.read(|connection| {
-            query_all(
-                connection,
-                &format!(
-                    "SELECT {PARTICIPANT_COLUMNS} FROM participant WHERE meetingID = ?1 \
-                     ORDER BY displayName, id"
-                ),
-                [DbUuid(meeting_id)],
-                participant_from_row,
-            )
-        })
+        self.read(|connection| participants_of_meeting(connection, meeting_id))
     }
 
     /// The meeting's speakers by cluster label.

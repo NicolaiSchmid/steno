@@ -15,6 +15,7 @@
 //! - `testing` (feature `testing`): deterministic fakes for every
 //!   boundary, so the pipeline, the CLI and the shell test without models.
 //! - [`json`]: the `StenoJSON` convention and the date and UUID codecs.
+//! - [`summary`]: the summary document as Markdown, names substituted.
 //! - [`string_enum`](mod@string_enum): the macro every Swift `String` enum is spelled with.
 //! - [`paths`]: where the database lives on each platform.
 //!
@@ -34,6 +35,7 @@ pub mod paths;
 pub mod protocols;
 pub mod store;
 pub mod string_enum;
+pub mod summary;
 #[cfg(any(test, feature = "testing"))]
 pub mod testing;
 

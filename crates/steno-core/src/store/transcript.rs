@@ -40,16 +40,22 @@ pub(super) fn insert_segment(connection: &Connection, segment: &TranscriptSegmen
     )
 }
 
+/// The meeting's transcript by start, ties by id.
+pub(super) fn segments_of_meeting(
+    connection: &Connection,
+    meeting_id: Uuid,
+) -> Result<Vec<TranscriptSegment>> {
+    query_all(
+        connection,
+        &format!("SELECT {COLUMNS} FROM transcriptSegment WHERE meetingID = ?1 ORDER BY start, id"),
+        [DbUuid(meeting_id)],
+        from_row,
+    )
+}
+
 impl Store {
     /// The meeting's transcript in time order.
     pub fn segments(&self, meeting_id: Uuid) -> Result<Vec<TranscriptSegment>> {
-        self.read(|connection| {
-            query_all(
-                connection,
-                &format!("SELECT {COLUMNS} FROM transcriptSegment WHERE meetingID = ?1 ORDER BY start, id"),
-                [DbUuid(meeting_id)],
-                from_row,
-            )
-        })
+        self.read(|connection| segments_of_meeting(connection, meeting_id))
     }
 }
