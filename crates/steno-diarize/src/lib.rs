@@ -1,0 +1,59 @@
+//! Speaker diarization for one lane: who spoke when, as `SpeakerCluster`s
+//! with ranges, a unit embedding, a confidence and a sample clip. Plan:
+//! `.plans/2026-10-02-rust-core-and-tauri-shell.md` (`WP4d`) executing
+//! decision 6 and gate G3 of `.plans/2026-10-01-cross-platform-speech-stack.md`;
+//! the clustering constants come from `.plans/2026-09-29-speaker-calibration.md`.
+//!
+//! The pipeline is the pyannote community-1 shape `FluidAudio` runs on the
+//! Mac, with Steno's own clustering and refinement above the tensors:
+//!
+//! 1. [`segmentation`]: ten-second windows every two seconds through the
+//!    pyannote segmentation 3.0 model; its powerset classes become
+//!    per-frame speaker activity for up to three local speakers.
+//! 2. [`extraction`]: one embedding per window and local speaker, over
+//!    the frames where only that speaker is active (one second of speech
+//!    at least), through the `WeSpeaker` embedding model.
+//! 3. [`clustering`]: agglomerative clustering of the unit embeddings,
+//!    average linkage on cosine distance, cut at
+//!    [`DiarizerConfig::clustering_threshold`].
+//! 4. [`timeline`]: windows vote per frame for their clusters; the frame's
+//!    speaker count is the rounded mean over the windows covering it;
+//!    runs become exclusive turns.
+//! 5. [`mapping`]: turns and chunks become "Speaker n" clusters with merged
+//!    ranges, the duration-weighted unit mean embedding and the sample
+//!    clip (`DiarizationMapping.swift`).
+//! 6. [`refinement`]: each cluster with thirty seconds of speech is
+//!    re-embedded over its own concatenated speech, clusters merge at
+//!    cosine 0.60, fragments join at 0.30 or are dropped
+//!    (`ClusterRefinement.swift`).
+//!
+//! The two models sit behind [`TensorBackend`]: [`onnx::OnnxBackend`] runs
+//! the sherpa-onnx exports through ONNX Runtime on every platform;
+//! `coreml::CoreMlBackend` runs `FluidAudio`'s compiled models on the Mac,
+//! so the Mac keeps the embeddings the Swift app stored. Everything above
+//! the trait is shared and tested without models.
+//!
+//! Audio never leaves the device: the only network access in this crate is
+//! [`models::ModelStore`] fetching the published model files.
+
+pub mod backend;
+pub mod clustering;
+#[cfg(all(feature = "coreml", target_os = "macos"))]
+pub mod coreml;
+mod diarizer;
+mod error;
+pub mod extraction;
+pub mod fbank;
+pub mod mapping;
+pub mod models;
+#[cfg(feature = "onnx")]
+pub mod onnx;
+pub mod pipeline;
+pub mod refinement;
+pub mod segmentation;
+pub mod timeline;
+
+pub use backend::{BackendError, SegmentationGeometry, TensorBackend};
+pub use diarizer::ModelDiarizer;
+pub use error::DiarizeError;
+pub use pipeline::{DiarizerConfig, Pipeline};

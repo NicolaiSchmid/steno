@@ -1,0 +1,42 @@
+[package]
+name = "steno-diarize"
+description = "Speaker diarization: segmentation and embedding backends, Steno's clustering and refinement"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[features]
+# `coreml` is a no-op off macOS: its dependencies and module are gated on
+# the target, so one default feature set builds everywhere.
+default = ["onnx", "coreml"]
+# ONNX Runtime backend (pyannote segmentation 3.0 and WeSpeaker ResNet34-LM).
+onnx = ["dep:ort"]
+# CoreML backend over FluidAudio's compiled models; macOS only.
+coreml = ["dep:objc2", "dep:objc2-foundation", "dep:objc2-core-ml"]
+
+[dependencies]
+steno-core = { path = "../steno-core" }
+ort = { workspace = true, optional = true }
+rustfft.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+ureq.workspace = true
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = { workspace = true, optional = true }
+objc2-foundation = { workspace = true, optional = true }
+objc2-core-ml = { workspace = true, optional = true }
+
+[dev-dependencies]
+hound.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tempfile.workspace = true
+tokio.workspace = true
+
+[lints]
+workspace = true
