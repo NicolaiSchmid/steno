@@ -8,13 +8,14 @@ use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 
 use chrono::{FixedOffset, Utc};
-use steno_audio::{CaptureConfiguration, CaptureSession, CaptureState, LaneLevels as AudioLevels};
+use steno_audio::{CaptureConfiguration, CaptureSession, LaneLevels as AudioLevels};
 use steno_bridge::{CaptureMode, PermissionKind, RecordingState};
 use steno_core::{MeetingSource, RecordingEndReason, Store};
 use steno_host::services::{LaneLevels, Permissions, Recorder, RecorderStatus};
 use steno_pipeline::{LocalRecordingIntake, RecordingResult};
 use uuid::Uuid;
 
+use crate::block_on;
 use crate::pipeline_service::PipelineHandle;
 
 /// Builds a capture session for a configuration; the product passes
@@ -26,6 +27,8 @@ struct Active {
     session: Arc<CaptureSession>,
     meeting_id: Uuid,
     mode: CaptureMode,
+    /// The latest lane levels, written by the forwarding thread.
+    levels: Arc<Mutex<Option<LaneLevels>>>,
     level_thread: Option<JoinHandle<()>>,
 }
 
@@ -56,9 +59,6 @@ pub struct RealRecorder {
     inner: Mutex<Inner>,
     /// Called after every status change so the host republishes.
     changed: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
-    /// The latest lane levels of the active recording, written by the
-    /// forwarding thread.
-    level_source: Mutex<Option<Arc<Mutex<Option<LaneLevels>>>>>,
 }
 
 impl RealRecorder {
@@ -83,7 +83,6 @@ impl RealRecorder {
                 active: None,
             }),
             changed: Mutex::new(None),
-            level_source: Mutex::new(None),
         }
     }
 
@@ -95,13 +94,15 @@ impl RealRecorder {
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(hook);
     }
 
-    fn notify(&self) {
-        if let Some(hook) = self
-            .changed
+    fn hook(&self) -> Option<Arc<dyn Fn() + Send + Sync>> {
+        self.changed
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone()
-        {
+    }
+
+    fn notify(&self) {
+        if let Some(hook) = self.hook() {
             hook();
         }
     }
@@ -149,6 +150,7 @@ impl RealRecorder {
             return Err(error.to_string());
         }
         let meeting_id = meeting.id;
+        let shared = Arc::new(Mutex::new(None::<LaneLevels>));
         {
             let mut inner = self.inner();
             inner.status.state = RecordingState::Recording;
@@ -163,21 +165,16 @@ impl RealRecorder {
                 session,
                 meeting_id,
                 mode,
+                levels: shared.clone(),
                 level_thread: None,
             });
         }
         // Levels arrive on a std channel at 10 Hz; a thread forwards them
-        // into the status so the host can publish `recording`.
-        let hook = self
-            .changed
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone();
-        let shared = Arc::new(Mutex::new(None::<LaneLevels>));
-        let sink = shared.clone();
+        // into `Active::levels` and the host republishes `recording`.
+        let hook = self.hook();
         let thread = std::thread::spawn(move || {
             while let Ok(update) = levels_receiver.recv() {
-                *sink
+                *shared
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(levels(&update));
                 if let Some(hook) = &hook {
@@ -185,18 +182,9 @@ impl RealRecorder {
                 }
             }
         });
-        let mut inner = self.inner();
-        if let Some(active) = inner.active.as_mut() {
+        if let Some(active) = self.inner().active.as_mut() {
             active.level_thread = Some(thread);
         }
-        inner.status.levels = *shared
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        drop(inner);
-        *self
-            .level_source
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(shared);
         Ok(())
     }
 
@@ -214,8 +202,9 @@ impl RealRecorder {
             Ok(result) => {
                 let duration = result.statistics.duration;
                 let statistics = result.statistics.clone();
-                let completed = tokio::task::block_in_place(|| {
-                    self.runtime.block_on(intake.complete(
+                let completed = block_on(
+                    &self.runtime,
+                    intake.complete(
                         active.meeting_id,
                         RecordingResult {
                             asset: result.asset,
@@ -223,8 +212,8 @@ impl RealRecorder {
                             end_reason: reason,
                         },
                         None,
-                    ))
-                });
+                    ),
+                );
                 match completed {
                     Ok(_) => {
                         let mut warning = None;
@@ -272,15 +261,13 @@ impl RealRecorder {
 
 impl Recorder for RealRecorder {
     fn status(&self) -> RecorderStatus {
-        let mut status = self.inner().status.clone();
+        let inner = self.inner();
+        let mut status = inner.status.clone();
         if status.state == RecordingState::Recording
-            && let Some(source) = self
-                .level_source
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .as_ref()
+            && let Some(active) = &inner.active
         {
-            status.levels = *source
+            status.levels = *active
+                .levels
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
         }
@@ -345,11 +332,4 @@ impl Recorder for RealRecorder {
         self.inner().status.denied_permissions = denied;
         self.notify();
     }
-}
-
-/// The session state the shell may want to show; `CaptureState::Failed`
-/// ends the recording through `stop`.
-#[must_use]
-pub fn capture_failed(state: &CaptureState) -> bool {
-    matches!(state, CaptureState::Failed { .. })
 }

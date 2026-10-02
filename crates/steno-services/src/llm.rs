@@ -15,6 +15,16 @@ use steno_llm::{
     LlmTranscriptCleaner, OpenAiCompatibleClient, RetryPolicy,
 };
 
+use crate::block_on;
+
+/// The Codex CLI's sign-in, found through the process environment.
+#[must_use]
+pub fn codex_store() -> Arc<CodexCredentialStore> {
+    Arc::new(CodexCredentialStore::new(
+        CodexCredentialStore::default_home(&std::env::vars().collect()),
+    ))
+}
+
 /// The two passes on one shared client.
 pub struct Passes {
     pub cleaner: Arc<dyn TranscriptCleaner>,
@@ -97,55 +107,39 @@ pub struct RealLlmService {
 
 impl LlmService for RealLlmService {
     fn probe(&self, settings: &Settings, api_key: Option<&str>) -> Result<String, String> {
-        let settings = settings.clone();
-        let codex = self.codex.clone();
-        let api_key = api_key.map(str::to_owned);
-        tokio::task::block_in_place(|| {
-            self.runtime
-                .block_on(async move { probe_line(&settings, api_key.as_deref(), &codex).await })
-        })
+        block_on(&self.runtime, probe_line(settings, api_key, &self.codex))
     }
 
     fn codex_account(&self) -> Result<String, String> {
-        let codex = self.codex.clone();
-        tokio::task::block_in_place(|| {
-            self.runtime.block_on(async move {
-                codex
-                    .current()
-                    .await
-                    .map(|credentials| credentials.account_line())
-                    .map_err(|error| error.to_string())
-            })
-        })
+        block_on(&self.runtime, self.codex.current())
+            .map(|credentials| credentials.account_line())
+            .map_err(|error| error.to_string())
     }
 
     fn codex_models(&self) -> Result<Vec<CodexModel>, CodexModelsError> {
-        let codex = self.codex.clone();
-        tokio::task::block_in_place(|| {
-            self.runtime.block_on(async move {
-                codex
-                    .current()
-                    .await
-                    .map_err(|error| CodexModelsError::Credential(error.to_string()))?;
-                let client = CodexResponsesClient::new(
-                    LlmEndpoint::codex("list", Settings::DEFAULT_CODEX_CONTEXT_TOKENS),
-                    codex,
-                )
-                .with_retry(RetryPolicy::with_max_attempts(1));
-                let models = client
-                    .list_models()
-                    .await
-                    .map_err(|error| CodexModelsError::Other(error.to_string()))?;
-                Ok(models
-                    .into_iter()
-                    .filter(steno_llm::CodexModel::is_listed)
-                    .map(|model| CodexModel {
-                        slug: model.slug,
-                        display_name: model.display_name,
-                        context_window: model.context_window,
-                    })
-                    .collect())
-            })
+        block_on(&self.runtime, async {
+            self.codex
+                .current()
+                .await
+                .map_err(|error| CodexModelsError::Credential(error.to_string()))?;
+            let client = CodexResponsesClient::new(
+                LlmEndpoint::codex("list", Settings::DEFAULT_CODEX_CONTEXT_TOKENS),
+                self.codex.clone(),
+            )
+            .with_retry(RetryPolicy::with_max_attempts(1));
+            let models = client
+                .list_models()
+                .await
+                .map_err(|error| CodexModelsError::Other(error.to_string()))?;
+            Ok(models
+                .into_iter()
+                .filter(steno_llm::CodexModel::is_listed)
+                .map(|model| CodexModel {
+                    slug: model.slug,
+                    display_name: model.display_name,
+                    context_window: model.context_window,
+                })
+                .collect())
         })
     }
 }

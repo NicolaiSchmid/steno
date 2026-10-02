@@ -2,7 +2,6 @@
 //! object graph, and [`App`], what it hands back. Swift: `AppEnvironment.live`
 //! and `AppController.launch`.
 
-use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use chrono::{FixedOffset, Local, Offset as _, Utc};
@@ -21,12 +20,13 @@ use steno_pipeline::{
 };
 use steno_speech::ModelStore;
 
+use crate::block_on;
 use crate::handover::RealHandover;
-use crate::llm::RealLlmService;
+use crate::llm::{RealLlmService, codex_store};
 use crate::misc::{DiskFolderUsage, FilePreferences, PlatformAudioDevices, WallClock};
 use crate::pipeline_service::{MakeDependencies, PipelineHandle, RealPipeline, run_sweep};
 use crate::recorder::{MakeCaptureSession, RealRecorder};
-use crate::secrets::{FileSecretStore, KeyringSecretStore};
+use crate::secrets::secret_store;
 use crate::speech::RealSpeechModels;
 
 /// What differs between the shell, the CLI and the tests.
@@ -47,17 +47,6 @@ pub struct AppOptions {
     pub version: String,
     /// Builds a capture session; `CaptureSession::new` in the product.
     pub make_capture_session: MakeCaptureSession,
-}
-
-/// A no-op opener for the CLI and the tests.
-#[derive(Debug, Default)]
-pub struct NoOpener;
-
-impl Opener for NoOpener {
-    fn reveal(&self, _path: &std::path::Path) {}
-    fn open_url(&self, _url: &str) {}
-    fn open_window(&self, _window: steno_bridge::BridgeWindow) {}
-    fn close_window(&self, _window: steno_bridge::BridgeWindow) {}
 }
 
 impl AppOptions {
@@ -106,6 +95,16 @@ pub fn local_zone() -> FixedOffset {
     Local::now().offset().fix()
 }
 
+/// Opens (and migrates) the database at `path`, creating its folder.
+pub fn open_store(path: &std::path::Path) -> Result<Arc<Store>, String> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+    }
+    Ok(Arc::new(
+        Store::open(path).map_err(|error| error.to_string())?,
+    ))
+}
+
 /// The dependencies of one pipeline from the stored settings and the API
 /// key, shared by the first build and every reload.
 pub fn pipeline_dependencies(
@@ -117,9 +116,8 @@ pub fn pipeline_dependencies(
     runtime: &tokio::runtime::Handle,
 ) -> Result<PipelineDependencies, String> {
     let settings = store.settings().map_err(|error| error.to_string())?;
-    let api_key =
-        tokio::task::block_in_place(|| runtime.block_on(secrets.secret(&SecretKey::llm_api_key())))
-            .map_err(|error| error.to_string())?;
+    let api_key = block_on(runtime, secrets.secret(&SecretKey::llm_api_key()))
+        .map_err(|error| error.to_string())?;
     let speech_store = crate::speech::speech_store(&settings, paths);
     let zone = steno_adapters::runtime::local_time_zone();
     let passes = crate::llm::passes(&settings, api_key.as_deref(), codex, zone);
@@ -148,15 +146,16 @@ fn handover_listener(
     zone: FixedOffset,
     runtime: &tokio::runtime::Handle,
 ) -> Result<(Arc<HandoverService>, uuid::Uuid), String> {
-    let identity = tokio::task::block_in_place(|| {
-        runtime.block_on(crate::handover::load_or_mint_identity(
+    let identity = block_on(
+        runtime,
+        crate::handover::load_or_mint_identity(
             secrets.as_ref(),
             &format!(
                 "Steno on {}",
                 steno_handover::HandoverConfiguration::default_service_name()
             ),
-        ))
-    })?;
+        ),
+    )?;
     let intake = Arc::new(RecordingIntake::over(
         store.clone(),
         pipeline.current(),
@@ -165,57 +164,6 @@ fn handover_listener(
     let mac_id = identity.mac_id();
     let service = Arc::new(crate::handover::service(store.clone(), intake, identity));
     Ok((service, mac_id))
-}
-
-/// The host's service table over the graph's parts.
-#[allow(clippy::too_many_arguments)]
-fn services(
-    permissions: Arc<FakePermissions>,
-    recorder: Arc<RealRecorder>,
-    pipeline: &Arc<PipelineHandle>,
-    sweep: &RetentionSweep,
-    speech_store: &ModelStore,
-    codex: Arc<CodexCredentialStore>,
-    handover: Option<(&Arc<HandoverService>, uuid::Uuid)>,
-    opener: Arc<dyn Opener>,
-    preferences_path: std::path::PathBuf,
-    secrets: Arc<dyn SecretStore>,
-    runtime: &tokio::runtime::Handle,
-) -> Services {
-    Services {
-        clock: Arc::new(WallClock),
-        login_item: Arc::new(FakeLoginItem::new(LoginItemStatus::NotRegistered)),
-        permissions,
-        updater: Arc::new(FakeUpdater::default()),
-        recorder,
-        pipeline: Arc::new(RealPipeline {
-            handle: pipeline.clone(),
-            sweep: sweep.clone(),
-        }),
-        speech_models: Arc::new(RealSpeechModels {
-            speech: speech_store.clone(),
-        }),
-        llm: Arc::new(RealLlmService {
-            codex,
-            runtime: runtime.clone(),
-        }),
-        export_validator: Arc::new(crate::delivery::ObsidianValidator),
-        handover: handover.map(|(service, mac_id)| {
-            Arc::new(RealHandover {
-                service: service.clone(),
-                mac_id,
-                runtime: runtime.clone(),
-            }) as Arc<dyn steno_host::services::Handover>
-        }),
-        qr: Arc::new(FakeQrEncoder::new("")),
-        audio_devices: Arc::new(PlatformAudioDevices),
-        folder_usage: Arc::new(DiskFolderUsage),
-        file_system: Arc::new(steno_host::services::RealFileSystem),
-        clip_player: Arc::new(FakeClipPlayer::new(Arc::new(FakeFileSystem::default()))),
-        opener,
-        preferences: Arc::new(FilePreferences::new(preferences_path)),
-        secrets,
-    }
 }
 
 /// Builds the graph. Real: store, settings, secret store, speech engine
@@ -228,23 +176,13 @@ fn services(
 pub fn build(options: AppOptions) -> Result<App, String> {
     let mut warnings = Vec::new();
     let paths = options.paths;
-    let database = options
-        .database_path
-        .unwrap_or_else(|| paths.database_path());
-    if let Some(parent) = database.parent() {
-        std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
-    }
-    let store = Arc::new(Store::open(&database).map_err(|error| error.to_string())?);
-    let secrets: Arc<dyn SecretStore> = if options.keyring {
-        Arc::new(KeyringSecretStore)
-    } else {
-        Arc::new(FileSecretStore::in_support_directory(
-            &paths.support_directory,
-        ))
-    };
-    let codex = Arc::new(CodexCredentialStore::new(
-        CodexCredentialStore::default_home(&std::env::vars().collect()),
-    ));
+    let store = open_store(
+        &options
+            .database_path
+            .unwrap_or_else(|| paths.database_path()),
+    )?;
+    let secrets = secret_store(options.keyring, &paths);
+    let codex = codex_store();
     let events = MeetingEventBus::new();
     let runtime = options.runtime;
     let zone = local_zone();
@@ -260,7 +198,6 @@ pub fn build(options: AppOptions) -> Result<App, String> {
         );
         Arc::new(move || pipeline_dependencies(&store, &paths, &secrets, &codex, &events, &runtime))
     };
-    let codex = codex.clone();
     let pipeline = Arc::new(PipelineHandle::new(
         ProcessingPipeline::new(make()?),
         make,
@@ -288,21 +225,42 @@ pub fn build(options: AppOptions) -> Result<App, String> {
         }
     };
 
-    let services = services(
+    let services = Services {
+        clock: Arc::new(WallClock),
+        login_item: Arc::new(FakeLoginItem::new(LoginItemStatus::NotRegistered)),
         permissions,
-        recorder.clone(),
-        &pipeline,
-        &sweep,
-        &speech_store,
-        codex,
-        handover
-            .as_ref()
-            .map(|(service, mac_id)| (service, *mac_id)),
-        options.opener,
-        paths.support_directory.join("preferences.json"),
-        secrets.clone(),
-        &runtime,
-    );
+        updater: Arc::new(FakeUpdater::default()),
+        recorder: recorder.clone(),
+        pipeline: Arc::new(RealPipeline {
+            handle: pipeline.clone(),
+            sweep: sweep.clone(),
+        }),
+        speech_models: Arc::new(RealSpeechModels {
+            speech: speech_store.clone(),
+        }),
+        llm: Arc::new(RealLlmService {
+            codex,
+            runtime: runtime.clone(),
+        }),
+        export_validator: Arc::new(crate::delivery::ObsidianValidator),
+        handover: handover.as_ref().map(|(service, mac_id)| {
+            Arc::new(RealHandover {
+                service: service.clone(),
+                mac_id: *mac_id,
+                runtime: runtime.clone(),
+            }) as Arc<dyn steno_host::services::Handover>
+        }),
+        qr: Arc::new(FakeQrEncoder::new("")),
+        audio_devices: Arc::new(PlatformAudioDevices),
+        folder_usage: Arc::new(DiskFolderUsage),
+        file_system: Arc::new(steno_host::services::RealFileSystem),
+        clip_player: Arc::new(FakeClipPlayer::new(Arc::new(FakeFileSystem::default()))),
+        opener: options.opener,
+        preferences: Arc::new(FilePreferences::new(
+            paths.support_directory.join("preferences.json"),
+        )),
+        secrets: secrets.clone(),
+    };
 
     Ok(App {
         paths,
@@ -411,6 +369,5 @@ impl App {
             });
         }
         host.store_changed();
-        let _ = BTreeMap::<String, String>::new();
     }
 }

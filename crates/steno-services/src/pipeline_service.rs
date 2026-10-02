@@ -10,6 +10,8 @@ use steno_host::services::Pipeline;
 use steno_pipeline::{PipelineDependencies, ProcessingPipeline, RetentionSweep};
 use uuid::Uuid;
 
+use crate::block_on;
+
 /// Rebuilds the dependencies from the stored settings and the API key.
 pub type MakeDependencies = Arc<dyn Fn() -> Result<PipelineDependencies, String> + Send + Sync>;
 
@@ -45,10 +47,6 @@ impl PipelineHandle {
             .clone()
     }
 
-    fn block<T>(&self, future: impl std::future::Future<Output = T>) -> T {
-        tokio::task::block_in_place(|| self.runtime.block_on(future))
-    }
-
     /// Replaces the pipeline with one built from the stored settings and
     /// the secret store's API key.
     pub fn reload(&self) -> Result<(), String> {
@@ -74,23 +72,26 @@ pub struct RealPipeline {
 impl Pipeline for RealPipeline {
     fn rerun_summary(&self, meeting_id: Uuid, template_id: &str) -> Result<(), String> {
         let pipeline = self.handle.current();
-        self.handle
-            .block(pipeline.rerun_summary(meeting_id, template_id))
-            .map_err(|error| error.to_string())
+        block_on(
+            &self.handle.runtime,
+            pipeline.rerun_summary(meeting_id, template_id),
+        )
+        .map_err(|error| error.to_string())
     }
 
     fn redeliver(&self, meeting_id: Uuid) -> Result<(), String> {
         let pipeline = self.handle.current();
-        self.handle
-            .block(pipeline.redeliver(meeting_id))
+        block_on(&self.handle.runtime, pipeline.redeliver(meeting_id))
             .map_err(|error| error.to_string())
     }
 
     fn apply_retention(&self, meeting_id: Uuid, rule: AudioRetention) -> Result<(), String> {
         let pipeline = self.handle.current();
-        self.handle
-            .block(pipeline.apply_retention(meeting_id, rule))
-            .map_err(|error| error.to_string())
+        block_on(
+            &self.handle.runtime,
+            pipeline.apply_retention(meeting_id, rule),
+        )
+        .map_err(|error| error.to_string())
     }
 
     fn reload(&self) -> Result<(), String> {

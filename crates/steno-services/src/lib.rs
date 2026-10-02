@@ -22,5 +22,14 @@ pub mod recorder;
 pub mod secrets;
 pub mod speech;
 
-pub use app::{App, AppOptions, build};
-pub use secrets::{FileSecretStore, KeyringSecretStore};
+pub use app::{App, AppOptions, build, open_store};
+pub use secrets::{FileSecretStore, KeyringSecretStore, secret_store};
+
+/// Runs `future` to completion on `runtime` from a synchronous host
+/// service (the host's traits are synchronous, the clients are async).
+pub(crate) fn block_on<T>(
+    runtime: &tokio::runtime::Handle,
+    future: impl std::future::Future<Output = T>,
+) -> T {
+    tokio::task::block_in_place(|| runtime.block_on(future))
+}

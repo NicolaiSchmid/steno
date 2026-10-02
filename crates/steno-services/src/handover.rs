@@ -3,10 +3,12 @@
 use std::sync::Arc;
 
 use chrono::Utc;
-use steno_core::{HandoverIntake, HandoverReceipt, PairedDevice, SecretKey, SecretStore, Store};
+use steno_core::{HandoverIntake, HandoverReceipt, PairedDevice, SecretStore, Store};
 use steno_handover::{HandoverConfiguration, HandoverIdentity, HandoverService};
 use steno_host::services::{Handover, ListenerState, PairingCode};
 use uuid::Uuid;
+
+use crate::block_on;
 
 /// Loads the identity from the secret store or mints one and stores it,
 /// as the Swift app kept it in the login keychain.
@@ -23,7 +25,6 @@ pub async fn load_or_mint_identity(
         .set_secret(&key, Some(&identity.to_pem()))
         .await
         .map_err(|e| e.to_string())?;
-    let _ = SecretKey::llm_api_key();
     Ok(identity)
 }
 
@@ -47,12 +48,6 @@ pub struct RealHandover {
     pub runtime: tokio::runtime::Handle,
 }
 
-impl RealHandover {
-    fn block<T>(&self, future: impl std::future::Future<Output = T>) -> T {
-        tokio::task::block_in_place(|| self.runtime.block_on(future))
-    }
-}
-
 impl Handover for RealHandover {
     fn state(&self) -> ListenerState {
         match self.service.state() {
@@ -67,17 +62,15 @@ impl Handover for RealHandover {
     }
 
     fn paired_devices(&self) -> Result<Vec<PairedDevice>, String> {
-        self.block(self.service.paired_devices())
-            .map_err(|error| error.to_string())
+        block_on(&self.runtime, self.service.paired_devices()).map_err(|error| error.to_string())
     }
 
     fn start(&self) -> Result<(), String> {
-        self.block(self.service.start())
-            .map_err(|error| error.to_string())
+        block_on(&self.runtime, self.service.start()).map_err(|error| error.to_string())
     }
 
     fn stop(&self) {
-        self.block(self.service.stop());
+        block_on(&self.runtime, self.service.stop());
     }
 
     fn begin_pairing(&self) -> PairingCode {
@@ -93,8 +86,7 @@ impl Handover for RealHandover {
     }
 
     fn revoke(&self, device_id: Uuid) -> Result<(), String> {
-        self.block(self.service.revoke(device_id))
-            .map_err(|error| error.to_string())
+        block_on(&self.runtime, self.service.revoke(device_id)).map_err(|error| error.to_string())
     }
 
     fn receipts(&self) -> Vec<HandoverReceipt> {

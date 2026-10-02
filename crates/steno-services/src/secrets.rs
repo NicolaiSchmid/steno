@@ -6,12 +6,25 @@
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
-use steno_core::{SecretKey, SecretStore, async_trait, protocols::BoundaryResult};
+use steno_core::{SecretKey, SecretStore, StenoPaths, async_trait, protocols::BoundaryResult};
 
 /// The service name every Steno entry is filed under.
 pub const KEYRING_SERVICE: &str = "uno.schmid.steno";
+
+/// The platform keyring when `keyring` is set, else the secrets file under
+/// the support directory (the CLI and headless machines).
+#[must_use]
+pub fn secret_store(keyring: bool, paths: &StenoPaths) -> Arc<dyn SecretStore> {
+    if keyring {
+        Arc::new(KeyringSecretStore)
+    } else {
+        Arc::new(FileSecretStore::in_support_directory(
+            &paths.support_directory,
+        ))
+    }
+}
 
 /// The platform keyring.
 #[derive(Debug, Default)]
