@@ -38,7 +38,10 @@
 //! `snapshots.rs` or `settings.rs`; the fixture and the `FIXTURES` row
 //! (`every_topic_has_a_snapshot_fixture` fails until the fixture exists).
 //!
-//! Errors: [`BridgeError`] is the contract's error and nothing more.
+//! Errors: [`BridgeError`] is the contract's error and nothing more; its
+//! `From<steno_core::StoreError>` impl (`envelope.rs`) puts the store's
+//! errors on the contract's codes once, so a host returns them with `?`
+//! rather than mapping them by hand.
 //!
 //! Every public item is re-exported at the root; the modules are the table
 //! of contents.

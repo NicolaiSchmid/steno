@@ -4,8 +4,7 @@
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-
-use steno_core::string_enum;
+use steno_core::{StoreError, string_enum};
 
 string_enum! {
     /// Topics the host publishes; every publish carries a full snapshot.
@@ -238,6 +237,30 @@ impl BridgeError {
     }
 }
 
+/// The store's errors on the contract's codes, so a host returns them with
+/// `?`. A lock held past the busy timeout ([`StoreError::is_busy`]) is
+/// `failed` with a message that says to try again, since nothing is wrong
+/// with the call; a meeting the store does not have is `notFound`; every
+/// other error is `failed` with the store's own description.
+impl From<StoreError> for BridgeError {
+    fn from(error: StoreError) -> Self {
+        if error.is_busy() {
+            return Self::failed(BUSY_MESSAGE);
+        }
+        match error {
+            StoreError::MeetingNotFound(id) => Self::not_found(format!(
+                "No meeting with id {} was found.",
+                steno_core::json::uuid_string(id)
+            )),
+            other => Self::failed(other.to_string()),
+        }
+    }
+}
+
+/// What the page shows for a busy database; the call is sound and a retry
+/// is the right answer.
+const BUSY_MESSAGE: &str = "The database is busy. Try again in a moment.";
+
 /// One publish from the host. The page dispatches on `topic` and decodes
 /// `payload` as that topic's snapshot type. Swift: `BridgeEvent`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -435,6 +458,62 @@ mod tests {
             serde_json::from_str(r#"{"id":"r","error":{"code":"cancelled","message":"m"}}"#)
                 .unwrap();
         assert_eq!(decoded.error.unwrap().code, BridgeErrorCode::Cancelled);
+    }
+
+    /// The three outcomes of the `From<StoreError>` mapping, and that `?`
+    /// reaches it from a host method's `Result<_, BridgeError>`.
+    #[test]
+    fn store_errors_land_on_the_contract_codes() {
+        fn host_method(store: Result<(), StoreError>) -> Result<(), BridgeError> {
+            store?;
+            Ok(())
+        }
+
+        let sqlite = |code| {
+            StoreError::Sqlite(rusqlite::Error::SqliteFailure(
+                rusqlite::ffi::Error::new(code),
+                None,
+            ))
+        };
+        for code in [
+            rusqlite::ffi::SQLITE_BUSY,
+            rusqlite::ffi::SQLITE_BUSY_SNAPSHOT,
+            rusqlite::ffi::SQLITE_LOCKED,
+        ] {
+            assert_eq!(
+                BridgeError::from(sqlite(code)),
+                BridgeError::failed(BUSY_MESSAGE),
+                "code {code}"
+            );
+        }
+
+        let id = uuid::Uuid::parse_str("516eade8-40e5-4434-8aaf-9214a21a604e").unwrap();
+        assert_eq!(
+            BridgeError::from(StoreError::MeetingNotFound(id)),
+            BridgeError::not_found(
+                "No meeting with id 516EADE8-40E5-4434-8AAF-9214A21A604E was found."
+            )
+        );
+
+        let constraint = BridgeError::from(sqlite(rusqlite::ffi::SQLITE_CONSTRAINT));
+        assert_eq!(constraint.code, BridgeErrorCode::Failed);
+        assert!(
+            constraint.message.contains("constraint"),
+            "{}",
+            constraint.message
+        );
+        assert_eq!(
+            BridgeError::from(StoreError::UnknownMigration("v99".into())),
+            BridgeError::failed("the database was migrated by a newer version (v99)")
+        );
+
+        assert_eq!(
+            host_method(Err(StoreError::MeetingNotFound(id)))
+                .unwrap_err()
+                .code,
+            BridgeErrorCode::NotFound
+        );
+        assert_eq!(host_method(Ok(())), Ok(()));
     }
 
     #[test]

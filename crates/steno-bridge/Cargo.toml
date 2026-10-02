@@ -21,6 +21,8 @@ uuid.workspace = true
 zmij.workspace = true
 
 [dev-dependencies]
+# Builds the `SQLITE_BUSY` error the `From<StoreError>` test maps.
+rusqlite.workspace = true
 similar.workspace = true
 
 [lints]
