@@ -46,14 +46,13 @@ pub fn transcript_text(tokens: &[Token], vocab: &Vocab) -> String {
 pub fn token_timings(tokens: &[Token], vocab: &Vocab) -> Vec<TokenTiming> {
     let mut sorted: Vec<Token> = tokens.to_vec();
     sorted.sort_by_key(|token| token.frame);
-    let has_durations = !tokens.is_empty();
     let start_of = |token: &Token| frame_seconds(token.frame.saturating_sub(EMISSION_DELAY_FRAMES));
     sorted
         .iter()
         .enumerate()
         .map(|(i, token)| {
             let start = start_of(token);
-            let end = if has_durations && token.duration > 0 {
+            let end = if token.duration > 0 {
                 start + frame_seconds(token.duration).max(FRAME_SECONDS)
             } else if let Some(next) = sorted.get(i + 1) {
                 start_of(next).max(start + FRAME_SECONDS)
@@ -123,28 +122,26 @@ pub fn words(timings: &[TokenTiming]) -> Vec<TimedWord> {
             }
             continue;
         }
+        // Punctuation glues to the word before it even across a boundary;
+        // anything else glues only when nothing says a new word starts.
         let punctuation_only = text.chars().all(|c| is_punctuation(c) || is_symbol(c));
-        if punctuation_only && let Some(word) = current.as_mut() {
-            word.text.push_str(text);
-            word.end = word.end.max(timing.end);
-            confidences.push(timing.confidence);
-            boundary_pending = false;
-            continue;
+        let glues = punctuation_only || !(starts_word || boundary_pending);
+        match current.as_mut() {
+            Some(word) if glues => {
+                word.text.push_str(text);
+                word.end = word.end.max(timing.end);
+            }
+            _ => {
+                flush(&mut current, &mut confidences, &mut out);
+                current = Some(TimedWord {
+                    text: text.to_owned(),
+                    start: timing.start,
+                    end: timing.end,
+                    confidence: 1.0,
+                });
+            }
         }
-        if starts_word || boundary_pending || current.is_none() {
-            flush(&mut current, &mut confidences, &mut out);
-            current = Some(TimedWord {
-                text: text.to_owned(),
-                start: timing.start,
-                end: timing.end,
-                confidence: 1.0,
-            });
-            confidences.push(timing.confidence);
-        } else if let Some(word) = current.as_mut() {
-            word.text.push_str(text);
-            word.end = word.end.max(timing.end);
-            confidences.push(timing.confidence);
-        }
+        confidences.push(timing.confidence);
         boundary_pending = false;
     }
     flush(&mut current, &mut confidences, &mut out);

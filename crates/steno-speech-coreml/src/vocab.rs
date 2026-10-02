@@ -117,32 +117,20 @@ pub fn is_symbol(c: char) -> bool {
     )
 }
 
-/// A piece of nothing but punctuation and symbols, after its boundary is
-/// stripped, counts as punctuation for the seam rules.
-fn is_punctuation_or_symbol_only(text: &str) -> bool {
-    !text.is_empty() && text.chars().all(|c| is_punctuation(c) || is_symbol(c))
-}
-
 /// Decoding this piece right after another word does not glue two words:
 /// it starts a word or is pure punctuation and symbols
-/// (`ChunkProcessor.isSpliceSafePiece`).
+/// (`ChunkProcessor.isSpliceSafePiece`). The empty piece is neither.
 #[must_use]
 pub fn is_splice_safe_piece(piece: &str) -> bool {
-    if piece.is_empty() {
-        return false;
-    }
-    if is_word_boundary(piece) {
-        return true;
-    }
-    is_punctuation_or_symbol_only(piece)
+    is_word_boundary(piece) || is_punctuation_only_piece(piece)
 }
 
-/// A piece of only punctuation and symbol scalars, boundary included in
-/// the test (`ChunkProcessor.isPunctuationOnlyPiece`): `.` qualifies,
-/// ` .` does not, because the space is neither.
+/// A non-empty piece of only punctuation and symbol scalars, boundary
+/// included in the test (`ChunkProcessor.isPunctuationOnlyPiece`): `.`
+/// qualifies, ` .` does not, because the space is neither.
 #[must_use]
 pub fn is_punctuation_only_piece(piece: &str) -> bool {
-    is_punctuation_or_symbol_only(piece)
+    !piece.is_empty() && piece.chars().all(|c| is_punctuation(c) || is_symbol(c))
 }
 
 /// The sentence-final marks FluidAudio resolves punctuation ids from
