@@ -1,0 +1,66 @@
+name: Rust CI
+
+# Formats, lints and tests the Cargo workspace on the three target platforms.
+# Apple-only backends compile behind `cfg(target_os = "macos")`, so every
+# crate builds everywhere. The macOS job follows `MACOS_RUNS_ON` like Swift CI.
+# Path-gated so it does nothing for unrelated changes.
+
+on:
+  pull_request:
+    paths:
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'rust-toolchain.toml'
+      - 'rustfmt.toml'
+      - 'crates/**'
+      - 'apps/desktop/**'
+      - 'apps/macos/web/fixtures/bridge/**'
+      - '.github/workflows/rust-ci.yml'
+  push:
+    branches: ['main']
+    paths:
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'rust-toolchain.toml'
+      - 'rustfmt.toml'
+      - 'crates/**'
+      - 'apps/desktop/**'
+      - 'apps/macos/web/fixtures/bridge/**'
+      - '.github/workflows/rust-ci.yml'
+
+concurrency:
+  group: rust-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  workspace:
+    name: ${{ matrix.name }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux
+            os: ubuntu-latest
+          - name: windows
+            os: windows-latest
+          - name: macos
+            os: ${{ vars.MACOS_RUNS_ON || 'macos-15' }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Format
+        run: cargo fmt --all --check
+      - name: Lint
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - name: Test
+        run: cargo test --workspace --locked
