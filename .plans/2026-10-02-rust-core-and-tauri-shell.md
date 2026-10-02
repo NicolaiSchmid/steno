@@ -178,6 +178,15 @@ bridge's copies of the macro and codecs. Packages after WP3 branch from `main`.
   removed, web app moved to `apps/web`, Swift rows removed from `AGENTS.md`.
 - **WP10 Windows.** WASAPI capture, DirectML provider (speech-stack G4), installer.
 
+## Progress
+
+One row per work package as it lands; the branch and PR columns point at the
+work, the notes at what the next package needs to know.
+
+| Package | Branch | PR | State | Notes |
+|---------|--------|----|-------|-------|
+| WP7 handover | `feat/rust-handover` | #TBD | PR open | `crates/steno-handover`: rustls (ring) listener, TLS 1.3 only, hyper 1 HTTP/1.1, pinned verifier (`pinning`), rcgen identity in the `SecretStore` as one PEM bundle, pairing, seven routes, inbox, mdns-sd advertiser; `tests/wire_contract.rs` reads `wire.ts`. Store gains `paired_device*` and `handover_receipt` queries. Core's `RecordingIntake` (copy into the audio folder, enqueue) waits for WP6: no `RecordingLayout` and no file-URL to path helper in Rust core yet. |
+
 ## Risks
 
 - The spike decoder is validated above the joint only; the ONNX logits split is WP4's
