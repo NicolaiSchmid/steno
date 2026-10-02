@@ -13,12 +13,14 @@
 //! WP1 of `.plans/2026-10-02-rust-core-and-tauri-shell.md`.
 
 pub mod commands;
+pub mod dispatcher;
 pub mod envelope;
 pub mod json;
 pub mod settings;
 pub mod snapshots;
 
 pub use commands::*;
+pub use dispatcher::{BridgeHost, Decoding, Dispatcher, EventSink, EventSinkExt, Outcome};
 pub use envelope::*;
 pub use settings::*;
 pub use snapshots::*;
