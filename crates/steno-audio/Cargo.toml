@@ -1,0 +1,35 @@
+[package]
+name = "steno-audio"
+description = "Steno's capture backends, lock-free rings, echo cancellation, recording writer, meeting detection and decoder"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+links = "speexdsp"
+
+[dependencies]
+steno-core = { path = "../steno-core" }
+chrono.workspace = true
+symphonia.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+uuid.workspace = true
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2.workspace = true
+objc2-core-audio.workspace = true
+objc2-core-audio-types.workspace = true
+objc2-core-foundation.workspace = true
+objc2-foundation.workspace = true
+
+[build-dependencies]
+cc.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+tokio.workspace = true
+
+[lints]
+workspace = true

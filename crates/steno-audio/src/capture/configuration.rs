@@ -1,0 +1,250 @@
+//! The value types around a capture: mode, configuration, errors, states,
+//! levels, notices and statistics.
+//! Swift: `Sources/StenoAudio/Capture/CaptureConfiguration.swift`.
+
+use std::collections::BTreeMap;
+use std::path::PathBuf;
+
+use chrono::{DateTime, Utc};
+use steno_core::{AudioAsset, AudioLane};
+
+use crate::SAMPLE_RATE;
+
+/// Call: two lanes, `Mic` ("me") and `System` ("them") with echo
+/// cancellation. In person: one `Mixed` room lane from the microphone, no
+/// tap, no echo cancellation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum CaptureMode {
+    Call,
+    InPerson,
+}
+
+impl CaptureMode {
+    /// The lanes a session in this mode records, in master channel order.
+    #[must_use]
+    pub fn lanes(self) -> Vec<AudioLane> {
+        match self {
+            CaptureMode::Call => vec![AudioLane::Mic, AudioLane::System],
+            CaptureMode::InPerson => vec![AudioLane::Mixed],
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CaptureConfiguration {
+    pub mode: CaptureMode,
+    /// `None`: the default input device.
+    pub input_device_uid: Option<String>,
+    /// Default true in `Call`; ignored in `InPerson`.
+    pub echo_cancellation: bool,
+    /// Debug: writes `mic.raw.caf` (the microphone before echo cancellation)
+    /// next to the master.
+    pub keep_raw_mic_lane: bool,
+    /// The audio folder; the per-meeting folder
+    /// (`RecordingLayout::new(audio_folder, meeting_id)`) is created inside.
+    pub output_directory: PathBuf,
+    /// Developer tools only: record these lanes instead of the mode's
+    /// (`[System]` for the Continuity spike). The app never sets it.
+    pub lane_override: Option<Vec<AudioLane>>,
+}
+
+impl CaptureConfiguration {
+    #[must_use]
+    pub fn new(mode: CaptureMode, output_directory: impl Into<PathBuf>) -> Self {
+        Self {
+            mode,
+            input_device_uid: None,
+            echo_cancellation: true,
+            keep_raw_mic_lane: false,
+            output_directory: output_directory.into(),
+            lane_override: None,
+        }
+    }
+
+    /// The lanes a session records, in master channel order.
+    #[must_use]
+    pub fn lanes(&self) -> Vec<AudioLane> {
+        self.lane_override
+            .clone()
+            .unwrap_or_else(|| self.mode.lanes())
+    }
+
+    /// Echo cancellation runs only with both a mic and a system lane.
+    #[must_use]
+    pub fn uses_echo_cancellation(&self) -> bool {
+        let lanes = self.lanes();
+        self.echo_cancellation
+            && lanes.contains(&AudioLane::Mic)
+            && lanes.contains(&AudioLane::System)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, thiserror::Error)]
+pub enum CaptureError {
+    /// A Core Audio call failed: which one, and its `OSStatus` (rendered as
+    /// the four-character code when it is one).
+    #[error("{operation} failed: {}", four_char_code(*status))]
+    CoreAudio { operation: String, status: i32 },
+    #[error("the input device is not available")]
+    InputDeviceUnavailable,
+    #[error("the output device is not available")]
+    OutputDeviceUnavailable,
+    /// The aggregate's input streams did not match the expected lanes.
+    #[error("unexpected input stream layout: {0}")]
+    UnexpectedStreamLayout(String),
+    /// The aggregate would not run at [`SAMPLE_RATE`] (the output device is
+    /// fixed at another rate); the user changes it in Audio MIDI Setup or
+    /// picks another output. The rate is carried as whole hertz.
+    #[error("the audio devices run at {actual} Hz, not {} Hz", SAMPLE_RATE as u32)]
+    SampleRateMismatch { actual: u32 },
+    /// The tap never rose above [`LaneLevel::SILENT_PEAK_LINEAR`] during
+    /// the whole session.
+    #[error("the system lane stayed silent")]
+    SystemAudioSilent,
+    /// A device changed or disappeared and the backend could not be
+    /// restarted within `CaptureSession::RESTART_ATTEMPTS`.
+    #[error("an audio device disappeared")]
+    DeviceLost,
+    #[error("writing the recording failed: {0}")]
+    WriterFailed(String),
+    /// A backend error that is none of the above (its description).
+    #[error("capture backend failed: {0}")]
+    BackendFailed(String),
+    /// `start` while not idle, `stop` while not recording.
+    #[error("{0}")]
+    InvalidState(String),
+}
+
+/// Renders an `OSStatus` as its four-character code when it is one
+/// (`'!obj'`, `'who?'`), else as the number.
+#[must_use]
+pub fn four_char_code(status: i32) -> String {
+    // The bit pattern is what the four characters are packed in.
+    let bytes = (status as u32).to_be_bytes();
+    if bytes.iter().all(|b| (0x20..0x7f).contains(b)) {
+        format!("'{}'", String::from_utf8_lossy(&bytes))
+    } else {
+        status.to_string()
+    }
+}
+
+/// What `stop()` returns: the finished master with its sidecars (retention
+/// `KeepForever` until the caller sets it from `Settings`) and the
+/// session's statistics.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CaptureResult {
+    pub asset: AudioAsset,
+    pub statistics: CaptureStatistics,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum CaptureState {
+    Idle,
+    Starting,
+    Recording {
+        started_at: DateTime<Utc>,
+    },
+    Stopping,
+    /// `recording` is `None` when the start produced nothing, and the
+    /// finalised partial recording when a device stayed lost or the writer
+    /// failed mid-meeting; `stop()` returns the same value or fails when it
+    /// is `None`.
+    Failed {
+        error: CaptureError,
+        recording: Option<Box<CaptureResult>>,
+    },
+}
+
+impl CaptureState {
+    /// The failure, when in `Failed`.
+    #[must_use]
+    pub fn failure(&self) -> Option<&CaptureError> {
+        match self {
+            CaptureState::Failed { error, .. } => Some(error),
+            _ => None,
+        }
+    }
+
+    /// `idle`, `starting`, `recording`, `stopping` or `failed`.
+    #[must_use]
+    pub fn kind(&self) -> &'static str {
+        match self {
+            CaptureState::Idle => "idle",
+            CaptureState::Starting => "starting",
+            CaptureState::Recording { .. } => "recording",
+            CaptureState::Stopping => "stopping",
+            CaptureState::Failed { .. } => "failed",
+        }
+    }
+}
+
+/// RMS and peak of one lane over the last metering window, in dBFS.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct LaneLevel {
+    pub rms: f32,
+    pub peak: f32,
+}
+
+impl LaneLevel {
+    /// Digital silence: the floor every meter reports for zeros.
+    pub const SILENCE: LaneLevel = LaneLevel {
+        rms: -160.0,
+        peak: -160.0,
+    };
+
+    /// -80 dBFS, linear: a lane whose peak never exceeds it is "silent" for
+    /// [`CaptureStatistics::system_lane_silent`] and the permission probe.
+    pub const SILENT_PEAK_LINEAR: f32 = 1e-4;
+}
+
+/// Published at 10 Hz; `system` is `None` in `InPerson`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct LaneLevels {
+    pub mic: LaneLevel,
+    pub system: Option<LaneLevel>,
+}
+
+/// What the backend's listener found different after a notification burst
+/// settled. The synthetic backend reports `DefaultInputChanged`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum DeviceChangeReason {
+    DefaultOutputChanged,
+    DefaultInputChanged,
+    OutputDeviceGone,
+    InputDeviceGone,
+    /// The aggregate no longer runs at [`SAMPLE_RATE`].
+    SampleRateChanged,
+}
+
+/// What `CaptureSession::notices` carries while the state stays
+/// `Recording`: the rebuild beginning and the new backend running. Device
+/// loss is not a notice; `states` carries `Failed(DeviceLost)`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum CaptureNotice {
+    DeviceChanged(DeviceChangeReason),
+    /// `attempt` is the restart that succeeded (1 when the first did);
+    /// `gap_seconds` the silence written for this gap.
+    DeviceResumed {
+        attempt: usize,
+        gap_seconds: f64,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct CaptureStatistics {
+    /// Seconds of audio written to the master.
+    pub duration: f64,
+    /// Frames lost per lane to ring overruns or a stalled writer; should be
+    /// empty.
+    pub dropped_frames: BTreeMap<AudioLane, usize>,
+    /// True when the tap never exceeded [`LaneLevel::SILENT_PEAK_LINEAR`].
+    pub system_lane_silent: bool,
+    /// True when a device change could not be survived (every restart
+    /// failed) and the session finalised the recording early.
+    pub ended_on_device_loss: bool,
+    /// Device changes the recording survived by rebuilding in place.
+    pub device_changes: usize,
+    /// Seconds of silence written to keep the master on wall time across
+    /// those rebuilds.
+    pub gap_seconds: f64,
+}
