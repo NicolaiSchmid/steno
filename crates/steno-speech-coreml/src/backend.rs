@@ -36,16 +36,25 @@ pub const PREPROCESSOR_FILE: &str = "Preprocessor.mlmodelc";
 pub const ENCODER_FILE: &str = "Encoder.mlmodelc";
 pub const DECODER_FILE: &str = "Decoder.mlmodelc";
 pub const JOINT_FILE: &str = "JointDecisionv3.mlmodelc";
-pub const VOCABULARY_FILE: &str = "parakeet_v3_vocab.json";
+/// Vocabulary file (`ModelNames.ASR.vocabularyFile`, the name Steno's
+/// `ModelAsset` requires); the model repository ships the same bytes as
+/// `parakeet_v3_vocab.json` too, read when the first is absent.
+pub const VOCABULARY_FILE: &str = "parakeet_vocab.json";
+/// The second name of the vocabulary file.
+pub const VOCABULARY_FILE_V3: &str = "parakeet_v3_vocab.json";
 
 /// Compute units per model, as `AsrModels.loadLocal` assigns them from
 /// `defaultConfiguration()` (`.cpuAndNeuralEngine`; the preprocessor is
 /// pinned to the CPU because all of its ops map there anyway).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ComputeUnitsPlan {
+    /// `Preprocessor.mlmodelc`.
     pub preprocessor: ComputeUnits,
+    /// `Encoder.mlmodelc`.
     pub encoder: ComputeUnits,
+    /// `Decoder.mlmodelc`.
     pub decoder: ComputeUnits,
+    /// `JointDecisionv3.mlmodelc`.
     pub joint: ComputeUnits,
 }
 
@@ -75,7 +84,9 @@ pub struct Backend {
 /// What the joint decided for one frame.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct JointDecision {
+    /// The argmax token id, `BLANK_ID` for blank.
     pub token: usize,
+    /// The joint's probability for `token`.
     pub probability: f32,
     /// Index into the duration bins, not the duration itself.
     pub duration_bin: usize,
@@ -161,7 +172,12 @@ impl Backend {
     /// Load with explicit compute units (the harness compares them).
     pub fn load_with(directory: &Path, units: ComputeUnitsPlan) -> Result<Backend, SpeechError> {
         let started = Instant::now();
-        let vocab = Vocab::load(&directory.join(VOCABULARY_FILE))?;
+        let vocab_path = [VOCABULARY_FILE, VOCABULARY_FILE_V3]
+            .iter()
+            .map(|name| directory.join(name))
+            .find(|path| path.is_file())
+            .unwrap_or_else(|| directory.join(VOCABULARY_FILE));
+        let vocab = Vocab::load(&vocab_path)?;
         let preprocessor = Model::load(&directory.join(PREPROCESSOR_FILE), units.preprocessor)?;
         let encoder = Model::load(&directory.join(ENCODER_FILE), units.encoder)?;
         let decoder = Model::load(&directory.join(DECODER_FILE), units.decoder)?;
@@ -220,7 +236,10 @@ impl Backend {
             .unwrap_or(MAX_MODEL_SAMPLES)
             .min(MAX_MODEL_SAMPLES);
         scratch.audio_length.as_i32_mut()?[0] =
-            i32::try_from(declared).map_err(|_| SpeechError::DurationBin(declared))?;
+            i32::try_from(declared).map_err(|_| SpeechError::Range {
+                name: "audio_length",
+                value: declared,
+            })?;
         let input = inputs(&[
             ("audio_signal", &scratch.audio),
             ("audio_length", &scratch.audio_length),
@@ -250,7 +269,10 @@ impl Backend {
     /// followed by the `predictorOutput` cache).
     pub fn decoder_step(&self, scratch: &mut Scratch, token: usize) -> Result<(), SpeechError> {
         scratch.targets.as_i32_mut()?[0] =
-            i32::try_from(token).map_err(|_| SpeechError::DurationBin(token))?;
+            i32::try_from(token).map_err(|_| SpeechError::Range {
+                name: "token",
+                value: token,
+            })?;
         let input = inputs(&[
             ("targets", &scratch.targets),
             ("target_length", &scratch.target_length),

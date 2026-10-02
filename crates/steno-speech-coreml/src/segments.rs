@@ -20,10 +20,25 @@ use crate::vocab::{Vocab, WORD_BOUNDARY, is_punctuation, is_symbol};
 pub struct TokenTiming {
     /// The piece with the SentencePiece marker replaced by a space.
     pub text: String,
+    /// SentencePiece id.
     pub id: usize,
+    /// Seconds, one frame before emission.
     pub start: f64,
+    /// Seconds, from the token's duration.
     pub end: f64,
+    /// The joint's probability.
     pub confidence: f32,
+}
+
+/// Swift's `CharacterSet.whitespaces`, which `TokenAggregator` trims:
+/// Unicode `Zs` plus tab. No v3 piece carries anything but a space, so
+/// the set matters for the rule, not for today's output.
+fn is_swift_whitespace(c: char) -> bool {
+    matches!(
+        c,
+        '\t' | ' ' | '\u{A0}' | '\u{1680}' | '\u{2000}'
+            ..='\u{200A}' | '\u{202F}' | '\u{205F}' | '\u{3000}'
+    )
 }
 
 /// TDT emits about one encoder frame after the acoustic event; FluidAudio
@@ -115,7 +130,7 @@ pub fn words(timings: &[TokenTiming]) -> Vec<TimedWord> {
             chars.next();
             text = chars.as_str();
         }
-        let text = text.trim_matches(|c: char| c == ' ' || c == '\t');
+        let text = text.trim_matches(is_swift_whitespace);
         if text.is_empty() {
             if starts_word {
                 boundary_pending = true;
@@ -210,6 +225,8 @@ pub fn segments(words: &[TimedWord]) -> Vec<RawSegment> {
 
 /// Tokens to segments, the whole Swift chain; with text but no words
 /// (nothing aggregated) one segment over the audio, as `ParakeetMapping`.
+/// `language` stays `None`: `ParakeetMapping` runs `LanguageTagger` here,
+/// which arrives with WP4a's shared crate.
 #[must_use]
 pub fn raw_segments(tokens: &[Token], vocab: &Vocab, duration: f64) -> Vec<RawSegment> {
     let mut result = segments(&words(&token_timings(tokens, vocab)));

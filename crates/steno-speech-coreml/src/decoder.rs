@@ -31,10 +31,12 @@ pub const CONSECUTIVE_BLANK_LIMIT: usize = 5;
 /// count of tokens decoded before the emission cutoff. The suppressed
 /// count matters to the empty-decode recovery gate: a window whose only
 /// tokens were suppressed decoded fine and is not retried
-/// (`AsrManager.isWholeWindowBlank`).
+/// (`AsrManager.isWholeWindowBlank`, issue #909).
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Hypothesis {
+    /// Emitted tokens, global frames.
     pub tokens: Vec<Token>,
+    /// Tokens decoded before the emission cutoff and dropped.
     pub suppressed: usize,
 }
 
@@ -65,7 +67,9 @@ impl Hypothesis {
 /// Counters the harness reports.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct DecodeCounts {
+    /// Prediction-network calls, one per emitted token plus the priming.
     pub decoder_calls: usize,
+    /// Joint calls, one per frame step.
     pub joint_calls: usize,
 }
 
@@ -215,7 +219,9 @@ pub fn decode_window(
     }
 
     if spec.is_last {
-        let count = encoder.frames();
+        // Swift's `EncoderFrameView.count` is the valid frame count, so the
+        // flush never probes a padding frame; `valid > 1` was checked above.
+        let count = encoder.valid;
         let mut additional = 0usize;
         let mut consecutive_blanks = 0usize;
         let mut final_t = t;

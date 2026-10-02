@@ -32,6 +32,10 @@ pub enum SpeechError {
     #[error("duration bin out of range: {0}")]
     DurationBin(usize),
 
+    /// A length or token id did not fit the `Int32` the models take.
+    #[error("{name} out of range: {value}")]
+    Range { name: &'static str, value: usize },
+
     /// The vocabulary file did not parse.
     #[error("vocabulary {path}: {message}")]
     Vocabulary { path: PathBuf, message: String },

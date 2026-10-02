@@ -4,9 +4,9 @@
 //!
 //! Long audio: silence-aligned windows decoded by `concurrency` workers
 //! (FluidAudio's `parallelChunkConcurrency = 4`), each window retried
-//! through the empty-decode recovery ladder (issue #909), then merged in
-//! order, clamped monotonic, seam duplicates collapsed and seam gaps
-//! re-decoded (issue #758). Short audio (one window) skips the merge.
+//! through the empty-decode recovery ladder, then merged in order,
+//! clamped monotonic, seam duplicates collapsed and seam gaps re-decoded.
+//! Short audio (one window) skips the merge.
 
 use std::collections::HashSet;
 use std::sync::Mutex;
@@ -65,8 +65,11 @@ impl Config {
 /// Counters and timings of one transcription, for the harness table.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct Stats {
+    /// Windows decoded, recovery passes and repair probes excluded.
     pub windows: usize,
+    /// Prediction-network calls.
     pub decoder_calls: usize,
+    /// Joint calls.
     pub joint_calls: usize,
     /// Recovery ladder passes run (each a preprocessor, encoder and decode).
     pub recoveries_tried: usize,
@@ -78,7 +81,9 @@ pub struct Stats {
     pub repaired_tokens: usize,
     /// Summed over all workers, so with four of them these exceed wall time.
     pub preprocessor_seconds: f64,
+    /// Encoder time, summed over workers.
     pub encoder_seconds: f64,
+    /// Decode-loop time, summed over workers.
     pub decoder_seconds: f64,
 }
 
@@ -100,7 +105,9 @@ impl Stats {
 /// The merged tokens of a recording and how they were produced.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Transcript {
+    /// Merged tokens in text order.
     pub tokens: Vec<Token>,
+    /// Counters and timings of the run.
     pub stats: Stats,
 }
 
@@ -248,7 +255,7 @@ impl Transcriber {
         )?;
         stats.windows = 1;
         Ok(Transcript {
-            tokens: enforce_monotonic(hypothesis.tokens),
+            tokens: hypothesis.tokens,
             stats,
         })
     }
@@ -451,8 +458,8 @@ impl Transcriber {
     ) -> Result<Vec<Token>, SpeechError> {
         let total = audio.len();
         let vocab = self.vocab();
-        // 1.5 s at 80 ms is exactly 18 frames; the cast truncates nothing
-        // of interest for the floor FluidAudio applies.
+        // 1.5 s at 80 ms is 18.75 frames; Swift's `Int()` truncates to 18
+        // and the cast does the same.
         #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
         let min_gap_frames =
             ((self.config.seam_gap_min_gap_seconds / FRAME_SECONDS) as usize).max(2);
@@ -562,7 +569,8 @@ fn should_recover(samples: &[f32]) -> bool {
     if samples.len() < RECOVERY_MIN_SAMPLES {
         return false;
     }
-    let energy: f64 = samples.iter().map(|s| f64::from(*s) * f64::from(*s)).sum();
+    // Squared in f32 and accumulated in f64, as the Swift does.
+    let energy: f64 = samples.iter().map(|s| f64::from(*s * *s)).sum();
     // Window lengths are at most 240,000.
     #[allow(clippy::cast_precision_loss)]
     let count = samples.len() as f64;

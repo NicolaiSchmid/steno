@@ -212,9 +212,17 @@ fn ns_numbers(values: &[usize]) -> Retained<NSArray<NSNumber>> {
     NSArray::from_retained_slice(&numbers)
 }
 
-fn read_numbers(array: &NSArray<NSNumber>) -> Vec<usize> {
+/// Shape or stride entries as `usize`. CoreML reports them as `NSInteger`
+/// and permits negative strides; one would alias frame 0 in
+/// `EncoderView::copy_frame`, so a negative entry is an error instead.
+fn read_numbers(array: &NSArray<NSNumber>, name: &str) -> Result<Vec<usize>, SpeechError> {
     (0..array.count())
-        .map(|index| usize::try_from(array.objectAtIndex(index).integerValue()).unwrap_or(0))
+        .map(|index| {
+            let value = array.objectAtIndex(index).integerValue();
+            usize::try_from(value).map_err(|_| {
+                SpeechError::CoreMl(format!("{name} entry {index} is negative: {value}"))
+            })
+        })
         .collect()
 }
 
@@ -232,7 +240,7 @@ impl Array {
             )
         }
         .map_err(|error| SpeechError::CoreMl(ns_error(&error)))?;
-        let mut array = Array::wrap(inner);
+        let mut array = Array::wrap(inner)?;
         match array.data_type {
             DataType::Float32 => array.as_f32_mut()?.fill(0.0),
             DataType::Int32 => array.as_i32_mut()?.fill(0),
@@ -255,22 +263,22 @@ impl Array {
         Array::alloc(shape, MLMultiArrayDataType::Int32)
     }
 
-    fn wrap(inner: Retained<MLMultiArray>) -> Array {
+    fn wrap(inner: Retained<MLMultiArray>) -> Result<Array, SpeechError> {
         // SAFETY: `shape`, `strides` and `dataType` are read-only
         // properties of a live array.
         let (shape, strides, data_type) = unsafe {
             (
-                read_numbers(&inner.shape()),
-                read_numbers(&inner.strides()),
+                read_numbers(&inner.shape(), "shape")?,
+                read_numbers(&inner.strides(), "strides")?,
                 DataType::from_raw(inner.dataType()),
             )
         };
-        Array {
+        Ok(Array {
             inner,
             shape,
             strides,
             data_type,
-        }
+        })
     }
 
     #[must_use]
@@ -460,7 +468,7 @@ impl Outputs {
                 .and_then(|value| value.multiArrayValue())
         }
         .ok_or(SpeechError::MissingOutput(name))?;
-        Ok(Array::wrap(array))
+        Array::wrap(array)
     }
 }
 
@@ -497,6 +505,13 @@ impl EncoderView {
             });
         }
         array.require_type(DataType::Float32)?;
+        // A zero stride would make every frame read the same element.
+        if array.strides[1] == 0 || array.strides[2] == 0 {
+            return Err(SpeechError::CoreMl(format!(
+                "encoder strides {:?} are not addressable",
+                array.strides
+            )));
+        }
         let frames = array.shape[2];
         Ok(EncoderView {
             hidden,
