@@ -11,8 +11,9 @@
 //!   end-aligned final window, the adaptive speech gate), [`merge`] (the
 //!   overlap merge, seam-word collapse, seam-gap splice rules), [`vocab`]
 //!   (the SentencePiece vocabulary and its derived id sets), [`segments`]
-//!   (tokens to timed words to `RawSegment`s, as `StenoSpeech` does it)
-//!   and [`wer`] (the parity scorer).
+//!   (tokens to timed words to `RawSegment`s, as `StenoSpeech` does it),
+//!   [`wav`] (the harness's 16 kHz WAV reader) and [`wer`] (the parity
+//!   scorer).
 //! - macOS only (plain names, because the modules do not exist in a
 //!   Linux or Windows build of these docs): `coreml` (the one module
 //!   allowed `unsafe`, wrapping `objc2-core-ml`), `backend` (the four
@@ -21,9 +22,11 @@
 //!   merge, repair), `engine` (the `SpeechEngine` implementation) and
 //!   `parity` (the harness against the Swift baseline).
 //!
-//! Every heuristic here is a port of FluidAudio's Swift, file and function
-//! named at each item, because the Swift app's transcript is the oracle: a
-//! Rust transcript that differs is a bug (plan invariant 6). The decoder
+//! Every heuristic here is a port of FluidAudio's Swift; each item names
+//! its origin as `Type.method` in parentheses (the file is `Type.swift`),
+//! the one place a Swift pointer appears for that item. The Swift app's
+//! transcript is the oracle: a Rust transcript that differs is a bug (plan
+//! invariant 6). The decoder
 //! core is small and stable; the heuristics around it change in most
 //! FluidAudio releases, which is why the parity harness exists.
 //!
@@ -68,9 +71,12 @@ pub use engine::{CoreMlParakeetEngine, ENGINE_ID, default_model_directory};
 /// `ChunkProcessor.TokenWindow`.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Token {
+    /// SentencePiece id into the vocabulary.
     pub id: usize,
     /// Global encoder frame index at emission.
     pub frame: usize,
+    /// The joint's probability for the token, clamped to `[0, 1]` as
+    /// `TdtDurationMapping.clampProbability` does.
     pub confidence: f32,
     /// Frames the decoder advanced after emitting; `0` when unknown.
     pub duration: usize,

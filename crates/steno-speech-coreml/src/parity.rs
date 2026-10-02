@@ -52,12 +52,19 @@ impl Default for Options {
 /// One corpus file's result.
 #[derive(Debug, Clone)]
 pub struct FileResult {
+    /// File stem shared by the WAV and the baseline JSON.
     pub name: String,
+    /// Audio length.
     pub audio_seconds: f64,
+    /// Transcription wall time, model load excluded.
     pub wall_seconds: f64,
+    /// Merged tokens.
     pub tokens: usize,
+    /// Counters and timings of the run.
     pub stats: Stats,
+    /// Word errors of the Rust text against the Swift text.
     pub errors: WordErrors,
+    /// Word-start agreement where the text matches.
     pub timing: TimingAgreement,
 }
 
@@ -76,11 +83,17 @@ impl FileResult {
 /// The whole run.
 #[derive(Debug, Clone)]
 pub struct Report {
+    /// One row per corpus file, in name order.
     pub files: Vec<FileResult>,
+    /// Word errors summed over the corpus.
     pub total: WordErrors,
+    /// Time to load the four models and the vocabulary.
     pub model_load_seconds: f64,
+    /// Parallel windows.
     pub concurrency: usize,
+    /// `vm.loadavg` before the first file.
     pub load_before: String,
+    /// `vm.loadavg` after the last file.
     pub load_after: String,
 }
 
@@ -123,7 +136,7 @@ impl fmt::Display for Report {
         writeln!(f)?;
         writeln!(
             f,
-            "| File | Audio s | Wall s | RTFx | Windows | Tokens | Recoveries | Repairs | Swift words | Rust words | Edits | WER vs Swift | Starts within 10 ms |"
+            "| File | Audio s | Wall s | RTFx | Windows | Tokens | Recoveries accepted/tried | Repaired tokens/probes | Swift words | Rust words | Edits | WER vs Swift | Starts within 10 ms |"
         )?;
         writeln!(
             f,

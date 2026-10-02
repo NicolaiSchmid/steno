@@ -1,8 +1,8 @@
 //! The SentencePiece vocabulary of `parakeet-tdt-0.6b-v3`
-//! (`parakeet_v3_vocab.json`, 8,192 pieces) and the id sets FluidAudio
-//! derives from it: splice-safe pieces for the seam merge (issue #683),
-//! case-variant canonical ids for the overlap matcher (issue #706) and the
-//! sentence-final punctuation ids (issue #905).
+//! (`parakeet_vocab.json`, 8,192 pieces) and the id sets FluidAudio
+//! derives from it: splice-safe pieces for the seam merge, case-variant
+//! canonical ids for the overlap matcher and the sentence-final
+//! punctuation ids (issue #905).
 //!
 //! The v3 file marks word starts with a leading space; the SentencePiece
 //! export uses `▁` (U+2581). FluidAudio accepts both everywhere
@@ -297,6 +297,7 @@ impl Vocab {
     }
 }
 
+// pub(crate): the merge and segments tests reuse `sample()`.
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;

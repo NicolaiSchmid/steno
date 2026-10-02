@@ -32,7 +32,8 @@ name: Rust CI
 # The `msrv` job checks the workspace against `rust-version` from Cargo.toml
 # on Linux, so the number stays true.
 #
-# `steno-speech-coreml` (WP4b): its CoreML half compiles on macOS only and
+# `steno-speech-coreml` (WP4b of `.plans/2026-10-02-rust-core-and-tauri-shell.md`):
+# its CoreML half compiles on macOS only and
 # its unit tests need no models, so `cargo test --workspace` covers them on
 # every job (the platform-independent half on Linux and Windows too). The
 # parity harness against the Swift transcripts needs the Parakeet models

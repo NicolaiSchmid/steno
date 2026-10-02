@@ -1,4 +1,4 @@
-//! The parity harness: the seven calibration files through the CoreML
+//! The parity harness: the calibration corpus through the CoreML
 //! pipeline, scored against the Swift app's transcripts.
 //!
 //! ```text
