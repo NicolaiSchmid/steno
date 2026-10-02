@@ -75,17 +75,14 @@ fn search_rows(connection: &Connection, pattern: &str, limit: i64) -> Result<Vec
             })
         },
     )?);
+    // Byte order of a UUID is the order of its upper-case string, so the
+    // tie-break matches Swift's `uuidString` compare without the strings; a
+    // meeting hit (no segment) sorts before its segments, as "" did.
     hits.sort_by(|left, right| {
         left.rank
             .total_cmp(&right.rank)
-            .then_with(|| {
-                crate::json::uuid_string(left.meeting_id)
-                    .cmp(&crate::json::uuid_string(right.meeting_id))
-            })
-            .then_with(|| {
-                let key = |id: Option<Uuid>| id.map(crate::json::uuid_string).unwrap_or_default();
-                key(left.segment_id).cmp(&key(right.segment_id))
-            })
+            .then_with(|| left.meeting_id.cmp(&right.meeting_id))
+            .then_with(|| left.segment_id.cmp(&right.segment_id))
     });
     hits.truncate(usize::try_from(limit).unwrap_or(usize::MAX));
     Ok(hits)
