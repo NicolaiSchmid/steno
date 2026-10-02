@@ -76,6 +76,12 @@ reqwest = { version = "0.13", default-features = false, features = ["rustls-no-p
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 serde_path_to_error = "0.1"
 url = "2"
+# The diarization crate: ONNX Runtime (rustls TLS, prebuilt binaries), the
+# FFT behind the fbank front end, the model download and the test WAV reader.
+ort = { version = "2.0.0-rc.13", default-features = false, features = ["std", "download-binaries", "tls-rustls", "copy-dylibs", "api-27"] }
+rustfft = "6"
+ureq = { version = "3", default-features = false, features = ["rustls", "gzip"] }
+hound = "3"
 
 [workspace.lints.clippy]
 all = { level = "warn", priority = -1 }
