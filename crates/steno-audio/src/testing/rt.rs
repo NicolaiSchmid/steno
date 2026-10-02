@@ -17,9 +17,15 @@
 //! counted nothing on the Windows runner.)
 
 use std::alloc::{GlobalAlloc, Layout, System};
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 
 pub struct CountingAllocator;
+
+/// One measurement at a time: the counters are process-wide, and the test
+/// harness runs tests on several threads, so a second `allocations_during`
+/// would reset the count and move the counted thread under the first.
+static MEASURING: Mutex<()> = Mutex::new(());
 
 static COUNTING: AtomicBool = AtomicBool::new(false);
 static COUNTED_THREAD: AtomicUsize = AtomicUsize::new(0);
@@ -60,8 +66,8 @@ fn note() {
 }
 
 // SAFETY: every method forwards to `System` after a counter update; the
-// counters are atomics and the thread id is a TLS address, neither of
-// which allocates, so the allocator never re-enters itself.
+// counters are atomics and the thread id is an OS call, neither of which
+// allocates, so the allocator never re-enters itself.
 unsafe impl GlobalAlloc for CountingAllocator {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         note();
@@ -99,7 +105,11 @@ impl CountingAllocator {
     /// meaningful when this type is the process's `#[global_allocator]`;
     /// otherwise the count is always zero and proves nothing, which the
     /// callers' "the hook sees a deliberate allocation" test guards.
+    /// Measurements are serialised process-wide (see `MEASURING`).
     pub fn allocations_during(body: impl FnOnce()) -> u64 {
+        let _guard = MEASURING
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         Self::start_counting();
         body();
         Self::stop_counting()
