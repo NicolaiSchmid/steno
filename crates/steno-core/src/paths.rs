@@ -1,0 +1,177 @@
+//! Where the database and support files live. On the Mac this is Swift's
+//! `~/Library/Application Support/Steno/`, the file the Swift app writes
+//! today; Linux and Windows follow their platform conventions through the
+//! `directories` crate. Audio lives in `Settings::audio_folder`.
+
+use std::collections::HashMap;
+use std::fmt::Write as _;
+use std::path::{Path, PathBuf};
+
+use directories::BaseDirs;
+
+/// The support directory and what hangs off it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StenoPaths {
+    pub support_directory: PathBuf,
+}
+
+impl StenoPaths {
+    #[must_use]
+    pub fn new(support_directory: impl Into<PathBuf>) -> Self {
+        StenoPaths {
+            support_directory: support_directory.into(),
+        }
+    }
+
+    /// `<support>/steno.sqlite`.
+    #[must_use]
+    pub fn database_path(&self) -> PathBuf {
+        self.support_directory.join("steno.sqlite")
+    }
+
+    /// [`StenoPaths::support_directory`] for the process environment.
+    #[must_use]
+    pub fn default_support_directory() -> PathBuf {
+        Self::support_directory(&std::env::vars().collect())
+    }
+
+    /// The platform's support directory for `environment`, which tests pass
+    /// explicitly:
+    ///
+    /// - macOS: `$HOME/Library/Application Support/Steno` (Swift's path;
+    ///   `HOME` first because not every Foundation honours it otherwise)
+    /// - Linux: `$XDG_DATA_HOME/Steno`, else `$HOME/.local/share/Steno`
+    /// - Windows: `%APPDATA%\Steno`
+    ///
+    /// A variable holding a relative path counts as unset, as the XDG base
+    /// directory specification requires for `XDG_DATA_HOME`; `HOME` and
+    /// `APPDATA` get the same treatment.
+    #[must_use]
+    pub fn support_directory(environment: &HashMap<String, String>) -> PathBuf {
+        let absolute = |key: &str| {
+            environment
+                .get(key)
+                .map(Path::new)
+                .filter(|path| path.is_absolute())
+                .map(Path::to_path_buf)
+        };
+        let base_dirs = BaseDirs::new();
+        let home = || {
+            absolute("HOME")
+                .or_else(|| base_dirs.as_ref().map(|dirs| dirs.home_dir().to_path_buf()))
+                .unwrap_or_else(|| PathBuf::from("."))
+        };
+        let data = if cfg!(target_os = "macos") {
+            home().join("Library").join("Application Support")
+        } else if cfg!(windows) {
+            absolute("APPDATA")
+                .or_else(|| base_dirs.as_ref().map(|dirs| dirs.data_dir().to_path_buf()))
+                .unwrap_or_else(home)
+        } else {
+            absolute("XDG_DATA_HOME").unwrap_or_else(|| home().join(".local").join("share"))
+        };
+        data.join("Steno")
+    }
+
+    /// The default paths with the support directory created.
+    pub fn create_default() -> std::io::Result<StenoPaths> {
+        let paths = StenoPaths::new(Self::default_support_directory());
+        std::fs::create_dir_all(&paths.support_directory)?;
+        Ok(paths)
+    }
+}
+
+/// `path` as the `file://` URL string Swift's `URL(fileURLWithPath:)`
+/// produces: percent-encoding outside the URL path-allowed set, a trailing
+/// slash for a directory, forward slashes and a leading slash before a
+/// Windows drive letter.
+#[must_use]
+pub fn file_url(path: &Path, is_directory: bool) -> String {
+    let mut text = path.to_string_lossy().into_owned();
+    if cfg!(windows) {
+        if let Some(rest) = text.strip_prefix(r"\\?\") {
+            text = rest.to_owned();
+        }
+        text = text.replace('\\', "/");
+        if !text.starts_with('/') {
+            text.insert(0, '/');
+        }
+    }
+    let mut url = String::from("file://");
+    for byte in text.bytes() {
+        if is_path_allowed(byte) {
+            url.push(char::from(byte));
+        } else {
+            let _ = write!(url, "%{byte:02X}");
+        }
+    }
+    if is_directory && !url.ends_with('/') {
+        url.push('/');
+    }
+    url
+}
+
+/// RFC 3986 unreserved and sub-delims plus `:`, `@` and `/`: the characters
+/// Foundation leaves alone in a file URL's path.
+fn is_path_allowed(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || b"-._~!$&'()*+,;=:@/".contains(&byte)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn file_urls_match_foundation() {
+        if cfg!(windows) {
+            assert_eq!(
+                file_url(Path::new(r"C:\Users\x\AppData\Roaming\Steno\Audio"), true),
+                "file:///C:/Users/x/AppData/Roaming/Steno/Audio/"
+            );
+        } else {
+            assert_eq!(
+                file_url(
+                    Path::new("/Users/x/Library/Application Support/Steno/Audio"),
+                    true
+                ),
+                "file:///Users/x/Library/Application%20Support/Steno/Audio/"
+            );
+            assert_eq!(
+                file_url(Path::new("/tmp/a b/ü.wav"), false),
+                "file:///tmp/a%20b/%C3%BC.wav"
+            );
+        }
+    }
+
+    #[test]
+    fn the_support_directory_follows_the_environment() {
+        let environment: HashMap<String, String> = [
+            ("HOME".to_owned(), "/home/nicolai".to_owned()),
+            ("XDG_DATA_HOME".to_owned(), "/data".to_owned()),
+            (
+                "APPDATA".to_owned(),
+                r"C:\Users\nicolai\AppData\Roaming".to_owned(),
+            ),
+        ]
+        .into_iter()
+        .collect();
+        let directory = StenoPaths::support_directory(&environment);
+        if cfg!(target_os = "macos") {
+            assert_eq!(
+                directory,
+                PathBuf::from("/home/nicolai/Library/Application Support/Steno")
+            );
+        } else if cfg!(windows) {
+            assert_eq!(
+                directory,
+                PathBuf::from(r"C:\Users\nicolai\AppData\Roaming\Steno")
+            );
+        } else {
+            assert_eq!(directory, PathBuf::from("/data/Steno"));
+        }
+        assert_eq!(
+            StenoPaths::new(&directory).database_path(),
+            directory.join("steno.sqlite")
+        );
+    }
+}

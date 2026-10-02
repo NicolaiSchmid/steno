@@ -174,7 +174,16 @@ once that chain has merged.
 
 Filled in by WP6 from the Swift app's bridge methods and topics (one line per method and
 topic, plus menu bar, panels, deep links, auto-stop, detection, retention, updates,
-login item, calendar, phone pairing). Empty until then.
+login item, calendar, phone pairing). Until then, only what the first crates turned up.
+
+### Store
+
+- `StenoJSON` date output truncates to the millisecond; Rust rounds like GRDB; fix the
+  Swift formatter before cutover.
+- `MeetingStore.init` should check the migrator's `hasBeenSuperseded` and refuse a
+  database with an identifier it does not know, as the Rust store does
+  (`StoreError::UnknownMigration`); today GRDB ignores unknown identifiers and the
+  Swift app would run on a newer schema without noticing.
 
 ### Bridge
 
