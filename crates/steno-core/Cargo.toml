@@ -9,22 +9,18 @@ repository.workspace = true
 publish.workspace = true
 
 [dependencies]
-base64 = "0.22"
+base64.workspace = true
 chrono.workspace = true
-directories = "6"
-# Pinned here only because the root Cargo.toml is out of this branch's scope;
-# the workspace table should take it when that file is next edited.
-rusqlite = { version = "0.40", features = ["bundled"] }
+directories.workspace = true
+rusqlite.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
-# Pinned here only because the root Cargo.toml is out of this branch's scope;
-# the workspace table should take them when that file is next edited.
-similar = "2"
-tempfile = "3"
+similar.workspace = true
+tempfile.workspace = true
 
 [lints]
 workspace = true
