@@ -8,7 +8,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use steno_core::{LlmMessage, LlmRequest, LlmResponseFormat, LlmRole, MeetingExport};
+use steno_core::{LanguageTag, LlmMessage, LlmRequest, LlmResponseFormat, LlmRole, MeetingExport};
 use steno_llm::testing::{ManualClock, StubChatServer};
 use steno_llm::{
     CodexCredentialStore, CodexResponsesClient, JwtClaims, LlmClientEvent, LlmEndpoint,
@@ -20,6 +20,14 @@ pub const API_KEY: &str = "sk-test-secret-0123456789";
 /// Wall-clock budget for waiting on a sleeper; only spent in the failure
 /// case.
 pub const SLEEPER_WAIT: Duration = Duration::from_secs(10);
+
+pub fn de() -> LanguageTag {
+    LanguageTag::from("de")
+}
+
+pub fn secs(n: u64) -> Duration {
+    Duration::from_secs(n)
+}
 
 pub fn fixtures_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../Tests/Fixtures/llm")

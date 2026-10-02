@@ -8,7 +8,7 @@ mod common;
 use std::sync::Arc;
 
 use common::*;
-use steno_core::{AudioLane, LanguageTag, LlmUsage, TranscriptCleaner, TranscriptSegment};
+use steno_core::{AudioLane, LlmUsage, TranscriptCleaner, TranscriptSegment};
 use steno_llm::cleanup::{CleanupDraft, CleanupDraftSegment, glossary};
 use steno_llm::inputs::cleanup_input;
 use steno_llm::testing::{StubChatServer, default_usage, parse_segments, scripts};
@@ -16,10 +16,6 @@ use steno_llm::{
     CleanupPromptBuilder, LlmEndpoint, LlmError, LlmTranscriptCleaner, OpenAiCompatibleClient,
     RetryPolicy, TranscriptChunk, TranscriptChunker,
 };
-
-fn de() -> LanguageTag {
-    LanguageTag::from("de")
-}
 
 /// A cleaner over the stub server with no retries and the system clock;
 /// every request is answered at once, so nothing ever sleeps.

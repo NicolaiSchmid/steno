@@ -7,7 +7,6 @@
 mod common;
 
 use std::sync::Arc;
-use std::time::Duration;
 
 use common::*;
 use steno_core::{
@@ -22,10 +21,6 @@ use steno_llm::{
     CodexCredentialError, CodexError, CodexResponsesClient, LlmClient, LlmClientEvent, LlmEndpoint,
     LlmError, RetryPolicy, StructuredOutputMode,
 };
-
-fn secs(n: u64) -> Duration {
-    Duration::from_secs(n)
-}
 
 fn llm(error: CodexError) -> LlmError {
     match error {

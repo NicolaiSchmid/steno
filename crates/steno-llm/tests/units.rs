@@ -23,10 +23,6 @@ use steno_llm::{
     StructuredOutputDecoder, SummaryPromptBuilder, TokenBudget, TranscriptChunk, TranscriptChunker,
 };
 
-fn de() -> LanguageTag {
-    LanguageTag::from("de")
-}
-
 fn response(text: &str, finish: LlmFinishReason) -> LlmResponse {
     LlmResponse {
         text: text.to_owned(),

@@ -17,10 +17,6 @@ use steno_llm::{
     StructuredOutputMode,
 };
 
-fn secs(n: u64) -> Duration {
-    Duration::from_secs(n)
-}
-
 #[tokio::test]
 async fn sends_bearer_auth_body_and_purpose_and_parses_the_reply() {
     let harness = ClientHarness::new().await;

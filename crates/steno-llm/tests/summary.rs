@@ -26,10 +26,6 @@ use steno_llm::{
     StructuredOutputDecoder, SummaryPromptBuilder, TokenBudget, TranscriptChunker,
 };
 
-fn de() -> LanguageTag {
-    LanguageTag::from("de")
-}
-
 fn summarizer(server: &StubChatServer, context_tokens: i64) -> LlmMeetingSummarizer<Utc> {
     let endpoint = LlmEndpoint {
         context_tokens,
