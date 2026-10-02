@@ -35,31 +35,44 @@ permissions:
   contents: read
 
 jobs:
+  # Which platforms the run builds, from the input: a job-level `if` cannot
+  # read the matrix, so a first job filters the include list and the bundle
+  # job takes its matrix from it. The macOS runner label comes from
+  # `MACOS_RUNS_ON` as everywhere else.
+  plan:
+    name: plan
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      matrix: ${{ steps.plan.outputs.matrix }}
+    steps:
+      - id: plan
+        env:
+          PLATFORMS: ${{ inputs.platforms }}
+          MACOS_RUNS_ON: ${{ vars.MACOS_RUNS_ON || '"macos-15"' }}
+        run: |
+          set -euo pipefail
+          all='[
+            {"name":"linux","os":"ubuntu-latest","bundles":"deb,appimage",
+             "artifacts":"target/release/bundle/deb/*.deb\ntarget/release/bundle/appimage/*.AppImage"},
+            {"name":"windows","os":"windows-latest","bundles":"msi,nsis",
+             "artifacts":"target/release/bundle/msi/*.msi\ntarget/release/bundle/nsis/*.exe"},
+            {"name":"macos","os":null,"bundles":"app,dmg",
+             "artifacts":"target/release/bundle/dmg/*.dmg\ntarget/release/bundle/macos/*.app.tar.gz"}
+          ]'
+          matrix="$(jq -c --arg wanted "$PLATFORMS" --argjson mac "$MACOS_RUNS_ON" \
+            '{include: [ .[] | select(($wanted | split(",") | map(gsub(" "; ""))) | index(.name)) | if .name == "macos" then .os = $mac else . end ]}' \
+            <<< "$all")"
+          echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
+          echo "$matrix"
+          test "$(jq '.include | length' <<< "$matrix")" -gt 0 || { echo "::error::no platform selected from '$PLATFORMS'"; exit 1; }
+
   bundle:
     name: ${{ matrix.name }}
-    if: contains(inputs.platforms, matrix.name)
+    needs: plan
     strategy:
       fail-fast: false
-      matrix:
-        include:
-          - name: linux
-            os: ubuntu-latest
-            bundles: 'deb,appimage'
-            artifacts: |
-              target/release/bundle/deb/*.deb
-              target/release/bundle/appimage/*.AppImage
-          - name: windows
-            os: windows-latest
-            bundles: 'msi,nsis'
-            artifacts: |
-              target/release/bundle/msi/*.msi
-              target/release/bundle/nsis/*.exe
-          - name: macos
-            os: ${{ fromJSON(vars.MACOS_RUNS_ON || '"macos-15"') }}
-            bundles: 'app,dmg'
-            artifacts: |
-              target/release/bundle/dmg/*.dmg
-              target/release/bundle/macos/*.app.tar.gz
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 60
     steps:

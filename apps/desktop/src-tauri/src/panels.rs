@@ -776,7 +776,9 @@ mod tests {
     fn the_panels_state_resolves_from_what_it_holds() {
         let panels = Panels::default();
         assert_eq!(panels.content(), None);
-        assert_eq!(panels.size_of(Panel::Bubble), (240.0, 40.0));
+        assert_eq!(panels.size_of(Panel::Bubble), Panel::Bubble.initial_size());
+        assert_eq!(Panel::Bubble.initial_size(), (480.0, 40.0));
+        assert_eq!(Panel::Prompt.initial_size(), (480.0, 56.0));
         *panels.prompt.lock().unwrap() = Some(PromptRequest {
             app_name: "Zoom".into(),
             seconds: 60,

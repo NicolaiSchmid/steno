@@ -131,7 +131,7 @@ pub fn system_settings_url(kind: PermissionKind) -> Option<String> {
 
 #[cfg(target_os = "macos")]
 mod platform {
-    //! TCC through AVFoundation. `requestAccessForMediaType:completionHandler:`
+    //! TCC through `AVFoundation`. `requestAccessForMediaType:completionHandler:`
     //! shows the system prompt the first time and answers from the record
     //! after; the completion block runs on an arbitrary queue, so the answer
     //! crosses a channel back to the caller.
@@ -179,7 +179,7 @@ mod platform {
         // SAFETY: a class method; the block outlives the call because
         // AVFoundation copies it.
         unsafe {
-            AVCaptureDevice::requestAccessForMediaType_completionHandler(media_type(), &handler)
+            AVCaptureDevice::requestAccessForMediaType_completionHandler(media_type(), &handler);
         };
         match receiver.await {
             Ok(true) => PermissionState::Granted,
