@@ -8,9 +8,31 @@ use uuid::Uuid;
 /// ending in a `%%steno:<uuid>%%` comment that identifies its meeting.
 /// [`ManagedBlock::merge`] replaces or inserts a meeting's line,
 /// [`ManagedBlock::remove`] drops it again when the person left the meeting
-/// (a speaker reassigned to somebody else). Bytes outside the markers are
-/// copied unchanged; missing markers are appended by `merge` and never by
-/// `remove`.
+/// (a speaker reassigned to somebody else).
+///
+/// Only lines that carry a `%%steno:` marker are managed: they are the
+/// ones re-sorted and replaced. Every other non-blank line inside the
+/// block keeps its bytes and its place, and bytes outside the markers are
+/// copied unchanged. The block is the first start marker and the first end
+/// marker after it; a page without an end marker after the start (the user
+/// deleted it), or with the end before the start, has no block: `merge`
+/// appends a fresh one and `remove` changes nothing. A second start marker
+/// inside the block is an ordinary line.
+///
+/// ```
+/// use steno_adapters::rendering::ManagedBlock;
+/// use uuid::Uuid;
+///
+/// let id = Uuid::nil();
+/// let line = format!("- 2026-09-24 [[2026-09-24-sync|Sync]] {}", ManagedBlock::marker(id));
+/// let page = ManagedBlock::merge(&line, id, "# Anna\n");
+/// assert_eq!(
+///     page,
+///     "# Anna\n\n<!-- steno:meetings:start -->\n- 2026-09-24 [[2026-09-24-sync|Sync]] %%steno:00000000-0000-0000-0000-000000000000%%\n<!-- steno:meetings:end -->\n"
+/// );
+/// assert_eq!(ManagedBlock::merge(&line, id, &page), page, "idempotent");
+/// assert_eq!(ManagedBlock::remove(id, &page), "# Anna\n\n<!-- steno:meetings:start -->\n<!-- steno:meetings:end -->\n");
+/// ```
 pub struct ManagedBlock;
 
 impl ManagedBlock {
@@ -47,8 +69,11 @@ impl ManagedBlock {
     }
 
     /// `existing` with `line` replacing the line that carries this meeting's
-    /// marker (or inserted when there is none), the block re-sorted newest
-    /// first; the block appended when the markers are missing.
+    /// marker (or inserted when there is none) and the marker lines re-sorted
+    /// newest first where the first of them stood; the block appended when
+    /// there is none. Lines without a marker keep their bytes and their
+    /// place (a CRLF page keeps its `\r`s); blank lines inside the block are
+    /// dropped.
     #[must_use]
     pub fn merge(line: &str, meeting_id: Uuid, existing: &str) -> String {
         let Some((start, end)) = Self::body_range(existing) else {
@@ -63,19 +88,36 @@ impl ManagedBlock {
             return result;
         };
         let marker = Self::marker(meeting_id);
-        let mut lines: Vec<String> = existing[start..end]
+        let mut kept: Vec<String> = Vec::new();
+        let mut managed: Vec<String> = Vec::new();
+        let mut slot = None;
+        for candidate in existing[start..end]
             .split('\n')
-            .filter(|candidate| !candidate.trim_matches([' ', '\t']).is_empty())
-            .filter(|candidate| !candidate.contains(&marker))
-            .map(str::to_owned)
-            .collect();
-        lines.push(line.to_owned());
+            .filter(|candidate| !candidate.trim_matches([' ', '\t', '\r']).is_empty())
+        {
+            if Self::is_managed(candidate) {
+                slot.get_or_insert(kept.len());
+                if !candidate.contains(&marker) {
+                    managed.push(candidate.to_owned());
+                }
+            } else {
+                kept.push(candidate.to_owned());
+            }
+        }
+        managed.push(line.to_owned());
+        let slot = slot.unwrap_or(0);
+        kept.splice(slot..slot, Self::sorted_newest_first(managed));
         format!(
             "{}\n{}\n{}",
             &existing[..start],
-            Self::sorted_newest_first(lines).join("\n"),
+            kept.join("\n"),
             &existing[end..]
         )
+    }
+
+    /// Whether a line is one of ours: it carries a `%%steno:` marker.
+    fn is_managed(line: &str) -> bool {
+        line.contains("%%steno:")
     }
 
     /// `existing` without the line that carries this meeting's marker. Every

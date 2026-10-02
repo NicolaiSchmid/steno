@@ -150,12 +150,130 @@ fn remove_leaves_an_empty_block_with_its_markers() {
 }
 
 #[test]
+fn a_page_without_an_end_marker_gets_a_fresh_block_and_keeps_its_lines() {
+    let line = line();
+    // The user deleted the end marker; the start marker and the old line
+    // are left dangling above her notes.
+    let dangling = format!(
+        "# Anna\n\n<!-- steno:meetings:start -->\n{OLDER}\n\n## Notes\n\nFirst paragraph.\nSecond line.\n"
+    );
+    let merged = ManagedBlock::merge(&line, meeting_id(), &dangling);
+    assert_eq!(
+        merged,
+        format!(
+            "{dangling}\n{}",
+            ManagedBlock::block(std::slice::from_ref(&line))
+        ),
+        "no end marker after the start: a fresh block is appended"
+    );
+    // The next delivery sees a block from the dangling start to the far end
+    // marker. Her lines in between keep their order and their place; only
+    // the marker lines are sorted, where the first of them stood.
+    let again = ManagedBlock::merge(NEWER, uuid(8), &merged);
+    assert_eq!(
+        again,
+        format!(
+            "# Anna\n\n<!-- steno:meetings:start -->\n{NEWER}\n{line}\n{OLDER}\n## Notes\nFirst paragraph.\nSecond line.\n<!-- steno:meetings:start -->\n<!-- steno:meetings:end -->\n"
+        )
+    );
+    assert_eq!(
+        ManagedBlock::merge(NEWER, uuid(8), &again),
+        again,
+        "idempotent"
+    );
+    assert_eq!(
+        ManagedBlock::remove(uuid(9), &again),
+        again.replace(&format!("{OLDER}\n"), ""),
+        "remove drops only the marker line"
+    );
+}
+
+#[test]
+fn user_lines_between_the_markers_keep_their_place() {
+    let line = line();
+    let page = format!(
+        "<!-- steno:meetings:start -->\nAbove, hers.\n{OLDER}\nBetween, hers.\n<!-- steno:meetings:end -->\n"
+    );
+    assert_eq!(
+        ManagedBlock::merge(&line, meeting_id(), &page),
+        format!(
+            "<!-- steno:meetings:start -->\nAbove, hers.\n{line}\n{OLDER}\nBetween, hers.\n<!-- steno:meetings:end -->\n"
+        ),
+        "the sorted marker lines take the first marker line's place"
+    );
+    let no_markers = "<!-- steno:meetings:start -->\nOnly hers.\n<!-- steno:meetings:end -->\n";
+    assert_eq!(
+        ManagedBlock::merge(&line, meeting_id(), no_markers),
+        format!("<!-- steno:meetings:start -->\n{line}\nOnly hers.\n<!-- steno:meetings:end -->\n"),
+        "no marker line yet: ours go first"
+    );
+}
+
+#[test]
+fn an_end_marker_before_the_start_is_not_a_block() {
+    let line = line();
+    let reversed = format!("<!-- steno:meetings:end -->\n{OLDER}\n<!-- steno:meetings:start -->\n");
+    assert_eq!(
+        ManagedBlock::merge(&line, meeting_id(), &reversed),
+        format!(
+            "{reversed}\n{}",
+            ManagedBlock::block(std::slice::from_ref(&line))
+        ),
+        "merge appends a fresh block"
+    );
+    assert_eq!(
+        ManagedBlock::remove(uuid(9), &reversed),
+        reversed,
+        "remove changes nothing"
+    );
+}
+
+#[test]
+fn a_second_start_marker_inside_the_block_is_an_ordinary_line() {
+    let line = line();
+    let page = format!(
+        "<!-- steno:meetings:start -->\n{OLDER}\n<!-- steno:meetings:start -->\nHers.\n<!-- steno:meetings:end -->\n"
+    );
+    assert_eq!(
+        ManagedBlock::merge(&line, meeting_id(), &page),
+        format!(
+            "<!-- steno:meetings:start -->\n{line}\n{OLDER}\n<!-- steno:meetings:start -->\nHers.\n<!-- steno:meetings:end -->\n"
+        )
+    );
+}
+
+#[test]
+fn a_crlf_page_keeps_its_bytes_outside_and_its_own_lines() {
+    let line = line();
+    let stale =
+        "- 2026-09-24 [[old-slug|Old title]] %%steno:00000000-0000-0000-0000-000000000001%%";
+    let page = format!(
+        "# Anna\r\n\r\n<!-- steno:meetings:start -->\r\n{stale}\r\nHers.\r\n{OLDER}\r\n\r\n<!-- steno:meetings:end -->\r\nBelow.\r\n"
+    );
+    assert_eq!(
+        ManagedBlock::merge(&line, meeting_id(), &page),
+        format!(
+            "# Anna\r\n\r\n<!-- steno:meetings:start -->\n{line}\n{OLDER}\r\nHers.\r\n<!-- steno:meetings:end -->\r\nBelow.\r\n"
+        ),
+        "her lines keep their CR; the blank CRLF line inside the block goes"
+    );
+    assert_eq!(
+        ManagedBlock::remove(meeting_id(), &page),
+        format!(
+            "# Anna\r\n\r\n<!-- steno:meetings:start -->\r\nHers.\r\n{OLDER}\r\n\r\n<!-- steno:meetings:end -->\r\nBelow.\r\n"
+        )
+    );
+}
+
+#[test]
 fn sorts_by_date_then_text() {
     let lines = [
         "- 2026-01-01 b",
         "- 2026-03-01 a",
         "- 2026-01-01 a",
         "no date at all",
+        "- 2026-1-01 nine characters",
+        "- 2026-01-0",
     ]
     .map(str::to_owned)
     .to_vec();
@@ -165,8 +283,11 @@ fn sorts_by_date_then_text() {
             "- 2026-03-01 a",
             "- 2026-01-01 a",
             "- 2026-01-01 b",
-            "no date at all"
-        ]
+            "- 2026-01-0",
+            "- 2026-1-01 nine characters",
+            "no date at all",
+        ],
+        "a malformed or short date counts as none and sorts last, by text"
     );
 }
 
