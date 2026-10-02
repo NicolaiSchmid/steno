@@ -76,10 +76,10 @@ fn state_updates_touch_only_their_columns() {
     let now = date("2026-09-30T09:00:00.000Z");
     store
         .set_state(
+            meeting.id,
             MeetingState::Failed {
                 reason: "x".to_owned(),
             },
-            meeting.id,
             now,
         )
         .unwrap();
@@ -116,7 +116,7 @@ fn state_updates_touch_only_their_columns() {
 
     let missing = uuid("00000000-0000-4000-8000-000000000000");
     assert!(matches!(
-        store.set_state(MeetingState::Ready, missing, now),
+        store.set_state(missing, MeetingState::Ready, now),
         Err(StoreError::MeetingNotFound(id)) if id == missing
     ));
 }

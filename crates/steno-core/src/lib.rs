@@ -1,5 +1,5 @@
 //! Steno's core: the domain types, the SQLite store that shares its file
-//! with the Swift app, and the settings. WP2 of
+//! with the Swift app, and the settings. Plan:
 //! `.plans/2026-10-02-rust-core-and-tauri-shell.md`.
 //!
 //! The Swift package (`Sources/StenoCore`) stays the source of truth until
@@ -12,7 +12,9 @@ pub mod json;
 pub mod model;
 pub mod paths;
 pub mod store;
+pub mod string_enum;
 
 pub use model::*;
 pub use paths::StenoPaths;
 pub use store::{Store, StoreError};
+pub use string_enum::UnknownCase;

@@ -1,3 +1,6 @@
+//! `audioAsset` rows.
+//! Swift: the asset methods of `Sources/StenoCore/Storage/MeetingStore.swift`.
+
 use rusqlite::{Connection, OptionalExtension, Row, params};
 use uuid::Uuid;
 
@@ -43,7 +46,10 @@ pub(super) fn save(connection: &Connection, asset: &AudioAsset) -> Result<()> {
     Ok(())
 }
 
-pub(super) fn for_meeting(connection: &Connection, meeting_id: Uuid) -> Result<Vec<AudioAsset>> {
+pub(super) fn assets_of_meeting(
+    connection: &Connection,
+    meeting_id: Uuid,
+) -> Result<Vec<AudioAsset>> {
     query_all(
         connection,
         &format!("SELECT {COLUMNS} FROM audioAsset WHERE meetingID = ?1 ORDER BY id"),

@@ -1,8 +1,8 @@
-//! The SQLite store over the file the Swift app writes
-//! (`Sources/StenoCore/Storage/MeetingStore.swift`): the same migrations,
-//! recorded in `grdb_migrations` the way GRDB records them, the same column
-//! encodings, and the read and write paths the pipeline and the host need.
-//! UI-specific queries follow with the host module.
+//! The SQLite store over the file the Swift app writes: the same
+//! migrations, recorded in `grdb_migrations` the way GRDB records them, the
+//! same column encodings, and the read and write paths the pipeline and the
+//! host need. UI-specific queries follow with the host module.
+//! Swift: `Sources/StenoCore/Storage/MeetingStore.swift`.
 
 mod assets;
 mod convert;
@@ -26,7 +26,10 @@ pub use meetings::DeletedMeeting;
 
 use crate::model::MeetingStateKind;
 
-/// Errors a store call can raise beyond SQLite's own.
+/// Errors a store call can raise beyond SQLite's own, plus the two the
+/// migrator adds. Swift: `MeetingStoreError` in
+/// `Sources/StenoCore/Storage/MeetingStore.swift`; the cases the Swift
+/// store raises from methods not ported yet are absent here.
 #[derive(Debug, Error)]
 pub enum StoreError {
     #[error(transparent)]

@@ -1,3 +1,6 @@
+//! `person`, `participant`, `speaker` and `speakerNameSuggestion` rows.
+//! Swift: `Sources/StenoCore/Storage/MeetingStore+People.swift`.
+
 use rusqlite::{Connection, OptionalExtension, Row, params};
 use uuid::Uuid;
 
@@ -12,7 +15,7 @@ fn embedding_of(row: &Row<'_>, column: &str) -> rusqlite::Result<Option<Embeddin
     Ok(bytes.as_deref().and_then(Embedding::from_bytes))
 }
 
-// MARK: persons
+// Persons
 
 const PERSON_COLUMNS: &str = "id, displayName, email, embedding, sampleCount, createdAt";
 
@@ -42,7 +45,7 @@ pub(super) fn save_person(connection: &Connection, person: &Person) -> Result<()
     Ok(())
 }
 
-// MARK: participants
+// Participants
 
 const PARTICIPANT_COLUMNS: &str = "id, meetingID, personID, displayName, role, email";
 
@@ -72,7 +75,7 @@ pub(super) fn save_participant(connection: &Connection, participant: &Participan
     Ok(())
 }
 
-// MARK: speakers
+// Speakers
 
 const SPEAKER_COLUMNS: &str = "id, meetingID, clusterLabel, assignment, personID, similarity, \
      embedding, sampleClipStart, sampleClipEnd, sampleClipURL, clusterConfidence";
@@ -131,7 +134,10 @@ pub(super) fn save_speaker(connection: &Connection, speaker: &Speaker) -> Result
     write_speaker(connection, speaker, &upsert_sql("speaker", SPEAKER_COLUMNS))
 }
 
-pub(super) fn speakers(connection: &Connection, meeting_id: Uuid) -> Result<Vec<Speaker>> {
+pub(super) fn speakers_of_meeting(
+    connection: &Connection,
+    meeting_id: Uuid,
+) -> Result<Vec<Speaker>> {
     query_all(
         connection,
         &format!(
@@ -142,7 +148,7 @@ pub(super) fn speakers(connection: &Connection, meeting_id: Uuid) -> Result<Vec<
     )
 }
 
-// MARK: speaker name suggestions
+// Speaker name suggestions
 
 const SUGGESTION_COLUMNS: &str = "speakerID, meetingID, name, confidence, evidence";
 
@@ -242,7 +248,7 @@ impl Store {
 
     /// The meeting's speakers by cluster label.
     pub fn speakers(&self, meeting_id: Uuid) -> Result<Vec<Speaker>> {
-        self.read(|connection| speakers(connection, meeting_id))
+        self.read(|connection| speakers_of_meeting(connection, meeting_id))
     }
 
     pub fn save_speaker(&self, speaker: &Speaker) -> Result<()> {

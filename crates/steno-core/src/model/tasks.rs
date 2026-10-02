@@ -1,8 +1,12 @@
+//! Tasks and decisions extracted from a meeting.
+//! Swift: `Sources/StenoCore/Model/Tasks.swift`.
+
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::json;
+use crate::string_enum;
 
 string_enum! {
     pub enum TaskPriority {

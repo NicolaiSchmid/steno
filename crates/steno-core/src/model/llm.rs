@@ -1,3 +1,6 @@
+//! Token accounting for the LLM calls of a meeting.
+//! Swift: `Sources/StenoCore/Model/LLM.swift`.
+
 use std::ops::Add;
 
 use serde::{Deserialize, Serialize};

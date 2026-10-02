@@ -1,3 +1,6 @@
+//! BCP-47 language tags.
+//! Swift: `Sources/StenoCore/Model/LanguageTag.swift`.
+
 use std::fmt;
 
 use serde::{Deserialize, Serialize};

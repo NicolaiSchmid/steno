@@ -1,9 +1,9 @@
-//! The GRDB migrations of `Sources/StenoCore/Storage/Migrations.swift` as
-//! SQL files, applied in order and recorded in `grdb_migrations` exactly as
-//! GRDB's `DatabaseMigrator` records them, so either side considers the
-//! other's work applied. Append-only: a new version is a new file and a new
-//! entry below the last one, written once and applied by both sides until
-//! cutover.
+//! The GRDB migrations as SQL files, applied in order and recorded in
+//! `grdb_migrations` exactly as GRDB's `DatabaseMigrator` records them, so
+//! either side considers the other's work applied. Append-only: a new
+//! version is a new file and a new entry below the last one, written once
+//! and applied by both sides until cutover.
+//! Swift: `Sources/StenoCore/Storage/Migrations.swift`.
 
 use rusqlite::{Connection, TransactionBehavior};
 

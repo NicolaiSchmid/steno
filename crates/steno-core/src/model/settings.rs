@@ -1,9 +1,13 @@
+//! The user's settings and their defaults.
+//! Swift: `Sources/StenoCore/Model/Settings.swift`.
+
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use super::{AudioRetention, Meeting};
 use crate::json;
 use crate::paths::{StenoPaths, file_url};
+use crate::string_enum;
 
 string_enum! {
     /// Which service writes the summaries.

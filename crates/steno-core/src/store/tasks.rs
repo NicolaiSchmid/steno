@@ -1,3 +1,7 @@
+//! `meetingTask` and `decision` rows.
+//! Swift: the task and decision methods of
+//! `Sources/StenoCore/Storage/MeetingStore.swift`.
+
 use rusqlite::{Connection, Row, params};
 use uuid::Uuid;
 

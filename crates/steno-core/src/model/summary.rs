@@ -1,3 +1,6 @@
+//! The structured summary the LLM returns.
+//! Swift: `Sources/StenoCore/Model/Summary.swift`.
+
 use serde::{Deserialize, Serialize};
 
 use super::LanguageTag;

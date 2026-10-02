@@ -1,3 +1,6 @@
+//! Audio assets: their format, lanes and retention.
+//! Swift: `Sources/StenoCore/Model/Audio.swift`.
+
 use std::collections::BTreeMap;
 
 use chrono::{DateTime, Duration, Utc};
@@ -9,6 +12,7 @@ use crate::json::{
     self,
     case_coding::{self, Case},
 };
+use crate::string_enum;
 
 string_enum! {
     pub enum AudioFormat {

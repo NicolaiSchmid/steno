@@ -2,6 +2,11 @@
 //! sorted keys, ISO 8601 dates with three fraction digits, `Data` as base64,
 //! slashes unescaped. JSON columns use the compact one-line form; the pretty
 //! form (`meeting.json`) belongs to a later package.
+//!
+//! The date and UUID text codecs ([`format_date`], [`parse_date`],
+//! [`uuid_string`] and the `with` modules) are the one implementation for
+//! every Steno crate; the bridge crate switches to them in the integration
+//! commit after it and this crate have both landed.
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
@@ -50,12 +55,15 @@ fn normalise(value: &mut Value) {
     }
 }
 
-/// `2026-09-25T10:00:00.000Z`: always UTC, always three fraction digits.
+/// `2026-09-25T10:00:00.000Z`: always UTC, always three fraction digits,
+/// truncated like Swift's `StenoJSON.format` (see `store::convert`).
+#[must_use]
 pub fn format_date(date: DateTime<Utc>) -> String {
     date.format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string()
 }
 
 /// Accepts the fractional and the whole-second ISO 8601 forms.
+#[must_use]
 pub fn parse_date(text: &str) -> Option<DateTime<Utc>> {
     DateTime::parse_from_rfc3339(text)
         .ok()
@@ -64,6 +72,7 @@ pub fn parse_date(text: &str) -> Option<DateTime<Utc>> {
 
 /// The uppercase hyphenated form Swift's `UUID.uuidString` produces, which
 /// is what every id column and JSON id holds.
+#[must_use]
 pub fn uuid_string(id: Uuid) -> String {
     id.hyphenated()
         .encode_upper(&mut Uuid::encode_buffer())
@@ -171,7 +180,7 @@ pub mod base64_bytes {
 /// The JSON shape of enums with payloads (`Model/CaseCoding.swift`): a bare
 /// string for a case without a payload (`"ready"`) and a one-key object for
 /// a case with one (`{"failed":"reason"}`, `{"keepDays":30}`).
-pub mod case_coding {
+pub(crate) mod case_coding {
     use serde::ser::SerializeMap;
 
     use super::{Deserialize, Serialize, Serializer, Value, de};
@@ -224,10 +233,6 @@ pub mod case_coding {
     ) -> Result<T, E> {
         let value = payload.ok_or_else(|| E::custom(format!("case {name} needs a payload")))?;
         serde_json::from_value(value).map_err(E::custom)
-    }
-
-    pub fn unknown<E: de::Error>(type_name: &str, name: &str) -> E {
-        E::custom(format!("unknown {type_name} case {name}"))
     }
 }
 

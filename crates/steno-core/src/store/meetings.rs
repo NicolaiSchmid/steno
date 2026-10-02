@@ -1,3 +1,7 @@
+//! `meeting` rows and the transactions that write a meeting together with
+//! what hangs off it.
+//! Swift: `Sources/StenoCore/Storage/MeetingStore.swift`.
+
 use chrono::{DateTime, Utc};
 use rusqlite::{Connection, OptionalExtension, Row, params, params_from_iter};
 use uuid::Uuid;
@@ -81,6 +85,8 @@ pub(super) fn fetch(connection: &Connection, id: Uuid) -> Result<Option<Meeting>
         .optional()?)
 }
 
+/// The row as it is now, for a read-modify-write inside a transaction;
+/// `MeetingNotFound` when there is none, since every caller needs one.
 pub(super) fn current(connection: &Connection, id: Uuid) -> Result<Meeting> {
     fetch(connection, id)?.ok_or(StoreError::MeetingNotFound(id))
 }
@@ -96,7 +102,7 @@ fn write_processing_results(connection: &Connection, results: &Meeting) -> Resul
 
 /// What `delete_meeting` leaves for the caller: the files the rows pointed
 /// at, which the caller removes once the transaction has committed (the
-/// folder-versus-files rule lives with the recording layout, WP6).
+/// folder-versus-files rule lives with the recording layout).
 #[derive(Debug, Clone, PartialEq)]
 pub struct DeletedMeeting {
     pub assets: Vec<AudioAsset>,
@@ -218,7 +224,8 @@ impl Store {
         })
     }
 
-    pub fn set_state(&self, state: MeetingState, id: Uuid, now: DateTime<Utc>) -> Result<()> {
+    /// `update_meeting` for the one field the pipeline changes most.
+    pub fn set_state(&self, id: Uuid, state: MeetingState, now: DateTime<Utc>) -> Result<()> {
         self.update_meeting(id, now, |meeting| {
             meeting.state = state;
             Ok(())
@@ -329,8 +336,8 @@ impl Store {
                 }
                 MeetingStateKind::Queued | MeetingStateKind::Ready | MeetingStateKind::Failed => {}
             }
-            let assets = assets::for_meeting(transaction, id)?;
-            let clips = people::speakers(transaction, id)?
+            let assets = assets::assets_of_meeting(transaction, id)?;
+            let clips = people::speakers_of_meeting(transaction, id)?
                 .into_iter()
                 .filter_map(|speaker| speaker.sample_clip_url)
                 .collect();

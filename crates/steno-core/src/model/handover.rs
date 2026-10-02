@@ -1,3 +1,6 @@
+//! Phone handover: the paired device, its state and the receipt.
+//! Swift: `Sources/StenoCore/Model/Handover.swift`.
+
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use uuid::Uuid;
@@ -6,6 +9,7 @@ use crate::json::{
     self,
     case_coding::{self, Case},
 };
+use crate::string_enum;
 
 /// A phone paired with this computer. The bearer token itself is never
 /// stored; the store keeps its SHA-256.

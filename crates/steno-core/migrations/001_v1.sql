@@ -1,7 +1,9 @@
--- GRDB migration "v1" (Sources/StenoCore/Storage/Migrations.swift) as the
--- DDL GRDB emits, so sqlite_master reads the same on both sides. The trigger
--- bodies are GRDB's FTS5 synchronisation text, whitespace included: SQLite
--- stores CREATE TRIGGER statements verbatim.
+-- GRDB migration "v1": the initial schema.
+-- Mirrors "v1" in Sources/StenoCore/Storage/Migrations.swift; applied by
+-- both sides until cutover; never edit once shipped.
+-- The DDL is what GRDB emits, so sqlite_master reads the same on both
+-- sides. The trigger bodies are GRDB's FTS5 synchronisation text, whitespace
+-- included: SQLite stores CREATE TRIGGER statements verbatim.
 CREATE TABLE "meeting" ("id" TEXT PRIMARY KEY NOT NULL, "title" TEXT NOT NULL, "startedAt" DATETIME NOT NULL, "duration" DOUBLE NOT NULL, "language" TEXT, "source" TEXT NOT NULL, "calendarEventID" TEXT, "tags" TEXT NOT NULL DEFAULT '[]', "state" TEXT NOT NULL, "failureReason" TEXT, "templateID" TEXT NOT NULL, "summary" TEXT, "summaryText" TEXT NOT NULL DEFAULT '', "scratchpad" TEXT NOT NULL DEFAULT '', "llmUsage" TEXT, "createdAt" DATETIME NOT NULL, "updatedAt" DATETIME NOT NULL);
 CREATE INDEX "meeting_state" ON "meeting"("state");
 CREATE INDEX "meeting_startedAt" ON "meeting"("startedAt");

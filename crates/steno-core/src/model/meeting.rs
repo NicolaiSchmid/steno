@@ -1,3 +1,6 @@
+//! The meeting: its source, state, end reason and title origin.
+//! Swift: `Sources/StenoCore/Model/Meeting.swift`.
+
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use uuid::Uuid;
@@ -7,6 +10,7 @@ use crate::json::{
     self,
     case_coding::{self, Case},
 };
+use crate::string_enum;
 
 string_enum! {
     /// Where a recording came from. Decides which lanes exist and which lane

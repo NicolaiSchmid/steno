@@ -1,3 +1,6 @@
+//! `transcriptSegment` rows.
+//! Swift: the segment methods of `Sources/StenoCore/Storage/MeetingStore.swift`.
+
 use rusqlite::{Connection, Row, params};
 use uuid::Uuid;
 

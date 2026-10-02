@@ -1,4 +1,10 @@
+//! The pipeline's stages and the learned rate per stage.
+//! Swift: `Sources/StenoCore/Storage/Records.swift` and
+//! `Sources/StenoCore/Storage/MeetingStore+Timings.swift`.
+
 use serde::{Deserialize, Serialize};
+
+use crate::string_enum;
 
 string_enum! {
     /// The pipeline's stages in execution order.

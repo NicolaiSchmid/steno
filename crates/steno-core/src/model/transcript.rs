@@ -1,7 +1,11 @@
+//! Transcript segments and the lane they came from.
+//! Swift: `Sources/StenoCore/Model/Transcript.swift`.
+
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::json;
+use crate::string_enum;
 
 string_enum! {
     /// Which capture lane a segment or file belongs to.

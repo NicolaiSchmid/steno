@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 #
-# One-off cross-check of the Rust store against a database the Swift app
-# wrote: copies the database to a temporary directory (the original is never
+# Cross-check of the Rust store against a database the Swift app wrote:
+# copies the database to a temporary directory (the original is never
 # opened, let alone written), opens the copy with steno-core and prints row
 # counts and the first meeting's fields. Run on a machine that has such a
-# database; the result goes into the PR body, never into the repo.
+# database; nothing it prints belongs in the repo.
 #
 # Usage: scripts/verify-store-against-swift-db.sh <path to steno.sqlite>
 

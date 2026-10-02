@@ -1,3 +1,6 @@
+//! UUIDs derived from another and a salt.
+//! Swift: `Sources/StenoCore/Model/UUID+Derived.swift`.
+
 use uuid::Uuid;
 
 use crate::json::uuid_string;

@@ -1,7 +1,8 @@
 //! `Settings` as one row per property in the `setting` table, each value a
-//! one-line `StenoJSON` fragment (`Sources/StenoCore/Storage/SettingsStore.swift`).
-//! A property missing from the table loads as its default and an unknown
-//! row is ignored, so a property can be added without a migration.
+//! one-line `StenoJSON` fragment. A property missing from the table loads
+//! as its default and an unknown row is ignored, so a property can be added
+//! without a migration.
+//! Swift: `Sources/StenoCore/Storage/SettingsStore.swift`.
 
 use rusqlite::params;
 use serde_json::Value;

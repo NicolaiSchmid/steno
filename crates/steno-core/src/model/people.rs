@@ -1,3 +1,6 @@
+//! Participants, persons, speakers and their embeddings.
+//! Swift: `Sources/StenoCore/Model/People.swift`.
+
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use uuid::Uuid;
@@ -6,6 +9,7 @@ use crate::json::{
     self,
     case_coding::{self, Case},
 };
+use crate::string_enum;
 
 string_enum! {
     /// Whether a participant is the user or somebody else.
