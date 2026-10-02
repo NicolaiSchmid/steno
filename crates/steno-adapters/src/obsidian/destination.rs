@@ -63,6 +63,25 @@ pub struct ObsidianFolderDestination {
 impl ObsidianFolderDestination {
     pub const DESTINATION_ID: &'static str = "obsidian-folder";
 
+    /// The stored destination for `settings`, with its dates in `time_zone`.
+    ///
+    /// ```
+    /// use chrono_tz::Tz;
+    /// use steno_adapters::ObsidianFolderDestination;
+    /// use steno_core::ObsidianSettings;
+    ///
+    /// let destination = ObsidianFolderDestination::new(
+    ///     ObsidianSettings {
+    ///         vault_path: "/path/to/vault".to_owned(),
+    ///         people_folder: Some("People".to_owned()),
+    ///         include_audio: false,
+    ///         task_tag: None,
+    ///     },
+    ///     Tz::Europe__Berlin,
+    /// );
+    /// assert_eq!(destination.settings().people_folder.as_deref(), Some("People"));
+    /// assert!(destination.validate_vault().is_err(), "no vault at that path");
+    /// ```
     #[must_use]
     pub fn new(settings: ObsidianSettings, time_zone: Tz) -> Self {
         Self::with_id(settings, time_zone, Self::DESTINATION_ID)

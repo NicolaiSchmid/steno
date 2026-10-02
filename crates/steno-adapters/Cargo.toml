@@ -22,6 +22,8 @@ unicode-normalization.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
+# The doctests render the core's sample export.
+steno-core = { path = "../steno-core", features = ["testing"] }
 tempfile.workspace = true
 tokio.workspace = true
 

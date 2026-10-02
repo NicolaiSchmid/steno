@@ -87,7 +87,7 @@ impl AtomicFileWriter {
 
     /// `<dir>/.steno-tmp-<8 hex>-<name>` beside `target`, the name cut on a
     /// character boundary so the whole temp name fits in
-    /// [`AtomicFileWriter::MAX_NAME_BYTES`]; a target name near the limit
+    /// 255 bytes (`MAX_NAME_BYTES`); a target name near the limit
     /// otherwise failed with "file name too long" before the first byte.
     #[must_use]
     pub fn temporary_path(target: &Path) -> PathBuf {

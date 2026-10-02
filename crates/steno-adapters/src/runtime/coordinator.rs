@@ -37,6 +37,22 @@ impl std::fmt::Debug for DeliveryCoordinator {
 impl DeliveryCoordinator {
     /// The coordinator over the stored settings' destinations
     /// ([`DeliveryCoordinator::destinations_for`]) and the wall clock.
+    ///
+    /// ```
+    /// use std::sync::Arc;
+    ///
+    /// use steno_adapters::DeliveryCoordinator;
+    /// use steno_core::{DeliveryDispatcher as _, Store};
+    /// use uuid::Uuid;
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let coordinator = DeliveryCoordinator::new(Arc::new(Store::in_memory()?));
+    /// let runtime = tokio::runtime::Builder::new_current_thread().build()?;
+    /// let rows = runtime.block_on(coordinator.deliver_all(Uuid::new_v4()));
+    /// assert!(rows.is_empty(), "no destination configured: nothing to deliver");
+    /// # Ok(())
+    /// # }
+    /// ```
     #[must_use]
     pub fn new(store: Arc<Store>) -> Self {
         Self::with_destinations(store, Box::new(Self::destinations_for), Box::new(Utc::now))

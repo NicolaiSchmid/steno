@@ -46,6 +46,16 @@ pub struct PersonPage {
 /// clock; equal inputs give equal bytes on every machine. Destinations pass
 /// the pinned folder basename as `folder_slug` on re-export so note names
 /// stay put when the title changes.
+///
+/// ```
+/// use steno_adapters::rendering::{ArtifactRenderer, RenderOptions};
+/// use steno_core::testing::sample_data;
+///
+/// let note =
+///     ArtifactRenderer::new().render_folder_note(&sample_data::export(), &RenderOptions::PLAIN, None);
+/// assert!(note.starts_with("---\ntitle: "));
+/// assert!(note.contains("\n## Summary\n"));
+/// ```
 #[derive(Debug, Clone, Copy, Default)]
 pub struct ArtifactRenderer;
 

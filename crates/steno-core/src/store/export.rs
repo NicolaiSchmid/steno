@@ -57,6 +57,18 @@ pub(super) fn export_rows(
 impl Store {
     /// Everything an adapter receives, read in one transaction. The
     /// `StenoJSON` pretty form of the result is `meeting.json`.
+    ///
+    /// ```no_run
+    /// use steno_core::{StenoPaths, Store};
+    /// use uuid::Uuid;
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let store = Store::open(StenoPaths::create_default()?.database_path())?;
+    /// let export = store.export(Uuid::parse_str("0D6F1C2E-0000-4000-8000-000000000001")?)?;
+    /// println!("{}: {} segments", export.meeting.title, export.segments.len());
+    /// # Ok(())
+    /// # }
+    /// ```
     pub fn export(&self, meeting_id: Uuid) -> Result<MeetingExport> {
         self.read(|connection| {
             export_rows(connection, meeting_id)?.ok_or(StoreError::MeetingNotFound(meeting_id))
