@@ -75,19 +75,23 @@ fn recorded_identifiers_are_honoured() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("steno.sqlite");
     {
-        let connection = rusqlite::Connection::open(&path).unwrap();
-        connection
+        // One transaction: on a rollback journal every statement would
+        // otherwise commit, and fsync, on its own.
+        let mut connection = rusqlite::Connection::open(&path).unwrap();
+        let transaction = connection.transaction().unwrap();
+        transaction
             .execute_batch("CREATE TABLE grdb_migrations (identifier TEXT NOT NULL PRIMARY KEY)")
             .unwrap();
         for migration in migrator::MIGRATIONS {
-            connection.execute_batch(migration.sql).unwrap();
-            connection
+            transaction.execute_batch(migration.sql).unwrap();
+            transaction
                 .execute(
                     "INSERT INTO grdb_migrations (identifier) VALUES (?1)",
                     [migration.identifier],
                 )
                 .unwrap();
         }
+        transaction.commit().unwrap();
     }
     let store = Store::open(&path).unwrap();
     assert_eq!(

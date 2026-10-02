@@ -48,9 +48,10 @@ pub const MIGRATIONS: &[Migration] = &[
 const MIGRATIONS_TABLE: &str =
     "CREATE TABLE IF NOT EXISTS grdb_migrations (identifier TEXT NOT NULL PRIMARY KEY)";
 
-/// The identifiers recorded so far, in application order.
-pub fn applied(connection: &Connection) -> Result<Vec<String>> {
-    connection.execute_batch(MIGRATIONS_TABLE)?;
+/// The identifiers recorded so far, in application order. A plain read:
+/// the table exists once [`migrate`] has run, which every `Store` does
+/// before handing out its connection.
+pub(crate) fn applied(connection: &Connection) -> Result<Vec<String>> {
     query_all(
         connection,
         "SELECT identifier FROM grdb_migrations ORDER BY rowid",
@@ -71,12 +72,13 @@ pub fn applied(connection: &Connection) -> Result<Vec<String>> {
 /// or two copies of this one) cannot both apply the same version: the
 /// second waits on the busy timeout, then finds the identifier recorded
 /// and moves on.
-pub fn migrate(connection: &mut Connection) -> Result<()> {
+pub(crate) fn migrate(connection: &mut Connection) -> Result<()> {
     migrate_with(connection, MIGRATIONS)
 }
 
 /// [`migrate`] over an explicit list; tests pass one with a bad migration.
 fn migrate_with(connection: &mut Connection, migrations: &[Migration]) -> Result<()> {
+    connection.execute_batch(MIGRATIONS_TABLE)?;
     let applied = applied(connection)?;
     let known = |identifier: &str| migrations.iter().any(|m| m.identifier == identifier);
     if let Some(unknown) = applied.iter().find(|identifier| !known(identifier)) {

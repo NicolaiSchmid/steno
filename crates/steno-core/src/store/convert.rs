@@ -2,12 +2,40 @@
 //! UTC text, UUIDs as uppercase text, JSON columns through `StenoJSON`,
 //! string enums by case name, embeddings as little-endian `f32` blobs.
 //! Each wrapper is a `ToSql` for `params!` and a `FromSql` that
-//! [`RowExt::col`] unwraps again:
+//! [`RowExt::col`] unwraps again. This is the pattern for a query the
+//! `Store` does not have a method for: [`DbUuid`], [`DbDate`], [`DbJson`],
+//! [`DbEnum`] and [`DbEmbedding`] in the parameters, [`RowExt::col`] on the
+//! row, against the connection [`Store::read`](super::Store::read) or
+//! [`Store::write`](super::Store::write) hands out.
 //!
-//! ```ignore
-//! connection.execute(sql, params![DbUuid(id), DbDate(at), DbJson(&tags)])?;
-//! let id = row.col::<DbUuid>("id")?;
-//! let expires_at = row.col::<Option<DbDate>>("expiresAt")?;
+//! ```
+//! use rusqlite::params;
+//! use steno_core::Store;
+//! use steno_core::store::convert::{DbDate, DbUuid, RowExt as _};
+//!
+//! # fn main() -> steno_core::store::Result<()> {
+//! let store = Store::in_memory()?;
+//! let id = uuid::Uuid::new_v4();
+//! // On a whole millisecond, so the column text reads back equal.
+//! let created_at = steno_core::json::parse_date("2026-09-29T13:49:11.135Z").unwrap();
+//! store.write(|transaction| {
+//!     transaction.execute(
+//!         "INSERT INTO person (id, displayName, createdAt) VALUES (?1, ?2, ?3)",
+//!         params![DbUuid(id), "Anna", DbDate(created_at)],
+//!     )?;
+//!     Ok(())
+//! })?;
+//! let (read_id, read_at) = store.read(|connection| {
+//!     Ok(connection.query_row(
+//!         "SELECT id, createdAt FROM person WHERE id = ?1",
+//!         [DbUuid(id)],
+//!         |row| Ok((row.col::<DbUuid>("id")?, row.col::<DbDate>("createdAt")?)),
+//!     )?)
+//! })?;
+//! assert_eq!(read_id, id);
+//! assert_eq!(read_at, created_at);
+//! # Ok(())
+//! # }
 //! ```
 //!
 //! Swift: `Sources/StenoCore/Storage/Records.swift` and GRDB's

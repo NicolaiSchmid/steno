@@ -3,6 +3,8 @@
 
 mod common;
 
+use rusqlite::params;
+use steno_core::store::convert::{DbDate, DbUuid};
 use steno_core::*;
 
 use common::{PERSON_ID, date, populated, uuid};
@@ -309,4 +311,57 @@ fn is_busy_names_the_lock_errors() {
     assert!(busy(rusqlite::ffi::SQLITE_LOCKED).is_busy());
     assert!(!busy(rusqlite::ffi::SQLITE_CONSTRAINT).is_busy());
     assert!(!StoreError::MeetingNotFound(uuid(PERSON_ID)).is_busy());
+}
+
+/// A closure that returns `Err` leaves nothing behind: the transaction is
+/// rolled back, the lock released, and the next write goes through.
+#[test]
+fn a_failed_write_rolls_back() {
+    let store = Store::in_memory().unwrap();
+    let person = common::person();
+    let missing = uuid("00000000-0000-4000-8000-000000000000");
+    let error = store
+        .write(|transaction| {
+            transaction.execute(
+                "INSERT INTO person (id, displayName, createdAt) VALUES (?1, ?2, ?3)",
+                params![
+                    DbUuid(person.id),
+                    person.display_name,
+                    DbDate(person.created_at)
+                ],
+            )?;
+            Err::<(), _>(StoreError::MeetingNotFound(missing))
+        })
+        .unwrap_err();
+    assert!(matches!(error, StoreError::MeetingNotFound(id) if id == missing));
+    assert_eq!(count(&store, "person"), 0, "the insert was rolled back");
+    store.save_person(&person).unwrap();
+    assert_eq!(count(&store, "person"), 1);
+    assert_eq!(store.person(person.id).unwrap(), Some(person));
+}
+
+/// The same strictness on `speaker.embedding`: five bytes are not an
+/// `f32` vector, and the meeting's speakers fail to read rather than lose
+/// one embedding silently.
+#[test]
+fn a_malformed_speaker_embedding_is_a_read_error() {
+    let (store, meeting) = populated();
+    store
+        .write(|transaction| {
+            transaction.execute(
+                "UPDATE speaker SET embedding = X'0102030405' WHERE meetingID = ?1",
+                [DbUuid(meeting.id)],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    let error = store.speakers(meeting.id).unwrap_err();
+    assert!(
+        matches!(
+            error,
+            StoreError::Sqlite(rusqlite::Error::FromSqlConversionFailure(..))
+        ),
+        "{error}"
+    );
+    assert!(error.to_string().contains("out of 5 byte blob"), "{error}");
 }

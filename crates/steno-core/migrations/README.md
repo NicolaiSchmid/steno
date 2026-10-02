@@ -34,6 +34,9 @@ know every version.
 4. Regenerate `tests/fixtures/schema.swift.sql` on a Mac with
    `scripts/dump-swift-schema.sh` and run `cargo test -p steno-core`: the
    parity test compares the Rust-made schema with it byte for byte.
+5. Run `scripts/verify-store-against-swift-db.sh <steno.sqlite>` against a
+   database the Swift app wrote: it opens a copy with the Rust store and
+   prints what it reads.
 
 The migrator runs each version in its own `IMMEDIATE` transaction with
 foreign keys off and checks `pragma_foreign_key_check` before the commit, as

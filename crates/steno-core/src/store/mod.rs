@@ -2,15 +2,17 @@
 //! migrations, recorded in `grdb_migrations` the way GRDB records them, the
 //! same column encodings, and the read and write paths the pipeline and the
 //! host need. The queries only the windows ask for (search, the sidebar
-//! list with its counts) arrive with the Tauri host in WP6, next to the
-//! commands that call them.
+//! list with its counts) arrive with the Tauri host in WP6: as new
+//! methods here, or next to the commands that call them, written with the
+//! [`convert`] codecs against the connection [`Store::read`] and
+//! [`Store::write`] hand out.
 //! Swift: `Sources/StenoCore/Storage/MeetingStore.swift`.
 //!
 //! The migration procedure both sides follow is in
 //! `crates/steno-core/migrations/README.md`.
 
 mod assets;
-mod convert;
+pub mod convert;
 mod deliveries;
 mod meetings;
 pub mod migrator;
@@ -37,8 +39,19 @@ use crate::model::MeetingStateKind;
 /// store raises from methods not ported yet are absent here.
 #[derive(Debug, Error)]
 pub enum StoreError {
+    /// SQLite's own errors, among them a row this build cannot decode:
+    /// rusqlite's `FromSqlConversionFailure` and `InvalidColumnType` carry
+    /// an enum text this build does not know, an invalid UUID, a JSON
+    /// column that does not parse, a malformed embedding blob or an
+    /// unparsable date. Such a row was written by another build (or by
+    /// hand); the call itself was sound.
     #[error(transparent)]
     Sqlite(#[from] rusqlite::Error),
+    /// The `setting` path only: its rows are merged into one JSON object
+    /// and decoded as [`Settings`](crate::model::Settings) outside SQLite,
+    /// so a value that does not fit fails here, not as a column
+    /// conversion. Every other JSON column goes through
+    /// [`convert::DbJson`] and surfaces as [`StoreError::Sqlite`].
     #[error("JSON column: {0}")]
     Json(#[from] serde_json::Error),
     #[error(transparent)]
@@ -59,9 +72,11 @@ pub enum StoreError {
     /// them is in.
     #[error("{count} foreign key violations after migrating, the first in {table}")]
     ForeignKeyViolations { table: String, count: i64 },
-    /// `PRAGMA journal_mode = WAL` left the file in another mode: a
-    /// read-only file, or a volume without shared memory. The store refuses
-    /// it rather than run two processes on a rollback journal.
+    /// `PRAGMA journal_mode = WAL` left the file in another mode. SQLite
+    /// does that when the VFS has no shared memory, which is what a
+    /// network volume gets (SQLite's `unix-none`); the file stays on its
+    /// rollback journal, and the store refuses it rather than run two
+    /// processes on one. The mode the pragma answered with is the payload.
     #[error("the database is in journal mode {0}, not wal")]
     JournalModeNotWal(String),
 }
@@ -95,8 +110,9 @@ const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 /// Every method blocks on the lock and on SQLite; an async host calls them
 /// from `spawn_blocking`. The mutex is `std`'s and not reentrant: a `Store`
 /// method called from inside a [`Store::read`] or [`Store::write`] closure
-/// deadlocks. Use the free functions of the submodules on the connection
-/// the closure was given instead.
+/// deadlocks. Query the connection the closure was given instead: inside
+/// the crate through the submodules' free functions, outside it with the
+/// [`convert`] codecs.
 ///
 /// The five-second busy timeout is a margin, not a guarantee. Measured
 /// against the Swift app rebuilding its FTS index over 600,000 segments,
@@ -289,4 +305,31 @@ fn upsert_sql(table: &str, columns: &str) -> String {
         insert_sql(table, columns),
         updates.join(", ")
     )
+}
+
+// `unix-none` exists only in SQLite's unix VFS set.
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+
+    /// `unix-none` is SQLite's VFS without shared memory, the one a network
+    /// volume ends up with: the pragma leaves the file on its rollback
+    /// journal and answers `delete`, and the store refuses the file.
+    #[test]
+    fn a_vfs_without_shared_memory_is_refused() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("steno.sqlite");
+        let connection =
+            Connection::open_with_flags_and_vfs(&path, rusqlite::OpenFlags::default(), "unix-none")
+                .unwrap();
+        let error = enable_wal(&connection).unwrap_err();
+        assert!(
+            matches!(&error, StoreError::JournalModeNotWal(mode) if mode == "delete"),
+            "{error}"
+        );
+        assert_eq!(
+            error.to_string(),
+            "the database is in journal mode delete, not wal"
+        );
+    }
 }

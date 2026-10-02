@@ -4,7 +4,8 @@
 //!
 //! - [`model`]: the domain types, one module per Swift file in
 //!   `Sources/StenoCore/Model`.
-//! - [`store`]: the SQLite store, its migrations and the column encodings.
+//! - [`store`]: the SQLite store and its migrations; [`store::convert`]
+//!   holds the column codecs a query outside the crate uses.
 //! - [`json`]: the `StenoJSON` convention and the date and UUID codecs.
 //! - [`string_enum`](mod@string_enum): the macro every Swift `String` enum is spelled with.
 //! - [`paths`]: where the database lives on each platform.
@@ -27,5 +28,5 @@ pub mod string_enum;
 
 pub use model::*;
 pub use paths::StenoPaths;
-pub use store::{Store, StoreError};
+pub use store::{DeletedMeeting, Store, StoreError};
 pub use string_enum::UnknownCase;
