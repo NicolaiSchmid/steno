@@ -15,7 +15,7 @@
 //!
 //! # The async form
 //!
-//! Every asynchronous trait is written with [`async_trait`], decided once
+//! Every asynchronous trait is written with [`async_trait`](macro@async_trait), decided once
 //! here: native `async fn` in traits (Rust 1.75) is not dyn-compatible, and
 //! the pipeline needs `Arc<dyn SpeechEngine>` and friends, so the methods
 //! are boxed futures with a `Send` bound. Implementations put

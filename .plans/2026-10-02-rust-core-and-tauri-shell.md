@@ -51,7 +51,7 @@ this plan starts is a parity item for the Rust side, tracked in the parity list 
 ```
 Cargo.toml                 workspace
 crates/
-  steno-core/              domain types, SQLite store and migrations, pipeline orchestration, settings
+  steno-core/              domain types, protocols (the pluggable boundaries), SQLite store and migrations, pipeline orchestration, settings
   steno-bridge/            the JSON contract (topics, methods, snapshots, params, envelope), fixture tests
   steno-audio/             capture backends (CoreAudio taps, PipeWire, WASAPI), ring buffer, AEC, writer
   steno-speech/            VAD, chunker, merge, TDT decoder; CoreML and ONNX Runtime backends; model store
@@ -193,3 +193,15 @@ What the bridge crate (WP1) asks of the Swift side before WP6 fills the list:
   set, written by `BridgeSamples` next to the existing ones, so the Rust round-trip
   test pins the optional keys that `crates/steno-bridge/tests/optional_fields.rs`
   pins by hand today.
+
+## Progress
+
+One row per package; a package is a PR off `main` once the WP1 to WP3 chain
+has merged.
+
+| Package | Branch | PR | State |
+|---------|--------|----|-------|
+| WP1 workspace and bridge | `feat/rust-bridge` | #153 | merged |
+| WP2 store | `feat/rust-store` | #155 | merged |
+| WP3 Tauri shell on fixtures | `feat/rust-desktop` | #156 | merged |
+| Core protocols (`steno-core::protocols`, boundary value types, `testing` fakes) | `feat/rust-protocols` | (this PR) | open |
