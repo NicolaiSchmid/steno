@@ -3,63 +3,49 @@
 
 mod common;
 
-use std::process::Command;
-
 use rusqlite::Connection;
 use steno_core::*;
 
 use common::{MEETING_ID, PERSON_ID, date, populate, uuid};
 
-/// Raw column text through `sqlite3` when the CLI is available (the
-/// independent reader), else through a second rusqlite connection.
+/// Raw column text through a second rusqlite connection, formatted the way
+/// the `sqlite3` CLI prints a `-noheader` row (`|` between columns, an
+/// empty cell for NULL, one decimal for an integral REAL).
+///
+/// Not the `sqlite3` CLI: the test needs FTS5 for the `_ft` queries and the
+/// system binary's feature set varies by machine (the hosted `macos-15`
+/// runner ships one without it, 2026-10-02). The bundled SQLite behind
+/// rusqlite is the same on every platform, and it reads the stored bytes
+/// without going through the store's decoders.
 fn raw(path: &std::path::Path, sql: &str) -> String {
-    match Command::new("sqlite3")
-        .arg("-batch")
-        .arg("-noheader")
-        .arg(path)
-        .arg(sql)
-        .output()
-    {
-        Ok(output) if output.status.success() => String::from_utf8(output.stdout)
-            .unwrap()
-            .trim_end()
-            .replace("\r\n", "\n"),
-        Ok(output) => panic!(
-            "sqlite3 failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        ),
-        Err(error) => {
-            eprintln!("sqlite3 CLI not available ({error}); reading raw columns through rusqlite");
-            let connection = Connection::open(path).unwrap();
-            let mut statement = connection.prepare(sql).unwrap();
-            let columns = statement.column_count();
-            let rows = statement
-                .query_map([], |row| {
-                    (0..columns)
-                        .map(|index| {
-                            row.get::<_, rusqlite::types::Value>(index)
-                                .map(|value| match value {
-                                    rusqlite::types::Value::Null => String::new(),
-                                    rusqlite::types::Value::Integer(i) => i.to_string(),
-                                    rusqlite::types::Value::Real(f) if f.fract() == 0.0 => {
-                                        format!("{f:.1}")
-                                    }
-                                    rusqlite::types::Value::Real(f) => f.to_string(),
-                                    rusqlite::types::Value::Text(t) => t,
-                                    rusqlite::types::Value::Blob(b) => {
-                                        format!("<{} bytes>", b.len())
-                                    }
-                                })
+    let connection = Connection::open(path).unwrap();
+    let mut statement = connection.prepare(sql).unwrap();
+    let columns = statement.column_count();
+    let rows = statement
+        .query_map([], |row| {
+            (0..columns)
+                .map(|index| {
+                    row.get::<_, rusqlite::types::Value>(index)
+                        .map(|value| match value {
+                            rusqlite::types::Value::Null => String::new(),
+                            rusqlite::types::Value::Integer(i) => i.to_string(),
+                            rusqlite::types::Value::Real(f) if f.fract() == 0.0 => {
+                                format!("{f:.1}")
+                            }
+                            rusqlite::types::Value::Real(f) => f.to_string(),
+                            rusqlite::types::Value::Text(t) => t,
+                            rusqlite::types::Value::Blob(b) => {
+                                format!("<{} bytes>", b.len())
+                            }
                         })
-                        .collect::<rusqlite::Result<Vec<_>>>()
-                        .map(|cells| cells.join("|"))
                 })
-                .unwrap();
-            rows.collect::<rusqlite::Result<Vec<_>>>()
-                .unwrap()
-                .join("\n")
-        }
-    }
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .map(|cells| cells.join("|"))
+        })
+        .unwrap();
+    rows.collect::<rusqlite::Result<Vec<_>>>()
+        .unwrap()
+        .join("\n")
 }
 
 #[test]
