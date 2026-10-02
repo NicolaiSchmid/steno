@@ -47,6 +47,13 @@ tempfile = "3"
 async-trait = "0.1"
 sha2 = "0.10"
 tokio = { version = "1", default-features = false, features = ["macros", "rt", "rt-multi-thread"] }
+# Apple frameworks through madsmtm's generated bindings (one objc2 runtime
+# for CoreML now, CoreAudio and AppKit later). Pulled in only by crates'
+# `cfg(target_os = "macos")` dependency tables, so the other platforms never
+# build them.
+objc2 = "0.6"
+objc2-core-ml = "0.3.2"
+objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "NSArray", "NSDictionary", "NSEnumerator", "NSError", "NSObject", "NSString", "NSURL", "NSValue"] }
 
 [workspace.lints.clippy]
 all = { level = "warn", priority = -1 }
