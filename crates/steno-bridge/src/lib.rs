@@ -13,11 +13,32 @@
 //! Naming: a top-level Swift type keeps its name without the `Bridge` prefix
 //! (`BridgeMeetingSource` is [`MeetingSource`]). A type nested in a snapshot,
 //! `Outer.Inner`, becomes `<Topic><Inner>`, where the topic word is the
-//! snapshot's short name: `App`, `Recording`, `Progress`, `List`, `Detail`,
-//! `General`, `Recording`, `Transcription`, `Summaries`, `Export`, `Phone`,
-//! `Onboarding`; a doubly nested `Outer.Mid.Inner` becomes
-//! `<Topic><Mid><Inner>` (`PhoneSettingsSnapshot.Listener.State` is
-//! [`PhoneListenerState`]).
+//! snapshot's short name, one per topic: `App`, `Recording`, `Progress`,
+//! `List` (`meetings.list`), `Detail` (`meeting.detail`), `General`,
+//! `Recording` again for `settings.recording` ([`RecordingLevel`] belongs to
+//! the live topic, [`RecordingDevice`] to the settings one), `Transcription`,
+//! `Summaries`, `Export`, `Phone` (`settings.iphone`), `Onboarding`. A doubly
+//! nested `Outer.Mid.Inner` becomes `<Topic><Mid><Inner>`
+//! (`PhoneSettingsSnapshot.Listener.State` is [`PhoneListenerState`]). The
+//! exception is a nested name Swift declares as a `typealias` of a
+//! `StenoCore` type: it keeps the core name and no topic word, so
+//! [`MeetingState`], [`RetentionMode`], [`SpeakerAssignment`] and
+//! [`TaskPriority`].
+//!
+//! To add a method: the variant and raw value in [`BridgeMethod`]
+//! (`envelope.rs`); its params or reply type in `commands.rs`; one line in
+//! `bridge_host!` (`dispatcher.rs`), which yields the host method and the
+//! route, and without which the crate does not compile; the fixture,
+//! `index.json` and the `FIXTURES` row in `tests/fixtures.rs`; `contract.ts`
+//! on the web side, which that test compares. To add a topic: the variant in
+//! [`BridgeTopic`]; the snapshot type with its `impl Snapshot` in
+//! `snapshots.rs` or `settings.rs`; the fixture and the `FIXTURES` row
+//! (`every_topic_has_a_snapshot_fixture` fails until the fixture exists).
+//!
+//! Errors: [`BridgeError`] is the contract's error and nothing more. The
+//! mapping from the store's errors, `impl From<StoreError> for BridgeError`,
+//! arrives with `steno-core` later, in the crate that sees both types, so a
+//! host does not map store errors by hand.
 //!
 //! Every public item is re-exported at the root; the modules are the table
 //! of contents.
@@ -36,7 +57,3 @@ pub use envelope::*;
 pub use settings::*;
 pub use snapshots::*;
 pub use string_enum::*;
-
-/// The name of the script message handler and of the `window` object the
-/// page installs; shared with the web transports.
-pub const MESSAGE_HANDLER_NAME: &str = "steno";

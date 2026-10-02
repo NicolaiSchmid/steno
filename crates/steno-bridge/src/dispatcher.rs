@@ -1,22 +1,43 @@
 //! The host side of a call, after `apps/macos/Steno/Web/BridgeDispatcher.swift`
-//! and `BridgeRequestParams.swift`: a request body in, a reply envelope out.
-//! [`BridgeHost`] has one typed method per [`BridgeMethod`]; the
-//! [`Dispatcher`] decodes the envelope, reads the params as the method's
-//! contract type, calls the host and wraps the outcome, so the page's promise
-//! always settles with an envelope, never a rejection.
+//! and `BridgeRequestParams.swift`: a method and its params in, the typed
+//! handler's outcome out. [`BridgeHost`] has one typed method per
+//! [`BridgeMethod`]; the [`Dispatcher`] reads the params as the method's
+//! contract type, calls the host and wraps the outcome. Two entry points for
+//! the two transports: [`Dispatcher::call`] takes a method and its params,
+//! which is what the Tauri `bridge_call` command receives
+//! (`apps/macos/web/src/bridge/tauri-transport.ts` sends `{ method, params }`
+//! and no id); [`Dispatcher::dispatch`] takes the request envelope with its
+//! `id` and always answers with a reply envelope, never a rejection, as
+//! `webkit-transport.ts` expects.
 //!
 //! Hosts run blocking. Every method takes `&self` and returns when the work
 //! is done, including a method that waits on a dialog; the host uses interior
 //! mutability for its view models, which is what the Swift `@MainActor` host
-//! amounts to. The Tauri shell runs [`Dispatcher::dispatch`] on a blocking
-//! thread (the command handler is `async` and awaits a `spawn_blocking`) and
-//! bounces anything that needs the UI, such as `ui.confirmDestructive` and
-//! the folder panels, to the main thread from inside the host method. A host
-//! behind an `Arc` is a host ([`BridgeHost`] is implemented for
-//! `Arc<T: BridgeHost + ?Sized>`), so the shell can share one host between
-//! the dispatcher and the event publisher.
+//! amounts to. The Tauri shell runs the dispatcher on a blocking thread (the
+//! command handler is `async` and awaits a `spawn_blocking`) and bounces
+//! anything that needs the UI, such as `ui.confirmDestructive` and the folder
+//! panels, to the main thread from inside the host method.
+//!
+//! Events and replies are not ordered with respect to each other. A host
+//! method that publishes a snapshot and then returns sends the snapshot
+//! through the [`EventSink`] (the window's event channel) and the reply
+//! through the command's future, two paths the `spawn_blocking` hop can
+//! reorder; the page must not read a reply as "the snapshots this call caused
+//! have arrived", nor the reverse. The Swift host has the same property
+//! (`evaluateJavaScript` for events, the message handler's reply for
+//! results). WP6 settles the convention when the real host lands; until then
+//! every snapshot is a full state, so arrival order only decides which full
+//! state the page shows last.
+//!
+//! [`BridgeHost`] and [`EventSink`] are separate traits because they have
+//! different owners: the shell implements the sink (it owns the windows the
+//! events go to) and hands it to the host, which only holds it, as an
+//! `Arc<dyn EventSink>`. That trait object needs `EventSink` object safe, so
+//! `emit` takes a built [`BridgeEvent`] and the generic `publish` lives on
+//! the [`EventSinkExt`] extension. A host behind an `Arc` is a host too
+//! ([`BridgeHost`] is implemented for `Arc<T: BridgeHost + ?Sized>`), so the
+//! shell can share one host between the dispatcher and the event publisher.
 
-use serde::Serialize;
 use serde::de::DeserializeOwned;
 use serde_json::Value;
 
@@ -54,9 +75,38 @@ impl<T: EventSink + ?Sized> EventSinkExt for T {}
 /// contract error.
 pub type Outcome<T> = Result<T, BridgeError>;
 
-/// Writes [`BridgeHost`] from one list of `Variant => fn name(params) -> Reply;`
-/// lines, and the delegating `impl BridgeHost for Arc<T>` from the same list,
-/// so a method is spelt once.
+/// How a method's reply lands in the envelope: nothing for `()`, the JSON
+/// value for a typed reply. Swift: `BridgeReplies.value`.
+trait IntoResult {
+    fn into_result(self) -> Outcome<Option<Value>>;
+}
+
+impl IntoResult for () {
+    fn into_result(self) -> Outcome<Option<Value>> {
+        Ok(None)
+    }
+}
+
+/// One `IntoResult` per reply type `commands.rs` names.
+macro_rules! typed_replies {
+    ($($reply:ty),+ $(,)?) => {$(
+        impl IntoResult for $reply {
+            fn into_result(self) -> Outcome<Option<Value>> {
+                serde_json::to_value(self).map(Some).map_err(|error| {
+                    BridgeError::failed(format!("The reply could not be encoded: {error}"))
+                })
+            }
+        }
+    )+};
+}
+
+typed_replies!(ConfirmReply, ChosenPathReply, SpeakerOptionsReply);
+
+/// Writes [`BridgeHost`], the delegating `impl BridgeHost for Arc<T>` and
+/// [`Dispatcher::call`] from one list of `Variant => fn name(params) ->
+/// Reply;` lines, so a method is spelt once and the route over
+/// [`BridgeMethod`] stays exhaustive: a variant without a line here does
+/// not compile.
 macro_rules! bridge_host {
     ($(
         $variant:ident => fn $method:ident($($param:ident: $params:ty)?) -> $reply:ty;
@@ -81,6 +131,24 @@ macro_rules! bridge_host {
                     (**self).$method($($param)?)
                 }
             )+
+        }
+
+        impl<H: BridgeHost> Dispatcher<H> {
+            /// One method call: the params read as the method's contract type
+            /// (a missing, `null` or unreadable value is `invalidParams`), the
+            /// host's typed handler, and its reply as the envelope's `result`,
+            /// `None` for a method without one. The Tauri `bridge_call` command
+            /// maps this straight onto its own `Result`.
+            pub fn call(&self, method: BridgeMethod, params: Option<Value>) -> Outcome<Option<Value>> {
+                match method {
+                    $(
+                        BridgeMethod::$variant => {
+                            $(let $param: $params = decode(method, params)?;)?
+                            self.host.$method($($param)?).and_then(IntoResult::into_result)
+                        }
+                    )+
+                }
+            }
         }
     };
 }
@@ -171,26 +239,8 @@ bridge_host! {
     UiConfirmDestructive => fn ui_confirm_destructive(params: ConfirmDestructiveParams) -> ConfirmReply;
 }
 
-/// The envelope before the method name is checked, so an unknown method and
-/// a malformed request are told apart by one decode. Swift: `RawRequest`.
-#[derive(serde::Deserialize)]
-struct RawRequest {
-    id: String,
-    method: String,
-    #[serde(default)]
-    params: Option<Value>,
-}
-
-/// The result of reading a request body. Swift: `BridgeDispatcher.Decoding`.
-#[derive(Debug, Clone, PartialEq)]
-pub enum Decoding {
-    Request(BridgeRequest),
-    /// The reply to send instead; `id` is the body's when it was readable.
-    Rejected(BridgeReply),
-}
-
-/// Reads the envelope, routes by method to the host's typed handler, and
-/// wraps the outcome. Swift: `BridgeDispatcher`.
+/// Routes a method to the host's typed handler and wraps the outcome; see
+/// [`Dispatcher::call`] and [`Dispatcher::dispatch`]. Swift: `BridgeDispatcher`.
 pub struct Dispatcher<H: BridgeHost> {
     host: H,
 }
@@ -200,44 +250,17 @@ impl<H: BridgeHost> Dispatcher<H> {
         Self { host }
     }
 
-    pub fn host(&self) -> &H {
-        &self.host
-    }
-
-    /// Reads a request body. A method name outside the contract is
-    /// `unknownMethod`; anything else that fails to decode is
-    /// `invalidParams`, with the body's `id` when it was readable.
-    pub fn decode(body: &str) -> Decoding {
-        let invalid = |id: &str, message: &str| {
-            Decoding::Rejected(BridgeReply::error(id, BridgeError::invalid_params(message)))
-        };
-        let Ok(value) = serde_json::from_str::<Value>(body) else {
-            return invalid("", "The message is not JSON.");
-        };
-        if !value.is_object() {
-            return invalid("", "The message is not an object.");
-        }
-        let id = value["id"].as_str().unwrap_or("").to_owned();
-        let Ok(raw) = serde_json::from_value::<RawRequest>(value) else {
-            return invalid(&id, "The message is not a bridge request.");
-        };
-        match raw.method.parse::<BridgeMethod>() {
-            Ok(method) => Decoding::Request(BridgeRequest::new(raw.id, method, raw.params)),
-            Err(_) => Decoding::Rejected(BridgeReply::error(
-                raw.id,
-                BridgeError::unknown_method(format!("Unknown method '{}'.", raw.method)),
-            )),
-        }
-    }
-
-    /// One call end to end: decode, route, wrap. Never fails, so the page's
-    /// promise resolves with an envelope in every case.
+    /// One envelope end to end: read the request, [`call`](Self::call),
+    /// wrap. Never fails, so the page's promise resolves with an envelope in
+    /// every case: a method name outside the contract is `unknownMethod`,
+    /// a body that is not a request is `invalidParams`, with the body's `id`
+    /// when it was readable.
     pub fn dispatch(&self, body: &str) -> BridgeReply {
-        let request = match Self::decode(body) {
-            Decoding::Request(request) => request,
-            Decoding::Rejected(reply) => return reply,
+        let request = match decode_request(body) {
+            Ok(request) => request,
+            Err(reply) => return reply,
         };
-        match self.route(&request) {
+        match self.call(request.method, request.params) {
             Ok(Some(result)) => BridgeReply::result(request.id, result),
             Ok(None) => BridgeReply::empty(request.id),
             Err(error) => BridgeReply::error(request.id, error),
@@ -271,152 +294,50 @@ impl<H: BridgeHost> Dispatcher<H> {
         json::to_compact_string(&self.dispatch(body))
             .expect("an envelope of strings and JSON values encodes")
     }
+}
 
-    /// Routes by method: reads the params as the contract type, calls the
-    /// host, converts a typed reply to its JSON value.
-    #[allow(clippy::too_many_lines)]
-    fn route(&self, request: &BridgeRequest) -> Outcome<Option<Value>> {
-        use BridgeMethod as M;
-        let host = &self.host;
-        match request.method {
-            M::PageReady => unit(host.page_ready()),
-            M::PageLayout => unit(host.page_layout(params(request)?)),
+/// The envelope before the method name is checked, so an unknown method and
+/// a malformed request are told apart by one read. Swift: `RawRequest`.
+#[derive(serde::Deserialize)]
+struct RawRequest {
+    id: String,
+    method: String,
+    #[serde(default)]
+    params: Option<Value>,
+}
 
-            M::MeetingsSetFilter => unit(host.meetings_set_filter(params(request)?)),
-            M::MeetingsSetTagFilter => unit(host.meetings_set_tag_filter(params(request)?)),
-            M::MeetingsSetQuery => unit(host.meetings_set_query(params(request)?)),
-            M::MeetingsSelect => unit(host.meetings_select(params(request)?)),
-            M::MeetingsDelete => value(host.meetings_delete(params(request)?)),
-
-            M::MeetingSetTab => unit(host.meeting_set_tab(params(request)?)),
-            M::MeetingSetTags => unit(host.meeting_set_tags(params(request)?)),
-            M::MeetingSetTemplate => unit(host.meeting_set_template(params(request)?)),
-            M::MeetingRerunSummary => unit(host.meeting_rerun_summary()),
-            M::MeetingReexport => unit(host.meeting_reexport()),
-            M::MeetingSetKeepAudio => value(host.meeting_set_keep_audio(params(request)?)),
-            M::MeetingDeleteRecordingNow => value(host.meeting_delete_recording_now()),
-            M::MeetingSaveNotes => unit(host.meeting_save_notes(params(request)?)),
-            M::MeetingRevealRecording => unit(host.meeting_reveal_recording()),
-            M::MeetingRevealExport => unit(host.meeting_reveal_export()),
-
-            M::SpeakersOptions => value(host.speakers_options(params(request)?)),
-            M::SpeakersSelect => unit(host.speakers_select(params(request)?)),
-            M::SpeakersPlay => unit(host.speakers_play(params(request)?)),
-            M::SpeakersStop => unit(host.speakers_stop()),
-
-            M::RecordingStart => unit(host.recording_start(params(request)?)),
-            M::RecordingStop => unit(host.recording_stop()),
-            M::RecordingToggle => unit(host.recording_toggle()),
-            M::RecordingKeepGoing => unit(host.recording_keep_going()),
-            M::RecordingClearMessages => unit(host.recording_clear_messages()),
-
-            M::SetupDismissBanner => unit(host.setup_dismiss_banner()),
-
-            M::SettingsGeneralSetLaunchAtLogin => {
-                unit(host.settings_general_set_launch_at_login(params(request)?))
-            }
-            M::SettingsGeneralSetDetection => {
-                unit(host.settings_general_set_detection(params(request)?))
-            }
-            M::SettingsGeneralSetDefaultTemplate => {
-                unit(host.settings_general_set_default_template(params(request)?))
-            }
-            M::SettingsGeneralRequestCalendar => unit(host.settings_general_request_calendar()),
-            M::SettingsGeneralSetAutomaticUpdates => {
-                unit(host.settings_general_set_automatic_updates(params(request)?))
-            }
-            M::SettingsGeneralOpenLoginItems => unit(host.settings_general_open_login_items()),
-            M::SettingsRecordingSetInputDevice => {
-                unit(host.settings_recording_set_input_device(params(request)?))
-            }
-            M::SettingsRecordingRefreshDevices => unit(host.settings_recording_refresh_devices()),
-            M::SettingsRecordingChooseFolder => value(host.settings_recording_choose_folder()),
-            M::SettingsRecordingRevealFolder => unit(host.settings_recording_reveal_folder()),
-            M::SettingsRecordingSetRetention => {
-                unit(host.settings_recording_set_retention(params(request)?))
-            }
-            M::SettingsRecordingRequestPermission => {
-                unit(host.settings_recording_request_permission(params(request)?))
-            }
-            M::SettingsTranscriptionSetEngine => {
-                unit(host.settings_transcription_set_engine(params(request)?))
-            }
-            M::SettingsTranscriptionDownload => {
-                unit(host.settings_transcription_download(params(request)?))
-            }
-            M::SettingsTranscriptionRemove => {
-                unit(host.settings_transcription_remove(params(request)?))
-            }
-            M::SettingsSummariesSelectPreset => {
-                unit(host.settings_summaries_select_preset(params(request)?))
-            }
-            M::SettingsSummariesUpdate => unit(host.settings_summaries_update(params(request)?)),
-            M::SettingsSummariesSave => unit(host.settings_summaries_save()),
-            M::SettingsSummariesTest => unit(host.settings_summaries_test()),
-            M::SettingsSummariesConfirmCodex => unit(host.settings_summaries_confirm_codex()),
-            M::SettingsSummariesRefreshCodexStatus => {
-                unit(host.settings_summaries_refresh_codex_status())
-            }
-            M::SettingsSummariesRefreshCodexModels => {
-                unit(host.settings_summaries_refresh_codex_models())
-            }
-            M::SettingsSummariesSelectCodexModel => {
-                unit(host.settings_summaries_select_codex_model(params(request)?))
-            }
-            M::SettingsSummariesStopUsingCodex => unit(host.settings_summaries_stop_using_codex()),
-            M::SettingsExportSetEnabled => unit(host.settings_export_set_enabled(params(request)?)),
-            M::SettingsExportChooseVault => value(host.settings_export_choose_vault()),
-            M::SettingsExportUpdate => unit(host.settings_export_update(params(request)?)),
-            M::SettingsExportSave => unit(host.settings_export_save()),
-            M::SettingsPhoneBeginPairing => unit(host.settings_phone_begin_pairing()),
-            M::SettingsPhoneCancelPairing => unit(host.settings_phone_cancel_pairing()),
-            M::SettingsPhoneRevoke => unit(host.settings_phone_revoke(params(request)?)),
-
-            M::OnboardingRequest => unit(host.onboarding_request(params(request)?)),
-            M::OnboardingSkip => unit(host.onboarding_skip(params(request)?)),
-            M::OnboardingRefresh => unit(host.onboarding_refresh()),
-            M::OnboardingAdvance => unit(host.onboarding_advance()),
-            M::OnboardingBack => unit(host.onboarding_back()),
-            M::OnboardingSaveSummaries => unit(host.onboarding_save_summaries()),
-            M::OnboardingConfirmSummariesWithCodex => {
-                unit(host.onboarding_confirm_summaries_with_codex())
-            }
-            M::OnboardingChooseVault => value(host.onboarding_choose_vault()),
-            M::OnboardingSaveVault => unit(host.onboarding_save_vault()),
-            M::OnboardingSkipSetup => unit(host.onboarding_skip_setup(params(request)?)),
-            M::OnboardingFinish => unit(host.onboarding_finish()),
-
-            M::UpdatesCheck => unit(host.updates_check()),
-            M::SystemOpenUrl => unit(host.system_open_url(params(request)?)),
-            M::SystemOpenSystemSettings => unit(host.system_open_system_settings(params(request)?)),
-            M::WindowOpen => unit(host.window_open(params(request)?)),
-            M::WindowClose => unit(host.window_close(params(request)?)),
-            M::UiConfirmDestructive => value(host.ui_confirm_destructive(params(request)?)),
-        }
+/// Reads a request body, or the reply to send instead. Swift:
+/// `BridgeDispatcher.decode`.
+fn decode_request(body: &str) -> Result<BridgeRequest, BridgeReply> {
+    let invalid =
+        |id: &str, message: &str| Err(BridgeReply::error(id, BridgeError::invalid_params(message)));
+    let Ok(value) = serde_json::from_str::<Value>(body) else {
+        return invalid("", "The message is not JSON.");
+    };
+    if !value.is_object() {
+        return invalid("", "The message is not an object.");
+    }
+    let id = value["id"].as_str().unwrap_or("").to_owned();
+    let Ok(raw) = serde_json::from_value::<RawRequest>(value) else {
+        return invalid(&id, "The message is not a bridge request.");
+    };
+    match raw.method.parse::<BridgeMethod>() {
+        Ok(method) => Ok(BridgeRequest::new(raw.id, method, raw.params)),
+        Err(_) => Err(BridgeReply::error(
+            raw.id,
+            BridgeError::unknown_method(format!("Unknown method '{}'.", raw.method)),
+        )),
     }
 }
 
-/// The method's params decoded into its contract type; a missing, `null` or
-/// unreadable value is `invalidParams`. Swift: `BridgeRequest.params(_:)`.
-fn params<T: DeserializeOwned>(request: &BridgeRequest) -> Outcome<T> {
-    match &request.params {
+/// The method's params as its contract type; a missing, `null` or unreadable
+/// value is `invalidParams`. Swift: `BridgeRequest.params(_:)`.
+fn decode<T: DeserializeOwned>(method: BridgeMethod, params: Option<Value>) -> Outcome<T> {
+    match params {
         None | Some(Value::Null) => Err(BridgeError::invalid_params(format!(
-            "{} needs params.",
-            request.method
+            "{method} needs params."
         ))),
-        Some(value) => serde_json::from_value(value.clone())
-            .map_err(|error| BridgeError::invalid_params(format!("{}: {error}", request.method))),
+        Some(value) => serde_json::from_value(value)
+            .map_err(|error| BridgeError::invalid_params(format!("{method}: {error}"))),
     }
-}
-
-fn unit(outcome: Outcome<()>) -> Outcome<Option<Value>> {
-    outcome.map(|()| None)
-}
-
-/// A typed reply as the envelope carries it. Swift: `BridgeReplies.value`.
-fn value<T: Serialize>(outcome: Outcome<T>) -> Outcome<Option<Value>> {
-    let reply = outcome?;
-    serde_json::to_value(reply)
-        .map(Some)
-        .map_err(|error| BridgeError::failed(format!("The reply could not be encoded: {error}")))
 }

@@ -2,12 +2,13 @@
 //! the error its `FromStr` returns.
 //!
 //! A macro rather than `strum`: the raw values live next to the variants, and
-//! the macro gives a `const fn as_str` and a `const ALL` slice, which the
-//! dispatcher's routing and the contract tests use at compile time; `strum`
-//! would add a dependency for a weaker version of the same four impls. The
-//! enums are deliberately not `#[non_exhaustive]`: the dispatcher matches
-//! every `BridgeMethod` exhaustively, so a method added to the contract fails
-//! to compile until it is routed, which is the check we want.
+//! the macro gives a `const fn as_str`, a `const ALL` slice (the contract
+//! tests walk it against `contract.ts`) and a `FromStr` (the dispatcher reads
+//! method names with it); `strum` would add a dependency for a weaker version
+//! of the same four impls. The enums are deliberately not `#[non_exhaustive]`:
+//! `bridge_host!` matches every `BridgeMethod`, so a method added to the
+//! contract fails to compile until it has a line there, which is the check we
+//! want.
 
 /// A string enum with the exact raw values Swift's `String` enums encode:
 /// serde renames, `ALL` (Swift's `CaseIterable`), `as_str`, `Display` and
