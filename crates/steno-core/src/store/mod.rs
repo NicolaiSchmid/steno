@@ -16,9 +16,9 @@ mod transcript;
 
 use std::path::Path;
 use std::sync::{Mutex, MutexGuard, PoisonError};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
-use rusqlite::{Connection, Params, Row, Transaction};
+use rusqlite::{Connection, ErrorCode, Params, Row, Transaction, TransactionBehavior};
 use thiserror::Error;
 use uuid::Uuid;
 
@@ -45,13 +45,18 @@ pub enum StoreError {
     /// wrote it, and this one must not touch it.
     #[error("the database was migrated by a newer version ({0})")]
     UnknownMigration(String),
-    /// GRDB's check after migrating: the schema went in but the rows no
-    /// longer satisfy its foreign keys.
+    /// GRDB's check before a migration commits: its rows no longer satisfy
+    /// the foreign keys, so it was rolled back and the database is as it
+    /// was.
     #[error("{0} foreign key violations after migrating")]
     ForeignKeyViolations(i64),
 }
 
 pub type Result<T> = std::result::Result<T, StoreError>;
+
+/// How long a connection waits for another process's lock before giving
+/// up; GRDB's `DatabasePool` default.
+const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// The one store over the database. One connection behind a mutex: SQLite
 /// serialises writes anyway, and the host reads on the same thread pool.
@@ -69,13 +74,17 @@ impl Store {
     /// Opens (creating) the database at `path` in WAL mode with foreign keys
     /// on and a five-second busy timeout, as GRDB's `DatabasePool` does, and
     /// applies every pending migration. The parent directory is created.
+    /// Another process (the Swift app, a second copy of this one) may hold
+    /// the file at the same time: every write here begins immediate, so the
+    /// two queue on the busy timeout instead of failing.
     pub fn open(path: impl AsRef<Path>) -> Result<Store> {
         let path = path.as_ref();
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
         let connection = Connection::open(path)?;
-        connection.pragma_update(None, "journal_mode", "WAL")?;
+        connection.busy_timeout(BUSY_TIMEOUT)?;
+        enable_wal(&connection)?;
         Self::new(connection)
     }
 
@@ -85,7 +94,6 @@ impl Store {
     }
 
     fn new(mut connection: Connection) -> Result<Store> {
-        connection.busy_timeout(Duration::from_secs(5))?;
         connection.pragma_update(None, "foreign_keys", true)?;
         migrator::migrate(&mut connection)?;
         Ok(Store {
@@ -107,9 +115,15 @@ impl Store {
     }
 
     /// Runs `body` inside one transaction, committed when it returns `Ok`.
+    /// The transaction begins `IMMEDIATE`, as GRDB's `DatabasePool` writer
+    /// does: a deferred one that reads first and writes second cannot be
+    /// upgraded once another connection has written in between (WAL's
+    /// `SQLITE_BUSY_SNAPSHOT`), and the busy handler does not retry that.
+    /// Beginning immediate takes the write lock up front, so the second
+    /// writer waits its turn instead of failing with `database is locked`.
     pub fn write<T>(&self, body: impl FnOnce(&Transaction<'_>) -> Result<T>) -> Result<T> {
         let mut connection = self.lock();
-        let transaction = connection.transaction()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let value = body(&transaction)?;
         transaction.commit()?;
         Ok(value)
@@ -148,9 +162,29 @@ impl Store {
     }
 }
 
+/// `PRAGMA journal_mode = WAL`. Switching a fresh file's mode rewrites the
+/// header under an exclusive lock, and when two connections have both read
+/// the old header and race for it SQLite hands the loser a plain
+/// `SQLITE_BUSY` without consulting the busy handler. The loser retries
+/// until the winner is done (then the pragma finds WAL set and does
+/// nothing) or the busy timeout is spent.
+fn enable_wal(connection: &Connection) -> Result<()> {
+    let deadline = Instant::now() + BUSY_TIMEOUT;
+    loop {
+        match connection.pragma_update(None, "journal_mode", "WAL") {
+            Err(rusqlite::Error::SqliteFailure(error, _))
+                if error.code == ErrorCode::DatabaseBusy && Instant::now() < deadline =>
+            {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            outcome => return Ok(outcome?),
+        }
+    }
+}
+
 /// The two statements of the schema dump; the same text as the query in
 /// `scripts/dump-swift-schema.sh`.
-pub const SCHEMA_DUMP_QUERIES: &[&str] = &[
+const SCHEMA_DUMP_QUERIES: &[&str] = &[
     "SELECT type || '|' || name || '|' || tbl_name || '|' || coalesce(sql, '') FROM sqlite_master ORDER BY type, name",
     "SELECT 'migration|' || identifier FROM grdb_migrations ORDER BY rowid",
 ];
@@ -181,6 +215,11 @@ fn insert_sql(table: &str, columns: &str) -> String {
 /// [`insert_sql`] with `ON CONFLICT DO UPDATE` on every column but the
 /// first, the primary key: GRDB's `save`, which replaces the row in place
 /// when it exists (so the FTS update triggers fire) and inserts it otherwise.
+///
+/// `upsert_sql("decision", "id, meetingID, text")` is
+/// `INSERT INTO decision (id, meetingID, text) VALUES (?1, ?2, ?3)
+/// ON CONFLICT(id) DO UPDATE SET meetingID = excluded.meetingID,
+/// text = excluded.text`.
 fn upsert_sql(table: &str, columns: &str) -> String {
     let mut names = columns.split(',').map(str::trim);
     let key = names.next().expect("the key column comes first");

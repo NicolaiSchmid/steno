@@ -5,7 +5,7 @@
 //! entry below the last one, written once and applied by both sides until
 //! cutover.
 
-use rusqlite::Connection;
+use rusqlite::{Connection, TransactionBehavior};
 
 use super::{Result, StoreError, query_all};
 
@@ -51,46 +51,61 @@ pub fn applied(connection: &Connection) -> Result<Vec<String>> {
     )
 }
 
-/// Applies every migration not yet recorded, each in its own transaction
-/// with foreign keys off and a check at the end, as GRDB does. Fails before
-/// touching anything when the database records an identifier this build
-/// does not know.
+/// Applies every migration not yet recorded, each in its own `IMMEDIATE`
+/// transaction with foreign keys off and GRDB's check before the commit:
+/// a migration whose rows no longer satisfy their foreign keys rolls back
+/// and the open fails with [`StoreError::ForeignKeyViolations`]. Fails
+/// before touching anything when the database records an identifier this
+/// build does not know.
+///
+/// The transaction also covers the read of what is applied, so two
+/// processes opening a fresh database at once (the Swift app and this one,
+/// or two copies of this one) cannot both apply the same version: the
+/// second waits on the busy timeout, then finds the identifier recorded
+/// and moves on.
 pub fn migrate(connection: &mut Connection) -> Result<()> {
     let applied = applied(connection)?;
     let known = |identifier: &str| MIGRATIONS.iter().any(|m| m.identifier == identifier);
     if let Some(unknown) = applied.iter().find(|identifier| !known(identifier)) {
         return Err(StoreError::UnknownMigration(unknown.clone()));
     }
-    let pending: Vec<&Migration> = MIGRATIONS
-        .iter()
-        .filter(|migration| !applied.iter().any(|a| a == migration.identifier))
-        .collect();
-    if pending.is_empty() {
+    if applied.len() == MIGRATIONS.len() {
         return Ok(());
     }
 
+    // `PRAGMA foreign_keys` is a no-op inside a transaction, so it is
+    // switched around the whole run, as GRDB does.
     connection.pragma_update(None, "foreign_keys", false)?;
-    let outcome = apply(connection, &pending);
+    let outcome = apply(connection);
     connection.pragma_update(None, "foreign_keys", true)?;
     outcome
 }
 
-fn apply(connection: &mut Connection, pending: &[&Migration]) -> Result<()> {
-    for migration in pending {
-        let transaction = connection.transaction()?;
+fn apply(connection: &mut Connection) -> Result<()> {
+    for migration in MIGRATIONS {
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let recorded: bool = transaction.query_row(
+            "SELECT count(*) FROM grdb_migrations WHERE identifier = ?1",
+            [migration.identifier],
+            |row| row.get::<_, i64>(0).map(|count| count > 0),
+        )?;
+        if recorded {
+            continue;
+        }
         transaction.execute_batch(migration.sql)?;
         transaction.execute(
             "INSERT INTO grdb_migrations (identifier) VALUES (?1)",
             [migration.identifier],
         )?;
+        let violations: i64 =
+            transaction.query_row("SELECT count(*) FROM pragma_foreign_key_check", [], |row| {
+                row.get(0)
+            })?;
+        if violations > 0 {
+            // Dropping the transaction rolls it back.
+            return Err(StoreError::ForeignKeyViolations(violations));
+        }
         transaction.commit()?;
-    }
-    let violations: i64 =
-        connection.query_row("SELECT count(*) FROM pragma_foreign_key_check", [], |row| {
-            row.get(0)
-        })?;
-    if violations > 0 {
-        return Err(StoreError::ForeignKeyViolations(violations));
     }
     Ok(())
 }
