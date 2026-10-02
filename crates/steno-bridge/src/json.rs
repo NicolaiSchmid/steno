@@ -300,8 +300,9 @@ pub mod date {
 }
 
 /// Foundation's `UUID` on the wire: hyphenated, upper case. Decoding accepts
-/// either case, as `UUID(uuidString:)` does. Use as `#[serde(with = "json::uuid")]`
-/// and `#[serde(with = "json::uuid::option")]`.
+/// either case and only the hyphenated 36-character form, as
+/// `UUID(uuidString:)` does. Use as `#[serde(with = "json::uuid")]` and
+/// `#[serde(with = "json::uuid::option")]`.
 pub mod uuid {
     use serde::{Deserialize, Deserializer, Serialize, Serializer};
     use uuid::Uuid;
@@ -318,7 +319,15 @@ pub mod uuid {
 
     pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Uuid, D::Error> {
         let string = String::deserialize(deserializer)?;
-        Uuid::parse_str(&string).map_err(serde::de::Error::custom)
+        parse(&string).ok_or_else(|| serde::de::Error::custom(format!("Not a UUID: {string}")))
+    }
+
+    /// The hyphenated form only: the `uuid` crate would also read the
+    /// 32-digit, braced and `urn:uuid:` forms, which Foundation rejects.
+    pub fn parse(string: &str) -> Option<Uuid> {
+        (string.len() == 36)
+            .then(|| Uuid::try_parse(string).ok())
+            .flatten()
     }
 
     /// The same format on an `Option`; `None` is `null`, or an omitted key
@@ -522,4 +531,37 @@ mod tests {
         let id = ::uuid::Uuid::parse_str("00000000-0000-0000-0000-00000000000c").unwrap();
         assert_eq!(uuid::format(&id), "00000000-0000-0000-0000-00000000000C");
     }
+
+    /// `UUID(uuidString:)` reads either case of the hyphenated form and
+    /// nothing else.
+    #[test]
+    fn uuids_read_only_the_hyphenated_form() {
+        let id = ::uuid::Uuid::parse_str("00000000-0000-0000-0000-00000000000c").unwrap();
+        assert_eq!(
+            uuid::parse("00000000-0000-0000-0000-00000000000C"),
+            Some(id)
+        );
+        assert_eq!(
+            uuid::parse("00000000-0000-0000-0000-00000000000c"),
+            Some(id)
+        );
+        for rejected in [
+            "0000000000000000000000000000000c",
+            "{00000000-0000-0000-0000-00000000000c}",
+            "urn:uuid:00000000-0000-0000-0000-00000000000c",
+            "00000000-0000-0000-0000-00000000000",
+            "",
+        ] {
+            assert_eq!(uuid::parse(rejected), None, "{rejected:?}");
+        }
+        let wire: Wire = serde_json::from_str("\"00000000-0000-0000-0000-00000000000c\"").unwrap();
+        assert_eq!(wire.0, id);
+        let error = serde_json::from_str::<Wire>("\"0000000000000000000000000000000c\"")
+            .unwrap_err()
+            .to_string();
+        assert!(error.starts_with("Not a UUID: 0000"), "{error}");
+    }
+
+    #[derive(Debug, serde::Deserialize)]
+    struct Wire(#[serde(with = "uuid")] ::uuid::Uuid);
 }
