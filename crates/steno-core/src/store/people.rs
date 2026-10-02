@@ -222,11 +222,10 @@ pub(super) fn persons_with_ids(connection: &Connection, ids: &[Uuid]) -> Result<
         "SELECT {PERSON_COLUMNS} FROM person WHERE id IN ({}) ORDER BY displayName, id",
         placeholders.join(", ")
     );
-    let keys: Vec<DbUuid> = ids.iter().copied().map(DbUuid).collect();
     query_all(
         connection,
         &sql,
-        rusqlite::params_from_iter(keys.iter()),
+        rusqlite::params_from_iter(ids.iter().copied().map(DbUuid)),
         person_from_row,
     )
 }
