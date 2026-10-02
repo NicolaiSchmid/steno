@@ -24,6 +24,7 @@ import {
 	MenuPopup,
 	RecordMark,
 	SectionLabel,
+	SidebarColumn,
 	SidebarRow,
 	SplitButton,
 } from "@/components/ui";
@@ -80,21 +81,21 @@ function RecordButton({
 		const busy = state !== "recording";
 		return (
 			<Button
-				className="h-9 w-full justify-start"
+				className="w-full justify-start"
 				data-testid={state === "starting" ? "sidebar-record" : "sidebar-stop"}
 				disabled={busy}
 				onClick={busy ? undefined : () => send(client, "recording.stop")}
 				size="lg"
 				variant="primary"
 			>
-				<RecordMark />
+				<RecordMark pulse={state === "recording"} />
 				{state === "recording"
 					? "Stop"
 					: state === "starting"
 						? "Starting…"
 						: "Stopping…"}
 				{state === "recording" ? (
-					<span className="ml-auto font-mono font-normal text-[12.5px] tabular-nums">
+					<span className="ml-auto font-mono font-normal text-xs tabular-nums">
 						{format.duration(elapsed)}
 					</span>
 				) : null}
@@ -250,7 +251,7 @@ function RecordControl({
 	recording: RecordingSnapshot | undefined;
 }) {
 	return (
-		<div className="mb-3 flex flex-col gap-1.5">
+		<>
 			<RecordButton recording={recording} />
 			{recording?.autoStop && recording.state === "recording" ? (
 				<AutoStopNotice autoStop={recording.autoStop} />
@@ -263,13 +264,14 @@ function RecordControl({
 			{recording?.deniedPermissions.map((kind) => (
 				<DeniedPermission key={kind} kind={kind} />
 			))}
-		</div>
+		</>
 	);
 }
 
 /**
- * The 236 pt column: the Record control, the filters with counts, the tags,
- * then the paired iPhone and Settings at the foot.
+ * The 256 px column: a header-high spacer under the traffic lights, the
+ * Record control, the filters with counts, the tags, then the paired iPhone
+ * and Settings at the foot.
  */
 export function Sidebar() {
 	const client = useBridge();
@@ -279,7 +281,50 @@ export function Sidebar() {
 	const phone = app?.phone;
 
 	return (
-		<aside className="surface-grain flex min-h-0 flex-col gap-0.5 border-border border-r bg-sidebar px-2 pt-[52px] pb-2">
+		<SidebarColumn
+			footer={
+				<>
+					{phone ? (
+						<Card
+							className="flex items-center gap-2"
+							data-testid="phone-card"
+							padding="sm"
+							variant="sidebar"
+						>
+							<SmartphoneIcon
+								aria-hidden="true"
+								className="size-4 shrink-0 text-sidebar-icon"
+							/>
+							<span className="min-w-0 flex-1 text-2xs text-sidebar-muted-foreground">
+								<span className="block truncate font-medium text-foreground text-xs">
+									{phone.name}
+								</span>
+								{phone.lastSyncAt
+									? `Synced ${format.relative(phone.lastSyncAt)}`
+									: "Not synced yet"}
+							</span>
+							<span
+								aria-label={phone.isReachable ? "Connected" : "Not connected"}
+								className={cn(
+									"size-[7px] shrink-0 rounded-full",
+									phone.isReachable
+										? "bg-primary-2 shadow-[0_0_0_3px_var(--primary-soft)]"
+										: "bg-faint",
+								)}
+								role="img"
+							/>
+						</Card>
+					) : null}
+					<SidebarRow
+						data-testid="nav-settings"
+						icon={<SettingsIcon />}
+						onClick={() => send(client, "window.open", { window: "settings" })}
+					>
+						Settings
+					</SidebarRow>
+				</>
+			}
+		>
 			<RecordControl recording={recording} />
 			<SectionLabel>Meetings</SectionLabel>
 			{FILTERS.map((item) => (
@@ -321,45 +366,6 @@ export function Sidebar() {
 					})}
 				</>
 			) : null}
-			<div className="mt-auto flex flex-col gap-1.5">
-				{phone ? (
-					<Card
-						className="flex items-center gap-[9px]"
-						data-testid="phone-card"
-						padding="sm"
-					>
-						<SmartphoneIcon
-							aria-hidden="true"
-							className="size-4 shrink-0 stroke-[1.75] text-muted-foreground"
-						/>
-						<span className="min-w-0 flex-1 text-muted-foreground text-xs">
-							<span className="block truncate font-medium text-[12.5px] text-foreground">
-								{phone.name}
-							</span>
-							{phone.lastSyncAt
-								? `Synced ${format.relative(phone.lastSyncAt)}`
-								: "Not synced yet"}
-						</span>
-						<span
-							aria-label={phone.isReachable ? "Connected" : "Not connected"}
-							className={cn(
-								"size-[7px] shrink-0 rounded-full",
-								phone.isReachable
-									? "bg-primary-2 shadow-[0_0_0_3px_var(--primary-soft)]"
-									: "bg-faint",
-							)}
-							role="img"
-						/>
-					</Card>
-				) : null}
-				<SidebarRow
-					data-testid="nav-settings"
-					icon={<SettingsIcon />}
-					onClick={() => send(client, "window.open", { window: "settings" })}
-				>
-					Settings
-				</SidebarRow>
-			</div>
-		</aside>
+		</SidebarColumn>
 	);
 }

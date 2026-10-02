@@ -2,8 +2,8 @@ import { PlusIcon, XIcon } from "lucide-react";
 import { type KeyboardEvent, useState } from "react";
 import { send, useBridge } from "@/bridge/hooks";
 import {
+	Button,
 	Input,
-	Pill,
 	Popover,
 	PopoverDescription,
 	PopoverPopup,
@@ -21,7 +21,7 @@ export function normaliseTag(raw: string): string {
 }
 
 /**
- * The "Add tag" pill beside the meeting's tags: a popover with the current
+ * The "Add tag" button beside the meeting's tags: a popover with the current
  * tags (each removable) and a field that adds one on Return. Every change is
  * one `meeting.setTags` with the full list.
  */
@@ -57,12 +57,12 @@ export function TagEditor({ tags }: TagEditorProps) {
 			<PopoverTrigger
 				aria-label={tags.length === 0 ? undefined : "Edit tags"}
 				data-testid="edit-tags"
-				render={<Pill onClick={() => undefined} />}
+				render={<Button size="xs" variant="ghost-muted" />}
 			>
 				<PlusIcon aria-hidden="true" />
 				{tags.length === 0 ? "Add tag" : null}
 			</PopoverTrigger>
-			<PopoverPopup align="start" sideOffset={6}>
+			<PopoverPopup align="start">
 				<PopoverTitle>Tags</PopoverTitle>
 				<PopoverDescription>
 					Tags group meetings in the sidebar and travel with the export.
@@ -70,15 +70,17 @@ export function TagEditor({ tags }: TagEditorProps) {
 				{tags.length > 0 ? (
 					<div className="mt-3 flex flex-wrap gap-1.5">
 						{tags.map((tag) => (
-							<Pill
+							<Button
 								aria-label={`Remove tag ${tag}`}
 								data-testid={`remove-tag-${tag}`}
 								key={tag}
 								onClick={() => save(tags.filter((other) => other !== tag))}
+								size="xs"
+								variant="outline"
 							>
 								#{tag}
 								<XIcon aria-hidden="true" />
-							</Pill>
+							</Button>
 						))}
 					</div>
 				) : null}

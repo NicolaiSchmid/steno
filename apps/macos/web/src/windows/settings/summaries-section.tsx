@@ -47,7 +47,7 @@ function CodexFields({ codex }: { codex: CodexState }) {
 		<>
 			{codex.signIn === "signedIn" ? (
 				<FormRow
-					control={<Badge variant="live">Connected</Badge>}
+					control={<Badge variant="success">Connected</Badge>}
 					data-testid="codex-account"
 					label={`Using ChatGPT as ${codex.signInDetail ?? "your account"}.`}
 				/>
@@ -69,7 +69,7 @@ function CodexFields({ codex }: { codex: CodexState }) {
 					<>
 						<Select
 							aria-label="Model"
-							className="w-[220px]"
+							className="w-56"
 							data-testid="codex-model"
 							disabled={codex.models.length === 0}
 							onValueChange={(value) => {
@@ -218,6 +218,7 @@ export function SummariesSection() {
 					<FormRow
 						control={
 							<DraftField
+								className="w-40"
 								label="Context size"
 								onCommit={(contextTokens) => update({ contextTokens })}
 								testId="context-tokens"

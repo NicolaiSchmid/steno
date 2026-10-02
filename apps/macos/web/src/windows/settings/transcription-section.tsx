@@ -133,7 +133,7 @@ export function TranscriptionSection() {
 						control={
 							<Select
 								aria-label="Model"
-								className="w-[240px]"
+								className="w-56"
 								data-testid="engine"
 								onValueChange={(value) => {
 									if (value) {

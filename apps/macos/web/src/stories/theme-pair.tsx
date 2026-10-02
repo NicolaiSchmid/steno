@@ -24,9 +24,7 @@ export function ThemePair({ title, children }: ThemePairProps) {
 	const [dark, setDark] = useState<HTMLDivElement | null>(null);
 	return (
 		<section className="flex flex-col gap-2">
-			<h2 className="m-0 font-medium text-[13px] text-muted-foreground">
-				{title}
-			</h2>
+			<h2 className="m-0 font-medium text-muted-foreground text-sm">{title}</h2>
 			<div className="grid grid-cols-2 gap-3">
 				<div className={columnClass} ref={setLight}>
 					{light ? children({ dark: false, container: light }) : null}

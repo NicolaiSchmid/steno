@@ -1,4 +1,4 @@
-import { act, screen } from "@testing-library/react";
+import { act, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it } from "vitest";
 import type { AppSnapshot } from "@/bridge/contract";
@@ -11,31 +11,37 @@ describe("SettingsWindow", () => {
 		const harness = await createBridgeHarness();
 		renderWithBridge(<SettingsWindow />, harness);
 		expect(callsTo(harness.transport, "page.ready")).toHaveLength(1);
-		expect(screen.getByTestId("section-title-general")).toHaveTextContent(
+		// The breadcrumb carries the title; the page opens with its purpose.
+		expect(screen.getByRole("listitem", { current: "page" })).toHaveTextContent(
 			"General",
+		);
+		expect(screen.getByTestId("section-purpose-general")).toHaveTextContent(
+			"Steno runs in the menu bar and records when you ask it to.",
 		);
 	});
 
-	it("lists the six sections with the subtitles their snapshots carry", async () => {
+	it("lists the six sections as single-line rows and marks the current one", async () => {
 		const harness = await createBridgeHarness();
 		renderWithBridge(<SettingsWindow />, harness);
-		expect(screen.getByTestId("settings-general")).toHaveTextContent(
-			"Steno 0.10.0",
-		);
-		expect(screen.getByTestId("settings-recording")).toHaveTextContent("Ready");
-		expect(screen.getByTestId("settings-transcription")).toHaveTextContent(
-			"Ready",
-		);
-		expect(screen.getByTestId("settings-summaries")).toHaveTextContent(
-			"Not set up",
-		);
-		expect(screen.getByTestId("settings-export")).toHaveTextContent("Off");
-		expect(screen.getByTestId("settings-iphone")).toHaveTextContent(
-			"Nicolai's iPhone",
-		);
+		const nav = screen.getByRole("navigation", { name: "Settings sections" });
+		expect(
+			within(nav)
+				.getAllByRole("button")
+				.map((row) => row.textContent),
+		).toEqual([
+			"General",
+			"Recording",
+			"Transcription",
+			"Summaries",
+			"Export",
+			"iPhone",
+		]);
 		expect(screen.getByTestId("settings-general")).toHaveAttribute(
 			"aria-current",
 			"true",
+		);
+		expect(screen.getByTestId("settings-recording")).not.toHaveAttribute(
+			"aria-current",
 		);
 	});
 
@@ -44,14 +50,21 @@ describe("SettingsWindow", () => {
 		const harness = await createBridgeHarness();
 		renderWithBridge(<SettingsWindow />, harness);
 		await user.click(screen.getByTestId("settings-recording"));
-		expect(screen.getByTestId("section-title-recording")).toBeInTheDocument();
+		expect(screen.getByTestId("section-purpose-recording")).toBeInTheDocument();
+		expect(screen.getByRole("listitem", { current: "page" })).toHaveTextContent(
+			"Recording",
+		);
+		expect(screen.getByTestId("settings-recording")).toHaveAttribute(
+			"aria-current",
+			"true",
+		);
 		expect(screen.queryByTestId("section-general")).not.toBeInTheDocument();
 	});
 
 	it("opens on the route's section", async () => {
 		const harness = await createBridgeHarness();
 		renderWithBridge(<SettingsWindow section="export" />, harness);
-		expect(screen.getByTestId("section-title-export")).toBeInTheDocument();
+		expect(screen.getByTestId("section-purpose-export")).toBeInTheDocument();
 	});
 
 	it("follows the host's deep link when it arrives", async () => {
@@ -64,12 +77,12 @@ describe("SettingsWindow", () => {
 				requestedSettingsSection: "summaries",
 			} satisfies AppSnapshot);
 		});
-		expect(screen.getByTestId("section-title-summaries")).toBeInTheDocument();
+		expect(screen.getByTestId("section-purpose-summaries")).toBeInTheDocument();
 		// The host clears the request; the page keeps its selection.
 		act(() => {
 			harness.transport.emit("app", app);
 		});
-		expect(screen.getByTestId("section-title-summaries")).toBeInTheDocument();
+		expect(screen.getByTestId("section-purpose-summaries")).toBeInTheDocument();
 	});
 
 	it("follows the same deep link twice, after the user moved away", async () => {
@@ -84,16 +97,16 @@ describe("SettingsWindow", () => {
 		act(() => {
 			harness.transport.emit("app", toRecording);
 		});
-		expect(screen.getByTestId("section-title-recording")).toBeInTheDocument();
+		expect(screen.getByTestId("section-purpose-recording")).toBeInTheDocument();
 		act(() => {
 			harness.transport.emit("app", app);
 		});
 		await user.click(screen.getByTestId("settings-general"));
-		expect(screen.getByTestId("section-title-general")).toBeInTheDocument();
+		expect(screen.getByTestId("section-purpose-general")).toBeInTheDocument();
 		// The host publishes the same request again: a new snapshot, shown again.
 		act(() => {
 			harness.transport.emit("app", { ...toRecording });
 		});
-		expect(screen.getByTestId("section-title-recording")).toBeInTheDocument();
+		expect(screen.getByTestId("section-purpose-recording")).toBeInTheDocument();
 	});
 });

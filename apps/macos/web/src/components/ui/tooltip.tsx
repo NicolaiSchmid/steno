@@ -15,11 +15,12 @@ export interface TooltipProps
 	container?: ComponentProps<typeof BaseTooltip.Portal>["container"];
 }
 
+/** An opaque popover-coloured hint (not glass) that scales in from 0.98. */
 export function Tooltip({
 	children,
 	label,
 	side = "top",
-	sideOffset = 6,
+	sideOffset = 4,
 	container,
 	...props
 }: TooltipProps) {
@@ -34,8 +35,8 @@ export function Tooltip({
 				>
 					<BaseTooltip.Popup
 						className={cn(
-							"dropdown-glass rounded-[7px] border px-2 py-1 text-[12px] text-foreground leading-[1.4] shadow-pop",
-							"origin-(--transform-origin) transition-[opacity,transform] duration-(--duration-functional) ease-standard",
+							"edge-highlight max-w-80 rounded-md border border-border bg-popover px-2 py-1 text-foreground text-xs shadow-md outline-none",
+							"origin-(--transform-origin) transition-[opacity,scale] duration-(--duration-functional) ease-standard",
 							"data-starting-style:scale-[0.98] data-starting-style:opacity-0",
 							"data-ending-style:scale-[0.98] data-ending-style:opacity-0",
 						)}

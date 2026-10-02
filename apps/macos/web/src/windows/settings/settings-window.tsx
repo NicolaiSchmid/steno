@@ -7,13 +7,13 @@ import {
 	UploadIcon,
 } from "lucide-react";
 import { type ReactNode, useEffect, useState } from "react";
-import { useBridge, usePageReady, useSnapshot } from "@/bridge/hooks";
-import { ScrollArea, SidebarRow } from "@/components/ui";
+import { useBridge, usePageReady } from "@/bridge/hooks";
+import { ContentColumn, SidebarColumn, SidebarRow } from "@/components/ui";
 import { ExportSection } from "./export-section";
 import { GeneralSection } from "./general-section";
 import { PhoneSection } from "./iphone-section";
 import { RecordingSection } from "./recording-section";
-import { SECTIONS, type SectionId, type SectionInfo } from "./sections";
+import { SECTIONS, type SectionId, sectionInfo } from "./sections";
 import { SummariesSection } from "./summaries-section";
 import { TranscriptionSection } from "./transcription-section";
 
@@ -32,11 +32,12 @@ export interface SettingsWindowProps {
 }
 
 /**
- * The Settings window: a 200 pt sidebar of the six sections, each with the
- * one-line status its snapshot carries, and the selected section's form
- * cards. Tells the host the page is ready once. A deep link arrives as the
- * `app` snapshot's `requestedSettingsSection`, consumed by the host with
- * that publish, and wins over the route.
+ * The Settings window: a 256 px sidebar of the six sections as single-line
+ * rows, and the selected section under a "Settings / Section" breadcrumb in
+ * the header row, its form cards centred at the settings width. Tells the
+ * host the page is ready once. A deep link arrives as the `app` snapshot's
+ * `requestedSettingsSection`, consumed by the host with that publish, and
+ * wins over the route.
  */
 export function SettingsWindow({ section: routeSection }: SettingsWindowProps) {
 	const client = useBridge();
@@ -87,49 +88,30 @@ export function SettingsWindow({ section: routeSection }: SettingsWindowProps) {
 
 	return (
 		<div
-			className="grid h-full min-h-0 grid-cols-[200px_minmax(0,1fr)] overflow-hidden bg-background text-foreground"
+			className="grid h-full min-h-0 grid-cols-[256px_minmax(0,1fr)] overflow-hidden bg-background text-foreground"
 			data-testid="settings-window"
 		>
-			<nav
-				aria-label="Settings sections"
-				className="surface-grain flex min-h-0 flex-col gap-0.5 border-border border-r bg-sidebar px-2 pt-[52px] pb-2"
-			>
+			<SidebarColumn aria-label="Settings sections" as="nav">
 				{SECTIONS.map((info) => (
-					<SectionRow
+					<SidebarRow
 						active={info.id === section}
-						info={info}
+						data-testid={`settings-${info.id}`}
+						icon={ICONS[info.id]}
 						key={info.id}
-						onSelect={() => setSection(info.id)}
-					/>
+						onClick={() => setSection(info.id)}
+					>
+						{info.title}
+					</SidebarRow>
 				))}
-			</nav>
-			<ScrollArea className="min-h-0">
-				<div className="mx-auto max-w-[640px]">{page}</div>
-			</ScrollArea>
+			</SidebarColumn>
+			<div className="flex min-h-0 flex-col">
+				<ContentColumn
+					crumbs={["Settings", sectionInfo(section).title]}
+					width="settings"
+				>
+					{page}
+				</ContentColumn>
+			</div>
 		</div>
-	);
-}
-
-/** One sidebar row: the section's title over the subtitle its own snapshot carries. */
-function SectionRow({
-	info,
-	active,
-	onSelect,
-}: {
-	info: SectionInfo;
-	active: boolean;
-	onSelect: () => void;
-}) {
-	const snapshot = useSnapshot(info.topic);
-	return (
-		<SidebarRow
-			active={active}
-			data-testid={`settings-${info.id}`}
-			icon={ICONS[info.id]}
-			onClick={onSelect}
-			subtitle={snapshot?.subtitle ?? "…"}
-		>
-			{info.title}
-		</SidebarRow>
 	);
 }

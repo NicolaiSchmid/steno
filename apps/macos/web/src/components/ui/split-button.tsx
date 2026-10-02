@@ -3,37 +3,34 @@ import { cva, type VariantProps } from "class-variance-authority";
 import { ChevronDownIcon } from "lucide-react";
 import type { ComponentProps, ReactNode } from "react";
 import { cn } from "@/lib/cn";
+import { buttonLook } from "./button";
 import { Menu, type MenuProps, MenuTrigger } from "./menu";
 
 /**
  * One control with two targets: the main action and a chevron that opens a
  * menu of alternatives (the Record control in the sidebar). The look is the
- * primary button's; the chevron half lifts slightly on hover so the split
- * shows itself when the pointer arrives.
+ * button's; the chevron half lifts slightly on hover so the split shows
+ * itself when the pointer arrives.
  */
 export const splitButtonVariants = cva(
 	[
-		"inline-flex shrink-0 select-none items-stretch overflow-hidden whitespace-nowrap",
-		"rounded-control border font-medium text-[13px] leading-none",
-		"transition-[background-color,border-color,box-shadow,color,transform,opacity]",
+		"relative inline-flex shrink-0 select-none items-stretch overflow-hidden whitespace-nowrap",
+		"rounded-control border font-medium text-sm leading-none",
+		"transition-[background-color,border-color,box-shadow,color,scale,opacity]",
 		"duration-(--duration-functional) ease-standard",
 		"active:scale-[0.97] active:duration-(--duration-press-in)",
-		"has-[button:disabled]:pointer-events-none has-[button:disabled]:opacity-50",
-		"[&_svg]:size-4 [&_svg]:shrink-0 [&_svg]:stroke-[1.75]",
+		"has-[button:disabled]:pointer-events-none has-[button:disabled]:opacity-64",
+		"[&_svg]:size-4 [&_svg]:shrink-0",
 	],
 	{
 		variants: {
 			variant: {
-				primary:
-					"border-primary bg-primary text-primary-fg shadow-[inset_0_1px_rgb(255_255_255/16%),var(--shadow-xs)] hover:bg-primary/90",
-				outline: [
-					"border-input bg-popover text-foreground shadow-[0_1px_rgb(0_0_0/4%)] hover:bg-accent",
-					"dark:bg-[rgb(255_255_255/3%)] dark:shadow-[0_-1px_rgb(255_255_255/6%)] dark:hover:bg-[rgb(255_255_255/6%)]",
-				],
+				primary: buttonLook.primary,
+				outline: buttonLook.outline,
 			},
 			size: {
 				md: "h-8",
-				lg: "h-9 text-[13.5px]",
+				lg: "h-9",
 			},
 		},
 		defaultVariants: { variant: "primary", size: "md" },
@@ -41,7 +38,7 @@ export const splitButtonVariants = cva(
 );
 
 const partClass =
-	"outline-none focus-visible:ring-2 focus-visible:ring-primary-fg/60 focus-visible:ring-inset";
+	"outline-none focus-visible:ring-2 focus-visible:ring-primary-foreground/60 focus-visible:ring-inset";
 
 export interface SplitButtonProps
 	extends Omit<ComponentProps<typeof BaseButton>, "className">,
@@ -76,7 +73,7 @@ export function SplitButton({
 				<BaseButton
 					className={cn(
 						partClass,
-						"flex min-w-0 flex-1 items-center gap-2 rounded-l-control px-3 text-left",
+						"flex min-w-0 flex-1 items-center gap-2 rounded-l-control px-[11px] text-left",
 					)}
 					type={type}
 					{...props}
@@ -87,7 +84,7 @@ export function SplitButton({
 					aria-label={menuLabel}
 					className={cn(
 						partClass,
-						"grid w-[38px] shrink-0 place-items-center rounded-r-control transition-colors duration-(--duration-functional) ease-standard hover:bg-primary-fg/10 data-popup-open:bg-primary-fg/10 [&_svg]:size-3.5",
+						"grid w-8 shrink-0 place-items-center rounded-r-control transition-colors duration-(--duration-functional) ease-standard hover:bg-primary-foreground/10 data-popup-open:bg-primary-foreground/10 [&_svg]:size-3.5",
 					)}
 					data-testid={menuTestId}
 				>

@@ -118,13 +118,13 @@ export function SpeakerPicker({
 	return (
 		<Popover modal={false} onOpenChange={onOpenChange} open={open}>
 			<PopoverTrigger
-				className="-ml-2.5 self-start"
+				className="-ml-[7px] self-start"
 				data-testid={`speaker-picker-${speaker.id}`}
-				render={<Button size="sm" variant="ghost" />}
+				render={<Button size="xs" variant="ghost" />}
 			>
 				{speaker.displayName}
 			</PopoverTrigger>
-			<PopoverPopup align="start" sideOffset={4}>
+			<PopoverPopup align="start" padding="sm" size="sm">
 				<Input
 					aria-label={`Name for ${speaker.clusterLabel}`}
 					autoFocus

@@ -31,20 +31,20 @@ export function Disclosure({
 		>
 			<Collapsible.Trigger
 				className={cn(
-					"group inline-flex h-6 w-max items-center gap-1 rounded-[6px] px-1.5 font-medium text-[11px] text-faint outline-none",
+					"group inline-flex h-6 w-max items-center gap-1 rounded-md px-1.5 font-medium text-muted-foreground text-xs outline-none",
 					"transition-colors duration-(--duration-functional) ease-standard",
-					"hover:text-muted-foreground focus-visible:ring-2 focus-visible:ring-primary/50",
+					"hover:bg-accent hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring",
 				)}
 				data-testid={testId}
 			>
 				<ChevronRightIcon
 					aria-hidden="true"
-					className="size-3 stroke-2 transition-transform duration-(--duration-functional) ease-standard group-data-panel-open:rotate-90"
+					className="size-3 transition-transform duration-(--duration-functional) ease-standard group-data-panel-open:rotate-90"
 				/>
 				{summary}
 			</Collapsible.Trigger>
 			<Collapsible.Panel className="overflow-hidden">
-				<pre className="m-0 select-text whitespace-pre-wrap break-words rounded-[6px] bg-muted px-2.5 py-2 font-mono text-[11px] text-muted-foreground leading-[1.5]">
+				<pre className="m-0 select-text whitespace-pre-wrap break-words rounded-md bg-accent px-2.5 py-2 font-mono text-2xs text-muted-foreground leading-relaxed">
 					{children}
 				</pre>
 			</Collapsible.Panel>
