@@ -18,9 +18,10 @@ pub struct WriteFailure {
 }
 
 /// Writes a file so a reader never sees a half-written one: the bytes go to
-/// `.steno-tmp-<name>-<8 hex>` in the target directory, are `fsync`ed, and
-/// a rename replaces the target in one step. A failure removes the temp
-/// file and leaves the target as it was.
+/// `.steno-tmp-<8 hex>-<name>` in the target directory, are `fsync`ed, and
+/// a rename replaces the target in one step; on Unix the directory is
+/// `fsync`ed after the rename so the new name survives a crash too. A
+/// failure removes the temp file and leaves the target as it was.
 pub struct AtomicFileWriter;
 
 impl AtomicFileWriter {
@@ -37,9 +38,32 @@ impl AtomicFileWriter {
         });
         if outcome.is_err() {
             let _ = fs::remove_file(&temporary);
+            return outcome;
         }
+        Self::sync_directory(target);
         outcome
     }
+
+    /// `fsync` the directory after the rename so the directory entry is on
+    /// disk, not only the bytes. Best effort: the data is already durable
+    /// and the file is in place, so a directory that cannot be synced
+    /// (some network file systems) is not a failed write. Windows has no
+    /// directory handle to sync; the rename is left as it is there.
+    #[cfg(unix)]
+    fn sync_directory(target: &Path) {
+        if let Some(parent) = target.parent()
+            && let Ok(directory) = fs::File::open(if parent.as_os_str().is_empty() {
+                Path::new(".")
+            } else {
+                parent
+            })
+        {
+            let _ = directory.sync_all();
+        }
+    }
+
+    #[cfg(not(unix))]
+    fn sync_directory(_target: &Path) {}
 
     /// Removes every `.steno-tmp-*` left in `directory` by an earlier crash.
     /// Nothing else is ever removed.
@@ -58,19 +82,27 @@ impl AtomicFileWriter {
         }
     }
 
-    /// `<dir>/.steno-tmp-<name>-<8 hex>` beside `target`.
+    /// The longest file name the file systems we write to accept, in bytes.
+    const MAX_NAME_BYTES: usize = 255;
+
+    /// `<dir>/.steno-tmp-<8 hex>-<name>` beside `target`, the name cut on a
+    /// character boundary so the whole temp name fits in
+    /// [`AtomicFileWriter::MAX_NAME_BYTES`]; a target name near the limit
+    /// otherwise failed with "file name too long" before the first byte.
     #[must_use]
     pub fn temporary_path(target: &Path) -> PathBuf {
         let name = target
             .file_name()
             .map(|name| name.to_string_lossy().into_owned())
             .unwrap_or_default();
+        let prefix = format!("{}{}-", Self::TEMPORARY_PREFIX, Self::random_hex());
+        let budget = Self::MAX_NAME_BYTES.saturating_sub(prefix.len());
+        let mut cut = name.len().min(budget);
+        while !name.is_char_boundary(cut) {
+            cut -= 1;
+        }
         let parent = target.parent().unwrap_or_else(|| Path::new(""));
-        parent.join(format!(
-            "{}{name}-{}",
-            Self::TEMPORARY_PREFIX,
-            Self::random_hex()
-        ))
+        parent.join(format!("{prefix}{}", &name[..cut]))
     }
 
     /// Eight lowercase hex digits.

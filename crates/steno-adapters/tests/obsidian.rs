@@ -430,6 +430,33 @@ fn collisions_get_a_suffix_and_a_crashed_attempt_is_reused() {
 }
 
 #[test]
+fn a_crashed_attempt_is_reused_and_its_temporary_swept() {
+    let vault = Vault::new();
+    let export = vault.export_with_audio();
+    fs::create_dir_all(vault.path(FOLDER)).unwrap();
+    fs::write(
+        vault.path(&format!("{FOLDER}/meeting.json")),
+        ArtifactRenderer::new().render_json(&export).unwrap(),
+    )
+    .unwrap();
+    let temporary = format!("{FOLDER}/.steno-tmp-deadbeef-{FOLDER_SLUG}.md");
+    fs::write(vault.path(&temporary), b"half written\n").unwrap();
+
+    let receipt = deliver(&vault.destination(), &export, None);
+    assert_eq!(
+        receipt.folder, FOLDER,
+        "our meeting.json: the folder is ours"
+    );
+    assert_eq!(vault.list("Meetings"), [FOLDER_SLUG]);
+    assert_eq!(
+        vault.list(FOLDER),
+        meeting_files(FOLDER_SLUG),
+        "the temporary is gone and nothing else was added"
+    );
+    assert!(!vault.path(&temporary).exists());
+}
+
+#[test]
 fn files_the_app_never_wrote_are_not_opened_on_reexport() {
     let vault = Vault::new();
     let export = vault.export_with_audio();

@@ -3,6 +3,7 @@
 mod common;
 
 use std::fs;
+use std::path::Path;
 
 use common::*;
 use steno_adapters::fs::AtomicFileWriter;
@@ -69,12 +70,42 @@ fn temporary_names_sit_beside_the_target_with_eight_hex_digits() {
         .unwrap()
         .to_string_lossy()
         .into_owned();
-    let hex = name.strip_prefix(".steno-tmp-note.md-").unwrap();
+    let hex = name
+        .strip_prefix(".steno-tmp-")
+        .unwrap()
+        .strip_suffix("-note.md")
+        .unwrap();
     assert_eq!(hex.len(), 8);
     assert!(
         hex.chars()
             .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase())
     );
+}
+
+#[test]
+fn temporary_names_fit_in_255_bytes_and_cut_on_a_character_boundary() {
+    let long = format!("{}.md", "ü".repeat(130));
+    assert!(long.len() > 255);
+    let temporary = AtomicFileWriter::temporary_path(Path::new("/vault").join(&long).as_path());
+    let name = temporary.file_name().unwrap().to_str().unwrap().to_owned();
+    assert_eq!(name.len(), 255 - 1, "two-byte characters: one byte short");
+    assert!(name.starts_with(".steno-tmp-"));
+    assert!(name.ends_with("üü"), "{name}");
+    let exact = "a".repeat(255);
+    let temporary = AtomicFileWriter::temporary_path(Path::new("/vault").join(&exact).as_path());
+    assert_eq!(temporary.file_name().unwrap().len(), 255);
+}
+
+#[cfg(unix)]
+#[test]
+fn a_target_name_of_255_bytes_is_written() {
+    let directory = temp_dir("atomic-long");
+    let name = format!("{}.md", "a".repeat(252));
+    assert_eq!(name.len(), 255);
+    let target = directory.path().join(&name);
+    AtomicFileWriter::write(b"long\n", &target).unwrap();
+    assert_eq!(fs::read(&target).unwrap(), b"long\n");
+    assert_eq!(list(directory.path()), [name]);
 }
 
 #[test]
