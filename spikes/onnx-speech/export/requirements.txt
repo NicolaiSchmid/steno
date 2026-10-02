@@ -1,0 +1,12 @@
+# Versions that produced the spike E exports (python:3.11 image, CPU torch wheel).
+# Install torch first from the CPU index: pip install torch --index-url https://download.pytorch.org/whl/cpu
+torch==2.14.1
+nemo_toolkit[asr]==3.0.0
+onnx==1.23.1
+onnxruntime==1.30.0
+onnxsim==0.7.3
+huggingface_hub==1.33.0
+# Only for the pure-ORT sanity decoder (recipe/test_onnx.py from sherpa-onnx):
+kaldi-native-fbank==1.22.3
+soundfile==0.14.0
+librosa==0.11.0

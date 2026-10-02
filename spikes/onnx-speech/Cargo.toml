@@ -1,0 +1,22 @@
+[package]
+name = "onnx-speech-spike"
+version = "0.1.0"
+edition = "2021"
+description = "Steno spike: Parakeet TDT v3 + pyannote diarization through sherpa-onnx on CPU"
+
+[[bin]]
+name = "onnx-speech-spike"
+path = "src/main.rs"
+
+[dependencies]
+# Published crate; pins prebuilt sherpa-onnx v1.12.9 (see dist.json in the crate).
+sherpa-rs-sys = { version = "0.6.8", default-features = false, features = ["download-binaries"] }
+hound = "3.5"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+libc = "0.2"
+# Text language detection for segment-level voting (stage 3).
+whatlang = "0.16"
+
+[profile.release]
+opt-level = 3
