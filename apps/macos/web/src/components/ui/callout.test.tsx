@@ -51,7 +51,9 @@ describe("Callout", () => {
 			"bg-warning-surface",
 		);
 		expect(calloutVariants({ variant: "info" })).toContain("border-info/32");
-		expect(calloutVariants({ variant: "live" })).toContain("border-primary/32");
+		expect(calloutVariants({ variant: "live" })).toContain(
+			"[&_[data-slot=icon]]:text-live",
+		);
 		expect(calloutVariants({ variant: "destructive" })).toContain(
 			"bg-destructive-surface",
 		);

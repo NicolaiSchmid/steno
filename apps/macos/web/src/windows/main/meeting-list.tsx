@@ -258,7 +258,7 @@ export function MeetingList() {
 type RowState = Exclude<MeetingRow["state"], "ready">;
 
 const TONE: Record<RowState, string> = {
-	recording: "text-primary",
+	recording: "text-live-foreground",
 	failed: "text-destructive-foreground",
 	processing: "text-info-foreground",
 	queued: "text-info-foreground",
@@ -298,7 +298,7 @@ function RowStatus({ meeting }: { meeting: MeetingRow }) {
 				{meeting.state === "recording" ? (
 					<span
 						aria-hidden="true"
-						className="size-1.5 animate-status-pulse rounded-full bg-primary"
+						className="size-1.5 animate-status-pulse rounded-full bg-live"
 					/>
 				) : null}
 				{LABEL[meeting.state]}

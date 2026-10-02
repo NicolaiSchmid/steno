@@ -193,7 +193,7 @@ export function PermissionRow({
 			}
 			tone={
 				state === "granted"
-					? "primary"
+					? "success"
 					: state === "denied"
 						? "warning"
 						: "faint"

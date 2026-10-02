@@ -25,8 +25,8 @@ export const calloutVariants = cva(
 				warning:
 					"border-warning/32 bg-warning-surface text-warning-foreground [&_[data-slot=description]]:text-warning-foreground/80 [&_[data-slot=icon]]:text-warning",
 				info: "border-info/32 bg-info-surface text-foreground [&_[data-slot=icon]]:text-info",
-				/** The recorder's own notices (the auto-stop countdown). */
-				live: "border-primary/32 bg-primary/4 text-foreground [&_[data-slot=icon]]:text-primary",
+				/** The recorder's own notices (the auto-stop countdown): the default look, the icon in the live red. */
+				live: "border-border bg-card text-foreground [&_[data-slot=icon]]:text-live",
 				/** A connected or saved state ("Using ChatGPT as …", a passed test). */
 				success:
 					"border-success/32 bg-success-surface text-success-foreground [&_[data-slot=icon]]:text-success",

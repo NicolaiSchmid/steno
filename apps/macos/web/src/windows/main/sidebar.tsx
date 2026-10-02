@@ -308,7 +308,7 @@ export function Sidebar() {
 								className={cn(
 									"size-[7px] shrink-0 rounded-full",
 									phone.isReachable
-										? "bg-primary-2 shadow-[0_0_0_3px_var(--primary-soft)]"
+										? "bg-success shadow-[0_0_0_3px_var(--success-surface)]"
 										: "bg-faint",
 								)}
 								role="img"

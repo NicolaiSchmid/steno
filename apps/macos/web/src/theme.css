@@ -44,11 +44,17 @@
 	--row-pressed: #ffffff;
 	--row-selected: #ffffff;
 
-	/* Steno's live green in place of T3's blue; lifted a step in dark. */
-	--primary: #3f8a4c;
-	--primary-2: #4c9a5a;
+	/*
+	 * The primary is achromatic (near-black on light, white on dark), as in
+	 * the phone app and the native panels (plan 2026-10-02-neutral-accent.md).
+	 * Red is reserved for what is live, amber for what needs the user.
+	 */
+	--primary: #171717;
+	--primary-2: #262626;
 	--primary-foreground: #ffffff;
-	--primary-soft: rgba(76, 154, 90, 0.12);
+	--primary-soft: rgba(0, 0, 0, 0.08);
+	--live: var(--destructive);
+	--live-foreground: var(--destructive-foreground);
 
 	/* Status: the 500 for fills and icons, the 700 (400 in dark) for text. */
 	--warning: #f59e0b;
@@ -64,10 +70,11 @@
 	--info-foreground: #1d4ed8;
 	--info-surface: rgba(59, 130, 246, 0.08);
 
-	--p1: #b3573e;
-	--p2: #b9862a;
-	--p3: #5f7f6b;
-	--p4: #6d6f8e;
+	/* People: the 600s as text on their own 16 % tint (the 400s in dark). */
+	--p1: #e11d48;
+	--p2: #d97706;
+	--p3: #059669;
+	--p4: #4f46e5;
 
 	--radius: 10px;
 	--control-radius: 8px;
@@ -122,9 +129,10 @@
 	--row-pressed: rgba(255, 255, 255, 0.11);
 	--row-selected: rgba(255, 255, 255, 0.07);
 
-	--primary: #4c9a5a;
-	--primary-2: #5aae69;
-	--primary-soft: rgba(76, 154, 90, 0.2);
+	--primary: #ffffff;
+	--primary-2: #e5e5e5;
+	--primary-foreground: #0a0a0a;
+	--primary-soft: rgba(255, 255, 255, 0.12);
 
 	--warning-foreground: #fbbf24;
 	--warning-surface: rgba(245, 158, 11, 0.16);
@@ -134,6 +142,11 @@
 	--success-surface: rgba(16, 185, 129, 0.16);
 	--info-foreground: #60a5fa;
 	--info-surface: rgba(59, 130, 246, 0.16);
+
+	--p1: #fb7185;
+	--p2: #fbbf24;
+	--p3: #34d399;
+	--p4: #818cf8;
 
 	--glass-blur: 16px;
 	--glass-sat: 1.08;
@@ -178,6 +191,8 @@
 	--color-primary-2: var(--primary-2);
 	--color-primary-foreground: var(--primary-foreground);
 	--color-primary-soft: var(--primary-soft);
+	--color-live: var(--live);
+	--color-live-foreground: var(--live-foreground);
 	--color-warning: var(--warning);
 	--color-warning-foreground: var(--warning-foreground);
 	--color-warning-surface: var(--warning-surface);

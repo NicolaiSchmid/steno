@@ -224,11 +224,11 @@ function KeepAudioToggle({
 
 const EXPORT_ICON: Record<
 	MeetingDetailSnapshot["export"]["status"],
-	{ icon: ReactNode; tone: "faint" | "muted" | "primary" | "warning" }
+	{ icon: ReactNode; tone: "faint" | "muted" | "success" | "warning" }
 > = {
 	notConfigured: { icon: <ShareIcon />, tone: "faint" },
 	pending: { icon: <ClockIcon />, tone: "muted" },
-	delivered: { icon: <CheckCircle2Icon />, tone: "primary" },
+	delivered: { icon: <CheckCircle2Icon />, tone: "success" },
 	failed: { icon: <CircleAlertIcon />, tone: "warning" },
 };
 
