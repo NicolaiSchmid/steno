@@ -193,17 +193,15 @@ fn embed_speaker(
     let Some(embedding) = backend.embed(&window.samples, &weights)? else {
         return Ok(None);
     };
-    let active: Vec<usize> = weights
-        .iter()
-        .enumerate()
-        .filter(|(_, weight)| **weight > 0.0)
-        .map(|(frame, _)| frame)
-        .collect();
-    let (Some(first), Some(last)) = (active.first(), active.last()) else {
+    let marked = |weight: &f32| *weight > 0.0;
+    let (Some(first), Some(last)) = (
+        weights.iter().position(marked),
+        weights.iter().rposition(marked),
+    ) else {
         return Ok(None);
     };
     let (start, end) =
-        segmentation::frame_span(geometry, window.offset, *first, *last, total_samples);
+        segmentation::frame_span(geometry, window.offset, first, last, total_samples);
     Ok(Some(WindowEmbedding {
         window: window.index,
         local_speaker: speaker,
