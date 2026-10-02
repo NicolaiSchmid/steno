@@ -1,7 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Steno",
-  "version": "0.1.0",
   "identifier": "uno.schmid.steno.desktop",
   "build": {
     "frontendDist": "../../macos/web/dist",
