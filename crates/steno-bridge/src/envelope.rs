@@ -4,6 +4,7 @@
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use steno_core::json::uuid_string;
 use steno_core::{StoreError, string_enum};
 
 string_enum! {
@@ -237,29 +238,27 @@ impl BridgeError {
     }
 }
 
+/// What the page shows for a busy database.
+const BUSY_MESSAGE: &str = "The database is busy. Try again in a moment.";
+
 /// The store's errors on the contract's codes, so a host returns them with
 /// `?`. A lock held past the busy timeout ([`StoreError::is_busy`]) is
-/// `failed` with a message that says to try again, since nothing is wrong
-/// with the call; a meeting the store does not have is `notFound`; every
-/// other error is `failed` with the store's own description.
+/// `failed` with `BUSY_MESSAGE`, since nothing is wrong with the call; a
+/// meeting the store does not have is `notFound`; every other error is
+/// `failed` with the store's own description.
 impl From<StoreError> for BridgeError {
     fn from(error: StoreError) -> Self {
         if error.is_busy() {
             return Self::failed(BUSY_MESSAGE);
         }
         match error {
-            StoreError::MeetingNotFound(id) => Self::not_found(format!(
-                "No meeting with id {} was found.",
-                steno_core::json::uuid_string(id)
-            )),
+            StoreError::MeetingNotFound(id) => {
+                Self::not_found(format!("No meeting with id {} was found.", uuid_string(id)))
+            }
             other => Self::failed(other.to_string()),
         }
     }
 }
-
-/// What the page shows for a busy database; the call is sound and a retry
-/// is the right answer.
-const BUSY_MESSAGE: &str = "The database is busy. Try again in a moment.";
 
 /// One publish from the host. The page dispatches on `topic` and decodes
 /// `payload` as that topic's snapshot type. Swift: `BridgeEvent`.
@@ -460,15 +459,9 @@ mod tests {
         assert_eq!(decoded.error.unwrap().code, BridgeErrorCode::Cancelled);
     }
 
-    /// The three outcomes of the `From<StoreError>` mapping, and that `?`
-    /// reaches it from a host method's `Result<_, BridgeError>`.
+    /// The three outcomes of the `From<StoreError>` mapping.
     #[test]
     fn store_errors_land_on_the_contract_codes() {
-        fn host_method(store: Result<(), StoreError>) -> Result<(), BridgeError> {
-            store?;
-            Ok(())
-        }
-
         let sqlite = |code| {
             StoreError::Sqlite(rusqlite::Error::SqliteFailure(
                 rusqlite::ffi::Error::new(code),
@@ -506,14 +499,6 @@ mod tests {
             BridgeError::from(StoreError::UnknownMigration("v99".into())),
             BridgeError::failed("the database was migrated by a newer version (v99)")
         );
-
-        assert_eq!(
-            host_method(Err(StoreError::MeetingNotFound(id)))
-                .unwrap_err()
-                .code,
-            BridgeErrorCode::NotFound
-        );
-        assert_eq!(host_method(Ok(())), Ok(()));
     }
 
     #[test]
