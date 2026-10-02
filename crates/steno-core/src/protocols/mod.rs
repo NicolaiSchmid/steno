@@ -24,6 +24,52 @@
 //! minutes, which is nothing; the audio thread never crosses one of these
 //! (see [`EchoCanceller`]).
 //!
+//! # Implementing a boundary
+//!
+//! `#[async_trait]` on the `impl`, `async fn` inside, and the result is
+//! held as `Arc<dyn Trait>`:
+//!
+//! ```
+//! use std::sync::Arc;
+//!
+//! use steno_core::{
+//!     BoundaryResult, CleanupInput, CleanupOutput, LlmUsage, TranscriptCleaner, async_trait,
+//! };
+//!
+//! /// A cleaner that trims each line and spends no tokens.
+//! struct Trim;
+//!
+//! #[async_trait]
+//! impl TranscriptCleaner for Trim {
+//!     async fn clean(&self, input: &CleanupInput) -> BoundaryResult<CleanupOutput> {
+//!         let mut segments = input.segments.clone();
+//!         for segment in &mut segments {
+//!             segment.text = segment.text.trim().to_owned();
+//!         }
+//!         Ok(CleanupOutput {
+//!             segments,
+//!             failed_chunks: Vec::new(),
+//!             usage: LlmUsage::ZERO,
+//!         })
+//!     }
+//! }
+//!
+//! # #[tokio::main(flavor = "current_thread")]
+//! # async fn main() -> BoundaryResult<()> {
+//! let cleaner: Arc<dyn TranscriptCleaner> = Arc::new(Trim);
+//! let input = CleanupInput {
+//!     segments: Vec::new(),
+//!     language: None,
+//!     participants: Vec::new(),
+//!     speakers: Vec::new(),
+//!     known_people: Vec::new(),
+//! };
+//! let output = cleaner.clean(&input).await?;
+//! assert_eq!(output.usage, LlmUsage::ZERO);
+//! # Ok(())
+//! # }
+//! ```
+//!
 //! # Errors
 //!
 //! Swift's protocols throw `any Error`; the Rust form is [`BoxError`], so

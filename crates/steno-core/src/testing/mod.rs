@@ -1,23 +1,67 @@
 //! Deterministic implementations of every boundary, so the pipeline, the
 //! CLI and the shell test without models, a network or a keyring. Behind
-//! the `testing` cargo feature (and always present in this crate's own
-//! tests). One for one with `Sources/StenoCore/Testing`, except the
-//! dispatcher fake, which waits for the store's export.
+//! the `testing` cargo feature and always present in this crate's own
+//! tests. One for one with `Sources/StenoCore/Testing`, except the
+//! dispatcher fake, which arrives with the store's export.
 //!
-//! - [`CallLog`]: what a fake was asked to do, from any thread.
-//! - [`FakeSpeechEngine`] and [`FakeDiarizer`]: one segment per second,
-//!   speakers round-robin.
-//! - [`FakeLanguageModel`], [`PassthroughCleaner`], [`FakeSummarizer`]:
-//!   canned answers, fixed usage.
-//! - [`FakeDestination`] and [`FakeHandoverIntake`]: files under a
-//!   temporary root, admissions recorded.
-//! - [`InMemorySecretStore`] and [`InMemorySpeakerMemory`]: maps.
-//! - [`sample_data`]: a meeting, a person and an export to feed them.
+//! Every fake records what it was asked in a [`CallLog`] named for what it
+//! records (`transcriptions`, `summaries`, `admissions`), and a fake with a
+//! `failure: Option<String>` field fails every call with that message as a
+//! [`FakeFailure`]. The Swift hooks that run inside a call (`onTranscribe`,
+//! `onPrepare`, for `ManualClock` and gates) are not ported; the pipeline
+//! crate adds them when its tests need them.
 //!
-//! Every fake records its calls in a [`CallLog`] and fails on demand through
-//! a `failure` field holding a [`FakeFailure`] message. The Swift fakes'
-//! `onTranscribe` style hooks (for `ManualClock` and gates) are not ported
-//! yet; the pipeline package adds them when its tests need them.
+//! - [`FakeSpeechEngine`]: one segment per `segment_seconds`.
+//! - [`FakeDiarizer`]: `cluster_count` speakers round-robin over
+//!   `turn_seconds` turns, or a closure's answer.
+//! - [`FakeLanguageModel`]: a queue of canned responses, [`Exhausted`]
+//!   when it runs dry.
+//! - [`PassthroughCleaner`]: the segments untouched, a fixed usage.
+//! - [`FakeSummarizer`]: one bullet per template section, or a canned
+//!   summary.
+//! - [`FakeDestination`]: `meeting.json` under a temporary root, with
+//!   `fail_until` transient failures first.
+//! - [`FakeHandoverIntake`]: admissions recorded, a fixed or fresh id.
+//! - [`InMemorySecretStore`]: a map.
+//! - [`InMemorySpeakerMemory`]: cosine ranking over a list of people.
+//! - [`sample_data`]: the meeting, person and export the fakes share.
+//!
+//! # Example
+//!
+//! A fake answers like the real boundary and remembers what it was asked:
+//!
+//! ```
+//! use steno_core::testing::FakeLanguageModel;
+//! use steno_core::{
+//!     LanguageModel, LlmFinishReason, LlmMessage, LlmRequest, LlmResponse, LlmResponseFormat,
+//!     LlmRole,
+//! };
+//!
+//! # #[tokio::main(flavor = "current_thread")]
+//! # async fn main() -> steno_core::BoundaryResult<()> {
+//! let model = FakeLanguageModel::new([LlmResponse {
+//!     text: "Hallo".to_owned(),
+//!     finish_reason: LlmFinishReason::Stop,
+//!     usage: None,
+//!     model: None,
+//! }]);
+//! let request = LlmRequest {
+//!     messages: vec![LlmMessage {
+//!         role: LlmRole::User,
+//!         content: "Say hello".to_owned(),
+//!     }],
+//!     response_format: LlmResponseFormat::Text,
+//!     temperature: None,
+//!     max_tokens: None,
+//!     purpose: "greeting".to_owned(),
+//! };
+//!
+//! assert_eq!(model.complete(&request).await?.text, "Hallo");
+//! assert_eq!(model.requests.entries(), vec![request.clone()]);
+//! assert!(model.complete(&request).await.is_err(), "the queue ran dry");
+//! # Ok(())
+//! # }
+//! ```
 
 mod call_log;
 mod fake_delivery;
