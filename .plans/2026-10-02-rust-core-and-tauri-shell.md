@@ -233,6 +233,14 @@ What the bridge crate (WP1) asks of the Swift side before WP6 fills the list:
   every `TaskPriority` case; `contract_ts_nested_enums_match` in
   `crates/steno-bridge/tests/fixtures.rs` pins it by hand today.
 
+### LLM
+
+- `OutputLanguage.promptName` falls back to Foundation's `en_US` locale names for a
+  tag outside the 25-entry table; Rust has no locale data and writes the tag itself.
+  Both agree on every tag the fixtures and goldens use; a meeting tagged with a rarer
+  language gets "sw" instead of "Swahili" in the prompt on the Rust side until the
+  table grows.
+
 ## Progress
 
 One row per package. WP1 to WP3 were a chain; every package after them is one
@@ -247,6 +255,7 @@ PR off `main`.
 | Bridge on core | `refactor/rust-bridge-on-core` | #161 | merged |
 | WP4b CoreML speech backend | `feat/rust-speech-coreml` | #163 | merged |
 | WP7b adapters | `feat/rust-adapters` | #165 | open |
+| WP7a LLM (`steno-llm`) | `feat/rust-llm` | — | open: both clients, both passes, stub server, 173 tests |
 
 WP4b is `crates/steno-speech-coreml`: `objc2-core-ml` behind one safe module,
 the four backend calls, the FluidAudio 0.17.4 heuristics ported
