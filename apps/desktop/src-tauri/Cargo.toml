@@ -16,9 +16,32 @@ tauri-build.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tauri.workspace = true
+tauri-plugin-autostart.workspace = true
+tauri-plugin-deep-link.workspace = true
+tauri-plugin-dialog.workspace = true
 tauri-plugin-opener.workspace = true
+tauri-plugin-single-instance.workspace = true
+tauri-plugin-updater.workspace = true
 thiserror.workspace = true
+tokio.workspace = true
+url.workspace = true
 uuid.workspace = true
+
+# The keyring behind `secrets::KeyringSecretStore`: the login Keychain, the
+# Credential Manager, and the Secret Service over D-Bus (zbus, pure Rust, so
+# no libdbus at link time; `tokio` because the shell already runs one).
+[target.'cfg(target_os = "macos")'.dependencies]
+keyring = { workspace = true, features = ["apple-native"] }
+tauri-nspanel.workspace = true
+objc2.workspace = true
+objc2-av-foundation.workspace = true
+block2.workspace = true
+
+[target.'cfg(target_os = "windows")'.dependencies]
+keyring = { workspace = true, features = ["windows-native"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+keyring = { workspace = true, features = ["async-secret-service", "tokio", "crypto-rust"] }
 
 # The work packages named here are in .plans/2026-10-02-rust-core-and-tauri-shell.md.
 [features]
