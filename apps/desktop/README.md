@@ -8,40 +8,37 @@ cargo feature answers the bridge from the recorded fixtures in
 `apps/macos/web/fixtures/bridge/`, so the whole UI runs on every platform
 before any pipeline exists.
 
-## Layout
-
-| Path | What lives there |
-|---|---|
-| `src-tauri/Cargo.toml` | Crate `steno-desktop`, binary `steno-desktop`, feature `fixture-host` (default on) |
-| `src-tauri/tauri.conf.json` | `frontendDist` is the web app's `dist/`; `beforeDevCommand` and `beforeBuildCommand` run `pnpm dev` and `pnpm build` in `apps/macos/web`; no windows are declared here, `windows.rs` creates them |
-| `src-tauri/build.rs`, `src-tauri/placeholder/` | Points `frontendDist` at the placeholder page when the web `dist/` is missing, so `cargo build` works on a bare checkout; then `tauri_build::build()` |
-| `src-tauri/src/windows.rs` | The three windows with the Swift sizes: main 1120 by 720 (minimum 960 by 600) at `#/main`, Settings 960 by 640 (minimum 760 by 520) at `#/settings`, onboarding fixed 560 by 620 at `#/onboarding`. Main opens at start; the others on `window.open`, focused when already open |
-| `src-tauri/src/bridge.rs` | `bridge_call(method, params)` and the `steno:event` emitter, scoped to the calling window. `window.open`, `window.close` and `system.openURL` are the shell's; everything else goes to the host |
-| `src-tauri/src/host.rs`, `fixtures.rs` | The fixture host: the fixtures `index.json` lists, embedded with `include_str!`; every topic's snapshot on `page.ready`; replies as `mock-transport.ts` gives them (`speakers.options.reply`, `reply.confirm` and `reply.chosenPath` for the alerts and folder panels, `null` otherwise) |
-| `src-tauri/src/navigation.rs` | Navigation policy: the app origin and, in debug builds, the Vite dev server; everything else is cancelled |
-| `src-tauri/src/smoke.rs`, `scripts/smoke-linux.sh` | The headless smoke CI runs under Xvfb |
-| `src-tauri/capabilities/default.json` | `core:default` for the three windows, nothing more; native capabilities are reached through `bridge_call` |
-
 ## Build
 
+`cargo tauri dev` from `apps/desktop` (the `@tauri-apps/cli` or
+`cargo install tauri-cli`) starts the Vite dev server and the shell together.
+Without the CLI:
+
 ```sh
-# The web UI first; without it the shell embeds a placeholder page.
+# The web UI first; without it a debug build embeds a placeholder page.
 pnpm --dir apps/macos/web install --frozen-lockfile && pnpm --dir apps/macos/web build
 cargo build -p steno-desktop
 ```
 
-A debug build loads `devUrl` (the Vite dev server on 5173) instead of the
-embedded `dist/`, as Tauri does for every dev build. To run a debug binary
-against the embedded bundle (what the smoke does), drop the dev URL through
-Tauri's own configuration merge:
+A build without the `custom-protocol` feature loads `devUrl` (the Vite dev
+server on 5173), whatever the profile; that is Tauri's dev build. To run a
+debug binary against the embedded bundle (what the smoke does), drop the dev
+URL through Tauri's own configuration merge:
 
 ```sh
 TAURI_CONFIG='{"build":{"devUrl":null}}' cargo build -p steno-desktop
 ```
 
-Release builds always embed. `cargo tauri dev` (the `@tauri-apps/cli` or
-`cargo install tauri-cli`) from `apps/desktop` starts the Vite dev server and
-the shell together.
+A release embeds the bundle only with the feature, which `cargo tauri build`
+turns on:
+
+```sh
+cargo build -p steno-desktop --release --features custom-protocol
+```
+
+A release build with the web `dist/` missing fails in `build.rs`, so no
+release bundle carries the placeholder. Release packaging also passes
+`--no-default-features` until WP6 flips the `fixture-host` default.
 
 ### Linux prerequisites
 
@@ -68,28 +65,46 @@ apps/desktop/scripts/smoke-linux.sh target/debug/steno-desktop 12
 Windows and macOS need nothing beyond the Rust toolchain (WebView2 ships
 with Windows 11; the `.ico` the Windows resource needs is in `icons/`).
 
+## Layout
+
+| Path | What lives there |
+|---|---|
+| `src-tauri/Cargo.toml` | Crate `steno-desktop`, binary `steno-desktop`; features `fixture-host` (default on) and `custom-protocol` (embeds the bundle, see Build) |
+| `src-tauri/tauri.conf.json` | `frontendDist` is the web app's `dist/`; `beforeDevCommand` and `beforeBuildCommand` run `pnpm dev` and `pnpm build` in `apps/macos/web`; no windows are declared here, `windows.rs` creates them |
+| `src-tauri/build.rs`, `src-tauri/placeholder/` | Points `frontendDist` at the placeholder page when the web `dist/` is missing, so a debug `cargo build` works on a bare checkout (a release build fails instead); then `tauri_build::build()` |
+| `src-tauri/src/main.rs` | Wires the plugins, the managed state and the windows; keeps the process alive on macOS when the last window closes, as the Swift menu bar app does |
+| `src-tauri/src/windows.rs` | The three windows with the Swift sizes: main 1120 by 720 (minimum 960 by 600) at `#/main`, Settings 960 by 640 (minimum 760 by 520) at `#/settings`, onboarding fixed 560 by 620 at `#/onboarding`. Main opens at start; the others on `window.open`, focused when already open |
+| `src-tauri/src/bridge.rs` | `bridge_call(method, params)` and the `steno:event` emitter, scoped to the calling window; a finished `onboarding` snapshot closes the onboarding window. `window.open`, `window.close` and `system.openURL` (`https:` and `mailto:` only) are the shell's; everything else goes to the host |
+| `src-tauri/src/host.rs`, `fixtures.rs` | The fixture host: the fixtures `index.json` lists, embedded with `include_str!`; every topic's snapshot on `page.ready`; replies as `mock-transport.ts` gives them (`speakers.options.reply`, `reply.confirm` and `reply.chosenPath` for the alerts and folder panels, `null` otherwise); a deep link as the `app` snapshot with the request set, then the clean one |
+| `src-tauri/src/navigation.rs` | Navigation policy: the app origin and, in a dev build, the Vite dev server; everything else is cancelled |
+| `src-tauri/src/smoke.rs`, `scripts/smoke-linux.sh` | The headless smoke CI runs under Xvfb |
+| `src-tauri/capabilities/default.json` | `core:event:allow-listen` and `allow-unlisten` for the three windows, the one core IPC the page uses; `bridge_call` is an app command and native capabilities are reached through it |
+
 ## Smoke
 
 `STENO_SMOKE_SECONDS=<n> steno-desktop` opens all three windows side by side,
 waits `n` seconds and exits 0 when the main window sent `page.ready`, 1 when
-it did not. `scripts/smoke-linux.sh [binary] [seconds]` runs that under
-`xvfb-run` and, when ImageMagick is present, captures the Xvfb root and one
-crop per window into `apps/desktop/screens/` (ignored by git; CI uploads it
-as the `desktop-smoke-screens` artifact). The windows carry only fixture
-data, which is synthetic.
+it did not, 2 at once when `n` is not a positive number.
+`scripts/smoke-linux.sh [binary] [seconds]` runs that under `xvfb-run` and,
+when ImageMagick is present, captures the Xvfb root and one crop per window
+into `apps/desktop/screens/` (ignored by git; CI uploads it as the
+`desktop-smoke-screens` artifact). The windows carry only fixture data,
+which is synthetic.
 
 ## Tests
 
-`cargo test -p steno-desktop`: the fixture table (it equals `index.json`,
-every topic has a snapshot, every fixture parses, the reply aliases match
-the mock transport),
-the window specs and routes, the `params.window` shape, the navigation
-policy and the smoke's switches. The web side's `tauri-transport.test.ts`
-covers the page's half of the wire.
+`cargo test -p steno-desktop` covers the fixture table against `index.json`
+and the mock transport, the window specs and routes, the URL and navigation
+policies, the deep-link snapshots and the smoke's switches;
+`tauri-transport.test.ts` in the web app covers the page's half of the wire.
 
 ## Not here yet
 
-Tray, floating panels, deep links, autostart, the updater and the keyring
-follow in WP8 of the plan. Linux and Windows keep their native title bar;
-macOS gets the overlay title bar the Swift windows have. The page's traffic
-light inset is a WP8 design question for the other two platforms.
+Tray, floating panels, deep links, autostart, the updater, the keyring and
+single instance follow in WP8 of the plan. Until the tray lands there, Linux
+and Windows quit when the last window closes; macOS keeps running, as the
+Swift app does. The identifier is `uno.schmid.steno.desktop` so the shell
+installs beside the Swift app; WP9 changes it to `uno.schmid.steno.mac` for
+the cutover. Linux and Windows keep their native title bar; macOS gets the
+overlay title bar the Swift windows have. The page's traffic light inset is a
+WP8 design question for the other two platforms.
