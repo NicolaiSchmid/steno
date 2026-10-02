@@ -28,6 +28,7 @@ use std::time::{Duration, Instant};
 
 use steno_core::AudioLane;
 
+use super::fixtures::AudioFixtures;
 use crate::SAMPLE_RATE;
 use crate::capture::{CaptureBackend, CaptureError, CaptureStream, DeviceChangeReason};
 use crate::realtime::LaneFrameSink;
@@ -425,7 +426,7 @@ impl Generator {
                     .and_then(|echo| lanes.iter().position(|l| *l == echo.of));
                 // Positive, rounded as Swift rounds.
                 LaneState {
-                    increment: (signal.frequency / SAMPLE_RATE * 4_294_967_296.0).round() as u32,
+                    increment: AudioFixtures::phase_increment(signal.frequency),
                     phase: 0,
                     amplitude: signal.amplitude as f32,
                     echo_lane,
@@ -447,10 +448,10 @@ impl Generator {
         &self.buffers[lane]
     }
 
+    /// The fixtures' integer-phase sine, in `f32` as the lanes are.
     #[inline(always)]
     fn sine(phase: u32) -> f32 {
-        // The sine is in [-1, 1].
-        (2.0 * std::f64::consts::PI * f64::from(phase) / 4_294_967_296.0).sin() as f32
+        AudioFixtures::sine(phase) as f32
     }
 
     /// Writes `frames` samples per lane. Echo terms are the source lane's
