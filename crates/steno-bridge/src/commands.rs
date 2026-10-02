@@ -6,10 +6,9 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::envelope::{BridgeWindow, CaptureMode, PermissionKind, SettingsSection};
-use crate::json;
 use crate::settings::RecordingRetention;
 use crate::snapshots::{DetailTab, ListFilter, OnboardingSetupStepKind};
-use crate::string_enum::string_enum;
+use steno_core::string_enum;
 
 /// Swift: `PageLayoutParams`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -41,7 +40,7 @@ pub struct SetQueryParams {
 /// Swift: `MeetingIDParams`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MeetingIdParams {
-    #[serde(rename = "meetingID", with = "json::uuid")]
+    #[serde(rename = "meetingID", with = "steno_core::json::uuid_text")]
     pub meeting_id: Uuid,
 }
 
@@ -80,7 +79,7 @@ pub struct SetStringParams {
 /// moved on lands on the meeting it was typed for. Swift: `SaveNotesParams`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SaveNotesParams {
-    #[serde(rename = "meetingID", with = "json::uuid")]
+    #[serde(rename = "meetingID", with = "steno_core::json::uuid_text")]
     pub meeting_id: Uuid,
     pub text: String,
 }
@@ -88,7 +87,7 @@ pub struct SaveNotesParams {
 /// Swift: `SpeakerOptionsParams`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SpeakerOptionsParams {
-    #[serde(rename = "speakerID", with = "json::uuid")]
+    #[serde(rename = "speakerID", with = "steno_core::json::uuid_text")]
     pub speaker_id: Uuid,
     pub query: String,
 }
@@ -116,7 +115,7 @@ pub struct SpeakerOption {
         rename = "personID",
         default,
         skip_serializing_if = "Option::is_none",
-        with = "json::uuid::option"
+        with = "steno_core::json::uuid_text_opt"
     )]
     pub person_id: Option<Uuid>,
 }
@@ -133,7 +132,7 @@ pub struct SpeakerOptionsReply {
 /// Swift: `SelectSpeakerParams`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SelectSpeakerParams {
-    #[serde(rename = "speakerID", with = "json::uuid")]
+    #[serde(rename = "speakerID", with = "steno_core::json::uuid_text")]
     pub speaker_id: Uuid,
     pub option: SpeakerOption,
 }
@@ -141,7 +140,7 @@ pub struct SelectSpeakerParams {
 /// Swift: `SpeakerIDParams`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SpeakerIdParams {
-    #[serde(rename = "speakerID", with = "json::uuid")]
+    #[serde(rename = "speakerID", with = "steno_core::json::uuid_text")]
     pub speaker_id: Uuid,
 }
 
@@ -209,7 +208,7 @@ pub struct ExportUpdateParams {
 /// Swift: `DeviceIDParams`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DeviceIdParams {
-    #[serde(rename = "deviceID", with = "json::uuid")]
+    #[serde(rename = "deviceID", with = "steno_core::json::uuid_text")]
     pub device_id: Uuid,
 }
 
@@ -235,7 +234,7 @@ pub struct WindowParams {
         rename = "meetingID",
         default,
         skip_serializing_if = "Option::is_none",
-        with = "json::uuid::option"
+        with = "steno_core::json::uuid_text_opt"
     )]
     pub meeting_id: Option<Uuid>,
 }

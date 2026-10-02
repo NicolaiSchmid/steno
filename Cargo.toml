@@ -35,6 +35,10 @@ tauri-plugin-opener = "2.7"
 thiserror = "2"
 tracing = "0.1"
 uuid = { version = "1", features = ["serde", "v4"] }
+# The digit source of `steno-bridge`'s `json::write_number`: shortest
+# round-trip digits with ties to even, as Foundation breaks them and Rust's
+# `Display` does not. Already in the lock through serde_json.
+zmij = "1"
 # Test only
 similar = "2"
 tempfile = "3"

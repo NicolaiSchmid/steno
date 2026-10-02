@@ -7,9 +7,8 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::envelope::{BridgeTopic, PermissionKind, PermissionState};
-use crate::json;
 use crate::snapshots::Snapshot;
-use crate::string_enum::string_enum;
+use steno_core::string_enum;
 
 // settings.general
 
@@ -43,7 +42,7 @@ pub struct GeneralUpdates {
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
-        with = "json::date::option"
+        with = "steno_core::json::iso_time_opt"
     )]
     pub last_check_at: Option<DateTime<Utc>>,
     pub outcome: GeneralUpdatesOutcome,
@@ -364,15 +363,15 @@ impl Snapshot for ExportSettingsSnapshot {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PhoneDevice {
-    #[serde(with = "json::uuid")]
+    #[serde(with = "steno_core::json::uuid_text")]
     pub id: Uuid,
     pub name: String,
-    #[serde(with = "json::date")]
+    #[serde(with = "steno_core::json::iso_time")]
     pub paired_at: DateTime<Utc>,
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
-        with = "json::date::option"
+        with = "steno_core::json::iso_time_opt"
     )]
     pub last_seen_at: Option<DateTime<Utc>>,
 }
@@ -402,7 +401,7 @@ pub struct PhoneListener {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PhonePairing {
-    #[serde(with = "json::date")]
+    #[serde(with = "steno_core::json::iso_time")]
     pub expires_at: DateTime<Utc>,
     /// The QR code as a base64 PNG; the page draws it in an `img`.
     #[serde(rename = "qrPNGBase64")]
@@ -413,9 +412,9 @@ pub struct PhonePairing {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PhoneReceipt {
-    #[serde(rename = "deviceID", with = "json::uuid")]
+    #[serde(rename = "deviceID", with = "steno_core::json::uuid_text")]
     pub device_id: Uuid,
-    #[serde(rename = "recordingID", with = "json::uuid")]
+    #[serde(rename = "recordingID", with = "steno_core::json::uuid_text")]
     pub recording_id: Uuid,
     pub received_bytes: i64,
     #[serde(default, skip_serializing_if = "Option::is_none")]

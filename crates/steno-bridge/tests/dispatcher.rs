@@ -37,7 +37,7 @@ impl BridgeHost for SpyHost {
     fn meetings_select(&self, params: MeetingIdParams) -> Outcome<()> {
         self.record(format!(
             "meetings.select {}",
-            json::uuid::format(&params.meeting_id)
+            steno_core::json::uuid_string(params.meeting_id)
         ));
         if params.meeting_id.is_nil() {
             return Err(BridgeError::not_found("No meeting with that id."));

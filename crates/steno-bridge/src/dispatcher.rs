@@ -14,11 +14,10 @@
 //! direction of accepting what the page never sends: serde reads a params
 //! struct from a positional array as well as from an object (`["abc"]` for
 //! `{ "meetingId": "abc" }`), where Swift's keyed decoder rejects the array.
-//! Not pinned either way. The UUID codec (`json::uuid`) used to be lenient
-//! too (the `uuid` crate reads un-hyphenated and `urn:uuid:` forms that
-//! `UUID(uuidString:)` rejects); it now takes only the hyphenated
-//! 36-character form, since ids on the wire come from the host's own
-//! snapshots.
+//! Not pinned either way. The UUID codec (`steno_core::json::uuid_text`)
+//! takes only the hyphenated 36-character form `UUID(uuidString:)` reads,
+//! not the un-hyphenated and `urn:uuid:` forms the `uuid` crate would also
+//! accept; ids on the wire come from the host's own snapshots.
 //!
 //! Hosts run blocking. Every method takes `&self` and returns when the work
 //! is done, including a method that waits on a dialog; the host uses interior

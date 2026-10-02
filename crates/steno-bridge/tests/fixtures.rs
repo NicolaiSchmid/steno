@@ -283,7 +283,7 @@ fn contract_ts_nested_enums_match() {
     );
     assert_eq!(
         nested(&[detail, "speakers: z.array(", "assignment: z.enum(["]),
-        raw(SpeakerAssignment::ALL)
+        raw(SpeakerAssignmentKind::ALL)
     );
     assert_eq!(
         nested(&[detail, "summaryStatus: z", "kind: z.enum(["]),

@@ -5,7 +5,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::string_enum::string_enum;
+use steno_core::string_enum;
 
 string_enum! {
     /// Topics the host publishes; every publish carries a full snapshot.
@@ -374,7 +374,7 @@ mod tests {
         let error = "meetings.explode".parse::<BridgeMethod>().unwrap_err();
         assert_eq!(
             error.to_string(),
-            "'meetings.explode' is not a BridgeMethod"
+            "unknown BridgeMethod case \"meetings.explode\""
         );
     }
 
