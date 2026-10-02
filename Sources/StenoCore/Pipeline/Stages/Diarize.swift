@@ -31,18 +31,23 @@ extension ProcessingPipeline {
     return diarizedLane(source: source, lanes: lanes)
   }
 
-  /// Speech on the tap below this share of the mic's speech means the tap
-  /// carried no conversation. A notification chime or a hallucinated word
-  /// on a silent tap stays under it; a real call partner never does.
+  /// The tap carried no conversation when its speech stays under both
+  /// bounds: this share of the mic's speech, and `tapConversationMaximumSeconds`
+  /// outright. A notification chime or a hallucinated word on a silent tap
+  /// stays under both; a partner who mostly listens still clears the
+  /// seconds.
   static let tapConversationMinimumShare: TimeInterval = 0.05
+  static let tapConversationMaximumSeconds: TimeInterval = 10
 
   /// True when the mic lane holds speech and the system lane holds less
-  /// than `tapConversationMinimumShare` of it.
+  /// than `tapConversationMinimumShare` of it and less than
+  /// `tapConversationMaximumSeconds`.
   static func tapCarriedNoConversation(_ lanes: [AudioLane: [RawSegment]]) -> Bool {
     guard let mic = lanes[.mic], let system = lanes[.system] else { return false }
     let micSpeech = mic.reduce(0.0) { $0 + $1.duration }
     let tapSpeech = system.reduce(0.0) { $0 + $1.duration }
     return micSpeech > 0 && tapSpeech < micSpeech * tapConversationMinimumShare
+      && tapSpeech < tapConversationMaximumSeconds
   }
 
   /// The sample clip is at most ten seconds.
@@ -55,7 +60,10 @@ extension ProcessingPipeline {
   /// `RecordingLayout.sampleClip(speakerID:)` beside the master.
   ///
   /// `lane` is the lane to diarize, `diarizedLane(source:lanes:)` when nil.
-  /// `buffer` is the last lane `decodeAndTranscribe` decoded, which is the
+  /// A mic lane in which the diarizer hears fewer than two voices is the
+  /// user alone (headphones, the tap permission missing): the stage returns
+  /// no clusters and no lane, writes no clip, and the merge keeps the mic
+  /// as "me". `buffer` is the last lane `decodeAndTranscribe` decoded, which is the
   /// diarized lane unless a call fell back to its mic lane, so the stage
   /// reuses it. The lane is decoded here only when no buffer was handed or
   /// it carries another lane; a caller who hands another lane's buffer holds
@@ -78,6 +86,9 @@ extension ProcessingPipeline {
         buffer = try await decoder.decode(asset, lane: lane)
       }
       let result = try await diarizer.diarize(buffer)
+      if lane == .mic, result.clusters.count < 2 {
+        return Diarization(speakers: [], clusterSpeakers: [])
+      }
       var labels = Set<String>()
       for cluster in result.clusters where !labels.insert(cluster.label).inserted {
         throw PipelineFailure(

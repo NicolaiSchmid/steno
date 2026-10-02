@@ -5,9 +5,9 @@ import Foundation
 /// `.mixed` segments get the diarization cluster covering their midpoint,
 /// and a `.mixed` segment is never assigned to "me". When the mic lane is
 /// the diarized lane (a call whose tap carried no conversation), its
-/// segments get clusters like a room lane and the tap's stray segments are
-/// dropped: with the conversation in the room, whatever the tap heard was
-/// a chime or a hallucination, never a speaker.
+/// segments get clusters like a room lane and the tap's stray segments
+/// (a chime, a hallucinated word) are kept without a speaker: the clusters
+/// describe the room, not the tap, and nothing transcribed is thrown away.
 public enum LaneMerger {
   /// A diarization cluster and the `Speaker` row it became.
   public struct ClusterSpeaker: Sendable, Equatable {
@@ -60,12 +60,13 @@ public enum LaneMerger {
     var merged: [(order: (TimeInterval, Int, Int), segment: TranscriptSegment)] = []
     for (laneIndex, lane) in AudioLane.allCases.enumerated() {
       guard let raw = lanes[lane] else { continue }
-      if lane == .system, micIsRoom { continue }
       for (index, segment) in raw.enumerated() {
         let speakerID: UUID?
         switch lane {
         case .mic where !micIsRoom:
           speakerID = meSpeakerID
+        case .system where micIsRoom:
+          speakerID = nil
         case .mic, .system, .mixed:
           speakerID = cluster(covering: segment, in: clusters)
         }

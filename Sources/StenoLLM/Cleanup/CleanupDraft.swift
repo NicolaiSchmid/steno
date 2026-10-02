@@ -61,9 +61,11 @@ public struct CleanupDraft: Codable, Sendable, Equatable {
     return stripped
   }
 
-  /// `text` without a leading `[n]` index and `Label:`; `text` itself when
-  /// neither is there, so a text that happens to start with a colon-bearing
-  /// word ("Meeting: agenda") is left alone unless the word is a label.
+  /// `text` without a leading `[n]` index and a speaker label; `text`
+  /// itself when neither is there. The label may be wrapped in markdown or
+  /// brackets (`**Me:**`, `(Me)`) and end in a colon, a closing bracket or
+  /// a spaced dash (`Me - `); a first word that is no label ("Meeting:
+  /// agenda", "Me-too products") is left alone.
   static func strippingLabel(from text: String, labels: SpeakerLabels) -> String {
     var rest = text[...].drop(while: \.isWhitespace)
     var stripped = false
@@ -73,11 +75,34 @@ public struct CleanupDraft: Codable, Sendable, Equatable {
       rest = rest[rest.index(after: close)...].drop(while: \.isWhitespace)
       stripped = true
     }
-    if let colon = rest.firstIndex(of: ":"), labels.isLabel(String(rest[..<colon])) {
-      rest = rest[rest.index(after: colon)...].drop(while: \.isWhitespace)
+    if let separator = Self.labelSeparator(in: rest),
+      labels.isLabel(String(rest[..<separator]).trimmingCharacters(in: Self.labelDecoration))
+    {
+      rest = rest[rest.index(after: separator)...].drop { character in
+        character.unicodeScalars.allSatisfy(Self.labelDecoration.contains)
+      }
       stripped = true
     }
     return stripped ? String(rest) : text
+  }
+
+  /// Markdown emphasis and brackets a model may wrap a label in.
+  static let labelDecoration = CharacterSet(charactersIn: "*_~`()[]").union(.whitespaces)
+
+  /// The first `:` or `)` in the opening stretch of `text`, or a `-` that
+  /// follows whitespace; nil when the opening stretch has none. The
+  /// stretch is long enough for `**Unknown speaker:**` and short enough
+  /// that a colon deep in a sentence is never taken for a label's.
+  static func labelSeparator(in text: Substring) -> Substring.Index? {
+    let window = text.prefix(32)
+    var previous: Character?
+    for index in window.indices {
+      let character = window[index]
+      if character == ":" || character == ")" { return index }
+      if character == "-", previous?.isWhitespace == true { return index }
+      previous = character
+    }
+    return nil
   }
 
   /// The cleaned texts in segment order, trimmed; meaningful once

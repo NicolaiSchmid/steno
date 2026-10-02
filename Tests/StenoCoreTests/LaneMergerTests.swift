@@ -38,8 +38,8 @@ import Testing
 
   /// A call whose tap carried no conversation: the mic lane is the room,
   /// its segments get clusters, nobody is "me", and the tap's stray
-  /// segments are dropped.
-  @Test func aMicLaneDiarizedAsTheRoomGetsClustersAndDropsTheTap() {
+  /// segments are kept without a speaker.
+  @Test func aMicLaneDiarizedAsTheRoomGetsClustersAndKeepsTheTapUnassigned() {
     let a = SampleData.uuid(20)
     let b = SampleData.uuid(21)
     let clusters = [
@@ -56,9 +56,9 @@ import Testing
     ]
     let merged = LaneMerger.merge(
       meetingID: meetingID, lanes: lanes, clusters: clusters, meSpeakerID: nil, diarizedLane: .mic)
-    #expect(merged.map(\.text) == ["a one", "b one", "nobody"])
-    #expect(merged.map(\.speakerID) == [a, b, nil])
-    #expect(merged.allSatisfy { $0.lane == .mic })
+    #expect(merged.map(\.text) == ["a one", "b one", "chime", "nobody"])
+    #expect(merged.map(\.speakerID) == [a, b, nil, nil])
+    #expect(merged.map(\.lane) == [.mic, .mic, .system, .mic])
     // The same lanes with the tap diarized keep the old rules.
     let standard = LaneMerger.merge(
       meetingID: meetingID, lanes: lanes, clusters: clusters, meSpeakerID: me, diarizedLane: .system

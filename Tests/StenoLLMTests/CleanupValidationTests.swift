@@ -42,9 +42,17 @@ import Testing
     #expect(strip("[3] Hallo.") == "Hallo.")
     #expect(strip("Unknown speaker: Hallo.") == "Hallo.")
     #expect(strip("  Speaker 2 : Hallo.") == "Hallo.")
+    #expect(strip("**Me:** Danke dir.") == "Danke dir.")
+    #expect(strip("_Speaker 1_: Danke dir.") == "Danke dir.")
+    #expect(strip("(Me) Danke dir.") == "Danke dir.")
+    #expect(strip("Me - Danke dir.") == "Danke dir.")
     #expect(strip("Speaker 10: Hallo.") == "Speaker 10: Hallo.", "not a label of this meeting")
     #expect(strip("Meeting: agenda") == "Meeting: agenda")
+    #expect(strip("Me-too products are everywhere.") == "Me-too products are everywhere.")
     #expect(strip("Me, I think so: yes") == "Me, I think so: yes")
+    #expect(
+      strip("Das ist, was ich meine, und zwar wirklich so: alles.")
+        == "Das ist, was ich meine, und zwar wirklich so: alles.")
     #expect(strip(" Hallo.") == " Hallo.", "untouched when nothing is stripped")
     #expect(strip("Me:") == "", "an emptied text is then a validation problem")
 

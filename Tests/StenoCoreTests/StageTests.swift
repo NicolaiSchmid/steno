@@ -139,9 +139,10 @@ import Testing
     #expect(ProcessingPipeline.diarizedLane(source: .phone, lanes: []) == nil)
   }
 
-  /// A call whose tap holds less than 5 % of the mic's speech is diarized
-  /// on the mic lane; one with a real partner, zero mic speech, or no tap
-  /// at all keeps the standard lane.
+  /// A call whose tap holds less than 5 % of the mic's speech and under
+  /// ten seconds is diarized on the mic lane; one with a real partner,
+  /// however quiet, zero mic speech, or no tap at all keeps the standard
+  /// lane.
   @Test func aCallWhoseTapCarriedNoConversationIsDiarizedOnTheMicLane() {
     func lanes(mic: [TimeInterval], system: [TimeInterval]) -> [AudioLane: [RawSegment]] {
       func segments(_ durations: [TimeInterval]) -> [RawSegment] {
@@ -167,6 +168,11 @@ import Testing
     #expect(!ProcessingPipeline.tapCarriedNoConversation(boundary))
     let partner = lanes(mic: [30], system: [30])
     #expect(!ProcessingPipeline.tapCarriedNoConversation(partner))
+    // A partner who mostly listens: 60 s against 2000 s is 3 %, but ten
+    // seconds of speech is a conversation.
+    #expect(!ProcessingPipeline.tapCarriedNoConversation(lanes(mic: [2000], system: [60])))
+    #expect(!ProcessingPipeline.tapCarriedNoConversation(lanes(mic: [2000], system: [10])))
+    #expect(ProcessingPipeline.tapCarriedNoConversation(lanes(mic: [2000], system: [9.5])))
     #expect(
       ProcessingPipeline.diarizedLane(source: .macCall, lanes: call, transcription: partner)
         == .system)

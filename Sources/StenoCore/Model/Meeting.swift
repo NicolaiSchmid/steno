@@ -3,7 +3,9 @@ import Foundation
 /// Where a recording came from. Decides which lanes exist and which lane is
 /// diarized.
 public enum MeetingSource: String, Codable, Sendable, Equatable, Hashable, CaseIterable {
-  /// Two lanes on the Mac: `.mic` is "me", `.system` is "them".
+  /// Two lanes on the Mac: `.mic` is "me", `.system` is "them", unless the
+  /// tap carried no conversation (a phone on speaker next to the Mac); then
+  /// the mic lane is diarized like a room (`ProcessingPipeline.diarizedLane`).
   case macCall
   /// One `.mixed` room lane from the Mac microphone, fully diarized.
   case macInPerson

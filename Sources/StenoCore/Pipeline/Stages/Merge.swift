@@ -11,7 +11,9 @@ extension ProcessingPipeline {
   /// transaction, so it survives a later failure. When the asset has a
   /// `.mic` lane that is "me" (not the lane diarized as the room), the "me"
   /// participant (created if the app did not write one) and the "me"
-  /// speaker exist before any segment points at them.
+  /// speaker exist before any segment points at them. When the mic lane is
+  /// the room, a "me" participant an earlier run of this pipeline created
+  /// is removed again; one the app wrote stays.
   func merge(meeting: Meeting, lanes: [AudioLane: [RawSegment]], diarization: Diarization)
     async throws -> Merged
   {
@@ -24,6 +26,8 @@ extension ProcessingPipeline {
         let meSpeaker = LaneMerger.meSpeaker(meetingID: meeting.id, personID: me.personID)
         allSpeakers.append(meSpeaker)
         meSpeakerID = meSpeaker.id
+      } else if diarization.lane == .mic {
+        try await store.deleteParticipant(id: LaneMerger.meParticipantID(meetingID: meeting.id))
       }
       let segments = LaneMerger.merge(
         meetingID: meeting.id, lanes: lanes, clusters: diarization.clusterSpeakers,

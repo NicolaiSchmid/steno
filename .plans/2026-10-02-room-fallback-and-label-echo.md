@@ -37,30 +37,42 @@ Two defects stack:
 
 1. **Room fallback in the pipeline, not at capture.** After transcription,
    a `.macCall` asset whose system lane holds less than 5 % of the mic
-   lane's speech duration (`tapConversationMinimumShare`) is treated as a
+   lane's speech duration (`tapConversationMinimumShare`) and less than
+   ten seconds outright (`tapConversationMaximumSeconds`) is treated as a
    room recording: the mic lane is diarized instead of the tap, mic
-   segments get clusters, no "me" speaker or participant is created, and
-   the tap's stray segments (a chime, a hallucinated word) are dropped.
-   The pipeline sees the transcription, so it catches a tap that recorded a
-   notification sound as well as pure silence, and the rule also covers
-   `steno process` and re-runs. The meeting keeps `source = macCall`: it
-   was a call, just not through the Mac. Capture, the asset's lanes and the
-   files stay truthful.
-2. **Threshold by speech share, not peak.** The capture's -80 dBFS peak
-   rule would miss a tap that heard one chime. A real call partner speaks
-   far more than 5 % of what the mic hears; a chime or a hallucinated word
-   stays under it. Zero mic speech never triggers the fallback.
-3. **Strip echoed labels before validation, and tell the model.** The
+   segments get clusters, no "me" speaker is created, and the tap's stray
+   segments (a chime, a hallucinated word) are kept without a speaker so
+   nothing transcribed is lost if the rule misjudges a call. The pipeline
+   sees the transcription, so it catches a tap that recorded a notification
+   sound as well as pure silence, and the rule also covers `steno process`
+   and re-runs. The meeting keeps `source = macCall`: it was a call, just
+   not through the Mac. Capture, the asset's lanes and the files stay
+   truthful.
+2. **Threshold by speech share and an absolute cap, not peak.** The
+   capture's -80 dBFS peak rule would miss a tap that heard one chime. The
+   share alone would misjudge a partner who mostly listens (60 s against
+   2000 s is 3 %), so ten seconds of tap speech is always a conversation.
+   Zero mic speech never triggers the fallback.
+3. **One voice on the mic is the user alone.** A silent tap also happens
+   with headphones when the system audio permission is missing. When the
+   diarizer hears fewer than two voices on the mic lane, the stage returns
+   no clusters and writes no clip, and the merge keeps the mic as "me" as
+   before. A "me" participant an earlier run of the pipeline created
+   (deterministic id) is removed when a re-run falls back; one the app
+   wrote stays.
+4. **Strip echoed labels before validation, and tell the model.** The
    cleaner strips a leading `[n]` index and any known speaker label (or
-   `Unknown speaker`) plus colon from every returned text
+   `Unknown speaker`) from every returned text
    (`CleanupDraft.strippingSpeakerLabels`), case-insensitively, before the
-   count and word checks run. A text that merely starts with a word and a
-   colon ("Meeting: agenda") is left alone unless the word is a label. The
-   prompt gains one rule saying the index and label are framing. Stripping
-   is deterministic and costs no retry; the prompt rule makes the retry
-   rarer. Goldens `Tests/Fixtures/llm/prompts/cleanup-*.txt` change by that
-   one line.
-4. **No automatic repair of stored transcripts.** The affected meeting
+   count and word checks run. The label may be wrapped in markdown or
+   brackets (`**Me:**`, `(Me)`) and end in a colon, a closing bracket or a
+   spaced dash. A text that merely starts with a word and a colon
+   ("Meeting: agenda", "Me-too products") is left alone unless the word is
+   a label. The prompt gains one rule saying the index and label are
+   framing. Stripping is deterministic and costs no retry; the prompt rule
+   makes the retry rarer. Goldens `Tests/Fixtures/llm/prompts/cleanup-*.txt`
+   change by that one line.
+5. **No automatic repair of stored transcripts.** The affected meeting
    needs re-diarization anyway, which only a re-run of the pipeline gives.
    The app has no "process again" today; that is a follow-up (bridge
    command + button on a ready meeting). Until then the kept recording can
@@ -70,13 +82,18 @@ Two defects stack:
 
 - `Sources/StenoCore/Pipeline/Stages/Diarize.swift`: `Diarization.lane`,
   `diarizedLane(source:lanes:transcription:)`, `tapCarriedNoConversation`,
-  `tapConversationMinimumShare`; `diarize` takes the lane.
+  `tapConversationMinimumShare`, `tapConversationMaximumSeconds`; `diarize`
+  takes the lane and keeps a one-voice mic lane as "me".
 - `Sources/StenoCore/Pipeline/ProcessingPipeline.swift`:
   `transcribeAndDiarize` picks the lane from the transcription and drops a
   handed buffer of another lane before `diarize` decodes the right one.
 - `Sources/StenoCore/Pipeline/LaneMerger.swift`: `merge(..., diarizedLane:)`.
-- `Sources/StenoCore/Pipeline/Stages/Merge.swift`: no "me" speaker or
-  participant when the mic lane is the room.
+- `Sources/StenoCore/Pipeline/Stages/Merge.swift`: no "me" speaker when
+  the mic lane is the room; the pipeline's own "me" participant is removed.
+- `Sources/StenoCore/Storage/MeetingStore.swift`: `deleteParticipant(id:)`.
+- `Sources/StenoCore/Model/Meeting.swift`,
+  `Sources/StenoAudio/Capture/CaptureConfiguration.swift`: lane rule doc
+  comments name the exception.
 - `Sources/StenoLLM/Cleanup/CleanupDraft.swift`,
   `LLMTranscriptCleaner.swift`, `CleanupPromptBuilder.swift`,
   `Transcript/SpeakerLabels.swift`: label stripping and the prompt rule.
