@@ -125,4 +125,42 @@ mod tests {
                 .is_none()
         );
     }
+
+    #[tokio::test]
+    async fn equal_similarities_rank_by_id_and_the_list_stops_at_the_limit() {
+        // Three people sharing one voice, inserted out of id order.
+        let memory = InMemorySpeakerMemory::new([
+            Person {
+                id: Uuid::from_u128(3),
+                ..sample_data::person(0, "Third")
+            },
+            Person {
+                id: Uuid::from_u128(1),
+                ..sample_data::person(0, "First")
+            },
+            Person {
+                id: Uuid::from_u128(2),
+                ..sample_data::person(0, "Second")
+            },
+        ]);
+        let voice = sample_data::embedding(0);
+        let names = |ranked: Vec<SpeakerMatch>| -> Vec<String> {
+            ranked
+                .into_iter()
+                .map(|found| found.person.display_name)
+                .collect()
+        };
+        let all = memory.candidates(&voice, 10).await.unwrap();
+        // One shared voice: every similarity is the same bit pattern.
+        assert!(
+            all.iter()
+                .all(|found| found.similarity.to_bits() == all[0].similarity.to_bits())
+        );
+        assert_eq!(names(all), ["First", "Second", "Third"]);
+        assert_eq!(
+            names(memory.candidates(&voice, 2).await.unwrap()),
+            ["First", "Second"]
+        );
+        assert_eq!(names(memory.candidates(&voice, 0).await.unwrap()), [""; 0]);
+    }
 }

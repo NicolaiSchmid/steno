@@ -94,6 +94,17 @@ mod tests {
             .map(|template| template.id.as_str())
             .collect();
         assert_eq!(ids, SummaryTemplate::BUNDLED_IDS);
+        // The menu order `SummaryTemplate.bundledIDs` lists in
+        // `Sources/StenoCore/Templates/SummaryTemplate.swift`.
+        assert_eq!(
+            SummaryTemplate::BUNDLED_IDS,
+            [
+                "default",
+                "customer-discovery",
+                "daily-standup",
+                "interview"
+            ]
+        );
         let default = SummaryTemplate::bundled_with_id(SummaryTemplate::DEFAULT_ID).unwrap();
         assert_eq!(default.display_name, "Default");
         assert!(default.section("executive-summary").unwrap().required);
