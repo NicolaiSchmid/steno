@@ -28,14 +28,20 @@ describe("SpeakersPopover", () => {
 		await user.click(trigger);
 		const popover = await screen.findByRole("dialog");
 		expect(within(popover).getAllByRole("listitem")).toHaveLength(4);
-		const nicolai = within(popover).getByTestId(`speaker-row-${NICOLAI}`);
+		const nicolai = within(popover).getByTestId(
+			`speakers-popover-row-${NICOLAI}`,
+		);
 		expect(nicolai).toHaveTextContent("Nicolai");
 		expect(nicolai).toHaveTextContent("nicolai@example.com");
 		expect(within(nicolai).queryByText("Who is this?")).toBeNull();
-		const unnamed = within(popover).getByTestId(`speaker-row-${UNNAMED}`);
+		const unnamed = within(popover).getByTestId(
+			`speakers-popover-row-${UNNAMED}`,
+		);
 		expect(unnamed).toHaveTextContent("Speaker 4");
 		expect(within(unnamed).getByText("Who is this?")).toBeInTheDocument();
-		expect(within(unnamed).queryByTestId(`speaker-play-${UNNAMED}`)).toBeNull();
+		expect(
+			within(unnamed).queryByTestId(`speakers-popover-play-${UNNAMED}`),
+		).toBeNull();
 	});
 
 	it("renames a confirmed speaker inline", async () => {
@@ -43,7 +49,9 @@ describe("SpeakersPopover", () => {
 		const harness = await createBridgeHarness();
 		renderWithBridge(<SpeakersPopover speakers={await speakers()} />, harness);
 		await user.click(screen.getByTestId("speakers-trigger"));
-		await user.click(await screen.findByTestId(`speaker-picker-${NICOLAI}`));
+		await user.click(
+			await screen.findByTestId(`speakers-popover-picker-${NICOLAI}`),
+		);
 
 		const field = await screen.findByTestId(`speaker-field-${NICOLAI}`);
 		expect(field).toHaveFocus();
@@ -80,9 +88,11 @@ describe("SpeakersPopover", () => {
 		const harness = await createBridgeHarness();
 		renderWithBridge(<SpeakersPopover speakers={await speakers()} />, harness);
 		await user.click(screen.getByTestId("speakers-trigger"));
-		await user.click(await screen.findByTestId(`speaker-picker-${UNNAMED}`));
+		await user.click(
+			await screen.findByTestId(`speakers-popover-picker-${UNNAMED}`),
+		);
 		expect(screen.getByTestId(`speaker-field-${UNNAMED}`)).toBeInTheDocument();
-		await user.click(screen.getByTestId(`speaker-picker-${NICOLAI}`));
+		await user.click(screen.getByTestId(`speakers-popover-picker-${NICOLAI}`));
 		expect(screen.queryByTestId(`speaker-field-${UNNAMED}`)).toBeNull();
 		expect(screen.getByTestId(`speaker-field-${NICOLAI}`)).toBeInTheDocument();
 	});
@@ -92,7 +102,9 @@ describe("SpeakersPopover", () => {
 		const harness = await createBridgeHarness();
 		renderWithBridge(<SpeakersPopover speakers={await speakers()} />, harness);
 		await user.click(screen.getByTestId("speakers-trigger"));
-		await user.click(await screen.findByTestId(`speaker-play-${NICOLAI}`));
+		await user.click(
+			await screen.findByTestId(`speakers-popover-play-${NICOLAI}`),
+		);
 		expect(callsTo(harness.transport, "speakers.play")).toEqual([
 			{ method: "speakers.play", params: { speakerID: NICOLAI } },
 		]);

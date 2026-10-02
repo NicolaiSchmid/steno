@@ -1,11 +1,9 @@
-import { ChevronDownIcon, PlayIcon, SquareIcon } from "lucide-react";
+import { ChevronDownIcon } from "lucide-react";
 import { useState } from "react";
 import type { MeetingDetailSnapshot } from "@/bridge/contract";
-import { send, useBridge } from "@/bridge/hooks";
 import {
 	Avatar,
 	AvatarStack,
-	Badge,
 	Button,
 	Popover,
 	PopoverPopup,
@@ -13,7 +11,11 @@ import {
 	PopoverTrigger,
 } from "@/components/ui";
 import { formatPeople } from "./format";
-import { type Speaker, SpeakerPickerPanel } from "./speaker-picker";
+import {
+	SpeakerBadge,
+	SpeakerPickerPanel,
+	SpeakerPlayButton,
+} from "./speaker-picker";
 
 export interface SpeakersPopoverProps {
 	speakers: MeetingDetailSnapshot["speakers"];
@@ -25,10 +27,11 @@ export interface SpeakersPopoverProps {
  * speaker in cluster order (avatar, name, email, a Play button for the
  * sample clip). Clicking a name, confirmed or not, expands the picker under
  * the row, so a speaker can be renamed at any time; the pick applies at
- * once through `speakers.select` and the store redraws the rows.
+ * once through `speakers.select` and the store redraws the rows. Test ids
+ * carry a `speakers-popover-` prefix so they never collide with the
+ * transcript's `speaker-picker-<id>` and `speaker-play-<id>`.
  */
 export function SpeakersPopover({ speakers }: SpeakersPopoverProps) {
-	const client = useBridge();
 	const [open, setOpen] = useState(false);
 	const [expanded, setExpanded] = useState<string | null>(null);
 
@@ -39,19 +42,10 @@ export function SpeakersPopover({ speakers }: SpeakersPopoverProps) {
 		}
 	}
 
-	function togglePlay(speaker: Speaker) {
-		if (speaker.isPlaying) {
-			send(client, "speakers.stop");
-		} else {
-			send(client, "speakers.play", { speakerID: speaker.id });
-		}
-	}
-
 	return (
 		<Popover modal={false} onOpenChange={onOpenChange} open={open}>
 			<PopoverTrigger
-				aria-label="Speakers"
-				className="-ml-[7px] gap-2"
+				className="-ml-[7px] min-w-0 max-w-full gap-2"
 				data-testid="speakers-trigger"
 				render={<Button size="sm" variant="ghost-muted" />}
 			>
@@ -66,7 +60,7 @@ export function SpeakersPopover({ speakers }: SpeakersPopoverProps) {
 						/>
 					))}
 				</AvatarStack>
-				<span className="text-sm">{formatPeople(speakers)}</span>
+				<span className="truncate">{formatPeople(speakers)}</span>
 				<ChevronDownIcon aria-hidden="true" />
 			</PopoverTrigger>
 			<PopoverPopup align="start" size="lg">
@@ -74,11 +68,10 @@ export function SpeakersPopover({ speakers }: SpeakersPopoverProps) {
 				<ul className="my-0 mt-3 flex list-none flex-col gap-1 p-0">
 					{speakers.map((speaker) => {
 						const isExpanded = expanded === speaker.id;
-						const unconfirmed = speaker.assignment !== "confirmed";
 						return (
 							<li
 								className="flex flex-col"
-								data-testid={`speaker-row-${speaker.id}`}
+								data-testid={`speakers-popover-row-${speaker.id}`}
 								key={speaker.id}
 							>
 								<div className="flex items-center gap-3">
@@ -91,50 +84,28 @@ export function SpeakersPopover({ speakers }: SpeakersPopoverProps) {
 									<Button
 										aria-expanded={isExpanded}
 										className="-ml-[9px] min-w-0 flex-1 justify-start"
-										data-testid={`speaker-picker-${speaker.id}`}
+										data-testid={`speakers-popover-picker-${speaker.id}`}
 										onClick={() => setExpanded(isExpanded ? null : speaker.id)}
 										size="sm"
 										variant="ghost"
 									>
-										<span className="truncate font-medium">
-											{speaker.displayName}
-										</span>
+										<span className="truncate">{speaker.displayName}</span>
 										{speaker.email ? (
 											<span className="truncate font-normal text-faint">
 												{speaker.email}
 											</span>
 										) : null}
-										{unconfirmed ? (
-											<Badge className="shrink-0" size="sm" variant="warning">
-												{speaker.assignment === "suggested"
-													? "Suggested"
-													: "Who is this?"}
-											</Badge>
-										) : null}
+										<SpeakerBadge className="shrink-0" speaker={speaker} />
 										<ChevronDownIcon
 											aria-hidden="true"
 											className="ml-auto shrink-0"
 										/>
 									</Button>
-									{speaker.hasClip ? (
-										<Button
-											aria-label={
-												speaker.isPlaying
-													? `Stop the sample of ${speaker.displayName}`
-													: `Play a sample of ${speaker.displayName}`
-											}
-											data-testid={`speaker-play-${speaker.id}`}
-											onClick={() => togglePlay(speaker)}
-											size="icon-sm"
-											variant="ghost"
-										>
-											{speaker.isPlaying ? (
-												<SquareIcon aria-hidden="true" />
-											) : (
-												<PlayIcon aria-hidden="true" />
-											)}
-										</Button>
-									) : null}
+									<SpeakerPlayButton
+										iconOnly
+										speaker={speaker}
+										testID={`speakers-popover-play-${speaker.id}`}
+									/>
 								</div>
 								{isExpanded ? (
 									<SpeakerPickerPanel

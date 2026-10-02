@@ -1,16 +1,14 @@
-import {
-	CheckIcon,
-	CopyIcon,
-	MessageSquareTextIcon,
-	PlayIcon,
-	SquareIcon,
-} from "lucide-react";
+import { CheckIcon, CopyIcon, MessageSquareTextIcon } from "lucide-react";
 import { useEffect, useState } from "react";
 import type { MeetingDetailSnapshot } from "@/bridge/contract";
-import { send, useBridge } from "@/bridge/hooks";
-import { Badge, Button, EmptyState } from "@/components/ui";
+import { Button, EmptyState } from "@/components/ui";
 import { format } from "./format";
-import { type Speaker, SpeakerPicker } from "./speaker-picker";
+import {
+	type Speaker,
+	SpeakerBadge,
+	SpeakerPicker,
+	SpeakerPlayButton,
+} from "./speaker-picker";
 
 export type Turn = MeetingDetailSnapshot["transcript"][number];
 
@@ -39,7 +37,6 @@ function firstTurnOf(
  * play button.
  */
 export function TranscriptTab({ detail, pickerRequest }: TranscriptTabProps) {
-	const client = useBridge();
 	const [openTurnID, setOpenTurnID] = useState<string | null>(() =>
 		pickerRequest
 			? (firstTurnOf(detail.transcript, pickerRequest.speakerID) ?? null)
@@ -89,14 +86,6 @@ export function TranscriptTab({ detail, pickerRequest }: TranscriptTabProps) {
 			});
 	}
 
-	function togglePlay(speaker: Speaker) {
-		if (speaker.isPlaying) {
-			send(client, "speakers.stop");
-		} else {
-			send(client, "speakers.play", { speakerID: speaker.id });
-		}
-	}
-
 	return (
 		<div data-testid="tab-content-transcript">
 			<div className="mb-6 flex items-center gap-4 text-muted-foreground text-sm">
@@ -118,8 +107,6 @@ export function TranscriptTab({ detail, pickerRequest }: TranscriptTabProps) {
 				const speaker = turn.speakerID
 					? speakers.get(turn.speakerID)
 					: undefined;
-				const unconfirmed =
-					speaker !== undefined && speaker.assignment !== "confirmed";
 				return (
 					<div className="mb-5 grid grid-cols-[140px_1fr] gap-4" key={turn.id}>
 						<div className="flex flex-col gap-0.5 pt-0.5 font-medium text-sm">
@@ -135,33 +122,15 @@ export function TranscriptTab({ detail, pickerRequest }: TranscriptTabProps) {
 							<span className="font-mono font-normal text-2xs text-faint tabular-nums">
 								{format.range(turn.startSeconds, turn.endSeconds)}
 							</span>
-							{unconfirmed && speaker ? (
-								<Badge className="mt-1 self-start" size="sm" variant="warning">
-									{speaker.assignment === "suggested"
-										? "Suggested"
-										: "Who is this?"}
-								</Badge>
+							{speaker ? (
+								<SpeakerBadge className="mt-1 self-start" speaker={speaker} />
 							) : null}
-							{speaker?.hasClip ? (
-								<Button
-									aria-label={
-										speaker.isPlaying
-											? `Stop the sample of ${speaker.displayName}`
-											: `Play a sample of ${speaker.displayName}`
-									}
+							{speaker ? (
+								<SpeakerPlayButton
 									className="mt-1 -ml-[7px] self-start"
-									data-testid={`speaker-play-${speaker.id}`}
-									onClick={() => togglePlay(speaker)}
-									size="xs"
-									variant="ghost"
-								>
-									{speaker.isPlaying ? (
-										<SquareIcon aria-hidden="true" />
-									) : (
-										<PlayIcon aria-hidden="true" />
-									)}
-									{speaker.isPlaying ? "Stop" : "Play"}
-								</Button>
+									speaker={speaker}
+									testID={`speaker-play-${speaker.id}`}
+								/>
 							) : null}
 						</div>
 						<p className="my-0">{turn.text}</p>

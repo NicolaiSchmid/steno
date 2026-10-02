@@ -1,4 +1,10 @@
-import { PlusIcon, UserIcon, UserXIcon } from "lucide-react";
+import {
+	PlayIcon,
+	PlusIcon,
+	SquareIcon,
+	UserIcon,
+	UserXIcon,
+} from "lucide-react";
 import {
 	type ChangeEvent,
 	type KeyboardEvent,
@@ -9,6 +15,7 @@ import {
 import type { MeetingDetailSnapshot, SpeakerOption } from "@/bridge/contract";
 import { send, useBridge } from "@/bridge/hooks";
 import {
+	Badge,
 	Button,
 	Input,
 	Popover,
@@ -16,7 +23,6 @@ import {
 	PopoverTrigger,
 } from "@/components/ui";
 import { menuItemVariants } from "@/components/ui/menu";
-import { cn } from "@/lib/cn";
 
 export type Speaker = MeetingDetailSnapshot["speakers"][number];
 
@@ -31,6 +37,76 @@ function optionIcon(kind: SpeakerOption["kind"]) {
 		case "unknown":
 			return <UserXIcon aria-hidden="true" />;
 	}
+}
+
+export interface SpeakerBadgeProps {
+	speaker: Speaker;
+	className?: string;
+}
+
+/** "Suggested" or "Who is this?" on an unconfirmed speaker; nothing else. */
+export function SpeakerBadge({ speaker, className }: SpeakerBadgeProps) {
+	if (speaker.assignment === "confirmed") {
+		return null;
+	}
+	return (
+		<Badge {...(className ? { className } : {})} size="sm" variant="warning">
+			{speaker.assignment === "suggested" ? "Suggested" : "Who is this?"}
+		</Badge>
+	);
+}
+
+export interface SpeakerPlayButtonProps {
+	speaker: Speaker;
+	/** Suffix of the test id, so two hosts on one page stay apart. */
+	testID: string;
+	/** Icon only, for a row; the transcript spells out Play and Stop. */
+	iconOnly?: boolean;
+	className?: string;
+}
+
+/**
+ * Plays or stops the speaker's sample clip (`speakers.play`,
+ * `speakers.stop`); renders nothing without a clip.
+ */
+export function SpeakerPlayButton({
+	speaker,
+	testID,
+	iconOnly = false,
+	className,
+}: SpeakerPlayButtonProps) {
+	const client = useBridge();
+	if (!speaker.hasClip) {
+		return null;
+	}
+	function toggle() {
+		if (speaker.isPlaying) {
+			send(client, "speakers.stop");
+		} else {
+			send(client, "speakers.play", { speakerID: speaker.id });
+		}
+	}
+	return (
+		<Button
+			aria-label={
+				speaker.isPlaying
+					? `Stop the sample of ${speaker.displayName}`
+					: `Play a sample of ${speaker.displayName}`
+			}
+			{...(className ? { className } : {})}
+			data-testid={testID}
+			onClick={toggle}
+			size={iconOnly ? "icon-sm" : "xs"}
+			variant="ghost"
+		>
+			{speaker.isPlaying ? (
+				<SquareIcon aria-hidden="true" />
+			) : (
+				<PlayIcon aria-hidden="true" />
+			)}
+			{iconOnly ? null : speaker.isPlaying ? "Stop" : "Play"}
+		</Button>
+	);
 }
 
 export interface SpeakerPickerPanelProps {
@@ -167,7 +243,6 @@ export interface SpeakerPickerProps {
 	speaker: Speaker;
 	open: boolean;
 	onOpenChange: (open: boolean) => void;
-	className?: string;
 }
 
 /**
@@ -179,16 +254,15 @@ export function SpeakerPicker({
 	speaker,
 	open,
 	onOpenChange,
-	className,
 }: SpeakerPickerProps) {
 	return (
 		<Popover modal={false} onOpenChange={onOpenChange} open={open}>
 			<PopoverTrigger
-				className={cn("-ml-[7px] self-start", className)}
+				className="-ml-[7px] max-w-full self-start"
 				data-testid={`speaker-picker-${speaker.id}`}
 				render={<Button size="xs" variant="ghost" />}
 			>
-				{speaker.displayName}
+				<span className="truncate">{speaker.displayName}</span>
 			</PopoverTrigger>
 			<PopoverPopup align="start" padding="sm" size="sm">
 				<SpeakerPickerPanel
