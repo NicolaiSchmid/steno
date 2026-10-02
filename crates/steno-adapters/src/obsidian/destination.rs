@@ -394,7 +394,8 @@ impl Destination for ObsidianFolderDestination {
 
 /// The local path of a `file://` URL as the store holds it
 /// (`steno_core::paths::file_url`): the percent-encoding undone, the host
-/// part (empty or `localhost`) dropped. `None` for any other scheme.
+/// part (empty or `localhost`) dropped, and on Windows the drive path
+/// restored with backslashes. `None` for any other scheme.
 #[must_use]
 pub fn file_url_path(url: &str) -> Option<PathBuf> {
     let rest = url.strip_prefix("file://")?;
@@ -419,10 +420,13 @@ pub fn file_url_path(url: &str) -> Option<PathBuf> {
         }
     }
     let decoded = String::from_utf8(bytes).ok()?;
+    // `file_url` spelt a Windows path with forward slashes behind a leading
+    // `/`; both are undone so the path reads back as the OS spells it.
     #[cfg(windows)]
     let decoded = decoded
         .strip_prefix('/')
         .filter(|rest| rest.as_bytes().get(1) == Some(&b':'))
-        .map_or(decoded.clone(), str::to_owned);
+        .unwrap_or(&decoded)
+        .replace('/', "\\");
     Some(PathBuf::from(decoded))
 }
