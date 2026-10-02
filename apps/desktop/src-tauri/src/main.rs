@@ -1,65 +1,148 @@
-//! The Tauri shell (WP3 of `.plans/2026-10-02-rust-core-and-tauri-shell.md`):
-//! three windows around the web UI in `apps/macos/web` and the `bridge_call`
-//! command the page's Tauri transport talks to. The shell holds no logic:
-//! with the default `fixture-host` feature the bridge is answered from the
-//! recorded fixtures, so the whole UI runs on Linux and Windows before any
-//! pipeline exists; WP6 swaps the host for the real one.
+//! The Tauri shell (WP3 and WP8 of
+//! `.plans/2026-10-02-rust-core-and-tauri-shell.md`): three windows and two
+//! floating panels around the web UI in `apps/macos/web`, a tray icon, and
+//! the `bridge_call` command the page's Tauri transport talks to. The shell
+//! holds no logic: with the default `fixture-host` feature the bridge is
+//! answered from the recorded fixtures, so the whole UI runs on Linux and
+//! Windows before any pipeline exists; WP6 swaps the host for the real one.
 //!
-//! Seven shapes duplicate the `steno-bridge` crate's until WP6 wires the
-//! crates into the shell, then become `use` lines: `BridgeErrorCode`,
-//! `BridgeError`, `BridgeEvent` (whose `topic` becomes the `BridgeTopic`
-//! enum), `OpenUrlParams`, `SettingsSection` and `WindowParams` in
-//! `bridge.rs`, `BridgeWindow` in `windows.rs`; `bridge::uuid_text` becomes
-//! `steno_core::json::uuid_string`.
+//! What the shell owns beside the windows (WP8): the tray (`tray`), the
+//! panels (`panels`), launch at login (`autostart`), updates (`updater`),
+//! the keyring (`secrets`), the OS permissions (`permissions`), the
+//! `steno:` links (`deep_links`), the native dialogs (`dialogs`) and the
+//! single instance. Every one is a thin module over a Tauri plugin or an
+//! OS API with its rules in plain functions the tests cover.
+//!
+//! Seven shapes duplicate the `steno-bridge` crate's until that crate merges,
+//! then become `use` lines: `BridgeErrorCode`, `BridgeError`, `BridgeEvent`
+//! (whose `topic` becomes the `BridgeTopic` enum), `OpenUrlParams`,
+//! `SettingsSection` and `WindowParams` in `bridge.rs`, `BridgeWindow` in
+//! `windows.rs`; `bridge::uuid_text` becomes `json::uuid::format`;
+//! `recording::RecordingState` becomes the crate's.
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 // Without the fixture host nothing emits a snapshot or publishes a request
 // yet; those paths stay compiled so WP6 wires them instead of rewriting them.
 #![cfg_attr(not(feature = "fixture-host"), allow(dead_code))]
 
+mod actions;
+mod autostart;
 mod bridge;
+mod deep_links;
+mod dialogs;
 #[cfg(feature = "fixture-host")]
 mod fixtures;
 mod host;
 mod navigation;
+mod panels;
+mod permissions;
+mod recording;
+mod secrets;
 mod smoke;
+mod tray;
+mod updater;
 mod windows;
 
+use tauri::Manager;
+
 fn main() {
-    let app = tauri::Builder::default()
+    let mut builder = tauri::Builder::default();
+    // First, so a second instance exits before it builds anything; it
+    // hands its arguments (a `steno:` link among them) to this one and
+    // the main window comes forward.
+    if single_instance_available() {
+        builder = builder.plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
+            actions::open(app, windows::BridgeWindow::Main);
+        }));
+    }
+    builder = builder
+        .plugin(autostart::plugin())
+        .plugin(tauri_plugin_deep_link::init())
+        .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
+        .plugin(updater::plugin());
+    #[cfg(target_os = "macos")]
+    {
+        builder = builder.plugin(tauri_nspanel::init());
+    }
+    let app = builder
         .manage(host::Host)
         .manage(smoke::Smoke::default())
-        .invoke_handler(tauri::generate_handler![bridge::bridge_call])
+        .manage(panels::Panels::default())
+        .manage(updater::Updates::default())
+        .invoke_handler(tauri::generate_handler![
+            bridge::bridge_call,
+            bridge::panel_call
+        ])
         .setup(|app| {
             let handle = app.handle();
+            // No tray is not fatal: the windows still work, and the process
+            // still stays alive for them. On Linux the tray crate panics
+            // (rather than errs) when libayatana-appindicator is not
+            // installed, so the panic is caught here; the .deb depends on
+            // the library and the AppImage bundles it.
+            let built =
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| tray::build(handle)));
+            match built {
+                Ok(Ok(())) => handle.state::<smoke::Smoke>().note_tray(),
+                Ok(Err(error)) => {
+                    eprintln!("[steno-desktop] the tray could not be built: {error}");
+                }
+                Err(_) => eprintln!(
+                    "[steno-desktop] the tray could not be built: the tray library is missing"
+                ),
+            }
             windows::open(handle, windows::BridgeWindow::Main, None, None)?;
+            deep_links::install(handle);
             smoke::arm(handle);
             Ok(())
         })
         .build(tauri::generate_context!())
         .expect("steno-desktop failed to build");
-    // WP6: on macOS the menu's Quit item (muda's predefined `terminate:`) ends
-    // the process without `ExitRequested`; tao implements only
-    // `applicationWillTerminate`. Once the shell holds state, a graceful
-    // shutdown needs a custom Quit item that calls `AppHandle::exit`.
-    app.run(|_app, event| {
-        let tauri::RunEvent::ExitRequested { code, api, .. } = &event else {
-            return;
-        };
-        if !exits_on(*code) {
-            api.prevent_exit();
+    app.run(|app, event| match event {
+        tauri::RunEvent::ExitRequested { code, api, .. } => {
+            if !exits_on(code) {
+                api.prevent_exit();
+            }
         }
+        // A panel the user dragged: its anchor follows (`panels::moved`
+        // tells a drag from the window taking its size).
+        tauri::RunEvent::WindowEvent {
+            label,
+            event: tauri::WindowEvent::Moved(position),
+            ..
+        } => {
+            if let Some(panel) = panels::Panel::from_label(&label) {
+                panels::moved(app, panel, position);
+            }
+        }
+        // The Dock icon was clicked with no window open: the main window
+        // comes back, as it does for the Swift app.
+        #[cfg(target_os = "macos")]
+        tauri::RunEvent::Reopen {
+            has_visible_windows: false,
+            ..
+        } => actions::open(app, windows::BridgeWindow::Main),
+        _ => {}
     });
 }
 
 /// Whether an exit request ends the process. One with a code is the shell's
-/// own (`AppHandle::exit`, the smoke's) and always does. One without comes
-/// from the last window closing: on macOS the process stays, as the Swift
-/// menu bar app does (`applicationShouldTerminateAfterLastWindowClosed` in
-/// `StenoApp.swift`); Linux and Windows quit until the tray lands in WP8.
+/// own (`AppHandle::exit` from the tray's Quit, the smoke's) and always
+/// does. One without comes from the last window closing: the tray keeps
+/// the process alive on every platform, as the Swift menu bar app stays
+/// when its window closes (`applicationShouldTerminateAfterLastWindowClosed`
+/// in `StenoApp.swift`).
 fn exits_on(code: Option<i32>) -> bool {
-    code.is_some() || !cfg!(target_os = "macos")
+    code.is_some()
+}
+
+/// Whether the single-instance plugin can run: on Linux it holds a name on
+/// the session bus and panics without one (a headless CI run under
+/// `xvfb-run` has none), so it is skipped there; macOS and Windows need
+/// nothing.
+fn single_instance_available() -> bool {
+    !cfg!(target_os = "linux") || std::env::var_os("DBUS_SESSION_BUS_ADDRESS").is_some()
 }
 
 #[cfg(test)]
@@ -67,9 +150,21 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_last_window_keeps_the_process_only_on_macos() {
+    fn only_the_shells_own_exit_ends_the_process() {
         assert!(exits_on(Some(0)));
         assert!(exits_on(Some(1)));
-        assert_eq!(exits_on(None), !cfg!(target_os = "macos"));
+        assert!(!exits_on(None));
+    }
+
+    #[test]
+    fn single_instance_needs_a_session_bus_on_linux_only() {
+        if cfg!(target_os = "linux") {
+            assert_eq!(
+                single_instance_available(),
+                std::env::var_os("DBUS_SESSION_BUS_ADDRESS").is_some()
+            );
+        } else {
+            assert!(single_instance_available());
+        }
     }
 }

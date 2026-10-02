@@ -16,8 +16,13 @@ use tauri_plugin_opener::OpenerExt;
 use uuid::Uuid;
 
 use crate::{
+    autostart, dialogs,
     host::Host,
+    panels::{self, Panel},
+    permissions::{self, PermissionKindParams},
+    recording::RecordingState,
     smoke::Smoke,
+    tray, updater,
     windows::{self, BridgeWindow},
 };
 
@@ -100,11 +105,14 @@ struct BridgeEvent<'a> {
 /// Publishes one topic's snapshot to one window, and to that window only;
 /// the smoke run counts what reaches main. An `onboarding` snapshot that
 /// says `finished` also closes the onboarding window: the page shows what
-/// the host says and the host ends the window.
+/// the host says and the host ends the window. A `recording` snapshot to
+/// the main window is also what the tray and the floating panels follow.
 ///
-/// Swift: `OnboardingWindow.swift` (`onChange(of: finished)`).
+/// Swift: `OnboardingWindow.swift` (`onChange(of: finished)`),
+/// `FloatingPanelPresenter.observe` and `MenuBarLabel`.
 pub fn emit(window: &WebviewWindow, topic: &str, payload: Value) -> Result<(), BridgeError> {
     let finished = finishes_onboarding(topic, &payload);
+    let recording = recording_state_for_shell(window.label(), topic, &payload);
     window
         .emit_to(
             EventTarget::webview_window(window.label()),
@@ -117,7 +125,25 @@ pub fn emit(window: &WebviewWindow, topic: &str, payload: Value) -> Result<(), B
         windows::close(window.app_handle(), BridgeWindow::Onboarding)
             .map_err(|error| BridgeError::failed(error.to_string()))?;
     }
+    if let Some(state) = recording {
+        tray::note_recording(window.app_handle(), state);
+        panels::note_recording(window.app_handle(), state);
+    }
     Ok(())
+}
+
+/// The recorder state the shell follows: the `recording` topic as published
+/// to the main window (the window the host drives the recorder through);
+/// the same topic reaching another window, or any other topic, moves
+/// nothing.
+pub fn recording_state_for_shell(
+    label: &str,
+    topic: &str,
+    payload: &Value,
+) -> Option<RecordingState> {
+    (label == BridgeWindow::Main.as_str() && topic == "recording")
+        .then(|| RecordingState::from_snapshot(payload))
+        .flatten()
 }
 
 /// Whether a snapshot ends onboarding: the `onboarding` topic with
@@ -227,6 +253,20 @@ struct OpenUrlParams {
     url: String,
 }
 
+/// `params.bool.json`.
+#[derive(Debug, Deserialize)]
+struct SetBoolParams {
+    value: bool,
+}
+
+/// `panel_call("resize")`: the page's measured size in CSS pixels, which
+/// are logical points.
+#[derive(Debug, Deserialize)]
+struct ResizeParams {
+    width: f64,
+    height: f64,
+}
+
 fn parse<T: for<'de> Deserialize<'de>>(method: &str, params: Value) -> Result<T, BridgeError> {
     serde_json::from_value(params).map_err(|error| invalid_params_for(method, error))
 }
@@ -294,8 +334,87 @@ pub async fn bridge_call(
                 .map_err(|error| BridgeError::failed(error.to_string()))?;
             Ok(Value::Null)
         }
-        _ => host.call(&window, &method, params),
+        // The OS plumbing the Swift host did inside its view models and
+        // the shell does here: settings panes, the login item, the update
+        // check and the folder panels. See each module for the seam
+        // towards the host.
+        "system.openSystemSettings" => {
+            let request: PermissionKindParams = parse(&method, params)?;
+            if let Some(url) = permissions::system_settings_url(request.kind) {
+                dialogs::open_url(&app, &url)?;
+            }
+            Ok(Value::Null)
+        }
+        "settings.general.openLoginItems" => {
+            if let Some(url) = autostart::system_settings_url() {
+                dialogs::open_url(&app, url)?;
+            }
+            Ok(Value::Null)
+        }
+        "settings.general.setLaunchAtLogin" => {
+            let request: SetBoolParams = parse(&method, params.clone())?;
+            autostart::set_enabled(&app, request.value).map_err(BridgeError::failed)?;
+            tray::note_login_item(&app);
+            // The host hears of it too, so its General snapshot follows.
+            host.call(&window, &method, params)?;
+            Ok(Value::Null)
+        }
+        "updates.check" => {
+            let handle = app.clone();
+            tauri::async_runtime::spawn(async move { updater::check_and_offer(&handle).await });
+            Ok(Value::Null)
+        }
+        _ => match dialogs::FolderChooser::for_method(&method) {
+            Some(chooser) => {
+                let chosen = dialogs::choose_folder(&window, chooser).await?;
+                if let Some(path) = &chosen {
+                    host.call(&window, &method, dialogs::chosen_path_params(path))?;
+                }
+                Ok(dialogs::chosen_path_reply(chosen.as_deref()))
+            }
+            None => host.call(&window, &method, params),
+        },
     }
+}
+
+/// The panels' own command, beside the bridge: the page reports its
+/// measured size (`resize`) and the prompt's X dismisses the prompt
+/// (`dismissPrompt`). Only a panel window may call it; the three bridge
+/// windows get `unknownMethod`, as they would for a method they do not
+/// answer.
+#[tauri::command]
+pub async fn panel_call(
+    app: AppHandle,
+    window: WebviewWindow,
+    action: String,
+    params: Option<Value>,
+) -> Result<Value, BridgeError> {
+    let panel = panel_caller(window.label())?;
+    let params = params.unwrap_or(Value::Null);
+    match action.as_str() {
+        "resize" => {
+            let size: ResizeParams = parse(&action, params)?;
+            app.state::<Smoke>()
+                .note_panel_size(panel.label(), (size.width, size.height));
+            panels::resize(&app, panel, (size.width, size.height))
+                .map_err(|error| BridgeError::failed(error.to_string()))?;
+            Ok(Value::Null)
+        }
+        "dismissPrompt" => {
+            panels::dismiss_prompt(&app);
+            Ok(Value::Null)
+        }
+        other => Err(BridgeError::unknown_method(format!(
+            "The panels do not answer {other}."
+        ))),
+    }
+}
+
+/// Which panel is calling, or `unknownMethod` for any other window.
+pub fn panel_caller(label: &str) -> Result<Panel, BridgeError> {
+    Panel::from_label(label).ok_or_else(|| {
+        BridgeError::unknown_method(format!("The {label} window does not answer panel_call."))
+    })
 }
 
 #[cfg(test)]
@@ -478,6 +597,63 @@ mod tests {
                 format!("The {name} window does not answer window.close.")
             );
         }
+    }
+
+    #[test]
+    fn only_the_main_windows_recording_snapshot_moves_the_shell() {
+        let live: Value = serde_json::from_str(include_str!(
+            "../../../macos/web/fixtures/bridge/recording.live.json"
+        ))
+        .unwrap();
+        assert_eq!(
+            recording_state_for_shell("main", "recording", &live),
+            Some(RecordingState::Recording)
+        );
+        assert_eq!(
+            recording_state_for_shell("settings", "recording", &live),
+            None
+        );
+        assert_eq!(recording_state_for_shell("main", "progress", &live), None);
+        assert_eq!(
+            recording_state_for_shell("main", "recording", &Value::Null),
+            None
+        );
+    }
+
+    #[test]
+    fn only_the_panels_call_panel_call() {
+        assert_eq!(panel_caller("bubble").unwrap(), Panel::Bubble);
+        assert_eq!(panel_caller("prompt").unwrap(), Panel::Prompt);
+        for label in ["main", "settings", "onboarding"] {
+            let error = panel_caller(label).unwrap_err();
+            assert_eq!(error.code, BridgeErrorCode::UnknownMethod, "{label}");
+            assert_eq!(
+                error.message,
+                format!("The {label} window does not answer panel_call.")
+            );
+        }
+    }
+
+    #[test]
+    fn the_shells_params_read_the_recorded_shapes() {
+        let flag: SetBoolParams = parse(
+            "settings.general.setLaunchAtLogin",
+            serde_json::from_str(include_str!(
+                "../../../macos/web/fixtures/bridge/params.bool.json"
+            ))
+            .unwrap(),
+        )
+        .unwrap();
+        assert!(matches!(flag.value, true | false));
+        let size: ResizeParams = parse(
+            "resize",
+            serde_json::json!({ "width": 244.5, "height": 40 }),
+        )
+        .unwrap();
+        assert_eq!((size.width, size.height), (244.5, 40.0));
+        let error = parse::<ResizeParams>("resize", serde_json::json!({ "width": 1 })).unwrap_err();
+        assert_eq!(error.code, BridgeErrorCode::InvalidParams);
+        assert!(error.message.starts_with("resize: "));
     }
 
     #[test]
