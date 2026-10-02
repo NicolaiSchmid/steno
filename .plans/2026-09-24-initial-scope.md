@@ -1,5 +1,10 @@
 # Steno — scope and decisions
 
+> Amended 2026-10-02 by [`2026-10-02-rust-core-and-tauri-shell.md`](2026-10-02-rust-core-and-tauri-shell.md):
+> Windows and Linux leave the non-goals for the next major version, and the
+> "Language / UI", "Core" and "Apps" rows below describe the Swift app that ships
+> until the Rust cutover.
+
 Status: draft for confirmation. Date: 2026-09-24.
 Decisions below were settled in a structured interview. Nothing here is implemented yet.
 Research background: `docs/research/2026-09-24-jamie-and-oss-landscape.md`.

@@ -1,0 +1,51 @@
+# The Rust workspace: core crates under crates/, the Tauri shell under
+# apps/desktop (added by WP3). Plan: .plans/2026-10-02-rust-core-and-tauri-shell.md.
+# Dependency direction mirrors the Swift package: steno-core depends on nothing
+# of ours; every other crate depends on steno-core; the shell and the CLI wire
+# them together.
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+# The floor of the dependency tree, checked by the `msrv` job in rust-ci.yml:
+# tauri 2.12 declares 1.90 (edition 2024 alone needs 1.85, let chains 1.88).
+rust-version = "1.90"
+license = "MIT"
+repository = "https://github.com/NicolaiSchmid/steno"
+publish = false
+
+# Shared dependency versions live here and nowhere else; crates inherit them
+# with `workspace = true`. No `serde_json/preserve_order`: every writer sorts
+# keys itself (`steno-bridge` and `steno-core` `json.rs`), so the default map
+# is the right one.
+[workspace.dependencies]
+anyhow = "1"
+base64 = "0.22"
+chrono = { version = "0.4", default-features = false, features = ["clock", "serde", "std"] }
+directories = "6"
+rusqlite = { version = "0.40", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tauri = "2.12"
+tauri-build = "2.7"
+tauri-plugin-opener = "2.7"
+thiserror = "2"
+tracing = "0.1"
+uuid = { version = "1", features = ["serde", "v4"] }
+# Test only
+similar = "2"
+tempfile = "3"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+must_use_candidate = "allow"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1

@@ -1,5 +1,10 @@
 # Steno: the Mac windows as a local web app with Steno's own design language
 
+> Amended 2026-10-02 by [`2026-10-02-rust-core-and-tauri-shell.md`](2026-10-02-rust-core-and-tauri-shell.md):
+> the "no Electron, Tauri, Node at runtime" decision held for the Swift host; a
+> Tauri 2 shell replaces that host on every platform at cutover. The web app,
+> the bridge contract and the fixtures carry over unchanged.
+
 Status: implemented, 2026-10-01 (WP0 to WP5; proposed 2026-09-29, revised 2026-09-30, third
 draft). Deviations per work package are recorded at the end. Triggered by the review of rc.3
 ("still horrible", "still just a gray blob", Settings clipping the window). The first draft
