@@ -163,6 +163,29 @@ impl From<CodexCredentialError> for RefreshFailure {
     }
 }
 
+impl From<RefreshRejected> for CodexCredentialError {
+    fn from(rejected: RefreshRejected) -> Self {
+        let detail = match rejected.code {
+            Some(code) => format!("{code}: {}", rejected.message),
+            None => rejected.message,
+        };
+        if rejected.permanent {
+            CodexCredentialError::SignInExpired(detail)
+        } else {
+            CodexCredentialError::RefreshFailed(detail)
+        }
+    }
+}
+
+impl From<RefreshFailure> for CodexCredentialError {
+    fn from(failure: RefreshFailure) -> Self {
+        match failure {
+            RefreshFailure::Rejected(rejected) => rejected.into(),
+            RefreshFailure::Credential(error) => error,
+        }
+    }
+}
+
 /// The token endpoint's answer; every field is optional there.
 #[derive(Deserialize)]
 struct RefreshResponse {
@@ -305,18 +328,8 @@ impl CodexCredentialStore {
     /// access token is within [`Self::EXPIRY_WINDOW`] of its expiry or the
     /// file is older than [`Self::STALE_AFTER`].
     pub async fn current(&self) -> Result<CodexCredentials, CodexCredentialError> {
-        let file = self.read()?;
-        if !self.needs_refresh(&file.credentials) {
-            return Ok(file.credentials);
-        }
-        let _refreshing = self.refresh_lock.lock().await;
-        // Another caller may have refreshed while we waited: the file is the
-        // truth.
-        let latest = self.read()?;
-        if !self.needs_refresh(&latest.credentials) {
-            return Ok(latest.credentials);
-        }
-        self.refresh_rereading_on_reuse(latest).await
+        self.refresh_unless(|credentials| !self.needs_refresh(credentials))
+            .await
     }
 
     /// The 401 path: the file's credentials when they have changed since
@@ -326,13 +339,24 @@ impl CodexCredentialStore {
         &self,
         access_token: &str,
     ) -> Result<CodexCredentials, CodexCredentialError> {
+        self.refresh_unless(|credentials| credentials.access_token != access_token)
+            .await
+    }
+
+    /// The file's credentials when `usable` says so, else a refresh under
+    /// the lock, re-reading first: another caller may have refreshed while
+    /// we waited, and the file is the truth.
+    async fn refresh_unless(
+        &self,
+        usable: impl Fn(&CodexCredentials) -> bool,
+    ) -> Result<CodexCredentials, CodexCredentialError> {
         let file = self.read()?;
-        if file.credentials.access_token != access_token {
+        if usable(&file.credentials) {
             return Ok(file.credentials);
         }
         let _refreshing = self.refresh_lock.lock().await;
         let latest = self.read()?;
-        if latest.credentials.access_token != access_token {
+        if usable(&latest.credentials) {
             return Ok(latest.credentials);
         }
         self.refresh_rereading_on_reuse(latest).await
@@ -440,38 +464,21 @@ impl CodexCredentialStore {
         file: AuthFile,
     ) -> Result<CodexCredentials, CodexCredentialError> {
         let original_refresh_token = file.credentials.refresh_token.clone();
-        match self.refresh_once(file).await {
-            Ok(credentials) => Ok(credentials),
-            Err(RefreshFailure::Credential(error)) => Err(error),
-            Err(RefreshFailure::Rejected(rejected)) => {
-                if rejected.code.as_deref() == Some("refresh_token_reused") {
-                    // The CLI may have rotated the token since our read; its
-                    // file is the truth. One more read, one more try, then
-                    // the failure stands.
-                    let latest = self.read()?;
-                    if latest.credentials.refresh_token != original_refresh_token {
-                        return match self.refresh_once(latest).await {
-                            Ok(credentials) => Ok(credentials),
-                            Err(RefreshFailure::Credential(error)) => Err(error),
-                            Err(RefreshFailure::Rejected(again)) => Err(Self::error_for(&again)),
-                        };
-                    }
-                }
-                Err(Self::error_for(&rejected))
+        let rejected = match self.refresh_once(file).await {
+            Ok(credentials) => return Ok(credentials),
+            Err(RefreshFailure::Credential(error)) => return Err(error),
+            Err(RefreshFailure::Rejected(rejected)) => rejected,
+        };
+        if rejected.code.as_deref() == Some("refresh_token_reused") {
+            // The CLI may have rotated the token since our read; its file is
+            // the truth. One more read, one more try, then the failure
+            // stands.
+            let latest = self.read()?;
+            if latest.credentials.refresh_token != original_refresh_token {
+                return self.refresh_once(latest).await.map_err(Into::into);
             }
         }
-    }
-
-    fn error_for(rejected: &RefreshRejected) -> CodexCredentialError {
-        let detail = match &rejected.code {
-            Some(code) => format!("{code}: {}", rejected.message),
-            None => rejected.message.clone(),
-        };
-        if rejected.permanent {
-            CodexCredentialError::SignInExpired(detail)
-        } else {
-            CodexCredentialError::RefreshFailed(detail)
-        }
+        Err(rejected.into())
     }
 
     async fn refresh_once(&self, file: AuthFile) -> Result<CodexCredentials, RefreshFailure> {
@@ -494,13 +501,12 @@ impl CodexCredentialStore {
             .body(serde_json::to_vec(&body).unwrap_or_default())
             .send()
             .await
-            .map_err(|error| {
-                CodexCredentialError::RefreshFailed(transport::redact(&error.to_string(), &secrets))
-            })?;
+            .map_err(|error| Self::refresh_failed(&error, &secrets))?;
         let status = response.status().as_u16();
-        let data = response.bytes().await.map_err(|error| {
-            CodexCredentialError::RefreshFailed(transport::redact(&error.to_string(), &secrets))
-        })?;
+        let data = response
+            .bytes()
+            .await
+            .map_err(|error| Self::refresh_failed(&error, &secrets))?;
         if !(200..300).contains(&status) {
             let rejection: RefreshError = serde_json::from_slice(&data).unwrap_or_default();
             let code = rejection
@@ -551,6 +557,10 @@ impl CodexCredentialStore {
         );
         self.write(&document)?;
         Ok(Self::credentials_in(&document)?)
+    }
+
+    fn refresh_failed(error: &reqwest::Error, secrets: &[String]) -> CodexCredentialError {
+        CodexCredentialError::RefreshFailed(transport::redact(&error.to_string(), secrets))
     }
 
     /// Temp file beside the target with mode 0600, then `rename`: readers
