@@ -525,7 +525,7 @@ pub struct Bakeoff {
     /// Reference transcripts (`<name>.txt` beside each recording by default).
     #[arg(long = "reference-dir")]
     pub reference_directory: Option<PathBuf>,
-    /// Where the reports go; defaults to <audio-dir>/bakeoff.
+    /// Where the reports go; defaults to `<audio-dir>/bakeoff`.
     #[arg(long = "out")]
     pub output: Option<PathBuf>,
     /// Also run the cleanup pass and report the cleaned WER.
