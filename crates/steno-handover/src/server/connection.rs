@@ -27,26 +27,9 @@ use tokio::net::TcpStream;
 use tokio_rustls::server::TlsStream;
 
 use super::ServerMetrics;
+use crate::configuration::HandoverConfiguration;
 use crate::engine::{AuthOutcome, HandoverRequest, HandoverResponse, RequestHandling};
 use crate::route::Route;
-
-/// What the connection needs from the configuration.
-#[derive(Debug, Clone)]
-pub struct Settings {
-    pub read_timeout: Duration,
-    pub json_body_limit: i64,
-    pub chunk_body_limit: i64,
-}
-
-impl Settings {
-    fn body_limit(&self, route: Route) -> usize {
-        let limit = match route {
-            Route::Chunk(..) => self.chunk_body_limit,
-            _ => self.json_body_limit,
-        };
-        usize::try_from(limit).unwrap_or(usize::MAX)
-    }
-}
 
 /// How long a half-closed connection may linger before it is torn down.
 pub const CLOSE_GRACE: Duration = Duration::from_secs(2);
@@ -57,7 +40,7 @@ pub const REJECTED_BODY_DRAIN: usize = 64 * 1024;
 struct Shared {
     engine: Arc<dyn RequestHandling>,
     metrics: Arc<ServerMetrics>,
-    settings: Arc<Settings>,
+    configuration: Arc<HandoverConfiguration>,
     /// True from dispatch until the response is written: the silence is the
     /// engine's (a long verify), not the client's, so the read timeout does
     /// not apply.
@@ -72,12 +55,12 @@ pub async fn serve(
     tls: TlsStream<TcpStream>,
     engine: Arc<dyn RequestHandling>,
     metrics: Arc<ServerMetrics>,
-    settings: Arc<Settings>,
+    configuration: Arc<HandoverConfiguration>,
 ) {
     let shared = Arc::new(Shared {
         engine,
         metrics,
-        settings: settings.clone(),
+        configuration,
         handling: AtomicBool::new(false),
         closing: AtomicBool::new(false),
     });
@@ -119,7 +102,7 @@ async fn handle(shared: Arc<Shared>, request: Request<Incoming>) -> Response<Ful
             body,
         );
     };
-    let limit = shared.settings.body_limit(route);
+    let limit = usize::try_from(route.body_limit(&shared.configuration)).unwrap_or(usize::MAX);
     let declared = parts
         .headers
         .get(header::CONTENT_LENGTH)
@@ -292,7 +275,7 @@ impl AsyncRead for TimedStream {
                     return Poll::Pending;
                 }
                 if !self.armed {
-                    let deadline = Instant::now() + self.shared.settings.read_timeout;
+                    let deadline = Instant::now() + self.shared.configuration.read_timeout;
                     self.sleep.as_mut().reset(deadline.into());
                     self.armed = true;
                 }

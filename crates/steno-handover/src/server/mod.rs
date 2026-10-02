@@ -100,12 +100,14 @@ impl HandoverServer {
         } else {
             None
         };
-        let settings = Arc::new(connection::Settings {
-            read_timeout: configuration.read_timeout,
-            json_body_limit: HandoverConfiguration::JSON_BODY_LIMIT,
-            chunk_body_limit: configuration.chunk_body_limit(),
-        });
-        let accept_task = tokio::spawn(accept_loop(listener, acceptor, engine, metrics, settings));
+        let configuration = Arc::new(configuration.clone());
+        let accept_task = tokio::spawn(accept_loop(
+            listener,
+            acceptor,
+            engine,
+            metrics,
+            configuration,
+        ));
         Ok(HandoverServer {
             port,
             accept_task,
@@ -124,19 +126,12 @@ impl HandoverServer {
     }
 }
 
-/// How long a TLS handshake may take before the connection is dropped;
-/// the read timeout, so a peer that connects and says nothing costs the
-/// same as one that stops mid-request.
-fn handshake_timeout(settings: &connection::Settings) -> Duration {
-    settings.read_timeout
-}
-
 async fn accept_loop(
     listener: TcpListener,
     acceptor: TlsAcceptor,
     engine: Arc<dyn RequestHandling>,
     metrics: Arc<ServerMetrics>,
-    settings: Arc<connection::Settings>,
+    configuration: Arc<HandoverConfiguration>,
 ) {
     loop {
         let (stream, _) = match listener.accept().await {
@@ -151,12 +146,14 @@ async fn accept_loop(
         let acceptor = acceptor.clone();
         let engine = engine.clone();
         let metrics = metrics.clone();
-        let settings = settings.clone();
+        let configuration = configuration.clone();
         tokio::spawn(async move {
+            // The handshake gets the read timeout: a peer that connects and
+            // says nothing costs the same as one that stops mid-request.
             let handshake =
-                tokio::time::timeout(handshake_timeout(&settings), acceptor.accept(stream));
+                tokio::time::timeout(configuration.read_timeout, acceptor.accept(stream));
             match handshake.await {
-                Ok(Ok(tls)) => connection::serve(tls, engine, metrics, settings).await,
+                Ok(Ok(tls)) => connection::serve(tls, engine, metrics, configuration).await,
                 Ok(Err(error)) => {
                     tracing::debug!(target: "steno::handover", "TLS handshake failed: {error}");
                 }
