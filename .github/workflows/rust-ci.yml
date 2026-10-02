@@ -47,8 +47,10 @@ jobs:
           - name: windows
             os: windows-latest
           - name: macos
-            os: ${{ vars.MACOS_RUNS_ON || 'macos-15' }}
-    runs-on: ${{ matrix.os }}
+            os: macos-15
+    # The macOS job follows `MACOS_RUNS_ON` (a JSON label list for the Forge
+    # runners) like Swift CI; the other two use the hosted images.
+    runs-on: ${{ matrix.name == 'macos' && fromJSON(vars.MACOS_RUNS_ON || '"macos-15"') || matrix.os }}
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
