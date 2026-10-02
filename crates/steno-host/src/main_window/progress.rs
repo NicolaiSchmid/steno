@@ -1,8 +1,8 @@
 //! Where the pipeline is with every meeting that is queued or processing,
 //! after `Main/ProcessingProgressModel.swift`, and the two event types it
 //! consumes, after `Sources/StenoCore/{Pipeline/ProcessingProgress,Events/MeetingEvent}.swift`.
-//! The event types move to the core with the pipeline (WP6's
-//! orchestration); the host imports them then.
+//! The event types live in the core (`steno_core::MeetingEvent`,
+//! `steno_core::ProcessingProgress`) and are re-exported here.
 
 use std::collections::BTreeMap;
 
@@ -12,38 +12,7 @@ use uuid::Uuid;
 
 use crate::labels::stage_label;
 
-/// What a `progress` event carries. Swift: `ProcessingProgress`.
-#[derive(Debug, Clone, PartialEq)]
-pub struct ProcessingProgress {
-    pub stage: PipelineStage,
-    /// The bar's value, clamped so it never decreases within one run.
-    pub fraction: f64,
-    /// Where the next progress event is expected to land.
-    pub next_fraction: f64,
-    /// Wall clock the run is expected to still take.
-    pub estimated_remaining_seconds: f64,
-    pub is_estimate_seeded: bool,
-}
-
-/// What the pipeline and the store tell the UI beyond row changes.
-/// Swift: `MeetingEvent`.
-#[derive(Debug, Clone, PartialEq)]
-pub enum MeetingEvent {
-    Progress {
-        meeting_id: Uuid,
-        progress: ProcessingProgress,
-    },
-    SpeakersNeedReview {
-        meeting_id: Uuid,
-        speaker_ids: Vec<Uuid>,
-    },
-    RetentionApplied {
-        meeting_id: Uuid,
-    },
-    Deleted {
-        meeting_id: Uuid,
-    },
-}
+pub use steno_core::{MeetingEvent, ProcessingProgress};
 
 /// One queued or processing meeting as the model tracks it.
 /// Swift: `ProcessingProgressModel.Entry`.

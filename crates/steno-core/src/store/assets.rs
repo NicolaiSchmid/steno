@@ -92,3 +92,57 @@ impl Store {
         })
     }
 }
+
+impl Store {
+    /// The asset row by its own id, `None` when there is none.
+    pub fn asset_by_id(&self, id: Uuid) -> Result<Option<AudioAsset>> {
+        self.read(|connection| {
+            Ok(connection
+                .query_row(
+                    &format!("SELECT {COLUMNS} FROM audioAsset WHERE id = ?1"),
+                    [DbUuid(id)],
+                    from_row,
+                )
+                .optional()?)
+        })
+    }
+
+    /// Every asset whose `expiresAt` has passed and whose meeting is not
+    /// recording, queued or processing, in expiry order.
+    /// Swift: `MeetingStore.expiredAssets(now:)`.
+    pub fn expired_assets(&self, now: chrono::DateTime<chrono::Utc>) -> Result<Vec<AudioAsset>> {
+        self.read(|connection| {
+            query_all(
+                connection,
+                &format!(
+                    "SELECT {} FROM audioAsset a JOIN meeting m ON m.id = a.meetingID \
+                     WHERE a.expiresAt IS NOT NULL AND a.expiresAt <= ?1 \
+                     AND m.state NOT IN ('recording', 'queued', 'processing') \
+                     ORDER BY a.expiresAt, a.id",
+                    COLUMNS
+                        .split(", ")
+                        .map(|column| format!("a.{column}"))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
+                [DbDate(now)],
+                from_row,
+            )
+        })
+    }
+
+    /// Marks every listed asset `keepForever` with `expiresAt` cleared, in
+    /// one write. Swift: `MeetingStore.keepForever(assetIDs:)`.
+    pub fn keep_forever(&self, asset_ids: &[Uuid]) -> Result<()> {
+        self.write(|transaction| {
+            for id in asset_ids {
+                transaction.execute(
+                    "UPDATE audioAsset SET retention = ?1, retentionDays = NULL, expiresAt = NULL \
+                     WHERE id = ?2",
+                    params![DbEnum(AudioRetention::KeepForever.kind()), DbUuid(*id)],
+                )?;
+            }
+            Ok(())
+        })
+    }
+}
