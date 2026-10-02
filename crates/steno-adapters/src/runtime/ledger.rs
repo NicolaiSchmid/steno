@@ -24,7 +24,6 @@ pub struct DeliveryLedger {
     /// tampered receipt does not pin a folder or protect a file here.
     previous: Option<DeliveryReceipt>,
     files: BTreeMap<String, DeliveredFile>,
-    owned: Vec<String>,
 }
 
 impl DeliveryLedger {
@@ -42,16 +41,10 @@ impl DeliveryLedger {
             .flat_map(|receipt| receipt.files.iter())
             .map(|file| (file.relative_path.clone(), file.clone()))
             .collect();
-        let owned = files
-            .values()
-            .filter(|file| file.ownership == FileOwnership::Owned)
-            .map(|file| file.relative_path.clone())
-            .collect();
         DeliveryLedger {
             root: root.to_owned(),
             previous,
             files,
-            owned,
         }
     }
 
@@ -79,12 +72,21 @@ impl DeliveryLedger {
         &self.files
     }
 
+    /// The files of the previous receipt, when one applies.
+    fn previous_files(&self) -> impl Iterator<Item = &DeliveredFile> {
+        self.previous.iter().flat_map(|receipt| &receipt.files)
+    }
+
     /// Whether an owned path may be opened for writing: on first delivery
     /// always; on re-export when the receipt lists it as owned or nothing is
     /// there yet. A file the app never wrote is never opened for writing.
     #[must_use]
     pub fn may_write(&self, path: &str, exists: bool) -> bool {
-        self.is_first_delivery() || self.owned.iter().any(|owned| owned == path) || !exists
+        self.is_first_delivery()
+            || !exists
+            || self
+                .previous_files()
+                .any(|file| file.ownership == FileOwnership::Owned && file.relative_path == path)
     }
 
     pub fn record(&mut self, path: &str, ownership: FileOwnership, data: &[u8]) {
@@ -103,9 +105,7 @@ impl DeliveryLedger {
     /// person who left the meeting is still listed on.
     #[must_use]
     pub fn stale_managed_pages(&self, rendered: &HashSet<String>) -> Vec<String> {
-        self.previous
-            .iter()
-            .flat_map(|receipt| &receipt.files)
+        self.previous_files()
             .filter(|file| file.ownership == FileOwnership::ManagedBlock)
             .filter(|file| !rendered.contains(&file.relative_path))
             .map(|file| file.relative_path.clone())
