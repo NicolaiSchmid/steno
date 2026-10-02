@@ -38,35 +38,16 @@ pub fn decode<T: DeserializeOwned>(bytes: &[u8]) -> Result<T, serde_json::Error>
 /// `.sortedKeys` and `.withoutEscapingSlashes`: two-space indent, `" : "`
 /// between key and value, and an empty container as an open and a close
 /// bracket around a blank line. The reduce prompt carries the chunk notes
-/// in this form, pinned by the golden.
+/// in this form, pinned by the golden. Keys and numbers are normalised by
+/// the one-line encoder first, so both forms agree on them.
 #[must_use]
 pub fn swift_pretty(value: &serde_json::Value) -> String {
-    let mut normalised: serde_json::Value = serde_json::to_string(value)
+    let normalised: serde_json::Value = steno_core::json::to_column_string(value)
         .and_then(|text| serde_json::from_str(&text))
         .unwrap_or(serde_json::Value::Null);
-    normalise_numbers(&mut normalised);
     let mut out = String::new();
     write_pretty(&normalised, 0, &mut out);
     out
-}
-
-fn normalise_numbers(value: &mut serde_json::Value) {
-    match value {
-        serde_json::Value::Object(map) => map.values_mut().for_each(normalise_numbers),
-        serde_json::Value::Array(items) => items.iter_mut().for_each(normalise_numbers),
-        serde_json::Value::Number(number) => {
-            if let Some(float) = number.as_f64()
-                && number.is_f64()
-                && float.fract() == 0.0
-                && float.abs() < 9_007_199_254_740_992.0
-            {
-                #[allow(clippy::cast_possible_truncation)]
-                let whole = float as i64;
-                *value = serde_json::Value::from(whole);
-            }
-        }
-        _ => {}
-    }
 }
 
 fn write_pretty(value: &serde_json::Value, indent: usize, out: &mut String) {
@@ -80,15 +61,13 @@ fn write_pretty(value: &serde_json::Value, indent: usize, out: &mut String) {
                 out.push('}');
                 return;
             }
-            let mut keys: Vec<&String> = map.keys().collect();
-            keys.sort();
             out.push_str("{\n");
-            for (offset, key) in keys.iter().enumerate() {
+            for (offset, (key, entry)) in map.iter().enumerate() {
                 out.push_str(&inner);
                 out.push_str(&serde_json::to_string(key).unwrap_or_default());
                 out.push_str(" : ");
-                write_pretty(&map[*key], indent + 1, out);
-                if offset + 1 < keys.len() {
+                write_pretty(entry, indent + 1, out);
+                if offset + 1 < map.len() {
                     out.push(',');
                 }
                 out.push('\n');
