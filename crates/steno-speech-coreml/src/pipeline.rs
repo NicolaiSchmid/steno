@@ -308,8 +308,7 @@ impl Transcriber {
     ) -> Result<(Vec<Vec<Token>>, Stats), SpeechError> {
         let workers = self.config.concurrency.min(windows.len()).max(1);
         let next = AtomicUsize::new(0);
-        let outputs: Vec<Mutex<Option<Vec<Token>>>> =
-            windows.iter().map(|_| Mutex::new(None)).collect();
+        let outputs: Vec<Mutex<Vec<Token>>> = windows.iter().map(|_| Mutex::default()).collect();
         let failure: Mutex<Option<SpeechError>> = Mutex::new(None);
         let totals: Mutex<Stats> = Mutex::new(Stats::default());
 
@@ -338,7 +337,7 @@ impl Transcriber {
                                 },
                                 &mut stats,
                             )?;
-                            *outputs[index].lock().expect("output lock") = Some(hypothesis.tokens);
+                            *outputs[index].lock().expect("output lock") = hypothesis.tokens;
                         }
                     })();
                     totals.lock().expect("stats lock").add(&stats);
@@ -357,7 +356,7 @@ impl Transcriber {
         }
         let outputs = outputs
             .into_iter()
-            .map(|slot| slot.into_inner().expect("output lock").unwrap_or_default())
+            .map(|slot| slot.into_inner().expect("output lock"))
             .collect();
         Ok((outputs, totals.into_inner().expect("stats lock")))
     }
@@ -481,10 +480,9 @@ impl Transcriber {
                 // duration when present, else one frame.
                 let gap_start_frame = current.frame + current.duration.max(1);
                 let gap_end_frame = next.frame;
-                if gap_end_frame < gap_start_frame + min_gap_frames {
-                    continue;
-                }
-                if probed_gap_starts.contains(&gap_start_frame) {
+                if gap_end_frame < gap_start_frame + min_gap_frames
+                    || probed_gap_starts.contains(&gap_start_frame)
+                {
                     continue;
                 }
                 let gap_start_sample = gap_start_frame * FRAME_SAMPLES;
@@ -514,7 +512,6 @@ impl Transcriber {
                 ];
                 let lead = word_neighbor(&working, index, -1, vocab);
                 let tail = word_neighbor(&working, index + 1, 1, vocab);
-                let mut recovered: Vec<Token> = Vec::new();
                 for placement in placements {
                     let window_start = placement.min(total.saturating_sub(window_samples))
                         / FRAME_SAMPLES
@@ -541,16 +538,13 @@ impl Transcriber {
                         tail,
                         vocab,
                     );
-                    if !candidate.is_empty() {
-                        recovered = candidate;
-                        break;
+                    if candidate.is_empty() {
+                        continue;
                     }
+                    stats.repaired_tokens += candidate.len();
+                    inserts.extend(candidate);
+                    break;
                 }
-                if recovered.is_empty() {
-                    continue;
-                }
-                stats.repaired_tokens += recovered.len();
-                inserts.extend(recovered);
             }
             if inserts.is_empty() {
                 break;
