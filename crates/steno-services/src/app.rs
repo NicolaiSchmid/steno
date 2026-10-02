@@ -138,6 +138,35 @@ pub fn pipeline_dependencies(
     })
 }
 
+/// The handover listener over a loaded or minted identity, with the mac id
+/// the Phones settings show; `None`, with the reason, when the identity
+/// could not be read or stored.
+fn handover_listener(
+    store: &Arc<Store>,
+    pipeline: &Arc<PipelineHandle>,
+    secrets: &Arc<dyn SecretStore>,
+    zone: FixedOffset,
+    runtime: &tokio::runtime::Handle,
+) -> Result<(Arc<HandoverService>, uuid::Uuid), String> {
+    let identity = tokio::task::block_in_place(|| {
+        runtime.block_on(crate::handover::load_or_mint_identity(
+            secrets.as_ref(),
+            &format!(
+                "Steno on {}",
+                steno_handover::HandoverConfiguration::default_service_name()
+            ),
+        ))
+    })?;
+    let intake = Arc::new(RecordingIntake::over(
+        store.clone(),
+        pipeline.current(),
+        zone,
+    ));
+    let mac_id = identity.mac_id();
+    let service = Arc::new(crate::handover::service(store.clone(), intake, identity));
+    Ok((service, mac_id))
+}
+
 /// The host's service table over the graph's parts.
 #[allow(clippy::too_many_arguments)]
 fn services(
@@ -251,25 +280,8 @@ pub fn build(options: AppOptions) -> Result<App, String> {
         runtime.clone(),
     ));
 
-    let handover = match tokio::task::block_in_place(|| {
-        runtime.block_on(crate::handover::load_or_mint_identity(
-            secrets.as_ref(),
-            &format!(
-                "Steno on {}",
-                steno_handover::HandoverConfiguration::default_service_name()
-            ),
-        ))
-    }) {
-        Ok(identity) => {
-            let intake = Arc::new(RecordingIntake::over(
-                store.clone(),
-                pipeline.current(),
-                zone,
-            ));
-            let mac_id = identity.mac_id();
-            let service = Arc::new(crate::handover::service(store.clone(), intake, identity));
-            Some((service, mac_id))
-        }
+    let handover = match handover_listener(&store, &pipeline, &secrets, zone, &runtime) {
+        Ok(pair) => Some(pair),
         Err(error) => {
             warnings.push(format!("Phone handover is unavailable: {error}"));
             None
