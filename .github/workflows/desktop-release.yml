@@ -136,7 +136,7 @@ jobs:
             updater=false
           fi
           config="{\"build\":{\"beforeBuildCommand\":null},\"bundle\":{\"createUpdaterArtifacts\":$updater}}"
-          pnpm --dir ../../macos/web dlx @tauri-apps/cli@^2.12 build --ci \
+          pnpm dlx @tauri-apps/cli@^2.12 build --ci \
             --bundles "${{ matrix.bundles }}" --config "$config"
 
       # A self-hosted runner keeps its target directory outside the

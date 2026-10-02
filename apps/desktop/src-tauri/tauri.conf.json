@@ -76,11 +76,7 @@
     },
     "linux": {
       "deb": {
-        "section": "sound",
-        "depends": [
-          "libwebkit2gtk-4.1-0",
-          "libayatana-appindicator3-1"
-        ]
+        "section": "sound"
       },
       "appimage": {
         "bundleMediaFramework": false

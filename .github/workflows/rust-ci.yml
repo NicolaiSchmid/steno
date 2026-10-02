@@ -226,7 +226,7 @@ jobs:
         if: matrix.name == 'linux'
         working-directory: apps/desktop/src-tauri
         run: |
-          pnpm --dir ../../macos/web dlx @tauri-apps/cli@^2.12 build --ci --no-bundle \
+          pnpm dlx @tauri-apps/cli@^2.12 build --ci --no-bundle \
             --config '{"build":{"beforeBuildCommand":null},"bundle":{"createUpdaterArtifacts":false}}'
           test -x ../../../target/release/steno-desktop
 
