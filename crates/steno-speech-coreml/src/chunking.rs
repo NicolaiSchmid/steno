@@ -307,18 +307,17 @@ fn best_boundary_candidate(
     let mut best_start = target_start;
     let mut best_score = f32::MAX;
     let mut scores: Vec<f32> = Vec::new();
-    if lower_frame <= upper_frame {
-        for frame in lower_frame..=upper_frame {
-            let candidate = frame * FRAME_SAMPLES;
-            if candidate <= previous_start || candidate > latest_covered_start {
-                continue;
-            }
-            let score = boundary_energy_score(audio, candidate, half_window);
-            scores.push(score);
-            if score < best_score {
-                best_score = score;
-                best_start = candidate;
-            }
+    // An inverted range (target near the start) is simply empty.
+    for frame in lower_frame..=upper_frame {
+        let candidate = frame * FRAME_SAMPLES;
+        if candidate <= previous_start || candidate > latest_covered_start {
+            continue;
+        }
+        let score = boundary_energy_score(audio, candidate, half_window);
+        scores.push(score);
+        if score < best_score {
+            best_score = score;
+            best_start = candidate;
         }
     }
     if scores.is_empty() {
@@ -432,7 +431,8 @@ pub struct Window {
     pub audio_end: usize,
     /// The sample the decoder's frame zero refers to
     /// (`chunkStartOffset`): `context_start` when a warm-up prefix is
-    /// decoded, else the chunk start.
+    /// decoded, else the chunk start. Without mel context the two
+    /// coincide, so this always equals `context_start`.
     pub frame_origin: usize,
     /// Tokens before this global frame are decoded but suppressed
     /// (`emitTokensAfterFrame`).
@@ -492,18 +492,12 @@ pub fn plan_windows(
             .max(FRAME_SAMPLES);
         let candidate_end = chunk_start + visible;
         let is_last = candidate_end >= total_samples;
-        let chunk_end = if is_last {
-            total_samples
+        // The last window stops at the file end, or earlier at the end of
+        // speech; a non-final window is at least one frame long.
+        let audio_end = if is_last {
+            total_samples.min(speech_end)
         } else {
             candidate_end
-        };
-        if chunk_end <= chunk_start {
-            break;
-        }
-        let audio_end = if is_last {
-            chunk_end.min(speech_end)
-        } else {
-            chunk_end
         };
         if audio_end <= chunk_start {
             break;
@@ -513,11 +507,7 @@ pub fn plan_windows(
             index,
             context_start,
             audio_end,
-            frame_origin: if warmup > 0 {
-                context_start
-            } else {
-                chunk_start
-            },
+            frame_origin: context_start,
             emit_after_frame: (warmup > 0).then_some(chunk_start / FRAME_SAMPLES),
             is_last,
         });
