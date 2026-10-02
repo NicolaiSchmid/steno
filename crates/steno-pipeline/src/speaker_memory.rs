@@ -6,7 +6,9 @@
 
 use std::sync::Arc;
 
-use steno_core::{Embedding, SpeakerMatch, SpeakerMemory, Store, async_trait, protocols::BoundaryResult};
+use steno_core::{
+    Embedding, SpeakerMatch, SpeakerMemory, Store, async_trait, protocols::BoundaryResult,
+};
 
 #[derive(Debug, Clone)]
 pub struct StoreSpeakerMemory {
@@ -23,7 +25,11 @@ impl StoreSpeakerMemory {
 #[async_trait]
 impl SpeakerMemory for StoreSpeakerMemory {
     /// Best first; ties broken by person id so the order is stable.
-    async fn candidates(&self, embedding: &Embedding, limit: usize) -> BoundaryResult<Vec<SpeakerMatch>> {
+    async fn candidates(
+        &self,
+        embedding: &Embedding,
+        limit: usize,
+    ) -> BoundaryResult<Vec<SpeakerMatch>> {
         if limit == 0 {
             return Ok(Vec::new());
         }

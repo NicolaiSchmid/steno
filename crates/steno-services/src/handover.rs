@@ -3,7 +3,7 @@
 use std::sync::Arc;
 
 use chrono::Utc;
-use steno_core::{HandoverReceipt, PairedDevice, SecretKey, SecretStore, Store, HandoverIntake};
+use steno_core::{HandoverIntake, HandoverReceipt, PairedDevice, SecretKey, SecretStore, Store};
 use steno_handover::{HandoverConfiguration, HandoverIdentity, HandoverService};
 use steno_host::services::{Handover, ListenerState, PairingCode};
 use uuid::Uuid;
@@ -33,7 +33,12 @@ pub fn service(
     intake: Arc<dyn HandoverIntake>,
     identity: HandoverIdentity,
 ) -> HandoverService {
-    HandoverService::with_wall_clock(HandoverConfiguration::default(), store, intake, Arc::new(identity))
+    HandoverService::with_wall_clock(
+        HandoverConfiguration::default(),
+        store,
+        intake,
+        Arc::new(identity),
+    )
 }
 
 pub struct RealHandover {
@@ -67,7 +72,8 @@ impl Handover for RealHandover {
     }
 
     fn start(&self) -> Result<(), String> {
-        self.block(self.service.start()).map_err(|error| error.to_string())
+        self.block(self.service.start())
+            .map_err(|error| error.to_string())
     }
 
     fn stop(&self) {

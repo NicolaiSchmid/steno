@@ -79,7 +79,12 @@ impl FileSecretStore {
     }
 
     fn load(&self) -> std::io::Result<BTreeMap<String, String>> {
-        if let Some(cached) = self.cache.lock().unwrap_or_else(std::sync::PoisonError::into_inner).as_ref() {
+        if let Some(cached) = self
+            .cache
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+        {
             return Ok(cached.clone());
         }
         let map = match std::fs::read(&self.path) {
@@ -87,7 +92,10 @@ impl FileSecretStore {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => BTreeMap::new(),
             Err(error) => return Err(error),
         };
-        *self.cache.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(map.clone());
+        *self
+            .cache
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(map.clone());
         Ok(map)
     }
 
@@ -102,7 +110,10 @@ impl FileSecretStore {
             use std::os::unix::fs::PermissionsExt as _;
             std::fs::set_permissions(&self.path, std::fs::Permissions::from_mode(0o600))?;
         }
-        *self.cache.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(map.clone());
+        *self
+            .cache
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(map.clone());
         Ok(())
     }
 }
@@ -152,7 +163,10 @@ mod tests {
         assert_eq!(store.secret(&key).await.unwrap(), None);
         let env = FileSecretStore::new(
             dir.path().join("secrets.json"),
-            BTreeMap::from([(FileSecretStore::API_KEY_VARIABLE.to_owned(), "sk-env".to_owned())]),
+            BTreeMap::from([(
+                FileSecretStore::API_KEY_VARIABLE.to_owned(),
+                "sk-env".to_owned(),
+            )]),
         );
         assert_eq!(env.secret(&key).await.unwrap().as_deref(), Some("sk-env"));
     }

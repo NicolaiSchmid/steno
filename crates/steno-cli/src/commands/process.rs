@@ -66,7 +66,8 @@ pub struct Process {
 
 /// The frame count and rate of a PCM WAV header.
 pub fn wav_info(path: &Path) -> Result<(u32, usize), Failure> {
-    let file = steno_audio::WavFile::read(path).map_err(|e| Failure::runtime(format!("{}: {e}", path.display())))?;
+    let file = steno_audio::WavFile::read(path)
+        .map_err(|e| Failure::runtime(format!("{}: {e}", path.display())))?;
     Ok((file.sample_rate, file.frame_count()))
 }
 
@@ -75,10 +76,14 @@ impl Process {
         self.speech.validate()?;
         match self.source {
             Source::MacCall if self.system_lane.is_none() => {
-                return Err(Failure::usage("--source mac-call needs --system-lane <wav>."));
+                return Err(Failure::usage(
+                    "--source mac-call needs --system-lane <wav>.",
+                ));
             }
             Source::MacInPerson | Source::Phone if self.system_lane.is_some() => {
-                return Err(Failure::usage("--system-lane only applies to --source mac-call."));
+                return Err(Failure::usage(
+                    "--system-lane only applies to --source mac-call.",
+                ));
             }
             _ => {}
         }
@@ -91,7 +96,10 @@ impl Process {
             )));
         }
         if !self.input.exists() {
-            return Err(Failure::usage(format!("No such file: {}", self.input.display())));
+            return Err(Failure::usage(format!(
+                "No such file: {}",
+                self.input.display()
+            )));
         }
         if let Some(lane) = &self.system_lane
             && !lane.exists()
@@ -209,14 +217,19 @@ impl Process {
         )?);
         let printer = tokio::spawn(async move {
             while let Ok(event) = receiver.recv().await {
-                if let MeetingEvent::Progress { meeting_id: id, progress } = event
+                if let MeetingEvent::Progress {
+                    meeting_id: id,
+                    progress,
+                } = event
                     && id == meeting_id
                 {
                     eprintln!("{}", progress_line(&progress));
                 }
             }
         });
-        pipeline.enqueue(&meeting, &asset).map_err(Failure::runtime)?;
+        pipeline
+            .enqueue(&meeting, &asset)
+            .map_err(Failure::runtime)?;
         pipeline.wait_until_idle().await;
         drop(events);
         drop(pipeline);
@@ -225,7 +238,9 @@ impl Process {
         let result = store
             .meeting(meeting_id)
             .map_err(Failure::runtime)?
-            .ok_or_else(|| Failure::runtime(format!("meeting {meeting_id} vanished during processing")))?;
+            .ok_or_else(|| {
+                Failure::runtime(format!("meeting {meeting_id} vanished during processing"))
+            })?;
         if let MeetingState::Failed { reason } = &result.state {
             return Err(Failure::runtime(format!("processing failed: {reason}")));
         }

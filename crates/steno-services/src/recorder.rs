@@ -89,7 +89,10 @@ impl RealRecorder {
 
     /// The hook the app wires to `Host::recorder_changed`.
     pub fn on_change(&self, hook: Arc<dyn Fn() + Send + Sync>) {
-        *self.changed.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(hook);
+        *self
+            .changed
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(hook);
     }
 
     fn notify(&self) {
@@ -104,7 +107,9 @@ impl RealRecorder {
     }
 
     fn inner(&self) -> std::sync::MutexGuard<'_, Inner> {
-        self.inner.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+        self.inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     fn intake(&self) -> LocalRecordingIntake {
@@ -172,7 +177,9 @@ impl RealRecorder {
         let sink = shared.clone();
         let thread = std::thread::spawn(move || {
             while let Ok(update) = levels_receiver.recv() {
-                *sink.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(levels(&update));
+                *sink
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(levels(&update));
                 if let Some(hook) = &hook {
                     hook();
                 }
@@ -182,9 +189,14 @@ impl RealRecorder {
         if let Some(active) = inner.active.as_mut() {
             active.level_thread = Some(thread);
         }
-        inner.status.levels = *shared.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        inner.status.levels = *shared
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         drop(inner);
-        *self.level_source.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(shared);
+        *self
+            .level_source
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(shared);
         Ok(())
     }
 
@@ -224,7 +236,8 @@ impl RealRecorder {
                         }
                         if statistics.ended_on_device_loss {
                             warning = Some(
-                                "An audio device disappeared; the partial recording was kept.".to_owned(),
+                                "An audio device disappeared; the partial recording was kept."
+                                    .to_owned(),
                             );
                         }
                         Ok(warning)
@@ -267,7 +280,9 @@ impl Recorder for RealRecorder {
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .as_ref()
         {
-            status.levels = *source.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            status.levels = *source
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
         }
         status
     }

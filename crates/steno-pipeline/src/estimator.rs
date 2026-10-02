@@ -141,7 +141,11 @@ impl StageRates {
         set(PipelineStage::Transcribe, "parakeet-v3", 1.0 / 90.0);
         set(PipelineStage::Transcribe, "parakeet-ultra", 1.0 / 90.0);
         set(PipelineStage::Transcribe, "parakeet-de", 1.0 / 90.0);
-        set(PipelineStage::Transcribe, "whisperkit-large-v3-turbo", 1.0 / 6.0);
+        set(
+            PipelineStage::Transcribe,
+            "whisperkit-large-v3-turbo",
+            1.0 / 6.0,
+        );
         set(PipelineStage::Diarize, Self::UNKEYED, 1.0 / 60.0);
         set(PipelineStage::MatchSpeakers, Self::UNKEYED, 0.05);
         set(PipelineStage::Merge, Self::UNKEYED, 0.1);
@@ -194,7 +198,11 @@ impl StageRates {
         self.entries
             .get(&(stage, key.to_owned()))
             .or_else(|| seeds.entries.get(&(stage, key.to_owned())))
-            .or_else(|| seeds.entries.get(&(stage, Self::seed_key(stage).to_owned())))
+            .or_else(|| {
+                seeds
+                    .entries
+                    .get(&(stage, Self::seed_key(stage).to_owned()))
+            })
             .copied()
             .unwrap_or_else(|| seed(0.0))
     }
@@ -388,7 +396,10 @@ mod tests {
     fn seeds_cover_every_stage_and_fall_back_for_unknown_engines() {
         let rates = StageRates::seeds();
         for stage in PipelineStage::ALL {
-            assert!(rates.rate(*stage, "whatever").seconds_per_unit > 0.0, "{stage:?}");
+            assert!(
+                rates.rate(*stage, "whatever").seconds_per_unit > 0.0,
+                "{stage:?}"
+            );
         }
         assert_eq!(
             rates.rate(PipelineStage::Transcribe, "fake-engine"),
@@ -399,7 +410,13 @@ mod tests {
     #[test]
     fn the_first_sample_replaces_the_seed_and_later_ones_average() {
         let first = absorbing(seed(1.0), 4.0);
-        assert_eq!(first, StageRate { seconds_per_unit: 4.0, samples: 1 });
+        assert_eq!(
+            first,
+            StageRate {
+                seconds_per_unit: 4.0,
+                samples: 1
+            }
+        );
         let second = absorbing(first, 2.0);
         assert_eq!(second.samples, 2);
         assert!((second.seconds_per_unit - (0.3 * 2.0 + 0.7 * 4.0)).abs() < 1e-9);

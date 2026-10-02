@@ -22,8 +22,12 @@ use steno_core::{
     paths::{file_url, path_from_file_url},
 };
 use steno_llm::testing::{Scripts, StubChatServer};
-use steno_llm::{LlmEndpoint, LlmMeetingSummarizer, LlmTranscriptCleaner, OpenAiCompatibleClient, RetryPolicy};
-use steno_pipeline::{MeetingEventBus, PipelineDependencies, ProcessingPipeline, StoreSpeakerMemory};
+use steno_llm::{
+    LlmEndpoint, LlmMeetingSummarizer, LlmTranscriptCleaner, OpenAiCompatibleClient, RetryPolicy,
+};
+use steno_pipeline::{
+    MeetingEventBus, PipelineDependencies, ProcessingPipeline, StoreSpeakerMemory,
+};
 
 fn fixture(relative: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -50,9 +54,21 @@ fn summary_usage() -> LlmUsage {
 fn call_asset(audio: &Path, meeting_id: uuid::Uuid) -> AudioAsset {
     let layout = RecordingLayout::new(audio, meeting_id);
     layout.create_directories(false).unwrap();
-    std::fs::copy(fixture("audio/conversation-two-lane-6s.wav"), layout.master(AudioFormat::Wav16kInt16)).unwrap();
-    std::fs::copy(fixture("audio/conversation-mic-6s.wav"), layout.sidecar(AudioLane::Mic)).unwrap();
-    std::fs::copy(fixture("audio/conversation-system-6s.wav"), layout.sidecar(AudioLane::System)).unwrap();
+    std::fs::copy(
+        fixture("audio/conversation-two-lane-6s.wav"),
+        layout.master(AudioFormat::Wav16kInt16),
+    )
+    .unwrap();
+    std::fs::copy(
+        fixture("audio/conversation-mic-6s.wav"),
+        layout.sidecar(AudioLane::Mic),
+    )
+    .unwrap();
+    std::fs::copy(
+        fixture("audio/conversation-system-6s.wav"),
+        layout.sidecar(AudioLane::System),
+    )
+    .unwrap();
     AudioAsset {
         id: steno_core::derived_uuid(meeting_id, "asset"),
         meeting_id,
@@ -60,8 +76,14 @@ fn call_asset(audio: &Path, meeting_id: uuid::Uuid) -> AudioAsset {
         format: AudioFormat::Wav16kInt16,
         lanes: vec![AudioLane::Mic, AudioLane::System],
         sidecars_16k: BTreeMap::from([
-            (AudioLane::Mic, file_url(&layout.sidecar(AudioLane::Mic), false)),
-            (AudioLane::System, file_url(&layout.sidecar(AudioLane::System), false)),
+            (
+                AudioLane::Mic,
+                file_url(&layout.sidecar(AudioLane::Mic), false),
+            ),
+            (
+                AudioLane::System,
+                file_url(&layout.sidecar(AudioLane::System), false),
+            ),
         ]),
         mixdown_url: None,
         retention: AudioRetention::KeepDays(30),
@@ -98,7 +120,10 @@ async fn a_mac_call_fixture_lands_in_the_vault() {
         task_tag: Some("task".to_owned()),
     });
     store.save_settings(&settings).unwrap();
-    for person in [sample_data::person(0, "Jérôme"), sample_data::person(1, "Nicolai")] {
+    for person in [
+        sample_data::person(0, "Jérôme"),
+        sample_data::person(1, "Nicolai"),
+    ] {
         store.save_person(&person).unwrap();
     }
 
@@ -115,14 +140,20 @@ async fn a_mac_call_fixture_lands_in_the_vault() {
     });
     server.respond(Arc::new(move |request| {
         if request.purpose.as_deref() == Some("summary") {
-            Some(Scripts.completion(&summary_body, Some("stop"), Some(summary_usage()), "stub-model"))
+            Some(Scripts.completion(
+                &summary_body,
+                Some("stop"),
+                Some(summary_usage()),
+                "stub-model",
+            ))
         } else {
             echo(request)
         }
     }));
     let endpoint = LlmEndpoint::new(server.base_url().clone(), "stub-model");
     let client: Arc<dyn steno_core::LanguageModel> = Arc::new(
-        OpenAiCompatibleClient::new(endpoint.clone(), None).with_retry(RetryPolicy::with_max_attempts(1)),
+        OpenAiCompatibleClient::new(endpoint.clone(), None)
+            .with_retry(RetryPolicy::with_max_attempts(1)),
     );
     let cleaner = Arc::new(LlmTranscriptCleaner::new(client.clone(), endpoint.clone()));
     let summarizer = Arc::new(LlmMeetingSummarizer::new(client, endpoint, chrono_tz::UTC));
@@ -137,7 +168,8 @@ async fn a_mac_call_fixture_lands_in_the_vault() {
                 .obsidian
                 .iter()
                 .map(|obsidian| {
-                    Arc::new(ObsidianFolderDestination::new(obsidian.clone(), berlin)) as Arc<dyn Destination>
+                    Arc::new(ObsidianFolderDestination::new(obsidian.clone(), berlin))
+                        as Arc<dyn Destination>
                 })
                 .collect()
         }),
@@ -171,17 +203,31 @@ async fn a_mac_call_fixture_lands_in_the_vault() {
     let stored = store.meeting(meeting.id).unwrap().unwrap();
     assert_eq!(stored.state, MeetingState::Ready, "{:?}", stored.state);
     assert_eq!(stored.title, "Produktstrategie", "a calendar title is kept");
-    let purposes: Vec<String> = server.requests().iter().filter_map(|r| r.purpose.clone()).collect();
+    let purposes: Vec<String> = server
+        .requests()
+        .iter()
+        .filter_map(|r| r.purpose.clone())
+        .collect();
     assert_eq!(purposes, ["cleanup", "summary"]);
     assert_eq!(stored.llm_usage, Some(cleanup_usage() + summary_usage()));
     assert_eq!(
-        stored.summary.as_ref().unwrap().sections.iter().map(|s| s.id.as_str()).collect::<Vec<_>>(),
+        stored
+            .summary
+            .as_ref()
+            .unwrap()
+            .sections
+            .iter()
+            .map(|s| s.id.as_str())
+            .collect::<Vec<_>>(),
         ["executive-summary", "full-summary"]
     );
 
     let deliveries = store.deliveries(meeting.id).unwrap();
     assert_eq!(deliveries.len(), 1);
-    assert_eq!(deliveries[0].destination_id, ObsidianFolderDestination::DESTINATION_ID);
+    assert_eq!(
+        deliveries[0].destination_id,
+        ObsidianFolderDestination::DESTINATION_ID
+    );
     assert_eq!(deliveries[0].status, DeliveryStatus::Delivered);
     assert_eq!(deliveries[0].last_attempt_at, Some(now));
     let receipt = deliveries[0].receipt.clone().unwrap();
@@ -189,7 +235,11 @@ async fn a_mac_call_fixture_lands_in_the_vault() {
     let slug = "2026-09-29-produktstrategie";
     assert_eq!(receipt.folder, folder);
     assert_eq!(
-        receipt.files.iter().map(|f| f.relative_path.as_str()).collect::<Vec<_>>(),
+        receipt
+            .files
+            .iter()
+            .map(|f| f.relative_path.as_str())
+            .collect::<Vec<_>>(),
         [
             format!("{folder}/{slug} - Tasks.md"),
             format!("{folder}/{slug} - Transcript.md"),
@@ -203,7 +253,12 @@ async fn a_mac_call_fixture_lands_in_the_vault() {
     );
     for file in &receipt.files {
         let data = std::fs::read(vault.join(&file.relative_path)).unwrap();
-        assert_eq!(file.sha256, steno_adapters::sha256(&data), "{}", file.relative_path);
+        assert_eq!(
+            file.sha256,
+            steno_adapters::sha256(&data),
+            "{}",
+            file.relative_path
+        );
     }
 
     let json = std::fs::read(vault.join(format!("{folder}/meeting.json"))).unwrap();
@@ -218,12 +273,18 @@ async fn a_mac_call_fixture_lands_in_the_vault() {
     assert_eq!(export.segments, current.segments);
     assert_eq!(export.tasks, current.tasks);
     assert!(
-        export.audio.as_ref().unwrap().expires_at.is_none() && current.audio.as_ref().unwrap().expires_at.is_some(),
+        export.audio.as_ref().unwrap().expires_at.is_none()
+            && current.audio.as_ref().unwrap().expires_at.is_some(),
         "delivery precedes the retention stage, which sets the expiry afterwards"
     );
     assert_eq!(export.schema_version, MeetingExport::CURRENT_SCHEMA_VERSION);
     assert_eq!(export.segments.len(), 12);
-    assert!(export.segments.iter().all(|s| s.raw_text.starts_with("fake segment")));
+    assert!(
+        export
+            .segments
+            .iter()
+            .all(|s| s.raw_text.starts_with("fake segment"))
+    );
     assert!(export.segments.iter().all(|s| {
         let mut chars = s.raw_text.chars();
         let expected = chars
@@ -232,28 +293,74 @@ async fn a_mac_call_fixture_lands_in_the_vault() {
             .unwrap();
         s.text == expected
     }));
-    assert_eq!(export.tasks.iter().map(|t| t.text.as_str()).collect::<Vec<_>>(), ["Budgetzahlen prüfen."]);
-    assert_eq!(export.decisions.iter().map(|d| d.text.as_str()).collect::<Vec<_>>(), ["Der Kern wird priorisiert."]);
     assert_eq!(
-        export.speakers.iter().map(|s| s.cluster_label.as_str()).collect::<Vec<_>>(),
+        export
+            .tasks
+            .iter()
+            .map(|t| t.text.as_str())
+            .collect::<Vec<_>>(),
+        ["Budgetzahlen prüfen."]
+    );
+    assert_eq!(
+        export
+            .decisions
+            .iter()
+            .map(|d| d.text.as_str())
+            .collect::<Vec<_>>(),
+        ["Der Kern wird priorisiert."]
+    );
+    assert_eq!(
+        export
+            .speakers
+            .iter()
+            .map(|s| s.cluster_label.as_str())
+            .collect::<Vec<_>>(),
         ["Me", "Speaker 1", "Speaker 2"]
     );
     // The fake diarizer's axis embeddings match the pre-enrolled people
     // through the real cosine memory: every "them" speaker is suggested.
-    let them: Vec<_> = export.speakers.iter().filter(|s| s.cluster_label != "Me").collect();
+    let them: Vec<_> = export
+        .speakers
+        .iter()
+        .filter(|s| s.cluster_label != "Me")
+        .collect();
     assert_eq!(them.len(), 2);
-    assert!(them.iter().all(|s| s.assignment.kind() == SpeakerAssignmentKind::Suggested), "{them:?}");
-    let suggested: std::collections::BTreeSet<_> = them.iter().filter_map(|s| s.assignment.person_id()).collect();
-    let people: std::collections::BTreeSet<_> = store.persons().unwrap().iter().map(|p| p.id).collect();
-    assert_eq!(suggested, people, "each cluster is suggested to its own person");
+    assert!(
+        them.iter()
+            .all(|s| s.assignment.kind() == SpeakerAssignmentKind::Suggested),
+        "{them:?}"
+    );
+    let suggested: std::collections::BTreeSet<_> = them
+        .iter()
+        .filter_map(|s| s.assignment.person_id())
+        .collect();
+    let people: std::collections::BTreeSet<_> =
+        store.persons().unwrap().iter().map(|p| p.id).collect();
+    assert_eq!(
+        suggested, people,
+        "each cluster is suggested to its own person"
+    );
     // The stub's analysis names "Speaker 1" from a quote; the summarize
     // stage persists it for the review sheet.
-    let speaker_one = export.speakers.iter().find(|s| s.cluster_label == "Speaker 1").unwrap();
+    let speaker_one = export
+        .speakers
+        .iter()
+        .find(|s| s.cluster_label == "Speaker 1")
+        .unwrap();
     let suggestions = store.name_suggestions(meeting.id).unwrap();
     assert_eq!(suggestions.len(), 1, "{suggestions:?}");
     assert_eq!(suggestions[0].speaker_id, speaker_one.id);
     assert_eq!(suggestions[0].name.as_deref(), Some("Jérôme"));
-    let mixdown = path_from_file_url(current.audio.as_ref().unwrap().mixdown_url.as_ref().unwrap()).unwrap();
+    let mixdown = path_from_file_url(
+        current
+            .audio
+            .as_ref()
+            .unwrap()
+            .mixdown_url
+            .as_ref()
+            .unwrap(),
+    )
+    .unwrap();
     assert_eq!(
         std::fs::read(vault.join(format!("{folder}/audio.wav"))).unwrap(),
         std::fs::read(&mixdown).unwrap(),
@@ -267,15 +374,30 @@ async fn a_mac_call_fixture_lands_in_the_vault() {
     let notes = vault.join(format!("{folder}/notes.md"));
     std::fs::write(&notes, "mine\n").unwrap();
     pipeline.redeliver(meeting.id).await.unwrap();
-    let again = store.deliveries(meeting.id).unwrap()[0].receipt.clone().unwrap();
+    let again = store.deliveries(meeting.id).unwrap()[0]
+        .receipt
+        .clone()
+        .unwrap();
     assert_eq!(again.folder, receipt.folder);
     assert_eq!(
-        again.files.iter().map(|f| &f.relative_path).collect::<Vec<_>>(),
-        receipt.files.iter().map(|f| &f.relative_path).collect::<Vec<_>>()
+        again
+            .files
+            .iter()
+            .map(|f| &f.relative_path)
+            .collect::<Vec<_>>(),
+        receipt
+            .files
+            .iter()
+            .map(|f| &f.relative_path)
+            .collect::<Vec<_>>()
     );
     for (before, after) in receipt.files.iter().zip(&again.files) {
         if !before.relative_path.ends_with("meeting.json") {
-            assert_eq!(before.sha256, after.sha256, "{} is byte-identical", before.relative_path);
+            assert_eq!(
+                before.sha256, after.sha256,
+                "{} is byte-identical",
+                before.relative_path
+            );
         }
     }
     assert_ne!(
@@ -283,7 +405,11 @@ async fn a_mac_call_fixture_lands_in_the_vault() {
         "meeting.json changed: the retention stage set expiresAt after the first delivery"
     );
     assert_eq!(std::fs::read_to_string(&notes).unwrap(), "mine\n");
-    assert_eq!(server.request_count(), 2, "a re-export never re-runs the LLM");
+    assert_eq!(
+        server.request_count(),
+        2,
+        "a re-export never re-runs the LLM"
+    );
 
     let mut collected = Vec::new();
     while let Ok(event) = receiver.try_recv() {
@@ -315,5 +441,10 @@ async fn a_mac_call_fixture_lands_in_the_vault() {
         &collected[9],
         MeetingEvent::SpeakersNeedReview { meeting_id, speaker_ids } if *meeting_id == meeting.id && speaker_ids.len() == 3
     ));
-    assert_eq!(collected[12], MeetingEvent::RetentionApplied { meeting_id: meeting.id });
+    assert_eq!(
+        collected[12],
+        MeetingEvent::RetentionApplied {
+            meeting_id: meeting.id
+        }
+    );
 }

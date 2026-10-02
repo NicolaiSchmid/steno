@@ -26,7 +26,11 @@ pub struct ProcessingRun {
 
 impl ProcessingRun {
     #[must_use]
-    pub fn new(estimator: ProcessingEstimator, stages: Vec<PipelineStage>, started_at: f64) -> Self {
+    pub fn new(
+        estimator: ProcessingEstimator,
+        stages: Vec<PipelineStage>,
+        started_at: f64,
+    ) -> Self {
         ProcessingRun {
             estimator,
             stages,
@@ -41,7 +45,12 @@ impl ProcessingRun {
     /// seconds, clamped: the fraction never falls below the previous
     /// event's `next_fraction`, and `next_fraction` is rescaled with it so
     /// the honest step keeps its share of the remaining time.
-    pub fn progress(&mut self, stage: PipelineStage, lane: usize, elapsed: f64) -> ProcessingProgress {
+    pub fn progress(
+        &mut self,
+        stage: PipelineStage,
+        lane: usize,
+        elapsed: f64,
+    ) -> ProcessingProgress {
         let honest = self.estimator.progress(stage, lane, elapsed, &self.stages);
         let floor = self.last.as_ref().map_or(0.0, |last| last.next_fraction);
         if honest.fraction >= floor {
@@ -135,12 +144,22 @@ mod tests {
     fn samples_are_recorded_only_when_alone_and_learned() {
         let mut run = run();
         let now = Utc::now();
-        assert!(run.measure(PipelineStage::Decode, 0, 1.0, true, now).is_none());
-        assert!(run.measure(PipelineStage::Merge, 0, 0.5, false, now).is_none());
-        let sample = run.measure(PipelineStage::Diarize, 0, 2.0, true, now).unwrap();
+        assert!(
+            run.measure(PipelineStage::Decode, 0, 1.0, true, now)
+                .is_none()
+        );
+        assert!(
+            run.measure(PipelineStage::Merge, 0, 0.5, false, now)
+                .is_none()
+        );
+        let sample = run
+            .measure(PipelineStage::Diarize, 0, 2.0, true, now)
+            .unwrap();
         assert_eq!(sample.key, "");
         assert!((sample.seconds_per_unit - 0.2).abs() < 1e-9);
-        let keyed = run.measure(PipelineStage::Transcribe, 0, 5.0, true, now).unwrap();
+        let keyed = run
+            .measure(PipelineStage::Transcribe, 0, 5.0, true, now)
+            .unwrap();
         assert_eq!(keyed.key, "fake");
     }
 }

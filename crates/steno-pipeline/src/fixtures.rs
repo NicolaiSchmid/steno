@@ -28,8 +28,14 @@ const VOICE_B: [(f64, f64); 2] = [(220.0, 0.35), (880.0, 0.15)];
 #[must_use]
 pub fn cases() -> Vec<(&'static str, Vec<i16>)> {
     vec![
-        ("audio/conversation-mic-6s.wav", conversation(6.0, &[AudioLane::Mic])),
-        ("audio/conversation-system-6s.wav", conversation(6.0, &[AudioLane::System])),
+        (
+            "audio/conversation-mic-6s.wav",
+            conversation(6.0, &[AudioLane::Mic]),
+        ),
+        (
+            "audio/conversation-system-6s.wav",
+            conversation(6.0, &[AudioLane::System]),
+        ),
         (
             "audio/conversation-two-lane-6s.wav",
             conversation(6.0, &[AudioLane::Mic, AudioLane::System]),

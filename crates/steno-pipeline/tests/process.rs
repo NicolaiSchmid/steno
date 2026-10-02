@@ -15,8 +15,8 @@ use steno_core::testing::{
 };
 use steno_core::{
     AudioAsset, AudioFormat, AudioLane, AudioRetention, Delivery, DeliveryDispatcher,
-    DeliveryStatus, Destination, Meeting, MeetingEvent, MeetingSource, MeetingState,
-    PipelineStage, RecordingLayout, SpeakerAssignmentKind, Store, async_trait,
+    DeliveryStatus, Destination, Meeting, MeetingEvent, MeetingSource, MeetingState, PipelineStage,
+    RecordingLayout, SpeakerAssignmentKind, Store, async_trait,
     paths::{file_url, path_from_file_url},
 };
 use steno_pipeline::{
@@ -94,7 +94,11 @@ struct World {
     now: DateTime<Utc>,
 }
 
-fn world(summarizer: bool, destination: Option<FakeDestination>, retention: AudioRetention) -> World {
+fn world(
+    summarizer: bool,
+    destination: Option<FakeDestination>,
+    retention: AudioRetention,
+) -> World {
     let dir = tempfile::tempdir().unwrap();
     let store = Arc::new(Store::open(dir.path().join("steno.sqlite")).unwrap());
     let audio = dir.path().join("audio");
@@ -103,7 +107,10 @@ fn world(summarizer: bool, destination: Option<FakeDestination>, retention: Audi
     settings.audio_folder = file_url(&audio, true);
     settings.default_retention = retention;
     store.save_settings(&settings).unwrap();
-    for person in [sample_data::person(0, "Anna"), sample_data::person(1, "Ben")] {
+    for person in [
+        sample_data::person(0, "Anna"),
+        sample_data::person(1, "Ben"),
+    ] {
         store.save_person(&person).unwrap();
     }
     let now = sample_data::started_at() + Duration::hours(1);
@@ -201,9 +208,21 @@ fn call_meeting(now: DateTime<Utc>) -> Meeting {
 fn call_asset(audio: &Path, meeting_id: Uuid, retention: AudioRetention) -> AudioAsset {
     let layout = RecordingLayout::new(audio, meeting_id);
     layout.create_directories(false).unwrap();
-    std::fs::copy(fixture("conversation-two-lane-6s.wav"), layout.master(AudioFormat::Wav16kInt16)).unwrap();
-    std::fs::copy(fixture("conversation-mic-6s.wav"), layout.sidecar(AudioLane::Mic)).unwrap();
-    std::fs::copy(fixture("conversation-system-6s.wav"), layout.sidecar(AudioLane::System)).unwrap();
+    std::fs::copy(
+        fixture("conversation-two-lane-6s.wav"),
+        layout.master(AudioFormat::Wav16kInt16),
+    )
+    .unwrap();
+    std::fs::copy(
+        fixture("conversation-mic-6s.wav"),
+        layout.sidecar(AudioLane::Mic),
+    )
+    .unwrap();
+    std::fs::copy(
+        fixture("conversation-system-6s.wav"),
+        layout.sidecar(AudioLane::System),
+    )
+    .unwrap();
     AudioAsset {
         id: Uuid::new_v4(),
         meeting_id,
@@ -211,8 +230,14 @@ fn call_asset(audio: &Path, meeting_id: Uuid, retention: AudioRetention) -> Audi
         format: AudioFormat::Wav16kInt16,
         lanes: vec![AudioLane::Mic, AudioLane::System],
         sidecars_16k: BTreeMap::from([
-            (AudioLane::Mic, file_url(&layout.sidecar(AudioLane::Mic), false)),
-            (AudioLane::System, file_url(&layout.sidecar(AudioLane::System), false)),
+            (
+                AudioLane::Mic,
+                file_url(&layout.sidecar(AudioLane::Mic), false),
+            ),
+            (
+                AudioLane::System,
+                file_url(&layout.sidecar(AudioLane::System), false),
+            ),
         ]),
         mixdown_url: None,
         retention,
@@ -240,15 +265,14 @@ fn stages(events: &[MeetingEvent]) -> Vec<PipelineStage> {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_mac_call_runs_every_stage_to_ready_and_delivers() {
-    let world = world(true, Some(FakeDestination::new(PathBuf::new())), AudioRetention::KeepDays(30));
+    let world = world(
+        true,
+        Some(FakeDestination::new(PathBuf::new())),
+        AudioRetention::KeepDays(30),
+    );
     let destination = FakeDestination::new(&world.vault);
     let world = World {
-        pipeline: ProcessingPipeline::new(
-            world
-                .pipeline
-                .dependencies()
-                .clone(),
-        ),
+        pipeline: ProcessingPipeline::new(world.pipeline.dependencies().clone()),
         ..world
     };
     // The dispatcher above holds a destination rooted nowhere; rebuild with
@@ -276,21 +300,41 @@ async fn a_mac_call_runs_every_stage_to_ready_and_delivers() {
     assert!(stored.llm_usage.is_some());
 
     let export = world.store.export(meeting.id).unwrap().unwrap();
-    assert_eq!(export.segments.len(), 12, "six one-second segments per lane");
-    assert!(export.segments.iter().all(|s| s.raw_text.starts_with("fake segment")));
     assert_eq!(
-        export.speakers.iter().map(|s| s.cluster_label.as_str()).collect::<Vec<_>>(),
+        export.segments.len(),
+        12,
+        "six one-second segments per lane"
+    );
+    assert!(
+        export
+            .segments
+            .iter()
+            .all(|s| s.raw_text.starts_with("fake segment"))
+    );
+    assert_eq!(
+        export
+            .speakers
+            .iter()
+            .map(|s| s.cluster_label.as_str())
+            .collect::<Vec<_>>(),
         ["Me", "Speaker 1", "Speaker 2"]
     );
-    let them: Vec<_> = export.speakers.iter().filter(|s| s.cluster_label != "Me").collect();
+    let them: Vec<_> = export
+        .speakers
+        .iter()
+        .filter(|s| s.cluster_label != "Me")
+        .collect();
     assert!(
-        them.iter().all(|s| s.assignment.kind() == SpeakerAssignmentKind::Suggested),
+        them.iter()
+            .all(|s| s.assignment.kind() == SpeakerAssignmentKind::Suggested),
         "the fake diarizer's axis embeddings match the enrolled people: {:?}",
         them.iter().map(|s| &s.assignment).collect::<Vec<_>>()
     );
-    assert!(them.iter().all(|s| s.sample_clip_url.as_ref().is_some_and(|url| {
-        path_from_file_url(url).is_some_and(|p| p.exists())
-    })));
+    assert!(them.iter().all(|s| {
+        s.sample_clip_url
+            .as_ref()
+            .is_some_and(|url| path_from_file_url(url).is_some_and(|p| p.exists()))
+    }));
     assert_eq!(export.tasks.len(), 1);
     assert_eq!(export.decisions.len(), 1);
     assert!(
@@ -298,7 +342,12 @@ async fn a_mac_call_runs_every_stage_to_ready_and_delivers() {
         "the fake summarizer never guesses names, and only named suggestions are stored"
     );
     let audio = export.audio.unwrap();
-    assert!(audio.mixdown_url.as_ref().is_some_and(|url| path_from_file_url(url).unwrap().exists()));
+    assert!(
+        audio
+            .mixdown_url
+            .as_ref()
+            .is_some_and(|url| path_from_file_url(url).unwrap().exists())
+    );
     assert_eq!(
         audio.expires_at,
         Some(world.now + Duration::days(30)),
@@ -307,7 +356,13 @@ async fn a_mac_call_runs_every_stage_to_ready_and_delivers() {
     let deliveries = world.store.deliveries(meeting.id).unwrap();
     assert_eq!(deliveries.len(), 1);
     assert_eq!(deliveries[0].status, DeliveryStatus::Delivered);
-    assert!(world.vault.join(deliveries[0].receipt.as_ref().unwrap().folder.as_str()).join("meeting.json").exists());
+    assert!(
+        world
+            .vault
+            .join(deliveries[0].receipt.as_ref().unwrap().folder.as_str())
+            .join("meeting.json")
+            .exists()
+    );
 
     let events = drain(&mut receiver);
     assert_eq!(
@@ -330,7 +385,12 @@ async fn a_mac_call_runs_every_stage_to_ready_and_delivers() {
         &events[9],
         MeetingEvent::SpeakersNeedReview { speaker_ids, .. } if speaker_ids.len() == 3
     ));
-    assert_eq!(events.last(), Some(&MeetingEvent::RetentionApplied { meeting_id: meeting.id }));
+    assert_eq!(
+        events.last(),
+        Some(&MeetingEvent::RetentionApplied {
+            meeting_id: meeting.id
+        })
+    );
     let fractions: Vec<f64> = events
         .iter()
         .filter_map(|e| match e {
@@ -342,12 +402,22 @@ async fn a_mac_call_runs_every_stage_to_ready_and_delivers() {
 
     // Every learned stage ran alone, so the rates left their seeds.
     let rates = StageRates::from_rows(&world.store.stage_rates().unwrap());
-    assert_eq!(rates.rate(PipelineStage::Transcribe, "fake-engine").samples, 1);
-    assert_eq!(rates.rate(PipelineStage::Decode, "").samples, 0, "decode is never learned");
+    assert_eq!(
+        rates.rate(PipelineStage::Transcribe, "fake-engine").samples,
+        1
+    );
+    assert_eq!(
+        rates.rate(PipelineStage::Decode, "").samples,
+        0,
+        "decode is never learned"
+    );
 
     // A re-export never re-runs the LLM and leaves the stamp alone.
     pipeline.redeliver(meeting.id).await.unwrap();
-    assert_eq!(world.store.asset(meeting.id).unwrap().unwrap().expires_at, audio.expires_at);
+    assert_eq!(
+        world.store.asset(meeting.id).unwrap().unwrap().expires_at,
+        audio.expires_at
+    );
     assert_eq!(stages(&drain(&mut receiver)), [PipelineStage::Deliver]);
 }
 
@@ -363,7 +433,10 @@ async fn without_an_llm_the_meeting_is_ready_with_no_summary() {
     assert_eq!(stored.summary, None);
     assert_eq!(stored.llm_usage, None);
     assert_eq!(world.store.tasks(meeting.id).unwrap(), []);
-    assert_eq!(world.store.asset(meeting.id).unwrap().unwrap().expires_at, None);
+    assert_eq!(
+        world.store.asset(meeting.id).unwrap().unwrap().expires_at,
+        None
+    );
     let error = world
         .pipeline
         .rerun_summary(meeting.id, "default")
@@ -417,7 +490,10 @@ async fn launch_recovery_resumes_queued_meetings_and_fails_those_without_an_asse
     let asset = call_asset(&world.audio, meeting.id, AudioRetention::KeepForever);
     let mut queued = meeting.clone();
     queued.state = MeetingState::Queued;
-    world.store.save_meeting_with_asset(&queued, &asset).unwrap();
+    world
+        .store
+        .save_meeting_with_asset(&queued, &asset)
+        .unwrap();
     let mut orphan = sample_data::meeting();
     orphan.id = Uuid::new_v4();
     orphan.state = MeetingState::Processing;
@@ -426,7 +502,10 @@ async fn launch_recovery_resumes_queued_meetings_and_fails_those_without_an_asse
     let resumed = world.pipeline.resume_unfinished().unwrap();
     assert_eq!(resumed, [meeting.id]);
     world.pipeline.wait_until_idle().await;
-    assert_eq!(world.store.meeting(meeting.id).unwrap().unwrap().state, MeetingState::Ready);
+    assert_eq!(
+        world.store.meeting(meeting.id).unwrap().unwrap().state,
+        MeetingState::Ready
+    );
     assert!(matches!(
         world.store.meeting(orphan.id).unwrap().unwrap().state,
         MeetingState::Failed { .. }
@@ -448,31 +527,63 @@ async fn a_failed_delivery_defers_deletion_until_a_redeliver_succeeds() {
     });
     let pipeline = ProcessingPipeline::new(dependencies);
     let meeting = call_meeting(world.now);
-    let asset = call_asset(&world.audio, meeting.id, AudioRetention::DeleteAfterProcessing);
+    let asset = call_asset(
+        &world.audio,
+        meeting.id,
+        AudioRetention::DeleteAfterProcessing,
+    );
     pipeline.enqueue(&meeting, &asset).unwrap();
     pipeline.wait_until_idle().await;
 
-    assert_eq!(world.store.meeting(meeting.id).unwrap().unwrap().state, MeetingState::Ready);
+    assert_eq!(
+        world.store.meeting(meeting.id).unwrap().unwrap().state,
+        MeetingState::Ready
+    );
     assert!(matches!(
         world.store.deliveries(meeting.id).unwrap()[0].status,
         DeliveryStatus::Failed(_)
     ));
     let deferred = world.store.asset_by_id(asset.id).unwrap().unwrap();
-    assert_eq!(deferred.expires_at, None, "the export needs the audio, so nothing expires");
+    assert_eq!(
+        deferred.expires_at, None,
+        "the export needs the audio, so nothing expires"
+    );
     let sweep = RetentionSweep::new(world.store.clone());
-    assert_eq!(sweep.run(world.now + Duration::days(3650)).unwrap(), Vec::<PathBuf>::new());
+    assert_eq!(
+        sweep.run(world.now + Duration::days(3650)).unwrap(),
+        Vec::<PathBuf>::new()
+    );
 
     pipeline.redeliver(meeting.id).await.unwrap();
-    assert_eq!(world.store.deliveries(meeting.id).unwrap()[0].status, DeliveryStatus::Delivered);
+    assert_eq!(
+        world.store.deliveries(meeting.id).unwrap()[0].status,
+        DeliveryStatus::Delivered
+    );
     let stamped = world.store.asset_by_id(asset.id).unwrap().unwrap();
-    assert_eq!(stamped.expires_at, Some(world.now), "stamped only after the delivery succeeded");
+    assert_eq!(
+        stamped.expires_at,
+        Some(world.now),
+        "stamped only after the delivery succeeded"
+    );
 
     let removed = sweep.run(world.now).unwrap();
     let master = path_from_file_url(&asset.url).unwrap();
     assert!(removed.contains(&master));
     assert!(!master.exists());
-    assert_eq!(world.store.asset_by_id(asset.id).unwrap().unwrap().expires_at, None);
-    assert_eq!(sweep.keep_all().unwrap(), 0, "the swept master is gone, nothing to keep");
+    assert_eq!(
+        world
+            .store
+            .asset_by_id(asset.id)
+            .unwrap()
+            .unwrap()
+            .expires_at,
+        None
+    );
+    assert_eq!(
+        sweep.keep_all().unwrap(),
+        0,
+        "the swept master is gone, nothing to keep"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -495,7 +606,15 @@ async fn apply_retention_replaces_the_rule_and_stamps_a_ready_meeting() {
         .apply_retention(meeting.id, AudioRetention::KeepForever)
         .await
         .unwrap();
-    assert_eq!(world.store.asset_by_id(asset.id).unwrap().unwrap().expires_at, None);
+    assert_eq!(
+        world
+            .store
+            .asset_by_id(asset.id)
+            .unwrap()
+            .unwrap()
+            .expires_at,
+        None
+    );
 }
 
 #[test]

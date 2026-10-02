@@ -45,12 +45,18 @@ impl RetentionSweep {
                 .store
                 .speakers(asset.meeting_id)?
                 .into_iter()
-                .filter(|speaker| speaker.assignment.is_confirmed() && speaker.sample_clip_url.is_some())
+                .filter(|speaker| {
+                    speaker.assignment.is_confirmed() && speaker.sample_clip_url.is_some()
+                })
                 .collect();
             let files: Vec<PathBuf> = asset
                 .expirable_files()
                 .iter()
-                .chain(confirmed_with_clips.iter().filter_map(|s| s.sample_clip_url.as_ref()))
+                .chain(
+                    confirmed_with_clips
+                        .iter()
+                        .filter_map(|s| s.sample_clip_url.as_ref()),
+                )
                 .filter_map(|url| path_from_file_url(url))
                 .collect();
             let mut clean = true;

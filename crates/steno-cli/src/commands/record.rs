@@ -11,8 +11,8 @@ use clap::{Args, ValueEnum};
 use steno_audio::testing::SyntheticCaptureBackend;
 use steno_audio::testing::synthetic::SyntheticOptions;
 use steno_audio::{
-    CaptureBackend, CaptureConfiguration, CaptureMode, CaptureNotice, CaptureSession,
-    CaptureState, LaneLevels, LiveCaptureBackend, SpeexEchoCanceller, SystemClock,
+    CaptureBackend, CaptureConfiguration, CaptureMode, CaptureNotice, CaptureSession, CaptureState,
+    LaneLevels, LiveCaptureBackend, SpeexEchoCanceller, SystemClock,
 };
 use steno_core::{AudioLane, EchoCanceller, paths::path_from_file_url};
 use uuid::Uuid;
@@ -76,7 +76,10 @@ pub struct Record {
 pub fn notice_line(notice: &CaptureNotice) -> String {
     match notice {
         CaptureNotice::DeviceChanged(reason) => format!("device change: {reason:?}, reconnecting"),
-        CaptureNotice::DeviceResumed { attempt, gap_seconds } => {
+        CaptureNotice::DeviceResumed {
+            attempt,
+            gap_seconds,
+        } => {
             format!("device resumed: attempt {attempt}, gap {gap_seconds:.2} s")
         }
     }
@@ -86,7 +89,10 @@ pub fn notice_line(notice: &CaptureNotice) -> String {
 #[must_use]
 pub fn level_line(levels: &LaneLevels) -> String {
     match &levels.system {
-        Some(system) => format!("mic {:6.1} dBFS  system {:6.1} dBFS", levels.mic.rms, system.rms),
+        Some(system) => format!(
+            "mic {:6.1} dBFS  system {:6.1} dBFS",
+            levels.mic.rms, system.rms
+        ),
         None => format!("mic {:6.1} dBFS", levels.mic.rms),
     }
 }
@@ -125,7 +131,11 @@ pub fn session(
         Backend::Synthetic => {
             let mut options = SyntheticOptions::tones(
                 &lanes,
-                &[(AudioLane::Mic, 440.0), (AudioLane::System, 1_000.0), (AudioLane::Mixed, 440.0)],
+                &[
+                    (AudioLane::Mic, 440.0),
+                    (AudioLane::System, 1_000.0),
+                    (AudioLane::Mixed, 440.0),
+                ],
                 seconds.unwrap_or(3_600.0),
             );
             options.real_time = true;
@@ -179,7 +189,9 @@ pub async fn wait_for_stop(session: &CaptureSession, seconds: Option<f64>) {
 impl Record {
     fn validate(&self) -> Result<Uuid, Failure> {
         let id = match &self.meeting_id {
-            Some(text) => Uuid::parse_str(text).map_err(|_| Failure::usage("--meeting-id must be a UUID."))?,
+            Some(text) => {
+                Uuid::parse_str(text).map_err(|_| Failure::usage("--meeting-id must be a UUID."))?
+            }
             None => Uuid::new_v4(),
         };
         if let Some(seconds) = self.seconds
@@ -193,7 +205,9 @@ impl Record {
     pub async fn run(self) -> Outcome {
         let id = self.validate()?;
         let mut configuration = CaptureConfiguration::new(self.mode.into(), &self.out);
-        configuration.input_device_uid.clone_from(&self.input_device_uid);
+        configuration
+            .input_device_uid
+            .clone_from(&self.input_device_uid);
         configuration.echo_cancellation = !self.no_echo_cancellation;
         configuration.keep_raw_mic_lane = self.keep_raw_mic;
         let session = session(configuration, self.backend, self.seconds)?;
@@ -222,7 +236,9 @@ impl Record {
         println!("meeting: {}", steno_core::json::uuid_string(id));
         println!(
             "master: {}",
-            path_from_file_url(&result.asset.url).unwrap_or_default().display()
+            path_from_file_url(&result.asset.url)
+                .unwrap_or_default()
+                .display()
         );
         for lane in &result.asset.lanes {
             if let Some(sidecar) = result.asset.sidecars_16k.get(lane) {
@@ -242,12 +258,22 @@ impl Record {
             .collect();
         println!(
             "dropped frames: {}",
-            if dropped.is_empty() { "none".to_owned() } else { dropped.join(" ") }
+            if dropped.is_empty() {
+                "none".to_owned()
+            } else {
+                dropped.join(" ")
+            }
         );
-        println!("system lane silent: {}", result.statistics.system_lane_silent);
+        println!(
+            "system lane silent: {}",
+            result.statistics.system_lane_silent
+        );
         println!("device changes: {}", result.statistics.device_changes);
         println!("gap filled: {:.2} s", result.statistics.gap_seconds);
-        println!("ended on device loss: {}", result.statistics.ended_on_device_loss);
+        println!(
+            "ended on device loss: {}",
+            result.statistics.ended_on_device_loss
+        );
         if let Some(error) = failed {
             return Err(Failure::runtime(format!("recording ended with {error}")));
         }

@@ -11,11 +11,11 @@ use std::sync::Arc;
 
 use chrono::{DateTime, FixedOffset, Utc};
 use steno_core::{
-    AudioAsset, AudioLane, AudioRetention, HandoverIntake, HandoverReceipt, HandoverState,
-    Meeting, MeetingSource, MeetingState, MeetingStateKind, PairedDevice, Participant,
-    ParticipantRole, RecordingEndReason, RecordingLayout, RecordingMetadata, Store,
-    StoreError, TitleOrigin, async_trait, derived_uuid, paths::file_url,
-    paths::path_from_file_url, protocols::BoundaryResult,
+    AudioAsset, AudioLane, AudioRetention, HandoverIntake, HandoverReceipt, HandoverState, Meeting,
+    MeetingSource, MeetingState, MeetingStateKind, PairedDevice, Participant, ParticipantRole,
+    RecordingEndReason, RecordingLayout, RecordingMetadata, Store, StoreError, TitleOrigin,
+    async_trait, derived_uuid, paths::file_url, paths::path_from_file_url,
+    protocols::BoundaryResult,
 };
 use uuid::Uuid;
 
@@ -45,7 +45,11 @@ pub fn phone_title(started_at: DateTime<Utc>, zone: FixedOffset) -> String {
 /// "Call 2026-09-24 11:00", "Meeting 2026-09-24 11:00" or "Phone recording
 /// 2026-09-24 11:00" in `zone`. Swift: `LocalRecordingIntake.defaultTitle`.
 #[must_use]
-pub fn default_title(source: MeetingSource, started_at: DateTime<Utc>, zone: FixedOffset) -> String {
+pub fn default_title(
+    source: MeetingSource,
+    started_at: DateTime<Utc>,
+    zone: FixedOffset,
+) -> String {
     let kind = match source {
         MeetingSource::MacCall => "Call",
         MeetingSource::MacInPerson => "Meeting",
@@ -94,7 +98,9 @@ impl RecordingIntake {
         device: &PairedDevice,
     ) -> Result<Uuid, Box<dyn std::error::Error + Send + Sync>> {
         let existing = self.store.handover_receipt(metadata.recording_id)?;
-        if let Some(meeting_id) = existing.as_ref().and_then(|receipt| receipt.state.meeting_id())
+        if let Some(meeting_id) = existing
+            .as_ref()
+            .and_then(|receipt| receipt.state.meeting_id())
             && self.store.meeting(meeting_id)?.is_some()
         {
             return Ok(meeting_id);
@@ -315,7 +321,10 @@ impl LocalRecordingIntake {
             Ok(meeting) => Ok(meeting),
             Err(error @ LocalRecordingIntakeError::NotRecording(..)) => Err(error),
             Err(error) => {
-                let _ = self.fail(meeting_id, &format!("Recording could not be saved: {error}"));
+                let _ = self.fail(
+                    meeting_id,
+                    &format!("Recording could not be saved: {error}"),
+                );
                 Err(error)
             }
         }
@@ -333,15 +342,17 @@ impl LocalRecordingIntake {
             None => self.store.settings()?.default_retention,
         };
         let mut not_recording = None;
-        let mut meeting = self.store.update_meeting(meeting_id, timestamp, |meeting| {
-            if meeting.state != MeetingState::Recording {
-                not_recording = Some(meeting.state.kind());
-                return Ok(());
-            }
-            meeting.duration = result.duration;
-            meeting.end_reason = Some(result.end_reason.clone());
-            Ok(())
-        })?;
+        let mut meeting = self
+            .store
+            .update_meeting(meeting_id, timestamp, |meeting| {
+                if meeting.state != MeetingState::Recording {
+                    not_recording = Some(meeting.state.kind());
+                    return Ok(());
+                }
+                meeting.duration = result.duration;
+                meeting.end_reason = Some(result.end_reason.clone());
+                Ok(())
+            })?;
         if let Some(kind) = not_recording {
             return Err(LocalRecordingIntakeError::NotRecording(meeting_id, kind));
         }
@@ -385,9 +396,10 @@ pub fn participants_from(attendees: &[Attendee], meeting_id: Uuid) -> Vec<Partic
             .as_deref()
             .map(|email| email.trim().to_lowercase())
             .filter(|email| !email.is_empty());
-        let key = email
-            .as_ref()
-            .map_or_else(|| format!("name:{}", name.to_lowercase()), |email| format!("email:{email}"));
+        let key = email.as_ref().map_or_else(
+            || format!("name:{}", name.to_lowercase()),
+            |email| format!("email:{email}"),
+        );
         if !seen.insert(key) {
             continue;
         }
@@ -450,7 +462,10 @@ mod tests {
             .unwrap()
             .with_timezone(&Utc);
         let berlin = FixedOffset::east_opt(2 * 3600).unwrap();
-        assert_eq!(default_title(MeetingSource::MacCall, at, berlin), "Call 2026-09-24 11:00");
+        assert_eq!(
+            default_title(MeetingSource::MacCall, at, berlin),
+            "Call 2026-09-24 11:00"
+        );
         assert_eq!(
             default_title(MeetingSource::MacInPerson, at, berlin),
             "Meeting 2026-09-24 11:00"

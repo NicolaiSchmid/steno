@@ -17,7 +17,9 @@ use steno_core::{
     AudioAsset, AudioFormat, AudioLane, AudioRetention, Destination, Meeting, MeetingExport,
     MeetingSource, MeetingState, RecordingLayout, Settings, Store, TitleOrigin, paths::file_url,
 };
-use steno_pipeline::{MeetingEventBus, PipelineDependencies, ProcessingPipeline, StoreSpeakerMemory};
+use steno_pipeline::{
+    MeetingEventBus, PipelineDependencies, ProcessingPipeline, StoreSpeakerMemory,
+};
 
 fn fixture(relative: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -28,7 +30,9 @@ fn fixture(relative: &str) -> PathBuf {
 #[tokio::test(flavor = "multi_thread")]
 async fn the_synthetic_call_runs_through_the_real_engines_to_a_well_formed_export() {
     if std::env::var("STENO_MODEL_TESTS").as_deref() != Ok("1") {
-        eprintln!("set STENO_MODEL_TESTS=1 to run the pipeline over the fixture recording with the ONNX engines");
+        eprintln!(
+            "set STENO_MODEL_TESTS=1 to run the pipeline over the fixture recording with the ONNX engines"
+        );
         return;
     }
     let dir = tempfile::tempdir().unwrap();
@@ -61,15 +65,30 @@ async fn the_synthetic_call_runs_through_the_real_engines_to_a_well_formed_expor
             store.clone(),
             MeetingEventBus::new(),
         )
-        .with_llm(Some(Arc::new(PassthroughCleaner::default())), Some(Arc::new(FakeSummarizer::default()))),
+        .with_llm(
+            Some(Arc::new(PassthroughCleaner::default())),
+            Some(Arc::new(FakeSummarizer::default())),
+        ),
     );
 
     let meeting_id = uuid::Uuid::new_v4();
     let layout = RecordingLayout::new(&audio, meeting_id);
     layout.create_directories(false).unwrap();
-    std::fs::copy(fixture("audio/conversation-two-lane-6s.wav"), layout.master(AudioFormat::Wav16kInt16)).unwrap();
-    std::fs::copy(fixture("audio/conversation-mic-6s.wav"), layout.sidecar(AudioLane::Mic)).unwrap();
-    std::fs::copy(fixture("audio/conversation-system-6s.wav"), layout.sidecar(AudioLane::System)).unwrap();
+    std::fs::copy(
+        fixture("audio/conversation-two-lane-6s.wav"),
+        layout.master(AudioFormat::Wav16kInt16),
+    )
+    .unwrap();
+    std::fs::copy(
+        fixture("audio/conversation-mic-6s.wav"),
+        layout.sidecar(AudioLane::Mic),
+    )
+    .unwrap();
+    std::fs::copy(
+        fixture("audio/conversation-system-6s.wav"),
+        layout.sidecar(AudioLane::System),
+    )
+    .unwrap();
     let now = Utc::now();
     let meeting = Meeting {
         id: meeting_id,
@@ -97,8 +116,14 @@ async fn the_synthetic_call_runs_through_the_real_engines_to_a_well_formed_expor
         format: AudioFormat::Wav16kInt16,
         lanes: vec![AudioLane::Mic, AudioLane::System],
         sidecars_16k: BTreeMap::from([
-            (AudioLane::Mic, file_url(&layout.sidecar(AudioLane::Mic), false)),
-            (AudioLane::System, file_url(&layout.sidecar(AudioLane::System), false)),
+            (
+                AudioLane::Mic,
+                file_url(&layout.sidecar(AudioLane::Mic), false),
+            ),
+            (
+                AudioLane::System,
+                file_url(&layout.sidecar(AudioLane::System), false),
+            ),
         ]),
         mixdown_url: None,
         retention: AudioRetention::KeepForever,
@@ -112,14 +137,29 @@ async fn the_synthetic_call_runs_through_the_real_engines_to_a_well_formed_expor
     let export = store.export(meeting_id).unwrap().unwrap();
     let json = ArtifactRenderer.render_json(&export).unwrap();
     let decoded: MeetingExport = serde_json::from_slice(&json).unwrap();
-    assert_eq!(decoded.schema_version, MeetingExport::CURRENT_SCHEMA_VERSION);
+    assert_eq!(
+        decoded.schema_version,
+        MeetingExport::CURRENT_SCHEMA_VERSION
+    );
     assert_eq!(decoded.meeting.id, meeting_id);
     assert_eq!(decoded.meeting.state, MeetingState::Ready);
     assert_eq!(decoded.meeting.source, MeetingSource::MacCall);
-    assert!(decoded.speakers.iter().any(|s| s.cluster_label == "Me"), "the mic lane has the me speaker");
-    assert!(decoded.audio.as_ref().is_some_and(|a| a.mixdown_url.is_some()));
     assert!(
-        decoded.speakers.iter().filter(|s| s.cluster_label != "Me").all(|s| s.embedding.is_none()),
+        decoded.speakers.iter().any(|s| s.cluster_label == "Me"),
+        "the mic lane has the me speaker"
+    );
+    assert!(
+        decoded
+            .audio
+            .as_ref()
+            .is_some_and(|a| a.mixdown_url.is_some())
+    );
+    assert!(
+        decoded
+            .speakers
+            .iter()
+            .filter(|s| s.cluster_label != "Me")
+            .all(|s| s.embedding.is_none()),
         "embeddings never reach meeting.json"
     );
     // Synthetic tones carry no speech: the engine may return no segments,
@@ -128,7 +168,11 @@ async fn the_synthetic_call_runs_through_the_real_engines_to_a_well_formed_expor
         "[model-tests] {} segments, {} speakers: {:?}",
         decoded.segments.len(),
         decoded.speakers.len(),
-        decoded.speakers.iter().map(|s| &s.cluster_label).collect::<Vec<_>>()
+        decoded
+            .speakers
+            .iter()
+            .map(|s| &s.cluster_label)
+            .collect::<Vec<_>>()
     );
     assert!(speech_store.is_installed(&steno_speech::ModelAsset::parakeet_v3_fp32()));
 }

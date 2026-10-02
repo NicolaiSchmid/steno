@@ -73,7 +73,9 @@ impl LaneMerger {
             for (index, segment) in raw.iter().enumerate() {
                 let speaker_id = match lane {
                     AudioLane::Mic => me_speaker_id,
-                    AudioLane::System | AudioLane::Mixed => Self::cluster_covering(segment, clusters),
+                    AudioLane::System | AudioLane::Mixed => {
+                        Self::cluster_covering(segment, clusters)
+                    }
                 };
                 let transcript = TranscriptSegment {
                     id: Self::segment_id(meeting_id, *lane, index),
@@ -151,16 +153,25 @@ mod tests {
         let clusters = vec![
             ClusterSpeaker {
                 speaker_id: a,
-                ranges: vec![TimeRange { lower: 0.0, upper: 1.0 }],
+                ranges: vec![TimeRange {
+                    lower: 0.0,
+                    upper: 1.0,
+                }],
             },
             ClusterSpeaker {
                 speaker_id: b,
-                ranges: vec![TimeRange { lower: 1.0, upper: 2.0 }],
+                ranges: vec![TimeRange {
+                    lower: 1.0,
+                    upper: 2.0,
+                }],
             },
         ];
         let mut lanes = BTreeMap::new();
         lanes.insert(AudioLane::Mic, vec![raw(0.5, 1.5, "mic")]);
-        lanes.insert(AudioLane::System, vec![raw(0.0, 0.8, "sys a"), raw(1.2, 1.9, "sys b")]);
+        lanes.insert(
+            AudioLane::System,
+            vec![raw(0.0, 0.8, "sys a"), raw(1.2, 1.9, "sys b")],
+        );
         let merged = LaneMerger::merge(meeting, &lanes, &clusters, Some(me));
         assert_eq!(
             merged.iter().map(|s| s.text.as_str()).collect::<Vec<_>>(),
@@ -169,7 +180,10 @@ mod tests {
         assert_eq!(merged[0].speaker_id, Some(a));
         assert_eq!(merged[1].speaker_id, Some(me));
         assert_eq!(merged[2].speaker_id, Some(b));
-        assert_eq!(merged[1].id, LaneMerger::segment_id(meeting, AudioLane::Mic, 0));
+        assert_eq!(
+            merged[1].id,
+            LaneMerger::segment_id(meeting, AudioLane::Mic, 0)
+        );
     }
 
     #[test]
@@ -177,9 +191,18 @@ mod tests {
         let a = Uuid::new_v4();
         let clusters = vec![ClusterSpeaker {
             speaker_id: a,
-            ranges: vec![TimeRange { lower: 0.0, upper: 0.4 }],
+            ranges: vec![TimeRange {
+                lower: 0.0,
+                upper: 0.4,
+            }],
         }];
-        assert_eq!(LaneMerger::cluster_covering(&raw(0.0, 2.0, ""), &clusters), Some(a));
-        assert_eq!(LaneMerger::cluster_covering(&raw(3.0, 4.0, ""), &clusters), None);
+        assert_eq!(
+            LaneMerger::cluster_covering(&raw(0.0, 2.0, ""), &clusters),
+            Some(a)
+        );
+        assert_eq!(
+            LaneMerger::cluster_covering(&raw(3.0, 4.0, ""), &clusters),
+            None
+        );
     }
 }

@@ -11,8 +11,7 @@ use steno_pipeline::{PipelineDependencies, ProcessingPipeline, RetentionSweep};
 use uuid::Uuid;
 
 /// Rebuilds the dependencies from the stored settings and the API key.
-pub type MakeDependencies =
-    Arc<dyn Fn() -> Result<PipelineDependencies, String> + Send + Sync>;
+pub type MakeDependencies = Arc<dyn Fn() -> Result<PipelineDependencies, String> + Send + Sync>;
 
 /// The current pipeline behind a swap: a reload replaces it first, so a
 /// Save never waits for a run in progress; the retired pipeline is kept
@@ -26,7 +25,11 @@ pub struct PipelineHandle {
 
 impl PipelineHandle {
     #[must_use]
-    pub fn new(pipeline: ProcessingPipeline, make: MakeDependencies, runtime: tokio::runtime::Handle) -> Self {
+    pub fn new(
+        pipeline: ProcessingPipeline,
+        make: MakeDependencies,
+        runtime: tokio::runtime::Handle,
+    ) -> Self {
         PipelineHandle {
             current: Mutex::new(pipeline),
             make,
@@ -57,7 +60,8 @@ impl PipelineHandle {
                 .unwrap_or_else(std::sync::PoisonError::into_inner),
             replacement,
         );
-        self.runtime.spawn(async move { retired.wait_until_idle().await });
+        self.runtime
+            .spawn(async move { retired.wait_until_idle().await });
         Ok(())
     }
 }

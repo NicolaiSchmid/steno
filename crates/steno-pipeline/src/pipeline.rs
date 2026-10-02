@@ -20,12 +20,12 @@ use std::time::Instant;
 use chrono::{DateTime, Utc};
 use steno_core::{
     AudioAsset, AudioBuffer16k, AudioDecoder, AudioLane, AudioRetention, CleanupInput,
-    DeliveryDispatcher, DeliveryStatus, Diarizer, LanguageTag, LlmUsage, Meeting,
-    MeetingEvent, MeetingSource, MeetingState, MeetingStateKind, MeetingSummarizer, Participant,
-    ParticipantRole, PipelineStage, RawSegment, RecordingLayout, Settings, Speaker,
-    SpeakerAssignment, SpeakerMemory, SpeechEngine, Store, StoreError, SummaryInput,
-    SummaryTemplate, TimeRange, TitleOrigin, TranscriptCleaner, TranscriptSegment,
-    derived_uuid, paths::file_url, protocols::DEFAULT_MATCH_MARGIN,
+    DeliveryDispatcher, DeliveryStatus, Diarizer, LanguageTag, LlmUsage, Meeting, MeetingEvent,
+    MeetingSource, MeetingState, MeetingStateKind, MeetingSummarizer, Participant, ParticipantRole,
+    PipelineStage, RawSegment, RecordingLayout, Settings, Speaker, SpeakerAssignment,
+    SpeakerMemory, SpeechEngine, Store, StoreError, SummaryInput, SummaryTemplate, TimeRange,
+    TitleOrigin, TranscriptCleaner, TranscriptSegment, derived_uuid, paths::file_url,
+    protocols::DEFAULT_MATCH_MARGIN,
 };
 use tokio::sync::Mutex as AsyncMutex;
 use tokio::task::JoinHandle;
@@ -243,7 +243,9 @@ pub const SAMPLE_CLIP_SECONDS: f64 = 10.0;
 /// `None` when no segment is tagged. Ties break on the tag so the result is
 /// stable. Swift: `LanguageElection.elect`.
 #[must_use]
-pub fn elect_language<'a>(segments: impl IntoIterator<Item = &'a RawSegment>) -> Option<LanguageTag> {
+pub fn elect_language<'a>(
+    segments: impl IntoIterator<Item = &'a RawSegment>,
+) -> Option<LanguageTag> {
     let mut totals: BTreeMap<LanguageTag, f64> = BTreeMap::new();
     for segment in segments {
         if let Some(language) = &segment.language {
@@ -285,7 +287,10 @@ pub fn diarized_lane(source: MeetingSource, lanes: &[AudioLane]) -> Option<Audio
     ordered_lanes(lanes).last().copied()
 }
 
-fn attributing<T, E: fmt::Display>(stage: PipelineStage, result: std::result::Result<T, E>) -> Result<T> {
+fn attributing<T, E: fmt::Display>(
+    stage: PipelineStage,
+    result: std::result::Result<T, E>,
+) -> Result<T> {
     result.map_err(|error| PipelineFailure::wrapping(&error, stage))
 }
 
@@ -378,8 +383,9 @@ impl ProcessingPipeline {
                     self.store().set_state(
                         meeting.id,
                         MeetingState::Failed {
-                            reason: "Processing was interrupted and the recording's asset is missing"
-                                .to_owned(),
+                            reason:
+                                "Processing was interrupted and the recording's asset is missing"
+                                    .to_owned(),
                         },
                         self.now(),
                     ),
@@ -431,8 +437,14 @@ impl ProcessingPipeline {
     pub async fn warm_up(&self) -> Result<()> {
         let _guard = self.inner.preparing.lock().await;
         let dependencies = &self.inner.dependencies;
-        attributing(PipelineStage::Decode, dependencies.speech_engine.prepare().await)?;
-        attributing(PipelineStage::Diarize, dependencies.diarizer.prepare().await)?;
+        attributing(
+            PipelineStage::Decode,
+            dependencies.speech_engine.prepare().await,
+        )?;
+        attributing(
+            PipelineStage::Diarize,
+            dependencies.diarizer.prepare().await,
+        )?;
         Ok(())
     }
 
@@ -443,15 +455,21 @@ impl ProcessingPipeline {
     pub async fn process(&self, asset_id: Uuid) -> Result<()> {
         let asset = attributing(PipelineStage::Decode, self.store().asset_by_id(asset_id))?
             .ok_or_else(|| {
-                PipelineFailure::new(PipelineStage::Decode, format!("audio asset {asset_id} not found"))
-            })?;
-        let meeting = attributing(PipelineStage::Decode, self.store().meeting(asset.meeting_id))?
-            .ok_or_else(|| {
                 PipelineFailure::new(
                     PipelineStage::Decode,
-                    format!("meeting {} not found", asset.meeting_id),
+                    format!("audio asset {asset_id} not found"),
                 )
             })?;
+        let meeting = attributing(
+            PipelineStage::Decode,
+            self.store().meeting(asset.meeting_id),
+        )?
+        .ok_or_else(|| {
+            PipelineFailure::new(
+                PipelineStage::Decode,
+                format!("meeting {} not found", asset.meeting_id),
+            )
+        })?;
         let meeting_id = meeting.id;
         self.exclusively(meeting_id, PipelineStage::Decode, async {
             let persisted = match self.process_until_persist(&asset, meeting).await {
@@ -473,7 +491,11 @@ impl ProcessingPipeline {
         .await
     }
 
-    async fn process_until_persist(&self, asset: &AudioAsset, meeting: Meeting) -> Result<AudioAsset> {
+    async fn process_until_persist(
+        &self,
+        asset: &AudioAsset,
+        meeting: Meeting,
+    ) -> Result<AudioAsset> {
         self.warm_up().await?;
         attributing(
             PipelineStage::Decode,
@@ -481,7 +503,13 @@ impl ProcessingPipeline {
                 .set_state(meeting.id, MeetingState::Processing, self.now()),
         )?;
         let settings = attributing(PipelineStage::Decode, self.store().settings())?;
-        let run = self.make_run(&meeting, &asset.lanes, None, PipelineStage::ALL.to_vec(), &settings)?;
+        let run = self.make_run(
+            &meeting,
+            &asset.lanes,
+            None,
+            PipelineStage::ALL.to_vec(),
+            &settings,
+        )?;
         self.state().runs.insert(meeting.id, run);
         let mut current = meeting;
         current.state = MeetingState::Processing;
@@ -490,7 +518,9 @@ impl ProcessingPipeline {
         diarized.speakers = self
             .match_speakers(diarized.speakers, current.id, &settings)
             .await?;
-        let merged = self.merge(&current, &transcription.lanes, &diarized).await?;
+        let merged = self
+            .merge(&current, &transcription.lanes, &diarized)
+            .await?;
         let cleaned = self
             .cleanup(&current, merged.segments, &merged.speakers)
             .await?;
@@ -510,7 +540,10 @@ impl ProcessingPipeline {
     pub async fn rerun_summary(&self, meeting_id: Uuid, template_id: &str) -> Result<()> {
         let meeting = attributing(PipelineStage::Summarize, self.store().meeting(meeting_id))?
             .ok_or_else(|| {
-                PipelineFailure::new(PipelineStage::Summarize, format!("meeting {meeting_id} not found"))
+                PipelineFailure::new(
+                    PipelineStage::Summarize,
+                    format!("meeting {meeting_id} not found"),
+                )
             })?;
         if self.inner.dependencies.summarizer.is_none() {
             return Err(PipelineFailure::new(
@@ -527,7 +560,11 @@ impl ProcessingPipeline {
                     )
                 })?;
             let settings = attributing(PipelineStage::Summarize, self.store().settings())?;
-            let lanes = export.audio.as_ref().map(|a| a.lanes.clone()).unwrap_or_default();
+            let lanes = export
+                .audio
+                .as_ref()
+                .map(|a| a.lanes.clone())
+                .unwrap_or_default();
             let run = self.make_run(
                 &meeting,
                 &lanes,
@@ -539,7 +576,8 @@ impl ProcessingPipeline {
             let mut current = meeting;
             current.template_id = template_id.to_owned();
             current.state = MeetingState::Ready;
-            self.summarize(current, &export.segments, &export.speakers).await?;
+            self.summarize(current, &export.segments, &export.speakers)
+                .await?;
             self.deliver(meeting_id).await;
             self.stamp_deferred_retention(meeting_id).await
         })
@@ -552,14 +590,23 @@ impl ProcessingPipeline {
     pub async fn redeliver(&self, meeting_id: Uuid) -> Result<()> {
         let meeting = attributing(PipelineStage::Deliver, self.store().meeting(meeting_id))?
             .ok_or_else(|| {
-                PipelineFailure::new(PipelineStage::Deliver, format!("meeting {meeting_id} not found"))
+                PipelineFailure::new(
+                    PipelineStage::Deliver,
+                    format!("meeting {meeting_id} not found"),
+                )
             })?;
         self.exclusively(meeting_id, PipelineStage::Deliver, async {
             let settings = attributing(PipelineStage::Deliver, self.store().settings())?;
             let lanes = attributing(PipelineStage::Deliver, self.store().asset(meeting_id))?
                 .map(|a| a.lanes)
                 .unwrap_or_default();
-            let run = self.make_run(&meeting, &lanes, None, vec![PipelineStage::Deliver], &settings)?;
+            let run = self.make_run(
+                &meeting,
+                &lanes,
+                None,
+                vec![PipelineStage::Deliver],
+                &settings,
+            )?;
             self.state().runs.insert(meeting_id, run);
             self.deliver(meeting_id).await;
             self.stamp_deferred_retention(meeting_id).await
@@ -766,8 +813,13 @@ impl ProcessingPipeline {
             // Release the previous lane before decoding the next.
             drop(last.take());
             let buffer = if index == 0 {
-                self.run(PipelineStage::Decode, 0, meeting_id, decoder.decode(asset, lane))
-                    .await?
+                self.run(
+                    PipelineStage::Decode,
+                    0,
+                    meeting_id,
+                    decoder.decode(asset, lane),
+                )
+                .await?
             } else {
                 attributing(PipelineStage::Decode, decoder.decode(asset, lane).await)?
             };
@@ -1031,13 +1083,15 @@ impl ProcessingPipeline {
                 )?;
                 return Ok::<_, PipelineFailure>(updated);
             };
-            let template = SummaryTemplate::bundled_with_id(&meeting.template_id).ok_or_else(|| {
-                PipelineFailure::new(
-                    PipelineStage::Summarize,
-                    format!("unknown summary template {}", meeting.template_id),
-                )
-            })?;
-            let participants = attributing(PipelineStage::Summarize, store.participants(meeting_id))?;
+            let template =
+                SummaryTemplate::bundled_with_id(&meeting.template_id).ok_or_else(|| {
+                    PipelineFailure::new(
+                        PipelineStage::Summarize,
+                        format!("unknown summary template {}", meeting.template_id),
+                    )
+                })?;
+            let participants =
+                attributing(PipelineStage::Summarize, store.participants(meeting_id))?;
             let people = attributing(PipelineStage::Summarize, store.persons())?;
             let output = attributing(
                 PipelineStage::Summarize,
@@ -1075,7 +1129,12 @@ impl ProcessingPipeline {
             updated.updated_at = now;
             attributing(
                 PipelineStage::Summarize,
-                store.replace_summary(&updated, &output.tasks, &output.decisions, &output.speaker_names),
+                store.replace_summary(
+                    &updated,
+                    &output.tasks,
+                    &output.decisions,
+                    &output.speaker_names,
+                ),
             )?;
             Ok(updated)
         })
@@ -1115,11 +1174,12 @@ impl ProcessingPipeline {
                 PipelineStage::Persist,
                 store.set_state(meeting.id, MeetingState::Ready, now),
             )?;
-            let unconfirmed: Vec<Uuid> = attributing(PipelineStage::Persist, store.speakers(meeting.id))?
-                .into_iter()
-                .filter(|speaker| !speaker.assignment.is_confirmed())
-                .map(|speaker| speaker.id)
-                .collect();
+            let unconfirmed: Vec<Uuid> =
+                attributing(PipelineStage::Persist, store.speakers(meeting.id))?
+                    .into_iter()
+                    .filter(|speaker| !speaker.assignment.is_confirmed())
+                    .map(|speaker| speaker.id)
+                    .collect();
             if !unconfirmed.is_empty() {
                 events.post(MeetingEvent::SpeakersNeedReview {
                     meeting_id: meeting.id,
@@ -1159,7 +1219,9 @@ impl ProcessingPipeline {
         }
         let now = self.now();
         self.run(PipelineStage::Retention, 0, meeting_id, async {
-            let mut updated = store.asset_by_id(asset.id)?.unwrap_or_else(|| asset.clone());
+            let mut updated = store
+                .asset_by_id(asset.id)?
+                .unwrap_or_else(|| asset.clone());
             updated.expires_at = updated.retention.expiry(now);
             store.save_asset(&updated)?;
             events.post(MeetingEvent::RetentionApplied { meeting_id });
@@ -1181,8 +1243,8 @@ impl ProcessingPipeline {
         }
         let ready = attributing(PipelineStage::Retention, store.meeting(meeting_id))?
             .is_some_and(|meeting| meeting.state == MeetingState::Ready);
-        let master_exists = steno_core::paths::path_from_file_url(&asset.url)
-            .is_some_and(|path| path.exists());
+        let master_exists =
+            steno_core::paths::path_from_file_url(&asset.url).is_some_and(|path| path.exists());
         if !ready || !master_exists {
             return Ok(());
         }
@@ -1192,7 +1254,10 @@ impl ProcessingPipeline {
 
 /// The participant with `role == me`, created with the display name `Me`
 /// when the app wrote none. Swift: `ensureMeParticipant`.
-pub fn ensure_me_participant(store: &Store, meeting_id: Uuid) -> std::result::Result<Participant, StoreError> {
+pub fn ensure_me_participant(
+    store: &Store,
+    meeting_id: Uuid,
+) -> std::result::Result<Participant, StoreError> {
     if let Some(existing) = store
         .participants(meeting_id)?
         .into_iter()

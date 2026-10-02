@@ -35,7 +35,9 @@ pub struct ObsidianOptions {
 
 impl ObsidianOptions {
     fn validate(&self) -> Result<(), Failure> {
-        if self.vault.is_none() && (self.people_folder.is_some() || self.include_audio || self.task_tag.is_some()) {
+        if self.vault.is_none()
+            && (self.people_folder.is_some() || self.include_audio || self.task_tag.is_some())
+        {
             return Err(Failure::usage(
                 "--people-folder, --include-audio and --task-tag need --vault.",
             ));
@@ -135,7 +137,10 @@ impl Deliver {
             }
         }
         if !failures.is_empty() {
-            return Err(Failure::runtime(format!("delivery failed: {}", failures.join("; "))));
+            return Err(Failure::runtime(format!(
+                "delivery failed: {}",
+                failures.join("; ")
+            )));
         }
         Ok(())
     }

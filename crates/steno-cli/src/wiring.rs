@@ -108,13 +108,17 @@ pub fn secret_store() -> Result<Arc<dyn SecretStore>, Failure> {
 }
 
 pub fn codex_store() -> Arc<CodexCredentialStore> {
-    Arc::new(CodexCredentialStore::new(CodexCredentialStore::default_home(
-        &std::env::vars().collect::<std::collections::HashMap<_, _>>(),
-    )))
+    Arc::new(CodexCredentialStore::new(
+        CodexCredentialStore::default_home(
+            &std::env::vars().collect::<std::collections::HashMap<_, _>>(),
+        ),
+    ))
 }
 
 /// The LLM passes from the settings, `None` without an endpoint.
-pub async fn llm_passes(settings: &Settings) -> Result<Option<steno_services::llm::Passes>, Failure> {
+pub async fn llm_passes(
+    settings: &Settings,
+) -> Result<Option<steno_services::llm::Passes>, Failure> {
     let secrets = secret_store()?;
     let api_key = secrets
         .secret(&steno_core::SecretKey::llm_api_key())
@@ -163,9 +167,8 @@ pub fn dependencies(
             )),
         ),
     };
-    let dispatcher = dispatcher.unwrap_or_else(|| {
-        Arc::new(steno_adapters::DeliveryCoordinator::new(store.clone()))
-    });
+    let dispatcher = dispatcher
+        .unwrap_or_else(|| Arc::new(steno_adapters::DeliveryCoordinator::new(store.clone())));
     let dependencies = PipelineDependencies::new(
         Arc::new(steno_audio::SymphoniaAudioCodec::new()),
         speech_engine,
@@ -186,8 +189,10 @@ pub fn sha256_hex(data: &[u8]) -> String {
     use sha2::Digest as _;
     use std::fmt::Write as _;
     let digest = sha2::Sha256::digest(data);
-    digest.iter().fold(String::with_capacity(64), |mut text, byte| {
-        let _ = write!(text, "{byte:02x}");
-        text
-    })
+    digest
+        .iter()
+        .fold(String::with_capacity(64), |mut text, byte| {
+            let _ = write!(text, "{byte:02x}");
+            text
+        })
 }

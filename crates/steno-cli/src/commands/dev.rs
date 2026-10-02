@@ -98,7 +98,10 @@ impl Db {
             }
             DbCommand::Reindex(database) => {
                 let path = database.path()?;
-                database.open()?.rebuild_search_index().map_err(Failure::runtime)?;
+                database
+                    .open()?
+                    .rebuild_search_index()
+                    .map_err(Failure::runtime)?;
                 println!("reindexed {}", path.display());
                 Ok(())
             }
@@ -127,7 +130,8 @@ pub enum FixturesCommand {
 impl Fixtures {
     fn run(self) -> Outcome {
         let FixturesCommand::Generate { out } = self.command;
-        let outputs = steno_pipeline::fixtures::generate(&out, &sha256_hex).map_err(Failure::runtime)?;
+        let outputs =
+            steno_pipeline::fixtures::generate(&out, &sha256_hex).map_err(Failure::runtime)?;
         std::fs::write(
             out.join("MANIFEST.sha256"),
             steno_pipeline::fixtures::manifest(&outputs),
@@ -226,7 +230,11 @@ impl AecBench {
         };
         let frame = steno_audio::FRAME_SIZE;
         let rate = steno_audio::SAMPLE_RATE;
-        #[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        #[allow(
+            clippy::cast_precision_loss,
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss
+        )]
         let tail = (rate * self.tail_milliseconds as f64 / 1000.0) as usize;
         let mut canceller: Box<dyn EchoCanceller> = match self.engine {
             AecEngine::Speex => Box::new(
@@ -269,7 +277,8 @@ impl AecBench {
 }
 
 fn read_48k(path: &Path) -> Result<Vec<f32>, Failure> {
-    let file = WavFile::read(path).map_err(|e| Failure::runtime(format!("{}: {e}", path.display())))?;
+    let file =
+        WavFile::read(path).map_err(|e| Failure::runtime(format!("{}: {e}", path.display())))?;
     file.channels
         .into_iter()
         .next()
@@ -307,14 +316,23 @@ impl CaptureSpike {
             return Err(Failure::usage("--seconds must be positive."));
         }
         let (mode, lane_override) = match self.lanes {
-            Lanes::System => (steno_audio::CaptureMode::Call, Some(vec![AudioLane::System])),
+            Lanes::System => (
+                steno_audio::CaptureMode::Call,
+                Some(vec![AudioLane::System]),
+            ),
             Lanes::Call => (steno_audio::CaptureMode::Call, None),
             Lanes::InPerson => (steno_audio::CaptureMode::InPerson, None),
         };
         let mut configuration = steno_audio::CaptureConfiguration::new(mode, &self.out);
-        configuration.input_device_uid.clone_from(&self.input_device_uid);
+        configuration
+            .input_device_uid
+            .clone_from(&self.input_device_uid);
         configuration.lane_override = lane_override;
-        let session = super::record::session(configuration, super::record::Backend::Live, Some(self.seconds))?;
+        let session = super::record::session(
+            configuration,
+            super::record::Backend::Live,
+            Some(self.seconds),
+        )?;
         let threads = super::record::print_live(&session, false);
         let id = uuid::Uuid::new_v4();
         session
@@ -326,19 +344,36 @@ impl CaptureSpike {
         for thread in threads {
             let _ = thread.join();
         }
-        println!("master: {}", path_from_file_url(&result.asset.url).unwrap_or_default().display());
-        println!("lanes: {}", result.asset.lanes.iter().map(|l| l.as_str()).collect::<Vec<_>>().join(", "));
+        println!(
+            "master: {}",
+            path_from_file_url(&result.asset.url)
+                .unwrap_or_default()
+                .display()
+        );
+        println!(
+            "lanes: {}",
+            result
+                .asset
+                .lanes
+                .iter()
+                .map(|l| l.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
         println!("duration: {:.2} s", result.statistics.duration);
         for lane in &result.asset.lanes {
             if let Some(sidecar) = result.asset.sidecars_16k.get(lane)
                 && let Some(path) = path_from_file_url(sidecar)
                 && let Ok(samples) = WavFile::read_16k_mono(&path)
             {
-                let onset = samples.iter().position(|s| s.abs() > 0.01).map_or(-1.0, |i| {
-                    #[allow(clippy::cast_precision_loss)]
-                    let seconds = i as f64 / AudioBuffer16k::SAMPLE_RATE;
-                    seconds
-                });
+                let onset = samples
+                    .iter()
+                    .position(|s| s.abs() > 0.01)
+                    .map_or(-1.0, |i| {
+                        #[allow(clippy::cast_precision_loss)]
+                        let seconds = i as f64 / AudioBuffer16k::SAMPLE_RATE;
+                        seconds
+                    });
                 println!("onset {}: {onset:.3} s", lane.as_str());
             }
         }
@@ -364,13 +399,21 @@ impl ModelsOptions {
         }
         let store = self.database.open()?;
         let settings = store.settings().map_err(Failure::runtime)?;
-        Ok(steno_services::speech::speech_store(&settings, &crate::wiring::paths()?))
+        Ok(steno_services::speech::speech_store(
+            &settings,
+            &crate::wiring::paths()?,
+        ))
     }
 
     fn root(&self) -> Result<PathBuf, Failure> {
         Ok(match &self.models_directory {
             Some(directory) => directory.clone(),
-            None => self.store()?.root().parent().map(Path::to_path_buf).unwrap_or_default(),
+            None => self
+                .store()?
+                .root()
+                .parent()
+                .map(Path::to_path_buf)
+                .unwrap_or_default(),
         })
     }
 }
@@ -386,7 +429,11 @@ fn parse_asset(argument: &str) -> Result<ModelAsset, String> {
     argument.parse::<ModelAsset>().map_err(|_| {
         format!(
             "{argument} is not a model asset; one of {}.",
-            ModelAsset::ALL.iter().map(|a| a.as_str()).collect::<Vec<_>>().join(", ")
+            ModelAsset::ALL
+                .iter()
+                .map(|a| a.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
         )
     })
 }
@@ -418,19 +465,28 @@ impl Models {
         use steno_host::services::SpeechModels as _;
         match self.command {
             ModelsCommand::List(options) => {
-                let service = RealSpeechModels { speech: options.store()? };
+                let service = RealSpeechModels {
+                    speech: options.store()?,
+                };
                 println!("models: {}", options.root()?.display());
                 for asset in ModelAsset::ALL {
                     let line = match service.installed_size(*asset) {
-                        Some(bytes) => format!("installed ({})", steno_host::labels::file_size(bytes)),
-                        None => format!("not installed (~{})", steno_host::labels::file_size(asset.approximate_bytes())),
+                        Some(bytes) => {
+                            format!("installed ({})", steno_host::labels::file_size(bytes))
+                        }
+                        None => format!(
+                            "not installed (~{})",
+                            steno_host::labels::file_size(asset.approximate_bytes())
+                        ),
                     };
                     println!("{} {}: {line}", asset.as_str(), asset.display_name());
                 }
                 Ok(())
             }
             ModelsCommand::Download { asset, options } => {
-                let service = RealSpeechModels { speech: options.store()? };
+                let service = RealSpeechModels {
+                    speech: options.store()?,
+                };
                 let mut last = -1i64;
                 service
                     .download(asset, &mut |fraction, phase| {
@@ -446,7 +502,9 @@ impl Models {
                 Ok(())
             }
             ModelsCommand::Remove { asset, options } => {
-                let service = RealSpeechModels { speech: options.store()? };
+                let service = RealSpeechModels {
+                    speech: options.store()?,
+                };
                 service.remove(asset).map_err(Failure::runtime)?;
                 println!("removed {}", asset.as_str());
                 Ok(())
@@ -510,7 +568,10 @@ impl Bakeoff {
             }
         }
         if !self.audio_directory.is_dir() {
-            return Err(Failure::usage(format!("{} is not a directory", self.audio_directory.display())));
+            return Err(Failure::usage(format!(
+                "{} is not a directory",
+                self.audio_directory.display()
+            )));
         }
         let mut files: Vec<PathBuf> = std::fs::read_dir(&self.audio_directory)
             .map_err(Failure::runtime)?
@@ -533,7 +594,9 @@ impl Bakeoff {
         let cleaner: Option<Arc<dyn TranscriptCleaner>> = if self.cleanup {
             let store = self.models.database.open()?;
             let settings = store.settings().map_err(Failure::runtime)?;
-            crate::wiring::llm_passes(&settings).await?.map(|passes| passes.cleaner)
+            crate::wiring::llm_passes(&settings)
+                .await?
+                .map(|passes| passes.cleaner)
         } else {
             None
         };
@@ -551,21 +614,36 @@ impl Bakeoff {
             };
             engine.prepare().await.map_err(Failure::runtime)?;
             for file in &files {
-                let name = file.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                let name = file
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_default();
                 let buffer = decode_any(&decoder, file).await?;
                 let started = std::time::Instant::now();
-                let segments = engine.transcribe(&buffer, None).await.map_err(Failure::runtime)?;
+                let segments = engine
+                    .transcribe(&buffer, None)
+                    .await
+                    .map_err(Failure::runtime)?;
                 let wall = started.elapsed().as_secs_f64();
-                let text = segments.iter().map(|s| s.text.as_str()).collect::<Vec<_>>().join(" ");
+                let text = segments
+                    .iter()
+                    .map(|s| s.text.as_str())
+                    .collect::<Vec<_>>()
+                    .join(" ");
                 let reference = self.reference_for(file);
-                let rate = reference.as_deref().map(|reference| wer::word_errors(reference, &text).rate());
+                let rate = reference
+                    .as_deref()
+                    .map(|reference| wer::word_errors(reference, &text).rate());
                 let (cleaned_wer, requests) = match (&cleaner, &reference) {
                     (Some(cleaner), Some(reference)) => {
                         let transcript: Vec<_> = segments
                             .iter()
                             .enumerate()
                             .map(|(index, s)| steno_core::TranscriptSegment {
-                                id: steno_core::derived_uuid(uuid::Uuid::nil(), &format!("bakeoff-{index}")),
+                                id: steno_core::derived_uuid(
+                                    uuid::Uuid::nil(),
+                                    &format!("bakeoff-{index}"),
+                                ),
                                 meeting_id: uuid::Uuid::nil(),
                                 start: s.start,
                                 end: s.end,
@@ -585,12 +663,23 @@ impl Bakeoff {
                             })
                             .await
                             .map_err(Failure::runtime)?;
-                        let corrected_text = output.segments.iter().map(|s| s.text.as_str()).collect::<Vec<_>>().join(" ");
-                        (Some(wer::word_errors(reference, &corrected_text).rate()), output.usage.requests)
+                        let corrected_text = output
+                            .segments
+                            .iter()
+                            .map(|s| s.text.as_str())
+                            .collect::<Vec<_>>()
+                            .join(" ");
+                        (
+                            Some(wer::word_errors(reference, &corrected_text).rate()),
+                            output.usage.requests,
+                        )
                     }
                     _ => (None, 0),
                 };
-                let stem = file.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+                let stem = file
+                    .file_stem()
+                    .map(|s| s.to_string_lossy().into_owned())
+                    .unwrap_or_default();
                 std::fs::write(
                     output.join(format!("{stem}.{engine_id}.json")),
                     serde_json::to_vec_pretty(&segments).map_err(Failure::runtime)?,
@@ -613,12 +702,18 @@ impl Bakeoff {
             "generatedAt": steno_core::json::format_date(Utc::now()),
             "rows": rows,
         });
-        std::fs::write(output.join("report.json"), serde_json::to_vec_pretty(&report).map_err(Failure::runtime)?)
-            .map_err(Failure::runtime)?;
+        std::fs::write(
+            output.join("report.json"),
+            serde_json::to_vec_pretty(&report).map_err(Failure::runtime)?,
+        )
+        .map_err(Failure::runtime)?;
         let markdown = render_bakeoff(&rows);
         std::fs::write(output.join("report.md"), &markdown).map_err(Failure::runtime)?;
         if self.json {
-            println!("{}", serde_json::to_string_pretty(&report).map_err(Failure::runtime)?);
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&report).map_err(Failure::runtime)?
+            );
         } else {
             print!("{markdown}");
             println!("reports: {}", output.display());
@@ -628,7 +723,10 @@ impl Bakeoff {
 
     fn reference_for(&self, file: &Path) -> Option<String> {
         let stem = file.file_stem()?;
-        let directory = self.reference_directory.clone().unwrap_or_else(|| self.audio_directory.clone());
+        let directory = self
+            .reference_directory
+            .clone()
+            .unwrap_or_else(|| self.audio_directory.clone());
         std::fs::read_to_string(directory.join(format!("{}.txt", stem.to_string_lossy()))).ok()
     }
 }
@@ -640,10 +738,16 @@ fn percent(value: Option<f64>) -> String {
 fn render_bakeoff(rows: &[BakeoffRow]) -> String {
     use std::fmt::Write as _;
     let mut out = String::new();
-    out.push_str("| file | engine | audio s | wall s | RTFx | segments | WER | cleaned WER | requests |\n");
+    out.push_str(
+        "| file | engine | audio s | wall s | RTFx | segments | WER | cleaned WER | requests |\n",
+    );
     out.push_str("|---|---|---|---|---|---|---|---|---|\n");
     for row in rows {
-        let rtfx = if row.wall_seconds > 0.0 { row.audio_seconds / row.wall_seconds } else { 0.0 };
+        let rtfx = if row.wall_seconds > 0.0 {
+            row.audio_seconds / row.wall_seconds
+        } else {
+            0.0
+        };
         let _ = writeln!(
             out,
             "| {} | {} | {:.2} | {:.2} | {:.1} | {} | {} | {} | {} |",
@@ -685,7 +789,10 @@ fn render_bakeoff(rows: &[BakeoffRow]) -> String {
     out
 }
 
-async fn decode_any(decoder: &steno_audio::SymphoniaAudioCodec, file: &Path) -> Result<AudioBuffer16k, Failure> {
+async fn decode_any(
+    decoder: &steno_audio::SymphoniaAudioCodec,
+    file: &Path,
+) -> Result<AudioBuffer16k, Failure> {
     use steno_core::AudioDecoder as _;
     let asset = steno_core::AudioAsset {
         id: uuid::Uuid::nil(),
@@ -788,7 +895,10 @@ impl DiarizeSweep {
                     clusters.len()
                 );
                 for cluster in &clusters {
-                    println!("  {} {:.1} s (confidence {:.2})", cluster.label, cluster.seconds, cluster.confidence);
+                    println!(
+                        "  {} {:.1} s (confidence {:.2})",
+                        cluster.label, cluster.seconds, cluster.confidence
+                    );
                 }
                 runs.push(SweepRun {
                     file: file.display().to_string(),
@@ -801,8 +911,12 @@ impl DiarizeSweep {
             }
         }
         if let Some(output) = &self.output {
-            std::fs::write(output, serde_json::to_vec_pretty(&serde_json::json!({ "runs": runs })).map_err(Failure::runtime)?)
-                .map_err(Failure::runtime)?;
+            std::fs::write(
+                output,
+                serde_json::to_vec_pretty(&serde_json::json!({ "runs": runs }))
+                    .map_err(Failure::runtime)?,
+            )
+            .map_err(Failure::runtime)?;
             println!("report: {}", output.display());
         }
         Ok(())
@@ -870,14 +984,22 @@ impl EndpointOptions {
         Ok(endpoint)
     }
 
-    async fn client(&self, retry: RetryPolicy) -> Result<(Arc<dyn LlmClient>, LlmEndpoint), Failure> {
+    async fn client(
+        &self,
+        retry: RetryPolicy,
+    ) -> Result<(Arc<dyn LlmClient>, LlmEndpoint), Failure> {
         let endpoint = self.endpoint()?;
         let secrets = crate::wiring::secret_store()?;
         let api_key = secrets
             .secret(&steno_core::SecretKey::llm_api_key())
             .await
             .map_err(Failure::runtime)?;
-        let client = steno_services::llm::make_client(endpoint.clone(), api_key.as_deref(), &crate::wiring::codex_store(), retry);
+        let client = steno_services::llm::make_client(
+            endpoint.clone(),
+            api_key.as_deref(),
+            &crate::wiring::codex_store(),
+            retry,
+        );
         Ok((client, endpoint))
     }
 }
@@ -924,7 +1046,8 @@ pub enum LlmCommand {
 }
 
 fn load_export(path: &Path) -> Result<MeetingExport, Failure> {
-    let bytes = std::fs::read(path).map_err(|e| Failure::usage(format!("{}: {e}", path.display())))?;
+    let bytes =
+        std::fs::read(path).map_err(|e| Failure::usage(format!("{}: {e}", path.display())))?;
     serde_json::from_slice(&bytes).map_err(|e| Failure::usage(format!("{}: {e}", path.display())))
 }
 
@@ -972,7 +1095,11 @@ impl Llm {
                 }
                 Ok(())
             }
-            LlmCommand::Cleanup { input, out, options } => {
+            LlmCommand::Cleanup {
+                input,
+                out,
+                options,
+            } => {
                 let mut export = load_export(&input)?;
                 let (client, endpoint) = options.client(RetryPolicy::default()).await?;
                 let model: Arc<dyn steno_core::LanguageModel> = client;
@@ -991,23 +1118,35 @@ impl Llm {
                 for (original, cleaned) in export.segments.iter_mut().zip(&output.segments) {
                     if original.text != cleaned.text {
                         changed += 1;
-                        println!("{}\n  raw:     {}\n  cleaned: {}", original.id, original.raw_text, cleaned.text);
+                        println!(
+                            "{}\n  raw:     {}\n  cleaned: {}",
+                            original.id, original.raw_text, cleaned.text
+                        );
                         original.text.clone_from(&cleaned.text);
                     }
                 }
                 println!("{changed} of {} segments changed", export.segments.len());
                 println!(
                     "usage: {} request(s), {} prompt + {} completion tokens",
-                    output.usage.requests, output.usage.prompt_tokens, output.usage.completion_tokens
+                    output.usage.requests,
+                    output.usage.prompt_tokens,
+                    output.usage.completion_tokens
                 );
                 if let Some(out) = out {
-                    let json = steno_adapters::ArtifactRenderer.render_json(&export).map_err(Failure::runtime)?;
+                    let json = steno_adapters::ArtifactRenderer
+                        .render_json(&export)
+                        .map_err(Failure::runtime)?;
                     std::fs::write(&out, json).map_err(Failure::runtime)?;
                     println!("wrote {}", out.display());
                 }
                 Ok(())
             }
-            LlmCommand::Summarize { input, template, json, options } => {
+            LlmCommand::Summarize {
+                input,
+                template,
+                json,
+                options,
+            } => {
                 let export = load_export(&input)?;
                 let template_id = template.unwrap_or_else(|| export.meeting.template_id.clone());
                 let template = SummaryTemplate::bundled_with_id(&template_id).ok_or_else(|| {
@@ -1018,7 +1157,11 @@ impl Llm {
                 })?;
                 let (client, endpoint) = options.client(RetryPolicy::default()).await?;
                 let model: Arc<dyn steno_core::LanguageModel> = client;
-                let summarizer = LlmMeetingSummarizer::new(model, endpoint, steno_adapters::runtime::local_time_zone());
+                let summarizer = LlmMeetingSummarizer::new(
+                    model,
+                    endpoint,
+                    steno_adapters::runtime::local_time_zone(),
+                );
                 let output = summarizer
                     .summarize(&steno_core::SummaryInput {
                         meeting: export.meeting.clone(),
@@ -1043,7 +1186,11 @@ impl Llm {
                     if let Some(object) = value.as_object_mut() {
                         object.retain(|_, v| !v.is_null());
                     }
-                    println!("{}", steno_bridge::json::to_canonical_string(&value).map_err(Failure::runtime)?);
+                    println!(
+                        "{}",
+                        steno_bridge::json::to_canonical_string(&value)
+                            .map_err(Failure::runtime)?
+                    );
                 } else {
                     println!("# {}\n", output.title);
                     for section in &output.summary.sections {
@@ -1074,8 +1221,11 @@ impl Llm {
                         }
                         println!();
                     }
-                    let named: Vec<&steno_core::SpeakerNameSuggestion> =
-                        output.speaker_names.iter().filter(|s| s.name.is_some()).collect();
+                    let named: Vec<&steno_core::SpeakerNameSuggestion> = output
+                        .speaker_names
+                        .iter()
+                        .filter(|s| s.name.is_some())
+                        .collect();
                     if !named.is_empty() {
                         println!("## Speaker names\n");
                         for suggestion in named {
@@ -1083,7 +1233,10 @@ impl Llm {
                                 .speakers
                                 .iter()
                                 .find(|s| s.id == suggestion.speaker_id)
-                                .map_or_else(|| suggestion.speaker_id.to_string(), |s| s.cluster_label.clone());
+                                .map_or_else(
+                                    || suggestion.speaker_id.to_string(),
+                                    |s| s.cluster_label.clone(),
+                                );
                             println!(
                                 "- {label} → {} ({:.1})",
                                 suggestion.name.as_deref().unwrap_or_default(),
@@ -1094,7 +1247,9 @@ impl Llm {
                     }
                     println!(
                         "usage: {} request(s), {} prompt + {} completion tokens",
-                        output.usage.requests, output.usage.prompt_tokens, output.usage.completion_tokens
+                        output.usage.requests,
+                        output.usage.prompt_tokens,
+                        output.usage.completion_tokens
                     );
                 }
                 Ok(())
@@ -1132,15 +1287,21 @@ pub enum HandoverCommand {
 
 impl Handover {
     async fn run(self) -> Outcome {
-        let HandoverCommand::Serve { pair, name, port, inbox } = self.command;
+        let HandoverCommand::Serve {
+            pair,
+            name,
+            port,
+            inbox,
+        } = self.command;
         let name = name.unwrap_or_else(steno_handover::HandoverConfiguration::default_service_name);
         let inbox = inbox.unwrap_or_else(|| {
             std::env::temp_dir().join(format!("steno-handover-{}", uuid::Uuid::new_v4()))
         });
         let store = Arc::new(steno_core::Store::in_memory().map_err(Failure::runtime)?);
         let intake = Arc::new(steno_core::testing::FakeHandoverIntake::default());
-        let identity = steno_handover::HandoverIdentity::mint(&format!("Steno on {name}"), Utc::now())
-            .map_err(Failure::runtime)?;
+        let identity =
+            steno_handover::HandoverIdentity::mint(&format!("Steno on {name}"), Utc::now())
+                .map_err(Failure::runtime)?;
         let mac_id = identity.mac_id();
         let fingerprint = identity.fingerprint();
         let configuration = steno_handover::HandoverConfiguration {
@@ -1151,18 +1312,31 @@ impl Handover {
             ..steno_handover::HandoverConfiguration::default()
         };
         let pairing_window = configuration.pairing_window;
-        let service = steno_handover::HandoverService::with_wall_clock(configuration, store, intake, Arc::new(identity));
+        let service = steno_handover::HandoverService::with_wall_clock(
+            configuration,
+            store,
+            intake,
+            Arc::new(identity),
+        );
         service.start().await.map_err(Failure::runtime)?;
         let steno_handover::ListenerState::Listening { port: bound } = service.state() else {
-            return Err(Failure::runtime("the handover listener is not listening after start"));
+            return Err(Failure::runtime(
+                "the handover listener is not listening after start",
+            ));
         };
         println!("Steno handover listening on port {bound}");
         println!("Mac id: {}", steno_core::json::uuid_string(mac_id));
-        println!("Fingerprint (hex): {}", steno_handover::identity::hex(&fingerprint));
+        println!(
+            "Fingerprint (hex): {}",
+            steno_handover::identity::hex(&fingerprint)
+        );
         println!("Advertising _steno._tcp as \"{name}\"");
         if pair {
             let payload = service.begin_pairing();
-            println!("\nPairing window open for {} minutes. Scan this on the phone:", pairing_window.as_secs() / 60);
+            println!(
+                "\nPairing window open for {} minutes. Scan this on the phone:",
+                pairing_window.as_secs() / 60
+            );
             println!("{}", payload.url_string());
             print_qr(&payload.url_string());
         } else {
@@ -1207,7 +1381,10 @@ mod tests {
             text: String::new(),
         }];
         let table = render_bakeoff(&rows);
-        assert!(table.contains("| tone-1s.wav | parakeet-v3 | 1.00 | 0.50 | 2.0 | 1 | 33.3 % | - | 0 |"));
+        assert!(
+            table
+                .contains("| tone-1s.wav | parakeet-v3 | 1.00 | 0.50 | 2.0 | 1 | 33.3 % | - | 0 |")
+        );
         assert!(table.contains("| parakeet-v3 | 1 | 1.00 | 33.3 % | - | 0 | 0 |"));
     }
 }

@@ -52,7 +52,11 @@ pub fn speech_engine(settings: &Settings, store: &ModelStore) -> Arc<dyn SpeechE
             return Arc::new(steno_speech_coreml::CoreMlParakeetEngine::new(
                 store.root().parent().map_or_else(
                     steno_speech_coreml::default_model_directory,
-                    |models| steno_speech_coreml::engine::model_directory(models.parent().unwrap_or(models)),
+                    |models| {
+                        steno_speech_coreml::engine::model_directory(
+                            models.parent().unwrap_or(models),
+                        )
+                    },
                 ),
             ));
         }
@@ -115,7 +119,9 @@ impl SpeechModels for RealSpeechModels {
     fn is_installed(&self, asset: ModelAsset) -> bool {
         match asset {
             ModelAsset::OfflineDiarizer => self.diarizer_paths().iter().all(|path| path.is_file()),
-            other => Self::speech_asset(other).is_some_and(|asset| self.speech.is_installed(&asset)),
+            other => {
+                Self::speech_asset(other).is_some_and(|asset| self.speech.is_installed(&asset))
+            }
         }
     }
 
@@ -124,12 +130,18 @@ impl SpeechModels for RealSpeechModels {
             return None;
         }
         Some(match asset {
-            ModelAsset::OfflineDiarizer => self.diarizer_paths().iter().map(|p| Self::size_of(p)).sum(),
+            ModelAsset::OfflineDiarizer => {
+                self.diarizer_paths().iter().map(|p| Self::size_of(p)).sum()
+            }
             other => Self::size_of(&self.speech.directory(&Self::speech_asset(other)?)),
         })
     }
 
-    fn download(&self, asset: ModelAsset, progress: &mut dyn FnMut(f64, &str)) -> Result<(), String> {
+    fn download(
+        &self,
+        asset: ModelAsset,
+        progress: &mut dyn FnMut(f64, &str),
+    ) -> Result<(), String> {
         match asset {
             ModelAsset::OfflineDiarizer => {
                 let store = diarize_store(&self.speech);
@@ -186,7 +198,9 @@ impl SpeechModels for RealSpeechModels {
             other => {
                 let asset = Self::speech_asset(other)
                     .ok_or_else(|| format!("{} has no Rust engine yet", other.as_str()))?;
-                self.speech.remove(&asset).map_err(|error| error.to_string())
+                self.speech
+                    .remove(&asset)
+                    .map_err(|error| error.to_string())
             }
         }
     }

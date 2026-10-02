@@ -63,7 +63,11 @@ impl Opener for NoOpener {
 impl AppOptions {
     /// The product under the default support directory on the given
     /// runtime, with the live capture backend.
-    pub fn product(runtime: tokio::runtime::Handle, opener: Arc<dyn Opener>, version: &str) -> std::io::Result<Self> {
+    pub fn product(
+        runtime: tokio::runtime::Handle,
+        opener: Arc<dyn Opener>,
+        version: &str,
+    ) -> std::io::Result<Self> {
         Ok(AppOptions {
             paths: StenoPaths::create_default()?,
             database_path: None,
@@ -113,10 +117,9 @@ pub fn pipeline_dependencies(
     runtime: &tokio::runtime::Handle,
 ) -> Result<PipelineDependencies, String> {
     let settings = store.settings().map_err(|error| error.to_string())?;
-    let api_key = tokio::task::block_in_place(|| {
-        runtime.block_on(secrets.secret(&SecretKey::llm_api_key()))
-    })
-    .map_err(|error| error.to_string())?;
+    let api_key =
+        tokio::task::block_in_place(|| runtime.block_on(secrets.secret(&SecretKey::llm_api_key())))
+            .map_err(|error| error.to_string())?;
     let speech_store = crate::speech::speech_store(&settings, paths);
     let zone = steno_adapters::runtime::local_time_zone();
     let passes = crate::llm::passes(&settings, api_key.as_deref(), codex, zone);
@@ -134,7 +137,6 @@ pub fn pipeline_dependencies(
         None => dependencies,
     })
 }
-
 
 /// The host's service table over the graph's parts.
 #[allow(clippy::too_many_arguments)]
@@ -207,11 +209,13 @@ pub fn build(options: AppOptions) -> Result<App, String> {
     let secrets: Arc<dyn SecretStore> = if options.keyring {
         Arc::new(KeyringSecretStore)
     } else {
-        Arc::new(FileSecretStore::in_support_directory(&paths.support_directory))
+        Arc::new(FileSecretStore::in_support_directory(
+            &paths.support_directory,
+        ))
     };
-    let codex = Arc::new(CodexCredentialStore::new(CodexCredentialStore::default_home(
-        &std::env::vars().collect(),
-    )));
+    let codex = Arc::new(CodexCredentialStore::new(
+        CodexCredentialStore::default_home(&std::env::vars().collect()),
+    ));
     let events = MeetingEventBus::new();
     let runtime = options.runtime;
     let zone = local_zone();
@@ -250,11 +254,18 @@ pub fn build(options: AppOptions) -> Result<App, String> {
     let handover = match tokio::task::block_in_place(|| {
         runtime.block_on(crate::handover::load_or_mint_identity(
             secrets.as_ref(),
-            &format!("Steno on {}", steno_handover::HandoverConfiguration::default_service_name()),
+            &format!(
+                "Steno on {}",
+                steno_handover::HandoverConfiguration::default_service_name()
+            ),
         ))
     }) {
         Ok(identity) => {
-            let intake = Arc::new(RecordingIntake::over(store.clone(), pipeline.current(), zone));
+            let intake = Arc::new(RecordingIntake::over(
+                store.clone(),
+                pipeline.current(),
+                zone,
+            ));
             let mac_id = identity.mac_id();
             let service = Arc::new(crate::handover::service(store.clone(), intake, identity));
             Some((service, mac_id))
@@ -272,7 +283,9 @@ pub fn build(options: AppOptions) -> Result<App, String> {
         &sweep,
         &speech_store,
         codex,
-        handover.as_ref().map(|(service, mac_id)| (service, *mac_id)),
+        handover
+            .as_ref()
+            .map(|(service, mac_id)| (service, *mac_id)),
         options.opener,
         paths.support_directory.join("preferences.json"),
         secrets.clone(),
@@ -334,7 +347,8 @@ impl App {
                                 run_sweep(&sweep);
                                 event_host.store_changed();
                             }
-                            MeetingEvent::SpeakersNeedReview { .. } | MeetingEvent::Deleted { .. } => {
+                            MeetingEvent::SpeakersNeedReview { .. }
+                            | MeetingEvent::Deleted { .. } => {
                                 event_host.store_changed();
                             }
                         }
@@ -358,10 +372,10 @@ impl App {
             }
         });
 
-        if let Err(error) = self.store.fail_interrupted_recordings(
-            "Steno quit before this recording ended.",
-            Utc::now(),
-        ) {
+        if let Err(error) = self
+            .store
+            .fail_interrupted_recordings("Steno quit before this recording ended.", Utc::now())
+        {
             tracing::warn!(%error, "interrupted recordings could not be marked");
         }
         match self.pipeline.current().resume_unfinished() {
