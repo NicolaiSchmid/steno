@@ -4,9 +4,9 @@
 
 use steno_core::{MeetingExport, Person};
 
-use super::ManagedBlock;
 use super::{
-    Frontmatter, FrontmatterValue, LinkStyle, PersonPage, RenderOptions, date_text, markdown_text,
+    Frontmatter, FrontmatterValue, LinkStyle, ManagedBlock, PersonPage, RenderOptions, date_text,
+    markdown_text,
 };
 use crate::naming::{MeetingFolder, Note, Slug};
 

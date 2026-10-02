@@ -77,11 +77,12 @@ impl ManagedBlock {
     #[must_use]
     pub fn merge(line: &str, meeting_id: Uuid, existing: &str) -> String {
         let Some((start, end)) = Self::body_range(existing) else {
+            // A blank line separates the block from the page's last line.
             let mut result = existing.to_owned();
-            if !result.is_empty() && !result.ends_with('\n') {
-                result.push('\n');
-            }
             if !result.is_empty() {
+                if !result.ends_with('\n') {
+                    result.push('\n');
+                }
                 result.push('\n');
             }
             result.push_str(&Self::block(&[line.to_owned()]));
@@ -154,28 +155,18 @@ impl ManagedBlock {
         lines
     }
 
-    /// `"2026-09-24"` from `- 2026-09-24 …`, or `""` when the line has none.
-    fn date_of(line: &str) -> String {
-        let candidate: String = line
-            .trim_start_matches(['-', ' ', '*'])
-            .chars()
-            .take(10)
-            .collect();
-        let bytes = candidate.as_bytes();
-        if bytes.len() != 10 {
-            return String::new();
-        }
-        let well_formed = bytes.iter().enumerate().all(|(index, byte)| {
-            if index == 4 || index == 7 {
-                *byte == b'-'
-            } else {
-                byte.is_ascii_digit()
-            }
-        });
-        if well_formed {
-            candidate
-        } else {
-            String::new()
-        }
+    /// `"2026-09-24"` from `- 2026-09-24 …`, or `None` when the line has
+    /// none: fewer than ten characters after the bullet, or any of them
+    /// other than a digit where the hyphens are not.
+    fn date_of(line: &str) -> Option<&str> {
+        let candidate = line.trim_start_matches(['-', ' ', '*']).get(..10)?;
+        let well_formed = candidate
+            .bytes()
+            .enumerate()
+            .all(|(index, byte)| match index {
+                4 | 7 => byte == b'-',
+                _ => byte.is_ascii_digit(),
+            });
+        well_formed.then_some(candidate)
     }
 }
