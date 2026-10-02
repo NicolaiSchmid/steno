@@ -1,0 +1,45 @@
+//! The phone handover server: the computer's half of the wire the iOS
+//! recorder speaks. Swift: `Sources/StenoHandover`; the plan is
+//! `.plans/2026-10-02-rust-core-and-tauri-shell.md` (WP7).
+//!
+//! The phone finds the computer over Bonjour (`_steno._tcp`), pins the
+//! SHA-256 of its self-signed leaf certificate from the pairing QR code,
+//! pairs once with a single-use secret, and then uploads each recording in
+//! chunks over TLS 1.3 with a bearer token. Audio arrives here and goes no
+//! further than the inbox and the [`HandoverIntake`](steno_core::HandoverIntake)
+//! that admits it into the pipeline; nothing in this crate opens an outbound
+//! connection.
+//!
+//! - [`HandoverService`]: what the host and the CLI hold. Pairing, the
+//!   device list, revocation, the listener and the receipt stream.
+//! - [`HandoverIdentity`]: the TLS identity, minted once and kept in the
+//!   [`SecretStore`](steno_core::SecretStore).
+//! - [`PairingPayload`]: what the QR code shows.
+//! - [`pinning`]: the trust rule the phone applies, in Rust, for a client
+//!   that talks to the listener (the tests, a future CLI probe).
+//! - [`wire`], [`route`], [`engine`]: the protocol core, independent of the
+//!   listener, driven directly by the tests. The host reads wire values only
+//!   through [`HandoverReceipt`](steno_core::HandoverReceipt) and
+//!   [`PairingPayload`].
+//!
+//! The contract with the phone is `mobile/modules/steno-link/src/wire.ts`;
+//! `tests/wire_contract.rs` reads it and holds every name here against it.
+
+pub mod base64url;
+pub mod configuration;
+pub mod engine;
+pub mod identity;
+mod log;
+pub mod pairing;
+pub mod pinning;
+pub mod route;
+pub mod server;
+pub mod service;
+pub mod upload;
+pub mod wire;
+
+pub use configuration::HandoverConfiguration;
+pub use identity::{HandoverIdentity, IdentityError};
+pub use pairing::{PairingPayload, PairingPayloadError};
+pub use server::ServerMetrics;
+pub use service::{Clock, HandoverService, ListenerState};

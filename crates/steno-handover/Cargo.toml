@@ -1,0 +1,47 @@
+[package]
+name = "steno-handover"
+description = "The phone handover server: TLS-pinned listener, pairing, chunked upload intake"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+steno-core = { path = "../steno-core" }
+
+base64.workspace = true
+bytes.workspace = true
+chrono.workspace = true
+http.workspace = true
+http-body-util.workspace = true
+hyper.workspace = true
+hyper-util.workspace = true
+mdns-sd.workspace = true
+percent-encoding.workspace = true
+rand.workspace = true
+rcgen.workspace = true
+rustls.workspace = true
+rustls-pki-types.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+time.workspace = true
+# Additive on the workspace line (`macros`, `rt`): the listener's sockets,
+# timers and channels.
+tokio = { workspace = true, features = ["io-util", "net", "sync", "time"] }
+tokio-rustls.workspace = true
+tracing.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+regex.workspace = true
+reqwest.workspace = true
+tempfile.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread"] }
+x509-parser.workspace = true
+
+[lints]
+workspace = true
