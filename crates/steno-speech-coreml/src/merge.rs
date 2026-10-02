@@ -104,25 +104,22 @@ pub fn merge_chunks(left: &[Token], right: &[Token], vocab: &Vocab) -> Vec<Token
         return [left, right].concat();
     }
 
+    let indexed = |(index, token): (usize, &Token)| Indexed {
+        index,
+        token: *token,
+        start: start(token),
+    };
     let overlap_left: Vec<Indexed> = left
         .iter()
         .enumerate()
         .filter(|(_, token)| start(token) + FRAME_SECONDS > right_start - OVERLAP_SECONDS)
-        .map(|(index, token)| Indexed {
-            index,
-            token: *token,
-            start: start(token),
-        })
+        .map(indexed)
         .collect();
     let overlap_right: Vec<Indexed> = right
         .iter()
         .enumerate()
         .filter(|(_, token)| start(token) < left_end + OVERLAP_SECONDS)
-        .map(|(index, token)| Indexed {
-            index,
-            token: *token,
-            start: start(token),
-        })
+        .map(indexed)
         .collect();
     if overlap_left.len() < 2 || overlap_right.len() < 2 {
         return merge_by_midpoint(left, right, left_end, right_start, vocab);
@@ -241,24 +238,22 @@ fn merge_using_matches(
 /// contains `anchor`, or `None` when the stream begins mid-word
 /// (`ChunkProcessor.wordInitialIndex`).
 fn word_initial_index(stream: &[Token], anchor: usize, vocab: &Vocab) -> Option<usize> {
-    (0..=anchor)
-        .rev()
-        .find(|&index| vocab.is_splice_safe(stream[index].id))
+    stream[..=anchor]
+        .iter()
+        .rposition(|token| vocab.is_splice_safe(token.id))
 }
 
 /// Remove the trailing seam word from `result`; `false` and untouched when
 /// `result` has no word-initial piece (`ChunkProcessor.popSeamWord`).
 fn pop_seam_word(result: &mut Vec<Token>, vocab: &Vocab) -> bool {
-    match (0..result.len())
-        .rev()
-        .find(|&cursor| vocab.is_splice_safe(result[cursor].id))
-    {
-        Some(cursor) => {
-            result.truncate(cursor);
-            true
-        }
-        None => false,
-    }
+    let Some(cursor) = result
+        .iter()
+        .rposition(|token| vocab.is_splice_safe(token.id))
+    else {
+        return false;
+    };
+    result.truncate(cursor);
+    true
 }
 
 /// Cut both streams at the time midpoint of the overlap, letting left
@@ -324,29 +319,30 @@ pub fn collapse_seam_word_duplicates(tokens: &[Token], vocab: &Vocab) -> Vec<Tok
     if vocab.is_empty() || tokens.len() < 2 {
         return tokens.to_vec();
     }
-    let mut words: Vec<Word> = Vec::new();
+    let mut groups: Vec<Vec<Token>> = Vec::new();
     for token in tokens {
-        if words.is_empty() || vocab.starts_word(token.id) {
-            words.push(Word {
-                tokens: vec![*token],
-                core: String::new(),
-                start_frame: token.frame,
-                ends_sentence: false,
-            });
-        } else {
-            words.last_mut().expect("non-empty").tokens.push(*token);
+        match groups.last_mut() {
+            Some(group) if !vocab.starts_word(token.id) => group.push(*token),
+            _ => groups.push(vec![*token]),
         }
     }
-    for word in &mut words {
-        let text: String = word
-            .tokens
-            .iter()
-            .map(|token| strip_word_boundary(vocab.piece(token.id)))
-            .collect();
-        text.trim_matches(|c: char| is_punctuation(c) || c.is_whitespace())
-            .clone_into(&mut word.core);
-        word.ends_sentence = text.chars().last().is_some_and(|c| ".?!:".contains(c));
-    }
+    let words: Vec<Word> = groups
+        .into_iter()
+        .map(|tokens| {
+            let text: String = tokens
+                .iter()
+                .map(|token| strip_word_boundary(vocab.piece(token.id)))
+                .collect();
+            Word {
+                core: text
+                    .trim_matches(|c: char| is_punctuation(c) || c.is_whitespace())
+                    .to_owned(),
+                start_frame: tokens[0].frame,
+                ends_sentence: text.chars().last().is_some_and(|c| ".?!:".contains(c)),
+                tokens,
+            }
+        })
+        .collect();
 
     let mut keep = vec![true; words.len()];
     let mut last_kept: Option<usize> = None;
@@ -426,12 +422,10 @@ pub fn splice_candidate(
         .collect();
     let within = |a: usize, b: usize| a.abs_diff(b) <= EDGE_TOLERANCE_FRAMES;
 
-    let unsafe_head = |candidate: &[Token]| {
-        candidate
-            .first()
-            .is_some_and(|first| !vocab.is_splice_safe(first.id))
-    };
-    while unsafe_head(&candidate) {
+    while candidate
+        .first()
+        .is_some_and(|first| !vocab.is_splice_safe(first.id))
+    {
         candidate.remove(0);
     }
     while candidate
