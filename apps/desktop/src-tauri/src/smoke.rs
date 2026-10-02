@@ -218,8 +218,8 @@ pub const PANEL_PROMPT_Y: f64 = 700.0;
 pub const PANEL_BUBBLE_Y: f64 = 800.0;
 
 /// Both panels exist and are visible, then hide on request and report
-/// hidden. The test hook the task asks for: the same `show`/`hide` the
-/// one rule drives, checked from outside.
+/// hidden: the same `show` and `hide` the one rule drives, checked from
+/// outside.
 fn check_panels(app: &AppHandle) -> Result<(), String> {
     for panel in Panel::ALL {
         let label = panel.label();
