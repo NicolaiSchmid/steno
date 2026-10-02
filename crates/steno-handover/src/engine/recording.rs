@@ -208,7 +208,7 @@ impl Engine {
         #[allow(clippy::cast_sign_loss)]
         let offset = (index * receipt.chunk_size) as u64;
         if let Err(error) = receiving_file::write(
-            request.body.to_vec(),
+            request.body.clone(),
             offset,
             self.inbox.partial(recording_id),
         )
@@ -286,8 +286,9 @@ impl Engine {
         }
         let count = MetadataValidation::chunk_count(receipt.byte_count, receipt.chunk_size);
         let every_chunk: Vec<i64> = (0..count).collect();
-        if receipt.received_chunks != every_chunk || !self.inbox.has_partial(recording_id) {
-            if !self.inbox.has_partial(recording_id) {
+        let has_partial = self.inbox.has_partial(recording_id);
+        if receipt.received_chunks != every_chunk || !has_partial {
+            if !has_partial {
                 let state = receipt.state.clone();
                 let _ = self.transition(receipt, state, Some(Vec::new())).await;
             }
@@ -357,7 +358,7 @@ impl Engine {
         receipt: &mut HandoverReceipt,
     ) -> HandoverResponse {
         let recording_id = receipt.recording_id;
-        let meeting_id = match self.intake().admit(file, metadata, device).await {
+        let meeting_id = match self.intake.admit(file, metadata, device).await {
             Ok(meeting_id) => meeting_id,
             Err(error) => {
                 self.refresh(receipt);

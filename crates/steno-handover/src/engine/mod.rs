@@ -122,10 +122,13 @@ impl HandoverResponse {
         Self::json(status, &wire::Problem::new(message))
     }
 
-    /// A 500 whose body names the step and nothing else; the error itself,
-    /// which may carry a path under the user's home, goes to the local log.
+    /// A 500 whose body names the step and nothing else. The error itself
+    /// (a failing write, hash, promote, intake or store call) carries the
+    /// inbox path, and with it the user's home directory, so it goes to the
+    /// local log through `tracing` for whoever subscribes (the shell, the
+    /// CLI) and never to the phone or the receipt. Swift: `HandoverLog.swift`.
     pub fn internal_error(what: &str, error: &dyn std::fmt::Display) -> Self {
-        crate::log::failure(what, error);
+        tracing::error!(target: "steno::handover", "{what} failed: {error}");
         Self::problem(
             StatusCode::INTERNAL_SERVER_ERROR,
             format!("{what} failed on the Mac"),
@@ -158,11 +161,11 @@ struct State {
 }
 
 pub struct Engine {
-    pub(crate) configuration: HandoverConfiguration,
-    pub(crate) identity: Arc<HandoverIdentity>,
+    configuration: HandoverConfiguration,
+    identity: Arc<HandoverIdentity>,
     store: Arc<Store>,
     intake: Arc<dyn HandoverIntake>,
-    pub(crate) now: Clock,
+    now: Clock,
     pub inbox: Inbox,
     receipts: watch::Sender<Vec<HandoverReceipt>>,
     state: Mutex<State>,
@@ -426,10 +429,7 @@ impl Engine {
     pub fn receipts_snapshot(&self) -> Vec<HandoverReceipt> {
         let state = self.state();
         let mut receipts: Vec<HandoverReceipt> = state.active_receipts.values().cloned().collect();
-        receipts.sort_by(|left, right| {
-            (left.created_at, left.recording_id.to_string())
-                .cmp(&(right.created_at, right.recording_id.to_string()))
-        });
+        receipts.sort_by_key(|receipt| (receipt.created_at, receipt.recording_id));
         receipts
     }
 
@@ -531,10 +531,6 @@ impl Engine {
             recording_id,
         })
     }
-
-    pub(crate) fn intake(&self) -> &dyn HandoverIntake {
-        self.intake.as_ref()
-    }
 }
 
 /// The `completing` mark, removed when the `complete` call returns.
@@ -587,35 +583,24 @@ impl RequestHandling for Engine {
     }
 
     async fn handle(&self, request: HandoverRequest) -> HandoverResponse {
-        match request.route {
-            Route::Hello => {
+        // Every bearer route passed the gate with a device principal.
+        match (request.route, request.device().cloned()) {
+            (Route::Hello, _) => {
                 HandoverResponse::json(StatusCode::OK, &wire::Hello::new(self.identity.mac_id()))
             }
-            Route::Pair => self.pair(&request).await,
-            Route::Unpair
-            | Route::Announce(_)
-            | Route::Status(_)
-            | Route::Chunk(..)
-            | Route::Complete(_) => {
-                // Every bearer route passed the gate with a device principal.
-                let Some(device) = request.device().cloned() else {
-                    return Self::unauthorized();
-                };
-                match request.route {
-                    Route::Unpair => self.unpair(&device).await,
-                    Route::Announce(recording_id) => {
-                        self.announce(recording_id, &device, &request.body).await
-                    }
-                    Route::Status(recording_id) => self.status(recording_id, &device).await,
-                    Route::Chunk(recording_id, index) => {
-                        self.receive_chunk(recording_id, index, &device, &request)
-                            .await
-                    }
-                    Route::Complete(recording_id) => self.complete(recording_id, &device).await,
-                    Route::Hello | Route::Pair => {
-                        HandoverResponse::problem(StatusCode::NOT_FOUND, "no such route")
-                    }
-                }
+            (Route::Pair, _) => self.pair(&request).await,
+            (_, None) => Self::unauthorized(),
+            (Route::Unpair, Some(device)) => self.unpair(&device).await,
+            (Route::Announce(recording_id), Some(device)) => {
+                self.announce(recording_id, &device, &request.body).await
+            }
+            (Route::Status(recording_id), Some(device)) => self.status(recording_id, &device).await,
+            (Route::Chunk(recording_id, index), Some(device)) => {
+                self.receive_chunk(recording_id, index, &device, &request)
+                    .await
+            }
+            (Route::Complete(recording_id), Some(device)) => {
+                self.complete(recording_id, &device).await
             }
         }
     }

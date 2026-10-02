@@ -29,7 +29,6 @@ pub mod base64url;
 pub mod configuration;
 pub mod engine;
 pub mod identity;
-mod log;
 pub mod pairing;
 pub mod pinning;
 pub mod route;

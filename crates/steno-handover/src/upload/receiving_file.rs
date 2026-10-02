@@ -27,11 +27,15 @@ pub fn create(path: &Path) -> std::io::Result<()> {
 }
 
 /// Writes `data` at `offset` and flushes it to disk.
-pub async fn write(data: Vec<u8>, offset: u64, path: PathBuf) -> std::io::Result<()> {
+pub async fn write(
+    data: impl AsRef<[u8]> + Send + 'static,
+    offset: u64,
+    path: PathBuf,
+) -> std::io::Result<()> {
     off_task(move || {
         let mut file = OpenOptions::new().write(true).open(&path)?;
         file.seek(SeekFrom::Start(offset))?;
-        file.write_all(&data)?;
+        file.write_all(data.as_ref())?;
         file.sync_all()
     })
     .await

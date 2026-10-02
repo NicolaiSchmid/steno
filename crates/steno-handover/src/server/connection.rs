@@ -90,7 +90,7 @@ pub async fn serve(
 
 async fn handle(shared: Arc<Shared>, request: Request<Incoming>) -> Response<Full<Bytes>> {
     shared.metrics.update(|metrics| metrics.request_heads += 1);
-    let (parts, body) = request.into_parts();
+    let (parts, mut body) = request.into_parts();
     let uri = parts
         .uri
         .path_and_query()
@@ -121,7 +121,6 @@ async fn handle(shared: Arc<Shared>, request: Request<Incoming>) -> Response<Ful
     };
 
     let mut collected = BytesMut::new();
-    let mut body = body;
     while let Some(frame) = body.frame().await {
         let Ok(frame) = frame else {
             // The body ended early: nothing to answer, drop the connection.
@@ -157,7 +156,6 @@ async fn handle(shared: Arc<Shared>, request: Request<Incoming>) -> Response<Ful
         body: collected.freeze(),
     };
     let response = shared.engine.handle(request).await;
-    shared.handling.store(false, Ordering::SeqCst);
     if !keep_alive {
         shared.closing.store(true, Ordering::SeqCst);
     }
@@ -179,7 +177,6 @@ fn reject(
     response: HandoverResponse,
     body: Incoming,
 ) -> Response<Full<Bytes>> {
-    shared.closing.store(true, Ordering::SeqCst);
     let drain_shared = shared.clone();
     tokio::spawn(async move {
         let mut body = body;
@@ -196,7 +193,7 @@ fn reject(
             }
         }
     });
-    respond(shared, response, true)
+    respond_and_close(shared, response)
 }
 
 /// Anything that still arrives while the response flushes is dropped; the

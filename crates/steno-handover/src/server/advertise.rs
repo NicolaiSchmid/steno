@@ -6,6 +6,7 @@
 use mdns_sd::{ServiceDaemon, ServiceInfo};
 use uuid::Uuid;
 
+use crate::identity::HandoverIdentity;
 use crate::wire;
 
 pub struct Advertiser {
@@ -27,10 +28,7 @@ impl Advertiser {
             ("v", wire::PROTOCOL_VERSION.to_string()),
             ("id", mac_id.hyphenated().to_string()),
         ];
-        let host = format!(
-            "{}.local.",
-            crate::identity::HandoverIdentity::san_label(service_name).trim_end_matches(".local")
-        );
+        let host = format!("{}.", HandoverIdentity::san_label(service_name));
         ServiceInfo::new(
             Self::TYPE_DOMAIN,
             service_name,
