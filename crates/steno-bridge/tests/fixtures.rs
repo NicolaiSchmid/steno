@@ -15,20 +15,16 @@ use similar::TextDiff;
 use steno_bridge::*;
 
 fn repository_root() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("..")
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
 }
 
 fn fixtures_dir() -> PathBuf {
-    repository_root()
-        .join("apps")
-        .join("macos")
-        .join("web")
-        .join("fixtures")
-        .join("bridge")
+    repository_root().join("apps/macos/web/fixtures/bridge")
 }
 
-fn fixture_path(name: &str) -> PathBuf {
-    fixtures_dir().join(format!("{name}.json"))
+/// Raw values in declaration order, for the `contract.ts` comparisons.
+fn raw<T: std::fmt::Display>(all: &[T]) -> Vec<String> {
+    all.iter().map(ToString::to_string).collect()
 }
 
 type Reencode = fn(&[u8]) -> Result<Vec<u8>, String>;
@@ -143,7 +139,7 @@ fn files_on_disk() -> BTreeSet<String> {
 fn every_fixture_round_trips_byte_for_byte() {
     let mut failures = Vec::new();
     for (name, reencode) in FIXTURES {
-        let path = fixture_path(name);
+        let path = fixtures_dir().join(format!("{name}.json"));
         let on_disk = fs::read(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
         assert!(
             !on_disk.windows(2).any(|w| w == b"\r\n"),
@@ -215,13 +211,7 @@ fn every_topic_has_a_snapshot_fixture() {
 /// The string literals of `export const <name> = [ ... ] as const;` in
 /// `contract.ts`, or of the first `z.enum([ ... ])` inside `export const <name> = ...`.
 fn contract_ts_strings(name: &str) -> Vec<String> {
-    let path = repository_root()
-        .join("apps")
-        .join("macos")
-        .join("web")
-        .join("src")
-        .join("bridge")
-        .join("contract.ts");
+    let path = repository_root().join("apps/macos/web/src/bridge/contract.ts");
     let source = fs::read_to_string(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
     let start = source
         .find(&format!("export const {name} "))
@@ -239,58 +229,40 @@ fn contract_ts_strings(name: &str) -> Vec<String> {
 
 #[test]
 fn contract_ts_topics_methods_and_error_codes_match() {
-    let topics: Vec<&str> = BridgeTopic::ALL.iter().map(|t| t.as_str()).collect();
-    assert_eq!(contract_ts_strings("bridgeTopics"), topics);
-    let methods: Vec<&str> = BridgeMethod::ALL.iter().map(|m| m.as_str()).collect();
-    assert_eq!(contract_ts_strings("bridgeMethods"), methods);
-    let codes: Vec<&str> = BridgeErrorCode::ALL.iter().map(|c| c.as_str()).collect();
-    assert_eq!(contract_ts_strings("bridgeError"), codes);
+    assert_eq!(contract_ts_strings("bridgeTopics"), raw(BridgeTopic::ALL));
+    assert_eq!(contract_ts_strings("bridgeMethods"), raw(BridgeMethod::ALL));
+    assert_eq!(
+        contract_ts_strings("bridgeError"),
+        raw(BridgeErrorCode::ALL)
+    );
 }
 
 #[test]
 fn contract_ts_shared_vocabulary_matches() {
-    fn raw<T: Copy + 'static>(all: &[T], as_str: fn(T) -> &'static str) -> Vec<&'static str> {
-        all.iter().map(|v| as_str(*v)).collect()
-    }
     assert_eq!(
         contract_ts_strings("permissionKind"),
-        raw(PermissionKind::ALL, PermissionKind::as_str)
+        raw(PermissionKind::ALL)
     );
     assert_eq!(
         contract_ts_strings("permissionState"),
-        raw(PermissionState::ALL, PermissionState::as_str)
+        raw(PermissionState::ALL)
     );
     assert_eq!(
         contract_ts_strings("settingsSection"),
-        raw(SettingsSection::ALL, SettingsSection::as_str)
+        raw(SettingsSection::ALL)
     );
-    assert_eq!(
-        contract_ts_strings("bridgeWindow"),
-        raw(BridgeWindow::ALL, BridgeWindow::as_str)
-    );
+    assert_eq!(contract_ts_strings("bridgeWindow"), raw(BridgeWindow::ALL));
     assert_eq!(
         contract_ts_strings("meetingSource"),
-        raw(MeetingSource::ALL, MeetingSource::as_str)
+        raw(MeetingSource::ALL)
     );
-    assert_eq!(
-        contract_ts_strings("meetingState"),
-        raw(MeetingState::ALL, MeetingState::as_str)
-    );
-    assert_eq!(
-        contract_ts_strings("captureMode"),
-        raw(CaptureMode::ALL, CaptureMode::as_str)
-    );
-    assert_eq!(
-        contract_ts_strings("listFilter"),
-        raw(ListFilter::ALL, ListFilter::as_str)
-    );
-    assert_eq!(
-        contract_ts_strings("detailTab"),
-        raw(DetailTab::ALL, DetailTab::as_str)
-    );
+    assert_eq!(contract_ts_strings("meetingState"), raw(MeetingState::ALL));
+    assert_eq!(contract_ts_strings("captureMode"), raw(CaptureMode::ALL));
+    assert_eq!(contract_ts_strings("listFilter"), raw(ListFilter::ALL));
+    assert_eq!(contract_ts_strings("detailTab"), raw(DetailTab::ALL));
     assert_eq!(
         contract_ts_strings("retentionMode"),
-        raw(RetentionMode::ALL, RetentionMode::as_str)
+        raw(RetentionMode::ALL)
     );
 }
 

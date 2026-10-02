@@ -17,27 +17,17 @@ use serde_json::Value;
 /// `BridgeJSON.encode`: pretty printed, sorted keys, no trailing newline. The
 /// fixture files are this plus one `\n` (`BridgeFixture.fileData()`).
 pub fn to_canonical_string<T: Serialize + ?Sized>(value: &T) -> Result<String, serde_json::Error> {
-    Ok(canonical(&serde_json::to_value(value)?))
+    let mut out = String::new();
+    write_value(&mut out, &serde_json::to_value(value)?, Some(0));
+    Ok(out)
 }
 
 /// `BridgeDispatcher.encoder()`: the same bytes without whitespace, for
 /// replies and events that no person reads.
 pub fn to_compact_string<T: Serialize + ?Sized>(value: &T) -> Result<String, serde_json::Error> {
-    Ok(compact(&serde_json::to_value(value)?))
-}
-
-/// The pretty form of an already converted value.
-pub fn canonical(value: &Value) -> String {
     let mut out = String::new();
-    write_value(&mut out, value, Some(0));
-    out
-}
-
-/// The compact form of an already converted value.
-pub fn compact(value: &Value) -> String {
-    let mut out = String::new();
-    write_value(&mut out, value, None);
-    out
+    write_value(&mut out, &serde_json::to_value(value)?, None);
+    Ok(out)
 }
 
 const INDENT: &str = "  ";
@@ -185,31 +175,26 @@ pub mod date {
             .ok_or_else(|| serde::de::Error::custom(format!("Not an ISO 8601 date: {string}")))
     }
 
+    /// The same format on an `Option`; `None` is `null`, or an omitted key
+    /// with `skip_serializing_if`.
     pub mod option {
         use chrono::{DateTime, Utc};
-        use serde::{Deserialize, Deserializer, Serializer};
+        use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+        #[derive(Serialize, Deserialize)]
+        struct Wire(#[serde(with = "super")] DateTime<Utc>);
 
         pub fn serialize<S: Serializer>(
             date: &Option<DateTime<Utc>>,
             serializer: S,
         ) -> Result<S::Ok, S::Error> {
-            match date {
-                Some(date) => super::serialize(date, serializer),
-                None => serializer.serialize_none(),
-            }
+            date.map(Wire).serialize(serializer)
         }
 
         pub fn deserialize<'de, D: Deserializer<'de>>(
             deserializer: D,
         ) -> Result<Option<DateTime<Utc>>, D::Error> {
-            let string = Option::<String>::deserialize(deserializer)?;
-            string
-                .map(|string| {
-                    super::parse(&string).ok_or_else(|| {
-                        serde::de::Error::custom(format!("Not an ISO 8601 date: {string}"))
-                    })
-                })
-                .transpose()
+            Ok(Option::<Wire>::deserialize(deserializer)?.map(|wire| wire.0))
         }
     }
 }
@@ -236,27 +221,26 @@ pub mod uuid {
         Uuid::parse_str(&string).map_err(serde::de::Error::custom)
     }
 
+    /// The same format on an `Option`; `None` is `null`, or an omitted key
+    /// with `skip_serializing_if`.
     pub mod option {
-        use serde::{Deserialize, Deserializer, Serializer};
+        use serde::{Deserialize, Deserializer, Serialize, Serializer};
         use uuid::Uuid;
+
+        #[derive(Serialize, Deserialize)]
+        struct Wire(#[serde(with = "super")] Uuid);
 
         pub fn serialize<S: Serializer>(
             id: &Option<Uuid>,
             serializer: S,
         ) -> Result<S::Ok, S::Error> {
-            match id {
-                Some(id) => super::serialize(id, serializer),
-                None => serializer.serialize_none(),
-            }
+            id.map(Wire).serialize(serializer)
         }
 
         pub fn deserialize<'de, D: Deserializer<'de>>(
             deserializer: D,
         ) -> Result<Option<Uuid>, D::Error> {
-            let string = Option::<String>::deserialize(deserializer)?;
-            string
-                .map(|string| Uuid::parse_str(&string).map_err(serde::de::Error::custom))
-                .transpose()
+            Ok(Option::<Wire>::deserialize(deserializer)?.map(|wire| wire.0))
         }
     }
 }
@@ -272,7 +256,7 @@ mod tests {
     fn pretty_matches_foundation() {
         let value = json!({"b": [], "a": {"y": 1.0, "x": "s/t"}, "c": {}});
         assert_eq!(
-            canonical(&value),
+            to_canonical_string(&value).unwrap(),
             "{\n  \"a\" : {\n    \"x\" : \"s/t\",\n    \"y\" : 1\n  },\n  \"b\" : [\n\n  ],\n  \"c\" : {\n\n  }\n}"
         );
     }
@@ -280,14 +264,17 @@ mod tests {
     #[test]
     fn compact_has_no_whitespace() {
         let value = json!({"b": [1, 2.5], "a": null, "t": true});
-        assert_eq!(compact(&value), r#"{"a":null,"b":[1,2.5],"t":true}"#);
+        assert_eq!(
+            to_compact_string(&value).unwrap(),
+            r#"{"a":null,"b":[1,2.5],"t":true}"#
+        );
     }
 
     #[test]
     fn numbers_print_like_foundation() {
         let value = json!([1200.0, 0.62, 42, -3, 1e21, 0.1]);
         assert_eq!(
-            compact(&value),
+            to_compact_string(&value).unwrap(),
             "[1200,0.62,42,-3,1000000000000000000000,0.1]"
         );
     }
@@ -296,7 +283,7 @@ mod tests {
     fn strings_escape_only_what_foundation_escapes() {
         let value = json!("a\"b\\c\nd\te\u{1}f/g é … \u{2028}");
         assert_eq!(
-            compact(&value),
+            to_compact_string(&value).unwrap(),
             "\"a\\\"b\\\\c\\nd\\te\\u0001f/g é … \u{2028}\""
         );
     }

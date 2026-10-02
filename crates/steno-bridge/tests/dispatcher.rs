@@ -274,8 +274,7 @@ fn an_event_sink_publishes_snapshots_on_their_topic() {
     };
     sink.publish(&snapshot).unwrap();
     sink.publish(&None::<MeetingDetailSnapshot>).unwrap();
-    sink.publish_value(BridgeTopic::App, &json!({"version": "1"}))
-        .unwrap();
+    sink.emit(BridgeEvent::new(BridgeTopic::App, json!({"version": "1"})));
     let events = sink.events.lock().unwrap();
     assert_eq!(events[0].topic, BridgeTopic::Recording);
     assert_eq!(

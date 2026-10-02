@@ -1,8 +1,5 @@
 //! The snapshots the host publishes per topic, after
-//! `Sources/StenoBridge/Snapshots.swift`. Swift `Int` and `Int64` are `i64`,
-//! `Double` is `f64`, `Date` is `DateTime<Utc>` on the fixtures' format, `UUID`
-//! is `uuid::Uuid` upper-cased on the wire. Optional fields are omitted when
-//! absent, as Swift encodes nil.
+//! `Sources/StenoBridge/Snapshots.swift`; the type mapping is in the crate doc.
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};

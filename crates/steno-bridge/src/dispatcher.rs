@@ -22,9 +22,7 @@ use crate::commands::{
     SpeakerOptionsParams, SpeakerOptionsReply, StartRecordingParams, SummariesUpdateParams,
     WindowParams,
 };
-use crate::envelope::{
-    BridgeError, BridgeEvent, BridgeMethod, BridgeReply, BridgeRequest, BridgeTopic,
-};
+use crate::envelope::{BridgeError, BridgeEvent, BridgeMethod, BridgeReply, BridgeRequest};
 use crate::json;
 use crate::snapshots::Snapshot;
 
@@ -33,21 +31,12 @@ pub trait EventSink: Send + Sync {
     fn emit(&self, event: BridgeEvent);
 }
 
-/// The typed publish path over any [`EventSink`].
+/// The typed publish path over any [`EventSink`]; an untyped payload goes
+/// through [`BridgeEvent::new`] and `emit`.
 pub trait EventSinkExt: EventSink {
     /// Publishes a snapshot on its own topic.
     fn publish<S: Snapshot + ?Sized>(&self, snapshot: &S) -> Result<(), serde_json::Error> {
         self.emit(BridgeEvent::snapshot(S::TOPIC, snapshot)?);
-        Ok(())
-    }
-
-    /// Publishes any payload on a topic; for `null` and for tests.
-    fn publish_value<T: Serialize + ?Sized>(
-        &self,
-        topic: BridgeTopic,
-        payload: &T,
-    ) -> Result<(), serde_json::Error> {
-        self.emit(BridgeEvent::snapshot(topic, payload)?);
         Ok(())
     }
 }
@@ -329,7 +318,7 @@ pub enum Decoding {
 
 /// Reads the envelope, routes by method to the host's typed handler, and
 /// wraps the outcome. Swift: `BridgeDispatcher`.
-pub struct Dispatcher<H: BridgeHost + ?Sized> {
+pub struct Dispatcher<H: BridgeHost> {
     host: H,
 }
 
@@ -338,12 +327,6 @@ impl<H: BridgeHost> Dispatcher<H> {
         Self { host }
     }
 
-    pub fn into_host(self) -> H {
-        self.host
-    }
-}
-
-impl<H: BridgeHost + ?Sized> Dispatcher<H> {
     pub fn host(&self) -> &H {
         &self.host
     }
@@ -352,31 +335,18 @@ impl<H: BridgeHost + ?Sized> Dispatcher<H> {
     /// `unknownMethod`; anything else that fails to decode is
     /// `invalidParams`, with the body's `id` when it was readable.
     pub fn decode(body: &str) -> Decoding {
-        let value: Value = match serde_json::from_str(body) {
-            Ok(value) => value,
-            Err(_) => {
-                return Decoding::Rejected(BridgeReply::error(
-                    "",
-                    BridgeError::invalid_params("The message is not JSON."),
-                ));
-            }
+        let invalid = |id: &str, message: &str| {
+            Decoding::Rejected(BridgeReply::error(id, BridgeError::invalid_params(message)))
         };
-        let Some(object) = value.as_object() else {
-            return Decoding::Rejected(BridgeReply::error(
-                "",
-                BridgeError::invalid_params("The message is not an object."),
-            ));
+        let Ok(value) = serde_json::from_str::<Value>(body) else {
+            return invalid("", "The message is not JSON.");
         };
-        let id = object
-            .get("id")
-            .and_then(Value::as_str)
-            .unwrap_or("")
-            .to_owned();
-        let Ok(raw) = serde_json::from_value::<RawRequest>(value.clone()) else {
-            return Decoding::Rejected(BridgeReply::error(
-                id,
-                BridgeError::invalid_params("The message is not a bridge request."),
-            ));
+        if !value.is_object() {
+            return invalid("", "The message is not an object.");
+        }
+        let id = value["id"].as_str().unwrap_or("").to_owned();
+        let Ok(raw) = serde_json::from_value::<RawRequest>(value) else {
+            return invalid(&id, "The message is not a bridge request.");
         };
         match raw.method.parse::<BridgeMethod>() {
             Ok(method) => Decoding::Request(BridgeRequest::new(raw.id, method, raw.params)),
@@ -390,33 +360,30 @@ impl<H: BridgeHost + ?Sized> Dispatcher<H> {
     /// One call end to end: decode, route, wrap. Never fails, so the page's
     /// promise resolves with an envelope in every case.
     pub fn dispatch(&self, body: &str) -> BridgeReply {
-        match Self::decode(body) {
-            Decoding::Request(request) => self.dispatch_request(&request),
-            Decoding::Rejected(reply) => reply,
+        let request = match Self::decode(body) {
+            Decoding::Request(request) => request,
+            Decoding::Rejected(reply) => return reply,
+        };
+        match self.route(&request) {
+            Ok(result) => BridgeReply {
+                id: request.id,
+                result,
+                error: None,
+            },
+            Err(error) => BridgeReply::error(request.id, error),
         }
     }
 
     /// `dispatch` with the reply encoded in the dispatcher's compact style.
     pub fn dispatch_json(&self, body: &str) -> String {
-        let reply = self.dispatch(body);
-        json::to_compact_string(&reply).unwrap_or_else(|_| {
-            json::to_compact_string(&BridgeReply::error(
-                reply.id,
-                BridgeError::failed("The reply could not be encoded."),
-            ))
-            .expect("an error envelope of strings encodes")
-        })
-    }
-
-    /// Routes a decoded request and wraps the outcome.
-    pub fn dispatch_request(&self, request: &BridgeRequest) -> BridgeReply {
-        BridgeReply::from_outcome(request.id.clone(), self.handle(request))
+        json::to_compact_string(&self.dispatch(body))
+            .expect("an envelope of strings and JSON values encodes")
     }
 
     /// Routes by method: reads the params as the contract type, calls the
     /// host, converts a typed reply to its JSON value.
     #[allow(clippy::too_many_lines)]
-    pub fn handle(&self, request: &BridgeRequest) -> Outcome<Option<Value>> {
+    fn route(&self, request: &BridgeRequest) -> Outcome<Option<Value>> {
         use BridgeMethod as M;
         let host = &self.host;
         match request.method {
@@ -539,7 +506,7 @@ impl<H: BridgeHost + ?Sized> Dispatcher<H> {
 
 /// The method's params decoded into its contract type; a missing, `null` or
 /// unreadable value is `invalidParams`. Swift: `BridgeRequest.params(_:)`.
-pub fn params<T: DeserializeOwned>(request: &BridgeRequest) -> Outcome<T> {
+fn params<T: DeserializeOwned>(request: &BridgeRequest) -> Outcome<T> {
     match &request.params {
         None | Some(Value::Null) => Err(BridgeError::invalid_params(format!(
             "{} needs params.",

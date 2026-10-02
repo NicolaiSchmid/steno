@@ -248,21 +248,6 @@ impl BridgeReply {
             error: Some(error),
         }
     }
-
-    /// The outcome of a handler as the dispatcher wraps it.
-    pub fn from_outcome(
-        id: impl Into<String>,
-        outcome: Result<Option<Value>, BridgeError>,
-    ) -> Self {
-        match outcome {
-            Ok(result) => Self {
-                id: id.into(),
-                result,
-                error: None,
-            },
-            Err(error) => Self::error(id, error),
-        }
-    }
 }
 
 string_enum! {

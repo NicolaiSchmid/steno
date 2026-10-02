@@ -1,7 +1,6 @@
 //! Params of the page's method calls and the reply values, after
 //! `Sources/StenoBridge/Commands.swift`: one type per `BridgeMethod` that takes
-//! arguments; methods without a params type take `null`. Optional fields are
-//! omitted when absent, as Swift encodes nil.
+//! arguments; methods without a params type take `null`.
 
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
