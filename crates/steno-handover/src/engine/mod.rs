@@ -303,28 +303,17 @@ impl Engine {
 
     /// Forgets the device and drops whatever it was uploading.
     pub async fn revoke(&self, device_id: Uuid) -> store::Result<()> {
-        let dropped: Vec<(Uuid, bool)> = {
-            let mut state = self.state();
-            let owned: Vec<Uuid> = state
-                .active_receipts
-                .iter()
-                .filter(|(_, receipt)| receipt.device_id == device_id)
-                .map(|(id, _)| *id)
-                .collect();
-            owned
-                .into_iter()
-                .map(|id| {
-                    let receipt = state.active_receipts.remove(&id);
-                    let complete = receipt.is_some_and(|receipt| {
-                        receipt.state.kind() == steno_core::HandoverStateKind::Complete
-                    });
-                    (id, complete)
-                })
-                .collect()
-        };
-        for (recording_id, complete) in dropped {
-            if !complete {
-                self.inbox.discard(recording_id);
+        let mut dropped = Vec::new();
+        self.state().active_receipts.retain(|_, receipt| {
+            let owned = receipt.device_id == device_id;
+            if owned {
+                dropped.push(receipt.clone());
+            }
+            !owned
+        });
+        for receipt in dropped {
+            if receipt.state.kind() != steno_core::HandoverStateKind::Complete {
+                self.inbox.discard(receipt.recording_id);
             }
         }
         self.with_store(move |store| store.delete_paired_device(device_id))
@@ -510,6 +499,14 @@ impl Engine {
     /// The receipt as memory holds it now, for the re-read after a yield.
     pub(crate) fn active_receipt(&self, recording_id: Uuid) -> Option<HandoverReceipt> {
         self.state().active_receipts.get(&recording_id).cloned()
+    }
+
+    /// Replaces `receipt` with what memory holds after a yield, when another
+    /// request advanced it meanwhile.
+    pub(crate) fn refresh(&self, receipt: &mut HandoverReceipt) {
+        if let Some(current) = self.active_receipt(receipt.recording_id) {
+            *receipt = current;
+        }
     }
 
     /// The receipt when it belongs to the requesting device.

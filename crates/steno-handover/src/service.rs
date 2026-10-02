@@ -33,7 +33,6 @@ pub enum ListenerState {
 pub struct HandoverService {
     pub configuration: HandoverConfiguration,
     pub identity: Arc<HandoverIdentity>,
-    store: Arc<Store>,
     pub engine: Arc<Engine>,
     pub metrics: Arc<ServerMetrics>,
     server: Mutex<Option<HandoverServer>>,
@@ -64,7 +63,7 @@ impl HandoverService {
         let engine = Arc::new(Engine::new(
             configuration.clone(),
             identity.clone(),
-            store.clone(),
+            store,
             intake,
             receipt_updates.clone(),
             now,
@@ -72,7 +71,6 @@ impl HandoverService {
         HandoverService {
             configuration,
             identity,
-            store,
             engine,
             metrics: Arc::new(ServerMetrics::default()),
             server: Mutex::new(None),
@@ -105,10 +103,7 @@ impl HandoverService {
     }
 
     pub async fn paired_devices(&self) -> store::Result<Vec<PairedDevice>> {
-        let store = self.store.clone();
-        tokio::task::spawn_blocking(move || store.paired_devices())
-            .await
-            .map_err(|error| store::StoreError::Io(std::io::Error::other(error.to_string())))?
+        self.engine.with_store(Store::paired_devices).await
     }
 
     /// Forgets the phone: its next request is answered 401, which the phone

@@ -25,6 +25,10 @@ enum Verification {
     Answered(HandoverResponse),
 }
 
+fn no_such_recording() -> HandoverResponse {
+    HandoverResponse::problem(StatusCode::NOT_FOUND, "no such recording")
+}
+
 impl Engine {
     /// `PUT /v1/recordings/{id}` with `RecordingMetadata`: 201 for a new
     /// recording, 200 for a known one, both with `RecordingStatus`.
@@ -60,41 +64,7 @@ impl Engine {
                     "another device owns this recording",
                 );
             }
-            if existing.state.kind() == HandoverStateKind::Complete {
-                return HandoverResponse::json(StatusCode::OK, &Self::status_of(&existing));
-            }
-            if existing.byte_count != metadata.byte_count
-                || existing.sha256 != metadata.sha256
-                || existing.chunk_size != metadata.chunk_size
-            {
-                return HandoverResponse::problem(
-                    StatusCode::CONFLICT,
-                    "metadata differs from the first announcement",
-                );
-            }
-            let mut receipt = existing;
-            let mut received_chunks = None;
-            if !self.inbox.has_verified(recording_id, metadata.format)
-                && (!self.inbox.has_partial(recording_id)
-                    || self.inbox.load_metadata(recording_id).is_none())
-            {
-                // The partial is gone (a sweep, a crash before the first
-                // chunk): start over with the same receipt. A verified file
-                // waiting for a second intake attempt keeps its chunk set
-                // instead, so the phone's retry (announce, then complete)
-                // sends no chunk twice.
-                if let Err(error) = self.inbox.begin(&metadata) {
-                    return HandoverResponse::internal_error("opening the partial file", &error);
-                }
-                received_chunks = Some(Vec::new());
-            }
-            if let Err(error) = self
-                .transition(&mut receipt, HandoverState::Receiving, received_chunks)
-                .await
-            {
-                return HandoverResponse::internal_error("saving the receipt", &error);
-            }
-            return HandoverResponse::json(StatusCode::OK, &Self::status_of(&receipt));
+            return self.reannounce(existing, &metadata).await;
         }
 
         if let Err(error) = self.inbox.begin(&metadata) {
@@ -119,6 +89,49 @@ impl Engine {
         HandoverResponse::json(StatusCode::CREATED, &Self::status_of(&receipt))
     }
 
+    /// A known recording announced again: 200 with the status, 409 when the
+    /// metadata changed. The partial is reopened when it is gone (a sweep, a
+    /// crash before the first chunk), with the same receipt and an empty
+    /// chunk set; a verified file waiting for a second intake attempt keeps
+    /// its chunk set, so the phone's retry (announce, then complete) sends no
+    /// chunk twice.
+    async fn reannounce(
+        &self,
+        mut receipt: HandoverReceipt,
+        metadata: &RecordingMetadata,
+    ) -> HandoverResponse {
+        let recording_id = receipt.recording_id;
+        if receipt.state.kind() == HandoverStateKind::Complete {
+            return HandoverResponse::json(StatusCode::OK, &Self::status_of(&receipt));
+        }
+        if receipt.byte_count != metadata.byte_count
+            || receipt.sha256 != metadata.sha256
+            || receipt.chunk_size != metadata.chunk_size
+        {
+            return HandoverResponse::problem(
+                StatusCode::CONFLICT,
+                "metadata differs from the first announcement",
+            );
+        }
+        let mut received_chunks = None;
+        if !self.inbox.has_verified(recording_id, metadata.format)
+            && (!self.inbox.has_partial(recording_id)
+                || self.inbox.load_metadata(recording_id).is_none())
+        {
+            if let Err(error) = self.inbox.begin(metadata) {
+                return HandoverResponse::internal_error("opening the partial file", &error);
+            }
+            received_chunks = Some(Vec::new());
+        }
+        if let Err(error) = self
+            .transition(&mut receipt, HandoverState::Receiving, received_chunks)
+            .await
+        {
+            return HandoverResponse::internal_error("saving the receipt", &error);
+        }
+        HandoverResponse::json(StatusCode::OK, &Self::status_of(&receipt))
+    }
+
     /// `GET /v1/recordings/{id}`: the resume point, 404 for an unknown id.
     pub(super) async fn status(
         &self,
@@ -127,7 +140,7 @@ impl Engine {
     ) -> HandoverResponse {
         match self.owned_receipt(recording_id, device).await {
             Some(receipt) => HandoverResponse::json(StatusCode::OK, &Self::status_of(&receipt)),
-            None => HandoverResponse::problem(StatusCode::NOT_FOUND, "no such recording"),
+            None => no_such_recording(),
         }
     }
 
@@ -141,7 +154,7 @@ impl Engine {
         request: &HandoverRequest,
     ) -> HandoverResponse {
         let Some(receipt) = self.owned_receipt(recording_id, device).await else {
-            return HandoverResponse::problem(StatusCode::NOT_FOUND, "no such recording");
+            return no_such_recording();
         };
         if receipt.state.kind() == HandoverStateKind::Complete {
             return HandoverResponse::empty(StatusCode::NO_CONTENT);
@@ -210,7 +223,7 @@ impl Engine {
             .active_receipt(recording_id)
             .filter(|current| current.device_id == device.id)
         else {
-            return HandoverResponse::problem(StatusCode::NOT_FOUND, "no such recording");
+            return no_such_recording();
         };
         let mut chunks = receipt.received_chunks.clone();
         chunks.push(index);
@@ -236,7 +249,7 @@ impl Engine {
         device: &PairedDevice,
     ) -> HandoverResponse {
         let Some(mut receipt) = self.owned_receipt(recording_id, device).await else {
-            return HandoverResponse::problem(StatusCode::NOT_FOUND, "no such recording");
+            return no_such_recording();
         };
         if let Some(meeting_id) = receipt.state.meeting_id() {
             return HandoverResponse::json(StatusCode::OK, &wire::CompleteResponse { meeting_id });
@@ -290,17 +303,13 @@ impl Engine {
         let partial = self.inbox.partial(recording_id);
         let verified = match receiving_file::size(&partial) {
             Ok(size) if i64::try_from(size) == Ok(receipt.byte_count) => {
-                match receiving_file::hash_matches(partial, receipt.sha256.clone()).await {
-                    Ok(matches) => matches,
-                    Err(error) => {
-                        return Verification::Answered(HandoverResponse::internal_error(
-                            "verifying the file",
-                            &error,
-                        ));
-                    }
-                }
+                receiving_file::hash_matches(partial, receipt.sha256.clone()).await
             }
-            Ok(_) => false,
+            Ok(_) => Ok(false),
+            Err(error) => Err(error),
+        };
+        let verified = match verified {
+            Ok(verified) => verified,
             Err(error) => {
                 return Verification::Answered(HandoverResponse::internal_error(
                     "verifying the file",
@@ -308,9 +317,7 @@ impl Engine {
                 ));
             }
         };
-        if let Some(current) = self.active_receipt(recording_id) {
-            *receipt = current;
-        }
+        self.refresh(receipt);
         if !verified {
             self.inbox.discard(recording_id);
             let _ = self
@@ -353,9 +360,7 @@ impl Engine {
         let meeting_id = match self.intake().admit(file, metadata, device).await {
             Ok(meeting_id) => meeting_id,
             Err(error) => {
-                if let Some(current) = self.active_receipt(recording_id) {
-                    *receipt = current;
-                }
+                self.refresh(receipt);
                 let _ = self
                     .transition(
                         receipt,
@@ -366,9 +371,7 @@ impl Engine {
                 return HandoverResponse::internal_error("the intake", &error);
             }
         };
-        if let Some(current) = self.active_receipt(recording_id) {
-            *receipt = current;
-        }
+        self.refresh(receipt);
         let _ = self
             .transition(receipt, HandoverState::Complete { meeting_id }, None)
             .await;
