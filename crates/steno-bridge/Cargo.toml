@@ -12,6 +12,10 @@ publish.workspace = true
 chrono.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+similar = "2"
 
 [lints]
 workspace = true
