@@ -196,12 +196,12 @@ What the bridge crate (WP1) asks of the Swift side before WP6 fills the list:
 
 ## Progress
 
-One row per package; a package is a PR off `main` once the WP1 to WP3 chain
-has merged.
+One row per package. WP1 to WP3 were a chain; every package after them is one
+PR off `main`.
 
 | Package | Branch | PR | State |
 |---------|--------|----|-------|
 | WP1 workspace and bridge | `feat/rust-bridge` | #153 | merged |
 | WP2 store | `feat/rust-store` | #155 | merged |
 | WP3 Tauri shell on fixtures | `feat/rust-desktop` | #156 | merged |
-| Core protocols (`steno-core::protocols`, boundary value types, `testing` fakes) | `feat/rust-protocols` | #162 | open |
+| Core protocols and fakes | `feat/rust-protocols` | #162 | open |
