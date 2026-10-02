@@ -78,8 +78,11 @@ pub fn align<T: PartialEq>(reference: &[T], hypothesis: &[T]) -> Vec<Edit> {
 /// Edits and reference length of `hypothesis` against `reference`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct WordErrors {
+    /// Levenshtein distance over words.
     pub edits: usize,
+    /// Words in the reference (Swift) text.
     pub reference_words: usize,
+    /// Words in the hypothesis (Rust) text.
     pub hypothesis_words: usize,
 }
 
@@ -124,7 +127,9 @@ pub fn word_errors(reference: &str, hypothesis: &str) -> WordErrors {
 /// A word with its start time, the unit the timing comparison aligns.
 #[derive(Debug, Clone, PartialEq)]
 pub struct TimedText {
+    /// The normalised word.
     pub word: String,
+    /// Start in seconds.
     pub start: f64,
 }
 
@@ -216,6 +221,11 @@ mod tests {
         assert_eq!(word_errors("", "").rate(), 0.0);
         assert_eq!(word_errors("", "x").rate(), 1.0);
         assert_eq!(word_errors("a b", "").edits, 2);
+        assert_eq!(word_errors("a b", "a x b").edits, 1);
+        assert_eq!(
+            align(&["a", "b"], &["a", "x", "b"]),
+            vec![Edit::Match(0, 0), Edit::Insert(1), Edit::Match(1, 2)]
+        );
         let mut total = WordErrors::default();
         total.add(errors);
         total.add(word_errors("a", "b"));

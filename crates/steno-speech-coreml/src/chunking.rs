@@ -2,6 +2,10 @@
 //! (0.17.4) for v3 with `melChunkContext = false`, the path Steno's
 //! `ParakeetEngine` takes through `AsrManager.transcribe`.
 //!
+//! "Chunk" is FluidAudio's name for the region a start begins; "window"
+//! is the samples the model sees for it, which differ only by the warm-up
+//! prefix.
+//!
 //! Everything here is arithmetic over the samples; no model is involved,
 //! so it builds and is tested on every platform.
 
@@ -59,8 +63,11 @@ pub fn sample_seconds(sample: usize) -> f64 {
 /// 207,360 (12.96 s).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Layout {
+    /// Samples one window spans.
     pub chunk_samples: usize,
+    /// Samples consecutive windows share.
     pub overlap_samples: usize,
+    /// Samples between consecutive regular starts.
     pub stride_samples: usize,
 }
 
@@ -94,7 +101,9 @@ impl Layout {
 /// decision carries the flag so the port stays one for one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ChunkStart {
+    /// First sample of the chunk.
     pub start: usize,
+    /// Decode a suppressed warm-up prefix before `start`.
     pub use_warmup_prefix: bool,
 }
 
@@ -424,6 +433,7 @@ fn boundary_energy_score(audio: &[f32], center: usize, half_window: usize) -> f3
 /// the offset the decoder adds to its frame indices.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Window {
+    /// Position in the plan, the merge order.
     pub index: usize,
     /// First sample fed to the model (the chunk start minus any warm-up).
     pub context_start: usize,
@@ -437,6 +447,7 @@ pub struct Window {
     /// Tokens before this global frame are decoded but suppressed
     /// (`emitTokensAfterFrame`).
     pub emit_after_frame: Option<usize>,
+    /// Run the end-of-audio flush (`isLastChunk`).
     pub is_last: bool,
 }
 
@@ -717,6 +728,39 @@ mod tests {
             &vec![0.0; 2 * SAMPLE_RATE],
             SAMPLE_RATE
         ));
+    }
+
+    #[test]
+    fn an_earlier_silence_that_would_compress_the_tail_keeps_the_target() {
+        // Two silent frames at 10.0 s, speech on both sides of the regular
+        // 12.96 s boundary and of the boundary a start at 10.08 s would
+        // force: without the prefix the start moves to the silence; with
+        // it the compress-tail rule keeps the regular start, no warm-up.
+        let layout = Layout::v3();
+        let mut audio = tone(30.0, 0.1);
+        for sample in &mut audio[125 * FRAME_SAMPLES..127 * FRAME_SAMPLES] {
+            *sample = 0.0;
+        }
+        let without = silence_aligned_chunk_starts(&audio, layout, false);
+        assert_eq!(without[1].start, 126 * FRAME_SAMPLES);
+        let with = silence_aligned_chunk_starts(&audio, layout, true);
+        assert_eq!(with[1].start, layout.stride_samples);
+        assert!(!with[1].use_warmup_prefix);
+    }
+
+    #[test]
+    fn a_valley_above_the_near_silence_ratio_never_asks_for_a_warmup() {
+        // Two frames at 9 % of the median energy just before the regular
+        // boundary: a usable valley (35 %) but not near silence (5 %), so
+        // the start moves there and the warm-up rules stay out of it.
+        let layout = Layout::v3();
+        let mut audio = tone(30.0, 0.1);
+        for sample in &mut audio[160 * FRAME_SAMPLES..162 * FRAME_SAMPLES] {
+            *sample *= 0.3;
+        }
+        let with = silence_aligned_chunk_starts(&audio, layout, true);
+        assert_eq!(with[1].start, 161 * FRAME_SAMPLES);
+        assert!(!with[1].use_warmup_prefix);
     }
 
     #[test]

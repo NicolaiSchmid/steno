@@ -1,8 +1,7 @@
 //! Joining the windows' token streams: FluidAudio's `ChunkProcessor`
 //! merge (0.17.4) and the `SequenceMatcher` it calls, then the seam-word
-//! collapse (issue #706) and the splice rules of the seam-gap repair
-//! (issue #758). Pure functions over [`Token`] lists; the repair's
-//! re-decode lives in the pipeline.
+//! collapse and the splice rules of the seam-gap repair. Pure functions
+//! over [`Token`] lists; the repair's re-decode lives in the pipeline.
 //!
 //! The order of a merged stream is the text order; frame timestamps are
 //! metadata clamped non-decreasing afterwards (issue #825). Nothing here
@@ -492,6 +491,58 @@ mod tests {
         let pairs = find_lcs(&[1], &[1, 1], |a, b| a == b);
         assert_eq!(pairs, vec![(0, 1)]);
         assert_eq!(find_lcs(&[1, 2], &[3], |a, b| a == b), Vec::new());
+    }
+
+    #[test]
+    fn lcs_anchors_match_only_within_half_the_overlap() {
+        // Fewer contiguous pairs than `minimum_pairs` (2 here), so the LCS
+        // decides; its tolerance is one second (`overlapSeconds / 2`).
+        let vocab = sample();
+        let left = vec![
+            token(12, 100),
+            token(13, 105),
+            token(14, 110),
+            token(1, 115),
+        ];
+        let near = vec![token(5, 108), token(1, 127)]; // 0.96 s apart
+        let far = vec![token(5, 108), token(1, 128)]; // 1.04 s apart
+        // Anchored: the seam token keeps the left copy's frame and the
+        // right token before the anchor is dropped.
+        let anchored = merge_chunks(&left, &near, &vocab);
+        assert_eq!(ids(&anchored), vec![12, 13, 14, 1]);
+        assert_eq!(anchored[3].frame, 115);
+        // No anchor: the midpoint cut keeps the right copy instead.
+        let cut = merge_chunks(&left, &far, &vocab);
+        assert_eq!(ids(&cut), vec![12, 13, 14, 1]);
+        assert_eq!(cut[3].frame, 128);
+    }
+
+    #[test]
+    fn exactly_minimum_pairs_of_contiguous_matches_are_enough() {
+        // Four overlap tokens on the left, so two contiguous pairs anchor
+        // the merge; the LCS would find a third, non-contiguous pair and
+        // arbitrate the gap differently.
+        let vocab = sample();
+        let left = vec![
+            token(12, 100),
+            token(13, 102),
+            token(14, 104),
+            token(1, 106),
+        ];
+        let right = vec![
+            token(12, 100),
+            token(5, 101),
+            token(15, 102),
+            token(14, 104),
+            token(1, 106),
+            token(13, 110),
+        ];
+        assert_eq!(
+            find_lcs(&left, &right, |l, r| l.id == r.id),
+            vec![(0, 0), (2, 3), (3, 4)]
+        );
+        let merged = merge_chunks(&left, &right, &vocab);
+        assert_eq!(ids(&merged), vec![12, 13, 14, 1, 13]);
     }
 
     #[test]
