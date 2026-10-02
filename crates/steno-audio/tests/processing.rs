@@ -21,12 +21,10 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use steno_audio::capture::{CaptureBackend, CaptureError, CaptureStream};
-use steno_audio::realtime::{
-    FrameRelay, LaneFrameSink, LevelMeter, ProcessingConfiguration, ProcessingThread,
-};
+use steno_audio::realtime::{FrameRelay, LaneFrameSink, ProcessingConfiguration, ProcessingThread};
 use steno_audio::testing::synthetic::SyntheticOptions;
 use steno_audio::testing::{SyntheticCaptureBackend, SyntheticLane};
-use steno_audio::{PassthroughEchoCanceller, SAMPLE_RATE};
+use steno_audio::{EchoMetrics, PassthroughEchoCanceller, SAMPLE_RATE};
 use steno_core::{AudioLane, EchoCanceller};
 
 /// Drains the relay on the test thread and returns every frame per channel.
@@ -57,8 +55,7 @@ fn drain(
 }
 
 fn rms_decibels(samples: &[f32]) -> f32 {
-    let sum: f64 = samples.iter().map(|s| f64::from(*s) * f64::from(*s)).sum();
-    LevelMeter::decibels((sum / samples.len().max(1) as f64).sqrt() as f32)
+    EchoMetrics::decibels(EchoMetrics::rms(samples))
 }
 
 fn upward_crossings(samples: &[f32]) -> usize {

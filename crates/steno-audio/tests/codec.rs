@@ -20,6 +20,7 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 
+use steno_audio::EchoMetrics;
 use steno_audio::codec::sinc::SincResampler;
 use steno_audio::codec::{CodecError, SymphoniaAudioCodec};
 use steno_audio::testing::AudioFixtures;
@@ -31,15 +32,6 @@ use steno_core::{
     AudioAsset, AudioDecoder, AudioFormat, AudioLane, AudioRetention, RecordingLayout,
 };
 use uuid::Uuid;
-
-fn rms(samples: &[f32]) -> f32 {
-    (samples
-        .iter()
-        .map(|s| f64::from(*s) * f64::from(*s))
-        .sum::<f64>()
-        / samples.len() as f64)
-        .sqrt() as f32
-}
 
 fn write_call(layout: &RecordingLayout, seconds: f64, finish: bool) -> RecordingWriter {
     let mut writer =
@@ -61,21 +53,21 @@ fn write_call(layout: &RecordingLayout, seconds: f64, finish: bool) -> Recording
     writer
 }
 
-/// A two-lane meeting folder: 1 kHz on the mic lane at 0.5, 1 kHz on the
-/// system lane at 0.25, two seconds, with sidecars.
-fn make_call_asset(directory: &Path) -> AudioAsset {
-    let meeting_id = Uuid::new_v4();
-    let layout = RecordingLayout::new(directory, meeting_id);
-    let writer = write_call(&layout, 2.0, true);
-    let files = writer.files();
+/// An asset over `master` with `sidecars` as the persist stage would
+/// record it.
+fn make_asset(
+    master: &Path,
+    format: AudioFormat,
+    lanes: &[AudioLane],
+    sidecars: &[(AudioLane, &Path)],
+) -> AudioAsset {
     AudioAsset {
         id: Uuid::new_v4(),
-        meeting_id,
-        url: file_url(&files.master, false),
-        format: AudioFormat::Caf48kFloat32,
-        lanes: vec![AudioLane::Mic, AudioLane::System],
-        sidecars_16k: files
-            .sidecars_16k
+        meeting_id: Uuid::new_v4(),
+        url: file_url(master, false),
+        format,
+        lanes: lanes.to_vec(),
+        sidecars_16k: sidecars
             .iter()
             .map(|(lane, path)| (*lane, file_url(path, false)))
             .collect(),
@@ -83,6 +75,24 @@ fn make_call_asset(directory: &Path) -> AudioAsset {
         retention: AudioRetention::KeepForever,
         expires_at: None,
     }
+}
+
+/// A two-lane meeting folder: 1 kHz on the mic lane at 0.5, 1 kHz on the
+/// system lane at 0.25, two seconds, with sidecars.
+fn make_call_asset(directory: &Path) -> AudioAsset {
+    let layout = RecordingLayout::new(directory, Uuid::new_v4());
+    let files = write_call(&layout, 2.0, true).files();
+    let sidecars: Vec<(AudioLane, &Path)> = files
+        .sidecars_16k
+        .iter()
+        .map(|(lane, path)| (*lane, path.as_path()))
+        .collect();
+    make_asset(
+        &files.master,
+        AudioFormat::Caf48kFloat32,
+        &[AudioLane::Mic, AudioLane::System],
+        &sidecars,
+    )
 }
 
 #[tokio::test]
@@ -114,12 +124,12 @@ async fn decodes_each_lane_of_the_master_like_its_sidecar() {
     assert_eq!(system_from_master.len(), 32_000);
     let window = 4_000..30_000;
     let mic_difference = 20.0
-        * (rms(&mic_from_master.samples[window.clone()])
-            / rms(&mic_from_sidecar.samples[window.clone()]))
+        * (EchoMetrics::rms(&mic_from_master.samples[window.clone()])
+            / EchoMetrics::rms(&mic_from_sidecar.samples[window.clone()]))
         .log10();
     let system_difference = 20.0
-        * (rms(&system_from_master.samples[window.clone()])
-            / rms(&system_from_sidecar.samples[window.clone()]))
+        * (EchoMetrics::rms(&system_from_master.samples[window.clone()])
+            / EchoMetrics::rms(&system_from_sidecar.samples[window.clone()]))
         .log10();
     assert!(
         mic_difference.abs() < 0.1,
@@ -129,8 +139,8 @@ async fn decodes_each_lane_of_the_master_like_its_sidecar() {
         system_difference.abs() < 0.1,
         "system master vs sidecar {system_difference} dB"
     );
-    assert!((rms(&mic_from_master.samples[window.clone()]) - 0.3536).abs() < 0.01);
-    assert!((rms(&system_from_master.samples[window.clone()]) - 0.1768).abs() < 0.005);
+    assert!((EchoMetrics::rms(&mic_from_master.samples[window.clone()]) - 0.3536).abs() < 0.01);
+    assert!((EchoMetrics::rms(&system_from_master.samples[window.clone()]) - 0.1768).abs() < 0.005);
     // Sample-aligned with the sidecar to within a sample: the group delay
     // compensation holds.
     let mut max_error = 0.0f32;
@@ -156,32 +166,18 @@ async fn decodes_each_lane_of_the_master_like_its_sidecar() {
 #[tokio::test]
 async fn an_unfinished_master_with_empty_sidecars_decodes_from_the_master() {
     let directory = tempfile::tempdir().unwrap();
-    let meeting_id = Uuid::new_v4();
-    let layout = RecordingLayout::new(directory.path(), meeting_id);
+    let layout = RecordingLayout::new(directory.path(), Uuid::new_v4());
     // No finish(): the process "died" here, its handles still open.
     let writer = write_call(&layout, 1.5, false);
-    let asset = AudioAsset {
-        id: Uuid::new_v4(),
-        meeting_id,
-        url: file_url(&layout.master(AudioFormat::Caf48kFloat32), false),
-        format: AudioFormat::Caf48kFloat32,
-        lanes: vec![AudioLane::Mic, AudioLane::System],
-        sidecars_16k: [
-            (
-                AudioLane::Mic,
-                file_url(&layout.sidecar(AudioLane::Mic), false),
-            ),
-            (
-                AudioLane::System,
-                file_url(&layout.sidecar(AudioLane::System), false),
-            ),
-        ]
-        .into_iter()
-        .collect(),
-        mixdown_url: None,
-        retention: AudioRetention::KeepForever,
-        expires_at: None,
-    };
+    let asset = make_asset(
+        &layout.master(AudioFormat::Caf48kFloat32),
+        AudioFormat::Caf48kFloat32,
+        &[AudioLane::Mic, AudioLane::System],
+        &[
+            (AudioLane::Mic, &layout.sidecar(AudioLane::Mic)),
+            (AudioLane::System, &layout.sidecar(AudioLane::System)),
+        ],
+    );
     assert!(
         WavFile::read(&layout.sidecar(AudioLane::Mic)).is_err(),
         "zero-size header, samples after it"
@@ -192,8 +188,8 @@ async fn an_unfinished_master_with_empty_sidecars_decodes_from_the_master() {
     assert_eq!(decoded_mic.len(), 24_000, "1.5 s to the last frame written");
     assert_eq!(decoded_system.len(), 24_000);
     let window = 4_000..22_000;
-    assert!((rms(&decoded_mic.samples[window.clone()]) - 0.3536).abs() < 0.01);
-    assert!((rms(&decoded_system.samples[window]) - 0.1768).abs() < 0.005);
+    assert!((EchoMetrics::rms(&decoded_mic.samples[window.clone()]) - 0.3536).abs() < 0.01);
+    assert!((EchoMetrics::rms(&decoded_system.samples[window]) - 0.1768).abs() < 0.005);
     // Only now may the writer go away (and with it the open handles).
     assert_eq!(writer.lanes(), &[AudioLane::Mic, AudioLane::System]);
 }
@@ -211,7 +207,7 @@ async fn mixdown_is_a_16k_mono_wav_of_the_right_length() {
     assert_eq!((file.sample_rate, file.channels.len()), (16_000, 1));
     assert!((file.duration() - 2.0).abs() < 0.01);
     // Both lanes are 1 kHz in phase: the mono average is (0.5 + 0.25) / 2.
-    let level = rms(&file.channels[0][8_000..28_000]);
+    let level = EchoMetrics::rms(&file.channels[0][8_000..28_000]);
     assert!((20.0 * (level / (0.375 / 2f32.sqrt())).log10()).abs() < 1.0);
 
     // A 16 kHz WAV asset is copied, not re-encoded.
@@ -222,17 +218,7 @@ async fn mixdown_is_a_16k_mono_wav_of_the_right_length() {
     let mut writer = WavStreamWriter::create(&master, 16_000).unwrap();
     writer.write(&vec![1_000i16; 16_000]).unwrap();
     writer.finish().unwrap();
-    let wav_asset = AudioAsset {
-        id: Uuid::new_v4(),
-        meeting_id: Uuid::new_v4(),
-        url: file_url(&master, false),
-        format: AudioFormat::Wav16kInt16,
-        lanes: vec![AudioLane::Mixed],
-        sidecars_16k: BTreeMap::new(),
-        mixdown_url: None,
-        retention: AudioRetention::KeepForever,
-        expires_at: None,
-    };
+    let wav_asset = make_asset(&master, AudioFormat::Wav16kInt16, &[AudioLane::Mixed], &[]);
     let copy = wav_layout.mixdown(AudioFormat::Wav16kInt16);
     codec.mixdown(&wav_asset, &copy).await.unwrap();
     assert_eq!(
@@ -255,17 +241,7 @@ async fn wav_master_decodes_through_symphonia() {
         .collect();
     writer.write(&tone).unwrap();
     writer.finish().unwrap();
-    let asset = AudioAsset {
-        id: Uuid::new_v4(),
-        meeting_id: Uuid::new_v4(),
-        url: file_url(&path, false),
-        format: AudioFormat::Wav16kInt16,
-        lanes: vec![AudioLane::Mixed],
-        sidecars_16k: BTreeMap::new(),
-        mixdown_url: None,
-        retention: AudioRetention::KeepForever,
-        expires_at: None,
-    };
+    let asset = make_asset(&path, AudioFormat::Wav16kInt16, &[AudioLane::Mixed], &[]);
     let decoded = SymphoniaAudioCodec::new()
         .decode(&asset, AudioLane::Mixed)
         .await
@@ -292,7 +268,7 @@ fn the_sinc_resampler_keeps_level_and_period_at_44100() {
     let output = SymphoniaAudioCodec::to_16k(&tone, 44_100);
     assert_eq!(output.len(), 32_000);
     let steady = &output[1_000..31_000];
-    let error = 20.0 * (rms(steady) / (0.5 / 2f32.sqrt())).log10();
+    let error = 20.0 * (EchoMetrics::rms(steady) / (0.5 / 2f32.sqrt())).log10();
     assert!(error.abs() < 0.1, "{error} dB");
     let crossings = steady
         .windows(2)
@@ -309,6 +285,7 @@ fn the_sinc_resampler_keeps_level_and_period_at_44100() {
         .map(|i| 0.5 * (2.0 * std::f64::consts::PI * 12_000.0 * i as f64 / 44_100.0).sin() as f32)
         .collect();
     let rejected = SincResampler::new(44_100.0, 16_000.0).resample(&high);
-    let rejection = 20.0 * (rms(&rejected[1_000..31_000]) / (0.5 / 2f32.sqrt())).log10();
+    let rejection =
+        20.0 * (EchoMetrics::rms(&rejected[1_000..31_000]) / (0.5 / 2f32.sqrt())).log10();
     assert!(rejection < -50.0, "12 kHz aliases at {rejection} dB");
 }

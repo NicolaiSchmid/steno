@@ -17,31 +17,16 @@
 
 use std::path::Path;
 
+use steno_audio::EchoMetrics;
 use steno_audio::capture::{CaptureError, LaneLevel, LaneLevels};
 use steno_audio::realtime::{LevelMeter, LevelSlot};
+use steno_audio::testing::AudioFixtures;
 use steno_audio::writer::{
     CafFile, CafReadError, CafStreamWriter, LaneFrames, RecordingWriter, RecordingWriting,
     Resampler48kTo16k, WavFile, WavReadError, WavStreamWriter,
 };
 use steno_core::{AudioFormat, AudioLane, RecordingLayout};
 use uuid::Uuid;
-
-fn sine(frequency: f64, amplitude: f32, count: usize) -> Vec<f32> {
-    (0..count)
-        .map(|i| {
-            amplitude * (2.0 * std::f64::consts::PI * frequency * i as f64 / 48_000.0).sin() as f32
-        })
-        .collect()
-}
-
-fn rms(samples: &[f32]) -> f32 {
-    (samples
-        .iter()
-        .map(|s| f64::from(*s) * f64::from(*s))
-        .sum::<f64>()
-        / samples.len() as f64)
-        .sqrt() as f32
-}
 
 fn write_lanes(writer: &mut RecordingWriter, lanes: &[&[f32]]) {
     let frames = lanes[0].len() / 480;
@@ -67,8 +52,8 @@ fn two_lanes_round_trip_sample_accurately_with_sidecars() {
     let layout = RecordingLayout::new(directory.path(), meeting_id);
     let mut writer =
         RecordingWriter::new(&layout, &[AudioLane::Mic, AudioLane::System], false).unwrap();
-    let mic = sine(440.0, 0.5, 48_000 * 2);
-    let system = sine(1_000.0, 0.25, 48_000 * 2);
+    let mic = AudioFixtures::tone(440.0, 2.0, 0.5);
+    let system = AudioFixtures::tone(1_000.0, 2.0, 0.25);
     write_lanes(&mut writer, &[&mic, &system]);
     let files = writer.finish().unwrap();
     assert_eq!(files.master, layout.master(AudioFormat::Caf48kFloat32));
@@ -97,8 +82,8 @@ fn two_lanes_round_trip_sample_accurately_with_sidecars() {
     let system_sidecar = WavFile::read_16k_mono(&files.sidecars_16k[&AudioLane::System]).unwrap();
     assert_eq!(mic_sidecar.len(), 32_000);
     assert_eq!(system_sidecar.len(), 32_000);
-    assert!((20.0 * (rms(&mic_sidecar[2_000..]) / 0.3536).log10()).abs() < 0.1);
-    assert!((20.0 * (rms(&system_sidecar[2_000..]) / 0.1768).log10()).abs() < 0.1);
+    assert!((20.0 * (EchoMetrics::rms(&mic_sidecar[2_000..]) / 0.3536).log10()).abs() < 0.1);
+    assert!((20.0 * (EchoMetrics::rms(&system_sidecar[2_000..]) / 0.1768).log10()).abs() < 0.1);
     let info = WavFile::read(&files.sidecars_16k[&AudioLane::Mic]).unwrap();
     assert_eq!(
         (info.sample_rate, info.channels.len(), info.bits_per_sample),
@@ -143,7 +128,7 @@ fn in_person_writes_one_channel_and_the_mixed_sidecar() {
     let directory = tempfile::tempdir().unwrap();
     let layout = RecordingLayout::new(directory.path(), Uuid::new_v4());
     let mut writer = RecordingWriter::new(&layout, &[AudioLane::Mixed], false).unwrap();
-    let frame = sine(500.0, 0.5, 480 * 50);
+    let frame = AudioFixtures::tone(500.0, 0.5, 0.5);
     write_lanes(&mut writer, &[&frame]);
     let files = writer.finish().unwrap();
     assert_eq!(
@@ -240,7 +225,7 @@ fn sidecars_align_with_the_master_and_their_lane() {
     let mut writer =
         RecordingWriter::new(&layout, &[AudioLane::Mic, AudioLane::System], false).unwrap();
     let mut mic = vec![0.0f32; 96_000];
-    mic[48_000..].copy_from_slice(&sine(1_000.0, 0.5, 48_000));
+    mic[48_000..].copy_from_slice(&AudioFixtures::tone(1_000.0, 1.0, 0.5));
     let system = vec![0.0f32; 96_000];
     write_lanes(&mut writer, &[&mic, &system]);
     let files = writer.finish().unwrap();
@@ -328,11 +313,11 @@ fn resample(input: &[f32]) -> Vec<f32> {
 
 #[test]
 fn one_kilohertz_keeps_its_level_and_period() {
-    let output = resample(&sine(1_000.0, 0.5, 48_000));
+    let output = resample(&AudioFixtures::tone(1_000.0, 1.0, 0.5));
     assert_eq!(output.len(), 16_000);
     let steady = &output[2_000..];
     let expected = 0.5 / 2f32.sqrt();
-    let error = 20.0 * (rms(steady) / expected).log10();
+    let error = 20.0 * (EchoMetrics::rms(steady) / expected).log10();
     assert!(error.abs() < 0.1, "{error} dB");
     let crossings = steady
         .windows(2)
@@ -346,14 +331,14 @@ fn one_kilohertz_keeps_its_level_and_period() {
 #[test]
 fn passband_edge_survives_and_stopband_is_rejected() {
     let expected = 0.5 / 2f32.sqrt();
-    let six = resample(&sine(6_000.0, 0.5, 48_000));
-    let six_error = 20.0 * (rms(&six[2_000..]) / expected).log10();
+    let six = resample(&AudioFixtures::tone(6_000.0, 1.0, 0.5));
+    let six_error = 20.0 * (EchoMetrics::rms(&six[2_000..]) / expected).log10();
     assert!(six_error.abs() < 0.5, "6 kHz: {six_error} dB");
-    let twelve = resample(&sine(12_000.0, 0.5, 48_000));
-    let rejection = 20.0 * (rms(&twelve[2_000..]) / expected).log10();
+    let twelve = resample(&AudioFixtures::tone(12_000.0, 1.0, 0.5));
+    let rejection = 20.0 * (EchoMetrics::rms(&twelve[2_000..]) / expected).log10();
     assert!(rejection < -60.0, "12 kHz aliases at {rejection} dB");
-    let nine = resample(&sine(9_000.0, 0.5, 48_000));
-    let nine_level = 20.0 * (rms(&nine[2_000..]) / expected).log10();
+    let nine = resample(&AudioFixtures::tone(9_000.0, 1.0, 0.5));
+    let nine_level = 20.0 * (EchoMetrics::rms(&nine[2_000..]) / expected).log10();
     assert!(nine_level < -40.0, "9 kHz aliases at {nine_level} dB");
 }
 
@@ -361,7 +346,7 @@ fn passband_edge_survives_and_stopband_is_rejected() {
 /// delayed by exactly half the filter, with no seam at any frame boundary.
 #[test]
 fn output_follows_the_input_with_a_fixed_delay_across_frame_boundaries() {
-    let output = resample(&sine(1_000.0, 0.5, 48_000));
+    let output = resample(&AudioFixtures::tone(1_000.0, 1.0, 0.5));
     let delay = (Resampler48kTo16k::TAPS - 1) as f64 / 2.0 / Resampler48kTo16k::FACTOR as f64;
     let mut max_error = 0.0f32;
     for (index, sample) in output.iter().enumerate().skip(500) {
@@ -378,12 +363,12 @@ fn output_follows_the_input_with_a_fixed_delay_across_frame_boundaries() {
 
 #[test]
 fn output_clamps_to_full_scale_and_history_resets() {
-    let ints = resample_int16(&sine(440.0, 1.2, 4_800), None);
+    let ints = resample_int16(&AudioFixtures::tone(440.0, 0.1, 1.2), None);
     assert_eq!(ints.len(), 1_600);
     assert_eq!(ints.iter().max(), Some(&32767));
     assert_eq!(ints.iter().min(), Some(&-32767));
 
-    let input = sine(1_000.0, 0.5, 2_400);
+    let input = AudioFixtures::tone(1_000.0, 0.05, 0.5);
     let whole = resample_int16(&input, None);
     let interrupted = resample_int16(&input, Some(2));
     assert_eq!(interrupted[..320], whole[..320]);
@@ -401,7 +386,7 @@ fn output_clamps_to_full_scale_and_history_resets() {
 #[test]
 fn the_meter_reports_rms_and_peak_in_dbfs() {
     let mut meter = LevelMeter::new();
-    meter.accumulate(&sine(1_000.0, 1.0, 48_000));
+    meter.accumulate(&AudioFixtures::tone(1_000.0, 1.0, 1.0));
     let level = meter.flush();
     assert!((level.rms - -3.01).abs() < 0.05);
     assert!(level.peak.abs() < 0.01);
@@ -412,7 +397,7 @@ fn the_meter_reports_rms_and_peak_in_dbfs() {
     );
 
     let mut quiet = LevelMeter::new();
-    quiet.accumulate(&sine(1_000.0, 0.1, 48_000));
+    quiet.accumulate(&AudioFixtures::tone(1_000.0, 1.0, 0.1));
     assert!((quiet.current().rms - -23.01).abs() < 0.05);
     assert!((quiet.current().peak - -20.0).abs() < 0.01);
     assert!((quiet.linear_peak() - 0.1).abs() < 0.001);

@@ -31,7 +31,7 @@ use steno_audio::capture::{
 };
 use steno_audio::realtime::LaneFrameSink;
 use steno_audio::testing::synthetic::SyntheticOptions;
-use steno_audio::testing::{AudioFixtures, ManualClock, SyntheticCaptureBackend, SyntheticLane};
+use steno_audio::testing::{ManualClock, SyntheticCaptureBackend, SyntheticLane};
 use steno_audio::writer::{
     CafFile, LaneFrames, RecordingFiles, RecordingWriter, RecordingWriting, WavFile,
 };
@@ -110,6 +110,18 @@ fn until_failed(state: &CaptureState) -> bool {
     matches!(state, CaptureState::Failed { .. })
 }
 
+/// Matches the second `Idle`: the one after the initial state a `states()`
+/// subscription starts with.
+fn until_idle_again() -> impl FnMut(&CaptureState) -> bool {
+    let mut idles = 0;
+    move |state| {
+        if *state == CaptureState::Idle {
+            idles += 1;
+        }
+        idles == 2
+    }
+}
+
 /// Advances `clock` through the first `count` backoff sleeps of a rebuild,
 /// each once the sleeper is registered.
 fn advance_through_sleeps(clock: &ManualClock, count: usize) {
@@ -160,13 +172,7 @@ fn idle_starting_recording_stopping_idle_over_the_synthetic_backend() {
     let result = session.stop().unwrap();
     assert_eq!(session.state(), CaptureState::Idle);
 
-    let mut idles = 0;
-    let seen = collect_states(&states, |state| {
-        if *state == CaptureState::Idle {
-            idles += 1;
-        }
-        idles == 2
-    });
+    let seen = collect_states(&states, until_idle_again());
     assert_eq!(
         kinds(&seen),
         ["idle", "starting", "recording", "stopping", "idle"]
@@ -903,13 +909,7 @@ fn a_device_change_keeps_recording_on_the_same_files() {
     let result = session.stop().unwrap();
     assert_eq!(session.state(), CaptureState::Idle);
 
-    let mut idles = 0;
-    let seen = collect_states(&states, |state| {
-        if *state == CaptureState::Idle {
-            idles += 1;
-        }
-        idles == 2
-    });
+    let seen = collect_states(&states, until_idle_again());
     assert_eq!(
         kinds(&seen),
         ["idle", "starting", "recording", "stopping", "idle"],
@@ -991,13 +991,7 @@ fn a_gap_longer_than_the_ring_is_written_in_full() {
     backend.wait_until_finished();
     let result = session.stop().unwrap();
 
-    let mut idles = 0;
-    let seen = collect_states(&states, |state| {
-        if *state == CaptureState::Idle {
-            idles += 1;
-        }
-        idles == 2
-    });
+    let seen = collect_states(&states, until_idle_again());
     assert_eq!(
         kinds(&seen),
         ["idle", "starting", "recording", "stopping", "idle"]
@@ -1307,13 +1301,7 @@ fn stop_during_a_rebuild_finalises_once() {
     assert_eq!(session.state(), CaptureState::Idle);
     assert_eq!(backend.starts(), 2, "nothing after the stop");
     assert!(matches!(session.stop(), Err(CaptureError::InvalidState(_))));
-    let mut idles = 0;
-    let seen = collect_states(&states, |state| {
-        if *state == CaptureState::Idle {
-            idles += 1;
-        }
-        idles == 2
-    });
+    let seen = collect_states(&states, until_idle_again());
     assert_eq!(
         kinds(&seen),
         ["idle", "starting", "recording", "stopping", "idle"]
@@ -1580,5 +1568,4 @@ fn the_independent_tone_survives_within_three_decibels() {
     let echo_after = EchoMetrics::tone_level(&processed[range], 1_000.0, 48_000.0);
     let erle = 20.0 * (echo_before / echo_after).log10();
     assert!(erle >= 15.0, "echo tone ERLE {erle} dB under double talk");
-    let _ = AudioFixtures::SAMPLE_RATE;
 }
