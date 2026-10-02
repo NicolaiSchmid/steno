@@ -101,28 +101,24 @@ impl Report {
     /// Mean of the per-file WERs (the plan's target is this mean).
     #[must_use]
     pub fn mean_file_wer(&self) -> f64 {
+        self.mean(|file| file.errors.rate())
+    }
+
+    /// Mean RTFx over the files.
+    #[must_use]
+    pub fn mean_rtfx(&self) -> f64 {
+        self.mean(FileResult::rtfx)
+    }
+
+    /// Mean of `value` over the files; zero without files.
+    fn mean(&self, value: impl Fn(&FileResult) -> f64) -> f64 {
         if self.files.is_empty() {
             return 0.0;
         }
         // File counts are tiny.
         #[allow(clippy::cast_precision_loss)]
         let count = self.files.len() as f64;
-        self.files
-            .iter()
-            .map(|file| file.errors.rate())
-            .sum::<f64>()
-            / count
-    }
-
-    /// Mean RTFx over the files.
-    #[must_use]
-    pub fn mean_rtfx(&self) -> f64 {
-        if self.files.is_empty() {
-            return 0.0;
-        }
-        #[allow(clippy::cast_precision_loss)]
-        let count = self.files.len() as f64;
-        self.files.iter().map(FileResult::rtfx).sum::<f64>() / count
+        self.files.iter().map(value).sum::<f64>() / count
     }
 }
 
@@ -289,14 +285,7 @@ pub fn run(
             let json = serde_json::to_string_pretty(&segments)?;
             std::fs::write(out.join(format!("{name}.rust.json")), json)?;
         }
-        eprintln!(
-            "{name}: {wall_seconds:.2} s, RTFx {:.0}, WER {:.2} %, {} windows, {} tokens",
-            audio_seconds / wall_seconds.max(1e-9),
-            errors.rate() * 100.0,
-            transcript.stats.windows,
-            tokens.len()
-        );
-        files.push(FileResult {
+        let result = FileResult {
             name,
             audio_seconds,
             wall_seconds,
@@ -304,7 +293,16 @@ pub fn run(
             stats: transcript.stats,
             errors,
             timing,
-        });
+        };
+        eprintln!(
+            "{}: {wall_seconds:.2} s, RTFx {:.0}, WER {:.2} %, {} windows, {} tokens",
+            result.name,
+            result.rtfx(),
+            errors.rate() * 100.0,
+            result.stats.windows,
+            result.tokens
+        );
+        files.push(result);
     }
     Ok(Report {
         files,
