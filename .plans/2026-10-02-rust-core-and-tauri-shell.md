@@ -204,4 +204,4 @@ has merged.
 | WP1 workspace and bridge | `feat/rust-bridge` | #153 | merged |
 | WP2 store | `feat/rust-store` | #155 | merged |
 | WP3 Tauri shell on fixtures | `feat/rust-desktop` | #156 | merged |
-| Core protocols (`steno-core::protocols`, boundary value types, `testing` fakes) | `feat/rust-protocols` | (this PR) | open |
+| Core protocols (`steno-core::protocols`, boundary value types, `testing` fakes) | `feat/rust-protocols` | #162 | open |
