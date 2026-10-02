@@ -17,7 +17,7 @@ use uuid::Uuid;
 use super::ManagedBlock;
 use crate::fs::{AtomicFileWriter, LocalFolderSink};
 use crate::naming::MeetingFolder;
-use crate::rendering::{ArtifactRenderer, LinkStyle, RenderOptions};
+use crate::rendering::{ArtifactRenderer, LinkStyle, PersonPage, RenderOptions};
 use crate::runtime::DeliveryLedger;
 
 /// What can go wrong in the vault. The app shows the message verbatim.
@@ -158,61 +158,87 @@ impl ObsidianFolderDestination {
         }
 
         if let Some(people_folder) = &self.settings.people_folder {
-            self.writing(people_folder, || self.sink.create_directory(people_folder))?;
-            AtomicFileWriter::remove_stale_temporaries(&self.sink.path(people_folder));
-            let mut rendered_pages: HashSet<String> = HashSet::new();
-            for page in renderer.render_person_pages(meeting, &options, Some(&slug)) {
-                let path = format!("{people_folder}/{}", page.file_name);
-                rendered_pages.insert(path.clone());
-                let mut data = page.page.into_bytes();
-                if let Some(existing) = self.reading(&path, || self.sink.read(&path))? {
-                    // A page that is not UTF-8 text cannot be merged without
-                    // changing bytes outside the block, so it is left as it
-                    // is and reported.
-                    let Ok(text) = String::from_utf8(existing) else {
-                        return Err(ObsidianError::ReadFailed {
-                            path: self.absolute(&path),
-                            underlying: "not UTF-8 text; the page was left unchanged".to_owned(),
-                        });
-                    };
-                    data = ManagedBlock::merge(&page.line, meeting.meeting.id, &text).into_bytes();
-                }
-                self.writing(&path, || self.sink.write(&data, &path))?;
-                ledger.record(&path, FileOwnership::ManagedBlock, &data);
-            }
-            self.remove_meeting_line(&rendered_pages, meeting.meeting.id, &mut ledger)?;
+            let pages = renderer.render_person_pages(meeting, &options, Some(&slug));
+            self.write_person_pages(people_folder, pages, meeting.meeting.id, &mut ledger)?;
         }
-
         if self.settings.include_audio {
-            // The mixdown is copied while it exists; after the retention sweep
-            // the copy already in the vault (in the receipt or on disk) is the
-            // audio. Only when neither is there has the meeting no audio to
-            // deliver.
-            let mixdown = meeting
-                .audio
-                .as_ref()
-                .and_then(|audio| audio.mixdown_url.as_deref())
-                .and_then(file_url_path)
-                .filter(|path| path.exists());
-            if let Some(mixdown) = mixdown {
-                let data = self
-                    .reading(&mixdown.to_string_lossy(), || fs::read(&mixdown).map(Some))?
-                    .unwrap_or_default();
-                let extension = mixdown
-                    .extension()
-                    .map(|extension| extension.to_string_lossy().into_owned())
-                    .unwrap_or_default();
-                self.write_owned(
-                    &mut ledger,
-                    &format!("{folder}/{}", MeetingFolder::audio_file(&extension)),
-                    &data,
-                )?;
-            } else if !self.audio_is_in_the_vault(&folder, &ledger) {
-                return Err(ObsidianError::AudioUnavailable);
-            }
+            self.copy_audio(meeting, &folder, &mut ledger)?;
         }
 
         Ok(ledger.receipt(&folder, ArtifactRenderer::VERSION))
+    }
+
+    /// Writes every rendered page into `people_folder`: whole when the page
+    /// is new, else with this meeting's line merged into its managed block;
+    /// then drops the line from the previous receipt's pages this delivery
+    /// did not render.
+    fn write_person_pages(
+        &self,
+        people_folder: &str,
+        pages: Vec<PersonPage>,
+        meeting_id: Uuid,
+        ledger: &mut DeliveryLedger,
+    ) -> Result<(), ObsidianError> {
+        self.writing(people_folder, || self.sink.create_directory(people_folder))?;
+        AtomicFileWriter::remove_stale_temporaries(&self.sink.path(people_folder));
+        let mut rendered: HashSet<String> = HashSet::new();
+        for page in pages {
+            let path = format!("{people_folder}/{}", page.file_name);
+            rendered.insert(path.clone());
+            let mut data = page.page.into_bytes();
+            if let Some(existing) = self.reading(&path, || self.sink.read(&path))? {
+                // A page that is not UTF-8 text cannot be merged without
+                // changing bytes outside the block, so it is left as it
+                // is and reported.
+                let Ok(text) = String::from_utf8(existing) else {
+                    return Err(ObsidianError::ReadFailed {
+                        path: self.absolute(&path),
+                        underlying: "not UTF-8 text; the page was left unchanged".to_owned(),
+                    });
+                };
+                data = ManagedBlock::merge(&page.line, meeting_id, &text).into_bytes();
+            }
+            self.writing(&path, || self.sink.write(&data, &path))?;
+            ledger.record(&path, FileOwnership::ManagedBlock, &data);
+        }
+        self.remove_meeting_line(&rendered, meeting_id, ledger)
+    }
+
+    /// Copies the mixdown into the meeting folder while it exists; after the
+    /// retention sweep the copy already in the vault (in the receipt or on
+    /// disk) is the audio. Only when neither is there has the meeting no
+    /// audio to deliver.
+    fn copy_audio(
+        &self,
+        meeting: &MeetingExport,
+        folder: &str,
+        ledger: &mut DeliveryLedger,
+    ) -> Result<(), ObsidianError> {
+        let mixdown = meeting
+            .audio
+            .as_ref()
+            .and_then(|audio| audio.mixdown_url.as_deref())
+            .and_then(file_url_path)
+            .filter(|path| path.exists());
+        let Some(mixdown) = mixdown else {
+            return if self.audio_is_in_the_vault(folder, ledger) {
+                Ok(())
+            } else {
+                Err(ObsidianError::AudioUnavailable)
+            };
+        };
+        let data = self
+            .reading(&mixdown.to_string_lossy(), || fs::read(&mixdown).map(Some))?
+            .unwrap_or_default();
+        let extension = mixdown
+            .extension()
+            .map(|extension| extension.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        self.write_owned(
+            ledger,
+            &format!("{folder}/{}", MeetingFolder::audio_file(&extension)),
+            &data,
+        )
     }
 
     fn write_owned(
