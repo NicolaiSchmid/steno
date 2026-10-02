@@ -1,0 +1,66 @@
+//! `Settings` as one row per property in the `setting` table, each value a
+//! one-line `StenoJSON` fragment (`Sources/StenoCore/Storage/SettingsStore.swift`).
+//! A property missing from the table loads as its default and an unknown
+//! row is ignored, so a property can be added without a migration.
+
+use rusqlite::params;
+use serde_json::Value;
+
+use super::{Result, Store, StoreError};
+use crate::json;
+use crate::model::Settings;
+
+/// `settings` as a JSON object. Through text, not `to_value`, so an `f32`
+/// keeps its shortest form (`0.6`) as in [`json::to_column_string`].
+fn object(settings: &Settings) -> Result<serde_json::Map<String, Value>> {
+    match serde_json::from_str::<Value>(&serde_json::to_string(settings)?)? {
+        Value::Object(map) => Ok(map),
+        _ => Err(StoreError::Json(serde::ser::Error::custom(
+            "Settings is not a JSON object",
+        ))),
+    }
+}
+
+impl Store {
+    /// The defaults overlaid with every stored row.
+    pub fn settings(&self) -> Result<Settings> {
+        self.settings_with_defaults(&Settings::default())
+    }
+
+    /// [`Store::settings`] over explicit defaults (tests pass one with a
+    /// known audio folder).
+    pub fn settings_with_defaults(&self, defaults: &Settings) -> Result<Settings> {
+        let mut merged = object(defaults)?;
+        self.read(|connection| {
+            let mut statement = connection.prepare("SELECT key, value FROM setting")?;
+            let rows = statement.query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })?;
+            for row in rows {
+                let (key, value) = row?;
+                merged.insert(key, json::from_column_str(&value)?);
+            }
+            Ok(())
+        })?;
+        Ok(serde_json::from_value(Value::Object(merged))?)
+    }
+
+    /// Writes every property, removing rows for properties that are now
+    /// `None`.
+    pub fn save_settings(&self, settings: &Settings) -> Result<()> {
+        let object = object(settings)?;
+        let mut keys: Vec<&String> = object.keys().collect();
+        keys.sort();
+        self.write(|transaction| {
+            transaction.execute("DELETE FROM setting", [])?;
+            for key in keys {
+                let fragment = json::to_column_string(&object[key])?;
+                transaction.execute(
+                    "INSERT INTO setting (key, value) VALUES (?1, ?2)",
+                    params![key, fragment],
+                )?;
+            }
+            Ok(())
+        })
+    }
+}
