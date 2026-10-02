@@ -61,6 +61,10 @@ zmij = "1"
 symphonia = { version = "0.5", default-features = false, features = ["aac", "caf", "isomp4", "mp3", "pcm", "wav"] }
 # Build only
 cc = "1"
+# The secret store behind `SecretStore` in the services assembly: the
+# Keychain, the Windows credential store and the kernel keyring on Linux
+# (`linux-native` needs no D-Bus library at build time).
+keyring = { version = "3", default-features = false, features = ["apple-native", "windows-native", "linux-native"] }
 # Test only
 similar = "2"
 # Temporary directories in tests; `steno-diarize` also downloads each model

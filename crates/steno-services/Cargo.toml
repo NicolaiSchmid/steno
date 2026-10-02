@@ -1,0 +1,41 @@
+[package]
+name = "steno-services"
+description = "The services assembly: the real object graph from the settings, handed to steno-host"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+async-trait.workspace = true
+chrono.workspace = true
+chrono-tz.workspace = true
+keyring.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+steno-adapters = { path = "../steno-adapters" }
+steno-audio = { path = "../steno-audio" }
+steno-bridge = { path = "../steno-bridge" }
+steno-core = { path = "../steno-core", features = ["testing"] }
+steno-diarize = { path = "../steno-diarize", default-features = false, features = ["onnx"] }
+steno-handover = { path = "../steno-handover" }
+steno-host = { path = "../steno-host" }
+steno-llm = { path = "../steno-llm" }
+steno-pipeline = { path = "../steno-pipeline" }
+steno-speech = { path = "../steno-speech" }
+thiserror.workspace = true
+tokio = { workspace = true, features = ["rt", "rt-multi-thread", "sync", "macros", "time"] }
+tracing.workspace = true
+uuid.workspace = true
+
+[target.'cfg(target_os = "macos")'.dependencies]
+steno-speech-coreml = { path = "../steno-speech-coreml" }
+
+[dev-dependencies]
+steno-llm = { path = "../steno-llm", features = ["testing"] }
+tempfile.workspace = true
+
+[lints]
+workspace = true

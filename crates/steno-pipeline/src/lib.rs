@@ -25,6 +25,7 @@ pub mod lane_merger;
 pub mod pipeline;
 pub mod retention;
 pub mod run;
+pub mod speaker_memory;
 
 pub use estimator::{ProcessingEstimator, StageRates, StageSample};
 pub use events::{EventReceiver, MeetingEventBus};
@@ -36,4 +37,5 @@ pub use pipeline::{
     MonotonicClock, Now, PipelineDependencies, PipelineFailure, ProcessingPipeline, SystemClock,
 };
 pub use retention::{RetentionSweep, SweepIncomplete};
+pub use speaker_memory::StoreSpeakerMemory;
 pub use steno_core::{MeetingEvent, PipelineStage, ProcessingProgress};
