@@ -11,7 +11,7 @@ pub fn allows(url: &Url, dev_server: Option<&Url>) -> bool {
     if url.as_str() == "about:blank" {
         return true;
     }
-    if url.scheme() == "tauri" {
+    if url.scheme() == "tauri" && url.host_str() == Some("localhost") {
         return true;
     }
     if matches!(url.scheme(), "http" | "https") && url.host_str() == Some("tauri.localhost") {
@@ -51,6 +51,9 @@ mod tests {
         assert!(!allows(&url("http://localhost:5173/"), None));
         assert!(!allows(&url("file:///etc/passwd"), None));
         assert!(!allows(&url("about:config"), None));
+        // The scheme alone is not the origin.
+        assert!(!allows(&url("tauri://example.com/index.html"), None));
+        assert!(!allows(&url("tauri:///index.html"), None));
     }
 
     #[test]

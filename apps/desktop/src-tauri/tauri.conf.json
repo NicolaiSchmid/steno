@@ -5,8 +5,8 @@
   "build": {
     "frontendDist": "../../macos/web/dist",
     "devUrl": "http://localhost:5173",
-    "beforeDevCommand": { "script": "pnpm dev", "cwd": "../macos/web" },
-    "beforeBuildCommand": { "script": "pnpm build", "cwd": "../macos/web" }
+    "beforeDevCommand": { "script": "pnpm dev", "cwd": "../../macos/web" },
+    "beforeBuildCommand": { "script": "pnpm build", "cwd": "../../macos/web" }
   },
   "app": {
     "security": {

@@ -9,7 +9,7 @@
 
 use std::fmt;
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
 use tauri::{AppHandle, Emitter, EventTarget, Manager, State, Url, WebviewWindow};
 use tauri_plugin_opener::OpenerExt;
@@ -177,14 +177,35 @@ impl fmt::Display for SettingsSection {
 /// an optional section for Settings and an optional meeting for main. A
 /// section outside the six or a meeting ID that is not a UUID is
 /// `invalidParams`, so what reaches a route or a snapshot needs no escaping.
+/// Unknown keys are ignored, as the Swift `Decodable` and `steno-bridge` do.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct WindowParams {
     pub window: BridgeWindow,
     #[serde(default)]
     pub section: Option<SettingsSection>,
-    #[serde(rename = "meetingID", default)]
+    #[serde(
+        rename = "meetingID",
+        default,
+        deserialize_with = "deserialize_meeting_id"
+    )]
     pub meeting_id: Option<Uuid>,
+}
+
+/// `meetingID` as `UUID(uuidString:)` reads it: the hyphenated 36-character
+/// form only, either case. The `uuid` crate would also read the 32-digit,
+/// braced and `urn:uuid:` forms, which Foundation rejects. `steno-bridge`
+/// brings this as `json::uuid::option`.
+fn deserialize_meeting_id<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<Uuid>, D::Error> {
+    let Some(string) = Option::<String>::deserialize(deserializer)? else {
+        return Ok(None);
+    };
+    (string.len() == 36)
+        .then(|| Uuid::try_parse(&string).ok())
+        .flatten()
+        .map(Some)
+        .ok_or_else(|| serde::de::Error::custom(format!("Not a UUID: {string}")))
 }
 
 /// A UUID as the Swift host writes it (`UUID.uuidString`, upper case), so a
@@ -198,7 +219,6 @@ pub fn uuid_text(id: &Uuid) -> String {
 
 /// `params.system.openURL.json`.
 #[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
 struct OpenUrlParams {
     url: String,
 }
@@ -212,12 +232,19 @@ fn parse<T: for<'de> Deserialize<'de>>(method: &str, params: Value) -> Result<T,
 /// not answer the method (`unknownMethod`, as their Swift hosts route it,
 /// `MainWindowBridge.swift` and `SettingsBridge.swift`); the onboarding
 /// window closes nothing but itself (`invalidParams`,
-/// `OnboardingBridge.swift`). The page does not send the method today: the
-/// host closes the window on a finished `onboarding` snapshot (`emit`).
+/// `OnboardingBridge.swift`). The messages are the Swift hosts' verbatim.
+/// The page does not send the method today: the host closes the window on
+/// a finished `onboarding` snapshot (`emit`).
 pub fn close_target(caller: &str, request: &WindowParams) -> Result<BridgeWindow, BridgeError> {
     if caller != BridgeWindow::Onboarding.as_str() {
+        // The Swift hosts name the Settings window with its title case.
+        let name = if caller == BridgeWindow::Settings.as_str() {
+            "Settings"
+        } else {
+            caller
+        };
         return Err(BridgeError::unknown_method(format!(
-            "The {caller} window does not answer window.close."
+            "The {name} window does not answer window.close."
         )));
     }
     if request.window != BridgeWindow::Onboarding {
@@ -376,25 +403,55 @@ mod tests {
             r#"{"window":"settings","section":"General"}"#,
             r#"{"window":"settings","section":"iphone&dark"}"#,
             r#"{"window":"panel"}"#,
-            r#"{"window":"main","extra":true}"#,
         ] {
             let error = window_params(json).expect_err(json);
             assert_eq!(error.code, BridgeErrorCode::InvalidParams, "{json}");
             assert!(error.message.starts_with("window.open: "), "{json}");
         }
+        // Unknown keys are ignored, as the Swift `Decodable` ignores them.
+        let params = window_params(r#"{"window":"main","extra":true}"#).unwrap();
+        assert_eq!(params.window, BridgeWindow::Main);
     }
 
+    /// `UUID(uuidString:)` reads either case of the hyphenated form and
+    /// nothing else; `null` and a missing key are no meeting.
     #[test]
-    fn a_meeting_id_must_be_a_uuid() {
+    fn a_meeting_id_must_be_a_hyphenated_uuid() {
+        let id: Uuid = "00000000-0000-0000-0000-00000000000c".parse().unwrap();
+        for json in [
+            r#"{"window":"main","meetingID":"00000000-0000-0000-0000-00000000000c"}"#,
+            r#"{"window":"main","meetingID":"00000000-0000-0000-0000-00000000000C"}"#,
+        ] {
+            assert_eq!(window_params(json).unwrap().meeting_id, Some(id), "{json}");
+        }
+        for json in [
+            r#"{"window":"main"}"#,
+            r#"{"window":"main","meetingID":null}"#,
+        ] {
+            assert_eq!(window_params(json).unwrap().meeting_id, None, "{json}");
+        }
         for json in [
             r#"{"window":"main","meetingID":"m-1"}"#,
             r#"{"window":"main","meetingID":""}"#,
             r#"{"window":"main","meetingID":"00000000-0000-0000-0000-00000000000g"}"#,
+            r#"{"window":"main","meetingID":"00000000-0000-0000-0000-00000000000"}"#,
+            r#"{"window":"main","meetingID":"0000000000000000000000000000000c"}"#,
+            r#"{"window":"main","meetingID":"{00000000-0000-0000-0000-00000000000c}"}"#,
+            r#"{"window":"main","meetingID":"urn:uuid:00000000-0000-0000-0000-00000000000c"}"#,
             r#"{"window":"main","meetingID":1}"#,
         ] {
             let error = window_params(json).expect_err(json);
             assert_eq!(error.code, BridgeErrorCode::InvalidParams, "{json}");
         }
+        let braced = window_params(
+            r#"{"window":"main","meetingID":"{00000000-0000-0000-0000-00000000000c}"}"#,
+        )
+        .unwrap_err();
+        assert!(
+            braced.message.starts_with("window.open: Not a UUID: {0000"),
+            "{}",
+            braced.message
+        );
     }
 
     #[test]
@@ -408,12 +465,13 @@ mod tests {
         let other = close_target("onboarding", &settings).unwrap_err();
         assert_eq!(other.code, BridgeErrorCode::InvalidParams);
         assert_eq!(other.message, "The onboarding window closes only itself.");
-        for caller in ["main", "settings"] {
+        // Verbatim from `MainWindowBridge.swift` and `SettingsBridge.swift`.
+        for (caller, name) in [("main", "main"), ("settings", "Settings")] {
             let error = close_target(caller, &onboarding).unwrap_err();
             assert_eq!(error.code, BridgeErrorCode::UnknownMethod, "{caller}");
             assert_eq!(
                 error.message,
-                format!("The {caller} window does not answer window.close.")
+                format!("The {name} window does not answer window.close.")
             );
         }
     }

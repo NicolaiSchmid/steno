@@ -23,9 +23,13 @@ fn main() {
 /// placeholder.
 fn ensure_frontend_dist(manifest_dir: &Path) {
     let dist = manifest_dir.join("../../macos/web/dist");
-    println!("cargo:rerun-if-changed={}", dist.display());
+    let index = dist.join("index.html");
+    // The file, not the directory: a directory's mtime moves with every
+    // asset Vite rewrites, while what decides the override is whether
+    // `index.html` exists.
+    println!("cargo:rerun-if-changed={}", index.display());
     println!("cargo:rerun-if-env-changed=TAURI_CONFIG");
-    if dist.join("index.html").is_file() {
+    if index.is_file() {
         return;
     }
     assert!(
