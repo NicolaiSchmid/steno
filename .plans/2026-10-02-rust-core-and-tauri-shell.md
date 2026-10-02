@@ -584,12 +584,13 @@ PR off `main`.
 | Core protocols and fakes | `feat/rust-protocols` | #162 | merged |
 | Bridge on core | `refactor/rust-bridge-on-core` | #161 | merged |
 | WP4b CoreML speech backend | `feat/rust-speech-coreml` | #163 | merged |
+| WP4a speech: `steno-speech` pipeline (VAD, chunker, TDT decoder, merge, tagger), ONNX Runtime backend, model store | `feat/rust-speech` | #171 | open |
 | WP7a LLM (`steno-llm`) | `feat/rust-llm` | #167 | merged |
 | WP7b adapters | `feat/rust-adapters` | #165 | merged |
 | WP6a host | `feat/rust-host` | #170 | merged |
 | WP5a audio (`steno-audio`) | `feat/rust-audio` | #166 | merged |
 | WP4d diarization (`steno-diarize`) | `feat/rust-diarize` | #164 | merged |
-| WP7c handover | `feat/rust-handover` | #169 | open |
+| WP7c handover | `feat/rust-handover` | #169 | merged |
 
 WP4b is `crates/steno-speech-coreml`: `objc2-core-ml` behind one safe module,
 the four backend calls, the FluidAudio 0.17.4 heuristics ported
