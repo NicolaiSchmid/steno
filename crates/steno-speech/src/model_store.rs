@@ -169,9 +169,8 @@ impl ModelStore {
             .files
             .iter()
             .filter(|file| {
-                fs::metadata(directory.join(&file.name))
+                !fs::metadata(directory.join(&file.name))
                     .is_ok_and(|m| m.is_file() && m.len() == file.size)
-                    .not()
             })
             .map(|file| file.name.clone())
             .collect()
@@ -315,17 +314,6 @@ impl ModelStore {
             return Err(error);
         }
         fs::rename(&partial, destination).map_err(|e| SpeechError::io(destination, e))
-    }
-}
-
-/// `!` as a method, so the filter above reads forwards.
-trait Not {
-    fn not(self) -> bool;
-}
-
-impl Not for bool {
-    fn not(self) -> bool {
-        !self
     }
 }
 

@@ -36,10 +36,7 @@ pub struct Chunk {
 impl Chunk {
     #[must_use]
     pub fn seconds(&self) -> f64 {
-        // Exact far beyond any recording length.
-        #[allow(clippy::cast_precision_loss)]
-        let samples = self.range.len() as f64;
-        samples / SAMPLE_RATE as f64
+        self.range.len() as f64 / SAMPLE_RATE as f64
     }
 }
 
@@ -78,13 +75,7 @@ impl Default for ChunkerConfig {
 #[must_use]
 pub fn samples(seconds: f32) -> usize {
     // Rounded down; the clamp keeps the cast in range.
-    #[allow(
-        clippy::cast_possible_truncation,
-        clippy::cast_sign_loss,
-        clippy::cast_precision_loss
-    )]
-    let count = (seconds.max(0.0) * SAMPLE_RATE as f32) as usize;
-    count
+    (seconds.max(0.0) * SAMPLE_RATE as f32) as usize
 }
 
 /// Pauses between speech regions, including the leading and the trailing
@@ -206,10 +197,10 @@ pub fn layout(audio: &[f32], speech: &[Range<usize>], config: &ChunkerConfig) ->
 }
 
 /// The next chunk starts `overlap` before this one's end and at least
-/// `min_chunk` after this one's start, so an overlap longer than the chunk
-/// still makes linear progress.
+/// `min_chunk` (at least one sample) after this one's start, so an overlap
+/// longer than the chunk still makes linear progress.
 fn next_start(start: usize, end: usize, overlap: usize, min_chunk: usize) -> usize {
-    end.saturating_sub(overlap).max(start + min_chunk.max(1))
+    end.saturating_sub(overlap).max(start + min_chunk)
 }
 
 #[cfg(test)]

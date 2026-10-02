@@ -11,7 +11,7 @@ use std::ops::Range;
 use steno_core::{LanguageTag, RawSegment, TimedWord};
 
 use crate::backend::{FRAME_SAMPLES, SpeechBackend};
-use crate::chunker::{Chunk, ChunkerConfig, SAMPLE_RATE, layout, samples};
+use crate::chunker::{Chunk, ChunkerConfig, SAMPLE_RATE, layout, samples as sample_count};
 use crate::decoder::{DecodeStats, DecoderConfig, Token, decode_window};
 use crate::error::SpeechError;
 use crate::language::LanguageTagger;
@@ -194,8 +194,6 @@ impl<B: SpeechBackend> Transcriber<B> {
 
     fn looks_empty(&self, tokens: &[Token], speech: &[Range<usize>], range: &Range<usize>) -> bool {
         let speech_seconds = speech_inside(speech, range);
-        // Word counts are small.
-        #[allow(clippy::cast_precision_loss)]
         let words = self.word_count(tokens) as f32;
         speech_seconds >= self.config.recovery.min_speech_seconds
             && words < self.config.recovery.min_words_per_speech_second * speech_seconds
@@ -208,14 +206,14 @@ impl<B: SpeechBackend> Transcriber<B> {
         original: Vec<Token>,
         stats: &mut DecodeStats,
     ) -> Result<Vec<Token>, SpeechError> {
-        let max = samples_of(self.config.chunker.max_seconds);
+        let max = sample_count(self.config.chunker.max_seconds);
         let mut best = original;
         let mut best_words = self.word_count(&best);
         let mut accepted = false;
         let extensions = self.config.recovery.extensions_seconds.clone();
         for (before, after) in extensions {
-            let start = range.start.saturating_sub(samples_of(before));
-            let end = (range.end + samples_of(after)).min(samples.len());
+            let start = range.start.saturating_sub(sample_count(before));
+            let end = (range.end + sample_count(after)).min(samples.len());
             if end - start > max || (start == range.start && end == range.end) {
                 continue;
             }
@@ -235,10 +233,6 @@ impl<B: SpeechBackend> Transcriber<B> {
     }
 }
 
-fn samples_of(seconds: f32) -> usize {
-    samples(seconds)
-}
-
 /// Seconds of VAD speech inside `range`.
 #[must_use]
 pub fn speech_inside(speech: &[Range<usize>], range: &Range<usize>) -> f32 {
@@ -251,14 +245,11 @@ pub fn speech_inside(speech: &[Range<usize>], range: &Range<usize>) -> f32 {
                 .saturating_sub(region.start.max(range.start))
         })
         .sum();
-    // Sample counts fit f32's integer range well enough for seconds.
-    #[allow(clippy::cast_precision_loss)]
-    let seconds = count as f32 / SAMPLE_RATE as f32;
-    seconds
+    count as f32 / SAMPLE_RATE as f32
 }
 
 #[cfg(test)]
-pub(crate) mod fake {
+mod fake {
     //! A backend that reads the "token per frame" the test audio encodes:
     //! each 80 ms frame of audio holds a constant sample value `k / 1000`,
     //! which the fake decodes as piece `k` (0 for silence); a chunk's frames

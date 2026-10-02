@@ -13,7 +13,7 @@ use std::ops::Range;
 use std::path::Path;
 
 use ort::session::{Session, SessionInputValue};
-use ort::value::{Tensor, TensorElementType, ValueType};
+use ort::value::Tensor;
 
 use crate::chunker::samples;
 use crate::error::SpeechError;
@@ -285,8 +285,6 @@ impl VoiceActivityDetector for EnergyVad {
         let probabilities: Vec<f32> = samples
             .chunks(WINDOW)
             .map(|window| {
-                // Window lengths are tiny.
-                #[allow(clippy::cast_precision_loss)]
                 let rms = (window.iter().map(|x| x * x).sum::<f32>() / window.len() as f32).sqrt();
                 if rms >= self.rms_threshold { 1.0 } else { 0.0 }
             })
@@ -298,17 +296,6 @@ impl VoiceActivityDetector for EnergyVad {
             &self.config,
         ))
     }
-}
-
-/// Silero's input dtypes, kept here so the loader's expectations are in one
-/// place.
-#[allow(dead_code)]
-const EXPECTED_TYPES: [TensorElementType; 2] =
-    [TensorElementType::Float32, TensorElementType::Int64];
-
-#[allow(dead_code)]
-fn is_tensor(value: &ValueType) -> bool {
-    matches!(value, ValueType::Tensor { .. })
 }
 
 #[cfg(test)]

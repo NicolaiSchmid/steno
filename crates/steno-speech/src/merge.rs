@@ -32,10 +32,7 @@ fn enforce_monotonic(tokens: &mut [Token]) {
 }
 
 fn seconds(token: &Token) -> f64 {
-    // Frame counts are far below 2^53.
-    #[allow(clippy::cast_precision_loss)]
-    let frame = token.frame as f64;
-    frame * FRAME_SECONDS
+    token.frame as f64 * FRAME_SECONDS
 }
 
 /// Merges `right` onto `left`, which ends inside `right`'s start.

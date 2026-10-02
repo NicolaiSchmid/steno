@@ -19,10 +19,7 @@ pub fn timed_pieces(tokens: &[Token], vocab: &Vocab) -> Vec<TimedWord> {
     tokens
         .iter()
         .map(|token| {
-            // Frame counts are far below 2^53.
-            #[allow(clippy::cast_precision_loss)]
             let start = token.frame.saturating_sub(1) as f64 * FRAME_SECONDS;
-            #[allow(clippy::cast_precision_loss)]
             let length = token.duration.max(1) as f64 * FRAME_SECONDS;
             TimedWord {
                 text: vocab.piece(token.id).to_owned(),
@@ -55,8 +52,6 @@ impl TokenAggregator {
             if let Some(mut word) = current.take()
                 && !word.text.is_empty()
             {
-                // Piece counts are small.
-                #[allow(clippy::cast_precision_loss)]
                 let mean = confidences.iter().sum::<f32>() / confidences.len().max(1) as f32;
                 word.confidence = if confidences.is_empty() { 1.0 } else { mean };
                 words.push(word);

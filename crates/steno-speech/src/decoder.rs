@@ -127,7 +127,7 @@ mod tests {
 
     /// A backend driven by a script of joint decisions, in call order; the
     /// decoder step records what it was fed.
-    pub(crate) struct ScriptedBackend {
+    struct ScriptedBackend {
         shape: ModelShape,
         script: std::collections::VecDeque<JointDecision>,
         pub fed: Vec<u32>,
