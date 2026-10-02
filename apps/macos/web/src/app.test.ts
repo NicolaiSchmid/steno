@@ -8,6 +8,14 @@ describe("parseHash", () => {
 		expect(parseHash("#/main").path).toBe("/main");
 	});
 
+	it("reads the panel routes with their request", () => {
+		expect(parseHash("#/panel/bubble").path).toBe("/panel/bubble");
+		const prompt = parseHash("#/panel/prompt?app=Microsoft+Teams&seconds=60");
+		expect(prompt.path).toBe("/panel/prompt");
+		expect(prompt.params.get("app")).toBe("Microsoft Teams");
+		expect(prompt.params.get("seconds")).toBe("60");
+	});
+
 	it("keeps the stories and the query flags", () => {
 		const route = parseHash("#/stories?dark");
 		expect(route.path).toBe("/stories");

@@ -3,13 +3,16 @@ import { TooltipProvider } from "@/components/ui";
 import { StoriesPage } from "@/stories/stories-page";
 import { MainWindow } from "@/windows/main/main-window";
 import { OnboardingWindow } from "@/windows/onboarding/onboarding-window";
+import { isPanelRoute, PanelWindow } from "@/windows/panels/panel-window";
 import { isSectionId } from "@/windows/settings/sections";
 import { SettingsWindow } from "@/windows/settings/settings-window";
 
 /**
  * Hash routes: `#/main` (the default when the hash is empty),
  * `#/settings?section=<general|recording|transcription|summaries|export|iphone>`,
- * `#/onboarding` and `#/stories` (every component). Query flags: `dark`; for the main window
+ * `#/onboarding`, the Tauri shell's floating panels `#/panel/bubble` and
+ * `#/panel/prompt?app=<name>&seconds=<n>` (`src/windows/panels/`), and
+ * `#/stories` (every component). Query flags: `dark`; for the main window
  * `menu` and `picker` open the actions menu and the speaker picker on mount,
  * and the mock bridge reads `scenario` and `tab` (`src/bridge/mock-transport.ts`).
  * A hash change re-renders the page in place; nothing reloads.
@@ -74,6 +77,14 @@ export function App() {
 	let page: React.ReactNode;
 	if (route.path === "/stories") {
 		page = <StoriesPage />;
+	} else if (isPanelRoute(route.path)) {
+		// The pill alone on the transparent canvas: no page background, no
+		// full-height root, so the shell's window shows nothing around it.
+		return (
+			<TooltipProvider delay={400}>
+				<PanelWindow params={route.params} route={route.path} />
+			</TooltipProvider>
+		);
 	} else if (route.path === "/onboarding") {
 		page = <OnboardingWindow />;
 	} else if (route.path === "/settings") {

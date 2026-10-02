@@ -1,0 +1,116 @@
+import { screen } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
+import { describe, expect, it, vi } from "vitest";
+import { callsTo, createBridgeHarness, renderWithBridge } from "@/test/bridge";
+import { DetectionPrompt, parsePromptRequest } from "./detection-prompt";
+import type { PanelShell } from "./panel-shell";
+
+function fakeShell(): PanelShell & { calls: unknown[][] } {
+	const calls: unknown[][] = [];
+	return {
+		calls,
+		call: async (action, params) => {
+			calls.push([action, params]);
+		},
+	};
+}
+
+describe("parsePromptRequest", () => {
+	it("reads the app and the seconds, with defaults", () => {
+		expect(
+			parsePromptRequest(new URLSearchParams("app=Zoom&seconds=45")),
+		).toEqual({
+			appName: "Zoom",
+			seconds: 45,
+		});
+		expect(parsePromptRequest(new URLSearchParams())).toEqual({
+			appName: "An app",
+			seconds: 60,
+		});
+		expect(parsePromptRequest(new URLSearchParams("app=+&seconds=-3"))).toEqual(
+			{
+				appName: "An app",
+				seconds: 60,
+			},
+		);
+		expect(
+			parsePromptRequest(new URLSearchParams("seconds=soon")).seconds,
+		).toBe(60);
+	});
+});
+
+describe("DetectionPrompt", () => {
+	it("names the app and offers Record and Not now", async () => {
+		const harness = await createBridgeHarness();
+		renderWithBridge(
+			<DetectionPrompt
+				request={{ appName: "Zoom", seconds: 60 }}
+				shell={fakeShell()}
+			/>,
+			harness,
+		);
+		expect(screen.getByTestId("prompt-title")).toHaveTextContent(
+			"Zoom opened the microphone",
+		);
+		expect(
+			screen.getByRole("button", { name: "Record with Steno" }),
+		).toBeInTheDocument();
+		expect(screen.getByRole("button", { name: "Not now" })).toBeInTheDocument();
+		expect(screen.getByTestId("countdown-hairline")).toBeInTheDocument();
+	});
+
+	it("Record starts a call recording through the bridge", async () => {
+		const harness = await createBridgeHarness();
+		renderWithBridge(
+			<DetectionPrompt
+				request={{ appName: "Zoom", seconds: 60 }}
+				shell={fakeShell()}
+			/>,
+			harness,
+		);
+		await userEvent.click(screen.getByTestId("prompt-record"));
+		expect(callsTo(harness.transport, "recording.start")).toEqual([
+			{ method: "recording.start", params: { mode: "call" } },
+		]);
+	});
+
+	it("the X tells the shell and never the bridge", async () => {
+		const harness = await createBridgeHarness();
+		const shell = fakeShell();
+		renderWithBridge(
+			<DetectionPrompt
+				request={{ appName: "Zoom", seconds: 60 }}
+				shell={shell}
+			/>,
+			harness,
+		);
+		await userEvent.click(screen.getByTestId("prompt-dismiss"));
+		expect(shell.calls).toEqual([["dismissPrompt", undefined]]);
+		expect(harness.transport.calls).toEqual([]);
+	});
+
+	it("reports its size to the shell", async () => {
+		const observed = vi.fn();
+		class FakeResizeObserver {
+			constructor(callback: () => void) {
+				observed(callback);
+			}
+			observe() {}
+			disconnect() {}
+		}
+		vi.stubGlobal("ResizeObserver", FakeResizeObserver);
+		const harness = await createBridgeHarness();
+		const shell = fakeShell();
+		renderWithBridge(
+			<DetectionPrompt
+				request={{ appName: "Zoom", seconds: 60 }}
+				shell={shell}
+			/>,
+			harness,
+		);
+		expect(observed).toHaveBeenCalledOnce();
+		// jsdom lays nothing out, so the zero size is not reported.
+		expect(shell.calls.filter(([action]) => action === "resize")).toEqual([]);
+		vi.unstubAllGlobals();
+	});
+});
