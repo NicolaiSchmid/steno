@@ -54,13 +54,13 @@ pub fn turns(
     let mut counts = vec![0u32; total_frames];
     for activity in &analysis.activities {
         let base = geometry.global_frame(activity.offset);
-        for (local, _) in activity.frames.iter().enumerate() {
+        for (local, mask) in activity.frames.iter().enumerate() {
             let frame = base + local;
             if frame >= total_frames {
                 break;
             }
             coverage[frame] += 1;
-            counts[frame] += activity.speaker_count(local);
+            counts[frame] += mask.count_ones();
         }
     }
     for (embedding, cluster) in analysis.embeddings.iter().zip(assignments) {
@@ -76,28 +76,32 @@ pub fn turns(
             }
         }
     }
-    // Active clusters per frame: the top `k` by votes, `k` the rounded mean
-    // speaker count, only clusters somebody voted for.
-    let mut active: Vec<Vec<usize>> = Vec::with_capacity(total_frames);
+    // Active clusters per frame, laid out like `votes`: the top `k` by
+    // votes, `k` the rounded mean speaker count, only clusters somebody
+    // voted for.
+    let mut active = vec![false; total_frames * cluster_count];
+    let mut ranked: Vec<usize> = Vec::with_capacity(cluster_count);
     for frame in 0..total_frames {
         if coverage[frame] == 0 {
-            active.push(Vec::new());
             continue;
         }
         let expected = (counts[frame] + coverage[frame] / 2) / coverage[frame];
         let k = (expected as usize).min(cluster_count.min(geometry.num_speakers));
         let row = &votes[frame * cluster_count..(frame + 1) * cluster_count];
-        let mut ranked: Vec<usize> = (0..cluster_count).filter(|c| row[*c] > 0).collect();
+        ranked.clear();
+        ranked.extend((0..cluster_count).filter(|c| row[*c] > 0));
         ranked.sort_by(|lhs, rhs| row[*rhs].cmp(&row[*lhs]).then(lhs.cmp(rhs)));
         ranked.truncate(k);
-        active.push(ranked);
+        for cluster in &ranked {
+            active[frame * cluster_count + cluster] = true;
+        }
     }
     // Runs per cluster become segments with their mean vote share.
     let mut segments: Vec<Segment> = Vec::new();
     for cluster in 0..cluster_count {
         let mut run: Option<(usize, f64, usize)> = None;
         for frame in 0..=total_frames {
-            let is_active = frame < total_frames && active[frame].contains(&cluster);
+            let is_active = frame < total_frames && active[frame * cluster_count + cluster];
             if is_active {
                 let share =
                     f64::from(votes[frame * cluster_count + cluster]) / f64::from(coverage[frame]);
