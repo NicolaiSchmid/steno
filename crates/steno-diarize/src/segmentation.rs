@@ -1,7 +1,7 @@
 //! Sliding windows over the lane and the segmentation model's powerset
 //! output as per-frame speaker activity.
 
-use crate::backend::{SegmentationGeometry, to_f64};
+use crate::backend::SegmentationGeometry;
 
 /// One window handed to the segmentation and embedding models.
 #[derive(Debug, Clone, PartialEq)]
@@ -146,9 +146,9 @@ pub fn frame_span(
     last: usize,
     total_samples: usize,
 ) -> (f64, f64) {
-    let base = to_f64(offset) / to_f64(geometry.sample_rate);
+    let base = geometry.seconds(offset);
     let half = geometry.frame_seconds() / 2.0;
-    let duration = to_f64(total_samples) / to_f64(geometry.sample_rate);
+    let duration = geometry.seconds(total_samples);
     let start = (base + geometry.frame_centre_seconds(first) - half).clamp(0.0, duration);
     let end = (base + geometry.frame_centre_seconds(last) + half).clamp(start, duration);
     (start, end)

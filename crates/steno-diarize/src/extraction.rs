@@ -58,8 +58,7 @@ impl Analysis {
     /// Seconds of audio analysed.
     #[must_use]
     pub fn duration(&self) -> f64 {
-        crate::backend::to_f64(self.total_samples)
-            / crate::backend::to_f64(self.geometry.sample_rate)
+        self.geometry.seconds(self.total_samples)
     }
 }
 

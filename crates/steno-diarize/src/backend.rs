@@ -37,24 +37,29 @@ impl SegmentationGeometry {
         num_classes: 7,
     };
 
+    /// `samples` samples as seconds at this geometry's rate.
+    #[must_use]
+    pub fn seconds(&self, samples: usize) -> f64 {
+        to_f64(samples) / to_f64(self.sample_rate)
+    }
+
     /// Seconds one frame advances.
     #[must_use]
     pub fn frame_seconds(&self) -> f64 {
-        to_f64(self.receptive_field_shift) / to_f64(self.sample_rate)
+        self.seconds(self.receptive_field_shift)
     }
 
     /// Seconds the window lasts.
     #[must_use]
     pub fn window_seconds(&self) -> f64 {
-        to_f64(self.window_samples) / to_f64(self.sample_rate)
+        self.seconds(self.window_samples)
     }
 
     /// The time at the centre of `frame` counted from the start of the
     /// window (or recording) it belongs to.
     #[must_use]
     pub fn frame_centre_seconds(&self, frame: usize) -> f64 {
-        to_f64(frame * self.receptive_field_shift + self.receptive_field_size / 2)
-            / to_f64(self.sample_rate)
+        self.seconds(frame * self.receptive_field_shift + self.receptive_field_size / 2)
     }
 
     /// The first global frame of a window at `offset` samples: the window's

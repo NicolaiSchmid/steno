@@ -3,7 +3,7 @@
 
 use steno_core::{AudioBuffer16k, BoxError, ClusterChunk, DiarizationResult, Embedding};
 
-use crate::backend::TensorBackend;
+use crate::backend::{TensorBackend, to_f64};
 use crate::clustering::{self, ClusteringConfig};
 use crate::error::DiarizeError;
 use crate::extraction::{self, Analysis, ExtractionRules};
@@ -68,9 +68,7 @@ impl DiarizerConfig {
     fn step_samples(&self, sample_rate: usize) -> usize {
         // Positive seconds times the rate; nothing to truncate.
         #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-        let step = (self.step_seconds * crate::backend::to_f64(sample_rate))
-            .round()
-            .max(1.0) as usize;
+        let step = (self.step_seconds * to_f64(sample_rate)).round().max(1.0) as usize;
         step
     }
 }

@@ -8,9 +8,9 @@ use std::path::Path;
 use ort::session::Session;
 use ort::value::Tensor;
 
-use crate::backend::{BackendError, SegmentationGeometry, TensorBackend};
+use crate::backend::{BackendError, SegmentationGeometry, TensorBackend, to_f64};
 use crate::error::DiarizeError;
-use crate::fbank::Fbank;
+use crate::fbank::{Fbank, FbankConfig};
 use crate::models::{ModelStore, PYANNOTE_SEGMENTATION_3_0, WESPEAKER_RESNET34_LM};
 
 /// Fbank frames the embedding model is given at least; under that the
@@ -86,7 +86,7 @@ impl OnnxBackend {
             )));
         }
         drop(metadata);
-        let mut config = crate::fbank::FbankConfig::WESPEAKER;
+        let mut config = FbankConfig::WESPEAKER;
         if !scales_samples {
             config.sample_scale = 1.0;
         }
@@ -116,15 +116,13 @@ impl OnnxBackend {
         let geometry = &self.geometry;
         let mut selected = Vec::new();
         for frame in 0..frames {
-            let centre = self.fbank.frame_centre_seconds(frame)
-                * crate::backend::to_f64(geometry.sample_rate);
-            let shifted = centre - crate::backend::to_f64(geometry.receptive_field_size / 2);
+            let centre = self.fbank.frame_centre_seconds(frame) * to_f64(geometry.sample_rate);
+            let shifted = centre - to_f64(geometry.receptive_field_size / 2);
             // Non-negative after the clamp; the index stays far below 2^53.
             #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-            let segmentation_frame = ((shifted
-                / crate::backend::to_f64(geometry.receptive_field_shift))
-            .round()
-            .max(0.0) as usize)
+            let segmentation_frame = ((shifted / to_f64(geometry.receptive_field_shift))
+                .round()
+                .max(0.0) as usize)
                 .min(geometry.frames_per_window.saturating_sub(1));
             if weights
                 .get(segmentation_frame)
