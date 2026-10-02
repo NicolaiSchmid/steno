@@ -674,16 +674,7 @@ impl<Tz: TimeZone> SummaryPromptBuilder<Tz> {
         .join("\n");
         let user = format!("Validation error: {error}\n\nInvalid answer:\n{invalid}");
         LlmRequest {
-            messages: vec![
-                LlmMessage {
-                    role: LlmRole::System,
-                    content: system,
-                },
-                LlmMessage {
-                    role: LlmRole::User,
-                    content: user,
-                },
-            ],
+            messages: Self::messages(system, user),
             response_format: request.response_format.clone(),
             temperature: Some(Self::TEMPERATURE),
             max_tokens: request.max_tokens,
@@ -801,16 +792,7 @@ impl<Tz: TimeZone> SummaryPromptBuilder<Tz> {
         max_tokens: Option<i64>,
     ) -> LlmRequest {
         LlmRequest {
-            messages: vec![
-                LlmMessage {
-                    role: LlmRole::System,
-                    content: system,
-                },
-                LlmMessage {
-                    role: LlmRole::User,
-                    content: user,
-                },
-            ],
+            messages: Self::messages(system, user),
             response_format: LlmResponseFormat::JsonSchema {
                 name: name.to_owned(),
                 schema: schema.json_value(),
@@ -820,6 +802,19 @@ impl<Tz: TimeZone> SummaryPromptBuilder<Tz> {
             max_tokens,
             purpose: purpose.to_owned(),
         }
+    }
+
+    fn messages(system: String, user: String) -> Vec<LlmMessage> {
+        vec![
+            LlmMessage {
+                role: LlmRole::System,
+                content: system,
+            },
+            LlmMessage {
+                role: LlmRole::User,
+                content: user,
+            },
+        ]
     }
 }
 
