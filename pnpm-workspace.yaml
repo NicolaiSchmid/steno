@@ -1,16 +1,21 @@
-# The JavaScript workspace, laid out like pingdotgg/t3code: apps under apps/*
-# share one lockfile at the repository root.
+# The JavaScript workspace, laid out like pingdotgg/t3code: every app under
+# apps/ with a package.json shares one lockfile at the repository root. Today
+# that is apps/site; apps/desktop (Tauri, Rust only) has no package.json and
+# is skipped. When the Rust plan's WP9 moves the web UI to apps/web it joins
+# here by itself; drop its standalone pnpm-workspace.yaml at that point and
+# re-point the Tauri build hooks at `pnpm --filter @steno/web`.
 #
 # Two packages stay out of it on purpose and carry their own
 # pnpm-workspace.yaml (a file without a `packages` key marks a standalone
-# project, so pnpm stops walking up when run inside them):
+# project, so pnpm stops walking up when run inside them, and `apps/*` does
+# not match a nested directory anyway):
 #   - mobile/          EAS builds install from that directory and the Expo
 #                      native fingerprint is computed there.
-#   - apps/macos/web/  scripts/build-web.sh installs it inside the Xcode build
-#                      on a machine that has no reason to install the rest.
-# Moving either in here is a plan of its own.
+#   - apps/macos/web/  scripts/build-web.sh and the Tauri shell's build hooks
+#                      install it in place; the Xcode build machine has no
+#                      reason to install the rest.
 packages:
-  - apps/site
+  - apps/*
 
 # pnpm 11 holds back very new releases by default; the versions the site was
 # scaffolded with are allowed explicitly so a fresh install reproduces the

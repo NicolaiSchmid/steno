@@ -44,6 +44,29 @@ It is hosted at `steno.nicolaischmid.com`.
    the repository with Root Directory `apps/site`, and the CNAME
    `steno.nicolaischmid.com` points at it. Elsewhere: upload `out/`.
 
+## Fit with the Rust core and Tauri shell
+
+Checked on 2026-10-02 against `refactor/rust-workspace` and `feat/rust-desktop`
+(PRs #151, #153, #155, #156; plan `2026-10-02-rust-core-and-tauri-shell.md`):
+
+- The Cargo workspace (`Cargo.toml`, `crates/`, `apps/desktop/src-tauri`) and
+  the pnpm workspace (`package.json`, `pnpm-workspace.yaml`) sit side by side
+  at the root and share no files. `apps/*` skips `apps/desktop`, which has no
+  `package.json`.
+- The Tauri shell builds the web UI with `pnpm dev` and `pnpm build` in
+  `apps/macos/web`, and Rust CI installs there with its own lockfile. Both keep
+  working under the root workspace because that directory's
+  `pnpm-workspace.yaml` marks it standalone (`pnpm -w root` inside it resolves
+  to its own `node_modules`). Verified by merging both branches in a scratch
+  worktree and running the web install and build.
+- WP9 moves the web UI to `apps/web`; it then joins this workspace through
+  `apps/*`. That PR drops the standalone workspace file, moves the web
+  lockfile into the root one, and changes `tauri.conf.json`'s `frontendDist`
+  and build hooks (`pnpm --filter @steno/web build` from the root).
+- The only textual overlap is `AGENTS.md`: the Rust PRs rewrite the Core row
+  and add a Rust section before "Review guidelines"; this plan's section sits
+  before "Mobile" so the two merge cleanly in either order.
+
 ## Out of scope
 
 Blog, docs pages, analytics, a download counter, a newsletter. Each would be

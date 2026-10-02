@@ -80,6 +80,23 @@ missing local setup, run it. Do not ask first.
 - Tests with `swift test`. Fixtures under `Tests/Fixtures/`; keep audio
   fixtures short and synthetic, never recordings of real meetings.
 
+## Landing page (`apps/site/`)
+
+- Next.js 16 App Router with `output: "export"`; the site must stay fully
+  static so any host can serve `out/`. No server components that need a
+  runtime, no API routes.
+- Installed from the repository root (`pnpm install`), run with
+  `pnpm dev:site`; `pnpm check:site` and `pnpm build:site` must pass before a
+  PR (`.github/workflows/site-ci.yml`). `mobile/` and `apps/macos/web/` stay
+  outside the root workspace; `pnpm-workspace.yaml` says why.
+- Design and structure follow t3.codes (pingdotgg/t3code `apps/marketing`):
+  dark only, DM Sans and JetBrains Mono, hero → feature blocks → closing CTA.
+  Tokens live in `src/app/globals.css`; no raw colours at call sites. Hue is
+  reserved for the red live state, the primary action is white on dark.
+- Copy presents Steno as multi-platform (macOS, Windows, Linux) and does not
+  mention the vault or Obsidian. The hero mock uses the README's example
+  meeting, never a real recording. URLs live in `src/lib/site.ts`.
+
 ## Mobile (`mobile/`)
 
 - Expo SDK 57 dev client, pnpm 11 (`packageManager` in `mobile/package.json`),
@@ -98,23 +115,6 @@ missing local setup, run it. Do not ask first.
 - Delivery: `.github/workflows/mobile-cd.yml` decides OTA vs TestFlight from
   the Expo native fingerprint. See `mobile/README.md` before touching anything
   that moves the fingerprint (dependencies, config plugins, permissions).
-
-## Landing page (`apps/site/`)
-
-- Next.js 16 App Router with `output: "export"`; the site must stay fully
-  static so any host can serve `out/`. No server components that need a
-  runtime, no API routes.
-- Installed from the repository root (`pnpm install`), run with
-  `pnpm dev:site`; `pnpm check:site` and `pnpm build:site` must pass before a
-  PR (`.github/workflows/site-ci.yml`). `mobile/` and `apps/macos/web/` stay
-  outside the root workspace; `pnpm-workspace.yaml` says why.
-- Design and structure follow t3.codes (pingdotgg/t3code `apps/marketing`):
-  dark only, DM Sans and JetBrains Mono, hero → feature blocks → closing CTA.
-  Tokens live in `src/app/globals.css`; no raw colours at call sites. Hue is
-  reserved for the red live state, the primary action is white on dark.
-- Copy presents Steno as multi-platform (macOS, Windows, Linux) and does not
-  mention the vault or Obsidian. The hero mock uses the README's example
-  meeting, never a real recording. URLs live in `src/lib/site.ts`.
 
 ## Review guidelines
 
