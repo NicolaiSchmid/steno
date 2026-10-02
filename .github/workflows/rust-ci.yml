@@ -24,9 +24,10 @@ name: Rust CI
 # Linux also builds the web UI (its bridge transports are the shell's other
 # half), checks it, and runs the Tauri shell's headless smoke under Xvfb
 # (apps/desktop/scripts/smoke-linux.sh); the screenshots are uploaded as
-# `desktop-smoke-screens`. Windows and macOS build the shell against
-# `apps/desktop/src-tauri/placeholder/`, which build.rs embeds when the web
-# dist is missing.
+# `desktop-smoke-screens`. Windows and macOS build the shell without the web
+# dist: build.rs points `frontendDist` at `apps/desktop/src-tauri/placeholder/`
+# so the build goes through; the binary they produce would still load the
+# Vite dev server, as every build without `custom-protocol` does.
 #
 # The `msrv` job checks the workspace against `rust-version` from Cargo.toml
 # on Linux, so the number stays true.
@@ -141,9 +142,11 @@ jobs:
         run: cargo test --workspace --locked
 
       # A debug build loads devUrl; the smoke needs the embedded bundle, so
-      # the dev URL is dropped through Tauri's configuration merge.
+      # the dev URL is dropped through Tauri's configuration merge. The run
+      # ends itself after 15 s; the step limit catches a hang before that.
       - name: Desktop smoke
         if: matrix.name == 'linux'
+        timeout-minutes: 5
         env:
           TAURI_CONFIG: '{"build":{"devUrl":null}}'
         run: |

@@ -2,9 +2,11 @@
 # Headless smoke of the Tauri shell on Linux: runs the built binary under
 # xvfb-run with STENO_SMOKE_SECONDS, which makes the shell open all three
 # windows side by side and exit 0 once the main window has sent page.ready
-# (1 when it did not). When ImageMagick's `import` is available, the Xvfb
-# root is captured near the end of the wait into apps/desktop/screens/ as
-# review evidence; the windows carry only fixture data.
+# and a snapshot reached it (1 when either did not). When ImageMagick's
+# `import` is available, the Xvfb root is captured near the end of the wait
+# into apps/desktop/screens/ as review evidence, with one crop per window
+# (`magick` from ImageMagick 7, `convert` from 6); the windows carry only
+# fixture data.
 #
 #   apps/desktop/scripts/smoke-linux.sh [path/to/steno-desktop] [seconds]
 #
@@ -40,10 +42,16 @@ xvfb-run --auto-servernum --server-args="-screen 0 2200x1500x24" bash -c '
     sleep "$(( $2 > 3 ? $2 - 3 : 1 ))"
     import -window root "$3/smoke-root.png" && echo "smoke: captured $3/smoke-root.png"
     # One file per window, at the positions smoke.rs lays them out.
-    if command -v magick >/dev/null; then
-      magick "$3/smoke-root.png" -crop 1120x720+0+0 +repage "$3/main.png"
-      magick "$3/smoke-root.png" -crop 960x640+1160+0 +repage "$3/settings.png"
-      magick "$3/smoke-root.png" -crop 560x620+0+780 +repage "$3/onboarding.png"
+    # ImageMagick 7 is `magick`; 6 (the hosted Ubuntu image) is `convert`.
+    crop=""
+    if command -v magick >/dev/null; then crop=magick
+    elif command -v convert >/dev/null; then crop=convert
+    fi
+    if [[ -n "$crop" ]]; then
+      "$crop" "$3/smoke-root.png" -crop 1120x720+0+0 +repage "$3/main.png"
+      "$crop" "$3/smoke-root.png" -crop 960x640+1160+0 +repage "$3/settings.png"
+      "$crop" "$3/smoke-root.png" -crop 560x620+0+780 +repage "$3/onboarding.png"
+      echo "smoke: cropped main, settings and onboarding with $crop"
     fi
   fi
   wait "$app"
