@@ -1,0 +1,1584 @@
+//! The session over the synthetic backend: state machine, level stream,
+//! files, drop accounting, device changes and loss. Everything runs as fast
+//! as the rings accept and the rebuild's backoff runs on a `ManualClock`;
+//! no wall-clock sleeps in the code under test.
+//! Swift: `Tests/StenoAudioTests/CaptureSessionTests.swift`,
+//! `LiveAECPathTests.swift`.
+
+// Test arithmetic: sample counts and dB values cast freely, and sample
+// rates compare exactly on purpose.
+#![allow(
+    clippy::cast_precision_loss,
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::float_cmp,
+    clippy::too_many_lines,
+    clippy::doc_markdown,
+    clippy::cast_lossless,
+    clippy::unnecessary_wraps
+)]
+
+use std::collections::BTreeMap;
+use std::path::Path;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::mpsc::Receiver;
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+
+use steno_audio::capture::{
+    CaptureBackend, CaptureConfiguration, CaptureError, CaptureMode, CaptureNotice, CaptureSession,
+    CaptureState, CaptureStream, DeviceChangeReason, LaneLevel,
+};
+use steno_audio::realtime::LaneFrameSink;
+use steno_audio::testing::synthetic::SyntheticOptions;
+use steno_audio::testing::{AudioFixtures, ManualClock, SyntheticCaptureBackend, SyntheticLane};
+use steno_audio::writer::{
+    CafFile, LaneFrames, RecordingFiles, RecordingWriter, RecordingWriting, WavFile,
+};
+use steno_audio::{Clock, EchoMetrics, PassthroughEchoCanceller, SAMPLE_RATE, SystemClock};
+use steno_core::paths::path_from_file_url;
+use steno_core::{AudioFormat, AudioLane, AudioRetention, EchoCanceller, RecordingLayout};
+use uuid::Uuid;
+
+const RECV: Duration = Duration::from_secs(10);
+
+fn configuration(mode: CaptureMode, directory: &Path, keep_raw: bool) -> CaptureConfiguration {
+    let mut configuration = CaptureConfiguration::new(mode, directory);
+    configuration.echo_cancellation = true;
+    configuration.keep_raw_mic_lane = keep_raw;
+    configuration
+}
+
+fn passthrough() -> Option<Box<dyn EchoCanceller>> {
+    Some(Box::new(PassthroughEchoCanceller::new(48_000.0, 480)))
+}
+
+fn tones(lanes: &[AudioLane], seconds: f64) -> SyntheticOptions {
+    SyntheticOptions::tones(
+        lanes,
+        &[
+            (AudioLane::Mic, 440.0),
+            (AudioLane::System, 1_000.0),
+            (AudioLane::Mixed, 440.0),
+        ],
+        seconds,
+    )
+}
+
+fn call() -> [AudioLane; 2] {
+    [AudioLane::Mic, AudioLane::System]
+}
+
+fn restarted_stream() -> CaptureStream {
+    CaptureStream {
+        sample_rate: SAMPLE_RATE,
+        input_latency_frames: 480,
+        output_latency_frames: 9_600,
+        layout: None,
+    }
+}
+
+fn master_of(result: &steno_audio::capture::CaptureResult) -> CafFile {
+    CafFile::read(&path_from_file_url(&result.asset.url).unwrap()).unwrap()
+}
+
+fn sidecar_of(result: &steno_audio::capture::CaptureResult, lane: AudioLane) -> Vec<f32> {
+    WavFile::read_16k_mono(&path_from_file_url(&result.asset.sidecars_16k[&lane]).unwrap()).unwrap()
+}
+
+/// Collects states until the predicate matches.
+fn collect_states(
+    states: &Receiver<CaptureState>,
+    mut done: impl FnMut(&CaptureState) -> bool,
+) -> Vec<CaptureState> {
+    let mut seen = Vec::new();
+    while let Ok(state) = states.recv_timeout(RECV) {
+        let finished = done(&state);
+        seen.push(state);
+        if finished {
+            break;
+        }
+    }
+    seen
+}
+
+fn kinds(states: &[CaptureState]) -> Vec<&'static str> {
+    states.iter().map(CaptureState::kind).collect()
+}
+
+fn until_failed(state: &CaptureState) -> bool {
+    matches!(state, CaptureState::Failed { .. })
+}
+
+/// Advances `clock` through the first `count` backoff sleeps of a rebuild,
+/// each once the sleeper is registered.
+fn advance_through_sleeps(clock: &ManualClock, count: usize) {
+    for step in CaptureSession::RESTART_BACKOFF.iter().take(count) {
+        assert!(
+            clock.wait_for_sleepers(1),
+            "the rebuild sleeps on the injected clock"
+        );
+        clock.advance(*step);
+    }
+}
+
+/// Gives every thread a chance to run before asserting nothing further
+/// happened.
+fn settle() {
+    std::thread::sleep(Duration::from_millis(100));
+}
+
+#[test]
+fn idle_starting_recording_stopping_idle_over_the_synthetic_backend() {
+    let directory = tempfile::tempdir().unwrap();
+    let backend = Arc::new(SyntheticCaptureBackend::new(tones(&call(), 3.0)));
+    // Ten seconds of writer headroom: the backend delivers three seconds of
+    // audio in milliseconds, far faster than a debug-build writer.
+    let session = CaptureSession::with_backend(
+        configuration(CaptureMode::Call, directory.path(), false),
+        backend.clone(),
+        passthrough(),
+        1_000,
+        Arc::new(SystemClock::new()),
+    )
+    .unwrap();
+    let states = session.states();
+    let levels = session.levels();
+    let meeting_id = Uuid::new_v4();
+    assert_eq!(session.state(), CaptureState::Idle);
+
+    session.start(meeting_id).unwrap();
+    assert!(matches!(session.state(), CaptureState::Recording { .. }));
+
+    // The level stream carries the injected tone level (amplitude 0.5 sines
+    // are -9.03 dBFS).
+    let first = levels.recv_timeout(RECV).unwrap();
+    assert!((first.mic.rms - -9.03).abs() < 0.2);
+    assert!((first.system.unwrap().rms - -9.03).abs() < 0.2);
+
+    backend.wait_until_finished();
+    let result = session.stop().unwrap();
+    assert_eq!(session.state(), CaptureState::Idle);
+
+    let mut idles = 0;
+    let seen = collect_states(&states, |state| {
+        if *state == CaptureState::Idle {
+            idles += 1;
+        }
+        idles == 2
+    });
+    assert_eq!(
+        kinds(&seen),
+        ["idle", "starting", "recording", "stopping", "idle"]
+    );
+
+    assert_eq!(result.asset.meeting_id, meeting_id);
+    assert_eq!(result.asset.format, AudioFormat::Caf48kFloat32);
+    assert_eq!(result.asset.lanes, call());
+    assert_eq!(result.asset.retention, AudioRetention::KeepForever);
+    let layout = RecordingLayout::new(directory.path(), meeting_id);
+    assert_eq!(
+        path_from_file_url(&result.asset.url).unwrap(),
+        layout.master(AudioFormat::Caf48kFloat32)
+    );
+    assert_eq!(
+        path_from_file_url(&result.asset.sidecars_16k[&AudioLane::Mic]).unwrap(),
+        layout.sidecar(AudioLane::Mic)
+    );
+    assert_eq!(RecordingLayout::from_asset(&result.asset).unwrap(), layout);
+    assert!(result.statistics.dropped_frames.is_empty());
+    assert!((result.statistics.duration - 3.0).abs() < 0.02);
+    assert!(!result.statistics.system_lane_silent);
+    assert!(!result.statistics.ended_on_device_loss);
+
+    let master = master_of(&result);
+    assert_eq!(master.channels.len(), 2);
+    assert!((master.duration() - 3.0).abs() < 0.02);
+    let mic = sidecar_of(&result, AudioLane::Mic);
+    assert!((mic.len() as f64 / 16_000.0 - 3.0).abs() < 0.02);
+}
+
+/// A device that changes and never comes back: four restarts fail across
+/// the backoff ladder and the recording ends in `DeviceLost`, finalised and
+/// readable to its last frame.
+#[test]
+fn device_lost_stops_cleanly_with_a_readable_master() {
+    let directory = tempfile::tempdir().unwrap();
+    let clock = Arc::new(ManualClock::new());
+    let backend = Arc::new(SyntheticCaptureBackend::new(
+        tones(&call(), 10.0)
+            .change_device_after(1.0)
+            .restarts_that_fail(CaptureSession::RESTART_ATTEMPTS),
+    ));
+    let session = CaptureSession::with_backend(
+        configuration(CaptureMode::Call, directory.path(), false),
+        backend.clone(),
+        passthrough(),
+        200,
+        clock.clone(),
+    )
+    .unwrap();
+    let states = session.states();
+    let notices = session.notices();
+    session.start(Uuid::new_v4()).unwrap();
+    assert_eq!(
+        notices.recv_timeout(RECV).unwrap(),
+        CaptureNotice::DeviceChanged(DeviceChangeReason::DefaultInputChanged)
+    );
+    advance_through_sleeps(&clock, CaptureSession::RESTART_ATTEMPTS - 1);
+    let seen = collect_states(&states, until_failed);
+    assert_eq!(
+        seen.last().unwrap().failure(),
+        Some(&CaptureError::DeviceLost)
+    );
+    assert!(seen.contains(&CaptureState::Stopping));
+
+    // The state carries the finalised partial recording; `stop()` returns
+    // the same one.
+    let result = session.stop().unwrap();
+    assert_eq!(
+        *seen.last().unwrap(),
+        CaptureState::Failed {
+            error: CaptureError::DeviceLost,
+            recording: Some(Box::new(result.clone()))
+        }
+    );
+    assert!(result.statistics.ended_on_device_loss);
+    assert_eq!(result.statistics.device_changes, 0);
+    assert_eq!(result.statistics.gap_seconds, 0.0);
+    assert_eq!(result.statistics.duration, 1.0);
+    let master = master_of(&result);
+    assert_eq!(master.channels.len(), 2);
+    assert_eq!(master.frame_count(), 48_000);
+    assert_eq!(backend.starts(), 1 + CaptureSession::RESTART_ATTEMPTS);
+
+    // A failed session restarts; this backend's one change is spent, so the
+    // second recording sees no change and no restart.
+    session.start(Uuid::new_v4()).unwrap();
+    backend.wait_until_finished();
+    let second = session.stop().unwrap();
+    assert_eq!(session.state(), CaptureState::Idle);
+    assert_eq!(
+        backend.starts(),
+        2 + CaptureSession::RESTART_ATTEMPTS,
+        "one start, no restart"
+    );
+    assert_eq!(second.statistics.device_changes, 0);
+}
+
+/// A tap that never delivers anything (permission denied, a muted mix) is
+/// reported through `system_lane_silent` and the level stream's floor,
+/// while the recording itself completes.
+#[test]
+fn a_silent_system_lane_is_reported_in_statistics_and_levels() {
+    let directory = tempfile::tempdir().unwrap();
+    let signals: BTreeMap<AudioLane, SyntheticLane> = [
+        (AudioLane::Mic, SyntheticLane::tone(440.0)),
+        (AudioLane::System, SyntheticLane::SILENCE),
+    ]
+    .into_iter()
+    .collect();
+    let backend = Arc::new(SyntheticCaptureBackend::new(SyntheticOptions::signals(
+        signals, 1.0,
+    )));
+    let session = CaptureSession::with_backend(
+        configuration(CaptureMode::Call, directory.path(), false),
+        backend.clone(),
+        passthrough(),
+        1_000,
+        Arc::new(SystemClock::new()),
+    )
+    .unwrap();
+    let levels = session.levels();
+    session.start(Uuid::new_v4()).unwrap();
+    let first = levels.recv_timeout(RECV).unwrap();
+    assert!((first.mic.rms - -9.03).abs() < 0.2);
+    assert_eq!(first.system, Some(LaneLevel::SILENCE));
+    backend.wait_until_finished();
+    let result = session.stop().unwrap();
+    assert!(result.statistics.system_lane_silent);
+    assert!(result.statistics.dropped_frames.is_empty());
+    let master = master_of(&result);
+    assert!(master.channels[1].iter().all(|s| *s == 0.0));
+    assert!(master.channels[0].iter().any(|s| *s != 0.0));
+}
+
+/// One frame of relay headroom against a backend that delivers two seconds
+/// in milliseconds: the writer falls behind, and every frame it missed is
+/// counted against the master that was written, on every lane alike.
+#[test]
+fn dropped_frames_account_for_every_frame_the_writer_missed() {
+    let directory = tempfile::tempdir().unwrap();
+    let backend = Arc::new(SyntheticCaptureBackend::new(tones(&call(), 2.0)));
+    let session = CaptureSession::with_backend(
+        configuration(CaptureMode::Call, directory.path(), false),
+        backend.clone(),
+        passthrough(),
+        1,
+        Arc::new(SystemClock::new()),
+    )
+    .unwrap();
+    session.start(Uuid::new_v4()).unwrap();
+    backend.wait_until_finished();
+    let result = session.stop().unwrap();
+    let master = master_of(&result);
+    let processed_frames = 200;
+    for lane in call() {
+        let dropped = result
+            .statistics
+            .dropped_frames
+            .get(&lane)
+            .copied()
+            .unwrap_or(0);
+        assert_eq!(
+            dropped + master.frame_count() / 480,
+            processed_frames,
+            "{}: {dropped} dropped + {} written",
+            lane.as_str(),
+            master.frame_count() / 480
+        );
+    }
+    assert_eq!(
+        result.statistics.duration,
+        master.frame_count() as f64 / 48_000.0
+    );
+    let sidecar = sidecar_of(&result, AudioLane::Mic);
+    assert_eq!(
+        sidecar.len(),
+        master.frame_count() / 3,
+        "sidecars drop with the master"
+    );
+}
+
+#[test]
+fn stop_after_device_loss_returns_the_same_recording_every_time() {
+    let directory = tempfile::tempdir().unwrap();
+    let clock = Arc::new(ManualClock::new());
+    let backend = Arc::new(SyntheticCaptureBackend::new(
+        tones(&call(), 10.0)
+            .change_device_after(0.5)
+            .restarts_that_fail(CaptureSession::RESTART_ATTEMPTS),
+    ));
+    let session = CaptureSession::with_backend(
+        configuration(CaptureMode::Call, directory.path(), false),
+        backend.clone(),
+        passthrough(),
+        200,
+        clock.clone(),
+    )
+    .unwrap();
+    let states = session.states();
+    let notices = session.notices();
+    session.start(Uuid::new_v4()).unwrap();
+    assert_eq!(
+        notices.recv_timeout(RECV).unwrap(),
+        CaptureNotice::DeviceChanged(DeviceChangeReason::DefaultInputChanged)
+    );
+    advance_through_sleeps(&clock, CaptureSession::RESTART_ATTEMPTS - 1);
+    collect_states(&states, until_failed);
+    let first = session.stop().unwrap();
+    let second = session.stop().unwrap();
+    assert_eq!(first, second);
+    assert_eq!(
+        session.state(),
+        CaptureState::Failed {
+            error: CaptureError::DeviceLost,
+            recording: Some(Box::new(first.clone()))
+        }
+    );
+    backend.stop();
+    backend.stop();
+    assert_eq!(
+        master_of(&first).frame_count(),
+        (first.statistics.duration * 48_000.0).round() as usize
+    );
+}
+
+#[test]
+fn in_person_produces_one_channel_and_the_mixed_sidecar() {
+    let directory = tempfile::tempdir().unwrap();
+    let backend = Arc::new(SyntheticCaptureBackend::new(tones(
+        &[AudioLane::Mixed],
+        1.0,
+    )));
+    let session = CaptureSession::with_backend(
+        configuration(CaptureMode::InPerson, directory.path(), false),
+        backend.clone(),
+        None,
+        200,
+        Arc::new(SystemClock::new()),
+    )
+    .unwrap();
+    let levels = session.levels();
+    session.start(Uuid::new_v4()).unwrap();
+    backend.wait_until_finished();
+    let result = session.stop().unwrap();
+    assert_eq!(result.asset.lanes, vec![AudioLane::Mixed]);
+    assert_eq!(
+        result
+            .asset
+            .sidecars_16k
+            .keys()
+            .copied()
+            .collect::<Vec<_>>(),
+        vec![AudioLane::Mixed]
+    );
+    assert_eq!(master_of(&result).channels.len(), 1);
+    assert!(
+        !result.statistics.system_lane_silent,
+        "no system lane, so not 'silent'"
+    );
+    let latest = levels.recv_timeout(RECV).unwrap();
+    assert_eq!(latest.system, None);
+}
+
+#[test]
+fn raw_mic_lane_is_kept_when_asked() {
+    let directory = tempfile::tempdir().unwrap();
+    let backend = Arc::new(SyntheticCaptureBackend::new(tones(&call(), 0.5)));
+    let session = CaptureSession::with_backend(
+        configuration(CaptureMode::Call, directory.path(), true),
+        backend.clone(),
+        passthrough(),
+        200,
+        Arc::new(SystemClock::new()),
+    )
+    .unwrap();
+    session.start(Uuid::new_v4()).unwrap();
+    backend.wait_until_finished();
+    let result = session.stop().unwrap();
+    let raw = RecordingLayout::from_asset(&result.asset)
+        .unwrap()
+        .directory
+        .join("mic.raw.caf");
+    assert!(raw.exists());
+    assert_eq!(
+        CafFile::read(&raw).unwrap().channels[0],
+        master_of(&result).channels[0]
+    );
+}
+
+#[test]
+fn start_while_recording_and_stop_while_idle_fail() {
+    let directory = tempfile::tempdir().unwrap();
+    let backend = Arc::new(SyntheticCaptureBackend::new(tones(
+        &[AudioLane::Mixed],
+        1.0,
+    )));
+    let session = CaptureSession::with_backend(
+        configuration(CaptureMode::InPerson, directory.path(), false),
+        backend,
+        None,
+        200,
+        Arc::new(SystemClock::new()),
+    )
+    .unwrap();
+    assert!(matches!(session.stop(), Err(CaptureError::InvalidState(_))));
+    session.start(Uuid::new_v4()).unwrap();
+    assert!(matches!(
+        session.start(Uuid::new_v4()),
+        Err(CaptureError::InvalidState(_))
+    ));
+    session.stop().unwrap();
+}
+
+/// Fifty start/stop cycles on one session: every cycle ends idle with a
+/// readable master and nothing carries over (rings cleared, threads
+/// joined).
+#[test]
+fn repeated_start_stop_cycles_stay_clean() {
+    let directory = tempfile::tempdir().unwrap();
+    let backend = Arc::new(SyntheticCaptureBackend::new(tones(&call(), 0.1)));
+    let session = CaptureSession::with_backend(
+        configuration(CaptureMode::Call, directory.path(), false),
+        backend.clone(),
+        None,
+        200,
+        Arc::new(SystemClock::new()),
+    )
+    .unwrap();
+    for cycle in 0..50 {
+        session.start(Uuid::new_v4()).unwrap();
+        backend.wait_until_finished();
+        let result = session.stop().unwrap();
+        assert_eq!(session.state(), CaptureState::Idle);
+        assert!(
+            (result.statistics.duration - 0.1).abs() < 0.02,
+            "cycle {cycle}"
+        );
+        assert!(result.statistics.dropped_frames.is_empty(), "cycle {cycle}");
+        assert_eq!(master_of(&result).channels.len(), 2);
+    }
+    assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 50);
+}
+
+/// A backend that records once and fails on every later start.
+struct OnceThenFailing {
+    inner: Arc<SyntheticCaptureBackend>,
+    starts: AtomicUsize,
+}
+
+impl CaptureBackend for OnceThenFailing {
+    fn start(
+        &self,
+        lanes: &[AudioLane],
+        uid: Option<&str>,
+        sink: Arc<LaneFrameSink>,
+    ) -> Result<CaptureStream, CaptureError> {
+        if self.starts.fetch_add(1, Ordering::Relaxed) != 0 {
+            return Err(CaptureError::InputDeviceUnavailable);
+        }
+        self.inner.start(lanes, uid, sink)
+    }
+    fn stop(&self) {
+        self.inner.stop();
+    }
+}
+
+/// Meeting A records and stops; meeting B's start fails in the backend.
+/// `stop()` after that failure must fail, not hand out A's asset under B's
+/// meeting (the app would enqueue A twice).
+#[test]
+fn a_failed_restart_does_not_return_the_previous_meetings_recording() {
+    let directory = tempfile::tempdir().unwrap();
+    let inner = Arc::new(SyntheticCaptureBackend::new(tones(
+        &[AudioLane::Mixed],
+        0.2,
+    )));
+    let backend = Arc::new(OnceThenFailing {
+        inner: inner.clone(),
+        starts: AtomicUsize::new(0),
+    });
+    let session = CaptureSession::with_backend(
+        configuration(CaptureMode::InPerson, directory.path(), false),
+        backend,
+        None,
+        200,
+        Arc::new(SystemClock::new()),
+    )
+    .unwrap();
+    let first = Uuid::new_v4();
+    session.start(first).unwrap();
+    inner.wait_until_finished();
+    let result = session.stop().unwrap();
+    assert_eq!(result.asset.meeting_id, first);
+
+    assert_eq!(
+        session.start(Uuid::new_v4()),
+        Err(CaptureError::InputDeviceUnavailable)
+    );
+    assert_eq!(
+        session.state(),
+        CaptureState::Failed {
+            error: CaptureError::InputDeviceUnavailable,
+            recording: None
+        }
+    );
+    assert!(
+        matches!(session.stop(), Err(CaptureError::InvalidState(_))),
+        "nothing was recorded for this start"
+    );
+}
+
+/// Logs `reset` and `process` calls in order.
+struct ResetLoggingCanceller {
+    log: Arc<Mutex<Vec<&'static str>>>,
+}
+
+impl EchoCanceller for ResetLoggingCanceller {
+    fn process(&mut self, near_end: &[f32], _far_end: &[f32], out: &mut [f32]) {
+        let mut log = self.log.lock().unwrap();
+        if log.last() != Some(&"process") {
+            log.push("process");
+        }
+        let count = near_end.len().min(out.len());
+        out[..count].copy_from_slice(&near_end[..count]);
+    }
+    fn reset(&mut self) {
+        self.log.lock().unwrap().push("reset");
+    }
+}
+
+/// One canceller serves every recording of a session, so each start resets
+/// it before the first frame: meeting two on headphones must not begin with
+/// the filter meeting one converged on the loudspeakers.
+#[test]
+fn every_start_resets_the_echo_canceller_before_the_first_frame() {
+    let directory = tempfile::tempdir().unwrap();
+    let backend = Arc::new(SyntheticCaptureBackend::new(tones(&call(), 0.1)));
+    let log = Arc::new(Mutex::new(Vec::new()));
+    let session = CaptureSession::with_backend(
+        configuration(CaptureMode::Call, directory.path(), false),
+        backend.clone(),
+        Some(Box::new(ResetLoggingCanceller { log: log.clone() })),
+        200,
+        Arc::new(SystemClock::new()),
+    )
+    .unwrap();
+    for _ in 0..2 {
+        session.start(Uuid::new_v4()).unwrap();
+        backend.wait_until_finished();
+        session.stop().unwrap();
+    }
+    assert_eq!(
+        *log.lock().unwrap(),
+        ["reset", "process", "reset", "process"]
+    );
+}
+
+/// The far-end is delayed by both device paths whenever their sum reaches
+/// one processing frame; the Speex tail keeps the room.
+#[test]
+fn far_end_delay_covers_input_and_output_paths_from_one_frame_up() {
+    assert_eq!(CaptureSession::far_end_delay_frames(0, 0), 0);
+    assert_eq!(
+        CaptureSession::far_end_delay_frames(200, 200),
+        0,
+        "under one frame the tail absorbs it"
+    );
+    assert_eq!(CaptureSession::far_end_delay_frames(300, 300), 600);
+    assert_eq!(
+        CaptureSession::far_end_delay_frames(1_440, 9_600),
+        11_040,
+        "a 30 ms mic path plus a 200 ms Bluetooth output"
+    );
+    assert_eq!(CaptureSession::far_end_delay_frames(0, 480), 480);
+    assert_eq!(CaptureSession::gap_frames(Duration::ZERO), 0);
+    assert_eq!(CaptureSession::gap_frames(Duration::from_millis(255)), 25);
+    assert_eq!(CaptureSession::gap_frames(Duration::from_secs(10)), 1_000);
+}
+
+#[test]
+fn the_session_exposes_the_backends_stream_while_recording() {
+    let directory = tempfile::tempdir().unwrap();
+    let backend = Arc::new(SyntheticCaptureBackend::new(tones(
+        &[AudioLane::Mixed],
+        0.1,
+    )));
+    let session = CaptureSession::with_backend(
+        configuration(CaptureMode::InPerson, directory.path(), false),
+        backend.clone(),
+        None,
+        200,
+        Arc::new(SystemClock::new()),
+    )
+    .unwrap();
+    assert_eq!(session.stream(), None);
+    session.start(Uuid::new_v4()).unwrap();
+    assert_eq!(session.stream(), Some(CaptureStream::SYNTHETIC));
+    backend.wait_until_finished();
+    session.stop().unwrap();
+    assert_eq!(session.stream(), None);
+}
+
+/// Wraps the real writer and fails where a full disk would: every `write`
+/// after `fail_after_frames`, and `finish()` itself when asked.
+struct FaultyWriter {
+    inner: RecordingWriter,
+    fail_after_frames: Option<usize>,
+    fail_finish: bool,
+    frames: usize,
+}
+
+impl RecordingWriting for FaultyWriter {
+    fn files(&self) -> RecordingFiles {
+        self.inner.files()
+    }
+    fn write(&mut self, frames: &LaneFrames<'_>) -> Result<(), CaptureError> {
+        self.frames += 1;
+        if let Some(limit) = self.fail_after_frames
+            && self.frames > limit
+        {
+            return Err(CaptureError::WriterFailed("DiskFull".into()));
+        }
+        self.inner.write(frames)
+    }
+    fn finish(&mut self) -> Result<RecordingFiles, CaptureError> {
+        let files = self.inner.finish()?;
+        if self.fail_finish {
+            return Err(CaptureError::WriterFailed("DiskFull".into()));
+        }
+        Ok(files)
+    }
+}
+
+fn faulty_session(
+    directory: &Path,
+    backend: Arc<SyntheticCaptureBackend>,
+    fail_after_frames: Option<usize>,
+    fail_finish: bool,
+    clock: Arc<dyn Clock>,
+) -> CaptureSession {
+    CaptureSession::with_writer_factory(
+        configuration(CaptureMode::InPerson, directory, false),
+        backend,
+        None,
+        1_000,
+        clock,
+        Arc::new(move |layout, lanes, keep_raw| {
+            Ok(Box::new(FaultyWriter {
+                inner: RecordingWriter::new(layout, lanes, keep_raw)?,
+                fail_after_frames,
+                fail_finish,
+                frames: 0,
+            }) as Box<dyn RecordingWriting>)
+        }),
+    )
+    .unwrap()
+}
+
+/// The disk fills while closing the files: `stop()` still returns the
+/// asset and the state, not an error, carries the failure.
+#[test]
+fn a_failing_finish_still_returns_the_asset_and_ends_failed() {
+    let directory = tempfile::tempdir().unwrap();
+    let backend = Arc::new(SyntheticCaptureBackend::new(tones(
+        &[AudioLane::Mixed],
+        0.5,
+    )));
+    let session = faulty_session(
+        directory.path(),
+        backend.clone(),
+        None,
+        true,
+        Arc::new(SystemClock::new()),
+    );
+    let meeting_id = Uuid::new_v4();
+    session.start(meeting_id).unwrap();
+    backend.wait_until_finished();
+    let result = session.stop().unwrap();
+    assert_eq!(result.asset.meeting_id, meeting_id);
+    assert!((result.statistics.duration - 0.5).abs() < 0.02);
+    assert_eq!(master_of(&result).frame_count(), 24_000);
+    match session.state() {
+        CaptureState::Failed {
+            error: CaptureError::WriterFailed(detail),
+            recording,
+        } => {
+            assert!(detail.contains("DiskFull"));
+            assert_eq!(
+                recording.as_deref(),
+                Some(&result),
+                "the failed state carries the recording"
+            );
+        }
+        other => panic!("expected Failed(WriterFailed), got {other:?}"),
+    }
+    assert_eq!(
+        session.stop().unwrap(),
+        result,
+        "and stop() returns the same one"
+    );
+}
+
+/// The disk fills mid-recording: the first write error stops the writes,
+/// the session finalises, and `stop()` returns what was written.
+#[test]
+fn a_failing_write_mid_recording_finalises_what_was_written() {
+    let directory = tempfile::tempdir().unwrap();
+    let backend = Arc::new(SyntheticCaptureBackend::new(tones(
+        &[AudioLane::Mixed],
+        2.0,
+    )));
+    let session = faulty_session(
+        directory.path(),
+        backend.clone(),
+        Some(30),
+        false,
+        Arc::new(SystemClock::new()),
+    );
+    let states = session.states();
+    session.start(Uuid::new_v4()).unwrap();
+    let seen = collect_states(&states, until_failed);
+    assert!(
+        matches!(
+            seen.last(),
+            Some(CaptureState::Failed {
+                error: CaptureError::WriterFailed(_),
+                ..
+            })
+        ),
+        "{seen:?}"
+    );
+    let result = session.stop().unwrap();
+    assert!((result.statistics.duration - 0.3).abs() < 0.001);
+    assert_eq!(master_of(&result).frame_count(), 30 * 480);
+}
+
+struct Failing;
+
+impl CaptureBackend for Failing {
+    fn start(
+        &self,
+        _: &[AudioLane],
+        _: Option<&str>,
+        _: Arc<LaneFrameSink>,
+    ) -> Result<CaptureStream, CaptureError> {
+        Err(CaptureError::InputDeviceUnavailable)
+    }
+    fn stop(&self) {}
+}
+
+#[test]
+fn a_failing_backend_leaves_the_session_failed_and_no_folder() {
+    let directory = tempfile::tempdir().unwrap();
+    let session = CaptureSession::with_backend(
+        configuration(CaptureMode::InPerson, directory.path(), false),
+        Arc::new(Failing),
+        None,
+        200,
+        Arc::new(SystemClock::new()),
+    )
+    .unwrap();
+    let meeting_id = Uuid::new_v4();
+    assert_eq!(
+        session.start(meeting_id),
+        Err(CaptureError::InputDeviceUnavailable)
+    );
+    assert_eq!(
+        session.state(),
+        CaptureState::Failed {
+            error: CaptureError::InputDeviceUnavailable,
+            recording: None
+        }
+    );
+    assert!(
+        !RecordingLayout::new(directory.path(), meeting_id)
+            .directory
+            .exists()
+    );
+    assert!(matches!(session.stop(), Err(CaptureError::InvalidState(_))));
+}
+
+// Device changes
+
+/// A device change rebuilds the backend in place: the state never leaves
+/// `Recording`, the notices say what happened, the master keeps growing on
+/// the same files with every frame of both starts and nothing dropped, the
+/// echo canceller starts cold again, and no silence is needed when the
+/// restart succeeds at once.
+#[test]
+fn a_device_change_keeps_recording_on_the_same_files() {
+    let directory = tempfile::tempdir().unwrap();
+    let clock = Arc::new(ManualClock::new());
+    let backend = Arc::new(SyntheticCaptureBackend::new(
+        tones(&call(), 2.0)
+            .change_device_after(1.0)
+            .stream_after_restart(restarted_stream()),
+    ));
+    let log = Arc::new(Mutex::new(Vec::new()));
+    let session = CaptureSession::with_backend(
+        configuration(CaptureMode::Call, directory.path(), false),
+        backend.clone(),
+        Some(Box::new(ResetLoggingCanceller { log: log.clone() })),
+        1_000,
+        clock.clone(),
+    )
+    .unwrap();
+    let states = session.states();
+    let notices = session.notices();
+    let meeting_id = Uuid::new_v4();
+    session.start(meeting_id).unwrap();
+    assert_eq!(session.stream(), Some(CaptureStream::SYNTHETIC));
+
+    assert_eq!(
+        notices.recv_timeout(RECV).unwrap(),
+        CaptureNotice::DeviceChanged(DeviceChangeReason::DefaultInputChanged)
+    );
+    assert_eq!(
+        notices.recv_timeout(RECV).unwrap(),
+        CaptureNotice::DeviceResumed {
+            attempt: 1,
+            gap_seconds: 0.0
+        }
+    );
+    assert!(matches!(session.state(), CaptureState::Recording { .. }));
+    assert_eq!(
+        session.stream(),
+        Some(restarted_stream()),
+        "the rebuilt backend's stream"
+    );
+    assert_eq!(backend.starts(), 2);
+    backend.wait_until_finished();
+    let result = session.stop().unwrap();
+    assert_eq!(session.state(), CaptureState::Idle);
+
+    let mut idles = 0;
+    let seen = collect_states(&states, |state| {
+        if *state == CaptureState::Idle {
+            idles += 1;
+        }
+        idles == 2
+    });
+    assert_eq!(
+        kinds(&seen),
+        ["idle", "starting", "recording", "stopping", "idle"],
+        "the state never left Recording during the change"
+    );
+    assert_eq!(result.statistics.device_changes, 1);
+    assert_eq!(result.statistics.gap_seconds, 0.0);
+    assert!(result.statistics.dropped_frames.is_empty());
+    assert!(!result.statistics.ended_on_device_loss);
+    assert_eq!(
+        backend.frames_delivered(),
+        3 * 48_000,
+        "one second, then two"
+    );
+    let master = master_of(&result);
+    assert_eq!(master.channels.len(), 2);
+    assert_eq!(
+        master.frame_count(),
+        backend.frames_delivered(),
+        "every frame of both starts"
+    );
+    assert_eq!(result.statistics.duration, 3.0);
+    let layout = RecordingLayout::new(directory.path(), meeting_id);
+    assert_eq!(
+        path_from_file_url(&result.asset.url).unwrap(),
+        layout.master(AudioFormat::Caf48kFloat32),
+        "the same files"
+    );
+    assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 1);
+    assert_eq!(
+        *log.lock().unwrap(),
+        ["reset", "process", "reset", "process"],
+        "cold filter after"
+    );
+    assert_eq!(clock.pending_sleepers(), 0);
+}
+
+/// The contiguity claim: a gap longer than the two seconds the sink's rings
+/// hold is written in full as silence through the relay, so the master runs
+/// to wall time with nothing truncated into `dropped_frames`. Three restarts
+/// fail, the clock advances 0.25, 0.5 and then 2.5 s, the fourth succeeds,
+/// and 3.25 s of zeros sit between the old device's last frame and the new
+/// device's first.
+#[test]
+fn a_gap_longer_than_the_ring_is_written_in_full() {
+    let directory = tempfile::tempdir().unwrap();
+    let clock = Arc::new(ManualClock::new());
+    let backend = Arc::new(SyntheticCaptureBackend::new(
+        tones(&call(), 2.0)
+            .change_device_after(1.0)
+            .restarts_that_fail(3),
+    ));
+    let session = CaptureSession::with_backend(
+        configuration(CaptureMode::Call, directory.path(), false),
+        backend.clone(),
+        passthrough(),
+        1_000,
+        clock.clone(),
+    )
+    .unwrap();
+    let states = session.states();
+    let notices = session.notices();
+    session.start(Uuid::new_v4()).unwrap();
+    assert_eq!(
+        notices.recv_timeout(RECV).unwrap(),
+        CaptureNotice::DeviceChanged(DeviceChangeReason::DefaultInputChanged)
+    );
+    advance_through_sleeps(&clock, 2);
+    assert!(clock.wait_for_sleepers(1), "the third backoff");
+    clock.advance(Duration::from_millis(2_500));
+    assert_eq!(
+        notices.recv_timeout(RECV).unwrap(),
+        CaptureNotice::DeviceResumed {
+            attempt: 4,
+            gap_seconds: 3.25
+        }
+    );
+    assert!(matches!(session.state(), CaptureState::Recording { .. }));
+    backend.wait_until_finished();
+    let result = session.stop().unwrap();
+
+    let mut idles = 0;
+    let seen = collect_states(&states, |state| {
+        if *state == CaptureState::Idle {
+            idles += 1;
+        }
+        idles == 2
+    });
+    assert_eq!(
+        kinds(&seen),
+        ["idle", "starting", "recording", "stopping", "idle"]
+    );
+    assert_eq!(result.statistics.gap_seconds, 3.25);
+    assert_eq!(result.statistics.device_changes, 1);
+    assert!(result.statistics.dropped_frames.is_empty());
+    assert!(!result.statistics.ended_on_device_loss);
+    assert_eq!(backend.starts(), 5);
+    let old_frames = 48_000;
+    let gap_frames = (3.25 * 48_000.0) as usize;
+    assert_eq!(backend.frames_delivered(), 3 * 48_000);
+    let master = master_of(&result);
+    assert_eq!(
+        master.frame_count(),
+        backend.frames_delivered() + gap_frames
+    );
+    assert_eq!(result.statistics.duration, 6.25);
+    for channel in &master.channels {
+        assert!(
+            channel[old_frames - 480..old_frames]
+                .iter()
+                .any(|s| *s != 0.0),
+            "the old device's last frame precedes the gap"
+        );
+        assert!(
+            channel[old_frames..old_frames + gap_frames]
+                .iter()
+                .all(|s| *s == 0.0),
+            "the gap is silence"
+        );
+        assert!(
+            channel[old_frames + gap_frames..old_frames + gap_frames + 480]
+                .iter()
+                .any(|s| *s != 0.0),
+            "the new device's first frame follows it"
+        );
+    }
+    let sidecar = sidecar_of(&result, AudioLane::Mic);
+    assert_eq!(
+        sidecar.len(),
+        master.frame_count() / 3,
+        "the sidecars carry the gap too"
+    );
+}
+
+/// The shape a Bluetooth headset produces (out of the profile and back):
+/// two changes, two rebuilds, four notices in order, one master.
+#[test]
+fn two_device_changes_rebuild_twice() {
+    let directory = tempfile::tempdir().unwrap();
+    let clock = Arc::new(ManualClock::new());
+    let backend = Arc::new(SyntheticCaptureBackend::new(
+        tones(&call(), 2.0).change_device_after(0.5).changes(2),
+    ));
+    let session = CaptureSession::with_backend(
+        configuration(CaptureMode::Call, directory.path(), false),
+        backend.clone(),
+        passthrough(),
+        1_000,
+        clock,
+    )
+    .unwrap();
+    let notices = session.notices();
+    session.start(Uuid::new_v4()).unwrap();
+    let seen: Vec<CaptureNotice> = (0..4)
+        .filter_map(|_| notices.recv_timeout(RECV).ok())
+        .collect();
+    assert_eq!(
+        seen,
+        [
+            CaptureNotice::DeviceChanged(DeviceChangeReason::DefaultInputChanged),
+            CaptureNotice::DeviceResumed {
+                attempt: 1,
+                gap_seconds: 0.0
+            },
+            CaptureNotice::DeviceChanged(DeviceChangeReason::DefaultInputChanged),
+            CaptureNotice::DeviceResumed {
+                attempt: 1,
+                gap_seconds: 0.0
+            },
+        ]
+    );
+    backend.wait_until_finished();
+    let result = session.stop().unwrap();
+    assert_eq!(result.statistics.device_changes, 2);
+    assert_eq!(result.statistics.gap_seconds, 0.0);
+    assert!(result.statistics.dropped_frames.is_empty());
+    assert!(!result.statistics.ended_on_device_loss);
+    assert_eq!(backend.starts(), 3);
+    assert_eq!(backend.frames_delivered(), 24_000 + 24_000 + 96_000);
+    assert_eq!(master_of(&result).frame_count(), backend.frames_delivered());
+}
+
+/// Four failed restarts end the recording in `DeviceLost` after the summed
+/// backoff on the manual clock, with what was recorded before the change
+/// and nothing rebuilt.
+#[test]
+fn a_restart_that_keeps_failing_ends_in_device_lost() {
+    let directory = tempfile::tempdir().unwrap();
+    let clock = Arc::new(ManualClock::new());
+    let backend = Arc::new(SyntheticCaptureBackend::new(
+        tones(&call(), 10.0)
+            .change_device_after(0.5)
+            .restarts_that_fail(4),
+    ));
+    let session = CaptureSession::with_backend(
+        configuration(CaptureMode::Call, directory.path(), false),
+        backend.clone(),
+        passthrough(),
+        200,
+        clock.clone(),
+    )
+    .unwrap();
+    let states = session.states();
+    let notices = session.notices();
+    session.start(Uuid::new_v4()).unwrap();
+    // Three sleeps separate the four attempts; none before the first.
+    advance_through_sleeps(&clock, 3);
+    assert_eq!(clock.now(), Duration::from_millis(1_750));
+    let seen = collect_states(&states, until_failed);
+    assert_eq!(
+        seen.last().unwrap().failure(),
+        Some(&CaptureError::DeviceLost)
+    );
+    let result = session.stop().unwrap();
+    assert!(result.statistics.ended_on_device_loss);
+    assert_eq!(result.statistics.device_changes, 0);
+    assert_eq!(result.statistics.gap_seconds, 0.0);
+    assert_eq!(result.statistics.duration, 0.5);
+    assert_eq!(master_of(&result).frame_count(), 24_000);
+    assert_eq!(backend.starts(), 5, "one start and four failed restarts");
+    assert_eq!(clock.pending_sleepers(), 0);
+    settle();
+    let entries: Vec<CaptureNotice> = notices.try_iter().collect();
+    assert_eq!(
+        entries,
+        [CaptureNotice::DeviceChanged(
+            DeviceChangeReason::DefaultInputChanged
+        )],
+        "no resumed notice"
+    );
+}
+
+/// A backend whose `stop()` reports a change on the sink it was given, the
+/// way a HAL listener can fire while the session tears down.
+struct ReportingOnStop {
+    inner: Arc<SyntheticCaptureBackend>,
+    sink: Mutex<Option<Arc<LaneFrameSink>>>,
+}
+
+impl CaptureBackend for ReportingOnStop {
+    fn start(
+        &self,
+        lanes: &[AudioLane],
+        uid: Option<&str>,
+        sink: Arc<LaneFrameSink>,
+    ) -> Result<CaptureStream, CaptureError> {
+        *self.sink.lock().unwrap() = Some(sink.clone());
+        self.inner.start(lanes, uid, sink)
+    }
+    fn stop(&self) {
+        self.inner.stop();
+        if let Some(sink) = self.sink.lock().unwrap().clone() {
+            sink.report_device_change(DeviceChangeReason::OutputDeviceGone);
+        }
+    }
+}
+
+/// A report before `start` and one from inside `stop()` produce no notice
+/// and leave the state as it was.
+#[test]
+fn a_device_change_while_idle_or_after_stop_is_ignored() {
+    let directory = tempfile::tempdir().unwrap();
+    let inner = Arc::new(SyntheticCaptureBackend::new(tones(
+        &[AudioLane::Mixed],
+        0.2,
+    )));
+    let session = CaptureSession::with_backend(
+        configuration(CaptureMode::InPerson, directory.path(), false),
+        Arc::new(ReportingOnStop {
+            inner: inner.clone(),
+            sink: Mutex::new(None),
+        }),
+        None,
+        200,
+        Arc::new(SystemClock::new()),
+    )
+    .unwrap();
+    let notices = session.notices();
+    session.device_changed(DeviceChangeReason::DefaultInputChanged);
+    assert_eq!(session.state(), CaptureState::Idle);
+
+    session.start(Uuid::new_v4()).unwrap();
+    inner.wait_until_finished();
+    let result = session.stop().unwrap();
+    assert_eq!(session.state(), CaptureState::Idle);
+    settle();
+    assert_eq!(session.state(), CaptureState::Idle);
+    assert!(notices.try_iter().next().is_none());
+    assert_eq!(result.statistics.device_changes, 0);
+    assert!(!result.statistics.ended_on_device_loss);
+    assert_eq!(inner.starts(), 1, "nothing was restarted");
+}
+
+/// The writer fails while a rebuild is under way (on the first frame of gap
+/// silence, the 51st frame written): the session ends `Failed(WriterFailed)`
+/// with what was written, not `DeviceLost`, and the rebuild does not
+/// resurrect it.
+#[test]
+fn a_writer_failure_during_a_rebuild_ends_writer_failed() {
+    let directory = tempfile::tempdir().unwrap();
+    let clock = Arc::new(ManualClock::new());
+    let backend = Arc::new(SyntheticCaptureBackend::new(
+        tones(&[AudioLane::Mixed], 2.0)
+            .change_device_after(0.5)
+            .restarts_that_fail(1),
+    ));
+    let session = faulty_session(
+        directory.path(),
+        backend.clone(),
+        Some(50),
+        false,
+        clock.clone(),
+    );
+    let states = session.states();
+    let notices = session.notices();
+    session.start(Uuid::new_v4()).unwrap();
+    assert_eq!(
+        notices.recv_timeout(RECV).unwrap(),
+        CaptureNotice::DeviceChanged(DeviceChangeReason::DefaultInputChanged)
+    );
+    // One failed restart, 250 ms on the clock, then 25 frames of silence.
+    advance_through_sleeps(&clock, 1);
+    let seen = collect_states(&states, until_failed);
+    let (detail, recording) = match seen.last() {
+        Some(CaptureState::Failed {
+            error: CaptureError::WriterFailed(detail),
+            recording,
+        }) => (detail.clone(), recording.clone()),
+        other => panic!("expected Failed(WriterFailed), got {other:?}"),
+    };
+    assert!(detail.contains("DiskFull"));
+    let result = session.stop().unwrap();
+    assert_eq!(recording.as_deref(), Some(&result));
+    assert!(!result.statistics.ended_on_device_loss);
+    assert_eq!(result.statistics.duration, 0.5);
+    assert_eq!(master_of(&result).frame_count(), 50 * 480);
+    settle();
+    assert_eq!(
+        session.state(),
+        CaptureState::Failed {
+            error: CaptureError::WriterFailed(detail),
+            recording: Some(Box::new(result))
+        }
+    );
+    assert!(clock.wait_for_sleepers(0));
+}
+
+/// `stop()` while the rebuild waits out a backoff abandons it: the
+/// recording is finalised once, ends `Idle`, the cancelled sleep is gone,
+/// and nothing the clock does afterwards changes the outcome.
+#[test]
+fn stop_during_a_rebuild_finalises_once() {
+    let directory = tempfile::tempdir().unwrap();
+    let clock = Arc::new(ManualClock::new());
+    let backend = Arc::new(SyntheticCaptureBackend::new(
+        tones(&call(), 10.0)
+            .change_device_after(0.5)
+            .restarts_that_fail(4),
+    ));
+    let session = CaptureSession::with_backend(
+        configuration(CaptureMode::Call, directory.path(), false),
+        backend.clone(),
+        passthrough(),
+        200,
+        clock.clone(),
+    )
+    .unwrap();
+    let states = session.states();
+    let notices = session.notices();
+    session.start(Uuid::new_v4()).unwrap();
+    assert_eq!(
+        notices.recv_timeout(RECV).unwrap(),
+        CaptureNotice::DeviceChanged(DeviceChangeReason::DefaultInputChanged)
+    );
+    assert!(
+        clock.wait_for_sleepers(1),
+        "the rebuild is waiting out the first backoff"
+    );
+
+    let result = session.stop().unwrap();
+    assert_eq!(session.state(), CaptureState::Idle);
+    assert!(
+        clock.wait_for_sleepers(0),
+        "the abandoned rebuild's sleep was cancelled"
+    );
+    assert!(!result.statistics.ended_on_device_loss);
+    assert_eq!(result.statistics.device_changes, 0);
+    assert_eq!(result.statistics.gap_seconds, 0.0);
+    assert_eq!(result.statistics.duration, 0.5);
+    assert_eq!(master_of(&result).frame_count(), 24_000);
+    assert_eq!(backend.starts(), 2, "one start, one failed restart");
+
+    clock.advance(Duration::from_secs(10));
+    settle();
+    assert_eq!(session.state(), CaptureState::Idle);
+    assert_eq!(backend.starts(), 2, "nothing after the stop");
+    assert!(matches!(session.stop(), Err(CaptureError::InvalidState(_))));
+    let mut idles = 0;
+    let seen = collect_states(&states, |state| {
+        if *state == CaptureState::Idle {
+            idles += 1;
+        }
+        idles == 2
+    });
+    assert_eq!(
+        kinds(&seen),
+        ["idle", "starting", "recording", "stopping", "idle"]
+    );
+    assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 1);
+}
+
+/// In production the relay holds two seconds; a gap wider than that waits
+/// for the writer in 5 ms steps on the clock, and every frame of silence
+/// still arrives: 1.75 s of gap through a one-second relay.
+#[test]
+fn a_gap_wider_than_the_relay_waits_for_the_writer_and_loses_nothing() {
+    let directory = tempfile::tempdir().unwrap();
+    let clock = Arc::new(ManualClock::new());
+    let backend = Arc::new(SyntheticCaptureBackend::new(
+        tones(&call(), 1.0)
+            .change_device_after(0.5)
+            .restarts_that_fail(3),
+    ));
+    let session = CaptureSession::with_backend(
+        configuration(CaptureMode::Call, directory.path(), false),
+        backend.clone(),
+        passthrough(),
+        100,
+        clock.clone(),
+    )
+    .unwrap();
+    let notices = session.notices();
+    session.start(Uuid::new_v4()).unwrap();
+    advance_through_sleeps(&clock, 3);
+    // The rebuilt backend delivers its second at machine speed into the
+    // rings while the gap waits on the clock; the writer drains the relay
+    // in real time, so the gap's 5 ms waits are driven as they appear.
+    let mut seen = vec![notices.recv_timeout(RECV).unwrap()];
+    while seen.len() < 2 {
+        if let Ok(notice) = notices.recv_timeout(Duration::from_millis(2)) {
+            seen.push(notice);
+        } else if clock.pending_sleepers() == 1 {
+            clock.advance(Duration::from_millis(5));
+        }
+    }
+    assert_eq!(
+        seen,
+        [
+            CaptureNotice::DeviceChanged(DeviceChangeReason::DefaultInputChanged),
+            CaptureNotice::DeviceResumed {
+                attempt: 4,
+                gap_seconds: 1.75
+            },
+        ]
+    );
+    backend.wait_until_finished();
+    let result = session.stop().unwrap();
+    assert_eq!(result.statistics.gap_seconds, 1.75);
+    assert_eq!(result.statistics.device_changes, 1);
+    assert!(result.statistics.dropped_frames.is_empty());
+    assert_eq!(backend.frames_delivered(), 24_000 + 48_000);
+    assert_eq!(
+        master_of(&result).frame_count(),
+        backend.frames_delivered() + 84_000
+    );
+    assert_eq!(result.statistics.duration, 3.25);
+    assert!(clock.wait_for_sleepers(0));
+}
+
+/// `MAXIMUM_GAP`: an outage of 30 s on the clock fills 10 s of silence, and
+/// `gap_seconds` reports the capped value the master actually holds.
+#[test]
+fn a_gap_is_capped_at_ten_seconds() {
+    let directory = tempfile::tempdir().unwrap();
+    let clock = Arc::new(ManualClock::new());
+    let backend = Arc::new(SyntheticCaptureBackend::new(
+        tones(&call(), 2.0)
+            .change_device_after(1.0)
+            .restarts_that_fail(1),
+    ));
+    let session = CaptureSession::with_backend(
+        configuration(CaptureMode::Call, directory.path(), false),
+        backend.clone(),
+        passthrough(),
+        2_000,
+        clock.clone(),
+    )
+    .unwrap();
+    let notices = session.notices();
+    session.start(Uuid::new_v4()).unwrap();
+    assert_eq!(
+        notices.recv_timeout(RECV).unwrap(),
+        CaptureNotice::DeviceChanged(DeviceChangeReason::DefaultInputChanged)
+    );
+    assert!(clock.wait_for_sleepers(1));
+    clock.advance(Duration::from_secs(30));
+    assert_eq!(
+        notices.recv_timeout(RECV).unwrap(),
+        CaptureNotice::DeviceResumed {
+            attempt: 2,
+            gap_seconds: 10.0
+        }
+    );
+    backend.wait_until_finished();
+    let result = session.stop().unwrap();
+    assert_eq!(result.statistics.gap_seconds, 10.0);
+    assert!(result.statistics.dropped_frames.is_empty());
+    assert_eq!(
+        master_of(&result).frame_count(),
+        backend.frames_delivered() + 480_000
+    );
+    assert_eq!(result.statistics.duration, 13.0);
+}
+
+/// A change reported while a rebuild is under way is not lost: `resume`
+/// starts the next rebuild from it, so the notices come in pairs and the
+/// second rebuild runs at once.
+#[test]
+fn a_change_reported_during_a_rebuild_starts_the_next_one() {
+    let directory = tempfile::tempdir().unwrap();
+    let clock = Arc::new(ManualClock::new());
+    let backend = Arc::new(SyntheticCaptureBackend::new(
+        tones(&call(), 2.0)
+            .change_device_after(0.5)
+            .restarts_that_fail(1),
+    ));
+    let session = CaptureSession::with_backend(
+        configuration(CaptureMode::Call, directory.path(), false),
+        backend.clone(),
+        passthrough(),
+        1_000,
+        clock.clone(),
+    )
+    .unwrap();
+    let notices = session.notices();
+    session.start(Uuid::new_v4()).unwrap();
+    assert_eq!(
+        notices.recv_timeout(RECV).unwrap(),
+        CaptureNotice::DeviceChanged(DeviceChangeReason::DefaultInputChanged)
+    );
+    assert!(
+        clock.wait_for_sleepers(1),
+        "the first restart failed; the rebuild waits"
+    );
+    session.device_changed(DeviceChangeReason::OutputDeviceGone);
+    clock.advance(Duration::from_millis(250));
+    assert_eq!(
+        notices.recv_timeout(RECV).unwrap(),
+        CaptureNotice::DeviceResumed {
+            attempt: 2,
+            gap_seconds: 0.25
+        }
+    );
+    assert_eq!(
+        notices.recv_timeout(RECV).unwrap(),
+        CaptureNotice::DeviceChanged(DeviceChangeReason::OutputDeviceGone),
+        "kept, not dropped"
+    );
+    assert_eq!(
+        notices.recv_timeout(RECV).unwrap(),
+        CaptureNotice::DeviceResumed {
+            attempt: 1,
+            gap_seconds: 0.0
+        }
+    );
+    backend.wait_until_finished();
+    let result = session.stop().unwrap();
+    assert_eq!(result.statistics.device_changes, 2);
+    assert_eq!(result.statistics.gap_seconds, 0.25);
+    assert!(result.statistics.dropped_frames.is_empty());
+    assert_eq!(
+        backend.starts(),
+        4,
+        "start, failed restart, restart, restart"
+    );
+    // The second rebuild stopped its backend mid-callback, so only the
+    // sub-frame residue is missing from the master.
+    let frames = master_of(&result).frame_count();
+    let expected = backend.frames_delivered() + 12_000;
+    assert!(
+        frames <= expected && frames > expected - 480,
+        "{frames} of {expected}"
+    );
+    assert!(clock.wait_for_sleepers(0));
+}
+
+// Echo cancellation in the real processing path (LiveAECPathTests)
+
+fn record(
+    signals: BTreeMap<AudioLane, SyntheticLane>,
+    seconds: f64,
+) -> (Vec<f32>, Vec<f32>, Vec<f32>) {
+    let directory = tempfile::tempdir().unwrap();
+    let backend = Arc::new(SyntheticCaptureBackend::new(SyntheticOptions::signals(
+        signals, seconds,
+    )));
+    let session = CaptureSession::with_backend(
+        configuration(CaptureMode::Call, directory.path(), true),
+        backend.clone(),
+        None,
+        1_500,
+        Arc::new(SystemClock::new()),
+    )
+    .unwrap();
+    session.start(Uuid::new_v4()).unwrap();
+    backend.wait_until_finished();
+    let result = session.stop().unwrap();
+    assert!(result.statistics.dropped_frames.is_empty());
+    let master = master_of(&result);
+    let raw = CafFile::read(
+        &RecordingLayout::from_asset(&result.asset)
+            .unwrap()
+            .directory
+            .join("mic.raw.caf"),
+    )
+    .unwrap();
+    (
+        raw.channels[0].clone(),
+        master.channels[0].clone(),
+        master.channels[1].clone(),
+    )
+}
+
+#[test]
+fn echo_of_the_system_lane_is_cancelled_on_the_mic_lane() {
+    let (raw, processed, system) = record(
+        [
+            (
+                AudioLane::Mic,
+                SyntheticLane::new(0.0, 0.0).with_echo(AudioLane::System, 0.060, 0.5),
+            ),
+            (AudioLane::System, SyntheticLane::new(1_000.0, 0.5)),
+        ]
+        .into_iter()
+        .collect(),
+        4.0,
+    );
+    let range = 2 * 48_000..4 * 48_000;
+    let erle = EchoMetrics::erle(&raw, &processed, range.clone());
+    assert!(erle >= 15.0, "ERLE {erle} dB over the last two seconds");
+    assert_eq!(raw.len(), processed.len());
+    assert!((EchoMetrics::decibels(EchoMetrics::rms(&raw[range.clone()])) - -15.05).abs() < 0.2);
+    assert!((EchoMetrics::decibels(EchoMetrics::rms(&system[range])) - -9.03).abs() < 0.2);
+}
+
+#[test]
+fn the_independent_tone_survives_within_three_decibels() {
+    let (raw, processed, _) = record(
+        [
+            (
+                AudioLane::Mic,
+                SyntheticLane::new(320.0, 0.25).with_echo(AudioLane::System, 0.060, 0.5),
+            ),
+            (AudioLane::System, SyntheticLane::new(1_000.0, 0.5)),
+        ]
+        .into_iter()
+        .collect(),
+        4.0,
+    );
+    let range = 2 * 48_000..4 * 48_000;
+    let before = EchoMetrics::tone_level(&raw[range.clone()], 320.0, 48_000.0);
+    let after = EchoMetrics::tone_level(&processed[range.clone()], 320.0, 48_000.0);
+    let change = 20.0 * (after / before).log10();
+    assert!(change.abs() <= 3.0, "own tone changed by {change} dB");
+    assert!((before - 0.25).abs() < 0.01);
+
+    let echo_before = EchoMetrics::tone_level(&raw[range.clone()], 1_000.0, 48_000.0);
+    let echo_after = EchoMetrics::tone_level(&processed[range], 1_000.0, 48_000.0);
+    let erle = 20.0 * (echo_before / echo_after).log10();
+    assert!(erle >= 15.0, "echo tone ERLE {erle} dB under double talk");
+    let _ = AudioFixtures::SAMPLE_RATE;
+}
