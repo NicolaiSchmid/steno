@@ -145,14 +145,7 @@ impl std::error::Error for Refused {}
 
 impl ScriptedIntake {
     pub fn new(meeting_id: Uuid, failures: u32) -> Arc<Self> {
-        Arc::new(ScriptedIntake {
-            meeting_id,
-            delay: Duration::ZERO,
-            admit_once: false,
-            admissions: Mutex::new(Vec::new()),
-            failures_left: Mutex::new(failures),
-            admitted: Mutex::new(false),
-        })
+        Self::with_delay(meeting_id, failures, Duration::ZERO, false)
     }
 
     pub fn with_delay(
@@ -369,16 +362,20 @@ impl Response {
     }
 
     pub fn header(&self, name: &str) -> Option<&str> {
-        self.headers
-            .iter()
-            .find(|(key, _)| key.eq_ignore_ascii_case(name))
-            .map(|(_, value)| value.as_str())
+        header(&self.headers, name)
     }
+}
+
+fn header<'a>(headers: &'a [(String, String)], name: &str) -> Option<&'a str> {
+    headers
+        .iter()
+        .find(|(key, _)| key.eq_ignore_ascii_case(name))
+        .map(|(_, value)| value.as_str())
 }
 
 #[derive(Clone)]
 pub struct LoopbackClient {
-    pub base: String,
+    base: String,
     client: reqwest::Client,
 }
 
@@ -475,6 +472,7 @@ pub fn pairing(secret: &[u8]) -> String {
 // Raw client: for the limit tests, where the assertion is about the
 // connection itself
 
+#[derive(Default)]
 pub struct Exchange {
     pub status: Option<u16>,
     pub headers: Vec<(String, String)>,
@@ -484,12 +482,11 @@ pub struct Exchange {
 
 impl Exchange {
     pub fn header(&self, name: &str) -> Option<&str> {
-        self.headers
-            .iter()
-            .find(|(key, _)| key.eq_ignore_ascii_case(name))
-            .map(|(_, value)| value.as_str())
+        header(&self.headers, name)
     }
 }
+
+type ClientStream = tokio_rustls::client::TlsStream<TcpStream>;
 
 pub struct RawClient {
     pub port: u16,
@@ -497,7 +494,7 @@ pub struct RawClient {
 }
 
 impl RawClient {
-    async fn connect(&self) -> std::io::Result<tokio_rustls::client::TlsStream<TcpStream>> {
+    async fn connect(&self) -> std::io::Result<ClientStream> {
         let tcp = TcpStream::connect(("127.0.0.1", self.port)).await?;
         let connector = TlsConnector::from(pinned_client_config(&self.fingerprint).unwrap());
         let name = rustls_pki_types::ServerName::try_from("steno.local").unwrap();
@@ -528,42 +525,14 @@ impl RawClient {
         stream.flush().await?;
 
         let mut received = Vec::new();
-        let mut closed = false;
-        read_until(
-            tokio::time::Instant::now() + timeout,
-            &mut received,
-            &mut stream,
-            &mut closed,
-        )
-        .await;
+        let complete = |bytes: &[u8]| parse_response(bytes).is_some();
+        let mut closed = read_until(&mut stream, timeout, &mut received, complete).await;
         if !closed {
-            let mut buffer = [0u8; 4096];
-            let grace = tokio::time::Instant::now() + close_grace;
-            loop {
-                let remaining = grace.saturating_duration_since(tokio::time::Instant::now());
-                if remaining.is_zero() {
-                    break;
-                }
-                match tokio::time::timeout(remaining, stream.read(&mut buffer)).await {
-                    Ok(Ok(0) | Err(_)) => {
-                        closed = true;
-                        break;
-                    }
-                    Ok(Ok(count)) => received.extend_from_slice(&buffer[..count]),
-                    Err(_) => break,
-                }
-            }
+            closed = read_until(&mut stream, close_grace, &mut received, |_| false).await;
         }
-        let parsed = parse_response(&received);
-        Ok(Exchange {
-            status: parsed.as_ref().map(|(status, _, _)| *status),
-            headers: parsed
-                .as_ref()
-                .map(|(_, headers, _)| headers.clone())
-                .unwrap_or_default(),
-            body: parsed.map(|(_, _, body)| body).unwrap_or_default(),
-            closed_by_server: closed,
-        })
+        let mut exchange = parse_response(&received).unwrap_or_default();
+        exchange.closed_by_server = closed;
+        Ok(exchange)
     }
 
     /// Sends `bytes` as they are and then stays silent. True when the server
@@ -572,56 +541,41 @@ impl RawClient {
         let mut stream = self.connect().await?;
         stream.write_all(bytes).await?;
         stream.flush().await?;
-        let mut buffer = [0u8; 1024];
-        let deadline = tokio::time::Instant::now() + timeout;
-        loop {
-            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-            if remaining.is_zero() {
-                return Ok(false);
-            }
-            match tokio::time::timeout(remaining, stream.read(&mut buffer)).await {
-                Ok(Ok(0) | Err(_)) => return Ok(true),
-                Ok(Ok(_)) => {}
-                Err(_) => return Ok(false),
-            }
-        }
+        Ok(read_until(&mut stream, timeout, &mut Vec::new(), |_| false).await)
     }
 }
 
-/// Reads until a complete response is buffered, the server closes, or the
-/// deadline passes.
+/// Appends what arrives to `received` until `done` says so, the server
+/// closes (true) or `timeout` passes.
 async fn read_until(
-    deadline: tokio::time::Instant,
+    stream: &mut ClientStream,
+    timeout: Duration,
     received: &mut Vec<u8>,
-    stream: &mut tokio_rustls::client::TlsStream<TcpStream>,
-    closed: &mut bool,
-) {
+    done: impl Fn(&[u8]) -> bool,
+) -> bool {
+    let deadline = tokio::time::Instant::now() + timeout;
     let mut buffer = [0u8; 16 * 1024];
     loop {
         let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
         if remaining.is_zero() {
-            return;
+            return false;
         }
         match tokio::time::timeout(remaining, stream.read(&mut buffer)).await {
-            Ok(Ok(0) | Err(_)) => {
-                *closed = true;
-                return;
-            }
+            Ok(Ok(0) | Err(_)) => return true,
             Ok(Ok(count)) => {
                 received.extend_from_slice(&buffer[..count]);
-                if parse_response(received).is_some() {
-                    return;
+                if done(received) {
+                    return false;
                 }
             }
-            Err(_) => return,
+            Err(_) => return false,
         }
     }
 }
 
 /// One complete HTTP/1.1 response (status, headers, body by
 /// `Content-Length`), or `None` while it is still incomplete.
-#[allow(clippy::type_complexity)]
-fn parse_response(bytes: &[u8]) -> Option<(u16, Vec<(String, String)>, Vec<u8>)> {
+fn parse_response(bytes: &[u8]) -> Option<Exchange> {
     let end = bytes.windows(4).position(|window| window == b"\r\n\r\n")?;
     let head = std::str::from_utf8(&bytes[..end]).ok()?;
     let mut lines = head.split("\r\n");
@@ -637,7 +591,12 @@ fn parse_response(bytes: &[u8]) -> Option<(u16, Vec<(String, String)>, Vec<u8>)>
         .and_then(|(_, value)| value.parse().ok())
         .unwrap_or(0);
     let body = &bytes[end + 4..];
-    (body.len() >= length).then(|| (status, headers, body[..length].to_vec()))
+    (body.len() >= length).then(|| Exchange {
+        status: Some(status),
+        headers,
+        body: body[..length].to_vec(),
+        closed_by_server: false,
+    })
 }
 
 // The phone
