@@ -28,6 +28,7 @@
       "clusterLabel" : "Speaker 1",
       "colorIndex" : 0,
       "displayName" : "Nicolai",
+      "email" : "nicolai@example.com",
       "hasClip" : true,
       "id" : "00000000-0000-0000-0000-000000000014",
       "isPlaying" : false,

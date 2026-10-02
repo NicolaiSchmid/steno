@@ -20,8 +20,6 @@ import type {
 import { detailTab } from "@/bridge/contract";
 import { send, useBridge, useSnapshot } from "@/bridge/hooks";
 import {
-	Avatar,
-	AvatarStack,
 	Badge,
 	Button,
 	Callout,
@@ -53,6 +51,7 @@ import {
 import { NotesTab } from "./notes-tab";
 import { ProcessingCard } from "./processing-card";
 import { SOURCE } from "./source";
+import { SpeakersPopover } from "./speakers-popover";
 import { SummaryTab } from "./summary-tab";
 import { TagEditor } from "./tag-editor";
 import { TasksTab } from "./tasks-tab";
@@ -591,21 +590,12 @@ function DetailBody({
 				data-testid="speakers-row"
 			>
 				{detail.speakers.length > 0 ? (
-					<AvatarStack ring="background">
-						{detail.speakers.map((speaker) => (
-							<Avatar
-								index={speaker.colorIndex}
-								key={speaker.id}
-								name={speaker.displayName}
-								size="md"
-								unknown={speaker.assignment === "unknown"}
-							/>
-						))}
-					</AvatarStack>
-				) : null}
-				<span className="text-muted-foreground text-sm">
-					{formatPeople(detail.speakers)}
-				</span>
+					<SpeakersPopover speakers={detail.speakers} />
+				) : (
+					<span className="text-muted-foreground text-sm">
+						{formatPeople(detail.speakers)}
+					</span>
+				)}
 				{unconfirmed.length > 0 && detail.transcript.length > 0 ? (
 					<Button
 						data-testid="confirm-speaker"

@@ -34,8 +34,9 @@ function firstTurnOf(
 
 /**
  * The turns in two columns: who and when on the left, the words on the
- * right. An unconfirmed speaker's name opens the picker; a speaker with a
- * clip gets a play button.
+ * right. A speaker's name opens the picker, confirmed or not, so a wrong
+ * name can be taken back where it is read; a speaker with a clip gets a
+ * play button.
  */
 export function TranscriptTab({ detail, pickerRequest }: TranscriptTabProps) {
 	const client = useBridge();
@@ -122,7 +123,7 @@ export function TranscriptTab({ detail, pickerRequest }: TranscriptTabProps) {
 				return (
 					<div className="mb-5 grid grid-cols-[140px_1fr] gap-4" key={turn.id}>
 						<div className="flex flex-col gap-0.5 pt-0.5 font-medium text-sm">
-							{unconfirmed && speaker ? (
+							{speaker ? (
 								<SpeakerPicker
 									onOpenChange={(open) => setOpenTurnID(open ? turn.id : null)}
 									open={openTurnID === turn.id}

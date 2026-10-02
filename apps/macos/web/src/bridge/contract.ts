@@ -369,6 +369,7 @@ export const meetingDetailSnapshot = z
 					displayName: z.string(),
 					assignment: z.enum(["unknown", "suggested", "confirmed"]),
 					personID: uuid.optional(),
+					email: z.string().optional(),
 					suggestionName: z.string().optional(),
 					colorIndex: z.number().int(),
 					hasClip: z.boolean(),

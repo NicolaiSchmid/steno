@@ -98,7 +98,8 @@ public enum BridgeSamples {
       .init(
         id: speakerNicolai, clusterLabel: "Speaker 1", displayName: "Nicolai",
         assignment: .confirmed,
-        personID: personNicolai, colorIndex: 0, hasClip: true, isPlaying: false),
+        personID: personNicolai, email: "nicolai@example.com", colorIndex: 0, hasClip: true,
+        isPlaying: false),
       .init(
         id: speakerJerome, clusterLabel: "Speaker 2", displayName: "Jérôme", assignment: .confirmed,
         personID: personJerome, colorIndex: 1, hasClip: true, isPlaying: false),
