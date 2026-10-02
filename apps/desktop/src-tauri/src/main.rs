@@ -18,7 +18,7 @@ mod windows;
 fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
-        .manage(host::Host::new())
+        .manage(host::Host)
         .invoke_handler(tauri::generate_handler![bridge::bridge_call])
         .setup(|app| {
             let handle = app.handle();

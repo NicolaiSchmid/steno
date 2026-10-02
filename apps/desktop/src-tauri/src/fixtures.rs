@@ -1,11 +1,72 @@
 //! The recorded bridge fixtures (`apps/macos/web/fixtures/bridge/`), embedded
-//! by `build.rs` from `index.json`, and the mock transport's rules for
-//! serving them: topic files become snapshots, `<method>.reply.json` and the
-//! two generic reply shapes answer commands, everything else is `null`.
+//! with `include_str!` in `index.json` order, and the mock transport's rules
+//! for serving them: topic files become snapshots, `<method>.reply.json` and
+//! the two generic reply shapes answer commands, everything else is `null`.
 
 use serde_json::Value;
 
-include!(concat!(env!("OUT_DIR"), "/fixtures.rs"));
+/// Embeds every listed fixture as a `(key, json)` pair; the test below keeps
+/// the list equal to `index.json`.
+macro_rules! fixtures {
+    ($($key:literal),* $(,)?) => {
+        /// Every recorded fixture by key, in `index.json` order.
+        pub static FIXTURES: &[(&str, &str)] = &[
+            $(($key, include_str!(concat!("../../../macos/web/fixtures/bridge/", $key, ".json"))),)*
+        ];
+    };
+}
+
+fixtures![
+    "app",
+    "recording",
+    "recording.live",
+    "progress",
+    "meetings.list",
+    "meeting.detail",
+    "settings.general",
+    "settings.recording",
+    "settings.transcription",
+    "settings.summaries",
+    "settings.summaries.codex",
+    "settings.export",
+    "settings.iphone",
+    "settings.iphone.pairing",
+    "onboarding",
+    "onboarding.setup",
+    "envelope.request",
+    "envelope.reply",
+    "envelope.error",
+    "envelope.event",
+    "speakers.options.reply",
+    "params.page.layout",
+    "params.meetings.setFilter",
+    "params.meetings.setTagFilter",
+    "params.meetings.setQuery",
+    "params.meetingID",
+    "params.meeting.setTab",
+    "params.meeting.setTags",
+    "params.meeting.setTemplate",
+    "params.bool",
+    "params.string",
+    "params.meeting.saveNotes",
+    "params.speakers.options",
+    "params.speakers.select",
+    "params.speakerID",
+    "params.recording.start",
+    "params.settings.recording.setRetention",
+    "params.permissionKind",
+    "params.assetID",
+    "params.settings.general.setAutomaticUpdates",
+    "params.settings.summaries.update",
+    "params.settings.export.update",
+    "params.deviceID",
+    "params.onboarding.setupStep",
+    "params.system.openURL",
+    "params.window",
+    "params.ui.confirmDestructive",
+    "reply.confirm",
+    "reply.chosenPath",
+];
 
 /// The contract's topics (`bridgeTopics` in `contract.ts`). The other
 /// snapshot-shaped fixtures (`recording.live`, `onboarding.setup`, ...) feed
@@ -98,12 +159,17 @@ mod tests {
     }
 
     #[test]
-    fn every_fixture_parses_and_has_a_file() {
-        assert!(
-            FIXTURES.len() >= 49,
-            "index.json lists {} fixtures",
-            FIXTURES.len()
-        );
+    fn the_table_is_index_json() {
+        let index: Vec<String> = serde_json::from_str(include_str!(
+            "../../../macos/web/fixtures/bridge/index.json"
+        ))
+        .expect("index.json is a list of keys");
+        let keys: Vec<&str> = FIXTURES.iter().map(|(key, _)| *key).collect();
+        assert_eq!(keys, index);
+    }
+
+    #[test]
+    fn every_fixture_parses() {
         for (key, json) in FIXTURES {
             let value: Value = serde_json::from_str(json).unwrap_or_else(|e| panic!("{key}: {e}"));
             assert!(

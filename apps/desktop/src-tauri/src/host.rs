@@ -13,26 +13,15 @@ use tauri::WebviewWindow;
 
 use crate::bridge::BridgeFailure;
 
-#[cfg(not(feature = "fixture-host"))]
-use crate::bridge::ErrorCode;
+pub struct Host;
 
-pub struct Host {
-    _private: (),
-}
-
+#[cfg(feature = "fixture-host")]
 impl Host {
-    pub const fn new() -> Self {
-        Self { _private: () }
-    }
-
     /// The page has mounted: publish every topic it may show.
     pub fn page_ready(&self, window: &WebviewWindow) -> Result<(), BridgeFailure> {
-        #[cfg(feature = "fixture-host")]
         for (topic, snapshot) in crate::fixtures::snapshots() {
             crate::bridge::emit(window, topic, snapshot)?;
         }
-        #[cfg(not(feature = "fixture-host"))]
-        let _ = window;
         Ok(())
     }
 
@@ -43,17 +32,7 @@ impl Host {
         method: &str,
         _params: Value,
     ) -> Result<Value, BridgeFailure> {
-        #[cfg(feature = "fixture-host")]
-        {
-            Ok(crate::fixtures::reply(method))
-        }
-        #[cfg(not(feature = "fixture-host"))]
-        {
-            Err(BridgeFailure::new(
-                ErrorCode::Failed,
-                format!("{method}: no bridge host is wired yet"),
-            ))
-        }
+        Ok(crate::fixtures::reply(method))
     }
 
     /// `window.open` names a meeting or a section for a window that is
@@ -66,12 +45,37 @@ impl Host {
         field: &str,
         value: &str,
     ) -> Result<(), BridgeFailure> {
-        #[cfg(feature = "fixture-host")]
         if let Some(app) = crate::fixtures::app_snapshot_requesting(field, value) {
             crate::bridge::emit(window, "app", app)?;
         }
-        #[cfg(not(feature = "fixture-host"))]
-        let _ = (window, field, value);
+        Ok(())
+    }
+}
+
+#[cfg(not(feature = "fixture-host"))]
+impl Host {
+    pub fn page_ready(&self, _window: &WebviewWindow) -> Result<(), BridgeFailure> {
+        Ok(())
+    }
+
+    pub fn call(
+        &self,
+        _window: &WebviewWindow,
+        method: &str,
+        _params: Value,
+    ) -> Result<Value, BridgeFailure> {
+        Err(BridgeFailure::new(
+            crate::bridge::ErrorCode::Failed,
+            format!("{method}: no bridge host is wired yet"),
+        ))
+    }
+
+    pub fn publish_request(
+        &self,
+        _window: &WebviewWindow,
+        _field: &str,
+        _value: &str,
+    ) -> Result<(), BridgeFailure> {
         Ok(())
     }
 }

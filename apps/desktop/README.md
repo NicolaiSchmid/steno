@@ -14,10 +14,10 @@ before any pipeline exists.
 |---|---|
 | `src-tauri/Cargo.toml` | Crate `steno-desktop`, binary `steno-desktop`, feature `fixture-host` (default on) |
 | `src-tauri/tauri.conf.json` | `frontendDist` is the web app's `dist/`; `beforeDevCommand` and `beforeBuildCommand` run `pnpm dev` and `pnpm build` in `apps/macos/web`; no windows are declared here, `windows.rs` creates them |
-| `src-tauri/build.rs` | Generates the fixture module (`include_str!` of every file `index.json` lists); stands in for a missing web `dist/` with a placeholder page so `cargo build` works on a bare checkout; then `tauri_build::build()` |
+| `src-tauri/build.rs`, `src-tauri/placeholder/` | Points `frontendDist` at the placeholder page when the web `dist/` is missing, so `cargo build` works on a bare checkout; then `tauri_build::build()` |
 | `src-tauri/src/windows.rs` | The three windows with the Swift sizes: main 1120 by 720 (minimum 960 by 600) at `#/main`, Settings 960 by 640 (minimum 760 by 520) at `#/settings`, onboarding fixed 560 by 620 at `#/onboarding`. Main opens at start; the others on `window.open`, focused when already open |
 | `src-tauri/src/bridge.rs` | `bridge_call(method, params)` and the `steno:event` emitter, scoped to the calling window. `window.open`, `window.close` and `system.openURL` are the shell's; everything else goes to the host |
-| `src-tauri/src/host.rs`, `fixtures.rs` | The fixture host: every topic's snapshot on `page.ready`, replies as `mock-transport.ts` gives them (`speakers.options.reply`, `reply.confirm` and `reply.chosenPath` for the alerts and folder panels, `null` otherwise) |
+| `src-tauri/src/host.rs`, `fixtures.rs` | The fixture host: the fixtures `index.json` lists, embedded with `include_str!`; every topic's snapshot on `page.ready`; replies as `mock-transport.ts` gives them (`speakers.options.reply`, `reply.confirm` and `reply.chosenPath` for the alerts and folder panels, `null` otherwise) |
 | `src-tauri/src/navigation.rs` | Navigation policy: the app origin and, in debug builds, the Vite dev server; everything else is cancelled |
 | `src-tauri/src/smoke.rs`, `scripts/smoke-linux.sh` | The headless smoke CI runs under Xvfb |
 | `src-tauri/capabilities/default.json` | `core:default` for the three windows, nothing more; native capabilities are reached through `bridge_call` |
@@ -45,9 +45,8 @@ the shell together.
 
 ### Linux prerequisites
 
-Debian and Ubuntu: `scripts/setup-linux.sh` (WebKitGTK 4.1, GTK 3,
-libayatana-appindicator, librsvg, OpenSSL, pkg-config, xdo; Xvfb and
-ImageMagick for the smoke). CI runs it on `ubuntu-latest`.
+Debian and Ubuntu: `scripts/setup-linux.sh` installs the packages (the
+list is in the script); CI runs it on `ubuntu-latest`.
 
 NixOS: no system packages; build and run inside a shell with the libraries:
 
@@ -81,8 +80,9 @@ data, which is synthetic.
 
 ## Tests
 
-`cargo test -p steno-desktop`: the fixture module (every topic has a
-snapshot, every fixture parses, the reply aliases match the mock transport),
+`cargo test -p steno-desktop`: the fixture table (it equals `index.json`,
+every topic has a snapshot, every fixture parses, the reply aliases match
+the mock transport),
 the window specs and routes, the `params.window` shape, the navigation
 policy and the smoke's switches. The web side's `tauri-transport.test.ts`
 covers the page's half of the wire.
