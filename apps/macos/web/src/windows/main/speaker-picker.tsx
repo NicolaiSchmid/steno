@@ -1,4 +1,10 @@
-import { PlusIcon, UserIcon, UserXIcon } from "lucide-react";
+import {
+	PlayIcon,
+	PlusIcon,
+	SquareIcon,
+	UserIcon,
+	UserXIcon,
+} from "lucide-react";
 import {
 	type ChangeEvent,
 	type KeyboardEvent,
@@ -9,6 +15,7 @@ import {
 import type { MeetingDetailSnapshot, SpeakerOption } from "@/bridge/contract";
 import { send, useBridge } from "@/bridge/hooks";
 import {
+	Badge,
 	Button,
 	Input,
 	Popover,
@@ -21,12 +28,6 @@ export type Speaker = MeetingDetailSnapshot["speakers"][number];
 
 export const SPEAKER_QUERY_DEBOUNCE_MS = 150;
 
-export interface SpeakerPickerProps {
-	speaker: Speaker;
-	open: boolean;
-	onOpenChange: (open: boolean) => void;
-}
-
 function optionIcon(kind: SpeakerOption["kind"]) {
 	switch (kind) {
 		case "person":
@@ -38,16 +39,96 @@ function optionIcon(kind: SpeakerOption["kind"]) {
 	}
 }
 
+export interface SpeakerBadgeProps {
+	speaker: Speaker;
+	className?: string;
+}
+
+/** "Suggested" or "Who is this?" on an unconfirmed speaker; nothing else. */
+export function SpeakerBadge({ speaker, className }: SpeakerBadgeProps) {
+	if (speaker.assignment === "confirmed") {
+		return null;
+	}
+	return (
+		<Badge {...(className ? { className } : {})} size="sm" variant="warning">
+			{speaker.assignment === "suggested" ? "Suggested" : "Who is this?"}
+		</Badge>
+	);
+}
+
+export interface SpeakerPlayButtonProps {
+	speaker: Speaker;
+	/** Suffix of the test id, so two hosts on one page stay apart. */
+	testID: string;
+	/** Icon only, for a row; the transcript spells out Play and Stop. */
+	iconOnly?: boolean;
+	className?: string;
+}
+
 /**
- * Names an unconfirmed speaker. The trigger is the speaker's name in the
- * transcript; the popover asks the host for options as the query changes
- * (`speakers.options`) and sends the pick (`speakers.select`).
+ * Plays or stops the speaker's sample clip (`speakers.play`,
+ * `speakers.stop`); renders nothing without a clip.
  */
-export function SpeakerPicker({
+export function SpeakerPlayButton({
 	speaker,
-	open,
-	onOpenChange,
-}: SpeakerPickerProps) {
+	testID,
+	iconOnly = false,
+	className,
+}: SpeakerPlayButtonProps) {
+	const client = useBridge();
+	if (!speaker.hasClip) {
+		return null;
+	}
+	function toggle() {
+		if (speaker.isPlaying) {
+			send(client, "speakers.stop");
+		} else {
+			send(client, "speakers.play", { speakerID: speaker.id });
+		}
+	}
+	return (
+		<Button
+			aria-label={
+				speaker.isPlaying
+					? `Stop the sample of ${speaker.displayName}`
+					: `Play a sample of ${speaker.displayName}`
+			}
+			{...(className ? { className } : {})}
+			data-testid={testID}
+			onClick={toggle}
+			size={iconOnly ? "icon-sm" : "xs"}
+			variant="ghost"
+		>
+			{speaker.isPlaying ? (
+				<SquareIcon aria-hidden="true" />
+			) : (
+				<PlayIcon aria-hidden="true" />
+			)}
+			{iconOnly ? null : speaker.isPlaying ? "Stop" : "Play"}
+		</Button>
+	);
+}
+
+export interface SpeakerPickerPanelProps {
+	speaker: Speaker;
+	/** Called once the pick was sent, so the owner can close. */
+	onPicked: () => void;
+	className?: string;
+}
+
+/**
+ * The field and the option list that name one speaker, any speaker: the
+ * host is asked for options as the query changes (`speakers.options`) and
+ * the pick is sent as `speakers.select`. Mounting it is opening it: the
+ * first request runs at once and takes the host's prefill (the suggested
+ * name) into the field. `SpeakerPicker` wraps it in a popover for the
+ * transcript; the Speakers popover expands it inline under a row.
+ */
+export function SpeakerPickerPanel({
+	speaker,
+	onPicked,
+	className,
+}: SpeakerPickerPanelProps) {
 	const client = useBridge();
 	const [query, setQuery] = useState("");
 	const [options, setOptions] = useState<readonly SpeakerOption[]>([]);
@@ -79,11 +160,8 @@ export function SpeakerPicker({
 			});
 	}
 
-	// biome-ignore lint/correctness/useExhaustiveDependencies: `load` reads the latest speaker id through the closure; the query fires once per open.
+	// biome-ignore lint/correctness/useExhaustiveDependencies: `load` reads the latest speaker id through the closure; the query fires once per speaker.
 	useEffect(() => {
-		if (!open) {
-			return;
-		}
 		setQuery("");
 		setOptions([]);
 		load("", true);
@@ -91,7 +169,7 @@ export function SpeakerPicker({
 			clearTimeout(timer.current);
 			request.current += 1;
 		};
-	}, [open, speaker.id]);
+	}, [speaker.id]);
 
 	function onQueryChange(event: ChangeEvent<HTMLInputElement>) {
 		const value = event.target.value;
@@ -105,7 +183,7 @@ export function SpeakerPicker({
 
 	function pick(option: SpeakerOption) {
 		send(client, "speakers.select", { speakerID: speaker.id, option });
-		onOpenChange(false);
+		onPicked();
 	}
 
 	function onKeyDown(event: KeyboardEvent<HTMLInputElement>) {
@@ -116,55 +194,81 @@ export function SpeakerPicker({
 	}
 
 	return (
+		<div className={className}>
+			<Input
+				aria-label={`Name for ${speaker.clusterLabel}`}
+				autoFocus
+				data-testid={`speaker-field-${speaker.id}`}
+				onChange={onQueryChange}
+				onKeyDown={onKeyDown}
+				placeholder="Who is this?"
+				size="sm"
+				value={query}
+			/>
+			<div
+				aria-busy={loading || undefined}
+				aria-label="People"
+				className="mt-2 flex flex-col gap-0.5"
+				role="listbox"
+			>
+				{options.map((option, index) => (
+					<button
+						aria-selected={index === 0}
+						className={menuItemVariants()}
+						key={`${option.kind}-${option.label}`}
+						onClick={() => pick(option)}
+						role="option"
+						type="button"
+					>
+						{optionIcon(option.kind)}
+						<span className="min-w-0 flex-1 truncate">{option.label}</span>
+						{option.detail ? (
+							<span className="shrink-0 text-faint text-xs">
+								{option.detail}
+							</span>
+						) : null}
+					</button>
+				))}
+				{!loading && options.length === 0 ? (
+					<p className="my-0 px-2 py-1.5 text-faint text-xs">
+						No one matches yet.
+					</p>
+				) : null}
+			</div>
+		</div>
+	);
+}
+
+export interface SpeakerPickerProps {
+	speaker: Speaker;
+	open: boolean;
+	onOpenChange: (open: boolean) => void;
+}
+
+/**
+ * Names a speaker from the transcript: the trigger is the speaker's name
+ * on a turn, the popover holds the `SpeakerPickerPanel`. Confirmed
+ * speakers open it too, so a wrong name can be taken back where it is read.
+ */
+export function SpeakerPicker({
+	speaker,
+	open,
+	onOpenChange,
+}: SpeakerPickerProps) {
+	return (
 		<Popover modal={false} onOpenChange={onOpenChange} open={open}>
 			<PopoverTrigger
-				className="-ml-[7px] self-start"
+				className="-ml-[7px] max-w-full self-start"
 				data-testid={`speaker-picker-${speaker.id}`}
 				render={<Button size="xs" variant="ghost" />}
 			>
-				{speaker.displayName}
+				<span className="truncate">{speaker.displayName}</span>
 			</PopoverTrigger>
 			<PopoverPopup align="start" padding="sm" size="sm">
-				<Input
-					aria-label={`Name for ${speaker.clusterLabel}`}
-					autoFocus
-					data-testid={`speaker-field-${speaker.id}`}
-					onChange={onQueryChange}
-					onKeyDown={onKeyDown}
-					placeholder="Who is this?"
-					size="sm"
-					value={query}
+				<SpeakerPickerPanel
+					onPicked={() => onOpenChange(false)}
+					speaker={speaker}
 				/>
-				<div
-					aria-busy={loading || undefined}
-					aria-label="People"
-					className="mt-2 flex flex-col gap-0.5"
-					role="listbox"
-				>
-					{options.map((option, index) => (
-						<button
-							aria-selected={index === 0}
-							className={menuItemVariants()}
-							key={`${option.kind}-${option.label}`}
-							onClick={() => pick(option)}
-							role="option"
-							type="button"
-						>
-							{optionIcon(option.kind)}
-							<span className="min-w-0 flex-1 truncate">{option.label}</span>
-							{option.detail ? (
-								<span className="shrink-0 text-faint text-xs">
-									{option.detail}
-								</span>
-							) : null}
-						</button>
-					))}
-					{!loading && options.length === 0 ? (
-						<p className="my-0 px-2 py-1.5 text-faint text-xs">
-							No one matches yet.
-						</p>
-					) : null}
-				</div>
 			</PopoverPopup>
 		</Popover>
 	);

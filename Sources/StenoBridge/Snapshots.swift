@@ -301,6 +301,8 @@ public struct MeetingDetailSnapshot: Codable, Sendable, Equatable {
     public var displayName: String
     public var assignment: Assignment
     public var personID: UUID?
+    /// The confirmed or suggested person's email, when known.
+    public var email: String?
     public var suggestionName: String?
     public var colorIndex: Int
     public var hasClip: Bool
@@ -308,14 +310,15 @@ public struct MeetingDetailSnapshot: Codable, Sendable, Equatable {
 
     public init(
       id: UUID, clusterLabel: String, displayName: String, assignment: Assignment,
-      personID: UUID? = nil, suggestionName: String? = nil, colorIndex: Int, hasClip: Bool,
-      isPlaying: Bool
+      personID: UUID? = nil, email: String? = nil, suggestionName: String? = nil, colorIndex: Int,
+      hasClip: Bool, isPlaying: Bool
     ) {
       self.id = id
       self.clusterLabel = clusterLabel
       self.displayName = displayName
       self.assignment = assignment
       self.personID = personID
+      self.email = email
       self.suggestionName = suggestionName
       self.colorIndex = colorIndex
       self.hasClip = hasClip

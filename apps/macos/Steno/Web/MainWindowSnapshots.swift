@@ -343,7 +343,7 @@ extension MeetingDetailSnapshot {
       MeetingDetailSnapshot.Speaker(
         id: row.id, clusterLabel: row.speaker.clusterLabel, displayName: row.displayName,
         assignment: row.speaker.assignment.kind, personID: row.speaker.assignment.personID,
-        suggestionName: speakers.prefill(for: row.id),
+        email: row.person?.email, suggestionName: speakers.prefill(for: row.id),
         colorIndex: MainWindowSnapshots.colorIndex(for: row.person?.id ?? row.id),
         hasClip: row.canPlay, isPlaying: playing == row.id)
     }

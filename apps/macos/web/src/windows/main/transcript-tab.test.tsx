@@ -19,12 +19,30 @@ describe("TranscriptTab", () => {
 	it("renders the turns and marks the unnamed speaker", async () => {
 		const harness = await createBridgeHarness();
 		renderWithBridge(<TranscriptTab detail={await detail()} />, harness);
-		expect(screen.getByText("Nicolai")).toBeInTheDocument();
 		expect(screen.getByText("Who is this?")).toBeInTheDocument();
 		expect(screen.getByTestId(`speaker-picker-${UNNAMED}`)).toHaveTextContent(
 			"Speaker 4",
 		);
-		expect(screen.queryByTestId(`speaker-picker-${NICOLAI}`)).toBeNull();
+		expect(screen.getByTestId(`speaker-picker-${NICOLAI}`)).toHaveTextContent(
+			"Nicolai",
+		);
+	});
+
+	it("opens the picker on a confirmed speaker too", async () => {
+		const user = userEvent.setup();
+		const harness = await createBridgeHarness();
+		renderWithBridge(<TranscriptTab detail={await detail()} />, harness);
+		await user.click(screen.getByTestId(`speaker-picker-${NICOLAI}`));
+		expect(
+			await screen.findByTestId(`speaker-field-${NICOLAI}`),
+		).toBeInTheDocument();
+		await screen.findAllByRole("option");
+		expect(callsTo(harness.transport, "speakers.options")).toEqual([
+			{
+				method: "speakers.options",
+				params: { speakerID: NICOLAI, query: "" },
+			},
+		]);
 	});
 
 	it("asks the host for options, then sends the pick", async () => {
