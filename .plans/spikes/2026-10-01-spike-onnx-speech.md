@@ -39,7 +39,9 @@ average read just before each file.
    ```
 
    The exported encoder's relative-position table is fixed at 2500 encoder frames
-   (about 200 s of audio). The C++ exception crosses the FFI boundary and kills the
+   (about 200 s of audio), as read from this error; spike E later measured the cap at
+   5000 frames (400 s) and explained the 2500 (`.plans/spikes/2026-10-01-spike-own-export.md`).
+   The C++ exception crosses the FFI boundary and kills the
    process; there is no error return. The spike therefore splits the audio into
    chunks of about 60 s (default) or 20 s, cutting at the quietest 100 ms frame within
    5 s of each boundary (`split_at_quiet_points` in `spikes/onnx-speech/src/main.rs`).
@@ -229,8 +231,8 @@ available.
 3 to 16 speakers for single-speaker calls at every threshold tried, where FluidAudio
 gets exactly one. Reproducing FluidAudio's quality would mean exporting pyannote's
 community-1 embedding model, reimplementing its clustering and refinement, and
-calibrating against the Forge corpus again (`.plans/2026-09-29-...` speaker
-calibration work). That is weeks, not a spike.
+calibrating against the Forge corpus again (`.plans/2026-09-29-speaker-calibration.md`).
+That is weeks, not a spike.
 
 **Verdict.** ONNX on CPU is good enough for transcription as a background job on
 Linux and Windows, at WhisperKit-class speed and with WhisperKit-class disagreement

@@ -1,7 +1,7 @@
-# Spike: two-lane CoreAudio capture with echo cancellation in Rust
+# Spike A: two-lane CoreAudio capture with echo cancellation in Rust
 
 Status: measured 2026-10-01 on Forge (Mac16,1, M4 Pro, macOS 26.7), time-boxed
-to about 90 minutes. Question: can Rust do Steno's two-lane capture (process
+to about 90 minutes. Parent: `.plans/2026-10-01-cross-platform-spikes.md`. Question: can Rust do Steno's two-lane capture (process
 tap + microphone through one private aggregate device and one IOProc) with
 Speex echo cancellation, at the quality of the Swift implementation in
 `Sources/StenoAudio`?
@@ -220,18 +220,10 @@ confirms the SplitMix64 and envelope ports.
 ## Verdict
 
 Feasible, with the quality question left open by the environment rather than
-by Rust.
-
-What the spike shows:
-
-- Every HAL call the Swift backend uses exists in `objc2-core-audio`, and the
-  code ports almost mechanically: same layout resolution result, same
-  latencies, same 512-frame callback cadence, same start behaviour, no drops.
-- The audio-thread contract (no allocation, no lock) is met and, unlike in
-  Swift, proven by a counting allocator rather than by discipline.
-- Speex vendored into a `cc` build gives bit-identical results to the Swift
-  CSpeex package.
-- Build cost is trivial (4 s clean, 16 crates, 788 KB).
+by Rust. The short answer at the top and the tables above carry what the spike
+shows (same layout, latencies and callback cadence as Swift, no drops, zero
+allocations in the IOProc, Speex identical to the printed precision, 4 s clean
+build).
 
 What it does not show: that the mic and system lanes carry the same levels
 and alignment as Swift's. Structurally they must (the HAL does the mixing,

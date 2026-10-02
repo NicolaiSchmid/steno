@@ -1,6 +1,7 @@
-# Spike: driving FluidAudio's Parakeet TDT v3 CoreML models from Rust
+# Spike C: driving FluidAudio's Parakeet TDT v3 CoreML models from Rust
 
 Date: 2026-10-01. Time box: 90 minutes. Status: complete, with precise gaps.
+Parent: `.plans/2026-10-01-cross-platform-spikes.md`.
 
 Question: can a Rust process load the exact `.mlmodelc` bundles the Swift app
 uses today (FluidAudio 0.17.4, `parakeet-tdt-0.6b-v3`, encoder precision
@@ -160,8 +161,8 @@ retries only on windows that decoded empty (5 to 49 retries per file, each a
 preprocessor, encoder and decode pass) and changed the WER by 0.06 points
 overall, because almost no retry clears the 0.7 confidence gate (see below).
 A second full run at load 7.0 to 7.1 measured 5.1 to 7.4 s per file and is
-not a valid timing; a clean rerun was queued to wait for load below 4 (result
-appended at the end if it completed inside the time box).
+not a valid timing; the queued rerun never got a load below 4 (see the
+appendix).
 
 Where the time goes (serial): the encoder is a fixed 1.2 s per 10-minute file
 (47 windows at 25.5 ms); the decoder loop is 1.1 to 2.2 s, proportional to the

@@ -206,18 +206,21 @@ removal on or off, `high_freq` 8000 or Nyquist, `snip_edges` either way, pre-emp
 0 or 0.97 all give 67 to 72 words, and the encoder output has no NaN or inf. With
 sherpa-onnx's exact NeMo feature settings (`offline-stream.cc`: dither 0, no
 pre-emphasis, no DC removal, Hann, `snip_edges` false, 0 to 8000 Hz, librosa mels,
-per-feature normalisation) it gives 72 words. The remaining difference is inside
-sherpa-onnx's recognizer glue (`offline-recognizer-transducer-nemo-impl.h` and the
-TDT decoder), which was not debugged in the time box. Both the stock and the own
-models trip it, so in the fp32 row c0cd3671 still loses about 110 words in runs
-(about 7 points of its 14.1 %), and the two empty-decode flags fire exactly as in
-spike D.
+per-feature normalisation) it gives 72 words. This spike therefore placed the
+remaining difference inside sherpa-onnx's recognizer glue
+(`offline-recognizer-transducer-nemo-impl.h` and the TDT decoder), which was not
+debugged in the time box. Both the stock and the own models trip it, so in the fp32
+row c0cd3671 still loses about 110 words in runs (about 7 points of its 14.1 %), and
+the two empty-decode flags fire exactly as in spike D.
 
-Consequence for the plan: the fix is not a model export. It is either a newer
-sherpa-onnx (sherpa-rs git pins 1.12.15; untested) or, better, running the three ONNX
-sessions ourselves from Rust (the `ort` crate) with our own feature extraction and
-TDT greedy loop, which is about the size of the numpy script and is what a sidecar
-(WP2) would own anyway. The window-extension recovery from spike D stays as a guard.
+Correction (spike F, same day, `.plans/spikes/2026-10-01-spike-fleurs-wer.md`): the
+numpy loop used as the control here produces garbled text (64.4 % WER on FLEURS)
+while keeping 85 to 90 % of the word count, so its 57 to 72 words do not show a
+correct decode and the attribution to the glue is unverified. What stands: the window
+is not quantisation and not the arm64 kernels; its cause is open. The plan's response
+(an own decode loop validated against FLEURS, or sherpa-onnx 1.12.15 re-tested on this
+window) is in the parent plan under decision 5 and WP2. The window-extension recovery
+from spike D stays as a guard.
 
 ### 2. Do the scattered German single-word substitutions go away with fp32?
 
@@ -298,13 +301,10 @@ experiment left.
 The specific findings change the parent plan more than the numbers do:
 
 1. Spike D's "int8 export defect" (the window that decodes to zero tokens) is not in
-   the export. It reproduces with fp32, on x86 and arm64, through sherpa-onnx 1.12.9,
-   and does not reproduce with the same model file and the same greedy TDT loop
-   against onnxruntime directly. Decision 5's sidecar should drive onnxruntime
-   itself (the `ort` crate, our feature extraction, the 40-line TDT loop) rather
-   than wrap sherpa-onnx's recognizer, or at least move to sherpa-onnx 1.12.15 and
-   re-test this window. Fixing it is worth about 7 points on c0cd3671 and would put
-   the fp32 mean near 10.5 %.
+   the export. It reproduces with fp32, on x86 and arm64, through sherpa-onnx 1.12.9.
+   The control that seemed to clear it is itself broken (correction above), so where
+   the defect lives is open. Fixing it is worth about 7 points on c0cd3671 and would
+   put the fp32 mean near 10.5 %.
 2. The 400 s cap of the stock export (not 200 s) is a position-table size and the
    own export carries 800 s; the chunker's 190 s clamp can be relaxed, though the
    `T^2` attention memory (13 GB peak for a 600 s window) means 25 to 60 s segments
@@ -324,10 +324,13 @@ decision 3 already accepts ("identical text is not a goal").
 
 ## What remains
 
+As written at the close of this spike; spike F settled G1 by absolute WER the same
+evening and overtook the first and third items.
+
 - Decide whether the ONNX engine drives onnxruntime directly from Rust instead of
-  through sherpa-onnx's recognizer: this spike shows the zero-token defect is in the
-  sherpa-onnx 1.12.9 glue, the numpy decode loop is small, and a sidecar (WP2) would
-  own the sessions anyway. Test sherpa-onnx 1.12.15 first if the wrapper is kept.
+  through sherpa-onnx's recognizer: the numpy decode loop is small and a sidecar (WP2)
+  would own the sessions anyway, but it must first be shown to decode correctly. Test
+  sherpa-onnx 1.12.15 on the zero-token window if the wrapper is kept.
 - Re-score c0cd3671 once the defect is gone; the fp32 row is at 14.1 % with about
   7 points of empty-decode damage.
 - 7eb51e56: measure against the own fp32 export as the reference for the ONNX path,

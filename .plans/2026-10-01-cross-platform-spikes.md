@@ -1,9 +1,12 @@
 # Cross-platform spikes: can Rust and Tauri carry Steno to Linux and Windows?
 
-Status: spikes measured on 2026-10-01, results and a recommendation below. This
-file records the question, the method, the shared baseline and the conclusion. Each spike has its own
-report in `.plans/spikes/`. It proposes nothing yet; the scope plan
-(`.plans/2026-09-24-initial-scope.md`) still lists Windows and Linux as v1 non-goals.
+Status: spikes A to C measured 2026-10-01; position below. This file owns the question,
+the method, the shared baseline and the results of spikes A to C. The follow-up plan
+`.plans/2026-10-01-cross-platform-speech-stack.md` owns the decisions, the gates, the work
+packages and spikes D to F. Each spike has its own report in `.plans/spikes/`. Nothing here
+changes the scope plan (`.plans/2026-09-24-initial-scope.md`), which still lists Windows and
+Linux as v1 non-goals; the web UI plan (`.plans/2026-09-29-macos-webview-ui.md`) still rules
+out Tauri for the Mac app.
 
 ## Question
 
@@ -23,7 +26,8 @@ Candidate end states discussed:
 2. Rust core and Tauri shell on every platform, CoreML speech on the Mac, ONNX speech
    elsewhere, the web UI unchanged. One stack, one build, but a rewrite.
 
-Three unknowns gate option 2. The spikes answer them with numbers.
+Three unknowns gate option 2. Spikes A to C answer them with numbers; spikes D to F
+(speech-stack plan) follow up on what B found.
 
 ## Spikes
 
@@ -32,8 +36,10 @@ Three unknowns gate option 2. The spikes answer them with numbers.
 | A | Can Rust do the two-lane tap + mic capture with Speex echo cancellation on macOS, allocation-free on the audio thread, at the Swift spike's quality? | `.plans/spikes/2026-10-01-spike-rust-capture.md` |
 | B | How do Parakeet TDT v3 and pyannote through sherpa-onnx on CPU (Apple Silicon and x86 Linux) compare with the CoreML pipeline in agreement and speed? | `.plans/spikes/2026-10-01-spike-onnx-speech.md` |
 | C | Can a Rust process drive FluidAudio's CoreML Parakeet models and reproduce the Swift transcript at the Swift speed? | `.plans/spikes/2026-10-01-spike-coreml-rust.md` |
+| D, E, F | Chunker and language voting, own ONNX export, absolute WER on FLEURS German | `.plans/2026-10-01-cross-platform-speech-stack.md` (work packages) |
 
-Spike code lives under `spikes/` and is not part of any product target.
+Spike code lives under `spikes/` (`capture-rs`, `coreml-rs`, `onnx-speech`) and is not
+part of any product target.
 
 ## Shared method
 
@@ -91,11 +97,13 @@ Transcription works, diarization does not, and neither is close to the Mac.
 
 Same weights do not give the same text: int8 kernels, per-chunk language detection
 that flips German to English, and no voice activity detection. The exported encoder
-aborts the process on audio longer than about 200 s (a C++ exception crosses the FFI),
-so production needs VAD-driven segmentation. The ONNX Runtime CoreML provider was
-eight times slower than CPU at 13 GB RSS, so ONNX offers no acceleration on the Mac.
-Linux numbers from atlas were taken at load 30 to 90 and are upper bounds only
-(RTFx 2.6 to 7.8); an idle laptop measurement is still missing.
+aborts the process on long audio (a C++ exception crosses the FFI; spike B read the cap
+as about 200 s, spike E measured it at 400 s), so production needs VAD-driven
+segmentation. The ONNX Runtime CoreML provider was eight times slower than CPU at 13 GB
+RSS, so ONNX offers no acceleration on the Mac. Linux numbers from atlas were taken at
+load 30 to 90 and are upper bounds only (RTFx 2.6 to 7.8); an idle laptop measurement is
+still missing. Spikes D to F took the agreement and segmentation findings further; the
+speech-stack plan has the outcome.
 
 The stock sherpa-onnx diarizer (pyannote segmentation 3.0, ERes2Net embeddings,
 agglomerative clustering) returned 3 to 16 speakers for single-speaker calls at every
@@ -125,35 +133,36 @@ FluidAudio changes these heuristics in most releases.
 
 ## Decision
 
-Rust is not the obstacle. Capture ports mechanically with provable real-time safety,
-and the Mac speech path keeps its models and its Neural Engine speed from Rust at a
-bounded, measured cost. If Steno were being started today for three platforms, Rust
-and Tauri would be the right stack.
+Rust is not the obstacle. Capture ports mechanically with provable real-time safety
+(spike A), and the Mac speech path keeps its models and its Neural Engine speed from
+Rust at a bounded, measured cost (spike C). If Steno were being started today for three
+platforms, Rust and Tauri would be the right stack.
 
-The obstacle is what Linux and Windows would get. With the only available Parakeet v3
-export on CPU, transcription runs at WhisperKit speed with WhisperKit-level
-disagreement from the Mac transcript, memory peaks near 3 GB, and speaker labels do
-not exist until a diarizer is rebuilt and recalibrated. That is true in either
-architecture (Swift daemon or Rust core); the non-Apple speech stack is the gating
-work, and the rewrite only pays for itself once that work is worth doing.
+The obstacle is what Linux and Windows would get, and that is the same in either
+architecture (Swift daemon or Rust core): the non-Apple speech stack is the gating work,
+and the rewrite only pays for itself once that work is worth doing. Spike B put the gap
+at WhisperKit-class speed and WhisperKit-class disagreement with the Mac transcript,
+near 3 GB of memory, and no usable speaker labels. The speech-stack plan took that gap
+on the same evening; its state is the current position on quality:
 
-Recommendation:
+| Question from spike B | State (see the speech-stack plan) |
+|---|---|
+| Transcript quality on CPU | Settled. Gate G1 passed: our own fp32 export scores 5.3 % WER on FLEURS German long files against 5.5 % for CoreML Parakeet |
+| Speed on an idle Linux laptop | Open (gate G2); every Linux number so far is from a loaded desktop |
+| Diarization | Open (gate G3); needs the embedding export, our clustering and a calibration run |
+| GPU | Open (gate G4); no suitable machine in the fleet |
 
-1. Do not start a Rust rewrite now. Nothing in the spikes makes the Swift app worse,
-   and the rewrite's benefit is entirely conditional on shipping other platforms.
-2. Record the three spike crates under `spikes/` as evidence; they are not product
-   code and no target depends on them.
-3. Before any platform decision, run the two measurements the spikes could not: ONNX
-   Parakeet on an idle Linux laptop (not a loaded desktop), and a diarization spike
-   that exports pyannote community-1 embeddings and ports Steno's clustering and
-   refinement, scored against the Forge corpus. Those two numbers, not Rust, decide
-   whether a Linux or Windows Steno is a product anyone would want.
-4. Independently of platforms, move the view models and window bridges out of
+Position:
+
+1. No Rust rewrite now. Nothing in the spikes makes the Swift app worse, and the
+   rewrite's benefit is entirely conditional on shipping other platforms. If G2 and G3
+   pass and there are real users on Linux or Windows, the next plan is the Rust core and
+   Tauri shell, with CoreML speech on the Mac through the spike C route and a parity
+   harness against FluidAudio output as its first deliverable.
+2. The spike crates under `spikes/` are evidence, not product code; no target depends
+   on them.
+3. Independently of platforms, move the view models and window bridges out of
    `apps/macos/Steno` into the Swift package behind `BridgeHost`. It makes the host
-   logic hostlessly testable on Linux today and keeps every option open.
-5. Follow up in the Swift app on the two capture environment findings: silent TCC
-   denial and the IOProc waiting for an output client.
-
-If both measurements in step 3 come back acceptable and there are real users on Linux
-or Windows, the next plan is the Rust core and Tauri shell, with CoreML speech on the
-Mac through the spike C route and a parity harness as its first deliverable.
+   logic testable on Linux today and keeps every option open.
+4. Follow up in the Swift app on the two capture environment findings from spike A:
+   silent TCC denial and the IOProc waiting for an output client.

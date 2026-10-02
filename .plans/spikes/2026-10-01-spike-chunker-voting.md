@@ -205,9 +205,11 @@ words); the first returned zero tokens from all four candidates. A probe afterwa
 The audio is ordinary (RMS 0.10, peak 0.95, no clipping); the CoreML reference has
 about 150 words there. The int8 export produces nothing for any window that starts
 between 25 and 37 s and ends before about 50 s, and produces normal text as soon as
-the window is extended either way or the signal is scaled up. That is a
-quantisation defect of this export, not segmentation: boundary shifts of 2 s and
-halving do not escape it, extending the window by 5 to 12 s does. FluidAudio's
+the window is extended either way or the signal is scaled up. Not segmentation:
+boundary shifts of 2 s and halving do not escape it, extending the window by 5 to
+12 s does. This spike read it as a quantisation defect of the export; spike E
+reproduced it with the fp32 export (`.plans/spikes/2026-10-01-spike-own-export.md`),
+so it is not quantisation, and after spike F its cause is open. FluidAudio's
 recovery policies (`spikes/coreml-rs/src/pipeline.rs`: full-length encoder,
 padded preprocessor, trimmed tail) exist for the same symptom on CoreML.
 
@@ -280,11 +282,11 @@ Language voting is not worth much on this corpus: pause-aligned chunks do not fl
 language, so there is nothing to vote on, and the lane prior's only use was to
 reject a text-detector confusion. The two findings that matter for the plan:
 
-- The remaining disagreement is model-level (bucket 2) and an export defect (bucket
-  3). Both point at decision 3 of the parent plan, our own fp32 and calibrated int8
-  export, as the next variable; the chunker and recovery code here is the harness to
-  measure it with. Excluding the untrustworthy file, the floor this pipeline reaches
-  with the current export is 12.9 % mean, still above the gate.
+- The remaining disagreement is model-level (bucket 2) and the zero-token window
+  (bucket 3). Both pointed at decision 3 of the parent plan, our own export, as the
+  next variable, and the chunker and recovery code here is the harness spikes E and F
+  measured it with. Excluding the untrustworthy file, the floor this pipeline reaches
+  with the stock export is 12.9 % mean, still above the gate as it stood.
 - Any ONNX pipeline needs an empty-decode recovery that *extends* the window
   (FluidAudio-style policies), not only shifts it; the 2 s shifts and halving that
   were specified here did not escape the defect, a 5 to 12 s extension did.
