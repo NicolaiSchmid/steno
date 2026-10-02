@@ -181,7 +181,7 @@ against `main`.
 | WP2 store | merged | #155 | |
 | WP3 Tauri shell on fixtures | merged | #156 | |
 | protocols (traits and value types) | in review | feat/rust-protocols | `EchoCanceller`, `AudioDecoder`, `AudioBuffer16k`, ... |
-| WP5a audio (`steno-audio`) | in review | feat/rust-audio | Rings, Speex AEC, writer, session with rebuild, synthetic backend, macOS live backend, detector, symphonia decoder; PipeWire (WP5b) and WASAPI (WP10) are stubs. Zero-allocation proof in `crates/steno-audio/tests/realtime.rs`; ERLE table identical to Swift's `aec-bench --synthetic`. |
+| WP5a audio (`steno-audio`) | in review | #166 | Rings, Speex AEC, writer, session with rebuild, synthetic backend, macOS live backend, detector, symphonia decoder; PipeWire (WP5b) and WASAPI (WP10) are stubs. Zero-allocation proof in `crates/steno-audio/tests/realtime.rs`; ERLE table identical to Swift's `aec-bench --synthetic`. |
 
 ## Risks
 
