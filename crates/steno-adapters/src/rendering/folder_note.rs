@@ -5,8 +5,8 @@
 use steno_core::{MeetingExport, MeetingSource, summary};
 
 use super::{
-    ArtifactRenderer, Frontmatter, FrontmatterValue, LinkStyle, Names, RenderOptions, date_text,
-    markdown_text,
+    ArtifactRenderer, Frontmatter, FrontmatterValue, LinkStyle, Names, RenderOptions, Timecode,
+    date_text, markdown_text,
 };
 use crate::naming::{MeetingFolder, Note};
 
@@ -103,8 +103,7 @@ impl FolderNoteRenderer<'_> {
     pub fn info_line(&self) -> String {
         let meeting = &self.export.meeting;
         let start = meeting.started_at;
-        let end =
-            start + chrono::Duration::milliseconds(Self::whole_milliseconds(meeting.duration));
+        let end = start + chrono::Duration::milliseconds(Timecode::milliseconds(meeting.duration));
         let links = match self.options.link_style {
             LinkStyle::Wikilink => [
                 markdown_text::wikilink(
@@ -159,18 +158,6 @@ impl FolderNoteRenderer<'_> {
             })
             .collect::<Vec<_>>()
             .join("\n")
-    }
-
-    /// `max(0, duration)` in whole milliseconds, for the end time of the
-    /// info line.
-    fn whole_milliseconds(duration: f64) -> i64 {
-        if !duration.is_finite() || duration <= 0.0 {
-            return 0;
-        }
-        // Finite and positive; a meeting is far below 2^53 milliseconds.
-        #[allow(clippy::cast_possible_truncation)]
-        let milliseconds = (duration * 1000.0).round() as i64;
-        milliseconds
     }
 
     /// Whole minutes, rounded up.

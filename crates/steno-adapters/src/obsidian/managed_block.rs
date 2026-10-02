@@ -1,7 +1,6 @@
 //! The region of a person page that Steno owns.
 //! Swift: `Sources/StenoAdapters/Obsidian/ManagedBlock.swift`.
 
-use steno_core::json::uuid_string;
 use uuid::Uuid;
 
 /// One line per meeting between two HTML comments, newest first, each line
@@ -17,10 +16,11 @@ impl ManagedBlock {
     pub const START: &'static str = "<!-- steno:meetings:start -->";
     pub const END: &'static str = "<!-- steno:meetings:end -->";
 
-    /// `%%steno:0d6f…%%`, Obsidian's comment syntax so the id never shows.
+    /// `%%steno:0d6f…%%`, Obsidian's comment syntax so the id never shows;
+    /// the id in `Uuid`'s lowercase `Display` form.
     #[must_use]
     pub fn marker(meeting_id: Uuid) -> String {
-        format!("%%steno:{}%%", uuid_string(meeting_id).to_lowercase())
+        format!("%%steno:{meeting_id}%%")
     }
 
     /// A whole block around `lines`, terminated by a newline.

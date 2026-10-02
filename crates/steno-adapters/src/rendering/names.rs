@@ -76,10 +76,10 @@ impl Names<'_> {
     /// (linked when they are a person), then speakers that resolved to nobody
     /// under their cluster label.
     pub fn participants(&self) -> Vec<String> {
-        let mut seen: HashSet<&str> = HashSet::new();
+        let mut seen: HashSet<String> = HashSet::new();
         let mut names = Vec::new();
         for participant in &self.export.participants {
-            if !seen.insert(participant.display_name.as_str()) {
+            if !seen.insert(participant.display_name.clone()) {
                 continue;
             }
             names.push(if participant.person_id.is_none() {
@@ -88,10 +88,9 @@ impl Names<'_> {
                 self.person(&participant.display_name)
             });
         }
-        let mut seen_speakers: HashSet<String> = seen.iter().map(|s| (*s).to_owned()).collect();
         for speaker in &self.export.speakers {
             let name = self.export.display_name_for_speaker(speaker.id);
-            if !seen_speakers.insert(name.clone()) {
+            if !seen.insert(name.clone()) {
                 continue;
             }
             names.push(if speaker.person_id().is_none() {

@@ -2,7 +2,6 @@
 //! block is Steno's.
 //! Swift: `Sources/StenoAdapters/Rendering/PersonPageRenderer.swift`.
 
-use steno_core::json::uuid_string;
 use steno_core::{MeetingExport, Person};
 
 use super::{
@@ -27,7 +26,7 @@ impl PersonPageRenderer<'_> {
         let mut frontmatter = Frontmatter::new(self.options.time_zone);
         frontmatter.append(
             "steno_person_id",
-            FrontmatterValue::String(uuid_string(person.id).to_lowercase()),
+            FrontmatterValue::String(person.id.to_string()),
         );
         if let Some(email) = person.email.as_deref().filter(|email| !email.is_empty()) {
             frontmatter.append("email", FrontmatterValue::String(email.to_owned()));

@@ -4,7 +4,6 @@
 
 use chrono_tz::Tz;
 use serde_json::Value;
-use steno_core::json::uuid_string;
 use steno_core::{MeetingExport, TranscriptSegment};
 
 use super::{
@@ -70,7 +69,7 @@ impl ArtifactRenderer {
         options: &RenderOptions,
         folder_slug: Option<&str>,
     ) -> Result<Vec<RenderedArtifact>, serde_json::Error> {
-        let slug = folder_slug.map_or_else(|| Self::folder_slug(export, options), str::to_owned);
+        let slug = Self::slug(export, options, folder_slug);
         Ok(vec![
             RenderedArtifact {
                 kind: RenderedArtifactKind::Json,
@@ -114,7 +113,7 @@ impl ArtifactRenderer {
         if !options.person_pages {
             return Vec::new();
         }
-        let slug = folder_slug.map_or_else(|| Self::folder_slug(export, options), str::to_owned);
+        let slug = Self::slug(export, options, folder_slug);
         let renderer = PersonPageRenderer {
             export,
             options,
@@ -137,7 +136,7 @@ impl ArtifactRenderer {
         options: &RenderOptions,
         folder_slug: Option<&str>,
     ) -> String {
-        let slug = folder_slug.map_or_else(|| Self::folder_slug(export, options), str::to_owned);
+        let slug = Self::slug(export, options, folder_slug);
         FolderNoteRenderer {
             export,
             options,
@@ -174,13 +173,19 @@ impl ArtifactRenderer {
         Ok(steno_bridge::json::to_canonical_string(&value)?.into_bytes())
     }
 
-    pub(crate) fn folder_slug(export: &MeetingExport, options: &RenderOptions) -> String {
-        MeetingFolder::basename(&export.meeting, options.time_zone)
+    /// The folder basename a destination pinned, else the one this export
+    /// would get.
+    fn slug(export: &MeetingExport, options: &RenderOptions, folder_slug: Option<&str>) -> String {
+        folder_slug.map_or_else(
+            || MeetingFolder::basename(&export.meeting, options.time_zone),
+            str::to_owned,
+        )
     }
 
-    /// The lowercase UUID every note carries as `steno_id`.
+    /// The lowercase UUID every note carries as `steno_id` (`Uuid`'s
+    /// `Display` form).
     pub(crate) fn steno_id(export: &MeetingExport) -> String {
-        uuid_string(export.meeting.id).to_lowercase()
+        export.meeting.id.to_string()
     }
 
     /// The frontmatter and `# Title — Kind` heading the transcript and tasks
@@ -202,14 +207,15 @@ impl ArtifactRenderer {
         ]
     }
 
-    /// Segments by start, ties broken by id so the order is total.
+    /// Segments by start, ties broken by id so the order is total. Ids
+    /// compare as bytes, which orders them as their hex strings do.
     pub(crate) fn ordered_segments(export: &MeetingExport) -> Vec<&TranscriptSegment> {
         let mut segments: Vec<&TranscriptSegment> = export.segments.iter().collect();
         segments.sort_by(|left, right| {
             left.start
                 .partial_cmp(&right.start)
                 .unwrap_or(std::cmp::Ordering::Equal)
-                .then_with(|| uuid_string(left.id).cmp(&uuid_string(right.id)))
+                .then_with(|| left.id.cmp(&right.id))
         });
         segments
     }
