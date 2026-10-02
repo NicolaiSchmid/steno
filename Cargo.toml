@@ -38,6 +38,11 @@ uuid = { version = "1", features = ["serde", "v4"] }
 # Test only
 similar = "2"
 tempfile = "3"
+# Added by the protocols package: dyn-safe async traits, the content hash
+# the fakes write into receipts, and the executor the trait tests run on.
+async-trait = "0.1"
+sha2 = "0.10"
+tokio = { version = "1", default-features = false, features = ["macros", "rt"] }
 
 [workspace.lints.clippy]
 all = { level = "warn", priority = -1 }

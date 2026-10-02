@@ -5,6 +5,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use uuid::Uuid;
 
+use super::AudioFormat;
 use crate::json::{
     self,
     case_coding::{self, Case},
@@ -132,6 +133,24 @@ impl<'de> Deserialize<'de> for HandoverState {
             }
         })
     }
+}
+
+/// What the phone declares about a recording before the bytes arrive; the
+/// intake verifies `byte_count` and `sha256` against the received file.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RecordingMetadata {
+    #[serde(rename = "recordingID", with = "json::uuid_text")]
+    pub recording_id: Uuid,
+    #[serde(with = "json::iso_time")]
+    pub started_at: DateTime<Utc>,
+    pub duration_seconds: f64,
+    pub byte_count: i64,
+    #[serde(with = "json::base64_bytes")]
+    pub sha256: Vec<u8>,
+    pub chunk_size: i64,
+    pub format: AudioFormat,
+    pub device_name: String,
 }
 
 /// Progress of one phone recording being handed over; the idempotency key

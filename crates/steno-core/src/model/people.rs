@@ -85,6 +85,54 @@ impl Embedding {
         rest.is_empty()
             .then(|| Embedding(chunks.iter().copied().map(f32::from_le_bytes).collect()))
     }
+
+    #[must_use]
+    pub fn magnitude(&self) -> f32 {
+        self.0.iter().map(|value| value * value).sum::<f32>().sqrt()
+    }
+
+    /// The same direction with unit length; the zero vector stays zero.
+    #[must_use]
+    pub fn normalized(&self) -> Embedding {
+        let magnitude = self.magnitude();
+        if magnitude > 0.0 {
+            Embedding(self.0.iter().map(|value| value / magnitude).collect())
+        } else {
+            self.clone()
+        }
+    }
+
+    /// The dot product over the shared prefix of the two vectors.
+    #[must_use]
+    pub fn dot(&self, other: &Embedding) -> f32 {
+        self.0
+            .iter()
+            .zip(&other.0)
+            .map(|(left, right)| left * right)
+            .sum()
+    }
+
+    /// Cosine similarity in `-1...1`; zero when either vector is zero or the
+    /// dimensions differ.
+    #[must_use]
+    pub fn cosine_similarity(&self, other: &Embedding) -> f32 {
+        if self.0.len() != other.0.len() {
+            return 0.0;
+        }
+        let denominator = self.magnitude() * other.magnitude();
+        if denominator > 0.0 {
+            self.dot(other) / denominator
+        } else {
+            0.0
+        }
+    }
+}
+
+/// A known person ranked against a new voice, what `SpeakerMemory` returns.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SpeakerMatch {
+    pub person: Person,
+    pub similarity: f32,
 }
 
 string_enum! {
@@ -302,6 +350,20 @@ mod tests {
         assert_eq!(&bytes[..4], &[0, 0, 0x80, 0x3f]);
         assert_eq!(Embedding::from_bytes(&bytes), Some(embedding));
         assert_eq!(Embedding::from_bytes(&bytes[..5]), None);
+    }
+
+    #[test]
+    fn cosine_similarity_is_zero_for_zero_or_mismatched_vectors() {
+        let x = Embedding(vec![1.0, 0.0]);
+        let y = Embedding(vec![0.0, 2.0]);
+        let diagonal = Embedding(vec![3.0, 3.0]);
+        assert_eq!(x.cosine_similarity(&x), 1.0);
+        assert_eq!(x.cosine_similarity(&y), 0.0);
+        assert!((x.cosine_similarity(&diagonal) - 0.707_106_77).abs() < 1e-6);
+        assert_eq!(x.cosine_similarity(&Embedding(vec![0.0, 0.0])), 0.0);
+        assert_eq!(x.cosine_similarity(&Embedding(vec![1.0])), 0.0);
+        assert_eq!(diagonal.normalized().magnitude(), 1.0);
+        assert_eq!(Embedding(vec![0.0]).normalized(), Embedding(vec![0.0]));
     }
 
     #[test]

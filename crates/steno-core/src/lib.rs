@@ -3,7 +3,13 @@
 //! `.plans/2026-10-02-rust-core-and-tauri-shell.md`.
 //!
 //! - [`model`]: the domain types, one module per Swift file in
-//!   `Sources/StenoCore/Model`.
+//!   `Sources/StenoCore/Model`, plus the value types the boundaries
+//!   exchange (audio buffers, raw segments, diarization results, stage
+//!   inputs and outputs, templates).
+//! - [`protocols`]: the pluggable boundaries (`SpeechEngine`, `Diarizer`,
+//!   `EchoCanceller`, `LanguageModel`, `Destination`, `SecretStore`,
+//!   `SpeakerMemory` and the pipeline stage traits), one trait per file,
+//!   with the async-trait decision documented once in its module doc.
 //! - [`store`]: the SQLite store and its migrations; [`store::convert`]
 //!   holds the column codecs a query outside the crate uses.
 //! - [`json`]: the `StenoJSON` convention and the date and UUID codecs.
@@ -23,10 +29,16 @@
 pub mod json;
 pub mod model;
 pub mod paths;
+pub mod protocols;
 pub mod store;
 pub mod string_enum;
 
 pub use model::*;
 pub use paths::StenoPaths;
+pub use protocols::{
+    AudioDecoder, BoundaryResult, BoxError, DeliveryDispatcher, Destination, Diarizer,
+    EchoCanceller, HandoverIntake, LanguageModel, MeetingSummarizer, SecretKey, SecretStore,
+    SpeakerMemory, SpeechEngine, TranscriptCleaner, async_trait,
+};
 pub use store::{DeletedMeeting, Store, StoreError};
 pub use string_enum::UnknownCase;

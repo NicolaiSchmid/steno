@@ -8,19 +8,28 @@ license.workspace = true
 repository.workspace = true
 publish.workspace = true
 
+[features]
+# The fakes in `testing`: every protocol with a deterministic implementation
+# so the pipeline, the CLI and the shell test without models or a network.
+testing = ["dep:sha2"]
+
 [dependencies]
+async-trait.workspace = true
 base64.workspace = true
 chrono.workspace = true
 directories.workspace = true
 rusqlite.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+sha2 = { workspace = true, optional = true }
 thiserror.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
+sha2.workspace = true
 similar.workspace = true
 tempfile.workspace = true
+tokio.workspace = true
 
 [lints]
 workspace = true
