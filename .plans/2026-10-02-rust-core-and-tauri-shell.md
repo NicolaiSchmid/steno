@@ -33,7 +33,8 @@ this plan starts is a parity item for the Rust side, tracked in the parity list 
 2. **Same SQLite file.** The Rust store replays the GRDB migrations in
    `Sources/StenoCore/Storage/Migrations.swift` as SQL and proves it with a schema
    diff against a database the Swift CLI created. New migrations after this plan
-   starts are written once in SQL and applied by both sides until cutover.
+   starts are written once in SQL and mirrored in `Migrations.swift` and the Rust
+   `.sql` files until cutover; the parity test proves them equal.
 3. **Audio never leaves the device.** Only `Destination` implementations and the LLM
    client open network connections, and the LLM client sends text.
 4. **One speech pipeline above the tensors.** Chunker, overlap merge and the TDT decode
@@ -69,7 +70,10 @@ Dependency direction is the Swift one: `steno-core` depends on nothing of ours; 
 other crate depends on `steno-core`; the shell and the CLI wire them. The shell holds
 no logic: view models and the bridge host live in `steno-core` (host module) so the
 CLI, tests and the shell share them, which is the extraction the spikes plan asked for
-in Swift and which happens in Rust instead.
+in Swift and which happens in Rust instead. One temporary exception: from WP3 until
+WP6 the shell carries a fixture host behind its `fixture-host` feature that answers
+the bridge from the recorded fixtures, so the UI runs on every platform before the
+pipeline exists.
 
 Platform backends behind traits, two implementations before generalising: `Capture`
 (CoreAudio, PipeWire, WASAPI, synthetic), `SpeechBackend` (CoreML, ONNX Runtime, fake),
@@ -91,9 +95,13 @@ line here.
 
 ## Repository setup for three platforms
 
-- Cargo workspace at the root, `rust-toolchain.toml` pinned to stable, `rustfmt` and
-  `clippy -D warnings` in CI, `cargo deny` for licences (CC-BY attribution for Parakeet
-  is a runtime notice, not a crate licence).
+- Cargo workspace at the root, `rust-toolchain.toml` pinned to stable, `rustfmt`,
+  `clippy -D warnings` and a `cargo check` on `rust-version` in CI. Shared dependency
+  versions live in the root `[workspace.dependencies]`, crates inherit them.
+  `cargo deny` for licences arrives in WP8 with the first Linux release, once the
+  dependency tree is complete (the Tauri and `directories` trees bring MPL-2.0 crates
+  that an allow list has to name; CC-BY attribution for Parakeet is a runtime notice,
+  not a crate licence).
 - `.github/workflows/rust-ci.yml`: `ubuntu-latest`, `windows-latest` and the macOS
   runner (`MACOS_RUNS_ON`, same variable as Swift CI) build and test the workspace;
   Apple-only crates compile on every OS with their backends behind `cfg`. Tauri
@@ -108,9 +116,12 @@ line here.
 
 ## Work packages
 
-Order is dependency order; packages on one line run in parallel. Each is one PR off
-this branch with its own tests; the branch merges to `main` when WP1 is green so later
-packages stack on `main`.
+Order is dependency order; packages on one line run in parallel. Stacking: this
+branch (`refactor/rust-workspace`, PR #151) sits on `t3code/assess-linux-windows-webui`
+(PR #150, the spikes and speech-stack plans); WP1, WP2 and WP3 are PRs off this branch
+(#153, #155, #156) that rebase onto it as it changes; everything reaches `main` through
+#150, then #151, then the package PRs in order. Packages after WP3 branch from `main`
+once that chain has merged.
 
 - **WP1 workspace and bridge.** Cargo workspace, toolchain, CI matrix, `.gitignore`,
   `AGENTS.md`. `steno-bridge` with every topic, method, snapshot, params and envelope
@@ -134,13 +145,14 @@ packages stack on `main`.
   `Tests/StenoAudioTests` ported. PipeWire backend. WASAPI backend last.
 - **WP6 pipeline and host.** Orchestration (`process`, retention, speaker matching,
   export), the host module with view models and the bridge host over the real store,
-  the CLI. Parity: the Swift `steno export` of a calibration meeting equals the Rust
-  one field for field.
+  the CLI; the shell's `fixture-host` feature is switched off and removed. Parity: the
+  Swift `steno export` of a calibration meeting equals the Rust one field for field.
 - **WP7 LLM, adapters, handover.** Ports of `StenoLLM` (Codex and OpenAI-compatible),
   `StenoAdapters`, `StenoHandover` (rustls, the pinned trust evaluation, the shared
   `wire.ts` contract test).
 - **WP8 shell completion and Linux release.** Autostart, updater, keyring, onboarding
-  permissions per OS, installer bundles; `release.yml` matrix; first Linux build.
+  permissions per OS, installer bundles; `cargo deny` with a licence allow list in CI;
+  `release.yml` matrix; first Linux build.
 - **WP9 Mac cutover.** Parity list empty, same bundle id, Sparkle handoff, Swift app
   removed, web app moved to `apps/web`, Swift rows removed from `AGENTS.md`.
 - **WP10 Windows.** WASAPI capture, DirectML provider (speech-stack G4), installer.

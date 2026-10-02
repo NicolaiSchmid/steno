@@ -1,5 +1,10 @@
 # Steno — scope and decisions
 
+> Amended 2026-10-02 by [`2026-10-02-rust-core-and-tauri-shell.md`](2026-10-02-rust-core-and-tauri-shell.md):
+> Windows and Linux leave the non-goals for the next major version, and the
+> "Language / UI", "Core" and "Apps" rows below describe the Swift app that ships
+> until the Rust cutover.
+
 Status: draft for confirmation. Date: 2026-09-24.
 Decisions below were settled in a structured interview. Nothing here is implemented yet.
 Research background: `docs/research/2026-09-24-jamie-and-oss-landscape.md`.
@@ -16,11 +21,6 @@ through agents that consume the exported files.
 Reference product: Jamie (meetjamie.ai). Reference implementations: anarlog (MIT, Rust)
 for capture and echo cancellation, Parrot (GPL, Swift) for two-lane capture, AudioCap
 for Core Audio taps. Rebuilt from scratch, no forks.
-
-> Amended 2026-10-02 by [`2026-10-02-rust-core-and-tauri-shell.md`](2026-10-02-rust-core-and-tauri-shell.md):
-> Windows and Linux leave the non-goals for the next major version, and the
-> "Language / UI", "Core" and "Apps" rows below describe the Swift app that ships
-> until the Rust cutover.
 
 ## Non-goals for v1
 
