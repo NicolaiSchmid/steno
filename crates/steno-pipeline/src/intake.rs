@@ -90,13 +90,16 @@ impl RecordingIntake {
         let now = pipeline.dependencies().now.clone();
         Self::new(store, enqueue_through(pipeline), now, zone)
     }
+}
 
-    async fn admit_file(
+#[async_trait]
+impl HandoverIntake for RecordingIntake {
+    async fn admit(
         &self,
         file: &Path,
         metadata: &RecordingMetadata,
         device: &PairedDevice,
-    ) -> Result<Uuid, Box<dyn std::error::Error + Send + Sync>> {
+    ) -> BoundaryResult<Uuid> {
         let existing = self.store.handover_receipt(metadata.recording_id)?;
         if let Some(meeting_id) = existing
             .as_ref()
@@ -163,7 +166,7 @@ impl RecordingIntake {
         receipt.state = HandoverState::Complete { meeting_id };
         receipt.updated_at = timestamp;
 
-        let admitted: Result<(), Box<dyn std::error::Error + Send + Sync>> = async {
+        let admitted: BoundaryResult<()> = async {
             self.store.save_handover_receipt(&receipt)?;
             (self.enqueue)(meeting, asset).await?;
             Ok(())
@@ -177,18 +180,6 @@ impl RecordingIntake {
         }
         let _ = std::fs::remove_file(file);
         Ok(meeting_id)
-    }
-}
-
-#[async_trait]
-impl HandoverIntake for RecordingIntake {
-    async fn admit(
-        &self,
-        file: &Path,
-        metadata: &RecordingMetadata,
-        device: &PairedDevice,
-    ) -> BoundaryResult<Uuid> {
-        self.admit_file(file, metadata, device).await
     }
 }
 

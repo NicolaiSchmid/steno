@@ -15,7 +15,7 @@ use steno_core::testing::{
 };
 use steno_core::{
     AudioAsset, AudioFormat, AudioLane, AudioRetention, Delivery, DeliveryDispatcher,
-    DeliveryStatus, Destination, Meeting, MeetingEvent, MeetingSource, MeetingState, PipelineStage,
+    DeliveryStatus, Destination, Meeting, MeetingEvent, MeetingState, PipelineStage,
     RecordingLayout, SpeakerAssignmentKind, Store, async_trait,
     paths::{file_url, path_from_file_url},
 };
@@ -94,9 +94,11 @@ struct World {
     now: DateTime<Utc>,
 }
 
+/// `destination` builds the one fake destination over the vault path,
+/// `None` runs without any.
 fn world(
     summarizer: bool,
-    destination: Option<FakeDestination>,
+    destination: Option<fn(&Path) -> FakeDestination>,
     retention: AudioRetention,
 ) -> World {
     let dir = tempfile::tempdir().unwrap();
@@ -117,7 +119,7 @@ fn world(
     let events = MeetingEventBus::new();
     let destinations: Vec<Arc<dyn Destination>> = destination
         .into_iter()
-        .map(|d| Arc::new(d) as Arc<dyn Destination>)
+        .map(|make| Arc::new(make(&vault)) as Arc<dyn Destination>)
         .collect();
     let dispatcher = Arc::new(FakeDispatcher {
         store: store.clone(),
@@ -269,24 +271,10 @@ fn stages(events: &[MeetingEvent]) -> Vec<PipelineStage> {
 async fn a_mac_call_runs_every_stage_to_ready_and_delivers() {
     let world = world(
         true,
-        Some(FakeDestination::new(PathBuf::new())),
+        Some(|vault| FakeDestination::new(vault)),
         AudioRetention::KeepDays(30),
     );
-    let destination = FakeDestination::new(&world.vault);
-    let world = World {
-        pipeline: ProcessingPipeline::new(world.pipeline.dependencies().clone()),
-        ..world
-    };
-    // The dispatcher above holds a destination rooted nowhere; rebuild with
-    // the vault one so the files land where the assertions look.
-    let dispatcher = Arc::new(FakeDispatcher {
-        store: world.store.clone(),
-        destinations: vec![Arc::new(destination)],
-        now: world.now,
-    });
-    let mut dependencies = world.pipeline.dependencies().clone();
-    dependencies.dispatcher = dispatcher;
-    let pipeline = ProcessingPipeline::new(dependencies);
+    let pipeline = &world.pipeline;
     let mut receiver = world.events.subscribe();
 
     let meeting = call_meeting(world.now);
@@ -516,18 +504,15 @@ async fn launch_recovery_resumes_queued_meetings_and_fails_those_without_an_asse
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_failed_delivery_defers_deletion_until_a_redeliver_succeeds() {
-    let world = world(false, None, AudioRetention::DeleteAfterProcessing);
-    let destination = FakeDestination {
-        fail_until: 1,
-        ..FakeDestination::new(&world.vault)
-    };
-    let mut dependencies = world.pipeline.dependencies().clone();
-    dependencies.dispatcher = Arc::new(FakeDispatcher {
-        store: world.store.clone(),
-        destinations: vec![Arc::new(destination)],
-        now: world.now,
-    });
-    let pipeline = ProcessingPipeline::new(dependencies);
+    let world = world(
+        false,
+        Some(|vault| FakeDestination {
+            fail_until: 1,
+            ..FakeDestination::new(vault)
+        }),
+        AudioRetention::DeleteAfterProcessing,
+    );
+    let pipeline = &world.pipeline;
     let meeting = call_meeting(world.now);
     let asset = call_asset(
         &world.audio,
@@ -620,7 +605,7 @@ async fn apply_retention_replaces_the_rule_and_stamps_a_ready_meeting() {
 }
 
 #[test]
-fn an_in_person_recording_has_no_me_speaker_and_the_fixtures_match_the_manifest() {
+fn the_generated_fixtures_match_the_committed_files() {
     let dir = tempfile::tempdir().unwrap();
     let outputs = steno_pipeline::fixtures::generate(dir.path(), &|data| {
         use std::fmt::Write as _;
@@ -644,5 +629,4 @@ fn an_in_person_recording_has_no_me_speaker_and_the_fixtures_match_the_manifest(
         .unwrap();
         assert_eq!(generated, committed, "{}", output.relative_path);
     }
-    let _ = MeetingSource::MacInPerson;
 }

@@ -191,19 +191,19 @@ impl StageRates {
     }
 
     /// The learned rate for `stage` under `key`, else its seed, else the
-    /// stage's fallback seed.
+    /// stage's fallback seed. Every table starts from [`StageRates::seeds`],
+    /// so a key missing here has no seed of its own either.
     #[must_use]
     pub fn rate(&self, stage: PipelineStage, key: &str) -> StageRate {
-        let seeds = Self::seeds();
         self.entries
             .get(&(stage, key.to_owned()))
-            .or_else(|| seeds.entries.get(&(stage, key.to_owned())))
+            .copied()
             .or_else(|| {
-                seeds
+                Self::seeds()
                     .entries
                     .get(&(stage, Self::seed_key(stage).to_owned()))
+                    .copied()
             })
-            .copied()
             .unwrap_or_else(|| seed(0.0))
     }
 

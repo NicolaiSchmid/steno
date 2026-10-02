@@ -513,7 +513,10 @@ impl ProcessingPipeline {
         self.state().runs.insert(meeting.id, run);
         let mut current = meeting;
         current.state = MeetingState::Processing;
-        let (transcription, mut diarized) = self.transcribe_and_diarize(asset, &current).await?;
+        // The last decoded lane is handed to `diarize` and dropped there, so
+        // no buffer is alive from `match_speakers` on.
+        let (transcription, last) = self.decode_and_transcribe(asset, current.id).await?;
+        let mut diarized = self.diarize(asset, &current, last).await?;
         current.language = transcription.language;
         diarized.speakers = self
             .match_speakers(diarized.speakers, current.id, &settings)
@@ -701,21 +704,19 @@ impl ProcessingPipeline {
             if let Some(run) = guard.runs.get_mut(&meeting_id) {
                 run.progress(stage, lane, elapsed_now - run.started_at)
             } else {
-                {
-                    let mut run = ProcessingRun::new(
-                        ProcessingEstimator::new(
-                            0.0,
-                            Vec::new(),
-                            None,
-                            self.inner.dependencies.speech_engine.id(),
-                            StageRates::NO_MODEL,
-                            StageRates::seeds(),
-                        ),
-                        PipelineStage::ALL.to_vec(),
-                        elapsed_now,
-                    );
-                    run.progress(stage, lane, 0.0)
-                }
+                let mut run = ProcessingRun::new(
+                    ProcessingEstimator::new(
+                        0.0,
+                        Vec::new(),
+                        None,
+                        self.inner.dependencies.speech_engine.id(),
+                        StageRates::NO_MODEL,
+                        StageRates::seeds(),
+                    ),
+                    PipelineStage::ALL.to_vec(),
+                    elapsed_now,
+                );
+                run.progress(stage, lane, 0.0)
             }
         };
         self.inner.dependencies.events.post(MeetingEvent::Progress {
@@ -783,18 +784,6 @@ impl ProcessingPipeline {
     }
 
     // Stages
-
-    /// `decode_and_transcribe` hands its last lane to `diarize`, and the
-    /// buffer is local to this call, so it is gone before `match_speakers`.
-    async fn transcribe_and_diarize(
-        &self,
-        asset: &AudioAsset,
-        meeting: &Meeting,
-    ) -> Result<(Transcription, Diarization)> {
-        let (transcription, last) = self.decode_and_transcribe(asset, meeting.id).await?;
-        let diarization = self.diarize(asset, meeting, last).await?;
-        Ok((transcription, diarization))
-    }
 
     /// Per lane: decode, then transcribe with the previous lane's dominant
     /// language as the hint. Each buffer goes out of scope before the next
