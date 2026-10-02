@@ -6,8 +6,7 @@
 //! an LLM endpoint. Swift: `Commands/Process.swift`.
 
 use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::path::PathBuf;
 
 use chrono::{Duration, Utc};
 use clap::{Args, ValueEnum};
@@ -62,13 +61,6 @@ pub struct Process {
     pub database: DatabaseOptions,
     #[command(flatten)]
     pub speech: SpeechOptions,
-}
-
-/// The frame count and rate of a PCM WAV header.
-pub fn wav_info(path: &Path) -> Result<(u32, usize), Failure> {
-    let file = steno_audio::WavFile::read(path)
-        .map_err(|e| Failure::runtime(format!("{}: {e}", path.display())))?;
-    Ok((file.sample_rate, file.frame_count()))
 }
 
 impl Process {
@@ -126,9 +118,10 @@ impl Process {
         let meeting_id = Uuid::new_v4();
         let layout = RecordingLayout::new(&root, meeting_id);
         layout.create_directories(false).map_err(Failure::runtime)?;
-        let (sample_rate, frames) = wav_info(&self.input)?;
+        let wav = steno_audio::WavFile::read(&self.input)
+            .map_err(|e| Failure::runtime(format!("{}: {e}", self.input.display())))?;
         #[allow(clippy::cast_precision_loss)]
-        let duration = frames as f64 / f64::from(sample_rate.max(1));
+        let duration = wav.frame_count() as f64 / f64::from(wav.sample_rate.max(1));
 
         let asset = if let (Source::MacCall, Some(system_lane)) = (self.source, &self.system_lane) {
             let mic = layout.sidecar(AudioLane::Mic);
@@ -288,19 +281,6 @@ pub fn remaining_text(remaining: f64) -> String {
     } else {
         format!("{}m {}s", seconds / 60, seconds % 60)
     }
-}
-
-/// The dispatcher a one-off `deliver --vault` passes: the given
-/// destinations, the real coordinator's rules.
-pub fn ad_hoc_dispatcher(
-    store: Arc<steno_core::Store>,
-    destinations: Vec<Arc<dyn steno_core::Destination>>,
-) -> Arc<dyn steno_core::DeliveryDispatcher> {
-    Arc::new(steno_adapters::DeliveryCoordinator::with_destinations(
-        store,
-        Box::new(move |_| destinations.clone()),
-        Box::new(Utc::now),
-    ))
 }
 
 #[cfg(test)]

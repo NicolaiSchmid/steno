@@ -405,6 +405,12 @@ impl ModelsOptions {
         ))
     }
 
+    fn service(&self) -> Result<RealSpeechModels, Failure> {
+        Ok(RealSpeechModels {
+            speech: self.store()?,
+        })
+    }
+
     fn root(&self) -> Result<PathBuf, Failure> {
         Ok(match &self.models_directory {
             Some(directory) => directory.clone(),
@@ -465,9 +471,7 @@ impl Models {
         use steno_host::services::SpeechModels as _;
         match self.command {
             ModelsCommand::List(options) => {
-                let service = RealSpeechModels {
-                    speech: options.store()?,
-                };
+                let service = options.service()?;
                 println!("models: {}", options.root()?.display());
                 for asset in ModelAsset::ALL {
                     let line = match service.installed_size(*asset) {
@@ -484,9 +488,7 @@ impl Models {
                 Ok(())
             }
             ModelsCommand::Download { asset, options } => {
-                let service = RealSpeechModels {
-                    speech: options.store()?,
-                };
+                let service = options.service()?;
                 let mut last = -1i64;
                 service
                     .download(asset, &mut |fraction, phase| {
@@ -502,10 +504,7 @@ impl Models {
                 Ok(())
             }
             ModelsCommand::Remove { asset, options } => {
-                let service = RealSpeechModels {
-                    speech: options.store()?,
-                };
-                service.remove(asset).map_err(Failure::runtime)?;
+                options.service()?.remove(asset).map_err(Failure::runtime)?;
                 println!("removed {}", asset.as_str());
                 Ok(())
             }
@@ -989,15 +988,10 @@ impl EndpointOptions {
         retry: RetryPolicy,
     ) -> Result<(Arc<dyn LlmClient>, LlmEndpoint), Failure> {
         let endpoint = self.endpoint()?;
-        let secrets = crate::wiring::secret_store()?;
-        let api_key = secrets
-            .secret(&steno_core::SecretKey::llm_api_key())
-            .await
-            .map_err(Failure::runtime)?;
         let client = steno_services::llm::make_client(
             endpoint.clone(),
-            api_key.as_deref(),
-            &crate::wiring::codex_store(),
+            crate::wiring::api_key().await?.as_deref(),
+            &steno_services::llm::codex_store(),
             retry,
         );
         Ok((client, endpoint))

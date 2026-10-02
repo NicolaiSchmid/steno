@@ -12,7 +12,7 @@ mod wiring;
 use clap::Parser;
 
 use crate::commands::{Command, Steno};
-pub use crate::wiring::{Failure, Outcome};
+use crate::wiring::Failure;
 
 fn main() {
     let steno = match Steno::try_parse() {

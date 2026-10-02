@@ -5,10 +5,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use clap::Args;
-use steno_core::{SecretStore, Settings, StenoPaths, Store};
-use steno_llm::CodexCredentialStore;
+use steno_core::{SecretKey, Settings, StenoPaths, Store};
 use steno_pipeline::{MeetingEventBus, PipelineDependencies};
-use steno_services::FileSecretStore;
 use uuid::Uuid;
 
 /// A usage error exits 1, a runtime failure 2.
@@ -50,11 +48,7 @@ impl DatabaseOptions {
     }
 
     pub fn open(&self) -> Result<Arc<Store>, Failure> {
-        let path = self.path()?;
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).map_err(Failure::runtime)?;
-        }
-        Ok(Arc::new(Store::open(&path).map_err(Failure::runtime)?))
+        steno_services::open_store(&self.path()?).map_err(Failure::runtime)
     }
 }
 
@@ -99,35 +93,23 @@ pub fn paths() -> Result<StenoPaths, Failure> {
     StenoPaths::create_default().map_err(Failure::runtime)
 }
 
-/// The CLI's secret store: `STENO_LLM_API_KEY` or the 0600 secrets file
-/// in the support directory.
-pub fn secret_store() -> Result<Arc<dyn SecretStore>, Failure> {
-    Ok(Arc::new(FileSecretStore::in_support_directory(
-        &paths()?.support_directory,
-    )))
-}
-
-pub fn codex_store() -> Arc<CodexCredentialStore> {
-    Arc::new(CodexCredentialStore::new(
-        CodexCredentialStore::default_home(
-            &std::env::vars().collect::<std::collections::HashMap<_, _>>(),
-        ),
-    ))
+/// The LLM API key from the CLI's secret store: `STENO_LLM_API_KEY` or
+/// the 0600 secrets file in the support directory.
+pub async fn api_key() -> Result<Option<String>, Failure> {
+    steno_services::secret_store(false, &paths()?)
+        .secret(&SecretKey::llm_api_key())
+        .await
+        .map_err(Failure::runtime)
 }
 
 /// The LLM passes from the settings, `None` without an endpoint.
 pub async fn llm_passes(
     settings: &Settings,
 ) -> Result<Option<steno_services::llm::Passes>, Failure> {
-    let secrets = secret_store()?;
-    let api_key = secrets
-        .secret(&steno_core::SecretKey::llm_api_key())
-        .await
-        .map_err(Failure::runtime)?;
     Ok(steno_services::llm::passes(
         settings,
-        api_key.as_deref(),
-        &codex_store(),
+        api_key().await?.as_deref(),
+        &steno_services::llm::codex_store(),
         steno_adapters::runtime::local_time_zone(),
     ))
 }

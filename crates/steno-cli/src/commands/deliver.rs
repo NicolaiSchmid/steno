@@ -9,6 +9,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use chrono::Utc;
 use clap::Args;
 use steno_adapters::{DeliveryCoordinator, ObsidianFolderDestination};
 use steno_core::{DeliveryStatus, Destination, ObsidianSettings};
@@ -94,7 +95,12 @@ impl Deliver {
             stored
         };
         let ids: Vec<String> = targets.iter().map(|t| t.id().to_owned()).collect();
-        let dispatcher = super::process::ad_hoc_dispatcher(store.clone(), targets);
+        // This run's destinations under the real coordinator's rules.
+        let dispatcher = Arc::new(DeliveryCoordinator::with_destinations(
+            store.clone(),
+            Box::new(move |_| targets.clone()),
+            Box::new(Utc::now),
+        ));
         let pipeline = ProcessingPipeline::new(crate::wiring::dependencies(
             store.clone(),
             &settings,
