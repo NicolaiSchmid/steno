@@ -309,6 +309,18 @@ bridge's copies of the macro and codecs. Packages after WP3 branch from `main`.
 - Two shells and two cores for some months: the parity list and the fixture oracle are
   what keep them honest.
 
+## Progress
+
+One row per package; a package is a PR off `main` once the WP1 to WP3 chain
+has merged.
+
+| Package | Branch | PR | State |
+|---------|--------|----|-------|
+| WP1 workspace and bridge | `feat/rust-bridge` | #153 | merged |
+| WP2 store | `feat/rust-store` | #155 | merged |
+| WP3 Tauri shell on fixtures | `feat/rust-desktop` | #156 | merged |
+| WP8 shell completion: tray, floating panels, autostart, updater, keyring, permissions, deep links, single instance, dialogs, installer bundles and the unsigned release workflow (`cargo deny` and signing follow with WP9) | `feat/rust-shell` | #172 | open |
+
 ## Parity list
 
 Every user-visible behaviour of the Swift app, one line each, ticked when the Rust side
