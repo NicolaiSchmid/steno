@@ -4,8 +4,10 @@
 //! form (`meeting.json`) belongs to a later package.
 //!
 //! The date and UUID text codecs ([`format_date`], [`parse_date`],
-//! [`uuid_string`] and the `with` modules) are the one implementation for
-//! every Steno crate; the bridge crate switches to them once both have landed.
+//! [`uuid_string`], [`parse_uuid`] and the `with` modules [`iso_time`],
+//! [`iso_time_opt`], [`uuid_text`] and [`uuid_text_opt`]) are the one
+//! implementation for every Steno crate; `steno-bridge` reads and writes its
+//! envelopes with them.
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
@@ -78,9 +80,24 @@ pub fn uuid_string(id: Uuid) -> String {
         .to_owned()
 }
 
+/// The inverse of [`uuid_string`]: either case of the hyphenated
+/// 36-character form and nothing else, as `UUID(uuidString:)` reads it. The
+/// `uuid` crate alone would also take the 32-digit, braced and `urn:uuid:`
+/// forms, which Foundation rejects.
+#[must_use]
+pub fn parse_uuid(text: &str) -> Option<Uuid> {
+    (text.len() == 36)
+        .then(|| Uuid::try_parse(text).ok())
+        .flatten()
+}
+
+fn not_a_uuid<E: de::Error>(text: &str) -> E {
+    E::custom(format!("not a UUID: {text}"))
+}
+
 /// `Uuid` as uppercase text.
 pub mod uuid_text {
-    use super::{Deserialize, Deserializer, Serializer, Uuid, de};
+    use super::{Deserialize, Deserializer, Serializer, Uuid};
 
     pub fn serialize<S: Serializer>(id: &Uuid, serializer: S) -> Result<S::Ok, S::Error> {
         serializer.serialize_str(&super::uuid_string(*id))
@@ -88,14 +105,14 @@ pub mod uuid_text {
 
     pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Uuid, D::Error> {
         let text = String::deserialize(deserializer)?;
-        Uuid::parse_str(&text).map_err(de::Error::custom)
+        super::parse_uuid(&text).ok_or_else(|| super::not_a_uuid(&text))
     }
 }
 
 /// `Option<Uuid>` as uppercase text; pair with `skip_serializing_if` and
 /// `default`.
 pub mod uuid_text_opt {
-    use super::{Deserialize, Deserializer, Serializer, Uuid, de};
+    use super::{Deserialize, Deserializer, Serializer, Uuid};
 
     pub fn serialize<S: Serializer>(id: &Option<Uuid>, serializer: S) -> Result<S::Ok, S::Error> {
         match id {
@@ -108,7 +125,7 @@ pub mod uuid_text_opt {
         deserializer: D,
     ) -> Result<Option<Uuid>, D::Error> {
         let text = Option::<String>::deserialize(deserializer)?;
-        text.map(|text| Uuid::parse_str(&text).map_err(de::Error::custom))
+        text.map(|text| super::parse_uuid(&text).ok_or_else(|| super::not_a_uuid(&text)))
             .transpose()
     }
 }
@@ -262,5 +279,43 @@ mod tests {
     fn uuids_are_uppercase() {
         let id = Uuid::parse_str("516eade8-40e5-4434-8aaf-9214a21a604e").unwrap();
         assert_eq!(uuid_string(id), "516EADE8-40E5-4434-8AAF-9214A21A604E");
+    }
+
+    /// `UUID(uuidString:)` reads either case of the hyphenated form and
+    /// nothing else; the codecs follow it rather than the `uuid` crate.
+    #[test]
+    fn uuids_read_only_the_hyphenated_form() {
+        #[derive(Debug, PartialEq, Deserialize)]
+        struct Wire(
+            #[serde(with = "uuid_text")] Uuid,
+            #[serde(with = "uuid_text_opt")] Option<Uuid>,
+        );
+
+        let id = Uuid::parse_str("516eade8-40e5-4434-8aaf-9214a21a604e").unwrap();
+        assert_eq!(parse_uuid("516EADE8-40E5-4434-8AAF-9214A21A604E"), Some(id));
+        assert_eq!(parse_uuid("516eade8-40e5-4434-8aaf-9214a21a604e"), Some(id));
+        for rejected in [
+            "516eade840e544348aaf9214a21a604e",
+            "{516eade8-40e5-4434-8aaf-9214a21a604e}",
+            "urn:uuid:516eade8-40e5-4434-8aaf-9214a21a604e",
+            "516eade8-40e5-4434-8aaf-9214a21a604",
+            "",
+        ] {
+            assert_eq!(parse_uuid(rejected), None, "{rejected:?}");
+            let error = serde_json::from_str::<Wire>(&format!(
+                "[\"516EADE8-40E5-4434-8AAF-9214A21A604E\",{}]",
+                serde_json::to_string(rejected).unwrap()
+            ))
+            .unwrap_err()
+            .to_string();
+            assert!(error.starts_with("not a UUID: "), "{rejected:?}: {error}");
+        }
+        let wire: Wire =
+            serde_json::from_str("[\"516eade8-40e5-4434-8aaf-9214a21a604e\",null]").unwrap();
+        assert_eq!(wire, Wire(id, None));
+        let error = serde_json::from_str::<Wire>("[\"516eade840e544348aaf9214a21a604e\",null]")
+            .unwrap_err()
+            .to_string();
+        assert!(error.starts_with("not a UUID: 516e"), "{error}");
     }
 }

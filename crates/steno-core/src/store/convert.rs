@@ -137,9 +137,10 @@ impl ToSql for DbUuid {
 
 impl FromSql for DbUuid {
     fn column_result(value: ValueRef<'_>) -> FromSqlResult<Self> {
-        Uuid::parse_str(text_of(value)?)
+        // The hyphenated form only, as GRDB's `UUID(uuidString:)` reads it.
+        json::parse_uuid(text_of(value)?)
             .map(DbUuid)
-            .map_err(|error| FromSqlError::Other(Box::new(error)))
+            .ok_or(FromSqlError::InvalidType)
     }
 }
 
