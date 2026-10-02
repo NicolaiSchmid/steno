@@ -5,7 +5,7 @@ import { send, useBridge, usePageReady, useSnapshot } from "@/bridge/hooks";
 import { Button, RecordMark } from "@/components/ui";
 import { cn } from "@/lib/cn";
 import { format } from "@/windows/main/format";
-import { useElapsedSeconds, useNow } from "@/windows/main/use-now";
+import { useCountdownSeconds, useElapsedSeconds } from "@/windows/main/use-now";
 import {
 	CountdownHairline,
 	EMPTY_HISTORY,
@@ -175,15 +175,7 @@ function AutoStopLine({
 }: {
 	autoStop: NonNullable<RecordingSnapshot["autoStop"]>;
 }) {
-	const anchor = useRef({ at: Date.now(), seconds: autoStop.remainingSeconds });
-	useEffect(() => {
-		anchor.current = { at: Date.now(), seconds: autoStop.remainingSeconds };
-	}, [autoStop.remainingSeconds]);
-	const now = useNow(true);
-	const remaining = Math.max(
-		0,
-		anchor.current.seconds - (now - anchor.current.at) / 1000,
-	);
+	const remaining = Math.max(0, useCountdownSeconds(autoStop.remainingSeconds));
 	return (
 		<>
 			<p

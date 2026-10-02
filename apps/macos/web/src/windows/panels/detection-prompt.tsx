@@ -2,7 +2,7 @@ import { XIcon } from "lucide-react";
 import { useRef } from "react";
 import { send, useBridge } from "@/bridge/hooks";
 import { Button, RecordMark } from "@/components/ui";
-import { useNow } from "@/windows/main/use-now";
+import { useCountdownSeconds } from "@/windows/main/use-now";
 import { CountdownHairline, PanelBar } from "./panel-bar";
 import { type PanelShell, panelShell, useReportSize } from "./panel-shell";
 
@@ -38,12 +38,7 @@ export function DetectionPrompt({
 	shell?: PanelShell;
 }) {
 	const client = useBridge();
-	const opened = useRef(Date.now());
-	const now = useNow(true);
-	const remaining = Math.max(
-		0,
-		request.seconds - (now - opened.current) / 1000,
-	);
+	const remaining = Math.max(0, useCountdownSeconds(request.seconds));
 	const bar = useRef<HTMLDivElement>(null);
 	useReportSize(bar, shell);
 

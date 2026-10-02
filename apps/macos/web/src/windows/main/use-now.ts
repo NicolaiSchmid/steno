@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 
 /**
  * The current time, re-read every `intervalMs` while `active`. Drives the
@@ -15,6 +15,17 @@ export function useNow(active: boolean, intervalMs = 1000): number {
 		return () => clearInterval(timer);
 	}, [active, intervalMs]);
 	return now;
+}
+
+/**
+ * Seconds left, counted down at 1 Hz from `seconds` as of the render it
+ * arrived in; a new figure re-anchors the count. Goes below zero once the
+ * time is up; `format.countdown` shows that as 0:00.
+ */
+export function useCountdownSeconds(seconds: number): number {
+	const anchor = useMemo(() => ({ at: Date.now(), seconds }), [seconds]);
+	const now = useNow(true);
+	return anchor.seconds - (now - anchor.at) / 1000;
 }
 
 /** Whole seconds since `startedAt`, ticking; zero when not started. */
