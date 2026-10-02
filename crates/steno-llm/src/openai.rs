@@ -10,6 +10,7 @@ use steno_core::{
     async_trait,
 };
 
+use crate::endpoint::WireFormat;
 use crate::transport::{self, HttpReply, LlmClientEvent, Observer, notify};
 use crate::wire::{
     self, ChatCompletionRequest, ChatCompletionResponse, ChatErrorEnvelope, ChatResponseFormat,
@@ -326,25 +327,14 @@ impl OpenAiCompatibleClient {
         format: &LlmResponseFormat,
         mode: StructuredOutputMode,
     ) -> Option<ChatResponseFormat> {
-        match (format, mode) {
-            (LlmResponseFormat::Text, _) | (_, StructuredOutputMode::PromptOnly) => None,
-            (LlmResponseFormat::JsonObject, _)
-            | (LlmResponseFormat::JsonSchema { .. }, StructuredOutputMode::JsonObject) => {
-                Some(ChatResponseFormat::json_object())
-            }
-            (
-                LlmResponseFormat::JsonSchema {
-                    name,
-                    schema,
-                    strict,
-                },
-                StructuredOutputMode::JsonSchema,
-            ) => Some(ChatResponseFormat::json_schema(
+        Some(match mode.wire_format(format)? {
+            WireFormat::JsonObject => ChatResponseFormat::json_object(),
+            WireFormat::JsonSchema {
                 name,
-                schema.clone(),
-                *strict,
-            )),
-        }
+                schema,
+                strict,
+            } => ChatResponseFormat::json_schema(name, schema.clone(), strict),
+        })
     }
 
     /// One attempt raced against `endpoint.request_timeout` on the clock.

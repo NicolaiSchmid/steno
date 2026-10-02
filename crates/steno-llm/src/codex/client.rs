@@ -10,6 +10,7 @@ use steno_core::{
 };
 
 use super::{CodexCredentialError, CodexCredentialStore, CodexCredentials};
+use crate::endpoint::WireFormat;
 use crate::transport::{self, HttpReply, LlmClientEvent, Observer, notify};
 use crate::wire::{
     self, CodexErrorEnvelope, CodexModel, CodexModelList, ResponsesFormat, ResponsesOutputItem,
@@ -281,26 +282,21 @@ impl CodexResponsesClient {
         }
     }
 
+    /// The wire `text.format` for a request under `mode`; `None` sends
+    /// none.
     #[must_use]
     pub fn text_format(
         format: &LlmResponseFormat,
         mode: StructuredOutputMode,
     ) -> Option<ResponsesFormat> {
-        match (format, mode) {
-            (LlmResponseFormat::Text, _) | (_, StructuredOutputMode::PromptOnly) => None,
-            (LlmResponseFormat::JsonObject, _)
-            | (LlmResponseFormat::JsonSchema { .. }, StructuredOutputMode::JsonObject) => {
-                Some(ResponsesFormat::json_object())
-            }
-            (
-                LlmResponseFormat::JsonSchema {
-                    name,
-                    schema,
-                    strict,
-                },
-                StructuredOutputMode::JsonSchema,
-            ) => Some(ResponsesFormat::json_schema(name, schema.clone(), *strict)),
-        }
+        Some(match mode.wire_format(format)? {
+            WireFormat::JsonObject => ResponsesFormat::json_object(),
+            WireFormat::JsonSchema {
+                name,
+                schema,
+                strict,
+            } => ResponsesFormat::json_schema(name, schema.clone(), strict),
+        })
     }
 
     #[must_use]

@@ -4,7 +4,9 @@
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
-use steno_core::{BoundaryResult, LanguageModel, LlmProvider, Settings, async_trait};
+use steno_core::{
+    BoundaryResult, LanguageModel, LlmProvider, LlmResponseFormat, Settings, async_trait,
+};
 use url::Url;
 
 /// How the client asks for JSON. It starts at the endpoint's mode and falls
@@ -35,6 +37,43 @@ impl StructuredOutputMode {
             StructuredOutputMode::PromptOnly => None,
         }
     }
+
+    /// What goes on the wire for `format` under this mode, before either
+    /// client spells it in its own request type: nothing for a text request
+    /// or in `PromptOnly`, `json_object` for a JSON object request or a
+    /// schema request in `JsonObject`, the schema itself in `JsonSchema`.
+    pub(crate) fn wire_format(self, format: &LlmResponseFormat) -> Option<WireFormat<'_>> {
+        match (format, self) {
+            (LlmResponseFormat::Text, _) | (_, StructuredOutputMode::PromptOnly) => None,
+            (LlmResponseFormat::JsonObject, _)
+            | (LlmResponseFormat::JsonSchema { .. }, StructuredOutputMode::JsonObject) => {
+                Some(WireFormat::JsonObject)
+            }
+            (
+                LlmResponseFormat::JsonSchema {
+                    name,
+                    schema,
+                    strict,
+                },
+                StructuredOutputMode::JsonSchema,
+            ) => Some(WireFormat::JsonSchema {
+                name,
+                schema,
+                strict: *strict,
+            }),
+        }
+    }
+}
+
+/// The structured output request after the mode fallback, independent of
+/// the wire format that carries it.
+pub(crate) enum WireFormat<'a> {
+    JsonObject,
+    JsonSchema {
+        name: &'a str,
+        schema: &'a serde_json::Value,
+        strict: bool,
+    },
 }
 
 /// Where the model lives and how much it can hold. Deliberately not
