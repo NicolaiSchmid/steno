@@ -146,8 +146,10 @@ jobs:
         run: cargo fmt --all --check
       - name: Lint
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      # `--no-fail-fast`: every crate's tests run and report even when an
+      # earlier crate fails, so one red crate does not hide the others.
       - name: Test
-        run: cargo test --workspace --locked
+        run: cargo test --workspace --locked --no-fail-fast
       - name: Test the core fakes
         run: cargo test -p steno-core --features testing --locked
 
