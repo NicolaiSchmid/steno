@@ -10,8 +10,8 @@
     # Bump both lines on every release. `release.yml` prints them in the
     # job summary of the tag run, so a bump is copy-paste from there.
     release = {
-      version = "0.10.0-rc.1";
-      hash = "sha256-K0U/003Vg5gbq3OpeHkBffsLOfo7wVY12tunm6aW1vU=";
+      version = "0.10.0-rc.2";
+      hash = "sha256-Z65JPd8+TWpcDNq4k8ctds/HVtqNzTNWrs9F3wZOssQ=";
     };
 
     # The app is a signed, notarised Apple Silicon bundle; there is nothing
