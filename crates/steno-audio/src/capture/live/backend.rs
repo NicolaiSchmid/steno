@@ -18,8 +18,18 @@
 //! [`io_proc`], which only calls [`deliver`].
 //!
 //! Teardown order: watcher thread, `AudioDeviceStop`,
-//! `AudioDeviceDestroyIOProcID`, listeners, `AudioHardwareDestroyAggregateDevice`,
-//! `AudioHardwareDestroyProcessTap`.
+//! `AudioDeviceDestroyIOProcID`, the callback context, listeners,
+//! `AudioHardwareDestroyAggregateDevice`, `AudioHardwareDestroyProcessTap`.
+//!
+//! Call mode needs an output client. The aggregate's clock master is the
+//! system output device; where the capture permission is missing (a
+//! session without a GUI, over SSH) the HAL runs the IOProc only while
+//! another client has that output open, so the capture delivers no
+//! callbacks at all until something plays (measured in
+//! `.plans/spikes/2026-10-01-spike-rust-capture.md`: the first callback
+//! arrived when `afplay` opened the speakers, and a run with nothing
+//! playing got none). In-person mode has no tap and runs on the
+//! microphone's clock.
 
 use std::ffi::c_void;
 use std::ptr::NonNull;
@@ -158,13 +168,14 @@ impl Watcher {
     }
 }
 
-/// What one started capture holds.
+/// What one started capture holds, in teardown order: the fields drop in
+/// the order `stop()` drops them explicitly.
 struct Active {
-    _tap: Option<ProcessTap>,
-    _aggregate: AggregateDevice,
     _io_proc: IoProc,
     _context: Box<CallbackContext>,
     _listeners: Vec<PropertyListener>,
+    _aggregate: AggregateDevice,
+    _tap: Option<ProcessTap>,
     watcher: Arc<Watcher>,
     watcher_thread: Option<JoinHandle<()>>,
 }
@@ -355,7 +366,8 @@ impl CaptureBackend for LiveCaptureBackend {
         let context_ptr: *const CallbackContext = &raw const *context;
         // SAFETY: `context` is boxed and stored in `Active` beside the
         // `IoProc`, whose drop (stop + destroy) runs before the box is
-        // freed by field order below.
+        // freed: `Active` declares the IoProc first and `stop()` drops it
+        // first.
         let io = unsafe {
             IoProc::start(
                 aggregate.id,
@@ -477,10 +489,10 @@ impl CaptureBackend for LiveCaptureBackend {
             ..
         } = active;
         drop(io_proc);
+        drop(context);
         drop(listeners);
         drop(aggregate);
         drop(tap);
-        drop(context);
     }
 }
 

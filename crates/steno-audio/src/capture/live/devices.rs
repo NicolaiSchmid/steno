@@ -19,6 +19,8 @@ use objc2_core_audio::{
 use super::AudioDeviceInfo;
 use super::hal::{self, CoreAudioError, Id, SYSTEM, UNKNOWN};
 
+/// The HAL's device list and default devices, read fresh on every call
+/// (nothing is cached; a device can come and go between two calls).
 pub struct AudioDevices;
 
 impl AudioDevices {
@@ -59,6 +61,8 @@ impl AudioDevices {
         Ok(Self::all()?.into_iter().find(|d| d.uid == uid))
     }
 
+    /// The system's default input device: what the microphone lane records
+    /// when `Settings` names no input.
     pub fn default_input() -> Result<AudioDeviceInfo, CoreAudioError> {
         Self::info(Self::default_device(
             kAudioHardwarePropertyDefaultInputDevice,
@@ -79,7 +83,9 @@ impl AudioDevices {
         hal::uid(Self::default_device(kAudioHardwarePropertyDefaultOutputDevice).ok()?).ok()
     }
 
-    pub fn default_device(selector: AudioObjectPropertySelector) -> Result<Id, CoreAudioError> {
+    /// The device a default-device `selector` names; an error when none is
+    /// set.
+    fn default_device(selector: AudioObjectPropertySelector) -> Result<Id, CoreAudioError> {
         let id: Id = hal::read_pod(SYSTEM, selector, kAudioObjectPropertyScopeGlobal, None)?;
         if id == UNKNOWN {
             return Err(CoreAudioError {
@@ -91,7 +97,9 @@ impl AudioDevices {
         Ok(id)
     }
 
-    pub fn info(id: Id) -> Result<AudioDeviceInfo, CoreAudioError> {
+    /// One device's description; the default flags are left `false` for
+    /// [`Self::all`] to fill.
+    fn info(id: Id) -> Result<AudioDeviceInfo, CoreAudioError> {
         let transport = hal::read_u32(
             id,
             kAudioDevicePropertyTransportType,
@@ -118,6 +126,8 @@ impl AudioDevices {
         })
     }
 
+    /// A transport type code as the text [`AudioDeviceInfo::transport_type`]
+    /// carries.
     #[must_use]
     pub fn transport_name(kind: u32) -> String {
         match kind {

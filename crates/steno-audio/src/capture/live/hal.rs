@@ -59,8 +59,11 @@ pub const UNKNOWN: Id = kAudioObjectUnknown;
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[error("{operation} on audio object {object} failed: {status} ({})", four_char_code(*status))]
 pub struct CoreAudioError {
+    /// The property or function that failed.
     pub operation: String,
+    /// The audio object it was called on.
     pub object: Id,
+    /// The `OSStatus` it returned.
     pub status: OSStatus,
 }
 
