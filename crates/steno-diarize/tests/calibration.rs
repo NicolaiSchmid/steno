@@ -29,7 +29,7 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use steno_core::AudioBuffer16k;
-use steno_diarize::{DEFAULT_CLUSTERING_THRESHOLD, DiarizerConfig, Pipeline, TensorBackend};
+use steno_diarize::{DEFAULT_CLUSTERING_THRESHOLD, DiarizationBackend, DiarizerConfig, Pipeline};
 
 /// The remote speaker count per call from `truth.json`, whatever shape
 /// the file has: an object keyed by id with a number or an object holding
@@ -146,7 +146,7 @@ fn read_wav(path: &Path) -> AudioBuffer16k {
     AudioBuffer16k::new(mono)
 }
 
-fn backend() -> (String, Box<dyn TensorBackend>) {
+fn backend() -> (String, Box<dyn DiarizationBackend>) {
     let kind = std::env::var("STENO_DIARIZE_BACKEND").unwrap_or_else(|_| "onnx".to_owned());
     match kind.as_str() {
         #[cfg(feature = "onnx")]

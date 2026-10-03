@@ -1,9 +1,9 @@
 //! The pipeline above the tensors: analysis, clustering, timeline, mapping
-//! and refinement over one [`TensorBackend`].
+//! and refinement over one [`DiarizationBackend`].
 
 use steno_core::{AudioBuffer16k, BoxError, ClusterChunk, DiarizationResult, Embedding};
 
-use crate::backend::TensorBackend;
+use crate::backend::DiarizationBackend;
 use crate::clustering::{self, ClusteringConfig};
 use crate::error::DiarizeError;
 use crate::extraction::{self, Analysis, ExtractionRules};
@@ -83,12 +83,12 @@ impl DiarizerConfig {
 /// One backend and one configuration; `diarize` runs the whole chain,
 /// the pieces are public for the calibration harness, which analyses a
 /// lane once and sweeps the clustering cut.
-pub struct Pipeline<B: TensorBackend = Box<dyn TensorBackend>> {
+pub struct Pipeline<B: DiarizationBackend = Box<dyn DiarizationBackend>> {
     backend: B,
     config: DiarizerConfig,
 }
 
-impl<B: TensorBackend> Pipeline<B> {
+impl<B: DiarizationBackend> Pipeline<B> {
     /// A pipeline over a loaded backend.
     #[must_use]
     pub fn new(backend: B, config: DiarizerConfig) -> Self {
@@ -209,7 +209,7 @@ impl<B: TensorBackend> Pipeline<B> {
     }
 }
 
-impl<B: TensorBackend> SliceEmbedder for Pipeline<B> {
+impl<B: DiarizationBackend> SliceEmbedder for Pipeline<B> {
     fn embedding(&mut self, audio: &AudioBuffer16k) -> Result<Option<Embedding>, BoxError> {
         self.embed_slice(audio)
             .map_err(|error| Box::new(error) as BoxError)

@@ -9,7 +9,7 @@ mod common;
 
 use common::{audio, range};
 use steno_core::{AudioBuffer16k, Embedding, TimeRange};
-use steno_diarize::backend::{BackendError, SegmentationGeometry, TensorBackend};
+use steno_diarize::backend::{BackendError, DiarizationBackend, SegmentationGeometry};
 use steno_diarize::{DiarizeError, DiarizerConfig, ModelDiarizer, Pipeline};
 
 struct FakeBackend {
@@ -42,7 +42,7 @@ impl FakeBackend {
     }
 }
 
-impl TensorBackend for FakeBackend {
+impl DiarizationBackend for FakeBackend {
     fn geometry(&self) -> &SegmentationGeometry {
         &self.geometry
     }
@@ -213,7 +213,7 @@ fn silence_and_short_audio_yield_no_speakers() {
 /// the store and the speaker matching hold 256.
 struct ShortEmbeddings(FakeBackend);
 
-impl TensorBackend for ShortEmbeddings {
+impl DiarizationBackend for ShortEmbeddings {
     fn geometry(&self) -> &SegmentationGeometry {
         self.0.geometry()
     }
@@ -267,7 +267,7 @@ async fn the_diarizer_loads_its_backend_once_and_serialises_calls() {
         DiarizerConfig::default(),
         Box::new(move || {
             counter.fetch_add(1, Ordering::SeqCst);
-            Ok(Box::new(FakeBackend::new()) as Box<dyn TensorBackend>)
+            Ok(Box::new(FakeBackend::new()) as Box<dyn DiarizationBackend>)
         }),
     );
     diarizer.prepare().await.unwrap();
@@ -296,7 +296,7 @@ async fn concurrent_callers_get_identical_results_from_one_backend() {
         DiarizerConfig::default(),
         Box::new(move || {
             counter.fetch_add(1, Ordering::SeqCst);
-            Ok(Box::new(FakeBackend::new()) as Box<dyn TensorBackend>)
+            Ok(Box::new(FakeBackend::new()) as Box<dyn DiarizationBackend>)
         }),
     ));
     let buffer = Arc::new(audio(
@@ -326,7 +326,7 @@ struct WaitingBackend {
     flag: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
-impl TensorBackend for WaitingBackend {
+impl DiarizationBackend for WaitingBackend {
     fn geometry(&self) -> &SegmentationGeometry {
         self.inner.geometry()
     }
@@ -382,7 +382,7 @@ struct PanickingBackend {
     panicked: bool,
 }
 
-impl TensorBackend for PanickingBackend {
+impl DiarizationBackend for PanickingBackend {
     fn geometry(&self) -> &SegmentationGeometry {
         self.inner.geometry()
     }

@@ -27,11 +27,11 @@
 //!    re-embedded over its own concatenated speech, clusters merge at
 //!    cosine 0.60, fragments join at 0.30 or are dropped.
 //!
-//! The two models sit behind [`TensorBackend`]: [`onnx::OnnxBackend`] runs
-//! the sherpa-onnx exports through ONNX Runtime on every platform;
-//! `coreml::CoreMlBackend` runs `FluidAudio`'s compiled models on the Mac,
-//! so the Mac keeps the embeddings the Swift app stored. Everything above
-//! the trait is shared and tested without models.
+//! The two models sit behind [`DiarizationBackend`]:
+//! [`onnx::OnnxBackend`] runs the sherpa-onnx exports through ONNX Runtime
+//! on every platform; `coreml::CoreMlBackend` runs `FluidAudio`'s compiled
+//! models on the Mac, so the Mac keeps the embeddings the Swift app
+//! stored. Everything above the trait is shared and tested without models.
 //!
 //! Where this crate knowingly differs from `FluidAudio` above the tensors:
 //! average linkage on cosine distance where it cuts centroid linkage and
@@ -72,7 +72,7 @@ pub mod refinement;
 pub mod segmentation;
 pub mod timeline;
 
-pub use backend::{BackendError, SegmentationGeometry, TensorBackend};
+pub use backend::{BackendError, DiarizationBackend, SegmentationGeometry};
 pub use diarizer::{BackendLoader, ModelDiarizer};
 pub use error::DiarizeError;
 pub use models::ModelStore;

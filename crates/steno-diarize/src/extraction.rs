@@ -4,7 +4,7 @@
 
 use steno_core::Embedding;
 
-use crate::backend::{BackendError, SegmentationGeometry, TensorBackend};
+use crate::backend::{BackendError, DiarizationBackend, SegmentationGeometry};
 use crate::error::DiarizeError;
 use crate::segmentation::{self, Window, WindowActivity};
 use crate::to_f64;
@@ -82,7 +82,7 @@ impl Analysis {
 /// enough clean speech. `step` is in samples. A segmentation or embedding
 /// output of the wrong length is [`DiarizeError::Shape`].
 pub fn analyze(
-    backend: &mut dyn TensorBackend,
+    backend: &mut dyn DiarizationBackend,
     audio: &[f32],
     step: usize,
     rules: &ExtractionRules,
@@ -189,7 +189,7 @@ struct Context<'a> {
 }
 
 fn embed_speaker(
-    backend: &mut dyn TensorBackend,
+    backend: &mut dyn DiarizationBackend,
     context: &Context<'_>,
     window: &Window,
     activity: &WindowActivity,

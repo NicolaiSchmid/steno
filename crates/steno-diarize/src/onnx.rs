@@ -8,7 +8,7 @@ use std::path::Path;
 use ort::session::Session;
 use ort::value::Tensor;
 
-use crate::backend::{BackendError, SegmentationGeometry, TensorBackend};
+use crate::backend::{BackendError, DiarizationBackend, SegmentationGeometry};
 use crate::error::DiarizeError;
 use crate::fbank::{Fbank, FbankConfig};
 use crate::models::{ModelStore, PYANNOTE_SEGMENTATION_3_0, WESPEAKER_RESNET34_LM};
@@ -218,7 +218,7 @@ fn to_i64(count: usize) -> i64 {
     i64::try_from(count).unwrap_or(i64::MAX)
 }
 
-impl TensorBackend for OnnxBackend {
+impl DiarizationBackend for OnnxBackend {
     fn geometry(&self) -> &SegmentationGeometry {
         &self.geometry
     }

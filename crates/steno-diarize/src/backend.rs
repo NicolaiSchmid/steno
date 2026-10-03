@@ -87,7 +87,7 @@ impl SegmentationGeometry {
 
 /// The models behind the pipeline. One instance serves one pipeline; calls
 /// arrive one after another.
-pub trait TensorBackend: Send {
+pub trait DiarizationBackend: Send {
     fn geometry(&self) -> &SegmentationGeometry;
 
     /// Segmentation logits for one window of exactly
@@ -103,7 +103,7 @@ pub trait TensorBackend: Send {
     fn embed(&mut self, window: &[f32], weights: &[f32]) -> Result<Option<Vec<f32>>, BackendError>;
 }
 
-impl<B: TensorBackend + ?Sized> TensorBackend for Box<B> {
+impl<B: DiarizationBackend + ?Sized> DiarizationBackend for Box<B> {
     fn geometry(&self) -> &SegmentationGeometry {
         (**self).geometry()
     }

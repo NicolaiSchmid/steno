@@ -19,7 +19,7 @@ use std::path::Path;
 
 use binding::{Array, Model};
 
-use crate::backend::{BackendError, SegmentationGeometry, TensorBackend};
+use crate::backend::{BackendError, DiarizationBackend, SegmentationGeometry};
 use crate::error::DiarizeError;
 
 /// The three models.
@@ -93,7 +93,7 @@ fn one_window(mut shape: Vec<usize>) -> Vec<usize> {
     shape
 }
 
-impl TensorBackend for CoreMlBackend {
+impl DiarizationBackend for CoreMlBackend {
     fn geometry(&self) -> &SegmentationGeometry {
         &self.geometry
     }

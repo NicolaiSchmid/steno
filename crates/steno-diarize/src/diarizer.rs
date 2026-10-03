@@ -5,14 +5,14 @@ use std::sync::{Arc, Mutex, PoisonError};
 
 use steno_core::{AudioBuffer16k, BoundaryResult, DiarizationResult, Diarizer, async_trait};
 
-use crate::backend::TensorBackend;
+use crate::backend::DiarizationBackend;
 use crate::error::DiarizeError;
 use crate::pipeline::{DiarizerConfig, Pipeline};
 
 /// Builds the backend when the diarizer is first prepared or used;
 /// downloads and model loading happen here.
 pub type BackendLoader =
-    Box<dyn Fn() -> Result<Box<dyn TensorBackend>, DiarizeError> + Send + Sync>;
+    Box<dyn Fn() -> Result<Box<dyn DiarizationBackend>, DiarizeError> + Send + Sync>;
 
 /// The pipeline before and after its backend has loaded.
 enum Slot {
@@ -76,7 +76,7 @@ impl ModelDiarizer {
 
     /// A diarizer over a backend that already exists.
     #[must_use]
-    pub fn with_backend(config: DiarizerConfig, backend: Box<dyn TensorBackend>) -> Self {
+    pub fn with_backend(config: DiarizerConfig, backend: Box<dyn DiarizationBackend>) -> Self {
         ModelDiarizer {
             config: config.clone(),
             slot: Arc::new(Mutex::new(Slot::Loaded(Pipeline::new(backend, config)))),
@@ -101,7 +101,7 @@ impl ModelDiarizer {
             config,
             Box::new(move || {
                 let backend = crate::onnx::OnnxBackend::from_store(&store, threads)?;
-                Ok(Box::new(backend) as Box<dyn TensorBackend>)
+                Ok(Box::new(backend) as Box<dyn DiarizationBackend>)
             }),
         )
     }
@@ -116,7 +116,7 @@ impl ModelDiarizer {
             config,
             Box::new(move || {
                 let backend = crate::coreml::CoreMlBackend::load(&models_dir)?;
-                Ok(Box::new(backend) as Box<dyn TensorBackend>)
+                Ok(Box::new(backend) as Box<dyn DiarizationBackend>)
             }),
         )
     }
