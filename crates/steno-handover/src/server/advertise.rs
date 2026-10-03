@@ -406,7 +406,7 @@ mod tests {
             v4_at("Ethernet", 4, [192, 168, 1, 3], IfOperStatus::Up, false),
             v4_at("Wi-Fi", 7, [10, 0, 0, 9], IfOperStatus::Up, false),
             v4_at("Tailscale", 12, [100, 64, 0, 10], IfOperStatus::Up, false),
-            v4_at("OpenVPN TAP", 15, [10, 8, 0, 6], IfOperStatus::Up, false),
+            v4_at("TAP", 15, [10, 8, 0, 6], IfOperStatus::Up, false),
             v4_at("vEthernet", 21, [172, 20, 16, 1], IfOperStatus::Up, false),
             v4_at("Unknown", 30, [192, 168, 2, 3], IfOperStatus::Up, false),
         ];
