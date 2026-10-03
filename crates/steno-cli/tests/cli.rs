@@ -410,6 +410,35 @@ fn path_of_file_url(url: &str) -> PathBuf {
     PathBuf::from(rest.replace("%20", " "))
 }
 
+/// `STENO_MODELS_DIR` names the models directory, taken from the working
+/// directory when relative, as the app and the `transcribe` example take it
+/// (`crates/steno-services/tests/models_directory.rs` pins those two).
+#[test]
+fn the_models_variable_names_the_models_directory() {
+    let home = tempfile::tempdir().unwrap();
+    let home = home.path();
+    let work = home.join("work");
+    std::fs::create_dir_all(&work).unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_steno"))
+        .args(["dev", "models", "list", "--db"])
+        .arg(home.join("steno.sqlite"))
+        .current_dir(&work)
+        .env("HOME", home)
+        .env("XDG_DATA_HOME", home.join("share"))
+        .env("APPDATA", home.join("appdata"))
+        .env("STENO_MODELS_DIR", "relative/models")
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success(), "{output:?}");
+    let expected = work.canonicalize().unwrap().join("relative").join("models");
+    assert_eq!(
+        stdout.lines().next(),
+        Some(format!("models: {}", expected.display()).as_str()),
+        "{stdout}"
+    );
+}
+
 // Every usage error of the Swift test in one place.
 #[allow(clippy::too_many_lines)]
 #[test]

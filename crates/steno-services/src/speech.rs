@@ -37,7 +37,9 @@ pub fn models_directory(settings: &Settings, paths: &StenoPaths) -> PathBuf {
     )
 }
 
-/// [`models_directory`] with the variable's value passed in.
+/// [`models_directory`] with the variable's value passed in. The variable
+/// is read by `steno_speech`'s rule, which the `transcribe` example and the
+/// FLEURS test use too.
 fn models_directory_with(
     settings: &Settings,
     paths: &StenoPaths,
@@ -47,25 +49,14 @@ fn models_directory_with(
         .models_directory
         .as_deref()
         .and_then(|url| file_url_path(url).or_else(|| Some(PathBuf::from(url))))
-        .or_else(|| {
-            variable
-                .filter(|value| !value.is_empty())
-                .map(|value| absolute(Path::new(&value)))
-        })
+        .or_else(|| ModelStore::models_directory_named(variable))
         .unwrap_or_else(|| paths.support_directory.join("Models"))
-}
-
-/// `path` from the working directory when it is relative, as Swift's
-/// `URL(fileURLWithPath:)` reads a command-line path.
-#[must_use]
-pub fn absolute(path: &Path) -> PathBuf {
-    std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf())
 }
 
 /// The ONNX speech models under `models_directory`.
 #[must_use]
 pub fn speech_store_under(models_directory: &Path) -> ModelStore {
-    ModelStore::new(models_directory.join("onnx"))
+    ModelStore::in_models_directory(models_directory)
 }
 
 /// The `CoreML` Parakeet directory under `models_directory`.
