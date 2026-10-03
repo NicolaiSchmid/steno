@@ -61,8 +61,10 @@ measures its pill and reports the size in device pixels through the
 `panel_call` command; the shell divides it by the window's scale factor
 (WebKitGTK's pixel ratio follows the X resolution, the window's scale does
 not), rounds it up to whole points, clamps it to the screen's work area
-and sizes the window from it, on the main thread so quick reports apply
-in order (a report that is not a size is `invalidParams`). The prompt's X
+and sizes the window from it. `panel_call` is a synchronous command, so it
+runs on the main thread in the order the page sent its reports, and the
+last one sent is the size the window keeps (a report that is not a size is
+`invalidParams`). The prompt's X
 and that size report are the only two things `panel_call` carries;
 everything else the panels do goes through the bridge (`recording.stop`,
 `recording.keepGoing`, `recording.start`, `window.open`). The host raises

@@ -292,8 +292,17 @@ pub async fn bridge_call(
 /// (`dismissPrompt`). Only a panel window may call it; the three bridge
 /// windows get `unknownMethod`, as they would for a method they do not
 /// answer.
+///
+/// A synchronous command: Tauri runs it on the main thread, in the order
+/// the page sent its calls, so a burst of size reports applies in order
+/// and the last one sent is the size the window keeps. Nothing in it waits
+/// on the main thread (there the window getters answer at once), and it
+/// builds no window, which would deadlock a synchronous command on
+/// Windows: a dismissal's refresh runs later (`panels::dismiss_prompt`).
+// Tauri hands a command its arguments by value.
+#[allow(clippy::needless_pass_by_value)]
 #[tauri::command]
-pub async fn panel_call(
+pub fn panel_call(
     app: AppHandle,
     window: WebviewWindow,
     action: String,

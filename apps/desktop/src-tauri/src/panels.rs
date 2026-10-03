@@ -664,9 +664,16 @@ pub fn set_prompt(app: &AppHandle, request: Option<PromptRequest>) {
 /// prompt's (`Panels::dismiss_prompt`). The host's detection controller learns
 /// of it through `WP6b`'s hook here; the fixture host has no detection to
 /// tell.
+///
+/// The caller is `bridge::panel_call`, a synchronous command on the main
+/// thread, where `refresh` would run `apply` in place, and `apply` may
+/// build a window, which deadlocks a synchronous command on Windows. So
+/// the refresh is posted from the async runtime and runs on a later turn
+/// of the main loop.
 pub fn dismiss_prompt(app: &AppHandle, raised: Option<u64>) {
     if app.state::<Panels>().dismiss_prompt(raised) {
-        refresh(app);
+        let handle = app.clone();
+        tauri::async_runtime::spawn(async move { refresh(&handle) });
     }
 }
 
@@ -674,32 +681,24 @@ pub fn dismiss_prompt(app: &AppHandle, raised: Option<u64>) {
 /// top-centre point it hangs from (the anchor in the normal flow, wherever
 /// the smoke put it otherwise), so a change of content never moves the
 /// panel, short of moving it back inside the screen. A report that is not
-/// a size is `invalidParams` at once; one larger than the screen is
-/// clamped to its work area.
+/// a size is `invalidParams`; one larger than the screen is clamped to its
+/// work area; a failed window call is `failed`.
 ///
-/// The rest runs on the main thread, as `apply` does, and the command
-/// returns without waiting for it: two reports in quick succession are
-/// applied one after the other, so the size recorded (`note_size`) is
-/// always the one the window took, and a failure there is logged.
+/// Runs on the main thread, as `apply` does: `bridge::panel_call` is a
+/// synchronous command, so reports apply in the order the page sent them
+/// and the size recorded (`note_size`) is always the one the window took
+/// last.
 pub fn resize(app: &AppHandle, panel: Panel, reported: (f64, f64)) -> Result<(), BridgeError> {
     if !is_size(reported) {
         return Err(not_a_size(reported));
     }
-    let handle = app.clone();
-    app.run_on_main_thread(move || {
-        if let Err(error) = resize_now(&handle, panel, reported) {
-            eprintln!(
-                "[steno-desktop] resizing the {} panel failed: {error}",
-                panel.label()
-            );
-        }
-    })
-    .map_err(failed)
+    take_size(app, panel, reported).map_err(failed)
 }
 
-/// `resize` on the main thread, where the screens and the window's
-/// getters answer at once; no lock is held across a window call.
-fn resize_now(app: &AppHandle, panel: Panel, reported: (f64, f64)) -> tauri::Result<()> {
+/// `resize` for a report that is a size, on the main thread, where the
+/// screens and the window's getters answer at once; no lock is held
+/// across a window call.
+fn take_size(app: &AppHandle, panel: Panel, reported: (f64, f64)) -> tauri::Result<()> {
     let screens = screens(app);
     let fallback = fallback_screen(&screens);
     let window = app.get_webview_window(panel.label());
