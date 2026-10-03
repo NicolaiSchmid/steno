@@ -79,37 +79,19 @@ pub type RecordingWriterFactory = Arc<
         + Sync,
 >;
 
-/// A recording session over one backend; see the module doc.
+/// A recording session over one backend; see the module doc. Tests run
+/// the same pipeline over a synthetic backend and a manual clock through
+/// [`CaptureSession::with_backend`].
 ///
 /// ```no_run
-/// use std::sync::Arc;
+/// use steno_audio::{CaptureConfiguration, CaptureMode, CaptureSession};
 ///
-/// use steno_audio::testing::SyntheticCaptureBackend;
-/// use steno_audio::{CaptureConfiguration, CaptureMode, CaptureSession, SystemClock};
-/// use steno_core::AudioLane;
-///
-/// // The production session: live devices, Speex, the wall clock.
 /// let configuration = CaptureConfiguration::new(CaptureMode::Call, "/tmp/steno-audio");
-/// let live = CaptureSession::new(configuration.clone())?;
-///
-/// // The same pipeline over two synthetic tones, as the Linux tests run it.
-/// let backend = Arc::new(SyntheticCaptureBackend::tones(
-///     &configuration.lanes(),
-///     &[(AudioLane::Mic, 440.0), (AudioLane::System, 1_000.0)],
-///     2.0,
-/// ));
-/// let session = CaptureSession::with_backend(
-///     configuration,
-///     backend,
-///     None,
-///     CaptureSession::DEFAULT_WRITER_HEADROOM_FRAMES,
-///     Arc::new(SystemClock::new()),
-/// )?;
+/// let session = CaptureSession::new(configuration)?;
 /// session.start(uuid::Uuid::new_v4())?;
 /// std::thread::sleep(std::time::Duration::from_secs(2));
 /// let result = session.stop()?;
 /// println!("{:.1} s at {}", result.statistics.duration, result.asset.url);
-/// # drop(live);
 /// # Ok::<(), steno_audio::CaptureError>(())
 /// ```
 pub struct CaptureSession {

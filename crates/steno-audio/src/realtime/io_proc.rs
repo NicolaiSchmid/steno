@@ -47,8 +47,8 @@ fn samples(channel: &ChannelRef, buffers: &[BufferView], frames: usize) -> Optio
 
 /// One callback's input buffers into the sink's rings following `sources`.
 /// The frame count comes from the first source's buffer; a buffer the HAL
-/// delivered without data, or shaped unlike the layout the pointers were resolved for,
-/// becomes silence so the lanes stay aligned.
+/// delivered without data, or shaped unlike the layout the pointers were
+/// resolved for, becomes silence so the lanes stay aligned.
 ///
 /// # Safety
 ///
