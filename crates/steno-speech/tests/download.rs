@@ -22,6 +22,9 @@ struct Behaviour {
     cut_first_after: Option<usize>,
     /// Answers every request with the whole file, as some hosts do.
     ignore_range: bool,
+    /// Answers a range request with the whole file under `206`, labelled
+    /// as starting at 0 or, with `false`, without a `Content-Range`.
+    whole_file_as_206: Option<bool>,
 }
 
 /// One request the server saw: the path and the `Range` header.
@@ -108,6 +111,24 @@ fn answer(
             .ok()
     });
     let (head, slice) = match start {
+        Some(_) if behaviour.whole_file_as_206.is_some() => {
+            let range = if behaviour.whole_file_as_206 == Some(true) {
+                format!(
+                    "Content-Range: bytes 0-{}/{}\r\n",
+                    body.len() - 1,
+                    body.len()
+                )
+            } else {
+                String::new()
+            };
+            (
+                format!(
+                    "HTTP/1.1 206 Partial Content\r\n{range}Content-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                ),
+                &body[..],
+            )
+        }
         Some(start) if start >= body.len() => {
             let head = format!(
                 "HTTP/1.1 416 Range Not Satisfiable\r\nContent-Range: bytes */{}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
@@ -383,4 +404,29 @@ fn a_partial_another_download_holds_is_left_alone() {
     drop(held);
     assert_eq!(fs::read(&partial).unwrap(), &contents[..7_000]);
     assert_eq!(names(&f.directory()), [NAME, PARTIAL]);
+}
+
+#[test]
+fn a_206_from_the_wrong_offset_or_without_a_range_is_not_appended() {
+    // Both answers carry the whole file; appended to the partial they
+    // would overrun the manifest size. The download starts over instead.
+    for labelled in [true, false] {
+        let contents = body(30_000);
+        let f = fixture(
+            &contents,
+            Behaviour {
+                whole_file_as_206: Some(labelled),
+                ..Behaviour::default()
+            },
+        );
+        f.leave_partial(&contents[..12_000]);
+        f.install();
+        let ranges: Vec<_> = f.server.seen().into_iter().map(|s| s.range).collect();
+        assert_eq!(
+            ranges,
+            [Some("bytes=12000-".to_owned()), None],
+            "labelled {labelled}"
+        );
+        assert_eq!(names(&f.directory()), [NAME]);
+    }
 }
