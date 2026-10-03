@@ -518,8 +518,9 @@ fn remove_stale_partials(directory: &Path, name: &str) {
         if pid == std::process::id() {
             continue;
         }
-        let stale = entry
-            .metadata()
+        // Not `DirEntry::metadata`: on Windows that is the cached directory
+        // entry, whose write time can lag for a file open for writing.
+        let stale = fs::symlink_metadata(entry.path())
             .and_then(|m| m.modified())
             .ok()
             .and_then(|modified| modified.elapsed().ok())
