@@ -27,14 +27,22 @@
 //!
 //! # Models
 //!
-//! Nothing is committed. [`ModelStore`] keeps every asset under
-//! `<support directory>/Models/<asset id>/` or under the directory
-//! `STENO_MODELS_DIR` names. Silero VAD downloads from the sherpa-onnx
-//! release with its checksum verified. The fp32 Parakeet export is not
-//! hosted yet: produce it with `spikes/onnx-speech/export/` and place
-//! `encoder.onnx`, `encoder.weights`, `decoder.onnx`, `joiner.onnx` and
-//! `tokens.txt` in `<root>/parakeet-tdt-0.6b-v3-fp32/`; `prepare` says so
-//! when they are missing.
+//! Nothing is committed. [`ModelStore::new`] takes the store root, which
+//! holds one folder per asset: `<root>/parakeet-tdt-0.6b-v3-fp32/` and
+//! `<root>/silero-vad/`. The app passes `<models directory>/onnx`, the
+//! models directory being `<support directory>/Models` unless the settings
+//! or `STENO_MODELS_DIR` name another. [`ModelStore::from_environment`],
+//! the `transcribe` example and the model-gated tests read
+//! `STENO_MODELS_DIR` as the store root itself, so point it at
+//! `<models directory>/onnx` to use the app's copies; unset, they use
+//! [`ModelStore::default_root`].
+//!
+//! Silero VAD downloads from the sherpa-onnx release with its checksum
+//! verified. The fp32 Parakeet export is not hosted yet: produce it with
+//! `spikes/onnx-speech/export/` and place `encoder.onnx`,
+//! `encoder.weights`, `decoder.onnx`, `joiner.onnx` and `tokens.txt` in
+//! `<root>/parakeet-tdt-0.6b-v3-fp32/`; `prepare` says so when they are
+//! missing.
 //!
 //! # Threads and process boundaries
 //!

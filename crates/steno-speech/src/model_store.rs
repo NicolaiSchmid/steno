@@ -4,9 +4,11 @@
 //! while hashing, and renames only a verified, synced file into place. Models are
 //! never committed (`.gitignore` covers `*.onnx`).
 //!
-//! The root is `<support directory>/Models` ([`steno_core::StenoPaths`]),
-//! or the directory `STENO_MODELS_DIR` names, with one sub-directory per
-//! asset id. Silero VAD downloads from the sherpa-onnx `asr-models`
+//! A store's root holds one folder per asset id, `<root>/<asset id>/`; the
+//! app passes `<models directory>/onnx` to [`ModelStore::new`].
+//! [`ModelStore::from_environment`] takes the directory `STENO_MODELS_DIR`
+//! names as the root itself, else [`ModelStore::default_root`] (the crate
+//! docs say more). Silero VAD downloads from the sherpa-onnx `asr-models`
 //! release. The fp32 Parakeet export (2.6 GB) is not hosted yet: until the
 //! release plan names a host, its files are produced by
 //! `spikes/onnx-speech/export/` and copied into
@@ -161,7 +163,8 @@ pub struct ModelStore {
 }
 
 impl ModelStore {
-    /// Names a directory that replaces the default root.
+    /// Names the store root [`ModelStore::from_environment`] uses in place
+    /// of the default one.
     pub const ENVIRONMENT_VARIABLE: &'static str = "STENO_MODELS_DIR";
 
     #[must_use]
@@ -195,7 +198,8 @@ impl ModelStore {
         })
     }
 
-    /// `<support directory>/Models`, the Swift app's models root.
+    /// `<support directory>/Models` ([`steno_core::StenoPaths`]), the Swift
+    /// app's models root; the app's ONNX assets sit in its `onnx/` folder.
     #[must_use]
     pub fn default_root() -> PathBuf {
         StenoPaths::default_support_directory().join("Models")
