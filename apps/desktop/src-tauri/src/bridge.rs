@@ -254,12 +254,10 @@ pub async fn bridge_call(
             }
             Ok(Value::Null)
         }
+        // The host hears of it too, so its General snapshot follows.
         "settings.general.setLaunchAtLogin" => {
-            let request: SetBoolParams = parse(&method, params.clone())?;
-            autostart::set_enabled(&app, request.value)?;
-            tray::note_login_item(&app);
-            // The host hears of it too, so its General snapshot follows.
-            host.call(&window, &method, params)?;
+            let request: SetBoolParams = parse(&method, params)?;
+            actions::set_launch_at_login(&app, &window, request.value)?;
             Ok(Value::Null)
         }
         "updates.check" => {

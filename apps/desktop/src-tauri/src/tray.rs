@@ -11,99 +11,30 @@
 //! a tray (a Linux desktop with no indicator host) the window closes and
 //! the process ends with it (`main.rs`).
 //!
-//! The menu's handler is `on_menu_event`, registered once by `main.rs`:
-//! Tauri hands every menu event to the same listeners, whether from the
-//! tray's menu or, on macOS, the menu bar's (`menu.rs`), whose items carry
-//! the same ids.
+//! The items are `actions::MenuAction`s and their handler is
+//! `actions::on_menu_event`, registered once by `main.rs`: Tauri hands
+//! every menu event to the same listeners, whether from the tray's menu
+//! or, on macOS, the menu bar's (`menu.rs`), whose items carry the same
+//! ids.
 //!
 //! Swift: `MenuBarView.swift`, `MenuBarLabel` and `MenuBarLabelPresentation`
 //! in `StenoApp.swift` and `FloatingContent.swift`.
 
-use std::fmt;
-
 use tauri::{
     AppHandle, Manager, Wry,
     image::Image,
-    menu::{CheckMenuItem, Menu, MenuEvent, MenuId, MenuItem, PredefinedMenuItem},
+    menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem},
     tray::TrayIconBuilder,
 };
 
 use crate::{
-    actions::{self, CaptureMode},
+    actions::MenuAction,
     autostart,
     recording::{RecorderState, RecordingState},
-    windows::BridgeWindow,
 };
 
 /// The tray's id, for `AppHandle::tray_by_id`.
 pub const TRAY_ID: &str = "steno";
-
-/// The menu items, by id. The ids are stable strings so a test can map
-/// them both ways without a menu.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum MenuAction {
-    Record,
-    RecordInPerson,
-    OpenMain,
-    OpenSettings,
-    LaunchAtLogin,
-    CheckForUpdates,
-    Quit,
-}
-
-impl MenuAction {
-    pub const ALL: [MenuAction; 7] = [
-        Self::Record,
-        Self::RecordInPerson,
-        Self::OpenMain,
-        Self::OpenSettings,
-        Self::LaunchAtLogin,
-        Self::CheckForUpdates,
-        Self::Quit,
-    ];
-
-    pub const fn id(self) -> &'static str {
-        match self {
-            Self::Record => "record",
-            Self::RecordInPerson => "record-in-person",
-            Self::OpenMain => "open-main",
-            Self::OpenSettings => "open-settings",
-            Self::LaunchAtLogin => "launch-at-login",
-            Self::CheckForUpdates => "check-for-updates",
-            Self::Quit => "quit",
-        }
-    }
-
-    pub fn from_id(id: &str) -> Option<Self> {
-        Self::ALL.into_iter().find(|action| action.id() == id)
-    }
-
-    /// The item's text at rest; `record_label` replaces the first while
-    /// the recorder is busy.
-    pub const fn label(self) -> &'static str {
-        match self {
-            Self::Record => "Record",
-            Self::RecordInPerson => "Record in person",
-            Self::OpenMain => "Open Steno",
-            Self::OpenSettings => "Settings…",
-            Self::LaunchAtLogin => "Launch at login",
-            Self::CheckForUpdates => "Check for Updates…",
-            Self::Quit => "Quit Steno",
-        }
-    }
-
-    /// The plain menu item for the action, in the tray's menu or the menu
-    /// bar's.
-    pub fn item(self, app: &AppHandle, accelerator: Option<&str>) -> tauri::Result<MenuItem<Wry>> {
-        MenuItem::with_id(app, self.id(), self.label(), true, accelerator)
-    }
-}
-
-impl fmt::Display for MenuAction {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.id())
-    }
-}
 
 /// The Record item's text per recorder state: the same words as the
 /// sidebar's control (`RecordButton` in `sidebar.tsx`).
@@ -224,48 +155,9 @@ pub fn note_login_item(app: &AppHandle) {
     }
 }
 
-/// A menu item was chosen, in the tray's menu or the menu bar's.
-pub fn on_menu_event(app: &AppHandle, event: &MenuEvent) {
-    let MenuId(id) = event.id();
-    let Some(action) = MenuAction::from_id(id) else {
-        return;
-    };
-    match action {
-        MenuAction::Record => report(actions::record(app, None)),
-        MenuAction::RecordInPerson => report(actions::record(app, Some(CaptureMode::InPerson))),
-        MenuAction::OpenMain => actions::open(app, BridgeWindow::Main),
-        MenuAction::OpenSettings => actions::open(app, BridgeWindow::Settings),
-        MenuAction::LaunchAtLogin => {
-            let wanted = !autostart::status(app).is_on();
-            if let Err(error) = autostart::set_enabled(app, wanted) {
-                eprintln!("[steno-desktop] login item could not be changed: {error}");
-            }
-            note_login_item(app);
-        }
-        MenuAction::CheckForUpdates => actions::check_for_updates(app),
-        MenuAction::Quit => actions::quit(app),
-    }
-}
-
-fn report(result: Result<(), crate::bridge::BridgeError>) {
-    if let Err(error) = result {
-        eprintln!("[steno-desktop] tray: {error}");
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn every_action_round_trips_through_its_id() {
-        for action in MenuAction::ALL {
-            assert_eq!(MenuAction::from_id(action.id()), Some(action));
-            assert_eq!(action.to_string(), action.id());
-            assert_ne!(action.label(), "");
-        }
-        assert_eq!(MenuAction::from_id("about"), None);
-    }
 
     #[test]
     fn the_record_item_follows_the_recorder() {

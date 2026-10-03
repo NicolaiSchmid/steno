@@ -74,7 +74,7 @@ fn main() {
     let app = builder
         // One handler for every menu: the tray's on every platform and
         // the menu bar's on macOS reach the same listeners.
-        .on_menu_event(|app, event| tray::on_menu_event(app, &event))
+        .on_menu_event(|app, event| actions::on_menu_event(app, &event))
         .manage(host::Host)
         .manage(smoke::Smoke::default())
         .manage(panels::Panels::default())

@@ -6,7 +6,7 @@
 //! `actions::quit` and the run loop), the Edit menu whose predefined items
 //! give the webviews their undo, cut, copy, paste and select-all
 //! shortcuts, and the Window menu. The items share the tray's ids, so the
-//! one handler `main.rs` registers (`tray::on_menu_event`) serves both
+//! one handler `main.rs` registers (`actions::on_menu_event`) serves both
 //! menus. Linux and Windows show no menu bar; the tray carries the
 //! actions there.
 //!
@@ -17,7 +17,7 @@ use tauri::{
     menu::{AboutMetadata, Menu, PredefinedMenuItem, Submenu},
 };
 
-use crate::tray::MenuAction;
+use crate::actions::MenuAction;
 
 /// The whole menu bar; `Builder::menu` installs it.
 pub fn build(app: &AppHandle) -> tauri::Result<Menu<Wry>> {
