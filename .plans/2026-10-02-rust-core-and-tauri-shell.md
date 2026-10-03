@@ -336,11 +336,6 @@ still has to draw the window side. `[ ]` is not ported yet.
   `synchronous = NORMAL` a power loss can roll the commits back. Those commits need
   `FULL` (and `fullfsync` on macOS for the drive cache), here and in the Rust port of
   the intake.
-- `HandoverEngine.swift:145` refreshes `lastSeenAt` with `store.save(seen, tokenHash:)`,
-  an upsert of the device the gate read before a yield, so a revoke that lands in
-  between resurrects the device and its token hash. The Rust engine runs an `UPDATE`
-  of the row that still holds the token (`Store::touch_paired_device`); move the Swift
-  side to the same `UPDATE` before cutover.
 
 ### Adapters
 
@@ -461,17 +456,34 @@ another release, otherwise the cutover closes them:
   (`advertise::windows_keeps`), which leaves out Wintun, TAP and Hyper-V adapters; and
   `100.64.0.0/10` everywhere. It serves bridges on Linux and macOS, which Swift classes
   `.other`, and does not re-publish after a network change. WP8 decides: restart on
-  network change, or re-register.
+  network change, or re-register. Two gaps remain. Rust judges a connection by its
+  local address where Swift judges the interface it arrives on, so on Linux and macOS
+  (weak host model) a packet addressed to the LAN address that arrives over a tunnel is
+  served: the computer is a subnet router or exit node, or a peer's allowed IPs cover
+  the LAN. On Windows a LAN address that sits on a Hyper-V external switch is refused
+  with the virtual adapter.
+- `Sources/StenoHandover/Routing/HandoverEngine.swift` `touch(_:tokenHash:)` refreshes
+  `lastSeenAt` with `store.save(seen, tokenHash:)`, an upsert of the device the gate
+  read before a yield, so a revoke that lands in between resurrects the device and its
+  token hash. The Rust engine runs an `UPDATE` of the row that still holds the token
+  (`Store::touch_paired_device`); add an `UPDATE` method to `MeetingStore+Handover.swift`
+  and call it there before cutover.
 - Receipt reads: Swift's `HandoverEngine.sweepOrphans` and `RecordingHandler.receipt(_:)`
   read with `try?`, so a failed read counts as no receipt: the sweep deletes a
   resumable upload, a route answers 404, and an announce starts the recording over,
   overwriting a `complete` receipt so that the next `complete` admits the meeting
   twice. Rust keeps the files and answers 500 (`Engine::receipt`); move the Swift side
   to the same before cutover.
+- Revoked receipts: Swift's `HandoverEngine.persist` puts a receipt back into
+  `activeReceipts` after a revoke removed it, when a `complete` that read it before the
+  revoke writes it back; the receipt stream then shows an upload of a revoked phone
+  until restart. Rust keeps the receipts of a device revoked since start out of memory
+  until it pairs again; move the Swift side to the same before cutover.
 - Service name: Swift's `HandoverConfiguration.defaultServiceName()` uses
-  `Host.current().localizedName` (the computer name in System Settings). The Rust
-  default reads `HOSTNAME` or `/etc/hostname` and falls back to `Steno`; the shell
-  passes the OS computer name on the Mac (WP9) and on Windows (WP10).
+  `Host.current().localizedName` (the computer name in System Settings), else
+  `ProcessInfo.processInfo.hostName`. The Rust default reads `HOSTNAME` or
+  `/etc/hostname` and falls back to `Steno`; the shell passes the OS computer name on
+  the Mac (WP9) and on Windows (WP10).
 
 ### Bridge
 
