@@ -103,7 +103,7 @@ context.objects = [
 EOF
 
 pipewire >"$root/pipewire.log" 2>&1 &
-pids+=($!)
+pids+=("$!")
 for _ in $(seq 1 100); do
   [[ -S "$XDG_RUNTIME_DIR/pipewire-0" ]] && break
   sleep 0.05
@@ -143,4 +143,4 @@ if [[ $status -ne 0 ]]; then
   echo "pipewire-headless: the command failed ($status); daemon logs follow" >&2
   tail -n 40 "$root/pipewire.log" "$root/wireplumber.log" >&2 || true
 fi
-exit $status
+exit "$status"

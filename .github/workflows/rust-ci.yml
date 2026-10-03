@@ -44,10 +44,11 @@ name: Rust CI
 # `crates/steno-speech-coreml/tests/parity.rs` and the `steno-coreml-parity`
 # binary, run by hand, never here.
 #
-# steno-audio's PipeWire backend (WP5b) builds on Linux against the
-# libpipewire headers (scripts/setup-linux.sh installs them). The Linux job
-# also runs its live tests, `crates/steno-audio/tests/pipewire.rs`, against
-# a private headless daemon with WirePlumber and null devices that
+# steno-audio's PipeWire backend (WP5b of
+# .plans/2026-10-02-rust-core-and-tauri-shell.md) builds on Linux against
+# the libpipewire headers (scripts/setup-linux.sh installs them). The Linux
+# job also runs its live tests, `crates/steno-audio/tests/pipewire.rs`,
+# against a private headless daemon with WirePlumber and null devices that
 # `scripts/pipewire-headless.sh` starts: real links, real cycles, and the
 # allocation count on PipeWire's own data-loop thread.
 #
