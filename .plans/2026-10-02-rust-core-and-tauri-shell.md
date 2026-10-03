@@ -296,9 +296,16 @@ still has to draw the window side. `[ ]` is not ported yet.
   a 24-hour clock in the zone the shell passes (Swift used the locale); the Swift
   speakers popover's own error line is the detail's; `settings.transcription.download`
   publishes its progress from the download's thread; a retried re-export after a refusal
-  happens on the next store change (Swift retried on the next `.ready` tick). Fixture
-  values the view models never compute are listed, with the host's value and the
-  reason, in `crates/steno-host/tests/parity.rs`.
+  happens on the next store change (Swift retried on the next `.ready` tick); a
+  pending re-export when the detail goes away is attempted once (Swift retried after
+  three seconds in a detached task); one host answers all three windows and routes the
+  four Summaries form commands by the calling window (`Host::for_window`) where Swift
+  had one host per window; the Settings sections reload when the stored settings
+  change under them (a store change, an onboarding save) where Swift loaded them once
+  per window open; the `recording` throttle is flushed by a thread the host owns where
+  Swift's publisher armed a task; the model download replies at once and runs on a
+  host thread. Fixture values the view models never compute are listed, with the
+  host's value and the reason, in `crates/steno-host/tests/parity.rs`.
 
 ### Store
 
