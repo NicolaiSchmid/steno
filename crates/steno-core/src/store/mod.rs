@@ -1,11 +1,9 @@
 //! The SQLite store over the file the Swift app writes: the same
 //! migrations, recorded in `grdb_migrations` the way GRDB records them, the
 //! same column encodings, and the read and write paths the pipeline and the
-//! host need. The queries only the windows ask for (search, the sidebar
-//! list with its counts) arrive with the Tauri host in WP6: as new
-//! methods here, or next to the commands that call them, written with the
-//! [`convert`] codecs against the connection [`Store::read`] and
-//! [`Store::write`] hand out.
+//! host need. The queries the windows ask for (`search`, `export`,
+//! `speakers_for_meetings`, `recent_persons`) live here too, written with
+//! the [`convert`] codecs.
 //! Swift: `Sources/StenoCore/Storage/MeetingStore.swift`.
 //!
 //! The migration procedure both sides follow is in
@@ -191,9 +189,17 @@ impl Store {
             .unwrap_or_else(PoisonError::into_inner)
     }
 
-    /// Runs `body` on the connection outside a transaction.
+    /// Runs `body` inside one deferred transaction, so every query it makes
+    /// sees the same snapshot of the file (an export's seven selects read
+    /// one meeting, not a meeting another process is rewriting between
+    /// them), as GRDB's `reader.read` did. Nothing is written; the
+    /// transaction is rolled back when `body` returns.
     pub fn read<T>(&self, body: impl FnOnce(&Connection) -> Result<T>) -> Result<T> {
-        body(&self.lock())
+        let mut connection = self.lock();
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Deferred)?;
+        let value = body(&transaction)?;
+        transaction.rollback()?;
+        Ok(value)
     }
 
     /// Runs `body` inside one transaction, committed when it returns `Ok`.

@@ -375,17 +375,29 @@ impl Person {
     }
 }
 
-/// `text` trimmed, lower-cased and with its combining marks removed:
+/// `text` trimmed, lower-cased and with its diacritics removed:
 /// Foundation's `caseInsensitive` plus `diacriticInsensitive` compare.
+/// Only the Latin diacritic blocks go (Combining Diacritical Marks and
+/// their two extension blocks); a vowel sign in another script is part of
+/// the name, so two Devanagari names that differ by one stay distinct.
 #[must_use]
 pub fn fold_name(text: &str) -> String {
     use unicode_normalization::UnicodeNormalization as _;
-    use unicode_normalization::char::is_combining_mark;
     text.trim()
         .nfd()
-        .filter(|character| !is_combining_mark(*character))
+        .filter(|character| !is_latin_diacritic(*character))
         .flat_map(char::to_lowercase)
         .collect()
+}
+
+/// Combining Diacritical Marks (U+0300..U+036F), Extended (U+1AB0..U+1AFF)
+/// and Supplement (U+1DC0..U+1DFF): what decomposing a Latin letter with
+/// an accent produces.
+fn is_latin_diacritic(character: char) -> bool {
+    matches!(
+        character,
+        '\u{0300}'..='\u{036F}' | '\u{1AB0}'..='\u{1AFF}' | '\u{1DC0}'..='\u{1DFF}'
+    )
 }
 
 /// The model's guess who a speaker is (#78), one per speaker.
@@ -440,6 +452,10 @@ mod tests {
         assert!(Person::names_match("ANNA", "anna"));
         assert!(!Person::names_match("Anna", "Anne"));
         assert_eq!(fold_name("Jérôme Müller"), "jerome muller");
+        // Vowel signs are letters of the name, not accents: "Rama" and
+        // "Rima" in Devanagari differ by one combining mark and stay apart.
+        assert!(!Person::names_match("राम", "रीम"));
+        assert_ne!(fold_name("कि"), fold_name("कु"));
     }
 
     #[test]
