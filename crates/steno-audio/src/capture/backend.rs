@@ -18,7 +18,8 @@ use crate::realtime::LaneFrameSink;
 /// generates deterministic tones. The session orchestrates a rebuild after
 /// a change by calling `stop()` and `start` again on the same backend and
 /// the same sink, so a backend must be restartable. The WASAPI backend
-/// (WP10) will implement this trait too (see `capture::live`).
+/// (WP10 of `.plans/2026-10-02-rust-core-and-tauri-shell.md`) will
+/// implement this trait too (see `capture::live`).
 pub trait CaptureBackend: Send + Sync {
     /// Starts delivering `lanes` (in this order) at [`SAMPLE_RATE`] and
     /// describes the stream it opened. `input_device_uid` `None` selects
