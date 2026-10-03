@@ -22,6 +22,7 @@ pub type MakeDependencies = Arc<dyn Fn() -> Result<PipelineDependencies, BuildEr
 /// until it is idle, so meetings in flight finish on the dependencies they
 /// started with. Everything that enqueues resolves `current()` per call,
 /// so a recording that ends after a reload goes through the new one.
+/// Held by `App`, the recorder, the phone intake and [`HostPipeline`].
 pub struct CurrentPipeline {
     current: Mutex<ProcessingPipeline>,
     make: MakeDependencies,
@@ -50,12 +51,6 @@ impl CurrentPipeline {
             .clone()
     }
 
-    /// The runtime the pipeline's background work runs on.
-    #[must_use]
-    pub fn runtime(&self) -> &tokio::runtime::Handle {
-        &self.runtime
-    }
-
     /// Replaces the pipeline with one built from the stored settings and
     /// the secret store's API key.
     pub fn reload(&self) -> Result<(), BuildError> {
@@ -82,16 +77,16 @@ impl CurrentPipeline {
 /// meeting row; a failure is logged. `apply_retention` touches the store
 /// only and completes in place, so the detail the host reads back right
 /// after already shows the new rule.
-pub struct SwappablePipeline {
-    pub handle: Arc<CurrentPipeline>,
+pub struct HostPipeline {
+    pub pipeline: Arc<CurrentPipeline>,
     pub sweep: RetentionSweep,
 }
 
-impl Pipeline for SwappablePipeline {
+impl Pipeline for HostPipeline {
     fn rerun_summary(&self, meeting_id: Uuid, template_id: &str) -> Result<(), String> {
-        let pipeline = self.handle.current();
+        let pipeline = self.pipeline.current();
         let template_id = template_id.to_owned();
-        self.handle.runtime.spawn(async move {
+        self.pipeline.runtime.spawn(async move {
             if let Err(error) = pipeline.rerun_summary(meeting_id, &template_id).await {
                 tracing::warn!(%meeting_id, %error, "summary re-run failed");
             }
@@ -100,8 +95,8 @@ impl Pipeline for SwappablePipeline {
     }
 
     fn redeliver(&self, meeting_id: Uuid) -> Result<(), String> {
-        let pipeline = self.handle.current();
-        self.handle.runtime.spawn(async move {
+        let pipeline = self.pipeline.current();
+        self.pipeline.runtime.spawn(async move {
             if let Err(error) = pipeline.redeliver(meeting_id).await {
                 tracing::warn!(%meeting_id, %error, "re-export failed");
             }
@@ -110,16 +105,16 @@ impl Pipeline for SwappablePipeline {
     }
 
     fn apply_retention(&self, meeting_id: Uuid, rule: AudioRetention) -> Result<(), String> {
-        let pipeline = self.handle.current();
+        let pipeline = self.pipeline.current();
         block_on(
-            &self.handle.runtime,
+            &self.pipeline.runtime,
             pipeline.apply_retention(meeting_id, rule),
         )
         .map_err(|error| error.to_string())
     }
 
     fn reload(&self) -> Result<(), String> {
-        self.handle.reload().map_err(|error| error.to_string())
+        self.pipeline.reload().map_err(|error| error.to_string())
     }
 
     fn keep_all_recordings(&self) -> Result<i64, String> {
@@ -149,7 +144,7 @@ mod tests {
     };
 
     use super::*;
-    use crate::test_support::{fake_dependencies, temp_store};
+    use crate::testing::{fake_dependencies, temp_store};
 
     /// A summarizer that answers only once released.
     struct HeldSummarizer {
@@ -170,14 +165,14 @@ mod tests {
         store: &Arc<Store>,
         summarizer: Arc<dyn MeetingSummarizer>,
         runtime: tokio::runtime::Handle,
-    ) -> SwappablePipeline {
+    ) -> HostPipeline {
         let dependencies = fake_dependencies(store, "fake-engine").with_llm(None, Some(summarizer));
         let make: MakeDependencies = {
             let dependencies = dependencies.clone();
             Arc::new(move || Ok(dependencies.clone()))
         };
-        SwappablePipeline {
-            handle: Arc::new(CurrentPipeline::new(
+        HostPipeline {
+            pipeline: Arc::new(CurrentPipeline::new(
                 ProcessingPipeline::new(dependencies),
                 make,
                 runtime,
@@ -187,7 +182,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn a_summary_rerun_returns_before_the_summarizer_answers() {
+    async fn a_summary_re_run_returns_before_the_summarizer_answers() {
         let (_dir, store) = temp_store();
         let mut meeting = sample_data::meeting();
         meeting.state = MeetingState::Ready;
@@ -232,7 +227,7 @@ mod tests {
             Arc::new(steno_core::testing::FakeSummarizer::default()),
             tokio::runtime::Handle::current(),
         );
-        let pipeline = service.handle.current();
+        let pipeline = service.pipeline.current();
         let returned = tokio::task::spawn_blocking(move || service.redeliver(meeting.id))
             .await
             .unwrap();

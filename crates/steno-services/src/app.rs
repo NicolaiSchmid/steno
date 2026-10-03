@@ -23,7 +23,7 @@ use steno_speech::ModelStore;
 use crate::block_on;
 use crate::handover::ListenerHandover;
 use crate::llm::{ClientLlmService, codex_store};
-use crate::pipeline::{CurrentPipeline, MakeDependencies, SwappablePipeline, run_sweep};
+use crate::pipeline::{CurrentPipeline, HostPipeline, MakeDependencies, run_sweep};
 use crate::platform::{DiskFolderUsage, FilePreferences, PlatformAudioDevices, WallClock};
 use crate::recorder::{CaptureRecorder, MakeCaptureSession};
 use crate::secrets::secret_store;
@@ -285,8 +285,8 @@ pub fn build(options: AppOptions) -> Result<App, BuildError> {
         permissions,
         updater: Arc::new(FakeUpdater::default()),
         recorder: recorder.clone(),
-        pipeline: Arc::new(SwappablePipeline {
-            handle: pipeline.clone(),
+        pipeline: Arc::new(HostPipeline {
+            pipeline: pipeline.clone(),
             sweep: sweep.clone(),
         }),
         speech_models: Arc::new(ModelStoreSpeechModels {
@@ -438,7 +438,7 @@ mod tests {
     use steno_pipeline::{MeetingEventBus, ProcessingPipeline};
 
     use super::*;
-    use crate::test_support::{fake_dependencies, temp_store};
+    use crate::testing::{fake_dependencies, temp_store};
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn the_phone_intake_enqueues_through_the_pipeline_current_at_admission() {

@@ -9,7 +9,7 @@
 //! | Module | What it holds |
 //! |--------|---------------|
 //! | [`app`] | [`AppOptions`], [`build`], [`App`] with `host()` and `launch()`, [`BuildError`] |
-//! | [`pipeline`] | The host's `Pipeline` over a swappable [`ProcessingPipeline`](steno_pipeline::ProcessingPipeline) and the retention sweep |
+//! | [`pipeline`] | [`CurrentPipeline`](pipeline::CurrentPipeline), the swappable [`ProcessingPipeline`](steno_pipeline::ProcessingPipeline), and [`HostPipeline`](pipeline::HostPipeline), the host's `Pipeline` over it and the retention sweep |
 //! | [`recorder`] | The host's `Recorder` over the capture session and the Mac intake |
 //! | [`speech`] | The models root, the speech engine per platform, the ONNX diarizer, the host's `SpeechModels` |
 //! | [`llm`] | The LLM passes from the settings and the host's `LlmService` |
@@ -68,7 +68,7 @@ pub mod recorder;
 pub mod secrets;
 pub mod speech;
 #[cfg(test)]
-mod test_support;
+mod testing;
 
 pub use app::{App, AppOptions, BuildError, build, open_store};
 pub use secrets::{FileSecretStore, KeyringSecretStore, secret_store};
