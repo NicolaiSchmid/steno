@@ -56,7 +56,8 @@ steno_core::string_enum! {
     pub enum Fault {
         /// `std::process::abort`, as a C++ exception through the FFI ends.
         Abort = "abort",
-        /// A Rust panic, which ends the process with status 101.
+        /// A line of stderr that is not UTF-8, then a Rust panic, which
+        /// ends the process with status 101.
         Panic = "panic",
         /// Exits with status 3.
         Exit = "exit",
@@ -229,7 +230,12 @@ impl Engine for FakeEngine {
     ) -> Result<Vec<RawSegment>, String> {
         match self.fault_now().filter(|fault| !fault.at_start()) {
             Some(Fault::Abort) => std::process::abort(),
-            Some(Fault::Panic) => panic!("simulated panic in the speech engine"),
+            Some(Fault::Panic) => {
+                // A line that is not UTF-8 first, as a native library may
+                // write: the parent must still keep the panic message.
+                let _ = io::stderr().write_all(b"native noise \xff\xfe\n");
+                panic!("simulated panic in the speech engine")
+            }
             Some(Fault::Exit) => std::process::exit(3),
             Some(Fault::Hang) => hang(),
             Some(Fault::Allocate) => {
@@ -307,10 +313,16 @@ pub fn serve(options: &Options) -> ExitCode {
     let started = std::thread::Builder::new()
         .name("heartbeat".to_owned())
         .spawn(move || {
+            let mut warned = false;
             loop {
-                send(&Reply::Memory {
-                    rss_bytes: rss_bytes(),
-                });
+                let rss_bytes = rss_bytes();
+                if rss_bytes == 0 && !warned {
+                    eprintln!(
+                        "steno-speech-sidecar: the resident set cannot be read here, so the parent's memory ceiling cannot act"
+                    );
+                    warned = true;
+                }
+                send(&Reply::Memory { rss_bytes });
                 std::thread::sleep(heartbeat);
             }
         });

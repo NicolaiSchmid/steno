@@ -126,6 +126,10 @@ pub enum SidecarError {
     /// a run ONNX Runtime refused) and keeps running.
     #[error("{0}")]
     Remote(String),
+    /// The models root is not valid UTF-8, which the protocol's JSON cannot
+    /// carry; no child was started.
+    #[error("the models root {} is not valid UTF-8, which the sidecar protocol cannot carry", path.display())]
+    NotUtf8 { path: PathBuf },
 }
 
 impl SpeechError {

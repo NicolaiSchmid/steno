@@ -240,6 +240,7 @@ async fn a_panic_or_an_exit_is_a_crash_with_the_child_s_last_words() {
         let SidecarError::Crashed { stderr, .. } = error else {
             panic!("{error}");
         };
+        assert!(stderr.contains("native noise"), "{stderr}");
         assert!(stderr.contains("simulated panic"), "{stderr}");
     })
     .await;

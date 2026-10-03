@@ -10,7 +10,7 @@
 
 use std::collections::{BTreeSet, VecDeque};
 use std::ffi::OsString;
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, Read};
 use std::path::PathBuf;
 use std::process::{Child, ChildStdin, Command, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
@@ -139,6 +139,11 @@ struct SidecarProcess {
 /// The lines of the child's stderr kept for a crash report.
 const STDERR_LINES: usize = 20;
 
+/// The longest stderr line kept whole; a longer one is kept in pieces of
+/// this size, so a child that writes without newlines cannot grow the
+/// buffer without bound.
+const STDERR_LINE_BYTES: u64 = 4096;
+
 impl SidecarProcess {
     /// Spawns the child and waits for its [`Reply::Ready`].
     fn spawn(config: &SidecarConfig) -> Result<Self, SidecarError> {
@@ -206,8 +211,22 @@ impl SidecarProcess {
         std::thread::Builder::new()
             .name(format!("sidecar-{pid}-stderr"))
             .spawn(move || {
-                for line in BufReader::new(stderr).lines() {
-                    let Ok(line) = line else { return };
+                let mut stderr = BufReader::new(stderr);
+                let mut bytes = Vec::new();
+                loop {
+                    bytes.clear();
+                    // Bytes, not `lines()`: invalid UTF-8 (an ONNX Runtime
+                    // message, a path) must not end the reader.
+                    match (&mut stderr)
+                        .take(STDERR_LINE_BYTES)
+                        .read_until(b'\n', &mut bytes)
+                    {
+                        Ok(0) | Err(_) => return,
+                        Ok(_) => {}
+                    }
+                    let line = String::from_utf8_lossy(&bytes)
+                        .trim_end_matches(['\r', '\n'])
+                        .to_owned();
                     tracing::debug!(target: "steno_speech::sidecar", pid, "{line}");
                     let mut tail = lines.lock().unwrap_or_else(PoisonError::into_inner);
                     if tail.len() == STDERR_LINES {
@@ -396,6 +415,13 @@ impl Shared {
     fn ensure_loaded(&self, slot: &mut Option<SidecarProcess>) -> Result<(), SpeechError> {
         if slot.as_ref().is_some_and(|p| p.loaded) {
             return Ok(());
+        }
+        // The `load` request carries the root as a JSON string.
+        if self.store.root().to_str().is_none() {
+            return Err(SidecarError::NotUtf8 {
+                path: self.store.root().to_path_buf(),
+            }
+            .into());
         }
         for asset in &self.assets {
             self.store.ensure(asset, &mut log_download)?;
@@ -677,5 +703,27 @@ mod tests {
         assert_eq!(engine.health().await.unwrap(), None);
         assert_eq!(engine.shut_down().await.unwrap(), None);
         engine.release().await.unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_models_root_the_protocol_cannot_carry_is_refused_before_any_spawn() {
+        use std::os::unix::ffi::OsStrExt;
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join(std::ffi::OsStr::from_bytes(b"models-\xff"));
+        let engine = SidecarSpeechEngine::with_assets(
+            ModelStore::new(&root),
+            SidecarConfig::new(dir.path().join("no-such-sidecar")),
+            Vec::new(),
+        );
+        let error = engine.prepare().await.unwrap_err();
+        assert!(
+            matches!(
+                error.downcast_ref::<SpeechError>(),
+                Some(SpeechError::Sidecar(SidecarError::NotUtf8 { path })) if *path == root
+            ),
+            "{error}"
+        );
+        assert_eq!(engine.spawns(), 0);
     }
 }
