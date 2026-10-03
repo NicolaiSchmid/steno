@@ -284,11 +284,8 @@ mod tests {
     fn checksums_are_lowercase_hex_and_a_bad_file_is_not_accepted() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("x.bin");
-        fs::write(&path, b"abc").unwrap();
-        assert_eq!(
-            sha256_of(&path).unwrap(),
-            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
-        );
+        fs::write(&path, ABC).unwrap();
+        assert_eq!(sha256_of(&path).unwrap(), ABC_SHA256);
         let store = ModelStore::new(dir.path());
         let asset = ModelAsset {
             file_name: "x.bin",

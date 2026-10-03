@@ -15,7 +15,6 @@ use steno_diarize::{DiarizeError, DiarizerConfig, ModelDiarizer, Pipeline};
 struct FakeBackend {
     geometry: SegmentationGeometry,
     segment_calls: usize,
-    embed_calls: usize,
 }
 
 impl FakeBackend {
@@ -23,12 +22,11 @@ impl FakeBackend {
         FakeBackend {
             geometry: SegmentationGeometry::PYANNOTE_3_0,
             segment_calls: 0,
-            embed_calls: 0,
         }
     }
 
-    /// The speaker constants heard in frame `frame` of `window`, up to
-    /// three, in order of appearance inside the window.
+    /// The speaker constants heard in `window`, up to three, in order of
+    /// appearance.
     fn speakers_in_window(window: &[f32]) -> Vec<u32> {
         let mut speakers: Vec<u32> = Vec::new();
         for sample in window.iter().filter(|s| **s > 0.0) {
@@ -71,7 +69,6 @@ impl DiarizationBackend for FakeBackend {
     }
 
     fn embed(&mut self, window: &[f32], weights: &[f32]) -> Result<Option<Vec<f32>>, BackendError> {
-        self.embed_calls += 1;
         let g = &self.geometry;
         let mut values = vec![0.0f32; Embedding::DIMENSION];
         for (frame, _) in weights.iter().enumerate().filter(|(_, w)| **w > 0.0) {
