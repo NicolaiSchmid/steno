@@ -157,11 +157,10 @@ impl ModelStore {
     }
 
     /// Removes the partial downloads of `asset` (`<file_name>*.part`) that
-    /// were last written more than [`TRANSFER_TIMEOUT`] ago. A process
+    /// were last written more than [`STALE_PART_AGE`] ago. A process
     /// killed mid-download, an app quit on first run, skips the temporary
-    /// file's own cleanup; a download still under way is never that old,
-    /// because the timeout ends it. Best effort: a file that cannot be
-    /// removed is logged and left.
+    /// file's own cleanup; a download still under way is never that old.
+    /// Best effort: a file that cannot be removed is logged and left.
     fn remove_stale_parts(&self, asset: &ModelAsset) {
         let Ok(entries) = fs::read_dir(&self.root) else {
             return;
@@ -181,7 +180,7 @@ impl ModelStore {
                     .and_then(|metadata| metadata.modified())
                     .ok()
                     .and_then(|modified| modified.elapsed().ok())
-                    .is_some_and(|age| age > TRANSFER_TIMEOUT)
+                    .is_some_and(|age| age > STALE_PART_AGE)
             };
             if is_part
                 && is_stale()
@@ -204,6 +203,11 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 /// covers a slow connection without letting a stalled one hang the first
 /// run.
 const TRANSFER_TIMEOUT: Duration = Duration::from_secs(600);
+/// Age past which a partial download is taken as abandoned: a day, not
+/// [`TRANSFER_TIMEOUT`], because the file's age is wall-clock time and
+/// the timeout's clock stops while the machine sleeps, so a download
+/// still under way after a long sleep can be older than the timeout.
+const STALE_PART_AGE: Duration = Duration::from_secs(24 * 60 * 60);
 
 /// Why a download did not land in its file: the transfer or the file.
 enum DownloadError {
@@ -384,7 +388,7 @@ mod tests {
     fn stale_partial_downloads_are_removed() {
         let dir = tempfile::tempdir().unwrap();
         fs::write(dir.path().join("model.onnx"), ABC).unwrap();
-        let old = std::time::SystemTime::now() - TRANSFER_TIMEOUT - Duration::from_secs(60);
+        let old = std::time::SystemTime::now() - STALE_PART_AGE - Duration::from_secs(60);
         for name in ["model.onnxAbC123.part", "other.onnxAbC123.part"] {
             let file = fs::File::create(dir.path().join(name)).unwrap();
             file.set_modified(old).unwrap();
