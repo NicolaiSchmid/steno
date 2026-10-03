@@ -12,12 +12,16 @@
 //! PipeWire's objects are single-threaded, so every capture gets its own
 //! `steno-pipewire` thread owning the main loop, the context, the core,
 //! the registry, the stream and the links. `start` spawns it and waits for
-//! its answer (the [`CaptureStream`] or the error); `stop()` sends a quit
-//! through a `pipewire::channel` and joins it. The stream runs with
-//! `RT_PROCESS`, so its `process` callback runs on PipeWire's data-loop
-//! thread, which is the real-time path here: `process` dequeues the
-//! buffer, turns its chunk into a [`BufferView`](crate::realtime::BufferView)
-//! with [`interleaved_view`] and hands it to [`deliver`], the IOProc body
+//! its answer (the [`CaptureStream`] or the error). `stop()` closes the
+//! capture's [`Gate`] to the sink, sends a quit through a
+//! `pipewire::channel` and joins the thread; a thread that has not ended
+//! within [`STOP_TIMEOUT`] is logged and left behind the closed gate, so
+//! `stop()` returns, and nothing reaches the sink after it either way. The
+//! stream runs with `RT_PROCESS`, so its `process` callback runs on
+//! PipeWire's data-loop thread, which is the real-time path here:
+//! `process` dequeues the buffer, turns its chunk into a
+//! [`BufferView`](crate::realtime::BufferView) with [`interleaved_view`]
+//! and, while the gate is open, hands it to [`deliver`], the IOProc body
 //! the macOS backend uses. No allocation, no lock, no log (proven for the
 //! body in `tests/realtime.rs` and on the real data-loop thread in
 //! `tests/pipewire.rs`).
@@ -65,8 +69,8 @@ mod graph;
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::mpsc::{SyncSender, sync_channel};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::mpsc::{Receiver, RecvTimeoutError, SyncSender, sync_channel};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
@@ -93,8 +97,55 @@ const PUMP_SLICE: Duration = Duration::from_millis(20);
 /// The wait on the loop while nothing is pending.
 const IDLE_WAIT: Duration = Duration::from_secs(1);
 
+/// How long `stop()` waits for the PipeWire thread to tear down, a few
+/// milliseconds normally.
+const STOP_TIMEOUT: Duration = Duration::from_secs(2);
+
 /// The capture stream's `node.name`.
 const STREAM_NODE_NAME: &str = "steno-capture";
+
+/// The capture's way into the sink, closed for good by `stop()` before it
+/// waits for the thread: once [`Gate::close`] returned, neither a cycle's
+/// [`deliver`] nor a device-change report reaches the sink, whatever the
+/// thread does next. Lock-free on the real-time side: an increment, a load
+/// and a decrement, all `SeqCst`, so either a pass sees the gate closed or
+/// `close` sees the pass inside and waits for it to leave.
+#[derive(Debug)]
+struct Gate {
+    open: AtomicBool,
+    inside: AtomicUsize,
+}
+
+impl Gate {
+    fn new() -> Self {
+        Self {
+            open: AtomicBool::new(true),
+            inside: AtomicUsize::new(0),
+        }
+    }
+
+    /// Steps in; whether the gate is open. Every `enter` needs a
+    /// [`Self::leave`], open or not.
+    #[inline(always)]
+    fn enter(&self) -> bool {
+        self.inside.fetch_add(1, Ordering::SeqCst);
+        self.open.load(Ordering::SeqCst)
+    }
+
+    #[inline(always)]
+    fn leave(&self) {
+        self.inside.fetch_sub(1, Ordering::SeqCst);
+    }
+
+    /// Closes the gate and waits for whoever is inside: a cycle's
+    /// `deliver` (microseconds), or a report and its handler.
+    fn close(&self) {
+        self.open.store(false, Ordering::SeqCst);
+        while self.inside.load(Ordering::SeqCst) != 0 {
+            std::thread::yield_now();
+        }
+    }
+}
 
 /// What the data-loop thread owns: moved into the stream listener at
 /// registration, read only by [`process`]. It crosses to PipeWire's
@@ -102,6 +153,7 @@ const STREAM_NODE_NAME: &str = "steno-capture";
 /// (asserted below).
 struct RealTime {
     sink: Arc<LaneFrameSink>,
+    gate: Arc<Gate>,
     sources: Vec<LaneSource>,
     channels: usize,
     /// Frames in the last cycle; `start` waits for the first.
@@ -114,9 +166,10 @@ const _: () = {
 };
 
 /// The stream's `process` callback, on PipeWire's data-loop thread: one
-/// buffer through [`deliver`], then back to the stream. Nothing allocates,
-/// locks or logs; nothing can panic (the view and `deliver` index only
-/// through checked lookups, `channels` is at least 1).
+/// buffer through [`deliver`] while the gate is open, then back to the
+/// stream. Nothing allocates, locks or logs; nothing can panic (the view
+/// and `deliver` index only through checked lookups, `channels` is at
+/// least 1).
 fn process(stream: &pw::stream::Stream, rt: &mut RealTime) {
     let Some(mut buffer) = stream.dequeue_buffer() else {
         return;
@@ -127,10 +180,14 @@ fn process(stream: &pw::stream::Stream, rt: &mut RealTime) {
     let chunk = data.chunk();
     let (offset, size, stride) = (chunk.offset(), chunk.size(), chunk.stride());
     let view = interleaved_view(data.data().as_deref(), offset, size, stride, rt.channels);
-    // SAFETY: the view points into the buffer's memory, mapped by
-    // `MAP_BUFFERS` and valid for `byte_size` bytes while the buffer stays
-    // dequeued, which it does until `buffer` drops at the end of this call.
-    unsafe { deliver(&[view], &rt.sources, &rt.sink) };
+    if rt.gate.enter() {
+        // SAFETY: the view points into the buffer's memory, mapped by
+        // `MAP_BUFFERS` and valid for `byte_size` bytes while the buffer
+        // stays dequeued, which it does until `buffer` drops at the end of
+        // this call.
+        unsafe { deliver(&[view], &rt.sources, &rt.sink) };
+    }
+    rt.gate.leave();
     // Release: `start` returns on seeing it, and the frames `deliver`
     // wrote are then in the rings.
     rt.cycle_frames.store(
@@ -433,6 +490,7 @@ struct Capture {
     targets: Targets,
     input_device_uid: Option<String>,
     sink: Arc<LaneFrameSink>,
+    gate: Arc<Gate>,
     /// Frames in the stream's last cycle, written by [`process`].
     cycle_frames: Arc<AtomicUsize>,
     /// What `start` answers.
@@ -460,10 +518,12 @@ impl Drop for Capture {
         {
             tracing::warn!("disconnecting the PipeWire capture stream failed: {error}");
         }
+        tracing::debug!("the PipeWire capture stream is disconnected");
         drop(self.rt_listener.take());
         drop(self.state_listener.take());
         drop(self.stream.take());
         self.links.clear();
+        tracing::debug!("the PipeWire capture stream and links are destroyed");
     }
 }
 
@@ -474,6 +534,7 @@ impl Capture {
         lanes: &[AudioLane],
         input_device_uid: Option<&str>,
         sink: Arc<LaneFrameSink>,
+        gate: Arc<Gate>,
     ) -> Result<Self, CaptureError> {
         let deadline = Instant::now() + START_TIMEOUT;
         let connection = Connection::open()?;
@@ -486,7 +547,7 @@ impl Capture {
             .graph
             .borrow()
             .resolve(lanes, input_device_uid)?;
-        let mut capture = Self::new(connection, targets, input_device_uid, sink)?;
+        let mut capture = Self::new(connection, targets, input_device_uid, sink, gate)?;
         capture.link(deadline)?;
         capture.measure(deadline)?;
         Ok(capture)
@@ -499,6 +560,7 @@ impl Capture {
         targets: Targets,
         input_device_uid: Option<&str>,
         sink: Arc<LaneFrameSink>,
+        gate: Arc<Gate>,
     ) -> Result<Self, CaptureError> {
         let mut props = pw::properties::PropertiesBox::new();
         props.insert(*pw::keys::MEDIA_TYPE, "Audio");
@@ -519,6 +581,7 @@ impl Capture {
         let rt_listener = stream
             .add_local_listener_with_user_data(RealTime {
                 sink: Arc::clone(&sink),
+                gate: Arc::clone(&gate),
                 sources: targets.layout.sources.clone(),
                 channels: targets.channels(),
                 cycle_frames: Arc::clone(&cycle_frames),
@@ -559,6 +622,7 @@ impl Capture {
             targets,
             input_device_uid: input_device_uid.map(str::to_owned),
             sink,
+            gate,
             cycle_frames,
             baseline,
         })
@@ -779,7 +843,7 @@ impl Capture {
     }
 
     /// Compares the graph with the baseline and reports the first
-    /// difference to the sink.
+    /// difference to the sink while the gate is open.
     fn judge(&self) {
         let shared = &self.connection.shared;
         let snapshot = shared.graph.borrow().snapshot(
@@ -790,8 +854,11 @@ impl Capture {
         match snapshot.difference(&self.baseline) {
             None => tracing::info!("ignored a PipeWire graph change"),
             Some(reason) => {
-                tracing::info!("PipeWire graph change reported {reason:?}");
-                self.sink.report_device_change(reason);
+                if self.gate.enter() {
+                    tracing::info!("PipeWire graph change reported {reason:?}");
+                    self.sink.report_device_change(reason);
+                }
+                self.gate.leave();
             }
         }
     }
@@ -803,10 +870,11 @@ fn run(
     lanes: &[AudioLane],
     input_device_uid: Option<&str>,
     sink: Arc<LaneFrameSink>,
+    gate: Arc<Gate>,
     answer: &SyncSender<Result<CaptureStream, CaptureError>>,
     quit: pw::channel::Receiver<()>,
 ) {
-    match Capture::open(lanes, input_device_uid, sink) {
+    match Capture::open(lanes, input_device_uid, sink, gate) {
         Err(error) => {
             let _ = answer.send(Err(error));
         }
@@ -815,6 +883,9 @@ fn run(
             // queued and ends `watch` at once.
             let _ = answer.send(Ok(capture.info.clone()));
             capture.watch(quit);
+            tracing::debug!("the PipeWire capture got its quit; tearing down");
+            drop(capture);
+            tracing::debug!("the PipeWire capture is torn down");
         }
     }
 }
@@ -822,6 +893,9 @@ fn run(
 /// One started capture as `start` keeps it.
 struct Active {
     quit: pw::channel::Sender<()>,
+    gate: Arc<Gate>,
+    /// Disconnected once the thread is done, its teardown included.
+    ended: Receiver<()>,
     thread: JoinHandle<()>,
 }
 
@@ -859,12 +933,24 @@ impl LiveCaptureBackend {
         self.active.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    /// Asks the thread to quit and joins it: the stream, the links and the
-    /// connection are gone when this returns.
+    /// Closes the gate, asks the thread to quit and joins it: the stream,
+    /// the links and the connection are gone when this returns, unless
+    /// the thread hangs past [`STOP_TIMEOUT`]; it is then left behind,
+    /// logged, behind the closed gate.
     fn end(active: Active) {
+        active.gate.close();
         let _ = active.quit.send(());
-        if active.thread.join().is_err() {
-            tracing::warn!("the PipeWire capture thread panicked");
+        match active.ended.recv_timeout(STOP_TIMEOUT) {
+            Err(RecvTimeoutError::Timeout) => tracing::error!(
+                "the PipeWire capture thread did not end within {} s; it is left behind, \
+                 cut off from the recording",
+                STOP_TIMEOUT.as_secs()
+            ),
+            Ok(()) | Err(RecvTimeoutError::Disconnected) => {
+                if active.thread.join().is_err() {
+                    tracing::warn!("the PipeWire capture thread panicked");
+                }
+            }
         }
     }
 }
@@ -885,15 +971,21 @@ impl CaptureBackend for LiveCaptureBackend {
         }
         let (answer, answered) = sync_channel(1);
         let (quit, quit_receiver) = pw::channel::channel();
+        let (ending, ended) = sync_channel::<()>(0);
+        let gate = Arc::new(Gate::new());
         let lanes = lanes.to_vec();
         let input_device_uid = input_device_uid.map(str::to_owned);
+        let thread_gate = Arc::clone(&gate);
         let thread = std::thread::Builder::new()
             .name("steno-pipewire".into())
             .spawn(move || {
+                // Dropped last, when the teardown is done.
+                let _ending = ending;
                 run(
                     &lanes,
                     input_device_uid.as_deref(),
                     sink,
+                    thread_gate,
                     &answer,
                     quit_receiver,
                 );
@@ -908,7 +1000,12 @@ impl CaptureBackend for LiveCaptureBackend {
                     "the PipeWire thread did not answer".into(),
                 ))
             });
-        let started = Active { quit, thread };
+        let started = Active {
+            quit,
+            gate,
+            ended,
+            thread,
+        };
         match outcome {
             Ok(_) => *active = Some(started),
             Err(_) => Self::end(started),
@@ -970,6 +1067,33 @@ mod tests {
         .unwrap()
         .0
         .into_inner()
+    }
+
+    #[test]
+    fn nothing_passes_a_gate_once_it_closed() {
+        let gate = Arc::new(Gate::new());
+        let passed = Arc::new(AtomicUsize::new(0));
+        let done = Arc::new(AtomicBool::new(false));
+        let worker = std::thread::spawn({
+            let (gate, passed, done) = (Arc::clone(&gate), Arc::clone(&passed), Arc::clone(&done));
+            move || {
+                while !done.load(Ordering::Relaxed) {
+                    if gate.enter() {
+                        passed.fetch_add(1, Ordering::Relaxed);
+                    }
+                    gate.leave();
+                }
+            }
+        });
+        while passed.load(Ordering::Relaxed) < 1_000 {
+            std::thread::yield_now();
+        }
+        gate.close();
+        let at_close = passed.load(Ordering::Relaxed);
+        std::thread::sleep(Duration::from_millis(20));
+        assert_eq!(passed.load(Ordering::Relaxed), at_close);
+        done.store(true, Ordering::Relaxed);
+        worker.join().unwrap();
     }
 
     #[test]
