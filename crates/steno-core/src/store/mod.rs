@@ -195,6 +195,12 @@ impl Store {
     /// them), as GRDB's `reader.read` did. Nothing is written; the
     /// transaction is rolled back when `body` returns.
     pub fn read<T>(&self, body: impl FnOnce(&Connection) -> Result<T>) -> Result<T> {
+        self.snapshot(|transaction| body(transaction))
+    }
+
+    /// [`Store::read`] for a body that wants the transaction itself, so its
+    /// signature says every query runs inside the one snapshot.
+    fn snapshot<T>(&self, body: impl FnOnce(&Transaction<'_>) -> Result<T>) -> Result<T> {
         let mut connection = self.lock();
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Deferred)?;
         let value = body(&transaction)?;
