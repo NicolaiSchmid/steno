@@ -208,6 +208,12 @@ async fn unauthorized_refreshes_the_sign_in_once_then_stands() {
             Some(bearer(&fresh))
         ]
     );
+    assert_eq!(
+        harness.home.server.request_count(),
+        1,
+        "exactly one refresh"
+    );
+    assert!(!harness.events().iter().any(is_retrying));
 
     // A second 401 after the refresh is the answer, not a loop.
     let second = CodexHarness::new().await;
@@ -1196,4 +1202,69 @@ async fn a_failed_refresh_after_a_401_does_not_use_up_the_refresh() {
         auths,
         [Some(stored.clone()), Some(stored), Some(bearer(&fresh))]
     );
+}
+
+/// Sixty-four completions on a sign-in inside its expiry window: one token
+/// POST between them, and every request goes out with the new token.
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn sixty_four_completions_on_an_expiring_sign_in_share_one_refresh() {
+    let harness = CodexHarness::build(RetryPolicy::NONE, "gpt-stub", |_| {}).await;
+    harness
+        .home
+        .write(AuthFile::default().access(&CodexHome::access_token(10, "plus")));
+    let fresh = CodexHome::access_token(3_600, "plus");
+    let fresh_for_server = fresh.clone();
+    harness.home.server.respond(Arc::new(move |request| {
+        Some(if request.index == 0 {
+            scripts.token_refresh(&fresh_for_server, Some("rt_2"), None)
+        } else {
+            scripts.token_refresh_rejected("refresh_token_reused", 400)
+        })
+    }));
+    harness
+        .backend
+        .respond(Arc::new(|_| Some(scripts.stream("ok"))));
+    let request = text_request();
+    let results =
+        futures_util::future::join_all((0..64).map(|_| harness.client.complete_llm(&request)))
+            .await;
+    for result in results {
+        assert_eq!(result.unwrap().text, "ok");
+    }
+    assert_eq!(harness.home.server.request_count(), 1, "one token POST");
+    let requests = harness.backend.requests();
+    assert_eq!(requests.len(), 64);
+    assert!(
+        requests
+            .iter()
+            .all(|r| r.authorization() == Some(bearer(&fresh).as_str())),
+        "every completion used the new token"
+    );
+}
+
+/// Sixty-four completions on a sign-in the token endpoint refuses for good:
+/// the dead refresh token is posted once, every completion gets
+/// `SignInExpired`, and nothing reaches the backend.
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn sixty_four_completions_on_a_refused_sign_in_post_the_dead_token_once() {
+    let harness = CodexHarness::build(RetryPolicy::NONE, "gpt-stub", |_| {}).await;
+    harness
+        .home
+        .write(AuthFile::default().access(&CodexHome::access_token(10, "plus")));
+    harness.home.server.respond(Arc::new(|_| {
+        Some(scripts.token_refresh_rejected("refresh_token_expired", 400))
+    }));
+    let request = text_request();
+    let results =
+        futures_util::future::join_all((0..64).map(|_| harness.client.complete_llm(&request)))
+            .await;
+    for result in results {
+        let error = credential(result.unwrap_err());
+        assert!(
+            matches!(error, CodexCredentialError::SignInExpired(_)),
+            "{error}"
+        );
+    }
+    assert_eq!(harness.home.server.request_count(), 1, "one token POST");
+    assert_eq!(harness.backend.request_count(), 0);
 }
