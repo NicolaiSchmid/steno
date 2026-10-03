@@ -1,7 +1,6 @@
 //! Removes the audio of every asset whose expiry has passed.
 //! Swift: `Sources/StenoCore/Storage/RetentionSweep.swift`.
 
-use std::fmt;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -9,43 +8,21 @@ use chrono::{DateTime, Utc};
 use steno_core::{Store, StoreError, paths::path_from_file_url};
 
 /// Every file the sweep could not remove, with the reason.
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum SweepIncomplete {
+    #[error("retention sweep could not remove {}", listed(.0))]
     Files(Vec<(PathBuf, std::io::Error)>),
-    Store(StoreError),
+    #[error("{0}")]
+    Store(#[from] StoreError),
 }
 
-impl fmt::Display for SweepIncomplete {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            SweepIncomplete::Files(failures) => {
-                f.write_str("retention sweep could not remove ")?;
-                for (index, (path, error)) in failures.iter().enumerate() {
-                    if index > 0 {
-                        f.write_str(", ")?;
-                    }
-                    write!(f, "{} ({error})", path.display())?;
-                }
-                Ok(())
-            }
-            SweepIncomplete::Store(error) => error.fmt(f),
-        }
-    }
-}
-
-impl std::error::Error for SweepIncomplete {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            SweepIncomplete::Files(_) => None,
-            SweepIncomplete::Store(error) => Some(error),
-        }
-    }
-}
-
-impl From<StoreError> for SweepIncomplete {
-    fn from(error: StoreError) -> Self {
-        SweepIncomplete::Store(error)
-    }
+/// `path (reason), path (reason)`.
+fn listed(failures: &[(PathBuf, std::io::Error)]) -> String {
+    failures
+        .iter()
+        .map(|(path, error)| format!("{} ({error})", path.display()))
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 /// Master, sidecars and mixdown go together with the sample clips of the
