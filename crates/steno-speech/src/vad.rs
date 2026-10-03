@@ -200,6 +200,8 @@ impl SileroVad {
             StateLayout::Split { len, .. } => (vec![0.0f32; *len], vec![0.0f32; *len]),
             StateLayout::Joint { len, .. } => (vec![0.0f32; *len], Vec::new()),
         };
+        let split = matches!(self.state, StateLayout::Split { .. });
+        let wanted = if split { 3 } else { 2 };
         let mut context = vec![0.0f32; self.context];
         let mut frame = vec![0.0f32; self.context + WINDOW];
         let mut probabilities = Vec::with_capacity(samples.len() / WINDOW + 1);
@@ -244,11 +246,6 @@ impl SileroVad {
                 }
             }
             let outputs = self.session.run(inputs)?;
-            let wanted = if matches!(self.state, StateLayout::Split { .. }) {
-                3
-            } else {
-                2
-            };
             if outputs.len() < wanted {
                 return Err(SpeechError::Shape(format!(
                     "Silero VAD returned {} outputs, expected {wanted}",
@@ -259,7 +256,7 @@ impl SileroVad {
             probabilities.push(probability.first().copied().unwrap_or(0.0));
             let (_, next_h) = outputs[1].try_extract_tensor::<f32>()?;
             copy_state(&mut h, next_h)?;
-            if matches!(self.state, StateLayout::Split { .. }) {
+            if split {
                 let (_, next_c) = outputs[2].try_extract_tensor::<f32>()?;
                 copy_state(&mut c, next_c)?;
             }

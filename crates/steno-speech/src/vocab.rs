@@ -28,23 +28,19 @@ impl Vocab {
             detail,
         };
         let mut pieces = Vec::new();
-        for (line_number, line) in text.lines().enumerate() {
+        for (line, number) in text.lines().zip(1..) {
             if line.is_empty() {
                 continue;
             }
             let (piece, id) = line
                 .rsplit_once(' ')
-                .ok_or_else(|| invalid(format!("line {} has no id: {line:?}", line_number + 1)))?;
-            let id: usize = id.parse().map_err(|_| {
-                invalid(format!(
-                    "line {} has a non-numeric id: {line:?}",
-                    line_number + 1
-                ))
-            })?;
+                .ok_or_else(|| invalid(format!("line {number} has no id: {line:?}")))?;
+            let id: usize = id
+                .parse()
+                .map_err(|_| invalid(format!("line {number} has a non-numeric id: {line:?}")))?;
             if id != pieces.len() {
                 return Err(invalid(format!(
-                    "line {} has id {id}, expected {}",
-                    line_number + 1,
+                    "line {number} has id {id}, expected {}",
                     pieces.len()
                 )));
             }
