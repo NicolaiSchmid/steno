@@ -1,7 +1,7 @@
 //! Fakes for every service in [`services`](crate::services), after
 //! `Services/Fakes.swift` and the modules' `Testing/` fakes: each holds its
 //! state behind a mutex, answers what a test set, and records what the
-//! host asked, so the host runs hostless on a real store. The product never
+//! host asked, so the host runs without a shell on a real store. The product never
 //! constructs these; [`Services`] built from them is what the tests and the
 //! CLI's dry run use.
 
@@ -787,7 +787,7 @@ impl Preferences for FakePreferences {
     }
 }
 
-/// Every fake at once, with a handle on each: what a hostless test builds
+/// Every fake at once, with a handle on each: what a test without a shell builds
 /// its [`Services`] from. Swift: `AppEnvironment.preview()`.
 pub struct FakeServices {
     pub clock: Arc<FakeClock>,

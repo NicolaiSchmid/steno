@@ -8,16 +8,27 @@
 //! depends on the core, so the host, which needs both, sits above them in
 //! its own crate instead.
 //!
+//! - [`host`]: [`Host`], [`HostConfig`], the dialog closures and the
+//!   lifecycle calls the shell makes between commands.
+//! - [`publisher`]: the coalescing of topics and the 20 Hz throttle.
+//! - [`services`] and `fakes`: the seams to the shell, the pipeline and
+//!   the other crates, and a fake for each (behind the `fakes` feature).
+//! - [`main_window`], [`settings`], [`onboarding`], [`speakers`]: the view
+//!   models and snapshots, one module per window.
+//! - [`setup`], [`labels`], [`speech`], [`summary_markdown`]: the copy and
+//!   the labels the view models share, and the two tables (the speech
+//!   engines and assets, the summary Markdown) that move to WP4 and WP6b.
+//!
 //! The crate holds no UI framework and no I/O of its own beyond the store:
 //! everything the Swift app reached through a system framework (TCC,
 //! `ServiceManagement`, Sparkle, Core Audio, `EventKit`, the capture session,
 //! the pipeline, the model store, the LLM probe, the handover listener, the
-//! Finder) is a trait in [`services`], with a fake for each in [`fakes`],
-//! so the whole host runs hostless on a temporary database: that is how the
+//! Finder) is a trait in [`services`], with a fake for each in `fakes`,
+//! so the whole host runs without a shell on a temporary database: that is how the
 //! tests work and how the CLI can drive it. The core's own boundaries
 //! (`steno_core::protocols`) are consumed where one exists
 //! ([`SecretStore`](steno_core::SecretStore) for the API key, with the
-//! core's `testing` fake behind it in [`fakes`]); the rest wait for the
+//! core's `testing` fake behind it in `fakes`); the rest wait for the
 //! crates that implement them (WP4, WP5, WP7) and are shaped so the switch
 //! is a `use` line.
 //!
@@ -35,6 +46,7 @@
 // shape is the contract's, not a design choice to lint.
 #![allow(clippy::struct_excessive_bools)]
 
+#[cfg(any(test, feature = "fakes"))]
 pub mod fakes;
 pub mod host;
 pub mod labels;

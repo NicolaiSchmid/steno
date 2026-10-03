@@ -77,7 +77,7 @@ above the two in its own crate, WP6a.) Everything the Swift app reached through 
 system framework or a package the port has not written yet (permissions, login item,
 updater, the recorder, the pipeline, speech models, the LLM probe, vault validation,
 the handover listener, devices, files, the Finder) is a trait in `steno_host::services`
-with a fake in `steno_host::fakes`, so the whole host runs hostlessly on a temporary
+with a fake in `steno_host::fakes`, so the whole host runs without a shell on a temporary
 database; the core's own boundaries (`steno_core::protocols`) are used where one exists.
 One temporary exception: from WP3 until WP6 the shell carries a fixture host behind its
 `fixture-host` feature that answers the bridge from the recorded fixtures, so the UI
@@ -186,7 +186,7 @@ bridge's copies of the macro and codecs. Packages after WP3 branch from `main`.
 ## Parity list
 
 Every user-visible behaviour of the Swift app, one line each, ticked when the Rust side
-matches it. `[x]` means the host crate (WP6a) covers the rule hostlessly, through a
+matches it. `[x]` means the host crate (WP6a) covers the rule without a shell, through a
 service trait where the Swift app reached a framework; the crate named on the line
 still has to put the real implementation behind that trait, and the shell (WP6b, WP8)
 still has to draw the window side. `[ ]` is not ported yet.

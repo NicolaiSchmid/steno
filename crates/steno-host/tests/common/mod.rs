@@ -1,4 +1,4 @@
-//! What the hostless tests share, after `BridgeTestSupport.swift` and
+//! What the tests without a shell share, after `BridgeTestSupport.swift` and
 //! `TestSupport.swift`: a host over a temporary database and the fakes, a
 //! sink that records what the host publishes, the sample meeting the
 //! fixtures describe, and the request shapes.

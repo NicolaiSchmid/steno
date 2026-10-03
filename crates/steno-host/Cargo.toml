@@ -8,15 +8,19 @@ license.workspace = true
 repository.workspace = true
 publish.workspace = true
 
+[features]
+# The fakes in `fakes` and the core's `testing` fakes behind the boundaries
+# the host consumes (`InMemorySecretStore`): what the tests and the CLI's
+# dry run build their `Services` from. Off in the shell's build.
+fakes = ["steno-core/testing"]
+
 [dependencies]
 async-trait.workspace = true
 chrono.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 steno-bridge = { path = "../steno-bridge" }
-# `testing` for the core's fakes behind the boundaries the host consumes
-# (`InMemorySecretStore`), re-used by `fakes::FakeServices`.
-steno-core = { path = "../steno-core", features = ["testing"] }
+steno-core = { path = "../steno-core" }
 thiserror.workspace = true
 # The core's boundaries are async; the host runs blocking (see the crate
 # doc), so it owns one current-thread runtime to wait on them.
@@ -24,6 +28,8 @@ tokio = { workspace = true, features = ["rt"] }
 uuid.workspace = true
 
 [dev-dependencies]
+# The crate's own tests and doctests see the fakes without extra flags.
+steno-host = { path = ".", features = ["fakes"] }
 tempfile.workspace = true
 
 [lints]
