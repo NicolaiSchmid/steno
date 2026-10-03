@@ -12,7 +12,7 @@ use steno_handover::HandoverService;
 use steno_host::fakes::{
     FakeClipPlayer, FakeFileSystem, FakeLoginItem, FakePermissions, FakeQrEncoder, FakeUpdater,
 };
-use steno_host::services::{LoginItemStatus, Opener, Services};
+use steno_host::services::{LoginItem, LoginItemStatus, Opener, Services};
 use steno_host::{Host, HostConfig};
 use steno_llm::CodexCredentialStore;
 use steno_pipeline::{
@@ -52,6 +52,9 @@ pub struct AppOptions {
     pub keyring: bool,
     /// The window opener and URL opener; the shell's, a no-op for the CLI.
     pub opener: Arc<dyn Opener>,
+    /// The login item; the shell's (`autostart.rs`), `None` for a fake
+    /// that registers nothing (the CLI, the tests).
+    pub login_item: Option<Arc<dyn LoginItem>>,
     /// The runtime the host's synchronous service calls block on.
     pub runtime: tokio::runtime::Handle,
     /// `CFBundleShortVersionString`'s equivalent.
@@ -73,6 +76,7 @@ impl AppOptions {
             database_path: None,
             keyring: true,
             opener,
+            login_item: None,
             runtime,
             version: version.to_owned(),
             make_capture_session: Arc::new(|configuration| {
@@ -234,10 +238,12 @@ fn handover_listener(
 /// (`CoreML` on the Mac, ONNX elsewhere, in this process until the speech
 /// sidecar lands), ONNX diarizer, cosine speaker memory over the store,
 /// LLM passes, delivery coordinator, handover listener, capture session,
-/// recorder, the speech models, folder usage, preferences. Fakes until the shell
-/// draws their platform side (plan: `WP8`): permissions (all granted), login
-/// item, updater, clip player, QR encoder; the audio device list is empty
-/// off the Mac until the `PipeWire` and WASAPI backends enumerate devices.
+/// recorder, the speech models, folder usage, preferences, and the login item
+/// when the shell passes its own ([`AppOptions::login_item`]). Fakes where no
+/// platform side exists yet (the plan's `WP6b` row says why for each):
+/// permissions (all granted), updater, clip player, QR encoder; the audio
+/// device list is empty off the Mac until the `PipeWire` and WASAPI backends
+/// enumerate devices.
 pub fn build(options: AppOptions) -> Result<App, BuildError> {
     let mut warnings = Vec::new();
     let paths = options.paths;
@@ -286,7 +292,9 @@ pub fn build(options: AppOptions) -> Result<App, BuildError> {
 
     let services = Services {
         clock: Arc::new(WallClock),
-        login_item: Arc::new(FakeLoginItem::new(LoginItemStatus::NotRegistered)),
+        login_item: options
+            .login_item
+            .unwrap_or_else(|| Arc::new(FakeLoginItem::new(LoginItemStatus::NotRegistered))),
         permissions,
         updater: Arc::new(FakeUpdater::default()),
         recorder: recorder.clone(),
@@ -623,6 +631,7 @@ mod tests {
             database_path: None,
             keyring: false,
             opener: Arc::new(steno_host::fakes::FakeOpener::default()),
+            login_item: None,
             runtime: tokio::runtime::Handle::current(),
             version: "0.0.0".to_owned(),
             make_capture_session: Arc::new(|_| Err("no capture in this test".to_owned())),
@@ -638,6 +647,40 @@ mod tests {
             steno_core::MeetingState::Failed {
                 reason: "Recording was interrupted before it finished.".to_owned()
             }
+        );
+    }
+
+    /// The shell's login item is the one the host reads and switches; the
+    /// CLI and the tests, which pass none, get a fake that registers
+    /// nothing.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_login_item_the_shell_passes_is_the_hosts() {
+        let options = |login_item| {
+            let dir = tempfile::tempdir().unwrap();
+            let options = AppOptions {
+                paths: StenoPaths::new(dir.path().join("support")),
+                database_path: None,
+                keyring: false,
+                opener: Arc::new(steno_host::fakes::FakeOpener::default()),
+                login_item,
+                runtime: tokio::runtime::Handle::current(),
+                version: "0.0.0".to_owned(),
+                make_capture_session: Arc::new(|_| Err("no capture in this test".to_owned())),
+            };
+            (dir, options)
+        };
+        let shells = Arc::new(FakeLoginItem::new(LoginItemStatus::Enabled));
+        let (_dir, with) = options(Some(shells.clone() as Arc<dyn LoginItem>));
+        let app = build(with).unwrap();
+        assert_eq!(app.services.login_item.status(), LoginItemStatus::Enabled);
+        app.services.login_item.set_enabled(false).unwrap();
+        assert_eq!(*shells.changes.lock().unwrap(), [false]);
+
+        let (_dir, without) = options(None);
+        let app = build(without).unwrap();
+        assert_eq!(
+            app.services.login_item.status(),
+            LoginItemStatus::NotRegistered
         );
     }
 
