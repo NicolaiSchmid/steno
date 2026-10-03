@@ -5,7 +5,9 @@
 pub mod activity;
 pub mod detector;
 pub mod live;
+pub mod sessions;
 
 pub use activity::{ActivityError, ProcessAudioActivity, ProcessAudioActivitySource};
 pub use detector::{MeetingDetector, MeetingEvent};
 pub use live::LiveProcessAudioActivity;
+pub use sessions::{AudioSessionRecord, SessionFlow, SessionState, processes_from_sessions};
