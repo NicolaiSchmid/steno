@@ -34,9 +34,13 @@
 //! stored. Everything above the trait is shared and tested without models.
 //!
 //! Where this crate knowingly differs from `FluidAudio` above the tensors:
-//! average linkage on cosine distance where it cuts centroid linkage and
-//! then runs `VBx` ([`clustering`]); the speaker count rounds half up and
-//! a cluster nobody voted for is active only where no cluster has a vote
+//! the windows follow sherpa-onnx's layout, every full window and then one
+//! padded tail whose padded frames do not vote, where `FluidAudio` strides
+//! window offsets up to the end of the audio and counts every padded
+//! frame ([`segmentation::window_offsets`]); average linkage on cosine
+//! distance where it cuts centroid linkage and then runs `VBx`
+//! ([`clustering`]); the speaker count rounds half up and a cluster
+//! nobody voted for is active only where no cluster has a vote
 //! ([`timeline`]). It also omits `FluidAudio`'s fallback to overlapped
 //! frames, which the clean-frame ratio makes unreachable
 //! ([`extraction::ExtractionRules::min_active_ratio`]). Everything else is
