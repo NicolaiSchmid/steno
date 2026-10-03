@@ -47,8 +47,8 @@ use crate::{
     bridge::{BridgeError, failed},
     navigation,
     panel_geometry::{
-        PROBE_SIZE, PanelAnchor, Rect, accepted_size, fitted, frame_hanging_from, same_point,
-        same_size,
+        PROBE_SIZE, PanelAnchor, Rect, accepted_size, fitted, frame_hanging_from, is_size,
+        same_point, same_size,
     },
     recording::{RecorderState, RecordingState},
     windows,
@@ -631,24 +631,45 @@ pub fn dismiss_prompt(app: &AppHandle, raised: Option<u64>) {
 /// top-centre point it hangs from (the anchor in the normal flow, wherever
 /// the smoke put it otherwise), so a change of content never moves the
 /// panel, short of moving it back inside the screen. A report that is not
-/// a size is `invalidParams`; one larger than the screen is clamped to its
-/// work area.
+/// a size is `invalidParams` at once; one larger than the screen is
+/// clamped to its work area.
+///
+/// The rest runs on the main thread, as `apply` does, and the command
+/// returns without waiting for it: two reports in quick succession are
+/// applied one after the other, so the size recorded (`note_size`) is
+/// always the one the window took, and a failure there is logged.
 pub fn resize(app: &AppHandle, panel: Panel, reported: (f64, f64)) -> Result<(), BridgeError> {
+    if !is_size(reported) {
+        return Err(not_a_size(reported));
+    }
+    let handle = app.clone();
+    app.run_on_main_thread(move || {
+        if let Err(error) = resize_now(&handle, panel, reported) {
+            eprintln!(
+                "[steno-desktop] resizing the {} panel failed: {error}",
+                panel.label()
+            );
+        }
+    })
+    .map_err(failed)
+}
+
+/// `resize` on the main thread, where the screens and the window's
+/// getters answer at once; no lock is held across a window call.
+fn resize_now(app: &AppHandle, panel: Panel, reported: (f64, f64)) -> tauri::Result<()> {
     let screens = screens(app);
     let fallback = fallback_screen(&screens);
     let window = app.get_webview_window(panel.label());
     let panels = app.state::<Panels>();
     let top_center = match panels.hung_from(panel) {
         Some(point) => Some(point),
-        None => window
-            .as_ref()
-            .map(top_center_of)
-            .transpose()
-            .map_err(failed)?,
+        None => window.as_ref().map(top_center_of).transpose()?,
     };
     let screen = top_center.map_or(fallback, |point| Rect::holding(&screens, point, fallback));
-    let size = accepted_size(reported, (screen.width, screen.height))
-        .ok_or_else(|| not_a_size(reported))?;
+    // `resize` refused anything that is not a size, so this clamps only.
+    let Some(size) = accepted_size(reported, (screen.width, screen.height)) else {
+        return Ok(());
+    };
     if !panels.note_size(panel, size) {
         return Ok(());
     }
@@ -656,11 +677,8 @@ pub fn resize(app: &AppHandle, panel: Panel, reported: (f64, f64)) -> Result<(),
         return Ok(());
     };
     let frame = panels.place(panel, top_center, size, &screens);
-    pin_size(&window, size).map_err(failed)?;
-    window
-        .set_position(LogicalPosition::new(frame.x, frame.y))
-        .map_err(failed)?;
-    Ok(())
+    pin_size(&window, size)?;
+    window.set_position(LogicalPosition::new(frame.x, frame.y))
 }
 
 /// `invalidParams` for a report that is not a size, its numbers in their

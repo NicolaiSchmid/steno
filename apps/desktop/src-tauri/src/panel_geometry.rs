@@ -167,15 +167,21 @@ pub fn fitted(frame: Rect, screen: Rect) -> Rect {
     Rect::new(x, y, frame.width, frame.height)
 }
 
-/// The size a panel takes from its page's report: finite and at least a
-/// point each way (a sub-point, zero or negative size is no size), rounded
-/// up to whole points (the window system sizes in whole pixels, and a
-/// window a fraction narrower than its pill clips it and, on `WebKitGTK`,
-/// summons scrollbars), and clamped to the work area it hangs in, so a
-/// report of a million points cannot grow the window past its screen.
+/// Whether a page's report is a size at all: finite and at least a point
+/// each way (a sub-point, zero or negative size is no size).
+pub fn is_size(reported: (f64, f64)) -> bool {
+    let is_length = |value: f64| value.is_finite() && value >= 1.0;
+    is_length(reported.0) && is_length(reported.1)
+}
+
+/// The size a panel takes from its page's report: one that `is_size`,
+/// rounded up to whole points (the window system sizes in whole pixels,
+/// and a window a fraction narrower than its pill clips it and, on
+/// `WebKitGTK`, summons scrollbars), and clamped to the work area it hangs
+/// in, so a report of a million points cannot grow the window past its
+/// screen.
 pub fn accepted_size(reported: (f64, f64), work_area: (f64, f64)) -> Option<(f64, f64)> {
-    let is_size = |value: f64| value.is_finite() && value >= 1.0;
-    (is_size(reported.0) && is_size(reported.1)).then(|| {
+    is_size(reported).then(|| {
         (
             reported.0.ceil().min(work_area.0),
             reported.1.ceil().min(work_area.1),
@@ -348,7 +354,10 @@ mod tests {
             (240.0, f64::NEG_INFINITY),
         ] {
             assert_eq!(accepted_size(bad, AREA), None, "{bad:?}");
+            assert!(!is_size(bad), "{bad:?}");
         }
+        assert!(is_size((1.0, 1.0)));
+        assert!(is_size((1e9, 40.0)));
     }
 
     /// A fraction of a point rounds up, so the window is never narrower
