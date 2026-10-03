@@ -302,22 +302,6 @@ fn no_such_meeting() -> BridgeError {
     BridgeError::not_found("No meeting with that id is listed.")
 }
 
-/// The contract's error for a store failure: a missing meeting is
-/// `notFound`, a lock held past the busy timeout is `failed` with the
-/// retry wording, anything else `failed` with the store's text. A function,
-/// not `From`: both types are foreign to this crate and the bridge does not
-/// depend on the core.
-#[must_use]
-pub fn store_error(error: StoreError) -> BridgeError {
-    match error {
-        StoreError::MeetingNotFound(_) => no_such_meeting(),
-        error if error.is_busy() => {
-            BridgeError::failed("The database is busy right now. Try again in a moment.")
-        }
-        error => BridgeError::failed(error.to_string()),
-    }
-}
-
 fn no_selection() -> BridgeError {
     BridgeError::not_found("No meeting is selected.")
 }
@@ -1379,8 +1363,7 @@ impl BridgeHost for Host {
             .update_meeting(params.meeting_id, now, |meeting| {
                 meeting.scratchpad = params.text;
                 Ok(())
-            })
-            .map_err(store_error)?;
+            })?;
         self.command(&[], |inner| self.reload_detail(inner));
         Ok(())
     }

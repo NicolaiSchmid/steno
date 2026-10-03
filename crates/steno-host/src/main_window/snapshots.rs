@@ -12,12 +12,11 @@ use steno_bridge::{
     DetailTemplate, DetailTurn, ListCounts, ListDayGroup, ListFilter, ListTag,
     MeetingDetailSnapshot, MeetingRow, MeetingSource as BridgeSource, MeetingState as BridgeState,
     MeetingsListSnapshot, ProgressEntry as BridgeProgressEntry, ProgressSnapshot,
-    RecordingAutoStop, RecordingLevel, RecordingSnapshot, SettingsSection,
-    SpeakerAssignment as BridgeAssignment, SpeakerChip, TaskPriority as BridgeTaskPriority,
+    RecordingAutoStop, RecordingLevel, RecordingSnapshot, SettingsSection, SpeakerChip,
 };
 use steno_core::{
     Delivery, DeliveryStatus, Meeting, MeetingSource, MeetingStateKind, Person, Settings, Speaker,
-    SpeakerAssignmentKind, TaskPriority, TranscriptSegment,
+    TranscriptSegment,
 };
 use uuid::Uuid;
 
@@ -63,22 +62,6 @@ pub fn state(kind: MeetingStateKind) -> BridgeState {
         MeetingStateKind::Processing => BridgeState::Processing,
         MeetingStateKind::Ready => BridgeState::Ready,
         MeetingStateKind::Failed => BridgeState::Failed,
-    }
-}
-
-fn assignment(kind: SpeakerAssignmentKind) -> BridgeAssignment {
-    match kind {
-        SpeakerAssignmentKind::Unknown => BridgeAssignment::Unknown,
-        SpeakerAssignmentKind::Suggested => BridgeAssignment::Suggested,
-        SpeakerAssignmentKind::Confirmed => BridgeAssignment::Confirmed,
-    }
-}
-
-fn priority(priority: TaskPriority) -> BridgeTaskPriority {
-    match priority {
-        TaskPriority::Low => BridgeTaskPriority::Low,
-        TaskPriority::Normal => BridgeTaskPriority::Normal,
-        TaskPriority::High => BridgeTaskPriority::High,
     }
 }
 
@@ -480,7 +463,7 @@ fn speaker_rows(detail: &MeetingDetailViewModel, playing: Option<Uuid>) -> Vec<D
             id: row.id(),
             cluster_label: row.speaker.cluster_label.clone(),
             display_name: row.display_name().to_owned(),
-            assignment: assignment(row.speaker.assignment.kind()),
+            assignment: row.speaker.assignment.kind(),
             person_id: row.speaker.person_id(),
             email: row.person.as_ref().and_then(|person| person.email.clone()),
             suggestion_name: speakers.prefill(row.id()),
@@ -506,7 +489,7 @@ fn task_rows(export: &steno_core::MeetingExport) -> Vec<DetailTask> {
                     .or_else(|| task.assignee_name.clone()),
                 assignee_color_index: assignee.map(|person| color_index(person.id)),
                 due_date: task.due_date,
-                priority: priority(task.priority),
+                priority: task.priority,
                 done: task.done,
             }
         })
