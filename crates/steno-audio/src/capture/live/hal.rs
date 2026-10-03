@@ -506,7 +506,7 @@ impl AggregateDevice {
     ) -> Result<Self, CaptureError> {
         let uid = format!(
             "uno.schmid.steno.aggregate.{}",
-            uuid::Uuid::new_v4().hyphenated().to_string().to_uppercase()
+            steno_core::json::uuid_string(uuid::Uuid::new_v4())
         );
         let sub_devices: Vec<Retained<NSObject>> = sub_device_uids
             .iter()

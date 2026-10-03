@@ -36,7 +36,7 @@ use steno_audio::writer::{
     CafFile, LaneFrames, RecordingFiles, RecordingWriter, RecordingWriting, WavFile,
 };
 use steno_audio::{Clock, EchoMetrics, PassthroughEchoCanceller, SAMPLE_RATE, SystemClock};
-use steno_core::paths::path_from_file_url;
+use steno_core::paths::file_url_path;
 use steno_core::{AudioFormat, AudioLane, AudioRetention, EchoCanceller, RecordingLayout};
 use uuid::Uuid;
 
@@ -79,11 +79,11 @@ fn restarted_stream() -> CaptureStream {
 }
 
 fn master_of(result: &steno_audio::capture::CaptureResult) -> CafFile {
-    CafFile::read(&path_from_file_url(&result.asset.url).unwrap()).unwrap()
+    CafFile::read(&file_url_path(&result.asset.url).unwrap()).unwrap()
 }
 
 fn sidecar_of(result: &steno_audio::capture::CaptureResult, lane: AudioLane) -> Vec<f32> {
-    WavFile::read_16k_mono(&path_from_file_url(&result.asset.sidecars_16k[&lane]).unwrap()).unwrap()
+    WavFile::read_16k_mono(&file_url_path(&result.asset.sidecars_16k[&lane]).unwrap()).unwrap()
 }
 
 /// Collects states until the predicate matches.
@@ -184,11 +184,11 @@ fn idle_starting_recording_stopping_idle_over_the_synthetic_backend() {
     assert_eq!(result.asset.retention, AudioRetention::KeepForever);
     let layout = RecordingLayout::new(directory.path(), meeting_id);
     assert_eq!(
-        path_from_file_url(&result.asset.url).unwrap(),
+        file_url_path(&result.asset.url).unwrap(),
         layout.master(AudioFormat::Caf48kFloat32)
     );
     assert_eq!(
-        path_from_file_url(&result.asset.sidecars_16k[&AudioLane::Mic]).unwrap(),
+        file_url_path(&result.asset.sidecars_16k[&AudioLane::Mic]).unwrap(),
         layout.sidecar(AudioLane::Mic)
     );
     assert_eq!(RecordingLayout::from_asset(&result.asset).unwrap(), layout);
@@ -1115,7 +1115,7 @@ fn a_device_change_keeps_recording_on_the_same_files() {
     assert_eq!(result.statistics.duration, 3.0);
     let layout = RecordingLayout::new(directory.path(), meeting_id);
     assert_eq!(
-        path_from_file_url(&result.asset.url).unwrap(),
+        file_url_path(&result.asset.url).unwrap(),
         layout.master(AudioFormat::Caf48kFloat32),
         "the same files"
     );

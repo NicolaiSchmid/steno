@@ -12,10 +12,12 @@ use directories::BaseDirs;
 /// The support directory and what hangs off it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StenoPaths {
+    /// The folder holding the database.
     pub support_directory: PathBuf,
 }
 
 impl StenoPaths {
+    /// Paths under `support_directory`; nothing is created.
     #[must_use]
     pub fn new(support_directory: impl Into<PathBuf>) -> Self {
         StenoPaths {
@@ -84,21 +86,33 @@ impl StenoPaths {
 /// `path` as the `file://` URL string Swift's `URL(fileURLWithPath:)`
 /// produces: percent-encoding outside the URL path-allowed set, a trailing
 /// slash for a directory, forward slashes and a leading slash before a
-/// Windows drive letter.
+/// Windows drive letter. On Unix the path's bytes are encoded as they are,
+/// so a file name that is not UTF-8 round-trips through [`file_url_path`].
 #[must_use]
 pub fn file_url(path: &Path, is_directory: bool) -> String {
-    let mut text = path.to_string_lossy().into_owned();
-    if cfg!(windows) {
-        if let Some(rest) = text.strip_prefix(r"\\?\") {
-            text = rest.to_owned();
+    #[cfg(unix)]
+    let bytes = {
+        use std::os::unix::ffi::OsStrExt;
+        path.as_os_str().as_bytes()
+    };
+    #[cfg(not(unix))]
+    let text = {
+        let mut text = path.to_string_lossy().into_owned();
+        if cfg!(windows) {
+            if let Some(rest) = text.strip_prefix(r"\\?\") {
+                text = rest.to_owned();
+            }
+            text = text.replace('\\', "/");
+            if !text.starts_with('/') {
+                text.insert(0, '/');
+            }
         }
-        text = text.replace('\\', "/");
-        if !text.starts_with('/') {
-            text.insert(0, '/');
-        }
-    }
+        text
+    };
+    #[cfg(not(unix))]
+    let bytes = text.as_bytes();
     let mut url = String::from("file://");
-    for byte in text.bytes() {
+    for &byte in bytes {
         if is_path_allowed(byte) {
             url.push(char::from(byte));
         } else {
@@ -111,68 +125,23 @@ pub fn file_url(path: &Path, is_directory: bool) -> String {
     url
 }
 
-/// The inverse of [`file_url`]: the path of a `file://` URL as this
-/// machine spells it, percent-decoding what `file_url` encoded. `None` for
-/// any other scheme or a host other than the local one. On Unix the
-/// decoded bytes become the path as they are (a file name need not be
-/// UTF-8 there); on Windows they must be UTF-8.
-#[must_use]
-pub fn path_from_file_url(url: &str) -> Option<PathBuf> {
-    let rest = url.strip_prefix("file://")?;
-    let rest = rest.strip_prefix("localhost").unwrap_or(rest);
-    if !rest.starts_with('/') {
-        return None;
-    }
-    let mut bytes = Vec::with_capacity(rest.len());
-    let raw = rest.as_bytes();
-    let mut index = 0;
-    while index < raw.len() {
-        if raw[index] == b'%' && index + 2 < raw.len() {
-            let hex = std::str::from_utf8(&raw[index + 1..index + 3]).ok()?;
-            bytes.push(u8::from_str_radix(hex, 16).ok()?);
-            index += 3;
-        } else {
-            bytes.push(raw[index]);
-            index += 1;
-        }
-    }
-    if bytes.len() > 1 && bytes.last() == Some(&b'/') {
-        bytes.pop();
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::ffi::OsStringExt;
-        Some(PathBuf::from(std::ffi::OsString::from_vec(bytes)))
-    }
-    #[cfg(not(unix))]
-    {
-        let mut text = String::from_utf8(bytes).ok()?;
-        if cfg!(windows) {
-            // `/C:/...` becomes `C:\...`.
-            if text.len() >= 3 && text.as_bytes()[2] == b':' {
-                text.remove(0);
-            }
-            text = text.replace('/', "\\");
-        }
-        Some(PathBuf::from(text))
-    }
-}
-
 /// RFC 3986 unreserved and sub-delims plus `:`, `@` and `/`: the characters
 /// Foundation leaves alone in a file URL's path.
 fn is_path_allowed(byte: u8) -> bool {
     byte.is_ascii_alphanumeric() || b"-._~!$&'()*+,;=:@/".contains(&byte)
 }
 
-/// The local path of a `file://` URL as [`file_url`] spells it: the
-/// percent-encoding undone, any host part dropped (`file://server/share/x`
-/// reads as `/share/x`), a directory's trailing slash dropped except on `/`
-/// and a drive root `/X:/` (the audio folder reads back as `.../audio`),
-/// and on Windows a drive path restored with backslashes.
-/// A `%` that is not followed by two hex digits is kept as it is. The
-/// decoded bytes must be UTF-8. `None` for any other scheme or a URL
-/// without a path. Swift: `URL.path` of the stored `mixdownURL` or
-/// `audioFolder`.
+/// The local path of a `file://` URL as [`file_url`] spells it, read the
+/// way Swift's `URL.path` reads it: the host part dropped (empty,
+/// `localhost` or any other), the percent-encoding undone (a `%` not
+/// followed by two hex digits stays as it is), and one trailing slash
+/// dropped, so a directory reads back without it (`/` and a drive root
+/// such as `/C:/` keep theirs). On Unix the decoded bytes are the path as
+/// they are, so a file name need not be UTF-8; on Windows they must be
+/// UTF-8, and a drive path (`/C:/...`) loses its leading slash and takes
+/// backslashes, while a path without a drive keeps its forward slashes.
+/// `None` for any other scheme or a URL without a path. Swift: `URL.path`
+/// of a stored file URL.
 #[must_use]
 pub fn file_url_path(url: &str) -> Option<PathBuf> {
     let rest = url.strip_prefix("file://")?;
@@ -199,18 +168,26 @@ pub fn file_url_path(url: &str) -> Option<PathBuf> {
         }
     }
     drop_trailing_slash(&mut bytes);
-    let decoded = String::from_utf8(bytes).ok()?;
-    // `file_url` spelt a Windows drive path with forward slashes behind a
-    // leading `/`; both are undone so the path reads back as the OS spells
-    // it. A path without a drive (a Mac URL read on Windows) keeps its
-    // slashes, which Windows reads as separators all the same.
-    #[cfg(windows)]
-    let decoded = if decoded.starts_with('/') && decoded.as_bytes().get(2) == Some(&b':') {
-        decoded[1..].replace('/', "\\")
-    } else {
-        decoded
-    };
-    Some(PathBuf::from(decoded))
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStringExt;
+        Some(PathBuf::from(std::ffi::OsString::from_vec(bytes)))
+    }
+    #[cfg(not(unix))]
+    {
+        let decoded = String::from_utf8(bytes).ok()?;
+        // `file_url` spelt a Windows drive path with forward slashes behind
+        // a leading `/`; both are undone so the path reads back as the OS
+        // spells it. A path without a drive (a Mac URL read on Windows)
+        // keeps its slashes, which Windows reads as separators all the same.
+        #[cfg(windows)]
+        let decoded = if decoded.starts_with('/') && decoded.as_bytes().get(2) == Some(&b':') {
+            decoded[1..].replace('/', "\\")
+        } else {
+            decoded
+        };
+        Some(PathBuf::from(decoded))
+    }
 }
 
 /// Drops a directory's one trailing `/` from decoded path bytes, as Swift's
@@ -229,36 +206,6 @@ fn drop_trailing_slash(bytes: &mut Vec<u8>) {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn file_urls_round_trip_through_the_path() {
-        for path in [
-            "/Users/me/Audio Files/a b.caf",
-            "/tmp/plain.caf",
-            "/ü/ß.wav",
-        ] {
-            let url = file_url(Path::new(path), false);
-            assert_eq!(path_from_file_url(&url), Some(PathBuf::from(path)), "{url}");
-        }
-        assert_eq!(
-            path_from_file_url("file:///tmp/dir/"),
-            Some(PathBuf::from("/tmp/dir"))
-        );
-        assert_eq!(path_from_file_url("https://example.com/a"), None);
-    }
-
-    /// A Unix file name is bytes; one that is not UTF-8 still has a path.
-    #[cfg(unix)]
-    #[test]
-    fn non_utf8_bytes_become_a_path_on_unix() {
-        use std::os::unix::ffi::OsStringExt;
-        let bytes = |url: &str| path_from_file_url(url).unwrap().into_os_string().into_vec();
-        assert_eq!(
-            bytes("file:///tmp/%FF%FEname.caf"),
-            b"/tmp/\xFF\xFEname.caf"
-        );
-        assert_eq!(bytes("file:///tmp/%FF/"), b"/tmp/\xFF");
-    }
 
     #[test]
     fn file_urls_match_foundation() {
@@ -304,14 +251,29 @@ mod tests {
             Some(PathBuf::from("/tmp/%€/%4/%")),
             "a percent sign without two hex digits stays as it is"
         );
-        assert_eq!(file_url_path("file:///tmp/%FF.wav"), None, "not UTF-8");
+        assert_eq!(
+            file_url_path("file:///tmp/%+1/x.wav"),
+            Some(PathBuf::from("/tmp/%+1/x.wav")),
+            "a sign is not a hex digit"
+        );
+        if cfg!(windows) {
+            assert_eq!(file_url_path("file:///tmp/%FF.wav"), None, "not UTF-8");
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::ffi::OsStrExt;
+            assert_eq!(
+                file_url_path("file:///tmp/%FF.wav").as_deref(),
+                Some(Path::new(std::ffi::OsStr::from_bytes(b"/tmp/\xFF.wav"))),
+                "a Unix path need not be UTF-8"
+            );
+        }
         assert_eq!(file_url_path("https://example.com/x"), None);
         assert_eq!(file_url_path("file://host-only"), None);
     }
 
-    /// The trailing-slash rule, in one place. #166 adopts the same rule;
-    /// whichever merges second keeps one spelling and the union of both
-    /// test sets.
+    /// The trailing-slash rule, on the decoded bytes and through
+    /// `file_url_path`.
     #[test]
     fn a_directory_loses_its_trailing_slash_as_url_path_does() {
         let dropped = |path: &[u8]| {
@@ -336,8 +298,19 @@ mod tests {
             "the rule reads bytes, before any UTF-8 step"
         );
 
-        // Through `file_url_path`, which needs UTF-8 after the rule.
-        assert_eq!(file_url_path("file:///tmp/%FF/"), None, "not UTF-8");
+        // Through `file_url_path`, which needs UTF-8 after the rule on
+        // Windows only.
+        if cfg!(windows) {
+            assert_eq!(file_url_path("file:///tmp/%FF/"), None, "not UTF-8");
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::ffi::OsStringExt;
+            assert_eq!(
+                file_url_path("file:///tmp/%FF/").map(|path| path.into_os_string().into_vec()),
+                Some(b"/tmp/\xFF".to_vec())
+            );
+        }
         let path = |url: &str| file_url_path(url).unwrap().to_string_lossy().into_owned();
         assert_eq!(path("file:///tmp/a:/"), "/tmp/a:");
         assert_eq!(path("file:///Volumes/a:/"), "/Volumes/a:");
@@ -357,6 +330,45 @@ mod tests {
                 assert_eq!(path(&file_url(Path::new(directory), true)), directory);
             }
         }
+    }
+
+    /// A directory reads back without its trailing slash, as `URL.path`
+    /// reads it; `/` and a drive root keep theirs. `Path` equality ignores
+    /// a trailing slash, so the spellings are compared.
+    #[test]
+    fn a_directory_reads_back_without_its_trailing_slash() {
+        let spelt = |url: &str| file_url_path(url).unwrap().into_os_string();
+        let directory = if cfg!(windows) {
+            Path::new(r"C:\Users\x\Audio")
+        } else {
+            Path::new("/Users/x/Audio")
+        };
+        assert_eq!(
+            spelt(&file_url(directory, true)),
+            directory.as_os_str(),
+            "a directory round-trips"
+        );
+        assert_eq!(spelt("file:///"), "/");
+        assert_eq!(spelt("file://localhost/"), "/");
+        assert_eq!(spelt("file:///tmp/a:/"), "/tmp/a:", "not a drive root");
+        let drive_root = if cfg!(windows) { r"C:\" } else { "/C:/" };
+        assert_eq!(spelt("file:///C:/"), drive_root);
+    }
+
+    /// A Unix file name is bytes: one that is not UTF-8 encodes byte for
+    /// byte and decodes to the same path.
+    #[cfg(unix)]
+    #[test]
+    fn non_utf8_paths_round_trip_on_unix() {
+        use std::os::unix::ffi::{OsStrExt, OsStringExt};
+        let path = Path::new(std::ffi::OsStr::from_bytes(
+            b"/tmp/caf\xE9/\xFF\xFEname.caf",
+        ));
+        let url = file_url(path, false);
+        assert_eq!(url, "file:///tmp/caf%E9/%FF%FEname.caf");
+        assert_eq!(file_url_path(&url).as_deref(), Some(path));
+        let bytes = |url: &str| file_url_path(url).unwrap().into_os_string().into_vec();
+        assert_eq!(bytes("file:///tmp/%FF/"), b"/tmp/\xFF");
     }
 
     #[test]

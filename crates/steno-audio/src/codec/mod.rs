@@ -36,7 +36,7 @@ use std::path::{Path, PathBuf};
 
 use steno_core::{
     AudioAsset, AudioBuffer16k, AudioDecoder, AudioFormat, AudioLane, BoundaryResult, async_trait,
-    paths::path_from_file_url,
+    paths::file_url_path,
 };
 use symphonia::core::audio::SampleBuffer;
 use symphonia::core::codecs::DecoderOptions;
@@ -325,7 +325,7 @@ impl SymphoniaAudioCodec {
 impl AudioDecoder for SymphoniaAudioCodec {
     async fn decode(&self, asset: &AudioAsset, lane: AudioLane) -> BoundaryResult<AudioBuffer16k> {
         if let Some(sidecar) = asset.sidecars_16k.get(&lane)
-            && let Some(path) = path_from_file_url(sidecar)
+            && let Some(path) = file_url_path(sidecar)
             && let Ok(samples) = WavFile::read_16k_mono(&path)
             && !samples.is_empty()
         {
@@ -363,7 +363,7 @@ impl AudioDecoder for SymphoniaAudioCodec {
 
 /// The asset's master as a path; the URL must be a file URL.
 fn master_path(asset: &AudioAsset) -> Result<PathBuf, CodecError> {
-    path_from_file_url(&asset.url)
+    file_url_path(&asset.url)
         .ok_or_else(|| CodecError::Io(format!("not a file URL: {}", asset.url)))
 }
 
