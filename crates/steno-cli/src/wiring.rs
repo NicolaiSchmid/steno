@@ -156,8 +156,16 @@ pub fn dependencies(
         Arc<dyn steno_core::Diarizer>,
         Arc<dyn steno_core::SpeakerMemory>,
     ) = match engine {
-        Some(_) => (
-            steno_services::speech::speech_engine(settings, &models_directory),
+        Some(engine) => (
+            // The flag names the engine for this run, as the Swift CLI's
+            // `makeSpeechEngine(engine, ...)` did; the stored id does not.
+            steno_services::speech::speech_engine(
+                &Settings {
+                    speech_engine_id: engine.to_owned(),
+                    ..settings.clone()
+                },
+                &models_directory,
+            ),
             steno_services::speech::diarizer(&models_directory),
             Arc::new(steno_pipeline::StoreSpeakerMemory::new(store.clone())),
         ),
@@ -214,5 +222,33 @@ mod tests {
         assert_eq!(standardized(Path::new("vault")), cwd.join("vault"));
         let root = cwd.ancestors().last().unwrap().to_path_buf();
         assert_eq!(standardized(&root.join("..")), root);
+    }
+
+    #[test]
+    fn engine_names_the_engine_whatever_the_settings_say() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(Store::open(dir.path().join("steno.sqlite")).unwrap());
+        let settings = Settings {
+            speech_engine_id: "whisperkit-large-v3-turbo".to_owned(),
+            ..Settings::default()
+        };
+        let dependencies = dependencies(
+            store,
+            &settings,
+            Some("parakeet-v3"),
+            Some(dir.path()),
+            None,
+            None,
+            MeetingEventBus::new(),
+        )
+        .unwrap();
+        let named = steno_services::speech::speech_engine(
+            &Settings {
+                speech_engine_id: "parakeet-v3".to_owned(),
+                ..Settings::default()
+            },
+            dir.path(),
+        );
+        assert_eq!(dependencies.speech_engine.id(), named.id());
     }
 }
