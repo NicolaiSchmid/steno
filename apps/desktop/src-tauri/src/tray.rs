@@ -83,7 +83,7 @@ pub fn build(app: &AppHandle) -> tauri::Result<()> {
     let in_person = MenuAction::RecordInPerson.item(app, None)?;
     let launch_at_login = CheckMenuItem::with_id(
         app,
-        MenuAction::LaunchAtLogin.id(),
+        MenuAction::LaunchAtLogin.as_str(),
         MenuAction::LaunchAtLogin.label(),
         true,
         autostart::status(app).is_on(),

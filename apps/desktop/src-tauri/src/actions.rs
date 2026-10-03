@@ -10,8 +10,6 @@
 //! Swift: `MenuBarView.swift` (the buttons), `AppCommands` in
 //! `StenoApp.swift` (the Record menu).
 
-use std::fmt;
-
 use serde_json::{Value, json};
 pub use steno_bridge::CaptureMode;
 use tauri::{
@@ -27,46 +25,21 @@ use crate::{
     windows::{self, BridgeWindow},
 };
 
-/// The menu items, by id. The ids are stable strings so a test can map
-/// them both ways without a menu.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum MenuAction {
-    Record,
-    RecordInPerson,
-    OpenMain,
-    OpenSettings,
-    LaunchAtLogin,
-    CheckForUpdates,
-    Quit,
+steno_core::string_enum! {
+    /// The menu items, by id (`as_str`). The ids are stable strings so a
+    /// test can map them both ways without a menu.
+    pub enum MenuAction {
+        Record = "record",
+        RecordInPerson = "record-in-person",
+        OpenMain = "open-main",
+        OpenSettings = "open-settings",
+        LaunchAtLogin = "launch-at-login",
+        CheckForUpdates = "check-for-updates",
+        Quit = "quit",
+    }
 }
 
 impl MenuAction {
-    pub const ALL: [MenuAction; 7] = [
-        Self::Record,
-        Self::RecordInPerson,
-        Self::OpenMain,
-        Self::OpenSettings,
-        Self::LaunchAtLogin,
-        Self::CheckForUpdates,
-        Self::Quit,
-    ];
-
-    pub const fn id(self) -> &'static str {
-        match self {
-            Self::Record => "record",
-            Self::RecordInPerson => "record-in-person",
-            Self::OpenMain => "open-main",
-            Self::OpenSettings => "open-settings",
-            Self::LaunchAtLogin => "launch-at-login",
-            Self::CheckForUpdates => "check-for-updates",
-            Self::Quit => "quit",
-        }
-    }
-
-    pub fn from_id(id: &str) -> Option<Self> {
-        Self::ALL.into_iter().find(|action| action.id() == id)
-    }
-
     /// The item's text at rest; `record_label` replaces the first while
     /// the recorder is busy.
     pub const fn label(self) -> &'static str {
@@ -84,13 +57,7 @@ impl MenuAction {
     /// The plain menu item for the action, in the tray's menu or the menu
     /// bar's.
     pub fn item(self, app: &AppHandle, accelerator: Option<&str>) -> tauri::Result<MenuItem<Wry>> {
-        MenuItem::with_id(app, self.id(), self.label(), true, accelerator)
-    }
-}
-
-impl fmt::Display for MenuAction {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.id())
+        MenuItem::with_id(app, self.as_str(), self.label(), true, accelerator)
     }
 }
 
@@ -141,7 +108,7 @@ pub fn check_for_updates(app: &AppHandle) {
 /// A menu item was chosen, in the tray's menu or the menu bar's.
 pub fn on_menu_event(app: &AppHandle, event: &MenuEvent) {
     let MenuId(id) = event.id();
-    let Some(action) = MenuAction::from_id(id) else {
+    let Ok(action) = id.parse::<MenuAction>() else {
         return;
     };
     match action {
@@ -203,12 +170,12 @@ mod tests {
 
     #[test]
     fn every_action_round_trips_through_its_id() {
-        for action in MenuAction::ALL {
-            assert_eq!(MenuAction::from_id(action.id()), Some(action));
-            assert_eq!(action.to_string(), action.id());
+        for &action in MenuAction::ALL {
+            assert_eq!(action.as_str().parse::<MenuAction>(), Ok(action));
+            assert_eq!(action.to_string(), action.as_str());
             assert_ne!(action.label(), "");
         }
-        assert_eq!(MenuAction::from_id("about"), None);
+        assert!("about".parse::<MenuAction>().is_err());
     }
 
     /// The tray's login item tells the host what Settings tells it, in the
