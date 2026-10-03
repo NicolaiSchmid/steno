@@ -5,8 +5,7 @@
 //! and the macro gives a `const fn as_str` and a `const ALL` slice (Swift's
 //! `CaseIterable`) that routing tables and contract tests use at compile
 //! time. The enums are deliberately not `#[non_exhaustive]`: a case Swift
-//! adds fails to compile here until every match handles it, and
-//! `steno-bridge`'s `bridge_host!` matches every `BridgeMethod` the same way.
+//! adds fails to compile here until every match handles it.
 
 use thiserror::Error;
 
