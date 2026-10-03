@@ -4,12 +4,12 @@
 //! while hashing, and renames only a verified, synced file into place. Models are
 //! never committed (`.gitignore` covers `*.onnx`).
 //!
-//! A store's root holds one folder per asset id, `<root>/<asset id>/`; the
-//! app passes `<models directory>/onnx` to [`ModelStore::new`].
-//! [`ModelStore::from_environment`] takes the directory `STENO_MODELS_DIR`
-//! names as the root itself, else [`ModelStore::default_root`] (the crate
-//! docs say more). Silero VAD downloads from the sherpa-onnx `asr-models`
-//! release. The fp32 Parakeet export (2.6 GB) is not hosted yet: until the
+//! A store's root holds one folder per asset id, `<root>/<asset id>/`. The
+//! app's root comes from `steno-services`; [`ModelStore::from_environment`]
+//! and [`ModelStore::default_root`] are conveniences for the `transcribe`
+//! example and the FLEURS test (the crate docs say more). Silero VAD
+//! downloads from the sherpa-onnx `asr-models` release.
+//! The fp32 Parakeet export (2.6 GB) is not hosted yet: until the
 //! release plan names a host, its files are produced by
 //! `spikes/onnx-speech/export/` and copied into
 //! `<root>/parakeet-tdt-0.6b-v3-fp32/` by hand; [`ModelStore::ensure`]
@@ -192,7 +192,9 @@ impl ModelStore {
         }
     }
 
-    /// The root `STENO_MODELS_DIR` names, else the default root.
+    /// A convenience for the `transcribe` example and the FLEURS test; the
+    /// app's root comes from `steno-services`. The root `STENO_MODELS_DIR`
+    /// names, else the default root.
     #[must_use]
     pub fn from_environment() -> Self {
         Self::new(Self::environment_root().unwrap_or_else(Self::default_root))
@@ -211,8 +213,9 @@ impl ModelStore {
         })
     }
 
-    /// `<support directory>/Models` ([`steno_core::StenoPaths`]), the Swift
-    /// app's models root; the app's ONNX assets sit in its `onnx/` folder.
+    /// A convenience for the `transcribe` example and the FLEURS test; the
+    /// app's root comes from `steno-services`. `<support directory>/Models`
+    /// ([`steno_core::StenoPaths`]).
     #[must_use]
     pub fn default_root() -> PathBuf {
         StenoPaths::default_support_directory().join("Models")

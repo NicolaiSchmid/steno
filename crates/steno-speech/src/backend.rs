@@ -2,7 +2,8 @@
 //! the decoder, the chunker and the merge are written once over any
 //! backend ([`crate::onnx`] here); the integration step moves the `CoreML`
 //! backend of #163 behind this trait, and the WP4 notes in the plan list
-//! where the loops differ. Swift: `FluidAudio`'s `AsrModels` (Preprocessor, Encoder, Decoder,
+//! where the loops differ.
+//! Swift: `FluidAudio`'s `AsrModels` (Preprocessor, Encoder, Decoder,
 //! `JointDecisionv3`), which `ParakeetEngine` drives through `AsrManager`.
 //!
 //! The `CoreML` joint returns the argmax token and the duration bin; the ONNX
@@ -139,7 +140,9 @@ pub trait SpeechBackend: Send {
 /// Splits the ONNX joiner's logits (`vocab_size` vocabulary logits followed
 /// by one logit per duration bin) into a [`JointDecision`]: argmax over the
 /// vocabulary with its softmax probability, argmax over the duration bins.
-/// The `CoreML` joint does this inside the model.
+/// The `CoreML` joint does this inside the model. Errors with
+/// [`SpeechError::Shape`] when `vocab_size` is 0 or no duration logit
+/// follows the vocabulary.
 pub fn split_logits(logits: &[f32], vocab_size: usize) -> Result<JointDecision, SpeechError> {
     if vocab_size == 0 {
         return Err(SpeechError::Shape(

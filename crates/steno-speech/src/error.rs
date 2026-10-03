@@ -34,7 +34,7 @@ pub enum SpeechError {
     /// The manifest has no URL for a missing file (the fp32 export until it
     /// is hosted); the files have to be put in place by hand.
     #[error(
-        "model {asset} has no download location yet; put its files in {} or point STENO_MODELS_DIR at a directory with a {asset} folder",
+        "model {asset} has no download location yet; put its files in {}",
         directory.display()
     )]
     NotHosted {
