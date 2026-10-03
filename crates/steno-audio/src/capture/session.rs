@@ -354,8 +354,12 @@ impl CaptureSession {
     /// Ends the recording and returns it. A rebuild in flight is abandoned.
     /// After `Failed` returns the finalised partial recording the state
     /// carries, or fails when the failure came from a start that produced
-    /// nothing. Fails with `WriterFailed`, and leaves the state `Failed`,
-    /// when the master is gone from disk or the writer thread died.
+    /// nothing. While a writer failure or a device loss is finalising,
+    /// waits for it and answers from its outcome. A write or close that
+    /// fails during the teardown leaves the state `Failed` with the
+    /// recording that is returned. Fails with `WriterFailed`, and leaves
+    /// the state `Failed`, when the master is gone from disk or the writer
+    /// thread died.
     pub fn stop(&self) -> Result<CaptureResult, CaptureError> {
         self.core.stop()
     }
@@ -683,14 +687,18 @@ impl Core {
             || CaptureError::WriterFailed("the writer thread ended without its files".into());
         let mut writer_thread = active.writer_thread.take().ok_or_else(writer_lost)?;
         writer_thread.stop();
+        // A write that failed during this drain went to `writer_failed`,
+        // which ignores it once the state is `Stopping`; it comes back
+        // beside the asset instead, as a failed close does.
+        let write_failure = writer_thread.take_error();
         let mut writer = writer_thread.take_writer().ok_or_else(writer_lost)?;
         // Read before `clear()`, which zeroes the ring overrun counts.
         let ring_drops = active.sink.dropped_samples();
         active.sink.clear();
-        let failure = match writer.finish() {
-            Ok(_) => None,
-            Err(error) => Some(CaptureError::WriterFailed(error.to_string())),
-        };
+        let closing = writer.finish().err();
+        let failure = write_failure
+            .or(closing)
+            .map(|error| CaptureError::WriterFailed(error.to_string()));
         let files = writer.files();
         if !files.master.exists() {
             return Err(CaptureError::WriterFailed(format!(

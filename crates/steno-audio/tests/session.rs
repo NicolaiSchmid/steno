@@ -1834,6 +1834,76 @@ fn stop_during_a_device_losss_finalise_returns_its_recording() {
     );
 }
 
+/// Fails every write once `full` is set, as a disk that fills does.
+struct FullFrom(RecordingWriter, Arc<AtomicBool>);
+
+impl RecordingWriting for FullFrom {
+    fn files(&self) -> RecordingFiles {
+        self.0.files()
+    }
+    fn write(&mut self, frames: &LaneFrames<'_>) -> Result<(), CaptureError> {
+        if self.1.load(Ordering::SeqCst) {
+            return Err(CaptureError::WriterFailed("DiskFull".into()));
+        }
+        self.0.write(frames)
+    }
+    fn finish(&mut self) -> Result<RecordingFiles, CaptureError> {
+        self.0.finish()
+    }
+}
+
+/// The disk fills during `stop()`'s own drain: the backend delivers on
+/// while its teardown runs, and those frames fail to write. `stop()` still
+/// returns the recording, and the state carries the failure instead of
+/// reading `Idle` over a master shorter than what was delivered.
+#[test]
+fn a_write_failing_during_stops_drain_ends_failed_with_the_recording() {
+    let directory = tempfile::tempdir().unwrap();
+    let (backend, at_gate, open) = GatedStop::new(1, None, false);
+    let full = Arc::new(AtomicBool::new(false));
+    let disk = Arc::clone(&full);
+    let session = CaptureSession::with_writer_factory(
+        configuration(CaptureMode::InPerson, directory.path(), false),
+        backend.clone(),
+        None,
+        1_000,
+        Arc::new(SystemClock::new()),
+        Arc::new(move |layout, lanes, keep_raw| {
+            Ok(Box::new(FullFrom(
+                RecordingWriter::new(layout, lanes, keep_raw)?,
+                Arc::clone(&disk),
+            )) as Box<dyn RecordingWriting>)
+        }),
+    )
+    .unwrap();
+    session.start(Uuid::new_v4()).unwrap();
+    let result = std::thread::scope(|scope| {
+        let stopper = scope.spawn(|| session.stop());
+        at_gate
+            .recv_timeout(RECV)
+            .expect("stop() is tearing the backend down");
+        full.store(true, Ordering::SeqCst);
+        let before = backend.delivered();
+        while backend.delivered() == before {
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        open.send(()).unwrap();
+        stopper.join().unwrap()
+    })
+    .expect("stop() returns the recording");
+    assert!(master_of(&result).frame_count() < backend.delivered());
+    match session.state() {
+        CaptureState::Failed {
+            error: CaptureError::WriterFailed(detail),
+            recording,
+        } => {
+            assert!(detail.contains("DiskFull"));
+            assert_eq!(recording.as_deref(), Some(&result));
+        }
+        other => panic!("expected Failed(WriterFailed), got {other:?}"),
+    }
+}
+
 /// In production the relay holds two seconds; a gap wider than that waits
 /// for the writer in 5 ms steps on the clock, and every frame of silence
 /// still arrives: 1.75 s of gap through a one-second relay.

@@ -4,8 +4,9 @@
 //! 10 Hz level stream costs the processing thread nothing).
 //! Swift: `Sources/StenoAudio/Writer/WriterThread.swift`.
 //!
-//! A write error is kept, reported once and stops further writes; the loop
-//! keeps draining so the relay never fills. The lane slices handed to the
+//! A write error is kept (for [`WriterThread::take_error`]), reported once
+//! and stops further writes; the loop keeps draining so the relay never
+//! fills. The lane slices handed to the
 //! writer sit in a stack array sized by [`AudioLane::ALL`], so a drained
 //! frame allocates nothing (not a real-time requirement here, the thread
 //! does file I/O, but one less allocation per 10 ms).
@@ -39,6 +40,8 @@ struct Worker {
     on_levels: LevelsHandler,
     on_error: ErrorHandler,
     failed: Arc<AtomicBool>,
+    /// The first write error, kept for whoever closes the files.
+    error: Option<CaptureError>,
     last_generation: usize,
 }
 
@@ -64,6 +67,7 @@ impl Worker {
             };
             if let Err(error) = self.writer.write(&frames) {
                 self.failed.store(true, Ordering::Release);
+                self.error = Some(error.clone());
                 (self.on_error)(error);
             }
         }
@@ -117,6 +121,7 @@ impl WriterThread {
             on_levels,
             on_error,
             failed: Arc::clone(&failed),
+            error: None,
             last_generation: 0,
         };
         Self {
@@ -160,6 +165,12 @@ impl WriterThread {
     /// Drains everything left in the relay, then returns.
     pub fn stop(&mut self) {
         self.join();
+    }
+
+    /// The first write error, once the thread is stopped; `None` while the
+    /// loop runs, after the writer was taken, or when every write succeeded.
+    pub fn take_error(&mut self) -> Option<CaptureError> {
+        self.worker.as_mut().and_then(|worker| worker.error.take())
     }
 
     /// The writer, once the thread is stopped (or was never started), so
