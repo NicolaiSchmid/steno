@@ -267,10 +267,51 @@ bridge's copies of the macro and codecs. Packages after WP3 branch from `main`.
       `crates/steno-speech-coreml/src/engine.rs` (`ENGINE_ID`). Both are `parakeet-v3`. Resolve: one constant.
     - [ ] Swift pointers. Here: a `Swift:` line in each module doc. There:
       `(Type.method)` after each item. Resolve: one style.
-    - [ ] Test tools. Here: `crates/steno-speech/tests/common/mod.rs` (`read_wav`,
-      `score`). There: `crates/steno-speech-coreml/src/wav.rs`, `crates/steno-speech-coreml/src/wer.rs` (`word_errors`). Resolve: one module.
+    - [ ] Test tools. Here: `crates/steno-speech/src/wav.rs` (`read_pcm16`, promoted
+      by WP4c) and `crates/steno-speech/tests/common/mod.rs` (`score`). There: `crates/steno-speech-coreml/src/wav.rs`, `crates/steno-speech-coreml/src/wer.rs` (`word_errors`). Resolve: one module.
   - Already the same: confidence clamping (non-finite values are zero, the rest
     clamped), chunk and window.
+
+  **WP4c sidecar and models.** `crates/steno-speech-sidecar` (binary
+  `steno-speech-sidecar`) hosts the ONNX `Transcriber`; `SidecarSpeechEngine` in
+  `crates/steno-speech/src/sidecar/` implements `SpeechEngine` over it.
+  - Protocol (`sidecar/protocol.rs`): over the child's stdin and stdout only, never a
+    socket or a file. A frame is a little-endian `u32` header length, the JSON header
+    in the bridge convention (sorted keys, camelCase, a `type` tag), then the payload
+    the header declares: the samples of a `transcribe` request as little-endian `f32`,
+    bit for bit. Requests `load` (a store root), `health`, `transcribe`, `shutdown`;
+    the child sends `ready` with the protocol version, a `memory` heartbeat with its
+    resident set, and one reply per request id.
+  - Limits: the parent installs the models (the child opens no connection), then
+    enforces a per-request deadline (120 s plus 1 s per second of audio by default;
+    300 s for `load`) and a memory ceiling (6 GiB) against the heartbeat. A child that
+    dies, hangs, overruns or breaks the protocol is killed and reaped, the call fails
+    with `SpeechError::Sidecar`, and the next call spawns and loads again; an error the
+    child reports keeps it. The child exits when stdin ends or stdout breaks, so a dead
+    app leaves no child. `release()` stops it and frees the 2.2 GB working set; WP6b
+    calls it after each job.
+  - Platform policy (`crates/steno-speech/src/runtime.rs`): on Linux and Windows the
+    sidecar is the only engine the app runs; on macOS the in-process CoreML engine is
+    the default and the sidecar a fallback behind `SpeechSettings::onnx_sidecar_on_mac`.
+    The in-process `OnnxSpeechEngine` is what the child hosts and what the example and
+    the FLEURS test drive.
+  - Crash isolation (`crates/steno-speech-sidecar/tests/isolation.rs`, the real client
+    against the real binary with `--fake-engine --fault`): killed mid-request, abort
+    (as a C++ exception through the FFI ends), panic, exit, hang past the deadline,
+    allocation past the ceiling and garbage on stdout each end in an error and a
+    working next call in a new child. With the models on atlas the child loads at
+    2.2 GB resident and transcribes 471 s of FLEURS German in 34.5 s, segment for
+    segment equal to the in-process engine.
+  - Models: a file's source is a URL (GitHub release assets, 2 GB at most: Silero, and
+    the diarization models of `steno-diarize`) or a Hugging Face repository at a
+    pinned commit, `https://huggingface.co/<repo>/resolve/<revision>/<path>`, for the
+    2.6 GB fp32 export (`encoder.weights` alone is 2.4 GB). `tools/upload-models.sh`
+    verifies the export against the manifest, adds the CC-BY-4.0 `ATTRIBUTION.md` and
+    uploads it; setting `PARAKEET_V3_FP32_REVISION` then hosts it. Downloads resume
+    `<name>.partial` under a file lock with `Range` requests, across retries and runs;
+    a mirror (`SpeechSettings::models_mirror`) serves `<mirror>/<asset id>/<file>`.
+  - Left for WP8: ship the binary beside the app (Tauri `externalBin`;
+    `SidecarConfig::beside_current_exe` looks there) and sign it with the app.
 
   **WP4d diarization.** `steno-diarize`: speech-stack decision 6 and gate G3, moved
   here on 2026-10-02 so it ships with the Rust pipeline. Segmentation and embedding
@@ -402,6 +443,18 @@ still has to draw the window side. `[ ]` is not ported yet.
 - [x] `updates.check`, `system.openURL` (`https:` and `mailto:` only),
   `system.openSystemSettings`, `window.open` (the request rides on `app`),
   `window.close` (onboarding only), `ui.confirmDestructive`.
+
+### Speech
+
+- [ ] Decision for Nicolai: which Hugging Face account hosts the fp32 export.
+  `NicolaiSchmid/steno-models` is the placeholder in `tools/upload-models.sh` and
+  `STENO_MODELS_REPO`; an organisation would outlive a personal account. Then run the
+  script and set `PARAKEET_V3_FP32_REVISION`; until then the export has no source and
+  `prepare` asks for the files by hand or a mirror.
+- [ ] `SpeechSettings` (`onnxSidecarOnMac`, `modelsMirror`) are Rust-only: Swift has
+  neither. `steno-services` persists them; the Settings UI shows the macOS fallback, if
+  at all, in user words, and the mirror stays out of the UI (environment or config
+  only).
 
 ### Beyond the bridge
 
@@ -740,6 +793,7 @@ PR off `main`.
 | Bridge on core | `refactor/rust-bridge-on-core` | #161 | merged |
 | WP4b CoreML speech backend | `feat/rust-speech-coreml` | #163 | merged |
 | WP4a speech pipeline and ONNX backend | `feat/rust-speech` | #171 | merged |
+| WP4c speech sidecar, model hosting and download | `feat/rust-sidecar` | — | open |
 | WP7a LLM (`steno-llm`) | `feat/rust-llm` | #167 | merged |
 | WP7b adapters | `feat/rust-adapters` | #165 | merged |
 | WP6a host | `feat/rust-host` | #170 | merged |

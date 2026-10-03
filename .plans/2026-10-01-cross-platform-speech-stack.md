@@ -79,6 +79,13 @@ reports keep the interim reasoning.
    errors are C++ exceptions that abort through the FFI, and the 2 to 3 GB working set
    should be released after processing. Rules out: in-process inference off the Mac.
 
+   Implemented by WP4c of `.plans/2026-10-02-rust-core-and-tauri-shell.md`:
+   `crates/steno-speech-sidecar` with `SidecarSpeechEngine` in `crates/steno-speech`.
+   The child is spawned on demand, serves both lanes of a job and is stopped by
+   `release()` after it; the JSON headers follow the bridge convention and the audio
+   crosses the pipe as raw `f32`. On macOS the sidecar is a fallback behind a setting,
+   CoreML in-process stays the default.
+
    Open (WP2): whether the sidecar drives ONNX Runtime directly through the `ort` crate
    with our own feature extraction and TDT greedy loop, or wraps the sherpa-onnx
    recognizer. The CoreML loop in `spikes/coreml-rs/src/decoder.rs` is shared only above
