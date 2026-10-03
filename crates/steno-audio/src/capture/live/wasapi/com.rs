@@ -20,8 +20,9 @@
 //!   (`GetId`, `GetMixFormat`) are copied and freed with `CoTaskMemFree` in
 //!   the function that received them; nothing keeps such a pointer. A
 //!   `PROPVARIANT` frees its contents in `Drop` (`PropVariantClear`), so a
-//!   variant the store filled is simply dropped, and one that borrows our
-//!   memory (the activation blob) is `ManuallyDrop` and never cleared.
+//!   variant the store filled is simply dropped, and one that points at our
+//!   memory (the activation blob) is `ManuallyDrop` and never cleared; it
+//!   and the blob stay on the heap until the activation has completed.
 //! - **Capture buffers.** A packet from `IAudioCaptureClient::GetBuffer`
 //!   is lent to the caller's closure as a slice and released with
 //!   `ReleaseBuffer` right after the closure returns; the slice cannot
@@ -39,6 +40,7 @@
 use std::ffi::c_void;
 use std::marker::PhantomData;
 use std::mem::ManuallyDrop;
+use std::ptr::NonNull;
 use std::sync::mpsc::{SyncSender, sync_channel};
 use std::time::Duration;
 
@@ -744,9 +746,78 @@ impl CaptureClient {
     }
 }
 
+/// The process-loopback activation parameters and the `VT_BLOB` variant
+/// pointing at them, together on the heap. Microsoft does not say whether
+/// `ActivateAudioInterfaceAsync` copies them or reads them later on its
+/// own thread (its ApplicationLoopback sample keeps them alive until the
+/// completion), so the completion handler owns them: COM holds the handler
+/// until the activation completes, even after a caller that timed out has
+/// returned.
+struct ActivationParams(NonNull<ActivationBlob>);
+
+struct ActivationBlob {
+    params: AUDIOCLIENT_ACTIVATION_PARAMS,
+    /// Never dropped: `PROPVARIANT`'s `Drop` is `PropVariantClear`, which
+    /// would `CoTaskMemFree` the blob, and the blob is `params` beside it.
+    /// (Dropping it was a heap corruption the Windows runner caught.)
+    variant: ManuallyDrop<PROPVARIANT>,
+}
+
+impl ActivationParams {
+    fn exclude_process_tree(pid: u32) -> Self {
+        let blob = Box::new(ActivationBlob {
+            params: AUDIOCLIENT_ACTIVATION_PARAMS {
+                ActivationType: AUDIOCLIENT_ACTIVATION_TYPE_PROCESS_LOOPBACK,
+                Anonymous: AUDIOCLIENT_ACTIVATION_PARAMS_0 {
+                    ProcessLoopbackParams: AUDIOCLIENT_PROCESS_LOOPBACK_PARAMS {
+                        TargetProcessId: pid,
+                        ProcessLoopbackMode: PROCESS_LOOPBACK_MODE_EXCLUDE_TARGET_PROCESS_TREE,
+                    },
+                },
+            },
+            variant: ManuallyDrop::new(PROPVARIANT::default()),
+        });
+        let blob = NonNull::from(Box::leak(blob));
+        let raw = blob.as_ptr();
+        // SAFETY: `raw` is the live allocation just leaked, reached only
+        // through this pointer. This writes the `VT_BLOB` arm of its zeroed
+        // variant, pointing at its `params`, which live exactly as long.
+        unsafe {
+            let variant: &mut PROPVARIANT = &mut (*raw).variant;
+            let inner = &mut *variant.Anonymous.Anonymous;
+            inner.vt = VT_BLOB;
+            inner.Anonymous.blob = BLOB {
+                cbSize: std::mem::size_of::<AUDIOCLIENT_ACTIVATION_PARAMS>() as u32,
+                pBlobData: (&raw mut (*raw).params).cast::<u8>(),
+            };
+        }
+        Self(blob)
+    }
+
+    /// The variant to pass, valid while `self` lives.
+    fn variant(&self) -> *const PROPVARIANT {
+        // SAFETY: a place projection on the live allocation, no read;
+        // `ManuallyDrop` is `repr(transparent)`.
+        unsafe { (&raw const (*self.0.as_ptr()).variant).cast::<PROPVARIANT>() }
+    }
+}
+
+impl Drop for ActivationParams {
+    fn drop(&mut self) {
+        // SAFETY: the allocation leaked in `exclude_process_tree`, freed
+        // once; the variant inside is `ManuallyDrop`, so it is not cleared.
+        drop(unsafe { Box::from_raw(self.0.as_ptr()) });
+    }
+}
+
+/// `windows-implement` already answers `IAgileObject` for every
+/// `#[implement]` type; it is listed here as well because
+/// `ActivateAudioInterfaceAsync` requires an agile handler.
 #[implement(IActivateAudioInterfaceCompletionHandler, IAgileObject)]
 struct ActivationHandler {
     done: SyncSender<()>,
+    /// Read by the activation until it completes; see [`ActivationParams`].
+    _params: ActivationParams,
 }
 
 impl IActivateAudioInterfaceCompletionHandler_Impl for ActivationHandler_Impl {
@@ -759,8 +830,6 @@ impl IActivateAudioInterfaceCompletionHandler_Impl for ActivationHandler_Impl {
     }
 }
 
-/// Marks the handler free-threaded, as `ActivateAudioInterfaceAsync`
-/// requires.
 impl IAgileObject_Impl for ActivationHandler_Impl {}
 
 /// `ActivateAudioInterfaceAsync` on the process-loopback virtual device
@@ -769,44 +838,26 @@ fn activate_process_loopback(
     excluded_pid: u32,
     timeout: Duration,
 ) -> Result<IAudioClient, ComError> {
-    let mut params = AUDIOCLIENT_ACTIVATION_PARAMS {
-        ActivationType: AUDIOCLIENT_ACTIVATION_TYPE_PROCESS_LOOPBACK,
-        Anonymous: AUDIOCLIENT_ACTIVATION_PARAMS_0 {
-            ProcessLoopbackParams: AUDIOCLIENT_PROCESS_LOOPBACK_PARAMS {
-                TargetProcessId: excluded_pid,
-                ProcessLoopbackMode: PROCESS_LOOPBACK_MODE_EXCLUDE_TARGET_PROCESS_TREE,
-            },
-        },
-    };
-    // Never dropped: `PROPVARIANT`'s `Drop` is `PropVariantClear`, which
-    // would `CoTaskMemFree` the blob, and the blob is `params` on this
-    // stack. (Dropping it was a heap corruption the Windows runner caught.)
-    let mut variant = ManuallyDrop::new(PROPVARIANT::default());
-    // SAFETY: writes the `VT_BLOB` arm of a zeroed variant. The blob
-    // points at `params`, which outlives the activation call below (the
-    // call copies it; Microsoft's sample frees it as soon as the call
-    // returns); the variant is never cleared (above).
-    unsafe {
-        let inner = &mut *variant.Anonymous.Anonymous;
-        inner.vt = VT_BLOB;
-        inner.Anonymous.blob = BLOB {
-            cbSize: std::mem::size_of::<AUDIOCLIENT_ACTIVATION_PARAMS>() as u32,
-            pBlobData: (&raw mut params).cast::<u8>(),
-        };
-    }
+    let params = ActivationParams::exclude_process_tree(excluded_pid);
+    let variant = params.variant();
     let (sender, receiver) = sync_channel(1);
-    let handler: IActivateAudioInterfaceCompletionHandler =
-        ActivationHandler { done: sender }.into();
+    let handler: IActivateAudioInterfaceCompletionHandler = ActivationHandler {
+        done: sender,
+        _params: params,
+    }
+    .into();
     // SAFETY: the device path is a static wide string, the IID is
-    // `IAudioClient`'s and lives in a static, the variant is valid for the
-    // call (above), and the handler is a live, agile COM object the call
-    // keeps a reference to until it completes.
+    // `IAudioClient`'s and lives in a static, and the handler is a live,
+    // agile COM object the call keeps a reference to until it completes.
+    // The variant and its blob belong to the handler, so they stay valid
+    // for as long as the activation runs, also if `recv_timeout` below
+    // gives up first.
     let operation = check(
         unsafe {
             ActivateAudioInterfaceAsync(
                 VIRTUAL_AUDIO_DEVICE_PROCESS_LOOPBACK,
                 &IAudioClient::IID,
-                Some(&raw const *variant),
+                Some(variant),
                 &handler,
             )
         },
