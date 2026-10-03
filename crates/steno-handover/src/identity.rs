@@ -100,11 +100,7 @@ impl HandoverIdentity {
             PrivateKeyDer::Pkcs8(key) => pem_block("PRIVATE KEY", key.secret_pkcs8_der()),
             PrivateKeyDer::Sec1(key) => pem_block("EC PRIVATE KEY", key.secret_sec1_der()),
             PrivateKeyDer::Pkcs1(key) => pem_block("RSA PRIVATE KEY", key.secret_pkcs1_der()),
-            _ => {
-                return Err(IdentityError::Malformed(
-                    "private key: not PKCS#8, SEC1 or PKCS#1".to_owned(),
-                ));
-            }
+            _ => return Err(IdentityError::UnsupportedKey),
         };
         Ok(certificate + &key)
     }
@@ -244,8 +240,10 @@ pub enum IdentityError {
     Tls(#[from] rustls::Error),
     #[error("the secret store: {0}")]
     Secrets(steno_core::BoxError),
-    #[error("{0}")]
+    #[error("the stored identity is malformed: {0}")]
     Malformed(String),
+    #[error("the private key is not PKCS#8, SEC1 or PKCS#1, so it cannot be written")]
+    UnsupportedKey,
 }
 
 #[cfg(test)]

@@ -22,8 +22,7 @@ use steno_core::{
 use tokio::sync::watch;
 use uuid::Uuid;
 
-use crate::configuration::Clock;
-use crate::configuration::HandoverConfiguration;
+use crate::configuration::{Clock, HandoverConfiguration};
 use crate::identity::HandoverIdentity;
 use crate::pairing::{DeviceTokens, PairingPayload, PairingSession};
 use crate::route::{AuthRequirement, Route};

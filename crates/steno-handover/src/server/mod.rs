@@ -125,7 +125,7 @@ pub(crate) enum Reach {
 pub struct HandoverServer {
     pub port: u16,
     accept_task: JoinHandle<()>,
-    shutdown: watch::Sender<bool>,
+    stop_signal: watch::Sender<bool>,
     advertiser: Option<advertise::Advertiser>,
 }
 
@@ -195,7 +195,7 @@ impl HandoverServer {
             None
         };
         let configuration = Arc::new(configuration.clone());
-        let (shutdown, stopping) = watch::channel(false);
+        let (stop_signal, stopping) = watch::channel(false);
         let accept_task = tokio::spawn(accept_loop(
             listener,
             acceptor,
@@ -208,7 +208,7 @@ impl HandoverServer {
         Ok(HandoverServer {
             port,
             accept_task,
-            shutdown,
+            stop_signal,
             advertiser,
         })
     }
@@ -221,11 +221,13 @@ impl HandoverServer {
     pub async fn stop(self) {
         let HandoverServer {
             mut accept_task,
-            shutdown,
+            stop_signal,
             advertiser,
             ..
         } = self;
-        shutdown.send_replace(true);
+        stop_signal.send_replace(true);
+        // The accept task drains for STOP_GRACE; one second more before it
+        // is aborted outright.
         if tokio::time::timeout(STOP_GRACE + Duration::from_secs(1), &mut accept_task)
             .await
             .is_err()

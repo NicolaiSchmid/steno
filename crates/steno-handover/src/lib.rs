@@ -21,7 +21,7 @@
 //! - [`PairingPayload`]: what the QR code shows; [`base64url`] is its
 //!   encoding of the fingerprint and the secret.
 //! - [`pinning`]: the trust rule the phone applies, in Rust, for a client
-//!   that talks to the listener (the tests, a future CLI probe).
+//!   that talks to the listener (the tests).
 //! - [`server`]: the TLS listener, the per-connection HTTP/1.1 handling
 //!   with the body limits and the read timeout, Bonjour; [`ServerMetrics`]
 //!   is what the tests read.

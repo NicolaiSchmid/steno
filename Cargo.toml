@@ -86,8 +86,8 @@ hound = "3"
 ort = { version = "2.0.0-rc.13", default-features = false, features = ["std", "download-binaries", "tls-rustls", "copy-dylibs", "api-27"] }
 rustfft = "6"
 ureq = { version = "3", default-features = false, features = ["rustls", "gzip"] }
-# Added by the handover package: the TLS listener (rustls on ring; aws-lc-rs
-# needs cmake and NASM on Windows), the minted identity, HTTP/1.1, Bonjour.
+# The handover listener: TLS (rustls on ring; aws-lc-rs needs cmake and
+# NASM on Windows), the minted identity, HTTP/1.1, Bonjour.
 bytes = "1"
 http = "1"
 http-body-util = "0.1"

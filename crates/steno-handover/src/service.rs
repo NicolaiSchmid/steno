@@ -11,8 +11,7 @@ use steno_core::{HandoverIntake, HandoverReceipt, PairedDevice, Store, store};
 use tokio::sync::{Mutex, watch};
 use uuid::Uuid;
 
-pub use crate::configuration::Clock;
-use crate::configuration::HandoverConfiguration;
+use crate::configuration::{Clock, HandoverConfiguration};
 use crate::engine::Engine;
 use crate::identity::HandoverIdentity;
 use crate::pairing::PairingPayload;

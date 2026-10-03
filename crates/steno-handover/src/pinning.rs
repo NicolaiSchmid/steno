@@ -6,8 +6,7 @@
 //!
 //! The phone runs `mobile/modules/steno-link/ios/PinnedTrustEvaluator.swift`
 //! (symlinked into the Swift tests); this is the same rule as a rustls
-//! [`ServerCertVerifier`], for every Rust client of the listener: the tests,
-//! and a future `steno` CLI probe.
+//! [`ServerCertVerifier`], for every Rust client of the listener.
 
 use std::sync::Arc;
 
