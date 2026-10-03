@@ -266,3 +266,62 @@ async fn unpair_mid_upload_discards_the_partial_and_the_receipt() {
     assert_eq!(test.intake.admissions.count(), 0);
     test.stop().await;
 }
+
+#[tokio::test]
+async fn a_complete_in_flight_does_not_bring_a_revoked_device_back_into_the_stream() {
+    // `complete` read the receipt before the revoke and writes it back
+    // after the intake answers; the store refuses the write (the device is
+    // gone), and memory must not keep it either, or the receipt stream
+    // shows an upload of a revoked phone until restart.
+    let chunk_size: i64 = 64 * 1024;
+    let meeting_id = Uuid::new_v4();
+    let intake =
+        common::ScriptedIntake::with_delay(meeting_id, 0, Duration::from_millis(300), false);
+    let test = TestService::with(common::Options {
+        chunk_size,
+        intake: Some(intake.clone() as std::sync::Arc<dyn steno_core::HandoverIntake>),
+        start: false,
+        ..common::Options::default()
+    })
+    .await;
+    let phone = common::EngineDevice::paired(&test, "Direct iPhone").await;
+    let bytes = seeded_bytes(2 * chunk_size as usize, 97);
+    let metadata = phone.metadata(&bytes, chunk_size);
+    phone.upload_all(&metadata, &bytes).await;
+    let id = metadata.recording_id;
+    let receipts = test.service.receipts();
+
+    let completing = phone.complete(id);
+    let revoking = async {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert_eq!(intake.count(), 1, "the intake is admitting");
+        test.service.revoke(phone.device.id).await.unwrap();
+    };
+    let (_, ()) = tokio::join!(completing, revoking);
+
+    let owned = |receipts: &[steno_core::HandoverReceipt]| {
+        receipts
+            .iter()
+            .any(|receipt| receipt.device_id == phone.device.id)
+    };
+    assert!(!owned(&test.service.engine.receipts_snapshot()));
+    assert!(
+        !owned(&receipts.borrow()),
+        "the stream shows no receipt of it"
+    );
+    assert_eq!(test.store.handover_receipt(id).unwrap(), None);
+
+    // Paired again under the same id, the phone's uploads are live again.
+    let _ = test.service.begin_pairing();
+    let repaired = common::engine_pair(&test, phone.device.id, "Direct iPhone").await;
+    assert_eq!(repaired.status.as_u16(), 200);
+    let again = common::EngineDevice {
+        service: test.service.clone(),
+        device: test.store.paired_device(phone.device.id).unwrap().unwrap(),
+    };
+    let bytes = seeded_bytes(chunk_size as usize, 98);
+    let metadata = again.metadata(&bytes, chunk_size);
+    assert_eq!(again.announce(&metadata).await.status.as_u16(), 201);
+    assert!(owned(&test.service.engine.receipts_snapshot()));
+    assert!(owned(&receipts.borrow()));
+}

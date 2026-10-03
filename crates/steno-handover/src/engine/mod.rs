@@ -187,6 +187,20 @@ struct State {
     /// intake's answer. The verify and the admit yield, so a retried
     /// `complete` must not start a second verify or admission.
     completing: BTreeSet<Uuid>,
+    /// Devices revoked since start and not paired again. A request that
+    /// read its receipt before the revoke still writes it back after; its
+    /// receipts stay out of `active_receipts` (and the stream) all the same.
+    revoked: BTreeSet<Uuid>,
+}
+
+impl State {
+    /// Keeps `receipt` as the live copy, unless its device was revoked.
+    fn remember(&mut self, receipt: &HandoverReceipt) {
+        if !self.revoked.contains(&receipt.device_id) {
+            self.active_receipts
+                .insert(receipt.recording_id, receipt.clone());
+        }
+    }
 }
 
 pub struct Engine {
@@ -257,6 +271,7 @@ impl Engine {
                 pairing: None,
                 active_receipts: BTreeMap::new(),
                 completing: BTreeSet::new(),
+                revoked: BTreeSet::new(),
             }),
             saves: tokio::sync::Mutex::new(()),
         }
@@ -338,13 +353,17 @@ impl Engine {
     /// Forgets the device and drops whatever it was uploading.
     pub async fn revoke(&self, device_id: Uuid) -> store::Result<()> {
         let mut unfinished = Vec::new();
-        self.state().active_receipts.retain(|_, receipt| {
-            let owned = receipt.device_id == device_id;
-            if owned && receipt.state.kind() != HandoverStateKind::Complete {
-                unfinished.push(receipt.recording_id);
-            }
-            !owned
-        });
+        {
+            let mut state = self.state();
+            state.revoked.insert(device_id);
+            state.active_receipts.retain(|_, receipt| {
+                let owned = receipt.device_id == device_id;
+                if owned && receipt.state.kind() != HandoverStateKind::Complete {
+                    unfinished.push(receipt.recording_id);
+                }
+                !owned
+            });
+        }
         for recording_id in unfinished {
             self.inbox.discard(recording_id);
         }
@@ -441,6 +460,7 @@ impl Engine {
             }
             return HandoverResponse::internal_error("saving the device", &error);
         }
+        self.state().revoked.remove(&device_id);
         HandoverResponse::json(
             StatusCode::OK,
             &wire::PairResponse {
@@ -498,9 +518,7 @@ impl Engine {
     /// when the save's turn comes (`saves` is FIFO), so the last save of a
     /// burst carries every chunk of the burst.
     pub(crate) async fn persist(&self, receipt: &HandoverReceipt) -> store::Result<()> {
-        self.state()
-            .active_receipts
-            .insert(receipt.recording_id, receipt.clone());
+        self.state().remember(receipt);
         let result = {
             let _turn = self.saves.lock().await;
             let saved = self
@@ -535,7 +553,7 @@ impl Engine {
         if let Some(active) = state.active_receipts.get(&recording_id) {
             return Ok(Some(active.clone()));
         }
-        state.active_receipts.insert(recording_id, stored.clone());
+        state.remember(&stored);
         Ok(Some(stored))
     }
 
