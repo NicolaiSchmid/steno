@@ -21,9 +21,17 @@
 //! - [`pipeline`]: [`Transcriber`], which runs the above in order and
 //!   retries empty chunks with a wider window.
 //! - [`onnx`]: the ONNX Runtime backend over our fp32 export.
-//! - [`model_store`]: the manifest and the checksummed download.
-//! - [`engine`]: [`OnnxSpeechEngine`], the `SpeechEngine` implementation.
-//! - [`error`]: [`SpeechError`], the one error type.
+//! - [`model_store`]: the manifest, its two hosts and the checksummed,
+//!   resumable download.
+//! - [`engine`]: [`OnnxSpeechEngine`], the in-process `SpeechEngine` the
+//!   sidecar hosts.
+//! - [`sidecar`]: [`SidecarSpeechEngine`], the `SpeechEngine` over the
+//!   `steno-speech-sidecar` child process, and its wire protocol.
+//! - [`runtime`]: [`SpeechSettings`] and [`SpeechRuntime`], which engine
+//!   runs on which platform.
+//! - [`wav`]: the 16 kHz PCM-16 reader of the example and the tests.
+//! - [`error`]: [`SpeechError`], the one error type, and [`SidecarError`],
+//!   its cause when the speech sidecar fails.
 //!
 //! # Models
 //!
@@ -36,20 +44,27 @@
 //! example and the FLEURS test: they read `STENO_MODELS_DIR` as the store
 //! root itself, else `<support directory>/Models`.
 //!
-//! Silero VAD downloads from the sherpa-onnx release with its checksum
-//! verified. The fp32 Parakeet export is not hosted yet: produce it with
+//! Silero VAD downloads from the sherpa-onnx GitHub release with its
+//! checksum verified. The fp32 Parakeet export (2.6 GB, over GitHub's 2 GB
+//! asset limit) is prepared for Hugging Face (`scripts/upload-models.sh`,
+//! [`ModelSource::HuggingFace`]) but not uploaded yet: until
+//! [`PARAKEET_V3_FP32_REVISION`] is set, produce it with
 //! `spikes/onnx-speech/export/` and place `encoder.onnx`,
 //! `encoder.weights`, `decoder.onnx`, `joiner.onnx` and `tokens.txt` in
-//! `<root>/parakeet-tdt-0.6b-v3-fp32/`; `prepare` says so when they are
-//! missing.
+//! `<root>/parakeet-tdt-0.6b-v3-fp32/`, or serve a copy as a mirror
+//! ([`ModelStore::with_mirror`]); `prepare` says so when they are missing.
 //!
 //! # Threads and process boundaries
 //!
 //! Inference is synchronous and CPU-bound. [`OnnxSpeechEngine`] runs it on
-//! a blocking thread when a tokio runtime is present. Every type here is
-//! `Send` and holds its own sessions, so the sidecar of speech-stack
-//! decision 5 can host a [`Transcriber`] in another process behind the
-//! same `SpeechEngine`.
+//! a blocking thread when a tokio runtime is present. The app does not run
+//! it in its own process (invariant 4, speech-stack decision 5): on Linux
+//! and Windows it runs [`SidecarSpeechEngine`], which hosts the same
+//! [`Transcriber`] in `steno-speech-sidecar` and sends it the audio over a
+//! pipe, so an abort out of ONNX Runtime ends the child and not the app;
+//! on macOS the in-process `CoreML` engine is the default and the sidecar
+//! a fallback behind [`SpeechSettings::onnx_sidecar_on_mac`]
+//! ([`runtime`]).
 //!
 //! ```no_run
 //! use steno_core::{AudioBuffer16k, SpeechEngine};
@@ -97,9 +112,12 @@ pub mod merge;
 pub mod model_store;
 pub mod onnx;
 pub mod pipeline;
+pub mod runtime;
 pub mod segmentation;
+pub mod sidecar;
 pub mod vad;
 pub mod vocab;
+pub mod wav;
 
 pub use backend::{
     DecoderState, DecoderStep, EncoderOutput, FRAME_SAMPLES, FRAME_SECONDS, Features,
@@ -108,12 +126,17 @@ pub use backend::{
 pub use chunker::{Chunk, ChunkerConfig, Cut};
 pub use decoder::{DecodeStats, DecoderConfig, Token};
 pub use engine::OnnxSpeechEngine;
-pub use error::SpeechError;
+pub use error::{SidecarError, SpeechError};
 pub use features::MelExtractor;
 pub use language::{LanguageRecognizer, LanguageTagger, StopwordRecognizer, WhatlangRecognizer};
-pub use model_store::{DownloadProgress, ModelAsset, ModelFile, ModelStore};
+pub use model_store::{
+    DownloadProgress, ModelAsset, ModelFile, ModelSource, ModelStore, PARAKEET_V3_FP32_REVISION,
+    STENO_MODELS_REPO,
+};
 pub use onnx::{OnnxBackend, OnnxOptions};
 pub use pipeline::{PipelineConfig, RecoveryConfig, Transcriber, Transcript};
+pub use runtime::{SpeechRuntime, SpeechSettings};
 pub use segmentation::{TokenAggregator, TranscriptSegmenter};
+pub use sidecar::{SidecarConfig, SidecarHealth, SidecarSpeechEngine};
 pub use vad::{EnergyVad, SileroVad, VadConfig, VoiceActivityDetector};
 pub use vocab::Vocab;

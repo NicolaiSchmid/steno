@@ -29,4 +29,13 @@ pub trait SpeechEngine: Send + Sync {
         audio: &AudioBuffer16k,
         hint: Option<&LanguageTag>,
     ) -> BoundaryResult<Vec<RawSegment>>;
+
+    /// Frees what `prepare` loaded, so the working set goes back between
+    /// jobs; the next `prepare` or `transcribe` loads again. For the
+    /// pipeline to call after each job (WP6b). The default does nothing,
+    /// for engines with nothing worth freeing. Rust only: Swift's protocol
+    /// has no counterpart.
+    async fn release(&self) -> BoundaryResult<()> {
+        Ok(())
+    }
 }
