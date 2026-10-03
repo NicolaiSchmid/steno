@@ -241,6 +241,28 @@ What the bridge crate (WP1) asks of the Swift side before WP6 fills the list:
   language gets "sw" instead of "Swahili" in the prompt on the Rust side until the
   table grows.
 
+Rust is deliberately stricter than Swift in these places; each is ported to Swift or
+accepted before cutover:
+
+- Concurrent mode downgrade: a 400 steps the mode down only from the mode its request
+  went out under, so two concurrent rejections step once and announce once; Swift
+  steps from the mode it holds when the 400 arrives and can skip a step.
+- Concurrent parameter rejection: two requests rejected for `max_tokens` (or
+  `temperature`) at once are both resent; Swift fails the second with HTTP 400.
+- Waiters on a spent refresh token: callers that waited for a refresh the endpoint
+  refused for good get that answer without posting the dead token again; Swift's next
+  caller posts it again.
+- Write-back after the file changed hands: a re-read that shows `NotSignedIn` or
+  `ApiKeyLogin`, or a refresh token other than the one posted, keeps the file as it
+  is; Swift writes the new tokens over it.
+- Reused-token re-read: a rotated file whose access token is already fit to send is
+  used, not refreshed again; Swift refreshes it.
+- 401 refresh: only a refresh that went through uses up the one refresh a completion
+  gets after a 401; Swift spends it on a failed refresh too.
+- Redaction: secrets are removed before an error body is cut to its first characters,
+  and the token refresh redacts the account id too; Swift cuts first and redacts the
+  two tokens only.
+
 ## Progress
 
 One row per package. WP1 to WP3 were a chain; every package after them is one
@@ -254,8 +276,8 @@ PR off `main`.
 | Core protocols and fakes | `feat/rust-protocols` | #162 | merged |
 | Bridge on core | `refactor/rust-bridge-on-core` | #161 | merged |
 | WP4b CoreML speech backend | `feat/rust-speech-coreml` | #163 | merged |
-| WP7b adapters | `feat/rust-adapters` | #165 | open |
-| WP7a LLM (`steno-llm`) | `feat/rust-llm` | #167 | open: both clients, both passes, stub server, 187 tests |
+| WP7a LLM (`steno-llm`) | `feat/rust-llm` | #167 | open |
+| WP7b adapters | `feat/rust-adapters` | #165 | merged |
 
 WP4b is `crates/steno-speech-coreml`: `objc2-core-ml` behind one safe module,
 the four backend calls, the FluidAudio 0.17.4 heuristics ported
