@@ -144,7 +144,7 @@ pub fn same_size(a: (f64, f64), b: (f64, f64)) -> bool {
 /// The size a panel takes from its page's report: finite and at least a
 /// point each way (a sub-point, zero or negative size is no size), rounded
 /// up to whole points (the window system sizes in whole pixels, and a
-/// window a fraction narrower than its pill clips it and, on WebKitGTK,
+/// window a fraction narrower than its pill clips it and, on `WebKitGTK`,
 /// summons scrollbars), and clamped to the work area it hangs in, so a
 /// report of a million points cannot grow the window past its screen.
 pub fn accepted_size(reported: (f64, f64), work_area: (f64, f64)) -> Option<(f64, f64)> {

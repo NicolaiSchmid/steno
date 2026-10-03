@@ -4,7 +4,7 @@
 //! the `bridge_call` command the page's Tauri transport talks to. The shell
 //! holds no logic: with the default `fixture-host` feature the bridge is
 //! answered from the recorded fixtures, so the whole UI runs on Linux and
-//! Windows before any pipeline exists; WP6b swaps the host for the real one.
+//! Windows before any pipeline exists; `WP6b` swaps the host for the real one.
 //!
 //! What the shell owns beside the windows (WP8): the tray (`tray`), the
 //! panels (`panels`), launch at login (`autostart`), updates (`updater`),
