@@ -1,9 +1,10 @@
 //! The protocol core behind the listener: the auth gate and every route.
 //! Independent of the connection and of TLS, so [`Engine::handle`] is driven
 //! directly by the tests. Owned by the service; one lock around the pairing
-//! session, the live receipts and the completions in flight, held for
-//! synchronous sections only, never across a store, file or intake call, at
-//! which the next request runs. The recording routes live in
+//! session, the live receipts, the completions in flight and the revoked
+//! devices, held for synchronous sections only, never across a store, file
+//! or intake call, so another request runs while one awaits. The recording
+//! routes live in
 //! `recording.rs`. Swift: `Routing/HandoverEngine.swift`,
 //! `Routing/HTTPMessages.swift`.
 
@@ -57,9 +58,8 @@ pub struct HandoverRequest {
 }
 
 /// The `Authorization` header carries the pairing secret or the bearer
-/// token and the body of `/v1/pair` the device's request: neither belongs
-/// in a log line, so the headers show as their names and the body as its
-/// length.
+/// token, so headers show as their names; the body (audio, or JSON) shows
+/// as its length.
 impl std::fmt::Debug for HandoverRequest {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("HandoverRequest")

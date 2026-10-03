@@ -26,6 +26,9 @@ pub enum ListenerState {
     Failed(String),
 }
 
+/// The computer's side of the handover: one per host, created with
+/// [`HandoverService::new`], started and stopped with the app. The fields
+/// are what the host and the tests read; the listener itself is private.
 pub struct HandoverService {
     pub configuration: HandoverConfiguration,
     pub identity: Arc<HandoverIdentity>,
@@ -142,10 +145,13 @@ impl HandoverService {
         self.engine.begin_pairing()
     }
 
+    /// Closes the open pairing window, if any: the QR code on screen pairs
+    /// nothing from now on.
     pub fn cancel_pairing(&self) {
         self.engine.cancel_pairing();
     }
 
+    /// Every paired phone, oldest pairing first.
     pub async fn paired_devices(&self) -> store::Result<Vec<PairedDevice>> {
         self.engine.with_store(Store::paired_devices).await
     }
@@ -210,6 +216,8 @@ impl HandoverService {
         }
     }
 
+    /// Stops the listener ([`HandoverServer::stop`]) and reports
+    /// [`ListenerState::Stopped`]. Idempotent.
     pub async fn stop(&self) {
         let server = self.server.lock().await.take();
         if let Some(server) = server {

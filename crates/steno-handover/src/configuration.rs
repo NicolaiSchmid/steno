@@ -20,8 +20,10 @@ pub struct HandoverConfiguration {
     /// Bonjour instance name; the phone shows it. Defaults to
     /// [`HandoverConfiguration::default_service_name`].
     pub service_name: String,
-    /// Publish `_steno._tcp` on the local network. `false` binds loopback
-    /// only.
+    /// Publish `_steno._tcp` and serve on the LAN addresses
+    /// ([`server::advertise::lan_addresses`](crate::server::advertise::lan_addresses))
+    /// and loopback; `false` binds
+    /// loopback only.
     pub advertise: bool,
     /// The largest chunk the computer accepts; the phone declares its own
     /// chunk size per recording and it must not exceed this. 16 MiB in the

@@ -2,11 +2,10 @@
 //! runs HTTP/1.1 over each connection ([`connection`]) and, when
 //! advertising, publishes `_steno._tcp` with the TXT record (`v=1`,
 //! `id=<macID>`) through Bonjour ([`advertise`]). Loopback only when
-//! `advertise` is false; otherwise every IPv4 address is bound and a
-//! connection that arrives on an address outside
-//! [`advertise::lan_addresses`] (a VPN tunnel) or loopback is closed
-//! before the handshake, which is what the Swift listener's prohibited
-//! interface types do. Swift: `Network/HandoverServer.swift`,
+//! `advertise` is false; otherwise every IPv4 address is bound, and a
+//! connection whose local address is neither loopback nor a LAN address
+//! (a VPN tunnel) is closed before the handshake, as the Swift listener's
+//! prohibited interface types refuse it. Swift: `Network/HandoverServer.swift`,
 //! `Network/ServerMetrics.swift`.
 
 pub mod advertise;
