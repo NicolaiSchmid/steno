@@ -98,18 +98,5 @@ impl MetadataValidation {
 /// zero-width spaces only is empty here too.
 #[must_use]
 pub fn is_foundation_whitespace(character: char) -> bool {
-    matches!(
-        character,
-        '\u{9}'..='\u{D}'
-            | ' '
-            | '\u{85}'
-            | '\u{A0}'
-            | '\u{1680}'
-            | '\u{2000}'..='\u{200B}'
-            | '\u{2028}'
-            | '\u{2029}'
-            | '\u{202F}'
-            | '\u{205F}'
-            | '\u{3000}'
-    )
+    character.is_whitespace() || character == '\u{200B}'
 }
