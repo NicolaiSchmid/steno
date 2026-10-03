@@ -633,7 +633,7 @@ async fn a_failed_write_is_500_without_the_inbox_path() {
     let failed = phone.upload(metadata.recording_id, 0, &bytes).await;
     assert_eq!(failed.status, 500);
     let problem = failed.json::<wire::Problem>().error;
-    assert_eq!(problem, "writing the chunk failed on the Mac");
+    assert_eq!(problem, "writing the chunk failed on the computer");
     assert!(!problem.contains(inbox.directory.to_str().unwrap()));
     assert!(
         phone

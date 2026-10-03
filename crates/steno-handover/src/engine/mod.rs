@@ -131,7 +131,7 @@ impl HandoverResponse {
         tracing::error!(target: "steno::handover", "{what} failed: {error}");
         Self::problem(
             StatusCode::INTERNAL_SERVER_ERROR,
-            format!("{what} failed on the Mac"),
+            format!("{what} failed on the computer"),
         )
     }
 
