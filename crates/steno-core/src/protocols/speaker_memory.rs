@@ -24,10 +24,11 @@ pub trait SpeakerMemory: Send + Sync {
     ) -> BoundaryResult<Vec<SpeakerMatch>>;
 
     /// The best candidate at or above `threshold` that is at least `margin`
-    /// above the runner-up; `None` otherwise, and `None` when the best
-    /// similarity is not finite (a NaN compares false against every
-    /// threshold and would pass). Swift's default `margin` is
-    /// [`DEFAULT_MATCH_MARGIN`].
+    /// above the runner-up; `None` otherwise. Exactly Swift's arithmetic: a
+    /// NaN best never matches (Swift's `>=` rejects it, Rust's `<` would
+    /// not, hence the explicit check), while a non-finite runner-up does
+    /// not block the match, because `best - NaN < margin` is false in both
+    /// languages. Swift's default `margin` is [`DEFAULT_MATCH_MARGIN`].
     async fn match_voice(
         &self,
         embedding: &Embedding,
@@ -38,7 +39,7 @@ pub trait SpeakerMemory: Send + Sync {
         let Some(best) = ranked.first() else {
             return Ok(None);
         };
-        if !best.similarity.is_finite() || best.similarity < threshold {
+        if best.similarity.is_nan() || best.similarity < threshold {
             return Ok(None);
         }
         if let Some(runner_up) = ranked.get(1)
@@ -108,9 +109,23 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_nan_similarity_never_matches() {
+    async fn a_nan_best_never_matches() {
         assert_eq!(matched(&ranked(&[f32::NAN]), 0.0, 0.0).await, None);
         assert_eq!(matched(&ranked(&[f32::NAN, 0.9]), 0.0, 0.0).await, None);
-        assert_eq!(matched(&ranked(&[f32::INFINITY]), 0.0, 0.0).await, None);
+    }
+
+    #[tokio::test]
+    async fn non_finite_values_elsewhere_decide_as_in_swift() {
+        // `inf >= threshold` holds in Swift, so an infinite best matches.
+        assert_eq!(
+            matched(&ranked(&[f32::INFINITY]), 0.0, 0.0).await,
+            Some(f32::INFINITY)
+        );
+        assert_eq!(matched(&ranked(&[f32::NEG_INFINITY]), 0.0, 0.0).await, None);
+        // `best - NaN < margin` is false in both languages: no block.
+        assert_eq!(
+            matched(&ranked(&[0.9, f32::NAN]), 0.0, DEFAULT_MATCH_MARGIN).await,
+            Some(0.9)
+        );
     }
 }

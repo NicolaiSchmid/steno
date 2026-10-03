@@ -11,7 +11,10 @@ use super::lock;
 use crate::{BoundaryResult, Embedding, Person, SpeakerMatch, SpeakerMemory};
 
 /// A `SpeakerMemory` over an in-memory list of people: cosine ranking over
-/// the voices it was given, independent of any store.
+/// the voices it was given, independent of any store. Ties rank by person
+/// id, the order Swift gets from the uppercase id text. A similarity that
+/// is not finite (an embedding holding `inf` or NaN) is dropped before
+/// ranking, so the default `match_voice` only ever sees numbers.
 #[derive(Debug, Default)]
 pub struct InMemorySpeakerMemory {
     people: Mutex<BTreeMap<Uuid, Person>>,
@@ -53,14 +56,15 @@ impl SpeakerMemory for InMemorySpeakerMemory {
             .values()
             .filter_map(|person| {
                 let known = person.embedding.as_ref()?;
-                Some(SpeakerMatch {
+                let similarity = known.cosine_similarity(embedding);
+                similarity.is_finite().then(|| SpeakerMatch {
                     person: person.clone(),
-                    similarity: known.cosine_similarity(embedding),
+                    similarity,
                 })
             })
             .collect();
-        // Best first; ties broken by id. Swift compares the uppercase id
-        // text, which orders like the bytes.
+        // Best first; ties broken by id, which orders like Swift's
+        // uppercase id text.
         ranked.sort_by(|left, right| {
             right
                 .similarity
@@ -162,5 +166,18 @@ mod tests {
             ["First", "Second"]
         );
         assert_eq!(names(memory.candidates(&voice, 0).await.unwrap()), [""; 0]);
+    }
+
+    #[tokio::test]
+    async fn a_voice_with_an_infinite_component_matches_nobody() {
+        let memory = InMemorySpeakerMemory::new([
+            sample_data::person(0, "Anna"),
+            sample_data::person(1, "Ben"),
+        ]);
+        // `inf / inf` and `0 * inf` are NaN: every similarity is non-finite.
+        let mut voice = sample_data::embedding(0);
+        voice.0[0] = f32::INFINITY;
+        assert!(memory.candidates(&voice, 5).await.unwrap().is_empty());
+        assert_eq!(memory.match_voice(&voice, 0.0, 0.0).await.unwrap(), None);
     }
 }
