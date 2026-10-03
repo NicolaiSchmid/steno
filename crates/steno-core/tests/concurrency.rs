@@ -103,6 +103,38 @@ fn two_stores_write_the_same_file_without_errors() {
     );
 }
 
+/// How long the other store holds the write lock in the waiting test: well
+/// inside the five-second busy timeout, far longer than a commit.
+const HOLD: Duration = Duration::from_secs(1);
+
+/// A write waits out the other store's transaction instead of failing: one
+/// store holds the write lock for [`HOLD`] while the other begins its own,
+/// which takes the write lock up front and so waits on the busy timeout.
+/// Fails when the timeout is shorter than the hold.
+#[test]
+fn a_write_waits_for_the_other_stores_transaction() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("steno.sqlite");
+    let holder = Store::open(&path).unwrap();
+    let waiter = Store::open(&path).unwrap();
+    let held = Arc::new(Barrier::new(2));
+    let waiting = {
+        let held = held.clone();
+        thread::spawn(move || {
+            held.wait();
+            waiter.write(|_| Ok(()))
+        })
+    };
+    holder
+        .write(|_| {
+            held.wait();
+            thread::sleep(HOLD);
+            Ok(())
+        })
+        .unwrap();
+    waiting.join().unwrap().unwrap();
+}
+
 /// Both opens succeed and each migration is recorded once, whichever
 /// process got to the file first.
 #[test]
