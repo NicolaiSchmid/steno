@@ -4656,6 +4656,8 @@ dependencies = [
  "serde_json",
  "steno-bridge",
  "steno-core",
+ "steno-host",
+ "steno-services",
  "tauri",
  "tauri-build",
  "tauri-nspanel",
@@ -4667,6 +4669,7 @@ dependencies = [
  "tauri-plugin-updater",
  "thiserror 2.0.21",
  "tokio",
+ "tracing",
  "url",
  "uuid",
 ]

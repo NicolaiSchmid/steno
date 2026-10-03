@@ -1,10 +1,11 @@
-//! The Tauri shell (WP3 and WP8 of
+//! The Tauri shell (WP3, WP8 and WP6b of
 //! `.plans/2026-10-02-rust-core-and-tauri-shell.md`): three windows and two
 //! floating panels around the web UI in `apps/macos/web`, a tray icon, and
 //! the `bridge_call` command the page's Tauri transport talks to. The shell
-//! holds no logic: with the default `fixture-host` feature the bridge is
-//! answered from the recorded fixtures, so the whole UI runs on Linux and
-//! Windows before any pipeline exists; `WP6b` swaps the host for the real one.
+//! holds no logic: the bridge is answered by `steno_host::Host` over the
+//! services graph (`host`); with the opt-in `fixture-host` feature it is
+//! answered from the recorded fixtures instead, so the UI runs without a
+//! database.
 //!
 //! What the shell owns beside the windows (WP8): the tray (`tray`), the
 //! macOS menu bar (`menu`), the actions behind both menus (`actions`), the
@@ -23,9 +24,9 @@
 //! (`recording::RecorderState`, `windows::Spec`).
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
-// Without the fixture host nothing emits a snapshot or publishes a request
-// yet; those paths stay compiled so WP6b wires them instead of rewriting them.
-#![cfg_attr(not(feature = "fixture-host"), allow(dead_code))]
+// The fixture host leaves the real host's seams (the login item, the
+// opener, the alert) unused.
+#![cfg_attr(feature = "fixture-host", allow(dead_code))]
 
 mod actions;
 mod autostart;
@@ -54,8 +55,17 @@ use tauri::Manager;
 use crate::windows::BridgeWindow;
 
 fn main() {
+    steno_services::log_to_stderr(steno_services::LOG_FILTER);
     #[cfg(target_os = "linux")]
     display::choose();
+    // The runtime the services graph runs on, beside Tauri's own: the
+    // pipeline, the recorder's saves and the handover listener.
+    let runtime = std::sync::Arc::new(
+        tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .expect("a tokio runtime"),
+    );
     let mut builder = tauri::Builder::default();
     // First, so a second instance exits before it builds anything; it
     // hands its arguments (a `steno:` link among them) to this one and
@@ -84,7 +94,6 @@ fn main() {
         // One handler for every menu: the tray's on every platform and
         // the menu bar's on macOS reach the same listeners.
         .on_menu_event(|app, event| actions::on_menu_event(app, &event))
-        .manage(host::Host)
         .manage(smoke::Smoke::default())
         .manage(panels::Panels::default())
         .manage(windows::Pages::default())
@@ -94,17 +103,41 @@ fn main() {
             bridge::bridge_call,
             bridge::panel_call
         ])
-        .setup(|app| {
-            let handle = app.handle();
-            build_tray(handle);
-            windows::open(handle, windows::BridgeWindow::Main, None, None)?;
-            deep_links::install(handle);
-            smoke::arm(handle);
-            Ok(())
-        })
+        .setup(move |app| setup(app.handle(), &runtime))
         .build(tauri::generate_context!())
         .expect("steno-desktop failed to build");
-    app.run(|app, event| match event {
+    app.run(on_event);
+}
+
+/// Builds the host, the tray and the main window, opens onboarding when
+/// the host asks for it, and runs the launch sequence.
+fn setup(
+    handle: &tauri::AppHandle,
+    runtime: &tokio::runtime::Runtime,
+) -> Result<(), Box<dyn std::error::Error>> {
+    #[cfg(not(feature = "fixture-host"))]
+    let host = host::Host::real(handle, runtime)?;
+    #[cfg(feature = "fixture-host")]
+    let host = host::Host::fixtures();
+    let onboarding = host.should_open_onboarding();
+    handle.manage(host);
+    build_tray(handle);
+    windows::open(handle, windows::BridgeWindow::Main, None, None)?;
+    deep_links::install(handle);
+    // Before onboarding opens, so a smoke run places it.
+    smoke::arm(handle);
+    if onboarding {
+        windows::open(handle, windows::BridgeWindow::Onboarding, None, None)?;
+    }
+    host::host(handle).launch(runtime);
+    // The launch may have registered the login item.
+    tray::note_login_item(handle);
+    Ok(())
+}
+
+/// One turn of the run loop.
+fn on_event(app: &tauri::AppHandle, event: tauri::RunEvent) {
+    match event {
         tauri::RunEvent::ExitRequested { code, api, .. } => {
             if !exits_on(code, || tray_at_close(app)) {
                 api.prevent_exit();
@@ -137,6 +170,9 @@ fn main() {
             ..
         } => {
             app.state::<windows::Pages>().gone(&label);
+            if label == BridgeWindow::Onboarding.as_str() {
+                host::host(app).onboarding_window_closed();
+            }
             if exits_when_destroyed(&label, || tray_at_close(app)) {
                 actions::quit(app);
             }
@@ -160,7 +196,7 @@ fn main() {
             ..
         } => actions::open(app, windows::BridgeWindow::Main),
         _ => {}
-    });
+    }
 }
 
 /// Builds the tray. No tray is not fatal: the windows still work, and
