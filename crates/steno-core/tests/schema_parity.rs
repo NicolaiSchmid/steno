@@ -55,12 +55,13 @@ fn reopening_applies_nothing_and_sets_the_grdb_pragmas() {
     drop(Store::open(&path).unwrap());
     let store = Store::open(&path).unwrap();
     assert_eq!(store.applied_migrations().unwrap().len(), 4);
-    let (journal, foreign_keys, synchronous): (String, i64, i64) = store
+    let (journal, foreign_keys, synchronous, busy_timeout): (String, i64, i64, i64) = store
         .read(|connection| {
             Ok((
                 connection.query_row("PRAGMA journal_mode", [], |row| row.get(0))?,
                 connection.query_row("PRAGMA foreign_keys", [], |row| row.get(0))?,
                 connection.query_row("PRAGMA synchronous", [], |row| row.get(0))?,
+                connection.query_row("PRAGMA busy_timeout", [], |row| row.get(0))?,
             ))
         })
         .unwrap();
@@ -68,6 +69,8 @@ fn reopening_applies_nothing_and_sets_the_grdb_pragmas() {
     assert_eq!(foreign_keys, 1);
     // 1 is NORMAL, which GRDB's `DatabasePool` sets on its writer.
     assert_eq!(synchronous, 1);
+    // Milliseconds; `MeetingStore.onDisk`'s `.timeout(5)`.
+    assert_eq!(busy_timeout, 5000);
 }
 
 /// A database the Swift app migrated already records every identifier;
