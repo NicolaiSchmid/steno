@@ -19,10 +19,10 @@ fn main() {
 
     use steno_speech_coreml::parity::{Options, run};
 
+    const USAGE: &str = "usage: steno-coreml-parity [--models DIR] [--out DIR] [--concurrency N] <corpus-dir> <baseline-dir>";
+
     fn usage() -> ! {
-        eprintln!(
-            "usage: steno-coreml-parity [--models DIR] [--out DIR] [--concurrency N] <corpus-dir> <baseline-dir>"
-        );
+        eprintln!("{USAGE}");
         std::process::exit(2);
     }
 
@@ -31,6 +31,10 @@ fn main() {
     let mut positional: Vec<PathBuf> = Vec::new();
     while let Some(arg) = args.next() {
         match arg.as_str() {
+            "-h" | "--help" => {
+                println!("{USAGE}");
+                return;
+            }
             "--models" => options.models = Some(args.next().map_or_else(|| usage(), PathBuf::from)),
             "--out" => options.out = Some(args.next().map_or_else(|| usage(), PathBuf::from)),
             "--concurrency" => {
