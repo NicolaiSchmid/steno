@@ -152,6 +152,22 @@ fn interrupted_recordings_fail_at_launch() {
     );
 }
 
+/// The reason is Swift's default, read from the Swift source so the two
+/// cannot drift apart.
+#[test]
+fn the_interrupted_recording_reason_is_the_swift_default() {
+    let swift = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../Sources/StenoCore/Storage/MeetingStore.swift"),
+    )
+    .unwrap();
+    let declaration = format!(
+        "reason: String = \"{}\"",
+        Store::INTERRUPTED_RECORDING_REASON
+    );
+    assert!(swift.contains(&declaration), "{declaration}");
+}
+
 #[test]
 fn deleting_a_meeting_cascades_and_keeps_persons() {
     let (store, meeting) = populated();

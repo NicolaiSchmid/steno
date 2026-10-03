@@ -413,7 +413,7 @@ impl App {
 
         if let Err(error) = self
             .store
-            .fail_interrupted_recordings("Steno quit before this recording ended.", Utc::now())
+            .fail_interrupted_recordings(Store::INTERRUPTED_RECORDING_REASON, Utc::now())
         {
             tracing::warn!(%error, "interrupted recordings could not be marked");
         }
@@ -520,6 +520,34 @@ mod tests {
                 .count(),
             1,
             "the transcribe rate was learned under the current engine's id"
+        );
+    }
+
+    /// What `App::launch` does to a meeting a previous process left
+    /// recording: it fails with Swift's reason.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn launch_fails_a_recording_the_last_process_left_with_the_swift_reason() {
+        let dir = tempfile::tempdir().unwrap();
+        let app = build(AppOptions {
+            paths: StenoPaths::new(dir.path().join("support")),
+            database_path: None,
+            keyring: false,
+            opener: Arc::new(steno_host::fakes::FakeOpener::default()),
+            runtime: tokio::runtime::Handle::current(),
+            version: "0.0.0".to_owned(),
+            make_capture_session: Arc::new(|_| Err("no capture in this test".to_owned())),
+        })
+        .unwrap();
+        let mut meeting = steno_core::testing::sample_data::meeting();
+        meeting.state = steno_core::MeetingState::Recording;
+        app.store.save_meeting(&meeting).unwrap();
+        let host = Arc::new(app.host().unwrap());
+        app.launch(&host);
+        assert_eq!(
+            app.store.meeting(meeting.id).unwrap().unwrap().state,
+            steno_core::MeetingState::Failed {
+                reason: "Recording was interrupted before it finished.".to_owned()
+            }
         );
     }
 
