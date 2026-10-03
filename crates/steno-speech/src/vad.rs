@@ -27,6 +27,11 @@ pub trait VoiceActivityDetector: Send {
     fn speech_regions(&mut self, samples: &[f32]) -> Result<Vec<Range<usize>>, SpeechError>;
 }
 
+/// The defaults are the sherpa-onnx configuration the spike D harness ran
+/// (`spikes/onnx-speech/src/vad.rs` and `main.rs`: threshold 0.5, minimum
+/// silence 0.25 s, minimum speech 0.1 s), not Silero's own 100 ms of
+/// silence and 250 ms of speech; the negative threshold and the padding
+/// are Silero's.
 #[derive(Debug, Clone, PartialEq)]
 pub struct VadConfig {
     /// A window at or over this probability is speech.
@@ -34,8 +39,12 @@ pub struct VadConfig {
     /// Speech ends only when the probability falls under this
     /// (Silero's `threshold - 0.15`).
     pub negative_threshold: f32,
+    /// How long the probability must stay under the negative threshold
+    /// before the region closes.
     pub min_silence_seconds: f32,
+    /// Regions shorter than this are dropped.
     pub min_speech_seconds: f32,
+    /// Added before and after every kept region.
     pub pad_seconds: f32,
 }
 

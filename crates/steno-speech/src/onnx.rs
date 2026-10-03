@@ -9,7 +9,7 @@
 //! prediction network from the decoder's state inputs; the export's
 //! `vocab_size` metadata (8192, without the blank) is checked against the
 //! vocabulary and never used as the blank id, the mistake behind the
-//! spike-E decode loop's 64 % WER.
+//! spike E decode loop's 64 % WER.
 //! Swift: none on this path; the Mac runs `FluidAudio`'s `CoreML` models.
 
 use std::path::Path;
@@ -26,7 +26,9 @@ use crate::error::SpeechError;
 use crate::features::MelExtractor;
 use crate::vocab::Vocab;
 
-/// Session options shared by every model.
+/// Session options shared by every model. Each of the four sessions
+/// (encoder, decoder, joiner, Silero) gets its own intra-op pool of this
+/// size; only one of them runs at a time, so the pools do not add up.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OnnxOptions {
     /// Threads inside one operator; the plan measured at four.

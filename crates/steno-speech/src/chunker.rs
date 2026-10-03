@@ -1,8 +1,7 @@
 //! The pause-aligned chunk layout (decision 1 of the speech-stack plan):
-//! chunks aim at `target_seconds`, cut at the longest VAD pause within a
-//! search window either side of the target, never inside speech when a
-//! pause exists, with an energy-minimum fallback; a long pause ends a chunk
-//! early and is skipped; `overlap_seconds` of audio is shared with the next
+//! chunks aim at `target_seconds` and cut at the longest VAD pause inside
+//! the search window either side of the target, else at the quietest
+//! 100 ms frame there; a long pause ends a chunk early and is skipped; `overlap_seconds` of audio is shared with the next
 //! chunk for the merge. No chunk exceeds `max_seconds`, a memory clamp
 //! (attention grows with the square of the window: 13 GB at 600 s, spike
 //! E), not the position table's 800 s cap. Ported from
@@ -57,6 +56,11 @@ pub struct ChunkerConfig {
     pub min_chunk_seconds: f32,
 }
 
+/// The defaults are the spike D harness values
+/// (`spikes/onnx-speech/src/main.rs`: target 25 s, search 4 s, long pause
+/// 3 s, pad 0.25 s); `max_seconds` 60 and `overlap_seconds` 1.5 are
+/// decision 1 (the harness ran with a 190 s clamp); `min_chunk_seconds` is
+/// new here and keeps a cut from landing right after a chunk's start.
 impl Default for ChunkerConfig {
     fn default() -> Self {
         ChunkerConfig {

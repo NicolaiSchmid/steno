@@ -5,7 +5,9 @@
 //! normalisation over the window. The export's encoder was traced behind
 //! this preprocessor, so these are its training-time values; spike F
 //! showed sherpa-onnx's Kaldi-style settings scoring the same, so the
-//! differences sit below the model's sensitivity.
+//! differences sit below the model's sensitivity. The v3 configuration has
+//! `pad_to: 0` and dither only at training time, which is why neither
+//! appears here.
 //! Swift: none; `FluidAudio` ships this step as `Preprocessor.mlmodelc`.
 
 use std::sync::Arc;

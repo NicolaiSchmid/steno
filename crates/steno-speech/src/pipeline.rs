@@ -1,8 +1,10 @@
 //! The pipeline above the tensors, in order: VAD regions, the pause-aligned
 //! layout, one decode per chunk with the empty-decode recovery, the LCS
-//! merge, pieces to words to segments, and the language tag. Generic over
-//! [`SpeechBackend`], so a fake backend drives it in tests and the `CoreML`
-//! backend of `WP4b` slots in unchanged.
+//! merge, pieces to words to segments, and the language tag. A chunk is a
+//! range the layout chose; a window is the range actually decoded, the
+//! chunk itself or, after a recovery, the chunk with more audio around it.
+//! Generic over [`SpeechBackend`], so a fake backend drives it in tests and
+//! the `CoreML` backend on the Mac slots in unchanged.
 //! Swift: `Sources/StenoSpeech/Engines/ParakeetEngine.swift` and
 //! `ParakeetMapping.swift`, with `FluidAudio`'s `ChunkProcessor` in between.
 
@@ -22,7 +24,10 @@ use crate::vocab::{Vocab, starts_word};
 
 /// When a chunk with speech decodes to (almost) nothing, the window is
 /// decoded again with more audio around it (decision 1: extend, do not
-/// shift) and the candidate with the most words wins.
+/// shift) and the candidate with the most words inside the chunk wins.
+/// The defaults extend by 6, 12 and 18 s in total (up to 6 s before and
+/// 12 s after the chunk), which restates decision 1's "5 to 12 s" as the
+/// steps the spike D harness found useful.
 #[derive(Debug, Clone, PartialEq)]
 pub struct RecoveryConfig {
     /// Chunks with less VAD speech than this are not retried.

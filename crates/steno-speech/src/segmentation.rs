@@ -40,7 +40,7 @@ pub struct TokenAggregator;
 
 impl TokenAggregator {
     #[must_use]
-    pub fn words(&self, tokens: &[TimedWord]) -> Vec<TimedWord> {
+    pub fn words(&self, pieces: &[TimedWord]) -> Vec<TimedWord> {
         let mut words: Vec<TimedWord> = Vec::new();
         let mut current: Option<TimedWord> = None;
         let mut confidences: Vec<f32> = Vec::new();
@@ -62,9 +62,9 @@ impl TokenAggregator {
             confidences.clear();
         };
 
-        for token in tokens {
-            let is_word_start = starts_word(&token.text);
-            let text = strip_boundary(&token.text).trim();
+        for piece in pieces {
+            let is_word_start = starts_word(&piece.text);
+            let text = strip_boundary(&piece.text).trim();
             if text.is_empty() {
                 if is_word_start {
                     boundary_pending = true;
@@ -74,8 +74,8 @@ impl TokenAggregator {
             let punctuation_only = text.chars().all(is_punctuation_or_symbol);
             if punctuation_only && let Some(word) = current.as_mut() {
                 word.text.push_str(text);
-                word.end = word.end.max(token.end);
-                confidences.push(token.confidence);
+                word.end = word.end.max(piece.end);
+                confidences.push(piece.confidence);
                 boundary_pending = false;
                 continue;
             }
@@ -83,15 +83,15 @@ impl TokenAggregator {
                 flush(&mut current, &mut confidences, &mut words);
                 current = Some(TimedWord {
                     text: text.to_owned(),
-                    start: token.start,
-                    end: token.end,
-                    confidence: token.confidence,
+                    start: piece.start,
+                    end: piece.end,
+                    confidence: piece.confidence,
                 });
-                confidences.push(token.confidence);
+                confidences.push(piece.confidence);
             } else if let Some(word) = current.as_mut() {
                 word.text.push_str(text);
-                word.end = word.end.max(token.end);
-                confidences.push(token.confidence);
+                word.end = word.end.max(piece.end);
+                confidences.push(piece.confidence);
             }
             boundary_pending = false;
         }
@@ -116,6 +116,7 @@ pub struct TranscriptSegmenter {
     pub split_gap_seconds: f64,
 }
 
+/// Swift's defaults (30 s, 0.7 s).
 impl Default for TranscriptSegmenter {
     fn default() -> Self {
         TranscriptSegmenter {

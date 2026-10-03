@@ -12,8 +12,9 @@
 //! `spikes/onnx-speech/export/` and copied into
 //! `<root>/parakeet-tdt-0.6b-v3-fp32/` by hand; [`ModelStore::ensure`]
 //! reports [`SpeechError::NotHosted`] when they are missing. The checksums
-//! are those of the 2026-10-02 export on atlas (torch 2.14.1, `NeMo` 3.0.0);
-//! a hosted copy must match them or the manifest changes with it.
+//! are those of the export `spikes/onnx-speech/export/` produces with torch
+//! 2.14.1 and `NeMo` 3.0.0; a hosted copy must match them or the manifest
+//! changes with it.
 //! Swift: `Sources/StenoSpeech/Models/ModelAsset.swift`,
 //! `ModelStore.swift` and `ModelDownloading.swift`, whose downloads go
 //! through `FluidAudio` and `WhisperKit` instead.

@@ -1,8 +1,8 @@
 //! Steno's speech pipeline above the tensors: voice activity detection, the
 //! pause-aligned chunker, the greedy TDT decoder, the overlap merge and the
 //! mapping from pieces to segments, with the model calls behind one trait
-//! so the Mac (`CoreML`, `WP4b`) and every other platform (ONNX Runtime, here)
-//! share one loop. Plan: `.plans/2026-10-02-rust-core-and-tauri-shell.md`
+//! so the `CoreML` backend on the Mac and every other platform (ONNX
+//! Runtime, here) share one loop. Plan: `.plans/2026-10-02-rust-core-and-tauri-shell.md`
 //! (WP4, invariant 4) and decisions 1 to 5 of
 //! `.plans/2026-10-01-cross-platform-speech-stack.md`.
 //!
@@ -23,6 +23,7 @@
 //! - [`onnx`]: the ONNX Runtime backend over our fp32 export.
 //! - [`model_store`]: the manifest and the checksummed download.
 //! - [`engine`]: [`OnnxSpeechEngine`], the `SpeechEngine` implementation.
+//! - [`error`]: [`SpeechError`], the one error type.
 //!
 //! # Models
 //!
@@ -39,8 +40,9 @@
 //!
 //! Inference is synchronous and CPU-bound. [`OnnxSpeechEngine`] runs it on
 //! a blocking thread when a tokio runtime is present. Every type here is
-//! `Send` and holds its own sessions, so the sidecar of `WP4c` can host a
-//! [`Transcriber`] in another process behind the same `SpeechEngine`.
+//! `Send` and holds its own sessions, so the sidecar of speech-stack
+//! decision 5 can host a [`Transcriber`] in another process behind the
+//! same `SpeechEngine`.
 //!
 //! ```no_run
 //! use steno_core::{AudioBuffer16k, SpeechEngine};

@@ -1,7 +1,7 @@
 //! The four model calls of a Parakeet TDT transducer behind one trait, so
-//! the decoder, the chunker and the merge are written once and the Mac
-//! (`CoreML`, `WP4b`) and every other platform ([`crate::onnx`]) differ only
-//! here. Swift: `FluidAudio`'s `AsrModels` (Preprocessor, Encoder, Decoder,
+//! the decoder, the chunker and the merge are written once and the `CoreML`
+//! backend on the Mac and every other platform ([`crate::onnx`]) differ
+//! only here. Swift: `FluidAudio`'s `AsrModels` (Preprocessor, Encoder, Decoder,
 //! `JointDecisionv3`), which `ParakeetEngine` drives through `AsrManager`.
 //!
 //! The `CoreML` joint returns the argmax token and the duration bin; the ONNX
@@ -108,7 +108,8 @@ pub struct JointDecision {
 
 /// The model calls. Implementations hold their sessions and buffers and are
 /// `Send`, so a transcriber can move to a worker thread or, later, behind
-/// the sidecar boundary (`WP4c`); nothing is shared through globals.
+/// the sidecar boundary of speech-stack decision 5; nothing is shared
+/// through globals.
 pub trait SpeechBackend: Send {
     fn shape(&self) -> &ModelShape;
 

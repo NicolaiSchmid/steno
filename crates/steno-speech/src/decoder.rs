@@ -6,14 +6,14 @@
 //! zero duration keeps the frame for up to `max_symbols_per_frame` symbols
 //! before a forced advance. `FluidAudio`'s extra guards (one symbol per frame
 //! before forcing an advance, the tail pass over the last window) belong to
-//! the `CoreML` parity harness of `WP4b`, not here.
+//! the `CoreML` backend's parity harness on the Mac, not here.
 //! Swift: `FluidAudio`'s `TdtDecoderV3`, ported in
 //! `spikes/coreml-rs/src/decoder.rs`.
 
 use crate::backend::{DecoderState, EncoderOutput, SpeechBackend};
 use crate::error::SpeechError;
 
-/// One emitted piece.
+/// One emitted token: a `SentencePiece` piece with its frame.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Token {
     pub id: u32,
@@ -37,6 +37,9 @@ pub struct DecoderConfig {
     pub max_tokens_per_second: usize,
 }
 
+/// `max_symbols_per_frame` is `NeMo`'s default `max_symbols` of 10; the
+/// token budget is this crate's own guard, sized so a 60 s chunk of fast
+/// German (about ten tokens a second) is never cut.
 impl Default for DecoderConfig {
     fn default() -> Self {
         DecoderConfig {
