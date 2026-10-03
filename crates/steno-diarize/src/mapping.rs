@@ -61,6 +61,7 @@ pub fn result(turns: &[SpeakerTurn], raw: &[ClusterChunk]) -> DiarizationResult 
                     })
                     .collect::<Vec<_>>(),
             );
+            let embedding = cluster_embedding(&own_chunks);
             // Without chunks the turns carry the quality (and no embedding).
             let scored: Vec<ClusterChunk> = if own_chunks.is_empty() {
                 own_turns
@@ -74,13 +75,13 @@ pub fn result(turns: &[SpeakerTurn], raw: &[ClusterChunk]) -> DiarizationResult 
                     })
                     .collect()
             } else {
-                own_chunks.clone()
+                own_chunks
             };
             let choice = pick_clip(&ranges, &scored);
             SpeakerCluster {
                 label: display_label(index),
                 ranges,
-                embedding: cluster_embedding(&own_chunks),
+                embedding,
                 cluster_confidence: choice.cluster_confidence,
                 sample_clip_range: choice.range,
             }
