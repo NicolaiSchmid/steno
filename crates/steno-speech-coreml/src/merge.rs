@@ -9,6 +9,7 @@
 
 use crate::Token;
 use crate::chunking::{FRAME_SECONDS, OVERLAP_FRAMES, OVERLAP_SECONDS, frame_seconds};
+use crate::segments::is_swift_whitespace;
 use crate::vocab::{Vocab, is_punctuation, strip_word_boundary};
 
 /// A token with its index in the window it came from and its start time
@@ -322,9 +323,12 @@ pub fn collapse_seam_word_duplicates(tokens: &[Token], vocab: &Vocab) -> Vec<Tok
                 .iter()
                 .map(|token| strip_word_boundary(vocab.piece(token.id)))
                 .collect();
+            // Swift's `strippable` is punctuation plus `CharacterSet
+            // .whitespaces` (Zs and tab), not every Unicode white space; no
+            // v3 piece is affected either way.
             Word {
                 core: text
-                    .trim_matches(|c: char| is_punctuation(c) || c.is_whitespace())
+                    .trim_matches(|c: char| is_punctuation(c) || is_swift_whitespace(c))
                     .to_owned(),
                 start_frame: tokens[0].frame,
                 ends_sentence: text.chars().last().is_some_and(|c| ".?!:".contains(c)),

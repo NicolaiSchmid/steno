@@ -30,10 +30,11 @@ pub struct TokenTiming {
     pub confidence: f32,
 }
 
-/// Swift's `CharacterSet.whitespaces`, which `TokenAggregator` trims:
-/// Unicode `Zs` plus tab. No v3 piece carries anything but a space, so
-/// the set matters for the rule, not for today's output.
-fn is_swift_whitespace(c: char) -> bool {
+/// Swift's `CharacterSet.whitespaces`, which `TokenAggregator` trims and
+/// the seam-word collapse strips: Unicode `Zs` plus tab. No v3 piece
+/// carries anything but a space, so the set matters for the rule, not
+/// for today's output.
+pub(crate) fn is_swift_whitespace(c: char) -> bool {
     matches!(
         c,
         '\t' | ' ' | '\u{A0}' | '\u{1680}' | '\u{2000}'
