@@ -27,7 +27,9 @@ pub struct DiarizerConfig {
     /// clusters come back as the mapping produced them.
     pub refines_clusters: bool,
     /// Seconds between two segmentation windows; `FluidAudio`'s community
-    /// configuration steps a fifth of the ten-second window.
+    /// configuration steps a fifth of the ten-second window. A frame's
+    /// votes count the windows covering it in two bytes, exact for any
+    /// step down to 0.15 ms ([`crate::timeline`]).
     pub step_seconds: f64,
     pub extraction: ExtractionRules,
     pub timeline: timeline::TimelineRules,

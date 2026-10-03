@@ -76,11 +76,13 @@ pub fn turns(
     // holds, as `FluidAudio` takes the maximum activation per window and
     // cluster (`OfflineReconstruction.swift`), so a voice the model split
     // in two inside one window does not outvote the other windows. A vote
-    // cell is a byte: at most the five covering windows vote for one
-    // cluster on one frame, and the matrix is the largest thing here
-    // (frames times clusters, 59 frames a second, dozens of clusters
-    // before refinement on a group call).
-    let mut votes = vec![0u8; total_frames * cluster_count];
+    // cell holds at most the windows covering the frame: five at the
+    // default two-second step, 65 535 at a step of 0.15 ms, which no
+    // configuration reaches; a finer step saturates rather than wrapping,
+    // which can only flatten the ranking. Two bytes, not four, because the
+    // matrix is the largest thing here (frames times clusters, 59 frames a
+    // second, dozens of clusters before refinement on a group call).
+    let mut votes = vec![0u16; total_frames * cluster_count];
     let mut coverage = vec![0u32; total_frames];
     let mut counts = vec![0u32; total_frames];
     // Each window's embedded local speakers with their clusters.
