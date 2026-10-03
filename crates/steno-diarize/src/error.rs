@@ -20,8 +20,8 @@ pub enum DiarizeError {
     /// decodes.
     #[error("model metadata: {0}")]
     Metadata(String),
-    /// The tensor backend failed to load or to run.
-    #[error("tensor backend: {0}")]
+    /// The diarization backend failed to load or to run.
+    #[error("diarization backend: {0}")]
     Backend(#[source] BackendError),
     /// The backend returned a tensor of the wrong size.
     #[error("{what}: expected {expected} values, got {got}")]
