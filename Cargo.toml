@@ -60,6 +60,15 @@ objc2-foundation = { version = "0.3.2", default-features = false, features = ["s
 chrono-tz = "0.10"
 iana-time-zone = "0.1"
 unicode-normalization = "0.1"
+# The LLM crate: the HTTP client over rustls (no OpenSSL; the `ring`
+# provider, which builds with `cc` on all three platforms, installed by
+# `steno-llm` itself), bounded concurrency for the chunked passes, the path
+# a decode failure names, and URL handling.
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
+reqwest = { version = "0.13", default-features = false, features = ["rustls-no-provider", "http2"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+serde_path_to_error = "0.1"
+url = "2"
 
 [workspace.lints.clippy]
 all = { level = "warn", priority = -1 }
