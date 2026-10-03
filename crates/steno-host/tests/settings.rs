@@ -669,6 +669,67 @@ fn busy_flags_are_published_before_the_service_runs() {
     );
 }
 
+/// The consent card's model list comes over the network, so the host
+/// fetches it with its lock released: another call answers while the fetch
+/// runs, and sees the list loading. Swift awaited the fetch on the main
+/// actor, which blocked nothing else.
+#[test]
+fn confirming_codex_fetches_the_model_list_with_the_lock_released() {
+    let harness = Harness::builder()
+        .seed(|_, fakes| {
+            fakes
+                .llm
+                .set_codex_account(Ok("nicolai@example.com (Plus)"));
+            fakes.llm.set_codex_models(Ok(vec![CodexModel {
+                slug: "gpt-5.1-codex".to_owned(),
+                display_name: "GPT-5.1 Codex".to_owned(),
+                context_window: Some(272_000),
+            }]));
+        })
+        .build();
+    harness
+        .host
+        .settings_summaries_select_preset(SetStringParams {
+            value: "codex".to_owned(),
+        })
+        .unwrap();
+    // The hook reaches the host through a slot the test empties, so the
+    // fake does not keep the host alive.
+    let host = Arc::new(Mutex::new(Some(harness.host.clone())));
+    let seen = Arc::new(Mutex::new(None));
+    harness.fakes.llm.set_on_codex_models(Some(Arc::new({
+        let (host, seen) = (host.clone(), seen.clone());
+        move || {
+            let host = host.lock().unwrap().clone().unwrap();
+            let (sender, receiver) = std::sync::mpsc::channel();
+            std::thread::spawn(move || {
+                let _ = sender.send(host.snapshot(BridgeTopic::SettingsSummaries));
+            });
+            *seen.lock().unwrap() = Some(
+                receiver
+                    .recv_timeout(std::time::Duration::from_secs(5))
+                    .ok()
+                    .flatten()
+                    .map(|summaries| summaries["codex"]["isLoadingModels"].clone()),
+            );
+        }
+    })));
+    harness.host.settings_summaries_confirm_codex().unwrap();
+    harness.fakes.llm.set_on_codex_models(None);
+    host.lock().unwrap().take();
+    assert_eq!(
+        *seen.lock().unwrap(),
+        Some(Some(json!(true))),
+        "another call answered during the fetch and saw it loading"
+    );
+    let settings = harness.store.settings().unwrap();
+    assert_eq!(settings.llm_provider, LlmProvider::Codex);
+    assert_eq!(settings.codex_model.as_deref(), Some("gpt-5.1-codex"));
+    let summaries = harness.snapshot(BridgeTopic::SettingsSummaries);
+    assert_eq!(summaries["codex"]["isLoadingModels"], false);
+    assert_eq!(summaries["isConfigured"], true);
+}
+
 /// The shell's `bridge_call` is an `async` Tauri command, so a host call
 /// can arrive inside a tokio runtime. The host awaits the secret store at
 /// construction, on Save and when the sections reload; from there that

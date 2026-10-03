@@ -20,6 +20,7 @@ mod people;
 mod search;
 mod settings;
 mod tasks;
+mod timings;
 mod transcript;
 
 use std::path::Path;
@@ -32,6 +33,7 @@ use uuid::Uuid;
 
 pub use meetings::DeletedMeeting;
 pub use search::{SearchHit, fts5_pattern};
+pub use timings::StageRateRow;
 
 use crate::model::MeetingStateKind;
 

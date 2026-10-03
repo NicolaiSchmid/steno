@@ -1,0 +1,47 @@
+[package]
+name = "steno-services"
+description = "The services assembly: the real object graph from the settings, handed to steno-host"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+async-trait.workspace = true
+chrono.workspace = true
+chrono-tz.workspace = true
+keyring.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+steno-adapters = { path = "../steno-adapters" }
+steno-audio = { path = "../steno-audio" }
+steno-bridge = { path = "../steno-bridge" }
+steno-core = { path = "../steno-core" }
+# The ONNX diarizer only; the CoreML diarizer is not wired.
+steno-diarize = { path = "../steno-diarize", default-features = false, features = ["onnx"] }
+steno-handover = { path = "../steno-handover" }
+# The host's fakes stand in for the platform services the shell draws in
+# WP8 (permissions, login item, updater, clip player, QR encoder).
+steno-host = { path = "../steno-host", features = ["fakes"] }
+steno-llm = { path = "../steno-llm" }
+steno-pipeline = { path = "../steno-pipeline" }
+steno-speech = { path = "../steno-speech" }
+thiserror.workspace = true
+tokio = { workspace = true, features = ["rt", "rt-multi-thread", "sync", "macros", "time"] }
+tracing.workspace = true
+tracing-subscriber.workspace = true
+uuid.workspace = true
+
+[target.'cfg(target_os = "macos")'.dependencies]
+steno-speech-coreml = { path = "../steno-speech-coreml" }
+
+[dev-dependencies]
+steno-core = { path = "../steno-core", features = ["testing"] }
+steno-llm = { path = "../steno-llm", features = ["testing"] }
+steno-pipeline = { path = "../steno-pipeline", features = ["testing"] }
+tempfile.workspace = true
+
+[lints]
+workspace = true

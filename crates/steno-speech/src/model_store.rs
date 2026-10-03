@@ -4,10 +4,12 @@
 //! while hashing, and renames only a verified, synced file into place. Models are
 //! never committed (`.gitignore` covers `*.onnx`).
 //!
-//! A store's root holds one folder per asset id, `<root>/<asset id>/`. The
-//! app's root comes from `steno-services`; [`ModelStore::from_environment`]
-//! and [`ModelStore::default_root`] are conveniences for the `transcribe`
-//! example and the FLEURS test (the crate docs say more). Silero VAD
+//! A store's root holds one folder per asset id, `<root>/<asset id>/`.
+//! Steno keeps the root in the `onnx/` folder of its models directory
+//! ([`ModelStore::in_models_directory`]); `steno-services` resolves the
+//! models directory, and [`ModelStore::from_environment`] resolves it the
+//! same way for the `transcribe` example and the FLEURS test, which have
+//! no settings (the crate docs say more). Silero VAD
 //! downloads from the sherpa-onnx `asr-models` release.
 //! The fp32 Parakeet export (2.6 GB) is not hosted yet: until the
 //! release plan names a host, its files are produced by
@@ -176,9 +178,13 @@ pub struct ModelStore {
 }
 
 impl ModelStore {
-    /// Names the store root [`ModelStore::from_environment`] uses in place
-    /// of the default one.
+    /// Names the models directory in place of the default one, for the app
+    /// (without one in its settings), the CLI, the example and the tests.
     pub const ENVIRONMENT_VARIABLE: &'static str = "STENO_MODELS_DIR";
+
+    /// The folder of the models directory the ONNX models live in, beside
+    /// the `CoreML` ones the Swift app keeps in `fluidaudio/`.
+    pub const ONNX_FOLDER: &'static str = "onnx";
 
     #[must_use]
     pub fn new(root: impl Into<PathBuf>) -> Self {
@@ -192,32 +198,46 @@ impl ModelStore {
         }
     }
 
-    /// A convenience for the `transcribe` example and the FLEURS test; the
-    /// app's root comes from `steno-services`. The root `STENO_MODELS_DIR`
-    /// names, else the default root.
+    /// The store in the models directory `models_directory`:
+    /// `<models directory>/onnx`.
     #[must_use]
-    pub fn from_environment() -> Self {
-        Self::new(Self::environment_root().unwrap_or_else(Self::default_root))
+    pub fn in_models_directory(models_directory: &Path) -> Self {
+        Self::new(models_directory.join(Self::ONNX_FOLDER))
     }
 
-    /// The directory `STENO_MODELS_DIR` names, made absolute against the
-    /// current directory when it is relative; `None` when unset or empty.
-    /// The model-gated tests use the same reading.
+    /// For the `transcribe` example and the FLEURS test, which have no
+    /// settings: the store in the models directory `STENO_MODELS_DIR`
+    /// names, else in the default one, as the app and the CLI resolve it
+    /// without a models directory in the settings.
     #[must_use]
-    pub fn environment_root() -> Option<PathBuf> {
-        let value = std::env::var_os(Self::ENVIRONMENT_VARIABLE).filter(|v| !v.is_empty())?;
-        let path = PathBuf::from(value);
+    pub fn from_environment() -> Self {
+        Self::in_models_directory(
+            &Self::environment_models_directory().unwrap_or_else(Self::default_models_directory),
+        )
+    }
+
+    /// The models directory `STENO_MODELS_DIR` names, made absolute
+    /// against the current directory when it is relative; `None` when unset
+    /// or empty.
+    #[must_use]
+    pub fn environment_models_directory() -> Option<PathBuf> {
+        Self::models_directory_named(std::env::var_os(Self::ENVIRONMENT_VARIABLE))
+    }
+
+    /// [`Self::environment_models_directory`] for the variable's `value`.
+    #[must_use]
+    pub fn models_directory_named(value: Option<std::ffi::OsString>) -> Option<PathBuf> {
+        let path = PathBuf::from(value.filter(|v| !v.is_empty())?);
         Some(match std::env::current_dir() {
             Ok(cwd) if path.is_relative() => cwd.join(path),
             _ => path,
         })
     }
 
-    /// A convenience for the `transcribe` example and the FLEURS test; the
-    /// app's root comes from `steno-services`. `<support directory>/Models`
+    /// The default models directory, `<support directory>/Models`
     /// ([`steno_core::StenoPaths`]).
     #[must_use]
-    pub fn default_root() -> PathBuf {
+    pub fn default_models_directory() -> PathBuf {
         StenoPaths::default_support_directory().join("Models")
     }
 
@@ -1092,8 +1112,12 @@ mod tests {
         assert!(ModelAsset::parakeet_v3_fp32().total_size() > 2_500_000_000);
         assert!(ModelAsset::silero_vad().files[0].url.is_some());
         assert_eq!(
-            ModelStore::default_root(),
+            ModelStore::default_models_directory(),
             StenoPaths::default_support_directory().join("Models")
+        );
+        assert_eq!(
+            ModelStore::in_models_directory(Path::new("/models")).root(),
+            Path::new("/models/onnx")
         );
         let store = ModelStore::new("/models");
         assert_eq!(

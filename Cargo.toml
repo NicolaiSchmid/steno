@@ -52,6 +52,10 @@ gdk = "0.18"
 gio = "0.18"
 thiserror = "2"
 tracing = "0.1"
+# The `steno` CLI's and the desktop shell's log output
+# (`steno_services::log_to_stderr`): plain lines on stderr, filtered by
+# `RUST_LOG` (default `warn`).
+tracing-subscriber = { version = "0.3", default-features = false, features = ["env-filter", "fmt", "std"] }
 uuid = { version = "1", features = ["serde", "v4"] }
 # The digit source of `steno-bridge`'s `json::write_number`: shortest
 # round-trip digits with ties to even, as Foundation breaks them and Rust's
@@ -59,6 +63,14 @@ uuid = { version = "1", features = ["serde", "v4"] }
 zmij = "1"
 # The audio crate: decoding of recordings and phone files in pure Rust.
 symphonia = { version = "0.5", default-features = false, features = ["aac", "caf", "isomp4", "mp3", "pcm", "wav"] }
+# The secret store behind `SecretStore` in the services assembly: the
+# Keychain and the Windows credential store. On Linux the services use
+# the 0600 secrets file instead (`linux-native` is the kernel keyring,
+# which does not survive a reboot, and the Secret Service store needs
+# D-Bus); the feature stays so the crate builds there without a mock.
+keyring = { version = "3", default-features = false, features = ["apple-native", "windows-native", "linux-native"] }
+# The `steno` CLI's argument parser.
+clap = { version = "4", features = ["derive"] }
 # Build only
 cc = "1"
 # Test only
