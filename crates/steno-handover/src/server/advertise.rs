@@ -159,33 +159,50 @@ mod windows_adapters {
     /// Bit 0 of `InterfaceAndOperStatusFlags`.
     const HARDWARE_INTERFACE: u8 = 1;
 
+    /// The table `GetIfTable2` allocated, released when dropped.
+    struct Table(*mut MIB_IF_TABLE2);
+
+    impl Drop for Table {
+        fn drop(&mut self) {
+            // SAFETY: the pointer is the non-null table of a `GetIfTable2`
+            // that returned `NO_ERROR`, and this is its one release.
+            unsafe { FreeMibTable(self.0.cast()) };
+        }
+    }
+
     /// Every adapter's facts; `None` when the system does not say.
     pub(super) fn by_index() -> Option<BTreeMap<u32, WindowsAdapter>> {
         let mut table: *mut MIB_IF_TABLE2 = std::ptr::null_mut();
-        // SAFETY: on `NO_ERROR`, `GetIfTable2` has allocated a table of
-        // `NumEntries` rows at `table`; the rows are read before the one
-        // `FreeMibTable` that releases it.
-        unsafe {
-            if GetIfTable2(&raw mut table) != NO_ERROR || table.is_null() {
-                return None;
-            }
-            let count = usize::try_from((*table).NumEntries).unwrap_or(0);
-            let first = (&raw const (*table).Table).cast::<MIB_IF_ROW2>();
-            let adapters = std::slice::from_raw_parts(first, count)
-                .iter()
-                .map(|row| {
-                    let adapter = WindowsAdapter {
-                        if_type: row.Type,
-                        hardware: row.InterfaceAndOperStatusFlags._bitfield & HARDWARE_INTERFACE
-                            != 0,
-                        oper_up: row.OperStatus == IfOperStatusUp,
-                    };
-                    (row.InterfaceIndex, adapter)
-                })
-                .collect();
-            FreeMibTable(table.cast());
-            Some(adapters)
+        // SAFETY: `GetIfTable2` writes one pointer through a pointer to a
+        // live local.
+        if unsafe { GetIfTable2(&raw mut table) } != NO_ERROR || table.is_null() {
+            return None;
         }
+        let table = Table(table);
+        // SAFETY: on `NO_ERROR` the pointer is a live, aligned
+        // `MIB_IF_TABLE2` the system allocated; only the count is read.
+        let count = usize::try_from(unsafe { (*table.0).NumEntries }).unwrap_or(0);
+        // SAFETY: the same table. `&raw const` makes no reference, so the
+        // pointer keeps the provenance of the whole allocation, which holds
+        // `NumEntries` rows past the one the declared `[MIB_IF_ROW2; 1]`
+        // covers.
+        let first = unsafe { &raw const (*table.0).Table }.cast::<MIB_IF_ROW2>();
+        // SAFETY: the system wrote `count` initialised rows from `first`,
+        // aligned as the table's `Table` field is; the slice is dropped
+        // before `table` releases them.
+        let rows = unsafe { std::slice::from_raw_parts(first, count) };
+        let adapters = rows
+            .iter()
+            .map(|row| {
+                let adapter = WindowsAdapter {
+                    if_type: row.Type,
+                    hardware: row.InterfaceAndOperStatusFlags._bitfield & HARDWARE_INTERFACE != 0,
+                    oper_up: row.OperStatus == IfOperStatusUp,
+                };
+                (row.InterfaceIndex, adapter)
+            })
+            .collect();
+        Some(adapters)
     }
 }
 
