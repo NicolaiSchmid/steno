@@ -270,15 +270,17 @@ Rust fixes these Swift behaviours; each is ported to Swift or accepted before cu
   401 ends the completion.
 - `OpenAICompatibleClient.errorMessage`, `CodexResponsesClient.classify`, the
   undecodable-body errors of both clients and `CodexCredentialStore.refreshOnce`
-  should redact the whole body and then cut it, as the Rust clients do; today
-  `bodyText` cuts it to 4 096 bytes, the fallbacks to 500 characters and the
+  should redact the whole body (every secret of eight bytes or more, longest
+  first) and only then cut it on a character boundary, as the Rust clients do;
+  today `bodyText` cuts it to 4 096 bytes, the fallbacks to 500 characters and the
   refresh to 300 bytes before anything is redacted, so a secret straddling a cut
   leaves its prefix in the error.
 - `CodexCredentialStore.refreshOnce` should redact the account id too, and decide
-  permanent and reused on the code as sent, redacting it only for the detail, as
-  the Rust store does; today it redacts the two tokens only, and `RefreshError.code`
-  lowercases the code before it is redacted, so an echoed account id stays in the
-  detail and a token echoed in the code survives case-folded.
+  permanent and reused on the code as sent, redacting it only for the detail and
+  before it is lowercased, as the Rust store does; today it redacts the two tokens
+  only, and `RefreshError.code` lowercases the code before it is redacted, so an
+  echoed account id stays in the detail and a token echoed in the code survives
+  case-folded.
 - `LLMTransport.redact` should skip a secret shorter than eight bytes and replace
   the longest secret first, as the Rust `redact` does; today a placeholder key such
   as `x` or `ollama` garbles every error message it occurs in, and a secret that
