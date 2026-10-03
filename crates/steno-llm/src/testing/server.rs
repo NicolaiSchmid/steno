@@ -236,14 +236,10 @@ impl StubChatServer {
             let state = self.inner.state();
             state.requests.len() >= count || state.stopped
         });
-        assert!(
-            tokio::time::timeout(super::clock::STALL_DEADLINE, wait)
-                .await
-                .is_ok(),
-            "stub server: {} of {count} requests within {:?} of wall time",
-            self.request_count(),
-            super::clock::STALL_DEADLINE
-        );
+        super::or_stall_panic(wait, || {
+            format!("stub server: {} of {count} requests", self.request_count())
+        })
+        .await;
     }
 
     /// Stops accepting, releases every parked or hanging connection and

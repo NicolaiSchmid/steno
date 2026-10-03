@@ -17,8 +17,8 @@ use steno_llm::{
 use tokio::sync::mpsc;
 
 pub const API_KEY: &str = "sk-test-secret-0123456789";
-/// Wall-clock budget for waiting on a sleeper; only spent in the failure
-/// case.
+/// Wall-clock budget for waiting on a sleeper or an event, the test
+/// doubles' stall deadline; only spent in the failure case.
 pub const SLEEPER_WAIT: Duration = Duration::from_secs(10);
 
 pub fn de() -> LanguageTag {
