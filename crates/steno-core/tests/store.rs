@@ -396,3 +396,53 @@ fn a_read_sees_one_snapshot_while_another_store_writes() {
         "the next read sees the write"
     );
 }
+
+/// A second sample replaces the stored rate, not only its count: the fold
+/// sees the first row and the upsert keeps what the fold returned.
+#[test]
+fn a_stage_rate_folds_every_sample_into_one_row() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(dir.path().join("steno.sqlite")).unwrap();
+    let first = store
+        .update_stage_rate(
+            PipelineStage::Transcribe,
+            "engine",
+            date("2026-10-01T10:00:00.000Z"),
+            |stored| {
+                assert_eq!(stored, None);
+                StageRate {
+                    seconds_per_unit: 0.5,
+                    samples: 1,
+                }
+            },
+        )
+        .unwrap();
+    assert_eq!(first.seconds_per_unit, 0.5);
+    store
+        .update_stage_rate(
+            PipelineStage::Transcribe,
+            "engine",
+            date("2026-10-01T10:01:00.000Z"),
+            |stored| {
+                assert_eq!(stored, Some(first));
+                StageRate {
+                    seconds_per_unit: 0.25,
+                    samples: 2,
+                }
+            },
+        )
+        .unwrap();
+    let row = store
+        .stage_rate(PipelineStage::Transcribe, "engine")
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        row.rate,
+        StageRate {
+            seconds_per_unit: 0.25,
+            samples: 2
+        }
+    );
+    assert_eq!(row.updated_at, date("2026-10-01T10:01:00.000Z"));
+    assert_eq!(count(&store, "stageRate"), 1);
+}
