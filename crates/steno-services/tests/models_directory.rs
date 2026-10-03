@@ -56,17 +56,31 @@ fn the_app_the_cli_and_the_example_read_one_models_directory() {
     }
     let dir = tempfile::tempdir().unwrap();
     let (cwd, home) = (dir.path().join("work"), dir.path().join("home"));
-    std::fs::create_dir_all(&cwd).unwrap();
-    let cwd = cwd.canonicalize().unwrap();
+    // The roots exist, so they compare as the file system sees them: the
+    // working directory can come back resolved (`/private/var` on the Mac,
+    // a `\\?\` or long name on Windows).
+    let same = |left: &Path, right: &Path| {
+        assert_eq!(
+            left.canonicalize().unwrap(),
+            right.canonicalize().unwrap(),
+            "{} and {}",
+            left.display(),
+            right.display()
+        );
+    };
 
-    let (app, example) = roots_in(&cwd, &home, Some("relative/models"));
-    assert_eq!(app, example);
-    assert_eq!(app, cwd.join("relative").join("models").join("onnx"));
+    let relative = Path::new("relative").join("models");
+    let expected = cwd.join(&relative).join("onnx");
+    std::fs::create_dir_all(&expected).unwrap();
+    let (app, example) = roots_in(&cwd, &home, Some(relative.to_str().unwrap()));
+    same(&app, &example);
+    same(&app, &expected);
 
     let absolute = dir.path().join("absolute-models");
+    std::fs::create_dir_all(absolute.join("onnx")).unwrap();
     let (app, example) = roots_in(&cwd, &home, Some(absolute.to_str().unwrap()));
-    assert_eq!(app, example);
-    assert_eq!(app, absolute.join("onnx"));
+    same(&app, &example);
+    same(&app, &absolute.join("onnx"));
 
     let (app, example) = roots_in(&cwd, &home, None);
     assert_eq!(app, example, "the default models directory");
