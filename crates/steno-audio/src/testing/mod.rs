@@ -3,6 +3,11 @@
 //! signals, the synthetic capture backend, a scripted process-activity
 //! source, a manual clock and the counting allocator behind the real-time
 //! proof. Swift: `Sources/StenoAudio/Testing/`.
+//!
+//! Not feature-gated, unlike `steno-core`'s `testing`: the synthetic
+//! backend is the production path's test double on Linux CI and the
+//! shell's capture source where no HAL exists, and nothing here pulls in
+//! a dependency the crate does not already have.
 
 pub mod fake_activity;
 pub mod fixtures;

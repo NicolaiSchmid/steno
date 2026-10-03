@@ -9,16 +9,19 @@
 //! captured at the same instant; the processing thread owns any extra
 //! delay.
 //!
-//! The FFI surface is declared by hand (the spike's `speex.rs`); the C
-//! sources are vendored under `vendor/speexdsp` and compiled by `build.rs`.
+//! The FFI surface is declared by hand; the C sources are vendored under
+//! `vendor/speexdsp` (provenance in `PROVENANCE` there) and compiled by
+//! `build.rs`.
 
 use std::ffi::c_void;
 use std::os::raw::c_int;
 
 use steno_core::EchoCanceller;
 
+/// Why a canceller could not be created.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum EchoCancellerError {
+    /// A bad frame or tail shape, or Speex returned null.
     #[error("echo canceller could not start: {0}")]
     InitialisationFailed(String),
 }
@@ -64,6 +67,7 @@ unsafe extern "C" {
     ) -> c_int;
 }
 
+/// The Speex canceller; see the module doc.
 pub struct SpeexEchoCanceller {
     sample_rate: f64,
     frame_size: usize,
@@ -174,16 +178,19 @@ impl SpeexEchoCanceller {
         }
     }
 
+    /// The rate given at construction.
     #[must_use]
     pub fn sample_rate(&self) -> f64 {
         self.sample_rate
     }
 
+    /// Samples per `process` call.
     #[must_use]
     pub fn frame_size(&self) -> usize {
         self.frame_size
     }
 
+    /// The adaptive filter's tail, in samples.
     #[must_use]
     pub fn tail_length(&self) -> usize {
         self.tail_length

@@ -1,6 +1,6 @@
-//! Real-time safety evidence: a counting global allocator.
-//! From `spikes/capture-rs/src/rt.rs`; no Swift equivalent (the Swift
-//! tests hook libmalloc's `malloc_logger`, Darwin only).
+//! Real-time safety evidence: a counting global allocator. No Swift
+//! equivalent (the Swift tests hook libmalloc's `malloc_logger`, Darwin
+//! only).
 //!
 //! While counting is on for the current thread, every allocation,
 //! reallocation and deallocation that thread makes is counted. An
@@ -20,6 +20,8 @@ use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 
+/// The `#[global_allocator]` a test binary installs to count one thread's
+/// allocations; see the module doc.
 pub struct CountingAllocator;
 
 /// One measurement at a time: the counters are process-wide, and the test

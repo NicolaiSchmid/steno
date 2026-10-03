@@ -1,7 +1,6 @@
 //! `steno-audio`: capture (tap and mic lanes), echo cancellation, meeting
 //! detection, the recording writer and the decoder. The port of
-//! `Sources/StenoAudio` (WP5 of `.plans/2026-10-02-rust-core-and-tauri-shell.md`)
-//! built on the capture spike `spikes/capture-rs`.
+//! `Sources/StenoAudio` (WP5 of `.plans/2026-10-02-rust-core-and-tauri-shell.md`).
 //!
 //! # Threads and hand-offs
 //!
@@ -33,9 +32,12 @@
 //! The synthetic backend ([`testing::SyntheticCaptureBackend`]) is a
 //! producer thread speaking the `LaneFrameSink` protocol in place of the
 //! IOProc; everything below it is the production path, which is what makes
-//! the pipeline testable on every OS. `unsafe` lives in two places only:
-//! the HAL binding module (`capture::live::hal`, macOS) and the ring
-//! (`realtime::ring`); every invariant is commented there.
+//! the pipeline testable on every OS. `unsafe` is confined to the FFI
+//! edges, each with its invariant beside it: the Core Audio binding
+//! (`capture::live::hal`, `capture::live::backend`), the Speex FFI
+//! (`aec::speex`), the ring and the two raw-pointer writes into it
+//! (`realtime::ring`, `realtime::sink::write`, `realtime::io_proc::deliver`),
+//! and the counting allocator (`testing::rt`).
 //!
 //! Swift: `Sources/StenoAudio/StenoAudio.swift`.
 

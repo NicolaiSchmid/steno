@@ -12,6 +12,7 @@ links = "speexdsp"
 [dependencies]
 steno-core = { path = "../steno-core" }
 chrono.workspace = true
+serde.workspace = true
 symphonia.workspace = true
 thiserror.workspace = true
 tracing.workspace = true

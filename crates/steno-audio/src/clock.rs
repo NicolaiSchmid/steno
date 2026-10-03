@@ -2,7 +2,8 @@
 //! tests drive a [`testing::ManualClock`](crate::testing::ManualClock) and
 //! never wait on wall time. Swift used `any Clock<Duration>`; Rust has no
 //! injectable clock in std, so this is the two-method trait both need: a
-//! stopwatch read and a cancellable sleep.
+//! stopwatch read and a cancellable sleep. `steno-core` injects no clock,
+//! so the `Arc<dyn Clock>` pattern is this crate's own.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -24,11 +25,13 @@ struct CancelInner {
 }
 
 impl Cancel {
+    /// Not yet cancelled.
     #[must_use]
     pub fn new() -> Self {
         Self::default()
     }
 
+    /// Raises the flag and wakes every sleeper.
     pub fn cancel(&self) {
         self.inner.flag.store(true, Ordering::Release);
         let _guard = self
@@ -39,6 +42,7 @@ impl Cancel {
         self.inner.condvar.notify_all();
     }
 
+    /// Whether `cancel` has been called.
     #[must_use]
     pub fn is_cancelled(&self) -> bool {
         self.inner.flag.load(Ordering::Acquire)
@@ -71,6 +75,7 @@ impl Cancel {
     }
 }
 
+/// What the session and the detector need from time; see the module doc.
 pub trait Clock: Send + Sync {
     /// Time since an origin of the clock's choosing; only differences are
     /// used.
@@ -96,6 +101,7 @@ impl Default for SystemClock {
 }
 
 impl SystemClock {
+    /// Origin now.
     #[must_use]
     pub fn new() -> Self {
         Self::default()

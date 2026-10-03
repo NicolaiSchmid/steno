@@ -13,7 +13,7 @@ pub mod snapshot;
 pub use backend::{CaptureBackend, CaptureStream};
 pub use configuration::{
     CaptureConfiguration, CaptureError, CaptureMode, CaptureNotice, CaptureResult, CaptureState,
-    CaptureStatistics, DeviceChangeReason, LaneLevel, LaneLevels, four_char_code,
+    CaptureStatistics, DeviceChangeReason, LaneLevel, LaneLevels,
 };
 pub use layout::{ChannelRef, LaneSource, StreamLayout};
 pub use live::LiveCaptureBackend;

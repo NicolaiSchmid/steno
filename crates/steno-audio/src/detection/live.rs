@@ -5,8 +5,8 @@
 //! `Sources/StenoAudio/Detection/ProcessAudioActivity.swift`.
 //!
 //! On Linux and Windows the type exists so callers compile and reports no
-//! processes: PipeWire's node graph (WP5b) and WASAPI's session manager
-//! (WP10) fill it in.
+//! processes until the PipeWire and WASAPI backends fill it in (see
+//! `capture::live`).
 
 #[cfg(not(target_os = "macos"))]
 use std::sync::mpsc::Receiver;
@@ -17,12 +17,14 @@ use super::activity::{ActivityError, ProcessAudioActivity, ProcessAudioActivityS
 #[cfg(target_os = "macos")]
 pub use macos::LiveProcessAudioActivity;
 
+/// The HAL-backed source; off macOS a stub that lists no processes.
 #[cfg(not(target_os = "macos"))]
 #[derive(Debug, Default)]
 pub struct LiveProcessAudioActivity;
 
 #[cfg(not(target_os = "macos"))]
 impl LiveProcessAudioActivity {
+    /// The stub.
     #[must_use]
     pub fn new() -> Self {
         Self

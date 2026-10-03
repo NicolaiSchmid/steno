@@ -16,8 +16,8 @@ use crate::realtime::LaneFrameSink;
 /// [`SyntheticCaptureBackend`](crate::testing::SyntheticCaptureBackend)
 /// generates deterministic tones. The session orchestrates a rebuild after
 /// a change by calling `stop()` and `start` again on the same backend and
-/// the same sink, so a backend must be restartable. PipeWire (WP5b) and
-/// WASAPI (WP10) implement this trait too.
+/// the same sink, so a backend must be restartable. The PipeWire and
+/// WASAPI backends implement this trait too (see `capture::live`).
 pub trait CaptureBackend: Send + Sync {
     /// Starts delivering `lanes` (in this order) at [`SAMPLE_RATE`] and
     /// describes the stream it opened. `input_device_uid` `None` selects

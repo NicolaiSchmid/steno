@@ -32,8 +32,7 @@ use objc2_core_audio::{
     kAudioAggregateDeviceMainSubDeviceKey, kAudioAggregateDeviceNameKey,
     kAudioAggregateDeviceSubDeviceListKey, kAudioAggregateDeviceTapAutoStartKey,
     kAudioAggregateDeviceTapListKey, kAudioAggregateDeviceUIDKey,
-    kAudioDevicePropertyBufferFrameSize, kAudioDevicePropertyDeviceIsAlive,
-    kAudioDevicePropertyDeviceUID, kAudioDevicePropertyLatency,
+    kAudioDevicePropertyDeviceIsAlive, kAudioDevicePropertyDeviceUID, kAudioDevicePropertyLatency,
     kAudioDevicePropertyNominalSampleRate, kAudioDevicePropertySafetyOffset,
     kAudioDevicePropertyStreamConfiguration, kAudioHardwarePropertyTranslatePIDToProcessObject,
     kAudioObjectPropertyElementMain, kAudioObjectPropertyName, kAudioObjectPropertyScopeGlobal,
@@ -48,6 +47,7 @@ use objc2_core_foundation::{CFDictionary, CFRetained, CFString};
 use objc2_foundation::{NSArray, NSDictionary, NSNumber, NSObject, NSString};
 
 use crate::capture::CaptureError;
+use crate::capture::configuration::four_char_code;
 
 pub type Id = AudioObjectID;
 pub type OSStatus = i32;
@@ -57,7 +57,7 @@ pub const UNKNOWN: Id = kAudioObjectUnknown;
 /// A failed Core Audio call: which property or function, on which object,
 /// with which `OSStatus`.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-#[error("{operation} on audio object {object} failed: {status} ({})", crate::capture::four_char_code(*status))]
+#[error("{operation} on audio object {object} failed: {status} ({})", four_char_code(*status))]
 pub struct CoreAudioError {
     pub operation: String,
     pub object: Id,
@@ -78,7 +78,7 @@ impl From<CoreAudioError> for CaptureError {
 pub fn selector_name(selector: AudioObjectPropertySelector) -> String {
     // Selectors are four ASCII bytes packed in a u32.
     #[allow(clippy::cast_possible_wrap)]
-    crate::capture::four_char_code(selector as i32)
+    four_char_code(selector as i32)
 }
 
 fn address(
@@ -316,16 +316,6 @@ pub fn latency_frames(id: Id, scope: AudioObjectPropertyScope) -> usize {
 #[must_use]
 pub fn nominal_sample_rate(id: Id) -> f64 {
     read_f64(id, kAudioDevicePropertyNominalSampleRate).unwrap_or(0.0)
-}
-
-#[must_use]
-pub fn buffer_frame_size(id: Id) -> u32 {
-    read_u32(
-        id,
-        kAudioDevicePropertyBufferFrameSize,
-        kAudioObjectPropertyScopeGlobal,
-    )
-    .unwrap_or(0)
 }
 
 pub fn uid(id: Id) -> Result<String, CoreAudioError> {
