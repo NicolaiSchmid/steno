@@ -10,8 +10,9 @@
 //! panels hid, and closing main hid it rather than destroying it; 1
 //! otherwise; a value that is not a positive number ends the run at once
 //! with 2. Screenshots of the Xvfb root during the wait are the review
-//! evidence; the windows carry only fixture data, the prompts name made-up
-//! apps.
+//! evidence; the windows carry what the host's database holds (nothing on a
+//! fresh runner, synthetic data with the fixture host), the prompts name
+//! made-up apps.
 
 use std::{
     collections::HashMap,
@@ -147,7 +148,7 @@ pub enum Outcome {
     },
     /// The main window never reported its page mounted.
     NoPageReady,
-    /// The page mounted but nothing answered it: no host is wired.
+    /// The page mounted but the host published nothing to it.
     NoSnapshot,
     /// The meeting asked of main before its page mounted never reached it
     /// after its `page.ready`: lost, or published before the page listened.
@@ -177,17 +178,10 @@ impl Outcome {
                  after its page.ready in {seconds}s"
             ),
             Outcome::PanelsFailed(problem) => format!("FAILED, panels: {problem}"),
-            Outcome::NoSnapshot => {
-                let built = if cfg!(feature = "fixture-host") {
-                    ""
-                } else {
-                    " (built without the fixture-host feature)"
-                };
-                format!(
-                    "FAILED, page.ready from main but no snapshot reached it in {seconds}s: \
-                     no bridge host is wired{built}"
-                )
-            }
+            Outcome::NoSnapshot => format!(
+                "FAILED, page.ready from main but no snapshot reached it in {seconds}s: \
+                 the bridge host did not answer"
+            ),
         }
     }
 }
@@ -488,10 +482,9 @@ mod tests {
         assert_eq!(Outcome::NoPageReady.exit_code(), 1);
         assert_eq!(Outcome::NoSnapshot.exit_code(), 1);
         let message = Outcome::NoSnapshot.message(15);
-        assert!(message.contains("no bridge host is wired"), "{message}");
-        assert_eq!(
-            message.contains("without the fixture-host feature"),
-            !cfg!(feature = "fixture-host")
+        assert!(
+            message.contains("the bridge host did not answer"),
+            "{message}"
         );
         assert!(
             Outcome::NoPageReady
