@@ -105,9 +105,10 @@ pub unsafe fn deliver(buffers: &[BufferView], sources: &[LaneSource], sink: &Lan
     sink.end_callback();
 }
 
-/// One input buffer as safe code holds it: interleaved samples borrowed for
-/// the call, `None` for a buffer flagged silent (WASAPI's
-/// `AUDCLNT_BUFFERFLAGS_SILENT`), which becomes zeros.
+/// One input buffer as safe code holds it: a WASAPI capture packet (valid
+/// from `GetBuffer` to `ReleaseBuffer`) or the follower's staging copy, its
+/// interleaved samples borrowed for the call, `None` for a buffer flagged
+/// silent (`AUDCLNT_BUFFERFLAGS_SILENT`), which becomes zeros.
 #[derive(Debug, Clone, Copy)]
 pub struct SliceView<'a> {
     /// Interleaved channels in the buffer.
@@ -124,9 +125,10 @@ pub const MAX_SLICE_BUFFERS: usize = 4;
 
 /// [`deliver`] for buffers held as slices: builds the [`BufferView`]s on
 /// the stack and delivers them, so the caller needs no `unsafe`. A slice
-/// shorter than `channels * frames` is described by its real length, so
-/// [`deliver`]'s shape check turns it into silence rather than a read past
-/// its end. Buffers beyond [`MAX_SLICE_BUFFERS`] are ignored.
+/// shorter than `channels * frames` is treated as silent: its buffer keeps
+/// the length it claims and becomes zeros, so the lanes stay aligned and
+/// nothing reads past its end. Buffers beyond [`MAX_SLICE_BUFFERS`] are
+/// ignored.
 #[inline(always)]
 pub fn deliver_slices(buffers: &[SliceView<'_>], sources: &[LaneSource], sink: &LaneFrameSink) {
     let count = buffers.len().min(MAX_SLICE_BUFFERS);
@@ -137,22 +139,19 @@ pub fn deliver_slices(buffers: &[SliceView<'_>], sources: &[LaneSource], sink: &
     }; MAX_SLICE_BUFFERS];
     for (view, buffer) in views.iter_mut().zip(&buffers[..count]) {
         let wanted = buffer.frames * buffer.channels;
-        *view = match buffer.samples {
-            Some(samples) => BufferView {
-                channels: buffer.channels,
-                data: Some(samples.as_ptr()),
-                byte_size: wanted.min(samples.len()) * 4,
-            },
-            None => BufferView {
-                channels: buffer.channels,
-                data: None,
-                byte_size: wanted * 4,
-            },
+        *view = BufferView {
+            channels: buffer.channels,
+            data: buffer
+                .samples
+                .filter(|samples| samples.len() >= wanted)
+                .map(<[f32]>::as_ptr),
+            byte_size: wanted * 4,
         };
     }
     // SAFETY: every `data` pointer is the start of a slice borrowed for
-    // this call, and its `byte_size` never exceeds that slice's length in
-    // bytes; `deliver` reads a buffer only after checking that `byte_size`
-    // covers the callback's frames at the buffer's channel count.
+    // this call and holding at least `byte_size` bytes (shorter slices get
+    // no pointer above); `deliver` reads a buffer only within the
+    // callback's frames at the buffer's channel count, which its shape
+    // check keeps inside `byte_size`.
     unsafe { deliver(&views[..count], sources, sink) }
 }

@@ -23,8 +23,8 @@ use std::sync::Arc;
 
 use steno_audio::capture::{ChannelRef, LaneSource, SplitStreamPlan, StreamLayout};
 use steno_audio::realtime::{
-    BufferView, FollowerLane, FrameRelay, LaneFrameSink, Packet, PacketRouter,
-    ProcessingConfiguration, ProcessingThread, StreamBody, deliver,
+    BufferView, FollowerLane, FrameRelay, LaneFrameSink, PacketRouter, ProcessingConfiguration,
+    ProcessingThread, SliceView, StreamBody, deliver,
 };
 use steno_audio::testing::AudioFixtures;
 use steno_audio::testing::rt::CountingAllocator;
@@ -171,7 +171,7 @@ fn the_sidecar_resampler_allocates_nothing_after_init() {
     );
 }
 
-/// The WASAPI capture threads' per-packet bodies (WP10), driven with
+/// The WASAPI capture threads' per-packet bodies (WP10a), driven with
 /// synthetic packets, no audio device: the follower folding stereo loopback
 /// packets into its staging ring, the master routing mono microphone
 /// packets plus the staged frames into the sink. One second at WASAPI's
@@ -212,13 +212,13 @@ fn the_two_stream_bodies_allocate_nothing() {
             _ => 1,
         };
         for _ in 0..loopback_packets {
-            staging.handle(Packet {
+            staging.handle(SliceView {
                 frames: PERIOD,
                 channels: 2,
                 samples: (period != 30).then_some(tap),
             });
         }
-        master.handle(Packet {
+        master.handle(SliceView {
             frames: PERIOD,
             channels: 1,
             samples: Some(mic),

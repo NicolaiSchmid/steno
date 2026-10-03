@@ -20,5 +20,5 @@ pub use relay::FrameRelay;
 pub use ring::LaneRingBuffer;
 pub use rings::LaneRings;
 pub use sink::LaneFrameSink;
-pub use streams::{FollowerLane, Packet, PacketRouter, StreamBody};
+pub use streams::{FollowerLane, PacketRouter, StreamBody};
 pub use wake::Wake;

@@ -84,7 +84,7 @@ use crate::SAMPLE_RATE;
 use crate::capture::CaptureError;
 use crate::capture::split_streams::frames_from_hundred_nanoseconds;
 use crate::detection::{AudioSessionRecord, EndpointFlow, SessionState};
-use crate::realtime::Packet;
+use crate::realtime::SliceView;
 
 /// A failed COM or WASAPI call: which one, its `HRESULT`, the system's
 /// message for it.
@@ -681,7 +681,7 @@ impl CaptureClient {
     /// Hands every queued packet to `handle`, then returns. The real-time
     /// part: no allocation and no lock here on success (the `windows`
     /// error values are built only on failure); `handle` must keep it so.
-    pub fn drain(&mut self, mut handle: impl FnMut(Packet<'_>)) -> Result<(), ComError> {
+    pub fn drain(&mut self, mut handle: impl FnMut(SliceView<'_>)) -> Result<(), ComError> {
         loop {
             // SAFETY: plain call on the started capture service.
             let next = check(
@@ -731,7 +731,7 @@ impl CaptureClient {
                     )
                 })
             };
-            handle(Packet {
+            handle(SliceView {
                 frames: count,
                 channels: self.channels,
                 samples,

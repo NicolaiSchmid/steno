@@ -18,7 +18,9 @@ use std::sync::Arc;
 
 use steno_audio::capture::split_streams::{far_end_latencies, frames_from_hundred_nanoseconds};
 use steno_audio::capture::{ChannelRef, SplitStreamPlan, StreamSource};
-use steno_audio::realtime::{FollowerLane, LaneFrameSink, Packet, PacketRouter, StreamBody};
+use steno_audio::realtime::{
+    FollowerLane, LaneFrameSink, PacketRouter, SliceView, StreamBody, deliver_slices,
+};
 use steno_audio::{CaptureError, CaptureMode};
 use steno_core::AudioLane;
 
@@ -35,8 +37,8 @@ fn stereo_ramp(start: usize, frames: usize) -> Vec<f32> {
         .collect()
 }
 
-fn packet(samples: &[f32], channels: usize) -> Packet<'_> {
-    Packet {
+fn packet(samples: &[f32], channels: usize) -> SliceView<'_> {
+    SliceView {
         frames: samples.len() / channels,
         channels,
         samples: Some(samples),
@@ -201,7 +203,7 @@ fn the_follower_folds_stereo_and_stages_silent_packets_as_zeros() {
     let mut scratch = vec![0.0f32; 100];
     follower.push(packet(&stereo_ramp(0, 480), 2), &mut scratch);
     follower.push(
-        Packet {
+        SliceView {
             frames: 480,
             channels: 2,
             samples: None,
@@ -211,7 +213,7 @@ fn the_follower_folds_stereo_and_stages_silent_packets_as_zeros() {
     // A packet shorter than it claims becomes zeros, not a short write.
     let short = stereo_ramp(0, 10);
     follower.push(
-        Packet {
+        SliceView {
             frames: 480,
             channels: 2,
             samples: Some(&short),
@@ -282,7 +284,7 @@ fn a_silent_master_packet_writes_zeros_and_a_large_one_is_split() {
     let sink = LaneFrameSink::new(&lanes);
     let mut router = PacketRouter::new(plan.layout.sources, None, 256);
     router.route(
-        Packet {
+        SliceView {
             frames: 100,
             channels: 1,
             samples: None,
@@ -329,4 +331,28 @@ fn a_system_only_master_folds_its_stereo_packet() {
     let mut router = PacketRouter::new(plan.layout.sources, None, 480);
     router.route(packet(&stereo_ramp(0, 480), 2), &sink);
     assert_eq!(drain(&sink, 0), ramp(1, 480), "folded");
+}
+
+#[test]
+fn a_slice_shorter_than_it_claims_is_delivered_as_silence_of_its_claimed_length() {
+    let lanes = [AudioLane::Mic, AudioLane::System];
+    let plan = SplitStreamPlan::new(&lanes).unwrap();
+    let sink = LaneFrameSink::new(&lanes);
+    let full = ramp(1, 480);
+    let short = vec![7.0f32; 10];
+    let slice = |samples| SliceView {
+        channels: 1,
+        frames: 480,
+        samples: Some(samples),
+    };
+
+    // A short follower slice: the system lane is zeros, the mic intact.
+    deliver_slices(&[slice(&full), slice(&short)], &plan.layout.sources, &sink);
+    assert_eq!(drain(&sink, 0), full);
+    assert_eq!(drain(&sink, 1), vec![0.0; 480]);
+
+    // A short master slice: the callback keeps its 480 frames.
+    deliver_slices(&[slice(&short), slice(&full)], &plan.layout.sources, &sink);
+    assert_eq!(drain(&sink, 0), vec![0.0; 480]);
+    assert_eq!(drain(&sink, 1), full);
 }
