@@ -679,6 +679,28 @@ mod tests {
     }
 
     #[test]
+    fn a_silence_past_six_frames_before_the_window_end_is_out_of_reach() {
+        let layout = Layout::v3();
+        let chunk_frames = layout.chunk_samples / FRAME_SAMPLES; // 187
+        // Silence at frames 182 to 184 of a 30 s tone: within the 4 s
+        // search radius of the 162-frame target, but later than the
+        // previous window's end minus six frames (frame 181), so the
+        // boundary may not move there and the target stands.
+        let mut audio = tone(30.0, 0.1);
+        let silent = (chunk_frames - 5) * FRAME_SAMPLES..(chunk_frames - 2) * FRAME_SAMPLES;
+        audio[silent].fill(0.0);
+        let starts = silence_aligned_chunk_starts(&audio, layout, false);
+        assert_eq!(starts[1].start, layout.stride_samples);
+        // The same silence one frame earlier reaches the clamp exactly
+        // (`candidate > latest_covered_start` excludes, equality does not).
+        let mut audio = tone(30.0, 0.1);
+        let silent = (chunk_frames - 7) * FRAME_SAMPLES..(chunk_frames - 5) * FRAME_SAMPLES;
+        audio[silent].fill(0.0);
+        let starts = silence_aligned_chunk_starts(&audio, layout, false);
+        assert_eq!(starts[1].start, (chunk_frames - 6) * FRAME_SAMPLES);
+    }
+
+    #[test]
     fn a_valley_is_taken_when_no_silence_is_near() {
         let layout = Layout::v3();
         let mut audio = tone(30.0, 0.1);
