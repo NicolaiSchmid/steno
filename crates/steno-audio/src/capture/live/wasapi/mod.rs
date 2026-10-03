@@ -1,21 +1,25 @@
-//! The live capture backend on Windows (WP10): WASAPI in shared mode, one
-//! capture thread per stream, endpoint notifications and the rebuild report.
+//! The live capture backend on Windows: WASAPI in shared mode, one capture
+//! thread per stream, endpoint notifications and the rebuild report. WP10a
+//! of `.plans/2026-10-02-rust-core-and-tauri-shell.md`; the macOS
+//! counterpart is `capture::live::backend`. No Swift counterpart.
 //!
-//! **Compile-verified only.** There is no Windows machine in the fleet:
-//! this backend is written against Microsoft's documentation and its
-//! samples, compiled, linted and unit-tested on the `windows-latest` CI
-//! runner, which has no audio device. Nothing here has captured a sample
-//! on real hardware; `tests/live_windows.rs` holds the `--ignored` checks a
-//! Windows machine must run before this ships (the plan's parity list).
+//! **Compile-tested only.** No Windows machine has run it: this backend is
+//! written against Microsoft's documentation and its samples, compiled,
+//! linted and unit-tested on the `windows-latest` CI runner, which has no
+//! audio device. Nothing here has captured a sample on real hardware;
+//! `tests/live_windows.rs` holds the `--ignored` checks a Windows machine
+//! must run before this ships (the plan's parity list).
 //!
 //! # Streams
 //!
 //! - **System lane:** process loopback (`ActivateAudioInterfaceAsync` on
 //!   `VIRTUAL_AUDIO_DEVICE_PROCESS_LOOPBACK`,
 //!   `AUDIOCLIENT_ACTIVATION_TYPE_PROCESS_LOOPBACK`) excluding Steno's own
-//!   process tree, Windows 10 2004 and later. Where that activation fails,
-//!   loopback of the default render endpoint, which records Steno's own
-//!   output too.
+//!   process tree (Microsoft documents it from build 20348; reported to
+//!   work from Windows 10 2004, unverified). Where that activation fails
+//!   for any reason, its timeout included, loopback of the default render
+//!   endpoint, which records Steno's own output too; the switch is only
+//!   logged.
 //! - **Microphone:** the selected capture endpoint by id, or the default
 //!   (`eCapture`, `eConsole`), shared mode, event-driven.
 //!

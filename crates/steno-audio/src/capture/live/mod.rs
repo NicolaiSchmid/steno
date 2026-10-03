@@ -2,7 +2,7 @@
 //! microphone in a private aggregate device with one IOProc, device-change
 //! listeners, coalescing and the rebuild report. On Windows WASAPI: process
 //! loopback and the capture endpoint as two streams on their own threads
-//! (`wasapi`, WP10, compile-verified only; see its module doc). PipeWire is
+//! (`wasapi`, WP10a, compile-tested only; see its module doc). PipeWire is
 //! the stub here, failing at `start`, until WP5b of
 //! `.plans/2026-10-02-rust-core-and-tauri-shell.md` fills it. All implement
 //! [`CaptureBackend`](super::CaptureBackend) behind this same name.

@@ -6,13 +6,16 @@
 //!   SpeexDSP and a passthrough, with the ERLE metrics.
 //! - [`capture`]: the [`CaptureSession`] state machine over a
 //!   [`CaptureBackend`], the configuration and results, the stream layout,
-//!   and the live backend (Core Audio on macOS, stubs elsewhere).
+//!   and the live backend (Core Audio on macOS, WASAPI on Windows; stubs
+//!   elsewhere).
 //! - [`codec`]: [`SymphoniaAudioCodec`], decoding recordings and phone
 //!   files to 16 kHz mono, and the mixdown.
 //! - [`detection`]: the [`MeetingDetector`]: which processes hold the
-//!   microphone, debounced into a call starting and ending.
-//! - [`realtime`]: the rings, the sink, the IOProc body, the processing
-//!   thread and the relay; everything on the real-time path.
+//!   microphone, debounced into a call starting and ending, and the WASAPI
+//!   session mapping.
+//! - [`realtime`]: the rings, the sink, the IOProc body, the two-stream
+//!   bodies, the processing thread and the relay; everything on the
+//!   real-time path.
 //! - [`writer`]: the recording writer (CAF master, 16 kHz WAV sidecars),
 //!   its thread and the 3:1 resampler.
 //! - [`clock`]: the injectable [`Clock`] the rebuild and the detector
@@ -47,6 +50,12 @@
 //!                              `notices` channels, the asset on `stop()`
 //! ```
 //!
+//! On Windows the top of the diagram is two WASAPI capture threads
+//! (`capture::live::wasapi`): the microphone thread is the first arrow,
+//! routing each packet through `realtime::PacketRouter`, and the system
+//! thread stages its packets into a `realtime::FollowerLane` that router
+//! pulls from.
+//!
 //! The synthetic backend ([`testing::SyntheticCaptureBackend`]) is a
 //! producer thread speaking the `LaneFrameSink` protocol in place of the
 //! IOProc; everything below it is the production path, which is what makes
@@ -61,7 +70,7 @@
 //!
 //! The live backend and the process-activity source are Core Audio on
 //! macOS and WASAPI on Windows; on Linux they are stubs until PipeWire
-//! (WP5b). **The Windows backend is compile-verified only:** no Windows
+//! (WP5b). **The Windows backend is compile-tested only:** no Windows
 //! machine has run it. It is written against Microsoft's documentation,
 //! built, linted and unit-tested on the `windows-latest` CI runner, which
 //! has no audio device; its per-packet bodies (`realtime::streams`), the

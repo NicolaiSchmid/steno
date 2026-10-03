@@ -1,5 +1,5 @@
 //! Audio sessions to process activity: the mapping under the Windows
-//! [`LiveProcessAudioActivity`](super::LiveProcessAudioActivity) (WP10),
+//! [`LiveProcessAudioActivity`](super::LiveProcessAudioActivity) (WP10a),
 //! pure so it is tested on every OS over synthetic sessions. No Swift
 //! equivalent; the Core Audio HAL reports per-process input and output
 //! flags directly.

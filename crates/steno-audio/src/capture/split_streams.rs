@@ -1,5 +1,5 @@
 //! Which capture stream feeds which lane when the microphone and the system
-//! audio arrive as two streams (WASAPI, WP10), and the latency arithmetic
+//! audio arrive as two streams (WASAPI, WP10a), and the latency arithmetic
 //! for them. Pure, so it is tested on every OS; the Windows backend
 //! (`capture::live::wasapi`) builds on it. No Swift equivalent (one IOProc
 //! there).
