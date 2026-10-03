@@ -91,6 +91,7 @@ pub enum CodexCredentialError {
         "Codex is signed in with an API key, not a ChatGPT account. Pick OpenAI as the service and paste that key instead."
     )]
     ApiKeyLogin,
+    /// `auth.json` is not JSON, or its token fields have the wrong shape.
     #[error("The Codex sign-in file could not be read.")]
     Malformed(String),
     /// The refresh token is spent, expired or revoked: only `codex login`
@@ -293,7 +294,8 @@ impl CodexCredentialStore {
     /// use std::collections::HashMap;
     /// use steno_llm::CodexCredentialStore;
     ///
-    /// let home = CodexCredentialStore::default_home(&HashMap::new());
+    /// let env: HashMap<String, String> = std::env::vars().collect();
+    /// let home = CodexCredentialStore::default_home(&env);
     /// let store = CodexCredentialStore::new(&home);
     /// assert_eq!(store.file_path(), home.join("auth.json"));
     /// ```

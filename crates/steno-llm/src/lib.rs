@@ -3,6 +3,15 @@
 //! `Sources/StenoLLM`. Plan: `.plans/2026-10-02-rust-core-and-tauri-shell.md`
 //! (WP7a).
 //!
+//! Wiring: [`LlmEndpoint::from_settings`] gives the endpoint, or `None`
+//! while summaries are off. Under `Endpoint`, build the client with
+//! [`OpenAiCompatibleClient::from_secret_store`]. Under `Codex`, use
+//! `CodexResponsesClient::new(endpoint,
+//! Arc::new(CodexCredentialStore::new(CodexCredentialStore::default_home(&env))))`.
+//! Then give the same `Arc` and endpoint to [`LlmTranscriptCleaner::new`]
+//! and to [`LlmMeetingSummarizer::new`], the latter with the user's time
+//! zone.
+//!
 //! - `endpoint` ([`LlmEndpoint`], [`StructuredOutputMode`], [`EndpointProbe`],
 //!   [`LlmClient`]): where the model lives, how much it holds, how JSON is
 //!   asked for, and the trait both clients implement.
@@ -16,19 +25,24 @@
 //!   speech-to-text mistakes while keeping count, order and wording.
 //! - [`summary`]: pass 2, title, structured summary, decisions, tasks and
 //!   speaker names, single-shot or map and reduce.
-//! - [`budget`]: tokenizer-free token estimates and the input budgets.
-//! - [`chunker`]: the transcript split into runs that fit one request.
-//! - [`schema`]: the JSON Schema builder, limited to the strict subset.
-//! - [`decoder`]: a completion to a typed value, fences tolerated.
-//! - [`inputs`]: a `MeetingExport` as each pass's input.
-//! - [`labels`]: speaker ids to the labels the model sees, and back.
-//! - [`language`]: the language the summary is written in.
+//! - The input side of both passes:
+//!   - [`inputs`]: a `MeetingExport` as each pass's input.
+//!   - [`labels`]: speaker ids to the labels the model sees, and back.
+//!   - [`language`]: the language the summary is written in.
+//!   - [`budget`]: tokenizer-free token estimates and the input budgets.
+//!   - [`chunker`]: the transcript split into runs that fit one request.
+//! - The output side:
+//!   - [`schema`]: the JSON Schema builder, limited to what OpenAI's strict
+//!     structured outputs accept.
+//!   - [`decoder`]: a completion to a typed value, Markdown code fences
+//!     tolerated.
 //! - [`concurrency`]: bounded fan-out for the chunked passes.
-//! - `retry` ([`RetryPolicy`]): exponential backoff for retryable failures.
-//! - [`transport`]: one attempt raced against the [`Clock`], `Retry-After`,
-//!   the backoff, the redaction of secrets, and the HTTP client builder.
 //! - [`wire`]: the request and response shapes of both APIs and the
 //!   server-sent events parser.
+//! - `retry` ([`RetryPolicy`]): exponential backoff for retryable failures.
+//! - [`transport`]: the HTTP attempt raced against the [`Clock`], the
+//!   attempt loop, the client events, the HTTP client builder and the
+//!   redaction of secrets.
 //! - `testing` (behind the feature of that name): the loopback stub server,
 //!   the canned scripts and the manual clock.
 //!

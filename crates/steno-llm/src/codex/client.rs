@@ -83,6 +83,20 @@ impl CodexResponsesClient {
         "invalid_request_error",
     ];
 
+    /// A client over the CLI's sign-in with the default HTTP client, retry
+    /// policy and system clock. Nothing is read until the first request.
+    ///
+    /// ```
+    /// use std::collections::HashMap;
+    /// use std::sync::Arc;
+    /// use steno_llm::{CodexCredentialStore, CodexResponsesClient, LlmClient, LlmEndpoint};
+    ///
+    /// let env: HashMap<String, String> = std::env::vars().collect();
+    /// let store = CodexCredentialStore::new(CodexCredentialStore::default_home(&env));
+    /// let endpoint = LlmEndpoint::codex("gpt-5.6-luna", 200_000);
+    /// let client = CodexResponsesClient::new(endpoint, Arc::new(store));
+    /// assert_eq!(client.endpoint().model, "gpt-5.6-luna");
+    /// ```
     #[must_use]
     pub fn new(endpoint: LlmEndpoint, credentials: Arc<CodexCredentialStore>) -> Self {
         let mode = endpoint.structured_output_mode;
