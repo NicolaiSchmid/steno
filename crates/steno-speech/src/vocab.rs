@@ -49,20 +49,26 @@ impl Vocab {
         if pieces.len() < 2 {
             return Err(invalid("fewer than two pieces".to_owned()));
         }
-        Ok(Self::from_pieces(pieces))
+        Self::from_pieces(pieces)
     }
 
-    /// A vocabulary from pieces in id order, the last being the blank.
-    #[must_use]
-    pub fn from_pieces(pieces: Vec<String>) -> Self {
+    /// A vocabulary from pieces in id order, the last being the blank; it
+    /// needs at least one piece besides the blank.
+    pub fn from_pieces(pieces: Vec<String>) -> Result<Self, SpeechError> {
+        if pieces.len() < 2 {
+            return Err(SpeechError::Shape(format!(
+                "a vocabulary needs a piece and the blank, got {} pieces",
+                pieces.len()
+            )));
+        }
         let splice_safe = pieces
             .iter()
             .map(|p| starts_word(p) || is_punctuation_piece(p))
             .collect();
-        Vocab {
+        Ok(Vocab {
             pieces,
             splice_safe,
-        }
+        })
     }
 
     /// Pieces including the blank.
@@ -171,6 +177,11 @@ mod tests {
         assert!(matches!(
             Vocab::load(&dir.path().join("missing.txt")),
             Err(SpeechError::Io { .. })
+        ));
+        // No blank to take the last id.
+        assert!(matches!(
+            Vocab::from_pieces(Vec::new()),
+            Err(SpeechError::Shape(_))
         ));
     }
 

@@ -183,6 +183,7 @@ mod tests {
                 .map(str::to_owned)
                 .to_vec(),
         )
+        .unwrap()
     }
 
     fn token(id: u32, frame: usize) -> Token {

@@ -396,7 +396,7 @@ mod tests {
         pieces.extend((1..=20).map(|i| format!("▁w{i}")));
         pieces.extend((21..=40).map(|i| format!("s{i}")));
         pieces.push("<blk>".to_owned());
-        Vocab::from_pieces(pieces)
+        Vocab::from_pieces(pieces).unwrap()
     }
 
     fn transcriber(config: PipelineConfig, min_frames: usize) -> Transcriber<FrameTokenBackend> {

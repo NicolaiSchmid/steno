@@ -309,7 +309,7 @@ mod tests {
 
     #[test]
     fn pieces_get_fluid_audio_timings() {
-        let vocab = Vocab::from_pieces(["▁ja", "<blk>"].map(str::to_owned).to_vec());
+        let vocab = Vocab::from_pieces(["▁ja", "<blk>"].map(str::to_owned).to_vec()).unwrap();
         let pieces = timed_pieces(
             &[
                 Token {
