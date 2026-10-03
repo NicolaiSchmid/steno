@@ -33,10 +33,11 @@ pub struct DiarizerConfig {
     pub refinement: Rules,
 }
 
-/// The clustering cut the calibration harness chose on the Forge corpus;
-/// the PR of this crate holds the sweep. 0.32 is where `FluidAudio`'s
-/// Euclidean 0.8 on unit vectors lands as a cosine distance
-/// (`d^2 = 2 - 2 cos`), the starting point of the sweep.
+/// The clustering cut: `FluidAudio`'s Euclidean 0.8 on unit vectors as a
+/// cosine distance (`d^2 = 2 - 2 cos`). The G3 sweep over the seven
+/// calibration calls (`.plans/2026-10-01-cross-platform-speech-stack.md`,
+/// PR #164) passed at every cut from 0.20 to 0.60 on both backends, so
+/// the derived value is kept rather than tuned to the corpus.
 pub const DEFAULT_CLUSTERING_THRESHOLD: f32 = 0.32;
 
 impl Default for DiarizerConfig {
