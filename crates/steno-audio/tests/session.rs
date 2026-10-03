@@ -1611,6 +1611,10 @@ fn stop_during_a_rebuilds_teardown_waits_for_it() {
     assert!(result.statistics.dropped_frames.is_empty());
     assert_eq!(result.statistics.device_changes, 0);
     assert_eq!(result.statistics.gap_seconds, 0.0);
+    assert!(
+        !result.statistics.system_lane_silent,
+        "the old processing thread's peak counts"
+    );
     let master = master_of(&result);
     assert_eq!(master.frame_count(), delivered);
     assert_eq!(result.statistics.duration, delivered as f64 / SAMPLE_RATE);

@@ -161,8 +161,9 @@ struct Active {
 struct Rebuild {
     cancel: Cancel,
     /// Returns the silence frames the rebuild wrote that no `resume`
-    /// accounted, because a stop overtook it.
-    thread: JoinHandle<usize>,
+    /// accounted, because a stop overtook it, and the system-lane peak of
+    /// the processing thread it stopped, which `finish()` then folds in.
+    thread: JoinHandle<(usize, f32)>,
 }
 
 enum Restart {
@@ -644,9 +645,15 @@ impl Core {
         if let Some(rebuild) = active.rebuild.take() {
             rebuild.cancel.cancel();
             // With `active` gone every step of the rebuild gives up; what
-            // it wrote of a gap before that is in the master.
-            let unaccounted = rebuild.thread.join().unwrap_or(0);
+            // it wrote of a gap before that is in the master, and the peak
+            // of the processing thread it stopped comes back with it. The
+            // join must come before the processing thread's stop, the
+            // writer's and `clear()`; before or after `backend.stop()` is
+            // the same, since a backend stop while the rebuild's own runs
+            // finds the backend's state already taken and returns at once.
+            let (unaccounted, peak) = rebuild.thread.join().unwrap_or((0, 0.0));
             active.gap_seconds += Self::seconds(unaccounted);
+            active.system_peak_so_far = active.system_peak_so_far.max(peak);
         }
         self.backend.stop();
         let mut system_peak = active.system_peak_so_far;
@@ -752,8 +759,10 @@ impl Core {
     /// is written as silence before the new processing thread starts. The
     /// sink, the relay, the writer thread and the files stay. Nothing here
     /// runs on a real-time thread. Returns the silence frames written that
-    /// `resume` did not account because a stop came first.
-    fn rebuild(self: &Arc<Self>, generation: usize, cancel: &Cancel) -> usize {
+    /// `resume` did not account because a stop came first, and the old
+    /// processing thread's system-lane peak for a `finish()` that took the
+    /// recording before this thread could fold it in.
+    fn rebuild(self: &Arc<Self>, generation: usize, cancel: &Cancel) -> (usize, f32) {
         // The stopwatch runs from before the teardown: the HAL calls in
         // `stop()` take tens to hundreds of milliseconds during a device
         // transition, and that is dead time in the master too.
@@ -761,10 +770,10 @@ impl Core {
         let (sink, relay, processing) = {
             let mut inner = self.lock();
             if !Self::still_rebuilding(&inner, generation) {
-                return 0;
+                return (0, 0.0);
             }
             let Some(active) = inner.active.as_mut() else {
-                return 0;
+                return (0, 0.0);
             };
             (
                 Arc::clone(&active.sink),
@@ -776,14 +785,11 @@ impl Core {
         // audio; the processing thread's stop drains them into the relay.
         self.backend.stop();
         let mut canceller = None;
+        let mut peak = 0.0f32;
         if let Some(mut processing) = processing {
             processing.stop();
-            let peak = processing.system_peak();
+            peak = processing.system_peak();
             canceller = processing.take_echo_canceller();
-            let mut inner = self.lock();
-            if let Some(active) = inner.active.as_mut() {
-                active.system_peak_so_far = active.system_peak_so_far.max(peak);
-            }
         }
         // New devices mean a new echo path: the filter starts cold, as at start.
         if let Some(canceller) = canceller.as_mut() {
@@ -792,12 +798,17 @@ impl Core {
         {
             let mut inner = self.lock();
             inner.echo_canceller = canceller;
+            // Gone when `finish()` took the recording meanwhile; the peak
+            // then reaches it through this thread's return value.
+            if let Some(active) = inner.active.as_mut() {
+                active.system_peak_so_far = active.system_peak_so_far.max(peak);
+            }
         }
         // The old backend's listeners went with it, so the latch can open
         // now: a report from the rebuilt backend before the gap is written
         // reaches `device_changed`, which keeps it for `resume`.
         sink.rearm_device_change();
-        match self.restart_backend(&sink, generation, cancel) {
+        let unaccounted = match self.restart_backend(&sink, generation, cancel) {
             Restart::Started(stream, attempt) => {
                 // The gap grows through every failed attempt and is written
                 // once, in full, when a start succeeds.
@@ -819,7 +830,8 @@ impl Core {
                 self.device_lost();
                 0
             }
-        }
+        };
+        (unaccounted, peak)
     }
 
     /// `start` again, `RESTART_BACKOFF` apart on the clock: `Started` with
