@@ -1,8 +1,11 @@
 //! The real-time promise, checked rather than grepped: the IOProc body
-//! (`LaneFrameSink` producer calls through `deliver`), the processing loop
-//! with the real Speex canceller, its far-end delay line, metering, the
-//! raw-mic copy and the relay hand-off run one second of audio on the
-//! test's thread under the counting allocator and allocate nothing.
+//! (`LaneFrameSink` producer calls through `deliver`), the PipeWire
+//! `process` body (`interleaved_view` over one interleaved buffer, then
+//! `deliver`), the processing loop with the real Speex canceller, its
+//! far-end delay line, metering, the raw-mic copy and the relay hand-off
+//! run one second of audio on the test's thread under the counting
+//! allocator and allocate nothing. `tests/pipewire.rs` counts the real
+//! data-loop thread against a PipeWire daemon on Linux.
 //! Swift: `Tests/StenoAudioTests/RealTimeAllocationTests.swift` (Darwin's
 //! `malloc_logger` hook); here the crate's own `#[global_allocator]`, so it
 //! runs on every OS. Plan invariant 5.
@@ -24,6 +27,7 @@ use std::sync::Arc;
 use steno_audio::capture::{ChannelRef, LaneSource, StreamLayout};
 use steno_audio::realtime::{
     BufferView, FrameRelay, LaneFrameSink, ProcessingConfiguration, ProcessingThread, deliver,
+    interleaved_view,
 };
 use steno_audio::testing::AudioFixtures;
 use steno_audio::testing::rt::CountingAllocator;
@@ -104,6 +108,33 @@ fn the_allocator_sees_a_deliberate_allocation_on_this_thread() {
 }
 
 #[test]
+fn the_allocator_counts_another_thread_by_its_id() {
+    use std::sync::mpsc::channel;
+    let (id_sender, id) = channel();
+    let (go_sender, go) = channel::<()>();
+    let (done_sender, done) = channel();
+    let worker = std::thread::spawn(move || {
+        id_sender.send(CountingAllocator::current_thread()).unwrap();
+        go.recv().unwrap();
+        let vector = vec![1.0f32; 100_000];
+        std::hint::black_box(&vector);
+        drop(vector);
+        done_sender.send(()).unwrap();
+    });
+    let worker_id = id.recv().unwrap();
+    assert_ne!(worker_id, CountingAllocator::current_thread());
+    let seen = CountingAllocator::allocations_on(worker_id, || {
+        go_sender.send(()).unwrap();
+        done.recv().unwrap();
+    });
+    worker.join().unwrap();
+    assert!(
+        seen >= 1,
+        "counting another thread must observe its deliberate allocation"
+    );
+}
+
+#[test]
 fn producer_processing_and_relay_allocate_nothing_after_warm_up() {
     let lanes = [AudioLane::Mic, AudioLane::System];
     let layout = StreamLayout::resolve(&lanes, &[1, 2], &[vec![], vec![1]], &[2], Some(1)).unwrap();
@@ -151,6 +182,83 @@ fn producer_processing_and_relay_allocate_nothing_after_warm_up() {
         "allocations inside the IOProc and processing path: {allocations} (process total {})",
         CountingAllocator::total()
     );
+}
+
+/// `samples` as the bytes of a mapped PipeWire buffer.
+fn as_bytes(samples: &[f32]) -> &[u8] {
+    // SAFETY: initialised `f32`s are valid bytes; the length is the
+    // slice's in bytes.
+    unsafe { std::slice::from_raw_parts(samples.as_ptr().cast::<u8>(), samples.len() * 4) }
+}
+
+#[test]
+fn the_pipewire_process_body_allocates_nothing() {
+    // What `capture::live::pipewire` resolves for a call: one buffer of
+    // three interleaved channels, the microphone and the monitor's two.
+    const CHANNELS: usize = 3;
+    const CYCLE: usize = 1_024;
+    let lanes = [AudioLane::Mic, AudioLane::System];
+    let sources = [
+        LaneSource {
+            lane: AudioLane::Mic,
+            left: ChannelRef::new(0, 0, CHANNELS),
+            right: None,
+        },
+        LaneSource {
+            lane: AudioLane::System,
+            left: ChannelRef::new(0, 1, CHANNELS),
+            right: Some(ChannelRef::new(0, 2, CHANNELS)),
+        },
+    ];
+    let sink = LaneFrameSink::new(&lanes);
+    let material = Material::new(1.0);
+    let mut interleaved = vec![0.0f32; material.frames * CHANNELS];
+    for (index, frame) in interleaved
+        .as_chunks_mut::<CHANNELS>()
+        .0
+        .iter_mut()
+        .enumerate()
+    {
+        frame[0] = material.mic[index];
+        frame[1] = material.tap[2 * index];
+        frame[2] = material.tap[2 * index + 1];
+    }
+    // The buffer PipeWire maps, refilled every cycle as the graph does.
+    let mut memory = vec![0.0f32; CYCLE * CHANNELS];
+
+    let allocations = CountingAllocator::allocations_during(|| {
+        let mut offset = 0;
+        while offset < material.frames {
+            let count = CYCLE.min(material.frames - offset);
+            memory[..count * CHANNELS]
+                .copy_from_slice(&interleaved[offset * CHANNELS..(offset + count) * CHANNELS]);
+            let stride = CHANNELS * 4;
+            let view = interleaved_view(
+                Some(as_bytes(&memory)),
+                0,
+                (count * stride) as u32,
+                i32::try_from(stride).unwrap(),
+                CHANNELS,
+            );
+            // SAFETY: the view points into `memory`, alive for the call.
+            unsafe { deliver(&[view], &sources, &sink) };
+            offset += count;
+        }
+    });
+    assert_eq!(
+        allocations, 0,
+        "{allocations} allocations in the PipeWire process body"
+    );
+    assert!(sink.dropped_samples().is_empty());
+    assert_eq!(sink.available_to_read(), material.frames);
+    let mut mic = vec![0.0f32; material.frames];
+    let mut system = vec![0.0f32; material.frames];
+    assert!(sink.ring(0).read(&mut mic) && sink.ring(1).read(&mut system));
+    assert_eq!(mic, material.mic, "the microphone is channel 0, untouched");
+    for (index, sample) in system.iter().enumerate() {
+        let expected = f32::midpoint(material.tap[2 * index], material.tap[2 * index + 1]);
+        assert_eq!(*sample, expected, "the monitor folds to mono at {index}");
+    }
 }
 
 #[test]
