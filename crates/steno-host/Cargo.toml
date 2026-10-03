@@ -23,8 +23,9 @@ steno-bridge = { path = "../steno-bridge" }
 steno-core = { path = "../steno-core" }
 thiserror.workspace = true
 # The core's boundaries are async; the host runs blocking (see the crate
-# doc), so it owns one current-thread runtime to wait on them.
-tokio = { workspace = true, features = ["rt"] }
+# doc), so it owns one current-thread runtime to wait on them, with the
+# timer and I/O drivers a real secret store may need.
+tokio = { workspace = true, features = ["net", "rt", "time"] }
 uuid.workspace = true
 
 [dev-dependencies]

@@ -155,7 +155,8 @@ pub enum HostError {
 /// `#[tokio::test]`): there the future is awaited on a scoped helper thread
 /// instead, so the call blocks like every other host call and never panics.
 /// The secret store is the only boundary awaited this way, a handful of
-/// times per Save.
+/// times per Save. The runtime has its timer and I/O drivers, so a store
+/// may time out or talk to a socket.
 pub(crate) fn block_on<F>(future: F) -> F::Output
 where
     F: std::future::Future + Send,
@@ -164,8 +165,9 @@ where
     static RUNTIME: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
     let runtime = RUNTIME.get_or_init(|| {
         tokio::runtime::Builder::new_current_thread()
+            .enable_all()
             .build()
-            .expect("a current-thread runtime builds without I/O or time")
+            .expect("the host's current-thread runtime builds")
     });
     let run = || runtime.block_on(future);
     if tokio::runtime::Handle::try_current().is_err() {
@@ -2102,4 +2104,29 @@ fn parse_asset(params: &AssetIdParams) -> Outcome<ModelAsset> {
 /// host down with it.
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use super::block_on;
+
+    /// A boundary that sleeps, as a secret store with a timeout would,
+    /// needs the host runtime's timer, here and on the helper thread:
+    /// without it the call panics with "timers are disabled". The sleep is
+    /// made inside the future, as a boundary's `async fn` makes it.
+    async fn a_boundary_with_a_timeout() {
+        tokio::time::sleep(Duration::from_millis(1)).await;
+    }
+
+    #[test]
+    fn a_boundary_may_use_the_runtimes_timer() {
+        block_on(a_boundary_with_a_timeout());
+    }
+
+    #[tokio::test]
+    async fn a_boundary_may_use_the_timer_from_inside_a_runtime() {
+        block_on(a_boundary_with_a_timeout());
+    }
 }
