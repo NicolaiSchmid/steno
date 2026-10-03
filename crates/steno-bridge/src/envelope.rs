@@ -238,9 +238,10 @@ impl BridgeError {
 }
 
 /// The store's errors on the contract's codes, so a host returns them with
-/// `?`. The messages are the Swift host's for the same cases
+/// `?`. The not-found and still-busy messages are the Swift host's
 /// (`apps/macos/Steno/Web/MainWindowBridge.swift`), not the store's text
-/// with an id in it. A lock held past the busy timeout
+/// with an id in it; the lock message is new here, since the Swift app
+/// never surfaces a lock. A lock held past the busy timeout
 /// ([`StoreError::is_busy`]) is `failed` but retryable: nothing is wrong
 /// with the call. Everything else is `failed` with the store's own
 /// description, as `BridgeDispatcher.swift` replies with a bare
@@ -460,10 +461,11 @@ mod tests {
         assert_eq!(decoded.error.unwrap().code, BridgeErrorCode::Cancelled);
     }
 
-    /// Each arm of the `From<StoreError>` mapping against the literal text
-    /// the Swift host shows, so an edit to a message fails here rather than
-    /// drifting from `MainWindowBridge.swift`. Which SQLite codes count as
-    /// busy is the store's test (`is_busy_names_the_lock_errors`).
+    /// Each arm of the `From<StoreError>` mapping against the Swift host's
+    /// literal text where there is one, so an edit to a message fails here
+    /// rather than drifting from `MainWindowBridge.swift`. Which SQLite
+    /// codes count as busy is the store's test
+    /// (`is_busy_names_the_lock_errors`).
     #[test]
     fn store_errors_land_on_the_contract_codes() {
         let busy = StoreError::Sqlite(rusqlite::Error::SqliteFailure(
