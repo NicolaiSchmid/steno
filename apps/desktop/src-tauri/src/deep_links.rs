@@ -10,18 +10,20 @@
 //! | `steno://meeting/<uuid>` | opens the main window on that meeting (`requestedMeetingID`) |
 //! | `steno://settings[/<section>]` | opens Settings on the section (`requestedSettingsSection`) |
 //!
-//! A pairing link is logged and ignored: the Mac is the host, not the
-//! phone. Anything else is logged and ignored too. A second instance
+//! A pairing link is logged (by its scheme and host only: its query holds
+//! the pairing secret) and ignored: the Mac is the host, not the phone.
+//! Anything else is logged and ignored too. A second instance
 //! started with a link hands it to the first (`tauri-plugin-single-instance`
 //! with its `deep-link` feature) and exits. Scheme and host are read
 //! case-insensitively, as RFC 3986 has them; the path is read as written,
 //! so a Settings section must be spelled as the contract spells it, while
 //! a meeting id reads in either case, as `UUID(uuidString:)` does.
 //!
-//! On Linux the installers register the scheme through the desktop entry
+//! On Linux the `.deb` registers the scheme through the desktop entry
 //! (`linux/steno-desktop.desktop`: `Exec=… %u` and the
-//! `x-scheme-handler/steno` MIME type), which the bundler fills in for the
-//! `.deb` and the `AppImage` alike.
+//! `x-scheme-handler/steno` MIME type). An `AppImage` carries the same
+//! entry, but no system reads it, so an `AppImage` registers itself at
+//! start, as a debug build does (`registers_itself`).
 //!
 //! Swift: `apps/macos/project.yml` (no `CFBundleURLTypes`: the Mac app
 //! registers no scheme), `Sources/StenoHandover/Pairing/PairingPayload.swift`
@@ -48,7 +50,10 @@ pub enum DeepLink {
     Pair,
 }
 
-/// Why a URL is not a link the shell follows.
+/// Why a URL is not a link the shell follows. Each names the link by its
+/// scheme and host (`describe`) or by its path, never by its query: a
+/// pairing link's query holds the pairing secret, and these end up in the
+/// log.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum DeepLinkError {
     #[error("not a {SCHEME}: link: {0}")]
@@ -57,36 +62,72 @@ pub enum DeepLinkError {
     NotAMeeting(String),
     #[error("not a Settings section: {0}")]
     NotASection(String),
+    #[error("{0} takes no query, fragment, user or port")]
+    Extras(String),
     #[error("unknown link: {0}")]
     Unknown(String),
+}
+
+/// The link as the log may name it: scheme and host, nothing after.
+pub fn describe(url: &Url) -> String {
+    match url.host_str() {
+        Some(host) => format!("{}://{host}", url.scheme()),
+        None => format!("{}:", url.scheme()),
+    }
+}
+
+/// The path's one segment: `""` for no path or `/`, `"x"` for `/x` and
+/// `/x/`; `None` for anything else (an empty segment, a second one).
+fn single_segment(path: &str) -> Option<&str> {
+    if matches!(path, "" | "/") {
+        return Some("");
+    }
+    let rest = path.strip_prefix('/')?;
+    let rest = rest.strip_suffix('/').unwrap_or(rest);
+    (!rest.is_empty() && !rest.contains('/')).then_some(rest)
 }
 
 impl DeepLink {
     /// Reads a link. The host part is the verb (`steno://meeting/…`), as
     /// the pairing link is written; a path-only form (`steno:/meeting/…`)
-    /// is not accepted.
+    /// is not accepted. A meeting or Settings link is the verb and at most
+    /// one path segment: a query, a fragment, a user, a port or an empty
+    /// segment (`//`) make it no link the shell follows.
     pub fn parse(url: &Url) -> Result<Self, DeepLinkError> {
         if !url.scheme().eq_ignore_ascii_case(SCHEME) {
-            return Err(DeepLinkError::OtherScheme(url.to_string()));
+            return Err(DeepLinkError::OtherScheme(format!("{}:", url.scheme())));
         }
-        let path = url.path().trim_matches('/');
         let host = url.host_str().map(str::to_ascii_lowercase);
-        match host.as_deref() {
+        let verb = match host.as_deref() {
+            Some("pair") => return Ok(Self::Pair),
+            Some(verb @ ("meeting" | "settings")) => verb,
+            _ => return Err(DeepLinkError::Unknown(describe(url))),
+        };
+        if url.query().is_some()
+            || url.fragment().is_some()
+            || !url.username().is_empty()
+            || url.password().is_some()
+            || url.port().is_some()
+        {
+            return Err(DeepLinkError::Extras(describe(url)));
+        }
+        let path = url.path();
+        let segment = single_segment(path);
+        if verb == "meeting" {
             // The hyphenated 36-character form only, as `UUID(uuidString:)`
             // and the `window.open` params read it.
-            Some("meeting") => parse_uuid(path)
+            return segment
+                .and_then(parse_uuid)
                 .map(Self::Meeting)
-                .ok_or_else(|| DeepLinkError::NotAMeeting(path.to_owned())),
-            Some("settings") => {
-                if path.is_empty() {
-                    return Ok(Self::Settings(None));
-                }
-                path.parse::<SettingsSection>()
-                    .map(|section| Self::Settings(Some(section)))
-                    .map_err(|_| DeepLinkError::NotASection(path.to_owned()))
-            }
-            Some("pair") => Ok(Self::Pair),
-            _ => Err(DeepLinkError::Unknown(url.to_string())),
+                .ok_or_else(|| DeepLinkError::NotAMeeting(segment.unwrap_or(path).to_owned()));
+        }
+        match segment {
+            Some("") => Ok(Self::Settings(None)),
+            Some(name) => name
+                .parse::<SettingsSection>()
+                .map(|section| Self::Settings(Some(section)))
+                .map_err(|_| DeepLinkError::NotASection(name.to_owned())),
+            None => Err(DeepLinkError::NotASection(path.to_owned())),
         }
     }
 
@@ -113,16 +154,17 @@ impl DeepLink {
 pub fn handle(app: &AppHandle, urls: &[Url]) {
     for url in urls {
         match DeepLink::parse(url) {
-            Ok(DeepLink::Pair) => {
-                eprintln!("[steno-desktop] {url} is the iPhone's pairing link; nothing to do here");
-            }
+            Ok(DeepLink::Pair) => eprintln!(
+                "[steno-desktop] {} is the iPhone's pairing link; nothing to do here",
+                describe(url)
+            ),
             Ok(link) => {
                 let Some(request) = link.window_request() else {
                     continue;
                 };
                 let host = app.state::<Host>();
                 if let Err(error) = windows::open_requested(app, &host, &request) {
-                    eprintln!("[steno-desktop] {url}: {error}");
+                    eprintln!("[steno-desktop] {}: {error}", describe(url));
                 }
             }
             Err(error) => eprintln!("[steno-desktop] deep link ignored: {error}"),
@@ -130,16 +172,32 @@ pub fn handle(app: &AppHandle, urls: &[Url]) {
     }
 }
 
+/// Whether the running binary registers the scheme itself on Linux or
+/// Windows: a debug build, which no installer put in place, and an
+/// `AppImage`, whose embedded desktop entry no system reads (the plugin
+/// writes one to the data directory that runs the `AppImage`). An
+/// installed `.deb`, `.msi` or NSIS build has its desktop entry or
+/// registry key from the installer.
+#[cfg(any(target_os = "linux", windows, test))]
+pub const fn registers_itself(debug_build: bool, appimage: bool) -> bool {
+    debug_build || appimage
+}
+
 /// Listens for links while the app runs and follows the one it may have
-/// been started with. A debug build on Linux or Windows also registers
-/// the scheme for the running binary, which the installers do for a
-/// release (the `.desktop` file, the registry).
+/// been started with, registering the scheme first where the binary must
+/// (`registers_itself`).
 pub fn install(app: &AppHandle) {
     #[cfg(any(target_os = "linux", windows))]
-    if cfg!(debug_assertions)
-        && let Err(error) = app.deep_link().register_all()
     {
-        eprintln!("[steno-desktop] registering {SCHEME}: failed: {error}");
+        #[cfg(target_os = "linux")]
+        let appimage = app.env().appimage.is_some();
+        #[cfg(windows)]
+        let appimage = false;
+        if registers_itself(cfg!(debug_assertions), appimage)
+            && let Err(error) = app.deep_link().register_all()
+        {
+            eprintln!("[steno-desktop] registering {SCHEME}: failed: {error}");
+        }
     }
     let listener = app.clone();
     app.deep_link()
@@ -200,10 +258,8 @@ mod tests {
     #[test]
     fn everything_else_is_an_error_that_names_the_problem() {
         assert_eq!(
-            link("https://example.com/meeting/1"),
-            Err(DeepLinkError::OtherScheme(
-                "https://example.com/meeting/1".into()
-            ))
+            link("https://example.com/meeting/1?token=x"),
+            Err(DeepLinkError::OtherScheme("https:".into()))
         );
         assert_eq!(
             link("steno://meeting/m-1"),
@@ -223,10 +279,10 @@ mod tests {
             link("steno://settings/General"),
             Err(DeepLinkError::NotASection("General".into()))
         );
-        assert!(matches!(
-            link("steno://record"),
-            Err(DeepLinkError::Unknown(_))
-        ));
+        assert_eq!(
+            link("steno://record?x=1"),
+            Err(DeepLinkError::Unknown("steno://record".into()))
+        );
         assert!(matches!(
             link("steno:meeting"),
             Err(DeepLinkError::Unknown(_))
@@ -235,6 +291,81 @@ mod tests {
             link("steno://meeting/m-1").unwrap_err().to_string(),
             "not a meeting id: m-1"
         );
+    }
+
+    /// A meeting or Settings link is the verb and one segment: anything a
+    /// URL can carry beside that is refused, named without its query.
+    #[test]
+    fn a_link_carries_nothing_beyond_its_verb_and_segment() {
+        let id = "00000000-0000-0000-0000-000000000001";
+        for text in [
+            format!("steno://meeting/{id}?select=1"),
+            format!("steno://meeting/{id}#notes"),
+            format!("steno://user@meeting/{id}"),
+            format!("steno://user:pass@meeting/{id}"),
+            format!("steno://meeting:80/{id}"),
+            "steno://settings/summaries?secret=x".into(),
+            "steno://settings?x".into(),
+        ] {
+            let error = link(&text).expect_err(&text);
+            assert!(
+                matches!(error, DeepLinkError::Extras(_)),
+                "{text}: {error:?}"
+            );
+            let message = error.to_string();
+            assert!(
+                !message.contains("secret") && !message.contains("pass"),
+                "{message}"
+            );
+        }
+        assert_eq!(
+            link(&format!("steno://meeting//{id}")),
+            Err(DeepLinkError::NotAMeeting(format!("//{id}")))
+        );
+        assert_eq!(
+            link(&format!("steno://meeting/{id}/notes")),
+            Err(DeepLinkError::NotAMeeting(format!("/{id}/notes")))
+        );
+        assert_eq!(
+            link(&format!("steno://meeting/{id}//")),
+            Err(DeepLinkError::NotAMeeting(format!("/{id}//")))
+        );
+        assert_eq!(
+            link("steno://meeting"),
+            Err(DeepLinkError::NotAMeeting(String::new()))
+        );
+        assert_eq!(
+            link("steno://settings//"),
+            Err(DeepLinkError::NotASection("//".into()))
+        );
+        assert_eq!(
+            link("steno://settings/export/x"),
+            Err(DeepLinkError::NotASection("/export/x".into()))
+        );
+    }
+
+    /// The pairing link's secret is in its query; the log names the link
+    /// by its scheme and host alone.
+    #[test]
+    fn a_link_is_named_by_scheme_and_host_only() {
+        let pair = Url::parse(
+            "steno://pair/v1?mac=00000000-0000-0000-0000-000000000001&name=Mac&fp=x&secret=hunter2&exp=1",
+        )
+        .unwrap();
+        assert_eq!(describe(&pair), "steno://pair");
+        assert_eq!(
+            describe(&Url::parse("https://example.com/a?b=c").unwrap()),
+            "https://example.com"
+        );
+        assert_eq!(describe(&Url::parse("steno:meeting").unwrap()), "steno:");
+    }
+
+    #[test]
+    fn a_debug_build_and_an_appimage_register_the_scheme_themselves() {
+        assert!(registers_itself(true, false));
+        assert!(registers_itself(false, true));
+        assert!(registers_itself(true, true));
+        assert!(!registers_itself(false, false));
     }
 
     /// RFC 3986: the scheme and the host are case-insensitive; the path is
