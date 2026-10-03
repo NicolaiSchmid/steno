@@ -50,17 +50,26 @@ impl MetadataValidation {
             let max = Self::MAX_DURATION_SECONDS as i64;
             return Some(format!("durationSeconds must be between 0 and {max}"));
         }
-        let name = metadata.device_name.trim();
-        if name.is_empty() || name.chars().count() > Self::MAX_DEVICE_NAME_LENGTH {
-            return Some(format!(
-                "deviceName must be 1 to {} characters",
-                Self::MAX_DEVICE_NAME_LENGTH
-            ));
+        if let Err(problem) = Self::device_name(&metadata.device_name) {
+            return Some(problem);
         }
         if !Self::ACCEPTED_FORMATS.contains(&metadata.format) {
             return Some(format!("format {} is not accepted", metadata.format));
         }
         None
+    }
+
+    /// `name` trimmed, or the problem with it: the announce and the pairing
+    /// request hold a device name to the same rule.
+    pub(crate) fn device_name(name: &str) -> Result<&str, String> {
+        let name = name.trim();
+        if name.is_empty() || name.chars().count() > Self::MAX_DEVICE_NAME_LENGTH {
+            return Err(format!(
+                "deviceName must be 1 to {} characters",
+                Self::MAX_DEVICE_NAME_LENGTH
+            ));
+        }
+        Ok(name)
     }
 
     /// How many chunks a recording of `byte_count` bytes has at

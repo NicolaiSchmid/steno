@@ -401,17 +401,10 @@ impl Engine {
                     );
                 }
             };
-            let name = body.device_name.trim();
-            if name.is_empty() || name.chars().count() > MetadataValidation::MAX_DEVICE_NAME_LENGTH
-            {
-                return HandoverResponse::problem(
-                    StatusCode::BAD_REQUEST,
-                    format!(
-                        "deviceName must be 1 to {} characters",
-                        MetadataValidation::MAX_DEVICE_NAME_LENGTH
-                    ),
-                );
-            }
+            let name = match MetadataValidation::device_name(&body.device_name) {
+                Ok(name) => name,
+                Err(problem) => return HandoverResponse::problem(StatusCode::BAD_REQUEST, problem),
+            };
             let session = state.pairing.take().expect("checked under this guard");
             (session, body.device_id, name.to_owned())
         };
