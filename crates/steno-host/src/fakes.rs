@@ -18,10 +18,9 @@ use uuid::Uuid;
 
 use crate::services::{
     AudioDevices, AutoStopStatus, ClipPlayer, Clock, CodexModel, CodexModelsError, ExportValidator,
-    FileSystem, FolderUsage, Handover, InputDevice, LaneLevels, ListenerState, LlmService,
-    LoginItem, LoginItemStatus, Opener, PairingCode, Permissions, Pipeline, Preferences, QrEncoder,
-    Recorder, RecorderStatus, Services, SpeechModels, UpdateOutcome, Updater,
-    permission_is_required,
+    FileSystem, FolderUsage, Handover, InputDevice, ListenerState, LlmService, LoginItem,
+    LoginItemStatus, Opener, PairingCode, Permissions, Pipeline, Preferences, QrEncoder, Recorder,
+    RecorderStatus, Services, SpeechModels, UpdateOutcome, Updater, permission_is_required,
 };
 use crate::speech::ModelAsset;
 
@@ -29,6 +28,12 @@ use crate::speech::ModelAsset;
 /// hide the state the assertion wants to see.
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// The hook a test installed, cloned out so the fake's lock is released
+/// before the hook runs: a hook may call its fake again.
+fn installed<H: ?Sized>(slot: &Mutex<Option<Arc<H>>>) -> Option<Arc<H>> {
+    lock(slot).clone()
 }
 
 /// A fixed `now`. Swift: the `now: { TestSupport.now }` closure.
@@ -183,8 +188,7 @@ impl Permissions for FakePermissions {
 
     fn request(&self, kind: PermissionKind) -> PermissionState {
         lock(&self.requests).push(kind);
-        let hook = lock(&self.on_request).clone();
-        if let Some(hook) = hook {
+        if let Some(hook) = installed(&self.on_request) {
             hook(kind);
         }
         let answer = lock(&self.answers)
@@ -296,10 +300,6 @@ impl FakeRecorder {
     /// Overwrites the status wholesale (a test staging a live recording).
     pub fn set_status(&self, status: RecorderStatus) {
         *lock(&self.status) = status;
-    }
-
-    pub fn set_levels(&self, levels: Option<LaneLevels>) {
-        lock(&self.status).levels = levels;
     }
 
     pub fn set_auto_stop(&self, auto_stop: Option<AutoStopStatus>) {
@@ -519,8 +519,7 @@ impl SpeechModels for FakeSpeechModels {
         progress: &mut dyn FnMut(f64, &str),
     ) -> BoundaryResult<()> {
         lock(&self.downloads).push(asset);
-        let hook = lock(&self.on_download).clone();
-        if let Some(hook) = hook {
+        if let Some(hook) = installed(&self.on_download) {
             hook(asset);
         }
         let steps = lock(&self.progress).clone();
@@ -603,8 +602,7 @@ impl FakeLlmService {
 impl LlmService for FakeLlmService {
     fn probe(&self, settings: &Settings, _api_key: Option<&str>) -> BoundaryResult<String> {
         lock(&self.probes).push(settings.clone());
-        let hook = lock(&self.on_probe).clone();
-        if let Some(hook) = hook {
+        if let Some(hook) = installed(&self.on_probe) {
             hook(settings);
         }
         lock(&self.probe_result).clone().map_err(Into::into)
