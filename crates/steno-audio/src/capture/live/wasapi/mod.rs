@@ -73,7 +73,7 @@ use crate::capture::{
     CaptureBackend, CaptureError, CaptureStream, DeviceChangeReason, DeviceSnapshot,
     SplitStreamPlan, StreamSource,
 };
-use crate::detection::SessionFlow;
+use crate::detection::EndpointFlow;
 use crate::realtime::{FollowerLane, LaneFrameSink, PacketRouter, StreamBody};
 
 /// How long a stream thread may take to open its stream (process loopback
@@ -171,7 +171,7 @@ struct DeviceProbe {
 }
 
 impl DeviceProbe {
-    fn endpoint_id(enumerator: &Enumerator, flow: SessionFlow, role: Role) -> Option<String> {
+    fn endpoint_id(enumerator: &Enumerator, flow: EndpointFlow, role: Role) -> Option<String> {
         enumerator
             .default_endpoint(flow, role)
             .and_then(|endpoint| endpoint.id())
@@ -203,7 +203,7 @@ impl DeviceProbe {
                     .ok()
                     .filter(com::Endpoint::is_active)
                     .and_then(|endpoint| endpoint.id().ok()),
-                None => Self::endpoint_id(enumerator, SessionFlow::Capture, Role::Console),
+                None => Self::endpoint_id(enumerator, EndpointFlow::Capture, Role::Console),
             }
         } else {
             None
@@ -211,11 +211,11 @@ impl DeviceProbe {
         DeviceSnapshot {
             output_uid: self
                 .needs_system
-                .then(|| Self::endpoint_id(enumerator, SessionFlow::Render, Role::Console))
+                .then(|| Self::endpoint_id(enumerator, EndpointFlow::Render, Role::Console))
                 .flatten(),
             default_output_uid: self
                 .needs_system
-                .then(|| Self::endpoint_id(enumerator, SessionFlow::Render, Role::Communications))
+                .then(|| Self::endpoint_id(enumerator, EndpointFlow::Render, Role::Communications))
                 .flatten(),
             input_uid,
             output_alive: self.needs_system
@@ -296,7 +296,7 @@ fn open(
             let endpoint = match input_device_uid {
                 Some(uid) => enumerator.endpoint(uid).ok(),
                 None => enumerator
-                    .default_endpoint(SessionFlow::Capture, Role::Console)
+                    .default_endpoint(EndpointFlow::Capture, Role::Console)
                     .ok(),
             }
             .filter(com::Endpoint::is_active)
@@ -305,7 +305,7 @@ fn open(
             (client, endpoint.id().ok(), None)
         }
         StreamSource::System => {
-            let render = enumerator.default_endpoint(SessionFlow::Render, Role::Console);
+            let render = enumerator.default_endpoint(EndpointFlow::Render, Role::Console);
             let render_id = render.as_ref().ok().and_then(|e| e.id().ok());
             match CaptureClient::process_loopback(std::process::id(), channels, ACTIVATION_TIMEOUT)
             {
@@ -737,16 +737,16 @@ impl AudioDevices {
         let apartment = Apartment::enter()?;
         let enumerator = Enumerator::new()?;
         let default = |flow, role| DeviceProbe::endpoint_id(&enumerator, flow, role);
-        let default_input = default(SessionFlow::Capture, Role::Console);
-        let default_output = default(SessionFlow::Render, Role::Console);
+        let default_input = default(EndpointFlow::Capture, Role::Console);
+        let default_output = default(EndpointFlow::Render, Role::Console);
         let mut devices = Vec::new();
-        for flow in [SessionFlow::Capture, SessionFlow::Render] {
+        for flow in [EndpointFlow::Capture, EndpointFlow::Render] {
             for endpoint in enumerator.active_endpoints(flow)? {
                 let Ok(uid) = endpoint.id() else {
                     continue;
                 };
                 let (channels, rate) = endpoint.mix_format().unwrap_or((0, 0));
-                let is_input = flow == SessionFlow::Capture;
+                let is_input = flow == EndpointFlow::Capture;
                 let is_default = |default: Option<&str>| default == Some(uid.as_str());
                 let is_default_output = !is_input && is_default(default_output.as_deref());
                 devices.push(AudioDeviceInfo {
