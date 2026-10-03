@@ -232,6 +232,20 @@ mod tests {
         }
     }
 
+    /// `encoder` decoded with the default limits from frame 0.
+    fn decode(
+        backend: &mut ScriptedBackend,
+        encoder: &EncoderOutput,
+    ) -> Result<Vec<Token>, SpeechError> {
+        decode_window(
+            backend,
+            encoder,
+            0,
+            &DecoderConfig::default(),
+            &mut DecodeStats::default(),
+        )
+    }
+
     #[test]
     fn blanks_advance_by_their_duration_and_tokens_stay_on_zero_durations() {
         // Frame 0: blank, skip 2. Frame 2: token 1 dur 0, token 2 dur 1.
@@ -286,26 +300,9 @@ mod tests {
     #[test]
     fn an_empty_window_decodes_nothing_and_a_bad_duration_bin_is_a_shape_error() {
         let mut backend = ScriptedBackend::new(&[(1, 7)]);
-        let mut stats = DecodeStats::default();
-        assert!(
-            decode_window(
-                &mut backend,
-                &encoder(0),
-                0,
-                &DecoderConfig::default(),
-                &mut stats
-            )
-            .unwrap()
-            .is_empty()
-        );
+        assert!(decode(&mut backend, &encoder(0)).unwrap().is_empty());
         assert!(matches!(
-            decode_window(
-                &mut backend,
-                &encoder(1),
-                0,
-                &DecoderConfig::default(),
-                &mut stats
-            ),
+            decode(&mut backend, &encoder(1)),
             Err(SpeechError::Shape(_))
         ));
     }
@@ -322,13 +319,7 @@ mod tests {
             data: vec![0.0; 6],
         };
         assert!(matches!(
-            decode_window(
-                &mut backend,
-                &wide,
-                0,
-                &DecoderConfig::default(),
-                &mut DecodeStats::default()
-            ),
+            decode(&mut backend, &wide),
             Err(SpeechError::Shape(_))
         ));
     }
@@ -337,14 +328,7 @@ mod tests {
     fn a_probability_that_is_not_a_number_is_zero_confidence() {
         let mut backend = ScriptedBackend::new(&[(1, 1)]);
         backend.script[0].probability = f32::NAN;
-        let tokens = decode_window(
-            &mut backend,
-            &encoder(1),
-            0,
-            &DecoderConfig::default(),
-            &mut DecodeStats::default(),
-        )
-        .unwrap();
+        let tokens = decode(&mut backend, &encoder(1)).unwrap();
         assert_eq!(tokens[0].confidence, 0.0);
     }
 
