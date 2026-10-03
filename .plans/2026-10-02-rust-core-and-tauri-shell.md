@@ -17,8 +17,10 @@ speech on the Neural Engine; Linux and Windows run our fp32 ONNX export of the s
 model. The Swift app keeps shipping until the Rust app reaches parity on the Mac and
 reads the same database, so the cutover is a download, not a migration.
 
-Not in this plan: the diarization rebuild (speech-stack WP3, gate G3), GPU execution
-providers (WP4, gate G4), the iOS recorder (unchanged), and any new product feature.
+Not in this plan: GPU execution providers (speech-stack WP4, gate G4), the iOS
+recorder (unchanged), and any new product feature. The diarization rebuild
+(speech-stack WP3, gate G3) was outside it at the start and moved in on 2026-10-02 as
+WP4d, so it ships with the Rust pipeline.
 Feature work continues on the Swift app until cutover; anything merged there after
 this plan starts is a parity item for the Rust side, tracked in the parity list below.
 
@@ -56,6 +58,7 @@ crates/
   steno-host/              the view models behind the three windows, the bridge host over the store, the shell-side service traits and their fakes
   steno-audio/             capture backends (CoreAudio taps, PipeWire, WASAPI), ring buffer, AEC, writer
   steno-speech/            VAD, chunker, merge, TDT decoder; CoreML and ONNX Runtime backends; model store
+  steno-diarize/           speaker diarization: segmentation and embedding backends (CoreML, ONNX Runtime), Steno's clustering and refinement, model store
   steno-llm/               OpenAI-compatible and Codex clients, cleanup and summary passes
   steno-adapters/          destinations (Obsidian, Markdown folder), export
   steno-handover/          phone handover server (TLS pinned), shared wire contract with mobile/
@@ -149,6 +152,11 @@ bridge's copies of the macro and codecs. Packages after WP3 branch from `main`.
   corpus; ONNX Runtime backend through `ort` with the logits split validated on FLEURS
   German (closes the open item from the speech-stack plan); sidecar process; model
   manifest and download. Gate: FLEURS numbers within 0.5 points of the spike F table.
+  **WP4d diarization.** `steno-diarize`: speech-stack decision 6 and gate G3, moved
+  here on 2026-10-02 so it ships with the Rust pipeline. Segmentation and embedding
+  behind one backend trait (CoreML over FluidAudio's models on the Mac, ONNX Runtime
+  elsewhere), Steno's clustering, timeline, mapping and refinement ported from
+  `Sources/StenoSpeech/Diarization`, the G3 harness over the Forge corpus.
   **WP5 audio.** `steno-audio` from `spikes/capture-rs`: CoreAudio backend with
   device-change rebuild, synthetic backend, writer, AEC; capture tests from
   `Tests/StenoAudioTests` ported. PipeWire backend. WASAPI backend last.
@@ -532,7 +540,7 @@ PR off `main`.
 | WP7b adapters | `feat/rust-adapters` | #165 | merged |
 | WP6a host | `feat/rust-host` | #170 | merged |
 | WP5a audio (`steno-audio`) | `feat/rust-audio` | #166 | merged |
-| WP4d diarization: `steno-diarize` (segmentation, embedding, Steno's clustering and refinement, ONNX Runtime and CoreML backends, G3 calibration harness) | `feat/rust-diarize` | #164 | open |
+| WP4d diarization (`steno-diarize`) | `feat/rust-diarize` | #164 | open |
 
 WP4b is `crates/steno-speech-coreml`: `objc2-core-ml` behind one safe module,
 the four backend calls, the FluidAudio 0.17.4 heuristics ported
