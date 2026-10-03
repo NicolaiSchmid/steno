@@ -116,17 +116,13 @@ fn main() {
             }
         }
         // The main window closes: hidden and kept while a tray can bring
-        // it back, as the Swift main window closes behind the menu bar
-        // item (and the tray's recorder commands keep a window to go
-        // through); destroyed otherwise, as the window is then the only
-        // way to the app, which ends the process rather than linger
-        // invisibly.
+        // it back (`hides_on_close`); destroyed otherwise.
         tauri::RunEvent::WindowEvent {
             label,
             event: tauri::WindowEvent::CloseRequested { api, .. },
             ..
         } => {
-            if label == BridgeWindow::Main.as_str() && has_tray(app) {
+            if hides_on_close(&label, has_tray(app)) {
                 api.prevent_close();
                 if let Some(main) = app.get_webview_window(&label)
                     && let Err(error) = main.hide()
@@ -135,12 +131,18 @@ fn main() {
                 }
             }
         }
-        // A window is gone: its page no longer listens.
+        // A window is gone: its page no longer listens; a destroyed main
+        // window with no tray ends the process (`exits_when_destroyed`).
         tauri::RunEvent::WindowEvent {
             label,
             event: tauri::WindowEvent::Destroyed,
             ..
-        } => app.state::<windows::Pages>().gone(&label),
+        } => {
+            app.state::<windows::Pages>().gone(&label);
+            if exits_when_destroyed(&label, has_tray(app)) {
+                actions::quit(app);
+            }
+        }
         // A panel the user dragged: its anchor follows (`panels::moved`
         // tells a drag from the window taking its size).
         tauri::RunEvent::WindowEvent {
@@ -166,6 +168,23 @@ fn main() {
 /// Whether the tray was built (`tray::build` manages `Tray` on success).
 fn has_tray(app: &tauri::AppHandle) -> bool {
     app.try_state::<tray::Tray>().is_some()
+}
+
+/// Whether closing the window of `label` hides it instead: the main window
+/// while a tray can bring it back, as the Swift main window closes behind
+/// the menu bar item (and the tray's recorder commands keep a window to go
+/// through). Every other close destroys the window.
+fn hides_on_close(label: &str, has_tray: bool) -> bool {
+    label == BridgeWindow::Main.as_str() && has_tray
+}
+
+/// Whether the window of `label` being destroyed ends the process: the
+/// main window with no tray, as it was then the only way to the app. The
+/// panels' windows are hidden, never destroyed, so once one has existed
+/// the last window never closes on its own, and the process would linger
+/// invisibly.
+fn exits_when_destroyed(label: &str, has_tray: bool) -> bool {
+    label == BridgeWindow::Main.as_str() && !has_tray
 }
 
 /// Whether an exit request ends the process. One with a code is the shell's
@@ -198,6 +217,23 @@ mod tests {
         // No tray: the last window closing ends the process.
         assert!(exits_on(None, false));
         assert!(exits_on(Some(0), false));
+    }
+
+    /// With a tray, closing main hides it and the process stays; without
+    /// one, main is destroyed and the process ends with it, whatever else
+    /// (a hidden panel) is still around. The other windows just close.
+    #[test]
+    fn main_hides_behind_a_tray_and_ends_the_process_without_one() {
+        assert!(hides_on_close("main", true));
+        assert!(!hides_on_close("main", false));
+        assert!(!exits_when_destroyed("main", true));
+        assert!(exits_when_destroyed("main", false));
+        for label in ["settings", "onboarding", "bubble", "prompt"] {
+            for tray in [true, false] {
+                assert!(!hides_on_close(label, tray), "{label}");
+                assert!(!exits_when_destroyed(label, tray), "{label}");
+            }
+        }
     }
 
     #[test]
