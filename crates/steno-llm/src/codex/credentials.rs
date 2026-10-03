@@ -78,41 +78,28 @@ impl CodexCredentials {
 }
 
 /// Why the sign-in could not be used. The `Display` form is the sentence
-/// the user reads; [`detail`](Self::detail) is the technical text for logs
-/// and "Details".
+/// the user reads and never carries the payload; [`detail`](Self::detail)
+/// is the technical text (already redacted) for logs and "Details".
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum CodexCredentialError {
     /// No `auth.json`, or one without ChatGPT tokens.
+    #[error("No Codex sign-in found. Run `codex login` in Terminal, then try again.")]
     NotSignedIn,
     /// The file holds an API key login, which the Codex backend does not
     /// take; the OpenAI preset of the endpoint provider is the way.
+    #[error(
+        "Codex is signed in with an API key, not a ChatGPT account. Pick OpenAI as the service and paste that key instead."
+    )]
     ApiKeyLogin,
+    #[error("The Codex sign-in file could not be read.")]
     Malformed(String),
     /// The refresh token is spent, expired or revoked: only `codex login`
     /// helps.
+    #[error("The Codex sign-in has expired. Run `codex login` in Terminal, then try again.")]
     SignInExpired(String),
     /// The refresh did not go through for a reason a retry may fix.
+    #[error("The Codex sign-in could not be refreshed. Check the connection and try again.")]
     RefreshFailed(String),
-}
-
-impl fmt::Display for CodexCredentialError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(match self {
-            CodexCredentialError::NotSignedIn => {
-                "No Codex sign-in found. Run `codex login` in Terminal, then try again."
-            }
-            CodexCredentialError::ApiKeyLogin => {
-                "Codex is signed in with an API key, not a ChatGPT account. Pick OpenAI as the service and paste that key instead."
-            }
-            CodexCredentialError::Malformed(_) => "The Codex sign-in file could not be read.",
-            CodexCredentialError::SignInExpired(_) => {
-                "The Codex sign-in has expired. Run `codex login` in Terminal, then try again."
-            }
-            CodexCredentialError::RefreshFailed(_) => {
-                "The Codex sign-in could not be refreshed. Check the connection and try again."
-            }
-        })
-    }
 }
 
 impl CodexCredentialError {
