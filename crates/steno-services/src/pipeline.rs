@@ -9,7 +9,9 @@ use chrono::Utc;
 use steno_core::AudioRetention;
 use steno_core::protocols::BoundaryResult;
 use steno_host::services::Pipeline;
-use steno_pipeline::{Operation, PipelineDependencies, ProcessingPipeline, RetentionSweep};
+use steno_pipeline::{
+    Operation, PipelineDependencies, ProcessingPipeline, RetentionSweep, SweepIncomplete,
+};
 use uuid::Uuid;
 
 use crate::app::BuildError;
@@ -134,10 +136,23 @@ impl Pipeline for HostPipeline {
 }
 
 /// The sweep at launch and after every processed meeting; a partial sweep
-/// is logged, not fatal.
+/// is logged, not fatal. Warn says how many files stayed; their paths,
+/// which name the meetings' folders, go to debug.
 pub fn run_sweep(sweep: &RetentionSweep) {
-    if let Err(error) = sweep.run(Utc::now()) {
-        tracing::warn!(%error, "retention sweep incomplete");
+    match sweep.run(Utc::now()) {
+        Ok(_) => {}
+        Err(SweepIncomplete::Files(failures)) => {
+            tracing::warn!(
+                count = failures.len(),
+                "retention sweep could not remove every file"
+            );
+            for (path, error) in &failures {
+                tracing::debug!(path = %path.display(), %error, "retention sweep kept a file");
+            }
+        }
+        Err(SweepIncomplete::Store(error)) => {
+            tracing::warn!(%error, "retention sweep could not read the store");
+        }
     }
 }
 
@@ -241,6 +256,35 @@ mod tests {
         })
         .await
         .expect("the event was posted")
+    }
+
+    /// A file the sweep could not remove is counted at warn; its path,
+    /// which names the meeting's folder, is not.
+    #[test]
+    fn a_partial_sweep_warns_with_a_count_not_the_paths() {
+        let (dir, store) = temp_store();
+        let mut meeting = sample_data::meeting();
+        meeting.state = MeetingState::Ready;
+        // A directory where the master should be: removing it as a file fails.
+        let master = dir.path().join("private-folder").join("audio.wav");
+        std::fs::create_dir_all(master.join("inside")).unwrap();
+        let asset = steno_core::AudioAsset {
+            id: Uuid::new_v4(),
+            meeting_id: meeting.id,
+            url: steno_core::paths::file_url(&master, false),
+            format: steno_core::AudioFormat::Wav16kInt16,
+            lanes: vec![steno_core::AudioLane::Mixed],
+            sidecars_16k: std::collections::BTreeMap::new(),
+            mixdown_url: None,
+            retention: AudioRetention::KeepDays(1),
+            expires_at: Some(Utc::now() - chrono::Duration::hours(1)),
+        };
+        store.save_meeting_with_asset(&meeting, &asset).unwrap();
+        let (log, _guard) = crate::testing::CapturedLog::warnings();
+        run_sweep(&RetentionSweep::new(store.clone()));
+        let text = log.text();
+        assert!(text.contains("count=1"), "{text}");
+        assert!(!text.contains("private-folder"), "{text}");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

@@ -27,6 +27,8 @@ steno-core = { path = "../steno-core", features = ["testing"] }
 steno-pipeline = { path = ".", features = ["testing"] }
 tempfile.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "time"] }
+# The privacy test reads what the pipeline logs.
+tracing-subscriber.workspace = true
 
 [lints]
 workspace = true

@@ -421,6 +421,71 @@ async fn a_failing_stage_marks_the_meeting_failed_with_its_name() {
     assert_eq!(pipeline.in_flight(), Vec::<Uuid>::new());
 }
 
+/// Log lines written into a buffer, for the privacy tests.
+#[derive(Clone, Default)]
+struct CapturedLog(Arc<Mutex<Vec<u8>>>);
+
+impl CapturedLog {
+    fn text(&self) -> String {
+        String::from_utf8(self.0.lock().unwrap().clone()).unwrap()
+    }
+}
+
+impl std::io::Write for CapturedLog {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for CapturedLog {
+    type Writer = CapturedLog;
+
+    fn make_writer(&'a self) -> Self::Writer {
+        self.clone()
+    }
+}
+
+/// A failed background run is logged at warn with its asset and stage
+/// only: a stage's reason can name the audio file or quote the model, and
+/// stays with the meeting row and the debug level.
+#[tokio::test(flavor = "current_thread")]
+async fn a_failed_background_run_warns_with_its_stage_not_its_reason() {
+    let log = CapturedLog::default();
+    let _guard = tracing::subscriber::set_default(
+        tracing_subscriber::fmt()
+            .with_writer(log.clone())
+            .with_max_level(tracing::Level::WARN)
+            .finish(),
+    );
+    let world = world(false, None, AudioRetention::KeepForever);
+    let mut dependencies = world.pipeline.dependencies().clone();
+    let reason = "cannot open /Users/someone/Audio/meeting/mic.caf";
+    dependencies.diarizer = Arc::new(FakeDiarizer {
+        failure: Some(reason.to_owned()),
+        ..FakeDiarizer::default()
+    });
+    let pipeline = ProcessingPipeline::new(dependencies);
+    let meeting = call_meeting(world.now);
+    let asset = call_asset(&world.audio, meeting.id, AudioRetention::KeepForever);
+    pipeline.enqueue(&meeting, &asset).unwrap();
+    pipeline.wait_until_idle().await;
+
+    let text = log.text();
+    assert!(text.contains("processing failed"), "{text}");
+    assert!(text.contains("stage=\"diarize\""), "{text}");
+    assert!(text.contains(&asset.id.to_string()), "{text}");
+    assert!(!text.contains(reason), "{text}");
+    assert!(
+        !text.contains(&world.audio.display().to_string()),
+        "no audio path: {text}"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn a_failing_summary_names_its_stage_once() {
     let world = world(false, None, AudioRetention::KeepForever);

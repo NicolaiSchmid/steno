@@ -82,6 +82,11 @@ impl fmt::Display for PipelineFailure {
 
 type Result<T> = std::result::Result<T, PipelineFailure>;
 
+/// The log target of a background run's failure (`enqueue`,
+/// `resume_unfinished`). The CLI, which waits for its run and prints the
+/// failure itself as Swift's `steno process` did, turns it off.
+pub const BACKGROUND_RUN_LOG: &str = "steno_pipeline::background";
+
 /// A re-run or a re-export whose meeting is already claimed: awaiting it
 /// does the work, dropping it unawaited releases the meeting. See
 /// [`ProcessingPipeline::claim_rerun_summary`].
@@ -446,7 +451,16 @@ impl ProcessingPipeline {
                 asset_id,
             };
             if let Err(failure) = pipeline.process(asset_id).await {
-                tracing::warn!(%asset_id, %failure, "processing failed");
+                // The reason can name the audio file (a decode error) or
+                // quote the model, so warn carries the stage only; the
+                // meeting row has the whole reason.
+                tracing::warn!(
+                    target: BACKGROUND_RUN_LOG,
+                    %asset_id,
+                    stage = failure.stage.as_str(),
+                    "processing failed"
+                );
+                tracing::debug!(target: BACKGROUND_RUN_LOG, %asset_id, %failure, "processing failure");
             }
         });
         state.running.insert(asset_id, handle);

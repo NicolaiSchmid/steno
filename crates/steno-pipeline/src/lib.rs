@@ -77,8 +77,8 @@ pub use intake::{
 };
 pub use lane_merger::LaneMerger;
 pub use pipeline::{
-    MonotonicClock, Now, Operation, PipelineDependencies, PipelineFailure, ProcessingPipeline,
-    SystemClock,
+    BACKGROUND_RUN_LOG, MonotonicClock, Now, Operation, PipelineDependencies, PipelineFailure,
+    ProcessingPipeline, SystemClock,
 };
 pub use retention::{RetentionSweep, SweepIncomplete};
 pub use speaker_memory::StoreSpeakerMemory;

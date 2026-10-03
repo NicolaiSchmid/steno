@@ -97,7 +97,8 @@ pub struct App {
     pub models_directory: std::path::PathBuf,
     pub zone: FixedOffset,
     pub version: String,
-    /// What went wrong while building, for the shell's log.
+    /// What went wrong while building, for the shell's log; an unreadable
+    /// API key is logged where it is read.
     pub startup_warnings: Vec<String>,
 }
 
@@ -249,9 +250,8 @@ pub fn build(options: AppOptions) -> Result<App, BuildError> {
     let runtime = options.runtime;
     let zone = local_zone();
 
-    if let Err(warning) = api_key(&secrets, &runtime) {
-        warnings.push(warning);
-    }
+    // An unreadable API key is logged by the first build of the
+    // dependencies below, once.
     let make = make_dependencies(&store, &paths, &secrets, &codex, &events, &runtime);
     let pipeline = Arc::new(CurrentPipeline::new(
         ProcessingPipeline::new(make()?),
@@ -331,6 +331,27 @@ pub fn build(options: AppOptions) -> Result<App, BuildError> {
     })
 }
 
+/// Logs an `OperationFailed`: warn names the meeting, the operation and
+/// the stage; the failure text, which can quote the model or the server,
+/// goes to debug only.
+fn log_operation_failure(event: &MeetingEvent) {
+    if let MeetingEvent::OperationFailed {
+        meeting_id,
+        operation,
+        stage,
+        failure,
+    } = event
+    {
+        tracing::warn!(
+            %meeting_id,
+            operation = operation.label(),
+            stage = stage.as_str(),
+            "a background operation failed"
+        );
+        tracing::debug!(%meeting_id, %failure, "background operation failure");
+    }
+}
+
 impl App {
     /// The host over this graph, with the viewer's zone and the version.
     pub fn host(&self) -> Result<Host, steno_host::host::HostError> {
@@ -373,21 +394,8 @@ impl App {
                             | MeetingEvent::Deleted { .. } => {
                                 event_host.store_changed();
                             }
-                            MeetingEvent::OperationFailed {
-                                meeting_id,
-                                operation,
-                                stage,
-                                failure,
-                            } => {
-                                // The failure text can quote the model or
-                                // the server, so it goes to debug only.
-                                tracing::warn!(
-                                    %meeting_id,
-                                    operation = operation.label(),
-                                    stage = stage.as_str(),
-                                    "a background operation failed"
-                                );
-                                tracing::debug!(%meeting_id, %failure, "background operation failure");
+                            MeetingEvent::OperationFailed { .. } => {
+                                log_operation_failure(&event);
                                 event_host.store_changed();
                             }
                         }
@@ -549,6 +557,23 @@ mod tests {
                 reason: "Recording was interrupted before it finished.".to_owned()
             }
         );
+    }
+
+    #[test]
+    fn a_background_failure_warns_without_its_text() {
+        let (log, _guard) = crate::testing::CapturedLog::warnings();
+        let meeting_id = uuid::Uuid::new_v4();
+        log_operation_failure(&MeetingEvent::OperationFailed {
+            meeting_id,
+            operation: steno_core::MeetingOperation::SummaryRerun,
+            stage: steno_core::PipelineStage::Summarize,
+            failure: "summarize: the model said: I cannot summarise this".to_owned(),
+        });
+        let text = log.text();
+        assert!(text.contains(&meeting_id.to_string()), "{text}");
+        assert!(text.contains("Summary re-run"), "{text}");
+        assert!(text.contains("stage=\"summarize\""), "{text}");
+        assert!(!text.contains("the model said"), "{text}");
     }
 
     #[test]

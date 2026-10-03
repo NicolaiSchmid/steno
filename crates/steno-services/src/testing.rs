@@ -86,3 +86,45 @@ pub fn on_own_thread<T: Send + 'static>(
         Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => panic!("the call panicked"),
     }
 }
+
+/// Log lines written into a buffer at `warn` and above while the guard
+/// lives, on this thread.
+#[derive(Clone, Default)]
+pub struct CapturedLog(Arc<std::sync::Mutex<Vec<u8>>>);
+
+impl CapturedLog {
+    /// Starts capturing on this thread.
+    pub fn warnings() -> (Self, tracing::subscriber::DefaultGuard) {
+        let log = CapturedLog::default();
+        let guard = tracing::subscriber::set_default(
+            tracing_subscriber::fmt()
+                .with_writer(log.clone())
+                .with_max_level(tracing::Level::WARN)
+                .finish(),
+        );
+        (log, guard)
+    }
+
+    pub fn text(&self) -> String {
+        String::from_utf8(self.0.lock().unwrap().clone()).unwrap()
+    }
+}
+
+impl std::io::Write for CapturedLog {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for CapturedLog {
+    type Writer = CapturedLog;
+
+    fn make_writer(&'a self) -> Self::Writer {
+        self.clone()
+    }
+}

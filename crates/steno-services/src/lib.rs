@@ -76,13 +76,21 @@ mod testing;
 pub use app::{App, AppOptions, BuildError, build, open_store};
 pub use secrets::{FileSecretStore, KeyringSecretStore, secret_store};
 
+/// The shell's log filter when `RUST_LOG` is unset.
+pub const LOG_FILTER: &str = "warn";
+
 /// Installs the log output of the shell and the CLI: lines on stderr,
-/// filtered by `RUST_LOG` (default `warn`), so what the services warn
-/// about (no keychain, no handover identity, a re-run or re-export that
-/// failed in the background) is seen. A second call does nothing.
-pub fn log_to_stderr() {
+/// filtered by `RUST_LOG`, else by `default_filter` (the shell passes
+/// [`LOG_FILTER`]), so what the services warn about (no keychain, no
+/// handover identity, a re-run or re-export that failed in the background)
+/// is seen. A second call does nothing.
+///
+/// Privacy rule for every line at `warn` and above: ids, stages, counts and
+/// error kinds only, never transcript or model text, audio, a file path or
+/// a secret. Full error text goes to `debug`.
+pub fn log_to_stderr(default_filter: &str) {
     let filter = tracing_subscriber::EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn"));
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(default_filter));
     let _ = tracing_subscriber::fmt()
         .with_env_filter(filter)
         .with_writer(std::io::stderr)

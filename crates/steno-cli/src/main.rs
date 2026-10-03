@@ -15,7 +15,14 @@ use crate::commands::{Command, Steno};
 use crate::wiring::Failure;
 
 fn main() {
-    steno_services::log_to_stderr();
+    // `warn`, without the pipeline's line for a failed background run: the
+    // CLI waits for its run and prints the failure itself, as Swift's
+    // `steno process` did, so the line would say it twice.
+    steno_services::log_to_stderr(&format!(
+        "{},{}=off",
+        steno_services::LOG_FILTER,
+        steno_pipeline::BACKGROUND_RUN_LOG
+    ));
     let steno = match Steno::try_parse() {
         Ok(steno) => steno,
         Err(error) => {

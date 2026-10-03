@@ -317,6 +317,12 @@ fn a_run_whose_meeting_ends_failed_exits_two_and_says_why() {
         "{}",
         process.stderr
     );
+    assert_eq!(
+        process.stderr.matches("processing failed").count(),
+        1,
+        "one line, Swift's: {}",
+        process.stderr
+    );
     assert_eq!(process.stdout, "", "no meeting id on a failed run");
 }
 
