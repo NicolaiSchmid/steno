@@ -1,8 +1,10 @@
 //! The `StenoJSON` convention (`Sources/StenoCore/Model/StenoJSON.swift`):
 //! sorted keys, ISO 8601 dates with three fraction digits, `Data` as base64,
-//! slashes unescaped. JSON columns use the compact one-line form; the pretty
-//! form (`meeting.json`) arrives with the export port in WP6 of
-//! `.plans/2026-10-02-rust-core-and-tauri-shell.md`.
+//! slashes unescaped. JSON columns use [`to_column_string`] (`serde_json`'s
+//! number spelling, whole doubles as integers). Bytes that must match
+//! Foundation's (the bridge fixtures and replies, `meeting.json`) go through
+//! [`printer`]: [`to_canonical_string`] pretty, [`to_compact_string`]
+//! one-line. `steno-bridge` re-exports both.
 //!
 //! The date and UUID text codecs ([`format_date`], [`parse_date`],
 //! [`uuid_string`], [`parse_uuid`] and the `with` modules [`iso_time`],
@@ -13,6 +15,9 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
 use serde_json::Value;
 use uuid::Uuid;
+
+pub mod printer;
+pub use printer::{to_canonical_string, to_compact_string};
 
 /// `value` as the one-line JSON text a column holds: keys sorted, whole
 /// doubles written as integers the way Swift's `JSONEncoder` writes them.

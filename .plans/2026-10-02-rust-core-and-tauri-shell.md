@@ -150,7 +150,7 @@ bridge's copies of the macro and codecs. Packages after WP3 branch from `main`.
   Swift `steno export` of a calibration meeting equals the Rust one field for field.
 - **WP7 LLM, adapters, handover.** Ports of `StenoLLM` (Codex and OpenAI-compatible),
   `StenoAdapters`, `StenoHandover` (rustls, the pinned trust evaluation, the shared
-  `wire.ts` contract test).
+  `wire.ts` contract test). Lands as three PRs: WP7a LLM, WP7b adapters, WP7c handover.
 - **WP8 shell completion and Linux release.** Autostart, updater, keyring, onboarding
   permissions per OS, installer bundles; `cargo deny` with a licence allow list in CI;
   `release.yml` matrix; first Linux build.
@@ -186,6 +186,35 @@ login item, calendar, phone pairing). Until then, only what the first crates tur
   (`StoreError::UnknownMigration`); today GRDB ignores unknown identifiers and the
   Swift app would run on a newer schema without noticing.
 
+### Adapters
+
+- `ManagedBlock.merge` should manage only the lines that carry a `%%steno:` marker
+  (sorted where the first of them stood) and copy every other non-blank line of the
+  block through in place, as the Rust port does; today a page whose end marker the
+  user deleted is re-sorted and blank-stripped from the dangling start marker to the
+  far end marker on the next delivery. Rust also treats a line holding only `\r`
+  inside the block as blank; Swift's `.whitespaces` does not.
+- `AtomicFileWriter.write` should `fsync` the target's directory after the rename, as
+  the Rust writer does on Unix, so the new directory entry is durable along with the
+  bytes.
+- `AtomicFileWriter.temporaryURL` should put the eight hex digits before the name and
+  cut the name so the whole temp name fits in 255 bytes, as the Rust writer does;
+  today a target name within 20 bytes of the limit fails with "file name too long"
+  before the first byte.
+- `ObsidianFolderDestination.checkVault` should reject a `.` component in the people
+  folder as well (`./People`), as the Rust `check_vault` does by requiring the
+  ledger's plain-relative rule; today the receipt then carries `./People/Anna.md`,
+  the ledger's inside-the-root check refuses it, and every later delivery runs as a
+  first one (folder pin lost, stale lines never removed). This must land before the
+  Mac cutover (WP9): a user who typed `./People` or `.` in the Swift Settings would
+  otherwise get `PeopleFolderInvalid` on every Rust delivery.
+- `ObsidianFolderDestination.checkVault`'s message should say a plain relative path
+  (no `.`, `..` or empty components) when it adopts the rule; the Rust message is
+  Swift's verbatim and follows.
+- The person-page writer should write file names NFC-normalised, as the Rust writer
+  does; Foundation writes `Anna Müller.md` in NFD on APFS, which maps both to one
+  file, but a vault synced to a normalisation-sensitive filesystem gets two files.
+
 ### Bridge
 
 What the bridge crate (WP1) asks of the Swift side before WP6 fills the list:
@@ -210,7 +239,8 @@ PR off `main`.
 | WP3 Tauri shell on fixtures | `feat/rust-desktop` | #156 | merged |
 | Core protocols and fakes | `feat/rust-protocols` | #162 | merged |
 | Bridge on core | `refactor/rust-bridge-on-core` | #161 | merged |
-| WP4b CoreML speech backend | `feat/rust-speech-coreml` | #163 | in review |
+| WP4b CoreML speech backend | `feat/rust-speech-coreml` | #163 | merged |
+| WP7b adapters | `feat/rust-adapters` | #165 | open |
 
 WP4b is `crates/steno-speech-coreml`: `objc2-core-ml` behind one safe module,
 the four backend calls, the FluidAudio 0.17.4 heuristics ported

@@ -14,9 +14,14 @@
 //!   holds the column codecs a query outside the crate uses.
 //! - `testing` (feature `testing`): deterministic fakes for every
 //!   boundary, so the pipeline, the CLI and the shell test without models.
-//! - [`json`]: the `StenoJSON` convention and the date and UUID codecs.
+//! - [`json`]: the `StenoJSON` convention and the date and UUID codecs;
+//!   [`json::printer`] holds the Foundation-style printer `meeting.json` and
+//!   the bridge use.
+//! - [`summary`]: the summary document as Markdown, names substituted.
 //! - [`string_enum`](mod@string_enum): the macro every Swift `String` enum is spelled with.
-//! - [`paths`]: where the database lives on each platform.
+//! - [`paths`]: where the database lives on each platform, and the file URL
+//!   codec the store's audio paths use.
+//! - [`content_hash`]: the SHA-256 every receipt carries.
 //!
 //! Two rules hold the crate together. It depends on nothing else of ours
 //! (every other crate depends on it), so the pipeline, the CLI and the
@@ -28,12 +33,14 @@
 //! little-endian `f32` blobs. A schema change is one PR touching both
 //! sides; `migrations/README.md` has the procedure.
 
+pub mod content_hash;
 pub mod json;
 pub mod model;
 pub mod paths;
 pub mod protocols;
 pub mod store;
 pub mod string_enum;
+pub mod summary;
 #[cfg(any(test, feature = "testing"))]
 pub mod testing;
 

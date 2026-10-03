@@ -1,0 +1,30 @@
+[package]
+name = "steno-adapters"
+description = "Steno's destinations (the Obsidian folder) and the meeting export"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+steno-core = { path = "../steno-core" }
+
+async-trait.workspace = true
+chrono.workspace = true
+chrono-tz.workspace = true
+iana-time-zone.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+unicode-normalization.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+# The doctests render the core's sample export.
+steno-core = { path = "../steno-core", features = ["testing"] }
+tempfile.workspace = true
+tokio.workspace = true
+
+[lints]
+workspace = true

@@ -4,7 +4,6 @@
 use std::path::{Path, PathBuf};
 
 use async_trait::async_trait;
-use sha2::{Digest, Sha256};
 use thiserror::Error;
 use uuid::Uuid;
 
@@ -23,8 +22,10 @@ pub struct Transient {
 }
 
 /// A `Destination` that writes `meeting.json` under `<root>/<meeting id>/`
-/// and records every export it received. The file holds the compact
-/// `StenoJSON` form; the adapters crate owns the pretty one.
+/// and records every export it received. The file holds the column form
+/// ([`crate::json::to_column_string`]), not the pretty
+/// [`crate::json::to_canonical_string`] form the adapters' `meeting.json`
+/// holds.
 #[derive(Debug)]
 pub struct FakeDestination {
     pub id: String,
@@ -93,7 +94,7 @@ impl Destination for FakeDestination {
             files: vec![DeliveredFile {
                 relative_path: "meeting.json".to_owned(),
                 ownership: FileOwnership::Owned,
-                sha256: Sha256::digest(data.as_bytes()).to_vec(),
+                sha256: crate::content_hash::sha256(data.as_bytes()),
             }],
             renderer_version: Self::RENDERER_VERSION,
         })
@@ -137,6 +138,8 @@ impl HandoverIntake for FakeHandoverIntake {
 
 #[cfg(test)]
 mod tests {
+    use std::fmt::Write as _;
+
     use super::*;
     use crate::AudioFormat;
     use crate::testing::sample_data;
@@ -159,7 +162,15 @@ mod tests {
         assert_eq!(receipt.folder, uuid_string(export.meeting.id));
         let path = destination.export_path(export.meeting.id);
         let written = std::fs::read(&path).unwrap();
-        assert_eq!(receipt.files[0].sha256, Sha256::digest(&written).to_vec());
+        let mut hex = String::new();
+        for byte in &receipt.files[0].sha256 {
+            let _ = write!(hex, "{byte:02x}");
+        }
+        // `sha256sum` of the sample export's column form, as written.
+        assert_eq!(
+            hex,
+            "0d133bbf29e879aaf88951c84fd8e5a77ff95344312bd3548d4587fe14ed8ea4"
+        );
         let parsed: MeetingExport = serde_json::from_slice(&written).unwrap();
         assert_eq!(parsed, export);
         let previous = DeliveryReceipt {

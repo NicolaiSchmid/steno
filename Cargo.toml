@@ -19,8 +19,8 @@ publish = false
 
 # Shared dependency versions live here and nowhere else; crates inherit them
 # with `workspace = true`. No `serde_json/preserve_order`: every writer sorts
-# keys itself (`steno-bridge` and `steno-core` `json.rs`), so the default map
-# is the right one.
+# keys itself (`steno-core`'s `json.rs` and `json/printer.rs`), so the default
+# map is the right one.
 [workspace.dependencies]
 anyhow = "1"
 base64 = "0.22"
@@ -42,8 +42,8 @@ zmij = "1"
 # Test only
 similar = "2"
 tempfile = "3"
-# Dyn-compatible async traits for the boundaries, the content hash the
-# fakes write into receipts, and the executor the trait tests run on.
+# Dyn-compatible async traits for the boundaries, the content hash every
+# delivery receipt carries, and the executor the trait tests run on.
 async-trait = "0.1"
 sha2 = "0.10"
 tokio = { version = "1", default-features = false, features = ["macros", "rt", "rt-multi-thread"] }
@@ -54,6 +54,12 @@ tokio = { version = "1", default-features = false, features = ["macros", "rt", "
 objc2 = "0.6"
 objc2-core-ml = "0.3.2"
 objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "NSArray", "NSDictionary", "NSEnumerator", "NSError", "NSObject", "NSString", "NSURL", "NSValue"] }
+# Adapters: IANA time zones for the dates in the notes (Swift's `TimeZone`),
+# the machine's zone name, and the canonical decomposition `Slug` strips
+# diacritics with.
+chrono-tz = "0.10"
+iana-time-zone = "0.1"
+unicode-normalization = "0.1"
 
 [workspace.lints.clippy]
 all = { level = "warn", priority = -1 }

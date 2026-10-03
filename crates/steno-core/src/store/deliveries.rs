@@ -5,7 +5,7 @@ use rusqlite::{Connection, Row, params};
 use uuid::Uuid;
 
 use super::convert::{DbDate, DbEnum, DbJson, DbUuid, RowExt as _};
-use super::{Result, Store, query_all, upsert_sql};
+use super::{Result, Store, execute_cached, query_all, upsert_sql};
 use crate::model::{Delivery, DeliveryStatus};
 
 const COLUMNS: &str =
@@ -45,6 +45,25 @@ impl Store {
     /// this is a plain upsert.
     pub fn save_delivery(&self, delivery: &Delivery) -> Result<()> {
         self.write(|transaction| save(transaction, delivery))
+    }
+
+    /// Removes the rows with `ids`; ids without a row are ignored. The
+    /// dispatcher drops the rows of a destination that is no longer
+    /// configured with this.
+    pub fn delete_deliveries(&self, ids: &[Uuid]) -> Result<()> {
+        if ids.is_empty() {
+            return Ok(());
+        }
+        self.write(|transaction| {
+            for id in ids {
+                execute_cached(
+                    transaction,
+                    "DELETE FROM delivery WHERE id = ?1",
+                    [DbUuid(*id)],
+                )?;
+            }
+            Ok(())
+        })
     }
 
     /// The meeting's deliveries by destination id.

@@ -9,9 +9,8 @@
 //! `Date` is `chrono::DateTime<Utc>` written as `2026-09-29T12:48:00.000Z`,
 //! `UUID` is `uuid::Uuid` written upper case, a nil optional is an omitted
 //! key, `String` enums are `steno_core::string_enum!` enums with the same
-//! raw values. The date and UUID codecs are `steno_core::json`'s; this
-//! crate adds only the printer ([`json`]): the fixtures' pretty style and
-//! the dispatcher's compact one.
+//! raw values. The date and UUID codecs and the printer are
+//! `steno_core::json`'s ([`json`] re-exports the printer).
 //!
 //! Naming: a top-level Swift type keeps its name without the `Bridge` prefix
 //! (`BridgeMeetingSource` is [`MeetingSource`]). A type nested in a snapshot,
@@ -49,7 +48,6 @@
 pub mod commands;
 pub mod dispatcher;
 pub mod envelope;
-pub mod json;
 pub mod settings;
 pub mod snapshots;
 
@@ -58,3 +56,12 @@ pub use dispatcher::*;
 pub use envelope::*;
 pub use settings::*;
 pub use snapshots::*;
+
+/// Re-exports [`steno_core::json::printer`]:
+/// [`to_canonical_string`](steno_core::json::to_canonical_string) is the
+/// fixtures' pretty style (`BridgeJSON.encode`),
+/// [`to_compact_string`](steno_core::json::to_compact_string) the
+/// dispatcher's one-line style (`BridgeDispatcher.encoder()`).
+pub mod json {
+    pub use steno_core::json::{to_canonical_string, to_compact_string};
+}

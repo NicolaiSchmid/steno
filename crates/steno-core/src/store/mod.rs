@@ -14,6 +14,7 @@
 mod assets;
 pub mod convert;
 mod deliveries;
+mod export;
 mod meetings;
 pub mod migrator;
 mod people;

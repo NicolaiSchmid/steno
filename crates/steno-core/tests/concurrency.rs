@@ -1,13 +1,17 @@
 //! Two connections on one file, as when the Swift app and this store, or
 //! two copies of this store, hold the database at the same time: writes
-//! queue on the busy timeout instead of failing, and a fresh database is
-//! migrated once.
+//! queue on the busy timeout instead of failing, a fresh database is
+//! migrated once, an export reads past a held write lock, and an export
+//! sees a concurrent commit whole or not at all.
 
 mod common;
 
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use rusqlite::TransactionBehavior;
 use steno_core::Store;
 
 use common::populate;
@@ -112,4 +116,116 @@ fn two_stores_open_a_fresh_file_at_once() {
         })
         .unwrap();
     assert_eq!(identifiers, ["v1", "v2", "v3", "v4"]);
+}
+
+/// `Store::export` takes no write lock: it returns while the other store
+/// holds one. An immediate transaction (or `Store::write`) would queue on
+/// the busy timeout instead and fail with `database is locked` once it ran
+/// out. A plain read passes this too; the snapshot is checked by
+/// `an_export_never_sees_half_of_a_concurrent_commit`.
+#[test]
+fn an_export_reads_while_the_other_store_holds_the_write_lock() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("steno.sqlite");
+    let writer = Store::open(&path).unwrap();
+    let meeting = populate(&writer);
+    let reader = Store::open(&path).unwrap();
+
+    writer
+        .write(|_| {
+            assert_eq!(reader.export(meeting.id).unwrap().meeting.id, meeting.id);
+            Ok(())
+        })
+        .unwrap();
+}
+
+/// Exports the race test checks: enough for a torn export to show up many
+/// times over without the transaction (most exports tear then), few enough
+/// to finish in well under a second.
+const RACE_EXPORTS: u64 = 300;
+
+/// Commits that must land while those exports run, so they overlap the
+/// writer rather than finishing before it starts.
+const RACE_COMMITS: u64 = 300;
+
+/// A second connection commits the meeting's title, its decision and its
+/// tasks together, in a loop; every export must see all three from one
+/// commit. Without the export's transaction each query reads the latest
+/// commit, so the title and the decision come from different ones.
+#[test]
+fn an_export_never_sees_half_of_a_concurrent_commit() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("steno.sqlite");
+    let store = Store::open(&path).unwrap();
+    let meeting = populate(&store);
+    let id = steno_core::json::uuid_string(meeting.id);
+
+    let mut connection = rusqlite::Connection::open(&path).unwrap();
+    connection.busy_timeout(Duration::from_secs(5)).unwrap();
+    connection
+        .pragma_update(None, "synchronous", "OFF")
+        .unwrap();
+    let commit = move |connection: &mut rusqlite::Connection, text: &str| {
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .unwrap();
+        for sql in [
+            "UPDATE meeting SET title = ?1 WHERE id = ?2",
+            "UPDATE decision SET text = ?1 WHERE meetingID = ?2",
+            "UPDATE meetingTask SET text = ?1 WHERE meetingID = ?2",
+        ] {
+            transaction.execute(sql, (text, &id)).unwrap();
+        }
+        transaction.commit().unwrap();
+    };
+    commit(&mut connection, "0");
+    let export = store.export(meeting.id).unwrap();
+    assert_eq!((export.decisions.len(), export.tasks.len()), (1, 2));
+
+    let stop = Arc::new(AtomicBool::new(false));
+    let commits = Arc::new(AtomicU64::new(0));
+    let writer = {
+        let stop = stop.clone();
+        let commits = commits.clone();
+        thread::spawn(move || {
+            while !stop.load(Ordering::Relaxed) {
+                let n = commits.fetch_add(1, Ordering::Relaxed) + 1;
+                commit(&mut connection, &n.to_string());
+            }
+        })
+    };
+
+    let guard = Instant::now() + GUARD;
+    let first = commits.load(Ordering::Relaxed);
+    let mut exports = 0;
+    let mut torn = Vec::new();
+    while (exports < RACE_EXPORTS || commits.load(Ordering::Relaxed) - first < RACE_COMMITS)
+        && Instant::now() < guard
+    {
+        let export = store.export(meeting.id).unwrap();
+        exports += 1;
+        let title = &export.meeting.title;
+        let texts = export.decisions.iter().map(|decision| &decision.text);
+        let texts = texts.chain(export.tasks.iter().map(|task| &task.text));
+        if texts.clone().any(|text| text != title) {
+            torn.push(format!(
+                "title {title}, texts {:?}",
+                texts.collect::<Vec<_>>()
+            ));
+        }
+    }
+    stop.store(true, Ordering::Relaxed);
+    writer.join().unwrap();
+    let during = commits.load(Ordering::Relaxed) - first;
+
+    assert!(
+        torn.is_empty(),
+        "{} of {exports} exports torn, first: {}",
+        torn.len(),
+        torn[0]
+    );
+    assert!(
+        exports >= RACE_EXPORTS && during >= RACE_COMMITS,
+        "{exports} exports and {during} commits within {GUARD:?}"
+    );
 }

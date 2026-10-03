@@ -1,11 +1,10 @@
-//! The one JSON convention, as `StenoJSON` (`Sources/StenoCore/Model/StenoJSON.swift`)
-//! and `BridgeDispatcher.encoder()` produce it: sorted keys, slashes unescaped,
+//! The printer: the parent module's convention as `StenoJSON` and
+//! `BridgeDispatcher.encoder()` produce it, sorted keys, slashes unescaped,
 //! dates as `2026-09-29T12:48:00.000Z`, UUIDs upper case. Two styles:
-//! [`to_canonical_string`] is Foundation's `.prettyPrinted` (what the fixtures
-//! hold), [`to_compact_string`] is the one-line form the dispatcher sends.
-//! The date and UUID codecs the fields use are `steno_core::json`'s
-//! (`iso_time`, `uuid_text` and their `_opt` forms); only the printer lives
-//! here.
+//! [`to_canonical_string`] is Foundation's `.prettyPrinted` (the bridge
+//! fixtures and `meeting.json`), [`to_compact_string`] is the one-line form
+//! the bridge dispatcher sends. The date and UUID codecs the fields use are
+//! the parent module's (`iso_time`, `uuid_text` and their `_opt` forms).
 //!
 //! The printer walks a [`serde_json::Value`] rather than trusting
 //! `serde_json::to_string_pretty`: Foundation puts a space on both sides of the
@@ -16,23 +15,26 @@
 //! `null` before the printer sees it, so both styles here write `null`. Swift
 //! differs: `BridgeJSON.encode` (the fixtures) throws, and the dispatcher's
 //! compact encoder writes the strings `"NaN"`, `"Infinity"` and
-//! `"-Infinity"`. Mirroring the strings would need a `serde::Serializer` of
-//! our own, since the `Value` tree cannot tell a `null` from a NaN after the
-//! fact; the page's schema (`z.number()`) rejects both spellings alike and
-//! treats the field as "no value", so `null` is the recorded choice until a
-//! plan says otherwise. `nan_and_infinity_are_null` pins it.
+//! `"-Infinity"`. `StenoJSON.encoder()` throws as well, so where Swift fails
+//! a `meeting.json`, Rust writes `null`. Mirroring the strings would need a
+//! `serde::Serializer` of our own, since the `Value` tree cannot tell a
+//! `null` from a NaN after the fact; the page's schema (`z.number()`)
+//! rejects both spellings alike and treats the field as "no value", so
+//! `null` is the recorded choice until a plan says otherwise.
+//! `nan_and_infinity_are_null` pins it.
 
 use std::fmt::Write as _;
 
 use serde::Serialize;
 use serde_json::Value;
 
-/// `BridgeJSON.encode`: pretty printed, sorted keys, no trailing newline. The
-/// fixture files are this plus one `\n` (`BridgeFixture.fileData()`).
+/// `BridgeJSON.encode` and `StenoJSON.encoder()` (`meeting.json`): pretty
+/// printed, sorted keys, no trailing newline. The fixture files are this
+/// plus one `\n` (`BridgeFixture.fileData()`).
 ///
 /// ```
 /// use serde_json::json;
-/// use steno_bridge::json::to_canonical_string;
+/// use steno_core::json::to_canonical_string;
 ///
 /// let value = json!({"tags": [], "durationSeconds": 1200.0, "title": "Sync / weekly"});
 /// assert_eq!(
@@ -126,13 +128,17 @@ fn write_container(
 /// Integers as they are. Doubles as Foundation's `JSONEncoder` spells a
 /// `Double` (measured with `StenoJSON.encoder()` on macOS 26, Swift 6.4:
 /// the table in `numbers_print_like_foundation` and the corpus in
-/// `tests/fixtures/foundation-doubles.txt`): the shortest digits that
-/// round-trip, a tie between two shortest candidates broken to the even
-/// digit, in plain notation when the decimal exponent is at least -4 and
-/// `|f|` is at most 2^53 (`0.0001`, `1200`, `9007199254740992`), otherwise
-/// `d.ddde±XX` with a signed exponent of at least two digits (`1e-05`,
-/// `9.007199254740994e+15`, `1.7976931348623157e+308`). An integral double
-/// has no fraction and a negative zero keeps its sign (`-0`).
+/// `crates/steno-bridge/tests/fixtures/foundation-doubles.txt`): the
+/// shortest digits that round-trip, a tie between two shortest candidates
+/// broken to the even digit, in plain notation when the decimal exponent is
+/// at least -4 and `|f|` is at most 2^53 (`0.0001`, `1200`,
+/// `9007199254740992`), otherwise `d.ddde±XX` with a signed exponent of at
+/// least two digits (`1e-05`, `9.007199254740994e+15`,
+/// `1.7976931348623157e+308`). An integral double has no fraction and a
+/// negative zero keeps its sign (`-0`). An `f32` arrives widened to `f64`
+/// and prints that double's digits (`0.1f32` as `0.10000000149011612`,
+/// where Foundation writes a `Float` as `0.1`); no `f32` field reaches
+/// `meeting.json` or the bridge today.
 ///
 /// The digits come from `zmij` (Schubfach: shortest round-trip digits, ties
 /// to even, as `SwiftDtoa` breaks them) and are re-spelt here. Rust's own

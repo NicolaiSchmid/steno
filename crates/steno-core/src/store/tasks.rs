@@ -64,30 +64,40 @@ pub(super) fn insert_decision(connection: &Connection, decision: &Decision) -> R
     )
 }
 
+/// The meeting's tasks in id order.
+pub(super) fn tasks_of_meeting(
+    connection: &Connection,
+    meeting_id: Uuid,
+) -> Result<Vec<MeetingTask>> {
+    query_all(
+        connection,
+        &format!("SELECT {TASK_COLUMNS} FROM meetingTask WHERE meetingID = ?1 ORDER BY id"),
+        [DbUuid(meeting_id)],
+        task_from_row,
+    )
+}
+
+/// The meeting's decisions in id order.
+pub(super) fn decisions_of_meeting(
+    connection: &Connection,
+    meeting_id: Uuid,
+) -> Result<Vec<Decision>> {
+    query_all(
+        connection,
+        &format!("SELECT {DECISION_COLUMNS} FROM decision WHERE meetingID = ?1 ORDER BY id"),
+        [DbUuid(meeting_id)],
+        decision_from_row,
+    )
+}
+
 impl Store {
     /// The meeting's tasks in id order.
     pub fn tasks(&self, meeting_id: Uuid) -> Result<Vec<MeetingTask>> {
-        self.read(|connection| {
-            query_all(
-                connection,
-                &format!("SELECT {TASK_COLUMNS} FROM meetingTask WHERE meetingID = ?1 ORDER BY id"),
-                [DbUuid(meeting_id)],
-                task_from_row,
-            )
-        })
+        self.read(|connection| tasks_of_meeting(connection, meeting_id))
     }
 
     /// The meeting's decisions in id order.
     pub fn decisions(&self, meeting_id: Uuid) -> Result<Vec<Decision>> {
-        self.read(|connection| {
-            query_all(
-                connection,
-                &format!(
-                    "SELECT {DECISION_COLUMNS} FROM decision WHERE meetingID = ?1 ORDER BY id"
-                ),
-                [DbUuid(meeting_id)],
-                decision_from_row,
-            )
-        })
+        self.read(|connection| decisions_of_meeting(connection, meeting_id))
     }
 }
