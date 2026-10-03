@@ -2,7 +2,7 @@
 //! with download progress. Changing the engine rebuilds the pipeline.
 //! Swift: `Settings/SpeechSettingsViewModel.swift`.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use steno_core::Store;
 use steno_core::protocols::BoxError;
@@ -25,12 +25,12 @@ pub enum AssetState {
 pub struct SpeechSettingsViewModel {
     pub engine_id: SpeechEngineId,
     pub asset_states: BTreeMap<ModelAsset, AssetState>,
-    /// The downloads whose thread still runs, each with whether its reports
-    /// still show: a remove detaches the one in flight, so its late
-    /// progress cannot mark the asset downloading again, and a second
-    /// download of the asset waits until that thread has ended. Swift:
-    /// `downloads`.
-    pub downloads: BTreeMap<ModelAsset, bool>,
+    /// The assets whose download thread still runs. Its reports show while
+    /// the asset reads `downloading`; a remove marks it absent, which
+    /// detaches the one in flight, so its late progress cannot mark the
+    /// asset downloading again, and a second download of the asset waits
+    /// until that thread has ended. Swift: `downloads`.
+    downloads: BTreeSet<ModelAsset>,
     pub errors: SectionError,
 }
 
@@ -40,7 +40,7 @@ impl SpeechSettingsViewModel {
         SpeechSettingsViewModel {
             engine_id: SpeechEngineId::ParakeetV3,
             asset_states: BTreeMap::new(),
-            downloads: BTreeMap::new(),
+            downloads: BTreeSet::new(),
             errors: SectionError::default(),
         }
     }
@@ -188,10 +188,9 @@ impl SpeechSettingsViewModel {
     /// Marks the download started, unless one of the asset's still runs:
     /// whether the caller should run it. Swift: `download(_:)`'s guard.
     pub fn begin_download(&mut self, asset: ModelAsset) -> bool {
-        if self.downloads.contains_key(&asset) {
+        if !self.downloads.insert(asset) {
             return false;
         }
-        self.downloads.insert(asset, true);
         self.asset_states.insert(
             asset,
             AssetState::Downloading {
@@ -204,7 +203,7 @@ impl SpeechSettingsViewModel {
 
     /// One progress report, shown unless a remove detached the download.
     pub fn download_progress(&mut self, asset: ModelAsset, fraction: f64, phase: &str) {
-        if self.downloads.get(&asset) == Some(&true) {
+        if self.shows_download(asset) {
             self.asset_states.insert(
                 asset,
                 AssetState::Downloading {
@@ -215,6 +214,16 @@ impl SpeechSettingsViewModel {
         }
     }
 
+    /// Whether a running download still shows: only `begin_download` marks
+    /// an asset `downloading`, and while its thread runs only a remove
+    /// takes it out again.
+    fn shows_download(&self, asset: ModelAsset) -> bool {
+        matches!(
+            self.asset_states.get(&asset),
+            Some(AssetState::Downloading { .. })
+        )
+    }
+
     /// The download's thread ended (or never started): installed or failed;
     /// a detached download leaves what the model store reports.
     pub fn finish_download(
@@ -223,7 +232,8 @@ impl SpeechSettingsViewModel {
         outcome: Result<(), BoxError>,
         services: &Services,
     ) {
-        if self.downloads.remove(&asset) != Some(true) {
+        self.downloads.remove(&asset);
+        if !self.shows_download(asset) {
             self.refresh_states(services);
             return;
         }
@@ -240,9 +250,6 @@ impl SpeechSettingsViewModel {
         match services.speech_models.remove(asset) {
             Ok(()) => {
                 self.asset_states.insert(asset, AssetState::Absent);
-                if let Some(shows) = self.downloads.get_mut(&asset) {
-                    *shows = false;
-                }
             }
             Err(error) => self
                 .errors
