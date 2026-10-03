@@ -882,8 +882,10 @@ fn tags_templates_and_reruns_reach_the_store_and_the_pipeline() {
         vec![uuid(MEETING)]
     );
 
-    *harness.fakes.pipeline.failure.lock().unwrap() =
-        Some("the endpoint did not answer".to_owned());
+    harness
+        .fakes
+        .pipeline
+        .fail_calls(Some("the endpoint did not answer"));
     harness.host.meeting_rerun_summary().unwrap();
     let detail = harness.sink.last(BridgeTopic::MeetingDetail).unwrap();
     assert_eq!(

@@ -384,10 +384,12 @@ fn meeting_detail() {
 fn settings_general() {
     let harness = Harness::builder()
         .seed(|_, fakes| {
-            *fakes.login_item.changes.lock().unwrap() = Vec::new();
+            fakes.login_item.changes.lock().unwrap().clear();
             fakes.login_item.set_enabled(true).unwrap();
-            *fakes.updater.last_check.lock().unwrap() = Some(date("2026-09-29T11:50:00.000Z"));
-            *fakes.updater.outcome.lock().unwrap() = UpdateOutcome::UpToDate;
+            fakes.updater.set_last_check(
+                Some(date("2026-09-29T11:50:00.000Z")),
+                UpdateOutcome::UpToDate,
+            );
         })
         .build();
     assert_eq!(harness.fakes.login_item.status(), LoginItemStatus::Enabled);
@@ -424,7 +426,7 @@ fn settings_recording() {
                 true,
             );
             store.save_settings(&settings).unwrap();
-            *fakes.audio_devices.devices.lock().unwrap() = vec![
+            fakes.audio_devices.set_devices(vec![
                 steno_host::services::InputDevice {
                     uid: "BuiltInMicrophoneDevice".to_owned(),
                     name: "MacBook Pro Microphone".to_owned(),
@@ -433,9 +435,9 @@ fn settings_recording() {
                     uid: "AirPodsPro".to_owned(),
                     name: "Nicolai's AirPods Pro".to_owned(),
                 },
-            ];
-            *fakes.folder_usage.bytes.lock().unwrap() = Ok(734_003_200);
-            *fakes.pipeline.kept_forever.lock().unwrap() = 2;
+            ]);
+            fakes.folder_usage.set_bytes(Ok(734_003_200));
+            fakes.pipeline.set_kept_forever(2);
         })
         .build();
     // Forever once (keeping two recordings), then back to 30 days: the
@@ -563,8 +565,10 @@ fn settings_summaries_codex() {
             settings.codex_model = Some("gpt-5.1-codex".to_owned());
             settings.codex_confirmed_at = Some(date("2026-09-28T10:00:00.000Z"));
             store.save_settings(&settings).unwrap();
-            *fakes.llm.codex_account.lock().unwrap() = Ok("nicolai@example.com (Plus)".to_owned());
-            *fakes.llm.codex_models.lock().unwrap() = Ok(vec![
+            fakes
+                .llm
+                .set_codex_account(Ok("nicolai@example.com (Plus)"));
+            fakes.llm.set_codex_models(Ok(vec![
                 CodexModel {
                     slug: "gpt-5.1-codex".to_owned(),
                     display_name: "GPT-5.1 Codex".to_owned(),
@@ -575,9 +579,10 @@ fn settings_summaries_codex() {
                     display_name: "GPT-5.1 Codex mini".to_owned(),
                     context_window: None,
                 },
-            ]);
-            *fakes.llm.probe_result.lock().unwrap() =
-                Ok("Connected. 3 models listed; structured output works.".to_owned());
+            ]));
+            fakes
+                .llm
+                .set_probe_result(Ok("Connected. 3 models listed; structured output works."));
         })
         .build();
     harness
@@ -617,12 +622,11 @@ fn phone_harness() -> Harness {
             let handover = fakes.handover.as_ref().unwrap();
             handover.pair(paired_phone());
             handover.start().unwrap();
-            *fakes.qr.png_base64.lock().unwrap() = Some(
+            fakes.qr.set_png(Some(
                 fixture("settings.iphone.pairing")["pairing"]["qrPNGBase64"]
                     .as_str()
-                    .unwrap()
-                    .to_owned(),
-            );
+                    .unwrap(),
+            ));
         })
         .build()
 }
@@ -741,9 +745,9 @@ fn onboarding_setup() {
             fakes
                 .permissions
                 .set_state(PermissionKind::LocalNetwork, PermissionState::Unknown);
-            *fakes.export_validator.failure.lock().unwrap() = Some(
-                "The Obsidian vault at /Users/nicolai/Notes/Work Vault does not exist.".to_owned(),
-            );
+            fakes.export_validator.fail_validation(Some(
+                "The Obsidian vault at /Users/nicolai/Notes/Work Vault does not exist.",
+            ));
         })
         .build();
     harness

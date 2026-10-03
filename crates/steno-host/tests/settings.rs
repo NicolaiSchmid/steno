@@ -90,7 +90,10 @@ fn general_saves_template_detection_login_item_calendar_and_updates() {
     assert_eq!(general["defaultTemplateID"], "daily-standup");
     assert!(general.get("error").is_none());
 
-    *harness.fakes.login_item.failure.lock().unwrap() = Some("SMAppService refused".to_owned());
+    harness
+        .fakes
+        .login_item
+        .fail_changes(Some("SMAppService refused"));
     harness
         .host
         .settings_general_set_launch_at_login(SetBoolParams { value: false })
@@ -140,8 +143,8 @@ fn recording_saves_device_folder_and_retention_and_the_chooser_applies_its_answe
     let harness = Harness::builder()
         .choose(Some(&chosen_path))
         .seed(|_, fakes| {
-            *fakes.pipeline.kept_forever.lock().unwrap() = 3;
-            *fakes.folder_usage.bytes.lock().unwrap() = Ok(4_200);
+            fakes.pipeline.set_kept_forever(3);
+            fakes.folder_usage.set_bytes(Ok(4_200));
         })
         .build();
     let recording = harness.snapshot(BridgeTopic::SettingsRecording);
@@ -294,8 +297,8 @@ fn recording_saves_device_folder_and_retention_and_the_chooser_applies_its_answe
 fn errors_are_sentences_with_the_details_apart() {
     let harness = Harness::builder()
         .seed(|_, fakes| {
-            *fakes.folder_usage.bytes.lock().unwrap() = Err("permission denied".to_owned());
-            *fakes.audio_devices.failure.lock().unwrap() = Some("Core Audio said no".to_owned());
+            fakes.folder_usage.set_bytes(Err("permission denied"));
+            fakes.audio_devices.fail_listing(Some("Core Audio said no"));
         })
         .build();
     let recording = harness.snapshot(BridgeTopic::SettingsRecording);
@@ -414,13 +417,13 @@ fn the_download_reply_returns_while_the_download_runs() {
         .seed({
             let gate = gate.clone();
             move |_, fakes| {
-                *fakes.speech_models.on_download.lock().unwrap() = Some(Box::new(move |_| {
+                fakes.speech_models.set_on_download(move |_| {
                     let (open, signal) = &*gate;
                     let mut open = open.lock().unwrap();
                     while !*open {
                         open = signal.wait(open).unwrap();
                     }
-                }));
+                });
             }
         })
         .build();
@@ -482,13 +485,13 @@ fn a_remove_detaches_the_download_in_flight() {
         .seed({
             let gate = gate.clone();
             move |_, fakes| {
-                *fakes.speech_models.on_download.lock().unwrap() = Some(Box::new(move |_| {
+                fakes.speech_models.set_on_download(move |_| {
                     let (open, signal) = &*gate;
                     let mut open = open.lock().unwrap();
                     while !*open {
                         open = signal.wait(open).unwrap();
                     }
-                }));
+                });
             }
         })
         .build();
@@ -585,7 +588,7 @@ fn busy_flags_are_published_before_the_service_runs() {
     let seen_testing = Arc::new(Mutex::new(None));
     let seen_requesting = Arc::new(Mutex::new(None));
     let harness = Harness::builder().build();
-    *harness.fakes.llm.on_probe.lock().unwrap() = Some(Box::new({
+    harness.fakes.llm.set_on_probe({
         let sink = harness.sink.clone();
         let seen = seen_testing.clone();
         move |_| {
@@ -593,7 +596,7 @@ fn busy_flags_are_published_before_the_service_runs() {
                 .last(BridgeTopic::SettingsSummaries)
                 .map(|snapshot| snapshot["isTesting"].clone());
         }
-    }));
+    });
     harness
         .host
         .settings_summaries_update(update(Some("qwen3-8b"), None, None, None))
@@ -612,7 +615,7 @@ fn busy_flags_are_published_before_the_service_runs() {
         .fakes
         .permissions
         .set_answer(PermissionKind::SystemAudio, PermissionState::Granted);
-    *harness.fakes.permissions.on_request.lock().unwrap() = Some(Box::new({
+    harness.fakes.permissions.set_on_request({
         let sink = harness.sink.clone();
         let seen = seen_requesting.clone();
         move |_| {
@@ -620,7 +623,7 @@ fn busy_flags_are_published_before_the_service_runs() {
                 .last(BridgeTopic::SettingsRecording)
                 .map(|snapshot| snapshot["permissions"][1]["isRequesting"].clone());
         }
-    }));
+    });
     harness
         .host
         .settings_recording_request_permission(PermissionKindParams {
@@ -807,7 +810,7 @@ fn summaries_validate_save_the_key_apart_and_probe() {
         "an unchanged form saves and probes nothing"
     );
 
-    *harness.fakes.llm.probe_result.lock().unwrap() = Err("401 Unauthorized".to_owned());
+    harness.fakes.llm.set_probe_result(Err("401 Unauthorized"));
     harness.host.settings_summaries_test().unwrap();
     assert_eq!(
         harness.snapshot(BridgeTopic::SettingsSummaries)["testResult"],
@@ -821,12 +824,14 @@ fn summaries_validate_save_the_key_apart_and_probe() {
 fn the_codex_preset_stores_nothing_until_confirmed_and_picks_the_first_model() {
     let harness = Harness::builder()
         .seed(|_, fakes| {
-            *fakes.llm.codex_account.lock().unwrap() = Ok("nicolai@example.com (Plus)".to_owned());
-            *fakes.llm.codex_models.lock().unwrap() = Ok(vec![CodexModel {
+            fakes
+                .llm
+                .set_codex_account(Ok("nicolai@example.com (Plus)"));
+            fakes.llm.set_codex_models(Ok(vec![CodexModel {
                 slug: "gpt-5.1-codex".to_owned(),
                 display_name: "GPT-5.1 Codex".to_owned(),
                 context_window: Some(272_000),
-            }]);
+            }]));
         })
         .build();
     harness
@@ -898,7 +903,7 @@ fn the_codex_preset_stores_nothing_until_confirmed_and_picks_the_first_model() {
     );
 
     // The explicit status refresh re-reads the sign-in.
-    *harness.fakes.llm.codex_account.lock().unwrap() = Err("signed out".to_owned());
+    harness.fakes.llm.set_codex_account(Err("signed out"));
     harness
         .host
         .settings_summaries_refresh_codex_status()
@@ -1012,8 +1017,10 @@ fn export_waits_for_a_vault_validates_through_the_destination_and_saves() {
         Some("todo")
     );
 
-    *harness.fakes.export_validator.failure.lock().unwrap() =
-        Some("The Obsidian vault at /x does not exist.".to_owned());
+    harness
+        .fakes
+        .export_validator
+        .fail_validation(Some("The Obsidian vault at /x does not exist."));
     harness
         .host
         .settings_export_update(ExportUpdateParams {
@@ -1094,7 +1101,7 @@ fn phones_pair_list_and_revoke_devices() {
     let harness = Harness::builder()
         .with_handover("steno-mac-7f3a", 52_431)
         .seed(|_, fakes| {
-            *fakes.qr.png_base64.lock().unwrap() = Some("iVBORw0KGgo=".to_owned());
+            fakes.qr.set_png(Some("iVBORw0KGgo="));
         })
         .build();
     let phone = harness.snapshot(BridgeTopic::SettingsPhone);

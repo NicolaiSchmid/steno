@@ -343,7 +343,9 @@ fn granted_permissions_open_on_the_setup_page_and_handled_rows_finish() {
 fn the_summaries_form_commands_answer_on_the_calling_windows_model() {
     let harness = Harness::builder()
         .seed(|_, fakes| {
-            *fakes.llm.codex_account.lock().unwrap() = Ok("nicolai@example.com (Plus)".to_owned());
+            fakes
+                .llm
+                .set_codex_account(Ok("nicolai@example.com (Plus)"));
         })
         .build();
     let onboarding = harness.host.for_window(BridgeWindow::Onboarding);
@@ -421,7 +423,7 @@ fn the_summaries_form_commands_answer_on_the_calling_windows_model() {
             value: "codex".to_owned(),
         })
         .unwrap();
-    *harness.fakes.llm.codex_account.lock().unwrap() = Err("signed out".to_owned());
+    harness.fakes.llm.set_codex_account(Err("signed out"));
     onboarding
         .settings_summaries_refresh_codex_status()
         .unwrap();
@@ -589,9 +591,9 @@ fn saving_the_vault_validates_through_the_destination() {
     let harness = Harness::builder()
         .choose(Some("/Users/nicolai/Notes/Work Vault"))
         .seed(|_, fakes| {
-            *fakes.export_validator.failure.lock().unwrap() = Some(
-                "The Obsidian vault at /Users/nicolai/Notes/Work Vault does not exist.".to_owned(),
-            );
+            fakes.export_validator.fail_validation(Some(
+                "The Obsidian vault at /Users/nicolai/Notes/Work Vault does not exist.",
+            ));
         })
         .build();
     harness.host.onboarding_choose_vault().unwrap();
@@ -604,7 +606,7 @@ fn saving_the_vault_validates_through_the_destination() {
     assert_eq!(harness.store.settings().unwrap().obsidian, None);
 
     // The folder exists now: Save again goes through.
-    *harness.fakes.export_validator.failure.lock().unwrap() = None;
+    harness.fakes.export_validator.fail_validation(None);
     harness.host.onboarding_save_vault().unwrap();
     assert_eq!(
         harness.snapshot(BridgeTopic::Onboarding)["setup"][1]["state"],
@@ -618,12 +620,16 @@ fn saving_the_vault_validates_through_the_destination() {
 fn the_chatgpt_choice_collapses_the_summaries_row_once_confirmed() {
     let harness = Harness::builder()
         .seed(|_, fakes| {
-            *fakes.llm.codex_account.lock().unwrap() = Ok("nicolai@example.com (Plus)".to_owned());
-            *fakes.llm.codex_models.lock().unwrap() = Ok(vec![steno_host::services::CodexModel {
-                slug: "gpt-5.1-codex".to_owned(),
-                display_name: "GPT-5.1 Codex".to_owned(),
-                context_window: None,
-            }]);
+            fakes
+                .llm
+                .set_codex_account(Ok("nicolai@example.com (Plus)"));
+            fakes
+                .llm
+                .set_codex_models(Ok(vec![steno_host::services::CodexModel {
+                    slug: "gpt-5.1-codex".to_owned(),
+                    display_name: "GPT-5.1 Codex".to_owned(),
+                    context_window: None,
+                }]));
         })
         .build();
     harness
@@ -651,7 +657,9 @@ fn the_chatgpt_choice_collapses_the_summaries_row_once_confirmed() {
             settings.codex_model = Some("gpt-5.1-codex".to_owned());
             settings.codex_confirmed_at = Some(now());
             store.save_settings(&settings).unwrap();
-            *fakes.llm.codex_account.lock().unwrap() = Ok("nicolai@example.com (Plus)".to_owned());
+            fakes
+                .llm
+                .set_codex_account(Ok("nicolai@example.com (Plus)"));
         })
         .build();
     let onboarding = stored.snapshot(BridgeTopic::Onboarding);

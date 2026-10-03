@@ -77,6 +77,11 @@ impl FakeLoginItem {
             failure: Mutex::new(None),
         }
     }
+
+    /// Makes every `set_enabled` fail with `text`; `None` lets it through.
+    pub fn fail_changes(&self, text: Option<&str>) {
+        *lock(&self.failure) = text.map(str::to_owned);
+    }
 }
 
 impl LoginItem for FakeLoginItem {
@@ -105,7 +110,9 @@ impl LoginItem for FakeLoginItem {
 /// A hook a test installs to observe the host mid-request: the Swift view
 /// models published `isRequesting` while the system prompt was up, and a
 /// blocking host shows that state only to whoever the fake calls back.
-pub type RequestHook = Box<dyn Fn(PermissionKind) + Send + Sync>;
+/// The fake calls it with none of its own locks held, so the hook may call
+/// the fake again.
+pub type RequestHook = Arc<dyn Fn(PermissionKind) + Send + Sync>;
 
 /// Swift: `FakePermissions`.
 pub struct FakePermissions {
@@ -159,6 +166,11 @@ impl FakePermissions {
     pub fn set_answer(&self, kind: PermissionKind, state: PermissionState) {
         lock(&self.answers).insert(kind, state);
     }
+
+    /// Runs `hook` inside every `request`, before it answers.
+    pub fn set_on_request(&self, hook: impl Fn(PermissionKind) + Send + Sync + 'static) {
+        *lock(&self.on_request) = Some(Arc::new(hook));
+    }
 }
 
 impl Permissions for FakePermissions {
@@ -171,7 +183,8 @@ impl Permissions for FakePermissions {
 
     fn request(&self, kind: PermissionKind) -> PermissionState {
         lock(&self.requests).push(kind);
-        if let Some(hook) = lock(&self.on_request).as_ref() {
+        let hook = lock(&self.on_request).clone();
+        if let Some(hook) = hook {
             hook(kind);
         }
         let answer = lock(&self.answers)
@@ -208,6 +221,14 @@ impl Default for FakeUpdater {
             outcome: Mutex::new(UpdateOutcome::NotChecked),
             checks: Mutex::new(0),
         }
+    }
+}
+
+impl FakeUpdater {
+    /// When the last check ran and what it found.
+    pub fn set_last_check(&self, at: Option<DateTime<Utc>>, outcome: UpdateOutcome) {
+        *lock(&self.last_check) = at;
+        *lock(&self.outcome) = outcome;
     }
 }
 
@@ -372,6 +393,16 @@ pub struct FakePipeline {
 }
 
 impl FakePipeline {
+    /// Makes every call fail with `text`; `None` lets them through.
+    pub fn fail_calls(&self, text: Option<&str>) {
+        *lock(&self.failure) = text.map(str::to_owned);
+    }
+
+    /// How many recordings `keep_all_recordings` reports it kept.
+    pub fn set_kept_forever(&self, count: i64) {
+        *lock(&self.kept_forever) = count;
+    }
+
     fn outcome(&self) -> BoundaryResult<()> {
         lock(&self.failure)
             .clone()
@@ -409,7 +440,8 @@ impl Pipeline for FakePipeline {
 /// A hook a test installs to observe the host while a download runs on
 /// its thread: called once per download, before the first progress report,
 /// so a test can hold the download and look at what the host published.
-pub type DownloadHook = Box<dyn Fn(ModelAsset) + Send + Sync>;
+/// Called with none of the fake's locks held.
+pub type DownloadHook = Arc<dyn Fn(ModelAsset) + Send + Sync>;
 
 /// Installed assets with their sizes; a download reports its `progress`
 /// steps and installs. Swift: `ModelStore` over `FakeModelDownloader`.
@@ -465,6 +497,11 @@ impl FakeSpeechModels {
     pub fn fail_downloads(&self, text: Option<&str>) {
         *lock(&self.download_failure) = text.map(str::to_owned);
     }
+
+    /// Runs `hook` at the start of every download.
+    pub fn set_on_download(&self, hook: impl Fn(ModelAsset) + Send + Sync + 'static) {
+        *lock(&self.on_download) = Some(Arc::new(hook));
+    }
 }
 
 impl SpeechModels for FakeSpeechModels {
@@ -482,7 +519,8 @@ impl SpeechModels for FakeSpeechModels {
         progress: &mut dyn FnMut(f64, &str),
     ) -> BoundaryResult<()> {
         lock(&self.downloads).push(asset);
-        if let Some(hook) = lock(&self.on_download).as_ref() {
+        let hook = lock(&self.on_download).clone();
+        if let Some(hook) = hook {
             hook(asset);
         }
         let steps = lock(&self.progress).clone();
@@ -506,7 +544,8 @@ impl SpeechModels for FakeSpeechModels {
 /// A hook a test installs to observe the host while a probe runs: the
 /// Swift view model published `isTesting` while the request was out, and
 /// a blocking host shows that state only to whoever the fake calls back.
-pub type ProbeHook = Box<dyn Fn(&Settings) + Send + Sync>;
+/// Called with none of the fake's locks held.
+pub type ProbeHook = Arc<dyn Fn(&Settings) + Send + Sync>;
 
 /// Answers the probe and the Codex sign-in with what a test set.
 pub struct FakeLlmService {
@@ -539,10 +578,33 @@ impl Default for FakeLlmService {
     }
 }
 
+impl FakeLlmService {
+    /// The Test button's line, or the failure text.
+    pub fn set_probe_result(&self, result: Result<&str, &str>) {
+        *lock(&self.probe_result) = result.map(str::to_owned).map_err(str::to_owned);
+    }
+
+    /// The Codex sign-in's account line, or why there is none.
+    pub fn set_codex_account(&self, account: Result<&str, &str>) {
+        *lock(&self.codex_account) = account.map(str::to_owned).map_err(str::to_owned);
+    }
+
+    /// The Codex models on offer, or why the list failed.
+    pub fn set_codex_models(&self, models: Result<Vec<CodexModel>, CodexModelsError>) {
+        *lock(&self.codex_models) = models;
+    }
+
+    /// Runs `hook` inside every probe, before it answers.
+    pub fn set_on_probe(&self, hook: impl Fn(&Settings) + Send + Sync + 'static) {
+        *lock(&self.on_probe) = Some(Arc::new(hook));
+    }
+}
+
 impl LlmService for FakeLlmService {
     fn probe(&self, settings: &Settings, _api_key: Option<&str>) -> BoundaryResult<String> {
         lock(&self.probes).push(settings.clone());
-        if let Some(hook) = lock(&self.on_probe).as_ref() {
+        let hook = lock(&self.on_probe).clone();
+        if let Some(hook) = hook {
             hook(settings);
         }
         lock(&self.probe_result).clone().map_err(Into::into)
@@ -562,6 +624,13 @@ impl LlmService for FakeLlmService {
 pub struct FakeExportValidator {
     pub failure: Mutex<Option<String>>,
     pub validated: Mutex<Vec<ObsidianSettings>>,
+}
+
+impl FakeExportValidator {
+    /// Makes every validation fail with `text`; `None` accepts again.
+    pub fn fail_validation(&self, text: Option<&str>) {
+        *lock(&self.failure) = text.map(str::to_owned);
+    }
 }
 
 impl ExportValidator for FakeExportValidator {
@@ -689,6 +758,11 @@ impl FakeQrEncoder {
             png_base64: Mutex::new(Some(png_base64.to_owned())),
         }
     }
+
+    /// The PNG every text draws as; `None` when drawing fails.
+    pub fn set_png(&self, png_base64: Option<&str>) {
+        *lock(&self.png_base64) = png_base64.map(str::to_owned);
+    }
 }
 
 impl QrEncoder for FakeQrEncoder {
@@ -702,6 +776,17 @@ impl QrEncoder for FakeQrEncoder {
 pub struct FakeAudioDevices {
     pub devices: Mutex<Vec<InputDevice>>,
     pub failure: Mutex<Option<String>>,
+}
+
+impl FakeAudioDevices {
+    pub fn set_devices(&self, devices: Vec<InputDevice>) {
+        *lock(&self.devices) = devices;
+    }
+
+    /// Makes listing fail with `text`; `None` lists again.
+    pub fn fail_listing(&self, text: Option<&str>) {
+        *lock(&self.failure) = text.map(str::to_owned);
+    }
 }
 
 impl AudioDevices for FakeAudioDevices {
@@ -727,6 +812,11 @@ impl FakeFolderUsage {
             bytes: Mutex::new(Ok(bytes)),
             measured: Mutex::new(Vec::new()),
         }
+    }
+
+    /// What every measurement returns: the size, or the failure text.
+    pub fn set_bytes(&self, bytes: Result<i64, &str>) {
+        *lock(&self.bytes) = bytes.map_err(str::to_owned);
     }
 }
 
@@ -950,5 +1040,35 @@ impl FakeServices {
             preferences: self.preferences.clone(),
             secrets: self.secrets.clone(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A hook runs with none of the fake's locks held, so one that calls
+    /// back into its fake (here: replaces itself) returns instead of
+    /// deadlocking on the fake's own mutex.
+    #[test]
+    fn a_hook_may_call_its_fake_again() {
+        let permissions = Arc::new(FakePermissions::all_granted());
+        permissions.set_on_request({
+            let permissions = Arc::downgrade(&permissions);
+            move |_| {
+                if let Some(permissions) = permissions.upgrade() {
+                    permissions.set_on_request(|_| {});
+                }
+            }
+        });
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let requester = permissions.clone();
+        std::thread::spawn(move || {
+            let _ = sender.send(requester.request(PermissionKind::Calendar));
+        });
+        assert_eq!(
+            receiver.recv_timeout(std::time::Duration::from_secs(5)),
+            Ok(PermissionState::Granted)
+        );
     }
 }
