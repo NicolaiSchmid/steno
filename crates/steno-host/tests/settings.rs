@@ -289,7 +289,11 @@ fn recording_saves_device_folder_and_retention_and_the_chooser_applies_its_answe
     assert_eq!(recording["permissions"][1]["state"], "denied");
     assert_eq!(recording["subtitle"], "Permission needed");
     harness.host.settings_recording_reveal_folder().unwrap();
-    assert_eq!(harness.fakes.opener.revealed.lock().unwrap().len(), 1);
+    assert_eq!(
+        *harness.fakes.opener.revealed.lock().unwrap(),
+        vec![std::path::PathBuf::from(&chosen_path)],
+        "the folder the chooser set"
+    );
 }
 
 /// Swift: `testAudioReportsAnUnreadableFolderAsUnavailable`, `testErrorsAreSentencesWithDetailsApart`.

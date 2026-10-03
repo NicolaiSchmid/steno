@@ -974,6 +974,30 @@ fn keep_audio_goes_through_the_pipeline_and_asks_before_deleting_now() {
     );
 }
 
+/// `ui.confirmDestructive` hands the page's prompt to the shell's dialog
+/// as sent and replies with the answer, a decline included.
+#[test]
+fn the_pages_destructive_prompt_reaches_the_dialog() {
+    let asked = Arc::new(Mutex::new(Vec::new()));
+    let harness = Harness::builder()
+        .confirm_with({
+            let asked = asked.clone();
+            move |_, params| {
+                asked.lock().unwrap().push(params.clone());
+                false
+            }
+        })
+        .build();
+    let prompt = steno_bridge::ConfirmDestructiveParams {
+        title: "Remove this phone?".to_owned(),
+        message: "It can pair again later.".to_owned(),
+        confirm_title: "Remove".to_owned(),
+    };
+    let reply = harness.host.ui_confirm_destructive(prompt.clone()).unwrap();
+    assert!(!reply.confirmed);
+    assert_eq!(*asked.lock().unwrap(), vec![prompt]);
+}
+
 /// The delete-recording prompt runs with the lock released; a selection
 /// that moves while it is up must not take the answer with it, or another
 /// meeting's recording is deleted. Swift held the detail model across the
