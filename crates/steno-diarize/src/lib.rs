@@ -55,6 +55,8 @@
 //! Audio never leaves the device: the only network access in this crate is
 //! [`ModelStore`] fetching the published model files.
 
+#![deny(unsafe_code)]
+
 pub mod backend;
 pub mod clustering;
 #[cfg(all(feature = "coreml", target_os = "macos"))]

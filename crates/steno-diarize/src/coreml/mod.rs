@@ -10,9 +10,10 @@
 //! dimension of every input is the batch; it is pinned to 1 as
 //! `FluidAudio`'s `SegmentationProcessor` does, whatever default the model
 //! declares (the models accept 1 to 32 and `Segmentation.mlmodelc`
-//! declares 32). macOS only; the bindings live in [`binding`], the one
-//! module in this crate with `unsafe`.
+//! declares 32). macOS only; the bindings live in `binding`, the one
+//! module in this crate allowed `unsafe` (the crate denies it elsewhere).
 
+#[allow(unsafe_code)]
 mod binding;
 
 use std::path::{Path, PathBuf};
