@@ -18,7 +18,9 @@
 //! The real-time promise is counted on the real thread here: libpipewire
 //! runs the stream's `process` on its data-loop thread, which this file
 //! finds in `/proc/self/task` and counts with
-//! `CountingAllocator::allocations_on` for a second of cycles.
+//! `CountingAllocator::allocations_on` for a second of cycles. After
+//! `stop()` that thread and the capture's own are gone from the process,
+//! and the capture's node from the daemon.
 #![cfg(target_os = "linux")]
 // Test arithmetic: sample counts and frequencies cast freely.
 #![allow(
@@ -50,6 +52,8 @@ const SECOND_SINK: &str = "steno-test-sink-2";
 const MIC: &str = "steno-test-mic";
 const SINK_TONE: f64 = 440.0;
 const MIC_TONE: f64 = 1_000.0;
+/// The capture stream's `node.name`.
+const CAPTURE_NODE: &str = "steno-capture";
 const COALESCE_DELAY: Duration = LiveCaptureBackend::COALESCE_DELAY;
 
 /// Runs `work` on a thread and waits at most `limit` for its result.
@@ -172,24 +176,85 @@ impl Drop for Tone {
     }
 }
 
+/// This process's threads: kernel id and name.
+fn threads() -> Vec<(usize, String)> {
+    std::fs::read_dir("/proc/self/task")
+        .expect("/proc/self/task")
+        .filter_map(|entry| {
+            let entry = entry.ok()?;
+            let id = entry.file_name().to_string_lossy().parse().ok()?;
+            let name = std::fs::read_to_string(entry.path().join("comm")).ok()?;
+            Some((id, name.trim().to_owned()))
+        })
+        .collect()
+}
+
+/// Whether a thread of this process has `part` in its name: PipeWire's
+/// data loop (`data-loop.0` since PipeWire 0.3.x) or the capture's own
+/// `steno-pipewire`.
+fn thread_named(part: &str) -> Option<usize> {
+    threads()
+        .into_iter()
+        .find_map(|(id, name)| name.contains(part).then_some(id))
+}
+
 /// The kernel id of PipeWire's data-loop thread in this process, where the
-/// stream's `process` runs (`data-loop.0` since PipeWire 0.3.x).
+/// stream's `process` runs.
 fn data_loop_thread() -> usize {
-    let mut names = Vec::new();
-    for entry in std::fs::read_dir("/proc/self/task").expect("/proc/self/task") {
-        let entry = entry.expect("task entry");
-        let name = std::fs::read_to_string(entry.path().join("comm")).unwrap_or_default();
-        let name = name.trim().to_owned();
-        if name.contains("data-loop") {
-            return entry
-                .file_name()
-                .to_string_lossy()
-                .parse()
-                .expect("a thread id");
+    thread_named("data-loop")
+        .unwrap_or_else(|| panic!("no PipeWire data-loop thread among {:?}", threads()))
+}
+
+/// The daemon's global id of the node named `name`, from `pw-dump`.
+fn node_id(name: &str) -> Option<u64> {
+    let output = Command::new("pw-dump").output().ok()?;
+    let objects: serde_json::Value = serde_json::from_slice(&output.stdout).ok()?;
+    objects.as_array()?.iter().find_map(|object| {
+        let found = object.pointer("/info/props/node.name")?.as_str()?;
+        (found == name).then(|| object.get("id")?.as_u64())?
+    })
+}
+
+/// Polls `done` for up to two seconds; whether it held.
+fn eventually(mut done: impl FnMut() -> bool) -> bool {
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while !done() {
+        if Instant::now() >= deadline {
+            return false;
         }
-        names.push(name);
+        std::thread::sleep(Duration::from_millis(20));
     }
-    panic!("no PipeWire data-loop thread among {names:?}");
+    true
+}
+
+/// Stops `backend` and checks the teardown: the capture thread joined
+/// (it held the only other references to `sink`), no frame after `stop()`
+/// returns, both capture threads gone from the process, the capture's
+/// node gone from the daemon.
+fn stop_and_check_teardown(backend: &Arc<LiveCaptureBackend>, sink: &Arc<LaneFrameSink>) {
+    stop(backend);
+    let after_stop = sink.available_to_read();
+    assert_eq!(
+        Arc::strong_count(sink),
+        1,
+        "stop() returned before the capture thread let go of the sink"
+    );
+    assert!(
+        eventually(
+            || thread_named("data-loop").is_none() && thread_named("steno-pipewire").is_none()
+        ),
+        "the capture's threads outlive stop(): {:?}",
+        threads()
+    );
+    assert!(
+        eventually(|| node_id(CAPTURE_NODE).is_none()),
+        "{CAPTURE_NODE} is still in the graph after stop()"
+    );
+    assert_eq!(
+        sink.available_to_read(),
+        after_stop,
+        "no frame arrives after stop() returns"
+    );
 }
 
 /// Goertzel power of `frequency` in `samples` at 48 kHz.
@@ -266,6 +331,10 @@ fn a_call_records_the_microphone_and_the_monitor_aligned_without_allocating() {
     let backend = Arc::new(LiveCaptureBackend::new());
     let stream = start(&backend, &lanes, None, &sink).expect("start");
     println!("{stream:?}");
+    assert!(
+        sink.available_to_read() > 0,
+        "start returns once the first cycle arrived"
+    );
     assert_eq!(stream.sample_rate, SAMPLE_RATE);
     let layout = stream.layout.expect("a layout");
     assert_eq!(layout.sources[0].left, ChannelRef::new(0, 0, 3));
@@ -279,8 +348,8 @@ fn a_call_records_the_microphone_and_the_monitor_aligned_without_allocating() {
     let delivered = sink.available_to_read().saturating_sub(before);
     println!("data-loop thread {thread}: {allocations} allocations over {delivered} frames");
     assert!(
-        delivered > 24_000,
-        "a second should deliver most of 48 000 frames, got {delivered}"
+        (24_000..60_000).contains(&delivered),
+        "a second should deliver about 48 000 frames, got {delivered}"
     );
     assert_eq!(
         allocations, 0,
@@ -291,14 +360,7 @@ fn a_call_records_the_microphone_and_the_monitor_aligned_without_allocating() {
     assert_tone(&lanes_audio[0], MIC_TONE, SINK_TONE, "mic");
     assert_tone(&lanes_audio[1], SINK_TONE, MIC_TONE, "system");
 
-    stop(&backend);
-    let after_stop = sink.available_to_read();
-    std::thread::sleep(Duration::from_millis(200));
-    assert_eq!(
-        sink.available_to_read(),
-        after_stop,
-        "no frame arrives after stop() returns"
-    );
+    stop_and_check_teardown(&backend, &sink);
 }
 
 #[test]
@@ -317,7 +379,7 @@ fn in_person_records_only_the_microphone_by_its_uid() {
     assert_eq!(stream.output_latency_frames, 0, "no output in person");
     let audio = collect(&sink, 24_000);
     assert_tone(&audio[0], MIC_TONE, SINK_TONE, "mixed");
-    stop(&backend);
+    stop_and_check_teardown(&backend, &sink);
 }
 
 #[test]
@@ -397,6 +459,87 @@ fn moving_the_default_output_is_reported_once() {
     assert!(
         reasons.recv_timeout(COALESCE_DELAY * 2).is_err(),
         "one report per change"
+    );
+    stop(&backend);
+}
+
+/// The default sink as WirePlumber resolved it, from `pw-metadata`.
+fn default_sink() -> Option<String> {
+    let output = Command::new("pw-metadata")
+        .args(["-n", "default", "0", "default.audio.sink"])
+        .output()
+        .ok()?;
+    let text = String::from_utf8_lossy(&output.stdout);
+    [SECOND_SINK, SINK]
+        .into_iter()
+        .find(|name| text.contains(&format!("\"{name}\"")))
+        .map(str::to_owned)
+}
+
+#[test]
+#[ignore = "needs a PipeWire daemon; run under scripts/pipewire-headless.sh with -- --ignored"]
+fn a_burst_of_switches_is_reported_once_and_the_rebuild_restarts() {
+    let lanes = [AudioLane::Mic, AudioLane::System];
+    let (sink, reasons) = reporting_sink(&lanes);
+    let backend = Arc::new(LiveCaptureBackend::new());
+    let _restore = DefaultSink;
+    start(&backend, &lanes, None, &sink).expect("start");
+    for round in 0..6 {
+        let (to, from) = if round % 2 == 0 {
+            (SECOND_SINK, SINK)
+        } else {
+            (SINK, SECOND_SINK)
+        };
+        DefaultSink::set(to);
+        DefaultSink::set(from);
+        DefaultSink::set(to);
+        let reason = reasons
+            .recv_timeout(COALESCE_DELAY + Duration::from_secs(8))
+            .unwrap_or_else(|_| panic!("round {round}: no device-change report"));
+        assert_eq!(reason, DeviceChangeReason::DefaultOutputChanged);
+        assert!(
+            reasons.recv_timeout(COALESCE_DELAY * 2).is_err(),
+            "round {round}: one report per burst"
+        );
+        // The session's rebuild: stop, open the latch, start again.
+        stop_and_check_teardown(&backend, &sink);
+        sink.rearm_device_change();
+        assert!(
+            eventually(|| default_sink().as_deref() == Some(to)),
+            "round {round}: WirePlumber did not settle on {to}"
+        );
+        start(&backend, &lanes, None, &sink)
+            .unwrap_or_else(|e| panic!("round {round}: the rebuild's start failed: {e}"));
+        assert!(
+            reasons.recv_timeout(COALESCE_DELAY * 2).is_err(),
+            "round {round}: the restarted capture is on the new default"
+        );
+    }
+    stop_and_check_teardown(&backend, &sink);
+}
+
+#[test]
+#[ignore = "needs a PipeWire daemon; run under scripts/pipewire-headless.sh with -- --ignored"]
+fn changes_that_settle_back_or_touch_other_nodes_are_not_reported() {
+    let lanes = [AudioLane::Mic, AudioLane::System];
+    let (sink, reasons) = reporting_sink(&lanes);
+    let backend = Arc::new(LiveCaptureBackend::new());
+    let _restore = DefaultSink;
+    start(&backend, &lanes, None, &sink).expect("start");
+    // There and back within the coalescing delay.
+    DefaultSink::set(SECOND_SINK);
+    std::thread::sleep(Duration::from_millis(150));
+    DefaultSink::set(SINK);
+    assert!(
+        reasons.recv_timeout(COALESCE_DELAY * 3).is_err(),
+        "a default that came back is no change"
+    );
+    // A device Steno does not record comes and goes.
+    let other = TemporaryMic::create("steno-test-unrelated");
+    other.destroy();
+    assert!(
+        reasons.recv_timeout(COALESCE_DELAY * 3).is_err(),
+        "an unrelated node is no change"
     );
     stop(&backend);
 }
