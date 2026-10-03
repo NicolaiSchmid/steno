@@ -375,6 +375,18 @@ impl App {
                             | MeetingEvent::Deleted { .. } => {
                                 event_host.store_changed();
                             }
+                            MeetingEvent::OperationFailed {
+                                meeting_id,
+                                operation,
+                                reason,
+                            } => {
+                                tracing::warn!(
+                                    %meeting_id,
+                                    "{} failed: {reason}",
+                                    operation.label()
+                                );
+                                event_host.store_changed();
+                            }
                         }
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {

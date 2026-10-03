@@ -64,6 +64,37 @@ pub enum MeetingEvent {
     RetentionApplied { meeting_id: Uuid },
     /// Posted once a meeting's rows are gone.
     Deleted { meeting_id: Uuid },
+    /// Posted when a summary re-run or a re-export fails after the
+    /// pipeline accepted it. The host starts both in the background and
+    /// returns at once, so this is how the failure reaches the detail's
+    /// error line; a refusal (meeting busy, no summarizer) is returned to
+    /// the caller instead. Swift had no event: `MeetingDetailViewModel`
+    /// awaited the call and showed its error.
+    OperationFailed {
+        meeting_id: Uuid,
+        operation: MeetingOperation,
+        /// The pipeline's failure, `stage: reason`.
+        reason: String,
+    },
+}
+
+/// The operations on a finished meeting that run in the background.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum MeetingOperation {
+    SummaryRerun,
+    Reexport,
+}
+
+impl MeetingOperation {
+    /// The words the detail puts before `failed: <reason>`, as
+    /// `MeetingDetailViewModel` names the operation.
+    #[must_use]
+    pub fn label(self) -> &'static str {
+        match self {
+            MeetingOperation::SummaryRerun => "Summary re-run",
+            MeetingOperation::Reexport => "Re-export",
+        }
+    }
 }
 
 impl MeetingEvent {
@@ -73,7 +104,8 @@ impl MeetingEvent {
             MeetingEvent::Progress { meeting_id, .. }
             | MeetingEvent::SpeakersNeedReview { meeting_id, .. }
             | MeetingEvent::RetentionApplied { meeting_id }
-            | MeetingEvent::Deleted { meeting_id } => *meeting_id,
+            | MeetingEvent::Deleted { meeting_id }
+            | MeetingEvent::OperationFailed { meeting_id, .. } => *meeting_id,
         }
     }
 }

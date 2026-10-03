@@ -15,6 +15,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt;
 use std::future::Future;
 use std::path::Path;
+use std::pin::Pin;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Instant;
 
@@ -22,10 +23,11 @@ use chrono::{DateTime, Utc};
 use steno_core::{
     AudioAsset, AudioBuffer16k, AudioDecoder, AudioLane, AudioRetention, CleanupInput,
     DeliveryDispatcher, DeliveryStatus, Diarizer, LanguageTag, LlmUsage, Meeting, MeetingEvent,
-    MeetingSource, MeetingState, MeetingStateKind, MeetingSummarizer, Participant, ParticipantRole,
-    PipelineStage, RawSegment, RecordingLayout, Settings, Speaker, SpeakerAssignment,
-    SpeakerMemory, SpeechEngine, Store, StoreError, SummaryInput, SummaryTemplate, TimeRange,
-    TitleOrigin, TranscriptCleaner, TranscriptSegment, derived_uuid, paths::file_url,
+    MeetingOperation, MeetingSource, MeetingState, MeetingStateKind, MeetingSummarizer,
+    Participant, ParticipantRole, PipelineStage, RawSegment, RecordingLayout, Settings, Speaker,
+    SpeakerAssignment, SpeakerMemory, SpeechEngine, Store, StoreError, SummaryInput,
+    SummaryTemplate, TimeRange, TitleOrigin, TranscriptCleaner, TranscriptSegment, derived_uuid,
+    paths::file_url,
     protocols::{BoxError, DEFAULT_MATCH_MARGIN},
 };
 use tokio::sync::Mutex as AsyncMutex;
@@ -79,6 +81,11 @@ impl fmt::Display for PipelineFailure {
 }
 
 type Result<T> = std::result::Result<T, PipelineFailure>;
+
+/// A re-run or a re-export whose meeting is already claimed: awaiting it
+/// does the work, dropping it unawaited releases the meeting. See
+/// [`ProcessingPipeline::claim_rerun_summary`].
+pub type Operation = Pin<Box<dyn Future<Output = Result<()>> + Send + 'static>>;
 
 /// Wall-clock stamps for rows; tests pin it. Swift: `PipelineDependencies.now`
 /// in `Sources/StenoCore/Pipeline/ProcessingPipeline.swift`.
@@ -562,6 +569,16 @@ impl ProcessingPipeline {
     /// deliveries as they were; only `process` marks failed. Without a
     /// summarizer the call fails instead of writing a placeholder.
     pub async fn rerun_summary(&self, meeting_id: Uuid, template_id: &str) -> Result<()> {
+        self.claim_rerun_summary(meeting_id, template_id)?.await
+    }
+
+    /// The synchronous half of [`rerun_summary`](Self::rerun_summary): the
+    /// meeting is looked up, the summarizer checked and the meeting
+    /// claimed now, so a refusal reaches the caller before anything runs;
+    /// the returned [`Operation`] does the work and can be spawned. A
+    /// failure of the work is returned and also posted as
+    /// [`MeetingEvent::OperationFailed`], for a caller that does not wait.
+    pub fn claim_rerun_summary(&self, meeting_id: Uuid, template_id: &str) -> Result<Operation> {
         let meeting = required(
             PipelineStage::Summarize,
             self.store().meeting(meeting_id),
@@ -573,61 +590,105 @@ impl ProcessingPipeline {
                 "no LLM endpoint is configured",
             ));
         }
-        self.exclusively(meeting_id, PipelineStage::Summarize, async {
-            let export = required(
-                PipelineStage::Summarize,
-                self.store().export(meeting_id),
-                || format!("meeting {meeting_id} not found"),
-            )?;
-            let settings = attributing(PipelineStage::Summarize, self.store().settings())?;
-            let lanes = export
-                .audio
-                .as_ref()
-                .map(|a| a.lanes.clone())
-                .unwrap_or_default();
-            self.begin_run(
-                &meeting,
-                &lanes,
-                Some(ProcessingEstimator::token_count(&export.segments)),
-                vec![PipelineStage::Summarize, PipelineStage::Deliver],
-                &settings,
-            )?;
-            let mut current = meeting;
-            current.template_id = template_id.to_owned();
-            current.state = MeetingState::Ready;
-            self.summarize(current, &export.segments, &export.speakers)
-                .await?;
-            self.deliver(meeting_id).await;
-            self.stamp_deferred_retention(meeting_id).await
-        })
-        .await
+        let admitted = self.admit(meeting_id, PipelineStage::Summarize)?;
+        let pipeline = self.clone();
+        let template_id = template_id.to_owned();
+        Ok(Box::pin(async move {
+            let result = pipeline.resummarize(meeting, &template_id).await;
+            drop(admitted);
+            pipeline.reporting(meeting_id, MeetingOperation::SummaryRerun, result)
+        }))
+    }
+
+    async fn resummarize(&self, meeting: Meeting, template_id: &str) -> Result<()> {
+        let meeting_id = meeting.id;
+        let export = required(
+            PipelineStage::Summarize,
+            self.store().export(meeting_id),
+            || format!("meeting {meeting_id} not found"),
+        )?;
+        let settings = attributing(PipelineStage::Summarize, self.store().settings())?;
+        let lanes = export
+            .audio
+            .as_ref()
+            .map(|a| a.lanes.clone())
+            .unwrap_or_default();
+        self.begin_run(
+            &meeting,
+            &lanes,
+            Some(ProcessingEstimator::token_count(&export.segments)),
+            vec![PipelineStage::Summarize, PipelineStage::Deliver],
+            &settings,
+        )?;
+        let mut current = meeting;
+        current.template_id = template_id.to_owned();
+        current.state = MeetingState::Ready;
+        self.summarize(current, &export.segments, &export.speakers)
+            .await?;
+        self.deliver(meeting_id).await;
+        self.stamp_deferred_retention(meeting_id).await
     }
 
     /// Deliver only: the one re-export entry point. Stamps an audio asset
     /// whose expiry was deferred by a failed delivery once this one
     /// succeeds.
     pub async fn redeliver(&self, meeting_id: Uuid) -> Result<()> {
+        self.claim_redeliver(meeting_id)?.await
+    }
+
+    /// The synchronous half of [`redeliver`](Self::redeliver), as
+    /// [`claim_rerun_summary`](Self::claim_rerun_summary) is of the re-run.
+    pub fn claim_redeliver(&self, meeting_id: Uuid) -> Result<Operation> {
         let meeting = required(
             PipelineStage::Deliver,
             self.store().meeting(meeting_id),
             || format!("meeting {meeting_id} not found"),
         )?;
-        self.exclusively(meeting_id, PipelineStage::Deliver, async {
-            let settings = attributing(PipelineStage::Deliver, self.store().settings())?;
-            let lanes = attributing(PipelineStage::Deliver, self.store().asset(meeting_id))?
-                .map(|a| a.lanes)
-                .unwrap_or_default();
-            self.begin_run(
-                &meeting,
-                &lanes,
-                None,
-                vec![PipelineStage::Deliver],
-                &settings,
-            )?;
-            self.deliver(meeting_id).await;
-            self.stamp_deferred_retention(meeting_id).await
-        })
-        .await
+        let admitted = self.admit(meeting_id, PipelineStage::Deliver)?;
+        let pipeline = self.clone();
+        Ok(Box::pin(async move {
+            let result = pipeline.deliver_again(&meeting).await;
+            drop(admitted);
+            pipeline.reporting(meeting_id, MeetingOperation::Reexport, result)
+        }))
+    }
+
+    async fn deliver_again(&self, meeting: &Meeting) -> Result<()> {
+        let meeting_id = meeting.id;
+        let settings = attributing(PipelineStage::Deliver, self.store().settings())?;
+        let lanes = attributing(PipelineStage::Deliver, self.store().asset(meeting_id))?
+            .map(|a| a.lanes)
+            .unwrap_or_default();
+        self.begin_run(
+            meeting,
+            &lanes,
+            None,
+            vec![PipelineStage::Deliver],
+            &settings,
+        )?;
+        self.deliver(meeting_id).await;
+        self.stamp_deferred_retention(meeting_id).await
+    }
+
+    /// Posts `OperationFailed` for a failed `operation` and hands the
+    /// result on.
+    fn reporting(
+        &self,
+        meeting_id: Uuid,
+        operation: MeetingOperation,
+        result: Result<()>,
+    ) -> Result<()> {
+        if let Err(failure) = &result {
+            self.inner
+                .dependencies
+                .events
+                .post(MeetingEvent::OperationFailed {
+                    meeting_id,
+                    operation,
+                    reason: failure.to_string(),
+                });
+        }
+        result
     }
 
     /// The per-meeting keep: `rule` replaces the asset's retention and
@@ -649,7 +710,8 @@ impl ProcessingPipeline {
     // Stage plumbing
 
     /// Starts the meeting's run over `stages`, estimated from the learned
-    /// rates; [`Admitted`] drops it when the operation ends.
+    /// rates; the operation's [`Admitted`] mark removes it when the
+    /// operation ends.
     fn begin_run(
         &self,
         meeting: &Meeting,
@@ -674,30 +736,34 @@ impl ProcessingPipeline {
     }
 
     /// Marks `meeting_id` in flight for the duration of `body`; a second
-    /// operation on the same meeting fails for `stage`. The mark is
-    /// cleared when `body` completes or when the future is dropped
-    /// mid-way (a cancelled task), never left behind.
+    /// operation on the same meeting fails for `stage`.
     async fn exclusively<T>(
         &self,
         meeting_id: Uuid,
         stage: PipelineStage,
         body: impl Future<Output = Result<T>>,
     ) -> Result<T> {
-        {
-            let mut guard = self.state();
-            if !guard.in_flight.insert(meeting_id) {
-                return Err(PipelineFailure::new(
-                    stage,
-                    format!("meeting {meeting_id} is already being processed"),
-                ));
-            }
-            guard.admissions += 1;
-        }
-        let _admitted = Admitted {
-            pipeline: self,
-            meeting_id,
-        };
+        let _admitted = self.admit(meeting_id, stage)?;
         body.await
+    }
+
+    /// Marks `meeting_id` in flight until the returned mark is dropped,
+    /// or fails for `stage` when another operation holds it. The mark is
+    /// cleared however the operation ends: completed, failed, panicked or
+    /// dropped mid-way (a cancelled task).
+    fn admit(&self, meeting_id: Uuid, stage: PipelineStage) -> Result<Admitted> {
+        let mut guard = self.state();
+        if !guard.in_flight.insert(meeting_id) {
+            return Err(PipelineFailure::new(
+                stage,
+                format!("meeting {meeting_id} is already being processed"),
+            ));
+        }
+        guard.admissions += 1;
+        Ok(Admitted {
+            pipeline: self.clone(),
+            meeting_id,
+        })
     }
 
     /// Replaces the run's guessed token count with the transcript's.
@@ -1251,12 +1317,12 @@ impl ProcessingPipeline {
 
 /// The in-flight mark of one operation; dropping it clears the mark and
 /// the run, whichever way the operation ended.
-struct Admitted<'a> {
-    pipeline: &'a ProcessingPipeline,
+struct Admitted {
+    pipeline: ProcessingPipeline,
     meeting_id: Uuid,
 }
 
-impl Drop for Admitted<'_> {
+impl Drop for Admitted {
     fn drop(&mut self) {
         let mut guard = self.pipeline.state();
         guard.in_flight.remove(&self.meeting_id);

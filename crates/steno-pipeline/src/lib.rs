@@ -7,7 +7,7 @@
 //!
 //! | Module | What it holds |
 //! |--------|---------------|
-//! | [`pipeline`] | [`ProcessingPipeline`]: `enqueue`, `process`, `rerun_summary`, `redeliver`, `apply_retention`, the stages |
+//! | [`pipeline`] | [`ProcessingPipeline`]: `enqueue`, `process`, `rerun_summary` and `redeliver` (with their `claim_` halves), `apply_retention`, the stages |
 //! | [`estimator`] | The learned stage rates, their seeds and the arithmetic behind `progress` |
 //! | [`run`] | One run's progress state with the monotonic clamp |
 //! | [`events`] | [`MeetingEventBus`], the broadcast of `MeetingEvent` |
@@ -77,8 +77,9 @@ pub use intake::{
 };
 pub use lane_merger::LaneMerger;
 pub use pipeline::{
-    MonotonicClock, Now, PipelineDependencies, PipelineFailure, ProcessingPipeline, SystemClock,
+    MonotonicClock, Now, Operation, PipelineDependencies, PipelineFailure, ProcessingPipeline,
+    SystemClock,
 };
 pub use retention::{RetentionSweep, SweepIncomplete};
 pub use speaker_memory::StoreSpeakerMemory;
-pub use steno_core::{MeetingEvent, PipelineStage, ProcessingProgress};
+pub use steno_core::{MeetingEvent, MeetingOperation, PipelineStage, ProcessingProgress};

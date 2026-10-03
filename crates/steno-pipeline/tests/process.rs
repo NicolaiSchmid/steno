@@ -442,11 +442,85 @@ async fn a_failing_summary_names_its_stage_once() {
             reason: "summarize: HTTP 401".to_owned()
         }
     );
+
+    // A re-run that fails the same way leaves the state alone, returns the
+    // failure and posts it for the window.
+    let mut receiver = world.events.subscribe();
     let error = pipeline
         .rerun_summary(meeting.id, "default")
         .await
         .unwrap_err();
     assert_eq!(error.to_string(), "summarize: HTTP 401");
+    assert_eq!(
+        drain(&mut receiver)
+            .into_iter()
+            .filter(|event| matches!(event, MeetingEvent::OperationFailed { .. }))
+            .collect::<Vec<_>>(),
+        [MeetingEvent::OperationFailed {
+            meeting_id: meeting.id,
+            operation: steno_core::MeetingOperation::SummaryRerun,
+            reason: "summarize: HTTP 401".to_owned(),
+        }]
+    );
+    assert_eq!(pipeline.in_flight(), Vec::<Uuid>::new());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_missing_row_fails_for_the_operation_s_stage_with_what_is_missing() {
+    let world = world(true, None, AudioRetention::KeepForever);
+    let unknown = Uuid::new_v4();
+    let rerun = world
+        .pipeline
+        .rerun_summary(unknown, "default")
+        .await
+        .unwrap_err();
+    assert_eq!(rerun.to_string(), format!("summarize: meeting {unknown} not found"));
+    let redeliver = world.pipeline.redeliver(unknown).await.unwrap_err();
+    assert_eq!(redeliver.to_string(), format!("deliver: meeting {unknown} not found"));
+    let processed = world.pipeline.process(unknown).await.unwrap_err();
+    assert_eq!(
+        processed.to_string(),
+        format!("decode: audio asset {unknown} not found")
+    );
+    let kept = world
+        .pipeline
+        .apply_retention(unknown, AudioRetention::KeepForever)
+        .await
+        .unwrap_err();
+    assert_eq!(
+        kept.to_string(),
+        format!("retention: meeting {unknown} has no audio asset")
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_claimed_operation_holds_the_meeting_until_it_runs_or_is_dropped() {
+    let world = world(true, None, AudioRetention::KeepForever);
+    let meeting = call_meeting(world.now);
+    let asset = call_asset(&world.audio, meeting.id, AudioRetention::KeepForever);
+    world.pipeline.enqueue(&meeting, &asset).unwrap();
+    world.pipeline.wait_until_idle().await;
+
+    let claimed = world.pipeline.claim_redeliver(meeting.id).unwrap();
+    assert_eq!(world.pipeline.in_flight(), [meeting.id]);
+    let refused = world
+        .pipeline
+        .claim_rerun_summary(meeting.id, "default")
+        .err()
+        .unwrap();
+    assert_eq!(
+        refused.to_string(),
+        format!("summarize: meeting {} is already being processed", meeting.id)
+    );
+    drop(claimed);
+    assert_eq!(world.pipeline.in_flight(), Vec::<Uuid>::new());
+
+    let claimed = world
+        .pipeline
+        .claim_rerun_summary(meeting.id, "default")
+        .unwrap();
+    claimed.await.unwrap();
+    assert_eq!(world.pipeline.in_flight(), Vec::<Uuid>::new());
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -490,7 +564,7 @@ async fn launch_recovery_resumes_queued_meetings_and_fails_those_without_an_asse
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn a_failed_delivery_defers_deletion_until_a_redeliver_succeeds() {
+async fn a_failed_delivery_defers_deletion_until_a_re_export_succeeds() {
     let world = world(
         false,
         Some(|vault| FakeDestination {

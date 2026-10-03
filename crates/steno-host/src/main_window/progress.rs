@@ -110,7 +110,9 @@ impl ProcessingProgressModel {
             MeetingEvent::Deleted { meeting_id } => {
                 self.entries.remove(meeting_id);
             }
-            MeetingEvent::SpeakersNeedReview { .. } | MeetingEvent::RetentionApplied { .. } => {}
+            MeetingEvent::SpeakersNeedReview { .. }
+            | MeetingEvent::RetentionApplied { .. }
+            | MeetingEvent::OperationFailed { .. } => {}
         }
     }
 
