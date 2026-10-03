@@ -19,7 +19,7 @@ use std::time::Duration;
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
 use common::{
-    EngineDevice, FakeIntake, Phone, TestService, chunks, metadata_for, seeded_bytes, sha256,
+    EngineDevice, Phone, TestService, chunks, fake_intake, metadata_for, seeded_bytes, sha256,
 };
 use steno_core::{AudioFormat, HandoverState, HandoverStateKind};
 use steno_handover::upload::MetadataValidation;
@@ -41,7 +41,7 @@ fn status(state: HandoverStateKind, received_chunks: Vec<i64>) -> wire::Recordin
 
 #[tokio::test]
 async fn upload_survives_disconnect_resumes_skips_duplicates_and_completes() {
-    let intake = FakeIntake::new(meeting_id());
+    let intake = fake_intake(meeting_id());
     let test = TestService::with_intake(CHUNK_SIZE, intake.clone()).await;
     let phone = Phone::pair(&test).await;
     let bytes = seeded_bytes(3 * CHUNK_SIZE as usize + 12345, 42);
@@ -128,7 +128,7 @@ async fn upload_survives_disconnect_resumes_skips_duplicates_and_completes() {
         meeting_id()
     );
 
-    let admissions = intake.entries();
+    let admissions = intake.admissions.entries();
     assert_eq!(admissions.len(), 1);
     let admission = &admissions[0];
     assert_eq!(admission.metadata, metadata);
@@ -183,7 +183,7 @@ async fn hash_mismatch_is_422_and_the_partial_is_gone() {
     let completed = phone.complete(metadata.recording_id).await;
     assert_eq!(completed.status, 422);
     assert!(!inbox.has_partial(metadata.recording_id));
-    assert_eq!(test.intake.count(), 0);
+    assert_eq!(test.intake.admissions.count(), 0);
 
     assert_eq!(
         phone
@@ -251,7 +251,7 @@ async fn complete_with_missing_chunks_is_409_with_the_status() {
         early.json::<wire::RecordingStatus>(),
         status(HandoverStateKind::Receiving, vec![2])
     );
-    assert_eq!(test.intake.count(), 0);
+    assert_eq!(test.intake.admissions.count(), 0);
     test.stop().await;
 }
 
@@ -466,7 +466,7 @@ async fn chunk_and_metadata_errors_are_answered_without_side_effects() {
         204,
         "a late duplicate after completion is harmless"
     );
-    assert_eq!(test.intake.count(), 1);
+    assert_eq!(test.intake.admissions.count(), 1);
     test.stop().await;
 }
 
@@ -476,7 +476,7 @@ async fn chunks_in_flight_at_once_all_land_in_the_receipt() {
     // background session may deliver several at once. The engine yields
     // while it saves a receipt, so every concurrent chunk must survive into
     // the same receipt: no lost update, in memory or in the store.
-    let intake = FakeIntake::new(meeting_id());
+    let intake = fake_intake(meeting_id());
     let chunk_size: i64 = 64 * 1024;
     let test = TestService::with_intake(chunk_size, intake.clone()).await;
     let phone = Phone::pair(&test).await;
@@ -528,7 +528,7 @@ async fn chunks_in_flight_at_once_all_land_in_the_receipt() {
         "the stored copy lost nothing either"
     );
     assert_eq!(phone.complete(metadata.recording_id).await.status, 200);
-    let admission = &intake.entries()[0];
+    let admission = &intake.admissions.entries()[0];
     assert_eq!(
         std::fs::read(&admission.file).unwrap(),
         bytes,
@@ -540,7 +540,7 @@ async fn chunks_in_flight_at_once_all_land_in_the_receipt() {
 #[tokio::test]
 async fn announce_after_complete_reports_complete_with_every_chunk() {
     // The phone's retry after a lost 200 re-announces.
-    let intake = FakeIntake::new(meeting_id());
+    let intake = fake_intake(meeting_id());
     let test = TestService::with_intake(CHUNK_SIZE, intake.clone()).await;
     let phone = Phone::pair(&test).await;
     let bytes = seeded_bytes(2 * CHUNK_SIZE as usize + 1, 6);
@@ -560,7 +560,7 @@ async fn announce_after_complete_reports_complete_with_every_chunk() {
         repeated.json::<wire::CompleteResponse>().meeting_id,
         meeting_id()
     );
-    assert_eq!(intake.count(), 1, "no second admission");
+    assert_eq!(intake.admissions.count(), 1, "no second admission");
     assert!(
         !test.inbox().has_partial(metadata.recording_id),
         "no partial is reopened"
@@ -613,7 +613,7 @@ async fn a_vanished_partial_is_404_on_chunk_and_a_re_announce_starts_over() {
     assert!(inbox.has_partial(metadata.recording_id));
     phone.upload_all(&metadata, &bytes).await;
     assert_eq!(phone.complete(metadata.recording_id).await.status, 200);
-    let admission = &test.intake.entries()[0];
+    let admission = &test.intake.admissions.entries()[0];
     assert_eq!(std::fs::read(&admission.file).unwrap(), bytes);
     test.stop().await;
 }

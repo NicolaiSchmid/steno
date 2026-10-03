@@ -201,5 +201,5 @@ async fn the_gate_answers_while_a_whole_file_hash_runs() {
     };
     let (completed, ()) = tokio::join!(completion, observed);
     assert_eq!(completed.status.as_u16(), 200);
-    assert_eq!(test.intake.count(), 1);
+    assert_eq!(test.intake.admissions.count(), 1);
 }

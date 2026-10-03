@@ -14,7 +14,7 @@ mod common;
 
 use std::time::Duration;
 
-use common::{FakeIntake, Phone, TestService, date, seeded_bytes};
+use common::{Phone, TestService, date, fake_intake, seeded_bytes};
 use steno_core::{
     AudioFormat, HandoverReceipt, HandoverState, HandoverStateKind, PairedDevice, RecordingMetadata,
 };
@@ -25,7 +25,7 @@ const CHUNK_SIZE: i64 = 1024 * 1024;
 #[tokio::test]
 async fn receipts_stream_reaches_complete() {
     let meeting_id = Uuid::parse_str("1DEA0000-0000-4000-8000-000000000002").unwrap();
-    let test = TestService::with_intake(CHUNK_SIZE, FakeIntake::new(meeting_id)).await;
+    let test = TestService::with_intake(CHUNK_SIZE, fake_intake(meeting_id)).await;
     let mut receipts = test.service.receipts();
     let phone = Phone::pair(&test).await;
     let bytes = seeded_bytes(2 * CHUNK_SIZE as usize, 21);

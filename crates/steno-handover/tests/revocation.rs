@@ -195,7 +195,7 @@ async fn revoke_and_unpair_drop_the_upload_and_make_every_bearer_route_401() {
     );
     assert_eq!(b.phone.upload(b.id(), 1, &b.chunks[1]).await.status, 204);
     assert_eq!(b.phone.complete(b.id()).await.status, 200);
-    let admissions = test.intake.entries();
+    let admissions = test.intake.admissions.entries();
     assert_eq!(
         admissions.iter().map(|a| a.device.id).collect::<Vec<_>>(),
         vec![b.phone.device_id]
@@ -263,6 +263,6 @@ async fn unpair_mid_upload_discards_the_partial_and_the_receipt() {
             .status,
         401
     );
-    assert_eq!(test.intake.count(), 0);
+    assert_eq!(test.intake.admissions.count(), 0);
     test.stop().await;
 }

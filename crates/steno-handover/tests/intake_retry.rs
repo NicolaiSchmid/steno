@@ -16,7 +16,7 @@ mod common;
 
 use std::sync::Arc;
 
-use common::{FakeIntake, Phone, ScriptedIntake, TestService, chunks, seeded_bytes};
+use common::{Phone, ScriptedIntake, TestService, chunks, fake_intake, seeded_bytes};
 use steno_core::{
     AudioFormat, HandoverReceipt, HandoverState, HandoverStateKind, RecordingMetadata,
 };
@@ -241,7 +241,7 @@ async fn a_restarted_computer_resumes_from_the_stored_receipt_and_sweeps_only_or
     first.stop().await;
 
     // The computer comes back over the same store and inbox.
-    let intake = FakeIntake::new(meeting_id());
+    let intake = fake_intake(meeting_id());
     let now = first.now;
     let second = HandoverService::new(
         first.service.configuration.clone(),
@@ -309,7 +309,7 @@ async fn a_restarted_computer_resumes_from_the_stored_receipt_and_sweeps_only_or
         completed_upload.json::<wire::CompleteResponse>().meeting_id,
         meeting_id()
     );
-    let admissions = intake.entries();
+    let admissions = intake.admissions.entries();
     assert_eq!(admissions.len(), 1);
     assert_eq!(std::fs::read(&admissions[0].file).unwrap(), bytes);
     second.stop().await;

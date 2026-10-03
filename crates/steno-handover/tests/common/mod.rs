@@ -21,6 +21,7 @@ use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
 use chrono::{DateTime, TimeZone as _, Utc};
 use sha2::{Digest as _, Sha256};
+use steno_core::testing::FakeHandoverIntake;
 use steno_core::{
     AudioFormat, BoundaryResult, HandoverIntake, PairedDevice, RecordingMetadata, Store,
 };
@@ -66,53 +67,12 @@ pub fn date(seconds: i64) -> DateTime<Utc> {
     Utc.timestamp_opt(seconds, 0).single().unwrap()
 }
 
-/// Core's `FakeHandoverIntake`: records every admission, answers a fixed
-/// meeting id or a fresh one.
-#[derive(Debug, Clone)]
-pub struct Admission {
-    pub file: PathBuf,
-    pub metadata: RecordingMetadata,
-    pub device: PairedDevice,
-}
-
-#[derive(Default)]
-pub struct FakeIntake {
-    pub meeting_id: Option<Uuid>,
-    pub admissions: Mutex<Vec<Admission>>,
-}
-
-impl FakeIntake {
-    pub fn new(meeting_id: Uuid) -> Arc<Self> {
-        Arc::new(FakeIntake {
-            meeting_id: Some(meeting_id),
-            admissions: Mutex::new(Vec::new()),
-        })
-    }
-
-    pub fn entries(&self) -> Vec<Admission> {
-        self.admissions.lock().unwrap().clone()
-    }
-
-    pub fn count(&self) -> usize {
-        self.admissions.lock().unwrap().len()
-    }
-}
-
-#[steno_core::async_trait]
-impl HandoverIntake for FakeIntake {
-    async fn admit(
-        &self,
-        file: &Path,
-        metadata: &RecordingMetadata,
-        device: &PairedDevice,
-    ) -> BoundaryResult<Uuid> {
-        self.admissions.lock().unwrap().push(Admission {
-            file: file.to_path_buf(),
-            metadata: metadata.clone(),
-            device: device.clone(),
-        });
-        Ok(self.meeting_id.unwrap_or_else(Uuid::new_v4))
-    }
+/// Core's fake intake, answering `meeting_id` for every admission.
+pub fn fake_intake(meeting_id: Uuid) -> Arc<FakeHandoverIntake> {
+    Arc::new(FakeHandoverIntake {
+        meeting_id: Some(meeting_id),
+        ..FakeHandoverIntake::default()
+    })
 }
 
 /// A `HandoverIntake` that fails the first `failures` admissions and then
@@ -231,7 +191,7 @@ impl Default for Options {
 pub struct TestService {
     pub service: Arc<HandoverService>,
     pub store: Arc<Store>,
-    pub intake: Arc<FakeIntake>,
+    pub intake: Arc<FakeHandoverIntake>,
     pub directory: tempfile::TempDir,
     pub clock: WallClock,
     /// The wall clock as the service read it at start.
@@ -264,7 +224,7 @@ impl TestService {
     pub async fn with(options: Options) -> TestService {
         let directory = tempfile::tempdir().unwrap();
         let store = Arc::new(Store::in_memory().unwrap());
-        let fake = Arc::new(FakeIntake::default());
+        let fake = Arc::new(FakeHandoverIntake::default());
         let intake: Arc<dyn HandoverIntake> = options.intake.unwrap_or_else(|| fake.clone());
         let clock = WallClock::new(date(START));
         let configuration = HandoverConfiguration {

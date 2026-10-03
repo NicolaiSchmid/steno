@@ -38,6 +38,8 @@ tracing.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
+steno-core = { path = "../steno-core", features = ["testing"] }
+
 regex.workspace = true
 reqwest.workspace = true
 tempfile.workspace = true
