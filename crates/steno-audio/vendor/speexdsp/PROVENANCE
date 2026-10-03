@@ -1,18 +1,12 @@
 SpeexDSP sources vendored from https://gitlab.xiph.org/xiph/speexdsp
 (BSD licence, COPYING beside this file).
 
-Snapshot: libspeexdsp/ and include/speex/ as of upstream commit 3ad2acb1
-("resample_sse: use 2 accumulators to break data dependency",
-2026-06-01). That is release SpeexDSP-1.2.1 plus the three later upstream
-commits that touch a vendored file:
+Snapshot: libspeexdsp/ and include/speex/ as of upstream commit e8a18dcd
+("smallft: mark constants as const", 2025-05-22): release SpeexDSP-1.2.1
+plus eleven later commits, of which two change a file vendored here:
 
-  1d99e79f  resample_neon.h: add missing stdint include for aarch64
   738e1790  libspeexdsp: fix typos in comments
   e8a18dcd  smallft: mark constants as const
-
-The next upstream commit to touch a vendored file is e565ed9e
-(2026-06-08, resample_neon.h), so the snapshot was taken between
-e8a18dcd and 3ad2acb1 inclusive.
 
 Files: the seven .c files build.rs compiles (fftwrap, filterbank,
 kiss_fft, kiss_fftr, mdf, preprocess, smallft), the private headers they
