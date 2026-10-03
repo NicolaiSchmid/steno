@@ -128,11 +128,10 @@ impl Features {
     pub fn first_array(&self) -> Result<Array, BackendError> {
         // SAFETY: `featureNames` is a retained set of strings owned by the
         // provider; iterating it has no preconditions.
-        let names: Vec<String> = unsafe {
+        let mut names: Vec<String> = unsafe {
             let names = self.inner.featureNames();
             names.iter().map(|name| name.to_string()).collect()
         };
-        let mut names = names;
         names.sort();
         for name in names {
             if let Ok(array) = self.array(&name) {
