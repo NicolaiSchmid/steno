@@ -24,19 +24,24 @@ pub enum SpeechError {
         source: std::io::Error,
     },
     /// The asset's directory lacks files the manifest names.
-    #[error("model {asset} is not installed: {} missing under {}", missing.join(", "), root.display())]
+    #[error("model {asset} is not installed: {} missing in {}", missing.join(", "), directory.display())]
     NotInstalled {
         asset: String,
-        root: PathBuf,
+        /// `<root>/<asset id>`, where the files belong.
+        directory: PathBuf,
         missing: Vec<String>,
     },
     /// The manifest has no URL for a missing file (the fp32 export until it
     /// is hosted); the files have to be put in place by hand.
     #[error(
-        "model {asset} has no download location yet; put its files under {} or point STENO_MODELS_DIR at a directory that holds them",
-        root.display()
+        "model {asset} has no download location yet; put its files in {} or point STENO_MODELS_DIR at a directory with a {asset} folder",
+        directory.display()
     )]
-    NotHosted { asset: String, root: PathBuf },
+    NotHosted {
+        asset: String,
+        /// `<root>/<asset id>`, where the files belong.
+        directory: PathBuf,
+    },
     /// The HTTP download failed or returned a non-success status.
     #[error("download of {url} failed: {source}")]
     Download {

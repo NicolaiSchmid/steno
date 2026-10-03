@@ -227,14 +227,14 @@ impl ModelStore {
     pub fn verify(&self, asset: &ModelAsset) -> Result<(), SpeechError> {
         asset.validate()?;
         let missing = self.missing_files(asset);
+        let directory = self.directory(asset);
         if !missing.is_empty() {
             return Err(SpeechError::NotInstalled {
                 asset: asset.id.clone(),
-                root: self.root.clone(),
+                directory,
                 missing,
             });
         }
-        let directory = self.directory(asset);
         for file in &asset.files {
             let path = directory.join(&file.name);
             check_digest(file, &path, sha256_of(&path)?)?;
@@ -261,7 +261,7 @@ impl ModelStore {
             let Some(url) = &file.url else {
                 return Err(SpeechError::NotHosted {
                     asset: asset.id.clone(),
-                    root: self.root.clone(),
+                    directory,
                 });
             };
             self.download(url, file, &directory.join(&file.name), progress)?;
