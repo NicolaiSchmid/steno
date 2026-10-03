@@ -1,6 +1,7 @@
 //! The overlap merge: a time-tolerant longest common subsequence over the
 //! tokens two neighbouring windows share, with a midpoint cut when nothing
-//! matches, and the seam word owned by the left window. Ported from
+//! matches, and the seam word owned by the left window unless that window
+//! ends inside it. Ported from
 //! `spikes/coreml-rs/src/pipeline.rs`, itself a port of `FluidAudio`'s
 //! `mergeChunks`; the spike D harness ran the same code on sherpa-onnx
 //! pieces (`spikes/onnx-speech/src/merge.rs`).
@@ -109,22 +110,28 @@ pub fn merge_windows(
         }
     }
     let tail = &right[last_right + 1..];
-    match tail.iter().position(|t| vocab.is_splice_safe(t.id)) {
+    let left_rest = &left[last_left + 1..];
+    let next = tail.iter().position(|t| vocab.is_splice_safe(t.id));
+    // A left window that ends inside the seam word, as an Energy cut can,
+    // holds only part of it; a right that heard more of the word finishes it.
+    if !left_rest.iter().any(|t| vocab.is_splice_safe(t.id))
+        && next.unwrap_or(tail.len()) > left_rest.len()
+    {
+        out.extend_from_slice(tail);
+        return out;
+    }
+    match next {
         Some(0) => out.extend_from_slice(tail),
         Some(next) => {
             // The left window owns the seam word; the right resumes at its
             // next splice point.
-            out.extend(
-                left[last_left + 1..]
-                    .iter()
-                    .take_while(|t| !vocab.is_splice_safe(t.id)),
-            );
+            out.extend(left_rest.iter().take_while(|t| !vocab.is_splice_safe(t.id)));
             out.extend_from_slice(&tail[next..]);
         }
         // Nothing past the seam word on the right, or only the rest of that
         // word: its window ended inside the left one's span, so the left
         // keeps the rest.
-        None => out.extend_from_slice(&left[last_left + 1..]),
+        None => out.extend_from_slice(left_rest),
     }
     out
 }
@@ -254,6 +261,27 @@ mod tests {
             ids(&merged),
             vec![(1, 20), (5, 21), (2, 24), (7, 25), (3, 30)]
         );
+    }
+
+    #[test]
+    fn a_left_window_that_ends_inside_the_seam_word_takes_the_rest_from_the_right() {
+        // Left ends on "c"; the right heard "c z w" and then "d".
+        let left = vec![token(1, 20), token(5, 21), token(2, 24)];
+        let right = vec![
+            token(1, 20),
+            token(5, 21),
+            token(2, 24),
+            token(6, 25),
+            token(7, 26),
+            token(3, 30),
+        ];
+        assert_eq!(
+            ids(&merge_windows(&left, &right, 1.5, &vocab())),
+            ids(&right)
+        );
+        // The right ends inside the word too, one piece further than the left.
+        let right = &right[..4];
+        assert_eq!(ids(&merge_windows(&left, right, 1.5, &vocab())), ids(right));
     }
 
     #[test]
