@@ -243,19 +243,26 @@ impl MeetingListViewModel {
     /// The store's delete: rows, receipt and the meeting's files go (the
     /// folder when the recording lives in one, else each file), through
     /// the file system seam; a meeting still recording or processing is
-    /// refused and the reason shown. A deleted selection clears itself when
-    /// the list reloads. Swift: `MeetingStore.delete`.
-    pub fn delete(&mut self, id: Uuid, store: &Store, files: &dyn FileSystem) {
-        match store.delete_meeting(id) {
-            Ok(deleted) => {
-                for path in deleted.files_to_remove(id) {
-                    // A file already gone is not an error; one that will
-                    // not go is left for the retention sweep.
-                    let _ = files.remove(&path);
-                }
-                self.error = None;
+    /// refused and the reason shown. A file that resists does not stop the
+    /// rest; the first failure is shown, since the rows are gone and no
+    /// sweep finds that audio again. A deleted selection clears itself when
+    /// the list reloads. Returns whether the rows went. Swift:
+    /// `MeetingStore.delete`.
+    pub fn delete(&mut self, id: Uuid, store: &Store, files: &dyn FileSystem) -> bool {
+        let deleted = match store.delete_meeting(id) {
+            Ok(deleted) => deleted,
+            Err(error) => {
+                self.error = Some(format!("Meeting could not be deleted: {error}"));
+                return false;
             }
-            Err(error) => self.error = Some(format!("Meeting could not be deleted: {error}")),
+        };
+        let mut first_error = None;
+        for path in deleted.files_to_remove(id) {
+            if let Err(error) = files.remove(&path) {
+                first_error.get_or_insert(error);
+            }
         }
+        self.error = first_error.map(|error| format!("Meeting could not be deleted: {error}"));
+        true
     }
 }

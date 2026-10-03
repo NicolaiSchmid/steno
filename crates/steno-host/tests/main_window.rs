@@ -373,6 +373,80 @@ fn delete_asks_first_and_refuses_a_busy_meeting() {
     assert_eq!(queued.sink.count(BridgeTopic::Progress), 1);
 }
 
+/// A file that will not go is reported once the rows are gone (no sweep
+/// finds that audio again), as `MeetingStore.delete` threw its first
+/// failure; a delete the store refuses keeps the meeting's progress entry.
+#[test]
+fn a_delete_reports_files_that_stay_and_a_refusal_keeps_the_progress_entry() {
+    let harness = Harness::builder()
+        .seed(|store, fakes| {
+            let folder =
+                steno_core::paths::path_from_file_url(&store.settings().unwrap().audio_folder)
+                    .unwrap();
+            populate_sample(store, fakes, &folder);
+            fakes
+                .file_system
+                .fail_removals(Some("Operation not permitted"));
+        })
+        .build();
+    let reply = harness
+        .host
+        .meetings_delete(MeetingIdParams {
+            meeting_id: uuid(MEETING),
+        })
+        .unwrap();
+    assert!(reply.confirmed);
+    assert!(harness.store.meeting(uuid(MEETING)).unwrap().is_none());
+    let list = harness.sink.last(BridgeTopic::MeetingsList).unwrap();
+    assert_eq!(
+        list["error"],
+        "Meeting could not be deleted: Operation not permitted"
+    );
+    assert!(
+        harness
+            .fakes
+            .file_system
+            .exists(&master_path(&harness.audio_folder())),
+        "the master is still on disk, and the page says so"
+    );
+
+    // The meeting starts processing while the prompt is up: the store
+    // refuses, the reason shows, and the queued entry is not evicted.
+    let refused = Harness::builder()
+        .confirm_with(|host, _| {
+            let mut meeting = host.store().meeting(uuid(0x88)).unwrap().unwrap();
+            meeting.state = MeetingState::Processing;
+            host.store().save_meeting(&meeting).unwrap();
+            true
+        })
+        .seed(|store, _| {
+            let mut meeting = sample_meeting();
+            meeting.id = uuid(0x88);
+            meeting.state = MeetingState::Queued;
+            meeting.summary = None;
+            store.save_meeting(&meeting).unwrap();
+        })
+        .build();
+    refused
+        .host
+        .meetings_delete(MeetingIdParams {
+            meeting_id: uuid(0x88),
+        })
+        .unwrap();
+    assert!(refused.store.meeting(uuid(0x88)).unwrap().is_some());
+    assert_eq!(
+        refused.sink.last(BridgeTopic::MeetingsList).unwrap()["error"]
+            .as_str()
+            .map(|error| error.starts_with("Meeting could not be deleted: ")),
+        Some(true)
+    );
+    assert_eq!(
+        refused.snapshot(BridgeTopic::Progress)["entries"][0]["meetingID"],
+        id(0x88),
+        "the refused meeting keeps its progress entry"
+    );
+}
+
 /// The detail heading derives the title as the list does (Swift:
 /// `meeting.displayTitle()`), so an untitled meeting reads "Monday 10:06".
 #[test]

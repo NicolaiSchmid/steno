@@ -1301,20 +1301,22 @@ impl BridgeHost for Host {
             self.command(
                 &[BridgeTopic::MeetingsList, BridgeTopic::Progress],
                 |inner| {
-                    inner.list.delete(
+                    let deleted = inner.list.delete(
                         params.meeting_id,
                         &self.shared.store,
                         &*self.shared.services.file_system,
                     );
                     inner.list.reload(&self.shared.store);
-                    // The store's `deleted` event: a queued meeting's
-                    // progress entry goes with it.
-                    inner.progress.apply(
-                        &MeetingEvent::Deleted {
-                            meeting_id: params.meeting_id,
-                        },
-                        now,
-                    );
+                    // The store's `deleted` event, posted only when the rows
+                    // went: a queued meeting's progress entry goes with it.
+                    if deleted {
+                        inner.progress.apply(
+                            &MeetingEvent::Deleted {
+                                meeting_id: params.meeting_id,
+                            },
+                            now,
+                        );
+                    }
                 },
             );
         }

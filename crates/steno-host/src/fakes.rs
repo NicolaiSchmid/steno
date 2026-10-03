@@ -744,12 +744,19 @@ pub struct FakeFileSystem {
     pub existing: Mutex<BTreeSet<PathBuf>>,
     /// Every path `remove` was asked for, in order.
     pub removed: Mutex<Vec<PathBuf>>,
+    /// Set to make every `remove` fail with this text, leaving the path.
+    pub removal_failure: Mutex<Option<String>>,
 }
 
 impl FakeFileSystem {
     /// Makes `path` exist.
     pub fn create(&self, path: impl Into<PathBuf>) {
         lock(&self.existing).insert(path.into());
+    }
+
+    /// Makes every `remove` fail with `text`; `None` lets them through.
+    pub fn fail_removals(&self, text: Option<&str>) {
+        *lock(&self.removal_failure) = text.map(str::to_owned);
     }
 }
 
@@ -761,6 +768,9 @@ impl FileSystem for FakeFileSystem {
     /// The path and everything under it stop existing.
     fn remove(&self, path: &Path) -> BoundaryResult<()> {
         lock(&self.removed).push(path.to_path_buf());
+        if let Some(failure) = lock(&self.removal_failure).clone() {
+            return Err(failure.into());
+        }
         lock(&self.existing).retain(|existing| !existing.starts_with(path));
         Ok(())
     }
