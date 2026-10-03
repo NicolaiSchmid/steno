@@ -39,8 +39,8 @@ use std::{
 };
 
 use tauri::{
-    AppHandle, LogicalPosition, LogicalSize, Manager, PhysicalPosition, Url, WebviewUrl,
-    WebviewWindow, WebviewWindowBuilder, webview::NewWindowResponse,
+    AppHandle, LogicalPosition, LogicalSize, Manager, PhysicalPosition, PixelUnit, Url, WebviewUrl,
+    WebviewWindow, WebviewWindowBuilder, WindowSizeConstraints, webview::NewWindowResponse,
 };
 
 use crate::{
@@ -500,12 +500,17 @@ fn show_window(
     .always_on_top(true)
     .visible_on_all_workspaces(true)
     .skip_taskbar(true)
-    // GTK ignores `resize` on a window it holds non-resizable and keeps
-    // the webview's natural size instead, so the panel would never take
-    // the size its page reports there; undecorated, the window has no
-    // edge for the user to resize by either way. macOS and Windows honour
-    // `set_size` on a fixed window.
+    // GTK holds a window it calls non-resizable at least at its content's
+    // natural size (480 by 200 for a webview), so on Linux the panel must
+    // be resizable to take the size its page reports. Tauri then gives an
+    // undecorated window a 5 px resize border; the size is pinned (minimum
+    // and maximum the page's size, `pin_size`), so a press there starts a
+    // resize the window manager cannot carry out and the panel keeps its
+    // size. macOS and Windows honour `set_size` on a fixed window and have
+    // no such border.
     .resizable(cfg!(target_os = "linux"))
+    .min_inner_size(frame.width, frame.height)
+    .max_inner_size(frame.width, frame.height)
     .focused(false)
     .accept_first_mouse(true)
     .on_navigation(move |url| navigation::allows(url, dev_server.as_ref()))
@@ -638,13 +643,27 @@ pub fn resize(app: &AppHandle, panel: Panel, reported: (f64, f64)) -> Result<(),
         return Ok(());
     };
     let frame = panels.place(panel, top_center, size, &screens);
-    window
-        .set_size(LogicalSize::new(size.0, size.1))
-        .map_err(failed)?;
+    pin_size(&window, size).map_err(failed)?;
     window
         .set_position(LogicalPosition::new(frame.x, frame.y))
         .map_err(failed)?;
     Ok(())
+}
+
+/// Gives a panel's window `size` and holds it there: the minimum and the
+/// maximum become the size (one request, so they never cross), then the
+/// size itself. On Linux, where the window is resizable, the pin is what
+/// keeps a drag on its border from resizing it.
+fn pin_size(window: &WebviewWindow, size: (f64, f64)) -> tauri::Result<()> {
+    let width = Some(PixelUnit::Logical(size.0.into()));
+    let height = Some(PixelUnit::Logical(size.1.into()));
+    window.set_size_constraints(WindowSizeConstraints {
+        min_width: width,
+        min_height: height,
+        max_width: width,
+        max_height: height,
+    })?;
+    window.set_size(LogicalSize::new(size.0, size.1))
 }
 
 /// The window moved: a drag moves the anchor and saves it

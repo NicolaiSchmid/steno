@@ -10,7 +10,7 @@
 # from 6); the windows carry only fixture data. Xvfb has no compositor, so
 # the panels' transparent corners render black there.
 #
-#   apps/desktop/scripts/smoke-linux.sh [path/to/steno-desktop] [seconds]
+#   [STENO_SMOKE_DPI=<dpi>] apps/desktop/scripts/smoke-linux.sh [path/to/steno-desktop] [seconds]
 #
 # Needs the web dist embedded (pnpm build in apps/macos/web before cargo
 # build) and the runtime libraries the binary links; on NixOS run it inside
@@ -37,7 +37,11 @@ export LIBGL_ALWAYS_SOFTWARE=1
 export GDK_BACKEND=x11
 
 # 1120x720 main at the origin, Settings to its right, onboarding below.
-xvfb-run --auto-servernum --server-args="-screen 0 2200x1500x24" bash -c '
+# STENO_SMOKE_DPI sets the X resolution (Xvfb's own default otherwise);
+# WebKitGTK's devicePixelRatio follows it, so 120 checks the panels at a
+# ratio of 1.25.
+server_args="-screen 0 2200x1500x24${STENO_SMOKE_DPI:+ -dpi $STENO_SMOKE_DPI}"
+xvfb-run --auto-servernum --server-args="$server_args" bash -c '
   set -u
   "$1" & app=$!
   if command -v import >/dev/null; then

@@ -20,7 +20,7 @@ use std::{
     time::Duration,
 };
 
-use tauri::{AppHandle, Manager};
+use tauri::{AppHandle, LogicalSize, Manager, WebviewWindow};
 
 use crate::{
     panel_geometry::same_size,
@@ -265,12 +265,32 @@ fn check_panels(app: &AppHandle) -> Result<(), String> {
             "[steno-desktop] smoke: the {label} window is {} by {}",
             window_size.0, window_size.1
         );
+        stays_put(&window, label, window_size)?;
         panels::hide(app, panel).map_err(|error| format!("hiding {label}: {error}"))?;
         if window.is_visible().map_err(|error| error.to_string())? {
             return Err(format!("the {label} panel stayed visible after hide"));
         }
         eprintln!("[steno-desktop] smoke: the {label} panel showed and hid");
     }
+    Ok(())
+}
+
+/// A panel's size is the page's alone: a request for another size, as a
+/// drag on the Linux resize border makes, leaves the window as it is
+/// (`panels::pin_size`).
+fn stays_put(window: &WebviewWindow, label: &str, size: (f64, f64)) -> Result<(), String> {
+    window
+        .set_size(LogicalSize::new(size.0 + 40.0, size.1 + 40.0))
+        .map_err(|error| error.to_string())?;
+    thread::sleep(Duration::from_millis(500));
+    let after = panels::logical_size(window).map_err(|error| error.to_string())?;
+    if !same_size(after, size) {
+        return Err(format!(
+            "the {label} panel grew from {} by {} to {} by {} when asked",
+            size.0, size.1, after.0, after.1
+        ));
+    }
+    eprintln!("[steno-desktop] smoke: the {label} panel kept its size");
     Ok(())
 }
 
