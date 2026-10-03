@@ -106,18 +106,6 @@ impl OnnxBackend {
     pub fn embedding_dimension(&self) -> usize {
         self.embedding_dimension
     }
-
-    /// The fbank frames of `window` the segmentation `weights` mark, mean
-    /// subtracted over the whole window first when the model asks for it.
-    fn selected_features(&self, window: &[f32], weights: &[f32]) -> Vec<f32> {
-        speaker_features(
-            self.fbank.compute(window),
-            self.subtracts_mean,
-            weights,
-            &self.fbank,
-            &self.geometry,
-        )
-    }
 }
 
 /// The rows of `features` (one fbank frame each, `fbank.num_bins()` wide)
@@ -248,7 +236,13 @@ impl DiarizationBackend for OnnxBackend {
     }
 
     fn embed(&mut self, window: &[f32], weights: &[f32]) -> Result<Option<Vec<f32>>, BackendError> {
-        let features = self.selected_features(window, weights);
+        let features = speaker_features(
+            self.fbank.compute(window),
+            self.subtracts_mean,
+            weights,
+            &self.fbank,
+            &self.geometry,
+        );
         let bins = self.fbank.num_bins();
         let frames = features.len() / bins;
         if frames < MIN_EMBEDDING_FRAMES {
