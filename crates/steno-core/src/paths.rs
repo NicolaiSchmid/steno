@@ -154,14 +154,16 @@ pub fn file_url_path(url: &str) -> Option<PathBuf> {
     if decoded.len() > 1 && decoded.ends_with('/') && !decoded.ends_with(":/") {
         decoded.pop();
     }
-    // `file_url` spelt a Windows path with forward slashes behind a leading
-    // `/`; both are undone so the path reads back as the OS spells it.
+    // `file_url` spelt a Windows drive path with forward slashes behind a
+    // leading `/`; both are undone so the path reads back as the OS spells
+    // it. A path without a drive (a Mac URL read on Windows) keeps its
+    // slashes, which Windows reads as separators all the same.
     #[cfg(windows)]
-    let decoded = decoded
-        .strip_prefix('/')
-        .filter(|rest| rest.as_bytes().get(1) == Some(&b':'))
-        .unwrap_or(&decoded)
-        .replace('/', "\\");
+    let decoded = if decoded.starts_with('/') && decoded.as_bytes().get(2) == Some(&b':') {
+        decoded[1..].replace('/', "\\")
+    } else {
+        decoded
+    };
     Some(PathBuf::from(decoded))
 }
 
@@ -225,6 +227,13 @@ mod tests {
             assert_eq!(
                 file_url_path("file:///C:/").unwrap().to_string_lossy(),
                 r"C:\"
+            );
+            assert_eq!(
+                file_url_path("file:///Users/x/Audio/")
+                    .unwrap()
+                    .to_string_lossy(),
+                "/Users/x/Audio",
+                "a path without a drive keeps its slashes"
             );
         } else {
             assert_eq!(
