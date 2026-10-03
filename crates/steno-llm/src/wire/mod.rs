@@ -3,6 +3,7 @@
 //! APIs spell them; nothing here is stored and callers see
 //! [`LlmRequest`](steno_core::LlmRequest) and
 //! [`LlmResponse`](steno_core::LlmResponse).
+//! Swift: `Sources/StenoLLM/Wire/`.
 
 mod chat;
 mod responses;

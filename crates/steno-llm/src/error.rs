@@ -5,6 +5,13 @@ use std::time::Duration;
 
 /// Every failure this crate reports. Bodies and messages are redacted by
 /// the client before they get here, so no case ever carries a secret.
+///
+/// `Display` mirrors Swift's `description` word for word, which is why it
+/// is lowercase and technical where [`CodexCredentialError`] speaks to the
+/// user. The one difference is the retry delay of `RateLimited`: Swift
+/// prints its `Duration` in its own form, Rust as `{:?}` (`30s`).
+///
+/// [`CodexCredentialError`]: crate::CodexCredentialError
 #[derive(Debug, Clone, PartialEq, thiserror::Error)]
 pub enum LlmError {
     /// A non-2xx answer that is not a rate limit; `body` is the server's
