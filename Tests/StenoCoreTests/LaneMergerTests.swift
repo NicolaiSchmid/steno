@@ -36,6 +36,37 @@ import Testing
     #expect(Set(merged.map(\.id)).count == merged.count)
   }
 
+  /// A call whose tap carried no conversation: the mic lane is the room,
+  /// its segments get clusters, nobody is "me", and the tap's stray
+  /// segments are kept without a speaker.
+  @Test func aMicLaneDiarizedAsTheRoomGetsClustersAndKeepsTheTapUnassigned() {
+    let a = SampleData.uuid(20)
+    let b = SampleData.uuid(21)
+    let clusters = [
+      LaneMerger.ClusterSpeaker(speakerID: a, ranges: [0...1.5]),
+      LaneMerger.ClusterSpeaker(speakerID: b, ranges: [1.5...3]),
+    ]
+    let lanes: [AudioLane: [RawSegment]] = [
+      .mic: [
+        RawSegment(start: 0.2, end: 1, text: "a one"),
+        RawSegment(start: 2, end: 2.5, text: "b one"),
+        RawSegment(start: 5, end: 6, text: "nobody"),
+      ],
+      .system: [RawSegment(start: 3, end: 3.5, text: "chime")],
+    ]
+    let merged = LaneMerger.merge(
+      meetingID: meetingID, lanes: lanes, clusters: clusters, meSpeakerID: nil, diarizedLane: .mic)
+    #expect(merged.map(\.text) == ["a one", "b one", "chime", "nobody"])
+    #expect(merged.map(\.speakerID) == [a, b, nil, nil])
+    #expect(merged.map(\.lane) == [.mic, .mic, .system, .mic])
+    // The same lanes with the tap diarized keep the old rules.
+    let standard = LaneMerger.merge(
+      meetingID: meetingID, lanes: lanes, clusters: clusters, meSpeakerID: me, diarizedLane: .system
+    )
+    #expect(standard.map(\.text) == ["a one", "b one", "chime", "nobody"])
+    #expect(standard.map(\.speakerID) == [me, me, nil, me])
+  }
+
   @Test func overlapDecidesWhenNoClusterCoversTheMidpoint() {
     let a = SampleData.uuid(20)
     let b = SampleData.uuid(21)

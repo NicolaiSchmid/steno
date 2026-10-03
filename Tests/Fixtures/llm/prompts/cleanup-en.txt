@@ -11,6 +11,7 @@ Names to spell exactly like this: Mara, Jérôme, Nicolai.
 
 Rules:
 - Return exactly 6 segments with the indices 0 to 5, each once, in order. Never merge, split, drop, add, shorten, expand or summarise a segment.
+- A line reads `[index] Speaker: text`. The index and the speaker label before the colon are framing, not part of the segment: return only the text after the colon, never the label.
 - Fix speech-to-text mistakes only: misheard anglicisms and product names ("git hub" to "GitHub", "kuber netes" to "Kubernetes"), the names listed above, German noun capitalisation, sentence-initial capitals, punctuation.
 - Keep the wording, the word order and the speaker's register. Keep fillers unless they are transcription noise.
 - When a segment needs no change, return its text unchanged.

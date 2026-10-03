@@ -2,10 +2,11 @@ import Foundation
 import StenoCore
 
 /// Pass 1: the transcript in chunks through the model, at most
-/// `endpoint.maxConcurrentRequests` at a time. A chunk whose answer is refused, fails
-/// validation (count, indices, emptied or reworded segments) or does not
-/// decode is retried once with the reason appended, then kept as raw text
-/// and listed in `failedChunks`. Network and HTTP failures propagate: the
+/// `endpoint.maxConcurrentRequests` at a time. A speaker label the model
+/// echoed into a text (`Me: words`) is stripped before validation. A chunk
+/// whose answer is refused, fails validation (count, indices, emptied or
+/// reworded segments) or does not decode is retried once with the reason
+/// appended, then kept as raw text and listed in `failedChunks`. Network and HTTP failures propagate: the
 /// pipeline keeps the raw transcript and marks the stage failed. `rawText`
 /// is never touched; ids, order and count come back as they went in.
 public struct LLMTranscriptCleaner: TranscriptCleaner, Sendable {
@@ -28,7 +29,7 @@ public struct LLMTranscriptCleaner: TranscriptCleaner, Sendable {
     let results = try await mapBounded(chunks, limit: endpoint.maxConcurrentRequests) { chunk in
       try await self.cleanChunk(
         builder.build(chunk: chunk, language: input.language, glossary: glossary, labels: labels),
-        chunk: chunk, builder: builder)
+        chunk: chunk, builder: builder, labels: labels)
     }
 
     var segments = input.segments
@@ -51,7 +52,8 @@ public struct LLMTranscriptCleaner: TranscriptCleaner, Sendable {
 
   /// One chunk: request, validate, one retry with the reason, else nil.
   func cleanChunk(
-    _ request: LLMRequest, chunk: TranscriptChunk, builder: CleanupPromptBuilder
+    _ request: LLMRequest, chunk: TranscriptChunk, builder: CleanupPromptBuilder,
+    labels: SpeakerLabels
   ) async throws -> (texts: [String]?, usage: LLMUsage) {
     var request = request
     var usage = LLMUsage.zero
@@ -71,6 +73,7 @@ public struct LLMTranscriptCleaner: TranscriptCleaner, Sendable {
       usage = usage + response.countedUsage
       do {
         let draft = try StructuredOutputDecoder.decode(CleanupDraft.self, from: response)
+          .strippingSpeakerLabels(labels)
         let problems = draft.problems(against: chunk)
         if problems.isEmpty { return (draft.orderedTexts, usage) }
         rejection = problems.joined(separator: " ")
