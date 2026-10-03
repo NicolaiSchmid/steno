@@ -1,5 +1,5 @@
 //! The phone handover server: the computer's half of the wire the iOS
-//! recorder speaks. Swift: `Sources/StenoHandover`; the plan is
+//! recorder speaks. Swift: `Sources/StenoHandover`. Plan:
 //! `.plans/2026-10-02-rust-core-and-tauri-shell.md` (WP7).
 //!
 //! The phone finds the computer over Bonjour (`_steno._tcp`), pins the
