@@ -188,22 +188,59 @@ impl FloatingContent {
     }
 }
 
-/// Where the shell last put a panel: the point it hangs from and the
-/// origin of the frame it was given, so `Panels::dragged` tells the
-/// window reporting the shell's own move from the user dragging it.
-#[derive(Debug, Clone, Copy, PartialEq)]
+/// Where the shell last put a panel: the point it hangs from, the origin
+/// of the frame it was given, and the origins of the frames it gave
+/// before that the window has not reported yet (resizes still queued in
+/// the window system), so `Panels::dragged` tells the window reporting
+/// the shell's own moves from the user dragging it.
+#[derive(Debug, Clone, PartialEq)]
 struct Placement {
     top_center: (f64, f64),
     origin: (f64, f64),
+    queued: Vec<(f64, f64)>,
 }
 
+/// How many queued origins a placement keeps; a window that falls further
+/// behind than this has dropped reports, not queued them.
+const QUEUED_ORIGINS: usize = 64;
+
 impl Placement {
-    /// `frame` hanging from `top_center`.
+    /// `frame` hanging from `top_center`, nothing queued: the first
+    /// placement, or a drag.
     const fn new(top_center: (f64, f64), frame: Rect) -> Self {
         Self {
             top_center,
             origin: (frame.x, frame.y),
+            queued: Vec::new(),
         }
+    }
+
+    /// `frame` hanging from `top_center` after `earlier`, whose origin is
+    /// queued until the window reports it.
+    fn after(earlier: Option<Self>, top_center: (f64, f64), frame: Rect) -> Self {
+        let mut next = Self::new(top_center, frame);
+        if let Some(earlier) = earlier {
+            next.queued = earlier.queued;
+            if !same_point(earlier.origin, next.origin) {
+                next.queued.push(earlier.origin);
+            }
+            let excess = next.queued.len().saturating_sub(QUEUED_ORIGINS);
+            next.queued.drain(..excess);
+        }
+        next
+    }
+
+    /// Whether the window reporting `origin` is the shell's own move: the
+    /// latest frame's origin or a queued one. The queue empties only when
+    /// the window reports the latest frame: until then it may report the
+    /// earlier ones in any order (GTK applies a move and a resize on its
+    /// own schedule), and more than once.
+    fn reports_own(&mut self, origin: (f64, f64)) -> bool {
+        if same_point(self.origin, origin) {
+            self.queued.clear();
+            return true;
+        }
+        self.queued.iter().any(|queued| same_point(*queued, origin))
     }
 }
 
@@ -360,7 +397,8 @@ impl Panels {
         let screen = Rect::holding(screens, top_center, fallback_screen(screens));
         let frame = fitted(frame_hanging_from(top_center, size), screen);
         if let Ok(mut placed) = self.placed.lock() {
-            placed.insert(panel, Placement::new(top_center, frame));
+            let earlier = placed.remove(&panel);
+            placed.insert(panel, Placement::after(earlier, top_center, frame));
         }
         frame
     }
@@ -374,12 +412,14 @@ impl Panels {
     }
 
     /// The window of `panel` reports it is at `frame`. A frame at the
-    /// origin the shell gave it is the shell's own move, and one with
+    /// origin the shell gave it, or at one it gave before that the window
+    /// reports late (quick resizes), is the shell's own move, and one with
     /// another size than the page's is the window still taking that size;
     /// neither moves the anchor (else each prompt, bubble and launch would
-    /// shift it by the rounding of a half point). Anything else is a drag:
-    /// the panel hangs from the new point and the anchor follows, returned
-    /// when it changed so the caller saves it.
+    /// shift it by the rounding of a half point, and a burst of resizes by
+    /// more). Anything else is a drag: the panel hangs from the new point
+    /// and the anchor follows, returned when it changed so the caller
+    /// saves it.
     fn dragged(&self, panel: Panel, frame: Rect, screens: &[Rect]) -> Option<PanelAnchor> {
         if !same_size((frame.width, frame.height), self.size_of(panel)) {
             return None;
@@ -388,8 +428,8 @@ impl Panels {
         {
             let mut placed = self.placed.lock().ok()?;
             if placed
-                .get(&panel)
-                .is_some_and(|placement| same_point(placement.origin, (frame.x, frame.y)))
+                .get_mut(&panel)
+                .is_some_and(|placement| placement.reports_own((frame.x, frame.y)))
             {
                 return None;
             }
@@ -1003,6 +1043,66 @@ mod tests {
         assert_eq!(prompt, anchor);
         let frame = panels.place(Panel::Prompt, prompt.top_center, PROMPT, &[SCREEN]);
         assert_eq!((frame.x, frame.y), (308.0, 300.0));
+    }
+
+    /// Quick resizes: the window reports the shell's earlier frames after
+    /// it was given the later ones, at the size it has by then. None of
+    /// them is a drag and the anchor stays; once the window has reported
+    /// the latest frame, a move back to an earlier origin is a drag.
+    #[test]
+    fn frames_the_window_reports_late_are_the_shells_own() {
+        let panels = Panels::default();
+        show_measured(&panels, Panel::Bubble, BUBBLE, None);
+        let saved = panels.anchor.lock().unwrap().anchor;
+        let hung = panels.hung_from(Panel::Bubble).unwrap();
+        let sizes = [(120.0, 44.0), (150.0, 45.0), (180.0, 46.0)];
+        let frames = sizes.map(|size| {
+            panels.note_size(Panel::Bubble, size);
+            panels.place(Panel::Bubble, hung, size, &[SCREEN])
+        });
+        let last = sizes[2];
+        for frame in frames {
+            assert_eq!(
+                panels.dragged(Panel::Bubble, at(frame, last), &[SCREEN]),
+                None,
+                "{frame:?}"
+            );
+        }
+        assert_eq!(panels.anchor.lock().unwrap().anchor, saved);
+        assert_eq!(panels.hung_from(Panel::Bubble), Some(hung));
+        assert!(
+            panels
+                .dragged(Panel::Bubble, at(frames[0], last), &[SCREEN])
+                .is_some()
+        );
+    }
+
+    /// A placement keeps the origins the window has yet to report, once
+    /// each and at most `QUEUED_ORIGINS`, in any order, until the window
+    /// reports the latest frame.
+    #[test]
+    fn a_placement_queues_the_origins_not_reported_yet() {
+        let frame = |x: f64| Rect::new(x, 8.0, 100.0, 40.0);
+        let mut placement = Placement::new((1100.0, 8.0), frame(0.0));
+        for x in 1..=3 {
+            placement = Placement::after(Some(placement), (1100.0, 8.0), frame(f64::from(x)));
+        }
+        // The same origin again is not queued twice.
+        placement = Placement::after(Some(placement), (1100.0, 8.0), frame(3.2));
+        assert_eq!(placement.queued, [(0.0, 8.0), (1.0, 8.0), (2.0, 8.0)]);
+        for x in [1.0, 0.0, 1.0, 2.0] {
+            assert!(placement.reports_own((x, 8.0)), "{x}");
+        }
+        assert!(!placement.reports_own((40.0, 8.0)));
+        assert_eq!(placement.queued.len(), 3);
+        assert!(placement.reports_own((3.2, 8.0)));
+        assert_eq!(placement.queued, []);
+        assert!(!placement.reports_own((0.0, 8.0)));
+        for x in 0..100 {
+            placement = Placement::after(Some(placement), (1100.0, 8.0), frame(f64::from(x * 10)));
+        }
+        assert_eq!(placement.queued.len(), QUEUED_ORIGINS);
+        assert_eq!(placement.queued.last(), Some(&(980.0, 8.0)));
     }
 
     /// A move at another size than the page reported is the window still
