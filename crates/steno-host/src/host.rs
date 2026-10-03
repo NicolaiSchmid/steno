@@ -32,10 +32,12 @@
 //!
 //! # Publishing
 //!
-//! Every command publishes the topics it changed before it returns, and
-//! the page treats each snapshot as a full state, so the order in which
-//! the reply and the snapshots arrive decides nothing (the dispatcher's
-//! doc says why they can cross). Snapshots are built under the host's
+//! Every command publishes the topics it changed before it returns
+//! (`settings.transcription.download` is the one that keeps publishing
+//! after it returns, from the download's thread), and the page treats each
+//! snapshot as a full state, so the order in which the reply and the
+//! snapshots arrive decides nothing (the dispatcher's doc says why they
+//! can cross). Snapshots are built under the host's
 //! lock and emitted after it is released, in build order (one publisher
 //! runs at a time), so a sink may read [`Host::snapshot`] from inside
 //! `emit`, and a slow sink never holds a command or the recorder. A sink
@@ -46,6 +48,26 @@
 //! last clone of the host. The shell has no timer to run for it. The one
 //! poll the shell drives is the pairing poll, [`Host::refresh_pairing`],
 //! every two seconds while a code is shown, as the plan says.
+//!
+//! # Threads
+//!
+//! Every call blocks until it is done; the crate doc says which thread the
+//! shell calls from. Locks are taken in one order: the publishing mutex,
+//! then the view models, then the sink slot. The dialogs (`confirm`,
+//! `choose_folder`) are called with no lock held but on the command's
+//! thread, so the shell must not dispatch commands on the thread that draws
+//! a blocking native dialog. The services are called with the view-model
+//! lock held, so they must not call back into the host (the `services`
+//! module doc has the rule), except for the calls that run with it
+//! released: the permission prompts, the LLM probe, the Codex calls and the
+//! model download, the prompts and the probe with their busy flag
+//! published first. `settings.transcription.download` replies after its
+//! first publish and keeps publishing from its own thread until the
+//! download ends; a second download of the asset waits for that thread.
+//! The flush thread starts in [`Host::new`] and ends with the last clone.
+//! The core's async boundaries (the secret store) are awaited on the
+//! host's own runtime, on a helper thread when the caller is already inside
+//! a tokio runtime, so no call panics there.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
