@@ -213,10 +213,11 @@ impl HandoverServer {
         })
     }
 
-    /// Stops accepting, closes every connection (an idle one at once, one
-    /// mid-request after its response, any still busy after
-    /// [`STOP_GRACE`] by force) and withdraws the Bonjour record. Swift:
-    /// `group.shutdownGracefully()` closes the child channels.
+    /// Stops accepting, closes every connection (an idle one, or one
+    /// lingering after its last response, at once; one mid-request after
+    /// its response; any still busy after [`STOP_GRACE`] by force) and
+    /// withdraws the Bonjour record. No task of the listener outlives it.
+    /// Swift: `group.shutdownGracefully()` closes the child channels.
     pub async fn stop(self) {
         let HandoverServer {
             mut accept_task,

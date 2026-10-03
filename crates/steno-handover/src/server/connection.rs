@@ -11,11 +11,14 @@
 //! read timeout while the computer waits on the client is closed; the
 //! silence is not counted while the engine is handling a request. When the
 //! server stops, an idle connection closes at once and one mid-request
-//! closes after its response. Swift: `Routing/HTTPHandler.swift`.
+//! closes after its response. The drain of a rejected body and the linger
+//! after a close run in the connection's own task set, so they end with
+//! the connection's slot in the server's set and never outlive `stop`.
+//! Swift: `Routing/HTTPHandler.swift`.
 
 use std::pin::Pin;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
 
@@ -30,6 +33,7 @@ use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::net::TcpStream;
 use tokio::sync::watch;
+use tokio::task::JoinSet;
 use tokio_rustls::server::TlsStream;
 
 use super::ServerMetrics;
@@ -53,10 +57,28 @@ struct Shared {
     handling: AtomicBool,
     /// Set once the server decided to close this connection.
     closing: AtomicBool,
+    /// The drain and the linger this connection started; [`serve`] waits
+    /// for them, and dropping the set aborts them.
+    tasks: Mutex<JoinSet<()>>,
+}
+
+impl Shared {
+    /// Runs `task` in this connection's set. Nothing runs once the runtime
+    /// is gone.
+    fn spawn(&self, task: impl Future<Output = ()> + Send + 'static) {
+        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+            self.tasks
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .spawn_on(task, &runtime);
+        }
+    }
 }
 
 /// Serves `tls` until the client goes away, the server closes it, the
-/// server stops (`stopping` turns true) or an error ends it.
+/// server stops (`stopping` turns true) or an error ends it; then waits for
+/// the drain and the linger, which end on their own within [`CLOSE_GRACE`]
+/// or at once when the server stops.
 pub async fn serve(
     tls: TlsStream<TcpStream>,
     engine: Arc<dyn RequestHandling>,
@@ -70,7 +92,31 @@ pub async fn serve(
         configuration,
         handling: AtomicBool::new(false),
         closing: AtomicBool::new(false),
+        tasks: Mutex::new(JoinSet::new()),
     });
+    if let Err(error) = run(tls, &shared, &mut stopping).await {
+        tracing::debug!(target: "steno::handover", "connection ended: {error}");
+    }
+    if shared.closing.load(Ordering::SeqCst) {
+        shared
+            .metrics
+            .update(|metrics| metrics.closed_by_server += 1);
+    }
+    let mut tasks =
+        std::mem::take(&mut *shared.tasks.lock().unwrap_or_else(PoisonError::into_inner));
+    tokio::select! {
+        () = async { while tasks.join_next().await.is_some() {} } => {}
+        () = super::stopped(&mut stopping) => {}
+    }
+}
+
+/// HTTP/1.1 over `tls`; the connection, and with it the stream, is dropped
+/// on return, which starts the linger.
+async fn run(
+    tls: TlsStream<TcpStream>,
+    shared: &Arc<Shared>,
+    stopping: &mut watch::Receiver<bool>,
+) -> hyper::Result<()> {
     let io = TimedStream::new(tls, shared.clone());
     let service = service_fn({
         let shared = shared.clone();
@@ -86,23 +132,15 @@ pub async fn serve(
             .keep_alive(true)
             .serve_connection(TokioIo::new(io), service)
     );
-    let served = tokio::select! {
+    tokio::select! {
         served = connection.as_mut() => served,
-        () = super::stopped(&mut stopping) => {
+        () = super::stopped(stopping) => {
             // hyper finishes the response in flight, if any, with
             // `Connection: close`, and closes an idle connection now.
             shared.closing.store(true, Ordering::SeqCst);
             connection.as_mut().graceful_shutdown();
             connection.await
         }
-    };
-    if let Err(error) = served {
-        tracing::debug!(target: "steno::handover", "connection ended: {error}");
-    }
-    if shared.closing.load(Ordering::SeqCst) {
-        shared
-            .metrics
-            .update(|metrics| metrics.closed_by_server += 1);
     }
 }
 
@@ -199,14 +237,13 @@ fn reject(
     response: HandoverResponse,
     mut body: Incoming,
 ) -> Response<Full<Bytes>> {
-    let drain_shared = shared.clone();
-    tokio::spawn(async move {
+    // The metrics only: the set holding this task lives in `shared`.
+    let metrics = shared.metrics.clone();
+    shared.spawn(async move {
         let mut remaining = REJECTED_BODY_DRAIN;
         while let Some(Ok(frame)) = body.frame().await {
             if let Ok(data) = frame.into_data() {
-                drain_shared
-                    .metrics
-                    .update(|metrics| metrics.discarded_body_bytes += data.len() as u64);
+                metrics.update(|metrics| metrics.discarded_body_bytes += data.len() as u64);
                 if data.len() > remaining {
                     break;
                 }
@@ -347,20 +384,18 @@ impl Drop for TimedStream {
         // shut the write side); keep the input open for the grace period,
         // reading and discarding what the client still sends, so the close
         // that follows carries no unread data and sends no reset.
-        if let Ok(handle) = tokio::runtime::Handle::try_current() {
-            handle.spawn(async move {
-                let mut stream = stream;
-                let mut sink = vec![0u8; 16 * 1024];
-                let linger = async {
-                    loop {
-                        match tokio::io::AsyncReadExt::read(&mut stream, &mut sink).await {
-                            Ok(0) | Err(_) => break,
-                            Ok(_) => {}
-                        }
+        self.shared.spawn(async move {
+            let mut stream = stream;
+            let mut sink = vec![0u8; 16 * 1024];
+            let linger = async {
+                loop {
+                    match tokio::io::AsyncReadExt::read(&mut stream, &mut sink).await {
+                        Ok(0) | Err(_) => break,
+                        Ok(_) => {}
                     }
-                };
-                let _ = tokio::time::timeout(CLOSE_GRACE, linger).await;
-            });
-        }
+                }
+            };
+            let _ = tokio::time::timeout(CLOSE_GRACE, linger).await;
+        });
     }
 }
