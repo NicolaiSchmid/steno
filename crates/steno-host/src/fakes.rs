@@ -32,7 +32,7 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 
 /// The hook a test installed, cloned out so the fake's lock is released
 /// before the hook runs: a hook may call its fake again.
-fn installed<H: ?Sized>(slot: &Mutex<Option<Arc<H>>>) -> Option<Arc<H>> {
+fn hook_of<H: ?Sized>(slot: &Mutex<Option<Arc<H>>>) -> Option<Arc<H>> {
     lock(slot).clone()
 }
 
@@ -188,7 +188,7 @@ impl Permissions for FakePermissions {
 
     fn request(&self, kind: PermissionKind) -> PermissionState {
         lock(&self.requests).push(kind);
-        if let Some(hook) = installed(&self.on_request) {
+        if let Some(hook) = hook_of(&self.on_request) {
             hook(kind);
         }
         let answer = lock(&self.answers)
@@ -519,7 +519,7 @@ impl SpeechModels for FakeSpeechModels {
         progress: &mut dyn FnMut(f64, &str),
     ) -> BoundaryResult<()> {
         lock(&self.downloads).push(asset);
-        if let Some(hook) = installed(&self.on_download) {
+        if let Some(hook) = hook_of(&self.on_download) {
             hook(asset);
         }
         let steps = lock(&self.progress).clone();
@@ -602,7 +602,7 @@ impl FakeLlmService {
 impl LlmService for FakeLlmService {
     fn probe(&self, settings: &Settings, _api_key: Option<&str>) -> BoundaryResult<String> {
         lock(&self.probes).push(settings.clone());
-        if let Some(hook) = installed(&self.on_probe) {
+        if let Some(hook) = hook_of(&self.on_probe) {
             hook(settings);
         }
         lock(&self.probe_result).clone().map_err(Into::into)
