@@ -32,9 +32,10 @@ pub fn timed_pieces(tokens: &[Token], vocab: &Vocab) -> Vec<TimedWord> {
 }
 
 /// Joins pieces into words. A piece starting with a space or the marker
-/// begins a word; punctuation-only pieces glue to the word before them;
-/// pieces that are only a boundary carry it to the next piece. A word's
-/// confidence is the mean of its pieces'.
+/// begins a word; punctuation-only pieces glue to the word before them,
+/// except an opening mark with a boundary (`▁¿`, `▁¡`), which begins the
+/// next word; pieces that are only a boundary carry it to the next piece.
+/// A word's confidence is the mean of its pieces'.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct TokenAggregator;
 
@@ -71,9 +72,10 @@ impl TokenAggregator {
                 }
                 continue;
             }
-            let punctuation_only = text.chars().all(is_punctuation_or_symbol);
+            let glues = text.chars().all(is_punctuation_or_symbol)
+                && !(is_word_start && text.starts_with(OPENING_MARKS));
             match current.as_mut() {
-                Some(word) if punctuation_only || !(is_word_start || boundary_pending) => {
+                Some(word) if glues || !(is_word_start || boundary_pending) => {
                     word.text.push_str(text);
                     word.end = word.end.max(piece.end);
                 }
@@ -94,6 +96,10 @@ impl TokenAggregator {
         words
     }
 }
+
+/// Marks that open what follows them, so a boundary before one belongs to
+/// the next word ("hola ¿qué", not "hola¿qué").
+const OPENING_MARKS: [char; 5] = ['¿', '¡', '(', '[', '{'];
 
 /// Swift's `punctuationCharacters` and `symbols` sets, near enough: not a
 /// letter, digit, space or control character.
@@ -231,6 +237,20 @@ mod tests {
         let words =
             TokenAggregator.words(&[piece("▁Hallo", 0.0, 0.2, 1.0), piece("▁,", 0.2, 0.25, 1.0)]);
         assert_eq!(texts(&words), ["Hallo,"]);
+    }
+
+    #[test]
+    fn an_opening_mark_with_a_boundary_begins_the_next_word() {
+        let words = TokenAggregator.words(&[
+            piece("▁hola", 0.0, 0.2, 1.0),
+            piece("▁¿", 0.3, 0.35, 1.0),
+            piece("qué", 0.35, 0.5, 1.0),
+            piece("?", 0.5, 0.55, 1.0),
+            piece("▁¡", 0.6, 0.65, 1.0),
+            piece("▁Sí", 0.65, 0.8, 1.0),
+        ]);
+        assert_eq!(texts(&words), ["hola", "¿qué?", "¡", "Sí"]);
+        assert_eq!(words[1].start, 0.3);
     }
 
     #[test]
