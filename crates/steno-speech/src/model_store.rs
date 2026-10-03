@@ -345,13 +345,11 @@ impl ModelStore {
         destination: &Path,
         progress: &mut dyn FnMut(DownloadProgress<'_>),
     ) -> Result<(), SpeechError> {
-        let partial = RemoveOnDrop(destination.with_file_name(format!(
-            "{}{}.{}",
-            partial_prefix(&file.name),
-            std::process::id(),
-            NEXT_CALL.fetch_add(1, Ordering::Relaxed)
-        )));
-        let (received, digest) = self.stream_to(url, file, &partial.0, progress)?;
+        // `out` is dropped before `partial` on every path, so the file is
+        // closed before the guard deletes it or the rename moves it.
+        let (partial, mut out) = create_partial(destination, &file.name)?;
+        let (received, digest) = self.stream_to(url, file, &partial.0, &mut out, progress)?;
+        drop(out);
         if received != file.size {
             return Err(SpeechError::Size {
                 path: destination.to_path_buf(),
@@ -365,14 +363,16 @@ impl ModelStore {
         Ok(())
     }
 
-    /// Streams `url` into `partial` while hashing and syncs it; returns the
-    /// bytes received and their digest. Stops at the first byte over the
-    /// manifest size, so a misbehaving host cannot fill the disk.
+    /// Streams `url` into `out`, the file at `partial`, while hashing and
+    /// syncs it; returns the bytes received and their digest. Stops at the
+    /// first byte over the manifest size, so a misbehaving host cannot fill
+    /// the disk.
     fn stream_to(
         &self,
         url: &str,
         file: &ModelFile,
         partial: &Path,
+        out: &mut File,
         progress: &mut dyn FnMut(DownloadProgress<'_>),
     ) -> Result<(u64, String), SpeechError> {
         let response = self
@@ -387,11 +387,6 @@ impl ModelStore {
         let mut body = response.into_body();
         // One byte over the manifest size is enough to tell a long body.
         let mut reader = body.with_config().limit(file.size + 1).reader();
-        let mut out = File::options()
-            .write(true)
-            .create_new(true)
-            .open(partial)
-            .map_err(|e| SpeechError::io(partial, e))?;
         let mut hasher = Sha256::new();
         let mut received = 0u64;
         let mut buffer = vec![0u8; 1 << 16];
@@ -471,6 +466,25 @@ static NEXT_CALL: AtomicU64 = AtomicU64::new(0);
 /// `<name>.partial.`, followed by `<pid>.<call>`.
 fn partial_prefix(name: &str) -> String {
     format!("{name}.partial.")
+}
+
+/// Creates this call's partial download beside `destination`,
+/// `<name>.partial.<pid>.<call>`. A name that exists already, left by a dead
+/// process that had the same pid, is passed over for the next call number.
+fn create_partial(destination: &Path, name: &str) -> Result<(RemoveOnDrop, File), SpeechError> {
+    loop {
+        let path = destination.with_file_name(format!(
+            "{}{}.{}",
+            partial_prefix(name),
+            std::process::id(),
+            NEXT_CALL.fetch_add(1, Ordering::Relaxed)
+        ));
+        match File::options().write(true).create_new(true).open(&path) {
+            Ok(file) => return Ok((RemoveOnDrop(path), file)),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(e) => return Err(SpeechError::io(&path, e)),
+        }
+    }
 }
 
 /// The pid in `file_name` when it is a partial download of the file
@@ -731,6 +745,9 @@ mod tests {
         let (first_started, first_waits) = mpsc::channel();
         let (second_started, second_waits) = mpsc::channel();
         std::thread::scope(|scope| {
+            // Owned here, so a failed assertion drops the senders and frees
+            // the held downloads instead of leaving the scope waiting.
+            let release = release;
             let first = scope.spawn(|| {
                 store.ensure(&asset, &mut |p| {
                     if p.received >= 50_000 {
@@ -747,8 +764,6 @@ mod tests {
                 })
             });
             second_waits.recv_timeout(WAIT).unwrap();
-            // Every connection is released before anything is asserted, so
-            // a failure cannot leave the scope waiting on a held download.
             release[0].send(()).unwrap();
             let first = first.join().unwrap();
             let installed = store.verify(&asset);
@@ -790,6 +805,32 @@ mod tests {
         let error = store.ensure(&missing, &mut |_| {}).unwrap_err();
         assert!(matches!(&error, SpeechError::Download { .. }), "{error}");
         assert!(!store.is_installed(&missing));
+    }
+
+    #[test]
+    fn a_partial_name_a_dead_process_with_this_pid_left_is_passed_over() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = ModelStore::new(dir.path());
+        let body = b"not really a model".to_vec();
+        let asset = asset(Some(serve_once(&body)), &body, &digest(&body));
+        let directory = store.directory(&asset);
+        fs::create_dir_all(&directory).unwrap();
+        // The next call numbers, with room for other tests drawing some.
+        let next = NEXT_CALL.load(Ordering::Relaxed);
+        let own = std::process::id();
+        for call in next..next + 64 {
+            fs::write(
+                directory.join(format!("model.onnx.partial.{own}.{call}")),
+                b"old",
+            )
+            .unwrap();
+        }
+        store.ensure(&asset, &mut |_| {}).unwrap();
+        store.verify(&asset).unwrap();
+        assert_eq!(
+            fs::read(directory.join(format!("model.onnx.partial.{own}.{next}"))).unwrap(),
+            b"old"
+        );
     }
 
     #[test]
@@ -886,12 +927,12 @@ mod tests {
             (
                 &*format!("model.onnx.partial.{other}.0"),
                 b"half",
-                now - STALE_PARTIAL - minute,
+                now - 11 * minute,
             ),
             (
                 &*format!("model.onnx.partial.{other}.1"),
                 b"half",
-                now - STALE_PARTIAL + minute,
+                now - 9 * minute,
             ),
             (
                 &*format!("model.onnx.partial.{other}.2"),
