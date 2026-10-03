@@ -26,6 +26,14 @@
 //! recording }`; `stop()` returns the same result, or fails when the
 //! failure came from a start that produced nothing.
 //!
+//! A writer failure and a device loss finalise on their own threads (the
+//! writer failure's and the rebuild's) and hold `Stopping` meanwhile. A
+//! `stop()` arriving then waits on a condition variable until the state
+//! leaves `Stopping` and answers from the outcome, as it would have after
+//! Swift's actor ran the finalise first: the recording `Failed` carries,
+//! or `InvalidState` once the state is `Idle`. Only `stop()` waits there;
+//! a finaliser never waits for a stopper, so the wait cannot deadlock.
+//!
 //! # Threads
 //!
 //! Swift's actor becomes one mutex over the session state. The rule that
@@ -56,7 +64,7 @@
 
 use std::collections::BTreeMap;
 use std::sync::mpsc::{Receiver, Sender, channel};
-use std::sync::{Arc, Mutex, MutexGuard, Weak};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError, Weak};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
@@ -114,6 +122,9 @@ struct Core {
     clock: Arc<dyn Clock>,
     make_writer: RecordingWriterFactory,
     inner: Mutex<Inner>,
+    /// Notified on every state change; `stop()` waits on it while another
+    /// thread's finalise holds `Stopping`.
+    state_changed: Condvar,
 }
 
 struct Inner {
@@ -270,6 +281,7 @@ impl CaptureSession {
                     active: None,
                     rebuild_generation: 0,
                 }),
+                state_changed: Condvar::new(),
             }),
         })
     }
@@ -398,16 +410,15 @@ impl Drop for CaptureSession {
 
 impl Core {
     fn lock(&self) -> MutexGuard<'_, Inner> {
-        self.inner
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
+        self.inner.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    fn set_state(inner: &mut Inner, state: &CaptureState) {
+    fn set_state(&self, inner: &mut Inner, state: &CaptureState) {
         inner.state = state.clone();
         inner
             .state_subscribers
             .retain(|s| s.send(state.clone()).is_ok());
+        self.state_changed.notify_all();
     }
 
     fn publish(&self, levels: LaneLevels) {
@@ -470,7 +481,7 @@ impl Core {
         }
         // `Starting` carries no recording: a failed start must never hand
         // out the previous meeting's files.
-        Self::set_state(&mut inner, &CaptureState::Starting);
+        self.set_state(&mut inner, &CaptureState::Starting);
         // A new recording, possibly on other devices, starts from a cold filter.
         if let Some(canceller) = inner.echo_canceller.as_mut() {
             canceller.reset();
@@ -483,7 +494,7 @@ impl Core {
             Ok(writer) => writer,
             Err(error) => {
                 let failure = CaptureError::WriterFailed(error.to_string());
-                Self::set_state(
+                self.set_state(
                     &mut inner,
                     &CaptureState::Failed {
                         error: failure.clone(),
@@ -515,7 +526,7 @@ impl Core {
                 let mut writer = writer;
                 let _ = writer.finish();
                 let _ = std::fs::remove_dir_all(&layout.directory);
-                Self::set_state(
+                self.set_state(
                     &mut inner,
                     &CaptureState::Failed {
                         error: error.clone(),
@@ -576,7 +587,7 @@ impl Core {
             rebuild: None,
             pending_change: None,
         });
-        Self::set_state(
+        self.set_state(
             &mut inner,
             &CaptureState::Recording {
                 started_at: Utc::now(),
@@ -587,7 +598,13 @@ impl Core {
 
     fn stop(&self) -> Result<CaptureResult, CaptureError> {
         {
-            let mut inner = self.lock();
+            // Another thread's finalise (see the module doc) is waited out.
+            let mut inner = self
+                .state_changed
+                .wait_while(self.lock(), |inner| {
+                    matches!(inner.state, CaptureState::Stopping)
+                })
+                .unwrap_or_else(PoisonError::into_inner);
             match &inner.state {
                 CaptureState::Recording { .. } => {}
                 CaptureState::Failed { recording, .. } => {
@@ -605,7 +622,7 @@ impl Core {
                     )));
                 }
             }
-            Self::set_state(&mut inner, &CaptureState::Stopping);
+            self.set_state(&mut inner, &CaptureState::Stopping);
         }
         let finished = self.finish();
         // Closing the files can fail on a full disk; the master is still
@@ -622,7 +639,7 @@ impl Core {
                 recording: None,
             },
         };
-        Self::set_state(&mut self.lock(), &state);
+        self.set_state(&mut self.lock(), &state);
         finished.map(|(result, _)| result)
     }
 
@@ -1009,7 +1026,7 @@ impl Core {
             // This runs inside the rebuild thread; `finish()` must not
             // cancel or join it, and it is over anyway.
             active.rebuild = None;
-            Self::set_state(&mut inner, &CaptureState::Stopping);
+            self.set_state(&mut inner, &CaptureState::Stopping);
         }
         let state = match self.finish() {
             Ok((result, failure)) => CaptureState::Failed {
@@ -1021,7 +1038,7 @@ impl Core {
                 recording: None,
             },
         };
-        Self::set_state(&mut self.lock(), &state);
+        self.set_state(&mut self.lock(), &state);
     }
 
     fn writer_failed(&self, error: &CaptureError) {
@@ -1030,11 +1047,11 @@ impl Core {
             if !matches!(inner.state, CaptureState::Recording { .. }) {
                 return;
             }
-            Self::set_state(&mut inner, &CaptureState::Stopping);
+            self.set_state(&mut inner, &CaptureState::Stopping);
         }
         let result = self.finish().ok().map(|(result, _)| Box::new(result));
         let mut inner = self.lock();
-        Self::set_state(
+        self.set_state(
             &mut inner,
             &CaptureState::Failed {
                 error: CaptureError::WriterFailed(error.to_string()),

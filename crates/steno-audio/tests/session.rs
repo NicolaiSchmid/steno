@@ -24,11 +24,11 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread::JoinHandle;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use steno_audio::capture::{
-    CaptureBackend, CaptureConfiguration, CaptureError, CaptureMode, CaptureNotice, CaptureSession,
-    CaptureState, CaptureStream, DeviceChangeReason, LaneLevel,
+    CaptureBackend, CaptureConfiguration, CaptureError, CaptureMode, CaptureNotice, CaptureResult,
+    CaptureSession, CaptureState, CaptureStream, DeviceChangeReason, LaneLevel,
 };
 use steno_audio::realtime::LaneFrameSink;
 use steno_audio::testing::synthetic::SyntheticOptions;
@@ -711,7 +711,7 @@ impl RecordingWriting for FaultyWriter {
 
 fn faulty_session(
     directory: &Path,
-    backend: Arc<SyntheticCaptureBackend>,
+    backend: Arc<dyn CaptureBackend>,
     fail_after_frames: Option<usize>,
     fail_finish: bool,
     clock: Arc<dyn Clock>,
@@ -1624,6 +1624,214 @@ fn stop_during_a_rebuilds_teardown_waits_for_it() {
     let again = session.stop().unwrap();
     assert_eq!(session.state(), CaptureState::Idle);
     assert!(again.statistics.dropped_frames.is_empty());
+}
+
+/// A producer of 0.25 on every lane every 10 ms whose `stop()` call number
+/// `gated_call` (counted from 1) reports itself on `at_gate` and then waits
+/// for the test to open the gate, with the producer still running if one
+/// is. `change_after` reports one device change after that many callbacks
+/// of the first start; with `restarts_fail` every later start fails as an
+/// absent device does.
+struct GatedStop {
+    gated_call: usize,
+    change_after: Option<usize>,
+    restarts_fail: bool,
+    stops: AtomicUsize,
+    starts: AtomicUsize,
+    running: Mutex<Option<(Arc<AtomicBool>, JoinHandle<()>)>>,
+    alive: Arc<AtomicUsize>,
+    delivered: Arc<AtomicUsize>,
+    at_gate: Mutex<Sender<()>>,
+    gate: Mutex<Receiver<()>>,
+}
+
+impl GatedStop {
+    /// The backend, the receiver `at_gate` reports on and the gate's
+    /// sender.
+    fn new(
+        gated_call: usize,
+        change_after: Option<usize>,
+        restarts_fail: bool,
+    ) -> (Arc<Self>, Receiver<()>, Sender<()>) {
+        let (at_gate, reached) = channel();
+        let (open, gate) = channel();
+        let backend = Self {
+            gated_call,
+            change_after,
+            restarts_fail,
+            stops: AtomicUsize::new(0),
+            starts: AtomicUsize::new(0),
+            running: Mutex::new(None),
+            alive: Arc::new(AtomicUsize::new(0)),
+            delivered: Arc::new(AtomicUsize::new(0)),
+            at_gate: Mutex::new(at_gate),
+            gate: Mutex::new(gate),
+        };
+        (Arc::new(backend), reached, open)
+    }
+
+    fn delivered(&self) -> usize {
+        self.delivered.load(Ordering::SeqCst)
+    }
+}
+
+impl CaptureBackend for GatedStop {
+    fn start(
+        &self,
+        lanes: &[AudioLane],
+        _uid: Option<&str>,
+        sink: Arc<LaneFrameSink>,
+    ) -> Result<CaptureStream, CaptureError> {
+        let first = self.starts.fetch_add(1, Ordering::SeqCst) == 0;
+        if !first && self.restarts_fail {
+            return Err(CaptureError::InputDeviceUnavailable);
+        }
+        let change_after = if first { self.change_after } else { None };
+        let stop = Arc::new(AtomicBool::new(false));
+        let stopped = Arc::clone(&stop);
+        let alive = Arc::clone(&self.alive);
+        let delivered = Arc::clone(&self.delivered);
+        let lane_count = lanes.len();
+        alive.fetch_add(1, Ordering::SeqCst);
+        let producer = std::thread::spawn(move || {
+            let buffer = vec![0.25f32; 480];
+            let mut count = 0;
+            while !stopped.load(Ordering::Acquire) {
+                if sink.begin_callback(480) {
+                    for lane in 0..lane_count {
+                        sink.write_slice(lane, &buffer);
+                    }
+                    sink.end_callback();
+                    delivered.fetch_add(480, Ordering::SeqCst);
+                }
+                count += 1;
+                if change_after == Some(count) {
+                    sink.report_device_change(DeviceChangeReason::DefaultInputChanged);
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            alive.fetch_sub(1, Ordering::SeqCst);
+        });
+        *self.running.lock().unwrap() = Some((stop, producer));
+        Ok(CaptureStream::SYNTHETIC)
+    }
+
+    fn stop(&self) {
+        let call = self.stops.fetch_add(1, Ordering::SeqCst) + 1;
+        let running = self.running.lock().unwrap().take();
+        if call == self.gated_call {
+            self.at_gate.lock().unwrap().send(()).unwrap();
+            self.gate.lock().unwrap().recv().unwrap();
+        }
+        if let Some((stop, producer)) = running {
+            stop.store(true, Ordering::Release);
+            producer.join().unwrap();
+        }
+    }
+}
+
+/// Calls `stop()` on its own thread while a finalise waits at `backend`'s
+/// gate, gives the call 200 ms to land in that window (a `stop()` that does
+/// not wait for the finalise returns inside it), then opens the gate.
+/// Returns what `stop()` returned and the producers alive at that moment.
+fn stop_at_the_gate(
+    session: &CaptureSession,
+    backend: &GatedStop,
+    open: &Sender<()>,
+) -> (Result<CaptureResult, CaptureError>, usize) {
+    std::thread::scope(|scope| {
+        let stopper = scope.spawn(|| {
+            let result = session.stop();
+            (result, backend.alive.load(Ordering::SeqCst))
+        });
+        let deadline = Instant::now() + Duration::from_millis(200);
+        while !stopper.is_finished() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        open.send(()).unwrap();
+        stopper.join().unwrap()
+    })
+}
+
+/// The disk fills while recording and a user's `stop()` arrives while that
+/// failure is still finalising. It waits for the finalise, as Swift's actor
+/// ordered the two, and returns the recording the failure carries: no
+/// error, and no producer running when it returns.
+#[test]
+fn stop_during_a_writer_failures_finalise_returns_its_recording() {
+    let directory = tempfile::tempdir().unwrap();
+    let (backend, at_gate, open) = GatedStop::new(1, None, false);
+    let session = faulty_session(
+        directory.path(),
+        backend.clone(),
+        Some(5),
+        false,
+        Arc::new(SystemClock::new()),
+    );
+    session.start(Uuid::new_v4()).unwrap();
+    at_gate
+        .recv_timeout(RECV)
+        .expect("the writer failure's finalise is stopping the backend");
+    assert_eq!(session.state(), CaptureState::Stopping);
+
+    let (result, alive) = stop_at_the_gate(&session, &backend, &open);
+    let result = result.expect("stop() returns the finalised recording");
+    assert_eq!(alive, 0, "a producer still ran when stop() returned");
+    assert_eq!(master_of(&result).frame_count(), 5 * 480);
+    match session.state() {
+        CaptureState::Failed {
+            error: CaptureError::WriterFailed(detail),
+            recording,
+        } => {
+            assert!(detail.contains("DiskFull"));
+            assert_eq!(recording.as_deref(), Some(&result));
+        }
+        other => panic!("expected Failed(WriterFailed), got {other:?}"),
+    }
+}
+
+/// Every restart fails and a `stop()` arrives while the device loss is
+/// finalising: it waits and returns the recording `Failed(DeviceLost)`
+/// carries, every delivered frame in it.
+#[test]
+fn stop_during_a_device_losss_finalise_returns_its_recording() {
+    let directory = tempfile::tempdir().unwrap();
+    let clock = Arc::new(ManualClock::new());
+    let (backend, at_gate, open) = GatedStop::new(2, Some(10), true);
+    let session = CaptureSession::with_backend(
+        configuration(CaptureMode::Call, directory.path(), false),
+        backend.clone(),
+        passthrough(),
+        200,
+        clock.clone(),
+    )
+    .unwrap();
+    let notices = session.notices();
+    session.start(Uuid::new_v4()).unwrap();
+    assert_eq!(
+        notices.recv_timeout(RECV).unwrap(),
+        CaptureNotice::DeviceChanged(DeviceChangeReason::DefaultInputChanged)
+    );
+    advance_through_sleeps(&clock, 3);
+    at_gate
+        .recv_timeout(RECV)
+        .expect("the device loss's finalise is stopping the backend");
+    assert_eq!(session.state(), CaptureState::Stopping);
+
+    let (result, alive) = stop_at_the_gate(&session, &backend, &open);
+    let result = result.expect("stop() returns the finalised recording");
+    assert_eq!(alive, 0, "a producer still ran when stop() returned");
+    assert!(result.statistics.ended_on_device_loss);
+    assert!(!result.statistics.system_lane_silent);
+    assert!(result.statistics.dropped_frames.is_empty());
+    assert_eq!(master_of(&result).frame_count(), backend.delivered());
+    assert_eq!(
+        session.state(),
+        CaptureState::Failed {
+            error: CaptureError::DeviceLost,
+            recording: Some(Box::new(result))
+        }
+    );
 }
 
 /// In production the relay holds two seconds; a gap wider than that waits
