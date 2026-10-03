@@ -265,3 +265,37 @@ async fn the_device_name_is_stored_trimmed() {
     let stored = test.store.paired_device(id).unwrap().unwrap();
     assert_eq!(stored.name, "Nicolai's iPhone");
 }
+
+#[tokio::test]
+async fn a_failed_device_save_reopens_the_window_for_the_same_secret() {
+    // The secret was taken before the save; a save that fails must give
+    // the window back, or the phone holds a QR code that pairs nothing.
+    let test = TestService::with(common::Options {
+        start: false,
+        ..common::Options::default()
+    })
+    .await;
+    let refuse = |refused: bool| {
+        let sql = if refused {
+            "CREATE TEMP TRIGGER refuse_pairing BEFORE INSERT ON pairedDevice \
+             BEGIN SELECT RAISE(ABORT, 'refused'); END"
+        } else {
+            "DROP TRIGGER temp.refuse_pairing"
+        };
+        test.store
+            .write(|transaction| Ok(transaction.execute_batch(sql)?))
+            .unwrap();
+    };
+    let _ = test.service.begin_pairing();
+    refuse(true);
+    let failed = common::engine_pair(&test, Uuid::new_v4(), "iPhone").await;
+    assert_eq!(failed.status.as_u16(), 500);
+    assert!(test.service.engine.pairing_is_open(), "the window is back");
+
+    refuse(false);
+    let id = Uuid::new_v4();
+    let paired = common::engine_pair(&test, id, "iPhone").await;
+    assert_eq!(paired.status.as_u16(), 200);
+    assert!(!test.service.engine.pairing_is_open(), "and now spent");
+    assert!(test.store.paired_device(id).unwrap().is_some());
+}
