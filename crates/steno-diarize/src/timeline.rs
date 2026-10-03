@@ -1,23 +1,25 @@
 //! From window votes to exclusive speaker turns, the reconstruction step
 //! of the pyannote pipeline as sherpa-onnx and `FluidAudio` do it: every
 //! window votes per frame once for each cluster its active local speakers
-//! belong to, the
-//! frame's speaker count is the rounded mean count over the windows that
-//! cover it, the top clusters by votes are active, runs become segments,
-//! short gaps close, short segments go, and overlaps are resolved in
-//! favour of the earlier speaker so no two speakers share a moment, as
-//! the transcript lanes require.
+//! belong to, the frame's speaker count is the rounded mean count over
+//! the windows that cover it, the top clusters by votes are active, the
+//! frames of each cluster form runs, short gaps close, short runs go, and
+//! overlaps are resolved in favour of the earlier speaker so no two
+//! speakers share a moment, as the transcript lanes require.
 //!
-//! Two deliberate departures from `FluidAudio`'s `OfflineReconstruction`,
-//! listed with the others in the crate doc: the speaker count rounds half up (`(sum + n / 2) / n`) where Swift
-//! rounds half to even, which differs only where an even number of
-//! windows cover a frame and split evenly, the first and last eight
-//! seconds of a lane, and there one window hearing a voice means a
+//! Two deliberate departures from `FluidAudio`'s
+//! `OfflineReconstruction.swift`, listed with the others in the crate doc:
+//! the speaker count rounds half up (`(sum + n / 2) / n`) where
+//! `FluidAudio` rounds half to even, which differs only where an even
+//! number of windows cover a frame and split evenly, the first and last
+//! eight seconds of a lane, and there one window hearing a voice means a
 //! speaker rather than nobody; and where at least one cluster has a vote,
-//! only voted clusters are active, where Swift ranks the whole row and
-//! fills the count with clusters nobody voted for. Where no cluster has a
-//! vote on a frame the windows count as speech, the first `k` clusters are
-//! active as Swift's ranking of an all-zero row has it: a one-to-two-second
+//! only voted clusters are active, where `FluidAudio` ranks the whole row
+//! and fills the count with clusters nobody voted for. Where no cluster
+//! has a vote on a frame the windows count as speech, the first `k`
+//! clusters are active, as `perFrameClusters` ranks an all-zero row;
+//! Steno's Swift app runs `OfflineDiarizerConfig.default`, whose zero-vote
+//! re-embed is off, so this is what the Mac ships. A one-to-two-second
 //! utterance is alone in no window for the two seconds extraction asks,
 //! so it is embedded nowhere and casts no vote, and without that fallback
 //! it would be a hole no transcript segment could be attributed to.
@@ -135,7 +137,7 @@ pub fn turns(
             active[frame * cluster_count + cluster] = true;
         }
     }
-    // Runs per cluster become segments with their mean vote share.
+    // Each cluster's active frames become runs with their mean vote share.
     let mut runs: Vec<Run> = Vec::new();
     for cluster in 0..cluster_count {
         let mut run: Option<(usize, f64, usize)> = None;

@@ -1,6 +1,6 @@
 //! Times the ONNX backend on the two-voice fixture tiled to ten minutes:
 //! `STENO_MODELS_DIR=... cargo run --release -p steno-diarize --example bench_fixture`.
-//! A scratch measurement, not part of the test suite.
+//! A timing run, not part of the test suite.
 
 use std::path::PathBuf;
 use std::time::Instant;

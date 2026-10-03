@@ -37,13 +37,14 @@
 //! average linkage on cosine distance where it cuts centroid linkage and
 //! then runs `VBx` ([`clustering`]); the speaker count rounds half up and
 //! a cluster nobody voted for is active only where no cluster has a vote
-//! ([`timeline`]); no fallback to overlapped frames when the clean ones
-//! are few ([`extraction::ExtractionRules::min_active_ratio`]). Everything
-//! else is one for one with `Sources/StenoSpeech/Diarization` and the
-//! `FluidAudio` code it ran.
+//! ([`timeline`]). It also omits `FluidAudio`'s fallback to overlapped
+//! frames, which the clean-frame ratio makes unreachable
+//! ([`extraction::ExtractionRules::min_active_ratio`]). Everything else is
+//! one for one with `Sources/StenoSpeech/Diarization` and the `FluidAudio`
+//! code it ran.
 //!
 //! Entry points: [`ModelDiarizer`] is the `steno_core::Diarizer` the
-//! pipeline holds, built by [`ModelDiarizer::onnx`] over a
+//! meeting pipeline (WP6) holds, built by [`ModelDiarizer::onnx`] over a
 //! [`ModelStore`] or by `ModelDiarizer::coreml` over `FluidAudio`'s model
 //! directory; [`Pipeline`] exposes `analyze`, `map` and `refine` one at a
 //! time for the calibration harness, which analyses a lane once and

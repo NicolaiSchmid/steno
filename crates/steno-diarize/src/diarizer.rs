@@ -33,9 +33,9 @@ impl Slot {
     }
 }
 
-/// The diarizer the pipeline holds as `Arc<dyn Diarizer>`. Calls run one
-/// after another behind the lock, as `FluidDiarizer` runs its calls, so
-/// one backend instance serves every meeting the pipeline processes.
+/// The diarizer the meeting pipeline (WP6) holds as `Arc<dyn Diarizer>`.
+/// Calls run one after another behind the lock, as `FluidDiarizer` runs
+/// its calls, so one backend instance serves every meeting it processes.
 ///
 /// The work is minutes of model inference, so each call runs on one of
 /// tokio's blocking threads (`spawn_blocking`) and the lock is taken and
@@ -43,13 +43,14 @@ impl Slot {
 /// the shell while a lane is analysed. `prepare` and `diarize` must
 /// therefore be awaited inside a tokio runtime (any flavour, the
 /// current-thread one included); outside one, `spawn_blocking` panics.
-/// A panic inside a call comes back as an error, not a crash. The audio
-/// is cloned onto that
-/// thread (4 bytes a sample, 230 MB for an hour), the price of a
-/// `'static` task over a borrowed buffer; the analysis itself holds more.
-/// A panic mid-call leaves the pipeline as it was between calls, because
-/// the backends keep no state from one call to the next, so a poisoned
-/// lock is reused as core's store reuses its connection.
+/// The audio is cloned onto the blocking thread (4 bytes a sample, 230 MB
+/// for an hour), the price of a `'static` task over a borrowed buffer;
+/// the analysis itself holds more.
+///
+/// A panic inside a call comes back as the call's error, not a crash, and
+/// leaves the pipeline as it was between calls (the backends keep no
+/// state from one call to the next), so the poisoned lock is reused as
+/// core's store reuses its connection.
 pub struct ModelDiarizer {
     config: DiarizerConfig,
     slot: Arc<Mutex<Slot>>,

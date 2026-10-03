@@ -28,7 +28,7 @@ pub struct ExtractionRules {
     /// not seed a cluster of its own. `FluidAudio`'s fallback to the
     /// overlapped frames when the clean ones are under the one-second
     /// floor cannot trigger once this holds (118 frames exceed 60), so
-    /// the port has none; one of the departures the crate doc lists.
+    /// the port omits it, as the crate doc notes.
     pub min_active_ratio: f64,
 }
 
