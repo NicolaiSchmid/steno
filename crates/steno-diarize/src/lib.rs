@@ -11,8 +11,9 @@
 //!    pyannote segmentation 3.0 model; its powerset classes become
 //!    per-frame speaker activity for up to three local speakers.
 //! 2. [`extraction`]: one embedding per window and local speaker, over
-//!    the frames where only that speaker is active (one second of speech
-//!    at least), through the `WeSpeaker` embedding model.
+//!    the frames where only that speaker is active (a fifth of the
+//!    window at least, about two seconds), through the `WeSpeaker`
+//!    embedding model.
 //! 3. [`clustering`]: agglomerative clustering of the unit embeddings,
 //!    average linkage on cosine distance, cut at
 //!    [`DiarizerConfig::clustering_threshold`].

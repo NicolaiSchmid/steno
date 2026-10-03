@@ -2,19 +2,30 @@
 //! `Analysis` every later stage works from, so a threshold sweep re-runs
 //! only the clustering.
 
-use crate::backend::{BackendError, SegmentationGeometry, TensorBackend};
+use crate::backend::{BackendError, SegmentationGeometry, TensorBackend, to_f64};
 use crate::error::DiarizeError;
 use crate::segmentation::{self, Window, WindowActivity};
 
 /// How much of a local speaker is needed before a window embeds them, as
-/// `FluidAudio`'s `Embedding.community` has it.
+/// `FluidAudio`'s `Embedding.community` and its `OfflineEmbeddingExtractor`
+/// have it.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ExtractionRules {
     /// Active speech a local speaker needs inside a window to be embedded.
     pub min_segment_seconds: f64,
     /// Whether frames where two speakers overlap are left out of the
-    /// embedding, as long as enough clean frames remain.
+    /// embedding.
     pub exclude_overlap: bool,
+    /// The share of the window's frames the speaker must fill, after
+    /// overlap exclusion, to be embedded at all: `minActiveRatio = 0.2`
+    /// in `Offline/Extraction/OfflineEmbeddingExtractor.swift`, 118 of
+    /// 589 frames, about two seconds. A window that hears a speaker only
+    /// in passing contributes no embedding, so an interjection does not
+    /// seed a cluster of its own. `FluidAudio`'s fallback to the
+    /// overlapped frames when the clean ones are under the one-second
+    /// floor cannot trigger once this holds (118 frames exceed 60), so
+    /// the port has none.
+    pub min_active_ratio: f64,
 }
 
 impl Default for ExtractionRules {
@@ -22,6 +33,7 @@ impl Default for ExtractionRules {
         ExtractionRules {
             min_segment_seconds: 1.0,
             exclude_overlap: true,
+            min_active_ratio: 0.2,
         }
     }
 }
@@ -125,9 +137,10 @@ pub fn min_frames(geometry: &SegmentationGeometry, seconds: f64) -> usize {
     frames
 }
 
-/// The weights for `speaker` in one window: the frames where they speak
-/// alone when at least `min_frames` of those exist, otherwise every frame
-/// where they speak; `None` when they have under `min_frames` at all.
+/// The weights for `speaker` in one window: 1 on the frames where they
+/// speak (alone, when `rules.exclude_overlap`), 0 elsewhere; `None` when
+/// those frames number under `min_frames` or under
+/// [`ExtractionRules::min_active_ratio`] of the window.
 #[must_use]
 pub fn speaker_weights(
     activity: &WindowActivity,
@@ -136,28 +149,20 @@ pub fn speaker_weights(
     min_frames: usize,
     rules: &ExtractionRules,
 ) -> Option<Vec<f32>> {
-    let mut base = vec![0.0f32; frames_per_window];
-    let mut clean = vec![0.0f32; frames_per_window];
-    let mut base_count = 0usize;
-    let mut clean_count = 0usize;
-    for (frame, weight) in base.iter_mut().enumerate().take(activity.frames.len()) {
-        if activity.is_active(frame, speaker) {
+    let mut weights = vec![0.0f32; frames_per_window];
+    let mut count = 0usize;
+    for (frame, weight) in weights.iter_mut().enumerate().take(activity.frames.len()) {
+        let counted = activity.is_active(frame, speaker)
+            && (!rules.exclude_overlap || activity.speaker_count(frame) == 1);
+        if counted {
             *weight = 1.0;
-            base_count += 1;
-            if activity.speaker_count(frame) == 1 {
-                clean[frame] = 1.0;
-                clean_count += 1;
-            }
+            count += 1;
         }
     }
-    if base_count < min_frames {
+    if count < min_frames || to_f64(count) < rules.min_active_ratio * to_f64(frames_per_window) {
         return None;
     }
-    if rules.exclude_overlap && clean_count >= min_frames {
-        Some(clean)
-    } else {
-        Some(base)
-    }
+    Some(weights)
 }
 
 /// What every window's extraction shares.
@@ -230,7 +235,7 @@ mod tests {
     }
 
     #[test]
-    fn weights_prefer_clean_frames_and_fall_back_to_all_of_them() {
+    fn weights_mark_the_clean_frames_or_nothing() {
         let rules = ExtractionRules::default();
         // Speaker 0 alone for 4 frames, overlapping speaker 1 for 3 frames.
         let activity = activity(vec![0b01, 0b01, 0b01, 0b01, 0b11, 0b11, 0b11, 0b10]);
@@ -239,17 +244,17 @@ mod tests {
             clean,
             vec![1.0, 1.0, 1.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
         );
-        // With a higher floor the clean frames are too few: all seven count.
-        let all = speaker_weights(&activity, 0, 10, 5, &rules).unwrap();
-        assert_eq!(all.iter().sum::<f32>(), 7.0);
-        // Under the floor altogether: nothing.
-        assert!(speaker_weights(&activity, 1, 10, 5, &rules).is_none());
+        // With a higher floor the clean frames are too few; the
+        // overlapped ones are no fallback.
+        assert!(speaker_weights(&activity, 0, 10, 5, &rules).is_none());
+        // Speaker 1 is alone for one frame of ten: under the fifth.
+        assert!(speaker_weights(&activity, 1, 10, 1, &rules).is_none());
         // Speaker 2 never speaks.
         assert!(speaker_weights(&activity, 2, 10, 1, &rules).is_none());
-        // Overlap exclusion off: the base mask even when clean frames suffice.
+        // Overlap exclusion off: every frame where the speaker talks.
         let keep = ExtractionRules {
             exclude_overlap: false,
-            ..rules
+            ..rules.clone()
         };
         assert_eq!(
             speaker_weights(&activity, 0, 10, 4, &keep)
@@ -258,5 +263,43 @@ mod tests {
                 .sum::<f32>(),
             7.0
         );
+        assert_eq!(
+            speaker_weights(&activity, 1, 10, 1, &keep)
+                .unwrap()
+                .iter()
+                .sum::<f32>(),
+            4.0
+        );
+        // The ratio alone can refuse: four clean frames of forty.
+        assert!(speaker_weights(&activity, 0, 40, 1, &rules).is_none());
+        let lax = ExtractionRules {
+            min_active_ratio: 0.0,
+            ..rules
+        };
+        assert!(speaker_weights(&activity, 0, 40, 1, &lax).is_some());
+    }
+
+    /// The default ratio on pyannote's geometry: 118 clean frames, about
+    /// two seconds, exceed the one-second floor, so the floor never
+    /// decides on its own.
+    #[test]
+    fn the_default_ratio_asks_for_two_seconds_of_a_ten_second_window() {
+        let geometry = SegmentationGeometry::PYANNOTE_3_0;
+        let rules = ExtractionRules::default();
+        let floor = min_frames(&geometry, rules.min_segment_seconds);
+        let frames = |alone: usize| {
+            let mut frames = vec![0u8; geometry.frames_per_window];
+            for frame in frames.iter_mut().take(alone) {
+                *frame = 0b001;
+            }
+            activity(frames)
+        };
+        assert!(
+            speaker_weights(&frames(117), 0, geometry.frames_per_window, floor, &rules).is_none()
+        );
+        assert!(
+            speaker_weights(&frames(118), 0, geometry.frames_per_window, floor, &rules).is_some()
+        );
+        assert!(to_f64(floor) < rules.min_active_ratio * to_f64(geometry.frames_per_window));
     }
 }
