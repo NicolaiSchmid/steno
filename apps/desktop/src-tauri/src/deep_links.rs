@@ -154,19 +154,18 @@ impl DeepLink {
 pub fn handle(app: &AppHandle, urls: &[Url]) {
     for url in urls {
         match DeepLink::parse(url) {
-            Ok(DeepLink::Pair) => eprintln!(
-                "[steno-desktop] {} is the iPhone's pairing link; nothing to do here",
-                describe(url)
-            ),
-            Ok(link) => {
-                let Some(request) = link.window_request() else {
-                    continue;
-                };
-                let host = app.state::<Host>();
-                if let Err(error) = windows::open_requested(app, &host, &request) {
-                    eprintln!("[steno-desktop] {}: {error}", describe(url));
+            Ok(link) => match link.window_request() {
+                Some(request) => {
+                    let host = app.state::<Host>();
+                    if let Err(error) = windows::open_requested(app, &host, &request) {
+                        eprintln!("[steno-desktop] {}: {error}", describe(url));
+                    }
                 }
-            }
+                None => eprintln!(
+                    "[steno-desktop] {} is the iPhone's pairing link; nothing to do here",
+                    describe(url)
+                ),
+            },
             Err(error) => eprintln!("[steno-desktop] deep link ignored: {error}"),
         }
     }

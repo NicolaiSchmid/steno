@@ -150,7 +150,6 @@ impl ResizeParams {
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct DismissParams {
-    #[serde(default)]
     raised: Option<u64>,
 }
 
@@ -297,7 +296,7 @@ pub async fn panel_call(
         PanelAction::Resize => {
             let report: ResizeParams = panel_params(PanelAction::Resize, params)?;
             let size = report.logical(window.scale_factor().map_err(failed)?);
-            app.state::<Smoke>().note_panel_size(panel.label(), size);
+            app.state::<Smoke>().note_panel_size(panel, size);
             panels::resize(&app, panel, size)?;
             Ok(Value::Null)
         }

@@ -51,7 +51,7 @@ pub struct Smoke {
     tray_built: AtomicBool,
     /// The size each panel's page last reported, checked against the
     /// window at the end.
-    panel_sizes: Mutex<HashMap<String, (f64, f64)>>,
+    panel_sizes: Mutex<HashMap<Panel, (f64, f64)>>,
 }
 
 impl Smoke {
@@ -64,23 +64,25 @@ impl Smoke {
     /// A panel's page reported its size; logged on a smoke run so the
     /// screenshots can be read against the numbers, and kept so the end of
     /// the run can check the window took it.
-    pub fn note_panel_size(&self, label: &str, size: (f64, f64)) {
+    pub fn note_panel_size(&self, panel: Panel, size: (f64, f64)) {
         if self.armed.load(Ordering::SeqCst) {
             eprintln!(
-                "[steno-desktop] smoke: the {label} panel measures {} by {}",
-                size.0, size.1
+                "[steno-desktop] smoke: the {} panel measures {} by {}",
+                panel.label(),
+                size.0,
+                size.1
             );
         }
         if let Ok(mut sizes) = self.panel_sizes.lock() {
-            sizes.insert(label.to_owned(), size);
+            sizes.insert(panel, size);
         }
     }
 
-    fn panel_size(&self, label: &str) -> Option<(f64, f64)> {
+    fn panel_size(&self, panel: Panel) -> Option<(f64, f64)> {
         self.panel_sizes
             .lock()
             .ok()
-            .and_then(|sizes| sizes.get(label).copied())
+            .and_then(|sizes| sizes.get(&panel).copied())
     }
 
     /// Records a window's `page.ready`; the main window's is the one the
@@ -296,7 +298,7 @@ fn check_panels(app: &AppHandle) -> Result<(), String> {
         }
         let window_size = panels::logical_size(&window).map_err(|error| error.to_string())?;
         let reported = smoke
-            .panel_size(label)
+            .panel_size(panel)
             .ok_or_else(|| format!("the {label} panel never reported its size"))?;
         if !same_size(window_size, reported) {
             return Err(format!(
