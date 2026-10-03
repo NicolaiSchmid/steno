@@ -4,8 +4,7 @@
 //! session, the live receipts, the completions in flight and the revoked
 //! devices, held for synchronous sections only, never across a store, file
 //! or intake call, so another request runs while one awaits. The recording
-//! routes live in
-//! `recording.rs`. Swift: `Routing/HandoverEngine.swift`,
+//! routes live in `recording.rs`. Swift: `Routing/HandoverEngine.swift`,
 //! `Routing/HTTPMessages.swift`.
 
 mod recording;

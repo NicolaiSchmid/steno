@@ -22,8 +22,7 @@ pub struct HandoverConfiguration {
     pub service_name: String,
     /// Publish `_steno._tcp` and serve on the LAN addresses
     /// ([`server::advertise::lan_addresses`](crate::server::advertise::lan_addresses))
-    /// and loopback; `false` binds
-    /// loopback only.
+    /// and loopback; `false` binds loopback only.
     pub advertise: bool,
     /// The largest chunk the computer accepts; the phone declares its own
     /// chunk size per recording and it must not exceed this. 16 MiB in the

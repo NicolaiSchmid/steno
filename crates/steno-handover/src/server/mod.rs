@@ -5,8 +5,8 @@
 //! `advertise` is false; otherwise every IPv4 address is bound, and a
 //! connection whose local address is neither loopback nor a LAN address
 //! (a VPN tunnel) is closed before the handshake, as the Swift listener's
-//! prohibited interface types refuse it. Swift: `Network/HandoverServer.swift`,
-//! `Network/ServerMetrics.swift`.
+//! prohibited interface types refuse it. Swift:
+//! `Network/HandoverServer.swift`, `Network/ServerMetrics.swift`.
 
 pub mod advertise;
 pub mod connection;

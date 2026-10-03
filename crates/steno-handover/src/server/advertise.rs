@@ -18,7 +18,7 @@
 //! them and on loopback only. The addresses are read when the service
 //! starts and again, at most once a second, while it accepts; the record is
 //! not re-published when the computer changes network, whereas
-//! `NWListener` follows the change.
+//! `NWListener` follows the change. Swift: `Network/HandoverServer.swift`.
 
 use std::net::{IpAddr, Ipv4Addr};
 
