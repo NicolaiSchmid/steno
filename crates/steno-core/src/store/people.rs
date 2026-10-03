@@ -13,7 +13,7 @@ use crate::model::{
     Embedding, Participant, Person, Speaker, SpeakerAssignment, SpeakerAssignmentKind,
     SpeakerNameSuggestion, TimeRange,
 };
-use crate::paths::path_from_file_url;
+use crate::paths::file_url_path;
 
 // Persons
 
@@ -232,7 +232,7 @@ fn drop_clip_when_audio_is_gone(
     };
     let master_exists = assets::assets_of_meeting(connection, speaker.meeting_id)?
         .first()
-        .and_then(|asset| path_from_file_url(&asset.url))
+        .and_then(|asset| file_url_path(&asset.url))
         .is_some_and(|path| path.exists());
     if master_exists {
         return Ok(None);

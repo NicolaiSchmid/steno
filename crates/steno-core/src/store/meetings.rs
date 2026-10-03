@@ -16,7 +16,7 @@ use crate::model::{
     Participant, Speaker, SpeakerNameSuggestion, SummaryDocument, TitleOrigin, TranscriptSegment,
     derived_uuid,
 };
-use crate::paths::path_from_file_url;
+use crate::paths::file_url_path;
 
 const COLUMNS: &str = "id, title, startedAt, duration, language, source, calendarEventID, tags, \
      state, failureReason, templateID, summary, summaryText, scratchpad, llmUsage, createdAt, \
@@ -125,7 +125,7 @@ impl DeletedMeeting {
         let folder = self
             .assets
             .iter()
-            .filter_map(|asset| path_from_file_url(&asset.url))
+            .filter_map(|asset| file_url_path(&asset.url))
             .filter_map(|path| path.parent().map(Path::to_path_buf))
             .find(|folder| {
                 folder
@@ -140,7 +140,7 @@ impl DeletedMeeting {
             .iter()
             .flat_map(AudioAsset::expirable_files)
             .chain(self.clips.iter().cloned())
-            .filter_map(|url| path_from_file_url(&url))
+            .filter_map(|url| file_url_path(&url))
             .filter(|path| seen.insert(path.clone()))
             .collect()
     }
