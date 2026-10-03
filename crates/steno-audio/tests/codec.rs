@@ -34,10 +34,21 @@ use steno_core::{
 use uuid::Uuid;
 
 fn write_call(layout: &RecordingLayout, seconds: f64, finish: bool) -> RecordingWriter {
-    let mut writer =
-        RecordingWriter::new(layout, &[AudioLane::Mic, AudioLane::System], false).unwrap();
     let mic = AudioFixtures::tone(1_000.0, seconds, 0.5);
     let system = AudioFixtures::tone(1_000.0, seconds, 0.25);
+    write_call_lanes(layout, &mic, &system, finish)
+}
+
+/// `mic` and `system` at 48 kHz, whole 480-sample frames, through the
+/// recording writer into `layout`.
+fn write_call_lanes(
+    layout: &RecordingLayout,
+    mic: &[f32],
+    system: &[f32],
+    finish: bool,
+) -> RecordingWriter {
+    let mut writer =
+        RecordingWriter::new(layout, &[AudioLane::Mic, AudioLane::System], false).unwrap();
     for start in (0..mic.len()).step_by(480) {
         writer
             .write(&LaneFrames {
@@ -141,14 +152,17 @@ async fn decodes_each_lane_of_the_master_like_its_sidecar() {
     );
     assert!((EchoMetrics::rms(&mic_from_master.samples[window.clone()]) - 0.3536).abs() < 0.01);
     assert!((EchoMetrics::rms(&system_from_master.samples[window.clone()]) - 0.1768).abs() < 0.005);
-    // Sample-aligned with the sidecar to within a sample: the group delay
-    // compensation holds.
+    // Same samples once the sidecar's 32-sample group delay is undone (the
+    // onset test below pins that shift; a 1 kHz tone alone cannot).
     let mut max_error = 0.0f32;
     for index in window {
-        max_error =
-            max_error.max((mic_from_master.samples[index] - mic_from_sidecar.samples[index]).abs());
+        max_error = max_error
+            .max((mic_from_master.samples[index] - mic_from_sidecar.samples[index + 32]).abs());
     }
-    assert!(max_error < 0.02, "master decode vs sidecar: {max_error}");
+    assert!(
+        max_error < 0.02,
+        "master decode vs shifted sidecar: {max_error}"
+    );
 
     let error = codec
         .decode(&without_sidecars, AudioLane::Mixed)
@@ -158,6 +172,60 @@ async fn decodes_each_lane_of_the_master_like_its_sidecar() {
         error.to_string(),
         CodecError::LaneNotInAsset(AudioLane::Mixed).to_string()
     );
+}
+
+/// The group delay compensation, checked where a shift is visible: a
+/// 1 kHz tone has a 16-sample period at 16 kHz, so a 32- or 64-sample
+/// error passes a sample-by-sample compare. An onset at 1.0 s on the mic
+/// lane lands at 16 000 (within one) in the master decode, which drops the
+/// FIR's group delay so the lane sits on the master's time like a
+/// zero-phase conversion; the sidecar, written live by the same causal
+/// filter, carries that delay and has the onset 32 samples (2 ms) later,
+/// as Swift's did. The two decodes agree once that shift is undone.
+#[tokio::test]
+async fn master_decode_is_zero_phase_and_the_sidecar_lags_one_group_delay() {
+    let directory = tempfile::tempdir().unwrap();
+    let layout = RecordingLayout::new(directory.path(), Uuid::new_v4());
+    let mut mic = vec![0.0f32; 96_000];
+    mic[48_000..].copy_from_slice(&AudioFixtures::tone(1_000.0, 1.0, 0.5));
+    let system = vec![0.0f32; 96_000];
+    let files = write_call_lanes(&layout, &mic, &system, true).files();
+    let sidecars: Vec<(AudioLane, &Path)> = files
+        .sidecars_16k
+        .iter()
+        .map(|(lane, path)| (*lane, path.as_path()))
+        .collect();
+    let asset = make_asset(
+        &files.master,
+        AudioFormat::Caf48kFloat32,
+        &[AudioLane::Mic, AudioLane::System],
+        &sidecars,
+    );
+    let mut without_sidecars = asset.clone();
+    without_sidecars.sidecars_16k = BTreeMap::new();
+    let codec = SymphoniaAudioCodec::new();
+    let from_sidecar = codec.decode(&asset, AudioLane::Mic).await.unwrap();
+    let from_master = codec
+        .decode(&without_sidecars, AudioLane::Mic)
+        .await
+        .unwrap();
+    let onset = |samples: &[f32]| samples.iter().position(|s| s.abs() > 0.1).unwrap();
+    let sidecar_onset = onset(&from_sidecar.samples);
+    let master_onset = onset(&from_master.samples);
+    assert!(
+        (15_999..=16_001).contains(&master_onset),
+        "master decode onset at {master_onset}"
+    );
+    assert!(
+        (16_031..=16_033).contains(&sidecar_onset),
+        "sidecar onset at {sidecar_onset}"
+    );
+    assert_eq!(sidecar_onset - master_onset, 32, "one group delay apart");
+    let shift = sidecar_onset - master_onset;
+    let max_error = (16_100..31_000)
+        .map(|i| (from_master.samples[i] - from_sidecar.samples[i + shift]).abs())
+        .fold(0.0f32, f32::max);
+    assert!(max_error < 0.02, "shifted decodes differ by {max_error}");
 }
 
 /// Crash recovery through the real decoder: a master whose writer never
@@ -279,6 +347,22 @@ fn the_sinc_resampler_keeps_level_and_period_at_44100() {
         (crossings as f64 / seconds - 1_000.0).abs() < 5.0,
         "{crossings} crossings"
     );
+
+    // The passband edge, as the module doc states it: within 0.3 dB at
+    // 6 kHz, about -1.3 dB at 6.5 kHz.
+    let droop = |frequency: f64| {
+        let tone: Vec<f32> = (0..count)
+            .map(|i| {
+                0.5 * (2.0 * std::f64::consts::PI * frequency * i as f64 / 44_100.0).sin() as f32
+            })
+            .collect();
+        let output = SymphoniaAudioCodec::to_16k(&tone, 44_100);
+        20.0 * (EchoMetrics::rms(&output[1_000..31_000]) / (0.5 / 2f32.sqrt())).log10()
+    };
+    let at_6k = droop(6_000.0);
+    let at_6k5 = droop(6_500.0);
+    assert!(at_6k.abs() < 0.3, "6 kHz at {at_6k} dB");
+    assert!((-1.6..=-1.0).contains(&at_6k5), "6.5 kHz at {at_6k5} dB");
 
     // Above the output Nyquist is rejected.
     let high: Vec<f32> = (0..count)

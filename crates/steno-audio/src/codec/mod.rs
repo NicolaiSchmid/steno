@@ -125,7 +125,6 @@ impl SymphoniaAudioCodec {
             .is_some_and(|e| e.eq_ignore_ascii_case("caf"))
             && let Ok(file) = CafFile::read(path)
         {
-            // The writer's rate is whole hertz.
             return Ok((file.sample_rate as u32, file.channels));
         }
         Self::read_all_channels(path)
@@ -223,7 +222,10 @@ impl SymphoniaAudioCodec {
 
     /// The sidecar path's filter, frame by frame, compensated for its
     /// 95.5-sample group delay so the lane aligns with the master like a
-    /// zero-phase conversion would.
+    /// zero-phase conversion would. The live sidecar is the same filter
+    /// run causally, so it lags this decode by 32 samples (2 ms); Swift's
+    /// `AVAudioConverter` decode and causal sidecar writer had the same
+    /// relationship.
     fn decimate_48k(samples: &[f32]) -> Vec<f32> {
         let mut resampler = crate::writer::Resampler48kTo16k::new(FRAME_SIZE);
         let delay_in = (crate::writer::Resampler48kTo16k::TAPS - 1) / 2;
@@ -242,8 +244,8 @@ impl SymphoniaAudioCodec {
             resampler.process(frame, &mut out_frame);
             output.extend(out_frame.iter().map(|&s| f32::from(s) / 32767.0));
         }
-        // Drop the group delay (95.5 input samples is 31.83 output samples;
-        // 32 keeps the sidecar and the master decode within a sample).
+        // Drop the group delay: 95.5 input samples is 31.83 output samples,
+        // so the onset lands within a sample of where the master has it.
         let delay_out = delay_in.div_ceil(3);
         output.drain(..delay_out.min(output.len()));
         output

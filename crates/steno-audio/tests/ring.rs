@@ -17,7 +17,7 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::channel;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use steno_audio::capture::DeviceChangeReason;
 use steno_audio::realtime::{FrameRelay, LaneFrameSink, LaneRingBuffer};
@@ -132,64 +132,91 @@ fn clear_zeroes_storage_and_resets_indices() {
 /// A producer thread writes 480-sample blocks as fast as it can while a
 /// consumer thread drains; every sample is either read in order or counted
 /// as dropped, and nothing is duplicated or lost.
+/// One producer and one consumer on a 4 096-sample ring for about 200 ms,
+/// with block sizes that cycle through 1..=1024 on both sides and every
+/// sample carrying its sequence number. Every sample the consumer sees is
+/// the next one or a jump the size of a refused block, and samples read
+/// plus samples dropped equal samples produced. Under ThreadSanitizer
+/// (CI's `tsan` job) this is also what catches a weakened ordering on the
+/// indices.
 #[test]
 fn concurrent_producer_and_consumer_account_for_every_sample() {
     let ring = Arc::new(LaneRingBuffer::new(4096));
-    let block = 480;
-    let blocks = 2_000;
     let producer_done = Arc::new(AtomicBool::new(false));
+    // Sequence numbers stay exact in f32 below 2^24.
+    let limit: u32 = 4_000_000;
+    let deadline = Instant::now() + Duration::from_millis(200);
 
     let producer = {
         let ring = Arc::clone(&ring);
         let done = Arc::clone(&producer_done);
         std::thread::spawn(move || {
-            let mut buffer = vec![0.0f32; block];
-            for index in 0..blocks {
-                buffer.fill(index as f32);
-                ring.write_slice(&buffer);
+            let mut buffer = vec![0.0f32; 1024];
+            let mut next: u32 = 0;
+            let mut index = 0usize;
+            while next < limit && Instant::now() < deadline {
+                let size = (index * 37) % 1024 + 1;
+                index += 1;
+                for sample in &mut buffer[..size] {
+                    *sample = next as f32;
+                    next += 1;
+                }
+                if !ring.write_slice(&buffer[..size]) {
+                    std::thread::yield_now();
+                }
             }
             done.store(true, Ordering::Release);
+            next
         })
     };
     let consumer = {
         let ring = Arc::clone(&ring);
         let done = Arc::clone(&producer_done);
         std::thread::spawn(move || {
-            let mut buffer = vec![0.0f32; block];
-            let mut last_block: i64 = -1;
-            let mut ordered = true;
-            let mut count = 0usize;
+            let mut buffer = vec![0.0f32; 1024];
+            let mut expected: Option<u32> = None;
+            let mut read = 0usize;
+            let mut jumped = 0usize;
+            let mut index = 0usize;
             loop {
-                if ring.read(&mut buffer) {
-                    let value = buffer[0] as i64;
-                    if buffer.iter().any(|s| *s as i64 != value) || value <= last_block {
-                        ordered = false;
-                    }
-                    last_block = value;
-                    count += 1;
-                } else if done.load(Ordering::Acquire) {
-                    // One more look: the producer may have written between
-                    // the failed read and the flag.
-                    if !ring.read(&mut buffer) {
+                let size = (index * 53) % 1024 + 1;
+                index += 1;
+                let count = size.min(ring.available_to_read());
+                if count == 0 {
+                    // The producer may have written between the look and
+                    // the flag; one more look after the flag.
+                    if done.load(Ordering::Acquire) && ring.available_to_read() == 0 {
                         break;
                     }
-                    count += 1;
-                } else {
-                    std::thread::sleep(Duration::from_micros(200));
+                    std::thread::sleep(Duration::from_micros(50));
+                    continue;
+                }
+                assert!(ring.read(&mut buffer[..count]));
+                for &sample in &buffer[..count] {
+                    let value = sample as u32;
+                    if let Some(expected) = expected {
+                        assert!(value >= expected, "{value} after {expected}: out of order");
+                        jumped += (value - expected) as usize;
+                    }
+                    expected = Some(value + 1);
+                    read += 1;
                 }
             }
-            (count, ordered)
+            (read, jumped)
         })
     };
-    producer.join().unwrap();
-    let (read_blocks, ordered) = consumer.join().unwrap();
-    let dropped = ring.dropped_samples() / block;
+    let total_written = producer.join().unwrap() as usize;
+    let (read, jumped) = consumer.join().unwrap();
+    let dropped = ring.dropped_samples();
+    assert!(total_written > 0 && read > 0);
     assert_eq!(
-        read_blocks + dropped,
-        blocks,
-        "read {read_blocks} + dropped {dropped}"
+        read + dropped,
+        total_written,
+        "read {read} + dropped {dropped} != written {total_written}"
     );
-    assert!(ordered);
+    // Every gap in the sequence is a refused block; blocks refused after
+    // the last sample read leave no gap to see, so this is a bound.
+    assert!(jumped <= dropped, "jumped {jumped} over {dropped} dropped");
 }
 
 #[test]

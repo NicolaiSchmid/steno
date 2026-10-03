@@ -250,6 +250,36 @@ fn sidecars_align_with_the_master_and_their_lane() {
     );
 }
 
+/// The RIFF size field counts everything after itself (36 header bytes plus
+/// the samples) and the `data` size the samples alone; both are checked
+/// byte for byte, as is the file length, since the reader tolerates an
+/// overstated RIFF size and would not notice one.
+#[test]
+fn wav_header_sizes_match_the_samples_written() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("sizes.wav");
+    let mut writer = WavStreamWriter::create(&path, 16_000).unwrap();
+    writer.write(&[1_000i16; 160]).unwrap();
+    writer.write(&[-1_000i16; 100]).unwrap();
+    writer.finish().unwrap();
+    let bytes = std::fs::read(&path).unwrap();
+    let data_size = 260 * 2;
+    assert_eq!(bytes.len(), WavStreamWriter::HEADER_SIZE + data_size);
+    let riff_size = u32::from_le_bytes(bytes[4..8].try_into().unwrap()) as usize;
+    assert_eq!(riff_size, 36 + data_size);
+    assert_eq!(riff_size, bytes.len() - 8);
+    assert_eq!(&bytes[36..40], b"data");
+    assert_eq!(
+        u32::from_le_bytes(bytes[40..44].try_into().unwrap()) as usize,
+        data_size
+    );
+    assert_eq!(
+        u32::from_le_bytes(bytes[24..28].try_into().unwrap()),
+        16_000,
+        "sample rate"
+    );
+}
+
 /// A sidecar whose writer never reached `finish()` keeps its zero-size
 /// header with the samples after it, so the RIFF parser rejects it as
 /// malformed; the decoder relies on exactly that to rebuild the lane from
