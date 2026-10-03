@@ -65,14 +65,6 @@ pub fn diarize_store(speech: &ModelStore) -> steno_diarize::models::ModelStore {
     steno_diarize::models::ModelStore::new(speech.root().join("diarization"))
 }
 
-/// The models root a speech store was made under: the parent of `onnx/`.
-fn root_of(store: &ModelStore) -> PathBuf {
-    store
-        .root()
-        .parent()
-        .map_or_else(|| store.root().to_path_buf(), Path::to_path_buf)
-}
-
 /// The engine the settings name. On the Mac `parakeet-v3` is the `CoreML`
 /// engine on the Neural Engine; everywhere else, and for any other id, the
 /// fp32 ONNX export of the same model (the engine ids the Swift app
@@ -83,14 +75,14 @@ pub fn speech_engine(settings: &Settings, store: &ModelStore) -> Arc<dyn SpeechE
     #[cfg(target_os = "macos")]
     {
         if settings.speech_engine_id == steno_speech_coreml::ENGINE_ID {
+            // The store sits in `onnx/` under the models root.
+            let root = store.root().parent().unwrap_or(store.root());
             return Arc::new(LanguageTaggingEngine::new(Arc::new(
-                steno_speech_coreml::CoreMlParakeetEngine::new(coreml_model_directory(&root_of(
-                    store,
-                ))),
+                steno_speech_coreml::CoreMlParakeetEngine::new(coreml_model_directory(root)),
             )));
         }
     }
-    let _ = (&settings.speech_engine_id, root_of);
+    let _ = settings;
     Arc::new(OnnxSpeechEngine::new(
         store.clone(),
         OnnxOptions {
@@ -308,7 +300,6 @@ mod tests {
             coreml_model_directory(chosen),
             chosen.join("fluidaudio").join("parakeet-tdt-0.6b-v3")
         );
-        assert_eq!(root_of(&speech_store(&settings, &paths)), chosen);
     }
 
     #[cfg(target_os = "macos")]
