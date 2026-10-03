@@ -149,7 +149,7 @@ impl SileroVad {
         let mut sample_rate = None;
         let mut h = None;
         let mut c = None;
-        let mut joint = None;
+        let mut combined = None;
         for outlet in session.inputs() {
             let Some((_, shape)) = outlet_tensor(outlet.dtype()) else {
                 continue;
@@ -163,7 +163,7 @@ impl SileroVad {
                 "sr" => sample_rate = Some((outlet.name().to_owned(), shape.is_empty())),
                 "h" => h = Some((outlet.name().to_owned(), len)),
                 "c" => c = Some((outlet.name().to_owned(), len)),
-                "state" => joint = Some((outlet.name().to_owned(), len)),
+                "state" => combined = Some((outlet.name().to_owned(), len)),
                 _ => {}
             }
         }
@@ -173,7 +173,7 @@ impl SileroVad {
                 path.display()
             )));
         };
-        let (state, context) = match (h, c, joint) {
+        let (state, context) = match (h, c, combined) {
             (Some((h, len)), Some((c, _)), None) => (StateLayout::Separate { h, c, len }, 0),
             (None, None, Some((name, len))) => (StateLayout::Combined { name, len }, 64),
             _ => {
