@@ -3,6 +3,9 @@
 //! dates as `2026-09-29T12:48:00.000Z`, UUIDs upper case. Two styles:
 //! [`to_canonical_string`] is Foundation's `.prettyPrinted` (what the fixtures
 //! hold), [`to_compact_string`] is the one-line form the dispatcher sends.
+//! The date and UUID codecs the fields use are `steno_core::json`'s
+//! (`iso_time`, `uuid_text` and their `_opt` forms); only the printer lives
+//! here.
 //!
 //! The printer walks a [`serde_json::Value`] rather than trusting
 //! `serde_json::to_string_pretty`: Foundation puts a space on both sides of the
@@ -240,123 +243,8 @@ fn write_string(out: &mut String, string: &str) {
     out.push('"');
 }
 
-/// `StenoJSON`'s dates on the wire: UTC, three fraction digits, `Z`. Use as
-/// `#[serde(with = "json::date")]` on a `DateTime<Utc>` and
-/// `#[serde(with = "json::date::option")]` on an `Option<DateTime<Utc>>`.
-pub mod date {
-    use chrono::{DateTime, SecondsFormat, Utc};
-    use serde::{Deserialize, Deserializer, Serialize, Serializer};
-
-    /// `2026-09-25T10:00:00.000Z`: always UTC, always three fraction digits.
-    pub fn format(date: &DateTime<Utc>) -> String {
-        date.to_rfc3339_opts(SecondsFormat::Millis, true)
-    }
-
-    /// Accepts the fractional and the whole-second ISO 8601 forms, and any
-    /// offset (normalised to UTC), as `StenoJSON.parse` does.
-    pub fn parse(string: &str) -> Option<DateTime<Utc>> {
-        DateTime::parse_from_rfc3339(string)
-            .ok()
-            .map(|date| date.with_timezone(&Utc))
-    }
-
-    pub fn serialize<S: Serializer>(
-        date: &DateTime<Utc>,
-        serializer: S,
-    ) -> Result<S::Ok, S::Error> {
-        format(date).serialize(serializer)
-    }
-
-    pub fn deserialize<'de, D: Deserializer<'de>>(
-        deserializer: D,
-    ) -> Result<DateTime<Utc>, D::Error> {
-        let string = String::deserialize(deserializer)?;
-        parse(&string)
-            .ok_or_else(|| serde::de::Error::custom(format!("Not an ISO 8601 date: {string}")))
-    }
-
-    /// The same format on an `Option`; `None` is `null`, or an omitted key
-    /// with `skip_serializing_if`.
-    pub mod option {
-        use chrono::{DateTime, Utc};
-        use serde::{Deserialize, Deserializer, Serialize, Serializer};
-
-        #[derive(Serialize, Deserialize)]
-        struct Wire(#[serde(with = "super")] DateTime<Utc>);
-
-        pub fn serialize<S: Serializer>(
-            date: &Option<DateTime<Utc>>,
-            serializer: S,
-        ) -> Result<S::Ok, S::Error> {
-            date.map(Wire).serialize(serializer)
-        }
-
-        pub fn deserialize<'de, D: Deserializer<'de>>(
-            deserializer: D,
-        ) -> Result<Option<DateTime<Utc>>, D::Error> {
-            Ok(Option::<Wire>::deserialize(deserializer)?.map(|wire| wire.0))
-        }
-    }
-}
-
-/// Foundation's `UUID` on the wire: hyphenated, upper case. Decoding accepts
-/// either case and only the hyphenated 36-character form, as
-/// `UUID(uuidString:)` does. Use as `#[serde(with = "json::uuid")]` and
-/// `#[serde(with = "json::uuid::option")]`.
-pub mod uuid {
-    use serde::{Deserialize, Deserializer, Serialize, Serializer};
-    use uuid::Uuid;
-
-    pub fn format(id: &Uuid) -> String {
-        id.hyphenated()
-            .encode_upper(&mut Uuid::encode_buffer())
-            .to_string()
-    }
-
-    pub fn serialize<S: Serializer>(id: &Uuid, serializer: S) -> Result<S::Ok, S::Error> {
-        format(id).serialize(serializer)
-    }
-
-    pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Uuid, D::Error> {
-        let string = String::deserialize(deserializer)?;
-        parse(&string).ok_or_else(|| serde::de::Error::custom(format!("Not a UUID: {string}")))
-    }
-
-    /// The hyphenated form only: the `uuid` crate would also read the
-    /// 32-digit, braced and `urn:uuid:` forms, which Foundation rejects.
-    pub fn parse(string: &str) -> Option<Uuid> {
-        (string.len() == 36)
-            .then(|| Uuid::try_parse(string).ok())
-            .flatten()
-    }
-
-    /// The same format on an `Option`; `None` is `null`, or an omitted key
-    /// with `skip_serializing_if`.
-    pub mod option {
-        use serde::{Deserialize, Deserializer, Serialize, Serializer};
-        use uuid::Uuid;
-
-        #[derive(Serialize, Deserialize)]
-        struct Wire(#[serde(with = "super")] Uuid);
-
-        pub fn serialize<S: Serializer>(
-            id: &Option<Uuid>,
-            serializer: S,
-        ) -> Result<S::Ok, S::Error> {
-            id.map(Wire).serialize(serializer)
-        }
-
-        pub fn deserialize<'de, D: Deserializer<'de>>(
-            deserializer: D,
-        ) -> Result<Option<Uuid>, D::Error> {
-            Ok(Option::<Wire>::deserialize(deserializer)?.map(|wire| wire.0))
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use chrono::{TimeZone, Utc};
     use serde_json::json;
 
     use super::*;
@@ -515,53 +403,4 @@ mod tests {
             "\"a\\\"b\\\\c\\nd\\te\\u0001f/g é … \u{2028}\""
         );
     }
-
-    #[test]
-    fn dates_round_trip_in_the_fixture_format() {
-        let date = Utc.with_ymd_and_hms(2026, 9, 29, 12, 48, 0).unwrap();
-        assert_eq!(date::format(&date), "2026-09-29T12:48:00.000Z");
-        assert_eq!(date::parse("2026-09-29T12:48:00.000Z"), Some(date));
-        assert_eq!(date::parse("2026-09-29T12:48:00Z"), Some(date));
-        assert_eq!(date::parse("2026-09-29T14:48:00+02:00"), Some(date));
-        assert_eq!(date::parse("yesterday"), None);
-    }
-
-    #[test]
-    fn uuids_are_upper_case_on_the_wire() {
-        let id = ::uuid::Uuid::parse_str("00000000-0000-0000-0000-00000000000c").unwrap();
-        assert_eq!(uuid::format(&id), "00000000-0000-0000-0000-00000000000C");
-    }
-
-    /// `UUID(uuidString:)` reads either case of the hyphenated form and
-    /// nothing else.
-    #[test]
-    fn uuids_read_only_the_hyphenated_form() {
-        let id = ::uuid::Uuid::parse_str("00000000-0000-0000-0000-00000000000c").unwrap();
-        assert_eq!(
-            uuid::parse("00000000-0000-0000-0000-00000000000C"),
-            Some(id)
-        );
-        assert_eq!(
-            uuid::parse("00000000-0000-0000-0000-00000000000c"),
-            Some(id)
-        );
-        for rejected in [
-            "0000000000000000000000000000000c",
-            "{00000000-0000-0000-0000-00000000000c}",
-            "urn:uuid:00000000-0000-0000-0000-00000000000c",
-            "00000000-0000-0000-0000-00000000000",
-            "",
-        ] {
-            assert_eq!(uuid::parse(rejected), None, "{rejected:?}");
-        }
-        let wire: Wire = serde_json::from_str("\"00000000-0000-0000-0000-00000000000c\"").unwrap();
-        assert_eq!(wire.0, id);
-        let error = serde_json::from_str::<Wire>("\"0000000000000000000000000000000c\"")
-            .unwrap_err()
-            .to_string();
-        assert!(error.starts_with("Not a UUID: 0000"), "{error}");
-    }
-
-    #[derive(Debug, serde::Deserialize)]
-    struct Wire(#[serde(with = "uuid")] ::uuid::Uuid);
 }

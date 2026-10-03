@@ -1,5 +1,5 @@
 # The Rust workspace: core crates under crates/, the Tauri shell under
-# apps/desktop (added by WP3). Plan: .plans/2026-10-02-rust-core-and-tauri-shell.md.
+# apps/desktop. Plan: .plans/2026-10-02-rust-core-and-tauri-shell.md.
 # Dependency direction mirrors the Swift package: steno-core depends on nothing
 # of ours; every other crate depends on steno-core; the shell and the CLI wire
 # them together.
@@ -35,6 +35,10 @@ tauri-plugin-opener = "2.7"
 thiserror = "2"
 tracing = "0.1"
 uuid = { version = "1", features = ["serde", "v4"] }
+# The digit source of `steno-bridge`'s `json::write_number`: shortest
+# round-trip digits with ties to even, as Foundation breaks them and Rust's
+# `Display` does not. Already in the lock through serde_json.
+zmij = "1"
 # Test only
 similar = "2"
 tempfile = "3"

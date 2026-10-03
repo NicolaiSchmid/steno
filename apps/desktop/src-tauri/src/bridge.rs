@@ -192,9 +192,12 @@ pub struct WindowParams {
 }
 
 /// `meetingID` as `UUID(uuidString:)` reads it: the hyphenated 36-character
-/// form only, either case. The `uuid` crate would also read the 32-digit,
-/// braced and `urn:uuid:` forms, which Foundation rejects. `steno-bridge`
-/// brings this as `json::uuid::option`.
+/// form only, either case, for the reason given at
+/// `steno_core::json::parse_uuid`. The core has this codec as
+/// `steno_core::json::uuid_text_opt`; the shell switches to it in WP6 of
+/// `.plans/2026-10-02-rust-core-and-tauri-shell.md`. The core's message is
+/// lower-case (`not a UUID: ...`); the test below follows when the shell
+/// switches.
 fn deserialize_meeting_id<'de, D: Deserializer<'de>>(
     deserializer: D,
 ) -> Result<Option<Uuid>, D::Error> {
@@ -209,8 +212,9 @@ fn deserialize_meeting_id<'de, D: Deserializer<'de>>(
 }
 
 /// A UUID as the Swift host writes it (`UUID.uuidString`, upper case), so a
-/// `requestedMeetingID` matches the list's ids by string. `steno-bridge`
-/// brings this as `json::uuid::format`.
+/// `requestedMeetingID` matches the list's ids by string. Its core
+/// counterpart is `steno_core::json::uuid_string`, which the shell takes in
+/// WP6.
 pub fn uuid_text(id: &Uuid) -> String {
     id.hyphenated()
         .encode_upper(&mut Uuid::encode_buffer())

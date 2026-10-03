@@ -5,7 +5,8 @@
 //! contract type, calls the host and wraps the outcome. Two entry points for
 //! the two transports: [`Dispatcher::call`] takes a method and its params,
 //! which is what the Tauri `bridge_call` command receives (the Tauri
-//! transport added by WP3 sends `{ method, params }` and no id);
+//! transport, `apps/macos/web/src/bridge/tauri-transport.ts`, sends
+//! `{ method, params }` and no id);
 //! [`Dispatcher::dispatch`] takes the request envelope with its `id` and
 //! always answers with a reply envelope, never a rejection, as
 //! `webkit-transport.ts` expects.
@@ -14,10 +15,9 @@
 //! direction of accepting what the page never sends: serde reads a params
 //! struct from a positional array as well as from an object (`["abc"]` for
 //! `{ "meetingId": "abc" }`), where Swift's keyed decoder rejects the array.
-//! Not pinned either way. The UUID codec (`json::uuid`) used to be lenient
-//! too (the `uuid` crate reads un-hyphenated and `urn:uuid:` forms that
-//! `UUID(uuidString:)` rejects); it now takes only the hyphenated
-//! 36-character form, since ids on the wire come from the host's own
+//! Not pinned either way. The UUID codec goes the other way and is strict:
+//! `steno_core::json::parse_uuid` reads the hyphenated form only, as
+//! `UUID(uuidString:)` does; ids on the wire come from the host's own
 //! snapshots.
 //!
 //! Hosts run blocking. Every method takes `&self` and returns when the work

@@ -3,15 +3,15 @@
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use steno_core::json::{iso_time, iso_time_opt, uuid_text, uuid_text_opt};
+use steno_core::string_enum;
 use uuid::Uuid;
 
 use crate::envelope::{
     BridgeTopic, CaptureMode, MeetingSource, MeetingState, PermissionKind, PermissionState,
     SettingsSection,
 };
-use crate::json;
 use crate::settings::SummariesSettingsSnapshot;
-use crate::string_enum::string_enum;
 
 /// A payload the host publishes on a fixed topic; `EventSinkExt::publish`
 /// derives the topic from the type.
@@ -36,7 +36,7 @@ pub struct AppSnapshot {
         rename = "requestedMeetingID",
         default,
         skip_serializing_if = "Option::is_none",
-        with = "json::uuid::option"
+        with = "uuid_text_opt"
     )]
     pub requested_meeting_id: Option<Uuid>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -65,7 +65,7 @@ pub struct AppPhone {
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
-        with = "json::date::option"
+        with = "iso_time_opt"
     )]
     pub last_sync_at: Option<DateTime<Utc>>,
     pub is_reachable: bool,
@@ -108,7 +108,7 @@ pub struct RecordingSnapshot {
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
-        with = "json::date::option"
+        with = "iso_time_opt"
     )]
     pub started_at: Option<DateTime<Utc>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -119,7 +119,7 @@ pub struct RecordingSnapshot {
         rename = "meetingID",
         default,
         skip_serializing_if = "Option::is_none",
-        with = "json::uuid::option"
+        with = "uuid_text_opt"
     )]
     pub meeting_id: Option<Uuid>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -143,7 +143,7 @@ impl Snapshot for RecordingSnapshot {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProgressEntry {
-    #[serde(rename = "meetingID", with = "json::uuid")]
+    #[serde(rename = "meetingID", with = "uuid_text")]
     pub meeting_id: Uuid,
     pub stage: String,
     pub title: String,
@@ -178,7 +178,7 @@ string_enum! {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SpeakerChip {
-    #[serde(with = "json::uuid")]
+    #[serde(with = "uuid_text")]
     pub id: Uuid,
     pub initial: String,
     /// Index into the page's fixed people palette; stable per person.
@@ -190,10 +190,10 @@ pub struct SpeakerChip {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MeetingRow {
-    #[serde(with = "json::uuid")]
+    #[serde(with = "uuid_text")]
     pub id: Uuid,
     pub title: String,
-    #[serde(with = "json::date")]
+    #[serde(with = "iso_time")]
     pub started_at: DateTime<Utc>,
     pub duration_seconds: f64,
     pub source: MeetingSource,
@@ -245,7 +245,7 @@ pub struct MeetingsListSnapshot {
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
-        with = "json::uuid::option"
+        with = "uuid_text_opt"
     )]
     pub selection: Option<Uuid>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -288,7 +288,7 @@ pub struct DetailRetention {
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
-        with = "json::date::option"
+        with = "iso_time_opt"
     )]
     pub deletes_at: Option<DateTime<Utc>>,
     pub keeps_audio: bool,
@@ -296,30 +296,24 @@ pub struct DetailRetention {
     pub files_exist: bool,
 }
 
-string_enum! {
-    /// Swift: `MeetingDetailSnapshot.Speaker.Assignment`, an alias of
-    /// `StenoCore.SpeakerAssignment.Kind`; hence the core name, no topic word.
-    pub enum SpeakerAssignment {
-        Unknown = "unknown",
-        Suggested = "suggested",
-        Confirmed = "confirmed",
-    }
-}
+/// Swift: `MeetingDetailSnapshot.Speaker.Assignment`, an alias of
+/// `StenoCore.SpeakerAssignment.Kind`; hence the core type itself.
+pub use steno_core::SpeakerAssignmentKind;
 
 /// Swift: `MeetingDetailSnapshot.Speaker`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DetailSpeaker {
-    #[serde(with = "json::uuid")]
+    #[serde(with = "uuid_text")]
     pub id: Uuid,
     pub cluster_label: String,
     pub display_name: String,
-    pub assignment: SpeakerAssignment,
+    pub assignment: SpeakerAssignmentKind,
     #[serde(
         rename = "personID",
         default,
         skip_serializing_if = "Option::is_none",
-        with = "json::uuid::option"
+        with = "uuid_text_opt"
     )]
     pub person_id: Option<Uuid>,
     /// The confirmed or suggested person's email, when known.
@@ -358,13 +352,13 @@ pub struct DetailSummarySection {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DetailTurn {
-    #[serde(with = "json::uuid")]
+    #[serde(with = "uuid_text")]
     pub id: Uuid,
     #[serde(
         rename = "speakerID",
         default,
         skip_serializing_if = "Option::is_none",
-        with = "json::uuid::option"
+        with = "uuid_text_opt"
     )]
     pub speaker_id: Option<Uuid>,
     pub speaker_name: String,
@@ -373,21 +367,15 @@ pub struct DetailTurn {
     pub text: String,
 }
 
-string_enum! {
-    /// Swift: `MeetingDetailSnapshot.Task.Priority`, an alias of
-    /// `StenoCore.TaskPriority`; hence the core name, no topic word.
-    pub enum TaskPriority {
-        Low = "low",
-        Normal = "normal",
-        High = "high",
-    }
-}
+/// Swift: `MeetingDetailSnapshot.Task.Priority`, an alias of
+/// `StenoCore.TaskPriority`; hence the core type itself.
+pub use steno_core::TaskPriority;
 
 /// Swift: `MeetingDetailSnapshot.Task`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DetailTask {
-    #[serde(with = "json::uuid")]
+    #[serde(with = "uuid_text")]
     pub id: Uuid,
     pub text: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -397,7 +385,7 @@ pub struct DetailTask {
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
-        with = "json::date::option"
+        with = "iso_time_opt"
     )]
     pub due_date: Option<DateTime<Utc>>,
     pub priority: TaskPriority,
@@ -452,10 +440,10 @@ pub struct DetailSummaryStatus {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MeetingDetailSnapshot {
-    #[serde(with = "json::uuid")]
+    #[serde(with = "uuid_text")]
     pub id: Uuid,
     pub title: String,
-    #[serde(with = "json::date")]
+    #[serde(with = "iso_time")]
     pub started_at: DateTime<Utc>,
     pub duration_seconds: f64,
     #[serde(default, skip_serializing_if = "Option::is_none")]

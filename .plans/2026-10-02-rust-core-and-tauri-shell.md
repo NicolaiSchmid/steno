@@ -116,12 +116,12 @@ line here.
 
 ## Work packages
 
-Order is dependency order; packages on one line run in parallel. Stacking: this
-branch (`refactor/rust-workspace`, PR #151) sits on `t3code/assess-linux-windows-webui`
-(PR #150, the spikes and speech-stack plans); WP1, WP2 and WP3 are PRs off this branch
-(#153, #155, #156) that rebase onto it as it changes; everything reaches `main` through
-#150, then #151, then the package PRs in order. Packages after WP3 branch from `main`
-once that chain has merged.
+Order is dependency order; packages on one line run in parallel. Stacking: the
+workspace branch (`refactor/rust-workspace`, PR #151) sat on
+`t3code/assess-linux-windows-webui` (PR #150, the spikes and speech-stack plans); WP1,
+WP2 and WP3 were PRs off it (#153, #155, #156) and reached `main` in that order after
+#150 and #151. PR #161 makes `steno-bridge` depend on `steno-core` and removes the
+bridge's copies of the macro and codecs. Packages after WP3 branch from `main`.
 
 - **WP1 workspace and bridge.** Cargo workspace, toolchain, CI matrix, `.gitignore`,
   `AGENTS.md`. `steno-bridge` with every topic, method, snapshot, params and envelope
@@ -194,6 +194,9 @@ What the bridge crate (WP1) asks of the Swift side before WP6 fills the list:
   set, written by `BridgeSamples` next to the existing ones, so the Rust round-trip
   test pins the optional keys that `crates/steno-bridge/tests/optional_fields.rs`
   pins by hand today.
+- Fixtures: a task with `priority: low` in `meeting.detail`, so the round-trip pins
+  every `TaskPriority` case; `contract_ts_nested_enums_match` in
+  `crates/steno-bridge/tests/fixtures.rs` pins it by hand today.
 
 ## Progress
 
@@ -205,4 +208,5 @@ PR off `main`.
 | WP1 workspace and bridge | `feat/rust-bridge` | #153 | merged |
 | WP2 store | `feat/rust-store` | #155 | merged |
 | WP3 Tauri shell on fixtures | `feat/rust-desktop` | #156 | merged |
-| Core protocols and fakes | `feat/rust-protocols` | #162 | open |
+| Core protocols and fakes | `feat/rust-protocols` | #162 | merged |
+| Bridge on core | `refactor/rust-bridge-on-core` | #161 | open |

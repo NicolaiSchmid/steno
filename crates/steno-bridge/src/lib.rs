@@ -8,7 +8,10 @@
 //! Type mapping from Swift: `Int`/`Int64` are `i64`, `Double` is `f64`,
 //! `Date` is `chrono::DateTime<Utc>` written as `2026-09-29T12:48:00.000Z`,
 //! `UUID` is `uuid::Uuid` written upper case, a nil optional is an omitted
-//! key, `String` enums are `string_enum!` enums with the same raw values.
+//! key, `String` enums are `steno_core::string_enum!` enums with the same
+//! raw values. The date and UUID codecs are `steno_core::json`'s; this
+//! crate adds only the printer ([`json`]): the fixtures' pretty style and
+//! the dispatcher's compact one.
 //!
 //! Naming: a top-level Swift type keeps its name without the `Bridge` prefix
 //! (`BridgeMeetingSource` is [`MeetingSource`]). A type nested in a snapshot,
@@ -22,8 +25,8 @@
 //! (`PhoneSettingsSnapshot.Listener.State` is [`PhoneListenerState`]). The
 //! exception is a nested name Swift declares as a `typealias` of a
 //! `StenoCore` type: it keeps the core name and no topic word, so
-//! [`MeetingState`], [`RetentionMode`], [`SpeakerAssignment`] and
-//! [`TaskPriority`].
+//! [`MeetingState`], [`RetentionMode`], [`SpeakerAssignmentKind`] and
+//! [`TaskPriority`]; the last two are `steno_core`'s own enums re-exported.
 //!
 //! To add a method: the variant and raw value in [`BridgeMethod`]
 //! (`envelope.rs`); its params or reply type in `commands.rs`; one line in
@@ -35,10 +38,10 @@
 //! `snapshots.rs` or `settings.rs`; the fixture and the `FIXTURES` row
 //! (`every_topic_has_a_snapshot_fixture` fails until the fixture exists).
 //!
-//! Errors: [`BridgeError`] is the contract's error and nothing more. The
-//! mapping from the store's errors, `impl From<StoreError> for BridgeError`,
-//! arrives with `steno-core` later, in the crate that sees both types, so a
-//! host does not map store errors by hand.
+//! Errors: [`BridgeError`] is the contract's error and nothing more; its
+//! `From<steno_core::StoreError>` impl (`envelope.rs`) puts the store's
+//! errors on the contract's codes once, so a host returns them with `?`
+//! rather than mapping them by hand.
 //!
 //! Every public item is re-exported at the root; the modules are the table
 //! of contents.
@@ -49,11 +52,9 @@ pub mod envelope;
 pub mod json;
 pub mod settings;
 pub mod snapshots;
-pub mod string_enum;
 
 pub use commands::*;
 pub use dispatcher::*;
 pub use envelope::*;
 pub use settings::*;
 pub use snapshots::*;
-pub use string_enum::*;

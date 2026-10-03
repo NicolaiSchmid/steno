@@ -6,9 +6,6 @@
 //! `CaseIterable`) that routing tables and contract tests use at compile
 //! time. The enums are deliberately not `#[non_exhaustive]`: a case Swift
 //! adds fails to compile here until every match handles it.
-//!
-//! `steno-core` owns this macro; the bridge crate switches to it once both
-//! have landed.
 
 use thiserror::Error;
 

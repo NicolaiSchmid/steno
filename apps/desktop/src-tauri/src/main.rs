@@ -5,11 +5,12 @@
 //! recorded fixtures, so the whole UI runs on Linux and Windows before any
 //! pipeline exists; WP6 swaps the host for the real one.
 //!
-//! Seven shapes duplicate the `steno-bridge` crate's until that crate merges,
-//! then become `use` lines: `BridgeErrorCode`, `BridgeError`, `BridgeEvent`
-//! (whose `topic` becomes the `BridgeTopic` enum), `OpenUrlParams`,
-//! `SettingsSection` and `WindowParams` in `bridge.rs`, `BridgeWindow` in
-//! `windows.rs`; `bridge::uuid_text` becomes `json::uuid::format`.
+//! Seven shapes duplicate the `steno-bridge` crate's until WP6 wires the
+//! crates into the shell, then become `use` lines: `BridgeErrorCode`,
+//! `BridgeError`, `BridgeEvent` (whose `topic` becomes the `BridgeTopic`
+//! enum), `OpenUrlParams`, `SettingsSection` and `WindowParams` in
+//! `bridge.rs`, `BridgeWindow` in `windows.rs`; `bridge::uuid_text` becomes
+//! `steno_core::json::uuid_string`.
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 // Without the fixture host nothing emits a snapshot or publishes a request
