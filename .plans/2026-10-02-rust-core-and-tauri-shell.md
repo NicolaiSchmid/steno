@@ -152,19 +152,61 @@ bridge's copies of the macro and codecs. Packages after WP3 branch from `main`.
   corpus; ONNX Runtime backend through `ort` with the logits split validated on FLEURS
   German (closes the open item from the speech-stack plan); sidecar process; model
   manifest and download. Gate: FLEURS numbers within 0.5 points of the spike F table.
-  Integration notes (WP4a `crates/steno-speech`, #171, against the CoreML decoder of
-  #163): the two loops must become one per invariant 4, and they differ in eight
-  places. Repeated zero-duration tokens: the CoreML side forces duration 1 on the
-  second emission at a frame, `steno-speech` allows NeMo's `max_symbols` 10. Token
-  budget: fixed 150 per window there, `40 tokens/s * len + 16` here (150 would truncate
-  a 60 s chunk). Short window: the CoreML side returns empty for `valid <= 1`, here one
-  frame decodes. Tail flush: the CoreML side probes three boundary frames until five
-  blanks, none here, the merge owns the overlap. Emission suppression:
-  `emit_after_frame` and `Hypothesis` there, none here. Confidence: non-finite values
-  zeroed there, clamped after `split_logits` here. Merge: fixed 2.0 s overlap with a
-  contiguous-run preference and `minimum_pairs` there, 1.5 s LCS with tolerance
-  `max(overlap / 2, 0.5)` here. API: `Backend` plus `Scratch` plus `EncoderView` to
-  `Hypothesis` there, `SpeechBackend` (`&mut self`) to `Vec<Token>` here.
+  Integration notes (WP4a `crates/steno-speech`, #171, against `crates/steno-speech-coreml`
+  of #163), the input to the shared-decoder follow-up: invariant 4 makes the two
+  pipelines one, and today they differ here.
+  - Decode loop:
+    - Repeated zero-duration tokens: the CoreML side forces duration 1 on the second
+      emission at a frame; `steno-speech` allows NeMo's `max_symbols` 10.
+    - Token budget: fixed 150 per window there; 40 tokens per second of window, plus
+      16, here (150 would truncate a 60 s chunk).
+    - Short window: the CoreML side returns empty for `valid <= 1`; here one frame
+      decodes.
+    - Window end: the CoreML loop drops a token whose duration carries it past the
+      window end (`if active && label != BLANK_ID`; only the last window's flush
+      recovers it); here it is emitted, as NeMo does.
+    - Tail flush: the CoreML side runs up to 10 probes cycling three boundary frames
+      and stops at five blanks in a row; none here, the merge owns the overlap.
+    - Emission suppression: `emit_after_frame` and `Hypothesis` there, none here.
+    - Confidence: both sides zero non-finite values and clamp the rest.
+  - Merge:
+    - Overlap and anchors: a fixed 2.0 s overlap with a contiguous-run preference and
+      `minimum_pairs` there; 1.5 s LCS with tolerance `max(overlap / 2, 0.5)` here.
+    - Touching windows: the CoreML `merge_chunks` joins outright when
+      `left_end <= right_start`, as FluidAudio does, which keeps a word twice when
+      the right window repeats the left's last word a frame later. Here the join waits
+      for the match tolerance and the LCS runs with one token a side. The CoreML crate
+      keeps the shortcut until the shared merge replaces it.
+    - Right window ending inside the left: CoreML drops the left's tail; here the left
+      keeps it, also when the right tail only finishes the seam word.
+    - Seam word: CoreML hands it to the right window when the right heard it from its
+      start (`word_initial_index`, `pop_seam_word`); here the left always owns it.
+    - Ids match case-insensitively there (`ids_match`), exactly here.
+    - The LCS is walked back from the end there, forward here.
+    - `collapse_seam_word_duplicates` and the seam-gap repair pass exist only there.
+  - Recovery: CoreML gates on `is_whole_window_blank` plus an RMS check, then runs a
+    perturbation ladder with a credibility check. Here the gate is words per second of
+    speech, the retry only extends the window, and an accepted retry is trimmed to the
+    chunk plus the overlap.
+  - Chunking: FluidAudio's silence-aligned 14.96 s windows at a 12.96 s stride there;
+    the VAD layout with pause cuts here. Invariant 4 names the chunker as shared.
+  - API: `Backend` plus `Scratch` plus `EncoderView` to `Hypothesis` there,
+    `SpeechBackend` (`&mut self`) to `Vec<Token>` here.
+  - Names for the same concept, to settle in the shared crate:
+    - The backend: the `SpeechBackend` trait here; the `Backend` struct plus `Scratch`
+      there.
+    - `Token`: `id` is `u32` here, `usize` there; `duration` is the model's predicted
+      duration here and the frames the loop advanced (0 when unknown) there.
+    - Modules: `chunker` and `segmentation` here, `chunking` and `segments` there.
+    - Decoder limits: `max_symbols_per_frame` and `max_tokens_per_second` here,
+      `MAX_SYMBOLS_PER_STEP` and `MAX_TOKENS_PER_CHUNK` there.
+    - Engine id: `OnnxSpeechEngine::ID` here, a free `ENGINE_ID` there; both are
+      `parakeet-v3`, so one constant should own it.
+    - Swift pointers: a `Swift:` line here, `(Type.method)` there.
+    - Test tools: the WAV reader and the WER scorer sit in `tests/common` here and in
+      the `wav` and `wer` modules there.
+    - Chunk and window mean the same in both crates.
+
   **WP4d diarization.** `steno-diarize`: speech-stack decision 6 and gate G3, moved
   here on 2026-10-02 so it ships with the Rust pipeline. Segmentation and embedding
   behind one backend trait (CoreML over FluidAudio's models on the Mac, ONNX Runtime
@@ -597,7 +639,7 @@ PR off `main`.
 | Core protocols and fakes | `feat/rust-protocols` | #162 | merged |
 | Bridge on core | `refactor/rust-bridge-on-core` | #161 | merged |
 | WP4b CoreML speech backend | `feat/rust-speech-coreml` | #163 | merged |
-| WP4a speech: `steno-speech` pipeline (VAD, chunker, TDT decoder, merge, tagger), ONNX Runtime backend, model store | `feat/rust-speech` | #171 | open |
+| WP4a speech pipeline and ONNX backend | `feat/rust-speech` | #171 | open |
 | WP7a LLM (`steno-llm`) | `feat/rust-llm` | #167 | merged |
 | WP7b adapters | `feat/rust-adapters` | #165 | merged |
 | WP6a host | `feat/rust-host` | #170 | merged |
