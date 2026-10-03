@@ -16,7 +16,7 @@
 //! | [`handover`] | The identity in the secret store and the host's `Handover` over the listener |
 //! | [`secrets`] | The platform keyring and the 0600 secrets file behind `SecretStore` |
 //! | [`export`] | The host's `ExportValidator` over the Obsidian destination |
-//! | [`files`] | Replacing a file in one step: the secrets file, the CLI's `meeting.json` |
+//! | [`files`] | Durable writes, from `steno-pipeline`: the secrets file, the CLI's `meeting.json` |
 //! | [`platform`] | The clock, the folder usage walk, the input device list, the first-launch flags |
 //!
 //! What stays a fake here is named in [`build`]'s doc: the shell's
@@ -62,7 +62,6 @@
 
 pub mod app;
 pub mod export;
-pub mod files;
 pub mod handover;
 pub mod llm;
 pub mod pipeline;
@@ -75,6 +74,9 @@ mod testing;
 
 pub use app::{App, AppOptions, BuildError, build, open_store};
 pub use secrets::{FileSecretStore, KeyringSecretStore, secret_store};
+/// The durable writes live with the pipeline, whose phone intake needs
+/// them; the secrets file and the CLI's `meeting.json` use them from here.
+pub use steno_pipeline::files;
 
 /// The shell's log filter when `RUST_LOG` is unset.
 pub const LOG_FILTER: &str = "warn";

@@ -65,6 +65,13 @@ pub fn default_title(
 /// complete, enqueues a `phone` meeting with a `mixed` asset under the
 /// default retention, and only then deletes the upload. Idempotent on
 /// `recording_id`.
+///
+/// The copy and the meeting folder are synced to the disk before the
+/// receipt is marked complete ([`crate::files::copy_durably`]), because
+/// the phone deletes its own copy once `complete` answers 200. This is
+/// deliberately stricter than Swift, whose `RecordingIntake` used
+/// `copyItem` and synced nothing, so a power loss after the answer lost
+/// the recording on both devices. Swift: `Sources/StenoCore/Storage/RecordingIntake.swift`.
 pub struct RecordingIntake {
     store: Arc<Store>,
     enqueue: Enqueue,
@@ -114,12 +121,11 @@ impl HandoverIntake for RecordingIntake {
         let audio_folder = file_url_path(&settings.audio_folder)
             .ok_or_else(|| format!("audio folder is not a file URL: {}", settings.audio_folder))?;
         let layout = RecordingLayout::new(&audio_folder, meeting_id);
-        layout.create_directories(false)?;
+        // The copy and its folder are on the disk before the receipt says
+        // complete: the phone deletes its own copy on that answer.
+        crate::files::create_dir_all_durably(&layout.directory)?;
         let destination = layout.master(metadata.format);
-        if destination.exists() {
-            std::fs::remove_file(&destination)?;
-        }
-        std::fs::copy(file, &destination)?;
+        crate::files::copy_durably(file, &destination)?;
 
         let meeting = Meeting {
             id: meeting_id,

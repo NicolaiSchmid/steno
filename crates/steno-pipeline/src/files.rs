@@ -1,10 +1,36 @@
-//! Replacing a file in one step, for the secrets file and the CLI's
-//! `meeting.json`. Swift: `Data.write(to:options: .atomic)`.
+//! Durable file writes: replacing a file in one step (the secrets file, the
+//! CLI's `meeting.json`; Swift: `Data.write(to:options: .atomic)`), copying
+//! a recording so it survives a power loss (the phone intake), and creating
+//! folders whose entries survive one. The services and the CLI use these
+//! too, so there is one implementation.
 
-use std::fs::OpenOptions;
+use std::fs::{File, OpenOptions};
 use std::io::Write as _;
 use std::path::Path;
 use std::time::{Duration, SystemTime};
+
+/// The syncs a durable write makes; the disk in the product, a recorder in
+/// the tests, which check what is synced and when.
+trait Syncs {
+    /// Flushes `file`, written at `path`, to the disk.
+    fn file(&self, file: &File, path: &Path) -> std::io::Result<()>;
+    /// Makes the entries of `directory` (a rename, a new folder) durable;
+    /// best effort where the platform cannot sync a folder.
+    fn directory(&self, directory: &Path);
+}
+
+/// The product's syncs.
+struct Disk;
+
+impl Syncs for Disk {
+    fn file(&self, file: &File, _path: &Path) -> std::io::Result<()> {
+        file.sync_all()
+    }
+
+    fn directory(&self, directory: &Path) {
+        sync_directory(directory);
+    }
+}
 
 /// Who may read a file [`replace_file`] writes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -33,6 +59,55 @@ const STALE_AFTER: Duration = Duration::from_secs(60);
 /// failure removes the temporary; temporaries a killed writer left behind
 /// are removed by a later write once they are a minute old.
 pub fn replace_file(path: &Path, data: &[u8], access: Access) -> std::io::Result<()> {
+    write_durably(&Disk, path, access, |file| file.write_all(data))
+}
+
+/// Copies `source` to `destination` the way [`replace_file`] writes: into a
+/// temporary of its own beside `destination`, synced, renamed into place,
+/// the folder synced, so once this returns the copy survives a power loss.
+/// The phone intake copies an upload with it before it marks the receipt
+/// complete, since the phone deletes its own copy then; Swift's
+/// `RecordingIntake` used `copyItem`, which syncs nothing.
+pub fn copy_durably(source: &Path, destination: &Path) -> std::io::Result<()> {
+    copy_durably_with(&Disk, source, destination)
+}
+
+fn copy_durably_with(syncs: &dyn Syncs, source: &Path, destination: &Path) -> std::io::Result<()> {
+    let mut reader = File::open(source)?;
+    write_durably(syncs, destination, Access::Default, |file| {
+        std::io::copy(&mut reader, file).map(|_| ())
+    })
+}
+
+/// `std::fs::create_dir_all`, with the parent of every folder it creates
+/// synced, so the new folders themselves survive a power loss.
+pub fn create_dir_all_durably(directory: &Path) -> std::io::Result<()> {
+    create_dir_all_durably_with(&Disk, directory)
+}
+
+fn create_dir_all_durably_with(syncs: &dyn Syncs, directory: &Path) -> std::io::Result<()> {
+    let missing: Vec<&Path> = directory
+        .ancestors()
+        .take_while(|ancestor| !ancestor.as_os_str().is_empty() && !ancestor.exists())
+        .collect();
+    std::fs::create_dir_all(directory)?;
+    for created in missing.iter().rev() {
+        if let Some(parent) = created.parent().filter(|p| !p.as_os_str().is_empty()) {
+            syncs.directory(parent);
+        }
+    }
+    Ok(())
+}
+
+/// The one durable write: `write` fills a temporary of this writer's own
+/// beside `path`, which is synced, renamed onto `path`, and the folder
+/// synced. Dropping the temporary on an error removes it.
+fn write_durably(
+    syncs: &dyn Syncs,
+    path: &Path,
+    access: Access,
+    write: impl FnOnce(&mut File) -> std::io::Result<()>,
+) -> std::io::Result<()> {
     let directory = match path.parent() {
         Some(parent) if !parent.as_os_str().is_empty() => parent,
         _ => Path::new("."),
@@ -57,12 +132,11 @@ pub fn replace_file(path: &Path, data: &[u8], access: Access) -> std::io::Result
     }
     #[cfg(not(unix))]
     let _ = access;
-    // Dropping the temporary on an error below removes it.
     let mut temporary = builder.tempfile_in(directory)?;
-    temporary.write_all(data)?;
-    temporary.as_file().sync_all()?;
+    write(temporary.as_file_mut())?;
+    syncs.file(temporary.as_file(), temporary.path())?;
     temporary.persist(path).map_err(|error| error.error)?;
-    sync_directory(directory);
+    syncs.directory(directory);
     Ok(())
 }
 
@@ -223,6 +297,121 @@ mod tests {
             "another file's temporary is not this write's"
         );
         assert_eq!(std::fs::read(&path).unwrap(), b"{}");
+    }
+
+    /// What a test's syncs saw, in order: `file`, with whether the
+    /// destination existed yet, and `directory`, with the same.
+    struct Recorded {
+        destination: std::path::PathBuf,
+        events: std::sync::Mutex<Vec<(String, bool)>>,
+        fail_file_sync: bool,
+    }
+
+    impl Recorded {
+        fn new(destination: &Path) -> Self {
+            Recorded {
+                destination: destination.to_path_buf(),
+                events: std::sync::Mutex::new(Vec::new()),
+                fail_file_sync: false,
+            }
+        }
+
+        fn events(&self) -> Vec<(String, bool)> {
+            self.events.lock().unwrap().clone()
+        }
+    }
+
+    impl Syncs for Recorded {
+        fn file(&self, file: &File, path: &Path) -> std::io::Result<()> {
+            assert_eq!(
+                file.metadata()?.len(),
+                std::fs::metadata(path)?.len(),
+                "the handle is the temporary's"
+            );
+            self.events
+                .lock()
+                .unwrap()
+                .push(("file".to_owned(), self.destination.exists()));
+            if self.fail_file_sync {
+                return Err(std::io::Error::other("the disk is full"));
+            }
+            Ok(())
+        }
+
+        fn directory(&self, directory: &Path) {
+            self.events.lock().unwrap().push((
+                format!("directory {}", directory.display()),
+                self.destination.exists(),
+            ));
+        }
+    }
+
+    /// The copy is synced before the rename and the folder after it, so a
+    /// complete copy is on the disk when it returns: the content is the
+    /// source's and no temporary is left.
+    #[test]
+    fn a_durable_copy_syncs_the_file_then_renames_then_syncs_the_folder() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("upload.m4a");
+        std::fs::write(&source, vec![7u8; 100_000]).unwrap();
+        let destination = dir.path().join("meeting").join("recording.m4a");
+        std::fs::create_dir_all(destination.parent().unwrap()).unwrap();
+        let syncs = Recorded::new(&destination);
+        copy_durably_with(&syncs, &source, &destination).unwrap();
+        assert_eq!(
+            syncs.events(),
+            [
+                ("file".to_owned(), false),
+                (
+                    format!("directory {}", destination.parent().unwrap().display()),
+                    true
+                ),
+            ]
+        );
+        assert_eq!(std::fs::read(&destination).unwrap(), vec![7u8; 100_000]);
+        assert_eq!(
+            temporaries(destination.parent().unwrap()),
+            Vec::<String>::new()
+        );
+    }
+
+    /// A failure before the rename leaves no destination and no
+    /// temporary, so nothing half copied is ever taken for the recording.
+    #[test]
+    fn a_copy_that_fails_before_the_rename_leaves_no_destination() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("upload.m4a");
+        std::fs::write(&source, b"aac").unwrap();
+        let destination = dir.path().join("recording.m4a");
+        let mut syncs = Recorded::new(&destination);
+        syncs.fail_file_sync = true;
+        assert!(copy_durably_with(&syncs, &source, &destination).is_err());
+        assert!(!destination.exists());
+        assert_eq!(temporaries(dir.path()), Vec::<String>::new());
+        assert!(copy_durably(&dir.path().join("missing.m4a"), &destination).is_err());
+        assert!(!destination.exists());
+    }
+
+    /// Every folder created is made durable by syncing its parent; folders
+    /// that existed are left alone.
+    #[test]
+    fn new_folders_are_synced_into_their_parents() {
+        let dir = tempfile::tempdir().unwrap();
+        let audio = dir.path().join("audio");
+        let meeting = audio.join("0B6F4B1E");
+        let syncs = Recorded::new(&meeting);
+        create_dir_all_durably_with(&syncs, &meeting).unwrap();
+        assert!(meeting.is_dir());
+        assert_eq!(
+            syncs.events(),
+            [
+                (format!("directory {}", dir.path().display()), true),
+                (format!("directory {}", audio.display()), true),
+            ]
+        );
+        let again = Recorded::new(&meeting);
+        create_dir_all_durably_with(&again, &meeting).unwrap();
+        assert_eq!(again.events(), Vec::<(String, bool)>::new());
     }
 
     #[test]
