@@ -86,7 +86,8 @@ with a fake in `steno_host::fakes`, so the whole host runs without a shell on a 
 database; the core's own boundaries (`steno_core::protocols`) are used where one exists.
 One temporary exception: from WP3 until WP6 the shell carries a fixture host behind its
 `fixture-host` feature that answers the bridge from the recorded fixtures, so the UI
-runs on every platform before the pipeline exists.
+runs on every platform before the pipeline exists; since WP6b the real host is the
+default and the feature is opt-in, for UI work without a database.
 
 Platform backends behind traits, two implementations before generalising: `Capture`
 (CoreAudio, PipeWire, WASAPI, synthetic), `SpeechBackend` (CoreML, ONNX Runtime, fake),
@@ -285,16 +286,18 @@ bridge's copies of the macro and codecs. Packages after WP3 branch from `main`.
   parity suite and the ported view model tests; the parity list below is filled from it.
   **WP6b pipeline**: orchestration (`process`, retention, speaker matching, export), the
   CLI, the shell switched from its `fixture-host` feature to `steno-host` (the feature
-  is removed), the real `Recorder` and `Pipeline` behind the host's traits. Parity: the
-  Swift `steno export` of a calibration meeting equals the Rust one field for field. The
-  shell's seams towards the host (the prompt and its dismissal, `panels::set_prompt` and
-  `panels::dismiss_prompt`; the login item and update outcomes; the permissions; the
-  destructive alert; the folder choices; the reveal methods) are filled by WP6b. So is
-  shutdown: Quit, and a close that ends the process because no tray stands, must stop
-  and save a recording in progress first, as `applicationShouldTerminate` in
-  `apps/macos/Steno/StenoApp.swift` does (it awaits `AppController.shutdown`); today the
-  shell ends the process at once. The keyring `SecretStore` is not the shell's: it
-  lives in `steno-services` (#173, WP6b).
+  stays, opt-in, for UI work without a database), the real `Recorder` and `Pipeline`
+  behind the host's traits. Parity: the Swift `steno export` of a calibration meeting
+  equals the Rust one field for field. The shell's seams towards the host, as WP6b left
+  them: the destructive alert, the folder choices, the reveal methods (the `Opener` over
+  `dialogs` and `windows`) and the login item (`autostart::ShellLoginItem`) are wired;
+  the prompt and its dismissal, the permissions and the update outcomes are not, for the
+  reasons under "Pipeline and services (WP6b)". `[x]` Shutdown: Quit from the tray or
+  the macOS menu bar, and a close that ends the process because no tray stands, stop and
+  save a recording in progress first (`exit_request` in `apps/desktop/src-tauri/src/main.rs`
+  over `ExitGate` and `App::shutdown`), as `applicationShouldTerminate` in
+  `apps/macos/Steno/StenoApp.swift` does (it awaits `AppController.shutdown`). The
+  keyring `SecretStore` is not the shell's: it lives in `steno-services` (#173, WP6b).
 - **WP7 LLM, adapters, handover.** Ports of `StenoLLM` (Codex and OpenAI-compatible),
   `StenoAdapters`, `StenoHandover` (rustls, the pinned trust evaluation, the shared
   `wire.ts` contract test). Lands as three PRs: WP7a LLM, WP7b adapters, WP7c handover.
@@ -383,8 +386,9 @@ still has to draw the window side. `[ ]` is not ported yet.
 - [x] `setup.dismissBanner`.
 - [x] `settings.general.setLaunchAtLogin`, `.setDetectionEnabled`,
   `.setDefaultTemplate`, `.requestCalendar`, `.setAutomaticUpdates`, `.openLoginItems`:
-  through the `LoginItem`, `Permissions` and `Updater` traits, which WP6b implements
-  over WP8's shell modules (`autostart`, `permissions`, `updater`).
+  through the `LoginItem`, `Permissions` and `Updater` traits; WP6b implements
+  `LoginItem` over WP8's `autostart`, `Permissions` and `Updater` stay the services'
+  fakes (see "Pipeline and services (WP6b)").
 - [x] `settings.recording.setInputDevice`, `.refreshDevices`, `.chooseFolder` (the
   shell's chooser), `.revealFolder`, `.setRetention` (Forever keeps every recording on
   disk through `Pipeline::keep_all_recordings`), `.requestPermission`.
@@ -426,11 +430,12 @@ still has to draw the window side. `[ ]` is not ported yet.
   (`steno_services::App::launch`).
 - [ ] Pending speaker reviews (`speakersNeedReview`): the pipeline posts the event and
   the host republishes `progress`; the tray (WP8) shows no badge for it yet.
-- [ ] Updates: Sparkle today, the Tauri updater at cutover; the `Updater` trait, which
-  WP6b implements over WP8's `updater`.
+- [ ] Updates: Sparkle today, the Tauri updater at cutover; the `Updater` trait is still
+  the services' fake, since WP8's `updater` has no automatic-check or automatic-download
+  flag and no last check time to report (see "Pipeline and services (WP6b)").
 - [x] Login item: registered on the first launch when the setting says so
   (`Host::register_login_item_on_first_launch`), toggled from General, the pane opened;
-  the `LoginItem` trait, which WP6b implements over WP8's `autostart`.
+  the `LoginItem` trait over WP8's `autostart` (`autostart::ShellLoginItem`, WP6b).
 - [ ] Calendar: the event that names a recording and its attendees, looked up at
   recording start: the recorder, WP5.
 - [x] Phone pairing: the QR code, a phone's arrival closing the code, a code running
@@ -522,9 +527,30 @@ still has to draw the window side. `[ ]` is not ported yet.
   receipt and meeting commits still run under `NORMAL` (the Store item below).
 - Quitting while recording stops the recording with `quit` and saves it before the
   process exits (`App::shutdown` behind `ExitGate`, at most ten seconds), as Swift's
-  `applicationShouldTerminate` awaited `AppController.shutdown()`. Open until the
-  rebase after #172: macOS Quit (muda's `terminate:`) bypasses `ExitRequested`; wire
-  `App::shutdown` into #172's Quit item and tray close then.
+  `applicationShouldTerminate` awaited `AppController.shutdown()`. Every exit request
+  goes through `exit_request` in the shell: Quit in the tray's menu and in the macOS
+  menu bar (#172's own item, not muda's `terminate:`), a destroyed main window with no
+  tray, and the last window closing with no tray. Open on macOS: the Dock's Quit, a
+  logout and a system shutdown send `terminate:` to the application directly, and tao
+  answers with `applicationWillTerminate` only, no `ExitRequested`; a recording is not
+  saved there and the next launch marks it failed with the interrupted reason. Closing
+  it needs `applicationShouldTerminate` from tao or a delegate of the shell's own
+  (WP9, with the cutover).
+- The shell's seams WP6b leaves open, each waiting on work outside the shell: (1) the
+  detection prompt: no `DetectionController` is ported (WP5), so nothing calls
+  `panels::set_prompt` and `panels::dismiss_prompt` tells no one; (2) the host's
+  `Permissions` stay the services' fake (all granted): WP8's `permissions` answers
+  `unknown` off the Mac and for the Mac's system audio, and the host's onboarding
+  opener counts anything but `granted` as missing, so wiring it would open onboarding
+  at every launch on Linux and Windows; it waits for the audio crate's tap probe (WP5)
+  and a rule for what `unknown` means; (3) the host's `Updater` stays the fake: WP8's
+  `updater` checks only when asked, keeps no automatic-check or automatic-download flag
+  and no last check time, so the General section's Updates row has nothing real to
+  show, and `updates.check` stays the shell's; filling it is the update schedule WP9
+  decides, and the shell's `UpdateOutcome` stays beside the host's until then; (4) the
+  QR encoder and the clip player are fakes, so the pairing code shows no QR image and a
+  speaker's sample clip does not play: each needs new code (a QR crate, an audio
+  output), not wiring.
 - The two-second pairing poll (`Host::refresh_pairing`) rides on the store poll in
   `App::launch` and runs whether or not a code is shown, where Swift ran it only while
   the Phones pane showed one.
@@ -833,7 +859,7 @@ PR off `main`.
 | WP7c handover | `feat/rust-handover` | #169 | merged |
 | WP8 shell completion: tray, floating panels, autostart, updater, permissions, deep links, single instance, dialogs, installer bundles and the unsigned release workflow (`cargo deny` and signing follow with WP9) | `feat/rust-shell` | #172 | merged |
 | Store opens with `synchronous = NORMAL` | `fix/rust-core-concurrency-flake` | #174 | merged |
-| WP6b pipeline, CLI, services and shell wiring | `feat/rust-pipeline` | #173 | open |
+| WP6b pipeline, CLI, services, the shell on the real host, quitting saves first | `feat/rust-pipeline` | #173 | open |
 
 WP4b is `crates/steno-speech-coreml`: `objc2-core-ml` behind one safe module,
 the four backend calls, the FluidAudio 0.17.4 heuristics ported
@@ -869,9 +895,11 @@ right after one can forget a pairing (the phone gets 401 and unpairs, and the us
 pairs it again) or bring a revoked device back.
 
 WP6b is `crates/steno-pipeline`, `crates/steno-cli` and `crates/steno-services`,
-and `apps/desktop` on the real host. It sits on `main` and merges after #172 (the
-shell); the rebase after #172 wires `App::shutdown` into #172's Quit item and tray
-close and reruns the desktop smoke.
+and `apps/desktop` on the real host. It sits on `main` with every parent merged,
+#172 included: the shell answers the bridge from `steno_host::Host` over the services
+graph, each window's commands through `Host::for_window`, and Quit and a no-tray close
+go through `App::shutdown`; the desktop and panel smokes pass on the real host with an
+empty database.
 `process` runs the Swift stage order, with progress events in core
 (`MeetingEvent`, `ProcessingProgress`), learned stage rates, both intakes, the
 retention sweep and the store-backed cosine memory; `steno` has every Swift command
@@ -881,5 +909,5 @@ in-process until `WP4c`; the `CoreML` engine leaves `language` unset (#163), and
 `LanguageTaggingEngine` in the services crate runs `steno_speech`'s tagger after it,
 as `ParakeetMapping` did in Swift. Secrets: the platform keyring on macOS and
 Windows, the 0600 `secrets.json` on Linux (the kernel keyring does not survive a
-reboot; the Secret Service is WP8's). Parity items: the Pipeline and services list
+reboot; the Secret Service, which needs D-Bus, has no work package yet). Parity items: the Pipeline and services list
 above.
