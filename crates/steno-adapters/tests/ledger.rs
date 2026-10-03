@@ -234,3 +234,76 @@ fn folder_path_joins_root_and_folder() {
         std::path::Path::new("/vault/").join(LEDGER_FOLDER)
     );
 }
+
+#[test]
+fn folder_path_falls_back_to_the_root_for_a_folder_that_leaves_it() {
+    for folder in [
+        "../elsewhere",
+        "/Meetings/2026-09-24-sync",
+        "./Meetings",
+        "",
+    ] {
+        let receipt = DeliveryReceipt {
+            folder: folder.to_owned(),
+            ..receipt(ROOT, &[])
+        };
+        assert_eq!(
+            receipt_folder_path(&receipt),
+            std::path::Path::new(ROOT),
+            "{folder:?}"
+        );
+    }
+}
+
+#[test]
+fn this_runs_records_do_not_widen_may_write() {
+    let previous = receipt(ROOT, &[(NOTE, FileOwnership::Owned)]);
+    let mut ledger = DeliveryLedger::new(Some(&previous), ROOT);
+    ledger.record(AUDIO, FileOwnership::Owned, b"audio");
+    assert!(
+        ledger.files().contains_key(AUDIO),
+        "the receipt lists it for the next run"
+    );
+    assert!(
+        !ledger.may_write(AUDIO, true),
+        "the previous receipt decides; a file recorded this run is not owned yet"
+    );
+    assert!(ledger.may_write(AUDIO, false));
+}
+
+#[test]
+fn stale_managed_pages_are_the_previous_blocks_not_rendered_this_time() {
+    const BOB: &str = "People/Bob.md";
+    let previous = receipt(
+        ROOT,
+        &[
+            (NOTE, FileOwnership::Owned),
+            (AUDIO, FileOwnership::Owned),
+            (ANNA, FileOwnership::ManagedBlock),
+            (BOB, FileOwnership::ManagedBlock),
+        ],
+    );
+    let mut ledger = DeliveryLedger::new(Some(&previous), ROOT);
+    let rendered = |paths: &[&str]| paths.iter().map(|p| (*p).to_owned()).collect();
+    assert_eq!(ledger.stale_managed_pages(&rendered(&[ANNA])), [BOB]);
+    assert_eq!(
+        ledger.stale_managed_pages(&rendered(&[])),
+        [ANNA, BOB],
+        "owned files are never stale pages"
+    );
+    assert_eq!(
+        ledger.stale_managed_pages(&rendered(&[ANNA, BOB])),
+        Vec::<String>::new()
+    );
+    ledger.record(NOTE, FileOwnership::Owned, b"note");
+    ledger.record("People/Cara.md", FileOwnership::ManagedBlock, b"page");
+    assert_eq!(
+        ledger.stale_managed_pages(&rendered(&[ANNA])),
+        [BOB],
+        "this run's records are not previous pages"
+    );
+    assert_eq!(
+        DeliveryLedger::new(None, ROOT).stale_managed_pages(&rendered(&[])),
+        Vec::<String>::new()
+    );
+}

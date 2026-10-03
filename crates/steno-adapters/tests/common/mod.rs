@@ -2,7 +2,8 @@
 //! `Tests/StenoAdaptersTests/Support/FixtureMeeting.swift`. Sequential
 //! UUIDs, fixed dates, invented text; `Tests/Fixtures/meetings/
 //! produktstrategie.json` is its `StenoJSON` encoding as the Swift CLI
-//! writes it.
+//! writes it; plus the golden, temp-folder and store helpers the test files
+//! share.
 
 #![allow(dead_code)]
 

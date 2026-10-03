@@ -23,7 +23,7 @@ const NEWER: &str =
     "- 2026-10-02 [[2026-10-02-retro|Retro]] %%steno:00000000-0000-0000-0000-000000000008%%";
 
 #[test]
-fn person_line_and_new_page() {
+fn a_new_person_page_wraps_the_meeting_line_and_matches_the_golden() {
     let anna = anna();
     assert_eq!(
         anna.line,
@@ -213,8 +213,9 @@ fn user_lines_between_the_markers_keep_their_place() {
 fn an_end_marker_before_the_start_is_not_a_block() {
     let line = line();
     let reversed = format!("<!-- steno:meetings:end -->\n{OLDER}\n<!-- steno:meetings:start -->\n");
+    let once = ManagedBlock::merge(&line, meeting_id(), &reversed);
     assert_eq!(
-        ManagedBlock::merge(&line, meeting_id(), &reversed),
+        once,
         format!(
             "{reversed}\n{}",
             ManagedBlock::block(std::slice::from_ref(&line))
@@ -225,6 +226,25 @@ fn an_end_marker_before_the_start_is_not_a_block() {
         ManagedBlock::remove(uuid(9), &reversed),
         reversed,
         "remove changes nothing"
+    );
+    // The second merge finds a block from the orphan start marker to the
+    // new end marker: the blank line goes, the fresh start marker is an
+    // ordinary line, the user's text and the older line stay.
+    let twice = ManagedBlock::merge(&line, meeting_id(), &once);
+    assert_eq!(
+        twice,
+        format!(
+            "{reversed}{}\n{line}\n{}\n",
+            ManagedBlock::START,
+            ManagedBlock::END
+        ),
+        "the page settles after the second merge"
+    );
+    assert!(twice.contains(OLDER), "no user text lost");
+    assert_eq!(
+        ManagedBlock::merge(&line, meeting_id(), &twice),
+        twice,
+        "and stays settled"
     );
 }
 
@@ -274,6 +294,7 @@ fn sorts_by_date_then_text() {
         "no date at all",
         "- 2026-1-01 nine characters",
         "- 2026-01-0",
+        "- 2026/09/24 slashes",
     ]
     .map(str::to_owned)
     .to_vec();
@@ -285,9 +306,10 @@ fn sorts_by_date_then_text() {
             "- 2026-01-01 b",
             "- 2026-01-0",
             "- 2026-1-01 nine characters",
+            "- 2026/09/24 slashes",
             "no date at all",
         ],
-        "a malformed or short date counts as none and sorts last, by text"
+        "a malformed, short or slashed date counts as none and sorts last, by text"
     );
 }
 

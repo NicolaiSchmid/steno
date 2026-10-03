@@ -32,12 +32,7 @@ impl Vault {
     }
 
     fn settings(&self, include_audio: bool, people_folder: Option<&str>) -> ObsidianSettings {
-        ObsidianSettings {
-            vault_path: self.root.to_string_lossy().into_owned(),
-            people_folder: people_folder.map(str::to_owned),
-            include_audio,
-            task_tag: Some("task".to_owned()),
-        }
+        settings(&self.root, include_audio, people_folder)
     }
 
     fn destination(&self) -> ObsidianFolderDestination {
@@ -66,6 +61,21 @@ impl Vault {
     }
     fn export_with_audio(&self) -> MeetingExport {
         export_with_audio_in(self.directory.path())
+    }
+}
+
+/// The settings every test configures: the fixture's `task` tag, the rest
+/// as given.
+fn settings(
+    vault_path: &Path,
+    include_audio: bool,
+    people_folder: Option<&str>,
+) -> ObsidianSettings {
+    ObsidianSettings {
+        vault_path: vault_path.to_string_lossy().into_owned(),
+        people_folder: people_folder.map(str::to_owned),
+        include_audio,
+        task_tag: Some("task".to_owned()),
     }
 }
 
@@ -199,15 +209,7 @@ fn first_delivery_writes_the_six_file_layout_and_two_person_pages() {
 fn validate_rejects_missing_unwritable_and_bad_people_folder() {
     let vault = Vault::new();
     let nope = vault.directory.path().join("nope");
-    let missing = ObsidianFolderDestination::new(
-        ObsidianSettings {
-            vault_path: nope.to_string_lossy().into_owned(),
-            people_folder: None,
-            include_audio: false,
-            task_tag: None,
-        },
-        BERLIN,
-    );
+    let missing = ObsidianFolderDestination::new(settings(&nope, false, None), BERLIN);
     assert_eq!(
         missing.validate_vault(),
         Err(ObsidianError::VaultMissing(
@@ -216,15 +218,7 @@ fn validate_rejects_missing_unwritable_and_bad_people_folder() {
     );
     let file = vault.directory.path().join("file");
     fs::write(&file, b"").unwrap();
-    let on_file = ObsidianFolderDestination::new(
-        ObsidianSettings {
-            vault_path: file.to_string_lossy().into_owned(),
-            people_folder: None,
-            include_audio: false,
-            task_tag: None,
-        },
-        BERLIN,
-    );
+    let on_file = ObsidianFolderDestination::new(settings(&file, false, None), BERLIN);
     assert_eq!(
         on_file.validate_vault(),
         Err(ObsidianError::VaultMissing(
@@ -232,10 +226,16 @@ fn validate_rejects_missing_unwritable_and_bad_people_folder() {
         ))
     );
 
+    // `./People` is refused too: the ledger refuses receipt paths with a
+    // `.` component, so the destination refuses the folder up front.
     for bad in [
         "/People",
         "../People",
         "People/../..",
+        "./People",
+        "People/.",
+        "People/./Notes",
+        ".",
         "",
         "a//b",
         "a\\b",
@@ -272,13 +272,7 @@ fn validate_and_deliver_report_an_unwritable_vault() {
     if fs::write(locked.join("probe"), b"").is_ok() {
         return; // root
     }
-    let settings = ObsidianSettings {
-        vault_path: locked.to_string_lossy().into_owned(),
-        people_folder: None,
-        include_audio: false,
-        task_tag: None,
-    };
-    let destination = ObsidianFolderDestination::new(settings, BERLIN);
+    let destination = ObsidianFolderDestination::new(settings(&locked, false, None), BERLIN);
     assert_eq!(
         destination.validate_vault(),
         Err(ObsidianError::VaultNotWritable(
@@ -729,6 +723,67 @@ fn a_renamed_person_gets_a_new_page_and_the_old_one_stays() {
 }
 
 #[test]
+fn an_unchanged_stale_page_is_not_opened_for_writing() {
+    let vault = Vault::new();
+    let export = vault.export_with_audio();
+    let first = deliver(&vault.destination(), &export, None);
+    let mut renamed = export.clone();
+    renamed.persons[0].display_name = "Anna Schulz".to_owned();
+    renamed.participants[0].display_name = "Anna Schulz".to_owned();
+    let second = deliver(&vault.destination(), &renamed, Some(&first));
+    let anna = "People/Anna Müller.md";
+    let before = vault.read(anna);
+    assert!(
+        !before.windows(7).any(|w| w == b"%%steno"),
+        "the line is gone"
+    );
+    let metadata = fs::metadata(vault.path(anna)).unwrap();
+
+    // A rename-based writer replaces a read-only file as well, so the
+    // identity of the file on disk is what shows it was never opened.
+    let third = deliver(&vault.destination(), &renamed, Some(&second));
+
+    assert_eq!(third, second);
+    assert_eq!(vault.read(anna), before);
+    let after = fs::metadata(vault.path(anna)).unwrap();
+    assert_eq!(after.modified().unwrap(), metadata.modified().unwrap());
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt as _;
+        assert_eq!(after.ino(), metadata.ino(), "the same file, not a rewrite");
+    }
+}
+
+#[test]
+fn a_pinned_folder_with_a_trailing_slash_still_names_the_notes_after_it() {
+    let vault = Vault::new();
+    let export = vault.export_with_audio();
+    let pinned = DeliveryReceipt {
+        root: vault.root.to_string_lossy().into_owned(),
+        folder: format!("{FOLDER}/"),
+        files: vec![],
+        renderer_version: ArtifactRenderer::VERSION,
+    };
+
+    let receipt = deliver(&vault.destination(), &export, Some(&pinned));
+
+    assert_eq!(
+        receipt.folder,
+        format!("{FOLDER}/"),
+        "the pin is kept as stored"
+    );
+    assert_eq!(vault.list(FOLDER), meeting_files(FOLDER_SLUG));
+    let note = vault.text(&format!("{FOLDER}/{FOLDER_SLUG}.md"));
+    assert!(note.contains(&format!("[[{FOLDER_SLUG} - Transcript|Transcript]]")));
+    assert!(
+        vault
+            .text("People/Anna Müller.md")
+            .contains(&format!("[[{FOLDER_SLUG}|Produktstrategie")),
+        "the person line links the folder, not an empty slug"
+    );
+}
+
+#[test]
 fn redeliver_after_reassignment_removes_the_old_person_line() {
     let vault = Vault::new();
     let export = vault.export_with_audio();
@@ -840,15 +895,8 @@ fn a_moved_vault_is_written_fresh_under_the_pinned_folder_and_the_old_one_is_lef
 
     let moved = vault.directory.path().join("moved");
     fs::create_dir_all(&moved).unwrap();
-    let destination = ObsidianFolderDestination::new(
-        ObsidianSettings {
-            vault_path: moved.to_string_lossy().into_owned(),
-            people_folder: Some("People".to_owned()),
-            include_audio: true,
-            task_tag: Some("task".to_owned()),
-        },
-        BERLIN,
-    );
+    let destination =
+        ObsidianFolderDestination::new(settings(&moved, true, Some("People")), BERLIN);
     let second = deliver(&destination, &export, Some(&first));
 
     assert_eq!(second.root, moved.to_string_lossy());
@@ -995,15 +1043,8 @@ fn a_receipt_from_another_root_is_a_first_delivery_with_the_collision_rule() {
         ArtifactRenderer::new().render_json(&theirs).unwrap(),
     )
     .unwrap();
-    let destination = ObsidianFolderDestination::new(
-        ObsidianSettings {
-            vault_path: other.to_string_lossy().into_owned(),
-            people_folder: Some("People".to_owned()),
-            include_audio: true,
-            task_tag: Some("task".to_owned()),
-        },
-        BERLIN,
-    );
+    let destination =
+        ObsidianFolderDestination::new(settings(&other, true, Some("People")), BERLIN);
 
     let second = deliver(&destination, &export, Some(&first));
 
@@ -1045,12 +1086,7 @@ fn another_spelling_of_the_vault_path_is_the_same_root() {
     let root = vault.root.to_string_lossy().into_owned();
     for spelling in [format!("{root}/"), format!("{root}/./Meetings/..")] {
         let destination = ObsidianFolderDestination::new(
-            ObsidianSettings {
-                vault_path: spelling.clone(),
-                people_folder: Some("People".to_owned()),
-                include_audio: true,
-                task_tag: Some("task".to_owned()),
-            },
+            settings(Path::new(&spelling), true, Some("People")),
             BERLIN,
         );
         let second = deliver(&destination, &renamed, Some(&first));
@@ -1105,15 +1141,8 @@ fn a_person_page_that_is_not_utf8_is_left_alone_and_reported() {
 #[test]
 fn the_receipt_carries_the_renderer_version() {
     let directory = temp_dir("version");
-    let destination = ObsidianFolderDestination::new(
-        ObsidianSettings {
-            vault_path: directory.path().to_string_lossy().into_owned(),
-            people_folder: None,
-            include_audio: false,
-            task_tag: None,
-        },
-        BERLIN,
-    );
+    let destination =
+        ObsidianFolderDestination::new(settings(directory.path(), false, None), BERLIN);
     let receipt = deliver(&destination, &export(), None);
     assert_eq!(receipt.renderer_version, ArtifactRenderer::VERSION);
     let recorded = fixture_text("snapshots/obsidian/VERSION");

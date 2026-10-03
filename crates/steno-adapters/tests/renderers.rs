@@ -341,7 +341,7 @@ fn transcript_plain_style_writes_names_without_links() {
 }
 
 #[test]
-fn empty_transcript_and_blank_segments() {
+fn an_empty_transcript_says_so_and_a_blank_segment_is_skipped() {
     let mut export = export();
     export.segments = vec![];
     assert!(
@@ -413,7 +413,7 @@ fn task_lines_follow_the_verified_field_order() {
 }
 
 #[test]
-fn tasks_plain_style_and_no_tasks() {
+fn plain_style_tasks_carry_no_tag_and_an_empty_list_says_no_tasks() {
     let mut export = export();
     let plain_note = renderer().render_tasks(&export, &plain());
     assert!(
@@ -553,7 +553,7 @@ fn vtt_matches_the_golden() {
 }
 
 #[test]
-fn vtt_header_note_ordering_and_voices() {
+fn the_vtt_header_note_precedes_cues_in_start_order_with_voice_spans() {
     let vtt = renderer().render_vtt(&export());
     assert!(vtt.starts_with(
         "WEBVTT - Steno 00000000-0000-0000-0000-000000000001\n\nNOTE\nProduktstrategie: \"90/10\" & Roadmap für Q4\n2026-09-24T12:00:00Z\n\n00:00:00.000 --> 00:00:04.200\n<v Nicolai Schmid>Guten Morgen zusammen, fangen wir mit der Roadmap an.\n\n00:00:04.500 --> 00:00:09.800\n<v Anna Müller>Gern. Ich habe die Zahlen für Q4 dabei.\n"
