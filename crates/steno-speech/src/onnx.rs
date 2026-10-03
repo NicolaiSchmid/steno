@@ -297,6 +297,12 @@ impl SpeechBackend for OnnxBackend {
             (self.encoder_inputs.names[0].as_str(), audio),
             (self.encoder_inputs.names[1].as_str(), length),
         ])?;
+        if outputs.len() < 2 {
+            return Err(SpeechError::Shape(format!(
+                "encoder has {} outputs, expected 2",
+                outputs.len()
+            )));
+        }
         let (shape, data) = outputs[0].try_extract_tensor::<f32>()?;
         let (Some(hidden), Some(frames_out)) = (dimension(shape, 1), dimension(shape, 2)) else {
             return Err(SpeechError::Shape(format!(
@@ -380,6 +386,9 @@ impl SpeechBackend for OnnxBackend {
                 f32_tensor(vec![1, projection.len() as i64, 1], projection.to_vec())?,
             ),
         ])?;
+        if outputs.len() < 1 {
+            return Err(SpeechError::Shape("joiner returned no output".into()));
+        }
         let (_, logits) = outputs[0].try_extract_tensor::<f32>()?;
         split_logits(logits, self.shape.vocab_size)
     }

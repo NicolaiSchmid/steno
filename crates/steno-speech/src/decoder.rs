@@ -54,6 +54,8 @@ pub struct DecodeStats {
     pub joint_calls: usize,
     pub recoveries_tried: usize,
     pub recoveries_accepted: usize,
+    /// Windows abandoned at the token budget; their tail is truncated.
+    pub runaways: usize,
 }
 
 /// Decodes `encoder` with a fresh prediction-network state; token frames
@@ -103,6 +105,7 @@ pub fn decode_window<B: SpeechBackend + ?Sized>(
             duration,
         });
         if tokens.len() > budget {
+            stats.runaways += 1;
             break;
         }
         decoder_state = step.state;
@@ -296,14 +299,9 @@ mod tests {
             max_symbols_per_frame: 1000,
             max_tokens_per_second: 12,
         };
-        let tokens = decode_window(
-            &mut backend,
-            &encoder(12),
-            0,
-            &config,
-            &mut DecodeStats::default(),
-        )
-        .unwrap();
+        let mut stats = DecodeStats::default();
+        let tokens = decode_window(&mut backend, &encoder(12), 0, &config, &mut stats).unwrap();
         assert_eq!(tokens.len(), 12 * 12 / 12 + 16 + 1);
+        assert_eq!(stats.runaways, 1);
     }
 }

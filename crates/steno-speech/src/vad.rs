@@ -235,13 +235,24 @@ impl SileroVad {
                 }
             }
             let outputs = self.session.run(inputs)?;
+            let wanted = if matches!(self.state, StateLayout::Split { .. }) {
+                3
+            } else {
+                2
+            };
+            if outputs.len() < wanted {
+                return Err(SpeechError::Shape(format!(
+                    "Silero VAD returned {} outputs, expected {wanted}",
+                    outputs.len()
+                )));
+            }
             let (_, probability) = outputs[0].try_extract_tensor::<f32>()?;
             probabilities.push(probability.first().copied().unwrap_or(0.0));
             let (_, next_h) = outputs[1].try_extract_tensor::<f32>()?;
-            h.copy_from_slice(next_h);
+            copy_state(&mut h, next_h)?;
             if matches!(self.state, StateLayout::Split { .. }) {
                 let (_, next_c) = outputs[2].try_extract_tensor::<f32>()?;
-                c.copy_from_slice(next_c);
+                copy_state(&mut c, next_c)?;
             }
             if self.context > 0 {
                 context.copy_from_slice(&frame[frame.len() - self.context..]);
@@ -249,6 +260,20 @@ impl SileroVad {
         }
         Ok(probabilities)
     }
+}
+
+/// Carries a state output into the next step; a length other than the
+/// declared one is a model-shape error, not a panic on the model path.
+fn copy_state(state: &mut [f32], next: &[f32]) -> Result<(), SpeechError> {
+    if next.len() != state.len() {
+        return Err(SpeechError::Shape(format!(
+            "Silero VAD state output has {} values, the input takes {}",
+            next.len(),
+            state.len()
+        )));
+    }
+    state.copy_from_slice(next);
+    Ok(())
 }
 
 impl VoiceActivityDetector for SileroVad {
