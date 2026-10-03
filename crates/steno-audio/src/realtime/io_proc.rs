@@ -45,10 +45,31 @@ fn samples(channel: &ChannelRef, buffers: &[BufferView], frames: usize) -> Optio
     Some(unsafe { data.add(channel.offset) })
 }
 
+/// The callback's frame count: from the first source whose buffer carries
+/// any, so a first lane whose buffer arrived missing or with no channels
+/// becomes silence instead of costing the other lanes their audio. 0 when
+/// no source's buffer carries a frame.
+#[inline(always)]
+fn callback_frames(buffers: &[BufferView], sources: &[LaneSource]) -> usize {
+    for source in sources {
+        if let Some(buffer) = buffers.get(source.left.buffer)
+            && buffer.channels > 0
+        {
+            let frames = buffer.byte_size / (buffer.channels * 4);
+            if frames > 0 {
+                return frames;
+            }
+        }
+    }
+    0
+}
+
 /// One callback's input buffers into the sink's rings following `sources`.
-/// The frame count comes from the first source's buffer; a buffer the HAL
-/// delivered without data, or shaped unlike the layout the pointers were
-/// resolved for, becomes silence so the lanes stay aligned.
+/// The frame count comes from the first source whose buffer carries frames;
+/// a buffer the HAL delivered without data, or shaped unlike the layout the
+/// pointers were resolved for, becomes silence so the lanes stay aligned. A
+/// callback where no source's buffer carries a frame has no length to write
+/// or to count as a drop, and is skipped.
 ///
 /// # Safety
 ///
@@ -57,16 +78,7 @@ fn samples(channel: &ChannelRef, buffers: &[BufferView], frames: usize) -> Optio
 /// IOProc and the tests guarantee with owned vectors.
 #[inline(always)]
 pub unsafe fn deliver(buffers: &[BufferView], sources: &[LaneSource], sink: &LaneFrameSink) {
-    let Some(first_source) = sources.first() else {
-        return;
-    };
-    let Some(first) = buffers.get(first_source.left.buffer) else {
-        return;
-    };
-    if first.channels == 0 {
-        return;
-    }
-    let frames = first.byte_size / (first.channels * 4);
+    let frames = callback_frames(buffers, sources);
     if frames == 0 || !sink.begin_callback(frames) {
         return;
     }
