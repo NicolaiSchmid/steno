@@ -172,6 +172,15 @@ fn panel_params<T: for<'de> Deserialize<'de>>(
     parse(action.as_str(), params)
 }
 
+/// The X's params: none (`null`) dismisses whatever shows, as `{}` does.
+fn dismiss_params(params: Value) -> Result<DismissParams, BridgeError> {
+    if params.is_null() {
+        Ok(DismissParams::default())
+    } else {
+        panel_params(PanelAction::DismissPrompt, params)
+    }
+}
+
 /// Which window a `window.close` from `caller` may close: the onboarding
 /// window, and only on its own request. The main and Settings windows do
 /// not answer the method (`unknownMethod`, as their Swift hosts route it,
@@ -301,11 +310,7 @@ pub async fn panel_call(
             Ok(Value::Null)
         }
         PanelAction::DismissPrompt => {
-            let request: DismissParams = if params.is_null() {
-                DismissParams::default()
-            } else {
-                panel_params(PanelAction::DismissPrompt, params)?
-            };
+            let request = dismiss_params(params)?;
             panels::dismiss_prompt(&app, request.raised);
             Ok(Value::Null)
         }
@@ -588,6 +593,15 @@ mod tests {
         let none: DismissParams =
             panel_params(PanelAction::DismissPrompt, serde_json::json!({})).unwrap();
         assert_eq!(none.raised, None);
+        // An X with no params at all (the page sends none for a prompt
+        // shown unnumbered) dismisses too; `panel_params` alone refuses it.
+        assert_eq!(dismiss_params(Value::Null).unwrap().raised, None);
+        assert_eq!(
+            dismiss_params(serde_json::json!({ "raised": 3 }))
+                .unwrap()
+                .raised,
+            Some(3)
+        );
         for params in [
             serde_json::json!({ "raised": -1 }),
             serde_json::json!({ "raised": "3" }),

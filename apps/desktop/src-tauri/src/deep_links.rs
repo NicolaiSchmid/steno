@@ -158,17 +158,29 @@ pub fn handle(app: &AppHandle, urls: &[Url]) {
                 Some(request) => {
                     let host = app.state::<Host>();
                     if let Err(error) = windows::open_requested(app, &host, &request) {
-                        eprintln!("[steno-desktop] {}: {error}", describe(url));
+                        eprintln!("[steno-desktop] {}", not_followed(url, &error));
                     }
                 }
-                None => eprintln!(
-                    "[steno-desktop] {} is the iPhone's pairing link; nothing to do here",
-                    describe(url)
-                ),
+                None => eprintln!("[steno-desktop] {}", pairing_notice(url)),
             },
             Err(error) => eprintln!("[steno-desktop] deep link ignored: {error}"),
         }
     }
+}
+
+/// The log line for the phone's pairing link, named by scheme and host
+/// alone: its query carries the pairing secret.
+fn pairing_notice(url: &Url) -> String {
+    format!(
+        "{} is the iPhone's pairing link; nothing to do here",
+        describe(url)
+    )
+}
+
+/// The log line for a link whose window did not open, named by scheme and
+/// host alone.
+fn not_followed(url: &Url, error: &impl std::fmt::Display) -> String {
+    format!("{}: {error}", describe(url))
 }
 
 /// Whether the running binary registers the scheme itself on Linux or
@@ -302,6 +314,7 @@ mod tests {
             format!("steno://meeting/{id}#notes"),
             format!("steno://user@meeting/{id}"),
             format!("steno://user:pass@meeting/{id}"),
+            format!("steno://:pass@meeting/{id}"),
             format!("steno://meeting:80/{id}"),
             "steno://settings/summaries?secret=x".into(),
             "steno://settings?x".into(),
@@ -352,6 +365,16 @@ mod tests {
         )
         .unwrap();
         assert_eq!(describe(&pair), "steno://pair");
+        assert_eq!(
+            pairing_notice(&pair),
+            "steno://pair is the iPhone's pairing link; nothing to do here"
+        );
+        let meeting =
+            Url::parse("steno://meeting/00000000-0000-0000-0000-000000000001?secret=x").unwrap();
+        assert_eq!(
+            not_followed(&meeting, &"no window"),
+            "steno://meeting: no window"
+        );
         assert_eq!(
             describe(&Url::parse("https://example.com/a?b=c").unwrap()),
             "https://example.com"
