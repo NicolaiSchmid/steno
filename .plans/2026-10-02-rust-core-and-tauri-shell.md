@@ -209,4 +209,14 @@ PR off `main`.
 | WP2 store | `feat/rust-store` | #155 | merged |
 | WP3 Tauri shell on fixtures | `feat/rust-desktop` | #156 | merged |
 | Core protocols and fakes | `feat/rust-protocols` | #162 | merged |
-| Bridge on core | `refactor/rust-bridge-on-core` | #161 | open |
+| Bridge on core | `refactor/rust-bridge-on-core` | #161 | merged |
+| WP4b CoreML speech backend | `feat/rust-speech-coreml` | #163 | in review |
+
+WP4b is `crates/steno-speech-coreml`: `objc2-core-ml` behind one safe module,
+the four backend calls, the FluidAudio 0.17.4 heuristics ported
+(silence-aligned starts, contiguous-match merge, seam-word collapse, seam-gap
+repair, suppressed-token gate), four parallel windows, `SpeechEngine`
+implemented, parity harness `steno-coreml-parity`. Inverse text normalisation
+is not applied: Steno's Swift path (`ParakeetEngine` to
+`AsrManager.transcribe`) never calls FluidAudio's `TextNormalizer`, so the
+baseline carries none. Parity numbers: see the PR.

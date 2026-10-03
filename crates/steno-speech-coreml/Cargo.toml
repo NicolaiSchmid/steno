@@ -1,0 +1,33 @@
+[package]
+name = "steno-speech-coreml"
+description = "Parakeet TDT v3 on CoreML: FluidAudio's models driven from Rust"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+steno-core = { path = "../steno-core" }
+thiserror.workspace = true
+
+# The CoreML binding exists on the Mac only; every other platform builds the
+# platform-independent half of the crate (chunk layout, merge, segmentation,
+# the WER scorer) and nothing else.
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2.workspace = true
+objc2-core-ml.workspace = true
+objc2-foundation.workspace = true
+
+[dev-dependencies]
+tokio.workspace = true
+
+[[bin]]
+name = "steno-coreml-parity"
+path = "src/bin/parity.rs"
+
+[lints]
+workspace = true
