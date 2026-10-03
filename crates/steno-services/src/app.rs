@@ -561,7 +561,7 @@ mod tests {
 
     #[test]
     fn a_background_failure_warns_without_its_text() {
-        let (log, _guard) = crate::testing::CapturedLog::warnings();
+        let log = crate::testing::CapturedLog::warnings();
         let meeting_id = uuid::Uuid::new_v4();
         log_operation_failure(&MeetingEvent::OperationFailed {
             meeting_id,
@@ -570,9 +570,12 @@ mod tests {
             failure: "summarize: the model said: I cannot summarise this".to_owned(),
         });
         let text = log.text();
-        assert!(text.contains(&meeting_id.to_string()), "{text}");
-        assert!(text.contains("Summary re-run"), "{text}");
-        assert!(text.contains("stage=\"summarize\""), "{text}");
+        let line = text
+            .lines()
+            .find(|line| line.contains(&meeting_id.to_string()))
+            .unwrap_or_else(|| panic!("no line for the meeting: {text}"));
+        assert!(line.contains("Summary re-run"), "{line}");
+        assert!(line.contains("stage=\"summarize\""), "{line}");
         assert!(!text.contains("the model said"), "{text}");
     }
 

@@ -87,22 +87,28 @@ pub fn on_own_thread<T: Send + 'static>(
     }
 }
 
-/// Log lines written into a buffer at `warn` and above while the guard
-/// lives, on this thread.
+/// What the tests log at `warn` and above, from the first
+/// [`CapturedLog::warnings`] on: the process-wide subscriber, so a line is
+/// captured whichever thread writes it. Every test logs into it, so a test
+/// picks its own lines out by an id of its own.
 #[derive(Clone, Default)]
 pub struct CapturedLog(Arc<std::sync::Mutex<Vec<u8>>>);
 
 impl CapturedLog {
-    /// Starts capturing on this thread.
-    pub fn warnings() -> (Self, tracing::subscriber::DefaultGuard) {
-        let log = CapturedLog::default();
-        let guard = tracing::subscriber::set_default(
-            tracing_subscriber::fmt()
-                .with_writer(log.clone())
-                .with_max_level(tracing::Level::WARN)
-                .finish(),
-        );
-        (log, guard)
+    /// The capture, installed on the first call.
+    pub fn warnings() -> &'static CapturedLog {
+        static LOG: std::sync::OnceLock<CapturedLog> = std::sync::OnceLock::new();
+        LOG.get_or_init(|| {
+            let log = CapturedLog::default();
+            tracing::subscriber::set_global_default(
+                tracing_subscriber::fmt()
+                    .with_writer(log.clone())
+                    .with_max_level(tracing::Level::WARN)
+                    .finish(),
+            )
+            .expect("no other subscriber in the unit tests");
+            log
+        })
     }
 
     pub fn text(&self) -> String {
