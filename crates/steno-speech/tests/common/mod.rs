@@ -22,7 +22,7 @@ use steno_speech::{ModelAsset, ModelStore};
 
 /// The model store, when both assets are installed under the root
 /// `STENO_MODELS_DIR` names; read the way the engine reads it.
-pub fn models_dir() -> Option<ModelStore> {
+pub fn installed_store() -> Option<ModelStore> {
     let store = ModelStore::new(ModelStore::environment_root()?);
     [ModelAsset::parakeet_v3_fp32(), ModelAsset::silero_vad()]
         .iter()

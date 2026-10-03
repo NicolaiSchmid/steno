@@ -28,11 +28,11 @@ const TOLERANCE: f64 = 0.005;
 
 #[test]
 fn the_export_splits_into_8193_pieces_and_five_duration_bins() {
-    let Some(store) = common::models_dir() else {
+    let Some(models) = common::installed_store() else {
         return common::skip("STENO_MODELS_DIR");
     };
     let (backend, vocab) = OnnxBackend::load(
-        &store.directory(&ModelAsset::parakeet_v3_fp32()),
+        &models.directory(&ModelAsset::parakeet_v3_fp32()),
         &OnnxOptions::default(),
     )
     .unwrap();
@@ -54,7 +54,7 @@ fn the_export_splits_into_8193_pieces_and_five_duration_bins() {
 
 #[test]
 fn fleurs_cat_mean_wer_is_within_half_a_point_of_spike_f() {
-    let Some(models) = common::models_dir() else {
+    let Some(models) = common::installed_store() else {
         return common::skip("STENO_MODELS_DIR");
     };
     let Some(fleurs) = common::fleurs_dir() else {
