@@ -1,6 +1,6 @@
 //! Two connections on one file, as when the Swift app and this store, or
-//! two copies of this store, hold the database at the same time: writes
-//! queue on the busy timeout instead of failing, a fresh database is
+//! two copies of this store, hold the database at the same time: a write
+//! waits on the busy timeout instead of failing, a fresh database is
 //! migrated once, an export reads past a held write lock, and an export
 //! sees a concurrent commit whole or not at all.
 

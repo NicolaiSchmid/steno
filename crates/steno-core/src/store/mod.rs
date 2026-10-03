@@ -102,7 +102,8 @@ impl StoreError {
 pub type Result<T> = std::result::Result<T, StoreError>;
 
 /// How long a connection waits for another process's lock before giving
-/// up; GRDB's `DatabasePool` default.
+/// up. Swift: `configuration.busyMode = .timeout(5)` in
+/// `MeetingStore.onDisk`; GRDB's own default fails at once.
 const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// The one store over the database. One connection behind a mutex: SQLite
@@ -187,7 +188,8 @@ impl Store {
     /// upgraded once another connection has written in between (WAL's
     /// `SQLITE_BUSY_SNAPSHOT`), and the busy handler does not retry that.
     /// Beginning immediate takes the write lock up front, so the second
-    /// writer waits its turn instead of failing with `database is locked`.
+    /// writer waits on the busy timeout instead of failing with `database is
+    /// locked`.
     pub fn write<T>(&self, body: impl FnOnce(&Transaction<'_>) -> Result<T>) -> Result<T> {
         let mut connection = self.lock();
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
