@@ -809,11 +809,30 @@ impl Host {
         inner.general.login_item = self.shared.services.login_item.status();
     }
 
-    /// The user closed the onboarding window with its own close button:
-    /// that counts as having seen the pages, so the opener returns only for
-    /// a missing required permission. Swift: `OnboardingWindow.onDisappear`.
+    /// The onboarding window closed, by its own close button or after the
+    /// close Finish asked for; the shell calls this for either. Closing
+    /// counts as having seen the pages, so the opener returns only for a
+    /// missing required permission (Swift: `OnboardingWindow.onDisappear`),
+    /// and the model starts over, as Swift built one per window: a window
+    /// opened again begins on page 1, not finished.
     pub fn onboarding_window_closed(&self) {
         OnboardingViewModel::mark_completed(&self.shared.services);
+        let secret = block_on(
+            self.shared
+                .services
+                .secrets
+                .secret(&SecretKey::llm_api_key()),
+        )
+        .ok()
+        .flatten();
+        {
+            let mut inner = self.lock();
+            let mut fresh = OnboardingViewModel::new();
+            fresh.load(&self.shared.store, &self.shared.services, secret);
+            inner.onboarding = fresh;
+            inner.publisher.schedule(BridgeTopic::Onboarding);
+        }
+        self.publish();
     }
 
     // Helpers for the commands

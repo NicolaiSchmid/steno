@@ -305,6 +305,17 @@ fn granted_permissions_open_on_the_setup_page_and_handled_rows_finish() {
         1,
         "a later command does not close it again"
     );
+    // The window closed; one opened again starts over (on the setup page,
+    // every permission being granted), as Swift built a model per window,
+    // and its Finish closes it again.
+    open_rows.host.onboarding_window_closed();
+    let reopened = open_rows.sink.last(BridgeTopic::Onboarding).unwrap();
+    assert_eq!(reopened["finished"], false);
+    open_rows.host.onboarding_finish().unwrap();
+    assert_eq!(
+        *open_rows.fakes.opener.windows_closed.lock().unwrap(),
+        vec![BridgeWindow::Onboarding; 2]
+    );
 
     // The window's own close button: the flag alone, no further rule.
     // Swift: `OnboardingWindow.onDisappear`.
