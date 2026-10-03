@@ -1,8 +1,17 @@
-//! Invariant 3 of the plan as seen on the wire: both clients and both
-//! passes send text and nothing else. Every request body the stub servers
-//! record is a JSON document of prompt text; no file path, no audio byte,
-//! no speaker or meeting id, no raw transcript, no API key and no refresh
-//! token ever appears in it.
+//! Invariant 3 of the plan as seen on the wire, one test per claim of the
+//! privacy paragraph in the crate doc:
+//! - a completion body is a JSON document of prompt text, with no file
+//!   path, audio byte, speaker or meeting id, or segment `raw_text`;
+//! - secrets travel only in headers and in the token refresh: the API key
+//!   from the `SecretStore` in `Authorization`, the Codex access token and
+//!   account id in their two headers, the refresh token only in the
+//!   refresh's body;
+//! - the refreshed `auth.json` is written back with mode 0600 (unix) and
+//!   leaves no temporary file;
+//! - no secret, however often a server echoes it, reaches an error, a
+//!   `Debug` form or an observer event.
+//!
+//! Swift: no single suite; Rust-only.
 
 mod common;
 
@@ -10,7 +19,8 @@ use std::sync::Arc;
 
 use chrono::Utc;
 use common::*;
-use steno_core::{MeetingSummarizer, SummaryTemplate, TranscriptCleaner};
+use steno_core::testing::InMemorySecretStore;
+use steno_core::{MeetingSummarizer, SecretKey, SummaryTemplate, TranscriptCleaner};
 use steno_llm::inputs::{cleanup_input, summary_input};
 use steno_llm::testing::{RecordedRequest, StubChatServer, StubResponse, scripts};
 use steno_llm::{
@@ -78,6 +88,18 @@ fn assert_text_only(requests: &[RecordedRequest], export: &steno_core::MeetingEx
     }
 }
 
+/// The names of the headers whose value holds `secret`, sorted.
+fn headers_carrying(request: &RecordedRequest, secret: &str) -> Vec<String> {
+    let mut names: Vec<String> = request
+        .headers
+        .iter()
+        .filter(|(_, value)| value.contains(secret))
+        .map(|(name, _)| name.clone())
+        .collect();
+    names.sort();
+    names
+}
+
 /// An export whose raw text, audio asset and clip URLs would stand out in a
 /// body: the pass reads the cleaned text and never the asset.
 fn sensitive_export() -> steno_core::MeetingExport {
@@ -121,8 +143,12 @@ async fn the_endpoint_client_and_both_passes_send_text_only() {
         })
     }));
     let endpoint = LlmEndpoint::new(server.base_url().clone(), "stub-model");
+    let secrets = InMemorySecretStore::with([(SecretKey::llm_api_key(), API_KEY.to_owned())]);
     let client = Arc::new(
-        OpenAiCompatibleClient::new(endpoint.clone(), Some(API_KEY)).with_retry(RetryPolicy::NONE),
+        OpenAiCompatibleClient::from_secret_store(endpoint.clone(), &secrets)
+            .await
+            .unwrap()
+            .with_retry(RetryPolicy::NONE),
     );
     let cleaner = LlmTranscriptCleaner::new(client.clone(), endpoint.clone())
         .with_chunker(TranscriptChunker::new(150, 220, 3));
@@ -140,13 +166,21 @@ async fn the_endpoint_client_and_both_passes_send_text_only() {
     let requests = server.requests();
     assert!(requests.len() >= 3);
     assert_text_only(&requests, &export);
-    // The Authorization header carries the key, the body never does; the
-    // summary reads the cleaned text, never rawText.
-    assert!(
-        requests
-            .iter()
-            .all(|r| r.authorization() == Some(&format!("Bearer {API_KEY}")))
-    );
+    // The key from the secret store goes in the Authorization header and in
+    // no other header or body; the summary reads the cleaned text, never
+    // rawText.
+    for request in &requests {
+        assert_eq!(
+            headers_carrying(request, API_KEY),
+            ["authorization"],
+            "{}",
+            request.path
+        );
+        assert_eq!(
+            request.authorization(),
+            Some(format!("Bearer {API_KEY}").as_str())
+        );
+    }
     let summary = requests
         .iter()
         .find(|r| r.purpose.as_deref() == Some("summary"))
@@ -220,6 +254,16 @@ async fn the_codex_client_sends_text_only_and_keeps_the_tokens_in_headers() {
             !request.body_text().contains("acct_stored"),
             "the account id stays in the header"
         );
+        assert!(!request.body_text().contains("rt_original"));
+        assert_eq!(headers_carrying(request, &access), ["authorization"]);
+        assert_eq!(
+            headers_carrying(request, "acct_stored"),
+            ["chatgpt-account-id"]
+        );
+        assert_eq!(
+            headers_carrying(request, "rt_original"),
+            Vec::<String>::new()
+        );
         assert_eq!(
             request.authorization(),
             Some(format!("Bearer {access}").as_str())
@@ -228,6 +272,63 @@ async fn the_codex_client_sends_text_only_and_keeps_the_tokens_in_headers() {
     // The token endpoint was never needed: nothing but the backend saw a
     // request, and the refresh token never went anywhere.
     assert_eq!(harness.home.server.requests().len(), 0);
+}
+
+/// The refresh token goes to the token endpoint in the refresh's body and
+/// nowhere else; the refresh carries no access token or account id; the
+/// file it writes back is 0600 and nothing else is left in the home.
+#[tokio::test]
+async fn the_refresh_token_goes_only_to_the_token_endpoint_and_the_file_stays_0600() {
+    let harness = CodexHarness::build(RetryPolicy::NONE, "gpt-stub", |_| {}).await;
+    let stale = CodexHome::access_token(10, "plus");
+    harness.home.write(AuthFile::default().access(&stale));
+    let fresh = CodexHome::access_token(3_600, "plus");
+    harness
+        .home
+        .server
+        .enqueue([scripts.token_refresh(&fresh, Some("rt_rotated"), None)]);
+    harness.backend.enqueue([scripts.stream("ok")]);
+    harness.client.complete_llm(&text_request()).await.unwrap();
+
+    let [refresh] = harness.home.server.requests().try_into().unwrap();
+    let body: serde_json::Value = serde_json::from_slice(&refresh.body).unwrap();
+    assert_eq!(
+        body,
+        serde_json::json!({
+            "grant_type": "refresh_token",
+            "client_id": "app_test",
+            "refresh_token": "rt_original",
+        })
+    );
+    assert_eq!(refresh.authorization(), None);
+    for secret in [stale.as_str(), "acct_stored", "rt_original"] {
+        assert_eq!(headers_carrying(&refresh, secret), Vec::<String>::new());
+    }
+    for request in harness.backend.requests() {
+        for refresh_token in ["rt_original", "rt_rotated"] {
+            assert!(!request.body_text().contains(refresh_token));
+            assert_eq!(
+                headers_carrying(&request, refresh_token),
+                Vec::<String>::new()
+            );
+        }
+        assert_eq!(headers_carrying(&request, &fresh), ["authorization"]);
+    }
+
+    let entries: Vec<String> = std::fs::read_dir(harness.home.directory.path())
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(entries, ["auth.json"], "no temporary file is left");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(harness.home.file())
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, 0o600);
+    }
 }
 
 // No secret reaches an error, a `Debug` form or an observer event, however

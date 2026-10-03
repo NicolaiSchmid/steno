@@ -32,12 +32,16 @@
 //! - `testing` (behind the feature of that name): the loopback stub server,
 //!   the canned scripts and the manual clock.
 //!
-//! Privacy: this crate is the only code besides a `Destination` that opens
-//! a network connection, and it sends text only. Every request body is a
-//! prompt built from transcript text, names and template wording; no file
-//! path, audio byte, speaker id or raw transcript ever reaches a request,
-//! and the stub server tests in `tests/privacy.rs` assert it. No secret
-//! reaches an error or a `Debug` form either.
+//! Privacy (invariant 3 of the plan): besides a `Destination`, this crate is
+//! the only code that opens a network connection. What it sends is text
+//! only, and `tests/privacy.rs` asserts each claim that follows on the wire
+//! and on disk. A completion body holds prompt text built from the
+//! transcript, names and template wording; it never holds a file path, an
+//! audio byte, a speaker or meeting id, or a segment's `raw_text`. Secrets
+//! travel only in headers and in the token refresh: the API key comes from
+//! the `SecretStore`, and the Codex tokens stay in `$CODEX_HOME/auth.json`,
+//! written back through a rename with mode 0600. No secret reaches an
+//! error, a `Debug` form or an observer event.
 //!
 //! Tests: `cargo test -p steno-llm`; the stub server, scripts and manual
 //! clock come with the `testing` feature, which the dev-dependency on the

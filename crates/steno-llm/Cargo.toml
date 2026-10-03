@@ -33,6 +33,8 @@ uuid.workspace = true
 
 [dev-dependencies]
 chrono-tz.workspace = true
+# The in-memory secret store the privacy tests build a client from.
+steno-core = { path = "../steno-core", features = ["testing"] }
 steno-llm = { path = ".", features = ["testing"] }
 tempfile.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "net", "io-util"] }
