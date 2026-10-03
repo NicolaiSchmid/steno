@@ -31,9 +31,17 @@ impl Default for TimelineRules {
     }
 }
 
+/// The turn and chunk label of cluster `index`: `S1`, `S2`, ... The
+/// mapping joins turns and chunks by this string, so it is spelled here
+/// and nowhere else.
+#[must_use]
+pub fn cluster_label(index: usize) -> String {
+    format!("S{}", index + 1)
+}
+
 /// `assignments[i]` is the cluster of `analysis.embeddings[i]`, or `None`
-/// when it was left out of clustering. Turns carry the labels `S1`, `S2`
-/// ... by cluster index and a quality in `0...1`: the share of the windows
+/// when it was left out of clustering. Turns carry [`cluster_label`] of
+/// their cluster and a quality in `0...1`: the share of the windows
 /// covering the turn's frames that voted for its cluster.
 #[must_use]
 pub fn turns(
@@ -97,7 +105,7 @@ pub fn turns(
         }
     }
     // Runs per cluster become segments with their mean vote share.
-    let mut segments: Vec<Segment> = Vec::new();
+    let mut runs: Vec<Run> = Vec::new();
     for cluster in 0..cluster_count {
         let mut run: Option<(usize, f64, usize)> = None;
         for frame in 0..=total_frames {
@@ -112,7 +120,7 @@ pub fn turns(
             } else if let Some((start, sum, length)) = run.take() {
                 let (time_start, time_end) =
                     frame_span(geometry, 0, start, frame - 1, analysis.total_samples);
-                segments.push(Segment {
+                runs.push(Run {
                     cluster,
                     start: time_start,
                     end: time_end,
@@ -121,82 +129,84 @@ pub fn turns(
             }
         }
     }
-    segments.sort_by(|lhs, rhs| {
+    runs.sort_by(|lhs, rhs| {
         lhs.start
             .total_cmp(&rhs.start)
             .then(lhs.cluster.cmp(&rhs.cluster))
     });
-    let segments = close_gaps(segments, rules.min_duration_off);
-    let segments = exclusive(segments, rules.min_duration_on);
-    segments
-        .into_iter()
-        .map(|segment| SpeakerTurn {
-            speaker_label: format!("S{}", segment.cluster + 1),
-            start: segment.start,
-            end: segment.end,
+    let runs = close_gaps(runs, rules.min_duration_off);
+    let runs = exclusive(runs, rules.min_duration_on);
+    runs.into_iter()
+        .map(|run| SpeakerTurn {
+            speaker_label: cluster_label(run.cluster),
+            start: run.start,
+            end: run.end,
             // Qualities lie in 0...1; the narrowing is intended.
             #[allow(clippy::cast_possible_truncation)]
-            quality: segment.quality as f32,
+            quality: run.quality as f32,
         })
         .collect()
 }
 
+/// A stretch of frames one cluster is active in, before the gaps close
+/// and the overlaps resolve; a turn in the making. Not a transcript
+/// segment.
 #[derive(Debug, Clone, PartialEq)]
-struct Segment {
+struct Run {
     cluster: usize,
     start: f64,
     end: f64,
     quality: f64,
 }
 
-/// Joins a segment into the segment immediately before it in start
-/// order when both belong to one cluster and the gap is at most
-/// `max_gap`, quality weighted by duration; `FluidAudio`'s
-/// `mergeSegments`. Only the immediately preceding segment counts: an
-/// `A B A` run with a short second gap stays three segments, so `B` is
-/// not swallowed by the join of the two `A`s. `segments` sorted by start.
-fn close_gaps(segments: Vec<Segment>, max_gap: f64) -> Vec<Segment> {
-    let mut result: Vec<Segment> = Vec::with_capacity(segments.len());
-    for segment in segments {
+/// Joins a run into the run immediately before it in start order when
+/// both belong to one cluster and the gap is at most `max_gap`, quality
+/// weighted by duration; `FluidAudio`'s `mergeSegments`. Only the
+/// immediately preceding run counts: `A B A` with a short second gap
+/// stays three runs, so `B` is not swallowed by the join of the two
+/// `A`s. `runs` sorted by start.
+fn close_gaps(runs: Vec<Run>, max_gap: f64) -> Vec<Run> {
+    let mut result: Vec<Run> = Vec::with_capacity(runs.len());
+    for run in runs {
         if let Some(last) = result
             .last_mut()
-            .filter(|last| last.cluster == segment.cluster)
-            .filter(|last| segment.start - last.end <= max_gap)
+            .filter(|last| last.cluster == run.cluster)
+            .filter(|last| run.start - last.end <= max_gap)
         {
             let lhs = (last.end - last.start).max(0.0);
-            let rhs = (segment.end - segment.start).max(0.0);
+            let rhs = (run.end - run.start).max(0.0);
             let total = lhs + rhs;
             last.quality = if total > 0.0 {
-                (last.quality * lhs + segment.quality * rhs) / total
+                (last.quality * lhs + run.quality * rhs) / total
             } else {
-                f64::midpoint(last.quality, segment.quality)
+                f64::midpoint(last.quality, run.quality)
             };
-            last.end = last.end.max(segment.end);
+            last.end = last.end.max(run.end);
         } else {
-            result.push(segment);
+            result.push(run);
         }
     }
     result
 }
 
-/// Pushes each segment's start to the previous segment's end, drops what
+/// Pushes each run's start to the previous run's end, drops what
 /// vanishes or falls under `min_duration`, and scales the quality by what
 /// survived, as `FluidAudio`'s `excludeOverlaps` does.
-fn exclusive(segments: Vec<Segment>, min_duration: f64) -> Vec<Segment> {
-    let mut result: Vec<Segment> = Vec::with_capacity(segments.len());
+fn exclusive(runs: Vec<Run>, min_duration: f64) -> Vec<Run> {
+    let mut result: Vec<Run> = Vec::with_capacity(runs.len());
     let mut previous_end = f64::NEG_INFINITY;
-    for mut segment in segments {
-        let original = (segment.end - segment.start).max(0.0);
-        segment.start = segment.start.max(previous_end);
-        let duration = segment.end - segment.start;
+    for mut run in runs {
+        let original = (run.end - run.start).max(0.0);
+        run.start = run.start.max(previous_end);
+        let duration = run.end - run.start;
         if duration <= 0.0 || duration < min_duration {
             continue;
         }
         if original > 0.0 {
-            segment.quality = (segment.quality * duration / original).clamp(0.0, 1.0);
+            run.quality = (run.quality * duration / original).clamp(0.0, 1.0);
         }
-        previous_end = segment.end;
-        result.push(segment);
+        previous_end = run.end;
+        result.push(run);
     }
     result
 }
@@ -210,8 +220,8 @@ mod tests {
 
     const GEOMETRY: SegmentationGeometry = SegmentationGeometry::PYANNOTE_3_0;
 
-    fn segment(cluster: usize, start: f64, end: f64, quality: f64) -> Segment {
-        Segment {
+    fn run(cluster: usize, start: f64, end: f64, quality: f64) -> Run {
+        Run {
             cluster,
             start,
             end,
@@ -223,11 +233,11 @@ mod tests {
     fn gaps_close_only_within_a_cluster_and_under_the_limit() {
         let joined = close_gaps(
             vec![
-                segment(0, 0.0, 1.0, 1.0),
-                segment(0, 1.05, 3.0, 0.5),
-                segment(1, 3.0, 4.0, 0.5),
-                segment(0, 4.05, 5.0, 1.0),
-                segment(0, 6.0, 7.0, 1.0),
+                run(0, 0.0, 1.0, 1.0),
+                run(0, 1.05, 3.0, 0.5),
+                run(1, 3.0, 4.0, 0.5),
+                run(0, 4.05, 5.0, 1.0),
+                run(0, 6.0, 7.0, 1.0),
             ],
             0.1,
         );
@@ -246,9 +256,9 @@ mod tests {
     fn a_segment_joins_only_the_one_immediately_before_it() {
         let joined = close_gaps(
             vec![
-                segment(0, 0.0, 5.0, 1.0),
-                segment(1, 4.0, 7.0, 1.0),
-                segment(0, 5.05, 10.0, 1.0),
+                run(0, 0.0, 5.0, 1.0),
+                run(1, 4.0, 7.0, 1.0),
+                run(0, 5.05, 10.0, 1.0),
             ],
             0.1,
         );
@@ -266,10 +276,10 @@ mod tests {
     fn overlaps_resolve_towards_the_earlier_speaker_and_short_turns_go() {
         let turns = exclusive(
             vec![
-                segment(0, 0.0, 5.0, 1.0),
-                segment(1, 4.0, 8.0, 1.0),
-                segment(2, 7.5, 8.2, 1.0),
-                segment(0, 8.0, 8.5, 1.0),
+                run(0, 0.0, 5.0, 1.0),
+                run(1, 4.0, 8.0, 1.0),
+                run(2, 7.5, 8.2, 1.0),
+                run(0, 8.0, 8.5, 1.0),
             ],
             1.0,
         );

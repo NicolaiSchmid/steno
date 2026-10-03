@@ -147,7 +147,7 @@ impl<B: TensorBackend> Pipeline<B> {
             .iter()
             .zip(&labels)
             .map(|(embedding, label)| ClusterChunk {
-                speaker_label: format!("S{}", label + 1),
+                speaker_label: timeline::cluster_label(*label),
                 start: embedding.start,
                 end: embedding.end,
                 embedding: embedding.embedding.clone(),
@@ -186,7 +186,7 @@ impl<B: TensorBackend> Pipeline<B> {
             .embeddings
             .iter()
             .map(|embedding| ClusterChunk {
-                speaker_label: "S1".to_owned(),
+                speaker_label: timeline::cluster_label(0),
                 start: embedding.start,
                 end: embedding.end,
                 embedding: embedding.embedding.clone(),
