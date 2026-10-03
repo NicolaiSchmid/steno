@@ -324,6 +324,18 @@ pub struct LlmTranscriptCleaner {
 
 impl LlmTranscriptCleaner {
     /// A cleaner whose chunker follows the endpoint's cleanup budget.
+    ///
+    /// ```
+    /// use std::sync::Arc;
+    /// use steno_llm::{LlmEndpoint, LlmTranscriptCleaner, OpenAiCompatibleClient};
+    /// use url::Url;
+    ///
+    /// let endpoint = LlmEndpoint::new(Url::parse("http://127.0.0.1:1234/v1")?, "qwen3");
+    /// let model = Arc::new(OpenAiCompatibleClient::new(endpoint.clone(), None));
+    /// let cleaner = LlmTranscriptCleaner::new(model, endpoint);
+    /// assert_eq!(cleaner.endpoint.max_concurrent_requests, 2);
+    /// # Ok::<(), url::ParseError>(())
+    /// ```
     #[must_use]
     pub fn new(model: Arc<dyn LanguageModel>, endpoint: LlmEndpoint) -> Self {
         let chunker = TranscriptChunker::with_budget(endpoint.cleanup_chunk_budget_tokens(), 3);

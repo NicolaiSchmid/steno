@@ -63,6 +63,16 @@ impl fmt::Debug for OpenAiCompatibleClient {
 impl OpenAiCompatibleClient {
     /// A client with the default HTTP client, retry policy and system
     /// clock. An empty key is no key.
+    ///
+    /// ```
+    /// use steno_llm::{LlmClient, LlmEndpoint, OpenAiCompatibleClient};
+    /// use url::Url;
+    ///
+    /// let endpoint = LlmEndpoint::new(Url::parse("http://127.0.0.1:1234/v1")?, "qwen3");
+    /// let client = OpenAiCompatibleClient::new(endpoint, None);
+    /// assert_eq!(client.endpoint().model, "qwen3");
+    /// # Ok::<(), url::ParseError>(())
+    /// ```
     #[must_use]
     pub fn new(endpoint: LlmEndpoint, api_key: Option<&str>) -> Self {
         let mode = endpoint.structured_output_mode;

@@ -288,6 +288,15 @@ impl CodexCredentialStore {
     }
 
     /// The store over `home` with the real token endpoint and clock.
+    ///
+    /// ```
+    /// use std::collections::HashMap;
+    /// use steno_llm::CodexCredentialStore;
+    ///
+    /// let home = CodexCredentialStore::default_home(&HashMap::new());
+    /// let store = CodexCredentialStore::new(&home);
+    /// assert_eq!(store.file_path(), home.join("auth.json"));
+    /// ```
     #[must_use]
     pub fn new(home: impl Into<PathBuf>) -> Self {
         CodexCredentialStore {

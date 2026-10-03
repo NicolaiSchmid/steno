@@ -843,6 +843,20 @@ where
 {
     pub const DEFAULT_MINIMUM_CONFIDENCE: f64 = 0.3;
 
+    /// A summarizer writing the meeting date in `zone`, with the default
+    /// minimum confidence for name suggestions.
+    ///
+    /// ```
+    /// use std::sync::Arc;
+    /// use steno_llm::{LlmEndpoint, LlmMeetingSummarizer, OpenAiCompatibleClient};
+    /// use url::Url;
+    ///
+    /// let endpoint = LlmEndpoint::new(Url::parse("http://127.0.0.1:1234/v1")?, "qwen3");
+    /// let model = Arc::new(OpenAiCompatibleClient::new(endpoint.clone(), None));
+    /// let summarizer = LlmMeetingSummarizer::new(model, endpoint, chrono::Utc);
+    /// assert_eq!(summarizer.minimum_confidence, 0.3);
+    /// # Ok::<(), url::ParseError>(())
+    /// ```
     #[must_use]
     pub fn new(model: Arc<dyn LanguageModel>, endpoint: LlmEndpoint, zone: Tz) -> Self {
         LlmMeetingSummarizer {

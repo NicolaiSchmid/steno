@@ -1,28 +1,50 @@
-//! Steno's language model layer: the two [`LanguageModel`] clients (an
-//! OpenAI-compatible chat completions endpoint and OpenAI's Codex backend
-//! with a ChatGPT sign-in), the transcript cleanup pass and the meeting
-//! summary pass. Swift: `Sources/StenoLLM`. Plan:
-//! `.plans/2026-10-02-rust-core-and-tauri-shell.md` (WP7).
+//! Steno's language model layer: the two [`LanguageModel`] clients, the
+//! transcript cleanup pass and the meeting summary pass. Swift:
+//! `Sources/StenoLLM`. Plan: `.plans/2026-10-02-rust-core-and-tauri-shell.md`
+//! (WP7a).
+//!
+//! - `endpoint` ([`LlmEndpoint`], [`StructuredOutputMode`], [`EndpointProbe`],
+//!   [`LlmClient`]): where the model lives, how much it holds, how JSON is
+//!   asked for, and the trait both clients implement.
+//! - `openai` ([`OpenAiCompatibleClient`]): `POST {base}/chat/completions`
+//!   with Bearer auth, for LM Studio, Ollama, Groq, OpenRouter and OpenAI.
+//! - [`codex`]: OpenAI's Codex backend with a ChatGPT sign-in; `client`
+//!   ([`CodexResponsesClient`]) speaks the Responses API, `credentials`
+//!   ([`CodexCredentialStore`]) reads and refreshes the CLI's `auth.json`,
+//!   `jwt` ([`JwtClaims`]) reads the claims in its tokens.
+//! - [`cleanup`]: pass 1, the transcript in chunks through the model, fixing
+//!   speech-to-text mistakes while keeping count, order and wording.
+//! - [`summary`]: pass 2, title, structured summary, decisions, tasks and
+//!   speaker names, single-shot or map and reduce.
+//! - [`budget`]: tokenizer-free token estimates and the input budgets.
+//! - [`chunker`]: the transcript split into runs that fit one request.
+//! - [`schema`]: the JSON Schema builder, limited to the strict subset.
+//! - [`decoder`]: a completion to a typed value, fences tolerated.
+//! - [`inputs`]: a `MeetingExport` as each pass's input.
+//! - [`labels`]: speaker ids to the labels the model sees, and back.
+//! - [`language`]: the language the summary is written in.
+//! - [`concurrency`]: bounded fan-out for the chunked passes.
+//! - `retry` ([`RetryPolicy`]): exponential backoff for retryable failures.
+//! - [`transport`]: one attempt raced against the [`Clock`], `Retry-After`,
+//!   the backoff, the redaction of secrets, and the HTTP client builder.
+//! - [`wire`]: the request and response shapes of both APIs and the
+//!   server-sent events parser.
+//! - `testing` (behind the feature of that name): the loopback stub server,
+//!   the canned scripts and the manual clock.
 //!
 //! Privacy: this crate is the only code besides a `Destination` that opens
 //! a network connection, and it sends text only. Every request body is a
 //! prompt built from transcript text, names and template wording; no file
 //! path, audio byte, speaker id or raw transcript ever reaches a request,
-//! and the stub server tests in `tests/privacy.rs` assert it.
+//! and the stub server tests in `tests/privacy.rs` assert it. No secret
+//! reaches an error or a `Debug` form either.
 //!
-//! - [`OpenAiCompatibleClient`] and [`CodexResponsesClient`]: the clients,
-//!   both [`LlmClient`]s with a per-attempt timeout on an injected
-//!   [`Clock`], exponential retries, structured output mode fallback and
-//!   every secret redacted from every error.
-//! - [`CodexCredentialStore`]: `$CODEX_HOME/auth.json` read and refreshed
-//!   the way the Codex CLI does it.
-//! - [`LlmTranscriptCleaner`] and [`LlmMeetingSummarizer`]: the passes,
-//!   over any [`LanguageModel`].
-//! - `testing` (behind the feature of that name): the loopback stub server,
-//!   the canned scripts and the manual clock.
+//! Tests: `cargo test -p steno-llm`; the stub server, scripts and manual
+//! clock come with the `testing` feature, which the dev-dependency on the
+//! crate itself turns on.
 
-// Product names (OpenAI, ChatGPT, Codex CLI) and API field names appear in
-// most doc comments here; backticks on every one would read as code.
+// Product names (OpenAI, ChatGPT, OpenRouter) trip `doc_markdown` on some
+// thirty doc lines; none of them is code.
 #![allow(clippy::doc_markdown)]
 
 pub mod budget;
