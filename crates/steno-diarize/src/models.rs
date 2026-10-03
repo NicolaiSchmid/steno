@@ -273,6 +273,10 @@ mod tests {
 
     use super::*;
 
+    const ABC: &[u8] = b"abc";
+    /// SHA-256 of "abc", the FIPS 180-2 test vector.
+    const ABC_SHA256: &str = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
+
     #[test]
     fn the_store_sits_beside_the_swift_models() {
         let store = ModelStore::for_paths(&StenoPaths::new("/tmp/support"));
@@ -346,9 +350,6 @@ mod tests {
         });
         Box::leak(format!("http://{address}/model.onnx").into_boxed_str())
     }
-
-    const ABC: &[u8] = b"abc";
-    const ABC_SHA256: &str = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
 
     /// Two fetches of one model into a cold store at once, as the app and
     /// the `steno` command on first use: the server holds both responses
