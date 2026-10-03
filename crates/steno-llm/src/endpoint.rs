@@ -3,31 +3,26 @@
 
 use std::time::Duration;
 
-use serde::{Deserialize, Serialize};
 use steno_core::{
     BoundaryResult, LanguageModel, LlmProvider, LlmResponseFormat, Settings, async_trait,
+    string_enum,
 };
 use url::Url;
 
-/// How the client asks for JSON. It starts at the endpoint's mode and falls
-/// back per endpoint on a 400 that names `response_format`: `JsonSchema` to
-/// `JsonObject` to `PromptOnly` (the schema is always in the prompt as
-/// well, so every mode yields decodable output on a capable model).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub enum StructuredOutputMode {
-    JsonSchema,
-    JsonObject,
-    PromptOnly,
+string_enum! {
+    /// How the client asks for JSON. It starts at the endpoint's mode and
+    /// falls back per endpoint on a 400 that names `response_format`:
+    /// `JsonSchema` to `JsonObject` to `PromptOnly` (the schema is always
+    /// in the prompt as well, so every mode yields decodable output on a
+    /// capable model). Spelled as Swift's `StructuredOutputMode` raw values.
+    pub enum StructuredOutputMode {
+        JsonSchema = "jsonSchema",
+        JsonObject = "jsonObject",
+        PromptOnly = "promptOnly",
+    }
 }
 
 impl StructuredOutputMode {
-    pub const ALL: [StructuredOutputMode; 3] = [
-        StructuredOutputMode::JsonSchema,
-        StructuredOutputMode::JsonObject,
-        StructuredOutputMode::PromptOnly,
-    ];
-
     /// The next weaker mode; `None` from `PromptOnly`.
     #[must_use]
     pub fn downgraded(self) -> Option<StructuredOutputMode> {

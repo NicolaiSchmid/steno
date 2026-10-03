@@ -20,7 +20,8 @@ use steno_llm::wire::{
 };
 use steno_llm::{
     BudgetPolicy, CodexResponsesClient, JsonSchema, LlmEndpoint, LlmError, OpenAiCompatibleClient,
-    StructuredOutputDecoder, SummaryPromptBuilder, TokenBudget, TranscriptChunk, TranscriptChunker,
+    StructuredOutputDecoder, StructuredOutputMode, SummaryPromptBuilder, TokenBudget,
+    TranscriptChunk, TranscriptChunker,
 };
 
 fn response(text: &str, finish: LlmFinishReason) -> LlmResponse {
@@ -1126,4 +1127,33 @@ fn the_fixtures_are_what_the_swift_generators_produced() {
         steno_core::SummaryTemplate::bundled_with_id("interview"),
     );
     assert_eq!(other.template.id, "interview");
+}
+
+/// The mode is spelled as Swift's raw values in JSON and in text, and
+/// the chain order is the declaration order.
+#[test]
+fn structured_output_mode_keeps_the_swift_spelling() {
+    let modes = [
+        (StructuredOutputMode::JsonSchema, "jsonSchema"),
+        (StructuredOutputMode::JsonObject, "jsonObject"),
+        (StructuredOutputMode::PromptOnly, "promptOnly"),
+    ];
+    for (mode, text) in modes {
+        assert_eq!(serde_json::to_string(&mode).unwrap(), format!("\"{text}\""));
+        assert_eq!(
+            serde_json::from_str::<StructuredOutputMode>(&format!("\"{text}\"")).unwrap(),
+            mode
+        );
+        assert_eq!(mode.as_str(), text);
+        assert_eq!(text.parse::<StructuredOutputMode>().unwrap(), mode);
+    }
+    assert!(serde_json::from_str::<StructuredOutputMode>("\"json_schema\"").is_err());
+    assert_eq!(
+        StructuredOutputMode::ALL,
+        [
+            StructuredOutputMode::JsonSchema,
+            StructuredOutputMode::JsonObject,
+            StructuredOutputMode::PromptOnly
+        ]
+    );
 }

@@ -840,7 +840,7 @@ async fn text_format_follows_the_request_and_the_mode() {
         ),
         None
     );
-    for mode in StructuredOutputMode::ALL {
+    for &mode in StructuredOutputMode::ALL {
         assert_eq!(
             text_format(&LlmResponseFormat::Text, mode),
             None,
