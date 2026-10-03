@@ -249,6 +249,20 @@ pub trait SpeechModels: Send + Sync {
         progress: &mut dyn FnMut(f64, &str),
     ) -> BoundaryResult<()>;
     fn remove(&self, asset: ModelAsset) -> BoundaryResult<()>;
+
+    /// The name the acknowledgements give `asset`. The model behind an
+    /// asset is the services' choice per platform (the Mac's `CoreML` int8
+    /// Parakeet, an fp32 ONNX export elsewhere), so they may name it; the
+    /// default is the Swift app's name, [`ModelAsset::display_name`].
+    fn display_name(&self, asset: ModelAsset) -> String {
+        asset.display_name().to_owned()
+    }
+
+    /// Where `asset`'s model comes from, for the acknowledgements; the
+    /// default is the Swift app's repository, [`ModelAsset::source_repo`].
+    fn source_repo(&self, asset: ModelAsset) -> String {
+        asset.source_repo().to_owned()
+    }
 }
 
 /// One entry of the Codex backend's model list. Swift: `CodexModel` in

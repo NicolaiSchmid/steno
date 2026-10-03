@@ -338,7 +338,30 @@ impl SpeechModels for ModelStoreSpeechModels {
             }
         }
     }
+
+    /// Off the Mac, Parakeet v3 is the fp32 ONNX export of NVIDIA's model,
+    /// not the Swift app's `CoreML` int8 build; on the Mac it is that build,
+    /// under the Swift app's name.
+    fn display_name(&self, asset: ModelAsset) -> String {
+        match asset {
+            ModelAsset::ParakeetV3 if !Self::COREML_PARAKEET => ONNX_PARAKEET_NAME.to_owned(),
+            other => other.display_name().to_owned(),
+        }
+    }
+
+    fn source_repo(&self, asset: ModelAsset) -> String {
+        match asset {
+            ModelAsset::ParakeetV3 if !Self::COREML_PARAKEET => ONNX_PARAKEET_SOURCE.to_owned(),
+            other => other.source_repo().to_owned(),
+        }
+    }
 }
+
+/// What the acknowledgements call the fp32 ONNX Parakeet v3.
+pub const ONNX_PARAKEET_NAME: &str = "Parakeet TDT 0.6B v3 (fp32)";
+
+/// The model the ONNX export was converted from.
+pub const ONNX_PARAKEET_SOURCE: &str = "nvidia/parakeet-tdt-0.6b-v3";
 
 #[cfg(test)]
 mod tests {
@@ -473,6 +496,43 @@ mod tests {
                 OnnxSpeechEngine::ID
             );
         }
+    }
+
+    /// The first acknowledgement row, Parakeet v3, as Settings > General
+    /// shows it over this platform's model store.
+    fn parakeet_acknowledgement() -> (String, String) {
+        let models = ModelStoreSpeechModels::new(Path::new("/tmp/steno-models"));
+        let rows = steno_host::settings::snapshots::acknowledgements(&models);
+        assert_eq!(
+            rows[4].name,
+            ModelAsset::OfflineDiarizer.display_name(),
+            "the other assets keep their names"
+        );
+        (rows[0].name.clone(), rows[0].source.clone())
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn on_the_mac_parakeet_v3_is_acknowledged_as_the_swift_app_names_it() {
+        assert_eq!(
+            parakeet_acknowledgement(),
+            (
+                "Parakeet TDT 0.6B v3 (int8)".to_owned(),
+                "FluidInference/parakeet-tdt-0.6b-v3-coreml".to_owned()
+            )
+        );
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn off_the_mac_parakeet_v3_is_acknowledged_as_the_fp32_onnx_export() {
+        assert_eq!(
+            parakeet_acknowledgement(),
+            (
+                "Parakeet TDT 0.6B v3 (fp32)".to_owned(),
+                "nvidia/parakeet-tdt-0.6b-v3".to_owned()
+            )
+        );
     }
 
     #[tokio::test]

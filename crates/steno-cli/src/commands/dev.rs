@@ -473,7 +473,11 @@ impl Models {
                             steno_host::labels::file_size(asset.approximate_bytes())
                         ),
                     };
-                    println!("{} {}: {line}", asset.as_str(), asset.display_name());
+                    println!(
+                        "{} {}: {line}",
+                        asset.as_str(),
+                        service.display_name(*asset)
+                    );
                 }
                 Ok(())
             }
