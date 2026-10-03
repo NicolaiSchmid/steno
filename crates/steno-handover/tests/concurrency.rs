@@ -17,40 +17,83 @@ mod common;
 use std::sync::Arc;
 use std::time::Duration;
 
-use common::{EngineDevice, ScriptedIntake, TestService, engine_hello, engine_pair, seeded_bytes};
+use common::{EngineDevice, ScriptedIntake, TestService, engine_hello, seeded_bytes};
 use steno_core::{AudioFormat, HandoverState, HandoverStateKind};
-use steno_handover::wire;
+use steno_handover::engine::{HandoverRequest, Principal, RequestHandling as _};
+use steno_handover::route::Route;
+use steno_handover::{HandoverConfiguration, HandoverService, wire};
 use uuid::Uuid;
 
 fn meeting_id() -> Uuid {
     Uuid::parse_str("C0C0C0C0-0000-4000-8000-000000000001").unwrap()
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_pairing_secret_pairs_exactly_once_under_concurrent_use() {
-    // Both requests passed the gate (the session was open at both heads);
-    // the second must find the session gone, not a save still in flight.
+    // Both requests passed the gate (the session was open at both heads)
+    // and run on different worker threads, as two connections do; the
+    // second must find the session gone, not a save still in flight. The
+    // race is a few microseconds wide, so the round repeats, each time with
+    // a body padded to the JSON limit to keep the parse inside the window.
     let test = TestService::with(common::Options {
         start: false,
         ..common::Options::default()
     })
     .await;
-    let _ = test.service.begin_pairing();
-    let (legitimate, intruder) = (Uuid::new_v4(), Uuid::new_v4());
-
-    let (first, second) = tokio::join!(
-        engine_pair(&test, legitimate, "Nicolai's iPhone"),
-        engine_pair(&test, intruder, "Photographed QR")
-    );
-    let mut statuses = vec![first.status.as_u16(), second.status.as_u16()];
-    statuses.sort_unstable();
-    assert_eq!(statuses, vec![200, 403]);
+    for round in 0..ROUNDS {
+        let _ = test.service.begin_pairing();
+        let (legitimate, intruder) = (Uuid::new_v4(), Uuid::new_v4());
+        let first = tokio::spawn(pair_padded(
+            test.service.clone(),
+            legitimate,
+            "Nicolai's iPhone",
+        ));
+        let second = tokio::spawn(pair_padded(
+            test.service.clone(),
+            intruder,
+            "Photographed QR",
+        ));
+        let (first, second) = (first.await.unwrap(), second.await.unwrap());
+        let mut statuses = vec![first.status.as_u16(), second.status.as_u16()];
+        statuses.sort_unstable();
+        assert_eq!(
+            statuses,
+            vec![200, 403],
+            "round {round}: one phone pairs, not two"
+        );
+        assert!(
+            !test.service.engine.pairing_is_open(),
+            "round {round}: the secret is spent"
+        );
+    }
     let devices = test.service.paired_devices().await.unwrap();
-    assert_eq!(devices.len(), 1, "one phone paired, not two");
-    assert!(
-        !test.service.engine.pairing_is_open(),
-        "the secret is spent"
-    );
+    assert_eq!(devices.len(), ROUNDS, "one device per window");
+}
+
+const ROUNDS: usize = 100;
+
+/// `POST /v1/pair` through the engine with the body padded by whitespace
+/// to the JSON limit: a legal request whose parse takes long enough for
+/// the other thread to arrive.
+async fn pair_padded(
+    service: Arc<HandoverService>,
+    device_id: Uuid,
+    device_name: &str,
+) -> steno_handover::engine::HandoverResponse {
+    let json = serde_json::to_vec(&wire::PairRequest {
+        device_id,
+        device_name: device_name.to_owned(),
+    })
+    .unwrap();
+    let padding = usize::try_from(HandoverConfiguration::JSON_BODY_LIMIT).unwrap() - json.len();
+    let mut body = Vec::with_capacity(json.len() + padding);
+    body.push(b'{');
+    body.resize(1 + padding, b' ');
+    body.extend_from_slice(&json[1..]);
+    service
+        .engine
+        .handle(HandoverRequest::new(Route::Pair, Principal::Pairing).with_body(body))
+        .await
 }
 
 #[tokio::test]

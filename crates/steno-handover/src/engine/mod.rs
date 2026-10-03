@@ -25,7 +25,7 @@ use crate::identity::HandoverIdentity;
 use crate::pairing::{DeviceTokens, PairingPayload, PairingSession};
 use crate::route::{AuthRequirement, Route};
 use crate::service::Clock;
-use crate::upload::Inbox;
+use crate::upload::{Inbox, MetadataValidation};
 use crate::wire;
 
 /// Who a request comes from, decided at the request head before the body.
@@ -361,36 +361,46 @@ impl Engine {
 
     async fn pair(&self, request: &HandoverRequest) -> HandoverResponse {
         // The gate passed at the head; the window may have closed since.
-        let session = match self.state().pairing.clone() {
-            Some(session) if session.is_open() => session,
-            _ => return Self::pairing_rejected(),
-        };
-        let body: wire::PairRequest = match serde_json::from_slice(&request.body) {
-            Ok(body) => body,
-            Err(error) => {
-                return HandoverResponse::problem(
-                    StatusCode::BAD_REQUEST,
-                    format!("PairRequest: {error}"),
-                );
-            }
-        };
-        let name = body.device_name.trim();
-        if name.is_empty() || name.chars().count() > 128 {
-            return HandoverResponse::problem(
-                StatusCode::BAD_REQUEST,
-                "deviceName must be 1 to 128 characters",
-            );
-        }
-        // Single use: the session is taken before the first yield, so a
+        // Single use: one guard from the check to the take, so two
+        // connections on two worker threads that both passed the gate
+        // cannot both find the session open. Nothing in between yields; a
         // second request with the same secret that arrives while the save
         // runs finds no session and is 403. The window reopens only if the
         // save fails.
-        self.state().pairing = None;
+        let (session, device_id, name) = {
+            let mut state = self.state();
+            match &state.pairing {
+                Some(session) if session.is_open() => {}
+                _ => return Self::pairing_rejected(),
+            }
+            let body: wire::PairRequest = match serde_json::from_slice(&request.body) {
+                Ok(body) => body,
+                Err(error) => {
+                    return HandoverResponse::problem(
+                        StatusCode::BAD_REQUEST,
+                        format!("PairRequest: {error}"),
+                    );
+                }
+            };
+            let name = body.device_name.trim();
+            if name.is_empty() || name.chars().count() > MetadataValidation::MAX_DEVICE_NAME_LENGTH
+            {
+                return HandoverResponse::problem(
+                    StatusCode::BAD_REQUEST,
+                    format!(
+                        "deviceName must be 1 to {} characters",
+                        MetadataValidation::MAX_DEVICE_NAME_LENGTH
+                    ),
+                );
+            }
+            let session = state.pairing.take().expect("checked under this guard");
+            (session, body.device_id, name.to_owned())
+        };
         let token = DeviceTokens::mint();
         let timestamp = (self.now)();
         let device = PairedDevice {
-            id: body.device_id,
-            name: name.to_owned(),
+            id: device_id,
+            name,
             paired_at: timestamp,
             last_seen_at: Some(timestamp),
         };
