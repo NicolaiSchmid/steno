@@ -9,6 +9,10 @@ use tokio::sync::{Notify, oneshot};
 
 use crate::Clock;
 
+/// Wall time a [`ManualClock`] sleep waits for an `advance` before it
+/// panics.
+pub const STALL_DEADLINE: Duration = Duration::from_secs(10);
+
 /// A [`Clock`] that only moves when a test calls [`advance`](Self::advance).
 /// Sleepers register their deadline and wake when the clock passes it; a
 /// dropped sleep (a cancelled attempt) unregisters itself, so
@@ -116,7 +120,12 @@ impl Clock for ManualClock {
         };
         self.sleepers_changed.notify_waiters();
         let registration = Registration { clock: self, id };
-        let _ = woken.await;
+        // A sleep nobody advances is a test that would hang: fail it loudly
+        // instead. Only spent when a test is already broken.
+        assert!(
+            tokio::time::timeout(STALL_DEADLINE, woken).await.is_ok(),
+            "ManualClock: a {duration:?} sleep was not advanced within {STALL_DEADLINE:?} of wall time"
+        );
         drop(registration);
     }
 

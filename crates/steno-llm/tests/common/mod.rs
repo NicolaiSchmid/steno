@@ -223,12 +223,18 @@ impl EventRecorder {
         receiver: &mut mpsc::UnboundedReceiver<LlmClientEvent>,
         predicate: impl Fn(&LlmClientEvent) -> bool,
     ) -> Option<LlmClientEvent> {
-        while let Some(event) = receiver.recv().await {
-            if predicate(&event) {
-                return Some(event);
+        let find = async {
+            while let Some(event) = receiver.recv().await {
+                if predicate(&event) {
+                    return Some(event);
+                }
             }
-        }
-        None
+            None
+        };
+        tokio::time::timeout(SLEEPER_WAIT, find)
+            .await
+            .ok()
+            .flatten()
     }
 }
 

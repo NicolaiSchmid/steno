@@ -232,11 +232,18 @@ impl StubChatServer {
     /// Waits until at least `count` requests have been recorded, or the
     /// server was stopped. Never polls.
     pub async fn received(&self, count: usize) {
-        super::wait_until(&self.inner.requests_changed, || {
+        let wait = super::wait_until(&self.inner.requests_changed, || {
             let state = self.inner.state();
             state.requests.len() >= count || state.stopped
-        })
-        .await;
+        });
+        assert!(
+            tokio::time::timeout(super::clock::STALL_DEADLINE, wait)
+                .await
+                .is_ok(),
+            "stub server: {} of {count} requests within {:?} of wall time",
+            self.request_count(),
+            super::clock::STALL_DEADLINE
+        );
     }
 
     /// Stops accepting, releases every parked or hanging connection and
