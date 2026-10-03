@@ -22,7 +22,9 @@ steno-core = { path = "../steno-core" }
 # The ONNX diarizer only; the CoreML diarizer is not wired.
 steno-diarize = { path = "../steno-diarize", default-features = false, features = ["onnx"] }
 steno-handover = { path = "../steno-handover" }
-steno-host = { path = "../steno-host" }
+# The host's fakes stand in for the platform services the shell draws in
+# WP8 (permissions, login item, updater, clip player, QR encoder).
+steno-host = { path = "../steno-host", features = ["fakes"] }
 steno-llm = { path = "../steno-llm" }
 steno-pipeline = { path = "../steno-pipeline" }
 steno-speech = { path = "../steno-speech" }
