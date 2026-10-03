@@ -342,7 +342,8 @@ impl CaptureSession {
     /// Ends the recording and returns it. A rebuild in flight is abandoned.
     /// After `Failed` returns the finalised partial recording the state
     /// carries, or fails when the failure came from a start that produced
-    /// nothing.
+    /// nothing. Fails with `WriterFailed`, and leaves the state `Failed`,
+    /// when the master is gone from disk or the writer thread died.
     pub fn stop(&self) -> Result<CaptureResult, CaptureError> {
         self.core.stop()
     }
@@ -600,8 +601,16 @@ impl Core {
             }
             Self::set_state(&mut inner, &CaptureState::Stopping);
         }
-        let Some((result, failure)) = self.finish() else {
-            return Err(CaptureError::InvalidState("nothing to finish".into()));
+        let (result, failure) = match self.finish() {
+            Ok(finished) => finished,
+            Err(error) => {
+                let failed = CaptureState::Failed {
+                    error: error.clone(),
+                    recording: None,
+                };
+                Self::set_state(&mut self.lock(), &failed);
+                return Err(error);
+            }
         };
         // Closing the files can fail on a full disk; the master is still
         // readable to its last frame, so the result comes back and the
@@ -618,14 +627,23 @@ impl Core {
         Ok(result)
     }
 
-    /// Rebuild abandoned, backend off, rings drained, relay drained, files
-    /// closed, asset built. The asset is built even when closing the files
-    /// fails (its paths are fixed at start and the duration is what the
-    /// master holds); the failure comes back beside it. The caller has set
-    /// the state to `Stopping`; the threads are stopped with the lock
-    /// released (see the module doc).
-    fn finish(&self) -> Option<(CaptureResult, Option<CaptureError>)> {
-        let mut active = self.lock().active.take()?;
+    /// Rebuild abandoned and joined, backend off, rings drained, relay
+    /// drained, files closed, asset built. The asset is built even when
+    /// closing the files fails (its paths are fixed at start and the
+    /// duration is what the master holds); the failure comes back beside
+    /// it. `WriterFailed`
+    /// with no asset when there is nothing to hand out: the writer thread
+    /// died and took the writer with it, or the master is gone from disk
+    /// (its folder deleted while recording; an unlinked file still writes
+    /// and closes without an error). The caller has set the state to
+    /// `Stopping`; the threads are stopped with the lock released (see the
+    /// module doc).
+    fn finish(&self) -> Result<(CaptureResult, Option<CaptureError>), CaptureError> {
+        let mut active = self
+            .lock()
+            .active
+            .take()
+            .ok_or_else(|| CaptureError::InvalidState("nothing to finish".into()))?;
         if let Some(rebuild) = active.rebuild.take() {
             rebuild.cancel.cancel();
             // With `active` gone every step of the rebuild gives up; what
@@ -640,18 +658,28 @@ impl Core {
             system_peak = system_peak.max(processing.system_peak());
             self.lock().echo_canceller = processing.take_echo_canceller();
         }
-        let mut writer_thread = active.writer_thread.take()?;
+        let writer_lost =
+            || CaptureError::WriterFailed("the writer thread ended without its files".into());
+        let mut writer_thread = active.writer_thread.take().ok_or_else(writer_lost)?;
         writer_thread.stop();
-        let mut writer = writer_thread.take_writer()?;
+        let mut writer = writer_thread.take_writer().ok_or_else(writer_lost)?;
+        // Read before `clear()`, which zeroes the ring overrun counts.
+        let ring_drops = active.sink.dropped_samples();
         active.sink.clear();
         let failure = match writer.finish() {
             Ok(_) => None,
             Err(error) => Some(CaptureError::WriterFailed(error.to_string())),
         };
         let files = writer.files();
+        if !files.master.exists() {
+            return Err(CaptureError::WriterFailed(format!(
+                "{} is gone",
+                files.master.display()
+            )));
+        }
         let lanes = self.configuration.lanes();
         let mut dropped: BTreeMap<AudioLane, usize> = BTreeMap::new();
-        for (lane, samples) in active.sink.dropped_samples() {
+        for (lane, samples) in ring_drops {
             *dropped.entry(lane).or_default() += samples / FRAME_SIZE;
         }
         for (index, frames) in active.relay.dropped_frames().into_iter().enumerate() {
@@ -683,7 +711,7 @@ impl Core {
             retention: AudioRetention::KeepForever,
             expires_at: None,
         };
-        Some((CaptureResult { asset, statistics }, failure))
+        Ok((CaptureResult { asset, statistics }, failure))
     }
 
     // Device changes
@@ -974,17 +1002,17 @@ impl Core {
             active.rebuild = None;
             Self::set_state(&mut inner, &CaptureState::Stopping);
         }
-        let Some((result, failure)) = self.finish() else {
-            return;
-        };
-        let mut inner = self.lock();
-        Self::set_state(
-            &mut inner,
-            &CaptureState::Failed {
+        let state = match self.finish() {
+            Ok((result, failure)) => CaptureState::Failed {
                 error: failure.unwrap_or(CaptureError::DeviceLost),
                 recording: Some(Box::new(result)),
             },
-        );
+            Err(error) => CaptureState::Failed {
+                error,
+                recording: None,
+            },
+        };
+        Self::set_state(&mut self.lock(), &state);
     }
 
     fn writer_failed(&self, error: &CaptureError) {
@@ -995,7 +1023,7 @@ impl Core {
             }
             Self::set_state(&mut inner, &CaptureState::Stopping);
         }
-        let result = self.finish().map(|(result, _)| Box::new(result));
+        let result = self.finish().ok().map(|(result, _)| Box::new(result));
         let mut inner = self.lock();
         Self::set_state(
             &mut inner,

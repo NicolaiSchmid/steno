@@ -811,6 +811,187 @@ fn a_failing_write_mid_recording_finalises_what_was_written() {
     assert_eq!(master_of(&result).frame_count(), 30 * 480);
 }
 
+/// The writer thread panics on its tenth frame and takes the writer with
+/// it: `stop()` fails with `WriterFailed` instead of leaving the session
+/// stuck in `Stopping`, and the next recording starts.
+#[test]
+fn a_writer_thread_that_died_ends_failed_and_the_session_starts_again() {
+    struct Panicking(RecordingWriter, usize);
+    impl RecordingWriting for Panicking {
+        fn files(&self) -> RecordingFiles {
+            self.0.files()
+        }
+        fn write(&mut self, frames: &LaneFrames<'_>) -> Result<(), CaptureError> {
+            self.1 += 1;
+            assert!(self.1 < 10, "writer panics on purpose");
+            self.0.write(frames)
+        }
+        fn finish(&mut self) -> Result<RecordingFiles, CaptureError> {
+            self.0.finish()
+        }
+    }
+    let directory = tempfile::tempdir().unwrap();
+    let backend = Arc::new(SyntheticCaptureBackend::new(tones(
+        &[AudioLane::Mixed],
+        0.5,
+    )));
+    let first = Arc::new(AtomicBool::new(true));
+    let session = CaptureSession::with_writer_factory(
+        configuration(CaptureMode::InPerson, directory.path(), false),
+        backend.clone(),
+        None,
+        1_000,
+        Arc::new(SystemClock::new()),
+        Arc::new(move |layout, lanes, keep_raw| {
+            let writer = RecordingWriter::new(layout, lanes, keep_raw)?;
+            Ok(if first.swap(false, Ordering::SeqCst) {
+                Box::new(Panicking(writer, 0)) as Box<dyn RecordingWriting>
+            } else {
+                Box::new(writer)
+            })
+        }),
+    )
+    .unwrap();
+    session.start(Uuid::new_v4()).unwrap();
+    backend.wait_until_finished();
+    let error = session.stop().unwrap_err();
+    assert!(matches!(error, CaptureError::WriterFailed(_)), "{error:?}");
+    assert_eq!(
+        session.state(),
+        CaptureState::Failed {
+            error,
+            recording: None
+        }
+    );
+    session.start(Uuid::new_v4()).unwrap();
+    backend.wait_until_finished();
+    assert_eq!(master_of(&session.stop().unwrap()).frame_count(), 24_000);
+    assert_eq!(session.state(), CaptureState::Idle);
+}
+
+/// The meeting's folder is deleted while recording. On Unix the open files
+/// keep writing and close without an error, so only the missing master
+/// tells: `stop()` fails with `WriterFailed` rather than returning an asset
+/// whose files are gone.
+#[cfg(unix)]
+#[test]
+fn a_folder_deleted_while_recording_ends_writer_failed() {
+    let directory = tempfile::tempdir().unwrap();
+    let backend = Arc::new(SyntheticCaptureBackend::new(tones(
+        &[AudioLane::Mixed],
+        0.5,
+    )));
+    let session = CaptureSession::with_backend(
+        configuration(CaptureMode::InPerson, directory.path(), false),
+        backend.clone(),
+        None,
+        200,
+        Arc::new(SystemClock::new()),
+    )
+    .unwrap();
+    let meeting_id = Uuid::new_v4();
+    session.start(meeting_id).unwrap();
+    backend.wait_until_finished();
+    std::fs::remove_dir_all(RecordingLayout::new(directory.path(), meeting_id).directory).unwrap();
+    let error = session.stop().unwrap_err();
+    match &error {
+        CaptureError::WriterFailed(detail) => assert!(detail.ends_with("is gone"), "{detail}"),
+        other => panic!("expected WriterFailed, got {other:?}"),
+    }
+    assert_eq!(
+        session.state(),
+        CaptureState::Failed {
+            error,
+            recording: None
+        }
+    );
+}
+
+/// Stands in for the IOProc: the test pushes callbacks into the sink the
+/// session handed over.
+struct HandsOverTheSink {
+    sink: Mutex<Option<Arc<LaneFrameSink>>>,
+}
+
+impl CaptureBackend for HandsOverTheSink {
+    fn start(
+        &self,
+        _: &[AudioLane],
+        _: Option<&str>,
+        sink: Arc<LaneFrameSink>,
+    ) -> Result<CaptureStream, CaptureError> {
+        *self.sink.lock().unwrap() = Some(sink);
+        Ok(CaptureStream::SYNTHETIC)
+    }
+    fn stop(&self) {}
+}
+
+/// Passes the near end through once the gate opens; until then the
+/// processing thread is stuck in its first frame.
+struct GatedCanceller {
+    open: Arc<(Mutex<bool>, std::sync::Condvar)>,
+}
+
+impl EchoCanceller for GatedCanceller {
+    fn process(&mut self, near_end: &[f32], _far_end: &[f32], out: &mut [f32]) {
+        let (open, condvar) = &*self.open;
+        let mut guard = open.lock().unwrap();
+        while !*guard {
+            guard = condvar.wait(guard).unwrap();
+        }
+        let count = near_end.len().min(out.len());
+        out[..count].copy_from_slice(&near_end[..count]);
+    }
+    fn reset(&mut self) {}
+}
+
+/// Three seconds of callbacks while the processing thread is stuck: the
+/// two-second rings take what fits (plus what the thread read before it
+/// stuck), refuse the rest and count it, and
+/// those overruns reach `dropped_frames` (they used to be zeroed by the
+/// ring clear before they were read).
+#[test]
+fn ring_overruns_are_reported_in_dropped_frames() {
+    let directory = tempfile::tempdir().unwrap();
+    let backend = Arc::new(HandsOverTheSink {
+        sink: Mutex::new(None),
+    });
+    let open = Arc::new((Mutex::new(false), std::sync::Condvar::new()));
+    let session = CaptureSession::with_backend(
+        configuration(CaptureMode::Call, directory.path(), false),
+        backend.clone(),
+        Some(Box::new(GatedCanceller { open: open.clone() })),
+        2_000,
+        Arc::new(SystemClock::new()),
+    )
+    .unwrap();
+    session.start(Uuid::new_v4()).unwrap();
+    let sink = backend.sink.lock().unwrap().clone().unwrap();
+    let buffer = [0.25f32; 480];
+    let mut accepted = 0;
+    for _ in 0..300 {
+        if sink.begin_callback(480) {
+            sink.write_slice(0, &buffer);
+            sink.write_slice(1, &buffer);
+            sink.end_callback();
+            accepted += 1;
+        }
+    }
+    *open.0.lock().unwrap() = true;
+    open.1.notify_all();
+    let result = session.stop().unwrap();
+    let refused = 300 - accepted;
+    assert!(
+        refused > 0 && accepted >= 200,
+        "the rings hold two seconds: {accepted} accepted"
+    );
+    assert_eq!(master_of(&result).frame_count(), accepted * 480);
+    assert_eq!(
+        result.statistics.dropped_frames,
+        BTreeMap::from([(AudioLane::Mic, refused), (AudioLane::System, refused)])
+    );
+}
+
 struct Failing;
 
 impl CaptureBackend for Failing {
