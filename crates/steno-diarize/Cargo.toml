@@ -22,7 +22,7 @@ steno-core = { path = "../steno-core" }
 ort = { workspace = true, optional = true }
 rustfft.workspace = true
 sha2.workspace = true
-# A per-process temporary file for each model download.
+# A temporary file of its own for each model download.
 tempfile.workspace = true
 thiserror.workspace = true
 # `spawn_blocking` for the `Diarizer` calls; the workspace entry brings
