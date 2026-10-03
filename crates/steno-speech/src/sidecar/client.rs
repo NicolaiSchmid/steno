@@ -452,8 +452,9 @@ impl Shared {
 /// `prepare` installs the models into the store in this process (the
 /// child never opens a connection), spawns the child and has it load them;
 /// `transcribe` sends the samples over the pipe. A failed child is
-/// replaced on the next call. [`SidecarSpeechEngine::release`] stops the
-/// child and frees its working set; the pipeline calls it after each job.
+/// replaced on the next call. [`SpeechEngine::release`] stops the child
+/// and frees its working set; WP6b's pipeline is to call it after each
+/// job, and until then nothing frees it.
 pub struct SidecarSpeechEngine {
     shared: Arc<Shared>,
     languages: BTreeSet<LanguageTag>,
@@ -544,9 +545,10 @@ impl SidecarSpeechEngine {
         .await??)
     }
 
-    /// Stops the child, politely first; returns its exit status, `None`
-    /// when no child ran. The next call starts a new one.
-    pub async fn release(&self) -> BoundaryResult<Option<ExitStatus>> {
+    /// [`SpeechEngine::release`] with the child's exit status: stops the
+    /// child, politely first; `None` when no child ran. The next call
+    /// starts a new one.
+    pub async fn shut_down(&self) -> BoundaryResult<Option<ExitStatus>> {
         let shared = Arc::clone(&self.shared);
         Ok(blocking(move || {
             let mut slot = shared.lock();
@@ -627,6 +629,11 @@ impl SpeechEngine for SidecarSpeechEngine {
         .await??;
         Ok(segments)
     }
+
+    /// Stops the child and frees its working set (the models, 2.2 GB).
+    async fn release(&self) -> BoundaryResult<()> {
+        self.shut_down().await.map(drop)
+    }
 }
 
 #[cfg(test)]
@@ -668,6 +675,7 @@ mod tests {
         assert_eq!(engine.pid(), None);
         assert_eq!(engine.spawns(), 0);
         assert_eq!(engine.health().await.unwrap(), None);
-        assert_eq!(engine.release().await.unwrap(), None);
+        assert_eq!(engine.shut_down().await.unwrap(), None);
+        engine.release().await.unwrap();
     }
 }

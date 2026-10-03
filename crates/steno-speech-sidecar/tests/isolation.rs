@@ -130,12 +130,17 @@ async fn requests_round_trip_the_audio_bit_for_bit_in_one_child() {
     assert_eq!(segments[0].language, None);
     assert_eq!(engine.pid(), Some(pid));
     assert_eq!(engine.spawns(), 1);
-    let status = engine.release().await.unwrap().unwrap();
+    let status = engine.shut_down().await.unwrap().unwrap();
     assert!(status.success(), "{status}");
     assert_eq!(engine.pid(), None);
     // A released engine starts again on demand.
     assert_works(&engine, &tone(0.2)).await;
     assert_eq!(engine.spawns(), 2);
+    // A pipeline holding the trait object frees the child the same way.
+    let pipeline: &dyn SpeechEngine = &engine;
+    pipeline.release().await.unwrap();
+    assert_eq!(engine.pid(), None);
+    assert_eq!(engine.health().await.unwrap(), None);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -302,7 +307,7 @@ async fn the_real_engine_reports_missing_models_and_keeps_running() {
     );
     let health = engine.health().await.unwrap().unwrap();
     assert!(!health.loaded);
-    assert!(engine.release().await.unwrap().unwrap().success());
+    assert!(engine.shut_down().await.unwrap().unwrap().success());
 }
 
 #[test]
@@ -397,5 +402,5 @@ async fn the_real_models_load_and_transcribe_in_the_sidecar_when_installed() {
             sidecar.len()
         );
     }
-    assert!(engine.release().await.unwrap().unwrap().success());
+    assert!(engine.shut_down().await.unwrap().unwrap().success());
 }
