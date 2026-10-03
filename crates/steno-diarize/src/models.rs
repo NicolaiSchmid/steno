@@ -220,10 +220,20 @@ fn download(url: &'static str, file: &mut fs::File) -> Result<(), DownloadError>
         .new_agent();
     let response = agent.get(url).call().map_err(DownloadError::Transfer)?;
     let mut reader = response.into_body().into_reader();
-    // A short or broken body surfaces here as an I/O error from the
-    // reader; the file is the only writer, so it is reported as the
-    // file's error with the path by the caller.
-    io::copy(&mut reader, file).map_err(DownloadError::Write)?;
+    // Copied by hand rather than with `io::copy` so that a short or broken
+    // body, an error from the reader, is a transfer error with the URL and
+    // only a failed write is the file's.
+    let mut buffer = vec![0u8; 1 << 16];
+    loop {
+        let read = match reader.read(&mut buffer) {
+            Ok(0) => break,
+            Ok(read) => read,
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+            Err(error) => return Err(DownloadError::Transfer(ureq::Error::from(error))),
+        };
+        file.write_all(&buffer[..read])
+            .map_err(DownloadError::Write)?;
+    }
     file.flush().map_err(DownloadError::Write)?;
     Ok(())
 }
@@ -417,10 +427,11 @@ mod tests {
         assert_eq!(entries(dir.path()), Vec::<String>::new());
     }
 
-    /// A connection that closes before the declared length arrives is an
-    /// I/O error on the partial file, and the partial file goes with it.
+    /// A connection that closes before the declared length arrives is a
+    /// download error that names the URL, and the partial file goes with
+    /// it.
     #[test]
-    fn a_truncated_body_leaves_nothing_behind() {
+    fn a_truncated_body_names_the_url_and_leaves_nothing_behind() {
         let dir = tempfile::tempdir().unwrap();
         let asset = ModelAsset {
             file_name: "model.onnx",
@@ -429,7 +440,8 @@ mod tests {
             licence: "",
         };
         let error = ModelStore::new(dir.path()).ensure(&asset).unwrap_err();
-        assert!(matches!(error, ModelError::Io { .. }), "{error}");
+        assert!(matches!(error, ModelError::Download { .. }), "{error}");
+        assert!(error.to_string().contains(asset.url), "{error}");
         assert_eq!(entries(dir.path()), Vec::<String>::new());
     }
 }
