@@ -40,7 +40,11 @@ impl Slot {
 /// The work is minutes of model inference, so each call runs on one of
 /// tokio's blocking threads (`spawn_blocking`) and the lock is taken and
 /// released there, never across an `.await`; the executor keeps serving
-/// the shell while a lane is analysed. The audio is cloned onto that
+/// the shell while a lane is analysed. `prepare` and `diarize` must
+/// therefore be awaited inside a tokio runtime (any flavour, the
+/// current-thread one included); outside one, `spawn_blocking` panics.
+/// A panic inside a call comes back as an error, not a crash. The audio
+/// is cloned onto that
 /// thread (4 bytes a sample, 230 MB for an hour), the price of a
 /// `'static` task over a borrowed buffer; the analysis itself holds more.
 /// A panic mid-call leaves the pipeline as it was between calls, because
