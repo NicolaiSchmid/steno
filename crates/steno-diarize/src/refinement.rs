@@ -111,9 +111,8 @@ pub fn refine(
         }
         // The speaker keeps their embedding, clip and confidence; only the
         // ranges grow.
-        let mut ranges = substantive[index].ranges.clone();
-        ranges.extend(fragment.ranges.iter().copied());
-        substantive[index].ranges = merged(&ranges);
+        let speaker = &mut substantive[index];
+        speaker.ranges = union(&speaker.ranges, &fragment.ranges);
     }
 
     substantive.sort_by(|lhs, rhs| first_speech(lhs).total_cmp(&first_speech(rhs)));
@@ -217,11 +216,9 @@ fn merge(lhs: &SpeakerCluster, rhs: &SpeakerCluster) -> SpeakerCluster {
     } else {
         (rhs, lhs)
     };
-    let mut ranges = lhs.ranges.clone();
-    ranges.extend(rhs.ranges.iter().copied());
     SpeakerCluster {
         label: longer.label.clone(),
-        ranges: merged(&ranges),
+        ranges: union(&lhs.ranges, &rhs.ranges),
         embedding: longer
             .embedding
             .clone()
@@ -229,4 +226,9 @@ fn merge(lhs: &SpeakerCluster, rhs: &SpeakerCluster) -> SpeakerCluster {
         cluster_confidence: longer.cluster_confidence,
         sample_clip_range: longer.sample_clip_range.or(shorter.sample_clip_range),
     }
+}
+
+/// The ranges of both sides, merged.
+fn union(lhs: &[TimeRange], rhs: &[TimeRange]) -> Vec<TimeRange> {
+    merged(&[lhs, rhs].concat())
 }
