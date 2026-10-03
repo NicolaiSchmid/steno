@@ -209,7 +209,7 @@ PR off `main`.
 | WP2 store | `feat/rust-store` | #155 | merged |
 | WP3 Tauri shell on fixtures | `feat/rust-desktop` | #156 | merged |
 | Core protocols and fakes | `feat/rust-protocols` | #162 | merged |
-| Bridge on core | `refactor/rust-bridge-on-core` | #161 | open |
+| Bridge on core | `refactor/rust-bridge-on-core` | #161 | merged |
 | WP4b CoreML speech backend | `feat/rust-speech-coreml` | #163 | in review |
 
 WP4b is `crates/steno-speech-coreml`: `objc2-core-ml` behind one safe module,
