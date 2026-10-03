@@ -1,8 +1,8 @@
 //! Where the models live and how they get there. The manifest names every
 //! file of an asset with its size and SHA-256; the store checks a directory
-//! against it, downloads what is missing into `<file>.partial` while
-//! hashing, and renames only a verified file into place. Models are never
-//! committed (`.gitignore` covers `*.onnx`).
+//! against it, downloads what is missing into `<file>.partial.<pid>` while
+//! hashing, and renames only a verified, synced file into place. Models are
+//! never committed (`.gitignore` covers `*.onnx`).
 //!
 //! The root is `<support directory>/Models` ([`steno_core::StenoPaths`]),
 //! or the directory `STENO_MODELS_DIR` names, with one sub-directory per
@@ -22,6 +22,7 @@
 use std::fs::{self, File};
 use std::io::{Read, Write};
 use std::path::{Component, Path, PathBuf};
+use std::time::Duration;
 
 use sha2::{Digest, Sha256};
 use steno_core::StenoPaths;
@@ -244,7 +245,19 @@ impl ModelStore {
 
     /// Installs the asset if needed and returns its directory. Missing
     /// files with a URL are downloaded and verified; a missing file
-    /// without one is [`SpeechError::NotHosted`].
+    /// without one is [`SpeechError::NotHosted`]. Partial downloads a
+    /// killed process left behind are removed first.
+    ///
+    /// ```no_run
+    /// use steno_speech::{ModelAsset, ModelStore};
+    ///
+    /// let store = ModelStore::from_environment();
+    /// let directory = store.ensure(&ModelAsset::silero_vad(), &mut |p| {
+    ///     eprintln!("{}: {} of {} bytes", p.file, p.received, p.total);
+    /// })?;
+    /// assert!(directory.join("silero_vad.onnx").is_file());
+    /// # Ok::<(), steno_speech::SpeechError>(())
+    /// ```
     pub fn ensure(
         &self,
         asset: &ModelAsset,
@@ -252,6 +265,9 @@ impl ModelStore {
     ) -> Result<PathBuf, SpeechError> {
         asset.validate()?;
         let directory = self.directory(asset);
+        for file in &asset.files {
+            remove_stale_partials(&directory, &file.name);
+        }
         let missing = self.missing_files(asset);
         if missing.is_empty() {
             return Ok(directory);
@@ -279,10 +295,10 @@ impl ModelStore {
         Ok(())
     }
 
-    /// Downloads into a sibling `.partial.<pid>` file (two processes, the
-    /// app and a sidecar, can then install the same asset without writing
-    /// one inode), verifies it and renames it into place; nothing is left
-    /// behind on failure.
+    /// Downloads into a sibling `<name>.partial.<pid>` file (two processes,
+    /// the app and a sidecar, can then install the same asset without
+    /// writing one inode), verifies and syncs it and renames it into place;
+    /// nothing is left behind on failure, nor when `progress` panics.
     fn download(
         &self,
         url: &str,
@@ -290,32 +306,34 @@ impl ModelStore {
         destination: &Path,
         progress: &mut dyn FnMut(DownloadProgress<'_>),
     ) -> Result<(), SpeechError> {
-        let suffix = format!("partial.{}", std::process::id());
-        let partial = destination.with_extension(match destination.extension() {
-            Some(extension) => format!("{}.{suffix}", extension.to_string_lossy()),
-            None => suffix,
-        });
-        let result = self
-            .stream_to(url, file, &partial, progress)
-            .and_then(|()| {
-                fs::rename(&partial, destination).map_err(|e| SpeechError::io(destination, e))
+        let partial = RemoveOnDrop(destination.with_file_name(format!(
+            "{}{}",
+            partial_prefix(&file.name),
+            std::process::id()
+        )));
+        let (received, digest) = self.stream_to(url, file, &partial.0, progress)?;
+        if received != file.size {
+            return Err(SpeechError::Size {
+                path: destination.to_path_buf(),
+                expected: file.size,
+                actual: received,
             });
-        if result.is_err() {
-            let _ = fs::remove_file(&partial);
         }
-        result
+        check_digest(file, destination, digest)?;
+        fs::rename(&partial.0, destination).map_err(|e| SpeechError::io(destination, e))?;
+        sync_parent(destination)
     }
 
-    /// Streams `url` into `partial` while hashing; refuses the body as soon
-    /// as it exceeds the manifest size, so a misbehaving host cannot fill
-    /// the disk.
+    /// Streams `url` into `partial` while hashing and syncs it; returns the
+    /// bytes received and their digest. Stops at the first byte over the
+    /// manifest size, so a misbehaving host cannot fill the disk.
     fn stream_to(
         &self,
         url: &str,
         file: &ModelFile,
         partial: &Path,
         progress: &mut dyn FnMut(DownloadProgress<'_>),
-    ) -> Result<(), SpeechError> {
+    ) -> Result<(u64, String), SpeechError> {
         let response = self
             .agent
             .get(url)
@@ -332,11 +350,6 @@ impl ModelStore {
         let mut hasher = Sha256::new();
         let mut received = 0u64;
         let mut buffer = vec![0u8; 1 << 16];
-        let size_error = |received| SpeechError::Size {
-            path: partial.to_path_buf(),
-            expected: file.size,
-            actual: received,
-        };
         progress(DownloadProgress {
             file: &file.name,
             received,
@@ -351,7 +364,7 @@ impl ModelStore {
             }
             received += n as u64;
             if received > file.size {
-                return Err(size_error(received));
+                break;
             }
             out.write_all(&buffer[..n])
                 .map_err(|e| SpeechError::io(partial, e))?;
@@ -362,16 +375,69 @@ impl ModelStore {
                 total,
             });
         }
-        out.flush().map_err(|e| SpeechError::io(partial, e))?;
-        drop(out);
-        if received != file.size {
-            return Err(size_error(received));
-        }
-        check_digest(file, partial, hex(&hasher.finalize()))
+        // Without the sync a power loss could leave a file of the right
+        // length but lost contents, which `is_installed` (sizes only) takes.
+        out.sync_all().map_err(|e| SpeechError::io(partial, e))?;
+        Ok((received, hex(&hasher.finalize())))
     }
 }
 
-/// `actual` against the manifest's digest for `file`, read from `path`.
+/// A partial download no process has written to for this long is stale; a
+/// live download writes it many times a second.
+const STALE_PARTIAL: Duration = Duration::from_secs(10 * 60);
+
+/// `<name>.partial.`, followed by the pid of the downloading process.
+fn partial_prefix(name: &str) -> String {
+    format!("{name}.partial.")
+}
+
+/// Removes the stale `<name>.partial.<pid>` files in `directory`, which a
+/// killed process leaves behind (2.4 GB for `encoder.weights`). Best
+/// effort: a file that cannot be read or removed stays.
+fn remove_stale_partials(directory: &Path, name: &str) {
+    let prefix = partial_prefix(name);
+    let Ok(entries) = fs::read_dir(directory) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let stale = entry
+            .metadata()
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|modified| modified.elapsed().ok())
+            .is_some_and(|age| age >= STALE_PARTIAL);
+        if stale && entry.file_name().to_string_lossy().starts_with(&prefix) {
+            let _ = fs::remove_file(entry.path());
+        }
+    }
+}
+
+/// Deletes the file it names when dropped; after the rename into place
+/// there is nothing left to delete.
+struct RemoveOnDrop(PathBuf);
+
+impl Drop for RemoveOnDrop {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.0);
+    }
+}
+
+/// Syncs the directory holding `path`, so the rename survives a power loss.
+/// Windows cannot open a directory as a file; NTFS journals the rename.
+fn sync_parent(path: &Path) -> Result<(), SpeechError> {
+    #[cfg(unix)]
+    if let Some(parent) = path.parent() {
+        File::open(parent)
+            .and_then(|directory| directory.sync_all())
+            .map_err(|e| SpeechError::io(parent, e))?;
+    }
+    #[cfg(not(unix))]
+    let _ = path;
+    Ok(())
+}
+
+/// Compares `actual` with `file`'s manifest digest; `path` names the file
+/// in the error.
 fn check_digest(file: &ModelFile, path: &Path, actual: String) -> Result<(), SpeechError> {
     if actual.eq_ignore_ascii_case(&file.sha256) {
         Ok(())
@@ -470,9 +536,24 @@ mod tests {
         assert!(!store.is_installed(&asset));
         assert_eq!(store.missing_files(&asset), ["model.onnx"]);
         let mut reports = Vec::new();
+        let mut partials = Vec::new();
         let directory = store
-            .ensure(&asset, &mut |p| reports.push((p.received, p.total)))
+            .ensure(&asset, &mut |p| {
+                reports.push((p.received, p.total));
+                partials.extend(
+                    fs::read_dir(dir.path().join("test-asset"))
+                        .unwrap()
+                        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned()),
+                );
+            })
             .unwrap();
+        // The download writes a file of its own process, not the target.
+        assert!(
+            partials
+                .iter()
+                .all(|name| *name == format!("model.onnx.partial.{}", std::process::id())),
+            "{partials:?}"
+        );
         assert_eq!(directory, dir.path().join("test-asset"));
         assert_eq!(fs::read(directory.join("model.onnx")).unwrap(), body);
         assert!(store.is_installed(&asset));
@@ -520,8 +601,9 @@ mod tests {
         let error = store
             .ensure(&long_asset, &mut |p| last = p.received)
             .unwrap_err();
+        let destination = dir.path().join("test-asset").join("model.onnx");
         assert!(
-            matches!(error, SpeechError::Size { actual, .. } if actual > 1000),
+            matches!(&error, SpeechError::Size { actual, path, .. } if *actual > 1000 && *path == destination),
             "{error}"
         );
         assert!(last <= 1000);
@@ -553,6 +635,33 @@ mod tests {
             store.verify(&asset),
             Err(SpeechError::Checksum { .. })
         ));
+    }
+
+    #[test]
+    fn a_stale_partial_download_is_removed_and_a_live_one_kept() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = ModelStore::new(dir.path());
+        let body = b"local only".to_vec();
+        let asset = asset(None, &body, &digest(&body));
+        let directory = store.directory(&asset);
+        fs::create_dir_all(&directory).unwrap();
+        fs::write(directory.join("model.onnx"), &body).unwrap();
+        let (stale, live) = (
+            directory.join("model.onnx.partial.1"),
+            directory.join("model.onnx.partial.2"),
+        );
+        for path in [&stale, &live] {
+            fs::write(path, b"half").unwrap();
+        }
+        File::options()
+            .write(true)
+            .open(&stale)
+            .unwrap()
+            .set_modified(std::time::SystemTime::now() - 2 * STALE_PARTIAL)
+            .unwrap();
+        store.ensure(&asset, &mut |_| {}).unwrap();
+        assert!(!stale.exists());
+        assert!(live.exists());
     }
 
     #[test]
@@ -595,6 +704,12 @@ mod tests {
             asset.validate().unwrap();
         }
         assert!(fs::read_dir(dir.path()).unwrap().next().is_none());
+        // An invalid asset lists every file as missing, even one a join of
+        // its id would find: "." resolves to the root itself.
+        let mut dot = asset(None, &body, &digest(&body));
+        dot.id = ".".to_owned();
+        fs::write(dir.path().join("model.onnx"), &body).unwrap();
+        assert_eq!(store.missing_files(&dot), ["model.onnx"]);
     }
 
     #[test]
