@@ -51,9 +51,8 @@
 //! and then finds a started backend to tear down, instead of racing a
 //! half-built one; a backend never calls back into the session from
 //! `start`, so the hold cannot deadlock. It can stall, though: every
-//! caller, `state()` included, waits as long as `backend.start()` takes
-//! (2.1 s measured against a backend whose start blocked for 2 s), so a HAL
-//! call that hangs there freezes the session's callers with it.
+//! caller, `state()` included, waits as long as `backend.start()` takes,
+//! so a HAL call that hangs there freezes the session's callers with it.
 
 use std::collections::BTreeMap;
 use std::sync::mpsc::{Receiver, Sender, channel};
@@ -435,6 +434,12 @@ impl Core {
         self.configuration.keep_raw_mic_lane && self.configuration.lanes().contains(&AudioLane::Mic)
     }
 
+    /// The seconds `frames` relay frames of silence last, exact for any
+    /// gap length.
+    fn seconds(frames: usize) -> f64 {
+        (frames * FRAME_SIZE) as f64 / SAMPLE_RATE
+    }
+
     fn make_processing_thread(
         &self,
         sink: &Arc<LaneFrameSink>,
@@ -601,43 +606,35 @@ impl Core {
             }
             Self::set_state(&mut inner, &CaptureState::Stopping);
         }
-        let (result, failure) = match self.finish() {
-            Ok(finished) => finished,
-            Err(error) => {
-                let failed = CaptureState::Failed {
-                    error: error.clone(),
-                    recording: None,
-                };
-                Self::set_state(&mut self.lock(), &failed);
-                return Err(error);
-            }
-        };
+        let finished = self.finish();
         // Closing the files can fail on a full disk; the master is still
         // readable to its last frame, so the result comes back and the
         // state carries the failure instead of `stop()` throwing it away.
-        let mut inner = self.lock();
-        let state = match failure {
-            Some(error) => CaptureState::Failed {
-                error,
+        let state = match &finished {
+            Ok((_, None)) => CaptureState::Idle,
+            Ok((result, Some(error))) => CaptureState::Failed {
+                error: error.clone(),
                 recording: Some(Box::new(result.clone())),
             },
-            None => CaptureState::Idle,
+            Err(error) => CaptureState::Failed {
+                error: error.clone(),
+                recording: None,
+            },
         };
-        Self::set_state(&mut inner, &state);
-        Ok(result)
+        Self::set_state(&mut self.lock(), &state);
+        finished.map(|(result, _)| result)
     }
 
     /// Rebuild abandoned and joined, backend off, rings drained, relay
     /// drained, files closed, asset built. The asset is built even when
     /// closing the files fails (its paths are fixed at start and the
     /// duration is what the master holds); the failure comes back beside
-    /// it. `WriterFailed`
-    /// with no asset when there is nothing to hand out: the writer thread
-    /// died and took the writer with it, or the master is gone from disk
-    /// (its folder deleted while recording; an unlinked file still writes
-    /// and closes without an error). The caller has set the state to
-    /// `Stopping`; the threads are stopped with the lock released (see the
-    /// module doc).
+    /// it. `WriterFailed` with no asset when there is nothing to hand out:
+    /// the writer thread died and took the writer with it, or the master is
+    /// gone from disk (its folder deleted while recording; an unlinked file
+    /// still writes and closes without an error). The caller has set the
+    /// state to `Stopping`; the threads are stopped with the lock released
+    /// (see the module doc).
     fn finish(&self) -> Result<(CaptureResult, Option<CaptureError>), CaptureError> {
         let mut active = self
             .lock()
@@ -649,7 +646,7 @@ impl Core {
             // With `active` gone every step of the rebuild gives up; what
             // it wrote of a gap before that is in the master.
             let unaccounted = rebuild.thread.join().unwrap_or(0);
-            active.gap_seconds += (unaccounted * FRAME_SIZE) as f64 / SAMPLE_RATE;
+            active.gap_seconds += Self::seconds(unaccounted);
         }
         self.backend.stop();
         let mut system_peak = active.system_peak_so_far;
@@ -808,13 +805,14 @@ impl Core {
                 let gap_frames =
                     CaptureSession::gap_frames(elapsed.min(CaptureSession::MAXIMUM_GAP));
                 let written = self.write_silence(gap_frames, &relay, generation, cancel);
-                if written < gap_frames
-                    || !self.relay_has_room(&sink, &relay, generation, cancel)
-                    || !self.resume(stream, attempt, gap_frames, &sink, &relay, generation)
+                if written == gap_frames
+                    && self.relay_has_room(&sink, &relay, generation, cancel)
+                    && self.resume(stream, attempt, gap_frames, &sink, &relay, generation)
                 {
-                    return written;
+                    0
+                } else {
+                    written
                 }
-                0
             }
             Restart::Abandoned => 0,
             Restart::Exhausted => {
@@ -887,8 +885,7 @@ impl Core {
             let Some(active) = inner.active.as_mut() else {
                 return false;
             };
-            // Exact for any gap length.
-            let gap_seconds = (gap_frames * FRAME_SIZE) as f64 / SAMPLE_RATE;
+            let gap_seconds = Self::seconds(gap_frames);
             let mut processing = self.make_processing_thread(
                 sink,
                 relay,
