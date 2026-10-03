@@ -150,6 +150,15 @@ jobs:
         run: pnpm install --frozen-lockfile && pnpm check && pnpm build
         working-directory: apps/macos/web
 
+      # The handover interface test connects to the runner's own LAN
+      # address. Linux and Windows let it through (0.3 s), so a skip there
+      # fails the test; on macOS the application firewall holds the
+      # connection back and the test skips.
+      - name: Require the LAN interface test (Linux and Windows)
+        if: matrix.name != 'macos'
+        shell: bash
+        run: echo "STENO_REQUIRE_LAN_TEST=1" >> "$GITHUB_ENV"
+
       - name: Format
         run: cargo fmt --all --check
       - name: Lint
@@ -160,6 +169,17 @@ jobs:
         run: cargo test --workspace --locked --no-fail-fast
       - name: Test the core fakes
         run: cargo test -p steno-core --features testing --locked
+      # The handover tests that read the host's network, again with their
+      # output, so the log shows the LAN addresses found and whether the
+      # interface test ran or printed SKIPPED. `--workspace` keeps the Test
+      # step's features, so nothing is rebuilt; the Windows-only test
+      # matches nothing elsewhere.
+      - name: Handover network tests, with output
+        run: >-
+          cargo test --workspace --lib --locked -- --exact --nocapture
+          server::tests::the_lan_is_served_and_a_connection_outside_it_is_closed_before_any_tls_byte
+          server::advertise::tests::the_system_lan_addresses_can_be_read
+          server::advertise::tests::on_windows_the_adapter_table_has_a_row_for_every_ipv4_interface
 
       # A debug build loads devUrl; the smoke needs the embedded bundle, so
       # the dev URL is dropped through Tauri's configuration merge. The run
