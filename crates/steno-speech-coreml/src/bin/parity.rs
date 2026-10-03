@@ -19,27 +19,31 @@ fn main() {
 
     use steno_speech_coreml::parity::{Options, run};
 
+    fn usage() -> ! {
+        eprintln!(
+            "usage: steno-coreml-parity [--models DIR] [--out DIR] [--concurrency N] <corpus-dir> <baseline-dir>"
+        );
+        std::process::exit(2);
+    }
+
     let mut args = std::env::args().skip(1);
     let mut options = Options::default();
     let mut positional: Vec<PathBuf> = Vec::new();
     while let Some(arg) = args.next() {
         match arg.as_str() {
-            "--models" => options.models = args.next().map(PathBuf::from),
-            "--out" => options.out = args.next().map(PathBuf::from),
+            "--models" => options.models = Some(args.next().map_or_else(|| usage(), PathBuf::from)),
+            "--out" => options.out = Some(args.next().map_or_else(|| usage(), PathBuf::from)),
             "--concurrency" => {
                 options.concurrency = args
                     .next()
                     .and_then(|s| s.parse().ok())
-                    .unwrap_or(options.concurrency);
+                    .unwrap_or_else(|| usage());
             }
             _ => positional.push(PathBuf::from(arg)),
         }
     }
     if positional.len() != 2 {
-        eprintln!(
-            "usage: steno-coreml-parity [--models DIR] [--out DIR] [--concurrency N] <corpus-dir> <baseline-dir>"
-        );
-        std::process::exit(2);
+        usage();
     }
     match run(&positional[0], &positional[1], &options) {
         Ok(report) => print!("{report}"),
