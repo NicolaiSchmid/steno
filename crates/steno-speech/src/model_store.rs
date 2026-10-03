@@ -151,9 +151,22 @@ pub struct DownloadProgress<'a> {
 /// `transcribe` waiting behind it.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// How long a download then waits for the response headers. The body has no
-/// limit: 2.4 GB on a slow line takes hours.
+/// How long a download then waits for the response headers.
 const RESPONSE_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// The shortest body timeout, for a small file (200 ms under test).
+const MIN_BODY_TIMEOUT: Duration = Duration::from_millis(if cfg!(test) { 200 } else { 60_000 });
+
+/// The slowest average rate, in bytes per second, a body may arrive at.
+const MIN_BODY_RATE: u64 = 64 * 1024;
+
+/// How long a download may take to receive its body once the headers are
+/// in: `max(MIN_BODY_TIMEOUT, size / MIN_BODY_RATE)`, about 10 h for 2.4 GB.
+/// It bounds a stalled body without cutting a download that keeps moving at
+/// 64 KiB/s or more.
+fn body_timeout(size: u64) -> Duration {
+    MIN_BODY_TIMEOUT.max(Duration::from_secs(size / MIN_BODY_RATE))
+}
 
 /// The models root and the HTTP client.
 #[derive(Debug, Clone)]
@@ -263,8 +276,8 @@ impl ModelStore {
 
     /// Installs the asset if needed and returns its directory. Missing
     /// files with a URL are downloaded and verified, a file up to
-    /// [`DOWNLOAD_ATTEMPTS`] times when the host answers 5xx or the
-    /// connection drops; a missing file without a URL is
+    /// [`DOWNLOAD_ATTEMPTS`] times when the host answers 5xx, the
+    /// connection drops or the body stalls; a missing file without a URL is
     /// [`SpeechError::NotHosted`]. Partial downloads a
     /// killed process left behind are removed first.
     ///
@@ -382,6 +395,9 @@ impl ModelStore {
         let response = self
             .agent
             .get(url)
+            .config()
+            .timeout_recv_body(Some(body_timeout(file.size)))
+            .build()
             .call()
             .map_err(|source| SpeechError::Download {
                 url: url.to_owned(),
@@ -435,8 +451,9 @@ pub const DOWNLOAD_ATTEMPTS: u32 = 3;
 const RETRY_DELAY: Duration = Duration::from_millis(if cfg!(test) { 10 } else { 1000 });
 
 /// Whether a failed download may succeed when tried again: a 5xx answer, a
-/// connection that could not be made, dropped or timed out. A wrong size or
-/// checksum, a 4xx answer and a disk error fail at once.
+/// connection that could not be made, dropped or timed out, or a body that
+/// stalled past [`body_timeout`]. A wrong size or checksum, a 4xx answer and
+/// a disk error fail at once.
 fn is_transient(error: &SpeechError) -> bool {
     let dropped = |error: &std::io::Error| {
         use std::io::ErrorKind::{
@@ -454,8 +471,15 @@ fn is_transient(error: &SpeechError) -> bool {
             ureq::Error::Io(error) => dropped(error),
             _ => false,
         },
-        // The body is read through `std::io`.
-        SpeechError::Io { source, .. } => dropped(source),
+        // The body is read through `std::io`; its timeout arrives as
+        // `io::Error::other(ureq::Error::Timeout(_))`, of kind `Other`.
+        SpeechError::Io { source, .. } => {
+            dropped(source)
+                || source
+                    .get_ref()
+                    .and_then(|inner| inner.downcast_ref::<ureq::Error>())
+                    .is_some_and(|inner| matches!(inner, ureq::Error::Timeout(_)))
+        }
         _ => false,
     }
 }
@@ -742,7 +766,8 @@ mod tests {
         const WAIT: Duration = Duration::from_secs(30);
         let dir = tempfile::tempdir().unwrap();
         let store = ModelStore::new(dir.path());
-        let body: Vec<u8> = (0..100_000u32).map(|i| (i % 251) as u8 + 1).collect();
+        // 2 MB, so the body timeout (30 s) is far longer than the hold.
+        let body: Vec<u8> = (0..2_000_000u32).map(|i| (i % 251) as u8 + 1).collect();
         let (url, release) = serve_held(&body, vec![50_000, 10_000]);
         let asset = asset(Some(url), &body, &digest(&body));
         let (first_started, first_waits) = mpsc::channel();
@@ -808,6 +833,29 @@ mod tests {
         let error = store.ensure(&missing, &mut |_| {}).unwrap_err();
         assert!(matches!(&error, SpeechError::Download { .. }), "{error}");
         assert!(!store.is_installed(&missing));
+    }
+
+    #[test]
+    fn a_body_that_stalls_times_out_and_is_tried_again() {
+        // The first answer sends half the body and then nothing; the second
+        // sends it all. Without the body timeout the first read never ends.
+        let dir = tempfile::tempdir().unwrap();
+        let store = ModelStore::new(dir.path());
+        let body = b"not really a model".to_vec();
+        let (url, release) = serve_held(&body, vec![body.len() / 2, body.len()]);
+        let asset = asset(Some(url), &body, &digest(&body));
+        let (done, finished) = mpsc::channel();
+        let installer = store.clone();
+        let wanted = asset.clone();
+        std::thread::spawn(move || {
+            let _ = done.send(installer.ensure(&wanted, &mut |_| {}));
+        });
+        let result = finished
+            .recv_timeout(Duration::from_secs(10))
+            .expect("the stalled body was never given up");
+        drop(release);
+        result.unwrap();
+        store.verify(&asset).unwrap();
     }
 
     #[test]
