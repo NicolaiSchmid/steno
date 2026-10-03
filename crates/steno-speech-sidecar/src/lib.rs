@@ -307,6 +307,28 @@ fn send(reply: &Reply) {
     }
 }
 
+/// Reports the resident set every `interval` from a thread of its own,
+/// between and during requests.
+fn start_heartbeat(interval: Duration) -> io::Result<()> {
+    std::thread::Builder::new()
+        .name("heartbeat".to_owned())
+        .spawn(move || {
+            let mut warned = false;
+            loop {
+                let rss_bytes = rss_bytes();
+                if rss_bytes == 0 && !warned {
+                    eprintln!(
+                        "steno-speech-sidecar: the resident set cannot be read here, so the parent's memory ceiling cannot act"
+                    );
+                    warned = true;
+                }
+                send(&Reply::Memory { rss_bytes });
+                std::thread::sleep(interval);
+            }
+        })
+        .map(drop)
+}
+
 /// Runs the child until shutdown or until stdin ends.
 pub fn serve(options: &Options) -> ExitCode {
     let fake = options.fake_engine.then(|| FakeEngine {
@@ -321,24 +343,7 @@ pub fn serve(options: &Options) -> ExitCode {
     if start_fault == Some(Fault::Silent) {
         hang();
     }
-    let heartbeat = options.heartbeat;
-    let started = std::thread::Builder::new()
-        .name("heartbeat".to_owned())
-        .spawn(move || {
-            let mut warned = false;
-            loop {
-                let rss_bytes = rss_bytes();
-                if rss_bytes == 0 && !warned {
-                    eprintln!(
-                        "steno-speech-sidecar: the resident set cannot be read here, so the parent's memory ceiling cannot act"
-                    );
-                    warned = true;
-                }
-                send(&Reply::Memory { rss_bytes });
-                std::thread::sleep(heartbeat);
-            }
-        });
-    if let Err(error) = started {
+    if let Err(error) = start_heartbeat(options.heartbeat) {
         eprintln!("steno-speech-sidecar: no heartbeat thread: {error}");
         return ExitCode::from(2);
     }

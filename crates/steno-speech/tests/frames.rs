@@ -96,5 +96,5 @@ fn a_real_frame_still_reads_whole() {
         protocol::read_samples(&mut input, request.payload_bytes() / 4).unwrap(),
         samples
     );
-    assert!(input.is_empty());
+    assert_eq!(input.len(), 0);
 }

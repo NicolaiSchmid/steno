@@ -473,7 +473,7 @@ mod tests {
             read_header::<_, Request>(&mut cut.as_slice()),
             Err(FrameError::Truncated)
         ));
-        assert!(MAX_HEADER_BYTES <= 64 << 20);
+        const { assert!(MAX_HEADER_BYTES <= 64 << 20) };
     }
 
     #[test]

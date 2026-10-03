@@ -14,7 +14,7 @@ use std::collections::{BTreeSet, VecDeque};
 use std::ffi::OsString;
 use std::io::{BufRead, BufReader, Read};
 use std::path::PathBuf;
-use std::process::{Child, ChildStdin, Command, ExitStatus, Stdio};
+use std::process::{Child, ChildStderr, ChildStdin, Command, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
@@ -150,30 +150,75 @@ const STDERR_LINES: usize = 20;
 /// buffer without bound.
 const STDERR_LINE_BYTES: u64 = 4096;
 
+/// The command that starts the child with piped stdio.
+fn command(config: &SidecarConfig) -> Command {
+    let mut command = Command::new(&config.program);
+    command
+        .args(&config.args)
+        .arg("--heartbeat-ms")
+        .arg(config.heartbeat.as_millis().max(1).to_string())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    // The child is a console program: started from the windowed app
+    // without this flag, Windows opens a console window for it on every
+    // job, and closing that window kills the child mid-request.
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        command.creation_flags(CREATE_NO_WINDOW);
+    }
+    command
+}
+
+/// Reads the child's stderr on a thread of its own, logging each line and
+/// keeping the last [`STDERR_LINES`] for a crash report.
+fn keep_stderr_tail(
+    pid: u32,
+    stderr: ChildStderr,
+) -> std::io::Result<Arc<Mutex<VecDeque<String>>>> {
+    let tail = Arc::new(Mutex::new(VecDeque::with_capacity(STDERR_LINES)));
+    let lines = Arc::clone(&tail);
+    std::thread::Builder::new()
+        .name(format!("sidecar-{pid}-stderr"))
+        .spawn(move || {
+            let mut stderr = BufReader::new(stderr);
+            let mut bytes = Vec::new();
+            loop {
+                bytes.clear();
+                // Bytes, not `lines()`: invalid UTF-8 (an ONNX Runtime
+                // message, a path) must not end the reader.
+                match (&mut stderr)
+                    .take(STDERR_LINE_BYTES)
+                    .read_until(b'\n', &mut bytes)
+                {
+                    Ok(0) | Err(_) => return,
+                    Ok(_) => {}
+                }
+                let line = String::from_utf8_lossy(&bytes)
+                    .trim_end_matches(['\r', '\n'])
+                    .to_owned();
+                tracing::debug!(target: "steno_speech::sidecar", pid, "{line}");
+                let mut tail = lines.lock().unwrap_or_else(PoisonError::into_inner);
+                if tail.len() == STDERR_LINES {
+                    tail.pop_front();
+                }
+                tail.push_back(line);
+            }
+        })?;
+    Ok(tail)
+}
+
 impl SidecarProcess {
     /// Spawns the child and waits for its [`Reply::Ready`].
     fn spawn(config: &SidecarConfig) -> Result<Self, SidecarError> {
-        let mut command = Command::new(&config.program);
-        command
-            .args(&config.args)
-            .arg("--heartbeat-ms")
-            .arg(config.heartbeat.as_millis().max(1).to_string())
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
-        // The child is a console program: started from the windowed app
-        // without this flag, Windows opens a console window for it on every
-        // job, and closing that window kills the child mid-request.
-        #[cfg(windows)]
-        {
-            use std::os::windows::process::CommandExt;
-            const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-            command.creation_flags(CREATE_NO_WINDOW);
-        }
-        let mut child = command.spawn().map_err(|source| SidecarError::Spawn {
-            program: config.program.clone(),
-            source,
-        })?;
+        let mut child = command(config)
+            .spawn()
+            .map_err(|source| SidecarError::Spawn {
+                program: config.program.clone(),
+                source,
+            })?;
         let pid = child.id();
         let (Some(stdin), Some(stdout), Some(stderr)) =
             (child.stdin.take(), child.stdout.take(), child.stderr.take())
@@ -212,36 +257,7 @@ impl SidecarProcess {
                 }
             })
             .map_err(SidecarError::Pipe)?;
-        let tail = Arc::new(Mutex::new(VecDeque::with_capacity(STDERR_LINES)));
-        let lines = Arc::clone(&tail);
-        std::thread::Builder::new()
-            .name(format!("sidecar-{pid}-stderr"))
-            .spawn(move || {
-                let mut stderr = BufReader::new(stderr);
-                let mut bytes = Vec::new();
-                loop {
-                    bytes.clear();
-                    // Bytes, not `lines()`: invalid UTF-8 (an ONNX Runtime
-                    // message, a path) must not end the reader.
-                    match (&mut stderr)
-                        .take(STDERR_LINE_BYTES)
-                        .read_until(b'\n', &mut bytes)
-                    {
-                        Ok(0) | Err(_) => return,
-                        Ok(_) => {}
-                    }
-                    let line = String::from_utf8_lossy(&bytes)
-                        .trim_end_matches(['\r', '\n'])
-                        .to_owned();
-                    tracing::debug!(target: "steno_speech::sidecar", pid, "{line}");
-                    let mut tail = lines.lock().unwrap_or_else(PoisonError::into_inner);
-                    if tail.len() == STDERR_LINES {
-                        tail.pop_front();
-                    }
-                    tail.push_back(line);
-                }
-            })
-            .map_err(SidecarError::Pipe)?;
+        let tail = keep_stderr_tail(pid, stderr).map_err(SidecarError::Pipe)?;
         let mut process = SidecarProcess {
             child,
             stdin: Arc::new(Mutex::new(stdin)),
