@@ -6,7 +6,8 @@
 //!   SpeexDSP and a passthrough, with the ERLE metrics.
 //! - [`capture`]: the [`CaptureSession`] state machine over a
 //!   [`CaptureBackend`], the configuration and results, the stream layout,
-//!   and the live backend (Core Audio on macOS, stubs elsewhere).
+//!   and the live backend (Core Audio on macOS, PipeWire on Linux, a stub
+//!   on Windows until WP10).
 //! - [`codec`]: [`SymphoniaAudioCodec`], decoding recordings and phone
 //!   files to 16 kHz mono, and the mixdown.
 //! - [`detection`]: the [`MeetingDetector`]: which processes hold the
@@ -47,15 +48,22 @@
 //!                              `notices` channels, the asset on `stop()`
 //! ```
 //!
+//! On Linux the top of the diagram is PipeWire's data-loop thread running
+//! the capture stream's `process` callback (`capture::live::pipewire`),
+//! which turns its one interleaved buffer into a view
+//! ([`realtime::interleaved_view`]) and calls the same `deliver`.
+//!
 //! The synthetic backend ([`testing::SyntheticCaptureBackend`]) is a
 //! producer thread speaking the `LaneFrameSink` protocol in place of the
 //! IOProc; everything below it is the production path, which is what makes
 //! the pipeline testable on every OS. `unsafe` is confined to the FFI
 //! edges, each with its invariant beside it: the Core Audio binding
-//! (`capture::live::hal`, `capture::live::backend`), the Speex FFI
-//! (`aec::speex`), the ring and its raw-pointer callers (`realtime::ring`,
-//! `realtime::sink`, `realtime::io_proc`), and the counting allocator
-//! (`testing::rt`).
+//! (`capture::live::hal`, `capture::live::backend`), the PipeWire
+//! `process` callback's hand-off to `deliver` (`capture::live::pipewire`;
+//! the rest of libpipewire is reached through the safe `pipewire` crate),
+//! the Speex FFI (`aec::speex`), the ring and its raw-pointer callers
+//! (`realtime::ring`, `realtime::sink`, `realtime::io_proc`), and the
+//! counting allocator (`testing::rt`).
 //!
 //! Swift: `Sources/StenoAudio/StenoAudio.swift`.
 

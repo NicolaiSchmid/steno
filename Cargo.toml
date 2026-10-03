@@ -59,6 +59,12 @@ uuid = { version = "1", features = ["serde", "v4"] }
 zmij = "1"
 # The audio crate: decoding of recordings and phone files in pure Rust.
 symphonia = { version = "0.5", default-features = false, features = ["aac", "caf", "isomp4", "mp3", "pcm", "wav"] }
+# The audio crate's Linux capture backend (WP5b): libpipewire through the
+# pipewire-rs bindings. No version feature: the calls it makes exist since
+# PipeWire 0.3, so Ubuntu 24.04's 1.0 and Debian 12's 0.3.65 both build it.
+# Pulled in only by `cfg(target_os = "linux")` dependency tables; building
+# it needs the libpipewire-0.3 headers and libclang (scripts/setup-linux.sh).
+pipewire = "0.10"
 # Build only
 cc = "1"
 # Test only

@@ -243,7 +243,8 @@ pub struct LaneLevels {
 /// settled. The synthetic backend reports `DefaultInputChanged`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum DeviceChangeReason {
-    /// The default output device moved; the tap follows it.
+    /// The default output device moved; the system lane follows it once
+    /// the session rebuilt the capture.
     DefaultOutputChanged,
     /// The default input device moved.
     DefaultInputChanged,
@@ -251,7 +252,8 @@ pub enum DeviceChangeReason {
     OutputDeviceGone,
     /// The input device the capture started on is gone.
     InputDeviceGone,
-    /// The aggregate no longer runs at [`SAMPLE_RATE`].
+    /// The aggregate no longer runs at [`SAMPLE_RATE`]. macOS only:
+    /// PipeWire's adapter resamples, so the Linux backend never reports it.
     SampleRateChanged,
 }
 
