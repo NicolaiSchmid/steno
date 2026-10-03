@@ -1,7 +1,8 @@
 //! The four model calls of a Parakeet TDT transducer behind one trait, so
-//! the decoder, the chunker and the merge are written once and the `CoreML`
-//! backend on the Mac and every other platform ([`crate::onnx`]) differ
-//! only here. Swift: `FluidAudio`'s `AsrModels` (Preprocessor, Encoder, Decoder,
+//! the decoder, the chunker and the merge are written once over any
+//! backend ([`crate::onnx`] here); the integration step moves the `CoreML`
+//! backend of #163 behind this trait, and the WP4 notes in the plan list
+//! where the loops differ. Swift: `FluidAudio`'s `AsrModels` (Preprocessor, Encoder, Decoder,
 //! `JointDecisionv3`), which `ParakeetEngine` drives through `AsrManager`.
 //!
 //! The `CoreML` joint returns the argmax token and the duration bin; the ONNX

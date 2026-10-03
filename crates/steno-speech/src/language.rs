@@ -62,8 +62,9 @@ impl LanguageTagger {
     }
 
     /// Tags every segment. `hint` is the meeting language when the pipeline
-    /// knows it (the other lane's result); it breaks ties and covers
-    /// segments nothing else can tag.
+    /// knows it (from the other audio channel of the meeting, microphone or
+    /// system audio); it breaks ties and covers segments nothing else can
+    /// tag.
     #[must_use]
     pub fn tag(
         &self,

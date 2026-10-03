@@ -5,8 +5,9 @@
 //! fed to the prediction network, and advances by its duration, where a
 //! zero duration keeps the frame for up to `max_symbols_per_frame` symbols
 //! before a forced advance. `FluidAudio`'s extra guards (one symbol per frame
-//! before forcing an advance, the tail pass over the last window) belong to
-//! the `CoreML` backend's parity harness on the Mac, not here.
+//! before forcing an advance, the tail pass over the last window) live in
+//! `crates/steno-speech-coreml/src/decoder.rs`, not here; the WP4 notes in
+//! the plan list where the two loops differ.
 //! Swift: `FluidAudio`'s `TdtDecoderV3`, ported in
 //! `spikes/coreml-rs/src/decoder.rs`.
 

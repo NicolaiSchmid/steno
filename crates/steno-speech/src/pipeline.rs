@@ -3,8 +3,9 @@
 //! merge, pieces to words to segments, and the language tag. A chunk is a
 //! range the layout chose; a window is the range actually decoded, the
 //! chunk itself or, after a recovery, the chunk with more audio around it.
-//! Generic over [`SpeechBackend`], so a fake backend drives it in tests and
-//! the `CoreML` backend on the Mac slots in unchanged.
+//! Generic over [`SpeechBackend`], so a fake backend drives it in tests;
+//! the integration step moves the `CoreML` backend of #163 behind this
+//! trait, and the WP4 notes in the plan list where the loops differ.
 //! Swift: `Sources/StenoSpeech/Engines/ParakeetEngine.swift` and
 //! `ParakeetMapping.swift`, with `FluidAudio`'s `ChunkProcessor` in between.
 
@@ -26,8 +27,10 @@ use crate::vocab::{Vocab, starts_word};
 /// decoded again with more audio around it (decision 1: extend, do not
 /// shift) and the candidate with the most words inside the chunk wins.
 /// The defaults extend by 6, 12 and 18 s in total (up to 6 s before and
-/// 12 s after the chunk), which restates decision 1's "5 to 12 s" as the
-/// steps the spike D harness found useful.
+/// 12 s after the chunk): decision 1's 5 to 12 s in 6 s steps, reaching
+/// the 5 s earlier start and the 12 s later end that spike D's probe table
+/// (`.plans/spikes/2026-10-01-spike-chunker-voting.md`) shows escaping the
+/// zero-token window.
 #[derive(Debug, Clone, PartialEq)]
 pub struct RecoveryConfig {
     /// Chunks with less VAD speech than this are not retried.

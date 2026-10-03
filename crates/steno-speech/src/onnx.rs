@@ -8,8 +8,8 @@
 //! joiner's output width minus the vocabulary (8198 - 8193 = 5), the
 //! prediction network from the decoder's state inputs; the export's
 //! `vocab_size` metadata (8192, without the blank) is checked against the
-//! vocabulary and never used as the blank id, the mistake behind the
-//! spike E decode loop's 64 % WER.
+//! vocabulary and never used as the blank id, the mistake behind the 64 %
+//! WER spike F measured for the spike E loop.
 //! Swift: none on this path; the Mac runs `FluidAudio`'s `CoreML` models.
 
 use std::path::Path;
@@ -28,10 +28,12 @@ use crate::vocab::Vocab;
 
 /// Session options shared by every model. Each of the four sessions
 /// (encoder, decoder, joiner, Silero) gets its own intra-op pool of this
-/// size; only one of them runs at a time, so the pools do not add up.
+/// size, and ONNX Runtime spins its threads briefly after each run; only
+/// one session runs at a time, so the pools do not compete.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OnnxOptions {
-    /// Threads inside one operator; the plan measured at four.
+    /// Threads inside one operator; four, as the speech-stack plan measured
+    /// (decision 3).
     pub intra_threads: usize,
     /// Parallel operators; one, the graphs are sequential.
     pub inter_threads: usize,

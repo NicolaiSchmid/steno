@@ -73,6 +73,21 @@ impl OnnxSpeechEngine {
     /// and returns the transcriber the engine runs; the model-gated test
     /// and the `transcribe` example open theirs the same way. Blocking;
     /// download progress goes to `tracing` at debug level.
+    ///
+    /// ```no_run
+    /// use steno_speech::{ModelStore, OnnxOptions, OnnxSpeechEngine, PipelineConfig, VadConfig};
+    ///
+    /// let mut transcriber = OnnxSpeechEngine::open_transcriber(
+    ///     &ModelStore::from_environment(),
+    ///     &OnnxOptions::default(),
+    ///     PipelineConfig::default(),
+    ///     VadConfig::default(),
+    /// )?;
+    /// let samples = vec![0.0f32; 16_000]; // one second of 16 kHz mono
+    /// let transcript = transcriber.transcribe(&samples, None)?;
+    /// println!("{}", transcript.text());
+    /// # Ok::<(), steno_speech::SpeechError>(())
+    /// ```
     pub fn open_transcriber(
         store: &ModelStore,
         options: &OnnxOptions,
