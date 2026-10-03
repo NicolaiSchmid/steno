@@ -71,9 +71,13 @@ pub fn decode_window<B: SpeechBackend + ?Sized>(
     stats: &mut DecodeStats,
 ) -> Result<Vec<Token>, SpeechError> {
     let shape = backend.shape().clone();
-    let len = encoder
-        .len
-        .min(encoder.data.len() / shape.encoder_hidden.max(1));
+    if encoder.hidden != shape.encoder_hidden {
+        return Err(SpeechError::Shape(format!(
+            "encoder frames are {} wide, the joint takes {}",
+            encoder.hidden, shape.encoder_hidden
+        )));
+    }
+    let len = encoder.len.min(encoder.data.len() / encoder.hidden.max(1));
     let mut tokens = Vec::new();
     stats.windows += 1;
     if len == 0 {
@@ -104,11 +108,22 @@ pub fn decode_window<B: SpeechBackend + ?Sized>(
         tokens.push(Token {
             id: decision.token,
             frame: frame_offset + t,
-            confidence: decision.probability.clamp(0.0, 1.0),
+            // NaN passes through `clamp`; a non-finite probability is zero.
+            confidence: if decision.probability.is_finite() {
+                decision.probability.clamp(0.0, 1.0)
+            } else {
+                0.0
+            },
             duration,
         });
         if tokens.len() > budget {
             stats.runaways += 1;
+            tracing::warn!(
+                frames = len,
+                tokens = tokens.len(),
+                frame_offset,
+                "runaway decode: window abandoned at the token budget, its tail is lost"
+            );
             break;
         }
         decoder_state = step.state;
@@ -268,7 +283,7 @@ mod tests {
     }
 
     #[test]
-    fn an_empty_window_and_a_bad_duration_bin_are_handled() {
+    fn an_empty_window_decodes_nothing_and_a_bad_duration_bin_is_a_shape_error() {
         let mut backend = ScriptedBackend::new(&[(1, 7)]);
         let mut stats = DecodeStats::default();
         assert!(
@@ -292,6 +307,44 @@ mod tests {
             ),
             Err(SpeechError::Shape(_))
         ));
+    }
+
+    #[test]
+    fn a_frame_width_the_joint_does_not_take_is_a_shape_error() {
+        // Two-wide frames for a joint that takes one: slicing by the model's
+        // width would read past the data, by the frames' width the joint
+        // would get the wrong input.
+        let mut backend = ScriptedBackend::new(&[]);
+        let wide = EncoderOutput {
+            hidden: 2,
+            len: 3,
+            data: vec![0.0; 6],
+        };
+        assert!(matches!(
+            decode_window(
+                &mut backend,
+                &wide,
+                0,
+                &DecoderConfig::default(),
+                &mut DecodeStats::default()
+            ),
+            Err(SpeechError::Shape(_))
+        ));
+    }
+
+    #[test]
+    fn a_probability_that_is_not_a_number_is_zero_confidence() {
+        let mut backend = ScriptedBackend::new(&[(1, 1)]);
+        backend.script[0].probability = f32::NAN;
+        let tokens = decode_window(
+            &mut backend,
+            &encoder(1),
+            0,
+            &DecoderConfig::default(),
+            &mut DecodeStats::default(),
+        )
+        .unwrap();
+        assert_eq!(tokens[0].confidence, 0.0);
     }
 
     #[test]
