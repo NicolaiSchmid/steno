@@ -396,8 +396,9 @@ parity item until a plan says otherwise:
   (measured on `Tests/Fixtures/audio/tone-440-44k1-500ms.m4a`; iOS
   encoders prime 2 112). Fix at cutover: read the `elst` media time from
   the container and drop it before resampling, or accept 23 to 48 ms.
-- **AAC-LC only** through symphonia; HE-AAC is not expected from the iOS
-  recorder.
+- **AAC-LC only.** AVFoundation also decoded HE-AAC; symphonia decodes
+  AAC-LC alone. The iOS recorder writes AAC-LC, so nothing is lost today; a
+  plan adds HE-AAC if an import needs it.
 - **A stop that waited can lose its turn.** Swift's actor runs a `stop()`
   queued behind a writer failure's or a device loss's finalise right after
   it. The Rust `stop()` waits on a condition variable, and a `start()` can
