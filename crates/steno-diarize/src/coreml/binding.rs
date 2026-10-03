@@ -193,10 +193,6 @@ impl Array {
         }
     }
 
-    pub fn shape(&self) -> &[usize] {
-        &self.shape
-    }
-
     fn count(&self) -> usize {
         self.shape.iter().product()
     }

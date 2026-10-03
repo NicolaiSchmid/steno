@@ -129,17 +129,8 @@ impl DiarizationBackend for CoreMlBackend {
             .array("segments")
             .or_else(|_| output.array("log_probs"))
             .or_else(|_| output.first_array())?;
-        let values = logits.to_f32()?;
-        let expected = self.geometry.frames_per_window * self.geometry.num_classes;
-        if values.len() != expected {
-            return Err(format!(
-                "Segmentation.mlmodelc returned {} values (shape {:?}), expected {expected}",
-                values.len(),
-                logits.shape()
-            )
-            .into());
-        }
-        Ok(values)
+        // The length is checked once for both backends, in extraction.
+        logits.to_f32()
     }
 
     fn embed(&mut self, window: &[f32], weights: &[f32]) -> Result<Option<Vec<f32>>, BackendError> {

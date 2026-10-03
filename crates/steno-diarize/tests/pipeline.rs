@@ -252,6 +252,47 @@ fn an_embedding_of_the_wrong_length_is_an_error() {
     );
 }
 
+/// The fake with a segmentation model of another frame count: one frame
+/// short of pyannote's 589.
+struct ShortLogits(FakeBackend);
+
+impl DiarizationBackend for ShortLogits {
+    fn geometry(&self) -> &SegmentationGeometry {
+        self.0.geometry()
+    }
+
+    fn segment(&mut self, window: &[f32]) -> Result<Vec<f32>, BackendError> {
+        let mut logits = self.0.segment(window)?;
+        logits.truncate(logits.len() - self.0.geometry.num_classes);
+        Ok(logits)
+    }
+
+    fn embed(&mut self, window: &[f32], weights: &[f32]) -> Result<Option<Vec<f32>>, BackendError> {
+        self.0.embed(window, weights)
+    }
+}
+
+/// Segmentation logits of the wrong length fail the analysis with the
+/// shape, whichever backend produced them, rather than decoding frames
+/// against the wrong layout.
+#[test]
+fn segmentation_logits_of_the_wrong_length_are_an_error() {
+    let buffer = audio(&[(1.0, range(0.0, 20.0))], 20.0);
+    let mut pipeline = Pipeline::new(ShortLogits(FakeBackend::new()), DiarizerConfig::default());
+    let error = pipeline.diarize(&buffer).unwrap_err();
+    assert!(
+        matches!(
+            error,
+            DiarizeError::Shape {
+                what: "segmentation output",
+                expected: 4123,
+                got: 4116
+            }
+        ),
+        "{error}"
+    );
+}
+
 #[tokio::test]
 async fn the_diarizer_loads_its_backend_once_and_serialises_calls() {
     use std::sync::Arc;
