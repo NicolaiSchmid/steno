@@ -6,6 +6,8 @@
 
 mod common;
 
+use std::sync::{Arc, Condvar, Mutex};
+
 use steno_host::services::{LoginItem as _, SpeechModels as _};
 
 use common::*;
@@ -402,6 +404,156 @@ fn transcription_switches_engines_and_downloads_assets() {
     assert_eq!(asset["failure"], "offline");
 }
 
+/// `settings.transcription.download` replies at once; the download runs on
+/// its own thread and publishes as it goes (Swift: `SpeechSettingsViewModel
+/// .download`'s task).
+#[test]
+fn the_download_reply_returns_while_the_download_runs() {
+    let gate = Arc::new((Mutex::new(false), Condvar::new()));
+    let harness = Harness::builder()
+        .seed({
+            let gate = gate.clone();
+            move |_, fakes| {
+                *fakes.speech_models.on_download.lock().unwrap() = Some(Box::new(move |_| {
+                    let (open, signal) = &*gate;
+                    let mut open = open.lock().unwrap();
+                    while !*open {
+                        open = signal.wait(open).unwrap();
+                    }
+                }));
+            }
+        })
+        .build();
+    harness.sink.clear();
+    harness
+        .host
+        .settings_transcription_download(AssetIdParams {
+            asset_id: "offlineDiarizer".to_owned(),
+        })
+        .unwrap();
+    // Back here while the fake is still held on the gate.
+    let asset = &harness.snapshot(BridgeTopic::SettingsTranscription)["assets"][1];
+    assert_eq!(asset["state"], "downloading");
+    assert_eq!(
+        harness
+            .sink
+            .last(BridgeTopic::SettingsTranscription)
+            .unwrap()["assets"][1]["state"],
+        "downloading"
+    );
+    assert!(
+        !harness
+            .fakes
+            .speech_models
+            .is_installed(ModelAsset::OfflineDiarizer)
+    );
+    // A second download of the same asset while one runs is a no-op.
+    harness
+        .host
+        .settings_transcription_download(AssetIdParams {
+            asset_id: "offlineDiarizer".to_owned(),
+        })
+        .unwrap();
+    {
+        let (open, signal) = &*gate;
+        *open.lock().unwrap() = true;
+        signal.notify_all();
+    }
+    harness.wait_for_download(1);
+    assert_eq!(
+        harness.snapshot(BridgeTopic::SettingsTranscription)["assets"][1]["state"],
+        "installed"
+    );
+    assert_eq!(
+        harness.fakes.speech_models.downloads.lock().unwrap().len(),
+        1
+    );
+}
+
+/// `settings.recording.refreshDevices` re-reads the input list.
+#[test]
+fn refresh_devices_rereads_the_inputs() {
+    let harness = Harness::builder().build();
+    assert_eq!(
+        harness.snapshot(BridgeTopic::SettingsRecording)["devices"],
+        json!([])
+    );
+    harness
+        .fakes
+        .audio_devices
+        .devices
+        .lock()
+        .unwrap()
+        .push(steno_host::services::InputDevice {
+            uid: "mic-1".to_owned(),
+            name: "MacBook Pro Microphone".to_owned(),
+        });
+    harness.sink.clear();
+    harness.host.settings_recording_refresh_devices().unwrap();
+    let recording = harness.sink.last(BridgeTopic::SettingsRecording).unwrap();
+    assert_eq!(
+        recording["devices"],
+        json!([{"name": "MacBook Pro Microphone", "uid": "mic-1"}])
+    );
+}
+
+/// The page sees `isTesting` while the probe is out and `isRequesting`
+/// while the prompt is up: the host publishes before it calls the service,
+/// with its lock released. Swift: the awaited `test()` and `request`.
+#[test]
+fn busy_flags_are_published_before_the_service_runs() {
+    let seen_testing = Arc::new(Mutex::new(None));
+    let seen_requesting = Arc::new(Mutex::new(None));
+    let harness = Harness::builder().build();
+    *harness.fakes.llm.on_probe.lock().unwrap() = Some(Box::new({
+        let sink = harness.sink.clone();
+        let seen = seen_testing.clone();
+        move |_| {
+            *seen.lock().unwrap() = sink
+                .last(BridgeTopic::SettingsSummaries)
+                .map(|snapshot| snapshot["isTesting"].clone());
+        }
+    }));
+    harness
+        .host
+        .settings_summaries_update(update(Some("qwen3-8b"), None, None, None))
+        .unwrap();
+    harness.host.settings_summaries_test().unwrap();
+    assert_eq!(*seen_testing.lock().unwrap(), Some(json!(true)));
+    let summaries = harness.snapshot(BridgeTopic::SettingsSummaries);
+    assert_eq!(summaries["isTesting"], false);
+    assert_eq!(summaries["testResult"]["ok"], true);
+
+    harness
+        .fakes
+        .permissions
+        .set_state(PermissionKind::SystemAudio, PermissionState::Denied);
+    harness
+        .fakes
+        .permissions
+        .set_answer(PermissionKind::SystemAudio, PermissionState::Granted);
+    *harness.fakes.permissions.on_request.lock().unwrap() = Some(Box::new({
+        let sink = harness.sink.clone();
+        let seen = seen_requesting.clone();
+        move |_| {
+            *seen.lock().unwrap() = sink
+                .last(BridgeTopic::SettingsRecording)
+                .map(|snapshot| snapshot["permissions"][1]["isRequesting"].clone());
+        }
+    }));
+    harness
+        .host
+        .settings_recording_request_permission(PermissionKindParams {
+            kind: PermissionKind::SystemAudio,
+        })
+        .unwrap();
+    assert_eq!(*seen_requesting.lock().unwrap(), Some(json!(true)));
+    assert_eq!(
+        harness.snapshot(BridgeTopic::SettingsRecording)["permissions"][1],
+        json!({"isRequesting": false, "kind": "systemAudio", "state": "granted"})
+    );
+}
+
 fn update(
     model: Option<&str>,
     url: Option<&str>,
@@ -578,6 +730,48 @@ fn the_codex_preset_stores_nothing_until_confirmed_and_picks_the_first_model() {
     assert_eq!(summaries["codex"]["model"], "gpt-5.1-codex");
     assert_eq!(summaries["subtitle"], "ChatGPT (Codex)");
 
+    // The picker: the slug and its listed context window are stored.
+    harness
+        .fakes
+        .llm
+        .codex_models
+        .lock()
+        .unwrap()
+        .as_mut()
+        .unwrap()
+        .push(CodexModel {
+            slug: "gpt-5.1-codex-mini".to_owned(),
+            display_name: "GPT-5.1 Codex Mini".to_owned(),
+            context_window: Some(128_000),
+        });
+    harness
+        .host
+        .settings_summaries_refresh_codex_models()
+        .unwrap();
+    harness
+        .host
+        .settings_summaries_select_codex_model(SetStringParams {
+            value: "gpt-5.1-codex-mini".to_owned(),
+        })
+        .unwrap();
+    let settings = harness.store.settings().unwrap();
+    assert_eq!(settings.codex_model.as_deref(), Some("gpt-5.1-codex-mini"));
+    assert_eq!(settings.codex_context_tokens, 128_000);
+    assert_eq!(
+        harness.snapshot(BridgeTopic::SettingsSummaries)["codex"]["model"],
+        "gpt-5.1-codex-mini"
+    );
+
+    // The explicit status refresh re-reads the sign-in.
+    *harness.fakes.llm.codex_account.lock().unwrap() = Err("signed out".to_owned());
+    harness
+        .host
+        .settings_summaries_refresh_codex_status()
+        .unwrap();
+    let summaries = harness.snapshot(BridgeTopic::SettingsSummaries);
+    assert_eq!(summaries["codex"]["signIn"], "unavailable");
+    assert_eq!(summaries["codex"]["signInDetail"], "signed out");
+
     harness.host.settings_summaries_stop_using_codex().unwrap();
     let settings = harness.store.settings().unwrap();
     assert_eq!(settings.llm_provider, LlmProvider::Endpoint);
@@ -656,12 +850,64 @@ fn export_waits_for_a_vault_validates_through_the_destination_and_saves() {
     assert_eq!(export["vaultName"], "Work Vault");
     assert_eq!(export["subtitle"], "Work Vault");
 
+    // `settings.export.save` stores the typed fields, trimmed.
+    harness
+        .host
+        .settings_export_update(ExportUpdateParams {
+            people_folder: None,
+            include_audio: None,
+            task_tag: Some(" todo ".to_owned()),
+        })
+        .unwrap();
+    assert_eq!(
+        harness.store.settings().unwrap().obsidian.unwrap().task_tag,
+        None,
+        "typing stores nothing"
+    );
+    harness.host.settings_export_save().unwrap();
+    assert_eq!(
+        harness
+            .store
+            .settings()
+            .unwrap()
+            .obsidian
+            .unwrap()
+            .task_tag
+            .as_deref(),
+        Some("todo")
+    );
+
     *harness.fakes.export_validator.failure.lock().unwrap() =
         Some("The Obsidian vault at /x does not exist.".to_owned());
     harness
         .host
         .settings_export_update(ExportUpdateParams {
-            people_folder: None,
+            people_folder: Some("Elsewhere".to_owned()),
+            include_audio: None,
+            task_tag: None,
+        })
+        .unwrap();
+    harness.host.settings_export_save().unwrap();
+    assert_eq!(
+        harness.snapshot(BridgeTopic::SettingsExport)["validationMessage"],
+        "The Obsidian vault at /x does not exist."
+    );
+    assert_eq!(
+        harness
+            .store
+            .settings()
+            .unwrap()
+            .obsidian
+            .unwrap()
+            .people_folder
+            .as_deref(),
+        Some("People"),
+        "a refused save stores nothing"
+    );
+    harness
+        .host
+        .settings_export_update(ExportUpdateParams {
+            people_folder: Some("People".to_owned()),
             include_audio: Some(true),
             task_tag: None,
         })
@@ -699,7 +945,7 @@ fn export_waits_for_a_vault_validates_through_the_destination_and_saves() {
             .lock()
             .unwrap()
             .len(),
-        2
+        4
     );
     assert_eq!(
         harness.snapshot(BridgeTopic::SettingsExport)["subtitle"],
@@ -754,6 +1000,32 @@ fn phones_pair_list_and_revoke_devices() {
     assert_eq!(
         phone["listener"]["state"], "stopped",
         "no phones, no listener"
+    );
+
+    // Cancel while the code is up: the code and the listener go, nothing
+    // paired.
+    harness.host.settings_phone_begin_pairing().unwrap();
+    assert!(
+        harness
+            .snapshot(BridgeTopic::SettingsPhone)
+            .get("pairing")
+            .is_some()
+    );
+    harness.host.settings_phone_cancel_pairing().unwrap();
+    let phone = harness.snapshot(BridgeTopic::SettingsPhone);
+    assert!(phone.get("pairing").is_none());
+    assert_eq!(phone["listener"]["state"], "stopped");
+    assert!(
+        harness
+            .fakes
+            .handover
+            .as_ref()
+            .unwrap()
+            .pairing
+            .lock()
+            .unwrap()
+            .is_none(),
+        "the service's code is closed"
     );
 
     // A code that runs out with no phone closes itself.

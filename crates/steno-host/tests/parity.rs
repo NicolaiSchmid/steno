@@ -105,8 +105,9 @@ fn assert_parity(name: &str, host: &Value, deviations: &[Deviation]) {
     let expected = steno_bridge::json::to_canonical_string(&expected).unwrap();
     let actual = steno_bridge::json::to_canonical_string(host).unwrap();
     if expected != actual {
-        let diff = similar_lines(&expected, &actual);
-        panic!("{name}.json differs from the host's snapshot:\n{diff}");
+        let diff = first_difference(&apply(fixture(name), deviations), host)
+            .unwrap_or_else(|| "(equal as values; the canonical text differs)".to_owned());
+        panic!("{name}.json differs from the host's snapshot: {diff}");
     }
     let row = if deviations.is_empty() {
         format!("| `{name}` | exact | |")
@@ -124,19 +125,41 @@ fn assert_parity(name: &str, host: &Value, deviations: &[Deviation]) {
     println!("{row}");
 }
 
-fn similar_lines(expected: &str, actual: &str) -> String {
-    use std::fmt::Write as _;
-    let mut out = String::new();
-    for (left, right) in expected.lines().zip(actual.lines()) {
-        if left != right {
-            let _ = writeln!(out, "- {left}\n+ {right}");
+/// The first JSON pointer at which the two values differ, with both
+/// sides, walking objects by key and arrays by index so an inserted
+/// element names its own pointer instead of shifting every line after it.
+fn first_difference(expected: &Value, actual: &Value) -> Option<String> {
+    fn walk(pointer: &str, expected: &Value, actual: &Value) -> Option<String> {
+        match (expected, actual) {
+            (Value::Object(left), Value::Object(right)) => {
+                let keys: std::collections::BTreeSet<&String> =
+                    left.keys().chain(right.keys()).collect();
+                keys.into_iter().find_map(|key| {
+                    let pointer = format!("{pointer}/{key}");
+                    match (left.get(key), right.get(key)) {
+                        (Some(l), Some(r)) => walk(&pointer, l, r),
+                        (Some(l), None) => Some(format!("{pointer}: fixture {l}, host has no key")),
+                        (None, Some(r)) => Some(format!("{pointer}: fixture has no key, host {r}")),
+                        (None, None) => None,
+                    }
+                })
+            }
+            (Value::Array(left), Value::Array(right)) => {
+                (0..left.len().max(right.len())).find_map(|index| {
+                    let pointer = format!("{pointer}/{index}");
+                    match (left.get(index), right.get(index)) {
+                        (Some(l), Some(r)) => walk(&pointer, l, r),
+                        (Some(l), None) => Some(format!("{pointer}: fixture {l}, host ends")),
+                        (None, Some(r)) => Some(format!("{pointer}: fixture ends, host {r}")),
+                        (None, None) => None,
+                    }
+                })
+            }
+            _ if expected == actual => None,
+            _ => Some(format!("{pointer}: fixture {expected}, host {actual}")),
         }
     }
-    let (l, r) = (expected.lines().count(), actual.lines().count());
-    if l != r {
-        let _ = writeln!(out, "(fixture has {l} lines, host {r})");
-    }
-    out
+    walk("", expected, actual)
 }
 
 fn sample_harness() -> Harness {
@@ -299,14 +322,14 @@ fn meetings_list() {
                 "as above",
             ),
             deviation(
-                "/groups/0/meetings/0/speakers/3/colorIndex",
-                json!(0),
-                "as above (the speaker's own id)",
-            ),
-            deviation(
                 "/groups/0/meetings/0/speakers/2/isConfirmed",
                 json!(false),
                 "the chip follows the speaker's assignment, and the fixture's own detail has Speaker 3 suggested",
+            ),
+            deviation(
+                "/groups/0/meetings/0/speakers/3/colorIndex",
+                json!(0),
+                "as above (the speaker's own id)",
             ),
             deviation(
                 "/tags",

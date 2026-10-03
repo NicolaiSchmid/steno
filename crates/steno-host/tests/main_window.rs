@@ -9,13 +9,15 @@ mod common;
 
 use steno_host::services::Recorder as _;
 
+use std::sync::{Arc, Mutex};
+
 use common::*;
 use serde_json::{Value, json};
 use steno_bridge::{
-    BridgeErrorCode, BridgeHost, BridgeTopic, BridgeWindow, DetailTab, ListFilter, MeetingIdParams,
-    OpenUrlParams, RecordingState, SaveNotesParams, SetBoolParams, SetFilterParams, SetQueryParams,
-    SetTabParams, SetTagFilterParams, SetTagsParams, SetTemplateParams, StartRecordingParams,
-    WindowParams,
+    BridgeErrorCode, BridgeEvent, BridgeHost, BridgeTopic, BridgeWindow, DetailTab, EventSink,
+    ListFilter, MeetingIdParams, OpenUrlParams, RecordingState, SaveNotesParams, SetBoolParams,
+    SetFilterParams, SetQueryParams, SetTabParams, SetTagFilterParams, SetTagsParams,
+    SetTemplateParams, StartRecordingParams, WindowParams,
 };
 use steno_core::{
     AudioRetention, Delivery, DeliveryStatus, MeetingSource, MeetingState, TitleOrigin,
@@ -23,6 +25,7 @@ use steno_core::{
 use steno_host::host::TOPICS;
 use steno_host::labels::{display_title, utc};
 use steno_host::main_window::snapshots::{delivery_line, turns};
+use steno_host::services::{AutoStopStatus, FileSystem as _};
 
 fn sample() -> Harness {
     Harness::builder()
@@ -308,6 +311,26 @@ fn delete_asks_first_and_refuses_a_busy_meeting() {
     assert!(confirming.store.meeting(uuid(MEETING)).unwrap().is_none());
     assert!(confirming.store.asset(uuid(MEETING)).unwrap().is_none());
     assert_eq!(confirming.store.persons().unwrap().len(), 3, "people stay");
+    // The meeting folder goes whole, through the file system seam.
+    let folder = confirming
+        .audio_folder()
+        .join(steno_core::json::uuid_string(uuid(MEETING)));
+    assert_eq!(
+        *confirming.fakes.file_system.removed.lock().unwrap(),
+        vec![folder.clone()]
+    );
+    assert!(
+        !confirming
+            .fakes
+            .file_system
+            .exists(&master_path(&confirming.audio_folder()))
+    );
+    assert!(
+        !confirming
+            .fakes
+            .file_system
+            .exists(&clip_path(&confirming.audio_folder(), SPEAKER_NICOLAI))
+    );
     let list = confirming.sink.last(BridgeTopic::MeetingsList).unwrap();
     assert_eq!(ids(&list).len(), 2);
     assert!(
@@ -318,6 +341,200 @@ fn delete_asks_first_and_refuses_a_busy_meeting() {
         confirming.sink.last(BridgeTopic::MeetingDetail),
         Some(Value::Null)
     );
+
+    // A queued meeting has a progress entry; deleting it evicts the entry,
+    // as the store's `deleted` event did (`ProcessingProgressModel.apply`).
+    let queued = Harness::builder()
+        .confirm(true)
+        .seed(|store, _| {
+            let mut meeting = sample_meeting();
+            meeting.id = uuid(0x88);
+            meeting.state = MeetingState::Queued;
+            meeting.summary = None;
+            store.save_meeting(&meeting).unwrap();
+        })
+        .build();
+    assert_eq!(
+        queued.snapshot(BridgeTopic::Progress)["entries"][0]["meetingID"],
+        id(0x88)
+    );
+    queued.sink.clear();
+    queued
+        .host
+        .meetings_delete(MeetingIdParams {
+            meeting_id: uuid(0x88),
+        })
+        .unwrap();
+    assert_eq!(
+        queued.snapshot(BridgeTopic::Progress)["entries"],
+        json!([]),
+        "the progress entry goes with the meeting"
+    );
+    assert_eq!(queued.sink.count(BridgeTopic::Progress), 1);
+}
+
+/// The detail heading derives the title as the list does (Swift:
+/// `meeting.displayTitle()`), so an untitled meeting reads "Monday 10:06".
+#[test]
+fn the_detail_heading_derives_an_untitled_meetings_title() {
+    let harness = Harness::builder()
+        .seed(|store, _| {
+            store
+                .save_meeting(&meeting(
+                    0x66,
+                    "Recording",
+                    TitleOrigin::Default,
+                    "2026-09-28T08:06:00.000Z",
+                    60.0,
+                    MeetingSource::MacInPerson,
+                    &[],
+                    MeetingState::Ready,
+                    None,
+                ))
+                .unwrap();
+        })
+        .build();
+    let _ = harness.snapshot(BridgeTopic::MeetingsList);
+    let detail = harness.snapshot(BridgeTopic::MeetingDetail);
+    assert_eq!(detail["title"], "Monday 08:06");
+    assert_eq!(
+        harness.snapshot(BridgeTopic::MeetingsList)["groups"][0]["meetings"][0]["title"],
+        "Monday 08:06",
+        "the same title as the list row"
+    );
+}
+
+/// A sink that reads the host back from inside `emit`: the Tauri shell
+/// serialises on the webview thread, and the host must not hold its lock
+/// while it does.
+struct ReentrantSink {
+    host: Mutex<Option<steno_host::Host>>,
+    seen: Mutex<Vec<(BridgeTopic, Option<Value>)>>,
+}
+
+impl EventSink for ReentrantSink {
+    fn emit(&self, event: BridgeEvent) {
+        let read = self
+            .host
+            .lock()
+            .unwrap()
+            .as_ref()
+            .and_then(|host| host.snapshot(event.topic));
+        self.seen.lock().unwrap().push((event.topic, read));
+    }
+}
+
+#[test]
+fn snapshots_are_emitted_outside_the_hosts_lock() {
+    let harness = sample();
+    let sink = Arc::new(ReentrantSink {
+        host: Mutex::new(Some(harness.host.clone())),
+        seen: Mutex::new(Vec::new()),
+    });
+    harness.host.attach(sink.clone());
+    // A new selection publishes the list, then the detail it swapped in.
+    harness
+        .host
+        .meetings_select(MeetingIdParams {
+            meeting_id: uuid(MEETING_FAILED),
+        })
+        .unwrap();
+    let seen = sink.seen.lock().unwrap();
+    assert!(!seen.is_empty(), "the command published");
+    for (topic, read) in seen.iter() {
+        assert!(read.is_some(), "{topic:?} could be read back from emit");
+    }
+    assert_eq!(
+        seen.iter().map(|(topic, _)| *topic).collect::<Vec<_>>(),
+        vec![BridgeTopic::MeetingsList, BridgeTopic::MeetingDetail],
+        "in publish order"
+    );
+}
+
+/// `meeting.revealRecording`, `meeting.revealExport`, `page.layout`,
+/// `recording.keepGoing` and `recording.clearMessages` through the host.
+#[test]
+fn reveal_layout_and_the_recorder_messages_reach_their_services() {
+    let harness = sample();
+    harness.host.meeting_reveal_recording().unwrap();
+    assert_eq!(
+        *harness.fakes.opener.revealed.lock().unwrap(),
+        vec![master_path(&harness.audio_folder())]
+    );
+    harness
+        .fakes
+        .file_system
+        .remove(&master_path(&harness.audio_folder()))
+        .unwrap();
+    harness.host.store_changed();
+    let gone = harness.host.meeting_reveal_recording().unwrap_err();
+    assert_eq!(gone.code, BridgeErrorCode::NotFound);
+    assert_eq!(gone.message, "The recording is no longer on this Mac.");
+    assert_eq!(harness.fakes.opener.revealed.lock().unwrap().len(), 1);
+
+    harness
+        .store
+        .save_delivery(&Delivery {
+            id: Delivery::id_for(uuid(MEETING), "obsidian-folder"),
+            meeting_id: uuid(MEETING),
+            destination_id: "obsidian-folder".to_owned(),
+            status: DeliveryStatus::Delivered,
+            last_attempt_at: Some(now()),
+            receipt: Some(steno_core::DeliveryReceipt {
+                root: "/Users/nicolai/Notes".to_owned(),
+                folder: "Meetings/2026-09-29 Produktstrategie".to_owned(),
+                files: Vec::new(),
+                renderer_version: 1,
+            }),
+        })
+        .unwrap();
+    harness.host.store_changed();
+    harness.host.meeting_reveal_export().unwrap();
+    assert_eq!(
+        harness.fakes.opener.revealed.lock().unwrap()[1],
+        std::path::PathBuf::from("/Users/nicolai/Notes/Meetings/2026-09-29 Produktstrategie")
+    );
+
+    harness.sink.clear();
+    harness
+        .host
+        .page_layout(steno_bridge::PageLayoutParams {
+            window: BridgeWindow::Main,
+            width: 1_024.0,
+            height: 768.0,
+        })
+        .unwrap();
+    assert!(
+        harness.sink.events.lock().unwrap().is_empty(),
+        "validated and dropped: nothing publishes"
+    );
+
+    harness
+        .fakes
+        .recorder
+        .set_messages(Some("Low input level."), Some("Tap lost."));
+    harness.fakes.recorder.set_auto_stop(Some(AutoStopStatus {
+        app_name: Some("Zoom".to_owned()),
+        remaining_seconds: 42.0,
+        total_seconds: 90.0,
+    }));
+    let recording = harness.snapshot(BridgeTopic::Recording);
+    assert_eq!(recording["warning"], "Low input level.");
+    assert_eq!(recording["error"], "Tap lost.");
+    assert_eq!(recording["autoStop"]["remainingSeconds"], 42.0);
+    harness.host.recording_keep_going().unwrap();
+    assert_eq!(*harness.fakes.recorder.kept.lock().unwrap(), 1);
+    assert!(
+        harness
+            .snapshot(BridgeTopic::Recording)
+            .get("autoStop")
+            .is_none(),
+        "keep going disarms the auto-stop"
+    );
+    harness.host.recording_clear_messages().unwrap();
+    let recording = harness.snapshot(BridgeTopic::Recording);
+    assert!(recording.get("warning").is_none());
+    assert!(recording.get("error").is_none());
 }
 
 /// Swift: `notesLandOnTheMeetingTheyWereTypedFor`.
@@ -632,7 +849,7 @@ fn the_detail_footer_and_summary_rows_follow_the_store() {
 
 /// Swift: `openURLAcceptsOnlyWebAndMailLinks`, `theAppPublishCarryingADeepLinkConsumesIt`.
 #[test]
-fn system_and_window_commands() {
+fn open_url_takes_https_and_mail_links_and_only_onboarding_closes_itself() {
     let harness = sample();
     harness
         .host
@@ -646,13 +863,23 @@ fn system_and_window_commands() {
             url: "mailto:hi@example.com".to_owned(),
         })
         .unwrap();
-    let refused = harness
-        .host
-        .system_open_url(OpenUrlParams {
-            url: "file:///etc/hosts".to_owned(),
-        })
-        .unwrap_err();
-    assert_eq!(refused.code, BridgeErrorCode::InvalidParams);
+    for refused in [
+        "file:///etc/hosts",
+        "http://example.com",
+        "javascript:alert(1)",
+    ] {
+        let error = harness
+            .host
+            .system_open_url(OpenUrlParams {
+                url: refused.to_owned(),
+            })
+            .unwrap_err();
+        assert_eq!(error.code, BridgeErrorCode::InvalidParams, "{refused}");
+        assert_eq!(
+            error.message,
+            "Only https: and mailto: links open from the page."
+        );
+    }
     assert_eq!(harness.fakes.opener.opened.lock().unwrap().len(), 2);
 
     harness.sink.clear();
