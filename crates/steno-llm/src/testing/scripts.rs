@@ -283,7 +283,7 @@ impl Scripts {
     /// returns `completion`. Models the servers that honour `json_object`
     /// but not `json_schema`.
     #[must_use]
-    pub fn server(
+    pub fn format_rejecting_server(
         &self,
         models: &[&str],
         rejecting: &[&str],
@@ -449,7 +449,7 @@ impl Scripts {
 
     /// The Codex backend's 400 for a request field it does not take.
     #[must_use]
-    pub fn codex_unsupported_parameter(&self, name: &str) -> StubResponse {
+    pub fn codex_rejects_parameter(&self, name: &str) -> StubResponse {
         StubResponse::new(
             400,
             format!("{{\"detail\":\"Unsupported parameter: {name}\"}}").into_bytes(),

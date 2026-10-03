@@ -235,7 +235,7 @@ async fn redacts_the_key_from_every_error_and_event() {
 #[tokio::test]
 async fn probe_reports_models_mode_and_round_trip() {
     let harness = ClientHarness::new().await;
-    harness.server.respond(scripts.server(
+    harness.server.respond(scripts.format_rejecting_server(
         &["other", "stub-model"],
         &[],
         scripts.text("{\"ok\":true}"),
@@ -340,7 +340,7 @@ async fn probe_throws_a_transport_error_when_nothing_listens() {
 #[tokio::test]
 async fn probe_records_the_downgraded_mode_and_a_model_that_is_not_listed() {
     let harness = ClientHarness::new().await;
-    harness.server.respond(scripts.server(
+    harness.server.respond(scripts.format_rejecting_server(
         &["other"],
         &["json_schema"],
         scripts.text("{\"ok\":true}"),
@@ -432,7 +432,7 @@ fn retry_after_and_error_message_parsing() {
 }
 
 #[test]
-fn retryability_matrix() {
+fn only_transport_failures_timeouts_429s_408_and_5xx_are_retried() {
     for status in [500, 502, 503, 504, 599, 408] {
         assert!(
             LlmError::Http {
@@ -904,9 +904,11 @@ fn format_kinds(harness: &ClientHarness) -> Vec<Option<&'static str>> {
 #[tokio::test]
 async fn a_400_naming_response_format_flips_to_json_object_and_is_remembered() {
     let harness = ClientHarness::new().await;
-    harness
-        .server
-        .respond(scripts.server(&["stub-model"], &["json_schema"], scripts.text("{}")));
+    harness.server.respond(scripts.format_rejecting_server(
+        &["stub-model"],
+        &["json_schema"],
+        scripts.text("{}"),
+    ));
     assert_eq!(
         harness.client.resolved_mode(),
         StructuredOutputMode::JsonSchema
@@ -937,7 +939,7 @@ async fn a_400_naming_response_format_flips_to_json_object_and_is_remembered() {
 #[tokio::test]
 async fn a_second_400_falls_to_prompt_only_and_sends_no_response_format() {
     let harness = ClientHarness::new().await;
-    harness.server.respond(scripts.server(
+    harness.server.respond(scripts.format_rejecting_server(
         &["stub-model"],
         &["json_schema", "json_object"],
         scripts.text("{}"),
@@ -1093,9 +1095,11 @@ async fn a_400_at_prompt_only_is_an_http_error_and_never_retried() {
 #[tokio::test]
 async fn a_json_object_request_walks_the_whole_chain_and_ends_at_prompt_only() {
     let harness = ClientHarness::new().await;
-    harness
-        .server
-        .respond(scripts.server(&["stub-model"], &["json_object"], scripts.text("{}")));
+    harness.server.respond(scripts.format_rejecting_server(
+        &["stub-model"],
+        &["json_object"],
+        scripts.text("{}"),
+    ));
     harness.client.complete_llm(&json_request()).await.unwrap();
     // The chain is walked mode by mode, so the JsonSchema and JsonObject
     // modes both send json_object for this request: one repeated wire
@@ -1131,7 +1135,7 @@ async fn a_json_object_request_walks_the_whole_chain_and_ends_at_prompt_only() {
 #[tokio::test]
 async fn concurrent_rejections_downgrade_the_mode_once_per_step() {
     let harness = ClientHarness::new().await;
-    harness.server.respond(scripts.server(
+    harness.server.respond(scripts.format_rejecting_server(
         &["stub-model"],
         &["json_schema", "json_object"],
         scripts.text("{}"),

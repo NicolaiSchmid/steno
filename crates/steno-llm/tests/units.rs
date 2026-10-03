@@ -1030,7 +1030,7 @@ async fn stub_answers_unscripted_requests_with_404_and_consults_the_responder() 
     let url = server.base_url().join("/v1/models").unwrap();
     let first = http.get(url.clone()).send().await.unwrap();
     assert_eq!(first.status().as_u16(), 404);
-    server.respond(scripts.server(&["a", "b"], &[], scripts.text("x")));
+    server.respond(scripts.format_rejecting_server(&["a", "b"], &[], scripts.text("x")));
     let second = http.get(url).send().await.unwrap();
     assert_eq!(second.status().as_u16(), 200);
     let list: ModelList = wire::decode(&second.bytes().await.unwrap()).unwrap();

@@ -371,7 +371,7 @@ async fn a_rejected_schema_downgrades_the_mode_and_unsupported_parameters_surfac
     let second = CodexHarness::new().await;
     second
         .backend
-        .enqueue([scripts.codex_unsupported_parameter("max_output_tokens")]);
+        .enqueue([scripts.codex_rejects_parameter("max_output_tokens")]);
     let error = llm(second
         .client
         .complete_llm(&text_request())

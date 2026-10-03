@@ -355,7 +355,7 @@ fn a_section_the_model_split_in_two_is_merged() {
 }
 
 #[test]
-fn assignee_resolution_order() {
+fn assignees_resolve_by_full_name_then_first_name_then_speaker_label_then_known_person() {
     let input = summary_input(&customer_call(), None);
     let labels = SpeakerLabels::new(&input.speakers);
     let resolve = |name: Option<&str>| AnalysisDraft::resolve_assignee(name, &input, &labels);
