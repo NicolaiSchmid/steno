@@ -1135,11 +1135,17 @@ fn a_refused_keep_change_shows_on_the_detail_and_a_busy_meeting_takes_the_rule()
         .fakes
         .pipeline
         .fail_calls(Some("meeting has no audio asset"));
+    harness.sink.clear();
     let reply = harness
         .host
         .meeting_set_keep_audio(SetBoolParams { value: true })
         .unwrap();
     assert!(reply.confirmed);
+    assert_eq!(
+        harness.sink.last(BridgeTopic::MeetingDetail).unwrap()["error"],
+        "Retention could not be changed: meeting has no audio asset",
+        "the refusal reaches the page through a detail publish"
+    );
     let detail = harness.snapshot(BridgeTopic::MeetingDetail);
     assert_eq!(detail["id"], id(MEETING));
     assert_eq!(
