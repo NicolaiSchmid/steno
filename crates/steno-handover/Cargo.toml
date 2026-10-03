@@ -30,8 +30,8 @@ serde_json.workspace = true
 sha2.workspace = true
 thiserror.workspace = true
 time.workspace = true
-# Additive on the workspace line (`macros`, `rt`): the listener's sockets,
-# timers and channels.
+# Additive on the workspace line (`macros`, `rt`, `rt-multi-thread`): the
+# listener's sockets, timers and channels.
 tokio = { workspace = true, features = ["io-util", "net", "sync", "time"] }
 tokio-rustls.workspace = true
 tracing.workspace = true
@@ -48,7 +48,6 @@ steno-core = { path = "../steno-core", features = ["testing"] }
 regex.workspace = true
 reqwest.workspace = true
 tempfile.workspace = true
-tokio = { workspace = true, features = ["rt-multi-thread"] }
 x509-parser.workspace = true
 
 [lints]
