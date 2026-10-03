@@ -4,7 +4,8 @@
 //! pins both). `steno dev fixtures generate` writes these files; the
 //! pipeline's sample clips use the writer; [`two_lane_call`] lays the
 //! conversation out as a recording for the tests across crates.
-//! Swift: `Sources/StenoCore/Testing/FixtureGenerator.swift`, `Audio/WAVWriter.swift`.
+//! Swift: `Sources/StenoCore/Testing/FixtureGenerator.swift`,
+//! `Sources/StenoCore/Audio/WAVWriter.swift`.
 
 use std::collections::BTreeMap;
 use std::path::Path;

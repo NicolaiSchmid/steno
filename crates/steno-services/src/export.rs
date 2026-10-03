@@ -1,5 +1,5 @@
 //! The host's `ExportValidator` over the Obsidian destination: the Export
-//! settings' vault check. Swift: `ObsidianFolderDestination.validateVault`.
+//! settings' vault check. Swift: `ObsidianFolderDestination.validate()`.
 
 use steno_adapters::ObsidianFolderDestination;
 use steno_core::ObsidianSettings;

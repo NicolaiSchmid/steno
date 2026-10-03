@@ -1,6 +1,9 @@
 //! The platform services behind the host's small traits: the wall clock,
 //! the folder usage walk, the input device list, and the first-launch
-//! flags in `preferences.json`.
+//! flags in `preferences.json`. Swift: `Date()`,
+//! `AudioSettingsViewModel.measureFolderUsage` in
+//! `apps/macos/Steno/Settings/AudioSettingsViewModel.swift`, the Core Audio
+//! device list, and `UserDefaults` in `apps/macos/Steno/AppController.swift`.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};

@@ -1,4 +1,7 @@
-//! The host's `Handover` over the phone handover listener.
+//! The host's `Handover` over the phone handover listener. Swift:
+//! `IdentityKeychain.loadOrCreate` in
+//! `Sources/StenoHandover/Identity/IdentityKeychain.swift` and the handover
+//! block of `AppEnvironment.live` in `apps/macos/Steno/AppEnvironment.swift`.
 
 use std::sync::Arc;
 

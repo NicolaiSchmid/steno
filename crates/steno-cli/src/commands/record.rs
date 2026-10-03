@@ -2,7 +2,7 @@
 //! live|synthetic]`: records one meeting folder under DIR, prints the lane
 //! levels at 10 Hz to stderr and the files plus statistics at the end.
 //! Stops after `--seconds` or on Ctrl-C. `--backend synthetic` needs no
-//! devices. Swift: `Commands/Record.swift`.
+//! devices. Swift: `Sources/steno/Commands/Record.swift`.
 
 use std::path::PathBuf;
 use std::sync::Arc;

@@ -3,7 +3,7 @@
 //! waits for the pipeline. Prints one line per progress event to standard
 //! error, `stage percent remaining`, and the meeting id alone to standard
 //! output; a note on stderr says when the summary was skipped for lack of
-//! an LLM endpoint. Swift: `Commands/Process.swift`.
+//! an LLM endpoint. Swift: `Sources/steno/Commands/Process.swift`.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
