@@ -6,8 +6,9 @@
 //! must come back as an error from the engine, never take the test
 //! process down, and leave an engine that works on the next call.
 //!
-//! The fake engine needs no models; the last test runs the real one when
-//! `STENO_MODELS_DIR` holds them.
+//! The fake engine needs no models; the last test, ignored by default,
+//! runs the real one when `STENO_MODELS_DIR` holds them
+//! (`cargo test -p steno-speech-sidecar --release -- --ignored`).
 
 #![allow(
     clippy::cast_precision_loss,
@@ -23,7 +24,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use steno_core::{AudioBuffer16k, LanguageTag, SpeechEngine};
-use steno_speech::sidecar::protocol::{self, PROTOCOL_VERSION, Reply};
+use steno_speech::sidecar::protocol::{self, PROTOCOL_VERSION, Reply, Request};
 use steno_speech::{
     ModelAsset, ModelStore, OnnxOptions, OnnxSpeechEngine, SidecarConfig, SidecarError,
     SidecarSpeechEngine, SpeechError,
@@ -61,6 +62,51 @@ fn engine_with_fault(
     let mut config = config(&["--fault", fault, "--fault-once", marker.to_str().unwrap()]);
     adjust(&mut config);
     (engine_in(&dir, config), dir)
+}
+
+/// Whether a process with `pid` exists (a zombie counts).
+fn alive(pid: u32) -> bool {
+    if cfg!(windows) {
+        let out = Command::new("tasklist")
+            .args(["/FI", &format!("PID eq {pid}"), "/NH", "/FO", "CSV"])
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&out.stdout).contains(&format!("\"{pid}\""))
+    } else {
+        Command::new("kill")
+            .args(["-0", &pid.to_string()])
+            .stderr(Stdio::null())
+            .status()
+            .unwrap()
+            .success()
+    }
+}
+
+/// Waits up to ten seconds for `pid` to be gone.
+fn gone_soon(pid: u32) -> bool {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while alive(pid) {
+        if Instant::now() > deadline {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    true
+}
+
+/// Kills `pid`, for a test that failed with a child left running.
+fn kill(pid: u32) -> bool {
+    let status = if cfg!(windows) {
+        Command::new("taskkill")
+            .args(["/F", "/PID", &pid.to_string()])
+            .stdout(Stdio::null())
+            .status()
+    } else {
+        Command::new("kill")
+            .args(["-KILL", &pid.to_string()])
+            .status()
+    };
+    status.unwrap().success()
 }
 
 fn tone(seconds: f64) -> AudioBuffer16k {
@@ -162,17 +208,7 @@ async fn a_child_killed_mid_request_is_an_error_and_the_next_call_recovers() {
     // moment (a blocking sleep: the runtime has other workers).
     std::thread::sleep(Duration::from_millis(300));
     assert!(!running.is_finished());
-    let killed = if cfg!(windows) {
-        Command::new("taskkill")
-            .args(["/F", "/PID", &pid.to_string()])
-            .stdout(Stdio::null())
-            .status()
-    } else {
-        Command::new("kill")
-            .args(["-KILL", &pid.to_string()])
-            .status()
-    };
-    assert!(killed.unwrap().success());
+    assert!(kill(pid));
     let error = running.await.unwrap().unwrap_err();
     assert!(error.contains("died mid-request"), "{error}");
     assert_eq!(engine.pid(), None);
@@ -287,6 +323,102 @@ async fn an_error_the_child_reports_keeps_the_child() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_child_of_another_protocol_version_is_refused() {
+    let (engine, dir) = engine_with_fault("wrong-protocol", |_| {});
+    let error = engine.prepare().await.unwrap_err();
+    assert!(
+        matches!(sidecar_error(error.as_ref()), SidecarError::Protocol(detail)
+            if detail.contains("speaks protocol 0")),
+        "{error}"
+    );
+    assert_eq!(engine.pid(), None);
+    let refused: u32 = std::fs::read_to_string(dir.path().join("faulted"))
+        .unwrap()
+        .parse()
+        .unwrap();
+    assert!(gone_soon(refused), "the refused child {refused} still runs");
+    // The next child speaks the protocol.
+    assert_works(&engine, &tone(0.5)).await;
+    assert_eq!(engine.spawns(), 1);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_child_that_never_greets_is_killed_when_its_start_times_out() {
+    // It reads nothing, so a closed stdin does not end it: only the kill
+    // when the client drops the failed start does.
+    let (engine, dir) = engine_with_fault("silent", |c| {
+        c.startup_timeout = Duration::from_millis(500);
+    });
+    let error = engine.prepare().await.unwrap_err();
+    assert!(
+        matches!(sidecar_error(error.as_ref()), SidecarError::Timeout { .. }),
+        "{error}"
+    );
+    let silent: u32 = std::fs::read_to_string(dir.path().join("faulted"))
+        .unwrap()
+        .parse()
+        .unwrap();
+    if !gone_soon(silent) {
+        kill(silent);
+        panic!("the silent child {silent} outlived its failed start");
+    }
+    assert_works(&engine, &tone(0.5)).await;
+}
+
+#[test]
+fn a_busy_child_exits_when_its_parent_goes_away() {
+    // Driven by hand: the child hangs inside a transcription, so it never
+    // reads the closed stdin; its next heartbeat finds stdout gone.
+    let mut child = Command::new(BINARY)
+        .args(["--fake-engine", "--fault", "hang", "--heartbeat-ms", "20"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let mut stdin = child.stdin.take().unwrap();
+    let mut stdout = BufReader::new(child.stdout.take().unwrap());
+    loop {
+        match protocol::read_header::<_, Reply>(&mut stdout)
+            .unwrap()
+            .unwrap()
+        {
+            Reply::Ready { .. } => break,
+            Reply::Memory { .. } => {}
+            other => panic!("{other:?}"),
+        }
+    }
+    let samples = [0.5f32; 160];
+    protocol::write_frame(
+        &mut stdin,
+        &Request::Transcribe {
+            id: 1,
+            sample_count: samples.len() as u64,
+            hint: None,
+        },
+        &protocol::encode_samples(&samples),
+    )
+    .unwrap();
+    std::thread::sleep(Duration::from_millis(200));
+    assert!(child.try_wait().unwrap().is_none(), "the child is busy");
+    drop(stdin);
+    drop(stdout);
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let status = loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            break status;
+        }
+        if Instant::now() > deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("the busy child outlived its parent's pipes");
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    assert!(status.success(), "{status}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn the_real_engine_reports_missing_models_and_keeps_running() {
     // No `--fake-engine`: the child tries the store and says what is
     // missing; it downloads nothing (the client installs nothing either,
@@ -351,6 +483,7 @@ fn the_child_greets_and_exits_when_its_parent_goes_away() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs the models: STENO_MODELS_DIR, and STENO_FLEURS_DIR for the parity clip; run with -- --ignored"]
 async fn the_real_models_load_and_transcribe_in_the_sidecar_when_installed() {
     let Some(root) = ModelStore::environment_root() else {
         eprintln!("skipped: set STENO_MODELS_DIR to run the real sidecar");

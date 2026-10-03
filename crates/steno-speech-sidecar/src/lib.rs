@@ -31,10 +31,12 @@
 //!
 //! `--fake-engine` replaces Parakeet with an engine that needs no models
 //! and answers with the sample count and peak of the audio it received.
-//! Only with it, `--fault <kind>` makes the next transcription abort,
-//! panic, exit, hang, allocate without bound, write garbage or fail;
-//! `--fault-once <path>` limits that to the first child that creates
-//! `<path>`. The isolation tests drive the real client against these.
+//! Only with it, `--fault <kind>` ([`Fault`]) makes the next transcription
+//! abort, panic, exit, hang, allocate without bound, write garbage or fail,
+//! or the child stay silent or announce another protocol version from the
+//! start; `--fault-once <path>` limits that to the first child that creates
+//! `<path>`, which holds that child's pid. The isolation tests drive the
+//! real client against these.
 
 use std::fs::File;
 use std::io::{self, BufReader, Write};
@@ -67,6 +69,17 @@ steno_core::string_enum! {
         Garbage = "garbage",
         /// Answers with an error and keeps running.
         Error = "error",
+        /// At start: sends nothing, reads nothing, hangs.
+        Silent = "silent",
+        /// At start: announces protocol version 0 in its ready message.
+        WrongProtocol = "wrong-protocol",
+    }
+}
+
+impl Fault {
+    /// Committed when the child starts, not at the next transcription.
+    fn at_start(self) -> bool {
+        matches!(self, Fault::Silent | Fault::WrongProtocol)
     }
 }
 
@@ -181,7 +194,7 @@ struct FakeEngine {
 
 impl FakeEngine {
     /// The fault to commit now: always, or with `--fault-once` only in
-    /// the child that creates the marker.
+    /// the child that creates the marker, which then holds its pid.
     fn fault_now(&self) -> Option<Fault> {
         let fault = self.fault?;
         match &self.fault_once {
@@ -190,7 +203,10 @@ impl FakeEngine {
                 .create_new(true)
                 .open(marker)
                 .ok()
-                .map(|_| fault),
+                .map(|mut file| {
+                    let _ = write!(file, "{}", std::process::id());
+                    fault
+                }),
             None => Some(fault),
         }
     }
@@ -211,7 +227,7 @@ impl Engine for FakeEngine {
         samples: &[f32],
         hint: Option<&LanguageTag>,
     ) -> Result<Vec<RawSegment>, String> {
-        match self.fault_now() {
+        match self.fault_now().filter(|fault| !fault.at_start()) {
             Some(Fault::Abort) => std::process::abort(),
             Some(Fault::Panic) => panic!("simulated panic in the speech engine"),
             Some(Fault::Exit) => std::process::exit(3),
@@ -236,7 +252,7 @@ impl Engine for FakeEngine {
                 hang()
             }
             Some(Fault::Error) => Err("simulated failure in the speech engine".to_owned()),
-            None => {
+            Some(Fault::Silent | Fault::WrongProtocol) | None => {
                 let peak = samples.iter().fold(0.0f32, |m, s| m.max(s.abs()));
                 // Exact up to 2^53 samples, as in `AudioBuffer16k::duration`.
                 #[allow(clippy::cast_precision_loss)]
@@ -275,6 +291,18 @@ fn send(reply: &Reply) {
 
 /// Runs the child until shutdown or until stdin ends.
 pub fn serve(options: &Options) -> ExitCode {
+    let fake = options.fake_engine.then(|| FakeEngine {
+        loaded: false,
+        fault: options.fault,
+        fault_once: options.fault_once.clone(),
+    });
+    let start_fault = fake
+        .as_ref()
+        .filter(|engine| engine.fault.is_some_and(Fault::at_start))
+        .and_then(FakeEngine::fault_now);
+    if start_fault == Some(Fault::Silent) {
+        hang();
+    }
     let heartbeat = options.heartbeat;
     let started = std::thread::Builder::new()
         .name("heartbeat".to_owned())
@@ -290,17 +318,16 @@ pub fn serve(options: &Options) -> ExitCode {
         eprintln!("steno-speech-sidecar: no heartbeat thread: {error}");
         return ExitCode::from(2);
     }
-    let mut engine: Box<dyn Engine> = if options.fake_engine {
-        Box::new(FakeEngine {
-            loaded: false,
-            fault: options.fault,
-            fault_once: options.fault_once.clone(),
-        })
-    } else {
-        Box::new(OnnxEngine::default())
+    let mut engine: Box<dyn Engine> = match fake {
+        Some(fake) => Box::new(fake),
+        None => Box::new(OnnxEngine::default()),
     };
     send(&Reply::Ready {
-        protocol: PROTOCOL_VERSION,
+        protocol: if start_fault == Some(Fault::WrongProtocol) {
+            0
+        } else {
+            PROTOCOL_VERSION
+        },
         pid: std::process::id(),
     });
     let mut input = BufReader::new(io::stdin().lock());
@@ -395,6 +422,10 @@ mod tests {
         };
         assert_eq!(engine.fault_now(), Some(Fault::Error));
         assert_eq!(engine.fault_now(), None);
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("marker")).unwrap(),
+            std::process::id().to_string()
+        );
         let always = FakeEngine {
             fault_once: None,
             ..engine
