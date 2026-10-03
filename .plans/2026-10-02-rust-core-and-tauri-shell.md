@@ -189,7 +189,10 @@ bridge's copies of the macro and codecs. Packages after WP3 branch from `main`.
       does). Resolve: wait for the tolerance; the outright join keeps a word twice
       when the right repeats the left's last word a frame later (merge test
       `a_right_window_repeating_the_left_s_last_word_a_frame_later_keeps_one_copy`).
-      The CoreML crate keeps the shortcut until then.
+      The CoreML crate keeps the shortcut until then. `merge_chunks` also sends a
+      seam with fewer than two overlap tokens on either side to `merge_by_midpoint`
+      (`overlap_left.len() < 2 || overlap_right.len() < 2`), where this crate runs
+      the LCS with one token a side.
     - [ ] Right window ending inside the left. Here: `crates/steno-speech/src/merge.rs` (`merge_windows`,
       the left keeps its tail, also when the right's tail only finishes the seam
       word). There: `crates/steno-speech-coreml/src/merge.rs` (`merge_using_matches`, the left's tail is
@@ -199,20 +202,27 @@ bridge's copies of the macro and codecs. Packages after WP3 branch from `main`.
     - [ ] Midpoint cut without a splice point on the right. Here: `crates/steno-speech/src/merge.rs`
       (`merge_by_midpoint`, the left is kept whole). There: `crates/steno-speech-coreml/src/merge.rs`
       (`merge_by_midpoint`, the right is kept from the cutoff). Resolve: keep the
-      left; the right's continuation pieces glue onto the seam word and the left's
-      words past the cutoff are lost (merge test
+      left. Keeping the right from the cutoff glues its continuation pieces onto the
+      seam word and loses the left's words past the cutoff (merge test
       `a_midpoint_cut_with_no_word_start_on_the_right_keeps_the_left`).
-    - [ ] Seam word. Here: `crates/steno-speech/src/merge.rs` (`merge_windows`, the left always owns it).
+    - [ ] Seam word. Here: `crates/steno-speech/src/merge.rs` (`merge_windows`, the left owns it unless
+      its window ends inside it and the right heard more of it).
       There: `crates/steno-speech-coreml/src/merge.rs` (`word_initial_index`, `pop_seam_word`: the right owns it
-      when it heard it from its start). Resolve: measure. A left window whose tokens
-      end inside a word loses the word's rest under the left-owns rule (2,179 of
-      3,000 random layouts in a randomised merge check on #171); an energy cut can
-      end a window inside a word.
+      when it heard it from its start). Resolve: measure. Under a plain left-owns
+      rule a left window whose tokens end inside a word, as an energy cut can, lost
+      the word's rest (2,179 of 3,000 random layouts in a randomised merge check on
+      #171, 0 with the exception; FLEURS unchanged; merge test
+      `a_left_window_that_ends_inside_the_seam_word_takes_the_rest_from_the_right`).
     - [ ] Id matching. Here: `crates/steno-speech/src/merge.rs` (`merge_windows`, exact ids). There:
       `crates/steno-speech-coreml/src/vocab.rs` (`Vocab::ids_match`, case-insensitive). Resolve: measure.
     - [ ] LCS walk. Here: `crates/steno-speech/src/merge.rs` (`merge_windows`, forward). There:
       `crates/steno-speech-coreml/src/merge.rs` (`find_lcs`, back from the end). Resolve: measure; they differ
       only on ties.
+    - [ ] Repeated words. Here: `crates/steno-speech/src/merge.rs` (`merge_windows`). There:
+      `crates/steno-speech-coreml/src/merge.rs` (`find_lcs`). Both prefer a shifted alignment when a word
+      repeats within the tolerance across a seam, because the shifted match is
+      longer: seven "w4" 0.4 s apart merge to six. Resolve: break near-ties toward
+      the smaller time offset; measure first.
     - [ ] Seam repairs. Here: none. There: `crates/steno-speech-coreml/src/merge.rs`
       (`collapse_seam_word_duplicates`) and `crates/steno-speech-coreml/src/pipeline.rs` (`repair_seam_gaps`).
       Resolve: measure once the merge is shared.
@@ -249,7 +259,8 @@ bridge's copies of the macro and codecs. Packages after WP3 branch from `main`.
       `crates/steno-speech-coreml/src/chunking.rs`, `crates/steno-speech-coreml/src/segments.rs`. Resolve: one pair of names.
     - [ ] Decoder limits. Here: `crates/steno-speech/src/decoder.rs` (`DecoderConfig::max_symbols_per_frame`,
       `max_tokens_per_second`). There: `crates/steno-speech-coreml/src/decoder.rs` (`MAX_SYMBOLS_PER_STEP`,
-      `MAX_TOKENS_PER_CHUNK`). Resolve: the config fields, which tests vary.
+      `MAX_TOKENS_PER_CHUNK`). Resolve: the config fields, which tests vary. Settle
+      with the two decode-loop items above.
     - [ ] Engine id. Here: `crates/steno-speech/src/engine.rs` (`OnnxSpeechEngine::ID`). There:
       `crates/steno-speech-coreml/src/engine.rs` (`ENGINE_ID`). Both are `parakeet-v3`. Resolve: one constant.
     - [ ] Swift pointers. Here: a `Swift:` line in each module doc. There:
