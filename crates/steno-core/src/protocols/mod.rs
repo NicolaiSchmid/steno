@@ -1,6 +1,7 @@
-//! The pluggable boundaries, one trait per file, one for one with
-//! `Sources/StenoCore/Protocols`. Two implementations before generalising
-//! further; the pipeline holds each as `Arc<dyn Trait>`.
+//! The pluggable boundaries, one trait per file, after
+//! `Sources/StenoCore/Protocols` (whose `PipelineBoundaries.swift` holds the
+//! five stage traits). Two implementations before generalising further; the
+//! pipeline holds each as `Arc<dyn Trait>`.
 //!
 //! - [`SpeechEngine`]: speech to text for one lane.
 //! - [`Diarizer`]: who spoke when, for one lane.

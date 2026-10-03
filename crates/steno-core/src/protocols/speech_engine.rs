@@ -8,9 +8,8 @@ use async_trait::async_trait;
 use super::BoundaryResult;
 use crate::{AudioBuffer16k, LanguageTag, RawSegment};
 
-/// Speech-to-text behind one trait; v1 ships `parakeet-v3` and
-/// `whisperkit-large-v3-turbo`. `id` and `supported_languages` are fixed
-/// for the engine's lifetime.
+/// Speech to text behind one trait; the speech crate's engines implement
+/// it. `id` and `supported_languages` are fixed for the engine's lifetime.
 #[async_trait]
 pub trait SpeechEngine: Send + Sync {
     fn id(&self) -> &str;

@@ -1,5 +1,5 @@
 //! The pipeline's stage boundaries: what the cleaner and the summarizer
-//! receive and return, and the export every adapter receives.
+//! receive and return, and the export every destination receives.
 //! Swift: `Sources/StenoCore/Model/StageIO.swift`.
 
 use serde::{Deserialize, Serialize};
@@ -55,7 +55,7 @@ pub struct SummaryOutput {
     pub usage: LlmUsage,
 }
 
-/// Everything an adapter receives; its `StenoJSON` encoding is
+/// Everything a destination receives; its `StenoJSON` encoding is
 /// `meeting.json` everywhere.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

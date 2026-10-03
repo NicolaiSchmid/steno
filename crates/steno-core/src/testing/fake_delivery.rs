@@ -1,6 +1,5 @@
 //! A destination and a handover intake over a temporary folder.
-//! Swift: `Sources/StenoCore/Testing/FakeDelivery.swift` (the dispatcher
-//! fake follows with the store's export in WP6).
+//! Swift: `FakeDestination` and `FakeHandoverIntake` in `Sources/StenoCore/Testing/FakeDelivery.swift`.
 
 use std::path::{Path, PathBuf};
 

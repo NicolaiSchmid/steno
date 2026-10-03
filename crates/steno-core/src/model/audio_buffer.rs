@@ -1,5 +1,5 @@
 //! The one audio format the speech boundary accepts.
-//! Swift: `Sources/StenoCore/Model/Transcript.swift` (`AudioBuffer16k`).
+//! Swift: `AudioBuffer16k` in `Sources/StenoCore/Model/Transcript.swift`.
 
 use super::TimeRange;
 

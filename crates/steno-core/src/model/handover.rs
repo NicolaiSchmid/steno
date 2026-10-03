@@ -135,8 +135,9 @@ impl<'de> Deserialize<'de> for HandoverState {
     }
 }
 
-/// What the phone declares about a recording before the bytes arrive; the
-/// intake verifies `byte_count` and `sha256` against the received file.
+/// What the phone declares before uploading; the handover wire mirrors
+/// these names in `mobile/modules/steno-link/src/wire.ts`. `sha256` is the
+/// whole-file digest.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RecordingMetadata {

@@ -1,5 +1,5 @@
 //! The summary templates: section ids and headings fixed by the core,
-//! prompt text owned by the LLM workstream.
+//! prompt text edited in `Sources/StenoCore/Resources/Templates/*.json`.
 //! Swift: `Sources/StenoCore/Templates/SummaryTemplate.swift`.
 
 use std::sync::LazyLock;

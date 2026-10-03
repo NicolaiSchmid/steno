@@ -1,9 +1,9 @@
 //! What the speech engine and the diarizer return for one lane, and the
 //! intermediate pieces the speech crate builds them from.
-//! Swift: `Sources/StenoCore/Model/Transcript.swift` (`RawSegment`,
-//! `WordTiming`, `DiarizationResult`, `SpeakerCluster`),
-//! `Sources/StenoSpeech/Engines/TimedWord.swift` and
-//! `Sources/StenoSpeech/Diarization/ClusterChunk.swift`.
+//! Swift: `RawSegment`, `WordTiming`, `DiarizationResult` and
+//! `SpeakerCluster` in `Sources/StenoCore/Model/Transcript.swift`,
+//! `TimedWord` in `Sources/StenoSpeech/Engines/TimedWord.swift` and
+//! `ClusterChunk` in `Sources/StenoSpeech/Diarization/ClusterChunk.swift`.
 
 use serde::{Deserialize, Serialize};
 
@@ -43,7 +43,7 @@ pub struct WordTiming {
 
 /// One timed piece of text with the decoder's confidence, the unit the
 /// transcript segmenter works on. Parakeet's decoder tokens arrive as these
-/// and the token aggregator joins them; Whisper reports words directly.
+/// and the token aggregator joins them.
 /// Swift: `Sources/StenoSpeech/Engines/TimedWord.swift`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct TimedWord {
@@ -84,7 +84,10 @@ pub struct SpeakerCluster {
     /// The cluster's voice: its chunk embeddings at unit length, summed
     /// with duration as weight and L2-normalised (`ClusterEmbedding` in the
     /// speech crate); `None` when no chunk carried a usable vector. Skipped
-    /// by serde like `Speaker::embedding`; Swift never encodes a cluster.
+    /// by serde like `Speaker::embedding` because the Rust `Embedding` has
+    /// no serde form yet; Swift's cluster is synthesized `Codable` with its
+    /// `Embedding`, and `Tests/StenoCoreTests/ModelCodableTests.swift`
+    /// round-trips it, so this side drops the vector that side keeps.
     #[serde(skip)]
     pub embedding: Option<Embedding>,
     pub cluster_confidence: f32,

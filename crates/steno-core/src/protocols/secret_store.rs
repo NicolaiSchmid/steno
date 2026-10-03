@@ -39,6 +39,7 @@ impl fmt::Display for SecretKey {
     }
 }
 
+/// Where the API key lives: read, set, remove.
 #[async_trait]
 pub trait SecretStore: Send + Sync {
     async fn secret(&self, key: &SecretKey) -> BoundaryResult<Option<String>>;

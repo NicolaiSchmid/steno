@@ -7,8 +7,9 @@
 ///
 /// The one synchronous boundary, because it runs on the audio thread:
 /// `process` **must not allocate and must not take a lock** (plan
-/// invariant 5, proven by the counting allocator in `steno-audio`'s
-/// tests). Everything it needs (filter state, far-end history, scratch
+/// invariant 5, proven by the counting allocator from
+/// `spikes/capture-rs/src/rt.rs` in the audio crate's test build).
+/// Everything it needs (filter state, far-end history, scratch
 /// buffers) is allocated by the constructor, which is the backend's own
 /// `new(sample_rate, frame_size)` rather than a trait method so the trait
 /// stays dyn-compatible. The three slices have the same length, one frame.

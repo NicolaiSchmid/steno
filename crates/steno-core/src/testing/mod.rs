@@ -1,15 +1,16 @@
 //! Deterministic implementations of every boundary, so the pipeline, the
 //! CLI and the shell test without models, a network or a keyring. Behind
 //! the `testing` cargo feature and always present in this crate's own
-//! tests. One for one with `Sources/StenoCore/Testing`, except the
-//! dispatcher fake, which arrives with the store's export.
+//! tests. After `Sources/StenoCore/Testing`, minus the dispatcher fake,
+//! `RecordingAudioDecoder` (`FakeAudio.swift`), `FileSecretStore`,
+//! `ManualClock`, `Gate` and the `on*` hooks; and [`sample_data`] is not
+//! Swift's `SampleData` (own title, ids and dates).
 //!
 //! Every fake records what it was asked in a [`CallLog`] named for what it
 //! records (`transcriptions`, `summaries`, `admissions`), and a fake with a
 //! `failure: Option<String>` field fails every call with that message as a
-//! [`FakeFailure`]. The Swift hooks that run inside a call (`onTranscribe`,
-//! `onPrepare`, for `ManualClock` and gates) are not ported; the pipeline
-//! crate adds them when its tests need them.
+//! [`FakeFailure`]. The pipeline crate adds the hooks that run inside a
+//! call (`onTranscribe`, `onPrepare`) when its tests need them.
 //!
 //! - [`FakeSpeechEngine`]: one segment per `segment_seconds`.
 //! - [`FakeDiarizer`]: `cluster_count` speakers round-robin over
