@@ -1,7 +1,7 @@
 //! The four model calls of Parakeet TDT v3 on CoreML: preprocessor,
 //! encoder, decoder step and joint step, over FluidAudio's `.mlmodelc`
-//! bundles. The shared TDT loop of WP4a drives these through its
-//! `SpeechBackend` trait; until it lands, [`crate::decoder`] does.
+//! bundles. The shared-decoder follow-up drives these through
+//! `steno_speech::SpeechBackend`; until then [`crate::decoder`] does.
 //!
 //! Model contract (FluidAudio 0.17.4, `parakeet-tdt-0.6b-v3`):
 //!

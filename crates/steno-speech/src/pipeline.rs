@@ -26,9 +26,9 @@ use crate::vocab::{Vocab, starts_word};
 /// When a chunk with speech decodes to (almost) nothing, the window is
 /// decoded again with more audio around it (decision 1: extend, do not
 /// shift) and the candidate with the most words inside the chunk wins.
-/// The defaults extend by 6, 12 and 18 s in total (up to 6 s before and
-/// 12 s after the chunk): decision 1's 5 to 12 s in 6 s steps, reaching
-/// the 5 s earlier start and the 12 s later end that spike D's probe table
+/// Decision 1 extends by 5 to 12 s; the defaults try 6, 12 and 18 s in
+/// total, at most 6 s before and 12 s after the chunk, the 5 s earlier
+/// start and 12 s later end that spike D's probe table
 /// (`.plans/spikes/2026-10-01-spike-chunker-voting.md`) shows escaping the
 /// zero-token window.
 #[derive(Debug, Clone, PartialEq)]
@@ -572,6 +572,10 @@ mod tests {
         assert!(transcript.stats.recoveries_tried >= 1);
         assert_eq!(transcript.stats.recoveries_accepted, 0);
         assert_eq!(transcript.text(), "w5s25");
+    }
+
+    #[test]
+    fn speech_inside_counts_only_the_overlap() {
         assert_eq!(
             speech_inside(&[0..16_000, 32_000..48_000], &(8_000..40_000)),
             1.0

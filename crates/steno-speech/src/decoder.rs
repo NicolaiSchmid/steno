@@ -34,7 +34,8 @@ pub struct DecoderConfig {
     /// moves on (`NeMo`'s `max_symbols`).
     pub max_symbols_per_frame: usize,
     /// Tokens per second of window beyond which the window is abandoned
-    /// as a runaway; German speech needs about ten.
+    /// as a runaway, plus 16; the token that crosses the budget is kept.
+    /// German speech needs about ten.
     pub max_tokens_per_second: usize,
 }
 
@@ -84,7 +85,7 @@ pub fn decode_window<B: SpeechBackend + ?Sized>(
     if len == 0 {
         return Ok(tokens);
     }
-    // 80 ms frames: 12.5 per second.
+    // 80 ms frames are 12.5 a second; dividing by 12 errs high.
     let budget = config.max_tokens_per_second * len / 12 + 16;
     let mut decoder_state = DecoderState::zeros(shape.decoder_layers, shape.decoder_hidden);
     let mut step = backend.decoder_step(shape.blank_id, &decoder_state)?;
@@ -342,6 +343,7 @@ mod tests {
         };
         let mut stats = DecodeStats::default();
         let tokens = decode_window(&mut backend, &encoder(12), 0, &config, &mut stats).unwrap();
+        // The budget is 12 * 12 / 12 + 16; the token that crosses it is kept.
         assert_eq!(tokens.len(), 12 * 12 / 12 + 16 + 1);
         assert_eq!(stats.runaways, 1);
     }

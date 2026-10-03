@@ -30,9 +30,9 @@
 //! around it change in most FluidAudio releases, which is why the parity
 //! harness exists.
 //!
-//! Until WP4a's shared `SpeechBackend` loop lands in `steno-speech`, this
-//! crate carries its own pipeline over the four backend calls; the
-//! integration step swaps the loop and keeps the backend.
+//! Until the shared-decoder follow-up moves it onto `steno-speech`'s
+//! `SpeechBackend` loop, this crate carries its own pipeline over the four
+//! backend calls; that step swaps the loop and keeps the backend.
 
 #![deny(unsafe_code)]
 // The docs name FluidAudio, CoreML, SentencePiece and the work packages on
