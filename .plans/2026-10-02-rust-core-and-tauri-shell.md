@@ -611,4 +611,10 @@ rcgen identity in the `SecretStore` as one PEM bundle, pairing, the seven routes
 inbox and the mdns-sd advertiser; `tests/wire_contract.rs` reads `wire.ts`. The store
 gains the `paired_device*` and `handover_receipt` queries. Core's `RecordingIntake`
 (copy into the audio folder, enqueue) waits for WP6: no `RecordingLayout` and no
-file-URL to path helper in Rust core yet.
+file-URL to path helper in Rust core yet. Durability before `complete` answers 200 is
+the intake's, as in Swift: the listener fsyncs each chunk (`receiving_file::write`) and
+writes its own `complete` receipt only after `HandoverIntake::admit` returns, so the
+port must have the master and its commits on disk by then (the `RecordingIntake.admit`
+line under Store). Pairing and revoke commits stay `NORMAL`, as in Swift: a power loss
+right after one can forget a pairing (the phone gets 401 and unpairs, and the user
+pairs it again) or bring a revoked device back.
