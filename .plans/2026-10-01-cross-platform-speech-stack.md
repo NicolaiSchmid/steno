@@ -164,10 +164,10 @@ Open:
   (worth about 7 points on that file). Replace the 190 s clamp with the 60 s
   memory-derived clamp from decision 1; the position-table cap is not the guard.
 - WP3: diarization with our clustering and refinement, WeSpeaker ResNet34-LM as the
-  first embedding measured against ERes2Net's baseline; segmentation gate and embedding
-  licence confirmed first; calibration run on Forge (G3). Moved to the Rust port plan
-  as WP4d on 2026-10-02 (`.plans/2026-10-02-rust-core-and-tauri-shell.md`), where it
-  lands.
+  first embedding; segmentation gate and embedding licence confirmed first; calibration
+  run on Forge (G3). Moved to the Rust port plan as WP4d on 2026-10-02
+  (`.plans/2026-10-02-rust-core-and-tauri-shell.md`), where ResNet34-LM passed G3 and
+  ERes2Net was not measured (decision 6).
 - WP4: GPU providers (DirectML, CUDA) behind a runtime probe with CPU fallback;
   whisper.cpp Vulkan engine (G4). Needs a Windows machine with an integrated GPU and a
   Linux machine with NVIDIA; neither exists in the current fleet.
