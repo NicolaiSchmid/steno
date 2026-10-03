@@ -272,3 +272,106 @@ async fn concurrent_callers_get_identical_results_from_one_backend() {
     assert!(results.iter().all(|result| *result == results[0]));
     assert_eq!(loads.load(Ordering::SeqCst), 1);
 }
+
+/// A backend that holds its first segmentation call until a flag is
+/// raised, then behaves as the fake does.
+struct WaitingBackend {
+    inner: FakeBackend,
+    flag: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl TensorBackend for WaitingBackend {
+    fn geometry(&self) -> &SegmentationGeometry {
+        self.inner.geometry()
+    }
+
+    fn segment(&mut self, window: &[f32]) -> Result<Vec<f32>, BackendError> {
+        let started = std::time::Instant::now();
+        while !self.flag.load(std::sync::atomic::Ordering::SeqCst) {
+            if started.elapsed() > std::time::Duration::from_secs(10) {
+                return Err("the flag was never raised".into());
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        self.inner.segment(window)
+    }
+
+    fn embed(&mut self, window: &[f32], weights: &[f32]) -> Result<Option<Vec<f32>>, BackendError> {
+        self.inner.embed(window, weights)
+    }
+}
+
+/// The call runs on a blocking thread, not on the executor: on a
+/// current-thread runtime a sibling task gets to run while the backend
+/// waits for it, and the backend sees the flag the sibling raises. Run
+/// inline, the sibling would never be polled and the wait would time out.
+#[tokio::test]
+async fn a_call_runs_off_the_executor_so_sibling_tasks_proceed() {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use steno_core::Diarizer;
+
+    let flag = Arc::new(AtomicBool::new(false));
+    let backend = WaitingBackend {
+        inner: FakeBackend::new(),
+        flag: Arc::clone(&flag),
+    };
+    let diarizer = ModelDiarizer::with_backend(DiarizerConfig::default(), Box::new(backend));
+    let raiser = tokio::spawn(async move {
+        tokio::task::yield_now().await;
+        flag.store(true, Ordering::SeqCst);
+    });
+    let result = diarizer
+        .diarize(&audio(&[(2.0, range(0.0, 20.0))], 25.0))
+        .await
+        .unwrap();
+    raiser.await.unwrap();
+    assert_eq!(result.clusters.len(), 1);
+}
+
+/// A backend that panics on its first segmentation call and works from
+/// the second.
+struct PanickingBackend {
+    inner: FakeBackend,
+    panicked: bool,
+}
+
+impl TensorBackend for PanickingBackend {
+    fn geometry(&self) -> &SegmentationGeometry {
+        self.inner.geometry()
+    }
+
+    fn segment(&mut self, window: &[f32]) -> Result<Vec<f32>, BackendError> {
+        if !self.panicked {
+            self.panicked = true;
+            panic!("the backend gave up on its first window");
+        }
+        self.inner.segment(window)
+    }
+
+    fn embed(&mut self, window: &[f32], weights: &[f32]) -> Result<Option<Vec<f32>>, BackendError> {
+        self.inner.embed(window, weights)
+    }
+}
+
+/// A panic inside a call is the call's error, not the process's end, and
+/// the poisoned lock is reused: the next call over the same diarizer
+/// returns a result.
+#[tokio::test]
+async fn a_panic_in_the_backend_is_an_error_and_the_next_call_works() {
+    use steno_core::Diarizer;
+
+    let backend = PanickingBackend {
+        inner: FakeBackend::new(),
+        panicked: false,
+    };
+    let diarizer = ModelDiarizer::with_backend(DiarizerConfig::default(), Box::new(backend));
+    let buffer = audio(&[(2.0, range(0.0, 20.0))], 25.0);
+    let error = diarizer.diarize(&buffer).await.unwrap_err();
+    assert!(
+        error.to_string().contains("gave up"),
+        "the panic message travels with the error: {error}"
+    );
+    let result = diarizer.diarize(&buffer).await.unwrap();
+    assert_eq!(result.clusters.len(), 1);
+}
