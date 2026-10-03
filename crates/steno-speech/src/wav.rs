@@ -1,8 +1,11 @@
 //! The crate's one WAV reader: 16 kHz PCM-16, channel 0 of a
 //! multi-channel file, which is what the FLEURS clips, the calibration
-//! corpus and the Swift writer's sidecar files are. Promoted from the
-//! model-gated tests so the `transcribe` example, the FLEURS gate and the
-//! sidecar's parity test read audio the same way.
+//! corpus and the Swift writer's per-lane 16 kHz files (`<lane>.wav`) are.
+//! Promoted from the model-gated tests so the `transcribe` example, the
+//! FLEURS gate and the speech sidecar's parity test read audio the same
+//! way.
+//! Swift: `WAVAudioDecoder` in `Sources/StenoCore/Audio/WAVAudioDecoder.swift`,
+//! which also reads 32-bit float.
 
 use std::path::Path;
 
@@ -19,7 +22,7 @@ pub fn read_pcm16(path: &Path) -> Result<Vec<f32>, SpeechError> {
 }
 
 /// [`read_pcm16`] over bytes in memory.
-pub fn decode_pcm16(bytes: &[u8]) -> Result<Vec<f32>, String> {
+fn decode_pcm16(bytes: &[u8]) -> Result<Vec<f32>, String> {
     if bytes.len() < 12 || &bytes[0..4] != b"RIFF" || &bytes[8..12] != b"WAVE" {
         return Err("not a RIFF WAVE file".to_owned());
     }

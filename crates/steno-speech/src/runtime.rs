@@ -8,6 +8,7 @@
 //! Neural Engine path fails. The in-process [`OnnxSpeechEngine`](crate::OnnxSpeechEngine)
 //! is what the sidecar hosts and what the example and the FLEURS test
 //! drive; the app never runs it on its own thread.
+//! Swift: none; the Mac app runs `FluidAudio` in-process only.
 
 use std::path::PathBuf;
 
@@ -46,9 +47,10 @@ impl SpeechSettings {
         self.runtime_on(cfg!(target_os = "macos"))
     }
 
-    /// The runtime on a Mac (`macos`) or elsewhere.
+    /// The runtime on a Mac (`macos`) or elsewhere; [`Self::runtime`]
+    /// for any platform, so the tests can check both.
     #[must_use]
-    pub fn runtime_on(&self, macos: bool) -> SpeechRuntime {
+    fn runtime_on(&self, macos: bool) -> SpeechRuntime {
         if macos && !self.onnx_sidecar_on_mac {
             SpeechRuntime::CoreMlInProcess
         } else {
@@ -90,12 +92,12 @@ mod tests {
     fn settings_round_trip_in_camel_case_and_default_when_absent() {
         let settings = SpeechSettings {
             onnx_sidecar_on_mac: true,
-            models_mirror: Some("http://atlas:8000/models".to_owned()),
+            models_mirror: Some("http://mirror.example:8000/models".to_owned()),
         };
         let json = steno_core::json::to_column_string(&settings).unwrap();
         assert_eq!(
             json,
-            r#"{"modelsMirror":"http://atlas:8000/models","onnxSidecarOnMac":true}"#
+            r#"{"modelsMirror":"http://mirror.example:8000/models","onnxSidecarOnMac":true}"#
         );
         assert_eq!(
             serde_json::from_str::<SpeechSettings>(&json).unwrap(),
@@ -107,7 +109,7 @@ mod tests {
         );
         assert_eq!(
             settings.model_store("/models").mirror(),
-            Some("http://atlas:8000/models")
+            Some("http://mirror.example:8000/models")
         );
         assert_eq!(SpeechSettings::default().model_store("/m").mirror(), None);
     }

@@ -7,6 +7,8 @@
 //! [`SpeechError::Sidecar`], and the next call starts a new child and
 //! loads the models again. Nothing here can take the app down with the
 //! child.
+//!
+//! Swift: none; the Mac app runs `FluidAudio` in-process only.
 
 use std::collections::{BTreeSet, VecDeque};
 use std::ffi::OsString;
@@ -47,7 +49,7 @@ pub struct SidecarConfig {
     /// The child is killed once its resident set passes this many bytes.
     /// The fp32 export works in 2 to 3 GB; a 2 h recording adds about
     /// 0.5 GB of samples on each side of the pipe.
-    pub memory_ceiling: u64,
+    pub memory_ceiling_bytes: u64,
     /// How often the child reports its resident set.
     pub heartbeat: Duration,
     /// From spawn to [`Reply::Ready`].
@@ -59,8 +61,8 @@ pub struct SidecarConfig {
     /// the audio's duration.
     pub transcribe_timeout_floor: Duration,
     /// Wall-clock seconds allowed per second of audio; the CPU path ran
-    /// at 18 times real time on atlas (`RTFx` 18), so 1.0 leaves a slow
-    /// laptop a wide margin.
+    /// at 18 times real time on a Ryzen 7 7700 desktop (`RTFx` 18), so 1.0
+    /// leaves a slow laptop a wide margin.
     pub transcribe_timeout_ratio: f64,
     /// For [`Request::Health`] and the wait for [`Reply::Bye`].
     pub control_timeout: Duration,
@@ -74,7 +76,7 @@ impl SidecarConfig {
             program: program.into(),
             args: Vec::new(),
             options: OnnxOptions::default(),
-            memory_ceiling: 6 << 30,
+            memory_ceiling_bytes: 6 << 30,
             heartbeat: Duration::from_millis(200),
             startup_timeout: Duration::from_secs(10),
             load_timeout: Duration::from_secs(300),
@@ -85,7 +87,8 @@ impl SidecarConfig {
     }
 
     /// The binary beside the running executable, where the installers put
-    /// it (Tauri's `externalBin`, WP8).
+    /// it (Tauri's `externalBin`, WP8 of
+    /// `.plans/2026-10-02-rust-core-and-tauri-shell.md`).
     pub fn beside_current_exe() -> std::io::Result<Self> {
         let exe = std::env::current_exe()?;
         Ok(Self::new(exe.with_file_name(SIDECAR_BINARY)))
@@ -102,8 +105,11 @@ impl SidecarConfig {
 /// What [`SidecarSpeechEngine::health`] reports.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SidecarHealth {
+    /// The child's process id.
     pub pid: u32,
+    /// Its resident set, 0 where it cannot be read.
     pub rss_bytes: u64,
+    /// Whether its models are loaded.
     pub loaded: bool,
 }
 
@@ -174,13 +180,13 @@ impl SidecarProcess {
         else {
             let _ = child.kill();
             let _ = child.wait();
-            return Err(SidecarError::Protocol(
-                "the child's pipes were not opened".to_owned(),
-            ));
+            return Err(SidecarError::Pipe(std::io::Error::other(
+                "the child's pipes were not opened",
+            )));
         };
         let (sender, events) = mpsc::channel();
         let replies = sender.clone();
-        let ceiling = config.memory_ceiling;
+        let ceiling = config.memory_ceiling_bytes;
         std::thread::Builder::new()
             .name(format!("sidecar-{pid}-stdout"))
             .spawn(move || {
@@ -453,17 +459,21 @@ impl Shared {
                 process.loaded = true;
                 Ok(())
             }
-            Err(error) => Err(self.stop(slot, error).into()),
+            Err(error) => Err(self.kill_unless_remote(slot, error).into()),
         }
     }
 
-    /// Drops the child unless `error` came from the child itself, which
+    /// Kills the child unless `error` came from the child itself, which
     /// then still runs and answers; returns the error.
-    fn stop(&self, slot: &mut Option<SidecarProcess>, error: SidecarError) -> SidecarError {
+    fn kill_unless_remote(
+        &self,
+        slot: &mut Option<SidecarProcess>,
+        error: SidecarError,
+    ) -> SidecarError {
         if !matches!(error, SidecarError::Remote(_)) {
             if let Some(mut process) = slot.take() {
                 let status = process.kill();
-                tracing::warn!(pid = process.pid, ?status, %error, "speech sidecar stopped");
+                tracing::warn!(pid = process.pid, ?status, %error, "speech sidecar killed");
             }
             self.pid.store(0, Ordering::SeqCst);
         }
@@ -481,6 +491,25 @@ impl Shared {
 /// replaced on the next call. [`SpeechEngine::release`] stops the child
 /// and frees its working set; WP6b's pipeline is to call it after each
 /// job, and until then nothing frees it.
+///
+/// ```no_run
+/// use steno_core::{AudioBuffer16k, SpeechEngine};
+/// use steno_speech::{ModelStore, SidecarConfig, SidecarSpeechEngine};
+///
+/// # async fn run() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+/// let engine = SidecarSpeechEngine::new(
+///     ModelStore::from_environment(),
+///     SidecarConfig::beside_current_exe()?,
+/// );
+/// // Installs the models here, then starts the child and loads them there.
+/// engine.prepare().await?;
+/// let segments = engine.transcribe(&AudioBuffer16k::silence(1.0), None).await?;
+/// assert!(segments.is_empty());
+/// // After the job: the child exits and its 2.2 GB go back.
+/// engine.release().await?;
+/// # Ok(())
+/// # }
+/// ```
 pub struct SidecarSpeechEngine {
     shared: Arc<Shared>,
     languages: BTreeSet<LanguageTag>,
@@ -497,8 +526,9 @@ impl SidecarSpeechEngine {
         )
     }
 
-    /// Installs `assets` instead of Silero and the export before the
-    /// child starts; the tests pass none, as their fake child needs none.
+    /// For tests: installs `assets` instead of Silero and the export
+    /// before the child starts. The tests pass none, as their fake child
+    /// needs none.
     #[must_use]
     pub fn with_assets(store: ModelStore, config: SidecarConfig, assets: Vec<ModelAsset>) -> Self {
         SidecarSpeechEngine {
@@ -517,6 +547,7 @@ impl SidecarSpeechEngine {
         }
     }
 
+    /// How the engine starts and limits the child.
     #[must_use]
     pub fn config(&self) -> &SidecarConfig {
         &self.shared.config
@@ -529,7 +560,7 @@ impl SidecarSpeechEngine {
         Some(self.shared.pid.load(Ordering::SeqCst)).filter(|&pid| pid != 0)
     }
 
-    /// How many children this engine has started.
+    /// For tests: how many children this engine has started.
     #[must_use]
     pub fn spawns(&self) -> u64 {
         self.shared.spawns.load(Ordering::SeqCst)
@@ -537,7 +568,7 @@ impl SidecarSpeechEngine {
 
     /// Asks the running child for its pid, resident set and whether its
     /// models are loaded; `None` when no child runs. A child that does not
-    /// answer is stopped.
+    /// answer is killed.
     pub async fn health(&self) -> BoundaryResult<Option<SidecarHealth>> {
         let shared = Arc::clone(&self.shared);
         Ok(blocking(move || {
@@ -566,7 +597,7 @@ impl SidecarSpeechEngine {
                     },
                 )
                 .map(Some)
-                .map_err(|error| shared.stop(&mut slot, error))
+                .map_err(|error| shared.kill_unless_remote(&mut slot, error))
         })
         .await??)
     }
@@ -650,7 +681,7 @@ impl SpeechEngine for SidecarSpeechEngine {
                         other => Err(other),
                     },
                 )
-                .map_err(|error| SpeechError::from(shared.stop(&mut slot, error)))
+                .map_err(|error| SpeechError::from(shared.kill_unless_remote(&mut slot, error)))
         })
         .await??;
         Ok(segments)

@@ -1,8 +1,15 @@
-//! `steno-speech-sidecar`, the child process that runs Parakeet on ONNX
-//! Runtime for the app (speech-stack decision 5, invariant 4 of
-//! `.plans/2026-10-02-rust-core-and-tauri-shell.md`). The app drives it
-//! through `steno_speech::SidecarSpeechEngine`; the wire format is
-//! `steno_speech::sidecar::protocol`.
+//! `steno-speech-sidecar`, the speech sidecar: the child process that runs
+//! Parakeet on ONNX Runtime for the app (decision 5 of
+//! `.plans/2026-10-01-cross-platform-speech-stack.md`, invariant 4 of
+//! `.plans/2026-10-02-rust-core-and-tauri-shell.md`). The app, its parent,
+//! drives it through `steno_speech::SidecarSpeechEngine`; the wire format
+//! is `steno_speech::sidecar::protocol`.
+//!
+//! - [`serve`]: the child's whole life, from the ready message to exit.
+//! - [`Options::parse`]: the command line the parent passes.
+//! - [`Fault`]: what the fake engine does wrong for the isolation tests.
+//!
+//! Swift: none; the Mac app runs `FluidAudio` in-process only.
 //!
 //! # Platform policy
 //!
@@ -10,13 +17,13 @@
 //! never loads ONNX Runtime itself. On macOS the in-process `CoreML` engine
 //! is the default and this sidecar is a fallback behind the speech setting
 //! `onnxSidecarOnMac` (`steno_speech::SpeechSettings`). The reason is the
-//! same everywhere: ONNX Runtime can abort through the FFI on a C++
-//! exception and works in 2 to 3 GB, and in a child an abort costs one
-//! request and the memory goes back when the child exits.
+//! same everywhere: an uncaught C++ exception in ONNX Runtime ends the
+//! process, and ONNX Runtime works in 2 to 3 GB; in a child such an end
+//! costs one request, and the memory goes back when the child exits.
 //!
 //! # What the child does
 //!
-//! It loads the models once from the store root the app names and
+//! It loads the models once from the store root the parent names and
 //! installed (it never downloads and opens no connection), reads framed
 //! requests from stdin with the audio as a binary payload, answers on
 //! stdout, and reports its resident set from a heartbeat thread so the
@@ -54,7 +61,8 @@ steno_core::string_enum! {
     /// What the next transcription of the fake engine does instead of
     /// answering.
     pub enum Fault {
-        /// `std::process::abort`, as a C++ exception through the FFI ends.
+        /// `std::process::abort`, the way an uncaught C++ exception in ONNX
+        /// Runtime ends the process.
         Abort = "abort",
         /// A line of stderr that is not UTF-8, then a Rust panic, which
         /// ends the process with status 101.
@@ -87,9 +95,13 @@ impl Fault {
 /// The command line.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Options {
+    /// `--fake-engine`: no models, an answer that describes the audio.
     pub fake_engine: bool,
+    /// `--fault <kind>`, with the fake engine only.
     pub fault: Option<Fault>,
+    /// `--fault-once <path>`: only the child that creates `path` faults.
     pub fault_once: Option<PathBuf>,
+    /// `--heartbeat-ms <n>`: how often the resident set is reported.
     pub heartbeat: Duration,
 }
 

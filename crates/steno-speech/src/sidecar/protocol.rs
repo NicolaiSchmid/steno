@@ -1,6 +1,6 @@
-//! The wire format between the app and `steno-speech-sidecar`, over the
-//! child's stdin and stdout and nothing else: no socket, no file, so the
-//! audio stays inside the two processes.
+//! The wire format between the parent (the app) and `steno-speech-sidecar`,
+//! over the child's stdin and stdout and nothing else: no socket, no file,
+//! so the audio stays inside the two processes.
 //!
 //! A message is one frame: the length of its JSON header as a
 //! little-endian `u32`, then the header, then the payload the header
@@ -14,6 +14,8 @@
 //! requests, and one reply per request with the request's `id`. It exits
 //! after [`Request::Shutdown`] and when its stdin or stdout closes, so a
 //! dead parent leaves no child behind.
+//!
+//! Swift: none; the Mac app runs `FluidAudio` in-process only.
 
 use std::io::{self, Read, Write};
 use std::path::PathBuf;
@@ -37,7 +39,7 @@ pub const MAX_HEADER_BYTES: u32 = 64 << 20;
 /// is what limits a real request.
 pub const MAX_SAMPLES: u64 = 16_000 * 60 * 60 * 24;
 
-/// What the app asks of the child.
+/// What the parent asks of the child.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(
     tag = "type",
@@ -46,7 +48,7 @@ pub const MAX_SAMPLES: u64 = 16_000 * 60 * 60 * 24;
 )]
 pub enum Request {
     /// Load the models from `modelsRoot`, a [`ModelStore`](crate::ModelStore)
-    /// root the app has installed them into; the child never downloads.
+    /// root the parent has installed them into; the child never downloads.
     Load {
         id: u64,
         models_root: PathBuf,
@@ -67,6 +69,7 @@ pub enum Request {
 }
 
 impl Request {
+    /// The id its reply carries.
     #[must_use]
     pub fn id(&self) -> u64 {
         match self {
@@ -96,35 +99,24 @@ impl Request {
 )]
 pub enum Reply {
     /// Sent once at start.
-    Ready {
-        protocol: u32,
-        pid: u32,
-    },
+    Ready { protocol: u32, pid: u32 },
     /// The heartbeat: the child's resident set, for the parent's ceiling.
-    Memory {
-        rss_bytes: u64,
-    },
-    Loaded {
-        id: u64,
-    },
+    Memory { rss_bytes: u64 },
+    /// The models are loaded.
+    Loaded { id: u64 },
+    /// The answer to [`Request::Health`]; `loaded` once a load succeeded.
     Health {
         id: u64,
         pid: u32,
         rss_bytes: u64,
         loaded: bool,
     },
-    Transcript {
-        id: u64,
-        segments: Vec<RawSegment>,
-    },
+    /// The answer to [`Request::Transcribe`].
+    Transcript { id: u64, segments: Vec<RawSegment> },
     /// The request failed inside the child; the child keeps running.
-    Failed {
-        id: u64,
-        error: String,
-    },
-    Bye {
-        id: u64,
-    },
+    Failed { id: u64, error: String },
+    /// The answer to [`Request::Shutdown`], the child's last message.
+    Bye { id: u64 },
 }
 
 impl Reply {
@@ -145,6 +137,7 @@ impl Reply {
 /// A frame that could not be read.
 #[derive(Debug, Error)]
 pub enum FrameError {
+    /// The stream failed.
     #[error(transparent)]
     Io(#[from] io::Error),
     /// The stream ended inside a frame.
@@ -158,6 +151,7 @@ pub enum FrameError {
     /// object: binary garbage that only looked like a length prefix.
     #[error("not a protocol message: the header starts with byte {0:#04x}")]
     NotAHeader(u8),
+    /// A JSON header that is no message of the protocol.
     #[error("not a protocol message: {0}")]
     Json(#[from] serde_json::Error),
 }

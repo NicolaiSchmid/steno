@@ -30,7 +30,8 @@
 //! - [`runtime`]: [`SpeechSettings`] and [`SpeechRuntime`], which engine
 //!   runs on which platform.
 //! - [`wav`]: the 16 kHz PCM-16 reader of the example and the tests.
-//! - [`error`]: [`SpeechError`], the one error type.
+//! - [`error`]: [`SpeechError`], the one error type, and [`SidecarError`],
+//!   its cause when the speech sidecar fails.
 //!
 //! # Models
 //!
@@ -129,8 +130,8 @@ pub use error::{SidecarError, SpeechError};
 pub use features::MelExtractor;
 pub use language::{LanguageRecognizer, LanguageTagger, StopwordRecognizer, WhatlangRecognizer};
 pub use model_store::{
-    DownloadProgress, GITHUB_RELEASE_ASSET_LIMIT, ModelAsset, ModelFile, ModelSource, ModelStore,
-    PARAKEET_V3_FP32_REVISION, STENO_MODELS_REPO,
+    DownloadProgress, ModelAsset, ModelFile, ModelSource, ModelStore, PARAKEET_V3_FP32_REVISION,
+    STENO_MODELS_REPO,
 };
 pub use onnx::{OnnxBackend, OnnxOptions};
 pub use pipeline::{PipelineConfig, RecoveryConfig, Transcriber, Transcript};

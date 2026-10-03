@@ -3,6 +3,9 @@
 //! against it, downloads what is missing into a partial file of its own
 //! while hashing, and renames only a verified, synced file into place. Models are
 //! never committed (`.gitignore` covers `*.onnx`).
+//! Swift: `Sources/StenoSpeech/Models/ModelAsset.swift`,
+//! `ModelStore.swift` and `ModelDownloading.swift`, whose downloads go
+//! through `FluidAudio` and `WhisperKit` instead.
 //!
 //! A store's root holds one folder per asset id, `<root>/<asset id>/`. The
 //! app's root comes from `steno-services`; [`ModelStore::from_environment`]
@@ -48,9 +51,6 @@
 //! own, `<name>.partial.<pid>.<call>`, which nothing resumes and which is
 //! deleted when the call ends. Once a file is installed, by whatever path,
 //! the next call deletes its `<name>.partial`.
-//! Swift: `Sources/StenoSpeech/Models/ModelAsset.swift`,
-//! `ModelStore.swift` and `ModelDownloading.swift`, whose downloads go
-//! through `FluidAudio` and `WhisperKit` instead.
 
 use std::fs::{self, File, TryLockError};
 use std::io::{Read, Seek, SeekFrom, Write};
@@ -118,9 +118,6 @@ pub const STENO_MODELS_REPO: &str = "NicolaiSchmid/steno-models";
 /// `scripts/upload-models.sh`; `None` until it is uploaded, which leaves the
 /// export without a source.
 pub const PARAKEET_V3_FP32_REVISION: Option<&str> = None;
-
-/// The largest file a GitHub release takes.
-pub const GITHUB_RELEASE_ASSET_LIMIT: u64 = 2 * 1024 * 1024 * 1024;
 
 /// One downloadable model bundle; the settings pane shows the display
 /// name, the total size and the licence.
@@ -1451,6 +1448,9 @@ mod tests {
         expected.sort();
         assert_eq!(left, expected);
     }
+
+    /// The largest file a GitHub release takes.
+    const GITHUB_RELEASE_ASSET_LIMIT: u64 = 2 * 1024 * 1024 * 1024;
 
     #[test]
     fn hosts_fit_their_limits_and_hugging_face_urls_pin_a_commit() {

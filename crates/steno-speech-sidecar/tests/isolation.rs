@@ -1,10 +1,13 @@
 //! `SidecarSpeechEngine` against the real `steno-speech-sidecar` binary:
 //! the protocol round trip, health and graceful shutdown, and every way
-//! the child can fail (killed mid-request, aborting as a C++ exception
-//! does, panicking, exiting, hanging past the deadline, allocating past
-//! the memory ceiling, writing garbage, reporting an error). Each failure
-//! must come back as an error from the engine, never take the test
-//! process down, and leave an engine that works on the next call.
+//! the child can fail (killed mid-request, aborting the way an uncaught
+//! C++ exception does, panicking, exiting, hanging past the deadline,
+//! allocating past the memory ceiling, writing garbage, reporting an
+//! error, staying silent at start, speaking another protocol version).
+//! Each failure must come back as an error from the engine, never take the
+//! test process down, and leave an engine that works on the next call.
+//! Driven by hand, without the client, a child must exit when its parent's
+//! pipes close, idle or busy.
 //!
 //! The fake engine needs no models; the last test, ignored by default,
 //! runs the real one when `STENO_MODELS_DIR` holds them
@@ -42,7 +45,7 @@ fn config(args: &[&str]) -> SidecarConfig {
     config.heartbeat = Duration::from_millis(20);
     config.transcribe_timeout_floor = Duration::from_secs(30);
     config.transcribe_timeout_ratio = 0.0;
-    config.memory_ceiling = 1 << 30;
+    config.memory_ceiling_bytes = 1 << 30;
     config
 }
 
@@ -273,7 +276,7 @@ async fn a_child_that_hangs_is_killed_at_the_deadline() {
 #[tokio::test(flavor = "multi_thread")]
 async fn a_child_over_the_memory_ceiling_is_killed() {
     const CEILING: u64 = 256 << 20;
-    let (engine, _dir) = engine_with_fault("allocate", |c| c.memory_ceiling = CEILING);
+    let (engine, _dir) = engine_with_fault("allocate", |c| c.memory_ceiling_bytes = CEILING);
     assert_recovers(&engine, |error| {
         let SidecarError::MemoryCeiling {
             rss_bytes,
@@ -499,7 +502,7 @@ async fn the_real_models_load_and_transcribe_in_the_sidecar_when_installed() {
         return;
     }
     let mut config = SidecarConfig::new(BINARY);
-    config.memory_ceiling = 8 << 30;
+    config.memory_ceiling_bytes = 8 << 30;
     let engine = SidecarSpeechEngine::new(store.clone(), config);
     engine.prepare().await.unwrap();
     let health = engine.health().await.unwrap().unwrap();

@@ -186,9 +186,9 @@ impl SpeechEngine for OnnxSpeechEngine {
         }
         self.prepare().await?;
         let loaded = Arc::clone(&self.loaded);
-        // One copy of the recording per call; the sidecar boundary of
-        // speech-stack decision 5 will copy again, and this is the place to
-        // remove both.
+        // One copy of the recording per call, for the blocking thread; the
+        // speech sidecar copies again into its payload
+        // (`sidecar::protocol::encode_samples`).
         let samples = audio.samples.clone();
         let hint = hint.cloned();
         let transcript = blocking(move || {
