@@ -4,7 +4,7 @@ The Tauri 2 shell for macOS, Linux and Windows: three windows and two
 floating panels around the web UI in `apps/macos/web`, a tray icon, and the
 `bridge_call` command the web app's Tauri transport talks to. WP3 and WP8 of
 `.plans/2026-10-02-rust-core-and-tauri-shell.md`. The shell holds no logic;
-until WP6 wires the real host, the default `fixture-host` cargo feature
+until WP6b wires the real host, the default `fixture-host` cargo feature
 answers the bridge from the recorded fixtures in
 `apps/macos/web/fixtures/bridge/`, so the whole UI runs on every platform
 before any pipeline exists. Paths below are from the repository root.
@@ -20,8 +20,8 @@ Everything the Swift app does outside its three windows, per OS:
 | Launch at login (`autostart.rs`) | Launch Agent | `~/.config/autostart` entry | Run registry key |
 | Updates (`updater.rs`) | signed manifest per lane | same | same |
 | Secrets (`secrets.rs`) | login Keychain | Secret Service over D-Bus | Credential Manager |
-| Permissions (`permissions.rs`) | microphone TCC status and prompt; system audio and calendar deferred to the host's probes | granted (the portal asks at capture time) | granted (WASAPI asks nothing) |
-| Deep links (`deep_links.rs`) | `steno:` through `Info.plist` | `.desktop` MIME type (debug builds register at start) | registry (debug builds register at start) |
+| Permissions (`permissions.rs`) | microphone TCC status and prompt; system audio and calendar deferred to the host's probes | unknown (nothing to query before capture; the portal asks when the stream opens) | unknown (the privacy switch decides at capture time) |
+| Deep links (`deep_links.rs`) | `steno:` through `Info.plist` | the desktop entry in `linux/` (`Exec=… %u`, the `x-scheme-handler/steno` MIME type; debug builds register at start) | registry (debug builds register at start) |
 | Single instance | Unix socket | session bus name (skipped without a session bus, as in the headless smoke) | named mutex |
 | Dialogs (`dialogs.rs`) | `NSOpenPanel` sheet | GTK file chooser | common item dialog |
 
@@ -32,20 +32,31 @@ Recorder commands are bridge methods sent through the main window
 (`actions.rs`), so the shell has no recorder logic of its own; it follows
 the recorder off the `recording` snapshots the host publishes to that
 window (`recording.rs`). The queue and recent rows of the Swift popover are
-the main window's.
+the main window's. Closing the main window hides it while the tray stands,
+as the Swift window closes behind the menu bar item, so the tray and the
+panels always have it; on a desktop where no tray could be built (Linux
+without an indicator host) the window closes for real and the process
+ends with it, since nothing would be left to reach the app from. On macOS
+the menu bar carries the shell's own menu (`menu.rs`): Quit goes through
+the run loop, the Edit menu gives the pages their copy and paste shortcuts.
 
 The panels are the web app's `#/panel/bubble` and `#/panel/prompt` routes
 (`apps/macos/web/src/windows/panels/`), two webviews that hang from one
 anchor (top centre of the frame, 8 pt under the main screen's top edge by
 default, saved to `panel-anchor.json` in the app config directory when the
-user drags one). One rule decides what shows: a busy recorder wins, else a
-pending detection prompt, else nothing. The page measures its pill and
-reports the size through the `panel_call` command; the shell sizes the
-window from it. The prompt's X and that size report are the only two
-things `panel_call` carries; everything else the panels do goes through the
-bridge (`recording.stop`, `recording.keepGoing`, `recording.start`,
-`window.open`). The host raises and clears the prompt through
-`panels::set_prompt` (WP6b wires the detection controller).
+user drags one; the geometry is `panel_geometry.rs`). One rule decides
+what shows: a busy recorder wins, else a pending detection prompt, else
+nothing. Each window is created once and then hidden and shown; the
+prompt's is navigated to each new request, numbered so the page remounts
+and the countdown restarts. The page measures its pill and reports the
+size through the `panel_call` command; the shell rounds it up to whole
+points, clamps it to the screen's work area and sizes the window from it
+(a report that is not a size is `invalidParams`). The prompt's X and that
+size report are the only two things `panel_call` carries; everything else
+the panels do goes through the bridge (`recording.stop`,
+`recording.keepGoing`, `recording.start`, `window.open`). The host raises
+and clears the prompt through `panels::set_prompt` (WP6b wires the
+detection controller).
 
 The bridge methods the shell answers itself, beside `window.*` and
 `system.openURL`: `system.openSystemSettings` (the pane per OS),
@@ -60,8 +71,11 @@ replies `{}` and the host hears nothing.
 Deep links: the Swift Mac app registers no scheme (`steno://pair/…` is the
 iPhone's, the link the pairing QR code doubles as), so the scheme is new
 here. `steno://meeting/<uuid>` opens the main window on the meeting,
-`steno://settings[/<section>]` opens Settings on the section; a pairing
-link is logged and ignored.
+`steno://settings[/<section>]` opens Settings on the section; scheme and
+host read in any case, the section as the contract spells it; a pairing
+link is logged and ignored. A link that reaches a window before its page
+has mounted (a cold launch) waits in `windows::Pages` and is published on
+the page's `page.ready`.
 
 ## Run
 
@@ -77,7 +91,8 @@ cargo build -p steno-desktop && target/debug/steno-desktop
 
 Every build without the `custom-protocol` feature loads `devUrl` (the Vite
 dev server on 5173), whatever the profile; that is Tauri's dev build. Set
-`STENO_SMOKE_SECONDS` to open all three windows at once (see Smoke).
+`STENO_SMOKE_SECONDS` to open all three windows and both panels at once
+(see Smoke).
 
 ## Build
 
@@ -99,7 +114,18 @@ they show the whole UI with synthetic data on every platform.
 
 `tauri.conf.json` bundles `.app` and `.dmg` on macOS (minimum 15.0,
 `Entitlements.plist` and `Info.plist` beside the config), `.deb` and
-`.AppImage` on Linux, `.msi` and NSIS on Windows; the icons in `icons/`
+`.AppImage` on Linux, `.msi` and NSIS on Windows. On Linux the product
+name is `steno-desktop` (`tauri.linux.conf.json`), so the `.deb` is the
+`steno-desktop` package and leaves `steno` to the CLI; the binary keeps
+its name and the desktop entry (`linux/steno-desktop.desktop`, a template
+the bundler fills for the `.deb` and the AppImage) still reads Steno,
+passes a `steno:` link to the binary (`%u`) and claims the scheme. The
+`.deb` depends on `libayatana-appindicator3-1` explicitly: the Tauri CLI
+adds the tray's library only when it sees the `tray-icon` feature on a
+crate-local `tauri` dependency, and ours is inherited from the workspace.
+For the same reason the AppImage does not bundle that library; a host
+without it runs the shell without a tray, and closing the main window
+then quits (see above). The icons in `icons/`
 come from `cargo tauri icon` over the Swift app icon
 (`apps/macos/Steno/Resources/Assets.xcassets/AppIcon.appiconset/icon_512x512@2x.png`),
 the tray's template mark in `icons/tray/` is drawn by hand. The identifier
@@ -131,9 +157,9 @@ through; that page is only what the window shows when the dev URL is
 dropped as above or the feature is on. A plain debug build loads
 `localhost:5173` either way.
 
-Panic messages in a release binary carry the build host's source paths
-until Cargo's `trim-paths` stabilises; WP8's release job can set
-`RUSTFLAGS=--remap-path-prefix` meanwhile.
+Panic messages in a release binary would carry the build host's source
+paths until Cargo's `trim-paths` stabilises; the release workflow sets
+`RUSTFLAGS=--remap-path-prefix` so they read `steno/…` instead.
 
 ## Test
 
@@ -142,11 +168,15 @@ and the mock transport, the window specs and routes, the typed `window.open`
 and `window.close` params and who may close what, the URL and navigation
 policies, the deep-link snapshots and the smoke's switches and verdicts,
 and every WP8 module's rules: the tray's ids, labels and tooltip per
-recorder state, the panels' anchor (default, drag, screen loss, JSON),
-the one content rule, the prompt query, the login item states, the update
-lanes, the keyring store over the crate's in-memory mock, the permission
-kinds and panes per OS, the `steno:` link grammar, and the folder
-choosers' replies. `cargo test -p steno-desktop --no-default-features` the
+recorder state, the panels' geometry (the anchor's default, drag, screen
+loss and JSON, the probe before measuring, which size reports are
+accepted and how they are clamped), the one content rule, the prompt
+query and its numbering, the window requests a page is owed before it
+mounts, when the main window hides on close and when the process ends,
+the login item states, the update lanes, the keyring store over a
+recording mock (which pins the service and account order), the
+permission panes per OS, the `steno:` link grammar and its case rules,
+the Linux desktop entry, and the folder choosers' replies. `cargo test -p steno-desktop --no-default-features` the
 same without the fixture host. In the web app, `tauri-transport.test.ts`
 covers the page's half of the wire and `src/windows/panels/*.test.tsx` the
 two panels.
@@ -159,8 +189,8 @@ app), waits `n` seconds, hides the panels again and reports:
 
 | Exit | When |
 |---|---|
-| 0 | The main window sent `page.ready`, at least one snapshot reached it, the tray was built, and both panels were visible before the hide and hidden after it |
-| 1 | No `page.ready` from main; or `page.ready` but no snapshot: no bridge host is wired (a build with `--no-default-features` fails here until WP6, and the message says so); or no tray; or a panel that did not show or hide |
+| 0 | The main window sent `page.ready`, at least one snapshot reached it, the tray was built, and both panels were visible at the size their page reported before the hide and hidden after it |
+| 1 | No `page.ready` from main; or `page.ready` but no snapshot: no bridge host is wired (a build with `--no-default-features` fails here until WP6b, and the message says so); or no tray; or a panel that did not show, take its page's size, or hide |
 | 2 | At once, when `n` is not a positive number |
 
 `apps/desktop/scripts/smoke-linux.sh [binary] [seconds]` runs that under
@@ -215,13 +245,14 @@ Nothing beyond the Rust toolchain. WebView2 ships with Windows 11; the
 |---|---|
 | `apps/desktop/src-tauri/Cargo.toml` | Crate `steno-desktop`, binary `steno-desktop`; features `fixture-host` (default on) and `custom-protocol` (embeds the bundle, see Build). Dependency versions come from the workspace table in `Cargo.toml` |
 | `apps/desktop/src-tauri/tauri.conf.json` | `frontendDist` is the web app's `dist/`; no `version`, so Tauri takes the crate's; `beforeDevCommand` and `beforeBuildCommand` run `pnpm dev` and `pnpm build` with `cwd` `../../macos/web`: the CLI runs them from `src-tauri`, the directory holding this file, which is also where `frontendDist` (`../../macos/web/dist`) resolves from; `csp` lets the page load only its own scripts, styles, fonts and images, and `connect-src` only the IPC origins (`ipc:`, `http://ipc.localhost`), so nothing the page does reaches the network; `plugins` carries the `steno` scheme and the updater's public key and stable endpoint; `bundle` the six installer targets (see Bundles); no windows are declared, `windows.rs` and `panels.rs` create them |
+| `apps/desktop/src-tauri/tauri.linux.conf.json`, `linux/steno-desktop.desktop` | Merged on Linux: the `steno-desktop` product name for the package, and the desktop entry template (see Bundles) |
 | `apps/desktop/src-tauri/Info.plist`, `Entitlements.plist` | Merged into the macOS bundle: the TCC purpose strings and the Bonjour service, verbatim from `apps/macos/project.yml`; the audio-input and calendars entitlements |
 | `apps/desktop/src-tauri/build.rs`, `apps/desktop/src-tauri/placeholder/` | Points `frontendDist` at the placeholder page when the web `dist/` is missing, so a debug `cargo build` works on a bare checkout (a release build fails instead); then `tauri_build::build()` |
-| `apps/desktop/src-tauri/src/main.rs` | Wires the plugins (single instance first, autostart, deep link, dialog, opener, updater, `tauri-nspanel` on macOS), the managed state, the tray and the windows; keeps the process alive on every platform when the last window closes, as the Swift menu bar app does; a dragged panel's anchor and the Dock's reopen |
-| `apps/desktop/src-tauri/src/tray.rs`, `actions.rs`, `recording.rs` | The tray menu and icon, the actions behind its items, the recorder state the shell follows |
-| `apps/desktop/src-tauri/src/panels.rs` | The two floating panels, their anchor and the one content rule; the macOS `NSPanel` conversion |
+| `apps/desktop/src-tauri/src/main.rs` | Wires the plugins (single instance first, autostart, deep link, dialog, opener, updater, `tauri-nspanel` on macOS), the managed state, the one menu handler, the tray and the windows; hides the main window on close and keeps the process while a tray stands, ends it otherwise; a dragged panel's anchor, a destroyed window's page, and the Dock's reopen |
+| `apps/desktop/src-tauri/src/tray.rs`, `menu.rs`, `actions.rs`, `recording.rs` | The tray menu and icon, the macOS menu bar, the actions behind their items, the recorder state the shell follows |
+| `apps/desktop/src-tauri/src/panels.rs`, `panel_geometry.rs` | The two floating panels and the one content rule, the macOS `NSPanel` conversion; the anchor, frames and size validation as plain values |
 | `apps/desktop/src-tauri/src/autostart.rs`, `updater.rs`, `secrets.rs`, `permissions.rs`, `deep_links.rs`, `dialogs.rs` | One module per service (see What the shell owns); each is plain rules the tests cover over a plugin or OS call |
-| `apps/desktop/src-tauri/src/windows.rs` | The three windows with the Swift sizes: main 1120 by 720 (minimum 960 by 600) at `#/main`, Settings 960 by 640 (minimum 760 by 520) at `#/settings`, onboarding fixed 560 by 620 at `#/onboarding`. Main opens at start; the others on `window.open`, focused when already open. New windows from the page are denied |
+| `apps/desktop/src-tauri/src/windows.rs` | The three windows with the Swift sizes: main 1120 by 720 (minimum 960 by 600) at `#/main`, Settings 960 by 640 (minimum 760 by 520) at `#/settings`, onboarding fixed 560 by 620 at `#/onboarding`. Main opens at start; the others on `window.open`, focused when already open. New windows from the page are denied. `Pages` holds the requests a window is owed until its page mounts |
 | `apps/desktop/src-tauri/src/bridge.rs` | `bridge_call(method, params)` and the `steno:event` emitter, scoped to the calling window; a finished `onboarding` snapshot closes the onboarding window, a `recording` snapshot to main moves the tray and the panels. `window.open` (typed: one of the six sections, a UUID meeting id), `window.close` (the onboarding window, from itself), `system.openURL` (`https:` and `mailto:` only) and the WP8 methods listed above are the shell's; everything else goes to the host. `panel_call(action, params)` is the panels' own command |
 | `apps/desktop/src-tauri/src/host.rs`, `fixtures.rs` | The fixture host: the fixtures `index.json` lists, embedded with `include_str!`; every topic's snapshot on `page.ready`; replies as `mock-transport.ts` gives them (`speakers.options.reply`, `reply.confirm` and `reply.chosenPath` for the alerts and folder panels, `null` otherwise); a deep link as the `app` snapshot with the request set, then the clean one |
 | `apps/desktop/src-tauri/src/navigation.rs` | Navigation policy: the app origin and, in a dev build, the Vite dev server; everything else is cancelled |
@@ -232,20 +263,26 @@ Nothing beyond the Rust toolchain. WebView2 ships with Windows 11; the
 ## Not here yet
 
 Signing, notarisation, the GitHub release and the updater manifests are
-WP9; the release workflow stops at unsigned bundles. The host's half of the
-WP8 seams is WP6b: the detection controller raising the prompt
-(`panels::set_prompt`), the General snapshot reading `autostart::status`
-and `Updates::last`, the onboarding and Settings permission rows calling
-`permissions::state` and `request`, the folder choice arriving as
-`{ "path": … }`, the reveal methods calling `dialogs::reveal`, the LLM
-client reading `secrets::KeyringSecretStore` through
-`secrets::secret_blocking`. On macOS the system audio permission has no
-status API; the audio crate's probe (WP5) records it and until then it
-reads `unknown`. The panels are re-tuned on the Mac once they run there
-beside the Swift ones (the plan's risk list). Linux and Windows keep their
-native title bar; macOS gets the overlay title bar the Swift windows have.
-The page's traffic light inset is a design question for the other two
-platforms. On Linux, WebKitGTK leaks one
+WP9, as is `cargo deny`; the release workflow stops at unsigned bundles.
+The host's half of the WP8 seams is WP6b: the detection controller raising
+the prompt (`panels::set_prompt`), the General snapshot reading
+`autostart::status` and `Updates::last`, the onboarding and Settings
+permission rows calling `permissions::state` and `request`, the folder
+choice arriving as `{ "path": … }`, the reveal methods calling
+`dialogs::reveal`, the LLM client reading `secrets::KeyringSecretStore`
+through `secrets::secret_blocking`. The host may treat the main window as
+always present: a close hides it, so publishing to it never fails for want
+of a window. Launch at login is a Launch Agent, not `SMAppService`; WP9
+has to retire the Swift registration at cutover so the user does not get
+two login items (the plan's parity list). The macOS menu bar has no
+Record menu yet (`⌘⇧R` and Record In Person are the tray's and the
+sidebar's). On macOS the system audio permission has no status API; the
+audio crate's probe (WP5) records it and until then it reads `unknown`.
+The panels are re-tuned on the Mac once they run there beside the Swift
+ones (the plan's risk list). Linux and Windows keep their native title
+bar; macOS gets the overlay title bar the Swift windows have. The page's
+traffic light inset is a design question for the other two platforms. On
+Linux, WebKitGTK leaks one
 shared-memory file descriptor per destroyed webview that lived longer than
 about 250 ms (29 to 107 fds over 70 Settings open/close cycles; wry/WebKitGTK
 level, not the shell), so long sessions with many Settings opens should be
