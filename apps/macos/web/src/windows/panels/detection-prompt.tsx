@@ -7,7 +7,8 @@ import { CountdownHairline, PanelBar } from "./panel-bar";
 import { type PanelShell, panelShell, useReportSize } from "./panel-shell";
 
 /**
- * The detection prompt (`#/panel/prompt?app=<name>&seconds=<n>&raised=<serial>`): the Swift
+ * The detection prompt
+ * (`#/panel/prompt?app=<name>&seconds=<n>&raised=<serial>`): the Swift
  * `DetectionPromptView` in the pill language. "<App> opened the
  * microphone", one line under it, one primary Record button, an X, and the
  * draining hairline along the bottom. No number: nothing is at stake when
@@ -30,7 +31,7 @@ export interface PromptRequest {
 /** The request from the route's query; a missing name is "An app". */
 export function parsePromptRequest(params: URLSearchParams): PromptRequest {
 	const seconds = Number(params.get("seconds"));
-	const raised = Number(params.get("raised") ?? Number.NaN);
+	const raised = Number(params.get("raised"));
 	return {
 		appName: params.get("app")?.trim() || "An app",
 		seconds: Number.isFinite(seconds) && seconds > 0 ? seconds : 60,
