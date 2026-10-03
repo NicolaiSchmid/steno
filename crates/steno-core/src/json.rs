@@ -7,8 +7,7 @@
 //! The date and UUID text codecs ([`format_date`], [`parse_date`],
 //! [`uuid_string`], [`parse_uuid`] and the `with` modules [`iso_time`],
 //! [`iso_time_opt`], [`uuid_text`] and [`uuid_text_opt`]) are the one
-//! implementation for every Steno crate; `steno-bridge` reads and writes its
-//! envelopes with them.
+//! implementation for every Steno crate, `steno-bridge`'s envelopes included.
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
@@ -308,20 +307,14 @@ mod tests {
             "",
         ] {
             assert_eq!(parse_uuid(rejected), None, "{rejected:?}");
-            let error = serde_json::from_str::<Wire>(&format!(
-                "[\"516EADE8-40E5-4434-8AAF-9214A21A604E\",{}]",
-                serde_json::to_string(rejected).unwrap()
-            ))
-            .unwrap_err()
-            .to_string();
-            assert!(error.starts_with("not a UUID: "), "{rejected:?}: {error}");
+            let text = serde_json::to_string(rejected).unwrap();
+            for wire in [
+                format!("[{text},null]"),
+                format!("[\"516EADE8-40E5-4434-8AAF-9214A21A604E\",{text}]"),
+            ] {
+                let error = serde_json::from_str::<Wire>(&wire).unwrap_err().to_string();
+                assert!(error.starts_with("not a UUID: "), "{wire}: {error}");
+            }
         }
-        let wire: Wire =
-            serde_json::from_str("[\"516eade8-40e5-4434-8aaf-9214a21a604e\",null]").unwrap();
-        assert_eq!(wire, Wire(id, None));
-        let error = serde_json::from_str::<Wire>("[\"516eade840e544348aaf9214a21a604e\",null]")
-            .unwrap_err()
-            .to_string();
-        assert!(error.starts_with("not a UUID: 516e"), "{error}");
     }
 }

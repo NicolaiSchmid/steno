@@ -9,9 +9,9 @@
 //! `Date` is `chrono::DateTime<Utc>` written as `2026-09-29T12:48:00.000Z`,
 //! `UUID` is `uuid::Uuid` written upper case, a nil optional is an omitted
 //! key, `String` enums are `steno_core::string_enum!` enums with the same
-//! raw values. The date and UUID codecs are `steno_core::json`'s
-//! (`iso_time`, `uuid_text` and their `_opt` forms); this crate adds only
-//! the pretty printer the fixtures are written with ([`json`]).
+//! raw values. The date and UUID codecs are `steno_core::json`'s; this
+//! crate adds only the pretty printer the fixtures are written with
+//! ([`json`]).
 //!
 //! Naming: a top-level Swift type keeps its name without the `Bridge` prefix
 //! (`BridgeMeetingSource` is [`MeetingSource`]). A type nested in a snapshot,
