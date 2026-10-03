@@ -21,7 +21,7 @@ pub struct HandoverConfiguration {
     /// [`HandoverConfiguration::default_service_name`].
     pub service_name: String,
     /// Publish `_steno._tcp` and serve on the LAN addresses
-    /// ([`server::advertise::lan_addresses`](crate::server::advertise::lan_addresses))
+    /// ([`server::advertise::current_lan_addresses`](crate::server::advertise::current_lan_addresses))
     /// and loopback; `false` binds loopback only.
     pub advertise: bool,
     /// The largest chunk the computer accepts; the phone declares its own

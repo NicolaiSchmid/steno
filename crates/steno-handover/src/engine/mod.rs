@@ -193,9 +193,9 @@ struct State {
     /// intake's answer. The verify and the admit yield, so a retried
     /// `complete` must not start a second verify or admission.
     completing: BTreeSet<Uuid>,
-    /// Devices revoked since start and not paired again. A request that
-    /// read its receipt before the revoke still writes it back after; its
-    /// receipts stay out of `active_receipts` (and the stream) all the same.
+    /// Devices revoked since start and not paired again. Their receipts
+    /// stay out of `active_receipts` (and the stream), also when a request
+    /// that read one before the revoke writes it back after.
     revoked: BTreeSet<Uuid>,
 }
 

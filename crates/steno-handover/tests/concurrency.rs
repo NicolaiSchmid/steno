@@ -1,7 +1,7 @@
-//! Every store write, file write and hash is a yield at which the next
-//! request runs. These tests drive the engine directly, so two requests
-//! enter it in a known order and the races the loopback clients can only
-//! make likely are certain.
+//! Every store write, file write and hash is a yield, so another request
+//! runs while one awaits. These tests drive the engine directly, so two
+//! requests enter it in a known order and the races the loopback clients
+//! can only make likely are certain.
 
 #![allow(
     clippy::assert_is_empty,

@@ -1,24 +1,26 @@
-//! Bonjour: `_steno._tcp` on the local network with the TXT record the
-//! phone reads (`v`, the protocol version; `id`, the computer's id). The
-//! Swift listener publishes through `NWListener.Service`; here `mdns-sd`
-//! does it. Both answer the phone's `NWBrowser` the same way.
+//! Bonjour: `_steno._tcp` on the LAN with the TXT record the phone reads
+//! (`v`, the protocol version; `id`, the computer's id). The Swift listener
+//! publishes through `NWListener.Service`; here `mdns-sd` does it. Both
+//! answer the phone's `NWBrowser` the same way.
 //!
 //! Which network: the Swift listener sets `prohibitedInterfaceTypes =
 //! [.cellular, .other]`, so the service lives on Wi-Fi and wired Ethernet
 //! and never on a VPN tunnel. Here [`lan_addresses`] keeps the IPv4
 //! addresses of the interfaces that are up and not loopback, link-local or
 //! point-to-point, and never one in `100.64.0.0/10`, the shared address
-//! space Tailscale numbers its tunnel from. On Linux and macOS every tunnel
-//! interface (`wg0`, `tailscale0`, `tun0`, `utun3`) is point-to-point.
-//! Windows reports only PPP and its own tunnels so, and a Wintun, TAP or
-//! Hyper-V adapter there looks like Ethernet; on Windows an address also
-//! needs an adapter that is Ethernet or Wi-Fi, hardware, and up
-//! ([`windows_keeps`]), the counterpart of Swift's "not `.other`". The
-//! record carries those addresses, and the listener accepts connections on
-//! them and on loopback only. The addresses are read when the service
-//! starts and again, at most once a second, while it accepts; the record is
-//! not re-published when the computer changes network, whereas
-//! `NWListener` follows the change. Swift: `Network/HandoverServer.swift`.
+//! space (RFC 6598) carrier-grade NAT and mesh VPNs number from. Most
+//! tunnels on Linux and macOS (`wg0`, `tun0`, `utun3`) are point-to-point;
+//! layer-2 ones (a TAP device, `feth`) and bridges (`docker0`,
+//! `bridge100`) are not, and are served. Windows marks only PPP and its
+//! own tunnels point-to-point; a Wintun, TAP or Hyper-V adapter there
+//! looks like Ethernet, so on Windows an address also needs an adapter
+//! that is Ethernet or Wi-Fi, hardware, and up ([`windows_keeps`]), the
+//! counterpart of Swift's "not `.other`". The record carries those
+//! addresses, and the listener accepts connections on them and on loopback
+//! only. The addresses are read when the service starts and again, at most
+//! once a second, while it accepts; the record is not re-published when
+//! the computer changes network, whereas `NWListener` follows the change.
+//! Swift: `Network/HandoverServer.swift`.
 
 use std::net::{IpAddr, Ipv4Addr};
 
@@ -73,7 +75,7 @@ fn lan_addresses_where<'a>(
 
 /// Not loopback, not link-local, not unspecified, not in the shared
 /// address space `100.64.0.0/10` (RFC 6598), where a carrier-grade NAT or a
-/// Tailscale tunnel lives and a home or office network does not.
+/// mesh VPN lives and a home or office network does not.
 fn is_lan_address(address: Ipv4Addr) -> bool {
     let [first, second, ..] = address.octets();
     let shared = first == 100 && second & 0b1100_0000 == 64;

@@ -238,7 +238,7 @@ pub enum IdentityError {
     Validity(#[from] time::error::ComponentRange),
     #[error("the TLS configuration rejected the identity: {0}")]
     Tls(#[from] rustls::Error),
-    #[error("the secret store: {0}")]
+    #[error("reading or writing the secret store: {0}")]
     Secrets(steno_core::BoxError),
     #[error("the stored identity is malformed: {0}")]
     Malformed(String),
