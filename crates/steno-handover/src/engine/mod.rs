@@ -321,18 +321,16 @@ impl Engine {
 
     /// Forgets the device and drops whatever it was uploading.
     pub async fn revoke(&self, device_id: Uuid) -> store::Result<()> {
-        let mut dropped = Vec::new();
+        let mut unfinished = Vec::new();
         self.state().active_receipts.retain(|_, receipt| {
             let owned = receipt.device_id == device_id;
-            if owned {
-                dropped.push(receipt.clone());
+            if owned && receipt.state.kind() != steno_core::HandoverStateKind::Complete {
+                unfinished.push(receipt.recording_id);
             }
             !owned
         });
-        for receipt in dropped {
-            if receipt.state.kind() != steno_core::HandoverStateKind::Complete {
-                self.inbox.discard(receipt.recording_id);
-            }
+        for recording_id in unfinished {
+            self.inbox.discard(recording_id);
         }
         self.with_store(move |store| store.delete_paired_device(device_id))
             .await?;
@@ -610,23 +608,23 @@ impl RequestHandling for Engine {
 
     async fn handle(&self, request: HandoverRequest) -> HandoverResponse {
         // Every bearer route passed the gate with a device principal.
-        match (request.route, request.device().cloned()) {
+        match (request.route, request.device()) {
             (Route::Hello, _) => {
                 HandoverResponse::json(StatusCode::OK, &wire::Hello::new(self.identity.mac_id()))
             }
             (Route::Pair, _) => self.pair(&request).await,
             (_, None) => Self::unauthorized(),
-            (Route::Unpair, Some(device)) => self.unpair(&device).await,
+            (Route::Unpair, Some(device)) => self.unpair(device).await,
             (Route::Announce(recording_id), Some(device)) => {
-                self.announce(recording_id, &device, &request.body).await
+                self.announce(recording_id, device, &request.body).await
             }
-            (Route::Status(recording_id), Some(device)) => self.status(recording_id, &device).await,
+            (Route::Status(recording_id), Some(device)) => self.status(recording_id, device).await,
             (Route::Chunk(recording_id, index), Some(device)) => {
-                self.receive_chunk(recording_id, index, &device, &request)
+                self.receive_chunk(recording_id, index, device, &request)
                     .await
             }
             (Route::Complete(recording_id), Some(device)) => {
-                self.complete(recording_id, &device).await
+                self.complete(recording_id, device).await
             }
         }
     }

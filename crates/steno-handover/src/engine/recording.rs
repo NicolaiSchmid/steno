@@ -201,7 +201,6 @@ impl Engine {
             return HandoverResponse::empty(StatusCode::NO_CONTENT);
         }
         if !self.inbox.has_partial(recording_id) {
-            // Announce again: the partial is gone.
             return HandoverResponse::problem(
                 StatusCode::NOT_FOUND,
                 "no partial file; announce again",
@@ -227,12 +226,11 @@ impl Engine {
         else {
             return no_such_recording();
         };
-        let mut chunks = receipt.received_chunks.clone();
-        chunks.push(index);
-        chunks.sort_unstable();
-        chunks.dedup();
+        receipt.received_chunks.push(index);
+        receipt.received_chunks.sort_unstable();
+        receipt.received_chunks.dedup();
         if let Err(error) = self
-            .transition(&mut receipt, HandoverState::Receiving, Some(chunks))
+            .transition(&mut receipt, HandoverState::Receiving, None)
             .await
         {
             return HandoverResponse::internal_error("saving the receipt", &error);
@@ -287,9 +285,9 @@ impl Engine {
             return Verification::File(self.inbox.verified(recording_id, metadata.format));
         }
         let count = MetadataValidation::chunk_count(receipt.byte_count, receipt.chunk_size);
-        let every_chunk: Vec<i64> = (0..count).collect();
+        let every_chunk = receipt.received_chunks.iter().copied().eq(0..count);
         let has_partial = self.inbox.has_partial(recording_id);
-        if receipt.received_chunks != every_chunk || !has_partial {
+        if !every_chunk || !has_partial {
             if !has_partial {
                 let state = receipt.state.clone();
                 let _ = self.transition(receipt, state, Some(Vec::new())).await;
