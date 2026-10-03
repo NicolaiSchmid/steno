@@ -96,6 +96,7 @@ pub unsafe fn deliver(buffers: &[BufferView], sources: &[LaneSource], sink: &Lan
                     Some((right, right_stride)) => unsafe {
                         sink.write_mixed(lane, left, right, source.left.stride, right_stride);
                     },
+                    // SAFETY: as above, for the one pointer.
                     None => unsafe { sink.write(lane, left, source.left.stride) },
                 }
             }
