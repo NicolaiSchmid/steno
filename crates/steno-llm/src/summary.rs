@@ -16,9 +16,9 @@ use steno_core::{
 use uuid::Uuid;
 
 use crate::budget::{BudgetPolicy, counted_usage};
+use crate::concurrency::map_bounded;
 use crate::labels::{SpeakerLabels, render_plain_lines};
 use crate::language::OutputLanguage;
-use crate::support::map_bounded;
 use crate::{
     JsonSchema, LlmEndpoint, LlmError, StructuredOutputDecoder, TokenBudget, TranscriptChunk,
     TranscriptChunker,

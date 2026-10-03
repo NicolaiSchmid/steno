@@ -1238,16 +1238,19 @@ fn map_and_reduce_prompts_match_their_goldens() {
 #[tokio::test]
 async fn map_bounded_keeps_order_and_propagates_the_first_error() {
     let doubled: Vec<i32> =
-        steno_llm::support::map_bounded([3, 1, 2], 2, |v| async move { Ok::<_, ()>(v * 2) })
+        steno_llm::concurrency::map_bounded([3, 1, 2], 2, |v| async move { Ok::<_, ()>(v * 2) })
             .await
             .unwrap();
     assert_eq!(doubled, [6, 2, 4]);
-    let empty: Vec<i32> =
-        steno_llm::support::map_bounded(Vec::<i32>::new(), 2, |v| async move { Ok::<_, ()>(v) })
-            .await
-            .unwrap();
+    let empty: Vec<i32> = steno_llm::concurrency::map_bounded(
+        Vec::<i32>::new(),
+        2,
+        |v| async move { Ok::<_, ()>(v) },
+    )
+    .await
+    .unwrap();
     assert_eq!(empty.len(), 0);
-    let failed = steno_llm::support::map_bounded([1, 2, 3], 1, |v| async move {
+    let failed = steno_llm::concurrency::map_bounded([1, 2, 3], 1, |v| async move {
         if v == 2 { Err("boom") } else { Ok(v) }
     })
     .await;

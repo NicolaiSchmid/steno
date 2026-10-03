@@ -29,6 +29,7 @@ pub mod budget;
 pub mod chunker;
 pub mod cleanup;
 pub mod codex;
+pub mod concurrency;
 pub mod decoder;
 mod endpoint;
 mod error;
@@ -39,7 +40,6 @@ mod openai;
 mod retry;
 pub mod schema;
 pub mod summary;
-pub mod support;
 #[cfg(feature = "testing")]
 pub mod testing;
 pub mod transport;
