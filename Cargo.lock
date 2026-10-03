@@ -3650,6 +3650,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.21",
  "tokio",
+ "unicode-normalization",
  "uuid",
  "zmij",
 ]
@@ -3664,6 +3665,23 @@ dependencies = [
  "tauri-build",
  "tauri-plugin-opener",
  "thiserror 2.0.21",
+ "uuid",
+]
+
+[[package]]
+name = "steno-host"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "serde",
+ "serde_json",
+ "steno-bridge",
+ "steno-core",
+ "steno-host",
+ "tempfile",
+ "thiserror 2.0.21",
+ "tokio",
  "uuid",
 ]
 
