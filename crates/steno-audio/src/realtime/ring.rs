@@ -235,6 +235,18 @@ impl LaneRingBuffer {
         true
     }
 
+    /// Consumer side. Skips up to `count` queued samples without reading
+    /// them and returns how many it skipped: the follower lane's clock-drift
+    /// slip. Moves only the read index, which the consumer owns.
+    #[inline(always)]
+    pub fn discard(&self, count: usize) -> usize {
+        let read = self.read_index.load(Ordering::Relaxed);
+        let write = self.write_index.load(Ordering::Acquire);
+        let skipped = count.min(write - read);
+        self.read_index.store(read + skipped, Ordering::Release);
+        skipped
+    }
+
     /// Consumer side, not real-time: takes everything queued (the
     /// permission probe inspects what the tap delivered).
     pub fn drain_all(&self) -> Vec<f32> {

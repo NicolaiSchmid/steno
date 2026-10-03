@@ -1,28 +1,34 @@
-//! The HAL-backed [`ProcessAudioActivitySource`]: process objects with
-//! their PID, bundle id and `IsRunningInput` flag, and listeners on
+//! The live [process-activity source](super::ProcessAudioActivitySource).
+//! On macOS the HAL's process objects with their PID, bundle id and
+//! `IsRunningInput` flag, and listeners on
 //! `kAudioDevicePropertyDeviceIsRunningSomewhere` for every input device.
 //! Swift: `LiveProcessAudioActivity` in
 //! `Sources/StenoAudio/Detection/ProcessAudioActivity.swift`.
 //!
-//! On Linux and Windows the type exists so callers compile and reports no
-//! processes until the PipeWire and WASAPI backends fill it in (see
-//! `capture::live`).
+//! On Windows the audio sessions of every active endpoint, mapped by
+//! [`processes_from_sessions`](super::processes_from_sessions), with
+//! endpoint and session notifications (WP10a, compile-tested only; see
+//! `capture::live::wasapi`). No Swift counterpart. On Linux the type exists
+//! so callers compile and reports no processes until the PipeWire backend
+//! fills it in.
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", windows)))]
 use std::sync::mpsc::Receiver;
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", windows)))]
 use super::activity::{ActivityError, ProcessAudioActivity, ProcessAudioActivitySource};
 
 #[cfg(target_os = "macos")]
 pub use macos::LiveProcessAudioActivity;
+#[cfg(windows)]
+pub use wasapi::LiveProcessAudioActivity;
 
-/// The HAL-backed source; off macOS a stub that lists no processes.
-#[cfg(not(target_os = "macos"))]
+/// The Linux stub: lists no processes until PipeWire fills it in.
+#[cfg(not(any(target_os = "macos", windows)))]
 #[derive(Debug, Default)]
 pub struct LiveProcessAudioActivity;
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", windows)))]
 impl LiveProcessAudioActivity {
     /// The stub.
     #[must_use]
@@ -31,7 +37,7 @@ impl LiveProcessAudioActivity {
     }
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", windows)))]
 impl ProcessAudioActivitySource for LiveProcessAudioActivity {
     fn snapshot(&self) -> Result<Vec<ProcessAudioActivity>, ActivityError> {
         Ok(Vec::new())
@@ -40,6 +46,208 @@ impl ProcessAudioActivitySource for LiveProcessAudioActivity {
     fn changes(&self) -> Receiver<()> {
         // No notifications; the detector's poll still runs.
         std::sync::mpsc::channel().1
+    }
+}
+
+#[cfg(windows)]
+mod wasapi {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, channel};
+    use std::sync::{Arc, Mutex, PoisonError};
+    use std::thread::JoinHandle;
+    use std::time::Duration;
+
+    use crate::capture::live::wasapi::com::{
+        Apartment, ComError, EndpointRegistration, Enumerator, SessionManagerRegistration,
+        SessionRegistration,
+    };
+    use crate::detection::{
+        ActivityError, EndpointFlow, ProcessAudioActivity, ProcessAudioActivitySource,
+        processes_from_sessions,
+    };
+
+    impl From<ComError> for ActivityError {
+        fn from(error: ComError) -> Self {
+            ActivityError::Failed(error.to_string())
+        }
+    }
+
+    /// One `changes()` call: the notification thread and its stop flag.
+    struct Registration {
+        stop: Arc<AtomicBool>,
+        thread: Option<JoinHandle<()>>,
+    }
+
+    impl Drop for Registration {
+        fn drop(&mut self) {
+            self.stop.store(true, Ordering::Release);
+            if let Some(thread) = self.thread.take() {
+                let _ = thread.join();
+            }
+        }
+    }
+
+    /// The session-backed source. Each `changes()` call runs one thread
+    /// that holds the COM registrations for as long as the source lives
+    /// (or until the receiver is dropped).
+    #[derive(Default)]
+    pub struct LiveProcessAudioActivity {
+        registrations: Mutex<Vec<Registration>>,
+    }
+
+    impl std::fmt::Debug for LiveProcessAudioActivity {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.debug_struct("LiveProcessAudioActivity")
+                .finish_non_exhaustive()
+        }
+    }
+
+    impl LiveProcessAudioActivity {
+        /// No notifications registered until `changes()`.
+        #[must_use]
+        pub fn new() -> Self {
+            Self::default()
+        }
+    }
+
+    /// What the notification callbacks tell the notification thread.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum Notice {
+        /// A device or a session's state changed.
+        Changed,
+        /// A session was created: register for its state too.
+        SessionCreated,
+    }
+
+    fn notify(sender: &Sender<Notice>, notice: Notice) -> Box<dyn Fn() + Send + Sync> {
+        let sender = sender.clone();
+        Box::new(move || {
+            let _ = sender.send(notice);
+        })
+    }
+
+    /// The per-endpoint and per-session registrations on every active
+    /// capture endpoint, made afresh after every session creation.
+    struct SessionWatch {
+        _sessions: Vec<SessionRegistration>,
+        _managers: Vec<SessionManagerRegistration>,
+    }
+
+    impl SessionWatch {
+        fn register(enumerator: &Enumerator, sender: &Sender<Notice>) -> Self {
+            let mut sessions = Vec::new();
+            let mut managers = Vec::new();
+            for endpoint in enumerator
+                .active_endpoints(EndpointFlow::Capture)
+                .unwrap_or_default()
+            {
+                let Ok(manager) = endpoint.session_manager() else {
+                    continue;
+                };
+                // Enumerating first also makes the manager deliver
+                // `OnSessionCreated` (see `SessionManager::sessions`).
+                for session in manager.sessions().unwrap_or_default() {
+                    if let Ok(registration) =
+                        session.register_events(notify(sender, Notice::Changed))
+                    {
+                        sessions.push(registration);
+                    }
+                }
+                if let Ok(registration) =
+                    manager.register_created(notify(sender, Notice::SessionCreated))
+                {
+                    managers.push(registration);
+                }
+            }
+            Self {
+                _sessions: sessions,
+                _managers: managers,
+            }
+        }
+    }
+
+    /// The notification thread: registers, forwards every notice to the
+    /// detector, re-registers the session events when sessions appear or
+    /// devices change, until stopped or the detector's receiver is gone.
+    fn run_notifications(changes: &Sender<()>, stop: &AtomicBool) {
+        let Ok(apartment) = Apartment::enter() else {
+            return;
+        };
+        let Ok(enumerator) = Enumerator::new() else {
+            return;
+        };
+        let (sender, notices) = channel();
+        // A device change can bring capture endpoints with sessions, so it
+        // re-registers the session events like a session creation.
+        let endpoint_sender = sender.clone();
+        let endpoints: Option<EndpointRegistration> = enumerator
+            .register(Box::new(move |_| {
+                let _ = endpoint_sender.send(Notice::SessionCreated);
+            }))
+            .ok();
+        let mut sessions = Some(SessionWatch::register(&enumerator, &sender));
+        let _ = changes.send(());
+        while !stop.load(Ordering::Acquire) {
+            match notices.recv_timeout(Duration::from_millis(250)) {
+                Ok(notice) => {
+                    if notice == Notice::SessionCreated {
+                        // Unregister before registering again.
+                        drop(sessions.take());
+                        sessions = Some(SessionWatch::register(&enumerator, &sender));
+                    }
+                    if changes.send(()).is_err() {
+                        break;
+                    }
+                }
+                Err(RecvTimeoutError::Timeout) => {}
+                Err(RecvTimeoutError::Disconnected) => break,
+            }
+        }
+        drop(sessions);
+        drop(endpoints);
+        drop(enumerator);
+        drop(apartment);
+    }
+
+    impl ProcessAudioActivitySource for LiveProcessAudioActivity {
+        /// Every session on every active capture and render endpoint; an
+        /// endpoint whose sessions cannot be read is skipped.
+        fn snapshot(&self) -> Result<Vec<ProcessAudioActivity>, ActivityError> {
+            let apartment = Apartment::enter()?;
+            let enumerator = Enumerator::new()?;
+            let mut records = Vec::new();
+            for flow in [EndpointFlow::Capture, EndpointFlow::Render] {
+                for endpoint in enumerator.active_endpoints(flow)? {
+                    let Ok(manager) = endpoint.session_manager() else {
+                        continue;
+                    };
+                    for session in manager.sessions().unwrap_or_default() {
+                        records.extend(session.record(flow));
+                    }
+                }
+            }
+            drop(enumerator);
+            drop(apartment);
+            Ok(processes_from_sessions(&records))
+        }
+
+        /// One message per endpoint notification, session creation and
+        /// capture-session state change, plus one right away.
+        fn changes(&self) -> Receiver<()> {
+            let (sender, receiver) = channel();
+            let stop = Arc::new(AtomicBool::new(false));
+            let thread_stop = Arc::clone(&stop);
+            let thread = std::thread::Builder::new()
+                .name("steno-sessions".into())
+                .spawn(move || run_notifications(&sender, &thread_stop))
+                .map_err(|error| tracing::warn!("no session notifications: {error}"))
+                .ok();
+            self.registrations
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .push(Registration { stop, thread });
+            receiver
+        }
     }
 }
 

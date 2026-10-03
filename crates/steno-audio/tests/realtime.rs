@@ -21,9 +21,10 @@
 
 use std::sync::Arc;
 
-use steno_audio::capture::{ChannelRef, LaneSource, StreamLayout};
+use steno_audio::capture::{ChannelRef, LaneSource, SplitStreamPlan, StreamLayout};
 use steno_audio::realtime::{
-    BufferView, FrameRelay, LaneFrameSink, ProcessingConfiguration, ProcessingThread, deliver,
+    BufferView, FollowerLane, FrameRelay, LaneFrameSink, PacketRouter, ProcessingConfiguration,
+    ProcessingThread, SliceView, StreamBody, deliver,
 };
 use steno_audio::testing::AudioFixtures;
 use steno_audio::testing::rt::CountingAllocator;
@@ -167,5 +168,95 @@ fn the_sidecar_resampler_allocates_nothing_after_init() {
     assert_eq!(
         allocations, 0,
         "{allocations} allocations in 100 resampler frames"
+    );
+}
+
+/// The WASAPI capture threads' per-packet bodies (WP10a), driven with
+/// synthetic packets, no audio device: the follower folding stereo loopback
+/// packets into its staging ring, the master routing mono microphone
+/// packets plus the staged frames into the sink. One second at WASAPI's
+/// 10 ms period, with a silent loopback packet, a follower burst that
+/// slips at the high-water mark and a gap that underruns and re-primes, all
+/// on this thread under the counting allocator: nothing allocates. On the
+/// Windows runner this is the backend's real-time proof, since the runner
+/// has no device to drive the COM loop with.
+#[test]
+fn the_two_stream_bodies_allocate_nothing() {
+    const PERIOD: usize = 480;
+    let lanes = [AudioLane::Mic, AudioLane::System];
+    let plan = SplitStreamPlan::new(&lanes).unwrap();
+    let sink = Arc::new(LaneFrameSink::new(&lanes));
+    let follower = Arc::new(FollowerLane::for_period(PERIOD));
+    let mut master = StreamBody::Master {
+        router: PacketRouter::new(
+            plan.layout.sources.clone(),
+            Some(Arc::clone(&follower)),
+            4_800,
+        ),
+        sink: Arc::clone(&sink),
+    };
+    let mut staging = StreamBody::follower(Arc::clone(&follower), 4_800);
+    let material = Material::new(1.1);
+    let mut processed = vec![0.0f32; 110 * PERIOD];
+
+    let mut step = |period: usize| {
+        let offset = period * PERIOD;
+        let mic = &material.mic[offset..offset + PERIOD];
+        let tap = &material.tap[2 * offset..2 * (offset + PERIOD)];
+        // Periods 40 to 44 deliver no loopback packets (an underrun and a
+        // re-prime); period 60 delivers a burst of six (a slip); period 30
+        // is flagged silent.
+        let loopback_packets = match period {
+            40..45 => 0,
+            60 => 6,
+            _ => 1,
+        };
+        for _ in 0..loopback_packets {
+            staging.handle(SliceView {
+                frames: PERIOD,
+                channels: 2,
+                samples: (period != 30).then_some(tap),
+            });
+        }
+        master.handle(SliceView {
+            frames: PERIOD,
+            channels: 1,
+            samples: Some(mic),
+        });
+    };
+    // Warm-up outside the count.
+    for period in 0..10 {
+        step(period);
+    }
+    let allocations = CountingAllocator::allocations_during(|| {
+        for period in 10..110 {
+            step(period);
+        }
+        // The consumer side as the processing thread drains it.
+        let available = sink.available_to_read();
+        sink.ring(0).read(&mut processed[..available]);
+        sink.ring(1).read(&mut processed[..available]);
+    });
+    assert_eq!(
+        allocations, 0,
+        "{allocations} allocations in the WASAPI per-packet bodies"
+    );
+    assert_eq!(
+        sink.available_to_read(),
+        0,
+        "110 periods were delivered and drained"
+    );
+    assert!(follower.underrun_frames() > 0, "the gap underran");
+    assert!(follower.slipped_frames() > 0, "the burst slipped");
+    assert_eq!(
+        sink.dropped_samples().get(&AudioLane::System),
+        Some(&follower.slipped_frames()),
+        "slipped follower frames count as dropped system samples"
+    );
+    assert_eq!(sink.dropped_samples().get(&AudioLane::Mic), None);
+    println!(
+        "allocations in the two-stream bodies: {allocations}; underrun {} frames, slipped {}",
+        follower.underrun_frames(),
+        follower.slipped_frames()
     );
 }
