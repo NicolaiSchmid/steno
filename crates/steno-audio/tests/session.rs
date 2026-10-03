@@ -21,8 +21,9 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::mpsc::Receiver;
-use std::sync::{Arc, Mutex};
+use std::sync::mpsc::{Receiver, Sender, channel};
+use std::sync::{Arc, Condvar, Mutex};
+use std::thread::JoinHandle;
 use std::time::Duration;
 
 use steno_audio::capture::{
@@ -929,7 +930,7 @@ impl CaptureBackend for HandsOverTheSink {
 /// Passes the near end through once the gate opens; until then the
 /// processing thread is stuck in its first frame.
 struct GatedCanceller {
-    open: Arc<(Mutex<bool>, std::sync::Condvar)>,
+    open: Arc<(Mutex<bool>, Condvar)>,
 }
 
 impl EchoCanceller for GatedCanceller {
@@ -947,16 +948,15 @@ impl EchoCanceller for GatedCanceller {
 
 /// Three seconds of callbacks while the processing thread is stuck: the
 /// two-second rings take what fits (plus what the thread read before it
-/// stuck), refuse the rest and count it, and
-/// those overruns reach `dropped_frames` (they used to be zeroed by the
-/// ring clear before they were read).
+/// stuck), refuse the rest and count it, and those overruns reach
+/// `dropped_frames`.
 #[test]
 fn ring_overruns_are_reported_in_dropped_frames() {
     let directory = tempfile::tempdir().unwrap();
     let backend = Arc::new(HandsOverTheSink {
         sink: Mutex::new(None),
     });
-    let open = Arc::new((Mutex::new(false), std::sync::Condvar::new()));
+    let open = Arc::new((Mutex::new(false), Condvar::new()));
     let session = CaptureSession::with_backend(
         configuration(CaptureMode::Call, directory.path(), false),
         backend.clone(),
@@ -1498,8 +1498,8 @@ fn stop_during_a_rebuild_finalises_once() {
 /// and counts its callbacks and every frame the rings accepted.
 struct SlowTeardown {
     teardown: Duration,
-    running: Mutex<Option<(Arc<AtomicBool>, std::thread::JoinHandle<()>)>>,
-    tearing_down: Mutex<Option<std::sync::mpsc::Sender<()>>>,
+    running: Mutex<Option<(Arc<AtomicBool>, JoinHandle<()>)>>,
+    tearing_down: Mutex<Option<Sender<()>>>,
     starts: AtomicUsize,
     callbacks: Arc<AtomicUsize>,
     delivered: Arc<AtomicUsize>,
@@ -1507,7 +1507,7 @@ struct SlowTeardown {
 
 impl SlowTeardown {
     fn new(teardown: Duration) -> (Self, Receiver<()>) {
-        let (sender, receiver) = std::sync::mpsc::channel();
+        let (sender, receiver) = channel();
         let backend = Self {
             teardown,
             running: Mutex::new(None),
