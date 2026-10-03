@@ -18,7 +18,6 @@ use steno_llm::CodexCredentialStore;
 use steno_pipeline::{
     MeetingEventBus, PipelineDependencies, ProcessingPipeline, RecordingIntake, RetentionSweep,
 };
-use steno_speech::ModelStore;
 
 use crate::block_on;
 use crate::handover::ListenerHandover;
@@ -95,7 +94,8 @@ pub struct App {
     pub services: Services,
     pub handover: Option<Arc<HandoverService>>,
     pub recorder: Arc<CaptureRecorder>,
-    pub speech_store: ModelStore,
+    /// Where the speech and diarization models live.
+    pub models_directory: std::path::PathBuf,
     pub zone: FixedOffset,
     pub version: String,
     /// What went wrong while building, for the shell's log.
@@ -143,13 +143,13 @@ pub fn pipeline_dependencies(
         tracing::warn!("{warning}");
         None
     });
-    let speech_store = crate::speech::speech_store(&settings, paths);
+    let models_directory = crate::speech::models_directory(&settings, paths);
     let zone = steno_adapters::runtime::local_time_zone();
     let passes = crate::llm::passes(&settings, api_key.as_deref(), codex, zone);
     let dependencies = PipelineDependencies::new(
         Arc::new(SymphoniaAudioCodec::new()),
-        crate::speech::speech_engine(&settings, &speech_store),
-        crate::speech::diarizer(&speech_store),
+        crate::speech::speech_engine(&settings, &models_directory),
+        crate::speech::diarizer(&models_directory),
         Arc::new(steno_pipeline::StoreSpeakerMemory::new(store.clone())),
         Arc::new(DeliveryCoordinator::new(store.clone())),
         store.clone(),
@@ -230,7 +230,7 @@ fn handover_listener(
 /// (`CoreML` on the Mac, ONNX elsewhere, in this process until the speech
 /// sidecar lands), ONNX diarizer, cosine speaker memory over the store,
 /// LLM passes, delivery coordinator, handover listener, capture session,
-/// recorder, model store, folder usage, preferences. Fakes until the shell
+/// recorder, the speech models, folder usage, preferences. Fakes until the shell
 /// draws their platform side (plan: WP8): permissions (all granted), login
 /// item, updater, clip player, QR encoder; the audio device list is empty
 /// off the Mac until the `PipeWire` and WASAPI backends enumerate devices.
@@ -259,7 +259,7 @@ pub fn build(options: AppOptions) -> Result<App, BuildError> {
     ));
     let sweep = RetentionSweep::new(store.clone());
     let settings = store.settings()?;
-    let speech_store = crate::speech::speech_store(&settings, &paths);
+    let models_directory = crate::speech::models_directory(&settings, &paths);
 
     let permissions = Arc::new(FakePermissions::all_granted());
     let recorder = Arc::new(CaptureRecorder::new(
@@ -289,9 +289,7 @@ pub fn build(options: AppOptions) -> Result<App, BuildError> {
             pipeline: pipeline.clone(),
             sweep: sweep.clone(),
         }),
-        speech_models: Arc::new(ModelStoreSpeechModels {
-            speech: speech_store.clone(),
-        }),
+        speech_models: Arc::new(ModelStoreSpeechModels::new(&models_directory)),
         llm: Arc::new(ClientLlmService { codex }),
         export_validator: Arc::new(crate::export::ObsidianExportValidator),
         handover: handover.as_ref().map(|(service, mac_id)| {
@@ -323,7 +321,7 @@ pub fn build(options: AppOptions) -> Result<App, BuildError> {
         services,
         handover: handover.map(|(service, _)| service),
         recorder,
-        speech_store,
+        models_directory,
         zone,
         version: options.version,
         startup_warnings: warnings,

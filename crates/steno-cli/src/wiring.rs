@@ -126,10 +126,9 @@ pub fn dependencies(
     llm: Option<steno_services::llm::Passes>,
     events: MeetingEventBus,
 ) -> Result<PipelineDependencies, Failure> {
-    let paths = paths()?;
-    let speech_store = match models_directory {
-        Some(directory) => steno_services::speech::speech_store_under(directory),
-        None => steno_services::speech::speech_store(settings, &paths),
+    let models_directory = match models_directory {
+        Some(directory) => steno_services::speech::absolute(directory),
+        None => steno_services::speech::models_directory(settings, &paths()?),
     };
     let (speech_engine, diarizer, memory): (
         Arc<dyn steno_core::SpeechEngine>,
@@ -137,8 +136,8 @@ pub fn dependencies(
         Arc<dyn steno_core::SpeakerMemory>,
     ) = match engine {
         Some(_) => (
-            steno_services::speech::speech_engine(settings, &speech_store),
-            steno_services::speech::diarizer(&speech_store),
+            steno_services::speech::speech_engine(settings, &models_directory),
+            steno_services::speech::diarizer(&models_directory),
             Arc::new(steno_pipeline::StoreSpeakerMemory::new(store.clone())),
         ),
         None => (

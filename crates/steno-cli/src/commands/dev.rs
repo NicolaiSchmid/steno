@@ -385,32 +385,29 @@ impl CaptureSpike {
 
 #[derive(Debug, Args)]
 pub struct ModelsOptions {
-    /// Where the models live; defaults to the settings' models directory.
-    #[arg(long = "models-dir", value_name = "DIR")]
+    #[arg(
+        long = "models-dir",
+        value_name = "DIR",
+        help = "Models directory; defaults to the settings' directory, STENO_MODELS_DIR or Models in the support directory."
+    )]
     pub models_directory: Option<PathBuf>,
     #[command(flatten)]
     pub database: DatabaseOptions,
 }
 
 impl ModelsOptions {
-    fn store(&self) -> Result<steno_speech::ModelStore, Failure> {
-        Ok(steno_services::speech::speech_store_under(&self.root()?))
-    }
-
     fn service(&self) -> Result<ModelStoreSpeechModels, Failure> {
-        Ok(ModelStoreSpeechModels {
-            speech: self.store()?,
-        })
+        Ok(ModelStoreSpeechModels::new(&self.directory()?))
     }
 
-    /// The models root every store sits under; `dev models list` prints it.
-    fn root(&self) -> Result<PathBuf, Failure> {
+    /// The models directory; `dev models list` prints it.
+    fn directory(&self) -> Result<PathBuf, Failure> {
         if let Some(directory) = &self.models_directory {
-            return Ok(directory.clone());
+            return Ok(steno_services::speech::absolute(directory));
         }
         let store = self.database.open()?;
         let settings = store.settings().map_err(Failure::runtime)?;
-        Ok(steno_services::speech::models_root(
+        Ok(steno_services::speech::models_directory(
             &settings,
             &crate::wiring::paths()?,
         ))
@@ -465,7 +462,7 @@ impl Models {
         match self.command {
             ModelsCommand::List(options) => {
                 let service = options.service()?;
-                println!("models: {}", options.root()?.display());
+                println!("models: {}", options.directory()?.display());
                 for asset in ModelAsset::ALL {
                     let line = match service.installed_size(*asset) {
                         Some(bytes) => {
@@ -606,7 +603,7 @@ impl Bakeoff {
             } else {
                 let mut settings = steno_core::Settings::default();
                 settings.speech_engine_id.clone_from(engine_id);
-                steno_services::speech::speech_engine(&settings, &self.models.store()?)
+                steno_services::speech::speech_engine(&settings, &self.models.directory()?)
             };
             engine.prepare().await.map_err(Failure::runtime)?;
             for file in &files {
@@ -854,7 +851,7 @@ struct SweepCluster {
 
 impl DiarizeSweep {
     async fn run(self) -> Outcome {
-        let store = self.models.store()?;
+        let store = steno_services::speech::speech_store_under(&self.models.directory()?);
         let mut runs = Vec::new();
         for threshold in &self.thresholds {
             let config = DiarizerConfig {

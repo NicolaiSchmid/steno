@@ -11,7 +11,7 @@
 //! | [`app`] | [`AppOptions`], [`build`], [`App`] with `host()` and `launch()`, [`BuildError`] |
 //! | [`pipeline`] | [`CurrentPipeline`](pipeline::CurrentPipeline), the swappable [`ProcessingPipeline`](steno_pipeline::ProcessingPipeline), and [`HostPipeline`](pipeline::HostPipeline), the host's `Pipeline` over it and the retention sweep |
 //! | [`recorder`] | The host's `Recorder` over the capture session and the Mac intake |
-//! | [`speech`] | The models root, the speech engine per platform, the ONNX diarizer, the host's `SpeechModels` |
+//! | [`speech`] | The models directory, the speech engine per platform, the ONNX diarizer, the host's `SpeechModels` |
 //! | [`llm`] | The LLM passes from the settings and the host's `LlmService` |
 //! | [`handover`] | The identity in the secret store and the host's `Handover` over the listener |
 //! | [`secrets`] | The platform keyring and the 0600 secrets file behind `SecretStore` |
