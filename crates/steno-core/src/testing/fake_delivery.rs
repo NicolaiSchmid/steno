@@ -138,6 +138,8 @@ impl HandoverIntake for FakeHandoverIntake {
 
 #[cfg(test)]
 mod tests {
+    use std::fmt::Write as _;
+
     use super::*;
     use crate::AudioFormat;
     use crate::testing::sample_data;
@@ -160,9 +162,14 @@ mod tests {
         assert_eq!(receipt.folder, uuid_string(export.meeting.id));
         let path = destination.export_path(export.meeting.id);
         let written = std::fs::read(&path).unwrap();
+        let mut hex = String::new();
+        for byte in &receipt.files[0].sha256 {
+            let _ = write!(hex, "{byte:02x}");
+        }
+        // `sha256sum` of the sample export's column form, as written.
         assert_eq!(
-            receipt.files[0].sha256,
-            crate::content_hash::sha256(&written)
+            hex,
+            "0d133bbf29e879aaf88951c84fd8e5a77ff95344312bd3548d4587fe14ed8ea4"
         );
         let parsed: MeetingExport = serde_json::from_slice(&written).unwrap();
         assert_eq!(parsed, export);
