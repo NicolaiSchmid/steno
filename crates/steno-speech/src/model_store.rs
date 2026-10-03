@@ -1,7 +1,7 @@
 //! Where the models live and how they get there. The manifest names every
 //! file of an asset with its size and SHA-256; the store checks a directory
-//! against it, downloads what is missing into `<file>.partial.<pid>` while
-//! hashing, and renames only a verified, synced file into place. Models are
+//! against it, downloads what is missing into a partial file of its own
+//! while hashing, and renames only a verified, synced file into place. Models are
 //! never committed (`.gitignore` covers `*.onnx`).
 //!
 //! The root is `<support directory>/Models` ([`steno_core::StenoPaths`]),
@@ -22,6 +22,7 @@
 use std::fs::{self, File};
 use std::io::{Read, Write};
 use std::path::{Component, Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use sha2::{Digest, Sha256};
@@ -295,10 +296,11 @@ impl ModelStore {
         Ok(())
     }
 
-    /// Downloads into a sibling `<name>.partial.<pid>` file (two processes,
-    /// the app and a sidecar, can then install the same asset without
-    /// writing one inode), verifies and syncs it and renames it into place;
-    /// nothing is left behind on failure, nor when `progress` panics.
+    /// Downloads into a sibling `<name>.partial.<pid>.<call>` file, one per
+    /// call, so two downloads of one file (two engines, or the app and a
+    /// sidecar) never write one inode; verifies and syncs it and renames it
+    /// into place. Nothing is left behind on failure, nor when `progress`
+    /// panics.
     fn download(
         &self,
         url: &str,
@@ -307,9 +309,10 @@ impl ModelStore {
         progress: &mut dyn FnMut(DownloadProgress<'_>),
     ) -> Result<(), SpeechError> {
         let partial = RemoveOnDrop(destination.with_file_name(format!(
-            "{}{}",
+            "{}{}.{}",
             partial_prefix(&file.name),
-            std::process::id()
+            std::process::id(),
+            NEXT_CALL.fetch_add(1, Ordering::Relaxed)
         )));
         let (received, digest) = self.stream_to(url, file, &partial.0, progress)?;
         if received != file.size {
@@ -346,7 +349,11 @@ impl ModelStore {
         let mut body = response.into_body();
         // One byte over the manifest size is enough to tell a long body.
         let mut reader = body.with_config().limit(file.size + 1).reader();
-        let mut out = File::create(partial).map_err(|e| SpeechError::io(partial, e))?;
+        let mut out = File::options()
+            .write(true)
+            .create_new(true)
+            .open(partial)
+            .map_err(|e| SpeechError::io(partial, e))?;
         let mut hasher = Sha256::new();
         let mut received = 0u64;
         let mut buffer = vec![0u8; 1 << 16];
@@ -382,25 +389,43 @@ impl ModelStore {
     }
 }
 
-/// A partial download no process has written to for this long is stale; a
-/// live download writes it many times a second.
+/// Another process's partial download nothing has written to for this long
+/// is stale; a live download writes it many times a second.
 const STALE_PARTIAL: Duration = Duration::from_secs(10 * 60);
 
-/// `<name>.partial.`, followed by the pid of the downloading process.
+/// Numbers this process's downloads, so each has a partial file of its own.
+static NEXT_CALL: AtomicU64 = AtomicU64::new(0);
+
+/// `<name>.partial.`, followed by `<pid>.<call>`.
 fn partial_prefix(name: &str) -> String {
     format!("{name}.partial.")
 }
 
-/// Removes the stale `<name>.partial.<pid>` files in `directory`, which a
-/// killed process leaves behind (2.4 GB for `encoder.weights`). Best
-/// effort: a file that cannot be read or removed stays.
+/// The pid in `file_name` when it is a partial download of the file
+/// `prefix` belongs to, `<prefix><pid>.<call>`; `None` for any other name.
+fn partial_pid(file_name: &str, prefix: &str) -> Option<u32> {
+    let (pid, call) = file_name.strip_prefix(prefix)?.split_once('.')?;
+    call.parse::<u64>().ok()?;
+    pid.parse().ok()
+}
+
+/// Removes the stale partial downloads of `name` in `directory`, which a
+/// killed process leaves behind (2.4 GB for `encoder.weights`). This
+/// process's own partials belong to downloads still running and are never
+/// removed. Another process's is removed after [`STALE_PARTIAL`] without a
+/// write; should that process still be alive, its rename then fails and
+/// nothing is installed. Best effort: a file that cannot be read or
+/// removed stays.
 fn remove_stale_partials(directory: &Path, name: &str) {
     let prefix = partial_prefix(name);
     let Ok(entries) = fs::read_dir(directory) else {
         return;
     };
     for entry in entries.flatten() {
-        if !entry.file_name().to_string_lossy().starts_with(&prefix) {
+        let Some(pid) = partial_pid(&entry.file_name().to_string_lossy(), &prefix) else {
+            continue;
+        };
+        if pid == std::process::id() {
             continue;
         }
         let stale = entry
@@ -484,6 +509,7 @@ pub fn sha256_of(path: &Path) -> Result<String, SpeechError> {
 mod tests {
     use std::io::{BufRead, BufReader};
     use std::net::TcpListener;
+    use std::sync::mpsc;
 
     use super::*;
 
@@ -509,6 +535,40 @@ mod tests {
             stream.flush().unwrap();
         });
         format!("http://{address}/model.onnx")
+    }
+
+    /// Serves `body` to one connection per entry of `heads`, in order of
+    /// arrival: the first `heads[k]` bytes at once, the rest once the k-th
+    /// sender returned fires.
+    fn serve_held(body: Vec<u8>, heads: Vec<usize>) -> (String, Vec<mpsc::Sender<()>>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let (senders, receivers): (Vec<_>, Vec<_>) = heads.iter().map(|_| mpsc::channel()).unzip();
+        std::thread::spawn(move || {
+            for (head, release) in heads.into_iter().zip(receivers) {
+                let (stream, _) = listener.accept().unwrap();
+                let body = body.clone();
+                std::thread::spawn(move || {
+                    let mut reader = BufReader::new(&stream);
+                    let mut line = String::new();
+                    while reader.read_line(&mut line).unwrap() > 0 && line != "\r\n" {
+                        line.clear();
+                    }
+                    let mut stream = &stream;
+                    write!(
+                        stream,
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                        body.len()
+                    )
+                    .unwrap();
+                    stream.write_all(&body[..head]).unwrap();
+                    stream.flush().unwrap();
+                    let _ = release.recv();
+                    let _ = stream.write_all(&body[head..]);
+                });
+            }
+        });
+        (format!("http://{address}/model.onnx"), senders)
     }
 
     fn asset(url: Option<String>, body: &[u8], sha256: &str) -> ModelAsset {
@@ -550,11 +610,10 @@ mod tests {
                 );
             })
             .unwrap();
-        // The download writes a file of its own process, not the target.
+        // The download writes a file of its own, not the target.
+        let own = format!("model.onnx.partial.{}.", std::process::id());
         assert!(
-            partials
-                .iter()
-                .all(|name| *name == format!("model.onnx.partial.{}", std::process::id())),
+            !partials.is_empty() && partials.iter().all(|name| name.starts_with(&own)),
             "{partials:?}"
         );
         assert_eq!(directory, dir.path().join("test-asset"));
@@ -569,6 +628,54 @@ mod tests {
         store.ensure(&asset, &mut |_| {}).unwrap();
         store.remove(&asset).unwrap();
         assert!(!directory.exists());
+    }
+
+    #[test]
+    fn two_downloads_of_one_file_in_one_process_write_their_own_partials() {
+        // The second download starts while the first is half done; the
+        // first then finishes and must install what it received.
+        const WAIT: Duration = Duration::from_secs(30);
+        let dir = tempfile::tempdir().unwrap();
+        let store = ModelStore::new(dir.path());
+        let body: Vec<u8> = (0..100_000u32).map(|i| (i % 251) as u8 + 1).collect();
+        let (url, release) = serve_held(body.clone(), vec![50_000, 10_000]);
+        let asset = asset(Some(url), &body, &digest(&body));
+        let (first_started, first_waits) = mpsc::channel();
+        let (second_started, second_waits) = mpsc::channel();
+        std::thread::scope(|scope| {
+            let first = scope.spawn(|| {
+                store.ensure(&asset, &mut |p| {
+                    if p.received >= 50_000 {
+                        let _ = first_started.send(());
+                    }
+                })
+            });
+            first_waits.recv_timeout(WAIT).unwrap();
+            let second = scope.spawn(|| {
+                store.ensure(&asset, &mut |p| {
+                    if p.received >= 10_000 {
+                        let _ = second_started.send(());
+                    }
+                })
+            });
+            second_waits.recv_timeout(WAIT).unwrap();
+            // Every connection is released before anything is asserted, so
+            // a failure cannot leave the scope waiting on a held download.
+            release[0].send(()).unwrap();
+            let first = first.join().unwrap();
+            let installed = store.verify(&asset);
+            release[1].send(()).unwrap();
+            let second = second.join().unwrap();
+            first.unwrap();
+            installed.unwrap();
+            second.unwrap();
+        });
+        store.verify(&asset).unwrap();
+        let names: Vec<_> = fs::read_dir(store.directory(&asset))
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert_eq!(names, ["model.onnx"]);
     }
 
     #[test]
@@ -641,30 +748,78 @@ mod tests {
     }
 
     #[test]
-    fn a_stale_partial_download_is_removed_and_a_live_one_kept() {
+    fn only_another_process_s_partial_untouched_for_the_stale_age_is_removed() {
         let dir = tempfile::tempdir().unwrap();
         let store = ModelStore::new(dir.path());
         let body = b"local only".to_vec();
-        let asset = asset(None, &body, &digest(&body));
+        let mut asset = asset(None, &body, &digest(&body));
+        asset.files.push(ModelFile {
+            name: "notes.txt".to_owned(),
+            url: None,
+            sha256: digest(b"notes"),
+            size: 5,
+        });
         let directory = store.directory(&asset);
         fs::create_dir_all(&directory).unwrap();
-        fs::write(directory.join("model.onnx"), &body).unwrap();
-        let (stale, live) = (
-            directory.join("model.onnx.partial.1"),
-            directory.join("model.onnx.partial.2"),
-        );
-        for path in [&stale, &live] {
-            fs::write(path, b"half").unwrap();
+        let minute = Duration::from_secs(60);
+        let now = std::time::SystemTime::now();
+        let own = std::process::id();
+        let other = if own == 1 { 2 } else { 1 };
+        // (name, contents, last write)
+        let files = [
+            ("model.onnx", &body[..], now - 2 * STALE_PARTIAL),
+            ("notes.txt", b"notes", now - 2 * STALE_PARTIAL),
+            (
+                &*format!("model.onnx.partial.{other}.0"),
+                b"half",
+                now - STALE_PARTIAL - minute,
+            ),
+            (
+                &*format!("model.onnx.partial.{other}.1"),
+                b"half",
+                now - STALE_PARTIAL + minute,
+            ),
+            (
+                &*format!("model.onnx.partial.{other}.2"),
+                b"half",
+                now + 60 * minute,
+            ),
+            (
+                &*format!("model.onnx.partial.{own}.0"),
+                b"half",
+                now - 2 * STALE_PARTIAL,
+            ),
+            (
+                &*format!("model.onnx.partial.{other}"),
+                b"half",
+                now - 2 * STALE_PARTIAL,
+            ),
+            ("model.onnx.partial.x.0", b"half", now - 2 * STALE_PARTIAL),
+            ("other.onnx.partial.1.0", b"half", now - 2 * STALE_PARTIAL),
+        ];
+        for (name, contents, modified) in files {
+            let path = directory.join(name);
+            fs::write(&path, contents).unwrap();
+            File::options()
+                .write(true)
+                .open(&path)
+                .unwrap()
+                .set_modified(modified)
+                .unwrap();
         }
-        File::options()
-            .write(true)
-            .open(&stale)
-            .unwrap()
-            .set_modified(std::time::SystemTime::now() - 2 * STALE_PARTIAL)
-            .unwrap();
         store.ensure(&asset, &mut |_| {}).unwrap();
-        assert!(!stale.exists());
-        assert!(live.exists());
+        let mut left: Vec<_> = fs::read_dir(&directory)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        left.sort();
+        let mut expected: Vec<_> = files[..]
+            .iter()
+            .map(|(name, _, _)| (*name).to_owned())
+            .filter(|name| *name != format!("model.onnx.partial.{other}.0"))
+            .collect();
+        expected.sort();
+        assert_eq!(left, expected);
     }
 
     #[test]
