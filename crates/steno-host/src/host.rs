@@ -51,23 +51,23 @@
 //!
 //! # Threads
 //!
-//! Every call blocks until it is done; the crate doc says which thread the
-//! shell calls from. Locks are taken in one order: the publishing mutex,
-//! then the view models, then the sink slot. The dialogs (`confirm`,
-//! `choose_folder`) are called with no lock held but on the command's
-//! thread, so the shell must not dispatch commands on the thread that draws
-//! a blocking native dialog. The services are called with the view-model
-//! lock held, so they must not call back into the host (the `services`
-//! module doc has the rule), except for the calls that run with it
-//! released: the permission prompts, the LLM probe, the Codex calls and the
-//! model download, the prompts and the probe with their busy flag
+//! The crate doc says which thread the shell calls from. Locks are taken in
+//! one order: the publishing mutex, then the view models, then the sink
+//! slot. The dialogs (`confirm`, `choose_folder`) are called with no lock
+//! held, on the command's thread. The services are called with the
+//! view-model lock held, so they must not call back into the host (the
+//! `services` module doc has the rule), except for the calls that run with
+//! it released: the permission prompts, the LLM probe, the Codex calls and
+//! the model download, the prompts and the probe with their busy flag
 //! published first. `settings.transcription.download` replies after its
 //! first publish and keeps publishing from its own thread until the
-//! download ends; a second download of the asset waits for that thread.
-//! The flush thread starts in [`Host::new`] and ends with the last clone.
-//! The core's async boundaries (the secret store) are awaited on the
-//! host's own runtime, on a helper thread when the caller is already inside
-//! a tokio runtime, so no call panics there.
+//! download ends; a second download of the asset reattaches to that thread
+//! instead of starting one. The flush thread starts in [`Host::new`] and
+//! ends with the last clone. The core's async boundaries (the secret store)
+//! are awaited on the host's own runtime. A call that arrives inside a
+//! tokio runtime anyway (a `#[tokio::test]`, a command that skipped
+//! `spawn_blocking`) awaits the secret store on a helper thread instead of
+//! panicking, and still blocks that worker.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -151,12 +151,12 @@ pub enum HostError {
 /// The core's boundaries are async; the host waits on them here, on one
 /// current-thread runtime shared by every call. Blocking on a runtime from
 /// a thread that is already inside one panics, and a host call can arrive
-/// on such a thread (an `async` Tauri command, a test under
-/// `#[tokio::test]`): there the future is awaited on a scoped helper thread
-/// instead, so the call blocks like every other host call and never panics.
-/// The secret store is the only boundary awaited this way, a handful of
-/// times per Save. The runtime has its timer and I/O drivers, so a store
-/// may time out or talk to a socket.
+/// on such a thread (an `async` Tauri command that skipped
+/// `spawn_blocking`, a test under `#[tokio::test]`): there the future is
+/// awaited on a scoped helper thread instead, so the call blocks like every
+/// other host call and never panics. The secret store is the only boundary
+/// awaited this way, a handful of times per Save. The runtime has its timer
+/// and I/O drivers, so a store may time out or talk to a socket.
 pub(crate) fn block_on<F>(future: F) -> F::Output
 where
     F: std::future::Future + Send,

@@ -308,7 +308,8 @@ still has to draw the window side. `[ ]` is not ported yet.
   - `settings.transcription.download` replies at once and runs on a host thread that
     publishes its progress; a remove while it runs detaches it (its late progress is
     not shown, and the asset shows what the model store reports when it ends), where
-    Swift's task kept reporting.
+    Swift's task kept reporting. Download again while that thread runs reattaches to
+    it, as Swift showed the running task's progress.
   - A retried re-export after a refusal happens on the next store change (Swift
     retried on the next `.ready` tick); a pending re-export when the detail goes away
     is attempted once (Swift retried after three seconds in a detached task).
