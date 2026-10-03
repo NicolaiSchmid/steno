@@ -206,6 +206,17 @@ fn run_deliver(buffers: &[Buffer], frames: usize, layout: &StreamLayout, sink: &
     unsafe { deliver(&views, &layout.sources, sink) };
 }
 
+/// `samples` as a buffer of `channels` whose byte size reports `frames`
+/// frames, which may be fewer than `samples` holds but never more.
+fn view(samples: &[f32], channels: usize, frames: usize) -> BufferView {
+    assert!(frames * channels <= samples.len());
+    BufferView {
+        channels,
+        data: Some(samples.as_ptr()),
+        byte_size: frames * channels * 4,
+    }
+}
+
 fn read(sink: &LaneFrameSink, lane: usize, count: usize) -> Vec<f32> {
     let mut out = vec![f32::NAN; count];
     sink.ring(lane).read(&mut out);
@@ -380,20 +391,9 @@ fn a_buffer_shaped_unlike_the_layout_becomes_silence() {
     let sink = LaneFrameSink::new(&[AudioLane::Mic, AudioLane::System]);
     let mic = [1.0f32, -1.0, 2.0, -2.0, 3.0, -3.0, 4.0, -4.0];
     let short_tap = [9.0f32; 4];
-    let views = [
-        BufferView {
-            channels: 2,
-            data: Some(mic.as_ptr()),
-            byte_size: mic.len() * 4,
-        },
-        BufferView {
-            channels: 2,
-            data: Some(short_tap.as_ptr()),
-            byte_size: short_tap.len() * 4,
-        },
-    ];
-    // SAFETY: both pointers refer to vectors alive for the call and the byte
-    // sizes are the vectors' own.
+    let views = [view(&mic, 2, 4), view(&short_tap, 2, 2)];
+    // SAFETY: both pointers refer to arrays alive for the call, each at
+    // least as long as its byte size says (`view` asserts it).
     unsafe { deliver(&views, &layout.sources, &sink) };
     assert_eq!(sink.available_to_read(), 4);
     assert_eq!(read(&sink, 0, 4), vec![1.0, 2.0, 3.0, 4.0]);
@@ -431,20 +431,8 @@ fn a_buffer_shaped_unlike_the_layout_becomes_silence() {
     // (three frames by its byte size, four in the vector).
     let sink = LaneFrameSink::new(&[AudioLane::Mic, AudioLane::System]);
     let tap = [9.0f32; 8];
-    let views = [
-        BufferView {
-            channels: 2,
-            data: Some(mic.as_ptr()),
-            byte_size: mic.len() * 4,
-        },
-        BufferView {
-            channels: 2,
-            data: Some(tap.as_ptr()),
-            byte_size: 3 * 2 * 4,
-        },
-    ];
-    // SAFETY: both pointers refer to arrays alive for the call, each at
-    // least as long as its byte size says.
+    let views = [view(&mic, 2, 4), view(&tap, 2, 3)];
+    // SAFETY: as above.
     unsafe { deliver(&views, &layout.sources, &sink) };
     assert_eq!(sink.available_to_read(), 4);
     assert_eq!(read(&sink, 0, 4), vec![1.0, 2.0, 3.0, 4.0]);
@@ -461,18 +449,7 @@ fn a_buffer_shaped_unlike_the_layout_becomes_silence() {
     let sink = LaneFrameSink::new(&[AudioLane::Mic, AudioLane::System]);
     let padded_mic = [1.0f32, -1.0, 2.0, -2.0, 3.0, -3.0, 4.0, -4.0, 5.0, -5.0];
     let stereo_tap = [10.0f32, 20.0, 30.0, 40.0, 50.0, 60.0, 70.0, 80.0];
-    let views = [
-        BufferView {
-            channels: 2,
-            data: Some(padded_mic.as_ptr()),
-            byte_size: 4 * 2 * 4,
-        },
-        BufferView {
-            channels: 2,
-            data: Some(stereo_tap.as_ptr()),
-            byte_size: stereo_tap.len() * 4,
-        },
-    ];
+    let views = [view(&padded_mic, 2, 4), view(&stereo_tap, 2, 4)];
     // SAFETY: as above.
     unsafe { deliver(&views, &beyond.sources, &sink) };
     assert_eq!(sink.available_to_read(), 4);
@@ -498,11 +475,7 @@ fn an_unusable_first_buffer_costs_only_its_own_lane() {
     )
     .unwrap();
     let tap = [10.0f32, 20.0, 30.0, 40.0, 50.0, 60.0, 70.0, 80.0];
-    let tap_view = BufferView {
-        channels: 2,
-        data: Some(tap.as_ptr()),
-        byte_size: tap.len() * 4,
-    };
+    let tap_view = view(&tap, 2, 4);
     let no_channels = BufferView {
         channels: 0,
         data: None,
