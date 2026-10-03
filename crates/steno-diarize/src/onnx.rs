@@ -108,10 +108,18 @@ impl OnnxBackend {
 
     /// The fbank frames of `window` the segmentation `weights` mark: each
     /// feature frame takes the weight of the segmentation frame whose
-    /// centre is nearest its own.
+    /// centre is nearest its own. The mean is subtracted over the whole
+    /// ten-second window before the frames are picked, as pyannote's
+    /// `WeSpeaker` wrapper and `FluidAudio`'s `FBank` model normalise
+    /// before the mask is applied; normalising the selected frames alone
+    /// would centre every speaker's features on their own voice and
+    /// discard part of what tells voices apart.
     fn selected_features(&self, window: &[f32], weights: &[f32]) -> Vec<f32> {
-        let features = self.fbank.compute(window);
+        let mut features = self.fbank.compute(window);
         let bins = self.fbank.num_bins();
+        if self.subtracts_mean {
+            Fbank::subtract_mean(&mut features, bins);
+        }
         let frames = features.len() / bins.max(1);
         let geometry = &self.geometry;
         let mut selected = Vec::new();
@@ -222,14 +230,11 @@ impl TensorBackend for OnnxBackend {
     }
 
     fn embed(&mut self, window: &[f32], weights: &[f32]) -> Result<Option<Vec<f32>>, BackendError> {
-        let mut features = self.selected_features(window, weights);
+        let features = self.selected_features(window, weights);
         let bins = self.fbank.num_bins();
         let frames = features.len() / bins;
         if frames < MIN_EMBEDDING_FRAMES {
             return Ok(None);
-        }
-        if self.subtracts_mean {
-            Fbank::subtract_mean(&mut features, bins);
         }
         let input = Tensor::from_array((vec![1i64, to_i64(frames), to_i64(bins)], features))?;
         let name = self.embedding.inputs()[0].name().to_owned();
