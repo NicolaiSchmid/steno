@@ -750,6 +750,34 @@ async fn a_refresh_that_cannot_connect_names_the_cause() {
     assert!(detail.contains("Connect"), "the cause is kept: {detail}");
 }
 
+/// A rename that fails (here `auth.json` became a non-empty directory
+/// during the round trip) removes the temporary file, which holds live
+/// tokens.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_failed_rename_leaves_no_temporary_file() {
+    let home = CodexHome::new().await;
+    home.write(AuthFile::default().access(&CodexHome::access_token(10, "plus")));
+    let fresh = CodexHome::access_token(3_600, "plus");
+    let file = home.file();
+    home.server.respond(Arc::new(move |_| {
+        std::fs::remove_file(&file).unwrap();
+        std::fs::create_dir(&file).unwrap();
+        std::fs::write(file.join("occupied"), b"x").unwrap();
+        Some(scripts.token_refresh(&fresh, Some("rt_2"), None))
+    }));
+    let error = home.store().current().await.unwrap_err();
+    assert!(
+        matches!(error, CodexCredentialError::RefreshFailed(_)),
+        "{error:?}"
+    );
+    let entries: Vec<String> = std::fs::read_dir(home.directory.path())
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(entries, ["auth.json"], "no temporary file is left");
+}
+
 /// What the CLI wrote during the round trip survives the write-back.
 #[tokio::test]
 async fn write_back_overlays_the_files_latest_contents() {
