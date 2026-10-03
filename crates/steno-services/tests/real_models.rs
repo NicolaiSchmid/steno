@@ -5,8 +5,7 @@
 //! downloads on first run); `STENO_MODELS_DIR` keeps the models between
 //! runs. Swift: `Tests/StenoEndToEndTests/RealModelsEndToEndTests.swift`.
 
-use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use chrono::Utc;
@@ -14,18 +13,12 @@ use steno_adapters::ArtifactRenderer;
 use steno_audio::SymphoniaAudioCodec;
 use steno_core::testing::{FakeDestination, FakeSummarizer, PassthroughCleaner};
 use steno_core::{
-    AudioAsset, AudioFormat, AudioLane, AudioRetention, Destination, Meeting, MeetingExport,
-    MeetingSource, MeetingState, RecordingLayout, Settings, Store, TitleOrigin, paths::file_url,
+    AudioRetention, Destination, Meeting, MeetingExport, MeetingSource, MeetingState, Settings,
+    Store, TitleOrigin, paths::file_url,
 };
 use steno_pipeline::{
     MeetingEventBus, PipelineDependencies, ProcessingPipeline, StoreSpeakerMemory,
 };
-
-fn fixture(relative: &str) -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../Tests/Fixtures")
-        .join(relative)
-}
 
 // One flow: the setup is most of it.
 #[allow(clippy::too_many_lines)]
@@ -74,23 +67,6 @@ async fn the_synthetic_call_runs_through_the_real_engines_to_a_well_formed_expor
     );
 
     let meeting_id = uuid::Uuid::new_v4();
-    let layout = RecordingLayout::new(&audio, meeting_id);
-    layout.create_directories(false).unwrap();
-    std::fs::copy(
-        fixture("audio/conversation-two-lane-6s.wav"),
-        layout.master(AudioFormat::Wav16kInt16),
-    )
-    .unwrap();
-    std::fs::copy(
-        fixture("audio/conversation-mic-6s.wav"),
-        layout.sidecar(AudioLane::Mic),
-    )
-    .unwrap();
-    std::fs::copy(
-        fixture("audio/conversation-system-6s.wav"),
-        layout.sidecar(AudioLane::System),
-    )
-    .unwrap();
     let now = Utc::now();
     let meeting = Meeting {
         id: meeting_id,
@@ -111,26 +87,9 @@ async fn the_synthetic_call_runs_through_the_real_engines_to_a_well_formed_expor
         created_at: now,
         updated_at: now,
     };
-    let asset = AudioAsset {
-        id: uuid::Uuid::new_v4(),
-        meeting_id,
-        url: file_url(&layout.master(AudioFormat::Wav16kInt16), false),
-        format: AudioFormat::Wav16kInt16,
-        lanes: vec![AudioLane::Mic, AudioLane::System],
-        sidecars_16k: BTreeMap::from([
-            (
-                AudioLane::Mic,
-                file_url(&layout.sidecar(AudioLane::Mic), false),
-            ),
-            (
-                AudioLane::System,
-                file_url(&layout.sidecar(AudioLane::System), false),
-            ),
-        ]),
-        mixdown_url: None,
-        retention: AudioRetention::KeepForever,
-        expires_at: None,
-    };
+    let asset =
+        steno_pipeline::fixtures::two_lane_call(&audio, meeting_id, AudioRetention::KeepForever)
+            .unwrap();
     pipeline.enqueue(&meeting, &asset).unwrap();
     pipeline.wait_until_idle().await;
 

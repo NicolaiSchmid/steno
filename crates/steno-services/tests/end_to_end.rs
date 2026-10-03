@@ -6,7 +6,6 @@
 //! fakes). No models, no network.
 //! Swift: `Tests/StenoEndToEndTests/EndToEndTests.swift`.
 
-use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -16,9 +15,8 @@ use steno_adapters::{ArtifactRenderer, DeliveryCoordinator, ObsidianFolderDestin
 use steno_audio::SymphoniaAudioCodec;
 use steno_core::testing::{FakeDiarizer, FakeSpeechEngine, sample_data};
 use steno_core::{
-    AudioAsset, AudioFormat, AudioLane, AudioRetention, DeliveryStatus, Destination, LlmUsage,
-    Meeting, MeetingEvent, MeetingExport, MeetingState, ObsidianSettings, PipelineStage,
-    RecordingLayout, SpeakerAssignmentKind, Store,
+    AudioRetention, DeliveryStatus, Destination, LlmUsage, Meeting, MeetingEvent, MeetingExport,
+    MeetingState, ObsidianSettings, PipelineStage, SpeakerAssignmentKind, Store,
     paths::{file_url, path_from_file_url},
 };
 use steno_llm::testing::{Scripts, StubChatServer};
@@ -48,46 +46,6 @@ fn summary_usage() -> LlmUsage {
         prompt_tokens: 900,
         completion_tokens: 250,
         requests: 1,
-    }
-}
-
-fn call_asset(audio: &Path, meeting_id: uuid::Uuid) -> AudioAsset {
-    let layout = RecordingLayout::new(audio, meeting_id);
-    layout.create_directories(false).unwrap();
-    std::fs::copy(
-        fixture("audio/conversation-two-lane-6s.wav"),
-        layout.master(AudioFormat::Wav16kInt16),
-    )
-    .unwrap();
-    std::fs::copy(
-        fixture("audio/conversation-mic-6s.wav"),
-        layout.sidecar(AudioLane::Mic),
-    )
-    .unwrap();
-    std::fs::copy(
-        fixture("audio/conversation-system-6s.wav"),
-        layout.sidecar(AudioLane::System),
-    )
-    .unwrap();
-    AudioAsset {
-        id: steno_core::derived_uuid(meeting_id, "asset"),
-        meeting_id,
-        url: file_url(&layout.master(AudioFormat::Wav16kInt16), false),
-        format: AudioFormat::Wav16kInt16,
-        lanes: vec![AudioLane::Mic, AudioLane::System],
-        sidecars_16k: BTreeMap::from([
-            (
-                AudioLane::Mic,
-                file_url(&layout.sidecar(AudioLane::Mic), false),
-            ),
-            (
-                AudioLane::System,
-                file_url(&layout.sidecar(AudioLane::System), false),
-            ),
-        ]),
-        mixdown_url: None,
-        retention: AudioRetention::KeepDays(30),
-        expires_at: None,
     }
 }
 
@@ -196,7 +154,9 @@ async fn a_mac_call_fixture_lands_in_the_vault() {
     meeting.calendar_event_id = Some("event-1".to_owned());
     meeting.duration = 6.0;
     meeting.state = MeetingState::Recording;
-    let asset = call_asset(&audio, meeting.id);
+    let asset =
+        steno_pipeline::fixtures::two_lane_call(&audio, meeting.id, AudioRetention::KeepDays(30))
+            .unwrap();
     pipeline.enqueue(&meeting, &asset).unwrap();
     pipeline.wait_until_idle().await;
 

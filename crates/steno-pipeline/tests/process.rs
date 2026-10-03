@@ -4,7 +4,6 @@
 //! Swift: `Tests/StenoCoreTests/PipelineIntegrationTests.swift`,
 //! `StageTests.swift`, `RetentionSweepTests.swift`.
 
-use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
@@ -16,7 +15,7 @@ use steno_core::testing::{
 use steno_core::{
     AudioAsset, AudioFormat, AudioLane, AudioRetention, Delivery, DeliveryDispatcher,
     DeliveryStatus, Destination, Meeting, MeetingEvent, MeetingState, PipelineStage,
-    RecordingLayout, SpeakerAssignmentKind, Store, async_trait,
+    SpeakerAssignmentKind, Store, async_trait,
     paths::{file_url, path_from_file_url},
 };
 use steno_pipeline::{
@@ -24,12 +23,6 @@ use steno_pipeline::{
     StageRates,
 };
 use uuid::Uuid;
-
-fn fixture(name: &str) -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../Tests/Fixtures/audio")
-        .join(name)
-}
 
 /// A manual monotonic clock: every stage takes one second.
 struct TickingClock(Mutex<f64>);
@@ -208,43 +201,7 @@ fn call_meeting(now: DateTime<Utc>) -> Meeting {
 }
 
 fn call_asset(audio: &Path, meeting_id: Uuid, retention: AudioRetention) -> AudioAsset {
-    let layout = RecordingLayout::new(audio, meeting_id);
-    layout.create_directories(false).unwrap();
-    std::fs::copy(
-        fixture("conversation-two-lane-6s.wav"),
-        layout.master(AudioFormat::Wav16kInt16),
-    )
-    .unwrap();
-    std::fs::copy(
-        fixture("conversation-mic-6s.wav"),
-        layout.sidecar(AudioLane::Mic),
-    )
-    .unwrap();
-    std::fs::copy(
-        fixture("conversation-system-6s.wav"),
-        layout.sidecar(AudioLane::System),
-    )
-    .unwrap();
-    AudioAsset {
-        id: Uuid::new_v4(),
-        meeting_id,
-        url: file_url(&layout.master(AudioFormat::Wav16kInt16), false),
-        format: AudioFormat::Wav16kInt16,
-        lanes: vec![AudioLane::Mic, AudioLane::System],
-        sidecars_16k: BTreeMap::from([
-            (
-                AudioLane::Mic,
-                file_url(&layout.sidecar(AudioLane::Mic), false),
-            ),
-            (
-                AudioLane::System,
-                file_url(&layout.sidecar(AudioLane::System), false),
-            ),
-        ]),
-        mixdown_url: None,
-        retention,
-        expires_at: None,
-    }
+    steno_pipeline::fixtures::two_lane_call(audio, meeting_id, retention).unwrap()
 }
 
 fn drain(receiver: &mut steno_pipeline::EventReceiver) -> Vec<MeetingEvent> {
