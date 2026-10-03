@@ -45,6 +45,11 @@ fn config(args: &[&str]) -> SidecarConfig {
     config
 }
 
+/// An engine over an empty store in `dir` that installs nothing.
+fn engine_in(dir: &tempfile::TempDir, config: SidecarConfig) -> SidecarSpeechEngine {
+    SidecarSpeechEngine::with_assets(ModelStore::new(dir.path()), config, Vec::new())
+}
+
 /// An engine with `fault` committed by the first child only, so the next
 /// one is healthy.
 fn engine_with_fault(
@@ -55,8 +60,7 @@ fn engine_with_fault(
     let marker = dir.path().join("faulted");
     let mut config = config(&["--fault", fault, "--fault-once", marker.to_str().unwrap()]);
     adjust(&mut config);
-    let engine = SidecarSpeechEngine::with_assets(ModelStore::new(dir.path()), config, Vec::new());
-    (engine, dir)
+    (engine_in(&dir, config), dir)
 }
 
 fn tone(seconds: f64) -> AudioBuffer16k {
@@ -106,8 +110,7 @@ async fn assert_recovers(engine: &SidecarSpeechEngine, check: impl FnOnce(&Sidec
 #[tokio::test(flavor = "multi_thread")]
 async fn requests_round_trip_the_audio_bit_for_bit_in_one_child() {
     let dir = tempfile::tempdir().unwrap();
-    let engine =
-        SidecarSpeechEngine::with_assets(ModelStore::new(dir.path()), config(&[]), Vec::new());
+    let engine = engine_in(&dir, config(&[]));
     assert_eq!(engine.health().await.unwrap(), None);
     engine.prepare().await.unwrap();
     engine.prepare().await.unwrap();
@@ -260,11 +263,7 @@ async fn garbage_on_stdout_is_a_protocol_violation() {
 #[tokio::test(flavor = "multi_thread")]
 async fn an_error_the_child_reports_keeps_the_child() {
     let dir = tempfile::tempdir().unwrap();
-    let engine = SidecarSpeechEngine::with_assets(
-        ModelStore::new(dir.path()),
-        config(&["--fault", "error"]),
-        Vec::new(),
-    );
+    let engine = engine_in(&dir, config(&["--fault", "error"]));
     engine.prepare().await.unwrap();
     let pid = engine.pid();
     for _ in 0..2 {
@@ -286,7 +285,7 @@ async fn the_real_engine_reports_missing_models_and_keeps_running() {
     let dir = tempfile::tempdir().unwrap();
     let mut config = SidecarConfig::new(BINARY);
     config.heartbeat = Duration::from_millis(20);
-    let engine = SidecarSpeechEngine::with_assets(ModelStore::new(dir.path()), config, Vec::new());
+    let engine = engine_in(&dir, config);
     let error = engine.prepare().await.unwrap_err();
     let detail = error.to_string();
     assert!(
@@ -358,7 +357,7 @@ async fn the_real_models_load_and_transcribe_in_the_sidecar_when_installed() {
     }
     let mut config = SidecarConfig::new(BINARY);
     config.memory_ceiling = 8 << 30;
-    let engine = SidecarSpeechEngine::new(store, config);
+    let engine = SidecarSpeechEngine::new(store.clone(), config);
     engine.prepare().await.unwrap();
     let health = engine.health().await.unwrap().unwrap();
     assert!(health.loaded);
@@ -383,7 +382,7 @@ async fn the_real_models_load_and_transcribe_in_the_sidecar_when_installed() {
         let started = Instant::now();
         let sidecar = engine.transcribe(&audio, None).await.unwrap();
         let elapsed = started.elapsed();
-        let in_process = OnnxSpeechEngine::new(engine_store(), OnnxOptions::default());
+        let in_process = OnnxSpeechEngine::new(store, OnnxOptions::default());
         let expected = in_process.transcribe(&audio, None).await.unwrap();
         assert!(!sidecar.is_empty());
         assert_eq!(sidecar, expected);
@@ -395,8 +394,4 @@ async fn the_real_models_load_and_transcribe_in_the_sidecar_when_installed() {
         );
     }
     assert!(engine.release().await.unwrap().unwrap().success());
-}
-
-fn engine_store() -> ModelStore {
-    ModelStore::new(ModelStore::environment_root().unwrap())
 }
