@@ -161,8 +161,9 @@ mod tests {
     use std::sync::Arc;
 
     use steno_core::{
-        MeetingEvent, MeetingOperation, MeetingState, MeetingSummarizer, PipelineStage, Store,
-        SummaryInput, SummaryOutput, async_trait, testing::sample_data,
+        Delivery, DeliveryDispatcher, MeetingEvent, MeetingOperation, MeetingState,
+        MeetingSummarizer, PipelineStage, Store, SummaryInput, SummaryOutput, async_trait,
+        testing::sample_data,
     };
     use steno_pipeline::EventReceiver;
 
@@ -186,16 +187,68 @@ mod tests {
         }
     }
 
+    /// A summarizer that panics.
+    struct PanickingSummarizer;
+
+    #[async_trait]
+    impl MeetingSummarizer for PanickingSummarizer {
+        async fn summarize(&self, _input: &SummaryInput) -> BoundaryResult<SummaryOutput> {
+            panic!("the summarizer fell over");
+        }
+    }
+
+    /// A dispatcher that delivers nothing until released, or panics.
+    struct HeldDispatcher {
+        release: Arc<tokio::sync::Notify>,
+        asked: Arc<tokio::sync::Notify>,
+        panics: bool,
+    }
+
+    #[async_trait]
+    impl DeliveryDispatcher for HeldDispatcher {
+        async fn deliver_all(&self, _meeting_id: Uuid) -> Vec<Delivery> {
+            assert!(!self.panics, "the dispatcher fell over");
+            self.asked.notify_one();
+            self.release.notified().await;
+            Vec::new()
+        }
+    }
+
     fn pipeline(
         store: &Arc<Store>,
         summarizer: Option<Arc<dyn MeetingSummarizer>>,
     ) -> HostPipeline {
+        pipeline_over(
+            fake_dependencies(store, "fake-engine").with_llm(None, summarizer),
+            store,
+        )
+    }
+
+    fn pipeline_over(dependencies: PipelineDependencies, store: &Arc<Store>) -> HostPipeline {
         HostPipeline {
-            pipeline: current_pipeline(
-                fake_dependencies(store, "fake-engine").with_llm(None, summarizer),
-            ),
+            pipeline: current_pipeline(dependencies),
             sweep: RetentionSweep::new(store.clone()),
         }
+    }
+
+    /// A pipeline whose re-exports go through a [`HeldDispatcher`].
+    fn held_re_exports(
+        store: &Arc<Store>,
+        panics: bool,
+    ) -> (
+        HostPipeline,
+        Arc<tokio::sync::Notify>,
+        Arc<tokio::sync::Notify>,
+    ) {
+        let release = Arc::new(tokio::sync::Notify::new());
+        let asked = Arc::new(tokio::sync::Notify::new());
+        let mut dependencies = fake_dependencies(store, "fake-engine");
+        dependencies.dispatcher = Arc::new(HeldDispatcher {
+            release: release.clone(),
+            asked: asked.clone(),
+            panics,
+        });
+        (pipeline_over(dependencies, store), release, asked)
     }
 
     fn ready_meeting(store: &Store) -> steno_core::Meeting {
@@ -280,10 +333,16 @@ mod tests {
             expires_at: Some(Utc::now() - chrono::Duration::hours(1)),
         };
         store.save_meeting_with_asset(&meeting, &asset).unwrap();
-        let (log, _guard) = crate::testing::CapturedLog::warnings();
+        let log = crate::testing::CapturedLog::warnings();
         run_sweep(&RetentionSweep::new(store.clone()));
         let text = log.text();
-        assert!(text.contains("count=1"), "{text}");
+        assert!(
+            text.lines().any(
+                |line| line.contains("retention sweep could not remove every file")
+                    && line.contains("count=1")
+            ),
+            "{text}"
+        );
         assert!(!text.contains("private-folder"), "{text}");
     }
 
@@ -370,6 +429,84 @@ mod tests {
         })
         .await;
         assert_eq!(call(move || again.redeliver(id)), Ok(()));
+    }
+
+    /// A re-export holds its meeting until it ends: while it runs, a
+    /// second re-export and a re-run are refused; once it ends, the
+    /// meeting is free.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_running_re_export_holds_its_meeting_until_it_ends() {
+        let (_dir, store) = temp_store();
+        let meeting = ready_meeting(&store);
+        let id = meeting.id;
+        let (service, release, asked) = held_re_exports(&store, false);
+        let service = Arc::new(service);
+        let first = service.clone();
+        assert_eq!(call(move || first.redeliver(id)), Ok(()));
+        reached(&asked).await;
+        assert_eq!(service.pipeline.current().in_flight(), vec![id]);
+        let busy = format!("meeting {id} is already being processed");
+        let second = service.clone();
+        assert_eq!(
+            call(move || second.redeliver(id)),
+            Err(format!("deliver: {busy}"))
+        );
+        release.notify_one();
+        eventually("the re-export released its meeting", || {
+            service.pipeline.current().in_flight().is_empty()
+        })
+        .await;
+    }
+
+    /// A claimed operation that panics still reports: `OperationFailed`
+    /// with its stage, and the meeting is released.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_re_run_or_re_export_that_panics_posts_the_failure_and_releases_the_meeting() {
+        let (_dir, store) = temp_store();
+        let meeting = ready_meeting(&store);
+        let id = meeting.id;
+        let rerun = Arc::new(pipeline(&store, Some(Arc::new(PanickingSummarizer))));
+        let mut receiver = rerun.pipeline.current().dependencies().events.subscribe();
+        let caller = rerun.clone();
+        assert_eq!(call(move || caller.rerun_summary(id, "default")), Ok(()));
+        let failed = |event: &MeetingEvent| matches!(event, MeetingEvent::OperationFailed { .. });
+        assert_eq!(
+            next_event(&mut receiver, failed).await,
+            MeetingEvent::OperationFailed {
+                meeting_id: id,
+                operation: MeetingOperation::SummaryRerun,
+                stage: PipelineStage::Summarize,
+                failure: format!("summarize: {}", steno_pipeline::OPERATION_PANICKED),
+            }
+        );
+        eventually("the re-run released its meeting", || {
+            rerun.pipeline.current().in_flight().is_empty()
+        })
+        .await;
+
+        let (reexport, _release, _asked) = held_re_exports(&store, true);
+        let mut receiver = reexport
+            .pipeline
+            .current()
+            .dependencies()
+            .events
+            .subscribe();
+        let reexport = Arc::new(reexport);
+        let caller = reexport.clone();
+        assert_eq!(call(move || caller.redeliver(id)), Ok(()));
+        assert_eq!(
+            next_event(&mut receiver, failed).await,
+            MeetingEvent::OperationFailed {
+                meeting_id: id,
+                operation: MeetingOperation::Reexport,
+                stage: PipelineStage::Deliver,
+                failure: format!("deliver: {}", steno_pipeline::OPERATION_PANICKED),
+            }
+        );
+        eventually("the re-export released its meeting", || {
+            reexport.pipeline.current().in_flight().is_empty()
+        })
+        .await;
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

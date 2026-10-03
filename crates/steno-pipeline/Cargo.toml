@@ -16,6 +16,8 @@ testing = []
 [dependencies]
 async-trait.workspace = true
 chrono.workspace = true
+# `catch_unwind` on a claimed operation, so a panic is reported.
+futures-util.workspace = true
 steno-core = { path = "../steno-core" }
 thiserror.workspace = true
 tokio = { workspace = true, features = ["sync", "rt", "macros"] }

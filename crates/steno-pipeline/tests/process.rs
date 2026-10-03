@@ -450,18 +450,30 @@ impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for CapturedLog {
     }
 }
 
+/// What every test in this binary logs at warn and above, from the first
+/// call on: the process-wide subscriber, so a line is captured whichever
+/// thread writes it.
+fn captured_warnings() -> &'static CapturedLog {
+    static LOG: std::sync::OnceLock<CapturedLog> = std::sync::OnceLock::new();
+    LOG.get_or_init(|| {
+        let log = CapturedLog::default();
+        tracing::subscriber::set_global_default(
+            tracing_subscriber::fmt()
+                .with_writer(log.clone())
+                .with_max_level(tracing::Level::WARN)
+                .finish(),
+        )
+        .expect("no other subscriber in this test binary");
+        log
+    })
+}
+
 /// A failed background run is logged at warn with its asset and stage
 /// only: a stage's reason can name the audio file or quote the model, and
 /// stays with the meeting row and the debug level.
-#[tokio::test(flavor = "current_thread")]
+#[tokio::test(flavor = "multi_thread")]
 async fn a_failed_background_run_warns_with_its_stage_not_its_reason() {
-    let log = CapturedLog::default();
-    let _guard = tracing::subscriber::set_default(
-        tracing_subscriber::fmt()
-            .with_writer(log.clone())
-            .with_max_level(tracing::Level::WARN)
-            .finish(),
-    );
+    let log = captured_warnings();
     let world = world(false, None, AudioRetention::KeepForever);
     let mut dependencies = world.pipeline.dependencies().clone();
     let reason = "cannot open /Users/someone/Audio/meeting/mic.caf";
@@ -471,14 +483,20 @@ async fn a_failed_background_run_warns_with_its_stage_not_its_reason() {
     });
     let pipeline = ProcessingPipeline::new(dependencies);
     let meeting = call_meeting(world.now);
-    let asset = call_asset(&world.audio, meeting.id, AudioRetention::KeepForever);
+    // Other tests in this binary log through the same subscriber; an id
+    // of its own picks this run's line out.
+    let mut asset = call_asset(&world.audio, meeting.id, AudioRetention::KeepForever);
+    asset.id = Uuid::new_v4();
     pipeline.enqueue(&meeting, &asset).unwrap();
     pipeline.wait_until_idle().await;
 
     let text = log.text();
-    assert!(text.contains("processing failed"), "{text}");
-    assert!(text.contains("stage=\"diarize\""), "{text}");
-    assert!(text.contains(&asset.id.to_string()), "{text}");
+    let line = text
+        .lines()
+        .find(|line| line.contains(&asset.id.to_string()))
+        .unwrap_or_else(|| panic!("no line for the asset: {text}"));
+    assert!(line.contains("processing failed"), "{line}");
+    assert!(line.contains("stage=\"diarize\""), "{line}");
     assert!(!text.contains(reason), "{text}");
     assert!(
         !text.contains(&world.audio.display().to_string()),
@@ -729,6 +747,11 @@ async fn a_failed_delivery_defers_deletion_until_a_re_export_succeeds() {
     );
 
     pipeline.redeliver(meeting.id).await.unwrap();
+    assert_eq!(
+        pipeline.in_flight(),
+        Vec::<Uuid>::new(),
+        "the re-export released its meeting"
+    );
     assert_eq!(
         world.store.deliveries(meeting.id).unwrap()[0].status,
         DeliveryStatus::Delivered

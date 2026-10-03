@@ -4773,6 +4773,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "chrono",
+ "futures-util",
  "steno-core",
  "steno-pipeline",
  "tempfile",

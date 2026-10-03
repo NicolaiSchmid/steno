@@ -321,6 +321,24 @@ fn attributing<T, E: fmt::Display + 'static>(
     result.map_err(|error| PipelineFailure::wrapping(&error, stage))
 }
 
+/// The reason a claimed operation that panicked fails with.
+pub const OPERATION_PANICKED: &str = "the operation stopped unexpectedly";
+
+/// `work`, with a panic inside it turned into a failure for `stage`, so a
+/// claimed operation always ends in a result and a failure is posted. The
+/// panic message itself goes to stderr through the panic hook, as any
+/// panic's does.
+async fn unless_it_panics(
+    stage: PipelineStage,
+    work: impl Future<Output = Result<()>>,
+) -> Result<()> {
+    use futures_util::FutureExt as _;
+    std::panic::AssertUnwindSafe(work)
+        .catch_unwind()
+        .await
+        .unwrap_or_else(|_| Err(PipelineFailure::new(stage, OPERATION_PANICKED)))
+}
+
 /// The row an operation needs, or a failure for `stage` that says what
 /// is `missing`.
 fn required<T, E: fmt::Display + 'static>(
@@ -613,7 +631,11 @@ impl ProcessingPipeline {
         let pipeline = self.clone();
         let template_id = template_id.to_owned();
         Ok(Box::pin(async move {
-            let result = pipeline.resummarize(meeting, &template_id).await;
+            let result = unless_it_panics(
+                PipelineStage::Summarize,
+                pipeline.resummarize(meeting, &template_id),
+            )
+            .await;
             drop(admitted);
             pipeline.reporting(meeting_id, MeetingOperation::SummaryRerun, result)
         }))
@@ -662,7 +684,8 @@ impl ProcessingPipeline {
         let admitted = self.admit(meeting_id, PipelineStage::Deliver)?;
         let pipeline = self.clone();
         Ok(Box::pin(async move {
-            let result = pipeline.deliver_again(&meeting).await;
+            let result =
+                unless_it_panics(PipelineStage::Deliver, pipeline.deliver_again(&meeting)).await;
             drop(admitted);
             pipeline.reporting(meeting_id, MeetingOperation::Reexport, result)
         }))
