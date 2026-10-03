@@ -49,22 +49,25 @@ fn identifiers_match_migrations_swift() {
 }
 
 #[test]
-fn reopening_applies_nothing_and_keeps_wal_and_foreign_keys() {
+fn reopening_applies_nothing_and_keeps_wal_foreign_keys_and_synchronous_normal() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("nested").join("steno.sqlite");
     drop(Store::open(&path).unwrap());
     let store = Store::open(&path).unwrap();
     assert_eq!(store.applied_migrations().unwrap().len(), 4);
-    let (journal, foreign_keys): (String, i64) = store
+    let (journal, foreign_keys, synchronous): (String, i64, i64) = store
         .read(|connection| {
             Ok((
                 connection.query_row("PRAGMA journal_mode", [], |row| row.get(0))?,
                 connection.query_row("PRAGMA foreign_keys", [], |row| row.get(0))?,
+                connection.query_row("PRAGMA synchronous", [], |row| row.get(0))?,
             ))
         })
         .unwrap();
     assert_eq!(journal, "wal");
     assert_eq!(foreign_keys, 1);
+    // NORMAL, as GRDB's `DatabasePool` sets it in WAL mode.
+    assert_eq!(synchronous, 1);
 }
 
 /// A database the Swift app migrated already records every identifier;

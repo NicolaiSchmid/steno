@@ -132,12 +132,17 @@ impl std::fmt::Debug for Store {
 }
 
 impl Store {
-    /// Opens (creating) the database at `path` in WAL mode with foreign keys
-    /// on and a five-second busy timeout, as GRDB's `DatabasePool` does, and
-    /// applies every pending migration. The parent directory is created.
+    /// Opens (creating) the database at `path` and applies every pending
+    /// migration. The parent directory is created. The connection is set up
+    /// as the Swift app's: WAL mode with `synchronous = NORMAL`, as GRDB's
+    /// `DatabasePool` does for every connection, so a commit appends to the
+    /// WAL without an fsync and only a checkpoint syncs; foreign keys on;
+    /// and the Swift store's five-second busy timeout. Swift:
+    /// `MeetingStore.onDisk`, and GRDB's `Database.setUpWALMode`.
+    ///
     /// Another process (the Swift app, a second copy of this one) may hold
-    /// the file at the same time: every write here begins immediate, so the
-    /// two queue on the busy timeout instead of failing.
+    /// the file at the same time: every write here begins immediate, so one
+    /// writer waits for the other on the busy timeout instead of failing.
     pub fn open(path: impl AsRef<Path>) -> Result<Store> {
         let path = path.as_ref();
         if let Some(parent) = path.parent() {
@@ -146,6 +151,7 @@ impl Store {
         let connection = Connection::open(path)?;
         connection.busy_timeout(BUSY_TIMEOUT)?;
         enable_wal(&connection)?;
+        connection.pragma_update(None, "synchronous", "NORMAL")?;
         Self::new(connection)
     }
 
