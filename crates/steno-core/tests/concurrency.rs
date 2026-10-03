@@ -6,8 +6,8 @@
 
 mod common;
 
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Barrier};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -16,9 +16,10 @@ use steno_core::Store;
 
 use common::populate;
 
-/// Writes each worker makes: enough for the two to collide on the lock
-/// many times over, few enough that the loser's busy-handler sleeps (up to
-/// 100 ms a turn) keep the test under a few seconds on a CI runner.
+/// Writes each worker makes. SQLite's busy handler polls rather than
+/// queues, so the worker that takes the lock first usually makes all of
+/// its writes back to back while the other waits once, for that whole run,
+/// on the busy timeout. The run has to fit inside the timeout.
 const WRITES_PER_WORKER: usize = 40;
 
 /// Past this a worker stops and the test fails on its count, so a stuck
@@ -28,18 +29,32 @@ const GUARD: Duration = Duration::from_secs(60);
 /// Each store on its own connection, each writer reading the row and
 /// writing it back in one transaction (the shape that made a deferred
 /// transaction fail with `database is locked` once the other side had
-/// written in between), a fixed number of times each.
+/// written in between), a fixed number of times each, both starting
+/// together so they collide.
+///
+/// Both connections commit with `synchronous = OFF`. With an fsync per
+/// commit, a disk shared with parallel builds stretched the first worker's
+/// run past the five-second busy timeout and the waiting worker failed,
+/// though nothing was wrong with the store. Without the fsync the run takes
+/// milliseconds; the collision, the immediate transaction and the busy
+/// handler are the same.
 #[test]
 fn two_stores_write_the_same_file_without_errors() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("steno.sqlite");
     let meeting = populate(&Store::open(&path).unwrap());
 
+    let start = Arc::new(Barrier::new(2));
     let workers: Vec<_> = (0..2)
         .map(|worker| {
             let path = path.clone();
+            let start = start.clone();
             thread::spawn(move || {
                 let store = Store::open(&path).unwrap();
+                store
+                    .read(|connection| Ok(connection.pragma_update(None, "synchronous", "OFF")?))
+                    .unwrap();
+                start.wait();
                 let guard = Instant::now() + GUARD;
                 let mut writes = 0;
                 let mut errors = Vec::new();
