@@ -1,7 +1,7 @@
 //! `steno_core::Diarizer` over a [`Pipeline`] whose backend loads on first
-//! use.
+//! use. Swift: `Sources/StenoSpeech/Diarization/FluidDiarizer.swift`.
 
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex, PoisonError};
 
 use steno_core::{AudioBuffer16k, BoundaryResult, DiarizationResult, Diarizer, async_trait};
 
@@ -14,13 +14,41 @@ use crate::pipeline::{DiarizerConfig, Pipeline};
 pub type BackendLoader =
     Box<dyn Fn() -> Result<Box<dyn TensorBackend>, DiarizeError> + Send + Sync>;
 
+/// The pipeline before and after its backend has loaded.
+enum Slot {
+    Pending(BackendLoader),
+    Loaded(Pipeline),
+}
+
+impl Slot {
+    /// The pipeline, loading the backend on the first call.
+    fn pipeline(&mut self, config: &DiarizerConfig) -> Result<&mut Pipeline, DiarizeError> {
+        if let Slot::Pending(loader) = self {
+            *self = Slot::Loaded(Pipeline::new(loader()?, config.clone()));
+        }
+        match self {
+            Slot::Loaded(pipeline) => Ok(pipeline),
+            Slot::Pending(_) => unreachable!("loaded above"),
+        }
+    }
+}
+
 /// The diarizer the pipeline holds as `Arc<dyn Diarizer>`. Calls run one
 /// after another behind the lock, as `FluidDiarizer` runs its calls, so
 /// one backend instance serves every meeting the pipeline processes.
+///
+/// The work is minutes of model inference, so each call runs on one of
+/// tokio's blocking threads (`spawn_blocking`) and the lock is taken and
+/// released there, never across an `.await`; the executor keeps serving
+/// the shell while a lane is analysed. The audio is cloned onto that
+/// thread (4 bytes a sample, 230 MB for an hour), the price of a
+/// `'static` task over a borrowed buffer; the analysis itself holds more.
+/// A panic mid-call leaves the pipeline as it was between calls, because
+/// the backends keep no state from one call to the next, so a poisoned
+/// lock is reused as core's store reuses its connection.
 pub struct ModelDiarizer {
     config: DiarizerConfig,
-    loader: BackendLoader,
-    pipeline: Mutex<Option<Pipeline>>,
+    slot: Arc<Mutex<Slot>>,
 }
 
 impl std::fmt::Debug for ModelDiarizer {
@@ -32,12 +60,13 @@ impl std::fmt::Debug for ModelDiarizer {
 }
 
 impl ModelDiarizer {
+    /// A diarizer whose backend `loader` builds on the first `prepare` or
+    /// `diarize`.
     #[must_use]
     pub fn new(config: DiarizerConfig, loader: BackendLoader) -> Self {
         ModelDiarizer {
             config,
-            loader,
-            pipeline: Mutex::new(None),
+            slot: Arc::new(Mutex::new(Slot::Pending(loader))),
         }
     }
 
@@ -46,13 +75,21 @@ impl ModelDiarizer {
     pub fn with_backend(config: DiarizerConfig, backend: Box<dyn TensorBackend>) -> Self {
         ModelDiarizer {
             config: config.clone(),
-            loader: Box::new(|| Err(DiarizeError::message("the backend was consumed"))),
-            pipeline: Mutex::new(Some(Pipeline::new(backend, config))),
+            slot: Arc::new(Mutex::new(Slot::Loaded(Pipeline::new(backend, config)))),
         }
     }
 
     /// The ONNX Runtime backend over the model store: the two model files
-    /// are fetched on first use.
+    /// are fetched on first use. `threads` is the intra-op thread count of
+    /// each session; zero lets ONNX Runtime decide.
+    ///
+    /// ```no_run
+    /// use steno_core::StenoPaths;
+    /// use steno_diarize::{DiarizerConfig, ModelDiarizer, ModelStore};
+    ///
+    /// let store = ModelStore::for_paths(&StenoPaths::new("/tmp/steno-support"));
+    /// let diarizer = ModelDiarizer::onnx(DiarizerConfig::default(), store, 4);
+    /// ```
     #[cfg(feature = "onnx")]
     #[must_use]
     pub fn onnx(config: DiarizerConfig, store: crate::models::ModelStore, threads: usize) -> Self {
@@ -80,29 +117,34 @@ impl ModelDiarizer {
         )
     }
 
-    /// Runs `body` on the loaded pipeline, loading it first when needed.
-    fn with_pipeline<T>(
+    /// Runs `body` on the loaded pipeline on a blocking thread, loading
+    /// the pipeline there first when needed.
+    async fn run<T>(
         &self,
-        body: impl FnOnce(&mut Pipeline) -> Result<T, DiarizeError>,
-    ) -> Result<T, DiarizeError> {
-        let mut guard = self.pipeline.lock().map_err(|_| DiarizeError::Poisoned)?;
-        if guard.is_none() {
-            let backend = (self.loader)()?;
-            *guard = Some(Pipeline::new(backend, self.config.clone()));
-        }
-        let pipeline = guard.as_mut().expect("loaded above");
-        body(pipeline)
+        body: impl FnOnce(&mut Pipeline) -> Result<T, DiarizeError> + Send + 'static,
+    ) -> BoundaryResult<T>
+    where
+        T: Send + 'static,
+    {
+        let slot = Arc::clone(&self.slot);
+        let config = self.config.clone();
+        let value = tokio::task::spawn_blocking(move || {
+            let mut guard = slot.lock().unwrap_or_else(PoisonError::into_inner);
+            body(guard.pipeline(&config)?)
+        })
+        .await??;
+        Ok(value)
     }
 }
 
 #[async_trait]
 impl Diarizer for ModelDiarizer {
     async fn prepare(&self) -> BoundaryResult<()> {
-        self.with_pipeline(|_| Ok(()))?;
-        Ok(())
+        self.run(|_| Ok(())).await
     }
 
     async fn diarize(&self, audio: &AudioBuffer16k) -> BoundaryResult<DiarizationResult> {
-        Ok(self.with_pipeline(|pipeline| pipeline.diarize(audio))?)
+        let audio = audio.clone();
+        self.run(move |pipeline| pipeline.diarize(&audio)).await
     }
 }

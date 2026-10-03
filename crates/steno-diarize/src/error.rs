@@ -1,4 +1,8 @@
-//! The crate's error type.
+//! The crate's error type: one variant per way the diarizer can fail to
+//! run, so a log line tells a model file that could not be fetched from a
+//! model that loaded but is not the one expected from a backend that
+//! failed on a tensor call. `ModelDiarizer` boxes it into core's
+//! `BoundaryResult`.
 
 use std::fmt;
 
@@ -11,6 +15,11 @@ pub enum DiarizeError {
     /// A model file could not be fetched or verified.
     #[error(transparent)]
     Model(#[from] ModelError),
+    /// A model loaded but is not the one the pipeline expects: its
+    /// metadata or its declared shapes disagree with what the pipeline
+    /// decodes.
+    #[error("model metadata: {0}")]
+    Metadata(String),
     /// The tensor backend failed to load or to run.
     #[error("tensor backend: {0}")]
     Backend(#[source] BackendError),
@@ -21,19 +30,16 @@ pub enum DiarizeError {
         expected: usize,
         got: usize,
     },
-    /// The diarizer's lock was poisoned by a panic in an earlier call.
-    #[error("the diarizer is unusable after a panic in an earlier call")]
-    Poisoned,
 }
 
 impl DiarizeError {
-    /// Wraps any backend error.
+    /// Wraps any backend error, a message included.
     pub fn backend(error: impl Into<BackendError>) -> Self {
         DiarizeError::Backend(error.into())
     }
 
-    /// A backend error from a message.
-    pub fn message(message: impl fmt::Display) -> Self {
-        DiarizeError::Backend(message.to_string().into())
+    /// A model that is not the one expected, with what differs.
+    pub fn metadata(message: impl fmt::Display) -> Self {
+        DiarizeError::Metadata(message.to_string())
     }
 }

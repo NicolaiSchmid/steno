@@ -80,7 +80,7 @@ impl OnnxBackend {
             .and_then(|value| value.trim().parse().ok())
             .unwrap_or(geometry.sample_rate);
         if sample_rate != geometry.sample_rate {
-            return Err(DiarizeError::message(format!(
+            return Err(DiarizeError::metadata(format!(
                 "the embedding model wants {sample_rate} Hz, the segmentation model {} Hz",
                 geometry.sample_rate
             )));
@@ -150,7 +150,7 @@ fn session(path: &Path, threads: usize) -> Result<Session, DiarizeError> {
         // its message is what matters.
         builder = builder
             .with_intra_threads(threads)
-            .map_err(|error| DiarizeError::message(error.to_string()))?;
+            .map_err(|error| DiarizeError::backend(error.to_string()))?;
     }
     builder
         .commit_from_file(path)
@@ -180,7 +180,7 @@ fn geometry_of(session: &Session) -> Result<SegmentationGeometry, DiarizeError> 
     if geometry.receptive_field_shift == 0
         || geometry.window_samples < geometry.receptive_field_size
     {
-        return Err(DiarizeError::message(
+        return Err(DiarizeError::metadata(
             "the segmentation model's metadata is unusable",
         ));
     }
@@ -189,7 +189,7 @@ fn geometry_of(session: &Session) -> Result<SegmentationGeometry, DiarizeError> 
         + 1;
     let max_classes = number("powerset_max_classes", 2);
     if max_classes != 2 {
-        return Err(DiarizeError::message(format!(
+        return Err(DiarizeError::metadata(format!(
             "the segmentation model allows {max_classes} simultaneous speakers; this crate decodes 2"
         )));
     }

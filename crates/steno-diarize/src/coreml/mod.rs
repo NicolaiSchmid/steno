@@ -44,7 +44,7 @@ impl std::fmt::Debug for CoreMlBackend {
 impl CoreMlBackend {
     /// Loads the three `.mlmodelc` directories from `models_dir`.
     pub fn load(models_dir: &Path) -> Result<Self, DiarizeError> {
-        let load = |name: &str| Model::load(&models_dir.join(name)).map_err(DiarizeError::message);
+        let load = |name: &str| Model::load(&models_dir.join(name)).map_err(DiarizeError::backend);
         let segmentation = load("Segmentation.mlmodelc")?;
         let fbank = load("FBank.mlmodelc")?;
         let embedding = load("Embedding.mlmodelc")?;
@@ -66,7 +66,7 @@ impl CoreMlBackend {
         );
         let window = *segmentation_input.last().unwrap_or(&0);
         if window != geometry.window_samples {
-            return Err(DiarizeError::message(format!(
+            return Err(DiarizeError::metadata(format!(
                 "Segmentation.mlmodelc takes {window} samples, expected {}",
                 geometry.window_samples
             )));

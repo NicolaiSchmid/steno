@@ -234,3 +234,41 @@ async fn the_diarizer_loads_its_backend_once_and_serialises_calls() {
     let quiet = shared.diarize(&AudioBuffer16k::silence(2.0)).await.unwrap();
     assert_eq!(quiet.clusters.len(), 0);
 }
+
+/// Eight callers at once over one shared diarizer: every call runs on a
+/// blocking thread behind the one lock, so all eight see the same
+/// result and the backend loads once.
+#[tokio::test]
+async fn concurrent_callers_get_identical_results_from_one_backend() {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use steno_core::Diarizer;
+
+    let loads = Arc::new(AtomicUsize::new(0));
+    let counter = Arc::clone(&loads);
+    let diarizer: Arc<dyn Diarizer> = Arc::new(ModelDiarizer::new(
+        DiarizerConfig::default(),
+        Box::new(move || {
+            counter.fetch_add(1, Ordering::SeqCst);
+            Ok(Box::new(FakeBackend::new()) as Box<dyn TensorBackend>)
+        }),
+    ));
+    let buffer = Arc::new(audio(
+        &[(2.0, range(0.0, 40.0)), (1.0, range(45.0, 90.0))],
+        95.0,
+    ));
+    let tasks: Vec<_> = (0..8)
+        .map(|_| {
+            let diarizer = Arc::clone(&diarizer);
+            let buffer = Arc::clone(&buffer);
+            tokio::spawn(async move { diarizer.diarize(&buffer).await.unwrap() })
+        })
+        .collect();
+    let mut results = Vec::new();
+    for task in tasks {
+        results.push(task.await.unwrap());
+    }
+    assert_eq!(results[0].clusters.len(), 2, "{:?}", results[0]);
+    assert!(results.iter().all(|result| *result == results[0]));
+    assert_eq!(loads.load(Ordering::SeqCst), 1);
+}

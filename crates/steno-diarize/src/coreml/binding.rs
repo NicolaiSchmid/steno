@@ -33,7 +33,7 @@ unsafe impl Send for Model {}
 impl Model {
     /// Loads the `.mlmodelc` directory at `path` on the default compute
     /// units (CPU, GPU and Neural Engine as `CoreML` sees fit).
-    pub fn load(path: &std::path::Path) -> Result<Self, String> {
+    pub fn load(path: &std::path::Path) -> Result<Self, BackendError> {
         let text = path.to_string_lossy();
         // SAFETY: `NSURL` and `MLModelConfiguration` are plain Foundation
         // objects built from owned values; `modelWithContentsOfURL` reads

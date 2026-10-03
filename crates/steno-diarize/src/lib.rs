@@ -55,6 +55,7 @@ pub mod segmentation;
 pub mod timeline;
 
 pub use backend::{BackendError, SegmentationGeometry, TensorBackend};
-pub use diarizer::ModelDiarizer;
+pub use diarizer::{BackendLoader, ModelDiarizer};
 pub use error::DiarizeError;
-pub use pipeline::{DiarizerConfig, Pipeline};
+pub use models::ModelStore;
+pub use pipeline::{DEFAULT_CLUSTERING_THRESHOLD, DiarizerConfig, Pipeline};
