@@ -90,6 +90,9 @@ impl OpenAiCompatibleClient {
         Ok(Self::new(endpoint, key.as_deref()))
     }
 
+    /// An HTTP client of the caller's, for a proxy or a timeout policy of
+    /// its own. Start it from [`transport::http_client_builder`]: reqwest
+    /// comes without a TLS provider here, and that builder installs one.
     #[must_use]
     pub fn with_http(mut self, http: reqwest::Client) -> Self {
         self.http = http;

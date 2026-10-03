@@ -109,16 +109,25 @@ pub(crate) fn notify(observer: Option<&Observer>, event: LlmClientEvent) {
     }
 }
 
-/// The HTTP client both clients and the credential store share by default:
-/// rustls with the `ring` provider, installed process-wide once (a second
-/// install is refused and ignored; whichever provider is in place is used).
-#[must_use]
-pub fn default_http_client() -> reqwest::Client {
+/// A `reqwest::ClientBuilder` with the TLS provider in place: reqwest is
+/// built here without one (`rustls-no-provider`), so this installs rustls's
+/// `ring` provider process-wide once (a second install is refused and
+/// ignored; whichever provider is in place is used) and hands back the
+/// builder. Every client passed to a `with_http` should start here, or TLS
+/// panics at the first `https` request.
+pub fn http_client_builder() -> reqwest::ClientBuilder {
     static PROVIDER: std::sync::OnceLock<()> = std::sync::OnceLock::new();
     PROVIDER.get_or_init(|| {
         let _ = rustls::crypto::ring::default_provider().install_default();
     });
     reqwest::Client::builder()
+}
+
+/// The HTTP client both clients and the credential store share by default:
+/// [`http_client_builder`] with reqwest's default settings.
+#[must_use]
+pub fn default_http_client() -> reqwest::Client {
+    http_client_builder()
         .build()
         .expect("a reqwest client with the default settings")
 }

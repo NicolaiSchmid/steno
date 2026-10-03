@@ -913,6 +913,15 @@ fn draft_and_notes_schemas_are_strict_and_use_the_templates_section_ids() {
 
 // Stub server
 
+/// The builder every `with_http` caller should start from leaves the TLS
+/// provider installed, which reqwest's `rustls-no-provider` build does not
+/// do on its own.
+#[test]
+fn the_http_client_builder_installs_a_tls_provider() {
+    let _client = steno_llm::transport::http_client_builder().build().unwrap();
+    assert!(rustls::crypto::CryptoProvider::get_default().is_some());
+}
+
 #[tokio::test]
 async fn stub_accepts_a_post_returns_the_script_and_records_the_parsed_request() {
     let server = StubChatServer::start().await.unwrap();
