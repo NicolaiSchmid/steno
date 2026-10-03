@@ -200,22 +200,16 @@ pub struct Attendee {
 }
 
 /// Errors of the Mac recording transaction beyond the store's own.
-#[derive(Debug, Clone, PartialEq, thiserror::Error)]
+#[derive(Debug, thiserror::Error)]
 pub enum LocalRecordingIntakeError {
     /// `complete` on a meeting that is not `recording`: nothing is written
     /// and nothing is marked failed.
     #[error("meeting {0} is {1}, not recording")]
     NotRecording(Uuid, MeetingStateKind),
-    #[error("{0}")]
-    Store(String),
+    #[error(transparent)]
+    Store(#[from] StoreError),
     #[error("{0}")]
     Pipeline(#[from] PipelineFailure),
-}
-
-impl From<StoreError> for LocalRecordingIntakeError {
-    fn from(error: StoreError) -> Self {
-        LocalRecordingIntakeError::Store(error.to_string())
-    }
 }
 
 /// The Mac recording transaction. `begin` writes the `recording` row the
@@ -301,7 +295,8 @@ impl LocalRecordingIntake {
     /// Writes the duration and the end reason, sets the asset's retention
     /// (`retention`, else the settings' default as it is now) with
     /// `expires_at` cleared, and enqueues the meeting. A meeting that is not
-    /// `recording` is left alone; any other failure marks it failed.
+    /// `recording` is left alone, its row untouched; any other failure
+    /// marks it failed.
     pub async fn complete(
         &self,
         meeting_id: Uuid,
@@ -332,21 +327,23 @@ impl LocalRecordingIntake {
             Some(retention) => retention,
             None => self.store.settings()?.default_retention,
         };
-        let mut not_recording = None;
+        let current = self
+            .store
+            .meeting(meeting_id)?
+            .ok_or(StoreError::MeetingNotFound(meeting_id))?;
+        if current.state != MeetingState::Recording {
+            return Err(LocalRecordingIntakeError::NotRecording(
+                meeting_id,
+                current.state.kind(),
+            ));
+        }
         let mut meeting = self
             .store
             .update_meeting(meeting_id, timestamp, |meeting| {
-                if meeting.state != MeetingState::Recording {
-                    not_recording = Some(meeting.state.kind());
-                    return Ok(());
-                }
                 meeting.duration = result.duration;
                 meeting.end_reason = Some(result.end_reason.clone());
                 Ok(())
             })?;
-        if let Some(kind) = not_recording {
-            return Err(LocalRecordingIntakeError::NotRecording(meeting_id, kind));
-        }
         meeting.state = MeetingState::Queued;
         let mut asset = result.asset;
         asset.meeting_id = meeting_id;
@@ -408,7 +405,121 @@ pub fn participants_from(attendees: &[Attendee], meeting_id: Uuid) -> Vec<Partic
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    use steno_core::{AudioFormat, PipelineStage};
+
     use super::*;
+
+    /// Every file under `root`, recursively.
+    fn files_under(root: &Path) -> Vec<std::path::PathBuf> {
+        let mut files = Vec::new();
+        if let Ok(entries) = std::fs::read_dir(root) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    files.extend(files_under(&path));
+                } else {
+                    files.push(path);
+                }
+            }
+        }
+        files
+    }
+
+    #[tokio::test]
+    async fn a_phone_recording_lands_in_the_audio_folder_and_a_refused_one_leaves_no_copy() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(Store::open(dir.path().join("steno.sqlite")).unwrap());
+        let audio = dir.path().join("audio");
+        let mut settings = store.settings().unwrap();
+        settings.audio_folder = file_url(&audio, true);
+        store.save_settings(&settings).unwrap();
+        let now = DateTime::parse_from_rfc3339("2026-09-24T09:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let admitted: Arc<Mutex<Vec<(Meeting, AudioAsset)>>> = Arc::default();
+        let refusing = Arc::new(AtomicBool::new(false));
+        let enqueue: Enqueue = {
+            let (admitted, refusing) = (admitted.clone(), refusing.clone());
+            Arc::new(move |meeting, asset| {
+                let admitted = admitted.clone();
+                let refuse = refusing.load(Ordering::SeqCst);
+                Box::pin(async move {
+                    if refuse {
+                        return Err(PipelineFailure::new(PipelineStage::Decode, "no runtime"));
+                    }
+                    admitted.lock().unwrap().push((meeting, asset));
+                    Ok(())
+                })
+            })
+        };
+        let intake = RecordingIntake::new(
+            store.clone(),
+            enqueue,
+            Arc::new(move || now),
+            FixedOffset::east_opt(0).unwrap(),
+        );
+        let device = PairedDevice {
+            id: Uuid::new_v4(),
+            name: "Phone".to_owned(),
+            paired_at: now,
+            last_seen_at: None,
+        };
+        store.save_paired_device(&device, &[1; 32]).unwrap();
+        let metadata = RecordingMetadata {
+            recording_id: Uuid::new_v4(),
+            started_at: now,
+            duration_seconds: 12.0,
+            byte_count: 9,
+            sha256: vec![0; 32],
+            chunk_size: 9,
+            format: AudioFormat::M4aAac,
+            device_name: "Phone".to_owned(),
+        };
+        let upload = dir.path().join("upload.m4a");
+        std::fs::write(&upload, b"aac bytes").unwrap();
+
+        let meeting_id = intake.admit(&upload, &metadata, &device).await.unwrap();
+        let (meeting, asset) = admitted.lock().unwrap()[0].clone();
+        assert_eq!(meeting.id, meeting_id);
+        assert_eq!(meeting.title, "Phone recording 2026-09-24 09:00");
+        let master = RecordingLayout::new(&audio, meeting_id).master(AudioFormat::M4aAac);
+        assert!(master.starts_with(&audio));
+        assert_eq!(asset.url, file_url(&master, false));
+        assert_eq!(asset.lanes, vec![AudioLane::Mixed]);
+        assert_eq!(std::fs::read(&master).unwrap(), b"aac bytes");
+        assert!(!upload.exists(), "the upload is deleted once enqueued");
+        assert!(matches!(
+            store.handover_receipt(metadata.recording_id).unwrap().unwrap().state,
+            HandoverState::Complete { meeting_id: id } if id == meeting_id
+        ));
+
+        refusing.store(true, Ordering::SeqCst);
+        std::fs::write(&upload, b"aac bytes").unwrap();
+        let second = RecordingMetadata {
+            recording_id: Uuid::new_v4(),
+            ..metadata.clone()
+        };
+        let error = intake.admit(&upload, &second, &device).await.unwrap_err();
+        assert!(error.to_string().contains("no runtime"), "{error}");
+        assert_eq!(
+            files_under(&audio),
+            vec![master.clone()],
+            "the refused recording's copy is gone"
+        );
+        assert!(upload.exists(), "a refused upload is kept for the retry");
+        assert!(matches!(
+            store
+                .handover_receipt(second.recording_id)
+                .unwrap()
+                .unwrap()
+                .state,
+            HandoverState::Failed(_)
+        ));
+        assert_eq!(admitted.lock().unwrap().len(), 1);
+    }
 
     #[test]
     fn attendees_are_deduplicated_by_email_then_name() {
