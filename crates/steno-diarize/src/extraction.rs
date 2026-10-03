@@ -95,13 +95,13 @@ pub fn analyze(
         min_frames: min_frames(&geometry, rules.min_segment_seconds),
         total_samples: audio.len(),
     };
+    let expected = geometry.frames_per_window * geometry.num_classes;
     let mut activities = Vec::new();
     let mut embeddings = Vec::new();
     for window in segmentation::windows(audio, &geometry, step) {
         let logits = backend
             .segment(&window.samples)
             .map_err(DiarizeError::backend)?;
-        let expected = geometry.frames_per_window * geometry.num_classes;
         if logits.len() != expected {
             return Err(DiarizeError::Shape {
                 what: "segmentation output",

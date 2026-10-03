@@ -104,13 +104,13 @@ pub fn linkage(embeddings: &[Vec<f32>]) -> Vec<Merge> {
                 chain.pop();
                 chain.pop();
                 let (keep, drop) = if a < c { (a, c) } else { (c, a) };
+                let new_size = size[keep] + size[drop];
                 merges.push(Merge {
                     left: id[keep],
                     right: id[drop],
                     distance: d,
-                    size: size[keep] + size[drop],
+                    size: new_size,
                 });
-                let new_size = size[keep] + size[drop];
                 // Lance-Williams for average linkage.
                 #[allow(clippy::cast_precision_loss)]
                 let (weight_keep, weight_drop) = (
