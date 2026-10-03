@@ -380,11 +380,7 @@ impl ModelStore {
         asset
             .files
             .iter()
-            .filter(|file| {
-                invalid
-                    || !fs::metadata(directory.join(&file.name))
-                        .is_ok_and(|m| m.is_file() && m.len() == file.size)
-            })
+            .filter(|file| invalid || !is_complete(&directory.join(&file.name), file))
             .map(|file| file.name.clone())
             .collect()
     }
@@ -396,18 +392,26 @@ impl ModelStore {
         self.missing_files(asset).is_empty()
     }
 
-    /// Hashes every installed file against the manifest.
-    pub fn verify(&self, asset: &ModelAsset) -> Result<(), SpeechError> {
+    /// The asset's directory when [`ModelStore::is_installed`], else
+    /// [`SpeechError::NotInstalled`] naming the missing files.
+    pub(crate) fn installed_directory(&self, asset: &ModelAsset) -> Result<PathBuf, SpeechError> {
         asset.validate()?;
-        let missing = self.missing_files(asset);
         let directory = self.directory(asset);
-        if !missing.is_empty() {
-            return Err(SpeechError::NotInstalled {
+        let missing = self.missing_files(asset);
+        if missing.is_empty() {
+            Ok(directory)
+        } else {
+            Err(SpeechError::NotInstalled {
                 asset: asset.id.clone(),
                 directory,
                 missing,
-            });
+            })
         }
+    }
+
+    /// Hashes every installed file against the manifest.
+    pub fn verify(&self, asset: &ModelAsset) -> Result<(), SpeechError> {
+        let directory = self.installed_directory(asset)?;
         for file in &asset.files {
             let path = directory.join(&file.name);
             check_digest(file, &path, sha256_of(&path)?)?;

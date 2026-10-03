@@ -22,9 +22,9 @@ use steno_core::protocols::{BoundaryResult, async_trait};
 use steno_core::{AudioBuffer16k, LanguageTag, RawSegment, SpeechEngine};
 
 use super::protocol::{self, FrameError, PROTOCOL_VERSION, Reply, Request};
-use crate::engine::{OnnxSpeechEngine, blocking};
+use crate::engine::{OnnxSpeechEngine, blocking, log_download};
 use crate::error::{SidecarError, SpeechError};
-use crate::model_store::{DownloadProgress, ModelAsset, ModelStore};
+use crate::model_store::{ModelAsset, ModelStore};
 use crate::onnx::OnnxOptions;
 
 /// The binary's file name, `steno-speech-sidecar` plus `.exe` on Windows.
@@ -388,16 +388,8 @@ impl Shared {
         if slot.as_ref().is_some_and(|p| p.loaded) {
             return Ok(());
         }
-        let mut report = |progress: DownloadProgress<'_>| {
-            tracing::debug!(
-                file = progress.file,
-                received = progress.received,
-                total = progress.total,
-                "model download"
-            );
-        };
         for asset in &self.assets {
-            self.store.ensure(asset, &mut report)?;
+            self.store.ensure(asset, &mut log_download)?;
         }
         if slot.is_none() {
             let process = SidecarProcess::spawn(&self.config)?;

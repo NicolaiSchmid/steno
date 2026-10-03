@@ -94,16 +94,8 @@ impl OnnxSpeechEngine {
         config: PipelineConfig,
         vad: VadConfig,
     ) -> Result<Transcriber<OnnxBackend>, SpeechError> {
-        let mut report = |progress: DownloadProgress<'_>| {
-            tracing::debug!(
-                file = progress.file,
-                received = progress.received,
-                total = progress.total,
-                "model download"
-            );
-        };
-        store.ensure(&ModelAsset::silero_vad(), &mut report)?;
-        store.ensure(&ModelAsset::parakeet_v3_fp32(), &mut report)?;
+        store.ensure(&ModelAsset::silero_vad(), &mut log_download)?;
+        store.ensure(&ModelAsset::parakeet_v3_fp32(), &mut log_download)?;
         Self::load_installed(store, options, config, vad)
     }
 
@@ -117,25 +109,10 @@ impl OnnxSpeechEngine {
         config: PipelineConfig,
         vad: VadConfig,
     ) -> Result<Transcriber<OnnxBackend>, SpeechError> {
-        let silero = ModelAsset::silero_vad();
-        let parakeet = ModelAsset::parakeet_v3_fp32();
-        for asset in [&silero, &parakeet] {
-            asset.validate()?;
-            let missing = store.missing_files(asset);
-            if !missing.is_empty() {
-                return Err(SpeechError::NotInstalled {
-                    asset: asset.id.clone(),
-                    directory: store.directory(asset),
-                    missing,
-                });
-            }
-        }
-        let (backend, vocab) = OnnxBackend::load(&store.directory(&parakeet), options)?;
-        let detector = SileroVad::load(
-            &store.directory(&silero).join("silero_vad.onnx"),
-            options,
-            vad,
-        )?;
+        let vad_directory = store.installed_directory(&ModelAsset::silero_vad())?;
+        let model_directory = store.installed_directory(&ModelAsset::parakeet_v3_fp32())?;
+        let (backend, vocab) = OnnxBackend::load(&model_directory, options)?;
+        let detector = SileroVad::load(&vad_directory.join("silero_vad.onnx"), options, vad)?;
         Ok(Transcriber::new(
             backend,
             vocab,
@@ -144,6 +121,16 @@ impl OnnxSpeechEngine {
             config,
         ))
     }
+}
+
+/// Download progress of the model store, to `tracing` at debug level.
+pub(crate) fn log_download(progress: DownloadProgress<'_>) {
+    tracing::debug!(
+        file = progress.file,
+        received = progress.received,
+        total = progress.total,
+        "model download"
+    );
 }
 
 /// Runs `work` off the async executor when one is present, inline
