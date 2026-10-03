@@ -720,4 +720,22 @@ mod tests {
             Vec::new()
         );
     }
+
+    #[test]
+    fn splice_candidate_excludes_both_gap_edges() {
+        let vocab = sample();
+        let lead = token(12, 100);
+        let tail = token(13, 140);
+        // Word starts unrelated to the border words, placed exactly on the
+        // gap edges and one frame inside them: `frame > start` and
+        // `frame + 1 < end` keep only the inner pair.
+        let window = vec![
+            token(14, 100), // on the gap start
+            token(14, 101), // first frame inside
+            token(5, 138),  // last frame inside
+            token(5, 139),  // frame + 1 == gap end
+        ];
+        let candidate = splice_candidate(&window, 100, 140, lead, tail, &vocab);
+        assert_eq!(candidate, vec![token(14, 101), token(5, 138)]);
+    }
 }
