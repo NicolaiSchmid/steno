@@ -20,7 +20,7 @@ Everything the Swift app does outside its three windows, per OS:
 | Launch at login (`autostart.rs`) | Launch Agent | `~/.config/autostart` entry | Run registry key |
 | Updates (`updater.rs`) | signed manifest per lane | same | same |
 | Permissions (`permissions.rs`) | microphone TCC status and prompt; system audio and calendar deferred to the host's probes | unknown (nothing to query before capture; the portal asks when the stream opens) | unknown (the privacy switch decides at capture time) |
-| Deep links (`deep_links.rs`) | `steno:` through `Info.plist` | the desktop entry in `linux/` (`Exec=… %u`, the `x-scheme-handler/steno` MIME type; debug builds register at start) | registry (debug builds register at start) |
+| Deep links (`deep_links.rs`) | `steno:` through `CFBundleURLTypes`, written into the bundle by the deep-link plugin from `plugins.deep-link` | the `.deb`'s desktop entry from `linux/` (`Exec=… %u`, the `x-scheme-handler/steno` MIME type); an AppImage and a debug build register at start | registry (debug builds register at start) |
 | Single instance | Unix socket | session bus name (skipped without a session bus, as in the headless smoke) | named mutex |
 | Dialogs (`dialogs.rs`) | `NSOpenPanel` sheet | GTK file chooser | common item dialog |
 
@@ -176,9 +176,10 @@ loss and JSON, the probe before measuring, which size reports are
 accepted and how they are clamped), the one content rule, the prompt
 query and its numbering, the window requests a page is owed before it
 mounts, when the main window hides on close and when the process ends,
-the login item states, the update lanes, the permission panes per OS, the `steno:` link grammar and its case rules,
-the Linux desktop entry, and the folder choosers' replies. `cargo test -p steno-desktop --no-default-features` the
-same without the fixture host. In the web app, `tauri-transport.test.ts`
+the login item states, the update lanes, the permission panes per OS,
+the `steno:` link grammar and its case rules, the Linux desktop entry,
+and the folder choosers' replies. `cargo test -p steno-desktop
+--no-default-features` runs the same without the fixture host. In the web app, `tauri-transport.test.ts`
 covers the page's half of the wire and `src/windows/panels/*.test.tsx` the
 two panels.
 
@@ -280,15 +281,18 @@ of a window. Launch at login is a Launch Agent, not `SMAppService`; WP9
 has to retire the Swift registration at cutover so the user does not get
 two login items (the plan's parity list). The macOS menu bar has no
 Record menu yet (`⌘⇧R` and Record In Person are the tray's and the
-sidebar's). On macOS the system audio permission has no status API; the
+sidebar's), and no Find Meetings (`⌘F`). Updates are checked only when
+asked (the tray's item, Settings), where Sparkle checks daily on its own. On macOS the system audio permission has no status API; the
 audio crate's probe (WP5) records it and until then it reads `unknown`.
 The panels are re-tuned on the Mac once they run there beside the Swift
 ones (the plan's risk list). Linux and Windows keep their native title
 bar; macOS gets the overlay title bar the Swift windows have. The page's
 traffic light inset is a design question for the other two platforms. On
-Linux, WebKitGTK leaks one
-shared-memory file descriptor per destroyed webview that lived longer than
-about 250 ms (29 to 107 fds over 70 Settings open/close cycles; wry/WebKitGTK
-level, not the shell), so long sessions with many Settings opens should be
-watched until [#160](https://github.com/NicolaiSchmid/steno/issues/160) is
-resolved.
+Linux, WebKitGTK leaks one shared-memory file descriptor per destroyed
+webview that lived longer than about 250 ms (29 to 107 fds over 70
+Settings open/close cycles; wry/WebKitGTK level, not the shell), so long
+sessions with many Settings opens should be watched until
+[#160](https://github.com/NicolaiSchmid/steno/issues/160) is resolved. On
+Linux a panel keeps a 5 px resize border that Tauri gives every
+undecorated resizable window; a press there starts a resize the pinned
+size refuses, so it does nothing.

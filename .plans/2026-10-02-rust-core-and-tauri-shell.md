@@ -632,6 +632,9 @@ fix is ported to Swift before cutover.
   the approval state becomes unreachable.
 - The menu bar on macOS carries the application, Edit and Window menus; the Swift
   Record menu (`⌘⇧R`, Record In Person) and Find Meetings (`⌘F`) are not in it yet.
+- Updates: Sparkle checks daily on its own (`SUEnableAutomaticChecks`,
+  `SUScheduledCheckInterval` 86400 in `apps/macos/project.yml`); the shell checks only
+  when asked (the tray's Check for Updates, `updates.check` from Settings).
 
 ### Bridge
 

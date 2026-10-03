@@ -7,14 +7,17 @@
 //! Windows before any pipeline exists; `WP6b` swaps the host for the real one.
 //!
 //! What the shell owns beside the windows (WP8): the tray (`tray`), the
-//! panels (`panels`), launch at login (`autostart`), updates (`updater`),
-//! the OS permissions (`permissions`), the `steno:` links (`deep_links`),
-//! the native dialogs (`dialogs`) and the single instance. Secrets are not
-//! the shell's: the keyring `SecretStore` lives in `steno-services` (#173,
-//! `WP6b`). Every one is a thin module over a Tauri plugin or an
-//! OS API with its rules in plain functions the tests cover. Everything
-//! that is on the wire (errors, topics, windows, sections, params) is the
-//! `steno-bridge` crate's type; the shell adds only what it needs on top
+//! macOS menu bar (`menu`), the actions behind both menus (`actions`), the
+//! recorder state the shell follows (`recording`), the panels (`panels`)
+//! and their geometry (`panel_geometry`), window lifetime (`windows`),
+//! launch at login (`autostart`), updates (`updater`), the OS permissions
+//! (`permissions`), the `steno:` links (`deep_links`), the native dialogs
+//! (`dialogs`) and the single instance. Secrets are not the shell's: the
+//! keyring `SecretStore` lives in `steno-services` (#173, `WP6b`). Every
+//! one is a thin module over a Tauri plugin or an OS API with its rules in
+//! plain functions the tests cover. Everything that is on the wire
+//! (errors, topics, windows, sections, params) is the `steno-bridge`
+//! crate's type; the shell adds only what it needs on top
 //! (`recording::RecorderState`, `windows::Spec`).
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
@@ -86,11 +89,12 @@ fn main() {
         ])
         .setup(|app| {
             let handle = app.handle();
-            // No tray is not fatal: the windows still work, and the process
-            // still stays alive for them. On Linux the tray crate panics
-            // (rather than errs) when libayatana-appindicator is not
-            // installed, so the panic is caught here; the .deb depends on
-            // the library and the AppImage bundles it.
+            // No tray is not fatal: the windows still work, and closing
+            // main then ends the process (`exits_when_destroyed`). On Linux
+            // the tray crate panics (rather than errs) when
+            // libayatana-appindicator is not installed, so the panic is
+            // caught here; the .deb depends on the library, the AppImage
+            // does not bundle it (README, Bundles).
             let built =
                 std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| tray::build(handle)));
             match built {

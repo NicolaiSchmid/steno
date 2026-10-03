@@ -10,7 +10,8 @@ import { cn } from "@/lib/cn";
 
 /**
  * The pill: popover fill (opaque in both appearances), a hairline border,
- * the `xl` radius, the pop shadow that a floating surface over arbitrary
+ * the `2xl` radius (the web scale's nearest to the Swift `Theme.Radius.xl`),
+ * the pop shadow that a floating surface over arbitrary
  * content needs. `data-tauri-drag-region` lets the user drag the panel by
  * its background; buttons inside stop the drag by being buttons.
  */
