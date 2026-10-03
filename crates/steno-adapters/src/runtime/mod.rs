@@ -4,5 +4,5 @@
 mod coordinator;
 mod ledger;
 
-pub use coordinator::{DeliveryCoordinator, DestinationFactory};
+pub use coordinator::{DeliveryCoordinator, DestinationFactory, local_time_zone};
 pub use ledger::{DeliveryLedger, receipt_folder_path};

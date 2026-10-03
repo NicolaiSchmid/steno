@@ -27,6 +27,8 @@ pub struct DeliveryLedger {
 }
 
 impl DeliveryLedger {
+    /// The ledger for `root`; `previous` applies only when it is from this
+    /// root and stays inside it.
     #[must_use]
     pub fn new(previous: Option<&DeliveryReceipt>, root: &str) -> Self {
         let previous = previous
@@ -164,10 +166,9 @@ impl DeliveryLedger {
     }
 
     /// The receipt's folder and every file path are plain relative paths
-    /// (non-empty, only named components: no `..`, no `.`, no root, no
-    /// drive), the rule the destination applies to its people folder. A
-    /// stored path that fails it would be joined with the root blindly, so
-    /// such a receipt applies to nothing.
+    /// ([`DeliveryLedger::is_plain_relative`]), the rule the destination
+    /// applies to its people folder. A stored path that fails it would be
+    /// joined with the root blindly, so such a receipt applies to nothing.
     fn stays_inside_root(receipt: &DeliveryReceipt) -> bool {
         Self::is_plain_relative(&receipt.folder)
             && receipt
@@ -176,7 +177,11 @@ impl DeliveryLedger {
                 .all(|file| Self::is_plain_relative(&file.relative_path))
     }
 
-    fn is_plain_relative(path: &str) -> bool {
+    /// Non-empty, only named components: no `..`, no root, no drive, no
+    /// leading `.` (`Path::components` drops an interior one). The one rule
+    /// for a receipt's paths and for the people folder, so a folder the
+    /// destination accepts never yields a receipt the ledger refuses.
+    pub(crate) fn is_plain_relative(path: &str) -> bool {
         let mut components = Path::new(path).components().peekable();
         components.peek().is_some()
             && components.all(|component| matches!(component, Component::Normal(_)))
@@ -208,8 +213,15 @@ impl DeliveryLedger {
 }
 
 /// `root` joined with `folder`: the meeting folder to reveal in the file
-/// manager. Swift: `DeliveryReceipt.folderURL`.
+/// manager. A folder that is not a plain relative path (a tampered or
+/// foreign receipt) is not joined; the root itself is revealed instead.
+/// Swift: `DeliveryReceipt.folderURL`.
 #[must_use]
 pub fn receipt_folder_path(receipt: &DeliveryReceipt) -> PathBuf {
-    Path::new(&receipt.root).join(&receipt.folder)
+    let root = Path::new(&receipt.root);
+    if DeliveryLedger::is_plain_relative(&receipt.folder) {
+        root.join(&receipt.folder)
+    } else {
+        root.to_path_buf()
+    }
 }

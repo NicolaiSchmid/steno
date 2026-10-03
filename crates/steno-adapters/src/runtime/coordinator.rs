@@ -107,6 +107,9 @@ impl DeliveryCoordinator {
     }
 }
 
+/// `deliver_all` does blocking file I/O (the `fsync`ed writes, the audio
+/// copy) on the calling thread; the host runs it under `spawn_blocking` or
+/// an equivalent, not on an async executor's worker.
 #[async_trait]
 impl DeliveryDispatcher for DeliveryCoordinator {
     async fn deliver_all(&self, meeting_id: Uuid) -> Vec<Delivery> {
@@ -175,9 +178,11 @@ impl DeliveryDispatcher for DeliveryCoordinator {
 /// The machine's IANA time zone. Swift: `TimeZone.current`. When the name
 /// cannot be read or the zone tables do not know it, the destination runs
 /// in UTC: the folder dates and the times in the notes shift to UTC and
-/// nothing is logged, since the crate has no logger; the shell shows the
-/// zone it resolved in Settings.
-fn local_time_zone() -> Tz {
+/// nothing is logged, since the crate has no logger. The shell calls this
+/// too and shows the zone it resolved in Settings, which is where a UTC
+/// fallback becomes visible.
+#[must_use]
+pub fn local_time_zone() -> Tz {
     iana_time_zone::get_timezone()
         .ok()
         .and_then(|name| name.parse().ok())

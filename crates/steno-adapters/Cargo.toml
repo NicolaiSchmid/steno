@@ -9,6 +9,11 @@ repository.workspace = true
 publish.workspace = true
 
 [dependencies]
+# Only for `json::to_canonical_string`, the Foundation-style pretty printer
+# `meeting.json` is written with. It belongs in `steno-core`; the move waits
+# for #161 (`refactor/rust-bridge-on-core`), which makes the bridge depend on
+# the core. Until then a copy in the core would be a second printer to keep
+# byte-identical.
 steno-bridge = { path = "../steno-bridge" }
 steno-core = { path = "../steno-core" }
 

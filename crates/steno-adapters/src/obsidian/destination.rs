@@ -87,6 +87,7 @@ impl ObsidianFolderDestination {
         Self::with_id(settings, time_zone, Self::DESTINATION_ID)
     }
 
+    /// A destination with its own `Delivery` row id (`steno deliver --vault`).
     #[must_use]
     pub fn with_id(settings: ObsidianSettings, time_zone: Tz, id: &str) -> Self {
         let sink = LocalFolderSink::new(PathBuf::from(&settings.vault_path));
@@ -109,9 +110,9 @@ impl ObsidianFolderDestination {
     }
 
     /// The vault is a writable directory (probed with a file that is created
-    /// and removed) and the people folder is a relative path without `..`. A
-    /// missing `.obsidian/` is not an error: the folder may be a vault
-    /// Obsidian has not opened yet.
+    /// and removed) and the people folder is a plain relative path (no `..`,
+    /// no `.`). A missing `.obsidian/` is not an error: the folder may be a
+    /// vault Obsidian has not opened yet.
     pub fn validate_vault(&self) -> Result<(), ObsidianError> {
         self.check_vault()?;
         let probe = format!(".steno-probe-{}", AtomicFileWriter::random_hex());
@@ -121,6 +122,8 @@ impl ObsidianFolderDestination {
             .map_err(|_| ObsidianError::VaultNotWritable(self.settings.vault_path.clone()))
     }
 
+    /// [`Destination::deliver`] without the boundary error wrapper; the CLI
+    /// calls it directly.
     pub fn deliver_meeting(
         &self,
         meeting: &MeetingExport,
@@ -131,7 +134,11 @@ impl ObsidianFolderDestination {
         let folder = ledger
             .pinned_folder()
             .map_or_else(|| self.resolve_folder(meeting), str::to_owned);
-        let slug = folder.rsplit('/').next().unwrap_or(&folder).to_owned();
+        // Swift's `lastPathComponent`: a pinned `Meetings/x/` still names `x`.
+        let slug = Path::new(&folder).file_name().map_or_else(
+            || folder.clone(),
+            |name| name.to_string_lossy().into_owned(),
+        );
         let options = RenderOptions {
             link_style: LinkStyle::Wikilink,
             person_pages: self.settings.people_folder.is_some(),
@@ -171,7 +178,9 @@ impl ObsidianFolderDestination {
     /// Writes every rendered page into `people_folder`: whole when the page
     /// is new, else with this meeting's line merged into its managed block;
     /// then drops the line from the previous receipt's pages this delivery
-    /// did not render.
+    /// did not render. File names are written as the model holds them, NFC
+    /// (`Anna Müller.md`); Foundation writes them NFD on APFS, which treats
+    /// the two as one file, and both receipts store NFC.
     fn write_person_pages(
         &self,
         people_folder: &str,
@@ -323,8 +332,14 @@ impl ObsidianFolderDestination {
                 .any(|name| is_audio(name))
     }
 
-    /// The vault exists and the people folder, if any, is a relative path
-    /// without `..`, `\`, empty components or surrounding whitespace.
+    /// The vault exists and the people folder, if any, is a plain relative
+    /// path by the ledger's rule ([`DeliveryLedger::is_plain_relative`]: no
+    /// `..`, no root, no drive, no leading `.`) and has no `.` or empty
+    /// component (`Path::components` drops an interior `.`, so the ledger
+    /// cannot see those), no `\` and no surrounding whitespace. The ledger's
+    /// rule is part of it so the receipt paths this folder yields are ones
+    /// the ledger accepts on the next delivery; Swift's `checkVault` accepts
+    /// `./People` (parity list in the plan).
     pub(crate) fn check_vault(&self) -> Result<(), ObsidianError> {
         if !self.sink.is_directory("") {
             return Err(ObsidianError::VaultMissing(
@@ -334,13 +349,12 @@ impl ObsidianFolderDestination {
         let Some(folder) = &self.settings.people_folder else {
             return Ok(());
         };
-        let valid = !folder.is_empty()
-            && !folder.starts_with('/')
+        let valid = DeliveryLedger::is_plain_relative(folder)
             && !folder.contains('\\')
             && folder == folder.trim()
             && !folder
                 .split('/')
-                .any(|component| component == ".." || component.is_empty());
+                .any(|component| component == "." || component.is_empty());
         if valid {
             Ok(())
         } else {
