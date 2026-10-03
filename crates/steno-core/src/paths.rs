@@ -118,11 +118,13 @@ fn is_path_allowed(byte: u8) -> bool {
 }
 
 /// The local path of a `file://` URL as [`file_url`] spells it: the
-/// percent-encoding undone, the host part (empty or `localhost`) dropped,
-/// a directory's trailing slash dropped (the audio folder reads back as
-/// `.../audio`), and on Windows the drive path restored with backslashes.
-/// A `%` that is not followed by two hex digits is kept as it is. `None`
-/// for any other scheme. Swift: `URL.path` of the stored `mixdownURL` or
+/// percent-encoding undone, any host part dropped (`file://server/share/x`
+/// reads as `/share/x`), a directory's trailing slash dropped except on `/`
+/// and a drive root `/X:/` (the audio folder reads back as `.../audio`),
+/// and on Windows a drive path restored with backslashes.
+/// A `%` that is not followed by two hex digits is kept as it is. The
+/// decoded bytes must be UTF-8. `None` for any other scheme or a URL
+/// without a path. Swift: `URL.path` of the stored `mixdownURL` or
 /// `audioFolder`.
 #[must_use]
 pub fn file_url_path(url: &str) -> Option<PathBuf> {
@@ -149,11 +151,8 @@ pub fn file_url_path(url: &str) -> Option<PathBuf> {
             index += 1;
         }
     }
-    let mut decoded = String::from_utf8(bytes).ok()?;
-    // A drive root (`/C:/`) keeps its slash: `C:` alone is drive-relative.
-    if decoded.len() > 1 && decoded.ends_with('/') && !decoded.ends_with(":/") {
-        decoded.pop();
-    }
+    drop_trailing_slash(&mut bytes);
+    let decoded = String::from_utf8(bytes).ok()?;
     // `file_url` spelt a Windows drive path with forward slashes behind a
     // leading `/`; both are undone so the path reads back as the OS spells
     // it. A path without a drive (a Mac URL read on Windows) keeps its
@@ -165,6 +164,19 @@ pub fn file_url_path(url: &str) -> Option<PathBuf> {
         decoded
     };
     Some(PathBuf::from(decoded))
+}
+
+/// Drops a directory's one trailing `/` from decoded path bytes, as Swift's
+/// `URL.path` does, before any UTF-8 step: `/` stays, and so does a drive
+/// root `/X:/` (a drive letter `X`), because `C:` alone is drive-relative.
+/// Every other `.../` loses the slash, a name ending in `:` included
+/// (`/Volumes/a:/` reads as `/Volumes/a:`).
+fn drop_trailing_slash(bytes: &mut Vec<u8>) {
+    let drive_root =
+        matches!(bytes.as_slice(), [b'/', drive, b':', b'/'] if drive.is_ascii_alphabetic());
+    if bytes.len() > 1 && bytes.last() == Some(&b'/') && !drive_root {
+        bytes.pop();
+    }
 }
 
 #[cfg(test)]
@@ -216,36 +228,57 @@ mod tests {
             "a percent sign without two hex digits stays as it is"
         );
         assert_eq!(file_url_path("file:///tmp/%FF.wav"), None, "not UTF-8");
-        // A directory reads back without its slash, as `URL.path` does.
+        assert_eq!(file_url_path("https://example.com/x"), None);
+        assert_eq!(file_url_path("file://host-only"), None);
+    }
+
+    /// The trailing-slash rule, in one place. #166 applies the same check
+    /// to the same bytes, so its Unix branch only changes the UTF-8 step.
+    #[test]
+    fn a_directory_loses_its_trailing_slash_as_url_path_does() {
+        let dropped = |path: &[u8]| {
+            let mut bytes = path.to_vec();
+            drop_trailing_slash(&mut bytes);
+            bytes
+        };
+        assert_eq!(dropped(b"/tmp/a:/"), b"/tmp/a:");
+        assert_eq!(dropped(b"/Volumes/a:/"), b"/Volumes/a:");
+        assert_eq!(dropped(b"/Users/x/"), b"/Users/x");
+        assert_eq!(dropped(b"/C:/x/"), b"/C:/x");
+        assert_eq!(dropped(b"/tmp/x//"), b"/tmp/x/", "one slash only");
+        assert_eq!(dropped(b"/tmp/x"), b"/tmp/x");
+        assert_eq!(dropped(b"/"), b"/", "the root keeps its slash");
+        assert_eq!(dropped(b"/C:/"), b"/C:/", "a drive root keeps its slash");
+        assert_eq!(dropped(b"/z:/"), b"/z:/");
+        assert_eq!(dropped(b"/1:/"), b"/1:", "only a letter names a drive");
+        assert_eq!(dropped(b"/ab:/"), b"/ab:");
+        assert_eq!(
+            dropped(b"/tmp/\xFF/"),
+            b"/tmp/\xFF",
+            "the rule reads bytes, before any UTF-8 step"
+        );
+
+        // Through `file_url_path`, which needs UTF-8 after the rule.
+        assert_eq!(file_url_path("file:///tmp/%FF/"), None, "not UTF-8");
+        let path = |url: &str| file_url_path(url).unwrap().to_string_lossy().into_owned();
+        assert_eq!(path("file:///tmp/a:/"), "/tmp/a:");
+        assert_eq!(path("file:///Volumes/a:/"), "/Volumes/a:");
         if cfg!(windows) {
+            assert_eq!(path("file:///C:/Users/x/Audio/"), r"C:\Users\x\Audio");
+            assert_eq!(path("file:///C:/"), r"C:\");
             assert_eq!(
-                file_url_path("file:///C:/Users/x/Audio/")
-                    .unwrap()
-                    .to_string_lossy(),
-                r"C:\Users\x\Audio"
-            );
-            assert_eq!(
-                file_url_path("file:///C:/").unwrap().to_string_lossy(),
-                r"C:\"
-            );
-            assert_eq!(
-                file_url_path("file:///Users/x/Audio/")
-                    .unwrap()
-                    .to_string_lossy(),
+                path("file:///Users/x/Audio/"),
                 "/Users/x/Audio",
                 "a path without a drive keeps its slashes"
             );
         } else {
-            assert_eq!(
-                file_url_path(&file_url(Path::new("/tmp/a b"), true))
-                    .unwrap()
-                    .to_string_lossy(),
-                "/tmp/a b"
-            );
-            assert_eq!(file_url_path("file:///"), Some(PathBuf::from("/")));
+            assert_eq!(path("file:///"), "/");
+            assert_eq!(path("file:///C:/"), "/C:/");
+            assert_eq!(path("file:///Users/x/"), "/Users/x");
+            for directory in ["/tmp/a b", "/tmp/a:"] {
+                assert_eq!(path(&file_url(Path::new(directory), true)), directory);
+            }
         }
-        assert_eq!(file_url_path("https://example.com/x"), None);
-        assert_eq!(file_url_path("file://host-only"), None);
     }
 
     #[test]
