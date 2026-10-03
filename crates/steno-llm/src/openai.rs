@@ -404,18 +404,18 @@ impl OpenAiCompatibleClient {
         }
         LlmError::Http {
             status: reply.status,
-            body: self.redact(&Self::error_message(reply)),
+            body: Self::error_message(reply, self.secrets()),
         }
     }
 
     /// The server's `error.message`, else the first 500 characters of the
-    /// body.
+    /// body, with every secret redacted.
     #[must_use]
-    pub fn error_message(reply: &HttpReply) -> String {
+    pub fn error_message(reply: &HttpReply, secrets: &[String]) -> String {
         if let Ok(envelope) = wire::decode::<ChatErrorEnvelope>(&reply.body) {
-            return envelope.error.message;
+            return transport::redact(&envelope.error.message, secrets);
         }
-        reply.body_text().chars().take(500).collect()
+        transport::redacted_prefix(&reply.body_text(), secrets, 500)
     }
 
     /// A 400 whose message names the structured output request: the cue to

@@ -544,10 +544,7 @@ impl CodexCredentialStore {
     }
 
     async fn refresh_once(&self, file: AuthFile) -> Result<CodexCredentials, RefreshFailure> {
-        let secrets = [
-            file.credentials.refresh_token.clone(),
-            file.credentials.access_token.clone(),
-        ];
+        let secrets = file.credentials.secrets();
         let body = serde_json::json!({
             "grant_type": "refresh_token",
             "client_id": self.client_id,
@@ -574,14 +571,11 @@ impl CodexCredentialStore {
             let code = rejection
                 .code()
                 .map(|code| transport::redact(&code, &secrets));
-            let fallback = String::from_utf8_lossy(&data[..data.len().min(300)]).into_owned();
-            let message = transport::redact(
-                &format!(
-                    "HTTP {status}: {}",
-                    rejection.message().unwrap_or(fallback.as_str())
-                ),
-                &secrets,
-            );
+            let message = match rejection.message() {
+                Some(message) => transport::redact(message, &secrets),
+                None => transport::redacted_prefix(&String::from_utf8_lossy(&data), &secrets, 300),
+            };
+            let message = format!("HTTP {status}: {message}");
             let permanent = status == 401
                 || code
                     .as_deref()

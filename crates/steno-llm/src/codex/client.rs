@@ -512,14 +512,10 @@ impl CodexResponsesClient {
     #[must_use]
     pub fn classify(reply: &HttpReply, secrets: &[String]) -> LlmError {
         let envelope = wire::decode::<CodexErrorEnvelope>(&reply.body).ok();
-        let fallback: String = reply.body_text().chars().take(500).collect();
-        let message = transport::redact(
-            envelope
-                .as_ref()
-                .and_then(CodexErrorEnvelope::message)
-                .unwrap_or(fallback.as_str()),
-            secrets,
-        );
+        let message = match envelope.as_ref().and_then(CodexErrorEnvelope::message) {
+            Some(message) => transport::redact(message, secrets),
+            None => transport::redacted_prefix(&reply.body_text(), secrets, 500),
+        };
         if let Some(kind) = envelope.as_ref().and_then(CodexErrorEnvelope::kind)
             && Self::PLAN_LIMIT_KINDS.contains(&kind.as_str())
         {

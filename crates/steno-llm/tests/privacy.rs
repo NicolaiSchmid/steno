@@ -12,7 +12,7 @@ use chrono::Utc;
 use common::*;
 use steno_core::{MeetingSummarizer, SummaryTemplate, TranscriptCleaner};
 use steno_llm::inputs::{cleanup_input, summary_input};
-use steno_llm::testing::{RecordedRequest, StubChatServer, scripts};
+use steno_llm::testing::{RecordedRequest, StubChatServer, StubResponse, scripts};
 use steno_llm::{
     LlmEndpoint, LlmMeetingSummarizer, LlmTranscriptCleaner, OpenAiCompatibleClient, RetryPolicy,
     TranscriptChunker,
@@ -228,4 +228,160 @@ async fn the_codex_client_sends_text_only_and_keeps_the_tokens_in_headers() {
     // The token endpoint was never needed: nothing but the backend saw a
     // request, and the refresh token never went anywhere.
     assert_eq!(harness.home.server.requests().len(), 0);
+}
+
+// No secret reaches an error, a `Debug` form or an observer event, however
+// often and wherever a server echoes it.
+
+/// Fails when `text` holds any secret, or the first half of a long one (a
+/// cut that kept part of it).
+fn assert_no_secret(text: &str, secrets: &[String], what: &str) {
+    for secret in secrets {
+        assert!(
+            !text.contains(secret.as_str()),
+            "{what} carries a secret: {text}"
+        );
+        if secret.len() >= 16 {
+            let half = &secret[..secret.len() / 2];
+            assert!(
+                !text.contains(half),
+                "{what} carries part of a secret: {text}"
+            );
+        }
+    }
+}
+
+fn assert_error_redacted(error: &(impl std::fmt::Display + std::fmt::Debug), secrets: &[String]) {
+    assert_no_secret(&error.to_string(), secrets, "Display");
+    assert_no_secret(&format!("{error:?}"), secrets, "Debug");
+}
+
+/// Each secret twice in the error message, once as an echoed header and
+/// once in a nested field.
+fn echoing_envelope(secrets: &[String]) -> String {
+    let all = secrets.join(" and ");
+    serde_json::json!({
+        "error": {
+            "message": format!("rejected {all}; seen again: {all}"),
+            "type": "invalid_request_error",
+        },
+        "echo": {"headers": {"authorization": format!("Bearer {}", secrets[0])}},
+        "nested": {"deep": [secrets]},
+    })
+    .to_string()
+}
+
+/// A body that is not an error envelope, so the client falls back to its
+/// first `limit` characters: `echoed` as a header echo and in a nested
+/// field, then `cut` placed so it straddles the limit.
+fn echoing_plain_body(echoed: &[String], cut: &str, limit: usize) -> Vec<u8> {
+    let mut body = format!(
+        "Authorization: Bearer {}\n{}\n",
+        echoed[0],
+        serde_json::json!({"nested": {"deep": echoed}})
+    );
+    let start = limit - cut.len() / 2;
+    assert!(body.len() < start, "the echo fits before the cut");
+    body.push_str(&"x".repeat(start - body.len()));
+    body.push_str(cut);
+    body.push_str(" trailing");
+    body.into_bytes()
+}
+
+#[tokio::test]
+async fn the_endpoint_client_redacts_every_copy_of_the_api_key() {
+    let secrets = vec![API_KEY.to_owned()];
+    let harness = ClientHarness::with_retry(RetryPolicy::NONE).await;
+    let twice = format!("{API_KEY} and {API_KEY}");
+    harness.server.enqueue([
+        StubResponse::new(400, echoing_envelope(&secrets).into_bytes())
+            .with_header("Content-Type", "application/json")
+            .with_header("X-Echo", &format!("Bearer {API_KEY}")),
+        StubResponse::new(400, echoing_plain_body(&secrets, API_KEY, 500)),
+        scripts.refusal(&format!("I saw {twice}")),
+        StubResponse::new(200, format!("not a completion: {twice}").into_bytes()),
+    ]);
+    for _ in 0..4 {
+        let error = harness
+            .client
+            .complete_llm(&text_request())
+            .await
+            .unwrap_err();
+        assert_error_redacted(&error, &secrets);
+        assert!(error.to_string().contains("[redacted]"), "{error}");
+    }
+    for event in harness.events() {
+        assert_no_secret(&format!("{event:?}"), &secrets, "an event");
+    }
+    assert_no_secret(&format!("{:?}", harness.client), &secrets, "the client");
+}
+
+#[tokio::test]
+async fn the_codex_client_redacts_every_copy_of_the_tokens_and_the_account_id() {
+    let harness = CodexHarness::build(RetryPolicy::NONE, "gpt-stub", |_| {}).await;
+    let access = CodexHome::access_token(3_600, "plus");
+    let secrets = vec![
+        access.clone(),
+        "rt_original".to_owned(),
+        "acct_stored".to_owned(),
+    ];
+    let all = secrets.join(" and ");
+    harness.backend.enqueue([
+        StubResponse::new(400, echoing_envelope(&secrets).into_bytes())
+            .with_header("Content-Type", "application/json"),
+        StubResponse::new(400, echoing_plain_body(&secrets[1..], &access, 500)),
+        scripts.responses_error_event(&format!("{all}; again {all}"), "server_error"),
+        scripts.responses_refusal(&format!("I saw {all}; again {all}")),
+        StubResponse::new(200, format!("<html>{all}; again {all}</html>").into_bytes()),
+    ]);
+    for _ in 0..5 {
+        let error = harness
+            .client
+            .complete_llm(&text_request())
+            .await
+            .unwrap_err();
+        assert_error_redacted(&error, &secrets);
+        assert!(error.to_string().contains("[redacted]"), "{error}");
+    }
+    for event in harness.events() {
+        assert_no_secret(&format!("{event:?}"), &secrets, "an event");
+    }
+    let credentials = harness.home.store().stored().unwrap();
+    assert_no_secret(&format!("{credentials:?}"), &secrets, "the credentials");
+}
+
+#[tokio::test]
+async fn the_token_refresh_redacts_every_copy_of_the_tokens_and_the_account_id() {
+    let access = CodexHome::access_token(10, "plus");
+    let secrets = vec![
+        access.clone(),
+        "rt_original".to_owned(),
+        "acct_stored".to_owned(),
+    ];
+    let all = secrets.join(" and ");
+    let nested = StubResponse::new(400, echoing_envelope(&secrets).into_bytes())
+        .with_header("Content-Type", "application/json");
+    let flat = StubResponse::new(
+        400,
+        serde_json::json!({
+            "error": "acct_stored",
+            "error_code": "rt_original",
+            "error_description": format!("{all}; again {all}"),
+            "echo": {"authorization": format!("Bearer {access}")},
+        })
+        .to_string()
+        .into_bytes(),
+    )
+    .with_header("Content-Type", "application/json");
+    let plain = StubResponse::new(503, echoing_plain_body(&secrets[1..], &access, 300));
+    for reply in [nested, flat, plain] {
+        let home = CodexHome::new().await;
+        home.write(AuthFile::default().access(&access));
+        home.server.enqueue([reply]);
+        let error = home.store().current().await.unwrap_err();
+        assert_error_redacted(&error, &secrets);
+        let detail = error.detail().unwrap();
+        assert_no_secret(detail, &secrets, "the detail");
+        assert!(detail.contains("[redacted]"), "{detail}");
+    }
 }

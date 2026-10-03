@@ -354,6 +354,13 @@ pub fn retry_after(header: Option<&str>) -> Option<Duration> {
     ))
 }
 
+/// The first `limit` characters of `text` with every secret removed;
+/// redacted before the cut, so a secret straddling it leaves no prefix.
+#[must_use]
+pub fn redacted_prefix(text: &str, secrets: &[String], limit: usize) -> String {
+    redact(text, secrets).chars().take(limit).collect()
+}
+
 /// Removes every secret wherever a server or transport echoed it.
 #[must_use]
 pub fn redact(text: &str, secrets: &[String]) -> String {

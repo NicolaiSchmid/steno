@@ -426,7 +426,7 @@ fn retry_after_and_error_message_parsing() {
         body: b"<html>bad gateway</html>".to_vec(),
     };
     assert_eq!(
-        OpenAiCompatibleClient::error_message(&html),
+        OpenAiCompatibleClient::error_message(&html, &[]),
         "<html>bad gateway</html>"
     );
 }
