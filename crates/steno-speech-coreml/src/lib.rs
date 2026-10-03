@@ -30,7 +30,7 @@
 //! around it change in most FluidAudio releases, which is why the parity
 //! harness exists.
 //!
-//! Until WP4a's shared `TensorBackend` loop lands in `steno-speech`, this
+//! Until WP4a's shared `SpeechBackend` loop lands in `steno-speech`, this
 //! crate carries its own pipeline over the four backend calls; the
 //! integration step swaps the loop and keeps the backend.
 
