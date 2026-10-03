@@ -10,7 +10,7 @@ use std::path::PathBuf;
 use chrono::{DateTime, Utc};
 use steno_core::{
     MeetingExport, ParticipantRole, Person, Speaker, SpeakerAssignment, SpeakerNameSuggestion,
-    Store, TranscriptSegment, fold_name, paths::path_from_file_url,
+    Store, TranscriptSegment, fold_name, paths::file_url_path,
 };
 use uuid::Uuid;
 
@@ -332,10 +332,7 @@ impl SpeakerRow {
 /// The clip file of a speaker, when it names one.
 #[must_use]
 pub fn clip_path(speaker: &Speaker) -> Option<PathBuf> {
-    speaker
-        .sample_clip_url
-        .as_deref()
-        .and_then(path_from_file_url)
+    speaker.sample_clip_url.as_deref().and_then(file_url_path)
 }
 
 /// Swift: `SpeakersViewModel`.
@@ -493,7 +490,7 @@ impl SpeakersViewModel {
                 return Ok(false);
             }
             let clips = store.confirm_speaker(speaker_id, &person)?;
-            for clip in clips.iter().filter_map(|clip| path_from_file_url(clip)) {
+            for clip in clips.iter().filter_map(|clip| file_url_path(clip)) {
                 let _ = std::fs::remove_file(clip);
             }
             Ok(true)

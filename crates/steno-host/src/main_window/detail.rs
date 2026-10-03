@@ -8,7 +8,7 @@ use steno_bridge::DetailTab;
 use steno_core::protocols::{BoundaryResult, BoxError};
 use steno_core::{
     AudioRetention, Delivery, Meeting, MeetingExport, MeetingStateKind, Settings, Store,
-    SummaryTemplate, paths::path_from_file_url,
+    StoreError, SummaryTemplate, paths::file_url_path,
 };
 use uuid::Uuid;
 
@@ -90,12 +90,18 @@ impl MeetingDetailViewModel {
     /// two store observations delivered. Feeds the speakers and retries a
     /// refused re-export once the meeting is ready.
     pub fn reload(&mut self, store: &Store, files: &dyn FileSystem, pipeline: &dyn Pipeline) {
-        match store.export(self.id) {
+        // A meeting deleted under the detail has no export, not an error.
+        let export = match store.export(self.id) {
+            Ok(export) => Ok(Some(export)),
+            Err(StoreError::MeetingNotFound(_)) => Ok(None),
+            Err(error) => Err(error),
+        };
+        match export {
             Ok(export) => {
                 self.recording_files_exist = export
                     .as_ref()
                     .and_then(|export| export.audio.as_ref())
-                    .and_then(|asset| path_from_file_url(&asset.url))
+                    .and_then(|asset| file_url_path(&asset.url))
                     .is_some_and(|path| files.exists(&path));
                 self.export = export;
                 if let Some(export) = self.export.clone() {

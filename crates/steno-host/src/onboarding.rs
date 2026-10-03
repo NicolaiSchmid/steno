@@ -14,7 +14,7 @@ use steno_bridge::{
     OnboardingPage, OnboardingPermissionStep, OnboardingSetupStep, OnboardingSetupStepKind,
     OnboardingSetupStepState, OnboardingSnapshot, OnboardingVault, PermissionKind, PermissionState,
 };
-use steno_core::paths::path_from_file_url;
+use steno_core::paths::file_url_path;
 use steno_core::{AudioRetention, Settings, Store};
 
 use crate::labels::retention_footnote;
@@ -180,7 +180,7 @@ impl OnboardingViewModel {
     pub fn retention_sentence_for(settings: &Settings) -> String {
         let rule = match settings.default_retention {
             AudioRetention::KeepForever => {
-                let folder = path_from_file_url(&settings.audio_folder)
+                let folder = file_url_path(&settings.audio_folder)
                     .and_then(|path| {
                         path.file_name()
                             .map(|name| name.to_string_lossy().into_owned())

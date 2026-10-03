@@ -31,8 +31,7 @@ fn sample() -> Harness {
     Harness::builder()
         .seed(|store, fakes| {
             let folder =
-                steno_core::paths::path_from_file_url(&store.settings().unwrap().audio_folder)
-                    .unwrap();
+                steno_core::paths::file_url_path(&store.settings().unwrap().audio_folder).unwrap();
             populate_sample(store, fakes, &folder);
             set_retention(store, AudioRetention::KeepDays(30));
         })
@@ -252,8 +251,7 @@ fn delete_asks_first_and_refuses_a_busy_meeting() {
         .confirm(false)
         .seed(|store, fakes| {
             let folder =
-                steno_core::paths::path_from_file_url(&store.settings().unwrap().audio_folder)
-                    .unwrap();
+                steno_core::paths::file_url_path(&store.settings().unwrap().audio_folder).unwrap();
             populate_sample(store, fakes, &folder);
             let mut processing = sample_meeting();
             processing.id = uuid(0x77);
@@ -294,8 +292,7 @@ fn delete_asks_first_and_refuses_a_busy_meeting() {
         .confirm(true)
         .seed(|store, fakes| {
             let folder =
-                steno_core::paths::path_from_file_url(&store.settings().unwrap().audio_folder)
-                    .unwrap();
+                steno_core::paths::file_url_path(&store.settings().unwrap().audio_folder).unwrap();
             populate_sample(store, fakes, &folder);
         })
         .build();
@@ -381,8 +378,7 @@ fn a_delete_reports_files_that_stay_and_a_refusal_keeps_the_progress_entry() {
     let harness = Harness::builder()
         .seed(|store, fakes| {
             let folder =
-                steno_core::paths::path_from_file_url(&store.settings().unwrap().audio_folder)
-                    .unwrap();
+                steno_core::paths::file_url_path(&store.settings().unwrap().audio_folder).unwrap();
             populate_sample(store, fakes, &folder);
             fakes
                 .file_system
@@ -934,8 +930,7 @@ fn keep_audio_goes_through_the_pipeline_and_asks_before_deleting_now() {
         .confirm(false)
         .seed(|store, fakes| {
             let folder =
-                steno_core::paths::path_from_file_url(&store.settings().unwrap().audio_folder)
-                    .unwrap();
+                steno_core::paths::file_url_path(&store.settings().unwrap().audio_folder).unwrap();
             populate_sample(store, fakes, &folder);
             set_retention(store, AudioRetention::DeleteAfterProcessing);
         })
@@ -1019,8 +1014,7 @@ fn keep_audio_off_applies_only_to_the_meeting_it_was_asked_for() {
         })
         .seed(|store, fakes| {
             let folder =
-                steno_core::paths::path_from_file_url(&store.settings().unwrap().audio_folder)
-                    .unwrap();
+                steno_core::paths::file_url_path(&store.settings().unwrap().audio_folder).unwrap();
             populate_sample(store, fakes, &folder);
             set_retention(store, AudioRetention::DeleteAfterProcessing);
         })

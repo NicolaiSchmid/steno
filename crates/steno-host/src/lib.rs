@@ -16,8 +16,9 @@
 //! - [`main_window`], [`settings`], [`onboarding`], [`speakers`]: the view
 //!   models and snapshots, one module per window.
 //! - [`setup`], [`labels`], [`speech`], [`summary_markdown`]: the copy and
-//!   the labels the view models share, and the two tables (the speech
-//!   engines and assets, the summary Markdown) that move to WP4 and WP6b.
+//!   the labels the view models share, the speech engines and assets table
+//!   that moves to WP4, and the detail's split of the core's rendered
+//!   summary.
 //!
 //! Every call blocks until it is done; the core's async boundaries are
 //! awaited on one current-thread runtime the host owns, and from a thread

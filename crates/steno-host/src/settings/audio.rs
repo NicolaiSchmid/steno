@@ -8,7 +8,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use steno_bridge::{PermissionKind, PermissionState, RetentionMode};
-use steno_core::paths::{file_url, path_from_file_url};
+use steno_core::paths::{file_url, file_url_path};
 use steno_core::{AudioRetention, Store};
 
 use super::{SectionError, update_settings};
@@ -90,7 +90,7 @@ impl AudioSettingsViewModel {
         match store.settings() {
             Ok(settings) => {
                 self.input_device_uid = settings.input_device_uid;
-                self.audio_folder = path_from_file_url(&settings.audio_folder)
+                self.audio_folder = file_url_path(&settings.audio_folder)
                     .unwrap_or_else(|| PathBuf::from(&settings.audio_folder));
                 match settings.default_retention {
                     AudioRetention::DeleteAfterProcessing => {

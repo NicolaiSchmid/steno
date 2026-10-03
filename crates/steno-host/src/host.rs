@@ -89,7 +89,7 @@ use steno_bridge::{
     SpeakerOptionsParams, SpeakerOptionsReply, StartRecordingParams, SummariesUpdateParams,
     WindowParams,
 };
-use steno_core::paths::path_from_file_url;
+use steno_core::paths::file_url_path;
 use steno_core::protocols::SecretKey;
 use steno_core::{Store, StoreError};
 use uuid::Uuid;
@@ -1456,7 +1456,7 @@ impl BridgeHost for Host {
             .export
             .as_ref()
             .and_then(|export| export.audio.as_ref())
-            .and_then(|asset| path_from_file_url(&asset.url))
+            .and_then(|asset| file_url_path(&asset.url))
             .filter(|_| detail.recording_files_exist)
             .ok_or_else(|| BridgeError::not_found("The recording is no longer on this Mac."))?;
         self.shared.services.opener.reveal(&path);

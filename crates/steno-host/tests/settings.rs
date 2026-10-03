@@ -786,7 +786,7 @@ fn summaries_validate_save_the_key_apart_and_probe() {
         "the key goes to the secret store, trimmed"
     );
     let rendered =
-        steno_bridge::json::to_canonical_string(&harness.snapshot(BridgeTopic::SettingsSummaries))
+        steno_core::json::to_canonical_string(&harness.snapshot(BridgeTopic::SettingsSummaries))
             .unwrap();
     assert!(
         !rendered.contains("sk-test"),

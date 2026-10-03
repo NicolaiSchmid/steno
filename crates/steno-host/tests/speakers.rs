@@ -21,8 +21,7 @@ fn sample() -> Harness {
     Harness::builder()
         .seed(|store, fakes| {
             let folder =
-                steno_core::paths::path_from_file_url(&store.settings().unwrap().audio_folder)
-                    .unwrap();
+                steno_core::paths::file_url_path(&store.settings().unwrap().audio_folder).unwrap();
             populate_sample(store, fakes, &folder);
         })
         .build()

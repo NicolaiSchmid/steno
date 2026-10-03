@@ -1,7 +1,7 @@
 //! Snapshot parity against the recorded bridge fixtures
 //! (`apps/macos/web/fixtures/bridge/`): for every snapshot and reply
 //! fixture, the store and service state that produces it is built, the
-//! host's snapshot is encoded with `steno_bridge::json::to_canonical_string`
+//! host's snapshot is encoded with `steno_core::json::to_canonical_string`
 //! and compared byte for byte with the file.
 //!
 //! Where a fixture cannot be reproduced from any store or service state,
@@ -103,8 +103,8 @@ fn apply(mut fixture: Value, deviations: &[Deviation]) -> Value {
 /// its deviations, and records the row for the table.
 fn assert_parity(name: &str, host: &Value, deviations: &[Deviation]) {
     let expected = apply(fixture(name), deviations);
-    let expected = steno_bridge::json::to_canonical_string(&expected).unwrap();
-    let actual = steno_bridge::json::to_canonical_string(host).unwrap();
+    let expected = steno_core::json::to_canonical_string(&expected).unwrap();
+    let actual = steno_core::json::to_canonical_string(host).unwrap();
     if expected != actual {
         let diff = first_difference(&apply(fixture(name), deviations), host)
             .unwrap_or_else(|| "(equal as values; the canonical text differs)".to_owned());
@@ -169,8 +169,7 @@ fn sample_harness() -> Harness {
     Harness::builder()
         .seed(|store, fakes| {
             let folder =
-                steno_core::paths::path_from_file_url(&store.settings().unwrap().audio_folder)
-                    .unwrap();
+                steno_core::paths::file_url_path(&store.settings().unwrap().audio_folder).unwrap();
             populate_sample(store, fakes, &folder);
             configure_llm(store, "qwen3-8b");
             set_retention(store, AudioRetention::KeepDays(30));
@@ -184,8 +183,7 @@ fn app() {
         .with_handover("steno-mac-7f3a", 52_431)
         .seed(|store, fakes| {
             let folder =
-                steno_core::paths::path_from_file_url(&store.settings().unwrap().audio_folder)
-                    .unwrap();
+                steno_core::paths::file_url_path(&store.settings().unwrap().audio_folder).unwrap();
             populate_sample(store, fakes, &folder);
             let handover = fakes.handover.as_ref().unwrap();
             handover.pair(paired_phone());
