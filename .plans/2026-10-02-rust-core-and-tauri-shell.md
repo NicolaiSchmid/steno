@@ -258,7 +258,7 @@ still has to draw the window side. `[ ]` is not ported yet.
 - [x] `onboarding.request` (the page sees `isRequesting` while the prompt is up),
   `.skip`, `.refresh`, `.advance`, `.back`, `.saveSummaries`,
   `.confirmSummariesWithCodex`, `.chooseVault`, `.saveVault`, `.skipSetup`, `.finish`.
-- [x] `updates.check`, `system.openURL` (web and mail links only),
+- [x] `updates.check`, `system.openURL` (`https:` and `mailto:` only),
   `system.openSystemSettings`, `window.open` (the request rides on `app`),
   `window.close` (onboarding only), `ui.confirmDestructive`.
 
@@ -291,21 +291,29 @@ still has to draw the window side. `[ ]` is not ported yet.
 - [x] Onboarding opener rule (`Host::should_open_onboarding`): a missing required
   permission, or the flag unset; an install already configured writes the flag and
   stays closed.
-- Known differences, settled in WP6a: the search runs when `meetings.setQuery` arrives
-  (Swift debounced 200 ms; the page debounces typing); dates are worded in English with
-  a 24-hour clock in the zone the shell passes (Swift used the locale); the Swift
-  speakers popover's own error line is the detail's; `settings.transcription.download`
-  publishes its progress from the download's thread; a retried re-export after a refusal
-  happens on the next store change (Swift retried on the next `.ready` tick); a
-  pending re-export when the detail goes away is attempted once (Swift retried after
-  three seconds in a detached task); one host answers all three windows and routes the
-  four Summaries form commands by the calling window (`Host::for_window`) where Swift
-  had one host per window; the Settings sections reload when the stored settings
-  change under them (a store change, an onboarding save) where Swift loaded them once
-  per window open; the `recording` throttle is flushed by a thread the host owns where
-  Swift's publisher armed a task; the model download replies at once and runs on a
-  host thread. Fixture values the view models never compute are listed, with the
-  host's value and the reason, in `crates/steno-host/tests/parity.rs`.
+- Known differences, settled in WP6a. Fixture values the view models never compute
+  are listed, with the host's value and the reason, in
+  `crates/steno-host/tests/parity.rs`.
+  - The search runs when `meetings.setQuery` arrives (Swift debounced 200 ms; the
+    page debounces typing).
+  - Dates are worded in English with a 24-hour clock in the zone the shell passes
+    (Swift used the locale).
+  - One host answers all three windows and routes the four Summaries form commands by
+    the calling window (`Host::for_window`), where Swift had one host per window.
+  - The Settings sections reload when the stored settings change under them (a store
+    change, an onboarding save), where Swift loaded them once per window open.
+  - The `recording` throttle is flushed by a thread the host owns, where Swift's
+    publisher armed a task.
+  - `settings.transcription.download` replies at once and runs on a host thread that
+    publishes its progress; a remove while it runs detaches it (its late progress is
+    not shown, and the asset shows what the model store reports when it ends), where
+    Swift's task kept reporting.
+  - `meeting.setKeepAudio` and `meeting.deleteRecordingNow` change nothing and reply
+    `failed` when the selection moved while the prompt was up, where Swift applied
+    the answer to the meeting it had asked about.
+  - A retried re-export after a refusal happens on the next store change (Swift
+    retried on the next `.ready` tick); a pending re-export when the detail goes away
+    is attempted once (Swift retried after three seconds in a detached task).
 
 ### Store
 
