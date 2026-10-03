@@ -211,14 +211,16 @@ fn handover_listener(
 ) -> Result<(Arc<HandoverService>, uuid::Uuid), String> {
     let identity = block_on(
         runtime,
-        crate::handover::load_or_mint_identity(
+        steno_handover::HandoverIdentity::load_or_create(
             secrets.as_ref(),
             &format!(
                 "Steno on {}",
                 steno_handover::HandoverConfiguration::default_service_name()
             ),
+            chrono::Utc::now(),
         ),
-    )?;
+    )
+    .map_err(|error| error.to_string())?;
     let intake = Arc::new(handover_intake(store.clone(), pipeline.clone(), zone));
     let mac_id = identity.mac_id();
     let service = Arc::new(crate::handover::service(store.clone(), intake, identity));

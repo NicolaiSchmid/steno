@@ -9,6 +9,7 @@ use std::future::Future;
 use std::sync::{Arc, OnceLock};
 
 use chrono_tz::Tz;
+use steno_core::protocols::BoundaryResult;
 use steno_core::{MeetingSummarizer, Settings, TranscriptCleaner};
 use steno_host::services::{CodexModel, CodexModelsError, LlmService};
 use steno_llm::{
@@ -144,22 +145,23 @@ pub struct ClientLlmService {
 }
 
 impl LlmService for ClientLlmService {
-    fn probe(&self, settings: &Settings, api_key: Option<&str>) -> Result<String, String> {
+    fn probe(&self, settings: &Settings, api_key: Option<&str>) -> BoundaryResult<String> {
         let (settings, api_key, codex) = (
             settings.clone(),
             api_key.map(str::to_owned),
             self.codex.clone(),
         );
-        on_network_runtime(async move { probe_line(&settings, api_key.as_deref(), &codex).await })
-            .unwrap_or_else(|| Err(NETWORK_CALL_PANICKED.to_owned()))
+        Ok(on_network_runtime(
+            async move { probe_line(&settings, api_key.as_deref(), &codex).await },
+        )
+        .unwrap_or_else(|| Err(NETWORK_CALL_PANICKED.to_owned()))?)
     }
 
-    fn codex_account(&self) -> Result<String, String> {
+    fn codex_account(&self) -> BoundaryResult<String> {
         let codex = self.codex.clone();
-        on_network_runtime(async move { codex.current().await })
-            .ok_or_else(|| NETWORK_CALL_PANICKED.to_owned())?
-            .map(|credentials| credentials.account_line())
-            .map_err(|error| error.to_string())
+        Ok(on_network_runtime(async move { codex.current().await })
+            .ok_or(NETWORK_CALL_PANICKED)?
+            .map(|credentials| credentials.account_line())?)
     }
 
     fn codex_models(&self) -> Result<Vec<CodexModel>, CodexModelsError> {

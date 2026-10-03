@@ -143,7 +143,7 @@ impl CaptureRecorder {
 
     fn start_inner(&self, mode: CaptureMode, call_app: Option<&str>) -> Result<(), String> {
         let settings = self.store.settings().map_err(|e| e.to_string())?;
-        let audio_folder = steno_core::paths::path_from_file_url(&settings.audio_folder)
+        let audio_folder = steno_core::paths::file_url_path(&settings.audio_folder)
             .ok_or_else(|| format!("audio folder is not a file URL: {}", settings.audio_folder))?;
         let audio_mode = match mode {
             CaptureMode::Call => steno_audio::CaptureMode::Call,
@@ -391,7 +391,7 @@ mod tests {
         let pipeline = current_pipeline(dependencies);
         let models = Arc::new(FakeSpeechModels::default());
         for asset in installed {
-            models.install(*asset, None);
+            models.set_installed(*asset, None);
         }
         let make_session: MakeCaptureSession = Arc::new(|configuration: CaptureConfiguration| {
             let lanes = configuration.lanes();

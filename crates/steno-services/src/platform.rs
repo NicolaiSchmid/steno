@@ -10,6 +10,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use chrono::{DateTime, Utc};
+use steno_core::protocols::BoundaryResult;
 use steno_host::services::{AudioDevices, Clock, FolderUsage, InputDevice, Preferences};
 
 /// `Utc::now`.
@@ -27,7 +28,7 @@ impl Clock for WallClock {
 pub struct DiskFolderUsage;
 
 impl FolderUsage for DiskFolderUsage {
-    fn measure(&self, folder: &Path) -> Result<i64, String> {
+    fn measure(&self, folder: &Path) -> BoundaryResult<i64> {
         fn walk(path: &Path) -> std::io::Result<u64> {
             let mut total = 0;
             for entry in std::fs::read_dir(path)? {
@@ -44,9 +45,7 @@ impl FolderUsage for DiskFolderUsage {
         if !folder.exists() {
             return Ok(0);
         }
-        walk(folder)
-            .map(|bytes| i64::try_from(bytes).unwrap_or(i64::MAX))
-            .map_err(|error| error.to_string())
+        Ok(walk(folder).map(|bytes| i64::try_from(bytes).unwrap_or(i64::MAX))?)
     }
 }
 
@@ -57,7 +56,7 @@ impl FolderUsage for DiskFolderUsage {
 pub struct PlatformAudioDevices;
 
 impl AudioDevices for PlatformAudioDevices {
-    fn inputs(&self) -> Result<Vec<InputDevice>, String> {
+    fn inputs(&self) -> BoundaryResult<Vec<InputDevice>> {
         Ok(Vec::new())
     }
 }

@@ -12,7 +12,7 @@ use std::sync::Arc;
 
 use steno_core::{
     AudioBuffer16k, Diarizer, LanguageTag, RawSegment, Settings, SpeechEngine, StenoPaths,
-    async_trait, paths::path_from_file_url, protocols::BoundaryResult,
+    async_trait, paths::file_url_path, protocols::BoundaryResult,
 };
 use steno_diarize::{DiarizerConfig, ModelDiarizer};
 use steno_host::services::SpeechModels;
@@ -46,7 +46,7 @@ fn models_directory_with(
     settings
         .models_directory
         .as_deref()
-        .and_then(|url| path_from_file_url(url).or_else(|| Some(PathBuf::from(url))))
+        .and_then(|url| file_url_path(url).or_else(|| Some(PathBuf::from(url))))
         .or_else(|| {
             variable
                 .filter(|value| !value.is_empty())
@@ -272,24 +272,20 @@ impl SpeechModels for ModelStoreSpeechModels {
         &self,
         asset: ModelAsset,
         progress: &mut dyn FnMut(f64, &str),
-    ) -> Result<(), String> {
+    ) -> BoundaryResult<()> {
         match asset {
             ModelAsset::OfflineDiarizer => {
                 let store = diarize_store(&self.speech);
                 progress(0.0, "Segmentation model");
-                store
-                    .ensure(&steno_diarize::models::PYANNOTE_SEGMENTATION_3_0)
-                    .map_err(|error| error.to_string())?;
+                store.ensure(&steno_diarize::models::PYANNOTE_SEGMENTATION_3_0)?;
                 progress(0.5, "Speaker embedding model");
-                store
-                    .ensure(&steno_diarize::models::WESPEAKER_RESNET34_LM)
-                    .map_err(|error| error.to_string())?;
+                store.ensure(&steno_diarize::models::WESPEAKER_RESNET34_LM)?;
                 progress(1.0, "Installed");
                 Ok(())
             }
             ModelAsset::ParakeetV3 if Self::COREML_PARAKEET => Err(
                 "This build cannot download the CoreML Parakeet v3 model; install it from the Steno Mac app."
-                    .to_owned(),
+                    .into(),
             ),
             other => {
                 let asset = Self::speech_asset(other)
@@ -312,38 +308,33 @@ impl SpeechModels for ModelStoreSpeechModels {
                         #[allow(clippy::cast_precision_loss)]
                         let fraction = (received_before + report.received) as f64 / total as f64;
                         progress(fraction.min(1.0), report.file);
-                    })
-                    .map_err(|error| error.to_string())?;
+                    })?;
                 progress(1.0, "Installed");
                 Ok(())
             }
         }
     }
 
-    fn remove(&self, asset: ModelAsset) -> Result<(), String> {
+    fn remove(&self, asset: ModelAsset) -> BoundaryResult<()> {
         match asset {
             ModelAsset::OfflineDiarizer => {
                 for path in self.diarizer_paths() {
                     if path.exists() {
-                        std::fs::remove_file(&path).map_err(|error| error.to_string())?;
+                        std::fs::remove_file(&path)?;
                     }
                 }
                 Ok(())
             }
             ModelAsset::ParakeetV3 if Self::COREML_PARAKEET => {
                 match std::fs::remove_dir_all(&self.coreml) {
-                    Err(error) if error.kind() != std::io::ErrorKind::NotFound => {
-                        Err(error.to_string())
-                    }
+                    Err(error) if error.kind() != std::io::ErrorKind::NotFound => Err(error.into()),
                     _ => Ok(()),
                 }
             }
             other => {
                 let asset = Self::speech_asset(other)
                     .ok_or_else(|| format!("{} has no Rust engine yet", other.as_str()))?;
-                self.speech
-                    .remove(&asset)
-                    .map_err(|error| error.to_string())
+                Ok(self.speech.remove(&asset)?)
             }
         }
     }

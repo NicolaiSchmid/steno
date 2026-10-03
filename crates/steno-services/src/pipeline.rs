@@ -7,6 +7,7 @@ use std::sync::{Arc, Mutex};
 
 use chrono::Utc;
 use steno_core::AudioRetention;
+use steno_core::protocols::BoundaryResult;
 use steno_host::services::Pipeline;
 use steno_pipeline::{Operation, PipelineDependencies, ProcessingPipeline, RetentionSweep};
 use uuid::Uuid;
@@ -100,34 +101,35 @@ pub struct HostPipeline {
 }
 
 impl Pipeline for HostPipeline {
-    fn rerun_summary(&self, meeting_id: Uuid, template_id: &str) -> Result<(), String> {
-        self.pipeline
-            .start(|pipeline| pipeline.claim_rerun_summary(meeting_id, template_id))
+    fn rerun_summary(&self, meeting_id: Uuid, template_id: &str) -> BoundaryResult<()> {
+        Ok(self
+            .pipeline
+            .start(|pipeline| pipeline.claim_rerun_summary(meeting_id, template_id))?)
     }
 
-    fn redeliver(&self, meeting_id: Uuid) -> Result<(), String> {
-        self.pipeline
-            .start(|pipeline| pipeline.claim_redeliver(meeting_id))
+    fn redeliver(&self, meeting_id: Uuid) -> BoundaryResult<()> {
+        Ok(self
+            .pipeline
+            .start(|pipeline| pipeline.claim_redeliver(meeting_id))?)
     }
 
-    fn apply_retention(&self, meeting_id: Uuid, rule: AudioRetention) -> Result<(), String> {
+    fn apply_retention(&self, meeting_id: Uuid, rule: AudioRetention) -> BoundaryResult<()> {
         let pipeline = self.pipeline.current();
-        block_on(
+        Ok(block_on(
             &self.pipeline.runtime,
             pipeline.apply_retention(meeting_id, rule),
-        )
-        .map_err(|error| error.to_string())
+        )?)
     }
 
-    fn reload(&self) -> Result<(), String> {
-        self.pipeline.reload().map_err(|error| error.to_string())
+    fn reload(&self) -> BoundaryResult<()> {
+        Ok(self.pipeline.reload()?)
     }
 
-    fn keep_all_recordings(&self) -> Result<i64, String> {
-        self.sweep
+    fn keep_all_recordings(&self) -> BoundaryResult<i64> {
+        Ok(self
+            .sweep
             .keep_all()
-            .map(|count| i64::try_from(count).unwrap_or(i64::MAX))
-            .map_err(|error| error.to_string())
+            .map(|count| i64::try_from(count).unwrap_or(i64::MAX))?)
     }
 }
 
@@ -145,7 +147,7 @@ mod tests {
 
     use steno_core::{
         MeetingEvent, MeetingOperation, MeetingState, MeetingSummarizer, PipelineStage, Store,
-        SummaryInput, SummaryOutput, async_trait, protocols::BoundaryResult, testing::sample_data,
+        SummaryInput, SummaryOutput, async_trait, testing::sample_data,
     };
     use steno_pipeline::EventReceiver;
 
@@ -205,12 +207,15 @@ mod tests {
         )
     }
 
-    /// Calls one of the host's synchronous methods as the host does.
-    fn call<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> T {
+    /// Calls one of the host's synchronous methods as the host does; the
+    /// error as the detail shows it.
+    fn call<T: Send + 'static>(
+        f: impl FnOnce() -> BoundaryResult<T> + Send + 'static,
+    ) -> Result<T, String> {
         on_own_thread(
             PATIENCE,
             "the call returned without waiting for the work",
-            f,
+            move || f().map_err(|error| error.to_string()),
         )
     }
 
