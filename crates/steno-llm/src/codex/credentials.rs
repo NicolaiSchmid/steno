@@ -573,7 +573,8 @@ impl CodexCredentialStore {
             // Decided on the code as sent, so a secret that happens to
             // occur in it cannot turn a permanent refusal into a temporary
             // one; only the detail is redacted.
-            let code = rejection.code().map(str::to_lowercase);
+            let sent = rejection.code();
+            let code = sent.map(str::to_lowercase);
             let permanent = status == 401
                 || code
                     .as_deref()
@@ -582,10 +583,10 @@ impl CodexCredentialStore {
                 Some(message) => transport::redact(message, &secrets),
                 None => transport::redacted_prefix(&String::from_utf8_lossy(&data), &secrets, 300),
             };
-            let detail = match rejection.code() {
-                Some(code) => format!(
+            let detail = match sent {
+                Some(sent) => format!(
                     "{}: HTTP {status}: {message}",
-                    transport::redact(code, &secrets).to_lowercase()
+                    transport::redact(sent, &secrets).to_lowercase()
                 ),
                 None => format!("HTTP {status}: {message}"),
             };
