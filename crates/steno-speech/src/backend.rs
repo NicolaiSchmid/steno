@@ -141,6 +141,11 @@ pub trait SpeechBackend: Send {
 /// vocabulary with its softmax probability, argmax over the duration bins.
 /// The `CoreML` joint does this inside the model.
 pub fn split_logits(logits: &[f32], vocab_size: usize) -> Result<JointDecision, SpeechError> {
+    if vocab_size == 0 {
+        return Err(SpeechError::Shape(
+            "a joint without a vocabulary has no token to pick".into(),
+        ));
+    }
     if logits.len() <= vocab_size {
         return Err(SpeechError::Shape(format!(
             "joint returned {} logits for a vocabulary of {vocab_size}; no duration bins",
@@ -192,13 +197,17 @@ mod tests {
     }
 
     #[test]
-    fn the_blank_can_win_and_a_vector_without_durations_is_refused() {
+    fn the_blank_can_win_and_a_vector_without_durations_or_vocabulary_is_refused() {
         let logits = [0.0, 0.0, 0.0, 5.0, 1.0];
         let decision = split_logits(&logits, 4).unwrap();
         assert_eq!(decision.token, 3);
         assert_eq!(decision.duration_bin, 0);
         assert!(matches!(
             split_logits(&logits[..4], 4),
+            Err(SpeechError::Shape(_))
+        ));
+        assert!(matches!(
+            split_logits(&logits, 0),
             Err(SpeechError::Shape(_))
         ));
     }
