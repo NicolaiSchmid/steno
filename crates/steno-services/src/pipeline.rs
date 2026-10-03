@@ -334,7 +334,7 @@ mod tests {
             expires_at: Some(Utc::now() - chrono::Duration::hours(1)),
         };
         store.save_meeting_with_asset(&meeting, &asset).unwrap();
-        let log = crate::testing::CapturedLog::warnings();
+        let log = steno_pipeline::fixtures::CapturedLog::warnings();
         run_sweep(&RetentionSweep::new(store.clone()));
         let text = log.text();
         assert!(

@@ -10,8 +10,9 @@ publish.workspace = true
 
 [features]
 # `fixtures::two_lane_call`, the recorded call the integration tests here
-# and in the services crate process.
-testing = []
+# and in the services crate process, and `fixtures::CapturedLog`, what
+# their privacy tests read of the log.
+testing = ["dep:tracing-subscriber"]
 
 [dependencies]
 async-trait.workspace = true
@@ -24,14 +25,13 @@ tempfile.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["sync", "rt", "macros"] }
 tracing.workspace = true
+tracing-subscriber = { workspace = true, optional = true }
 uuid.workspace = true
 
 [dev-dependencies]
 steno-core = { path = "../steno-core", features = ["testing"] }
 steno-pipeline = { path = ".", features = ["testing"] }
 tokio = { workspace = true, features = ["rt-multi-thread", "time"] }
-# The privacy test reads what the pipeline logs.
-tracing-subscriber.workspace = true
 
 [lints]
 workspace = true

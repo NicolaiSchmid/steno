@@ -4,7 +4,8 @@
 //! pins both). `steno dev fixtures generate` writes these files; the
 //! pipeline's sample clips use the writer; `two_lane_call` (behind the
 //! `testing` feature) lays the
-//! conversation out as a recording for the tests across crates.
+//! conversation out as a recording for the tests across crates, and
+//! `CapturedLog` captures what they log.
 //! Swift: `Sources/StenoCore/Testing/FixtureGenerator.swift`,
 //! `Sources/StenoCore/Audio/WAVWriter.swift`.
 
@@ -12,7 +13,7 @@ use std::path::Path;
 
 use steno_core::{AudioBuffer16k, AudioLane};
 #[cfg(feature = "testing")]
-pub use testing::two_lane_call;
+pub use testing::{CapturedLog, two_lane_call};
 
 /// One generated file: its path under the fixtures root and its SHA-256.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -248,6 +249,7 @@ impl SplitMix64 {
 mod testing {
     use std::collections::BTreeMap;
     use std::path::Path;
+    use std::sync::{Arc, Mutex, OnceLock};
 
     use steno_core::{
         AudioAsset, AudioFormat, AudioLane, AudioRetention, RecordingLayout, derived_uuid,
@@ -288,5 +290,63 @@ mod testing {
             retention,
             expires_at: None,
         })
+    }
+
+    /// What a test binary logs at `warn` and above, from the first
+    /// [`CapturedLog::warnings`] on: the process-wide subscriber, so a line
+    /// is captured whichever thread writes it. Every test in the binary logs
+    /// into it, so a test picks its own lines out by an id of its own.
+    #[derive(Clone, Default)]
+    pub struct CapturedLog(Arc<Mutex<Vec<u8>>>);
+
+    impl CapturedLog {
+        /// The capture, installed on the first call.
+        ///
+        /// # Panics
+        ///
+        /// When the binary already has another global subscriber.
+        pub fn warnings() -> &'static CapturedLog {
+            static LOG: OnceLock<CapturedLog> = OnceLock::new();
+            LOG.get_or_init(|| {
+                let log = CapturedLog::default();
+                tracing::subscriber::set_global_default(
+                    tracing_subscriber::fmt()
+                        .with_writer(log.clone())
+                        .with_max_level(tracing::Level::WARN)
+                        .finish(),
+                )
+                .expect("no other subscriber in this test binary");
+                log
+            })
+        }
+
+        /// Everything captured so far.
+        ///
+        /// # Panics
+        ///
+        /// When a writer panicked while holding the buffer.
+        #[must_use]
+        pub fn text(&self) -> String {
+            String::from_utf8_lossy(&self.0.lock().unwrap()).into_owned()
+        }
+    }
+
+    impl std::io::Write for CapturedLog {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for CapturedLog {
+        type Writer = CapturedLog;
+
+        fn make_writer(&'a self) -> Self::Writer {
+            self.clone()
+        }
     }
 }

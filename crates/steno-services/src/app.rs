@@ -716,7 +716,7 @@ mod tests {
 
     #[test]
     fn a_background_failure_warns_without_its_text() {
-        let log = crate::testing::CapturedLog::warnings();
+        let log = steno_pipeline::fixtures::CapturedLog::warnings();
         let meeting_id = uuid::Uuid::new_v4();
         log_operation_failure(&MeetingEvent::OperationFailed {
             meeting_id,

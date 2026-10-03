@@ -421,59 +421,12 @@ async fn a_failing_stage_marks_the_meeting_failed_with_its_name() {
     assert_eq!(pipeline.in_flight(), Vec::<Uuid>::new());
 }
 
-/// Log lines written into a buffer, for the privacy tests.
-#[derive(Clone, Default)]
-struct CapturedLog(Arc<Mutex<Vec<u8>>>);
-
-impl CapturedLog {
-    fn text(&self) -> String {
-        String::from_utf8(self.0.lock().unwrap().clone()).unwrap()
-    }
-}
-
-impl std::io::Write for CapturedLog {
-    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-        self.0.lock().unwrap().extend_from_slice(bytes);
-        Ok(bytes.len())
-    }
-
-    fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
-    }
-}
-
-impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for CapturedLog {
-    type Writer = CapturedLog;
-
-    fn make_writer(&'a self) -> Self::Writer {
-        self.clone()
-    }
-}
-
-/// What every test in this binary logs at warn and above, from the first
-/// call on: the process-wide subscriber, so a line is captured whichever
-/// thread writes it.
-fn captured_warnings() -> &'static CapturedLog {
-    static LOG: std::sync::OnceLock<CapturedLog> = std::sync::OnceLock::new();
-    LOG.get_or_init(|| {
-        let log = CapturedLog::default();
-        tracing::subscriber::set_global_default(
-            tracing_subscriber::fmt()
-                .with_writer(log.clone())
-                .with_max_level(tracing::Level::WARN)
-                .finish(),
-        )
-        .expect("no other subscriber in this test binary");
-        log
-    })
-}
-
 /// A failed background run is logged at warn with its asset and stage
 /// only: a stage's reason can name the audio file or quote the model, and
 /// stays with the meeting row and the debug level.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_failed_background_run_warns_with_its_stage_not_its_reason() {
-    let log = captured_warnings();
+    let log = steno_pipeline::fixtures::CapturedLog::warnings();
     let world = world(false, None, AudioRetention::KeepForever);
     let mut dependencies = world.pipeline.dependencies().clone();
     let reason = "cannot open /Users/someone/Audio/meeting/mic.caf";
