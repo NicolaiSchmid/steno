@@ -72,27 +72,22 @@ impl TokenAggregator {
                 continue;
             }
             let punctuation_only = text.chars().all(is_punctuation_or_symbol);
-            if punctuation_only && let Some(word) = current.as_mut() {
-                word.text.push_str(text);
-                word.end = word.end.max(piece.end);
-                confidences.push(piece.confidence);
-                boundary_pending = false;
-                continue;
+            match current.as_mut() {
+                Some(word) if punctuation_only || !(is_word_start || boundary_pending) => {
+                    word.text.push_str(text);
+                    word.end = word.end.max(piece.end);
+                }
+                _ => {
+                    flush(&mut current, &mut confidences, &mut words);
+                    current = Some(TimedWord {
+                        text: text.to_owned(),
+                        start: piece.start,
+                        end: piece.end,
+                        confidence: piece.confidence,
+                    });
+                }
             }
-            if is_word_start || boundary_pending || current.is_none() {
-                flush(&mut current, &mut confidences, &mut words);
-                current = Some(TimedWord {
-                    text: text.to_owned(),
-                    start: piece.start,
-                    end: piece.end,
-                    confidence: piece.confidence,
-                });
-                confidences.push(piece.confidence);
-            } else if let Some(word) = current.as_mut() {
-                word.text.push_str(text);
-                word.end = word.end.max(piece.end);
-                confidences.push(piece.confidence);
-            }
+            confidences.push(piece.confidence);
             boundary_pending = false;
         }
         flush(&mut current, &mut confidences, &mut words);
