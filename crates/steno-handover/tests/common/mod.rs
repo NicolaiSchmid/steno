@@ -20,7 +20,7 @@ use std::time::Duration;
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
 use chrono::{DateTime, TimeZone as _, Utc};
-use sha2::{Digest as _, Sha256};
+pub use steno_core::content_hash::sha256;
 use steno_core::testing::FakeHandoverIntake;
 use steno_core::{
     AudioFormat, BoundaryResult, HandoverIntake, PairedDevice, RecordingMetadata, Store,
@@ -745,10 +745,6 @@ pub fn metadata_for(
         format,
         device_name: device_name.to_owned(),
     }
-}
-
-pub fn sha256(bytes: &[u8]) -> Vec<u8> {
-    Sha256::digest(bytes).to_vec()
 }
 
 pub fn chunks(bytes: &[u8], size: i64) -> Vec<Vec<u8>> {
