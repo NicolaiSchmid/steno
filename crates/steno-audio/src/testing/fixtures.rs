@@ -6,7 +6,7 @@
 //! echoed microphone built from them. Deterministic on every machine;
 //! never committed, always built in test setup. Same seeds and arithmetic
 //! as Swift, so the Speex ERLE table matches `steno dev aec-bench
-//! --synthetic` (proven by the spike, re-asserted in `tests/aec.rs`).
+//! --synthetic` (the table in `tests/aec.rs`).
 
 use crate::aec::EchoMetrics;
 

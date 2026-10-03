@@ -2,6 +2,24 @@
 //! detection, the recording writer and the decoder. The port of
 //! `Sources/StenoAudio` (WP5 of `.plans/2026-10-02-rust-core-and-tauri-shell.md`).
 //!
+//! - [`aec`]: echo cancellation, Speex's MDF filter over the vendored
+//!   SpeexDSP and a passthrough, with the ERLE metrics.
+//! - [`capture`]: the [`CaptureSession`] state machine over a
+//!   [`CaptureBackend`], the configuration and results, the stream layout,
+//!   and the live backend (Core Audio on macOS, stubs elsewhere).
+//! - [`codec`]: [`SymphoniaAudioCodec`], decoding recordings and phone
+//!   files to 16 kHz mono, and the mixdown.
+//! - [`detection`]: the [`MeetingDetector`]: which processes hold the
+//!   microphone, debounced into a call starting and ending.
+//! - [`realtime`]: the rings, the sink, the IOProc body, the processing
+//!   thread and the relay; everything on the real-time path.
+//! - [`writer`]: the recording writer (CAF master, 16 kHz WAV sidecars),
+//!   its thread and the 3:1 resampler.
+//! - [`clock`]: the injectable [`Clock`] the rebuild and the detector
+//!   sleep on.
+//! - [`testing`]: the synthetic backend, the manual clock, fixtures,
+//!   a fake process-activity source and the counting allocator.
+//!
 //! # Threads and hand-offs
 //!
 //! One recording runs on four threads; every arrow is a hand-off through a
@@ -35,9 +53,9 @@
 //! the pipeline testable on every OS. `unsafe` is confined to the FFI
 //! edges, each with its invariant beside it: the Core Audio binding
 //! (`capture::live::hal`, `capture::live::backend`), the Speex FFI
-//! (`aec::speex`), the ring and the two raw-pointer writes into it
-//! (`realtime::ring`, `realtime::sink::write`, `realtime::io_proc::deliver`),
-//! and the counting allocator (`testing::rt`).
+//! (`aec::speex`), the ring and its raw-pointer callers (`realtime::ring`,
+//! `realtime::sink`, `realtime::io_proc`), and the counting allocator
+//! (`testing::rt`).
 //!
 //! Swift: `Sources/StenoAudio/StenoAudio.swift`.
 
