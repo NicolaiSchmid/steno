@@ -114,18 +114,23 @@ pub fn merge_windows(
         Some(_) => {
             // The left window owns the seam word; the right resumes at its
             // next word start.
-            let mut cursor = last_left + 1;
-            while cursor < left.len() && !vocab.is_splice_safe(left[cursor].id) {
-                out.push(left[cursor]);
-                cursor += 1;
-            }
-            match tail.iter().position(|t| vocab.is_splice_safe(t.id)) {
-                Some(p) => out.extend_from_slice(&tail[p..]),
-                None => out.extend_from_slice(tail),
-            }
+            out.extend(
+                left[last_left + 1..]
+                    .iter()
+                    .take_while(|t| !vocab.is_splice_safe(t.id)),
+            );
+            out.extend_from_slice(from_word_start(tail, vocab));
         }
     }
     out
+}
+
+/// `tokens` from its first splice-safe token on, or all of it when none is.
+fn from_word_start<'a>(tokens: &'a [Token], vocab: &Vocab) -> &'a [Token] {
+    match tokens.iter().position(|t| vocab.is_splice_safe(t.id)) {
+        Some(p) => &tokens[p..],
+        None => tokens,
+    }
 }
 
 fn merge_by_midpoint(
@@ -140,23 +145,21 @@ fn merge_by_midpoint(
         .iter()
         .position(|t| seconds(t) >= cutoff)
         .unwrap_or(left.len());
-    let mut right_start_index = right
+    let right_start_index = right
         .iter()
         .position(|t| seconds(t) >= cutoff)
         .unwrap_or(right.len());
     if left_end_index > 0 {
-        while left_end_index < left.len() && !vocab.is_splice_safe(left[left_end_index].id) {
-            left_end_index += 1;
-        }
+        left_end_index += left[left_end_index..]
+            .iter()
+            .take_while(|t| !vocab.is_splice_safe(t.id))
+            .count();
     }
-    let mut scan = right_start_index;
-    while scan < right.len() && !vocab.is_splice_safe(right[scan].id) {
-        scan += 1;
-    }
-    if scan < right.len() {
-        right_start_index = scan;
-    }
-    [&left[..left_end_index], &right[right_start_index..]].concat()
+    [
+        &left[..left_end_index],
+        from_word_start(&right[right_start_index..], vocab),
+    ]
+    .concat()
 }
 
 #[cfg(test)]
