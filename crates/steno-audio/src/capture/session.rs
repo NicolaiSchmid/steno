@@ -4,8 +4,9 @@
 //! `Idle → Starting → Recording → Stopping → Idle`, or `Failed` when a
 //! device stays lost or the writer fails. Owns the sink, the processing
 //! thread, the relay, the writer thread and the [`RecordingWriting`]
-//! implementation; `stop()` tears them down in order (backend, processing,
-//! writer, files) and returns the [`CaptureResult`]: the finished
+//! implementation; `stop()` tears them down in order (an in-flight rebuild,
+//! the backend, processing, writer, files; see Threads) and returns the
+//! [`CaptureResult`]: the finished
 //! [`AudioAsset`] (`Caf48kFloat32`, `sidecars_16k` filled, retention
 //! `KeepForever` until the caller sets it from `Settings`) with statistics.
 //!
@@ -48,9 +49,14 @@
 //! joins the rebuild thread, lock released, before it stops the backend: the
 //! rebuild may be inside its own `backend.stop()` with the IOProc and the
 //! old processing thread still running, or may just have started the
-//! backend again, and the rings are cleared only once both are over. The
-//! rebuild never finalises through that join: when every restart failed it
-//! drops its own handle before `finish()` runs on it.
+//! backend again, and the rings are cleared only once both are over. So
+//! `stop()` blocks for as long as the rebuild's current step takes: its
+//! `backend.stop()` of the old devices and the old processing thread's
+//! stop (HAL teardown, up to hundreds of milliseconds, unbounded if the HAL
+//! hangs), or a `backend.start()` and its settle (below). When every
+//! restart failed, the rebuild finalises the recording itself and first
+//! takes its own handle out of the state, so `finish()` never joins the
+//! thread it runs on.
 //!
 //! The one long hold is deliberate: `start` and the rebuild's
 //! `restart_backend` keep the mutex across `backend.start()`, up to 200 ms
