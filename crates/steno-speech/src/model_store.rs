@@ -423,16 +423,16 @@ impl Drop for RemoveOnDrop {
 }
 
 /// Syncs the directory holding `path`, so the rename survives a power loss.
-/// Windows cannot open a directory as a file; NTFS journals the rename.
+/// Not on Windows, which cannot open a directory as a file; NTFS journals
+/// the rename.
 fn sync_parent(path: &Path) -> Result<(), SpeechError> {
-    #[cfg(unix)]
-    if let Some(parent) = path.parent() {
+    if cfg!(unix)
+        && let Some(parent) = path.parent()
+    {
         File::open(parent)
             .and_then(|directory| directory.sync_all())
             .map_err(|e| SpeechError::io(parent, e))?;
     }
-    #[cfg(not(unix))]
-    let _ = path;
     Ok(())
 }
 
