@@ -177,6 +177,7 @@ pub trait RequestHandling: Send + Sync {
     async fn handle(&self, request: HandoverRequest) -> HandoverResponse;
 }
 
+#[derive(Default)]
 struct State {
     pairing: Option<PairingSession>,
     /// Receipts touched since start, by recording id; what the receipt
@@ -266,12 +267,7 @@ impl Engine {
             intake,
             now,
             receipts,
-            state: Mutex::new(State {
-                pairing: None,
-                active_receipts: BTreeMap::new(),
-                completing: BTreeSet::new(),
-                revoked: BTreeSet::new(),
-            }),
+            state: Mutex::default(),
             saves: tokio::sync::Mutex::new(()),
         }
     }
