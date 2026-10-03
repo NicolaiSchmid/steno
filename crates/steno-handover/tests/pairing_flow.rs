@@ -250,3 +250,18 @@ fn credential_parsing_is_case_insensitive_on_the_scheme() {
     assert_eq!(Engine::credential("Bearer", Some("Bearer  ")), None);
     assert_eq!(Engine::credential("Bearer", None), None);
 }
+
+#[tokio::test]
+async fn the_device_name_is_stored_trimmed() {
+    let test = TestService::with(common::Options {
+        start: false,
+        ..common::Options::default()
+    })
+    .await;
+    let _ = test.service.begin_pairing();
+    let id = Uuid::new_v4();
+    let response = common::engine_pair(&test, id, " \u{200B}Nicolai's iPhone\n\u{3000}").await;
+    assert_eq!(response.status.as_u16(), 200);
+    let stored = test.store.paired_device(id).unwrap().unwrap();
+    assert_eq!(stored.name, "Nicolai's iPhone");
+}

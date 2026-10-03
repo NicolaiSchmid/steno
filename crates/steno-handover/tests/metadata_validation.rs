@@ -147,6 +147,52 @@ fn device_name_is_one_to_128_characters_after_trimming() {
 }
 
 #[test]
+fn device_names_are_counted_in_graphemes_and_trimmed_as_foundation_trims() {
+    // What the eye sees as one character, as Swift's `String.count` counts:
+    // a decomposed accent is two scalars, the family emoji seven scalars
+    // and 25 bytes, a precomposed accent two bytes.
+    for (what, grapheme) in [
+        ("decomposed accent", "e\u{301}"),
+        (
+            "ZWJ emoji",
+            "\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}\u{200D}\u{1F466}",
+        ),
+        ("precomposed accent", "\u{E9}"),
+    ] {
+        assert_eq!(
+            problem(|m| m.device_name = grapheme.repeat(128)),
+            None,
+            "128 of {what}"
+        );
+        assert!(
+            mentions(
+                problem(|m| m.device_name = grapheme.repeat(129)),
+                "deviceName"
+            ),
+            "129 of {what}"
+        );
+    }
+    // Foundation's `whitespacesAndNewlines` holds U+200B; Unicode's
+    // `White_Space` does not.
+    assert!(mentions(
+        problem(|m| m.device_name = "\u{200B}\u{200B}".to_owned()),
+        "deviceName"
+    ));
+    assert!(mentions(
+        problem(|m| m.device_name = "\u{3000}\u{A0}\u{2028}\u{85}".to_owned()),
+        "deviceName"
+    ));
+    assert_eq!(
+        problem(|m| m.device_name = format!("\u{200B}{}\u{200B}", "x".repeat(128))),
+        None
+    );
+    // Neither U+200C nor U+FEFF is in the set: such a name is one
+    // character, not empty.
+    assert_eq!(problem(|m| m.device_name = "\u{200C}".to_owned()), None);
+    assert_eq!(problem(|m| m.device_name = "\u{FEFF}".to_owned()), None);
+}
+
+#[test]
 fn only_phone_and_fixture_formats_are_accepted() {
     assert_eq!(problem(|m| m.format = AudioFormat::M4aAac), None);
     assert_eq!(problem(|m| m.format = AudioFormat::Wav16kInt16), None);

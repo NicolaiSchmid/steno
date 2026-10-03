@@ -4171,6 +4171,7 @@ dependencies = [
  "tokio",
  "tokio-rustls",
  "tracing",
+ "unicode-segmentation",
  "uuid",
  "windows-sys 0.61.2",
  "x509-parser",

@@ -3,6 +3,7 @@
 //! Swift: `Upload/MetadataValidation.swift`.
 
 use steno_core::{AudioFormat, RecordingMetadata};
+use unicode_segmentation::UnicodeSegmentation as _;
 
 use crate::configuration::HandoverConfiguration;
 
@@ -59,11 +60,15 @@ impl MetadataValidation {
         None
     }
 
-    /// `name` trimmed, or the problem with it: the announce and the pairing
-    /// request hold a device name to the same rule.
+    /// `name` trimmed, or the problem with it. One rule for the announce
+    /// and the pairing request; Swift spells it twice
+    /// (`Upload/MetadataValidation.swift`, `HandoverEngine.pair`). Trimmed of
+    /// [`is_foundation_whitespace`] and counted in grapheme clusters, as
+    /// `trimmingCharacters(in: .whitespacesAndNewlines)` and `String.count`
+    /// do.
     pub(crate) fn device_name(name: &str) -> Result<&str, String> {
-        let name = name.trim();
-        if name.is_empty() || name.chars().count() > Self::MAX_DEVICE_NAME_LENGTH {
+        let name = name.trim_matches(is_foundation_whitespace);
+        if name.is_empty() || name.graphemes(true).count() > Self::MAX_DEVICE_NAME_LENGTH {
             return Err(format!(
                 "deviceName must be 1 to {} characters",
                 Self::MAX_DEVICE_NAME_LENGTH
@@ -85,4 +90,26 @@ impl MetadataValidation {
         let offset = index * chunk_size;
         chunk_size.min(byte_count - offset)
     }
+}
+
+/// Foundation's `CharacterSet.whitespacesAndNewlines`, as measured on macOS
+/// and in swift-corelibs-foundation 6.1: Unicode's `White_Space` (what
+/// `char::is_whitespace` tests) and U+200B ZERO WIDTH SPACE, so a name of
+/// zero-width spaces only is empty here too.
+#[must_use]
+pub fn is_foundation_whitespace(character: char) -> bool {
+    matches!(
+        character,
+        '\u{9}'..='\u{D}'
+            | ' '
+            | '\u{85}'
+            | '\u{A0}'
+            | '\u{1680}'
+            | '\u{2000}'..='\u{200B}'
+            | '\u{2028}'
+            | '\u{2029}'
+            | '\u{202F}'
+            | '\u{205F}'
+            | '\u{3000}'
+    )
 }
