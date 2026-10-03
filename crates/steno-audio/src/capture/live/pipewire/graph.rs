@@ -12,10 +12,20 @@
 //! first non-monitor output port (lowest `port.id`) of the input node, as
 //! the macOS backend takes the input device's first channel; a virtual
 //! source (a null sink with `media.class = Audio/Source/Virtual`) has only
-//! a monitor output, and that is taken then. The system
-//! lane is the default sink's monitor: its `FL` and `FR` monitor ports
-//! (folded to mono by the rings), or its only one for a mono sink, or the
-//! two lowest-numbered for a sink without front channels.
+//! a monitor output, and that is taken then. The system lane is the
+//! default sink's monitor: its `FL` and `FR` monitor ports (folded to mono
+//! by the rings), or its only one for a mono sink, or the two
+//! lowest-numbered for a sink without front channels.
+//!
+//! PipeWire reuses the ids of removed globals, never their
+//! `object.serial`: a linked node or port is alive while its id still
+//! carries the serial it had at `resolve`, so a device destroyed and
+//! re-created under the same name and id still reads as gone.
+//!
+//! No Swift counterpart (the Swift app is macOS-only). The macOS analogue
+//! of [`Graph::snapshot`] is `LiveCaptureBackend.resolve` (Swift:
+//! `Sources/StenoAudio/Capture/LiveCaptureBackend.swift`), which reads the
+//! same [`DeviceSnapshot`] from Core Audio.
 
 use std::collections::BTreeMap;
 
@@ -36,6 +46,8 @@ pub(crate) struct NodeEntry {
     pub name: String,
     /// `media.class`, `Audio/Sink`, `Audio/Source` and so on.
     pub media_class: String,
+    /// `object.serial`, unique for the daemon's lifetime.
+    pub serial: Option<u64>,
 }
 
 impl NodeEntry {
@@ -63,6 +75,8 @@ pub(crate) struct PortEntry {
     pub channel: String,
     /// `port.id`: the port's index on its node.
     pub index: u32,
+    /// `object.serial`, unique for the daemon's lifetime.
+    pub serial: Option<u64>,
 }
 
 /// One end the capture stream is linked to: the node and the ports taken
@@ -78,6 +92,8 @@ pub(crate) struct Endpoint {
     /// The port whose latency is the device path's: the microphone port
     /// itself, or the sink's first playback (input) port.
     pub latency_port: Option<u32>,
+    /// The `object.serial` of the node, then of each of `ports`.
+    serials: Vec<Option<u64>>,
 }
 
 /// What a capture links and how the lanes sit in its interleaved buffer.
@@ -121,6 +137,7 @@ impl Graph {
             NodeEntry {
                 name: name.to_owned(),
                 media_class: props("media.class").unwrap_or_default().to_owned(),
+                serial: serial(&props),
             },
         );
     }
@@ -146,15 +163,18 @@ impl Graph {
                 index: props("port.id")
                     .and_then(|v| v.parse().ok())
                     .unwrap_or(u32::MAX),
+                serial: serial(&props),
             },
         );
     }
 
-    /// A global went away. True when it was a node: the change a capture
-    /// may have to react to (a port goes with its node).
+    /// A global went away. True when it was a node or a port: the change a
+    /// capture may have to react to. A port can go while its node stays
+    /// (the node's ports reconfigured), and Steno's link to it dies with it.
     pub fn remove(&mut self, id: u32) -> bool {
-        self.ports.remove(&id);
-        self.nodes.remove(&id).is_some()
+        let port = self.ports.remove(&id).is_some();
+        let node = self.nodes.remove(&id).is_some();
+        port || node
     }
 
     /// A property of the `default` metadata on subject 0. `key` `None`
@@ -181,12 +201,24 @@ impl Graph {
         changed
     }
 
-    /// Whether `endpoint`'s node is still in the graph: its id still names
-    /// a node of its name (PipeWire reuses the ids of removed globals).
+    /// The `object.serial` of node `node`, then of each of its `ports`;
+    /// `None` when one of them is not in the graph (or not on that node).
+    fn serials(&self, node: u32, ports: &[u32]) -> Option<Vec<Option<u64>>> {
+        let mut serials = vec![self.nodes.get(&node)?.serial];
+        for port in ports {
+            serials.push(self.ports.get(port).filter(|p| p.node == node)?.serial);
+        }
+        Some(serials)
+    }
+
+    /// Whether `endpoint` is still in the graph as `resolve` found it: its
+    /// node under the same name and every linked port, each with the same
+    /// `object.serial` (see the module doc).
     fn is_alive(&self, endpoint: &Endpoint) -> bool {
         self.nodes
             .get(&endpoint.node)
             .is_some_and(|node| node.name == endpoint.name)
+            && self.serials(endpoint.node, &endpoint.ports).as_ref() == Some(&endpoint.serials)
     }
 
     /// The source a microphone lane records: the node named `uid`, or the
@@ -232,12 +264,24 @@ impl Graph {
             .or_else(|| outputs.first())
             .map(|(id, _)| *id)
             .ok_or(CaptureError::InputDeviceUnavailable)?;
-        Ok(Endpoint {
+        Ok(self.endpoint(node, entry, vec![port], Some(port)))
+    }
+
+    /// An endpoint on node `node` linking `ports`, its serials as now.
+    fn endpoint(
+        &self,
+        node: u32,
+        entry: &NodeEntry,
+        ports: Vec<u32>,
+        latency_port: Option<u32>,
+    ) -> Endpoint {
+        Endpoint {
             node,
             name: entry.name.clone(),
-            ports: vec![port],
-            latency_port: Some(port),
-        })
+            serials: self.serials(node, &ports).unwrap_or_default(),
+            ports,
+            latency_port,
+        }
     }
 
     /// The default sink's monitor endpoint: front left and right first,
@@ -264,12 +308,8 @@ impl Graph {
             .ports_of(node, |p| !p.output)
             .first()
             .map(|(id, _)| *id);
-        Ok(Endpoint {
-            node,
-            name: entry.name.clone(),
-            ports: monitors.iter().take(2).map(|(id, _)| *id).collect(),
-            latency_port,
-        })
+        let ports = monitors.iter().take(2).map(|(id, _)| *id).collect();
+        Ok(self.endpoint(node, entry, ports, latency_port))
     }
 
     /// What a capture of `lanes` links: the endpoints, the port feeding
@@ -366,6 +406,11 @@ impl Graph {
     }
 }
 
+/// A global's `object.serial`.
+fn serial<'a>(props: &impl Fn(&str) -> Option<&'a str>) -> Option<u64> {
+    props("object.serial").and_then(|v| v.parse().ok())
+}
+
 /// The `name` of a `default` metadata value, `{"name":"…"}`.
 fn default_name(value: &str) -> Option<String> {
     let json: serde_json::Value = serde_json::from_str(value).ok()?;
@@ -415,58 +460,72 @@ mod tests {
         move |key| pairs.iter().find(|(k, _)| *k == key).map(|(_, v)| *v)
     }
 
+    const BUILT_IN_MIC: &str = "alsa_input.pci.analog-stereo";
+
+    /// Node `id` named `name` of `class`, its `object.serial` `serial`.
+    fn node(graph: &mut Graph, id: u32, serial: u64, name: &str, class: &str) {
+        let serial = serial.to_string();
+        graph.add_node(
+            id,
+            props(&[
+                ("node.name", name),
+                ("media.class", class),
+                ("object.serial", &serial),
+            ]),
+        );
+    }
+
+    /// Port `id` of `node`; a `monitor_` prefix on `channel` makes it a
+    /// monitor port.
+    fn port(graph: &mut Graph, id: u32, serial: u64, node: u32, dir: &str, channel: &str) {
+        let monitor = if channel.starts_with("monitor_") {
+            "true"
+        } else {
+            "false"
+        };
+        let channel = channel.trim_start_matches("monitor_");
+        let index = match channel {
+            "FR" => "1",
+            _ => "0",
+        };
+        let (node, serial) = (node.to_string(), serial.to_string());
+        graph.add_port(
+            id,
+            props(&[
+                ("node.id", &node),
+                ("port.direction", dir),
+                ("port.monitor", monitor),
+                ("audio.channel", channel),
+                ("port.id", index),
+                ("object.serial", &serial),
+            ]),
+        );
+    }
+
     /// A laptop: a stereo ALSA sink with monitors, a stereo built-in
-    /// microphone, a mono USB headset microphone, the defaults set.
+    /// microphone, a mono USB headset microphone, the defaults set. Every
+    /// global's serial is its id plus 1000.
     fn laptop() -> Graph {
         let mut graph = Graph::default();
-        graph.add_node(
-            40,
-            props(&[
-                ("node.name", "alsa_output.pci.analog-stereo"),
-                ("media.class", "Audio/Sink"),
-            ]),
-        );
-        graph.add_node(
-            41,
-            props(&[
-                ("node.name", "alsa_input.pci.analog-stereo"),
-                ("media.class", "Audio/Source"),
-            ]),
-        );
-        graph.add_node(
+        let sink = "alsa_output.pci.analog-stereo";
+        node(&mut graph, 40, 1040, sink, "Audio/Sink");
+        node(&mut graph, 41, 1041, BUILT_IN_MIC, "Audio/Source");
+        node(
+            &mut graph,
             42,
-            props(&[
-                ("node.name", "alsa_input.usb-headset.mono"),
-                ("media.class", "Audio/Source"),
-            ]),
+            1042,
+            "alsa_input.usb-headset.mono",
+            "Audio/Source",
         );
-        let port = |graph: &mut Graph, id: u32, node: &str, dir: &str, ch: &str, index: &str| {
-            let monitor = if ch.starts_with("monitor_") {
-                "true"
-            } else {
-                "false"
-            };
-            let channel = ch.trim_start_matches("monitor_");
-            graph.add_port(
-                id,
-                props(&[
-                    ("node.id", node),
-                    ("port.direction", dir),
-                    ("port.monitor", monitor),
-                    ("audio.channel", channel),
-                    ("port.id", index),
-                ]),
-            );
-        };
-        port(&mut graph, 50, "40", "in", "FL", "0");
-        port(&mut graph, 51, "40", "in", "FR", "1");
+        port(&mut graph, 50, 1050, 40, "in", "FL");
+        port(&mut graph, 51, 1051, 40, "in", "FR");
         // The monitor ports announced right before left, as the registry
         // may.
-        port(&mut graph, 52, "40", "out", "monitor_FR", "1");
-        port(&mut graph, 53, "40", "out", "monitor_FL", "0");
-        port(&mut graph, 54, "41", "out", "FR", "1");
-        port(&mut graph, 55, "41", "out", "FL", "0");
-        port(&mut graph, 56, "42", "out", "MONO", "0");
+        port(&mut graph, 52, 1052, 40, "out", "monitor_FR");
+        port(&mut graph, 53, 1053, 40, "out", "monitor_FL");
+        port(&mut graph, 54, 1054, 41, "out", "FR");
+        port(&mut graph, 55, 1055, 41, "out", "FL");
+        port(&mut graph, 56, 1056, 42, "out", "MONO");
         graph.set_default(
             Some(DEFAULT_SINK_KEY),
             Some(r#"{"name":"alsa_output.pci.analog-stereo"}"#),
@@ -681,7 +740,6 @@ mod tests {
             "a lost connection loses the output first"
         );
         assert!(graph.remove(40));
-        assert!(!graph.remove(55), "a port is not a node");
         graph.add_node(
             40,
             props(&[("node.name", "a-new-node"), ("media.class", "Audio/Sink")]),
@@ -690,6 +748,75 @@ mod tests {
             graph.snapshot(&targets, None, false).difference(&baseline),
             Some(crate::capture::DeviceChangeReason::OutputDeviceGone),
             "a reused id is not the device that went"
+        );
+    }
+
+    #[test]
+    fn a_device_recreated_under_its_id_and_name_reads_as_gone() {
+        let mut graph = laptop();
+        let targets = graph.resolve(&[AudioLane::Mixed], None).unwrap();
+        let baseline = graph.snapshot(&targets, None, false);
+        assert!(graph.remove(55));
+        assert!(graph.remove(54));
+        assert!(graph.remove(41));
+        // WirePlumber restarted: the source is back, ids and name reused.
+        node(&mut graph, 41, 2041, BUILT_IN_MIC, "Audio/Source");
+        port(&mut graph, 54, 2054, 41, "out", "FR");
+        port(&mut graph, 55, 2055, 41, "out", "FL");
+        assert_eq!(
+            graph.snapshot(&targets, None, false).difference(&baseline),
+            Some(crate::capture::DeviceChangeReason::InputDeviceGone),
+            "Steno's link died with the old port"
+        );
+    }
+
+    #[test]
+    fn a_linked_port_that_goes_alone_takes_its_lane_with_it() {
+        let mut graph = laptop();
+        let targets = graph
+            .resolve(&[AudioLane::Mic, AudioLane::System], None)
+            .unwrap();
+        let baseline = graph.snapshot(&targets, None, false);
+        assert!(graph.remove(54), "a port going is a change to judge");
+        assert_eq!(
+            graph.snapshot(&targets, None, false).difference(&baseline),
+            None,
+            "the microphone's second channel was not linked"
+        );
+        assert!(graph.remove(52));
+        assert_eq!(
+            graph.snapshot(&targets, None, false).difference(&baseline),
+            Some(crate::capture::DeviceChangeReason::OutputDeviceGone)
+        );
+        assert!(!graph.remove(52), "gone already");
+    }
+
+    #[test]
+    fn a_microphone_prefers_a_capture_port_to_an_earlier_monitor() {
+        let mut graph = Graph::default();
+        node(&mut graph, 70, 1070, "duplex-mic", "Audio/Source");
+        // The monitor holds `port.id` 0, the capture port 1.
+        port(&mut graph, 71, 1071, 70, "out", "monitor_MONO");
+        port(&mut graph, 72, 1072, 70, "out", "FR");
+        let targets = graph
+            .resolve(&[AudioLane::Mic], Some("duplex-mic"))
+            .unwrap();
+        assert_eq!(targets.feeds, vec![(70, 72)]);
+    }
+
+    #[test]
+    fn a_duplex_default_output_records_only_its_monitors() {
+        let mut graph = Graph::default();
+        node(&mut graph, 80, 1080, "headset", "Audio/Duplex");
+        port(&mut graph, 81, 1081, 80, "out", "FL");
+        port(&mut graph, 82, 1082, 80, "out", "monitor_FL");
+        port(&mut graph, 83, 1083, 80, "out", "monitor_FR");
+        graph.set_default(Some(DEFAULT_SINK_KEY), Some(r#"{"name":"headset"}"#));
+        let targets = graph.resolve(&[AudioLane::System], None).unwrap();
+        assert_eq!(
+            targets.feeds,
+            vec![(80, 82), (80, 83)],
+            "not the capture port"
         );
     }
 
