@@ -221,28 +221,26 @@ impl OnnxBackend {
             .ok_or_else(|| SpeechError::Shape("decoder hidden size unknown".into()))?;
         let encoder_hidden = dimension(&joiner_inputs.shapes[0], 1)
             .ok_or_else(|| SpeechError::Shape("encoder output width unknown".into()))?;
-        let joint_width = match joiner
+        let declared_width = joiner
             .outputs()
             .first()
             .and_then(|o| outlet_tensor(o.dtype()))
-        {
-            Some((_, shape)) if shape.last().is_some_and(|&d| d > 0) => {
-                dimension(&shape, shape.len() - 1).unwrap_or(0)
-            }
-            _ => {
-                // Dynamic last axis: one probe run tells.
-                let outputs = joiner.run(vec![
-                    (
-                        joiner_inputs.names[0].as_str(),
-                        f32_tensor(vec![1, encoder_hidden as i64, 1], vec![0.0; encoder_hidden])?,
-                    ),
-                    (
-                        joiner_inputs.names[1].as_str(),
-                        f32_tensor(vec![1, decoder_hidden as i64, 1], vec![0.0; decoder_hidden])?,
-                    ),
-                ])?;
-                outputs[0].try_extract_tensor::<f32>()?.1.len()
-            }
+            .and_then(|(_, shape)| dimension(&shape, shape.len().checked_sub(1)?));
+        let joint_width = if let Some(width) = declared_width {
+            width
+        } else {
+            // Dynamic last axis: one probe run tells.
+            let outputs = joiner.run(vec![
+                (
+                    joiner_inputs.names[0].as_str(),
+                    f32_tensor(vec![1, encoder_hidden as i64, 1], vec![0.0; encoder_hidden])?,
+                ),
+                (
+                    joiner_inputs.names[1].as_str(),
+                    f32_tensor(vec![1, decoder_hidden as i64, 1], vec![0.0; decoder_hidden])?,
+                ),
+            ])?;
+            outputs[0].try_extract_tensor::<f32>()?.1.len()
         };
         if joint_width <= vocab.len() || joint_width - vocab.len() > 8 {
             return Err(SpeechError::Shape(format!(
