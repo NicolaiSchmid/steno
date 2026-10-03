@@ -39,19 +39,6 @@ use super::ring::LaneRingBuffer;
 use super::sink::LaneFrameSink;
 use crate::capture::layout::LaneSource;
 
-/// One packet as a capture client handed it out: valid only for the call
-/// it is passed to (WASAPI's `GetBuffer` to `ReleaseBuffer`).
-#[derive(Debug, Clone, Copy)]
-pub struct Packet<'a> {
-    /// Frames in the packet.
-    pub frames: usize,
-    /// Interleaved channels per frame.
-    pub channels: usize,
-    /// `channels * frames` interleaved samples; `None` for a packet flagged
-    /// silent, which becomes zeros.
-    pub samples: Option<&'a [f32]>,
-}
-
 /// The follower stream's staging ring and the jitter-buffer policy the
 /// master applies when it pulls. Producer: the follower's capture thread
 /// ([`Self::push`]); consumer: the master's ([`Self::pull`]).
@@ -132,7 +119,7 @@ impl FollowerLane {
     /// count. A packet shorter than it claims is written as zeros.
     /// `scratch` is the thread's fold buffer; any length above zero works.
     #[inline(always)]
-    pub fn push(&self, packet: Packet<'_>, scratch: &mut [f32]) {
+    pub fn push(&self, packet: SliceView<'_>, scratch: &mut [f32]) {
         let frames = packet.frames;
         if frames == 0 || packet.channels == 0 {
             return;
@@ -246,7 +233,7 @@ impl PacketRouter {
 
     /// One master packet into the sink.
     #[inline(always)]
-    pub fn route(&mut self, packet: Packet<'_>, sink: &LaneFrameSink) {
+    pub fn route(&mut self, packet: SliceView<'_>, sink: &LaneFrameSink) {
         let channels = packet.channels;
         if channels == 0 {
             return;
@@ -323,7 +310,7 @@ impl StreamBody {
 
     /// One packet; real-time safe.
     #[inline(always)]
-    pub fn handle(&mut self, packet: Packet<'_>) {
+    pub fn handle(&mut self, packet: SliceView<'_>) {
         match self {
             StreamBody::Master { router, sink } => router.route(packet, sink),
             StreamBody::Follower { lane, scratch } => lane.push(packet, scratch),
