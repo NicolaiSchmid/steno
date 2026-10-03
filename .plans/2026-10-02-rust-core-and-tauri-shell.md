@@ -178,16 +178,6 @@ bridge's copies of the macro and codecs. Packages after WP3 branch from `main`.
   removed, web app moved to `apps/web`, Swift rows removed from `AGENTS.md`.
 - **WP10 Windows.** WASAPI capture, DirectML provider (speech-stack G4), installer.
 
-## Progress
-
-One row per work package as it lands; the branch and PR columns point at the
-work, the notes at what the next package needs to know.
-
-| Package | Branch | PR | State | Notes |
-|---------|--------|----|-------|-------|
-| Protocols | `feat/rust-protocols` | #162 | PR open | Protocol traits and pipeline value types in `steno-core` (`HandoverIntake`, `SecretStore`, `HandoverReceipt`, `PairedDevice`, `RecordingMetadata`); `feat/rust-handover` carries these commits until #162 merges. |
-| WP7 handover | `feat/rust-handover` | #169 | PR open | `crates/steno-handover`: rustls (ring) listener, TLS 1.3 only, hyper 1 HTTP/1.1, pinned verifier (`pinning`), rcgen identity in the `SecretStore` as one PEM bundle, pairing, seven routes, inbox, mdns-sd advertiser; `tests/wire_contract.rs` reads `wire.ts`. Store gains `paired_device*` and `handover_receipt` queries. Core's `RecordingIntake` (copy into the audio folder, enqueue) waits for WP6: no `RecordingLayout` and no file-URL to path helper in Rust core yet. |
-
 ## Risks
 
 - The spike decoder is validated above the joint only; the ONNX logits split is WP4's
@@ -571,6 +561,7 @@ PR off `main`.
 | WP6a host | `feat/rust-host` | #170 | merged |
 | WP5a audio (`steno-audio`) | `feat/rust-audio` | #166 | merged |
 | WP4d diarization (`steno-diarize`) | `feat/rust-diarize` | #164 | open |
+| WP7 handover | `feat/rust-handover` | #169 | open |
 
 WP4b is `crates/steno-speech-coreml`: `objc2-core-ml` behind one safe module,
 the four backend calls, the FluidAudio 0.17.4 heuristics ported
@@ -589,3 +580,11 @@ proof is `crates/steno-audio/tests/realtime.rs`; the ERLE table is
 identical to Swift's `aec-bench --synthetic`; the ring tests run under
 ThreadSanitizer in CI's `tsan` job; the live Core Audio tests sit behind
 `--ignored` in `tests/live.rs`. Parity items: the Audio list above.
+
+What WP7 leaves for the next package: `crates/steno-handover` is a rustls (ring)
+listener, TLS 1.3 only, hyper 1 HTTP/1.1, with the pinned verifier (`pinning`), the
+rcgen identity in the `SecretStore` as one PEM bundle, pairing, the seven routes, the
+inbox and the mdns-sd advertiser; `tests/wire_contract.rs` reads `wire.ts`. The store
+gains the `paired_device*` and `handover_receipt` queries. Core's `RecordingIntake`
+(copy into the audio folder, enqueue) waits for WP6: no `RecordingLayout` and no
+file-URL to path helper in Rust core yet.
