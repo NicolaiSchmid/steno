@@ -326,12 +326,15 @@ fn a_buffer_without_data_becomes_silence() {
     assert_eq!(read(&sink, 1, 4), vec![0.0; 4]);
 }
 
-/// The layout was resolved for a mono microphone and an interleaved stereo
-/// tap. A live buffer list shaped differently must never be read through
-/// those pointers: a tap that arrives mono (the stride no longer matches),
-/// a microphone channel beyond the buffer's channels, and a buffer shorter
-/// than the callback's frames each become silence, and the lanes stay
-/// aligned on the frames the first buffer carried.
+/// The layout was resolved for the first channel of a stereo microphone
+/// and an interleaved stereo tap. A live buffer list shaped differently
+/// must never be read through those pointers: a tap that arrives mono (the
+/// stride no longer matches), a microphone channel beyond the buffer's
+/// channels, and a buffer shorter than the callback's frames, by half or by
+/// a single frame, each become silence, and the lanes stay aligned on the
+/// frames the first buffer carried. Where a wrong read would stay inside
+/// the vector, the vector is longer than its reported size, so a guard that
+/// lets it through shows up as audio instead of an out-of-bounds read.
 #[test]
 fn a_buffer_shaped_unlike_the_layout_becomes_silence() {
     let layout = StreamLayout::resolve(
@@ -423,6 +426,109 @@ fn a_buffer_shaped_unlike_the_layout_becomes_silence() {
     assert_eq!(sink.available_to_read(), 4);
     assert_eq!(read(&sink, 0, 4), vec![0.0; 4], "channel beyond the buffer");
     assert_eq!(read(&sink, 1, 4), vec![15.0, 35.0, 55.0, 75.0]);
+
+    // The tap's buffer is exactly one frame short of the callback's four
+    // (three frames by its byte size, four in the vector).
+    let sink = LaneFrameSink::new(&[AudioLane::Mic, AudioLane::System]);
+    let tap = [9.0f32; 8];
+    let views = [
+        BufferView {
+            channels: 2,
+            data: Some(mic.as_ptr()),
+            byte_size: mic.len() * 4,
+        },
+        BufferView {
+            channels: 2,
+            data: Some(tap.as_ptr()),
+            byte_size: 3 * 2 * 4,
+        },
+    ];
+    // SAFETY: both pointers refer to arrays alive for the call, each at
+    // least as long as its byte size says.
+    unsafe { deliver(&views, &layout.sources, &sink) };
+    assert_eq!(sink.available_to_read(), 4);
+    assert_eq!(read(&sink, 0, 4), vec![1.0, 2.0, 3.0, 4.0]);
+    assert_eq!(
+        read(&sink, 1, 4),
+        vec![0.0; 4],
+        "a tap buffer one frame short is silence"
+    );
+
+    // The microphone's channel is the buffer's channel count at the right
+    // stride: only the offset compare rejects it.
+    let mut beyond = layout.clone();
+    beyond.sources[0].left = ChannelRef::new(0, 2, 2);
+    let sink = LaneFrameSink::new(&[AudioLane::Mic, AudioLane::System]);
+    let padded_mic = [1.0f32, -1.0, 2.0, -2.0, 3.0, -3.0, 4.0, -4.0, 5.0, -5.0];
+    let stereo_tap = [10.0f32, 20.0, 30.0, 40.0, 50.0, 60.0, 70.0, 80.0];
+    let views = [
+        BufferView {
+            channels: 2,
+            data: Some(padded_mic.as_ptr()),
+            byte_size: 4 * 2 * 4,
+        },
+        BufferView {
+            channels: 2,
+            data: Some(stereo_tap.as_ptr()),
+            byte_size: stereo_tap.len() * 4,
+        },
+    ];
+    // SAFETY: as above.
+    unsafe { deliver(&views, &beyond.sources, &sink) };
+    assert_eq!(sink.available_to_read(), 4);
+    assert_eq!(
+        read(&sink, 0, 4),
+        vec![0.0; 4],
+        "offset equal to the channels"
+    );
+    assert_eq!(read(&sink, 1, 4), vec![15.0, 35.0, 55.0, 75.0]);
+}
+
+/// The microphone's buffer arrives with no channels (or not at all): the
+/// callback's length comes from the tap's buffer, the microphone lane is
+/// silence and the tap's audio still lands.
+#[test]
+fn an_unusable_first_buffer_costs_only_its_own_lane() {
+    let layout = StreamLayout::resolve(
+        &[AudioLane::Mic, AudioLane::System],
+        &[1, 2],
+        &[vec![], vec![1]],
+        &[2],
+        Some(1),
+    )
+    .unwrap();
+    let tap = [10.0f32, 20.0, 30.0, 40.0, 50.0, 60.0, 70.0, 80.0];
+    let tap_view = BufferView {
+        channels: 2,
+        data: Some(tap.as_ptr()),
+        byte_size: tap.len() * 4,
+    };
+    let no_channels = BufferView {
+        channels: 0,
+        data: None,
+        byte_size: 0,
+    };
+    let sink = LaneFrameSink::new(&[AudioLane::Mic, AudioLane::System]);
+    // SAFETY: the one data pointer refers to an array alive for the call.
+    unsafe { deliver(&[no_channels, tap_view], &layout.sources, &sink) };
+    assert_eq!(sink.available_to_read(), 4);
+    assert_eq!(read(&sink, 0, 4), vec![0.0; 4]);
+    assert_eq!(read(&sink, 1, 4), vec![15.0, 35.0, 55.0, 75.0]);
+
+    // A buffer list with no buffer for the microphone at all, and one with
+    // no usable buffer: the second has no length and writes nothing.
+    let mut missing = layout.clone();
+    missing.sources[0].left = ChannelRef::new(5, 0, 1);
+    let sink = LaneFrameSink::new(&[AudioLane::Mic, AudioLane::System]);
+    // SAFETY: as above.
+    unsafe { deliver(&[no_channels, tap_view], &missing.sources, &sink) };
+    assert_eq!(read(&sink, 0, 4), vec![0.0; 4]);
+    assert_eq!(read(&sink, 1, 4), vec![15.0, 35.0, 55.0, 75.0]);
+    let sink = LaneFrameSink::new(&[AudioLane::Mic, AudioLane::System]);
+    // SAFETY: no buffer carries a pointer.
+    unsafe { deliver(&[no_channels, no_channels], &layout.sources, &sink) };
+    assert_eq!(sink.available_to_read(), 0);
+    assert!(sink.dropped_samples().is_empty());
 }
 
 /// Rings of four samples: the second callback of four is refused for both

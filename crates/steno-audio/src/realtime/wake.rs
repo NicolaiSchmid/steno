@@ -17,7 +17,10 @@
 //! a `notify_one` that lands after the consumer's re-check and before its
 //! `wait_timeout`, since the producer takes no lock: that wake waits out
 //! the timeout (20 ms on the processing thread, 50 ms on the writer), and
-//! the rings hold the frames meanwhile.
+//! the rings hold the frames meanwhile. That same bounded cost is all a
+//! weaker ordering would add, so no test tells `SeqCst` from `Relaxed`
+//! here; `tests/ring.rs` pins the wake itself (a parked consumer is woken
+//! by `signal`, not by its timeout).
 
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Condvar, Mutex};

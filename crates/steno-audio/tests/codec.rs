@@ -332,6 +332,70 @@ async fn wav_master_decodes_through_symphonia() {
     );
 }
 
+/// A stereo 16-bit PCM WAV at 48 kHz, built byte by byte: the left channel
+/// a 440 Hz sine at 0.5, the right a 1 kHz sine at 0.1. Every container the
+/// phone path reads in the other tests is mono, so this is what pins the
+/// de-interleaving: each channel decodes to its own samples, at its own
+/// level and frequency, through `read_channel` and `decode_path`.
+#[test]
+fn a_stereo_wav_decodes_each_channel_on_its_own() {
+    let frames = 24_000usize;
+    let sine = |hertz: f64, amplitude: f64, i: usize| {
+        ((2.0 * std::f64::consts::PI * hertz * i as f64 / 48_000.0).sin() * amplitude * 32_767.0)
+            as i16
+    };
+    let left: Vec<i16> = (0..frames).map(|i| sine(440.0, 0.5, i)).collect();
+    let right: Vec<i16> = (0..frames).map(|i| sine(1_000.0, 0.1, i)).collect();
+    let data_size = (frames * 4) as u32;
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(b"RIFF");
+    bytes.extend_from_slice(&(36 + data_size).to_le_bytes());
+    bytes.extend_from_slice(b"WAVEfmt ");
+    bytes.extend_from_slice(&16u32.to_le_bytes());
+    bytes.extend_from_slice(&1u16.to_le_bytes()); // PCM
+    bytes.extend_from_slice(&2u16.to_le_bytes()); // channels
+    bytes.extend_from_slice(&48_000u32.to_le_bytes());
+    bytes.extend_from_slice(&(48_000u32 * 4).to_le_bytes()); // bytes a second
+    bytes.extend_from_slice(&4u16.to_le_bytes()); // bytes a frame
+    bytes.extend_from_slice(&16u16.to_le_bytes()); // bits
+    bytes.extend_from_slice(b"data");
+    bytes.extend_from_slice(&data_size.to_le_bytes());
+    for (l, r) in left.iter().zip(&right) {
+        bytes.extend_from_slice(&l.to_le_bytes());
+        bytes.extend_from_slice(&r.to_le_bytes());
+    }
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("stereo.wav");
+    std::fs::write(&path, bytes).unwrap();
+
+    for (channel, written, hertz, amplitude) in [(0, &left, 440.0, 0.5), (1, &right, 1_000.0, 0.1)]
+    {
+        let source = SymphoniaAudioCodec::read_channel(&path, channel, AudioLane::Mixed).unwrap();
+        assert_eq!((source.sample_rate, source.channels), (48_000, 2));
+        assert_eq!(source.samples.len(), frames, "channel {channel}");
+        assert!(
+            source
+                .samples
+                .iter()
+                .zip(written.iter())
+                .all(|(decoded, sample)| (decoded - f32::from(*sample) / 32_768.0).abs() < 1e-6),
+            "channel {channel} decodes to its own samples"
+        );
+        let decoded = SymphoniaAudioCodec::decode_path(&path, channel, AudioLane::Mixed).unwrap();
+        assert_eq!(decoded.len(), 8_000);
+        let steady = &decoded.samples[800..7_200];
+        assert!(
+            level_against_sine(steady, amplitude).abs() < 0.2,
+            "channel {channel} level"
+        );
+        assert!((frequency(steady, 16_000.0) - hertz).abs() < 5.0);
+    }
+    assert!(matches!(
+        SymphoniaAudioCodec::read_channel(&path, 2, AudioLane::Mixed),
+        Err(CodecError::ChannelMissing { channels: 2, .. })
+    ));
+}
+
 fn fixture(name: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../Tests/Fixtures/audio")

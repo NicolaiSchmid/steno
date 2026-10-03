@@ -350,3 +350,46 @@ fn the_relay_refuses_and_counts_a_frame_on_every_channel() {
     assert!(relay.wake().try_take());
     assert!(!relay.wake().try_take(), "no wake for the refused frame");
 }
+
+/// A consumer parked in `Wake::wait` is woken by `signal`, not by its
+/// timeout: two hundred hand-offs, each after the consumer has had a
+/// millisecond to park, with a 200 ms timeout. The lock-free `signal` can
+/// still land between the consumer's re-check and its wait (the module doc
+/// accepts that cost), so a handful of slow waits is allowed; a `signal`
+/// that never wakes the parked consumer makes every one slow.
+#[test]
+fn a_parked_consumer_is_woken_by_the_signal_not_the_timeout() {
+    let wake = Arc::new(steno_audio::realtime::Wake::new());
+    let (ack, acks) = channel();
+    let consumer = {
+        let wake = Arc::clone(&wake);
+        std::thread::spawn(move || {
+            loop {
+                let started = Instant::now();
+                let woken = wake.wait(Duration::from_millis(200));
+                if ack.send((woken, started.elapsed())).is_err() {
+                    break;
+                }
+            }
+        })
+    };
+    let mut slow = 0;
+    for _ in 0..200 {
+        std::thread::sleep(Duration::from_millis(1));
+        wake.signal();
+        // A wait that returns without a wake (the timeout before the
+        // signal) is not a hand-off; take the next one.
+        let took = loop {
+            let (woken, took) = acks.recv().unwrap();
+            if woken {
+                break took;
+            }
+        };
+        if took >= Duration::from_millis(150) {
+            slow += 1;
+            assert!(slow <= 5, "{slow} hand-offs waited out the timeout");
+        }
+    }
+    drop(acks);
+    consumer.join().unwrap();
+}
