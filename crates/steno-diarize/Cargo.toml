@@ -25,7 +25,8 @@ sha2.workspace = true
 # A per-process temporary file for each model download.
 tempfile.workspace = true
 thiserror.workspace = true
-# `spawn_blocking` for the `Diarizer` calls; the `rt` feature only.
+# `spawn_blocking` for the `Diarizer` calls; the workspace entry brings
+# `rt`, `rt-multi-thread` and `macros`, nothing more.
 tokio.workspace = true
 tracing.workspace = true
 ureq.workspace = true

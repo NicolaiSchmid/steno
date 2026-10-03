@@ -173,8 +173,8 @@ pub struct ClipChoice {
 
 /// The longest contiguous range of the cluster, capped to
 /// [`CLIP_TARGET_SECONDS`] and centred on the highest-quality chunk inside
-/// it; on a tie the earlier range and the earlier chunk, as Swift's
-/// `max(by:)` picks them. Confidence is the duration-weighted mean chunk
+/// it, the earlier range and the earlier chunk on a tie. Confidence is
+/// the duration-weighted mean chunk
 /// quality, halved when the longest range is under
 /// [`CLIP_MINIMUM_SECONDS`].
 #[must_use]

@@ -160,10 +160,11 @@ fn verifies(path: &Path, asset: &ModelAsset) -> bool {
     path.is_file() && sha256_of(path).is_ok_and(|got| got == asset.sha256)
 }
 
-/// Time to reach the host, and for the whole transfer: the larger file is
-/// 26 MB, so ten minutes covers a slow connection without letting a
-/// stalled one hang the first run forever.
+/// Time to reach the host.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
+/// Time for the whole transfer: the larger file is 26 MB, so ten minutes
+/// covers a slow connection without letting a stalled one hang the first
+/// run.
 const TRANSFER_TIMEOUT: Duration = Duration::from_secs(600);
 
 /// Why a download did not land in its file: the transfer or the file.

@@ -195,8 +195,7 @@ fn closest_pair(clusters: &[SpeakerCluster]) -> Option<(usize, usize, f32)> {
 }
 
 /// The cluster whose embedding is closest to `embedding`, with the cosine,
-/// the first on a tie as Swift's `max(by:)` picks it; `None` when none
-/// carries an embedding.
+/// the first on a tie; `None` when none carries an embedding.
 fn closest(embedding: &Embedding, clusters: &[SpeakerCluster]) -> Option<(usize, f32)> {
     first_max_by(
         clusters.iter().enumerate().filter_map(|(index, cluster)| {

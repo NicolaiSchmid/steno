@@ -33,7 +33,7 @@ pub enum DiarizeError {
 }
 
 impl DiarizeError {
-    /// Wraps any backend error, a message included.
+    /// Wraps a backend error or a plain message.
     pub fn backend(error: impl Into<BackendError>) -> Self {
         DiarizeError::Backend(error.into())
     }
