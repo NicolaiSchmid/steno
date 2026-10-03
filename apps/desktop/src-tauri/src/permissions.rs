@@ -8,10 +8,11 @@
 //! Bonjour registration, so both stay `unknown` here. The usage strings the
 //! prompts show are in `Info.plist` beside `tauri.conf.json`.
 //!
-//! Linux and Windows: no permission model the shell can query. `PipeWire`'s
-//! portal and WASAPI grant at capture time (the portal shows its own dialog
-//! then), so the microphone and system audio report `granted`; the
-//! calendar and the local network stay `unknown`.
+//! Linux and Windows: no permission model the shell can query ahead of
+//! capture. `PipeWire`'s portal asks when the stream opens and WASAPI
+//! follows the Windows microphone privacy switch, neither of which the
+//! shell can read beforehand, so every permission reports `unknown` there
+//! until the recorder has opened a stream and the host knows better.
 //!
 //! Swift: `PermissionsService.swift`.
 //!
@@ -128,24 +129,26 @@ mod platform {
 
 #[cfg(not(target_os = "macos"))]
 mod platform {
-    //! No permission model to query: `PipeWire`'s portal and WASAPI grant at
-    //! capture time, so the recorder is never blocked ahead of it.
+    //! Nothing to query before capture: the portal asks when the stream
+    //! opens, Windows decides by its privacy switch. Neither is known here,
+    //! so the honest answer is `unknown`, not a `granted` the OS may
+    //! contradict at the first recording.
 
     use super::PermissionState;
 
     pub fn microphone_state() -> PermissionState {
-        PermissionState::Granted
+        PermissionState::Unknown
     }
 
     pub fn system_audio_state() -> PermissionState {
-        PermissionState::Granted
+        PermissionState::Unknown
     }
 
     /// `async` for the one signature across platforms; the macOS one awaits
-    /// the TCC prompt.
+    /// the TCC prompt. There is no prompt to raise here.
     #[allow(clippy::unused_async)]
     pub async fn request_microphone() -> PermissionState {
-        PermissionState::Granted
+        PermissionState::Unknown
     }
 }
 
@@ -163,16 +166,18 @@ mod tests {
     }
 
     #[test]
-    fn linux_and_windows_grant_capture_ahead_of_time() {
+    fn linux_and_windows_know_nothing_ahead_of_capture() {
         if cfg!(target_os = "macos") {
             return;
         }
-        assert_eq!(state(PermissionKind::Microphone), PermissionState::Granted);
-        assert_eq!(state(PermissionKind::SystemAudio), PermissionState::Granted);
-        assert_eq!(
-            tauri::async_runtime::block_on(request(PermissionKind::Microphone)),
-            PermissionState::Granted
-        );
+        for &kind in PermissionKind::ALL {
+            assert_eq!(state(kind), PermissionState::Unknown, "{kind}");
+            assert_eq!(
+                tauri::async_runtime::block_on(request(kind)),
+                PermissionState::Unknown,
+                "{kind}"
+            );
+        }
     }
 
     #[test]
