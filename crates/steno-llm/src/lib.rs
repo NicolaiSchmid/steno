@@ -60,8 +60,10 @@
 //! and a refresh writes them back to it with mode 0600 (on Unix only),
 //! leaving no temporary file. No secret, however often or wherever in a
 //! body a server echoes it, reaches an error, a `Debug` form or an observer
-//! event: a body is redacted whole before it is cut. A key shorter than
-//! eight bytes is a placeholder, not a secret, and is left as it is.
+//! event: a body is redacted whole before it is cut, which
+//! `tests/redaction_property.rs` also checks on random bodies. A key
+//! shorter than eight bytes is a placeholder, not a secret, and is left as
+//! it is.
 //!
 //! Tests: `cargo test -p steno-llm`; the dev-dependency on the crate itself
 //! turns the `testing` feature on.
