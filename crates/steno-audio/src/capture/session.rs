@@ -704,7 +704,7 @@ impl Core {
             .or(closing)
             .map(|error| CaptureError::WriterFailed(error.to_string()));
         let files = writer.files();
-        if !files.master.exists() {
+        if matches!(files.master.try_exists(), Ok(false)) {
             return Err(CaptureError::WriterFailed(format!(
                 "{} is gone",
                 files.master.display()
@@ -756,6 +756,11 @@ impl Core {
 
     fn device_changed(self: &Arc<Self>, reason: DeviceChangeReason) {
         let mut inner = self.lock();
+        self.begin_rebuild(&mut inner, reason);
+    }
+
+    /// [`Self::device_changed`] under the caller's guard.
+    fn begin_rebuild(self: &Arc<Self>, inner: &mut Inner, reason: DeviceChangeReason) {
         if !matches!(inner.state, CaptureState::Recording { .. }) {
             return;
         }
@@ -779,7 +784,7 @@ impl Core {
             .expect("spawn rebuild thread");
         active.rebuild = Some(Rebuild { cancel, thread });
         inner.rebuild_generation = generation;
-        Self::emit(&mut inner, CaptureNotice::DeviceChanged(reason));
+        Self::emit(inner, CaptureNotice::DeviceChanged(reason));
     }
 
     fn still_rebuilding(inner: &Inner, generation: usize) -> bool {
@@ -922,41 +927,40 @@ impl Core {
         relay: &Arc<FrameRelay>,
         generation: usize,
     ) -> bool {
-        let pending = {
-            let mut inner = self.lock();
-            if !Self::still_rebuilding(&inner, generation) {
-                return false;
-            }
-            let canceller = inner.echo_canceller.take();
-            let Some(active) = inner.active.as_mut() else {
-                return false;
-            };
-            let gap_seconds = Self::seconds(gap_frames);
-            let mut processing = self.make_processing_thread(
-                sink,
-                relay,
-                &stream,
-                Some(Arc::clone(&active.levels)),
-                canceller,
-            );
-            processing.start();
-            let pending = active.pending_change.take();
-            active.stream = stream;
-            active.processing = Some(processing);
-            active.device_changes += 1;
-            active.gap_seconds += gap_seconds;
-            active.rebuild = None;
-            Self::emit(
-                &mut inner,
-                CaptureNotice::DeviceResumed {
-                    attempt,
-                    gap_seconds,
-                },
-            );
-            pending
+        let mut inner = self.lock();
+        if !Self::still_rebuilding(&inner, generation) {
+            return false;
+        }
+        let canceller = inner.echo_canceller.take();
+        let Some(active) = inner.active.as_mut() else {
+            return false;
         };
+        let gap_seconds = Self::seconds(gap_frames);
+        let mut processing = self.make_processing_thread(
+            sink,
+            relay,
+            &stream,
+            Some(Arc::clone(&active.levels)),
+            canceller,
+        );
+        processing.start();
+        let pending = active.pending_change.take();
+        active.stream = stream;
+        active.processing = Some(processing);
+        active.device_changes += 1;
+        active.gap_seconds += gap_seconds;
+        active.rebuild = None;
+        Self::emit(
+            &mut inner,
+            CaptureNotice::DeviceResumed {
+                attempt,
+                gap_seconds,
+            },
+        );
+        // Under the same guard, so a stop and a new start cannot come in
+        // between and hand this recording's change to the next one.
         if let Some(pending) = pending {
-            self.device_changed(pending);
+            self.begin_rebuild(&mut inner, pending);
         }
         true
     }
