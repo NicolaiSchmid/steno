@@ -121,11 +121,12 @@ pub fn speech_engine(settings: &Settings, models_directory: &Path) -> Arc<dyn Sp
     #[cfg(target_os = "macos")]
     {
         if runs_on_coreml(&settings.speech_engine_id) {
-            return Arc::new(LanguageTaggingEngine::new(Arc::new(
-                steno_speech_coreml::CoreMlParakeetEngine::new(coreml_model_directory(
-                    models_directory,
-                )),
-            )));
+            let coreml = steno_speech_coreml::CoreMlParakeetEngine::new(coreml_model_directory(
+                models_directory,
+            ));
+            return Arc::new(LanguageTaggingEngine::new(Arc::new(OneCallAtATime::new(
+                Arc::new(coreml),
+            ))));
         }
     }
     let _ = settings;
@@ -136,6 +137,51 @@ pub fn speech_engine(settings: &Settings, models_directory: &Path) -> Arc<dyn Sp
             ..OnnxOptions::default()
         },
     ))
+}
+
+/// An engine whose calls do long synchronous model work without yielding
+/// (the `CoreML` Parakeet loads and transcribes that way): one call at a
+/// time, as Swift's `AsrManager` actor ran them, each off the runtime's
+/// workers ([`crate::off_the_workers`]), so two meetings processing at once
+/// queue on the model instead of parking two workers for minutes.
+pub struct OneCallAtATime {
+    inner: Arc<dyn SpeechEngine>,
+    turn: tokio::sync::Mutex<()>,
+}
+
+impl OneCallAtATime {
+    #[must_use]
+    pub fn new(inner: Arc<dyn SpeechEngine>) -> Self {
+        OneCallAtATime {
+            inner,
+            turn: tokio::sync::Mutex::new(()),
+        }
+    }
+}
+
+#[async_trait]
+impl SpeechEngine for OneCallAtATime {
+    fn id(&self) -> &str {
+        self.inner.id()
+    }
+
+    fn supported_languages(&self) -> &BTreeSet<LanguageTag> {
+        self.inner.supported_languages()
+    }
+
+    async fn prepare(&self) -> BoundaryResult<()> {
+        let _turn = self.turn.lock().await;
+        crate::off_the_workers(self.inner.prepare()).await
+    }
+
+    async fn transcribe(
+        &self,
+        audio: &AudioBuffer16k,
+        hint: Option<&LanguageTag>,
+    ) -> BoundaryResult<Vec<RawSegment>> {
+        let _turn = self.turn.lock().await;
+        crate::off_the_workers(self.inner.transcribe(audio, hint)).await
+    }
 }
 
 /// Whether [`speech_engine`] builds the `CoreML` engine for `engine_id`:
@@ -618,6 +664,94 @@ mod tests {
                 "Parakeet TDT 0.6B v3 (fp32)".to_owned(),
                 "nvidia/parakeet-tdt-0.6b-v3".to_owned()
             )
+        );
+    }
+
+    /// An engine that transcribes synchronously, without yielding, until
+    /// `go` lets it, and counts how many calls run at once.
+    struct BlockingEngine {
+        languages: BTreeSet<LanguageTag>,
+        go: std::sync::Mutex<std::sync::mpsc::Receiver<()>>,
+        running: std::sync::atomic::AtomicUsize,
+        most_at_once: std::sync::atomic::AtomicUsize,
+    }
+
+    #[async_trait]
+    impl SpeechEngine for BlockingEngine {
+        fn id(&self) -> &'static str {
+            "blocking"
+        }
+
+        fn supported_languages(&self) -> &BTreeSet<LanguageTag> {
+            &self.languages
+        }
+
+        async fn prepare(&self) -> BoundaryResult<()> {
+            Ok(())
+        }
+
+        async fn transcribe(
+            &self,
+            _audio: &AudioBuffer16k,
+            _hint: Option<&LanguageTag>,
+        ) -> BoundaryResult<Vec<RawSegment>> {
+            use std::sync::atomic::Ordering::SeqCst;
+            let now = self.running.fetch_add(1, SeqCst) + 1;
+            self.most_at_once.fetch_max(now, SeqCst);
+            self.go
+                .lock()
+                .unwrap()
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .expect("released");
+            self.running.fetch_sub(1, SeqCst);
+            Ok(Vec::new())
+        }
+    }
+
+    /// Two transcriptions on a runtime with one worker: they run one after
+    /// the other, and while one blocks, the task that releases it still
+    /// runs, because the blocked call left the worker first.
+    #[test]
+    fn coreml_style_calls_run_one_at_a_time_off_the_workers() {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_all()
+            .build()
+            .unwrap();
+        let (go, released) = std::sync::mpsc::channel();
+        let inner = Arc::new(BlockingEngine {
+            languages: BTreeSet::new(),
+            go: std::sync::Mutex::new(released),
+            running: 0.into(),
+            most_at_once: 0.into(),
+        });
+        let engine = Arc::new(OneCallAtATime::new(inner.clone()));
+        let (done, finished) = std::sync::mpsc::channel();
+        runtime.spawn(async move {
+            let audio = AudioBuffer16k::new(vec![0.0; 16_000]);
+            let calls = (0..2).map(|_| {
+                let (engine, audio) = (engine.clone(), audio.clone());
+                tokio::spawn(async move { engine.transcribe(&audio, None).await.unwrap() })
+            });
+            let calls: Vec<_> = calls.collect();
+            // The releasing task needs a worker while a call blocks.
+            tokio::spawn(async move {
+                for _ in 0..2 {
+                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                    go.send(()).unwrap();
+                }
+            });
+            for call in calls {
+                call.await.unwrap();
+            }
+            done.send(()).unwrap();
+        });
+        finished
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("both calls finished while the worker was free for the release");
+        assert_eq!(
+            inner.most_at_once.load(std::sync::atomic::Ordering::SeqCst),
+            1
         );
     }
 
