@@ -300,7 +300,10 @@ impl Transcriber {
     }
 
     /// Decode every window, `concurrency` at a time, in index order. Each
-    /// worker owns its scratch arrays; the models are shared.
+    /// worker owns its scratch arrays; the models are shared. A worker
+    /// panic propagates out of `std::thread::scope` as a panic, not as an
+    /// `Err`; the only panic sites are the mutex `expect`s, which fire
+    /// only after an earlier panic poisoned the lock.
     fn decode_windows(
         &self,
         audio: &[f32],
