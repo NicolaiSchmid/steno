@@ -38,7 +38,8 @@ fi
 matrix="$(jq -c --argjson names "$names" --argjson mac "$mac" \
   '{include: [ .[] | select(.name as $n | $names | index($n)) | if .name == "macos" then .os = $mac else . end ]}' \
   <<< "$all")"
-if [[ "$(jq '.include | length' <<< "$matrix")" -eq 0 ]]; then
+# Every name is known by now, so no name is no platform.
+if [[ "$names" == "[]" ]]; then
   echo "::error::no platform selected from '$platforms'" >&2
   exit 1
 fi

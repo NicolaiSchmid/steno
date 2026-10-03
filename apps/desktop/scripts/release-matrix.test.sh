@@ -6,6 +6,11 @@ set -euo pipefail
 script="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/release-matrix.sh"
 failures=0
 
+fail() {
+  echo "FAIL: $1"
+  failures=$((failures + 1))
+}
+
 names() {
   PLATFORMS="$1" MACOS_RUNS_ON='"macos-15"' "$script" | jq -r '[.include[].name] | join(",")'
 }
@@ -14,19 +19,16 @@ expect() {
   local input="$1" wanted="$2" got
   got="$(names "$input")" || got="<failed>"
   if [[ "$got" != "$wanted" ]]; then
-    echo "FAIL: '$input' gave '$got', wanted '$wanted'"
-    failures=$((failures + 1))
+    fail "'$input' gave '$got', wanted '$wanted'"
   fi
 }
 
 refuse() {
   local input="$1" output
   if output="$(PLATFORMS="$input" "$script" 2>&1)"; then
-    echo "FAIL: '$input' was accepted: $output"
-    failures=$((failures + 1))
+    fail "'$input' was accepted: $output"
   elif [[ "$output" != *"::error::"* ]]; then
-    echo "FAIL: '$input' failed without an ::error:: line: $output"
-    failures=$((failures + 1))
+    fail "'$input' failed without an ::error:: line: $output"
   fi
 }
 
@@ -43,13 +45,11 @@ refuse 'linux windows'
 
 runner="$(PLATFORMS=macos MACOS_RUNS_ON='["self-hosted","forge"]' "$script" | jq -c '.include[0].os')"
 if [[ "$runner" != '["self-hosted","forge"]' ]]; then
-  echo "FAIL: the macOS runner is $runner"
-  failures=$((failures + 1))
+  fail "the macOS runner is $runner"
 fi
 uploads="$(PLATFORMS=macos "$script" | jq -r '.include[0].artifacts')"
 if [[ "$uploads" != *'*.dmg'* || "$uploads" != *'*.app.tar.gz'* ]]; then
-  echo "FAIL: the macOS uploads are $uploads"
-  failures=$((failures + 1))
+  fail "the macOS uploads are $uploads"
 fi
 
 if ((failures > 0)); then
