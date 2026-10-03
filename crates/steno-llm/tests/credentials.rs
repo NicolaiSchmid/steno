@@ -159,10 +159,7 @@ async fn refreshes_near_expiry_and_writes_back_preserving_unknown_keys() {
         let mode = std::fs::metadata(home.file()).unwrap().permissions().mode();
         assert_eq!(mode & 0o777, 0o600);
     }
-    let entries: Vec<String> = std::fs::read_dir(home.directory.path())
-        .unwrap()
-        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
-        .collect();
+    let entries = file_names(home.directory.path());
     assert_eq!(entries, ["auth.json"], "no temp file left behind");
 }
 
@@ -429,17 +426,10 @@ async fn a_refresh_without_rotation_keeps_the_old_tokens_and_touches_only_auth_j
         json!(CodexHome::id_token("nicolai@example.com", "plus"))
     );
     assert_eq!(tokens["account_id"], "acct_stored");
-    let mut entries: Vec<String> = std::fs::read_dir(home.directory.path())
-        .unwrap()
-        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
-        .collect();
-    entries.sort();
+    let entries = file_names(home.directory.path());
     assert_eq!(entries, ["auth.json", "config.toml", "sessions"]);
     assert_eq!(std::fs::read(&config).unwrap(), config_bytes);
-    let session_entries: Vec<String> = std::fs::read_dir(&sessions)
-        .unwrap()
-        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
-        .collect();
+    let session_entries = file_names(&sessions);
     assert_eq!(session_entries, ["rollout.jsonl"]);
     // The next read sees the written file, so no second refresh.
     assert_eq!(home.store().current().await.unwrap(), credentials);
@@ -771,10 +761,7 @@ async fn a_failed_rename_leaves_no_temporary_file() {
         matches!(error, CodexCredentialError::RefreshFailed(_)),
         "{error:?}"
     );
-    let entries: Vec<String> = std::fs::read_dir(home.directory.path())
-        .unwrap()
-        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
-        .collect();
+    let entries = file_names(home.directory.path());
     assert_eq!(entries, ["auth.json"], "no temporary file is left");
 }
 

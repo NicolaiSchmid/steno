@@ -401,6 +401,16 @@ impl CodexHome {
     }
 }
 
+/// The names in `directory`, sorted.
+pub fn file_names(directory: &std::path::Path) -> Vec<String> {
+    let mut names: Vec<String> = std::fs::read_dir(directory)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    names.sort();
+    names
+}
+
 /// Writes `auth` to `path` the way the CLI would (compact JSON).
 pub fn write_auth(path: &std::path::Path, auth: AuthFile) {
     {

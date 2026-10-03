@@ -318,10 +318,7 @@ async fn the_refresh_token_goes_only_in_the_refresh_body_and_auth_json_is_writte
         assert_eq!(headers_carrying(&request, &fresh), ["authorization"]);
     }
 
-    let entries: Vec<String> = std::fs::read_dir(harness.home.directory.path())
-        .unwrap()
-        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
-        .collect();
+    let entries = file_names(harness.home.directory.path());
     assert_eq!(entries, ["auth.json"], "no temporary file is left");
     #[cfg(unix)]
     {
