@@ -52,7 +52,7 @@ pub use chunker::{TranscriptChunk, TranscriptChunker};
 pub use cleanup::{CleanupDraft, CleanupPromptBuilder, LlmTranscriptCleaner};
 pub use codex::{
     CodexCredentialError, CodexCredentialStore, CodexCredentials, CodexError, CodexModel,
-    CodexResponsesClient, JwtClaims,
+    CodexResponsesClient, JwtClaims, Now,
 };
 pub use decoder::StructuredOutputDecoder;
 pub use endpoint::{EndpointProbe, LlmClient, LlmEndpoint, StructuredOutputMode};

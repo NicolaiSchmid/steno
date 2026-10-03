@@ -116,7 +116,8 @@ impl CodexCredentialError {
     }
 }
 
-/// The clock the store reads for the refresh windows.
+/// The clock the store reads for the refresh windows; what
+/// [`CodexCredentialStore::with_now`] takes.
 pub type Now = Arc<dyn Fn() -> DateTime<Utc> + Send + Sync>;
 
 /// Reads and refreshes `$CODEX_HOME/auth.json` the way the Codex CLI does,
