@@ -8,8 +8,9 @@
 //!
 //! The tray also keeps the process alive: with it, closing the main window
 //! hides it and the process stays, as the Swift menu bar app stays; without
-//! a tray (a Linux desktop with no indicator host) the window closes and
-//! the process ends with it (`main.rs`).
+//! a tray the window closes and the process ends with it (`main.rs`). On
+//! Linux a tray that was built still counts as none while nothing shows
+//! its icon (`has_host`).
 //!
 //! The items are `actions::MenuAction`s and their handler is
 //! `actions::on_menu_event`, registered once by `main.rs`: Tauri hands
@@ -32,6 +33,11 @@ use crate::{
     autostart,
     recording::{RecorderState, RecordingState},
 };
+
+/// The name a status notifier host's watcher owns on the session bus:
+/// KDE's, the GNOME `AppIndicator` extension's and most panels'.
+#[cfg(target_os = "linux")]
+const WATCHER: &str = "org.kde.StatusNotifierWatcher";
 
 /// The tray's id, for `AppHandle::tray_by_id`.
 pub const TRAY_ID: &str = "steno";
@@ -75,6 +81,63 @@ pub struct Tray {
     record: MenuItem<Wry>,
     in_person: MenuItem<Wry>,
     launch_at_login: CheckMenuItem<Wry>,
+}
+
+/// Whether something on the desktop shows the tray's icon. macOS and
+/// Windows always do. On Linux a status notifier host does, found through
+/// its watcher's name on the session bus; GNOME without the
+/// `AppIndicator` extension, a bare X server or no session bus has none,
+/// and the icon is built but never seen. An `XEmbed`-only tray is not
+/// asked for: the shell then counts no tray, the safe side (closing main
+/// ends the app instead of leaving it running unseen). Asked at each close
+/// rather than once, so a panel that starts after the shell (a launch at
+/// login) counts; the query waits half a second at most.
+pub fn has_host() -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        hosted(
+            std::env::var_os("DBUS_SESSION_BUS_ADDRESS").as_deref(),
+            watcher_owned,
+        )
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        true
+    }
+}
+
+/// `has_host` on Linux: with a session bus address (none means no bus, and
+/// `GLib` would otherwise try to launch one), whether `owned` says the
+/// watcher's name has an owner.
+#[cfg(target_os = "linux")]
+fn hosted(bus_address: Option<&std::ffi::OsStr>, owned: impl FnOnce() -> bool) -> bool {
+    bus_address.is_some_and(|address| !address.is_empty()) && owned()
+}
+
+/// One `NameHasOwner` call for `WATCHER` on the session bus.
+#[cfg(target_os = "linux")]
+fn watcher_owned() -> bool {
+    use gio::{
+        BusType, Cancellable, DBusCallFlags,
+        glib::{ToVariant, VariantTy},
+    };
+    let Ok(bus) = gio::bus_get_sync(BusType::Session, Cancellable::NONE) else {
+        return false;
+    };
+    bus.call_sync(
+        Some("org.freedesktop.DBus"),
+        "/org/freedesktop/DBus",
+        "org.freedesktop.DBus",
+        "NameHasOwner",
+        Some(&(WATCHER,).to_variant()),
+        VariantTy::new("(b)").ok(),
+        DBusCallFlags::NONE,
+        500,
+        Cancellable::NONE,
+    )
+    .ok()
+    .and_then(|reply| reply.get::<(bool,)>())
+    .is_some_and(|(owned,)| owned)
 }
 
 /// Builds the menu and the icon and manages `Tray`.
@@ -188,6 +251,19 @@ mod tests {
         assert_eq!(tooltip(RecordingState::Idle), "Steno");
         assert_eq!(tooltip(RecordingState::Starting), "Steno, recording");
         assert_eq!(tooltip(RecordingState::Recording), "Steno, recording");
+    }
+
+    /// No session bus address is no host, and the bus is not asked.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_tray_host_needs_a_session_bus_and_the_watcher() {
+        use std::ffi::OsStr;
+        let bus = Some(OsStr::new("unix:path=/run/user/1000/bus"));
+        assert!(hosted(bus, || true));
+        assert!(!hosted(bus, || false));
+        for none in [None, Some(OsStr::new(""))] {
+            assert!(!hosted(none, || panic!("asked without a bus")));
+        }
     }
 
     #[test]

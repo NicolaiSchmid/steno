@@ -96,23 +96,7 @@ fn main() {
         ])
         .setup(|app| {
             let handle = app.handle();
-            // No tray is not fatal: the windows still work, and closing
-            // main then ends the process (`exits_when_destroyed`). On Linux
-            // the tray crate panics (rather than errs) when
-            // libayatana-appindicator is not installed, so the panic is
-            // caught here; the .deb depends on the library, the AppImage
-            // does not bundle it (README, Bundles).
-            let built =
-                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| tray::build(handle)));
-            match built {
-                Ok(Ok(())) => handle.state::<smoke::Smoke>().note_tray(),
-                Ok(Err(error)) => {
-                    eprintln!("[steno-desktop] the tray could not be built: {error}");
-                }
-                Err(_) => eprintln!(
-                    "[steno-desktop] the tray could not be built: the tray library is missing"
-                ),
-            }
+            build_tray(handle);
             windows::open(handle, windows::BridgeWindow::Main, None, None)?;
             deep_links::install(handle);
             smoke::arm(handle);
@@ -176,9 +160,38 @@ fn main() {
     });
 }
 
-/// Whether the tray was built (`tray::build` manages `Tray` on success).
+/// Builds the tray. No tray is not fatal: the windows still work, and
+/// closing main then ends the process (`exits_when_destroyed`). On Linux
+/// the tray crate panics (rather than errs) when libayatana-appindicator
+/// is not installed, so the panic is caught here; the .deb depends on the
+/// library, the `AppImage` does not bundle it (README, Bundles). A tray
+/// nothing shows (`tray::has_host`) is logged once here.
+fn build_tray(app: &tauri::AppHandle) {
+    let built = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| tray::build(app)));
+    match built {
+        Ok(Ok(())) => {
+            app.state::<smoke::Smoke>().note_tray();
+            if !tray::has_host() {
+                eprintln!(
+                    "[steno-desktop] no tray host shows the tray icon; \
+                     closing the main window ends the app"
+                );
+            }
+        }
+        Ok(Err(error)) => eprintln!("[steno-desktop] the tray could not be built: {error}"),
+        Err(_) => {
+            eprintln!("[steno-desktop] the tray could not be built: the tray library is missing");
+        }
+    }
+}
+
+/// Whether a tray stands: it was built (`tray::build` manages `Tray` on
+/// success) and something shows it (`tray::has_host`). A smoke run stands
+/// in for the host Xvfb lacks, so it checks the close rule a desktop with
+/// a tray gets.
 fn has_tray(app: &tauri::AppHandle) -> bool {
     app.try_state::<tray::Tray>().is_some()
+        && (tray::has_host() || app.state::<smoke::Smoke>().is_armed())
 }
 
 /// Whether closing the window of `label` hides it instead: the main window

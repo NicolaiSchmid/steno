@@ -61,6 +61,11 @@ impl Smoke {
         self.tray_built.store(true, Ordering::SeqCst);
     }
 
+    /// Whether this is a smoke run (`arm`).
+    pub fn is_armed(&self) -> bool {
+        self.armed.load(Ordering::SeqCst)
+    }
+
     /// A panel's page reported its size; logged on a smoke run so the
     /// screenshots can be read against the numbers, and kept so the end of
     /// the run can check the window took it.

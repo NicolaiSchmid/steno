@@ -37,9 +37,13 @@ the recorder off the `recording` snapshots the host publishes to that
 window (`recording.rs`). The queue and recent rows of the Swift popover are
 the main window's. Closing the main window hides it while the tray stands,
 as the Swift window closes behind the menu bar item, so the tray and the
-panels always have it; on a desktop where no tray could be built (Linux
-without an indicator host) the window closes for real and the process
-ends with it, since nothing would be left to reach the app from. On macOS
+panels always have it. Where no tray could be built, or nothing shows it,
+the window closes for real and the process ends with it, since nothing
+would be left to reach the app from. On Linux "shows it" means a status
+notifier host: at each close the shell asks the session bus whether
+`org.kde.StatusNotifierWatcher` has an owner (KDE, most panels, and GNOME
+only with the AppIndicator extension). An `XEmbed`-only tray is not asked
+for, so there closing main also ends the app, the safe side. On macOS
 the menu bar carries the shell's own menu (`menu.rs`): Quit goes through
 the run loop, the Edit menu gives the pages their copy and paste shortcuts.
 
@@ -217,7 +221,9 @@ the Xvfb root and one crop per window and per panel into
 at that resolution, where WebKitGTK's pixel ratio is 1.25 and the panels
 must still fit their pills. The windows carry only fixture data,
 which is synthetic. Xvfb has no compositor, so the panels' transparent
-corners render black there; a desktop shows them rounded.
+corners render black there; a desktop shows them rounded. Xvfb has no
+tray host either; a smoke run stands in for one, so the built tray counts
+and the run checks the close rule a desktop with a tray gets.
 
 ## Prerequisites
 

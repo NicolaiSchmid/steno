@@ -32,6 +32,9 @@ tokio.workspace = true
 url.workspace = true
 uuid.workspace = true
 
+[target.'cfg(target_os = "linux")'.dependencies]
+gio.workspace = true
+
 [target.'cfg(target_os = "macos")'.dependencies]
 tauri-nspanel.workspace = true
 objc2.workspace = true
