@@ -28,8 +28,9 @@ pub struct SpeechSettingsViewModel {
     /// The assets whose download thread still runs. Its reports show while
     /// the asset reads `downloading`; a remove marks it absent, which
     /// detaches the one in flight, so its late progress cannot mark the
-    /// asset downloading again, and a second download of the asset waits
-    /// until that thread has ended. Swift: `downloads`.
+    /// asset downloading again. A second download of the asset starts no
+    /// thread: it reattaches to the one still running, whose next report
+    /// shows. Swift: `downloads`.
     downloads: BTreeSet<ModelAsset>,
     pub errors: SectionError,
 }
@@ -185,20 +186,23 @@ impl SpeechSettingsViewModel {
         self.refresh_states(services);
     }
 
-    /// Marks the download started, unless one of the asset's still runs:
-    /// whether the caller should run it. Swift: `download(_:)`'s guard.
+    /// Marks the download started: whether the caller should run it. When
+    /// one of the asset's still runs, nothing new starts; a remove had
+    /// detached it, so the asset reads `downloading` again and the running
+    /// thread's next report shows, as Swift's did. Swift: `download(_:)`'s
+    /// guard.
     pub fn begin_download(&mut self, asset: ModelAsset) -> bool {
-        if !self.downloads.insert(asset) {
-            return false;
+        let starts = self.downloads.insert(asset);
+        if starts || !self.shows_download(asset) {
+            self.asset_states.insert(
+                asset,
+                AssetState::Downloading {
+                    fraction: 0.0,
+                    phase: "starting".to_owned(),
+                },
+            );
         }
-        self.asset_states.insert(
-            asset,
-            AssetState::Downloading {
-                fraction: 0.0,
-                phase: "starting".to_owned(),
-            },
-        );
-        true
+        starts
     }
 
     /// One progress report, shown unless a remove detached the download.
@@ -288,5 +292,56 @@ mod tests {
             AssetState::Failed("The download could not start: no threads".to_owned())
         );
         assert!(model.begin_download(ModelAsset::OfflineDiarizer));
+    }
+
+    /// Download, remove, Download again while the first thread runs: no
+    /// second thread, the asset reads `downloading` again and the running
+    /// thread's reports and its outcome show. Swift kept showing that
+    /// download's progress.
+    #[test]
+    fn a_download_again_after_a_remove_reattaches_to_the_running_thread() {
+        let fakes = FakeServices::new(chrono::Utc::now());
+        let services = fakes.services();
+        let asset = ModelAsset::OfflineDiarizer;
+        let mut model = SpeechSettingsViewModel::new();
+        assert!(model.begin_download(asset));
+        model.download_progress(asset, 0.4, "downloading");
+        model.remove(asset, &services);
+        assert_eq!(model.state_of(asset), AssetState::Absent);
+        model.download_progress(asset, 0.5, "downloading");
+        assert_eq!(model.state_of(asset), AssetState::Absent, "detached");
+
+        assert!(!model.begin_download(asset), "no second thread");
+        assert_eq!(
+            model.state_of(asset),
+            AssetState::Downloading {
+                fraction: 0.0,
+                phase: "starting".to_owned()
+            }
+        );
+        model.download_progress(asset, 0.6, "downloading");
+        assert_eq!(
+            model.state_of(asset),
+            AssetState::Downloading {
+                fraction: 0.6,
+                phase: "downloading".to_owned()
+            },
+            "reattached"
+        );
+        assert!(!model.begin_download(asset));
+        assert_eq!(
+            model.state_of(asset),
+            AssetState::Downloading {
+                fraction: 0.6,
+                phase: "downloading".to_owned()
+            },
+            "a click while it shows changes nothing"
+        );
+        fakes.speech_models.set_installed(asset, Some(42));
+        model.finish_download(asset, Ok(()), &services);
+        assert_eq!(
+            model.state_of(asset),
+            AssetState::Installed { bytes: Some(42) }
+        );
     }
 }

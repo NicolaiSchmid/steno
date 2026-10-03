@@ -1745,14 +1745,17 @@ impl BridgeHost for Host {
         let asset = parse_asset(&params)?;
         // The reply returns at once; the download runs on its own thread
         // and publishes as it goes, as Swift's task did.
-        {
+        // A download of the asset still running is reattached to instead.
+        let starts = {
             let mut inner = self.lock();
-            if !inner.speech.begin_download(asset) {
-                return Ok(());
-            }
+            let starts = inner.speech.begin_download(asset);
             inner.publisher.schedule(BridgeTopic::SettingsTranscription);
-        }
+            starts
+        };
         self.publish();
+        if !starts {
+            return Ok(());
+        }
         let host = self.clone();
         let spawned = thread::Builder::new()
             .name(format!("steno-download-{}", asset.as_str()))

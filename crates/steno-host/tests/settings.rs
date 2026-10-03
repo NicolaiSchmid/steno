@@ -11,7 +11,7 @@ use std::sync::{Arc, Condvar, Mutex};
 use steno_host::services::{LoginItem as _, SpeechModels as _};
 
 use common::*;
-use serde_json::json;
+use serde_json::{Value, json};
 use steno_bridge::{
     AssetIdParams, BridgeErrorCode, BridgeHost, BridgeTopic, DeviceIdParams, ExportUpdateParams,
     PermissionKind, PermissionKindParams, PermissionState, RecordingRetention, RetentionMode,
@@ -486,46 +486,45 @@ fn the_download_reply_returns_while_the_download_runs() {
     );
 }
 
-/// A remove while the download runs detaches it: its late progress does
-/// not mark the asset downloading again, and a second download of the
-/// asset waits until the first thread has ended, as Swift's `downloads`
-/// guard kept one task per asset.
-#[test]
-fn a_remove_detaches_the_download_in_flight() {
-    let (harness, release_downloads) = holding_downloads();
-    let download = || {
-        harness
-            .host
-            .settings_transcription_download(AssetIdParams {
-                asset_id: "offlineDiarizer".to_owned(),
-            })
-            .unwrap();
-    };
-    download();
+/// The diarizer's download replies at once, on a host clone under the five
+/// second guard: a download run inline would hang on the gate, so the
+/// test fails instead.
+fn download_diarizer(harness: &Harness) {
+    let host = harness.host.clone();
+    within_five_seconds("the download reply", move || {
+        host.settings_transcription_download(AssetIdParams {
+            asset_id: "offlineDiarizer".to_owned(),
+        })
+    })
+    .unwrap();
+}
+
+fn remove_diarizer(harness: &Harness) {
     harness
         .host
         .settings_transcription_remove(AssetIdParams {
             asset_id: "offlineDiarizer".to_owned(),
         })
         .unwrap();
-    assert_eq!(
-        harness.snapshot(BridgeTopic::SettingsTranscription)["assets"][1]["state"],
-        "absent"
-    );
+}
+
+fn diarizer_state(harness: &Harness) -> Value {
+    harness.snapshot(BridgeTopic::SettingsTranscription)["assets"][1]["state"].clone()
+}
+
+/// A remove while the download runs detaches it: its late progress does
+/// not mark the asset downloading again, and the asset shows what the
+/// model store reports when the thread ends.
+#[test]
+fn a_remove_detaches_the_download_in_flight() {
+    let (harness, release_downloads) = holding_downloads();
+    download_diarizer(&harness);
+    remove_diarizer(&harness);
+    assert_eq!(diarizer_state(&harness), "absent");
     harness.sink.clear();
-    download();
-    assert_eq!(
-        harness.snapshot(BridgeTopic::SettingsTranscription)["assets"][1]["state"],
-        "absent",
-        "the first download still runs, so the second does not start"
-    );
     release_downloads();
     harness.wait_for("the detached download to end", |harness| {
-        harness
-            .host
-            .snapshot(BridgeTopic::SettingsTranscription)
-            .unwrap()["assets"][1]["state"]
-            == "installed"
+        diarizer_state(harness) == "installed"
     });
     assert!(
         harness
@@ -539,8 +538,47 @@ fn a_remove_detaches_the_download_in_flight() {
         harness.fakes.speech_models.downloads.lock().unwrap().len(),
         1
     );
+}
+
+/// Download again after a remove while the first thread still runs: no
+/// second thread starts; the asset reads `downloading` again and the
+/// running thread's progress shows, as Swift's `downloads` guard kept one
+/// task per asset and kept showing its progress. Once that thread has
+/// ended, the asset downloads again.
+#[test]
+fn download_again_after_a_remove_reattaches_to_the_running_download() {
+    let (harness, release_downloads) = holding_downloads();
+    download_diarizer(&harness);
+    remove_diarizer(&harness);
+    assert_eq!(diarizer_state(&harness), "absent");
+    harness.sink.clear();
+    download_diarizer(&harness);
+    assert_eq!(
+        harness
+            .sink
+            .last(BridgeTopic::SettingsTranscription)
+            .unwrap()["assets"][1]["state"],
+        "downloading",
+        "the click reattached and published"
+    );
+    release_downloads();
+    harness.wait_for_download(1);
+    assert!(
+        harness
+            .sink
+            .all(BridgeTopic::SettingsTranscription)
+            .iter()
+            .any(|snapshot| snapshot["assets"][1]["downloadFraction"] == 0.5),
+        "the running thread's progress shows again"
+    );
+    assert_eq!(diarizer_state(&harness), "installed");
+    assert_eq!(
+        harness.fakes.speech_models.downloads.lock().unwrap().len(),
+        1,
+        "no second thread"
+    );
     // Its thread has ended: the asset downloads again.
-    download();
+    download_diarizer(&harness);
     harness.wait_for("the second download to run", |harness| {
         harness.fakes.speech_models.downloads.lock().unwrap().len() == 2
     });
