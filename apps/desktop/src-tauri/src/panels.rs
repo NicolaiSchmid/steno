@@ -308,13 +308,23 @@ fn save_anchor(app: &AppHandle, anchor: PanelAnchor) {
     }
 }
 
+/// The window's inner size in logical points.
+pub fn logical_size(window: &WebviewWindow) -> tauri::Result<(f64, f64)> {
+    let scale = window.scale_factor()?;
+    let size = window.inner_size()?;
+    Ok((
+        f64::from(size.width) / scale,
+        f64::from(size.height) / scale,
+    ))
+}
+
 /// The window's top-centre point in logical points.
 fn top_center_of(window: &WebviewWindow) -> tauri::Result<(f64, f64)> {
     let scale = window.scale_factor()?;
     let position = window.outer_position()?;
-    let size = window.inner_size()?;
+    let (width, _) = logical_size(window)?;
     Ok((
-        f64::from(position.x) / scale + f64::from(size.width) / scale / 2.0,
+        f64::from(position.x) / scale + width / 2.0,
         f64::from(position.y) / scale,
     ))
 }
@@ -506,13 +516,9 @@ pub fn moved(app: &AppHandle, panel: Panel, position: PhysicalPosition<i32>) {
     let Some(window) = app.get_webview_window(panel.label()) else {
         return;
     };
-    let (Ok(scale), Ok(inner)) = (window.scale_factor(), window.inner_size()) else {
+    let (Ok(scale), Ok(size)) = (window.scale_factor(), logical_size(&window)) else {
         return;
     };
-    let size = (
-        f64::from(inner.width) / scale,
-        f64::from(inner.height) / scale,
-    );
     let panels = app.state::<Panels>();
     let reported = panels.size_of(panel);
     if !same_size(size, reported) {

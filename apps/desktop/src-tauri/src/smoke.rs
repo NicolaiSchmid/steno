@@ -251,12 +251,7 @@ fn check_panels(app: &AppHandle) -> Result<(), String> {
         if !window.is_visible().map_err(|error| error.to_string())? {
             return Err(format!("the {label} panel was not visible"));
         }
-        let scale = window.scale_factor().map_err(|error| error.to_string())?;
-        let inner = window.inner_size().map_err(|error| error.to_string())?;
-        let window_size = (
-            f64::from(inner.width) / scale,
-            f64::from(inner.height) / scale,
-        );
+        let window_size = panels::logical_size(&window).map_err(|error| error.to_string())?;
         let reported = smoke
             .panel_size(label)
             .ok_or_else(|| format!("the {label} panel never reported its size"))?;
