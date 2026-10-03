@@ -1,6 +1,6 @@
 //! The phone handover server: the computer's half of the wire the iOS
 //! recorder speaks. Swift: `Sources/StenoHandover`. Plan:
-//! `.plans/2026-10-02-rust-core-and-tauri-shell.md` (`WP7c`).
+//! `.plans/2026-10-02-rust-core-and-tauri-shell.md` (WP7c).
 //!
 //! The phone finds the computer over Bonjour (`_steno._tcp`), pins the
 //! SHA-256 of its self-signed leaf certificate from the pairing QR code,

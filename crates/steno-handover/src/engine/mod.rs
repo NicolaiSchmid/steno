@@ -326,7 +326,7 @@ impl Engine {
     // Pairing session
 
     /// Opens a window and returns the payload for the QR code, replacing
-    /// any open session.
+    /// any open window.
     pub fn begin_pairing(&self) -> PairingPayload {
         let session = PairingSession::open(
             self.identity.mac_id(),

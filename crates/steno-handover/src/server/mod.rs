@@ -217,7 +217,8 @@ impl HandoverServer {
     /// lingering after its last response, at once; one mid-request after
     /// its response; any still busy after [`STOP_GRACE`] by force) and
     /// withdraws the Bonjour record. No task of the listener outlives it.
-    /// Swift: `group.shutdownGracefully()` closes the child channels.
+    /// Swift: `HandoverServer.stop` (`group.shutdownGracefully()` closes the
+    /// child channels).
     pub async fn stop(self) {
         let HandoverServer {
             mut accept_task,
@@ -447,16 +448,16 @@ mod tests {
             .unwrap_or(false)
     }
 
-    /// The host's address once the interface test found it, for the query
-    /// of the server that serves it.
+    /// The interface test's host address, as the LAN query of its second
+    /// server.
     static HOST: OnceLock<Ipv4Addr> = OnceLock::new();
 
     fn the_host() -> Vec<Ipv4Addr> {
         HOST.get().copied().into_iter().collect()
     }
 
-    /// Ends a test this host cannot run, and says so on stdout. CI sets
-    /// `STENO_REQUIRE_LAN_TEST` where the test runs, so a skip there fails.
+    /// Reports a test this host cannot run on stdout. CI sets
+    /// `STENO_REQUIRE_LAN_TEST` on Linux and Windows, so a skip there fails.
     fn skip(reason: &str) {
         assert!(
             std::env::var_os("STENO_REQUIRE_LAN_TEST").is_none(),

@@ -139,7 +139,7 @@ impl HandoverService {
     // Pairing and devices
 
     /// Opens a pairing window and returns what the QR code shows
-    /// (`url_string`). Replaces any open session; the secret is single use
+    /// (`url_string`). Replaces any open window; the secret is single use
     /// and expires after `configuration.pairing_window`.
     pub fn begin_pairing(&self) -> PairingPayload {
         self.engine.begin_pairing()
