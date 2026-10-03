@@ -610,8 +610,9 @@ listener, TLS 1.3 only, hyper 1 HTTP/1.1, with the pinned verifier (`pinning`), 
 rcgen identity in the `SecretStore` as one PEM bundle, pairing, the seven routes, the
 inbox and the mdns-sd advertiser; `tests/wire_contract.rs` reads `wire.ts`. The store
 gains the `paired_device*` and `handover_receipt` queries. Core's `RecordingIntake`
-(copy into the audio folder, enqueue) waits for WP6: no `RecordingLayout` and no
-file-URL to path helper in Rust core yet. Durability before `complete` answers 200 is
+(copy into the audio folder, enqueue) waits for WP6b: Rust core has no pipeline to
+enqueue into yet; the audio folder's path comes from `paths::file_url_path`, the
+meeting's folder from `RecordingLayout`. Durability before `complete` answers 200 is
 the intake's, as in Swift: the listener fsyncs each chunk (`receiving_file::write`) and
 writes its own `complete` receipt only after `HandoverIntake::admit` returns, so the
 port must have the master and its commits on disk by then (the `RecordingIntake.admit`
