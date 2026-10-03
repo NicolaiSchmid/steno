@@ -2,10 +2,10 @@
 //! Swift: `Routing/Route.swift`.
 
 use http::Method;
+use steno_core::json::parse_uuid;
 use uuid::Uuid;
 
 use crate::configuration::HandoverConfiguration;
-use crate::pairing::parse_uuid;
 
 /// What a request must carry before its body is read.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -14,6 +14,7 @@
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
+use steno_core::json::parse_uuid;
 use steno_core::{AudioFormat, RecordingMetadata};
 use uuid::Uuid;
 
@@ -129,7 +130,7 @@ impl Inbox {
                 let name = entry.file_name();
                 let name = name.to_str()?;
                 let stem = name.split_once('.').map_or(name, |(stem, _)| stem);
-                crate::pairing::parse_uuid(stem)
+                parse_uuid(stem)
             })
             .collect()
     }

@@ -8,6 +8,7 @@ use chrono::{DateTime, TimeZone as _, Utc};
 use percent_encoding::{AsciiSet, NON_ALPHANUMERIC, utf8_percent_encode};
 use rand::RngCore as _;
 use sha2::{Digest as _, Sha256};
+use steno_core::json::parse_uuid;
 use thiserror::Error;
 use uuid::Uuid;
 
@@ -155,15 +156,6 @@ impl PairingPayload {
             expires_at,
         ))
     }
-}
-
-/// A hyphenated UUID (8-4-4-4-12, either case), the one form Swift's
-/// `UUID(uuidString:)` accepts.
-pub(crate) fn parse_uuid(text: &str) -> Option<Uuid> {
-    if text.len() != 36 {
-        return None;
-    }
-    Uuid::try_parse(text).ok()
 }
 
 /// Everything but RFC 3986's unreserved characters is percent-encoded,
