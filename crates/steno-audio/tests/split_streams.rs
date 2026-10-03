@@ -28,7 +28,7 @@ fn ramp(start: usize, frames: usize) -> Vec<f32> {
 }
 
 /// `frames` stereo frames: left counts up from `start`, right is left + 2,
-/// so the fold is left + 1.
+/// so the fold is `ramp(start + 1, frames)`.
 fn stereo_ramp(start: usize, frames: usize) -> Vec<f32> {
     (start..start + frames)
         .flat_map(|i| [i as f32, i as f32 + 2.0])
@@ -202,8 +202,7 @@ fn the_follower_folds_stereo_and_stages_silent_packets_as_zeros() {
     );
     let mut out = vec![0.0f32; 1_440];
     follower.pull(&mut out);
-    let folded: Vec<f32> = (0..480).map(|i| i as f32 + 1.0).collect();
-    assert_eq!(&out[..480], folded.as_slice());
+    assert_eq!(&out[..480], ramp(1, 480).as_slice(), "folded");
     assert!(out[480..].iter().all(|s| *s == 0.0));
 }
 
@@ -250,9 +249,11 @@ fn the_master_routes_its_packet_and_the_followers_frames_as_one_callback() {
 
     assert_eq!(sink.available_to_read(), 960);
     assert_eq!(drain(&sink, 0), ramp(10_000, 960));
-    let system = drain(&sink, 1);
-    let folded: Vec<f32> = (0..960).map(|i| i as f32 + 1.0).collect();
-    assert_eq!(system, folded, "folded, in order, primed at once");
+    assert_eq!(
+        drain(&sink, 1),
+        ramp(1, 960),
+        "folded, in order, primed at once"
+    );
     assert!(sink.dropped_samples().is_empty());
 }
 
@@ -309,6 +310,5 @@ fn a_system_only_master_folds_its_stereo_packet() {
     let sink = LaneFrameSink::new(&lanes);
     let mut router = PacketRouter::new(plan.layout.sources, None, 480);
     router.route(packet(&stereo_ramp(0, 480), 2), &sink);
-    let folded: Vec<f32> = (0..480).map(|i| i as f32 + 1.0).collect();
-    assert_eq!(drain(&sink, 0), folded);
+    assert_eq!(drain(&sink, 0), ramp(1, 480), "folded");
 }
