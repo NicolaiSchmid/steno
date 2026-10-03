@@ -234,7 +234,9 @@ pub trait Pipeline: Send + Sync {
     fn keep_all_recordings(&self) -> BoundaryResult<i64>;
 }
 
-/// The speech model store (WP4). Swift: `ModelStore` in
+/// The speech model store (WP4). The fake keeps a map of installed
+/// assets, records every download and removal, and reports the progress
+/// steps a test set. Swift: `ModelStore` in
 /// `Sources/StenoSpeech/Models/ModelStore.swift`.
 pub trait SpeechModels: Send + Sync {
     fn is_installed(&self, asset: ModelAsset) -> bool;
@@ -282,7 +284,8 @@ pub trait LlmService: Send + Sync {
 
 /// Checks an Obsidian vault configuration without delivering anything
 /// (WP7's `ObsidianFolderDestination.validate()`); the error text is the
-/// destination's and is shown verbatim.
+/// destination's and is shown verbatim. The fake records every
+/// configuration it checked and fails with the text a test set.
 pub trait ExportValidator: Send + Sync {
     fn validate(&self, settings: &ObsidianSettings) -> BoundaryResult<()>;
 }
@@ -305,7 +308,9 @@ pub struct PairingCode {
     pub url_string: String,
 }
 
-/// The Mac side of the phone handover (WP7). Swift: `HandoverService` in
+/// The Mac side of the phone handover (WP7). The fake counts starts and
+/// stops, records every revoke and answers with the devices, receipts and
+/// pairing code a test set. Swift: `HandoverService` in
 /// `Sources/StenoHandover/HandoverService.swift`.
 pub trait Handover: Send + Sync {
     fn state(&self) -> ListenerState;
@@ -322,7 +327,8 @@ pub trait Handover: Send + Sync {
 }
 
 /// Draws a QR code as a PNG, base64 (the shell implements it in WP6b).
-/// Swift: `QRCode.png(for:)` in `apps/macos/Steno/Services/QRCode.swift`.
+/// The fake answers the image a test set, whatever the text. Swift:
+/// `QRCode.png(for:)` in `apps/macos/Steno/Services/QRCode.swift`.
 pub trait QrEncoder: Send + Sync {
     fn png_base64(&self, text: &str) -> Option<String>;
 }
@@ -335,7 +341,8 @@ pub struct InputDevice {
     pub name: String,
 }
 
-/// Lists the input devices (WP5, from the capture backend). Swift:
+/// Lists the input devices (WP5, from the capture backend). The fake
+/// answers the devices, or the failure, a test set. Swift:
 /// `AudioDevices.inputs()` in `Sources/StenoAudio/Capture/AudioDevices.swift`.
 pub trait AudioDevices: Send + Sync {
     fn inputs(&self) -> BoundaryResult<Vec<InputDevice>>;
@@ -344,7 +351,8 @@ pub trait AudioDevices: Send + Sync {
 /// Sums a folder (WP6b implements it over `std::fs`). Swift:
 /// `AudioFolderUsage.measure` in
 /// `Sources/StenoCore/Audio/AudioFolderUsage.swift`; the view model's
-/// default treated a folder that does not exist as zero.
+/// default treated a folder that does not exist as zero. The fake records
+/// every folder it measured and answers the size a test set.
 pub trait FolderUsage: Send + Sync {
     fn measure(&self, folder: &Path) -> BoundaryResult<i64>;
 }
@@ -362,7 +370,8 @@ pub trait FileSystem: Send + Sync {
 }
 
 /// Plays a speaker's sample clip, one at a time (the shell implements it
-/// in WP6b). Swift: `ClipPlayer`.
+/// in WP6b). The fake plays a clip the fake file system has and records
+/// every clip it played. Swift: `ClipPlayer`.
 pub trait ClipPlayer: Send + Sync {
     /// Starts the clip; false when the file is missing or unreadable.
     fn play(&self, clip: &Path) -> bool;
@@ -373,7 +382,8 @@ pub trait ClipPlayer: Send + Sync {
 /// The Finder, the default browser and the shell's windows (the shell
 /// implements it in WP6b). Swift:
 /// `NSWorkspace` and the `openWindow` / `dismissWindow` actions the windows
-/// installed on their bridges.
+/// installed on their bridges. The fake records every reveal, URL and
+/// window opened or closed.
 pub trait Opener: Send + Sync {
     fn reveal(&self, path: &Path);
     fn open_url(&self, url: &str);
