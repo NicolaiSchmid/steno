@@ -389,6 +389,27 @@ mod tests {
         assert!(panicking.current().await.is_empty(), "fails closed");
     }
 
+    static READS: AtomicUsize = AtomicUsize::new(0);
+
+    /// Answers twice, then panics: the system that stops saying.
+    fn answers_twice() -> Vec<Ipv4Addr> {
+        assert!(
+            READS.fetch_add(1, Ordering::SeqCst) < 2,
+            "the system stopped saying"
+        );
+        vec![Ipv4Addr::new(192, 168, 1, 20)]
+    }
+
+    #[tokio::test]
+    async fn with_no_refresh_interval_each_connection_reads_again_and_a_failed_read_keeps_nothing()
+    {
+        let mut fresh = LanAddresses::new(answers_twice, Duration::ZERO);
+        assert_eq!(fresh.current().await, &[Ipv4Addr::new(192, 168, 1, 20)]);
+        assert_eq!(fresh.current().await, &[Ipv4Addr::new(192, 168, 1, 20)]);
+        assert_eq!(READS.load(Ordering::SeqCst), 2, "read again");
+        assert!(fresh.current().await.is_empty(), "not the stale set");
+    }
+
     /// A non-loopback IPv4 address of this host, an interface that is up
     /// first.
     fn host_address() -> Option<Ipv4Addr> {

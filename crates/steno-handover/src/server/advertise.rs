@@ -329,6 +329,7 @@ mod tests {
             v4("utun3", [10, 8, 0, 2], IfOperStatus::Up, true),
             v4("tailscale0", [100, 101, 7, 9], IfOperStatus::Up, false),
             v4("en4", [100, 127, 255, 1], IfOperStatus::Up, false),
+            v4("en6", [100, 63, 255, 255], IfOperStatus::Up, false),
             v4("en5", [100, 128, 0, 1], IfOperStatus::Up, false),
             Interface {
                 name: "en0".to_owned(),
@@ -349,6 +350,7 @@ mod tests {
             lan_addresses(&interfaces),
             vec![
                 Ipv4Addr::new(10, 0, 0, 5),
+                Ipv4Addr::new(100, 63, 255, 255),
                 Ipv4Addr::new(100, 128, 0, 1),
                 Ipv4Addr::new(192, 168, 1, 20)
             ]
@@ -363,6 +365,12 @@ mod tests {
             ("Ethernet", adapter(6, true, true), lan, true),
             ("Wi-Fi", adapter(71, true, true), lan, true),
             ("Ethernet, down", adapter(6, true, false), lan, false),
+            (
+                "type 53 marked hardware",
+                adapter(53, true, true),
+                lan,
+                false,
+            ),
             (
                 "Wintun",
                 adapter(53, false, true),

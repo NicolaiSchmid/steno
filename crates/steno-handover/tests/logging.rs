@@ -15,7 +15,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
 use common::{Phone, TestService, seeded_bytes};
-use steno_handover::base64url;
+use steno_handover::{base64url, wire};
 use tracing::field::{Field, Visit};
 use tracing::span::{Attributes, Id, Record};
 use tracing::{Event, Metadata};
@@ -97,7 +97,17 @@ async fn no_credential_reaches_the_log() {
     let payload = test.service.begin_pairing();
     let rejected = Phone::try_pair(&test, &[0u8; 32], Uuid::new_v4(), "Intruder").await;
     assert_eq!(rejected.status, 403);
-    let phone = Phone::pair_with(&test, &payload, "Test iPhone").await;
+    // Straight through `try_pair`, so the secret the log is searched for
+    // is the one that went over the wire.
+    let device_id = Uuid::new_v4();
+    let paired = Phone::try_pair(&test, &payload.secret, device_id, "Test iPhone").await;
+    assert_eq!(paired.status, 200, "the window's own secret pairs");
+    let phone = Phone {
+        client: test.client(),
+        token: paired.json::<wire::PairResponse>().token,
+        device_id,
+        device_name: "Test iPhone".to_owned(),
+    };
     let bytes = seeded_bytes(usize::try_from(CHUNK_SIZE).unwrap(), 44);
     let metadata = phone.metadata(&bytes, CHUNK_SIZE);
     assert_eq!(phone.announce(&metadata).await.status, 201);

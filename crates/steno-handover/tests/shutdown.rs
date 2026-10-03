@@ -133,9 +133,9 @@ async fn stop_cuts_an_upload_stalled_mid_body_by_the_end_of_the_grace() {
 #[tokio::test]
 async fn stop_ends_the_linger_after_a_close() {
     // A request with `Connection: close` is answered and half-closed; the
-    // server then reads and discards for up to CLOSE_GRACE. That linger
-    // ends when the server stops: once `stop` returns, the socket is gone
-    // and a write from the client is reset.
+    // server then reads and discards for up to CLOSE_GRACE, so the client's
+    // writes land. That linger ends when the server stops: once `stop`
+    // returns, the socket is gone and a write from the client is reset.
     let test = TestService::start().await;
     let mut stream = test.raw_client().connect().await.unwrap();
     stream
@@ -152,24 +152,29 @@ async fn stop_ends_the_linger_after_a_close() {
     assert_eq!(parse_response(&received).and_then(|r| r.status), Some(200));
     let started = tokio::time::Instant::now();
 
-    test.stop().await;
     // Well-formed records: the linger reads through TLS and would stop at
     // the first garbage byte on its own.
-    let mut reset = false;
-    for _ in 0..20 {
-        let written = async {
-            stream.write_all(HELLO).await?;
-            stream.flush().await
-        };
-        if written.await.is_err() {
-            reset = true;
-            break;
+    let mut writes_land = async |probes: usize| {
+        for _ in 0..probes {
+            let written = async {
+                stream.write_all(HELLO).await?;
+                stream.flush().await
+            };
+            if written.await.is_err() {
+                return false;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
         }
-        tokio::time::sleep(Duration::from_millis(25)).await;
-    }
+        true
+    };
+    assert!(writes_land(12).await, "the socket lingers after the close");
+    test.stop().await;
+    assert!(
+        !writes_land(20).await,
+        "the lingering socket was closed by stop"
+    );
     assert!(
         started.elapsed() < steno_handover::server::connection::CLOSE_GRACE,
         "probed inside the linger's own grace"
     );
-    assert!(reset, "the lingering socket was closed by stop");
 }
