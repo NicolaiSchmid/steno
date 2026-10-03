@@ -1079,16 +1079,31 @@ impl Host {
         });
     }
 
-    /// Applies the keep flag, after the delete-recording prompt when
-    /// `confirming`; the reply says whether the user went ahead.
-    fn set_keep_audio(&self, keep: bool, confirming: bool) -> Outcome<ConfirmReply> {
+    /// Applies the keep flag to `meeting_id`, the meeting selected when the
+    /// command arrived, after the delete-recording prompt when `confirming`;
+    /// the reply says whether the user went ahead. The prompt runs with the
+    /// lock released, so the selection can move while it is up (a recording
+    /// starts, a deep link lands): then nothing is applied, rather than
+    /// deleting another meeting's recording. Swift held the detail model
+    /// across the prompt (`setKeepAudio(_:on:confirming:)`).
+    fn set_keep_audio(
+        &self,
+        keep: bool,
+        meeting_id: Uuid,
+        confirming: bool,
+    ) -> Outcome<ConfirmReply> {
         if confirming && !self.confirm(&delete_recording_prompt()) {
             return Ok(ConfirmReply { confirmed: false });
         }
         self.detail_write(|detail| {
+            if detail.id != meeting_id {
+                return Err(BridgeError::failed(
+                    "Another meeting was selected before you confirmed. Nothing was changed.",
+                ));
+            }
             detail.set_keep_audio(keep, &self.shared.store, &*self.shared.services.pipeline);
-        })
-        .map(|()| ConfirmReply { confirmed: true })
+            Ok(ConfirmReply { confirmed: true })
+        })?
     }
 
     /// Page 1 moves on by itself once every step is handled, as the Swift
@@ -1339,19 +1354,17 @@ impl BridgeHost for Host {
     }
 
     fn meeting_set_keep_audio(&self, params: SetBoolParams) -> Outcome<ConfirmReply> {
-        let confirming = {
+        let (meeting_id, confirming) = {
             let inner = self.lock();
             let detail = inner.detail.as_ref().ok_or_else(no_selection)?;
-            !params.value && detail.would_delete_now()
+            (detail.id, !params.value && detail.would_delete_now())
         };
-        self.set_keep_audio(params.value, confirming)
+        self.set_keep_audio(params.value, meeting_id, confirming)
     }
 
     fn meeting_delete_recording_now(&self) -> Outcome<ConfirmReply> {
-        if self.lock().detail.is_none() {
-            return Err(no_selection());
-        }
-        self.set_keep_audio(false, true)
+        let meeting_id = self.lock().detail.as_ref().ok_or_else(no_selection)?.id;
+        self.set_keep_audio(false, meeting_id, true)
     }
 
     fn meeting_save_notes(&self, params: SaveNotesParams) -> Outcome<()> {

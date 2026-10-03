@@ -786,6 +786,66 @@ fn keep_audio_goes_through_the_pipeline_and_asks_before_deleting_now() {
     );
 }
 
+/// The delete-recording prompt runs with the lock released; a selection
+/// that moves while it is up must not take the answer with it, or another
+/// meeting's recording is deleted. Swift held the detail model across the
+/// prompt (`MainWindowBridge.setKeepAudio(_:on:confirming:)`).
+#[test]
+fn keep_audio_off_applies_only_to_the_meeting_it_was_asked_for() {
+    let prompts = Arc::new(Mutex::new(Vec::new()));
+    let harness = Harness::builder()
+        .confirm_with({
+            let prompts = prompts.clone();
+            move |host, params| {
+                prompts.lock().unwrap().push(params.title.clone());
+                host.meetings_select(MeetingIdParams {
+                    meeting_id: uuid(MEETING_IN_PERSON),
+                })
+                .unwrap();
+                true
+            }
+        })
+        .seed(|store, fakes| {
+            let folder =
+                steno_core::paths::path_from_file_url(&store.settings().unwrap().audio_folder)
+                    .unwrap();
+            populate_sample(store, fakes, &folder);
+            set_retention(store, AudioRetention::DeleteAfterProcessing);
+        })
+        .build();
+    assert_eq!(
+        harness.snapshot(BridgeTopic::MeetingDetail)["id"],
+        id(MEETING)
+    );
+
+    let error = harness.host.meeting_delete_recording_now().unwrap_err();
+    assert_eq!(error.code, BridgeErrorCode::Failed);
+    harness
+        .host
+        .meetings_select(MeetingIdParams {
+            meeting_id: uuid(MEETING),
+        })
+        .unwrap();
+    let error = harness
+        .host
+        .meeting_set_keep_audio(SetBoolParams { value: false })
+        .unwrap_err();
+    assert_eq!(error.code, BridgeErrorCode::Failed);
+    assert_eq!(
+        *prompts.lock().unwrap(),
+        vec!["Delete this recording now?"; 2],
+        "both commands asked"
+    );
+    assert!(
+        harness.fakes.pipeline.retention.lock().unwrap().is_empty(),
+        "neither meeting's recording rule changed"
+    );
+    assert_eq!(
+        harness.snapshot(BridgeTopic::MeetingDetail)["id"],
+        id(MEETING_IN_PERSON)
+    );
+}
+
 /// Swift: `testExportStatusFollowsTheDeliveriesAndTheVault`, `testSummaryStatusFollowsTheSummaryAndTheEndpoint`.
 #[test]
 fn the_detail_footer_and_summary_rows_follow_the_store() {

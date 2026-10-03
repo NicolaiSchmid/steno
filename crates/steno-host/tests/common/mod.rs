@@ -11,7 +11,7 @@ use std::sync::{Arc, Mutex};
 
 use chrono::{DateTime, Utc};
 use serde_json::Value;
-use steno_bridge::{BridgeEvent, BridgeHost, BridgeTopic, EventSink};
+use steno_bridge::{BridgeEvent, BridgeHost, BridgeTopic, ConfirmDestructiveParams, EventSink};
 use steno_core::paths::file_url;
 use steno_core::*;
 use steno_host::fakes::FakeServices;
@@ -95,13 +95,27 @@ pub struct Harness {
     pub fakes: FakeServices,
     pub host: Host,
     pub sink: Arc<RecordingSink>,
+    /// The host as the `confirm_with` prompt sees it; emptied on drop, so
+    /// the prompt's handle does not keep the host (and its flush thread)
+    /// alive past the test.
+    prompt_host: Arc<Mutex<Option<Host>>>,
+}
+
+impl Drop for Harness {
+    fn drop(&mut self) {
+        self.prompt_host.lock().unwrap().take();
+    }
 }
 
 type Seed = Box<dyn FnOnce(&Store, &FakeServices)>;
 
+/// A destructive prompt that sees the host while it is up.
+type Prompt = Box<dyn Fn(&Host, &ConfirmDestructiveParams) -> bool + Send + Sync>;
+
 pub struct HarnessBuilder {
     fakes: FakeServices,
     confirm: bool,
+    prompt: Option<Prompt>,
     chosen: Option<PathBuf>,
     seed: Vec<Seed>,
     page_ready: bool,
@@ -116,6 +130,16 @@ impl HarnessBuilder {
     /// What the destructive prompt answers.
     pub fn confirm(mut self, confirmed: bool) -> Self {
         self.confirm = confirmed;
+        self
+    }
+
+    /// The destructive prompt runs `prompt`, which gets the host as it
+    /// stands while the prompt is up and answers for the user.
+    pub fn confirm_with(
+        mut self,
+        prompt: impl Fn(&Host, &ConfirmDestructiveParams) -> bool + Send + Sync + 'static,
+    ) -> Self {
+        self.prompt = Some(Box::new(prompt));
         self
     }
 
@@ -149,6 +173,9 @@ impl HarnessBuilder {
             seed(&store, &self.fakes);
         }
         let confirmed = self.confirm;
+        let prompt = self.prompt;
+        let prompt_host = Arc::new(Mutex::new(None::<Host>));
+        let prompt_slot = prompt_host.clone();
         let chosen = self.chosen;
         let host = Host::new(
             store.clone(),
@@ -160,9 +187,16 @@ impl HarnessBuilder {
         )
         .unwrap()
         .with_dialogs(
-            Box::new(move |_| confirmed),
+            Box::new(move |params| match &prompt {
+                Some(prompt) => {
+                    let host = prompt_slot.lock().unwrap().clone();
+                    host.is_some_and(|host| prompt(&host, params))
+                }
+                None => confirmed,
+            }),
             Box::new(move |_| chosen.clone()),
         );
+        *prompt_host.lock().unwrap() = Some(host.clone());
         let sink = Arc::new(RecordingSink::default());
         host.attach(sink.clone());
         if self.page_ready {
@@ -175,6 +209,7 @@ impl HarnessBuilder {
             fakes: self.fakes,
             host,
             sink,
+            prompt_host,
         }
     }
 }
@@ -184,6 +219,7 @@ impl Harness {
         HarnessBuilder {
             fakes: FakeServices::new(now()),
             confirm: true,
+            prompt: None,
             chosen: None,
             seed: Vec::new(),
             page_ready: true,
