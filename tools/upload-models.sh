@@ -136,27 +136,32 @@ Licence: CC BY 4.0, a derivative of NVIDIA's Parakeet TDT 0.6B v3; see
 [ATTRIBUTION.md](ATTRIBUTION.md).
 README
 
-uploads=(
-	"huggingface-cli upload $repo $directory $asset --repo-type model ${private[*]} --commit-message 'Parakeet TDT 0.6B v3 fp32 ONNX export'"
-	"huggingface-cli upload $repo $staging/ATTRIBUTION.md ATTRIBUTION.md --repo-type model --commit-message 'CC-BY-4.0 attribution'"
-	"huggingface-cli upload $repo $staging/README.md README.md --repo-type model --commit-message 'Model card'"
-)
+# Prints the command on a dry run, runs it otherwise.
+run() {
+	if (( dry_run )); then
+		print -r -- "  ${(q-)@}"
+	else
+		"$@"
+	fi
+}
 
 if (( dry_run )); then
 	print "\ndry run, would run:"
-	for upload in $uploads; do print "  $upload"; done
+else
+	(( $+commands[huggingface-cli] )) || { print -u2 "huggingface-cli not found: pip install -U 'huggingface_hub[cli]'"; exit 1; }
+fi
+run huggingface-cli upload "$repo" "$directory" "$asset" --repo-type model $private \
+	--commit-message "Parakeet TDT 0.6B v3 fp32 ONNX export"
+run huggingface-cli upload "$repo" "$staging/ATTRIBUTION.md" ATTRIBUTION.md --repo-type model \
+	--commit-message "CC-BY-4.0 attribution"
+run huggingface-cli upload "$repo" "$staging/README.md" README.md --repo-type model \
+	--commit-message "Model card"
+
+if (( dry_run )); then
 	print "\nstaged ATTRIBUTION.md:\n"
 	cat "$staging/ATTRIBUTION.md"
 	exit 0
 fi
-
-(( $+commands[huggingface-cli] )) || { print -u2 "huggingface-cli not found: pip install -U 'huggingface_hub[cli]'"; exit 1; }
-huggingface-cli upload "$repo" "$directory" "$asset" --repo-type model $private \
-	--commit-message "Parakeet TDT 0.6B v3 fp32 ONNX export"
-huggingface-cli upload "$repo" "$staging/ATTRIBUTION.md" ATTRIBUTION.md --repo-type model \
-	--commit-message "CC-BY-4.0 attribution"
-huggingface-cli upload "$repo" "$staging/README.md" README.md --repo-type model \
-	--commit-message "Model card"
 
 auth=()
 [[ -n "${HF_TOKEN:-}" ]] && auth=(-H "Authorization: Bearer $HF_TOKEN")
