@@ -299,9 +299,10 @@ mod tests {
             ids(&merge_windows(&left, &right, 1.5, &vocab())),
             ids(&[left, right].concat())
         );
-        // Touching: the right starts on the frame the left ends.
-        let left = vec![token(0, 0), token(4, 9)];
-        let right = vec![token(5, 10), token(1, 12)];
+        // Touching: the right starts on the frame the left ends (frames
+        // 10 and 11, whose seconds are exact in `f64`).
+        let left = vec![token(0, 0), token(4, 10)];
+        let right = vec![token(5, 11), token(1, 13)];
         assert_eq!(
             ids(&merge_windows(&left, &right, 1.5, &vocab())),
             ids(&[left, right].concat())

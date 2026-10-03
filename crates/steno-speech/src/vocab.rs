@@ -178,9 +178,13 @@ mod tests {
             Vocab::load(&dir.path().join("missing.txt")),
             Err(SpeechError::Io { .. })
         ));
-        // No blank to take the last id.
+        // No blank to take the last id, or nothing besides the blank.
         assert!(matches!(
             Vocab::from_pieces(Vec::new()),
+            Err(SpeechError::Shape(_))
+        ));
+        assert!(matches!(
+            Vocab::from_pieces(vec!["<blk>".to_owned()]),
             Err(SpeechError::Shape(_))
         ));
     }
