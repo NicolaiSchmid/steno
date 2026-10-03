@@ -78,7 +78,8 @@ pub const LAN_REFRESH: Duration = Duration::from_secs(1);
 pub(crate) struct LanAddresses {
     query: fn() -> Vec<Ipv4Addr>,
     every: Duration,
-    last: Option<(Instant, Arc<[Ipv4Addr]>)>,
+    read_at: Option<Instant>,
+    addresses: Vec<Ipv4Addr>,
 }
 
 impl LanAddresses {
@@ -86,7 +87,8 @@ impl LanAddresses {
         LanAddresses {
             query,
             every,
-            last: None,
+            read_at: None,
+            addresses: Vec::new(),
         }
     }
 
@@ -95,18 +97,17 @@ impl LanAddresses {
         Self::new(advertise::current_lan_addresses, LAN_REFRESH)
     }
 
-    async fn current(&mut self) -> Arc<[Ipv4Addr]> {
-        if let Some((read_at, addresses)) = &self.last
-            && read_at.elapsed() < self.every
+    async fn current(&mut self) -> &[Ipv4Addr] {
+        if self
+            .read_at
+            .is_none_or(|read_at| read_at.elapsed() >= self.every)
         {
-            return addresses.clone();
+            self.addresses = tokio::task::spawn_blocking(self.query)
+                .await
+                .unwrap_or_default();
+            self.read_at = Some(Instant::now());
         }
-        let addresses: Arc<[Ipv4Addr]> = tokio::task::spawn_blocking(self.query)
-            .await
-            .unwrap_or_default()
-            .into();
-        self.last = Some((Instant::now(), addresses.clone()));
-        addresses
+        &self.addresses
     }
 }
 
@@ -271,7 +272,7 @@ async fn accept_loop(
             }
         };
         let served = match &mut lan {
-            Some(lan) => on_a_served_network(&stream, &lan.current().await),
+            Some(lan) => on_a_served_network(&stream, lan.current().await),
             None => true,
         };
         if !served {
@@ -372,8 +373,8 @@ mod tests {
     async fn the_lan_addresses_are_read_once_per_refresh_and_a_failed_read_serves_none() {
         let mut kept = LanAddresses::new(counted, Duration::from_secs(3600));
         let before = QUERIES.load(Ordering::SeqCst);
-        assert_eq!(&*kept.current().await, &[Ipv4Addr::new(192, 168, 1, 20)]);
-        assert_eq!(&*kept.current().await, &[Ipv4Addr::new(192, 168, 1, 20)]);
+        assert_eq!(kept.current().await, &[Ipv4Addr::new(192, 168, 1, 20)]);
+        assert_eq!(kept.current().await, &[Ipv4Addr::new(192, 168, 1, 20)]);
         assert_eq!(QUERIES.load(Ordering::SeqCst) - before, 1, "one query");
 
         let mut panicking = LanAddresses::new(|| panic!("the system did not say"), LAN_REFRESH);
