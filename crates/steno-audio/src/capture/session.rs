@@ -25,15 +25,19 @@
 //! A recording cut short (device loss, writer failure, a full disk while
 //! closing) is finalised and travels in the state: `Failed { error,
 //! recording }`; `stop()` returns the same result, or fails when the
-//! failure came from a start that produced nothing.
+//! failure left no recording.
 //!
 //! A writer failure and a device loss finalise on their own threads (the
 //! writer failure's and the rebuild's) and hold `Stopping` meanwhile. A
-//! `stop()` arriving then waits on a condition variable until the state
-//! leaves `Stopping` and answers from the outcome, as it would have after
-//! Swift's actor ran the finalise first: the recording `Failed` carries,
-//! or `InvalidState` once the state is `Idle`. Only `stop()` waits there;
-//! a finaliser never waits for a stopper, so the wait cannot deadlock.
+//! `stop()` that finds `Stopping` (one of those finalises, or another
+//! `stop()`) waits on a condition variable until the state leaves
+//! `Stopping`, then answers from the outcome: the recording `Failed`
+//! carries, or `InvalidState` once the state is `Idle`. Swift's actor ran
+//! the queued stop right after the finalise; here a `start()` can take the
+//! lock first, and the stop then answers `InvalidState` rather than ending
+//! the new recording. Only `stop()` waits there; a finaliser never waits
+//! for a stopper, so the wait cannot deadlock, and a finaliser that panics
+//! leaves `Failed` with no recording rather than `Stopping` for good.
 //!
 //! # Threads
 //!
@@ -57,6 +61,13 @@
 //! restart failed, the rebuild finalises the recording itself and first
 //! takes its own handle out of the state, so `finish()` never joins the
 //! thread it runs on.
+//!
+//! A stop that cuts a rebuild short loses nothing from the statistics. The
+//! join returns the system-lane peak of the processing thread the rebuild
+//! stopped, plus any gap silence no `resume` counted. `finish()` reads the
+//! ring overruns before it clears the rings, and counts the whole frames
+//! still in them (audio a restarted backend delivered before any processing
+//! thread ran) as dropped on every lane.
 //!
 //! The one long hold is deliberate: `start` and the rebuild's
 //! `restart_backend` keep the mutex across `backend.start()`, up to 200 ms
@@ -364,13 +375,13 @@ impl CaptureSession {
 
     /// Ends the recording and returns it. A rebuild in flight is abandoned.
     /// After `Failed` returns the finalised partial recording the state
-    /// carries, or fails when the failure came from a start that produced
-    /// nothing. While a writer failure or a device loss is finalising,
-    /// waits for it and answers from its outcome. A write or close that
-    /// fails during the teardown leaves the state `Failed` with the
-    /// recording that is returned. Fails with `WriterFailed`, and leaves
-    /// the state `Failed`, when the master is gone from disk or the writer
-    /// thread died.
+    /// carries, or fails when the failure left no recording. While a writer
+    /// failure or a device loss is finalising, waits for it and answers from
+    /// its outcome; `InvalidState` when a `start()` came in first. A write or
+    /// close that fails during the teardown leaves the state `Failed` with the
+    /// recording that is returned. Fails with `WriterFailed`, and leaves the
+    /// state `Failed`, when the master is gone from disk or the writer thread
+    /// died.
     pub fn stop(&self) -> Result<CaptureResult, CaptureError> {
         self.core.stop()
     }
@@ -986,8 +997,10 @@ impl Core {
                 gap_seconds,
             },
         );
-        // Under the same guard, so a stop and a new start cannot come in
-        // between and hand this recording's change to the next one.
+        // Must stay under this guard: released and taken again, a stop and a
+        // new start could come in between and hand this recording's change
+        // to the next one. No test reaches that window, so this comment is
+        // what keeps the call here.
         if let Some(pending) = pending {
             self.begin_rebuild(&mut inner, pending);
         }
@@ -1061,8 +1074,8 @@ impl Core {
         true
     }
 
-    /// Every restart failed: the recording ends as it did before rebuilds
-    /// existed, finalised and carried in `Failed(DeviceLost)`.
+    /// Every restart failed: the recording ends, finalised and carried in
+    /// `Failed(DeviceLost)`.
     fn device_lost(&self) {
         {
             let mut inner = self.lock();

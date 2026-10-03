@@ -259,8 +259,8 @@ fn device_lost_stops_cleanly_with_a_readable_master() {
     assert_eq!(master.frame_count(), 48_000);
     assert_eq!(backend.starts(), 1 + CaptureSession::RESTART_ATTEMPTS);
 
-    // A failed session restarts; this backend's one change is spent, so the
-    // second recording sees no change and no restart.
+    // A failed session starts again; this backend's one change is spent, so
+    // the second recording sees no change and no rebuild.
     session.start(Uuid::new_v4()).unwrap();
     backend.wait_until_finished();
     let second = session.stop().unwrap();
@@ -1705,10 +1705,11 @@ impl CaptureBackend for GatedStop {
     }
 }
 
-/// Calls `stop()` on its own thread while a finalise waits at `backend`'s
-/// gate, gives the call 200 ms to land in that window (a `stop()` that does
-/// not wait for the finalise returns inside it), then opens the gate.
-/// Returns what `stop()` returned and the producers alive at that moment.
+/// Calls `stop()` on its own thread while another thread (a finalise, or a
+/// rebuild's teardown) waits at `backend`'s gate, gives the call 200 ms to
+/// land in that window (a `stop()` that does not wait returns inside it),
+/// then opens the gate. Returns what `stop()` returned and the producers
+/// alive at that moment.
 fn stop_at_the_gate(
     session: &CaptureSession,
     backend: &GatedStop,
@@ -1820,7 +1821,7 @@ fn stop_during_a_writer_failures_finalise_returns_its_recording() {
 /// finalising: it waits and returns the recording `Failed(DeviceLost)`
 /// carries, every delivered frame in it.
 #[test]
-fn stop_during_a_device_losss_finalise_returns_its_recording() {
+fn stop_during_the_device_loss_finalise_returns_its_recording() {
     let directory = tempfile::tempdir().unwrap();
     let clock = Arc::new(ManualClock::new());
     let (backend, at_gate, open) = GatedStop::new(2, Some(10), true);
@@ -2207,7 +2208,8 @@ fn a_gap_wider_than_the_relay_waits_for_the_writer_and_loses_nothing() {
 
 /// `stop()` while the gap waits for room in a 30-frame relay: the silence
 /// already written stays in the master and is reported in `gap_seconds`,
-/// though the rebuild never resumed, so `device_changes` stays 0.
+/// though the rebuild never resumed, so `device_changes` stays 0, and what
+/// the restarted backend delivered meanwhile counts as dropped.
 #[test]
 fn stop_while_the_gap_waits_for_the_relay_reports_the_silence_written() {
     let directory = tempfile::tempdir().unwrap();
