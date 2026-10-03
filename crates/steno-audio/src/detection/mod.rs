@@ -10,4 +10,4 @@ pub mod sessions;
 pub use activity::{ActivityError, ProcessAudioActivity, ProcessAudioActivitySource};
 pub use detector::{MeetingDetector, MeetingEvent};
 pub use live::LiveProcessAudioActivity;
-pub use sessions::{AudioSessionRecord, SessionFlow, SessionState, processes_from_sessions};
+pub use sessions::{AudioSessionRecord, EndpointFlow, SessionState, processes_from_sessions};

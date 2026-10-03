@@ -10,12 +10,12 @@ use std::time::Duration;
 
 use steno_audio::detection::sessions::image_file_name;
 use steno_audio::detection::{
-    AudioSessionRecord, MeetingDetector, MeetingEvent, ProcessAudioActivity, SessionFlow,
+    AudioSessionRecord, EndpointFlow, MeetingDetector, MeetingEvent, ProcessAudioActivity,
     SessionState, processes_from_sessions,
 };
 use steno_audio::testing::{FakeProcessAudioActivity, ManualClock};
 
-fn session(pid: u32, flow: SessionFlow, state: SessionState, image: &str) -> AudioSessionRecord {
+fn session(pid: u32, flow: EndpointFlow, state: SessionState, image: &str) -> AudioSessionRecord {
     AudioSessionRecord {
         pid,
         flow,
@@ -32,10 +32,10 @@ const SPOTIFY: &str = r"C:\Program Files\Spotify\Spotify.exe";
 #[test]
 fn an_active_capture_session_is_running_input_and_a_render_one_output() {
     let records = [
-        session(7_100, SessionFlow::Render, SessionState::Active, TEAMS),
-        session(7_100, SessionFlow::Capture, SessionState::Active, TEAMS),
-        session(5_151, SessionFlow::Capture, SessionState::Inactive, ZOOM),
-        session(9_000, SessionFlow::Render, SessionState::Active, SPOTIFY),
+        session(7_100, EndpointFlow::Render, SessionState::Active, TEAMS),
+        session(7_100, EndpointFlow::Capture, SessionState::Active, TEAMS),
+        session(5_151, EndpointFlow::Capture, SessionState::Inactive, ZOOM),
+        session(9_000, EndpointFlow::Render, SessionState::Active, SPOTIFY),
     ];
     let processes = processes_from_sessions(&records);
     assert_eq!(
@@ -61,23 +61,23 @@ fn an_active_capture_session_is_running_input_and_a_render_one_output() {
 
 #[test]
 fn system_sounds_pid_zero_and_expired_sessions_are_skipped() {
-    let mut system_sounds = session(4, SessionFlow::Render, SessionState::Active, "");
+    let mut system_sounds = session(4, EndpointFlow::Render, SessionState::Active, "");
     system_sounds.system_sounds = true;
     let records = [
         system_sounds,
-        session(0, SessionFlow::Capture, SessionState::Active, "Idle"),
-        session(3_000, SessionFlow::Capture, SessionState::Expired, TEAMS),
+        session(0, EndpointFlow::Capture, SessionState::Active, "Idle"),
+        session(3_000, EndpointFlow::Capture, SessionState::Expired, TEAMS),
     ];
     assert_eq!(processes_from_sessions(&records), Vec::new());
 }
 
 #[test]
 fn the_first_known_image_names_the_process() {
-    let mut unnamed = session(42, SessionFlow::Capture, SessionState::Active, "");
+    let mut unnamed = session(42, EndpointFlow::Capture, SessionState::Active, "");
     unnamed.image_path = None;
     let records = [
         unnamed,
-        session(42, SessionFlow::Render, SessionState::Inactive, TEAMS),
+        session(42, EndpointFlow::Render, SessionState::Inactive, TEAMS),
     ];
     let processes = processes_from_sessions(&records);
     assert_eq!(processes.len(), 1);
@@ -101,7 +101,7 @@ fn sessions_drive_the_meeting_detector() {
     let clock = Arc::new(ManualClock::new());
     let idle = [session(
         7_100,
-        SessionFlow::Capture,
+        EndpointFlow::Capture,
         SessionState::Inactive,
         TEAMS,
     )];
@@ -118,8 +118,8 @@ fn sessions_drive_the_meeting_detector() {
     assert!(clock.wait_for_sleepers(1), "the poll timer is armed");
 
     let call = [
-        session(7_100, SessionFlow::Capture, SessionState::Active, TEAMS),
-        session(7_100, SessionFlow::Render, SessionState::Active, TEAMS),
+        session(7_100, EndpointFlow::Capture, SessionState::Active, TEAMS),
+        session(7_100, EndpointFlow::Render, SessionState::Active, TEAMS),
     ];
     source.set(processes_from_sessions(&call));
     assert!(clock.wait_for_sleepers(2), "the open debounce is armed");

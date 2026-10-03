@@ -60,7 +60,7 @@ mod wasapi {
         SessionRegistration,
     };
     use crate::detection::{
-        ActivityError, ProcessAudioActivity, ProcessAudioActivitySource, SessionFlow,
+        ActivityError, EndpointFlow, ProcessAudioActivity, ProcessAudioActivitySource,
         processes_from_sessions,
     };
 
@@ -136,7 +136,7 @@ mod wasapi {
             let mut sessions = Vec::new();
             let mut managers = Vec::new();
             for endpoint in enumerator
-                .active_endpoints(SessionFlow::Capture)
+                .active_endpoints(EndpointFlow::Capture)
                 .unwrap_or_default()
             {
                 let Ok(manager) = endpoint.session_manager() else {
@@ -214,7 +214,7 @@ mod wasapi {
             let apartment = Apartment::enter()?;
             let enumerator = Enumerator::new()?;
             let mut records = Vec::new();
-            for flow in [SessionFlow::Capture, SessionFlow::Render] {
+            for flow in [EndpointFlow::Capture, EndpointFlow::Render] {
                 for endpoint in enumerator.active_endpoints(flow)? {
                     let Ok(manager) = endpoint.session_manager() else {
                         continue;

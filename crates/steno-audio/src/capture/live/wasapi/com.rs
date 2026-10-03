@@ -81,7 +81,7 @@ use windows_core::implement;
 use crate::SAMPLE_RATE;
 use crate::capture::CaptureError;
 use crate::capture::split_streams::frames_from_hundred_nanoseconds;
-use crate::detection::{AudioSessionRecord, SessionFlow, SessionState};
+use crate::detection::{AudioSessionRecord, EndpointFlow, SessionState};
 use crate::realtime::Packet;
 
 /// A failed COM or WASAPI call: which one, its `HRESULT`, the system's
@@ -204,10 +204,10 @@ pub enum Role {
     Communications,
 }
 
-fn data_flow(flow: SessionFlow) -> EDataFlow {
+fn data_flow(flow: EndpointFlow) -> EDataFlow {
     match flow {
-        SessionFlow::Capture => eCapture,
-        SessionFlow::Render => eRender,
+        EndpointFlow::Capture => eCapture,
+        EndpointFlow::Render => eRender,
     }
 }
 
@@ -233,7 +233,7 @@ impl Enumerator {
     }
 
     /// The default endpoint for `flow` and `role`.
-    pub fn default_endpoint(&self, flow: SessionFlow, which: Role) -> Result<Endpoint, ComError> {
+    pub fn default_endpoint(&self, flow: EndpointFlow, which: Role) -> Result<Endpoint, ComError> {
         // SAFETY: plain values in, a counted interface out.
         let device = unsafe { self.0.GetDefaultAudioEndpoint(data_flow(flow), role(which)) };
         check(device, "IMMDeviceEnumerator::GetDefaultAudioEndpoint").map(Endpoint)
@@ -248,7 +248,7 @@ impl Enumerator {
     }
 
     /// Every active endpoint for `flow`.
-    pub fn active_endpoints(&self, flow: SessionFlow) -> Result<Vec<Endpoint>, ComError> {
+    pub fn active_endpoints(&self, flow: EndpointFlow) -> Result<Vec<Endpoint>, ComError> {
         // SAFETY: plain values in, a counted collection out.
         let collection = check(
             unsafe {
@@ -944,7 +944,7 @@ impl Session {
     /// The session as [`processes_from_sessions`](crate::detection::processes_from_sessions)
     /// reads it; `None` when its state cannot be read.
     #[must_use]
-    pub fn record(&self, flow: SessionFlow) -> Option<AudioSessionRecord> {
+    pub fn record(&self, flow: EndpointFlow) -> Option<AudioSessionRecord> {
         // SAFETY: plain call on the live session.
         let state = unsafe { self.0.GetState() }.ok()?;
         let control: IAudioSessionControl2 = self.0.cast().ok()?;

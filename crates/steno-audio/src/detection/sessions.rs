@@ -17,9 +17,10 @@ use std::collections::BTreeMap;
 
 use super::activity::ProcessAudioActivity;
 
-/// Which side of the engine a session's endpoint is on.
+/// Which side of the engine an endpoint is on (`EDataFlow`): what a
+/// session records and what the capture backend opens.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum SessionFlow {
+pub enum EndpointFlow {
     /// A capture endpoint (a microphone).
     Capture,
     /// A render endpoint (speakers, headphones).
@@ -43,7 +44,7 @@ pub struct AudioSessionRecord {
     /// `IAudioSessionControl2::GetProcessId`.
     pub pid: u32,
     /// The endpoint's data flow.
-    pub flow: SessionFlow,
+    pub flow: EndpointFlow,
     /// `IAudioSessionControl::GetState`.
     pub state: SessionState,
     /// `IAudioSessionControl2::IsSystemSoundsSession`.
@@ -76,8 +77,8 @@ pub fn processes_from_sessions(records: &[AudioSessionRecord]) -> Vec<ProcessAud
         }
         if record.state == SessionState::Active {
             match record.flow {
-                SessionFlow::Capture => process.is_running_input = true,
-                SessionFlow::Render => process.is_running_output = true,
+                EndpointFlow::Capture => process.is_running_input = true,
+                EndpointFlow::Render => process.is_running_output = true,
             }
         }
     }
