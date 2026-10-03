@@ -243,6 +243,10 @@ impl ModelStore {
         Ok(())
     }
 
+    /// Downloads into a sibling `.partial.<pid>` file (two processes, the
+    /// app and a sidecar, can then install the same asset without writing
+    /// one inode), verifies it and renames it into place; nothing is left
+    /// behind on failure.
     fn download(
         &self,
         url: &str,
@@ -250,10 +254,32 @@ impl ModelStore {
         destination: &Path,
         progress: &mut dyn FnMut(DownloadProgress<'_>),
     ) -> Result<(), SpeechError> {
+        let suffix = format!("partial.{}", std::process::id());
         let partial = destination.with_extension(match destination.extension() {
-            Some(extension) => format!("{}.partial", extension.to_string_lossy()),
-            None => "partial".to_owned(),
+            Some(extension) => format!("{}.{suffix}", extension.to_string_lossy()),
+            None => suffix,
         });
+        let result = self
+            .stream_to(url, file, &partial, progress)
+            .and_then(|()| {
+                fs::rename(&partial, destination).map_err(|e| SpeechError::io(destination, e))
+            });
+        if result.is_err() {
+            let _ = fs::remove_file(&partial);
+        }
+        result
+    }
+
+    /// Streams `url` into `partial` while hashing; refuses the body as soon
+    /// as it exceeds the manifest size, so a misbehaving host cannot fill
+    /// the disk.
+    fn stream_to(
+        &self,
+        url: &str,
+        file: &ModelFile,
+        partial: &Path,
+        progress: &mut dyn FnMut(DownloadProgress<'_>),
+    ) -> Result<(), SpeechError> {
         let response = self
             .agent
             .get(url)
@@ -264,55 +290,56 @@ impl ModelStore {
             })?;
         let total = response.body().content_length().unwrap_or(file.size);
         let mut body = response.into_body();
-        let mut reader = body.with_config().limit(u64::MAX).reader();
-        let mut out = File::create(&partial).map_err(|e| SpeechError::io(&partial, e))?;
+        // One byte over the manifest size is enough to tell a long body.
+        let mut reader = body.with_config().limit(file.size + 1).reader();
+        let mut out = File::create(partial).map_err(|e| SpeechError::io(partial, e))?;
         let mut hasher = Sha256::new();
         let mut received = 0u64;
         let mut buffer = vec![0u8; 1 << 16];
-        let mut report = |received: u64| {
+        let size_error = |received| SpeechError::Size {
+            path: partial.to_path_buf(),
+            expected: file.size,
+            actual: received,
+        };
+        progress(DownloadProgress {
+            file: &file.name,
+            received,
+            total,
+        });
+        loop {
+            let n = reader
+                .read(&mut buffer)
+                .map_err(|e| SpeechError::io(partial, e))?;
+            if n == 0 {
+                break;
+            }
+            received += n as u64;
+            if received > file.size {
+                return Err(size_error(received));
+            }
+            out.write_all(&buffer[..n])
+                .map_err(|e| SpeechError::io(partial, e))?;
+            hasher.update(&buffer[..n]);
             progress(DownloadProgress {
                 file: &file.name,
                 received,
                 total,
             });
-        };
-        report(received);
-        loop {
-            let n = reader
-                .read(&mut buffer)
-                .map_err(|e| SpeechError::io(&partial, e))?;
-            if n == 0 {
-                break;
-            }
-            out.write_all(&buffer[..n])
-                .map_err(|e| SpeechError::io(&partial, e))?;
-            hasher.update(&buffer[..n]);
-            received += n as u64;
-            report(received);
         }
-        out.flush().map_err(|e| SpeechError::io(&partial, e))?;
+        out.flush().map_err(|e| SpeechError::io(partial, e))?;
         drop(out);
+        if received != file.size {
+            return Err(size_error(received));
+        }
         let actual = hex(&hasher.finalize());
-        let verdict = if received != file.size {
-            Err(SpeechError::Size {
-                path: destination.to_path_buf(),
-                expected: file.size,
-                actual: received,
-            })
-        } else if !actual.eq_ignore_ascii_case(&file.sha256) {
-            Err(SpeechError::Checksum {
-                path: destination.to_path_buf(),
+        if !actual.eq_ignore_ascii_case(&file.sha256) {
+            return Err(SpeechError::Checksum {
+                path: partial.to_path_buf(),
                 expected: file.sha256.clone(),
                 actual,
-            })
-        } else {
-            Ok(())
-        };
-        if let Err(error) = verdict {
-            let _ = fs::remove_file(&partial);
-            return Err(error);
+            });
         }
-        fs::rename(&partial, destination).map_err(|e| SpeechError::io(destination, e))
+        Ok(())
     }
 }
 
@@ -437,12 +464,28 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = ModelStore::new(dir.path());
         let body = b"short".to_vec();
-        let mut asset = asset(Some(serve_once(body.clone())), &body, &digest(&body));
-        asset.files[0].size += 1;
+        let mut short = asset(Some(serve_once(body.clone())), &body, &digest(&body));
+        short.files[0].size += 1;
         assert!(matches!(
-            store.ensure(&asset, &mut |_| {}),
+            store.ensure(&short, &mut |_| {}),
             Err(SpeechError::Size { .. })
         ));
+        // A body longer than the manifest says is cut off at the first
+        // byte over, before the checksum is even looked at.
+        let long = vec![0u8; 1 << 20];
+        let mut long_asset = asset(Some(serve_once(long.clone())), &long, &digest(&long));
+        long_asset.files[0].size = 1000;
+        let mut last = 0;
+        let error = store
+            .ensure(&long_asset, &mut |p| last = p.received)
+            .unwrap_err();
+        assert!(
+            matches!(error, SpeechError::Size { actual, .. } if actual > 1000),
+            "{error}"
+        );
+        assert!(last <= 1000);
+        let directory = dir.path().join("test-asset");
+        assert!(fs::read_dir(&directory).unwrap().next().is_none());
     }
 
     #[test]
