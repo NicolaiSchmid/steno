@@ -76,6 +76,19 @@ mod testing;
 pub use app::{App, AppOptions, BuildError, build, open_store};
 pub use secrets::{FileSecretStore, KeyringSecretStore, secret_store};
 
+/// Installs the log output of the shell and the CLI: lines on stderr,
+/// filtered by `RUST_LOG` (default `warn`), so what the services warn
+/// about (no keychain, no handover identity, a re-run or re-export that
+/// failed in the background) is seen. A second call does nothing.
+pub fn log_to_stderr() {
+    let filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn"));
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(filter)
+        .with_writer(std::io::stderr)
+        .try_init();
+}
+
 /// Runs `future` to completion on `runtime` from a synchronous host
 /// service (the host's traits are synchronous, the clients are async).
 pub(crate) fn block_on<T>(

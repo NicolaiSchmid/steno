@@ -36,7 +36,6 @@ steno-speech = { path = "../steno-speech" }
 steno-speech-coreml = { path = "../steno-speech-coreml" }
 thiserror.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "signal", "time", "sync"] }
-tracing-subscriber.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]

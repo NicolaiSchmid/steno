@@ -15,7 +15,7 @@ use crate::commands::{Command, Steno};
 use crate::wiring::Failure;
 
 fn main() {
-    log_to_stderr();
+    steno_services::log_to_stderr();
     let steno = match Steno::try_parse() {
         Ok(steno) => steno,
         Err(error) => {
@@ -48,16 +48,4 @@ fn main() {
             std::process::exit(2);
         }
     }
-}
-
-/// Log lines on stderr, filtered by `RUST_LOG` (default `warn`), so a
-/// warning the services log (a secret store that cannot be read, a
-/// re-export that failed in the background) is seen.
-fn log_to_stderr() {
-    let filter = tracing_subscriber::EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn"));
-    let _ = tracing_subscriber::fmt()
-        .with_env_filter(filter)
-        .with_writer(std::io::stderr)
-        .try_init();
 }
