@@ -241,27 +241,48 @@ What the bridge crate (WP1) asks of the Swift side before WP6 fills the list:
   language gets "sw" instead of "Swahili" in the prompt on the Rust side until the
   table grows.
 
-Rust is deliberately stricter than Swift in these places; each is ported to Swift or
-accepted before cutover:
+Rust fixes these Swift behaviours; each is ported to Swift or accepted before cutover:
 
-- Concurrent mode downgrade: a 400 steps the mode down only from the mode its request
-  went out under, so two concurrent rejections step once and announce once; Swift
-  steps from the mode it holds when the 400 arrives and can skip a step.
-- Concurrent parameter rejection: two requests rejected for `max_tokens` (or
-  `temperature`) at once are both resent; Swift fails the second with HTTP 400.
-- Waiters on a spent refresh token: callers that waited for a refresh the endpoint
-  refused for good get that answer without posting the dead token again; Swift's next
-  caller posts it again.
-- Write-back after the file changed hands: a re-read that shows `NotSignedIn` or
-  `ApiKeyLogin`, or a refresh token other than the one posted, keeps the file as it
-  is; Swift writes the new tokens over it.
-- Reused-token re-read: a rotated file whose access token is already fit to send is
-  used, not refreshed again; Swift refreshes it.
-- 401 refresh: only a refresh that went through uses up the one refresh a completion
-  gets after a 401; Swift spends it on a failed refresh too.
-- Redaction: secrets are removed before an error body is cut to its first characters,
-  and the token refresh redacts the account id too; Swift cuts first and redacts the
-  two tokens only.
+- `OpenAICompatibleClient.complete` and `CodexResponsesClient.complete` should step
+  the mode down from the mode the rejected request went out under, as the Rust
+  clients do; today they step from the mode the client holds when the 400 arrives,
+  so two concurrent rejections go from `.jsonSchema` straight to `.promptOnly` and
+  announce two downgrades.
+- `OpenAICompatibleClient.complete` should resend a request that still carried a
+  parameter a concurrent request already got rejected, as the Rust client does;
+  today the second rejection for `max_tokens` or `temperature` finds the parameter
+  in `rejectedParameters` and fails the completion with HTTP 400.
+- `CodexCredentialStore.refresh` should remember a refresh token the endpoint
+  refused for good and give every later caller that refusal while the file still
+  holds the token, as the Rust store does; today only the callers waiting on the
+  same refresh get it, and the next caller posts the dead token again.
+- `CodexCredentialStore.refreshOnce` should keep the file as it is when the
+  re-read shows `NotSignedIn`, `ApiKeyLogin` or a refresh token other than the one
+  posted, as the Rust store does; today it writes the new tokens over it and undoes
+  a sign-out, a switch to an API key or a new login made during the refresh.
+- `CodexCredentialStore.refreshRereadingOnReuse` should use the re-read file's
+  credentials when their access token is already fit to send, as the Rust store
+  does; today it refreshes them again and spends the refresh token the CLI just
+  rotated in.
+- `CodexResponsesClient.complete` should count the one refresh a completion gets
+  after a 401 only once a refresh went through, as the Rust client does; today a
+  refresh that failed (the token endpoint hiccuped) uses it up, and the retry's
+  401 ends the completion.
+- `OpenAICompatibleClient.errorMessage`, `CodexResponsesClient.classify`, the
+  undecodable-body errors of both clients and `CodexCredentialStore.refreshOnce`
+  should redact the whole body and then cut it, as the Rust clients do; today
+  `bodyText` cuts it to 4 096 bytes, the fallbacks to 500 characters and the
+  refresh to 300 bytes before anything is redacted, so a secret straddling a cut
+  leaves its prefix in the error.
+- `CodexCredentialStore.refreshOnce` should redact the account id too, and decide
+  permanent and reused on the code as sent, redacting it only for the detail, as
+  the Rust store does; today it redacts the two tokens only, and `RefreshError.code`
+  lowercases the code before it is redacted, so an echoed account id stays in the
+  detail and a token echoed in the code survives case-folded.
+- `LLMTransport.redact` should skip a secret shorter than eight bytes and replace
+  the longest secret first, as the Rust `redact` does; today a placeholder key such
+  as `x` or `ollama` garbles every error message it occurs in, and a secret that
+  contains another is left in pieces.
 
 ## Progress
 
