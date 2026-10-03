@@ -26,10 +26,10 @@ use steno_audio::capture::{CaptureBackend, CaptureError, CaptureStream};
 use steno_audio::realtime::{FrameRelay, LaneFrameSink, ProcessingConfiguration, ProcessingThread};
 use steno_audio::testing::synthetic::SyntheticOptions;
 use steno_audio::testing::{SyntheticCaptureBackend, SyntheticLane};
-use steno_audio::{EchoMetrics, PassthroughEchoCanceller, SAMPLE_RATE};
+use steno_audio::{PassthroughEchoCanceller, SAMPLE_RATE};
 use steno_core::{AudioLane, EchoCanceller};
 
-use common::upward_crossings;
+use common::{rms_decibels, upward_crossings};
 
 /// Drains the relay on the test thread and returns every frame per channel.
 fn drain(
@@ -56,10 +56,6 @@ fn drain(
         }
     }
     output
-}
-
-fn rms_decibels(samples: &[f32]) -> f32 {
-    EchoMetrics::decibels(EchoMetrics::rms(samples))
 }
 
 fn signals(entries: &[(AudioLane, SyntheticLane)]) -> BTreeMap<AudioLane, SyntheticLane> {

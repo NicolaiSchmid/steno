@@ -36,7 +36,7 @@ use steno_core::{
 };
 use uuid::Uuid;
 
-use common::{frequency, level_against_sine};
+use common::{frequency, level_against_sine, onset, rms_decibels};
 
 fn write_call(layout: &RecordingLayout, seconds: f64, finish: bool) -> RecordingWriter {
     let mic = AudioFixtures::tone(1_000.0, seconds, 0.5);
@@ -115,11 +115,6 @@ fn make_call_asset(directory: &Path) -> AudioAsset {
     call_asset(&write_call(&layout, 2.0, true).files())
 }
 
-/// The index of the first sample louder than `threshold`.
-fn onset(samples: &[f32], threshold: f32) -> usize {
-    samples.iter().position(|s| s.abs() > threshold).unwrap()
-}
-
 /// `count` samples of a sine at 0.5, sampled at 44.1 kHz like the phone's
 /// recordings.
 fn tone_44k1(hertz: f64, count: usize) -> Vec<f32> {
@@ -156,10 +151,8 @@ async fn decodes_each_lane_of_the_master_like_its_sidecar() {
     );
     assert_eq!(system_from_master.len(), 32_000);
     let window = 4_000..30_000;
-    let difference = |a: &[f32], b: &[f32]| {
-        EchoMetrics::decibels(EchoMetrics::rms(&a[window.clone()]))
-            - EchoMetrics::decibels(EchoMetrics::rms(&b[window.clone()]))
-    };
+    let difference =
+        |a: &[f32], b: &[f32]| rms_decibels(&a[window.clone()]) - rms_decibels(&b[window.clone()]);
     let mic_difference = difference(&mic_from_master.samples, &mic_from_sidecar.samples);
     let system_difference = difference(&system_from_master.samples, &system_from_sidecar.samples);
     assert!(

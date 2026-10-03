@@ -4,6 +4,16 @@
 
 use steno_audio::EchoMetrics;
 
+/// The rms level of `samples` in dBFS.
+pub fn rms_decibels(samples: &[f32]) -> f32 {
+    EchoMetrics::decibels(EchoMetrics::rms(samples))
+}
+
+/// The index of the first sample louder than `threshold`.
+pub fn onset(samples: &[f32], threshold: f32) -> usize {
+    samples.iter().position(|s| s.abs() > threshold).unwrap()
+}
+
 /// The level of `samples` in dB against a sine of `amplitude`: 0 when a
 /// tone of that amplitude kept its level.
 pub fn level_against_sine(samples: &[f32], amplitude: f32) -> f32 {

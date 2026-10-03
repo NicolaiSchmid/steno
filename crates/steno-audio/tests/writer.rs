@@ -29,7 +29,7 @@ use steno_audio::writer::{
 use steno_core::{AudioFormat, AudioLane, RecordingLayout};
 use uuid::Uuid;
 
-use common::{frequency, level_against_sine};
+use common::{frequency, level_against_sine, onset};
 
 fn write_lanes(writer: &mut RecordingWriter, lanes: &[&[f32]]) {
     let frames = lanes[0].len() / 480;
@@ -245,7 +245,7 @@ fn sidecars_align_with_the_master_and_their_lane() {
         mic_sidecar[..16_000].iter().all(|s| *s == 0.0),
         "causal: nothing before the onset"
     );
-    let onset = mic_sidecar.iter().position(|s| s.abs() > 0.1).unwrap();
+    let onset = onset(&mic_sidecar, 0.1);
     assert!((16_020..=16_050).contains(&onset), "onset at {onset}");
     assert!(
         system_sidecar.iter().all(|s| *s == 0.0),
