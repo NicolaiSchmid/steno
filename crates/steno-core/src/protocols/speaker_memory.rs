@@ -28,7 +28,8 @@ pub trait SpeakerMemory: Send + Sync {
     /// NaN best never matches (Swift's `>=` rejects it, Rust's `<` would
     /// not, hence the explicit check), while a non-finite runner-up does
     /// not block the match, because `best - NaN < margin` is false in both
-    /// languages. Swift's default `margin` is [`DEFAULT_MATCH_MARGIN`].
+    /// languages. A NaN threshold matches nobody, as Swift's `>=` does.
+    /// Swift's default `margin` is [`DEFAULT_MATCH_MARGIN`].
     async fn match_voice(
         &self,
         embedding: &Embedding,
@@ -39,7 +40,7 @@ pub trait SpeakerMemory: Send + Sync {
         let Some(best) = ranked.first() else {
             return Ok(None);
         };
-        if best.similarity.is_nan() || best.similarity < threshold {
+        if best.similarity.is_nan() || threshold.is_nan() || best.similarity < threshold {
             return Ok(None);
         }
         if let Some(runner_up) = ranked.get(1)
@@ -112,6 +113,16 @@ mod tests {
     async fn a_nan_best_never_matches() {
         assert_eq!(matched(&ranked(&[f32::NAN]), 0.0, 0.0).await, None);
         assert_eq!(matched(&ranked(&[f32::NAN, 0.9]), 0.0, 0.0).await, None);
+    }
+
+    #[tokio::test]
+    async fn a_nan_threshold_matches_nobody() {
+        assert_eq!(matched(&ranked(&[0.9]), f32::NAN, 0.0).await, None);
+        assert_eq!(matched(&ranked(&[0.9, 0.1]), f32::NAN, 0.0).await, None);
+        assert_eq!(
+            matched(&ranked(&[f32::INFINITY]), f32::NAN, 0.0).await,
+            None
+        );
     }
 
     #[tokio::test]
