@@ -8,6 +8,7 @@ use std::fmt::Write as _;
 use std::fs;
 use std::io::{self, Read, Write as _};
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use sha2::{Digest, Sha256};
 use steno_core::StenoPaths;
@@ -115,8 +116,15 @@ impl ModelStore {
         })?;
         let partial = path.with_extension("onnx.part");
         tracing::info!(url = asset.url, "downloading model");
-        download(asset.url, &partial)?;
-        let got = sha256_of(&partial)?;
+        let verified = download(asset.url, &partial).and_then(|()| sha256_of(&partial));
+        let got = match verified {
+            Ok(got) => got,
+            Err(error) => {
+                // A failed or interrupted download leaves nothing behind.
+                let _ = fs::remove_file(&partial);
+                return Err(error);
+            }
+        };
         if got != asset.sha256 {
             let _ = fs::remove_file(&partial);
             return Err(ModelError::Checksum {
@@ -133,8 +141,20 @@ impl ModelStore {
     }
 }
 
+/// Time to reach the host, and for the whole transfer: the larger file is
+/// 26 MB, so ten minutes covers a slow connection without letting a
+/// stalled one hang the first run forever.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
+const TRANSFER_TIMEOUT: Duration = Duration::from_secs(600);
+
 fn download(url: &'static str, target: &Path) -> Result<(), ModelError> {
-    let response = ureq::get(url)
+    let agent = ureq::Agent::config_builder()
+        .timeout_connect(Some(CONNECT_TIMEOUT))
+        .timeout_global(Some(TRANSFER_TIMEOUT))
+        .build()
+        .new_agent();
+    let response = agent
+        .get(url)
         .call()
         .map_err(|source| ModelError::Download {
             url,
@@ -213,10 +233,12 @@ mod tests {
             licence: "",
         };
         // The stale file fails its checksum, so the store tries the URL,
-        // which is unreachable.
+        // which is unreachable; no partial file stays behind.
         assert!(matches!(
             store.ensure(&asset),
             Err(ModelError::Download { .. })
         ));
+        assert!(!dir.path().join("x.onnx.part").exists());
+        assert!(!dir.path().join("x.bin.part").exists());
     }
 }
