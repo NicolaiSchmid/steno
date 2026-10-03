@@ -156,7 +156,9 @@ pub enum HostError {
 /// awaited on a scoped helper thread instead, so the call blocks like every
 /// other host call and never panics. The secret store is the only boundary
 /// awaited this way, a handful of times per Save. The runtime has its timer
-/// and I/O drivers, so a store may time out or talk to a socket.
+/// and I/O drivers, so a store may time out or talk to a socket. Build
+/// timers inside the future: one made on the caller's runtime is driven by
+/// the runtime this call blocks.
 pub(crate) fn block_on<F>(future: F) -> F::Output
 where
     F: std::future::Future + Send,
