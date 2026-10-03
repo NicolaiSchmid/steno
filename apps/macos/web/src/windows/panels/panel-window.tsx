@@ -5,7 +5,7 @@ import { RecordingBubble } from "./recording-bubble";
 /**
  * The floating panels' routes, served to the Tauri shell's two panel
  * webviews (`apps/desktop/src-tauri/src/panels.rs`): `#/panel/bubble` and
- * `#/panel/prompt?app=<name>&seconds=<n>&raised=<serial>`. The Swift app
+ * `#/panel/prompt?app=<name>&seconds=<n>&raised=<n>`. The Swift app
  * draws these two surfaces in SwiftUI and never loads the routes. The page
  * is the pill alone on a transparent canvas, pinned to the top-left
  * corner, so the window the shell sizes from the pill's report shows

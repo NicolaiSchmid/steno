@@ -8,7 +8,7 @@ import { type PanelShell, panelShell, useReportSize } from "./panel-shell";
 
 /**
  * The detection prompt
- * (`#/panel/prompt?app=<name>&seconds=<n>&raised=<serial>`): the Swift
+ * (`#/panel/prompt?app=<name>&seconds=<n>&raised=<n>`): the Swift
  * `DetectionPromptView` in the pill language. "<App> opened the
  * microphone", one line under it, one primary Record button, an X, and the
  * draining hairline along the bottom. No number: nothing is at stake when
