@@ -5,9 +5,10 @@
 //! and compared byte for byte with the file.
 //!
 //! Where a fixture cannot be reproduced from any store or service state,
-//! because `BridgeSamples.swift` wrote a hand-picked value the view models
-//! never compute, the difference is listed as a [`Deviation`] on the
-//! fixture: a JSON pointer, the value the host produces instead, and why.
+//! because `Sources/StenoBridge/BridgeSamples.swift` wrote a hand-picked
+//! value the view models never compute, the difference is listed as a
+//! [`Deviation`] on the fixture: a JSON pointer, the value the host
+//! produces instead, and why.
 //! The test applies the deviations to the fixture and then demands byte
 //! equality, so everything not listed is proven equal, and the table the
 //! test prints is the PR's parity table.

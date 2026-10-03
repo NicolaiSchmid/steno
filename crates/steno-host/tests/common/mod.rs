@@ -1,7 +1,8 @@
-//! What the tests without a shell share, after `BridgeTestSupport.swift` and
-//! `TestSupport.swift`: a host over a temporary database and the fakes, a
-//! sink that records what the host publishes, the sample meeting the
-//! fixtures describe, and the request shapes.
+//! What the tests without a shell share, after
+//! `apps/macos/StenoTests/BridgeTestSupport.swift` and
+//! `apps/macos/StenoTests/TestSupport.swift`: a host over a temporary
+//! database and the fakes, a sink that records what the host publishes,
+//! the sample meeting the fixtures describe, and the request shapes.
 
 #![allow(dead_code, clippy::too_many_arguments, clippy::too_many_lines)]
 
@@ -282,7 +283,8 @@ pub fn within_five_seconds<R: Send + 'static>(
         .unwrap_or_else(|_| panic!("{what} did not return within five seconds"))
 }
 
-// The sample meeting the bridge fixtures describe (`BridgeSamples.swift`),
+// The sample meeting the bridge fixtures describe
+// (`Sources/StenoBridge/BridgeSamples.swift`),
 // as rows the pipeline would have left: three persons, the ready meeting
 // with its asset, four speakers, three turns, two tasks and a decision, an
 // in-person meeting without a summary and a failed call.
