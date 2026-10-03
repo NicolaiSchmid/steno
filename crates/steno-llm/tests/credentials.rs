@@ -52,6 +52,20 @@ async fn reads_the_file_the_way_the_cli_writes_it() {
 }
 
 #[tokio::test]
+async fn the_debug_form_redacts_both_tokens_and_the_account_id() {
+    let home = CodexHome::new().await;
+    home.write(AuthFile::default());
+    let credentials = home.store().stored().unwrap();
+    let debug = format!("{credentials:?}");
+    for secret in credentials.secrets() {
+        assert!(!debug.contains(&secret), "{debug}");
+    }
+    assert!(debug.contains("[redacted]"));
+    assert!(debug.contains("nicolai@example.com"), "{debug}");
+    assert!(debug.contains("plus"), "{debug}");
+}
+
+#[tokio::test]
 async fn account_id_falls_back_to_the_id_token_claim() {
     let home = CodexHome::new().await;
     home.write(AuthFile {

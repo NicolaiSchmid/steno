@@ -354,11 +354,22 @@ impl CodexResponsesClient {
         if let Ok(value) = purpose.parse() {
             headers.insert("X-Steno-Purpose", value);
         }
-        if let Ok(value) = format!("Bearer {}", credentials.access_token).parse() {
-            headers.insert(reqwest::header::AUTHORIZATION, value);
-        }
-        if let Ok(value) = credentials.account_id.parse() {
-            headers.insert("ChatGPT-Account-ID", value);
+        for (name, text) in [
+            (
+                reqwest::header::AUTHORIZATION,
+                format!("Bearer {}", credentials.access_token),
+            ),
+            (
+                reqwest::header::HeaderName::from_static("chatgpt-account-id"),
+                credentials.account_id.clone(),
+            ),
+        ] {
+            if let Ok(mut value) = reqwest::header::HeaderValue::from_str(&text) {
+                // Sensitive: the `Debug` form of the headers and of any
+                // request built from them prints `Sensitive`, not the token.
+                value.set_sensitive(true);
+                headers.insert(name, value);
+            }
         }
         if let Ok(value) = self.session_id.parse() {
             headers.insert("session-id", value);
@@ -578,5 +589,42 @@ impl LlmClient for CodexResponsesClient {
 
     async fn probe(&self) -> BoundaryResult<EndpointProbe> {
         self.probe_llm().await.map_err(CodexError::boxed)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use super::*;
+
+    #[test]
+    fn the_token_and_account_headers_are_sensitive() {
+        let client = CodexResponsesClient::new(
+            LlmEndpoint::codex("m", 32_000),
+            Arc::new(CodexCredentialStore::new("/nonexistent")),
+        );
+        let credentials = CodexCredentials {
+            access_token: "at-unit-secret".to_owned(),
+            refresh_token: "rt-unit-secret".to_owned(),
+            account_id: "acct-unit-secret".to_owned(),
+            email: None,
+            plan_type: None,
+            expires_at: None,
+            last_refresh: None,
+        };
+        let headers = client.headers("test", &credentials);
+        assert_eq!(
+            headers[reqwest::header::AUTHORIZATION].to_str().unwrap(),
+            "Bearer at-unit-secret"
+        );
+        assert_eq!(
+            headers["chatgpt-account-id"].to_str().unwrap(),
+            "acct-unit-secret"
+        );
+        let debug = format!("{headers:?}");
+        for secret in credentials.secrets() {
+            assert!(!debug.contains(&secret), "{debug}");
+        }
     }
 }

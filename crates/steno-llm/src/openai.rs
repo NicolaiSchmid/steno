@@ -2,6 +2,7 @@
 //! Swift: `Sources/StenoLLM/OpenAICompatibleClient.swift`.
 
 use std::collections::BTreeSet;
+use std::fmt;
 use std::sync::{Arc, Mutex, PoisonError};
 
 use steno_core::{
@@ -24,7 +25,8 @@ use crate::{
 /// The endpoint [`LlmClient`]: `POST {base}/chat/completions` with Bearer
 /// auth, a per-attempt timeout and exponential retries on the injected
 /// clock, structured output mode fallback remembered per endpoint, and the
-/// API key redacted from every error. Text only ever leaves through here or
+/// API key redacted from every error and from the `Debug` form. Text only
+/// ever leaves through here or
 /// [`CodexResponsesClient`](crate::CodexResponsesClient).
 pub struct OpenAiCompatibleClient {
     endpoint: LlmEndpoint,
@@ -45,6 +47,17 @@ struct State {
     /// models), `temperature` is left out (they accept only the default).
     /// No model-name sniffing.
     rejected_parameters: BTreeSet<String>,
+}
+
+impl fmt::Debug for OpenAiCompatibleClient {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("OpenAiCompatibleClient")
+            .field("endpoint", &self.endpoint)
+            .field("api_key", &self.api_key.as_ref().map(|_| "[redacted]"))
+            .field("retry", &self.retry)
+            .field("state", &self.state())
+            .finish_non_exhaustive()
+    }
 }
 
 impl OpenAiCompatibleClient {
@@ -293,8 +306,11 @@ impl OpenAiCompatibleClient {
             headers.insert("X-Steno-Purpose", value);
         }
         if let Some(key) = &self.api_key
-            && let Ok(value) = format!("Bearer {key}").parse()
+            && let Ok(mut value) = reqwest::header::HeaderValue::from_str(&format!("Bearer {key}"))
         {
+            // Sensitive: the `Debug` form of the headers and of any request
+            // built from them prints `Sensitive`, not the key.
+            value.set_sensitive(true);
             headers.insert(reqwest::header::AUTHORIZATION, value);
         }
         headers
@@ -433,5 +449,41 @@ impl LlmClient for OpenAiCompatibleClient {
 
     async fn probe(&self) -> BoundaryResult<EndpointProbe> {
         Ok(self.probe_llm().await?)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use url::Url;
+
+    use super::*;
+
+    fn client() -> OpenAiCompatibleClient {
+        let endpoint = LlmEndpoint::new(Url::parse("http://127.0.0.1:9/v1").unwrap(), "m");
+        OpenAiCompatibleClient::new(endpoint, Some("sk-unit-secret"))
+    }
+
+    #[test]
+    fn the_authorization_header_is_sensitive() {
+        let client = client();
+        let headers = client.headers("test");
+        assert_eq!(
+            headers[reqwest::header::AUTHORIZATION].to_str().unwrap(),
+            "Bearer sk-unit-secret"
+        );
+        let debug = format!("{headers:?}");
+        assert!(!debug.contains("sk-unit-secret"), "{debug}");
+        assert!(debug.contains("Sensitive"), "{debug}");
+    }
+
+    #[test]
+    fn the_debug_form_redacts_the_api_key() {
+        let debug = format!("{:?}", client());
+        assert!(!debug.contains("sk-unit-secret"), "{debug}");
+        assert!(debug.contains("[redacted]"), "{debug}");
+        assert!(
+            debug.contains("127.0.0.1"),
+            "the endpoint stays visible: {debug}"
+        );
     }
 }

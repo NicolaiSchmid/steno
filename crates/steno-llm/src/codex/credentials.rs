@@ -15,8 +15,9 @@ use super::jwt::JwtClaims;
 use crate::transport;
 
 /// The ChatGPT sign-in the Codex CLI stored, as far as Steno reads it.
-/// Never persisted anywhere but the CLI's own file; never logged.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// Never persisted anywhere but the CLI's own file; never logged: the
+/// `Debug` form redacts both tokens and the account id.
+#[derive(Clone, PartialEq, Eq)]
 pub struct CodexCredentials {
     pub access_token: String,
     pub refresh_token: String,
@@ -29,6 +30,20 @@ pub struct CodexCredentials {
     pub expires_at: Option<DateTime<Utc>>,
     /// The file's `last_refresh`; `None` for a file the CLI never refreshed.
     pub last_refresh: Option<DateTime<Utc>>,
+}
+
+impl fmt::Debug for CodexCredentials {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("CodexCredentials")
+            .field("access_token", &"[redacted]")
+            .field("refresh_token", &"[redacted]")
+            .field("account_id", &"[redacted]")
+            .field("email", &self.email)
+            .field("plan_type", &self.plan_type)
+            .field("expires_at", &self.expires_at)
+            .field("last_refresh", &self.last_refresh)
+            .finish()
+    }
 }
 
 impl CodexCredentials {
