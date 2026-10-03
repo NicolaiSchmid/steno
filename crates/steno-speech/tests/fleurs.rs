@@ -20,21 +20,11 @@ mod common;
 use std::time::Instant;
 
 use steno_speech::{
-    ModelStore, OnnxBackend, OnnxOptions, OnnxSpeechEngine, PipelineConfig, Transcriber, VadConfig,
+    ModelStore, OnnxBackend, OnnxOptions, OnnxSpeechEngine, PipelineConfig, SAMPLE_RATE, VadConfig,
 };
 
 const SPIKE_F_MEAN_WER: f64 = 0.053;
 const TOLERANCE: f64 = 0.005;
-
-fn transcriber(models: &std::path::Path) -> Transcriber<OnnxBackend> {
-    OnnxSpeechEngine::open_transcriber(
-        &ModelStore::new(models),
-        &OnnxOptions::default(),
-        PipelineConfig::default(),
-        VadConfig::default(),
-    )
-    .expect("open the export and Silero")
-}
 
 #[test]
 fn the_export_splits_into_8193_pieces_and_five_duration_bins() {
@@ -70,7 +60,13 @@ fn fleurs_cat_mean_wer_is_within_half_a_point_of_spike_f() {
     let Some(fleurs) = common::fleurs_dir() else {
         return common::skip("STENO_FLEURS_DIR");
     };
-    let mut transcriber = transcriber(&models);
+    let mut transcriber = OnnxSpeechEngine::open_transcriber(
+        &ModelStore::new(models),
+        &OnnxOptions::default(),
+        PipelineConfig::default(),
+        VadConfig::default(),
+    )
+    .expect("open the export and Silero");
     let mut files: Vec<_> = std::fs::read_dir(fleurs.join("cat"))
         .unwrap()
         .filter_map(Result::ok)
@@ -91,7 +87,7 @@ fn fleurs_cat_mean_wer_is_within_half_a_point_of_spike_f() {
         let wall = started.elapsed().as_secs_f64();
         let hypothesis = transcript.text();
         let score = common::score(&reference, &hypothesis);
-        let audio_seconds = samples.len() as f64 / 16_000.0;
+        let audio_seconds = samples.len() as f64 / SAMPLE_RATE as f64;
         println!(
             "| {} | {} | {} | {:.1}% | {}/{}/{} | {} | {}/{} | {:.1} |",
             path.file_stem().unwrap().to_string_lossy(),

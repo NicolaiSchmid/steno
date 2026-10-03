@@ -25,7 +25,8 @@ use std::time::Instant;
 
 use common::read_wav;
 use steno_speech::{
-    DecodeStats, ModelStore, OnnxOptions, OnnxSpeechEngine, PipelineConfig, VadConfig,
+    DecodeStats, ModelStore, OnnxOptions, OnnxSpeechEngine, PipelineConfig, SAMPLE_RATE, VadConfig,
+    sample_count,
 };
 
 fn main() {
@@ -58,14 +59,12 @@ fn main() {
 
     for file in &files {
         let samples = read_wav(file);
-        let seconds = samples.len() as f64 / 16_000.0;
+        let seconds = samples.len() as f64 / SAMPLE_RATE as f64;
         let started = Instant::now();
         if let Some((start, end)) = range {
-            let range = ((start * 16_000.0) as usize).min(samples.len())
-                ..((end * 16_000.0) as usize).min(samples.len());
             let mut stats = DecodeStats::default();
             let tokens = transcriber
-                .decode_range(&samples, range.clone(), &mut stats)
+                .decode_range(&samples, sample_count(start)..sample_count(end), &mut stats)
                 .unwrap_or_else(|e| panic!("{e}"));
             let text = transcriber.render(&tokens);
             println!(
