@@ -28,8 +28,9 @@ use thiserror::Error;
 pub const PROTOCOL_VERSION: u32 = 1;
 
 /// The longest header either side accepts. A transcript of a long meeting
-/// is a few megabytes of JSON.
-pub const MAX_HEADER_BYTES: u32 = 256 << 20;
+/// is a few megabytes of JSON, of 24 hours (see [`MAX_SAMPLES`]) under
+/// 20 MB with every word timed.
+pub const MAX_HEADER_BYTES: u32 = 64 << 20;
 
 /// The most samples one request may carry: 24 hours of 16 kHz audio. A
 /// sanity bound on the header, far above any meeting; the memory ceiling
@@ -80,7 +81,7 @@ impl Request {
     #[must_use]
     pub fn payload_bytes(&self) -> u64 {
         match self {
-            Request::Transcribe { sample_count, .. } => sample_count * 4,
+            Request::Transcribe { sample_count, .. } => sample_count.saturating_mul(4),
             _ => 0,
         }
     }
@@ -153,6 +154,10 @@ pub enum FrameError {
     /// [`MAX_SAMPLES`].
     #[error("a frame of {0} bytes is over the limit")]
     TooLarge(u64),
+    /// A header that does not start with `{`, so it cannot be a JSON
+    /// object: binary garbage that only looked like a length prefix.
+    #[error("not a protocol message: the header starts with byte {0:#04x}")]
+    NotAHeader(u8),
     #[error("not a protocol message: {0}")]
     Json(#[from] serde_json::Error),
 }
@@ -194,22 +199,52 @@ pub fn read_header<R: Read, T: DeserializeOwned>(input: &mut R) -> Result<Option
     if length > MAX_HEADER_BYTES {
         return Err(FrameError::TooLarge(u64::from(length)));
     }
-    let mut header = vec![0u8; length as usize];
-    read_exact(input, &mut header)?;
+    let mut first = [0u8; 1];
+    if length > 0 {
+        read_exact(input, &mut first)?;
+    }
+    if first[0] != b'{' {
+        return Err(FrameError::NotAHeader(first[0]));
+    }
+    // Grown as the bytes arrive, so a length prefix alone allocates little.
+    let mut header = Vec::with_capacity((length as usize).min(INITIAL_CAPACITY));
+    header.push(b'{');
+    input
+        .by_ref()
+        .take(u64::from(length) - 1)
+        .read_to_end(&mut header)?;
+    if header.len() < length as usize {
+        return Err(FrameError::Truncated);
+    }
     Ok(Some(serde_json::from_slice(&header)?))
 }
+
+/// What a reader reserves before the bytes it was promised arrive, in
+/// bytes or samples: a frame's prefix may claim far more than ever comes.
+const INITIAL_CAPACITY: usize = 1 << 16;
 
 /// Reads the payload of a transcribe request: `sample_count` samples.
 pub fn read_samples<R: Read>(input: &mut R, sample_count: u64) -> Result<Vec<f32>, FrameError> {
     if sample_count > MAX_SAMPLES {
-        return Err(FrameError::TooLarge(sample_count * 4));
+        return Err(FrameError::TooLarge(sample_count.saturating_mul(4)));
     }
-    let mut samples = Vec::with_capacity(sample_count as usize);
+    // At most 24 hours of samples, so the count and its bytes fit a usize.
+    let total = sample_count as usize;
+    let mut samples = Vec::with_capacity(total.min(INITIAL_CAPACITY));
     let mut buffer = vec![0u8; 1 << 16];
-    let mut remaining = sample_count as usize * 4;
+    let mut remaining = total * 4;
     while remaining > 0 {
         let chunk = &mut buffer[..remaining.min(1 << 16)];
         read_exact(input, chunk)?;
+        if samples.capacity() - samples.len() < chunk.len() / 4 {
+            // Doubles as the bytes arrive, never past the declared count.
+            samples.reserve_exact(
+                samples
+                    .capacity()
+                    .max(chunk.len() / 4)
+                    .min(total - samples.len()),
+            );
+        }
         samples.extend(
             chunk
                 .as_chunks::<4>()
@@ -225,7 +260,11 @@ pub fn read_samples<R: Read>(input: &mut R, sample_count: u64) -> Result<Vec<f32
 /// `samples` as the payload of a transcribe request.
 #[must_use]
 pub fn encode_samples(samples: &[f32]) -> Vec<u8> {
-    samples.iter().flat_map(|s| s.to_le_bytes()).collect()
+    let mut payload = Vec::with_capacity(samples.len() * 4);
+    for sample in samples {
+        payload.extend_from_slice(&sample.to_le_bytes());
+    }
+    payload
 }
 
 fn read_exact<R: Read>(input: &mut R, buffer: &mut [u8]) -> Result<(), FrameError> {
@@ -391,6 +430,12 @@ mod tests {
         garbage.extend_from_slice(b"nope");
         assert!(matches!(
             read_header::<_, Request>(&mut garbage.as_slice()),
+            Err(FrameError::NotAHeader(b'n'))
+        ));
+        let mut braces = 3u32.to_le_bytes().to_vec();
+        braces.extend_from_slice(b"{x}");
+        assert!(matches!(
+            read_header::<_, Request>(&mut braces.as_slice()),
             Err(FrameError::Json(_))
         ));
         let mut unknown = Vec::new();
@@ -404,5 +449,66 @@ mod tests {
             read_header::<_, Request>(&mut unknown.as_slice()),
             Err(FrameError::Json(_))
         ));
+    }
+
+    #[test]
+    fn binary_garbage_is_refused_before_its_claimed_length_is_awaited() {
+        // A real header is a JSON object; anything else fails at its first
+        // byte, whatever length the four bytes before it claimed.
+        for (length, bytes) in [
+            (MAX_HEADER_BYTES, &b"\x00\x01binary"[..]),
+            (2, b"[]"),
+            (1, b" "),
+            (0, b""),
+        ] {
+            let mut wire = length.to_le_bytes().to_vec();
+            wire.extend_from_slice(bytes);
+            let first = bytes.first().copied().unwrap_or(0);
+            assert!(
+                matches!(
+                    read_header::<_, Request>(&mut wire.as_slice()),
+                    Err(FrameError::NotAHeader(byte)) if byte == first
+                ),
+                "{length}"
+            );
+        }
+        // A header that starts right but stops short is cut, not awaited.
+        let mut cut = MAX_HEADER_BYTES.to_le_bytes().to_vec();
+        cut.extend_from_slice(br#"{"id":1"#);
+        assert!(matches!(
+            read_header::<_, Request>(&mut cut.as_slice()),
+            Err(FrameError::Truncated)
+        ));
+        assert!(MAX_HEADER_BYTES <= 64 << 20);
+    }
+
+    #[test]
+    fn huge_sample_counts_neither_overflow_nor_panic() {
+        let request = Request::Transcribe {
+            id: 1,
+            sample_count: u64::MAX,
+            hint: None,
+        };
+        assert_eq!(request.payload_bytes(), u64::MAX);
+        assert!(matches!(
+            read_samples(&mut &[][..], u64::MAX),
+            Err(FrameError::TooLarge(u64::MAX))
+        ));
+        // The largest count allowed, with eight bytes behind it.
+        assert!(matches!(
+            read_samples(&mut &[0u8; 8][..], MAX_SAMPLES),
+            Err(FrameError::Truncated)
+        ));
+    }
+
+    #[test]
+    fn a_long_payload_arrives_whole_across_many_reads() {
+        // Past the initial capacity and the read buffer, at an odd length.
+        let samples: Vec<f32> = (0..200_003u32).map(|i| (i as f32).sin()).collect();
+        let payload = encode_samples(&samples);
+        assert_eq!(payload.len(), samples.len() * 4);
+        let read = read_samples(&mut payload.as_slice(), samples.len() as u64).unwrap();
+        assert_eq!(read, samples);
+        assert_eq!(read.capacity(), samples.len());
     }
 }

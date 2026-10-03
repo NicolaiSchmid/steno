@@ -62,7 +62,8 @@ steno_core::string_enum! {
         Hang = "hang",
         /// Allocates and touches memory without bound, then hangs.
         Allocate = "allocate",
-        /// Writes bytes that are not a frame, then hangs.
+        /// Writes bytes that are not a frame (a length prefix of 16 MiB,
+        /// then text), then hangs.
         Garbage = "garbage",
         /// Answers with an error and keeps running.
         Error = "error",
@@ -226,7 +227,9 @@ impl Engine for FakeEngine {
             }
             Some(Fault::Garbage) => {
                 let mut out = io::stdout().lock();
-                let _ = out.write_all(&[0xFF, 0xFF, 0xFF, 0x7F]);
+                // Under the header limit, so only the first byte after
+                // it can tell the parent this is no frame.
+                let _ = out.write_all(&(16u32 << 20).to_le_bytes());
                 let _ = out.write_all(b"this is not a frame");
                 let _ = out.flush();
                 drop(out);

@@ -250,14 +250,18 @@ async fn a_child_over_the_memory_ceiling_is_killed() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn garbage_on_stdout_is_a_protocol_violation() {
+    // The garbage claims a 16 MiB header; the parent refuses it at the
+    // first byte instead of waiting out the 30 s deadline for the rest.
     let (engine, _dir) = engine_with_fault("garbage", |_| {});
+    let started = Instant::now();
     assert_recovers(&engine, |error| {
         assert!(
-            matches!(error, SidecarError::Protocol(detail) if detail.contains("over the limit")),
+            matches!(error, SidecarError::Protocol(detail) if detail.contains("not a protocol message")),
             "{error}"
         );
     })
     .await;
+    assert!(started.elapsed() < Duration::from_secs(20));
 }
 
 #[tokio::test(flavor = "multi_thread")]

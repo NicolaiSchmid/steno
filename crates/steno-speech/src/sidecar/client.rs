@@ -159,12 +159,10 @@ impl SidecarProcess {
             const CREATE_NO_WINDOW: u32 = 0x0800_0000;
             command.creation_flags(CREATE_NO_WINDOW);
         }
-        let mut child = command
-            .spawn()
-            .map_err(|source| SidecarError::Spawn {
-                program: config.program.clone(),
-                source,
-            })?;
+        let mut child = command.spawn().map_err(|source| SidecarError::Spawn {
+            program: config.program.clone(),
+            source,
+        })?;
         let pid = child.id();
         let (Some(stdin), Some(stdout), Some(stderr)) =
             (child.stdin.take(), child.stdout.take(), child.stderr.take())
