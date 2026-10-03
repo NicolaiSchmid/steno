@@ -9,78 +9,33 @@
 
 use std::fmt;
 
-use serde::{Deserialize, Deserializer, Serialize};
+use serde::Deserialize;
 use serde_json::Value;
+pub use steno_bridge::BridgeError;
+use steno_bridge::{
+    BridgeEvent, BridgeTopic, BridgeWindow, OpenUrlParams, PermissionKindParams, SetBoolParams,
+    WindowParams,
+};
 use tauri::{AppHandle, Emitter, EventTarget, Manager, State, Url, WebviewWindow};
-use tauri_plugin_opener::OpenerExt;
-use uuid::Uuid;
 
 use crate::{
+    actions, autostart, dialogs,
     host::Host,
+    panels::{self, Panel},
+    permissions,
+    recording::{RecorderState, RecordingState},
     smoke::Smoke,
-    windows::{self, BridgeWindow},
+    tray, windows,
 };
 
 /// The event every snapshot travels on; the page listens for it scoped to
 /// its own window.
 pub const EVENT_NAME: &str = "steno:event";
 
-/// The contract's error codes the shell raises, spelled as the page reads
-/// them. The full set (`notFound` and `cancelled` as well) is the host's and
-/// comes with `steno-bridge`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub enum BridgeErrorCode {
-    UnknownMethod,
-    InvalidParams,
-    Failed,
-}
-
-impl BridgeErrorCode {
-    /// The raw value on the wire.
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::UnknownMethod => "unknownMethod",
-            Self::InvalidParams => "invalidParams",
-            Self::Failed => "failed",
-        }
-    }
-}
-
-impl fmt::Display for BridgeErrorCode {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.as_str())
-    }
-}
-
-/// A rejected command, serialised as the contract's error envelope; the
-/// transport turns it into the page's `BridgeError`.
-#[derive(Debug, Clone, Serialize, thiserror::Error)]
-#[error("{code}: {message}")]
-pub struct BridgeError {
-    pub code: BridgeErrorCode,
-    pub message: String,
-}
-
-impl BridgeError {
-    pub fn new(code: BridgeErrorCode, message: impl Into<String>) -> Self {
-        Self {
-            code,
-            message: message.into(),
-        }
-    }
-
-    pub fn unknown_method(message: impl Into<String>) -> Self {
-        Self::new(BridgeErrorCode::UnknownMethod, message)
-    }
-
-    pub fn invalid_params(message: impl Into<String>) -> Self {
-        Self::new(BridgeErrorCode::InvalidParams, message)
-    }
-
-    pub fn failed(message: impl Into<String>) -> Self {
-        Self::new(BridgeErrorCode::Failed, message)
-    }
+/// A shell-side failure (a window call, the opener, a plugin) as the
+/// contract's `failed`, for `map_err`.
+pub fn failed(error: impl fmt::Display) -> BridgeError {
+    BridgeError::failed(error.to_string())
 }
 
 /// `invalidParams` for a method whose params did not decode, named after
@@ -89,41 +44,56 @@ fn invalid_params_for(method: &str, error: impl fmt::Display) -> BridgeError {
     BridgeError::invalid_params(format!("{method}: {error}"))
 }
 
-/// The event envelope (`envelope.event.json`). `topic` becomes the
-/// `BridgeTopic` enum with `steno-bridge`.
-#[derive(Debug, Clone, Serialize)]
-struct BridgeEvent<'a> {
-    topic: &'a str,
-    payload: Value,
-}
-
 /// Publishes one topic's snapshot to one window, and to that window only;
 /// the smoke run counts what reaches main. An `onboarding` snapshot that
 /// says `finished` also closes the onboarding window: the page shows what
-/// the host says and the host ends the window.
+/// the host says and the host ends the window. A `recording` snapshot to
+/// the main window is also what the tray and the floating panels follow.
 ///
-/// Swift: `OnboardingWindow.swift` (`onChange(of: finished)`).
+/// Swift: `OnboardingWindow.swift` (`onChange(of: finished)`),
+/// `FloatingPanelPresenter.observe` and `MenuBarLabel`.
 pub fn emit(window: &WebviewWindow, topic: &str, payload: Value) -> Result<(), BridgeError> {
+    let topic: BridgeTopic = topic.parse().map_err(failed)?;
     let finished = finishes_onboarding(topic, &payload);
+    let recording = recording_state_for_shell(window.label(), topic, &payload);
+    window
+        .state::<Smoke>()
+        .note_snapshot(window.label(), topic, &payload);
     window
         .emit_to(
             EventTarget::webview_window(window.label()),
             EVENT_NAME,
-            BridgeEvent { topic, payload },
+            BridgeEvent::new(topic, payload),
         )
-        .map_err(|error| BridgeError::failed(error.to_string()))?;
-    window.state::<Smoke>().note_snapshot(window.label());
+        .map_err(failed)?;
     if finished {
-        windows::close(window.app_handle(), BridgeWindow::Onboarding)
-            .map_err(|error| BridgeError::failed(error.to_string()))?;
+        windows::close(window.app_handle(), BridgeWindow::Onboarding).map_err(failed)?;
+    }
+    if let Some(state) = recording {
+        tray::note_recording(window.app_handle(), state);
+        panels::note_recording(window.app_handle(), state);
     }
     Ok(())
 }
 
+/// The recorder state the shell follows: the `recording` topic as published
+/// to the main window (the window the host drives the recorder through);
+/// the same topic reaching another window, or any other topic, moves
+/// nothing.
+pub fn recording_state_for_shell(
+    label: &str,
+    topic: BridgeTopic,
+    payload: &Value,
+) -> Option<RecordingState> {
+    (label == BridgeWindow::Main.as_str() && topic == BridgeTopic::Recording)
+        .then(|| RecordingState::from_snapshot(payload))
+        .flatten()
+}
+
 /// Whether a snapshot ends onboarding: the `onboarding` topic with
 /// `finished` true.
-pub fn finishes_onboarding(topic: &str, payload: &Value) -> bool {
-    topic == "onboarding" && payload["finished"] == Value::Bool(true)
+pub fn finishes_onboarding(topic: BridgeTopic, payload: &Value) -> bool {
+    topic == BridgeTopic::Onboarding && payload["finished"] == Value::Bool(true)
 }
 
 /// The URLs a page may open: `https:` and `mailto:` links, so a page cannot
@@ -139,96 +109,76 @@ pub fn openable_url(text: &str) -> Result<Url, BridgeError> {
         })
 }
 
-/// `settingsSection` in `contract.ts`: the six Settings sections, as the
-/// route's `section=` and the `app` snapshot's `requestedSettingsSection`
-/// spell them.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum SettingsSection {
-    General,
-    Recording,
-    Transcription,
-    Summaries,
-    Export,
-    Iphone,
-}
-
-impl SettingsSection {
-    /// The raw value on the wire.
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::General => "general",
-            Self::Recording => "recording",
-            Self::Transcription => "transcription",
-            Self::Summaries => "summaries",
-            Self::Export => "export",
-            Self::Iphone => "iphone",
-        }
+steno_core::string_enum! {
+    /// What a panel asks of the shell through `panel_call` (`PanelAction`
+    /// in `panel-shell.ts`).
+    pub enum PanelAction {
+        Resize = "resize",
+        DismissPrompt = "dismissPrompt",
     }
 }
 
-impl fmt::Display for SettingsSection {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.as_str())
-    }
+/// The action a panel named, or `unknownMethod`, as the bridge answers a
+/// method it does not know.
+pub fn panel_action(text: &str) -> Result<PanelAction, BridgeError> {
+    text.parse()
+        .map_err(|_| BridgeError::unknown_method(format!("The panels do not answer {text}.")))
 }
 
-/// `params.window.json`, typed as `windowParams` in `contract.ts`: a window,
-/// an optional section for Settings and an optional meeting for main. A
-/// section outside the six or a meeting ID that is not a UUID is
-/// `invalidParams`, so what reaches a route or a snapshot needs no escaping.
-/// Unknown keys are ignored, as the Swift `Decodable` and `steno-bridge` do.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
-pub struct WindowParams {
-    pub window: BridgeWindow,
-    #[serde(default)]
-    pub section: Option<SettingsSection>,
-    #[serde(
-        rename = "meetingID",
-        default,
-        deserialize_with = "deserialize_meeting_id"
-    )]
-    pub meeting_id: Option<Uuid>,
-}
-
-/// `meetingID` as `UUID(uuidString:)` reads it: the hyphenated 36-character
-/// form only, either case, for the reason given at
-/// `steno_core::json::parse_uuid`. The core has this codec as
-/// `steno_core::json::uuid_text_opt`; the shell switches to it in WP6 of
-/// `.plans/2026-10-02-rust-core-and-tauri-shell.md`. The core's message is
-/// lower-case (`not a UUID: ...`); the test below follows when the shell
-/// switches.
-fn deserialize_meeting_id<'de, D: Deserializer<'de>>(
-    deserializer: D,
-) -> Result<Option<Uuid>, D::Error> {
-    let Some(string) = Option::<String>::deserialize(deserializer)? else {
-        return Ok(None);
-    };
-    (string.len() == 36)
-        .then(|| Uuid::try_parse(&string).ok())
-        .flatten()
-        .map(Some)
-        .ok_or_else(|| serde::de::Error::custom(format!("Not a UUID: {string}")))
-}
-
-/// A UUID as the Swift host writes it (`UUID.uuidString`, upper case), so a
-/// `requestedMeetingID` matches the list's ids by string. Its core
-/// counterpart is `steno_core::json::uuid_string`, which the shell takes in
-/// WP6.
-pub fn uuid_text(id: &Uuid) -> String {
-    id.hyphenated()
-        .encode_upper(&mut Uuid::encode_buffer())
-        .to_string()
-}
-
-/// `params.system.openURL.json`.
+/// `panel_call("resize")`: the page's measured size in device pixels (CSS
+/// pixels times `devicePixelRatio`, `deviceSize` in `panel-shell.ts`).
+/// Exactly the two fields, as an object.
 #[derive(Debug, Deserialize)]
-struct OpenUrlParams {
-    url: String,
+#[serde(deny_unknown_fields)]
+struct ResizeParams {
+    width: f64,
+    height: f64,
+}
+
+impl ResizeParams {
+    /// The size in logical points for a window of `scale`. CSS pixels are
+    /// not points everywhere: `WebKitGTK` takes its pixel ratio from the X
+    /// resolution (1.25 at 120 dpi) while the window's scale stays 1.
+    fn logical(&self, scale: f64) -> (f64, f64) {
+        (self.width / scale, self.height / scale)
+    }
+}
+
+/// `panel_call("dismissPrompt")`: the number of the prompt whose X was
+/// clicked (`raised` in its route); `null` params or no `raised` for a
+/// prompt shown unnumbered.
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DismissParams {
+    raised: Option<u64>,
 }
 
 fn parse<T: for<'de> Deserialize<'de>>(method: &str, params: Value) -> Result<T, BridgeError> {
     serde_json::from_value(params).map_err(|error| invalid_params_for(method, error))
+}
+
+/// A panel's params: a JSON object (serde would also read a struct from
+/// an array, `[300, 40]`), with no field the action does not name.
+fn panel_params<T: for<'de> Deserialize<'de>>(
+    action: PanelAction,
+    params: Value,
+) -> Result<T, BridgeError> {
+    if !params.is_object() {
+        return Err(invalid_params_for(
+            action.as_str(),
+            "the params must be an object",
+        ));
+    }
+    parse(action.as_str(), params)
+}
+
+/// The X's params: none (`null`) dismisses whatever shows, as `{}` does.
+fn dismiss_params(params: Value) -> Result<DismissParams, BridgeError> {
+    if params.is_null() {
+        Ok(DismissParams::default())
+    } else {
+        panel_params(PanelAction::DismissPrompt, params)
+    }
 }
 
 /// Which window a `window.close` from `caller` may close: the onboarding
@@ -273,6 +223,11 @@ pub async fn bridge_call(
         "page.ready" => {
             smoke.note_ready(window.label());
             host.page_ready(&window)?;
+            // What was asked of the window before its page could hear it
+            // (a deep link at launch) goes out after the first snapshots.
+            if let Some(owed) = app.state::<windows::Pages>().ready(window.label()) {
+                host.publish_request(&window, owed.field.as_str(), &owed.value)?;
+            }
             Ok(Value::Null)
         }
         "window.open" => {
@@ -283,23 +238,107 @@ pub async fn bridge_call(
         "window.close" => {
             let request: WindowParams = parse(&method, params)?;
             let target = close_target(window.label(), &request)?;
-            windows::close(&app, target).map_err(|error| BridgeError::failed(error.to_string()))?;
+            windows::close(&app, target).map_err(failed)?;
             Ok(Value::Null)
         }
         "system.openURL" => {
             let request: OpenUrlParams = parse(&method, params)?;
             let url = openable_url(&request.url)?;
-            app.opener()
-                .open_url(url, None::<&str>)
-                .map_err(|error| BridgeError::failed(error.to_string()))?;
+            dialogs::open_url(&app, url.as_str())?;
             Ok(Value::Null)
         }
-        _ => host.call(&window, &method, params),
+        // The OS plumbing the Swift host did inside its view models and
+        // the shell does here: settings panes, the login item, the update
+        // check and the folder panels. See each module for the seam
+        // towards the host.
+        "system.openSystemSettings" => {
+            let request: PermissionKindParams = parse(&method, params)?;
+            if let Some(url) = permissions::system_settings_url(request.kind) {
+                dialogs::open_url(&app, &url)?;
+            }
+            Ok(Value::Null)
+        }
+        "settings.general.openLoginItems" => {
+            if let Some(url) = autostart::system_settings_url() {
+                dialogs::open_url(&app, url)?;
+            }
+            Ok(Value::Null)
+        }
+        // The host hears of it too, so its General snapshot follows.
+        "settings.general.setLaunchAtLogin" => {
+            let request: SetBoolParams = parse(&method, params)?;
+            actions::set_launch_at_login(&app, &window, request.value)?;
+            Ok(Value::Null)
+        }
+        "updates.check" => {
+            actions::check_for_updates(&app);
+            Ok(Value::Null)
+        }
+        _ => match dialogs::FolderChooser::for_method(&method) {
+            Some(chooser) => {
+                let chosen = dialogs::choose_folder(&window, chooser).await?;
+                if let Some(path) = &chosen {
+                    host.call(&window, &method, dialogs::chosen_path_reply(Some(path)))?;
+                }
+                Ok(dialogs::chosen_path_reply(chosen.as_deref()))
+            }
+            None => host.call(&window, &method, params),
+        },
     }
+}
+
+/// The panels' own command, beside the bridge: the page reports its
+/// measured size (`resize`) and the prompt's X dismisses the prompt
+/// (`dismissPrompt`). Only a panel window may call it; the three bridge
+/// windows get `unknownMethod`, as they would for a method they do not
+/// answer.
+///
+/// A synchronous command: Tauri runs it on the main thread, in the order
+/// the page sent its calls, so a burst of size reports applies in order
+/// and the last one sent is the size the window keeps. Nothing in it waits
+/// on the main thread (there the window getters answer at once), and it
+/// builds no window, which would deadlock a synchronous command on
+/// Windows: a dismissal's refresh runs later (`panels::dismiss_prompt`).
+// Tauri hands a command its arguments by value.
+#[allow(clippy::needless_pass_by_value)]
+#[tauri::command]
+pub fn panel_call(
+    app: AppHandle,
+    window: WebviewWindow,
+    action: String,
+    params: Option<Value>,
+) -> Result<Value, BridgeError> {
+    let panel = panel_caller(window.label())?;
+    let params = params.unwrap_or(Value::Null);
+    match panel_action(&action)? {
+        PanelAction::Resize => {
+            let report: ResizeParams = panel_params(PanelAction::Resize, params)?;
+            let size = report.logical(window.scale_factor().map_err(failed)?);
+            app.state::<Smoke>().note_panel_size(panel, size);
+            panels::resize(&app, panel, size)?;
+            Ok(Value::Null)
+        }
+        PanelAction::DismissPrompt => {
+            let request = dismiss_params(params)?;
+            panels::dismiss_prompt(&app, request.raised);
+            Ok(Value::Null)
+        }
+    }
+}
+
+/// Which panel is calling, or `unknownMethod` for any other window.
+pub fn panel_caller(label: &str) -> Result<Panel, BridgeError> {
+    Panel::from_label(label).ok_or_else(|| {
+        BridgeError::unknown_method(format!("The {label} window does not answer panel_call."))
+    })
 }
 
 #[cfg(test)]
 mod tests {
+    use ::uuid::Uuid;
+    use steno_bridge::{BridgeErrorCode, SettingsSection};
+    use steno_core::json::uuid_string;
+
     use super::*;
 
     const REFUSAL: &str = "Only https: and mailto: links open from the page.";
@@ -348,8 +387,7 @@ mod tests {
         let json = serde_json::to_value(&error).unwrap();
         assert_eq!(json["code"], "invalidParams");
         assert_eq!(json["message"], "window.open: missing field `window`");
-        // `Display` spells the code as the wire does, so this holds once the
-        // types come from `steno-bridge`.
+        // `Display` spells the code as the wire does.
         assert_eq!(
             error.to_string(),
             "invalidParams: window.open: missing field `window`"
@@ -374,16 +412,8 @@ mod tests {
         .unwrap();
         assert_eq!(main.window, BridgeWindow::Main);
         assert_eq!(
-            main.meeting_id.map(|id| uuid_text(&id)).as_deref(),
+            main.meeting_id.map(uuid_string).as_deref(),
             Some("00000000-0000-0000-0000-000000000001")
-        );
-        assert_eq!(
-            uuid_text(&Uuid::nil()),
-            "00000000-0000-0000-0000-000000000000"
-        );
-        assert_eq!(
-            uuid_text(&"6ba7b810-9dad-11d1-80b4-00c04fd430c8".parse().unwrap()),
-            "6BA7B810-9DAD-11D1-80B4-00C04FD430C8"
         );
     }
 
@@ -452,7 +482,7 @@ mod tests {
         )
         .unwrap_err();
         assert!(
-            braced.message.starts_with("window.open: Not a UUID: {0000"),
+            braced.message.starts_with("window.open: not a UUID: {0000"),
             "{}",
             braced.message
         );
@@ -481,16 +511,144 @@ mod tests {
     }
 
     #[test]
+    fn only_the_main_windows_recording_snapshot_moves_the_shell() {
+        let live: Value = serde_json::from_str(include_str!(
+            "../../../macos/web/fixtures/bridge/recording.live.json"
+        ))
+        .unwrap();
+        assert_eq!(
+            recording_state_for_shell("main", BridgeTopic::Recording, &live),
+            Some(RecordingState::Recording)
+        );
+        assert_eq!(
+            recording_state_for_shell("settings", BridgeTopic::Recording, &live),
+            None
+        );
+        assert_eq!(
+            recording_state_for_shell("main", BridgeTopic::Progress, &live),
+            None
+        );
+        assert_eq!(
+            recording_state_for_shell("main", BridgeTopic::Recording, &Value::Null),
+            None
+        );
+    }
+
+    #[test]
+    fn only_the_panels_call_panel_call() {
+        assert_eq!(panel_caller("bubble").unwrap(), Panel::Bubble);
+        assert_eq!(panel_caller("prompt").unwrap(), Panel::Prompt);
+        for label in ["main", "settings", "onboarding"] {
+            let error = panel_caller(label).unwrap_err();
+            assert_eq!(error.code, BridgeErrorCode::UnknownMethod, "{label}");
+            assert_eq!(
+                error.message,
+                format!("The {label} window does not answer panel_call.")
+            );
+        }
+    }
+
+    #[test]
+    fn the_shells_params_read_the_recorded_shapes() {
+        let flag: SetBoolParams = parse(
+            "settings.general.setLaunchAtLogin",
+            serde_json::from_str(include_str!(
+                "../../../macos/web/fixtures/bridge/params.bool.json"
+            ))
+            .unwrap(),
+        )
+        .unwrap();
+        assert!(matches!(flag.value, true | false));
+        let size: ResizeParams = parse(
+            "resize",
+            serde_json::json!({ "width": 244.5, "height": 40 }),
+        )
+        .unwrap();
+        assert_eq!((size.width, size.height), (244.5, 40.0));
+        assert_eq!(size.logical(1.0), (244.5, 40.0));
+        // Device pixels at a ratio of 1.25 (120 dpi) on a window of scale 1,
+        // and on a Retina window, where the page's ratio is the scale.
+        let large: ResizeParams = parse(
+            "resize",
+            serde_json::json!({ "width": 100.0, "height": 52.5 }),
+        )
+        .unwrap();
+        assert_eq!(large.logical(1.0), (100.0, 52.5));
+        assert_eq!(large.logical(2.0), (50.0, 26.25));
+        for (params, says) in [
+            (serde_json::json!({ "width": 1 }), "missing field `height`"),
+            (serde_json::json!([300, 40]), "the params must be an object"),
+            (
+                serde_json::json!({ "width": 300, "height": 40, "depth": 2 }),
+                "unknown field `depth`",
+            ),
+            (Value::Null, "the params must be an object"),
+        ] {
+            let error = panel_params::<ResizeParams>(PanelAction::Resize, params).unwrap_err();
+            assert_eq!(error.code, BridgeErrorCode::InvalidParams);
+            assert!(error.message.starts_with("resize: "), "{}", error.message);
+            assert!(error.message.contains(says), "{}", error.message);
+        }
+    }
+
+    #[test]
+    fn a_dismissal_names_its_prompt_or_none() {
+        let named: DismissParams = panel_params(
+            PanelAction::DismissPrompt,
+            serde_json::json!({ "raised": 3 }),
+        )
+        .unwrap();
+        assert_eq!(named.raised, Some(3));
+        let none: DismissParams =
+            panel_params(PanelAction::DismissPrompt, serde_json::json!({})).unwrap();
+        assert_eq!(none.raised, None);
+        // An X with no params at all (the page sends none for a prompt
+        // shown unnumbered) dismisses too; `panel_params` alone refuses it.
+        assert_eq!(dismiss_params(Value::Null).unwrap().raised, None);
+        assert_eq!(
+            dismiss_params(serde_json::json!({ "raised": 3 }))
+                .unwrap()
+                .raised,
+            Some(3)
+        );
+        for params in [
+            serde_json::json!({ "raised": -1 }),
+            serde_json::json!({ "raised": "3" }),
+            serde_json::json!({ "raised": 3, "app": "Zoom" }),
+            serde_json::json!([3]),
+        ] {
+            let error = panel_params::<DismissParams>(PanelAction::DismissPrompt, params.clone())
+                .unwrap_err();
+            assert_eq!(error.code, BridgeErrorCode::InvalidParams, "{params}");
+            assert!(error.message.starts_with("dismissPrompt: "), "{params}");
+        }
+    }
+
+    #[test]
+    fn the_panels_answer_two_actions_and_nothing_else() {
+        assert_eq!(panel_action("resize").unwrap(), PanelAction::Resize);
+        assert_eq!(
+            panel_action("dismissPrompt").unwrap(),
+            PanelAction::DismissPrompt
+        );
+        for text in ["Resize", "close", ""] {
+            let error = panel_action(text).unwrap_err();
+            assert_eq!(error.code, BridgeErrorCode::UnknownMethod, "{text}");
+            assert_eq!(error.message, format!("The panels do not answer {text}."));
+        }
+    }
+
+    #[test]
     fn only_a_finished_onboarding_snapshot_closes_the_window() {
         let setup: Value = serde_json::from_str(include_str!(
             "../../../macos/web/fixtures/bridge/onboarding.setup.json"
         ))
         .unwrap();
-        assert!(!finishes_onboarding("onboarding", &setup));
+        assert!(!finishes_onboarding(BridgeTopic::Onboarding, &setup));
         let mut finished = setup.clone();
         finished["finished"] = Value::Bool(true);
-        assert!(finishes_onboarding("onboarding", &finished));
-        assert!(!finishes_onboarding("app", &finished));
-        assert!(!finishes_onboarding("onboarding", &Value::Null));
+        assert!(finishes_onboarding(BridgeTopic::Onboarding, &finished));
+        assert!(!finishes_onboarding(BridgeTopic::App, &finished));
+        assert!(!finishes_onboarding(BridgeTopic::Onboarding, &Value::Null));
     }
 }

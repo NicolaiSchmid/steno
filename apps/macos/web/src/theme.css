@@ -102,6 +102,8 @@
 	--duration-entrance: 250ms;
 	--duration-surface: 200ms;
 	--duration-press-in: 100ms;
+	/* The panels' countdown hairline steps once a second, in time with the clock. */
+	--duration-countdown-step: 1000ms;
 	--ease-standard: cubic-bezier(0.4, 0, 0.2, 1);
 	--ease-drawer: cubic-bezier(0.32, 0.72, 0, 1);
 }
@@ -292,6 +294,13 @@
 	html {
 		/* The rem base: `text-sm` is the 14 px UI size, `text-xs` the 12 px tier. */
 		font-size: 16px;
+	}
+
+	/* A floating panel's document is its pill and nothing else: the shell
+	   sizes the window from the pill's report, so there is nothing to scroll
+	   to and no scrollbar may appear for a rounding remainder. */
+	html.panel {
+		overflow: hidden;
 	}
 
 	body {

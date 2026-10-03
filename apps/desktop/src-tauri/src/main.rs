@@ -1,65 +1,269 @@
-//! The Tauri shell (WP3 of `.plans/2026-10-02-rust-core-and-tauri-shell.md`):
-//! three windows around the web UI in `apps/macos/web` and the `bridge_call`
-//! command the page's Tauri transport talks to. The shell holds no logic:
-//! with the default `fixture-host` feature the bridge is answered from the
-//! recorded fixtures, so the whole UI runs on Linux and Windows before any
-//! pipeline exists; WP6 swaps the host for the real one.
+//! The Tauri shell (WP3 and WP8 of
+//! `.plans/2026-10-02-rust-core-and-tauri-shell.md`): three windows and two
+//! floating panels around the web UI in `apps/macos/web`, a tray icon, and
+//! the `bridge_call` command the page's Tauri transport talks to. The shell
+//! holds no logic: with the default `fixture-host` feature the bridge is
+//! answered from the recorded fixtures, so the whole UI runs on Linux and
+//! Windows before any pipeline exists; `WP6b` swaps the host for the real one.
 //!
-//! Seven shapes duplicate the `steno-bridge` crate's until WP6 wires the
-//! crates into the shell, then become `use` lines: `BridgeErrorCode`,
-//! `BridgeError`, `BridgeEvent` (whose `topic` becomes the `BridgeTopic`
-//! enum), `OpenUrlParams`, `SettingsSection` and `WindowParams` in
-//! `bridge.rs`, `BridgeWindow` in `windows.rs`; `bridge::uuid_text` becomes
-//! `steno_core::json::uuid_string`.
+//! What the shell owns beside the windows (WP8): the tray (`tray`), the
+//! macOS menu bar (`menu`), the actions behind both menus (`actions`), the
+//! recorder state the shell follows (`recording`), the panels (`panels`)
+//! and their geometry (`panel_geometry`), window lifetime (`windows`; the
+//! close and exit rules are in this file), launch at login (`autostart`),
+//! updates (`updater`), the OS permissions (`permissions`), the `steno:`
+//! links (`deep_links`), the native dialogs (`dialogs`), the single
+//! instance, and on a Wayland session the `XWayland` backend the panels
+//! need (`display`). Secrets are not the shell's:
+//! the keyring `SecretStore` lives in `steno-services` (#173, `WP6b`).
+//! Every one is a thin module over a Tauri plugin or an OS API with its
+//! rules in plain functions the tests cover. Everything that is on the
+//! wire (errors, topics, windows, sections, params) is the `steno-bridge`
+//! crate's type; the shell adds only what it needs on top
+//! (`recording::RecorderState`, `windows::Spec`).
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 // Without the fixture host nothing emits a snapshot or publishes a request
-// yet; those paths stay compiled so WP6 wires them instead of rewriting them.
+// yet; those paths stay compiled so WP6b wires them instead of rewriting them.
 #![cfg_attr(not(feature = "fixture-host"), allow(dead_code))]
 
+mod actions;
+mod autostart;
 mod bridge;
+mod deep_links;
+mod dialogs;
+#[cfg(target_os = "linux")]
+mod display;
 #[cfg(feature = "fixture-host")]
 mod fixtures;
 mod host;
+#[cfg(target_os = "macos")]
+mod menu;
 mod navigation;
+mod panel_geometry;
+mod panels;
+mod permissions;
+mod recording;
 mod smoke;
+mod tray;
+mod updater;
 mod windows;
 
+use tauri::Manager;
+
+use crate::windows::BridgeWindow;
+
 fn main() {
-    let app = tauri::Builder::default()
+    #[cfg(target_os = "linux")]
+    display::choose();
+    let mut builder = tauri::Builder::default();
+    // First, so a second instance exits before it builds anything; it
+    // hands its arguments (a `steno:` link among them) to this one and
+    // the main window comes forward.
+    if single_instance_available() {
+        builder = builder.plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
+            actions::open(app, windows::BridgeWindow::Main);
+        }));
+    }
+    builder = builder
+        .plugin(autostart::plugin())
+        .plugin(tauri_plugin_deep_link::init())
+        .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
+        .plugin(updater::plugin());
+    #[cfg(target_os = "macos")]
+    {
+        // The menu bar's menu is the shell's own: Tauri's default one ends
+        // in a Quit that terminates without `ExitRequested`.
+        builder = builder
+            .plugin(tauri_nspanel::init())
+            .enable_macos_default_menu(false)
+            .menu(menu::build);
+    }
+    let app = builder
+        // One handler for every menu: the tray's on every platform and
+        // the menu bar's on macOS reach the same listeners.
+        .on_menu_event(|app, event| actions::on_menu_event(app, &event))
         .manage(host::Host)
         .manage(smoke::Smoke::default())
-        .invoke_handler(tauri::generate_handler![bridge::bridge_call])
+        .manage(panels::Panels::default())
+        .manage(windows::Pages::default())
+        .manage(updater::Updates::default())
+        .manage(TrayAtClose::default())
+        .invoke_handler(tauri::generate_handler![
+            bridge::bridge_call,
+            bridge::panel_call
+        ])
         .setup(|app| {
             let handle = app.handle();
+            build_tray(handle);
             windows::open(handle, windows::BridgeWindow::Main, None, None)?;
+            deep_links::install(handle);
             smoke::arm(handle);
             Ok(())
         })
         .build(tauri::generate_context!())
         .expect("steno-desktop failed to build");
-    // WP6: on macOS the menu's Quit item (muda's predefined `terminate:`) ends
-    // the process without `ExitRequested`; tao implements only
-    // `applicationWillTerminate`. Once the shell holds state, a graceful
-    // shutdown needs a custom Quit item that calls `AppHandle::exit`.
-    app.run(|_app, event| {
-        let tauri::RunEvent::ExitRequested { code, api, .. } = &event else {
-            return;
-        };
-        if !exits_on(*code) {
-            api.prevent_exit();
+    app.run(|app, event| match event {
+        tauri::RunEvent::ExitRequested { code, api, .. } => {
+            if !exits_on(code, || tray_at_close(app)) {
+                api.prevent_exit();
+            }
         }
+        // The main window closes: hidden and kept while a tray can bring
+        // it back (`hides_on_close`); destroyed otherwise. `has_tray` is
+        // asked here, once per close, and the events that follow reuse it.
+        tauri::RunEvent::WindowEvent {
+            label,
+            event: tauri::WindowEvent::CloseRequested { api, .. },
+            ..
+        } if label == BridgeWindow::Main.as_str() => {
+            let tray = has_tray(app);
+            app.state::<TrayAtClose>().note(tray);
+            if hides_on_close(&label, tray) {
+                api.prevent_close();
+                if let Some(main) = app.get_webview_window(&label)
+                    && let Err(error) = main.hide()
+                {
+                    eprintln!("[steno-desktop] hiding the main window failed: {error}");
+                }
+            }
+        }
+        // A window is gone: its page no longer listens; a destroyed main
+        // window with no tray ends the process (`exits_when_destroyed`).
+        tauri::RunEvent::WindowEvent {
+            label,
+            event: tauri::WindowEvent::Destroyed,
+            ..
+        } => {
+            app.state::<windows::Pages>().gone(&label);
+            if exits_when_destroyed(&label, || tray_at_close(app)) {
+                actions::quit(app);
+            }
+        }
+        // A panel the user dragged: its anchor follows (`panels::moved`
+        // tells a drag from the window taking its size).
+        tauri::RunEvent::WindowEvent {
+            label,
+            event: tauri::WindowEvent::Moved(position),
+            ..
+        } => {
+            if let Some(panel) = panels::Panel::from_label(&label) {
+                panels::moved(app, panel, position);
+            }
+        }
+        // The Dock icon was clicked with no window open: the main window
+        // comes back, as it does for the Swift app.
+        #[cfg(target_os = "macos")]
+        tauri::RunEvent::Reopen {
+            has_visible_windows: false,
+            ..
+        } => actions::open(app, windows::BridgeWindow::Main),
+        _ => {}
     });
 }
 
+/// Builds the tray. No tray is not fatal: the windows still work, and
+/// closing main then ends the process (`exits_when_destroyed`). On Linux
+/// the tray crate panics (rather than errs) when libayatana-appindicator
+/// is not installed, so the panic is caught here; the .deb depends on the
+/// library, the `AppImage` does not bundle it (README, Bundles). A tray
+/// nothing shows (`tray::has_host`) is logged once here.
+fn build_tray(app: &tauri::AppHandle) {
+    let built = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| tray::build(app)));
+    match built {
+        Ok(Ok(())) => {
+            app.state::<smoke::Smoke>().note_tray();
+            if !tray::has_host() {
+                eprintln!(
+                    "[steno-desktop] no tray host shows the tray icon; \
+                     closing the main window ends the app"
+                );
+            }
+        }
+        Ok(Err(error)) => eprintln!("[steno-desktop] the tray could not be built: {error}"),
+        Err(_) => {
+            eprintln!("[steno-desktop] the tray could not be built: the tray library is missing");
+        }
+    }
+}
+
+/// Whether a tray stands (`tray_stands`): `tray::build` manages `Tray` on
+/// success, and the host is asked last.
+fn has_tray(app: &tauri::AppHandle) -> bool {
+    tray_stands(
+        app.try_state::<tray::Tray>().is_some(),
+        app.state::<smoke::Smoke>().is_armed(),
+        tray::has_host,
+    )
+}
+
+/// Whether a tray stands: it was `built` and something shows it, a host
+/// (`tray::has_host`, asked only when it decides) or a smoke run, which
+/// stands in for the host Xvfb lacks so it checks the close rule a desktop
+/// with a tray gets.
+fn tray_stands(built: bool, smoke: bool, host: impl FnOnce() -> bool) -> bool {
+    built && (smoke || host())
+}
+
+/// What `has_tray` said when the main window last closed, so the
+/// `Destroyed` and the exit request that follow a close do not ask the
+/// session bus again.
+#[derive(Default)]
+struct TrayAtClose(std::sync::Mutex<Option<bool>>);
+
+impl TrayAtClose {
+    fn note(&self, tray: bool) {
+        if let Ok(mut noted) = self.0.lock() {
+            *noted = Some(tray);
+        }
+    }
+
+    fn noted(&self) -> Option<bool> {
+        self.0.lock().ok().and_then(|noted| *noted)
+    }
+}
+
+/// The tray as the last close of main found it, else as it is now.
+fn tray_at_close(app: &tauri::AppHandle) -> bool {
+    app.state::<TrayAtClose>()
+        .noted()
+        .unwrap_or_else(|| has_tray(app))
+}
+
+/// Whether closing the window of `label` hides it instead: the main window
+/// while a tray can bring it back, as the Swift main window closes behind
+/// the menu bar item (and the tray's recorder commands keep a window to go
+/// through). Every other close destroys the window.
+fn hides_on_close(label: &str, has_tray: bool) -> bool {
+    label == BridgeWindow::Main.as_str() && has_tray
+}
+
+/// Whether the window of `label` being destroyed ends the process: the
+/// main window with no tray, since nothing else reaches the app; the
+/// Swift app always has its menu bar item. The panels' windows are
+/// hidden, never destroyed, so once one has existed the last window never
+/// closes on its own, and the process would linger invisibly.
+fn exits_when_destroyed(label: &str, has_tray: impl FnOnce() -> bool) -> bool {
+    label == BridgeWindow::Main.as_str() && !has_tray()
+}
+
 /// Whether an exit request ends the process. One with a code is the shell's
-/// own (`AppHandle::exit`, the smoke's) and always does. One without comes
-/// from the last window closing: on macOS the process stays, as the Swift
-/// menu bar app does (`applicationShouldTerminateAfterLastWindowClosed` in
-/// `StenoApp.swift`); Linux and Windows quit until the tray lands in WP8.
-fn exits_on(code: Option<i32>) -> bool {
-    code.is_some() || !cfg!(target_os = "macos")
+/// own (`AppHandle::exit` from Quit, the smoke's) and always does. One
+/// without comes from the last window closing: with a tray the process
+/// stays, as the Swift menu bar app stays when its window closes
+/// (`applicationShouldTerminateAfterLastWindowClosed` in `StenoApp.swift`);
+/// without one it ends. The tray is asked only for one without a code.
+fn exits_on(code: Option<i32>, has_tray: impl FnOnce() -> bool) -> bool {
+    code.is_some() || !has_tray()
+}
+
+/// Whether the single-instance plugin can run: on Linux it holds a name on
+/// the session bus and panics without one (a headless CI run under
+/// `xvfb-run` has none), so it is skipped there; macOS and Windows need
+/// nothing.
+fn single_instance_available() -> bool {
+    !cfg!(target_os = "linux") || std::env::var_os("DBUS_SESSION_BUS_ADDRESS").is_some()
 }
 
 #[cfg(test)]
@@ -67,9 +271,66 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_last_window_keeps_the_process_only_on_macos() {
-        assert!(exits_on(Some(0)));
-        assert!(exits_on(Some(1)));
-        assert_eq!(exits_on(None), !cfg!(target_os = "macos"));
+    fn only_the_shells_own_exit_ends_the_process_while_a_tray_stands() {
+        let asked = || panic!("the tray asked for an exit with a code");
+        assert!(exits_on(Some(0), asked));
+        assert!(exits_on(Some(1), asked));
+        assert!(!exits_on(None, || true));
+        // No tray: the last window closing ends the process.
+        assert!(exits_on(None, || false));
+    }
+
+    /// A tray stands when it was built and a host or a smoke run shows it;
+    /// the host is asked only when that decides.
+    #[test]
+    fn a_tray_stands_when_built_and_shown() {
+        for (built, smoke, host, stands, asks) in [
+            (true, false, true, true, true),
+            (true, false, false, false, true),
+            (true, true, false, true, false),
+            (true, true, true, true, false),
+            (false, false, true, false, false),
+            (false, true, true, false, false),
+        ] {
+            let asked = std::cell::Cell::new(false);
+            let result = tray_stands(built, smoke, || {
+                asked.set(true);
+                host
+            });
+            assert_eq!(result, stands, "{built} {smoke} {host}");
+            assert_eq!(asked.get(), asks, "{built} {smoke} {host}");
+        }
+    }
+
+    /// With a tray, closing main hides it and the process stays; without
+    /// one, main is destroyed and the process ends with it, whatever else
+    /// (a hidden panel) is still around. The other windows just close.
+    #[test]
+    fn main_hides_behind_a_tray_and_ends_the_process_without_one() {
+        assert!(hides_on_close("main", true));
+        assert!(!hides_on_close("main", false));
+        assert!(!exits_when_destroyed("main", || true));
+        assert!(exits_when_destroyed("main", || false));
+        for label in ["settings", "onboarding", "bubble", "prompt"] {
+            for tray in [true, false] {
+                assert!(!hides_on_close(label, tray), "{label}");
+                assert!(
+                    !exits_when_destroyed(label, || panic!("asked for {label}")),
+                    "{label}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn single_instance_needs_a_session_bus_on_linux_only() {
+        if cfg!(target_os = "linux") {
+            assert_eq!(
+                single_instance_available(),
+                std::env::var_os("DBUS_SESSION_BUS_ADDRESS").is_some()
+            );
+        } else {
+            assert!(single_instance_available());
+        }
     }
 }

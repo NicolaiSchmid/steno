@@ -39,12 +39,15 @@ impl Host {
 
     /// `window.open` names a meeting or a section for a window that is
     /// already open: the request rides on the `app` snapshot
-    /// (`requestedMeetingID`, `requestedSettingsSection`), the page follows
-    /// it, and the clean snapshot goes out right after, as the publish that
-    /// carried the request consumes it.
+    /// (`requestedMeetingID`, `requestedSettingsSection`), and the clean
+    /// snapshot goes out right after, as the publish that carried the
+    /// request consumes it. The Settings page follows its section; the
+    /// main page ignores the meeting, which the host selects itself
+    /// (`consumeMeetingRequest`), so with the fixture host a meeting link
+    /// changes nothing on screen until `WP6b`'s host does the selecting.
     ///
     /// Swift: `didPublish` in `MainWindowBridge.swift` and
-    /// `SettingsBridge.swift`.
+    /// `SettingsBridge.swift`, `MainWindowBridge.consumeMeetingRequest`.
     pub fn publish_request(
         &self,
         window: &WebviewWindow,

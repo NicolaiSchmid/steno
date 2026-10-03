@@ -40,6 +40,7 @@ import {
 	TabsTab,
 } from "@/components/ui";
 import { cn } from "@/lib/cn";
+import { useElapsedSeconds } from "@/lib/use-now";
 import { deleteMeeting } from "./delete-meeting";
 import {
 	firstSentence,
@@ -56,7 +57,6 @@ import { SummaryTab } from "./summary-tab";
 import { TagEditor } from "./tag-editor";
 import { TasksTab } from "./tasks-tab";
 import { TranscriptTab } from "./transcript-tab";
-import { useElapsedSeconds } from "./use-now";
 
 type Tab = MeetingDetailSnapshot["tab"];
 const TABS: readonly Tab[] = detailTab.options;

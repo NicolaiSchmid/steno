@@ -5,22 +5,95 @@
   "build": {
     "frontendDist": "../../macos/web/dist",
     "devUrl": "http://localhost:5173",
-    "beforeDevCommand": { "script": "pnpm dev", "cwd": "../../macos/web" },
-    "beforeBuildCommand": { "script": "pnpm build", "cwd": "../../macos/web" }
+    "beforeDevCommand": {
+      "script": "pnpm dev",
+      "cwd": "../../macos/web"
+    },
+    "beforeBuildCommand": {
+      "script": "pnpm build",
+      "cwd": "../../macos/web"
+    }
   },
   "app": {
     "security": {
       "csp": "default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self'; connect-src ipc: http://ipc.localhost"
     }
   },
+  "plugins": {
+    "deep-link": {
+      "desktop": {
+        "schemes": [
+          "steno"
+        ]
+      }
+    },
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEZBQkJCRDA2N0IzMjE0QTkKUldTcEZESjdCcjI3K3ZZK0tCTXBKb1pNSGFiYVZzZyt1Z0dXc0QzblVhYjdhN292bzVKQnk1MHUK",
+      "endpoints": [
+        "https://github.com/NicolaiSchmid/steno/releases/latest/download/latest.json"
+      ]
+    }
+  },
   "bundle": {
-    "active": false,
+    "active": true,
+    "targets": [
+      "app",
+      "dmg",
+      "deb",
+      "appimage",
+      "msi",
+      "nsis"
+    ],
+    "createUpdaterArtifacts": true,
+    "publisher": "Nicolai Schmid",
+    "homepage": "https://github.com/NicolaiSchmid/steno",
+    "category": "Productivity",
+    "shortDescription": "Bot-free meeting recorder",
+    "longDescription": "Records your calls and in-person meetings on this device, transcribes them locally and writes the notes where you keep them. Audio never leaves the device.",
+    "license": "MIT",
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
       "icons/128x128@2x.png",
-      "icons/icon.png",
-      "icons/icon.ico"
-    ]
+      "icons/icon.icns",
+      "icons/icon.ico",
+      "icons/icon.png"
+    ],
+    "macOS": {
+      "minimumSystemVersion": "15.0",
+      "entitlements": "Entitlements.plist",
+      "infoPlist": "Info.plist",
+      "dmg": {
+        "appPosition": {
+          "x": 180,
+          "y": 170
+        },
+        "applicationFolderPosition": {
+          "x": 480,
+          "y": 170
+        }
+      }
+    },
+    "linux": {
+      "deb": {
+        "section": "sound",
+        "depends": [
+          "libayatana-appindicator3-1"
+        ],
+        "desktopTemplate": "linux/steno-desktop.desktop"
+      },
+      "appimage": {
+        "bundleMediaFramework": false
+      }
+    },
+    "windows": {
+      "webviewInstallMode": {
+        "type": "downloadBootstrapper",
+        "silent": true
+      },
+      "nsis": {
+        "installMode": "currentUser"
+      }
+    }
   }
 }

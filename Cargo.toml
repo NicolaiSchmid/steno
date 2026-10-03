@@ -29,9 +29,27 @@ directories = "6"
 rusqlite = { version = "0.40", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-tauri = "2.12"
+tauri = { version = "2.12", features = ["tray-icon", "image-png"] }
 tauri-build = "2.7"
+tauri-plugin-autostart = "2.7"
+tauri-plugin-deep-link = "2.6"
+tauri-plugin-dialog = "2.8"
 tauri-plugin-opener = "2.7"
+tauri-plugin-single-instance = { version = "2.5", features = ["deep-link"] }
+tauri-plugin-updater = "2.13"
+# `sync` for the shell's one-shot channels; `macros`, `rt` and
+# `rt-multi-thread` for the executor the core's boundary tests run on.
+tokio = { version = "1", default-features = false, features = ["sync", "macros", "rt", "rt-multi-thread"] }
+# macOS only: non-activating floating panels and the microphone TCC prompt
+# (with `objc2` below).
+tauri-nspanel = "2.1"
+objc2-av-foundation = { version = "0.3", default-features = false, features = ["std", "block2", "AVCaptureDevice", "AVMediaFormat"] }
+block2 = "0.6"
+# Linux only: the session bus query that tells whether a tray host shows the
+# tray icon (`gio`) and the backends GDK may open (`gdk`). Both already in
+# the lock through GTK, which the shell links anyway.
+gdk = "0.18"
+gio = "0.18"
 thiserror = "2"
 tracing = "0.1"
 uuid = { version = "1", features = ["serde", "v4"] }
@@ -48,12 +66,11 @@ similar = "2"
 # Temporary directories in tests; `steno-diarize` also downloads each model
 # into a temporary file of its own.
 tempfile = "3"
-# Dyn-compatible async traits for the boundaries, the content hash every
-# delivery receipt carries, and the executor the trait tests run on, whose
-# blocking pool `steno-diarize` also runs its model calls on.
+# Dyn-compatible async traits for the boundaries and the content hash every
+# delivery receipt carries; their executor is `tokio` above, whose blocking
+# pool `steno-diarize` also runs its model calls on.
 async-trait = "0.1"
 sha2 = "0.10"
-tokio = { version = "1", default-features = false, features = ["macros", "rt", "rt-multi-thread"] }
 # Apple frameworks through madsmtm's generated bindings (one objc2 runtime
 # for CoreML and CoreAudio now, AppKit later). Pulled in only by crates'
 # `cfg(target_os = "macos")` dependency tables, so the other platforms never

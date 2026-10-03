@@ -10,7 +10,7 @@ import {
 	TimerIcon,
 	UsersIcon,
 } from "lucide-react";
-import { type ReactNode, useMemo } from "react";
+import type { ReactNode } from "react";
 import type {
 	MeetingsListSnapshot,
 	RecordingSnapshot,
@@ -29,8 +29,8 @@ import {
 	SplitButton,
 } from "@/components/ui";
 import { cn } from "@/lib/cn";
+import { useCountdownSeconds, useElapsedSeconds } from "@/lib/use-now";
 import { format } from "./format";
-import { useElapsedSeconds, useNow } from "./use-now";
 
 type Filter = MeetingsListSnapshot["filter"];
 type PermissionKind = RecordingSnapshot["deniedPermissions"][number];
@@ -150,12 +150,7 @@ function AutoStopNotice({
 	const client = useBridge();
 	// The host's figure is taken as of the moment it arrived; the page counts
 	// down from there until a snapshot with a new figure resets it.
-	const anchor = useMemo(
-		() => ({ at: Date.now(), seconds: autoStop.remainingSeconds }),
-		[autoStop.remainingSeconds],
-	);
-	const now = useNow(true);
-	const remaining = anchor.seconds - (now - anchor.at) / 1000;
+	const remaining = useCountdownSeconds(autoStop.remainingSeconds);
 	const countdown = (
 		<span className="font-mono tabular-nums">
 			{format.countdown(remaining)}

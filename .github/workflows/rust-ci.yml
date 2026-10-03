@@ -22,12 +22,15 @@ name: Rust CI
 #     pushes to `main`.
 #
 # Linux also builds the web UI (its bridge transports are the shell's other
-# half), checks it, and runs the Tauri shell's headless smoke under Xvfb
-# (apps/desktop/scripts/smoke-linux.sh); the screenshots are uploaded as
-# `desktop-smoke-screens`. Windows and macOS build the shell without the web
-# dist: build.rs points `frontendDist` at `apps/desktop/src-tauri/placeholder/`
-# so the build goes through; the binary they produce would still load the
-# Vite dev server, as every build without `custom-protocol` does.
+# half), checks it, runs the Tauri shell's headless smoke under Xvfb
+# (apps/desktop/scripts/smoke-linux.sh; the screenshots are uploaded as
+# `desktop-smoke-screens`), and runs `tauri build --no-bundle` so a
+# packaging regression (the bundle config, the icons, the plists, the
+# release profile) fails here and not in desktop-release.yml. Windows and
+# macOS build the shell without the web dist: build.rs points `frontendDist`
+# at `apps/desktop/src-tauri/placeholder/` so the build goes through; the
+# binary they produce would still load the Vite dev server, as every build
+# without `custom-protocol` does.
 #
 # The `msrv` job checks the workspace against `rust-version` from Cargo.toml
 # on Linux, so the number stays true.
@@ -196,6 +199,11 @@ jobs:
             ran on_windows_the_adapter_table_has_a_row_for_every_ipv4_interface
           fi
 
+      # The desktop release workflow's platform filter.
+      - name: Desktop release matrix
+        if: matrix.name == 'linux'
+        run: apps/desktop/scripts/release-matrix.test.sh
+
       # A debug build loads devUrl; the smoke needs the embedded bundle, so
       # the dev URL is dropped through Tauri's configuration merge. The run
       # ends itself after 15 s; the step limit catches a hang before that.
@@ -214,6 +222,19 @@ jobs:
           name: desktop-smoke-screens
           path: apps/desktop/screens
           if-no-files-found: ignore
+
+      # The release build as the Tauri CLI drives it, without the installer
+      # step: the web dist is already built above, so the config merge
+      # drops beforeBuildCommand, and the updater artifacts need the
+      # signing key WP9 brings, so they are off here. The CLI is the
+      # version desktop-release.yml pins.
+      - name: Desktop release build (no bundle)
+        if: matrix.name == 'linux'
+        working-directory: apps/desktop/src-tauri
+        run: |
+          pnpm dlx @tauri-apps/cli@2.12.1 build --ci --no-bundle \
+            --config '{"build":{"beforeBuildCommand":null},"bundle":{"createUpdaterArtifacts":false}}'
+          test -x ../../../target/release/steno-desktop
 
   msrv:
     name: msrv

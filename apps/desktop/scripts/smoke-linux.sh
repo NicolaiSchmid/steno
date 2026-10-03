@@ -1,14 +1,16 @@
 #!/usr/bin/env bash
 # Headless smoke of the Tauri shell on Linux: runs the built binary under
 # xvfb-run with STENO_SMOKE_SECONDS, which makes the shell open all three
-# windows side by side and exit 0 once the main window has sent page.ready
-# and a snapshot reached it (1 when either did not). When ImageMagick's
-# `import` is available, the Xvfb root is captured near the end of the wait
-# into apps/desktop/screens/ as review evidence, with one crop per window
-# (`magick` from ImageMagick 7, `convert` from 6); the windows carry only
-# fixture data.
+# windows side by side and both floating panels under Settings, and exit 0
+# once the main window has sent page.ready, a snapshot reached it, the tray
+# was built and the panels showed and hid (1 when any did not). When
+# ImageMagick's `import` is available, the Xvfb root is captured near the
+# end of the wait into apps/desktop/screens/ as review evidence, with one
+# crop per window and per panel (`magick` from ImageMagick 7, `convert`
+# from 6); the windows carry only fixture data. Xvfb has no compositor, so
+# the panels' transparent corners render black there.
 #
-#   apps/desktop/scripts/smoke-linux.sh [path/to/steno-desktop] [seconds]
+#   [STENO_SMOKE_DPI=<dpi>] apps/desktop/scripts/smoke-linux.sh [path/to/steno-desktop] [seconds]
 #
 # Needs the web dist embedded (pnpm build in apps/macos/web before cargo
 # build) and the runtime libraries the binary links; on NixOS run it inside
@@ -35,7 +37,11 @@ export LIBGL_ALWAYS_SOFTWARE=1
 export GDK_BACKEND=x11
 
 # 1120x720 main at the origin, Settings to its right, onboarding below.
-xvfb-run --auto-servernum --server-args="-screen 0 2200x1500x24" bash -c '
+# STENO_SMOKE_DPI sets the X resolution (Xvfb's own default otherwise);
+# WebKitGTK's devicePixelRatio follows it, so 120 checks the panels at a
+# ratio of 1.25.
+server_args="-screen 0 2200x1500x24${STENO_SMOKE_DPI:+ -dpi $STENO_SMOKE_DPI}"
+xvfb-run --auto-servernum --server-args="$server_args" bash -c '
   set -u
   "$1" & app=$!
   if command -v import >/dev/null; then
@@ -51,7 +57,12 @@ xvfb-run --auto-servernum --server-args="-screen 0 2200x1500x24" bash -c '
       "$crop" "$3/smoke-root.png" -crop 1120x720+0+0 +repage "$3/main.png"
       "$crop" "$3/smoke-root.png" -crop 960x640+1160+0 +repage "$3/settings.png"
       "$crop" "$3/smoke-root.png" -crop 560x620+0+780 +repage "$3/onboarding.png"
-      echo "smoke: cropped main, settings and onboarding with $crop"
+      # The panels, where smoke.rs puts them (PANELS_X, PANEL_*_Y), with a
+      # margin around each so the crop survives the page resizing the
+      # window about its top centre, at 120 dpi too.
+      "$crop" "$3/smoke-root.png" -crop 720x100+1040+680 +repage "$3/prompt.png"
+      "$crop" "$3/smoke-root.png" -crop 720x100+1040+780 +repage "$3/bubble.png"
+      echo "smoke: cropped main, settings, onboarding, prompt and bubble with $crop"
     fi
   fi
   wait "$app"

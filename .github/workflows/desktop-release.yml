@@ -1,0 +1,159 @@
+name: Desktop bundles
+
+# Builds the Tauri shell's installer bundles on the three platforms and
+# uploads them as workflow artifacts, on a manual trigger: `.app` and `.dmg`
+# on macOS, `.deb` and `.AppImage` on Linux, `.msi` and NSIS `.exe` on
+# Windows. WP8 of .plans/2026-10-02-rust-core-and-tauri-shell.md. Nothing is
+# signed or notarised and no GitHub release is published; that is WP9, which
+# also gives this job the `TAURI_SIGNING_PRIVATE_KEY` secret (the private
+# half of `plugins.updater.pubkey` in tauri.conf.json, generated with
+# `cargo tauri signer generate`; see apps/desktop/README.md). Until the
+# secret exists the updater artifacts (`.sig` files and the macOS
+# `.app.tar.gz`) are switched off through Tauri's configuration merge,
+# because a public key in the config without a private key in the
+# environment fails the build. The CLI writes no `latest.json`; the
+# manifests are WP9's.
+#
+# The bundles answer the bridge from the recorded fixtures (the shell's
+# default `fixture-host` feature): they show the whole UI with synthetic
+# data on every platform. WP6b flips the default feature off once the real
+# host is wired; this job builds whatever the crate's default is.
+#
+# The macOS job follows `MACOS_RUNS_ON` like the other workflows.
+
+on:
+  workflow_dispatch:
+    inputs:
+      platforms:
+        description: 'Which platforms to build (comma-separated: linux, windows, macos)'
+        type: string
+        default: 'linux,windows,macos'
+
+concurrency:
+  group: desktop-release-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  # Which platforms the run builds, from the input: a job-level `if` cannot
+  # read the matrix, so a first job turns the input into the include list
+  # (apps/desktop/scripts/release-matrix.sh: any case, an unknown name
+  # fails the run) and the bundle job takes its matrix from it. The macOS
+  # runner label comes from `MACOS_RUNS_ON` as everywhere else.
+  plan:
+    name: plan
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      matrix: ${{ steps.plan.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: plan
+        env:
+          PLATFORMS: ${{ inputs.platforms }}
+          MACOS_RUNS_ON: ${{ vars.MACOS_RUNS_ON || '"macos-15"' }}
+        run: |
+          set -euo pipefail
+          matrix="$(apps/desktop/scripts/release-matrix.sh)"
+          echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
+          echo "$matrix"
+
+  bundle:
+    name: ${{ matrix.name }}
+    needs: plan
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Linux prerequisites
+        if: matrix.name == 'linux'
+        run: scripts/setup-linux.sh
+
+      - name: Use the installed rustup (self-hosted runners only)
+        if: runner.environment == 'self-hosted'
+        run: |
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+          echo "/run/current-system/sw/bin" >> "$GITHUB_PATH"
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Target directory outside the workspace (self-hosted runners only)
+        if: runner.environment == 'self-hosted'
+        run: |
+          target="$HOME/Library/Caches/steno-ci/$RUNNER_NAME/cargo-target"
+          mkdir -p "$target"
+          echo "CARGO_TARGET_DIR=$target" >> "$GITHUB_ENV"
+          echo "STENO_TARGET_DIR=$target" >> "$GITHUB_ENV"
+
+      - uses: Swatinem/rust-cache@v2
+        if: runner.environment == 'github-hosted'
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      - uses: pnpm/action-setup@v4
+        with:
+          package_json_file: apps/macos/web/package.json
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: apps/macos/web/pnpm-lock.yaml
+
+      # The web UI first (beforeBuildCommand would build it again; the
+      # config merge below drops that so the CLI does not run pnpm twice).
+      - name: Web install and build
+        run: pnpm install --frozen-lockfile && pnpm build
+        working-directory: apps/macos/web
+
+      # The Tauri CLI as the npm package: a prebuilt binary in seconds,
+      # where `cargo install tauri-cli` compiles for minutes. Pinned to the
+      # exact version of the `tauri` crate in Cargo.lock and of
+      # `@tauri-apps/api`, because it runs with the signing key in its
+      # environment.
+      - name: Bundle
+        shell: bash
+        working-directory: apps/desktop/src-tauri
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          # Release panics would otherwise carry the runner's source paths.
+          RUSTFLAGS: --remap-path-prefix=${{ github.workspace }}=steno
+        run: |
+          set -euo pipefail
+          updater=true
+          if [ -z "${TAURI_SIGNING_PRIVATE_KEY:-}" ]; then
+            echo "::notice::TAURI_SIGNING_PRIVATE_KEY is not set; building without updater artifacts (WP9)"
+            updater=false
+          fi
+          config="{\"build\":{\"beforeBuildCommand\":null},\"bundle\":{\"createUpdaterArtifacts\":$updater}}"
+          pnpm dlx @tauri-apps/cli@2.12.1 build --ci \
+            --bundles "${{ matrix.bundles }}" --config "$config"
+
+      # A self-hosted runner keeps its target directory outside the
+      # workspace; the upload step reads from the workspace.
+      - name: Collect bundles
+        shell: bash
+        run: |
+          set -euo pipefail
+          src="${STENO_TARGET_DIR:-target}/release/bundle"
+          mkdir -p target/release
+          if [ "$src" != "target/release/bundle" ]; then
+            rm -rf target/release/bundle
+            cp -R "$src" target/release/bundle
+          fi
+          find target/release/bundle -maxdepth 2 -type f \( -name '*.deb' -o -name '*.AppImage' -o -name '*.msi' -o -name '*.exe' -o -name '*.dmg' -o -name '*.tar.gz' -o -name '*.sig' \) -print
+
+      - name: Upload bundles
+        uses: actions/upload-artifact@v4
+        with:
+          name: steno-desktop-${{ matrix.name }}
+          path: |
+            ${{ matrix.artifacts }}
+            target/release/bundle/**/*.sig
+          if-no-files-found: error
