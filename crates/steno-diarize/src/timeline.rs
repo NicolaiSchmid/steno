@@ -149,15 +149,18 @@ struct Segment {
     quality: f64,
 }
 
-/// Joins consecutive segments of one cluster whose gap is at most
-/// `max_gap`, quality weighted by duration. `segments` sorted by start.
+/// Joins a segment into the segment immediately before it in start
+/// order when both belong to one cluster and the gap is at most
+/// `max_gap`, quality weighted by duration; `FluidAudio`'s
+/// `mergeSegments`. Only the immediately preceding segment counts: an
+/// `A B A` run with a short second gap stays three segments, so `B` is
+/// not swallowed by the join of the two `A`s. `segments` sorted by start.
 fn close_gaps(segments: Vec<Segment>, max_gap: f64) -> Vec<Segment> {
     let mut result: Vec<Segment> = Vec::with_capacity(segments.len());
     for segment in segments {
         if let Some(last) = result
-            .iter_mut()
-            .rev()
-            .find(|last| last.cluster == segment.cluster)
+            .last_mut()
+            .filter(|last| last.cluster == segment.cluster)
             .filter(|last| segment.start - last.end <= max_gap)
         {
             let lhs = (last.end - last.start).max(0.0);
@@ -173,11 +176,6 @@ fn close_gaps(segments: Vec<Segment>, max_gap: f64) -> Vec<Segment> {
             result.push(segment);
         }
     }
-    result.sort_by(|lhs, rhs| {
-        lhs.start
-            .total_cmp(&rhs.start)
-            .then(lhs.cluster.cmp(&rhs.cluster))
-    });
     result
 }
 
@@ -226,16 +224,42 @@ mod tests {
         let joined = close_gaps(
             vec![
                 segment(0, 0.0, 1.0, 1.0),
-                segment(1, 1.0, 2.0, 0.5),
                 segment(0, 1.05, 3.0, 0.5),
-                segment(0, 4.0, 5.0, 1.0),
+                segment(1, 3.0, 4.0, 0.5),
+                segment(0, 4.05, 5.0, 1.0),
+                segment(0, 6.0, 7.0, 1.0),
+            ],
+            0.1,
+        );
+        assert_eq!(joined.len(), 4);
+        assert_eq!((joined[0].start, joined[0].end), (0.0, 3.0));
+        assert!((joined[0].quality - (1.0 + 0.5 * 1.95) / 2.95).abs() < 1e-9);
+        // Another cluster in between, then a gap over the limit: no joins.
+        assert_eq!((joined[1].cluster, joined[2].start), (1, 4.05));
+        assert_eq!(joined[3].start, 6.0);
+    }
+
+    /// `A B A` with the second `A` starting 0.05 s after the first ends:
+    /// `B` sits between them in start order, so the two `A`s stay apart
+    /// and `B` survives, as `FluidAudio`'s `mergeSegments` has it.
+    #[test]
+    fn a_segment_joins_only_the_one_immediately_before_it() {
+        let joined = close_gaps(
+            vec![
+                segment(0, 0.0, 5.0, 1.0),
+                segment(1, 4.0, 7.0, 1.0),
+                segment(0, 5.05, 10.0, 1.0),
             ],
             0.1,
         );
         assert_eq!(joined.len(), 3);
-        assert_eq!((joined[0].start, joined[0].end), (0.0, 3.0));
-        assert!((joined[0].quality - (1.0 + 0.5 * 1.95) / 2.95).abs() < 1e-9);
-        assert_eq!(joined[2].start, 4.0);
+        assert_eq!((joined[0].cluster, joined[0].end), (0, 5.0));
+        assert_eq!((joined[1].cluster, joined[1].start), (1, 4.0));
+        assert_eq!((joined[2].cluster, joined[2].start), (0, 5.05));
+        let turns = exclusive(joined, 1.0);
+        assert_eq!(turns.len(), 3, "{turns:?}");
+        assert_eq!((turns[1].start, turns[1].end), (5.0, 7.0));
+        assert_eq!((turns[2].start, turns[2].end), (7.0, 10.0));
     }
 
     #[test]
