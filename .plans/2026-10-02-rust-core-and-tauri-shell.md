@@ -374,7 +374,8 @@ still has to draw the window side. `[ ]` is not ported yet.
 - [x] `setup.dismissBanner`.
 - [x] `settings.general.setLaunchAtLogin`, `.setDetectionEnabled`,
   `.setDefaultTemplate`, `.requestCalendar`, `.setAutomaticUpdates`, `.openLoginItems`:
-  through the `LoginItem`, `Permissions` and `Updater` traits, which WP8 implements.
+  through the `LoginItem`, `Permissions` and `Updater` traits, which WP6b implements
+  over WP8's shell modules (`autostart`, `permissions`, `updater`).
 - [x] `settings.recording.setInputDevice`, `.refreshDevices`, `.chooseFolder` (the
   shell's chooser), `.revealFolder`, `.setRetention` (Forever keeps every recording on
   disk through `Pipeline::keep_all_recordings`), `.requestPermission`.
@@ -418,7 +419,7 @@ still has to draw the window side. `[ ]` is not ported yet.
   seam, WP8.
 - [x] Login item: registered on the first launch when the setting says so
   (`Host::register_login_item_on_first_launch`), toggled from General, the pane opened;
-  the `LoginItem` trait, WP8 implements.
+  the `LoginItem` trait, which WP6b implements over WP8's `autostart`.
 - [ ] Calendar: the event that names a recording and its attendees, looked up at
   recording start: the recorder, WP5.
 - [x] Phone pairing: the QR code, a phone's arrival closing the code, a code running

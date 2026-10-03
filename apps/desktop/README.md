@@ -295,30 +295,33 @@ Nothing beyond the Rust toolchain. WebView2 ships with Windows 11; the
 
 Signing, notarisation, the GitHub release and the updater manifests are
 WP9, as is `cargo deny`; the release workflow stops at unsigned bundles.
-The host's half of the WP8 seams is WP6b: the detection controller raising
-the prompt (`panels::set_prompt`) and hearing of its dismissal
-(`panels::dismiss_prompt`), the General snapshot reading
-`autostart::status` and `Updates::last`, the onboarding and Settings
-permission rows calling `permissions::state` and `request`, the folder
-choice arriving as `{ "path": … }`, the reveal methods calling
-`dialogs::reveal`. The host may treat the main window as always present: a
-close hides it, or ends the process when no tray stands, so publishing to
-it never fails for want of a window. Launch at login is a Launch Agent,
-not `SMAppService`; WP9 has to retire the Swift registration at cutover so
-the user does not get two login items (the plan's parity list). The macOS
-menu bar has no Record menu yet (`⌘⇧R` and Record In Person are the tray's
-and the sidebar's), and no Find Meetings (`⌘F`). Updates are checked only
-when asked (the tray's item, Settings), where Sparkle checks daily on its
-own. On macOS the system audio permission has no status API; the audio
-crate's probe (WP5) records it and until then it reads `unknown`. The
-panels are re-tuned on the Mac once they run there beside the Swift ones
-(the plan's risk list). Linux and Windows keep their native title bar;
-macOS gets the overlay title bar the Swift windows have. The page's
-traffic light inset is a design question for the other two platforms. On
-Linux, WebKitGTK leaks one shared-memory file descriptor per destroyed
-webview that lived longer than about 250 ms (29 to 107 fds over 70
-Settings open/close cycles; wry/WebKitGTK level, not the shell), so long
-sessions with many Settings opens should be watched until
+The host's half of the WP8 seams is WP6b, which wires `steno-host` (#170)
+in place of the fixture host: the detection controller raising the prompt
+(`panels::set_prompt`) and hearing of its dismissal
+(`panels::dismiss_prompt`); the host's `LoginItem`, `Permissions`,
+`Updater` and `Opener` traits implemented over `autostart`, `permissions`,
+`updater` and `dialogs::reveal`, whose `LoginItemStatus` and
+`UpdateOutcome` give way to the host's own; and the folder panels, which
+`steno-host` asks for through its `choose_folder` callback where this
+shell shows the panel itself and forwards `{ "path": … }`. The host may
+treat the main window as always present: a close hides it, or ends the
+process when no tray stands, so publishing to it never fails for want of a
+window. Launch at login is a Launch Agent, not `SMAppService`; WP9 has to
+retire the Swift registration at cutover so the user does not get two
+login items (the plan's parity list). The macOS menu bar has no Record
+menu yet (`⌘⇧R` and Record In Person are the tray's and the sidebar's),
+and no Find Meetings (`⌘F`). Updates are checked only when asked (the
+tray's item, Settings), where Sparkle checks daily on its own. On macOS
+the system audio permission has no status API; the audio crate's probe
+(WP5) records it and until then it reads `unknown`. The panels are
+re-tuned on the Mac once they run there beside the Swift ones (the plan's
+risk list). Linux and Windows keep their native title bar; macOS gets the
+overlay title bar the Swift windows have. The page's traffic light inset
+is a design question for the other two platforms. On Linux, WebKitGTK
+leaks one shared-memory file descriptor per destroyed webview that lived
+longer than about 250 ms (29 to 107 fds over 70 Settings open/close
+cycles; wry/WebKitGTK level, not the shell), so long sessions with many
+Settings opens should be watched until
 [#160](https://github.com/NicolaiSchmid/steno/issues/160) is resolved. On
 Linux a panel keeps a 5 px resize border that Tauri gives every
 undecorated resizable window. The pinned size holds, but the border shows

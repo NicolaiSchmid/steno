@@ -46,6 +46,8 @@ pub fn endpoints(version: &str) -> Vec<Url> {
 }
 
 /// What the last check found; the General section shows it.
+/// `steno_host::services::UpdateOutcome` is the same; `WP6b` keeps that one
+/// when it implements the host's `Updater` over this module.
 ///
 /// Swift: `UpdateCheckOutcome`.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]

@@ -14,6 +14,8 @@ use crate::bridge::{BridgeError, failed};
 
 /// `GeneralSettingsSnapshot.launchAtLogin` in the contract. The host reads
 /// it for the General section (`WP6b`); the shell reads only `is_on`.
+/// `steno_host::services::LoginItemStatus` is the same set; `WP6b` keeps
+/// that one when it implements the host's `LoginItem` over this module.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[allow(dead_code)]
 pub enum LoginItemStatus {
