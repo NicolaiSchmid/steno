@@ -289,8 +289,12 @@ bridge's copies of the macro and codecs. Packages after WP3 branch from `main`.
   Swift `steno export` of a calibration meeting equals the Rust one field for field. The
   shell's seams towards the host (the prompt and its dismissal, `panels::set_prompt` and
   `panels::dismiss_prompt`; the login item and update outcomes; the permissions; the
-  folder choices; the reveal methods) are filled by WP6b. The keyring `SecretStore` is
-  not the shell's: it lives in `steno-services` (#173, WP6b).
+  destructive alert; the folder choices; the reveal methods) are filled by WP6b. So is
+  shutdown: Quit, and a close that ends the process because no tray stands, must stop
+  and save a recording in progress first, as `applicationShouldTerminate` in
+  `apps/macos/Steno/StenoApp.swift` does (it awaits `AppController.shutdown`); today the
+  shell ends the process at once. The keyring `SecretStore` is not the shell's: it
+  lives in `steno-services` (#173, WP6b).
 - **WP7 LLM, adapters, handover.** Ports of `StenoLLM` (Codex and OpenAI-compatible),
   `StenoAdapters`, `StenoHandover` (rustls, the pinned trust evaluation, the shared
   `wire.ts` contract test). Lands as three PRs: WP7a LLM, WP7b adapters, WP7c handover.
@@ -415,8 +419,8 @@ still has to draw the window side. `[ ]` is not ported yet.
 - [ ] Retention sweep at launch and after `retentionApplied`, interrupted recordings
   marked failed at launch, unfinished processing resumed at launch: WP6b.
 - [ ] Pending speaker reviews (`speakersNeedReview`): not on the bridge; WP6b.
-- [ ] Updates: Sparkle today, the Tauri updater at cutover; the `Updater` trait is the
-  seam, WP8.
+- [ ] Updates: Sparkle today, the Tauri updater at cutover; the `Updater` trait, which
+  WP6b implements over WP8's `updater`.
 - [x] Login item: registered on the first launch when the setting says so
   (`Host::register_login_item_on_first_launch`), toggled from General, the pane opened;
   the `LoginItem` trait, which WP6b implements over WP8's `autostart`.

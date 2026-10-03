@@ -113,8 +113,7 @@ the page's `page.ready`.
 `cargo tauri dev` from `apps/desktop/src-tauri` (`pnpm dlx
 @tauri-apps/cli@2.12.1 dev`, the version the workflows pin, or `cargo
 install tauri-cli --version 2.12.1`) starts the Vite dev server and the
-shell together.
-Without the CLI, start the dev server yourself and build the shell:
+shell together. Without the CLI, start the dev server yourself and build the shell:
 
 ```sh
 pnpm --dir apps/macos/web install --frozen-lockfile
@@ -233,8 +232,8 @@ the Xvfb root and one crop per window and per panel into
 `apps/desktop/screens/` (ignored by git; CI uploads it as the
 `desktop-smoke-screens` artifact). With `STENO_SMOKE_DPI=120` it runs Xvfb
 at that resolution, where WebKitGTK's pixel ratio is 1.25 and the panels
-must still fit their pills. The windows carry only fixture data,
-which is synthetic. Xvfb has no compositor, so the panels' transparent
+must still fit their pills. The windows carry only fixture data, which is
+synthetic. Xvfb has no compositor, so the panels' transparent
 corners render black there; a desktop shows them rounded. Xvfb has no
 tray host either; a smoke run stands in for one, so the built tray counts
 and the run checks the close rule a desktop with a tray gets.
@@ -291,7 +290,7 @@ Nothing beyond the Rust toolchain. WebView2 ships with Windows 11; the
 | `apps/desktop/src-tauri/src/panels.rs`, `panel_geometry.rs` | The two floating panels and the one content rule, the macOS `NSPanel` conversion; the anchor, frames and size validation as plain values |
 | `apps/desktop/src-tauri/src/autostart.rs`, `updater.rs`, `permissions.rs`, `deep_links.rs`, `dialogs.rs` | One module per service (see What the shell owns); each is plain rules the tests cover over a plugin or OS call |
 | `apps/desktop/src-tauri/src/windows.rs` | The three windows with the Swift sizes: main 1120 by 720 (minimum 960 by 600) at `#/main`, Settings 960 by 640 (minimum 760 by 520) at `#/settings`, onboarding fixed 560 by 620 at `#/onboarding`. Main opens at start; the others on `window.open`, focused when already open. New windows from the page are denied. `Pages` holds the requests a window is owed until its page mounts |
-| `apps/desktop/src-tauri/src/bridge.rs` | `bridge_call(method, params)` and the `steno:event` emitter, scoped to the calling window; a finished `onboarding` snapshot closes the onboarding window, a `recording` snapshot to main moves the tray and the panels. `window.open` (typed: one of the six sections, a UUID meeting id), `window.close` (the onboarding window, from itself), `system.openURL` (`https:` and `mailto:` only) and the WP8 methods listed above are the shell's; everything else goes to the host. `panel_call(action, params)` is the panels' own command |
+| `apps/desktop/src-tauri/src/bridge.rs` | `bridge_call(method, params)` and the `steno:event` emitter, scoped to the calling window; a finished `onboarding` snapshot closes the onboarding window, a `recording` snapshot to main moves the tray and the panels. `window.open` (typed: one of the six sections, a UUID meeting id), `window.close` (the onboarding window, from itself), `system.openURL` (`https:` and `mailto:` only) and the shell's own methods listed above are the shell's; everything else goes to the host. `panel_call(action, params)` is the panels' own command |
 | `apps/desktop/src-tauri/src/host.rs`, `fixtures.rs` | The fixture host: the fixtures `index.json` lists, embedded with `include_str!`; every topic's snapshot on `page.ready`; replies as `mock-transport.ts` gives them (`speakers.options.reply`, `reply.confirm` and `reply.chosenPath` for the alerts and folder panels, `null` otherwise); a deep link as the `app` snapshot with the request set, then the clean one |
 | `apps/desktop/src-tauri/src/navigation.rs` | Navigation policy: the app origin and, in a dev build, the Vite dev server; everything else is cancelled |
 | `apps/desktop/src-tauri/src/smoke.rs`, `apps/desktop/scripts/smoke-linux.sh` | The headless smoke CI runs under Xvfb |
@@ -305,12 +304,19 @@ WP9, as is `cargo deny`; the release workflow stops at unsigned bundles.
 The host's half of the WP8 seams is WP6b, which wires `steno-host` (#170)
 in place of the fixture host: the detection controller raising the prompt
 (`panels::set_prompt`) and hearing of its dismissal
-(`panels::dismiss_prompt`); the host's `LoginItem`, `Permissions`,
-`Updater` and `Opener` traits implemented over `autostart`, `permissions`,
-`updater` and `dialogs::reveal`, whose `LoginItemStatus` and
-`UpdateOutcome` give way to the host's own; and the folder panels, which
-`steno-host` asks for through its `choose_folder` callback where this
-shell shows the panel itself and forwards `{ "path": … }`. The host may
+(`panels::dismiss_prompt`); the host's `LoginItem`, `Permissions` and
+`Updater` traits implemented over `autostart`, `permissions` and
+`updater`, whose `LoginItemStatus` and `UpdateOutcome` give way to the
+host's own, and its `Opener` over `dialogs::reveal`, `dialogs::open_url`
+and `windows::open` and `windows::close`; its `confirm` callback for the
+destructive alert, which the shell does not draw yet (the fixture host
+answers confirmed); and the folder panels, which `steno-host` asks for
+through its `choose_folder` callback where this shell shows the panel
+itself and forwards `{ "path": … }`. Quit, and a close that ends the
+process because no tray stands, must then stop and save a recording in
+progress first, as the Swift `applicationShouldTerminate` in
+`apps/macos/Steno/StenoApp.swift` does (it awaits
+`AppController.shutdown`); today both end the process at once. The host may
 treat the main window as always present: a close hides it, or ends the
 process when no tray stands, so publishing to it never fails for want of a
 window. Launch at login is a Launch Agent, not `SMAppService`; WP9 has to
