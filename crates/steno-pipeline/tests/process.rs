@@ -16,7 +16,7 @@ use steno_core::{
     AudioAsset, AudioFormat, AudioLane, AudioRetention, Delivery, DeliveryDispatcher,
     DeliveryStatus, Destination, Meeting, MeetingEvent, MeetingState, PipelineStage,
     SpeakerAssignmentKind, Store, async_trait,
-    paths::{file_url, path_from_file_url},
+    paths::{file_url, file_url_path},
 };
 use steno_pipeline::{
     MeetingEventBus, MonotonicClock, PipelineDependencies, ProcessingPipeline, RetentionSweep,
@@ -47,7 +47,7 @@ struct FakeDispatcher {
 #[async_trait]
 impl DeliveryDispatcher for FakeDispatcher {
     async fn deliver_all(&self, meeting_id: Uuid) -> Vec<Delivery> {
-        let export = self.store.export(meeting_id).unwrap().unwrap();
+        let export = self.store.export(meeting_id).unwrap();
         let existing = self.store.deliveries(meeting_id).unwrap();
         let mut rows = Vec::new();
         for destination in &self.destinations {
@@ -170,7 +170,7 @@ impl steno_core::AudioDecoder for WavDecoder {
         lane: AudioLane,
     ) -> steno_core::protocols::BoundaryResult<steno_core::AudioBuffer16k> {
         let url = asset.sidecars_16k.get(&lane).unwrap_or(&asset.url);
-        let path = path_from_file_url(url).ok_or("not a file URL")?;
+        let path = file_url_path(url).ok_or("not a file URL")?;
         Ok(steno_core::AudioBuffer16k::new(read_wav(&path)?))
     }
 
@@ -183,7 +183,7 @@ impl steno_core::AudioDecoder for WavDecoder {
         asset: &AudioAsset,
         to: &Path,
     ) -> steno_core::protocols::BoundaryResult<()> {
-        let source = path_from_file_url(&asset.url).ok_or("not a file URL")?;
+        let source = file_url_path(&asset.url).ok_or("not a file URL")?;
         std::fs::copy(source, to)?;
         Ok(())
     }
@@ -246,7 +246,7 @@ async fn a_mac_call_runs_every_stage_to_ready_and_delivers() {
     assert!(stored.summary.is_some());
     assert!(stored.llm_usage.is_some());
 
-    let export = world.store.export(meeting.id).unwrap().unwrap();
+    let export = world.store.export(meeting.id).unwrap();
     assert_eq!(
         export.segments.len(),
         12,
@@ -280,7 +280,7 @@ async fn a_mac_call_runs_every_stage_to_ready_and_delivers() {
     assert!(them.iter().all(|s| {
         s.sample_clip_url
             .as_ref()
-            .is_some_and(|url| path_from_file_url(url).is_some_and(|p| p.exists()))
+            .is_some_and(|url| file_url_path(url).is_some_and(|p| p.exists()))
     }));
     assert_eq!(export.tasks.len(), 1);
     assert_eq!(export.decisions.len(), 1);
@@ -293,7 +293,7 @@ async fn a_mac_call_runs_every_stage_to_ready_and_delivers() {
         audio
             .mixdown_url
             .as_ref()
-            .is_some_and(|url| path_from_file_url(url).unwrap().exists())
+            .is_some_and(|url| file_url_path(url).unwrap().exists())
     );
     assert_eq!(
         audio.expires_at,
@@ -675,7 +675,7 @@ async fn a_failed_delivery_defers_deletion_until_a_re_export_succeeds() {
     );
 
     let removed = sweep.run(world.now).unwrap();
-    let master = path_from_file_url(&asset.url).unwrap();
+    let master = file_url_path(&asset.url).unwrap();
     assert!(removed.contains(&master));
     assert!(!master.exists());
     assert_eq!(

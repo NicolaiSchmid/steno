@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
-use steno_core::{Store, StoreError, paths::path_from_file_url};
+use steno_core::{Store, StoreError, paths::file_url_path};
 
 /// Why a sweep stopped short: files it could not remove, or a store read
 /// that failed.
@@ -67,7 +67,7 @@ impl RetentionSweep {
                         .iter()
                         .filter_map(|s| s.sample_clip_url.as_ref()),
                 )
-                .filter_map(|url| path_from_file_url(url))
+                .filter_map(|url| file_url_path(url))
                 .collect();
             let mut clean = true;
             for path in files.into_iter().filter(|path| path.exists()) {
@@ -102,7 +102,7 @@ impl RetentionSweep {
             .store
             .assets()?
             .into_iter()
-            .filter(|asset| path_from_file_url(&asset.url).is_some_and(|path| path.exists()))
+            .filter(|asset| file_url_path(&asset.url).is_some_and(|path| path.exists()))
             .map(|asset| asset.id)
             .collect();
         self.store.keep_forever(&ids)?;

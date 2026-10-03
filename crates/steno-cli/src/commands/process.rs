@@ -13,7 +13,7 @@ use clap::{Args, ValueEnum};
 use steno_core::{
     AudioAsset, AudioFormat, AudioLane, Meeting, MeetingEvent, MeetingSource, MeetingState,
     PipelineStage, ProcessingProgress, RecordingLayout, SummaryTemplate, TitleOrigin,
-    paths::{file_url, path_from_file_url},
+    paths::{file_url, file_url_path},
 };
 use steno_pipeline::{MeetingEventBus, ProcessingPipeline};
 use uuid::Uuid;
@@ -112,7 +112,7 @@ impl Process {
         // is the app's and never changes here.
         let root = match &self.audio_folder {
             Some(folder) => crate::wiring::standardized(folder),
-            None => path_from_file_url(&settings.audio_folder)
+            None => file_url_path(&settings.audio_folder)
                 .ok_or_else(|| Failure::runtime("the audio folder setting is not a file URL"))?,
         };
         let meeting_id = Uuid::new_v4();
@@ -195,10 +195,7 @@ impl Process {
         let skipped = llm.is_none();
         let events = MeetingEventBus::new();
         let mut receiver = events.subscribe();
-        let models = settings
-            .models_directory
-            .as_deref()
-            .and_then(path_from_file_url);
+        let models = settings.models_directory.as_deref().and_then(file_url_path);
         let pipeline = ProcessingPipeline::new(crate::wiring::dependencies(
             store.clone(),
             &settings,

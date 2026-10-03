@@ -14,8 +14,7 @@ use steno_core::{
     AudioAsset, AudioLane, AudioRetention, HandoverIntake, HandoverReceipt, HandoverState, Meeting,
     MeetingSource, MeetingState, MeetingStateKind, PairedDevice, Participant, ParticipantRole,
     RecordingEndReason, RecordingLayout, RecordingMetadata, Store, StoreError, TitleOrigin,
-    async_trait, derived_uuid, paths::file_url, paths::path_from_file_url,
-    protocols::BoundaryResult,
+    async_trait, derived_uuid, paths::file_url, paths::file_url_path, protocols::BoundaryResult,
 };
 use uuid::Uuid;
 
@@ -112,7 +111,7 @@ impl HandoverIntake for RecordingIntake {
         let settings = self.store.settings()?;
         let meeting_id = Uuid::new_v4();
         let timestamp = (self.now)();
-        let audio_folder = path_from_file_url(&settings.audio_folder)
+        let audio_folder = file_url_path(&settings.audio_folder)
             .ok_or_else(|| format!("audio folder is not a file URL: {}", settings.audio_folder))?;
         let layout = RecordingLayout::new(&audio_folder, meeting_id);
         layout.create_directories(false)?;

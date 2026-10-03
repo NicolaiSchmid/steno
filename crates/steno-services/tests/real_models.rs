@@ -95,7 +95,7 @@ async fn the_synthetic_call_runs_through_the_real_engines_to_a_well_formed_expor
 
     let stored = store.meeting(meeting_id).unwrap().unwrap();
     assert_eq!(stored.state, MeetingState::Ready, "{:?}", stored.state);
-    let export = store.export(meeting_id).unwrap().unwrap();
+    let export = store.export(meeting_id).unwrap();
     let json = ArtifactRenderer.render_json(&export).unwrap();
     let decoded: MeetingExport = serde_json::from_slice(&json).unwrap();
     assert_eq!(

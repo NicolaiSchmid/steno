@@ -607,11 +607,7 @@ impl ProcessingPipeline {
 
     async fn resummarize(&self, meeting: Meeting, template_id: &str) -> Result<()> {
         let meeting_id = meeting.id;
-        let export = required(
-            PipelineStage::Summarize,
-            self.store().export(meeting_id),
-            || format!("meeting {meeting_id} not found"),
-        )?;
+        let export = attributing(PipelineStage::Summarize, self.store().export(meeting_id))?;
         let settings = attributing(PipelineStage::Summarize, self.store().settings())?;
         let lanes = export
             .audio
@@ -1312,7 +1308,7 @@ impl ProcessingPipeline {
         let ready = attributing(PipelineStage::Retention, store.meeting(meeting_id))?
             .is_some_and(|meeting| meeting.state == MeetingState::Ready);
         let master_exists =
-            steno_core::paths::path_from_file_url(&asset.url).is_some_and(|path| path.exists());
+            steno_core::paths::file_url_path(&asset.url).is_some_and(|path| path.exists());
         if !ready || !master_exists {
             return Ok(());
         }

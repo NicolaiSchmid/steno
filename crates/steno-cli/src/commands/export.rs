@@ -23,10 +23,7 @@ pub struct Export {
 impl Export {
     pub fn run(self) -> Outcome {
         let store = self.database.open()?;
-        let export = store
-            .export(self.meeting_id)
-            .map_err(Failure::runtime)?
-            .ok_or_else(|| Failure::runtime(format!("meeting {} not found", self.meeting_id)))?;
+        let export = store.export(self.meeting_id).map_err(Failure::runtime)?;
         let out = crate::wiring::standardized(&self.out);
         std::fs::create_dir_all(&out).map_err(Failure::runtime)?;
         let path = out.join("meeting.json");

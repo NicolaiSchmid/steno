@@ -13,7 +13,7 @@ use steno_audio::testing::AudioFixtures;
 use steno_audio::{EchoMetrics, PassthroughEchoCanceller, SpeexEchoCanceller, WavFile};
 use steno_core::{
     AudioBuffer16k, AudioLane, Diarizer, EchoCanceller, MeetingExport, MeetingSummarizer,
-    SpeechEngine, SummaryTemplate, TranscriptCleaner, paths::path_from_file_url,
+    SpeechEngine, SummaryTemplate, TranscriptCleaner, paths::file_url_path,
 };
 use steno_diarize::{DiarizerConfig, ModelDiarizer};
 use steno_host::speech::ModelAsset;
@@ -346,7 +346,7 @@ impl CaptureSpike {
         }
         println!(
             "master: {}",
-            path_from_file_url(&result.asset.url)
+            file_url_path(&result.asset.url)
                 .unwrap_or_default()
                 .display()
         );
@@ -363,7 +363,7 @@ impl CaptureSpike {
         println!("duration: {:.2} s", result.statistics.duration);
         for lane in &result.asset.lanes {
             if let Some(sidecar) = result.asset.sidecars_16k.get(lane)
-                && let Some(path) = path_from_file_url(sidecar)
+                && let Some(path) = file_url_path(sidecar)
                 && let Ok(samples) = WavFile::read_16k_mono(&path)
             {
                 let onset = samples

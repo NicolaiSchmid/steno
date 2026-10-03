@@ -14,7 +14,7 @@ use steno_audio::{
     CaptureBackend, CaptureConfiguration, CaptureMode, CaptureNotice, CaptureSession, CaptureState,
     LaneLevels, LiveCaptureBackend, SpeexEchoCanceller, SystemClock,
 };
-use steno_core::{AudioLane, EchoCanceller, paths::path_from_file_url};
+use steno_core::{AudioLane, EchoCanceller, paths::file_url_path};
 use uuid::Uuid;
 
 use crate::wiring::{Failure, Outcome};
@@ -237,7 +237,7 @@ impl Record {
         println!("meeting: {}", steno_core::json::uuid_string(id));
         println!(
             "master: {}",
-            path_from_file_url(&result.asset.url)
+            file_url_path(&result.asset.url)
                 .unwrap_or_default()
                 .display()
         );
@@ -246,7 +246,7 @@ impl Record {
                 println!(
                     "sidecar {}: {}",
                     lane.as_str(),
-                    path_from_file_url(sidecar).unwrap_or_default().display()
+                    file_url_path(sidecar).unwrap_or_default().display()
                 );
             }
         }

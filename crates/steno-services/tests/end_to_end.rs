@@ -17,7 +17,7 @@ use steno_core::testing::{FakeDiarizer, FakeSpeechEngine, sample_data};
 use steno_core::{
     AudioRetention, DeliveryStatus, Destination, LlmUsage, Meeting, MeetingEvent, MeetingExport,
     MeetingState, ObsidianSettings, PipelineStage, SpeakerAssignmentKind, Store,
-    paths::{file_url, path_from_file_url},
+    paths::{file_url, file_url_path},
 };
 use steno_llm::testing::{Scripts, StubChatServer};
 use steno_llm::{
@@ -215,7 +215,7 @@ async fn a_mac_call_fixture_lands_in_the_vault() {
         let data = std::fs::read(vault.join(&file.relative_path)).unwrap();
         assert_eq!(
             file.sha256,
-            steno_adapters::sha256(&data),
+            steno_core::content_hash::sha256(&data),
             "{}",
             file.relative_path
         );
@@ -228,7 +228,7 @@ async fn a_mac_call_fixture_lands_in_the_vault() {
         ArtifactRenderer.render_json(&export).unwrap(),
         "meeting.json is the StenoJSON encoding"
     );
-    let current = store.export(meeting.id).unwrap().unwrap();
+    let current = store.export(meeting.id).unwrap();
     assert_eq!(export.meeting, current.meeting);
     assert_eq!(export.segments, current.segments);
     assert_eq!(export.tasks, current.tasks);
@@ -311,7 +311,7 @@ async fn a_mac_call_fixture_lands_in_the_vault() {
     assert_eq!(suggestions.len(), 1, "{suggestions:?}");
     assert_eq!(suggestions[0].speaker_id, speaker_one.id);
     assert_eq!(suggestions[0].name.as_deref(), Some("Jérôme"));
-    let mixdown = path_from_file_url(
+    let mixdown = file_url_path(
         current
             .audio
             .as_ref()
