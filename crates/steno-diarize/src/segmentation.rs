@@ -16,29 +16,40 @@ pub struct Window {
     pub valid_frames: usize,
 }
 
-/// Windows every `step` samples, as sherpa-onnx lays them out: audio up to
-/// one window long is one zero-padded window; otherwise every window that
-/// fits, then one padded window for the tail when samples remain. A step
-/// of zero reads as one window.
+/// The first sample of every window when `audio` samples are windowed
+/// every `step`, as sherpa-onnx lays them out: audio up to one window long
+/// is one zero-padded window; otherwise every window that fits, then one
+/// padded window for the tail when samples remain. A step of zero reads
+/// as one window.
 #[must_use]
-pub fn windows(audio: &[f32], geometry: &SegmentationGeometry, step: usize) -> Vec<Window> {
+pub fn window_offsets(total: usize, geometry: &SegmentationGeometry, step: usize) -> Vec<usize> {
     let length = geometry.window_samples;
     let step = step.max(1);
-    let total = audio.len();
-    let mut offsets = Vec::new();
     if total <= length {
-        offsets.push(0);
-    } else {
-        let full = (total - length) / step + 1;
-        offsets.extend((0..full).map(|index| index * step));
-        if !(total - length).is_multiple_of(step) {
-            offsets.push(full * step);
-        }
+        return vec![0];
+    }
+    let full = (total - length) / step + 1;
+    let mut offsets: Vec<usize> = (0..full).map(|index| index * step).collect();
+    if !(total - length).is_multiple_of(step) {
+        offsets.push(full * step);
     }
     offsets
+}
+
+/// The windows at [`window_offsets`], built one at a time as the iterator
+/// advances: a padded window is 640 KB at pyannote's geometry and an hour
+/// holds 1 800 of them, so only the window being analysed is alive.
+pub fn windows<'a>(
+    audio: &'a [f32],
+    geometry: &'a SegmentationGeometry,
+    step: usize,
+) -> impl ExactSizeIterator<Item = Window> + 'a {
+    let length = geometry.window_samples;
+    let total = audio.len();
+    window_offsets(total, geometry, step)
         .into_iter()
         .enumerate()
-        .map(|(index, offset)| {
+        .map(move |(index, offset)| {
             let available = total.saturating_sub(offset).min(length);
             let mut samples = vec![0.0f32; length];
             samples[..available].copy_from_slice(&audio[offset..offset + available]);
@@ -49,7 +60,6 @@ pub fn windows(audio: &[f32], geometry: &SegmentationGeometry, step: usize) -> V
                 valid_frames: geometry.valid_frames(available),
             }
         })
-        .collect()
 }
 
 /// The powerset classes of a segmentation model as speaker bit masks:
@@ -163,7 +173,7 @@ mod tests {
     #[test]
     fn short_audio_is_one_padded_window() {
         let audio = vec![0.5f32; 16_000];
-        let windows = windows(&audio, &GEOMETRY, 32_000);
+        let windows: Vec<Window> = windows(&audio, &GEOMETRY, 32_000).collect();
         assert_eq!(windows.len(), 1);
         assert_eq!(windows[0].offset, 0);
         assert_eq!(windows[0].samples.len(), 160_000);
@@ -185,18 +195,23 @@ mod tests {
     fn long_audio_gets_every_full_window_and_a_padded_tail() {
         // 25 s: full windows at 0, 2, ..., 14 s (eight), then the tail at 16 s.
         let audio = vec![0.1f32; 400_000];
-        let windows = windows(&audio, &GEOMETRY, 32_000);
+        let iterator = windows(&audio, &GEOMETRY, 32_000);
+        assert_eq!(iterator.len(), 9);
+        let windows: Vec<Window> = iterator.collect();
         let offsets: Vec<usize> = windows.iter().map(|w| w.offset).collect();
         assert_eq!(offsets, (0..9).map(|i| i * 32_000).collect::<Vec<_>>());
+        assert_eq!(window_offsets(400_000, &GEOMETRY, 32_000), offsets);
         assert_eq!(
             windows[8].valid_frames,
             GEOMETRY.valid_frames(400_000 - 256_000)
         );
         assert!(windows.iter().all(|w| w.valid_frames <= 589));
         // Exactly one window's worth plus one step: two windows, no tail.
-        let exact = super::windows(&vec![0.0f32; 192_000], &GEOMETRY, 32_000);
+        let exact: Vec<Window> =
+            super::windows(&vec![0.0f32; 192_000], &GEOMETRY, 32_000).collect();
         assert_eq!(exact.len(), 2);
         assert_eq!(exact[1].valid_frames, 589);
+        assert_eq!(window_offsets(0, &GEOMETRY, 0), vec![0]);
     }
 
     #[test]
