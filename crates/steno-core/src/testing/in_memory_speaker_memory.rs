@@ -177,7 +177,7 @@ mod tests {
         // `inf / inf` and `0 * inf` are NaN: every similarity is non-finite.
         let mut voice = sample_data::embedding(0);
         voice.0[0] = f32::INFINITY;
-        assert!(memory.candidates(&voice, 5).await.unwrap().is_empty());
+        assert_eq!(memory.candidates(&voice, 5).await.unwrap(), []);
         assert_eq!(memory.match_voice(&voice, 0.0, 0.0).await.unwrap(), None);
     }
 }

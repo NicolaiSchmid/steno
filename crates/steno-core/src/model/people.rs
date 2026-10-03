@@ -362,7 +362,11 @@ mod tests {
         assert!((x.cosine_similarity(&diagonal) - 0.707_106_77).abs() < 1e-6);
         assert_eq!(x.cosine_similarity(&Embedding(vec![0.0, 0.0])), 0.0);
         assert_eq!(x.cosine_similarity(&Embedding(vec![1.0])), 0.0);
-        assert_eq!(diagonal.normalized().magnitude(), 1.0);
+    }
+
+    #[test]
+    fn normalized_has_unit_magnitude_except_for_the_zero_vector() {
+        assert_eq!(Embedding(vec![3.0, 3.0]).normalized().magnitude(), 1.0);
         assert_eq!(Embedding(vec![0.0]).normalized(), Embedding(vec![0.0]));
     }
 

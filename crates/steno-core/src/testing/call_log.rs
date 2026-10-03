@@ -26,8 +26,12 @@ impl<Entry> CallLog<Entry> {
         Self::default()
     }
 
-    pub fn record(&self, entry: Entry) {
-        lock(&self.entries).push(entry);
+    /// Appends `entry` and returns the count including it, so a fake that
+    /// numbers its calls reads the number from the same lock.
+    pub fn record(&self, entry: Entry) -> usize {
+        let mut entries = lock(&self.entries);
+        entries.push(entry);
+        entries.len()
     }
 
     #[must_use]
@@ -51,14 +55,41 @@ impl<Entry: Clone> CallLog<Entry> {
 
 #[cfg(test)]
 mod tests {
+    use std::panic::{AssertUnwindSafe, catch_unwind};
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
     use super::*;
+
+    /// Panics on its first clone, inside the lock `entries()` holds, and
+    /// clones quietly after that.
+    struct Volatile(Arc<AtomicBool>);
+
+    impl Clone for Volatile {
+        fn clone(&self) -> Self {
+            assert!(!self.0.swap(false, Ordering::SeqCst), "first clone");
+            Volatile(Arc::clone(&self.0))
+        }
+    }
+
+    #[test]
+    fn a_poisoned_log_still_records_and_reads() {
+        let log = CallLog::new();
+        log.record(Volatile(Arc::new(AtomicBool::new(true))));
+        let panicked = catch_unwind(AssertUnwindSafe(|| log.entries())).is_err();
+        assert!(panicked);
+        assert!(log.entries.is_poisoned());
+        assert_eq!(log.count(), 1);
+        assert_eq!(log.record(Volatile(Arc::new(AtomicBool::new(false)))), 2);
+        assert_eq!(log.entries().len(), 2);
+    }
 
     #[test]
     fn a_log_keeps_call_order() {
         let log = CallLog::new();
         assert!(log.is_empty());
-        log.record("a");
-        log.record("b");
+        assert_eq!(log.record("a"), 1);
+        assert_eq!(log.record("b"), 2);
         assert_eq!(log.count(), 2);
         assert_eq!(log.entries(), vec!["a", "b"]);
     }

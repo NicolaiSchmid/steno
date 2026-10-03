@@ -93,7 +93,15 @@ mod tests {
         assert_eq!(AudioBuffer16k::default().duration(), 0.0);
         assert_eq!(ramp(16_000).duration(), 1.0);
         assert_eq!(ramp(8_000).duration(), 0.5);
+    }
+
+    #[test]
+    fn silence_rounds_down_to_whole_samples() {
         assert_eq!(AudioBuffer16k::silence(0.25).len(), 4_000);
+        // 0.8 of a sample is no sample; 1.6 samples is one.
+        assert_eq!(AudioBuffer16k::silence(0.000_05).len(), 0);
+        assert_eq!(AudioBuffer16k::silence(0.000_1).len(), 1);
+        assert_eq!(AudioBuffer16k::silence(-1.0).len(), 0);
     }
 
     #[test]

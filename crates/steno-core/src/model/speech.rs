@@ -233,7 +233,7 @@ mod tests {
     }
 
     #[test]
-    fn chunks_and_turns_clamp_their_duration() {
+    fn an_inverted_chunk_has_zero_duration_and_an_empty_range() {
         let chunk = ClusterChunk {
             speaker_label: "Speaker 2".to_owned(),
             start: 3.0,
@@ -249,13 +249,10 @@ mod tests {
                 upper: 3.0
             }
         );
-        let turn = SpeakerTurn {
-            speaker_label: "Speaker 1".to_owned(),
-            start: 0.0,
-            end: 1.25,
-            quality: 0.8,
-        };
-        assert_eq!(turn.duration(), 1.25);
+    }
+
+    #[test]
+    fn a_timed_word_drops_its_confidence_to_become_a_word_timing() {
         let word = TimedWord {
             text: "ja".to_owned(),
             start: 0.1,

@@ -54,7 +54,8 @@ impl Default for FakeSpeechEngine {
 impl FakeSpeechEngine {
     /// The segments for `duration` seconds: one per `segment_seconds`, each
     /// starting exactly where the previous one ended, the last one clipped
-    /// to the end; three evenly spaced word timings each when asked.
+    /// to the end; three evenly spaced word timings each when asked, the
+    /// last word ending exactly at the segment's `end`.
     #[must_use]
     pub fn segments(
         duration: f64,
@@ -80,16 +81,27 @@ impl FakeSpeechEngine {
                 let end = duration.min((index + 1) as f64 * segment_seconds);
                 let text = format!("{text_prefix} segment {}", index + 1);
                 let timings = word_timings.then(|| {
-                    let step = (end - start) / 3.0;
-                    text.split(' ')
+                    let words: Vec<&str> = text.split(' ').collect();
+                    #[allow(clippy::cast_precision_loss)]
+                    let step = (end - start) / words.len() as f64;
+                    let last = words.len() - 1;
+                    words
+                        .iter()
                         .enumerate()
-                        .map(|(offset, word)| {
+                        .map(|(index, word)| {
                             #[allow(clippy::cast_precision_loss)]
-                            let offset = offset as f64;
+                            let offset = index as f64;
                             WordTiming {
-                                word: word.to_owned(),
+                                word: (*word).to_owned(),
                                 start: start + offset * step,
-                                end: start + (offset + 1.0) * step,
+                                // `start + 3 * step` can miss `end` by an
+                                // ulp; the last word ends where the
+                                // segment does.
+                                end: if index == last {
+                                    end
+                                } else {
+                                    start + (offset + 1.0) * step
+                                },
                             }
                         })
                         .collect()
@@ -319,6 +331,18 @@ mod tests {
         }
     }
 
+    #[test]
+    fn the_last_word_ends_where_its_segment_does() {
+        // Over 0.9 s steps `start + 3 * step` misses `end` by an ulp in two
+        // of the fourteen segments.
+        let segments = FakeSpeechEngine::segments(12.0, 0.9, None, "fake", true);
+        assert_eq!(segments.len(), 14);
+        for segment in &segments {
+            let words = segment.word_timings.as_ref().unwrap();
+            assert_eq!(words[2].end.to_bits(), segment.end.to_bits(), "{segment:?}");
+        }
+    }
+
     #[tokio::test]
     async fn a_failing_engine_returns_its_message() {
         let engine = FakeSpeechEngine {
@@ -368,6 +392,9 @@ mod tests {
         );
         assert_eq!(first.embedding.as_ref().unwrap().0[0], 1.0);
         assert_eq!(result.clusters[1].embedding.as_ref().unwrap().0[1], 1.0);
+        // Confidence falls by a tenth per cluster from 0.9, in `f32`.
+        assert_eq!(first.cluster_confidence, 0.9);
+        assert_eq!(result.clusters[1].cluster_confidence, 0.9_f32 - 0.1);
         assert_eq!(diarizer.diarizations.entries(), vec![40.0]);
         assert_eq!(
             FakeDiarizer::round_robin(0.0, 2, 1.0),

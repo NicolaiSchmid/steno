@@ -193,7 +193,56 @@ impl MeetingSummarizer for FakeSummarizer {
 mod tests {
     use super::*;
     use crate::testing::sample_data;
-    use crate::{LlmFinishReason, LlmMessage, LlmResponseFormat, LlmRole, SummaryTemplate};
+    use crate::{
+        AudioLane, LlmFinishReason, LlmMessage, LlmResponseFormat, LlmRole, Speaker,
+        SpeakerAssignment, SummaryTemplate, TranscriptSegment,
+    };
+
+    fn response(text: &str) -> LlmResponse {
+        LlmResponse {
+            text: text.to_owned(),
+            finish_reason: LlmFinishReason::Stop,
+            usage: None,
+            model: None,
+        }
+    }
+
+    fn segment(text: &str) -> TranscriptSegment {
+        TranscriptSegment {
+            id: derived_uuid(sample_data::meeting_id(), text),
+            meeting_id: sample_data::meeting_id(),
+            start: 0.0,
+            end: 1.5,
+            speaker_id: None,
+            lane: AudioLane::Mic,
+            text: text.to_owned(),
+            raw_text: text.to_owned(),
+        }
+    }
+
+    fn speaker(label: &str) -> Speaker {
+        Speaker {
+            id: derived_uuid(sample_data::meeting_id(), label),
+            meeting_id: sample_data::meeting_id(),
+            cluster_label: label.to_owned(),
+            assignment: SpeakerAssignment::Unknown,
+            embedding: None,
+            sample_clip_range: None,
+            sample_clip_url: None,
+            cluster_confidence: 0.9,
+        }
+    }
+
+    fn summary_input(segments: Vec<TranscriptSegment>, speakers: Vec<Speaker>) -> SummaryInput {
+        SummaryInput {
+            meeting: sample_data::meeting(),
+            segments,
+            speakers,
+            participants: Vec::new(),
+            known_people: Vec::new(),
+            template: SummaryTemplate::bundled_with_id("default").unwrap().clone(),
+        }
+    }
 
     fn request(content: &str) -> LlmRequest {
         LlmRequest {
@@ -210,55 +259,77 @@ mod tests {
 
     #[tokio::test]
     async fn the_model_answers_in_order_and_then_runs_dry() {
-        let model = FakeLanguageModel::new([LlmResponse {
-            text: "one".to_owned(),
-            finish_reason: LlmFinishReason::Stop,
-            usage: None,
-            model: None,
-        }]);
+        let model = FakeLanguageModel::new([response("one"), response("two")]);
+        assert_eq!(model.remaining(), 2);
         assert_eq!(model.complete(&request("a")).await.unwrap().text, "one");
-        let error = model.complete(&request("b")).await.unwrap_err();
+        assert_eq!(model.complete(&request("b")).await.unwrap().text, "two");
+        let error = model.complete(&request("c")).await.unwrap_err();
         assert!(error.is::<Exhausted>());
-        assert_eq!(model.requests.count(), 2);
+        assert_eq!(
+            model
+                .requests
+                .entries()
+                .iter()
+                .map(|request| request.messages[0].content.as_str())
+                .collect::<Vec<_>>(),
+            ["a", "b", "c"]
+        );
         assert_eq!(model.remaining(), 0);
     }
 
     #[tokio::test]
     async fn the_cleaner_passes_segments_through() {
         let cleaner = PassthroughCleaner::default();
+        let segments = vec![segment("Hallo zusammen."), segment("Fangen wir an.")];
         let input = CleanupInput {
-            segments: Vec::new(),
-            language: None,
+            segments: segments.clone(),
+            language: Some("de".into()),
             participants: Vec::new(),
             speakers: Vec::new(),
             known_people: Vec::new(),
         };
         let output = cleaner.clean(&input).await.unwrap();
-        assert_eq!(output.segments, Vec::new());
-        assert_eq!(output.usage.prompt_tokens, 100);
-        assert_eq!(cleaner.cleanups.entries(), vec![0]);
+        assert_eq!(output.segments, segments);
+        assert_eq!(output.failed_chunks, [0usize; 0]);
+        assert_eq!(output.usage, cleaner.usage);
+        assert_eq!(cleaner.cleanups.entries(), vec![2]);
     }
 
     #[tokio::test]
     async fn the_summarizer_fills_every_template_section() {
         let summarizer = FakeSummarizer::default();
-        let template = SummaryTemplate::bundled_with_id("default").unwrap().clone();
-        let input = SummaryInput {
-            meeting: sample_data::meeting(),
-            segments: Vec::new(),
-            speakers: Vec::new(),
-            participants: Vec::new(),
-            known_people: Vec::new(),
-            template: template.clone(),
-        };
+        let input = summary_input(
+            vec![segment("Wir starten mit dem Plan.")],
+            vec![speaker("Speaker 1"), speaker("Speaker 2")],
+        );
+        let template = &input.template;
         let output = summarizer.summarize(&input).await.unwrap();
         assert_eq!(output.title, "Summary of Call 2026-09-29 15:49");
         assert_eq!(output.summary.sections.len(), template.sections.len());
+        for section in &output.summary.sections {
+            assert_eq!(section.bullets.len(), 1);
+            assert_eq!(section.bullets[0].lead, "Speaker 1");
+            assert_eq!(section.bullets[0].text, "Wir starten mit dem Plan.");
+        }
         assert_eq!(
-            output.summary.sections[0].bullets[0].text,
-            "Nothing was said."
+            output.decisions,
+            vec!["Decision from Speaker 1.".to_owned()]
         );
         assert_eq!(output.tasks[0].text, "Follow up on Default.");
+        assert_eq!(output.tasks[0].assignee_name.as_deref(), Some("Speaker 1"));
+        assert_eq!(
+            output
+                .speaker_names
+                .iter()
+                .map(|suggestion| (suggestion.speaker_id, suggestion.name.clone()))
+                .collect::<Vec<_>>(),
+            input
+                .speakers
+                .iter()
+                .map(|speaker| (speaker.id, None))
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(output.usage, summarizer.usage);
         assert_eq!(output.language, Some("de".into()));
         assert_eq!(summarizer.summaries.entries(), vec!["default".to_owned()]);
         // Codable in Swift: the output round-trips through JSON.
@@ -267,5 +338,35 @@ mod tests {
             serde_json::from_str::<SummaryOutput>(&text).unwrap(),
             output
         );
+    }
+
+    #[tokio::test]
+    async fn an_empty_meeting_summarizes_to_the_placeholders() {
+        let output = FakeSummarizer::output(
+            &summary_input(Vec::new(), Vec::new()),
+            FakeSummarizer::default().usage,
+        );
+        assert_eq!(
+            output.summary.sections[0].bullets[0].text,
+            "Nothing was said."
+        );
+        assert_eq!(output.summary.sections[0].bullets[0].lead, "Speaker 1");
+        assert_eq!(output.speaker_names, []);
+    }
+
+    #[tokio::test]
+    async fn a_canned_summary_wins_over_the_deterministic_one() {
+        let input = summary_input(Vec::new(), Vec::new());
+        let canned = SummaryOutput {
+            title: "Canned".to_owned(),
+            decisions: vec!["Ship it.".to_owned()],
+            ..FakeSummarizer::output(&input, FakeSummarizer::default().usage)
+        };
+        let summarizer = FakeSummarizer {
+            canned: Some(canned.clone()),
+            ..Default::default()
+        };
+        assert_eq!(summarizer.summarize(&input).await.unwrap(), canned);
+        assert_eq!(summarizer.summaries.entries(), vec!["default".to_owned()]);
     }
 }

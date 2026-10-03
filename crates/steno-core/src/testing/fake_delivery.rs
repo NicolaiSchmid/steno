@@ -75,9 +75,8 @@ impl Destination for FakeDestination {
         meeting: &MeetingExport,
         previous: Option<&DeliveryReceipt>,
     ) -> BoundaryResult<DeliveryReceipt> {
-        self.deliveries.record(meeting.clone());
+        let attempt = self.deliveries.record(meeting.clone());
         FakeFailure::check(self.deliver_failure.as_ref())?;
-        let attempt = self.deliveries.count();
         if attempt <= self.fail_until {
             return Err(Box::new(Transient { attempt }));
         }
@@ -202,7 +201,14 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(id, fixed);
-        assert_eq!(intake.admissions.entries()[0].metadata, metadata);
+        assert_eq!(
+            intake.admissions.entries(),
+            vec![Admission {
+                file: PathBuf::from("/tmp/recording.m4a"),
+                metadata: metadata.clone(),
+                device: device.clone(),
+            }]
+        );
         // Codable in Swift: the metadata round-trips through JSON.
         let text = to_column_string(&metadata).unwrap();
         assert!(text.starts_with(r#"{"byteCount":1024,"chunkSize":512,"deviceName":"Phone","durationSeconds":12,"format":"m4aAAC","#));
