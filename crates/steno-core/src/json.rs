@@ -1,7 +1,8 @@
 //! The `StenoJSON` convention (`Sources/StenoCore/Model/StenoJSON.swift`):
 //! sorted keys, ISO 8601 dates with three fraction digits, `Data` as base64,
 //! slashes unescaped. JSON columns use the compact one-line form; the pretty
-//! form (`meeting.json`) belongs to a later package.
+//! form (`meeting.json`) arrives with the export port in WP6 of
+//! `.plans/2026-10-02-rust-core-and-tauri-shell.md`.
 //!
 //! The date and UUID text codecs ([`format_date`], [`parse_date`],
 //! [`uuid_string`], [`parse_uuid`] and the `with` modules [`iso_time`],

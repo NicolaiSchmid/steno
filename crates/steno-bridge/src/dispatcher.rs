@@ -5,7 +5,8 @@
 //! contract type, calls the host and wraps the outcome. Two entry points for
 //! the two transports: [`Dispatcher::call`] takes a method and its params,
 //! which is what the Tauri `bridge_call` command receives (the Tauri
-//! transport added by WP3 sends `{ method, params }` and no id);
+//! transport, `apps/macos/web/src/bridge/tauri-transport.ts`, sends
+//! `{ method, params }` and no id);
 //! [`Dispatcher::dispatch`] takes the request envelope with its `id` and
 //! always answers with a reply envelope, never a rejection, as
 //! `webkit-transport.ts` expects.

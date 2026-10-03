@@ -1,5 +1,5 @@
 # The Rust workspace: core crates under crates/, the Tauri shell under
-# apps/desktop (added by WP3). Plan: .plans/2026-10-02-rust-core-and-tauri-shell.md.
+# apps/desktop. Plan: .plans/2026-10-02-rust-core-and-tauri-shell.md.
 # Dependency direction mirrors the Swift package: steno-core depends on nothing
 # of ours; every other crate depends on steno-core; the shell and the CLI wire
 # them together.
