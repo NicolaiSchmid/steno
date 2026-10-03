@@ -14,11 +14,29 @@
 //! here: the API key goes through [`steno_core::SecretStore`]. Failures are
 //! the core's [`BoundaryResult`] over `BoxError`, so a crate behind a seam
 //! returns its own error type through `?` and the view models show it as
-//! text, once. The traits
-//! below stand in front of WP4 (speech models), WP5 (the recorder), WP6's
-//! pipeline, WP7 (the LLM probe, the vault validation, the handover
-//! listener) and the shell (permissions, login item, updater, devices,
-//! files, the Finder); each names the Swift type it replaces.
+//! text, once. The traits below stand in front of WP4 (speech models), WP5
+//! (the recorder, the devices), WP6b's pipeline, WP7 (the LLM probe, the
+//! vault validation, the handover listener) and the shell (permissions,
+//! login item, updater, files, the Finder); each names the Swift type it
+//! replaces.
+//!
+//! # Calling back into the host
+//!
+//! Most services are called with the host's view-model lock held: the
+//! pipeline from the detail commands and every Save, the recorder's
+//! `status` for each `recording` snapshot and its `refresh_permissions`
+//! after a failed start, the clip player's `playing` while the detail is
+//! built, the handover, devices, folder usage, updater and login item
+//! from the Settings commands, and the secret store when the Settings
+//! sections reload. An implementation therefore must not call
+//! back into the host (`store_changed`, `recorder_changed`,
+//! `apply_meeting_event`, `phones_changed`, any command) from inside one of
+//! its methods on the calling thread, and must not hold a lock of its own
+//! while notifying the host if one of its methods takes that lock: the
+//! first deadlocks on the host's mutex, the second in a lock-order cycle.
+//! Notify from the service's own thread, after the method returned. The
+//! permission prompts, the LLM probe, the Codex calls and the model
+//! download run with the lock released and may block as long as they need.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -177,7 +195,12 @@ impl RecorderStatus {
     }
 }
 
-/// The one recorder (WP5 wires the capture session behind it).
+/// The one recorder (WP5 wires the capture session behind it). Called
+/// with the host's lock held (see the module doc): a change reaches the
+/// host through [`Host::recorder_changed`](crate::Host::recorder_changed)
+/// from the recorder's own thread, never from inside these methods, and
+/// never while holding a lock `status` takes. The fake runs the state
+/// machine without a session and records every start, stop and keep.
 /// Swift: `RecordingController`.
 pub trait Recorder: Send + Sync {
     fn status(&self) -> RecorderStatus;
@@ -193,8 +216,13 @@ pub trait Recorder: Send + Sync {
 }
 
 /// What the view models ask the processing pipeline and the retention
-/// sweep for. Swift: `ProcessingPipeline` and `RetentionSweep` through
-/// `AppEnvironment`.
+/// sweep for (WP6b implements it). Called with the host's lock held (see
+/// the module doc): the pipeline reports its work through
+/// [`Host::store_changed`](crate::Host::store_changed) and
+/// [`Host::apply_meeting_event`](crate::Host::apply_meeting_event) from its
+/// own thread, never from inside these methods, and never while holding a
+/// lock these methods take. The fake records every call. Swift:
+/// `ProcessingPipeline` and `RetentionSweep` through `AppEnvironment`.
 pub trait Pipeline: Send + Sync {
     fn rerun_summary(&self, meeting_id: Uuid, template_id: &str) -> BoundaryResult<()>;
     fn redeliver(&self, meeting_id: Uuid) -> BoundaryResult<()>;
@@ -239,8 +267,9 @@ pub enum CodexModelsError {
     Other(String),
 }
 
-/// The LLM module's probe and the Codex sign-in (WP7). Swift: `LLMWiring`
-/// and `CodexCredentialStore`.
+/// The LLM module's probe and the Codex sign-in (WP7). The fake answers
+/// what a test set and records the settings of every probe. Swift:
+/// `LLMWiring` and `CodexCredentialStore`.
 pub trait LlmService: Send + Sync {
     /// One line for the Test button, or the failure text.
     fn probe(&self, settings: &Settings, api_key: Option<&str>) -> BoundaryResult<String>;
@@ -292,8 +321,8 @@ pub trait Handover: Send + Sync {
     fn receipts(&self) -> Vec<HandoverReceipt>;
 }
 
-/// Draws a QR code as a PNG, base64. Swift: `QRCode.png(for:)` in
-/// `apps/macos/Steno/Services/QRCode.swift`.
+/// Draws a QR code as a PNG, base64 (the shell implements it in WP6b).
+/// Swift: `QRCode.png(for:)` in `apps/macos/Steno/Services/QRCode.swift`.
 pub trait QrEncoder: Send + Sync {
     fn png_base64(&self, text: &str) -> Option<String>;
 }
@@ -306,13 +335,14 @@ pub struct InputDevice {
     pub name: String,
 }
 
-/// Lists the input devices. Swift: `AudioDevices.inputs()` in
-/// `Sources/StenoAudio/Capture/AudioDevices.swift`.
+/// Lists the input devices (WP5, from the capture backend). Swift:
+/// `AudioDevices.inputs()` in `Sources/StenoAudio/Capture/AudioDevices.swift`.
 pub trait AudioDevices: Send + Sync {
     fn inputs(&self) -> BoundaryResult<Vec<InputDevice>>;
 }
 
-/// Sums a folder. Swift: `AudioFolderUsage.measure` in
+/// Sums a folder (WP6b implements it over `std::fs`). Swift:
+/// `AudioFolderUsage.measure` in
 /// `Sources/StenoCore/Audio/AudioFolderUsage.swift`; the view model's
 /// default treated a folder that does not exist as zero.
 pub trait FolderUsage: Send + Sync {
@@ -331,7 +361,8 @@ pub trait FileSystem: Send + Sync {
     fn remove(&self, path: &Path) -> BoundaryResult<()>;
 }
 
-/// Plays a speaker's sample clip, one at a time. Swift: `ClipPlayer`.
+/// Plays a speaker's sample clip, one at a time (the shell implements it
+/// in WP6b). Swift: `ClipPlayer`.
 pub trait ClipPlayer: Send + Sync {
     /// Starts the clip; false when the file is missing or unreadable.
     fn play(&self, clip: &Path) -> bool;
@@ -339,7 +370,8 @@ pub trait ClipPlayer: Send + Sync {
     fn playing(&self) -> Option<PathBuf>;
 }
 
-/// The Finder, the default browser and the shell's windows. Swift:
+/// The Finder, the default browser and the shell's windows (the shell
+/// implements it in WP6b). Swift:
 /// `NSWorkspace` and the `openWindow` / `dismissWindow` actions the windows
 /// installed on their bridges.
 pub trait Opener: Send + Sync {
@@ -353,7 +385,7 @@ pub trait Opener: Send + Sync {
 
 /// The two flags the Swift app kept in `UserDefaults`: whether onboarding
 /// has finished and whether the login item was registered once. The shell
-/// (`WP6b`) keeps them in its own settings file; the fake holds a map.
+/// (WP6b) keeps them in its own settings file; the fake holds a map.
 pub trait Preferences: Send + Sync {
     fn flag(&self, key: &str) -> bool;
     fn set_flag(&self, key: &str, value: bool);
