@@ -50,7 +50,7 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
-use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError, RwLock, Weak};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError, RwLock, RwLockReadGuard, Weak};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -420,14 +420,16 @@ impl Host {
         self
     }
 
-    /// Asks the shell's destructive prompt.
-    fn confirm(&self, prompt: &ConfirmDestructiveParams) -> bool {
-        (self
-            .shared
+    fn dialogs(&self) -> RwLockReadGuard<'_, Dialogs> {
+        self.shared
             .dialogs
             .read()
             .unwrap_or_else(PoisonError::into_inner)
-            .confirm)(prompt)
+    }
+
+    /// Asks the shell's destructive prompt.
+    fn confirm(&self, prompt: &ConfirmDestructiveParams) -> bool {
+        (self.dialogs().confirm)(prompt)
     }
 
     /// The same host, answering for `window`: see the module doc.
@@ -579,18 +581,18 @@ impl Host {
                 if due.is_empty() {
                     break;
                 }
-                let page_ready = inner.publisher.is_page_ready();
-                let sink = lock(&self.shared.sink).clone();
+                // Nothing goes out before `page.ready`; the snapshots are
+                // still built for their side effects.
+                let sink = lock(&self.shared.sink)
+                    .clone()
+                    .filter(|_| inner.publisher.is_page_ready());
                 let mut batch = Vec::with_capacity(due.len());
                 for topic in due {
-                    let snapshot = self.build(&mut inner, topic);
-                    let emitted = page_ready && sink.is_some() && snapshot.is_some();
+                    let snapshot = self.build(&mut inner, topic).filter(|_| sink.is_some());
                     if topic == BridgeTopic::App {
-                        Self::did_publish_app(&mut inner, emitted);
+                        Self::did_publish_app(&mut inner, snapshot.is_some());
                     }
-                    if let (true, Some(payload)) = (emitted, snapshot) {
-                        batch.push(BridgeEvent::new(topic, payload));
-                    }
+                    batch.extend(snapshot.map(|payload| BridgeEvent::new(topic, payload)));
                 }
                 (sink, batch)
             };
@@ -856,12 +858,7 @@ impl Host {
     /// Runs the shell's folder chooser from `current` and `apply` on the
     /// chosen folder; the reply carries the choice, `None` when cancelled.
     fn choose(&self, current: Option<&Path>, apply: impl FnOnce(&Path)) -> ChosenPathReply {
-        let chosen = (self
-            .shared
-            .dialogs
-            .read()
-            .unwrap_or_else(PoisonError::into_inner)
-            .choose_folder)(current);
+        let chosen = (self.dialogs().choose_folder)(current);
         if let Some(folder) = &chosen {
             apply(folder);
         }
@@ -1029,11 +1026,15 @@ impl Host {
         }
     }
 
-    /// A command on this window's Summaries form (see the module doc): the
-    /// window's own model, its own topic, and the probe the model asked for
-    /// run outside the lock afterwards.
-    fn summaries_command(&self, body: impl FnOnce(&mut LlmSettingsViewModel)) {
-        let window = self.window;
+    /// A command on `window`'s Summaries form: that window's model, its own
+    /// topic, and the probe the model asked for run outside the lock
+    /// afterwards. The four form commands pass the calling window (see the
+    /// module doc), the Codex card and Save the Settings window.
+    fn summaries_command(
+        &self,
+        window: BridgeWindow,
+        body: impl FnOnce(&mut LlmSettingsViewModel),
+    ) {
         {
             let mut inner = self.lock();
             body(inner.llm_mut(window));
@@ -1073,8 +1074,7 @@ impl Host {
             .services
             .speech_models
             .download(asset, &mut |fraction, phase| {
-                {
-                    let mut inner = self.lock();
+                self.command(&[BridgeTopic::SettingsTranscription], |inner| {
                     inner.speech.asset_states.insert(
                         asset,
                         AssetState::Downloading {
@@ -1082,9 +1082,7 @@ impl Host {
                             phase: phase.to_owned(),
                         },
                     );
-                    inner.publisher.schedule(BridgeTopic::SettingsTranscription);
-                }
-                self.publish();
+                });
             });
         self.settings_command(BridgeTopic::SettingsTranscription, |inner| {
             let state = match outcome {
@@ -1705,48 +1703,42 @@ impl BridgeHost for Host {
             BridgeError::invalid_params(format!("Unknown summaries service {}.", params.value))
         })?;
         let now = self.now();
-        self.summaries_command(|llm| {
+        self.summaries_command(self.window, |llm| {
             llm.select_preset(preset, &self.shared.store, &self.shared.services, now);
         });
         Ok(())
     }
 
     fn settings_summaries_update(&self, params: SummariesUpdateParams) -> Outcome<()> {
-        self.summaries_command(|llm| llm.apply_update(&params));
+        self.summaries_command(self.window, |llm| llm.apply_update(&params));
         Ok(())
     }
 
     fn settings_summaries_save(&self) -> Outcome<()> {
         let now = self.now();
-        self.settings_command(BridgeTopic::SettingsSummaries, |inner| {
-            inner
-                .llm
-                .commit(&self.shared.store, &self.shared.services, now);
+        self.summaries_command(BridgeWindow::Settings, |llm| {
+            llm.commit(&self.shared.store, &self.shared.services, now);
         });
-        self.run_pending_probe(BridgeWindow::Settings);
         Ok(())
     }
 
     fn settings_summaries_test(&self) -> Outcome<()> {
-        self.summaries_command(LlmSettingsViewModel::request_probe);
+        self.summaries_command(self.window, LlmSettingsViewModel::request_probe);
         Ok(())
     }
 
     fn settings_summaries_confirm_codex(&self) -> Outcome<()> {
         let now = self.now();
-        self.settings_command(BridgeTopic::SettingsSummaries, |inner| {
-            inner
-                .llm
-                .confirm_codex(&self.shared.store, &self.shared.services, now);
+        self.summaries_command(BridgeWindow::Settings, |llm| {
+            llm.confirm_codex(&self.shared.store, &self.shared.services, now);
         });
-        self.run_pending_probe(BridgeWindow::Settings);
         Ok(())
     }
 
     fn settings_summaries_refresh_codex_status(&self) -> Outcome<()> {
         // A file read, outside the lock all the same.
         let account = self.shared.services.llm.codex_account();
-        self.summaries_command(|llm| llm.apply_codex_account(account));
+        self.summaries_command(self.window, |llm| llm.apply_codex_account(account));
         Ok(())
     }
 
@@ -1763,26 +1755,22 @@ impl BridgeHost for Host {
 
     fn settings_summaries_select_codex_model(&self, params: SetStringParams) -> Outcome<()> {
         let now = self.now();
-        self.settings_command(BridgeTopic::SettingsSummaries, |inner| {
-            inner.llm.select_codex_model(
+        self.summaries_command(BridgeWindow::Settings, |llm| {
+            llm.select_codex_model(
                 &params.value,
                 &self.shared.store,
                 &self.shared.services,
                 now,
             );
         });
-        self.run_pending_probe(BridgeWindow::Settings);
         Ok(())
     }
 
     fn settings_summaries_stop_using_codex(&self) -> Outcome<()> {
         let now = self.now();
-        self.settings_command(BridgeTopic::SettingsSummaries, |inner| {
-            inner
-                .llm
-                .stop_using_codex(&self.shared.store, &self.shared.services, now);
+        self.summaries_command(BridgeWindow::Settings, |llm| {
+            llm.stop_using_codex(&self.shared.store, &self.shared.services, now);
         });
-        self.run_pending_probe(BridgeWindow::Settings);
         Ok(())
     }
 
