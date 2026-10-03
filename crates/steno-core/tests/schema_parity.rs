@@ -49,7 +49,7 @@ fn identifiers_match_migrations_swift() {
 }
 
 #[test]
-fn reopening_applies_nothing_and_keeps_wal_foreign_keys_and_synchronous_normal() {
+fn reopening_applies_nothing_and_sets_the_grdb_pragmas() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("nested").join("steno.sqlite");
     drop(Store::open(&path).unwrap());
@@ -66,7 +66,7 @@ fn reopening_applies_nothing_and_keeps_wal_foreign_keys_and_synchronous_normal()
         .unwrap();
     assert_eq!(journal, "wal");
     assert_eq!(foreign_keys, 1);
-    // NORMAL, as GRDB's `DatabasePool` sets it in WAL mode.
+    // 1 is NORMAL, which GRDB's `DatabasePool` sets on its writer.
     assert_eq!(synchronous, 1);
 }
 
