@@ -411,11 +411,9 @@ fn transcription_switches_engines_and_downloads_assets() {
     assert_eq!(asset["failure"], "offline");
 }
 
-/// `settings.transcription.download` replies at once; the download runs on
-/// its own thread and publishes as it goes (Swift: `SpeechSettingsViewModel
-/// .download`'s task).
-#[test]
-fn the_download_reply_returns_while_the_download_runs() {
+/// A harness whose downloads wait at their start, before any progress,
+/// until the returned closure releases them.
+fn holding_downloads() -> (Harness, impl Fn()) {
     let gate = Arc::new((Mutex::new(false), Condvar::new()));
     let harness = Harness::builder()
         .seed({
@@ -431,6 +429,20 @@ fn the_download_reply_returns_while_the_download_runs() {
             }
         })
         .build();
+    let release = move || {
+        let (open, signal) = &*gate;
+        *open.lock().unwrap() = true;
+        signal.notify_all();
+    };
+    (harness, release)
+}
+
+/// `settings.transcription.download` replies at once; the download runs on
+/// its own thread and publishes as it goes (Swift: `SpeechSettingsViewModel
+/// .download`'s task).
+#[test]
+fn the_download_reply_returns_while_the_download_runs() {
+    let (harness, release_downloads) = holding_downloads();
     harness.sink.clear();
     let host = harness.host.clone();
     within_five_seconds("the download reply", move || {
@@ -462,11 +474,7 @@ fn the_download_reply_returns_while_the_download_runs() {
             asset_id: "offlineDiarizer".to_owned(),
         })
         .unwrap();
-    {
-        let (open, signal) = &*gate;
-        *open.lock().unwrap() = true;
-        signal.notify_all();
-    }
+    release_downloads();
     harness.wait_for_download(1);
     assert_eq!(
         harness.snapshot(BridgeTopic::SettingsTranscription)["assets"][1]["state"],
@@ -484,21 +492,7 @@ fn the_download_reply_returns_while_the_download_runs() {
 /// guard kept one task per asset.
 #[test]
 fn a_remove_detaches_the_download_in_flight() {
-    let gate = Arc::new((Mutex::new(false), Condvar::new()));
-    let harness = Harness::builder()
-        .seed({
-            let gate = gate.clone();
-            move |_, fakes| {
-                fakes.speech_models.set_on_download(move |_| {
-                    let (open, signal) = &*gate;
-                    let mut open = open.lock().unwrap();
-                    while !*open {
-                        open = signal.wait(open).unwrap();
-                    }
-                });
-            }
-        })
-        .build();
+    let (harness, release_downloads) = holding_downloads();
     let download = || {
         harness
             .host
@@ -525,11 +519,7 @@ fn a_remove_detaches_the_download_in_flight() {
         "absent",
         "the first download still runs, so the second does not start"
     );
-    {
-        let (open, signal) = &*gate;
-        *open.lock().unwrap() = true;
-        signal.notify_all();
-    }
+    release_downloads();
     harness.wait_for("the detached download to end", |harness| {
         harness
             .host
