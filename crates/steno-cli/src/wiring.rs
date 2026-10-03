@@ -43,9 +43,7 @@ impl DatabaseOptions {
     pub fn path(&self) -> Result<PathBuf, Failure> {
         match &self.database_path {
             Some(path) => Ok(path.clone()),
-            None => Ok(StenoPaths::create_default()
-                .map_err(Failure::runtime)?
-                .database_path()),
+            None => Ok(paths()?.database_path()),
         }
     }
 
