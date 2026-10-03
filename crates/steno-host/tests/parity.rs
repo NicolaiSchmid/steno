@@ -155,6 +155,8 @@ fn first_difference(expected: &Value, actual: &Value) -> Option<String> {
                     }
                 })
             }
+            // 95 and 95.0 are one number to the page.
+            (Value::Number(left), Value::Number(right)) if left.as_f64() == right.as_f64() => None,
             _ if expected == actual => None,
             _ => Some(format!("{pointer}: fixture {expected}, host {actual}")),
         }
@@ -196,16 +198,16 @@ fn app() {
         &harness.snapshot(BridgeTopic::App),
         &[
             deviation(
-                "/setupBanner/title",
-                json!("Summaries and export are off."),
-                "the fixture's banner copy is not `SetupCopy`'s; the host says what is missing",
-            ),
-            deviation(
                 "/setupBanner/body",
                 json!(
                     "Steno has no LLM endpoint and no Obsidian vault yet, so meetings keep a raw transcript on this Mac."
                 ),
-                "as above",
+                "the fixture's banner copy is not `SetupCopy`'s; the host says what is missing",
+            ),
+            deviation(
+                "/setupBanner/title",
+                json!("Summaries and export are off."),
+                "as for the body",
             ),
         ],
     );
@@ -403,14 +405,14 @@ fn settings_general() {
         &host,
         &[
             deviation(
-                "/templates",
-                templates,
-                "the templates are the four bundled ones with their own descriptions; the fixture names three that do not exist",
-            ),
-            deviation(
                 "/acknowledgements",
                 acknowledgements,
                 "every speech model and the seven libraries; the fixture lists four",
+            ),
+            deviation(
+                "/templates",
+                templates,
+                "the templates are the four bundled ones with their own descriptions; the fixture names three that do not exist",
             ),
         ],
     );
@@ -500,6 +502,26 @@ fn settings_transcription() {
         mid_download,
         &[
             deviation(
+                "/assets/0/detail",
+                json!("Installed · 485 MB"),
+                "asset details are `statusText`",
+            ),
+            deviation(
+                "/assets/0/name",
+                json!("Speech recognition"),
+                "asset names are `componentTitle`, what the component does",
+            ),
+            deviation(
+                "/assets/1/detail",
+                json!("Downloading… 35%"),
+                "as for asset 0",
+            ),
+            deviation(
+                "/assets/1/name",
+                json!("Speaker recognition"),
+                "as for asset 0",
+            ),
+            deviation(
                 "/engineID",
                 json!("parakeet-v3"),
                 "the engine id is `Settings.speechEngineID`'s value; the fixture shortens it",
@@ -509,18 +531,6 @@ fn settings_transcription() {
                 host_engines,
                 "engines carry `SpeechSettingsViewModel.engineTitle` (\"Parakeet · fast · 25 languages\")",
             ),
-            deviation(
-                "/assets/0/name",
-                json!("Speech recognition"),
-                "asset names are `componentTitle`, what the component does",
-            ),
-            deviation(
-                "/assets/0/detail",
-                json!("Installed · 485 MB"),
-                "asset details are `statusText`",
-            ),
-            deviation("/assets/1/name", json!("Speaker recognition"), "as above"),
-            deviation("/assets/1/detail", json!("Downloading… 35%"), "as above"),
             deviation(
                 "/subtitle",
                 json!("Download needed"),
@@ -703,8 +713,8 @@ fn onboarding_permissions() {
             kind: PermissionKind::LocalNetwork,
         })
         .unwrap();
-    // The prompt is up: the fake calls back while the host waits on it,
-    // which is when the page sees `isRequesting`.
+    // `onboarding`'s `isRequesting` is the first of the two publishes
+    // `onboarding.request` makes, before the prompt.
     harness.sink.clear();
     harness
         .host
@@ -722,16 +732,16 @@ fn onboarding_permissions() {
         "onboarding",
         &published[0],
         &[
-            removed(
-                "/summaries",
-                "page 1 never carries the Summaries form (`OnboardingSnapshot.init` sends it on page 2 only)",
-            ),
-            removed("/vault", "as above for the vault row"),
             deviation(
                 "/retentionSentence",
                 json!(RETENTION_SENTENCE),
                 "the sentence is the Audio footnote plus the Settings pointer; the fixture drops the footnote's second sentence",
             ),
+            removed(
+                "/summaries",
+                "page 1 never carries the Summaries form (`OnboardingSnapshot.init` sends it on page 2 only)",
+            ),
+            removed("/vault", "as for the Summaries form, the vault row"),
         ],
     );
 }
