@@ -415,6 +415,22 @@ mod tests {
     }
 
     #[test]
+    fn a_long_pause_past_the_clamp_waits_for_the_next_chunk() {
+        // The 11 s pause starts past the 10 s clamp. Ending the first chunk
+        // at it would cut at the clamp and skip the speech from 10 to 11 s.
+        let speech = [0..s(11.0), s(20.0)..s(25.0)];
+        let config = ChunkerConfig {
+            target_seconds: 8.0,
+            search_seconds: 2.0,
+            max_seconds: 10.0,
+            ..ChunkerConfig::default()
+        };
+        let chunks = layout(&audio(26.0, &speech), &speech, &config);
+        assert!(covers(&chunks, &speech), "{chunks:?}");
+        assert_eq!(chunks[0].cut, Cut::Energy);
+    }
+
+    #[test]
     fn a_long_pause_cut_never_ends_past_the_audio() {
         // The padding after the 0.2 s pause would reach 0.2 s past the end.
         let speech = [0..s(5.0), s(5.2)..s(5.3)];

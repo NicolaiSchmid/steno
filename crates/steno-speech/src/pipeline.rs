@@ -674,6 +674,11 @@ mod tests {
             ids(&cut),
             [(1, 16), (21, 18), (3, 131), (23, 132), (24, 133)]
         );
+        // Without a word start before the first kept piece, the trim keeps
+        // from the window's first token.
+        let mut headless = vec![token(21, 16), token(22, 18), token(3, 131)];
+        keep_chunk_and_overlap(&mut headless, &range, overlap, &vocab);
+        assert_eq!(ids(&headless), [(21, 16), (22, 18), (3, 131)]);
         let mut outside = vec![token(1, 10), token(2, 140)];
         keep_chunk_and_overlap(&mut outside, &range, overlap, &vocab);
         assert!(outside.is_empty());

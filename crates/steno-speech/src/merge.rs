@@ -387,6 +387,13 @@ mod tests {
             ids(&merge_windows(&left, &right, 1.5, &vocab())),
             ids(&left)
         );
+        // Cutoff at frame 24 with one left token before it.
+        let left = vec![token(0, 10), token(4, 27)];
+        let right = vec![token(3, 20), token(5, 28), token(6, 29)];
+        assert_eq!(
+            ids(&merge_windows(&left, &right, 1.5, &vocab())),
+            ids(&left)
+        );
     }
 
     #[test]
