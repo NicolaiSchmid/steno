@@ -1,23 +1,24 @@
-//! The Linux live backend against a real PipeWire daemon, ignored by
+//! The Linux live backend against a real `pipewire` daemon, ignored by
 //! default. Run it inside the headless harness, which starts a private
-//! daemon and WirePlumber with the test devices these tests name:
+//! daemon and `wireplumber` with the test devices these tests name:
 //!
 //! ```text
 //! scripts/pipewire-headless.sh cargo test -p steno-audio --test pipewire \
 //!   -- --ignored --test-threads=1 --nocapture
 //! ```
 //!
-//! Tones go in with `pw-play`: into `steno-test-sink` through WirePlumber's
-//! own linking, into the virtual microphone `steno-test-mic` by a stream
-//! WirePlumber leaves alone and `pw-link` (WirePlumber links playback only
-//! into sinks). Each start runs on its own thread joined with a deadline,
-//! so a hang fails instead of stalling the suite. The tests share one
-//! daemon, so they run one at a time and put back what they move.
+//! Tones go in with `pw-play`: into `steno-test-sink` through the session
+//! manager's own linking, into the virtual microphone `steno-test-mic` by a
+//! stream the session manager leaves alone and `pw-link` (`wireplumber`
+//! links playback only into sinks). Each start runs on its own thread
+//! joined with a deadline, so a hang fails instead of stalling the suite.
+//! The tests share one daemon, so they run one at a time and put back what
+//! they move.
 //!
-//! The real-time promise is counted on the real thread here: PipeWire runs
-//! the stream's `process` on its data-loop thread, which this file finds in
-//! `/proc/self/task` and counts with
-//! [`CountingAllocator::allocations_on`] for a second of cycles.
+//! The real-time promise is counted on the real thread here: libpipewire
+//! runs the stream's `process` on its data-loop thread, which this file
+//! finds in `/proc/self/task` and counts with
+//! `CountingAllocator::allocations_on` for a second of cycles.
 #![cfg(target_os = "linux")]
 // Test arithmetic: sample counts and frequencies cast freely.
 #![allow(
