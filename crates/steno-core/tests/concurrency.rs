@@ -1,7 +1,7 @@
 //! Two connections on one file, as when the Swift app and this store, or
 //! two copies of this store, hold the database at the same time: writes
-//! queue on the busy timeout instead of failing, and a fresh database is
-//! migrated once.
+//! queue on the busy timeout instead of failing, a fresh database is
+//! migrated once, and an export reads past a held write lock.
 
 mod common;
 
@@ -112,4 +112,31 @@ fn two_stores_open_a_fresh_file_at_once() {
         })
         .unwrap();
     assert_eq!(identifiers, ["v1", "v2", "v3", "v4"]);
+}
+
+/// `Store::export` reads under a deferred transaction, which in WAL mode
+/// is a snapshot that neither waits for nor blocks a writer: it returns
+/// while the other store holds the write lock. An immediate transaction
+/// would queue on the busy timeout instead and fail after it.
+#[test]
+fn an_export_reads_while_the_other_store_holds_the_write_lock() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("steno.sqlite");
+    let writer = Store::open(&path).unwrap();
+    let meeting = populate(&writer);
+    let reader = Store::open(&path).unwrap();
+
+    let started = Instant::now();
+    writer
+        .write(|_| {
+            let export = reader.export(meeting.id).unwrap();
+            assert_eq!(export.meeting.id, meeting.id);
+            assert_eq!(export.meeting.title, meeting.title);
+            Ok(())
+        })
+        .unwrap();
+    assert!(
+        started.elapsed() < Duration::from_secs(4),
+        "the export waited on the writer's lock"
+    );
 }
