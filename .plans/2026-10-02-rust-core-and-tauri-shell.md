@@ -471,6 +471,9 @@ still has to draw the window side. `[ ]` is not ported yet.
   defaults), without the auto-stop grace after a call ends and without the meeting
   detection prompt; the detector and the capture session exist, the policy is WP5's
   and the panel WP8's.
+- `STENO_MODELS_DIR` names the models directory for the app (without one in its
+  settings), the CLI, the `transcribe` example and the FLEURS test alike; the ONNX
+  models sit in its `onnx/` (`steno_speech::ModelStore::in_models_directory`).
 - `speech_engine_id` other than `parakeet-v3` (the Swift `parakeet-ultra`,
   `parakeet-de`, `whisperkit-large-v3-turbo`) falls back to the ONNX Parakeet v3
   engine; `steno dev models` lists the four Swift assets and can install only
@@ -866,8 +869,9 @@ right after one can forget a pairing (the phone gets 401 and unpairs, and the us
 pairs it again) or bring a revoked device back.
 
 WP6b is `crates/steno-pipeline`, `crates/steno-cli` and `crates/steno-services`,
-and `apps/desktop` on the real host. It merges after #171, whose code its diff carries
-until then, and is rebased onto `main` once #172 has landed.
+and `apps/desktop` on the real host. It sits on `main` and merges after #172 (the
+shell); the rebase after #172 wires `App::shutdown` into #172's Quit item and tray
+close and reruns the desktop smoke.
 `process` runs the Swift stage order, with progress events in core
 (`MeetingEvent`, `ProcessingProgress`), learned stage rates, both intakes, the
 retention sweep and the store-backed cosine memory; `steno` has every Swift command
