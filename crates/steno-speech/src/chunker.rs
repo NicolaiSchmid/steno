@@ -1,12 +1,21 @@
 //! The pause-aligned chunk layout (decision 1 of the speech-stack plan):
 //! chunks aim at `target_seconds` and cut at the longest VAD pause inside
 //! the search window either side of the target, else at the quietest
-//! 100 ms frame there; a long pause anywhere ahead of the window's far edge
-//! ends a chunk early and is skipped;
-//! `overlap_seconds` of audio is shared with the next chunk for the merge.
-//! No chunk exceeds `max_seconds`, a memory clamp (attention grows with the
-//! square of the window: 13 GB at 600 s, spike E), not the position table's
-//! 800 s cap. Ported from `spikes/onnx-speech/src/chunker.rs`.
+//! 100 ms frame there. A long pause that starts before the window's far
+//! edge, or within `min_chunk_seconds` past it, ends the chunk early and is
+//! not decoded. `overlap_seconds` of audio is shared with the next chunk
+//! for the merge. No chunk exceeds `max_seconds`, a memory clamp (attention
+//! grows with the square of the window: 13 GB at 600 s, spike E), not the
+//! position table's 800 s cap.
+//!
+//! The search and the cuts are ported from
+//! `spikes/onnx-speech/src/chunker.rs`; the long-pause rule is not. The
+//! spike laid out the tail before looking for long pauses and ignored those
+//! within `min_chunk_seconds` of a chunk's start, so it decoded some of
+//! them, and the spike D numbers ran that way. The rule here skips every
+//! one, as the spike's doc and decision 1 say, and looks
+//! `min_chunk_seconds` past the window's far edge, where the spike looked
+//! up to it.
 //! Swift: none; `FluidAudio`'s `ChunkProcessor` cuts at fixed 15 s strides.
 
 use std::ops::Range;
@@ -18,8 +27,8 @@ use crate::backend::{SAMPLE_RATE, sample_count};
 pub enum Cut {
     /// The middle of the longest pause in the search window.
     Pause,
-    /// Just before a pause of `long_pause_seconds` or more, or at the clamp
-    /// when the pause starts less than `pad_seconds` before it.
+    /// `pad_seconds` into a pause of `long_pause_seconds` or more, or at the
+    /// clamp or the end of the audio when that comes first.
     LongPause,
     /// The quietest 100 ms frame in the search window; no pause there.
     Energy,
@@ -154,13 +163,23 @@ pub fn layout(audio: &[f32], speech: &[Range<usize>], config: &ChunkerConfig) ->
         // close to it moves back.
         let want = start + target.min(max - search);
         let reach = want + search;
-        // A long pause ahead, before the search window closes, ends the
-        // chunk early, tail or not; no overlap is needed across silence.
+        // Where a cut may fall: never closer than `min_chunk` to the start,
+        // and always after the previous chunk's end.
+        let lo = want
+            .saturating_sub(search)
+            .max(start + min_chunk)
+            .max(previous_end + 1);
+        let hi = reach.max(lo + 1);
+        // A long pause that starts before the cut window closes, or within
+        // `min_chunk` past it, ends the chunk early, tail or not: a cut
+        // before it would leave a sliver of a chunk up to the pause, and no
+        // overlap is needed across silence.
+        let far = (reach + min_chunk).max(hi).min(start + max);
         if let Some(pause) = pauses
             .iter()
-            .find(|p| p.start > start && p.start < reach.min(speech_end) && p.len() >= long_pause)
+            .find(|p| p.start > start && p.start < far.min(speech_end) && p.len() >= long_pause)
         {
-            let end = (pause.start + pad).min(start + max);
+            let end = (pause.start + pad).min(start + max).min(total);
             chunks.push(Chunk {
                 range: start..end,
                 cut: Cut::LongPause,
@@ -177,11 +196,6 @@ pub fn layout(audio: &[f32], speech: &[Range<usize>], config: &ChunkerConfig) ->
             });
             break;
         }
-        let lo = want
-            .saturating_sub(search)
-            .max(start + min_chunk)
-            .max(previous_end + 1);
-        let hi = reach.max(lo + 1);
         // The longest pause, clipped to the window, wins; the first on ties.
         let mut best: Option<Range<usize>> = None;
         for pause in &pauses {
@@ -343,21 +357,94 @@ mod tests {
         assert!(covers(&chunks, &speech), "{chunks:?}");
     }
 
+    fn cuts(chunks: &[Chunk]) -> Vec<(Range<usize>, Cut)> {
+        chunks.iter().map(|c| (c.range.clone(), c.cut)).collect()
+    }
+
     #[test]
     fn a_long_pause_right_after_the_start_still_ends_the_chunk() {
-        // The first chunk cuts on energy at 28.95 s; the second starts 1.5 s
-        // earlier and meets the 120 s pause 1.85 s in, under min_chunk. It
-        // ends there instead of decoding the silence after it.
+        // The 9 s pause starts 1 s in, under min_chunk.
+        let speech = [0..s(1.0), s(10.0)..s(20.0)];
+        let chunks = layout(&audio(21.0, &speech), &speech, &ChunkerConfig::default());
+        assert_eq!(
+            cuts(&chunks),
+            [(0..s(1.25), Cut::LongPause), (s(9.75)..s(20.25), Cut::Tail)]
+        );
+    }
+
+    #[test]
+    fn a_long_pause_in_the_search_window_ends_the_chunk_at_its_start() {
+        // The 4 s pause starts at 26 s, between the target and the window's
+        // far edge: the chunk ends at its start, not in its middle.
+        let speech = [0..s(26.0), s(30.0)..s(40.0)];
+        let chunks = layout(&audio(41.0, &speech), &speech, &ChunkerConfig::default());
+        assert_eq!(chunks[0].range, 0..s(26.25));
+        assert_eq!(chunks[0].cut, Cut::LongPause);
+    }
+
+    #[test]
+    fn a_long_pause_just_past_the_search_window_ends_the_chunk() {
+        // The 120 s pause starts at 29.3 s, past the 21 to 29 s window but
+        // within min_chunk of it. Cutting inside the speech before it would
+        // leave a 2 s chunk between that cut and the pause.
         let speech = [0..s(29.3), s(149.3)..s(160.0)];
         let mut samples = audio(162.0, &speech);
         for x in &mut samples[s(28.9)..s(29.0)] {
             *x = 0.001;
         }
         let chunks = layout(&samples, &speech, &ChunkerConfig::default());
-        assert_eq!(chunks[0].range, 0..s(28.95));
-        assert_eq!(chunks[1].cut, Cut::LongPause);
-        assert_eq!(chunks[1].range, s(27.45)..s(29.55));
-        assert_eq!(chunks[2].range, s(149.05)..s(160.25));
+        assert_eq!(
+            cuts(&chunks),
+            [
+                (0..s(29.55), Cut::LongPause),
+                (s(149.05)..s(160.25), Cut::Tail)
+            ]
+        );
+        // With min_chunk past the window's far edge, the search for a cut
+        // starts beyond it, and a long pause there is still skipped.
+        let speech = [0..s(5.0), s(10.0)..s(20.0)];
+        let config = ChunkerConfig {
+            target_seconds: 3.0,
+            search_seconds: 1.0,
+            min_chunk_seconds: 6.0,
+            ..ChunkerConfig::default()
+        };
+        let chunks = layout(&audio(21.0, &speech), &speech, &config);
+        assert_eq!(chunks[0].range, 0..s(5.25));
+        assert_eq!(chunks[0].cut, Cut::LongPause);
+    }
+
+    #[test]
+    fn a_long_pause_cut_never_ends_past_the_audio() {
+        // The padding after the 0.2 s pause would reach 0.2 s past the end.
+        let speech = [0..s(5.0), s(5.2)..s(5.3)];
+        let config = ChunkerConfig {
+            long_pause_seconds: 0.1,
+            pad_seconds: 0.5,
+            ..ChunkerConfig::default()
+        };
+        let chunks = layout(&audio(5.3, &speech), &speech, &config);
+        assert_eq!(cuts(&chunks), [(0..s(5.3), Cut::LongPause)]);
+    }
+
+    #[test]
+    fn the_next_chunk_starts_at_least_min_chunk_after_the_last_one() {
+        // The 5 s overlap reaches back past the start of the chunk that
+        // cut at 3.05 s.
+        let speech = [0..s(20.0)];
+        let mut samples = audio(20.0, &speech);
+        for x in &mut samples[s(3.0)..s(3.1)] {
+            *x = 0.001;
+        }
+        let config = ChunkerConfig {
+            target_seconds: 3.0,
+            search_seconds: 0.5,
+            overlap_seconds: 5.0,
+            ..ChunkerConfig::default()
+        };
+        let chunks = layout(&samples, &speech, &config);
+        assert_eq!(chunks[0].range, 0..s(3.05));
+        assert_eq!(chunks[1].range.start, s(2.0));
     }
 
     #[test]
@@ -366,9 +453,8 @@ mod tests {
         // skipped like any other long pause.
         let speech = [0..s(2.0), s(26.0)..s(27.0)];
         let chunks = layout(&audio(28.0, &speech), &speech, &ChunkerConfig::default());
-        let layout: Vec<_> = chunks.iter().map(|c| (c.range.clone(), c.cut)).collect();
         assert_eq!(
-            layout,
+            cuts(&chunks),
             vec![
                 (0..s(2.25), Cut::LongPause),
                 (s(25.75)..s(27.25), Cut::Tail)
@@ -418,10 +504,10 @@ mod tests {
 
     #[test]
     fn odd_configurations_still_move_every_end_forward() {
-        // The smallest cases of the property test. A search window opening
-        // inside the previous chunk once ended a chunk exactly where the
-        // previous one did (the midpoint of a one-sample pause); a long
-        // pause shorter than twice the padding was hit again and again.
+        // Two minimal configurations from a randomised search: a search
+        // window opening inside the previous chunk could end a chunk where
+        // the previous one did (the midpoint of a one-sample pause); a long
+        // pause shorter than twice the padding was hit repeatedly.
         let speech = [0..5_280, 21_440..516_480];
         let config = ChunkerConfig {
             target_seconds: 8.31,
