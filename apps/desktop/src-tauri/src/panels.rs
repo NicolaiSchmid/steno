@@ -821,7 +821,10 @@ mod macos {
     //! deactivates, and moves by its background.
 
     use tauri::WebviewWindow;
-    use tauri_nspanel::{CollectionBehavior, Panel as _, PanelLevel, StyleMask, tauri_panel};
+    use tauri_nspanel::{
+        CollectionBehavior, Panel as _, PanelLevel, StyleMask, objc2_app_kit::NSWindowStyleMask,
+        tauri_panel,
+    };
 
     tauri_panel! {
         panel!(FloatingPanel {
@@ -838,12 +841,7 @@ mod macos {
     pub fn make_panel(window: &WebviewWindow) -> tauri::Result<()> {
         let panel = FloatingPanel::from_window(window)?;
         panel.set_level(PanelLevel::Floating.value());
-        if let Err(error) = panel.set_style_mask(
-            StyleMask::empty()
-                .nonactivating_panel()
-                .borderless()
-                .value(),
-        ) {
+        if let Err(error) = panel.set_style_mask(style_mask()) {
             eprintln!("[steno-desktop] panel style mask: {error}");
         }
         panel.set_collection_behavior(
@@ -860,6 +858,28 @@ mod macos {
         panel.set_released_when_closed(false);
         panel.show();
         Ok(())
+    }
+
+    /// Borderless and non-activating: a click on the panel leaves the
+    /// meeting app frontmost. `borderless()` is the empty mask and clears
+    /// what came before it, so it goes first.
+    ///
+    /// Swift: the `styleMask` in `FloatingPanel.init`.
+    fn style_mask() -> NSWindowStyleMask {
+        StyleMask::empty()
+            .borderless()
+            .nonactivating_panel()
+            .value()
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn the_panel_is_borderless_and_non_activating() {
+            assert_eq!(style_mask(), NSWindowStyleMask::NonactivatingPanel);
+        }
     }
 }
 
