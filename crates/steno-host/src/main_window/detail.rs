@@ -378,7 +378,7 @@ impl MeetingDetailViewModel {
 
     /// A re-run or a re-export the pipeline accepted failed later, in the
     /// background (`MeetingEvent::OperationFailed`): the error line says so
-    /// in the words [`Self::run`] uses for a refusal, as Swift's awaited
+    /// in the words a refused call gets there, as Swift's awaited
     /// call did for both.
     pub fn operation_failed(&mut self, operation: MeetingOperation, failure: &str) {
         self.error = Some(format!("{} failed: {failure}", operation.label()));

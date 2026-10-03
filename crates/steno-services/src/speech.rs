@@ -142,8 +142,9 @@ pub fn speech_engine(settings: &Settings, models_directory: &Path) -> Arc<dyn Sp
 /// An engine whose calls do long synchronous model work without yielding
 /// (the `CoreML` Parakeet loads and transcribes that way): one call at a
 /// time, as Swift's `AsrManager` actor ran them, each off the runtime's
-/// workers ([`crate::off_the_workers`]), so two meetings processing at once
-/// queue on the model instead of parking two workers for minutes.
+/// workers (`block_in_place` on a multi-thread runtime), so two meetings
+/// processing at once queue on the model instead of parking two workers
+/// for minutes.
 pub struct OneCallAtATime {
     inner: Arc<dyn SpeechEngine>,
     turn: tokio::sync::Mutex<()>,
