@@ -215,9 +215,8 @@ impl<B: SpeechBackend> Transcriber<B> {
         stats: &mut DecodeStats,
     ) -> Result<Vec<Token>, SpeechError> {
         let max = sample_count(self.config.chunker.max_seconds);
-        let mut best = original;
-        let mut best_words = self.words_inside(&best, range);
-        let mut accepted = false;
+        let original_words = self.words_inside(&original, range);
+        let (mut best, mut best_words) = (original, original_words);
         let extensions = self.config.recovery.extensions_seconds.clone();
         for (before, after) in extensions {
             let start = range.start.saturating_sub(sample_count(before));
@@ -231,10 +230,9 @@ impl<B: SpeechBackend> Transcriber<B> {
             if words > best_words {
                 best = candidate;
                 best_words = words;
-                accepted = true;
             }
         }
-        if accepted {
+        if best_words > original_words {
             stats.recoveries_accepted += 1;
         }
         Ok(best)
@@ -274,14 +272,14 @@ mod fake {
     };
 
     pub struct FrameTokenBackend {
-        pub shape: ModelShape,
-        pub min_frames: usize,
+        shape: ModelShape,
+        min_frames: usize,
     }
 
     impl FrameTokenBackend {
-        pub fn new(vocab: &Vocab) -> Self {
+        pub fn new(vocab: &Vocab, min_frames: usize) -> Self {
             FrameTokenBackend {
-                min_frames: 0,
+                min_frames,
                 shape: ModelShape {
                     vocab_size: vocab.len(),
                     blank_id: vocab.blank_id(),
@@ -394,14 +392,7 @@ mod tests {
         Vocab::from_pieces(pieces)
     }
 
-    fn transcriber(config: PipelineConfig) -> Transcriber<FrameTokenBackend> {
-        transcriber_with(config, 0)
-    }
-
-    fn transcriber_with(
-        config: PipelineConfig,
-        min_frames: usize,
-    ) -> Transcriber<FrameTokenBackend> {
+    fn transcriber(config: PipelineConfig, min_frames: usize) -> Transcriber<FrameTokenBackend> {
         let vocab = vocab();
         let tagger = LanguageTagger::with_recognizer(
             LanguageTagger::default_candidates(),
@@ -418,8 +409,7 @@ mod tests {
                 ..VadConfig::default()
             },
         };
-        let mut backend = FrameTokenBackend::new(&vocab);
-        backend.min_frames = min_frames;
+        let backend = FrameTokenBackend::new(&vocab, min_frames);
         Transcriber::new(backend, vocab, Box::new(vad), tagger, config)
     }
 
@@ -446,7 +436,7 @@ mod tests {
 
     #[test]
     fn a_short_recording_is_one_chunk_with_words_and_timings() {
-        let mut t = transcriber(PipelineConfig::default());
+        let mut t = transcriber(PipelineConfig::default(), 0);
         // "w1 s21 s22" then a pause then "w2".
         let mut samples = audio(6.0, 10, &[1, 21, 22]);
         for (i, x) in audio(6.0, 40, &[2]).into_iter().enumerate() {
@@ -481,7 +471,7 @@ mod tests {
             },
             ..PipelineConfig::default()
         };
-        let mut t = transcriber(config);
+        let mut t = transcriber(config, 0);
         // 20 words, one every 1.6 s (20 frames), starting at 1 s: 32 s of speech with no pauses
         // long enough for the VAD, so the chunker cuts on energy inside the words.
         let mut samples = vec![0.0f32; 36 * SAMPLE_RATE];
@@ -527,7 +517,7 @@ mod tests {
         // fake encodes windows under 130 frames to silence, so only the
         // 6 s extension after the chunk decodes it.
         let (config, samples) = empty_chunk_fixture(50);
-        let mut t = transcriber_with(config, 130);
+        let mut t = transcriber(config, 130);
         let transcript = t.transcribe(&samples, None).unwrap();
         assert_eq!(transcript.chunks.len(), 1, "{:?}", transcript.chunks);
         assert!(transcript.stats.recoveries_tried >= 1);
@@ -541,7 +531,7 @@ mod tests {
         // window decodes it, but it is the second chunk's word, so the retry
         // is not accepted and the merge sees it once.
         let (config, samples) = empty_chunk_fixture(130);
-        let mut t = transcriber(config);
+        let mut t = transcriber(config, 0);
         let transcript = t.transcribe(&samples, None).unwrap();
         assert_eq!(transcript.chunks.len(), 2, "{:?}", transcript.chunks);
         assert!(transcript.stats.recoveries_tried >= 1);
@@ -555,7 +545,7 @@ mod tests {
 
     #[test]
     fn silence_gives_an_empty_transcript() {
-        let mut t = transcriber(PipelineConfig::default());
+        let mut t = transcriber(PipelineConfig::default(), 0);
         let transcript = t.transcribe(&vec![0.0; 3 * SAMPLE_RATE], None).unwrap();
         assert!(transcript.segments.is_empty());
         assert!(transcript.chunks.is_empty());
