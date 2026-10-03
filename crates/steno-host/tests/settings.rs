@@ -554,6 +554,61 @@ fn busy_flags_are_published_before_the_service_runs() {
     );
 }
 
+/// The shell's `bridge_call` is an `async` Tauri command, so a host call
+/// can arrive inside a tokio runtime. The host awaits the secret store at
+/// construction, on Save and when the sections reload; from there that
+/// must block like any other call, not panic with "Cannot start a runtime
+/// from within a runtime".
+#[test]
+fn the_secret_store_is_awaited_from_inside_an_async_runtime() {
+    let runtimes = [
+        tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap(),
+        tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .build()
+            .unwrap(),
+    ];
+    for runtime in runtimes {
+        runtime.block_on(async {
+            let harness = Harness::builder().build();
+            harness
+                .host
+                .settings_summaries_update(update(Some("gpt-4.1-mini"), None, None, None))
+                .unwrap();
+            harness
+                .host
+                .settings_summaries_select_preset(SetStringParams {
+                    value: "openAI".to_owned(),
+                })
+                .unwrap();
+            harness
+                .host
+                .settings_summaries_update(update(None, None, Some("sk-async"), None))
+                .unwrap();
+            harness.host.settings_summaries_save().unwrap();
+            let stored = harness
+                .fakes
+                .secrets
+                .secret(&SecretKey::llm_api_key())
+                .await
+                .unwrap();
+            assert_eq!(stored.as_deref(), Some("sk-async"));
+
+            // A write from elsewhere reloads the sections, the key with them.
+            let mut settings = harness.store.settings().unwrap();
+            settings.meeting_detection_enabled = false;
+            harness.store.save_settings(&settings).unwrap();
+            harness.host.store_changed();
+            assert_eq!(
+                harness.snapshot(BridgeTopic::SettingsGeneral)["detectionEnabled"],
+                false
+            );
+        });
+    }
+}
+
 fn update(
     model: Option<&str>,
     url: Option<&str>,

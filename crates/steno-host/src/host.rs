@@ -121,16 +121,33 @@ pub enum HostError {
 }
 
 /// The core's boundaries are async; the host waits on them here, on one
-/// current-thread runtime shared by every call.
-pub(crate) fn block_on<F: std::future::Future>(future: F) -> F::Output {
+/// current-thread runtime shared by every call. Blocking on a runtime from
+/// a thread that is already inside one panics, and a host call can arrive
+/// on such a thread (an `async` Tauri command, a test under
+/// `#[tokio::test]`): there the future is awaited on a scoped helper thread
+/// instead, so the call blocks like every other host call and never panics.
+/// The secret store is the only boundary awaited this way, a handful of
+/// times per Save.
+pub(crate) fn block_on<F>(future: F) -> F::Output
+where
+    F: std::future::Future + Send,
+    F::Output: Send,
+{
     static RUNTIME: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
-    RUNTIME
-        .get_or_init(|| {
-            tokio::runtime::Builder::new_current_thread()
-                .build()
-                .expect("a current-thread runtime builds without I/O or time")
-        })
-        .block_on(future)
+    let runtime = RUNTIME.get_or_init(|| {
+        tokio::runtime::Builder::new_current_thread()
+            .build()
+            .expect("a current-thread runtime builds without I/O or time")
+    });
+    if tokio::runtime::Handle::try_current().is_err() {
+        return runtime.block_on(future);
+    }
+    thread::scope(|scope| {
+        scope
+            .spawn(|| runtime.block_on(future))
+            .join()
+            .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
+    })
 }
 
 /// The view models and the controller state behind the host's mutex.
@@ -906,7 +923,12 @@ impl Host {
     }
 
     /// Every Settings section's `load`, as `SettingsBridge.load()` ran them
-    /// when the window opened. A download in flight keeps its state.
+    /// when the window opened. A download in flight keeps its state. The
+    /// API key is read from the secret store here with the lock held: this
+    /// runs only when the stored settings changed (an outside write, an
+    /// onboarding save), the read is short, and moving it out would split
+    /// one reload into two publishes. A `SecretStore` must not call back
+    /// into the host.
     fn reload_sections(&self, inner: &mut Inner) {
         let store = &self.shared.store;
         let services = &self.shared.services;
