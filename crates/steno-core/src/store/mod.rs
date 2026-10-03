@@ -135,11 +135,10 @@ impl std::fmt::Debug for Store {
 impl Store {
     /// Opens (creating) the database at `path` and applies every pending
     /// migration. The parent directory is created. The connection is set up
-    /// as the Swift app's: WAL mode with `synchronous = NORMAL`, as GRDB's
-    /// `DatabasePool` does for every connection, so a commit appends to the
-    /// WAL without an fsync and only a checkpoint syncs; foreign keys on;
-    /// and the Swift store's five-second busy timeout. Swift:
-    /// `MeetingStore.onDisk`, and GRDB's `Database.setUpWALMode`.
+    /// as the Swift app's (`MeetingStore.onDisk`, GRDB's
+    /// `Database.setUpWALMode`): WAL mode with `synchronous = NORMAL`, so a
+    /// commit appends to the WAL without an fsync and only a checkpoint
+    /// syncs; foreign keys on; a five-second busy timeout.
     ///
     /// Another process (the Swift app, a second copy of this one) may hold
     /// the file at the same time: every write here begins immediate, so one
