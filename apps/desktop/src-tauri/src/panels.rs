@@ -28,15 +28,7 @@
 //! Swift: `FloatingPanel.swift`, `FloatingPanelModel.swift`,
 //! `FloatingContent.swift`.
 
-use std::{
-    collections::HashMap,
-    fs,
-    path::PathBuf,
-    sync::{
-        Mutex,
-        atomic::{AtomicU64, Ordering},
-    },
-};
+use std::{collections::HashMap, fs, path::PathBuf, sync::Mutex};
 
 use tauri::{
     AppHandle, LogicalPosition, LogicalSize, Manager, PhysicalPosition, PixelUnit, Url, WebviewUrl,
@@ -147,16 +139,68 @@ impl PromptRequest {
     }
 }
 
+/// A prompt the host raised, with the shell's number for it: the `raised`
+/// in its query and in its X's dismissal. Each `set_prompt` with a request
+/// is a new number, so a request raised again, even an identical one, is a
+/// new prompt; one shown again after the bubble keeps its number.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RaisedPrompt {
+    pub request: PromptRequest,
+    pub raised: u64,
+}
+
+impl RaisedPrompt {
+    /// The prompt's query, numbered.
+    pub fn query(&self) -> String {
+        self.request.query(Some(self.raised))
+    }
+}
+
+/// The prompt slot: the one pending, and how many have been raised.
+#[derive(Debug, Default)]
+struct Prompts {
+    pending: Option<RaisedPrompt>,
+    raised: u64,
+}
+
+impl Prompts {
+    /// The host raised (`Some`) or cleared (`None`) the prompt; a raised
+    /// one takes the next number.
+    fn set(&mut self, request: Option<PromptRequest>) {
+        self.pending = request.map(|request| {
+            self.raised += 1;
+            RaisedPrompt {
+                request,
+                raised: self.raised,
+            }
+        });
+    }
+
+    /// The prompt's X: one that names a prompt (`raised`) clears only the
+    /// latest one raised, so a click that ran while the window loaded the
+    /// next prompt cannot clear it; one that names none (a prompt shown
+    /// unnumbered) clears whatever is pending. `true` when it cleared.
+    /// Swift: each `DetectionPromptViewModel` closes only itself
+    /// (`onClose`).
+    fn dismiss(&mut self, raised: Option<u64>) -> bool {
+        let dismisses = raised.is_none_or(|raised| raised == self.raised);
+        if dismisses {
+            self.pending = None;
+        }
+        dismisses
+    }
+}
+
 /// What the one floating surface shows.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FloatingContent {
-    Prompt(PromptRequest),
+    Prompt(RaisedPrompt),
     Bubble,
 }
 
 impl FloatingContent {
     /// The one rule: a busy recorder wins, else a prompt, else hidden.
-    pub fn resolve(prompt: Option<&PromptRequest>, recording: RecordingState) -> Option<Self> {
+    pub fn resolve(prompt: Option<&RaisedPrompt>, recording: RecordingState) -> Option<Self> {
         if recording.is_busy() {
             return Some(Self::Bubble);
         }
@@ -204,13 +248,11 @@ pub struct Panels {
     /// The size each panel's page last reported.
     sizes: Mutex<HashMap<Panel, (f64, f64)>>,
     placed: Mutex<HashMap<Panel, Placement>>,
-    prompt: Mutex<Option<PromptRequest>>,
+    prompt: Mutex<Prompts>,
     recording: Mutex<RecordingState>,
     /// What `apply` last showed, so a snapshot that changes nothing does
     /// not re-navigate the prompt.
     showing: Mutex<Option<FloatingContent>>,
-    /// How many prompts have been raised; the next one's `raised` number.
-    raised: AtomicU64,
 }
 
 impl Default for Panels {
@@ -222,7 +264,6 @@ impl Default for Panels {
             prompt: Mutex::default(),
             recording: Mutex::new(RecordingState::Idle),
             showing: Mutex::default(),
-            raised: AtomicU64::new(0),
         }
     }
 }
@@ -255,7 +296,11 @@ impl Panels {
     }
 
     pub fn content(&self) -> Option<FloatingContent> {
-        let prompt = self.prompt.lock().ok().and_then(|prompt| prompt.clone());
+        let prompt = self
+            .prompt
+            .lock()
+            .ok()
+            .and_then(|prompt| prompt.pending.clone());
         let recording = self
             .recording
             .lock()
@@ -275,17 +320,19 @@ impl Panels {
         })
     }
 
-    /// The query for a prompt raised now, numbered.
-    fn prompt_query(&self, request: &PromptRequest) -> String {
-        request.query(Some(self.raised.fetch_add(1, Ordering::SeqCst) + 1))
+    /// The host raised or cleared the prompt (`Prompts::set`).
+    fn set_prompt(&self, request: Option<PromptRequest>) {
+        if let Ok(mut prompt) = self.prompt.lock() {
+            prompt.set(request);
+        }
     }
 
-    /// Whether the prompt's X dismisses: one that names a prompt (`raised`)
-    /// dismisses only the latest one raised, so a click that ran while
-    /// the window loaded the next prompt cannot clear it; one that names
-    /// none (a prompt shown unnumbered) dismisses whatever shows.
-    fn dismisses(&self, raised: Option<u64>) -> bool {
-        raised.is_none_or(|raised| raised == self.raised.load(Ordering::SeqCst))
+    /// The prompt's X (`Prompts::dismiss`), checked and cleared under one
+    /// lock, so a prompt raised in between is never the one cleared.
+    fn dismiss_prompt(&self, raised: Option<u64>) -> bool {
+        self.prompt
+            .lock()
+            .is_ok_and(|mut prompt| prompt.dismiss(raised))
     }
 
     /// The anchor to lay out from: the saved one (`load` reads it on first
@@ -484,7 +531,8 @@ pub fn show_at(
 }
 
 /// Shows `panel` at `frame`. An existing window is reused: the prompt's
-/// is navigated to the new request first.
+/// is navigated to the new request first, unless it already shows it (the
+/// same prompt again after the bubble keeps its page and countdown).
 fn show_window(
     app: &AppHandle,
     panel: Panel,
@@ -493,7 +541,11 @@ fn show_window(
 ) -> tauri::Result<WebviewWindow> {
     if let Some(existing) = app.get_webview_window(panel.label()) {
         if panel.navigates_per_request() {
-            existing.navigate(panel.route_url(&existing.url()?, query))?;
+            let current = existing.url()?;
+            let next = panel.route_url(&current, query);
+            if next != current {
+                existing.navigate(next)?;
+            }
         }
         existing.set_position(LogicalPosition::new(frame.x, frame.y))?;
         existing.show()?;
@@ -572,7 +624,7 @@ fn apply(app: &AppHandle, content: Option<&FloatingContent>) {
         return;
     };
     let query = match content {
-        FloatingContent::Prompt(request) => Some(panels.prompt_query(request)),
+        FloatingContent::Prompt(prompt) => Some(prompt.query()),
         FloatingContent::Bubble => None,
     };
     if let Err(error) = show(app, content.panel(), query.as_deref()) {
@@ -609,21 +661,22 @@ pub fn note_recording(app: &AppHandle, state: RecordingState) {
     refresh(app);
 }
 
-/// The host raised (`Some`) or cleared (`None`) the detection prompt.
+/// The host raised (`Some`) or cleared (`None`) the detection prompt; a
+/// raised one is numbered here (`Prompts::set`). `WP6b`'s detection
+/// controller is the caller; nothing raises a prompt before it.
+#[allow(dead_code)]
 pub fn set_prompt(app: &AppHandle, request: Option<PromptRequest>) {
-    if let Ok(mut prompt) = app.state::<Panels>().prompt.lock() {
-        *prompt = request;
-    }
+    app.state::<Panels>().set_prompt(request);
     refresh(app);
 }
 
 /// The prompt's X: the prompt goes away, unless the X was another
-/// prompt's (`Panels::dismisses`). The host's detection controller learns
+/// prompt's (`Prompts::dismiss`). The host's detection controller learns
 /// of it through `WP6b`'s hook here; the fixture host has no detection to
 /// tell.
 pub fn dismiss_prompt(app: &AppHandle, raised: Option<u64>) {
-    if app.state::<Panels>().dismisses(raised) {
-        set_prompt(app, None);
+    if app.state::<Panels>().dismiss_prompt(raised) {
+        refresh(app);
     }
 }
 
@@ -823,8 +876,10 @@ mod tests {
         assert!(Panel::Prompt.navigates_per_request());
         assert!(!Panel::Bubble.navigates_per_request());
         let panels = Panels::default();
-        let first = panels.prompt_query(&request("Zoom"));
-        let second = panels.prompt_query(&request("Zoom"));
+        panels.set_prompt(Some(request("Zoom")));
+        let first = pending_query(&panels);
+        panels.set_prompt(Some(request("Zoom")));
+        let second = pending_query(&panels);
         assert_eq!(first, "app=Zoom&seconds=60&raised=1");
         assert_eq!(second, "app=Zoom&seconds=60&raised=2");
         for origin in [
@@ -846,9 +901,20 @@ mod tests {
         }
     }
 
+    /// The pending prompt's query.
+    fn pending_query(panels: &Panels) -> String {
+        match panels.content() {
+            Some(FloatingContent::Prompt(prompt)) => prompt.query(),
+            other => panic!("no prompt pending: {other:?}"),
+        }
+    }
+
     #[test]
     fn a_busy_recorder_wins_then_the_prompt_then_nothing() {
-        let prompt = request("Zoom");
+        let prompt = RaisedPrompt {
+            request: request("Zoom"),
+            raised: 1,
+        };
         for state in [
             RecordingState::Starting,
             RecordingState::Recording,
@@ -881,7 +947,7 @@ mod tests {
         assert_eq!(panels.size_of(Panel::Bubble), Panel::Bubble.initial_size());
         assert_eq!(Panel::Bubble.initial_size(), (480.0, 40.0));
         assert_eq!(Panel::Prompt.initial_size(), (480.0, 56.0));
-        *panels.prompt.lock().unwrap() = Some(request("Zoom"));
+        panels.set_prompt(Some(request("Zoom")));
         assert!(matches!(panels.content(), Some(FloatingContent::Prompt(_))));
         *panels.recording.lock().unwrap() = RecordingState::Recording;
         assert_eq!(panels.content(), Some(FloatingContent::Bubble));
@@ -998,17 +1064,51 @@ mod tests {
     }
 
     /// An X that names a prompt dismisses only the latest one raised; one
-    /// that names none dismisses what shows.
+    /// that names none dismisses what is pending.
     #[test]
     fn the_x_dismisses_only_its_own_prompt() {
         let panels = Panels::default();
-        assert!(panels.dismisses(None));
-        panels.prompt_query(&request("Charlie"));
-        panels.prompt_query(&request("Delta"));
-        assert!(!panels.dismisses(Some(1)), "Charlie's X");
-        assert!(panels.dismisses(Some(2)), "Delta's X");
-        assert!(!panels.dismisses(Some(3)), "a prompt not raised yet");
-        assert!(panels.dismisses(None));
+        assert!(panels.dismiss_prompt(None));
+        panels.set_prompt(Some(request("Charlie")));
+        panels.set_prompt(Some(request("Delta")));
+        assert!(!panels.dismiss_prompt(Some(1)), "Charlie's X");
+        assert!(!panels.dismiss_prompt(Some(3)), "a prompt not raised yet");
+        assert_eq!(pending_query(&panels), "app=Delta&seconds=60&raised=2");
+        assert!(panels.dismiss_prompt(Some(2)), "Delta's X");
+        assert_eq!(panels.content(), None);
+        panels.set_prompt(Some(request("Echo")));
+        assert!(panels.dismiss_prompt(None), "an unnumbered X");
+        assert_eq!(panels.content(), None);
+    }
+
+    /// The number is taken when the host raises the prompt, not when it
+    /// shows: an X from the old prompt that lands after the host raised a
+    /// new one, before the main thread showed it, leaves the new one up.
+    #[test]
+    fn an_old_x_between_raising_and_showing_leaves_the_new_prompt() {
+        let panels = Panels::default();
+        panels.set_prompt(Some(request("Charlie")));
+        let shown = pending_query(&panels);
+        assert!(shown.ends_with("raised=1"));
+        panels.set_prompt(Some(request("Delta")));
+        // Charlie's X, before Delta's `apply` ran.
+        assert!(!panels.dismiss_prompt(Some(1)));
+        assert_eq!(pending_query(&panels), "app=Delta&seconds=60&raised=2");
+    }
+
+    /// An identical request raised again is a new prompt (it remounts);
+    /// the pending one shown again after the bubble is the same.
+    #[test]
+    fn a_request_raised_again_is_a_new_prompt() {
+        let panels = Panels::default();
+        panels.set_prompt(Some(request("Zoom")));
+        let first = panels.content();
+        assert!(panels.note_showing(first.as_ref()));
+        assert!(panels.note_showing(Some(&FloatingContent::Bubble)));
+        assert!(panels.note_showing(first.as_ref()));
+        assert_eq!(panels.content(), first, "the same prompt after the bubble");
+        panels.set_prompt(Some(request("Zoom")));
+        assert!(panels.note_showing(panels.content().as_ref()));
     }
 
     /// A snapshot that changes nothing leaves the panel alone; a prompt
@@ -1017,7 +1117,10 @@ mod tests {
     #[test]
     fn apply_moves_only_on_a_change_of_content() {
         let panels = Panels::default();
-        let prompt = FloatingContent::Prompt(request("Zoom"));
+        let prompt = FloatingContent::Prompt(RaisedPrompt {
+            request: request("Zoom"),
+            raised: 1,
+        });
         assert!(!panels.note_showing(None));
         assert!(panels.note_showing(Some(&prompt)));
         assert!(!panels.note_showing(Some(&prompt)));

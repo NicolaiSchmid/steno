@@ -50,8 +50,9 @@ default, saved to `panel-anchor.json` in the app config directory when the
 user drags one; the geometry is `panel_geometry.rs`). One rule decides
 what shows: a busy recorder wins, else a pending detection prompt, else
 nothing. Each window is created once and then hidden and shown; the
-prompt's is navigated to each new request, numbered so the page remounts
-and the countdown restarts. The page measures its pill and reports the
+prompt's is navigated to each new request, which the shell numbers when
+the host raises it, so the page remounts and the countdown restarts; the
+X sends that number back and dismisses only its own prompt. The page measures its pill and reports the
 size in device pixels through the `panel_call` command; the shell divides
 it by the window's scale factor (WebKitGTK's pixel ratio follows the X
 resolution, the window's scale does not), rounds it up to whole points, clamps it to the screen's work area and sizes the window from it
