@@ -138,7 +138,9 @@ impl Store {
     /// like the Swift app's writer: WAL mode, `synchronous = NORMAL`, foreign
     /// keys on and a five-second busy timeout. With `NORMAL` in WAL mode a
     /// commit waits for an fsync only when it runs a checkpoint or is the
-    /// first commit after one.
+    /// first commit after one, so a power loss or OS crash can roll back
+    /// commits that no checkpoint has copied into the database yet; an app
+    /// crash loses nothing.
     /// Swift: `MeetingStore.onDisk`, whose `DatabasePool` runs GRDB's
     /// `Database.setUpWALMode`.
     ///

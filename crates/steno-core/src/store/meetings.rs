@@ -331,11 +331,11 @@ impl Store {
     /// while the meeting is `recording` or `processing`. Returns the files
     /// the rows named, for the caller to remove.
     ///
-    /// With `synchronous = NORMAL` the commit need not be on disk when this
-    /// returns, so a power loss or OS crash can roll the delete back after
-    /// the caller removed the files, as in the Swift app. A caller that needs
-    /// the delete durable before removing the files must wait for a
-    /// checkpoint.
+    /// The store commits with `synchronous = NORMAL`, so the delete need
+    /// not be on disk when this returns: a power loss or OS crash can roll
+    /// it back after the caller removed the files, as in the Swift app. A
+    /// delete that must be on disk first needs a commit with `FULL`, which
+    /// the store does not offer yet.
     pub fn delete_meeting(&self, id: Uuid) -> Result<DeletedMeeting> {
         self.write(|transaction| {
             let meeting = current(transaction, id)?;
