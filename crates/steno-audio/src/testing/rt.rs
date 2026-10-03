@@ -47,12 +47,12 @@ unsafe extern "system" {
 
 #[inline(always)]
 fn thread_id() -> usize {
-    // SAFETY: both are plain, always-available OS calls without
-    // preconditions.
+    // SAFETY: a plain, always-available OS call without preconditions.
     #[cfg(unix)]
     unsafe {
         pthread_self()
     }
+    // SAFETY: as above.
     #[cfg(windows)]
     unsafe {
         GetCurrentThreadId() as usize
