@@ -692,8 +692,12 @@ impl Core {
         // beside the asset instead, as a failed close does.
         let write_failure = writer_thread.take_error();
         let mut writer = writer_thread.take_writer().ok_or_else(writer_lost)?;
-        // Read before `clear()`, which zeroes the ring overrun counts.
+        // Read before `clear()`, which zeroes the ring overrun counts. Whole
+        // frames still in the rings never reached the relay: a restarted
+        // backend delivered them after a stop overtook its rebuild, with no
+        // processing thread running yet. They count as dropped.
         let ring_drops = active.sink.dropped_samples();
+        let undrained = active.sink.available_to_read() / FRAME_SIZE;
         active.sink.clear();
         let closing = writer.finish().err();
         let failure = write_failure
@@ -710,6 +714,11 @@ impl Core {
         let mut dropped: BTreeMap<AudioLane, usize> = BTreeMap::new();
         for (lane, samples) in ring_drops {
             *dropped.entry(lane).or_default() += samples / FRAME_SIZE;
+        }
+        if undrained > 0 {
+            for lane in &lanes {
+                *dropped.entry(*lane).or_default() += undrained;
+            }
         }
         for (index, frames) in active.relay.dropped_frames().into_iter().enumerate() {
             if index < lanes.len() && frames > 0 {

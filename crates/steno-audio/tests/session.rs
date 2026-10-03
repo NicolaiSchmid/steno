@@ -1999,14 +1999,25 @@ fn stop_while_the_gap_waits_for_the_relay_reports_the_silence_written() {
     assert_eq!(session.state(), CaptureState::Idle);
     let master = master_of(&result);
     let silence = master.frame_count() - 24_000;
-    assert!(
-        silence >= 30 * 480,
-        "at least a relay of silence: {silence}"
-    );
+    // The relay may still hold the old device's last audio when the gap
+    // starts waiting, so the silence written is at least one frame, not a
+    // whole relay.
+    assert!(silence >= 480, "some silence: {silence}");
     assert!(master.channels[0][24_000..].iter().all(|s| *s == 0.0));
     assert_eq!(result.statistics.gap_seconds, silence as f64 / SAMPLE_RATE);
     assert_eq!(result.statistics.device_changes, 0);
-    assert!(result.statistics.dropped_frames.is_empty());
+    // What the restarted backend delivered sat in the rings with no
+    // processing thread to drain it: dropped, and counted.
+    let undrained = (backend.frames_delivered() - 24_000) / 480;
+    assert_eq!(
+        result
+            .statistics
+            .dropped_frames
+            .get(&AudioLane::Mixed)
+            .copied()
+            .unwrap_or(0),
+        undrained
+    );
     assert_eq!(
         result.statistics.duration,
         master.frame_count() as f64 / SAMPLE_RATE
