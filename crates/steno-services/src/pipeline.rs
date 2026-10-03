@@ -219,10 +219,17 @@ mod tests {
         )
     }
 
-    /// Calls the host's synchronous method off the runtime, as the host
-    /// does, failing the test if it does not return in time.
+    /// Calls the host's synchronous method on a thread of its own, as the
+    /// host does, failing the test if it does not return in time. Not a
+    /// `spawn_blocking` task: the runtime waits for those when it shuts
+    /// down, so a call stuck on the work would hang the test instead of
+    /// failing it.
     async fn call<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> T {
-        tokio::time::timeout(PATIENCE, tokio::task::spawn_blocking(f))
+        let (sender, receiver) = tokio::sync::oneshot::channel();
+        std::thread::spawn(move || {
+            let _ = sender.send(f());
+        });
+        tokio::time::timeout(PATIENCE, receiver)
             .await
             .expect("the call returned without waiting for the work")
             .unwrap()
