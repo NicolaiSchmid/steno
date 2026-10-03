@@ -602,7 +602,7 @@ pub fn sha256_of(path: &Path) -> Result<String, SpeechError> {
 #[cfg(test)]
 mod tests {
     use std::io::{BufRead, BufReader};
-    use std::net::TcpListener;
+    use std::net::{TcpListener, TcpStream};
     use std::sync::mpsc;
 
     use super::*;
@@ -625,11 +625,7 @@ mod tests {
         std::thread::spawn(move || {
             for bytes in responses {
                 let (stream, _) = listener.accept().unwrap();
-                let mut reader = BufReader::new(&stream);
-                let mut line = String::new();
-                while reader.read_line(&mut line).unwrap() > 0 && line != "\r\n" {
-                    line.clear();
-                }
+                read_request_head(&stream);
                 let mut stream = &stream;
                 stream.write_all(&bytes).unwrap();
                 stream.flush().unwrap();
@@ -646,35 +642,37 @@ mod tests {
     /// Serves `body` to one connection per entry of `heads`, in order of
     /// arrival: the first `heads[k]` bytes at once, the rest once the k-th
     /// sender returned fires.
-    fn serve_held(body: Vec<u8>, heads: Vec<usize>) -> (String, Vec<mpsc::Sender<()>>) {
+    fn serve_held(body: &[u8], heads: Vec<usize>) -> (String, Vec<mpsc::Sender<()>>) {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap();
         let (senders, receivers): (Vec<_>, Vec<_>) = heads.iter().map(|_| mpsc::channel()).unzip();
+        let bytes = response("200 OK", body);
+        let header = bytes.len() - body.len();
         std::thread::spawn(move || {
             for (head, release) in heads.into_iter().zip(receivers) {
                 let (stream, _) = listener.accept().unwrap();
-                let body = body.clone();
+                let bytes = bytes.clone();
                 std::thread::spawn(move || {
-                    let mut reader = BufReader::new(&stream);
-                    let mut line = String::new();
-                    while reader.read_line(&mut line).unwrap() > 0 && line != "\r\n" {
-                        line.clear();
-                    }
+                    read_request_head(&stream);
+                    let (now, later) = bytes.split_at(header + head);
                     let mut stream = &stream;
-                    write!(
-                        stream,
-                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-                        body.len()
-                    )
-                    .unwrap();
-                    stream.write_all(&body[..head]).unwrap();
+                    stream.write_all(now).unwrap();
                     stream.flush().unwrap();
                     let _ = release.recv();
-                    let _ = stream.write_all(&body[head..]);
+                    let _ = stream.write_all(later);
                 });
             }
         });
         (format!("http://{address}/model.onnx"), senders)
+    }
+
+    /// Reads a request up to the blank line that ends its head.
+    fn read_request_head(stream: &TcpStream) {
+        let mut reader = BufReader::new(stream);
+        let mut line = String::new();
+        while reader.read_line(&mut line).unwrap() > 0 && line != "\r\n" {
+            line.clear();
+        }
     }
 
     fn asset(url: Option<String>, body: &[u8], sha256: &str) -> ModelAsset {
@@ -744,7 +742,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = ModelStore::new(dir.path());
         let body: Vec<u8> = (0..100_000u32).map(|i| (i % 251) as u8 + 1).collect();
-        let (url, release) = serve_held(body.clone(), vec![50_000, 10_000]);
+        let (url, release) = serve_held(&body, vec![50_000, 10_000]);
         let asset = asset(Some(url), &body, &digest(&body));
         let (first_started, first_waits) = mpsc::channel();
         let (second_started, second_waits) = mpsc::channel();
