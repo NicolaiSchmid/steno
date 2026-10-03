@@ -8,9 +8,9 @@
 //! scheduling.
 //!
 //! Manual: `cargo run --release -p steno-speech-coreml --bin
-//! steno-coreml-parity -- ~/steno-spikes/corpus ~/steno-spikes/baseline-bakeoff`
-//! on Forge, or the ignored test in `tests/parity.rs` with
-//! `STENO_CALIBRATION_CORPUS` set.
+//! steno-coreml-parity -- ~/steno-spikes/corpus
+//! ~/steno-spikes/baseline-bakeoff` on Forge, or the ignored test in
+//! `tests/parity.rs` with `STENO_CALIBRATION_CORPUS` set.
 
 use std::fmt;
 use std::path::{Path, PathBuf};

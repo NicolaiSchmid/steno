@@ -37,10 +37,10 @@ pub const ENCODER_FILE: &str = "Encoder.mlmodelc";
 pub const DECODER_FILE: &str = "Decoder.mlmodelc";
 pub const JOINT_FILE: &str = "JointDecisionv3.mlmodelc";
 /// Vocabulary file (`ModelNames.ASR.vocabularyFile`, the name Steno's
-/// `ModelAsset` requires); the model repository ships the same bytes as
-/// `parakeet_v3_vocab.json` too, read when the first is absent.
+/// `ModelAsset` requires).
 pub const VOCABULARY_FILE: &str = "parakeet_vocab.json";
-/// The second name of the vocabulary file.
+/// The model repository's name for the same bytes; read when
+/// [`VOCABULARY_FILE`] is absent.
 pub const VOCABULARY_FILE_V3: &str = "parakeet_v3_vocab.json";
 
 /// Compute units per model, as `AsrModels.loadLocal` assigns them from

@@ -229,8 +229,8 @@ impl Transcriber {
     }
 
     /// One window: frame aligned by zero padding when that stays within
-    /// the model window, decoded as first and last chunk
-    /// (`transcribeWithState`, the short branch).
+    /// the model window, decoded as both first and last window
+    /// (`isLastChunk`); `transcribeWithState`, the short branch.
     fn transcribe_short(&self, audio: &[f32]) -> Result<Transcript, SpeechError> {
         let aligned_len = audio.len().div_ceil(FRAME_SAMPLES) * FRAME_SAMPLES;
         let mut padded: Vec<f32>;
@@ -465,7 +465,8 @@ impl Transcriber {
         #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
         let min_gap_frames =
             ((self.config.seam_gap_min_gap_seconds / FRAME_SECONDS) as usize).max(2);
-        // The probe window is the chunk window without mel context.
+        // The probe window is one chunk of samples (`chunk_samples`), no mel
+        // context.
         let window_samples = Layout::v3().chunk_samples;
 
         let mut working = tokens;

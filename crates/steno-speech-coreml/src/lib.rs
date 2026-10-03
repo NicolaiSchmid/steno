@@ -26,9 +26,9 @@
 //! its origin as `Type.method` in parentheses (the file is `Type.swift`),
 //! the one place a Swift pointer appears for that item. The Swift app's
 //! transcript is the oracle: a Rust transcript that differs is a bug (plan
-//! invariant 6). The decoder
-//! core is small and stable; the heuristics around it change in most
-//! FluidAudio releases, which is why the parity harness exists.
+//! invariant 6). The decoder core is small and stable; the heuristics
+//! around it change in most FluidAudio releases, which is why the parity
+//! harness exists.
 //!
 //! Until WP4a's shared `TensorBackend` loop lands in `steno-speech`, this
 //! crate carries its own pipeline over the four backend calls; the
@@ -67,8 +67,8 @@ pub mod pipeline;
 pub use engine::{CoreMlParakeetEngine, ENGINE_ID, default_model_directory};
 
 /// One decoded token with its global encoder frame (80 ms), the joint's
-/// probability for it and the duration bin it advanced by. FluidAudio's
-/// `ChunkProcessor.TokenWindow`.
+/// probability for it and the duration bin it advanced by
+/// (`ChunkProcessor.TokenWindow`).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Token {
     /// SentencePiece id into the vocabulary.

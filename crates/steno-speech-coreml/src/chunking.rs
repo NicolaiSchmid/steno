@@ -37,7 +37,8 @@ pub const SPEECH_RMS_REFERENCE_SCALE: f32 = 0.3;
 /// (`ChunkProcessor.speechRmsReferencePercentile`).
 pub const SPEECH_RMS_REFERENCE_PERCENTILE: f64 = 0.75;
 
-/// Frames of a sample count, rounded up (`ASRConstants.calculateEncoderFrames`).
+/// Frames of a sample count, rounded up
+/// (`ASRConstants.calculateEncoderFrames`).
 #[must_use]
 pub fn encoder_frames(samples: usize) -> usize {
     samples.div_ceil(FRAME_SAMPLES)

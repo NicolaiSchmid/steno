@@ -199,7 +199,7 @@ fn merge_using_matches(
         result.extend_from_slice(tail);
         return result;
     }
-    // Issue #683: the splice lands mid-word; re-splice at a word boundary
+    // The splice lands mid-word (issue #683): re-splice at a word boundary
     // so exactly one window segments the seam word.
     if let Some(word_start) = word_initial_index(right, last_right, vocab)
         && pop_seam_word(&mut result, vocab)
