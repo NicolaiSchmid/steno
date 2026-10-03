@@ -107,9 +107,27 @@ pub fn openable_url(text: &str) -> Result<Url, BridgeError> {
         })
 }
 
+steno_core::string_enum! {
+    /// What a panel asks of the shell through `panel_call` (`PanelAction`
+    /// in `panel-shell.ts`).
+    pub enum PanelAction {
+        Resize = "resize",
+        DismissPrompt = "dismissPrompt",
+    }
+}
+
+/// The action a panel named, or `unknownMethod`, as the bridge answers a
+/// method it does not know.
+pub fn panel_action(text: &str) -> Result<PanelAction, BridgeError> {
+    text.parse()
+        .map_err(|_| BridgeError::unknown_method(format!("The panels do not answer {text}.")))
+}
+
 /// `panel_call("resize")`: the page's measured size in device pixels (CSS
 /// pixels times `devicePixelRatio`, `deviceSize` in `panel-shell.ts`).
+/// Exactly the two fields, as an object.
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct ResizeParams {
     width: f64,
     height: f64,
@@ -124,8 +142,33 @@ impl ResizeParams {
     }
 }
 
+/// `panel_call("dismissPrompt")`: the number of the prompt whose X was
+/// clicked (`raised` in its route); `null` params or no `raised` for a
+/// prompt shown unnumbered.
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DismissParams {
+    #[serde(default)]
+    raised: Option<u64>,
+}
+
 fn parse<T: for<'de> Deserialize<'de>>(method: &str, params: Value) -> Result<T, BridgeError> {
     serde_json::from_value(params).map_err(|error| invalid_params_for(method, error))
+}
+
+/// A panel's params: a JSON object (serde would also read a struct from
+/// an array, `[300, 40]`), with no field the action does not name.
+fn panel_params<T: for<'de> Deserialize<'de>>(
+    action: PanelAction,
+    params: Value,
+) -> Result<T, BridgeError> {
+    if !params.is_object() {
+        return Err(invalid_params_for(
+            action.as_str(),
+            "the params must be an object",
+        ));
+    }
+    parse(action.as_str(), params)
 }
 
 /// Which window a `window.close` from `caller` may close: the onboarding
@@ -250,21 +293,23 @@ pub async fn panel_call(
 ) -> Result<Value, BridgeError> {
     let panel = panel_caller(window.label())?;
     let params = params.unwrap_or(Value::Null);
-    match action.as_str() {
-        "resize" => {
-            let report: ResizeParams = parse(&action, params)?;
+    match panel_action(&action)? {
+        PanelAction::Resize => {
+            let report: ResizeParams = panel_params(PanelAction::Resize, params)?;
             let size = report.logical(window.scale_factor().map_err(failed)?);
             app.state::<Smoke>().note_panel_size(panel.label(), size);
             panels::resize(&app, panel, size)?;
             Ok(Value::Null)
         }
-        "dismissPrompt" => {
-            panels::dismiss_prompt(&app);
+        PanelAction::DismissPrompt => {
+            let request: DismissParams = if params.is_null() {
+                DismissParams::default()
+            } else {
+                panel_params(PanelAction::DismissPrompt, params)?
+            };
+            panels::dismiss_prompt(&app, request.raised);
             Ok(Value::Null)
         }
-        other => Err(BridgeError::unknown_method(format!(
-            "The panels do not answer {other}."
-        ))),
     }
 }
 
@@ -517,9 +562,58 @@ mod tests {
         .unwrap();
         assert_eq!(large.logical(1.0), (100.0, 52.5));
         assert_eq!(large.logical(2.0), (50.0, 26.25));
-        let error = parse::<ResizeParams>("resize", serde_json::json!({ "width": 1 })).unwrap_err();
-        assert_eq!(error.code, BridgeErrorCode::InvalidParams);
-        assert!(error.message.starts_with("resize: "));
+        for (params, says) in [
+            (serde_json::json!({ "width": 1 }), "missing field `height`"),
+            (serde_json::json!([300, 40]), "the params must be an object"),
+            (
+                serde_json::json!({ "width": 300, "height": 40, "depth": 2 }),
+                "unknown field `depth`",
+            ),
+            (Value::Null, "the params must be an object"),
+        ] {
+            let error = panel_params::<ResizeParams>(PanelAction::Resize, params).unwrap_err();
+            assert_eq!(error.code, BridgeErrorCode::InvalidParams);
+            assert!(error.message.starts_with("resize: "), "{}", error.message);
+            assert!(error.message.contains(says), "{}", error.message);
+        }
+    }
+
+    #[test]
+    fn a_dismissal_names_its_prompt_or_none() {
+        let named: DismissParams = panel_params(
+            PanelAction::DismissPrompt,
+            serde_json::json!({ "raised": 3 }),
+        )
+        .unwrap();
+        assert_eq!(named.raised, Some(3));
+        let none: DismissParams =
+            panel_params(PanelAction::DismissPrompt, serde_json::json!({})).unwrap();
+        assert_eq!(none.raised, None);
+        for params in [
+            serde_json::json!({ "raised": -1 }),
+            serde_json::json!({ "raised": "3" }),
+            serde_json::json!({ "raised": 3, "app": "Zoom" }),
+            serde_json::json!([3]),
+        ] {
+            let error = panel_params::<DismissParams>(PanelAction::DismissPrompt, params.clone())
+                .unwrap_err();
+            assert_eq!(error.code, BridgeErrorCode::InvalidParams, "{params}");
+            assert!(error.message.starts_with("dismissPrompt: "), "{params}");
+        }
+    }
+
+    #[test]
+    fn the_panels_answer_two_actions_and_nothing_else() {
+        assert_eq!(panel_action("resize").unwrap(), PanelAction::Resize);
+        assert_eq!(
+            panel_action("dismissPrompt").unwrap(),
+            PanelAction::DismissPrompt
+        );
+        for text in ["Resize", "close", ""] {
+            let error = panel_action(text).unwrap_err();
+            assert_eq!(error.code, BridgeErrorCode::UnknownMethod, "{text}");
+            assert_eq!(error.message, format!("The panels do not answer {text}."));
+        }
     }
 
     #[test]

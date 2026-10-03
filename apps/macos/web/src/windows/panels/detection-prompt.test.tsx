@@ -37,6 +37,17 @@ describe("parsePromptRequest", () => {
 			parsePromptRequest(new URLSearchParams("seconds=soon")).seconds,
 		).toBe(60);
 	});
+
+	it("reads the shell's number for the prompt, when it is one", () => {
+		expect(
+			parsePromptRequest(new URLSearchParams("app=Zoom&seconds=45&raised=3")),
+		).toEqual({ appName: "Zoom", seconds: 45, raised: 3 });
+		for (const raised of ["", "0", "-1", "1.5", "two"]) {
+			expect(
+				parsePromptRequest(new URLSearchParams(`raised=${raised}`)).raised,
+			).toBeUndefined();
+		}
+	});
 });
 
 describe("DetectionPrompt", () => {
@@ -87,6 +98,20 @@ describe("DetectionPrompt", () => {
 		await userEvent.click(screen.getByTestId("prompt-dismiss"));
 		expect(shell.calls).toEqual([["dismissPrompt", undefined]]);
 		expect(harness.transport.calls).toEqual([]);
+	});
+
+	it("the X names the prompt it dismisses", async () => {
+		const harness = await createBridgeHarness();
+		const shell = fakeShell();
+		renderWithBridge(
+			<DetectionPrompt
+				request={{ appName: "Zoom", seconds: 60, raised: 4 }}
+				shell={shell}
+			/>,
+			harness,
+		);
+		await userEvent.click(screen.getByTestId("prompt-dismiss"));
+		expect(shell.calls).toEqual([["dismissPrompt", { raised: 4 }]]);
 	});
 
 	it("reports its size to the shell", async () => {

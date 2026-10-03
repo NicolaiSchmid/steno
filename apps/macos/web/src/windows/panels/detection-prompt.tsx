@@ -7,26 +7,34 @@ import { CountdownHairline, PanelBar } from "./panel-bar";
 import { type PanelShell, panelShell, useReportSize } from "./panel-shell";
 
 /**
- * The detection prompt (`#/panel/prompt?app=<name>&seconds=<n>`): the Swift
+ * The detection prompt (`#/panel/prompt?app=<name>&seconds=<n>&raised=<serial>`): the Swift
  * `DetectionPromptView` in the pill language. "<App> opened the
  * microphone", one line under it, one primary Record button, an X, and the
  * draining hairline along the bottom. No number: nothing is at stake when
  * the prompt closes. The shell opens the panel with the request in the
  * route and hides it when the host clears the prompt; Record starts a call
- * recording through the bridge, the X tells the shell.
+ * recording through the bridge, the X tells the shell which prompt it was.
  */
 
 export interface PromptRequest {
 	appName: string;
 	seconds: number;
+	/**
+	 * The shell's number for this prompt (`raised`), sent back with the X
+	 * so a click that lands while the next prompt loads dismisses only the
+	 * prompt it was aimed at.
+	 */
+	raised?: number;
 }
 
 /** The request from the route's query; a missing name is "An app". */
 export function parsePromptRequest(params: URLSearchParams): PromptRequest {
 	const seconds = Number(params.get("seconds"));
+	const raised = Number(params.get("raised") ?? Number.NaN);
 	return {
 		appName: params.get("app")?.trim() || "An app",
 		seconds: Number.isFinite(seconds) && seconds > 0 ? seconds : 60,
+		...(Number.isSafeInteger(raised) && raised > 0 ? { raised } : {}),
 	};
 }
 
@@ -74,7 +82,11 @@ export function DetectionPrompt({
 				aria-label="Not now"
 				data-testid="prompt-dismiss"
 				onClick={() => {
-					shell.call("dismissPrompt").catch((cause: unknown) => {
+					const params =
+						request.raised === undefined
+							? undefined
+							: { raised: request.raised };
+					shell.call("dismissPrompt", params).catch((cause: unknown) => {
 						console.error("panel: dismissPrompt failed", cause);
 					});
 				}}

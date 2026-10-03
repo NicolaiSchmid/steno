@@ -270,6 +270,14 @@ impl Panels {
         request.query(Some(self.raised.fetch_add(1, Ordering::SeqCst) + 1))
     }
 
+    /// Whether the prompt's X dismisses: one that names a prompt (`raised`)
+    /// dismisses only the latest one raised, so a click that ran while
+    /// the window loaded the next prompt cannot clear it; one that names
+    /// none (a prompt shown unnumbered) dismisses whatever shows.
+    fn dismisses(&self, raised: Option<u64>) -> bool {
+        raised.is_none_or(|raised| raised == self.raised.load(Ordering::SeqCst))
+    }
+
     /// The anchor to lay out from: the saved one (`load` reads it on first
     /// use) while a panel of `size` hanging from it fits one of `screens`,
     /// else the default.
@@ -603,11 +611,14 @@ pub fn set_prompt(app: &AppHandle, request: Option<PromptRequest>) {
     refresh(app);
 }
 
-/// The prompt's X: the prompt goes away. The host's detection controller
-/// learns of it through `WP6b`'s hook here; the fixture host has no
-/// detection to tell.
-pub fn dismiss_prompt(app: &AppHandle) {
-    set_prompt(app, None);
+/// The prompt's X: the prompt goes away, unless the X was another
+/// prompt's (`Panels::dismisses`). The host's detection controller learns
+/// of it through `WP6b`'s hook here; the fixture host has no detection to
+/// tell.
+pub fn dismiss_prompt(app: &AppHandle, raised: Option<u64>) {
+    if app.state::<Panels>().dismisses(raised) {
+        set_prompt(app, None);
+    }
 }
 
 /// The page measured its content: the window takes that size around the
@@ -630,12 +641,8 @@ pub fn resize(app: &AppHandle, panel: Panel, reported: (f64, f64)) -> Result<(),
             .map_err(failed)?,
     };
     let screen = top_center.map_or(fallback, |point| Rect::holding(&screens, point, fallback));
-    let size = accepted_size(reported, (screen.width, screen.height)).ok_or_else(|| {
-        BridgeError::invalid_params(format!(
-            "resize: {:?} by {:?} is not a size",
-            reported.0, reported.1
-        ))
-    })?;
+    let size = accepted_size(reported, (screen.width, screen.height))
+        .ok_or_else(|| not_a_size(reported))?;
     if !panels.note_size(panel, size) {
         return Ok(());
     }
@@ -648,6 +655,15 @@ pub fn resize(app: &AppHandle, panel: Panel, reported: (f64, f64)) -> Result<(),
         .set_position(LogicalPosition::new(frame.x, frame.y))
         .map_err(failed)?;
     Ok(())
+}
+
+/// `invalidParams` for a report that is not a size, its numbers in their
+/// shortest form (`1e-300`, not three hundred digits).
+fn not_a_size(reported: (f64, f64)) -> BridgeError {
+    BridgeError::invalid_params(format!(
+        "resize: {:?} by {:?} is not a size",
+        reported.0, reported.1
+    ))
 }
 
 /// Gives a panel's window `size` and holds it there: the minimum and the
@@ -949,6 +965,32 @@ mod tests {
         // A report as large as the screen fills it from its top-left corner.
         let whole = panels.place(Panel::Prompt, (1100.0, 8.0), (2200.0, 1500.0), &[SCREEN]);
         assert_eq!(whole, SCREEN);
+    }
+
+    #[test]
+    fn a_report_that_is_no_size_is_named_briefly() {
+        assert_eq!(
+            not_a_size((1e-300, 40.0)).message,
+            "resize: 1e-300 by 40.0 is not a size"
+        );
+        assert_eq!(
+            not_a_size((f64::NAN, -1.0)).message,
+            "resize: NaN by -1.0 is not a size"
+        );
+    }
+
+    /// An X that names a prompt dismisses only the latest one raised; one
+    /// that names none dismisses what shows.
+    #[test]
+    fn the_x_dismisses_only_its_own_prompt() {
+        let panels = Panels::default();
+        assert!(panels.dismisses(None));
+        panels.prompt_query(&request("Charlie"));
+        panels.prompt_query(&request("Delta"));
+        assert!(!panels.dismisses(Some(1)), "Charlie's X");
+        assert!(panels.dismisses(Some(2)), "Delta's X");
+        assert!(!panels.dismisses(Some(3)), "a prompt not raised yet");
+        assert!(panels.dismisses(None));
     }
 
     /// A snapshot that changes nothing leaves the panel alone; a prompt
