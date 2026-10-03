@@ -332,4 +332,69 @@ mod tests {
             0
         );
     }
+
+    /// Two windows disagree on how many speak: the first hears two, the
+    /// second one. Where both cover, the mean count is 1.5, which rounds
+    /// to 2, so the second speaker keeps the floor until the first window
+    /// ends; a truncating mean would hand those eight seconds to the
+    /// first speaker.
+    #[test]
+    fn the_speaker_count_is_the_rounded_mean_over_the_covering_windows() {
+        // Window 0: local speaker 1 alone for 119 frames, then both.
+        let frames_a: Vec<u8> = (0..589)
+            .map(|f| if f < 119 { 0b10 } else { 0b11 })
+            .collect();
+        // Window 1 (from 2 s): local speaker 0 alone throughout.
+        let frames_b = vec![0b01u8; 589];
+        let analysis = Analysis {
+            geometry: GEOMETRY.clone(),
+            total_samples: 192_000,
+            activities: vec![
+                WindowActivity {
+                    window: 0,
+                    offset: 0,
+                    frames: frames_a,
+                },
+                WindowActivity {
+                    window: 1,
+                    offset: 32_000,
+                    frames: frames_b,
+                },
+            ],
+            embeddings: vec![
+                WindowEmbedding {
+                    window: 0,
+                    local_speaker: 0,
+                    start: 2.0,
+                    end: 10.0,
+                    embedding: vec![1.0],
+                },
+                WindowEmbedding {
+                    window: 0,
+                    local_speaker: 1,
+                    start: 0.0,
+                    end: 10.0,
+                    embedding: vec![1.0],
+                },
+                WindowEmbedding {
+                    window: 1,
+                    local_speaker: 0,
+                    start: 2.0,
+                    end: 12.0,
+                    embedding: vec![1.0],
+                },
+            ],
+        };
+        let turns = turns(
+            &analysis,
+            &[Some(0), Some(1), Some(0)],
+            &TimelineRules::default(),
+        );
+        let second = turns.iter().find(|t| t.speaker_label == "S2").unwrap();
+        let first = turns.iter().find(|t| t.speaker_label == "S1").unwrap();
+        assert!(second.start < 0.05, "{second:?}");
+        assert!((second.end - 9.95).abs() < 0.05, "{second:?}");
+        assert!((first.start - second.end).abs() < 1e-9, "{first:?}");
+        assert!((first.end - 12.0).abs() < 0.05, "{first:?}");
+    }
 }

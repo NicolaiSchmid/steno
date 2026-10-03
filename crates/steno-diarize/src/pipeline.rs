@@ -203,3 +203,38 @@ impl<B: TensorBackend> SliceEmbedder for Pipeline<B> {
             .map_err(|error| Box::new(error) as BoxError)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The defaults are the plan's and `FluidAudio`'s numbers; nothing
+    /// else pins them, so a slipped constant would otherwise pass every
+    /// behavioural test that builds its own rules.
+    #[test]
+    fn the_default_configuration_is_the_calibrated_one() {
+        let config = DiarizerConfig::default();
+        assert_eq!(config.clustering_threshold, DEFAULT_CLUSTERING_THRESHOLD);
+        assert_eq!(DEFAULT_CLUSTERING_THRESHOLD, 0.32);
+        assert_eq!(config.min_speakers, None);
+        assert_eq!(config.max_speakers, None);
+        assert!(config.refines_clusters);
+        assert_eq!(config.step_seconds, 2.0);
+        assert_eq!(config.step_samples(16_000), 32_000);
+        assert_eq!(config.extraction.min_segment_seconds, 1.0);
+        assert!(config.extraction.exclude_overlap);
+        assert_eq!(config.extraction.min_active_ratio, 0.2);
+        assert_eq!(config.timeline.min_duration_on, 1.0);
+        assert_eq!(config.timeline.min_duration_off, 0.1);
+        assert_eq!(config.refinement.minimum_seconds, 30.0);
+        assert_eq!(config.refinement.merge_threshold, 0.60);
+        assert_eq!(config.refinement.absorb_threshold, 0.30);
+        assert_eq!(DiarizerConfig::MINIMUM_AUDIO_SECONDS, 1.0);
+        let clustering = config.clustering(0.5);
+        assert_eq!(clustering.threshold, 0.5);
+        assert_eq!(
+            config.clustering(config.clustering_threshold).threshold,
+            0.32
+        );
+    }
+}

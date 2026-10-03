@@ -380,6 +380,37 @@ mod tests {
         assert!(row[peak] - row[70] > 5.0);
     }
 
+    /// `WeSpeaker` trains on 16-bit integer samples; Steno's buffers hold
+    /// `-1...1`. The recipe scales by 32 768 before the FFT, so every log
+    /// energy of a tone sits `ln(32768^2)` above the unscaled one.
+    #[test]
+    fn samples_are_scaled_to_the_sixteen_bit_range() {
+        assert_eq!(FbankConfig::WESPEAKER.sample_scale, 32_768.0);
+        #[allow(clippy::cast_precision_loss)]
+        let tone: Vec<f32> = (0..1_600)
+            .map(|index| (2.0 * std::f32::consts::PI * 440.0 * index as f32 / 16_000.0).sin() * 0.5)
+            .collect();
+        let scaled = Fbank::wespeaker().compute(&tone);
+        let unscaled = Fbank::new(FbankConfig {
+            sample_scale: 1.0,
+            ..FbankConfig::WESPEAKER
+        })
+        .compute(&tone);
+        let expected = (32_768.0f32 * 32_768.0).ln();
+        let peak = scaled[..80]
+            .iter()
+            .enumerate()
+            .max_by(|lhs, rhs| lhs.1.total_cmp(rhs.1))
+            .map(|(bin, _)| bin)
+            .unwrap();
+        assert!(
+            (scaled[peak] - unscaled[peak] - expected).abs() < 1e-3,
+            "{} vs {} + {expected}",
+            scaled[peak],
+            unscaled[peak]
+        );
+    }
+
     #[test]
     fn silence_floors_at_epsilon_and_mean_subtraction_centres_each_bin() {
         let fbank = Fbank::wespeaker();
