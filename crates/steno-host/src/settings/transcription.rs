@@ -5,6 +5,7 @@
 use std::collections::BTreeMap;
 
 use steno_core::Store;
+use steno_core::protocols::BoxError;
 
 use super::{SectionError, update_settings};
 use crate::labels::file_size;
@@ -166,7 +167,7 @@ impl SpeechSettingsViewModel {
         let outcome = update_settings(store, |settings| {
             id.as_str().clone_into(&mut settings.speech_engine_id);
         })
-        .map_err(|error| error.to_string())
+        .map_err(BoxError::from)
         .and_then(|_| services.pipeline.reload());
         match outcome {
             Ok(()) => self.errors.clear(),

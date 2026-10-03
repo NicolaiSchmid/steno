@@ -51,9 +51,8 @@ impl GeneralSettingsViewModel {
     /// The login item and the setting together. Swift: `AppEnvironment.setLaunchAtLogin`.
     pub fn set_launch_at_login(&mut self, enabled: bool, store: &Store, services: &Services) {
         let outcome = services.login_item.set_enabled(enabled).and_then(|()| {
-            update_settings(store, |settings| settings.launch_at_login = enabled)
-                .map(drop)
-                .map_err(|error| error.to_string())
+            update_settings(store, |settings| settings.launch_at_login = enabled)?;
+            Ok(())
         });
         if let Err(error) = outcome {
             self.errors

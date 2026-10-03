@@ -17,7 +17,7 @@
 //!   models and snapshots, one module per window.
 //! - [`setup`], [`labels`], [`speech`], [`summary_markdown`]: the copy and
 //!   the labels the view models share, and the two tables (the speech
-//!   engines and assets, the summary Markdown) that move to WP4 and WP6b.
+//!   engines and assets, the summary Markdown) that move to WP4 and `WP6b`.
 //!
 //! The crate holds no UI framework and no I/O of its own beyond the store:
 //! everything the Swift app reached through a system framework (TCC,

@@ -11,6 +11,7 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use chrono::{DateTime, Utc};
 use steno_bridge::{BridgeWindow, CaptureMode, PermissionKind, PermissionState, RecordingState};
+use steno_core::protocols::BoundaryResult;
 use steno_core::testing::InMemorySecretStore;
 use steno_core::{AudioRetention, HandoverReceipt, ObsidianSettings, PairedDevice, Settings};
 use uuid::Uuid;
@@ -83,9 +84,9 @@ impl LoginItem for FakeLoginItem {
         *lock(&self.status)
     }
 
-    fn set_enabled(&self, enabled: bool) -> Result<(), String> {
+    fn set_enabled(&self, enabled: bool) -> BoundaryResult<()> {
         if let Some(failure) = lock(&self.failure).clone() {
-            return Err(failure);
+            return Err(failure.into());
         }
         lock(&self.changes).push(enabled);
         *lock(&self.status) = if enabled {
@@ -369,33 +370,35 @@ pub struct FakePipeline {
 }
 
 impl FakePipeline {
-    fn outcome(&self) -> Result<(), String> {
-        lock(&self.failure).clone().map_or(Ok(()), Err)
+    fn outcome(&self) -> BoundaryResult<()> {
+        lock(&self.failure)
+            .clone()
+            .map_or(Ok(()), |text| Err(text.into()))
     }
 }
 
 impl Pipeline for FakePipeline {
-    fn rerun_summary(&self, meeting_id: Uuid, template_id: &str) -> Result<(), String> {
+    fn rerun_summary(&self, meeting_id: Uuid, template_id: &str) -> BoundaryResult<()> {
         lock(&self.summary_reruns).push((meeting_id, template_id.to_owned()));
         self.outcome()
     }
 
-    fn redeliver(&self, meeting_id: Uuid) -> Result<(), String> {
+    fn redeliver(&self, meeting_id: Uuid) -> BoundaryResult<()> {
         lock(&self.redeliveries).push(meeting_id);
         self.outcome()
     }
 
-    fn apply_retention(&self, meeting_id: Uuid, rule: AudioRetention) -> Result<(), String> {
+    fn apply_retention(&self, meeting_id: Uuid, rule: AudioRetention) -> BoundaryResult<()> {
         lock(&self.retention).push((meeting_id, rule));
         self.outcome()
     }
 
-    fn reload(&self) -> Result<(), String> {
+    fn reload(&self) -> BoundaryResult<()> {
         *lock(&self.reloads) += 1;
         self.outcome()
     }
 
-    fn keep_all_recordings(&self) -> Result<i64, String> {
+    fn keep_all_recordings(&self) -> BoundaryResult<i64> {
         self.outcome()?;
         Ok(*lock(&self.kept_forever))
     }
@@ -447,20 +450,20 @@ impl SpeechModels for FakeSpeechModels {
         &self,
         asset: ModelAsset,
         progress: &mut dyn FnMut(f64, &str),
-    ) -> Result<(), String> {
+    ) -> BoundaryResult<()> {
         lock(&self.downloads).push(asset);
         let steps = lock(&self.progress).clone();
         for (fraction, phase) in &steps {
             progress(*fraction, phase);
         }
         if let Some(failure) = lock(&self.download_failure).clone() {
-            return Err(failure);
+            return Err(failure.into());
         }
         lock(&self.installed).insert(asset, Some(asset.approximate_bytes()));
         Ok(())
     }
 
-    fn remove(&self, asset: ModelAsset) -> Result<(), String> {
+    fn remove(&self, asset: ModelAsset) -> BoundaryResult<()> {
         lock(&self.removals).push(asset);
         lock(&self.installed).remove(&asset);
         Ok(())
@@ -490,13 +493,13 @@ impl Default for FakeLlmService {
 }
 
 impl LlmService for FakeLlmService {
-    fn probe(&self, settings: &Settings, _api_key: Option<&str>) -> Result<String, String> {
+    fn probe(&self, settings: &Settings, _api_key: Option<&str>) -> BoundaryResult<String> {
         lock(&self.probes).push(settings.clone());
-        lock(&self.probe_result).clone()
+        lock(&self.probe_result).clone().map_err(Into::into)
     }
 
-    fn codex_account(&self) -> Result<String, String> {
-        lock(&self.codex_account).clone()
+    fn codex_account(&self) -> BoundaryResult<String> {
+        lock(&self.codex_account).clone().map_err(Into::into)
     }
 
     fn codex_models(&self) -> Result<Vec<CodexModel>, CodexModelsError> {
@@ -512,9 +515,11 @@ pub struct FakeExportValidator {
 }
 
 impl ExportValidator for FakeExportValidator {
-    fn validate(&self, settings: &ObsidianSettings) -> Result<(), String> {
+    fn validate(&self, settings: &ObsidianSettings) -> BoundaryResult<()> {
         lock(&self.validated).push(settings.clone());
-        lock(&self.failure).clone().map_or(Ok(()), Err)
+        lock(&self.failure)
+            .clone()
+            .map_or(Ok(()), |text| Err(text.into()))
     }
 }
 
@@ -577,15 +582,15 @@ impl Handover for FakeHandover {
         self.mac_id.clone()
     }
 
-    fn paired_devices(&self) -> Result<Vec<PairedDevice>, String> {
+    fn paired_devices(&self) -> BoundaryResult<Vec<PairedDevice>> {
         Ok(lock(&self.devices).clone())
     }
 
-    fn start(&self) -> Result<(), String> {
+    fn start(&self) -> BoundaryResult<()> {
         *lock(&self.starts) += 1;
         if let Some(failure) = lock(&self.start_failure).clone() {
             *lock(&self.state) = ListenerState::Failed(failure.clone());
-            return Err(failure);
+            return Err(failure.into());
         }
         *lock(&self.state) = ListenerState::Listening(self.port);
         Ok(())
@@ -609,7 +614,7 @@ impl Handover for FakeHandover {
         *lock(&self.pairing) = None;
     }
 
-    fn revoke(&self, device_id: Uuid) -> Result<(), String> {
+    fn revoke(&self, device_id: Uuid) -> BoundaryResult<()> {
         lock(&self.revoked).push(device_id);
         lock(&self.devices).retain(|device| device.id != device_id);
         Ok(())
@@ -650,9 +655,9 @@ pub struct FakeAudioDevices {
 }
 
 impl AudioDevices for FakeAudioDevices {
-    fn inputs(&self) -> Result<Vec<InputDevice>, String> {
+    fn inputs(&self) -> BoundaryResult<Vec<InputDevice>> {
         if let Some(failure) = lock(&self.failure).clone() {
-            return Err(failure);
+            return Err(failure.into());
         }
         Ok(lock(&self.devices).clone())
     }
@@ -676,9 +681,9 @@ impl FakeFolderUsage {
 }
 
 impl FolderUsage for FakeFolderUsage {
-    fn measure(&self, folder: &Path) -> Result<i64, String> {
+    fn measure(&self, folder: &Path) -> BoundaryResult<i64> {
         lock(&self.measured).push(folder.to_path_buf());
-        lock(&self.bytes).clone()
+        lock(&self.bytes).clone().map_err(Into::into)
     }
 }
 

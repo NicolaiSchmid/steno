@@ -5,6 +5,7 @@
 
 use chrono::{DateTime, Utc};
 use steno_bridge::DetailTab;
+use steno_core::protocols::{BoundaryResult, BoxError};
 use steno_core::{
     AudioRetention, Delivery, Meeting, MeetingExport, MeetingStateKind, Settings, Store,
     SummaryTemplate, paths::path_from_file_url,
@@ -318,7 +319,7 @@ impl MeetingDetailViewModel {
             store
                 .settings()
                 .map(|settings| settings.default_retention)
-                .map_err(|error| error.to_string())
+                .map_err(BoxError::from)
         };
         if let Err(error) = rule.and_then(|rule| pipeline.apply_retention(self.id, rule)) {
             self.error = Some(format!("Retention could not be changed: {error}"));
@@ -377,7 +378,7 @@ impl MeetingDetailViewModel {
         }
     }
 
-    fn run(&mut self, what: &str, operation: impl FnOnce() -> Result<(), String>) {
+    fn run(&mut self, what: &str, operation: impl FnOnce() -> BoundaryResult<()>) {
         self.is_busy = true;
         match operation() {
             Ok(()) => self.error = None,

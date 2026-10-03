@@ -11,7 +11,10 @@
 //! names case by case, and the raw values are the same, so one type serves.
 //!
 //! Traits the core will own (`steno_core::protocols`) are not repeated
-//! here: the API key goes through [`steno_core::SecretStore`]. The traits
+//! here: the API key goes through [`steno_core::SecretStore`]. Failures are
+//! the core's [`BoundaryResult`] over `BoxError`, so a crate behind a seam
+//! returns its own error type through `?` and the view models show it as
+//! text, once. The traits
 //! below stand in front of WP4 (speech models), WP5 (the recorder), WP6's
 //! pipeline, WP7 (the LLM probe, the vault validation, the handover
 //! listener) and the shell (permissions, login item, updater, devices,
@@ -22,6 +25,7 @@ use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
 use steno_bridge::{BridgeWindow, CaptureMode, PermissionKind, PermissionState, RecordingState};
+use steno_core::protocols::BoundaryResult;
 use steno_core::{AudioRetention, HandoverReceipt, ObsidianSettings, PairedDevice, Settings};
 use uuid::Uuid;
 
@@ -77,7 +81,7 @@ impl LoginItemStatus {
 /// Swift: `LoginItemControlling`.
 pub trait LoginItem: Send + Sync {
     fn status(&self) -> LoginItemStatus;
-    fn set_enabled(&self, enabled: bool) -> Result<(), String>;
+    fn set_enabled(&self, enabled: bool) -> BoundaryResult<()>;
     fn open_system_settings(&self);
 }
 
@@ -186,14 +190,14 @@ pub trait Recorder: Send + Sync {
 /// sweep for. Swift: `ProcessingPipeline` and `RetentionSweep` through
 /// `AppEnvironment`.
 pub trait Pipeline: Send + Sync {
-    fn rerun_summary(&self, meeting_id: Uuid, template_id: &str) -> Result<(), String>;
-    fn redeliver(&self, meeting_id: Uuid) -> Result<(), String>;
-    fn apply_retention(&self, meeting_id: Uuid, rule: AudioRetention) -> Result<(), String>;
+    fn rerun_summary(&self, meeting_id: Uuid, template_id: &str) -> BoundaryResult<()>;
+    fn redeliver(&self, meeting_id: Uuid) -> BoundaryResult<()>;
+    fn apply_retention(&self, meeting_id: Uuid, rule: AudioRetention) -> BoundaryResult<()>;
     /// Rebuilds the pipeline from the stored settings and the API key.
-    fn reload(&self) -> Result<(), String>;
+    fn reload(&self) -> BoundaryResult<()>;
     /// `RetentionSweep.keepAll()`: marks every recording still on disk as
     /// kept forever and returns how many.
-    fn keep_all_recordings(&self) -> Result<i64, String>;
+    fn keep_all_recordings(&self) -> BoundaryResult<i64>;
 }
 
 /// The speech model store (WP4). Swift: `ModelStore`.
@@ -206,8 +210,8 @@ pub trait SpeechModels: Send + Sync {
         &self,
         asset: ModelAsset,
         progress: &mut dyn FnMut(f64, &str),
-    ) -> Result<(), String>;
-    fn remove(&self, asset: ModelAsset) -> Result<(), String>;
+    ) -> BoundaryResult<()>;
+    fn remove(&self, asset: ModelAsset) -> BoundaryResult<()>;
 }
 
 /// One entry of the Codex backend's model list. Swift: `CodexModel`.
@@ -231,10 +235,10 @@ pub enum CodexModelsError {
 /// and `CodexCredentialStore`.
 pub trait LlmService: Send + Sync {
     /// One line for the Test button, or the failure text.
-    fn probe(&self, settings: &Settings, api_key: Option<&str>) -> Result<String, String>;
+    fn probe(&self, settings: &Settings, api_key: Option<&str>) -> BoundaryResult<String>;
     /// The account line of the Codex sign-in on this computer, or why
     /// there is none.
-    fn codex_account(&self) -> Result<String, String>;
+    fn codex_account(&self) -> BoundaryResult<String>;
     /// The Codex models on offer, listed ones only.
     fn codex_models(&self) -> Result<Vec<CodexModel>, CodexModelsError>;
 }
@@ -243,7 +247,7 @@ pub trait LlmService: Send + Sync {
 /// (WP7's `ObsidianFolderDestination.validate()`); the error text is the
 /// destination's and is shown verbatim.
 pub trait ExportValidator: Send + Sync {
-    fn validate(&self, settings: &ObsidianSettings) -> Result<(), String>;
+    fn validate(&self, settings: &ObsidianSettings) -> BoundaryResult<()>;
 }
 
 /// Where the handover listener stands. Swift: `ListenerState`.
@@ -268,12 +272,12 @@ pub trait Handover: Send + Sync {
     fn state(&self) -> ListenerState;
     /// The identity's id as the page shows it.
     fn mac_id(&self) -> String;
-    fn paired_devices(&self) -> Result<Vec<PairedDevice>, String>;
-    fn start(&self) -> Result<(), String>;
+    fn paired_devices(&self) -> BoundaryResult<Vec<PairedDevice>>;
+    fn start(&self) -> BoundaryResult<()>;
     fn stop(&self);
     fn begin_pairing(&self) -> PairingCode;
     fn cancel_pairing(&self);
-    fn revoke(&self, device_id: Uuid) -> Result<(), String>;
+    fn revoke(&self, device_id: Uuid) -> BoundaryResult<()>;
     /// Every receipt the listener knows, any state.
     fn receipts(&self) -> Vec<HandoverReceipt>;
 }
@@ -292,13 +296,13 @@ pub struct InputDevice {
 
 /// Lists the input devices. Swift: `AudioDevices.inputs()`.
 pub trait AudioDevices: Send + Sync {
-    fn inputs(&self) -> Result<Vec<InputDevice>, String>;
+    fn inputs(&self) -> BoundaryResult<Vec<InputDevice>>;
 }
 
 /// Sums a folder. Swift: `AudioFolderUsage.measure`; the view model's
 /// default treated a folder that does not exist as zero.
 pub trait FolderUsage: Send + Sync {
-    fn measure(&self, folder: &Path) -> Result<i64, String>;
+    fn measure(&self, folder: &Path) -> BoundaryResult<i64>;
 }
 
 /// Whether a file is on disk; the view models ask before offering to play

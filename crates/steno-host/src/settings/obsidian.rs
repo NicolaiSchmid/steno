@@ -114,7 +114,7 @@ impl ObsidianSettingsViewModel {
         if let Some(draft) = &draft
             && let Err(message) = services.export_validator.validate(draft)
         {
-            self.validation_message = Some(message);
+            self.validation_message = Some(message.to_string());
             return;
         }
         let stored = draft.clone();

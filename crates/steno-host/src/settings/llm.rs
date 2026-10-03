@@ -5,7 +5,7 @@
 //! Swift: `Settings/LLMSettingsViewModel.swift`.
 
 use chrono::{DateTime, Utc};
-use steno_core::protocols::SecretKey;
+use steno_core::protocols::{BoundaryResult, SecretKey};
 use steno_core::{LlmProvider, Settings, Store, string_enum};
 
 use super::{SectionError, update_settings};
@@ -278,7 +278,7 @@ impl LlmSettingsViewModel {
     pub fn refresh_codex_status(&mut self, services: &Services) {
         self.codex_status = match services.llm.codex_account() {
             Ok(account) => CodexStatus::SignedIn(account),
-            Err(reason) => CodexStatus::Unavailable(reason),
+            Err(reason) => CodexStatus::Unavailable(reason.to_string()),
         };
     }
 
@@ -508,7 +508,25 @@ impl LlmSettingsViewModel {
             return;
         }
         let draft = self.draft();
-        let outcome = update_settings(store, |settings| {
+        match Self::store(&draft, store, services, now) {
+            Ok(settings) => {
+                self.is_configured = llm_configured(&settings);
+                self.stored = Some(draft);
+                self.errors.clear();
+            }
+            Err(error) => self.errors.fail("Settings could not be saved.", error),
+        }
+    }
+
+    /// The settings, the key in the secret store, then the pipeline rebuilt
+    /// on them; the settings as written.
+    fn store(
+        draft: &Stored,
+        store: &Store,
+        services: &Services,
+        now: DateTime<Utc>,
+    ) -> BoundaryResult<Settings> {
+        let settings = update_settings(store, |settings| {
             settings.llm_provider = draft.provider;
             settings.llm_base_url.clone_from(&draft.base_url);
             settings.llm_model.clone_from(&draft.model);
@@ -522,29 +540,14 @@ impl LlmSettingsViewModel {
             } else {
                 settings.codex_confirmed_at = None;
             }
-        })
-        .map_err(|error| error.to_string())
-        .and_then(|settings| {
-            crate::host::block_on(
-                services
-                    .secrets
-                    .set_secret(&SecretKey::llm_api_key(), draft.api_key.as_deref()),
-            )
-            .map_err(|error| error.to_string())?;
-            Ok(settings)
-        })
-        .and_then(|settings| {
-            services.pipeline.reload()?;
-            Ok(settings)
-        });
-        match outcome {
-            Ok(settings) => {
-                self.is_configured = llm_configured(&settings);
-                self.stored = Some(draft);
-                self.errors.clear();
-            }
-            Err(error) => self.errors.fail("Settings could not be saved.", error),
-        }
+        })?;
+        crate::host::block_on(
+            services
+                .secrets
+                .set_secret(&SecretKey::llm_api_key(), draft.api_key.as_deref()),
+        )?;
+        services.pipeline.reload()?;
+        Ok(settings)
     }
 
     /// Reachability, model listing and structured output mode, through the
@@ -575,7 +578,7 @@ impl LlmSettingsViewModel {
         self.test_result = Some(
             match services.llm.probe(&probed, draft.api_key.as_deref()) {
                 Ok(report) => TestResult::Success(report),
-                Err(failure) => TestResult::Failure(failure),
+                Err(failure) => TestResult::Failure(failure.to_string()),
             },
         );
         self.is_testing = false;
