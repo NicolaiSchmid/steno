@@ -43,7 +43,7 @@ fn peak(samples: &[f32]) -> f32 {
 }
 
 #[test]
-#[ignore = "needs a Mac with audio devices; run with -- --ignored"]
+#[ignore = "needs a Mac with audio devices; run with -- --ignored --nocapture"]
 fn device_enumeration_returns() {
     let devices = within(
         Duration::from_secs(10),
@@ -124,7 +124,7 @@ fn start_capture_stop(lanes: &'static [AudioLane]) -> Option<usize> {
 }
 
 #[test]
-#[ignore = "needs a Mac with audio devices; run with -- --ignored"]
+#[ignore = "needs a Mac with audio devices; run with -- --ignored --nocapture"]
 fn in_person_capture_starts_and_stops_within_bounds() {
     if let Some(callbacks) = start_capture_stop(&[AudioLane::Mixed]) {
         assert!(callbacks > 0, "the microphone's IOProc never ran");
@@ -136,13 +136,14 @@ fn in_person_capture_starts_and_stops_within_bounds() {
 /// had captured silence. Play something during the run (`afplay`) to see
 /// callbacks.
 #[test]
-#[ignore = "needs a Mac with audio devices; run with -- --ignored"]
+#[ignore = "needs a Mac with audio devices; run with -- --ignored --nocapture"]
 fn call_capture_starts_and_stops_within_bounds() {
     if start_capture_stop(&[AudioLane::Mic, AudioLane::System]) == Some(0) {
         println!(
             "SKIPPED call capture: the IOProc never ran in 500 ms. The tap aggregate runs only \
              while another client has the output device open; play something during the test \
-             to exercise it."
+             to exercise it (`afplay <any audio file>`); see \
+             .plans/spikes/2026-10-01-spike-rust-capture.md."
         );
     }
 }

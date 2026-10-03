@@ -546,7 +546,7 @@ impl CaptureBackend for OnceThenFailing {
 /// `stop()` after that failure must fail, not hand out A's asset under B's
 /// meeting (the app would enqueue A twice).
 #[test]
-fn a_failed_restart_does_not_return_the_previous_meetings_recording() {
+fn a_failed_start_does_not_return_the_previous_meetings_recording() {
     let directory = tempfile::tempdir().unwrap();
     let inner = Arc::new(SyntheticCaptureBackend::new(tones(
         &[AudioLane::Mixed],
