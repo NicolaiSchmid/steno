@@ -147,7 +147,7 @@ fn debug_output_shows_no_secret_and_no_credential() {
     assert!(shown.contains(&base64url::encode(&fingerprint())));
 
     let token = "dGhlIGJlYXJlciB0b2tlbg==";
-    let request = HandoverRequest::new(Route::Pair, Principal::Pairing)
+    let request = HandoverRequest::new(Route::Pair, Principal::Pairing(1))
         .with_header("authorization", &format!("Bearer {token}"))
         .with_body(format!(
             r#"{{"deviceId":"{}","deviceName":"Phone"}}"#,

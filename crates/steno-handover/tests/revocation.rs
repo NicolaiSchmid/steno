@@ -312,8 +312,8 @@ async fn a_complete_in_flight_does_not_bring_a_revoked_device_back_into_the_stre
     assert_eq!(test.store.handover_receipt(id).unwrap(), None);
 
     // Paired again under the same id, the phone's uploads are live again.
-    let _ = test.service.begin_pairing();
-    let repaired = common::engine_pair(&test, phone.device.id, "Direct iPhone").await;
+    let payload = test.service.begin_pairing();
+    let repaired = common::engine_pair(&test, &payload, phone.device.id, "Direct iPhone").await;
     assert_eq!(repaired.status.as_u16(), 200);
     let again = common::EngineDevice {
         service: test.service.clone(),

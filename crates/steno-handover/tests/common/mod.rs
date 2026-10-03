@@ -25,7 +25,9 @@ use steno_core::testing::FakeHandoverIntake;
 use steno_core::{
     AudioFormat, BoundaryResult, HandoverIntake, PairedDevice, RecordingMetadata, Store,
 };
-use steno_handover::engine::{HandoverRequest, HandoverResponse, Principal, RequestHandling as _};
+use steno_handover::engine::{
+    AuthOutcome, HandoverRequest, HandoverResponse, Principal, RequestHandling as _,
+};
 use steno_handover::pinning::pinned_client_config;
 use steno_handover::route::Route;
 use steno_handover::server::MetricsSnapshot;
@@ -782,9 +784,9 @@ pub struct EngineDevice {
 impl EngineDevice {
     /// Opens a window, pairs and returns the paired device's view.
     pub async fn paired(test: &TestService, device_name: &str) -> EngineDevice {
-        let _ = test.service.begin_pairing();
+        let payload = test.service.begin_pairing();
         let device_id = Uuid::new_v4();
-        let response = engine_pair(test, device_id, device_name).await;
+        let response = engine_pair(test, &payload, device_id, device_name).await;
         assert_eq!(response.status, 200);
         let device = test.store.paired_device(device_id).unwrap().unwrap();
         EngineDevice {
@@ -859,16 +861,37 @@ impl EngineDevice {
     }
 }
 
-/// `POST /v1/pair` past the gate, as a request whose secret matched.
+/// What the gate makes of `POST /v1/pair` with the secret of `payload`;
+/// panics on a rejection.
+pub async fn pairing_principal(
+    test: &TestService,
+    payload: &steno_handover::PairingPayload,
+) -> Principal {
+    let authorization = pairing(&payload.secret);
+    match test
+        .service
+        .engine
+        .authenticate(Route::Pair, Some(&authorization))
+        .await
+    {
+        AuthOutcome::Allowed(principal) => principal,
+        AuthOutcome::Rejected(response) => panic!("the gate refused the secret: {response:?}"),
+    }
+}
+
+/// `POST /v1/pair` with the secret of `payload`, the gate and the body
+/// straight into the engine.
 pub async fn engine_pair(
     test: &TestService,
+    payload: &steno_handover::PairingPayload,
     device_id: Uuid,
     device_name: &str,
 ) -> HandoverResponse {
+    let principal = pairing_principal(test, payload).await;
     test.service
         .engine
         .handle(
-            HandoverRequest::new(Route::Pair, Principal::Pairing).with_body(
+            HandoverRequest::new(Route::Pair, principal).with_body(
                 serde_json::to_vec(&wire::PairRequest {
                     device_id,
                     device_name: device_name.to_owned(),

@@ -33,7 +33,10 @@ use crate::wire;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Principal {
     Anonymous,
-    Pairing,
+    /// The secret matched the pairing window with this number (the engine
+    /// counts the windows it opens); `/v1/pair` pairs only while that
+    /// window is still the open one.
+    Pairing(u64),
     Device(PairedDevice),
 }
 
@@ -179,6 +182,10 @@ pub trait RequestHandling: Send + Sync {
 #[derive(Default)]
 struct State {
     pairing: Option<PairingSession>,
+    /// Pairing windows opened since start, so the number of the last one.
+    /// A head authorised against an earlier window whose body arrives after
+    /// a cancel and a reopen must not pair against the new one.
+    windows_opened: u64,
     /// Receipts touched since start, by recording id; what the receipt
     /// stream carries.
     active_receipts: BTreeMap<Uuid, HandoverReceipt>,
@@ -328,7 +335,9 @@ impl Engine {
             self.now.clone(),
         );
         let payload = session.payload.clone();
-        self.state().pairing = Some(session);
+        let mut state = self.state();
+        state.windows_opened += 1;
+        state.pairing = Some(session);
         payload
     }
 
@@ -406,17 +415,20 @@ impl Engine {
     // Routes
 
     async fn pair(&self, request: &HandoverRequest) -> HandoverResponse {
-        // The gate passed at the head; the window may have closed since.
-        // Single use: one guard from the check to the take, so two
-        // connections on two worker threads that both passed the gate
-        // cannot both find the session open. Nothing in between yields; a
-        // second request with the same secret that arrives while the save
-        // runs finds no session and is 403. The window reopens only if the
-        // save fails.
+        let Principal::Pairing(window) = request.principal else {
+            return Self::pairing_rejected();
+        };
+        // The gate passed at the head; the window may have closed, or been
+        // replaced, since. Single use: one guard from the check to the
+        // take, so two connections on two worker threads that both passed
+        // the gate cannot both find the session open. Nothing in between
+        // yields; a second request with the same secret that arrives while
+        // the save runs finds no session and is 403. The window reopens
+        // only if the save fails.
         let (session, device_id, name) = {
             let mut state = self.state();
             match &state.pairing {
-                Some(session) if session.is_open() => {}
+                Some(session) if session.is_open() && state.windows_opened == window => {}
                 _ => return Self::pairing_rejected(),
             }
             let body: wire::PairRequest = match serde_json::from_slice(&request.body) {
@@ -614,16 +626,14 @@ impl RequestHandling for Engine {
         match route.auth() {
             AuthRequirement::None => AuthOutcome::Allowed(Principal::Anonymous),
             AuthRequirement::Pairing => {
-                let matched = Self::credential("Pairing", authorization).is_some_and(|secret| {
-                    self.state()
-                        .pairing
-                        .as_ref()
-                        .is_some_and(|session| session.matches(secret))
+                let window = Self::credential("Pairing", authorization).and_then(|secret| {
+                    let state = self.state();
+                    let session = state.pairing.as_ref()?;
+                    session.matches(secret).then_some(state.windows_opened)
                 });
-                if matched {
-                    AuthOutcome::Allowed(Principal::Pairing)
-                } else {
-                    AuthOutcome::Rejected(Self::pairing_rejected())
+                match window {
+                    Some(window) => AuthOutcome::Allowed(Principal::Pairing(window)),
+                    None => AuthOutcome::Rejected(Self::pairing_rejected()),
                 }
             }
             AuthRequirement::Bearer => {

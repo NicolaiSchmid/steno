@@ -1,5 +1,7 @@
 //! Pairing on the injected wall clock: the first use of a secret pairs,
-//! the second is 403, an expired window is 403, a revoked token is 401.
+//! the second is 403, an expired window is 403, a revoked token is 401,
+//! the name is stored trimmed, a failed save reopens the window, and a
+//! head authorised against a closed window does not pair against the next.
 
 #![allow(
     clippy::assert_is_empty,
@@ -17,7 +19,8 @@ use std::time::Duration;
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
 use common::{Phone, TestService, bearer};
-use steno_handover::engine::Engine;
+use steno_handover::engine::{Engine, HandoverRequest, RequestHandling as _};
+use steno_handover::route::Route;
 use steno_handover::{base64url, wire};
 use uuid::Uuid;
 
@@ -258,9 +261,10 @@ async fn the_device_name_is_stored_trimmed() {
         ..common::Options::default()
     })
     .await;
-    let _ = test.service.begin_pairing();
+    let payload = test.service.begin_pairing();
     let id = Uuid::new_v4();
-    let response = common::engine_pair(&test, id, " \u{200B}Nicolai's iPhone\n\u{3000}").await;
+    let response =
+        common::engine_pair(&test, &payload, id, " \u{200B}Nicolai's iPhone\n\u{3000}").await;
     assert_eq!(response.status.as_u16(), 200);
     let stored = test.store.paired_device(id).unwrap().unwrap();
     assert_eq!(stored.name, "Nicolai's iPhone");
@@ -275,20 +279,55 @@ async fn a_failed_device_save_reopens_the_window_for_the_same_secret() {
         ..common::Options::default()
     })
     .await;
-    let _ = test.service.begin_pairing();
+    let payload = test.service.begin_pairing();
     common::execute_batch(
         &test.store,
         "CREATE TEMP TRIGGER refuse_pairing BEFORE INSERT ON pairedDevice \
          BEGIN SELECT RAISE(ABORT, 'refused'); END",
     );
-    let failed = common::engine_pair(&test, Uuid::new_v4(), "iPhone").await;
+    let failed = common::engine_pair(&test, &payload, Uuid::new_v4(), "iPhone").await;
     assert_eq!(failed.status.as_u16(), 500);
     assert!(test.service.engine.pairing_is_open(), "the window is back");
 
     common::execute_batch(&test.store, "DROP TRIGGER temp.refuse_pairing");
     let id = Uuid::new_v4();
-    let paired = common::engine_pair(&test, id, "iPhone").await;
+    let paired = common::engine_pair(&test, &payload, id, "iPhone").await;
     assert_eq!(paired.status.as_u16(), 200);
     assert!(!test.service.engine.pairing_is_open(), "and now spent");
     assert!(test.store.paired_device(id).unwrap().is_some());
+}
+
+#[tokio::test]
+async fn a_head_authorised_against_a_closed_window_does_not_pair_against_the_next() {
+    // The phone's head passed the gate, then its body trickled in while
+    // the user cancelled and opened a window for another phone.
+    let test = TestService::with(common::Options {
+        start: false,
+        ..common::Options::default()
+    })
+    .await;
+    let first = test.service.begin_pairing();
+    let principal = common::pairing_principal(&test, &first).await;
+    test.service.cancel_pairing();
+    let _second = test.service.begin_pairing();
+
+    let late = test
+        .service
+        .engine
+        .handle(
+            HandoverRequest::new(Route::Pair, principal).with_body(
+                serde_json::to_vec(&wire::PairRequest {
+                    device_id: Uuid::new_v4(),
+                    device_name: "iPhone".to_owned(),
+                })
+                .unwrap(),
+            ),
+        )
+        .await;
+    assert_eq!(late.status.as_u16(), 403);
+    assert!(
+        test.service.engine.pairing_is_open(),
+        "the new window is kept"
+    );
+    assert!(test.store.paired_devices().unwrap().is_empty());
 }

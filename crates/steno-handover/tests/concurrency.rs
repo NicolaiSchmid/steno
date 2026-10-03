@@ -43,14 +43,15 @@ async fn a_pairing_secret_pairs_exactly_once_under_concurrent_use() {
     .await;
     let runtime = tokio::runtime::Handle::current();
     for round in 0..ROUNDS {
-        let _ = test.service.begin_pairing();
+        let payload = test.service.begin_pairing();
+        let principal = common::pairing_principal(&test, &payload).await;
         let barrier = Arc::new(std::sync::Barrier::new(2));
         let racers = [
             (Uuid::new_v4(), "Nicolai's iPhone"),
             (Uuid::new_v4(), "Photographed QR"),
         ]
         .map(|(device_id, device_name)| {
-            let request = padded_pair_request(device_id, device_name);
+            let request = padded_pair_request(principal.clone(), device_id, device_name);
             let (service, barrier, runtime) =
                 (test.service.clone(), barrier.clone(), runtime.clone());
             tokio::task::spawn_blocking(move || {
@@ -79,10 +80,14 @@ async fn a_pairing_secret_pairs_exactly_once_under_concurrent_use() {
 
 const ROUNDS: usize = 100;
 
-/// `POST /v1/pair` past the gate with the body padded by whitespace to the
-/// JSON limit: a legal request whose parse takes long enough for the other
-/// thread to arrive.
-fn padded_pair_request(device_id: Uuid, device_name: &str) -> HandoverRequest {
+/// `POST /v1/pair` as `principal`, the gate's answer, with the body padded
+/// by whitespace to the JSON limit: a legal request whose parse takes long
+/// enough for the other thread to arrive.
+fn padded_pair_request(
+    principal: Principal,
+    device_id: Uuid,
+    device_name: &str,
+) -> HandoverRequest {
     let json = serde_json::to_vec(&wire::PairRequest {
         device_id,
         device_name: device_name.to_owned(),
@@ -93,7 +98,7 @@ fn padded_pair_request(device_id: Uuid, device_name: &str) -> HandoverRequest {
     body.push(b'{');
     body.resize(1 + padding, b' ');
     body.extend_from_slice(&json[1..]);
-    HandoverRequest::new(Route::Pair, Principal::Pairing).with_body(body)
+    HandoverRequest::new(Route::Pair, principal).with_body(body)
 }
 
 #[tokio::test]
