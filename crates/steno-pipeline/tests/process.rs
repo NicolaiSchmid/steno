@@ -550,7 +550,7 @@ async fn a_failing_summary_names_its_stage_once() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn a_missing_row_fails_for_the_operation_s_stage_with_what_is_missing() {
+async fn a_missing_row_fails_for_the_stage_of_the_operation_and_names_the_row() {
     let world = world(true, None, AudioRetention::KeepForever);
     let unknown = Uuid::new_v4();
     let rerun = world

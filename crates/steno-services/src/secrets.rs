@@ -230,7 +230,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn one_store_sees_another_store_s_write() {
+    async fn a_store_sees_what_another_store_wrote() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("secrets.json");
         let first = FileSecretStore::new(&path, BTreeMap::new());
@@ -342,7 +342,7 @@ mod tests {
     /// One writer of [`two_processes_writing_different_keys_lose_nothing`];
     /// does nothing unless that test started this process.
     #[tokio::test]
-    async fn secrets_writer_process() {
+    async fn a_writer_process_writes_its_keys_only_when_the_two_process_test_starts_it() {
         if let (Ok(path), Ok(prefix)) = (std::env::var(WRITER_PATH), std::env::var(WRITER_PREFIX)) {
             write_keys(Path::new(&path), &prefix).await;
         }
@@ -357,7 +357,7 @@ mod tests {
             .map(|prefix| {
                 std::process::Command::new(std::env::current_exe().unwrap())
                     .args([
-                        "secrets::tests::secrets_writer_process",
+                        "secrets::tests::a_writer_process_writes_its_keys_only_when_the_two_process_test_starts_it",
                         "--exact",
                         "--test-threads=1",
                         "--quiet",
@@ -393,7 +393,7 @@ mod tests {
     }
 
     #[test]
-    fn the_keyring_names_are_the_swift_app_s() {
+    fn keyring_entries_are_filed_as_the_swift_app_files_them() {
         let keychain = swift_source("apps/macos/Steno/Services/KeychainSecretStore.swift");
         assert!(
             keychain.contains(&format!(

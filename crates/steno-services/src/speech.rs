@@ -589,7 +589,7 @@ mod tests {
 
     #[cfg(target_os = "macos")]
     #[test]
-    fn the_coreml_directory_and_files_are_the_engine_s() {
+    fn the_coreml_directory_and_files_are_those_the_engine_loads() {
         let support = Path::new("/tmp/steno-support");
         assert_eq!(
             coreml_model_directory(&support.join("Models")),

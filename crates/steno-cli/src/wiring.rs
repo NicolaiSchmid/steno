@@ -225,7 +225,7 @@ mod tests {
     }
 
     #[test]
-    fn engine_names_the_engine_whatever_the_settings_say() {
+    fn the_engine_flag_wins_over_the_stored_engine() {
         let dir = tempfile::tempdir().unwrap();
         let store = Arc::new(Store::open(dir.path().join("steno.sqlite")).unwrap());
         let settings = Settings {

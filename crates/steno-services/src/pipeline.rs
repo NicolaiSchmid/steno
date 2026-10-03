@@ -362,7 +362,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn a_refused_re_run_or_re_export_is_the_call_s_error() {
+    async fn a_refused_re_run_or_re_export_is_the_error_of_the_call() {
         let (_dir, store) = temp_store();
         let meeting = ready_meeting(&store);
         let without_llm = pipeline(&store, None);

@@ -211,7 +211,7 @@ mod tests {
     /// timer parks on the host's state while a Settings command holds it),
     /// and the probe still answers.
     #[test]
-    fn a_probe_answers_while_every_app_worker_waits_on_the_caller_s_lock() {
+    fn a_probe_answers_while_every_app_worker_waits_on_a_lock_the_caller_holds() {
         let one_worker = || {
             tokio::runtime::Builder::new_multi_thread()
                 .worker_threads(1)
