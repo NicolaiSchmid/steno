@@ -29,7 +29,9 @@ packages=(
   # steno-audio's PipeWire backend: headers and bindgen's libclang.
   libclang-dev
   libpipewire-0.3-dev
-  # Its live tests: a private daemon, pw-cli and pw-play, WirePlumber.
+  # Its live tests: a private daemon, pw-cli and pw-play, WirePlumber and
+  # the session bus WirePlumber 0.4 needs.
+  dbus
   pipewire
   pipewire-bin
   wireplumber

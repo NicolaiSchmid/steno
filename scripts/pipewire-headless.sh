@@ -8,22 +8,25 @@
 #
 # Everything lives in a temporary XDG runtime, config and state directory,
 # so neither the daemon nor WirePlumber touches the user's own session or
-# remembers anything afterwards. No D-Bus: the session bus is disabled, and
-# the modules that want it log an error and carry on.
+# remembers anything afterwards. A private session bus comes up beside them
+# when `dbus-daemon` is installed: WirePlumber 0.4 (Ubuntu 24.04) exits
+# without one. Without `dbus-daemon` the bus is disabled, which WirePlumber
+# 0.5 survives (its D-Bus modules log an error and are skipped).
 #
 #   scripts/pipewire-headless.sh cargo test -p steno-audio --test pipewire \
 #     -- --ignored --test-threads=1
 #
-# Needs `pipewire`, `wireplumber`, `pw-cli` and `pw-play` on PATH (Ubuntu:
-# pipewire, pipewire-bin, wireplumber; Nix: pipewire, wireplumber). Used by
-# rust-ci.yml on ubuntu-latest.
+# Needs `pipewire`, `wireplumber`, `pw-cli`, `pw-dump` and `pw-play` on
+# PATH, and `dbus-daemon` for WirePlumber 0.4 (Ubuntu: pipewire,
+# pipewire-bin, wireplumber, dbus; Nix: pipewire, wireplumber, dbus). Used
+# by rust-ci.yml on ubuntu-latest.
 set -euo pipefail
 
 if [[ $# -eq 0 ]]; then
   echo "usage: $0 <command> [args...]" >&2
   exit 2
 fi
-for tool in pipewire wireplumber pw-cli pw-play; do
+for tool in pipewire wireplumber pw-cli pw-dump pw-play; do
   if ! command -v "$tool" >/dev/null 2>&1; then
     echo "pipewire-headless: $tool not found" >&2
     exit 1
@@ -45,10 +48,18 @@ export XDG_RUNTIME_DIR="$root/runtime"
 export XDG_CONFIG_HOME="$root/config"
 export XDG_STATE_HOME="$root/state"
 export PIPEWIRE_RUNTIME_DIR="$XDG_RUNTIME_DIR"
-export DBUS_SESSION_BUS_ADDRESS="disabled:"
 unset PIPEWIRE_REMOTE
 mkdir -p "$XDG_RUNTIME_DIR" "$XDG_CONFIG_HOME/pipewire/pipewire.conf.d" "$XDG_STATE_HOME"
 chmod 700 "$XDG_RUNTIME_DIR"
+
+if command -v dbus-daemon >/dev/null 2>&1; then
+  dbus-daemon --session --fork --nopidfile \
+    --address="unix:path=$XDG_RUNTIME_DIR/bus" --print-pid=3 3>"$root/dbus.pid"
+  pids+=("$(cat "$root/dbus.pid")")
+  export DBUS_SESSION_BUS_ADDRESS="unix:path=$XDG_RUNTIME_DIR/bus"
+else
+  export DBUS_SESSION_BUS_ADDRESS="disabled:"
+fi
 
 # The devices, created by the daemon itself at start. The priorities make
 # WirePlumber choose steno-test-sink and steno-test-mic as the defaults.
@@ -104,15 +115,25 @@ if [[ ! -S "$XDG_RUNTIME_DIR/pipewire-0" ]]; then
 fi
 
 wireplumber >"$root/wireplumber.log" 2>&1 &
-pids+=($!)
+wireplumber_pid=$!
+pids+=("$wireplumber_pid")
 # WirePlumber publishes the defaults once it has looked at the devices.
+ready=""
 for _ in $(seq 1 100); do
-  if pw-cli info default 2>/dev/null | grep -q metadata ||
-    pw-dump 2>/dev/null | grep -q '"default.audio.sink"'; then
+  # Not `grep -q`: it stops reading at the first match, pw-dump dies of
+  # SIGPIPE, and pipefail fails the test.
+  if pw-dump 2>/dev/null | grep '"default.audio.sink"' >/dev/null; then
+    ready=1
     break
   fi
+  kill -0 "$wireplumber_pid" 2>/dev/null || break
   sleep 0.1
 done
+if [[ -z "$ready" ]]; then
+  echo "pipewire-headless: WirePlumber did not publish the default devices" >&2
+  tail -n 40 "$root/pipewire.log" "$root/wireplumber.log" >&2 || true
+  exit 1
+fi
 
 set +e
 "$@"
