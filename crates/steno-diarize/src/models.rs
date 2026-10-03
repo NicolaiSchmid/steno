@@ -110,8 +110,10 @@ impl ModelStore {
     /// same model at once (the app and the `steno` command on first use)
     /// never share a partial file, and moves into place only after it
     /// verifies; whichever finishes last wins, both end with a verified
-    /// file. A failed or interrupted download leaves nothing behind.
+    /// file. A failed or interrupted download leaves nothing behind, and a
+    /// partial file a killed process left is removed on a later call.
     pub fn ensure(&self, asset: &ModelAsset) -> Result<PathBuf, ModelError> {
+        self.remove_stale_parts(asset);
         let path = self.path(asset);
         if verifies(&path, asset) {
             return Ok(path);
@@ -152,6 +154,42 @@ impl ModelStore {
             return Err(io_error(&path)(error.error));
         }
         Ok(path)
+    }
+
+    /// Removes the partial downloads of `asset` (`<file_name>*.part`) that
+    /// were last written more than [`TRANSFER_TIMEOUT`] ago. A process
+    /// killed mid-download, an app quit on first run, skips the temporary
+    /// file's own cleanup; a download still under way is never that old,
+    /// because the timeout ends it. Best effort: a file that cannot be
+    /// removed is logged and left.
+    fn remove_stale_parts(&self, asset: &ModelAsset) {
+        let Ok(entries) = fs::read_dir(&self.root) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let is_part = path
+                .extension()
+                .is_some_and(|extension| extension == "part")
+                && entry
+                    .file_name()
+                    .to_str()
+                    .is_some_and(|name| name.starts_with(asset.file_name));
+            let is_stale = || {
+                entry
+                    .metadata()
+                    .and_then(|metadata| metadata.modified())
+                    .ok()
+                    .and_then(|modified| modified.elapsed().ok())
+                    .is_some_and(|age| age > TRANSFER_TIMEOUT)
+            };
+            if is_part
+                && is_stale()
+                && let Err(error) = fs::remove_file(&path)
+            {
+                tracing::warn!(path = %path.display(), %error, "stale partial download left in place");
+            }
+        }
     }
 }
 
@@ -330,6 +368,37 @@ mod tests {
         }
         assert_eq!(fs::read(dir.path().join("model.onnx")).unwrap(), ABC);
         assert_eq!(entries(dir.path()), vec!["model.onnx".to_owned()]);
+    }
+
+    /// A partial download a killed process left behind goes on the next
+    /// call once no download could still be writing it; a recent one,
+    /// which may belong to a fetch under way, and another model's stay.
+    #[test]
+    fn stale_partial_downloads_are_removed() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("model.onnx"), ABC).unwrap();
+        let old = std::time::SystemTime::now() - TRANSFER_TIMEOUT - Duration::from_secs(60);
+        for name in ["model.onnxAbC123.part", "other.onnxAbC123.part"] {
+            let file = fs::File::create(dir.path().join(name)).unwrap();
+            file.set_modified(old).unwrap();
+        }
+        fs::write(dir.path().join("model.onnxXyZ789.part"), b"").unwrap();
+        let asset = ModelAsset {
+            file_name: "model.onnx",
+            url: "http://127.0.0.1:9/never",
+            sha256: ABC_SHA256,
+            licence: "",
+        };
+        let path = ModelStore::new(dir.path()).ensure(&asset).unwrap();
+        assert_eq!(path, dir.path().join("model.onnx"));
+        assert_eq!(
+            entries(dir.path()),
+            vec![
+                "model.onnx".to_owned(),
+                "model.onnxXyZ789.part".to_owned(),
+                "other.onnxAbC123.part".to_owned()
+            ]
+        );
     }
 
     /// A body that is not the published file fails the checksum and
