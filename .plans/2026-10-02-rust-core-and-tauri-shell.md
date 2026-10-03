@@ -484,11 +484,51 @@ still has to draw the window side. `[ ]` is not ported yet.
   key's raw value (`crates/steno-services/src/secrets.rs` pins both against the Swift
   sources), so the Rust app reads the API key the Swift app stored. The `keyring`
   crate sets no label, where Swift wrote "Steno <key>"; lookups ignore it. The CLI and
-  the app do not read each other on the Mac, as Keychain and the file did not. On Linux
-  the app uses the same file, so the two share it; a write is atomic under a lock.
+  the app do not read each other on macOS and Windows, as Keychain and the file did
+  not. On Linux the app uses the same file, so the two share it; a write is atomic
+  under a lock.
 - A summary re-run or a re-export the pipeline refuses (meeting busy, no LLM set up)
-  is the call's error, as in Swift; one that fails after it started posts
-  `MeetingEvent::OperationFailed`, a Rust addition (Swift awaited the call).
+  is the call's error, as in Swift; one that fails after it started, a panic included,
+  posts `MeetingEvent::OperationFailed`, a Rust addition (Swift awaited the call), and
+  the detail shows `<operation> failed: <failure>` on its error line, as
+  `MeetingDetailViewModel` did. Difference: a re-export after a speaker change that
+  fails once started shows there too, where Swift kept it quiet and retried on the
+  next `.ready` tick.
+- No host call holds the host's lock across a network request: the probe and the
+  Codex model list, also when confirming ChatGPT (Codex), run with it released, and
+  the sign-in the Summaries section reads under the lock comes from the file
+  (`CodexCredentialStore::stored`), as Swift's `refreshCodexStatus` read it. The
+  calls still block the bridge call that made them, as Swift's awaited calls held the
+  window's task.
+- A meeting a previous process left recording fails at launch with Swift's "Recording
+  was interrupted before it finished." (`Store::INTERRUPTED_RECORDING_REASON`).
+- A recording start warms the pipeline up only when the models of the engine the
+  settings name and the diarizer's are installed (`SpeechModels::engine_installed`),
+  so it never downloads, as Swift's `warmUpPipelineIfModelsInstalled`.
+- The `CoreML` Parakeet runs one call at a time, off the runtime's workers, as Swift's
+  `AsrManager` actor ran it (`OneCallAtATime`).
+- Settings > General acknowledges the Parakeet the platform runs: "Parakeet TDT 0.6B v3
+  (int8)" from the `CoreML` repository on the Mac, as Swift; "Parakeet TDT 0.6B v3
+  (fp32)" from `nvidia/parakeet-tdt-0.6b-v3` elsewhere (`SpeechModels::display_name`
+  and `source_repo`). Open: the diarizer's row still names the Swift app's `CoreML`
+  diarizer, while every platform runs the ONNX pyannote 3.0 and WeSpeaker ResNet34-LM
+  models; the same hook fixes it.
+- The phone intake syncs the copy and its folder to the disk before it marks the
+  receipt complete (`steno_pipeline::files::copy_durably`); Swift's `copyItem` did
+  not, so a power loss after the phone's 200 lost the recording on both devices. The
+  receipt and meeting commits still run under `NORMAL` (the Store item below).
+- Quitting while recording stops the recording with `quit` and saves it before the
+  process exits (`App::shutdown` behind `ExitGate`, at most ten seconds), as Swift's
+  `applicationShouldTerminate` awaited `AppController.shutdown()`. Open until the
+  rebase after #172: macOS Quit (muda's `terminate:`) bypasses `ExitRequested`; wire
+  `App::shutdown` into #172's Quit item and tray close then.
+- The shell does not run the two-second pairing poll (`Host::refresh_pairing`) yet, so
+  a phone that pairs closes the code on the next Settings change rather than within
+  two seconds; #172's shell timer, at the rebase after #172.
+- At `warn`, the default level, a log line carries ids, stages, counts and error kinds,
+  never transcript or model text, audio, a file path or a secret; the full text goes to
+  `debug` (`steno_services::log_to_stderr`). The CLI prints a failed run once, as Swift
+  did.
 - On the Mac, Parakeet v3 is the `CoreML` model the Swift app installs; Settings and
   `steno dev models` report its directory, and this build cannot download it.
 - The audio device list is empty off the Mac, so Settings > Recording offers only the
@@ -826,7 +866,8 @@ right after one can forget a pairing (the phone gets 401 and unpairs, and the us
 pairs it again) or bring a revoked device back.
 
 WP6b is `crates/steno-pipeline`, `crates/steno-cli` and `crates/steno-services`,
-and `apps/desktop` on the real host. It merges after #164, #166, #169 and #171.
+and `apps/desktop` on the real host. It merges after #171, whose code its diff carries
+until then, and is rebased onto `main` once #172 has landed.
 `process` runs the Swift stage order, with progress events in core
 (`MeetingEvent`, `ProcessingProgress`), learned stage rates, both intakes, the
 retention sweep and the store-backed cosine memory; `steno` has every Swift command
