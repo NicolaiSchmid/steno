@@ -4,7 +4,7 @@
 //! Swift: `Sources/StenoCore/Storage/MeetingStore+Timings.swift`.
 
 use chrono::{DateTime, Utc};
-use rusqlite::{Row, params};
+use rusqlite::{Connection, Row, params};
 
 use super::convert::{DbDate, DbEnum, RowExt as _};
 use super::{Result, Store, query_all};
@@ -32,6 +32,18 @@ fn from_row(row: &Row<'_>) -> rusqlite::Result<StageRateRow> {
     })
 }
 
+/// The stored row for `stage` and `key`, `None` before the first sample.
+fn find(connection: &Connection, stage: PipelineStage, key: &str) -> Result<Option<StageRateRow>> {
+    let rows = query_all(
+        connection,
+        "SELECT stage, key, samples, secondsPerUnit, updatedAt FROM stageRate \
+         WHERE stage = ?1 AND key = ?2",
+        params![DbEnum(stage), key],
+        from_row,
+    )?;
+    Ok(rows.into_iter().next())
+}
+
 impl Store {
     /// Every learned rate, stage order then key. A row whose stage the
     /// enum does not know is skipped, not an error (a newer schema's stage).
@@ -52,16 +64,7 @@ impl Store {
 
     /// The one row for `stage` and `key`, `None` before the first sample.
     pub fn stage_rate(&self, stage: PipelineStage, key: &str) -> Result<Option<StageRateRow>> {
-        self.read(|connection| {
-            let rows = query_all(
-                connection,
-                "SELECT stage, key, samples, secondsPerUnit, updatedAt FROM stageRate \
-                 WHERE stage = ?1 AND key = ?2",
-                params![DbEnum(stage), key],
-                from_row,
-            )?;
-            Ok(rows.into_iter().next())
-        })
+        self.read(|connection| find(connection, stage, key))
     }
 
     /// Folds one measurement into its row inside one write: `fold` sees
@@ -75,17 +78,7 @@ impl Store {
         fold: impl FnOnce(Option<StageRate>) -> StageRate,
     ) -> Result<StageRate> {
         self.write(|transaction| {
-            let current = query_all(
-                transaction,
-                "SELECT stage, key, samples, secondsPerUnit, updatedAt FROM stageRate \
-                 WHERE stage = ?1 AND key = ?2",
-                params![DbEnum(stage), key],
-                from_row,
-            )?
-            .into_iter()
-            .next()
-            .map(|row| row.rate);
-            let rate = fold(current);
+            let rate = fold(find(transaction, stage, key)?.map(|row| row.rate));
             transaction.execute(
                 "INSERT INTO stageRate (stage, key, samples, secondsPerUnit, updatedAt) \
                  VALUES (?1, ?2, ?3, ?4, ?5) \
