@@ -609,19 +609,24 @@ impl Core {
     fn stop(&self) -> Result<CaptureResult, CaptureError> {
         {
             // Another thread's finalise (see the module doc) is waited out.
-            let mut inner = self
-                .state_changed
-                .wait_while(self.lock(), |inner| {
-                    matches!(inner.state, CaptureState::Stopping)
-                })
-                .unwrap_or_else(PoisonError::into_inner);
+            // The loop re-checks after every wakeup: a spurious one, or a
+            // `Stopping` left and entered again before this thread got the
+            // lock back. A poisoned lock is read as it is, so a panic
+            // elsewhere does not end the wait early.
+            let mut inner = self.lock();
+            while matches!(inner.state, CaptureState::Stopping) {
+                inner = self
+                    .state_changed
+                    .wait(inner)
+                    .unwrap_or_else(PoisonError::into_inner);
+            }
             match &inner.state {
                 CaptureState::Recording { .. } => {}
                 CaptureState::Failed { recording, .. } => {
                     return match recording {
                         Some(recording) => Ok((**recording).clone()),
                         None => Err(CaptureError::InvalidState(
-                            "stop after a failed start".into(),
+                            "stop after a failure that left no recording".into(),
                         )),
                     };
                 }
@@ -634,6 +639,10 @@ impl Core {
             }
             self.set_state(&mut inner, &CaptureState::Stopping);
         }
+        let unwinding = Unwinding::arm(
+            self,
+            CaptureError::BackendFailed("the teardown panicked".into()),
+        );
         let finished = self.finish();
         // Closing the files can fail on a full disk; the master is still
         // readable to its last frame, so the result comes back and the
@@ -650,6 +659,7 @@ impl Core {
             },
         };
         self.set_state(&mut self.lock(), &state);
+        unwinding.disarm();
         finished.map(|(result, _)| result)
     }
 
@@ -1053,6 +1063,7 @@ impl Core {
             active.rebuild = None;
             self.set_state(&mut inner, &CaptureState::Stopping);
         }
+        let unwinding = Unwinding::arm(self, CaptureError::DeviceLost);
         let state = match self.finish() {
             Ok((result, failure)) => CaptureState::Failed {
                 error: failure.unwrap_or(CaptureError::DeviceLost),
@@ -1064,6 +1075,7 @@ impl Core {
             },
         };
         self.set_state(&mut self.lock(), &state);
+        unwinding.disarm();
     }
 
     fn writer_failed(&self, error: &CaptureError) {
@@ -1074,15 +1086,18 @@ impl Core {
             }
             self.set_state(&mut inner, &CaptureState::Stopping);
         }
+        let failure = as_writer_failure(error.clone());
+        let unwinding = Unwinding::arm(self, failure.clone());
         let result = self.finish().ok().map(|(result, _)| Box::new(result));
         let mut inner = self.lock();
         self.set_state(
             &mut inner,
             &CaptureState::Failed {
-                error: as_writer_failure(error.clone()),
+                error: failure,
                 recording: result,
             },
         );
+        unwinding.disarm();
     }
 }
 
@@ -1092,5 +1107,44 @@ fn as_writer_failure(error: CaptureError) -> CaptureError {
     match error {
         CaptureError::WriterFailed(_) => error,
         other => CaptureError::WriterFailed(other.to_string()),
+    }
+}
+
+/// Armed while a finalise holds `Stopping`. If the finalise panics, the
+/// drop during the unwind sets `Failed { error, recording: None }` and
+/// wakes the waiting `stop()`s, which would otherwise wait for good; the
+/// next `start()` then works. A finalise that returns disarms it.
+struct Unwinding<'a> {
+    core: &'a Core,
+    error: Option<CaptureError>,
+}
+
+impl<'a> Unwinding<'a> {
+    fn arm(core: &'a Core, error: CaptureError) -> Self {
+        Self {
+            core,
+            error: Some(error),
+        }
+    }
+
+    fn disarm(mut self) {
+        self.error = None;
+    }
+}
+
+impl Drop for Unwinding<'_> {
+    fn drop(&mut self) {
+        if let Some(error) = self.error.take() {
+            let mut inner = self.core.lock();
+            if matches!(inner.state, CaptureState::Stopping) {
+                self.core.set_state(
+                    &mut inner,
+                    &CaptureState::Failed {
+                        error,
+                        recording: None,
+                    },
+                );
+            }
+        }
     }
 }

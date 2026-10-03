@@ -21,7 +21,7 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::mpsc::{Receiver, Sender, channel};
+use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, channel};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
@@ -1834,6 +1834,153 @@ fn stop_during_a_device_losss_finalise_returns_its_recording() {
             recording: Some(Box::new(result))
         }
     );
+}
+
+/// Runs `f` on its own thread and fails the test when it has not returned
+/// within `RECV`, rather than hanging the test binary.
+fn within_deadline<T: Send + 'static>(what: &str, f: impl FnOnce() -> T + Send + 'static) -> T {
+    let (done, finished) = channel();
+    std::thread::spawn(move || {
+        let _ = done.send(f());
+    });
+    match finished.recv_timeout(RECV) {
+        Ok(value) => value,
+        Err(RecvTimeoutError::Timeout) => panic!("{what} did not return within {RECV:?}"),
+        Err(RecvTimeoutError::Disconnected) => panic!("{what} panicked"),
+    }
+}
+
+/// The synthetic backend, except that the `stop()` calls numbered in
+/// `panicking` (counted from 1) stop the producer and then panic, as a
+/// backend with a bug would.
+struct PanicsOnStop {
+    inner: SyntheticCaptureBackend,
+    panicking: Vec<usize>,
+    stops: AtomicUsize,
+    panicked: AtomicUsize,
+}
+
+impl CaptureBackend for PanicsOnStop {
+    fn start(
+        &self,
+        lanes: &[AudioLane],
+        uid: Option<&str>,
+        sink: Arc<LaneFrameSink>,
+    ) -> Result<CaptureStream, CaptureError> {
+        self.inner.start(lanes, uid, sink)
+    }
+
+    fn stop(&self) {
+        let call = self.stops.fetch_add(1, Ordering::SeqCst) + 1;
+        self.inner.stop();
+        if self.panicking.contains(&call) {
+            self.panicked.fetch_add(1, Ordering::SeqCst);
+            panic!("backend stop {call} panics on purpose");
+        }
+    }
+}
+
+/// A finalise that panics leaves `Stopping` for `Failed` with no recording
+/// rather than holding it forever: a later `stop()` returns at once, and the
+/// session records again. Both finalisers are covered: a writer failure's,
+/// on its own thread, and the caller's `stop()`, which passes the panic on.
+#[test]
+fn a_panicking_finalise_ends_failed_and_the_session_starts_again() {
+    let directory = tempfile::tempdir().unwrap();
+    let backend = Arc::new(PanicsOnStop {
+        inner: SyntheticCaptureBackend::new(tones(&[AudioLane::Mixed], 0.5)),
+        panicking: vec![1, 3],
+        stops: AtomicUsize::new(0),
+        panicked: AtomicUsize::new(0),
+    });
+    let session = Arc::new(first_writer_fails(
+        directory.path(),
+        backend.clone(),
+        CaptureMode::InPerson,
+    ));
+    let no_recording =
+        || CaptureError::InvalidState("stop after a failure that left no recording".into());
+
+    // The writer failure's finalise panics on its own thread.
+    session.start(Uuid::new_v4()).unwrap();
+    let deadline = Instant::now() + RECV;
+    while backend.panicked.load(Ordering::SeqCst) == 0 {
+        assert!(
+            Instant::now() < deadline,
+            "the finalise never stopped the backend"
+        );
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    let stopping = Arc::clone(&session);
+    let stopped = within_deadline("stop() after a panicked finalise", move || stopping.stop());
+    assert_eq!(stopped.unwrap_err(), no_recording());
+    assert!(
+        matches!(
+            session.state(),
+            CaptureState::Failed {
+                error: CaptureError::WriterFailed(_),
+                recording: None
+            }
+        ),
+        "{:?}",
+        session.state()
+    );
+
+    session.start(Uuid::new_v4()).unwrap();
+    backend.inner.wait_until_finished();
+    assert_eq!(master_of(&session.stop().unwrap()).frame_count(), 24_000);
+
+    // The caller's own `stop()` panics; the panic reaches the caller.
+    session.start(Uuid::new_v4()).unwrap();
+    backend.inner.wait_until_finished();
+    let unwound = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| session.stop()));
+    assert!(unwound.is_err(), "the backend's panic reaches the caller");
+    assert_eq!(
+        session.state(),
+        CaptureState::Failed {
+            error: CaptureError::BackendFailed("the teardown panicked".into()),
+            recording: None
+        }
+    );
+    let stopping = Arc::clone(&session);
+    let stopped = within_deadline("stop() after a panicked stop()", move || stopping.stop());
+    assert_eq!(stopped.unwrap_err(), no_recording());
+
+    session.start(Uuid::new_v4()).unwrap();
+    backend.inner.wait_until_finished();
+    assert_eq!(master_of(&session.stop().unwrap()).frame_count(), 24_000);
+    assert_eq!(session.state(), CaptureState::Idle);
+}
+
+/// A session over `backend` whose first recording's writer fails after
+/// five frames, as a full disk does; every later one writes normally.
+fn first_writer_fails(
+    directory: &Path,
+    backend: Arc<dyn CaptureBackend>,
+    mode: CaptureMode,
+) -> CaptureSession {
+    let first = Arc::new(AtomicBool::new(true));
+    CaptureSession::with_writer_factory(
+        configuration(mode, directory, false),
+        backend,
+        None,
+        1_000,
+        Arc::new(SystemClock::new()),
+        Arc::new(move |layout, lanes, keep_raw| {
+            let writer = RecordingWriter::new(layout, lanes, keep_raw)?;
+            Ok(if first.swap(false, Ordering::SeqCst) {
+                Box::new(FaultyWriter {
+                    inner: writer,
+                    fail_after_frames: Some(5),
+                    fail_finish: false,
+                    frames: 0,
+                }) as Box<dyn RecordingWriting>
+            } else {
+                Box::new(writer)
+            })
+        }),
+    )
+    .unwrap()
 }
 
 /// Fails every write once `full` is set, as a disk that fills does.
