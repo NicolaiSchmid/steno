@@ -69,12 +69,15 @@ impl OnnxSpeechEngine {
         &self.store
     }
 
-    /// Installs what is missing and loads the sessions. Blocking.
-    fn load(
+    /// Installs what is missing from `store`, loads the export and Silero
+    /// and returns the transcriber the engine runs; the model-gated test
+    /// and the `transcribe` example open theirs the same way. Blocking;
+    /// download progress goes to `tracing` at debug level.
+    pub fn open_transcriber(
         store: &ModelStore,
         options: &OnnxOptions,
-        config: &PipelineConfig,
-        vad: &VadConfig,
+        config: PipelineConfig,
+        vad: VadConfig,
     ) -> Result<Transcriber<OnnxBackend>, SpeechError> {
         let mut report = |progress: DownloadProgress<'_>| {
             tracing::debug!(
@@ -87,14 +90,13 @@ impl OnnxSpeechEngine {
         let vad_directory = store.ensure(&ModelAsset::silero_vad(), &mut report)?;
         let model_directory = store.ensure(&ModelAsset::parakeet_v3_fp32(), &mut report)?;
         let (backend, vocab) = OnnxBackend::load(&model_directory, options)?;
-        let detector =
-            SileroVad::load(&vad_directory.join("silero_vad.onnx"), options, vad.clone())?;
+        let detector = SileroVad::load(&vad_directory.join("silero_vad.onnx"), options, vad)?;
         Ok(Transcriber::new(
             backend,
             vocab,
             Box::new(detector),
             LanguageTagger::new(),
-            config.clone(),
+            config,
         ))
     }
 }
@@ -134,7 +136,7 @@ impl SpeechEngine for OnnxSpeechEngine {
         blocking(move || {
             let mut guard = loaded.lock().unwrap_or_else(PoisonError::into_inner);
             if guard.is_none() {
-                *guard = Some(Self::load(&store, &options, &config, &vad)?);
+                *guard = Some(Self::open_transcriber(&store, &options, config, vad)?);
             }
             Ok::<_, SpeechError>(())
         })

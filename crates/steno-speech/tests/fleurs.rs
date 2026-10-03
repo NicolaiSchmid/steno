@@ -20,29 +20,20 @@ mod common;
 use std::time::Instant;
 
 use steno_speech::{
-    LanguageTagger, OnnxBackend, OnnxOptions, PipelineConfig, SileroVad, Transcriber, VadConfig,
+    ModelStore, OnnxBackend, OnnxOptions, OnnxSpeechEngine, PipelineConfig, Transcriber, VadConfig,
 };
 
 const SPIKE_F_MEAN_WER: f64 = 0.053;
 const TOLERANCE: f64 = 0.005;
 
 fn transcriber(models: &std::path::Path) -> Transcriber<OnnxBackend> {
-    let options = OnnxOptions::default();
-    let (backend, vocab) = OnnxBackend::load(&models.join("parakeet-tdt-0.6b-v3-fp32"), &options)
-        .expect("load the export");
-    let vad = SileroVad::load(
-        &models.join("silero-vad").join("silero_vad.onnx"),
-        &options,
+    OnnxSpeechEngine::open_transcriber(
+        &ModelStore::new(models),
+        &OnnxOptions::default(),
+        PipelineConfig::default(),
         VadConfig::default(),
     )
-    .expect("load Silero");
-    Transcriber::new(
-        backend,
-        vocab,
-        Box::new(vad),
-        LanguageTagger::new(),
-        PipelineConfig::default(),
-    )
+    .expect("open the export and Silero")
 }
 
 #[test]

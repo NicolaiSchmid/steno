@@ -16,37 +16,17 @@
     clippy::assert_is_empty
 )]
 
-use std::path::{Path, PathBuf};
+// The WAV reader is the integration tests'; the scorer beside it is unused here.
+#[path = "../tests/common/mod.rs"]
+mod common;
+
+use std::path::PathBuf;
 use std::time::Instant;
 
+use common::read_wav;
 use steno_speech::{
-    DecodeStats, LanguageTagger, ModelAsset, ModelStore, OnnxBackend, OnnxOptions, PipelineConfig,
-    SileroVad, Transcriber, VadConfig,
+    DecodeStats, ModelStore, OnnxOptions, OnnxSpeechEngine, PipelineConfig, VadConfig,
 };
-
-fn read_wav(path: &Path) -> Vec<f32> {
-    let bytes = std::fs::read(path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
-    assert_eq!(&bytes[0..4], b"RIFF", "{}: not a WAV", path.display());
-    let mut offset = 12;
-    let mut channels = 1usize;
-    while offset + 8 <= bytes.len() {
-        let id = &bytes[offset..offset + 4];
-        let size = u32::from_le_bytes(bytes[offset + 4..offset + 8].try_into().unwrap()) as usize;
-        let body = &bytes[offset + 8..(offset + 8 + size).min(bytes.len())];
-        if id == b"fmt " {
-            channels = usize::from(u16::from_le_bytes(body[2..4].try_into().unwrap()));
-            let rate = u32::from_le_bytes(body[4..8].try_into().unwrap());
-            assert_eq!(rate, 16_000, "{}: {rate} Hz, need 16 kHz", path.display());
-        } else if id == b"data" {
-            return body
-                .chunks_exact(2 * channels)
-                .map(|frame| f32::from(i16::from_le_bytes([frame[0], frame[1]])) / 32_768.0)
-                .collect();
-        }
-        offset += 8 + size + (size & 1);
-    }
-    panic!("{}: no data chunk", path.display());
-}
 
 fn main() {
     let mut range: Option<(f32, f32)> = None;
@@ -66,30 +46,14 @@ fn main() {
         "usage: transcribe [--range START-END] <wav>..."
     );
 
-    let store = ModelStore::from_environment();
-    let options = OnnxOptions::default();
     let started = Instant::now();
-    let model_dir = store
-        .ensure(&ModelAsset::parakeet_v3_fp32(), &mut |_| {})
-        .unwrap_or_else(|e| panic!("{e}"));
-    let vad_dir = store
-        .ensure(&ModelAsset::silero_vad(), &mut |_| {})
-        .unwrap_or_else(|e| panic!("{e}"));
-    let (backend, vocab) =
-        OnnxBackend::load(&model_dir, &options).unwrap_or_else(|e| panic!("{e}"));
-    let vad = SileroVad::load(
-        &vad_dir.join("silero_vad.onnx"),
-        &options,
+    let mut transcriber = OnnxSpeechEngine::open_transcriber(
+        &ModelStore::from_environment(),
+        &OnnxOptions::default(),
+        PipelineConfig::default(),
         VadConfig::default(),
     )
     .unwrap_or_else(|e| panic!("{e}"));
-    let mut transcriber = Transcriber::new(
-        backend,
-        vocab,
-        Box::new(vad),
-        LanguageTagger::new(),
-        PipelineConfig::default(),
-    );
     eprintln!("models loaded in {:.1} s", started.elapsed().as_secs_f64());
 
     for file in &files {
