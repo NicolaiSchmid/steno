@@ -2,7 +2,8 @@ import { useEffect, useMemo, useState } from "react";
 
 /**
  * The current time, re-read every `intervalMs` while `active`. Drives the
- * elapsed counters at 1 Hz; nothing else in the page ticks.
+ * elapsed counters and countdowns of the main window, Settings and the
+ * panels at 1 Hz; nothing else in the pages ticks.
  */
 export function useNow(active: boolean, intervalMs = 1000): number {
 	const [now, setNow] = useState(() => Date.now());

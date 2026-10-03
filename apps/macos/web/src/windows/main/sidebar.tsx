@@ -29,8 +29,8 @@ import {
 	SplitButton,
 } from "@/components/ui";
 import { cn } from "@/lib/cn";
+import { useCountdownSeconds, useElapsedSeconds } from "@/lib/use-now";
 import { format } from "./format";
-import { useCountdownSeconds, useElapsedSeconds } from "./use-now";
 
 type Filter = MeetingsListSnapshot["filter"];
 type PermissionKind = RecordingSnapshot["deniedPermissions"][number];

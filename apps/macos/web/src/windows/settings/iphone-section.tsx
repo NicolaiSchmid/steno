@@ -12,7 +12,7 @@ import {
 	ProgressBar,
 	QRCode,
 } from "@/components/ui";
-import { useNow } from "../main/use-now";
+import { useNow } from "@/lib/use-now";
 import { SectionPage } from "./section-page";
 import {
 	deviceName,

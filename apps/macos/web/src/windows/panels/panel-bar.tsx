@@ -84,7 +84,7 @@ export function CountdownHairline({
 			data-testid="countdown-hairline"
 		>
 			<span
-				className="block h-full rounded-full bg-foreground/40 transition-[width] duration-1000 ease-linear motion-reduce:transition-none"
+				className="block h-full rounded-full bg-foreground/40 transition-[width] duration-(--duration-countdown-step) ease-linear motion-reduce:transition-none"
 				style={{ width: `${fraction * 100}%` }}
 			/>
 		</span>

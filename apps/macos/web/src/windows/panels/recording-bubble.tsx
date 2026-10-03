@@ -4,8 +4,8 @@ import type { RecordingSnapshot } from "@/bridge/contract";
 import { send, useBridge, usePageReady, useSnapshot } from "@/bridge/hooks";
 import { Button, RecordMark } from "@/components/ui";
 import { cn } from "@/lib/cn";
+import { useCountdownSeconds, useElapsedSeconds } from "@/lib/use-now";
 import { format } from "@/windows/main/format";
-import { useCountdownSeconds, useElapsedSeconds } from "@/windows/main/use-now";
 import {
 	CountdownHairline,
 	EMPTY_HISTORY,

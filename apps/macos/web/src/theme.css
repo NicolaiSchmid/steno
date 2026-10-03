@@ -102,6 +102,8 @@
 	--duration-entrance: 250ms;
 	--duration-surface: 200ms;
 	--duration-press-in: 100ms;
+	/* The panels' countdown hairline steps once a second, in time with the clock. */
+	--duration-countdown-step: 1000ms;
 	--ease-standard: cubic-bezier(0.4, 0, 0.2, 1);
 	--ease-drawer: cubic-bezier(0.32, 0.72, 0, 1);
 }

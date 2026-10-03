@@ -2,7 +2,7 @@ import { XIcon } from "lucide-react";
 import { useRef } from "react";
 import { send, useBridge } from "@/bridge/hooks";
 import { Button, RecordMark } from "@/components/ui";
-import { useCountdownSeconds } from "@/windows/main/use-now";
+import { useCountdownSeconds } from "@/lib/use-now";
 import { CountdownHairline, PanelBar } from "./panel-bar";
 import { type PanelShell, panelShell, useReportSize } from "./panel-shell";
 
