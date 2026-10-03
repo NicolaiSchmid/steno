@@ -41,10 +41,10 @@
 //!
 //! The `default.audio.sink` and `default.audio.source` metadata changing,
 //! a linked node going away, or the connection or the stream failing mark
-//! a change; [`COALESCE_DELAY`] after the last one the graph is compared
-//! with what the capture started on ([`DeviceSnapshot::difference`]), and
-//! a difference goes to the sink as a
-//! [`DeviceChangeReason`](crate::capture::DeviceChangeReason), from this
+//! a change; [`LiveCaptureBackend::COALESCE_DELAY`] after the last one the
+//! graph is compared with what the capture started on
+//! ([`DeviceSnapshot::difference`]), and a difference goes to the sink as
+//! a [`DeviceChangeReason`](crate::capture::DeviceChangeReason), from this
 //! thread, never during `start`. The session then rebuilds through
 //! `stop()` and `start`, as on the Mac. The capture never follows a
 //! default on its own.
@@ -75,11 +75,7 @@ use crate::capture::{CaptureBackend, CaptureError, CaptureStream, DeviceSnapshot
 use crate::realtime::{LaneFrameSink, deliver, interleaved_view};
 
 /// How long `start` lets PipeWire answer, link and run the first cycle.
-pub const START_TIMEOUT: Duration = Duration::from_secs(3);
-/// How long a burst of graph changes settles before it is judged once; the
-/// Mac's `LiveCaptureBackend::COALESCE_DELAY`. A Bluetooth profile switch
-/// removes and adds nodes and moves both defaults within it.
-pub const COALESCE_DELAY: Duration = Duration::from_millis(500);
+const START_TIMEOUT: Duration = Duration::from_secs(3);
 /// The longest single wait on the loop while starting, so the deadline is
 /// checked often.
 const PUMP_SLICE: Duration = Duration::from_millis(20);
@@ -87,7 +83,7 @@ const PUMP_SLICE: Duration = Duration::from_millis(20);
 const IDLE_WAIT: Duration = Duration::from_secs(1);
 
 /// The capture stream's `node.name`.
-pub const STREAM_NODE_NAME: &str = "steno-capture";
+const STREAM_NODE_NAME: &str = "steno-capture";
 
 /// What the data-loop thread owns: moved into the stream listener at
 /// registration, read only by [`process`]. It crosses to PipeWire's
@@ -676,7 +672,7 @@ impl Capture {
             let wait = match shared.pending.get() {
                 None => IDLE_WAIT,
                 Some(last) => {
-                    let due = last + COALESCE_DELAY;
+                    let due = last + LiveCaptureBackend::COALESCE_DELAY;
                     let now = Instant::now();
                     if now >= due {
                         shared.pending.set(None);
@@ -759,6 +755,11 @@ impl std::fmt::Debug for LiveCaptureBackend {
 }
 
 impl LiveCaptureBackend {
+    /// How long a burst of graph changes settles before it is judged once,
+    /// as on the Mac. A Bluetooth profile switch removes and adds nodes
+    /// and moves both defaults within it.
+    pub const COALESCE_DELAY: Duration = Duration::from_millis(500);
+
     #[must_use]
     pub fn new() -> Self {
         Self {

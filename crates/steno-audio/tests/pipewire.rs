@@ -34,7 +34,6 @@ use std::sync::mpsc::{Receiver, channel};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use steno_audio::capture::live::pipewire::COALESCE_DELAY;
 use steno_audio::capture::{ChannelRef, DeviceChangeReason};
 use steno_audio::testing::rt::CountingAllocator;
 use steno_audio::writer::WavStreamWriter;
@@ -51,6 +50,7 @@ const SECOND_SINK: &str = "steno-test-sink-2";
 const MIC: &str = "steno-test-mic";
 const SINK_TONE: f64 = 440.0;
 const MIC_TONE: f64 = 1_000.0;
+const COALESCE_DELAY: Duration = LiveCaptureBackend::COALESCE_DELAY;
 
 /// Runs `work` on a thread and waits at most `limit` for its result.
 fn within<T: Send + 'static>(
