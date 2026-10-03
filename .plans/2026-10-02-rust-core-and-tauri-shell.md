@@ -449,6 +449,54 @@ another release, otherwise the cutover closes them:
   rebuild's successful restart and `resume` clears the new backend's
   audio and reports nothing.
 
+### Handover
+
+Rust fixes the Swift behaviours below except the network and service name lines; each
+fix is ported to Swift before cutover.
+
+- Network, same as Swift: Rust refuses tunnels. On Linux and macOS that is every
+  point-to-point interface, which most tunnels there are (`wg0`, `tun0`, `utun3`); on
+  Windows every adapter but hardware Ethernet and Wi-Fi that is up
+  (`advertise::windows_keeps`), which leaves out Wintun, TAP and Hyper-V adapters.
+- Network, Rust differs (WP8 decides): the record is not re-published after a network
+  change (restart on network change, or re-register). Layer-2 tunnels (a TAP device,
+  `feth`) and bridges (`docker0`, `bridge100`) are not point-to-point, and are served;
+  Swift classes bridges `.other`. A LAN numbered in `100.64.0.0/10` is refused, on
+  every platform. Rust judges a connection by its local address where Swift judges the
+  interface it arrives on, so on Linux and macOS (weak host model) a packet addressed
+  to the LAN address that arrives over a tunnel is served: the computer is a subnet
+  router or exit node, or a peer's allowed IPs cover the LAN. On Windows the hardware
+  rule refuses a LAN address on a Hyper-V external switch's or a Network Bridge's
+  vEthernet adapter, so a computer whose LAN address moved there is unreachable.
+- Touch: `HandoverEngine.touch` should run an `UPDATE` of the row that still holds the
+  token (a new `MeetingStore` method), as the Rust engine does
+  (`Store::touch_paired_device`); today `store.save(seen, tokenHash:)` upserts the
+  device the gate read before a yield, so a revoke in between resurrects it.
+- Store reads: Swift's `HandoverEngine.sweepOrphans` and `RecordingHandler.receipt`
+  read with `try?`, so a failed read counts as no receipt: the sweep deletes a
+  resumable upload, a route answers 404, and an announce starts the recording over,
+  overwriting a `complete` receipt so that the next `complete` admits the meeting
+  twice. `HandoverEngine.authenticate` reads the device with `try?`, so a failed read
+  answers 401 and the phone unpairs. Rust keeps the files and answers 500
+  (`Engine::receipt`, the bearer gate).
+- Pairing windows: Swift's `HandoverEngine.pair` checks only that a window is open,
+  not that it is the one whose secret the head matched. The read timeout runs per
+  silence, so a head whose body keeps trickling in pairs against a window opened after
+  a cancel, or one opened for a second phone. A failed save gives the session back
+  whenever no window is open, also after a cancel. Rust numbers the windows and pairs
+  only against the one the gate matched (`Principal::Pairing`); a failed save does not
+  reopen a window cancelled or replaced meanwhile.
+- Revoked receipts: Swift's `HandoverEngine.persist` puts a receipt back into
+  `activeReceipts` after a revoke removed it, when a `complete` that read it before the
+  revoke writes it back; the receipt stream then shows an upload of a revoked phone
+  until restart. Rust keeps the receipts of a device revoked since start out of memory
+  until it pairs again.
+- Service name: Swift's `HandoverConfiguration.defaultServiceName` uses
+  `Host.current().localizedName` (the computer name in System Settings), else
+  `ProcessInfo.processInfo.hostName`. The Rust default reads `HOSTNAME` or
+  `/etc/hostname` and falls back to `Steno`; the shell passes the OS computer name on
+  the Mac (WP9) and on Windows (WP10).
+
 ### Bridge
 
 What the bridge crate (WP1) asks of the Swift side before WP6 fills the list:
@@ -540,7 +588,8 @@ PR off `main`.
 | WP7b adapters | `feat/rust-adapters` | #165 | merged |
 | WP6a host | `feat/rust-host` | #170 | merged |
 | WP5a audio (`steno-audio`) | `feat/rust-audio` | #166 | merged |
-| WP4d diarization (`steno-diarize`) | `feat/rust-diarize` | #164 | open |
+| WP4d diarization (`steno-diarize`) | `feat/rust-diarize` | #164 | merged |
+| WP7c handover | `feat/rust-handover` | #169 | open |
 
 WP4b is `crates/steno-speech-coreml`: `objc2-core-ml` behind one safe module,
 the four backend calls, the FluidAudio 0.17.4 heuristics ported
@@ -559,3 +608,18 @@ proof is `crates/steno-audio/tests/realtime.rs`; the ERLE table is
 identical to Swift's `aec-bench --synthetic`; the ring tests run under
 ThreadSanitizer in CI's `tsan` job; the live Core Audio tests sit behind
 `--ignored` in `tests/live.rs`. Parity items: the Audio list above.
+
+What WP7c leaves for the next package: `crates/steno-handover` is a rustls (ring)
+listener, TLS 1.3 only, hyper 1 HTTP/1.1, with the pinned verifier (`pinning`), the
+rcgen identity in the `SecretStore` as one PEM bundle, pairing, the seven routes, the
+inbox and the mdns-sd advertiser; `tests/wire_contract.rs` reads `wire.ts`. The store
+gains the paired-device and handover-receipt queries. Core's `RecordingIntake`
+(copy into the audio folder, enqueue) waits for WP6b: Rust core has no pipeline to
+enqueue into yet; the audio folder's path comes from `paths::file_url_path`, the
+meeting's folder from `RecordingLayout`. Durability before `complete` answers 200 is
+the intake's, as in Swift: the listener fsyncs each chunk (`receiving_file::write`) and
+writes its own `complete` receipt only after `HandoverIntake::admit` returns, so the
+port must have the master and its commits on disk by then (the `RecordingIntake.admit`
+line under Store). Pairing and revoke commits stay `NORMAL`, as in Swift: a power loss
+right after one can forget a pairing (the phone gets 401 and unpairs, and the user
+pairs it again) or bring a revoked device back.

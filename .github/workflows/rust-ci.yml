@@ -150,6 +150,15 @@ jobs:
         run: pnpm install --frozen-lockfile && pnpm check && pnpm build
         working-directory: apps/macos/web
 
+      # The handover interface test connects to the runner's own LAN
+      # address. Linux and Windows deliver that connection, so a skip there
+      # fails the test; on macOS the application firewall holds the
+      # connection back and the test skips.
+      - name: Require the LAN interface test (Linux and Windows)
+        if: matrix.name != 'macos'
+        shell: bash
+        run: echo "STENO_REQUIRE_LAN_TEST=1" >> "$GITHUB_ENV"
+
       - name: Format
         run: cargo fmt --all --check
       - name: Lint
@@ -160,6 +169,32 @@ jobs:
         run: cargo test --workspace --locked --no-fail-fast
       - name: Test the core fakes
         run: cargo test -p steno-core --features testing --locked
+      # The handover tests that read the host's network, again with their
+      # output, so the log shows the LAN addresses found and whether the
+      # interface test ran or printed SKIPPED. `--workspace` keeps the Test
+      # step's feature set, which `-p steno-handover` would change; Windows
+      # and macOS rebuild nothing here, Linux part of the tree (about 30 s).
+      # The Windows-only test exists only there. A rename would leave
+      # `--exact` matching nothing, which passes, so the step greps the log
+      # for each test's `ok` line; the interface test prints one on macOS
+      # too, after its SKIPPED line. Bash runs with `pipefail`, so `tee`
+      # keeps the test's exit code.
+      - name: Handover network tests, with output
+        shell: bash
+        run: |
+          log="$RUNNER_TEMP/handover-network.log"
+          cargo test --workspace --lib --locked -- --exact --nocapture \
+            server::tests::the_lan_is_served_and_a_connection_outside_it_is_closed_before_any_tls_byte \
+            server::advertise::tests::the_system_lan_addresses_can_be_read \
+            server::advertise::tests::on_windows_the_adapter_table_has_a_row_for_every_ipv4_interface \
+            | tee "$log"
+          ran() {
+            grep -qF "$1 ... ok" "$log" || { echo "::error::$1 did not run"; exit 1; }
+          }
+          ran the_lan_is_served_and_a_connection_outside_it_is_closed_before_any_tls_byte
+          if [ "$RUNNER_OS" = Windows ]; then
+            ran on_windows_the_adapter_table_has_a_row_for_every_ipv4_interface
+          fi
 
       # A debug build loads devUrl; the smoke needs the embedded bundle, so
       # the dev URL is dropped through Tauri's configuration merge. The run

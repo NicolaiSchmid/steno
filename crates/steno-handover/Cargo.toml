@@ -1,0 +1,54 @@
+[package]
+name = "steno-handover"
+description = "The phone handover server: TLS-pinned listener, pairing, chunked uploads into the inbox"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+steno-core = { path = "../steno-core" }
+
+base64.workspace = true
+bytes.workspace = true
+chrono.workspace = true
+http.workspace = true
+http-body-util.workspace = true
+hyper.workspace = true
+hyper-util.workspace = true
+if-addrs.workspace = true
+mdns-sd.workspace = true
+percent-encoding.workspace = true
+rand.workspace = true
+rcgen.workspace = true
+rustls.workspace = true
+rustls-pki-types.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+time.workspace = true
+# Additive on the workspace line (`macros`, `rt`, `rt-multi-thread`): the
+# listener's sockets, timers and channels.
+tokio = { workspace = true, features = ["io-util", "net", "sync", "time"] }
+tokio-rustls.workspace = true
+tracing.workspace = true
+unicode-segmentation.workspace = true
+uuid.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows-sys.workspace = true
+
+[dev-dependencies]
+# The fake intake the tests admit through.
+steno-core = { path = "../steno-core", features = ["testing"] }
+
+regex.workspace = true
+reqwest.workspace = true
+tempfile.workspace = true
+x509-parser.workspace = true
+
+[lints]
+workspace = true
