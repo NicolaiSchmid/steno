@@ -152,6 +152,19 @@ bridge's copies of the macro and codecs. Packages after WP3 branch from `main`.
   corpus; ONNX Runtime backend through `ort` with the logits split validated on FLEURS
   German (closes the open item from the speech-stack plan); sidecar process; model
   manifest and download. Gate: FLEURS numbers within 0.5 points of the spike F table.
+  Integration notes (WP4a `crates/steno-speech`, #171, against the CoreML decoder of
+  #163): the two loops must become one per invariant 4, and they differ in eight
+  places. Repeated zero-duration tokens: the CoreML side forces duration 1 on the
+  second emission at a frame, `steno-speech` allows NeMo's `max_symbols` 10. Token
+  budget: fixed 150 per window there, `40 tokens/s * len + 16` here (150 would truncate
+  a 60 s chunk). Short window: the CoreML side returns empty for `valid <= 1`, here one
+  frame decodes. Tail flush: the CoreML side probes three boundary frames until five
+  blanks, none here, the merge owns the overlap. Emission suppression:
+  `emit_after_frame` and `Hypothesis` there, none here. Confidence: non-finite values
+  zeroed there, clamped after `split_logits` here. Merge: fixed 2.0 s overlap with a
+  contiguous-run preference and `minimum_pairs` there, 1.5 s LCS with tolerance
+  `max(overlap / 2, 0.5)` here. API: `Backend` plus `Scratch` plus `EncoderView` to
+  `Hypothesis` there, `SpeechBackend` (`&mut self`) to `Vec<Token>` here.
   **WP4d diarization.** `steno-diarize`: speech-stack decision 6 and gate G3, moved
   here on 2026-10-02 so it ships with the Rust pipeline. Segmentation and embedding
   behind one backend trait (CoreML over FluidAudio's models on the Mac, ONNX Runtime
