@@ -12,9 +12,14 @@
 //! rounds half to even, which differs only where an even number of
 //! windows cover a frame and split evenly, the first and last eight
 //! seconds of a lane, and there one window hearing a voice means a
-//! speaker rather than nobody; and a cluster nobody voted for is never
-//! active, where Swift's tie-break assigns the first cluster, which would
-//! hand silence to speaker one.
+//! speaker rather than nobody; and where at least one cluster has a vote,
+//! only voted clusters are active, where Swift ranks the whole row and
+//! fills the count with clusters nobody voted for. Where no cluster has a
+//! vote on a frame the windows count as speech, the first `k` clusters are
+//! active as Swift's ranking of an all-zero row has it: a one-to-two-second
+//! utterance is alone in no window for the two seconds extraction asks,
+//! so it is embedded nowhere and casts no vote, and without that fallback
+//! it would be a hole no transcript segment could be attributed to.
 
 use steno_core::SpeakerTurn;
 
@@ -95,7 +100,7 @@ pub fn turns(
     }
     // Active clusters per frame, laid out like `votes`: the top `k` by
     // votes, `k` the rounded mean speaker count, only clusters somebody
-    // voted for.
+    // voted for; the first `k` when nobody did (see the module doc).
     let mut active = vec![false; total_frames * cluster_count];
     let mut ranked: Vec<usize> = Vec::with_capacity(cluster_count);
     for frame in 0..total_frames {
@@ -109,6 +114,9 @@ pub fn turns(
         ranked.extend((0..cluster_count).filter(|c| row[*c] > 0));
         ranked.sort_by(|lhs, rhs| row[*rhs].cmp(&row[*lhs]).then(lhs.cmp(rhs)));
         ranked.truncate(k);
+        if ranked.is_empty() {
+            ranked.extend(0..k);
+        }
         for cluster in &ranked {
             active[frame * cluster_count + cluster] = true;
         }
@@ -350,6 +358,74 @@ mod tests {
             super::turns(&analysis, &[None, None], &TimelineRules::default()).len(),
             0
         );
+    }
+
+    /// One speaker for eight seconds, a second and a half of speech from
+    /// nine to ten and a half that no window embeds (it is alone in none
+    /// for two seconds), then the speaker again from twelve. The windows
+    /// count one speaker over the short utterance, nobody voted for it,
+    /// and it still becomes a turn of the first cluster, as `FluidAudio`
+    /// has it, rather than a hole; its quality is zero because no vote
+    /// backs it.
+    #[test]
+    fn speech_nobody_voted_for_goes_to_the_first_cluster() {
+        // Window 0 (0 s to 10 s): speaker 0 to 8 s, the utterance from 9 s.
+        let frames_a: Vec<u8> = (0..589)
+            .map(|f| match f {
+                0..=472 => 0b01,
+                532..=588 => 0b10,
+                _ => 0,
+            })
+            .collect();
+        // Window 1 (10 s to 20 s): the utterance to 10.5 s, speaker 0
+        // from 12 s.
+        let frames_b: Vec<u8> = (0..589)
+            .map(|f| match f {
+                0..=28 => 0b10,
+                118..=588 => 0b01,
+                _ => 0,
+            })
+            .collect();
+        let analysis = Analysis {
+            geometry: GEOMETRY.clone(),
+            total_samples: 320_000,
+            activities: vec![
+                WindowActivity {
+                    window: 0,
+                    offset: 0,
+                    frames: frames_a,
+                },
+                WindowActivity {
+                    window: 1,
+                    offset: 160_000,
+                    frames: frames_b,
+                },
+            ],
+            embeddings: vec![
+                WindowEmbedding {
+                    window: 0,
+                    local_speaker: 0,
+                    start: 0.0,
+                    end: 8.0,
+                    embedding: vec![1.0],
+                },
+                WindowEmbedding {
+                    window: 1,
+                    local_speaker: 0,
+                    start: 12.0,
+                    end: 20.0,
+                    embedding: vec![1.0],
+                },
+            ],
+        };
+        let turns = turns(&analysis, &[Some(0), Some(0)], &TimelineRules::default());
+        assert_eq!(turns.len(), 3, "{turns:?}");
+        assert!(turns.iter().all(|turn| turn.speaker_label == "S1"));
+        let short = &turns[1];
+        assert!((short.start - 9.0).abs() < 0.05, "{short:?}");
+        assert!((short.end - 10.5).abs() < 0.05, "{short:?}");
+        assert_eq!(short.quality, 0.0, "no vote backs it");
+        assert!(turns[0].quality > 0.99 && turns[2].quality > 0.99);
     }
 
     /// Two windows disagree on how many speak: the first hears two, the
