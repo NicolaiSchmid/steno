@@ -33,8 +33,9 @@ pub fn timed_pieces(tokens: &[Token], vocab: &Vocab) -> Vec<TimedWord> {
 
 /// Joins pieces into words. A piece starting with a space or the marker
 /// begins a word; punctuation-only pieces glue to the word before them,
-/// except an opening mark with a boundary (`▁¿`, `▁¡`), which begins the
-/// next word; pieces that are only a boundary carry it to the next piece.
+/// except an opening mark with a boundary (`▁¿`, `▁¡`, `▁'`), which begins
+/// the next word; pieces that are only a boundary carry it to the next
+/// piece.
 /// A word's confidence is the mean of its pieces'.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct TokenAggregator;
@@ -98,8 +99,10 @@ impl TokenAggregator {
 }
 
 /// Marks that open what follows them, so a boundary before one belongs to
-/// the next word ("hola ¿qué", not "hola¿qué").
-const OPENING_MARKS: [char; 5] = ['¿', '¡', '(', '[', '{'];
+/// the next word ("hola ¿qué", not "hola¿qué"). The apostrophe opens a
+/// quote only with a boundary (`▁'`); without one it ends a quote or sits
+/// inside a word and glues.
+const OPENING_MARKS: [char; 6] = ['¿', '¡', '(', '[', '{', '\''];
 
 /// Swift's `punctuationCharacters` and `symbols` sets, near enough: not a
 /// letter, digit, space or control character.
@@ -251,6 +254,21 @@ mod tests {
         ]);
         assert_eq!(texts(&words), ["hola", "¿qué?", "¡", "Sí"]);
         assert_eq!(words[1].start, 0.3);
+        // Without a boundary the mark glues like any punctuation.
+        let words = TokenAggregator.words(&[
+            piece("▁hola", 0.0, 0.2, 1.0),
+            piece("¿", 0.3, 0.35, 1.0),
+            piece("qué", 0.35, 0.5, 1.0),
+        ]);
+        assert_eq!(texts(&words), ["hola¿qué"]);
+        // An opening quote with a boundary, the closing one without.
+        let words = TokenAggregator.words(&[
+            piece("▁said", 0.0, 0.2, 1.0),
+            piece("▁'", 0.3, 0.35, 1.0),
+            piece("hello", 0.35, 0.5, 1.0),
+            piece("'", 0.5, 0.55, 1.0),
+        ]);
+        assert_eq!(texts(&words), ["said", "'hello'"]);
     }
 
     #[test]
