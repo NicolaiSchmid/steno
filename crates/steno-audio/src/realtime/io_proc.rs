@@ -125,7 +125,7 @@ pub fn interleaved_view(
     stride: i32,
     channels: usize,
 ) -> BufferView {
-    let frame_bytes = channels * 4;
+    let frame_bytes = channels * size_of::<f32>();
     let size = size as usize;
     let without_data = |byte_size| BufferView {
         channels,
@@ -164,7 +164,40 @@ mod tests {
     fn bytes(samples: &[f32]) -> &[u8] {
         // SAFETY: any initialised `f32` slice is valid as bytes; the length
         // is the slice's in bytes.
-        unsafe { std::slice::from_raw_parts(samples.as_ptr().cast::<u8>(), samples.len() * 4) }
+        unsafe { std::slice::from_raw_parts(samples.as_ptr().cast::<u8>(), size_of_val(samples)) }
+    }
+
+    #[test]
+    fn a_view_delivers_whole_frames_in_channel_order_within_the_memory() {
+        use steno_core::AudioLane;
+
+        // Four frames of three channels, sample `10 * frame + channel`.
+        let samples: Vec<f32> = (0..12u8).map(|i| f32::from(i / 3 * 10 + i % 3)).collect();
+        let memory = bytes(&samples);
+        // From the second frame, a chunk far longer than the memory.
+        let view = interleaved_view(Some(memory), 12, 4_096, 12, 3);
+        assert_eq!(view.byte_size, 36, "three whole frames are left");
+        let lanes = [AudioLane::Mic, AudioLane::System];
+        let sources = [
+            LaneSource {
+                lane: AudioLane::Mic,
+                left: ChannelRef::new(0, 0, 3),
+                right: None,
+            },
+            LaneSource {
+                lane: AudioLane::System,
+                left: ChannelRef::new(0, 2, 3),
+                right: None,
+            },
+        ];
+        let sink = LaneFrameSink::new(&lanes);
+        // SAFETY: the view points into `samples`, alive for the call.
+        unsafe { deliver(&[view], &sources, &sink) };
+        assert_eq!(sink.available_to_read(), 3);
+        let (mut mic, mut system) = ([0.0f32; 3], [0.0f32; 3]);
+        assert!(sink.ring(0).read(&mut mic) && sink.ring(1).read(&mut system));
+        assert_eq!(mic, [10.0, 20.0, 30.0], "channel 0 of frames 1 to 3");
+        assert_eq!(system, [12.0, 22.0, 32.0], "channel 2 of frames 1 to 3");
     }
 
     #[test]

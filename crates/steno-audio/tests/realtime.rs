@@ -261,6 +261,28 @@ fn the_pipewire_process_body_allocates_nothing() {
     }
 }
 
+/// On Linux the counter names a thread by the kernel's id, the one
+/// `/proc/self/task` lists, so `tests/pipewire.rs` can count PipeWire's
+/// data-loop thread by it.
+#[cfg(target_os = "linux")]
+#[test]
+fn the_counting_allocator_names_threads_as_the_kernel_does() {
+    fn kernel_thread_id() -> usize {
+        std::fs::read_link("/proc/thread-self")
+            .expect("/proc/thread-self")
+            .file_name()
+            .and_then(|name| name.to_str()?.parse().ok())
+            .expect("a thread id")
+    }
+    let here = (CountingAllocator::current_thread(), kernel_thread_id());
+    let there = std::thread::spawn(|| (CountingAllocator::current_thread(), kernel_thread_id()))
+        .join()
+        .unwrap();
+    assert_eq!(here.0, here.1);
+    assert_eq!(there.0, there.1);
+    assert_ne!(here.0, there.0);
+}
+
 #[test]
 fn the_sidecar_resampler_allocates_nothing_after_init() {
     let mut resampler = Resampler48kTo16k::new(FRAME_SIZE);
