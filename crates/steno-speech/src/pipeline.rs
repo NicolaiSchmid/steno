@@ -423,6 +423,24 @@ mod tests {
         Transcriber::new(backend, vocab, Box::new(vad), tagger, config)
     }
 
+    /// Copies the non-silent samples of `other` over `samples`.
+    fn overlay(samples: &mut [f32], other: &[f32]) {
+        for (x, &y) in samples.iter_mut().zip(other) {
+            if y != 0.0 {
+                *x = y;
+            }
+        }
+    }
+
+    /// Fills the silence inside `range` with the fixtures' noise.
+    fn fill_noise(samples: &mut [f32], range: Range<usize>) {
+        for (i, x) in samples.iter_mut().enumerate() {
+            if *x == 0.0 && range.contains(&i) {
+                *x = 0.0004 * if i % 2 == 0 { 1.0 } else { -1.0 };
+            }
+        }
+    }
+
     /// 9 s of speech energy the fake decodes to nothing (piece 0), one word
     /// at `word_frame`; chunks of about 8 s.
     fn empty_chunk_fixture(word_frame: usize) -> (PipelineConfig, Vec<f32>) {
@@ -436,11 +454,7 @@ mod tests {
             ..PipelineConfig::default()
         };
         let mut samples = audio(14.0, word_frame, &[5, 25]);
-        for (i, x) in samples.iter_mut().enumerate() {
-            if *x == 0.0 && i < 9 * SAMPLE_RATE {
-                *x = 0.0004 * if i % 2 == 0 { 1.0 } else { -1.0 };
-            }
-        }
+        fill_noise(&mut samples, 0..9 * SAMPLE_RATE);
         (config, samples)
     }
 
@@ -449,11 +463,7 @@ mod tests {
         let mut t = transcriber(PipelineConfig::default(), 0);
         // "w1 s21 s22" then a pause then "w2".
         let mut samples = audio(6.0, 10, &[1, 21, 22]);
-        for (i, x) in audio(6.0, 40, &[2]).into_iter().enumerate() {
-            if x != 0.0 {
-                samples[i] = x;
-            }
-        }
+        overlay(&mut samples, &audio(6.0, 40, &[2]));
         let transcript = t.transcribe(&samples, None).unwrap();
         assert_eq!(transcript.chunks.len(), 1);
         assert_eq!(transcript.text(), "w1s21s22 w2");
@@ -487,21 +497,10 @@ mod tests {
         let mut samples = vec![0.0f32; 36 * SAMPLE_RATE];
         for word in 1..=20u32 {
             let frame = 12 + (word as usize - 1) * 20;
-            for (i, x) in audio(36.0, frame, &[word, 20 + word])
-                .into_iter()
-                .enumerate()
-            {
-                if x != 0.0 {
-                    samples[i] = x;
-                }
-            }
+            overlay(&mut samples, &audio(36.0, frame, &[word, 20 + word]));
         }
         // Fill the gaps with low-level noise so the VAD sees one region.
-        for (i, x) in samples.iter_mut().enumerate() {
-            if *x == 0.0 && i > SAMPLE_RATE && i < 34 * SAMPLE_RATE {
-                *x = 0.0004 * if i % 2 == 0 { 1.0 } else { -1.0 };
-            }
-        }
+        fill_noise(&mut samples, SAMPLE_RATE + 1..34 * SAMPLE_RATE);
         let transcript = t.transcribe(&samples, None).unwrap();
         assert!(transcript.chunks.len() >= 3, "{:?}", transcript.chunks);
         let expected: Vec<String> = (1..=20).map(|w| format!("w{w}s{}", 20 + w)).collect();
@@ -559,11 +558,7 @@ mod tests {
     fn recover_with(extensions: &[(f32, f32)]) -> (Vec<Token>, Transcriber<FrameTokenBackend>) {
         let (mut config, mut samples) = empty_chunk_fixture(50);
         config.recovery.extensions_seconds = extensions.to_vec();
-        for (i, x) in audio(14.0, 135, &[6]).into_iter().enumerate() {
-            if x != 0.0 {
-                samples[i] = x;
-            }
-        }
+        overlay(&mut samples, &audio(14.0, 135, &[6]));
         let mut t = transcriber(config, 160);
         let range = SAMPLE_RATE..9 * SAMPLE_RATE;
         let tokens = t
