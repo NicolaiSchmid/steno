@@ -12,8 +12,8 @@ use thiserror::Error;
 use uuid::Uuid;
 
 use crate::base64url;
+use crate::configuration::Clock;
 use crate::pinning::constant_time_equals;
-use crate::service::Clock;
 
 /// What the QR code carries, and the deep link it doubles as:
 ///

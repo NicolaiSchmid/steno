@@ -20,11 +20,11 @@ use steno_core::{HandoverIntake, HandoverReceipt, HandoverState, PairedDevice, S
 use tokio::sync::watch;
 use uuid::Uuid;
 
+use crate::configuration::Clock;
 use crate::configuration::HandoverConfiguration;
 use crate::identity::HandoverIdentity;
 use crate::pairing::{DeviceTokens, PairingPayload, PairingSession};
 use crate::route::{AuthRequirement, Route};
-use crate::service::Clock;
 use crate::upload::{Inbox, MetadataValidation};
 use crate::wire;
 

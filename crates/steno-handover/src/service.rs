@@ -6,20 +6,17 @@
 
 use std::sync::Arc;
 
-use chrono::{DateTime, Utc};
+use chrono::Utc;
 use steno_core::{HandoverIntake, HandoverReceipt, PairedDevice, Store, store};
 use tokio::sync::{Mutex, watch};
 use uuid::Uuid;
 
+pub use crate::configuration::Clock;
 use crate::configuration::HandoverConfiguration;
 use crate::engine::Engine;
 use crate::identity::HandoverIdentity;
 use crate::pairing::PairingPayload;
 use crate::server::{HandoverServer, ServerError, ServerMetrics};
-
-/// The one time source: it stamps receipts and devices and decides when the
-/// pairing window has closed. Tests advance it.
-pub type Clock = Arc<dyn Fn() -> DateTime<Utc> + Send + Sync>;
 
 /// Where the listener stands. Named `ListenerState` because core's
 /// `HandoverState` is the per-recording receipt state.

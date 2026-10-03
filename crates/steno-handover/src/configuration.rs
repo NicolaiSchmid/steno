@@ -1,10 +1,16 @@
-//! How the listener binds and where partial uploads live.
-//! Swift: `HandoverConfiguration.swift`.
+//! How the listener binds and where partial uploads live, and the clock
+//! the service runs on. Swift: `HandoverConfiguration.swift`.
 
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
 
+use chrono::{DateTime, Utc};
 use steno_core::StenoPaths;
+
+/// The one time source: it stamps receipts and devices and decides when the
+/// pairing window has closed. Tests advance it.
+pub type Clock = Arc<dyn Fn() -> DateTime<Utc> + Send + Sync>;
 
 /// How the computer's side of the handover listens and where it keeps
 /// partial uploads. Tests use `advertise: false` and a fresh temporary

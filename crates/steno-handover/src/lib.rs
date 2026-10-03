@@ -37,8 +37,8 @@ pub mod service;
 pub mod upload;
 pub mod wire;
 
-pub use configuration::HandoverConfiguration;
+pub use configuration::{Clock, HandoverConfiguration};
 pub use identity::{HandoverIdentity, IdentityError};
 pub use pairing::{PairingPayload, PairingPayloadError};
 pub use server::ServerMetrics;
-pub use service::{Clock, HandoverService, ListenerState};
+pub use service::{HandoverService, ListenerState};
