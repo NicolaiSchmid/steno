@@ -150,18 +150,27 @@ fn merge_by_midpoint(
         .iter()
         .position(|t| seconds(t) >= cutoff)
         .unwrap_or(right.len());
+    // The right resumes at its first splice point (a word start or a
+    // punctuation piece) from the cutoff.
+    let resume = right[right_start_index..]
+        .iter()
+        .position(|t| vocab.is_splice_safe(t.id));
+    match (resume, left_end_index) {
+        // Without one the right adds no word of its own: its window ended
+        // inside the left's span, which keeps everything.
+        (None, 1..) => return left.to_vec(),
+        // A left with nothing before the cutoff keeps nothing, and the
+        // right everything from the cutoff.
+        (None, 0) => {}
+        (Some(offset), _) => right_start_index += offset,
+    }
+    // The left finishes the word it is in.
     if left_end_index > 0 {
         left_end_index += left[left_end_index..]
             .iter()
             .take_while(|t| !vocab.is_splice_safe(t.id))
             .count();
     }
-    // The right resumes at its first splice point (a word start or a
-    // punctuation piece), or keeps everything when it has none.
-    right_start_index += right[right_start_index..]
-        .iter()
-        .position(|t| vocab.is_splice_safe(t.id))
-        .unwrap_or(0);
     [&left[..left_end_index], &right[right_start_index..]].concat()
 }
 
@@ -290,6 +299,13 @@ mod tests {
             ids(&merge_windows(&left, &right, 1.5, &vocab())),
             ids(&[left, right].concat())
         );
+        // Touching: the right starts on the frame the left ends.
+        let left = vec![token(0, 0), token(4, 9)];
+        let right = vec![token(5, 10), token(1, 12)];
+        assert_eq!(
+            ids(&merge_windows(&left, &right, 1.5, &vocab())),
+            ids(&[left, right].concat())
+        );
     }
 
     #[test]
@@ -325,7 +341,27 @@ mod tests {
     }
 
     #[test]
-    fn the_midpoint_cut_keeps_word_rests_on_both_sides() {
+    fn a_midpoint_cut_with_no_word_start_on_the_right_keeps_the_left() {
+        // Cutoff at frame 24. Past it the right has only continuations (y
+        // z), which would glue onto the left's "a".
+        let left = vec![token(0, 10), token(1, 24), token(4, 27)];
+        let right = vec![token(3, 20), token(5, 28), token(6, 29)];
+        assert_eq!(
+            ids(&merge_windows(&left, &right, 1.5, &vocab())),
+            ids(&left)
+        );
+        // Cutoff at frame 28. The right has nothing past it, the left has
+        // "c" there.
+        let left = vec![token(0, 10), token(1, 26), token(2, 40)];
+        let right = vec![token(3, 15), token(6, 27)];
+        assert_eq!(
+            ids(&merge_windows(&left, &right, 1.5, &vocab())),
+            ids(&left)
+        );
+    }
+
+    #[test]
+    fn a_midpoint_cut_without_a_splice_point_keeps_the_right_from_the_cutoff() {
         // Cutoff at frame 25. Left's first token (x, frame 26) already lies
         // past it, so left contributes nothing; right after the cutoff has
         // no word start, so all of it is kept.
