@@ -624,6 +624,27 @@ mod tests {
     }
 
     #[test]
+    fn midpoint_merge_lets_left_finish_a_word_cut_by_the_cutoff() {
+        let vocab = sample();
+        // No token matches, so the LCS is empty and the midpoint decides.
+        // left_end = 141 frames, right_start = 130: the cutoff is frame
+        // 135.5, between "b"(134) and "c"(136) of " a b c".
+        let left = vec![
+            token(12, 100),
+            token(14, 133),
+            token(15, 134),
+            token(16, 136),
+            token(13, 140),
+        ];
+        let right = vec![token(1, 130), token(5, 137)];
+        let merged = merge_chunks(&left, &right, &vocab);
+        // Left keeps "c" (its cut word's last piece) and stops at the word
+        // start " world"; right resumes at " meeting", the first piece at
+        // or after the cutoff.
+        assert_eq!(ids(&merged), vec![12, 14, 15, 16, 5]);
+    }
+
+    #[test]
     fn monotonic_clamps_without_reordering() {
         let tokens = vec![token(1, 5), token(2, 3), token(3, 7), token(4, 6)];
         let frames: Vec<usize> = enforce_monotonic(tokens).iter().map(|t| t.frame).collect();
