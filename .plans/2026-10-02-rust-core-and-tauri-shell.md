@@ -463,6 +463,17 @@ another release, otherwise the cutover closes them:
   rebuild's successful restart and `resume` clears the new backend's
   audio and reports nothing.
 
+### Handover
+
+- Network: Swift's `NWListener` with `prohibitedInterfaceTypes = [.cellular, .other]`
+  follows interface changes and classifies bridges and virtual adapters as `.other`.
+  The Rust listener keeps the LAN addresses (`advertise::lan_addresses`: up, not
+  loopback, not link-local, not point-to-point) for the Bonjour record at start and
+  checks them again per connection, so a tunnel is refused as in Swift, a bridge is
+  not, and a network change after start needs a restart of the service to be
+  re-published. Decide in WP8 whether the shell restarts the service on network
+  change or the advertiser re-registers.
+
 ### Bridge
 
 What the bridge crate (WP1) asks of the Swift side before WP6 fills the list:

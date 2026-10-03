@@ -94,6 +94,9 @@ http-body-util = "0.1"
 hyper = { version = "1", features = ["http1", "server"] }
 hyper-util = { version = "0.1", features = ["tokio"] }
 mdns-sd = "0.21"
+# The interfaces the listener and the Bonjour record may use (already in
+# the tree through mdns-sd).
+if-addrs = "0.15"
 percent-encoding = "2"
 rand = "0.9"
 rcgen = { version = "0.14", default-features = false, features = ["pem", "ring"] }

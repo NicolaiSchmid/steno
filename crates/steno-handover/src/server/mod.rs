@@ -2,7 +2,11 @@
 //! runs HTTP/1.1 over each connection ([`connection`]) and, when
 //! advertising, publishes `_steno._tcp` with the TXT record (`v=1`,
 //! `id=<macID>`) through Bonjour ([`advertise`]). Loopback only when
-//! `advertise` is false. Swift: `Network/HandoverServer.swift`,
+//! `advertise` is false; otherwise every IPv4 address is bound and a
+//! connection that arrives on an address outside
+//! [`advertise::lan_addresses`] (a VPN tunnel) or loopback is closed
+//! before the handshake, which is what the Swift listener's prohibited
+//! interface types do. Swift: `Network/HandoverServer.swift`,
 //! `Network/ServerMetrics.swift`.
 
 pub mod advertise;
@@ -35,6 +39,10 @@ pub struct MetricsSnapshot {
     /// Connections closed because the client stayed silent past the read
     /// timeout (counted in `closed_by_server` too).
     pub timed_out: u64,
+    /// Connections closed before the handshake because they arrived on an
+    /// address the service does not live on (counted in `closed_by_server`
+    /// too).
+    pub refused_interface: u64,
 }
 
 #[derive(Debug, Default)]
@@ -79,7 +87,8 @@ impl std::fmt::Debug for HandoverServer {
 
 impl HandoverServer {
     /// Binds and starts accepting. Advertising binds every IPv4 interface
-    /// (the phone resolves IPv4 only); otherwise 127.0.0.1.
+    /// (the phone resolves IPv4 only) and publishes the LAN addresses;
+    /// otherwise 127.0.0.1.
     pub async fn start(
         configuration: &HandoverConfiguration,
         identity: &HandoverIdentity,
@@ -98,10 +107,18 @@ impl HandoverServer {
             return Err(ServerError::NoPort);
         }
         let advertiser = if configuration.advertise {
+            let addresses = advertise::current_lan_addresses();
+            if addresses.is_empty() {
+                tracing::warn!(
+                    target: "steno::handover",
+                    "no Wi-Fi or wired network: the phone cannot find this computer until the service restarts"
+                );
+            }
             Some(advertise::Advertiser::publish(
                 &configuration.service_name,
                 identity.mac_id(),
                 port,
+                &addresses,
             )?)
         } else {
             None
@@ -178,6 +195,13 @@ async fn accept_loop(
                 continue;
             }
         };
+        if configuration.advertise && !on_a_served_network(&stream) {
+            metrics.update(|metrics| {
+                metrics.refused_interface += 1;
+                metrics.closed_by_server += 1;
+            });
+            continue;
+        }
         let _ = stream.set_nodelay(true);
         let acceptor = acceptor.clone();
         let engine = engine.clone();
@@ -218,6 +242,15 @@ async fn accept_loop(
     drop(listener);
     let drained = async { while connections.join_next().await.is_some() {} };
     let _ = tokio::time::timeout(STOP_GRACE, drained).await;
+}
+
+/// Whether `stream` arrived on loopback or on a LAN address as of now; a
+/// connection over a tunnel is not served. The interfaces are read per
+/// connection so a network change after start is followed.
+fn on_a_served_network(stream: &tokio::net::TcpStream) -> bool {
+    stream.local_addr().is_ok_and(|local| {
+        advertise::accepts_local_address(local.ip(), &advertise::current_lan_addresses())
+    })
 }
 
 #[derive(Debug, Error)]
