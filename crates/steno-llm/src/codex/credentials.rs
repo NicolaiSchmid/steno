@@ -395,7 +395,7 @@ impl CodexCredentialStore {
         {
             return Err(token.error.clone());
         }
-        match self.refresh_rereading_on_reuse(latest).await {
+        match self.refresh_rereading_on_reuse(latest, &usable).await {
             Ok(credentials) => {
                 *spent = None;
                 Ok(credentials)
@@ -519,6 +519,7 @@ impl CodexCredentialStore {
     async fn refresh_rereading_on_reuse(
         &self,
         file: AuthFile,
+        usable: &impl Fn(&CodexCredentials) -> bool,
     ) -> Result<CodexCredentials, RefreshFailure> {
         let rejected = match self.refresh_once(file).await {
             Ok(credentials) => return Ok(credentials),
@@ -527,10 +528,15 @@ impl CodexCredentialStore {
         };
         if rejected.code.as_deref() == Some("refresh_token_reused") {
             // The CLI may have rotated the token since this read; its file
-            // is the truth. One more read, one more try, then the failure
-            // stands.
+            // is the truth. One more read: its credentials when they are
+            // already fit to send (refreshing them would spend the CLI's
+            // fresh token for nothing), else one more try, then the
+            // failure stands.
             let latest = self.read()?;
             if latest.credentials.refresh_token != rejected.refresh_token {
+                if usable(&latest.credentials) {
+                    return Ok(latest.credentials);
+                }
                 return self.refresh_once(latest).await;
             }
         }
@@ -592,15 +598,23 @@ impl CodexCredentialStore {
         })?;
         // Overlay the new tokens on what the file holds now, not on the copy
         // read before the round trip: the CLI may have written other keys
-        // meanwhile, and those must survive. A file the user signed out of
-        // meanwhile (`codex logout`) stays signed out: the new tokens are
-        // dropped rather than written into a file the user just removed. A
-        // file that is merely unreadable at that moment (half-written by
-        // the CLI) falls back to the copy read before.
+        // meanwhile, and those must survive. A file that changed hands
+        // meanwhile is left alone and the new tokens are dropped: one the
+        // user signed out of (`codex logout`) or switched to an API key
+        // (`codex login --api-key`) keeps that answer, and one whose
+        // refresh token is no longer the one posted (the CLI or a new
+        // `codex login` wrote it) is returned as it stands. A file that is
+        // merely unreadable at that moment (half-written by the CLI) falls
+        // back to the copy read before.
         let mut document = match self.read() {
+            Ok(latest) if latest.credentials.refresh_token != file.credentials.refresh_token => {
+                return Ok(latest.credentials);
+            }
             Ok(latest) => latest.document,
-            Err(CodexCredentialError::NotSignedIn) => {
-                return Err(CodexCredentialError::NotSignedIn.into());
+            Err(
+                error @ (CodexCredentialError::NotSignedIn | CodexCredentialError::ApiKeyLogin),
+            ) => {
+                return Err(error.into());
             }
             Err(_) => file.document,
         };

@@ -754,3 +754,79 @@ async fn the_unauthorized_path_trusts_a_rotated_file() {
     assert_eq!(credentials.refresh_token, "rt_cli");
     assert_eq!(home.server.requests().len(), 0);
 }
+
+/// `codex login --api-key` during the round trip: the write-back must not
+/// put the old sign-in tokens over the new key.
+#[tokio::test]
+async fn an_api_key_login_during_the_refresh_is_not_overwritten() {
+    let home = CodexHome::new().await;
+    home.write(AuthFile::default().access(&CodexHome::access_token(10, "plus")));
+    let fresh = CodexHome::access_token(3_600, "plus");
+    let file = home.file();
+    let api_key_login = br#"{"OPENAI_API_KEY":"sk-new","tokens":null}"#;
+    home.server.respond(Arc::new(move |_| {
+        std::fs::write(&file, api_key_login).unwrap();
+        Some(scripts.token_refresh(&fresh, Some("rt_2"), None))
+    }));
+    assert_eq!(
+        home.store().current().await.unwrap_err(),
+        CodexCredentialError::ApiKeyLogin
+    );
+    assert_eq!(std::fs::read(home.file()).unwrap(), api_key_login);
+}
+
+/// A new `codex login` (or a CLI refresh) during the round trip wrote a
+/// different refresh token: that file is the answer, left as it stands.
+#[tokio::test]
+async fn a_new_login_during_the_refresh_is_returned_and_left_alone() {
+    let home = CodexHome::new().await;
+    home.write(AuthFile::default().access(&CodexHome::access_token(10, "plus")));
+    let fresh = CodexHome::access_token(3_600, "plus");
+    let from_login = CodexHome::access_token(3_600, "pro");
+    let file = home.file();
+    let from_login_for_responder = from_login.clone();
+    home.server.respond(Arc::new(move |_| {
+        write_auth(
+            &file,
+            AuthFile::default()
+                .access(&from_login_for_responder)
+                .refresh("rt_new_login"),
+        );
+        Some(scripts.token_refresh(&fresh, Some("rt_2"), None))
+    }));
+    let credentials = home.store().current().await.unwrap();
+    assert_eq!(credentials.refresh_token, "rt_new_login");
+    assert_eq!(credentials.access_token, from_login);
+    let stored = home.store().stored().unwrap();
+    assert_eq!(stored, credentials, "no write-back over the new login");
+    assert_eq!(stored.last_refresh, Some(codex_now() - minutes(60)));
+    assert_eq!(home.server.request_count(), 1);
+}
+
+/// A reused-token answer when the CLI has already written a token fit to
+/// send: that token is used, not spent on a second refresh.
+#[tokio::test]
+async fn a_reused_token_takes_the_clis_usable_tokens_without_refreshing_them() {
+    let home = CodexHome::new().await;
+    home.write(AuthFile::default().access(&CodexHome::access_token(10, "plus")));
+    let from_cli = CodexHome::access_token(3_600, "plus");
+    let file = home.file();
+    let from_cli_for_responder = from_cli.clone();
+    home.server.respond(Arc::new(move |_| {
+        write_auth(
+            &file,
+            AuthFile::default()
+                .access(&from_cli_for_responder)
+                .refresh("rt_from_cli"),
+        );
+        Some(scripts.token_refresh_rejected("refresh_token_reused", 400))
+    }));
+    let credentials = home.store().current().await.unwrap();
+    assert_eq!(credentials.refresh_token, "rt_from_cli");
+    assert_eq!(credentials.access_token, from_cli);
+    assert_eq!(
+        home.server.request_count(),
+        1,
+        "the CLI's token is not spent"
+    );
+}
