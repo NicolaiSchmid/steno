@@ -10,8 +10,8 @@
 //! `UUID` is `uuid::Uuid` written upper case, a nil optional is an omitted
 //! key, `String` enums are `steno_core::string_enum!` enums with the same
 //! raw values. The date and UUID codecs are `steno_core::json`'s; this
-//! crate adds only the pretty printer the fixtures are written with
-//! ([`json`]).
+//! crate adds only the printer ([`json`]): the fixtures' pretty style and
+//! the dispatcher's compact one.
 //!
 //! Naming: a top-level Swift type keeps its name without the `Bridge` prefix
 //! (`BridgeMeetingSource` is [`MeetingSource`]). A type nested in a snapshot,
