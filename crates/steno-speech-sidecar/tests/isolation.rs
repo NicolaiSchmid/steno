@@ -349,9 +349,10 @@ async fn a_child_of_another_protocol_version_is_refused() {
 #[tokio::test(flavor = "multi_thread")]
 async fn a_child_that_never_greets_is_killed_when_its_start_times_out() {
     // It reads nothing, so a closed stdin does not end it: only the kill
-    // when the client drops the failed start does.
+    // when the client drops the failed start does. The timeout leaves a
+    // slow first start (a busy macOS runner) time to write its marker.
     let (engine, dir) = engine_with_fault("silent", |c| {
-        c.startup_timeout = Duration::from_millis(500);
+        c.startup_timeout = Duration::from_secs(5);
     });
     let error = engine.prepare().await.unwrap_err();
     assert!(
@@ -359,7 +360,7 @@ async fn a_child_that_never_greets_is_killed_when_its_start_times_out() {
         "{error}"
     );
     let silent: u32 = std::fs::read_to_string(dir.path().join("faulted"))
-        .unwrap()
+        .expect("the silent child started within the timeout")
         .parse()
         .unwrap();
     if !gone_soon(silent) {
