@@ -237,7 +237,10 @@ impl StubChatServer {
             state.requests.len() >= count || state.stopped
         });
         super::or_stall_panic(wait, || {
-            format!("stub server: {} of {count} requests", self.request_count())
+            format!(
+                "stub server: only {} of {count} requests arrived",
+                self.request_count()
+            )
         })
         .await;
     }

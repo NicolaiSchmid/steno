@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use common::*;
 use steno_core::{LlmFinishReason, LlmResponseFormat, LlmUsage, Settings};
-use steno_llm::testing::{StubResponse, scripts};
+use steno_llm::testing::{STALL_DEADLINE, StubResponse, scripts};
 use steno_llm::transport::{self, HttpReply};
 use steno_llm::{
     LlmClient, LlmClientEvent, LlmEndpoint, LlmError, OpenAiCompatibleClient, RetryPolicy,
@@ -594,7 +594,7 @@ async fn rate_limit_then_success_honours_retry_after_on_the_clock() {
             }
         })
     );
-    assert!(harness.clock.wait_for_sleepers(1, SLEEPER_WAIT).await);
+    assert!(harness.clock.wait_for_sleepers(1, STALL_DEADLINE).await);
     assert_eq!(harness.server.request_count(), 1);
 
     harness.clock.advance(secs(6));
@@ -651,7 +651,7 @@ async fn timeout_on_the_clock_cancels_the_attempt_and_retries() {
     let task = tokio::spawn(async move { client.complete_llm(&json_request()).await });
     harness.server.received(1).await;
     assert!(
-        harness.clock.wait_for_sleepers(1, SLEEPER_WAIT).await,
+        harness.clock.wait_for_sleepers(1, STALL_DEADLINE).await,
         "the timeout sleeper is registered"
     );
     harness.clock.advance(secs(30));
@@ -734,7 +734,7 @@ async fn cancellation_during_the_backoff_sends_nothing_more() {
             .await
             .is_some()
     );
-    assert!(harness.clock.wait_for_sleepers(1, SLEEPER_WAIT).await);
+    assert!(harness.clock.wait_for_sleepers(1, STALL_DEADLINE).await);
     task.abort();
     assert!(task.await.unwrap_err().is_cancelled());
     assert_eq!(harness.server.request_count(), 1);
@@ -843,7 +843,7 @@ async fn three_clock_timeouts_exhaust_the_policy() {
     for attempt in 1..=3 {
         harness.server.received(attempt).await;
         assert!(
-            harness.clock.wait_for_sleepers(1, SLEEPER_WAIT).await,
+            harness.clock.wait_for_sleepers(1, STALL_DEADLINE).await,
             "attempt {attempt} registers its timeout"
         );
         harness.clock.advance(secs(10));

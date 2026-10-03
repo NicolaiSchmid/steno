@@ -12,7 +12,7 @@ use common::*;
 use steno_core::{
     LlmFinishReason, LlmMessage, LlmRequest, LlmResponseFormat, LlmRole, LlmUsage, Settings,
 };
-use steno_llm::testing::{StubResponse, scripts};
+use steno_llm::testing::{STALL_DEADLINE, StubResponse, scripts};
 use steno_llm::wire::{
     ChatErrorDetail, ChatErrorEnvelope, CodexModel, ResponsesFormat, ResponsesIncompleteDetails,
     ResponsesInputItem, ResponsesOutputItem, ResponsesResponse, ResponsesUsage,
@@ -480,7 +480,7 @@ async fn list_models_probe_and_timeout() {
             .with_retry(RetryPolicy::NONE)
             .with_clock(hanging.clock.clone());
     let task = tokio::spawn(async move { client.complete_llm(&text_request()).await });
-    assert!(hanging.clock.wait_for_sleepers(1, SLEEPER_WAIT).await);
+    assert!(hanging.clock.wait_for_sleepers(1, STALL_DEADLINE).await);
     hanging.clock.advance(secs(5));
     let error = llm(task.await.unwrap().unwrap_err());
     assert_eq!(error, LlmError::Timeout);

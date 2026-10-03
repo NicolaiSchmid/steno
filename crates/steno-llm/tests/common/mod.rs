@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use steno_core::{LanguageTag, LlmMessage, LlmRequest, LlmResponseFormat, LlmRole, MeetingExport};
-use steno_llm::testing::{ManualClock, StubChatServer};
+use steno_llm::testing::{ManualClock, STALL_DEADLINE, StubChatServer};
 use steno_llm::{
     CodexCredentialStore, CodexResponsesClient, JwtClaims, LlmClientEvent, LlmEndpoint,
     OpenAiCompatibleClient, RetryPolicy, StructuredOutputMode,
@@ -17,9 +17,6 @@ use steno_llm::{
 use tokio::sync::mpsc;
 
 pub const API_KEY: &str = "sk-test-secret-0123456789";
-/// Wall-clock budget for waiting on a sleeper or an event, the test
-/// doubles' stall deadline; only spent in the failure case.
-pub const SLEEPER_WAIT: Duration = Duration::from_secs(10);
 
 pub fn de() -> LanguageTag {
     LanguageTag::from("de")
@@ -211,7 +208,7 @@ impl EventRecorder {
         tokio::spawn(async move {
             while let Some(event) = receiver.recv().await {
                 if let LlmClientEvent::Retrying { after, .. } = event {
-                    clock.wait_for_sleepers(1, SLEEPER_WAIT).await;
+                    clock.wait_for_sleepers(1, STALL_DEADLINE).await;
                     clock.advance(after);
                 }
             }
@@ -231,7 +228,7 @@ impl EventRecorder {
             }
             None
         };
-        tokio::time::timeout(SLEEPER_WAIT, find)
+        tokio::time::timeout(STALL_DEADLINE, find)
             .await
             .ok()
             .flatten()

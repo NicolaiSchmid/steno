@@ -10,8 +10,9 @@ pub use clock::ManualClock;
 pub use scripts::{Responder, Scripts, default_usage, event_stream, parse_segments, scripts};
 pub use server::{Behaviour, RecordedRequest, StubChatServer, StubResponse};
 
-/// Wall time a test double waits before it fails a test that would hang.
-const STALL_DEADLINE: std::time::Duration = std::time::Duration::from_secs(10);
+/// Wall time a test double, or a test waiting on one, waits before it
+/// fails a test that would hang; only spent when a test is already broken.
+pub const STALL_DEADLINE: std::time::Duration = std::time::Duration::from_secs(10);
 
 /// `future`'s output, or a panic naming what `stalled` describes once
 /// [`STALL_DEADLINE`] of wall time has passed: a sleep nobody advances or a
