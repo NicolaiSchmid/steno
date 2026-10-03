@@ -251,15 +251,13 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn non_utf8_bytes_become_a_path_on_unix() {
-        use std::os::unix::ffi::{OsStrExt, OsStringExt};
-        let path = path_from_file_url("file:///tmp/%FF%FEname.caf").unwrap();
-        assert_eq!(path.as_os_str().as_bytes(), b"/tmp/\xFF\xFEname.caf");
+        use std::os::unix::ffi::OsStringExt;
+        let bytes = |url: &str| path_from_file_url(url).unwrap().into_os_string().into_vec();
         assert_eq!(
-            path_from_file_url("file:///tmp/%FF/"),
-            Some(PathBuf::from(std::ffi::OsString::from_vec(
-                b"/tmp/\xFF".to_vec()
-            )))
+            bytes("file:///tmp/%FF%FEname.caf"),
+            b"/tmp/\xFF\xFEname.caf"
         );
+        assert_eq!(bytes("file:///tmp/%FF/"), b"/tmp/\xFF");
     }
 
     #[test]
