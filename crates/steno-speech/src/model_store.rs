@@ -46,7 +46,8 @@
 //! from zero. A second download of the same file while the first holds the
 //! lock, or one on a file system without locks, writes a partial of its
 //! own, `<name>.partial.<pid>.<call>`, which nothing resumes and which is
-//! deleted when the call ends.
+//! deleted when the call ends. Once a file is installed, by whatever path,
+//! the next call deletes its `<name>.partial`.
 //! Swift: `Sources/StenoSpeech/Models/ModelAsset.swift`,
 //! `ModelStore.swift` and `ModelDownloading.swift`, whose downloads go
 //! through `FluidAudio` and `WhisperKit` instead.
@@ -426,7 +427,7 @@ impl ModelStore {
     /// resuming where the last one stopped; a missing file without a URL is
     /// [`SpeechError::NotHosted`]. Another process's per-call partials that
     /// have gone stale are removed first; `<name>.partial` stays and is
-    /// resumed.
+    /// resumed, unless its file is installed already, when it is deleted.
     ///
     /// ```no_run
     /// use steno_speech::{ModelAsset, ModelStore};
@@ -447,6 +448,9 @@ impl ModelStore {
         let directory = self.directory(asset);
         for file in &asset.files {
             remove_stale_partials(&directory, &file.name);
+            if is_complete(&directory.join(&file.name), file) {
+                remove_finished_partial(&directory, &file.name);
+            }
         }
         let missing = self.missing_files(asset);
         if missing.is_empty() {
@@ -488,8 +492,10 @@ impl ModelStore {
         let mut partial = Partial::open(destination, file)?;
         if partial.resumable && is_complete(destination, file) {
             // Installed by another download between `missing_files` and
-            // the lock; the handle may even be that file, renamed.
-            partial.done = true;
+            // the lock; the handle may even be that file, renamed. Nothing
+            // at `<name>.partial` is needed now, so the drop deletes it
+            // under the lock.
+            partial.discard();
             return Ok(());
         }
         let mut attempt = 1;
@@ -855,7 +861,8 @@ impl Partial {
         Ok(())
     }
 
-    /// Marks the bytes as wrong, so the file is deleted even if resumable.
+    /// Marks the bytes as unwanted, so the file is deleted even if
+    /// resumable.
     fn discard(&mut self) {
         self.resumable = false;
     }
@@ -869,6 +876,21 @@ impl Drop for Partial {
         if !self.done && (!self.resumable || self.len == 0) {
             let _ = fs::remove_file(&self.path);
         }
+    }
+}
+
+/// Deletes `<name>.partial` in `directory` once `<name>` is installed: a
+/// download killed before the file arrived another way (by hand, from a
+/// copy) leaves it behind, up to 2.4 GB. Only under its lock, so a
+/// download still writing it keeps it. Best effort, like
+/// [`remove_stale_partials`].
+fn remove_finished_partial(directory: &Path, name: &str) {
+    let path = directory.join(format!("{name}.partial"));
+    let Ok(handle) = File::options().write(true).open(&path) else {
+        return;
+    };
+    if handle.try_lock().is_ok() {
+        let _ = fs::remove_file(&path);
     }
 }
 
@@ -1302,6 +1324,57 @@ mod tests {
             store.verify(&asset),
             Err(SpeechError::Checksum { .. })
         ));
+    }
+
+    #[test]
+    fn a_partial_is_deleted_once_its_file_is_installed_another_way() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = ModelStore::new(dir.path());
+        let body = b"local only".to_vec();
+        let asset = asset(None, &body, &digest(&body));
+        let directory = store.directory(&asset);
+        fs::create_dir_all(&directory).unwrap();
+        let partial = directory.join("model.onnx.partial");
+        // Killed half way, then copied in by hand.
+        fs::write(&partial, &body[..4]).unwrap();
+        fs::write(directory.join("model.onnx"), &body).unwrap();
+        // While another download holds it, it stays.
+        let held = File::options().write(true).open(&partial).unwrap();
+        held.lock().unwrap();
+        store.ensure(&asset, &mut |_| {}).unwrap();
+        assert!(partial.exists());
+        drop(held);
+        store.ensure(&asset, &mut |_| {}).unwrap();
+        assert!(!partial.exists());
+        store.verify(&asset).unwrap();
+    }
+
+    #[test]
+    fn a_download_that_finds_its_file_installed_leaves_no_partial() {
+        // Installed by another download between the check and the lock:
+        // this one returns at once (the URL is never fetched) and must not
+        // leave the partial it opened.
+        let dir = tempfile::tempdir().unwrap();
+        let store = ModelStore::new(dir.path());
+        let body = b"not really a model".to_vec();
+        let asset = asset(None, &body, &digest(&body));
+        let directory = store.directory(&asset);
+        fs::create_dir_all(&directory).unwrap();
+        let destination = directory.join("model.onnx");
+        fs::write(&destination, &body).unwrap();
+        store
+            .download_with_retries(
+                "http://127.0.0.1:9/never",
+                &asset.files[0],
+                &destination,
+                &mut |_| {},
+            )
+            .unwrap();
+        let names: Vec<_> = fs::read_dir(&directory)
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert_eq!(names, ["model.onnx"]);
     }
 
     #[test]
