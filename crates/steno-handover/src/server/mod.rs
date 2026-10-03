@@ -459,11 +459,28 @@ mod tests {
     /// Reports a test this host cannot run on stdout. CI sets
     /// `STENO_REQUIRE_LAN_TEST` on Linux and Windows, so a skip there fails.
     fn skip(reason: &str) {
-        assert!(
-            std::env::var_os("STENO_REQUIRE_LAN_TEST").is_none(),
-            "the interface test must not skip here: {reason}"
-        );
+        let required = std::env::var_os("STENO_REQUIRE_LAN_TEST").is_some();
+        if let Err(message) = may_skip(required, reason) {
+            panic!("{message}");
+        }
         println!("SKIPPED: {reason}");
+    }
+
+    /// Whether the interface test may skip for `reason`: only where the run
+    /// does not require it.
+    fn may_skip(required: bool, reason: &str) -> Result<(), String> {
+        if required {
+            Err(format!("the interface test must not skip here: {reason}"))
+        } else {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn a_skip_fails_where_the_run_requires_the_interface_test() {
+        let refused = may_skip(true, "no LAN address").unwrap_err();
+        assert!(refused.contains("no LAN address"), "{refused}");
+        assert_eq!(may_skip(false, "no LAN address"), Ok(()));
     }
 
     /// A listener on every IPv4 address that serves loopback and `lan`.
