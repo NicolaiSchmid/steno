@@ -451,6 +451,11 @@ fn float_format(channels: usize) -> WAVEFORMATEX {
 /// late by several periods loses nothing.
 const BUFFER_DURATION: i64 = 1_000_000;
 
+/// How often a polled stream (no event) is drained: 50 ms, half its buffer.
+pub const POLL_INTERVAL: Duration = Duration::from_millis(50);
+/// [`POLL_INTERVAL`] as a `REFERENCE_TIME`.
+const POLL_INTERVAL_HUNDRED_NANOSECONDS: i64 = (POLL_INTERVAL.as_nanos() / 100) as i64;
+
 /// A Win32 auto-reset event the engine signals per period.
 struct Event(HANDLE);
 
@@ -499,6 +504,9 @@ pub struct CaptureClient {
     period_frames: usize,
     latency_frames: usize,
     discontinuities: u64,
+    /// No packet drained yet: loopback streams commonly flag their first
+    /// packet as a discontinuity, which is not a late thread.
+    first_packet: bool,
 }
 
 impl CaptureClient {
@@ -595,7 +603,11 @@ impl CaptureClient {
         let latency = unsafe { client.GetStreamLatency() }.unwrap_or(0);
         let mut period: i64 = 0;
         // SAFETY: `period` is a live i64 for the call to write.
-        let period = if unsafe { client.GetDevicePeriod(Some(&raw mut period), None) }.is_ok()
+        let period = if event.is_none() {
+            // A polled stream is drained once per poll, so that is its
+            // packet rhythm, whatever the engine's period.
+            POLL_INTERVAL_HUNDRED_NANOSECONDS
+        } else if unsafe { client.GetDevicePeriod(Some(&raw mut period), None) }.is_ok()
             && period > 0
         {
             period
@@ -611,6 +623,7 @@ impl CaptureClient {
             period_frames: frames_from_hundred_nanoseconds(period, SAMPLE_RATE),
             latency_frames: frames_from_hundred_nanoseconds(latency, SAMPLE_RATE),
             discontinuities: 0,
+            first_packet: true,
         })
     }
 
@@ -620,7 +633,7 @@ impl CaptureClient {
         self.buffer_frames
     }
 
-    /// Frames per engine period.
+    /// Frames per engine period; for a polled stream, frames per poll.
     #[must_use]
     pub fn period_frames(&self) -> usize {
         self.period_frames
@@ -632,8 +645,9 @@ impl CaptureClient {
         self.latency_frames
     }
 
-    /// Packets flagged `AUDCLNT_BUFFERFLAGS_DATA_DISCONTINUITY` so far: the
-    /// engine lost data because the thread was late.
+    /// Packets flagged `AUDCLNT_BUFFERFLAGS_DATA_DISCONTINUITY` so far, the
+    /// first packet aside: the engine lost data because the thread was
+    /// late.
     #[must_use]
     pub fn discontinuities(&self) -> u64 {
         self.discontinuities
@@ -652,10 +666,11 @@ impl CaptureClient {
     }
 
     /// Waits for the engine's signal, at most `timeout` (a polled stream
-    /// sleeps `timeout`). `false` on timeout; the caller drains anyway.
+    /// sleeps [`POLL_INTERVAL`] instead). `false` on timeout; the caller
+    /// drains anyway.
     pub fn wait(&self, timeout: Duration) -> bool {
         let Some(event) = &self.event else {
-            std::thread::sleep(timeout);
+            std::thread::sleep(POLL_INTERVAL);
             return false;
         };
         let milliseconds = u32::try_from(timeout.as_millis()).unwrap_or(u32::MAX);
@@ -695,9 +710,10 @@ impl CaptureClient {
             )?;
             // The flag constants are small positive bit masks.
             let silent = flags & AUDCLNT_BUFFERFLAGS_SILENT.0 as u32 != 0;
-            if flags & AUDCLNT_BUFFERFLAGS_DATA_DISCONTINUITY.0 as u32 != 0 {
+            if flags & AUDCLNT_BUFFERFLAGS_DATA_DISCONTINUITY.0 as u32 != 0 && !self.first_packet {
                 self.discontinuities += 1;
             }
+            self.first_packet = false;
             let count = frames as usize;
             let samples = if silent || data.is_null() || count == 0 {
                 None
