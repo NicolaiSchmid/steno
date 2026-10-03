@@ -298,6 +298,16 @@ fn attributing<T, E: fmt::Display>(
     result.map_err(|error| PipelineFailure::wrapping(&error, stage))
 }
 
+/// The row an operation needs, or a failure for `stage` that says what
+/// is `missing`.
+fn required<T, E: fmt::Display>(
+    stage: PipelineStage,
+    result: std::result::Result<Option<T>, E>,
+    missing: impl FnOnce() -> String,
+) -> Result<T> {
+    attributing(stage, result)?.ok_or_else(|| PipelineFailure::new(stage, missing()))
+}
+
 impl ProcessingPipeline {
     #[must_use]
     pub fn new(dependencies: PipelineDependencies) -> Self {
@@ -461,23 +471,16 @@ impl ProcessingPipeline {
     /// meeting `ready` nothing downgrades it: a `retention` error is
     /// returned to the caller and the meeting stays ready and delivered.
     pub async fn process(&self, asset_id: Uuid) -> Result<()> {
-        let asset = attributing(PipelineStage::Decode, self.store().asset_by_id(asset_id))?
-            .ok_or_else(|| {
-                PipelineFailure::new(
-                    PipelineStage::Decode,
-                    format!("audio asset {asset_id} not found"),
-                )
-            })?;
-        let meeting = attributing(
+        let asset = required(
+            PipelineStage::Decode,
+            self.store().asset_by_id(asset_id),
+            || format!("audio asset {asset_id} not found"),
+        )?;
+        let meeting = required(
             PipelineStage::Decode,
             self.store().meeting(asset.meeting_id),
-        )?
-        .ok_or_else(|| {
-            PipelineFailure::new(
-                PipelineStage::Decode,
-                format!("meeting {} not found", asset.meeting_id),
-            )
-        })?;
+            || format!("meeting {} not found", asset.meeting_id),
+        )?;
         let meeting_id = meeting.id;
         self.exclusively(meeting_id, PipelineStage::Decode, async {
             let persisted = match self.process_until_persist(&asset, meeting).await {
@@ -511,14 +514,13 @@ impl ProcessingPipeline {
                 .set_state(meeting.id, MeetingState::Processing, self.now()),
         )?;
         let settings = attributing(PipelineStage::Decode, self.store().settings())?;
-        let run = self.make_run(
+        self.begin_run(
             &meeting,
             &asset.lanes,
             None,
             PipelineStage::ALL.to_vec(),
             &settings,
         )?;
-        self.state().runs.insert(meeting.id, run);
         let mut current = meeting;
         current.state = MeetingState::Processing;
         // The last decoded lane is handed to `diarize` and dropped there, so
@@ -549,13 +551,11 @@ impl ProcessingPipeline {
     /// deliveries as they were; only `process` marks failed. Without a
     /// summarizer the call fails instead of writing a placeholder.
     pub async fn rerun_summary(&self, meeting_id: Uuid, template_id: &str) -> Result<()> {
-        let meeting = attributing(PipelineStage::Summarize, self.store().meeting(meeting_id))?
-            .ok_or_else(|| {
-                PipelineFailure::new(
-                    PipelineStage::Summarize,
-                    format!("meeting {meeting_id} not found"),
-                )
-            })?;
+        let meeting = required(
+            PipelineStage::Summarize,
+            self.store().meeting(meeting_id),
+            || format!("meeting {meeting_id} not found"),
+        )?;
         if self.inner.dependencies.summarizer.is_none() {
             return Err(PipelineFailure::new(
                 PipelineStage::Summarize,
@@ -563,27 +563,24 @@ impl ProcessingPipeline {
             ));
         }
         self.exclusively(meeting_id, PipelineStage::Summarize, async {
-            let export = attributing(PipelineStage::Summarize, self.store().export(meeting_id))?
-                .ok_or_else(|| {
-                    PipelineFailure::new(
-                        PipelineStage::Summarize,
-                        format!("meeting {meeting_id} not found"),
-                    )
-                })?;
+            let export = required(
+                PipelineStage::Summarize,
+                self.store().export(meeting_id),
+                || format!("meeting {meeting_id} not found"),
+            )?;
             let settings = attributing(PipelineStage::Summarize, self.store().settings())?;
             let lanes = export
                 .audio
                 .as_ref()
                 .map(|a| a.lanes.clone())
                 .unwrap_or_default();
-            let run = self.make_run(
+            self.begin_run(
                 &meeting,
                 &lanes,
                 Some(ProcessingEstimator::token_count(&export.segments)),
                 vec![PipelineStage::Summarize, PipelineStage::Deliver],
                 &settings,
             )?;
-            self.state().runs.insert(meeting_id, run);
             let mut current = meeting;
             current.template_id = template_id.to_owned();
             current.state = MeetingState::Ready;
@@ -599,26 +596,23 @@ impl ProcessingPipeline {
     /// whose expiry was deferred by a failed delivery once this one
     /// succeeds.
     pub async fn redeliver(&self, meeting_id: Uuid) -> Result<()> {
-        let meeting = attributing(PipelineStage::Deliver, self.store().meeting(meeting_id))?
-            .ok_or_else(|| {
-                PipelineFailure::new(
-                    PipelineStage::Deliver,
-                    format!("meeting {meeting_id} not found"),
-                )
-            })?;
+        let meeting = required(
+            PipelineStage::Deliver,
+            self.store().meeting(meeting_id),
+            || format!("meeting {meeting_id} not found"),
+        )?;
         self.exclusively(meeting_id, PipelineStage::Deliver, async {
             let settings = attributing(PipelineStage::Deliver, self.store().settings())?;
             let lanes = attributing(PipelineStage::Deliver, self.store().asset(meeting_id))?
                 .map(|a| a.lanes)
                 .unwrap_or_default();
-            let run = self.make_run(
+            self.begin_run(
                 &meeting,
                 &lanes,
                 None,
                 vec![PipelineStage::Deliver],
                 &settings,
             )?;
-            self.state().runs.insert(meeting_id, run);
             self.deliver(meeting_id).await;
             self.stamp_deferred_retention(meeting_id).await
         })
@@ -630,13 +624,11 @@ impl ProcessingPipeline {
     /// stamp is written now. Safe while the meeting is processing: the
     /// stages read the row again before they write it.
     pub async fn apply_retention(&self, meeting_id: Uuid, rule: AudioRetention) -> Result<()> {
-        let mut asset = attributing(PipelineStage::Retention, self.store().asset(meeting_id))?
-            .ok_or_else(|| {
-                PipelineFailure::new(
-                    PipelineStage::Retention,
-                    format!("meeting {meeting_id} has no audio asset"),
-                )
-            })?;
+        let mut asset = required(
+            PipelineStage::Retention,
+            self.store().asset(meeting_id),
+            || format!("meeting {meeting_id} has no audio asset"),
+        )?;
         asset.retention = rule;
         asset.expires_at = None;
         attributing(PipelineStage::Retention, self.store().save_asset(&asset))?;
@@ -645,14 +637,16 @@ impl ProcessingPipeline {
 
     // Stage plumbing
 
-    fn make_run(
+    /// Starts the meeting's run over `stages`, estimated from the learned
+    /// rates; [`Admitted`] drops it when the operation ends.
+    fn begin_run(
         &self,
         meeting: &Meeting,
         lanes: &[AudioLane],
         tokens: Option<i64>,
         stages: Vec<PipelineStage>,
         settings: &Settings,
-    ) -> Result<ProcessingRun> {
+    ) -> Result<()> {
         let stage = *stages.first().unwrap_or(&PipelineStage::Decode);
         let rows = attributing(stage, self.store().stage_rates())?;
         let estimator = ProcessingEstimator::new(
@@ -663,11 +657,9 @@ impl ProcessingPipeline {
             &ProcessingEstimator::llm_model_key(settings),
             StageRates::from_rows(&rows),
         );
-        Ok(ProcessingRun::new(
-            estimator,
-            stages,
-            self.inner.dependencies.clock.seconds(),
-        ))
+        let run = ProcessingRun::new(estimator, stages, self.inner.dependencies.clock.seconds());
+        self.state().runs.insert(meeting.id, run);
+        Ok(())
     }
 
     /// Marks `meeting_id` in flight for the duration of `body`; a second
