@@ -164,34 +164,6 @@ struct Prompts {
     raised: u64,
 }
 
-impl Prompts {
-    /// The host raised (`Some`) or cleared (`None`) the prompt; a raised
-    /// one takes the next number.
-    fn set(&mut self, request: Option<PromptRequest>) {
-        self.pending = request.map(|request| {
-            self.raised += 1;
-            RaisedPrompt {
-                request,
-                raised: self.raised,
-            }
-        });
-    }
-
-    /// The prompt's X: one that names a prompt (`raised`) clears only the
-    /// latest one raised, so a click that ran while the window loaded the
-    /// next prompt cannot clear it; one that names none (a prompt shown
-    /// unnumbered) clears whatever is pending. `true` when it cleared.
-    /// Swift: each `DetectionPromptViewModel` closes only itself
-    /// (`onClose`).
-    fn dismiss(&mut self, raised: Option<u64>) -> bool {
-        let dismisses = raised.is_none_or(|raised| raised == self.raised);
-        if dismisses {
-            self.pending = None;
-        }
-        dismisses
-    }
-}
-
 /// What the one floating surface shows.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FloatingContent {
@@ -321,19 +293,35 @@ impl Panels {
         })
     }
 
-    /// The host raised or cleared the prompt (`Prompts::set`).
+    /// The host raised (`Some`) or cleared (`None`) the prompt; a raised
+    /// one takes the next number.
     fn set_prompt(&self, request: Option<PromptRequest>) {
         if let Ok(mut prompt) = self.prompt.lock() {
-            prompt.set(request);
+            prompt.pending = request.map(|request| {
+                prompt.raised += 1;
+                RaisedPrompt {
+                    request,
+                    raised: prompt.raised,
+                }
+            });
         }
     }
 
-    /// The prompt's X (`Prompts::dismiss`), checked and cleared under one
-    /// lock, so a prompt raised in between is never the one cleared.
+    /// The prompt's X: one that names a prompt (`raised`) clears only the
+    /// latest one raised, so a click that ran while the window loaded the
+    /// next prompt cannot clear it; one that names none (a prompt shown
+    /// unnumbered) clears whatever is pending. Checked and cleared under
+    /// one lock, so a prompt raised in between is never the one cleared;
+    /// `true` when it cleared. Swift: each `DetectionPromptViewModel`
+    /// closes only itself (`onClose`).
     fn dismiss_prompt(&self, raised: Option<u64>) -> bool {
-        self.prompt
-            .lock()
-            .is_ok_and(|mut prompt| prompt.dismiss(raised))
+        self.prompt.lock().is_ok_and(|mut prompt| {
+            let dismisses = raised.is_none_or(|raised| raised == prompt.raised);
+            if dismisses {
+                prompt.pending = None;
+            }
+            dismisses
+        })
     }
 
     /// The anchor to lay out from: the saved one (`load` reads it on first
@@ -664,7 +652,7 @@ pub fn note_recording(app: &AppHandle, state: RecordingState) {
 }
 
 /// The host raised (`Some`) or cleared (`None`) the detection prompt; a
-/// raised one is numbered here (`Prompts::set`). `WP6b`'s detection
+/// raised one is numbered here (`Panels::set_prompt`). `WP6b`'s detection
 /// controller is the caller; nothing raises a prompt before it.
 #[allow(dead_code)]
 pub fn set_prompt(app: &AppHandle, request: Option<PromptRequest>) {
@@ -673,7 +661,7 @@ pub fn set_prompt(app: &AppHandle, request: Option<PromptRequest>) {
 }
 
 /// The prompt's X: the prompt goes away, unless the X was another
-/// prompt's (`Prompts::dismiss`). The host's detection controller learns
+/// prompt's (`Panels::dismiss_prompt`). The host's detection controller learns
 /// of it through `WP6b`'s hook here; the fixture host has no detection to
 /// tell.
 pub fn dismiss_prompt(app: &AppHandle, raised: Option<u64>) {
