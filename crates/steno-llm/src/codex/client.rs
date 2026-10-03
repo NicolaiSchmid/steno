@@ -2,8 +2,8 @@
 //! ChatGPT sign-in from the credential store.
 //! Swift: `Sources/StenoLLM/Codex/CodexResponsesClient.swift`.
 
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, PoisonError};
 
 use steno_core::{
     BoundaryResult, BoxError, LanguageModel, LlmFinishReason, LlmRequest, LlmResponse,
@@ -12,7 +12,9 @@ use steno_core::{
 
 use super::{CodexCredentialError, CodexCredentialStore, CodexCredentials};
 use crate::endpoint::WireFormat;
-use crate::transport::{self, Attempt, HttpReply, LlmClientEvent, Observer, notify};
+use crate::transport::{
+    self, Attempt, HttpReply, LlmClientEvent, Observer, RememberedMode, notify,
+};
 use crate::wire::{
     self, CodexErrorEnvelope, CodexModel, CodexModelList, ResponsesFormat, ResponsesOutputItem,
     ResponsesReasoning, ResponsesRequest, ResponsesResponse, ResponsesStreamEvent, ResponsesText,
@@ -61,7 +63,7 @@ pub struct CodexResponsesClient {
     retry: RetryPolicy,
     clock: Arc<dyn Clock>,
     observer: Option<Observer>,
-    mode: Mutex<StructuredOutputMode>,
+    mode: RememberedMode,
     /// One per client, so the backend can group a meeting's requests.
     session_id: String,
 }
@@ -93,7 +95,7 @@ impl CodexResponsesClient {
             retry: RetryPolicy::default(),
             clock: Arc::new(SystemClock::default()),
             observer: None,
-            mode: Mutex::new(mode),
+            mode: RememberedMode::new(mode),
             session_id: uuid::Uuid::new_v4().to_string(),
         }
     }
@@ -123,23 +125,6 @@ impl CodexResponsesClient {
     pub fn with_observer(mut self, observer: Observer) -> Self {
         self.observer = Some(observer);
         self
-    }
-
-    fn mode(&self) -> StructuredOutputMode {
-        *self.mode.lock().unwrap_or_else(PoisonError::into_inner)
-    }
-
-    /// Moves the remembered mode from `from` to `to` only while it still is
-    /// `from`: a late 400 from a concurrent request that started under an
-    /// older mode must neither bounce the mode back up nor announce the
-    /// same downgrade twice. Returns whether this call moved it.
-    fn downgrade(&self, from: StructuredOutputMode, to: StructuredOutputMode) -> bool {
-        let mut mode = self.mode.lock().unwrap_or_else(PoisonError::into_inner);
-        if *mode != from {
-            return false;
-        }
-        *mode = to;
-        true
     }
 
     /// One completion with this crate's own error types.
@@ -175,7 +160,7 @@ impl CodexResponsesClient {
         refreshed_after_unauthorized: &AtomicBool,
     ) -> Result<Attempt, CodexCredentialError> {
         let credentials = self.credentials.current().await?;
-        let mode = self.mode();
+        let mode = self.mode.get();
         let wire = match self.make_request(request, mode, &credentials) {
             Ok(wire) => wire,
             Err(failure) => return Ok(Attempt::Failed(failure)),
@@ -218,11 +203,8 @@ impl CodexResponsesClient {
         if reply.status == 400
             && request.response_format.kind() != LlmResponseFormatKind::Text
             && Self::complains_about_text_format(&reply.body_text())
-            && let Some(next) = mode.downgraded()
+            && self.mode.step_down(mode, self.observer.as_ref())
         {
-            if self.downgrade(mode, next) {
-                notify(self.observer.as_ref(), LlmClientEvent::ModeDowngraded(next));
-            }
             return Ok(Attempt::Resend);
         }
         Ok(Attempt::Failed(Self::classify(&reply, &secrets)))
@@ -262,7 +244,7 @@ impl CodexResponsesClient {
             .await?;
         Ok(EndpointProbe {
             model_listed,
-            resolved_mode: self.mode(),
+            resolved_mode: self.mode.get(),
             round_trip: self.clock.now().saturating_sub(start),
             account_line: Some(credentials.account_line()),
         })
@@ -597,7 +579,7 @@ impl LlmClient for CodexResponsesClient {
     }
 
     fn resolved_mode(&self) -> StructuredOutputMode {
-        self.mode()
+        self.mode.get()
     }
 
     async fn probe(&self) -> BoundaryResult<EndpointProbe> {

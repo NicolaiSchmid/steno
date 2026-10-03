@@ -5,7 +5,7 @@
 
 use std::collections::HashMap;
 use std::future::Future;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 use steno_core::{LlmResponse, async_trait};
@@ -106,6 +106,51 @@ pub type Observer = Arc<dyn Fn(LlmClientEvent) + Send + Sync>;
 pub(crate) fn notify(observer: Option<&Observer>, event: LlmClientEvent) {
     if let Some(observer) = observer {
         observer(event);
+    }
+}
+
+/// The structured output mode a client remembers across requests: it
+/// starts at the endpoint's and only ever steps down.
+#[derive(Debug)]
+pub(crate) struct RememberedMode(Mutex<StructuredOutputMode>);
+
+impl RememberedMode {
+    pub(crate) fn new(mode: StructuredOutputMode) -> Self {
+        RememberedMode(Mutex::new(mode))
+    }
+
+    pub(crate) fn get(&self) -> StructuredOutputMode {
+        *self.0.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// One step down from `from`, the mode the rejected request went out
+    /// under; `false` when there is no weaker mode and the 400 stands. The
+    /// step is taken, and announced to `observer`, only while the
+    /// remembered mode still is `from`: a late 400 from a concurrent
+    /// request that started under an older mode must neither bounce the
+    /// mode back up nor announce the same downgrade twice. Either way the
+    /// request is worth resending.
+    pub(crate) fn step_down(
+        &self,
+        from: StructuredOutputMode,
+        observer: Option<&Observer>,
+    ) -> bool {
+        let Some(next) = from.downgraded() else {
+            return false;
+        };
+        let moved = {
+            let mut mode = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+            if *mode == from {
+                *mode = next;
+                true
+            } else {
+                false
+            }
+        };
+        if moved {
+            notify(observer, LlmClientEvent::ModeDowngraded(next));
+        }
+        true
     }
 }
 

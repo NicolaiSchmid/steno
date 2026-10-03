@@ -12,7 +12,9 @@ use steno_core::{
 };
 
 use crate::endpoint::WireFormat;
-use crate::transport::{self, Attempt, HttpReply, LlmClientEvent, Observer, notify};
+use crate::transport::{
+    self, Attempt, HttpReply, LlmClientEvent, Observer, RememberedMode, notify,
+};
 use crate::wire::{
     self, ChatCompletionRequest, ChatCompletionResponse, ChatErrorEnvelope, ChatResponseFormat,
     ModelList,
@@ -35,18 +37,13 @@ pub struct OpenAiCompatibleClient {
     retry: RetryPolicy,
     clock: Arc<dyn Clock>,
     observer: Option<Observer>,
-    state: Mutex<State>,
-}
-
-#[derive(Debug)]
-struct State {
-    mode: StructuredOutputMode,
+    mode: RememberedMode,
     /// Parameters a 400 named (`error.param`) and that the client now
     /// spells differently, remembered per client like the mode:
     /// `max_tokens` goes as `max_completion_tokens` (OpenAI's reasoning
     /// models), `temperature` is left out (they accept only the default).
     /// No model-name sniffing.
-    rejected_parameters: BTreeSet<String>,
+    rejected_parameters: Mutex<BTreeSet<String>>,
 }
 
 impl fmt::Debug for OpenAiCompatibleClient {
@@ -55,7 +52,8 @@ impl fmt::Debug for OpenAiCompatibleClient {
             .field("endpoint", &self.endpoint)
             .field("api_key", &self.api_key.as_ref().map(|_| "[redacted]"))
             .field("retry", &self.retry)
-            .field("state", &self.state())
+            .field("mode", &self.mode)
+            .field("rejected_parameters", &*self.rejected_parameters())
             .finish_non_exhaustive()
     }
 }
@@ -83,10 +81,8 @@ impl OpenAiCompatibleClient {
             retry: RetryPolicy::default(),
             clock: Arc::new(SystemClock::default()),
             observer: None,
-            state: Mutex::new(State {
-                mode,
-                rejected_parameters: BTreeSet::new(),
-            }),
+            mode: RememberedMode::new(mode),
+            rejected_parameters: Mutex::new(BTreeSet::new()),
         }
     }
 
@@ -131,21 +127,10 @@ impl OpenAiCompatibleClient {
         self.api_key.iter().cloned().collect()
     }
 
-    fn state(&self) -> std::sync::MutexGuard<'_, State> {
-        self.state.lock().unwrap_or_else(PoisonError::into_inner)
-    }
-
-    /// Moves the remembered mode from `from` to `to` only while it still is
-    /// `from`: a late 400 from a concurrent request that started under an
-    /// older mode must neither bounce the mode back up nor announce the
-    /// same downgrade twice. Returns whether this call moved it.
-    fn downgrade(&self, from: StructuredOutputMode, to: StructuredOutputMode) -> bool {
-        let mut state = self.state();
-        if state.mode != from {
-            return false;
-        }
-        state.mode = to;
-        true
+    fn rejected_parameters(&self) -> std::sync::MutexGuard<'_, BTreeSet<String>> {
+        self.rejected_parameters
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
     }
 
     /// One completion with this crate's own error type; the
@@ -164,7 +149,7 @@ impl OpenAiCompatibleClient {
     /// resend after a mode downgrade or a parameter adjustment (neither
     /// consumes an attempt). A request that cannot be built is final.
     async fn attempt(&self, request: &LlmRequest, attempt: u32) -> Result<Attempt, LlmError> {
-        let mode = self.state().mode;
+        let mode = self.mode.get();
         let wire = self.make_request(request, mode)?;
         notify(
             self.observer.as_ref(),
@@ -194,17 +179,14 @@ impl OpenAiCompatibleClient {
         if reply.status == 400
             && request.response_format.kind() != LlmResponseFormatKind::Text
             && Self::complains_about_response_format(&reply.body_text())
-            && let Some(next) = mode.downgraded()
+            && self.mode.step_down(mode, self.observer.as_ref())
         {
-            if self.downgrade(mode, next) {
-                notify(self.observer.as_ref(), LlmClientEvent::ModeDowngraded(next));
-            }
             return Ok(Attempt::Resend);
         }
         if reply.status == 400
             && let Some(param) = Self::rejected_parameter(&reply)
             && Self::ADJUSTABLE_PARAMETERS.contains(&param.as_str())
-            && self.state().rejected_parameters.insert(param.clone())
+            && self.rejected_parameters().insert(param.clone())
         {
             notify(
                 self.observer.as_ref(),
@@ -243,7 +225,7 @@ impl OpenAiCompatibleClient {
         self.complete_llm(&Self::probe_request()).await?;
         Ok(EndpointProbe {
             model_listed,
-            resolved_mode: self.state().mode,
+            resolved_mode: self.mode.get(),
             round_trip: self.clock.now().saturating_sub(start),
             account_line: None,
         })
@@ -291,10 +273,10 @@ impl OpenAiCompatibleClient {
             .max_tokens
             .unwrap_or(self.endpoint.max_output_tokens);
         let (renames_max_tokens, drops_temperature) = {
-            let state = self.state();
+            let rejected = self.rejected_parameters();
             (
-                state.rejected_parameters.contains("max_tokens"),
-                state.rejected_parameters.contains("temperature"),
+                rejected.contains("max_tokens"),
+                rejected.contains("temperature"),
             )
         };
         let body = ChatCompletionRequest {
@@ -471,7 +453,7 @@ impl LlmClient for OpenAiCompatibleClient {
     }
 
     fn resolved_mode(&self) -> StructuredOutputMode {
-        self.state().mode
+        self.mode.get()
     }
 
     async fn probe(&self) -> BoundaryResult<EndpointProbe> {
