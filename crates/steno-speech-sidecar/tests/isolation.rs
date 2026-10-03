@@ -22,7 +22,7 @@
 
 use std::ffi::OsString;
 use std::io::BufReader;
-use std::process::{Command, Stdio};
+use std::process::{Child, ChildStdout, Command, ExitStatus, Stdio};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -85,16 +85,57 @@ fn alive(pid: u32) -> bool {
     }
 }
 
-/// Waits up to ten seconds for `pid` to be gone.
-fn gone_soon(pid: u32) -> bool {
+/// Polls `probe` every 20 ms for up to ten seconds.
+fn within_ten_seconds<T>(mut probe: impl FnMut() -> Option<T>) -> Option<T> {
     let deadline = Instant::now() + Duration::from_secs(10);
-    while alive(pid) {
+    loop {
+        if let Some(value) = probe() {
+            return Some(value);
+        }
         if Instant::now() > deadline {
-            return false;
+            return None;
         }
         std::thread::sleep(Duration::from_millis(20));
     }
-    true
+}
+
+/// Waits up to ten seconds for `pid` to be gone.
+fn gone_soon(pid: u32) -> bool {
+    within_ten_seconds(|| (!alive(pid)).then_some(())).is_some()
+}
+
+/// A child with `args`, started by hand without the client.
+fn spawn_by_hand(args: &[&str]) -> Child {
+    Command::new(BINARY)
+        .args(args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap()
+}
+
+/// Reads past the heartbeats to the child's ready message: its protocol
+/// and pid. A child that never sends one fails the test, not hangs it.
+fn ready(stdout: &mut BufReader<ChildStdout>) -> (u32, u32) {
+    for _ in 0..100 {
+        match protocol::read_header::<_, Reply>(stdout).unwrap().unwrap() {
+            Reply::Ready { protocol, pid } => return (protocol, pid),
+            Reply::Memory { .. } => {}
+            other => panic!("{other:?}"),
+        }
+    }
+    panic!("no ready message");
+}
+
+/// Waits up to ten seconds for `child` to exit; kills it and panics with
+/// `outlived` if it does not.
+fn exit_status(child: &mut Child, outlived: &str) -> ExitStatus {
+    within_ten_seconds(|| child.try_wait().unwrap()).unwrap_or_else(|| {
+        let _ = child.kill();
+        let _ = child.wait();
+        panic!("{outlived}")
+    })
 }
 
 /// Kills `pid`, for a test that failed with a child left running.
@@ -374,25 +415,10 @@ async fn a_child_that_never_greets_is_killed_when_its_start_times_out() {
 fn a_busy_child_exits_when_its_parent_goes_away() {
     // Driven by hand: the child hangs inside a transcription, so it never
     // reads the closed stdin; its next heartbeat finds stdout gone.
-    let mut child = Command::new(BINARY)
-        .args(["--fake-engine", "--fault", "hang", "--heartbeat-ms", "20"])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .unwrap();
+    let mut child = spawn_by_hand(&["--fake-engine", "--fault", "hang", "--heartbeat-ms", "20"]);
     let mut stdin = child.stdin.take().unwrap();
     let mut stdout = BufReader::new(child.stdout.take().unwrap());
-    loop {
-        match protocol::read_header::<_, Reply>(&mut stdout)
-            .unwrap()
-            .unwrap()
-        {
-            Reply::Ready { .. } => break,
-            Reply::Memory { .. } => {}
-            other => panic!("{other:?}"),
-        }
-    }
+    ready(&mut stdout);
     let samples = [0.5f32; 160];
     protocol::write_frame(
         &mut stdin,
@@ -408,18 +434,7 @@ fn a_busy_child_exits_when_its_parent_goes_away() {
     assert!(child.try_wait().unwrap().is_none(), "the child is busy");
     drop(stdin);
     drop(stdout);
-    let deadline = Instant::now() + Duration::from_secs(10);
-    let status = loop {
-        if let Some(status) = child.try_wait().unwrap() {
-            break status;
-        }
-        if Instant::now() > deadline {
-            let _ = child.kill();
-            let _ = child.wait();
-            panic!("the busy child outlived its parent's pipes");
-        }
-        std::thread::sleep(Duration::from_millis(20));
-    };
+    let status = exit_status(&mut child, "the busy child outlived its parent's pipes");
     assert!(status.success(), "{status}");
 }
 
@@ -450,40 +465,11 @@ async fn the_real_engine_reports_missing_models_and_keeps_running() {
 #[test]
 fn the_child_greets_and_exits_when_its_parent_goes_away() {
     // Driven by hand, without the client: a closed stdin is a dead parent.
-    let mut child = Command::new(BINARY)
-        .args(["--fake-engine", "--heartbeat-ms", "1000"])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .unwrap();
+    let mut child = spawn_by_hand(&["--fake-engine", "--heartbeat-ms", "1000"]);
     let mut stdout = BufReader::new(child.stdout.take().unwrap());
-    let mut greeted = false;
-    for _ in 0..3 {
-        match protocol::read_header::<_, Reply>(&mut stdout)
-            .unwrap()
-            .unwrap()
-        {
-            Reply::Ready { protocol, pid } => {
-                assert_eq!(protocol, PROTOCOL_VERSION);
-                assert_eq!(pid, child.id());
-                greeted = true;
-                break;
-            }
-            Reply::Memory { .. } => {}
-            other => panic!("{other:?}"),
-        }
-    }
-    assert!(greeted);
+    assert_eq!(ready(&mut stdout), (PROTOCOL_VERSION, child.id()));
     drop(child.stdin.take());
-    let deadline = Instant::now() + Duration::from_secs(10);
-    let status = loop {
-        if let Some(status) = child.try_wait().unwrap() {
-            break status;
-        }
-        assert!(Instant::now() < deadline, "the child outlived its stdin");
-        std::thread::sleep(Duration::from_millis(20));
-    };
+    let status = exit_status(&mut child, "the child outlived its stdin");
     assert!(status.success(), "{status}");
 }
 
