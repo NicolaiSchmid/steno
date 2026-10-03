@@ -13,7 +13,7 @@
 //! its answer (the [`CaptureStream`] or the error); `stop()` sends a quit
 //! through a `pipewire::channel` and joins it. The stream runs with
 //! `RT_PROCESS`, so its `process` callback runs on PipeWire's data-loop
-//! thread, which is the real-time path here: [`process`] dequeues the
+//! thread, which is the real-time path here: `process` dequeues the
 //! buffer, turns its chunk into a [`BufferView`](crate::realtime::BufferView)
 //! with [`interleaved_view`] and hands it to [`deliver`], the IOProc body
 //! the macOS backend uses. No allocation, no lock, no log (proven for the
@@ -23,7 +23,7 @@
 //! # Start
 //!
 //! Two roundtrips bring the registry's nodes and ports and the `default`
-//! metadata ([`graph`] keeps them). The targets resolve from it: the input
+//! metadata (`graph` keeps them). The targets resolve from it: the input
 //! node (by UID, its `node.name`, or the default source) and the default
 //! sink. The stream asks for 48 kHz `f32` with one `AUXn` channel per
 //! linked port; PipeWire's adapter resamples whatever the graph runs at,
@@ -43,10 +43,11 @@
 //! a linked node going away, or the connection or the stream failing mark
 //! a change; [`COALESCE_DELAY`] after the last one the graph is compared
 //! with what the capture started on ([`DeviceSnapshot::difference`]), and
-//! a difference goes to the sink as a [`DeviceChangeReason`]
-//! (crate::capture::DeviceChangeReason), from this thread, never during
-//! `start`. The session then rebuilds through `stop()` and `start`, as on
-//! the Mac. The capture never follows a default on its own.
+//! a difference goes to the sink as a
+//! [`DeviceChangeReason`](crate::capture::DeviceChangeReason), from this
+//! thread, never during `start`. The session then rebuilds through
+//! `stop()` and `start`, as on the Mac. The capture never follows a
+//! default on its own.
 //!
 //! The system lane is the whole default sink, Steno's own output included
 //! (the Mac's tap excludes Steno's process; Steno plays nothing during a
