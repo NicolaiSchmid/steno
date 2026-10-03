@@ -60,8 +60,9 @@ async fn streamed_body_over_the_limit_is_413_and_closes() {
     let test = TestService::with_chunk_size(CHUNK_SIZE).await;
     let raw = test.raw_client();
     // No Content-Length: the counting handler must catch it as it arrives.
-    // `/v1/hello` needs no auth, so the counter is the only thing in the way.
-    let oversized = usize::try_from(HandoverConfiguration::JSON_BODY_LIMIT).unwrap() + 4096;
+    // `/v1/hello` needs no auth, so the counter is the only thing in the
+    // way; one byte past the limit is enough.
+    let oversized = usize::try_from(HandoverConfiguration::JSON_BODY_LIMIT).unwrap() + 1;
     let body = vec![0x42u8; oversized];
     let chunked = format!("{:x}\r\n", body.len())
         .into_bytes()
