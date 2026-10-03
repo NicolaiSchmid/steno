@@ -429,6 +429,68 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn completing_a_meeting_that_is_not_recording_writes_and_enqueues_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(Store::open(dir.path().join("steno.sqlite")).unwrap());
+        let mut meeting = steno_core::testing::sample_data::meeting();
+        meeting.state = MeetingState::Ready;
+        store.save_meeting(&meeting).unwrap();
+        let before = store.meeting(meeting.id).unwrap().unwrap();
+        let enqueued = Arc::new(AtomicBool::new(false));
+        let enqueue: Enqueue = {
+            let enqueued = enqueued.clone();
+            Arc::new(move |_, _| {
+                enqueued.store(true, Ordering::SeqCst);
+                Box::pin(async { Ok(()) })
+            })
+        };
+        let later = before.updated_at + chrono::Duration::hours(1);
+        let intake = LocalRecordingIntake::new(
+            store.clone(),
+            enqueue,
+            Arc::new(move || later),
+            FixedOffset::east_opt(0).unwrap(),
+        );
+        let asset = AudioAsset {
+            id: Uuid::new_v4(),
+            meeting_id: meeting.id,
+            url: file_url(&dir.path().join("recording.wav"), false),
+            format: AudioFormat::Wav16kInt16,
+            lanes: vec![AudioLane::Mic],
+            sidecars_16k: std::collections::BTreeMap::new(),
+            retention: AudioRetention::KeepForever,
+            expires_at: None,
+            mixdown_url: None,
+        };
+        let error = intake
+            .complete(
+                meeting.id,
+                RecordingResult {
+                    asset,
+                    duration: 99.0,
+                    end_reason: RecordingEndReason::Manual,
+                },
+                None,
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(
+                error,
+                LocalRecordingIntakeError::NotRecording(id, MeetingStateKind::Ready)
+                    if id == meeting.id
+            ),
+            "{error}"
+        );
+        assert_eq!(
+            store.meeting(meeting.id).unwrap().unwrap(),
+            before,
+            "the row is untouched and not marked failed"
+        );
+        assert!(!enqueued.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test]
     async fn a_phone_recording_lands_in_the_audio_folder_and_a_refused_one_leaves_no_copy() {
         let dir = tempfile::tempdir().unwrap();
         let store = Arc::new(Store::open(dir.path().join("steno.sqlite")).unwrap());
