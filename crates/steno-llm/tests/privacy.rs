@@ -690,6 +690,28 @@ async fn no_secret_after_a_multi_byte_character_at_a_cut_reaches_an_error_or_an_
     .await;
 }
 
+/// A server that writes a body as JSON escapes a key with a quote, a
+/// backslash or a slash in it; the escaped copy, with `/` as is or as
+/// `\/`, is redacted like the key itself.
+#[tokio::test]
+async fn a_json_escaped_copy_of_a_secret_is_redacted() {
+    let key = r#"sk-test/AB"CD\EFGH12"#;
+    let expected = r#"HTTP 401: {"detail":"bad key [redacted]"}"#;
+    for echoed in [r#"sk-test/AB\"CD\\EFGH12"#, r#"sk-test\/AB\"CD\\EFGH12"#] {
+        let harness = ClientHarness::build(RetryPolicy::NONE, Some(key), |_| {}).await;
+        let body = format!(r#"{{"detail":"bad key {echoed}"}}"#);
+        harness
+            .server
+            .enqueue([StubResponse::new(401, body.into_bytes())]);
+        let error = harness
+            .client
+            .complete_llm(&text_request())
+            .await
+            .unwrap_err();
+        assert_eq!(error.to_string(), expected, "{echoed}");
+    }
+}
+
 /// A key shorter than eight bytes is a placeholder for a local server, not
 /// a credential, and is left as it is: redacting it would garble every
 /// message. Eight bytes and more is a secret.

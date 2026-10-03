@@ -336,20 +336,37 @@ pub fn redacted_prefix(text: &str, secrets: &[String], limit: usize) -> String {
 /// it alone, or it would garble ordinary words in every error.
 pub const MIN_SECRET_LEN: usize = 8;
 
-/// Removes every secret wherever a server or transport echoed it, longest
-/// first, so a secret that contains another is replaced whole. Secrets
-/// shorter than [`MIN_SECRET_LEN`] are skipped.
+/// Removes every secret wherever a server or transport echoed it, as it
+/// is and JSON-escaped (a body written as JSON escapes `"` and `\`, and
+/// may write `/` as `\/`), longest first, so a secret that contains
+/// another is replaced whole. Secrets shorter than [`MIN_SECRET_LEN`] are
+/// skipped.
 #[must_use]
 pub fn redact(text: &str, secrets: &[String]) -> String {
-    let mut secrets: Vec<&str> = secrets
+    let mut forms: Vec<String> = secrets
         .iter()
-        .map(String::as_str)
         .filter(|secret| secret.len() >= MIN_SECRET_LEN)
+        .flat_map(|secret| {
+            let escaped = json_escaped(secret);
+            let slashed = escaped.replace('/', "\\/");
+            [secret.clone(), escaped, slashed]
+        })
         .collect();
-    secrets.sort_by_key(|secret| std::cmp::Reverse(secret.len()));
+    forms.sort_by(|a, b| b.len().cmp(&a.len()).then_with(|| a.cmp(b)));
+    forms.dedup();
     let mut result = text.to_owned();
-    for secret in secrets {
-        result = result.replace(secret, "[redacted]");
+    for form in forms {
+        result = result.replace(&form, "[redacted]");
     }
     result
+}
+
+/// `text` as serde_json writes it inside a string, without the quotes.
+fn json_escaped(text: &str) -> String {
+    let quoted = serde_json::to_string(text).unwrap_or_default();
+    quoted
+        .strip_prefix('"')
+        .and_then(|rest| rest.strip_suffix('"'))
+        .unwrap_or_default()
+        .to_owned()
 }
