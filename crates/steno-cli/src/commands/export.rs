@@ -33,17 +33,15 @@ impl Export {
         let json = steno_adapters::ArtifactRenderer
             .render_json(&export)
             .map_err(Failure::runtime)?;
-        // Written beside the target and renamed over it, so a reader never
-        // sees a half-written file. A failed write removes its partial
-        // file; one a killed process left behind is overwritten and
+        // A partial file a killed process left behind is overwritten and
         // renamed away by the next export.
-        let partial = out.join(".meeting.json.partial");
-        std::fs::write(&partial, json)
-            .and_then(|()| std::fs::rename(&partial, &path))
-            .map_err(|error| {
-                let _ = std::fs::remove_file(&partial);
-                Failure::runtime(error)
-            })?;
+        steno_services::files::replace_file(
+            &path,
+            &out.join(".meeting.json.partial"),
+            &json,
+            false,
+        )
+        .map_err(Failure::runtime)?;
         println!("{}", path.display());
         Ok(())
     }

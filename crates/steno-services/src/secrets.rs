@@ -12,6 +12,8 @@ use std::sync::Arc;
 
 use steno_core::{SecretKey, SecretStore, StenoPaths, async_trait, protocols::BoundaryResult};
 
+use crate::files::{replace_file, restrict_new_file};
+
 /// The service every Steno keyring entry is filed under, on every
 /// platform: the Swift app's (`KeychainSecretStore.defaultService` in
 /// `apps/macos/Steno/Services/KeychainSecretStore.swift`), so the Rust app
@@ -141,71 +143,14 @@ impl FileSecretStore {
         if let Some(parent) = self.path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        let lock = owner_only(std::fs::OpenOptions::new().create(true).write(true))
+        let lock = restrict_new_file(std::fs::OpenOptions::new().create(true).write(true))
             .open(self.beside(".lock"))?;
         lock.lock()?;
         let mut map = self.read()?;
         change(&mut map);
         let data = serde_json::to_vec_pretty(&map).map_err(std::io::Error::other)?;
-        let temporary = self.beside(".tmp");
-        let written = (|| {
-            use std::io::Write as _;
-            let mut file = owner_only(
-                std::fs::OpenOptions::new()
-                    .create(true)
-                    .write(true)
-                    .truncate(true),
-            )
-            .open(&temporary)?;
-            // A temporary file left by a crash keeps its old mode; Swift
-            // re-applied 0600 on every write too.
-            restrict_to_owner(&temporary)?;
-            file.write_all(&data)?;
-            file.sync_all()?;
-            std::fs::rename(&temporary, &self.path)
-        })();
-        if written.is_err() {
-            let _ = std::fs::remove_file(&temporary);
-        }
-        written?;
-        sync_directory(self.path.parent());
-        Ok(())
+        replace_file(&self.path, &self.beside(".tmp"), &data, true)
     }
-}
-
-/// `options` creating the file with mode 0600 where the platform has modes.
-fn owner_only(options: &mut std::fs::OpenOptions) -> &mut std::fs::OpenOptions {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt as _;
-        options.mode(0o600);
-    }
-    options
-}
-
-/// Sets mode 0600 on `path` where the platform has modes.
-fn restrict_to_owner(path: &Path) -> std::io::Result<()> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt as _;
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
-    }
-    #[cfg(not(unix))]
-    let _ = path;
-    Ok(())
-}
-
-/// Makes a rename in `directory` durable where the platform can sync a
-/// directory; best effort.
-fn sync_directory(directory: Option<&Path>) {
-    #[cfg(unix)]
-    if let Some(directory) = directory
-        && let Ok(handle) = std::fs::File::open(directory)
-    {
-        let _ = handle.sync_all();
-    }
-    #[cfg(not(unix))]
-    let _ = directory;
 }
 
 #[async_trait]
