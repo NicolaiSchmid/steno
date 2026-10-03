@@ -302,10 +302,10 @@ bridge's copies of the macro and codecs. Packages after WP3 branch from `main`.
     working next call in a new child. With the models on atlas the child loads at
     2.2 GB resident and transcribes 471 s of FLEURS German in 34.5 s, segment for
     segment equal to the in-process engine.
-  - Models: a file's source is a URL (GitHub release assets, 2 GB at most: Silero, and
-    the diarization models of `steno-diarize`) or a Hugging Face repository at a
+  - Models: a file's source is a URL (GitHub release assets, 2 GB at most: Silero;
+    `steno-diarize` fetches its own models, `crates/steno-diarize/src/models.rs`) or a Hugging Face repository at a
     pinned commit, `https://huggingface.co/<repo>/resolve/<revision>/<path>`, for the
-    2.6 GB fp32 export (`encoder.weights` alone is 2.4 GB). `tools/upload-models.sh`
+    2.6 GB fp32 export (`encoder.weights` alone is 2.4 GB). `scripts/upload-models.sh`
     verifies the export against the manifest, adds the CC-BY-4.0 `ATTRIBUTION.md` and
     uploads it; setting `PARAKEET_V3_FP32_REVISION` then hosts it. Downloads resume
     `<name>.partial` under a file lock with `Range` requests, across retries and runs;
@@ -447,7 +447,7 @@ still has to draw the window side. `[ ]` is not ported yet.
 ### Speech
 
 - [ ] Decision for Nicolai: which Hugging Face account hosts the fp32 export.
-  `NicolaiSchmid/steno-models` is the placeholder in `tools/upload-models.sh` and
+  `NicolaiSchmid/steno-models` is the placeholder in `scripts/upload-models.sh` and
   `STENO_MODELS_REPO`; an organisation would outlive a personal account. Then run the
   script and set `PARAKEET_V3_FP32_REVISION`; until then the export has no source and
   `prepare` asks for the files by hand or a mirror.

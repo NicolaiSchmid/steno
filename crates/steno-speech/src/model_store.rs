@@ -14,12 +14,12 @@
 //! A file's [`ModelSource`] is a plain URL or a file in a Hugging Face
 //! model repository at a pinned commit,
 //! `https://huggingface.co/<repo>/resolve/<revision>/<path>`. GitHub
-//! release assets cap at 2 GB per file, so the small files stay there
-//! (Silero VAD from the sherpa-onnx `asr-models` release; the diarization
-//! models of `steno-diarize` likewise) and the fp32 Parakeet export (2.6
-//! GB, of which `encoder.weights` is 2.4 GB) goes to Hugging Face, uploaded
-//! by `tools/upload-models.sh` into `NicolaiSchmid/steno-models` (a
-//! placeholder until the plan's parity list settles the account). Until
+//! release assets cap at 2 GB per file, so the small file stays there
+//! (Silero VAD from the sherpa-onnx `asr-models` release; `steno-diarize`
+//! fetches its own models, `crates/steno-diarize/src/models.rs`) and the
+//! fp32 Parakeet export (2.6 GB, of which `encoder.weights` is 2.4 GB)
+//! goes to Hugging Face, uploaded by `scripts/upload-models.sh` into
+//! `NicolaiSchmid/steno-models` (a placeholder until the plan's parity list settles the account). Until
 //! [`PARAKEET_V3_FP32_REVISION`] names a commit, the export has no source:
 //! its files are produced by `spikes/onnx-speech/export/` and copied into
 //! `<root>/parakeet-tdt-0.6b-v3-fp32/` by hand, or fetched from a mirror,
@@ -110,12 +110,12 @@ pub struct ModelFile {
 }
 
 /// The Hugging Face repository the fp32 export is uploaded to by
-/// `tools/upload-models.sh`. A placeholder: which account hosts the models
+/// `scripts/upload-models.sh`. A placeholder: which account hosts the models
 /// is open in the plan's parity list.
 pub const STENO_MODELS_REPO: &str = "NicolaiSchmid/steno-models";
 
 /// The commit of [`STENO_MODELS_REPO`] that holds the export, printed by
-/// `tools/upload-models.sh`; `None` until it is uploaded, which leaves the
+/// `scripts/upload-models.sh`; `None` until it is uploaded, which leaves the
 /// export without a source.
 pub const PARAKEET_V3_FP32_REVISION: Option<&str> = None;
 
@@ -166,7 +166,7 @@ impl ModelAsset {
     }
 
     /// The export from a Hugging Face repository at `revision`, laid out
-    /// `<asset id>/<file name>` the way `tools/upload-models.sh` uploads it.
+    /// `<asset id>/<file name>` the way `scripts/upload-models.sh` uploads it.
     #[must_use]
     pub fn parakeet_v3_fp32_from(repo: &str, revision: &str) -> Self {
         Self::parakeet_v3_fp32_manifest(|id, name| {

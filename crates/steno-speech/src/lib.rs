@@ -45,7 +45,7 @@
 //!
 //! Silero VAD downloads from the sherpa-onnx GitHub release with its
 //! checksum verified. The fp32 Parakeet export (2.6 GB, over GitHub's 2 GB
-//! asset limit) is prepared for Hugging Face (`tools/upload-models.sh`,
+//! asset limit) is prepared for Hugging Face (`scripts/upload-models.sh`,
 //! [`ModelSource::HuggingFace`]) but not uploaded yet: until
 //! [`PARAKEET_V3_FP32_REVISION`] is set, produce it with
 //! `spikes/onnx-speech/export/` and place `encoder.onnx`,
