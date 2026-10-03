@@ -18,6 +18,8 @@
     clippy::cast_lossless
 )]
 
+mod common;
+
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
@@ -26,13 +28,15 @@ use steno_audio::codec::sinc::SincResampler;
 use steno_audio::codec::{CodecError, SymphoniaAudioCodec};
 use steno_audio::testing::AudioFixtures;
 use steno_audio::writer::{
-    LaneFrames, RecordingWriter, RecordingWriting, WavFile, WavStreamWriter,
+    LaneFrames, RecordingFiles, RecordingWriter, RecordingWriting, WavFile, WavStreamWriter,
 };
 use steno_core::paths::file_url;
 use steno_core::{
     AudioAsset, AudioDecoder, AudioFormat, AudioLane, AudioRetention, RecordingLayout,
 };
 use uuid::Uuid;
+
+use common::{frequency, level_against_sine};
 
 fn write_call(layout: &RecordingLayout, seconds: f64, finish: bool) -> RecordingWriter {
     let mic = AudioFixtures::tone(1_000.0, seconds, 0.5);
@@ -89,11 +93,8 @@ fn make_asset(
     }
 }
 
-/// A two-lane meeting folder: 1 kHz on the mic lane at 0.5, 1 kHz on the
-/// system lane at 0.25, two seconds, with sidecars.
-fn make_call_asset(directory: &Path) -> AudioAsset {
-    let layout = RecordingLayout::new(directory, Uuid::new_v4());
-    let files = write_call(&layout, 2.0, true).files();
+/// The asset over a two-lane call the recording writer finished.
+fn call_asset(files: &RecordingFiles) -> AudioAsset {
     let sidecars: Vec<(AudioLane, &Path)> = files
         .sidecars_16k
         .iter()
@@ -105,6 +106,26 @@ fn make_call_asset(directory: &Path) -> AudioAsset {
         &[AudioLane::Mic, AudioLane::System],
         &sidecars,
     )
+}
+
+/// A two-lane meeting folder: 1 kHz on the mic lane at 0.5, 1 kHz on the
+/// system lane at 0.25, two seconds, with sidecars.
+fn make_call_asset(directory: &Path) -> AudioAsset {
+    let layout = RecordingLayout::new(directory, Uuid::new_v4());
+    call_asset(&write_call(&layout, 2.0, true).files())
+}
+
+/// The index of the first sample louder than `threshold`.
+fn onset(samples: &[f32], threshold: f32) -> usize {
+    samples.iter().position(|s| s.abs() > threshold).unwrap()
+}
+
+/// `count` samples of a sine at 0.5, sampled at 44.1 kHz like the phone's
+/// recordings.
+fn tone_44k1(hertz: f64, count: usize) -> Vec<f32> {
+    (0..count)
+        .map(|i| 0.5 * (2.0 * std::f64::consts::PI * hertz * i as f64 / 44_100.0).sin() as f32)
+        .collect()
 }
 
 #[tokio::test]
@@ -135,14 +156,12 @@ async fn decodes_each_lane_of_the_master_like_its_sidecar() {
     );
     assert_eq!(system_from_master.len(), 32_000);
     let window = 4_000..30_000;
-    let mic_difference = 20.0
-        * (EchoMetrics::rms(&mic_from_master.samples[window.clone()])
-            / EchoMetrics::rms(&mic_from_sidecar.samples[window.clone()]))
-        .log10();
-    let system_difference = 20.0
-        * (EchoMetrics::rms(&system_from_master.samples[window.clone()])
-            / EchoMetrics::rms(&system_from_sidecar.samples[window.clone()]))
-        .log10();
+    let difference = |a: &[f32], b: &[f32]| {
+        EchoMetrics::decibels(EchoMetrics::rms(&a[window.clone()]))
+            - EchoMetrics::decibels(EchoMetrics::rms(&b[window.clone()]))
+    };
+    let mic_difference = difference(&mic_from_master.samples, &mic_from_sidecar.samples);
+    let system_difference = difference(&system_from_master.samples, &system_from_sidecar.samples);
     assert!(
         mic_difference.abs() < 0.1,
         "mic master vs sidecar {mic_difference} dB"
@@ -190,18 +209,7 @@ async fn master_decode_is_zero_phase_and_the_sidecar_lags_one_group_delay() {
     let mut mic = vec![0.0f32; 96_000];
     mic[48_000..].copy_from_slice(&AudioFixtures::tone(1_000.0, 1.0, 0.5));
     let system = vec![0.0f32; 96_000];
-    let files = write_call_lanes(&layout, &mic, &system, true).files();
-    let sidecars: Vec<(AudioLane, &Path)> = files
-        .sidecars_16k
-        .iter()
-        .map(|(lane, path)| (*lane, path.as_path()))
-        .collect();
-    let asset = make_asset(
-        &files.master,
-        AudioFormat::Caf48kFloat32,
-        &[AudioLane::Mic, AudioLane::System],
-        &sidecars,
-    );
+    let asset = call_asset(&write_call_lanes(&layout, &mic, &system, true).files());
     let mut without_sidecars = asset.clone();
     without_sidecars.sidecars_16k = BTreeMap::new();
     let codec = SymphoniaAudioCodec::new();
@@ -210,9 +218,8 @@ async fn master_decode_is_zero_phase_and_the_sidecar_lags_one_group_delay() {
         .decode(&without_sidecars, AudioLane::Mic)
         .await
         .unwrap();
-    let onset = |samples: &[f32]| samples.iter().position(|s| s.abs() > 0.1).unwrap();
-    let sidecar_onset = onset(&from_sidecar.samples);
-    let master_onset = onset(&from_master.samples);
+    let sidecar_onset = onset(&from_sidecar.samples, 0.1);
+    let master_onset = onset(&from_master.samples, 0.1);
     assert!(
         (15_999..=16_001).contains(&master_onset),
         "master decode onset at {master_onset}"
@@ -276,8 +283,7 @@ async fn mixdown_is_a_16k_mono_wav_of_the_right_length() {
     assert_eq!((file.sample_rate, file.channels.len()), (16_000, 1));
     assert!((file.duration() - 2.0).abs() < 0.01);
     // Both lanes are 1 kHz in phase: the mono average is (0.5 + 0.25) / 2.
-    let level = EchoMetrics::rms(&file.channels[0][8_000..28_000]);
-    assert!((20.0 * (level / (0.375 / 2f32.sqrt())).log10()).abs() < 1.0);
+    assert!(level_against_sine(&file.channels[0][8_000..28_000], 0.375).abs() < 1.0);
 
     // A 16 kHz WAV asset is copied, not re-encoded.
     let wav_dir = tempfile::tempdir().unwrap();
@@ -356,9 +362,8 @@ fn aac_and_mp3_fixtures_decode_with_their_priming_measured() {
             "{name}: {} source samples",
             source.samples.len()
         );
-        let onset = |samples: &[f32]| samples.iter().position(|s| s.abs() > 0.05).unwrap();
-        let onset_source = onset(&source.samples);
-        let onset_16k = onset(&decoded.samples);
+        let onset_source = onset(&source.samples, 0.05);
+        let onset_16k = onset(&decoded.samples, 0.05);
         println!(
             "{name}: {} samples at 44.1 kHz, onset at {onset_source} ({:.1} ms); {} samples at 16 kHz, onset at {onset_16k}",
             source.samples.len(),
@@ -370,13 +375,9 @@ fn aac_and_mp3_fixtures_decode_with_their_priming_measured() {
             "{name}: priming {onset_source} samples"
         );
         let steady = &decoded.samples[onset_16k + 400..onset_16k + 400 + 6_000];
-        let level = 20.0 * (EchoMetrics::rms(steady) / (0.5 / 2f32.sqrt())).log10();
+        let level = level_against_sine(steady, 0.5);
         assert!(level.abs() < 1.0, "{name}: level {level} dB");
-        let crossings = steady
-            .windows(2)
-            .filter(|w| w[0] < 0.0 && w[1] >= 0.0)
-            .count();
-        let hertz = crossings as f64 / (steady.len() as f64 / 16_000.0);
+        let hertz = frequency(steady, 16_000.0);
         assert!((hertz - 440.0).abs() < 5.0, "{name}: {hertz} Hz");
     }
 }
@@ -386,34 +387,19 @@ fn aac_and_mp3_fixtures_decode_with_their_priming_measured() {
 #[test]
 fn the_sinc_resampler_keeps_level_and_period_at_44100() {
     let count = 44_100 * 2;
-    let tone: Vec<f32> = (0..count)
-        .map(|i| 0.5 * (2.0 * std::f64::consts::PI * 1_000.0 * i as f64 / 44_100.0).sin() as f32)
-        .collect();
-    let output = SymphoniaAudioCodec::to_16k(&tone, 44_100);
+    let output = SymphoniaAudioCodec::to_16k(&tone_44k1(1_000.0, count), 44_100);
     assert_eq!(output.len(), 32_000);
     let steady = &output[1_000..31_000];
-    let error = 20.0 * (EchoMetrics::rms(steady) / (0.5 / 2f32.sqrt())).log10();
+    let error = level_against_sine(steady, 0.5);
     assert!(error.abs() < 0.1, "{error} dB");
-    let crossings = steady
-        .windows(2)
-        .filter(|w| w[0] < 0.0 && w[1] >= 0.0)
-        .count();
-    let seconds = steady.len() as f64 / 16_000.0;
-    assert!(
-        (crossings as f64 / seconds - 1_000.0).abs() < 5.0,
-        "{crossings} crossings"
-    );
+    let hertz = frequency(steady, 16_000.0);
+    assert!((hertz - 1_000.0).abs() < 5.0, "{hertz} Hz");
 
     // The passband edge, as the module doc states it: within 0.3 dB at
     // 6 kHz, about -1.3 dB at 6.5 kHz.
-    let droop = |frequency: f64| {
-        let tone: Vec<f32> = (0..count)
-            .map(|i| {
-                0.5 * (2.0 * std::f64::consts::PI * frequency * i as f64 / 44_100.0).sin() as f32
-            })
-            .collect();
-        let output = SymphoniaAudioCodec::to_16k(&tone, 44_100);
-        20.0 * (EchoMetrics::rms(&output[1_000..31_000]) / (0.5 / 2f32.sqrt())).log10()
+    let droop = |hertz: f64| {
+        let output = SymphoniaAudioCodec::to_16k(&tone_44k1(hertz, count), 44_100);
+        level_against_sine(&output[1_000..31_000], 0.5)
     };
     let at_6k = droop(6_000.0);
     let at_6k5 = droop(6_500.0);
@@ -421,11 +407,7 @@ fn the_sinc_resampler_keeps_level_and_period_at_44100() {
     assert!((-1.6..=-1.0).contains(&at_6k5), "6.5 kHz at {at_6k5} dB");
 
     // Above the output Nyquist is rejected.
-    let high: Vec<f32> = (0..count)
-        .map(|i| 0.5 * (2.0 * std::f64::consts::PI * 12_000.0 * i as f64 / 44_100.0).sin() as f32)
-        .collect();
-    let rejected = SincResampler::new(44_100.0, 16_000.0).resample(&high);
-    let rejection =
-        20.0 * (EchoMetrics::rms(&rejected[1_000..31_000]) / (0.5 / 2f32.sqrt())).log10();
+    let rejected = SincResampler::new(44_100.0, 16_000.0).resample(&tone_44k1(12_000.0, count));
+    let rejection = level_against_sine(&rejected[1_000..31_000], 0.5);
     assert!(rejection < -50.0, "12 kHz aliases at {rejection} dB");
 }

@@ -15,9 +15,10 @@
     clippy::cast_lossless
 )]
 
+mod common;
+
 use std::path::Path;
 
-use steno_audio::EchoMetrics;
 use steno_audio::capture::{CaptureError, LaneLevel, LaneLevels};
 use steno_audio::realtime::{LevelMeter, LevelSlot};
 use steno_audio::testing::AudioFixtures;
@@ -27,6 +28,8 @@ use steno_audio::writer::{
 };
 use steno_core::{AudioFormat, AudioLane, RecordingLayout};
 use uuid::Uuid;
+
+use common::{frequency, level_against_sine};
 
 fn write_lanes(writer: &mut RecordingWriter, lanes: &[&[f32]]) {
     let frames = lanes[0].len() / 480;
@@ -82,8 +85,8 @@ fn two_lanes_round_trip_sample_accurately_with_sidecars() {
     let system_sidecar = WavFile::read_16k_mono(&files.sidecars_16k[&AudioLane::System]).unwrap();
     assert_eq!(mic_sidecar.len(), 32_000);
     assert_eq!(system_sidecar.len(), 32_000);
-    assert!((20.0 * (EchoMetrics::rms(&mic_sidecar[2_000..]) / 0.3536).log10()).abs() < 0.1);
-    assert!((20.0 * (EchoMetrics::rms(&system_sidecar[2_000..]) / 0.1768).log10()).abs() < 0.1);
+    assert!(level_against_sine(&mic_sidecar[2_000..], 0.5).abs() < 0.1);
+    assert!(level_against_sine(&system_sidecar[2_000..], 0.25).abs() < 0.1);
     let info = WavFile::read(&files.sidecars_16k[&AudioLane::Mic]).unwrap();
     assert_eq!(
         (info.sample_rate, info.channels.len(), info.bits_per_sample),
@@ -346,29 +349,25 @@ fn one_kilohertz_keeps_its_level_and_period() {
     let output = resample(&AudioFixtures::tone(1_000.0, 1.0, 0.5));
     assert_eq!(output.len(), 16_000);
     let steady = &output[2_000..];
-    let expected = 0.5 / 2f32.sqrt();
-    let error = 20.0 * (EchoMetrics::rms(steady) / expected).log10();
+    let error = level_against_sine(steady, 0.5);
     assert!(error.abs() < 0.1, "{error} dB");
-    let crossings = steady
-        .windows(2)
-        .filter(|w| w[0] < 0.0 && w[1] >= 0.0)
-        .count();
-    let seconds = steady.len() as f64 / 16_000.0;
-    assert!((crossings as f64 / seconds - 1_000.0).abs() < 5.0);
+    assert!((frequency(steady, 16_000.0) - 1_000.0).abs() < 5.0);
     assert!(steady.iter().copied().fold(f32::MIN, f32::max) <= 0.505);
 }
 
 #[test]
 fn passband_edge_survives_and_stopband_is_rejected() {
-    let expected = 0.5 / 2f32.sqrt();
-    let six = resample(&AudioFixtures::tone(6_000.0, 1.0, 0.5));
-    let six_error = 20.0 * (EchoMetrics::rms(&six[2_000..]) / expected).log10();
+    let level = |hertz: f64| {
+        level_against_sine(
+            &resample(&AudioFixtures::tone(hertz, 1.0, 0.5))[2_000..],
+            0.5,
+        )
+    };
+    let six_error = level(6_000.0);
     assert!(six_error.abs() < 0.5, "6 kHz: {six_error} dB");
-    let twelve = resample(&AudioFixtures::tone(12_000.0, 1.0, 0.5));
-    let rejection = 20.0 * (EchoMetrics::rms(&twelve[2_000..]) / expected).log10();
+    let rejection = level(12_000.0);
     assert!(rejection < -60.0, "12 kHz aliases at {rejection} dB");
-    let nine = resample(&AudioFixtures::tone(9_000.0, 1.0, 0.5));
-    let nine_level = 20.0 * (EchoMetrics::rms(&nine[2_000..]) / expected).log10();
+    let nine_level = level(9_000.0);
     assert!(nine_level < -40.0, "9 kHz aliases at {nine_level} dB");
 }
 

@@ -15,6 +15,8 @@
     clippy::cast_lossless
 )]
 
+mod common;
+
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -26,6 +28,8 @@ use steno_audio::testing::synthetic::SyntheticOptions;
 use steno_audio::testing::{SyntheticCaptureBackend, SyntheticLane};
 use steno_audio::{EchoMetrics, PassthroughEchoCanceller, SAMPLE_RATE};
 use steno_core::{AudioLane, EchoCanceller};
+
+use common::upward_crossings;
 
 /// Drains the relay on the test thread and returns every frame per channel.
 fn drain(
@@ -56,13 +60,6 @@ fn drain(
 
 fn rms_decibels(samples: &[f32]) -> f32 {
     EchoMetrics::decibels(EchoMetrics::rms(samples))
-}
-
-fn upward_crossings(samples: &[f32]) -> usize {
-    samples
-        .windows(2)
-        .filter(|w| w[0] < 0.0 && w[1] >= 0.0)
-        .count()
 }
 
 fn signals(entries: &[(AudioLane, SyntheticLane)]) -> BTreeMap<AudioLane, SyntheticLane> {
