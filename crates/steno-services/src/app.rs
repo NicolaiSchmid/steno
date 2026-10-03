@@ -7,7 +7,7 @@ use std::sync::Arc;
 use chrono::{FixedOffset, Local, Offset as _, Utc};
 use steno_adapters::DeliveryCoordinator;
 use steno_audio::{CaptureSession, SymphoniaAudioCodec};
-use steno_core::{MeetingEvent, SecretKey, SecretStore, StenoPaths, Store};
+use steno_core::{MeetingEvent, SecretKey, SecretStore, StenoPaths, Store, StoreError};
 use steno_handover::HandoverService;
 use steno_host::fakes::{
     FakeClipPlayer, FakeFileSystem, FakeLoginItem, FakePermissions, FakeQrEncoder, FakeUpdater,
@@ -21,13 +21,26 @@ use steno_pipeline::{
 use steno_speech::ModelStore;
 
 use crate::block_on;
-use crate::handover::RealHandover;
-use crate::llm::{RealLlmService, codex_store};
-use crate::misc::{DiskFolderUsage, FilePreferences, PlatformAudioDevices, WallClock};
-use crate::pipeline_service::{MakeDependencies, PipelineHandle, RealPipeline, run_sweep};
-use crate::recorder::{MakeCaptureSession, RealRecorder};
+use crate::handover::ListenerHandover;
+use crate::llm::{ClientLlmService, codex_store};
+use crate::pipeline::{CurrentPipeline, MakeDependencies, SwappablePipeline, run_sweep};
+use crate::platform::{DiskFolderUsage, FilePreferences, PlatformAudioDevices, WallClock};
+use crate::recorder::{CaptureRecorder, MakeCaptureSession};
 use crate::secrets::secret_store;
-use crate::speech::RealSpeechModels;
+use crate::speech::ModelStoreSpeechModels;
+
+/// What stops the graph from being built: the database could not be
+/// opened or read. A secret store that cannot be read and a handover
+/// identity that cannot be loaded are warnings, not errors; the graph
+/// runs without them.
+#[derive(Debug, thiserror::Error)]
+pub enum BuildError {
+    #[error(transparent)]
+    Store(#[from] StoreError),
+    /// The database folder could not be created.
+    #[error("database folder: {0}")]
+    Io(#[from] std::io::Error),
+}
 
 /// What differs between the shell, the CLI and the tests.
 pub struct AppOptions {
@@ -37,7 +50,7 @@ pub struct AppOptions {
     /// `None` opens the database under `paths`.
     pub database_path: Option<std::path::PathBuf>,
     /// The platform keyring when true, else the 0600 secrets file (the CLI
-    /// and headless machines).
+    /// and headless machines). Linux always uses the file; see the crate doc.
     pub keyring: bool,
     /// The window opener and URL opener; the shell's, a no-op for the CLI.
     pub opener: Arc<dyn Opener>,
@@ -77,11 +90,11 @@ pub struct App {
     pub store: Arc<Store>,
     pub secrets: Arc<dyn SecretStore>,
     pub events: MeetingEventBus,
-    pub pipeline: Arc<PipelineHandle>,
+    pub pipeline: Arc<CurrentPipeline>,
     pub sweep: RetentionSweep,
     pub services: Services,
     pub handover: Option<Arc<HandoverService>>,
-    pub recorder: Arc<RealRecorder>,
+    pub recorder: Arc<CaptureRecorder>,
     pub speech_store: ModelStore,
     pub zone: FixedOffset,
     pub version: String,
@@ -96,17 +109,27 @@ pub fn local_zone() -> FixedOffset {
 }
 
 /// Opens (and migrates) the database at `path`, creating its folder.
-pub fn open_store(path: &std::path::Path) -> Result<Arc<Store>, String> {
+pub fn open_store(path: &std::path::Path) -> Result<Arc<Store>, BuildError> {
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+        std::fs::create_dir_all(parent)?;
     }
-    Ok(Arc::new(
-        Store::open(path).map_err(|error| error.to_string())?,
-    ))
+    Ok(Arc::new(Store::open(path)?))
+}
+
+/// The LLM API key, or `None` with the reason when the secret store could
+/// not be read: the app runs without summaries rather than not at all, as
+/// `AppEnvironment.live` did when the keychain was unreachable.
+fn api_key(
+    secrets: &Arc<dyn SecretStore>,
+    runtime: &tokio::runtime::Handle,
+) -> Result<Option<String>, String> {
+    block_on(runtime, secrets.secret(&SecretKey::llm_api_key()))
+        .map_err(|error| format!("Could not read the LLM API key from the secret store: {error}"))
 }
 
 /// The dependencies of one pipeline from the stored settings and the API
-/// key, shared by the first build and every reload.
+/// key, shared by the first build and every reload. A secret store that
+/// cannot be read is logged and the passes are built without a key.
 pub fn pipeline_dependencies(
     store: &Arc<Store>,
     paths: &StenoPaths,
@@ -114,10 +137,12 @@ pub fn pipeline_dependencies(
     codex: &Arc<CodexCredentialStore>,
     events: &MeetingEventBus,
     runtime: &tokio::runtime::Handle,
-) -> Result<PipelineDependencies, String> {
-    let settings = store.settings().map_err(|error| error.to_string())?;
-    let api_key = block_on(runtime, secrets.secret(&SecretKey::llm_api_key()))
-        .map_err(|error| error.to_string())?;
+) -> Result<PipelineDependencies, BuildError> {
+    let settings = store.settings()?;
+    let api_key = api_key(secrets, runtime).unwrap_or_else(|warning| {
+        tracing::warn!("{warning}");
+        None
+    });
     let speech_store = crate::speech::speech_store(&settings, paths);
     let zone = steno_adapters::runtime::local_time_zone();
     let passes = crate::llm::passes(&settings, api_key.as_deref(), codex, zone);
@@ -136,12 +161,51 @@ pub fn pipeline_dependencies(
     })
 }
 
+/// [`pipeline_dependencies`] over clones of its inputs, for the reloads.
+fn make_dependencies(
+    store: &Arc<Store>,
+    paths: &StenoPaths,
+    secrets: &Arc<dyn SecretStore>,
+    codex: &Arc<CodexCredentialStore>,
+    events: &MeetingEventBus,
+    runtime: &tokio::runtime::Handle,
+) -> MakeDependencies {
+    let (store, paths, secrets, codex, events, runtime) = (
+        store.clone(),
+        paths.clone(),
+        secrets.clone(),
+        codex.clone(),
+        events.clone(),
+        runtime.clone(),
+    );
+    Arc::new(move || pipeline_dependencies(&store, &paths, &secrets, &codex, &events, &runtime))
+}
+
+/// The phone intake over whichever pipeline is current when a recording
+/// arrives, so a reload is not bypassed. Swift: `AppEnvironment.makeIntake`.
+pub fn handover_intake(
+    store: Arc<Store>,
+    pipeline: Arc<CurrentPipeline>,
+    zone: FixedOffset,
+) -> RecordingIntake {
+    let now = pipeline.current().dependencies().now.clone();
+    RecordingIntake::new(
+        store,
+        Arc::new(move |meeting, asset| {
+            let pipeline = pipeline.current();
+            Box::pin(async move { pipeline.enqueue(&meeting, &asset) })
+        }),
+        now,
+        zone,
+    )
+}
+
 /// The handover listener over a loaded or minted identity, with the mac id
 /// the Phones settings show; `None`, with the reason, when the identity
 /// could not be read or stored.
 fn handover_listener(
     store: &Arc<Store>,
-    pipeline: &Arc<PipelineHandle>,
+    pipeline: &Arc<CurrentPipeline>,
     secrets: &Arc<dyn SecretStore>,
     zone: FixedOffset,
     runtime: &tokio::runtime::Handle,
@@ -156,24 +220,21 @@ fn handover_listener(
             ),
         ),
     )?;
-    let intake = Arc::new(RecordingIntake::over(
-        store.clone(),
-        pipeline.current(),
-        zone,
-    ));
+    let intake = Arc::new(handover_intake(store.clone(), pipeline.clone(), zone));
     let mac_id = identity.mac_id();
     let service = Arc::new(crate::handover::service(store.clone(), intake, identity));
     Ok((service, mac_id))
 }
 
 /// Builds the graph. Real: store, settings, secret store, speech engine
-/// (`CoreML` on the Mac, ONNX elsewhere, in-process until the `WP4c`
-/// sidecar), ONNX diarizer, cosine speaker memory over the store, LLM
-/// passes, delivery coordinator, handover listener, capture session,
-/// recorder, model store, folder usage, preferences. Fakes until `WP8`:
-/// permissions (all granted), login item, updater, clip player, QR
-/// encoder; the audio device list is empty off the Mac until `WP5b`.
-pub fn build(options: AppOptions) -> Result<App, String> {
+/// (`CoreML` on the Mac, ONNX elsewhere, in this process until the speech
+/// sidecar lands), ONNX diarizer, cosine speaker memory over the store,
+/// LLM passes, delivery coordinator, handover listener, capture session,
+/// recorder, model store, folder usage, preferences. Fakes until the shell
+/// draws their platform side (plan: WP8): permissions (all granted), login
+/// item, updater, clip player, QR encoder; the audio device list is empty
+/// off the Mac until the `PipeWire` and WASAPI backends enumerate devices.
+pub fn build(options: AppOptions) -> Result<App, BuildError> {
     let mut warnings = Vec::new();
     let paths = options.paths;
     let store = open_store(
@@ -187,28 +248,21 @@ pub fn build(options: AppOptions) -> Result<App, String> {
     let runtime = options.runtime;
     let zone = local_zone();
 
-    let make: MakeDependencies = {
-        let (store, paths, secrets, codex, events, runtime) = (
-            store.clone(),
-            paths.clone(),
-            secrets.clone(),
-            codex.clone(),
-            events.clone(),
-            runtime.clone(),
-        );
-        Arc::new(move || pipeline_dependencies(&store, &paths, &secrets, &codex, &events, &runtime))
-    };
-    let pipeline = Arc::new(PipelineHandle::new(
+    if let Err(warning) = api_key(&secrets, &runtime) {
+        warnings.push(warning);
+    }
+    let make = make_dependencies(&store, &paths, &secrets, &codex, &events, &runtime);
+    let pipeline = Arc::new(CurrentPipeline::new(
         ProcessingPipeline::new(make()?),
         make,
         runtime.clone(),
     ));
     let sweep = RetentionSweep::new(store.clone());
-    let settings = store.settings().map_err(|error| error.to_string())?;
+    let settings = store.settings()?;
     let speech_store = crate::speech::speech_store(&settings, &paths);
 
     let permissions = Arc::new(FakePermissions::all_granted());
-    let recorder = Arc::new(RealRecorder::new(
+    let recorder = Arc::new(CaptureRecorder::new(
         store.clone(),
         pipeline.clone(),
         options.make_capture_session,
@@ -231,20 +285,20 @@ pub fn build(options: AppOptions) -> Result<App, String> {
         permissions,
         updater: Arc::new(FakeUpdater::default()),
         recorder: recorder.clone(),
-        pipeline: Arc::new(RealPipeline {
+        pipeline: Arc::new(SwappablePipeline {
             handle: pipeline.clone(),
             sweep: sweep.clone(),
         }),
-        speech_models: Arc::new(RealSpeechModels {
+        speech_models: Arc::new(ModelStoreSpeechModels {
             speech: speech_store.clone(),
         }),
-        llm: Arc::new(RealLlmService {
+        llm: Arc::new(ClientLlmService {
             codex,
             runtime: runtime.clone(),
         }),
-        export_validator: Arc::new(crate::delivery::ObsidianValidator),
+        export_validator: Arc::new(crate::export::ObsidianExportValidator),
         handover: handover.as_ref().map(|(service, mac_id)| {
-            Arc::new(RealHandover {
+            Arc::new(ListenerHandover {
                 service: service.clone(),
                 mac_id: *mac_id,
                 runtime: runtime.clone(),
@@ -369,5 +423,143 @@ impl App {
             });
         }
         host.store_changed();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use steno_core::testing::{FakeDiarizer, FakeSpeechEngine, InMemorySpeakerMemory};
+    use steno_core::{
+        AudioFormat, HandoverIntake as _, PairedDevice, RecordingMetadata, SecretKey, SecretStore,
+        Store, async_trait, paths::file_url, protocols::BoundaryResult,
+    };
+    use steno_pipeline::{MeetingEventBus, PipelineDependencies, ProcessingPipeline};
+
+    use super::*;
+
+    /// Fakes over `store`, the engine named `engine_id` so a run shows
+    /// which pipeline it went through.
+    fn dependencies(store: &Arc<Store>, engine_id: &str) -> PipelineDependencies {
+        PipelineDependencies::new(
+            Arc::new(SymphoniaAudioCodec::new()),
+            Arc::new(FakeSpeechEngine {
+                id: engine_id.to_owned(),
+                ..FakeSpeechEngine::default()
+            }),
+            Arc::new(FakeDiarizer::default()),
+            Arc::new(InMemorySpeakerMemory::new(Vec::new())),
+            Arc::new(DeliveryCoordinator::new(store.clone())),
+            store.clone(),
+            MeetingEventBus::new(),
+        )
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_phone_intake_enqueues_through_the_pipeline_current_at_admission() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(Store::open(dir.path().join("steno.sqlite")).unwrap());
+        let mut settings = store.settings().unwrap();
+        settings.audio_folder = file_url(&dir.path().join("audio"), true);
+        store.save_settings(&settings).unwrap();
+        let reloads = Arc::new(AtomicUsize::new(0));
+        let make: MakeDependencies = {
+            let (store, reloads) = (store.clone(), reloads.clone());
+            Arc::new(move || {
+                let n = reloads.fetch_add(1, Ordering::SeqCst) + 1;
+                Ok(dependencies(&store, &format!("engine-{n}")))
+            })
+        };
+        let current = Arc::new(CurrentPipeline::new(
+            ProcessingPipeline::new(dependencies(&store, "engine-0")),
+            make,
+            tokio::runtime::Handle::current(),
+        ));
+        let intake = handover_intake(store.clone(), current.clone(), local_zone());
+
+        current.reload().unwrap();
+        assert_eq!(
+            current.current().dependencies().speech_engine.id(),
+            "engine-1"
+        );
+
+        let upload = dir.path().join("upload.wav");
+        std::fs::write(
+            &upload,
+            steno_pipeline::fixtures::wav_data(&vec![0; 16_000], 16_000, 1),
+        )
+        .unwrap();
+        let device = PairedDevice {
+            id: uuid::Uuid::new_v4(),
+            name: "Phone".to_owned(),
+            paired_at: Utc::now(),
+            last_seen_at: None,
+        };
+        store.save_paired_device(&device, &[1; 32]).unwrap();
+        let metadata = RecordingMetadata {
+            recording_id: uuid::Uuid::new_v4(),
+            started_at: Utc::now(),
+            duration_seconds: 1.0,
+            byte_count: 32_044,
+            sha256: vec![0; 32],
+            chunk_size: 32_044,
+            format: AudioFormat::Wav16kInt16,
+            device_name: "Phone".to_owned(),
+        };
+        let meeting_id = intake.admit(&upload, &metadata, &device).await.unwrap();
+        // The retired pipeline never saw the meeting; the current one did.
+        let current_pipeline = current.current();
+        current_pipeline.wait_until_idle().await;
+        let meeting = store.meeting(meeting_id).unwrap().unwrap();
+        assert_ne!(meeting.state.kind(), steno_core::MeetingStateKind::Queued);
+        assert_eq!(
+            store
+                .stage_rates()
+                .unwrap()
+                .iter()
+                .filter(|row| row.key == "engine-1")
+                .count(),
+            1,
+            "the transcribe rate was learned under the current engine's id"
+        );
+    }
+
+    /// A secret store whose reads fail, as the keyring does without a
+    /// default keychain.
+    struct BrokenSecrets;
+
+    #[async_trait]
+    impl SecretStore for BrokenSecrets {
+        async fn secret(&self, _key: &SecretKey) -> BoundaryResult<Option<String>> {
+            Err("no default keychain".into())
+        }
+
+        async fn set_secret(&self, _key: &SecretKey, _value: Option<&str>) -> BoundaryResult<()> {
+            Err("no default keychain".into())
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_secret_store_that_cannot_be_read_leaves_the_pipeline_without_a_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(Store::open(dir.path().join("steno.sqlite")).unwrap());
+        let secrets: Arc<dyn SecretStore> = Arc::new(BrokenSecrets);
+        let paths = StenoPaths::new(dir.path().join("support"));
+        let dependencies = pipeline_dependencies(
+            &store,
+            &paths,
+            &secrets,
+            &codex_store(),
+            &MeetingEventBus::new(),
+            &tokio::runtime::Handle::current(),
+        )
+        .expect("the graph builds without the key");
+        assert!(dependencies.cleaner.is_none());
+        assert_eq!(
+            api_key(&secrets, &tokio::runtime::Handle::current()).unwrap_err(),
+            "Could not read the LLM API key from the secret store: no default keychain"
+        );
     }
 }
