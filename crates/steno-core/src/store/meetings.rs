@@ -2,6 +2,9 @@
 //! what hangs off it.
 //! Swift: `Sources/StenoCore/Storage/MeetingStore.swift`.
 
+use std::collections::BTreeSet;
+use std::path::{Path, PathBuf};
+
 use chrono::{DateTime, Utc};
 use rusqlite::{Connection, OptionalExtension, Row, params, params_from_iter};
 use uuid::Uuid;
@@ -13,6 +16,7 @@ use crate::model::{
     Participant, Speaker, SpeakerNameSuggestion, SummaryDocument, TitleOrigin, TranscriptSegment,
     derived_uuid,
 };
+use crate::paths::path_from_file_url;
 
 const COLUMNS: &str = "id, title, startedAt, duration, language, source, calendarEventID, tags, \
      state, failureReason, templateID, summary, summaryText, scratchpad, llmUsage, createdAt, \
@@ -101,13 +105,45 @@ fn write_processing_results(connection: &Connection, results: &Meeting) -> Resul
 }
 
 /// What `delete_meeting` leaves for the caller: the files the rows pointed
-/// at, which the caller removes once the transaction has committed (the
-/// folder-versus-files rule lives with the recording layout).
+/// at, which the caller removes once the transaction has committed, through
+/// [`DeletedMeeting::files_to_remove`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DeletedMeeting {
     pub assets: Vec<AudioAsset>,
     /// The speakers' sample clip URLs.
     pub clips: Vec<String>,
+}
+
+impl DeletedMeeting {
+    /// The meeting folder when an asset lives in one (the folder named
+    /// after the meeting id, as the recording layout lays it out), else
+    /// every file the rows name, each once, in asset then clip order.
+    /// Swift: `MeetingStore.filesToRemove`.
+    #[must_use]
+    pub fn files_to_remove(&self, meeting_id: Uuid) -> Vec<PathBuf> {
+        let folder_name = crate::json::uuid_string(meeting_id);
+        let folder = self
+            .assets
+            .iter()
+            .filter_map(|asset| path_from_file_url(&asset.url))
+            .filter_map(|path| path.parent().map(Path::to_path_buf))
+            .find(|folder| {
+                folder
+                    .file_name()
+                    .is_some_and(|name| name == folder_name.as_str())
+            });
+        if let Some(folder) = folder {
+            return vec![folder];
+        }
+        let mut seen = BTreeSet::new();
+        self.assets
+            .iter()
+            .flat_map(AudioAsset::expirable_files)
+            .chain(self.clips.iter().cloned())
+            .filter_map(|url| path_from_file_url(&url))
+            .filter(|path| seen.insert(path.clone()))
+            .collect()
+    }
 }
 
 impl Store {
@@ -369,5 +405,64 @@ impl Store {
             transaction.execute("DELETE FROM meeting WHERE id = ?1", [DbUuid(id)])?;
             Ok(DeletedMeeting { assets, clips })
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeMap;
+
+    use super::*;
+    use crate::model::{AudioFormat, AudioLane, AudioRetention};
+
+    fn asset(meeting_id: Uuid, url: &str) -> AudioAsset {
+        AudioAsset {
+            id: Uuid::nil(),
+            meeting_id,
+            url: url.to_owned(),
+            format: AudioFormat::Caf48kFloat32,
+            lanes: vec![AudioLane::Mic],
+            sidecars_16k: BTreeMap::from([(
+                AudioLane::Mic,
+                "file:///audio/elsewhere/mic.wav".to_owned(),
+            )]),
+            mixdown_url: None,
+            retention: AudioRetention::KeepForever,
+            expires_at: None,
+        }
+    }
+
+    /// Swift: `MeetingStoreTests.testFilesToRemove`.
+    #[test]
+    fn a_meeting_folder_is_removed_whole_and_loose_files_once_each() {
+        let id = Uuid::parse_str("00000000-0000-0000-0000-000000000001").unwrap();
+        let in_folder = DeletedMeeting {
+            assets: vec![asset(
+                id,
+                "file:///audio/00000000-0000-0000-0000-000000000001/master.caf",
+            )],
+            clips: vec![
+                "file:///audio/00000000-0000-0000-0000-000000000001/speakers/a.wav".to_owned(),
+            ],
+        };
+        assert_eq!(
+            in_folder.files_to_remove(id),
+            vec![PathBuf::from("/audio/00000000-0000-0000-0000-000000000001")]
+        );
+        let loose = DeletedMeeting {
+            assets: vec![asset(id, "file:///audio/master.caf")],
+            clips: vec![
+                "file:///audio/clip.wav".to_owned(),
+                "file:///audio/clip.wav".to_owned(),
+            ],
+        };
+        assert_eq!(
+            loose.files_to_remove(id),
+            vec![
+                PathBuf::from("/audio/master.caf"),
+                PathBuf::from("/audio/elsewhere/mic.wav"),
+                PathBuf::from("/audio/clip.wav"),
+            ]
+        );
     }
 }
