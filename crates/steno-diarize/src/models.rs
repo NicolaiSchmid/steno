@@ -105,42 +105,59 @@ impl ModelStore {
     }
 
     /// The verified path of `asset`, downloading it when it is missing
-    /// or fails its checksum. The download lands in a `.part` file and is
-    /// renamed only after it verifies.
+    /// or fails its checksum. The download lands in a temporary file of
+    /// its own in the store's directory, so two processes fetching the
+    /// same model at once (the app and the `steno` command on first use)
+    /// never share a partial file, and moves into place only after it
+    /// verifies; whichever finishes last wins, both end with a verified
+    /// file. A failed or interrupted download leaves nothing behind.
     pub fn ensure(&self, asset: &ModelAsset) -> Result<PathBuf, ModelError> {
         let path = self.path(asset);
-        if path.is_file() && sha256_of(&path)? == asset.sha256 {
+        if verifies(&path, asset) {
             return Ok(path);
         }
-        fs::create_dir_all(&self.root).map_err(|source| ModelError::Io {
-            path: self.root.clone(),
-            source,
-        })?;
-        let partial = path.with_extension("onnx.part");
-        tracing::info!(url = asset.url, "downloading model");
-        let verified = download(asset.url, &partial).and_then(|()| sha256_of(&partial));
-        let got = match verified {
-            Ok(got) => got,
-            Err(error) => {
-                // A failed or interrupted download leaves nothing behind.
-                let _ = fs::remove_file(&partial);
-                return Err(error);
-            }
+        let io_error = |path: &Path| {
+            let path = path.to_path_buf();
+            move |source| ModelError::Io { path, source }
         };
+        fs::create_dir_all(&self.root).map_err(io_error(&self.root))?;
+        let mut partial = tempfile::Builder::new()
+            .prefix(asset.file_name)
+            .suffix(".part")
+            .tempfile_in(&self.root)
+            .map_err(io_error(&self.root))?;
+        tracing::info!(url = asset.url, "downloading model");
+        download(asset.url, partial.as_file_mut()).map_err(|error| match error {
+            DownloadError::Transfer(source) => ModelError::Download {
+                url: asset.url,
+                source: Box::new(source),
+            },
+            DownloadError::Write(source) => io_error(partial.path())(source),
+        })?;
+        let got = sha256_of(partial.path())?;
         if got != asset.sha256 {
-            let _ = fs::remove_file(&partial);
             return Err(ModelError::Checksum {
                 path,
                 expected: asset.sha256.to_owned(),
                 got,
             });
         }
-        fs::rename(&partial, &path).map_err(|source| ModelError::Io {
-            path: path.clone(),
-            source,
-        })?;
+        if let Err(error) = partial.persist(&path) {
+            // Another fetch may have put the file there first and still
+            // hold it open, which a Windows rename refuses: a destination
+            // that verifies is as good as our own.
+            if verifies(&path, asset) {
+                return Ok(path);
+            }
+            return Err(io_error(&path)(error.error));
+        }
         Ok(path)
     }
+}
+
+/// Whether the file at `path` exists and matches `asset`'s checksum.
+fn verifies(path: &Path, asset: &ModelAsset) -> bool {
+    path.is_file() && sha256_of(path).is_ok_and(|got| got == asset.sha256)
 }
 
 /// Time to reach the host, and for the whole transfer: the larger file is
@@ -149,32 +166,26 @@ impl ModelStore {
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 const TRANSFER_TIMEOUT: Duration = Duration::from_secs(600);
 
-fn download(url: &'static str, target: &Path) -> Result<(), ModelError> {
+/// Why a download did not land in its file: the transfer or the file.
+enum DownloadError {
+    Transfer(ureq::Error),
+    Write(io::Error),
+}
+
+/// Fetches `url` into `file`, which is positioned at its start.
+fn download(url: &'static str, file: &mut fs::File) -> Result<(), DownloadError> {
     let agent = ureq::Agent::config_builder()
         .timeout_connect(Some(CONNECT_TIMEOUT))
         .timeout_global(Some(TRANSFER_TIMEOUT))
         .build()
         .new_agent();
-    let response = agent
-        .get(url)
-        .call()
-        .map_err(|source| ModelError::Download {
-            url,
-            source: Box::new(source),
-        })?;
+    let response = agent.get(url).call().map_err(DownloadError::Transfer)?;
     let mut reader = response.into_body().into_reader();
-    let mut file = fs::File::create(target).map_err(|source| ModelError::Io {
-        path: target.to_path_buf(),
-        source,
-    })?;
-    io::copy(&mut reader, &mut file).map_err(|source| ModelError::Io {
-        path: target.to_path_buf(),
-        source,
-    })?;
-    file.flush().map_err(|source| ModelError::Io {
-        path: target.to_path_buf(),
-        source,
-    })?;
+    // A short or broken body surfaces here as an I/O error from the
+    // reader; the file is the only writer, so it is reported as the
+    // file's error with the path by the caller.
+    io::copy(&mut reader, file).map_err(DownloadError::Write)?;
+    file.flush().map_err(DownloadError::Write)?;
     Ok(())
 }
 
@@ -205,6 +216,8 @@ pub fn sha256_of(path: &Path) -> Result<String, ModelError> {
 
 #[cfg(test)]
 mod tests {
+    use std::net::TcpListener;
+
     use super::*;
 
     #[test]
@@ -240,7 +253,105 @@ mod tests {
             store.ensure(&asset),
             Err(ModelError::Download { .. })
         ));
-        assert!(!dir.path().join("x.onnx.part").exists());
-        assert!(!dir.path().join("x.bin.part").exists());
+        assert_eq!(entries(dir.path()), vec!["x.bin".to_owned()]);
+    }
+
+    /// The file names in `dir`, sorted.
+    fn entries(dir: &Path) -> Vec<String> {
+        let mut names: Vec<String> = fs::read_dir(dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        names
+    }
+
+    /// A loopback HTTP server that answers `connections` requests with
+    /// `body`, declaring `declared_length` bytes; the URL it serves.
+    fn serve(body: &'static [u8], declared_length: usize, connections: usize) -> &'static str {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            for stream in listener.incoming().take(connections) {
+                let mut stream = stream.unwrap();
+                let mut request = Vec::new();
+                let mut byte = [0u8; 1];
+                while !request.ends_with(b"\r\n\r\n") && stream.read(&mut byte).unwrap() == 1 {
+                    request.push(byte[0]);
+                }
+                let head = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {declared_length}\r\nConnection: close\r\n\r\n"
+                );
+                stream.write_all(head.as_bytes()).unwrap();
+                stream.write_all(body).unwrap();
+                stream.flush().unwrap();
+            }
+        });
+        Box::leak(format!("http://{address}/model.onnx").into_boxed_str())
+    }
+
+    const ABC: &[u8] = b"abc";
+    const ABC_SHA256: &str = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
+
+    /// Two fetches of one model into a cold store at once, as the app and
+    /// the `steno` command on first use: each downloads into its own
+    /// temporary file, both end with the verified file in place, and
+    /// nothing else is left in the directory.
+    #[test]
+    fn concurrent_fetches_of_one_model_both_succeed() {
+        let dir = tempfile::tempdir().unwrap();
+        let asset = ModelAsset {
+            file_name: "model.onnx",
+            url: serve(ABC, ABC.len(), 2),
+            sha256: ABC_SHA256,
+            licence: "",
+        };
+        let store = ModelStore::new(dir.path());
+        let results: Vec<Result<PathBuf, ModelError>> = std::thread::scope(|scope| {
+            let fetches: Vec<_> = (0..2)
+                .map(|_| scope.spawn(|| store.ensure(&asset)))
+                .collect();
+            fetches
+                .into_iter()
+                .map(|fetch| fetch.join().unwrap())
+                .collect()
+        });
+        for result in &results {
+            assert_eq!(result.as_ref().unwrap(), &dir.path().join("model.onnx"));
+        }
+        assert_eq!(fs::read(dir.path().join("model.onnx")).unwrap(), ABC);
+        assert_eq!(entries(dir.path()), vec!["model.onnx".to_owned()]);
+    }
+
+    /// A body that is not the published file fails the checksum and
+    /// leaves no file behind, not even the one with the wrong content.
+    #[test]
+    fn a_body_with_the_wrong_checksum_leaves_nothing_behind() {
+        let dir = tempfile::tempdir().unwrap();
+        let asset = ModelAsset {
+            file_name: "model.onnx",
+            url: serve(b"not the model", 13, 1),
+            sha256: ABC_SHA256,
+            licence: "",
+        };
+        let error = ModelStore::new(dir.path()).ensure(&asset).unwrap_err();
+        assert!(matches!(error, ModelError::Checksum { .. }), "{error}");
+        assert_eq!(entries(dir.path()), Vec::<String>::new());
+    }
+
+    /// A connection that closes before the declared length arrives is an
+    /// I/O error on the partial file, and the partial file goes with it.
+    #[test]
+    fn a_truncated_body_leaves_nothing_behind() {
+        let dir = tempfile::tempdir().unwrap();
+        let asset = ModelAsset {
+            file_name: "model.onnx",
+            url: serve(ABC, 1 << 20, 1),
+            sha256: ABC_SHA256,
+            licence: "",
+        };
+        let error = ModelStore::new(dir.path()).ensure(&asset).unwrap_err();
+        assert!(matches!(error, ModelError::Io { .. }), "{error}");
+        assert_eq!(entries(dir.path()), Vec::<String>::new());
     }
 }

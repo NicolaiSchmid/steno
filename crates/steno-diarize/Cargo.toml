@@ -22,6 +22,8 @@ steno-core = { path = "../steno-core" }
 ort = { workspace = true, optional = true }
 rustfft.workspace = true
 sha2.workspace = true
+# A per-process temporary file for each model download.
+tempfile.workspace = true
 thiserror.workspace = true
 # `spawn_blocking` for the `Diarizer` calls; the `rt` feature only.
 tokio.workspace = true
@@ -37,7 +39,6 @@ objc2-core-ml = { workspace = true, optional = true }
 hound.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-tempfile.workspace = true
 
 [lints]
 workspace = true
