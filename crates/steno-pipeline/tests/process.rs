@@ -459,7 +459,8 @@ async fn a_failing_summary_names_its_stage_once() {
         [MeetingEvent::OperationFailed {
             meeting_id: meeting.id,
             operation: steno_core::MeetingOperation::SummaryRerun,
-            reason: "summarize: HTTP 401".to_owned(),
+            stage: PipelineStage::Summarize,
+            failure: "summarize: HTTP 401".to_owned(),
         }]
     );
     assert_eq!(pipeline.in_flight(), Vec::<Uuid>::new());

@@ -376,13 +376,18 @@ impl App {
                             MeetingEvent::OperationFailed {
                                 meeting_id,
                                 operation,
-                                reason,
+                                stage,
+                                failure,
                             } => {
+                                // The failure text can quote the model or
+                                // the server, so it goes to debug only.
                                 tracing::warn!(
                                     %meeting_id,
-                                    "{} failed: {reason}",
-                                    operation.label()
+                                    operation = operation.label(),
+                                    stage = stage.as_str(),
+                                    "a background operation failed"
                                 );
+                                tracing::debug!(%meeting_id, %failure, "background operation failure");
                                 event_host.store_changed();
                             }
                         }

@@ -686,7 +686,8 @@ impl ProcessingPipeline {
                 .post(MeetingEvent::OperationFailed {
                     meeting_id,
                     operation,
-                    reason: failure.to_string(),
+                    stage: failure.stage,
+                    failure: failure.to_string(),
                 });
         }
         result

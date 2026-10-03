@@ -65,16 +65,18 @@ pub enum MeetingEvent {
     /// Posted once a meeting's rows are gone.
     Deleted { meeting_id: Uuid },
     /// Posted when a summary re-run or a re-export fails after the
-    /// pipeline accepted it. The host starts both in the background and
-    /// returns at once, so this is how the failure reaches the detail's
+    /// pipeline accepted it. The services start both in the background and
+    /// return at once, so this is how the failure reaches the detail's
     /// error line; a refusal (meeting busy, no summarizer) is returned to
     /// the caller instead. Swift had no event: `MeetingDetailViewModel`
     /// awaited the call and showed its error.
     OperationFailed {
         meeting_id: Uuid,
         operation: MeetingOperation,
-        /// The pipeline's failure, `stage: reason`.
-        reason: String,
+        /// The stage that failed.
+        stage: PipelineStage,
+        /// The pipeline's failure as text, `stage: reason`.
+        failure: String,
     },
 }
 

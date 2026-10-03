@@ -315,7 +315,8 @@ mod tests {
             MeetingEvent::OperationFailed {
                 meeting_id: id,
                 operation: MeetingOperation::SummaryRerun,
-                reason: "summarize: released without a summary".to_owned(),
+                stage: PipelineStage::Summarize,
+                failure: "summarize: released without a summary".to_owned(),
             }
         );
         // The meeting is released for the next operation.
