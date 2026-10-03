@@ -21,6 +21,9 @@
 //! Swift: `MenuBarView.swift`, `MenuBarLabel` and `MenuBarLabelPresentation`
 //! in `StenoApp.swift` and `FloatingContent.swift`.
 
+#[cfg(target_os = "linux")]
+use std::sync::atomic::{AtomicBool, Ordering};
+
 use tauri::{
     AppHandle, Manager, Wry,
     image::Image,
@@ -35,9 +38,13 @@ use crate::{
 };
 
 /// The name a status notifier host's watcher owns on the session bus:
-/// KDE's, the GNOME `AppIndicator` extension's and most panels'.
+/// KDE's, the GNOME `AppIndicator` extension's and most desktop panels'.
 #[cfg(target_os = "linux")]
 const WATCHER: &str = "org.kde.StatusNotifierWatcher";
+
+/// Whether `WATCHER` has been seen on the bus in this run (`has_host`).
+#[cfg(target_os = "linux")]
+static WATCHER_SEEN: AtomicBool = AtomicBool::new(false);
 
 /// The tray's id, for `AppHandle::tray_by_id`.
 pub const TRAY_ID: &str = "steno";
@@ -90,15 +97,22 @@ pub struct Tray {
 /// and the icon is built but never seen. An `XEmbed`-only tray is not
 /// asked for: the shell then counts no tray, the safe side (closing main
 /// ends the app instead of leaving it running unseen). Asked at each close
-/// rather than once, so a panel that starts after the shell (a launch at
-/// login) counts; the query waits half a second at most.
+/// until the watcher is seen, so a tray host that starts after the shell
+/// (a launch at login) counts; once seen it counts for the rest of the
+/// run, so one failed or slow bus call does not turn a close into a quit.
+/// The call itself waits half a second at most; the first connection to
+/// the bus has no timeout of its own.
+///
+/// Swift: none needed; an `NSStatusItem` always shows in the menu bar.
 pub fn has_host() -> bool {
     #[cfg(target_os = "linux")]
     {
-        hosted(
-            std::env::var_os("DBUS_SESSION_BUS_ADDRESS").as_deref(),
-            watcher_owned,
-        )
+        remembered(&WATCHER_SEEN, || {
+            hosted(
+                std::env::var_os("DBUS_SESSION_BUS_ADDRESS").as_deref(),
+                watcher_owned,
+            )
+        })
     }
     #[cfg(not(target_os = "linux"))]
     {
@@ -106,9 +120,24 @@ pub fn has_host() -> bool {
     }
 }
 
-/// `has_host` on Linux: with a session bus address (none means no bus, and
-/// `GLib` would otherwise try to launch one), whether `owned` says the
-/// watcher's name has an owner.
+/// `true` once `ask` has said `true`: `seen` keeps it, and `ask` is not
+/// asked again.
+#[cfg(target_os = "linux")]
+fn remembered(seen: &AtomicBool, ask: impl FnOnce() -> bool) -> bool {
+    if seen.load(Ordering::Relaxed) {
+        return true;
+    }
+    let found = ask();
+    if found {
+        seen.store(true, Ordering::Relaxed);
+    }
+    found
+}
+
+/// `has_host` on Linux: with a session bus address, whether `owned` says
+/// the watcher's name has an owner. No address counts as no bus; `GLib`
+/// would otherwise look for one at `$XDG_RUNTIME_DIR/bus` and then try to
+/// launch one.
 #[cfg(target_os = "linux")]
 fn hosted(bus_address: Option<&std::ffi::OsStr>, owned: impl FnOnce() -> bool) -> bool {
     bus_address.is_some_and(|address| !address.is_empty()) && owned()
@@ -135,9 +164,14 @@ fn watcher_owned() -> bool {
         500,
         Cancellable::NONE,
     )
-    .ok()
-    .and_then(|reply| reply.get::<(bool,)>())
-    .is_some_and(|(owned,)| owned)
+    .is_ok_and(|reply| owner_in(&reply))
+}
+
+/// Whether a `NameHasOwner` reply says the name has an owner: a `(b)`
+/// that is `true`; anything else is no.
+#[cfg(target_os = "linux")]
+fn owner_in(reply: &gio::glib::Variant) -> bool {
+    reply.get::<(bool,)>().is_some_and(|(owned,)| owned)
 }
 
 /// Builds the menu and the icon and manages `Tray`.
@@ -264,6 +298,30 @@ mod tests {
         for none in [None, Some(OsStr::new(""))] {
             assert!(!hosted(none, || panic!("asked without a bus")));
         }
+    }
+
+    /// Once the watcher has been seen it counts without asking; a no is
+    /// asked again next time.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_watcher_once_seen_is_kept() {
+        let seen = AtomicBool::new(false);
+        assert!(!remembered(&seen, || false));
+        assert!(!seen.load(Ordering::Relaxed));
+        assert!(remembered(&seen, || true));
+        assert!(remembered(&seen, || panic!("asked again")));
+    }
+
+    /// Only a `(b)` that is `true` says the name has an owner.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_reply_names_an_owner_only_when_it_says_true() {
+        use gio::glib::ToVariant;
+        assert!(owner_in(&(true,).to_variant()));
+        assert!(!owner_in(&(false,).to_variant()));
+        assert!(!owner_in(&true.to_variant()));
+        assert!(!owner_in(&("true",).to_variant()));
+        assert!(!owner_in(&().to_variant()));
     }
 
     #[test]

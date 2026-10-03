@@ -89,6 +89,7 @@ fn main() {
         .manage(panels::Panels::default())
         .manage(windows::Pages::default())
         .manage(updater::Updates::default())
+        .manage(TrayAtClose::default())
         .invoke_handler(tauri::generate_handler![
             bridge::bridge_call,
             bridge::panel_call
@@ -105,18 +106,21 @@ fn main() {
         .expect("steno-desktop failed to build");
     app.run(|app, event| match event {
         tauri::RunEvent::ExitRequested { code, api, .. } => {
-            if !exits_on(code, has_tray(app)) {
+            if !exits_on(code, || tray_at_close(app)) {
                 api.prevent_exit();
             }
         }
         // The main window closes: hidden and kept while a tray can bring
-        // it back (`hides_on_close`); destroyed otherwise.
+        // it back (`hides_on_close`); destroyed otherwise. `has_tray` is
+        // asked here, once per close, and the events that follow reuse it.
         tauri::RunEvent::WindowEvent {
             label,
             event: tauri::WindowEvent::CloseRequested { api, .. },
             ..
-        } => {
-            if hides_on_close(&label, has_tray(app)) {
+        } if label == BridgeWindow::Main.as_str() => {
+            let tray = has_tray(app);
+            app.state::<TrayAtClose>().note(tray);
+            if hides_on_close(&label, tray) {
                 api.prevent_close();
                 if let Some(main) = app.get_webview_window(&label)
                     && let Err(error) = main.hide()
@@ -133,7 +137,7 @@ fn main() {
             ..
         } => {
             app.state::<windows::Pages>().gone(&label);
-            if exits_when_destroyed(&label, has_tray(app)) {
+            if exits_when_destroyed(&label, || tray_at_close(app)) {
                 actions::quit(app);
             }
         }
@@ -184,13 +188,47 @@ fn build_tray(app: &tauri::AppHandle) {
     }
 }
 
-/// Whether a tray stands: it was built (`tray::build` manages `Tray` on
-/// success) and something shows it (`tray::has_host`). A smoke run stands
-/// in for the host Xvfb lacks, so it checks the close rule a desktop with
-/// a tray gets.
+/// Whether a tray stands (`tray_stands`): `tray::build` manages `Tray` on
+/// success, and the host is asked last.
 fn has_tray(app: &tauri::AppHandle) -> bool {
-    app.try_state::<tray::Tray>().is_some()
-        && (tray::has_host() || app.state::<smoke::Smoke>().is_armed())
+    tray_stands(
+        app.try_state::<tray::Tray>().is_some(),
+        app.state::<smoke::Smoke>().is_armed(),
+        tray::has_host,
+    )
+}
+
+/// Whether a tray stands: it was `built` and something shows it, a host
+/// (`tray::has_host`, asked only when it decides) or a smoke run, which
+/// stands in for the host Xvfb lacks so it checks the close rule a desktop
+/// with a tray gets.
+fn tray_stands(built: bool, smoke: bool, host: impl FnOnce() -> bool) -> bool {
+    built && (smoke || host())
+}
+
+/// What `has_tray` said when the main window last closed, so the
+/// `Destroyed` and the exit request that follow a close do not ask the
+/// session bus again.
+#[derive(Default)]
+struct TrayAtClose(std::sync::Mutex<Option<bool>>);
+
+impl TrayAtClose {
+    fn note(&self, tray: bool) {
+        if let Ok(mut noted) = self.0.lock() {
+            *noted = Some(tray);
+        }
+    }
+
+    fn noted(&self) -> Option<bool> {
+        self.0.lock().ok().and_then(|noted| *noted)
+    }
+}
+
+/// The tray as the last close of main found it, else as it is now.
+fn tray_at_close(app: &tauri::AppHandle) -> bool {
+    app.state::<TrayAtClose>()
+        .noted()
+        .unwrap_or_else(|| has_tray(app))
 }
 
 /// Whether closing the window of `label` hides it instead: the main window
@@ -206,8 +244,8 @@ fn hides_on_close(label: &str, has_tray: bool) -> bool {
 /// Swift app always has its menu bar item. The panels' windows are
 /// hidden, never destroyed, so once one has existed the last window never
 /// closes on its own, and the process would linger invisibly.
-fn exits_when_destroyed(label: &str, has_tray: bool) -> bool {
-    label == BridgeWindow::Main.as_str() && !has_tray
+fn exits_when_destroyed(label: &str, has_tray: impl FnOnce() -> bool) -> bool {
+    label == BridgeWindow::Main.as_str() && !has_tray()
 }
 
 /// Whether an exit request ends the process. One with a code is the shell's
@@ -215,9 +253,9 @@ fn exits_when_destroyed(label: &str, has_tray: bool) -> bool {
 /// without comes from the last window closing: with a tray the process
 /// stays, as the Swift menu bar app stays when its window closes
 /// (`applicationShouldTerminateAfterLastWindowClosed` in `StenoApp.swift`);
-/// without one it ends.
-fn exits_on(code: Option<i32>, has_tray: bool) -> bool {
-    code.is_some() || !has_tray
+/// without one it ends. The tray is asked only for one without a code.
+fn exits_on(code: Option<i32>, has_tray: impl FnOnce() -> bool) -> bool {
+    code.is_some() || !has_tray()
 }
 
 /// Whether the single-instance plugin can run: on Linux it holds a name on
@@ -234,12 +272,34 @@ mod tests {
 
     #[test]
     fn only_the_shells_own_exit_ends_the_process_while_a_tray_stands() {
-        assert!(exits_on(Some(0), true));
-        assert!(exits_on(Some(1), true));
-        assert!(!exits_on(None, true));
+        let asked = || panic!("the tray asked for an exit with a code");
+        assert!(exits_on(Some(0), asked));
+        assert!(exits_on(Some(1), asked));
+        assert!(!exits_on(None, || true));
         // No tray: the last window closing ends the process.
-        assert!(exits_on(None, false));
-        assert!(exits_on(Some(0), false));
+        assert!(exits_on(None, || false));
+    }
+
+    /// A tray stands when it was built and a host or a smoke run shows it;
+    /// the host is asked only when that decides.
+    #[test]
+    fn a_tray_stands_when_built_and_shown() {
+        for (built, smoke, host, stands, asks) in [
+            (true, false, true, true, true),
+            (true, false, false, false, true),
+            (true, true, false, true, false),
+            (true, true, true, true, false),
+            (false, false, true, false, false),
+            (false, true, true, false, false),
+        ] {
+            let asked = std::cell::Cell::new(false);
+            let result = tray_stands(built, smoke, || {
+                asked.set(true);
+                host
+            });
+            assert_eq!(result, stands, "{built} {smoke} {host}");
+            assert_eq!(asked.get(), asks, "{built} {smoke} {host}");
+        }
     }
 
     /// With a tray, closing main hides it and the process stays; without
@@ -249,12 +309,15 @@ mod tests {
     fn main_hides_behind_a_tray_and_ends_the_process_without_one() {
         assert!(hides_on_close("main", true));
         assert!(!hides_on_close("main", false));
-        assert!(!exits_when_destroyed("main", true));
-        assert!(exits_when_destroyed("main", false));
+        assert!(!exits_when_destroyed("main", || true));
+        assert!(exits_when_destroyed("main", || false));
         for label in ["settings", "onboarding", "bubble", "prompt"] {
             for tray in [true, false] {
                 assert!(!hides_on_close(label, tray), "{label}");
-                assert!(!exits_when_destroyed(label, tray), "{label}");
+                assert!(
+                    !exits_when_destroyed(label, || panic!("asked for {label}")),
+                    "{label}"
+                );
             }
         }
     }

@@ -41,9 +41,12 @@ panels always have it. Where no tray could be built, or nothing shows it,
 the window closes for real and the process ends with it, since nothing
 would be left to reach the app from. On Linux "shows it" means a status
 notifier host: at each close the shell asks the session bus whether
-`org.kde.StatusNotifierWatcher` has an owner (KDE, most panels, and GNOME
-only with the AppIndicator extension). An `XEmbed`-only tray is not asked
-for, so there closing main also ends the app, the safe side. On macOS
+`org.kde.StatusNotifierWatcher` has an owner (KDE, most desktop panels,
+and GNOME only with the AppIndicator extension); once it has seen one it
+stops asking, so a bus that fails one call does not turn a close into a
+quit. On stock GNOME the icon is not shown and closing main quits; the
+AppIndicator extension brings the tray back. An `XEmbed`-only tray is not
+asked for, so there closing main also ends the app, the safe side. On macOS
 the menu bar carries the shell's own menu (`menu.rs`): Quit goes through
 the run loop, the Edit menu gives the pages their copy and paste shortcuts.
 

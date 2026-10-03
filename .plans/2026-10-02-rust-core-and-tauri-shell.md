@@ -641,6 +641,9 @@ fix is ported to Swift before cutover.
   the panels need. A user's `GDK_BACKEND=wayland`, or a session without XWayland,
   runs natively with panels that neither float nor keep their place; a native path
   would need the layer-shell protocol and is not planned.
+- Linux shows the tray only where a status notifier host runs (KDE, most desktop
+  panels, GNOME with the AppIndicator extension); elsewhere closing the main window
+  quits, where the Swift `NSStatusItem` is always in the menu bar.
 - Updates: Sparkle checks daily on its own (`SUEnableAutomaticChecks`,
   `SUScheduledCheckInterval` 86400 in `apps/macos/project.yml`); the shell checks only
   when asked (the tray's Check for Updates, `updates.check` from Settings).
