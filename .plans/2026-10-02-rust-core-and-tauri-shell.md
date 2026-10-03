@@ -451,23 +451,24 @@ another release, otherwise the cutover closes them:
 
 ### Handover
 
-- Network: Rust refuses tunnels as Swift does: point-to-point interfaces on Linux and
-  macOS; on Windows every adapter but hardware Ethernet and Wi-Fi that is up
-  (`advertise::windows_keeps`), which leaves out Wintun, TAP and Hyper-V adapters; and
-  `100.64.0.0/10` everywhere. It serves bridges on Linux and macOS, which Swift classes
-  `.other`, and does not re-publish after a network change. WP8 decides: restart on
-  network change, or re-register. Two gaps remain. Rust judges a connection by its
-  local address where Swift judges the interface it arrives on, so on Linux and macOS
-  (weak host model) a packet addressed to the LAN address that arrives over a tunnel is
-  served: the computer is a subnet router or exit node, or a peer's allowed IPs cover
-  the LAN. On Windows a LAN address that sits on a Hyper-V external switch is refused
-  with the virtual adapter.
-- `Sources/StenoHandover/Routing/HandoverEngine.swift` `touch(_:tokenHash:)` refreshes
-  `lastSeenAt` with `store.save(seen, tokenHash:)`, an upsert of the device the gate
-  read before a yield, so a revoke that lands in between resurrects the device and its
-  token hash. The Rust engine runs an `UPDATE` of the row that still holds the token
-  (`Store::touch_paired_device`); add an `UPDATE` method to `MeetingStore+Handover.swift`
-  and call it there before cutover.
+- Network, same as Swift: Rust refuses tunnels. On Linux and macOS that is every
+  point-to-point interface, which most tunnels there are (`wg0`, `tun0`, `utun3`); on
+  Windows every adapter but hardware Ethernet and Wi-Fi that is up
+  (`advertise::windows_keeps`), which leaves out Wintun, TAP and Hyper-V adapters.
+- Network, Rust differs (WP8 decides): the record is not re-published after a network
+  change (restart on network change, or re-register). Layer-2 tunnels (a TAP device,
+  `feth`) and bridges (`docker0`, `bridge100`) are not point-to-point, and are served;
+  Swift classes bridges `.other`. A LAN numbered in `100.64.0.0/10` is refused, on
+  every platform. Rust judges a connection by its local address where Swift judges the
+  interface it arrives on, so on Linux and macOS (weak host model) a packet addressed
+  to the LAN address that arrives over a tunnel is served: the computer is a subnet
+  router or exit node, or a peer's allowed IPs cover the LAN. On Windows the hardware
+  rule refuses a LAN address on a Hyper-V external switch's or a Network Bridge's
+  vEthernet adapter, so a computer whose LAN address moved there is unreachable.
+- `HandoverEngine.touch(_:tokenHash:)` should run an `UPDATE` of the row that still
+  holds the token (a new `MeetingStore+Handover.swift` method), as the Rust engine does
+  (`Store::touch_paired_device`); today `store.save(seen, tokenHash:)` upserts the
+  device the gate read before a yield, so a revoke in between resurrects it.
 - Store reads: Swift's `HandoverEngine.sweepOrphans` and `RecordingHandler.receipt(_:)`
   read with `try?`, so a failed read counts as no receipt: the sweep deletes a
   resumable upload, a route answers 404, and an announce starts the recording over,
@@ -584,7 +585,7 @@ PR off `main`.
 | WP6a host | `feat/rust-host` | #170 | merged |
 | WP5a audio (`steno-audio`) | `feat/rust-audio` | #166 | merged |
 | WP4d diarization (`steno-diarize`) | `feat/rust-diarize` | #164 | open |
-| WP7 handover | `feat/rust-handover` | #169 | open |
+| WP7c handover | `feat/rust-handover` | #169 | open |
 
 WP4b is `crates/steno-speech-coreml`: `objc2-core-ml` behind one safe module,
 the four backend calls, the FluidAudio 0.17.4 heuristics ported
@@ -604,7 +605,7 @@ identical to Swift's `aec-bench --synthetic`; the ring tests run under
 ThreadSanitizer in CI's `tsan` job; the live Core Audio tests sit behind
 `--ignored` in `tests/live.rs`. Parity items: the Audio list above.
 
-What WP7 leaves for the next package: `crates/steno-handover` is a rustls (ring)
+What WP7c leaves for the next package: `crates/steno-handover` is a rustls (ring)
 listener, TLS 1.3 only, hyper 1 HTTP/1.1, with the pinned verifier (`pinning`), the
 rcgen identity in the `SecretStore` as one PEM bundle, pairing, the seven routes, the
 inbox and the mdns-sd advertiser; `tests/wire_contract.rs` reads `wire.ts`. The store
