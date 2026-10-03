@@ -275,7 +275,7 @@ mod tests {
     /// `B` sits between them in start order, so the two `A`s stay apart
     /// and `B` survives, as `FluidAudio`'s `mergeSegments` has it.
     #[test]
-    fn a_segment_joins_only_the_one_immediately_before_it() {
+    fn a_run_joins_only_the_one_immediately_before_it() {
         let joined = close_gaps(
             vec![
                 run(0, 0.0, 5.0, 1.0),

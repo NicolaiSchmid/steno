@@ -18,6 +18,14 @@ use steno_core::{
 
 use crate::first_max_by;
 
+/// The user-facing label of the cluster at `index` in order of first
+/// speech: `Speaker 1`, `Speaker 2`, ... Spelled here and nowhere else,
+/// as [`crate::timeline::cluster_label`] spells the turn labels.
+#[must_use]
+pub fn speaker_label(index: usize) -> String {
+    format!("Speaker {}", index + 1)
+}
+
 /// Chunks arrive without a quality; each takes the quality of the turn it
 /// overlaps most first.
 #[must_use]
@@ -70,7 +78,7 @@ pub fn result(turns: &[SpeakerTurn], raw: &[ClusterChunk]) -> DiarizationResult 
             };
             let choice = pick_clip(&ranges, &scored);
             SpeakerCluster {
-                label: format!("Speaker {}", index + 1),
+                label: speaker_label(index),
                 ranges,
                 embedding: cluster_embedding(&own_chunks),
                 cluster_confidence: choice.cluster_confidence,
