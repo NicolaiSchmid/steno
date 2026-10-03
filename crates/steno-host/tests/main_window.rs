@@ -507,12 +507,14 @@ fn snapshots_are_emitted_outside_the_hosts_lock() {
     });
     harness.host.attach(sink.clone());
     // A new selection publishes the list, then the detail it swapped in.
-    harness
-        .host
-        .meetings_select(MeetingIdParams {
+    // An emit under the lock deadlocks the sink's read: fail, do not hang.
+    let host = harness.host.clone();
+    within_five_seconds("the selection", move || {
+        host.meetings_select(MeetingIdParams {
             meeting_id: uuid(MEETING_FAILED),
         })
-        .unwrap();
+    })
+    .unwrap();
     let seen = sink.seen.lock().unwrap();
     assert!(!seen.is_empty(), "the command published");
     for (topic, read) in seen.iter() {
@@ -1004,7 +1006,12 @@ fn keep_audio_off_applies_only_to_the_meeting_it_was_asked_for() {
         id(MEETING)
     );
 
-    let error = harness.host.meeting_delete_recording_now().unwrap_err();
+    // A prompt asked under the lock deadlocks the selection: fail, do not hang.
+    let host = harness.host.clone();
+    let error = within_five_seconds("the delete-recording prompt", move || {
+        host.meeting_delete_recording_now()
+    })
+    .unwrap_err();
     assert_eq!(error.code, BridgeErrorCode::Failed);
     harness
         .host
