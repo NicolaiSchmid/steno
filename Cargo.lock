@@ -4457,6 +4457,7 @@ name = "steno-desktop"
 version = "0.1.0"
 dependencies = [
  "block2",
+ "gdk",
  "gio",
  "objc2",
  "objc2-av-foundation",

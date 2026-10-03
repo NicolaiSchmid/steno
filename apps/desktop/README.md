@@ -74,12 +74,14 @@ On a Wayland session the shell runs under XWayland. GTK 3 on Wayland can
 neither place a window nor keep it above the others, and it reports no
 moves, so the panels would not float, would not stay where they are put,
 and would never save the anchor. When `WAYLAND_DISPLAY` and `DISPLAY` are
-both set and `GDK_BACKEND` is not, `main` sets `GDK_BACKEND=x11` before
-anything else starts and logs one `display:` line. A `GDK_BACKEND` set
-before launch always wins: `GDK_BACKEND=wayland steno-desktop` runs
-natively on Wayland, with panels that do neither. A Wayland session
-without XWayland (no `DISPLAY`) runs on Wayland too, since X11 would not
-open there.
+both set and `GDK_BACKEND` is not, `main` allows GDK only its `x11`
+backend before Tauri initialises GTK (`display.rs`). That setting stays
+inside the process, so a browser the shell opens still starts on Wayland.
+Every start logs one `display:` line naming the backend. A `GDK_BACKEND`
+set before launch always wins: `GDK_BACKEND=wayland steno-desktop` runs
+natively on Wayland, with panels that neither stay on top nor keep their
+place. A Wayland session without XWayland (no `DISPLAY`) runs on Wayland
+too, since X11 would not open there.
 
 The bridge methods the shell answers itself, beside `window.*` and
 `system.openURL`: `system.openSystemSettings` (the pane per OS),
@@ -279,7 +281,7 @@ Nothing beyond the Rust toolchain. WebView2 ships with Windows 11; the
 | `apps/desktop/src-tauri/tauri.linux.conf.json`, `linux/steno-desktop.desktop` | Merged on Linux: the `steno-desktop` product name for the package, and the desktop entry template (see Bundles) |
 | `apps/desktop/src-tauri/Info.plist`, `Entitlements.plist` | Merged into the macOS bundle: the TCC purpose strings and the Bonjour service, verbatim from `apps/macos/project.yml`; the audio-input and calendars entitlements |
 | `apps/desktop/src-tauri/build.rs`, `apps/desktop/src-tauri/placeholder/` | Points `frontendDist` at the placeholder page when the web `dist/` is missing, so a debug `cargo build` works on a bare checkout (a release build fails instead); then `tauri_build::build()` |
-| `apps/desktop/src-tauri/src/main.rs` | Wires the plugins (single instance first, autostart, deep link, dialog, opener, updater, `tauri-nspanel` on macOS), the managed state, the one menu handler, the tray and the windows; hides the main window on close and keeps the process while a tray stands, ends it otherwise; a dragged panel's anchor, a destroyed window's page, and the Dock's reopen |
+| `apps/desktop/src-tauri/src/main.rs` | Wires the plugins (single instance first, autostart, deep link, dialog, opener, updater, `tauri-nspanel` on macOS), the managed state, the one menu handler, the tray and the windows; hides the main window on close and keeps the process while a tray stands, ends it otherwise; a dragged panel's anchor, a destroyed window's page, and the Dock's reopen. `display.rs`, on Linux: the GDK backend (XWayland on a Wayland session) |
 | `apps/desktop/src-tauri/src/tray.rs`, `menu.rs`, `actions.rs`, `recording.rs` | The tray menu and icon, the macOS menu bar, the actions behind their items, the recorder state the shell follows |
 | `apps/desktop/src-tauri/src/panels.rs`, `panel_geometry.rs` | The two floating panels and the one content rule, the macOS `NSPanel` conversion; the anchor, frames and size validation as plain values |
 | `apps/desktop/src-tauri/src/autostart.rs`, `updater.rs`, `permissions.rs`, `deep_links.rs`, `dialogs.rs` | One module per service (see What the shell owns); each is plain rules the tests cover over a plugin or OS call |
