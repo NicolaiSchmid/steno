@@ -517,7 +517,7 @@ fn long_api_key() -> String {
 
 /// `filler` up to the cut, then `secret` with all but its last byte before
 /// the cut, then more text. `in_bytes` places the cut at a byte offset
-/// (the body cut of the old code), else at a character offset; a
+/// (Swift's `bodyText` cut), else at a character offset; a
 /// multi-byte `filler` ends right where the secret starts.
 fn straddling(filler: char, secret: &str, cut: usize, in_bytes: bool) -> Vec<u8> {
     let before = cut - (secret.len() - 1);

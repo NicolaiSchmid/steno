@@ -1,7 +1,8 @@
 //! The Codex credential store over a temporary home and a stub token
 //! endpoint: reading the CLI's file, the refresh windows, the atomic
 //! write-back that keeps unknown keys, the re-read on a reused token, the
-//! shared refresh for concurrent callers and the redaction of both tokens.
+//! shared refresh for concurrent callers and the redaction of both tokens
+//! and the account id.
 //! Swift: `CodexCredentialStoreTests`, `CodexCredentialStoreConcurrencyTests`.
 
 mod common;

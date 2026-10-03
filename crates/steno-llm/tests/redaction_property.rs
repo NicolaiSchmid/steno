@@ -1,6 +1,7 @@
 //! The property behind the redaction claim of the crate doc's privacy
-//! paragraph: no secret, however often or wherever in a body a server
-//! echoes it, reaches an error, a `Debug` form or an observer event.
+//! paragraph: no secret, however often or wherever a server echoes it in a
+//! body that is not the model's answer, reaches an error, a `Debug` form or
+//! an observer event.
 //! Random secrets of the four kinds (API key, access token, refresh token,
 //! account id), 8 to 200 characters, some with multi-byte characters, go
 //! into random bodies that echo them one to four times, some copies across
@@ -8,7 +9,7 @@
 //! that can carry text into an error: plain and enveloped error bodies,
 //! undecodable 2xx bodies, refusals, stream errors, the model list, a 401
 //! whose refresh fails, and the token endpoint's refusals with the secret
-//! in the code. The seed is fixed, so a failure always reproduces.
+//! in the code. The seeds are fixed, so a failure always reproduces.
 //!
 //! Swift: no single suite; Rust-only.
 
@@ -27,11 +28,15 @@ use steno_llm::{
 /// Cases per client and for the token refresh.
 const CASES: u64 = 200;
 
-/// Endpoint clients, each with its own random key, the cases take turns
-/// on: building a client loads the platform's root certificates, too slow
+/// How many endpoint clients, each with its own random key, the cases take
+/// turns on: building one loads the platform's root certificates, too slow
 /// to do two hundred times. The Codex client and the store read the
 /// secrets from the file on every call, so one of each serves every case.
 const ENDPOINT_CLIENTS: u64 = 8;
+
+/// Fixed so a failure always reproduces; each run draws from its own range,
+/// `CASES + ENDPOINT_CLIENTS` wide.
+const SEEDS: [u64; 3] = [1, 100_000, 200_000];
 
 /// xorshift64: deterministic and dependency-free.
 struct Rng(u64);
@@ -342,9 +347,10 @@ async fn token_refresh_leaks(seed: u64) -> Vec<String> {
 
 #[tokio::test]
 async fn no_random_secret_echoed_anywhere_in_a_random_body_reaches_an_error_or_an_event() {
-    let mut found = endpoint_client_leaks(1).await;
-    found.extend(codex_client_leaks(100_000).await);
-    found.extend(token_refresh_leaks(200_000).await);
+    let [endpoint, codex, refresh] = SEEDS;
+    let mut found = endpoint_client_leaks(endpoint).await;
+    found.extend(codex_client_leaks(codex).await);
+    found.extend(token_refresh_leaks(refresh).await);
     assert!(
         found.is_empty(),
         "{} leaks, the first: {:#?}",
