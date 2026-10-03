@@ -4,13 +4,14 @@
 //! (WP7a).
 //!
 //! Wiring: [`LlmEndpoint::from_settings`] gives the endpoint, or `None`
-//! while summaries are off. Under `Endpoint`, build the client with
-//! [`OpenAiCompatibleClient::from_secret_store`]. Under `Codex`, use
-//! `CodexResponsesClient::new(endpoint,
-//! Arc::new(CodexCredentialStore::new(CodexCredentialStore::default_home(&env))))`.
-//! Then give the same `Arc` and endpoint to [`LlmTranscriptCleaner::new`]
-//! and to [`LlmMeetingSummarizer::new`], the latter with the user's time
-//! zone.
+//! while summaries are off or not set up. For `LlmProvider::Endpoint`,
+//! build the client with [`OpenAiCompatibleClient::from_secret_store`]. For
+//! `LlmProvider::Codex`, use `CodexResponsesClient::new(endpoint,
+//! Arc::new(CodexCredentialStore::new(CodexCredentialStore::default_home(&env))))`
+//! (`env` from `std::env::vars()`; see the [`CodexResponsesClient::new`]
+//! example). Then give the same `Arc` and endpoint to
+//! [`LlmTranscriptCleaner::new`] and to [`LlmMeetingSummarizer::new`], the
+//! latter with the user's time zone.
 //!
 //! - `endpoint` ([`LlmEndpoint`], [`StructuredOutputMode`], [`EndpointProbe`],
 //!   [`LlmClient`]): where the model lives, how much it holds, how JSON is
@@ -43,23 +44,27 @@
 //! - [`transport`]: the HTTP attempt raced against the [`Clock`], the
 //!   attempt loop, the client events, the HTTP client builder and the
 //!   redaction of secrets.
-//! - `testing` (behind the feature of that name): the loopback stub server,
-//!   the canned scripts and the manual clock.
+//! - `testing` (feature `testing`): the loopback stub server, the canned
+//!   scripts and the manual clock.
 //!
-//! Privacy (invariant 3 of the plan): besides a `Destination`, this crate is
-//! the only code that opens a network connection. What it sends is text
-//! only, and `tests/privacy.rs` asserts each claim that follows on the wire
-//! and on disk. A completion body holds prompt text built from the
-//! transcript, names and template wording; it never holds a file path, an
-//! audio byte, a speaker or meeting id, or a segment's `raw_text`. Secrets
-//! travel only in headers and in the token refresh: the API key comes from
-//! the `SecretStore`, and the Codex tokens stay in `$CODEX_HOME/auth.json`,
-//! written back through a rename with mode 0600. No secret reaches an
-//! error, a `Debug` form or an observer event.
+//! Privacy: plan invariant 3 lets only a `Destination` and this crate open
+//! a network connection, and this crate sends text only. `tests/privacy.rs`
+//! asserts each of the following for every client it applies to. A
+//! completion body is JSON prompt text built from the transcript, names and
+//! template wording; it never holds a file path, an audio byte, a speaker
+//! or meeting id, or a segment's `raw_text`. Secrets travel only in headers
+//! and in the token refresh: the API key read from the `SecretStore` only
+//! in `Authorization`, the Codex access token and account id only in their
+//! two headers, the refresh token only in the refresh's body. The Codex
+//! tokens are read from `auth.json` (in `$CODEX_HOME`, else `~/.codex`),
+//! and a refresh writes them back to it with mode 0600 (on Unix only),
+//! leaving no temporary file. No secret, however often or wherever in a
+//! body a server echoes it, reaches an error, a `Debug` form or an observer
+//! event: a body is redacted whole before it is cut. A key shorter than
+//! eight bytes is a placeholder, not a secret, and is left as it is.
 //!
-//! Tests: `cargo test -p steno-llm`; the stub server, scripts and manual
-//! clock come with the `testing` feature, which the dev-dependency on the
-//! crate itself turns on.
+//! Tests: `cargo test -p steno-llm`; the dev-dependency on the crate itself
+//! turns the `testing` feature on.
 
 // Product names (OpenAI, ChatGPT, OpenRouter) trip `doc_markdown` on some
 // thirty doc lines; none of them is code.

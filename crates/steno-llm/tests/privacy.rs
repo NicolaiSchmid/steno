@@ -1,15 +1,17 @@
-//! Invariant 3 of the plan as seen on the wire, one test per claim of the
-//! privacy paragraph in the crate doc:
+//! Invariant 3 of the plan on the wire and on disk: each claim of the crate
+//! doc's privacy paragraph, asserted for every client it applies to:
 //! - a completion body is a JSON document of prompt text, with no file
 //!   path, audio byte, speaker or meeting id, or segment `raw_text`;
 //! - secrets travel only in headers and in the token refresh: the API key
-//!   from the `SecretStore` in `Authorization`, the Codex access token and
-//!   account id in their two headers, the refresh token only in the
-//!   refresh's body;
-//! - the refreshed `auth.json` is written back with mode 0600 (unix) and
-//!   leaves no temporary file;
-//! - no secret, however often a server echoes it, reaches an error, a
-//!   `Debug` form or an observer event.
+//!   read from the `SecretStore` only in `Authorization`, the Codex access
+//!   token and account id only in their two headers, the refresh token only
+//!   in the refresh's body;
+//! - the tokens read from `auth.json` are written back to it after a
+//!   refresh with mode 0600 on Unix, leaving no temporary file;
+//! - no secret, however often or wherever in a body a server echoes it,
+//!   reaches an error, a `Debug` form or an observer event, since a body is
+//!   redacted whole before it is cut;
+//! - a key shorter than eight bytes is a placeholder and is left as it is.
 //!
 //! Swift: no single suite; Rust-only.
 
@@ -129,7 +131,7 @@ fn sensitive_export() -> steno_core::MeetingExport {
 }
 
 #[tokio::test]
-async fn the_endpoint_client_and_both_passes_send_text_only() {
+async fn the_endpoint_client_and_both_passes_send_text_only_and_the_key_only_in_authorization() {
     let export = sensitive_export();
     let server = StubChatServer::start().await.unwrap();
     server.respond(Arc::new(move |request| {
@@ -193,7 +195,8 @@ async fn the_endpoint_client_and_both_passes_send_text_only() {
 }
 
 #[tokio::test]
-async fn the_codex_client_sends_text_only_and_keeps_the_tokens_in_headers() {
+async fn the_codex_client_sends_text_only_and_the_access_token_and_account_id_only_in_their_headers()
+ {
     let export = sensitive_export();
     let harness = CodexHarness::new().await;
     harness.backend.respond(Arc::new(move |request| {
@@ -276,9 +279,9 @@ async fn the_codex_client_sends_text_only_and_keeps_the_tokens_in_headers() {
 
 /// The refresh token goes to the token endpoint in the refresh's body and
 /// nowhere else; the refresh carries no access token or account id; the
-/// file it writes back is 0600 and nothing else is left in the home.
+/// file it writes back is 0600 on Unix and nothing else is left in the home.
 #[tokio::test]
-async fn the_refresh_token_goes_only_to_the_token_endpoint_and_the_file_stays_0600() {
+async fn the_refresh_token_goes_only_in_the_refresh_body_and_auth_json_is_written_back_0600() {
     let harness = CodexHarness::build(RetryPolicy::NONE, "gpt-stub", |_| {}).await;
     let stale = CodexHome::access_token(10, "plus");
     harness.home.write(AuthFile::default().access(&stale));
@@ -681,10 +684,10 @@ async fn no_secret_after_a_multi_byte_character_at_a_cut_reaches_an_error_or_an_
 }
 
 /// A key shorter than eight bytes is a placeholder for a local server, not
-/// a credential, and is left alone: redacting it would garble every
+/// a credential, and is left as it is: redacting it would garble every
 /// message. Eight bytes and more is a secret.
 #[tokio::test]
-async fn a_placeholder_key_shorter_than_eight_bytes_is_left_alone() {
+async fn a_key_shorter_than_eight_bytes_is_a_placeholder_and_left_as_it_is() {
     let message = serde_json::json!({"error": {"message": "context exceeded max tokens"}});
     for (key, expected) in [
         ("x", "HTTP 400: context exceeded max tokens"),
