@@ -562,6 +562,52 @@ async fn concurrent_callers_share_one_refresh() {
     assert_eq!(home.server.request_count(), 1);
 }
 
+/// Once the endpoint has turned a refresh token down for good, the callers
+/// that waited for that refresh get the same answer from the lock, not from
+/// the network: the dead token is posted once. Only a token the CLI
+/// rotated since is tried again.
+#[tokio::test]
+async fn a_permanent_refusal_is_shared_with_the_waiting_callers() {
+    let home = CodexHome::new().await;
+    home.write(AuthFile::default().access(&CodexHome::access_token(10, "plus")));
+    home.server.respond(Arc::new(|_| {
+        Some(scripts.token_refresh_rejected("refresh_token_expired", 400))
+    }));
+    let store = Arc::new(home.store());
+    let stale = CodexHome::access_token(10, "plus");
+    let (a, b, c) = tokio::join!(
+        store.current(),
+        store.current(),
+        store.refreshed_if_still_using(&stale)
+    );
+    for outcome in [a, b, c] {
+        let error = outcome.unwrap_err();
+        assert!(
+            matches!(error, CodexCredentialError::SignInExpired(_)),
+            "{error}"
+        );
+    }
+    assert_eq!(home.server.request_count(), 1, "one POST for three callers");
+    // A later caller over the same file: still no round trip.
+    assert!(matches!(
+        store.current().await.unwrap_err(),
+        CodexCredentialError::SignInExpired(_)
+    ));
+    assert_eq!(home.server.request_count(), 1);
+    // The CLI signs in again: the new token is tried.
+    home.write(
+        AuthFile::default()
+            .access(&CodexHome::access_token(10, "plus"))
+            .refresh("rt_after_login"),
+    );
+    let _ = store.current().await;
+    assert_eq!(home.server.request_count(), 2);
+    assert_eq!(
+        refresh_body(&home.server.requests()[1])["refresh_token"],
+        "rt_after_login"
+    );
+}
+
 /// `{"error": {"code": …}}`, the shape the endpoint uses beside the flat
 /// one: a permanent code on a 400 is final, and a reused code triggers the
 /// re-read.

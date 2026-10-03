@@ -148,7 +148,17 @@ pub struct CodexCredentialStore {
     client_id: String,
     now: Now,
     /// Held for the length of one refresh; waiters re-read the file after.
-    refresh_lock: tokio::sync::Mutex<()>,
+    /// Inside: the refresh token the endpoint last turned down for good,
+    /// so a waiter whose re-read shows that same token gets the answer
+    /// without posting the dead token again.
+    refresh_lock: tokio::sync::Mutex<Option<SpentToken>>,
+}
+
+/// A refresh token the endpoint turned down for good, with the error it
+/// gave. Never `Debug`: it holds the token.
+struct SpentToken {
+    refresh_token: String,
+    error: CodexCredentialError,
 }
 
 /// The whole document plus what Steno read from it, kept so unknown keys
@@ -159,8 +169,11 @@ struct AuthFile {
 }
 
 /// A refresh the token endpoint turned down, before it is mapped to the
-/// public error: the code decides on a re-read.
+/// public error: the code decides on a re-read, and a permanent refusal
+/// is remembered against the token it was for. Never `Debug`.
 struct RefreshRejected {
+    /// The token the endpoint refused.
+    refresh_token: String,
     code: Option<String>,
     permanent: bool,
     /// Already redacted.
@@ -295,7 +308,7 @@ impl CodexCredentialStore {
             token_endpoint: Url::parse(Self::DEFAULT_TOKEN_ENDPOINT).expect("a literal URL"),
             client_id: Self::CODEX_CLIENT_ID.to_owned(),
             now: Arc::new(Utc::now),
-            refresh_lock: tokio::sync::Mutex::new(()),
+            refresh_lock: tokio::sync::Mutex::new(None),
         }
     }
 
@@ -360,7 +373,10 @@ impl CodexCredentialStore {
 
     /// The file's credentials when `usable` says so, else a refresh under
     /// the lock, re-reading first: another caller may have refreshed while
-    /// we waited, and the file is the truth.
+    /// this caller waited, and the file is the truth. A caller whose
+    /// re-read shows the token the previous refresh was refused for good
+    /// gets that refusal back without a round trip; only a token the CLI
+    /// rotated since is tried.
     async fn refresh_unless(
         &self,
         usable: impl Fn(&CodexCredentials) -> bool,
@@ -369,12 +385,38 @@ impl CodexCredentialStore {
         if usable(&file.credentials) {
             return Ok(file.credentials);
         }
-        let _refreshing = self.refresh_lock.lock().await;
+        let mut spent = self.refresh_lock.lock().await;
         let latest = self.read()?;
         if usable(&latest.credentials) {
             return Ok(latest.credentials);
         }
-        self.refresh_rereading_on_reuse(latest).await
+        if let Some(token) = spent.as_ref()
+            && token.refresh_token == latest.credentials.refresh_token
+        {
+            return Err(token.error.clone());
+        }
+        match self.refresh_rereading_on_reuse(latest).await {
+            Ok(credentials) => {
+                *spent = None;
+                Ok(credentials)
+            }
+            Err(failure) => {
+                let refused_for_good = match &failure {
+                    RefreshFailure::Rejected(rejected) if rejected.permanent => {
+                        Some(rejected.refresh_token.clone())
+                    }
+                    _ => None,
+                };
+                let error = CodexCredentialError::from(failure);
+                if let Some(refresh_token) = refused_for_good {
+                    *spent = Some(SpentToken {
+                        refresh_token,
+                        error: error.clone(),
+                    });
+                }
+                Err(error)
+            }
+        }
     }
 
     /// Whether the access token is inside its expiry window or the file is
@@ -477,23 +519,22 @@ impl CodexCredentialStore {
     async fn refresh_rereading_on_reuse(
         &self,
         file: AuthFile,
-    ) -> Result<CodexCredentials, CodexCredentialError> {
-        let original_refresh_token = file.credentials.refresh_token.clone();
+    ) -> Result<CodexCredentials, RefreshFailure> {
         let rejected = match self.refresh_once(file).await {
             Ok(credentials) => return Ok(credentials),
-            Err(RefreshFailure::Credential(error)) => return Err(error),
+            Err(RefreshFailure::Credential(error)) => return Err(error.into()),
             Err(RefreshFailure::Rejected(rejected)) => rejected,
         };
         if rejected.code.as_deref() == Some("refresh_token_reused") {
-            // The CLI may have rotated the token since our read; its file is
-            // the truth. One more read, one more try, then the failure
+            // The CLI may have rotated the token since this read; its file
+            // is the truth. One more read, one more try, then the failure
             // stands.
             let latest = self.read()?;
-            if latest.credentials.refresh_token != original_refresh_token {
-                return self.refresh_once(latest).await.map_err(Into::into);
+            if latest.credentials.refresh_token != rejected.refresh_token {
+                return self.refresh_once(latest).await;
             }
         }
-        Err(rejected.into())
+        Err(RefreshFailure::Rejected(rejected))
     }
 
     async fn refresh_once(&self, file: AuthFile) -> Result<CodexCredentials, RefreshFailure> {
@@ -540,6 +581,7 @@ impl CodexCredentialStore {
                     .as_deref()
                     .is_some_and(|code| Self::PERMANENT_REFRESH_CODES.contains(&code));
             return Err(RefreshFailure::Rejected(RefreshRejected {
+                refresh_token: file.credentials.refresh_token,
                 code,
                 permanent,
                 message,
