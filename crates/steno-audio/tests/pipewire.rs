@@ -37,6 +37,7 @@ use std::time::{Duration, Instant};
 use steno_audio::capture::live::pipewire::COALESCE_DELAY;
 use steno_audio::capture::{ChannelRef, DeviceChangeReason};
 use steno_audio::testing::rt::CountingAllocator;
+use steno_audio::writer::WavStreamWriter;
 use steno_audio::{
     CaptureBackend, CaptureError, CaptureStream, LaneFrameSink, LiveCaptureBackend, SAMPLE_RATE,
 };
@@ -103,19 +104,7 @@ fn tool(program: &str, args: &[&str]) -> bool {
 /// A 16-bit mono 48 kHz sine of `seconds` as a WAV file.
 fn write_tone(path: &Path, frequency: f64, seconds: f64) {
     let frames = (seconds * SAMPLE_RATE) as usize;
-    let mut bytes = Vec::with_capacity(44 + frames * 2);
-    let data_size = (frames * 2) as u32;
-    bytes.extend_from_slice(b"RIFF");
-    bytes.extend_from_slice(&(36 + data_size).to_le_bytes());
-    bytes.extend_from_slice(b"WAVEfmt ");
-    for field in [16u32.to_le_bytes(), [1, 0, 1, 0]] {
-        bytes.extend_from_slice(&field);
-    }
-    bytes.extend_from_slice(&48_000u32.to_le_bytes());
-    bytes.extend_from_slice(&96_000u32.to_le_bytes());
-    bytes.extend_from_slice(&[2, 0, 16, 0]);
-    bytes.extend_from_slice(b"data");
-    bytes.extend_from_slice(&data_size.to_le_bytes());
+    let mut bytes = WavStreamWriter::header(48_000, frames);
     for index in 0..frames {
         let phase = std::f64::consts::TAU * frequency * index as f64 / SAMPLE_RATE;
         bytes.extend_from_slice(&((phase.sin() * 12_000.0) as i16).to_le_bytes());
