@@ -26,6 +26,7 @@
 use std::cell::UnsafeCell;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+/// The single-producer, single-consumer ring; see the module doc.
 pub struct LaneRingBuffer {
     capacity: usize,
     mask: usize,

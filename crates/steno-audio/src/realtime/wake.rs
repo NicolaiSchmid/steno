@@ -23,6 +23,7 @@ use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Condvar, Mutex};
 use std::time::Duration;
 
+/// The counting wake-up; see the module doc.
 #[derive(Debug)]
 pub struct Wake {
     pending: AtomicU32,
@@ -38,6 +39,7 @@ impl Default for Wake {
 }
 
 impl Wake {
+    /// Nothing pending, nobody parked.
     #[must_use]
     pub fn new() -> Self {
         Self {

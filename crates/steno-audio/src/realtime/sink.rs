@@ -20,8 +20,10 @@ use super::wake::Wake;
 use crate::SAMPLE_RATE;
 use crate::capture::DeviceChangeReason;
 
+/// Runs on the backend's listener thread with what changed.
 pub type DeviceChangeHandler = Box<dyn Fn(DeviceChangeReason) + Send + Sync>;
 
+/// The producer's view of the rings; see the module doc.
 pub struct LaneFrameSink {
     lanes: Vec<AudioLane>,
     rings: LaneRings,
@@ -68,11 +70,13 @@ impl LaneFrameSink {
         }
     }
 
+    /// The lanes, in ring order.
     #[must_use]
     pub fn lanes(&self) -> &[AudioLane] {
         &self.lanes
     }
 
+    /// The rings underneath.
     #[must_use]
     pub fn rings(&self) -> &LaneRings {
         &self.rings
@@ -80,6 +84,8 @@ impl LaneFrameSink {
 
     // Producer (real-time)
 
+    /// Reserves `frames` on every ring, or counts the drop on every lane and
+    /// returns `false`.
     #[inline(always)]
     pub fn begin_callback(&self, frames: usize) -> bool {
         if !self.rings.reserve(frames) {
@@ -132,12 +138,14 @@ impl LaneFrameSink {
         };
     }
 
+    /// Zeros for the callback's frames on `lane`.
     #[inline(always)]
     pub fn write_silence(&self, lane: usize) {
         let count = self.pending_frames.load(Ordering::Relaxed);
         self.rings.ring(lane).write_zeros(count);
     }
 
+    /// Publishes the callback's frames and wakes the consumer.
     #[inline(always)]
     pub fn end_callback(&self) {
         self.rings.commit();
@@ -173,6 +181,7 @@ impl LaneFrameSink {
         self.rings.wake()
     }
 
+    /// Ring `lane`.
     #[must_use]
     pub fn ring(&self, lane: usize) -> &LaneRingBuffer {
         self.rings.ring(lane)

@@ -8,11 +8,13 @@
 
 use std::time::Duration;
 
+/// Namespace for `settle`.
 pub struct NominalSampleRate;
 
 impl NominalSampleRate {
     /// Ten reads, 20 ms apart: 200 ms at most.
     pub const ATTEMPTS: usize = 10;
+    /// Between reads.
     pub const INTERVAL: Duration = Duration::from_millis(20);
 
     /// Returns the first rate `read()` reports that equals `target`, or the

@@ -38,8 +38,10 @@ impl WavStreamWriter {
     /// The RIFF size field counts everything after itself: the header minus
     /// the 8-byte `RIFF` chunk header, plus the samples.
     pub const RIFF_SIZE_BEFORE_DATA: usize = Self::HEADER_SIZE - 8;
+    /// Int16.
     pub const BYTES_PER_SAMPLE: usize = 2;
 
+    /// Writes a header with zero sizes; `sample_rate` in hertz.
     pub fn create(path: &Path, sample_rate: u32) -> Result<Self, CaptureError> {
         let mut file = File::create(path).map_err(|e| io_error(path, &e))?;
         file.write_all(&Self::header(sample_rate, 0))
@@ -53,16 +55,19 @@ impl WavStreamWriter {
         })
     }
 
+    /// Where it writes.
     #[must_use]
     pub fn path(&self) -> &Path {
         &self.path
     }
 
+    /// Samples written so far.
     #[must_use]
     pub fn samples_written(&self) -> usize {
         self.samples_written
     }
 
+    /// Appends `samples`.
     pub fn write(&mut self, samples: &[i16]) -> Result<(), CaptureError> {
         let Some(file) = self.file.as_mut() else {
             return Ok(());
@@ -88,6 +93,7 @@ impl WavStreamWriter {
         Ok(())
     }
 
+    /// Patches the sizes, syncs and closes; once.
     pub fn finish(&mut self) -> Result<(), CaptureError> {
         let Some(mut file) = self.file.take() else {
             return Ok(());
@@ -100,6 +106,7 @@ impl WavStreamWriter {
         Ok(())
     }
 
+    /// Seconds written.
     #[must_use]
     pub fn duration(&self) -> f64 {
         let samples = self.samples_written as f64;
@@ -128,6 +135,7 @@ impl WavStreamWriter {
     }
 }
 
+/// Why a WAV could not be read.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum WavReadError {
     /// Not 16-bit integer or 32-bit float PCM.
@@ -136,6 +144,7 @@ pub enum WavReadError {
     /// Not a RIFF/WAVE file, or a chunk is truncated.
     #[error("malformed WAV file: {0}")]
     Malformed(String),
+    /// A read failed: the path and the error.
     #[error("{0}")]
     Io(String),
 }
@@ -144,30 +153,38 @@ pub enum WavReadError {
 /// and common recorders produce.
 #[derive(Debug, Clone, PartialEq)]
 pub struct WavFile {
+    /// Hertz.
     pub sample_rate: u32,
+    /// 16 or 32.
     pub bits_per_sample: u16,
+    /// 32-bit float rather than 16-bit integer.
     pub is_float: bool,
+    /// De-interleaved, as `f32` in -1..1.
     pub channels: Vec<Vec<f32>>,
 }
 
 impl WavFile {
+    /// Frames per channel.
     #[must_use]
     pub fn frame_count(&self) -> usize {
         self.channels.first().map_or(0, Vec::len)
     }
 
+    /// Seconds.
     #[must_use]
     pub fn duration(&self) -> f64 {
         let frames = self.frame_count() as f64;
         frames / f64::from(self.sample_rate)
     }
 
+    /// Reads the whole file.
     pub fn read(path: &Path) -> Result<Self, WavReadError> {
         let data = std::fs::read(path)
             .map_err(|e| WavReadError::Io(format!("{}: {e}", path.display())))?;
         Self::read_bytes(&data)
     }
 
+    /// Parses `data` as RIFF/WAVE.
     pub fn read_bytes(data: &[u8]) -> Result<Self, WavReadError> {
         if data.len() < 12 || &data[..4] != b"RIFF" || &data[8..12] != b"WAVE" {
             return Err(WavReadError::Malformed("missing RIFF/WAVE tags".into()));

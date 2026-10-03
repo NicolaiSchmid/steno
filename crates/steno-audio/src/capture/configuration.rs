@@ -10,13 +10,17 @@ use steno_core::{AudioAsset, AudioLane};
 
 use crate::SAMPLE_RATE;
 
-/// Call: two lanes, `Mic` ("me") and `System` ("them") with echo
-/// cancellation. In person: one `Mixed` room lane from the microphone, no
-/// tap, no echo cancellation.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum CaptureMode {
-    Call,
-    InPerson,
+steno_core::string_enum! {
+    /// How a meeting is captured; the raw values are Swift's `CaptureMode`
+    /// cases as `Settings` and the bridge spell them.
+    pub enum CaptureMode {
+        /// Two lanes, `Mic` ("me") and `System` ("them"), with echo
+        /// cancellation.
+        Call = "call",
+        /// One `Mixed` room lane from the microphone: no tap, no echo
+        /// cancellation.
+        InPerson = "inPerson",
+    }
 }
 
 impl CaptureMode {
@@ -30,8 +34,10 @@ impl CaptureMode {
     }
 }
 
+/// What a session records and where.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CaptureConfiguration {
+    /// Call or in person: decides the lanes and the echo cancellation.
     pub mode: CaptureMode,
     /// `None`: the default input device.
     pub input_device_uid: Option<String>,
@@ -49,6 +55,8 @@ pub struct CaptureConfiguration {
 }
 
 impl CaptureConfiguration {
+    /// The defaults: default input device, echo cancellation on, no raw
+    /// microphone lane, no lane override.
     #[must_use]
     pub fn new(mode: CaptureMode, output_directory: impl Into<PathBuf>) -> Self {
         Self {
@@ -79,14 +87,22 @@ impl CaptureConfiguration {
     }
 }
 
+/// Everything a capture can fail with; `Display` is the user-facing text.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, thiserror::Error)]
 pub enum CaptureError {
     /// A Core Audio call failed: which one, and its `OSStatus` (rendered as
     /// the four-character code when it is one).
     #[error("{operation} failed: {}", four_char_code(*status))]
-    CoreAudio { operation: String, status: i32 },
+    CoreAudio {
+        /// The HAL function or property.
+        operation: String,
+        /// The `OSStatus` it returned.
+        status: i32,
+    },
+    /// No input device resolves: none plugged in, or the stored UID is gone.
     #[error("the input device is not available")]
     InputDeviceUnavailable,
+    /// No default system output device.
     #[error("the output device is not available")]
     OutputDeviceUnavailable,
     /// The aggregate's input streams did not match the expected lanes.
@@ -96,7 +112,10 @@ pub enum CaptureError {
     /// fixed at another rate); the user changes it in Audio MIDI Setup or
     /// picks another output. The rate is carried as whole hertz.
     #[error("the audio devices run at {actual} Hz, not {} Hz", SAMPLE_RATE as u32)]
-    SampleRateMismatch { actual: u32 },
+    SampleRateMismatch {
+        /// The rate the devices run at, whole hertz.
+        actual: u32,
+    },
     /// The tap never rose above [`LaneLevel::SILENT_PEAK_LINEAR`] during
     /// the whole session.
     #[error("the system lane stayed silent")]
@@ -105,6 +124,8 @@ pub enum CaptureError {
     /// restarted within `CaptureSession::RESTART_ATTEMPTS`.
     #[error("an audio device disappeared")]
     DeviceLost,
+    /// A file write failed (its description); the recording is finalised as
+    /// far as it got.
     #[error("writing the recording failed: {0}")]
     WriterFailed(String),
     /// A backend error that is none of the above (its description).
@@ -118,7 +139,7 @@ pub enum CaptureError {
 /// Renders an `OSStatus` as its four-character code when it is one
 /// (`'!obj'`, `'who?'`), else as the number.
 #[must_use]
-pub fn four_char_code(status: i32) -> String {
+pub(crate) fn four_char_code(status: i32) -> String {
     // The bit pattern is what the four characters are packed in.
     let bytes = (status as u32).to_be_bytes();
     if bytes.iter().all(|b| (0x20..0x7f).contains(b)) {
@@ -133,24 +154,34 @@ pub fn four_char_code(status: i32) -> String {
 /// session's statistics.
 #[derive(Debug, Clone, PartialEq)]
 pub struct CaptureResult {
+    /// The master with its sidecars.
     pub asset: AudioAsset,
+    /// Duration, drops, silence and device changes.
     pub statistics: CaptureStatistics,
 }
 
+/// The session's state machine; see the `session` module doc.
 #[derive(Debug, Clone, PartialEq)]
 pub enum CaptureState {
+    /// Nothing is recording.
     Idle,
+    /// `start` is bringing the backend up.
     Starting,
+    /// Frames are flowing.
     Recording {
+        /// When the backend began delivering, wall time.
         started_at: DateTime<Utc>,
     },
+    /// `stop` is tearing down.
     Stopping,
     /// `recording` is `None` when the start produced nothing, and the
     /// finalised partial recording when a device stayed lost or the writer
     /// failed mid-meeting; `stop()` returns the same value or fails when it
     /// is `None`.
     Failed {
+        /// What ended the recording.
         error: CaptureError,
+        /// The finalised partial recording, when there is one.
         recording: Option<Box<CaptureResult>>,
     },
 }
@@ -181,7 +212,9 @@ impl CaptureState {
 /// RMS and peak of one lane over the last metering window, in dBFS.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct LaneLevel {
+    /// RMS over the window, dBFS.
     pub rms: f32,
+    /// Peak over the window, dBFS.
     pub peak: f32,
 }
 
@@ -200,7 +233,9 @@ impl LaneLevel {
 /// Published at 10 Hz; `system` is `None` in `InPerson`.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct LaneLevels {
+    /// The microphone, or the room lane in person.
     pub mic: LaneLevel,
+    /// The tap; `None` in person.
     pub system: Option<LaneLevel>,
 }
 
@@ -208,9 +243,13 @@ pub struct LaneLevels {
 /// settled. The synthetic backend reports `DefaultInputChanged`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum DeviceChangeReason {
+    /// The default output device moved; the tap follows it.
     DefaultOutputChanged,
+    /// The default input device moved.
     DefaultInputChanged,
+    /// The output device the capture started on is gone.
     OutputDeviceGone,
+    /// The input device the capture started on is gone.
     InputDeviceGone,
     /// The aggregate no longer runs at [`SAMPLE_RATE`].
     SampleRateChanged,
@@ -221,15 +260,19 @@ pub enum DeviceChangeReason {
 /// loss is not a notice; `states` carries `Failed(DeviceLost)`.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum CaptureNotice {
+    /// A change was reported; the rebuild begins.
     DeviceChanged(DeviceChangeReason),
     /// `attempt` is the restart that succeeded (1 when the first did);
     /// `gap_seconds` the silence written for this gap.
     DeviceResumed {
+        /// Restarts it took.
         attempt: usize,
+        /// Silence written for the gap, seconds.
         gap_seconds: f64,
     },
 }
 
+/// What `stop()` reports beside the asset.
 #[derive(Debug, Clone, PartialEq)]
 pub struct CaptureStatistics {
     /// Seconds of audio written to the master.

@@ -10,13 +10,20 @@
 
 use super::configuration::DeviceChangeReason;
 
+/// The devices a capture runs on at one moment; see the module doc.
 #[derive(Debug, Clone, PartialEq)]
 pub struct DeviceSnapshot {
+    /// The default system output: the aggregate's clock master.
     pub output_uid: Option<String>,
+    /// The default output, which the tap mirrors.
     pub default_output_uid: Option<String>,
+    /// The microphone; `None` without a microphone lane.
     pub input_uid: Option<String>,
+    /// The output device the capture started on still answers `DeviceIsAlive`.
     pub output_alive: bool,
+    /// The input device the capture started on still answers `DeviceIsAlive`.
     pub input_alive: bool,
+    /// The aggregate's nominal rate; 0 once it is gone.
     pub sample_rate: f64,
 }
 

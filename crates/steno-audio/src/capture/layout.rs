@@ -14,12 +14,16 @@ use super::configuration::CaptureError;
 /// for a non-interleaved channel).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ChannelRef {
+    /// Index into the callback's buffer list.
     pub buffer: usize,
+    /// The first sample's offset inside a frame of that buffer.
     pub offset: usize,
+    /// Samples between consecutive frames: the buffer's channel count.
     pub stride: usize,
 }
 
 impl ChannelRef {
+    /// A reference from its three indices.
     #[must_use]
     pub const fn new(buffer: usize, offset: usize, stride: usize) -> Self {
         Self {
@@ -34,13 +38,18 @@ impl ChannelRef {
 /// is folded to the mono system lane.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LaneSource {
+    /// The lane this source feeds.
     pub lane: AudioLane,
+    /// Its channel.
     pub left: ChannelRef,
+    /// A second channel folded in: a stereo tap to the mono system lane.
     pub right: Option<ChannelRef>,
 }
 
+/// Where every lane's samples sit in the aggregate's input buffers.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StreamLayout {
+    /// One per lane, in lane order.
     pub sources: Vec<LaneSource>,
     /// True when the HAL placed the tap's streams before the sub-devices'.
     pub tap_first: bool,

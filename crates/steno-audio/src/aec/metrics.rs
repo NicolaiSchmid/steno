@@ -8,6 +8,7 @@ use steno_core::EchoCanceller;
 
 use crate::realtime::LevelMeter;
 
+/// Namespace for the measurement helpers; no state.
 pub struct EchoMetrics;
 
 impl EchoMetrics {

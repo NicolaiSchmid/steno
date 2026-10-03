@@ -10,6 +10,7 @@
 
 use crate::aec::EchoMetrics;
 
+/// Namespace for the generators; see the module doc.
 pub struct AudioFixtures;
 
 /// SplitMix64, as `Sources/StenoCore/Testing/SplitMix64.swift`.
@@ -17,6 +18,7 @@ pub struct AudioFixtures;
 pub struct SplitMix64(pub u64);
 
 impl SplitMix64 {
+    /// The next 64 bits.
     #[allow(clippy::should_implement_trait)]
     pub fn next(&mut self) -> u64 {
         self.0 = self.0.wrapping_add(0x9E37_79B9_7F4A_7C15);
@@ -35,6 +37,7 @@ impl SplitMix64 {
 }
 
 impl AudioFixtures {
+    /// Every fixture is 48 kHz.
     pub const SAMPLE_RATE: f64 = 48_000.0;
 
     /// A sine of `frequency` for `seconds` at `amplitude`.
@@ -86,6 +89,8 @@ impl AudioFixtures {
         Self::speech_like_far_with(seconds, 0x5EED_0048, 0.7, 0.7)
     }
 
+    /// As [`Self::speech_like_far`] with the seed, the peak and the spectral
+    /// tilt chosen.
     #[must_use]
     pub fn speech_like_far_with(seconds: f64, seed: u64, peak: f64, tilt: f32) -> Vec<f32> {
         let raw = Self::noise(seconds, seed, 1.0);
@@ -120,6 +125,8 @@ impl AudioFixtures {
         Self::room_impulse_response_with(0.1, 48, 0.1, 0x1200_0000)
     }
 
+    /// As [`Self::room_impulse_response`] with the length, the reflection
+    /// count, their gain and the seed chosen.
     #[must_use]
     pub fn room_impulse_response_with(
         seconds: f64,
@@ -148,6 +155,8 @@ impl AudioFixtures {
         Self::echo_mic_with(far, impulse_response, 0.060, 0.5, 0x0A0B_0C0D, 0.001)
     }
 
+    /// As [`Self::echo_mic`] with the delay, the echo gain, the noise seed and
+    /// the noise level chosen.
     #[must_use]
     pub fn echo_mic_with(
         far: &[f32],
@@ -174,11 +183,13 @@ impl AudioFixtures {
             .collect()
     }
 
+    /// Swift's integer phase step for `frequency` at 48 kHz.
     #[must_use]
     pub fn phase_increment(frequency: f64) -> u32 {
         (frequency / Self::SAMPLE_RATE * 4_294_967_296.0).round() as u32
     }
 
+    /// The sine of a 32-bit phase.
     #[must_use]
     pub fn sine(phase: u32) -> f64 {
         (2.0 * std::f64::consts::PI * f64::from(phase) / 4_294_967_296.0).sin()

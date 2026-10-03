@@ -16,6 +16,8 @@ use std::path::{Path, PathBuf};
 use super::io_error;
 use crate::capture::CaptureError;
 
+/// Streams Float32 PCM into a CAF whose data size stays -1 until `finish`;
+/// see the module doc.
 pub struct CafStreamWriter {
     path: PathBuf,
     sample_rate: f64,
@@ -48,6 +50,7 @@ impl CafStreamWriter {
     pub const EDIT_COUNT_SIZE: usize = 4;
     /// `kCAFLinearPCMFormatFlagIsFloat | kCAFLinearPCMFormatFlagIsLittleEndian`.
     pub const FLOAT_LITTLE_ENDIAN_FLAGS: u32 = 0b11;
+    /// Float32.
     pub const BYTES_PER_SAMPLE: usize = 4;
     /// Everything before the first sample: 68 bytes.
     pub const HEADER_SIZE: usize = Self::FILE_HEADER_SIZE
@@ -60,6 +63,7 @@ impl CafStreamWriter {
     pub const DATA_SIZE_OFFSET: u64 =
         (Self::FILE_HEADER_SIZE + Self::CHUNK_HEADER_SIZE + Self::DESC_CHUNK_SIZE + 4) as u64;
 
+    /// Writes the header: `channels` interleaved Float32 at `sample_rate`.
     pub fn create(path: &Path, sample_rate: f64, channels: usize) -> Result<Self, CaptureError> {
         assert!(channels > 0, "a CAF needs at least one channel");
         let mut file = File::create(path).map_err(|e| io_error(path, &e))?;
@@ -75,11 +79,13 @@ impl CafStreamWriter {
         })
     }
 
+    /// Where it writes.
     #[must_use]
     pub fn path(&self) -> &Path {
         &self.path
     }
 
+    /// Frames written so far.
     #[must_use]
     pub fn frames_written(&self) -> usize {
         self.frames_written
@@ -163,12 +169,16 @@ impl CafStreamWriter {
     }
 }
 
+/// Why a CAF could not be read.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum CafReadError {
+    /// Not a CAF, or a chunk runs past the end.
     #[error("malformed CAF file: {0}")]
     Malformed(String),
+    /// Not Float32 little-endian PCM.
     #[error("unsupported CAF format: {0}")]
     UnsupportedFormat(String),
+    /// A read failed: the path and the error.
     #[error("{0}")]
     Io(String),
 }
@@ -179,28 +189,34 @@ pub enum CafReadError {
 /// [`SymphoniaAudioCodec`](crate::codec::SymphoniaAudioCodec).
 #[derive(Debug, Clone, PartialEq)]
 pub struct CafFile {
+    /// Hertz.
     pub sample_rate: f64,
+    /// De-interleaved channels.
     pub channels: Vec<Vec<f32>>,
 }
 
 impl CafFile {
+    /// Frames per channel.
     #[must_use]
     pub fn frame_count(&self) -> usize {
         self.channels.first().map_or(0, Vec::len)
     }
 
+    /// Seconds.
     #[must_use]
     pub fn duration(&self) -> f64 {
         let frames = self.frame_count() as f64;
         frames / self.sample_rate
     }
 
+    /// Reads the whole file.
     pub fn read(path: &Path) -> Result<Self, CafReadError> {
         let data = std::fs::read(path)
             .map_err(|e| CafReadError::Io(format!("{}: {e}", path.display())))?;
         Self::read_bytes(&data)
     }
 
+    /// Parses `data` as a CAF.
     pub fn read_bytes(data: &[u8]) -> Result<Self, CafReadError> {
         if data.len() < 8 || &data[..4] != b"caff" {
             return Err(CafReadError::Malformed("missing caff header".into()));

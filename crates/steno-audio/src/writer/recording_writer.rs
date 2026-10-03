@@ -30,16 +30,24 @@ use crate::{FRAME_SIZE, SAMPLE_RATE};
 /// over the writer thread's buffers, valid for the duration of `write`.
 #[derive(Debug)]
 pub struct LaneFrames<'a> {
+    /// Samples per lane.
     pub frame_count: usize,
+    /// One slice per lane, in the session's lane order.
     pub lanes: &'a [&'a [f32]],
+    /// The microphone before cancellation, when kept.
     pub raw_mic: Option<&'a [f32]>,
 }
 
+/// The files one recording produced.
 #[derive(Debug, Clone, PartialEq)]
 pub struct RecordingFiles {
+    /// The 48 kHz CAF.
     pub master: PathBuf,
+    /// One 16 kHz WAV per lane.
     pub sidecars_16k: BTreeMap<AudioLane, PathBuf>,
+    /// `mic.raw.caf`, when kept.
     pub raw_mic: Option<PathBuf>,
+    /// Seconds in the master.
     pub duration: f64,
 }
 
@@ -50,10 +58,14 @@ pub trait RecordingWriting: Send {
     /// The files and the duration written so far; valid before `finish()`
     /// and after a failed one, so the session can still hand out the asset.
     fn files(&self) -> RecordingFiles;
+    /// One frame for every lane.
     fn write(&mut self, frames: &LaneFrames<'_>) -> Result<(), CaptureError>;
+    /// Patches the headers and closes the files; once.
     fn finish(&mut self) -> Result<RecordingFiles, CaptureError>;
 }
 
+/// The production writer: the master CAF, one sidecar per lane through the
+/// 3:1 FIR, the raw microphone when kept; see the module doc.
 pub struct RecordingWriter {
     layout: RecordingLayout,
     lanes: Vec<AudioLane>,
@@ -120,11 +132,13 @@ impl RecordingWriter {
         })
     }
 
+    /// The folder layout it writes into.
     #[must_use]
     pub fn layout(&self) -> &RecordingLayout {
         &self.layout
     }
 
+    /// The lanes, in master channel order.
     #[must_use]
     pub fn lanes(&self) -> &[AudioLane] {
         &self.lanes

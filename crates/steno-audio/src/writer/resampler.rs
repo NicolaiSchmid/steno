@@ -7,6 +7,7 @@
 //! byte-identical between CI and a Mac. One instance per lane; it keeps the
 //! filter history between calls.
 
+/// The 3:1 decimator; see the module doc.
 #[derive(Debug, Clone)]
 pub struct Resampler48kTo16k {
     frame_size: usize,
@@ -16,7 +17,9 @@ pub struct Resampler48kTo16k {
 }
 
 impl Resampler48kTo16k {
+    /// 48 kHz to 16 kHz.
     pub const FACTOR: usize = 3;
+    /// Filter length.
     pub const TAPS: usize = 192;
 
     /// `frame_size` must be a multiple of 3.
@@ -34,6 +37,7 @@ impl Resampler48kTo16k {
         }
     }
 
+    /// Input samples per `process`.
     #[must_use]
     pub fn frame_size(&self) -> usize {
         self.frame_size

@@ -12,6 +12,7 @@ use std::time::Duration;
 
 use crate::clock::{Cancel, Clock};
 
+/// A clock tests move by hand; see the module doc.
 #[derive(Debug, Default)]
 pub struct ManualClock {
     state: Mutex<State>,
@@ -30,6 +31,7 @@ struct State {
 }
 
 impl ManualClock {
+    /// At zero, nobody sleeping.
     #[must_use]
     pub fn new() -> Self {
         Self::default()

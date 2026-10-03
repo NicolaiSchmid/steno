@@ -14,6 +14,7 @@
 
 use crate::writer::Resampler48kTo16k;
 
+/// One resampler for one pair of rates; see the module doc.
 #[derive(Debug, Clone)]
 pub struct SincResampler {
     ratio: f64,
@@ -25,7 +26,9 @@ pub struct SincResampler {
 }
 
 impl SincResampler {
+    /// Sub-filters per input sample.
     pub const PHASES: usize = 128;
+    /// Coefficients per sub-filter.
     pub const TAPS: usize = 64;
 
     /// `input_rate` to `output_rate`, both in hertz.

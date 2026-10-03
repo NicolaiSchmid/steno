@@ -37,7 +37,9 @@ use crate::realtime::LaneFrameSink;
 /// hears in a call).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct SyntheticEcho {
+    /// The lane echoed.
     pub of: AudioLane,
+    /// Seconds behind it.
     pub delay: f64,
     /// Linear gain; 0.5 is -6 dB.
     pub gain: f64,
@@ -46,12 +48,16 @@ pub struct SyntheticEcho {
 /// One synthetic lane: a sine, optionally plus an echo of another lane.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct SyntheticLane {
+    /// Hertz; 0 at amplitude 0 is silence.
     pub frequency: f64,
+    /// Linear peak.
     pub amplitude: f64,
+    /// An echo of another lane mixed in.
     pub echo: Option<SyntheticEcho>,
 }
 
 impl SyntheticLane {
+    /// No signal.
     pub const SILENCE: SyntheticLane = SyntheticLane {
         frequency: 0.0,
         amplitude: 0.0,
@@ -68,6 +74,7 @@ impl SyntheticLane {
         }
     }
 
+    /// A tone at `amplitude`.
     #[must_use]
     pub fn new(frequency: f64, amplitude: f64) -> Self {
         Self {
@@ -77,6 +84,7 @@ impl SyntheticLane {
         }
     }
 
+    /// Adds an echo of lane `of`, `delay` seconds behind, at `gain`.
     #[must_use]
     pub fn with_echo(mut self, of: AudioLane, delay: f64, gain: f64) -> Self {
         self.echo = Some(SyntheticEcho { of, delay, gain });
@@ -87,13 +95,21 @@ impl SyntheticLane {
 /// The knobs of [`SyntheticCaptureBackend::new`].
 #[derive(Debug, Clone, PartialEq)]
 pub struct SyntheticOptions {
+    /// What each lane carries.
     pub signals: BTreeMap<AudioLane, SyntheticLane>,
+    /// How long one `start` delivers before the producer ends.
     pub seconds: f64,
+    /// Frames per callback, the HAL's buffer size.
     pub callback_frames: usize,
+    /// Pace the callbacks on the wall clock instead of as fast as possible.
     pub real_time: bool,
+    /// Seconds into a start at which a device change is reported.
     pub change_device_after: Option<f64>,
+    /// How many starts report one.
     pub changes: usize,
+    /// How many restarts after a change fail before one succeeds.
     pub restarts_that_fail: usize,
+    /// The stream the restarted backend reports, when it should differ.
     pub stream_after_restart: Option<CaptureStream>,
 }
 
@@ -115,6 +131,8 @@ impl SyntheticOptions {
         Self::signals(signals, seconds)
     }
 
+    /// `signals` for `seconds`: 512-frame callbacks, as fast as possible, no
+    /// device changes.
     #[must_use]
     pub fn signals(signals: BTreeMap<AudioLane, SyntheticLane>, seconds: f64) -> Self {
         Self {
@@ -129,36 +147,42 @@ impl SyntheticOptions {
         }
     }
 
+    /// Frames per callback.
     #[must_use]
     pub fn callback_frames(mut self, frames: usize) -> Self {
         self.callback_frames = frames;
         self
     }
 
+    /// Report a device change this many seconds into a start.
     #[must_use]
     pub fn change_device_after(mut self, seconds: f64) -> Self {
         self.change_device_after = Some(seconds);
         self
     }
 
+    /// How many starts report a change.
     #[must_use]
     pub fn changes(mut self, count: usize) -> Self {
         self.changes = count;
         self
     }
 
+    /// Fail this many restarts first.
     #[must_use]
     pub fn restarts_that_fail(mut self, count: usize) -> Self {
         self.restarts_that_fail = count;
         self
     }
 
+    /// What the restarted backend reports.
     #[must_use]
     pub fn stream_after_restart(mut self, stream: CaptureStream) -> Self {
         self.stream_after_restart = Some(stream);
         self
     }
 
+    /// Pace on the wall clock.
     #[must_use]
     pub fn real_time(mut self, real_time: bool) -> Self {
         self.real_time = real_time;
@@ -166,6 +190,7 @@ impl SyntheticOptions {
     }
 }
 
+/// The test double for the live backend; see the module doc.
 pub struct SyntheticCaptureBackend {
     options: SyntheticOptions,
     state: Mutex<State>,
@@ -192,6 +217,7 @@ impl std::fmt::Debug for SyntheticCaptureBackend {
 }
 
 impl SyntheticCaptureBackend {
+    /// Built from `options`; nothing runs until `start`.
     #[must_use]
     pub fn new(options: SyntheticOptions) -> Self {
         Self {
@@ -214,6 +240,7 @@ impl SyntheticCaptureBackend {
         Self::new(SyntheticOptions::tones(lanes, tones, seconds))
     }
 
+    /// The options it was built with.
     #[must_use]
     pub fn options(&self) -> &SyntheticOptions {
         &self.options

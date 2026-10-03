@@ -20,18 +20,26 @@ use super::ring::LaneRingBuffer;
 use super::sink::LaneFrameSink;
 use crate::FRAME_SIZE;
 
+/// What a [`ProcessingThread`] is built with.
 pub struct ProcessingConfiguration {
+    /// The lanes, in ring order.
     pub lanes: Vec<AudioLane>,
+    /// Samples per processing frame.
     pub frame_size: usize,
+    /// Applied to the microphone with the system lane as far end; `None`
+    /// passes the microphone through.
     pub echo_canceller: Option<Box<dyn EchoCanceller>>,
     /// Samples the far-end is delayed by before cancellation (0: none).
     pub far_end_delay_frames: usize,
+    /// Also relay the microphone before cancellation.
     pub keep_raw_mic: bool,
     /// Frames per level publish: 10 frames is 100 ms, 10 Hz.
     pub frames_per_level: usize,
 }
 
 impl ProcessingConfiguration {
+    /// [`FRAME_SIZE`] frames, no far-end delay, no raw microphone, levels
+    /// every ten frames.
     #[must_use]
     pub fn new(lanes: &[AudioLane], echo_canceller: Option<Box<dyn EchoCanceller>>) -> Self {
         Self {
@@ -273,6 +281,7 @@ impl ProcessingThread {
         }
     }
 
+    /// The slot the thread publishes levels into.
     #[must_use]
     pub fn levels(&self) -> &Arc<LevelSlot> {
         &self.shared.levels
@@ -290,6 +299,7 @@ impl ProcessingThread {
         self.shared.system_peak()
     }
 
+    /// Spawns the thread; a second call does nothing.
     pub fn start(&mut self) {
         let Some(mut worker) = self.worker.take() else {
             return;

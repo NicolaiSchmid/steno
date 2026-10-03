@@ -79,6 +79,39 @@ pub type RecordingWriterFactory = Arc<
         + Sync,
 >;
 
+/// A recording session over one backend; see the module doc.
+///
+/// ```no_run
+/// use std::sync::Arc;
+///
+/// use steno_audio::testing::SyntheticCaptureBackend;
+/// use steno_audio::{CaptureConfiguration, CaptureMode, CaptureSession, SystemClock};
+/// use steno_core::AudioLane;
+///
+/// // The production session: live devices, Speex, the wall clock.
+/// let configuration = CaptureConfiguration::new(CaptureMode::Call, "/tmp/steno-audio");
+/// let live = CaptureSession::new(configuration.clone())?;
+///
+/// // The same pipeline over two synthetic tones, as the Linux tests run it.
+/// let backend = Arc::new(SyntheticCaptureBackend::tones(
+///     &configuration.lanes(),
+///     &[(AudioLane::Mic, 440.0), (AudioLane::System, 1_000.0)],
+///     2.0,
+/// ));
+/// let session = CaptureSession::with_backend(
+///     configuration,
+///     backend,
+///     None,
+///     CaptureSession::DEFAULT_WRITER_HEADROOM_FRAMES,
+///     Arc::new(SystemClock::new()),
+/// )?;
+/// session.start(uuid::Uuid::new_v4())?;
+/// std::thread::sleep(std::time::Duration::from_secs(2));
+/// let result = session.stop()?;
+/// println!("{:.1} s at {}", result.statistics.duration, result.asset.url);
+/// # drop(live);
+/// # Ok::<(), steno_audio::CaptureError>(())
+/// ```
 pub struct CaptureSession {
     core: Arc<Core>,
 }
@@ -199,6 +232,8 @@ impl CaptureSession {
         )
     }
 
+    /// As [`Self::with_backend`], with the file writer injected too; tests wrap
+    /// the real one to fail writes the way a full disk does.
     pub fn with_writer_factory(
         configuration: CaptureConfiguration,
         backend: Arc<dyn CaptureBackend>,
@@ -239,16 +274,19 @@ impl CaptureSession {
         })
     }
 
+    /// The configuration given at construction.
     #[must_use]
     pub fn configuration(&self) -> &CaptureConfiguration {
         &self.core.configuration
     }
 
+    /// The relay depth between processing and file I/O, in frames.
     #[must_use]
     pub fn writer_headroom_frames(&self) -> usize {
         self.core.writer_headroom_frames
     }
 
+    /// The current state.
     #[must_use]
     pub fn state(&self) -> CaptureState {
         self.core.lock().state.clone()
@@ -295,6 +333,8 @@ impl CaptureSession {
             .map(|active| active.stream.clone())
     }
 
+    /// Starts a recording for `meeting_id` in its own folder of the configured
+    /// directory; `InvalidState` while one is starting, recording or stopping.
     pub fn start(&self, meeting_id: Uuid) -> Result<(), CaptureError> {
         self.core.start(meeting_id)
     }

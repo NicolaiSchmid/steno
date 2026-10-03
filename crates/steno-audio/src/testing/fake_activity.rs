@@ -10,6 +10,8 @@ use std::sync::{Arc, Mutex};
 
 use crate::detection::{ActivityError, ProcessAudioActivity, ProcessAudioActivitySource};
 
+/// A scripted [`ProcessAudioActivitySource`]: tests set the processes and
+/// watch what the detector asks for.
 #[derive(Debug, Default, Clone)]
 pub struct FakeProcessAudioActivity {
     inner: Arc<Mutex<Inner>>,
@@ -24,6 +26,7 @@ struct Inner {
 }
 
 impl FakeProcessAudioActivity {
+    /// Starts with `initial`.
     #[must_use]
     pub fn new(initial: Vec<ProcessAudioActivity>) -> Self {
         Self {
@@ -40,10 +43,12 @@ impl FakeProcessAudioActivity {
         self.lock().snapshot_count
     }
 
+    /// Makes `snapshot` fail with `failure` until cleared with `None`.
     pub fn set_failure(&self, failure: Option<&str>) {
         self.lock().failure = failure.map(str::to_owned);
     }
 
+    /// Replaces the processes and notifies every listener.
     pub fn set(&self, activities: Vec<ProcessAudioActivity>) {
         let listeners = {
             let mut inner = self.lock();
@@ -55,6 +60,7 @@ impl FakeProcessAudioActivity {
         }
     }
 
+    /// Replaces the processes without a notification; the poll must find it.
     pub fn set_silently(&self, activities: Vec<ProcessAudioActivity>) {
         self.lock().activities = activities;
     }

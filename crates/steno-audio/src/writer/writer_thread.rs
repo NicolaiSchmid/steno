@@ -79,6 +79,7 @@ impl Worker {
     }
 }
 
+/// The writer thread's handle; see the module doc.
 pub struct WriterThread {
     worker: Option<Worker>,
     thread: Option<JoinHandle<Worker>>,
@@ -88,6 +89,7 @@ pub struct WriterThread {
 }
 
 impl WriterThread {
+    /// Builds the worker over `relay`; `start` spawns it.
     #[must_use]
     pub fn new(
         relay: Arc<FrameRelay>,
@@ -126,11 +128,13 @@ impl WriterThread {
         }
     }
 
+    /// A write has failed; frames are drained and dropped from now on.
     #[must_use]
     pub fn has_failed(&self) -> bool {
         self.failed.load(Ordering::Acquire)
     }
 
+    /// Spawns the thread; a second call does nothing.
     pub fn start(&mut self) {
         let Some(mut worker) = self.worker.take() else {
             return;

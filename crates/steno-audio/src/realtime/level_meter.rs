@@ -16,11 +16,13 @@ pub struct LevelMeter {
 }
 
 impl LevelMeter {
+    /// Empty: silence until samples arrive.
     #[must_use]
     pub fn new() -> Self {
         Self::default()
     }
 
+    /// Adds `samples` to the window.
     #[inline(always)]
     pub fn accumulate(&mut self, samples: &[f32]) {
         let mut squares = 0.0f64;
@@ -59,6 +61,7 @@ impl LevelMeter {
         }
     }
 
+    /// The window's level, then an empty window.
     pub fn flush(&mut self) -> LaneLevel {
         let level = self.current();
         *self = Self::default();
@@ -90,6 +93,8 @@ pub struct LevelSlot {
 }
 
 impl LevelSlot {
+    /// Silence on every lane; `has_system` says whether a system lane is
+    /// published at all.
     #[must_use]
     pub fn new(has_system: bool) -> Self {
         let silence = LaneLevel::SILENCE;
@@ -103,6 +108,7 @@ impl LevelSlot {
         }
     }
 
+    /// The processing thread's levels for the next reader.
     #[inline(always)]
     pub fn publish(&self, mic: LaneLevel, system: Option<LaneLevel>) {
         self.mic_rms.store(mic.rms.to_bits(), Ordering::Relaxed);
@@ -122,6 +128,7 @@ impl LevelSlot {
         self.generation.load(Ordering::Acquire)
     }
 
+    /// The last published levels.
     #[must_use]
     pub fn levels(&self) -> LaneLevels {
         LaneLevels {

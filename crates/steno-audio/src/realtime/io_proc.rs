@@ -14,6 +14,7 @@ use crate::capture::layout::{ChannelRef, LaneSource};
 /// `None` for a buffer the HAL delivered without data.
 #[derive(Debug, Clone, Copy)]
 pub struct BufferView {
+    /// Interleaved channels in the buffer.
     pub channels: usize,
     /// Interleaved samples; `channels * frames` floats.
     pub data: Option<*const f32>,

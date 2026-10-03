@@ -25,12 +25,22 @@ use std::time::Duration;
 use super::activity::{ActivityError, ProcessAudioActivity, ProcessAudioActivitySource};
 use crate::clock::{Cancel, Clock};
 
+/// What the detector tells its subscribers.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MeetingEvent {
-    MicrophoneOpened { bundle_id: Option<String>, pid: i32 },
+    /// Another process has held the microphone for the debounce.
+    MicrophoneOpened {
+        /// The holder's bundle identifier, when the HAL knows it.
+        bundle_id: Option<String>,
+        /// The holder's process id.
+        pid: i32,
+    },
+    /// The holder let go for the debounce.
     MicrophoneReleased,
 }
 
+/// Polls and listens to a [`ProcessAudioActivitySource`] and debounces it
+/// into [`MeetingEvent`]s; see the module doc.
 pub struct MeetingDetector {
     core: Arc<Core>,
 }
@@ -60,7 +70,9 @@ struct Inner {
 }
 
 impl MeetingDetector {
+    /// How long a state must hold before it is reported.
     pub const DEFAULT_DEBOUNCE: Duration = Duration::from_secs(2);
+    /// Between snapshots when no notification arrives.
     pub const DEFAULT_POLL_INTERVAL: Duration = Duration::from_secs(1);
 
     /// `ignoring_pids` defaults to this process.
@@ -87,16 +99,19 @@ impl MeetingDetector {
         }
     }
 
+    /// The debounce in use.
     #[must_use]
     pub fn debounce(&self) -> Duration {
         self.core.debounce
     }
 
+    /// The poll interval in use.
     #[must_use]
     pub fn poll_interval(&self) -> Duration {
         self.core.poll_interval
     }
 
+    /// `start` has run and `stop` has not.
     #[must_use]
     pub fn is_running(&self) -> bool {
         self.core.lock().running.is_some()
@@ -167,6 +182,8 @@ impl MeetingDetector {
         Ok(())
     }
 
+    /// Stops the poll and listen threads, drops a pending debounce and forgets
+    /// the holder; a second call does nothing.
     pub fn stop(&self) {
         let (running, pending, threads) = {
             let mut inner = self.core.lock();

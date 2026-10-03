@@ -9,6 +9,7 @@
 use super::rings::LaneRings;
 use super::wake::Wake;
 
+/// The processing-to-writer hand-off; see the module doc.
 #[derive(Debug)]
 pub struct FrameRelay {
     channels: usize,
@@ -29,11 +30,13 @@ impl FrameRelay {
         }
     }
 
+    /// Channels per frame.
     #[must_use]
     pub fn channels(&self) -> usize {
         self.channels
     }
 
+    /// Samples per channel per frame.
     #[must_use]
     pub fn frame_size(&self) -> usize {
         self.frame_size
@@ -52,6 +55,7 @@ impl FrameRelay {
         self.rings.ring(0).capacity() / self.frame_size
     }
 
+    /// The rings underneath.
     #[must_use]
     pub fn rings(&self) -> &LaneRings {
         &self.rings
@@ -72,6 +76,8 @@ impl FrameRelay {
         self.rings.has_room(self.frame_size)
     }
 
+    /// Reserves one frame on every channel, or counts the refusal on every
+    /// channel and returns `false`.
     #[inline(always)]
     pub fn begin_frame(&self) -> bool {
         self.rings.reserve(self.frame_size)
@@ -85,6 +91,7 @@ impl FrameRelay {
             .write_slice(&source[..self.frame_size]);
     }
 
+    /// Publishes the frame begun and wakes the writer.
     #[inline(always)]
     pub fn end_frame(&self) {
         self.rings.commit();

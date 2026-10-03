@@ -15,6 +15,8 @@
 use super::ring::LaneRingBuffer;
 use super::wake::Wake;
 
+/// `count` rings advanced together: a reservation on all or none, one
+/// commit, one wake.
 #[derive(Debug)]
 pub struct LaneRings {
     rings: Vec<LaneRingBuffer>,
@@ -32,11 +34,13 @@ impl LaneRings {
         }
     }
 
+    /// Rings.
     #[must_use]
     pub fn count(&self) -> usize {
         self.rings.len()
     }
 
+    /// Ring `channel`.
     #[must_use]
     pub fn ring(&self, channel: usize) -> &LaneRingBuffer {
         &self.rings[channel]
