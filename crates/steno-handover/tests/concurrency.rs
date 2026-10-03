@@ -21,7 +21,7 @@ use common::{EngineDevice, ScriptedIntake, TestService, engine_hello, seeded_byt
 use steno_core::{AudioFormat, HandoverState, HandoverStateKind};
 use steno_handover::engine::{HandoverRequest, Principal, RequestHandling as _};
 use steno_handover::route::Route;
-use steno_handover::{HandoverConfiguration, HandoverService, wire};
+use steno_handover::{HandoverConfiguration, wire};
 use uuid::Uuid;
 
 fn meeting_id() -> Uuid {
@@ -31,30 +31,37 @@ fn meeting_id() -> Uuid {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_pairing_secret_pairs_exactly_once_under_concurrent_use() {
     // Both requests passed the gate (the session was open at both heads)
-    // and run on different worker threads, as two connections do; the
-    // second must find the session gone, not a save still in flight. The
-    // race is a few microseconds wide, so the round repeats, each time with
-    // a body padded to the JSON limit to keep the parse inside the window.
+    // and enter the engine at the same instant on two threads, as two
+    // connections on two workers do: a barrier releases them together.
+    // The second must find the session gone, not a save still in flight.
+    // Each body is padded to the JSON limit, so the parse between the
+    // check and the take is wide enough for the other thread to land in.
     let test = TestService::with(common::Options {
         start: false,
         ..common::Options::default()
     })
     .await;
+    let runtime = tokio::runtime::Handle::current();
     for round in 0..ROUNDS {
         let _ = test.service.begin_pairing();
-        let (legitimate, intruder) = (Uuid::new_v4(), Uuid::new_v4());
-        let first = tokio::spawn(pair_padded(
-            test.service.clone(),
-            legitimate,
-            "Nicolai's iPhone",
-        ));
-        let second = tokio::spawn(pair_padded(
-            test.service.clone(),
-            intruder,
-            "Photographed QR",
-        ));
-        let (first, second) = (first.await.unwrap(), second.await.unwrap());
-        let mut statuses = vec![first.status.as_u16(), second.status.as_u16()];
+        let barrier = Arc::new(std::sync::Barrier::new(2));
+        let racers = [
+            (Uuid::new_v4(), "Nicolai's iPhone"),
+            (Uuid::new_v4(), "Photographed QR"),
+        ]
+        .map(|(device_id, device_name)| {
+            let request = padded_pair_request(device_id, device_name);
+            let (service, barrier, runtime) =
+                (test.service.clone(), barrier.clone(), runtime.clone());
+            tokio::task::spawn_blocking(move || {
+                barrier.wait();
+                runtime.block_on(service.engine.handle(request))
+            })
+        });
+        let mut statuses = Vec::new();
+        for racer in racers {
+            statuses.push(racer.await.unwrap().status.as_u16());
+        }
         statuses.sort_unstable();
         assert_eq!(
             statuses,
@@ -72,14 +79,10 @@ async fn a_pairing_secret_pairs_exactly_once_under_concurrent_use() {
 
 const ROUNDS: usize = 100;
 
-/// `POST /v1/pair` through the engine with the body padded by whitespace
-/// to the JSON limit: a legal request whose parse takes long enough for
-/// the other thread to arrive.
-async fn pair_padded(
-    service: Arc<HandoverService>,
-    device_id: Uuid,
-    device_name: &str,
-) -> steno_handover::engine::HandoverResponse {
+/// `POST /v1/pair` past the gate with the body padded by whitespace to the
+/// JSON limit: a legal request whose parse takes long enough for the other
+/// thread to arrive.
+fn padded_pair_request(device_id: Uuid, device_name: &str) -> HandoverRequest {
     let json = serde_json::to_vec(&wire::PairRequest {
         device_id,
         device_name: device_name.to_owned(),
@@ -90,10 +93,7 @@ async fn pair_padded(
     body.push(b'{');
     body.resize(1 + padding, b' ');
     body.extend_from_slice(&json[1..]);
-    service
-        .engine
-        .handle(HandoverRequest::new(Route::Pair, Principal::Pairing).with_body(body))
-        .await
+    HandoverRequest::new(Route::Pair, Principal::Pairing).with_body(body)
 }
 
 #[tokio::test]
