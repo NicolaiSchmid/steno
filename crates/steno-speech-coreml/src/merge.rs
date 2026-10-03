@@ -691,6 +691,24 @@ mod tests {
     }
 
     #[test]
+    fn case_only_duplicates_starting_with_a_digit_are_kept() {
+        // Swift collapses only when the core's first character is a
+        // letter (`currentCore.first?.isLetter`): " 3D"(1) then " 3d"(2)
+        // within the overlap both stay.
+        let vocab = Vocab::from_pieces(
+            [(1, " 3D"), (2, " 3d"), (3, " hello")]
+                .into_iter()
+                .map(|(id, piece)| (id, piece.to_owned()))
+                .collect(),
+        );
+        let tokens = vec![token(3, 10), token(1, 20), token(2, 22), token(3, 30)];
+        assert_eq!(
+            ids(&collapse_seam_word_duplicates(&tokens, &vocab)),
+            vec![3, 1, 2, 3]
+        );
+    }
+
+    #[test]
     fn word_neighbor_walks_past_punctuation() {
         let vocab = sample();
         let stream = vec![token(12, 1), token(4, 2), token(13, 10)];
