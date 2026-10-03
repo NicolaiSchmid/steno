@@ -44,6 +44,13 @@ name: Rust CI
 # `crates/steno-speech-coreml/tests/parity.rs` and the `steno-coreml-parity`
 # binary, run by hand, never here.
 #
+# steno-audio's PipeWire backend (WP5b) builds on Linux against the
+# libpipewire headers (scripts/setup-linux.sh installs them). The Linux job
+# also runs its live tests, `crates/steno-audio/tests/pipewire.rs`, against
+# a private headless daemon with WirePlumber and null devices that
+# `scripts/pipewire-headless.sh` starts: real links, real cycles, and the
+# allocation count on PipeWire's own data-loop thread.
+#
 # The `tsan` job runs the audio ring tests under ThreadSanitizer: the
 # two-thread accounting test in `crates/steno-audio/tests/ring.rs` is what
 # catches a weakened memory ordering on the ring indices, and only a
@@ -65,6 +72,7 @@ on:
       - 'apps/macos/web/package.json'
       - 'apps/macos/web/pnpm-lock.yaml'
       - 'scripts/setup-linux.sh'
+      - 'scripts/pipewire-headless.sh'
       - '.github/workflows/rust-ci.yml'
   push:
     branches: ['main']
@@ -80,6 +88,7 @@ on:
       - 'apps/macos/web/package.json'
       - 'apps/macos/web/pnpm-lock.yaml'
       - 'scripts/setup-linux.sh'
+      - 'scripts/pipewire-headless.sh'
       - '.github/workflows/rust-ci.yml'
 
 concurrency:
@@ -198,6 +207,13 @@ jobs:
           if [ "$RUNNER_OS" = Windows ]; then
             ran on_windows_the_adapter_table_has_a_row_for_every_ipv4_interface
           fi
+      - name: PipeWire live tests
+        if: matrix.name == 'linux'
+        timeout-minutes: 10
+        run: >-
+          scripts/pipewire-headless.sh
+          cargo test -p steno-audio --test pipewire --locked
+          -- --ignored --test-threads=1 --nocapture
 
       # The desktop release workflow's platform filter.
       - name: Desktop release matrix
@@ -270,6 +286,12 @@ jobs:
       - uses: dtolnay/rust-toolchain@nightly
         with:
           components: rust-src
+      # steno-audio links libpipewire on Linux and generates its bindings
+      # with libclang at build time.
+      - name: PipeWire headers
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libpipewire-0.3-dev libclang-dev
       - uses: Swatinem/rust-cache@v2
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}

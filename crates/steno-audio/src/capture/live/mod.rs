@@ -1,10 +1,11 @@
-//! The live capture backend: on macOS a CoreAudio process tap plus the
-//! microphone in a private aggregate device with one IOProc, device-change
-//! listeners, coalescing and the rebuild report. PipeWire and WASAPI are
-//! the stubs here, failing at `start`, until WP5b and WP10 of
-//! `.plans/2026-10-02-rust-core-and-tauri-shell.md` fill them; both
-//! implement [`CaptureBackend`](super::CaptureBackend) behind this same
-//! name.
+//! The live capture backend, one per platform behind the one name
+//! `LiveCaptureBackend`, each a [`CaptureBackend`](super::CaptureBackend):
+//! on macOS a CoreAudio process tap plus the microphone in a private
+//! aggregate device with one IOProc (`backend`); on Linux one PipeWire
+//! capture stream linked to the microphone and the default sink's monitor
+//! (`pipewire`, WP5b of `.plans/2026-10-02-rust-core-and-tauri-shell.md`).
+//! Both coalesce device changes and report them for the session's rebuild.
+//! WASAPI (WP10) is the stub here, failing at `start`.
 //! Swift: `Sources/StenoAudio/Capture/LiveCaptureBackend.swift`.
 
 #[cfg(target_os = "macos")]
@@ -23,7 +24,12 @@ pub use devices::AudioDevices;
 #[cfg(target_os = "macos")]
 pub use hal::CoreAudioError;
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(target_os = "linux")]
+pub mod pipewire;
+#[cfg(target_os = "linux")]
+pub use pipewire::LiveCaptureBackend;
+
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
 pub use stub::LiveCaptureBackend;
 
 /// One device as `steno dev audio-devices` and the app's input picker see
@@ -70,7 +76,7 @@ impl AudioDeviceInfo {
     }
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
 mod stub {
     use std::sync::Arc;
 
@@ -79,8 +85,8 @@ mod stub {
     use crate::capture::{CaptureBackend, CaptureError, CaptureStream};
     use crate::realtime::LaneFrameSink;
 
-    /// On platforms without Core Audio the live backend exists so callers
-    /// compile, and fails at `start`.
+    /// On platforms without Core Audio or PipeWire (Windows until WP10)
+    /// the live backend exists so callers compile, and fails at `start`.
     #[derive(Debug, Default)]
     pub struct LiveCaptureBackend;
 
@@ -100,7 +106,7 @@ mod stub {
             _sink: Arc<LaneFrameSink>,
         ) -> Result<CaptureStream, CaptureError> {
             Err(CaptureError::BackendFailed(
-                "live capture needs macOS (Core Audio) in this build".into(),
+                "live capture needs macOS (Core Audio) or Linux (PipeWire) in this build".into(),
             ))
         }
 
