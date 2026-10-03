@@ -36,9 +36,8 @@ use crate::speech::ModelStoreSpeechModels;
 pub enum BuildError {
     #[error(transparent)]
     Store(#[from] StoreError),
-    /// The database folder could not be created.
-    #[error("database folder: {0}")]
-    Io(#[from] std::io::Error),
+    #[error("Could not create the database folder: {0}")]
+    DatabaseFolder(#[source] std::io::Error),
 }
 
 /// What differs between the shell, the CLI and the tests.
@@ -111,7 +110,7 @@ pub fn local_zone() -> FixedOffset {
 /// Opens (and migrates) the database at `path`, creating its folder.
 pub fn open_store(path: &std::path::Path) -> Result<Arc<Store>, BuildError> {
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
+        std::fs::create_dir_all(parent).map_err(BuildError::DatabaseFolder)?;
     }
     Ok(Arc::new(Store::open(path)?))
 }
@@ -512,6 +511,21 @@ mod tests {
                 .count(),
             1,
             "the transcribe rate was learned under the current engine's id"
+        );
+    }
+
+    #[test]
+    fn a_database_folder_that_cannot_be_created_says_so() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("a-file");
+        std::fs::write(&file, b"").unwrap();
+        let error = open_store(&file.join("steno.sqlite")).err().unwrap();
+        assert!(matches!(error, BuildError::DatabaseFolder(_)));
+        assert!(
+            error
+                .to_string()
+                .starts_with("Could not create the database folder: "),
+            "{error}"
         );
     }
 
