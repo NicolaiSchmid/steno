@@ -200,17 +200,13 @@ pub fn layout(audio: &[f32], speech: &[Range<usize>], config: &ChunkerConfig) ->
             range: start..end,
             cut,
         });
-        start = next_start(start, end, overlap, min_chunk);
+        // The next chunk starts `overlap` before this one's end and at least
+        // `min_chunk` (at least one sample) after this one's start, so an
+        // overlap longer than the chunk still makes linear progress.
+        start = end.saturating_sub(overlap).max(start + min_chunk);
         previous_end = end;
     }
     chunks
-}
-
-/// The next chunk starts `overlap` before this one's end and at least
-/// `min_chunk` (at least one sample) after this one's start, so an overlap
-/// longer than the chunk still makes linear progress.
-fn next_start(start: usize, end: usize, overlap: usize, min_chunk: usize) -> usize {
-    end.saturating_sub(overlap).max(start + min_chunk)
 }
 
 #[cfg(test)]
