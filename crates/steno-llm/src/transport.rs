@@ -221,7 +221,7 @@ fn transport_error(error: &reqwest::Error, secrets: &[String]) -> LlmError {
 
 /// reqwest's message plus every source, so "connection refused" reaches the
 /// user and not only "error sending request".
-fn error_chain(error: &dyn std::error::Error) -> String {
+pub(crate) fn error_chain(error: &dyn std::error::Error) -> String {
     let mut text = error.to_string();
     let mut source = error.source();
     while let Some(cause) = source {

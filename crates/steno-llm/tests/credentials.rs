@@ -732,6 +732,24 @@ async fn a_secret_inside_the_error_code_changes_no_decision() {
     }
 }
 
+/// A refresh that cannot reach the token endpoint names the cause, not only
+/// reqwest's "error sending request".
+#[tokio::test]
+async fn a_refresh_that_cannot_connect_names_the_cause() {
+    let home = CodexHome::new().await;
+    home.write(AuthFile::default().access(&CodexHome::access_token(10, "plus")));
+    // Port 1 (tcpmux) is closed on every runner: the connection is refused.
+    let store = home
+        .store()
+        .with_token_endpoint(url::Url::parse("http://127.0.0.1:1/oauth/token").unwrap());
+    let error = store.current().await.unwrap_err();
+    let CodexCredentialError::RefreshFailed(detail) = &error else {
+        panic!("expected RefreshFailed, got {error:?}");
+    };
+    assert!(detail.starts_with("error sending request"), "{detail}");
+    assert!(detail.contains("Connect"), "the cause is kept: {detail}");
+}
+
 /// What the CLI wrote during the round trip survives the write-back.
 #[tokio::test]
 async fn write_back_overlays_the_files_latest_contents() {

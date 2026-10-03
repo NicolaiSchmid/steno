@@ -643,8 +643,13 @@ impl CodexCredentialStore {
         Ok(Self::credentials_in(&document)?)
     }
 
+    /// reqwest's message plus every source, redacted, as the clients
+    /// report a transport failure.
     fn refresh_failed(error: &reqwest::Error, secrets: &[String]) -> CodexCredentialError {
-        CodexCredentialError::RefreshFailed(transport::redact(&error.to_string(), secrets))
+        CodexCredentialError::RefreshFailed(transport::redact(
+            &transport::error_chain(error),
+            secrets,
+        ))
     }
 
     /// Temp file beside the target with mode 0600, then `rename`: readers
