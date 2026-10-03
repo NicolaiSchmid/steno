@@ -185,6 +185,7 @@ work, the notes at what the next package needs to know.
 
 | Package | Branch | PR | State | Notes |
 |---------|--------|----|-------|-------|
+| Protocols | `feat/rust-protocols` | #162 | PR open | Protocol traits and pipeline value types in `steno-core` (`HandoverIntake`, `SecretStore`, `HandoverReceipt`, `PairedDevice`, `RecordingMetadata`); `feat/rust-handover` carries these commits until #162 merges. |
 | WP7 handover | `feat/rust-handover` | #169 | PR open | `crates/steno-handover`: rustls (ring) listener, TLS 1.3 only, hyper 1 HTTP/1.1, pinned verifier (`pinning`), rcgen identity in the `SecretStore` as one PEM bundle, pairing, seven routes, inbox, mdns-sd advertiser; `tests/wire_contract.rs` reads `wire.ts`. Store gains `paired_device*` and `handover_receipt` queries. Core's `RecordingIntake` (copy into the audio folder, enqueue) waits for WP6: no `RecordingLayout` and no file-URL to path helper in Rust core yet. |
 
 ## Risks
@@ -473,6 +474,10 @@ another release, otherwise the cutover closes them:
   not, and a network change after start needs a restart of the service to be
   re-published. Decide in WP8 whether the shell restarts the service on network
   change or the advertiser re-registers.
+- Service name: Swift's `HandoverConfiguration.defaultServiceName()` uses
+  `Host.current().localizedName` (the computer name in System Settings). The Rust
+  default reads `HOSTNAME` or `/etc/hostname` and falls back to `Steno`; the shell
+  passes the OS computer name on the Mac (WP9) and on Windows (WP10).
 
 ### Bridge
 
