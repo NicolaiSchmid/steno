@@ -107,11 +107,23 @@ impl HandoverRequest {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct HandoverResponse {
     pub status: StatusCode,
     pub headers: Vec<(&'static str, String)>,
     pub body: Bytes,
+}
+
+/// The body of a `/v1/pair` answer carries the bearer token, so the body
+/// shows as its length.
+impl std::fmt::Debug for HandoverResponse {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("HandoverResponse")
+            .field("status", &self.status)
+            .field("headers", &self.headers)
+            .field("body_len", &self.body.len())
+            .finish()
+    }
 }
 
 impl HandoverResponse {

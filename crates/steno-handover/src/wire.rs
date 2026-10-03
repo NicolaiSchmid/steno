@@ -41,13 +41,24 @@ pub struct PairRequest {
 }
 
 /// `POST /v1/pair` response; `token` is the bearer for every later call.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PairResponse {
     pub token: String,
     #[serde(rename = "macID", with = "uuid_text")]
     pub mac_id: Uuid,
     pub mac_name: String,
+}
+
+/// The token authorises every later call; it stays out of every log line.
+impl std::fmt::Debug for PairResponse {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PairResponse")
+            .field("token", &"[redacted]")
+            .field("mac_id", &self.mac_id)
+            .field("mac_name", &self.mac_name)
+            .finish()
+    }
 }
 
 /// `GET /v1/recordings/{id}`, the announce response and the 409 body.

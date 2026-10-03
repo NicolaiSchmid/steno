@@ -11,9 +11,9 @@
 )]
 
 use chrono::{DateTime, Utc};
-use steno_handover::engine::{HandoverRequest, Principal};
+use steno_handover::engine::{HandoverRequest, HandoverResponse, Principal};
 use steno_handover::route::Route;
-use steno_handover::{PairingPayload, PairingPayloadError, base64url};
+use steno_handover::{PairingPayload, PairingPayloadError, base64url, wire};
 use uuid::Uuid;
 
 fn fingerprint() -> Vec<u8> {
@@ -160,4 +160,20 @@ fn debug_output_shows_no_secret_and_no_credential() {
         shown.contains("authorization") && shown.contains("body_len"),
         "{shown}"
     );
+
+    let paired = wire::PairResponse {
+        token: token.to_owned(),
+        mac_id: mac_id(),
+        mac_name: "Mac".to_owned(),
+    };
+    let shown = format!("{paired:?}");
+    assert!(!shown.contains(token), "{shown}");
+    assert!(
+        shown.contains("[redacted]") && shown.contains("Mac"),
+        "{shown}"
+    );
+    let response = HandoverResponse::json(http::StatusCode::OK, &paired);
+    let shown = format!("{response:?}");
+    assert!(!shown.contains(token), "{shown}");
+    assert!(shown.contains("body_len"), "{shown}");
 }
