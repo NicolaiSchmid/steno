@@ -146,6 +146,10 @@ struct Inner {
     /// Bumped per rebuild and never reset, so a rebuild thread that wakes
     /// after a stop and a new start does nothing.
     rebuild_generation: usize,
+    /// Bumped by every `start` and never reset, so a `stop()` that waited
+    /// and a writer failure that arrives late act on their own recording
+    /// only, never on one started meanwhile.
+    recordings_started: usize,
 }
 
 struct Active {
@@ -286,6 +290,7 @@ impl CaptureSession {
                     echo_canceller,
                     active: None,
                     rebuild_generation: 0,
+                    recordings_started: 0,
                 }),
                 state_changed: Condvar::new(),
             }),
@@ -492,6 +497,8 @@ impl Core {
         // `Starting` carries no recording: a failed start must never hand
         // out the previous meeting's files.
         self.set_state(&mut inner, &CaptureState::Starting);
+        inner.recordings_started += 1;
+        let recording = inner.recordings_started;
         // A new recording, possibly on other devices, starts from a cold filter.
         if let Some(canceller) = inner.echo_canceller.as_mut() {
             canceller.reset();
@@ -574,7 +581,7 @@ impl Core {
                 if let Some(core) = on_error.upgrade() {
                     std::thread::Builder::new()
                         .name("steno-wfail".into())
-                        .spawn(move || core.writer_failed(&error))
+                        .spawn(move || core.writer_failed(&error, recording))
                         .expect("spawn writer failure thread");
                 }
             }),
@@ -614,11 +621,19 @@ impl Core {
             // lock back. A poisoned lock is read as it is, so a panic
             // elsewhere does not end the wait early.
             let mut inner = self.lock();
+            let recording = inner.recordings_started;
             while matches!(inner.state, CaptureState::Stopping) {
                 inner = self
                     .state_changed
                     .wait(inner)
                     .unwrap_or_else(PoisonError::into_inner);
+            }
+            // A `start()` took the lock first: the recording this stop was
+            // for has ended, and the new one is not this caller's to stop.
+            if inner.recordings_started != recording {
+                return Err(CaptureError::InvalidState(
+                    "stop after another recording started".into(),
+                ));
             }
             match &inner.state {
                 CaptureState::Recording { .. } => {}
@@ -1078,10 +1093,14 @@ impl Core {
         unwinding.disarm();
     }
 
-    fn writer_failed(&self, error: &CaptureError) {
+    /// The writer thread of the start numbered `recording` failed; a
+    /// failure that arrives after that recording ended is ignored.
+    fn writer_failed(&self, error: &CaptureError, recording: usize) {
         {
             let mut inner = self.lock();
-            if !matches!(inner.state, CaptureState::Recording { .. }) {
+            if !matches!(inner.state, CaptureState::Recording { .. })
+                || inner.recordings_started != recording
+            {
                 return;
             }
             self.set_state(&mut inner, &CaptureState::Stopping);

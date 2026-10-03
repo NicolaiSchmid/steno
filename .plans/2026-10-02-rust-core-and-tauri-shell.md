@@ -398,6 +398,11 @@ parity item until a plan says otherwise:
   the container and drop it before resampling, or accept 23 to 48 ms.
 - **AAC-LC only** through symphonia; HE-AAC is not expected from the iOS
   recorder.
+- **A stop that waited can lose its turn.** Swift's actor runs a `stop()`
+  queued behind a writer failure's or a device loss's finalise right after
+  it. The Rust `stop()` waits on a condition variable, and a `start()` can
+  take the lock first; the stop then answers `InvalidState` and leaves the
+  new recording running, and its caller does not get the failed recording.
 - **`steno dev` tooling** (`capture-spike`, `aec-bench`, `audio-devices`)
   is not ported; it arrives with the CLI in WP6.
 - **Call mode waits for an output client.** Swift and Rust both clock the
