@@ -58,9 +58,10 @@ xvfb-run --auto-servernum --server-args="$server_args" bash -c '
       "$crop" "$3/smoke-root.png" -crop 960x640+1160+0 +repage "$3/settings.png"
       "$crop" "$3/smoke-root.png" -crop 560x620+0+780 +repage "$3/onboarding.png"
       # The panels, where smoke.rs puts them (PANELS_X, PANEL_*_Y), with a
-      # margin around each so the crop survives the page resizing the window.
-      "$crop" "$3/smoke-root.png" -crop 560x100+1140+680 +repage "$3/prompt.png"
-      "$crop" "$3/smoke-root.png" -crop 560x100+1140+780 +repage "$3/bubble.png"
+      # margin around each so the crop survives the page resizing the
+      # window about its top centre, at 120 dpi too.
+      "$crop" "$3/smoke-root.png" -crop 720x100+1040+680 +repage "$3/prompt.png"
+      "$crop" "$3/smoke-root.png" -crop 720x100+1040+780 +repage "$3/bubble.png"
       echo "smoke: cropped main, settings, onboarding, prompt and bubble with $crop"
     fi
   fi

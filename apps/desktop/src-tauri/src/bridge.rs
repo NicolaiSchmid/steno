@@ -107,12 +107,21 @@ pub fn openable_url(text: &str) -> Result<Url, BridgeError> {
         })
 }
 
-/// `panel_call("resize")`: the page's measured size in CSS pixels, which
-/// are logical points.
+/// `panel_call("resize")`: the page's measured size in device pixels (CSS
+/// pixels times `devicePixelRatio`, `deviceSize` in `panel-shell.ts`).
 #[derive(Debug, Deserialize)]
 struct ResizeParams {
     width: f64,
     height: f64,
+}
+
+impl ResizeParams {
+    /// The size in logical points for a window of `scale`. CSS pixels are
+    /// not points everywhere: `WebKitGTK` takes its pixel ratio from the X
+    /// resolution (1.25 at 120 dpi) while the window's scale stays 1.
+    fn logical(&self, scale: f64) -> (f64, f64) {
+        (self.width / scale, self.height / scale)
+    }
 }
 
 fn parse<T: for<'de> Deserialize<'de>>(method: &str, params: Value) -> Result<T, BridgeError> {
@@ -243,10 +252,10 @@ pub async fn panel_call(
     let params = params.unwrap_or(Value::Null);
     match action.as_str() {
         "resize" => {
-            let size: ResizeParams = parse(&action, params)?;
-            app.state::<Smoke>()
-                .note_panel_size(panel.label(), (size.width, size.height));
-            panels::resize(&app, panel, (size.width, size.height))?;
+            let report: ResizeParams = parse(&action, params)?;
+            let size = report.logical(window.scale_factor().map_err(failed)?);
+            app.state::<Smoke>().note_panel_size(panel.label(), size);
+            panels::resize(&app, panel, size)?;
             Ok(Value::Null)
         }
         "dismissPrompt" => {
@@ -498,6 +507,16 @@ mod tests {
         )
         .unwrap();
         assert_eq!((size.width, size.height), (244.5, 40.0));
+        assert_eq!(size.logical(1.0), (244.5, 40.0));
+        // Device pixels at a ratio of 1.25 (120 dpi) on a window of scale 1,
+        // and on a Retina window, where the page's ratio is the scale.
+        let large: ResizeParams = parse(
+            "resize",
+            serde_json::json!({ "width": 100.0, "height": 52.5 }),
+        )
+        .unwrap();
+        assert_eq!(large.logical(1.0), (100.0, 52.5));
+        assert_eq!(large.logical(2.0), (50.0, 26.25));
         let error = parse::<ResizeParams>("resize", serde_json::json!({ "width": 1 })).unwrap_err();
         assert_eq!(error.code, BridgeErrorCode::InvalidParams);
         assert!(error.message.starts_with("resize: "));

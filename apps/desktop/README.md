@@ -49,8 +49,9 @@ what shows: a busy recorder wins, else a pending detection prompt, else
 nothing. Each window is created once and then hidden and shown; the
 prompt's is navigated to each new request, numbered so the page remounts
 and the countdown restarts. The page measures its pill and reports the
-size through the `panel_call` command; the shell rounds it up to whole
-points, clamps it to the screen's work area and sizes the window from it
+size in device pixels through the `panel_call` command; the shell divides
+it by the window's scale factor (WebKitGTK's pixel ratio follows the X
+resolution, the window's scale does not), rounds it up to whole points, clamps it to the screen's work area and sizes the window from it
 (a report that is not a size is `invalidParams`). The prompt's X and that
 size report are the only two things `panel_call` carries; everything else
 the panels do goes through the bridge (`recording.stop`,

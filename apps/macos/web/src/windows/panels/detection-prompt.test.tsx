@@ -113,4 +113,32 @@ describe("DetectionPrompt", () => {
 		expect(shell.calls.filter(([action]) => action === "resize")).toEqual([]);
 		vi.unstubAllGlobals();
 	});
+
+	it("reports its size in device pixels", async () => {
+		vi.stubGlobal(
+			"ResizeObserver",
+			class {
+				observe() {}
+				disconnect() {}
+			},
+		);
+		vi.stubGlobal("devicePixelRatio", 1.25);
+		const measure = vi
+			.spyOn(HTMLElement.prototype, "getBoundingClientRect")
+			.mockReturnValue(new DOMRect(0, 0, 460, 56));
+		const harness = await createBridgeHarness();
+		const shell = fakeShell();
+		renderWithBridge(
+			<DetectionPrompt
+				request={{ appName: "Zoom", seconds: 60 }}
+				shell={shell}
+			/>,
+			harness,
+		);
+		expect(shell.calls.filter(([action]) => action === "resize")).toEqual([
+			["resize", { width: 575, height: 70 }],
+		]);
+		measure.mockRestore();
+		vi.unstubAllGlobals();
+	});
 });
