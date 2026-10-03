@@ -441,6 +441,43 @@ mod tests {
     }
 
     #[test]
+    fn the_system_lan_addresses_can_be_read() {
+        let lan = current_lan_addresses();
+        println!("lan_addresses: {lan:?}");
+        assert!(
+            lan.iter().all(|address| is_lan_address(*address)),
+            "{lan:?}"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn on_windows_the_adapter_table_has_a_row_for_every_ipv4_interface() {
+        /// `IF_TYPE_SOFTWARE_LOOPBACK`.
+        const LOOPBACK: u32 = 24;
+        let adapters = windows_adapters::by_index().expect("GetIfTable2 answers");
+        let loopback: Vec<_> = adapters
+            .values()
+            .filter(|adapter| adapter.if_type == LOOPBACK)
+            .collect();
+        assert!(!loopback.is_empty(), "a loopback row: {adapters:?}");
+        for adapter in loopback {
+            assert!(!adapter.hardware && adapter.oper_up, "{adapter:?}");
+        }
+        for interface in if_addrs::get_if_addrs().unwrap() {
+            if let (IfAddr::V4(_), Some(index)) = (&interface.addr, interface.index)
+                && index != 0
+            {
+                assert!(
+                    adapters.contains_key(&index),
+                    "{} at index {index}: {adapters:?}",
+                    interface.name
+                );
+            }
+        }
+    }
+
+    #[test]
     fn loopback_and_the_lan_addresses_are_accepted_a_tunnel_is_not() {
         let lan = vec![Ipv4Addr::new(192, 168, 1, 20)];
         assert!(accepts_local_address("127.0.0.1".parse().unwrap(), &lan));
