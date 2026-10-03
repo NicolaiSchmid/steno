@@ -265,6 +265,23 @@ impl Harness {
     }
 }
 
+/// Runs `call` on its own thread and returns what it returned, failing the
+/// test after five seconds instead of hanging it: for a call that must not
+/// wait on something the test still holds (a gated download, a sink that
+/// reads the host back).
+pub fn within_five_seconds<R: Send + 'static>(
+    what: &str,
+    call: impl FnOnce() -> R + Send + 'static,
+) -> R {
+    let (sender, receiver) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = sender.send(call());
+    });
+    receiver
+        .recv_timeout(std::time::Duration::from_secs(5))
+        .unwrap_or_else(|_| panic!("{what} did not return within five seconds"))
+}
+
 // The sample meeting the bridge fixtures describe (`BridgeSamples.swift`),
 // as rows the pipeline would have left: three persons, the ready meeting
 // with its asset, four speakers, three turns, two tasks and a decision, an

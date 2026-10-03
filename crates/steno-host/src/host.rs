@@ -81,7 +81,7 @@ use crate::services::Services;
 use crate::settings::{
     AudioSettingsViewModel, GeneralSettingsViewModel, LlmPreset, LlmSettingsViewModel,
     ObsidianSettingsViewModel, PhonesSettingsViewModel, SpeechSettingsViewModel, llm::Probe,
-    overview, snapshots as settings_snapshots, transcription::AssetState,
+    overview, snapshots as settings_snapshots,
 };
 use crate::speakers::{OptionKind, SpeakerOption as ModelOption};
 use crate::speech::{ModelAsset, SpeechEngineId};
@@ -1081,23 +1081,13 @@ impl Host {
             .speech_models
             .download(asset, &mut |fraction, phase| {
                 self.command(&[BridgeTopic::SettingsTranscription], |inner| {
-                    inner.speech.asset_states.insert(
-                        asset,
-                        AssetState::Downloading {
-                            fraction,
-                            phase: phase.to_owned(),
-                        },
-                    );
+                    inner.speech.download_progress(asset, fraction, phase);
                 });
             });
         self.settings_command(BridgeTopic::SettingsTranscription, |inner| {
-            let state = match outcome {
-                Ok(()) => AssetState::Installed {
-                    bytes: self.shared.services.speech_models.installed_size(asset),
-                },
-                Err(error) => AssetState::Failed(error.to_string()),
-            };
-            inner.speech.asset_states.insert(asset, state);
+            inner
+                .speech
+                .finish_download(asset, outcome, &self.shared.services);
         });
     }
 
@@ -1684,26 +1674,27 @@ impl BridgeHost for Host {
         // and publishes as it goes, as Swift's task did.
         {
             let mut inner = self.lock();
-            if matches!(inner.speech.state_of(asset), AssetState::Downloading { .. }) {
+            if !inner.speech.begin_download(asset) {
                 return Ok(());
             }
-            inner.speech.asset_states.insert(
-                asset,
-                AssetState::Downloading {
-                    fraction: 0.0,
-                    phase: "starting".to_owned(),
-                },
-            );
             inner.publisher.schedule(BridgeTopic::SettingsTranscription);
         }
         self.publish();
         let host = self.clone();
-        thread::Builder::new()
+        let spawned = thread::Builder::new()
             .name(format!("steno-download-{}", asset.as_str()))
-            .spawn(move || host.run_download(asset))
-            .map_err(|error| {
-                BridgeError::failed(format!("The download could not start: {error}"))
-            })?;
+            .spawn(move || host.run_download(asset));
+        if let Err(error) = spawned {
+            let message = format!("The download could not start: {error}");
+            self.settings_command(BridgeTopic::SettingsTranscription, |inner| {
+                inner.speech.finish_download(
+                    asset,
+                    Err(message.clone().into()),
+                    &self.shared.services,
+                );
+            });
+            return Err(BridgeError::failed(message));
+        }
         Ok(())
     }
 

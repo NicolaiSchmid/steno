@@ -425,12 +425,13 @@ fn the_download_reply_returns_while_the_download_runs() {
         })
         .build();
     harness.sink.clear();
-    harness
-        .host
-        .settings_transcription_download(AssetIdParams {
+    let host = harness.host.clone();
+    within_five_seconds("the download reply", move || {
+        host.settings_transcription_download(AssetIdParams {
             asset_id: "offlineDiarizer".to_owned(),
         })
-        .unwrap();
+    })
+    .unwrap();
     // Back here while the fake is still held on the gate.
     let asset = &harness.snapshot(BridgeTopic::SettingsTranscription)["assets"][1];
     assert_eq!(asset["state"], "downloading");
@@ -468,6 +469,85 @@ fn the_download_reply_returns_while_the_download_runs() {
         harness.fakes.speech_models.downloads.lock().unwrap().len(),
         1
     );
+}
+
+/// A remove while the download runs detaches it: its late progress does
+/// not mark the asset downloading again, and a second download of the
+/// asset waits until the first thread has ended, as Swift's `downloads`
+/// guard kept one task per asset.
+#[test]
+fn a_remove_detaches_the_download_in_flight() {
+    let gate = Arc::new((Mutex::new(false), Condvar::new()));
+    let harness = Harness::builder()
+        .seed({
+            let gate = gate.clone();
+            move |_, fakes| {
+                *fakes.speech_models.on_download.lock().unwrap() = Some(Box::new(move |_| {
+                    let (open, signal) = &*gate;
+                    let mut open = open.lock().unwrap();
+                    while !*open {
+                        open = signal.wait(open).unwrap();
+                    }
+                }));
+            }
+        })
+        .build();
+    let download = || {
+        harness
+            .host
+            .settings_transcription_download(AssetIdParams {
+                asset_id: "offlineDiarizer".to_owned(),
+            })
+            .unwrap();
+    };
+    download();
+    harness
+        .host
+        .settings_transcription_remove(AssetIdParams {
+            asset_id: "offlineDiarizer".to_owned(),
+        })
+        .unwrap();
+    assert_eq!(
+        harness.snapshot(BridgeTopic::SettingsTranscription)["assets"][1]["state"],
+        "absent"
+    );
+    harness.sink.clear();
+    download();
+    assert_eq!(
+        harness.snapshot(BridgeTopic::SettingsTranscription)["assets"][1]["state"],
+        "absent",
+        "the first download still runs, so the second does not start"
+    );
+    {
+        let (open, signal) = &*gate;
+        *open.lock().unwrap() = true;
+        signal.notify_all();
+    }
+    harness.wait_for("the detached download to end", |harness| {
+        harness
+            .host
+            .snapshot(BridgeTopic::SettingsTranscription)
+            .unwrap()["assets"][1]["state"]
+            == "installed"
+    });
+    assert!(
+        harness
+            .sink
+            .all(BridgeTopic::SettingsTranscription)
+            .iter()
+            .all(|snapshot| snapshot["assets"][1]["state"] != "downloading"),
+        "a detached download's progress is not shown"
+    );
+    assert_eq!(
+        harness.fakes.speech_models.downloads.lock().unwrap().len(),
+        1
+    );
+    // Its thread has ended: the asset downloads again.
+    download();
+    harness.wait_for("the second download to run", |harness| {
+        harness.fakes.speech_models.downloads.lock().unwrap().len() == 2
+    });
+    harness.wait_for_download(1);
 }
 
 /// `settings.recording.refreshDevices` re-reads the input list.

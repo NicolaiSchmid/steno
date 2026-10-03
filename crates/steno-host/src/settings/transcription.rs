@@ -25,6 +25,12 @@ pub enum AssetState {
 pub struct SpeechSettingsViewModel {
     pub engine_id: SpeechEngineId,
     pub asset_states: BTreeMap<ModelAsset, AssetState>,
+    /// The downloads whose thread still runs, each with whether its reports
+    /// still show: a remove detaches the one in flight, so its late
+    /// progress cannot mark the asset downloading again, and a second
+    /// download of the asset waits until that thread has ended. Swift:
+    /// `downloads`.
+    pub downloads: BTreeMap<ModelAsset, bool>,
     pub errors: SectionError,
 }
 
@@ -34,6 +40,7 @@ impl SpeechSettingsViewModel {
         SpeechSettingsViewModel {
             engine_id: SpeechEngineId::ParakeetV3,
             asset_states: BTreeMap::new(),
+            downloads: BTreeMap::new(),
             errors: SectionError::default(),
         }
     }
@@ -178,10 +185,64 @@ impl SpeechSettingsViewModel {
         self.refresh_states(services);
     }
 
+    /// Marks the download started, unless one of the asset's still runs:
+    /// whether the caller should run it. Swift: `download(_:)`'s guard.
+    pub fn begin_download(&mut self, asset: ModelAsset) -> bool {
+        if self.downloads.contains_key(&asset) {
+            return false;
+        }
+        self.downloads.insert(asset, true);
+        self.asset_states.insert(
+            asset,
+            AssetState::Downloading {
+                fraction: 0.0,
+                phase: "starting".to_owned(),
+            },
+        );
+        true
+    }
+
+    /// One progress report, shown unless a remove detached the download.
+    pub fn download_progress(&mut self, asset: ModelAsset, fraction: f64, phase: &str) {
+        if self.downloads.get(&asset) == Some(&true) {
+            self.asset_states.insert(
+                asset,
+                AssetState::Downloading {
+                    fraction,
+                    phase: phase.to_owned(),
+                },
+            );
+        }
+    }
+
+    /// The download's thread ended (or never started): installed or failed;
+    /// a detached download leaves what the model store reports.
+    pub fn finish_download(
+        &mut self,
+        asset: ModelAsset,
+        outcome: Result<(), BoxError>,
+        services: &Services,
+    ) {
+        if self.downloads.remove(&asset) != Some(true) {
+            self.refresh_states(services);
+            return;
+        }
+        let state = match outcome {
+            Ok(()) => AssetState::Installed {
+                bytes: services.speech_models.installed_size(asset),
+            },
+            Err(error) => AssetState::Failed(error.to_string()),
+        };
+        self.asset_states.insert(asset, state);
+    }
+
     pub fn remove(&mut self, asset: ModelAsset, services: &Services) {
         match services.speech_models.remove(asset) {
             Ok(()) => {
                 self.asset_states.insert(asset, AssetState::Absent);
+                if let Some(shows) = self.downloads.get_mut(&asset) {
+                    *shows = false;
+                }
             }
             Err(error) => self
                 .errors
@@ -193,5 +254,32 @@ impl SpeechSettingsViewModel {
 impl Default for SpeechSettingsViewModel {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::fakes::FakeServices;
+
+    /// The host's path when the download thread cannot start: the asset
+    /// leaves `downloading` for the failure, and may be downloaded again.
+    #[test]
+    fn a_download_that_never_ran_shows_its_failure_and_may_start_again() {
+        let fakes = FakeServices::new(chrono::Utc::now());
+        let services = fakes.services();
+        let mut model = SpeechSettingsViewModel::new();
+        assert!(model.begin_download(ModelAsset::OfflineDiarizer));
+        assert!(!model.begin_download(ModelAsset::OfflineDiarizer));
+        model.finish_download(
+            ModelAsset::OfflineDiarizer,
+            Err("The download could not start: no threads".into()),
+            &services,
+        );
+        assert_eq!(
+            model.state_of(ModelAsset::OfflineDiarizer),
+            AssetState::Failed("The download could not start: no threads".to_owned())
+        );
+        assert!(model.begin_download(ModelAsset::OfflineDiarizer));
     }
 }
