@@ -28,6 +28,8 @@ steno-host = { path = "../steno-host", features = ["fakes"] }
 steno-llm = { path = "../steno-llm" }
 steno-pipeline = { path = "../steno-pipeline" }
 steno-speech = { path = "../steno-speech" }
+# A temporary file of each writer's own for `files::replace_file`.
+tempfile.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["rt", "rt-multi-thread", "sync", "macros", "time"] }
 tracing.workspace = true
@@ -41,7 +43,6 @@ steno-speech-coreml = { path = "../steno-speech-coreml" }
 steno-core = { path = "../steno-core", features = ["testing"] }
 steno-llm = { path = "../steno-llm", features = ["testing"] }
 steno-pipeline = { path = "../steno-pipeline", features = ["testing"] }
-tempfile.workspace = true
 
 [lints]
 workspace = true

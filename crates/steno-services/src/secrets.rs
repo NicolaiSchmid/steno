@@ -12,7 +12,7 @@ use std::sync::Arc;
 
 use steno_core::{SecretKey, SecretStore, StenoPaths, async_trait, protocols::BoundaryResult};
 
-use crate::files::{replace_file, restrict_new_file};
+use crate::files::{Access, replace_file, restrict_new_file};
 
 /// The service every Steno keyring entry is filed under, on every
 /// platform: the Swift app's (`KeychainSecretStore.defaultService` in
@@ -149,7 +149,7 @@ impl FileSecretStore {
         let mut map = self.read()?;
         change(&mut map);
         let data = serde_json::to_vec_pretty(&map).map_err(std::io::Error::other)?;
-        replace_file(&self.path, &self.beside(".tmp"), &data, true)
+        replace_file(&self.path, &data, Access::OwnerOnly)
     }
 }
 
@@ -259,14 +259,13 @@ mod tests {
             .unwrap();
         assert_eq!(mode(&path), 0o600);
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
-        // A temporary file a crash left behind, world-readable.
-        std::fs::write(store.beside(".tmp"), b"stale").unwrap();
-        std::fs::set_permissions(store.beside(".tmp"), std::fs::Permissions::from_mode(0o644))
-            .unwrap();
         store.set_secret(&key, Some("k")).await.unwrap();
-        assert_eq!(mode(&path), 0o600);
+        assert_eq!(
+            mode(&path),
+            0o600,
+            "a write replaces the file, mode and all"
+        );
         assert_eq!(mode(&store.beside(".lock")), 0o600);
-        assert!(!store.beside(".tmp").exists());
         let text = std::fs::read_to_string(&path).unwrap();
         assert_eq!(
             serde_json::from_str::<BTreeMap<String, String>>(&text).unwrap(),

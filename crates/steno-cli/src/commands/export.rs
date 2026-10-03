@@ -30,15 +30,8 @@ impl Export {
         let json = steno_adapters::ArtifactRenderer
             .render_json(&export)
             .map_err(Failure::runtime)?;
-        // A partial file a killed process left behind is overwritten and
-        // renamed away by the next export.
-        steno_services::files::replace_file(
-            &path,
-            &out.join(".meeting.json.partial"),
-            &json,
-            false,
-        )
-        .map_err(Failure::runtime)?;
+        steno_services::files::replace_file(&path, &json, steno_services::files::Access::Default)
+            .map_err(Failure::runtime)?;
         println!("{}", path.display());
         Ok(())
     }

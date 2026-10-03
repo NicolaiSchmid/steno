@@ -378,8 +378,11 @@ fn relative_paths_are_taken_from_the_working_directory() {
         canonical_work.join("out")
     );
     assert!(
-        !work.join("out/.meeting.json.partial").exists(),
-        "the partial file was renamed away"
+        std::fs::read_dir(work.join("out"))
+            .unwrap()
+            .flatten()
+            .all(|entry| !entry.file_name().to_string_lossy().ends_with(".partial")),
+        "the temporary was renamed away"
     );
     let exported = export(&json_path);
     let url = exported["audio"]["url"].as_str().unwrap();
