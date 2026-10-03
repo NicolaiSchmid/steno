@@ -103,8 +103,12 @@ unsafe impl GlobalAlloc for CountingAllocator {
 impl CountingAllocator {
     /// Starts counting the calling thread's allocations; resets the count.
     pub fn start_counting() {
+        Self::start_counting_on(thread_id());
+    }
+
+    fn start_counting_on(thread: usize) {
         COUNTED.store(0, Ordering::Relaxed);
-        COUNTED_THREAD.store(thread_id(), Ordering::Relaxed);
+        COUNTED_THREAD.store(thread, Ordering::Relaxed);
         COUNTING.store(true, Ordering::Release);
     }
 
@@ -121,12 +125,7 @@ impl CountingAllocator {
     /// callers' "the hook sees a deliberate allocation" test guards.
     /// Measurements are serialised process-wide (see `MEASURING`).
     pub fn allocations_during(body: impl FnOnce()) -> u64 {
-        let _guard = MEASURING
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        Self::start_counting();
-        body();
-        Self::stop_counting()
+        Self::allocations_on(thread_id(), body)
     }
 
     /// Allocations thread `thread` (an id as [`Self::current_thread`]
@@ -137,9 +136,7 @@ impl CountingAllocator {
         let _guard = MEASURING
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        COUNTED.store(0, Ordering::Relaxed);
-        COUNTED_THREAD.store(thread, Ordering::Relaxed);
-        COUNTING.store(true, Ordering::Release);
+        Self::start_counting_on(thread);
         body();
         Self::stop_counting()
     }
