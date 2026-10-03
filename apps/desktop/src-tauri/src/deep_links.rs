@@ -27,11 +27,11 @@
 //! registers no scheme), `Sources/StenoHandover/Pairing/PairingPayload.swift`
 //! (the phone's `steno://pair` link).
 
+use steno_bridge::{SettingsSection, WindowParams};
+use steno_core::json::parse_uuid;
 use tauri::{AppHandle, Manager, Url};
 use tauri_plugin_deep_link::DeepLinkExt;
 use uuid::Uuid;
-
-use steno_bridge::{SettingsSection, WindowParams};
 
 use crate::{
     host::Host,
@@ -72,15 +72,11 @@ impl DeepLink {
         let path = url.path().trim_matches('/');
         let host = url.host_str().map(str::to_ascii_lowercase);
         match host.as_deref() {
-            Some("meeting") => {
-                // The hyphenated 36-character form only, as `UUID(uuidString:)`
-                // and the `window.open` params read it.
-                (path.len() == 36)
-                    .then(|| Uuid::try_parse(path).ok())
-                    .flatten()
-                    .map(Self::Meeting)
-                    .ok_or_else(|| DeepLinkError::NotAMeeting(path.to_owned()))
-            }
+            // The hyphenated 36-character form only, as `UUID(uuidString:)`
+            // and the `window.open` params read it.
+            Some("meeting") => parse_uuid(path)
+                .map(Self::Meeting)
+                .ok_or_else(|| DeepLinkError::NotAMeeting(path.to_owned())),
             Some("settings") => {
                 if path.is_empty() {
                     return Ok(Self::Settings(None));

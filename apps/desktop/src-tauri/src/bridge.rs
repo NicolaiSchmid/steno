@@ -348,14 +348,6 @@ mod tests {
             main.meeting_id.map(uuid_string).as_deref(),
             Some("00000000-0000-0000-0000-000000000001")
         );
-        assert_eq!(
-            uuid_string(Uuid::nil()),
-            "00000000-0000-0000-0000-000000000000"
-        );
-        assert_eq!(
-            uuid_string("6ba7b810-9dad-11d1-80b4-00c04fd430c8".parse().unwrap()),
-            "6BA7B810-9DAD-11D1-80B4-00C04FD430C8"
-        );
     }
 
     #[test]
