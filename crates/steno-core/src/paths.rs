@@ -113,7 +113,9 @@ pub fn file_url(path: &Path, is_directory: bool) -> String {
 
 /// The inverse of [`file_url`]: the path of a `file://` URL as this
 /// machine spells it, percent-decoding what `file_url` encoded. `None` for
-/// any other scheme or a host other than the local one.
+/// any other scheme or a host other than the local one. On Unix the
+/// decoded bytes become the path as they are (a file name need not be
+/// UTF-8 there); on Windows they must be UTF-8.
 #[must_use]
 pub fn path_from_file_url(url: &str) -> Option<PathBuf> {
     let rest = url.strip_prefix("file://")?;
@@ -134,18 +136,26 @@ pub fn path_from_file_url(url: &str) -> Option<PathBuf> {
             index += 1;
         }
     }
-    let mut text = String::from_utf8(bytes).ok()?;
-    if text.ends_with('/') && text.len() > 1 {
-        text.pop();
+    if bytes.len() > 1 && bytes.last() == Some(&b'/') {
+        bytes.pop();
     }
-    if cfg!(windows) {
-        // `/C:/...` becomes `C:\...`.
-        if text.len() >= 3 && text.as_bytes()[2] == b':' {
-            text.remove(0);
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStringExt;
+        Some(PathBuf::from(std::ffi::OsString::from_vec(bytes)))
+    }
+    #[cfg(not(unix))]
+    {
+        let mut text = String::from_utf8(bytes).ok()?;
+        if cfg!(windows) {
+            // `/C:/...` becomes `C:\...`.
+            if text.len() >= 3 && text.as_bytes()[2] == b':' {
+                text.remove(0);
+            }
+            text = text.replace('/', "\\");
         }
-        text = text.replace('/', "\\");
+        Some(PathBuf::from(text))
     }
-    Some(PathBuf::from(text))
 }
 
 /// RFC 3986 unreserved and sub-delims plus `:`, `@` and `/`: the characters
@@ -235,6 +245,21 @@ mod tests {
             Some(PathBuf::from("/tmp/dir"))
         );
         assert_eq!(path_from_file_url("https://example.com/a"), None);
+    }
+
+    /// A Unix file name is bytes; one that is not UTF-8 still has a path.
+    #[cfg(unix)]
+    #[test]
+    fn non_utf8_bytes_become_a_path_on_unix() {
+        use std::os::unix::ffi::{OsStrExt, OsStringExt};
+        let path = path_from_file_url("file:///tmp/%FF%FEname.caf").unwrap();
+        assert_eq!(path.as_os_str().as_bytes(), b"/tmp/\xFF\xFEname.caf");
+        assert_eq!(
+            path_from_file_url("file:///tmp/%FF/"),
+            Some(PathBuf::from(std::ffi::OsString::from_vec(
+                b"/tmp/\xFF".to_vec()
+            )))
+        );
     }
 
     #[test]
