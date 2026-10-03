@@ -34,7 +34,7 @@ name: Rust CI
 #
 # `steno-speech-coreml` (WP4b of `.plans/2026-10-02-rust-core-and-tauri-shell.md`):
 # its CoreML half compiles on macOS only and its unit tests need no models,
-# so `cargo test --workspace` covers them on every job (the
+# so `cargo test --workspace` covers them on all three `workspace` jobs (the
 # platform-independent half on Linux and Windows too). The parity harness
 # against the Swift transcripts needs the Parakeet models and the calibration
 # corpus on Forge; it is the ignored test
