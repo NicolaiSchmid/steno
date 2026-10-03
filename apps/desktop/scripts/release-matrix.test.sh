@@ -23,12 +23,13 @@ expect() {
   fi
 }
 
+# refuse <platforms> [macos-runs-on]: exit 1 with one line, an ::error::.
 refuse() {
-  local input="$1" output
-  if output="$(PLATFORMS="$input" "$script" 2>&1)"; then
-    fail "'$input' was accepted: $output"
-  elif [[ "$output" != *"::error::"* ]]; then
-    fail "'$input' failed without an ::error:: line: $output"
+  local input="$1" mac="${2:-\"macos-15\"}" output
+  if output="$(PLATFORMS="$input" MACOS_RUNS_ON="$mac" "$script" 2>&1)"; then
+    fail "'$input' ($mac) was accepted: $output"
+  elif [[ "$output" != "::error::"* || "$output" == *$'\n'* ]]; then
+    fail "'$input' ($mac) did not fail with one ::error:: line: $output"
   fi
 }
 
@@ -42,6 +43,18 @@ refuse ','
 refuse 'linux,freebsd'
 refuse 'mac'
 refuse 'linux windows'
+# A newline cannot inject a workflow command: the error is one line, and
+# the injected text shows only inside it, joined to its neighbour once the
+# newline is gone.
+refuse $'linux\n::warning::injected'
+refuse $'freebsd\r\n::add-mask::x,linux'
+injected="$(PLATFORMS=$'linux\n::warning::injected' "$script" 2>&1 || true)"
+if [[ "$injected" != '::error::unknown platform "linux::warning::injected" (known: linux, windows, macos)' ]]; then
+  fail "the injected name reads $injected"
+fi
+# A runner that is not a JSON string or array.
+refuse 'macos' 'macos-15'
+refuse 'linux' '{"label":"macos-15"}'
 
 runner="$(PLATFORMS=macos MACOS_RUNS_ON='["self-hosted","forge"]' "$script" | jq -c '.include[0].os')"
 if [[ "$runner" != '["self-hosted","forge"]' ]]; then
