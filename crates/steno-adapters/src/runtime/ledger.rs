@@ -214,9 +214,8 @@ impl DeliveryLedger {
 
 /// `root` joined with `folder`: the meeting folder to reveal in the file
 /// manager. A folder that is not a plain relative path (a tampered or
-/// foreign receipt) is not joined; the root itself is revealed instead, and
-/// the result does not say which happened: a receipt whose folder fails the
-/// rule reveals the vault root, and the host cannot tell the two apart.
+/// foreign receipt) is not joined; the root is returned instead, and
+/// nothing tells the host the fallback happened.
 /// Swift: `DeliveryReceipt.folderURL`.
 #[must_use]
 pub fn receipt_folder_path(receipt: &DeliveryReceipt) -> PathBuf {
