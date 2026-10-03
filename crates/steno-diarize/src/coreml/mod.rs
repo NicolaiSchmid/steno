@@ -28,7 +28,8 @@ use crate::error::DiarizeError;
 /// app's model store installs these models, its default models root plus
 /// `ModelAsset.offlineDiarizer`'s `frameworkRoot` and `modelFolder`
 /// (`Sources/StenoSpeech/Models/ModelAsset.swift`). A models directory
-/// moved in the Swift app's settings is not followed.
+/// moved in the Swift app's settings is not followed. Takes `StenoPaths`,
+/// as [`crate::ModelStore::for_paths`] does.
 #[must_use]
 pub fn model_directory(paths: &StenoPaths) -> PathBuf {
     paths

@@ -48,9 +48,10 @@
 //! code it ran.
 //!
 //! Entry points: [`ModelDiarizer`] is the `steno_core::Diarizer` the
-//! meeting pipeline (WP6) holds, built by [`ModelDiarizer::onnx`] over a
-//! [`ModelStore`] or by `ModelDiarizer::coreml` over `FluidAudio`'s model
-//! directory; [`Pipeline`] exposes `analyze`, `map` and `refine` one at a
+//! meeting pipeline (WP6) holds, built by [`ModelDiarizer::onnx`] over
+//! [`ModelStore::for_paths`] or by `ModelDiarizer::coreml` over
+//! `coreml::model_directory`, where the Swift app installs `FluidAudio`'s
+//! models; [`Pipeline`] exposes `analyze`, `map` and `refine` one at a
 //! time for the calibration harness, which analyses a lane once and
 //! sweeps the cut; [`fbank`] is the feature front end the ONNX backend
 //! puts in front of the embedding model. Features: `onnx` builds the
