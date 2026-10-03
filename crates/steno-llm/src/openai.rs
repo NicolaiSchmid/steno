@@ -368,7 +368,7 @@ impl OpenAiCompatibleClient {
         let decoded: ChatCompletionResponse = wire::decode(&reply.body).map_err(|_| {
             LlmError::Transport(format!(
                 "undecodable completion body: {}",
-                self.redact(&reply.body_text())
+                reply.redacted_text(self.secrets(), 4_096)
             ))
         })?;
         let choice = decoded
@@ -417,7 +417,7 @@ impl OpenAiCompatibleClient {
         if let Ok(envelope) = wire::decode::<ChatErrorEnvelope>(&reply.body) {
             return transport::redact(&envelope.error.message, secrets);
         }
-        transport::redacted_prefix(&reply.body_text(), secrets, 500)
+        reply.redacted_text(secrets, 500)
     }
 
     /// A 400 whose message names the structured output request: the cue to

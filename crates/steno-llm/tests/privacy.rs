@@ -334,19 +334,18 @@ async fn the_refresh_token_goes_only_to_the_token_endpoint_and_the_file_stays_06
 // No secret reaches an error, a `Debug` form or an observer event, however
 // often and wherever a server echoes it.
 
-/// Fails when `text` holds any secret, or the first half of a long one (a
-/// cut that kept part of it).
+/// Fails when `text` holds eight bytes in a row of any secret, in any case:
+/// a cut taken before the redaction leaves a prefix of the secret behind,
+/// a lowercased field a case-folded copy.
 fn assert_no_secret(text: &str, secrets: &[String], what: &str) {
+    let folded = text.to_lowercase();
     for secret in secrets {
-        assert!(
-            !text.contains(secret.as_str()),
-            "{what} carries a secret: {text}"
-        );
-        if secret.len() >= 16 {
-            let half = &secret[..secret.len() / 2];
+        let secret = secret.to_lowercase();
+        for piece in secret.as_bytes().windows(secret.len().min(8)) {
+            let piece = std::str::from_utf8(piece).expect("ASCII secrets");
             assert!(
-                !text.contains(half),
-                "{what} carries part of a secret: {text}"
+                !folded.contains(piece),
+                "{what} carries part of a secret ({piece}): {text}"
             );
         }
     }
@@ -479,4 +478,201 @@ async fn the_token_refresh_redacts_every_copy_of_the_tokens_and_the_account_id()
         assert_no_secret(detail, &secrets, "the detail");
         assert!(detail.contains("[redacted]"), "{detail}");
     }
+}
+
+// Every cut a client takes: 4 096 characters of a body that is not the
+// answer, 500 of an error body that is not an envelope, 300 of a refusal
+// from the token endpoint. Each body is redacted whole before it is cut.
+
+const BODY_CUT: usize = 4_096;
+const ERROR_CUT: usize = 500;
+const REFRESH_CUT: usize = 300;
+
+/// A project key (`sk-proj-` and 160 more characters), long enough that a
+/// body of its copies redacts to fewer than 500 characters before byte
+/// 4 096.
+fn long_api_key() -> String {
+    format!("sk-proj-{}", "A1b2C3d4".repeat(20))
+}
+
+/// `filler` up to the cut, then `secret` with all but its last byte before
+/// the cut, then more text. `in_bytes` places the cut at a byte offset
+/// (the body cut of the old code), else at a character offset; a
+/// multi-byte `filler` ends right where the secret starts.
+fn straddling(filler: char, secret: &str, cut: usize, in_bytes: bool) -> Vec<u8> {
+    let before = cut - (secret.len() - 1);
+    let mut body = if in_bytes {
+        let width = filler.len_utf8();
+        "x".repeat(before % width) + &filler.to_string().repeat(before / width)
+    } else {
+        filler.to_string().repeat(before)
+    };
+    body.push_str(secret);
+    body.push_str(" trailing");
+    body.into_bytes()
+}
+
+/// Copies of `secret`, one of them across byte 4 096 and five more after
+/// it, so the body runs past every cut.
+fn many_copies(secret: &str) -> Vec<u8> {
+    let start = BODY_CUT - (secret.len() - 1);
+    let mut body = String::new();
+    while body.len() + secret.len() < start {
+        body.push_str(secret);
+        body.push(' ');
+    }
+    body.push_str(&"x".repeat(start - body.len()));
+    for _ in 0..6 {
+        body.push_str(secret);
+        body.push(' ');
+    }
+    body.into_bytes()
+}
+
+/// Each body twice to an endpoint client allowed two attempts, `status` 200
+/// for a body that is not a completion and 500 for one that is not an
+/// error envelope: the first error lands in a `Retrying` event, the second
+/// is returned.
+async fn assert_endpoint_client_redacts(key: &str, bodies: &[(u16, Vec<u8>)]) {
+    let secrets = vec![key.to_owned()];
+    let harness = ClientHarness::build(RetryPolicy::with_max_attempts(2), Some(key), |_| {}).await;
+    let driver = harness.drive_retries();
+    for (status, body) in bodies {
+        let reply = StubResponse::new(*status, body.clone());
+        harness.server.enqueue([reply.clone(), reply]);
+        let error = harness
+            .client
+            .complete_llm(&text_request())
+            .await
+            .unwrap_err();
+        assert_error_redacted(&error, &secrets);
+        assert!(error.to_string().contains("[redacted]"), "{error}");
+    }
+    driver.abort();
+    let events = harness.events();
+    assert_eq!(
+        events.iter().filter(|e| is_retrying(e)).count(),
+        bodies.len()
+    );
+    for event in events {
+        assert_no_secret(&format!("{event:?}"), &secrets, "an event");
+    }
+}
+
+/// As [`assert_endpoint_client_redacts`] for the Codex client, and each body
+/// once more as the answer to the model list.
+async fn assert_codex_client_redacts(bodies: &[(u16, Vec<u8>)]) {
+    let harness = CodexHarness::with_retry(RetryPolicy::with_max_attempts(2)).await;
+    let secrets = codex_secrets(&CodexHome::access_token(3_600, "plus"));
+    let driver = harness.drive_retries();
+    for (status, body) in bodies {
+        let reply = StubResponse::new(*status, body.clone());
+        harness
+            .backend
+            .enqueue([reply.clone(), reply.clone(), reply]);
+        let error = harness
+            .client
+            .complete_llm(&text_request())
+            .await
+            .unwrap_err();
+        assert_error_redacted(&error, &secrets);
+        assert!(error.to_string().contains("[redacted]"), "{error}");
+        let error = harness.client.list_models().await.unwrap_err();
+        assert_error_redacted(&error, &secrets);
+        assert!(error.to_string().contains("[redacted]"), "{error}");
+    }
+    driver.abort();
+    let events = harness.events();
+    assert_eq!(
+        events.iter().filter(|e| is_retrying(e)).count(),
+        bodies.len()
+    );
+    for event in events {
+        assert_no_secret(&format!("{event:?}"), &secrets, "an event");
+    }
+}
+
+/// Each body as the token endpoint's 503 to a refresh of a stale sign-in.
+async fn assert_token_refresh_redacts(bodies: impl Fn(&[String]) -> Vec<Vec<u8>>) {
+    let access = CodexHome::access_token(10, "plus");
+    let secrets = codex_secrets(&access);
+    for body in bodies(&secrets) {
+        let home = CodexHome::new().await;
+        home.write(AuthFile::default().access(&access));
+        home.server.enqueue([StubResponse::new(503, body)]);
+        let error = home.store().current().await.unwrap_err();
+        assert_error_redacted(&error, &secrets);
+        let detail = error.detail().unwrap();
+        assert_no_secret(detail, &secrets, "the detail");
+        assert!(detail.contains("[redacted]"), "{detail}");
+    }
+}
+
+#[tokio::test]
+async fn no_secret_straddling_the_4096_byte_cut_reaches_an_error_or_an_event() {
+    let key = long_api_key();
+    assert_endpoint_client_redacts(API_KEY, &[(200, straddling('x', API_KEY, BODY_CUT, true))])
+        .await;
+    assert_endpoint_client_redacts(&key, &[(200, straddling('x', &key, BODY_CUT, true))]).await;
+    let secrets = codex_secrets(&CodexHome::access_token(3_600, "plus"));
+    let bodies: Vec<(u16, Vec<u8>)> = secrets
+        .iter()
+        .map(|secret| (200, straddling('x', secret, BODY_CUT, true)))
+        .collect();
+    assert_codex_client_redacts(&bodies).await;
+    assert_token_refresh_redacts(|secrets| {
+        secrets
+            .iter()
+            .map(|s| straddling('x', s, REFRESH_CUT, false))
+            .collect()
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn no_secret_echoed_past_every_cut_reaches_an_error_or_an_event() {
+    for key in [API_KEY.to_owned(), long_api_key()] {
+        assert_endpoint_client_redacts(&key, &[(200, many_copies(&key)), (500, many_copies(&key))])
+            .await;
+    }
+    let secrets = codex_secrets(&CodexHome::access_token(3_600, "plus"));
+    let bodies: Vec<(u16, Vec<u8>)> = secrets
+        .iter()
+        .flat_map(|secret| [(200, many_copies(secret)), (500, many_copies(secret))])
+        .collect();
+    assert_codex_client_redacts(&bodies).await;
+    assert_token_refresh_redacts(|secrets| secrets.iter().map(|s| many_copies(s)).collect()).await;
+}
+
+#[tokio::test]
+async fn no_secret_after_a_multi_byte_character_at_a_cut_reaches_an_error_or_an_event() {
+    let key = long_api_key();
+    for key in [API_KEY, key.as_str()] {
+        assert_endpoint_client_redacts(
+            key,
+            &[
+                (200, straddling('€', key, BODY_CUT, true)),
+                (500, straddling('€', key, ERROR_CUT, false)),
+            ],
+        )
+        .await;
+    }
+    let secrets = codex_secrets(&CodexHome::access_token(3_600, "plus"));
+    let bodies: Vec<(u16, Vec<u8>)> = secrets
+        .iter()
+        .flat_map(|secret| {
+            [
+                (200, straddling('€', secret, BODY_CUT, true)),
+                (500, straddling('€', secret, ERROR_CUT, false)),
+            ]
+        })
+        .collect();
+    assert_codex_client_redacts(&bodies).await;
+    assert_token_refresh_redacts(|secrets| {
+        secrets
+            .iter()
+            .map(|s| straddling('€', s, REFRESH_CUT, false))
+            .collect()
+    })
+    .await;
 }

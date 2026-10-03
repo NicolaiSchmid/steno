@@ -24,11 +24,21 @@ pub struct HttpReply {
 }
 
 impl HttpReply {
-    /// The first 4 096 bytes of the body as text.
+    /// The first 4 096 bytes of the body as text, unredacted: only for
+    /// reading what a 400 complains about, never for an error. An error
+    /// takes [`HttpReply::redacted_text`].
     #[must_use]
     pub fn body_text(&self) -> String {
         let end = self.body.len().min(4_096);
         String::from_utf8_lossy(&self.body[..end]).into_owned()
+    }
+
+    /// The first `limit` characters of the whole body with every secret
+    /// removed, for an error: the body is redacted whole before the cut,
+    /// so a secret straddling the cut leaves no prefix.
+    #[must_use]
+    pub fn redacted_text(&self, secrets: &[String], limit: usize) -> String {
+        redacted_prefix(&String::from_utf8_lossy(&self.body), secrets, limit)
     }
 
     #[must_use]
@@ -315,6 +325,7 @@ pub fn retry_after(header: Option<&str>) -> Option<Duration> {
 
 /// The first `limit` characters of `text` with every secret removed;
 /// redacted before the cut, so a secret straddling it leaves no prefix.
+/// The one place a text is both redacted and cut.
 #[must_use]
 pub fn redacted_prefix(text: &str, secrets: &[String], limit: usize) -> String {
     redact(text, secrets).chars().take(limit).collect()

@@ -241,7 +241,7 @@ impl CodexResponsesClient {
         let list: CodexModelList = wire::decode(&reply.body).map_err(|_| {
             LlmError::Transport(format!(
                 "undecodable model list: {}",
-                transport::redact(&reply.body_text(), &secrets)
+                reply.redacted_text(&secrets, 4_096)
             ))
         })?;
         Ok(list.models)
@@ -419,7 +419,7 @@ impl CodexResponsesClient {
         let response: ResponsesResponse = wire::decode(&reply.body).map_err(|_| {
             LlmError::Transport(format!(
                 "undecodable response body: {}",
-                transport::redact(&reply.body_text(), secrets)
+                reply.redacted_text(secrets, 4_096)
             ))
         })?;
         Self::result(
@@ -529,7 +529,7 @@ impl CodexResponsesClient {
         let envelope = wire::decode::<CodexErrorEnvelope>(&reply.body).ok();
         let message = match envelope.as_ref().and_then(CodexErrorEnvelope::message) {
             Some(message) => transport::redact(message, secrets),
-            None => transport::redacted_prefix(&reply.body_text(), secrets, 500),
+            None => reply.redacted_text(secrets, 500),
         };
         if let Some(kind) = envelope.as_ref().and_then(CodexErrorEnvelope::kind)
             && Self::PLAN_LIMIT_KINDS.contains(&kind.as_str())
