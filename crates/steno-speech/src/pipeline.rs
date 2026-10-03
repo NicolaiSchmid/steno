@@ -10,8 +10,8 @@ use std::ops::Range;
 
 use steno_core::{LanguageTag, RawSegment, TimedWord};
 
-use crate::backend::{FRAME_SAMPLES, SpeechBackend};
-use crate::chunker::{Chunk, ChunkerConfig, SAMPLE_RATE, layout, samples as sample_count};
+use crate::backend::{FRAME_SAMPLES, SAMPLE_RATE, SpeechBackend, sample_count};
+use crate::chunker::{Chunk, ChunkerConfig, layout};
 use crate::decoder::{DecodeStats, DecoderConfig, Token, decode_window};
 use crate::error::SpeechError;
 use crate::language::LanguageTagger;

@@ -15,7 +15,7 @@ use std::path::Path;
 use ort::session::{Session, SessionInputValue};
 use ort::value::Tensor;
 
-use crate::chunker::samples;
+use crate::backend::sample_count;
 use crate::error::SpeechError;
 use crate::onnx::{OnnxOptions, open_session, outlet_tensor};
 
@@ -59,9 +59,9 @@ pub fn regions_from_probabilities(
     total: usize,
     config: &VadConfig,
 ) -> Vec<Range<usize>> {
-    let min_silence = samples(config.min_silence_seconds);
-    let min_speech = samples(config.min_speech_seconds);
-    let pad = samples(config.pad_seconds);
+    let min_silence = sample_count(config.min_silence_seconds);
+    let min_speech = sample_count(config.min_speech_seconds);
+    let pad = sample_count(config.pad_seconds);
     let mut raw: Vec<Range<usize>> = Vec::new();
     let mut start: Option<usize> = None;
     let mut silence_since: Option<usize> = None;

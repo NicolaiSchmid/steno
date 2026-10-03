@@ -94,7 +94,7 @@ pub mod vocab;
 
 pub use backend::{
     DecoderState, DecoderStep, EncoderOutput, FRAME_SAMPLES, FRAME_SECONDS, Features,
-    JointDecision, ModelShape, SpeechBackend, split_logits,
+    JointDecision, ModelShape, SAMPLE_RATE, SpeechBackend, sample_count, split_logits,
 };
 pub use chunker::{Chunk, ChunkerConfig, Cut};
 pub use decoder::{DecodeStats, DecoderConfig, Token};

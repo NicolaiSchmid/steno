@@ -11,7 +11,7 @@
 
 use std::ops::Range;
 
-pub const SAMPLE_RATE: usize = 16_000;
+use crate::backend::{SAMPLE_RATE, sample_count};
 
 /// How a chunk's end was chosen.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -71,13 +71,6 @@ impl Default for ChunkerConfig {
     }
 }
 
-/// Seconds to whole samples, never negative.
-#[must_use]
-pub fn samples(seconds: f32) -> usize {
-    // Rounded down; the clamp keeps the cast in range.
-    (seconds.max(0.0) * SAMPLE_RATE as f32) as usize
-}
-
 /// Pauses between speech regions, including the leading and the trailing
 /// silence. `speech` is sorted and non-overlapping.
 #[must_use]
@@ -123,13 +116,13 @@ pub fn layout(audio: &[f32], speech: &[Range<usize>], config: &ChunkerConfig) ->
         return chunks;
     };
     let pauses = pauses(speech, total);
-    let target = samples(config.target_seconds);
-    let search = samples(config.search_seconds);
-    let overlap = samples(config.overlap_seconds);
-    let long_pause = samples(config.long_pause_seconds);
-    let max = samples(config.max_seconds).max(1);
-    let pad = samples(config.pad_seconds);
-    let min_chunk = samples(config.min_chunk_seconds).clamp(1, max);
+    let target = sample_count(config.target_seconds);
+    let search = sample_count(config.search_seconds);
+    let overlap = sample_count(config.overlap_seconds);
+    let long_pause = sample_count(config.long_pause_seconds);
+    let max = sample_count(config.max_seconds).max(1);
+    let pad = sample_count(config.pad_seconds);
+    let min_chunk = sample_count(config.min_chunk_seconds).clamp(1, max);
     let speech_end = last_speech.end.min(total);
 
     let mut start = speech[0].start.saturating_sub(pad);
@@ -223,7 +216,7 @@ mod tests {
     use super::*;
 
     fn s(seconds: f32) -> usize {
-        samples(seconds)
+        sample_count(seconds)
     }
 
     /// Audio that is loud inside `speech` and silent elsewhere.

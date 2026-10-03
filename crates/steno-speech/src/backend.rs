@@ -10,11 +10,20 @@
 
 use crate::error::SpeechError;
 
+/// The one sample rate of the pipeline; every model here takes 16 kHz.
+pub const SAMPLE_RATE: usize = 16_000;
 /// Seconds per encoder frame: a 10 ms mel hop times the subsampling factor
 /// of 8.
 pub const FRAME_SECONDS: f64 = 0.08;
-/// Samples per encoder frame at 16 kHz.
-pub const FRAME_SAMPLES: usize = 1_280;
+/// Samples per encoder frame.
+pub const FRAME_SAMPLES: usize = SAMPLE_RATE * 8 / 100;
+
+/// Seconds to whole samples, rounded down and never negative.
+#[must_use]
+pub fn sample_count(seconds: f32) -> usize {
+    // The clamp keeps the cast in range.
+    (seconds.max(0.0) * SAMPLE_RATE as f32) as usize
+}
 
 /// What the loop needs to know about a model before the first call.
 #[derive(Debug, Clone, PartialEq, Eq)]
