@@ -739,7 +739,7 @@ PR off `main`.
 | Core protocols and fakes | `feat/rust-protocols` | #162 | merged |
 | Bridge on core | `refactor/rust-bridge-on-core` | #161 | merged |
 | WP4b CoreML speech backend | `feat/rust-speech-coreml` | #163 | merged |
-| WP4a speech pipeline and ONNX backend | `feat/rust-speech` | #171 | open |
+| WP4a speech pipeline and ONNX backend | `feat/rust-speech` | #171 | merged |
 | WP7a LLM (`steno-llm`) | `feat/rust-llm` | #167 | merged |
 | WP7b adapters | `feat/rust-adapters` | #165 | merged |
 | WP6a host | `feat/rust-host` | #170 | merged |
