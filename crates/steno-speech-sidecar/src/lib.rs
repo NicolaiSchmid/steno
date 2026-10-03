@@ -240,7 +240,7 @@ impl Engine for FakeEngine {
         samples: &[f32],
         hint: Option<&LanguageTag>,
     ) -> Result<Vec<RawSegment>, String> {
-        match self.fault_now().filter(|fault| !fault.at_start()) {
+        match self.fault_now() {
             Some(Fault::Abort) => std::process::abort(),
             Some(Fault::Panic) => {
                 // A line that is not UTF-8 first, as a native library may
@@ -270,6 +270,7 @@ impl Engine for FakeEngine {
                 hang()
             }
             Some(Fault::Error) => Err("simulated failure in the speech engine".to_owned()),
+            // The start faults were committed, if at all, at start.
             Some(Fault::Silent | Fault::WrongProtocol) | None => {
                 let peak = samples.iter().fold(0.0f32, |m, s| m.max(s.abs()));
                 // Exact up to 2^53 samples, as in `AudioBuffer16k::duration`.
