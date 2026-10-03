@@ -20,11 +20,8 @@
 //!   that moves to WP4, and the detail's split of the core's rendered
 //!   summary.
 //!
-//! Every call blocks until it is done; the core's async boundaries are
-//! awaited on one current-thread runtime the host owns, and from a thread
-//! already inside a tokio runtime on a scoped helper thread, so no call
-//! panics there. A call can still block for as long as a native prompt is
-//! up, so the shell runs each command on a blocking thread
+//! Every call blocks until it is done, for as long as a native prompt is
+//! up if it asks one, so the shell runs each command on a blocking thread
 //! (`tauri::async_runtime::spawn_blocking`), never on a runtime worker or
 //! the thread that draws the dialogs; [`host`]'s `Threads` section has the
 //! rest of the rules.
