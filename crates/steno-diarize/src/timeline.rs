@@ -419,6 +419,17 @@ mod tests {
             super::turns(&analysis, &[None, None], &TimelineRules::default()).len(),
             0
         );
+        // The second window's embedding left out of clustering: that window
+        // still counts towards coverage and the speaker count but votes for
+        // no cluster, so the 411 frames both windows hear carry a share of
+        // one half and the 60 only the first window hears a share of one.
+        let partial = super::turns(&analysis, &[Some(0), None], &TimelineRules::default());
+        assert_eq!(partial.len(), 1, "{partial:?}");
+        let expected = (60.0 + 411.0 * 0.5) / 471.0;
+        assert!(
+            (f64::from(partial[0].quality) - expected).abs() < 1e-4,
+            "{partial:?}, expected {expected}"
+        );
     }
 
     /// One speaker for eight seconds, a second and a half of speech from
@@ -602,5 +613,85 @@ mod tests {
         assert!((second.end - 9.95).abs() < 0.05, "{second:?}");
         assert!((first.start - second.end).abs() < 1e-9, "{first:?}");
         assert!((first.end - 12.0).abs() < 0.05, "{first:?}");
+    }
+
+    /// At a step of three samples, the smallest at which two bytes stay
+    /// exact, 53 010 windows cover a frame. Every third window votes for
+    /// cluster 0 and the rest for cluster 1; both counts are past what one
+    /// byte holds, and both stay exact, so cluster 1 holds the floor
+    /// throughout with two thirds of the votes, where saturated cells
+    /// would tie and hand it to cluster 0.
+    #[test]
+    fn two_byte_cells_count_every_window_at_a_three_sample_step() {
+        let windows = 53_010usize;
+        // Offsets from 135 put frame 589 under every window.
+        let offset = |window: usize| 135 + 3 * window;
+        let analysis = Analysis {
+            geometry: GEOMETRY.clone(),
+            total_samples: offset(windows - 1) + 160_000,
+            activities: (0..windows)
+                .map(|window| WindowActivity {
+                    window,
+                    offset: offset(window),
+                    frames: vec![0b01u8; 589],
+                })
+                .collect(),
+            embeddings: (0..windows)
+                .map(|window| WindowEmbedding {
+                    window,
+                    local_speaker: 0,
+                    start: 0.0,
+                    end: 10.0,
+                    embedding: vec![1.0],
+                })
+                .collect(),
+        };
+        let assignments: Vec<Option<usize>> = (0..windows)
+            .map(|window| Some(usize::from(window % 3 != 0)))
+            .collect();
+        let total_frames = analysis.total_samples / GEOMETRY.receptive_field_shift;
+        let votes = Votes::tally(&analysis, &assignments, 2, total_frames);
+        assert_eq!(votes.coverage[589], 53_010);
+        assert_eq!(
+            (votes.cells[589 * 2], votes.cells[589 * 2 + 1]),
+            (17_670, 35_340)
+        );
+        let turns = turns(&analysis, &assignments, &TimelineRules::default());
+        assert_eq!(turns.len(), 1, "{turns:?}");
+        assert_eq!(turns[0].speaker_label, "S2");
+        assert!((turns[0].quality - 2.0 / 3.0).abs() < 0.01, "{turns:?}");
+    }
+
+    /// An activity whose frames run past the end of the audio votes only
+    /// up to the last frame. `segmentation::windows` drops those frames
+    /// before they get here, but `turns` takes any `Analysis`: one window
+    /// from four seconds of a twelve-second lane, all 589 frames marked,
+    /// gives one turn that ends with the audio.
+    #[test]
+    fn frames_past_the_end_of_the_audio_are_not_counted() {
+        let analysis = Analysis {
+            geometry: GEOMETRY.clone(),
+            total_samples: 192_000,
+            activities: vec![WindowActivity {
+                window: 0,
+                offset: 64_000,
+                frames: vec![0b01u8; 589],
+            }],
+            embeddings: vec![WindowEmbedding {
+                window: 0,
+                local_speaker: 0,
+                start: 4.0,
+                end: 12.0,
+                embedding: vec![1.0],
+            }],
+        };
+        let votes = Votes::tally(&analysis, &[Some(0)], 1, 711);
+        assert_eq!(votes.coverage.len(), 711);
+        assert_eq!(votes.coverage.iter().sum::<u32>(), 711 - 237);
+        let turns = turns(&analysis, &[Some(0)], &TimelineRules::default());
+        assert_eq!(turns.len(), 1, "{turns:?}");
+        assert!((turns[0].start - 4.0).abs() < 0.05, "{turns:?}");
+        assert_eq!(turns[0].end, 12.0);
+        assert!((turns[0].quality - 1.0).abs() < 1e-6);
     }
 }
