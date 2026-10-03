@@ -1,7 +1,8 @@
 //! The parent side: spawns `steno-speech-sidecar`, supervises it and
 //! implements `SpeechEngine` over it. Every request has a deadline; the
-//! child's heartbeat is checked against the memory ceiling while a request
-//! waits; a child that dies, hangs, overruns the ceiling or breaks the
+//! reader thread checks the child's heartbeat against the memory ceiling
+//! and ends the current request (or the next, for an idle child) once it
+//! is over; a child that dies, hangs, overruns the ceiling or breaks the
 //! protocol is killed and reaped, the call returns
 //! [`SpeechError::Sidecar`], and the next call starts a new child and
 //! loads the models again. Nothing here can take the app down with the
@@ -106,9 +107,13 @@ pub struct SidecarHealth {
     pub loaded: bool,
 }
 
-/// What the reader threads hand the waiting request.
+/// What the reader threads hand the waiting request. Heartbeats are not
+/// queued, so an idle child cannot grow the queue: the reader keeps the
+/// latest resident set and queues [`Event::OverCeiling`] once it is over.
 enum Event {
     Reply(Reply),
+    /// A heartbeat over the memory ceiling.
+    OverCeiling(u64),
     /// stdout ended: between frames or inside one, which is how a child
     /// that dies while writing looks.
     Closed,
@@ -128,7 +133,7 @@ struct SidecarProcess {
     pid: u32,
     next_id: u64,
     loaded: bool,
-    rss_bytes: u64,
+    ceiling: u64,
 }
 
 /// The lines of the child's stderr kept for a crash report.
@@ -161,12 +166,21 @@ impl SidecarProcess {
         };
         let (sender, events) = mpsc::channel();
         let replies = sender.clone();
+        let ceiling = config.memory_ceiling;
         std::thread::Builder::new()
             .name(format!("sidecar-{pid}-stdout"))
             .spawn(move || {
                 let mut stdout = BufReader::new(stdout);
+                let mut over = false;
                 loop {
                     let event = match protocol::read_header::<_, Reply>(&mut stdout) {
+                        Ok(Some(Reply::Memory { rss_bytes })) => {
+                            if over || rss_bytes <= ceiling {
+                                continue;
+                            }
+                            over = true;
+                            Event::OverCeiling(rss_bytes)
+                        }
                         Ok(Some(reply)) => Event::Reply(reply),
                         Ok(None) | Err(FrameError::Truncated | FrameError::Io(_)) => Event::Closed,
                         Err(error) => Event::Garbage(error.to_string()),
@@ -203,9 +217,9 @@ impl SidecarProcess {
             pid,
             next_id: 1,
             loaded: false,
-            rss_bytes: 0,
+            ceiling,
         };
-        match process.wait_for(None, config.startup_timeout, config.memory_ceiling)? {
+        match process.wait_for(None, config.startup_timeout)? {
             Reply::Ready { protocol, .. } if protocol == PROTOCOL_VERSION => Ok(process),
             Reply::Ready { protocol, .. } => Err(SidecarError::Protocol(format!(
                 "the child speaks protocol {protocol}, this client {PROTOCOL_VERSION}"
@@ -224,7 +238,6 @@ impl SidecarProcess {
         make: impl FnOnce(u64) -> Request,
         payload: Vec<u8>,
         timeout: Duration,
-        ceiling: u64,
     ) -> Result<Reply, SidecarError> {
         let id = self.next_id;
         self.next_id += 1;
@@ -240,20 +253,15 @@ impl SidecarProcess {
                 }
             })
             .map_err(SidecarError::Pipe)?;
-        match self.wait_for(Some(id), timeout, ceiling)? {
+        match self.wait_for(Some(id), timeout)? {
             Reply::Failed { error, .. } => Err(SidecarError::Remote(error)),
             reply => Ok(reply),
         }
     }
 
-    /// Waits for the reply to `id` (`None`: for [`Reply::Ready`]), checking
-    /// each heartbeat against `ceiling`.
-    fn wait_for(
-        &mut self,
-        id: Option<u64>,
-        timeout: Duration,
-        ceiling: u64,
-    ) -> Result<Reply, SidecarError> {
+    /// Waits for the reply to `id` (`None`: for [`Reply::Ready`]); a
+    /// heartbeat over the ceiling, even one sent while idle, ends the wait.
+    fn wait_for(&mut self, id: Option<u64>, timeout: Duration) -> Result<Reply, SidecarError> {
         let deadline = Instant::now() + timeout;
         loop {
             let remaining = deadline.saturating_duration_since(Instant::now());
@@ -261,14 +269,11 @@ impl SidecarProcess {
                 return Err(SidecarError::Timeout { after: timeout });
             }
             match self.events.recv_timeout(remaining) {
-                Ok(Event::Reply(Reply::Memory { rss_bytes })) => {
-                    self.rss_bytes = rss_bytes;
-                    if rss_bytes > ceiling {
-                        return Err(SidecarError::MemoryCeiling {
-                            rss_bytes,
-                            ceiling_bytes: ceiling,
-                        });
-                    }
+                Ok(Event::OverCeiling(rss_bytes)) => {
+                    return Err(SidecarError::MemoryCeiling {
+                        rss_bytes,
+                        ceiling_bytes: self.ceiling,
+                    });
                 }
                 Ok(Event::Reply(reply)) if reply.id() == id => return Ok(reply),
                 Ok(Event::Reply(reply)) => {
@@ -326,9 +331,9 @@ impl SidecarProcess {
 
     /// Asks the child to exit, then kills it if it has not within the
     /// grace period. Returns its exit status.
-    fn shutdown(mut self, grace: Duration, ceiling: u64) -> Option<ExitStatus> {
+    fn shutdown(mut self, grace: Duration) -> Option<ExitStatus> {
         let polite = self
-            .request(|id| Request::Shutdown { id }, Vec::new(), grace, ceiling)
+            .request(|id| Request::Shutdown { id }, Vec::new(), grace)
             .is_ok();
         if polite && let Some(status) = self.exit_status(grace) {
             return Some(status);
@@ -442,7 +447,6 @@ impl SidecarSpeechEngine {
                 |id| Request::Health { id },
                 Vec::new(),
                 config.control_timeout,
-                config.memory_ceiling,
             );
             match reply {
                 Ok(Reply::Health {
@@ -480,7 +484,7 @@ impl SidecarSpeechEngine {
             state
                 .process
                 .take()
-                .and_then(|process| process.shutdown(config.control_timeout, config.memory_ceiling))
+                .and_then(|process| process.shutdown(config.control_timeout))
         })
         .await?)
     }
@@ -527,7 +531,6 @@ impl SidecarSpeechEngine {
             },
             Vec::new(),
             config.load_timeout,
-            config.memory_ceiling,
         );
         match reply {
             Ok(Reply::Loaded { .. }) => {
@@ -569,7 +572,7 @@ impl Drop for SidecarSpeechEngine {
                 .process
                 .take()
         {
-            process.shutdown(self.config.control_timeout, self.config.memory_ceiling);
+            process.shutdown(self.config.control_timeout);
         }
     }
 }
@@ -633,7 +636,6 @@ impl SpeechEngine for SidecarSpeechEngine {
                 },
                 payload,
                 timeout,
-                config.memory_ceiling,
             );
             match reply {
                 Ok(Reply::Transcript { segments, .. }) => Ok(segments),
