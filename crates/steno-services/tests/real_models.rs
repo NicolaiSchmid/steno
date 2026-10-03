@@ -40,7 +40,7 @@ async fn the_synthetic_call_runs_through_the_real_engines_to_a_well_formed_expor
     "parakeet-v3".clone_into(&mut settings.speech_engine_id);
     store.save_settings(&settings).unwrap();
 
-    let speech_store = steno_services::speech::speech_store_under(&models);
+    let speech_store = steno_speech::ModelStore::in_models_directory(&models);
     let engine = steno_services::speech::speech_engine(&Settings::default(), &models);
     let diarizer = steno_services::speech::diarizer(&models);
     let vault = dir.path().join("vault");

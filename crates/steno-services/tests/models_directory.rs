@@ -42,7 +42,7 @@ fn roots_in(cwd: &Path, home: &Path, variable: Option<&str>) -> (PathBuf, PathBu
 fn the_app_the_cli_and_the_example_read_one_models_directory() {
     if std::env::var_os(CHILD).is_some() {
         let paths = StenoPaths::new(StenoPaths::default_support_directory());
-        let app = steno_services::speech::speech_store_under(
+        let app = steno_speech::ModelStore::in_models_directory(
             &steno_services::speech::models_directory(&Settings::default(), &paths),
         );
         println!("app={}", app.root().display());

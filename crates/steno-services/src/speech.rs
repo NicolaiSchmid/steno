@@ -53,12 +53,6 @@ fn models_directory_with(
         .unwrap_or_else(|| paths.support_directory.join("Models"))
 }
 
-/// The ONNX speech models under `models_directory`.
-#[must_use]
-pub fn speech_store_under(models_directory: &Path) -> ModelStore {
-    ModelStore::in_models_directory(models_directory)
-}
-
 /// The `CoreML` Parakeet directory under `models_directory`.
 #[must_use]
 pub fn coreml_model_directory(models_directory: &Path) -> PathBuf {
@@ -124,7 +118,7 @@ pub fn speech_engine(settings: &Settings, models_directory: &Path) -> Arc<dyn Sp
     }
     let _ = settings;
     Arc::new(OnnxSpeechEngine::new(
-        speech_store_under(models_directory),
+        ModelStore::in_models_directory(models_directory),
         OnnxOptions {
             intra_threads: ONNX_THREADS,
             ..OnnxOptions::default()
@@ -165,7 +159,7 @@ impl SpeechEngine for OneCallAtATime {
 
     async fn prepare(&self) -> BoundaryResult<()> {
         let _turn = self.turn.lock().await;
-        crate::off_the_workers(self.inner.prepare()).await
+        off_the_workers(self.inner.prepare()).await
     }
 
     async fn transcribe(
@@ -174,7 +168,21 @@ impl SpeechEngine for OneCallAtATime {
         hint: Option<&LanguageTag>,
     ) -> BoundaryResult<Vec<RawSegment>> {
         let _turn = self.turn.lock().await;
-        crate::off_the_workers(self.inner.transcribe(audio, hint)).await
+        off_the_workers(self.inner.transcribe(audio, hint)).await
+    }
+}
+
+/// Awaits `future`, which does long synchronous work without yielding (a
+/// `CoreML` load or transcription): on a multi-thread runtime the worker
+/// hands its queued tasks to the others first (`block_in_place`) and then
+/// blocks on it, so a long call parks one thread rather than everything
+/// queued behind it; elsewhere it is awaited as it is.
+async fn off_the_workers<T>(future: impl std::future::Future<Output = T>) -> T {
+    match tokio::runtime::Handle::try_current() {
+        Ok(handle) if handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread => {
+            tokio::task::block_in_place(|| handle.block_on(future))
+        }
+        _ => future.await,
     }
 }
 
@@ -244,7 +252,7 @@ impl SpeechEngine for LanguageTaggingEngine {
 pub fn diarizer(models_directory: &Path) -> Arc<dyn Diarizer> {
     Arc::new(ModelDiarizer::onnx(
         DiarizerConfig::default(),
-        diarize_store(&speech_store_under(models_directory)),
+        diarize_store(&ModelStore::in_models_directory(models_directory)),
         ONNX_THREADS,
     ))
 }
@@ -262,7 +270,7 @@ impl ModelStoreSpeechModels {
     #[must_use]
     pub fn new(models_directory: &Path) -> Self {
         ModelStoreSpeechModels {
-            speech: speech_store_under(models_directory),
+            speech: ModelStore::in_models_directory(models_directory),
             coreml: coreml_model_directory(models_directory),
         }
     }
@@ -512,7 +520,10 @@ mod tests {
             models_directory_with(&settings, &paths, Some("/tmp/steno-env-models".into())),
             chosen
         );
-        assert_eq!(speech_store_under(chosen).root(), chosen.join("onnx"));
+        assert_eq!(
+            ModelStore::in_models_directory(chosen).root(),
+            chosen.join("onnx")
+        );
         assert_eq!(
             coreml_model_directory(chosen),
             chosen.join("fluidaudio").join("parakeet-tdt-0.6b-v3")

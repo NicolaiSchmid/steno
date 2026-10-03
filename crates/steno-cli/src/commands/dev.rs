@@ -855,7 +855,7 @@ struct SweepCluster {
 
 impl DiarizeSweep {
     async fn run(self) -> Outcome {
-        let store = steno_services::speech::speech_store_under(&self.models.directory()?);
+        let store = steno_speech::ModelStore::in_models_directory(&self.models.directory()?);
         let mut runs = Vec::new();
         for threshold in &self.thresholds {
             let config = DiarizerConfig {

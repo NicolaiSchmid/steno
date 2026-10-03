@@ -99,20 +99,6 @@ pub fn log_to_stderr(default_filter: &str) {
         .try_init();
 }
 
-/// Awaits `future`, which does long synchronous work without yielding (a
-/// `CoreML` load or transcription): on a multi-thread runtime the worker
-/// hands its queued tasks to the others first (`block_in_place`) and then
-/// blocks on it, so a long call parks one thread rather than everything
-/// queued behind it; elsewhere it is awaited as it is.
-pub(crate) async fn off_the_workers<T>(future: impl std::future::Future<Output = T>) -> T {
-    match tokio::runtime::Handle::try_current() {
-        Ok(handle) if handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread => {
-            tokio::task::block_in_place(|| handle.block_on(future))
-        }
-        _ => future.await,
-    }
-}
-
 /// Runs `future` to completion on `runtime` from a synchronous host
 /// service (the host's traits are synchronous, the clients are async).
 pub(crate) fn block_on<T>(
