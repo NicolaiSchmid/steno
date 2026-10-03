@@ -184,16 +184,20 @@ impl<B: SpeechBackend> Transcriber<B> {
         join_words(&TokenAggregator.words(&timed_pieces(tokens, &self.vocab)))
     }
 
-    fn word_count(&self, tokens: &[Token]) -> usize {
+    /// Word starts among `tokens` whose frame lies inside `range`, so a
+    /// recovery candidate decoded over a wider window is scored on the
+    /// chunk's own audio and not on the neighbour's speech it also saw.
+    fn words_inside(&self, tokens: &[Token], range: &Range<usize>) -> usize {
+        let frames = range.start / FRAME_SAMPLES..=range.end / FRAME_SAMPLES;
         tokens
             .iter()
-            .filter(|t| starts_word(self.vocab.piece(t.id)))
+            .filter(|t| frames.contains(&t.frame) && starts_word(self.vocab.piece(t.id)))
             .count()
     }
 
     fn looks_empty(&self, tokens: &[Token], speech: &[Range<usize>], range: &Range<usize>) -> bool {
         let speech_seconds = speech_inside(speech, range);
-        let words = self.word_count(tokens) as f32;
+        let words = self.words_inside(tokens, range) as f32;
         speech_seconds >= self.config.recovery.min_speech_seconds
             && words < self.config.recovery.min_words_per_speech_second * speech_seconds
     }
@@ -207,7 +211,7 @@ impl<B: SpeechBackend> Transcriber<B> {
     ) -> Result<Vec<Token>, SpeechError> {
         let max = sample_count(self.config.chunker.max_seconds);
         let mut best = original;
-        let mut best_words = self.word_count(&best);
+        let mut best_words = self.words_inside(&best, range);
         let mut accepted = false;
         let extensions = self.config.recovery.extensions_seconds.clone();
         for (before, after) in extensions {
@@ -218,7 +222,7 @@ impl<B: SpeechBackend> Transcriber<B> {
             }
             stats.recoveries_tried += 1;
             let candidate = self.decode_range(samples, start..end, stats)?;
-            let words = self.word_count(&candidate);
+            let words = self.words_inside(&candidate, range);
             if words > best_words {
                 best = candidate;
                 best_words = words;
@@ -255,7 +259,9 @@ mod fake {
     //! are not aligned to the recording's, so a frame takes the piece most
     //! of its samples carry. The joint emits the frame's piece once
     //! (duration 0) and then blank, so the decoder loop, the chunker and the
-    //! merge are exercised end to end with a known answer.
+    //! merge are exercised end to end with a known answer. A window shorter
+    //! than `min_frames` encodes to silence, which stands in for spike D's
+    //! zero-token window so the recovery has something to recover.
 
     use super::*;
     use crate::backend::{
@@ -264,11 +270,13 @@ mod fake {
 
     pub struct FrameTokenBackend {
         pub shape: ModelShape,
+        pub min_frames: usize,
     }
 
     impl FrameTokenBackend {
         pub fn new(vocab: &Vocab) -> Self {
             FrameTokenBackend {
+                min_frames: 0,
                 shape: ModelShape {
                     vocab_size: vocab.len(),
                     blank_id: vocab.blank_id(),
@@ -307,10 +315,15 @@ mod fake {
             })
         }
         fn encode(&mut self, features: &Features) -> Result<EncoderOutput, SpeechError> {
+            let data = if features.frames < self.min_frames {
+                vec![0.0; features.frames]
+            } else {
+                features.data.clone()
+            };
             Ok(EncoderOutput {
                 hidden: 1,
                 len: features.frames,
-                data: features.data.clone(),
+                data,
             })
         }
         fn decoder_step(
@@ -377,6 +390,13 @@ mod tests {
     }
 
     fn transcriber(config: PipelineConfig) -> Transcriber<FrameTokenBackend> {
+        transcriber_with(config, 0)
+    }
+
+    fn transcriber_with(
+        config: PipelineConfig,
+        min_frames: usize,
+    ) -> Transcriber<FrameTokenBackend> {
         let vocab = vocab();
         let tagger = LanguageTagger::with_recognizer(
             LanguageTagger::default_candidates(),
@@ -393,13 +413,30 @@ mod tests {
                 ..VadConfig::default()
             },
         };
-        Transcriber::new(
-            FrameTokenBackend::new(&vocab),
-            vocab,
-            Box::new(vad),
-            tagger,
-            config,
-        )
+        let mut backend = FrameTokenBackend::new(&vocab);
+        backend.min_frames = min_frames;
+        Transcriber::new(backend, vocab, Box::new(vad), tagger, config)
+    }
+
+    /// 9 s of speech energy the fake decodes to nothing (piece 0), one word
+    /// at `word_frame`; chunks of about 8 s.
+    fn empty_chunk_fixture(word_frame: usize) -> (PipelineConfig, Vec<f32>) {
+        let config = PipelineConfig {
+            chunker: ChunkerConfig {
+                target_seconds: 8.0,
+                search_seconds: 1.0,
+                long_pause_seconds: 100.0,
+                ..ChunkerConfig::default()
+            },
+            ..PipelineConfig::default()
+        };
+        let mut samples = audio(14.0, word_frame, &[5, 25]);
+        for (i, x) in samples.iter_mut().enumerate() {
+            if *x == 0.0 && i < 9 * SAMPLE_RATE {
+                *x = 0.0004 * if i % 2 == 0 { 1.0 } else { -1.0 };
+            }
+        }
+        (config, samples)
     }
 
     #[test]
@@ -481,26 +518,29 @@ mod tests {
 
     #[test]
     fn an_empty_chunk_with_speech_is_retried_with_a_wider_window() {
-        // Speech energy without decodable pieces for 10 s (piece 0 is silence to the fake),
-        // then a word just after the chunk end: the extension picks it up.
-        let config = PipelineConfig {
-            chunker: ChunkerConfig {
-                target_seconds: 8.0,
-                search_seconds: 1.0,
-                long_pause_seconds: 100.0,
-                ..ChunkerConfig::default()
-            },
-            ..PipelineConfig::default()
-        };
-        let mut t = transcriber(config);
-        let mut samples = audio(14.0, 130, &[5, 25]);
-        for (i, x) in samples.iter_mut().enumerate() {
-            if *x == 0.0 && i < 9 * SAMPLE_RATE {
-                *x = 0.0004 * if i % 2 == 0 { 1.0 } else { -1.0 };
-            }
-        }
+        // The word sits at 4 s inside the one 9.25 s chunk (116 frames); the
+        // fake encodes windows under 130 frames to silence, so only the
+        // 6 s extension after the chunk decodes it.
+        let (config, samples) = empty_chunk_fixture(50);
+        let mut t = transcriber_with(config, 130);
         let transcript = t.transcribe(&samples, None).unwrap();
+        assert_eq!(transcript.chunks.len(), 1, "{:?}", transcript.chunks);
         assert!(transcript.stats.recoveries_tried >= 1);
+        assert_eq!(transcript.stats.recoveries_accepted, 1);
+        assert_eq!(transcript.text(), "w5s25");
+    }
+
+    #[test]
+    fn a_word_in_the_neighbour_chunk_does_not_count_as_a_recovery() {
+        // The word at 10.4 s lies after the first chunk's end; the widened
+        // window decodes it, but it is the second chunk's word, so the retry
+        // is not accepted and the merge sees it once.
+        let (config, samples) = empty_chunk_fixture(130);
+        let mut t = transcriber(config);
+        let transcript = t.transcribe(&samples, None).unwrap();
+        assert_eq!(transcript.chunks.len(), 2, "{:?}", transcript.chunks);
+        assert!(transcript.stats.recoveries_tried >= 1);
+        assert_eq!(transcript.stats.recoveries_accepted, 0);
         assert_eq!(transcript.text(), "w5s25");
         assert_eq!(
             speech_inside(&[0..16_000, 32_000..48_000], &(8_000..40_000)),
