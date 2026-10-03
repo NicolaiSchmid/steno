@@ -155,9 +155,8 @@ impl ManagedBlock {
         lines
     }
 
-    /// `"2026-09-24"` from `- 2026-09-24 …`, or `None` when the line has
-    /// none: fewer than ten characters after the bullet, or any of them
-    /// other than a digit where the hyphens are not.
+    /// `"2026-09-24"` from `- 2026-09-24 …`; `None` when fewer than ten
+    /// characters follow the bullet or they do not fit `DDDD-DD-DD`.
     fn date_of(line: &str) -> Option<&str> {
         let candidate = line.trim_start_matches(['-', ' ', '*']).get(..10)?;
         let well_formed = candidate

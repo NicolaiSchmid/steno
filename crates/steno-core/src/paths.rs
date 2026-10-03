@@ -121,7 +121,7 @@ fn is_path_allowed(byte: u8) -> bool {
 /// percent-encoding undone, the host part (empty or `localhost`) dropped,
 /// and on Windows the drive path restored with backslashes. A `%` that is
 /// not followed by two hex digits is kept as it is. `None` for any other
-/// scheme.
+/// scheme. Swift: `URL.path` of the stored `mixdownURL`.
 #[must_use]
 pub fn file_url_path(url: &str) -> Option<PathBuf> {
     let rest = url.strip_prefix("file://")?;

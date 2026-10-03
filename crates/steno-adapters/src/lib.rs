@@ -1,6 +1,6 @@
 //! Steno's destinations and the meeting export, the port of
 //! `Sources/StenoAdapters`. Plan: `.plans/2026-10-02-rust-core-and-tauri-shell.md`,
-//! WP7.
+//! work package 7b.
 //!
 //! - [`rendering`]: pure renderers from [`MeetingExport`](steno_core::MeetingExport)
 //!   to bytes: folder note, transcript and tasks Markdown, `WebVTT`,
