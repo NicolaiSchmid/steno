@@ -474,9 +474,15 @@ async fn a_missing_row_fails_for_the_operation_s_stage_with_what_is_missing() {
         .rerun_summary(unknown, "default")
         .await
         .unwrap_err();
-    assert_eq!(rerun.to_string(), format!("summarize: meeting {unknown} not found"));
+    assert_eq!(
+        rerun.to_string(),
+        format!("summarize: meeting {unknown} not found")
+    );
     let redeliver = world.pipeline.redeliver(unknown).await.unwrap_err();
-    assert_eq!(redeliver.to_string(), format!("deliver: meeting {unknown} not found"));
+    assert_eq!(
+        redeliver.to_string(),
+        format!("deliver: meeting {unknown} not found")
+    );
     let processed = world.pipeline.process(unknown).await.unwrap_err();
     assert_eq!(
         processed.to_string(),
@@ -510,7 +516,10 @@ async fn a_claimed_operation_holds_the_meeting_until_it_runs_or_is_dropped() {
         .unwrap();
     assert_eq!(
         refused.to_string(),
-        format!("summarize: meeting {} is already being processed", meeting.id)
+        format!(
+            "summarize: meeting {} is already being processed",
+            meeting.id
+        )
     );
     drop(claimed);
     assert_eq!(world.pipeline.in_flight(), Vec::<Uuid>::new());
@@ -532,6 +541,57 @@ async fn a_second_operation_on_a_meeting_in_flight_is_refused() {
     let again = world.pipeline.enqueue(&meeting, &asset).unwrap_err();
     assert!(again.reason.contains("already being processed"));
     world.pipeline.wait_until_idle().await;
+}
+
+/// An engine that panics mid-run, standing in for any bug in a stage.
+struct PanickingEngine(std::collections::BTreeSet<steno_core::LanguageTag>);
+
+#[async_trait]
+impl steno_core::SpeechEngine for PanickingEngine {
+    fn id(&self) -> &'static str {
+        "panicking-engine"
+    }
+
+    fn supported_languages(&self) -> &std::collections::BTreeSet<steno_core::LanguageTag> {
+        &self.0
+    }
+
+    async fn prepare(&self) -> steno_core::protocols::BoundaryResult<()> {
+        Ok(())
+    }
+
+    async fn transcribe(
+        &self,
+        _audio: &steno_core::AudioBuffer16k,
+        _hint: Option<&steno_core::LanguageTag>,
+    ) -> steno_core::protocols::BoundaryResult<Vec<steno_core::RawSegment>> {
+        panic!("the engine broke");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_run_that_panics_releases_its_asset_and_its_meeting() {
+    let world = world(false, None, AudioRetention::KeepForever);
+    let mut dependencies = world.pipeline.dependencies().clone();
+    dependencies.speech_engine = Arc::new(PanickingEngine(std::collections::BTreeSet::new()));
+    let pipeline = ProcessingPipeline::new(dependencies);
+    let meeting = call_meeting(world.now);
+    let asset = call_asset(&world.audio, meeting.id, AudioRetention::KeepForever);
+    pipeline.enqueue(&meeting, &asset).unwrap();
+    // Without waiting for idle (which drops the entries itself), the same
+    // asset can be enqueued again once the panicked run is gone.
+    let enqueued = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            if pipeline.enqueue(&meeting, &asset).is_ok() {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await;
+    assert!(enqueued.is_ok(), "the panicked run left its entry behind");
+    pipeline.wait_until_idle().await;
+    assert_eq!(pipeline.in_flight(), Vec::<Uuid>::new());
 }
 
 #[tokio::test(flavor = "multi_thread")]

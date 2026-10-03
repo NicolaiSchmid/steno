@@ -434,15 +434,20 @@ impl ProcessingPipeline {
     }
 
     /// The state lock is held from the spawn to the insert, so the task
-    /// cannot finish and remove its entry before the entry exists.
+    /// cannot finish and remove its entry before the entry exists; the
+    /// task's [`Running`] mark removes the entry however the task ends, a
+    /// panic included.
     fn start(&self, asset_id: Uuid) {
         let pipeline = self.clone();
         let mut state = self.state();
         let handle = tokio::spawn(async move {
+            let _running = Running {
+                pipeline: pipeline.clone(),
+                asset_id,
+            };
             if let Err(failure) = pipeline.process(asset_id).await {
                 tracing::warn!(%asset_id, %failure, "processing failed");
             }
-            pipeline.state().running.remove(&asset_id);
         });
         state.running.insert(asset_id, handle);
     }
@@ -1327,6 +1332,18 @@ impl Drop for Admitted {
         let mut guard = self.pipeline.state();
         guard.in_flight.remove(&self.meeting_id);
         guard.runs.remove(&self.meeting_id);
+    }
+}
+
+/// A background run's entry in `running`; dropping it removes the entry.
+struct Running {
+    pipeline: ProcessingPipeline,
+    asset_id: Uuid,
+}
+
+impl Drop for Running {
+    fn drop(&mut self) {
+        self.pipeline.state().running.remove(&self.asset_id);
     }
 }
 
