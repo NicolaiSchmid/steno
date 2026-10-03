@@ -185,6 +185,11 @@ login item, calendar, phone pairing). Until then, only what the first crates tur
   database with an identifier it does not know, as the Rust store does
   (`StoreError::UnknownMigration`); today GRDB ignores unknown identifiers and the
   Swift app would run on a newer schema without noticing.
+- A commit acknowledged outside the process should be on disk before the
+  acknowledgement: the handover receipt and the new meeting row, after which the phone
+  deletes its copy. Under `synchronous = NORMAL` that transaction needs to run with
+  `FULL` or be followed by a checkpoint before the answer goes out. The Swift app has
+  the same gap today.
 
 ### Adapters
 
