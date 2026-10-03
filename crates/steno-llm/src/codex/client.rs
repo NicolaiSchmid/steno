@@ -193,11 +193,13 @@ impl CodexResponsesClient {
         }
         if reply.status == 401 && !refreshed_after_unauthorized.load(Ordering::Relaxed) {
             // The file may hold a token the CLI already rotated (no
-            // network), else one refresh; then a 401 is the answer.
-            refreshed_after_unauthorized.store(true, Ordering::Relaxed);
+            // network), else one refresh; then a 401 is the answer. A
+            // refresh that failed for a reason a retry may fix does not
+            // use this up: the next attempt may refresh again.
             self.credentials
                 .refreshed_if_still_using(&credentials.access_token)
                 .await?;
+            refreshed_after_unauthorized.store(true, Ordering::Relaxed);
             return Ok(Attempt::Resend);
         }
         if reply.status == 400

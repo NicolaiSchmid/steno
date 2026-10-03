@@ -1163,3 +1163,37 @@ async fn unauthorized_with_a_rotated_file_rereads_instead_of_refreshing() {
     );
     assert_eq!(harness.home.server.requests().len(), 0);
 }
+
+/// A 401 whose refresh hiccups backs off, and the next attempt's 401 may
+/// refresh again: only a refresh that went through uses up the one
+/// refresh a completion gets.
+#[tokio::test]
+async fn a_failed_refresh_after_a_401_does_not_use_up_the_refresh() {
+    let harness = CodexHarness::new().await;
+    let fresh = CodexHome::access_token(3_600, "pro");
+    harness.home.server.enqueue([
+        scripts.server_error(503),
+        scripts.token_refresh(&fresh, Some("rt_2"), None),
+    ]);
+    harness.backend.enqueue([
+        scripts.unauthorized(),
+        scripts.unauthorized(),
+        scripts.stream("ok"),
+    ]);
+    let driver = harness.drive_retries();
+    let response = harness.client.complete_llm(&text_request()).await;
+    driver.abort();
+    assert_eq!(response.unwrap().text, "ok");
+    assert_eq!(harness.home.server.request_count(), 2);
+    let auths: Vec<Option<String>> = harness
+        .backend
+        .requests()
+        .iter()
+        .map(|r| r.authorization().map(str::to_owned))
+        .collect();
+    let stored = bearer(&CodexHome::access_token(3_600, "plus"));
+    assert_eq!(
+        auths,
+        [Some(stored.clone()), Some(stored), Some(bearer(&fresh))]
+    );
+}
