@@ -66,105 +66,14 @@ pub fn turns(
     assignments: &[Option<usize>],
     rules: &TimelineRules,
 ) -> Vec<SpeakerTurn> {
-    let geometry = &analysis.geometry;
     let cluster_count = assignments.iter().flatten().max().map_or(0, |max| max + 1);
-    let total_frames = analysis.total_samples / geometry.receptive_field_shift;
+    let total_frames = analysis.total_samples / analysis.geometry.receptive_field_shift;
     if cluster_count == 0 || total_frames == 0 {
         return Vec::new();
     }
-    // Per global frame: votes per cluster, how many windows cover it, and
-    // the summed local speaker counts. A window casts one vote for a
-    // cluster on a frame however many of its local speakers the cluster
-    // holds, as `FluidAudio` takes the maximum activation per window and
-    // cluster (`OfflineReconstruction.swift`), so a voice the model split
-    // in two inside one window does not outvote the other windows. A vote
-    // cell holds at most the windows covering the frame: five at the
-    // default two-second step, 65 535 at a step of 0.15 ms, which no
-    // configuration reaches; a finer step saturates rather than wrapping,
-    // which can only flatten the ranking. Two bytes, not four, because the
-    // matrix is the largest thing here (frames times clusters, 59 frames a
-    // second, dozens of clusters before refinement on a group call).
-    let mut votes = vec![0u16; total_frames * cluster_count];
-    let mut coverage = vec![0u32; total_frames];
-    let mut counts = vec![0u32; total_frames];
-    // Each window's clusters with the mask of their embedded local
-    // speakers: a frame votes for a cluster when the masks meet.
-    let mut members: Vec<Vec<(usize, u8)>> = vec![Vec::new(); analysis.activities.len()];
-    for (embedding, cluster) in analysis.embeddings.iter().zip(assignments) {
-        if let Some(cluster) = *cluster {
-            let window = &mut members[embedding.window];
-            let speaker = 1u8 << embedding.local_speaker;
-            match window.iter_mut().find(|(known, _)| *known == cluster) {
-                Some((_, speakers)) => *speakers |= speaker,
-                None => window.push((cluster, speaker)),
-            }
-        }
-    }
-    for (activity, members) in analysis.activities.iter().zip(&members) {
-        let base = geometry.global_frame(activity.offset);
-        for (local, mask) in activity.frames.iter().enumerate() {
-            let frame = base + local;
-            if frame >= total_frames {
-                break;
-            }
-            coverage[frame] += 1;
-            counts[frame] += mask.count_ones();
-            for &(cluster, speakers) in members {
-                if mask & speakers != 0 {
-                    let cell = &mut votes[frame * cluster_count + cluster];
-                    *cell = cell.saturating_add(1);
-                }
-            }
-        }
-    }
-    // Active clusters per frame, laid out like `votes`: the top `k` by
-    // votes, `k` the rounded mean speaker count, only clusters somebody
-    // voted for; the first `k` when nobody did (see the module doc).
-    let mut active = vec![false; total_frames * cluster_count];
-    let mut ranked: Vec<usize> = Vec::with_capacity(cluster_count);
-    for frame in 0..total_frames {
-        if coverage[frame] == 0 {
-            continue;
-        }
-        let expected = (counts[frame] + coverage[frame] / 2) / coverage[frame];
-        let k = (expected as usize).min(cluster_count.min(geometry.num_speakers));
-        let row = &votes[frame * cluster_count..(frame + 1) * cluster_count];
-        ranked.clear();
-        ranked.extend((0..cluster_count).filter(|c| row[*c] > 0));
-        ranked.sort_by(|lhs, rhs| row[*rhs].cmp(&row[*lhs]).then(lhs.cmp(rhs)));
-        ranked.truncate(k);
-        if ranked.is_empty() {
-            ranked.extend(0..k);
-        }
-        for cluster in &ranked {
-            active[frame * cluster_count + cluster] = true;
-        }
-    }
-    // Each cluster's active frames become runs with their mean vote share.
-    let mut runs: Vec<Run> = Vec::new();
-    for cluster in 0..cluster_count {
-        let mut run: Option<(usize, f64, usize)> = None;
-        for frame in 0..=total_frames {
-            let is_active = frame < total_frames && active[frame * cluster_count + cluster];
-            if is_active {
-                let share =
-                    f64::from(votes[frame * cluster_count + cluster]) / f64::from(coverage[frame]);
-                run = Some(match run {
-                    Some((start, sum, length)) => (start, sum + share, length + 1),
-                    None => (frame, share, 1),
-                });
-            } else if let Some((start, sum, length)) = run.take() {
-                let (time_start, time_end) =
-                    frame_span(geometry, 0, start, frame - 1, analysis.total_samples);
-                runs.push(Run {
-                    cluster,
-                    start: time_start,
-                    end: time_end,
-                    quality: (sum / to_f64(length)).clamp(0.0, 1.0),
-                });
-            }
-        }
-    }
+    let votes = Votes::tally(analysis, assignments, cluster_count, total_frames);
+    let active = votes.active(analysis.geometry.num_speakers);
+    let mut runs = votes.runs(&active, analysis);
     runs.sort_by(|lhs, rhs| {
         lhs.start
             .total_cmp(&rhs.start)
@@ -182,6 +91,138 @@ pub fn turns(
             quality: run.quality as f32,
         })
         .collect()
+}
+
+/// Per global frame: votes per cluster, how many windows cover it, and
+/// the summed local speaker counts. A window casts one vote for a cluster
+/// on a frame however many of its local speakers the cluster holds, as
+/// `FluidAudio` takes the maximum activation per window and cluster
+/// (`OfflineReconstruction.swift`), so a voice the model split in two
+/// inside one window does not outvote the other windows. A vote cell
+/// holds at most the windows covering the frame: five at the default
+/// two-second step, 65 535 at a step of 0.15 ms, which no configuration
+/// reaches; a finer step saturates rather than wrapping, which can only
+/// flatten the ranking. Two bytes, not four, because the matrix is the
+/// largest thing here (frames times clusters, 59 frames a second, dozens
+/// of clusters before refinement on a group call).
+struct Votes {
+    /// One row of `clusters` cells per frame.
+    cells: Vec<u16>,
+    clusters: usize,
+    coverage: Vec<u32>,
+    counts: Vec<u32>,
+}
+
+impl Votes {
+    fn tally(
+        analysis: &Analysis,
+        assignments: &[Option<usize>],
+        clusters: usize,
+        total_frames: usize,
+    ) -> Self {
+        let mut votes = Votes {
+            cells: vec![0; total_frames * clusters],
+            clusters,
+            coverage: vec![0; total_frames],
+            counts: vec![0; total_frames],
+        };
+        // Each window's clusters with the mask of their embedded local
+        // speakers: a frame votes for a cluster when the masks meet.
+        let mut members: Vec<Vec<(usize, u8)>> = vec![Vec::new(); analysis.activities.len()];
+        for (embedding, cluster) in analysis.embeddings.iter().zip(assignments) {
+            if let Some(cluster) = *cluster {
+                let window = &mut members[embedding.window];
+                let speaker = 1u8 << embedding.local_speaker;
+                match window.iter_mut().find(|(known, _)| *known == cluster) {
+                    Some((_, speakers)) => *speakers |= speaker,
+                    None => window.push((cluster, speaker)),
+                }
+            }
+        }
+        for (activity, members) in analysis.activities.iter().zip(&members) {
+            let base = analysis.geometry.global_frame(activity.offset);
+            for (local, mask) in activity.frames.iter().enumerate() {
+                let frame = base + local;
+                if frame >= total_frames {
+                    break;
+                }
+                votes.coverage[frame] += 1;
+                votes.counts[frame] += mask.count_ones();
+                for &(cluster, speakers) in members {
+                    if mask & speakers != 0 {
+                        let cell = &mut votes.cells[frame * clusters + cluster];
+                        *cell = cell.saturating_add(1);
+                    }
+                }
+            }
+        }
+        votes
+    }
+
+    /// Active clusters per frame, laid out like `cells`: the top `k` by
+    /// votes, `k` the rounded mean speaker count capped at
+    /// `max_speakers`, only clusters somebody voted for; the first `k`
+    /// when nobody did (see the module doc).
+    fn active(&self, max_speakers: usize) -> Vec<bool> {
+        let clusters = self.clusters;
+        let mut active = vec![false; self.cells.len()];
+        let mut ranked: Vec<usize> = Vec::with_capacity(clusters);
+        for (frame, row) in self.cells.chunks_exact(clusters).enumerate() {
+            let coverage = self.coverage[frame];
+            if coverage == 0 {
+                continue;
+            }
+            let expected = (self.counts[frame] + coverage / 2) / coverage;
+            let k = (expected as usize).min(clusters.min(max_speakers));
+            ranked.clear();
+            ranked.extend((0..clusters).filter(|c| row[*c] > 0));
+            ranked.sort_by(|lhs, rhs| row[*rhs].cmp(&row[*lhs]).then(lhs.cmp(rhs)));
+            ranked.truncate(k);
+            if ranked.is_empty() {
+                ranked.extend(0..k);
+            }
+            for cluster in &ranked {
+                active[frame * clusters + cluster] = true;
+            }
+        }
+        active
+    }
+
+    /// Each cluster's active frames as runs with their mean vote share.
+    fn runs(&self, active: &[bool], analysis: &Analysis) -> Vec<Run> {
+        let clusters = self.clusters;
+        let total_frames = self.coverage.len();
+        let mut runs: Vec<Run> = Vec::new();
+        for cluster in 0..clusters {
+            let mut run: Option<(usize, f64, usize)> = None;
+            for frame in 0..=total_frames {
+                let is_active = frame < total_frames && active[frame * clusters + cluster];
+                if is_active {
+                    let share = f64::from(self.cells[frame * clusters + cluster])
+                        / f64::from(self.coverage[frame]);
+                    run = Some(match run {
+                        Some((start, sum, length)) => (start, sum + share, length + 1),
+                        None => (frame, share, 1),
+                    });
+                } else if let Some((start, sum, length)) = run.take() {
+                    let (time_start, time_end) = frame_span(
+                        &analysis.geometry,
+                        0,
+                        start,
+                        frame - 1,
+                        analysis.total_samples,
+                    );
+                    runs.push(Run {
+                        cluster,
+                        start: time_start,
+                        end: time_end,
+                        quality: (sum / to_f64(length)).clamp(0.0, 1.0),
+                    });
+                }
+            }
+        }
+        runs
+    }
 }
 
 /// A stretch of frames one cluster is active in, before the gaps close
