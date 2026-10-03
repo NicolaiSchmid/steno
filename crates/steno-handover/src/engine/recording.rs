@@ -25,7 +25,7 @@ enum Verification {
     Answered(HandoverResponse),
 }
 
-fn no_such_recording() -> HandoverResponse {
+pub(super) fn no_such_recording() -> HandoverResponse {
     HandoverResponse::problem(StatusCode::NOT_FOUND, "no such recording")
 }
 
@@ -57,7 +57,11 @@ impl Engine {
             return HandoverResponse::problem(StatusCode::BAD_REQUEST, problem);
         }
 
-        if let Some(existing) = self.receipt(recording_id).await {
+        let existing = match self.receipt(recording_id).await {
+            Ok(existing) => existing,
+            Err(error) => return HandoverResponse::internal_error("reading the receipt", &error),
+        };
+        if let Some(existing) = existing {
             if existing.device_id != device.id {
                 return HandoverResponse::problem(
                     StatusCode::CONFLICT,
@@ -139,8 +143,8 @@ impl Engine {
         device: &PairedDevice,
     ) -> HandoverResponse {
         match self.owned_receipt(recording_id, device).await {
-            Some(receipt) => HandoverResponse::json(StatusCode::OK, &Self::status_of(&receipt)),
-            None => no_such_recording(),
+            Ok(receipt) => HandoverResponse::json(StatusCode::OK, &Self::status_of(&receipt)),
+            Err(response) => response,
         }
     }
 
@@ -153,8 +157,9 @@ impl Engine {
         device: &PairedDevice,
         request: &HandoverRequest,
     ) -> HandoverResponse {
-        let Some(receipt) = self.owned_receipt(recording_id, device).await else {
-            return no_such_recording();
+        let receipt = match self.owned_receipt(recording_id, device).await {
+            Ok(receipt) => receipt,
+            Err(response) => return response,
         };
         if receipt.state.kind() == HandoverStateKind::Complete {
             return HandoverResponse::empty(StatusCode::NO_CONTENT);
@@ -248,8 +253,9 @@ impl Engine {
         recording_id: Uuid,
         device: &PairedDevice,
     ) -> HandoverResponse {
-        let Some(mut receipt) = self.owned_receipt(recording_id, device).await else {
-            return no_such_recording();
+        let mut receipt = match self.owned_receipt(recording_id, device).await {
+            Ok(receipt) => receipt,
+            Err(response) => return response,
         };
         if let Some(meeting_id) = receipt.state.meeting_id() {
             return HandoverResponse::json(StatusCode::OK, &wire::CompleteResponse { meeting_id });

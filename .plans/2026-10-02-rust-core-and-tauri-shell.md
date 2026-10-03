@@ -462,6 +462,12 @@ another release, otherwise the cutover closes them:
   `100.64.0.0/10` everywhere. It serves bridges on Linux and macOS, which Swift classes
   `.other`, and does not re-publish after a network change. WP8 decides: restart on
   network change, or re-register.
+- Receipt reads: Swift's `HandoverEngine.sweepOrphans` and `RecordingHandler.receipt(_:)`
+  read with `try?`, so a failed read counts as no receipt: the sweep deletes a
+  resumable upload, a route answers 404, and an announce starts the recording over,
+  overwriting a `complete` receipt so that the next `complete` admits the meeting
+  twice. Rust keeps the files and answers 500 (`Engine::receipt`); move the Swift side
+  to the same before cutover.
 - Service name: Swift's `HandoverConfiguration.defaultServiceName()` uses
   `Host.current().localizedName` (the computer name in System Settings). The Rust
   default reads `HOSTNAME` or `/etc/hostname` and falls back to `Steno`; the shell

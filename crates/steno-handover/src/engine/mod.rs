@@ -281,16 +281,18 @@ impl Engine {
     /// announce and the first save, a device revoked while offline), that a
     /// completed intake left behind (it copied the file before writing
     /// `complete`), or whose receipt has not moved in
-    /// [`Engine::ABANDONED_AFTER_SECONDS`]. Best effort.
+    /// [`Engine::ABANDONED_AFTER_SECONDS`]. Best effort: a receipt the
+    /// store cannot read keeps its files, which a later start sweeps.
     pub async fn sweep_orphans(&self) {
         let _ = self.inbox.prepare();
         let cutoff = (self.now)() - Duration::seconds(Self::ABANDONED_AFTER_SECONDS);
         for recording_id in self.inbox.recording_ids() {
-            let receipt = self
+            let Ok(receipt) = self
                 .with_store(move |store| store.handover_receipt(recording_id))
                 .await
-                .ok()
-                .flatten();
+            else {
+                continue;
+            };
             match receipt {
                 None => self.inbox.discard(recording_id),
                 Some(receipt)
@@ -512,22 +514,29 @@ impl Engine {
     }
 
     /// The receipt from memory or the store. Another request may have loaded
-    /// and advanced it while the store read ran; memory wins then.
-    pub(crate) async fn receipt(&self, recording_id: Uuid) -> Option<HandoverReceipt> {
+    /// and advanced it while the store read ran; memory wins then. A failed
+    /// read is an error, not "no receipt": taken for a new recording, it
+    /// would let an announce overwrite a `complete` receipt and the next
+    /// `complete` admit the meeting a second time.
+    pub(crate) async fn receipt(
+        &self,
+        recording_id: Uuid,
+    ) -> store::Result<Option<HandoverReceipt>> {
         if let Some(active) = self.state().active_receipts.get(&recording_id) {
-            return Some(active.clone());
+            return Ok(Some(active.clone()));
         }
-        let stored = self
+        let Some(stored) = self
             .with_store(move |store| store.handover_receipt(recording_id))
-            .await
-            .ok()
-            .flatten()?;
+            .await?
+        else {
+            return Ok(None);
+        };
         let mut state = self.state();
         if let Some(active) = state.active_receipts.get(&recording_id) {
-            return Some(active.clone());
+            return Ok(Some(active.clone()));
         }
         state.active_receipts.insert(recording_id, stored.clone());
-        Some(stored)
+        Ok(Some(stored))
     }
 
     /// The receipt as memory holds it now, for the re-read after a yield.
@@ -543,15 +552,21 @@ impl Engine {
         }
     }
 
-    /// The receipt when it belongs to the requesting device.
+    /// The receipt when it belongs to the requesting device; the answer
+    /// for the phone when there is none (404) or the read failed (500).
     pub(crate) async fn owned_receipt(
         &self,
         recording_id: Uuid,
         device: &PairedDevice,
-    ) -> Option<HandoverReceipt> {
-        self.receipt(recording_id)
-            .await
-            .filter(|receipt| receipt.device_id == device.id)
+    ) -> Result<HandoverReceipt, HandoverResponse> {
+        match self.receipt(recording_id).await {
+            Ok(Some(receipt)) if receipt.device_id == device.id => Ok(receipt),
+            Ok(_) => Err(recording::no_such_recording()),
+            Err(error) => Err(HandoverResponse::internal_error(
+                "reading the receipt",
+                &error,
+            )),
+        }
     }
 
     /// Marks `recording_id` as completing; `None` when it already is.
