@@ -10,7 +10,8 @@ use steno_core::AudioRetention;
 use steno_core::protocols::BoundaryResult;
 use steno_host::services::Pipeline;
 use steno_pipeline::{
-    Operation, PipelineDependencies, ProcessingPipeline, RetentionSweep, SweepIncomplete,
+    Operation, PipelineDependencies, PipelineFailure, ProcessingPipeline, RetentionSweep,
+    SweepIncomplete,
 };
 use uuid::Uuid;
 
@@ -71,14 +72,14 @@ impl CurrentPipeline {
     }
 
     /// Claims the meeting on the current pipeline in place, so a refusal
-    /// is the call's error, then runs the claimed operation on the
-    /// runtime in the background; its failure reaches the window as the
+    /// is the call's error, then spawns the claimed operation on the
+    /// runtime; its failure reaches the detail's error line as the
     /// `OperationFailed` event it posts.
-    fn start<E: std::fmt::Display>(
+    fn claim_and_spawn(
         &self,
-        claim: impl FnOnce(&ProcessingPipeline) -> Result<Operation, E>,
-    ) -> Result<(), String> {
-        let operation = claim(&self.current()).map_err(|failure| failure.to_string())?;
+        claim: impl FnOnce(&ProcessingPipeline) -> Result<Operation, PipelineFailure>,
+    ) -> Result<(), PipelineFailure> {
+        let operation = claim(&self.current())?;
         self.runtime.spawn(async move {
             let _ = operation.await;
         });
@@ -91,10 +92,10 @@ impl CurrentPipeline {
 /// up) comes back as the call's error, as the Swift detail saw it; the
 /// work itself then runs on the runtime and the call returns. The host
 /// calls with its state locked, and both talk to the network, so waiting
-/// here would park the runtime's workers on that lock (the event loop,
-/// the flush timer and the poll all take it) until nobody is left to
-/// drive the request. A failure after the claim is posted as
-/// `MeetingEvent::OperationFailed`. `apply_retention` touches the store
+/// here would park the runtime's workers on that lock (the event loop and
+/// the poll take it) until nobody is left to drive the request. A failure
+/// after the claim is posted as `MeetingEvent::OperationFailed`, which the
+/// host shows on the detail's error line. `apply_retention` touches the store
 /// only and completes in place, so the detail the host reads back right
 /// after already shows the new rule.
 pub struct HostPipeline {
@@ -106,13 +107,13 @@ impl Pipeline for HostPipeline {
     fn rerun_summary(&self, meeting_id: Uuid, template_id: &str) -> BoundaryResult<()> {
         Ok(self
             .pipeline
-            .start(|pipeline| pipeline.claim_rerun_summary(meeting_id, template_id))?)
+            .claim_and_spawn(|pipeline| pipeline.claim_rerun_summary(meeting_id, template_id))?)
     }
 
     fn redeliver(&self, meeting_id: Uuid) -> BoundaryResult<()> {
         Ok(self
             .pipeline
-            .start(|pipeline| pipeline.claim_redeliver(meeting_id))?)
+            .claim_and_spawn(|pipeline| pipeline.claim_redeliver(meeting_id))?)
     }
 
     fn apply_retention(&self, meeting_id: Uuid, rule: AudioRetention) -> BoundaryResult<()> {
