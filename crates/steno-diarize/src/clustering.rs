@@ -8,10 +8,10 @@
 //! The threshold is a cosine distance (`1 - cos`) averaged over every
 //! pair of members across the two clusters, which is what average linkage
 //! compares. `FluidAudio` cuts a centroid-linkage dendrogram, then runs
-//! `VBx`, at a Euclidean distance between unit vectors (0.8 in Steno's
-//! calibration), so its number is not this number; `d^2 = 2 - 2 cos`
-//! turns 0.8 into 0.32, which is where the sweep behind
-//! [`crate::DEFAULT_CLUSTERING_THRESHOLD`] started.
+//! `VBx`, at a Euclidean distance between unit vectors, so its number is
+//! not this number; [`crate::DEFAULT_CLUSTERING_THRESHOLD`] says how the
+//! default was derived from it. This is one of the departures the crate
+//! doc lists.
 
 /// The cut and the speaker-count constraints.
 #[derive(Debug, Clone, PartialEq)]

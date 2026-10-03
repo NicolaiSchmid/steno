@@ -33,6 +33,15 @@
 //! so the Mac keeps the embeddings the Swift app stored. Everything above
 //! the trait is shared and tested without models.
 //!
+//! Where this crate knowingly differs from `FluidAudio` above the tensors:
+//! average linkage on cosine distance where it cuts centroid linkage and
+//! then runs `VBx` ([`clustering`]); the speaker count rounds half up and
+//! a cluster nobody voted for is active only where no cluster has a vote
+//! ([`timeline`]); no fallback to overlapped frames when the clean ones
+//! are few ([`extraction::ExtractionRules::min_active_ratio`]). Everything
+//! else is one for one with `Sources/StenoSpeech/Diarization` and the
+//! `FluidAudio` code it ran.
+//!
 //! Entry points: [`ModelDiarizer`] is the `steno_core::Diarizer` the
 //! pipeline holds, built by [`ModelDiarizer::onnx`] over a
 //! [`ModelStore`] or by `ModelDiarizer::coreml` over `FluidAudio`'s model

@@ -7,8 +7,8 @@
 //! favour of the earlier speaker so no two speakers share a moment, as
 //! the transcript lanes require.
 //!
-//! Two deliberate departures from `FluidAudio`'s `OfflineReconstruction`:
-//! the speaker count rounds half up (`(sum + n / 2) / n`) where Swift
+//! Two deliberate departures from `FluidAudio`'s `OfflineReconstruction`,
+//! listed with the others in the crate doc: the speaker count rounds half up (`(sum + n / 2) / n`) where Swift
 //! rounds half to even, which differs only where an even number of
 //! windows cover a frame and split evenly, the first and last eight
 //! seconds of a lane, and there one window hearing a voice means a

@@ -19,13 +19,14 @@ pub struct ExtractionRules {
     pub exclude_overlap: bool,
     /// The share of the window's frames the speaker must fill, after
     /// overlap exclusion, to be embedded at all: `minActiveRatio = 0.2`
-    /// in `Offline/Extraction/OfflineEmbeddingExtractor.swift`, 118 of
-    /// 589 frames, about two seconds. A window that hears a speaker only
-    /// in passing contributes no embedding, so an interjection does not
-    /// seed a cluster of its own. `FluidAudio`'s fallback to the
+    /// in `FluidAudio`'s
+    /// `Diarizer/Offline/Extraction/OfflineEmbeddingExtractor.swift`, 118
+    /// of 589 frames, about two seconds. A window that hears a speaker
+    /// only in passing contributes no embedding, so an interjection does
+    /// not seed a cluster of its own. `FluidAudio`'s fallback to the
     /// overlapped frames when the clean ones are under the one-second
     /// floor cannot trigger once this holds (118 frames exceed 60), so
-    /// the port has none.
+    /// the port has none; one of the departures the crate doc lists.
     pub min_active_ratio: f64,
 }
 

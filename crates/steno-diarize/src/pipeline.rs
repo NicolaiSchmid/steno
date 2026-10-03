@@ -17,8 +17,9 @@ use crate::{mapping, timeline};
 /// `Sources/StenoSpeech/Diarization/FluidDiarizer.swift`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct DiarizerConfig {
-    /// Cosine distance between cluster means at or below which the
-    /// agglomerative clustering merges; see [`DEFAULT_CLUSTERING_THRESHOLD`].
+    /// Mean pairwise cosine distance between the members of two clusters
+    /// (average linkage) at or below which they merge; see
+    /// [`DEFAULT_CLUSTERING_THRESHOLD`] and [`crate::clustering`].
     pub clustering_threshold: f32,
     pub min_speakers: Option<usize>,
     pub max_speakers: Option<usize>,
@@ -35,9 +36,10 @@ pub struct DiarizerConfig {
 
 /// The clustering cut: `FluidAudio`'s Euclidean 0.8 on unit vectors as a
 /// cosine distance (`d^2 = 2 - 2 cos`). The G3 sweep over the seven
-/// calibration calls (`.plans/2026-10-01-cross-platform-speech-stack.md`,
-/// PR #164) passed at every cut from 0.20 to 0.60 on both backends, so
-/// the derived value is kept rather than tuned to the corpus.
+/// calibration calls (gate G3 in
+/// `.plans/2026-10-01-cross-platform-speech-stack.md`) passed at every
+/// cut from 0.20 to 0.60 on both backends, so the derived value is kept
+/// rather than tuned to the corpus.
 pub const DEFAULT_CLUSTERING_THRESHOLD: f32 = 0.32;
 
 impl Default for DiarizerConfig {
