@@ -332,14 +332,12 @@ impl ObsidianFolderDestination {
                 .any(|name| is_audio(name))
     }
 
-    /// The vault exists and the people folder, if any, is a plain relative
-    /// path by the ledger's rule ([`DeliveryLedger::is_plain_relative`]: no
-    /// `..`, no root, no drive, no leading `.`) and has no `.` or empty
-    /// component (`Path::components` drops an interior `.`, so the ledger
-    /// cannot see those), no `\` and no surrounding whitespace. The ledger's
-    /// rule is part of it so the receipt paths this folder yields are ones
-    /// the ledger accepts on the next delivery; Swift's `checkVault` accepts
-    /// `./People` (parity list in the plan).
+    /// The vault exists and the people folder, if any, passes the ledger's
+    /// rule ([`DeliveryLedger::is_plain_relative`]), so the receipt paths it
+    /// yields are ones the ledger accepts on the next delivery, and is
+    /// stricter still: no `.` or empty component (the ledger's rule folds
+    /// those away), no `\` and no surrounding whitespace. Swift's
+    /// `checkVault` accepts `./People` (parity list in the plan).
     pub(crate) fn check_vault(&self) -> Result<(), ObsidianError> {
         if !self.sink.is_directory("") {
             return Err(ObsidianError::VaultMissing(
