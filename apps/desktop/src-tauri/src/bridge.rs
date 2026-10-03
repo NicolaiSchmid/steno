@@ -57,13 +57,15 @@ pub fn emit(window: &WebviewWindow, topic: &str, payload: Value) -> Result<(), B
     let finished = finishes_onboarding(topic, &payload);
     let recording = recording_state_for_shell(window.label(), topic, &payload);
     window
+        .state::<Smoke>()
+        .note_snapshot(window.label(), topic, &payload);
+    window
         .emit_to(
             EventTarget::webview_window(window.label()),
             EVENT_NAME,
             BridgeEvent::new(topic, payload),
         )
         .map_err(failed)?;
-    window.state::<Smoke>().note_snapshot(window.label());
     if finished {
         windows::close(window.app_handle(), BridgeWindow::Onboarding).map_err(failed)?;
     }

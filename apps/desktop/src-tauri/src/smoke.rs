@@ -1,13 +1,17 @@
 //! The headless smoke run CI drives under `xvfb-run`: with
 //! `STENO_SMOKE_SECONDS=<n>` the shell opens all three windows side by side
-//! and both floating panels under them, waits that long, hides the panels
-//! again, and exits 0 when the main window sent `page.ready`, at least one
-//! snapshot reached it in reply, the tray was built, and both panels were
-//! visible at the size their page reported before the hide and hidden
-//! after it; 1 otherwise; a value that is not a positive number ends the
-//! run at once with 2. Screenshots of the Xvfb root during the wait are the
-//! review evidence; the windows carry only fixture data, the prompt names a
-//! made-up app.
+//! and both floating panels under them, asks main for a meeting before its
+//! page has mounted (as a deep link at a cold launch does), waits that
+//! long, then checks the panels and closes main. It exits 0 when the main
+//! window sent `page.ready`, at least one snapshot reached it in reply,
+//! the meeting reached it after its `page.ready`, the tray was built, both
+//! panels were visible at the size their page reported and kept it when
+//! asked for another, a second prompt reached the prompt's window, both
+//! panels hid, and closing main hid it rather than destroying it; 1
+//! otherwise; a value that is not a positive number ends the run at once
+//! with 2. Screenshots of the Xvfb root during the wait are the review
+//! evidence; the windows carry only fixture data, the prompts name made-up
+//! apps.
 
 use std::{
     collections::HashMap,
@@ -20,12 +24,16 @@ use std::{
     time::Duration,
 };
 
+use serde_json::Value;
+use steno_bridge::{BridgeTopic, WindowParams};
+use steno_core::json::parse_uuid;
 use tauri::{AppHandle, LogicalSize, Manager, WebviewWindow};
 
 use crate::{
+    host::Host,
     panel_geometry::same_size,
     panels::{self, Panel, PromptRequest},
-    windows::{self, BridgeWindow, Spec},
+    windows::{self, BridgeWindow, RequestField, Spec},
 };
 
 pub const SECONDS_VARIABLE: &str = "STENO_SMOKE_SECONDS";
@@ -37,6 +45,9 @@ pub struct Smoke {
     armed: AtomicBool,
     main_ready: AtomicBool,
     main_snapshots: AtomicUsize,
+    /// The meeting asked of main before its page mounted reached it after
+    /// its `page.ready` (`windows::Pages`).
+    request_delivered: AtomicBool,
     tray_built: AtomicBool,
     /// The size each panel's page last reported, checked against the
     /// window at the end.
@@ -84,28 +95,42 @@ impl Smoke {
     }
 
     /// Records a snapshot emitted to a window (`bridge::emit`); main's are
-    /// the proof that a host answered its `page.ready`.
-    pub fn note_snapshot(&self, label: &str) {
-        if label == BridgeWindow::Main.as_str() {
-            self.main_snapshots.fetch_add(1, Ordering::SeqCst);
+    /// the proof that a host answered its `page.ready`, and an `app`
+    /// snapshot to main carrying `SMOKE_MEETING` after that `page.ready`
+    /// is the request the run asked for before it.
+    pub fn note_snapshot(&self, label: &str, topic: BridgeTopic, payload: &Value) {
+        if label != BridgeWindow::Main.as_str() {
+            return;
+        }
+        self.main_snapshots.fetch_add(1, Ordering::SeqCst);
+        if topic == BridgeTopic::App
+            && payload[RequestField::MeetingId.as_str()] == SMOKE_MEETING
+            && self.main_ready.load(Ordering::SeqCst)
+        {
+            self.request_delivered.store(true, Ordering::SeqCst);
         }
     }
 
-    fn outcome(&self, panels: Result<(), String>) -> Outcome {
+    fn outcome(&self, checks: Result<(), String>) -> Outcome {
         match (
             self.main_ready.load(Ordering::SeqCst),
             self.main_snapshots.load(Ordering::SeqCst),
+            self.request_delivered.load(Ordering::SeqCst),
             self.tray_built.load(Ordering::SeqCst),
-            panels,
+            checks,
         ) {
             (false, ..) => Outcome::NoPageReady,
             (true, 0, ..) => Outcome::NoSnapshot,
-            (true, _, false, _) => Outcome::NoTray,
-            (true, _, true, Err(problem)) => Outcome::PanelsFailed(problem),
-            (true, snapshots, true, Ok(())) => Outcome::Ok { snapshots },
+            (true, _, false, ..) => Outcome::RequestLost,
+            (true, _, true, false, _) => Outcome::NoTray,
+            (true, _, true, true, Err(problem)) => Outcome::PanelsFailed(problem),
+            (true, snapshots, true, true, Ok(())) => Outcome::Ok { snapshots },
         }
     }
 }
+
+/// The meeting the run asks main for before its page mounts.
+pub const SMOKE_MEETING: &str = "00000000-0000-0000-0000-00000000005E";
 
 /// How a smoke run ends.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -117,10 +142,14 @@ pub enum Outcome {
     NoPageReady,
     /// The page mounted but nothing answered it: no host is wired.
     NoSnapshot,
+    /// The meeting asked of main before its page mounted never reached it
+    /// after its `page.ready`: lost, or published before the page listened.
+    RequestLost,
     /// `tray::build` failed (the error was logged at startup).
     NoTray,
-    /// A panel did not show, take its page's size, or hide, as asked; the
-    /// message says which.
+    /// A panel did not show, take its page's size, keep it, take a second
+    /// prompt or hide, or main did not hide on close; the message says
+    /// which.
     PanelsFailed(String),
 }
 
@@ -136,6 +165,10 @@ impl Outcome {
             }
             Outcome::NoPageReady => format!("FAILED, no page.ready from main in {seconds}s"),
             Outcome::NoTray => "FAILED, the tray icon was not built".to_owned(),
+            Outcome::RequestLost => format!(
+                "FAILED, the meeting asked of main before its page mounted did not reach it \
+                 after its page.ready in {seconds}s"
+            ),
             Outcome::PanelsFailed(problem) => format!("FAILED, panels: {problem}"),
             Outcome::NoSnapshot => {
                 let built = if cfg!(feature = "fixture-host") {
@@ -205,6 +238,16 @@ pub fn arm(app: &AppHandle) {
     if let Err(error) = opened {
         eprintln!("[steno-desktop] smoke: opening the other windows failed: {error}");
     }
+    // A meeting for main before its page has mounted, as a `steno:` link
+    // at a cold launch asks: it must wait for main's `page.ready`.
+    let meeting = WindowParams {
+        window: BridgeWindow::Main,
+        section: None,
+        meeting_id: parse_uuid(SMOKE_MEETING),
+    };
+    if let Err(error) = windows::open_requested(app, &app.state::<Host>(), &meeting) {
+        eprintln!("[steno-desktop] smoke: asking main for a meeting failed: {error}");
+    }
     // Both panels at once, under Settings, which the one rule never does
     // (`FloatingContent::resolve`); the run shows them to screenshot them.
     let prompt = PromptRequest {
@@ -225,8 +268,8 @@ pub fn arm(app: &AppHandle) {
     let handle = app.clone();
     thread::spawn(move || {
         thread::sleep(Duration::from_secs(seconds));
-        let panels = check_panels(&handle);
-        let outcome = handle.state::<Smoke>().outcome(panels);
+        let checks = check_panels(&handle).and_then(|()| check_main_hides(&handle));
+        let outcome = handle.state::<Smoke>().outcome(checks);
         eprintln!("[steno-desktop] smoke: {}", outcome.message(seconds));
         handle.exit(outcome.exit_code());
     });
@@ -266,12 +309,56 @@ fn check_panels(app: &AppHandle) -> Result<(), String> {
             window_size.0, window_size.1
         );
         stays_put(&window, label, window_size)?;
+        if panel == Panel::Prompt {
+            takes_a_second_prompt(app, &window)?;
+        }
         panels::hide(app, panel).map_err(|error| format!("hiding {label}: {error}"))?;
         if window.is_visible().map_err(|error| error.to_string())? {
             return Err(format!("the {label} panel stayed visible after hide"));
         }
         eprintln!("[steno-desktop] smoke: the {label} panel showed and hid");
     }
+    Ok(())
+}
+
+/// A second prompt reaches the prompt's existing window: it is navigated
+/// to the new request (`Panel::navigates_per_request`), not just shown.
+fn takes_a_second_prompt(app: &AppHandle, window: &WebviewWindow) -> Result<(), String> {
+    let second = PromptRequest {
+        app_name: "Acme Notes".into(),
+        seconds: 30,
+    };
+    let query = second.query(None);
+    panels::show_at(app, Panel::Prompt, Some(&query), (PANELS_X, PANEL_PROMPT_Y))
+        .map_err(|error| format!("raising a second prompt: {error}"))?;
+    thread::sleep(Duration::from_millis(500));
+    let url = window.url().map_err(|error| error.to_string())?;
+    let wanted = Panel::Prompt.fragment(Some(&query));
+    if url.fragment() != Some(wanted.as_str()) {
+        return Err(format!(
+            "the second prompt did not reach the prompt's window: it shows {:?}, not {wanted:?}",
+            url.fragment()
+        ));
+    }
+    eprintln!("[steno-desktop] smoke: the prompt's window took a second prompt");
+    Ok(())
+}
+
+/// Closing the main window while a tray stands hides it and keeps it
+/// (`hides_on_close` in `main.rs`): the tray and the panels go through it.
+fn check_main_hides(app: &AppHandle) -> Result<(), String> {
+    let main = app
+        .get_webview_window(BridgeWindow::Main.as_str())
+        .ok_or("the main window was gone before the close")?;
+    main.close().map_err(|error| error.to_string())?;
+    thread::sleep(Duration::from_millis(1000));
+    let main = app
+        .get_webview_window(BridgeWindow::Main.as_str())
+        .ok_or("closing the main window destroyed it")?;
+    if main.is_visible().map_err(|error| error.to_string())? {
+        return Err("the main window stayed visible after a close".into());
+    }
+    eprintln!("[steno-desktop] smoke: closing main hid it");
     Ok(())
 }
 
@@ -313,33 +400,66 @@ mod tests {
         assert_eq!(wait_from(Some("-5")), Wait::Invalid("-5".into()));
     }
 
+    fn app_requesting(meeting: &str) -> Value {
+        serde_json::json!({ "version": "1", "requestedMeetingID": meeting })
+    }
+
     #[test]
     fn only_the_main_window_counts() {
         let smoke = Smoke::default();
         smoke.note_ready("settings");
         smoke.note_ready("onboarding");
-        smoke.note_snapshot("settings");
+        smoke.note_snapshot("settings", BridgeTopic::App, &app_requesting(SMOKE_MEETING));
         assert_eq!(smoke.outcome(Ok(())), Outcome::NoPageReady);
         smoke.note_ready("main");
         assert_eq!(smoke.outcome(Ok(())), Outcome::NoSnapshot);
-        smoke.note_snapshot("main");
-        smoke.note_snapshot("main");
+        smoke.note_snapshot("main", BridgeTopic::Recording, &Value::Null);
+        assert_eq!(smoke.outcome(Ok(())), Outcome::RequestLost);
+        smoke.note_snapshot("main", BridgeTopic::App, &app_requesting(SMOKE_MEETING));
         assert_eq!(smoke.outcome(Ok(())), Outcome::NoTray);
         smoke.note_tray();
         assert_eq!(smoke.outcome(Ok(())), Outcome::Ok { snapshots: 2 });
+    }
+
+    /// The meeting counts only when it reaches main after its `page.ready`:
+    /// one published before the page listened is lost to it.
+    #[test]
+    fn the_early_meeting_counts_only_after_page_ready() {
+        let smoke = Smoke::default();
+        smoke.note_tray();
+        smoke.note_snapshot("main", BridgeTopic::App, &app_requesting(SMOKE_MEETING));
+        smoke.note_ready("main");
+        smoke.note_snapshot("main", BridgeTopic::App, &app_requesting("other"));
+        smoke.note_snapshot(
+            "main",
+            BridgeTopic::MeetingsList,
+            &app_requesting(SMOKE_MEETING),
+        );
+        assert_eq!(smoke.outcome(Ok(())), Outcome::RequestLost);
+        assert!(
+            Outcome::RequestLost
+                .message(15)
+                .contains("after its page.ready")
+        );
+        smoke.note_snapshot("main", BridgeTopic::App, &app_requesting(SMOKE_MEETING));
+        assert_eq!(smoke.outcome(Ok(())), Outcome::Ok { snapshots: 4 });
+        // The meeting is the codec's form of the id the run asks for.
+        let id = parse_uuid(SMOKE_MEETING).unwrap();
+        assert_eq!(windows::Request::meeting(&id).value, SMOKE_MEETING);
     }
 
     #[test]
     fn the_tray_and_the_panels_are_checked_after_the_page() {
         let smoke = Smoke::default();
         smoke.note_ready("main");
-        smoke.note_snapshot("main");
+        smoke.note_snapshot("main", BridgeTopic::App, &app_requesting(SMOKE_MEETING));
         smoke.note_tray();
         assert_eq!(
             smoke.outcome(Err("the bubble panel was not visible".into())),
             Outcome::PanelsFailed("the bubble panel was not visible".into())
         );
         assert_eq!(Outcome::NoTray.exit_code(), 1);
+        assert_eq!(Outcome::RequestLost.exit_code(), 1);
         assert_eq!(Outcome::PanelsFailed(String::new()).exit_code(), 1);
         assert!(Outcome::NoTray.message(5).contains("tray icon"));
         assert!(

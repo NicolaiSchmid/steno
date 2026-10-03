@@ -186,19 +186,23 @@ two panels.
 
 `STENO_SMOKE_SECONDS=<n> steno-desktop` opens all three windows side by
 side and both floating panels under Settings (the prompt naming a made-up
-app), waits `n` seconds, hides the panels again and reports:
+app), asks main for a meeting before its page has mounted (as a cold
+launch's deep link does), waits `n` seconds, then checks the panels,
+raises a second prompt, hides the panels, closes main and reports:
 
 | Exit | When |
 |---|---|
-| 0 | The main window sent `page.ready`, at least one snapshot reached it, the tray was built, and both panels were visible at the size their page reported before the hide and hidden after it |
-| 1 | No `page.ready` from main; or `page.ready` but no snapshot: no bridge host is wired (a build with `--no-default-features` fails here until WP6b, and the message says so); or no tray; or a panel that did not show, take its page's size, or hide |
+| 0 | The main window sent `page.ready`, at least one snapshot reached it, the meeting reached it after its `page.ready`, the tray was built, both panels were visible at the size their page reported and kept it when asked for 40 points more, the prompt's window took the second prompt, both panels hid, and closing main hid it and kept it |
+| 1 | No `page.ready` from main; or `page.ready` but no snapshot: no bridge host is wired (a build with `--no-default-features` fails here until WP6b, and the message says so); or the meeting was lost or published before the page listened; or no tray; or a panel or main that did not do as above |
 | 2 | At once, when `n` is not a positive number |
 
 `apps/desktop/scripts/smoke-linux.sh [binary] [seconds]` runs that under
 `xvfb-run` and, when ImageMagick is present (`magick` or `convert`), captures
 the Xvfb root and one crop per window and per panel into
 `apps/desktop/screens/` (ignored by git; CI uploads it as the
-`desktop-smoke-screens` artifact). The windows carry only fixture data,
+`desktop-smoke-screens` artifact). With `STENO_SMOKE_DPI=120` it runs Xvfb
+at that resolution, where WebKitGTK's pixel ratio is 1.25 and the panels
+must still fit their pills. The windows carry only fixture data,
 which is synthetic. Xvfb has no compositor, so the panels' transparent
 corners render black there; a desktop shows them rounded.
 
