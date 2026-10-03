@@ -6,14 +6,14 @@
 //!
 //! Two halves:
 //!
-//! - Platform-independent, built everywhere so its tests run on every CI
-//!   job: [`chunking`] (window layout, silence-aligned starts, the
-//!   end-aligned final window, the adaptive speech gate), [`merge`] (the
-//!   overlap merge, seam-word collapse, seam-gap splice rules), [`vocab`]
-//!   (the SentencePiece vocabulary and its derived id sets), [`segments`]
-//!   (tokens to timed words to `RawSegment`s, as `StenoSpeech` does it),
-//!   [`wav`] (the harness's 16 kHz WAV reader) and [`wer`] (the parity
-//!   scorer).
+//! - Platform-independent, built everywhere so its tests run on all three
+//!   CI platforms: [`chunking`] (window layout, silence-aligned starts,
+//!   the end-aligned final window, the adaptive speech gate), [`merge`]
+//!   (the overlap merge, seam-word collapse, seam-gap splice rules),
+//!   [`vocab`] (the SentencePiece vocabulary and its derived id sets),
+//!   [`segments`] (tokens to timed words to `RawSegment`s, as
+//!   `StenoSpeech` does it), [`wav`] (the harness's 16 kHz WAV reader) and
+//!   [`wer`] (the parity scorer).
 //! - macOS only (plain names, because the modules do not exist in a
 //!   Linux or Windows build of these docs): `coreml` (the one module
 //!   allowed `unsafe`, wrapping `objc2-core-ml`), `backend` (the four
