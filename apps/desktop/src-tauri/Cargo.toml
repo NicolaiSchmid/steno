@@ -15,6 +15,11 @@ tauri-build.workspace = true
 [dependencies]
 serde.workspace = true
 serde_json.workspace = true
+# The contract's types (errors, topics, windows, sections, params), so the
+# shell spells nothing of the wire itself; the core for the UUID codec the
+# contract's ids use.
+steno-bridge = { path = "../../../crates/steno-bridge" }
+steno-core = { path = "../../../crates/steno-core" }
 tauri.workspace = true
 tauri-plugin-autostart.workspace = true
 tauri-plugin-deep-link.workspace = true

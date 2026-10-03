@@ -10,6 +10,8 @@
 use tauri::AppHandle;
 use tauri_plugin_autostart::{MacosLauncher, ManagerExt};
 
+use crate::bridge::{BridgeError, failed};
+
 /// `GeneralSettingsSnapshot.launchAtLogin` in the contract. The host reads
 /// it for the General section (`WP6b`); the shell reads only `is_on`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -60,14 +62,16 @@ pub fn status(app: &AppHandle) -> LoginItemStatus {
     LoginItemStatus::from_plugin(app.autolaunch().is_enabled())
 }
 
-pub fn set_enabled(app: &AppHandle, enabled: bool) -> Result<(), String> {
+/// Registers or removes the login item; a plugin failure is `failed`,
+/// which the page shows as it would any other refused command.
+pub fn set_enabled(app: &AppHandle, enabled: bool) -> Result<(), BridgeError> {
     let manager = app.autolaunch();
     let result = if enabled {
         manager.enable()
     } else {
         manager.disable()
     };
-    result.map_err(|error| error.to_string())
+    result.map_err(failed)
 }
 
 /// Where the user manages login items; `None` where there is no such

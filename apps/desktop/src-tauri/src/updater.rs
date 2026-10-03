@@ -19,6 +19,8 @@ use tauri::{AppHandle, Manager, Url};
 use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
 use tauri_plugin_updater::UpdaterExt;
 
+use crate::bridge::{BridgeError, failed};
+
 /// The stable lane: the latest release's manifest.
 pub const STABLE_ENDPOINT: &str =
     "https://github.com/NicolaiSchmid/steno/releases/latest/download/latest.json";
@@ -99,24 +101,25 @@ pub fn plugin() -> tauri::plugin::TauriPlugin<tauri::Wry, tauri_plugin_updater::
 }
 
 /// Checks the lanes and records the outcome. The update itself, when there
-/// is one, is returned for the caller to offer.
-pub async fn check(app: &AppHandle) -> Result<Option<tauri_plugin_updater::Update>, String> {
+/// is one, is returned for the caller to offer; a check that could not run
+/// is `failed` with the updater's words.
+pub async fn check(app: &AppHandle) -> Result<Option<tauri_plugin_updater::Update>, BridgeError> {
     let version = app.package_info().version.to_string();
     let outcome = async {
         let updater = app
             .updater_builder()
             .endpoints(endpoints(&version))
-            .map_err(|error| error.to_string())?
+            .map_err(failed)?
             .build()
-            .map_err(|error| error.to_string())?;
-        updater.check().await.map_err(|error| error.to_string())
+            .map_err(failed)?;
+        updater.check().await.map_err(failed)
     }
     .await;
     let updates = app.state::<Updates>();
     match &outcome {
         Ok(Some(update)) => updates.record(UpdateOutcome::Available(update.version.clone())),
         Ok(None) => updates.record(UpdateOutcome::UpToDate),
-        Err(message) => updates.record(UpdateOutcome::Failed(message.clone())),
+        Err(error) => updates.record(UpdateOutcome::Failed(error.message.clone())),
     }
     outcome
 }
@@ -139,11 +142,11 @@ pub async fn check_and_offer(app: &AppHandle) {
             notify(app, MessageDialogKind::Info, "Steno is up to date.");
             return;
         }
-        Err(message) => {
+        Err(error) => {
             notify(
                 app,
                 MessageDialogKind::Error,
-                format!("The update check failed: {message}"),
+                format!("The update check failed: {}", error.message),
             );
             return;
         }

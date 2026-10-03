@@ -4703,6 +4703,8 @@ dependencies = [
  "objc2-av-foundation",
  "serde",
  "serde_json",
+ "steno-bridge",
+ "steno-core",
  "tauri",
  "tauri-build",
  "tauri-nspanel",

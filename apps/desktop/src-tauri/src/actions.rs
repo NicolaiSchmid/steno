@@ -8,40 +8,23 @@
 //! `StenoApp.swift` (the Record menu).
 
 use serde_json::{Value, json};
+pub use steno_bridge::CaptureMode;
 use tauri::{AppHandle, Manager, WebviewWindow};
 
 use crate::{
-    bridge::BridgeError,
+    bridge::{BridgeError, failed},
     host::Host,
     updater,
     windows::{self, BridgeWindow},
 };
 
-/// `captureMode` in `contract.ts`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CaptureMode {
-    /// The tray starts a call through `recording.toggle`; a deep link or
-    /// the host may ask for the mode by name.
-    #[allow(dead_code)]
-    Call,
-    InPerson,
-}
-
-impl CaptureMode {
-    /// The raw value on the wire.
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::Call => "call",
-            Self::InPerson => "inPerson",
-        }
-    }
-}
-
-/// The bridge method and params a tray action sends.
+/// The bridge method and params a tray action sends. The tray starts a
+/// call through `recording.toggle` and names the mode only for an
+/// in-person recording.
 pub fn recorder_command(mode: Option<CaptureMode>) -> (&'static str, Value) {
     match mode {
         None => ("recording.toggle", Value::Null),
-        Some(mode) => ("recording.start", json!({ "mode": mode.as_str() })),
+        Some(mode) => ("recording.start", json!({ "mode": mode })),
     }
 }
 
@@ -53,7 +36,7 @@ pub fn host_window(app: &AppHandle) -> Result<WebviewWindow, BridgeError> {
     if let Some(window) = app.get_webview_window(BridgeWindow::Main.as_str()) {
         return Ok(window);
     }
-    Ok(windows::open(app, BridgeWindow::Main, None, None)?)
+    windows::open(app, BridgeWindow::Main, None, None).map_err(failed)
 }
 
 /// Starts (`Some(mode)`) or toggles (`None`) the recorder through the host.
@@ -111,7 +94,7 @@ mod tests {
         .unwrap();
         let recorded = fixture["mode"].as_str().unwrap();
         assert!(
-            [CaptureMode::Call, CaptureMode::InPerson]
+            CaptureMode::ALL
                 .iter()
                 .any(|mode| mode.as_str() == recorded),
             "{recorded}"

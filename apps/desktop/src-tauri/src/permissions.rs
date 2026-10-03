@@ -20,69 +20,7 @@
 //! Settings snapshots (`WP6b`), so the dead-code lint is off for them.
 #![allow(dead_code)]
 
-use std::fmt;
-
-use serde::Deserialize;
-
-/// `permissionKind` in `contract.ts`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub enum PermissionKind {
-    Microphone,
-    SystemAudio,
-    Calendar,
-    LocalNetwork,
-}
-
-impl PermissionKind {
-    pub const ALL: [PermissionKind; 4] = [
-        Self::Microphone,
-        Self::SystemAudio,
-        Self::Calendar,
-        Self::LocalNetwork,
-    ];
-
-    /// The raw value on the wire.
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::Microphone => "microphone",
-            Self::SystemAudio => "systemAudio",
-            Self::Calendar => "calendar",
-            Self::LocalNetwork => "localNetwork",
-        }
-    }
-}
-
-impl fmt::Display for PermissionKind {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.as_str())
-    }
-}
-
-/// `permissionState` in `contract.ts`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PermissionState {
-    Unknown,
-    Granted,
-    Denied,
-}
-
-impl PermissionState {
-    /// The raw value on the wire.
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::Unknown => "unknown",
-            Self::Granted => "granted",
-            Self::Denied => "denied",
-        }
-    }
-}
-
-/// `params.permissionKind.json`.
-#[derive(Debug, Deserialize)]
-pub struct PermissionKindParams {
-    pub kind: PermissionKind,
-}
+pub use steno_bridge::{PermissionKind, PermissionState};
 
 /// The state without prompting.
 pub fn state(kind: PermissionKind) -> PermissionState {
@@ -216,28 +154,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_kinds_read_the_recorded_params() {
-        let params: PermissionKindParams = serde_json::from_str(include_str!(
-            "../../../macos/web/fixtures/bridge/params.permissionKind.json"
-        ))
-        .unwrap();
-        assert!(PermissionKind::ALL.contains(&params.kind));
-        for kind in PermissionKind::ALL {
-            let json = format!(r#"{{"kind":"{kind}"}}"#);
-            let parsed: PermissionKindParams = serde_json::from_str(&json).unwrap();
-            assert_eq!(parsed.kind, kind);
-        }
-        assert!(serde_json::from_str::<PermissionKindParams>(r#"{"kind":"camera"}"#).is_err());
-    }
-
-    #[test]
-    fn the_states_spell_as_the_contract_does() {
-        assert_eq!(PermissionState::Unknown.as_str(), "unknown");
-        assert_eq!(PermissionState::Granted.as_str(), "granted");
-        assert_eq!(PermissionState::Denied.as_str(), "denied");
-    }
-
-    #[test]
     fn the_calendar_and_the_local_network_are_never_the_shells() {
         assert_eq!(state(PermissionKind::Calendar), PermissionState::Unknown);
         assert_eq!(
@@ -261,7 +177,7 @@ mod tests {
 
     #[test]
     fn the_settings_panes_are_per_os() {
-        for kind in PermissionKind::ALL {
+        for &kind in PermissionKind::ALL {
             let url = system_settings_url(kind);
             if cfg!(target_os = "macos") {
                 let url = url.unwrap();

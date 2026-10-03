@@ -5,44 +5,18 @@
 //! Swift: the sizes live in `StenoApp.swift` (main), `SettingsWindow.swift`
 //! and `OnboardingWindow.swift`, main's minimum in `MainWindow.swift`.
 
-use std::fmt;
-
-use serde::Deserialize;
+pub use steno_bridge::BridgeWindow;
+use steno_bridge::WindowParams;
+use steno_core::json::uuid_string;
 use tauri::{
     AppHandle, Manager, WebviewUrl, WebviewWindow, WebviewWindowBuilder, webview::NewWindowResponse,
 };
 
 use crate::{
-    bridge::{self, BridgeError, WindowParams},
+    bridge::{BridgeError, failed},
     host::Host,
     navigation,
 };
-
-/// `params.window.json`'s `window`; the raw value is also the window label.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum BridgeWindow {
-    Main,
-    Settings,
-    Onboarding,
-}
-
-impl BridgeWindow {
-    /// The raw value on the wire.
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::Main => "main",
-            Self::Settings => "settings",
-            Self::Onboarding => "onboarding",
-        }
-    }
-}
-
-impl fmt::Display for BridgeWindow {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.as_str())
-    }
-}
 
 /// One window as the Swift app sizes it, in logical points.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -56,8 +30,8 @@ pub struct Spec {
 }
 
 impl Spec {
-    /// The shell's own knowledge of a window, kept off `BridgeWindow` so the
-    /// enum can come from `steno-bridge` unchanged.
+    /// The shell's own knowledge of a window, kept off the contract's
+    /// `BridgeWindow`.
     pub const fn of(window: BridgeWindow) -> Spec {
         match window {
             BridgeWindow::Main => Spec {
@@ -135,8 +109,7 @@ pub fn open(
     }
     // The Swift windows hide their title bar and let the page paint up to the
     // top edge, leaving the traffic lights their inset; the same look here.
-    // Linux and Windows keep their native title bar until the design pass of
-    // WP8 decides otherwise.
+    // Linux and Windows keep their native title bar.
     #[cfg(target_os = "macos")]
     {
         builder = builder
@@ -157,7 +130,6 @@ pub fn open_requested(
     host: &Host,
     request: &WindowParams,
 ) -> Result<(), BridgeError> {
-    let failed = |error: tauri::Error| BridgeError::failed(error.to_string());
     let existed = app.get_webview_window(request.window.as_str()).is_some();
     match request.window {
         BridgeWindow::Onboarding => {
@@ -168,11 +140,7 @@ pub fn open_requested(
             if let Some(meeting_id) = request.meeting_id {
                 // The main window exists for the app's lifetime, so the
                 // request always rides on its `app` snapshot.
-                host.publish_request(
-                    &window,
-                    "requestedMeetingID",
-                    &bridge::uuid_text(&meeting_id),
-                )?;
+                host.publish_request(&window, "requestedMeetingID", &uuid_string(meeting_id))?;
             }
         }
         BridgeWindow::Settings => {

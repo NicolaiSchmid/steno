@@ -31,7 +31,10 @@ use tauri::{
     WebviewWindowBuilder, webview::NewWindowResponse,
 };
 
-use crate::{navigation, recording::RecordingState};
+use crate::{
+    navigation,
+    recording::{RecorderState, RecordingState},
+};
 
 /// `Theme.Space.sm`: the default anchor's distance from the screen's top.
 pub const DEFAULT_TOP_INSET: f64 = 8.0;
@@ -237,7 +240,7 @@ fn matches(a: (f64, f64), b: (f64, f64)) -> bool {
 }
 
 /// The panels' state, managed by the app.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct Panels {
     anchor: Mutex<Option<PanelAnchor>>,
     anchor_loaded: Mutex<bool>,
@@ -245,6 +248,18 @@ pub struct Panels {
     sizes: Mutex<HashMap<Panel, (f64, f64)>>,
     prompt: Mutex<Option<PromptRequest>>,
     recording: Mutex<RecordingState>,
+}
+
+impl Default for Panels {
+    fn default() -> Self {
+        Self {
+            anchor: Mutex::default(),
+            anchor_loaded: Mutex::default(),
+            sizes: Mutex::default(),
+            prompt: Mutex::default(),
+            recording: Mutex::new(RecordingState::Idle),
+        }
+    }
 }
 
 impl Panels {
@@ -261,8 +276,7 @@ impl Panels {
         let recording = self
             .recording
             .lock()
-            .map(|state| *state)
-            .unwrap_or_default();
+            .map_or(RecordingState::Idle, |state| *state);
         FloatingContent::resolve(prompt.as_ref(), recording)
     }
 }

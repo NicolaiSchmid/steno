@@ -23,7 +23,7 @@ use tauri::{AppHandle, WebviewWindow};
 use tauri_plugin_dialog::DialogExt;
 use tauri_plugin_opener::OpenerExt;
 
-use crate::bridge::BridgeError;
+use crate::bridge::{BridgeError, failed};
 
 /// The bridge methods that open a folder panel.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -100,13 +100,13 @@ pub async fn choose_folder(
 /// this (`WP6b`).
 #[allow(dead_code)]
 pub fn reveal(app: &AppHandle, path: &Path) -> Result<(), BridgeError> {
-    Ok(app.opener().reveal_item_in_dir(path)?)
+    app.opener().reveal_item_in_dir(path).map_err(failed)
 }
 
 /// Opens a URL the shell itself composed (a settings pane); the page's own
 /// links go through `bridge::openable_url` first.
 pub fn open_url(app: &AppHandle, url: &str) -> Result<(), BridgeError> {
-    Ok(app.opener().open_url(url, None::<&str>)?)
+    app.opener().open_url(url, None::<&str>).map_err(failed)
 }
 
 #[cfg(test)]

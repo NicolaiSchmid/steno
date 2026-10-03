@@ -24,7 +24,7 @@ use tauri::{
 use crate::{
     actions::{self, CaptureMode},
     autostart,
-    recording::RecordingState,
+    recording::{RecorderState, RecordingState},
     windows::BridgeWindow,
 };
 
@@ -117,7 +117,7 @@ pub const fn in_person_enabled(state: RecordingState) -> bool {
 
 /// The icon's tooltip, the Swift label's accessibility text: "Steno" or
 /// "Steno, recording" (the elapsed time is the bubble's, not the tray's).
-pub const fn tooltip(state: RecordingState) -> &'static str {
+pub fn tooltip(state: RecordingState) -> &'static str {
     if state.is_busy() {
         "Steno, recording"
     } else {

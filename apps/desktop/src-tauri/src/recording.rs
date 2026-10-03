@@ -3,37 +3,26 @@
 //! panels follow it. The shell never asks the host for the state; it
 //! observes what the host publishes to the main window, as the Swift menu
 //! bar item observes `RecordingController.recording`.
-//!
-//! `steno-bridge` has this enum as `RecordingState`; this copy becomes a
-//! `use` line when the shell depends on that crate.
 
 use serde_json::Value;
+pub use steno_bridge::RecordingState;
 
-/// `recordingSnapshot.state` in `contract.ts`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum RecordingState {
-    #[default]
-    Idle,
-    Starting,
-    Recording,
-    Stopping,
-}
-
-impl RecordingState {
+/// What the shell makes of the contract's `RecordingState`.
+pub trait RecorderState: Sized {
     /// Reads the state off a `recording` snapshot; `None` when the payload
     /// is not one (so a malformed snapshot changes nothing in the shell).
-    pub fn from_snapshot(payload: &Value) -> Option<Self> {
-        match payload.get("state")?.as_str()? {
-            "idle" => Some(Self::Idle),
-            "starting" => Some(Self::Starting),
-            "recording" => Some(Self::Recording),
-            "stopping" => Some(Self::Stopping),
-            _ => None,
-        }
-    }
+    fn from_snapshot(payload: &Value) -> Option<Self>;
 
     /// Anything but idle: the recorder is busy and the bubble shows.
-    pub const fn is_busy(self) -> bool {
+    fn is_busy(&self) -> bool;
+}
+
+impl RecorderState for RecordingState {
+    fn from_snapshot(payload: &Value) -> Option<Self> {
+        payload.get("state")?.as_str()?.parse().ok()
+    }
+
+    fn is_busy(&self) -> bool {
         !matches!(self, Self::Idle)
     }
 }

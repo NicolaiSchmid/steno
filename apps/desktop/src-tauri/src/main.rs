@@ -11,14 +11,10 @@
 //! the keyring (`secrets`), the OS permissions (`permissions`), the
 //! `steno:` links (`deep_links`), the native dialogs (`dialogs`) and the
 //! single instance. Every one is a thin module over a Tauri plugin or an
-//! OS API with its rules in plain functions the tests cover.
-//!
-//! Seven shapes duplicate the `steno-bridge` crate's until that crate merges,
-//! then become `use` lines: `BridgeErrorCode`, `BridgeError`, `BridgeEvent`
-//! (whose `topic` becomes the `BridgeTopic` enum), `OpenUrlParams`,
-//! `SettingsSection` and `WindowParams` in `bridge.rs`, `BridgeWindow` in
-//! `windows.rs`; `bridge::uuid_text` becomes `json::uuid::format`;
-//! `recording::RecordingState` becomes the crate's.
+//! OS API with its rules in plain functions the tests cover. Everything
+//! that is on the wire (errors, topics, windows, sections, params) is the
+//! `steno-bridge` crate's type; the shell adds only what it needs on top
+//! (`recording::RecorderState`, `windows::Spec`).
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 // Without the fixture host nothing emits a snapshot or publishes a request

@@ -9,109 +9,39 @@
 
 use std::fmt;
 
-use serde::{Deserialize, Deserializer, Serialize};
+use serde::Deserialize;
 use serde_json::Value;
+pub use steno_bridge::BridgeError;
+use steno_bridge::{
+    BridgeEvent, BridgeTopic, BridgeWindow, OpenUrlParams, PermissionKindParams, SetBoolParams,
+    WindowParams,
+};
 use tauri::{AppHandle, Emitter, EventTarget, Manager, State, Url, WebviewWindow};
-use uuid::Uuid;
 
 use crate::{
     actions, autostart, dialogs,
     host::Host,
     panels::{self, Panel},
-    permissions::{self, PermissionKindParams},
-    recording::RecordingState,
+    permissions,
+    recording::{RecorderState, RecordingState},
     smoke::Smoke,
-    tray,
-    windows::{self, BridgeWindow},
+    tray, windows,
 };
 
 /// The event every snapshot travels on; the page listens for it scoped to
 /// its own window.
 pub const EVENT_NAME: &str = "steno:event";
 
-/// The contract's error codes the shell raises, spelled as the page reads
-/// them. The full set (`notFound` and `cancelled` as well) is the host's and
-/// comes with `steno-bridge`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub enum BridgeErrorCode {
-    UnknownMethod,
-    InvalidParams,
-    Failed,
-}
-
-impl BridgeErrorCode {
-    /// The raw value on the wire.
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::UnknownMethod => "unknownMethod",
-            Self::InvalidParams => "invalidParams",
-            Self::Failed => "failed",
-        }
-    }
-}
-
-impl fmt::Display for BridgeErrorCode {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.as_str())
-    }
-}
-
-/// A rejected command, serialised as the contract's error envelope; the
-/// transport turns it into the page's `BridgeError`.
-#[derive(Debug, Clone, Serialize, thiserror::Error)]
-#[error("{code}: {message}")]
-pub struct BridgeError {
-    pub code: BridgeErrorCode,
-    pub message: String,
-}
-
-impl BridgeError {
-    pub fn new(code: BridgeErrorCode, message: impl Into<String>) -> Self {
-        Self {
-            code,
-            message: message.into(),
-        }
-    }
-
-    pub fn unknown_method(message: impl Into<String>) -> Self {
-        Self::new(BridgeErrorCode::UnknownMethod, message)
-    }
-
-    pub fn invalid_params(message: impl Into<String>) -> Self {
-        Self::new(BridgeErrorCode::InvalidParams, message)
-    }
-
-    pub fn failed(message: impl Into<String>) -> Self {
-        Self::new(BridgeErrorCode::Failed, message)
-    }
-}
-
-/// A window or opener call that failed is `failed` with the error's text.
-impl From<tauri::Error> for BridgeError {
-    fn from(error: tauri::Error) -> Self {
-        Self::failed(error.to_string())
-    }
-}
-
-impl From<tauri_plugin_opener::Error> for BridgeError {
-    fn from(error: tauri_plugin_opener::Error) -> Self {
-        Self::failed(error.to_string())
-    }
+/// A shell-side failure (a window call, the opener, a plugin) as the
+/// contract's `failed`, for `map_err`.
+pub fn failed(error: impl fmt::Display) -> BridgeError {
+    BridgeError::failed(error.to_string())
 }
 
 /// `invalidParams` for a method whose params did not decode, named after
 /// the method so the page's log says which.
 fn invalid_params_for(method: &str, error: impl fmt::Display) -> BridgeError {
     BridgeError::invalid_params(format!("{method}: {error}"))
-}
-
-/// The event envelope (`envelope.event.json`). `topic` becomes the
-/// `BridgeTopic` enum with `steno-bridge`.
-#[derive(Debug, Clone, Serialize)]
-struct BridgeEvent<'a> {
-    topic: &'a str,
-    payload: Value,
 }
 
 /// Publishes one topic's snapshot to one window, and to that window only;
@@ -123,16 +53,19 @@ struct BridgeEvent<'a> {
 /// Swift: `OnboardingWindow.swift` (`onChange(of: finished)`),
 /// `FloatingPanelPresenter.observe` and `MenuBarLabel`.
 pub fn emit(window: &WebviewWindow, topic: &str, payload: Value) -> Result<(), BridgeError> {
+    let topic: BridgeTopic = topic.parse().map_err(failed)?;
     let finished = finishes_onboarding(topic, &payload);
     let recording = recording_state_for_shell(window.label(), topic, &payload);
-    window.emit_to(
-        EventTarget::webview_window(window.label()),
-        EVENT_NAME,
-        BridgeEvent { topic, payload },
-    )?;
+    window
+        .emit_to(
+            EventTarget::webview_window(window.label()),
+            EVENT_NAME,
+            BridgeEvent::new(topic, payload),
+        )
+        .map_err(failed)?;
     window.state::<Smoke>().note_snapshot(window.label());
     if finished {
-        windows::close(window.app_handle(), BridgeWindow::Onboarding)?;
+        windows::close(window.app_handle(), BridgeWindow::Onboarding).map_err(failed)?;
     }
     if let Some(state) = recording {
         tray::note_recording(window.app_handle(), state);
@@ -147,18 +80,18 @@ pub fn emit(window: &WebviewWindow, topic: &str, payload: Value) -> Result<(), B
 /// nothing.
 pub fn recording_state_for_shell(
     label: &str,
-    topic: &str,
+    topic: BridgeTopic,
     payload: &Value,
 ) -> Option<RecordingState> {
-    (label == BridgeWindow::Main.as_str() && topic == "recording")
+    (label == BridgeWindow::Main.as_str() && topic == BridgeTopic::Recording)
         .then(|| RecordingState::from_snapshot(payload))
         .flatten()
 }
 
 /// Whether a snapshot ends onboarding: the `onboarding` topic with
 /// `finished` true.
-pub fn finishes_onboarding(topic: &str, payload: &Value) -> bool {
-    topic == "onboarding" && payload["finished"] == Value::Bool(true)
+pub fn finishes_onboarding(topic: BridgeTopic, payload: &Value) -> bool {
+    topic == BridgeTopic::Onboarding && payload["finished"] == Value::Bool(true)
 }
 
 /// The URLs a page may open: `https:` and `mailto:` links, so a page cannot
@@ -172,100 +105,6 @@ pub fn openable_url(text: &str) -> Result<Url, BridgeError> {
         .ok_or_else(|| {
             BridgeError::invalid_params("Only https: and mailto: links open from the page.")
         })
-}
-
-/// `settingsSection` in `contract.ts`: the six Settings sections, as the
-/// route's `section=` and the `app` snapshot's `requestedSettingsSection`
-/// spell them.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum SettingsSection {
-    General,
-    Recording,
-    Transcription,
-    Summaries,
-    Export,
-    Iphone,
-}
-
-impl SettingsSection {
-    /// The raw value on the wire.
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::General => "general",
-            Self::Recording => "recording",
-            Self::Transcription => "transcription",
-            Self::Summaries => "summaries",
-            Self::Export => "export",
-            Self::Iphone => "iphone",
-        }
-    }
-}
-
-impl fmt::Display for SettingsSection {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.as_str())
-    }
-}
-
-/// `params.window.json`, typed as `windowParams` in `contract.ts`: a window,
-/// an optional section for Settings and an optional meeting for main. A
-/// section outside the six or a meeting ID that is not a UUID is
-/// `invalidParams`, so what reaches a route or a snapshot needs no escaping.
-/// Unknown keys are ignored, as the Swift `Decodable` and `steno-bridge` do.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
-pub struct WindowParams {
-    pub window: BridgeWindow,
-    #[serde(default)]
-    pub section: Option<SettingsSection>,
-    #[serde(
-        rename = "meetingID",
-        default,
-        deserialize_with = "deserialize_meeting_id"
-    )]
-    pub meeting_id: Option<Uuid>,
-}
-
-/// `meetingID` as `UUID(uuidString:)` reads it: the hyphenated 36-character
-/// form only, either case, for the reason given at
-/// `steno_core::json::parse_uuid`. The core has this codec as
-/// `steno_core::json::uuid_text_opt`; the shell switches to it in WP6 of
-/// `.plans/2026-10-02-rust-core-and-tauri-shell.md`. The core's message is
-/// lower-case (`not a UUID: ...`); the test below follows when the shell
-/// switches.
-fn deserialize_meeting_id<'de, D: Deserializer<'de>>(
-    deserializer: D,
-) -> Result<Option<Uuid>, D::Error> {
-    let Some(string) = Option::<String>::deserialize(deserializer)? else {
-        return Ok(None);
-    };
-    (string.len() == 36)
-        .then(|| Uuid::try_parse(&string).ok())
-        .flatten()
-        .map(Some)
-        .ok_or_else(|| serde::de::Error::custom(format!("Not a UUID: {string}")))
-}
-
-/// A UUID as the Swift host writes it (`UUID.uuidString`, upper case), so a
-/// `requestedMeetingID` matches the list's ids by string. Its core
-/// counterpart is `steno_core::json::uuid_string`, which the shell takes in
-/// WP6.
-pub fn uuid_text(id: &Uuid) -> String {
-    id.hyphenated()
-        .encode_upper(&mut Uuid::encode_buffer())
-        .to_string()
-}
-
-/// `params.system.openURL.json`.
-#[derive(Debug, Deserialize)]
-struct OpenUrlParams {
-    url: String,
-}
-
-/// `params.bool.json`.
-#[derive(Debug, Deserialize)]
-struct SetBoolParams {
-    value: bool,
 }
 
 /// `panel_call("resize")`: the page's measured size in CSS pixels, which
@@ -332,7 +171,7 @@ pub async fn bridge_call(
         "window.close" => {
             let request: WindowParams = parse(&method, params)?;
             let target = close_target(window.label(), &request)?;
-            windows::close(&app, target)?;
+            windows::close(&app, target).map_err(failed)?;
             Ok(Value::Null)
         }
         "system.openURL" => {
@@ -360,7 +199,7 @@ pub async fn bridge_call(
         }
         "settings.general.setLaunchAtLogin" => {
             let request: SetBoolParams = parse(&method, params.clone())?;
-            autostart::set_enabled(&app, request.value).map_err(BridgeError::failed)?;
+            autostart::set_enabled(&app, request.value)?;
             tray::note_login_item(&app);
             // The host hears of it too, so its General snapshot follows.
             host.call(&window, &method, params)?;
@@ -402,7 +241,7 @@ pub async fn panel_call(
             let size: ResizeParams = parse(&action, params)?;
             app.state::<Smoke>()
                 .note_panel_size(panel.label(), (size.width, size.height));
-            panels::resize(&app, panel, (size.width, size.height))?;
+            panels::resize(&app, panel, (size.width, size.height)).map_err(failed)?;
             Ok(Value::Null)
         }
         "dismissPrompt" => {
@@ -424,6 +263,10 @@ pub fn panel_caller(label: &str) -> Result<Panel, BridgeError> {
 
 #[cfg(test)]
 mod tests {
+    use ::uuid::Uuid;
+    use steno_bridge::{BridgeErrorCode, SettingsSection};
+    use steno_core::json::uuid_string;
+
     use super::*;
 
     const REFUSAL: &str = "Only https: and mailto: links open from the page.";
@@ -472,8 +315,7 @@ mod tests {
         let json = serde_json::to_value(&error).unwrap();
         assert_eq!(json["code"], "invalidParams");
         assert_eq!(json["message"], "window.open: missing field `window`");
-        // `Display` spells the code as the wire does, so this holds once the
-        // types come from `steno-bridge`.
+        // `Display` spells the code as the wire does.
         assert_eq!(
             error.to_string(),
             "invalidParams: window.open: missing field `window`"
@@ -498,15 +340,15 @@ mod tests {
         .unwrap();
         assert_eq!(main.window, BridgeWindow::Main);
         assert_eq!(
-            main.meeting_id.map(|id| uuid_text(&id)).as_deref(),
+            main.meeting_id.map(uuid_string).as_deref(),
             Some("00000000-0000-0000-0000-000000000001")
         );
         assert_eq!(
-            uuid_text(&Uuid::nil()),
+            uuid_string(Uuid::nil()),
             "00000000-0000-0000-0000-000000000000"
         );
         assert_eq!(
-            uuid_text(&"6ba7b810-9dad-11d1-80b4-00c04fd430c8".parse().unwrap()),
+            uuid_string("6ba7b810-9dad-11d1-80b4-00c04fd430c8".parse().unwrap()),
             "6BA7B810-9DAD-11D1-80B4-00C04FD430C8"
         );
     }
@@ -576,7 +418,7 @@ mod tests {
         )
         .unwrap_err();
         assert!(
-            braced.message.starts_with("window.open: Not a UUID: {0000"),
+            braced.message.starts_with("window.open: not a UUID: {0000"),
             "{}",
             braced.message
         );
@@ -611,16 +453,19 @@ mod tests {
         ))
         .unwrap();
         assert_eq!(
-            recording_state_for_shell("main", "recording", &live),
+            recording_state_for_shell("main", BridgeTopic::Recording, &live),
             Some(RecordingState::Recording)
         );
         assert_eq!(
-            recording_state_for_shell("settings", "recording", &live),
+            recording_state_for_shell("settings", BridgeTopic::Recording, &live),
             None
         );
-        assert_eq!(recording_state_for_shell("main", "progress", &live), None);
         assert_eq!(
-            recording_state_for_shell("main", "recording", &Value::Null),
+            recording_state_for_shell("main", BridgeTopic::Progress, &live),
+            None
+        );
+        assert_eq!(
+            recording_state_for_shell("main", BridgeTopic::Recording, &Value::Null),
             None
         );
     }
@@ -667,11 +512,11 @@ mod tests {
             "../../../macos/web/fixtures/bridge/onboarding.setup.json"
         ))
         .unwrap();
-        assert!(!finishes_onboarding("onboarding", &setup));
+        assert!(!finishes_onboarding(BridgeTopic::Onboarding, &setup));
         let mut finished = setup.clone();
         finished["finished"] = Value::Bool(true);
-        assert!(finishes_onboarding("onboarding", &finished));
-        assert!(!finishes_onboarding("app", &finished));
-        assert!(!finishes_onboarding("onboarding", &Value::Null));
+        assert!(finishes_onboarding(BridgeTopic::Onboarding, &finished));
+        assert!(!finishes_onboarding(BridgeTopic::App, &finished));
+        assert!(!finishes_onboarding(BridgeTopic::Onboarding, &Value::Null));
     }
 }

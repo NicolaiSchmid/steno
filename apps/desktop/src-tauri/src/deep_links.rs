@@ -19,8 +19,9 @@ use tauri::{AppHandle, Manager, Url};
 use tauri_plugin_deep_link::DeepLinkExt;
 use uuid::Uuid;
 
+use steno_bridge::{SettingsSection, WindowParams};
+
 use crate::{
-    bridge::{SettingsSection, WindowParams},
     host::Host,
     windows::{self, BridgeWindow},
 };
@@ -71,11 +72,9 @@ impl DeepLink {
                 if path.is_empty() {
                     return Ok(Self::Settings(None));
                 }
-                serde_json::from_value::<SettingsSection>(serde_json::Value::String(
-                    path.to_owned(),
-                ))
-                .map(|section| Self::Settings(Some(section)))
-                .map_err(|_| DeepLinkError::NotASection(path.to_owned()))
+                path.parse::<SettingsSection>()
+                    .map(|section| Self::Settings(Some(section)))
+                    .map_err(|_| DeepLinkError::NotASection(path.to_owned()))
             }
             Some("pair") => Ok(Self::Pair),
             _ => Err(DeepLinkError::Unknown(url.to_string())),
