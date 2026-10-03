@@ -34,8 +34,6 @@ impl SplitMix64 {
     }
 }
 
-// Sample counts and phase increments: every cast here is a small positive
-// quantity rounded as Swift rounds it.
 impl AudioFixtures {
     pub const SAMPLE_RATE: f64 = 48_000.0;
 

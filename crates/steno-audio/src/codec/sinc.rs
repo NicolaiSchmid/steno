@@ -7,8 +7,10 @@
 //! integer index and a fraction; the fraction selects two adjacent
 //! sub-filters of the table (`PHASES` per input sample) which are linearly
 //! interpolated. 64 taps per phase at the output rate's Nyquist (cutoff
-//! 0.45 of the lower rate), beta 9: about 70 dB stopband, flat to 6.5 kHz
-//! at 16 kHz output, plenty for speech.
+//! 0.45 of the lower rate), beta 9. Measured from 44.1 kHz in
+//! `tests/codec.rs`: within 0.3 dB to 6 kHz, -1.3 dB at 6.5 kHz, 12 kHz
+//! aliases below -50 dB (the design stopband is about -69 dB); plenty for
+//! speech. The exact 3:1 FIR the 48 kHz path uses is the flat one.
 
 use crate::writer::Resampler48kTo16k;
 

@@ -1,9 +1,11 @@
 //! Compiles the vendored `SpeexDSP` echo canceller and preprocessor
-//! (`vendor/speexdsp/`, BSD licence, `COPYING` there) into the crate. No
-//! system library, no pkg-config, no bindgen: the FFI surface is declared by
-//! hand in `src/aec/speex.rs`. Same seven files and flags as the capture
-//! spike (`spikes/capture-rs/build.rs`) and, in effect, as the Swift
-//! package's `CSpeex` target.
+//! (`vendor/speexdsp/`, BSD licence, `COPYING` there; provenance in
+//! `vendor/speexdsp/PROVENANCE`) into the crate. No system library, no
+//! pkg-config, no bindgen: the FFI surface is declared by hand in
+//! `src/aec/speex.rs`. Seven files, floating point, KISS FFT: in effect
+//! the Swift package's `CSpeex` target. `DISABLE_WARNINGS` keeps Speex
+//! from printing "The VAD has been replaced by a hack" to stderr on every
+//! canceller init (the Swift build prints it); it changes no arithmetic.
 fn main() {
     println!("cargo:rerun-if-env-changed=STENO_AUDIO_SKIP_SPEEX");
     // `cargo check --target aarch64-apple-darwin` from a Linux box has no
@@ -33,6 +35,7 @@ fn main() {
         .define("FLOATING_POINT", None)
         .define("USE_KISS_FFT", None)
         .define("EXPORT", Some(""))
+        .define("DISABLE_WARNINGS", None)
         .warnings(false)
         .opt_level(2)
         .compile("speexdsp");

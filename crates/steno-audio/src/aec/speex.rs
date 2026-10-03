@@ -92,7 +92,6 @@ impl std::fmt::Debug for SpeexEchoCanceller {
 impl SpeexEchoCanceller {
     /// Tail 200 ms of `sample_rate`, Speex's default suppression.
     pub fn new(sample_rate: f64, frame_size: usize) -> Result<Self, EchoCancellerError> {
-        // Whole samples of a positive rate.
         let tail = (sample_rate * 0.2) as usize;
         Self::with_tail(sample_rate, frame_size, tail, -40, -15)
     }
