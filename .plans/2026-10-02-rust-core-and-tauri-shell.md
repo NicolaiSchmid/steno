@@ -554,6 +554,47 @@ parity item until a plan says otherwise:
   unchecked. Check on the Swift app before cutover; a plan decides any
   remedy.
 
+What the Windows backend (WP10a, `capture::live::wasapi`) does differently
+from the macOS one, each a parity item until a Windows machine has checked
+it:
+
+- **A Windows machine is needed** for speech-stack gate G4 (DirectML on an
+  integrated GPU) and for a live capture check of the WASAPI backend: the
+  `--ignored` tests in `crates/steno-audio/tests/live_windows.rs`, a real
+  call recorded through process loopback, a default-device switch while
+  recording, and meeting detection with Teams and Zoom. The fleet has no
+  such machine; the backend is compile-verified on the `windows-latest` CI
+  runner only (it has no audio device), and its device-free tests ran there
+  and under wine.
+- **Two clocks, no drift compensation.** The microphone and the system audio
+  are two WASAPI streams on their endpoints' clocks; the Core Audio
+  aggregate drift-compensates, the Windows backend does not. The system
+  lane sits in a 20 ms jitter buffer behind the microphone
+  (`realtime::streams`), slips back to it past 60 ms (counted as dropped
+  system frames) and re-primes after an underrun (zeros). Measure the slip
+  rate on a USB headset against built-in speakers; a plan decides whether
+  to resample instead.
+- **Far-end latency** is the two streams' `GetStreamLatency` less the jitter
+  buffer. The process-loopback client may not implement it (0 then), and a
+  loopback stream's latency is not the render path's; check the echo
+  canceller's alignment on hardware.
+- **Process loopback scope.** Excluding Steno's process tree records every
+  other process; whether that follows the default render endpoint or mixes
+  every endpoint is unverified. Before Windows 10 2004 the fallback is
+  loopback of the default render endpoint, which records Steno's own output
+  too.
+- **The microphone lane is the engine's mono downmix** of the capture
+  endpoint (`AUTOCONVERTPCM`), not its first channel as on the Mac.
+- **Detection keys on executable names.** A process "holds the microphone"
+  while one of its capture sessions is active; its `bundle_id` is the image
+  file name (`Teams.exe`), so the app's list of call apps needs Windows
+  names. A capture session's state change is notified for sessions present
+  at registration; later ones are re-registered on `OnSessionCreated` and
+  otherwise caught by the detector's 1 s poll.
+- **Device list.** `AudioDeviceInfo.id` is the index in the enumeration
+  (WASAPI has no numeric ids), `uid` the endpoint id `Settings` stores; the
+  transport type and `is_running_somewhere` are not read.
+
 Six Swift defects the port does not share; fix them in Swift if it ships
 another release, otherwise the cutover closes them:
 
@@ -747,6 +788,7 @@ PR off `main`.
 | WP4d diarization (`steno-diarize`) | `feat/rust-diarize` | #164 | merged |
 | WP7c handover | `feat/rust-handover` | #169 | merged |
 | WP8 shell completion: tray, floating panels, autostart, updater, permissions, deep links, single instance, dialogs, installer bundles and the unsigned release workflow (`cargo deny` and signing follow with WP9) | `feat/rust-shell` | #172 | open |
+| WP10a WASAPI capture (`steno-audio`) | `feat/rust-wasapi` | #175 | open |
 
 WP4b is `crates/steno-speech-coreml`: `objc2-core-ml` behind one safe module,
 the four backend calls, the FluidAudio 0.17.4 heuristics ported
@@ -780,3 +822,15 @@ port must have the master and its commits on disk by then (the `RecordingIntake.
 line under Store). Pairing and revoke commits stay `NORMAL`, as in Swift: a power loss
 right after one can forget a pairing (the phone gets 401 and unpairs, and the user
 pairs it again) or bring a revoked device back.
+
+WP10a is the Windows half of `crates/steno-audio`: the WASAPI live backend
+(process loopback excluding Steno's process tree, endpoint loopback as the
+fallback, the capture endpoint, one thread per stream, endpoint
+notifications and the rebuild report) and the session-based
+`LiveProcessAudioActivity`. Compile-verified only: built, linted and
+unit-tested on the `windows-latest` runner, no live capture on hardware.
+The per-packet bodies, the stream plan and the session mapping are
+platform-independent (`tests/split_streams.rs`, `tests/sessions.rs`), the
+zero-allocation proof covers both stream bodies (`tests/realtime.rs`), and
+the hardware checks wait behind `--ignored` in `tests/live_windows.rs`.
+Parity items: the Windows list under Audio.
