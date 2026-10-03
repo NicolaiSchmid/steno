@@ -28,7 +28,12 @@ impl Syncs for Disk {
     }
 
     fn directory(&self, directory: &Path) {
-        sync_directory(directory);
+        #[cfg(unix)]
+        if let Ok(handle) = File::open(directory) {
+            let _ = handle.sync_all();
+        }
+        #[cfg(not(unix))]
+        let _ = directory;
     }
 }
 
@@ -148,23 +153,21 @@ fn write_durably(
     Ok(())
 }
 
-/// `std::fs::rename`, retried for a moment where Windows refuses to replace
-/// a file another writer is replacing at the same instant ("access
-/// denied"); one attempt elsewhere.
+/// `std::fs::rename`. Windows refuses to replace a file another writer is
+/// replacing at the same instant ("access denied"), so there a refusal is
+/// retried every 10 ms, 49 times at most (about half a second); elsewhere
+/// the rename is tried once.
 fn rename_over(from: &Path, to: &Path) -> std::io::Result<()> {
-    let attempts = if cfg!(windows) { 50 } else { 1 };
-    let mut attempt = 1;
-    loop {
+    let retries = if cfg!(windows) { 49 } else { 0 };
+    for _ in 0..retries {
         match std::fs::rename(from, to) {
-            Err(error)
-                if attempt < attempts && error.kind() == std::io::ErrorKind::PermissionDenied =>
-            {
-                attempt += 1;
+            Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => {
                 std::thread::sleep(Duration::from_millis(10));
             }
             outcome => return outcome,
         }
     }
+    std::fs::rename(from, to)
 }
 
 /// Removes this file's temporaries in `directory` that are older than
@@ -202,17 +205,6 @@ pub fn restrict_new_file(options: &mut OpenOptions) -> &mut OpenOptions {
         options.mode(0o600);
     }
     options
-}
-
-/// Makes a rename in `directory` durable where the platform can sync a
-/// directory; best effort.
-fn sync_directory(directory: &Path) {
-    #[cfg(unix)]
-    if let Ok(handle) = std::fs::File::open(directory) {
-        let _ = handle.sync_all();
-    }
-    #[cfg(not(unix))]
-    let _ = directory;
 }
 
 #[cfg(test)]
