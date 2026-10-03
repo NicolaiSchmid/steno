@@ -8,9 +8,11 @@ name: Desktop bundles
 # also gives this job the `TAURI_SIGNING_PRIVATE_KEY` secret (the private
 # half of `plugins.updater.pubkey` in tauri.conf.json, generated with
 # `cargo tauri signer generate`; see apps/desktop/README.md). Until the
-# secret exists the updater artifacts (`.sig` files, `latest.json`) are
-# switched off through Tauri's configuration merge, because a public key in
-# the config without a private key in the environment fails the build.
+# secret exists the updater artifacts (`.sig` files and the macOS
+# `.app.tar.gz`) are switched off through Tauri's configuration merge,
+# because a public key in the config without a private key in the
+# environment fails the build. The CLI writes no `latest.json`; the
+# manifests are WP9's.
 #
 # The bundles answer the bridge from the recorded fixtures (the shell's
 # default `fixture-host` feature): they show the whole UI with synthetic
@@ -36,9 +38,10 @@ permissions:
 
 jobs:
   # Which platforms the run builds, from the input: a job-level `if` cannot
-  # read the matrix, so a first job filters the include list and the bundle
-  # job takes its matrix from it. The macOS runner label comes from
-  # `MACOS_RUNS_ON` as everywhere else.
+  # read the matrix, so a first job turns the input into the include list
+  # (apps/desktop/scripts/release-matrix.sh: any case, an unknown name
+  # fails the run) and the bundle job takes its matrix from it. The macOS
+  # runner label comes from `MACOS_RUNS_ON` as everywhere else.
   plan:
     name: plan
     runs-on: ubuntu-latest
@@ -46,29 +49,16 @@ jobs:
     outputs:
       matrix: ${{ steps.plan.outputs.matrix }}
     steps:
+      - uses: actions/checkout@v4
       - id: plan
         env:
           PLATFORMS: ${{ inputs.platforms }}
           MACOS_RUNS_ON: ${{ vars.MACOS_RUNS_ON || '"macos-15"' }}
         run: |
           set -euo pipefail
-          all='[
-            {"name":"linux","os":"ubuntu-latest","bundles":"deb,appimage",
-             "artifacts":"target/release/bundle/deb/*.deb\ntarget/release/bundle/appimage/*.AppImage"},
-            {"name":"windows","os":"windows-latest","bundles":"msi,nsis",
-             "artifacts":"target/release/bundle/msi/*.msi\ntarget/release/bundle/nsis/*.exe"},
-            {"name":"macos","os":null,"bundles":"app,dmg",
-             "artifacts":"target/release/bundle/dmg/*.dmg"}
-          ]'
-          # The .app is inside the .dmg; the .app.tar.gz exists only as an
-          # updater artifact, which the signing key (WP9) switches on.
-          matrix="$(jq -c --arg wanted "$PLATFORMS" --argjson mac "$MACOS_RUNS_ON" \
-            '($wanted | split(",") | map(gsub(" "; ""))) as $names
-             | {include: [ .[] | select(.name as $n | $names | index($n)) | if .name == "macos" then .os = $mac else . end ]}' \
-            <<< "$all")"
+          matrix="$(apps/desktop/scripts/release-matrix.sh)"
           echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
           echo "$matrix"
-          test "$(jq '.include | length' <<< "$matrix")" -gt 0 || { echo "::error::no platform selected from '$PLATFORMS'"; exit 1; }
 
   bundle:
     name: ${{ matrix.name }}
@@ -122,7 +112,10 @@ jobs:
         working-directory: apps/macos/web
 
       # The Tauri CLI as the npm package: a prebuilt binary in seconds,
-      # where `cargo install tauri-cli` compiles for minutes.
+      # where `cargo install tauri-cli` compiles for minutes. Pinned to the
+      # exact version of the `tauri` crate in Cargo.lock and of
+      # `@tauri-apps/api`, because it runs with the signing key in its
+      # environment.
       - name: Bundle
         shell: bash
         working-directory: apps/desktop/src-tauri
@@ -139,7 +132,7 @@ jobs:
             updater=false
           fi
           config="{\"build\":{\"beforeBuildCommand\":null},\"bundle\":{\"createUpdaterArtifacts\":$updater}}"
-          pnpm dlx @tauri-apps/cli@^2.12 build --ci \
+          pnpm dlx @tauri-apps/cli@2.12.1 build --ci \
             --bundles "${{ matrix.bundles }}" --config "$config"
 
       # A self-hosted runner keeps its target directory outside the
@@ -154,7 +147,7 @@ jobs:
             rm -rf target/release/bundle
             cp -R "$src" target/release/bundle
           fi
-          find target/release/bundle -maxdepth 2 -type f \( -name '*.deb' -o -name '*.AppImage' -o -name '*.msi' -o -name '*.exe' -o -name '*.dmg' -o -name '*.tar.gz' -o -name '*.sig' -o -name 'latest.json' \) -print
+          find target/release/bundle -maxdepth 2 -type f \( -name '*.deb' -o -name '*.AppImage' -o -name '*.msi' -o -name '*.exe' -o -name '*.dmg' -o -name '*.tar.gz' -o -name '*.sig' \) -print
 
       - name: Upload bundles
         uses: actions/upload-artifact@v4

@@ -199,6 +199,11 @@ jobs:
             ran on_windows_the_adapter_table_has_a_row_for_every_ipv4_interface
           fi
 
+      # The desktop release workflow's platform filter.
+      - name: Desktop release matrix
+        if: matrix.name == 'linux'
+        run: apps/desktop/scripts/release-matrix.test.sh
+
       # A debug build loads devUrl; the smoke needs the embedded bundle, so
       # the dev URL is dropped through Tauri's configuration merge. The run
       # ends itself after 15 s; the step limit catches a hang before that.
@@ -221,12 +226,13 @@ jobs:
       # The release build as the Tauri CLI drives it, without the installer
       # step: the web dist is already built above, so the config merge
       # drops beforeBuildCommand, and the updater artifacts need the
-      # signing key WP9 brings, so they are off here.
+      # signing key WP9 brings, so they are off here. The CLI is the
+      # version desktop-release.yml pins.
       - name: Desktop release build (no bundle)
         if: matrix.name == 'linux'
         working-directory: apps/desktop/src-tauri
         run: |
-          pnpm dlx @tauri-apps/cli@^2.12 build --ci --no-bundle \
+          pnpm dlx @tauri-apps/cli@2.12.1 build --ci --no-bundle \
             --config '{"build":{"beforeBuildCommand":null},"bundle":{"createUpdaterArtifacts":false}}'
           test -x ../../../target/release/steno-desktop
 
