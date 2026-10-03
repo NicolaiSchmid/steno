@@ -6,9 +6,9 @@
 //! thread, the relay, the writer thread and the [`RecordingWriting`]
 //! implementation; `stop()` tears them down in order (an in-flight rebuild,
 //! the backend, processing, writer, files; see Threads) and returns the
-//! [`CaptureResult`]: the finished
-//! [`AudioAsset`] (`Caf48kFloat32`, `sidecars_16k` filled, retention
-//! `KeepForever` until the caller sets it from `Settings`) with statistics.
+//! [`CaptureResult`]: the finished [`AudioAsset`] (`Caf48kFloat32`,
+//! `sidecars_16k` filled, retention `KeepForever` until the caller sets it
+//! from `Settings`) with statistics.
 //!
 //! A device change while recording does not end the recording. The
 //! backend reports it through the sink; the session stops the backend and
