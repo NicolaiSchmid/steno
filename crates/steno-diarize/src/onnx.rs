@@ -107,41 +107,58 @@ impl OnnxBackend {
         self.embedding_dimension
     }
 
-    /// The fbank frames of `window` the segmentation `weights` mark: each
-    /// feature frame takes the weight of the segmentation frame whose
-    /// centre is nearest its own. The mean is subtracted over the whole
-    /// ten-second window before the frames are picked, as pyannote's
-    /// `WeSpeaker` wrapper and `FluidAudio`'s `FBank` model normalise
-    /// before the mask is applied; normalising the selected frames alone
-    /// would centre every speaker's features on their own voice and
-    /// discard part of what tells voices apart.
+    /// The fbank frames of `window` the segmentation `weights` mark, mean
+    /// subtracted over the whole window first when the model asks for it.
     fn selected_features(&self, window: &[f32], weights: &[f32]) -> Vec<f32> {
-        let mut features = self.fbank.compute(window);
-        let bins = self.fbank.num_bins();
-        if self.subtracts_mean {
-            Fbank::subtract_mean(&mut features, bins);
-        }
-        let frames = features.len() / bins.max(1);
-        let geometry = &self.geometry;
-        let mut selected = Vec::new();
-        for frame in 0..frames {
-            let centre = self.fbank.frame_centre_seconds(frame) * to_f64(geometry.sample_rate);
-            let shifted = centre - to_f64(geometry.receptive_field_size / 2);
-            // Non-negative after the clamp; the index stays far below 2^53.
-            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-            let segmentation_frame = ((shifted / to_f64(geometry.receptive_field_shift))
-                .round()
-                .max(0.0) as usize)
-                .min(geometry.frames_per_window.saturating_sub(1));
-            if weights
-                .get(segmentation_frame)
-                .is_some_and(|weight| *weight > 0.5)
-            {
-                selected.extend_from_slice(&features[frame * bins..(frame + 1) * bins]);
-            }
-        }
-        selected
+        speaker_features(
+            self.fbank.compute(window),
+            self.subtracts_mean,
+            weights,
+            &self.fbank,
+            &self.geometry,
+        )
     }
+}
+
+/// The rows of `features` (one fbank frame each, `fbank.num_bins()` wide)
+/// that belong to the speaker: each feature frame takes the weight of the
+/// segmentation frame whose centre is nearest its own and is kept when
+/// that weight is above a half. When `subtract_mean`, the mean is
+/// subtracted over the whole ten-second window before the frames are
+/// picked, as pyannote's `WeSpeaker` wrapper and `FluidAudio`'s `FBank`
+/// model normalise before the mask is applied; normalising the selected
+/// frames alone would centre every speaker's features on their own voice
+/// and discard part of what tells voices apart.
+fn speaker_features(
+    mut features: Vec<f32>,
+    subtract_mean: bool,
+    weights: &[f32],
+    fbank: &Fbank,
+    geometry: &SegmentationGeometry,
+) -> Vec<f32> {
+    let bins = fbank.num_bins();
+    if subtract_mean {
+        Fbank::subtract_mean(&mut features, bins);
+    }
+    let frames = features.len() / bins.max(1);
+    let mut selected = Vec::new();
+    for frame in 0..frames {
+        let centre = fbank.frame_centre_seconds(frame) * to_f64(geometry.sample_rate);
+        let shifted = centre - to_f64(geometry.receptive_field_size / 2);
+        // Non-negative after the clamp; the index stays far below 2^53.
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let segmentation_frame = ((shifted / to_f64(geometry.receptive_field_shift))
+            .round()
+            .max(0.0) as usize)
+            .min(geometry.frames_per_window.saturating_sub(1));
+        if weights
+            .get(segmentation_frame)
+            .is_some_and(|weight| *weight > 0.5)
+        {
+            selected.extend_from_slice(&features[frame * bins..(frame + 1) * bins]);
+        }
+    }
+    selected
 }
 
 fn session(path: &Path, threads: usize) -> Result<Session, DiarizeError> {
@@ -245,5 +262,49 @@ impl TensorBackend for OnnxBackend {
             return Ok(None);
         }
         Ok(Some(data.to_vec()))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Features whose first five seconds sit at one and whose second five
+    /// sit at minus one, the speaker marked over the first five: the
+    /// window's mean is zero, so the selected rows keep their one.
+    /// Subtracting the mean of the selected rows instead would send every
+    /// one of them to zero, which is the order this test rules out.
+    #[test]
+    fn the_mean_comes_off_the_whole_window_before_the_speaker_is_picked() {
+        let geometry = SegmentationGeometry::PYANNOTE_3_0;
+        let fbank = Fbank::new(FbankConfig::WESPEAKER);
+        let bins = fbank.num_bins();
+        let frames = fbank.num_frames(geometry.window_samples);
+        assert_eq!(frames % 2, 0, "two equal halves");
+        let features: Vec<f32> = (0..frames)
+            .flat_map(|frame| {
+                let value = if frame < frames / 2 { 1.0 } else { -1.0 };
+                std::iter::repeat_n(value, bins)
+            })
+            .collect();
+        // Segmentation frames whose centre lies in the first five seconds.
+        let weights: Vec<f32> = (0..geometry.frames_per_window)
+            .map(|frame| {
+                let centre =
+                    frame * geometry.receptive_field_shift + geometry.receptive_field_size / 2;
+                f32::from(u8::from(centre < geometry.window_samples / 2))
+            })
+            .collect();
+        let selected = speaker_features(features.clone(), true, &weights, &fbank, &geometry);
+        let rows = selected.len() / bins;
+        assert!(
+            (frames / 2 - 3..=frames / 2).contains(&rows),
+            "about half the rows, {rows} of {frames}"
+        );
+        assert!(selected.iter().all(|value| (value - 1.0).abs() < 1e-6));
+        assert_eq!(
+            speaker_features(features, false, &weights, &fbank, &geometry),
+            selected
+        );
     }
 }
