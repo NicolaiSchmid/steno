@@ -281,35 +281,55 @@ bridge's copies of the macro and codecs. Packages after WP3 branch from `main`.
     the header declares: the samples of a `transcribe` request as little-endian `f32`,
     bit for bit. Requests `load` (a store root), `health`, `transcribe`, `shutdown`;
     the child sends `ready` with the protocol version, a `memory` heartbeat with its
-    resident set, and one reply per request id.
+    resident set, and one reply per request id. A header stops at 64 MiB and must
+    start with `{`, and both readers grow their buffers as bytes arrive, so garbage
+    cannot make either side reserve memory. Tests: `headers_use_the_bridge_convention`,
+    `broken_frames_are_errors_not_messages`,
+    `binary_garbage_is_refused_before_its_claimed_length_is_awaited` and
+    `crates/steno-speech/tests/frames.rs`.
   - Limits: the parent installs the models (the child opens no connection), then
     enforces a per-request deadline (120 s plus 1 s per second of audio by default;
     300 s for `load`) and a memory ceiling (6 GiB) against the heartbeat. A child that
     dies, hangs, overruns or breaks the protocol is killed and reaped, the call fails
     with `SpeechError::Sidecar`, and the next call spawns and loads again; an error the
-    child reports keeps it. The child exits when stdin ends or stdout breaks, so a dead
-    app leaves no child. `release()` stops it and frees the 2.2 GB working set; WP6b
-    calls it after each job.
+    child reports keeps it (`an_error_the_child_reports_keeps_the_child`). The child
+    exits when stdin ends or stdout breaks, so a dead app leaves no child, idle or busy
+    (`the_child_greets_and_exits_when_its_parent_goes_away`,
+    `a_busy_child_exits_when_its_parent_goes_away`). `SpeechEngine::release()` stops
+    it and frees the 2.2 GB working set; WP6b is to call it after each job, and until
+    then nothing frees the working set. The deadline:
+    `the_deadline_grows_with_the_audio_and_the_binary_sits_beside_the_app`. On Windows
+    the child starts without a console window. ONNX Runtime's telemetry is off in
+    every process that opens a session, the child included
+    (`crates/steno-speech/src/onnx.rs`).
   - Platform policy (`crates/steno-speech/src/runtime.rs`): on Linux and Windows the
     sidecar is the only engine the app runs; on macOS the in-process CoreML engine is
     the default and the sidecar a fallback behind `SpeechSettings::onnx_sidecar_on_mac`.
     The in-process `OnnxSpeechEngine` is what the child hosts and what the example and
-    the FLEURS test drive.
+    the FLEURS test drive. Test: `the_sidecar_is_the_default_off_the_mac_and_the_fallback_on_it`.
   - Crash isolation (`crates/steno-speech-sidecar/tests/isolation.rs`, the real client
     against the real binary with `--fake-engine --fault`): killed mid-request, abort
-    (as a C++ exception through the FFI ends), panic, exit, hang past the deadline,
-    allocation past the ceiling and garbage on stdout each end in an error and a
-    working next call in a new child. With the models on atlas the child loads at
-    2.2 GB resident and transcribes 471 s of FLEURS German in 34.5 s, segment for
-    segment equal to the in-process engine.
+    (the way an uncaught C++ exception in ONNX Runtime ends the process), panic, exit,
+    hang past the deadline, allocation past the ceiling, garbage on stdout, silence at
+    start and another protocol version each end in an error and a working next call
+    in a new child. With the models on atlas the child loads at 2.2 GB resident and
+    transcribes 471 s of FLEURS German in 34.5 s, segment for segment equal to the
+    in-process engine (`the_real_models_load_and_transcribe_in_the_sidecar_when_installed`,
+    ignored by default, gated on `STENO_MODELS_DIR` and `STENO_FLEURS_DIR`, not run in
+    CI).
   - Models: a file's source is a URL (GitHub release assets, 2 GB at most: Silero;
     `steno-diarize` fetches its own models, `crates/steno-diarize/src/models.rs`) or a Hugging Face repository at a
     pinned commit, `https://huggingface.co/<repo>/resolve/<revision>/<path>`, for the
     2.6 GB fp32 export (`encoder.weights` alone is 2.4 GB). `scripts/upload-models.sh`
     verifies the export against the manifest, adds the CC-BY-4.0 `ATTRIBUTION.md` and
     uploads it; setting `PARAKEET_V3_FP32_REVISION` then hosts it. Downloads resume
-    `<name>.partial` under a file lock with `Range` requests, across retries and runs;
-    a mirror (`SpeechSettings::models_mirror`) serves `<mirror>/<asset id>/<file>`.
+    `<name>.partial` under a file lock with `Range` requests, across retries and runs,
+    and the partial goes once its file is installed; a mirror
+    (`SpeechSettings::models_mirror`) serves `<mirror>/<asset id>/<file>`. Tests:
+    `crates/steno-speech/tests/download.rs` (`a_cut_connection_resumes_with_a_range_request`,
+    `a_partial_a_killed_run_left_is_resumed_not_fetched_again`,
+    `a_206_from_the_wrong_offset_or_without_a_range_is_not_appended`,
+    `a_mirror_serves_every_file_from_asset_id_and_file_name`).
   - Left for WP8: ship the binary beside the app (Tauri `externalBin`;
     `SidecarConfig::beside_current_exe` looks there) and sign it with the app.
 
@@ -446,7 +466,7 @@ still has to draw the window side. `[ ]` is not ported yet.
 
 ### Speech
 
-- [ ] Decision for Nicolai: which Hugging Face account hosts the fp32 export.
+- [ ] Open decision: which Hugging Face account hosts the fp32 export.
   `NicolaiSchmid/steno-models` is the placeholder in `scripts/upload-models.sh` and
   `STENO_MODELS_REPO`; an organisation would outlive a personal account. Then run the
   script and set `PARAKEET_V3_FP32_REVISION`; until then the export has no source and
