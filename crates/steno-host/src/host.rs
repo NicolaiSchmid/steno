@@ -113,11 +113,15 @@ pub type Confirm = Box<dyn Fn(&ConfirmDestructiveParams) -> bool + Send + Sync>;
 /// choice, `None` when cancelled. Swift: `SettingsBridge.ChooseFolder`.
 pub type ChooseFolder = Box<dyn Fn(Option<&Path>) -> Option<PathBuf> + Send + Sync>;
 
-/// What constructing a host can fail on: the store.
+/// What constructing a host can fail on.
 #[derive(Debug, thiserror::Error)]
 pub enum HostError {
     #[error(transparent)]
     Store(#[from] StoreError),
+    /// The thread that flushes the throttled `recording` topic did not
+    /// start.
+    #[error("the host's flush thread could not start: {0}")]
+    FlushThread(std::io::Error),
 }
 
 /// The core's boundaries are async; the host waits on them here, on one
@@ -368,7 +372,7 @@ impl Host {
         let flusher = thread::Builder::new()
             .name("steno-host-flush".to_owned())
             .spawn(move || flush_loop(&receiver))
-            .map_err(StoreError::Io)?;
+            .map_err(HostError::FlushThread)?;
         let shared = Arc::new(Shared {
             store,
             services,
@@ -492,7 +496,10 @@ impl Host {
     /// The topic's snapshot as the view models stand, with the publish
     /// hooks the Swift bridges ran before building (the list's fill and
     /// the detail swap). `None` for a topic the host does not publish;
-    /// `null` for `meeting.detail` without a selection.
+    /// `null` for `meeting.detail` without a selection. Those hooks may
+    /// change state (a pending selection lands, the detail model swaps)
+    /// and queue topics, which go out with the next publish, not from
+    /// here.
     pub fn snapshot(&self, topic: BridgeTopic) -> Option<Value> {
         let mut inner = self.lock();
         self.build(&mut inner, topic)
@@ -610,7 +617,12 @@ impl Host {
 
     /// The app publish consumes the controller's requests after the
     /// snapshot has carried them once: the meeting becomes the selection,
-    /// the section is cleared once the page saw it.
+    /// the section is cleared once the page saw it. The `app` topic goes to
+    /// the main and the Settings window, so the first emit clears a
+    /// Settings deep link whichever window received it; that is enough
+    /// because the shell also passes the section in the route of a
+    /// Settings window it opens (`apps/desktop/src-tauri/src/windows.rs`),
+    /// so a window that opens later still lands on it.
     fn did_publish_app(inner: &mut Inner, emitted: bool) {
         if let Some(requested) = inner.app.requested_meeting_id.take() {
             inner.pending_selection = None;
@@ -672,8 +684,9 @@ impl Host {
     }
 
     /// How long until a throttled topic may go out; `None` when nothing
-    /// waits on its interval. The flush thread's wake-up; a test reads it to
-    /// know a `recording` change is on its way.
+    /// waits on its interval. Not for the shell: the flush thread publishes
+    /// on time. Tests read it to know a `recording` change is still held
+    /// back.
     #[must_use]
     pub fn next_flush_due(&self) -> Option<Duration> {
         self.lock().publisher.next_due(Instant::now())
