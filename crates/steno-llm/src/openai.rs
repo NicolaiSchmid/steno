@@ -122,6 +122,19 @@ impl OpenAiCompatibleClient {
         self.state.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
+    /// Moves the remembered mode from `from` to `to` only while it still is
+    /// `from`: a late 400 from a concurrent request that started under an
+    /// older mode must neither bounce the mode back up nor announce the
+    /// same downgrade twice. Returns whether this call moved it.
+    fn downgrade(&self, from: StructuredOutputMode, to: StructuredOutputMode) -> bool {
+        let mut state = self.state();
+        if state.mode != from {
+            return false;
+        }
+        state.mode = to;
+        true
+    }
+
     /// One completion with this crate's own error type; the
     /// [`LanguageModel`] impl boxes it.
     pub async fn complete_llm(&self, request: &LlmRequest) -> Result<LlmResponse, LlmError> {
@@ -170,8 +183,9 @@ impl OpenAiCompatibleClient {
             && Self::complains_about_response_format(&reply.body_text())
             && let Some(next) = mode.downgraded()
         {
-            self.state().mode = next;
-            notify(self.observer.as_ref(), LlmClientEvent::ModeDowngraded(next));
+            if self.downgrade(mode, next) {
+                notify(self.observer.as_ref(), LlmClientEvent::ModeDowngraded(next));
+            }
             return Ok(Attempt::Resend);
         }
         if reply.status == 400

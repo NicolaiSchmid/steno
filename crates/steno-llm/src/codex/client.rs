@@ -126,8 +126,17 @@ impl CodexResponsesClient {
         *self.mode.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    fn set_mode(&self, mode: StructuredOutputMode) {
-        *self.mode.lock().unwrap_or_else(PoisonError::into_inner) = mode;
+    /// Moves the remembered mode from `from` to `to` only while it still is
+    /// `from`: a late 400 from a concurrent request that started under an
+    /// older mode must neither bounce the mode back up nor announce the
+    /// same downgrade twice. Returns whether this call moved it.
+    fn downgrade(&self, from: StructuredOutputMode, to: StructuredOutputMode) -> bool {
+        let mut mode = self.mode.lock().unwrap_or_else(PoisonError::into_inner);
+        if *mode != from {
+            return false;
+        }
+        *mode = to;
+        true
     }
 
     /// One completion with this crate's own error types.
@@ -208,8 +217,9 @@ impl CodexResponsesClient {
             && Self::complains_about_text_format(&reply.body_text())
             && let Some(next) = mode.downgraded()
         {
-            self.set_mode(next);
-            notify(self.observer.as_ref(), LlmClientEvent::ModeDowngraded(next));
+            if self.downgrade(mode, next) {
+                notify(self.observer.as_ref(), LlmClientEvent::ModeDowngraded(next));
+            }
             return Ok(Attempt::Resend);
         }
         Ok(Attempt::Failed(Self::classify(&reply, &secrets)))

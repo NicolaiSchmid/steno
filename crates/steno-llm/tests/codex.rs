@@ -701,6 +701,57 @@ async fn a_four_hundred_that_does_not_name_the_format_is_not_downgraded() {
     );
 }
 
+/// Two chunks in flight under `JsonSchema` both draw the 400: one
+/// `ModeDowngraded` per step, and the late second 400 cannot move the mode
+/// back up.
+#[tokio::test]
+async fn concurrent_rejections_downgrade_the_mode_once_per_step() {
+    let harness = CodexHarness::new().await;
+    harness.backend.respond(Arc::new(|request| {
+        let has_text = request.responses.as_ref().is_some_and(|b| b.text.is_some());
+        Some(if has_text {
+            scripts.bad_request("text.format is not supported by this model")
+        } else {
+            scripts.stream("{}")
+        })
+    }));
+    harness.backend.hold_responses();
+    let first = request("a", schema_format("r"));
+    let second = request("b", schema_format("r"));
+    let (a, b, ()) = tokio::join!(
+        harness.client.complete_llm(&first),
+        harness.client.complete_llm(&second),
+        async {
+            harness.backend.received(2).await;
+            harness.backend.release();
+        }
+    );
+    a.unwrap();
+    b.unwrap();
+    let downgrades: Vec<_> = harness
+        .events()
+        .into_iter()
+        .filter_map(|event| match event {
+            LlmClientEvent::ModeDowngraded(mode) => Some(mode),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        downgrades,
+        [
+            StructuredOutputMode::JsonObject,
+            StructuredOutputMode::PromptOnly
+        ]
+    );
+    assert_eq!(
+        harness.client.resolved_mode(),
+        StructuredOutputMode::PromptOnly
+    );
+    assert_modes_never_go_up(&harness.events());
+    assert_eq!(harness.backend.request_count(), 6);
+    assert_eq!(harness.clock.pending_sleepers(), 0);
+}
+
 #[tokio::test]
 async fn the_downgrade_runs_to_prompt_only_and_sticks() {
     let harness = CodexHarness::new().await;

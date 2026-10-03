@@ -12,7 +12,7 @@ use steno_core::{LanguageTag, LlmMessage, LlmRequest, LlmResponseFormat, LlmRole
 use steno_llm::testing::{ManualClock, StubChatServer};
 use steno_llm::{
     CodexCredentialStore, CodexResponsesClient, JwtClaims, LlmClientEvent, LlmEndpoint,
-    OpenAiCompatibleClient, RetryPolicy,
+    OpenAiCompatibleClient, RetryPolicy, StructuredOutputMode,
 };
 use tokio::sync::mpsc;
 
@@ -229,6 +229,34 @@ impl EventRecorder {
             }
         }
         None
+    }
+}
+
+/// The mode of every `Request` event, in order.
+pub fn request_modes(events: &[LlmClientEvent]) -> Vec<StructuredOutputMode> {
+    events
+        .iter()
+        .filter_map(|event| match event {
+            LlmClientEvent::Request { mode, .. } => Some(*mode),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The structured output mode only ever walks down the chain: no request
+/// goes out under a mode above the one an earlier request was sent with.
+pub fn assert_modes_never_go_up(events: &[LlmClientEvent]) {
+    let rank = |mode: &StructuredOutputMode| {
+        StructuredOutputMode::ALL
+            .iter()
+            .position(|candidate| candidate == mode)
+            .unwrap()
+    };
+    let modes = request_modes(events);
+    let mut reached = 0;
+    for mode in &modes {
+        assert!(rank(mode) >= reached, "the mode went back up: {modes:?}");
+        reached = rank(mode);
     }
 }
 

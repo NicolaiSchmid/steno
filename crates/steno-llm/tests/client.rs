@@ -1116,6 +1116,61 @@ async fn a_json_object_request_walks_the_whole_chain_and_ends_at_prompt_only() {
     assert_eq!(harness.clock.pending_sleepers(), 0);
 }
 
+/// Two chunks in flight under `JsonSchema` both draw the 400. The mode
+/// moves down once per step and is announced once; the second, late 400
+/// (its attempt started under the older mode) neither moves the mode back
+/// up nor fires a second `ModeDowngraded`.
+#[tokio::test]
+async fn concurrent_rejections_downgrade_the_mode_once_per_step() {
+    let harness = ClientHarness::new().await;
+    harness.server.respond(scripts.server(
+        &["stub-model"],
+        &["json_schema", "json_object"],
+        scripts.text("{}"),
+    ));
+    harness.server.hold_responses();
+    let first = request("a", schema_format("reply"));
+    let second = request("b", schema_format("reply"));
+    let (a, b, ()) = tokio::join!(
+        harness.client.complete_llm(&first),
+        harness.client.complete_llm(&second),
+        async {
+            harness.server.received(2).await;
+            harness.server.release();
+        }
+    );
+    a.unwrap();
+    b.unwrap();
+    let downgrades: Vec<_> = harness
+        .events()
+        .into_iter()
+        .filter_map(|event| match event {
+            LlmClientEvent::ModeDowngraded(mode) => Some(mode),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        downgrades,
+        [
+            StructuredOutputMode::JsonObject,
+            StructuredOutputMode::PromptOnly
+        ]
+    );
+    assert_eq!(
+        harness.client.resolved_mode(),
+        StructuredOutputMode::PromptOnly
+    );
+    // Both first requests went out as json_schema, and no later request
+    // went out under a mode above the one already reached.
+    assert_eq!(
+        &request_modes(&harness.events())[..2],
+        [StructuredOutputMode::JsonSchema; 2]
+    );
+    assert_modes_never_go_up(&harness.events());
+    assert_eq!(harness.server.request_count(), 6);
+    assert_eq!(harness.clock.pending_sleepers(), 0);
+}
+
 // Parameter fallback
 
 #[tokio::test]
