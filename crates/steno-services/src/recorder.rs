@@ -216,6 +216,18 @@ impl CaptureRecorder {
         Ok(settings)
     }
 
+    /// Quitting: a recording in progress is stopped with the `quit` end
+    /// reason and saved (the asset written and the meeting enqueued)
+    /// before this returns. Swift: the `stop(reason: .quit)` in
+    /// `AppController.shutdown`.
+    pub fn stop_for_quit(&self) {
+        if self.inner().status.state != RecordingState::Recording {
+            return;
+        }
+        self.stop_inner(RecordingEndReason::Quit);
+        self.notify();
+    }
+
     fn stop_inner(&self, reason: RecordingEndReason) {
         let Some(active) = self.inner().active.take() else {
             return;
@@ -377,6 +389,7 @@ mod tests {
 
     struct Harness {
         _dir: tempfile::TempDir,
+        store: Arc<Store>,
         recorder: Arc<CaptureRecorder>,
         engine: Arc<FakeSpeechEngine>,
         diarizer: Arc<FakeDiarizer>,
@@ -419,7 +432,7 @@ mod tests {
             .map_err(|error| error.to_string())
         });
         let recorder = Arc::new(CaptureRecorder::new(
-            store,
+            store.clone(),
             pipeline,
             make_session,
             Arc::new(FakePermissions::all_granted()),
@@ -429,6 +442,7 @@ mod tests {
         ));
         Harness {
             _dir: dir,
+            store: store.clone(),
             recorder,
             engine,
             diarizer,
@@ -470,6 +484,27 @@ mod tests {
         assert_eq!(harness.diarizer.preparations.count(), 0);
         // Processing the recording loads them, as it always did.
         stop(&harness.recorder).await;
+    }
+
+    /// Quitting stops the recording with `quit` and saves it: the meeting
+    /// is queued for processing when the call returns.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn quitting_stops_and_saves_the_recording_with_the_quit_reason() {
+        let harness = harness(&[]);
+        start(&harness.recorder).await;
+        let meeting_id = harness.recorder.status().meeting_id.unwrap();
+        let quitting = harness.recorder.clone();
+        tokio::task::spawn_blocking(move || quitting.stop_for_quit())
+            .await
+            .unwrap();
+        assert_eq!(harness.recorder.status().state, RecordingState::Idle);
+        let meeting = harness.store.meeting(meeting_id).unwrap().unwrap();
+        assert_eq!(meeting.end_reason, Some(RecordingEndReason::Quit));
+        assert_ne!(
+            meeting.state.kind(),
+            steno_core::MeetingStateKind::Recording
+        );
+        assert!(harness.store.asset(meeting_id).unwrap().is_some());
     }
 
     /// The configured engine decides which model counts: with the `CoreML`
