@@ -70,8 +70,12 @@ pub fn turns(
         return Vec::new();
     }
     // Per global frame: votes per cluster, how many windows cover it, and
-    // the summed local speaker counts.
-    let mut votes = vec![0u32; total_frames * cluster_count];
+    // the summed local speaker counts. A vote cell is a byte: at most the
+    // five covering windows times three local speakers vote for one
+    // cluster on one frame, and the matrix is the largest thing here
+    // (frames times clusters, 59 frames a second, dozens of clusters
+    // before refinement on a group call).
+    let mut votes = vec![0u8; total_frames * cluster_count];
     let mut coverage = vec![0u32; total_frames];
     let mut counts = vec![0u32; total_frames];
     for activity in &analysis.activities {
@@ -93,7 +97,8 @@ pub fn turns(
             if activity.is_active(local, embedding.local_speaker) {
                 let frame = base + local;
                 if frame < total_frames {
-                    votes[frame * cluster_count + cluster] += 1;
+                    let cell = &mut votes[frame * cluster_count + cluster];
+                    *cell = cell.saturating_add(1);
                 }
             }
         }
