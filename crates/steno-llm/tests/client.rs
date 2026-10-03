@@ -222,6 +222,14 @@ async fn redacts_the_key_from_every_error_and_event() {
         "a [redacted] b"
     );
     assert_eq!(transport::redact("a b", &[]), "a b");
+    assert_eq!(
+        transport::redact(
+            &format!("{API_KEY} a {API_KEY} b {API_KEY}"),
+            &[API_KEY.to_owned()]
+        ),
+        "[redacted] a [redacted] b [redacted]",
+        "every occurrence, not only the first"
+    );
 }
 
 #[tokio::test]

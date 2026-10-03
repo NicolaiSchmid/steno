@@ -19,9 +19,9 @@ use steno_llm::wire::{
     ChatResponseFormat, ModelList, ServerSentEvent, looks_like_event_stream, parse_event_stream,
 };
 use steno_llm::{
-    BudgetPolicy, CodexResponsesClient, JsonSchema, LlmEndpoint, LlmError, OpenAiCompatibleClient,
-    StructuredOutputDecoder, StructuredOutputMode, SummaryPromptBuilder, TokenBudget,
-    TranscriptChunk, TranscriptChunker,
+    BudgetPolicy, CleanupDraft, CodexResponsesClient, JsonSchema, LlmEndpoint, LlmError,
+    OpenAiCompatibleClient, StructuredOutputDecoder, StructuredOutputMode, SummaryPromptBuilder,
+    TokenBudget, TranscriptChunk, TranscriptChunker,
 };
 
 fn response(text: &str, finish: LlmFinishReason) -> LlmResponse {
@@ -197,6 +197,44 @@ fn accepts_crlf_and_the_specifications_corners() {
 }
 
 #[test]
+fn a_stream_that_ends_without_a_blank_line_keeps_its_last_event() {
+    let completed = || ServerSentEvent {
+        event: Some("response.completed".to_owned()),
+        data: "{}".to_owned(),
+    };
+    assert_eq!(
+        parse_event_stream("event: response.completed\ndata: {}"),
+        [completed()]
+    );
+    assert_eq!(
+        parse_event_stream("event: response.completed\r\ndata: {}"),
+        [completed()]
+    );
+    assert_eq!(
+        parse_event_stream("data: a\n\nevent: response.completed\ndata: {}"),
+        [
+            ServerSentEvent {
+                event: None,
+                data: "a".to_owned()
+            },
+            completed()
+        ]
+    );
+}
+
+#[test]
+fn a_cleanup_reply_without_segments_is_invalid_json_not_an_empty_draft() {
+    for text in ["{}", "{\"segment\": []}", "```json\n{}\n```"] {
+        assert_eq!(
+            StructuredOutputDecoder::decode::<CleanupDraft>(&response(text, LlmFinishReason::Stop))
+                .unwrap_err(),
+            LlmError::InvalidJson("missing key segments at root".to_owned()),
+            "{text}"
+        );
+    }
+}
+
+#[test]
 fn detects_an_event_stream_by_header_or_shape() {
     assert!(looks_like_event_stream(
         Some("text/event-stream; charset=utf-8"),
@@ -233,6 +271,16 @@ fn a_stream_becomes_one_response() {
         })
     );
     assert_eq!(response.model.as_deref(), Some("gpt-5.6-luna"));
+}
+
+#[test]
+fn a_codex_stream_without_a_trailing_blank_line_still_completes() {
+    let stub = scripts.responses_stream("{\"ok\":true}", "completed", None, None, "m");
+    let body = std::str::from_utf8(&stub.body).unwrap().trim_end();
+    assert!(body.ends_with('}'), "the terminal event is the last line");
+    let response = CodexResponsesClient::parse_stream(body.as_bytes(), &[]).unwrap();
+    assert_eq!(response.text, "{\"ok\":true}");
+    assert_eq!(response.finish_reason, LlmFinishReason::Stop);
 }
 
 #[test]

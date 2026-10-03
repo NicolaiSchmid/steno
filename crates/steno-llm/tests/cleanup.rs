@@ -317,6 +317,27 @@ async fn undecodable_and_truncated_answers_fall_back_to_raw_after_one_retry() {
 }
 
 #[tokio::test]
+async fn a_reply_without_segments_is_retried_with_the_missing_key_as_the_reason() {
+    let server = StubChatServer::start().await.unwrap();
+    server.enqueue([scripts.text("{}"), scripts.text("{}")]);
+    let standup = standup();
+    let output = cleaner(&server, None, |_| {})
+        .clean(&cleanup_input(&standup))
+        .await
+        .unwrap();
+    assert_eq!(output.failed_chunks, [0]);
+    assert_eq!(output.segments, standup.segments);
+    assert_eq!(server.request_count(), 2);
+    let retry = server.requests().pop().unwrap().chat.unwrap();
+    let reason = &retry.messages.last().unwrap().content;
+    assert!(
+        reason.contains("the model returned invalid JSON: missing key segments at root"),
+        "the reason names the missing key, not an empty draft's count: {reason}"
+    );
+    assert!(!reason.contains("Expected"), "{reason}");
+}
+
+#[tokio::test]
 async fn empty_transcript_makes_no_request() {
     let server = StubChatServer::start().await.unwrap();
     let mut input = cleanup_input(&standup());
