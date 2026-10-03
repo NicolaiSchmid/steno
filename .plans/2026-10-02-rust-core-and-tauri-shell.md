@@ -37,8 +37,10 @@ this plan starts is a parity item for the Rust side, tracked in the parity list 
    diff against a database the Swift CLI created. New migrations after this plan
    starts are written once in SQL and mirrored in `Migrations.swift` and the Rust
    `.sql` files until cutover; the parity test proves them equal.
-3. **Audio never leaves the device.** Only `Destination` implementations and the LLM
-   client open network connections, and the LLM client sends text.
+3. **Audio never leaves the device.** Only `Destination` implementations, the LLM
+   client and the updater open network connections: the LLM client sends text, and
+   the updater fetches the release manifest and the signed bundle from the endpoint
+   in `apps/desktop/src-tauri/tauri.conf.json` and sends nothing.
 4. **One speech pipeline above the tensors.** Chunker, overlap merge and the TDT decode
    loop are shared; the backends are CoreML (`objc2-core-ml`) on the Mac and ONNX
    Runtime (`ort`) elsewhere. ONNX inference runs in a sidecar process; the Mac stays
@@ -109,7 +111,7 @@ line here.
 - Cargo workspace at the root, `rust-toolchain.toml` pinned to stable, `rustfmt`,
   `clippy -D warnings` and a `cargo check` on `rust-version` in CI. Shared dependency
   versions live in the root `[workspace.dependencies]`, crates inherit them.
-  `cargo deny` for licences arrives in WP8 with the first Linux release, once the
+  `cargo deny` for licences arrives in WP9 with the first signed release, once the
   dependency tree is complete (the Tauri and `directories` trees bring MPL-2.0 crates
   that an allow list has to name; CC-BY attribution for Parakeet is a runtime notice,
   not a crate licence).
@@ -278,22 +280,27 @@ bridge's copies of the macro and codecs. Packages after WP3 branch from `main`.
   **WP5 audio.** `steno-audio` from `spikes/capture-rs`: CoreAudio backend with
   device-change rebuild, synthetic backend, writer, AEC; capture tests from
   `Tests/StenoAudioTests` ported. PipeWire backend. WASAPI backend last.
-- **WP6 pipeline and host.** In two PRs. **WP6a host** (`steno-host`): the view
-  models and the bridge host over the real store, the service traits and fakes, the
-  fixture parity suite and the ported view model tests; the parity list below is
-  filled from it. **WP6b pipeline**: orchestration (`process`, retention, speaker
-  matching, export), the CLI, the shell switched from its `fixture-host` feature to
-  `steno-host` (the feature is removed), the real `Recorder` and `Pipeline` behind the
-  host's traits. Parity: the Swift `steno export` of a calibration meeting equals the
-  Rust one field for field.
+- **WP6 pipeline and host.** In two PRs. **WP6a host** (`steno-host`): the view models
+  and the bridge host over the real store, the service traits and fakes, the fixture
+  parity suite and the ported view model tests; the parity list below is filled from it.
+  **WP6b pipeline**: orchestration (`process`, retention, speaker matching, export), the
+  CLI, the shell switched from its `fixture-host` feature to `steno-host` (the feature
+  is removed), the real `Recorder` and `Pipeline` behind the host's traits. Parity: the
+  Swift `steno export` of a calibration meeting equals the Rust one field for field. The
+  shell's seams towards the host (the prompt, the login item and update outcomes, the
+  permissions, the folder choices, the secrets) are filled by WP6b.
 - **WP7 LLM, adapters, handover.** Ports of `StenoLLM` (Codex and OpenAI-compatible),
   `StenoAdapters`, `StenoHandover` (rustls, the pinned trust evaluation, the shared
   `wire.ts` contract test). Lands as three PRs: WP7a LLM, WP7b adapters, WP7c handover.
-- **WP8 shell completion and Linux release.** Autostart, updater, keyring, onboarding
-  permissions per OS, installer bundles; `cargo deny` with a licence allow list in CI;
-  `release.yml` matrix; first Linux build.
-- **WP9 Mac cutover.** Parity list empty, same bundle id, Sparkle handoff, Swift app
-  removed, web app moved to `apps/web`, Swift rows removed from `AGENTS.md`.
+- **WP8 shell completion.** Tray, floating panels, autostart, updater, keyring,
+  onboarding permissions per OS, deep links, single instance, dialogs, the six
+  installer bundles, and `.github/workflows/desktop-release.yml`: a manual run that
+  builds the bundles on the three platforms, unsigned, as workflow artifacts.
+- **WP9 Mac cutover and signed releases.** Parity list empty, same bundle id, Sparkle
+  handoff, Swift app removed, web app moved to `apps/web`, Swift rows removed from
+  `AGENTS.md`; `cargo deny` with a licence allow list in CI; the signing key for the
+  updater artifacts, notarisation, and the release matrix that publishes the bundles
+  and the updater manifests from a tag.
 - **WP10 Windows.** WASAPI capture, DirectML provider (speech-stack G4), installer.
 
 ## Risks
@@ -308,18 +315,6 @@ bridge's copies of the macro and codecs. Packages after WP3 branch from `main`.
   the transition; only the Swift one ships until WP9.
 - Two shells and two cores for some months: the parity list and the fixture oracle are
   what keep them honest.
-
-## Progress
-
-One row per package; a package is a PR off `main` once the WP1 to WP3 chain
-has merged.
-
-| Package | Branch | PR | State |
-|---------|--------|----|-------|
-| WP1 workspace and bridge | `feat/rust-bridge` | #153 | merged |
-| WP2 store | `feat/rust-store` | #155 | merged |
-| WP3 Tauri shell on fixtures | `feat/rust-desktop` | #156 | merged |
-| WP8 shell completion: tray, floating panels, autostart, updater, keyring, permissions, deep links, single instance, dialogs, installer bundles and the unsigned release workflow (`cargo deny` and signing follow with WP9) | `feat/rust-shell` | #172 | open |
 
 ## Parity list
 
@@ -627,6 +622,16 @@ fix is ported to Swift before cutover.
   `/etc/hostname` and falls back to `Steno`; the shell passes the OS computer name on
   the Mac (WP9) and on Windows (WP10).
 
+### Shell
+
+- Launch at login is a Launch Agent through `tauri-plugin-autostart`, where the Swift
+  app registers with `SMAppService`; the `requiresApproval` state never occurs on the
+  Rust side. At cutover (WP9) the Swift registration has to be removed or migrated so
+  the user does not end up with two login items, and the General section's copy for
+  the approval state becomes unreachable.
+- The menu bar on macOS carries the application, Edit and Window menus; the Swift
+  Record menu (`⌘⇧R`, Record In Person) and Find Meetings (`⌘F`) are not in it yet.
+
 ### Bridge
 
 What the bridge crate (WP1) asks of the Swift side before WP6 fills the list:
@@ -721,6 +726,7 @@ PR off `main`.
 | WP5a audio (`steno-audio`) | `feat/rust-audio` | #166 | merged |
 | WP4d diarization (`steno-diarize`) | `feat/rust-diarize` | #164 | merged |
 | WP7c handover | `feat/rust-handover` | #169 | merged |
+| WP8 shell completion: tray, floating panels, autostart, updater, keyring, permissions, deep links, single instance, dialogs, installer bundles and the unsigned release workflow (`cargo deny` and signing follow with WP9) | `feat/rust-shell` | #172 | open |
 
 WP4b is `crates/steno-speech-coreml`: `objc2-core-ml` behind one safe module,
 the four backend calls, the FluidAudio 0.17.4 heuristics ported
