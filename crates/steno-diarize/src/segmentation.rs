@@ -20,8 +20,9 @@ pub struct Window {
 /// The first sample of every window when `audio` samples are windowed
 /// every `step`, as sherpa-onnx lays them out: audio up to one window long
 /// is one zero-padded window; otherwise every window that fits, then one
-/// padded window for the tail when samples remain. A step of zero reads
-/// as one window.
+/// padded window for the tail when samples remain and it starts inside
+/// the audio (a step longer than the window can step past the end). A
+/// step of zero reads as one sample.
 #[must_use]
 pub fn window_offsets(total: usize, geometry: &SegmentationGeometry, step: usize) -> Vec<usize> {
     let length = geometry.window_samples;
@@ -31,7 +32,7 @@ pub fn window_offsets(total: usize, geometry: &SegmentationGeometry, step: usize
     }
     let full = (total - length) / step + 1;
     let mut offsets: Vec<usize> = (0..full).map(|index| index * step).collect();
-    if !(total - length).is_multiple_of(step) {
+    if !(total - length).is_multiple_of(step) && full * step < total {
         offsets.push(full * step);
     }
     offsets
@@ -211,6 +212,23 @@ mod tests {
         assert_eq!(exact.len(), 2);
         assert_eq!(exact[1].valid_frames, 589);
         assert_eq!(window_offsets(0, &GEOMETRY, 0), vec![0]);
+    }
+
+    /// A step longer than the window leaves gaps between windows, and the
+    /// tail window would start past the end of the audio: 72.5 s at a
+    /// 12.5 s step has full windows up to 62.5 s and no tail at 75 s.
+    #[test]
+    fn a_step_longer_than_the_window_puts_no_window_past_the_audio() {
+        let audio = vec![0.1f32; 1_160_012];
+        let windows: Vec<Window> = windows(&audio, &GEOMETRY, 200_000).collect();
+        let offsets: Vec<usize> = windows.iter().map(|w| w.offset).collect();
+        assert_eq!(offsets, (0..6).map(|i| i * 200_000).collect::<Vec<_>>());
+        assert_eq!(windows[5].valid_frames, 589);
+        // A tail that starts inside the audio is still padded and kept.
+        assert_eq!(
+            window_offsets(1_250_000, &GEOMETRY, 200_000).last(),
+            Some(&1_200_000)
+        );
     }
 
     #[test]
