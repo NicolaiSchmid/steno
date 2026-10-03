@@ -349,44 +349,29 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn a_wayland_session_runs_under_xwayland_unless_the_user_chose() {
-        let wayland = Some(OsStr::new("wayland-0"));
-        let x11 = Some(OsStr::new(":0"));
-        assert_eq!(
-            display_backend(wayland, None, None),
-            DisplayBackend::WaylandOnly
-        );
-        assert_eq!(display_backend(None, x11, None), DisplayBackend::GtksChoice);
-        assert_eq!(
-            display_backend(wayland, x11, None),
-            DisplayBackend::ForcedX11
-        );
-        assert_eq!(
-            display_backend(wayland, x11, Some(OsStr::new("wayland"))),
-            DisplayBackend::Users
-        );
-        assert_eq!(
-            display_backend(None, x11, Some(OsStr::new("x11"))),
-            DisplayBackend::Users
-        );
-        assert_eq!(
-            display_backend(wayland, x11, Some(OsStr::new(""))),
-            DisplayBackend::Users
-        );
-        assert_eq!(
-            display_backend(Some(OsStr::new("")), x11, None),
-            DisplayBackend::GtksChoice
-        );
-        assert_eq!(
-            display_backend(wayland, Some(OsStr::new("")), None),
-            DisplayBackend::WaylandOnly
-        );
-        for backend in [
-            DisplayBackend::GtksChoice,
-            DisplayBackend::ForcedX11,
-            DisplayBackend::WaylandOnly,
-            DisplayBackend::Users,
+        use DisplayBackend::{ForcedX11, GtksChoice, Users, WaylandOnly};
+        let wayland = Some("wayland-0");
+        let x11 = Some(":0");
+        for (wayland_display, x11_display, gdk_backend, expected) in [
+            (wayland, None, None, WaylandOnly),
+            (None, x11, None, GtksChoice),
+            (wayland, x11, None, ForcedX11),
+            (wayland, x11, Some("wayland"), Users),
+            (None, x11, Some("x11"), Users),
+            (wayland, x11, Some(""), Users),
+            (Some(""), x11, None, GtksChoice),
+            (wayland, Some(""), None, WaylandOnly),
         ] {
-            assert!(backend.describe().starts_with("display: "));
+            assert_eq!(
+                display_backend(
+                    wayland_display.map(OsStr::new),
+                    x11_display.map(OsStr::new),
+                    gdk_backend.map(OsStr::new),
+                ),
+                expected,
+                "{wayland_display:?} {x11_display:?} {gdk_backend:?}"
+            );
+            assert!(expected.describe().starts_with("display: "));
         }
     }
 
