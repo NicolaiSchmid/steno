@@ -170,19 +170,6 @@ bridge's copies of the macro and codecs. Packages after WP3 branch from `main`.
   removed, web app moved to `apps/web`, Swift rows removed from `AGENTS.md`.
 - **WP10 Windows.** WASAPI capture, DirectML provider (speech-stack G4), installer.
 
-## Progress
-
-One row per work package as it lands; the PR column is the package's PR
-against `main`.
-
-| Package | State | PR | Notes |
-|---------|-------|----|-------|
-| WP1 workspace and bridge | merged | #153 | |
-| WP2 store | merged | #155 | |
-| WP3 Tauri shell on fixtures | merged | #156 | |
-| protocols (traits and value types) | in review | feat/rust-protocols | `EchoCanceller`, `AudioDecoder`, `AudioBuffer16k`, ... |
-| WP5a audio (`steno-audio`) | in review | #166 | Rings, Speex AEC, writer, session with rebuild, synthetic backend, macOS live backend, detector, symphonia decoder; PipeWire (WP5b) and WASAPI (WP10) are stubs. Zero-allocation proof in `crates/steno-audio/tests/realtime.rs`; ERLE table identical to Swift's `aec-bench --synthetic`; ring tests under ThreadSanitizer in CI's `tsan` job; live Core Audio tests behind `--ignored` in `tests/live.rs`. Parity items below: AAC priming, sidecar group delay, sinc passband. |
-
 ## Risks
 
 - The spike decoder is validated above the joint only; the ONNX logits split is WP4's
@@ -393,7 +380,7 @@ parity item until a plan says otherwise:
   quality; the two are not bit-identical. The 3:1 FIR is flat to 7 kHz;
   the sinc, measured in `crates/steno-audio/tests/codec.rs` from 44.1 kHz,
   is within 0.3 dB to 6 kHz and -1.3 dB at 6.5 kHz, with 12 kHz aliasing
-  below -50 dB.
+  below -50 dB. Accept at cutover or lengthen the sinc; a plan decides.
 - **The sidecar lags the master decode by one group delay.** The live
   16 kHz sidecar is the same FIR run causally, so its onset sits 32 samples
   (2 ms) after the master decode's; `decode` prefers the sidecar, so a
@@ -413,6 +400,21 @@ parity item until a plan says otherwise:
   recorder.
 - **`steno dev` tooling** (`capture-spike`, `aec-bench`, `audio-devices`)
   is not ported; it arrives with the CLI in WP6.
+- `CaptureSession.finish()` should read the sink's ring overrun counts
+  before `sink.clear()`, as the Rust `finish()` does; today `clear()` zeroes
+  them first (`CaptureSession.swift`, the `clear()` before the
+  `droppedSamples` read), so `droppedFrames` never holds a ring overrun.
+- `CaptureSession` should count the silence a stop cut short in
+  `gapSeconds`, as the Rust session does; today a stop while the gap waits
+  for relay room leaves that silence in the master and reports 0.
+- `CaptureSession` should fail the stop with `writerFailed` when the master
+  is gone from disk at finalisation (the meeting folder deleted while
+  recording), as the Rust session does; an unlinked file still writes and
+  closes without an error.
+- `IOProcRunner.deliver` should take the callback's frame count from the
+  first source whose buffer carries frames, as the Rust `deliver` does;
+  today an unusable first buffer drops the whole callback, the other lanes
+  included.
 
 ### Bridge
 
@@ -503,7 +505,8 @@ PR off `main`.
 | WP4b CoreML speech backend | `feat/rust-speech-coreml` | #163 | merged |
 | WP7a LLM (`steno-llm`) | `feat/rust-llm` | #167 | merged |
 | WP7b adapters | `feat/rust-adapters` | #165 | merged |
-| WP6a host | `feat/rust-host` | #170 | open |
+| WP6a host | `feat/rust-host` | #170 | merged |
+| WP5a audio (`steno-audio`) | `feat/rust-audio` | #166 | in review |
 
 WP4b is `crates/steno-speech-coreml`: `objc2-core-ml` behind one safe module,
 the four backend calls, the FluidAudio 0.17.4 heuristics ported
@@ -513,3 +516,12 @@ implemented, parity harness `steno-coreml-parity`. Inverse text normalisation
 is not applied: Steno's Swift path (`ParakeetEngine` to
 `AsrManager.transcribe`) never calls FluidAudio's `TextNormalizer`, so the
 baseline carries none. Parity numbers: see the PR.
+
+WP5a is `crates/steno-audio`: the rings, Speex AEC over vendored SpeexDSP,
+the writer, the session with its device-change rebuild, the synthetic
+backend, the macOS live backend, the meeting detector and the symphonia
+decoder; PipeWire (WP5b) and WASAPI (WP10) are stubs. The zero-allocation
+proof is `crates/steno-audio/tests/realtime.rs`; the ERLE table is
+identical to Swift's `aec-bench --synthetic`; the ring tests run under
+ThreadSanitizer in CI's `tsan` job; the live Core Audio tests sit behind
+`--ignored` in `tests/live.rs`. Parity items: the Audio list above.
