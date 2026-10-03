@@ -230,8 +230,7 @@ impl Array {
     fn alloc(shape: &[usize], data_type: MLMultiArrayDataType) -> Result<Array, SpeechError> {
         // SAFETY: `initWithShape_dataType_error` allocates a first-major
         // contiguous buffer of `product(shape)` elements, uninitialised;
-        // `wrap` reads the layout CoreML chose and the fill below writes
-        // every byte before anything reads it.
+        // `wrap` reads the layout CoreML chose.
         let inner = unsafe {
             MLMultiArray::initWithShape_dataType_error(
                 MLMultiArray::alloc(),
@@ -240,16 +239,21 @@ impl Array {
             )
         }
         .map_err(|error| SpeechError::CoreMl(ns_error(&error)))?;
-        let mut array = Array::wrap(inner)?;
-        match array.data_type {
-            DataType::Float32 => array.as_f32_mut()?.fill(0.0),
-            DataType::Int32 => array.as_i32_mut()?.fill(0),
+        let array = Array::wrap(inner)?;
+        let element_size = match array.data_type {
+            DataType::Float32 => size_of::<f32>(),
+            DataType::Int32 => size_of::<i32>(),
             DataType::Other => {
                 return Err(SpeechError::CoreMl(
                     "allocated an unsupported data type".to_owned(),
                 ));
             }
-        }
+        };
+        array.require(array.data_type)?;
+        // SAFETY: the buffer is `product(shape) * size_of::<T>()` bytes
+        // owned by the retained array; `write_bytes` initialises every
+        // byte before a slice is formed.
+        unsafe { std::ptr::write_bytes(array.base(), 0, array.len() * element_size) };
         Ok(array)
     }
 
