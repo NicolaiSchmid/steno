@@ -397,12 +397,38 @@ mod tests {
         candidates.first().map(|&(_, address)| address)
     }
 
+    /// Whether a connection to `address` reaches an `accept` in this
+    /// process. An application firewall (macOS) completes the handshake
+    /// and then holds the connection back from an unsigned binary.
+    async fn reaches_this_process(address: Ipv4Addr) -> bool {
+        let Ok(listener) = TcpListener::bind((Ipv4Addr::UNSPECIFIED, 0)).await else {
+            return false;
+        };
+        let Ok(local) = listener.local_addr() else {
+            return false;
+        };
+        let both = async {
+            let (connected, accepted) = tokio::join!(
+                TcpStream::connect((address, local.port())),
+                listener.accept()
+            );
+            connected.is_ok() && accepted.is_ok()
+        };
+        tokio::time::timeout(Duration::from_secs(3), both)
+            .await
+            .unwrap_or(false)
+    }
+
     #[tokio::test]
     async fn a_connection_outside_the_served_networks_is_closed_before_any_tls_byte() {
         let Some(address) = host_address() else {
             eprintln!("skipped: this host has no non-loopback IPv4 address");
             return;
         };
+        if !reaches_this_process(address).await {
+            eprintln!("skipped: {address} delivers no inbound connection here (a firewall)");
+            return;
+        }
         let directory = tempfile::tempdir().unwrap();
         let configuration = HandoverConfiguration {
             inbox_directory: directory.path().join("inbox"),
@@ -430,13 +456,7 @@ mod tests {
                 .await
                 .unwrap();
 
-        let connect = TcpStream::connect((address, server.port));
-        let Ok(Ok(mut refused)) = tokio::time::timeout(Duration::from_secs(3), connect).await
-        else {
-            eprintln!("skipped: {address} takes no inbound connection here (a firewall)");
-            server.stop().await;
-            return;
-        };
+        let mut refused = TcpStream::connect((address, server.port)).await.unwrap();
         let mut received = Vec::new();
         let read = tokio::time::timeout(Duration::from_secs(5), refused.read_to_end(&mut received))
             .await
