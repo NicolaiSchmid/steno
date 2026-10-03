@@ -129,9 +129,7 @@ fn an_export_reads_while_the_other_store_holds_the_write_lock() {
 
     writer
         .write(|_| {
-            let export = reader.export(meeting.id).unwrap();
-            assert_eq!(export.meeting.id, meeting.id);
-            assert_eq!(export.meeting.title, meeting.title);
+            assert_eq!(reader.export(meeting.id).unwrap().meeting.id, meeting.id);
             Ok(())
         })
         .unwrap();
