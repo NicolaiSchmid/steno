@@ -407,16 +407,46 @@ async fn a_failing_stage_marks_the_meeting_failed_with_its_name() {
     pipeline.enqueue(&meeting, &asset).unwrap();
     pipeline.wait_until_idle().await;
     let stored = world.store.meeting(meeting.id).unwrap().unwrap();
-    assert!(
-        matches!(&stored.state, MeetingState::Failed { reason } if reason.starts_with("diarize: ")),
-        "{:?}",
-        stored.state
+    assert_eq!(
+        stored.state,
+        MeetingState::Failed {
+            reason: "diarize: no model".to_owned()
+        },
+        "the stage is named once"
     );
     assert!(
         world.store.segments(meeting.id).unwrap().is_empty(),
         "nothing after the failed stage was persisted"
     );
     assert_eq!(pipeline.in_flight(), Vec::<Uuid>::new());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_failing_summary_names_its_stage_once() {
+    let world = world(false, None, AudioRetention::KeepForever);
+    let dependencies = world.pipeline.dependencies().clone().with_llm(
+        Some(Arc::new(PassthroughCleaner::default())),
+        Some(Arc::new(FakeSummarizer {
+            failure: Some("HTTP 401".to_owned()),
+            ..FakeSummarizer::default()
+        })),
+    );
+    let pipeline = ProcessingPipeline::new(dependencies);
+    let meeting = call_meeting(world.now);
+    let asset = call_asset(&world.audio, meeting.id, AudioRetention::KeepForever);
+    pipeline.enqueue(&meeting, &asset).unwrap();
+    pipeline.wait_until_idle().await;
+    assert_eq!(
+        world.store.meeting(meeting.id).unwrap().unwrap().state,
+        MeetingState::Failed {
+            reason: "summarize: HTTP 401".to_owned()
+        }
+    );
+    let error = pipeline
+        .rerun_summary(meeting.id, "default")
+        .await
+        .unwrap_err();
+    assert_eq!(error.to_string(), "summarize: HTTP 401");
 }
 
 #[tokio::test(flavor = "multi_thread")]

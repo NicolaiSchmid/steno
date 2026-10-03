@@ -10,6 +10,7 @@
 //! durations feed the `stageRate` table when the meeting was alone in
 //! flight for the whole stage, so overlapping runs never pollute the rates.
 
+use std::any::Any;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt;
 use std::future::Future;
@@ -25,7 +26,7 @@ use steno_core::{
     PipelineStage, RawSegment, RecordingLayout, Settings, Speaker, SpeakerAssignment,
     SpeakerMemory, SpeechEngine, Store, StoreError, SummaryInput, SummaryTemplate, TimeRange,
     TitleOrigin, TranscriptCleaner, TranscriptSegment, derived_uuid, paths::file_url,
-    protocols::DEFAULT_MATCH_MARGIN,
+    protocols::{BoxError, DEFAULT_MATCH_MARGIN},
 };
 use tokio::sync::Mutex as AsyncMutex;
 use tokio::task::JoinHandle;
@@ -54,10 +55,20 @@ impl PipelineFailure {
         }
     }
 
-    /// A failure for `stage` describing `error`.
+    /// `error` itself when it already is a `PipelineFailure`, bare or
+    /// boxed as a boundary error (the stage it carries wins), else a
+    /// failure for `stage` describing `error`. Swift: `PipelineFailure.wrapping`.
     #[must_use]
-    pub fn wrapping(error: &dyn fmt::Display, stage: PipelineStage) -> Self {
-        PipelineFailure::new(stage, error.to_string())
+    pub fn wrapping<E: fmt::Display + 'static>(error: &E, stage: PipelineStage) -> Self {
+        let any: &dyn Any = error;
+        let carried = any.downcast_ref::<PipelineFailure>().or_else(|| {
+            any.downcast_ref::<BoxError>()
+                .and_then(|boxed| boxed.downcast_ref::<PipelineFailure>())
+        });
+        match carried {
+            Some(failure) => failure.clone(),
+            None => PipelineFailure::new(stage, error.to_string()),
+        }
     }
 }
 
@@ -291,7 +302,7 @@ pub fn diarized_lane(source: MeetingSource, lanes: &[AudioLane]) -> Option<Audio
     ordered_lanes(lanes).last().copied()
 }
 
-fn attributing<T, E: fmt::Display>(
+fn attributing<T, E: fmt::Display + 'static>(
     stage: PipelineStage,
     result: std::result::Result<T, E>,
 ) -> Result<T> {
@@ -300,7 +311,7 @@ fn attributing<T, E: fmt::Display>(
 
 /// The row an operation needs, or a failure for `stage` that says what
 /// is `missing`.
-fn required<T, E: fmt::Display>(
+fn required<T, E: fmt::Display + 'static>(
     stage: PipelineStage,
     result: std::result::Result<Option<T>, E>,
     missing: impl FnOnce() -> String,
@@ -732,7 +743,7 @@ impl ProcessingPipeline {
     /// is recorded as a rate sample once the stage is complete when the
     /// meeting was alone in flight for the whole stage; a body that failed
     /// records nothing.
-    async fn run<T, E: fmt::Display>(
+    async fn run<T, E: fmt::Display + 'static>(
         &self,
         stage: PipelineStage,
         lane: usize,
