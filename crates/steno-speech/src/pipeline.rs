@@ -371,7 +371,7 @@ mod fake {
     /// Audio of `seconds` seconds encoding `pieces` one per frame from
     /// `start_frame`, silence elsewhere.
     pub fn audio(seconds: f32, start_frame: usize, pieces: &[u32]) -> Vec<f32> {
-        let mut out = vec![0.0f32; (seconds * SAMPLE_RATE as f32) as usize];
+        let mut out = vec![0.0f32; sample_count(seconds)];
         for (i, &piece) in pieces.iter().enumerate() {
             let frame = start_frame + i;
             let range = frame * FRAME_SAMPLES..((frame + 1) * FRAME_SAMPLES).min(out.len());

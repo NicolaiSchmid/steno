@@ -119,10 +119,10 @@ pub fn regions_from_probabilities(
 /// How the model carries its recurrent state.
 enum StateLayout {
     /// v4: `h` and `c`, `[2, 1, 64]` each.
-    Split { h: String, c: String, len: usize },
+    Separate { h: String, c: String, len: usize },
     /// v5: one `state` of `[2, 1, 128]`, and 64 samples of context before
     /// each window.
-    Joint { name: String, len: usize },
+    Combined { name: String, len: usize },
 }
 
 /// Silero VAD, v4 or v5, over a session of its own.
@@ -174,8 +174,8 @@ impl SileroVad {
             )));
         };
         let (state, context) = match (h, c, joint) {
-            (Some((h, len)), Some((c, _)), None) => (StateLayout::Split { h, c, len }, 0),
-            (None, None, Some((name, len))) => (StateLayout::Joint { name, len }, 64),
+            (Some((h, len)), Some((c, _)), None) => (StateLayout::Separate { h, c, len }, 0),
+            (None, None, Some((name, len))) => (StateLayout::Combined { name, len }, 64),
             _ => {
                 return Err(SpeechError::Shape(format!(
                     "{}: unknown Silero state layout",
@@ -197,11 +197,11 @@ impl SileroVad {
     /// zero-padded.
     pub fn probabilities(&mut self, samples: &[f32]) -> Result<Vec<f32>, SpeechError> {
         let (mut h, mut c) = match &self.state {
-            StateLayout::Split { len, .. } => (vec![0.0f32; *len], vec![0.0f32; *len]),
-            StateLayout::Joint { len, .. } => (vec![0.0f32; *len], Vec::new()),
+            StateLayout::Separate { len, .. } => (vec![0.0f32; *len], vec![0.0f32; *len]),
+            StateLayout::Combined { len, .. } => (vec![0.0f32; *len], Vec::new()),
         };
-        let split = matches!(self.state, StateLayout::Split { .. });
-        let wanted = if split { 3 } else { 2 };
+        let separate = matches!(self.state, StateLayout::Separate { .. });
+        let wanted = if separate { 3 } else { 2 };
         let mut context = vec![0.0f32; self.context];
         let mut frame = vec![0.0f32; self.context + WINDOW];
         let mut probabilities = Vec::with_capacity(samples.len() / WINDOW + 1);
@@ -224,7 +224,7 @@ impl SileroVad {
                 ));
             }
             match &self.state {
-                StateLayout::Split {
+                StateLayout::Separate {
                     h: h_name,
                     c: c_name,
                     len,
@@ -238,7 +238,7 @@ impl SileroVad {
                         Tensor::from_array(([2, 1, len / 2], c.clone()))?.into(),
                     ));
                 }
-                StateLayout::Joint { name, len } => {
+                StateLayout::Combined { name, len } => {
                     inputs.push((
                         name.as_str(),
                         Tensor::from_array(([2, 1, len / 2], h.clone()))?.into(),
@@ -256,7 +256,7 @@ impl SileroVad {
             probabilities.push(probability.first().copied().unwrap_or(0.0));
             let (_, next_h) = outputs[1].try_extract_tensor::<f32>()?;
             copy_state(&mut h, next_h)?;
-            if split {
+            if separate {
                 let (_, next_c) = outputs[2].try_extract_tensor::<f32>()?;
                 copy_state(&mut c, next_c)?;
             }

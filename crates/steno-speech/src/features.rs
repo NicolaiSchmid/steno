@@ -246,9 +246,10 @@ fn mel_filters() -> Vec<f32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::backend::sample_count;
 
     fn tone(hz: f32, seconds: f32) -> Vec<f32> {
-        (0..(seconds * SAMPLE_RATE as f32) as usize)
+        (0..sample_count(seconds))
             .map(|n| (2.0 * std::f32::consts::PI * hz * n as f32 / SAMPLE_RATE as f32).sin())
             .collect()
     }
