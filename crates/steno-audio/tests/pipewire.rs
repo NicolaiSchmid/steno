@@ -55,6 +55,9 @@ const MIC_TONE: f64 = 1_000.0;
 /// The capture stream's `node.name`.
 const CAPTURE_NODE: &str = "steno-capture";
 const COALESCE_DELAY: Duration = LiveCaptureBackend::COALESCE_DELAY;
+/// How long a test listens for a report that must not come: three
+/// coalescing delays, fixed so that a shorter delay cannot shorten it.
+const QUIET: Duration = Duration::from_millis(1_500);
 
 /// Runs `work` on a thread and waits at most `limit` for its result.
 fn within<T: Send + 'static>(
@@ -447,20 +450,23 @@ fn moving_the_default_output_is_reported_once() {
     // give it time, and say what the metadata held if it never did.
     let reason = reasons
         .recv_timeout(COALESCE_DELAY + Duration::from_secs(8))
-        .unwrap_or_else(|_| {
-            let metadata = Command::new("pw-metadata")
-                .args(["-n", "default", "0"])
-                .output()
-                .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
-                .unwrap_or_default();
-            panic!("no device-change report; the default metadata holds:\n{metadata}")
-        });
+        .unwrap_or_else(|_| panic!("no device-change report; {}", default_metadata()));
     assert_eq!(reason, DeviceChangeReason::DefaultOutputChanged);
     assert!(
-        reasons.recv_timeout(COALESCE_DELAY * 2).is_err(),
+        reasons.recv_timeout(QUIET).is_err(),
         "one report per change"
     );
     stop(&backend);
+}
+
+/// What the `default` metadata holds, for a failure message.
+fn default_metadata() -> String {
+    let metadata = Command::new("pw-metadata")
+        .args(["-n", "default", "0"])
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+        .unwrap_or_default();
+    format!("the default metadata holds:\n{metadata}")
 }
 
 /// The default sink as WirePlumber resolved it, from `pw-metadata`.
@@ -490,15 +496,25 @@ fn a_burst_of_switches_is_reported_once_and_the_rebuild_restarts() {
         } else {
             (SINK, SECOND_SINK)
         };
+        assert!(
+            eventually(|| default_sink().as_deref() == Some(from)),
+            "round {round}: the default is not {from}; {}",
+            default_metadata()
+        );
         DefaultSink::set(to);
         DefaultSink::set(from);
         DefaultSink::set(to);
         let reason = reasons
             .recv_timeout(COALESCE_DELAY + Duration::from_secs(8))
-            .unwrap_or_else(|_| panic!("round {round}: no device-change report"));
+            .unwrap_or_else(|_| {
+                panic!(
+                    "round {round}: no device-change report; {}",
+                    default_metadata()
+                )
+            });
         assert_eq!(reason, DeviceChangeReason::DefaultOutputChanged);
         assert!(
-            reasons.recv_timeout(COALESCE_DELAY * 2).is_err(),
+            reasons.recv_timeout(QUIET).is_err(),
             "round {round}: one report per burst"
         );
         // The session's rebuild: stop, open the latch, start again.
@@ -511,7 +527,7 @@ fn a_burst_of_switches_is_reported_once_and_the_rebuild_restarts() {
         start(&backend, &lanes, None, &sink)
             .unwrap_or_else(|e| panic!("round {round}: the rebuild's start failed: {e}"));
         assert!(
-            reasons.recv_timeout(COALESCE_DELAY * 2).is_err(),
+            reasons.recv_timeout(QUIET).is_err(),
             "round {round}: the restarted capture is on the new default"
         );
     }
@@ -526,19 +542,24 @@ fn changes_that_settle_back_or_touch_other_nodes_are_not_reported() {
     let backend = Arc::new(LiveCaptureBackend::new());
     let _restore = DefaultSink;
     start(&backend, &lanes, None, &sink).expect("start");
-    // There and back within the coalescing delay.
+    // There and back within the coalescing delay: back as soon as
+    // WirePlumber moved it (about 15 ms).
     DefaultSink::set(SECOND_SINK);
-    std::thread::sleep(Duration::from_millis(150));
+    assert!(
+        eventually(|| default_sink().as_deref() == Some(SECOND_SINK)),
+        "WirePlumber did not move the default; {}",
+        default_metadata()
+    );
     DefaultSink::set(SINK);
     assert!(
-        reasons.recv_timeout(COALESCE_DELAY * 3).is_err(),
+        reasons.recv_timeout(QUIET).is_err(),
         "a default that came back is no change"
     );
     // A device Steno does not record comes and goes.
     let other = TemporaryMic::create("steno-test-unrelated");
     other.destroy();
     assert!(
-        reasons.recv_timeout(COALESCE_DELAY * 3).is_err(),
+        reasons.recv_timeout(QUIET).is_err(),
         "an unrelated node is no change"
     );
     stop(&backend);
