@@ -18,7 +18,7 @@ serde_json.workspace = true
 steno-adapters = { path = "../steno-adapters" }
 steno-audio = { path = "../steno-audio" }
 steno-bridge = { path = "../steno-bridge" }
-steno-core = { path = "../steno-core", features = ["testing"] }
+steno-core = { path = "../steno-core" }
 steno-diarize = { path = "../steno-diarize", default-features = false, features = ["onnx"] }
 steno-handover = { path = "../steno-handover" }
 steno-host = { path = "../steno-host" }
@@ -34,6 +34,7 @@ uuid.workspace = true
 steno-speech-coreml = { path = "../steno-speech-coreml" }
 
 [dev-dependencies]
+steno-core = { path = "../steno-core", features = ["testing"] }
 steno-llm = { path = "../steno-llm", features = ["testing"] }
 tempfile.workspace = true
 

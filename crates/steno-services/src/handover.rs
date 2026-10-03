@@ -42,13 +42,15 @@ pub fn service(
     )
 }
 
-pub struct RealHandover {
+/// The host's `Handover` over the listener; blocks on the runtime for the
+/// few async calls (paired devices, start, stop, revoke).
+pub struct ListenerHandover {
     pub service: Arc<HandoverService>,
     pub mac_id: Uuid,
     pub runtime: tokio::runtime::Handle,
 }
 
-impl Handover for RealHandover {
+impl Handover for ListenerHandover {
     fn state(&self) -> ListenerState {
         match self.service.state() {
             steno_handover::ListenerState::Stopped => ListenerState::Stopped,

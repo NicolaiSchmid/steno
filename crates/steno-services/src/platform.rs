@@ -1,6 +1,6 @@
-//! The small services: the clock, the folder usage, the audio device list,
-//! the preferences file, and the stubs `WP8` replaces (clip player, QR
-//! encoder, permissions, login item, updater).
+//! The platform services behind the host's small traits: the wall clock,
+//! the folder usage walk, the input device list, and the first-launch
+//! flags in `preferences.json`.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -47,9 +47,9 @@ impl FolderUsage for DiskFolderUsage {
     }
 }
 
-/// The input devices. Core Audio enumerates them on the Mac (`WP5`'s live
-/// backend); elsewhere the list is empty until the `PipeWire` and `WASAPI`
-/// backends land, and the default input is used.
+/// The input devices. Core Audio enumerates them on the Mac through the
+/// audio crate's live backend; elsewhere the list is empty until the
+/// `PipeWire` and WASAPI backends land, and the default input is used.
 #[derive(Debug, Default)]
 pub struct PlatformAudioDevices;
 

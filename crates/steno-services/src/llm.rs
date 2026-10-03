@@ -100,12 +100,12 @@ pub async fn probe_line(
 
 /// The host's `LlmService` over the real clients; blocks on the runtime
 /// handle the app runs on (the host's traits are synchronous).
-pub struct RealLlmService {
+pub struct ClientLlmService {
     pub codex: Arc<CodexCredentialStore>,
     pub runtime: tokio::runtime::Handle,
 }
 
-impl LlmService for RealLlmService {
+impl LlmService for ClientLlmService {
     fn probe(&self, settings: &Settings, api_key: Option<&str>) -> Result<String, String> {
         block_on(&self.runtime, probe_line(settings, api_key, &self.codex))
     }

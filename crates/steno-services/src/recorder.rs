@@ -1,8 +1,8 @@
 //! The host's `Recorder` over the capture session and the Mac recording
 //! intake. Swift: `apps/macos/Steno/Recording/RecordingController.swift`.
 //! The calendar lookup, the auto-stop after a call ends and the detection
-//! prompt are `WP5` and `WP8` items; the status carries what the capture
-//! session reports.
+//! prompt wait for the shell's platform work (plan: WP8); the status
+//! carries what the capture session reports.
 
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
@@ -16,7 +16,7 @@ use steno_pipeline::{LocalRecordingIntake, RecordingResult};
 use uuid::Uuid;
 
 use crate::block_on;
-use crate::pipeline_service::PipelineHandle;
+use crate::pipeline::CurrentPipeline;
 
 /// Builds a capture session for a configuration; the product passes
 /// `CaptureSession::new`, tests a synthetic backend.
@@ -49,9 +49,9 @@ fn levels(levels: &AudioLevels) -> LaneLevels {
     }
 }
 
-pub struct RealRecorder {
+pub struct CaptureRecorder {
     store: Arc<Store>,
-    pipeline: Arc<PipelineHandle>,
+    pipeline: Arc<CurrentPipeline>,
     make_session: MakeCaptureSession,
     permissions: Arc<dyn Permissions>,
     zone: FixedOffset,
@@ -61,17 +61,17 @@ pub struct RealRecorder {
     changed: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
 }
 
-impl RealRecorder {
+impl CaptureRecorder {
     #[must_use]
     pub fn new(
         store: Arc<Store>,
-        pipeline: Arc<PipelineHandle>,
+        pipeline: Arc<CurrentPipeline>,
         make_session: MakeCaptureSession,
         permissions: Arc<dyn Permissions>,
         zone: FixedOffset,
         runtime: tokio::runtime::Handle,
     ) -> Self {
-        RealRecorder {
+        CaptureRecorder {
             store,
             pipeline,
             make_session,
@@ -259,7 +259,7 @@ impl RealRecorder {
     }
 }
 
-impl Recorder for RealRecorder {
+impl Recorder for CaptureRecorder {
     fn status(&self) -> RecorderStatus {
         let inner = self.inner();
         let mut status = inner.status.clone();
