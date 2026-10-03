@@ -323,9 +323,9 @@ pub fn collapse_seam_word_duplicates(tokens: &[Token], vocab: &Vocab) -> Vec<Tok
                 .iter()
                 .map(|token| strip_word_boundary(vocab.piece(token.id)))
                 .collect();
-            // Swift's `strippable` is punctuation plus `CharacterSet
-            // .whitespaces` (Zs and tab), not every Unicode white space; no
-            // v3 piece is affected either way.
+            // Swift's `strippable` is punctuation plus
+            // `CharacterSet.whitespaces` (Zs and tab), not every Unicode
+            // white space; no v3 piece is affected either way.
             Word {
                 core: text
                     .trim_matches(|c: char| is_punctuation(c) || is_swift_whitespace(c))
