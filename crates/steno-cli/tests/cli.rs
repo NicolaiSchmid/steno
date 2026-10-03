@@ -38,7 +38,7 @@ fn export(path: &Path) -> serde_json::Value {
 // The Swift test is one flow too: each step reads the one before.
 #[allow(clippy::too_many_lines)]
 #[test]
-fn migrate_generate_process_export_and_deliver() {
+fn the_swift_cli_flow_runs_end_to_end_on_a_fresh_home() {
     let home = tempfile::tempdir().unwrap();
     let home = home.path();
     let db = home.join("db/steno.sqlite");
@@ -287,6 +287,40 @@ fn migrate_generate_process_export_and_deliver() {
     assert_eq!(steno(&["deliver", "nope", "--db", db], home).status, 1);
 }
 
+#[test]
+fn a_run_whose_meeting_ends_failed_exits_two_and_says_why() {
+    let home = tempfile::tempdir().unwrap();
+    let home = home.path();
+    let db = home.join("steno.sqlite");
+    // The mic lane is a WAV the command validates up front; the system lane
+    // is copied as is and fails in the pipeline's decode stage.
+    let not_audio = home.join("system.wav");
+    std::fs::write(&not_audio, b"not a wav").unwrap();
+    let process = steno(
+        &[
+            "process",
+            fixtures_root().join("audio/sweep-3s.wav").to_str().unwrap(),
+            "--source",
+            "mac-call",
+            "--system-lane",
+            not_audio.to_str().unwrap(),
+            "--db",
+            db.to_str().unwrap(),
+            "--audio-folder",
+            home.join("audio").to_str().unwrap(),
+        ],
+        home,
+    );
+    assert_eq!(process.status, 2, "{}", process.stderr);
+    assert!(
+        process.stderr.contains("processing failed: decode: "),
+        "{}",
+        process.stderr
+    );
+    assert_eq!(process.stdout, "", "no meeting id on a failed run");
+}
+
+// Every usage error of the Swift test in one place.
 // Every usage error of the Swift test in one place.
 #[allow(clippy::too_many_lines)]
 #[test]
