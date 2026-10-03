@@ -233,6 +233,68 @@ What the bridge crate (WP1) asks of the Swift side before WP6 fills the list:
   every `TaskPriority` case; `contract_ts_nested_enums_match` in
   `crates/steno-bridge/tests/fixtures.rs` pins it by hand today.
 
+### LLM
+
+- `OutputLanguage.promptName` falls back to Foundation's `en_US` locale names for a
+  tag outside the 25-entry table; Rust has no locale data and writes the tag itself.
+  Both agree on every tag the fixtures and goldens use; a meeting tagged with a rarer
+  language gets "sw" instead of "Swahili" in the prompt on the Rust side until the
+  table grows.
+
+Rust fixes these Swift behaviours; each is ported to Swift or accepted before cutover:
+
+- `OpenAICompatibleClient.complete` and `CodexResponsesClient.complete` should step
+  the mode down from the mode the rejected request went out under, as the Rust
+  clients do; today they step from the mode the client holds when the 400 arrives,
+  so two concurrent rejections go from `.jsonSchema` straight to `.promptOnly` and
+  announce two downgrades.
+- `OpenAICompatibleClient.complete` should resend a request that still carried a
+  parameter a concurrent request already got rejected, as the Rust client does;
+  today the second rejection for `max_tokens` or `temperature` finds the parameter
+  in `rejectedParameters` and fails the completion with HTTP 400.
+- `CodexCredentialStore.refresh` should remember a refresh token the endpoint
+  refused for good and give every later caller that refusal while the file still
+  holds the token, as the Rust store does; today only the callers waiting on the
+  same refresh get it, and the next caller posts the dead token again.
+- `CodexCredentialStore.refreshOnce` should keep the file as it is when the
+  re-read shows `NotSignedIn`, `ApiKeyLogin` or a refresh token other than the one
+  posted, as the Rust store does; today it writes the new tokens over it and undoes
+  a sign-out, a switch to an API key or a new login made during the refresh.
+- `CodexCredentialStore.refreshRereadingOnReuse` should use the re-read file's
+  credentials when their access token is already fit to send, as the Rust store
+  does; today it refreshes them again and spends the refresh token the CLI just
+  rotated in.
+- `CodexResponsesClient.complete` should count the one refresh a completion gets
+  after a 401 only once a refresh went through, as the Rust client does; today a
+  refresh that failed (the token endpoint hiccuped) uses it up, and the retry's
+  401 ends the completion.
+- `OpenAICompatibleClient.classify`, `CodexResponsesClient.classify`, the
+  undecodable-body errors of both clients and `CodexCredentialStore.refreshOnce`
+  should redact the whole of a body that is not the model's answer and only then
+  cut it on a character boundary, to 4 096, 500 or 300 characters, as the Rust
+  clients do (the answer text is not redacted, in either); today `bodyText` cuts
+  it to 4 096 bytes, the fallbacks to 500 characters and the refresh to 300 bytes
+  before anything is redacted, so a secret straddling a cut leaves its prefix in
+  the error.
+- `CodexCredentialStore.refreshOnce` should redact the account id too, and decide
+  permanent and reused on the code as sent, lowercased, redacting a copy for the
+  detail before and after lowercasing it, as the Rust store does; today it
+  redacts the two tokens only, and `RefreshError.code` lowercases the code before
+  it is redacted, so an echoed account id stays in the detail and a token echoed
+  in the code survives case-folded.
+- `LLMTransport.redact` should replace each secret of eight bytes or more and its
+  JSON-escaped form (as `serde_json` writes it inside a string, with `/` as is and
+  as `\/`), longest first, and skip a secret shorter than eight bytes, as the
+  Rust `redact` does; today a placeholder key such as `x` or `ollama` garbles
+  every error message it occurs in, a secret that contains another is left in
+  pieces, and a key with a quote, a backslash or a slash survives in a body that
+  escapes it.
+- `CodexCredentialStore.write` should print a failed rename's error number after
+  its `strerror` text (`Is a directory (os error 21)`) and name the temporary file
+  it could not remove, as the Rust store does; today it prints the `strerror`
+  text only and ignores a failed remove, so the two details differ and a leftover
+  `.auth.json.steno-<uuid>`, which holds the only live tokens, goes unmentioned.
+
 ## Progress
 
 One row per package. WP1 to WP3 were a chain; every package after them is one
@@ -246,7 +308,8 @@ PR off `main`.
 | Core protocols and fakes | `feat/rust-protocols` | #162 | merged |
 | Bridge on core | `refactor/rust-bridge-on-core` | #161 | merged |
 | WP4b CoreML speech backend | `feat/rust-speech-coreml` | #163 | merged |
-| WP7b adapters | `feat/rust-adapters` | #165 | open |
+| WP7a LLM (`steno-llm`) | `feat/rust-llm` | #167 | open |
+| WP7b adapters | `feat/rust-adapters` | #165 | merged |
 
 WP4b is `crates/steno-speech-coreml`: `objc2-core-ml` behind one safe module,
 the four backend calls, the FluidAudio 0.17.4 heuristics ported

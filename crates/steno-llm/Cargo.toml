@@ -1,0 +1,43 @@
+[package]
+name = "steno-llm"
+description = "Steno's language model clients and the cleanup and summary passes"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[features]
+# The loopback stub server, the canned scripts and the manual clock the
+# tests drive; the CLI's dev tools may use them too.
+testing = ["tokio/net", "tokio/io-util"]
+
+[dependencies]
+base64.workspace = true
+chrono.workspace = true
+futures-util.workspace = true
+reqwest.workspace = true
+rustls.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+serde_path_to_error.workspace = true
+steno-core = { path = "../steno-core" }
+thiserror.workspace = true
+# `sync` and `time` for the clock and the shared refresh; the stub server's
+# sockets come with the `testing` feature. Additive on top of the workspace
+# line.
+tokio = { workspace = true, features = ["sync", "time"] }
+url.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+chrono-tz.workspace = true
+# The in-memory secret store the privacy tests build a client from.
+steno-core = { path = "../steno-core", features = ["testing"] }
+steno-llm = { path = ".", features = ["testing"] }
+tempfile.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "net", "io-util"] }
+
+[lints]
+workspace = true
