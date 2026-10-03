@@ -1,9 +1,11 @@
 //! The COM and WASAPI calls behind the Windows capture backend and the
-//! audio-session enumeration, and on Windows the one module in the crate
-//! where `unsafe` lives (besides the shared ring and `deliver`). Written
-//! against Microsoft's documentation and compile-verified on the
-//! `windows-latest` CI runner only; no Windows machine with audio devices
-//! has run it (see the module doc of `capture::live::wasapi`).
+//! audio-session enumeration: the Windows backend's only `unsafe` (the
+//! crate-wide list is in the crate doc). Written against Microsoft's
+//! documentation and compile-tested on the `windows-latest` CI runner
+//! only; no Windows machine with audio devices has run it (see the module
+//! doc of `capture::live::wasapi`). WP10a of
+//! `.plans/2026-10-02-rust-core-and-tauri-shell.md`; the macOS counterpart
+//! is `capture::live::hal`. No Swift counterpart.
 //!
 //! # Invariants every `unsafe` block here relies on
 //!
@@ -32,7 +34,10 @@
 //!   were given, which sends on a channel or sets a flag; they never call
 //!   back into WASAPI (the documentation forbids it from inside
 //!   `IMMNotificationClient`) and never block. Each registration is undone
-//!   in `Drop` before the object it registered can go away.
+//!   in `Drop`. Microsoft does not say whether a callback can still be
+//!   running when the unregister call returns; it does not matter for
+//!   memory safety, because the object is reference counted and its
+//!   closure owns everything it touches (an `Arc` or a `Sender`).
 
 // `#[implement]` expands to `&T as *const T` casts.
 #![allow(clippy::ref_as_ptr)]
@@ -342,7 +347,8 @@ pub struct EndpointRegistration {
 impl Drop for EndpointRegistration {
     fn drop(&mut self) {
         // SAFETY: undoes the registration made with this same client on
-        // this same enumerator; after it returns no callback is in flight.
+        // this same enumerator. A callback still in flight only touches the
+        // client, which it holds a reference to (module doc).
         let _ = unsafe {
             self.enumerator
                 .UnregisterEndpointNotificationCallback(&self.client)
@@ -483,8 +489,10 @@ impl Drop for Event {
 /// Which loopback a system stream ended up on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LoopbackKind {
-    /// Process loopback excluding Steno's own process tree (Windows 10
-    /// 2004, build 19041, and later).
+    /// Process loopback excluding Steno's own process tree. Microsoft
+    /// documents it from build 20348; it is reported to work from Windows 10
+    /// 2004 (build 19041). Unverified here; the endpoint fallback covers
+    /// either.
     Process,
     /// Loopback of the default render endpoint, Steno's own output
     /// included.

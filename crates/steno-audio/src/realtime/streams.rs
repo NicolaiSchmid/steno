@@ -1,5 +1,5 @@
 //! Two independent capture streams into one [`LaneFrameSink`]: the bodies
-//! of the WASAPI capture threads (WP10), kept apart from COM so they run on
+//! of the WASAPI capture threads (WP10a), kept apart from COM so they run on
 //! every OS under the counting allocator (`tests/realtime.rs`). No Swift
 //! equivalent: Core Audio hands the microphone and the tap to one IOProc
 //! through the aggregate device, WASAPI delivers them as two streams on two

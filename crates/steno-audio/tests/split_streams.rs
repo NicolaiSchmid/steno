@@ -1,4 +1,4 @@
-//! The two-stream capture path the WASAPI backend runs (WP10), without
+//! The two-stream capture path the WASAPI backend runs (WP10a), without
 //! WASAPI: the stream plan, the latency arithmetic, the follower's
 //! jitter-buffer policy and the master's routing into the sink, over
 //! synthetic packets. Runs on every OS; on the Windows runner these are the

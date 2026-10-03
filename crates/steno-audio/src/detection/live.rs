@@ -1,14 +1,16 @@
-//! The HAL-backed [process-activity source](super::ProcessAudioActivitySource): process objects with
-//! their PID, bundle id and `IsRunningInput` flag, and listeners on
+//! The live [process-activity source](super::ProcessAudioActivitySource).
+//! On macOS the HAL's process objects with their PID, bundle id and
+//! `IsRunningInput` flag, and listeners on
 //! `kAudioDevicePropertyDeviceIsRunningSomewhere` for every input device.
 //! Swift: `LiveProcessAudioActivity` in
 //! `Sources/StenoAudio/Detection/ProcessAudioActivity.swift`.
 //!
 //! On Windows the audio sessions of every active endpoint, mapped by
 //! [`processes_from_sessions`](super::processes_from_sessions), with
-//! endpoint and session notifications (WP10, compile-verified only; see
-//! `capture::live::wasapi`). On Linux the type exists so callers compile
-//! and reports no processes until the PipeWire backend fills it in.
+//! endpoint and session notifications (WP10a, compile-tested only; see
+//! `capture::live::wasapi`). No Swift counterpart. On Linux the type exists
+//! so callers compile and reports no processes until the PipeWire backend
+//! fills it in.
 
 #[cfg(not(any(target_os = "macos", windows)))]
 use std::sync::mpsc::Receiver;
@@ -21,7 +23,7 @@ pub use macos::LiveProcessAudioActivity;
 #[cfg(windows)]
 pub use wasapi::LiveProcessAudioActivity;
 
-/// The HAL-backed source; on Linux a stub that lists no processes.
+/// The Linux stub: lists no processes until PipeWire fills it in.
 #[cfg(not(any(target_os = "macos", windows)))]
 #[derive(Debug, Default)]
 pub struct LiveProcessAudioActivity;

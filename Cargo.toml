@@ -60,7 +60,7 @@ zmij = "1"
 # The audio crate: decoding of recordings and phone files in pure Rust.
 symphonia = { version = "0.5", default-features = false, features = ["aac", "caf", "isomp4", "mp3", "pcm", "wav"] }
 # The WASAPI capture backend and the audio-session enumeration behind meeting
-# detection on Windows (WP10); `windows-core` for its `#[implement]` macro.
+# detection on Windows (WP10a); `windows-core` for its `#[implement]` macro.
 # Already in the tree through Tauri, so no new crate is fetched.
 windows = { version = "0.62", features = [
     "Win32_Devices_FunctionDiscovery",
