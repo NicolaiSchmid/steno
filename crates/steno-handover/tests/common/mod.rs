@@ -598,6 +598,16 @@ impl Phone {
 
     pub async fn pair_named(test: &TestService, device_name: &str) -> Phone {
         let payload = test.service.begin_pairing();
+        Self::pair_with(test, &payload, device_name).await
+    }
+
+    /// Pairs a fresh device with the secret of `payload`, the window the
+    /// caller opened.
+    pub async fn pair_with(
+        test: &TestService,
+        payload: &steno_handover::PairingPayload,
+        device_name: &str,
+    ) -> Phone {
         let device_id = Uuid::new_v4();
         let response = Self::try_pair(test, &payload.secret, device_id, device_name).await;
         assert_eq!(response.status, 200, "pairing failed");
