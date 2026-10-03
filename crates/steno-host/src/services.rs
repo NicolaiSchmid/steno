@@ -276,7 +276,9 @@ pub trait LlmService: Send + Sync {
     /// One line for the Test button, or the failure text.
     fn probe(&self, settings: &Settings, api_key: Option<&str>) -> BoundaryResult<String>;
     /// The account line of the Codex sign-in on this computer, or why
-    /// there is none.
+    /// there is none. Reads the sign-in on disk, never the network: the
+    /// Summaries section reads it with the host's lock held when it loads.
+    /// Swift: `CodexCredentialStore.stored()`.
     fn codex_account(&self) -> BoundaryResult<String>;
     /// The Codex models on offer, listed ones only.
     fn codex_models(&self) -> Result<Vec<CodexModel>, CodexModelsError>;

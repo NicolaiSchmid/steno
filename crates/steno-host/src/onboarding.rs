@@ -15,10 +15,11 @@ use steno_bridge::{
     OnboardingSetupStepState, OnboardingSnapshot, OnboardingVault, PermissionKind, PermissionState,
 };
 use steno_core::paths::file_url_path;
+use steno_core::protocols::BoundaryResult;
 use steno_core::{AudioRetention, Settings, Store};
 
 use crate::labels::retention_footnote;
-use crate::services::{Services, permission_is_required};
+use crate::services::{CodexModel, CodexModelsError, Services, permission_is_required};
 use crate::settings::llm::{CodexStatus, LlmPreset, LlmSettingsViewModel, url_host};
 use crate::settings::obsidian::ObsidianSettingsViewModel;
 use crate::settings::snapshots as settings_snapshots;
@@ -316,17 +317,37 @@ impl OnboardingViewModel {
         self.collapse_summaries_if_saved(services);
     }
 
-    /// The consent card's button on the Summaries row.
-    pub fn confirm_summaries_with_codex(
+    /// The consent card's button on the Summaries row; true when the
+    /// model list is to be fetched next, which the host does with its lock
+    /// released before [`Self::finish_confirm_summaries_with_codex`].
+    pub fn begin_confirm_summaries_with_codex(
         &mut self,
         store: &Store,
         services: &Services,
         now: DateTime<Utc>,
-    ) {
+    ) -> bool {
         if self.llm.preset != LlmPreset::Codex {
-            return;
+            return false;
         }
-        self.llm.confirm_codex(store, services, now);
+        if self.llm.begin_confirm_codex(store, services, now) {
+            return true;
+        }
+        self.collapse_summaries_if_saved(services);
+        false
+    }
+
+    /// The fetched list applied and saved, then the row collapses once it
+    /// is configured.
+    pub fn finish_confirm_summaries_with_codex(
+        &mut self,
+        account: BoundaryResult<String>,
+        models: Result<Vec<CodexModel>, CodexModelsError>,
+        store: &Store,
+        services: &Services,
+        now: DateTime<Utc>,
+    ) {
+        self.llm
+            .finish_confirm_codex(account, models, store, services, now);
         self.collapse_summaries_if_saved(services);
     }
 

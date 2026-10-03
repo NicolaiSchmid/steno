@@ -301,18 +301,34 @@ impl LlmSettingsViewModel {
         };
     }
 
-    /// The consent card's primary button: first the provider and the
-    /// confirmation are saved (no model yet, so nothing is probed), then
-    /// the model list is fetched, the first listed model picked, and the
-    /// result saved and probed.
-    pub fn confirm_codex(&mut self, store: &Store, services: &Services, now: DateTime<Utc>) {
+    /// The consent card's primary button, first half: the provider and the
+    /// confirmation are saved (no model yet, so nothing is probed). True
+    /// when the model list is to be fetched next (the save went through),
+    /// with the list marked loading; the host fetches it with its lock
+    /// released and hands it to [`Self::finish_confirm_codex`].
+    pub fn begin_confirm_codex(
+        &mut self,
+        store: &Store,
+        services: &Services,
+        now: DateTime<Utc>,
+    ) -> bool {
         self.codex_confirmed = true;
         self.test_result = None;
         self.commit(store, services, now);
-        if self.errors.error.is_some() {
-            return;
-        }
-        self.refresh_codex_models(services);
+        self.errors.error.is_none() && self.begin_codex_models()
+    }
+
+    /// The second half: the fetched list applied, the first listed model
+    /// picked when none was, and the result saved and probed.
+    pub fn finish_confirm_codex(
+        &mut self,
+        account: BoundaryResult<String>,
+        models: Result<Vec<CodexModel>, CodexModelsError>,
+        store: &Store,
+        services: &Services,
+        now: DateTime<Utc>,
+    ) {
+        self.finish_codex_models(account, models);
         if self.codex_model.is_empty()
             && let Some(first) = self.codex_models.first()
         {
@@ -334,14 +350,6 @@ impl LlmSettingsViewModel {
         self.preset = LlmPreset::infer_from_url(self.base_url().as_deref());
         self.test_result = None;
         self.commit(store, services, now);
-    }
-
-    /// The backend's listed models. Only after confirmation.
-    pub fn refresh_codex_models(&mut self, services: &Services) {
-        if !self.begin_codex_models() {
-            return;
-        }
-        self.finish_codex_models(services.llm.codex_account(), services.llm.codex_models());
     }
 
     /// Marks the list as loading; false before confirmation, when there is
