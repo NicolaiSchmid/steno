@@ -337,7 +337,8 @@ impl ModelStore {
         }
         check_digest(file, destination, digest)?;
         fs::rename(&partial.0, destination).map_err(|e| SpeechError::io(destination, e))?;
-        sync_parent(destination)
+        sync_parent(destination);
+        Ok(())
     }
 
     /// Streams `url` into `partial` while hashing and syncs it; returns the
@@ -464,17 +465,21 @@ impl Drop for RemoveOnDrop {
 }
 
 /// Syncs the directory holding `path`, so the rename survives a power loss.
-/// Not on Windows, which cannot open a directory as a file; NTFS journals
-/// the rename.
-fn sync_parent(path: &Path) -> Result<(), SpeechError> {
+/// Best effort: some FUSE and CIFS mounts refuse to sync a directory, and
+/// the file itself is synced already, so a failure is logged and the
+/// install stands. Not on Windows, which cannot open a directory as a file;
+/// NTFS journals the rename.
+fn sync_parent(path: &Path) {
     if cfg!(unix)
         && let Some(parent) = path.parent()
+        && let Err(error) = File::open(parent).and_then(|directory| directory.sync_all())
     {
-        File::open(parent)
-            .and_then(|directory| directory.sync_all())
-            .map_err(|e| SpeechError::io(parent, e))?;
+        tracing::warn!(
+            directory = %parent.display(),
+            %error,
+            "could not sync the models directory after installing a file"
+        );
     }
-    Ok(())
 }
 
 /// Compares `actual` with `file`'s manifest digest; `path` names the file
