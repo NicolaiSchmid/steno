@@ -403,7 +403,7 @@ impl ModelsOptions {
     /// The models directory; `dev models list` prints it.
     fn directory(&self) -> Result<PathBuf, Failure> {
         if let Some(directory) = &self.models_directory {
-            return Ok(steno_services::speech::absolute(directory));
+            return Ok(crate::wiring::standardized(directory));
         }
         let store = self.database.open()?;
         let settings = store.settings().map_err(Failure::runtime)?;
