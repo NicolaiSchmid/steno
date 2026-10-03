@@ -32,13 +32,13 @@ const GUARD: Duration = Duration::from_secs(60);
 /// writing it back in one transaction (the shape that made a deferred
 /// transaction fail with `database is locked` once the other side had
 /// written in between), a fixed number of times each. A barrier starts
-/// both workers together so they almost always collide.
+/// both workers together so they almost always collide. The stores open
+/// on this thread, so a failed open fails the test before either worker
+/// waits at the barrier.
 ///
 /// One worker's run fits inside the busy timeout because the store commits
 /// with `synchronous = NORMAL`, as the Swift app does: in WAL mode only the
 /// first commit after a checkpoint holds the write lock through an fsync.
-/// The stores open on this thread, so a failed open fails the test before
-/// either worker waits at the barrier.
 #[test]
 fn two_stores_write_the_same_file_without_errors() {
     let directory = tempfile::tempdir().unwrap();
@@ -111,7 +111,7 @@ const HOLD: Duration = Duration::from_secs(1);
 
 /// A write waits out the other store's transaction instead of failing: one
 /// store holds the write lock for `HOLD` while the other begins a write,
-/// which takes the write lock up front and so waits on the busy timeout.
+/// which asks for the write lock up front and so waits on the busy timeout.
 /// Fails when the busy timeout is shorter than the hold, or when the write
 /// does not wait for the lock.
 #[test]
