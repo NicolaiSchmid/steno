@@ -120,7 +120,7 @@ Order is dependency order; packages on one line run in parallel. Stacking: the
 workspace branch (`refactor/rust-workspace`, PR #151) sat on
 `t3code/assess-linux-windows-webui` (PR #150, the spikes and speech-stack plans); WP1,
 WP2 and WP3 were PRs off it (#153, #155, #156) and reached `main` in that order after
-#150 and #151. #161 then made `steno-bridge` depend on `steno-core` and removed the
+#150 and #151. PR #161 then made `steno-bridge` depend on `steno-core` and removed the
 bridge's copies of the macro and codecs. Packages after WP3 branch from `main`.
 
 - **WP1 workspace and bridge.** Cargo workspace, toolchain, CI matrix, `.gitignore`,
