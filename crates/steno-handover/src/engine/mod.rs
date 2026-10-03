@@ -165,7 +165,7 @@ pub trait RequestHandling: Send + Sync {
 }
 
 struct State {
-    pairing: Option<Arc<PairingSession>>,
+    pairing: Option<PairingSession>,
     /// Receipts touched since start, by recording id; what the receipt
     /// stream carries.
     active_receipts: BTreeMap<Uuid, HandoverReceipt>,
@@ -295,13 +295,13 @@ impl Engine {
     /// Opens a window and returns the payload for the QR code, replacing
     /// any open session.
     pub fn begin_pairing(&self) -> PairingPayload {
-        let session = Arc::new(PairingSession::open(
+        let session = PairingSession::open(
             self.identity.mac_id(),
             &self.configuration.service_name,
             &self.identity.fingerprint(),
             self.configuration.pairing_window,
             self.now.clone(),
-        ));
+        );
         let payload = session.payload.clone();
         self.state().pairing = Some(session);
         payload
@@ -316,7 +316,7 @@ impl Engine {
         self.state()
             .pairing
             .as_ref()
-            .is_some_and(|session| session.is_open())
+            .is_some_and(PairingSession::is_open)
     }
 
     /// Forgets the device and drops whatever it was uploading.
@@ -575,12 +575,16 @@ impl RequestHandling for Engine {
         match route.auth() {
             AuthRequirement::None => AuthOutcome::Allowed(Principal::Anonymous),
             AuthRequirement::Pairing => {
-                let session = self.state().pairing.clone();
-                match (Self::credential("Pairing", authorization), session) {
-                    (Some(secret), Some(session)) if session.matches(secret) => {
-                        AuthOutcome::Allowed(Principal::Pairing)
-                    }
-                    _ => AuthOutcome::Rejected(Self::pairing_rejected()),
+                let matched = Self::credential("Pairing", authorization).is_some_and(|secret| {
+                    self.state()
+                        .pairing
+                        .as_ref()
+                        .is_some_and(|session| session.matches(secret))
+                });
+                if matched {
+                    AuthOutcome::Allowed(Principal::Pairing)
+                } else {
+                    AuthOutcome::Rejected(Self::pairing_rejected())
                 }
             }
             AuthRequirement::Bearer => {
