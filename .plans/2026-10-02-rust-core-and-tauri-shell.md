@@ -205,7 +205,13 @@ login item, calendar, phone pairing). Until then, only what the first crates tur
   folder as well (`./People`), as the Rust `check_vault` does by requiring the
   ledger's plain-relative rule; today the receipt then carries `./People/Anna.md`,
   the ledger's inside-the-root check refuses it, and every later delivery runs as a
-  first one (folder pin lost, stale lines never removed).
+  first one (folder pin lost, stale lines never removed). This must land before the
+  Mac cutover (WP9): a user who typed `./People` or `.` in the Swift Settings would
+  otherwise get `PeopleFolderInvalid` on every Rust delivery. The Rust message is
+  Swift's verbatim ("must be a relative path inside the vault"), which misdescribes
+  `./People` and `.` once the stricter rule is in; Swift should reword it to say a
+  plain relative path (no `.`, `..` or empty components) when it adopts the rule,
+  and Rust follows.
 - The person-page writer should write file names NFC-normalised, as the Rust writer
   does; Foundation writes `Anna Müller.md` in NFD on APFS, which maps both to one
   file, but a vault synced to a normalisation-sensitive filesystem gets two files.
