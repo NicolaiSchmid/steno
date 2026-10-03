@@ -1,11 +1,19 @@
-//! Steno's core: the domain types, the SQLite store that shares its file
-//! with the Swift app, and the settings. Plan:
-//! `.plans/2026-10-02-rust-core-and-tauri-shell.md`.
+//! Steno's core: the domain types, the pluggable boundaries and their
+//! fakes, the SQLite store that shares its file with the Swift app, and
+//! the settings. Plan: `.plans/2026-10-02-rust-core-and-tauri-shell.md`.
 //!
 //! - [`model`]: the domain types, one module per Swift file in
-//!   `Sources/StenoCore/Model`.
+//!   `Sources/StenoCore/Model`, plus the value types the boundaries
+//!   exchange (audio buffers, raw segments, diarization results, stage
+//!   inputs and outputs, templates).
+//! - [`protocols`]: the pluggable boundaries (`SpeechEngine`, `Diarizer`,
+//!   `EchoCanceller`, `LanguageModel`, `Destination`, `SecretStore`,
+//!   `SpeakerMemory` and the pipeline stage traits), one trait per file,
+//!   with the async-trait decision documented once in its module doc.
 //! - [`store`]: the SQLite store and its migrations; [`store::convert`]
 //!   holds the column codecs a query outside the crate uses.
+//! - `testing` (feature `testing`): deterministic fakes for every
+//!   boundary, so the pipeline, the CLI and the shell test without models.
 //! - [`json`]: the `StenoJSON` convention and the date and UUID codecs.
 //! - [`string_enum`](mod@string_enum): the macro every Swift `String` enum is spelled with.
 //! - [`paths`]: where the database lives on each platform.
@@ -23,10 +31,18 @@
 pub mod json;
 pub mod model;
 pub mod paths;
+pub mod protocols;
 pub mod store;
 pub mod string_enum;
+#[cfg(any(test, feature = "testing"))]
+pub mod testing;
 
 pub use model::*;
 pub use paths::StenoPaths;
+pub use protocols::{
+    AudioDecoder, BoundaryResult, BoxError, DEFAULT_MATCH_MARGIN, DeliveryDispatcher, Destination,
+    Diarizer, EchoCanceller, HandoverIntake, LanguageModel, MeetingSummarizer, SecretKey,
+    SecretStore, SpeakerMemory, SpeechEngine, TranscriptCleaner, async_trait,
+};
 pub use store::{DeletedMeeting, Store, StoreError};
 pub use string_enum::UnknownCase;
