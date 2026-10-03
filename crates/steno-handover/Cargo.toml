@@ -42,6 +42,7 @@ uuid.workspace = true
 windows-sys.workspace = true
 
 [dev-dependencies]
+# The fake intake the tests admit through.
 steno-core = { path = "../steno-core", features = ["testing"] }
 
 regex.workspace = true
