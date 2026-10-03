@@ -357,9 +357,18 @@ fn assert_error_redacted(error: &(impl std::fmt::Display + std::fmt::Debug), sec
     assert_no_secret(&format!("{error:?}"), secrets, "Debug");
 }
 
+/// The Codex secrets of `AuthFile::default()` with `access` in it.
+fn codex_secrets(access: &str) -> Vec<String> {
+    vec![
+        access.to_owned(),
+        "rt_original".to_owned(),
+        "acct_stored".to_owned(),
+    ]
+}
+
 /// Each secret twice in the error message, once as an echoed header and
 /// once in a nested field.
-fn echoing_envelope(secrets: &[String]) -> String {
+fn echoing_envelope(secrets: &[String]) -> serde_json::Value {
     let all = secrets.join(" and ");
     serde_json::json!({
         "error": {
@@ -369,7 +378,6 @@ fn echoing_envelope(secrets: &[String]) -> String {
         "echo": {"headers": {"authorization": format!("Bearer {}", secrets[0])}},
         "nested": {"deep": [secrets]},
     })
-    .to_string()
 }
 
 /// A body that is not an error envelope, so the client falls back to its
@@ -395,8 +403,7 @@ async fn the_endpoint_client_redacts_every_copy_of_the_api_key() {
     let harness = ClientHarness::with_retry(RetryPolicy::NONE).await;
     let twice = format!("{API_KEY} and {API_KEY}");
     harness.server.enqueue([
-        StubResponse::new(400, echoing_envelope(&secrets).into_bytes())
-            .with_header("Content-Type", "application/json")
+        StubResponse::json(&echoing_envelope(&secrets), 400)
             .with_header("X-Echo", &format!("Bearer {API_KEY}")),
         StubResponse::new(400, echoing_plain_body(&secrets, API_KEY, 500)),
         scripts.refusal(&format!("I saw {twice}")),
@@ -421,15 +428,10 @@ async fn the_endpoint_client_redacts_every_copy_of_the_api_key() {
 async fn the_codex_client_redacts_every_copy_of_the_tokens_and_the_account_id() {
     let harness = CodexHarness::build(RetryPolicy::NONE, "gpt-stub", |_| {}).await;
     let access = CodexHome::access_token(3_600, "plus");
-    let secrets = vec![
-        access.clone(),
-        "rt_original".to_owned(),
-        "acct_stored".to_owned(),
-    ];
+    let secrets = codex_secrets(&access);
     let all = secrets.join(" and ");
     harness.backend.enqueue([
-        StubResponse::new(400, echoing_envelope(&secrets).into_bytes())
-            .with_header("Content-Type", "application/json"),
+        StubResponse::json(&echoing_envelope(&secrets), 400),
         StubResponse::new(400, echoing_plain_body(&secrets[1..], &access, 500)),
         scripts.responses_error_event(&format!("{all}; again {all}"), "server_error"),
         scripts.responses_refusal(&format!("I saw {all}; again {all}")),
@@ -454,26 +456,18 @@ async fn the_codex_client_redacts_every_copy_of_the_tokens_and_the_account_id() 
 #[tokio::test]
 async fn the_token_refresh_redacts_every_copy_of_the_tokens_and_the_account_id() {
     let access = CodexHome::access_token(10, "plus");
-    let secrets = vec![
-        access.clone(),
-        "rt_original".to_owned(),
-        "acct_stored".to_owned(),
-    ];
+    let secrets = codex_secrets(&access);
     let all = secrets.join(" and ");
-    let nested = StubResponse::new(400, echoing_envelope(&secrets).into_bytes())
-        .with_header("Content-Type", "application/json");
-    let flat = StubResponse::new(
-        400,
-        serde_json::json!({
+    let nested = StubResponse::json(&echoing_envelope(&secrets), 400);
+    let flat = StubResponse::json(
+        &serde_json::json!({
             "error": "acct_stored",
             "error_code": "rt_original",
             "error_description": format!("{all}; again {all}"),
             "echo": {"authorization": format!("Bearer {access}")},
-        })
-        .to_string()
-        .into_bytes(),
-    )
-    .with_header("Content-Type", "application/json");
+        }),
+        400,
+    );
     let plain = StubResponse::new(503, echoing_plain_body(&secrets[1..], &access, 300));
     for reply in [nested, flat, plain] {
         let home = CodexHome::new().await;
