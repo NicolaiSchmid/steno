@@ -335,6 +335,16 @@ mod tests {
         assert_eq!(chunks[0].range, 0..s(10.25));
         assert!(chunks.iter().all(|c| c.seconds() <= 16.0));
         assert!(covers(&chunks, &speech), "{chunks:?}");
+        // A search wider than the clamp shrinks to it: the window is 2 to
+        // 16 s from the start.
+        let wide = ChunkerConfig {
+            search_seconds: 20.0,
+            ..config
+        };
+        let chunks = layout(&audio(62.0, &speech), &speech, &wide);
+        assert_eq!(chunks[0].range, 0..s(10.25));
+        assert!(chunks.iter().all(|c| c.seconds() <= 16.0));
+        assert!(covers(&chunks, &speech), "{chunks:?}");
     }
 
     #[test]
