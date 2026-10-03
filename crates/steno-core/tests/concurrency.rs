@@ -34,10 +34,11 @@ const GUARD: Duration = Duration::from_secs(60);
 /// written in between), a fixed number of times each. A barrier starts
 /// both workers together so they almost always collide.
 ///
-/// The run fits inside the timeout because the store commits with
-/// `synchronous = NORMAL`, as the Swift app does: in WAL mode a commit
-/// does not wait for an fsync. The stores open on this thread, so a failed
-/// open fails the test before either worker waits at the barrier.
+/// The run fits inside the busy timeout because the store commits with
+/// `synchronous = NORMAL`, as the Swift app does: in WAL mode only the
+/// first commit after a checkpoint waits for an fsync. The stores open on
+/// this thread, so a failed open fails the test before either worker waits
+/// at the barrier.
 #[test]
 fn two_stores_write_the_same_file_without_errors() {
     let directory = tempfile::tempdir().unwrap();
@@ -103,26 +104,29 @@ fn two_stores_write_the_same_file_without_errors() {
     );
 }
 
-/// How long the other store holds the write lock in the waiting test: well
-/// inside the five-second busy timeout, far longer than a commit.
+/// How long the holder keeps the write lock in
+/// `a_write_waits_for_the_other_stores_transaction`: well inside the
+/// five-second busy timeout, far longer than a commit.
 const HOLD: Duration = Duration::from_secs(1);
 
 /// A write waits out the other store's transaction instead of failing: one
 /// store holds the write lock for [`HOLD`] while the other begins its own,
 /// which takes the write lock up front and so waits on the busy timeout.
-/// Fails when the timeout is shorter than the hold.
+/// Fails when the busy timeout is shorter than the hold, or when the write
+/// does not wait for the lock.
 #[test]
 fn a_write_waits_for_the_other_stores_transaction() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("steno.sqlite");
     let holder = Store::open(&path).unwrap();
     let waiter = Store::open(&path).unwrap();
+    let started = Instant::now();
     let held = Arc::new(Barrier::new(2));
     let waiting = {
         let held = held.clone();
         thread::spawn(move || {
             held.wait();
-            waiter.write(|_| Ok(()))
+            waiter.write(|_| Ok(Instant::now()))
         })
     };
     holder
@@ -132,7 +136,11 @@ fn a_write_waits_for_the_other_stores_transaction() {
             Ok(())
         })
         .unwrap();
-    waiting.join().unwrap().unwrap();
+    let entered = waiting.join().unwrap().unwrap();
+    assert!(
+        entered - started >= HOLD,
+        "the write did not wait for the held lock"
+    );
 }
 
 /// Both opens succeed and each migration is recorded once, whichever
