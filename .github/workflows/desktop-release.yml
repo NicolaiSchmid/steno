@@ -14,8 +14,8 @@ name: Desktop bundles
 #
 # The bundles answer the bridge from the recorded fixtures (the shell's
 # default `fixture-host` feature): they show the whole UI with synthetic
-# data on every platform. WP6b flips the feature and this job drops
-# `--features` once the real host is wired.
+# data on every platform. WP6b flips the default feature off once the real
+# host is wired; this job builds whatever the crate's default is.
 #
 # The macOS job follows `MACOS_RUNS_ON` like the other workflows.
 
@@ -58,10 +58,13 @@ jobs:
             {"name":"windows","os":"windows-latest","bundles":"msi,nsis",
              "artifacts":"target/release/bundle/msi/*.msi\ntarget/release/bundle/nsis/*.exe"},
             {"name":"macos","os":null,"bundles":"app,dmg",
-             "artifacts":"target/release/bundle/dmg/*.dmg\ntarget/release/bundle/macos/*.app.tar.gz"}
+             "artifacts":"target/release/bundle/dmg/*.dmg"}
           ]'
+          # The .app is inside the .dmg; the .app.tar.gz exists only as an
+          # updater artifact, which the signing key (WP9) switches on.
           matrix="$(jq -c --arg wanted "$PLATFORMS" --argjson mac "$MACOS_RUNS_ON" \
-            '{include: [ .[] | select(($wanted | split(",") | map(gsub(" "; ""))) | index(.name)) | if .name == "macos" then .os = $mac else . end ]}' \
+            '($wanted | split(",") | map(gsub(" "; ""))) as $names
+             | {include: [ .[] | select(.name as $n | $names | index($n)) | if .name == "macos" then .os = $mac else . end ]}' \
             <<< "$all")"
           echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
           echo "$matrix"
