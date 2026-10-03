@@ -1,6 +1,7 @@
 //! From window votes to exclusive speaker turns, the reconstruction step
 //! of the pyannote pipeline as sherpa-onnx and `FluidAudio` do it: every
-//! window votes per frame for the clusters of its local speakers, the
+//! window votes per frame once for each cluster its active local speakers
+//! belong to, the
 //! frame's speaker count is the rounded mean count over the windows that
 //! cover it, the top clusters by votes are active, runs become segments,
 //! short gaps close, short segments go, and overlaps are resolved in
@@ -70,15 +71,26 @@ pub fn turns(
         return Vec::new();
     }
     // Per global frame: votes per cluster, how many windows cover it, and
-    // the summed local speaker counts. A vote cell is a byte: at most the
-    // five covering windows times three local speakers vote for one
+    // the summed local speaker counts. A window casts one vote for a
+    // cluster on a frame however many of its local speakers the cluster
+    // holds, as `FluidAudio` takes the maximum activation per window and
+    // cluster (`OfflineReconstruction.swift`), so a voice the model split
+    // in two inside one window does not outvote the other windows. A vote
+    // cell is a byte: at most the five covering windows vote for one
     // cluster on one frame, and the matrix is the largest thing here
     // (frames times clusters, 59 frames a second, dozens of clusters
     // before refinement on a group call).
     let mut votes = vec![0u8; total_frames * cluster_count];
     let mut coverage = vec![0u32; total_frames];
     let mut counts = vec![0u32; total_frames];
-    for activity in &analysis.activities {
+    // Each window's embedded local speakers with their clusters.
+    let mut members: Vec<Vec<(usize, usize)>> = vec![Vec::new(); analysis.activities.len()];
+    for (embedding, cluster) in analysis.embeddings.iter().zip(assignments) {
+        if let Some(cluster) = cluster {
+            members[embedding.window].push((embedding.local_speaker, *cluster));
+        }
+    }
+    for (activity, members) in analysis.activities.iter().zip(&members) {
         let base = geometry.global_frame(activity.offset);
         for (local, mask) in activity.frames.iter().enumerate() {
             let frame = base + local;
@@ -87,16 +99,11 @@ pub fn turns(
             }
             coverage[frame] += 1;
             counts[frame] += mask.count_ones();
-        }
-    }
-    for (embedding, cluster) in analysis.embeddings.iter().zip(assignments) {
-        let Some(cluster) = cluster else { continue };
-        let activity = &analysis.activities[embedding.window];
-        let base = geometry.global_frame(activity.offset);
-        for local in 0..activity.frames.len() {
-            if activity.is_active(local, embedding.local_speaker) {
-                let frame = base + local;
-                if frame < total_frames {
+            for (index, &(speaker, cluster)) in members.iter().enumerate() {
+                let counted = members[..index].iter().any(|&(other, earlier)| {
+                    earlier == cluster && activity.is_active(local, other)
+                });
+                if activity.is_active(local, speaker) && !counted {
                     let cell = &mut votes[frame * cluster_count + cluster];
                     *cell = cell.saturating_add(1);
                 }
@@ -431,6 +438,56 @@ mod tests {
         assert!((short.end - 10.5).abs() < 0.05, "{short:?}");
         assert_eq!(short.quality, 0.0, "no vote backs it");
         assert!(turns[0].quality > 0.99 && turns[2].quality > 0.99);
+    }
+
+    /// Two local speakers of one window that clustered together vote once
+    /// per frame, as `FluidAudio` takes the maximum per window and
+    /// cluster. Window 0 hears local speakers 0 and 1 throughout, both in
+    /// cluster 0; window 1, from two seconds, hears cluster 1. Where both
+    /// windows cover, cluster 0 has one vote of two windows, not two, so
+    /// its turn's quality is the mean of 1 over the first 119 frames and
+    /// one half over the 470 shared ones.
+    #[test]
+    fn a_window_votes_once_for_a_cluster_whatever_its_local_speakers() {
+        let analysis = Analysis {
+            geometry: GEOMETRY.clone(),
+            total_samples: 192_000,
+            activities: vec![
+                WindowActivity {
+                    window: 0,
+                    offset: 0,
+                    frames: vec![0b11u8; 589],
+                },
+                WindowActivity {
+                    window: 1,
+                    offset: 32_000,
+                    frames: vec![0b01u8; 589],
+                },
+            ],
+            embeddings: [(0, 0), (0, 1), (1, 0)]
+                .into_iter()
+                .map(|(window, local_speaker)| WindowEmbedding {
+                    window,
+                    local_speaker,
+                    start: 0.0,
+                    end: 10.0,
+                    embedding: vec![1.0],
+                })
+                .collect(),
+        };
+        let turns = turns(
+            &analysis,
+            &[Some(0), Some(0), Some(1)],
+            &TimelineRules::default(),
+        );
+        assert_eq!(turns.len(), 2, "{turns:?}");
+        let first = &turns[0];
+        assert_eq!(first.speaker_label, "S1");
+        let expected = (119.0 + 470.0 * 0.5) / 589.0;
+        assert!(
+            (f64::from(first.quality) - expected).abs() < 1e-4,
+            "{first:?}, expected {expected}"
+        );
     }
 
     /// Two windows disagree on how many speak: the first hears two, the
