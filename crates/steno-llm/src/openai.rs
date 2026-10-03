@@ -150,7 +150,7 @@ impl OpenAiCompatibleClient {
     /// consumes an attempt). A request that cannot be built is final.
     async fn attempt(&self, request: &LlmRequest, attempt: u32) -> Result<Attempt, LlmError> {
         let mode = self.mode.get();
-        let wire = self.make_request(request, mode)?;
+        let (wire, adjusted) = self.make_request(request, mode)?;
         notify(
             self.observer.as_ref(),
             LlmClientEvent::Request {
@@ -183,15 +183,22 @@ impl OpenAiCompatibleClient {
         {
             return Ok(Attempt::Resend);
         }
+        // Resent whenever this request still used the old spelling, even if
+        // a concurrent request already taught the client the new one; only
+        // the request that taught it reports it. The rebuilt request never
+        // carries the parameter again, so this resends at most once per
+        // parameter.
         if reply.status == 400
             && let Some(param) = Self::rejected_parameter(&reply)
             && Self::ADJUSTABLE_PARAMETERS.contains(&param.as_str())
-            && self.rejected_parameters().insert(param.clone())
+            && !adjusted.contains(&param)
         {
-            notify(
-                self.observer.as_ref(),
-                LlmClientEvent::ParameterRejected(param),
-            );
+            if self.rejected_parameters().insert(param.clone()) {
+                notify(
+                    self.observer.as_ref(),
+                    LlmClientEvent::ParameterRejected(param),
+                );
+            }
             return Ok(Attempt::Resend);
         }
         Ok(Attempt::Failed(self.classify(&reply)))
@@ -264,21 +271,19 @@ impl OpenAiCompatibleClient {
 
     // Requests
 
+    /// The wire request under `mode`, and the rejected parameters it was
+    /// built around: a 400 naming one of those is final, not a resend.
     fn make_request(
         &self,
         request: &LlmRequest,
         mode: StructuredOutputMode,
-    ) -> Result<reqwest::Request, LlmError> {
+    ) -> Result<(reqwest::Request, BTreeSet<String>), LlmError> {
         let ceiling = request
             .max_tokens
             .unwrap_or(self.endpoint.max_output_tokens);
-        let (renames_max_tokens, drops_temperature) = {
-            let rejected = self.rejected_parameters();
-            (
-                rejected.contains("max_tokens"),
-                rejected.contains("temperature"),
-            )
-        };
+        let adjusted = self.rejected_parameters().clone();
+        let renames_max_tokens = adjusted.contains("max_tokens");
+        let drops_temperature = adjusted.contains("temperature");
         let body = ChatCompletionRequest {
             model: self.endpoint.model.clone(),
             messages: request.messages.iter().map(Into::into).collect(),
@@ -298,6 +303,7 @@ impl OpenAiCompatibleClient {
             .header(reqwest::header::CONTENT_TYPE, "application/json")
             .body(bytes)
             .build()
+            .map(|wire| (wire, adjusted))
             .map_err(|error| LlmError::Transport(error.to_string()))
     }
 

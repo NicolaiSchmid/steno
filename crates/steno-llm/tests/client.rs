@@ -1231,6 +1231,57 @@ async fn max_tokens_and_temperature_rejections_are_resent_and_remembered() {
 }
 
 #[tokio::test]
+async fn concurrent_rejections_of_one_parameter_resend_both_and_report_it_once() {
+    let harness = ClientHarness::new().await;
+    harness
+        .server
+        .respond(scripts.reasoning_model(scripts.text("{}")));
+    harness.server.hold_responses();
+    let first = request("a", schema_format("reply"));
+    let second = request("b", schema_format("reply"));
+    let (a, b, ()) = tokio::join!(
+        harness.client.complete_llm(&first),
+        harness.client.complete_llm(&second),
+        async {
+            harness.server.received(2).await;
+            harness.server.release();
+        }
+    );
+    assert_eq!(a.unwrap().text, "{}");
+    assert_eq!(b.unwrap().text, "{}");
+    let rejections: Vec<_> = harness
+        .events()
+        .into_iter()
+        .filter_map(|event| match event {
+            LlmClientEvent::ParameterRejected(param) => Some(param),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        rejections,
+        ["max_tokens", "temperature"],
+        "each parameter is reported once, however many requests it failed"
+    );
+    let wire: Vec<_> = harness
+        .server
+        .requests()
+        .into_iter()
+        .filter_map(|r| r.chat)
+        .collect();
+    assert!(
+        wire[..2].iter().all(|c| c.max_tokens == Some(64)),
+        "both first requests used the old spelling"
+    );
+    assert!(
+        (5..=6).contains(&wire.len()),
+        "no request is resent more than once per parameter: {}",
+        wire.len()
+    );
+    assert_eq!(harness.clock.pending_sleepers(), 0);
+    assert!(!harness.events().iter().any(is_retrying));
+}
+
+#[tokio::test]
 async fn the_endpoint_ceiling_is_renamed_too() {
     let harness = ClientHarness::configured(|e| e.max_output_tokens = 777).await;
     harness
