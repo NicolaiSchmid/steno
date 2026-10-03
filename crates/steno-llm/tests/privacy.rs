@@ -483,6 +483,21 @@ async fn the_token_refresh_redacts_every_copy_of_the_tokens_and_the_account_id()
     }
 }
 
+/// An upper-case echo of the account id in the code does not match the
+/// secret, but the detail lowercases the code and so rebuilds it: the
+/// detail is redacted again after the case fold.
+#[tokio::test]
+async fn a_code_that_lowercases_to_a_secret_is_redacted_after_the_case_fold() {
+    let home = CodexHome::new().await;
+    home.write(AuthFile::default().access(&CodexHome::access_token(10, "plus")));
+    home.server.enqueue([StubResponse::json(
+        &serde_json::json!({"error": {"code": "ACCT_STORED", "message": "refused"}}),
+        400,
+    )]);
+    let error = home.store().current().await.unwrap_err();
+    assert_eq!(error.detail(), Some("[redacted]: HTTP 400: refused"));
+}
+
 // Each body is redacted whole before it is cut at `BODY_CUT`, `ERROR_CUT`
 // or `REFRESH_CUT`.
 

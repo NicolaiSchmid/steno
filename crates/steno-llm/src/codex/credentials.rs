@@ -226,7 +226,7 @@ struct RefreshError {
 
 impl RefreshError {
     /// The code as the endpoint wrote it: lowercased for the decisions,
-    /// redacted before it is lowercased for the detail.
+    /// redacted before and after it is lowercased for the detail.
     fn code(&self) -> Option<&str> {
         if let Some(code) = self.error_code.as_deref().filter(|c| !c.is_empty()) {
             return Some(code);
@@ -583,10 +583,13 @@ impl CodexCredentialStore {
                 Some(message) => transport::redact(message, &secrets),
                 None => transport::redacted_prefix(&String::from_utf8_lossy(&data), &secrets, 300),
             };
+            // Redacted before the case fold, which could leave a folded
+            // copy of a secret, and after it, which could rebuild one from
+            // an upper-case echo.
             let detail = match sent {
                 Some(sent) => format!(
                     "{}: HTTP {status}: {message}",
-                    transport::redact(sent, &secrets).to_lowercase()
+                    transport::redact(&transport::redact(sent, &secrets).to_lowercase(), &secrets)
                 ),
                 None => format!("HTTP {status}: {message}"),
             };
