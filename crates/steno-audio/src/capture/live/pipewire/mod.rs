@@ -2,8 +2,10 @@
 //! itself to the microphone and to the default sink's monitor, so every
 //! graph cycle delivers all lanes in one interleaved buffer, aligned on the
 //! graph clock as the macOS aggregate aligns them on its clock master.
-//! WP5b of `.plans/2026-10-02-rust-core-and-tauri-shell.md`; the macOS
-//! counterpart is `capture::live::backend`.
+//! WP5b of `.plans/2026-10-02-rust-core-and-tauri-shell.md`. No Swift
+//! counterpart (the Swift app is macOS-only); the macOS backend is
+//! `capture::live::backend` (Swift:
+//! `Sources/StenoAudio/Capture/LiveCaptureBackend.swift`).
 //!
 //! # Threads
 //!
@@ -33,21 +35,26 @@
 //! through the server's `link-factory` (not lingering: the links die with
 //! the connection). `start` returns once the first cycle arrived; a graph
 //! that does not run within [`START_TIMEOUT`] is an error rather than a
-//! silent recording. The latencies come from the `SPA_PARAM_Latency` of
-//! the microphone port (capture side) and of the sink's first playback
-//! port (playback side), in frames of the first cycle's length.
+//! silent recording, and so is a link that failed. The latencies come
+//! from the `SPA_PARAM_Latency` of the microphone port (capture side) and
+//! of the sink's first playback port (playback side), in frames of the
+//! first cycle's length.
 //!
 //! # Device changes
 //!
-//! The `default.audio.sink` and `default.audio.source` metadata changing,
-//! a linked node going away, or the connection or the stream failing mark
-//! a change; [`LiveCaptureBackend::COALESCE_DELAY`] after the last one the
-//! graph is compared with what the capture started on
+//! The `default.audio.sink` and `default.audio.source` metadata changing
+//! or going away, a node or port going away, or the connection, the
+//! stream or a link failing mark a change;
+//! [`LiveCaptureBackend::COALESCE_DELAY`] after the last one the graph is
+//! compared with the devices the targets resolved to
 //! ([`DeviceSnapshot::difference`]), and a difference goes to the sink as
 //! a [`DeviceChangeReason`](crate::capture::DeviceChangeReason), from this
-//! thread, never during `start`. The session then rebuilds through
-//! `stop()` and `start`, as on the Mac. The capture never follows a
-//! default on its own.
+//! thread, never during `start`. A change during `start` is judged once
+//! the capture runs. The session then rebuilds through `stop()` and
+//! `start`, as on the Mac. The capture never follows a default on its own.
+//! A lost connection, stream or link reads as the output gone (the input
+//! for an in-person capture), and the sample rate never changes: the
+//! adapter resamples.
 //!
 //! The system lane is the whole default sink, Steno's own output included
 //! (the Mac's tap excludes Steno's process; Steno plays nothing during a
@@ -65,6 +72,7 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use pipewire as pw;
+use pw::proxy::ProxyT;
 use pw::spa;
 use pw::types::ObjectType;
 use steno_core::AudioLane;
@@ -76,6 +84,9 @@ use crate::realtime::{LaneFrameSink, deliver, interleaved_view};
 
 /// How long `start` lets PipeWire answer, link and run the first cycle.
 const START_TIMEOUT: Duration = Duration::from_secs(3);
+/// How long `start` waits for the device latencies after the first cycle,
+/// on top of [`START_TIMEOUT`].
+const LATENCY_TIMEOUT: Duration = Duration::from_millis(500);
 /// The longest single wait on the loop while starting, so the deadline is
 /// checked often.
 const PUMP_SLICE: Duration = Duration::from_millis(20);
@@ -120,8 +131,12 @@ fn process(stream: &pw::stream::Stream, rt: &mut RealTime) {
     // `MAP_BUFFERS` and valid for `byte_size` bytes while the buffer stays
     // dequeued, which it does until `buffer` drops at the end of this call.
     unsafe { deliver(&[view], &rt.sources, &rt.sink) };
-    rt.cycle_frames
-        .store(view.byte_size / (rt.channels * 4), Ordering::Relaxed);
+    // Release: `start` returns on seeing it, and the frames `deliver`
+    // wrote are then in the rings.
+    rt.cycle_frames.store(
+        view.byte_size / (rt.channels * size_of::<f32>()),
+        Ordering::Release,
+    );
 }
 
 /// A `pipewire` error as a backend failure naming what failed.
@@ -133,12 +148,12 @@ fn failed(what: &'static str) -> impl FnOnce(pw::Error) -> CaptureError {
 #[derive(Default)]
 struct Shared {
     graph: RefCell<Graph>,
-    /// The `default` metadata once bound: its listener, then the proxy, so
-    /// the listener drops first.
-    metadata: RefCell<Option<(pw::metadata::MetadataListener, pw::metadata::Metadata)>>,
+    /// The `default` metadata once bound: its global id, its listener,
+    /// then the proxy, so the listener drops first.
+    metadata: RefCell<Option<(u32, pw::metadata::MetadataListener, pw::metadata::Metadata)>>,
     /// The last `done` of a core roundtrip.
     done: Cell<Option<spa::utils::result::AsyncSeq>>,
-    /// The connection or the stream failed.
+    /// The connection, the stream or one of Steno's links failed.
     lost: Cell<bool>,
     /// The last change since the graph was last judged.
     pending: Cell<Option<Instant>>,
@@ -147,6 +162,14 @@ struct Shared {
 impl Shared {
     fn changed(&self) {
         self.pending.set(Some(Instant::now()));
+    }
+
+    /// `what` failed for good (logged with PipeWire's `message`): the
+    /// capture is lost.
+    fn fail(&self, what: &str, message: &str) {
+        tracing::warn!("{what} failed: {message}");
+        self.lost.set(true);
+        self.changed();
     }
 
     /// A registry global: nodes and ports into the graph, the `default`
@@ -196,9 +219,29 @@ impl Shared {
                         0
                     })
                     .register();
-                *self.metadata.borrow_mut() = Some((listener, metadata));
+                *self.metadata.borrow_mut() = Some((global.id, listener, metadata));
             }
             _ => {}
+        }
+    }
+
+    /// A registry global went away: a node or a port out of the graph, or
+    /// the bound `default` metadata, whose defaults go with it until it is
+    /// announced again (WirePlumber restarting).
+    fn forget(&self, id: u32) {
+        let metadata = self
+            .metadata
+            .borrow()
+            .as_ref()
+            .is_some_and(|(bound, ..)| *bound == id);
+        let changed = if metadata {
+            drop(self.metadata.borrow_mut().take());
+            self.graph.borrow_mut().set_default(None, None)
+        } else {
+            self.graph.borrow_mut().remove(id)
+        };
+        if changed {
+            self.changed();
         }
     }
 }
@@ -244,10 +287,10 @@ impl Connection {
             .error({
                 let shared = Rc::clone(&shared);
                 move |id, _seq, res, message| {
-                    tracing::warn!("PipeWire error on object {id}: {message} ({res})");
                     if id == pw::core::PW_ID_CORE {
-                        shared.lost.set(true);
-                        shared.changed();
+                        shared.fail("the connection to PipeWire", message);
+                    } else {
+                        tracing::warn!("PipeWire error on object {id}: {message} ({res})");
                     }
                 }
             })
@@ -261,11 +304,7 @@ impl Connection {
             })
             .global_remove({
                 let shared = Rc::clone(&shared);
-                move |id| {
-                    if shared.graph.borrow_mut().remove(id) {
-                        shared.changed();
-                    }
-                }
+                move |id| shared.forget(id)
             })
             .register();
         Ok(Self {
@@ -310,7 +349,9 @@ impl Connection {
     /// loss, or the deadline.
     fn stalled(&self, step: &str) -> CaptureError {
         if self.shared.lost.get() {
-            CaptureError::BackendFailed("the connection to PipeWire failed".into())
+            CaptureError::BackendFailed(
+                "the connection to PipeWire, the capture stream or a link failed".into(),
+            )
         } else {
             CaptureError::BackendFailed(format!(
                 "PipeWire did not {step} within {} s",
@@ -387,7 +428,7 @@ struct Capture {
     stream: Option<pw::stream::StreamRc>,
     rt_listener: Option<pw::stream::StreamListener<RealTime>>,
     state_listener: Option<pw::stream::StreamListener<()>>,
-    links: Vec<pw::link::Link>,
+    links: Vec<WatchedLink>,
     connection: Connection,
     targets: Targets,
     input_device_uid: Option<String>,
@@ -396,12 +437,24 @@ struct Capture {
     cycle_frames: Arc<AtomicUsize>,
     /// What `start` answers.
     info: CaptureStream,
-    /// The devices the capture started on.
+    /// The devices the targets resolved to, taken at `resolve`.
     baseline: DeviceSnapshot,
+}
+
+/// One of Steno's links and the listeners that mark the capture lost when
+/// it fails: an error on its proxy, or the server putting it in its error
+/// state. Fields drop in order, the listeners first.
+struct WatchedLink {
+    _info: pw::link::LinkListener,
+    _error: pw::proxy::ProxyListener,
+    _link: pw::link::Link,
 }
 
 impl Drop for Capture {
     fn drop(&mut self) {
+        // `pw_stream_disconnect` returns 0 whatever happens; if it ever
+        // failed, the rt listener below would still be freed while
+        // `process` might run.
         if let Some(stream) = &self.stream
             && let Err(error) = stream.disconnect()
         {
@@ -454,7 +507,7 @@ impl Capture {
         props.insert(*pw::keys::NODE_DESCRIPTION, "Steno recording");
         props.insert(*pw::keys::APP_NAME, "Steno");
         // Steno links the stream itself; the session manager must not.
-        props.insert("node.autoconnect", "false");
+        props.insert(*pw::keys::NODE_AUTOCONNECT, "false");
         props.insert(*pw::keys::NODE_DONT_RECONNECT, "true");
         props.insert(*pw::keys::STREAM_DONT_REMIX, "true");
         let stream = pw::stream::StreamRc::new(connection.core.clone(), STREAM_NODE_NAME, props)
@@ -479,9 +532,7 @@ impl Capture {
                 let shared = Rc::clone(&connection.shared);
                 move |_, (), _old, new| {
                     if let pw::stream::StreamState::Error(message) = new {
-                        tracing::warn!("the PipeWire capture stream failed: {message}");
-                        shared.lost.set(true);
-                        shared.changed();
+                        shared.fail("the PipeWire capture stream", &message);
                     }
                 }
             })
@@ -498,9 +549,12 @@ impl Capture {
             state_listener: Some(state_listener),
             links: Vec::new(),
             connection,
+            // `measure` fills in the latencies.
             info: CaptureStream {
+                sample_rate: SAMPLE_RATE,
+                input_latency_frames: 0,
+                output_latency_frames: 0,
                 layout: Some(targets.layout.clone()),
-                ..CaptureStream::SYNTHETIC
             },
             targets,
             input_device_uid: input_device_uid.map(str::to_owned),
@@ -558,39 +612,73 @@ impl Capture {
             .zip(stream_ports.unwrap_or_default())
         {
             let mut props = pw::properties::PropertiesBox::new();
-            props.insert("link.output.node", node.to_string());
-            props.insert("link.output.port", port.to_string());
-            props.insert("link.input.node", stream_node.to_string());
-            props.insert("link.input.port", input.to_string());
-            props.insert("object.linger", "false");
-            links.push(
-                connection
-                    .core
-                    .create_object::<pw::link::Link>("link-factory", &props)
-                    .map_err(failed("linking the capture stream"))?,
-            );
+            props.insert(*pw::keys::LINK_OUTPUT_NODE, node.to_string());
+            props.insert(*pw::keys::LINK_OUTPUT_PORT, port.to_string());
+            props.insert(*pw::keys::LINK_INPUT_NODE, stream_node.to_string());
+            props.insert(*pw::keys::LINK_INPUT_PORT, input.to_string());
+            props.insert(*pw::keys::OBJECT_LINGER, "false");
+            let link = connection
+                .core
+                .create_object::<pw::link::Link>("link-factory", &props)
+                .map_err(failed("linking the capture stream"))?;
+            links.push(Self::watch_link(&connection.shared, link));
         }
         self.links = links;
         Ok(())
     }
 
-    /// Waits for the first cycle, then reads the latencies in its length
-    /// and takes the baseline the changes are judged against.
+    /// `link` with the listeners that fail the capture when it fails.
+    fn watch_link(shared: &Rc<Shared>, link: pw::link::Link) -> WatchedLink {
+        let info = link
+            .add_listener_local()
+            .info({
+                let shared = Rc::downgrade(shared);
+                move |info| {
+                    if let pw::link::LinkState::Error(message) = info.state()
+                        && let Some(shared) = shared.upgrade()
+                    {
+                        shared.fail("a capture link", message);
+                    }
+                }
+            })
+            .register();
+        let error = link
+            .upcast_ref()
+            .add_listener_local()
+            .error({
+                let shared = Rc::downgrade(shared);
+                move |_seq, _res, message| {
+                    if let Some(shared) = shared.upgrade() {
+                        shared.fail("a capture link", message);
+                    }
+                }
+            })
+            .register();
+        WatchedLink {
+            _info: info,
+            _error: error,
+            _link: link,
+        }
+    }
+
+    /// Waits for the first cycle, then reads the latencies in its length.
+    /// A link that failed meanwhile fails the start, even when the other
+    /// links run.
     fn measure(&mut self, deadline: Instant) -> Result<(), CaptureError> {
         let connection = &self.connection;
-        if !connection.pump_until(deadline, || self.cycle_frames.load(Ordering::Relaxed) > 0) {
+        if !connection.pump_until(deadline, || self.cycle_frames.load(Ordering::Acquire) > 0) {
             return Err(connection.stalled("run the capture"));
         }
         let cycle = self.cycle_frames.load(Ordering::Relaxed);
         let graph_rate = self.stream().time().map_or(0, |time| time.rate().denom);
-        let (input, output) = self.latencies(deadline);
+        // Its own deadline: a first cycle late in the start's must not cut
+        // the read short and leave the far-end delay at zero.
+        let (input, output) = self.latencies(Instant::now() + LATENCY_TIMEOUT);
+        if self.connection.shared.lost.get() {
+            return Err(self.connection.stalled("run the capture"));
+        }
         self.info.input_latency_frames = input.frames(cycle, graph_rate);
         self.info.output_latency_frames = output.frames(cycle, graph_rate);
-        self.baseline = self.connection.shared.graph.borrow().snapshot(
-            &self.targets,
-            self.input_device_uid.as_deref(),
-            false,
-        );
         Ok(())
     }
 
@@ -665,9 +753,9 @@ impl Capture {
             let quitting = Rc::clone(&quitting);
             move |()| quitting.set(true)
         });
+        // A change while starting stays pending and is judged against the
+        // resolve-time baseline like any other.
         let shared = &self.connection.shared;
-        // Whatever moved while starting is in the baseline.
-        shared.pending.set(None);
         while !quitting.get() {
             let wait = match shared.pending.get() {
                 None => IDLE_WAIT,
@@ -811,10 +899,10 @@ impl CaptureBackend for LiveCaptureBackend {
                 );
             })
             .map_err(|e| CaptureError::BackendFailed(format!("the PipeWire thread: {e}")))?;
-        // The thread answers by its own deadline; the margin covers a
+        // The thread answers by its own deadlines; the margin covers a
         // thread that is slow to get scheduled.
         let outcome = answered
-            .recv_timeout(START_TIMEOUT + Duration::from_secs(2))
+            .recv_timeout(START_TIMEOUT + LATENCY_TIMEOUT + Duration::from_secs(2))
             .unwrap_or_else(|_| {
                 Err(CaptureError::BackendFailed(
                     "the PipeWire thread did not answer".into(),
