@@ -1,8 +1,8 @@
-//! The Windows live backend against the real WASAPI (WP10).
+//! The Windows live backend against the real WASAPI (WP10a).
 //!
-//! **Nobody has run the ignored tests yet.** There is no Windows machine
-//! in the fleet; the backend is compile-verified on the `windows-latest`
-//! CI runner, which has no audio device. The `#[ignore]`d tests here are
+//! **Nobody has run the ignored tests yet.** No Windows machine has run
+//! them; the backend is compile-tested on the `windows-latest` CI runner,
+//! which has no audio device. The `#[ignore]`d tests here are
 //! the live check a Windows machine with a microphone and speakers must
 //! run before the backend ships (the plan's parity list):
 //!
@@ -14,12 +14,15 @@
 //! during `call_capture_records_both_lanes` (any media player) so the
 //! loopback has something to deliver.
 //!
-//! The tests that are not ignored run everywhere, the CI runner included:
-//! they need no device and check only that the COM paths return within a
-//! bound with an answer (a capture that fails with "no input device" is a
-//! pass) instead of hanging or crashing. Each run happens on its own
-//! thread joined with a deadline, so a hang fails instead of stalling the
-//! suite.
+//! The tests that are not ignored run on every Windows host, the CI runner
+//! included: they need no device and check only that the COM paths return
+//! within a bound with an answer (a capture that fails with "no input
+//! device" is a pass) instead of hanging or crashing. Each run happens on
+//! its own thread joined with a deadline, so a hang fails instead of
+//! stalling the suite. CI runs them with `--nocapture`, so its log shows
+//! what COM answered.
+// Plan package names (WP10a) are not code.
+#![allow(clippy::doc_markdown)]
 #![cfg(windows)]
 
 use std::sync::Arc;

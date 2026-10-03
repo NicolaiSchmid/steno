@@ -78,6 +78,7 @@ fn the_first_known_image_names_the_process() {
     let records = [
         unnamed,
         session(42, EndpointFlow::Render, SessionState::Inactive, TEAMS),
+        session(42, EndpointFlow::Render, SessionState::Inactive, ZOOM),
     ];
     let processes = processes_from_sessions(&records);
     assert_eq!(processes.len(), 1);
@@ -92,6 +93,8 @@ fn image_file_names_from_both_path_forms() {
     assert_eq!(image_file_name(ZOOM), Some("Zoom.exe"));
     assert_eq!(image_file_name("Zoom.exe"), Some("Zoom.exe"));
     assert_eq!(image_file_name(r"C:\odd/mixed\App.exe"), Some("App.exe"));
+    assert_eq!(image_file_name(r"C:\odd\mixed/App.exe"), Some("App.exe"));
+    assert_eq!(image_file_name(" App.exe "), Some("App.exe"));
     assert_eq!(image_file_name(r"C:\trailing\"), None);
     assert_eq!(image_file_name(""), None);
 }
