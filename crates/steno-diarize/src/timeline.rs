@@ -87,11 +87,17 @@ pub fn turns(
     let mut votes = vec![0u16; total_frames * cluster_count];
     let mut coverage = vec![0u32; total_frames];
     let mut counts = vec![0u32; total_frames];
-    // Each window's embedded local speakers with their clusters.
-    let mut members: Vec<Vec<(usize, usize)>> = vec![Vec::new(); analysis.activities.len()];
+    // Each window's clusters with the mask of their embedded local
+    // speakers: a frame votes for a cluster when the masks meet.
+    let mut members: Vec<Vec<(usize, u8)>> = vec![Vec::new(); analysis.activities.len()];
     for (embedding, cluster) in analysis.embeddings.iter().zip(assignments) {
-        if let Some(cluster) = cluster {
-            members[embedding.window].push((embedding.local_speaker, *cluster));
+        if let Some(cluster) = *cluster {
+            let window = &mut members[embedding.window];
+            let speaker = 1u8 << embedding.local_speaker;
+            match window.iter_mut().find(|(known, _)| *known == cluster) {
+                Some((_, speakers)) => *speakers |= speaker,
+                None => window.push((cluster, speaker)),
+            }
         }
     }
     for (activity, members) in analysis.activities.iter().zip(&members) {
@@ -103,11 +109,8 @@ pub fn turns(
             }
             coverage[frame] += 1;
             counts[frame] += mask.count_ones();
-            for (index, &(speaker, cluster)) in members.iter().enumerate() {
-                let counted = members[..index].iter().any(|&(other, earlier)| {
-                    earlier == cluster && activity.is_active(local, other)
-                });
-                if activity.is_active(local, speaker) && !counted {
+            for &(cluster, speakers) in members {
+                if mask & speakers != 0 {
                     let cell = &mut votes[frame * cluster_count + cluster];
                     *cell = cell.saturating_add(1);
                 }
