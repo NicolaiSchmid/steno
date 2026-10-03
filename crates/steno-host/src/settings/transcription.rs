@@ -24,7 +24,7 @@ pub enum AssetState {
 #[derive(Debug)]
 pub struct SpeechSettingsViewModel {
     pub engine_id: SpeechEngineId,
-    pub asset_states: BTreeMap<ModelAsset, AssetState>,
+    pub(crate) asset_states: BTreeMap<ModelAsset, AssetState>,
     /// The assets whose download thread still runs. Its reports show while
     /// the asset reads `downloading`; a remove marks it absent, which
     /// detaches the one in flight, so its late progress cannot mark the
