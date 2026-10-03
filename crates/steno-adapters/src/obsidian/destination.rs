@@ -180,7 +180,7 @@ impl ObsidianFolderDestination {
     /// then drops the line from the previous receipt's pages this delivery
     /// did not render. File names are written as the model holds them, NFC
     /// (`Anna Müller.md`); Foundation writes them NFD on APFS, which treats
-    /// the two as one file, and both receipts store NFC.
+    /// the two as one file, and the Swift and Rust receipts both store NFC.
     fn write_person_pages(
         &self,
         people_folder: &str,
@@ -332,12 +332,11 @@ impl ObsidianFolderDestination {
                 .any(|name| is_audio(name))
     }
 
-    /// The vault exists and the people folder, if any, passes the ledger's
-    /// rule ([`DeliveryLedger::is_plain_relative`]), so the receipt paths it
-    /// yields are ones the ledger accepts on the next delivery, and is
-    /// stricter still: no `.` or empty component (the ledger's rule folds
-    /// those away), no `\` and no surrounding whitespace. Swift's
-    /// `checkVault` accepts `./People` (parity list in the plan).
+    /// The vault exists and the people folder, if any, passes
+    /// [`DeliveryLedger::is_plain_relative`] plus three checks on top: no `.`
+    /// or empty component (the ledger's rule folds those away), no `\`, no
+    /// surrounding whitespace. Swift's `checkVault` accepts `./People`
+    /// (parity list in the plan).
     pub(crate) fn check_vault(&self) -> Result<(), ObsidianError> {
         if !self.sink.is_directory("") {
             return Err(ObsidianError::VaultMissing(

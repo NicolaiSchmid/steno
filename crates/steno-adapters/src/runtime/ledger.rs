@@ -166,9 +166,9 @@ impl DeliveryLedger {
     }
 
     /// The receipt's folder and every file path are plain relative paths
-    /// ([`DeliveryLedger::is_plain_relative`]), the rule the destination
-    /// applies to its people folder. A stored path that fails it would be
-    /// joined with the root blindly, so such a receipt applies to nothing.
+    /// ([`DeliveryLedger::is_plain_relative`]). A stored path that fails it
+    /// would be joined with the root blindly, so such a receipt applies to
+    /// nothing.
     fn stays_inside_root(receipt: &DeliveryReceipt) -> bool {
         Self::is_plain_relative(&receipt.folder)
             && receipt
@@ -214,7 +214,9 @@ impl DeliveryLedger {
 
 /// `root` joined with `folder`: the meeting folder to reveal in the file
 /// manager. A folder that is not a plain relative path (a tampered or
-/// foreign receipt) is not joined; the root itself is revealed instead.
+/// foreign receipt) is not joined; the root itself is revealed instead, and
+/// the result does not say which happened: a receipt whose folder fails the
+/// rule reveals the vault root, and the host cannot tell the two apart.
 /// Swift: `DeliveryReceipt.folderURL`.
 #[must_use]
 pub fn receipt_folder_path(receipt: &DeliveryReceipt) -> PathBuf {
