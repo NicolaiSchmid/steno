@@ -65,7 +65,7 @@ use std::time::{Duration, Instant};
 
 use steno_core::AudioLane;
 
-use self::com::{Apartment, CaptureClient, Enumerator, LoopbackKind, ProAudioThread, Role};
+use self::com::{Apartment, CaptureClient, Enumerator, LoopbackKind, ProAudioThread};
 use super::AudioDeviceInfo;
 use crate::SAMPLE_RATE;
 use crate::capture::split_streams::far_end_latencies;
@@ -171,9 +171,9 @@ struct DeviceProbe {
 }
 
 impl DeviceProbe {
-    fn endpoint_id(enumerator: &Enumerator, flow: EndpointFlow, role: Role) -> Option<String> {
+    fn endpoint_id(enumerator: &Enumerator, flow: EndpointFlow) -> Option<String> {
         enumerator
-            .default_endpoint(flow, role)
+            .default_endpoint(flow)
             .and_then(|endpoint| endpoint.id())
             .ok()
     }
@@ -187,14 +187,15 @@ impl DeviceProbe {
     }
 
     /// The devices as they are now, in [`DeviceSnapshot`]'s terms: the
-    /// default render endpoint for most audio (`eConsole`) and the one call
-    /// apps use (`eCommunications`), the microphone (the explicit one if
-    /// still active, else the default), whether the endpoints the capture
-    /// started on are still active. Fields for a stream the capture does
-    /// not open stay empty, so they never differ. The engine converts to
-    /// 48 kHz, so the rate is always [`SAMPLE_RATE`]; a device format
-    /// change invalidates the stream instead, which the capture thread
-    /// reports.
+    /// default render endpoint (`eConsole`, the one both loopbacks follow),
+    /// the microphone (the explicit one if still active, else the
+    /// `eConsole` default), whether the endpoints the capture started on
+    /// are still active. `default_output_uid` stays empty: no stream opens
+    /// the `eCommunications` default, so its changes cost no rebuild. Fields
+    /// for a stream the capture does not open stay empty too, so they never
+    /// differ. The engine converts to 48 kHz, so the rate is always
+    /// [`SAMPLE_RATE`]; a device format change invalidates the stream
+    /// instead, which the capture thread reports as the device gone.
     fn resolve(&self, enumerator: &Enumerator) -> DeviceSnapshot {
         let input_uid = if self.needs_mic {
             match &self.input_device_uid {
@@ -203,7 +204,7 @@ impl DeviceProbe {
                     .ok()
                     .filter(com::Endpoint::is_active)
                     .and_then(|endpoint| endpoint.id().ok()),
-                None => Self::endpoint_id(enumerator, EndpointFlow::Capture, Role::Console),
+                None => Self::endpoint_id(enumerator, EndpointFlow::Capture),
             }
         } else {
             None
@@ -211,12 +212,9 @@ impl DeviceProbe {
         DeviceSnapshot {
             output_uid: self
                 .needs_system
-                .then(|| Self::endpoint_id(enumerator, EndpointFlow::Render, Role::Console))
+                .then(|| Self::endpoint_id(enumerator, EndpointFlow::Render))
                 .flatten(),
-            default_output_uid: self
-                .needs_system
-                .then(|| Self::endpoint_id(enumerator, EndpointFlow::Render, Role::Communications))
-                .flatten(),
+            default_output_uid: None,
             input_uid,
             output_alive: self.needs_system
                 && Self::is_alive(enumerator, self.render_endpoint_id.as_deref()),
@@ -227,12 +225,15 @@ impl DeviceProbe {
     }
 
     /// The snapshot the capture started on: as resolved now, with the
-    /// microphone the stream actually opened, so a default that moved
+    /// endpoints the streams actually opened on, so a default that moved
     /// between the open and this read still counts as a change.
     fn baseline(&self, enumerator: &Enumerator) -> DeviceSnapshot {
         let mut snapshot = self.resolve(enumerator);
         if self.needs_mic {
             snapshot.input_uid.clone_from(&self.mic_endpoint_id);
+        }
+        if self.needs_system {
+            snapshot.output_uid.clone_from(&self.render_endpoint_id);
         }
         snapshot
     }
@@ -295,9 +296,7 @@ fn open(
         StreamSource::Microphone => {
             let endpoint = match input_device_uid {
                 Some(uid) => enumerator.endpoint(uid).ok(),
-                None => enumerator
-                    .default_endpoint(EndpointFlow::Capture, Role::Console)
-                    .ok(),
+                None => enumerator.default_endpoint(EndpointFlow::Capture).ok(),
             }
             .filter(com::Endpoint::is_active)
             .ok_or(CaptureError::InputDeviceUnavailable)?;
@@ -305,7 +304,7 @@ fn open(
             (client, endpoint.id().ok(), None)
         }
         StreamSource::System => {
-            let render = enumerator.default_endpoint(EndpointFlow::Render, Role::Console);
+            let render = enumerator.default_endpoint(EndpointFlow::Render);
             let render_id = render.as_ref().ok().and_then(|e| e.id().ok());
             match CaptureClient::process_loopback(std::process::id(), channels, ACTIVATION_TIMEOUT)
             {
@@ -740,13 +739,16 @@ impl AudioDevices {
     /// Every active endpoint, capture endpoints first, in the order the
     /// enumerator lists them. `id` is the index in that list (WASAPI has
     /// no numeric ids); `uid` is the endpoint id `Settings` stores; the
-    /// channel count and rate are the shared-mode mix format's.
+    /// channel count and rate are the shared-mode mix format's. Windows has
+    /// one render default that matters here, `eConsole`, which both
+    /// loopbacks follow and [`DeviceSnapshot::output_uid`] tracks, so it is
+    /// both the default output and the default system output.
     pub fn all() -> Result<Vec<AudioDeviceInfo>, CaptureError> {
         let apartment = Apartment::enter()?;
         let enumerator = Enumerator::new()?;
-        let default = |flow, role| DeviceProbe::endpoint_id(&enumerator, flow, role);
-        let default_input = default(EndpointFlow::Capture, Role::Console);
-        let default_output = default(EndpointFlow::Render, Role::Console);
+        let default = |flow| DeviceProbe::endpoint_id(&enumerator, flow);
+        let default_input = default(EndpointFlow::Capture);
+        let default_output = default(EndpointFlow::Render);
         let mut devices = Vec::new();
         for flow in [EndpointFlow::Capture, EndpointFlow::Render] {
             for endpoint in enumerator.active_endpoints(flow)? {

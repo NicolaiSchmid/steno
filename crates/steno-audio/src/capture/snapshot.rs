@@ -7,23 +7,33 @@
 //! resolves), whether the two devices the capture started on are still
 //! alive, and the aggregate's rate. Pure, so the comparison the live
 //! backend makes after a notification burst is unit-tested without a HAL.
+//! The Windows backend fills the same fields with WASAPI's terms; each
+//! field says how.
 
 use super::configuration::DeviceChangeReason;
 
 /// The devices a capture runs on at one moment; see the module doc.
 #[derive(Debug, Clone, PartialEq)]
 pub struct DeviceSnapshot {
-    /// The default system output: the aggregate's clock master.
+    /// The default system output: the aggregate's clock master. On
+    /// Windows the `eConsole` default render endpoint, which both
+    /// loopbacks follow.
     pub output_uid: Option<String>,
-    /// The default output, which the tap mirrors.
+    /// The default output, which the tap mirrors. Always `None` on
+    /// Windows: no stream opens the `eCommunications` default.
     pub default_output_uid: Option<String>,
-    /// The microphone; `None` without a microphone lane.
+    /// The microphone; `None` without a microphone lane. On Windows the
+    /// selected capture endpoint, or the `eConsole` default.
     pub input_uid: Option<String>,
-    /// The output device the capture started on still answers `DeviceIsAlive`.
+    /// The output device the capture started on still answers
+    /// `DeviceIsAlive`; on Windows, is still `DEVICE_STATE_ACTIVE`.
     pub output_alive: bool,
-    /// The input device the capture started on still answers `DeviceIsAlive`.
+    /// The input device the capture started on still answers
+    /// `DeviceIsAlive`; on Windows, is still `DEVICE_STATE_ACTIVE`.
     pub input_alive: bool,
-    /// The aggregate's nominal rate; 0 once it is gone.
+    /// The aggregate's nominal rate; 0 once it is gone. On Windows always
+    /// 48 kHz: the engine converts, and a format change invalidates the
+    /// stream instead.
     pub sample_rate: f64,
 }
 
