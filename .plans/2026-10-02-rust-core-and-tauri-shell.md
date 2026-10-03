@@ -42,7 +42,7 @@ this plan starts is a parity item for the Rust side, tracked in the parity list 
    Runtime (`ort`) elsewhere. ONNX inference runs in a sidecar process; the Mac stays
    one process.
 5. **No allocation and no lock on the audio thread**, proven by the counting allocator
-   from `spikes/capture-rs/src/rt.rs` in a test build.
+   in `crates/steno-audio/src/testing/rt.rs` in a test build.
 6. **Scope stays the scope.** No new features in the port; a Rust behaviour that
    differs from Swift is a bug unless a plan says otherwise.
 
@@ -181,7 +181,7 @@ against `main`.
 | WP2 store | merged | #155 | |
 | WP3 Tauri shell on fixtures | merged | #156 | |
 | protocols (traits and value types) | in review | feat/rust-protocols | `EchoCanceller`, `AudioDecoder`, `AudioBuffer16k`, ... |
-| WP5a audio (`steno-audio`) | in review | #166 | Rings, Speex AEC, writer, session with rebuild, synthetic backend, macOS live backend, detector, symphonia decoder; PipeWire (WP5b) and WASAPI (WP10) are stubs. Zero-allocation proof in `crates/steno-audio/tests/realtime.rs`; ERLE table identical to Swift's `aec-bench --synthetic`. |
+| WP5a audio (`steno-audio`) | in review | #166 | Rings, Speex AEC, writer, session with rebuild, synthetic backend, macOS live backend, detector, symphonia decoder; PipeWire (WP5b) and WASAPI (WP10) are stubs. Zero-allocation proof in `crates/steno-audio/tests/realtime.rs`; ERLE table identical to Swift's `aec-bench --synthetic`; ring tests under ThreadSanitizer in CI's `tsan` job; live Core Audio tests behind `--ignored` in `tests/live.rs`. Parity items below: AAC priming, sidecar group delay, sinc passband. |
 
 ## Risks
 
@@ -387,10 +387,28 @@ parity item until a plan says otherwise:
   frame chunks. A two-hour 48 kHz lane is 1.4 GB transiently. Chunk the
   symphonia path before the Linux release.
 - **Resampling.** 48 kHz masters go through the writer's exact 3:1 FIR
-  (group delay compensated, within a sample of the sidecar); other rates
-  (the phone's 44.1 kHz) through a 64-tap, 128-phase windowed sinc. The
-  Swift codec used `AVAudioConverter` at maximum quality; the two are not
-  bit-identical, both are flat to 6.5 kHz.
+  with its group delay dropped, so the decode is zero-phase on the master's
+  time; other rates (the phone's 44.1 kHz) through a 64-tap, 128-phase
+  windowed sinc. The Swift codec used `AVAudioConverter` at maximum
+  quality; the two are not bit-identical. The 3:1 FIR is flat to 7 kHz;
+  the sinc, measured in `crates/steno-audio/tests/codec.rs` from 44.1 kHz,
+  is within 0.3 dB to 6 kHz and -1.3 dB at 6.5 kHz, with 12 kHz aliasing
+  below -50 dB.
+- **The sidecar lags the master decode by one group delay.** The live
+  16 kHz sidecar is the same FIR run causally, so its onset sits 32 samples
+  (2 ms) after the master decode's; `decode` prefers the sidecar, so a
+  transcript's timestamps shift by 2 ms depending on which file was read.
+  Swift had the same relationship (causal sidecar writer, delay-compensated
+  `AVAudioConverter`); `tests/codec.rs` pins both onsets. Either compensate
+  the sidecar at cutover or accept 2 ms.
+- **AAC priming is not trimmed.** AVFoundation dropped the encoder's
+  priming samples; symphonia 0.5 trims them for MP3 (the LAME tag, with
+  `enable_gapless`, measured: onset at sample 2 of an ffmpeg encode) but
+  parses and ignores the MP4 edit list and does not read `iTunSMPB`, so an
+  AAC lane from the phone starts 1 024 samples at 44.1 kHz (23 ms) late
+  (measured on `Tests/Fixtures/audio/tone-440-44k1-500ms.m4a`; iOS
+  encoders prime 2 112). Fix at cutover: read the `elst` media time from
+  the container and drop it before resampling, or accept 23 to 48 ms.
 - **AAC-LC only** through symphonia; HE-AAC is not expected from the iOS
   recorder.
 - **`steno dev` tooling** (`capture-spike`, `aec-bench`, `audio-devices`)
