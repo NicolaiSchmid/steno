@@ -68,6 +68,10 @@ pub enum SpeechError {
     /// A model's inputs, outputs or metadata do not fit the export contract.
     #[error("model shape: {0}")]
     Shape(String),
+    /// The blocking worker thread that runs inference ended without a
+    /// result (a panic or a runtime shutdown).
+    #[error("the speech worker thread stopped: {0}")]
+    Worker(String),
     /// `transcribe` before `prepare` succeeded.
     #[error("the speech engine is not prepared; call prepare() first")]
     NotPrepared,

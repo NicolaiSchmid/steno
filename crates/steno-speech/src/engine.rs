@@ -108,7 +108,7 @@ async fn blocking<T: Send + 'static>(
         Ok(handle) => handle
             .spawn_blocking(work)
             .await
-            .map_err(|e| SpeechError::Shape(format!("speech worker thread failed: {e}"))),
+            .map_err(|e| SpeechError::Worker(e.to_string())),
         Err(_) => Ok(work()),
     }
 }
