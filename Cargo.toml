@@ -45,9 +45,12 @@ symphonia = { version = "0.5", default-features = false, features = ["aac", "caf
 cc = "1"
 # Test only
 similar = "2"
+# Temporary directories in tests; `steno-diarize` also downloads each model
+# into a temporary file of its own.
 tempfile = "3"
 # Dyn-compatible async traits for the boundaries, the content hash every
-# delivery receipt carries, and the executor the trait tests run on.
+# delivery receipt carries, and the executor the trait tests run on, whose
+# blocking pool `steno-diarize` also runs its model calls on.
 async-trait = "0.1"
 sha2 = "0.10"
 tokio = { version = "1", default-features = false, features = ["macros", "rt", "rt-multi-thread"] }
@@ -76,6 +79,13 @@ reqwest = { version = "0.13", default-features = false, features = ["rustls-no-p
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 serde_path_to_error = "0.1"
 url = "2"
+# The diarization crate: the test WAV reader, ONNX Runtime (rustls TLS,
+# prebuilt binaries), the FFT behind the fbank front end and the model
+# download.
+hound = "3"
+ort = { version = "2.0.0-rc.13", default-features = false, features = ["std", "download-binaries", "tls-rustls", "copy-dylibs", "api-27"] }
+rustfft = "6"
+ureq = { version = "3", default-features = false, features = ["rustls", "gzip"] }
 
 [workspace.lints.clippy]
 all = { level = "warn", priority = -1 }

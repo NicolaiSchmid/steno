@@ -1,12 +1,12 @@
 # Cross-platform speech stack: the ONNX path to Mac-quality transcripts
 
-Status: direction agreed 2026-10-01; spikes D, E and F done the same day. Gate G1
-(transcript quality) passed; G2 (idle laptop speed), G3 (diarization) and G4 (GPU) are
-open. Follows `.plans/2026-10-01-cross-platform-spikes.md`, which owns the question, the
-method, the baseline and spikes A to C. This plan does not widen the scope plan's
-"Windows, Linux" non-goal; a later platform plan does if G2 and G3 pass. Until then it is
-spike work under `spikes/` and no product target depends on it. Next: WP2 (sidecar and
-decode loop), WP3 (diarization), and the G2 measurement (WP1c).
+Status: direction agreed 2026-10-01; spikes D, E and F done the same day. Gates G1
+(transcript quality) and G3 (diarization, WP4d of the Rust port plan) passed; G2 (idle
+laptop speed) and G4 (GPU) are open. Follows `.plans/2026-10-01-cross-platform-spikes.md`,
+which owns the question, the method, the baseline and spikes A to C. This plan does not
+widen the scope plan's "Windows, Linux" non-goal; a later platform plan does if G2 and G3
+pass. Until then it is spike work under `spikes/` and no product target depends on it.
+Next: WP2 (sidecar and decode loop) and the G2 measurement (WP1c).
 
 ## Problem
 
@@ -90,8 +90,9 @@ reports keep the interim reasoning.
    8.7 % disagreement with the Swift transcript. Driving ONNX Runtime directly would give
    one chunker, one decoder, one merger and two tensor backends (CoreML on the Mac, ONNX
    Runtime elsewhere) and would remove the dynamic-library and C++-exception problems of
-   the binding for ASR; VAD (decision 1) and segmentation and embedding (decision 6)
-   would still go through the sherpa-onnx C API until ported in their turn. Against it:
+   the binding for ASR; VAD (decision 1) would still go through the sherpa-onnx C API
+   until ported in its turn, while segmentation and embedding already run through `ort`
+   (decision 6). Against it:
    the sherpa-onnx recognizer is so far the only ONNX decode of this export shown to be
    accurate, so any own loop is validated against FLEURS, not word counts. The window of
    c0cd3671 that decodes to zero tokens belongs to the same package: spike D blamed int8
@@ -99,16 +100,16 @@ reports keep the interim reasoning.
    and spike F showed the loop spike E used as a control is itself broken, so its cause
    is open.
 6. **Diarization rebuilt on the matching embedding.** Segmentation (pyannote 3.0) and
-   embedding through the sherpa-onnx C API, our own clustering plus the refinement pass
-   from `.plans/2026-09-29-speaker-calibration.md`, recalibrated on the full Forge corpus
-   against `truth.json`. Why: the stock sherpa-onnx diarizer returned 3 to 16 speakers
-   for one at every threshold (spike B), where FluidAudio, with a different embedding and
-   clustering, returns one. Rules out: the stock sherpa-onnx diarizer. WP3's first
-   measurement is WeSpeaker ResNet34-LM from the sherpa-onnx assets, with ERes2Net's 3 to
-   16 over-count as the baseline; it was never run in a spike, whether it is the family
-   FluidAudio uses is unverified, and CAM++ was queued in spike B and not reached. The
-   pyannote segmentation gate and the embedding licence are confirmed before any product
-   build.
+   embedding (WeSpeaker ResNet34-LM), the sherpa-onnx model files run through `ort` with
+   Steno's own WeSpeaker fbank front end rather than the sherpa-onnx C API, our own
+   clustering plus the refinement pass from `.plans/2026-09-29-speaker-calibration.md`,
+   calibrated on the full Forge corpus against `truth.json`. Why: the stock sherpa-onnx
+   diarizer returned 3 to 16 speakers for one at every threshold (spike B), where
+   FluidAudio, with a different embedding and clustering, returns one. Rules out: the
+   stock sherpa-onnx diarizer. As built in WP4d of the Rust port plan: ResNet34-LM, the
+   first embedding measured, passed G3, so ERes2Net (the stock diarizer's embedding in
+   spike B) and CAM++ were not measured. The pyannote segmentation gate and the embedding
+   licence are confirmed before any product build.
 
 ## Gates
 
@@ -116,7 +117,7 @@ reports keep the interim reasoning.
 |---|---|---|---|
 | G1 transcript quality | Absolute WER against human references (FLEURS German test) on the same machine | Within 1 point of CoreML Parakeet | **Passed 2026-10-01 on arm64** (spike F): own fp32 ONNX 5.3 % vs CoreML 5.5 % on ten 7-minute files with the chunker in the loop, 5.7 % vs 5.9 % on 151 single utterances. x86 run owed with G2 (WP1c): spike B showed x86 and arm64 transcripts differ |
 | G2 idle laptop speed | RTFx and peak RSS of the full ONNX pipeline at 4 threads on an idle x86 Linux laptop of the class users have (8 cores or fewer, 16 GB or less; not atlas under load) | RTFx 20 or better, which is a 60-minute meeting in 3 minutes, and peak RSS no higher than the 3.4 GB measured on the M4 Pro. Incremental transcription (WP5) is measured separately and does not count towards G2 | Open (WP1c). RTFx 20 is what the M4 Pro reaches at 4 threads, so an x86 laptop may miss it; a miss re-sets the gate from the measurement rather than waving it through |
-| G3 diarization | Speaker counts on the full seven calls vs `truth.json` | All five 1:1 calls = 1; the two group calls within 1 of the count in `truth.json` (up to 7). FluidAudio's 2 on both is not the target | Open (WP3) |
+| G3 diarization | Speaker counts on the full seven calls vs `truth.json` | All five 1:1 calls = 1; the two group calls within 1 of the count in `truth.json` (up to 7). FluidAudio's 2 on both is not the target | **Passed 2026-10-03** (PR #164, WP4d of the Rust port plan): both backends 7 of 7 at every cut from 0.20 to 0.60; 0.32 kept as derived from FluidAudio's 0.8 rather than fitted |
 | G4 GPU | RTFx with DirectML on an integrated GPU and CUDA on a discrete one | At least 3x the same machine's CPU figure | Open; no machine |
 
 G1 was originally disagreement with the CoreML transcript on the seven calls (mean
@@ -163,8 +164,10 @@ Open:
   (worth about 7 points on that file). Replace the 190 s clamp with the 60 s
   memory-derived clamp from decision 1; the position-table cap is not the guard.
 - WP3: diarization with our clustering and refinement, WeSpeaker ResNet34-LM as the
-  first embedding measured against ERes2Net's baseline; segmentation gate and embedding
-  licence confirmed first; calibration run on Forge (G3).
+  first embedding; segmentation gate and embedding licence confirmed first; calibration
+  run on Forge (G3). Moved to the Rust port plan as WP4d on 2026-10-02
+  (`.plans/2026-10-02-rust-core-and-tauri-shell.md`), where ResNet34-LM passed G3 and
+  ERes2Net was not measured (decision 6).
 - WP4: GPU providers (DirectML, CUDA) behind a runtime probe with CPU fallback;
   whisper.cpp Vulkan engine (G4). Needs a Windows machine with an integrated GPU and a
   Linux machine with NVIDIA; neither exists in the current fleet.
