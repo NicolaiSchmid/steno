@@ -233,7 +233,7 @@ fn too_large(limit: usize) -> HandoverResponse {
 /// [`REJECTED_BODY_DRAIN`]) so the client reads the status instead of a
 /// reset, then closes.
 fn reject(
-    shared: &Arc<Shared>,
+    shared: &Shared,
     response: HandoverResponse,
     mut body: Incoming,
 ) -> Response<Full<Bytes>> {
