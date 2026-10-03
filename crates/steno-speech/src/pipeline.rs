@@ -237,16 +237,42 @@ impl<B: SpeechBackend> Transcriber<B> {
         }
         if best_words > original_words {
             stats.recoveries_accepted += 1;
-            // The wider window also decoded up to 12 s of the neighbours'
-            // speech; keep only what the merge expects of a chunk, its range
-            // plus the overlap either side.
             let overlap = sample_count(self.config.chunker.overlap_seconds);
-            let frames = range.start.saturating_sub(overlap) / FRAME_SAMPLES
-                ..=(range.end + overlap) / FRAME_SAMPLES;
-            best.retain(|t| frames.contains(&t.frame));
+            keep_chunk_and_overlap(&mut best, range, overlap, &self.vocab);
         }
         Ok(best)
     }
+}
+
+/// Trims an accepted recovery to what the merge expects of a chunk: its
+/// range plus `overlap` either side, since the wider window also decoded
+/// the neighbours' speech. A word with a piece inside those bounds is kept
+/// whole, from its first piece to its last, so the merge never meets half
+/// a word. `tokens` come from one decode, so their frames do not decrease.
+fn keep_chunk_and_overlap(
+    tokens: &mut Vec<Token>,
+    range: &Range<usize>,
+    overlap: usize,
+    vocab: &Vocab,
+) {
+    let frames =
+        range.start.saturating_sub(overlap) / FRAME_SAMPLES..=(range.end + overlap) / FRAME_SAMPLES;
+    let inside = |t: &Token| frames.contains(&t.frame);
+    let (Some(first), Some(last)) = (
+        tokens.iter().position(inside),
+        tokens.iter().rposition(inside),
+    ) else {
+        tokens.clear();
+        return;
+    };
+    let splice_safe = |t: &Token| vocab.is_splice_safe(t.id);
+    let start = tokens[..=first].iter().rposition(splice_safe).unwrap_or(0);
+    let end = tokens[last + 1..]
+        .iter()
+        .position(splice_safe)
+        .map_or(tokens.len(), |n| last + 1 + n);
+    tokens.truncate(end);
+    tokens.drain(..start);
 }
 
 /// Seconds of VAD speech inside `range`.
@@ -588,6 +614,65 @@ mod tests {
         assert_ne!(first[0].frame, later[0].frame);
         let (tied, _) = recover_with(&[(0.0, 6.0), (0.04, 6.0)]);
         assert_eq!(tied, first);
+    }
+
+    #[test]
+    fn a_recovery_trim_through_a_word_keeps_the_whole_word() {
+        // The trim ends on frame 131 (9 s plus the 1.5 s overlap) and "w7
+        // s27" starts on it. The trimmed window keeps the whole word, so the
+        // merge with the next window, which heard all of it, keeps it whole.
+        let (mut config, mut samples) = empty_chunk_fixture(50);
+        config.recovery.extensions_seconds = vec![(0.0, 6.0)];
+        samples.resize(18 * SAMPLE_RATE, 0.0);
+        overlay(&mut samples, &audio(18.0, 132, &[7, 27]));
+        let mut t = transcriber(config, 110);
+        let mut stats = DecodeStats::default();
+        let range = SAMPLE_RATE..9 * SAMPLE_RATE;
+        let left = t.recover(&samples, &range, Vec::new(), &mut stats).unwrap();
+        assert_eq!(stats.recoveries_accepted, 1);
+        assert_eq!(t.render(&left), "w5s25 w7s27");
+        let next = 15 * SAMPLE_RATE / 2..35 * SAMPLE_RATE / 2;
+        let right = t.decode_range(&samples, next, &mut stats).unwrap();
+        assert_eq!(t.render(&right), "w7s27");
+        let merged = merge_all(&[left, right], 1.5, t.vocab());
+        assert_eq!(t.render(&merged), "w5s25 w7s27");
+    }
+
+    #[test]
+    fn the_trim_keeps_tokens_up_to_the_overlap_and_words_it_cuts_whole() {
+        // The 3 to 9 s chunk with 1.5 s overlap keeps frames 18 to 131.
+        let token = |id, frame| Token {
+            id,
+            frame,
+            confidence: 1.0,
+            duration: 1,
+        };
+        let ids = |tokens: &[Token]| tokens.iter().map(|t| (t.id, t.frame)).collect::<Vec<_>>();
+        let range = 3 * SAMPLE_RATE..9 * SAMPLE_RATE;
+        let overlap = 3 * SAMPLE_RATE / 2;
+        let vocab = vocab();
+        let mut words = vec![token(1, 17), token(2, 18), token(3, 131), token(4, 132)];
+        keep_chunk_and_overlap(&mut words, &range, overlap, &vocab);
+        assert_eq!(ids(&words), [(2, 18), (3, 131)]);
+        // "w1 s21" ends on frame 18 and "w3 s23 s24" starts on 131: both
+        // are kept whole; "w4" and the lone "s25" past it are dropped.
+        let mut cut = vec![
+            token(1, 16),
+            token(21, 18),
+            token(3, 131),
+            token(23, 132),
+            token(24, 133),
+            token(4, 134),
+            token(25, 135),
+        ];
+        keep_chunk_and_overlap(&mut cut, &range, overlap, &vocab);
+        assert_eq!(
+            ids(&cut),
+            [(1, 16), (21, 18), (3, 131), (23, 132), (24, 133)]
+        );
+        let mut outside = vec![token(1, 10), token(2, 140)];
+        keep_chunk_and_overlap(&mut outside, &range, overlap, &vocab);
+        assert!(outside.is_empty());
     }
 
     #[test]
