@@ -765,6 +765,18 @@ impl Host {
             let now = self.now();
             inner.progress.apply(event, now);
             inner.publisher.schedule(BridgeTopic::Progress);
+            if let MeetingEvent::OperationFailed {
+                meeting_id,
+                operation,
+                failure,
+                ..
+            } = event
+                && let Some(detail) = inner.detail.as_mut()
+                && detail.id == *meeting_id
+            {
+                detail.operation_failed(*operation, failure);
+                inner.publisher.schedule(BridgeTopic::MeetingDetail);
+            }
         }
         self.publish();
     }
