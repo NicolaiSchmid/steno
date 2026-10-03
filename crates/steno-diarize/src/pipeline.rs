@@ -152,21 +152,9 @@ impl<B: DiarizationBackend> Pipeline<B> {
             .map(|embedding| embedding.embedding.clone())
             .collect();
         let labels = clustering::cluster(&vectors, &self.config.clustering(threshold));
-        let assignments: Vec<Option<usize>> = labels.iter().map(|label| Some(*label)).collect();
+        let assignments: Vec<Option<usize>> = labels.iter().copied().map(Some).collect();
         let turns = timeline::turns(analysis, &assignments, &self.config.timeline);
-        let chunks: Vec<ClusterChunk> = analysis
-            .embeddings
-            .iter()
-            .zip(&labels)
-            .map(|(embedding, label)| ClusterChunk {
-                speaker_label: timeline::cluster_label(*label),
-                start: embedding.start,
-                end: embedding.end,
-                embedding: embedding.embedding.clone(),
-                quality: 1.0,
-            })
-            .collect();
-        mapping::result(&turns, &chunks)
+        mapping::result(&turns, &chunks(analysis, labels))
     }
 
     /// The refinement pass over a mapped result, this pipeline as the
@@ -194,19 +182,26 @@ impl<B: DiarizationBackend> Pipeline<B> {
             return Ok(None);
         }
         let analysis = self.analyze(audio)?;
-        let chunks: Vec<ClusterChunk> = analysis
-            .embeddings
-            .iter()
-            .map(|embedding| ClusterChunk {
-                speaker_label: timeline::cluster_label(0),
-                start: embedding.start,
-                end: embedding.end,
-                embedding: embedding.embedding.clone(),
-                quality: 1.0,
-            })
-            .collect();
-        Ok(mapping::cluster_embedding(&chunks))
+        let one_voice = std::iter::repeat(0);
+        Ok(mapping::cluster_embedding(&chunks(&analysis, one_voice)))
     }
+}
+
+/// The window embeddings as the mapping's chunks, the `i`-th in the
+/// cluster of the `i`-th label; `mapping::result` sets their quality.
+fn chunks(analysis: &Analysis, labels: impl IntoIterator<Item = usize>) -> Vec<ClusterChunk> {
+    analysis
+        .embeddings
+        .iter()
+        .zip(labels)
+        .map(|(embedding, label)| ClusterChunk {
+            speaker_label: timeline::cluster_label(label),
+            start: embedding.start,
+            end: embedding.end,
+            embedding: embedding.embedding.clone(),
+            quality: 1.0,
+        })
+        .collect()
 }
 
 impl<B: DiarizationBackend> SliceEmbedder for Pipeline<B> {
