@@ -542,31 +542,34 @@ fn spawn_streams(
     Ok(streams)
 }
 
-/// Waits for every stream thread's next event, which must be
-/// `Opened` (`opening`) or `Started`; tears everything down on the first
-/// failure.
-fn await_streams(
+/// The stream thread's next event, which must be `Opened` (`opening`) or
+/// `Started` and a success.
+fn expect_event(launched: &mut Launched, opening: bool) -> Result<(), CaptureError> {
+    let event = next_event(launched, OPEN_TIMEOUT);
+    launched.answered |= event.is_ok();
+    match event {
+        Ok(StreamEvent::Opened(Ok(info))) if opening => {
+            launched.info = Some(info);
+            Ok(())
+        }
+        Ok(StreamEvent::Started(Ok(()))) if !opening => Ok(()),
+        Ok(StreamEvent::Opened(Err(error)) | StreamEvent::Started(Err(error))) | Err(error) => {
+            Err(error)
+        }
+        Ok(_) => Err(CaptureError::BackendFailed(
+            "stream thread out of step".into(),
+        )),
+    }
+}
+
+/// Waits for every stream thread to open its stream; tears everything
+/// down on the first failure.
+fn open_streams(
     stop: &AtomicBool,
     mut streams: Vec<Launched>,
-    opening: bool,
 ) -> Result<Vec<Launched>, CaptureError> {
     for index in 0..streams.len() {
-        let event = next_event(&streams[index], OPEN_TIMEOUT);
-        streams[index].answered |= event.is_ok();
-        let outcome = match event {
-            Ok(StreamEvent::Opened(Ok(info))) if opening => {
-                streams[index].info = Some(info);
-                Ok(())
-            }
-            Ok(StreamEvent::Started(Ok(()))) if !opening => Ok(()),
-            Ok(StreamEvent::Opened(Err(error)) | StreamEvent::Started(Err(error))) | Err(error) => {
-                Err(error)
-            }
-            Ok(_) => Err(CaptureError::BackendFailed(
-                "stream thread out of step".into(),
-            )),
-        };
-        if let Err(error) = outcome {
+        if let Err(error) = expect_event(&mut streams[index], true) {
             tear_down(stop, streams);
             return Err(error);
         }
@@ -574,34 +577,43 @@ fn await_streams(
     Ok(streams)
 }
 
-/// What each opened stream runs per packet: the master routes into the
-/// sink, the follower stages for it.
-fn hand_out_bodies(
+/// Hands each opened stream its per-packet body and waits for it to
+/// start, the follower before the master: the master routes into the
+/// sink, its only producer, so a start that fails has written nothing.
+/// Tears everything down on the first failure.
+fn start_streams(
+    stop: &AtomicBool,
+    mut streams: Vec<Launched>,
     plan: &SplitStreamPlan,
-    streams: &[Launched],
     follower: Option<&Arc<FollowerLane>>,
     sink: &Arc<LaneFrameSink>,
-) {
-    for launched in streams {
+) -> Result<Vec<Launched>, CaptureError> {
+    // `spawn_streams` put the master first.
+    for index in (0..streams.len()).rev() {
+        let launched = &mut streams[index];
         let buffer_frames = launched.info.as_ref().map_or(0, |i| i.buffer_frames);
         let body = if launched.source == plan.master {
-            StreamBody::Master {
+            Some(StreamBody::Master {
                 router: PacketRouter::new(
                     plan.layout.sources.clone(),
                     follower.cloned(),
                     buffer_frames,
                 ),
                 sink: Arc::clone(sink),
-            }
-        } else if let Some(lane) = follower {
-            StreamBody::follower(Arc::clone(lane), buffer_frames)
+            })
         } else {
-            continue;
+            follower.map(|lane| StreamBody::follower(Arc::clone(lane), buffer_frames))
         };
-        if let Some(sender) = &launched.body {
+        // Without a body the thread exits, which `expect_event` reports.
+        if let (Some(body), Some(sender)) = (body, launched.body.take()) {
             let _ = sender.send(body);
         }
+        if let Err(error) = expect_event(launched, false) {
+            tear_down(stop, streams);
+            return Err(error);
+        }
     }
+    Ok(streams)
 }
 
 /// Starts the watcher thread and waits for it to register. A capture
@@ -648,7 +660,7 @@ impl CaptureBackend for LiveCaptureBackend {
 
         let streams = spawn_streams(&plan, input_device_uid, &stop, &watcher)?;
         // Every stream opened, or none runs.
-        let mut streams = await_streams(&stop, streams, true)?;
+        let streams = open_streams(&stop, streams)?;
         let info = |source: StreamSource| {
             streams
                 .iter()
@@ -660,11 +672,7 @@ impl CaptureBackend for LiveCaptureBackend {
         let follower = plan.follower.and_then(|source| {
             info(source).map(|i| Arc::new(FollowerLane::for_period(i.period_frames)))
         });
-        hand_out_bodies(&plan, &streams, follower.as_ref(), &sink);
-        streams = await_streams(&stop, streams, false)?;
-        for launched in &mut streams {
-            launched.body.take();
-        }
+        let streams = start_streams(&stop, streams, &plan, follower.as_ref(), &sink)?;
         if let Some(kind) = system.as_ref().and_then(|s| s.loopback) {
             tracing::info!("system lane on {kind:?} loopback");
         }
