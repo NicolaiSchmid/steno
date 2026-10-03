@@ -20,7 +20,7 @@
 
 use std::fs::{self, File};
 use std::io::{Read, Write};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use sha2::{Digest, Sha256};
 use steno_core::StenoPaths;
@@ -105,6 +105,32 @@ impl ModelAsset {
     pub fn total_size(&self) -> u64 {
         self.files.iter().map(|f| f.size).sum()
     }
+
+    /// Refuses an id or a file name that is not exactly one normal path
+    /// component (`..`, an absolute path, an empty string, a slash), so
+    /// the manifest can never name a path outside the root.
+    pub fn validate(&self) -> Result<(), SpeechError> {
+        for name in
+            std::iter::once(self.id.as_str()).chain(self.files.iter().map(|f| f.name.as_str()))
+        {
+            if !is_plain_name(name) {
+                return Err(SpeechError::InvalidName {
+                    asset: self.id.clone(),
+                    name: name.to_owned(),
+                });
+            }
+        }
+        Ok(())
+    }
+}
+
+/// True when `name` is one `Component::Normal` and nothing else.
+fn is_plain_name(name: &str) -> bool {
+    let mut components = Path::new(name).components();
+    matches!(
+        (components.next(), components.next()),
+        (Some(Component::Normal(_)), None)
+    )
 }
 
 /// One progress report of a download.
@@ -161,7 +187,9 @@ impl ModelStore {
         self.root.join(&asset.id)
     }
 
-    /// Files absent or of the wrong size, by name.
+    /// Files absent or of the wrong size, by name; a file whose name
+    /// fails [`ModelAsset::validate`] is never looked up and counts as
+    /// missing.
     #[must_use]
     pub fn missing_files(&self, asset: &ModelAsset) -> Vec<String> {
         let directory = self.directory(asset);
@@ -169,8 +197,9 @@ impl ModelStore {
             .files
             .iter()
             .filter(|file| {
-                !fs::metadata(directory.join(&file.name))
-                    .is_ok_and(|m| m.is_file() && m.len() == file.size)
+                asset.validate().is_err()
+                    || !fs::metadata(directory.join(&file.name))
+                        .is_ok_and(|m| m.is_file() && m.len() == file.size)
             })
             .map(|file| file.name.clone())
             .collect()
@@ -185,6 +214,7 @@ impl ModelStore {
 
     /// Hashes every installed file against the manifest.
     pub fn verify(&self, asset: &ModelAsset) -> Result<(), SpeechError> {
+        asset.validate()?;
         let missing = self.missing_files(asset);
         if !missing.is_empty() {
             return Err(SpeechError::NotInstalled {
@@ -216,6 +246,7 @@ impl ModelStore {
         asset: &ModelAsset,
         progress: &mut dyn FnMut(DownloadProgress<'_>),
     ) -> Result<PathBuf, SpeechError> {
+        asset.validate()?;
         let directory = self.directory(asset);
         let missing = self.missing_files(asset);
         if missing.is_empty() {
@@ -236,6 +267,7 @@ impl ModelStore {
 
     /// Deletes the asset's directory.
     pub fn remove(&self, asset: &ModelAsset) -> Result<(), SpeechError> {
+        asset.validate()?;
         let directory = self.directory(asset);
         if directory.exists() {
             fs::remove_dir_all(&directory).map_err(|e| SpeechError::io(&directory, e))?;
@@ -512,6 +544,48 @@ mod tests {
             store.verify(&asset),
             Err(SpeechError::Checksum { .. })
         ));
+    }
+
+    #[test]
+    fn names_that_could_leave_the_root_are_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = ModelStore::new(dir.path());
+        let body = b"x".to_vec();
+        for (id, name) in [
+            ("../escape", "model.onnx"),
+            ("test-asset", "../model.onnx"),
+            ("test-asset", "/abs/model.onnx"),
+            ("test-asset", ""),
+            ("", "model.onnx"),
+            ("a/b", "model.onnx"),
+            (".", "model.onnx"),
+        ] {
+            let mut bad = asset(None, &body, &digest(&body));
+            bad.id = id.to_owned();
+            bad.files[0].name = name.to_owned();
+            let error = bad.validate().unwrap_err();
+            assert!(
+                matches!(error, SpeechError::InvalidName { .. }),
+                "{id} {name}: {error}"
+            );
+            assert!(matches!(
+                store.ensure(&bad, &mut |_| {}),
+                Err(SpeechError::InvalidName { .. })
+            ));
+            assert!(matches!(
+                store.verify(&bad),
+                Err(SpeechError::InvalidName { .. })
+            ));
+            assert!(matches!(
+                store.remove(&bad),
+                Err(SpeechError::InvalidName { .. })
+            ));
+            assert!(!store.is_installed(&bad));
+        }
+        for asset in ModelAsset::all() {
+            asset.validate().unwrap();
+        }
+        assert!(fs::read_dir(dir.path()).unwrap().next().is_none());
     }
 
     #[test]
