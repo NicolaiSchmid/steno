@@ -461,8 +461,8 @@ fn a_buffer_shaped_unlike_the_layout_becomes_silence() {
     assert_eq!(read(&sink, 1, 4), vec![15.0, 35.0, 55.0, 75.0]);
 }
 
-/// The microphone's buffer arrives with no channels (or not at all): the
-/// callback's length comes from the tap's buffer, the microphone lane is
+/// The microphone's buffer arrives with no channels, with no bytes, or not
+/// at all: the callback's length comes from the tap's buffer, the microphone lane is
 /// silence and the tap's audio still lands.
 #[test]
 fn an_unusable_first_buffer_costs_only_its_own_lane() {
@@ -484,6 +484,20 @@ fn an_unusable_first_buffer_costs_only_its_own_lane() {
     let sink = LaneFrameSink::new(&[AudioLane::Mic, AudioLane::System]);
     // SAFETY: the one data pointer refers to an array alive for the call.
     unsafe { deliver(&[no_channels, tap_view], &layout.sources, &sink) };
+    assert_eq!(sink.available_to_read(), 4);
+    assert_eq!(read(&sink, 0, 4), vec![0.0; 4]);
+    assert_eq!(read(&sink, 1, 4), vec![15.0, 35.0, 55.0, 75.0]);
+
+    // The shape the HAL delivers for an input with nothing this cycle: its
+    // channel count, no data and no bytes.
+    let empty = BufferView {
+        channels: 1,
+        data: None,
+        byte_size: 0,
+    };
+    let sink = LaneFrameSink::new(&[AudioLane::Mic, AudioLane::System]);
+    // SAFETY: as above.
+    unsafe { deliver(&[empty, tap_view], &layout.sources, &sink) };
     assert_eq!(sink.available_to_read(), 4);
     assert_eq!(read(&sink, 0, 4), vec![0.0; 4]);
     assert_eq!(read(&sink, 1, 4), vec![15.0, 35.0, 55.0, 75.0]);
