@@ -76,16 +76,18 @@ pub fn coreml_model_directory(models_directory: &Path) -> PathBuf {
         .join("parakeet-tdt-0.6b-v3")
 }
 
-/// What the `CoreML` Parakeet loads from its directory; the bundles count
-/// when their `coremldata.bin` is in place, as Swift's
+/// What makes the `CoreML` Parakeet installed: Swift's
+/// `ModelAsset.requiredFiles` (`Sources/StenoSpeech/Models/ModelAsset.swift`),
+/// the bundles counting when their `coremldata.bin` is in place, as
 /// `ModelStore.isInstalled` checks. `steno_speech_coreml::backend` names
-/// the same files (a macOS test pins them).
+/// the same files (a macOS test pins them); it also reads the model
+/// repository's `parakeet_v3_vocab.json` when the Swift name is absent.
 pub const COREML_PARAKEET_FILES: [&str; 5] = [
     "Preprocessor.mlmodelc",
     "Encoder.mlmodelc",
     "Decoder.mlmodelc",
     "JointDecisionv3.mlmodelc",
-    "parakeet_v3_vocab.json",
+    "parakeet_vocab.json",
 ];
 
 /// Whether every file the `CoreML` Parakeet loads is complete in `directory`.
