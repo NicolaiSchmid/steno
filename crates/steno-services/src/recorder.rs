@@ -10,7 +10,7 @@ use std::thread::JoinHandle;
 use chrono::{FixedOffset, Utc};
 use steno_audio::{CaptureConfiguration, CaptureSession, LaneLevels as AudioLevels};
 use steno_bridge::{CaptureMode, PermissionKind, RecordingState};
-use steno_core::{MeetingSource, RecordingEndReason, Store};
+use steno_core::{MeetingSource, RecordingEndReason, Settings, Store};
 use steno_host::services::{LaneLevels, Permissions, Recorder, RecorderStatus, SpeechModels};
 use steno_host::speech::ModelAsset;
 use steno_pipeline::{LocalRecordingIntake, RecordingResult};
@@ -124,11 +124,14 @@ impl CaptureRecorder {
 
     /// Loads the speech engine and the diarizer in the background while
     /// the recording runs, so processing does not wait for the cold load;
-    /// only when both models are installed, so it never starts a
-    /// download. Swift: `AppEnvironment.warmUpPipelineIfModelsInstalled`,
-    /// called when a recording starts.
-    fn warm_up_if_installed(&self) {
-        if !(self.speech_models.is_installed(ModelAsset::ParakeetV3)
+    /// only when the models of the engine `settings` name and the
+    /// diarizer's are installed, so it never starts a download. Swift:
+    /// `AppEnvironment.warmUpPipelineIfModelsInstalled`, called when a
+    /// recording starts.
+    fn warm_up_if_installed(&self, settings: &Settings) {
+        if !(self
+            .speech_models
+            .engine_installed(&settings.speech_engine_id)
             && self.speech_models.is_installed(ModelAsset::OfflineDiarizer))
         {
             return;
@@ -141,7 +144,8 @@ impl CaptureRecorder {
         });
     }
 
-    fn start_inner(&self, mode: CaptureMode, call_app: Option<&str>) -> Result<(), String> {
+    /// Starts the session and the meeting; the settings it started under.
+    fn start_inner(&self, mode: CaptureMode, call_app: Option<&str>) -> Result<Settings, String> {
         let settings = self.store.settings().map_err(|e| e.to_string())?;
         let audio_folder = steno_core::paths::file_url_path(&settings.audio_folder)
             .ok_or_else(|| format!("audio folder is not a file URL: {}", settings.audio_folder))?;
@@ -209,7 +213,7 @@ impl CaptureRecorder {
         if let Some(active) = self.inner().active.as_mut() {
             active.level_thread = Some(thread);
         }
-        Ok(())
+        Ok(settings)
     }
 
     fn stop_inner(&self, reason: RecordingEndReason) {
@@ -310,7 +314,7 @@ impl Recorder for CaptureRecorder {
         }
         self.notify();
         match self.start_inner(mode, call_app) {
-            Ok(()) => self.warm_up_if_installed(),
+            Ok(settings) => self.warm_up_if_installed(&settings),
             Err(error) => {
                 let mut inner = self.inner();
                 inner.status.state = RecordingState::Idle;
@@ -378,10 +382,21 @@ mod tests {
         diarizer: Arc<FakeDiarizer>,
     }
 
+    /// A recorder over fake models with `installed` on disk.
     fn harness(installed: &[ModelAsset]) -> Harness {
+        let models = Arc::new(FakeSpeechModels::default());
+        for asset in installed {
+            models.set_installed(*asset, None);
+        }
+        harness_over(models, "parakeet-v3")
+    }
+
+    /// A recorder over `models`, the settings naming `engine_id`.
+    fn harness_over(models: Arc<dyn SpeechModels>, engine_id: &str) -> Harness {
         let (dir, store) = temp_store();
         let mut settings = store.settings().unwrap();
         settings.audio_folder = file_url(&dir.path().join("audio"), true);
+        engine_id.clone_into(&mut settings.speech_engine_id);
         store.save_settings(&settings).unwrap();
         let engine = Arc::new(FakeSpeechEngine::default());
         let diarizer = Arc::new(FakeDiarizer::default());
@@ -389,10 +404,6 @@ mod tests {
         dependencies.speech_engine = engine.clone();
         dependencies.diarizer = diarizer.clone();
         let pipeline = current_pipeline(dependencies);
-        let models = Arc::new(FakeSpeechModels::default());
-        for asset in installed {
-            models.set_installed(*asset, None);
-        }
         let make_session: MakeCaptureSession = Arc::new(|configuration: CaptureConfiguration| {
             let lanes = configuration.lanes();
             let mut options =
@@ -458,6 +469,34 @@ mod tests {
         assert_eq!(harness.engine.preparations.count(), 0);
         assert_eq!(harness.diarizer.preparations.count(), 0);
         // Processing the recording loads them, as it always did.
+        stop(&harness.recorder).await;
+    }
+
+    /// The configured engine decides which model counts: with the `CoreML`
+    /// Parakeet and the diarizer on disk but another engine id stored (a
+    /// Swift user who picked Whisper), the ONNX engine would load, its
+    /// models are missing, and the warm-up neither loads nor downloads.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_recording_start_checks_the_models_of_the_configured_engine() {
+        let models_dir = tempfile::tempdir().unwrap();
+        let models = Arc::new(crate::speech::ModelStoreSpeechModels::new(
+            models_dir.path(),
+        ));
+        crate::speech::testing::install_coreml_parakeet(&models.coreml);
+        crate::speech::testing::install_onnx_diarizer(&models);
+        assert!(models.is_installed(ModelAsset::OfflineDiarizer));
+        let before = crate::speech::testing::files_under(models_dir.path());
+
+        let harness = harness_over(models, "whisperkit-large-v3-turbo");
+        start(&harness.recorder).await;
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        assert_eq!(harness.engine.preparations.count(), 0);
+        assert_eq!(harness.diarizer.preparations.count(), 0);
+        assert_eq!(
+            crate::speech::testing::files_under(models_dir.path()),
+            before,
+            "nothing was downloaded"
+        );
         stop(&harness.recorder).await;
     }
 }

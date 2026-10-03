@@ -240,6 +240,16 @@ pub trait Pipeline: Send + Sync {
 /// `Sources/StenoSpeech/Models/ModelStore.swift`.
 pub trait SpeechModels: Send + Sync {
     fn is_installed(&self, asset: ModelAsset) -> bool;
+    /// Whether every model the speech engine `engine_id` loads is on disk,
+    /// so loading it starts no download. The default asks for the engine's
+    /// asset; the services, which pick the engine per platform, answer for
+    /// the engine they build. Swift: `models.isInstalled(engine.asset)` in
+    /// `AppEnvironment.warmUpPipelineIfModelsInstalled`.
+    fn engine_installed(&self, engine_id: &str) -> bool {
+        engine_id
+            .parse::<crate::speech::SpeechEngineId>()
+            .is_ok_and(|engine| self.is_installed(engine.asset()))
+    }
     fn installed_size(&self, asset: ModelAsset) -> Option<i64>;
     /// Downloads the asset, reporting `(fraction, phase)` as it goes;
     /// returns once installed.

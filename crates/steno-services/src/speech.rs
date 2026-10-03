@@ -120,7 +120,7 @@ pub fn diarize_store(speech: &ModelStore) -> steno_diarize::models::ModelStore {
 pub fn speech_engine(settings: &Settings, models_directory: &Path) -> Arc<dyn SpeechEngine> {
     #[cfg(target_os = "macos")]
     {
-        if settings.speech_engine_id == steno_speech_coreml::ENGINE_ID {
+        if runs_on_coreml(&settings.speech_engine_id) {
             return Arc::new(LanguageTaggingEngine::new(Arc::new(
                 steno_speech_coreml::CoreMlParakeetEngine::new(coreml_model_directory(
                     models_directory,
@@ -136,6 +136,22 @@ pub fn speech_engine(settings: &Settings, models_directory: &Path) -> Arc<dyn Sp
             ..OnnxOptions::default()
         },
     ))
+}
+
+/// Whether [`speech_engine`] builds the `CoreML` engine for `engine_id`:
+/// `parakeet-v3` on the Mac; every other id, and every id elsewhere, gets
+/// the ONNX engine.
+#[must_use]
+pub fn runs_on_coreml(engine_id: &str) -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        engine_id == steno_speech_coreml::ENGINE_ID
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = engine_id;
+        false
+    }
 }
 
 /// An engine whose segments come back without a language, with
@@ -243,6 +259,19 @@ impl ModelStoreSpeechModels {
 }
 
 impl SpeechModels for ModelStoreSpeechModels {
+    /// The engine [`speech_engine`] builds for `engine_id`: the `CoreML`
+    /// Parakeet's files, or every model the ONNX engine loads (the VAD and
+    /// the fp32 Parakeet), whatever id the settings hold.
+    fn engine_installed(&self, engine_id: &str) -> bool {
+        if runs_on_coreml(engine_id) {
+            coreml_parakeet_installed(&self.coreml)
+        } else {
+            steno_speech::ModelAsset::all()
+                .iter()
+                .all(|asset| self.speech.is_installed(asset))
+        }
+    }
+
     fn is_installed(&self, asset: ModelAsset) -> bool {
         match asset {
             ModelAsset::OfflineDiarizer => self.diarizer_paths().iter().all(|path| path.is_file()),
@@ -363,6 +392,54 @@ pub const ONNX_PARAKEET_NAME: &str = "Parakeet TDT 0.6B v3 (fp32)";
 /// The model the ONNX export was converted from.
 pub const ONNX_PARAKEET_SOURCE: &str = "nvidia/parakeet-tdt-0.6b-v3";
 
+/// Model files on disk for the tests, so no test downloads one.
+#[cfg(test)]
+pub(crate) mod testing {
+    use std::collections::BTreeSet;
+    use std::path::{Path, PathBuf};
+
+    use super::{COREML_PARAKEET_FILES, ModelStoreSpeechModels};
+
+    /// The `CoreML` Parakeet in `directory`, complete: each bundle with a
+    /// one-byte `coremldata.bin`, the vocabulary as `{}`.
+    pub fn install_coreml_parakeet(directory: &Path) {
+        for name in COREML_PARAKEET_FILES {
+            let path = directory.join(name);
+            if name.ends_with(".mlmodelc") {
+                std::fs::create_dir_all(&path).unwrap();
+                std::fs::write(path.join("coremldata.bin"), b"x").unwrap();
+            } else {
+                std::fs::create_dir_all(directory).unwrap();
+                std::fs::write(&path, b"{}").unwrap();
+            }
+        }
+    }
+
+    /// The two ONNX diarizer models, as placeholder files.
+    pub fn install_onnx_diarizer(models: &ModelStoreSpeechModels) {
+        for path in models.diarizer_paths() {
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, b"onnx").unwrap();
+        }
+    }
+
+    /// Every file under `directory`.
+    pub fn files_under(directory: &Path) -> BTreeSet<PathBuf> {
+        let mut files = BTreeSet::new();
+        let mut pending = vec![directory.to_path_buf()];
+        while let Some(next) = pending.pop() {
+            for entry in std::fs::read_dir(&next).into_iter().flatten().flatten() {
+                if entry.path().is_dir() {
+                    pending.push(entry.path());
+                } else {
+                    files.insert(entry.path());
+                }
+            }
+        }
+        files
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use steno_core::paths::file_url;
@@ -433,15 +510,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let models = ModelStoreSpeechModels::new(dir.path());
         assert!(!models.is_installed(ModelAsset::ParakeetV3));
-        for name in COREML_PARAKEET_FILES {
-            let path = models.coreml.join(name);
-            std::fs::create_dir_all(&path).unwrap();
-            std::fs::write(path.join("coremldata.bin"), b"x").unwrap();
-        }
-        // Only the vocabulary needs to be a plain file.
-        let vocabulary = models.coreml.join("parakeet_v3_vocab.json");
-        std::fs::remove_dir_all(&vocabulary).unwrap();
-        std::fs::write(&vocabulary, b"{}").unwrap();
+        testing::install_coreml_parakeet(&models.coreml);
         assert_eq!(
             models.is_installed(ModelAsset::ParakeetV3),
             cfg!(target_os = "macos"),
@@ -453,6 +522,23 @@ mod tests {
             assert!(!models.coreml.exists());
             assert!(!models.is_installed(ModelAsset::ParakeetV3));
         }
+    }
+
+    /// The warm-up's question: with the `CoreML` Parakeet on disk, only
+    /// `parakeet-v3` on the Mac runs on it; any other id, and every id off
+    /// the Mac, needs the ONNX models, which are missing.
+    #[test]
+    fn the_configured_engine_is_installed_only_when_the_model_it_loads_is() {
+        let dir = tempfile::tempdir().unwrap();
+        let models = ModelStoreSpeechModels::new(dir.path());
+        assert!(!models.engine_installed("parakeet-v3"));
+        testing::install_coreml_parakeet(&models.coreml);
+        assert_eq!(
+            models.engine_installed("parakeet-v3"),
+            cfg!(target_os = "macos")
+        );
+        assert!(!models.engine_installed("whisperkit-large-v3-turbo"));
+        assert!(!models.engine_installed("anything"));
     }
 
     #[cfg(target_os = "macos")]
