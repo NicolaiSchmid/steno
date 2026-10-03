@@ -160,14 +160,24 @@ impl ModelStore {
         }
     }
 
-    /// `STENO_MODELS_DIR` if set to an absolute path, else the default root.
+    /// The root `STENO_MODELS_DIR` names, else the default root.
     #[must_use]
     pub fn from_environment() -> Self {
-        let root = std::env::var_os(Self::ENVIRONMENT_VARIABLE)
-            .map(PathBuf::from)
-            .filter(|p| p.is_absolute())
-            .unwrap_or_else(Self::default_root);
-        Self::new(root)
+        Self::new(Self::environment_root().unwrap_or_else(Self::default_root))
+    }
+
+    /// The directory `STENO_MODELS_DIR` names, made absolute against the
+    /// current directory when it is relative; `None` when unset or empty.
+    /// The model-gated tests use the same reading.
+    #[must_use]
+    pub fn environment_root() -> Option<PathBuf> {
+        let value = std::env::var_os(Self::ENVIRONMENT_VARIABLE).filter(|v| !v.is_empty())?;
+        let path = PathBuf::from(value);
+        if path.is_absolute() {
+            Some(path)
+        } else {
+            Some(std::env::current_dir().map_or(path.clone(), |cwd| cwd.join(path)))
+        }
     }
 
     /// `<support directory>/Models`, the Swift app's models root.

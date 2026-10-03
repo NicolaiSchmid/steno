@@ -14,9 +14,10 @@
 
 use std::path::{Path, PathBuf};
 
-/// The models root, when the test data is present.
+/// The models root, when the test data is present; read the way the
+/// engine reads it.
 pub fn models_dir() -> Option<PathBuf> {
-    let root = std::env::var_os("STENO_MODELS_DIR").map(PathBuf::from)?;
+    let root = steno_speech::ModelStore::environment_root()?;
     if root
         .join("parakeet-tdt-0.6b-v3-fp32")
         .join("encoder.onnx")
