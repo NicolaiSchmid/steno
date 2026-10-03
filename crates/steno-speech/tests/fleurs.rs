@@ -24,12 +24,13 @@ use steno_speech::{
 };
 
 const SPIKE_F_MEAN_WER: f64 = 0.053;
+const MODELS: &str = "the fp32 export and Silero VAD";
 const TOLERANCE: f64 = 0.005;
 
 #[test]
 fn the_export_splits_into_8193_pieces_and_five_duration_bins() {
     let Some(models) = common::installed_store() else {
-        return common::skip("STENO_MODELS_DIR");
+        return common::skip("STENO_MODELS_DIR", MODELS);
     };
     let (backend, vocab) = OnnxBackend::load(
         &models.directory(&ModelAsset::parakeet_v3_fp32()),
@@ -55,10 +56,13 @@ fn the_export_splits_into_8193_pieces_and_five_duration_bins() {
 #[test]
 fn fleurs_cat_mean_wer_is_within_half_a_point_of_spike_f() {
     let Some(models) = common::installed_store() else {
-        return common::skip("STENO_MODELS_DIR");
+        return common::skip("STENO_MODELS_DIR", MODELS);
     };
     let Some(fleurs) = common::fleurs_dir() else {
-        return common::skip("STENO_FLEURS_DIR");
+        return common::skip(
+            "STENO_FLEURS_DIR",
+            "the FLEURS German cat/ and utt/ directories",
+        );
     };
     let mut transcriber = OnnxSpeechEngine::open_transcriber(
         &models,

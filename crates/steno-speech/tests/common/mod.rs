@@ -36,9 +36,10 @@ pub fn fleurs_dir() -> Option<PathBuf> {
     root.join("cat").is_dir().then_some(root)
 }
 
-/// Says which variable would have let the model-gated test run.
-pub fn skip(variable: &str) {
-    eprintln!("skipped: {variable} is unset or does not point at the data");
+/// Says which variable would have let the model-gated test run, and what
+/// the directory it names needs.
+pub fn skip(variable: &str, needs: &str) {
+    eprintln!("skipped: {variable} is unset or lacks {needs}");
 }
 
 /// Reads a 16 kHz mono PCM-16 WAV into `f32` samples.

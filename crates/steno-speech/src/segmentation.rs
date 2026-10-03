@@ -310,7 +310,7 @@ mod tests {
     }
 
     #[test]
-    fn splits_on_gaps_and_sentence_ends_and_caps_length() {
+    fn segments_split_at_gaps_and_sentence_ends_and_cap_their_length() {
         let segments = TranscriptSegmenter::default().segments(&words(&[
             ("eins", 0.0, 0.3),
             ("zwei", 0.4, 0.7),
@@ -360,7 +360,7 @@ mod tests {
     }
 
     #[test]
-    fn pieces_get_fluid_audio_timings() {
+    fn pieces_take_fluid_audio_timings() {
         let vocab = Vocab::from_pieces(["▁ja", "<blk>"].map(str::to_owned).to_vec()).unwrap();
         let pieces = timed_pieces(
             &[

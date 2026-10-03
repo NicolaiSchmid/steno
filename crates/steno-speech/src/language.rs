@@ -308,7 +308,7 @@ mod tests {
     }
 
     #[test]
-    fn tags_german_and_english_segments() {
+    fn german_and_english_segments_get_their_tags() {
         let tagged = tagger().tag(
             vec![
                 segment("wir müssen das heute noch machen", 0.0, 2.0),
