@@ -1,10 +1,11 @@
 //! The live capture backend: on macOS a CoreAudio process tap plus the
 //! microphone in a private aggregate device with one IOProc, device-change
-//! listeners, coalescing and the rebuild report. PipeWire and WASAPI are
-//! the stubs here, failing at `start`, until WP5b and WP10 of
-//! `.plans/2026-10-02-rust-core-and-tauri-shell.md` fill them; both
-//! implement [`CaptureBackend`](super::CaptureBackend) behind this same
-//! name.
+//! listeners, coalescing and the rebuild report. On Windows WASAPI: process
+//! loopback and the capture endpoint as two streams on their own threads
+//! (`wasapi`, WP10, compile-verified only; see its module doc). PipeWire is
+//! the stub here, failing at `start`, until WP5b of
+//! `.plans/2026-10-02-rust-core-and-tauri-shell.md` fills it. All implement
+//! [`CaptureBackend`](super::CaptureBackend) behind this same name.
 //! Swift: `Sources/StenoAudio/Capture/LiveCaptureBackend.swift`.
 
 #[cfg(target_os = "macos")]
@@ -23,7 +24,12 @@ pub use devices::AudioDevices;
 #[cfg(target_os = "macos")]
 pub use hal::CoreAudioError;
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(windows)]
+pub mod wasapi;
+#[cfg(windows)]
+pub use wasapi::{AudioDevices, LiveCaptureBackend};
+
+#[cfg(not(any(target_os = "macos", windows)))]
 pub use stub::LiveCaptureBackend;
 
 /// One device as `steno dev audio-devices` and the app's input picker see
@@ -70,7 +76,7 @@ impl AudioDeviceInfo {
     }
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", windows)))]
 mod stub {
     use std::sync::Arc;
 
