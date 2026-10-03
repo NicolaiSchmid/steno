@@ -52,10 +52,24 @@
 //! IOProc; everything below it is the production path, which is what makes
 //! the pipeline testable on every OS. `unsafe` is confined to the FFI
 //! edges, each with its invariant beside it: the Core Audio binding
-//! (`capture::live::hal`, `capture::live::backend`), the Speex FFI
-//! (`aec::speex`), the ring and its raw-pointer callers (`realtime::ring`,
-//! `realtime::sink`, `realtime::io_proc`), and the counting allocator
-//! (`testing::rt`).
+//! (`capture::live::hal`, `capture::live::backend`), the WASAPI binding
+//! (`capture::live::wasapi::com`), the Speex FFI (`aec::speex`), the ring
+//! and its raw-pointer callers (`realtime::ring`, `realtime::sink`,
+//! `realtime::io_proc`), and the counting allocator (`testing::rt`).
+//!
+//! # Platforms
+//!
+//! The live backend and the process-activity source are Core Audio on
+//! macOS and WASAPI on Windows; on Linux they are stubs until PipeWire
+//! (WP5b). **The Windows backend is compile-verified only:** no Windows
+//! machine has run it. It is written against Microsoft's documentation,
+//! built, linted and unit-tested on the `windows-latest` CI runner, which
+//! has no audio device; its per-packet bodies (`realtime::streams`), the
+//! stream plan (`capture::split_streams`) and the session mapping
+//! (`detection::sessions`) are platform-independent and tested on every
+//! OS, the zero-allocation proof included. The live checks in
+//! `tests/live_windows.rs` are `--ignored` until a Windows machine runs
+//! them.
 //!
 //! Swift: `Sources/StenoAudio/StenoAudio.swift`.
 
