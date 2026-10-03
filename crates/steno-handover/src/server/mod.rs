@@ -256,12 +256,15 @@ async fn accept_loop(
 ) {
     let mut connections = JoinSet::new();
     loop {
+        // Stop first, so nothing is accepted once it is asked for; reaping
+        // before accepting keeps a connection flood from growing the set.
         let accepted = tokio::select! {
-            accepted = listener.accept() => accepted,
+            biased;
             () = stopped(&mut stopping) => break,
             // Reap finished connections so the set does not grow for the
             // life of the listener.
             Some(_) = connections.join_next(), if !connections.is_empty() => continue,
+            accepted = listener.accept() => accepted,
         };
         let (stream, _) = match accepted {
             Ok(accepted) => accepted,
