@@ -64,15 +64,28 @@ impl Store {
         })
     }
 
-    /// Writes one rate outright (the pipeline folds the sample first).
-    pub fn save_stage_rate(
+    /// Folds one measurement into its row inside one write: `fold` sees
+    /// the stored rate (`None` before the first sample) and returns the
+    /// rate to keep. Swift: `MeetingStore.record`.
+    pub fn update_stage_rate(
         &self,
         stage: PipelineStage,
         key: &str,
-        rate: StageRate,
         updated_at: DateTime<Utc>,
-    ) -> Result<()> {
+        fold: impl FnOnce(Option<StageRate>) -> StageRate,
+    ) -> Result<StageRate> {
         self.write(|transaction| {
+            let current = query_all(
+                transaction,
+                "SELECT stage, key, samples, secondsPerUnit, updatedAt FROM stageRate \
+                 WHERE stage = ?1 AND key = ?2",
+                params![DbEnum(stage), key],
+                from_row,
+            )?
+            .into_iter()
+            .next()
+            .map(|row| row.rate);
+            let rate = fold(current);
             transaction.execute(
                 "INSERT INTO stageRate (stage, key, samples, secondsPerUnit, updatedAt) \
                  VALUES (?1, ?2, ?3, ?4, ?5) \
@@ -86,7 +99,7 @@ impl Store {
                     DbDate(updated_at)
                 ],
             )?;
-            Ok(())
+            Ok(rate)
         })
     }
 }

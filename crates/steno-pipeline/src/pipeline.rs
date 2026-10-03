@@ -38,7 +38,7 @@ use crate::run::ProcessingRun;
 
 /// The one failure type: any error inside a stage becomes this, and
 /// [`ProcessingPipeline::process`] marks the meeting failed in one place.
-/// Swift: `PipelineFailure`.
+/// Swift: `PipelineFailure` in `Sources/StenoCore/Pipeline/PipelineStage.swift`.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, thiserror::Error)]
 pub struct PipelineFailure {
     pub stage: PipelineStage,
@@ -69,11 +69,14 @@ impl fmt::Display for PipelineFailure {
 
 type Result<T> = std::result::Result<T, PipelineFailure>;
 
-/// Wall-clock stamps for rows; tests pin it. Swift: `now`.
+/// Wall-clock stamps for rows; tests pin it. Swift: `PipelineDependencies.now`
+/// in `Sources/StenoCore/Pipeline/ProcessingPipeline.swift`.
 pub type Now = Arc<dyn Fn() -> DateTime<Utc> + Send + Sync>;
 
 /// A monotonic clock in seconds, for stage durations. Swift:
-/// `Clock<Duration>`; tests pass a manual one.
+/// `PipelineDependencies.clock` (a `Clock<Duration>`) in
+/// `Sources/StenoCore/Pipeline/ProcessingPipeline.swift`; tests pass a
+/// manual one.
 pub trait MonotonicClock: Send + Sync {
     fn seconds(&self) -> f64;
 }
@@ -208,7 +211,7 @@ impl fmt::Debug for ProcessingPipeline {
 }
 
 /// The two stages' joint hand-off: per-lane raw segments and the elected
-/// language. Swift: `Transcription`.
+/// language. Swift: `Transcription` in `Pipeline/Stages/DecodeTranscribe.swift`.
 struct Transcription {
     lanes: BTreeMap<AudioLane, Vec<RawSegment>>,
     language: Option<LanguageTag>,
@@ -220,7 +223,8 @@ struct DecodedLane {
     buffer: AudioBuffer16k,
 }
 
-/// What the diarize stage hands on. Swift: `Diarization`.
+/// What the diarize stage hands on. Swift: `Diarization` in
+/// `Pipeline/Stages/Diarize.swift`.
 struct Diarization {
     speakers: Vec<Speaker>,
     cluster_speakers: Vec<ClusterSpeaker>,
@@ -401,15 +405,18 @@ impl ProcessingPipeline {
         Ok(resumed)
     }
 
+    /// The state lock is held from the spawn to the insert, so the task
+    /// cannot finish and remove its entry before the entry exists.
     fn start(&self, asset_id: Uuid) {
         let pipeline = self.clone();
+        let mut state = self.state();
         let handle = tokio::spawn(async move {
             if let Err(failure) = pipeline.process(asset_id).await {
                 tracing::warn!(%asset_id, %failure, "processing failed");
             }
             pipeline.state().running.remove(&asset_id);
         });
-        self.state().running.insert(asset_id, handle);
+        state.running.insert(asset_id, handle);
     }
 
     /// Waits for every processing task started by `enqueue` or
@@ -433,7 +440,8 @@ impl ProcessingPipeline {
     /// Loads the speech engine and the diarizer now, so a run that starts
     /// later finds them resident. Concurrent calls are serialised; a failed
     /// load is retried by the next call rather than cached. Errors carry
-    /// `decode` for the engine and `diarize` for the diarizer.
+    /// `decode` for the engine and `diarize` for the diarizer, as the
+    /// Swift `warmUp` in `ProcessingPipeline.swift` attributes them.
     pub async fn warm_up(&self) -> Result<()> {
         let _guard = self.inner.preparing.lock().await;
         let dependencies = &self.inner.dependencies;
@@ -663,7 +671,9 @@ impl ProcessingPipeline {
     }
 
     /// Marks `meeting_id` in flight for the duration of `body`; a second
-    /// operation on the same meeting fails for `stage`.
+    /// operation on the same meeting fails for `stage`. The mark is
+    /// cleared when `body` completes or when the future is dropped
+    /// mid-way (a cancelled task), never left behind.
     async fn exclusively<T>(
         &self,
         meeting_id: Uuid,
@@ -680,11 +690,11 @@ impl ProcessingPipeline {
             }
             guard.admissions += 1;
         }
-        let result = body.await;
-        let mut guard = self.state();
-        guard.in_flight.remove(&meeting_id);
-        guard.runs.remove(&meeting_id);
-        result
+        let _admitted = Admitted {
+            pipeline: self,
+            meeting_id,
+        };
+        body.await
     }
 
     /// Replaces the run's guessed token count with the transcript's.
@@ -765,22 +775,17 @@ impl ProcessingPipeline {
         Ok(value)
     }
 
-    /// Folds one measurement into its row: the first sample replaces the
-    /// seed outright, later ones move the average. Swift: `MeetingStore.record`.
+    /// Folds one measurement into its row in one write: the first sample
+    /// replaces the seed outright, later ones move the average.
+    /// Swift: `MeetingStore.record`.
     fn record(&self, sample: &StageSample) -> std::result::Result<(), StoreError> {
-        let current = self
-            .store()
-            .stage_rate(sample.stage, &sample.key)?
-            .map_or_else(
-                || StageRates::seeds().rate(sample.stage, &sample.key),
-                |row| row.rate,
-            );
-        self.store().save_stage_rate(
-            sample.stage,
-            &sample.key,
-            absorbing(current, sample.seconds_per_unit),
-            sample.recorded_at,
-        )
+        self.store()
+            .update_stage_rate(sample.stage, &sample.key, sample.recorded_at, |current| {
+                let current =
+                    current.unwrap_or_else(|| StageRates::seeds().rate(sample.stage, &sample.key));
+                absorbing(current, sample.seconds_per_unit)
+            })
+            .map(drop)
     }
 
     // Stages
@@ -1238,6 +1243,21 @@ impl ProcessingPipeline {
             return Ok(());
         }
         self.retention(&asset).await
+    }
+}
+
+/// The in-flight mark of one operation; dropping it clears the mark and
+/// the run, whichever way the operation ended.
+struct Admitted<'a> {
+    pipeline: &'a ProcessingPipeline,
+    meeting_id: Uuid,
+}
+
+impl Drop for Admitted<'_> {
+    fn drop(&mut self) {
+        let mut guard = self.pipeline.state();
+        guard.in_flight.remove(&self.meeting_id);
+        guard.runs.remove(&self.meeting_id);
     }
 }
 
