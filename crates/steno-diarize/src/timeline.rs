@@ -161,10 +161,10 @@ impl Votes {
     }
 
     /// Active clusters per frame, laid out like `cells`: the top `k` by
-    /// votes, `k` the rounded mean speaker count capped at
-    /// `max_speakers`, only clusters somebody voted for; the first `k`
-    /// when nobody did (see the module doc).
-    fn active(&self, max_speakers: usize) -> Vec<bool> {
+    /// votes, `k` the rounded mean speaker count capped at the local
+    /// speakers one window tells apart, only clusters somebody voted for;
+    /// the first `k` when nobody did (see the module doc).
+    fn active(&self, local_speakers: usize) -> Vec<bool> {
         let clusters = self.clusters;
         let mut active = vec![false; self.cells.len()];
         let mut ranked: Vec<usize> = Vec::with_capacity(clusters);
@@ -174,7 +174,7 @@ impl Votes {
                 continue;
             }
             let expected = (self.counts[frame] + coverage / 2) / coverage;
-            let k = (expected as usize).min(clusters.min(max_speakers));
+            let k = (expected as usize).min(clusters.min(local_speakers));
             ranked.clear();
             ranked.extend((0..clusters).filter(|c| row[*c] > 0));
             ranked.sort_by(|lhs, rhs| row[*rhs].cmp(&row[*lhs]).then(lhs.cmp(rhs)));
