@@ -33,9 +33,9 @@ pub fn timed_pieces(tokens: &[Token], vocab: &Vocab) -> Vec<TimedWord> {
 
 /// Joins pieces into words. A piece starting with a space or the marker
 /// begins a word; punctuation-only pieces glue to the word before them,
-/// except an opening mark with a boundary (`▁¿`, `▁¡`, `▁'`), which begins
-/// the next word; pieces that are only a boundary carry it to the next
-/// piece.
+/// except an opening mark after a boundary (`▁¿`, `▁¡`, `▁'`, or a bare
+/// `▁` before the mark), which begins the next word; pieces that are only a
+/// boundary carry it to the next piece.
 /// A word's confidence is the mean of its pieces'.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct TokenAggregator;
@@ -73,8 +73,10 @@ impl TokenAggregator {
                 }
                 continue;
             }
-            let glues = text.chars().all(is_punctuation_or_symbol)
-                && !(is_word_start && text.starts_with(OPENING_MARKS));
+            // An opening mark is left to the boundary rule below: it begins
+            // a word after a boundary and glues without one.
+            let glues =
+                text.chars().all(is_punctuation_or_symbol) && !text.starts_with(OPENING_MARKS);
             match current.as_mut() {
                 Some(word) if glues || !(is_word_start || boundary_pending) => {
                     word.text.push_str(text);
@@ -269,6 +271,14 @@ mod tests {
             piece("'", 0.5, 0.55, 1.0),
         ]);
         assert_eq!(texts(&words), ["said", "'hello'"]);
+        // A bare boundary before the mark is a boundary too.
+        let words = TokenAggregator.words(&[
+            piece("▁hola", 0.0, 0.2, 1.0),
+            piece("▁", 0.3, 0.3, 1.0),
+            piece("¿", 0.3, 0.35, 1.0),
+            piece("qué", 0.35, 0.5, 1.0),
+        ]);
+        assert_eq!(texts(&words), ["hola", "¿qué"]);
     }
 
     #[test]
