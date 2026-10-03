@@ -94,8 +94,8 @@ impl Updates {
     }
 }
 
-/// The plugin with the shell's lane order; `tauri.conf.json` supplies the
-/// public key.
+/// The plugin; `check` supplies the lanes per build and `tauri.conf.json`
+/// the public key.
 pub fn plugin() -> tauri::plugin::TauriPlugin<tauri::Wry, tauri_plugin_updater::Config> {
     tauri_plugin_updater::Builder::new().build()
 }

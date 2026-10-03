@@ -12,7 +12,7 @@ import { type PanelShell, panelShell, useReportSize } from "./panel-shell";
  * microphone", one line under it, one primary Record button, an X, and the
  * draining hairline along the bottom. No number: nothing is at stake when
  * the prompt closes. The shell opens the panel with the request in the
- * route and closes it when the host clears the prompt; Record starts a call
+ * route and hides it when the host clears the prompt; Record starts a call
  * recording through the bridge, the X tells the shell.
  */
 

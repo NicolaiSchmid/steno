@@ -4,10 +4,10 @@
 //! again, and exits 0 when the main window sent `page.ready`, at least one
 //! snapshot reached it in reply, the tray was built, and both panels were
 //! visible at the size their page reported before the hide and hidden
-//! after it; 1 otherwise; a value that
-//! is not a positive number ends the run at once with 2. Screenshots of the
-//! Xvfb root during the wait are the review evidence; the windows carry only
-//! fixture data, the prompt names a made-up app.
+//! after it; 1 otherwise; a value that is not a positive number ends the
+//! run at once with 2. Screenshots of the Xvfb root during the wait are the
+//! review evidence; the windows carry only fixture data, the prompt names a
+//! made-up app.
 
 use std::{
     collections::HashMap,
