@@ -153,59 +153,111 @@ bridge's copies of the macro and codecs. Packages after WP3 branch from `main`.
   German (closes the open item from the speech-stack plan); sidecar process; model
   manifest and download. Gate: FLEURS numbers within 0.5 points of the spike F table.
   Integration notes (WP4a `crates/steno-speech`, #171, against `crates/steno-speech-coreml`
-  of #163), the input to the shared-decoder follow-up: invariant 4 makes the two
-  pipelines one, and today they differ here.
+  of #163): the checklist for the shared-decoder follow-up. Invariant 4 makes the two
+  pipelines one; each item is a place where they differ today. "Measure" means: run
+  FLEURS German `cat/` with both choices and keep the better mean.
   - Decode loop:
-    - Repeated zero-duration tokens: the CoreML side forces duration 1 on the second
-      emission at a frame; `steno-speech` allows NeMo's `max_symbols` 10.
-    - Token budget: fixed 150 per window there; 40 tokens per second of window, plus
-      16, here (150 would truncate a 60 s chunk).
-    - Short window: the CoreML side returns empty for `valid <= 1`; here one frame
-      decodes.
-    - Window end: the CoreML loop drops a token whose duration carries it past the
-      window end (`if active && label != BLANK_ID`; only the last window's flush
-      recovers it); here it is emitted, as NeMo does.
-    - Tail flush: the CoreML side runs up to 10 probes cycling three boundary frames
-      and stops at five blanks in a row; none here, the merge owns the overlap.
-    - Emission suppression: `emit_after_frame` and `Hypothesis` there, none here.
-    - Confidence: both sides zero non-finite values and clamp the rest.
+    - [ ] Repeated zero-duration tokens. Here: `crates/steno-speech/src/decoder.rs`
+      (`DecoderConfig::max_symbols_per_frame`, NeMo's `max_symbols` 10). There:
+      `crates/steno-speech-coreml/src/decoder.rs` (`decode_window`, duration forced to 1 on a frame's second
+      emission). Resolve: measure.
+    - [ ] Token budget. Here: `crates/steno-speech/src/decoder.rs` (`DecoderConfig::max_tokens_per_second`,
+      40 a second of window plus 16). There: `crates/steno-speech-coreml/src/decoder.rs` (`MAX_TOKENS_PER_CHUNK`,
+      150 a window). Resolve: the per-second budget; 150 truncates a 60 s chunk.
+    - [ ] Short window. Here: `crates/steno-speech/src/decoder.rs` (`decode_window`, one frame decodes).
+      There: `crates/steno-speech-coreml/src/decoder.rs` (`decode_window`, empty for `valid <= 1`). Resolve:
+      either; FLEURS never makes a one-frame window.
+    - [ ] Window end. Here: `crates/steno-speech/src/decoder.rs` (`decode_window`, a token whose duration
+      passes the window end is emitted, as NeMo does). There: `crates/steno-speech-coreml/src/decoder.rs`
+      (`decode_window`, `if active && label != BLANK_ID` drops it; only the last
+      window's flush recovers it). Resolve: emit it; FLEURS passes here without the
+      flush.
+    - [ ] Tail flush. Here: none, the merge owns the overlap. There: `crates/steno-speech-coreml/src/decoder.rs`
+      (`decode_window`, up to 10 probes over three boundary frames, stopping at
+      `CONSECUTIVE_BLANK_LIMIT`). Resolve: no flush, as the window end.
+    - [ ] Emission suppression. Here: none. There: `crates/steno-speech-coreml/src/chunking.rs`
+      (`emit_after_frame`) and `crates/steno-speech-coreml/src/decoder.rs` (`Hypothesis`). Resolve: goes with the
+      chunker; it serves FluidAudio's warm-up window, which the VAD layout lacks.
   - Merge:
-    - Overlap and anchors: a fixed 2.0 s overlap with a contiguous-run preference and
-      `minimum_pairs` there; 1.5 s LCS with tolerance `max(overlap / 2, 0.5)` here.
-    - Touching windows: the CoreML `merge_chunks` joins outright when
-      `left_end <= right_start`, as FluidAudio does, which keeps a word twice when
-      the right window repeats the left's last word a frame later. Here the join waits
-      for the match tolerance and the LCS runs with one token a side. The CoreML crate
-      keeps the shortcut until the shared merge replaces it.
-    - Right window ending inside the left: CoreML drops the left's tail; here the left
-      keeps it, also when the right tail only finishes the seam word.
-    - Seam word: CoreML hands it to the right window when the right heard it from its
-      start (`word_initial_index`, `pop_seam_word`); here the left always owns it.
-    - Ids match case-insensitively there (`ids_match`), exactly here.
-    - The LCS is walked back from the end there, forward here.
-    - `collapse_seam_word_duplicates` and the seam-gap repair pass exist only there.
-  - Recovery: CoreML gates on `is_whole_window_blank` plus an RMS check, then runs a
-    perturbation ladder with a credibility check. Here the gate is words per second of
-    speech, the retry only extends the window, and an accepted retry is trimmed to the
-    chunk plus the overlap.
-  - Chunking: FluidAudio's silence-aligned 14.96 s windows at a 12.96 s stride there;
-    the VAD layout with pause cuts here. Invariant 4 names the chunker as shared.
-  - API: `Backend` plus `Scratch` plus `EncoderView` to `Hypothesis` there,
-    `SpeechBackend` (`&mut self`) to `Vec<Token>` here.
-  - Names for the same concept, to settle in the shared crate:
-    - The backend: the `SpeechBackend` trait here; the `Backend` struct plus `Scratch`
-      there.
-    - `Token`: `id` is `u32` here, `usize` there; `duration` is the model's predicted
-      duration here and the frames the loop advanced (0 when unknown) there.
-    - Modules: `chunker` and `segmentation` here, `chunking` and `segments` there.
-    - Decoder limits: `max_symbols_per_frame` and `max_tokens_per_second` here,
-      `MAX_SYMBOLS_PER_STEP` and `MAX_TOKENS_PER_CHUNK` there.
-    - Engine id: `OnnxSpeechEngine::ID` here, a free `ENGINE_ID` there; both are
-      `parakeet-v3`, so one constant should own it.
-    - Swift pointers: a `Swift:` line here, `(Type.method)` there.
-    - Test tools: the WAV reader and the WER scorer sit in `tests/common` here and in
-      the `wav` and `wer` modules there.
-    - Chunk and window mean the same in both crates.
+    - [ ] Overlap and anchors. Here: `crates/steno-speech/src/merge.rs` (`merge_windows`, an LCS over 1.5 s
+      with tolerance `max(overlap / 2, 0.5)`). There: `crates/steno-speech-coreml/src/merge.rs` (`merge_chunks`,
+      `find_contiguous_matches` with `minimum_pairs`, then `find_lcs`, over 2.0 s).
+      Resolve: measure.
+    - [ ] Touching windows. Here: `crates/steno-speech/src/merge.rs` (`merge_windows`, the join waits for
+      the match tolerance; the LCS runs with one token a side). There: `crates/steno-speech-coreml/src/merge.rs`
+      (`merge_chunks`, joins outright when `left_end <= right_start`, as FluidAudio
+      does). Resolve: wait for the tolerance; the outright join keeps a word twice
+      when the right repeats the left's last word a frame later (merge test
+      `a_right_window_repeating_the_left_s_last_word_a_frame_later_keeps_one_copy`).
+      The CoreML crate keeps the shortcut until then.
+    - [ ] Right window ending inside the left. Here: `crates/steno-speech/src/merge.rs` (`merge_windows`,
+      the left keeps its tail, also when the right's tail only finishes the seam
+      word). There: `crates/steno-speech-coreml/src/merge.rs` (`merge_using_matches`, the left's tail is
+      dropped). Resolve: keep the tail (merge tests
+      `a_right_window_that_ends_inside_the_left_leaves_the_left_intact`,
+      `a_right_tail_without_a_word_start_leaves_the_left_its_words`).
+    - [ ] Midpoint cut without a splice point on the right. Here: `crates/steno-speech/src/merge.rs`
+      (`merge_by_midpoint`, the left is kept whole). There: `crates/steno-speech-coreml/src/merge.rs`
+      (`merge_by_midpoint`, the right is kept from the cutoff). Resolve: keep the
+      left; the right's continuation pieces glue onto the seam word and the left's
+      words past the cutoff are lost (merge test
+      `a_midpoint_cut_with_no_word_start_on_the_right_keeps_the_left`).
+    - [ ] Seam word. Here: `crates/steno-speech/src/merge.rs` (`merge_windows`, the left always owns it).
+      There: `crates/steno-speech-coreml/src/merge.rs` (`word_initial_index`, `pop_seam_word`: the right owns it
+      when it heard it from its start). Resolve: measure. A left window whose tokens
+      end inside a word loses the word's rest under the left-owns rule (2,179 of
+      3,000 random layouts in a randomised merge check on #171); an energy cut can
+      end a window inside a word.
+    - [ ] Id matching. Here: `crates/steno-speech/src/merge.rs` (`merge_windows`, exact ids). There:
+      `crates/steno-speech-coreml/src/vocab.rs` (`Vocab::ids_match`, case-insensitive). Resolve: measure.
+    - [ ] LCS walk. Here: `crates/steno-speech/src/merge.rs` (`merge_windows`, forward). There:
+      `crates/steno-speech-coreml/src/merge.rs` (`find_lcs`, back from the end). Resolve: measure; they differ
+      only on ties.
+    - [ ] Seam repairs. Here: none. There: `crates/steno-speech-coreml/src/merge.rs`
+      (`collapse_seam_word_duplicates`) and `crates/steno-speech-coreml/src/pipeline.rs` (`repair_seam_gaps`).
+      Resolve: measure once the merge is shared.
+  - Recovery:
+    - [ ] Gate and retry. Here: `crates/steno-speech/src/pipeline.rs` (`looks_empty`, words per second of
+      speech; `recover`, the window extended only). There: `crates/steno-speech-coreml/src/decoder.rs`
+      (`Hypothesis::is_whole_window_blank`) and `crates/steno-speech-coreml/src/pipeline.rs` (`should_recover`,
+      an RMS check; `transcribe_window`, a perturbation ladder; `is_credible`).
+      Resolve: measure on spike D's zero-token window and on FLEURS.
+    - [ ] Trim of an accepted retry. Here: `crates/steno-speech/src/pipeline.rs` (`keep_chunk_and_overlap`,
+      the chunk plus the overlap, a word the bounds cut kept whole). There: none,
+      the retry decodes the same window. Resolve: goes with the retry; the merge
+      lost a cut word's rest before the trim kept it whole (pipeline test
+      `a_recovery_trim_through_a_word_keeps_the_whole_word`).
+  - [ ] Chunking. Here: `crates/steno-speech/src/chunker.rs` (`layout`, VAD pause cuts with the long-pause
+    skip). There: `crates/steno-speech-coreml/src/chunking.rs` (`Layout::v3`, `silence_aligned_chunk_starts`:
+    14.96 s windows at a 12.96 s stride). Resolve: the VAD layout, which invariant 4
+    names as shared; FLEURS passes with it here.
+  - [ ] Opening marks. Here: `crates/steno-speech/src/segmentation.rs` (`OPENING_MARKS`: `¿`, `¡`, `'` and
+    brackets begin a word after a boundary). There: `crates/steno-speech-coreml/src/segments.rs` (`words`,
+    punctuation always glues). Resolve: the exception; "hola ¿qué" and "said
+    'hello'" keep their space (segmentation test
+    `an_opening_mark_with_a_boundary_begins_the_next_word`), and FLEURS did not move.
+  - Names for the same concept:
+    - [ ] Backend. Here: `crates/steno-speech/src/backend.rs` (`SpeechBackend`, `&mut self`, decoded to
+      `Vec<Token>` by `decode_window`). There: `crates/steno-speech-coreml/src/backend.rs` (`Backend` plus
+      `Scratch`), `crates/steno-speech-coreml/src/coreml.rs` (`EncoderView`) and `crates/steno-speech-coreml/src/decoder.rs` (`Hypothesis`).
+      Resolve: the trait, with `Backend` and `Scratch` behind it.
+    - [ ] Token. Here: `crates/steno-speech/src/decoder.rs` (`Token`: `id` a `u32`, `duration` the model's
+      prediction). There: `crates/steno-speech-coreml/src/lib.rs` (`Token`: `id` a `usize`, `duration` the frames
+      the loop advanced, 0 when unknown). Resolve: one type; the timings need the
+      predicted duration.
+    - [ ] Modules. Here: `crates/steno-speech/src/chunker.rs`, `crates/steno-speech/src/segmentation.rs`. There:
+      `crates/steno-speech-coreml/src/chunking.rs`, `crates/steno-speech-coreml/src/segments.rs`. Resolve: one pair of names.
+    - [ ] Decoder limits. Here: `crates/steno-speech/src/decoder.rs` (`DecoderConfig::max_symbols_per_frame`,
+      `max_tokens_per_second`). There: `crates/steno-speech-coreml/src/decoder.rs` (`MAX_SYMBOLS_PER_STEP`,
+      `MAX_TOKENS_PER_CHUNK`). Resolve: the config fields, which tests vary.
+    - [ ] Engine id. Here: `crates/steno-speech/src/engine.rs` (`OnnxSpeechEngine::ID`). There:
+      `crates/steno-speech-coreml/src/engine.rs` (`ENGINE_ID`). Both are `parakeet-v3`. Resolve: one constant.
+    - [ ] Swift pointers. Here: a `Swift:` line in each module doc. There:
+      `(Type.method)` after each item. Resolve: one style.
+    - [ ] Test tools. Here: `crates/steno-speech/tests/common/mod.rs` (`read_wav`,
+      `score`). There: `crates/steno-speech-coreml/src/wav.rs`, `crates/steno-speech-coreml/src/wer.rs` (`word_errors`). Resolve: one module.
+  - Already the same: confidence clamping (non-finite values are zero, the rest
+    clamped), chunk and window.
 
   **WP4d diarization.** `steno-diarize`: speech-stack decision 6 and gate G3, moved
   here on 2026-10-02 so it ships with the Rust pipeline. Segmentation and embedding
