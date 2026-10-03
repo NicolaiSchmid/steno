@@ -13,7 +13,7 @@ use std::sync::{Arc, Mutex};
 use chrono::{DateTime, Utc};
 use serde_json::Value;
 use steno_bridge::{BridgeEvent, BridgeHost, BridgeTopic, ConfirmDestructiveParams, EventSink};
-use steno_core::paths::file_url;
+use steno_core::paths::{file_url, file_url_path};
 use steno_core::*;
 use steno_host::fakes::FakeServices;
 use steno_host::{Host, HostConfig};
@@ -454,9 +454,10 @@ fn segment(
     }
 }
 
-/// Writes the sample into `store`, with the master and three clips marked
-/// as existing in the fake file system. `audio_folder` is the harness's.
-pub fn populate_sample(store: &Store, fakes: &FakeServices, audio_folder: &std::path::Path) {
+/// Writes the sample into `store`, with the master and three clips under
+/// the settings' audio folder marked as existing in the fake file system.
+pub fn populate_sample(store: &Store, fakes: &FakeServices) {
+    let audio_folder = &file_url_path(&store.settings().unwrap().audio_folder).unwrap();
     for person in [
         person(PERSON_NICOLAI, "Nicolai", Some("nicolai@example.com"), 0),
         person(PERSON_JEROME, "Jérôme", None, 1),

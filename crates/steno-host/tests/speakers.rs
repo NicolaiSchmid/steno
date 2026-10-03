@@ -18,13 +18,7 @@ use steno_bridge::{
 use steno_core::{Participant, ParticipantRole, SpeakerAssignment, SpeakerNameSuggestion};
 
 fn sample() -> Harness {
-    Harness::builder()
-        .seed(|store, fakes| {
-            let folder =
-                steno_core::paths::file_url_path(&store.settings().unwrap().audio_folder).unwrap();
-            populate_sample(store, fakes, &folder);
-        })
-        .build()
+    Harness::builder().seed(populate_sample).build()
 }
 
 fn options(harness: &Harness, speaker: u32, query: &str) -> Vec<SpeakerOption> {

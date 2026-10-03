@@ -168,9 +168,7 @@ fn first_difference(expected: &Value, actual: &Value) -> Option<String> {
 fn sample_harness() -> Harness {
     Harness::builder()
         .seed(|store, fakes| {
-            let folder =
-                steno_core::paths::file_url_path(&store.settings().unwrap().audio_folder).unwrap();
-            populate_sample(store, fakes, &folder);
+            populate_sample(store, fakes);
             configure_llm(store, "qwen3-8b");
             set_retention(store, AudioRetention::KeepDays(30));
         })
@@ -182,9 +180,7 @@ fn app() {
     let harness = Harness::builder()
         .with_handover("steno-mac-7f3a", 52_431)
         .seed(|store, fakes| {
-            let folder =
-                steno_core::paths::file_url_path(&store.settings().unwrap().audio_folder).unwrap();
-            populate_sample(store, fakes, &folder);
+            populate_sample(store, fakes);
             let handover = fakes.handover.as_ref().unwrap();
             handover.pair(paired_phone());
             handover.start().unwrap();

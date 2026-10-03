@@ -30,9 +30,7 @@ use steno_host::services::{AutoStopStatus, FileSystem as _};
 fn sample() -> Harness {
     Harness::builder()
         .seed(|store, fakes| {
-            let folder =
-                steno_core::paths::file_url_path(&store.settings().unwrap().audio_folder).unwrap();
-            populate_sample(store, fakes, &folder);
+            populate_sample(store, fakes);
             set_retention(store, AudioRetention::KeepDays(30));
         })
         .build()
@@ -250,9 +248,7 @@ fn delete_asks_first_and_refuses_a_busy_meeting() {
     let harness = Harness::builder()
         .confirm(false)
         .seed(|store, fakes| {
-            let folder =
-                steno_core::paths::file_url_path(&store.settings().unwrap().audio_folder).unwrap();
-            populate_sample(store, fakes, &folder);
+            populate_sample(store, fakes);
             let mut processing = sample_meeting();
             processing.id = uuid(0x77);
             processing.state = MeetingState::Processing;
@@ -290,11 +286,7 @@ fn delete_asks_first_and_refuses_a_busy_meeting() {
 
     let confirming = Harness::builder()
         .confirm(true)
-        .seed(|store, fakes| {
-            let folder =
-                steno_core::paths::file_url_path(&store.settings().unwrap().audio_folder).unwrap();
-            populate_sample(store, fakes, &folder);
-        })
+        .seed(populate_sample)
         .build();
     let _ = confirming.snapshot(BridgeTopic::MeetingsList);
     confirming.sink.clear();
@@ -377,9 +369,7 @@ fn delete_asks_first_and_refuses_a_busy_meeting() {
 fn a_delete_reports_files_that_stay_and_a_refusal_keeps_the_progress_entry() {
     let harness = Harness::builder()
         .seed(|store, fakes| {
-            let folder =
-                steno_core::paths::file_url_path(&store.settings().unwrap().audio_folder).unwrap();
-            populate_sample(store, fakes, &folder);
+            populate_sample(store, fakes);
             fakes
                 .file_system
                 .fail_removals(Some("Operation not permitted"));
@@ -929,9 +919,7 @@ fn keep_audio_goes_through_the_pipeline_and_asks_before_deleting_now() {
     let declining = Harness::builder()
         .confirm(false)
         .seed(|store, fakes| {
-            let folder =
-                steno_core::paths::file_url_path(&store.settings().unwrap().audio_folder).unwrap();
-            populate_sample(store, fakes, &folder);
+            populate_sample(store, fakes);
             set_retention(store, AudioRetention::DeleteAfterProcessing);
         })
         .build();
@@ -1013,9 +1001,7 @@ fn keep_audio_off_applies_only_to_the_meeting_it_was_asked_for() {
             }
         })
         .seed(|store, fakes| {
-            let folder =
-                steno_core::paths::file_url_path(&store.settings().unwrap().audio_folder).unwrap();
-            populate_sample(store, fakes, &folder);
+            populate_sample(store, fakes);
             set_retention(store, AudioRetention::DeleteAfterProcessing);
         })
         .build();
