@@ -308,7 +308,7 @@ mod tests {
         let support = Path::new("/tmp/steno-support");
         assert_eq!(
             coreml_model_directory(&support.join("Models")),
-            steno_speech_coreml::model_directory(support)
+            steno_speech_coreml::engine::model_directory(support)
         );
     }
 
