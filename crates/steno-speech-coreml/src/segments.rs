@@ -382,4 +382,24 @@ mod tests {
         assert_eq!(texts, vec!["hello world.", "a"]);
         assert_eq!(raw_segments(&[], &vocab, 10.0), Vec::new());
     }
+
+    #[test]
+    fn swift_whitespace_is_unicode_zs_plus_tab() {
+        let zs = [
+            '\u{20}', '\u{A0}', '\u{1680}', '\u{2000}', '\u{2001}', '\u{2002}', '\u{2003}',
+            '\u{2004}', '\u{2005}', '\u{2006}', '\u{2007}', '\u{2008}', '\u{2009}', '\u{200A}',
+            '\u{202F}', '\u{205F}', '\u{3000}',
+        ];
+        for c in zs.into_iter().chain(['\t']) {
+            assert!(is_swift_whitespace(c), "{c:?} is in the set");
+        }
+        // Line and paragraph breaks, vertical tab, form feed, NEL and the
+        // zero width space (`Cf`, not `Zs`) are outside it.
+        let outside = [
+            '\n', '\r', '\u{B}', '\u{C}', '\u{85}', '\u{2028}', '\u{2029}', '\u{200B}', 'a',
+        ];
+        for c in outside {
+            assert!(!is_swift_whitespace(c), "{c:?} is outside the set");
+        }
+    }
 }
