@@ -92,17 +92,21 @@ impl HandoverIdentity {
         })
     }
 
-    /// The certificate and the key as one PEM bundle.
-    #[must_use]
-    pub fn to_pem(&self) -> String {
+    /// The certificate and the key as one PEM bundle. A key of a kind this
+    /// crate cannot write is an error, not a bundle without a key.
+    pub fn to_pem(&self) -> Result<String, IdentityError> {
         let certificate = pem_block("CERTIFICATE", &self.certificate_der);
         let key = match &self.private_key {
             PrivateKeyDer::Pkcs8(key) => pem_block("PRIVATE KEY", key.secret_pkcs8_der()),
             PrivateKeyDer::Sec1(key) => pem_block("EC PRIVATE KEY", key.secret_sec1_der()),
             PrivateKeyDer::Pkcs1(key) => pem_block("RSA PRIVATE KEY", key.secret_pkcs1_der()),
-            _ => String::new(),
+            _ => {
+                return Err(IdentityError::Malformed(
+                    "private key: not PKCS#8, SEC1 or PKCS#1".to_owned(),
+                ));
+            }
         };
-        certificate + &key
+        Ok(certificate + &key)
     }
 
     /// The host's entry point: the stored identity, or a fresh one minted
@@ -119,7 +123,7 @@ impl HandoverIdentity {
         }
         let minted = Self::mint(common_name, now)?;
         secrets
-            .set_secret(&key, Some(&minted.to_pem()))
+            .set_secret(&key, Some(&minted.to_pem()?))
             .await
             .map_err(IdentityError::Secrets)?;
         Ok(minted)
@@ -260,7 +264,7 @@ mod tests {
     #[test]
     fn pem_round_trips() {
         let minted = HandoverIdentity::mint("A", Utc::now()).unwrap();
-        let bundle = minted.to_pem();
+        let bundle = minted.to_pem().unwrap();
         assert!(bundle.starts_with("-----BEGIN CERTIFICATE-----\n"));
         assert!(bundle.contains("-----BEGIN PRIVATE KEY-----\n"));
         let loaded = HandoverIdentity::from_pem(&bundle).unwrap();
