@@ -140,6 +140,8 @@ jobs:
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - name: Test
         run: cargo test --workspace --locked
+      - name: Test the core's fakes behind their feature
+        run: cargo test -p steno-core --features testing --locked
 
       # A debug build loads devUrl; the smoke needs the embedded bundle, so
       # the dev URL is dropped through Tauri's configuration merge. The run
