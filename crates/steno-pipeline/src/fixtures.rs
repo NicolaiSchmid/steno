@@ -2,19 +2,17 @@
 //! `SplitMix64` noise, integer phase accumulators, byte-identical on every
 //! machine and to the Swift generator (`Tests/Fixtures/MANIFEST.sha256`
 //! pins both). `steno dev fixtures generate` writes these files; the
-//! pipeline's sample clips use the writer; [`two_lane_call`] lays the
+//! pipeline's sample clips use the writer; `two_lane_call` (behind the
+//! `testing` feature) lays the
 //! conversation out as a recording for the tests across crates.
 //! Swift: `Sources/StenoCore/Testing/FixtureGenerator.swift`,
 //! `Sources/StenoCore/Audio/WAVWriter.swift`.
 
-use std::collections::BTreeMap;
 use std::path::Path;
 
-use steno_core::{
-    AudioAsset, AudioBuffer16k, AudioFormat, AudioLane, AudioRetention, RecordingLayout,
-    derived_uuid, paths::file_url,
-};
-use uuid::Uuid;
+use steno_core::{AudioBuffer16k, AudioLane};
+#[cfg(feature = "testing")]
+pub use testing::two_lane_call;
 
 /// One generated file: its path under the fixtures root and its SHA-256.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -213,39 +211,6 @@ pub fn wav_data(samples: &[i16], sample_rate: u32, channels: u16) -> Vec<u8> {
     data
 }
 
-/// The six-second call recorded into `audio_folder` for `meeting_id`: the
-/// two-lane master and the mic and system sidecars of [`conversation`]
-/// (the committed `audio/conversation-*-6s.wav`), and the asset naming
-/// them, its id derived from the meeting's.
-pub fn two_lane_call(
-    audio_folder: &Path,
-    meeting_id: Uuid,
-    retention: AudioRetention,
-) -> std::io::Result<AudioAsset> {
-    let layout = RecordingLayout::new(audio_folder, meeting_id);
-    layout.create_directories(false)?;
-    let master = layout.master(AudioFormat::Wav16kInt16);
-    let lanes = [AudioLane::Mic, AudioLane::System];
-    write_wav(&master, &conversation(6.0, &lanes))?;
-    let mut sidecars_16k = BTreeMap::new();
-    for lane in lanes {
-        let sidecar = layout.sidecar(lane);
-        write_wav(&sidecar, &conversation(6.0, &[lane]))?;
-        sidecars_16k.insert(lane, file_url(&sidecar, false));
-    }
-    Ok(AudioAsset {
-        id: derived_uuid(meeting_id, "asset"),
-        meeting_id,
-        url: file_url(&master, false),
-        format: AudioFormat::Wav16kInt16,
-        lanes: lanes.to_vec(),
-        sidecars_16k,
-        mixdown_url: None,
-        retention,
-        expires_at: None,
-    })
-}
-
 /// Writes a 16 kHz mono Int16 WAV atomically.
 pub fn write_wav(path: &Path, samples: &[i16]) -> std::io::Result<()> {
     write_atomically(path, &wav_data(samples, 16_000, 1))
@@ -275,5 +240,53 @@ impl SplitMix64 {
         z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
         z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
         z ^ (z >> 31)
+    }
+}
+
+/// What only tests need: behind the `testing` feature.
+#[cfg(feature = "testing")]
+mod testing {
+    use std::collections::BTreeMap;
+    use std::path::Path;
+
+    use steno_core::{
+        AudioAsset, AudioFormat, AudioLane, AudioRetention, RecordingLayout, derived_uuid,
+        paths::file_url,
+    };
+    use uuid::Uuid;
+
+    use super::{conversation, write_wav};
+
+    /// The six-second call recorded into `audio_folder` for `meeting_id`: the
+    /// two-lane master and the mic and system sidecars of [`conversation`]
+    /// (the committed `audio/conversation-*-6s.wav`), and the asset naming
+    /// them, its id derived from the meeting's.
+    pub fn two_lane_call(
+        audio_folder: &Path,
+        meeting_id: Uuid,
+        retention: AudioRetention,
+    ) -> std::io::Result<AudioAsset> {
+        let layout = RecordingLayout::new(audio_folder, meeting_id);
+        layout.create_directories(false)?;
+        let master = layout.master(AudioFormat::Wav16kInt16);
+        let lanes = [AudioLane::Mic, AudioLane::System];
+        write_wav(&master, &conversation(6.0, &lanes))?;
+        let mut sidecars_16k = BTreeMap::new();
+        for lane in lanes {
+            let sidecar = layout.sidecar(lane);
+            write_wav(&sidecar, &conversation(6.0, &[lane]))?;
+            sidecars_16k.insert(lane, file_url(&sidecar, false));
+        }
+        Ok(AudioAsset {
+            id: derived_uuid(meeting_id, "asset"),
+            meeting_id,
+            url: file_url(&master, false),
+            format: AudioFormat::Wav16kInt16,
+            lanes: lanes.to_vec(),
+            sidecars_16k,
+            mixdown_url: None,
+            retention,
+            expires_at: None,
+        })
     }
 }

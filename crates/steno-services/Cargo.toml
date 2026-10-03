@@ -36,6 +36,7 @@ steno-speech-coreml = { path = "../steno-speech-coreml" }
 [dev-dependencies]
 steno-core = { path = "../steno-core", features = ["testing"] }
 steno-llm = { path = "../steno-llm", features = ["testing"] }
+steno-pipeline = { path = "../steno-pipeline", features = ["testing"] }
 tempfile.workspace = true
 
 [lints]

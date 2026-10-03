@@ -8,6 +8,11 @@ license.workspace = true
 repository.workspace = true
 publish.workspace = true
 
+[features]
+# `fixtures::two_lane_call`, the recorded call the integration tests here
+# and in the services crate process.
+testing = []
+
 [dependencies]
 async-trait.workspace = true
 chrono.workspace = true
@@ -19,6 +24,7 @@ uuid.workspace = true
 
 [dev-dependencies]
 steno-core = { path = "../steno-core", features = ["testing"] }
+steno-pipeline = { path = ".", features = ["testing"] }
 tempfile.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "time"] }
 
