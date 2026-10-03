@@ -407,6 +407,37 @@ mod tests {
         );
     }
 
+    /// The numbers of `StageRates.seeds` in `ProcessingEstimator.swift`,
+    /// every one a seed (`samples == 0`).
+    #[test]
+    fn the_seeds_are_the_swift_constants() {
+        let rates = StageRates::seeds();
+        let seed = |stage, key| {
+            let rate = rates.rate(stage, key);
+            assert_eq!(rate.samples, 0, "{stage:?} {key}");
+            rate.seconds_per_unit
+        };
+        assert_eq!(seed(PipelineStage::Decode, ""), 0.005);
+        assert_eq!(seed(PipelineStage::Transcribe, "parakeet-v3"), 1.0 / 90.0);
+        assert_eq!(
+            seed(PipelineStage::Transcribe, "parakeet-ultra"),
+            1.0 / 90.0
+        );
+        assert_eq!(seed(PipelineStage::Transcribe, "parakeet-de"), 1.0 / 90.0);
+        assert_eq!(
+            seed(PipelineStage::Transcribe, "whisperkit-large-v3-turbo"),
+            1.0 / 6.0
+        );
+        assert_eq!(seed(PipelineStage::Diarize, ""), 1.0 / 60.0);
+        assert_eq!(seed(PipelineStage::MatchSpeakers, ""), 0.05);
+        assert_eq!(seed(PipelineStage::Merge, ""), 0.1);
+        assert_eq!(seed(PipelineStage::Cleanup, ""), 12.0);
+        assert_eq!(seed(PipelineStage::Summarize, ""), 3.0);
+        assert_eq!(seed(PipelineStage::Persist, ""), 0.005);
+        assert_eq!(seed(PipelineStage::Deliver, ""), 0.5);
+        assert_eq!(seed(PipelineStage::Retention, ""), 0.05);
+    }
+
     #[test]
     fn the_first_sample_replaces_the_seed_and_later_ones_average() {
         let first = absorbing(seed(1.0), 4.0);

@@ -1,6 +1,7 @@
 //! Removes the audio of every asset whose expiry has passed.
 //! Swift: `Sources/StenoCore/Storage/RetentionSweep.swift`.
 
+use std::fmt;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -8,12 +9,43 @@ use chrono::{DateTime, Utc};
 use steno_core::{Store, StoreError, paths::path_from_file_url};
 
 /// Every file the sweep could not remove, with the reason.
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug)]
 pub enum SweepIncomplete {
-    #[error("retention sweep could not remove {}", .0.iter().map(|(path, error)| format!("{} ({error})", path.display())).collect::<Vec<_>>().join(", "))]
     Files(Vec<(PathBuf, std::io::Error)>),
-    #[error(transparent)]
-    Store(#[from] StoreError),
+    Store(StoreError),
+}
+
+impl fmt::Display for SweepIncomplete {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            SweepIncomplete::Files(failures) => {
+                f.write_str("retention sweep could not remove ")?;
+                for (index, (path, error)) in failures.iter().enumerate() {
+                    if index > 0 {
+                        f.write_str(", ")?;
+                    }
+                    write!(f, "{} ({error})", path.display())?;
+                }
+                Ok(())
+            }
+            SweepIncomplete::Store(error) => error.fmt(f),
+        }
+    }
+}
+
+impl std::error::Error for SweepIncomplete {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            SweepIncomplete::Files(_) => None,
+            SweepIncomplete::Store(error) => Some(error),
+        }
+    }
+}
+
+impl From<StoreError> for SweepIncomplete {
+    fn from(error: StoreError) -> Self {
+        SweepIncomplete::Store(error)
+    }
 }
 
 /// Master, sidecars and mixdown go together with the sample clips of the
@@ -97,5 +129,97 @@ impl RetentionSweep {
             .collect();
         self.store.keep_forever(&ids)?;
         Ok(ids.len())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeMap;
+
+    use chrono::Duration;
+    use steno_core::testing::sample_data;
+    use steno_core::{
+        AudioAsset, AudioFormat, AudioLane, AudioRetention, MeetingState, RecordingLayout, Speaker,
+        SpeakerAssignment, paths::file_url,
+    };
+    use uuid::Uuid;
+
+    use super::*;
+
+    #[test]
+    fn the_sweep_removes_the_clips_of_confirmed_speakers_and_keeps_the_others() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(Store::open(dir.path().join("steno.sqlite")).unwrap());
+        let now = Utc::now();
+        let person = sample_data::person(0, "Anna");
+        store.save_person(&person).unwrap();
+        let mut meeting = sample_data::meeting();
+        meeting.state = MeetingState::Ready;
+        let layout = RecordingLayout::new(&dir.path().join("audio"), meeting.id);
+        layout.create_directories(true).unwrap();
+        let master = layout.master(AudioFormat::Wav16kInt16);
+        std::fs::write(&master, b"wav").unwrap();
+        let asset = AudioAsset {
+            id: Uuid::new_v4(),
+            meeting_id: meeting.id,
+            url: file_url(&master, false),
+            format: AudioFormat::Wav16kInt16,
+            lanes: vec![AudioLane::Mixed],
+            sidecars_16k: BTreeMap::new(),
+            mixdown_url: None,
+            retention: AudioRetention::KeepDays(1),
+            expires_at: Some(now - Duration::hours(1)),
+        };
+        store.save_meeting_with_asset(&meeting, &asset).unwrap();
+        let confirmed = Uuid::new_v4();
+        let unconfirmed = Uuid::new_v4();
+        for (id, assignment) in [
+            (
+                confirmed,
+                SpeakerAssignment::Confirmed {
+                    person_id: person.id,
+                },
+            ),
+            (unconfirmed, SpeakerAssignment::Unknown),
+        ] {
+            std::fs::write(layout.sample_clip(id), b"clip").unwrap();
+            store
+                .save_speaker(&Speaker {
+                    id,
+                    meeting_id: meeting.id,
+                    cluster_label: format!("SPEAKER_{id}"),
+                    assignment,
+                    embedding: None,
+                    sample_clip_range: None,
+                    sample_clip_url: Some(file_url(&layout.sample_clip(id), false)),
+                    cluster_confidence: 1.0,
+                })
+                .unwrap();
+        }
+
+        let removed = RetentionSweep::new(store.clone()).run(now).unwrap();
+        assert_eq!(removed, vec![master.clone(), layout.sample_clip(confirmed)]);
+        assert!(!master.exists());
+        assert!(!layout.sample_clip(confirmed).exists());
+        assert!(
+            layout.sample_clip(unconfirmed).exists(),
+            "an unconfirmed speaker keeps its clip until confirmation"
+        );
+        let speakers = store.speakers(meeting.id).unwrap();
+        let clip_of = |id| {
+            speakers
+                .iter()
+                .find(|speaker| speaker.id == id)
+                .unwrap()
+                .sample_clip_url
+                .clone()
+        };
+        assert_eq!(clip_of(confirmed), None);
+        assert!(clip_of(unconfirmed).is_some());
+        assert_eq!(
+            store.asset(meeting.id).unwrap().unwrap().expires_at,
+            None,
+            "the stamp is cleared once every file is gone"
+        );
     }
 }
