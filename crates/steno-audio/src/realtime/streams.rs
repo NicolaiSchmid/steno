@@ -22,7 +22,10 @@
 //! and slips back to `target` when the queue passes `high_water` (its clock
 //! runs fast). The two endpoints' clocks are not reconciled by resampling;
 //! the slips are counted as dropped system frames in the sink's accounting,
-//! the shortfalls as underruns. Both are a parity item in the plan.
+//! the shortfalls as underruns. The far-end delay assumes `target`, so the
+//! system lane sits at most `high_water - target` later than the echo
+//! canceller expects; [`FollowerLane::for_period`] keeps that to one
+//! period. Both are a parity item in the plan.
 //!
 //! Real-time: [`StreamBody::handle`] allocates nothing and takes no lock;
 //! the scratch buffers are allocated when the body is built, before the
@@ -86,12 +89,14 @@ impl FollowerLane {
     }
 
     /// The policy for a stream with `period` frames per packet: a target of
-    /// two periods (20 ms at WASAPI's usual 10 ms period), a high-water mark
-    /// four periods above it.
+    /// two periods (20 ms at WASAPI's usual 10 ms period) and a high-water
+    /// mark one period above it. The system lane then lags the far-end
+    /// delay by at most one period, a master that runs one period late
+    /// costs nothing, and a slip drops a little over one period.
     #[must_use]
     pub fn for_period(period: usize) -> Self {
         let period = period.max(1);
-        Self::new(2 * period, 6 * period, Self::CAPACITY)
+        Self::new(2 * period, 3 * period, Self::CAPACITY)
     }
 
     /// Frames kept queued: how much later the follower lane sits than the

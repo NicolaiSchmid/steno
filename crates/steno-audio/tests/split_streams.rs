@@ -177,6 +177,24 @@ fn a_fast_follower_slips_back_to_the_target_and_reports_the_loss() {
 }
 
 #[test]
+fn a_period_policy_keeps_two_periods_and_slips_one_period_above() {
+    let follower = FollowerLane::for_period(480);
+    assert_eq!(follower.target(), 960, "two periods");
+    let mut scratch = vec![0.0f32; 480];
+    let mut out = vec![0.0f32; 480];
+    // 1 920 queued: 1 440 after a pull is the high-water mark, no slip.
+    follower.push(packet(&ramp(0, 1_920), 1), &mut scratch);
+    assert_eq!(follower.pull(&mut out), 0);
+    assert_eq!(follower.queued(), 1_440);
+    // Two more periods: 1 920 after a pull passes it and slips to 960.
+    follower.push(packet(&ramp(1_920, 960), 1), &mut scratch);
+    assert_eq!(follower.pull(&mut out), 960);
+    assert_eq!(out, ramp(480, 480));
+    assert_eq!(follower.queued(), 960);
+    assert_eq!(follower.slipped_frames(), 960);
+}
+
+#[test]
 fn the_follower_folds_stereo_and_stages_silent_packets_as_zeros() {
     let follower = FollowerLane::new(0, 4_800, 48_000);
     // A fold buffer smaller than the packet folds it in pieces.
