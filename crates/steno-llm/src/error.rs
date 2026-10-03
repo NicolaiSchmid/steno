@@ -7,9 +7,10 @@
 use std::time::Duration;
 
 /// The model-service failures of both clients and both passes; sign-in
-/// failures are [`CodexCredentialError`]'s. Bodies and messages are
-/// redacted by the client before they get here, so no case ever carries a
-/// secret.
+/// failures are [`CodexCredentialError`]'s. A body or message that is not
+/// the model's answer is redacted by the client before it gets here, so no
+/// case built from one carries a secret; the model's answer text is not
+/// redacted, and `InvalidJson` may quote it.
 ///
 /// `Display` mirrors Swift's `description` word for word, which is why it
 /// is lowercase and technical where [`CodexCredentialError`] speaks to the
@@ -20,7 +21,7 @@ use std::time::Duration;
 #[derive(Debug, Clone, PartialEq, thiserror::Error)]
 pub enum LlmError {
     /// A non-2xx answer that is not a rate limit; `body` is the server's
-    /// error message or the first bytes of the body.
+    /// error message or the first characters of the redacted body.
     #[error("HTTP {status}: {body}")]
     Http { status: u16, body: String },
     /// The request never completed: DNS, connection refused, dropped socket.

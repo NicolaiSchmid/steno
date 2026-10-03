@@ -50,20 +50,23 @@
 //! Privacy: plan invariant 3 lets only a `Destination` and this crate open
 //! a network connection, and this crate sends text only. `tests/privacy.rs`
 //! asserts each of the following for every client it applies to. A
-//! completion body is JSON prompt text built from the transcript, names and
-//! template wording; it never holds a file path, an audio byte, a speaker
-//! or meeting id, or a segment's `raw_text`. Secrets travel only in headers
-//! and in the token refresh: the API key read from the `SecretStore` only
-//! in `Authorization`, the Codex access token and account id only in their
+//! completion body is a JSON document of prompt text; it never holds a file
+//! path, an audio byte, a speaker, person, meeting or segment id, or a
+//! segment's `raw_text`. Secrets travel only in headers and in the token
+//! refresh: the API key read from the `SecretStore` only in
+//! `Authorization`, the Codex access token and account id only in their
 //! two headers, the refresh token only in the refresh's body. The Codex
-//! tokens are read from `auth.json` (in `$CODEX_HOME`, else `~/.codex`),
-//! and a refresh writes them back to it with mode 0600 (on Unix only),
-//! leaving no temporary file. No secret, however often or wherever in a
-//! body a server echoes it, reaches an error, a `Debug` form or an observer
-//! event: a body is redacted whole before it is cut, which
-//! `tests/redaction_property.rs` also checks on random bodies. A key
-//! shorter than eight bytes is a placeholder, not a secret, and is left as
-//! it is.
+//! tokens are read from `auth.json` (in `$CODEX_HOME`, else `~/.codex`;
+//! `tests/credentials.rs`), and a refresh writes them back to it, with mode
+//! 0600 on Unix, leaving no temporary file. No secret (the API key, either
+//! Codex token or the account id), nor eight bytes in a row of one in any
+//! case, however often or wherever a server echoes it in a body that is not
+//! the model's answer, reaches an error's `Display`, `Debug` or `detail()`,
+//! a `Debug` form or an observer event: a body is redacted whole before it
+//! is cut, which `tests/redaction_property.rs` also checks on random
+//! bodies. The model's answer text is not redacted. A secret shorter than
+//! eight bytes is not redacted; in practice that is a placeholder key such
+//! as `x` or `ollama` for a local server.
 //!
 //! Tests: `cargo test -p steno-llm`; the dev-dependency on the crate itself
 //! turns the `testing` feature on.

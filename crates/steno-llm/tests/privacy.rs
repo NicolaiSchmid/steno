@@ -1,17 +1,24 @@
 //! Invariant 3 of the plan on the wire and on disk: each claim of the crate
 //! doc's privacy paragraph, asserted for every client it applies to:
-//! - a completion body is a JSON document of prompt text, with no file
-//!   path, audio byte, speaker or meeting id, or segment `raw_text`;
+//! - a completion body is a JSON document of prompt text; it never holds a
+//!   file path, an audio byte, a speaker, person, meeting or segment id, or
+//!   a segment's `raw_text`;
 //! - secrets travel only in headers and in the token refresh: the API key
 //!   read from the `SecretStore` only in `Authorization`, the Codex access
 //!   token and account id only in their two headers, the refresh token only
 //!   in the refresh's body;
-//! - the tokens read from `auth.json` are written back to it after a
-//!   refresh with mode 0600 on Unix, leaving no temporary file;
-//! - no secret, however often or wherever in a body a server echoes it,
-//!   reaches an error, a `Debug` form or an observer event, since a body is
-//!   redacted whole before it is cut;
-//! - a key shorter than eight bytes is a placeholder and is left as it is.
+//! - a refresh writes the Codex tokens back to `auth.json`, with mode 0600
+//!   on Unix, leaving no temporary file (where the file is read from is
+//!   `tests/credentials.rs`'s);
+//! - no secret (the API key, either Codex token or the account id), nor
+//!   eight bytes in a row of one in any case, however often or wherever a
+//!   server echoes it in a body that is not the model's answer, reaches an
+//!   error's `Display`, `Debug` or `detail()`, a `Debug` form or an observer
+//!   event: a body is redacted whole before it is cut, which
+//!   `tests/redaction_property.rs` also checks on random bodies;
+//! - the model's answer text is not redacted;
+//! - a secret shorter than eight bytes is not redacted; in practice that is
+//!   a placeholder key such as `x` or `ollama` for a local server.
 //!
 //! Swift: no single suite; Rust-only.
 
@@ -690,33 +697,81 @@ async fn no_secret_after_a_multi_byte_character_at_a_cut_reaches_an_error_or_an_
     .await;
 }
 
-/// A server that writes a body as JSON escapes a key with a quote, a
-/// backslash or a slash in it; the escaped copy, with `/` as is or as
-/// `\/`, is redacted like the key itself.
+/// A body that is not an envelope, written as JSON, escapes a secret with
+/// a quote, a backslash or a slash in it; the escaped copy, with `/` as is
+/// or as `\/`, is redacted like the secret itself.
 #[tokio::test]
 async fn a_json_escaped_copy_of_a_secret_is_redacted() {
+    let echo = |escaped: &str| format!(r#"{{"echo":"bad key {escaped}"}}"#).into_bytes();
+    let expected = r#"{"echo":"bad key [redacted]"}"#;
+
     let key = r#"sk-test/AB"CD\EFGH12"#;
-    let expected = r#"HTTP 401: {"detail":"bad key [redacted]"}"#;
-    for echoed in [r#"sk-test/AB\"CD\\EFGH12"#, r#"sk-test\/AB\"CD\\EFGH12"#] {
+    for escaped in [r#"sk-test/AB\"CD\\EFGH12"#, r#"sk-test\/AB\"CD\\EFGH12"#] {
         let harness = ClientHarness::build(RetryPolicy::NONE, Some(key), |_| {}).await;
-        let body = format!(r#"{{"detail":"bad key {echoed}"}}"#);
         harness
             .server
-            .enqueue([StubResponse::new(401, body.into_bytes())]);
+            .enqueue([StubResponse::new(401, echo(escaped))]);
         let error = harness
             .client
             .complete_llm(&text_request())
             .await
             .unwrap_err();
-        assert_eq!(error.to_string(), expected, "{echoed}");
+        assert_eq!(error.to_string(), format!("HTTP 401: {expected}"));
+    }
+
+    let account = r#"acct/st"ored"#;
+    for escaped in [r#"acct/st\"ored"#, r#"acct\/st\"ored"#] {
+        let harness = CodexHarness::build(RetryPolicy::NONE, "gpt-stub", |_| {}).await;
+        harness.home.write(AuthFile {
+            account_id: Some(account.to_owned()),
+            ..AuthFile::default()
+        });
+        harness
+            .backend
+            .enqueue([StubResponse::new(500, echo(escaped))]);
+        let error = harness
+            .client
+            .complete_llm(&text_request())
+            .await
+            .unwrap_err();
+        assert_eq!(error.to_string(), format!("HTTP 500: {expected}"));
+
+        let home = CodexHome::new().await;
+        home.write(AuthFile {
+            account_id: Some(account.to_owned()),
+            ..AuthFile::default().access(&CodexHome::access_token(10, "plus"))
+        });
+        home.server.enqueue([StubResponse::new(503, echo(escaped))]);
+        let error = home.store().current().await.unwrap_err();
+        assert_eq!(
+            error.detail(),
+            Some(format!("HTTP 503: {expected}").as_str())
+        );
     }
 }
 
-/// A key shorter than eight bytes is a placeholder for a local server, not
-/// a credential, and is left as it is: redacting it would garble every
-/// message. Eight bytes and more is a secret.
+/// The model's answer text is the pass's input, not an error, and is not
+/// redacted: a secret the model writes into it comes back as written.
 #[tokio::test]
-async fn a_key_shorter_than_eight_bytes_is_a_placeholder_and_left_as_it_is() {
+async fn the_model_s_answer_text_is_not_redacted() {
+    let answer = format!("the key was {API_KEY}");
+    let harness = ClientHarness::with_retry(RetryPolicy::NONE).await;
+    harness.server.enqueue([scripts.text(&answer)]);
+    let response = harness.client.complete_llm(&text_request()).await.unwrap();
+    assert_eq!(response.text, answer);
+
+    let harness = CodexHarness::build(RetryPolicy::NONE, "gpt-stub", |_| {}).await;
+    let answer = "the account was acct_stored, the refresh token rt_original";
+    harness.backend.enqueue([scripts.stream(answer)]);
+    let response = harness.client.complete_llm(&text_request()).await.unwrap();
+    assert_eq!(response.text, answer);
+}
+
+/// A secret shorter than eight bytes, in practice a placeholder key for a
+/// local server, is not redacted: redacting it would garble every message.
+/// Eight bytes and more is redacted, a key or an account id alike.
+#[tokio::test]
+async fn a_secret_shorter_than_eight_bytes_is_not_redacted() {
     let message = serde_json::json!({"error": {"message": "context exceeded max tokens"}});
     for (key, expected) in [
         ("x", "HTTP 400: context exceeded max tokens"),
@@ -731,5 +786,19 @@ async fn a_key_shorter_than_eight_bytes_is_a_placeholder_and_left_as_it_is() {
             .await
             .unwrap_err();
         assert_eq!(error.to_string(), expected, "{key}");
+    }
+    for (account, expected) in [
+        ("acct_1", "HTTP 400: refused for acct_1"),
+        ("acct_123", "HTTP 400: refused for [redacted]"),
+    ] {
+        let home = CodexHome::new().await;
+        home.write(AuthFile {
+            account_id: Some(account.to_owned()),
+            ..AuthFile::default().access(&CodexHome::access_token(10, "plus"))
+        });
+        let refusal = serde_json::json!({"error_description": format!("refused for {account}")});
+        home.server.enqueue([StubResponse::json(&refusal, 400)]);
+        let error = home.store().current().await.unwrap_err();
+        assert_eq!(error.detail(), Some(expected), "{account}");
     }
 }
