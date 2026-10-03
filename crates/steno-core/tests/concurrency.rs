@@ -16,10 +16,12 @@ use steno_core::Store;
 
 use common::populate;
 
-/// Writes each worker makes. SQLite's busy handler polls rather than
-/// queues, so the worker that takes the lock first usually makes all of
-/// its writes back to back while the other waits once, for that whole run,
-/// on the busy timeout. The run has to fit inside the timeout.
+/// Writes each worker makes: enough that a deferred transaction fails,
+/// few enough that one worker's whole run fits inside the busy timeout.
+/// SQLite's busy handler sleeps and retries, so waiters do not take
+/// turns: the worker that takes the write lock first usually makes all
+/// of its writes back to back while the other waits once, for that
+/// whole run.
 const WRITES_PER_WORKER: usize = 40;
 
 /// Past this a worker stops and the test fails on its count, so a stuck
@@ -29,15 +31,13 @@ const GUARD: Duration = Duration::from_secs(60);
 /// Each store on its own connection, each writer reading the row and
 /// writing it back in one transaction (the shape that made a deferred
 /// transaction fail with `database is locked` once the other side had
-/// written in between), a fixed number of times each, both starting
-/// together so they collide.
+/// written in between), a fixed number of times each. A barrier starts
+/// both workers together so they almost always collide.
 ///
-/// Both connections commit with `synchronous = OFF`. With an fsync per
-/// commit, a disk shared with parallel builds stretched the first worker's
-/// run past the five-second busy timeout and the waiting worker failed,
-/// though nothing was wrong with the store. Without the fsync the run takes
-/// milliseconds; the collision, the immediate transaction and the busy
-/// handler are the same.
+/// The run fits inside the timeout because the store commits with
+/// `synchronous = NORMAL`, as the Swift app does: in WAL mode a commit
+/// does not wait for an fsync. The stores open on this thread, so a failed
+/// open fails the test before either worker waits at the barrier.
 #[test]
 fn two_stores_write_the_same_file_without_errors() {
     let directory = tempfile::tempdir().unwrap();
@@ -45,15 +45,13 @@ fn two_stores_write_the_same_file_without_errors() {
     let meeting = populate(&Store::open(&path).unwrap());
 
     let start = Arc::new(Barrier::new(2));
-    let workers: Vec<_> = (0..2)
-        .map(|worker| {
-            let path = path.clone();
+    let stores: Vec<_> = (0..2).map(|_| Store::open(&path).unwrap()).collect();
+    let workers: Vec<_> = stores
+        .into_iter()
+        .enumerate()
+        .map(|(worker, store)| {
             let start = start.clone();
             thread::spawn(move || {
-                let store = Store::open(&path).unwrap();
-                store
-                    .read(|connection| Ok(connection.pragma_update(None, "synchronous", "OFF")?))
-                    .unwrap();
                 start.wait();
                 let guard = Instant::now() + GUARD;
                 let mut writes = 0;
