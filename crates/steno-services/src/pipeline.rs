@@ -67,13 +67,19 @@ impl CurrentPipeline {
         Ok(())
     }
 
-    /// Runs an operation the pipeline has already claimed the meeting
-    /// for on the runtime, in the background; its failure reaches the
-    /// window as the `OperationFailed` event it posts.
-    fn spawn(&self, operation: Operation) {
+    /// Claims the meeting on the current pipeline in place, so a refusal
+    /// is the call's error, then runs the claimed operation on the
+    /// runtime in the background; its failure reaches the window as the
+    /// `OperationFailed` event it posts.
+    fn start<E: std::fmt::Display>(
+        &self,
+        claim: impl FnOnce(&ProcessingPipeline) -> Result<Operation, E>,
+    ) -> Result<(), String> {
+        let operation = claim(&self.current()).map_err(|failure| failure.to_string())?;
         self.runtime.spawn(async move {
             let _ = operation.await;
         });
+        Ok(())
     }
 }
 
@@ -95,23 +101,13 @@ pub struct HostPipeline {
 
 impl Pipeline for HostPipeline {
     fn rerun_summary(&self, meeting_id: Uuid, template_id: &str) -> Result<(), String> {
-        let operation = self
-            .pipeline
-            .current()
-            .claim_rerun_summary(meeting_id, template_id)
-            .map_err(|failure| failure.to_string())?;
-        self.pipeline.spawn(operation);
-        Ok(())
+        self.pipeline
+            .start(|pipeline| pipeline.claim_rerun_summary(meeting_id, template_id))
     }
 
     fn redeliver(&self, meeting_id: Uuid) -> Result<(), String> {
-        let operation = self
-            .pipeline
-            .current()
-            .claim_redeliver(meeting_id)
-            .map_err(|failure| failure.to_string())?;
-        self.pipeline.spawn(operation);
-        Ok(())
+        self.pipeline
+            .start(|pipeline| pipeline.claim_redeliver(meeting_id))
     }
 
     fn apply_retention(&self, meeting_id: Uuid, rule: AudioRetention) -> Result<(), String> {
