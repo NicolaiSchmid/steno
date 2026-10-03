@@ -48,19 +48,22 @@ pub fn merge_windows(
     };
     let left_end = seconds(last_left) + FRAME_SECONDS;
     let right_start = seconds(first_right);
-    if left_end <= right_start {
+    let tolerance = (overlap_seconds / 2.0).max(0.5);
+    // Windows further apart than the match tolerance share no token. Closer
+    // ones go through the LCS even with one token a side: a right window
+    // that starts with the left's last word one frame later is a copy.
+    if right_start >= left_end + tolerance {
         return [left, right].concat();
     }
+    // The overlap reaches at least the tolerance, so a copy the LCS could
+    // match never falls outside it and through to the midpoint cut.
+    let reach = overlap_seconds.max(tolerance);
     let overlap_left: Vec<usize> = (0..left.len())
-        .filter(|&i| seconds(&left[i]) + FRAME_SECONDS > right_start - overlap_seconds)
+        .filter(|&i| seconds(&left[i]) + FRAME_SECONDS > right_start - reach)
         .collect();
     let overlap_right: Vec<usize> = (0..right.len())
-        .filter(|&i| seconds(&right[i]) < left_end + overlap_seconds)
+        .filter(|&i| seconds(&right[i]) < left_end + reach)
         .collect();
-    if overlap_left.len() < 2 || overlap_right.len() < 2 {
-        return merge_by_midpoint(left, right, left_end, right_start, vocab);
-    }
-    let tolerance = (overlap_seconds / 2.0).max(0.5);
     let matches = |a: usize, b: usize| {
         left[a].id == right[b].id && (seconds(&left[a]) - seconds(&right[b])).abs() < tolerance
     };
@@ -140,6 +143,11 @@ fn merge_by_midpoint(
     right_start: f64,
     vocab: &Vocab,
 ) -> Vec<Token> {
+    // Without a shared token, windows that do not overlap in time join as
+    // they are.
+    if right_start >= left_end {
+        return [left, right].concat();
+    }
     let cutoff = f64::midpoint(left_end, right_start);
     let mut left_end_index = left
         .iter()
@@ -190,8 +198,9 @@ mod tests {
 
     #[test]
     fn windows_apart_in_time_concatenate() {
+        // Right starts 2.24 s after left ends, past the 0.75 s tolerance.
         let left = vec![token(0, 0), token(4, 1)];
-        let right = vec![token(1, 10), token(5, 11)];
+        let right = vec![token(1, 30), token(5, 31)];
         assert_eq!(
             ids(&merge_all(&[left.clone(), right.clone()], 1.5, &vocab())),
             ids(&[left.clone(), right.clone()].concat())
@@ -273,6 +282,38 @@ mod tests {
         let merged = merge_all(&[left, right], 1.5, &vocab());
         // Cutoff 2.04 s = frame 25.5: left keeps up to frame 11, right resumes at the word start on frame 28.
         assert_eq!(ids(&merged), vec![(0, 10), (4, 11), (3, 28), (4, 29)]);
+    }
+
+    #[test]
+    fn windows_close_in_time_without_a_shared_token_concatenate() {
+        // Right starts 0.16 s after left ends and opens with the rest of
+        // left's last word: no copy, no time overlap, nothing to cut.
+        let left = vec![token(0, 0), token(1, 9)];
+        let right = vec![token(5, 12), token(2, 14)];
+        assert_eq!(
+            ids(&merge_windows(&left, &right, 1.5, &vocab())),
+            ids(&[left, right].concat())
+        );
+    }
+
+    #[test]
+    fn a_right_window_repeating_the_left_s_last_word_a_frame_later_keeps_one_copy() {
+        // Left ends with c on frame 24, right opens with c on frame 25: the
+        // windows touch, so a plain join would read "c c d".
+        let left = vec![token(1, 20), token(2, 24)];
+        let right = vec![token(2, 25), token(3, 30)];
+        assert_eq!(
+            ids(&merge_windows(&left, &right, 1.5, &vocab())),
+            vec![(1, 20), (2, 24), (3, 30)]
+        );
+        // With a 0.4 s overlap the 0.5 s tolerance reaches further than the
+        // overlap: the copy 0.4 s later is still matched, not cut at the
+        // midpoint and kept twice.
+        let right = vec![token(2, 30), token(3, 40)];
+        assert_eq!(
+            ids(&merge_windows(&left, &right, 0.4, &vocab())),
+            vec![(1, 20), (2, 24), (3, 40)]
+        );
     }
 
     #[test]
