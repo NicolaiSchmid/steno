@@ -15,9 +15,8 @@ use std::sync::Arc;
 use realfft::num_complex::Complex;
 use realfft::{RealFftPlanner, RealToComplex};
 
-use crate::backend::Features;
+use crate::backend::{Features, SAMPLE_RATE};
 
-use crate::backend::SAMPLE_RATE;
 pub const N_FFT: usize = 512;
 pub const WINDOW_LENGTH: usize = 400;
 pub const HOP_LENGTH: usize = 160;

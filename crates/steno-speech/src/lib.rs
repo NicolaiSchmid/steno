@@ -2,9 +2,9 @@
 //! pause-aligned chunker, the greedy TDT decoder, the overlap merge and the
 //! mapping from pieces to segments, with the model calls behind one trait
 //! so the `CoreML` backend on the Mac and every other platform (ONNX
-//! Runtime, here) share one loop. Plan: `.plans/2026-10-02-rust-core-and-tauri-shell.md`
-//! (WP4, invariant 4) and decisions 1 to 5 of
-//! `.plans/2026-10-01-cross-platform-speech-stack.md`.
+//! Runtime, here) share one loop. Plan:
+//! `.plans/2026-10-02-rust-core-and-tauri-shell.md` (WP4, invariant 4) and
+//! decisions 1 to 5 of `.plans/2026-10-01-cross-platform-speech-stack.md`.
 //!
 //! - [`backend`]: [`SpeechBackend`], the four model calls (features,
 //!   encoder, decoder step, joint step), the tensors they exchange and the

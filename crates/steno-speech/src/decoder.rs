@@ -136,7 +136,7 @@ mod tests {
     struct ScriptedBackend {
         shape: ModelShape,
         script: std::collections::VecDeque<JointDecision>,
-        pub fed: Vec<u32>,
+        fed: Vec<u32>,
     }
 
     impl ScriptedBackend {

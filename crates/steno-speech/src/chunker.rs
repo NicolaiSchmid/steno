@@ -1,11 +1,11 @@
 //! The pause-aligned chunk layout (decision 1 of the speech-stack plan):
 //! chunks aim at `target_seconds` and cut at the longest VAD pause inside
 //! the search window either side of the target, else at the quietest
-//! 100 ms frame there; a long pause ends a chunk early and is skipped; `overlap_seconds` of audio is shared with the next
-//! chunk for the merge. No chunk exceeds `max_seconds`, a memory clamp
-//! (attention grows with the square of the window: 13 GB at 600 s, spike
-//! E), not the position table's 800 s cap. Ported from
-//! `spikes/onnx-speech/src/chunker.rs`.
+//! 100 ms frame there; a long pause ends a chunk early and is skipped;
+//! `overlap_seconds` of audio is shared with the next chunk for the merge.
+//! No chunk exceeds `max_seconds`, a memory clamp (attention grows with the
+//! square of the window: 13 GB at 600 s, spike E), not the position table's
+//! 800 s cap. Ported from `spikes/onnx-speech/src/chunker.rs`.
 //! Swift: none; `FluidAudio`'s `ChunkProcessor` cuts at fixed 15 s strides.
 
 use std::ops::Range;
