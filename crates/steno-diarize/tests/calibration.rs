@@ -5,7 +5,9 @@
 //! lane once and sweeps the clustering cut, with and without refinement,
 //! and prints a Markdown table per backend for the PR. The run fails when
 //! any lane misses the gate at [`DEFAULT_CLUSTERING_THRESHOLD`] or has no
-//! audio in the corpus; the other cuts are reported, not asserted.
+//! audio in the corpus, and a run over every lane fails when a lane's
+//! audio has no count in `truth.json`; the other cuts are reported, not
+//! asserted.
 //!
 //! Environment:
 //! - `STENO_CALIBRATION_CORPUS`: the corpus directory (required).
@@ -220,6 +222,22 @@ fn requested_lanes(truth: &BTreeMap<String, usize>) -> Option<Vec<String>> {
     Some(requested)
 }
 
+/// Every `audio/<id>` in the corpus has a count in `truth`, so an entry
+/// `truth.json` holds in a shape [`truth`] cannot read fails the full run
+/// rather than leaving that lane out of the gate.
+fn assert_every_lane_has_truth(corpus: &Path, truth: &BTreeMap<String, usize>) {
+    let missing: Vec<String> = std::fs::read_dir(corpus.join("audio"))
+        .expect("audio directory readable")
+        .map(|entry| entry.expect("audio entry").file_name())
+        .map(|name| name.to_string_lossy().into_owned())
+        .filter(|id| !id.starts_with('.') && !truth.contains_key(id))
+        .collect();
+    assert!(
+        missing.is_empty(),
+        "audio without a count in truth.json: {missing:?}"
+    );
+}
+
 /// The cuts `STENO_DIARIZE_THRESHOLDS` names, or the default sweep.
 fn thresholds() -> Vec<f32> {
     std::env::var("STENO_DIARIZE_THRESHOLDS").ok().map_or_else(
@@ -283,6 +301,9 @@ fn g3_speaker_counts_against_truth() {
     let truth = truth(&corpus.join("truth.json"));
     assert!(!truth.is_empty(), "truth.json yielded no counts");
     let only = requested_lanes(&truth);
+    if only.is_none() {
+        assert_every_lane_has_truth(&corpus, &truth);
+    }
     let thresholds = thresholds();
     let (name, backend) = backend();
     let mut pipeline = Pipeline::new(backend, DiarizerConfig::default());
