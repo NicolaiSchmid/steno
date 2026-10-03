@@ -402,15 +402,7 @@ fn a_buffer_shaped_unlike_the_layout_becomes_silence() {
 
     // The microphone's channel is beyond a buffer that shrank to mono; the
     // frame count still comes from that first buffer.
-    let mono_layout = StreamLayout::resolve(
-        &[AudioLane::Mic, AudioLane::System],
-        &[2, 2],
-        &[vec![], vec![2]],
-        &[2],
-        Some(1),
-    )
-    .unwrap();
-    let mut shifted = mono_layout.clone();
+    let mut shifted = layout.clone();
     shifted.sources[0].left = ChannelRef::new(0, 1, 2);
     let sink = LaneFrameSink::new(&[AudioLane::Mic, AudioLane::System]);
     run_deliver(

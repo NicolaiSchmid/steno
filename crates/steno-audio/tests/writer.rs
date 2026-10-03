@@ -266,21 +266,14 @@ fn wav_header_sizes_match_the_samples_written() {
     writer.write(&[-1_000i16; 100]).unwrap();
     writer.finish().unwrap();
     let bytes = std::fs::read(&path).unwrap();
+    let field = |at: usize| u32::from_le_bytes(bytes[at..at + 4].try_into().unwrap()) as usize;
     let data_size = 260 * 2;
     assert_eq!(bytes.len(), WavStreamWriter::HEADER_SIZE + data_size);
-    let riff_size = u32::from_le_bytes(bytes[4..8].try_into().unwrap()) as usize;
-    assert_eq!(riff_size, 36 + data_size);
-    assert_eq!(riff_size, bytes.len() - 8);
+    assert_eq!(field(4), 36 + data_size, "RIFF size");
+    assert_eq!(field(4), bytes.len() - 8);
     assert_eq!(&bytes[36..40], b"data");
-    assert_eq!(
-        u32::from_le_bytes(bytes[40..44].try_into().unwrap()) as usize,
-        data_size
-    );
-    assert_eq!(
-        u32::from_le_bytes(bytes[24..28].try_into().unwrap()),
-        16_000,
-        "sample rate"
-    );
+    assert_eq!(field(40), data_size, "data size");
+    assert_eq!(field(24), 16_000, "sample rate");
 }
 
 /// A sidecar whose writer never reached `finish()` keeps its zero-size

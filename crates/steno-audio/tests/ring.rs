@@ -129,9 +129,6 @@ fn clear_zeroes_storage_and_resets_indices() {
     assert_eq!(out, [0.0; 4]);
 }
 
-/// A producer thread writes 480-sample blocks as fast as it can while a
-/// consumer thread drains; every sample is either read in order or counted
-/// as dropped, and nothing is duplicated or lost.
 /// One producer and one consumer on a 4 096-sample ring for about 200 ms,
 /// with block sizes that cycle through 1..=1024 on both sides and every
 /// sample carrying its sequence number. Every sample the consumer sees is
