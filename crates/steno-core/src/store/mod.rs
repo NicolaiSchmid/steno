@@ -135,10 +135,11 @@ impl std::fmt::Debug for Store {
 impl Store {
     /// Opens (creating) the database at `path` and applies every pending
     /// migration. The parent directory is created. The connection is set up
-    /// like the Swift app's writer: WAL mode with `synchronous = NORMAL`, so
-    /// checkpoints sync and commits do not, bar one WAL-header sync after
-    /// each checkpoint; foreign keys on; a five-second busy timeout. Swift:
-    /// `MeetingStore.onDisk`, whose `DatabasePool` runs GRDB's
+    /// like the Swift app's writer: WAL mode, `synchronous = NORMAL`, foreign
+    /// keys on and a five-second busy timeout. With `NORMAL` in WAL mode a
+    /// commit waits for an fsync only when it runs a checkpoint or is the
+    /// first commit after one.
+    /// Swift: `MeetingStore.onDisk`, whose `DatabasePool` runs GRDB's
     /// `Database.setUpWALMode`.
     ///
     /// Another process (the Swift app, a second copy of this one) may hold
@@ -188,8 +189,8 @@ impl Store {
     /// upgraded once another connection has written in between (WAL's
     /// `SQLITE_BUSY_SNAPSHOT`), and the busy handler does not retry that.
     /// Beginning immediate takes the write lock up front, so the second
-    /// writer waits on the busy timeout instead of failing with `database is
-    /// locked`.
+    /// writer waits on the busy timeout instead of failing with
+    /// `database is locked`.
     pub fn write<T>(&self, body: impl FnOnce(&Transaction<'_>) -> Result<T>) -> Result<T> {
         let mut connection = self.lock();
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
