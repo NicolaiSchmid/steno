@@ -174,11 +174,10 @@ impl ModelStore {
     pub fn environment_root() -> Option<PathBuf> {
         let value = std::env::var_os(Self::ENVIRONMENT_VARIABLE).filter(|v| !v.is_empty())?;
         let path = PathBuf::from(value);
-        if path.is_absolute() {
-            Some(path)
-        } else {
-            Some(std::env::current_dir().map_or(path.clone(), |cwd| cwd.join(path)))
-        }
+        Some(match std::env::current_dir() {
+            Ok(cwd) if path.is_relative() => cwd.join(path),
+            _ => path,
+        })
     }
 
     /// `<support directory>/Models`, the Swift app's models root.
@@ -204,11 +203,12 @@ impl ModelStore {
     #[must_use]
     pub fn missing_files(&self, asset: &ModelAsset) -> Vec<String> {
         let directory = self.directory(asset);
+        let invalid = asset.validate().is_err();
         asset
             .files
             .iter()
             .filter(|file| {
-                asset.validate().is_err()
+                invalid
                     || !fs::metadata(directory.join(&file.name))
                         .is_ok_and(|m| m.is_file() && m.len() == file.size)
             })
@@ -237,14 +237,7 @@ impl ModelStore {
         let directory = self.directory(asset);
         for file in &asset.files {
             let path = directory.join(&file.name);
-            let actual = sha256_of(&path)?;
-            if !actual.eq_ignore_ascii_case(&file.sha256) {
-                return Err(SpeechError::Checksum {
-                    path,
-                    expected: file.sha256.clone(),
-                    actual,
-                });
-            }
+            check_digest(file, &path, sha256_of(&path)?)?;
         }
         Ok(())
     }
@@ -374,15 +367,20 @@ impl ModelStore {
         if received != file.size {
             return Err(size_error(received));
         }
-        let actual = hex(&hasher.finalize());
-        if !actual.eq_ignore_ascii_case(&file.sha256) {
-            return Err(SpeechError::Checksum {
-                path: partial.to_path_buf(),
-                expected: file.sha256.clone(),
-                actual,
-            });
-        }
+        check_digest(file, partial, hex(&hasher.finalize()))
+    }
+}
+
+/// `actual` against the manifest's digest for `file`, read from `path`.
+fn check_digest(file: &ModelFile, path: &Path, actual: String) -> Result<(), SpeechError> {
+    if actual.eq_ignore_ascii_case(&file.sha256) {
         Ok(())
+    } else {
+        Err(SpeechError::Checksum {
+            path: path.to_path_buf(),
+            expected: file.sha256.clone(),
+            actual,
+        })
     }
 }
 
