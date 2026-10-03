@@ -5,7 +5,8 @@
 //! key goes into the client only; the Codex provider reads the Codex CLI's
 //! sign-in. Swift: `apps/macos/Steno/Services/LLMWiring.swift`.
 
-use std::sync::Arc;
+use std::future::Future;
+use std::sync::{Arc, OnceLock};
 
 use chrono_tz::Tz;
 use steno_core::{MeetingSummarizer, Settings, TranscriptCleaner};
@@ -14,8 +15,6 @@ use steno_llm::{
     CodexCredentialStore, CodexResponsesClient, LlmClient, LlmEndpoint, LlmMeetingSummarizer,
     LlmTranscriptCleaner, OpenAiCompatibleClient, RetryPolicy,
 };
-
-use crate::block_on;
 
 /// The Codex CLI's sign-in, found through the process environment.
 #[must_use]
@@ -98,33 +97,81 @@ pub async fn probe_line(
     ))
 }
 
-/// The host's `LlmService` over the real clients; blocks on the runtime
-/// handle the app runs on (the host's traits are synchronous).
+/// The runtime the host's network calls run on, with a worker of its
+/// own. The host makes them with its state locked, and the app runtime's
+/// workers can all be parked on that lock (the event loop, the flush timer
+/// and the poll take it), leaving nobody to drive a request or fire its
+/// timeout there. It lives as long as the process: a connection it opens
+/// can serve the pipeline's client later, and would die with it.
+fn network_runtime() -> &'static tokio::runtime::Runtime {
+    static RUNTIME: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
+    RUNTIME.get_or_init(|| {
+        tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .thread_name("steno-network")
+            .enable_all()
+            .build()
+            .expect("the network runtime")
+    })
+}
+
+/// Runs `future` on [`network_runtime`] and waits for it; `None` when it
+/// panicked.
+fn on_network_runtime<T: Send + 'static>(
+    future: impl Future<Output = T> + Send + 'static,
+) -> Option<T> {
+    let (sender, receiver) = std::sync::mpsc::channel();
+    network_runtime().spawn(async move {
+        let _ = sender.send(future.await);
+    });
+    let wait = move || receiver.recv().ok();
+    match tokio::runtime::Handle::try_current() {
+        Ok(handle) if handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread => {
+            tokio::task::block_in_place(wait)
+        }
+        _ => wait(),
+    }
+}
+
+const NETWORK_CALL_PANICKED: &str = "The request stopped unexpectedly.";
+
+/// The host's `LlmService` over the real clients. The host's traits are
+/// synchronous, so each call waits, on the network runtime; the host's
+/// state stays locked meanwhile (the probe's single attempt and the
+/// clients' timeouts bound the wait).
 pub struct ClientLlmService {
     pub codex: Arc<CodexCredentialStore>,
-    pub runtime: tokio::runtime::Handle,
 }
 
 impl LlmService for ClientLlmService {
     fn probe(&self, settings: &Settings, api_key: Option<&str>) -> Result<String, String> {
-        block_on(&self.runtime, probe_line(settings, api_key, &self.codex))
+        let (settings, api_key, codex) = (
+            settings.clone(),
+            api_key.map(str::to_owned),
+            self.codex.clone(),
+        );
+        on_network_runtime(async move { probe_line(&settings, api_key.as_deref(), &codex).await })
+            .unwrap_or_else(|| Err(NETWORK_CALL_PANICKED.to_owned()))
     }
 
     fn codex_account(&self) -> Result<String, String> {
-        block_on(&self.runtime, self.codex.current())
+        let codex = self.codex.clone();
+        on_network_runtime(async move { codex.current().await })
+            .ok_or_else(|| NETWORK_CALL_PANICKED.to_owned())?
             .map(|credentials| credentials.account_line())
             .map_err(|error| error.to_string())
     }
 
     fn codex_models(&self) -> Result<Vec<CodexModel>, CodexModelsError> {
-        block_on(&self.runtime, async {
-            self.codex
+        let codex = self.codex.clone();
+        on_network_runtime(async move {
+            codex
                 .current()
                 .await
                 .map_err(|error| CodexModelsError::Credential(error.to_string()))?;
             let client = CodexResponsesClient::new(
                 LlmEndpoint::codex("list", Settings::DEFAULT_CODEX_CONTEXT_TOKENS),
-                self.codex.clone(),
+                codex,
             )
             .with_retry(RetryPolicy::with_max_attempts(1));
             let models = client
@@ -141,5 +188,74 @@ impl LlmService for ClientLlmService {
                 })
                 .collect())
         })
+        .unwrap_or_else(|| Err(CodexModelsError::Other(NETWORK_CALL_PANICKED.to_owned())))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Mutex;
+    use std::time::Duration;
+
+    use steno_core::LlmProvider;
+    use steno_llm::testing::{Scripts, StubChatServer};
+
+    use super::*;
+
+    /// The deadlock the network runtime prevents: the app runtime's only
+    /// worker is parked on a lock the caller holds (as the host's flush
+    /// timer parks on the host's state while a Settings command holds it),
+    /// and the probe still answers.
+    #[test]
+    fn a_probe_answers_while_every_app_worker_waits_on_the_caller_s_lock() {
+        let one_worker = || {
+            tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(1)
+                .enable_all()
+                .build()
+                .unwrap()
+        };
+        let (app, elsewhere) = (one_worker(), one_worker());
+        let server = elsewhere.block_on(StubChatServer::start()).unwrap();
+        server.respond(Arc::new(|request| {
+            if request.path.ends_with("/models") {
+                Some(Scripts.models(&["stub-model"]))
+            } else {
+                Some(Scripts.json(&serde_json::json!({ "ok": true }), None))
+            }
+        }));
+        let settings = Settings {
+            llm_provider: LlmProvider::Endpoint,
+            llm_base_url: Some(server.base_url().to_string()),
+            llm_model: Some("stub-model".to_owned()),
+            ..Settings::default()
+        };
+
+        let host_state = Arc::new(Mutex::new(()));
+        let held = host_state.lock().unwrap();
+        let parked = host_state.clone();
+        let (parked_sender, parked_receiver) = std::sync::mpsc::channel();
+        app.spawn(async move {
+            parked_sender.send(()).unwrap();
+            drop(parked.lock().unwrap());
+        });
+        parked_receiver.recv().unwrap();
+
+        let service = ClientLlmService {
+            codex: codex_store(),
+        };
+        let (answer_sender, answer_receiver) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = answer_sender.send(service.probe(&settings, None));
+        });
+        let answer = answer_receiver
+            .recv_timeout(Duration::from_secs(10))
+            .expect("the probe answered while the app runtime was parked");
+        drop(held);
+        let line = answer.unwrap();
+        assert!(
+            line.starts_with("Connected: model listed, structured output"),
+            "{line}"
+        );
     }
 }

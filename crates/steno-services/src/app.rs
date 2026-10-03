@@ -292,10 +292,7 @@ pub fn build(options: AppOptions) -> Result<App, BuildError> {
         speech_models: Arc::new(ModelStoreSpeechModels {
             speech: speech_store.clone(),
         }),
-        llm: Arc::new(ClientLlmService {
-            codex,
-            runtime: runtime.clone(),
-        }),
+        llm: Arc::new(ClientLlmService { codex }),
         export_validator: Arc::new(crate::export::ObsidianExportValidator),
         handover: handover.as_ref().map(|(service, mac_id)| {
             Arc::new(ListenerHandover {
