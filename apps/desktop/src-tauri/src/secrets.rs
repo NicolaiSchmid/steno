@@ -152,17 +152,46 @@ mod tests {
 
     use super::*;
 
-    /// Routes the keyring crate to its in-memory credential store, once per
-    /// process, so the tests touch no real keychain. A mock credential lives
+    /// Routes the keyring crate to in-memory mock credentials, once per
+    /// process, so the tests touch no real keychain, and records the
+    /// service and user every entry is built with. A mock credential lives
     /// as long as its `Entry`, and the store makes a new entry per call, so
-    /// the mock proves the error mapping and the calls, not persistence;
+    /// the mock proves the error mapping and the names, not persistence;
     /// `the_platform_keyring_round_trips_a_secret` proves that on a machine
     /// with a keyring.
     fn use_mock_keyring() {
         static ONCE: Once = Once::new();
         ONCE.call_once(|| {
-            keyring::set_default_credential_builder(keyring::mock::default_credential_builder());
+            keyring::set_default_credential_builder(Box::new(RecordingBuilder));
         });
+    }
+
+    /// `(service, user)` of every entry built since the tests began.
+    static BUILT: Mutex<Vec<(String, String)>> = Mutex::new(Vec::new());
+
+    struct RecordingBuilder;
+
+    impl keyring::credential::CredentialBuilderApi for RecordingBuilder {
+        fn build(
+            &self,
+            _target: Option<&str>,
+            service: &str,
+            user: &str,
+        ) -> keyring::Result<Box<keyring::Credential>> {
+            BUILT
+                .lock()
+                .expect("built")
+                .push((service.to_owned(), user.to_owned()));
+            Ok(Box::new(keyring::mock::MockCredential::default()))
+        }
+
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
+        }
+
+        fn persistence(&self) -> keyring::credential::CredentialPersistence {
+            keyring::credential::CredentialPersistence::EntryOnly
+        }
     }
 
     fn round_trip(store: &dyn SecretStore) {
@@ -215,15 +244,19 @@ mod tests {
         );
     }
 
+    /// The keyring entry is `(service, account)` in that order, as the
+    /// Swift store names it: the store's service, the key's raw value.
     #[test]
-    fn entries_are_named_by_service_and_key() {
+    fn entries_are_named_by_service_then_key() {
         use_mock_keyring();
-        let store = KeyringSecretStore::new("uno.schmid.steno.test");
+        let store = KeyringSecretStore::new("uno.schmid.steno.names");
         let key = SecretKey("other".into());
-        // The credential's attributes are the keyring's own view of the
-        // entry: service and user, as the Swift store names them.
-        let entry = store.entry(&key).unwrap();
-        let attributes = entry.get_attributes().unwrap_or_default();
-        assert!(attributes.values().all(|value| !value.is_empty()));
+        store.secret(&key).unwrap();
+        let built = BUILT.lock().expect("built");
+        assert!(
+            built.contains(&("uno.schmid.steno.names".into(), "other".into())),
+            "{built:?}"
+        );
+        assert!(!built.contains(&("other".into(), "uno.schmid.steno.names".into())));
     }
 }
