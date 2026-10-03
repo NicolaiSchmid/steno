@@ -234,6 +234,13 @@ impl<B: SpeechBackend> Transcriber<B> {
         }
         if best_words > original_words {
             stats.recoveries_accepted += 1;
+            // The wider window also decoded up to 12 s of the neighbours'
+            // speech; keep only what the merge expects of a chunk, its range
+            // plus the overlap either side.
+            let overlap = sample_count(self.config.chunker.overlap_seconds);
+            let frames = range.start.saturating_sub(overlap) / FRAME_SAMPLES
+                ..=(range.end + overlap) / FRAME_SAMPLES;
+            best.retain(|t| frames.contains(&t.frame));
         }
         Ok(best)
     }
@@ -541,6 +548,48 @@ mod tests {
             speech_inside(&[0..16_000, 32_000..48_000], &(8_000..40_000)),
             1.0
         );
+    }
+
+    /// Recovers the 1 to 9 s range of the empty-chunk fixture, with a
+    /// second word at 10.8 s, under `extensions`; windows under 160 frames
+    /// (12.8 s) decode to silence.
+    fn recover_with(extensions: &[(f32, f32)]) -> (Vec<Token>, Transcriber<FrameTokenBackend>) {
+        let (mut config, mut samples) = empty_chunk_fixture(50);
+        config.recovery.extensions_seconds = extensions.to_vec();
+        for (i, x) in audio(14.0, 135, &[6]).into_iter().enumerate() {
+            if x != 0.0 {
+                samples[i] = x;
+            }
+        }
+        let mut t = transcriber(config, 160);
+        let range = SAMPLE_RATE..9 * SAMPLE_RATE;
+        let tokens = t
+            .recover(&samples, &range, Vec::new(), &mut DecodeStats::default())
+            .unwrap();
+        (tokens, t)
+    }
+
+    #[test]
+    fn an_accepted_recovery_keeps_only_the_chunk_and_its_overlap() {
+        // The 1 to 15 s window decodes both words; the one at 10.8 s lies
+        // past 9 s plus the 1.5 s overlap and belongs to the next chunk.
+        let (tokens, t) = recover_with(&[(0.0, 6.0)]);
+        assert_eq!(t.render(&tokens), "w5s25");
+    }
+
+    #[test]
+    fn a_later_extension_replaces_an_earlier_one_only_with_more_words() {
+        // The 3 s extension (11 s window) decodes nothing: fewer words, so
+        // the 6 s one stays.
+        let (tokens, t) = recover_with(&[(0.0, 6.0), (0.0, 3.0)]);
+        assert_eq!(t.render(&tokens), "w5s25");
+        // A tie keeps the first: starting half a frame earlier moves the
+        // frame grid, and with it the word's frame.
+        let (first, _) = recover_with(&[(0.0, 6.0)]);
+        let (later, _) = recover_with(&[(0.04, 6.0)]);
+        assert_ne!(first[0].frame, later[0].frame);
+        let (tied, _) = recover_with(&[(0.0, 6.0), (0.04, 6.0)]);
+        assert_eq!(tied, first);
     }
 
     #[test]
