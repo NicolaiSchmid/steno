@@ -158,15 +158,16 @@ struct AuthFile {
 }
 
 /// A refresh the token endpoint turned down, before it is mapped to the
-/// public error: the code decides on a re-read, and a permanent refusal
+/// public error: a reused token triggers a re-read, and a permanent refusal
 /// is remembered against the token it was for. Never `Debug`.
 struct RefreshRejected {
     /// The token the endpoint refused.
     refresh_token: String,
-    code: Option<String>,
+    /// The code was `refresh_token_reused`.
+    reused: bool,
     permanent: bool,
-    /// Already redacted.
-    message: String,
+    /// The code and the message, already redacted.
+    detail: String,
 }
 
 enum RefreshFailure {
@@ -182,14 +183,10 @@ impl From<CodexCredentialError> for RefreshFailure {
 
 impl From<RefreshRejected> for CodexCredentialError {
     fn from(rejected: RefreshRejected) -> Self {
-        let detail = match rejected.code {
-            Some(code) => format!("{code}: {}", rejected.message),
-            None => rejected.message,
-        };
         if rejected.permanent {
-            CodexCredentialError::SignInExpired(detail)
+            CodexCredentialError::SignInExpired(rejected.detail)
         } else {
-            CodexCredentialError::RefreshFailed(detail)
+            CodexCredentialError::RefreshFailed(rejected.detail)
         }
     }
 }
@@ -228,17 +225,18 @@ struct RefreshError {
 }
 
 impl RefreshError {
-    fn code(&self) -> Option<String> {
+    /// The code as the endpoint wrote it: lowercased for the decisions,
+    /// redacted before it is lowercased for the detail.
+    fn code(&self) -> Option<&str> {
         if let Some(code) = self.error_code.as_deref().filter(|c| !c.is_empty()) {
-            return Some(code.to_lowercase());
+            return Some(code);
         }
         match &self.error {
-            Some(Value::String(code)) if !code.is_empty() => Some(code.to_lowercase()),
+            Some(Value::String(code)) if !code.is_empty() => Some(code),
             Some(Value::Object(object)) => object
                 .get("code")
                 .and_then(Value::as_str)
-                .filter(|c| !c.is_empty())
-                .map(str::to_lowercase),
+                .filter(|c| !c.is_empty()),
             _ => None,
         }
     }
@@ -530,7 +528,7 @@ impl CodexCredentialStore {
             Err(RefreshFailure::Credential(error)) => return Err(error.into()),
             Err(RefreshFailure::Rejected(rejected)) => rejected,
         };
-        if rejected.code.as_deref() == Some("refresh_token_reused") {
+        if rejected.reused {
             // The CLI may have rotated the token since this read; its file
             // is the truth. One more read: its credentials when they are
             // already fit to send (refreshing them would spend the CLI's
@@ -572,23 +570,30 @@ impl CodexCredentialStore {
             .map_err(|error| Self::refresh_failed(&error, &secrets))?;
         if !(200..300).contains(&status) {
             let rejection: RefreshError = serde_json::from_slice(&data).unwrap_or_default();
-            let code = rejection
-                .code()
-                .map(|code| transport::redact(&code, &secrets));
-            let message = match rejection.message() {
-                Some(message) => transport::redact(message, &secrets),
-                None => transport::redacted_prefix(&String::from_utf8_lossy(&data), &secrets, 300),
-            };
-            let message = format!("HTTP {status}: {message}");
+            // Decided on the code as sent, so a secret that happens to
+            // occur in it cannot turn a permanent refusal into a temporary
+            // one; only the detail is redacted.
+            let code = rejection.code().map(str::to_lowercase);
             let permanent = status == 401
                 || code
                     .as_deref()
                     .is_some_and(|code| Self::PERMANENT_REFRESH_CODES.contains(&code));
+            let message = match rejection.message() {
+                Some(message) => transport::redact(message, &secrets),
+                None => transport::redacted_prefix(&String::from_utf8_lossy(&data), &secrets, 300),
+            };
+            let detail = match rejection.code() {
+                Some(code) => format!(
+                    "{}: HTTP {status}: {message}",
+                    transport::redact(code, &secrets).to_lowercase()
+                ),
+                None => format!("HTTP {status}: {message}"),
+            };
             return Err(RefreshFailure::Rejected(RefreshRejected {
                 refresh_token: file.credentials.refresh_token,
-                code,
+                reused: code.as_deref() == Some("refresh_token_reused"),
                 permanent,
-                message,
+                detail,
             }));
         }
         let refreshed: RefreshResponse = serde_json::from_slice(&data).map_err(|_| {

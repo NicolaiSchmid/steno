@@ -711,6 +711,27 @@ async fn error_codes_are_redacted_too() {
     assert!(detail.contains("[redacted]"));
 }
 
+/// The permanent and reused decisions read the code as sent: an account id
+/// that happens to occur in it is redacted from the detail only.
+#[tokio::test]
+async fn a_secret_inside_the_error_code_changes_no_decision() {
+    for code in ["invalid_grant", "refresh_token_reused"] {
+        let home = CodexHome::new().await;
+        let mut auth = AuthFile::default().access(&CodexHome::access_token(10, "plus"));
+        auth.account_id = Some(code.to_owned());
+        home.write(auth);
+        home.server
+            .enqueue([scripts.token_refresh_rejected(code, 400)]);
+        let error = home.store().current().await.unwrap_err();
+        let CodexCredentialError::SignInExpired(detail) = &error else {
+            panic!("{code}: expected SignInExpired, got {error:?}");
+        };
+        assert!(!detail.contains(code), "{detail}");
+        assert!(detail.starts_with("[redacted]: HTTP 400"), "{detail}");
+        assert_eq!(home.server.request_count(), 1, "{code}");
+    }
+}
+
 /// What the CLI wrote during the round trip survives the write-back.
 #[tokio::test]
 async fn write_back_overlays_the_files_latest_contents() {

@@ -467,8 +467,11 @@ async fn the_token_refresh_redacts_every_copy_of_the_tokens_and_the_account_id()
         }),
         400,
     );
+    // A code is lowercased for the decisions; a token in it is redacted
+    // before that, or a case-folded copy would survive.
+    let cased = StubResponse::json(&serde_json::json!({"error": {"code": access}}), 400);
     let plain = StubResponse::new(503, echoing_plain_body(&secrets[1..], &access, 300));
-    for reply in [nested, flat, plain] {
+    for reply in [nested, flat, cased, plain] {
         let home = CodexHome::new().await;
         home.write(AuthFile::default().access(&access));
         home.server.enqueue([reply]);
