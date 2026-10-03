@@ -419,6 +419,9 @@ fn the_models_variable_names_the_models_directory() {
     let home = home.path();
     let work = home.join("work");
     std::fs::create_dir_all(&work).unwrap();
+    let relative = Path::new("relative").join("models");
+    let expected = work.join(&relative);
+    std::fs::create_dir_all(&expected).unwrap();
     let output = Command::new(env!("CARGO_BIN_EXE_steno"))
         .args(["dev", "models", "list", "--db"])
         .arg(home.join("steno.sqlite"))
@@ -426,15 +429,21 @@ fn the_models_variable_names_the_models_directory() {
         .env("HOME", home)
         .env("XDG_DATA_HOME", home.join("share"))
         .env("APPDATA", home.join("appdata"))
-        .env("STENO_MODELS_DIR", "relative/models")
+        .env("STENO_MODELS_DIR", &relative)
         .output()
         .unwrap();
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(output.status.success(), "{output:?}");
-    let expected = work.canonicalize().unwrap().join("relative").join("models");
+    let printed = stdout
+        .lines()
+        .next()
+        .and_then(|line| line.strip_prefix("models: "))
+        .unwrap_or_else(|| panic!("{stdout}"));
+    // Compared as the file system sees them: the working directory may come
+    // back resolved (`/private/var` on the Mac, a long name on Windows).
     assert_eq!(
-        stdout.lines().next(),
-        Some(format!("models: {}", expected.display()).as_str()),
+        Path::new(printed).canonicalize().unwrap(),
+        expected.canonicalize().unwrap(),
         "{stdout}"
     );
 }

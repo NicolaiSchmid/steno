@@ -496,9 +496,15 @@ mod tests {
             models_directory_with(&settings, &paths, None),
             support.join("Models")
         );
+        // Absolute on the platform: `/tmp/...` has no drive on Windows.
+        let from_variable = if cfg!(windows) {
+            r"C:\steno-env-models"
+        } else {
+            "/tmp/steno-env-models"
+        };
         assert_eq!(
-            models_directory_with(&settings, &paths, Some("/tmp/steno-env-models".into())),
-            Path::new("/tmp/steno-env-models")
+            models_directory_with(&settings, &paths, Some(from_variable.into())),
+            Path::new(from_variable)
         );
         assert_eq!(
             models_directory_with(&settings, &paths, Some("relative/models".into())),
