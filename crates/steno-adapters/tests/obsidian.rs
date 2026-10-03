@@ -31,10 +31,6 @@ impl Vault {
         Vault { directory, root }
     }
 
-    fn settings(&self, include_audio: bool, people_folder: Option<&str>) -> ObsidianSettings {
-        settings(&self.root, include_audio, people_folder)
-    }
-
     fn destination(&self) -> ObsidianFolderDestination {
         self.destination_with(true, Some("People"))
     }
@@ -44,7 +40,7 @@ impl Vault {
         include_audio: bool,
         people_folder: Option<&str>,
     ) -> ObsidianFolderDestination {
-        ObsidianFolderDestination::new(self.settings(include_audio, people_folder), BERLIN)
+        destination_at(&self.root, include_audio, people_folder)
     }
 
     fn path(&self, relative: &str) -> PathBuf {
@@ -64,19 +60,22 @@ impl Vault {
     }
 }
 
-/// The settings every test configures: the fixture's `task` tag, the rest
-/// as given.
-fn settings(
+/// A destination on `vault_path` as every test configures it: Berlin time,
+/// the fixture's `task` tag, the rest as given.
+fn destination_at(
     vault_path: &Path,
     include_audio: bool,
     people_folder: Option<&str>,
-) -> ObsidianSettings {
-    ObsidianSettings {
-        vault_path: vault_path.to_string_lossy().into_owned(),
-        people_folder: people_folder.map(str::to_owned),
-        include_audio,
-        task_tag: Some("task".to_owned()),
-    }
+) -> ObsidianFolderDestination {
+    ObsidianFolderDestination::new(
+        ObsidianSettings {
+            vault_path: vault_path.to_string_lossy().into_owned(),
+            people_folder: people_folder.map(str::to_owned),
+            include_audio,
+            task_tag: Some("task".to_owned()),
+        },
+        BERLIN,
+    )
 }
 
 fn meeting_files(slug: &str) -> Vec<String> {
@@ -209,7 +208,7 @@ fn first_delivery_writes_the_six_file_layout_and_two_person_pages() {
 fn validate_rejects_missing_unwritable_and_bad_people_folder() {
     let vault = Vault::new();
     let nope = vault.directory.path().join("nope");
-    let missing = ObsidianFolderDestination::new(settings(&nope, false, None), BERLIN);
+    let missing = destination_at(&nope, false, None);
     assert_eq!(
         missing.validate_vault(),
         Err(ObsidianError::VaultMissing(
@@ -218,7 +217,7 @@ fn validate_rejects_missing_unwritable_and_bad_people_folder() {
     );
     let file = vault.directory.path().join("file");
     fs::write(&file, b"").unwrap();
-    let on_file = ObsidianFolderDestination::new(settings(&file, false, None), BERLIN);
+    let on_file = destination_at(&file, false, None);
     assert_eq!(
         on_file.validate_vault(),
         Err(ObsidianError::VaultMissing(
@@ -272,7 +271,7 @@ fn validate_and_deliver_report_an_unwritable_vault() {
     if fs::write(locked.join("probe"), b"").is_ok() {
         return; // root
     }
-    let destination = ObsidianFolderDestination::new(settings(&locked, false, None), BERLIN);
+    let destination = destination_at(&locked, false, None);
     assert_eq!(
         destination.validate_vault(),
         Err(ObsidianError::VaultNotWritable(
@@ -895,8 +894,7 @@ fn a_moved_vault_is_written_fresh_under_the_pinned_folder_and_the_old_one_is_lef
 
     let moved = vault.directory.path().join("moved");
     fs::create_dir_all(&moved).unwrap();
-    let destination =
-        ObsidianFolderDestination::new(settings(&moved, true, Some("People")), BERLIN);
+    let destination = destination_at(&moved, true, Some("People"));
     let second = deliver(&destination, &export, Some(&first));
 
     assert_eq!(second.root, moved.to_string_lossy());
@@ -1043,8 +1041,7 @@ fn a_receipt_from_another_root_is_a_first_delivery_with_the_collision_rule() {
         ArtifactRenderer::new().render_json(&theirs).unwrap(),
     )
     .unwrap();
-    let destination =
-        ObsidianFolderDestination::new(settings(&other, true, Some("People")), BERLIN);
+    let destination = destination_at(&other, true, Some("People"));
 
     let second = deliver(&destination, &export, Some(&first));
 
@@ -1085,10 +1082,7 @@ fn another_spelling_of_the_vault_path_is_the_same_root() {
 
     let root = vault.root.to_string_lossy().into_owned();
     for spelling in [format!("{root}/"), format!("{root}/./Meetings/..")] {
-        let destination = ObsidianFolderDestination::new(
-            settings(Path::new(&spelling), true, Some("People")),
-            BERLIN,
-        );
+        let destination = destination_at(Path::new(&spelling), true, Some("People"));
         let second = deliver(&destination, &renamed, Some(&first));
         assert_eq!(second.folder, first.folder, "{spelling}");
         assert_eq!(paths(&second), paths(&first), "{spelling}");
@@ -1141,8 +1135,7 @@ fn a_person_page_that_is_not_utf8_is_left_alone_and_reported() {
 #[test]
 fn the_receipt_carries_the_renderer_version() {
     let directory = temp_dir("version");
-    let destination =
-        ObsidianFolderDestination::new(settings(directory.path(), false, None), BERLIN);
+    let destination = destination_at(directory.path(), false, None);
     let receipt = deliver(&destination, &export(), None);
     assert_eq!(receipt.renderer_version, ArtifactRenderer::VERSION);
     let recorded = fixture_text("snapshots/obsidian/VERSION");
