@@ -321,7 +321,6 @@ fn a_run_whose_meeting_ends_failed_exits_two_and_says_why() {
 }
 
 // Every usage error of the Swift test in one place.
-// Every usage error of the Swift test in one place.
 #[allow(clippy::too_many_lines)]
 #[test]
 fn usage_errors_exit_one_and_name_the_known_values() {
