@@ -4,7 +4,6 @@
 use std::path::{Path, PathBuf};
 
 use async_trait::async_trait;
-use sha2::{Digest, Sha256};
 use thiserror::Error;
 use uuid::Uuid;
 
@@ -93,7 +92,7 @@ impl Destination for FakeDestination {
             files: vec![DeliveredFile {
                 relative_path: "meeting.json".to_owned(),
                 ownership: FileOwnership::Owned,
-                sha256: Sha256::digest(data.as_bytes()).to_vec(),
+                sha256: crate::content_hash::sha256(data.as_bytes()),
             }],
             renderer_version: Self::RENDERER_VERSION,
         })
@@ -159,7 +158,10 @@ mod tests {
         assert_eq!(receipt.folder, uuid_string(export.meeting.id));
         let path = destination.export_path(export.meeting.id);
         let written = std::fs::read(&path).unwrap();
-        assert_eq!(receipt.files[0].sha256, Sha256::digest(&written).to_vec());
+        assert_eq!(
+            receipt.files[0].sha256,
+            crate::content_hash::sha256(&written)
+        );
         let parsed: MeetingExport = serde_json::from_slice(&written).unwrap();
         assert_eq!(parsed, export);
         let previous = DeliveryReceipt {
