@@ -255,19 +255,28 @@ mod tests {
             word: word.to_owned(),
             start,
         };
+        // "hallo" starts exactly on the inclusive 10 ms edge (plus the
+        // rounding allowance), "gut" 15 ms late (over 10 ms, under 100 ms),
+        // "welt" 50 ms late.
         let reference = [
             timed("Hallo", 0.0),
             timed("Welt.", 0.5),
             timed("!", 0.6),
             timed("ja", 1.0),
+            timed("gut", 2.0),
         ];
-        let hypothesis = [timed("hallo", 0.0), timed("welt", 0.55), timed("nein", 1.0)];
+        let hypothesis = [
+            timed("hallo", 0.010 + 1e-9),
+            timed("welt", 0.55),
+            timed("nein", 1.0),
+            timed("gut", 2.015),
+        ];
         let agreement = timing_agreement(&reference, &hypothesis);
-        assert_eq!(agreement.matched, 2);
+        assert_eq!(agreement.matched, 3);
         assert_eq!(agreement.within_10ms, 1);
-        assert_eq!(agreement.within_100ms, 2);
+        assert_eq!(agreement.within_100ms, 3);
         assert!((agreement.mean_abs_seconds - 0.025).abs() < 1e-9);
-        assert!((agreement.fraction_within_10ms() - 0.5).abs() < 1e-12);
+        assert!((agreement.fraction_within_10ms() - 1.0 / 3.0).abs() < 1e-12);
         assert_eq!(timing_agreement(&[], &[]).fraction_within_10ms(), 1.0);
     }
 }

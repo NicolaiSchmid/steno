@@ -266,6 +266,15 @@ mod tests {
         assert_eq!(transcript_text(&tokens, &vocab), "hello world.");
         assert_eq!(transcript_text(&[], &vocab), "");
         assert_eq!(transcript_text(&[token(999, 1, 1)], &vocab), "");
+        // A lone boundary piece at the end becomes a trailing space, which
+        // the trim removes too.
+        let marker = Vocab::from_pieces(
+            [(1, "\u{2581}hello".to_owned()), (2, "\u{2581}".to_owned())].into(),
+        );
+        assert_eq!(
+            transcript_text(&[token(1, 1, 1), token(2, 2, 1)], &marker),
+            "hello"
+        );
     }
 
     #[test]
