@@ -181,7 +181,7 @@ pub fn file_url_path(url: &str) -> Option<PathBuf> {
         // spells it. A path without a drive (a Mac URL read on Windows)
         // keeps its slashes, which Windows reads as separators all the same.
         #[cfg(windows)]
-        let decoded = if decoded.starts_with('/') && decoded.as_bytes().get(2) == Some(&b':') {
+        let decoded = if starts_with_drive(decoded.as_bytes()) {
             decoded[1..].replace('/', "\\")
         } else {
             decoded
@@ -190,14 +190,19 @@ pub fn file_url_path(url: &str) -> Option<PathBuf> {
     }
 }
 
+/// Whether decoded path bytes begin with a drive, `/X:` with `X` an ASCII
+/// letter, the way `file_url` spells `X:\...`. `/1:/a` does not.
+fn starts_with_drive(bytes: &[u8]) -> bool {
+    matches!(bytes, [b'/', drive, b':', ..] if drive.is_ascii_alphabetic())
+}
+
 /// Drops a directory's one trailing `/` from decoded path bytes, as Swift's
 /// `URL.path` does, before any UTF-8 step: `/` stays, and so does a drive
 /// root `/X:/` (a drive letter `X`), because `C:` alone is drive-relative.
 /// Every other `.../` loses the slash, a name ending in `:` included
 /// (`/Volumes/a:/` reads as `/Volumes/a:`).
 fn drop_trailing_slash(bytes: &mut Vec<u8>) {
-    let drive_root =
-        matches!(bytes.as_slice(), [b'/', drive, b':', b'/'] if drive.is_ascii_alphabetic());
+    let drive_root = bytes.len() == 4 && starts_with_drive(bytes) && bytes[3] == b'/';
     if bytes.len() > 1 && bytes.last() == Some(&b'/') && !drive_root {
         bytes.pop();
     }
@@ -317,6 +322,7 @@ mod tests {
         if cfg!(windows) {
             assert_eq!(path("file:///C:/Users/x/Audio/"), r"C:\Users\x\Audio");
             assert_eq!(path("file:///C:/"), r"C:\");
+            assert_eq!(path("file:///1:/a"), "/1:/a", "only a letter names a drive");
             assert_eq!(
                 path("file:///Users/x/Audio/"),
                 "/Users/x/Audio",
@@ -369,6 +375,18 @@ mod tests {
         assert_eq!(file_url_path(&url).as_deref(), Some(path));
         let bytes = |url: &str| file_url_path(url).unwrap().into_os_string().into_vec();
         assert_eq!(bytes("file:///tmp/%FF/"), b"/tmp/\xFF");
+    }
+
+    /// The drive test behind the Windows respelling and the drive-root
+    /// slash: an ASCII letter, then `:`.
+    #[test]
+    fn only_a_letter_names_a_drive() {
+        assert!(starts_with_drive(b"/C:/x"));
+        assert!(starts_with_drive(b"/z:"));
+        assert!(!starts_with_drive(b"/1:/a"));
+        assert!(!starts_with_drive(b"/\xC3:/a"));
+        assert!(!starts_with_drive(b"C:/a"));
+        assert!(!starts_with_drive(b"/C"));
     }
 
     #[test]
