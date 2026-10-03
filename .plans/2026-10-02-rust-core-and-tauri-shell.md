@@ -345,6 +345,11 @@ still has to draw the window side. `[ ]` is not ported yet.
   `synchronous = NORMAL` a power loss can roll the commits back. Those commits need
   `FULL` (and `fullfsync` on macOS for the drive cache), here and in the Rust port of
   the intake.
+- `HandoverEngine.swift:145` refreshes `lastSeenAt` with `store.save(seen, tokenHash:)`,
+  an upsert of the device the gate read before a yield, so a revoke that lands in
+  between resurrects the device and its token hash. The Rust engine runs an `UPDATE`
+  of the row that still holds the token (`Store::touch_paired_device`); move the Swift
+  side to the same `UPDATE` before cutover.
 
 ### Adapters
 

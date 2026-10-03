@@ -2,6 +2,7 @@
 //! computer and where each phone recording's handover stands.
 //! Swift: `Sources/StenoCore/Storage/MeetingStore+Handover.swift`.
 
+use chrono::{DateTime, Utc};
 use rusqlite::{Connection, OptionalExtension, Row, params};
 use uuid::Uuid;
 
@@ -80,6 +81,25 @@ impl Store {
                     device.last_seen_at.map(DbDate),
                     token_hash,
                 ],
+            )?;
+            Ok(())
+        })
+    }
+
+    /// Refreshes `lastSeenAt` of the device that still holds `token_hash`.
+    /// An `UPDATE`, not a save: the engine reads the device and touches it
+    /// after a yield, and a revoke in between must stay a revoke. A row that
+    /// is gone, or whose token changed, is left alone.
+    pub fn touch_paired_device(
+        &self,
+        id: Uuid,
+        token_hash: &[u8],
+        seen_at: DateTime<Utc>,
+    ) -> Result<()> {
+        self.write(|transaction| {
+            transaction.execute(
+                "UPDATE pairedDevice SET lastSeenAt = ?3 WHERE id = ?1 AND tokenHash = ?2",
+                params![DbUuid(id), token_hash, DbDate(seen_at)],
             )?;
             Ok(())
         })

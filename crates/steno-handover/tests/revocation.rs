@@ -18,6 +18,7 @@ use std::time::Duration;
 
 use common::{Phone, TestService, chunks, seeded_bytes};
 use steno_core::RecordingMetadata;
+use steno_handover::pairing::DeviceTokens;
 use steno_handover::wire;
 use uuid::Uuid;
 
@@ -55,6 +56,46 @@ impl Upload {
     fn id(&self) -> Uuid {
         self.metadata.recording_id
     }
+}
+
+#[tokio::test]
+async fn a_revoke_between_the_gate_read_and_the_touch_stays_a_revoke() {
+    // The gate reads the device, yields, then refreshes `last_seen_at`. A
+    // revoke that lands in that gap must not be undone by the refresh: the
+    // touch is an `UPDATE` of the row that still holds the token, never a
+    // save that would re-insert the device and its token hash.
+    let test = TestService::with_chunk_size(CHUNK_SIZE).await;
+    let phone = Phone::pair(&test).await;
+    let read_at_the_gate = test
+        .store
+        .paired_device(phone.device_id)
+        .unwrap()
+        .expect("paired");
+    test.advance(Duration::from_secs(
+        steno_handover::engine::Engine::LAST_SEEN_RESOLUTION_SECONDS as u64 + 1,
+    ));
+    test.service.revoke(phone.device_id).await.unwrap();
+
+    let touched = test
+        .service
+        .engine
+        .touch(read_at_the_gate, DeviceTokens::hash(&phone.token))
+        .await;
+    assert!(
+        touched.last_seen_at > Some(test.now),
+        "the copy is refreshed"
+    );
+    assert_eq!(
+        test.service.paired_devices().await.unwrap(),
+        Vec::new(),
+        "the revoked device is not resurrected"
+    );
+    assert_eq!(
+        phone.status(Uuid::new_v4()).await.status,
+        401,
+        "its token is still unknown"
+    );
+    test.stop().await;
 }
 
 #[tokio::test]

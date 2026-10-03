@@ -327,8 +327,12 @@ impl Engine {
 
     // Auth gate
 
-    /// Refreshes `last_seen_at`, at most once a minute.
-    async fn touch(&self, device: PairedDevice, token_hash: Vec<u8>) -> PairedDevice {
+    /// Refreshes `last_seen_at`, at most once a minute. The gate read
+    /// `device` before a yield, so the write is an `UPDATE` of the row that
+    /// still holds `token_hash`: a revoke that landed in between is not
+    /// undone, and the device is not re-inserted. Public for the tests,
+    /// which run it against a device revoked after its read.
+    pub async fn touch(&self, device: PairedDevice, token_hash: Vec<u8>) -> PairedDevice {
         let timestamp = (self.now)();
         if let Some(seen) = device.last_seen_at
             && (timestamp - seen).num_seconds() < Self::LAST_SEEN_RESOLUTION_SECONDS
@@ -337,9 +341,9 @@ impl Engine {
         }
         let mut seen = device;
         seen.last_seen_at = Some(timestamp);
-        let saved = seen.clone();
+        let id = seen.id;
         let _ = self
-            .with_store(move |store| store.save_paired_device(&saved, &token_hash))
+            .with_store(move |store| store.touch_paired_device(id, &token_hash, timestamp))
             .await;
         seen
     }

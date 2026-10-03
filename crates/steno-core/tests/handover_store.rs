@@ -77,6 +77,44 @@ fn devices_are_found_by_token_hash_and_listed_oldest_first() {
 }
 
 #[test]
+fn touch_updates_the_live_row_and_resurrects_nothing() {
+    let store = Store::in_memory().unwrap();
+    let hash = vec![1u8; 32];
+    store.save_paired_device(&device(), &hash).unwrap();
+    let seen = date("2026-09-27T09:00:00.000Z");
+
+    // A wrong token hash touches nothing.
+    store
+        .touch_paired_device(uuid(DEVICE_ID), &[9u8; 32], seen)
+        .unwrap();
+    assert_eq!(
+        store.paired_device(uuid(DEVICE_ID)).unwrap(),
+        Some(device())
+    );
+
+    // The right one moves `lastSeenAt` and nothing else.
+    store
+        .touch_paired_device(uuid(DEVICE_ID), &hash, seen)
+        .unwrap();
+    let mut expected = device();
+    expected.last_seen_at = Some(seen);
+    assert_eq!(
+        store.paired_device_for_token_hash(&hash).unwrap(),
+        Some(expected)
+    );
+
+    // The engine's shape: the device was read, a revoke landed, the touch
+    // runs. The row stays gone and the token stays unknown.
+    store.delete_paired_device(uuid(DEVICE_ID)).unwrap();
+    store
+        .touch_paired_device(uuid(DEVICE_ID), &hash, seen)
+        .unwrap();
+    assert_eq!(store.paired_device(uuid(DEVICE_ID)).unwrap(), None);
+    assert_eq!(store.paired_device_for_token_hash(&hash).unwrap(), None);
+    assert_eq!(store.paired_devices().unwrap(), Vec::new());
+}
+
+#[test]
 fn receipts_round_trip_in_every_state_and_cascade_from_the_device() {
     let store = Store::in_memory().unwrap();
     store.save_paired_device(&device(), &[1u8; 32]).unwrap();
