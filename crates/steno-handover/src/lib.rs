@@ -10,13 +10,23 @@
 //! that admits it into the pipeline; nothing in this crate opens an outbound
 //! connection.
 //!
-//! - [`HandoverService`]: what the host and the CLI hold. Pairing, the
-//!   device list, revocation, the listener and the receipt stream.
+//! - [`HandoverService`]: the entry point, what the host and the CLI hold.
+//!   Pairing, the device list, revocation, the listener and the receipt
+//!   stream. Nothing else constructs the listener.
+//! - [`HandoverConfiguration`]: how the listener binds, where partial
+//!   uploads live, the pairing window and the read timeout; [`Clock`] is
+//!   the one time source.
 //! - [`HandoverIdentity`]: the TLS identity, minted once and kept in the
 //!   [`SecretStore`](steno_core::SecretStore).
-//! - [`PairingPayload`]: what the QR code shows.
+//! - [`PairingPayload`]: what the QR code shows; [`base64url`] is its
+//!   encoding of the fingerprint and the secret.
 //! - [`pinning`]: the trust rule the phone applies, in Rust, for a client
 //!   that talks to the listener (the tests, a future CLI probe).
+//! - [`server`]: the TLS listener, the per-connection HTTP/1.1 handling
+//!   with the body limits and the read timeout, Bonjour; [`ServerMetrics`]
+//!   is what the tests read.
+//! - [`upload`]: the inbox on disk and the limits on what a phone may
+//!   announce.
 //! - [`wire`], [`route`], [`engine`]: the protocol core, independent of the
 //!   listener, driven directly by the tests. The host reads wire values only
 //!   through [`HandoverReceipt`](steno_core::HandoverReceipt) and

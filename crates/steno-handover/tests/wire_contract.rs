@@ -3,7 +3,8 @@
 //! JSON body, the value kinds the phone's `decodeShape` demands, the enum
 //! values, the constants, the seven paths and the QR query names. The iOS
 //! side runs the mirror image in `native-contract.test.ts`, so a rename on
-//! either side fails one CI or the other. Swift: `WireContractTests.swift`.
+//! either side fails one CI or the other. Swift:
+//! `Tests/StenoHandoverTests/WireContractTests.swift`.
 
 #![allow(
     clippy::assert_is_empty,

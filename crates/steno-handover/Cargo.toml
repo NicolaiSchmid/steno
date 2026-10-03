@@ -1,6 +1,6 @@
 [package]
 name = "steno-handover"
-description = "The phone handover server: TLS-pinned listener, pairing, chunked upload intake"
+description = "The phone handover server: TLS-pinned listener, pairing, chunked uploads into the inbox"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

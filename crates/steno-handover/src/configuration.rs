@@ -17,7 +17,8 @@ pub type Clock = Arc<dyn Fn() -> DateTime<Utc> + Send + Sync>;
 /// inbox, so nothing leaves 127.0.0.1.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HandoverConfiguration {
-    /// Bonjour instance name; the phone shows it. Defaults to the host name.
+    /// Bonjour instance name; the phone shows it. Defaults to
+    /// [`HandoverConfiguration::default_service_name`].
     pub service_name: String,
     /// Publish `_steno._tcp` on the local network. `false` binds loopback
     /// only.
@@ -53,7 +54,8 @@ impl HandoverConfiguration {
         self.chunk_size + Self::BODY_HEADROOM
     }
 
-    /// The host name, `Steno` when the system does not say.
+    /// The host name from `HOSTNAME` or `/etc/hostname`; `Steno` elsewhere,
+    /// which the shell replaces with the OS computer name.
     #[must_use]
     pub fn default_service_name() -> String {
         std::env::var("HOSTNAME")

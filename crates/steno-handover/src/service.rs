@@ -48,6 +48,54 @@ impl std::fmt::Debug for HandoverService {
 
 impl HandoverService {
     /// The service before `start`. `now` is the one time source.
+    ///
+    /// ```no_run
+    /// use std::path::Path;
+    /// use std::sync::Arc;
+    ///
+    /// use chrono::Utc;
+    /// use steno_core::{
+    ///     BoundaryResult, HandoverIntake, PairedDevice, RecordingMetadata, Store, async_trait,
+    /// };
+    /// use steno_handover::{HandoverConfiguration, HandoverIdentity, HandoverService};
+    /// use uuid::Uuid;
+    ///
+    /// /// The host's intake: moves the verified file into the audio folder
+    /// /// and enqueues the meeting.
+    /// struct Intake;
+    ///
+    /// #[async_trait]
+    /// impl HandoverIntake for Intake {
+    ///     async fn admit(
+    ///         &self,
+    ///         _file: &Path,
+    ///         _metadata: &RecordingMetadata,
+    ///         _device: &PairedDevice,
+    ///     ) -> BoundaryResult<Uuid> {
+    ///         Ok(Uuid::new_v4())
+    ///     }
+    /// }
+    ///
+    /// # async fn run() -> Result<(), Box<dyn std::error::Error>> {
+    /// let store = Arc::new(Store::in_memory()?);
+    /// let identity = Arc::new(HandoverIdentity::mint("Steno", Utc::now())?);
+    /// let configuration = HandoverConfiguration {
+    ///     advertise: false,
+    ///     ..HandoverConfiguration::default()
+    /// };
+    /// let service = HandoverService::new(
+    ///     configuration,
+    ///     store,
+    ///     Arc::new(Intake),
+    ///     identity,
+    ///     Arc::new(Utc::now),
+    /// );
+    /// service.start().await?;
+    /// let qr = service.begin_pairing().url_string();
+    /// # let _ = qr;
+    /// # Ok(())
+    /// # }
+    /// ```
     pub fn new(
         configuration: HandoverConfiguration,
         store: Arc<Store>,
