@@ -47,12 +47,27 @@ pub enum AuthOutcome {
 
 /// One complete, authenticated request handed from the connection to the
 /// engine.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct HandoverRequest {
     pub route: Route,
     pub principal: Principal,
     pub headers: HeaderMap,
     pub body: Bytes,
+}
+
+/// The `Authorization` header carries the pairing secret or the bearer
+/// token and the body of `/v1/pair` the device's request: neither belongs
+/// in a log line, so the headers show as their names and the body as its
+/// length.
+impl std::fmt::Debug for HandoverRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("HandoverRequest")
+            .field("route", &self.route)
+            .field("principal", &self.principal)
+            .field("headers", &self.headers.keys().collect::<Vec<_>>())
+            .field("body_len", &self.body.len())
+            .finish()
+    }
 }
 
 impl HandoverRequest {

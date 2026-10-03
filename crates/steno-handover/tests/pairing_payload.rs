@@ -11,6 +11,8 @@
 )]
 
 use chrono::{DateTime, Utc};
+use steno_handover::engine::{HandoverRequest, Principal};
+use steno_handover::route::Route;
 use steno_handover::{PairingPayload, PairingPayloadError, base64url};
 use uuid::Uuid;
 
@@ -131,5 +133,31 @@ fn parse_failures_match_the_phone_parser() {
     assert_eq!(
         failure(&format!("{good}&exp=1")),
         Some(PairingPayloadError::BadEncoding("duplicate exp".into()))
+    );
+}
+
+#[test]
+fn debug_output_shows_no_secret_and_no_credential() {
+    // `{:?}` is what ends up in a log line or a panic message.
+    let payload = PairingPayload::new(mac_id(), "Mac", fingerprint(), secret(), at(1.0));
+    let shown = format!("{payload:?}");
+    assert!(shown.contains("[redacted]"), "{shown}");
+    assert!(!shown.contains(&base64url::encode(&secret())), "{shown}");
+    assert!(!shown.contains(&format!("{:?}", secret())), "{shown}");
+    assert!(shown.contains(&base64url::encode(&fingerprint())));
+
+    let token = "dGhlIGJlYXJlciB0b2tlbg==";
+    let request = HandoverRequest::new(Route::Pair, Principal::Pairing)
+        .with_header("authorization", &format!("Bearer {token}"))
+        .with_body(format!(
+            r#"{{"deviceId":"{}","deviceName":"Phone"}}"#,
+            mac_id()
+        ));
+    let shown = format!("{request:?}");
+    assert!(!shown.contains(token), "{shown}");
+    assert!(!shown.contains("deviceName"), "{shown}");
+    assert!(
+        shown.contains("authorization") && shown.contains("body_len"),
+        "{shown}"
     );
 }

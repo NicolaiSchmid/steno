@@ -25,14 +25,28 @@ use crate::service::Clock;
 /// single-use pairing secret, both 32 bytes in base64url without padding
 /// (the one place the wire uses base64url; JSON and headers use standard
 /// base64). The phone's `pairing-payload.ts` parses exactly this.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct PairingPayload {
     pub mac_id: Uuid,
     pub mac_name: String,
     pub fingerprint: Vec<u8>,
     pub secret: Vec<u8>,
-    /// Whole seconds; the phone refuses a code past this on its own clock.
+    /// Whole seconds; the phone refuses a payload past this on its own
+    /// clock.
     pub expires_at: DateTime<Utc>,
+}
+
+/// The secret pairs a phone; it stays out of every log line.
+impl std::fmt::Debug for PairingPayload {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PairingPayload")
+            .field("mac_id", &self.mac_id)
+            .field("mac_name", &self.mac_name)
+            .field("fingerprint", &base64url::encode(&self.fingerprint))
+            .field("secret", &"[redacted]")
+            .field("expires_at", &self.expires_at)
+            .finish()
+    }
 }
 
 impl PairingPayload {
