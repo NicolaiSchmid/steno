@@ -456,14 +456,12 @@ another release, otherwise the cutover closes them:
 
 ### Handover
 
-- Network: Swift's `NWListener` with `prohibitedInterfaceTypes = [.cellular, .other]`
-  follows interface changes and classifies bridges and virtual adapters as `.other`.
-  The Rust listener keeps the LAN addresses (`advertise::lan_addresses`: up, not
-  loopback, not link-local, not point-to-point) for the Bonjour record at start and
-  checks them again per connection, so a tunnel is refused as in Swift, a bridge is
-  not, and a network change after start needs a restart of the service to be
-  re-published. Decide in WP8 whether the shell restarts the service on network
-  change or the advertiser re-registers.
+- Network: Rust refuses tunnels as Swift does: point-to-point interfaces on Linux and
+  macOS; on Windows every adapter but hardware Ethernet and Wi-Fi that is up
+  (`advertise::windows_keeps`), which leaves out Wintun, TAP and Hyper-V adapters; and
+  `100.64.0.0/10` everywhere. It serves bridges on Linux and macOS, which Swift classes
+  `.other`, and does not re-publish after a network change. WP8 decides: restart on
+  network change, or re-register.
 - Service name: Swift's `HandoverConfiguration.defaultServiceName()` uses
   `Host.current().localizedName` (the computer name in System Settings). The Rust
   default reads `HOSTNAME` or `/etc/hostname` and falls back to `Steno`; the shell

@@ -97,6 +97,9 @@ mdns-sd = "0.21"
 # The interfaces the listener and the Bonjour record may use (already in
 # the tree through mdns-sd).
 if-addrs = "0.15"
+# Windows only: each adapter's type and hardware flag (`GetIfTable2`), which
+# if-addrs does not report. The version if-addrs already locks.
+windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_NetworkManagement_IpHelper", "Win32_NetworkManagement_Ndis"] }
 percent-encoding = "2"
 rand = "0.9"
 rcgen = { version = "0.14", default-features = false, features = ["pem", "ring"] }
