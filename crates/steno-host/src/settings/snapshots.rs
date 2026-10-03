@@ -79,9 +79,9 @@ pub fn acknowledgements(models: &dyn SpeechModels) -> Vec<GeneralAcknowledgement
         .iter()
         .map(|asset| GeneralAcknowledgement {
             group: GeneralAcknowledgementGroup::SpeechModels,
-            name: models.display_name(*asset),
+            name: models.display_name(*asset).to_owned(),
             licence: asset.licence().to_owned(),
-            source: models.source_repo(*asset),
+            source: models.source_repo(*asset).to_owned(),
         })
         .chain(libraries())
         .collect()

@@ -264,14 +264,14 @@ pub trait SpeechModels: Send + Sync {
     /// asset is the services' choice per platform (the Mac's `CoreML` int8
     /// Parakeet, an fp32 ONNX export elsewhere), so they may name it; the
     /// default is the Swift app's name, [`ModelAsset::display_name`].
-    fn display_name(&self, asset: ModelAsset) -> String {
-        asset.display_name().to_owned()
+    fn display_name(&self, asset: ModelAsset) -> &'static str {
+        asset.display_name()
     }
 
     /// Where `asset`'s model comes from, for the acknowledgements; the
     /// default is the Swift app's repository, [`ModelAsset::source_repo`].
-    fn source_repo(&self, asset: ModelAsset) -> String {
-        asset.source_repo().to_owned()
+    fn source_repo(&self, asset: ModelAsset) -> &'static str {
+        asset.source_repo()
     }
 }
 

@@ -411,26 +411,21 @@ impl SpeechModels for ModelStoreSpeechModels {
     /// Off the Mac, Parakeet v3 is the fp32 ONNX export of NVIDIA's model,
     /// not the Swift app's `CoreML` int8 build; on the Mac it is that build,
     /// under the Swift app's name.
-    fn display_name(&self, asset: ModelAsset) -> String {
+    fn display_name(&self, asset: ModelAsset) -> &'static str {
         match asset {
-            ModelAsset::ParakeetV3 if !Self::COREML_PARAKEET => ONNX_PARAKEET_NAME.to_owned(),
-            other => other.display_name().to_owned(),
+            ModelAsset::ParakeetV3 if !Self::COREML_PARAKEET => "Parakeet TDT 0.6B v3 (fp32)",
+            other => other.display_name(),
         }
     }
 
-    fn source_repo(&self, asset: ModelAsset) -> String {
+    /// Off the Mac, the model the ONNX export was converted from.
+    fn source_repo(&self, asset: ModelAsset) -> &'static str {
         match asset {
-            ModelAsset::ParakeetV3 if !Self::COREML_PARAKEET => ONNX_PARAKEET_SOURCE.to_owned(),
-            other => other.source_repo().to_owned(),
+            ModelAsset::ParakeetV3 if !Self::COREML_PARAKEET => "nvidia/parakeet-tdt-0.6b-v3",
+            other => other.source_repo(),
         }
     }
 }
-
-/// What the acknowledgements call the fp32 ONNX Parakeet v3.
-pub const ONNX_PARAKEET_NAME: &str = "Parakeet TDT 0.6B v3 (fp32)";
-
-/// The model the ONNX export was converted from.
-pub const ONNX_PARAKEET_SOURCE: &str = "nvidia/parakeet-tdt-0.6b-v3";
 
 /// Model files on disk for the tests, so no test downloads one.
 #[cfg(test)]
