@@ -1,13 +1,19 @@
 //! The macOS live backend against the real HAL, ignored by default: these
 //! need a Mac with audio devices and run with `cargo test -p steno-audio
-//! -- --ignored`. Over SSH the tap and the microphone deliver silence (a
-//! session without a GUI gets no TCC grant), which is fine: what these
-//! assert is that enumeration returns, that `start` and `stop` return
-//! within a bound, and that nothing hangs. Each run happens on its own
-//! thread joined with a deadline, so a hang fails instead of stalling the
-//! suite. What came back is printed for the record.
+//! --test live -- --ignored --nocapture` (without `--nocapture` the record
+//! they print is swallowed). Over SSH the tap and the microphone deliver
+//! silence (a session without a GUI gets no TCC grant), which is fine: what
+//! these assert is that enumeration returns, that `start` and `stop` return
+//! within a bound, that nothing hangs, and that the in-person `IOProc` runs.
+//! Call mode's `IOProc` runs only while another client has the output device
+//! open (see `capture::live::backend`), so a call capture with no callbacks
+//! is reported as skipped rather than as silence. Each run happens on its
+//! own thread joined with a deadline, so a hang fails instead of stalling
+//! the suite.
 //! Swift: `Tests/StenoAudioTests/LiveCaptureBackendTests.swift`.
 #![cfg(target_os = "macos")]
+// The docs name Core Audio's IOProc as the HAL spells it.
+#![allow(clippy::doc_markdown)]
 
 use std::sync::Arc;
 use std::sync::mpsc::channel;
@@ -66,11 +72,13 @@ fn device_enumeration_returns() {
     );
 }
 
-/// Starts the backend for `lanes`, captures half a second, stops. A start
-/// that fails (no input device on a headless Mac, a tap refused without
-/// the capture permission) is printed, not failed: the test's claim is
-/// that every call returns within the bound.
-fn start_capture_stop(lanes: &'static [AudioLane]) {
+/// Starts the backend for `lanes`, captures half a second, stops, and
+/// returns the IOProc callbacks counted in between (each completed callback
+/// signals the sink's wake once), or `None` when the start failed. A start
+/// that fails (no input device on a headless Mac, a tap refused without the
+/// capture permission) is printed, not failed. Zero callbacks means the
+/// IOProc never ran; callbacks with a zero peak mean it ran silent.
+fn start_capture_stop(lanes: &'static [AudioLane]) -> Option<usize> {
     within(Duration::from_secs(30), "start, capture, stop", move || {
         let backend = LiveCaptureBackend::new();
         let sink = Arc::new(LaneFrameSink::new(lanes));
@@ -82,11 +90,15 @@ fn start_capture_stop(lanes: &'static [AudioLane]) {
                     "start for {lanes:?} failed after {:?}: {error}",
                     started.elapsed()
                 );
-                return;
+                return None;
             }
         };
         println!("started {lanes:?} in {:?}: {stream:?}", started.elapsed());
         std::thread::sleep(Duration::from_millis(500));
+        let mut callbacks = 0;
+        while sink.wake().try_take() {
+            callbacks += 1;
+        }
         let available = sink.available_to_read();
         let peaks: Vec<String> = lanes
             .iter()
@@ -100,24 +112,37 @@ fn start_capture_stop(lanes: &'static [AudioLane]) {
             })
             .collect();
         println!(
-            "{available} samples per lane after 500 ms, dropped {:?}; {} (silence is expected without a GUI session)",
+            "{callbacks} callbacks, {available} samples per lane after 500 ms, dropped {:?}; {} (silence is expected without a GUI session)",
             sink.dropped_samples(),
             peaks.join(", ")
         );
         let stopping = Instant::now();
         backend.stop();
         println!("stopped in {:?}", stopping.elapsed());
-    });
+        Some(callbacks)
+    })
 }
 
 #[test]
 #[ignore = "needs a Mac with audio devices; run with -- --ignored"]
 fn in_person_capture_starts_and_stops_within_bounds() {
-    start_capture_stop(&[AudioLane::Mixed]);
+    if let Some(callbacks) = start_capture_stop(&[AudioLane::Mixed]) {
+        assert!(callbacks > 0, "the microphone's IOProc never ran");
+    }
 }
 
+/// Plays nothing itself: with no other client on the output device the
+/// IOProc does not run, and the test says so instead of passing as if it
+/// had captured silence. Play something during the run (`afplay`) to see
+/// callbacks.
 #[test]
 #[ignore = "needs a Mac with audio devices; run with -- --ignored"]
 fn call_capture_starts_and_stops_within_bounds() {
-    start_capture_stop(&[AudioLane::Mic, AudioLane::System]);
+    if start_capture_stop(&[AudioLane::Mic, AudioLane::System]) == Some(0) {
+        println!(
+            "SKIPPED call capture: the IOProc never ran in 500 ms. The tap aggregate runs only \
+             while another client has the output device open; play something during the test \
+             to exercise it."
+        );
+    }
 }
