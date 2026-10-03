@@ -14,7 +14,8 @@ use std::time::Duration;
 
 use thiserror::Error;
 use tokio::net::TcpListener;
-use tokio::task::JoinHandle;
+use tokio::sync::watch;
+use tokio::task::{JoinHandle, JoinSet};
 use tokio_rustls::TlsAcceptor;
 
 use crate::configuration::HandoverConfiguration;
@@ -55,11 +56,16 @@ impl ServerMetrics {
     }
 }
 
-/// A running listener; dropping it stops nothing, [`HandoverServer::stop`]
-/// does.
+/// How long [`HandoverServer::stop`] waits for the connections in flight
+/// to finish their request before it cuts them.
+pub const STOP_GRACE: Duration = Duration::from_secs(2);
+
+/// A running listener. [`HandoverServer::stop`] closes it in order;
+/// dropping it sends the same signal without waiting.
 pub struct HandoverServer {
     pub port: u16,
     accept_task: JoinHandle<()>,
+    shutdown: watch::Sender<bool>,
     advertiser: Option<advertise::Advertiser>,
 }
 
@@ -101,29 +107,50 @@ impl HandoverServer {
             None
         };
         let configuration = Arc::new(configuration.clone());
+        let (shutdown, stopping) = watch::channel(false);
         let accept_task = tokio::spawn(accept_loop(
             listener,
             acceptor,
             engine,
             metrics,
             configuration,
+            stopping,
         ));
         Ok(HandoverServer {
             port,
             accept_task,
+            shutdown,
             advertiser,
         })
     }
 
-    /// Stops accepting and withdraws the Bonjour record. Connections in
-    /// flight finish on their own.
+    /// Stops accepting, closes every connection (an idle one at once, one
+    /// mid-request after its response, any still busy after
+    /// [`STOP_GRACE`] by force) and withdraws the Bonjour record. Swift:
+    /// `group.shutdownGracefully()` closes the child channels.
     pub async fn stop(self) {
-        self.accept_task.abort();
-        let _ = self.accept_task.await;
-        if let Some(advertiser) = self.advertiser {
+        let HandoverServer {
+            mut accept_task,
+            shutdown,
+            advertiser,
+            ..
+        } = self;
+        shutdown.send_replace(true);
+        if tokio::time::timeout(STOP_GRACE + Duration::from_secs(1), &mut accept_task)
+            .await
+            .is_err()
+        {
+            accept_task.abort();
+        }
+        if let Some(advertiser) = advertiser {
             advertiser.withdraw();
         }
     }
+}
+
+/// Resolves once the server is stopping, also when the server was dropped.
+pub(crate) async fn stopped(stopping: &mut watch::Receiver<bool>) {
+    let _ = stopping.wait_for(|stopping| *stopping).await;
 }
 
 async fn accept_loop(
@@ -132,9 +159,18 @@ async fn accept_loop(
     engine: Arc<dyn RequestHandling>,
     metrics: Arc<ServerMetrics>,
     configuration: Arc<HandoverConfiguration>,
+    mut stopping: watch::Receiver<bool>,
 ) {
+    let mut connections = JoinSet::new();
     loop {
-        let (stream, _) = match listener.accept().await {
+        let accepted = tokio::select! {
+            accepted = listener.accept() => accepted,
+            () = stopped(&mut stopping) => break,
+            // Reap finished connections so the set does not grow for the
+            // life of the listener.
+            Some(_) = connections.join_next(), if !connections.is_empty() => continue,
+        };
+        let (stream, _) = match accepted {
             Ok(accepted) => accepted,
             Err(error) => {
                 tracing::warn!(target: "steno::handover", "accept failed: {error}");
@@ -147,13 +183,23 @@ async fn accept_loop(
         let engine = engine.clone();
         let metrics = metrics.clone();
         let configuration = configuration.clone();
-        tokio::spawn(async move {
-            // The handshake gets the read timeout: a peer that connects and
-            // says nothing costs the same as one that stops mid-request.
+        let mut stopping = stopping.clone();
+        connections.spawn(async move {
+            // The handshake gets the read timeout: a client that connects
+            // and says nothing costs the same as one that stops mid-request.
             let handshake =
                 tokio::time::timeout(configuration.read_timeout, acceptor.accept(stream));
-            match handshake.await {
-                Ok(Ok(tls)) => connection::serve(tls, engine, metrics, configuration).await,
+            let handshake = tokio::select! {
+                handshake = handshake => handshake,
+                () = stopped(&mut stopping) => {
+                    metrics.update(|metrics| metrics.closed_by_server += 1);
+                    return;
+                }
+            };
+            match handshake {
+                Ok(Ok(tls)) => {
+                    connection::serve(tls, engine, metrics, configuration, stopping).await;
+                }
                 Ok(Err(error)) => {
                     tracing::debug!(target: "steno::handover", "TLS handshake failed: {error}");
                 }
@@ -166,6 +212,12 @@ async fn accept_loop(
             }
         });
     }
+    // The listener is dropped here: nothing new connects while the
+    // connections in flight finish. What is still busy after the grace is
+    // aborted with the set.
+    drop(listener);
+    let drained = async { while connections.join_next().await.is_some() {} };
+    let _ = tokio::time::timeout(STOP_GRACE, drained).await;
 }
 
 #[derive(Debug, Error)]

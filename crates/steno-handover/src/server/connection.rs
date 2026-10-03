@@ -7,7 +7,9 @@
 //! client still sends is discarded up to a limit, then the connection
 //! closes. A connection that stays silent for the read timeout while the
 //! computer waits on the client is closed; the silence is not counted while
-//! the engine is handling a request. Swift: `Routing/HTTPHandler.swift`.
+//! the engine is handling a request. When the server stops, an idle
+//! connection closes at once and one mid-request closes after its
+//! response. Swift: `Routing/HTTPHandler.swift`.
 
 use std::pin::Pin;
 use std::sync::Arc;
@@ -24,6 +26,7 @@ use hyper::service::service_fn;
 use hyper_util::rt::{TokioIo, TokioTimer};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::net::TcpStream;
+use tokio::sync::watch;
 use tokio_rustls::server::TlsStream;
 
 use super::ServerMetrics;
@@ -49,13 +52,14 @@ struct Shared {
     closing: AtomicBool,
 }
 
-/// Serves `tls` until the client goes away, the server closes it or an
-/// error ends it.
+/// Serves `tls` until the client goes away, the server closes it, the
+/// server stops (`stopping` turns true) or an error ends it.
 pub async fn serve(
     tls: TlsStream<TcpStream>,
     engine: Arc<dyn RequestHandling>,
     metrics: Arc<ServerMetrics>,
     configuration: Arc<HandoverConfiguration>,
+    mut stopping: watch::Receiver<bool>,
 ) {
     let shared = Arc::new(Shared {
         engine,
@@ -72,12 +76,23 @@ pub async fn serve(
             async move { Ok::<_, std::convert::Infallible>(handle(shared, request).await) }
         }
     });
-    let served = http1::Builder::new()
-        .timer(TokioTimer::new())
-        .header_read_timeout(None)
-        .keep_alive(true)
-        .serve_connection(TokioIo::new(io), service)
-        .await;
+    let mut connection = std::pin::pin!(
+        http1::Builder::new()
+            .timer(TokioTimer::new())
+            .header_read_timeout(None)
+            .keep_alive(true)
+            .serve_connection(TokioIo::new(io), service)
+    );
+    let served = tokio::select! {
+        served = connection.as_mut() => served,
+        () = super::stopped(&mut stopping) => {
+            // hyper finishes the response in flight, if any, with
+            // `Connection: close`, and closes an idle connection now.
+            shared.closing.store(true, Ordering::SeqCst);
+            connection.as_mut().graceful_shutdown();
+            connection.await
+        }
+    };
     if let Err(error) = served {
         tracing::debug!(target: "steno::handover", "connection ended: {error}");
     }

@@ -486,7 +486,7 @@ impl Exchange {
     }
 }
 
-type ClientStream = tokio_rustls::client::TlsStream<TcpStream>;
+pub type ClientStream = tokio_rustls::client::TlsStream<TcpStream>;
 
 pub struct RawClient {
     pub port: u16,
@@ -494,7 +494,7 @@ pub struct RawClient {
 }
 
 impl RawClient {
-    async fn connect(&self) -> std::io::Result<ClientStream> {
+    pub async fn connect(&self) -> std::io::Result<ClientStream> {
         let tcp = TcpStream::connect(("127.0.0.1", self.port)).await?;
         let connector = TlsConnector::from(pinned_client_config(&self.fingerprint).unwrap());
         let name = rustls_pki_types::ServerName::try_from("steno.local").unwrap();
@@ -547,7 +547,7 @@ impl RawClient {
 
 /// Appends what arrives to `received` until `done` says so, the server
 /// closes (true) or `timeout` passes.
-async fn read_until(
+pub async fn read_until(
     stream: &mut ClientStream,
     timeout: Duration,
     received: &mut Vec<u8>,
@@ -575,7 +575,7 @@ async fn read_until(
 
 /// One complete HTTP/1.1 response (status, headers, body by
 /// `Content-Length`), or `None` while it is still incomplete.
-fn parse_response(bytes: &[u8]) -> Option<Exchange> {
+pub fn parse_response(bytes: &[u8]) -> Option<Exchange> {
     let end = bytes.windows(4).position(|window| window == b"\r\n\r\n")?;
     let head = std::str::from_utf8(&bytes[..end]).ok()?;
     let mut lines = head.split("\r\n");
