@@ -5,7 +5,9 @@
 //! The macOS backend (`capture::live`) turns the HAL's `AudioBufferList`
 //! into a slice of [`BufferView`]s on the stack and calls [`deliver`]. No
 //! arrays are created, no closures called, nothing logged inside the
-//! callback.
+//! callback. The WASAPI capture threads hold their packets as slices and
+//! go through [`deliver_slices`], the safe form, via
+//! [`PacketRouter`](super::PacketRouter).
 
 use super::sink::LaneFrameSink;
 use crate::capture::layout::{ChannelRef, LaneSource};
@@ -101,4 +103,56 @@ pub unsafe fn deliver(buffers: &[BufferView], sources: &[LaneSource], sink: &Lan
         }
     }
     sink.end_callback();
+}
+
+/// One input buffer as safe code holds it: interleaved samples borrowed for
+/// the call, `None` for a buffer flagged silent (WASAPI's
+/// `AUDCLNT_BUFFERFLAGS_SILENT`), which becomes zeros.
+#[derive(Debug, Clone, Copy)]
+pub struct SliceView<'a> {
+    /// Interleaved channels in the buffer.
+    pub channels: usize,
+    /// Frames in the buffer.
+    pub frames: usize,
+    /// `channels * frames` interleaved samples, or `None` for silence.
+    pub samples: Option<&'a [f32]>,
+}
+
+/// The most buffers [`deliver_slices`] takes: the master packet and the
+/// follower's staging copy, with room to spare.
+pub const MAX_SLICE_BUFFERS: usize = 4;
+
+/// [`deliver`] for buffers held as slices: builds the [`BufferView`]s on
+/// the stack and delivers them, so the caller needs no `unsafe`. A slice
+/// shorter than `channels * frames` is described by its real length, so
+/// [`deliver`]'s shape check turns it into silence rather than a read past
+/// its end. Buffers beyond [`MAX_SLICE_BUFFERS`] are ignored.
+#[inline(always)]
+pub fn deliver_slices(buffers: &[SliceView<'_>], sources: &[LaneSource], sink: &LaneFrameSink) {
+    let count = buffers.len().min(MAX_SLICE_BUFFERS);
+    let mut views = [BufferView {
+        channels: 0,
+        data: None,
+        byte_size: 0,
+    }; MAX_SLICE_BUFFERS];
+    for (view, buffer) in views.iter_mut().zip(&buffers[..count]) {
+        let wanted = buffer.frames * buffer.channels;
+        *view = match buffer.samples {
+            Some(samples) => BufferView {
+                channels: buffer.channels,
+                data: Some(samples.as_ptr()),
+                byte_size: wanted.min(samples.len()) * 4,
+            },
+            None => BufferView {
+                channels: buffer.channels,
+                data: None,
+                byte_size: wanted * 4,
+            },
+        };
+    }
+    // SAFETY: every `data` pointer is the start of a slice borrowed for
+    // this call, and its `byte_size` never exceeds that slice's length in
+    // bytes; `deliver` reads a buffer only after checking that `byte_size`
+    // covers the callback's frames at the buffer's channel count.
+    unsafe { deliver(&views[..count], sources, sink) }
 }
