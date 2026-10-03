@@ -237,23 +237,18 @@ impl BridgeError {
     }
 }
 
-/// What the page shows for a busy database.
-const BUSY_MESSAGE: &str = "The database is busy. Try again in a moment.";
-
 /// The store's errors on the contract's codes, so a host returns them with
-/// `?`. The messages are the ones the Swift host shows for the same cases
-/// (`apps/macos/Steno/Web/MainWindowBridge.swift`), never the store's
-/// internal text with an id in it. A lock held past the busy timeout
-/// ([`StoreError::is_busy`]) is `failed` with `BUSY_MESSAGE`, since nothing
-/// is wrong with the call; a meeting the store does not have is `notFound`;
-/// a meeting that cannot be deleted yet is `failed` with the state that
-/// holds it; every other error is `failed` with the store's own
+/// `?`. The messages are the Swift host's for the same cases
+/// (`apps/macos/Steno/Web/MainWindowBridge.swift`), not the store's text
+/// with an id in it. A lock held past the busy timeout
+/// ([`StoreError::is_busy`]) is `failed` but retryable: nothing is wrong
+/// with the call. Everything else is `failed` with the store's own
 /// description, as `BridgeDispatcher.swift` replies with a bare
-/// `"\(error)"` for anything a host method did not phrase itself.
+/// `"\(error)"` for an error a host method did not phrase itself.
 impl From<StoreError> for BridgeError {
     fn from(error: StoreError) -> Self {
         if error.is_busy() {
-            return Self::failed(BUSY_MESSAGE);
+            return Self::failed("The database is busy. Try again in a moment.");
         }
         match error {
             StoreError::MeetingNotFound(_) => Self::not_found("No meeting with that id is listed."),
@@ -465,28 +460,20 @@ mod tests {
         assert_eq!(decoded.error.unwrap().code, BridgeErrorCode::Cancelled);
     }
 
-    /// The outcomes of the `From<StoreError>` mapping, each against the
-    /// literal text the Swift host shows, so an edit to a message fails
-    /// here rather than drifting from `MainWindowBridge.swift`.
+    /// Each arm of the `From<StoreError>` mapping against the literal text
+    /// the Swift host shows, so an edit to a message fails here rather than
+    /// drifting from `MainWindowBridge.swift`. Which SQLite codes count as
+    /// busy is the store's test (`is_busy_names_the_lock_errors`).
     #[test]
     fn store_errors_land_on_the_contract_codes() {
-        let sqlite = |code| {
-            StoreError::Sqlite(rusqlite::Error::SqliteFailure(
-                rusqlite::ffi::Error::new(code),
-                None,
-            ))
-        };
-        for code in [
-            rusqlite::ffi::SQLITE_BUSY,
-            rusqlite::ffi::SQLITE_BUSY_SNAPSHOT,
-            rusqlite::ffi::SQLITE_LOCKED,
-        ] {
-            assert_eq!(
-                BridgeError::from(sqlite(code)),
-                BridgeError::failed("The database is busy. Try again in a moment."),
-                "code {code}"
-            );
-        }
+        let busy = StoreError::Sqlite(rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_BUSY),
+            None,
+        ));
+        assert_eq!(
+            BridgeError::from(busy),
+            BridgeError::failed("The database is busy. Try again in a moment.")
+        );
 
         let id = uuid::Uuid::parse_str("516eade8-40e5-4434-8aaf-9214a21a604e").unwrap();
         assert_eq!(
@@ -500,14 +487,6 @@ mod tests {
         assert_eq!(
             BridgeError::from(StoreError::MeetingBusy(id, MeetingStateKind::Processing)),
             BridgeError::failed("This meeting is still being processed.")
-        );
-
-        let constraint = BridgeError::from(sqlite(rusqlite::ffi::SQLITE_CONSTRAINT));
-        assert_eq!(constraint.code, BridgeErrorCode::Failed);
-        assert!(
-            constraint.message.contains("constraint"),
-            "{}",
-            constraint.message
         );
         assert_eq!(
             BridgeError::from(StoreError::UnknownMigration("v99".into())),
