@@ -258,8 +258,10 @@ impl ModelStore {
     }
 
     /// Installs the asset if needed and returns its directory. Missing
-    /// files with a URL are downloaded and verified; a missing file
-    /// without one is [`SpeechError::NotHosted`]. Partial downloads a
+    /// files with a URL are downloaded and verified, a file up to
+    /// [`DOWNLOAD_ATTEMPTS`] times when the host answers 5xx or the
+    /// connection drops; a missing file without a URL is
+    /// [`SpeechError::NotHosted`]. Partial downloads a
     /// killed process left behind are removed first.
     ///
     /// ```no_run
@@ -294,7 +296,7 @@ impl ModelStore {
                     directory,
                 });
             };
-            self.download(url, file, &directory.join(&file.name), progress)?;
+            self.download_with_retries(url, file, &directory.join(&file.name), progress)?;
         }
         Ok(directory)
     }
@@ -307,6 +309,28 @@ impl ModelStore {
             fs::remove_dir_all(&directory).map_err(|e| SpeechError::io(&directory, e))?;
         }
         Ok(())
+    }
+
+    /// [`ModelStore::download`], tried again after a transient failure;
+    /// `progress` starts from zero on each attempt.
+    fn download_with_retries(
+        &self,
+        url: &str,
+        file: &ModelFile,
+        destination: &Path,
+        progress: &mut dyn FnMut(DownloadProgress<'_>),
+    ) -> Result<(), SpeechError> {
+        let mut attempt = 1;
+        loop {
+            match self.download(url, file, destination, progress) {
+                Err(error) if attempt < DOWNLOAD_ATTEMPTS && is_transient(&error) => {
+                    tracing::warn!(%error, attempt, "model download failed, trying again");
+                    std::thread::sleep(RETRY_DELAY * attempt);
+                    attempt += 1;
+                }
+                result => return result,
+            }
+        }
     }
 
     /// Downloads into a sibling `<name>.partial.<pid>.<call>` file, one per
@@ -400,6 +424,40 @@ impl ModelStore {
         // length but lost contents, which `is_installed` (sizes only) takes.
         out.sync_all().map_err(|e| SpeechError::io(partial, e))?;
         Ok((received, hex(&hasher.finalize())))
+    }
+}
+
+/// Tries per file before a download fails: a 5xx answer or a dropped
+/// connection is often gone a few seconds later.
+pub const DOWNLOAD_ATTEMPTS: u32 = 3;
+
+/// The wait before the second attempt; each later one waits this much
+/// longer (10 ms under test).
+const RETRY_DELAY: Duration = Duration::from_millis(if cfg!(test) { 10 } else { 1000 });
+
+/// Whether a failed download may succeed when tried again: a 5xx answer, a
+/// connection that could not be made, dropped or timed out. A wrong size or
+/// checksum, a 4xx answer and a disk error fail at once.
+fn is_transient(error: &SpeechError) -> bool {
+    let dropped = |error: &std::io::Error| {
+        use std::io::ErrorKind::{
+            ConnectionAborted, ConnectionRefused, ConnectionReset, TimedOut, UnexpectedEof,
+        };
+        matches!(
+            error.kind(),
+            ConnectionAborted | ConnectionRefused | ConnectionReset | TimedOut | UnexpectedEof
+        )
+    };
+    match error {
+        SpeechError::Download { source, .. } => match source.as_ref() {
+            ureq::Error::StatusCode(status) => (500..600).contains(status),
+            ureq::Error::ConnectionFailed | ureq::Error::Timeout(_) => true,
+            ureq::Error::Io(error) => dropped(error),
+            _ => false,
+        },
+        // The body is read through `std::io`.
+        SpeechError::Io { source, .. } => dropped(source),
+        _ => false,
     }
 }
 
@@ -531,28 +589,40 @@ mod tests {
 
     use super::*;
 
-    /// Serves `body` once over HTTP on a local port and returns the URL.
-    fn serve_once(body: Vec<u8>) -> String {
+    /// A whole HTTP response carrying `body`.
+    fn response(status: &str, body: &[u8]) -> Vec<u8> {
+        let head = format!(
+            "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            body.len()
+        );
+        [head.as_bytes(), body].concat()
+    }
+
+    /// Answers one connection per entry of `responses`, in order, with
+    /// those bytes (none: the connection is closed unanswered), and returns
+    /// the URL.
+    fn serve(responses: Vec<Vec<u8>>) -> String {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap();
         std::thread::spawn(move || {
-            let (stream, _) = listener.accept().unwrap();
-            let mut reader = BufReader::new(&stream);
-            let mut line = String::new();
-            while reader.read_line(&mut line).unwrap() > 0 && line != "\r\n" {
-                line.clear();
+            for bytes in responses {
+                let (stream, _) = listener.accept().unwrap();
+                let mut reader = BufReader::new(&stream);
+                let mut line = String::new();
+                while reader.read_line(&mut line).unwrap() > 0 && line != "\r\n" {
+                    line.clear();
+                }
+                let mut stream = &stream;
+                stream.write_all(&bytes).unwrap();
+                stream.flush().unwrap();
             }
-            let mut stream = &stream;
-            write!(
-                stream,
-                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-                body.len()
-            )
-            .unwrap();
-            stream.write_all(&body).unwrap();
-            stream.flush().unwrap();
         });
         format!("http://{address}/model.onnx")
+    }
+
+    /// Serves `body` once and returns the URL.
+    fn serve_once(body: &[u8]) -> String {
+        serve(vec![response("200 OK", body)])
     }
 
     /// Serves `body` to one connection per entry of `heads`, in order of
@@ -613,7 +683,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = ModelStore::new(dir.path());
         let body = b"not really a model".to_vec();
-        let asset = asset(Some(serve_once(body.clone())), &body, &digest(&body));
+        let asset = asset(Some(serve_once(&body)), &body, &digest(&body));
         assert!(!store.is_installed(&asset));
         assert_eq!(store.missing_files(&asset), ["model.onnx"]);
         let mut reports = Vec::new();
@@ -697,11 +767,37 @@ mod tests {
     }
 
     #[test]
+    fn a_5xx_answer_or_a_dropped_connection_is_tried_again_a_few_times() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = ModelStore::new(dir.path());
+        let body = b"not really a model".to_vec();
+        let ok = response("200 OK", &body);
+        let unavailable = response("503 Service Unavailable", b"");
+        let url = serve(vec![unavailable.clone(), Vec::new(), ok.clone()]);
+        let flaky = asset(Some(url), &body, &digest(&body));
+        store.ensure(&flaky, &mut |_| {}).unwrap();
+        store.verify(&flaky).unwrap();
+        store.remove(&flaky).unwrap();
+        // The attempts are bounded, and a 4xx answer is final.
+        let attempts = DOWNLOAD_ATTEMPTS as usize;
+        let mut responses = vec![unavailable; attempts];
+        responses.push(ok.clone());
+        let down = asset(Some(serve(responses)), &body, &digest(&body));
+        let error = store.ensure(&down, &mut |_| {}).unwrap_err();
+        assert!(matches!(&error, SpeechError::Download { .. }), "{error}");
+        let url = serve(vec![response("404 Not Found", b""), ok]);
+        let missing = asset(Some(url), &body, &digest(&body));
+        let error = store.ensure(&missing, &mut |_| {}).unwrap_err();
+        assert!(matches!(&error, SpeechError::Download { .. }), "{error}");
+        assert!(!store.is_installed(&missing));
+    }
+
+    #[test]
     fn a_wrong_checksum_leaves_nothing_behind() {
         let dir = tempfile::tempdir().unwrap();
         let store = ModelStore::new(dir.path());
         let body = b"tampered".to_vec();
-        let asset = asset(Some(serve_once(body.clone())), &body, &digest(b"original"));
+        let asset = asset(Some(serve_once(&body)), &body, &digest(b"original"));
         let error = store.ensure(&asset, &mut |_| {}).unwrap_err();
         assert!(matches!(error, SpeechError::Checksum { .. }), "{error}");
         let directory = dir.path().join("test-asset");
@@ -714,7 +810,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = ModelStore::new(dir.path());
         let body = b"short".to_vec();
-        let mut short = asset(Some(serve_once(body.clone())), &body, &digest(&body));
+        let mut short = asset(Some(serve_once(&body)), &body, &digest(&body));
         short.files[0].size += 1;
         assert!(matches!(
             store.ensure(&short, &mut |_| {}),
@@ -723,7 +819,7 @@ mod tests {
         // A body longer than the manifest says is cut off at the first
         // byte over, before the checksum is even looked at.
         let long = vec![0u8; 1 << 20];
-        let mut long_asset = asset(Some(serve_once(long.clone())), &long, &digest(&long));
+        let mut long_asset = asset(Some(serve_once(&long)), &long, &digest(&long));
         long_asset.files[0].size = 1000;
         let mut last = 0;
         let error = store
