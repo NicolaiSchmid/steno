@@ -522,9 +522,9 @@ still has to draw the window side. `[ ]` is not ported yet.
   `applicationShouldTerminate` awaited `AppController.shutdown()`. Open until the
   rebase after #172: macOS Quit (muda's `terminate:`) bypasses `ExitRequested`; wire
   `App::shutdown` into #172's Quit item and tray close then.
-- The shell does not run the two-second pairing poll (`Host::refresh_pairing`) yet, so
-  a phone that pairs closes the code on the next Settings change rather than within
-  two seconds; #172's shell timer, at the rebase after #172.
+- The two-second pairing poll (`Host::refresh_pairing`) rides on the store poll in
+  `App::launch` and runs whether or not a code is shown, where Swift ran it only while
+  the Phones pane showed one.
 - At `warn`, the default level, a log line carries ids, stages, counts and error kinds,
   never transcript or model text, audio, a file path or a secret; the full text goes to
   `debug` (`steno_services::log_to_stderr`). The CLI prints a failed run once, as Swift

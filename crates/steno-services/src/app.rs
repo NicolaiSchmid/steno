@@ -488,13 +488,16 @@ impl App {
         });
         // Stage writes do not post events of their own; the list follows
         // the meeting rows through a slow poll until the store observes
-        // itself (the Swift app had GRDB observation).
+        // itself (the Swift app had GRDB observation). The same tick is
+        // the pairing poll Swift's Phones pane ran every two seconds: a
+        // phone that paired closes the code, a code that ran out closes.
         let poll_host = host.clone();
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(std::time::Duration::from_secs(2));
             loop {
                 interval.tick().await;
                 poll_host.store_changed();
+                poll_host.refresh_pairing();
             }
         });
 
