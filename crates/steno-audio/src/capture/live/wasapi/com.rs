@@ -63,7 +63,7 @@ use windows::Win32::Media::Audio::{
     IAudioSessionNotification, IAudioSessionNotification_Impl, IMMDevice, IMMDeviceEnumerator,
     IMMNotificationClient, IMMNotificationClient_Impl, MMDeviceEnumerator,
     PROCESS_LOOPBACK_MODE_EXCLUDE_TARGET_PROCESS_TREE, VIRTUAL_AUDIO_DEVICE_PROCESS_LOOPBACK,
-    WAVEFORMATEX, eCapture, eCommunications, eConsole, eRender,
+    WAVEFORMATEX, eCapture, eConsole, eRender,
 };
 use windows::Win32::Media::Multimedia::WAVE_FORMAT_IEEE_FLOAT;
 use windows::Win32::System::Com::StructuredStorage::PROPVARIANT;
@@ -196,16 +196,6 @@ unsafe fn take_co_string(value: PWSTR) -> Option<String> {
     }
 }
 
-/// Which default endpoint: the one most audio plays on and records from,
-/// or the one call apps use.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Role {
-    /// `eConsole`: games, system sounds, most apps.
-    Console,
-    /// `eCommunications`: voice calls.
-    Communications,
-}
-
 fn data_flow(flow: EndpointFlow) -> EDataFlow {
     match flow {
         EndpointFlow::Capture => eCapture,
@@ -213,15 +203,8 @@ fn data_flow(flow: EndpointFlow) -> EDataFlow {
     }
 }
 
-fn role(role: Role) -> ERole {
-    match role {
-        Role::Console => eConsole,
-        Role::Communications => eCommunications,
-    }
-}
-
-/// `IMMDeviceEnumerator`: endpoints by role, by id, by flow, and the
-/// endpoint notifications.
+/// `IMMDeviceEnumerator`: the default endpoints, endpoints by id and by
+/// flow, and the endpoint notifications.
 pub struct Enumerator(IMMDeviceEnumerator);
 
 impl Enumerator {
@@ -234,10 +217,12 @@ impl Enumerator {
         check(enumerator, "CoCreateInstance(MMDeviceEnumerator)").map(Self)
     }
 
-    /// The default endpoint for `flow` and `role`.
-    pub fn default_endpoint(&self, flow: EndpointFlow, which: Role) -> Result<Endpoint, ComError> {
+    /// The default endpoint for `flow` in the `eConsole` role, the one
+    /// most audio plays on and records from. (`eCommunications`, the call
+    /// apps' default, is not followed: no stream here opens it.)
+    pub fn default_endpoint(&self, flow: EndpointFlow) -> Result<Endpoint, ComError> {
         // SAFETY: plain values in, a counted interface out.
-        let device = unsafe { self.0.GetDefaultAudioEndpoint(data_flow(flow), role(which)) };
+        let device = unsafe { self.0.GetDefaultAudioEndpoint(data_flow(flow), eConsole) };
         check(device, "IMMDeviceEnumerator::GetDefaultAudioEndpoint").map(Endpoint)
     }
 
