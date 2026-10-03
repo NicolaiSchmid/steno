@@ -6,7 +6,7 @@ case-insensitive by default.
 
 | Folder | Contents |
 |---|---|
-| `audio/` | Generated 16 kHz mono Int16 WAV files, each under ten seconds, listed in `MANIFEST.sha256` |
+| `audio/` | Generated 16 kHz mono Int16 WAV files, each under ten seconds, listed in `MANIFEST.sha256`; and `tone-440-44k1-500ms.m4a` / `.mp3`, half a second of a 440 Hz sine at 0.5 (mono 44.1 kHz, AAC-LC and MP3 at 96 kbps from ffmpeg's `aevalsrc`) for the Rust decoder's phone path, committed once and not in the manifest |
 | `speech/` | `say` output committed once (German `Anna`, English `Samantha`, plus `Daniel` in `two-speakers-mf`, 16 kHz mono Int16, under ten seconds) with a `.ref.txt` per file and its own `MANIFEST.sha256`, checked by `SpeechFixtureTests`; never regenerated because `say` output changes with macOS releases |
 | `transcripts/` | `[RawSegment]` and `[TranscriptSegment]` samples with invented text |
 | `templates/` | The bundled summary templates as `StenoJSON`, one golden per template |

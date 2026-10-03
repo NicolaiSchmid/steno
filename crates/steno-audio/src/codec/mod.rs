@@ -19,6 +19,12 @@
 //! - **AAC-LC only.** HE-AAC files (unlikely from the iOS recorder, which
 //!   uses `AVAudioFile` with `kAudioFormatMPEG4AAC`) decode as LC and sound
 //!   wrong. Not seen in practice.
+//! - **Encoder priming.** AVFoundation trimmed the encoder's priming
+//!   samples; symphonia 0.5 trims them for MP3 (the LAME tag, with
+//!   `enable_gapless`) but not for MP4, whose edit list it parses and
+//!   ignores. An AAC lane therefore starts with the priming (1 024
+//!   samples at 44.1 kHz, 23 ms, for an ffmpeg encode; measured in
+//!   `tests/codec.rs`) and runs that much late. Tracked as a parity item.
 //! - **CAF**: PCM only (what the writer produces); a CAF holding AAC fails.
 //! - An unfinished master (data chunk size -1) decodes to its last whole
 //!   frame through the crate's own [`CafFile`]
@@ -44,20 +50,29 @@ use crate::writer::{CafFile, WavFile, WavStreamWriter};
 use crate::{FRAME_SIZE, SAMPLE_RATE};
 use sinc::SincResampler;
 
+/// Why a decode or mixdown failed.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum CodecError {
+    /// The asset's `lanes` do not list it.
     #[error("the asset has no {} lane", .0.as_str())]
     LaneNotInAsset(AudioLane),
+    /// The lane's channel index is beyond the file's channels.
     #[error("lane {} is channel {channel} but the file has {channels}", lane.as_str())]
     ChannelMissing {
+        /// The lane asked for.
         lane: AudioLane,
+        /// Its channel in the master.
         channel: usize,
+        /// Channels the file has.
         channels: usize,
     },
+    /// Symphonia could not probe or decode the container or codec.
     #[error("unsupported audio format: {0}")]
     UnsupportedFormat(String),
+    /// Decoding stopped mid-file.
     #[error("audio conversion failed: {0}")]
     ConversionFailed(String),
+    /// A read or write failed: the path and the error.
     #[error("{0}")]
     Io(String),
 }
@@ -65,21 +80,38 @@ pub enum CodecError {
 /// Decoded PCM at the source rate: one channel's samples.
 #[derive(Debug, Clone, PartialEq)]
 pub struct DecodedChannel {
+    /// Hertz.
     pub sample_rate: u32,
+    /// Channels the file has; this is one of them.
     pub channels: usize,
+    /// The channel's samples at `sample_rate`.
     pub samples: Vec<f32>,
 }
 
+/// The decoder, stateless; see the module doc.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct SymphoniaAudioCodec;
 
 impl SymphoniaAudioCodec {
+    /// There is no state.
     #[must_use]
     pub fn new() -> Self {
         Self
     }
 
-    /// Channel `channel` of the file at `path`, resampled to 16 kHz mono.
+    /// Channel `channel` of the file at `path`, resampled to 16 kHz mono;
+    /// `lane` names the channel in the error when the file lacks it.
+    ///
+    /// ```no_run
+    /// use std::path::Path;
+    ///
+    /// use steno_audio::SymphoniaAudioCodec;
+    /// use steno_core::AudioLane;
+    ///
+    /// let lane = SymphoniaAudioCodec::decode_path(Path::new("phone.m4a"), 0, AudioLane::Mixed)?;
+    /// println!("{} samples at 16 kHz", lane.len());
+    /// # Ok::<(), steno_audio::CodecError>(())
+    /// ```
     pub fn decode_path(
         path: &Path,
         channel: usize,
@@ -142,7 +174,12 @@ impl SymphoniaAudioCodec {
             .format(
                 &hint,
                 stream,
-                &FormatOptions::default(),
+                // Gapless: trims the encoder delay and padding where the
+                // container declares them (MP3's LAME tag; not MP4 yet).
+                &FormatOptions {
+                    enable_gapless: true,
+                    ..FormatOptions::default()
+                },
                 &MetadataOptions::default(),
             )
             .map_err(|e| CodecError::UnsupportedFormat(format!("{}: {e}", path.display())))?;

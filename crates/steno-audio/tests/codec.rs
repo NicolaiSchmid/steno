@@ -1,8 +1,9 @@
 //! Decode and mixdown on files built in setup: a two-channel 48 kHz CAF
 //! from the recording writer, a 16 kHz WAV master, and the sinc resampler
-//! on a 44.1 kHz tone. No m4a: there is no AAC encoder in pure Rust to
-//! build one with; the AAC path is exercised by hand with a phone recording
-//! (see the module doc of `steno_audio::codec`).
+//! on a 44.1 kHz tone; plus the phone path's containers on two committed
+//! synthetic fixtures (`Tests/Fixtures/audio/tone-440-44k1-500ms.{m4a,mp3}`,
+//! ffmpeg encodes of half a second of a 440 Hz sine; there is no AAC or MP3
+//! encoder in pure Rust to build them in setup).
 //! Swift: `Tests/StenoAudioTests/AVFoundationAudioCodecTests.swift`.
 
 // Test arithmetic: sample counts and dB values cast freely, and sample
@@ -18,7 +19,7 @@
 )]
 
 use std::collections::BTreeMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use steno_audio::EchoMetrics;
 use steno_audio::codec::sinc::SincResampler;
@@ -323,6 +324,61 @@ async fn wav_master_decodes_through_symphonia() {
             .zip(&reference)
             .all(|(a, b)| (a - b).abs() < 1e-4)
     );
+}
+
+fn fixture(name: &str) -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../Tests/Fixtures/audio")
+        .join(name)
+}
+
+/// The phone path's containers: half a second of a 440 Hz sine at 0.5,
+/// mono 44.1 kHz, as AAC-LC and as MP3 (96 kbps, ffmpeg). Frequency,
+/// level and the exact-length rule hold through `decode_path`. The start
+/// offset is the encoder priming: symphonia trims it for MP3 (the LAME tag,
+/// with `enable_gapless`) and not for MP4 (the edit list goes unread), so
+/// an AAC lane begins 1 024 samples (23 ms) late. Both offsets are measured
+/// here and recorded in the plan's Audio parity list.
+#[test]
+fn aac_and_mp3_fixtures_decode_with_their_priming_measured() {
+    for (name, priming_at_source_rate) in [
+        ("tone-440-44k1-500ms.m4a", 1_000..=1_100usize),
+        ("tone-440-44k1-500ms.mp3", 0..=16),
+    ] {
+        let path = fixture(name);
+        let source = SymphoniaAudioCodec::read_channel(&path, 0, AudioLane::Mixed).unwrap();
+        assert_eq!((source.sample_rate, source.channels), (44_100, 1), "{name}");
+        let decoded = SymphoniaAudioCodec::decode_path(&path, 0, AudioLane::Mixed).unwrap();
+        let expected_len = (source.samples.len() as f64 * 16_000.0 / 44_100.0).round() as usize;
+        assert_eq!(decoded.len(), expected_len, "{name}: exact length rule");
+        assert!(
+            (22_050..=22_050 + 4_096).contains(&source.samples.len()),
+            "{name}: {} source samples",
+            source.samples.len()
+        );
+        let onset = |samples: &[f32]| samples.iter().position(|s| s.abs() > 0.05).unwrap();
+        let onset_source = onset(&source.samples);
+        let onset_16k = onset(&decoded.samples);
+        println!(
+            "{name}: {} samples at 44.1 kHz, onset at {onset_source} ({:.1} ms); {} samples at 16 kHz, onset at {onset_16k}",
+            source.samples.len(),
+            onset_source as f64 / 44.1,
+            decoded.len()
+        );
+        assert!(
+            priming_at_source_rate.contains(&onset_source),
+            "{name}: priming {onset_source} samples"
+        );
+        let steady = &decoded.samples[onset_16k + 400..onset_16k + 400 + 6_000];
+        let level = 20.0 * (EchoMetrics::rms(steady) / (0.5 / 2f32.sqrt())).log10();
+        assert!(level.abs() < 1.0, "{name}: level {level} dB");
+        let crossings = steady
+            .windows(2)
+            .filter(|w| w[0] < 0.0 && w[1] >= 0.0)
+            .count();
+        let hertz = crossings as f64 / (steady.len() as f64 / 16_000.0);
+        assert!((hertz - 440.0).abs() < 5.0, "{name}: {hertz} Hz");
+    }
 }
 
 /// The phone's 44.1 kHz through the sinc resampler: level within 0.1 dB,
