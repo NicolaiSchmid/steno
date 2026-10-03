@@ -479,9 +479,10 @@ another release, otherwise the cutover closes them:
 - Pairing windows: Swift's `HandoverEngine.pair(_:)` checks only that a window is
   open, not that it is the one whose secret the head matched. The read timeout runs
   per silence, so a head whose body keeps trickling in pairs against a window opened
-  after a cancel, or one opened for a second phone. Rust numbers the windows and pairs
-  only against the one the gate matched (`Principal::Pairing`); move the Swift side
-  to the same before cutover.
+  after a cancel, or one opened for a second phone. A failed save gives the session
+  back whenever no window is open, also after a cancel. Rust numbers the windows and
+  pairs only against the one the gate matched (`Principal::Pairing`); a failed save
+  does not reopen a window cancelled or replaced meanwhile; move Swift to the same.
 - Revoked receipts: Swift's `HandoverEngine.persist` puts a receipt back into
   `activeReceipts` after a revoke removed it, when a `complete` that read it before the
   revoke writes it back; the receipt stream then shows an upload of a revoked phone

@@ -1,7 +1,8 @@
 //! Pairing on the injected wall clock: the first use of a secret pairs,
 //! the second is 403, an expired window is 403, a revoked token is 401,
-//! the name is stored trimmed, a failed save reopens the window, and a
-//! head authorised against a closed window does not pair against the next.
+//! the name is stored trimmed, a failed save reopens the window but not
+//! one cancelled or replaced while it ran, and a head authorised against a
+//! closed window does not pair against the next.
 
 #![allow(
     clippy::assert_is_empty,
@@ -14,12 +15,14 @@
 
 mod common;
 
+use std::sync::mpsc;
 use std::time::Duration;
 
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
 use common::{Phone, TestService, bearer};
-use steno_handover::engine::Engine;
+use steno_handover::engine::{AuthOutcome, Engine, Principal, RequestHandling};
+use steno_handover::route::Route;
 use steno_handover::{base64url, wire};
 use uuid::Uuid;
 
@@ -316,5 +319,123 @@ async fn a_head_authorised_against_a_closed_window_does_not_pair_against_the_nex
         test.service.engine.pairing_is_open(),
         "the new window is kept"
     );
+    assert!(test.store.paired_devices().unwrap().is_empty());
+}
+
+/// Makes every device save fail until `DROP TRIGGER temp.refuse_pairing`.
+fn refuse_pairing(test: &TestService) {
+    common::execute_batch(
+        &test.store,
+        "CREATE TEMP TRIGGER refuse_pairing BEFORE INSERT ON pairedDevice \
+         BEGIN SELECT RAISE(ABORT, 'refused'); END",
+    );
+}
+
+/// Whether the gate turns `secret` away as it does with no session open.
+async fn gate_refuses(test: &TestService, secret: &[u8]) -> bool {
+    match test
+        .service
+        .engine
+        .authenticate(Route::Pair, Some(&common::pairing(secret)))
+        .await
+    {
+        AuthOutcome::Allowed(_) => false,
+        AuthOutcome::Rejected(response) => response.status.as_u16() == 403,
+    }
+}
+
+/// The body of `POST /v1/pair` as `principal` while a thread holds the
+/// store, so the device save waits; `meanwhile` runs once the engine has
+/// taken the session, then the save goes ahead. Returns the status.
+async fn pair_during_a_held_save(
+    test: &TestService,
+    principal: Principal,
+    meanwhile: impl FnOnce(),
+) -> u16 {
+    let (held, held_rx) = mpsc::channel();
+    let (release, release_rx) = mpsc::channel::<()>();
+    let store = test.store.clone();
+    let holder = std::thread::spawn(move || {
+        store
+            .read(|_| {
+                held.send(()).unwrap();
+                release_rx.recv().unwrap();
+                Ok(())
+            })
+            .unwrap();
+    });
+    held_rx.recv().unwrap();
+
+    let pair = common::engine_pair_as(test, principal, Uuid::new_v4(), "iPhone");
+    let drive = async {
+        while test.service.engine.pairing_is_open() {
+            tokio::time::sleep(Duration::from_millis(2)).await;
+        }
+        meanwhile();
+        release.send(()).unwrap();
+    };
+    let (response, ()) =
+        tokio::time::timeout(Duration::from_secs(10), async { tokio::join!(pair, drive) })
+            .await
+            .expect("the save was held and released");
+    holder.join().unwrap();
+    response.status.as_u16()
+}
+
+#[tokio::test]
+async fn a_window_cancelled_while_its_save_runs_stays_closed_when_the_save_fails() {
+    // The user cancels while the phone's pair is saving; the save then
+    // fails. The QR code on screen must stay dead.
+    let test = TestService::with(common::Options {
+        start: false,
+        ..common::Options::default()
+    })
+    .await;
+    let payload = test.service.begin_pairing();
+    let principal = common::pairing_principal(&test, &payload).await;
+    refuse_pairing(&test);
+
+    let status = pair_during_a_held_save(&test, principal.clone(), || {
+        test.service.cancel_pairing();
+    })
+    .await;
+    assert_eq!(status, 500);
+    assert!(!test.service.engine.pairing_is_open(), "the cancel holds");
+
+    common::execute_batch(&test.store, "DROP TRIGGER temp.refuse_pairing");
+    assert!(gate_refuses(&test, &payload.secret).await);
+    let late = common::engine_pair_as(&test, principal, Uuid::new_v4(), "iPhone").await;
+    assert_eq!(late.status.as_u16(), 403);
+    assert!(test.store.paired_devices().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn a_window_replaced_and_cancelled_while_a_save_runs_brings_neither_back() {
+    // The phone's pair is saving; the user opens a window for another
+    // phone, then cancels it; the save fails. Neither QR code pairs.
+    let test = TestService::with(common::Options {
+        start: false,
+        ..common::Options::default()
+    })
+    .await;
+    let first = test.service.begin_pairing();
+    let principal = common::pairing_principal(&test, &first).await;
+    refuse_pairing(&test);
+
+    let mut second = None;
+    let status = pair_during_a_held_save(&test, principal.clone(), || {
+        second = Some(test.service.begin_pairing());
+        test.service.cancel_pairing();
+    })
+    .await;
+    let second = second.expect("opened during the save");
+    assert_eq!(status, 500);
+    assert!(!test.service.engine.pairing_is_open(), "the cancel holds");
+
+    common::execute_batch(&test.store, "DROP TRIGGER temp.refuse_pairing");
+    assert!(gate_refuses(&test, &first.secret).await, "the first QR");
+    assert!(gate_refuses(&test, &second.secret).await, "the second QR");
+    let late = common::engine_pair_as(&test, principal, Uuid::new_v4(), "iPhone").await;
+    assert_eq!(late.status.as_u16(), 403);
     assert!(test.store.paired_devices().unwrap().is_empty());
 }

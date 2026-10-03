@@ -34,8 +34,8 @@ use crate::wire;
 pub enum Principal {
     Anonymous,
     /// The secret matched the pairing window with this number (the engine
-    /// counts the windows it opens); `/v1/pair` pairs only while that
-    /// window is still the open one.
+    /// bumps it on every open and every cancel); `/v1/pair` pairs only
+    /// while that window is still the open one.
     Pairing(u64),
     Device(PairedDevice),
 }
@@ -182,10 +182,11 @@ pub trait RequestHandling: Send + Sync {
 #[derive(Default)]
 struct State {
     pairing: Option<PairingSession>,
-    /// Pairing windows opened since start, so the number of the last one.
+    /// The pairing window's number, bumped on every open and every cancel.
     /// A head authorised against an earlier window whose body arrives after
-    /// a cancel and a reopen must not pair against the new one.
-    windows_opened: u64,
+    /// a cancel and a reopen must not pair against the new one, and a
+    /// failed save gives its session back only if the number is unchanged.
+    window: u64,
     /// Receipts touched since start, by recording id; what the receipt
     /// stream carries.
     active_receipts: BTreeMap<Uuid, HandoverReceipt>,
@@ -336,13 +337,15 @@ impl Engine {
         );
         let payload = session.payload.clone();
         let mut state = self.state();
-        state.windows_opened += 1;
+        state.window += 1;
         state.pairing = Some(session);
         payload
     }
 
     pub fn cancel_pairing(&self) {
-        self.state().pairing = None;
+        let mut state = self.state();
+        state.pairing = None;
+        state.window += 1;
     }
 
     #[must_use]
@@ -423,12 +426,12 @@ impl Engine {
         // take, so two connections on two worker threads that both passed
         // the gate cannot both find the session open. Nothing in between
         // yields; a second request with the same secret that arrives while
-        // the save runs finds no session and is 403. The window reopens
-        // only if the save fails.
+        // the save runs finds no session and is 403. A failed save reopens
+        // the window, unless it was cancelled or replaced while the save ran.
         let (session, device_id, name) = {
             let mut state = self.state();
             match &state.pairing {
-                Some(session) if session.is_open() && state.windows_opened == window => {}
+                Some(session) if session.is_open() && state.window == window => {}
                 _ => return Self::pairing_rejected(),
             }
             let body: wire::PairRequest = match serde_json::from_slice(&request.body) {
@@ -461,7 +464,7 @@ impl Engine {
             .await
         {
             let mut state = self.state();
-            if state.pairing.is_none() {
+            if state.pairing.is_none() && state.window == window {
                 state.pairing = Some(session);
             }
             return HandoverResponse::internal_error("saving the device", &error);
@@ -629,7 +632,7 @@ impl RequestHandling for Engine {
                 let window = Self::credential("Pairing", authorization).and_then(|secret| {
                     let state = self.state();
                     let session = state.pairing.as_ref()?;
-                    session.matches(secret).then_some(state.windows_opened)
+                    session.matches(secret).then_some(state.window)
                 });
                 match window {
                     Some(window) => AuthOutcome::Allowed(Principal::Pairing(window)),
