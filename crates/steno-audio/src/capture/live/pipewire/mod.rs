@@ -812,24 +812,19 @@ impl CaptureBackend for LiveCaptureBackend {
             .map_err(|e| CaptureError::BackendFailed(format!("the PipeWire thread: {e}")))?;
         // The thread answers by its own deadline; the margin covers a
         // thread that is slow to get scheduled.
-        let outcome = answered.recv_timeout(START_TIMEOUT + Duration::from_secs(2));
-        let thread = Active { quit, thread };
-        match outcome {
-            Ok(Ok(stream)) => {
-                *active = Some(thread);
-                Ok(stream)
-            }
-            Ok(Err(error)) => {
-                Self::end(thread);
-                Err(error)
-            }
-            Err(_) => {
-                Self::end(thread);
+        let outcome = answered
+            .recv_timeout(START_TIMEOUT + Duration::from_secs(2))
+            .unwrap_or_else(|_| {
                 Err(CaptureError::BackendFailed(
                     "the PipeWire thread did not answer".into(),
                 ))
-            }
+            });
+        let started = Active { quit, thread };
+        match outcome {
+            Ok(_) => *active = Some(started),
+            Err(_) => Self::end(started),
         }
+        outcome
     }
 
     fn stop(&self) {
