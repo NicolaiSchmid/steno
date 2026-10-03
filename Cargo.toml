@@ -62,8 +62,10 @@ symphonia = { version = "0.5", default-features = false, features = ["aac", "caf
 # Build only
 cc = "1"
 # The secret store behind `SecretStore` in the services assembly: the
-# Keychain, the Windows credential store and the kernel keyring on Linux
-# (`linux-native` needs no D-Bus library at build time).
+# Keychain and the Windows credential store. On Linux the services use
+# the 0600 secrets file instead (`linux-native` is the kernel keyring,
+# which does not survive a reboot, and the Secret Service store needs
+# D-Bus); the feature stays so the crate builds there without a mock.
 keyring = { version = "3", default-features = false, features = ["apple-native", "windows-native", "linux-native"] }
 # The `steno` CLI's argument parser.
 clap = { version = "4", features = ["derive"] }

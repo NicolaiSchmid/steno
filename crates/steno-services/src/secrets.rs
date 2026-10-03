@@ -1,8 +1,10 @@
 //! `SecretStore` implementations: the platform keyring (the Keychain, the
-//! Windows credential store, the kernel keyring on Linux) through the
-//! `keyring` crate, and the 0600 JSON file the Swift CLI used where no
-//! keyring is reachable (`STENO_LLM_API_KEY` wins over the file).
-//! Swift: `KeychainSecretStore`, `FileSecretStore`.
+//! Windows credential store) through the `keyring` crate, and the 0600
+//! JSON file the Swift CLI used where no keyring is reachable
+//! (`STENO_LLM_API_KEY` wins over the file). Linux uses the file for the
+//! app too; the crate doc says why.
+//! Swift: `apps/macos/Steno/Services/KeychainSecretStore.swift`,
+//! `Sources/StenoCore/Testing/FileSecretStore.swift`.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -13,17 +15,25 @@ use steno_core::{SecretKey, SecretStore, StenoPaths, async_trait, protocols::Bou
 /// The service name every Steno entry is filed under.
 pub const KEYRING_SERVICE: &str = "uno.schmid.steno";
 
-/// The platform keyring when `keyring` is set, else the secrets file under
-/// the support directory (the CLI and headless machines).
+/// The platform keyring when `keyring` is set and the platform has one
+/// that persists (macOS, Windows), else the secrets file under the
+/// support directory (the CLI, headless machines, Linux).
 #[must_use]
 pub fn secret_store(keyring: bool, paths: &StenoPaths) -> Arc<dyn SecretStore> {
-    if keyring {
-        Arc::new(KeyringSecretStore)
-    } else {
+    if uses_file(keyring) {
         Arc::new(FileSecretStore::in_support_directory(
             &paths.support_directory,
         ))
+    } else {
+        Arc::new(KeyringSecretStore)
     }
+}
+
+/// Whether the file store answers: always when the keyring was not asked
+/// for, and on Linux regardless.
+#[must_use]
+pub fn uses_file(keyring: bool) -> bool {
+    !keyring || cfg!(target_os = "linux")
 }
 
 /// The platform keyring.
@@ -59,7 +69,7 @@ impl SecretStore for KeyringSecretStore {
     }
 }
 
-/// A JSON object of secrets in one file, written with mode 0600 where the
+/// A JSON object of secrets in one file, created with mode 0600 where the
 /// platform has modes. The environment overrides the LLM API key so a CLI
 /// run never has to store it.
 #[derive(Debug)]
@@ -112,17 +122,23 @@ impl FileSecretStore {
         Ok(map)
     }
 
+    /// Writes the file owner-only from the first byte: it is created with
+    /// mode 0600 (never world-readable in between), and an existing file
+    /// is truncated in place, keeping its mode.
     fn save(&self, map: &BTreeMap<String, String>) -> std::io::Result<()> {
+        use std::io::Write as _;
         if let Some(parent) = self.path.parent() {
             std::fs::create_dir_all(parent)?;
         }
         let data = serde_json::to_vec_pretty(map).map_err(std::io::Error::other)?;
-        std::fs::write(&self.path, data)?;
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create(true).truncate(true);
         #[cfg(unix)]
         {
-            use std::os::unix::fs::PermissionsExt as _;
-            std::fs::set_permissions(&self.path, std::fs::Permissions::from_mode(0o600))?;
+            use std::os::unix::fs::OpenOptionsExt as _;
+            options.mode(0o600);
         }
+        options.open(&self.path)?.write_all(&data)?;
         *self
             .cache
             .lock()
@@ -182,5 +198,35 @@ mod tests {
             )]),
         );
         assert_eq!(env.secret(&key).await.unwrap().as_deref(), Some("sk-env"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn the_file_is_owner_only_and_a_shorter_rewrite_leaves_no_tail() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("secrets.json");
+        let store = FileSecretStore::new(&path, BTreeMap::new());
+        let key = SecretKey::llm_api_key();
+        store
+            .set_secret(&key, Some("a-rather-long-key-value"))
+            .await
+            .unwrap();
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        store.set_secret(&key, Some("k")).await.unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            serde_json::from_str::<BTreeMap<String, String>>(&text).is_ok(),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn linux_uses_the_file_store_even_when_the_keyring_is_asked_for() {
+        assert!(uses_file(false));
+        assert_eq!(uses_file(true), cfg!(target_os = "linux"));
     }
 }
