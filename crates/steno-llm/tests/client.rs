@@ -230,6 +230,17 @@ async fn redacts_the_key_from_every_error_and_event() {
         "[redacted] a [redacted] b [redacted]",
         "every occurrence, not only the first"
     );
+    // A secret that contains another is replaced whole, whatever the order.
+    let outer = format!("{API_KEY}-suffix");
+    for secrets in [
+        [API_KEY.to_owned(), outer.clone()],
+        [outer.clone(), API_KEY.to_owned()],
+    ] {
+        assert_eq!(
+            transport::redact(&format!("a {outer} b {API_KEY}"), &secrets),
+            "a [redacted] b [redacted]"
+        );
+    }
 }
 
 #[tokio::test]

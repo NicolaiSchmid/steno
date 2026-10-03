@@ -679,3 +679,25 @@ async fn no_secret_after_a_multi_byte_character_at_a_cut_reaches_an_error_or_an_
     })
     .await;
 }
+
+/// A key shorter than eight bytes is a placeholder for a local server, not
+/// a credential, and is left alone: redacting it would garble every
+/// message. Eight bytes and more is a secret.
+#[tokio::test]
+async fn a_placeholder_key_shorter_than_eight_bytes_is_left_alone() {
+    let message = serde_json::json!({"error": {"message": "context exceeded max tokens"}});
+    for (key, expected) in [
+        ("x", "HTTP 400: context exceeded max tokens"),
+        ("ollama", "HTTP 400: context exceeded max tokens"),
+        ("exceeded", "HTTP 400: context [redacted] max tokens"),
+    ] {
+        let harness = ClientHarness::build(RetryPolicy::NONE, Some(key), |_| {}).await;
+        harness.server.enqueue([StubResponse::json(&message, 400)]);
+        let error = harness
+            .client
+            .complete_llm(&text_request())
+            .await
+            .unwrap_err();
+        assert_eq!(error.to_string(), expected, "{key}");
+    }
+}

@@ -331,12 +331,25 @@ pub fn redacted_prefix(text: &str, secrets: &[String], limit: usize) -> String {
     redact(text, secrets).chars().take(limit).collect()
 }
 
-/// Removes every secret wherever a server or transport echoed it.
+/// A secret shorter than this is a placeholder (`x`, `test`, `ollama` for
+/// a local server that takes any key), not a credential; [`redact`] leaves
+/// it alone, or it would garble ordinary words in every error.
+pub const MIN_SECRET_LEN: usize = 8;
+
+/// Removes every secret wherever a server or transport echoed it, longest
+/// first, so a secret that contains another is replaced whole. Secrets
+/// shorter than [`MIN_SECRET_LEN`] are skipped.
 #[must_use]
 pub fn redact(text: &str, secrets: &[String]) -> String {
+    let mut secrets: Vec<&str> = secrets
+        .iter()
+        .map(String::as_str)
+        .filter(|secret| secret.len() >= MIN_SECRET_LEN)
+        .collect();
+    secrets.sort_by_key(|secret| std::cmp::Reverse(secret.len()));
     let mut result = text.to_owned();
-    for secret in secrets.iter().filter(|secret| !secret.is_empty()) {
-        result = result.replace(secret.as_str(), "[redacted]");
+    for secret in secrets {
+        result = result.replace(secret, "[redacted]");
     }
     result
 }

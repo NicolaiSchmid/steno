@@ -323,8 +323,8 @@ fn incomplete_failed_refused_and_cut_streams() {
     );
     assert_eq!(
         parse(
-            scripts.responses_error_event("acct_1 said no", "server_error"),
-            &["acct_1".to_owned()]
+            scripts.responses_error_event("acct_123 said no", "server_error"),
+            &["acct_123".to_owned()]
         )
         .unwrap_err(),
         LlmError::Transport("[redacted] said no".to_owned())
