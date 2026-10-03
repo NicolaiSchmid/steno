@@ -144,6 +144,15 @@ pub struct DownloadProgress<'a> {
     pub total: u64,
 }
 
+/// How long a download waits for its connection, the TLS handshake
+/// included; without a limit a stalled host would hang `prepare`, and every
+/// `transcribe` waiting behind it.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// How long a download then waits for the response headers. The body has no
+/// limit: 2.4 GB on a slow line takes hours.
+const RESPONSE_TIMEOUT: Duration = Duration::from_secs(30);
+
 /// The models root and the HTTP client.
 #[derive(Debug, Clone)]
 pub struct ModelStore {
@@ -159,7 +168,11 @@ impl ModelStore {
     pub fn new(root: impl Into<PathBuf>) -> Self {
         ModelStore {
             root: root.into(),
-            agent: ureq::agent(),
+            agent: ureq::Agent::config_builder()
+                .timeout_connect(Some(CONNECT_TIMEOUT))
+                .timeout_recv_response(Some(RESPONSE_TIMEOUT))
+                .build()
+                .new_agent(),
         }
     }
 
