@@ -363,18 +363,13 @@ impl Recorder for CaptureRecorder {
 
 #[cfg(test)]
 mod tests {
-    use std::time::Duration;
-
+    use super::*;
+    use crate::testing::{current_pipeline, eventually, fake_dependencies, temp_store};
     use steno_audio::testing::SyntheticCaptureBackend;
     use steno_audio::testing::synthetic::SyntheticOptions;
     use steno_core::paths::file_url;
     use steno_core::testing::{FakeDiarizer, FakeSpeechEngine};
     use steno_host::fakes::{FakePermissions, FakeSpeechModels};
-    use steno_pipeline::ProcessingPipeline;
-
-    use super::*;
-    use crate::pipeline::MakeDependencies;
-    use crate::testing::{fake_dependencies, temp_store};
 
     struct Harness {
         _dir: tempfile::TempDir,
@@ -393,15 +388,7 @@ mod tests {
         let mut dependencies = fake_dependencies(&store, "fake-engine");
         dependencies.speech_engine = engine.clone();
         dependencies.diarizer = diarizer.clone();
-        let make: MakeDependencies = {
-            let dependencies = dependencies.clone();
-            Arc::new(move || Ok(dependencies.clone()))
-        };
-        let pipeline = Arc::new(CurrentPipeline::new(
-            ProcessingPipeline::new(dependencies),
-            make,
-            tokio::runtime::Handle::current(),
-        ));
+        let pipeline = current_pipeline(dependencies);
         let models = Arc::new(FakeSpeechModels::default());
         for asset in installed {
             models.install(*asset, None);
@@ -456,15 +443,10 @@ mod tests {
     async fn a_recording_start_warms_the_pipeline_up_when_the_models_are_installed() {
         let harness = harness(&[ModelAsset::ParakeetV3, ModelAsset::OfflineDiarizer]);
         start(&harness.recorder).await;
-        tokio::time::timeout(Duration::from_secs(5), async {
-            while harness.engine.preparations.count() == 0
-                || harness.diarizer.preparations.count() == 0
-            {
-                tokio::time::sleep(Duration::from_millis(10)).await;
-            }
+        eventually("both models were loaded while recording", || {
+            harness.engine.preparations.count() > 0 && harness.diarizer.preparations.count() > 0
         })
-        .await
-        .expect("both models were loaded while recording");
+        .await;
         stop(&harness.recorder).await;
     }
 
@@ -472,7 +454,7 @@ mod tests {
     async fn a_recording_start_never_warms_up_models_that_would_download() {
         let harness = harness(&[ModelAsset::OfflineDiarizer]);
         start(&harness.recorder).await;
-        tokio::time::sleep(Duration::from_millis(300)).await;
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
         assert_eq!(harness.engine.preparations.count(), 0);
         assert_eq!(harness.diarizer.preparations.count(), 0);
         // Processing the recording loads them, as it always did.

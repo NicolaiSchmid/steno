@@ -1,13 +1,20 @@
-//! What the unit tests share: a store in a temp directory and the
-//! pipeline's dependencies over core's fakes.
+//! What the unit tests share: a store in a temp directory, the
+//! pipeline's dependencies over core's fakes, and the waits that fail a
+//! test instead of hanging it.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use steno_adapters::DeliveryCoordinator;
 use steno_audio::SymphoniaAudioCodec;
 use steno_core::Store;
 use steno_core::testing::{FakeDiarizer, FakeSpeechEngine, InMemorySpeakerMemory};
-use steno_pipeline::{MeetingEventBus, PipelineDependencies};
+use steno_pipeline::{MeetingEventBus, PipelineDependencies, ProcessingPipeline};
+
+use crate::pipeline::{CurrentPipeline, MakeDependencies};
+
+/// How long a test waits for background work before it fails.
+pub const PATIENCE: Duration = Duration::from_secs(5);
 
 /// A fresh store; the directory lives as long as the guard.
 pub fn temp_store() -> (tempfile::TempDir, Arc<Store>) {
@@ -31,4 +38,51 @@ pub fn fake_dependencies(store: &Arc<Store>, engine_id: &str) -> PipelineDepende
         store.clone(),
         MeetingEventBus::new(),
     )
+}
+
+/// A pipeline on the current runtime whose reload builds `dependencies`
+/// again.
+pub fn current_pipeline(dependencies: PipelineDependencies) -> Arc<CurrentPipeline> {
+    let make: MakeDependencies = {
+        let dependencies = dependencies.clone();
+        Arc::new(move || Ok(dependencies.clone()))
+    };
+    Arc::new(CurrentPipeline::new(
+        ProcessingPipeline::new(dependencies),
+        make,
+        tokio::runtime::Handle::current(),
+    ))
+}
+
+/// Waits until `done` holds, failing the test with `what` after
+/// [`PATIENCE`].
+pub async fn eventually(what: &str, mut done: impl FnMut() -> bool) {
+    tokio::time::timeout(PATIENCE, async {
+        while !done() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect(what);
+}
+
+/// Calls `f` on a thread of its own, as the host calls its services,
+/// failing the test with `what` unless it returns within `patience`. Not
+/// a `spawn_blocking` task: the runtime waits for those when it shuts
+/// down, so a call stuck on the work would hang the test instead of
+/// failing it.
+pub fn on_own_thread<T: Send + 'static>(
+    patience: Duration,
+    what: &str,
+    f: impl FnOnce() -> T + Send + 'static,
+) -> T {
+    let (sender, receiver) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = sender.send(f());
+    });
+    match receiver.recv_timeout(patience) {
+        Ok(value) => value,
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => panic!("{what}"),
+        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => panic!("the call panicked"),
+    }
 }

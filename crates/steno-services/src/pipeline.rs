@@ -142,7 +142,6 @@ pub fn run_sweep(sweep: &RetentionSweep) {
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
-    use std::time::Duration;
 
     use steno_core::{
         MeetingEvent, MeetingOperation, MeetingState, MeetingSummarizer, PipelineStage, Store,
@@ -151,10 +150,9 @@ mod tests {
     use steno_pipeline::EventReceiver;
 
     use super::*;
-    use crate::testing::{fake_dependencies, temp_store};
-
-    /// How long a test waits for background work before it fails.
-    const PATIENCE: Duration = Duration::from_secs(5);
+    use crate::testing::{
+        PATIENCE, current_pipeline, eventually, fake_dependencies, on_own_thread, temp_store,
+    };
 
     /// A summarizer that answers only once released, then fails.
     struct HeldSummarizer {
@@ -174,19 +172,11 @@ mod tests {
     fn pipeline(
         store: &Arc<Store>,
         summarizer: Option<Arc<dyn MeetingSummarizer>>,
-        runtime: tokio::runtime::Handle,
     ) -> HostPipeline {
-        let dependencies = fake_dependencies(store, "fake-engine").with_llm(None, summarizer);
-        let make: MakeDependencies = {
-            let dependencies = dependencies.clone();
-            Arc::new(move || Ok(dependencies.clone()))
-        };
         HostPipeline {
-            pipeline: Arc::new(CurrentPipeline::new(
-                ProcessingPipeline::new(dependencies),
-                make,
-                runtime,
-            )),
+            pipeline: current_pipeline(
+                fake_dependencies(store, "fake-engine").with_llm(None, summarizer),
+            ),
             sweep: RetentionSweep::new(store.clone()),
         }
     }
@@ -215,20 +205,20 @@ mod tests {
         )
     }
 
-    /// Calls the host's synchronous method on a thread of its own, as the
-    /// host does, failing the test if it does not return in time. Not a
-    /// `spawn_blocking` task: the runtime waits for those when it shuts
-    /// down, so a call stuck on the work would hang the test instead of
-    /// failing it.
-    async fn call<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> T {
-        let (sender, receiver) = tokio::sync::oneshot::channel();
-        std::thread::spawn(move || {
-            let _ = sender.send(f());
-        });
-        tokio::time::timeout(PATIENCE, receiver)
+    /// Calls one of the host's synchronous methods as the host does.
+    fn call<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> T {
+        on_own_thread(
+            PATIENCE,
+            "the call returned without waiting for the work",
+            f,
+        )
+    }
+
+    /// Waits until the held summarizer is asked.
+    async fn reached(asked: &tokio::sync::Notify) {
+        tokio::time::timeout(PATIENCE, asked.notified())
             .await
-            .expect("the call returned without waiting for the work")
-            .unwrap()
+            .expect("the re-run reached the summarizer");
     }
 
     /// The next event matching `wanted`, failing the test after a while.
@@ -253,18 +243,12 @@ mod tests {
         let (_dir, store) = temp_store();
         let meeting = ready_meeting(&store);
         let (summarizer, release, asked) = held();
-        let service = pipeline(
-            &store,
-            Some(Arc::new(summarizer)),
-            tokio::runtime::Handle::current(),
-        );
+        let service = pipeline(&store, Some(Arc::new(summarizer)));
 
-        let returned = call(move || service.rerun_summary(meeting.id, &meeting.template_id)).await;
+        let returned = call(move || service.rerun_summary(meeting.id, &meeting.template_id));
         assert_eq!(returned, Ok(()));
         // The run was started: the summarizer is being asked.
-        tokio::time::timeout(PATIENCE, asked.notified())
-            .await
-            .expect("the re-run reached the summarizer");
+        reached(&asked).await;
         release.notify_one();
     }
 
@@ -272,36 +256,27 @@ mod tests {
     async fn a_refused_re_run_or_re_export_is_the_call_s_error() {
         let (_dir, store) = temp_store();
         let meeting = ready_meeting(&store);
-        let without_llm = pipeline(&store, None, tokio::runtime::Handle::current());
+        let without_llm = pipeline(&store, None);
         let id = meeting.id;
         assert_eq!(
-            call(move || without_llm.rerun_summary(id, "default")).await,
+            call(move || without_llm.rerun_summary(id, "default")),
             Err("summarize: no LLM endpoint is configured".to_owned())
         );
 
         let (summarizer, release, asked) = held();
-        let service = Arc::new(pipeline(
-            &store,
-            Some(Arc::new(summarizer)),
-            tokio::runtime::Handle::current(),
-        ));
+        let service = Arc::new(pipeline(&store, Some(Arc::new(summarizer))));
         let first = service.clone();
-        assert_eq!(
-            call(move || first.rerun_summary(id, "default")).await,
-            Ok(())
-        );
-        tokio::time::timeout(PATIENCE, asked.notified())
-            .await
-            .expect("the re-run reached the summarizer");
+        assert_eq!(call(move || first.rerun_summary(id, "default")), Ok(()));
+        reached(&asked).await;
         let busy = format!("meeting {id} is already being processed");
         let second = service.clone();
         assert_eq!(
-            call(move || second.redeliver(id)).await,
+            call(move || second.redeliver(id)),
             Err(format!("deliver: {busy}"))
         );
         let third = service.clone();
         assert_eq!(
-            call(move || third.rerun_summary(id, "default")).await,
+            call(move || third.rerun_summary(id, "default")),
             Err(format!("summarize: {busy}"))
         );
         release.notify_one();
@@ -309,7 +284,7 @@ mod tests {
         let unknown = Uuid::new_v4();
         let fourth = service.clone();
         assert_eq!(
-            call(move || fourth.redeliver(unknown)).await,
+            call(move || fourth.redeliver(unknown)),
             Err(format!("deliver: meeting {unknown} not found"))
         );
     }
@@ -319,21 +294,12 @@ mod tests {
         let (_dir, store) = temp_store();
         let meeting = ready_meeting(&store);
         let (summarizer, release, asked) = held();
-        let service = Arc::new(pipeline(
-            &store,
-            Some(Arc::new(summarizer)),
-            tokio::runtime::Handle::current(),
-        ));
+        let service = Arc::new(pipeline(&store, Some(Arc::new(summarizer))));
         let mut receiver = service.pipeline.current().dependencies().events.subscribe();
         let id = meeting.id;
         let caller = service.clone();
-        assert_eq!(
-            call(move || caller.rerun_summary(id, "default")).await,
-            Ok(())
-        );
-        tokio::time::timeout(PATIENCE, asked.notified())
-            .await
-            .expect("the re-run reached the summarizer");
+        assert_eq!(call(move || caller.rerun_summary(id, "default")), Ok(()));
+        reached(&asked).await;
         release.notify_one();
         let event = next_event(&mut receiver, |event| {
             matches!(event, MeetingEvent::OperationFailed { .. })
@@ -349,24 +315,21 @@ mod tests {
         );
         // The meeting is released for the next operation.
         let again = service.clone();
-        tokio::time::timeout(PATIENCE, async {
-            while !service.pipeline.current().in_flight().is_empty() {
-                tokio::time::sleep(Duration::from_millis(10)).await;
-            }
+        eventually("the meeting was released", || {
+            service.pipeline.current().in_flight().is_empty()
         })
-        .await
-        .expect("the meeting was released");
-        assert_eq!(call(move || again.redeliver(id)).await, Ok(()));
+        .await;
+        assert_eq!(call(move || again.redeliver(id)), Ok(()));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_re_export_returns_at_once_and_runs_in_the_background() {
         let (_dir, store) = temp_store();
         let meeting = ready_meeting(&store);
-        let service = pipeline(&store, None, tokio::runtime::Handle::current());
+        let service = pipeline(&store, None);
         let mut receiver = service.pipeline.current().dependencies().events.subscribe();
         let id = meeting.id;
-        assert_eq!(call(move || service.redeliver(id)).await, Ok(()));
+        assert_eq!(call(move || service.redeliver(id)), Ok(()));
         // The re-export ran: its one stage posted progress.
         let event = next_event(&mut receiver, |event| {
             matches!(event, MeetingEvent::Progress { .. })

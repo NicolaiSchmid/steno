@@ -201,6 +201,7 @@ mod tests {
     use steno_llm::testing::{Scripts, StubChatServer};
 
     use super::*;
+    use crate::testing::on_own_thread;
 
     /// The deadlock the network runtime prevents: the app runtime's only
     /// worker is parked on a lock the caller holds (as the host's flush
@@ -244,13 +245,11 @@ mod tests {
         let service = ClientLlmService {
             codex: codex_store(),
         };
-        let (answer_sender, answer_receiver) = std::sync::mpsc::channel();
-        std::thread::spawn(move || {
-            let _ = answer_sender.send(service.probe(&settings, None));
-        });
-        let answer = answer_receiver
-            .recv_timeout(Duration::from_secs(10))
-            .expect("the probe answered while the app runtime was parked");
+        let answer = on_own_thread(
+            Duration::from_secs(10),
+            "the probe answered while the app runtime was parked",
+            move || service.probe(&settings, None),
+        );
         drop(held);
         let line = answer.unwrap();
         assert!(
