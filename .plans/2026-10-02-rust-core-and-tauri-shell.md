@@ -287,9 +287,10 @@ bridge's copies of the macro and codecs. Packages after WP3 branch from `main`.
   CLI, the shell switched from its `fixture-host` feature to `steno-host` (the feature
   is removed), the real `Recorder` and `Pipeline` behind the host's traits. Parity: the
   Swift `steno export` of a calibration meeting equals the Rust one field for field. The
-  shell's seams towards the host (the prompt, the login item and update outcomes, the
-  permissions, the folder choices, the reveal methods) are filled by WP6b. The keyring
-  `SecretStore` is not the shell's: it lives in `steno-services` (#173, WP6b).
+  shell's seams towards the host (the prompt and its dismissal, `panels::set_prompt` and
+  `panels::dismiss_prompt`; the login item and update outcomes; the permissions; the
+  folder choices; the reveal methods) are filled by WP6b. The keyring `SecretStore` is
+  not the shell's: it lives in `steno-services` (#173, WP6b).
 - **WP7 LLM, adapters, handover.** Ports of `StenoLLM` (Codex and OpenAI-compatible),
   `StenoAdapters`, `StenoHandover` (rustls, the pinned trust evaluation, the shared
   `wire.ts` contract test). Lands as three PRs: WP7a LLM, WP7b adapters, WP7c handover.
@@ -300,8 +301,8 @@ bridge's copies of the macro and codecs. Packages after WP3 branch from `main`.
 - **WP9 Mac cutover and signed releases.** Parity list empty, same bundle id, Sparkle
   handoff, Swift app removed, web app moved to `apps/web`, Swift rows removed from
   `AGENTS.md`; `cargo deny` with a licence allow list in CI; the signing key for the
-  updater artifacts, notarisation, and the release matrix that publishes the bundles
-  and the updater manifests from a tag.
+  updater artifacts, notarisation, and the tag-triggered release workflow that
+  publishes the bundles and the updater manifests.
 - **WP10 Windows.** WASAPI capture, DirectML provider (speech-stack G4), installer.
 
 ## Risks

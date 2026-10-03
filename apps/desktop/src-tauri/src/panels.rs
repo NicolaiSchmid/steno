@@ -20,8 +20,9 @@
 //! panel by its background (`data-tauri-drag-region` in the page), the
 //! anchor follows and is saved. A saved anchor on a screen that is gone
 //! falls back to the default: top centre of the main screen, 8 pt under
-//! its top edge. The page measures itself and reports its size through
-//! `panel_call("resize")`; the shell sizes the window from that, as the
+//! its top edge. The page measures itself and reports its size in device
+//! pixels through `panel_call("resize")` (`bridge::ResizeParams::logical`
+//! turns it into points); the shell sizes the window from that, as the
 //! Swift root reported through `contentSizeDidChange`. The geometry is
 //! `panel_geometry.rs`.
 //!
@@ -124,7 +125,7 @@ pub struct PromptRequest {
 
 impl PromptRequest {
     /// The prompt's query: `app=<name>&seconds=<n>`, form-encoded, plus
-    /// `raised=<serial>` when the shell numbers the request: a new number
+    /// `raised=<n>` when the shell numbers the request: a new number
     /// is a new document for the page, so an identical request raised
     /// again still remounts the prompt and restarts its countdown.
     pub fn query(&self, raised: Option<u64>) -> String {
@@ -570,10 +571,11 @@ fn show_window(
     // natural size (480 by 200 for a webview), so on Linux the panel must
     // be resizable to take the size its page reports. Tauri then gives an
     // undecorated window a 5 px resize border; the size is pinned (minimum
-    // and maximum the page's size, `pin_size`), so a press there starts a
-    // resize the window manager cannot carry out and the panel keeps its
-    // size. macOS and Windows honour `set_size` on a fixed window and have
-    // no such border.
+    // and maximum the frame's size here, the page's once it reports,
+    // `pin_size`), so the panel keeps its size. The border still shows a
+    // resize cursor and swallows a press, so a drag that starts on the
+    // outer 5 px does not move the panel; no control sits there. macOS and
+    // Windows honour `set_size` on a fixed window and have no such border.
     .resizable(cfg!(target_os = "linux"))
     .min_inner_size(frame.width, frame.height)
     .max_inner_size(frame.width, frame.height)

@@ -203,10 +203,10 @@ fn hides_on_close(label: &str, has_tray: bool) -> bool {
 }
 
 /// Whether the window of `label` being destroyed ends the process: the
-/// main window with no tray, as it was then the only way to the app. The
-/// panels' windows are hidden, never destroyed, so once one has existed
-/// the last window never closes on its own, and the process would linger
-/// invisibly.
+/// main window with no tray, since nothing else reaches the app; the
+/// Swift app always has its menu bar item. The panels' windows are
+/// hidden, never destroyed, so once one has existed the last window never
+/// closes on its own, and the process would linger invisibly.
 fn exits_when_destroyed(label: &str, has_tray: bool) -> bool {
     label == BridgeWindow::Main.as_str() && !has_tray
 }

@@ -145,6 +145,7 @@ pub fn launch_at_login_command(value: bool) -> (&'static str, Value) {
 
 /// Switches launch at login, moves the tray's check mark and tells the
 /// host through `window`, for the tray's item and for Settings alike.
+/// Swift: `MenuBarViewModel.setLaunchAtLogin`.
 pub fn set_launch_at_login(
     app: &AppHandle,
     window: &WebviewWindow,

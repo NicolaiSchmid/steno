@@ -55,17 +55,20 @@ user drags one; the geometry is `panel_geometry.rs`). One rule decides
 what shows: a busy recorder wins, else a pending detection prompt, else
 nothing. Each window is created once and then hidden and shown; the
 prompt's is navigated to each new request, which the shell numbers when
-the host raises it, so the page remounts and the countdown restarts; the
-X sends that number back and dismisses only its own prompt. The page measures its pill and reports the
-size in device pixels through the `panel_call` command; the shell divides
-it by the window's scale factor (WebKitGTK's pixel ratio follows the X
-resolution, the window's scale does not), rounds it up to whole points, clamps it to the screen's work area and sizes the window from it
-(a report that is not a size is `invalidParams`). The prompt's X and that
-size report are the only two things `panel_call` carries; everything else
-the panels do goes through the bridge (`recording.stop`,
+the host raises it, so the page remounts and the countdown restarts; the X
+sends that number back and dismisses only its own prompt. The page
+measures its pill and reports the size in device pixels through the
+`panel_call` command; the shell divides it by the window's scale factor
+(WebKitGTK's pixel ratio follows the X resolution, the window's scale does
+not), rounds it up to whole points, clamps it to the screen's work area
+and sizes the window from it, on the main thread so quick reports apply
+in order (a report that is not a size is `invalidParams`). The prompt's X
+and that size report are the only two things `panel_call` carries;
+everything else the panels do goes through the bridge (`recording.stop`,
 `recording.keepGoing`, `recording.start`, `window.open`). The host raises
-and clears the prompt through `panels::set_prompt` (WP6b wires the
-detection controller).
+and clears the prompt through `panels::set_prompt` and hears of its X
+through `panels::dismiss_prompt` (WP6b wires the detection controller to
+both).
 
 On a Wayland session the shell runs under XWayland. GTK 3 on Wayland can
 neither place a window nor keep it above the others, and it reports no
@@ -90,7 +93,8 @@ replies `{}` and the host hears nothing.
 
 Deep links: the Swift Mac app registers no scheme (`steno://pair/…` is the
 iPhone's, the link the pairing QR code doubles as), so the scheme is new
-here. `steno://meeting/<uuid>` opens the main window on the meeting,
+here. `steno://meeting/<uuid>` opens the main window on the meeting (the
+host selects it; until WP6b the fixture host only brings main forward),
 `steno://settings[/<section>]` opens Settings on the section; scheme and
 host read in any case, the section as the contract spells it; a pairing
 link is logged and ignored. A link that reaches a window before its page
@@ -99,8 +103,10 @@ the page's `page.ready`.
 
 ## Run
 
-`cargo tauri dev` from `apps/desktop/src-tauri` (the `@tauri-apps/cli` or
-`cargo install tauri-cli`) starts the Vite dev server and the shell together.
+`cargo tauri dev` from `apps/desktop/src-tauri` (`pnpm dlx
+@tauri-apps/cli@2.12.1 dev`, the version the workflows pin, or `cargo
+install tauri-cli --version 2.12.1`) starts the Vite dev server and the
+shell together.
 Without the CLI, start the dev server yourself and build the shell:
 
 ```sh
@@ -117,7 +123,8 @@ dev server on 5173), whatever the profile; that is Tauri's dev build. Set
 ## Build
 
 The embedded bundle is what ships. Build the web UI first, then the shell
-with the feature, which `cargo tauri build` turns on by itself:
+with the feature, which `cargo tauri build` (CLI 2.12.1, as above) turns
+on by itself:
 
 ```sh
 pnpm --dir apps/macos/web install --frozen-lockfile && pnpm --dir apps/macos/web build
@@ -145,8 +152,8 @@ adds the tray's library only when it sees the `tray-icon` feature on a
 crate-local `tauri` dependency, and ours is inherited from the workspace.
 For the same reason the AppImage does not bundle that library; a host
 without it runs the shell without a tray, and closing the main window
-then quits (see above). The icons in `icons/`
-come from `cargo tauri icon` over the Swift app icon
+then quits (see above). The icons in `icons/` come from `cargo tauri
+icon` over the Swift app icon
 (`apps/macos/Steno/Resources/Assets.xcassets/AppIcon.appiconset/icon_512x512@2x.png`),
 the tray's template mark in `icons/tray/` is drawn by hand. The identifier
 stays `uno.schmid.steno.desktop` so the shell installs beside the Swift
@@ -195,9 +202,9 @@ mounts, when the main window hides on close and when the process ends,
 the login item states, the update lanes, the permission panes per OS,
 the `steno:` link grammar and its case rules, the Linux desktop entry,
 and the folder choosers' replies. `cargo test -p steno-desktop
---no-default-features` runs the same without the fixture host. In the web app, `tauri-transport.test.ts`
-covers the page's half of the wire and `src/windows/panels/*.test.tsx` the
-two panels.
+--no-default-features` runs the same without the fixture host. In the web
+app, `tauri-transport.test.ts` covers the page's half of the wire and
+`src/windows/panels/*.test.tsx` the two panels.
 
 ## Smoke
 
@@ -282,29 +289,31 @@ Nothing beyond the Rust toolchain. WebView2 ships with Windows 11; the
 | `apps/desktop/src-tauri/src/navigation.rs` | Navigation policy: the app origin and, in a dev build, the Vite dev server; everything else is cancelled |
 | `apps/desktop/src-tauri/src/smoke.rs`, `apps/desktop/scripts/smoke-linux.sh` | The headless smoke CI runs under Xvfb |
 | `apps/desktop/src-tauri/capabilities/default.json`, `panels.json` | `core:event:allow-listen` and `allow-unlisten` for the three windows, the one core IPC the page uses; the panels get the same plus `core:window:allow-start-dragging` for `data-tauri-drag-region`; `bridge_call` and `panel_call` are app commands and native capabilities are reached through them |
-| `.github/workflows/desktop-release.yml` | Manual trigger: the six bundles on the three platforms as workflow artifacts, unsigned (WP9 signs, notarises and publishes) |
+| `.github/workflows/desktop-release.yml`, `apps/desktop/scripts/release-matrix.sh` | Manual trigger: the six bundles on the three platforms as workflow artifacts, unsigned (WP9 signs, notarises and publishes); the `platforms` input is filtered by `release-matrix.sh` (tested in Rust CI by `release-matrix.test.sh`) |
 
 ## Not here yet
 
 Signing, notarisation, the GitHub release and the updater manifests are
 WP9, as is `cargo deny`; the release workflow stops at unsigned bundles.
 The host's half of the WP8 seams is WP6b: the detection controller raising
-the prompt (`panels::set_prompt`), the General snapshot reading
+the prompt (`panels::set_prompt`) and hearing of its dismissal
+(`panels::dismiss_prompt`), the General snapshot reading
 `autostart::status` and `Updates::last`, the onboarding and Settings
 permission rows calling `permissions::state` and `request`, the folder
 choice arriving as `{ "path": … }`, the reveal methods calling
-`dialogs::reveal`. The host may treat the main window as
-always present: a close hides it, so publishing to it never fails for want
-of a window. Launch at login is a Launch Agent, not `SMAppService`; WP9
-has to retire the Swift registration at cutover so the user does not get
-two login items (the plan's parity list). The macOS menu bar has no
-Record menu yet (`⌘⇧R` and Record In Person are the tray's and the
-sidebar's), and no Find Meetings (`⌘F`). Updates are checked only when
-asked (the tray's item, Settings), where Sparkle checks daily on its own. On macOS the system audio permission has no status API; the
-audio crate's probe (WP5) records it and until then it reads `unknown`.
-The panels are re-tuned on the Mac once they run there beside the Swift
-ones (the plan's risk list). Linux and Windows keep their native title
-bar; macOS gets the overlay title bar the Swift windows have. The page's
+`dialogs::reveal`. The host may treat the main window as always present: a
+close hides it, or ends the process when no tray stands, so publishing to
+it never fails for want of a window. Launch at login is a Launch Agent,
+not `SMAppService`; WP9 has to retire the Swift registration at cutover so
+the user does not get two login items (the plan's parity list). The macOS
+menu bar has no Record menu yet (`⌘⇧R` and Record In Person are the tray's
+and the sidebar's), and no Find Meetings (`⌘F`). Updates are checked only
+when asked (the tray's item, Settings), where Sparkle checks daily on its
+own. On macOS the system audio permission has no status API; the audio
+crate's probe (WP5) records it and until then it reads `unknown`. The
+panels are re-tuned on the Mac once they run there beside the Swift ones
+(the plan's risk list). Linux and Windows keep their native title bar;
+macOS gets the overlay title bar the Swift windows have. The page's
 traffic light inset is a design question for the other two platforms. On
 Linux, WebKitGTK leaks one shared-memory file descriptor per destroyed
 webview that lived longer than about 250 ms (29 to 107 fds over 70
@@ -312,5 +321,6 @@ Settings open/close cycles; wry/WebKitGTK level, not the shell), so long
 sessions with many Settings opens should be watched until
 [#160](https://github.com/NicolaiSchmid/steno/issues/160) is resolved. On
 Linux a panel keeps a 5 px resize border that Tauri gives every
-undecorated resizable window; a press there starts a resize the pinned
-size refuses, so it does nothing.
+undecorated resizable window. The pinned size holds, but the border shows
+a resize cursor and swallows a press, so a drag that starts on the outer
+5 px does not move the panel; no control sits there.
