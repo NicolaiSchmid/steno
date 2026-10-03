@@ -112,6 +112,10 @@ ort = { version = "=2.0.0-rc.13", default-features = false, features = ["std", "
 realfft = "3"
 ureq = { version = "3", default-features = false, features = ["rustls", "gzip"] }
 whatlang = "0.18"
+# Speech sidecar (WP4c): the child's own resident set, which its heartbeat
+# reports so the parent can enforce the memory ceiling (`/proc/self/statm`,
+# mach and psapi underneath; no unsafe of ours).
+memory-stats = "1"
 # The handover listener: TLS (rustls, the LLM line above, on ring; TLS 1.3
 # only is set in code; aws-lc-rs needs cmake and NASM on Windows), the
 # minted identity (rcgen, time), HTTP/1.1, Bonjour, the pairing secrets
