@@ -2,9 +2,10 @@
 //! `Analysis` every later stage works from, so a threshold sweep re-runs
 //! only the clustering.
 
-use crate::backend::{BackendError, SegmentationGeometry, TensorBackend, to_f64};
+use crate::backend::{BackendError, SegmentationGeometry, TensorBackend};
 use crate::error::DiarizeError;
 use crate::segmentation::{self, Window, WindowActivity};
+use crate::to_f64;
 
 /// How much of a local speaker is needed before a window embeds them, as
 /// `FluidAudio`'s `Embedding.community` and its `OfflineEmbeddingExtractor`

@@ -7,7 +7,7 @@ use common::{SplitMix64, chunk, range, turn, vector};
 use steno_core::{ClusterChunk, Embedding, SpeakerTurn};
 use steno_diarize::mapping::{
     CLIP_MINIMUM_SECONDS, CLIP_TARGET_SECONDS, ClipChoice, assigning_quality, cluster_embedding,
-    merged, pick_clip, result,
+    mean_quality, merged, pick_clip, result,
 };
 
 fn c(label: &str, start: f64, end: f64, axis: usize) -> ClusterChunk {
@@ -405,4 +405,57 @@ fn empty_input_gives_no_clusters() {
         merged(&[range(3.0, 4.0), range(0.0, 1.0), range(1.0, 2.0)]),
         vec![range(0.0, 2.0), range(3.0, 4.0)]
     );
+}
+
+/// Two ranges of one length and two chunks of one quality and duration:
+/// the earlier range and the earlier chunk win, as Swift's `max(by:)`
+/// returns the first maximum (Rust's `max_by` the last).
+#[test]
+fn ties_go_to_the_first_range_and_the_first_chunk() {
+    let ranges = [range(0.0, 20.0), range(30.0, 50.0)];
+    let chunks = [
+        chunk("S1", 2.0, 4.0, 0, 0.9, 1.0),
+        chunk("S1", 14.0, 16.0, 0, 0.9, 1.0),
+        chunk("S1", 40.0, 42.0, 0, 0.9, 1.0),
+    ];
+    let clip = pick_clip(&ranges, &chunks).range.unwrap();
+    assert_eq!(
+        (clip.lower, clip.upper),
+        (0.0, 10.0),
+        "around the 2...4 chunk"
+    );
+    // A chunk overlapping two turns of its speaker equally takes the
+    // first turn's quality.
+    let turns = [t("S1", 0.0, 10.0), t("S1", 10.0, 20.0)];
+    let turns = [
+        SpeakerTurn {
+            quality: 0.25,
+            ..turns[0].clone()
+        },
+        SpeakerTurn {
+            quality: 0.75,
+            ..turns[1].clone()
+        },
+    ];
+    let scored = assigning_quality(&[c("S1", 5.0, 15.0, 0)], &turns);
+    assert!((scored[0].quality - 0.25).abs() < 1e-6);
+}
+
+/// A chunk with a non-finite vector or quality does not reach the cluster
+/// embedding or the confidence.
+#[test]
+fn non_finite_chunks_are_left_out() {
+    let mut poisoned = c("S1", 0.0, 5.0, 0);
+    poisoned.embedding[3] = f32::NAN;
+    let sound = c("S1", 5.0, 10.0, 1);
+    let embedding = cluster_embedding(&[poisoned.clone(), sound.clone()]).unwrap();
+    assert!(embedding.0.iter().all(|value| value.is_finite()));
+    assert!(embedding.0[1] > 0.99);
+    assert!(cluster_embedding(&[poisoned.clone()]).is_none());
+    let unscored = ClusterChunk {
+        quality: f32::NAN,
+        ..sound.clone()
+    };
+    assert!((mean_quality(&[unscored.clone(), sound]) - 0.9).abs() < 1e-6);
+    assert_eq!(mean_quality(&[unscored]), 0.0);
 }

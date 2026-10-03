@@ -3,11 +3,12 @@
 
 use steno_core::{AudioBuffer16k, BoxError, ClusterChunk, DiarizationResult, Embedding};
 
-use crate::backend::{TensorBackend, to_f64};
+use crate::backend::TensorBackend;
 use crate::clustering::{self, ClusteringConfig};
 use crate::error::DiarizeError;
 use crate::extraction::{self, Analysis, ExtractionRules};
 use crate::refinement::{self, Rules, SliceEmbedder};
+use crate::to_f64;
 use crate::{mapping, timeline};
 
 /// The clustering knobs and whether the refinement pass runs, Steno's

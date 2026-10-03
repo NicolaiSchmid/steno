@@ -19,6 +19,7 @@
 
 use steno_core::{AudioBuffer16k, BoxError, Embedding, SpeakerCluster, TimeRange};
 
+use crate::first_max_by;
 use crate::mapping::{merged, speech_seconds};
 
 /// Embeds one stretch of speech as a single speaker. The pipeline fulfils
@@ -192,19 +193,19 @@ fn closest_pair(clusters: &[SpeakerCluster]) -> Option<(usize, usize, f32)> {
     best
 }
 
-/// The cluster whose embedding is closest to `embedding`, with the cosine;
-/// `None` when none carries an embedding.
+/// The cluster whose embedding is closest to `embedding`, with the cosine,
+/// the first on a tie as Swift's `max(by:)` picks it; `None` when none
+/// carries an embedding.
 fn closest(embedding: &Embedding, clusters: &[SpeakerCluster]) -> Option<(usize, f32)> {
-    clusters
-        .iter()
-        .enumerate()
-        .filter_map(|(index, cluster)| {
+    first_max_by(
+        clusters.iter().enumerate().filter_map(|(index, cluster)| {
             cluster
                 .embedding
                 .as_ref()
                 .map(|candidate| (index, candidate.cosine_similarity(embedding)))
-        })
-        .max_by(|lhs, rhs| lhs.1.total_cmp(&rhs.1))
+        }),
+        |lhs, rhs| lhs.1.total_cmp(&rhs.1),
+    )
 }
 
 /// One cluster from two: ranges merged; clip, confidence and, until the

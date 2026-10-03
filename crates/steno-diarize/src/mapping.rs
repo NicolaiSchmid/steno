@@ -16,6 +16,8 @@ use steno_core::{
     ClusterChunk, DiarizationResult, Embedding, SpeakerCluster, SpeakerTurn, TimeRange,
 };
 
+use crate::first_max_by;
+
 /// Chunks arrive without a quality; each takes the quality of the turn it
 /// overlaps most first.
 #[must_use]
@@ -103,10 +105,12 @@ pub fn assigning_quality(chunks: &[ClusterChunk], turns: &[SpeakerTurn]) -> Vec<
     chunks
         .iter()
         .map(|chunk| {
-            let best = turns
-                .iter()
-                .filter(|turn| turn.speaker_label == chunk.speaker_label)
-                .max_by(|lhs, rhs| overlap(lhs, chunk).total_cmp(&overlap(rhs, chunk)));
+            let best = first_max_by(
+                turns
+                    .iter()
+                    .filter(|turn| turn.speaker_label == chunk.speaker_label),
+                |lhs, rhs| overlap(lhs, chunk).total_cmp(&overlap(rhs, chunk)),
+            );
             let quality = best.map_or(1.0, |turn| {
                 if overlap(turn, chunk) > 0.0 {
                     turn.quality
@@ -130,15 +134,17 @@ fn overlap(turn: &SpeakerTurn, chunk: &ClusterChunk) -> f64 {
 /// unit length, summed with its duration as weight, then L2-normalised.
 /// Normalising first means a few high-norm windows (crosstalk, music,
 /// clipping) cannot steer the mean. `None` without a usable chunk; chunks
-/// of another dimension or zero duration are skipped.
+/// of another dimension, of zero duration or with a non-finite value
+/// (the backends reject those, so a defence) are skipped.
 #[must_use]
 pub fn cluster_embedding(chunks: &[ClusterChunk]) -> Option<Embedding> {
     let mut sum = vec![0.0f32; Embedding::DIMENSION];
     let mut usable = false;
-    for chunk in chunks
-        .iter()
-        .filter(|chunk| chunk.embedding.len() == Embedding::DIMENSION && chunk.duration() > 0.0)
-    {
+    for chunk in chunks.iter().filter(|chunk| {
+        chunk.embedding.len() == Embedding::DIMENSION
+            && chunk.duration() > 0.0
+            && chunk.embedding.iter().all(|value| value.is_finite())
+    }) {
         let unit = Embedding(chunk.embedding.clone()).normalized();
         // Durations are seconds; f32 holds them to the microsecond.
         #[allow(clippy::cast_possible_truncation)]
@@ -167,14 +173,13 @@ pub struct ClipChoice {
 
 /// The longest contiguous range of the cluster, capped to
 /// [`CLIP_TARGET_SECONDS`] and centred on the highest-quality chunk inside
-/// it. Confidence is the duration-weighted mean chunk quality, halved when
-/// the longest range is under [`CLIP_MINIMUM_SECONDS`].
+/// it; on a tie the earlier range and the earlier chunk, as Swift's
+/// `max(by:)` picks them. Confidence is the duration-weighted mean chunk
+/// quality, halved when the longest range is under
+/// [`CLIP_MINIMUM_SECONDS`].
 #[must_use]
 pub fn pick_clip(ranges: &[TimeRange], chunks: &[ClusterChunk]) -> ClipChoice {
-    let Some(longest) = ranges
-        .iter()
-        .max_by(|lhs, rhs| length(lhs).total_cmp(&length(rhs)))
-    else {
+    let Some(longest) = first_max_by(ranges, |lhs, rhs| length(lhs).total_cmp(&length(rhs))) else {
         return ClipChoice {
             range: None,
             cluster_confidence: 0.0,
@@ -185,14 +190,16 @@ pub fn pick_clip(ranges: &[TimeRange], chunks: &[ClusterChunk]) -> ClipChoice {
         confidence /= 2.0;
     }
     let clip_length = CLIP_TARGET_SECONDS.min(length(longest));
-    let best = chunks
-        .iter()
-        .filter(|chunk| overlaps(&chunk.range(), longest))
-        .max_by(|lhs, rhs| {
+    let best = first_max_by(
+        chunks
+            .iter()
+            .filter(|chunk| overlaps(&chunk.range(), longest)),
+        |lhs, rhs| {
             lhs.quality
                 .total_cmp(&rhs.quality)
                 .then(lhs.duration().total_cmp(&rhs.duration()))
-        });
+        },
+    );
     let centre = match best {
         Some(chunk) => f64::midpoint(chunk.start.max(longest.lower), chunk.end.min(longest.upper)),
         None => f64::midpoint(longest.lower, longest.upper),
@@ -209,15 +216,16 @@ pub fn pick_clip(ranges: &[TimeRange], chunks: &[ClusterChunk]) -> ClipChoice {
     }
 }
 
-/// Duration-weighted mean chunk quality in `0...1`; zero without duration.
+/// Duration-weighted mean chunk quality in `0...1`; zero without
+/// duration. A chunk with a non-finite quality does not count.
 #[must_use]
 pub fn mean_quality(chunks: &[ClusterChunk]) -> f32 {
-    let total: f64 = chunks.iter().map(ClusterChunk::duration).sum();
+    let scored = || chunks.iter().filter(|chunk| chunk.quality.is_finite());
+    let total: f64 = scored().map(ClusterChunk::duration).sum();
     if total <= 0.0 {
         return 0.0;
     }
-    let weighted: f64 = chunks
-        .iter()
+    let weighted: f64 = scored()
         .map(|chunk| f64::from(chunk.quality) * chunk.duration())
         .sum();
     // Clamped to 0...1 before narrowing.

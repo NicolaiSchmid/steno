@@ -418,3 +418,36 @@ fn ranges_beyond_the_buffer_are_not_embedded() {
     assert_eq!(refined, clusters.to_vec());
     assert_eq!(embedder.embedded_durations.len(), 0);
 }
+
+/// A fragment equally close to two speakers joins the first of them, as
+/// Swift's `max(by:)` returns the first maximum.
+#[test]
+fn a_fragment_tied_between_two_speakers_joins_the_first() {
+    let anna = [range(0.0, 60.0)];
+    let ben = [range(70.0, 130.0)];
+    let aside = [range(140.0, 150.0)];
+    let buffer = audio(
+        &[
+            (1.0, anna[0]),
+            (2.0, ben[0]),
+            (1.0, range(140.0, 145.0)),
+            (2.0, range(145.0, 150.0)),
+        ],
+        160.0,
+    );
+    let (refined, _) = run(
+        &[
+            c("Speaker 1", &anna, 1),
+            c("Speaker 2", &ben, 2),
+            c("Speaker 3", &aside, 3),
+        ],
+        &buffer,
+        &Rules::default(),
+    );
+    assert_eq!(labels(&refined), ["Speaker 1", "Speaker 2"]);
+    assert_eq!(
+        refined[0].ranges,
+        vec![range(0.0, 60.0), range(140.0, 150.0)]
+    );
+    assert_eq!(refined[1].ranges, ben.to_vec());
+}

@@ -9,9 +9,9 @@
 
 use steno_core::SpeakerTurn;
 
-use crate::backend::to_f64;
 use crate::extraction::Analysis;
 use crate::segmentation::frame_span;
+use crate::to_f64;
 
 /// `FluidAudio`'s `PostProcessing.community` and `Embedding.community`:
 /// gaps up to 0.1 s between turns of one speaker close; turns under one

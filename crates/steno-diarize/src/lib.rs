@@ -59,3 +59,22 @@ pub use diarizer::{BackendLoader, ModelDiarizer};
 pub use error::DiarizeError;
 pub use models::ModelStore;
 pub use pipeline::{DEFAULT_CLUSTERING_THRESHOLD, DiarizerConfig, Pipeline};
+
+/// Exact for every count below 2^53, far beyond any sample count.
+#[allow(clippy::cast_precision_loss)]
+pub(crate) fn to_f64(count: usize) -> f64 {
+    count as f64
+}
+
+/// The first of the greatest items under `compare`, as Swift's `max(by:)`
+/// and `argmax` pick it; the standard library's `max_by` returns the last,
+/// which would clip, absorb or decode differently from the Swift code on
+/// a tie.
+pub(crate) fn first_max_by<T>(
+    items: impl IntoIterator<Item = T>,
+    mut compare: impl FnMut(&T, &T) -> std::cmp::Ordering,
+) -> Option<T> {
+    // `min_by` keeps the first of equal items; comparing reversed makes
+    // the greatest the minimum.
+    items.into_iter().min_by(|lhs, rhs| compare(rhs, lhs))
+}

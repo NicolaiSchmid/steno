@@ -8,10 +8,11 @@ use std::path::Path;
 use ort::session::Session;
 use ort::value::Tensor;
 
-use crate::backend::{BackendError, SegmentationGeometry, TensorBackend, to_f64};
+use crate::backend::{BackendError, SegmentationGeometry, TensorBackend};
 use crate::error::DiarizeError;
 use crate::fbank::{Fbank, FbankConfig};
 use crate::models::{ModelStore, PYANNOTE_SEGMENTATION_3_0, WESPEAKER_RESNET34_LM};
+use crate::to_f64;
 
 /// Fbank frames the embedding model is given at least; under that the
 /// window's speaker is skipped (a quarter of a second).

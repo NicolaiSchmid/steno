@@ -1,5 +1,7 @@
 //! The two tensor calls the pipeline needs and what their frames mean.
 
+use crate::to_f64;
+
 /// Any error a backend raises; printed for the user.
 pub type BackendError = Box<dyn std::error::Error + Send + Sync + 'static>;
 
@@ -113,12 +115,6 @@ impl<B: TensorBackend + ?Sized> TensorBackend for Box<B> {
     fn embed(&mut self, window: &[f32], weights: &[f32]) -> Result<Option<Vec<f32>>, BackendError> {
         (**self).embed(window, weights)
     }
-}
-
-/// Exact for every count below 2^53, far beyond any sample count.
-#[allow(clippy::cast_precision_loss)]
-pub(crate) fn to_f64(count: usize) -> f64 {
-    count as f64
 }
 
 #[cfg(test)]

@@ -2,6 +2,7 @@
 //! output as per-frame speaker activity.
 
 use crate::backend::SegmentationGeometry;
+use crate::first_max_by;
 
 /// One window handed to the segmentation and embedding models.
 #[derive(Debug, Clone, PartialEq)]
@@ -126,19 +127,17 @@ impl WindowActivity {
     }
 }
 
-/// Hard argmax per frame over the powerset classes, then the class's
-/// speaker mask, as pyannote and sherpa-onnx decode it. `logits` holds
-/// `num_classes` values per frame; frames past `valid_frames` are dropped.
+/// Hard argmax per frame over the powerset classes (the first on a tie,
+/// as `argmax` has it), then the class's speaker mask, as pyannote and
+/// sherpa-onnx decode it. `logits` holds `num_classes` values per frame;
+/// frames past `valid_frames` are dropped.
 #[must_use]
 pub fn decode(logits: &[f32], classes: &[u8], num_classes: usize, valid_frames: usize) -> Vec<u8> {
     logits
         .chunks_exact(num_classes)
         .take(valid_frames)
         .map(|row| {
-            let best = row
-                .iter()
-                .enumerate()
-                .max_by(|lhs, rhs| lhs.1.total_cmp(rhs.1))
+            let best = first_max_by(row.iter().enumerate(), |lhs, rhs| lhs.1.total_cmp(rhs.1))
                 .map_or(0, |(index, _)| index);
             classes.get(best).copied().unwrap_or(0)
         })
@@ -237,6 +236,11 @@ mod tests {
         .concat();
         let frames = decode(&logits, &classes, 7, 3);
         assert_eq!(frames, vec![0b000, 0b010, 0b101]);
+        // A tie goes to the first class, as `argmax` has it.
+        assert_eq!(
+            decode(&[0.0, 2.0, 2.0, 0.0, 0.0, 0.0, 0.0], &classes, 7, 1),
+            vec![0b001]
+        );
         let activity = WindowActivity {
             window: 0,
             offset: 0,

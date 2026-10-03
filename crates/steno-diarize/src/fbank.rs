@@ -14,7 +14,7 @@ use std::sync::Arc;
 use rustfft::num_complex::Complex;
 use rustfft::{Fft, FftPlanner};
 
-use crate::backend::to_f64;
+use crate::to_f64;
 
 /// The window applied to each frame before the FFT.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
