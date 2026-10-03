@@ -11,22 +11,10 @@ mod common;
 
 use std::sync::Arc;
 
-use common::{EngineDevice, TestService, chunks, seeded_bytes};
-use steno_core::Store;
+use common::{EngineDevice, TestService, chunks, execute_batch, seeded_bytes};
 use steno_handover::{HandoverService, wire};
 
 const CHUNK_SIZE: i64 = 64 * 1024;
-
-fn shadow_the_receipts(store: &Store, shadowed: bool) {
-    let sql = if shadowed {
-        "CREATE TEMP TABLE handoverReceipt (unreadable INTEGER)"
-    } else {
-        "DROP TABLE temp.handoverReceipt"
-    };
-    store
-        .write(|transaction| Ok(transaction.execute_batch(sql)?))
-        .unwrap();
-}
 
 #[tokio::test]
 async fn a_failed_receipt_read_keeps_the_upload_and_answers_500() {
@@ -60,7 +48,10 @@ async fn a_failed_receipt_read_keeps_the_upload_and_answers_500() {
         first.service.identity.clone(),
         first.clock.clock(),
     ));
-    shadow_the_receipts(&first.store, true);
+    execute_batch(
+        &first.store,
+        "CREATE TEMP TABLE handoverReceipt (unreadable INTEGER)",
+    );
     second.engine.sweep_orphans().await;
     let inbox = &second.engine.inbox;
     assert!(inbox.has_partial(id), "the resumable upload is kept");
@@ -77,7 +68,7 @@ async fn a_failed_receipt_read_keeps_the_upload_and_answers_500() {
     assert!(inbox.has_partial(id), "no route touched the partial");
 
     // Once the store reads again, the upload resumes where it stood.
-    shadow_the_receipts(&first.store, false);
+    execute_batch(&first.store, "DROP TABLE temp.handoverReceipt");
     let status = resumed.status(id).await;
     assert_eq!(status.status.as_u16(), 200);
     assert_eq!(

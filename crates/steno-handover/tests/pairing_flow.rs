@@ -275,24 +275,17 @@ async fn a_failed_device_save_reopens_the_window_for_the_same_secret() {
         ..common::Options::default()
     })
     .await;
-    let refuse = |refused: bool| {
-        let sql = if refused {
-            "CREATE TEMP TRIGGER refuse_pairing BEFORE INSERT ON pairedDevice \
-             BEGIN SELECT RAISE(ABORT, 'refused'); END"
-        } else {
-            "DROP TRIGGER temp.refuse_pairing"
-        };
-        test.store
-            .write(|transaction| Ok(transaction.execute_batch(sql)?))
-            .unwrap();
-    };
     let _ = test.service.begin_pairing();
-    refuse(true);
+    common::execute_batch(
+        &test.store,
+        "CREATE TEMP TRIGGER refuse_pairing BEFORE INSERT ON pairedDevice \
+         BEGIN SELECT RAISE(ABORT, 'refused'); END",
+    );
     let failed = common::engine_pair(&test, Uuid::new_v4(), "iPhone").await;
     assert_eq!(failed.status.as_u16(), 500);
     assert!(test.service.engine.pairing_is_open(), "the window is back");
 
-    refuse(false);
+    common::execute_batch(&test.store, "DROP TRIGGER temp.refuse_pairing");
     let id = Uuid::new_v4();
     let paired = common::engine_pair(&test, id, "iPhone").await;
     assert_eq!(paired.status.as_u16(), 200);

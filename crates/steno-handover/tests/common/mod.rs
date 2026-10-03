@@ -75,6 +75,14 @@ pub fn fake_intake(meeting_id: Uuid) -> Arc<FakeHandoverIntake> {
     })
 }
 
+/// Runs `sql` on the store's connection; the tests make a store write or
+/// read fail with a temporary trigger or table.
+pub fn execute_batch(store: &Store, sql: &str) {
+    store
+        .write(|transaction| Ok(transaction.execute_batch(sql)?))
+        .unwrap();
+}
+
 /// A `HandoverIntake` that fails the first `failures` admissions and then
 /// returns `meeting_id`: the pipeline refusing a file once. `delay` holds
 /// each admission open, the way the real intake's copy of a large file
