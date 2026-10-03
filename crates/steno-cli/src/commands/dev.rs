@@ -555,7 +555,7 @@ impl Bakeoff {
         for engine in &self.engines {
             if !crate::wiring::ENGINE_IDS.contains(&engine.as_str()) {
                 return Err(Failure::usage(format!(
-                    "error: invalid value '{engine}' for '--engines': expected one of {}",
+                    "invalid value '{engine}' for '--engines': expected one of {}",
                     crate::wiring::ENGINE_IDS.join(", ")
                 )));
             }

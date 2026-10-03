@@ -7,12 +7,13 @@ use std::sync::Arc;
 use chrono::{DateTime, Utc};
 use steno_core::{Store, StoreError, paths::path_from_file_url};
 
-/// Every file the sweep could not remove, with the reason.
+/// Why a sweep stopped short: files it could not remove, or a store read
+/// that failed.
 #[derive(Debug, thiserror::Error)]
 pub enum SweepIncomplete {
     #[error("retention sweep could not remove {}", listed(.0))]
     Files(Vec<(PathBuf, std::io::Error)>),
-    #[error("{0}")]
+    #[error(transparent)]
     Store(#[from] StoreError),
 }
 

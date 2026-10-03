@@ -141,7 +141,7 @@ mod tests {
     }
 
     #[test]
-    fn samples_are_recorded_only_when_alone_and_learned() {
+    fn samples_are_recorded_only_when_the_run_was_alone() {
         let mut run = run();
         let now = Utc::now();
         assert!(

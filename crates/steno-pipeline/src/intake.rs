@@ -1,8 +1,8 @@
 //! The two recording intakes: the phone's (`RecordingIntake`, core's
 //! `HandoverIntake`) and the Mac's (`LocalRecordingIntake`). Every rule
 //! about the rows lives here so the app, the CLI and the handover service
-//! share one spelling. Swift: `Storage/RecordingIntake.swift` and
-//! `Storage/LocalRecordingIntake.swift`.
+//! share one spelling. Swift: `Sources/StenoCore/Storage/RecordingIntake.swift`
+//! and `Sources/StenoCore/Storage/LocalRecordingIntake.swift`.
 
 use std::future::Future;
 use std::path::Path;
@@ -208,7 +208,7 @@ pub enum LocalRecordingIntakeError {
     NotRecording(Uuid, MeetingStateKind),
     #[error(transparent)]
     Store(#[from] StoreError),
-    #[error("{0}")]
+    #[error(transparent)]
     Pipeline(#[from] PipelineFailure),
 }
 

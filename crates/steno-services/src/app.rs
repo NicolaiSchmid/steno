@@ -230,7 +230,7 @@ fn handover_listener(
 /// sidecar lands), ONNX diarizer, cosine speaker memory over the store,
 /// LLM passes, delivery coordinator, handover listener, capture session,
 /// recorder, the speech models, folder usage, preferences. Fakes until the shell
-/// draws their platform side (plan: WP8): permissions (all granted), login
+/// draws their platform side (plan: `WP8`): permissions (all granted), login
 /// item, updater, clip player, QR encoder; the audio device list is empty
 /// off the Mac until the `PipeWire` and WASAPI backends enumerate devices.
 pub fn build(options: AppOptions) -> Result<App, BuildError> {

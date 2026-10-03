@@ -1,7 +1,7 @@
 //! The host's `Recorder` over the capture session and the Mac recording
 //! intake. Swift: `apps/macos/Steno/Recording/RecordingController.swift`.
 //! The calendar lookup, the auto-stop after a call ends and the detection
-//! prompt wait for the shell's platform work (plan: WP8); the status
+//! prompt wait for the shell's platform work (plan: `WP8`); the status
 //! carries what the capture session reports.
 
 use std::sync::{Arc, Mutex};

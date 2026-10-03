@@ -75,7 +75,7 @@ impl SpeechOptions {
     pub fn validate(&self) -> Result<(), Failure> {
         match &self.engine {
             Some(engine) if !ENGINE_IDS.contains(&engine.as_str()) => Err(Failure::usage(format!(
-                "error: invalid value '{engine}' for '--engine <engine>': expected one of {}",
+                "invalid value '{engine}' for '--engine <engine>': expected one of {}",
                 ENGINE_IDS.join(", ")
             ))),
             _ => Ok(()),

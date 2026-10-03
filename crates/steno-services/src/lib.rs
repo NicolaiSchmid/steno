@@ -20,7 +20,7 @@
 //!
 //! What stays a fake here is named in [`build`]'s doc: the shell's
 //! platform services (permissions, login item, updater, clip player, QR
-//! encoder) wait for the plan's WP8; the speech sidecar process is `WP4c`'s,
+//! encoder) wait for the plan's `WP8`; the speech sidecar process is `WP4c`'s,
 //! so ONNX inference runs in this process until it lands.
 //!
 //! Secrets live in the platform keyring on macOS (the Keychain) and on
@@ -30,7 +30,7 @@
 //! keyring, which does not survive a reboot (the handover identity and the
 //! LLM API key would vanish), and its Secret Service store needs D-Bus and
 //! a running secret service, which headless machines and the CI runners
-//! do not have. The Secret Service is WP8's Linux release item.
+//! do not have. The Secret Service is `WP8`'s Linux release item.
 //!
 //! The shell's launch, in one piece:
 //!
