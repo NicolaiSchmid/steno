@@ -165,15 +165,13 @@ where
             .build()
             .expect("a current-thread runtime builds without I/O or time")
     });
+    let run = || runtime.block_on(future);
     if tokio::runtime::Handle::try_current().is_err() {
-        return runtime.block_on(future);
-    }
-    thread::scope(|scope| {
-        scope
-            .spawn(|| runtime.block_on(future))
-            .join()
+        run()
+    } else {
+        thread::scope(|scope| scope.spawn(run).join())
             .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
-    })
+    }
 }
 
 /// The view models and the controller state behind the host's mutex.
