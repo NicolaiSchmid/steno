@@ -742,7 +742,9 @@ async fn a_refresh_that_cannot_connect_names_the_cause() {
 
 /// A rename that fails (here `auth.json` became a non-empty directory
 /// during the round trip) removes the temporary file, which holds live
-/// tokens.
+/// tokens, and so names no leftover file. A remove that fails as well
+/// cannot be provoked here: nothing runs between the write and the
+/// rename, and taking write access from the directory is ignored for root.
 #[cfg(unix)]
 #[tokio::test]
 async fn a_failed_rename_leaves_no_temporary_file() {
@@ -763,6 +765,8 @@ async fn a_failed_rename_leaves_no_temporary_file() {
     );
     let entries = file_names(home.directory.path());
     assert_eq!(entries, ["auth.json"], "no temporary file is left");
+    let detail = error.detail().unwrap();
+    assert!(!detail.contains(".auth.json.steno-"), "{detail}");
 }
 
 /// What the CLI wrote during the round trip survives the write-back.

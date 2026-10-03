@@ -682,10 +682,17 @@ impl CodexCredentialStore {
             ));
         }
         if let Err(error) = std::fs::rename(&temporary, self.file_path()) {
-            let _ = std::fs::remove_file(&temporary);
-            return Err(CodexCredentialError::RefreshFailed(format!(
-                "could not replace the sign-in file: {error}"
-            )));
+            // The posted refresh token is spent by now, so a temporary file
+            // that stays behind holds the only live tokens: name it, never
+            // what it holds.
+            let left = match std::fs::remove_file(&temporary) {
+                Err(left) if left.kind() != std::io::ErrorKind::NotFound => {
+                    format!("; the new sign-in is left in {}", temporary.display())
+                }
+                _ => String::new(),
+            };
+            let detail = format!("could not replace the sign-in file: {error}{left}");
+            return Err(CodexCredentialError::RefreshFailed(detail));
         }
         Ok(())
     }
