@@ -335,7 +335,7 @@ impl Store {
     /// returns, so a power loss or OS crash can roll the delete back after
     /// the caller removed the files, as in the Swift app. A caller that needs
     /// the delete durable before removing the files must wait for a
-    /// checkpoint first.
+    /// checkpoint.
     pub fn delete_meeting(&self, id: Uuid) -> Result<DeletedMeeting> {
         self.write(|transaction| {
             let meeting = current(transaction, id)?;
