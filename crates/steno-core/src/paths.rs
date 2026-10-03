@@ -232,8 +232,9 @@ mod tests {
         assert_eq!(file_url_path("file://host-only"), None);
     }
 
-    /// The trailing-slash rule, in one place. #166 applies the same check
-    /// to the same bytes, so its Unix branch only changes the UTF-8 step.
+    /// The trailing-slash rule, in one place. #166 adopts the same rule;
+    /// whichever merges second keeps one spelling and the union of both
+    /// test sets.
     #[test]
     fn a_directory_loses_its_trailing_slash_as_url_path_does() {
         let dropped = |path: &[u8]| {
