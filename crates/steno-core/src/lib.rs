@@ -1,6 +1,6 @@
-//! Steno's core: the domain types, the SQLite store that shares its file
-//! with the Swift app, and the settings. Plan:
-//! `.plans/2026-10-02-rust-core-and-tauri-shell.md`.
+//! Steno's core: the domain types, the pluggable boundaries and their
+//! fakes, the SQLite store that shares its file with the Swift app, and
+//! the settings. Plan: `.plans/2026-10-02-rust-core-and-tauri-shell.md`.
 //!
 //! - [`model`]: the domain types, one module per Swift file in
 //!   `Sources/StenoCore/Model`, plus the value types the boundaries
@@ -12,7 +12,7 @@
 //!   with the async-trait decision documented once in its module doc.
 //! - [`store`]: the SQLite store and its migrations; [`store::convert`]
 //!   holds the column codecs a query outside the crate uses.
-//! - [`testing`] (feature `testing`): deterministic fakes for every
+//! - `testing` (feature `testing`): deterministic fakes for every
 //!   boundary, so the pipeline, the CLI and the shell test without models.
 //! - [`json`]: the `StenoJSON` convention and the date and UUID codecs.
 //! - [`string_enum`](mod@string_enum): the macro every Swift `String` enum is spelled with.
