@@ -21,8 +21,7 @@
 
 use std::sync::Arc;
 
-use steno_audio::capture::SplitStreamPlan;
-use steno_audio::capture::{ChannelRef, LaneSource, StreamLayout};
+use steno_audio::capture::{ChannelRef, LaneSource, SplitStreamPlan, StreamLayout};
 use steno_audio::realtime::{
     BufferView, FollowerLane, FrameRelay, LaneFrameSink, Packet, PacketRouter,
     ProcessingConfiguration, ProcessingThread, StreamBody, deliver,
