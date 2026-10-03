@@ -42,7 +42,7 @@ this plan starts is a parity item for the Rust side, tracked in the parity list 
    Runtime (`ort`) elsewhere. ONNX inference runs in a sidecar process; the Mac stays
    one process.
 5. **No allocation and no lock on the audio thread**, proven by the counting allocator
-   from `spikes/capture-rs/src/rt.rs` in a test build.
+   in `crates/steno-audio/src/testing/rt.rs` in a test build.
 6. **Scope stays the scope.** No new features in the port; a Rust behaviour that
    differs from Swift is a bug unless a plan says otherwise.
 
@@ -358,6 +358,89 @@ still has to draw the window side. `[ ]` is not ported yet.
   does; Foundation writes `Anna Müller.md` in NFD on APFS, which maps both to one
   file, but a vault synced to a normalisation-sensitive filesystem gets two files.
 
+### Audio
+
+What the audio crate (WP5a) does differently from `StenoAudio`, each a
+parity item until a plan says otherwise:
+
+- **Mixdown is 16 kHz mono Int16 WAV, not AAC.** There is no AAC encoder in
+  pure Rust; `SymphoniaAudioCodec::mixdown_format()` says `Wav16kInt16` so
+  the persist stage names `audio.wav` correctly. Options at cutover: ship a
+  small AAC encoder (`fdk-aac` is non-free; `ffmpeg` is too large), accept
+  WAV for the optional export, or encode through the platform (AudioToolbox
+  on the Mac, Media Foundation on Windows) behind a `cfg`.
+- **Whole-file decode.** The decoder reads a lane to one `Vec<f32>` at the
+  source rate before resampling; the AVFoundation codec converted in 32 768
+  frame chunks. A two-hour 48 kHz lane is 1.4 GB transiently. Chunk the
+  symphonia path before the Linux release.
+- **Resampling.** 48 kHz masters go through the writer's exact 3:1 FIR
+  with its group delay dropped, so the decode is zero-phase on the master's
+  time; other rates (the phone's 44.1 kHz) through a 64-tap, 128-phase
+  windowed sinc. The Swift codec used `AVAudioConverter` at maximum
+  quality; the two are not bit-identical. The 3:1 FIR is flat to 7 kHz;
+  the sinc, measured in `crates/steno-audio/tests/codec.rs` from 44.1 kHz,
+  is within 0.3 dB to 6 kHz and -1.3 dB at 6.5 kHz, with 12 kHz aliasing
+  below -50 dB. Accept at cutover or lengthen the sinc; a plan decides.
+- **The sidecar lags the master decode by one group delay.** The live
+  16 kHz sidecar is the same FIR run causally, so its onset sits 32 samples
+  (2 ms) after the master decode's; `decode` prefers the sidecar, so a
+  transcript's timestamps shift by 2 ms depending on which file was read.
+  Swift had the same relationship (causal sidecar writer, delay-compensated
+  `AVAudioConverter`); `tests/codec.rs` pins both onsets. Either compensate
+  the sidecar at cutover or accept 2 ms.
+- **AAC priming is not trimmed.** AVFoundation dropped the encoder's
+  priming samples; symphonia 0.5 trims them for MP3 (the LAME tag, with
+  `enable_gapless`, measured: onset at sample 2 of an ffmpeg encode) but
+  parses and ignores the MP4 edit list and does not read `iTunSMPB`, so an
+  AAC lane from the phone starts 1 024 samples at 44.1 kHz (23 ms) late
+  (measured on `Tests/Fixtures/audio/tone-440-44k1-500ms.m4a`; iOS
+  encoders prime 2 112). Fix at cutover: read the `elst` media time from
+  the container and drop it before resampling, or accept 23 to 48 ms.
+- **AAC-LC only.** AVFoundation also decoded HE-AAC; symphonia decodes
+  AAC-LC alone. The iOS recorder writes AAC-LC, so nothing is lost today; a
+  plan adds HE-AAC if an import needs it.
+- **A stop that waited can lose its turn.** Swift's actor runs a `stop()`
+  queued behind a writer failure's or a device loss's finalise right after
+  it. The Rust `stop()` waits on a condition variable, and a `start()` can
+  take the lock first; the stop then answers `InvalidState` and leaves the
+  new recording running, and its caller does not get the failed recording.
+- **`steno dev` tooling** (`capture-spike`, `aec-bench`, `audio-devices`)
+  is not ported; it arrives with the CLI in WP6.
+- **Call mode waits for an output client.** Swift and Rust both clock the
+  tap aggregate from the system output. Without the capture permission,
+  the IOProc runs only once another client opens the output
+  (`.plans/spikes/2026-10-01-spike-rust-capture.md`; `tests/live.rs`
+  skips). Whether a GUI session also loses its first seconds is
+  unchecked. Check on the Swift app before cutover; a plan decides any
+  remedy.
+
+Six Swift defects the port does not share; fix them in Swift if it ships
+another release, otherwise the cutover closes them:
+
+- `CaptureSession.finish()` should read the sink's ring overrun counts
+  before `sink.clear()`, as the Rust `finish()` does; today `clear()` zeroes
+  them first (`CaptureSession.swift`, the `clear()` before the
+  `droppedSamples` read), so `droppedFrames` never holds a ring overrun.
+- `CaptureSession` should count the silence a stop cut short in
+  `gapSeconds`, as the Rust session does; today a stop while the gap waits
+  for relay room leaves that silence in the master and reports 0.
+- `CaptureSession` should fail the stop with `writerFailed` when the master
+  is gone from disk at finalisation (the meeting folder deleted while
+  recording), as the Rust session does; an unlinked file still writes and
+  closes without an error.
+- `IOProcRunner.deliver` should take the callback's frame count from the
+  first source whose buffer carries frames, as the Rust `deliver` does;
+  today an unusable first buffer drops the whole callback, the other lanes
+  included.
+- `CaptureSession` should end `.failed(.writerFailed)` with the recording
+  when a write fails while `stop()` drains the relay, as the Rust session
+  does; today the `writerFailed` task runs after `stop()` and is ignored,
+  so the state reads `.idle` over a master short of what was delivered.
+- `CaptureSession.finish()` should count the whole frames left in the
+  rings as dropped, as the Rust session does; today a stop between a
+  rebuild's successful restart and `resume` clears the new backend's
+  audio and reports nothing.
+
 ### Bridge
 
 What the bridge crate (WP1) asks of the Swift side before WP6 fills the list:
@@ -447,7 +530,8 @@ PR off `main`.
 | WP4b CoreML speech backend | `feat/rust-speech-coreml` | #163 | merged |
 | WP7a LLM (`steno-llm`) | `feat/rust-llm` | #167 | merged |
 | WP7b adapters | `feat/rust-adapters` | #165 | merged |
-| WP6a host | `feat/rust-host` | #170 | open |
+| WP6a host | `feat/rust-host` | #170 | merged |
+| WP5a audio (`steno-audio`) | `feat/rust-audio` | #166 | in review |
 
 WP4b is `crates/steno-speech-coreml`: `objc2-core-ml` behind one safe module,
 the four backend calls, the FluidAudio 0.17.4 heuristics ported
@@ -457,3 +541,12 @@ implemented, parity harness `steno-coreml-parity`. Inverse text normalisation
 is not applied: Steno's Swift path (`ParakeetEngine` to
 `AsrManager.transcribe`) never calls FluidAudio's `TextNormalizer`, so the
 baseline carries none. Parity numbers: see the PR.
+
+WP5a is `crates/steno-audio`: the rings, Speex AEC over vendored SpeexDSP,
+the writer, the session with its device-change rebuild, the synthetic
+backend, the macOS live backend, the meeting detector and the symphonia
+decoder; PipeWire (WP5b) and WASAPI (WP10) are stubs. The zero-allocation
+proof is `crates/steno-audio/tests/realtime.rs`; the ERLE table is
+identical to Swift's `aec-bench --synthetic`; the ring tests run under
+ThreadSanitizer in CI's `tsan` job; the live Core Audio tests sit behind
+`--ignored` in `tests/live.rs`. Parity items: the Audio list above.

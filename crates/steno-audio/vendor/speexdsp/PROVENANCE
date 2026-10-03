@@ -1,0 +1,19 @@
+SpeexDSP sources vendored from https://gitlab.xiph.org/xiph/speexdsp
+(BSD licence, COPYING beside this file).
+
+Snapshot: libspeexdsp/ and include/speex/ as of upstream commit e8a18dcd
+("smallft: mark constants as const", 2025-05-22): release SpeexDSP-1.2.1
+plus eleven later commits, of which two change a file vendored here:
+
+  738e1790  libspeexdsp: fix typos in comments
+  e8a18dcd  smallft: mark constants as const
+
+Files: the seven .c files build.rs compiles (fftwrap, filterbank,
+kiss_fft, kiss_fftr, mdf, preprocess, smallft), the private headers they
+include, and speex/speexdsp_types.h, speex_echo.h, speex_preprocess.h; all
+byte-identical to upstream at that commit. One file is generated rather
+than copied: speex/speexdsp_config_types.h comes from upstream's
+speexdsp_config_types.h.in with <stdint.h> and the C99 fixed-width types,
+which is what configure emits on every platform Steno builds for.
+
+Verified 2026-10-03 against a clone of the upstream repository.

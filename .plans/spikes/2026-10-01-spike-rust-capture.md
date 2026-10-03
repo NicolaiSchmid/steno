@@ -1,7 +1,10 @@
 # Spike A: two-lane CoreAudio capture with echo cancellation in Rust
 
 Status: measured 2026-10-01 on Forge (Mac16,1, M4 Pro, macOS 26.7), time-boxed
-to about 90 minutes. Parent: `.plans/2026-10-01-cross-platform-spikes.md`. Question: can Rust do Steno's two-lane capture (process
+to about 90 minutes. The spike code moved into `crates/steno-audio` with WP5a of
+`.plans/2026-10-02-rust-core-and-tauri-shell.md` (2026-10-02) and was deleted
+from `spikes/capture-rs/` as the plan requires; the tables below stay as the
+evidence they were. Parent: `.plans/2026-10-01-cross-platform-spikes.md`. Question: can Rust do Steno's two-lane capture (process
 tap + microphone through one private aggregate device and one IOProc) with
 Speex echo cancellation, at the quality of the Swift implementation in
 `Sources/StenoAudio`?

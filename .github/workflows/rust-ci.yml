@@ -40,6 +40,13 @@ name: Rust CI
 # corpus on Forge; it is the ignored test
 # `crates/steno-speech-coreml/tests/parity.rs` and the `steno-coreml-parity`
 # binary, run by hand, never here.
+#
+# The `tsan` job runs the audio ring tests under ThreadSanitizer: the
+# two-thread accounting test in `crates/steno-audio/tests/ring.rs` is what
+# catches a weakened memory ordering on the ring indices, and only a
+# sanitizer sees that on x86. It needs nightly and `-Zbuild-std`, so it is
+# its own job and is not a required check: a nightly breakage must not block
+# the workspace jobs.
 
 on:
   pull_request:
@@ -197,3 +204,20 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Check on the minimum supported Rust
         run: cargo +${{ steps.msrv.outputs.version }} check --workspace --all-targets --locked
+
+  tsan:
+    name: tsan
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: rust-src
+      - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Ring tests under ThreadSanitizer
+        env:
+          RUSTFLAGS: -Zsanitizer=thread
+        run: cargo +nightly test -Zbuild-std --target x86_64-unknown-linux-gnu --locked -p steno-audio --test ring
