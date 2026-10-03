@@ -108,7 +108,8 @@ impl ModelDiarizer {
 
     /// The `CoreML` backend over `FluidAudio`'s compiled models in
     /// `models_dir` (`Segmentation.mlmodelc`, `FBank.mlmodelc`,
-    /// `Embedding.mlmodelc`).
+    /// `Embedding.mlmodelc`), which is [`crate::coreml::model_directory`]
+    /// for the models the Swift app installed.
     #[cfg(all(feature = "coreml", target_os = "macos"))]
     #[must_use]
     pub fn coreml(config: DiarizerConfig, models_dir: std::path::PathBuf) -> Self {

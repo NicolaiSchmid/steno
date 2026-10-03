@@ -1,7 +1,7 @@
 //! The `CoreML` backend over `FluidAudio`'s compiled diarization models
 //! (`Segmentation.mlmodelc`, `FBank.mlmodelc`, `Embedding.mlmodelc` from
-//! the `speaker-diarization` repository the Swift app installs under
-//! `Models/fluidaudio/`), so the Mac keeps the embeddings the Swift app
+//! the `speaker-diarization` repository the Swift app installs in
+//! [`model_directory`]), so the Mac keeps the embeddings the Swift app
 //! stored. The segmentation model takes `audio` `[1, 1, 160000]` and
 //! returns `[1, 589, 7]` powerset logits; `FBank` turns the window into
 //! `fbank_features`; `Embedding` takes those and per-frame `weights`
@@ -15,12 +15,27 @@
 
 mod binding;
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use binding::{Array, Model};
+use steno_core::StenoPaths;
 
 use crate::backend::{BackendError, DiarizationBackend, SegmentationGeometry};
 use crate::error::DiarizeError;
+
+/// `<support>/Models/fluidaudio/speaker-diarization`: where the Swift
+/// app's model store installs these models, its default models root plus
+/// `ModelAsset.offlineDiarizer`'s `frameworkRoot` and `modelFolder`
+/// (`Sources/StenoSpeech/Models/ModelAsset.swift`). A models directory
+/// moved in the Swift app's settings is not followed.
+#[must_use]
+pub fn model_directory(paths: &StenoPaths) -> PathBuf {
+    paths
+        .support_directory
+        .join("Models")
+        .join("fluidaudio")
+        .join("speaker-diarization")
+}
 
 /// The three models.
 pub struct CoreMlBackend {
@@ -150,5 +165,18 @@ impl DiarizationBackend for CoreMlBackend {
             return Ok(None);
         }
         Ok(Some(embedding))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_models_sit_where_the_swift_app_installs_them() {
+        assert_eq!(
+            model_directory(&StenoPaths::new("/tmp/support")),
+            PathBuf::from("/tmp/support/Models/fluidaudio/speaker-diarization")
+        );
     }
 }
