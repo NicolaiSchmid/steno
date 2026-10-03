@@ -11,8 +11,16 @@
 //! vocabulary and never used as the blank id, the mistake behind the 64 %
 //! WER spike F measured for the spike E loop.
 //! Swift: none on this path; the Mac runs `FluidAudio`'s `CoreML` models.
+//!
+//! Privacy invariant: ONNX Runtime's telemetry is off in every process
+//! that opens a session, `steno-speech-sidecar` included. Every session
+//! opens through one function here, which configures the process-wide
+//! environment with telemetry disabled before the first one. A
+//! Microsoft-built ONNX Runtime library would otherwise report model and
+//! usage details to Microsoft.
 
 use std::path::Path;
+use std::sync::Once;
 
 use ort::session::builder::GraphOptimizationLevel;
 use ort::session::{Session, SessionInputValue};
@@ -48,8 +56,22 @@ impl Default for OnnxOptions {
     }
 }
 
-/// Opens one model file with the shared options.
+/// Configures ONNX Runtime's process-wide environment once, before the
+/// first session: telemetry off (the privacy invariant in the module
+/// docs). The first configuration committed wins, so nothing in a Steno
+/// process opens a session any other way.
+pub(crate) fn init_environment() {
+    static INIT: Once = Once::new();
+    INIT.call_once(|| {
+        // `false` when `steno-diarize` committed the same settings first.
+        let _ = ort::init().with_telemetry(false).commit();
+    });
+}
+
+/// Opens one model file with the shared options, in the environment
+/// [`init_environment`] configures.
 pub(crate) fn open_session(path: &Path, options: &OnnxOptions) -> Result<Session, SpeechError> {
+    init_environment();
     let options_error = |e: ort::Error<ort::session::builder::SessionBuilder>| {
         SpeechError::SessionOptions(e.to_string())
     };
@@ -393,5 +415,15 @@ impl SpeechBackend for OnnxBackend {
         }
         let (_, logits) = outputs[0].try_extract_tensor::<f32>()?;
         split_logits(logits, self.shape.vocab_size)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn telemetry_is_switched_off_before_any_session() {
+        super::init_environment();
+        // Committed already: a later configuration cannot switch it on.
+        assert!(!ort::init().with_telemetry(true).commit());
     }
 }

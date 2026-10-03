@@ -2,8 +2,14 @@
 //! ResNet34-LM from the sherpa-onnx exports, with the fbank front end of
 //! [`crate::fbank`] in front of the embedding model. Runs on every
 //! platform.
+//!
+//! Privacy invariant: ONNX Runtime's telemetry is off. `session`, the one
+//! place a session opens, configures the process-wide environment with
+//! telemetry disabled before the first one (as `steno-speech` does; the
+//! first of the two to run sets it).
 
 use std::path::Path;
+use std::sync::Once;
 
 use ort::session::Session;
 use ort::value::Tensor;
@@ -150,6 +156,11 @@ fn speaker_features(
 }
 
 fn session(path: &Path, threads: usize) -> Result<Session, DiarizeError> {
+    static INIT: Once = Once::new();
+    INIT.call_once(|| {
+        // `false` when `steno-speech` committed the same settings first.
+        let _ = ort::init().with_telemetry(false).commit();
+    });
     let mut builder = Session::builder().map_err(DiarizeError::backend)?;
     if threads > 0 {
         // The builder error carries the builder back and is not `Send`;
