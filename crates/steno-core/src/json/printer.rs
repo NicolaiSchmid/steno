@@ -1,11 +1,11 @@
-//! The one JSON convention, as `StenoJSON` (`Sources/StenoCore/Model/StenoJSON.swift`)
-//! and `BridgeDispatcher.encoder()` produce it: sorted keys, slashes unescaped,
-//! dates as `2026-09-29T12:48:00.000Z`, UUIDs upper case. Two styles:
-//! [`to_canonical_string`] is Foundation's `.prettyPrinted` (what the fixtures
-//! hold), [`to_compact_string`] is the one-line form the dispatcher sends.
-//! The date and UUID codecs the fields use are `steno_core::json`'s
-//! (`iso_time`, `uuid_text` and their `_opt` forms); only the printer lives
-//! here.
+//! The printer: the one JSON convention as `StenoJSON`
+//! (`Sources/StenoCore/Model/StenoJSON.swift`) and `BridgeDispatcher.encoder()`
+//! produce it, sorted keys, slashes unescaped, dates as
+//! `2026-09-29T12:48:00.000Z`, UUIDs upper case. Two styles:
+//! [`to_canonical_string`] is Foundation's `.prettyPrinted` (the bridge
+//! fixtures and `meeting.json`), [`to_compact_string`] is the one-line form
+//! the bridge dispatcher sends. The date and UUID codecs the fields use are
+//! the parent module's (`iso_time`, `uuid_text` and their `_opt` forms).
 //!
 //! The printer walks a [`serde_json::Value`] rather than trusting
 //! `serde_json::to_string_pretty`: Foundation puts a space on both sides of the
@@ -32,7 +32,7 @@ use serde_json::Value;
 ///
 /// ```
 /// use serde_json::json;
-/// use steno_bridge::json::to_canonical_string;
+/// use steno_core::json::to_canonical_string;
 ///
 /// let value = json!({"tags": [], "durationSeconds": 1200.0, "title": "Sync / weekly"});
 /// assert_eq!(

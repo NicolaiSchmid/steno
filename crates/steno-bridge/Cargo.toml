@@ -12,13 +12,9 @@ publish.workspace = true
 steno-core = { path = "../steno-core" }
 chrono.workspace = true
 serde.workspace = true
-# `float_roundtrip`: the default float parser is fast but not always
-# correctly rounded; with it, every double this crate prints parses back to
-# the same bits (`tests/json.rs`). Additive on top of the workspace line.
-serde_json = { workspace = true, features = ["float_roundtrip"] }
+serde_json.workspace = true
 thiserror.workspace = true
 uuid.workspace = true
-zmij.workspace = true
 
 [dev-dependencies]
 # Builds the `SQLITE_BUSY` error the `From<StoreError>` test maps.

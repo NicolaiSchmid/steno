@@ -3378,7 +3378,6 @@ dependencies = [
  "chrono-tz",
  "iana-time-zone",
  "serde_json",
- "steno-bridge",
  "steno-core",
  "tempfile",
  "thiserror 2.0.21",
@@ -3399,7 +3398,6 @@ dependencies = [
  "steno-core",
  "thiserror 2.0.21",
  "uuid",
- "zmij",
 ]
 
 [[package]]
@@ -3419,6 +3417,7 @@ dependencies = [
  "thiserror 2.0.21",
  "tokio",
  "uuid",
+ "zmij",
 ]
 
 [[package]]

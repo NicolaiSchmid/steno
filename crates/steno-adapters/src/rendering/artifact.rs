@@ -180,7 +180,7 @@ impl ArtifactRenderer {
     /// `Value` would hold), then printed Foundation's way.
     pub fn render_json(&self, export: &MeetingExport) -> Result<Vec<u8>, serde_json::Error> {
         let value: Value = serde_json::from_str(&serde_json::to_string(export)?)?;
-        Ok(steno_bridge::json::to_canonical_string(&value)?.into_bytes())
+        Ok(steno_core::json::to_canonical_string(&value)?.into_bytes())
     }
 
     /// The folder basename a destination pinned, else the one this export

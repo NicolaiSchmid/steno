@@ -31,7 +31,7 @@ fn fixture_in_store_order() -> String {
         serde_json::from_str(&fixture_text("meetings/produktstrategie.json")).unwrap();
     let decisions = value["decisions"].as_array_mut().unwrap();
     decisions.sort_by(|left, right| left["id"].as_str().cmp(&right["id"].as_str()));
-    steno_bridge::json::to_canonical_string(&value).unwrap()
+    steno_core::json::to_canonical_string(&value).unwrap()
 }
 
 #[test]

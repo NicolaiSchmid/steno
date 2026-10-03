@@ -20,10 +20,15 @@ chrono.workspace = true
 directories.workspace = true
 rusqlite.workspace = true
 serde.workspace = true
-serde_json.workspace = true
+# `float_roundtrip`: the default float parser is fast but not always
+# correctly rounded; with it, every double the printer writes parses back
+# to the same bits (`steno-bridge/tests/json.rs`). Additive on top of the
+# workspace line.
+serde_json = { workspace = true, features = ["float_roundtrip"] }
 sha2.workspace = true
 thiserror.workspace = true
 uuid.workspace = true
+zmij.workspace = true
 
 [dev-dependencies]
 similar.workspace = true
