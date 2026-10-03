@@ -431,36 +431,18 @@ mod tests {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    use steno_core::testing::{FakeDiarizer, FakeSpeechEngine, InMemorySpeakerMemory};
     use steno_core::{
         AudioFormat, HandoverIntake as _, PairedDevice, RecordingMetadata, SecretKey, SecretStore,
-        Store, async_trait, paths::file_url, protocols::BoundaryResult,
+        async_trait, paths::file_url, protocols::BoundaryResult,
     };
-    use steno_pipeline::{MeetingEventBus, PipelineDependencies, ProcessingPipeline};
+    use steno_pipeline::{MeetingEventBus, ProcessingPipeline};
 
     use super::*;
-
-    /// Fakes over `store`, the engine named `engine_id` so a run shows
-    /// which pipeline it went through.
-    fn dependencies(store: &Arc<Store>, engine_id: &str) -> PipelineDependencies {
-        PipelineDependencies::new(
-            Arc::new(SymphoniaAudioCodec::new()),
-            Arc::new(FakeSpeechEngine {
-                id: engine_id.to_owned(),
-                ..FakeSpeechEngine::default()
-            }),
-            Arc::new(FakeDiarizer::default()),
-            Arc::new(InMemorySpeakerMemory::new(Vec::new())),
-            Arc::new(DeliveryCoordinator::new(store.clone())),
-            store.clone(),
-            MeetingEventBus::new(),
-        )
-    }
+    use crate::test_support::{fake_dependencies, temp_store};
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn the_phone_intake_enqueues_through_the_pipeline_current_at_admission() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = Arc::new(Store::open(dir.path().join("steno.sqlite")).unwrap());
+        let (dir, store) = temp_store();
         let mut settings = store.settings().unwrap();
         settings.audio_folder = file_url(&dir.path().join("audio"), true);
         store.save_settings(&settings).unwrap();
@@ -469,11 +451,11 @@ mod tests {
             let (store, reloads) = (store.clone(), reloads.clone());
             Arc::new(move || {
                 let n = reloads.fetch_add(1, Ordering::SeqCst) + 1;
-                Ok(dependencies(&store, &format!("engine-{n}")))
+                Ok(fake_dependencies(&store, &format!("engine-{n}")))
             })
         };
         let current = Arc::new(CurrentPipeline::new(
-            ProcessingPipeline::new(dependencies(&store, "engine-0")),
+            ProcessingPipeline::new(fake_dependencies(&store, "engine-0")),
             make,
             tokio::runtime::Handle::current(),
         ));
@@ -543,8 +525,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_secret_store_that_cannot_be_read_leaves_the_pipeline_without_a_key() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = Arc::new(Store::open(dir.path().join("steno.sqlite")).unwrap());
+        let (dir, store) = temp_store();
         let secrets: Arc<dyn SecretStore> = Arc::new(BrokenSecrets);
         let paths = StenoPaths::new(dir.path().join("support"));
         let dependencies = pipeline_dependencies(

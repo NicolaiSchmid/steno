@@ -67,6 +67,8 @@ pub mod platform;
 pub mod recorder;
 pub mod secrets;
 pub mod speech;
+#[cfg(test)]
+mod test_support;
 
 pub use app::{App, AppOptions, BuildError, build, open_store};
 pub use secrets::{FileSecretStore, KeyringSecretStore, secret_store};

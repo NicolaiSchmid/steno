@@ -143,14 +143,13 @@ mod tests {
     use std::sync::Arc;
     use std::time::{Duration, Instant};
 
-    use steno_core::testing::{FakeDiarizer, FakeSpeechEngine, InMemorySpeakerMemory};
     use steno_core::{
         MeetingState, MeetingSummarizer, Store, SummaryInput, SummaryOutput, async_trait,
         protocols::BoundaryResult, testing::sample_data,
     };
-    use steno_pipeline::MeetingEventBus;
 
     use super::*;
+    use crate::test_support::{fake_dependencies, temp_store};
 
     /// A summarizer that answers only once released.
     struct HeldSummarizer {
@@ -172,16 +171,7 @@ mod tests {
         summarizer: Arc<dyn MeetingSummarizer>,
         runtime: tokio::runtime::Handle,
     ) -> SwappablePipeline {
-        let dependencies = PipelineDependencies::new(
-            Arc::new(steno_audio::SymphoniaAudioCodec::new()),
-            Arc::new(FakeSpeechEngine::default()),
-            Arc::new(FakeDiarizer::default()),
-            Arc::new(InMemorySpeakerMemory::new(Vec::new())),
-            Arc::new(steno_adapters::DeliveryCoordinator::new(store.clone())),
-            store.clone(),
-            MeetingEventBus::new(),
-        )
-        .with_llm(None, Some(summarizer));
+        let dependencies = fake_dependencies(store, "fake-engine").with_llm(None, Some(summarizer));
         let make: MakeDependencies = {
             let dependencies = dependencies.clone();
             Arc::new(move || Ok(dependencies.clone()))
@@ -198,8 +188,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_summary_rerun_returns_before_the_summarizer_answers() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = Arc::new(Store::open(dir.path().join("steno.sqlite")).unwrap());
+        let (_dir, store) = temp_store();
         let mut meeting = sample_data::meeting();
         meeting.state = MeetingState::Ready;
         store.save_meeting(&meeting).unwrap();
@@ -234,8 +223,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_re_export_returns_at_once_and_runs_in_the_background() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = Arc::new(Store::open(dir.path().join("steno.sqlite")).unwrap());
+        let (_dir, store) = temp_store();
         let mut meeting = sample_data::meeting();
         meeting.state = MeetingState::Ready;
         store.save_meeting(&meeting).unwrap();
