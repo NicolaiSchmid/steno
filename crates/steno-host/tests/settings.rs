@@ -103,7 +103,7 @@ fn general_saves_template_detection_login_item_calendar_and_updates() {
     harness
         .fakes
         .permissions
-        .set(PermissionKind::Calendar, PermissionState::Unknown);
+        .set_state(PermissionKind::Calendar, PermissionState::Unknown);
     harness.host.settings_general_request_calendar().unwrap();
     assert_eq!(
         *harness.fakes.permissions.requests.lock().unwrap(),
@@ -269,11 +269,11 @@ fn recording_saves_device_folder_and_retention_and_the_chooser_applies_its_answe
     harness
         .fakes
         .permissions
-        .set(PermissionKind::SystemAudio, PermissionState::Denied);
+        .set_state(PermissionKind::SystemAudio, PermissionState::Denied);
     harness
         .fakes
         .permissions
-        .answer(PermissionKind::SystemAudio, PermissionState::Denied);
+        .set_answer(PermissionKind::SystemAudio, PermissionState::Denied);
     harness
         .host
         .settings_recording_request_permission(PermissionKindParams {
@@ -351,6 +351,7 @@ fn transcription_switches_engines_and_downloads_assets() {
             asset_id: "offlineDiarizer".to_owned(),
         })
         .unwrap();
+    harness.wait_for_download(1);
     let states: Vec<String> = harness
         .sink
         .all(BridgeTopic::SettingsTranscription)
@@ -388,13 +389,14 @@ fn transcription_switches_engines_and_downloads_assets() {
         .unwrap_err();
     assert_eq!(unknown.code, BridgeErrorCode::InvalidParams);
 
-    *harness.fakes.speech_models.download_failure.lock().unwrap() = Some("offline".to_owned());
+    harness.fakes.speech_models.fail_downloads(Some("offline"));
     harness
         .host
         .settings_transcription_download(AssetIdParams {
             asset_id: "offlineDiarizer".to_owned(),
         })
         .unwrap();
+    harness.wait_for_download(1);
     let asset = &harness.snapshot(BridgeTopic::SettingsTranscription)["assets"][1];
     assert_eq!(asset["state"], "failed");
     assert_eq!(asset["failure"], "offline");

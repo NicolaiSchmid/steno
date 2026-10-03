@@ -12,8 +12,8 @@ use common::*;
 use serde_json::json;
 use steno_bridge::{
     BridgeErrorCode, BridgeHost, BridgeTopic, BridgeWindow, OnboardingSetupStepKind,
-    PermissionKind, PermissionKindParams, PermissionState, SetupStepParams, SummariesUpdateParams,
-    WindowParams,
+    PermissionKind, PermissionKindParams, PermissionState, SetStringParams, SetupStepParams,
+    SummariesUpdateParams, WindowParams,
 };
 use steno_core::AudioRetention;
 use steno_host::onboarding::OnboardingViewModel;
@@ -24,12 +24,16 @@ fn permissions(
     calendar: PermissionState,
 ) -> impl FnOnce(&steno_core::Store, &steno_host::fakes::FakeServices) + 'static {
     move |_, fakes| {
-        fakes.permissions.set(PermissionKind::Microphone, mic);
-        fakes.permissions.set(PermissionKind::SystemAudio, system);
-        fakes.permissions.set(PermissionKind::Calendar, calendar);
+        fakes.permissions.set_state(PermissionKind::Microphone, mic);
         fakes
             .permissions
-            .set(PermissionKind::LocalNetwork, PermissionState::Unknown);
+            .set_state(PermissionKind::SystemAudio, system);
+        fakes
+            .permissions
+            .set_state(PermissionKind::Calendar, calendar);
+        fakes
+            .permissions
+            .set_state(PermissionKind::LocalNetwork, PermissionState::Unknown);
     }
 }
 
@@ -133,7 +137,7 @@ fn steps_run_in_order_required_ones_gate_completion_and_optional_ones_can_be_ski
     harness
         .fakes
         .permissions
-        .answer(PermissionKind::SystemAudio, PermissionState::Denied);
+        .set_answer(PermissionKind::SystemAudio, PermissionState::Denied);
     harness
         .host
         .onboarding_request(PermissionKindParams {
@@ -161,7 +165,7 @@ fn steps_run_in_order_required_ones_gate_completion_and_optional_ones_can_be_ski
     harness
         .fakes
         .permissions
-        .set(PermissionKind::SystemAudio, PermissionState::Granted);
+        .set_state(PermissionKind::SystemAudio, PermissionState::Granted);
     harness.host.onboarding_refresh().unwrap();
     let onboarding = harness.snapshot(BridgeTopic::Onboarding);
     assert_eq!(onboarding["permissionsComplete"], true);
@@ -244,6 +248,16 @@ fn granted_permissions_open_on_the_setup_page_and_handled_rows_finish() {
             .preferences
             .flag(OnboardingViewModel::COMPLETED_KEY)
     );
+    // Finishing closes the window from the host, after the page saw
+    // `finished` (Swift: `OnboardingWindow.onChange(of: finished)`).
+    assert_eq!(
+        *harness.fakes.opener.windows_closed.lock().unwrap(),
+        vec![BridgeWindow::Onboarding]
+    );
+    assert_eq!(
+        harness.sink.last(BridgeTopic::Onboarding).unwrap()["finished"],
+        true
+    );
 
     harness
         .host
@@ -254,8 +268,9 @@ fn granted_permissions_open_on_the_setup_page_and_handled_rows_finish() {
         })
         .unwrap();
     assert_eq!(
-        *harness.fakes.opener.windows_closed.lock().unwrap(),
-        vec![BridgeWindow::Onboarding]
+        harness.fakes.opener.windows_closed.lock().unwrap().len(),
+        2,
+        "the page's own close still works"
     );
     let error = harness
         .host
@@ -280,6 +295,208 @@ fn granted_permissions_open_on_the_setup_page_and_handled_rows_finish() {
             .preferences
             .flag(OnboardingViewModel::COMPLETED_KEY)
     );
+    assert_eq!(
+        *open_rows.fakes.opener.windows_closed.lock().unwrap(),
+        vec![BridgeWindow::Onboarding]
+    );
+    open_rows.host.onboarding_back().unwrap();
+    assert_eq!(
+        open_rows.fakes.opener.windows_closed.lock().unwrap().len(),
+        1,
+        "a later command does not close it again"
+    );
+
+    // The window's own close button: the flag alone, no further rule.
+    // Swift: `OnboardingWindow.onDisappear`.
+    let closed = Harness::builder().build();
+    assert!(
+        !closed
+            .fakes
+            .preferences
+            .flag(OnboardingViewModel::COMPLETED_KEY)
+    );
+    closed.host.onboarding_window_closed();
+    assert!(
+        closed
+            .fakes
+            .preferences
+            .flag(OnboardingViewModel::COMPLETED_KEY)
+    );
+    assert_eq!(closed.snapshot(BridgeTopic::Onboarding)["finished"], false);
+}
+
+/// The Summaries form sends the Settings window's method names from both
+/// windows; each answers on its own model. Swift: `SummariesCommands` on
+/// `OnboardingBridge.model.llm`.
+#[test]
+fn the_summaries_form_commands_answer_on_the_calling_windows_model() {
+    let harness = Harness::builder()
+        .seed(|_, fakes| {
+            *fakes.llm.codex_account.lock().unwrap() = Ok("nicolai@example.com (Plus)".to_owned());
+        })
+        .build();
+    let onboarding = harness.host.for_window(BridgeWindow::Onboarding);
+    assert_eq!(onboarding.window(), BridgeWindow::Onboarding);
+    assert_eq!(harness.host.window(), BridgeWindow::Main);
+    // A draft typed in the Settings window must not be what onboarding
+    // commits.
+    harness
+        .host
+        .settings_summaries_update(update(Some("settings-draft"), None))
+        .unwrap();
+
+    // selectPreset: the radio moves on page 2 and only there; what is
+    // stored is onboarding's own draft (the address, no model yet).
+    harness.sink.clear();
+    onboarding
+        .settings_summaries_select_preset(SetStringParams {
+            value: "openAI".to_owned(),
+        })
+        .unwrap();
+    let page = harness.snapshot(BridgeTopic::Onboarding);
+    assert_eq!(page["summaries"]["presetID"], "openAI");
+    assert_eq!(page["summaries"]["baseURL"], "https://api.openai.com/v1");
+    // The Settings section follows the store once another window wrote
+    // it, as a reopened Swift window would: its unsaved draft is gone.
+    let summaries = harness.snapshot(BridgeTopic::SettingsSummaries);
+    assert_eq!(summaries["presetID"], "openAI");
+    assert_eq!(summaries["model"], "");
+    assert_eq!(
+        harness.sink.count(BridgeTopic::Onboarding),
+        1,
+        "the onboarding topic republishes"
+    );
+    let settings = harness.store.settings().unwrap();
+    assert_eq!(
+        settings.llm_base_url.as_deref(),
+        Some("https://api.openai.com/v1"),
+        "the preset's address is stored, as Swift's selectPreset did"
+    );
+    assert_eq!(
+        settings.llm_model, None,
+        "not the Settings window's typed model"
+    );
+
+    // update: the draft stays in the onboarding model until its own save.
+    onboarding
+        .settings_summaries_update(update(Some("gpt-4.1-mini"), Some(" sk-onboarding ")))
+        .unwrap();
+    assert_eq!(
+        harness.snapshot(BridgeTopic::Onboarding)["summaries"]["model"],
+        "gpt-4.1-mini"
+    );
+    assert_eq!(
+        harness.snapshot(BridgeTopic::SettingsSummaries)["model"],
+        "",
+        "a page 2 draft is not the Settings draft"
+    );
+    assert_eq!(harness.store.settings().unwrap().llm_model, None);
+
+    // test: the result shows on page 2, not in Settings.
+    onboarding.settings_summaries_test().unwrap();
+    let page = harness.snapshot(BridgeTopic::Onboarding);
+    assert_eq!(page["summaries"]["testResult"]["ok"], true);
+    assert!(
+        harness
+            .snapshot(BridgeTopic::SettingsSummaries)
+            .get("testResult")
+            .is_none()
+    );
+    assert_eq!(harness.store.settings().unwrap().llm_model, None);
+
+    // refreshCodexStatus: the sign-in lands on the page's card.
+    onboarding
+        .settings_summaries_select_preset(SetStringParams {
+            value: "codex".to_owned(),
+        })
+        .unwrap();
+    *harness.fakes.llm.codex_account.lock().unwrap() = Err("signed out".to_owned());
+    onboarding
+        .settings_summaries_refresh_codex_status()
+        .unwrap();
+    let page = harness.snapshot(BridgeTopic::Onboarding);
+    assert_eq!(page["summaries"]["codex"]["signIn"], "unavailable");
+    assert_eq!(page["summaries"]["codex"]["signInDetail"], "signed out");
+    assert!(
+        harness
+            .snapshot(BridgeTopic::SettingsSummaries)
+            .get("codex")
+            .is_none()
+    );
+
+    // Back to the endpoint and saved through onboarding's own command.
+    onboarding
+        .settings_summaries_select_preset(SetStringParams {
+            value: "openAI".to_owned(),
+        })
+        .unwrap();
+    harness.host.onboarding_save_summaries().unwrap();
+    let settings = harness.store.settings().unwrap();
+    assert_eq!(settings.llm_model.as_deref(), Some("gpt-4.1-mini"));
+    assert_eq!(
+        harness.snapshot(BridgeTopic::Onboarding)["setup"][0]["state"],
+        "saved"
+    );
+    // The Settings section follows the store once onboarding wrote it, as
+    // a reopened Swift window would have.
+    let summaries = harness.snapshot(BridgeTopic::SettingsSummaries);
+    assert_eq!(summaries["presetID"], "openAI");
+    assert_eq!(summaries["model"], "gpt-4.1-mini");
+}
+
+fn update(model: Option<&str>, key: Option<&str>) -> SummariesUpdateParams {
+    SummariesUpdateParams {
+        base_url: None,
+        model: model.map(str::to_owned),
+        context_tokens: None,
+        api_key: key.map(str::to_owned),
+    }
+}
+
+/// A vault saved on page 2 is what the Export section saves back.
+#[test]
+fn a_vault_saved_by_onboarding_survives_the_export_sections_save() {
+    let harness = Harness::builder()
+        .choose(Some("/Users/nicolai/Notes"))
+        .seed(|store, _| {
+            let mut settings = store.settings().unwrap();
+            settings.obsidian = Some(steno_core::ObsidianSettings {
+                vault_path: "/Users/nicolai/Old".to_owned(),
+                people_folder: None,
+                include_audio: false,
+                task_tag: None,
+            });
+            store.save_settings(&settings).unwrap();
+        })
+        .build();
+    harness.host.onboarding_choose_vault().unwrap();
+    assert_eq!(
+        harness
+            .store
+            .settings()
+            .unwrap()
+            .obsidian
+            .unwrap()
+            .vault_path,
+        "/Users/nicolai/Notes"
+    );
+    assert_eq!(
+        harness.snapshot(BridgeTopic::SettingsExport)["vaultName"],
+        "Notes",
+        "the Export section reloaded"
+    );
+    harness.host.settings_export_save().unwrap();
+    assert_eq!(
+        harness
+            .store
+            .settings()
+            .unwrap()
+            .obsidian
+            .unwrap()
+            .vault_path,
+        "/Users/nicolai/Notes",
+        "the Export section's save keeps the vault onboarding chose"
+    );
 }
 
 /// Swift: `testSavingSummariesConfiguresTheEndpointAndRebuildsThePipeline`, `setupCommandsReachTheModelsAndFinish`.
@@ -298,6 +515,7 @@ fn saving_summaries_configures_the_endpoint_and_rebuilds_the_pipeline() {
 
     harness
         .host
+        .for_window(BridgeWindow::Onboarding)
         .settings_summaries_update(SummariesUpdateParams {
             base_url: None,
             model: Some("qwen3-8b".to_owned()),
@@ -308,6 +526,11 @@ fn saving_summaries_configures_the_endpoint_and_rebuilds_the_pipeline() {
     assert_eq!(
         harness.snapshot(BridgeTopic::Onboarding)["canSaveSummaries"],
         true
+    );
+    assert_eq!(
+        harness.snapshot(BridgeTopic::SettingsSummaries)["model"],
+        "",
+        "typed on page 2, not in Settings"
     );
     harness.host.onboarding_save_summaries().unwrap();
     let settings = harness.store.settings().unwrap();
@@ -442,7 +665,7 @@ fn should_open_follows_the_flag_and_the_required_permissions() {
     harness
         .fakes
         .permissions
-        .set(PermissionKind::SystemAudio, PermissionState::Denied);
+        .set_state(PermissionKind::SystemAudio, PermissionState::Denied);
     assert!(
         harness.host.should_open_onboarding(),
         "a missing required permission reopens it"
@@ -450,11 +673,11 @@ fn should_open_follows_the_flag_and_the_required_permissions() {
     harness
         .fakes
         .permissions
-        .set(PermissionKind::Calendar, PermissionState::Denied);
+        .set_state(PermissionKind::Calendar, PermissionState::Denied);
     harness
         .fakes
         .permissions
-        .set(PermissionKind::SystemAudio, PermissionState::Granted);
+        .set_state(PermissionKind::SystemAudio, PermissionState::Granted);
     assert!(
         !harness.host.should_open_onboarding(),
         "optional permissions do not"

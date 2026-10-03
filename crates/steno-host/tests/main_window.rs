@@ -724,10 +724,13 @@ fn recording_follows_the_recorder_and_the_start_selects_the_live_row() {
         })
         .unwrap();
     // `page.ready` published `recording` a moment ago: the change waits out
-    // the 20 Hz interval, which the shell's timer flushes.
+    // the 20 Hz interval, which the host's own flush thread ends; nothing
+    // else is called.
     assert_eq!(harness.sink.count(BridgeTopic::Recording), 0);
     assert!(harness.host.next_flush_due().is_some());
-    harness.settle();
+    harness.wait_for("the throttled recording publish", |harness| {
+        harness.sink.count(BridgeTopic::Recording) == 1
+    });
     let recording = harness.sink.last(BridgeTopic::Recording).unwrap();
     assert_eq!(recording["state"], "recording");
     assert_eq!(recording["mode"], "inPerson");
@@ -738,18 +741,21 @@ fn recording_follows_the_recorder_and_the_start_selects_the_live_row() {
         steno_core::json::uuid_string(live)
     );
 
+    // A stop within 50 ms of the last publish must not read "recording"
+    // until the next command: the flush thread publishes it.
     harness.host.recording_stop().unwrap();
-    harness.settle();
-    assert_eq!(
-        harness.sink.last(BridgeTopic::Recording).unwrap()["state"],
-        "idle"
-    );
+    harness.wait_for("the stop to publish", |harness| {
+        harness.sink.last(BridgeTopic::Recording).unwrap()["state"] == "idle"
+    });
     assert_eq!(*harness.fakes.recorder.stops.lock().unwrap(), 1);
     harness.host.recording_toggle().unwrap();
     assert_eq!(
         harness.fakes.recorder.status().state,
         RecordingState::Recording
     );
+    harness.wait_for("the toggle to publish", |harness| {
+        harness.sink.last(BridgeTopic::Recording).unwrap()["state"] == "recording"
+    });
 
     // Two changes inside one interval fold into one publish.
     std::thread::sleep(std::time::Duration::from_millis(60));
@@ -757,7 +763,10 @@ fn recording_follows_the_recorder_and_the_start_selects_the_live_row() {
     harness.host.recorder_changed();
     harness.host.recorder_changed();
     assert_eq!(harness.sink.count(BridgeTopic::Recording), 1);
-    harness.settle();
+    harness.wait_for("the folded publish", |harness| {
+        harness.sink.count(BridgeTopic::Recording) == 2
+    });
+    std::thread::sleep(std::time::Duration::from_millis(60));
     assert_eq!(harness.sink.count(BridgeTopic::Recording), 2);
     assert_eq!(harness.host.next_flush_due(), None);
 }

@@ -11,11 +11,11 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use chrono::FixedOffset;
 use steno_bridge::ListFilter;
-use steno_core::paths::path_from_file_url;
 use steno_core::{Meeting, MeetingStateKind, Person, Speaker, Store};
 use uuid::Uuid;
 
 use crate::labels::day_string;
+use crate::services::FileSystem;
 
 /// Whether `filter` shows `meeting`. Swift: `StateFilter.matches`.
 #[must_use]
@@ -186,8 +186,18 @@ impl MeetingListViewModel {
         if trimmed.is_empty() {
             self.search_hits = None;
         } else {
-            let hits = store.search(trimmed, self.search_limit).unwrap_or_default();
-            self.search_hits = Some(hits.into_iter().map(|hit| hit.meeting_id).collect());
+            match store.search(trimmed, self.search_limit) {
+                Ok(hits) => {
+                    self.search_hits = Some(hits.into_iter().map(|hit| hit.meeting_id).collect());
+                    self.error = None;
+                }
+                Err(error) => {
+                    // A failed search shows every meeting and says why,
+                    // rather than an empty list that looks like no match.
+                    self.search_hits = None;
+                    self.error = Some(format!("Meetings could not be searched: {error}"));
+                }
+            }
         }
         self.apply(&[]);
     }
@@ -230,24 +240,18 @@ impl MeetingListViewModel {
         )
     }
 
-    /// The store's delete: rows, receipt and the meeting's files go; a
-    /// meeting still recording or processing is refused and the reason
-    /// shown. A deleted selection clears itself when the list reloads.
-    pub fn delete(&mut self, id: Uuid, store: &Store) {
+    /// The store's delete: rows, receipt and the meeting's files go (the
+    /// folder when the recording lives in one, else each file), through
+    /// the file system seam; a meeting still recording or processing is
+    /// refused and the reason shown. A deleted selection clears itself when
+    /// the list reloads. Swift: `MeetingStore.delete`.
+    pub fn delete(&mut self, id: Uuid, store: &Store, files: &dyn FileSystem) {
         match store.delete_meeting(id) {
             Ok(deleted) => {
-                for url in deleted
-                    .assets
-                    .iter()
-                    .flat_map(steno_core::AudioAsset::expirable_files)
-                    .chain(deleted.clips.iter().cloned())
-                {
-                    if let Some(path) = path_from_file_url(&url) {
-                        let _ = std::fs::remove_file(&path);
-                        if let Some(folder) = path.parent() {
-                            let _ = std::fs::remove_dir(folder);
-                        }
-                    }
+                for path in deleted.files_to_remove(id) {
+                    // A file already gone is not an error; one that will
+                    // not go is left for the retention sweep.
+                    let _ = files.remove(&path);
                 }
                 self.error = None;
             }

@@ -7,6 +7,8 @@
 
 mod common;
 
+use steno_host::services::FileSystem as _;
+
 use common::*;
 use serde_json::json;
 use steno_bridge::{
@@ -374,7 +376,8 @@ fn playback_follows_the_clip_files() {
     harness
         .fakes
         .file_system
-        .remove(&clip_path(&harness.audio_folder(), SPEAKER_JEROME));
+        .remove(&clip_path(&harness.audio_folder(), SPEAKER_JEROME))
+        .unwrap();
     harness.host.store_changed();
     assert_eq!(
         harness.snapshot(BridgeTopic::MeetingDetail)["speakers"][1]["hasClip"],

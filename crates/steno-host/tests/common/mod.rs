@@ -195,13 +195,32 @@ impl Harness {
         self.host.snapshot(topic).unwrap()
     }
 
-    /// Waits out a throttled topic's interval and flushes it: what the
-    /// shell's timer does after `next_flush_due`.
-    pub fn settle(&self) {
-        if let Some(wait) = self.host.next_flush_due() {
-            std::thread::sleep(wait + std::time::Duration::from_millis(5));
-            self.host.flush_due();
+    /// Polls until `condition` holds, for what the host finishes on another
+    /// thread (a throttled publish, a download); panics after five seconds.
+    pub fn wait_for(&self, what: &str, condition: impl Fn(&Harness) -> bool) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !condition(self) {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "waited five seconds for {what}"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(2));
         }
+    }
+
+    /// Waits until the asset's `settings.transcription` state is final.
+    pub fn wait_for_download(&self, asset_index: usize) {
+        self.wait_for("the download to end", |harness| {
+            harness
+                .sink
+                .last(BridgeTopic::SettingsTranscription)
+                .is_some_and(|snapshot| {
+                    matches!(
+                        snapshot["assets"][asset_index]["state"].as_str(),
+                        Some("installed" | "failed")
+                    )
+                })
+        });
     }
 
     /// The audio folder the settings point at.

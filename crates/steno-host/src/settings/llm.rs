@@ -161,6 +161,14 @@ pub enum TestResult {
     Failure(String),
 }
 
+/// What one probe needs, taken out from under the host's lock: the draft
+/// as settings and the key. Swift probed inside the model's `await`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Probe {
+    pub settings: Settings,
+    pub api_key: Option<String>,
+}
+
 /// The stored values, for `commit` to compare against. Swift: `Stored`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Stored {
@@ -193,6 +201,10 @@ pub struct LlmSettingsViewModel {
     pub codex_model: String,
     codex_context_tokens: i64,
     stored: Option<Stored>,
+    /// A probe asked for (by Test, or by a save of a configured endpoint)
+    /// and not yet begun; the host takes it with [`Self::begin_pending_probe`]
+    /// and runs it outside its lock.
+    probe_pending: bool,
 }
 
 impl LlmSettingsViewModel {
@@ -218,6 +230,7 @@ impl LlmSettingsViewModel {
             codex_model: String::new(),
             codex_context_tokens: Settings::DEFAULT_CODEX_CONTEXT_TOKENS,
             stored: None,
+            probe_pending: false,
         }
     }
 
@@ -276,7 +289,13 @@ impl LlmSettingsViewModel {
 
     /// Reads the sign-in, never the network.
     pub fn refresh_codex_status(&mut self, services: &Services) {
-        self.codex_status = match services.llm.codex_account() {
+        self.apply_codex_account(services.llm.codex_account());
+    }
+
+    /// The sign-in as the service read it; the host reads it outside its
+    /// lock for the explicit refresh.
+    pub fn apply_codex_account(&mut self, account: BoundaryResult<String>) {
+        self.codex_status = match account {
             Ok(account) => CodexStatus::SignedIn(account),
             Err(reason) => CodexStatus::Unavailable(reason.to_string()),
         };
@@ -319,12 +338,32 @@ impl LlmSettingsViewModel {
 
     /// The backend's listed models. Only after confirmation.
     pub fn refresh_codex_models(&mut self, services: &Services) {
-        if !self.codex_confirmed {
+        if !self.begin_codex_models() {
             return;
         }
+        self.finish_codex_models(services.llm.codex_account(), services.llm.codex_models());
+    }
+
+    /// Marks the list as loading; false before confirmation, when there is
+    /// nothing to fetch. The host fetches outside its lock and calls
+    /// [`Self::finish_codex_models`].
+    pub fn begin_codex_models(&mut self) -> bool {
+        if !self.codex_confirmed {
+            return false;
+        }
         self.is_loading_codex_models = true;
-        self.refresh_codex_status(services);
-        match services.llm.codex_models() {
+        true
+    }
+
+    /// The sign-in and the list as fetched: a credential failure goes on
+    /// the card, any other on the list's own error line.
+    pub fn finish_codex_models(
+        &mut self,
+        account: BoundaryResult<String>,
+        models: Result<Vec<CodexModel>, CodexModelsError>,
+    ) {
+        self.apply_codex_account(account);
+        match models {
             Ok(models) => {
                 self.codex_models = models;
                 self.codex_models_error = None;
@@ -497,7 +536,7 @@ impl LlmSettingsViewModel {
         }
         self.save(store, services, now);
         if self.errors.error.is_none() && self.is_configured {
-            self.test(services, now);
+            self.request_probe();
         }
     }
 
@@ -551,8 +590,39 @@ impl LlmSettingsViewModel {
     }
 
     /// Reachability, model listing and structured output mode, through the
-    /// module's probe.
+    /// module's probe: the three halves in one call, for a caller that may
+    /// block.
     pub fn test(&mut self, services: &Services, now: DateTime<Utc>) {
+        self.request_probe();
+        if let Some(probe) = self.begin_pending_probe(now) {
+            self.finish_probe(
+                services
+                    .llm
+                    .probe(&probe.settings, probe.api_key.as_deref()),
+            );
+        }
+    }
+
+    /// Asks for a probe; the host begins it once the command's lock is
+    /// released.
+    pub fn request_probe(&mut self) {
+        self.probe_pending = true;
+    }
+
+    /// Whether a probe was asked for and not begun.
+    #[must_use]
+    pub fn probe_pending(&self) -> bool {
+        self.probe_pending
+    }
+
+    /// The pending probe, if any, marked as running (`isTesting`): what the
+    /// host hands to the service outside its lock. `None` when nothing is
+    /// pending or the form is not ready to be probed, in which case the
+    /// result already says what is missing.
+    pub fn begin_pending_probe(&mut self, now: DateTime<Utc>) -> Option<Probe> {
+        if !std::mem::take(&mut self.probe_pending) {
+            return None;
+        }
         let draft = self.draft();
         let missing = if draft.provider == LlmProvider::Codex {
             if !draft.codex_confirmed {
@@ -571,16 +641,21 @@ impl LlmSettingsViewModel {
         };
         if let Some(message) = missing {
             self.test_result = Some(TestResult::Failure(message.to_owned()));
-            return;
+            return None;
         }
         self.is_testing = true;
-        let probed = Self::settings_from(&draft, now);
-        self.test_result = Some(
-            match services.llm.probe(&probed, draft.api_key.as_deref()) {
-                Ok(report) => TestResult::Success(report),
-                Err(failure) => TestResult::Failure(failure.to_string()),
-            },
-        );
+        Some(Probe {
+            settings: Self::settings_from(&draft, now),
+            api_key: draft.api_key,
+        })
+    }
+
+    /// The probe's report or failure, shown; `isTesting` clears.
+    pub fn finish_probe(&mut self, outcome: BoundaryResult<String>) {
+        self.test_result = Some(match outcome {
+            Ok(report) => TestResult::Success(report),
+            Err(failure) => TestResult::Failure(failure.to_string()),
+        });
         self.is_testing = false;
     }
 

@@ -16,7 +16,8 @@ use uuid::Uuid;
 
 use crate::services::{ClipPlayer, FileSystem};
 
-/// What choosing a row does. Swift: `SpeakerOptions.Option.Kind`.
+/// What choosing a row does. Swift: `SpeakerOptions.Option.Kind` in
+/// `Sources/StenoCore/Speakers/SpeakerOptions.swift`.
 #[derive(Debug, Clone, PartialEq)]
 pub enum OptionKind {
     /// Confirms the speaker as this person.
@@ -26,7 +27,7 @@ pub enum OptionKind {
 }
 
 /// The trailing label that says why the row is offered. Swift:
-/// `SpeakerOptions.Option.Tag`.
+/// `SpeakerOptions.Option.Tag` in `Sources/StenoCore/Speakers/SpeakerOptions.swift`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OptionTag {
     SoundsLike,

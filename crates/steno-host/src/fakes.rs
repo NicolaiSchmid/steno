@@ -150,11 +150,13 @@ impl FakePermissions {
         }
     }
 
-    pub fn set(&self, kind: PermissionKind, state: PermissionState) {
+    /// What `state` reports for `kind`.
+    pub fn set_state(&self, kind: PermissionKind, state: PermissionState) {
         lock(&self.states).insert(kind, state);
     }
 
-    pub fn answer(&self, kind: PermissionKind, state: PermissionState) {
+    /// What `request` answers for `kind`.
+    pub fn set_answer(&self, kind: PermissionKind, state: PermissionState) {
         lock(&self.answers).insert(kind, state);
     }
 }
@@ -404,9 +406,13 @@ impl Pipeline for FakePipeline {
     }
 }
 
+/// A hook a test installs to observe the host while a download runs on
+/// its thread: called once per download, before the first progress report,
+/// so a test can hold the download and look at what the host published.
+pub type DownloadHook = Box<dyn Fn(ModelAsset) + Send + Sync>;
+
 /// Installed assets with their sizes; a download reports its `progress`
 /// steps and installs. Swift: `ModelStore` over `FakeModelDownloader`.
-#[derive(Debug)]
 pub struct FakeSpeechModels {
     pub installed: Mutex<BTreeMap<ModelAsset, Option<i64>>>,
     pub downloads: Mutex<Vec<ModelAsset>>,
@@ -414,6 +420,15 @@ pub struct FakeSpeechModels {
     /// The `(fraction, phase)` reports of one download, in order.
     pub progress: Mutex<Vec<(f64, String)>>,
     pub download_failure: Mutex<Option<String>>,
+    pub on_download: Mutex<Option<DownloadHook>>,
+}
+
+impl std::fmt::Debug for FakeSpeechModels {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("FakeSpeechModels")
+            .field("installed", &*lock(&self.installed))
+            .finish_non_exhaustive()
+    }
 }
 
 impl Default for FakeSpeechModels {
@@ -427,13 +442,28 @@ impl Default for FakeSpeechModels {
                 (1.0, "installing".to_owned()),
             ]),
             download_failure: Mutex::new(None),
+            on_download: Mutex::new(None),
         }
     }
 }
 
 impl FakeSpeechModels {
-    pub fn install(&self, asset: ModelAsset, bytes: Option<i64>) {
+    /// Makes `asset` installed with `bytes` on disk.
+    pub fn set_installed(&self, asset: ModelAsset, bytes: Option<i64>) {
         lock(&self.installed).insert(asset, bytes);
+    }
+
+    /// The `(fraction, phase)` reports every download makes, in order.
+    pub fn set_progress(&self, steps: Vec<(f64, &str)>) {
+        *lock(&self.progress) = steps
+            .into_iter()
+            .map(|(fraction, phase)| (fraction, phase.to_owned()))
+            .collect();
+    }
+
+    /// Makes every download fail with `text` after its progress reports.
+    pub fn fail_downloads(&self, text: Option<&str>) {
+        *lock(&self.download_failure) = text.map(str::to_owned);
     }
 }
 
@@ -452,6 +482,9 @@ impl SpeechModels for FakeSpeechModels {
         progress: &mut dyn FnMut(f64, &str),
     ) -> BoundaryResult<()> {
         lock(&self.downloads).push(asset);
+        if let Some(hook) = lock(&self.on_download).as_ref() {
+            hook(asset);
+        }
         let steps = lock(&self.progress).clone();
         for (fraction, phase) in &steps {
             progress(*fraction, phase);
@@ -470,13 +503,26 @@ impl SpeechModels for FakeSpeechModels {
     }
 }
 
+/// A hook a test installs to observe the host while a probe runs: the
+/// Swift view model published `isTesting` while the request was out, and
+/// a blocking host shows that state only to whoever the fake calls back.
+pub type ProbeHook = Box<dyn Fn(&Settings) + Send + Sync>;
+
 /// Answers the probe and the Codex sign-in with what a test set.
-#[derive(Debug)]
 pub struct FakeLlmService {
     pub probe_result: Mutex<Result<String, String>>,
     pub codex_account: Mutex<Result<String, String>>,
     pub codex_models: Mutex<Result<Vec<CodexModel>, CodexModelsError>>,
     pub probes: Mutex<Vec<Settings>>,
+    pub on_probe: Mutex<Option<ProbeHook>>,
+}
+
+impl std::fmt::Debug for FakeLlmService {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("FakeLlmService")
+            .field("probes", &lock(&self.probes).len())
+            .finish_non_exhaustive()
+    }
 }
 
 impl Default for FakeLlmService {
@@ -488,6 +534,7 @@ impl Default for FakeLlmService {
             codex_account: Mutex::new(Err("no Codex sign-in on this computer".to_owned())),
             codex_models: Mutex::new(Ok(Vec::new())),
             probes: Mutex::new(Vec::new()),
+            on_probe: Mutex::new(None),
         }
     }
 }
@@ -495,6 +542,9 @@ impl Default for FakeLlmService {
 impl LlmService for FakeLlmService {
     fn probe(&self, settings: &Settings, _api_key: Option<&str>) -> BoundaryResult<String> {
         lock(&self.probes).push(settings.clone());
+        if let Some(hook) = lock(&self.on_probe).as_ref() {
+            hook(settings);
+        }
         lock(&self.probe_result).clone().map_err(Into::into)
     }
 
@@ -687,25 +737,32 @@ impl FolderUsage for FakeFolderUsage {
     }
 }
 
-/// The files that "exist". Swift: `FileManager` over a temporary folder.
+/// The files that "exist", and what the host removed. Swift:
+/// `FileManager` over a temporary folder.
 #[derive(Debug, Default)]
 pub struct FakeFileSystem {
     pub existing: Mutex<BTreeSet<PathBuf>>,
+    /// Every path `remove` was asked for, in order.
+    pub removed: Mutex<Vec<PathBuf>>,
 }
 
 impl FakeFileSystem {
+    /// Makes `path` exist.
     pub fn create(&self, path: impl Into<PathBuf>) {
         lock(&self.existing).insert(path.into());
-    }
-
-    pub fn remove(&self, path: &Path) {
-        lock(&self.existing).remove(path);
     }
 }
 
 impl FileSystem for FakeFileSystem {
     fn exists(&self, path: &Path) -> bool {
         lock(&self.existing).contains(path)
+    }
+
+    /// The path and everything under it stop existing.
+    fn remove(&self, path: &Path) -> BoundaryResult<()> {
+        lock(&self.removed).push(path.to_path_buf());
+        lock(&self.existing).retain(|existing| !existing.starts_with(path));
+        Ok(())
     }
 }
 

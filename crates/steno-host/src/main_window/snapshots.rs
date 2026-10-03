@@ -382,6 +382,7 @@ fn export_snapshot(detail: &MeetingDetailViewModel, zone: FixedOffset) -> Detail
 pub fn detail_snapshot(
     detail: &MeetingDetailViewModel,
     playing: Option<Uuid>,
+    now: DateTime<Utc>,
     zone: FixedOffset,
 ) -> Option<MeetingDetailSnapshot> {
     let export = detail.export.as_ref()?;
@@ -406,9 +407,9 @@ pub fn detail_snapshot(
 
     Some(MeetingDetailSnapshot {
         id: meeting.id,
-        // The detail heading shows the stored title; the derived one is
-        // the list's (Swift passed no calendar here either).
-        title: meeting.title.clone(),
+        // The heading derives the title like the list does ("Monday 10:06"
+        // for the intake default). Swift: `meeting.displayTitle()`.
+        title: display_title(meeting, now, zone),
         started_at: meeting.started_at,
         duration_seconds: meeting.duration,
         language: meeting.language.as_ref().map(|tag| tag.as_str().to_owned()),

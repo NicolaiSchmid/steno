@@ -43,7 +43,8 @@ pub fn permission_is_required(kind: PermissionKind) -> bool {
 }
 
 /// The sentence a control shows when this permission is denied.
-/// Swift: `PermissionKind.deniedMessage`.
+/// Swift: `PermissionKind.deniedMessage` in
+/// `apps/macos/Steno/Recording/RecordingControlPresentation.swift`.
 #[must_use]
 pub fn denied_message(kind: PermissionKind) -> &'static str {
     match kind {
@@ -78,6 +79,8 @@ impl LoginItemStatus {
     }
 }
 
+/// The login item (`SMAppService` on the Mac; WP8 implements it per OS in
+/// the shell). The fake records every `set_enabled` and each pane opened.
 /// Swift: `LoginItemControlling`.
 pub trait LoginItem: Send + Sync {
     fn status(&self) -> LoginItemStatus;
@@ -85,7 +88,9 @@ pub trait LoginItem: Send + Sync {
     fn open_system_settings(&self);
 }
 
-/// Swift: `PermissionsChecking`.
+/// TCC on the Mac, the portal or nothing elsewhere; WP8 implements it per
+/// OS in the shell. The fake answers what a test set and records every
+/// request and pane opened. Swift: `PermissionsChecking`.
 pub trait Permissions: Send + Sync {
     fn state(&self, kind: PermissionKind) -> PermissionState;
     /// Runs the system prompt (or the probe) and returns the resulting state.
@@ -103,7 +108,8 @@ pub enum UpdateOutcome {
     Failed(String),
 }
 
-/// Swift: `UpdaterControlling`.
+/// Sparkle today, the Tauri updater at cutover (WP8). The fake holds the
+/// flags and counts the checks. Swift: `UpdaterControlling`.
 pub trait Updater: Send + Sync {
     fn can_check_for_updates(&self) -> bool;
     fn automatically_checks(&self) -> bool;
@@ -200,7 +206,8 @@ pub trait Pipeline: Send + Sync {
     fn keep_all_recordings(&self) -> BoundaryResult<i64>;
 }
 
-/// The speech model store (WP4). Swift: `ModelStore`.
+/// The speech model store (WP4). Swift: `ModelStore` in
+/// `Sources/StenoSpeech/Models/ModelStore.swift`.
 pub trait SpeechModels: Send + Sync {
     fn is_installed(&self, asset: ModelAsset) -> bool;
     fn installed_size(&self, asset: ModelAsset) -> Option<i64>;
@@ -214,7 +221,8 @@ pub trait SpeechModels: Send + Sync {
     fn remove(&self, asset: ModelAsset) -> BoundaryResult<()>;
 }
 
-/// One entry of the Codex backend's model list. Swift: `CodexModel`.
+/// One entry of the Codex backend's model list. Swift: `CodexModel` in
+/// `Sources/StenoLLM/Wire/Responses.swift`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CodexModel {
     pub slug: String,
@@ -250,7 +258,8 @@ pub trait ExportValidator: Send + Sync {
     fn validate(&self, settings: &ObsidianSettings) -> BoundaryResult<()>;
 }
 
-/// Where the handover listener stands. Swift: `ListenerState`.
+/// Where the handover listener stands. Swift: `ListenerState` in
+/// `Sources/StenoHandover/HandoverService.swift`.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum ListenerState {
     #[default]
@@ -260,14 +269,15 @@ pub enum ListenerState {
 }
 
 /// An open pairing window: when it closes and what the QR code carries.
-/// Swift: `PairingPayload`.
+/// Swift: `PairingPayload` in `Sources/StenoHandover/Pairing/PairingPayload.swift`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PairingCode {
     pub expires_at: DateTime<Utc>,
     pub url_string: String,
 }
 
-/// The Mac side of the phone handover (WP7). Swift: `HandoverService`.
+/// The Mac side of the phone handover (WP7). Swift: `HandoverService` in
+/// `Sources/StenoHandover/HandoverService.swift`.
 pub trait Handover: Send + Sync {
     fn state(&self) -> ListenerState;
     /// The identity's id as the page shows it.
@@ -282,33 +292,43 @@ pub trait Handover: Send + Sync {
     fn receipts(&self) -> Vec<HandoverReceipt>;
 }
 
-/// Draws a QR code as a PNG, base64. Swift: `QRCode.png(for:)`.
+/// Draws a QR code as a PNG, base64. Swift: `QRCode.png(for:)` in
+/// `apps/macos/Steno/Services/QRCode.swift`.
 pub trait QrEncoder: Send + Sync {
     fn png_base64(&self, text: &str) -> Option<String>;
 }
 
-/// One input device. Swift: `AudioDeviceInfo`.
+/// One input device. Swift: `AudioDeviceInfo` in
+/// `Sources/StenoAudio/Capture/AudioDevices.swift`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InputDevice {
     pub uid: String,
     pub name: String,
 }
 
-/// Lists the input devices. Swift: `AudioDevices.inputs()`.
+/// Lists the input devices. Swift: `AudioDevices.inputs()` in
+/// `Sources/StenoAudio/Capture/AudioDevices.swift`.
 pub trait AudioDevices: Send + Sync {
     fn inputs(&self) -> BoundaryResult<Vec<InputDevice>>;
 }
 
-/// Sums a folder. Swift: `AudioFolderUsage.measure`; the view model's
+/// Sums a folder. Swift: `AudioFolderUsage.measure` in
+/// `Sources/StenoCore/Audio/AudioFolderUsage.swift`; the view model's
 /// default treated a folder that does not exist as zero.
 pub trait FolderUsage: Send + Sync {
     fn measure(&self, folder: &Path) -> BoundaryResult<i64>;
 }
 
-/// Whether a file is on disk; the view models ask before offering to play
-/// a clip or reveal a recording. Swift: `FileManager.fileExists`.
+/// The files the view models touch: whether one is on disk before offering
+/// to play a clip or reveal a recording, and the removal of a deleted
+/// meeting's files. [`RealFileSystem`] is the product's implementation;
+/// the fake keeps a set of paths, so no clip or master has to exist.
+/// Swift: `FileManager.fileExists` and `removeItem`.
 pub trait FileSystem: Send + Sync {
     fn exists(&self, path: &Path) -> bool;
+    /// Removes a file, or a folder with everything in it; a path that is
+    /// not there is not an error.
+    fn remove(&self, path: &Path) -> BoundaryResult<()>;
 }
 
 /// Plays a speaker's sample clip, one at a time. Swift: `ClipPlayer`.
@@ -332,7 +352,8 @@ pub trait Opener: Send + Sync {
 }
 
 /// The two flags the Swift app kept in `UserDefaults`: whether onboarding
-/// has finished and whether the login item was registered once.
+/// has finished and whether the login item was registered once. The shell
+/// (`WP6b`) keeps them in its own settings file; the fake holds a map.
 pub trait Preferences: Send + Sync {
     fn flag(&self, key: &str) -> bool;
     fn set_flag(&self, key: &str, value: bool);
@@ -372,5 +393,17 @@ pub struct RealFileSystem;
 impl FileSystem for RealFileSystem {
     fn exists(&self, path: &Path) -> bool {
         path.exists()
+    }
+
+    fn remove(&self, path: &Path) -> BoundaryResult<()> {
+        let outcome = if path.is_dir() {
+            std::fs::remove_dir_all(path)
+        } else {
+            std::fs::remove_file(path)
+        };
+        match outcome {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            outcome => Ok(outcome?),
+        }
     }
 }

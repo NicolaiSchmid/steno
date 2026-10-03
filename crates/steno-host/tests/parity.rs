@@ -25,9 +25,10 @@ use std::path::{Path, PathBuf};
 use common::*;
 use serde_json::{Value, json};
 use steno_bridge::{
-    AssetIdParams, BridgeHost, BridgeTopic, ConfirmDestructiveParams, ExportUpdateParams,
-    PermissionKind, PermissionState, RecordingRetention, RecordingState, RetentionMode,
-    SetRetentionParams, SetStringParams, SpeakerOptionsParams, SummariesUpdateParams,
+    AssetIdParams, BridgeHost, BridgeTopic, BridgeWindow, ConfirmDestructiveParams,
+    ExportUpdateParams, PermissionKind, PermissionState, RecordingRetention, RecordingState,
+    RetentionMode, SetRetentionParams, SetStringParams, SpeakerOptionsParams,
+    SummariesUpdateParams,
 };
 use steno_core::paths::file_url;
 use steno_core::{AudioRetention, HandoverReceipt, HandoverState, LlmProvider, PipelineStage};
@@ -447,9 +448,11 @@ fn settings_transcription() {
         .seed(|_, fakes| {
             fakes
                 .speech_models
-                .install(ModelAsset::ParakeetV3, Some(485_000_000));
-            *fakes.speech_models.progress.lock().unwrap() = vec![(0.35, "Downloading".to_owned())];
-            *fakes.speech_models.download_failure.lock().unwrap() = Some("offline".to_owned());
+                .set_installed(ModelAsset::ParakeetV3, Some(485_000_000));
+            fakes
+                .speech_models
+                .set_progress(vec![(0.35, "Downloading")]);
+            fakes.speech_models.fail_downloads(Some("offline"));
         })
         .build();
     // The download's one progress report publishes the snapshot the fixture
@@ -460,6 +463,7 @@ fn settings_transcription() {
             asset_id: "offlineDiarizer".to_owned(),
         })
         .unwrap();
+    harness.wait_for_download(1);
     let published = harness.sink.all(BridgeTopic::SettingsTranscription);
     let mid_download = published
         .iter()
@@ -656,14 +660,14 @@ fn onboarding_permissions() {
         .seed(|store, fakes| {
             set_retention(store, AudioRetention::KeepDays(30));
             for kind in PermissionKind::ALL {
-                fakes.permissions.set(*kind, PermissionState::Unknown);
+                fakes.permissions.set_state(*kind, PermissionState::Unknown);
             }
             fakes
                 .permissions
-                .set(PermissionKind::Microphone, PermissionState::Granted);
+                .set_state(PermissionKind::Microphone, PermissionState::Granted);
             fakes
                 .permissions
-                .answer(PermissionKind::SystemAudio, PermissionState::Unknown);
+                .set_answer(PermissionKind::SystemAudio, PermissionState::Unknown);
         })
         .build();
     harness
@@ -713,7 +717,7 @@ fn onboarding_setup() {
             set_retention(store, AudioRetention::KeepDays(30));
             fakes
                 .permissions
-                .set(PermissionKind::LocalNetwork, PermissionState::Unknown);
+                .set_state(PermissionKind::LocalNetwork, PermissionState::Unknown);
             *fakes.export_validator.failure.lock().unwrap() = Some(
                 "The Obsidian vault at /Users/nicolai/Notes/Work Vault does not exist.".to_owned(),
             );
@@ -725,8 +729,11 @@ fn onboarding_setup() {
             kind: PermissionKind::LocalNetwork,
         })
         .unwrap();
+    // The form on page 2 sends the Settings method name from the
+    // onboarding window.
     harness
         .host
+        .for_window(BridgeWindow::Onboarding)
         .settings_summaries_update(SummariesUpdateParams {
             base_url: None,
             model: Some("qwen3-8b".to_owned()),

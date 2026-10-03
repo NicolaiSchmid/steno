@@ -12,24 +12,60 @@
 //! window that shows it (`app` to the main and the Settings window). The
 //! Swift hosts loaded their view models when a window opened; this one
 //! loads them all at construction, so a window that opens later publishes
-//! at once on its `page.ready`.
+//! at once on its `page.ready`, and it re-reads the Settings sections when
+//! the stored settings change under them ([`Host::store_changed`], a write
+//! from the onboarding window), which is what reopening the Swift window
+//! did.
+//!
+//! # Which window is calling
+//!
+//! The shell answers each window's commands through [`Host::for_window`],
+//! a clone of the host bound to that window (`Dispatcher::new(host
+//! .for_window(BridgeWindow::Onboarding))`). Four methods depend on it: the
+//! Summaries form sends the Settings window's method names
+//! (`settings.summaries.selectPreset`, `.update`, `.test`,
+//! `.refreshCodexStatus`) from both windows, and each window answers them
+//! on its own `LlmSettingsViewModel` and republishes its own topic, as
+//! `SummariesCommands` did in Swift. Every other method answers the same
+//! from any window. A host that was never bound ([`Host::new`]) answers as
+//! the main and Settings windows do.
+//!
+//! # Publishing
+//!
+//! Every command publishes the topics it changed before it returns, and
+//! the page treats each snapshot as a full state, so the order in which
+//! the reply and the snapshots arrive decides nothing (the dispatcher's
+//! doc says why they can cross). Snapshots are built under the host's
+//! lock and emitted after it is released, in build order (one publisher
+//! runs at a time), so a sink may read [`Host::snapshot`] from inside
+//! `emit`, and a slow sink never holds a command or the recorder. A sink
+//! must not run a command from inside `emit`.
+//!
+//! The throttled `recording` topic is flushed by a thread the host owns:
+//! armed when a publish leaves it pending, asleep otherwise, gone with the
+//! last clone of the host. The shell has no timer to run for it. The one
+//! poll the shell drives is the pairing poll, [`Host::refresh_pairing`],
+//! every two seconds while a code is shown, as the plan says.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
+use std::sync::mpsc;
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError, RwLock, Weak};
+use std::thread;
 use std::time::{Duration, Instant};
 
 use chrono::{DateTime, FixedOffset, Utc};
 use serde_json::{Value, to_value};
 use steno_bridge::{
-    AppPhone, AssetIdParams, BridgeError, BridgeHost, BridgeTopic, BridgeWindow, ChosenPathReply,
-    ConfirmDestructiveParams, ConfirmReply, DeviceIdParams, EventSink, ExportUpdateParams,
-    MeetingIdParams, OpenUrlParams, Outcome, PageLayoutParams, PermissionKindParams,
-    RecordingState, SaveNotesParams, SelectSpeakerParams, SetAutomaticUpdatesParams, SetBoolParams,
-    SetFilterParams, SetQueryParams, SetRetentionParams, SetStringParams, SetTabParams,
-    SetTagFilterParams, SetTagsParams, SetTemplateParams, SettingsSection, SetupStepParams,
-    SpeakerIdParams, SpeakerOption, SpeakerOptionKind, SpeakerOptionsParams, SpeakerOptionsReply,
-    StartRecordingParams, SummariesUpdateParams, WindowParams,
+    AppPhone, AssetIdParams, BridgeError, BridgeEvent, BridgeHost, BridgeTopic, BridgeWindow,
+    ChosenPathReply, ConfirmDestructiveParams, ConfirmReply, DeviceIdParams, EventSink,
+    ExportUpdateParams, MeetingIdParams, OpenUrlParams, Outcome, PageLayoutParams, PermissionKind,
+    PermissionKindParams, RecordingState, SaveNotesParams, SelectSpeakerParams,
+    SetAutomaticUpdatesParams, SetBoolParams, SetFilterParams, SetQueryParams, SetRetentionParams,
+    SetStringParams, SetTabParams, SetTagFilterParams, SetTagsParams, SetTemplateParams,
+    SettingsSection, SetupStepParams, SpeakerIdParams, SpeakerOption, SpeakerOptionKind,
+    SpeakerOptionsParams, SpeakerOptionsReply, StartRecordingParams, SummariesUpdateParams,
+    WindowParams,
 };
 use steno_core::paths::path_from_file_url;
 use steno_core::protocols::SecretKey;
@@ -44,8 +80,8 @@ use crate::publisher::{RECORDING_INTERVAL, TopicPublisher};
 use crate::services::Services;
 use crate::settings::{
     AudioSettingsViewModel, GeneralSettingsViewModel, LlmPreset, LlmSettingsViewModel,
-    ObsidianSettingsViewModel, PhonesSettingsViewModel, SpeechSettingsViewModel, overview,
-    snapshots as settings_snapshots, transcription::AssetState,
+    ObsidianSettingsViewModel, PhonesSettingsViewModel, SpeechSettingsViewModel, llm::Probe,
+    overview, snapshots as settings_snapshots, transcription::AssetState,
 };
 use crate::speakers::{OptionKind, SpeakerOption as ModelOption};
 use crate::speech::{ModelAsset, SpeechEngineId};
@@ -120,22 +156,102 @@ struct Inner {
     publisher: TopicPublisher,
 }
 
-/// Swift: `MainWindowBridge`, `SettingsBridge` and `OnboardingBridge` in
-/// one, over `AppController`.
-pub struct Host {
+/// What every clone of a [`Host`] shares: the store, the services, the
+/// view models and the sink.
+struct Shared {
     store: Arc<Store>,
     services: Services,
     config: HostConfig,
     inner: Mutex<Inner>,
     sink: Mutex<Option<Arc<dyn EventSink>>>,
+    /// Held for the whole of a publish, so snapshots reach the sink in the
+    /// order they were built while `inner` is free between the two.
+    publishing: Mutex<()>,
+    dialogs: RwLock<Dialogs>,
+    /// The thread that flushes a throttled topic when its interval is up.
+    flusher: thread::Thread,
+}
+
+/// The shell's two native surfaces.
+struct Dialogs {
     confirm: Confirm,
     choose_folder: ChooseFolder,
+}
+
+impl Drop for Shared {
+    fn drop(&mut self) {
+        // The flush thread holds a `Weak`; woken, it finds no host and ends.
+        self.flusher.unpark();
+    }
+}
+
+/// Swift: `MainWindowBridge`, `SettingsBridge` and `OnboardingBridge` in
+/// one, over `AppController`. Cheap to clone: every clone is a handle on
+/// the same view models, bound to the window it answers for
+/// ([`Host::for_window`]).
+///
+/// The whole drive, without a shell:
+///
+/// ```
+/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// use std::sync::Arc;
+/// use steno_bridge::{BridgeEvent, BridgeHost, BridgeTopic, BridgeWindow, EventSink};
+/// use steno_core::Store;
+/// use steno_host::fakes::FakeServices;
+/// use steno_host::{Host, HostConfig};
+///
+/// // Where the snapshots go: the shell's window channels, here a list.
+/// #[derive(Default)]
+/// struct Sink(std::sync::Mutex<Vec<BridgeTopic>>);
+/// impl EventSink for Sink {
+///     fn emit(&self, event: BridgeEvent) {
+///         self.0.lock().unwrap().push(event.topic);
+///     }
+/// }
+///
+/// let now = steno_core::json::parse_date("2026-09-29T12:50:00.000Z").unwrap();
+/// let store = Arc::new(Store::in_memory()?);
+/// let fakes = FakeServices::new(now);
+/// let host = Host::new(store.clone(), fakes.services(), HostConfig::default())?
+///     .with_dialogs(Box::new(|_| true), Box::new(|_| None));
+/// let sink = Arc::new(Sink::default());
+/// host.attach(sink.clone());
+///
+/// // `page.ready` publishes every topic once, in order.
+/// host.page_ready()?;
+/// assert_eq!(sink.0.lock().unwrap().len(), 12);
+///
+/// // A write from elsewhere (the pipeline, another process): the host
+/// // reloads what Swift followed through observation and republishes.
+/// let mut settings = store.settings()?;
+/// settings.meeting_detection_enabled = false;
+/// store.save_settings(&settings)?;
+/// host.store_changed();
+/// assert_eq!(
+///     host.snapshot(BridgeTopic::SettingsGeneral).unwrap()["detectionEnabled"],
+///     false
+/// );
+///
+/// // One dispatcher per window answers that window's commands.
+/// let onboarding = steno_bridge::Dispatcher::new(host.for_window(BridgeWindow::Onboarding));
+/// assert_eq!(
+///     onboarding.dispatch_json(r#"{"id":"1","method":"onboarding.back","params":null}"#),
+///     r#"{"id":"1"}"#
+/// );
+/// # Ok(())
+/// # }
+/// ```
+#[derive(Clone)]
+pub struct Host {
+    shared: Arc<Shared>,
+    window: BridgeWindow,
 }
 
 impl std::fmt::Debug for Host {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Host")
-            .field("config", &self.config)
+            .field("window", &self.window)
+            .field("config", &self.shared.config)
             .finish_non_exhaustive()
     }
 }
@@ -246,7 +362,13 @@ impl Host {
             TOPICS.to_vec(),
             BTreeMap::from([(BridgeTopic::Recording, RECORDING_INTERVAL)]),
         );
-        Ok(Host {
+        // The flush thread gets its handle on the host once the host exists.
+        let (handle, receiver) = mpsc::channel::<Weak<Shared>>();
+        let flusher = thread::Builder::new()
+            .name("steno-host-flush".to_owned())
+            .spawn(move || flush_loop(&receiver))
+            .map_err(StoreError::Io)?;
+        let shared = Arc::new(Shared {
             store,
             services,
             config,
@@ -268,33 +390,74 @@ impl Host {
                 publisher,
             }),
             sink: Mutex::new(None),
-            confirm: Box::new(|_| false),
-            choose_folder: Box::new(|_| None),
+            publishing: Mutex::new(()),
+            dialogs: RwLock::new(Dialogs {
+                confirm: Box::new(|_| false),
+                choose_folder: Box::new(|_| None),
+            }),
+            flusher: flusher.thread().clone(),
+        });
+        // The thread outlives this send only while a host exists.
+        let _ = handle.send(Arc::downgrade(&shared));
+        Ok(Host {
+            shared,
+            window: BridgeWindow::Main,
         })
     }
 
-    /// The shell's two native surfaces. Without them every destructive
-    /// prompt declines and every chooser cancels.
+    /// The shell's two native surfaces, shared by every clone. Without
+    /// them every destructive prompt declines and every chooser cancels.
     #[must_use]
-    pub fn with_dialogs(mut self, confirm: Confirm, choose_folder: ChooseFolder) -> Self {
-        self.confirm = confirm;
-        self.choose_folder = choose_folder;
+    pub fn with_dialogs(self, confirm: Confirm, choose_folder: ChooseFolder) -> Self {
+        *self
+            .shared
+            .dialogs
+            .write()
+            .unwrap_or_else(PoisonError::into_inner) = Dialogs {
+            confirm,
+            choose_folder,
+        };
         self
+    }
+
+    /// Asks the shell's destructive prompt.
+    fn confirm(&self, prompt: &ConfirmDestructiveParams) -> bool {
+        (self
+            .shared
+            .dialogs
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .confirm)(prompt)
+    }
+
+    /// The same host, answering for `window`: see the module doc.
+    #[must_use]
+    pub fn for_window(&self, window: BridgeWindow) -> Host {
+        Host {
+            shared: self.shared.clone(),
+            window,
+        }
+    }
+
+    /// The window this handle answers for.
+    #[must_use]
+    pub fn window(&self) -> BridgeWindow {
+        self.window
     }
 
     /// The sink snapshots go to. Swift: `attach(_:)`.
     pub fn attach(&self, sink: Arc<dyn EventSink>) {
-        *lock(&self.sink) = Some(sink);
+        *lock(&self.shared.sink) = Some(sink);
     }
 
     #[must_use]
     pub fn services(&self) -> &Services {
-        &self.services
+        &self.shared.services
     }
 
     #[must_use]
     pub fn store(&self) -> &Arc<Store> {
-        &self.store
+        &self.shared.store
     }
 
     /// The iPhone card for the `app` topic: the first paired device, as
@@ -314,11 +477,11 @@ impl Host {
     }
 
     fn now(&self) -> DateTime<Utc> {
-        self.services.clock.now()
+        self.shared.services.clock.now()
     }
 
     fn lock(&self) -> MutexGuard<'_, Inner> {
-        lock(&self.inner)
+        lock(&self.shared.inner)
     }
 
     // Publishing
@@ -338,10 +501,10 @@ impl Host {
             BridgeTopic::App => to_value(main_snapshots::app_snapshot(
                 &inner.app,
                 inner.has_meetings,
-                &self.config.version,
+                &self.shared.config.version,
             )),
             BridgeTopic::Recording => to_value(main_snapshots::recording_snapshot(
-                &self.services.recorder.status(),
+                &self.shared.services.recorder.status(),
             )),
             BridgeTopic::Progress => to_value(main_snapshots::progress_snapshot(&inner.progress)),
             BridgeTopic::MeetingsList => {
@@ -354,20 +517,25 @@ impl Host {
                 let playing = inner
                     .detail
                     .as_ref()
-                    .and_then(|detail| detail.speakers.playing(&*self.services.clip_player));
+                    .and_then(|detail| detail.speakers.playing(&*self.shared.services.clip_player));
                 inner
                     .detail
                     .as_ref()
                     .and_then(|detail| {
-                        main_snapshots::detail_snapshot(detail, playing, self.config.zone)
+                        main_snapshots::detail_snapshot(
+                            detail,
+                            playing,
+                            now,
+                            self.shared.config.zone,
+                        )
                     })
                     .map_or(Ok(Value::Null), to_value)
             }
             BridgeTopic::SettingsGeneral => to_value(settings_snapshots::general(
                 &inner.general,
-                &self.services,
+                &self.shared.services,
                 inner.subtitle(SettingsSection::General),
-                &self.config.version,
+                &self.shared.config.version,
             )),
             BridgeTopic::SettingsRecording => to_value(settings_snapshots::recording(
                 &inner.audio,
@@ -387,7 +555,7 @@ impl Host {
             )),
             BridgeTopic::SettingsPhone => to_value(settings_snapshots::phone(
                 &inner.phones,
-                &self.services,
+                &self.shared.services,
                 inner.subtitle(SettingsSection::Phone),
             )),
             BridgeTopic::Onboarding => to_value(onboarding::snapshot(&inner.onboarding)),
@@ -396,33 +564,44 @@ impl Host {
     }
 
     /// Flushes every pending topic whose interval is up: builds the
-    /// snapshot, emits it once the page is ready, and runs the publish's
-    /// side effects (a deep link is consumed by the publish that carried
-    /// it). Called at the end of every command; the shell calls
-    /// [`Host::flush_due`] when [`Host::next_flush_due`] elapses.
+    /// snapshots under the lock, emits them once it is released and the
+    /// page is ready, in build order, and runs the publish's side effects
+    /// (a deep link is consumed by the publish that carried it). Called at
+    /// the end of every command and by the flush thread; a throttled topic
+    /// left pending arms that thread.
     fn publish(&self) {
+        let _publishing = lock(&self.shared.publishing);
         // Bounded: each pass only schedules what a consumed request changed.
         for _ in 0..4 {
-            let mut inner = self.lock();
-            let due = inner.publisher.take_due(Instant::now());
-            if due.is_empty() {
-                return;
-            }
-            let page_ready = inner.publisher.is_page_ready();
-            let sink = lock(&self.sink).clone();
-            for topic in due {
-                let snapshot = self.build(&mut inner, topic);
-                let emitted = match (&sink, snapshot) {
-                    (Some(sink), Some(payload)) if page_ready => {
-                        sink.emit(steno_bridge::BridgeEvent::new(topic, payload));
-                        true
+            let (sink, batch) = {
+                let mut inner = self.lock();
+                let due = inner.publisher.take_due(Instant::now());
+                if due.is_empty() {
+                    break;
+                }
+                let page_ready = inner.publisher.is_page_ready();
+                let sink = lock(&self.shared.sink).clone();
+                let mut batch = Vec::with_capacity(due.len());
+                for topic in due {
+                    let snapshot = self.build(&mut inner, topic);
+                    let emitted = page_ready && sink.is_some() && snapshot.is_some();
+                    if topic == BridgeTopic::App {
+                        Self::did_publish_app(&mut inner, emitted);
                     }
-                    _ => false,
-                };
-                if topic == BridgeTopic::App {
-                    Self::did_publish_app(&mut inner, emitted);
+                    if let (true, Some(payload)) = (emitted, snapshot) {
+                        batch.push(BridgeEvent::new(topic, payload));
+                    }
+                }
+                (sink, batch)
+            };
+            if let Some(sink) = sink {
+                for event in batch {
+                    sink.emit(event);
                 }
             }
+        }
+        if self.next_flush_due().is_some() {
+            self.shared.flusher.unpark();
         }
     }
 
@@ -471,28 +650,27 @@ impl Host {
             return;
         }
         if let Some(mut leaving) = inner.detail.take() {
-            leaving.view_disappeared(&*self.services.pipeline, &*self.services.clip_player);
+            leaving.view_disappeared(
+                &*self.shared.services.pipeline,
+                &*self.shared.services.clip_player,
+            );
         }
         if let Some(selection) = selection {
             let mut detail =
                 MeetingDetailViewModel::new(selection, inner.app.stored_settings.as_ref());
             detail.reload(
-                &self.store,
-                &*self.services.file_system,
-                &*self.services.pipeline,
+                &self.shared.store,
+                &*self.shared.services.file_system,
+                &*self.shared.services.pipeline,
             );
             inner.detail = Some(detail);
         }
         inner.publisher.schedule(BridgeTopic::MeetingDetail);
     }
 
-    /// Flushes what is due now; for the shell's timer after
-    /// [`Host::next_flush_due`].
-    pub fn flush_due(&self) {
-        self.publish();
-    }
-
-    /// How long until a throttled topic may go out; `None` when nothing waits.
+    /// How long until a throttled topic may go out; `None` when nothing
+    /// waits on its interval. The flush thread's wake-up; a test reads it to
+    /// know a `recording` change is on its way.
     #[must_use]
     pub fn next_flush_due(&self) -> Option<Duration> {
         self.lock().publisher.next_due(Instant::now())
@@ -502,34 +680,32 @@ impl Host {
 
     /// The store changed (the pipeline wrote, a recording started, another
     /// process saved): reload what Swift followed through observation and
-    /// republish it.
+    /// republish it. When the stored settings changed, the Settings
+    /// sections load again too (an unsaved draft in one of them is replaced
+    /// by the stored values, as reopening the Swift window did); a write
+    /// that left the settings alone keeps every draft.
     pub fn store_changed(&self) {
         {
             let mut guard = self.lock();
             let inner = &mut *guard;
             let now = self.now();
-            inner.list.reload(&self.store);
+            inner.list.reload(&self.shared.store);
             inner.progress.meetings_changed(&inner.list.all, now);
-            inner.app.stored_settings = self.store.settings().ok();
             if let Some(detail) = inner.detail.as_mut() {
                 detail.reload(
-                    &self.store,
-                    &*self.services.file_system,
-                    &*self.services.pipeline,
+                    &self.shared.store,
+                    &*self.shared.services.file_system,
+                    &*self.shared.services.pipeline,
                 );
-                if let Some(settings) = &inner.app.stored_settings {
-                    detail.apply_settings(settings);
-                }
             }
             for topic in [
-                BridgeTopic::App,
                 BridgeTopic::Progress,
                 BridgeTopic::MeetingsList,
                 BridgeTopic::MeetingDetail,
             ] {
                 inner.publisher.schedule(topic);
             }
-            self.refresh_subtitles(inner);
+            self.follow_settings(inner, true);
         }
         self.publish();
     }
@@ -555,20 +731,25 @@ impl Host {
     pub fn phones_changed(&self) {
         {
             let mut inner = self.lock();
-            inner.phones.refresh(&self.services);
+            inner.phones.refresh(&self.shared.services);
             inner.publisher.schedule(BridgeTopic::SettingsPhone);
             self.refresh_subtitles(&mut inner);
         }
         self.publish();
     }
 
-    /// The pairing poll: a phone that arrived closes the code, a code that
-    /// ran out closes itself. Swift polled every two seconds.
+    /// The pairing poll, which the shell drives: every two seconds while
+    /// `settings.iphone` shows a code (Swift's `pairingPoll`), a phone that
+    /// arrived closes the code and a code that ran out closes itself. The
+    /// host has no timer for this; the flush thread covers the publisher
+    /// only.
     pub fn refresh_pairing(&self) {
         {
             let mut inner = self.lock();
             let now = self.now();
-            inner.phones.refresh_after_pairing(&self.services, now);
+            inner
+                .phones
+                .refresh_after_pairing(&self.shared.services, now);
             inner.publisher.schedule(BridgeTopic::SettingsPhone);
             self.refresh_subtitles(&mut inner);
         }
@@ -599,28 +780,37 @@ impl Host {
     /// Whether the onboarding window should open at launch.
     #[must_use]
     pub fn should_open_onboarding(&self) -> bool {
-        OnboardingViewModel::should_open(&self.store, &self.services)
+        OnboardingViewModel::should_open(&self.shared.store, &self.shared.services)
     }
 
     /// The first launch registers the login item when the setting says so.
     /// Swift: `AppController.registerLoginItemOnFirstLaunch`.
     pub fn register_login_item_on_first_launch(&self) {
-        let preferences = &self.services.preferences;
+        let preferences = &self.shared.services.preferences;
         if preferences.flag(LOGIN_ITEM_REGISTERED_KEY) {
             return;
         }
-        let Ok(settings) = self.store.settings() else {
+        let Ok(settings) = self.shared.store.settings() else {
             return;
         };
         if !settings.launch_at_login {
             return;
         }
         preferences.set_flag(LOGIN_ITEM_REGISTERED_KEY, true);
-        if self.services.login_item.status() == crate::services::LoginItemStatus::NotRegistered {
-            let _ = self.services.login_item.set_enabled(true);
+        if self.shared.services.login_item.status()
+            == crate::services::LoginItemStatus::NotRegistered
+        {
+            let _ = self.shared.services.login_item.set_enabled(true);
         }
         let mut inner = self.lock();
-        inner.general.login_item = self.services.login_item.status();
+        inner.general.login_item = self.shared.services.login_item.status();
+    }
+
+    /// The user closed the onboarding window with its own close button:
+    /// that counts as having seen the pages, so the opener returns only for
+    /// a missing required permission. Swift: `OnboardingWindow.onDisappear`.
+    pub fn onboarding_window_closed(&self) {
+        OnboardingViewModel::mark_completed(&self.shared.services);
     }
 
     // Helpers for the commands
@@ -666,7 +856,12 @@ impl Host {
     /// Runs the shell's folder chooser from `current` and `apply` on the
     /// chosen folder; the reply carries the choice, `None` when cancelled.
     fn choose(&self, current: Option<&Path>, apply: impl FnOnce(&Path)) -> ChosenPathReply {
-        let chosen = (self.choose_folder)(current);
+        let chosen = (self
+            .shared
+            .dialogs
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .choose_folder)(current);
         if let Some(folder) = &chosen {
             apply(folder);
         }
@@ -679,12 +874,12 @@ impl Host {
     fn reload_detail(&self, inner: &mut Inner) {
         if let Some(detail) = inner.detail.as_mut() {
             detail.reload(
-                &self.store,
-                &*self.services.file_system,
-                &*self.services.pipeline,
+                &self.shared.store,
+                &*self.shared.services.file_system,
+                &*self.shared.services.pipeline,
             );
         }
-        inner.list.reload(&self.store);
+        inner.list.reload(&self.shared.store);
         inner.publisher.schedule(BridgeTopic::MeetingsList);
         inner.publisher.schedule(BridgeTopic::MeetingDetail);
     }
@@ -692,7 +887,11 @@ impl Host {
     /// The sidebar subtitles follow every Settings command; a change
     /// republishes every section, as the observed map did.
     fn refresh_subtitles(&self, inner: &mut Inner) {
-        let next = overview::refresh(&self.store, &self.services, &self.config.version);
+        let next = overview::refresh(
+            &self.shared.store,
+            &self.shared.services,
+            &self.shared.config.version,
+        );
         if next != inner.subtitles {
             inner.subtitles = next;
             for topic in SECTION_TOPICS {
@@ -701,26 +900,79 @@ impl Host {
         }
     }
 
+    /// After a command that may have written settings: the stored settings
+    /// the `app` topic and the detail read are re-read, and when they
+    /// changed from another window's point of view (`reload_sections`: a
+    /// store change, an onboarding save) the Settings sections load again,
+    /// as Swift's did when its window opened. The subtitles follow either
+    /// way.
+    fn follow_settings(&self, inner: &mut Inner, reload_sections: bool) {
+        let latest = self.shared.store.settings().ok();
+        if latest != inner.app.stored_settings {
+            inner.app.stored_settings = latest;
+            inner.publisher.schedule(BridgeTopic::App);
+            if let (Some(detail), Some(settings)) =
+                (inner.detail.as_mut(), &inner.app.stored_settings)
+            {
+                detail.apply_settings(settings);
+                inner.publisher.schedule(BridgeTopic::MeetingDetail);
+            }
+            if reload_sections {
+                self.reload_sections(inner);
+            }
+        }
+        self.refresh_subtitles(inner);
+    }
+
+    /// Every Settings section's `load`, as `SettingsBridge.load()` ran them
+    /// when the window opened. A download in flight keeps its state.
+    fn reload_sections(&self, inner: &mut Inner) {
+        let store = &self.shared.store;
+        let services = &self.shared.services;
+        let secret = block_on(services.secrets.secret(&SecretKey::llm_api_key()))
+            .ok()
+            .flatten();
+        inner.general.load(store, services);
+        inner.audio.load(store, services);
+        inner.speech.load(store, services);
+        inner.llm.load(store, services, secret);
+        inner.obsidian.load(store);
+        for topic in SECTION_TOPICS {
+            inner.publisher.schedule(topic);
+        }
+    }
+
     fn settings_command(&self, topic: BridgeTopic, body: impl FnOnce(&mut Inner)) {
         {
             let mut inner = self.lock();
             body(&mut inner);
             inner.publisher.schedule(topic);
-            self.refresh_subtitles(&mut inner);
+            self.follow_settings(&mut inner, false);
         }
         self.publish();
     }
 
+    /// An onboarding command: page 2 writes the same settings the Summaries
+    /// and Export sections show, so those reload when it did. The exit is
+    /// the model's: the command that sets `finished` closes the window, as
+    /// `OnboardingWindow` did on that change, after the page saw it.
     fn onboarding_command(&self, body: impl FnOnce(&mut Inner)) {
-        {
+        let finished = {
             let mut inner = self.lock();
+            let was_finished = inner.onboarding.finished;
             body(&mut inner);
             inner.publisher.schedule(BridgeTopic::Onboarding);
-            // Page 2 writes the same settings the Summaries and Export
-            // sections show.
-            self.refresh_subtitles(&mut inner);
-        }
+            self.follow_settings(&mut inner, true);
+            !was_finished && inner.onboarding.finished
+        };
         self.publish();
+        self.run_pending_probe(BridgeWindow::Onboarding);
+        if finished {
+            self.shared
+                .services
+                .opener
+                .close_window(BridgeWindow::Onboarding);
+        }
     }
 
     fn command(&self, topics: &[BridgeTopic], body: impl FnOnce(&mut Inner)) {
@@ -734,14 +986,125 @@ impl Host {
         self.publish();
     }
 
+    /// Marks a view model busy under the lock and publishes, runs `work`
+    /// with the lock released, then applies its result under the lock and
+    /// publishes again: the page sees the busy flag while a prompt or a
+    /// probe is up, and no other topic waits on it. `begin` returns `None`
+    /// when there is nothing to run. Swift awaited inside the model, on the
+    /// main actor, which blocked nothing else.
+    fn outside_lock<W, R>(
+        &self,
+        topic: BridgeTopic,
+        begin: impl FnOnce(&mut Inner) -> Option<W>,
+        work: impl FnOnce(W) -> R,
+        finish: impl FnOnce(&mut Inner, R),
+    ) {
+        let work_item = {
+            let mut inner = self.lock();
+            let work_item = begin(&mut inner);
+            inner.publisher.schedule(topic);
+            self.refresh_subtitles(&mut inner);
+            work_item
+        };
+        self.publish();
+        let Some(work_item) = work_item else {
+            return;
+        };
+        let result = work(work_item);
+        {
+            let mut inner = self.lock();
+            finish(&mut inner, result);
+            inner.publisher.schedule(topic);
+            self.refresh_subtitles(&mut inner);
+        }
+        self.publish();
+    }
+
+    /// The topic the window's Summaries form rides on.
+    fn summaries_topic(window: BridgeWindow) -> BridgeTopic {
+        if window == BridgeWindow::Onboarding {
+            BridgeTopic::Onboarding
+        } else {
+            BridgeTopic::SettingsSummaries
+        }
+    }
+
+    /// A command on this window's Summaries form (see the module doc): the
+    /// window's own model, its own topic, and the probe the model asked for
+    /// run outside the lock afterwards.
+    fn summaries_command(&self, body: impl FnOnce(&mut LlmSettingsViewModel)) {
+        let window = self.window;
+        {
+            let mut inner = self.lock();
+            body(inner.llm_mut(window));
+            inner.publisher.schedule(Self::summaries_topic(window));
+            self.follow_settings(&mut inner, window == BridgeWindow::Onboarding);
+        }
+        self.publish();
+        self.run_pending_probe(window);
+    }
+
+    /// Runs the probe the window's Summaries model asked for, if any:
+    /// `isTesting` goes out first, the service is called with the lock
+    /// released, the report lands and goes out.
+    fn run_pending_probe(&self, window: BridgeWindow) {
+        if !self.lock().llm_mut(window).probe_pending() {
+            return;
+        }
+        let now = self.now();
+        self.outside_lock(
+            Self::summaries_topic(window),
+            |inner| inner.llm_mut(window).begin_pending_probe(now),
+            |probe: Probe| {
+                self.shared
+                    .services
+                    .llm
+                    .probe(&probe.settings, probe.api_key.as_deref())
+            },
+            |inner, outcome| inner.llm_mut(window).finish_probe(outcome),
+        );
+    }
+
+    /// The download, on its own thread: every progress report publishes,
+    /// then the installed size or the failure.
+    fn run_download(&self, asset: ModelAsset) {
+        let outcome = self
+            .shared
+            .services
+            .speech_models
+            .download(asset, &mut |fraction, phase| {
+                {
+                    let mut inner = self.lock();
+                    inner.speech.asset_states.insert(
+                        asset,
+                        AssetState::Downloading {
+                            fraction,
+                            phase: phase.to_owned(),
+                        },
+                    );
+                    inner.publisher.schedule(BridgeTopic::SettingsTranscription);
+                }
+                self.publish();
+            });
+        self.settings_command(BridgeTopic::SettingsTranscription, |inner| {
+            let state = match outcome {
+                Ok(()) => AssetState::Installed {
+                    bytes: self.shared.services.speech_models.installed_size(asset),
+                },
+                Err(error) => AssetState::Failed(error.to_string()),
+            };
+            inner.speech.asset_states.insert(asset, state);
+        });
+    }
+
     /// Applies the keep flag, after the delete-recording prompt when
     /// `confirming`; the reply says whether the user went ahead.
     fn set_keep_audio(&self, keep: bool, confirming: bool) -> Outcome<ConfirmReply> {
-        if confirming && !(self.confirm)(&delete_recording_prompt()) {
+        if confirming && !self.confirm(&delete_recording_prompt()) {
             return Ok(ConfirmReply { confirmed: false });
         }
         self.detail_write(|detail| {
-            detail.set_keep_audio(keep, &self.store, &*self.services.pipeline);
+            detail.set_keep_audio(keep, &self.shared.store, &*self.shared.services.pipeline);
         })
         .map(|()| ConfirmReply { confirmed: true })
     }
@@ -753,7 +1116,7 @@ impl Host {
         if inner.onboarding.page == steno_bridge::OnboardingPage::Permissions
             && inner.onboarding.permissions_handled()
         {
-            inner.onboarding.advance(&self.services);
+            inner.onboarding.advance(&self.shared.services);
         }
     }
 
@@ -800,6 +1163,45 @@ impl Host {
 impl Inner {
     fn subtitle(&self, section: SettingsSection) -> &str {
         self.subtitles.get(&section).map_or("", String::as_str)
+    }
+
+    /// The Summaries model the window owns: onboarding's on page 2, the
+    /// Settings section's otherwise.
+    fn llm_mut(&mut self, window: BridgeWindow) -> &mut LlmSettingsViewModel {
+        if window == BridgeWindow::Onboarding {
+            &mut self.onboarding.llm
+        } else {
+            &mut self.llm
+        }
+    }
+}
+
+/// The flush thread: wakes when the host arms it or a throttled topic's
+/// interval is up, publishes what is due, and ends once no host is left.
+fn flush_loop(receiver: &mpsc::Receiver<Weak<Shared>>) {
+    let Ok(shared) = receiver.recv() else {
+        return;
+    };
+    loop {
+        let Some(strong) = shared.upgrade() else {
+            return;
+        };
+        let wait = lock(&strong.inner).publisher.next_due(Instant::now());
+        match wait {
+            Some(wait) if wait.is_zero() => Host {
+                shared: strong,
+                window: BridgeWindow::Main,
+            }
+            .publish(),
+            Some(wait) => {
+                drop(strong);
+                thread::park_timeout(wait);
+            }
+            None => {
+                drop(strong);
+                thread::park();
+            }
+        }
     }
 }
 
@@ -852,7 +1254,7 @@ impl BridgeHost for Host {
 
     fn meetings_set_query(&self, params: SetQueryParams) -> Outcome<()> {
         self.command(&[BridgeTopic::MeetingsList], |inner| {
-            inner.list.set_query(params.query, &self.store);
+            inner.list.set_query(params.query, &self.shared.store);
         });
         Ok(())
     }
@@ -890,18 +1292,34 @@ impl BridgeHost for Host {
             ConfirmDestructiveParams {
                 title: format!(
                     "Delete “{}”?",
-                    crate::labels::display_title(meeting, self.now(), self.config.zone)
+                    crate::labels::display_title(meeting, self.now(), self.shared.config.zone)
                 ),
                 message: DELETE_MEETING_MESSAGE.to_owned(),
                 confirm_title: "Delete".to_owned(),
             }
         };
-        let confirmed = (self.confirm)(&prompt);
+        let confirmed = self.confirm(&prompt);
         if confirmed {
-            self.command(&[BridgeTopic::MeetingsList], |inner| {
-                inner.list.delete(params.meeting_id, &self.store);
-                inner.list.reload(&self.store);
-            });
+            let now = self.now();
+            self.command(
+                &[BridgeTopic::MeetingsList, BridgeTopic::Progress],
+                |inner| {
+                    inner.list.delete(
+                        params.meeting_id,
+                        &self.shared.store,
+                        &*self.shared.services.file_system,
+                    );
+                    inner.list.reload(&self.shared.store);
+                    // The store's `deleted` event: a queued meeting's
+                    // progress entry goes with it.
+                    inner.progress.apply(
+                        &MeetingEvent::Deleted {
+                            meeting_id: params.meeting_id,
+                        },
+                        now,
+                    );
+                },
+            );
         }
         Ok(ConfirmReply { confirmed })
     }
@@ -915,7 +1333,7 @@ impl BridgeHost for Host {
     fn meeting_set_tags(&self, params: SetTagsParams) -> Outcome<()> {
         let tags = MeetingDetailViewModel::tags_from(&params.tags);
         let now = self.now();
-        self.detail_write(|detail| detail.set_tags(tags, &self.store, now))
+        self.detail_write(|detail| detail.set_tags(tags, &self.shared.store, now))
     }
 
     fn meeting_set_template(&self, params: SetTemplateParams) -> Outcome<()> {
@@ -923,19 +1341,19 @@ impl BridgeHost for Host {
         self.detail_write(|detail| {
             detail.set_template(
                 &params.template_id,
-                &self.store,
+                &self.shared.store,
                 now,
-                &*self.services.pipeline,
+                &*self.shared.services.pipeline,
             );
         })
     }
 
     fn meeting_rerun_summary(&self) -> Outcome<()> {
-        self.detail_write(|detail| detail.rerun_summary(&*self.services.pipeline))
+        self.detail_write(|detail| detail.rerun_summary(&*self.shared.services.pipeline))
     }
 
     fn meeting_reexport(&self) -> Outcome<()> {
-        self.detail_write(|detail| detail.reexport(&*self.services.pipeline))
+        self.detail_write(|detail| detail.reexport(&*self.shared.services.pipeline))
     }
 
     fn meeting_set_keep_audio(&self, params: SetBoolParams) -> Outcome<ConfirmReply> {
@@ -958,7 +1376,8 @@ impl BridgeHost for Host {
         // The page debounces typing and names the meeting, so the text is
         // written where it says, selected or not, the moment it arrives.
         let now = self.now();
-        self.store
+        self.shared
+            .store
             .update_meeting(params.meeting_id, now, |meeting| {
                 meeting.scratchpad = params.text;
                 Ok(())
@@ -978,7 +1397,7 @@ impl BridgeHost for Host {
             .and_then(|asset| path_from_file_url(&asset.url))
             .filter(|_| detail.recording_files_exist)
             .ok_or_else(|| BridgeError::not_found("The recording is no longer on this Mac."))?;
-        self.services.opener.reveal(&path);
+        self.shared.services.opener.reveal(&path);
         Ok(())
     }
 
@@ -992,7 +1411,7 @@ impl BridgeHost for Host {
             .map(|receipt| Path::new(&receipt.root).join(&receipt.folder))
             .next()
             .ok_or_else(|| BridgeError::not_found("Nothing has been exported yet."))?;
-        self.services.opener.reveal(&folder);
+        self.shared.services.opener.reveal(&folder);
         Ok(())
     }
 
@@ -1020,13 +1439,13 @@ impl BridgeHost for Host {
             let outcome = Self::with_detail(&mut inner, |detail| {
                 if detail
                     .speakers
-                    .select(&option, params.speaker_id, &self.store, now)
+                    .select(&option, params.speaker_id, &self.shared.store, now)
                 {
                     detail.speakers_changed();
                 }
                 // The page has no "picker closed" moment the host can see;
                 // one re-export per change is idempotent.
-                detail.picker_closed(&*self.services.pipeline);
+                detail.picker_closed(&*self.shared.services.pipeline);
             });
             self.reload_detail(&mut inner);
             outcome
@@ -1039,12 +1458,16 @@ impl BridgeHost for Host {
         self.detail_command(|detail| {
             detail
                 .speakers
-                .play(params.speaker_id, &*self.services.clip_player);
+                .play(params.speaker_id, &*self.shared.services.clip_player);
         })
     }
 
     fn speakers_stop(&self) -> Outcome<()> {
-        self.detail_command(|detail| detail.speakers.stop_playback(&*self.services.clip_player))
+        self.detail_command(|detail| {
+            detail
+                .speakers
+                .stop_playback(&*self.shared.services.clip_player);
+        })
     }
 
     // recording
@@ -1053,13 +1476,13 @@ impl BridgeHost for Host {
         // The sidebar control's start: the recorder starts, then the live
         // row is requested so the window selects it. A start that fails
         // re-reads the permissions.
-        self.services.recorder.start(params.mode, None);
-        let status = self.services.recorder.status();
+        self.shared.services.recorder.start(params.mode, None);
+        let status = self.shared.services.recorder.status();
         self.command(
             &[BridgeTopic::Recording, BridgeTopic::App],
             |inner| match status.state {
                 RecordingState::Recording => inner.app.requested_meeting_id = status.meeting_id,
-                RecordingState::Idle => self.services.recorder.refresh_permissions(),
+                RecordingState::Idle => self.shared.services.recorder.refresh_permissions(),
                 RecordingState::Starting | RecordingState::Stopping => {}
             },
         );
@@ -1067,25 +1490,25 @@ impl BridgeHost for Host {
     }
 
     fn recording_stop(&self) -> Outcome<()> {
-        self.services.recorder.stop();
+        self.shared.services.recorder.stop();
         self.recorder_changed();
         Ok(())
     }
 
     fn recording_toggle(&self) -> Outcome<()> {
-        self.services.recorder.toggle();
+        self.shared.services.recorder.toggle();
         self.recorder_changed();
         Ok(())
     }
 
     fn recording_keep_going(&self) -> Outcome<()> {
-        self.services.recorder.keep_recording();
+        self.shared.services.recorder.keep_recording();
         self.recorder_changed();
         Ok(())
     }
 
     fn recording_clear_messages(&self) -> Outcome<()> {
-        self.services.recorder.clear_messages();
+        self.shared.services.recorder.clear_messages();
         self.recorder_changed();
         Ok(())
     }
@@ -1101,9 +1524,11 @@ impl BridgeHost for Host {
 
     fn settings_general_set_launch_at_login(&self, params: SetBoolParams) -> Outcome<()> {
         self.settings_command(BridgeTopic::SettingsGeneral, |inner| {
-            inner
-                .general
-                .set_launch_at_login(params.value, &self.store, &self.services);
+            inner.general.set_launch_at_login(
+                params.value,
+                &self.shared.store,
+                &self.shared.services,
+            );
         });
         Ok(())
     }
@@ -1112,7 +1537,7 @@ impl BridgeHost for Host {
         self.settings_command(BridgeTopic::SettingsGeneral, |inner| {
             inner
                 .general
-                .set_detection_enabled(params.value, &self.store);
+                .set_detection_enabled(params.value, &self.shared.store);
         });
         Ok(())
     }
@@ -1121,15 +1546,26 @@ impl BridgeHost for Host {
         self.settings_command(BridgeTopic::SettingsGeneral, |inner| {
             inner
                 .general
-                .set_default_template(&params.template_id, &self.store);
+                .set_default_template(&params.template_id, &self.shared.store);
         });
         Ok(())
     }
 
     fn settings_general_request_calendar(&self) -> Outcome<()> {
-        self.settings_command(BridgeTopic::SettingsGeneral, |inner| {
-            inner.general.request_calendar(&self.services);
-        });
+        self.outside_lock(
+            BridgeTopic::SettingsGeneral,
+            |inner| {
+                inner.general.begin_calendar_request();
+                Some(())
+            },
+            |()| {
+                self.shared
+                    .services
+                    .permissions
+                    .request(PermissionKind::Calendar)
+            },
+            |inner, state| inner.general.finish_calendar_request(state),
+        );
         Ok(())
     }
 
@@ -1138,10 +1574,12 @@ impl BridgeHost for Host {
         params: SetAutomaticUpdatesParams,
     ) -> Outcome<()> {
         self.settings_command(BridgeTopic::SettingsGeneral, |_| {
-            self.services
+            self.shared
+                .services
                 .updater
                 .set_automatically_checks(params.automatically_checks);
-            self.services
+            self.shared
+                .services
                 .updater
                 .set_automatically_downloads(params.automatically_downloads);
         });
@@ -1149,7 +1587,7 @@ impl BridgeHost for Host {
     }
 
     fn settings_general_open_login_items(&self) -> Outcome<()> {
-        self.services.login_item.open_system_settings();
+        self.shared.services.login_item.open_system_settings();
         Ok(())
     }
 
@@ -1158,14 +1596,14 @@ impl BridgeHost for Host {
     fn settings_recording_set_input_device(&self, params: SetStringParams) -> Outcome<()> {
         self.settings_command(BridgeTopic::SettingsRecording, |inner| {
             let uid = (!params.value.is_empty()).then_some(params.value);
-            inner.audio.set_input_device(uid, &self.store);
+            inner.audio.set_input_device(uid, &self.shared.store);
         });
         Ok(())
     }
 
     fn settings_recording_refresh_devices(&self) -> Outcome<()> {
         self.settings_command(BridgeTopic::SettingsRecording, |inner| {
-            inner.audio.refresh_devices(&self.services);
+            inner.audio.refresh_devices(&self.shared.services);
         });
         Ok(())
     }
@@ -1176,13 +1614,13 @@ impl BridgeHost for Host {
             self.settings_command(BridgeTopic::SettingsRecording, |inner| {
                 inner
                     .audio
-                    .set_audio_folder(folder, &self.store, &self.services);
+                    .set_audio_folder(folder, &self.shared.store, &self.shared.services);
             });
         }))
     }
 
     fn settings_recording_reveal_folder(&self) -> Outcome<()> {
-        self.lock().audio.reveal_folder(&self.services);
+        self.lock().audio.reveal_folder(&self.shared.services);
         Ok(())
     }
 
@@ -1191,17 +1629,20 @@ impl BridgeHost for Host {
             inner.audio.set_retention(
                 params.retention.mode,
                 params.retention.days,
-                &self.store,
-                &self.services,
+                &self.shared.store,
+                &self.shared.services,
             );
         });
         Ok(())
     }
 
     fn settings_recording_request_permission(&self, params: PermissionKindParams) -> Outcome<()> {
-        self.settings_command(BridgeTopic::SettingsRecording, |inner| {
-            inner.audio.request_permission(params.kind, &self.services);
-        });
+        self.outside_lock(
+            BridgeTopic::SettingsRecording,
+            |inner| inner.audio.begin_request(params.kind).then_some(()),
+            |()| self.shared.services.permissions.request(params.kind),
+            |inner, state| inner.audio.finish_request(params.kind, state),
+        );
         Ok(())
     }
 
@@ -1212,15 +1653,17 @@ impl BridgeHost for Host {
             BridgeError::invalid_params(format!("Unknown speech engine {}.", params.value))
         })?;
         self.settings_command(BridgeTopic::SettingsTranscription, |inner| {
-            inner.speech.set_engine(engine, &self.store, &self.services);
+            inner
+                .speech
+                .set_engine(engine, &self.shared.store, &self.shared.services);
         });
         Ok(())
     }
 
     fn settings_transcription_download(&self, params: AssetIdParams) -> Outcome<()> {
         let asset = parse_asset(&params)?;
-        // The download runs outside the lock so every progress report can
-        // publish while it goes.
+        // The reply returns at once; the download runs on its own thread
+        // and publishes as it goes, as Swift's task did.
         {
             let mut inner = self.lock();
             if matches!(inner.speech.state_of(asset), AssetState::Downloading { .. }) {
@@ -1236,119 +1679,110 @@ impl BridgeHost for Host {
             inner.publisher.schedule(BridgeTopic::SettingsTranscription);
         }
         self.publish();
-        let outcome = self
-            .services
-            .speech_models
-            .download(asset, &mut |fraction, phase| {
-                self.lock().speech.asset_states.insert(
-                    asset,
-                    AssetState::Downloading {
-                        fraction,
-                        phase: phase.to_owned(),
-                    },
-                );
-                self.lock()
-                    .publisher
-                    .schedule(BridgeTopic::SettingsTranscription);
-                self.publish();
-            });
-        self.settings_command(BridgeTopic::SettingsTranscription, |inner| {
-            let state = match outcome {
-                Ok(()) => AssetState::Installed {
-                    bytes: self.services.speech_models.installed_size(asset),
-                },
-                Err(error) => AssetState::Failed(error.to_string()),
-            };
-            inner.speech.asset_states.insert(asset, state);
-        });
+        let host = self.clone();
+        thread::Builder::new()
+            .name(format!("steno-download-{}", asset.as_str()))
+            .spawn(move || host.run_download(asset))
+            .map_err(|error| {
+                BridgeError::failed(format!("The download could not start: {error}"))
+            })?;
         Ok(())
     }
 
     fn settings_transcription_remove(&self, params: AssetIdParams) -> Outcome<()> {
         let asset = parse_asset(&params)?;
         self.settings_command(BridgeTopic::SettingsTranscription, |inner| {
-            inner.speech.remove(asset, &self.services);
+            inner.speech.remove(asset, &self.shared.services);
         });
         Ok(())
     }
 
-    // settings.summaries
+    // settings.summaries: the four form commands answer on the calling
+    // window's model (see the module doc), the rest on the Settings section.
 
     fn settings_summaries_select_preset(&self, params: SetStringParams) -> Outcome<()> {
         let preset: LlmPreset = params.value.parse().map_err(|_| {
-            BridgeError::invalid_params(format!("Unknown preset {}.", params.value))
+            BridgeError::invalid_params(format!("Unknown summaries service {}.", params.value))
         })?;
         let now = self.now();
-        self.settings_command(BridgeTopic::SettingsSummaries, |inner| {
-            inner
-                .llm
-                .select_preset(preset, &self.store, &self.services, now);
+        self.summaries_command(|llm| {
+            llm.select_preset(preset, &self.shared.store, &self.shared.services, now);
         });
         Ok(())
     }
 
     fn settings_summaries_update(&self, params: SummariesUpdateParams) -> Outcome<()> {
-        self.settings_command(BridgeTopic::SettingsSummaries, |inner| {
-            inner.llm.apply_update(&params);
-            inner.onboarding.llm.apply_update(&params);
-            inner.publisher.schedule(BridgeTopic::Onboarding);
-        });
+        self.summaries_command(|llm| llm.apply_update(&params));
         Ok(())
     }
 
     fn settings_summaries_save(&self) -> Outcome<()> {
         let now = self.now();
         self.settings_command(BridgeTopic::SettingsSummaries, |inner| {
-            inner.llm.commit(&self.store, &self.services, now);
+            inner
+                .llm
+                .commit(&self.shared.store, &self.shared.services, now);
         });
+        self.run_pending_probe(BridgeWindow::Settings);
         Ok(())
     }
 
     fn settings_summaries_test(&self) -> Outcome<()> {
-        let now = self.now();
-        self.settings_command(BridgeTopic::SettingsSummaries, |inner| {
-            inner.llm.test(&self.services, now);
-        });
+        self.summaries_command(LlmSettingsViewModel::request_probe);
         Ok(())
     }
 
     fn settings_summaries_confirm_codex(&self) -> Outcome<()> {
         let now = self.now();
         self.settings_command(BridgeTopic::SettingsSummaries, |inner| {
-            inner.llm.confirm_codex(&self.store, &self.services, now);
+            inner
+                .llm
+                .confirm_codex(&self.shared.store, &self.shared.services, now);
         });
+        self.run_pending_probe(BridgeWindow::Settings);
         Ok(())
     }
 
     fn settings_summaries_refresh_codex_status(&self) -> Outcome<()> {
-        self.settings_command(BridgeTopic::SettingsSummaries, |inner| {
-            inner.llm.refresh_codex_status(&self.services);
-        });
+        // A file read, outside the lock all the same.
+        let account = self.shared.services.llm.codex_account();
+        self.summaries_command(|llm| llm.apply_codex_account(account));
         Ok(())
     }
 
     fn settings_summaries_refresh_codex_models(&self) -> Outcome<()> {
-        self.settings_command(BridgeTopic::SettingsSummaries, |inner| {
-            inner.llm.refresh_codex_models(&self.services);
-        });
+        let llm = &self.shared.services.llm;
+        self.outside_lock(
+            BridgeTopic::SettingsSummaries,
+            |inner| inner.llm.begin_codex_models().then_some(()),
+            |()| (llm.codex_account(), llm.codex_models()),
+            |inner, (account, models)| inner.llm.finish_codex_models(account, models),
+        );
         Ok(())
     }
 
     fn settings_summaries_select_codex_model(&self, params: SetStringParams) -> Outcome<()> {
         let now = self.now();
         self.settings_command(BridgeTopic::SettingsSummaries, |inner| {
-            inner
-                .llm
-                .select_codex_model(&params.value, &self.store, &self.services, now);
+            inner.llm.select_codex_model(
+                &params.value,
+                &self.shared.store,
+                &self.shared.services,
+                now,
+            );
         });
+        self.run_pending_probe(BridgeWindow::Settings);
         Ok(())
     }
 
     fn settings_summaries_stop_using_codex(&self) -> Outcome<()> {
         let now = self.now();
         self.settings_command(BridgeTopic::SettingsSummaries, |inner| {
-            inner.llm.stop_using_codex(&self.store, &self.services, now);
+            inner
+                .llm
+                .stop_using_codex(&self.shared.store, &self.shared.services, now);
         });
+        self.run_pending_probe(BridgeWindow::Settings);
         Ok(())
     }
 
@@ -1358,7 +1792,7 @@ impl BridgeHost for Host {
         self.settings_command(BridgeTopic::SettingsExport, |inner| {
             inner
                 .obsidian
-                .set_enabled(params.value, &self.store, &self.services);
+                .set_enabled(params.value, &self.shared.store, &self.shared.services);
         });
         Ok(())
     }
@@ -1369,7 +1803,7 @@ impl BridgeHost for Host {
             self.settings_command(BridgeTopic::SettingsExport, |inner| {
                 inner
                     .obsidian
-                    .choose_vault(folder, &self.store, &self.services);
+                    .choose_vault(folder, &self.shared.store, &self.shared.services);
             });
         }))
     }
@@ -1383,9 +1817,11 @@ impl BridgeHost for Host {
                 inner.obsidian.task_tag = tag;
             }
             if let Some(include) = params.include_audio {
-                inner
-                    .obsidian
-                    .set_include_audio(include, &self.store, &self.services);
+                inner.obsidian.set_include_audio(
+                    include,
+                    &self.shared.store,
+                    &self.shared.services,
+                );
             }
         });
         Ok(())
@@ -1393,7 +1829,9 @@ impl BridgeHost for Host {
 
     fn settings_export_save(&self) -> Outcome<()> {
         self.settings_command(BridgeTopic::SettingsExport, |inner| {
-            inner.obsidian.commit(&self.store, &self.services);
+            inner
+                .obsidian
+                .commit(&self.shared.store, &self.shared.services);
         });
         Ok(())
     }
@@ -1402,21 +1840,21 @@ impl BridgeHost for Host {
 
     fn settings_phone_begin_pairing(&self) -> Outcome<()> {
         self.settings_command(BridgeTopic::SettingsPhone, |inner| {
-            inner.phones.begin_pairing(&self.services);
+            inner.phones.begin_pairing(&self.shared.services);
         });
         Ok(())
     }
 
     fn settings_phone_cancel_pairing(&self) -> Outcome<()> {
         self.settings_command(BridgeTopic::SettingsPhone, |inner| {
-            inner.phones.cancel_pairing(&self.services);
+            inner.phones.cancel_pairing(&self.shared.services);
         });
         Ok(())
     }
 
     fn settings_phone_revoke(&self, params: DeviceIdParams) -> Outcome<()> {
         self.settings_command(BridgeTopic::SettingsPhone, |inner| {
-            inner.phones.revoke(params.device_id, &self.services);
+            inner.phones.revoke(params.device_id, &self.shared.services);
         });
         Ok(())
     }
@@ -1427,7 +1865,7 @@ impl BridgeHost for Host {
         // Three steps so the page sees `isRequesting` while the prompt is
         // up, as it did with Swift's awaited request.
         self.onboarding_command(|inner| inner.onboarding.begin_request(params.kind));
-        let state = self.services.permissions.request(params.kind);
+        let state = self.shared.services.permissions.request(params.kind);
         self.onboarding_command(|inner| {
             inner.onboarding.finish_request(params.kind, state);
             self.advance_if_handled(inner);
@@ -1445,14 +1883,16 @@ impl BridgeHost for Host {
 
     fn onboarding_refresh(&self) -> Outcome<()> {
         self.onboarding_command(|inner| {
-            inner.onboarding.load(&self.store, &self.services, None);
+            inner
+                .onboarding
+                .load(&self.shared.store, &self.shared.services, None);
             self.advance_if_handled(inner);
         });
         Ok(())
     }
 
     fn onboarding_advance(&self) -> Outcome<()> {
-        self.onboarding_command(|inner| inner.onboarding.advance(&self.services));
+        self.onboarding_command(|inner| inner.onboarding.advance(&self.shared.services));
         Ok(())
     }
 
@@ -1466,7 +1906,7 @@ impl BridgeHost for Host {
         self.onboarding_command(|inner| {
             inner
                 .onboarding
-                .save_summaries(&self.store, &self.services, now);
+                .save_summaries(&self.shared.store, &self.shared.services, now);
         });
         Ok(())
     }
@@ -1474,9 +1914,11 @@ impl BridgeHost for Host {
     fn onboarding_confirm_summaries_with_codex(&self) -> Outcome<()> {
         let now = self.now();
         self.onboarding_command(|inner| {
-            inner
-                .onboarding
-                .confirm_summaries_with_codex(&self.store, &self.services, now);
+            inner.onboarding.confirm_summaries_with_codex(
+                &self.shared.store,
+                &self.shared.services,
+                now,
+            );
         });
         Ok(())
     }
@@ -1487,51 +1929,60 @@ impl BridgeHost for Host {
             self.onboarding_command(|inner| {
                 inner
                     .onboarding
-                    .choose_vault(folder, &self.store, &self.services);
+                    .choose_vault(folder, &self.shared.store, &self.shared.services);
             });
         }))
     }
 
     fn onboarding_save_vault(&self) -> Outcome<()> {
-        self.onboarding_command(|inner| inner.onboarding.save_vault(&self.store, &self.services));
+        self.onboarding_command(|inner| {
+            inner
+                .onboarding
+                .save_vault(&self.shared.store, &self.shared.services);
+        });
         Ok(())
     }
 
     fn onboarding_skip_setup(&self, params: SetupStepParams) -> Outcome<()> {
-        self.onboarding_command(|inner| inner.onboarding.skip_setup(params.step, &self.services));
+        self.onboarding_command(|inner| {
+            inner
+                .onboarding
+                .skip_setup(params.step, &self.shared.services);
+        });
         Ok(())
     }
 
     fn onboarding_finish(&self) -> Outcome<()> {
-        self.onboarding_command(|inner| inner.onboarding.finish(&self.services));
+        self.onboarding_command(|inner| inner.onboarding.finish(&self.shared.services));
         Ok(())
     }
 
     // system
 
     fn updates_check(&self) -> Outcome<()> {
-        self.services.updater.check_for_updates();
+        self.shared.services.updater.check_for_updates();
         self.settings_command(BridgeTopic::SettingsGeneral, |_| {});
         Ok(())
     }
 
     fn system_open_url(&self, params: OpenUrlParams) -> Outcome<()> {
-        // Only web and mail links, as the Swift bridges accepted.
+        // Only `https:` and `mailto:`, as `BridgeSystemCommands.openURL`
+        // accepted: a page cannot open files, plain `http:` or run scripts.
         let lower = params.url.to_lowercase();
-        if !(lower.starts_with("https://")
-            || lower.starts_with("http://")
-            || lower.starts_with("mailto:"))
-        {
+        if !(lower.starts_with("https://") || lower.starts_with("mailto:")) {
             return Err(BridgeError::invalid_params(
-                "Only web and mail links can be opened.",
+                "Only https: and mailto: links open from the page.",
             ));
         }
-        self.services.opener.open_url(&params.url);
+        self.shared.services.opener.open_url(&params.url);
         Ok(())
     }
 
     fn system_open_system_settings(&self, params: PermissionKindParams) -> Outcome<()> {
-        self.services.permissions.open_system_settings(params.kind);
+        self.shared
+            .services
+            .permissions
+            .open_system_settings(params.kind);
         Ok(())
     }
 
@@ -1549,7 +2000,7 @@ impl BridgeHost for Host {
             }
             BridgeWindow::Onboarding => {}
         });
-        self.services.opener.open_window(params.window);
+        self.shared.services.opener.open_window(params.window);
         Ok(())
     }
 
@@ -1559,13 +2010,13 @@ impl BridgeHost for Host {
                 "The onboarding window closes only itself.",
             ));
         }
-        self.services.opener.close_window(params.window);
+        self.shared.services.opener.close_window(params.window);
         Ok(())
     }
 
     fn ui_confirm_destructive(&self, params: ConfirmDestructiveParams) -> Outcome<ConfirmReply> {
         Ok(ConfirmReply {
-            confirmed: (self.confirm)(&params),
+            confirmed: self.confirm(&params),
         })
     }
 }
