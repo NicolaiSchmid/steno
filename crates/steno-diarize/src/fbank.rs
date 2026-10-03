@@ -89,6 +89,8 @@ impl std::fmt::Debug for Fbank {
 }
 
 impl Fbank {
+    /// An extractor for `config`: the window, the mel filters and the FFT
+    /// plan are built once here.
     #[must_use]
     pub fn new(config: FbankConfig) -> Self {
         let frame_length = ms_to_samples(config.frame_length_ms, config.sample_rate);
@@ -114,16 +116,19 @@ impl Fbank {
         Fbank::new(FbankConfig::WESPEAKER)
     }
 
+    /// Mel bins per frame, the width of a feature row.
     #[must_use]
     pub fn num_bins(&self) -> usize {
         self.config.num_bins
     }
 
+    /// Samples between two frames (160 at the recipe's 10 ms).
     #[must_use]
     pub fn frame_shift(&self) -> usize {
         self.frame_shift
     }
 
+    /// Samples in one frame (400 at the recipe's 25 ms).
     #[must_use]
     pub fn frame_length(&self) -> usize {
         self.frame_length

@@ -2,7 +2,7 @@
 //! with ranges, a unit embedding, a confidence and a sample clip. Plan:
 //! `.plans/2026-10-02-rust-core-and-tauri-shell.md` (`WP4d`) executing
 //! decision 6 and gate G3 of `.plans/2026-10-01-cross-platform-speech-stack.md`;
-//! the clustering constants come from `.plans/2026-09-29-speaker-calibration.md`.
+//! the refinement constants come from `.plans/2026-09-29-speaker-calibration.md`.
 //!
 //! The pipeline is the pyannote community-1 shape `FluidAudio` runs on the
 //! Mac, with Steno's own clustering and refinement above the tensors:
@@ -22,11 +22,10 @@
 //!    runs become exclusive turns.
 //! 5. [`mapping`]: turns and chunks become "Speaker n" clusters with merged
 //!    ranges, the duration-weighted unit mean embedding and the sample
-//!    clip (`DiarizationMapping.swift`).
+//!    clip.
 //! 6. [`refinement`]: each cluster with thirty seconds of speech is
 //!    re-embedded over its own concatenated speech, clusters merge at
-//!    cosine 0.60, fragments join at 0.30 or are dropped
-//!    (`ClusterRefinement.swift`).
+//!    cosine 0.60, fragments join at 0.30 or are dropped.
 //!
 //! The two models sit behind [`TensorBackend`]: [`onnx::OnnxBackend`] runs
 //! the sherpa-onnx exports through ONNX Runtime on every platform;
@@ -34,8 +33,18 @@
 //! so the Mac keeps the embeddings the Swift app stored. Everything above
 //! the trait is shared and tested without models.
 //!
+//! Entry points: [`ModelDiarizer`] is the `steno_core::Diarizer` the
+//! pipeline holds, built by [`ModelDiarizer::onnx`] over a
+//! [`ModelStore`] or by `ModelDiarizer::coreml` over `FluidAudio`'s model
+//! directory; [`Pipeline`] exposes `analyze`, `map` and `refine` one at a
+//! time for the calibration harness, which analyses a lane once and
+//! sweeps the cut; [`fbank`] is the feature front end the ONNX backend
+//! puts in front of the embedding model. Features: `onnx` builds the
+//! ONNX Runtime backend, `coreml` the `CoreML` one (a no-op off macOS);
+//! both are on by default.
+//!
 //! Audio never leaves the device: the only network access in this crate is
-//! [`models::ModelStore`] fetching the published model files.
+//! [`ModelStore`] fetching the published model files.
 
 pub mod backend;
 pub mod clustering;

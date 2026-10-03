@@ -1,5 +1,7 @@
-//! `Tests/StenoSpeechTests/FluidDiarizerMappingTests.swift` ported:
-//! the cluster embedding, the sample clip picker and the mapping.
+//! `Tests/StenoSpeechTests/FluidDiarizerMappingTests.swift` ported, in
+//! the same order as the Swift file: the cluster embedding, the sample
+//! clip picker and the mapping. The generated-input, tie and non-finite
+//! cases at the end are Rust's own.
 
 mod common;
 

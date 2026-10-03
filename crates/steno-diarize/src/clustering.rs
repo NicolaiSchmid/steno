@@ -5,11 +5,13 @@
 //! hour-long lane with a few thousand embeddings clusters in well under a
 //! second.
 //!
-//! `FluidAudio` cuts a centroid-linkage dendrogram at a Euclidean distance
-//! on unit vectors (0.8 in Steno's calibration, about cosine 0.68); this
-//! module's threshold is a cosine distance (`1 - cos`) between cluster
-//! means, so the two are not the same number. The default in
-//! [`crate::DiarizerConfig`] is the one the calibration harness chose.
+//! The threshold is a cosine distance (`1 - cos`) averaged over every
+//! pair of members across the two clusters, which is what average linkage
+//! compares. `FluidAudio` cuts a centroid-linkage dendrogram, then runs
+//! `VBx`, at a Euclidean distance between unit vectors (0.8 in Steno's
+//! calibration), so its number is not this number; `d^2 = 2 - 2 cos`
+//! turns 0.8 into 0.32, which is where the sweep behind
+//! [`crate::DEFAULT_CLUSTERING_THRESHOLD`] started.
 
 /// The cut and the speaker-count constraints.
 #[derive(Debug, Clone, PartialEq)]
@@ -52,7 +54,9 @@ pub fn linkage(embeddings: &[Vec<f32>]) -> Vec<Merge> {
     }
     let units: Vec<Vec<f32>> = embeddings.iter().map(|vector| normalized(vector)).collect();
     // Full square distance matrix over the active clusters; row `i` of
-    // cluster `i`. Memory is n²·4 bytes: 3 000 embeddings take 36 MB.
+    // cluster `i`. Memory is n^2 * 4 bytes: the 5 400 embeddings a
+    // sixty-minute group call can yield take 117 MB, for the run of the
+    // clustering only.
     let mut distance = vec![0.0f32; n * n];
     for i in 0..n {
         for j in i + 1..n {
@@ -107,7 +111,7 @@ pub fn linkage(embeddings: &[Vec<f32>]) -> Vec<Merge> {
                     size: size[keep] + size[drop],
                 });
                 let new_size = size[keep] + size[drop];
-                // Lance–Williams for average linkage.
+                // Lance-Williams for average linkage.
                 #[allow(clippy::cast_precision_loss)]
                 let (weight_keep, weight_drop) = (
                     size[keep] as f32 / new_size as f32,

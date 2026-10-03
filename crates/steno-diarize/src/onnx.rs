@@ -1,7 +1,7 @@
 //! The ONNX Runtime backend: pyannote segmentation 3.0 and `WeSpeaker`
 //! ResNet34-LM from the sherpa-onnx exports, with the fbank front end of
 //! [`crate::fbank`] in front of the embedding model. Runs on every
-//! platform; the Mac uses it only when the `CoreML` backend is not built.
+//! platform.
 
 use std::path::Path;
 

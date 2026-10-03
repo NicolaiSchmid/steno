@@ -1,5 +1,6 @@
-//! `Tests/StenoSpeechTests/ClusterRefinementTests.swift` ported: the
-//! merge order, the 30 s rule, the 0.30 absorb rule, label survival.
+//! `Tests/StenoSpeechTests/ClusterRefinementTests.swift` ported, in the
+//! same order as the Swift file: the merge order, the 30 s rule, the 0.30
+//! absorb rule, label survival. The tie case at the end is Rust's own.
 
 mod common;
 

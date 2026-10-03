@@ -1,8 +1,8 @@
-//! Turns and chunks into `DiarizationResult`, one for one with
-//! `DiarizationMapping.swift`, `ClusterEmbedding.swift` and
-//! `SampleClipPicker.swift`: one `SpeakerCluster` per label that has a
-//! turn, labelled "Speaker n" in order of first speech, with merged
-//! ranges, the normalised cluster embedding and the sample clip.
+//! Turns and chunks into `DiarizationResult`: one `SpeakerCluster` per
+//! label that has a turn, labelled "Speaker n" in order of first speech,
+//! with merged ranges, the normalised cluster embedding and the sample
+//! clip. Swift: `Sources/StenoSpeech/Diarization/DiarizationMapping.swift`,
+//! `ClusterEmbedding.swift` and `SampleClipPicker.swift`, one for one.
 //!
 //! The turns are the final word on who spoke when (frame voting over the
 //! whole recording); the chunks are the per-window embeddings that fed

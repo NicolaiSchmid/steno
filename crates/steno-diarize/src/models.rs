@@ -73,6 +73,7 @@ pub struct ModelStore {
 }
 
 impl ModelStore {
+    /// A store over `root`; the directory is created on the first fetch.
     #[must_use]
     pub fn new(root: impl Into<PathBuf>) -> Self {
         ModelStore { root: root.into() }
@@ -91,6 +92,7 @@ impl ModelStore {
         )
     }
 
+    /// The directory the model files live in.
     #[must_use]
     pub fn root(&self) -> &Path {
         &self.root

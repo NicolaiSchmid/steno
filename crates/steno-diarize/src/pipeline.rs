@@ -13,7 +13,8 @@ use crate::{mapping, timeline};
 
 /// The clustering knobs and whether the refinement pass runs, Steno's
 /// `FluidDiarizerConfig` with the window step and the stage rules exposed
-/// for the calibration harness.
+/// for the calibration harness. Swift:
+/// `Sources/StenoSpeech/Diarization/FluidDiarizer.swift`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct DiarizerConfig {
     /// Cosine distance between cluster means at or below which the
@@ -35,7 +36,7 @@ pub struct DiarizerConfig {
 /// The clustering cut the calibration harness chose on the Forge corpus;
 /// the PR of this crate holds the sweep. 0.32 is where `FluidAudio`'s
 /// Euclidean 0.8 on unit vectors lands as a cosine distance
-/// (`d² = 2 − 2 cos`), the starting point of the sweep.
+/// (`d^2 = 2 - 2 cos`), the starting point of the sweep.
 pub const DEFAULT_CLUSTERING_THRESHOLD: f32 = 0.32;
 
 impl Default for DiarizerConfig {
@@ -83,20 +84,26 @@ pub struct Pipeline<B: TensorBackend = Box<dyn TensorBackend>> {
 }
 
 impl<B: TensorBackend> Pipeline<B> {
+    /// A pipeline over a loaded backend.
     #[must_use]
     pub fn new(backend: B, config: DiarizerConfig) -> Self {
         Pipeline { backend, config }
     }
 
+    /// The configuration every call runs with.
     #[must_use]
     pub fn config(&self) -> &DiarizerConfig {
         &self.config
     }
 
+    /// Replaces the configuration for the calls that follow; the backend
+    /// stays loaded.
     pub fn set_config(&mut self, config: DiarizerConfig) {
         self.config = config;
     }
 
+    /// The backend, for what it reports about itself (geometry, call
+    /// counts in tests).
     #[must_use]
     pub fn backend(&self) -> &B {
         &self.backend
