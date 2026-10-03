@@ -733,4 +733,15 @@ fn bakeoff_with_fake_engines_reports_one_segment_per_second() {
         written.contains(&"report.json".to_owned()) && written.contains(&"report.md".to_owned())
     );
     assert!(written.contains(&"tone-3s.parakeet-v3.json".to_owned()));
+    // Both are in `StenoJSON`'s form, as the Swift bake-off wrote them:
+    // pretty, sorted keys, ` : ` between a key and its value.
+    for name in ["report.json", "tone-3s.parakeet-v3.json"] {
+        let text = std::fs::read_to_string(out.join(name)).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(
+            text,
+            steno_core::json::to_canonical_string(&value).unwrap(),
+            "{name}"
+        );
+    }
 }

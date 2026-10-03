@@ -679,7 +679,7 @@ impl Bakeoff {
                     .unwrap_or_default();
                 std::fs::write(
                     output.join(format!("{stem}.{engine_id}.json")),
-                    serde_json::to_vec_pretty(&segments).map_err(Failure::runtime)?,
+                    steno_core::json::to_canonical_string(&segments).map_err(Failure::runtime)?,
                 )
                 .map_err(Failure::runtime)?;
                 rows.push(BakeoffRow {
@@ -701,7 +701,7 @@ impl Bakeoff {
         });
         std::fs::write(
             output.join("report.json"),
-            serde_json::to_vec_pretty(&report).map_err(Failure::runtime)?,
+            steno_core::json::to_canonical_string(&report).map_err(Failure::runtime)?,
         )
         .map_err(Failure::runtime)?;
         let markdown = render_bakeoff(&rows);
@@ -709,7 +709,7 @@ impl Bakeoff {
         if self.json {
             println!(
                 "{}",
-                serde_json::to_string_pretty(&report).map_err(Failure::runtime)?
+                steno_core::json::to_canonical_string(&report).map_err(Failure::runtime)?
             );
         } else {
             print!("{markdown}");
@@ -910,7 +910,7 @@ impl DiarizeSweep {
         if let Some(output) = &self.output {
             std::fs::write(
                 output,
-                serde_json::to_vec_pretty(&serde_json::json!({ "runs": runs }))
+                steno_core::json::to_compact_string(&serde_json::json!({ "runs": runs }))
                     .map_err(Failure::runtime)?,
             )
             .map_err(Failure::runtime)?;
@@ -1062,14 +1062,15 @@ impl Llm {
                     .unwrap_or_default();
                 let millis = i64::try_from(report.round_trip.as_millis()).unwrap_or(i64::MAX);
                 if json {
+                    let value = serde_json::json!({
+                        "modelListed": report.model_listed,
+                        "structuredOutput": mode,
+                        "roundTripMilliseconds": millis,
+                        "account": report.account_line,
+                    });
                     println!(
                         "{}",
-                        serde_json::json!({
-                            "modelListed": report.model_listed,
-                            "structuredOutput": mode,
-                            "roundTripMilliseconds": millis,
-                            "account": report.account_line,
-                        })
+                        steno_core::json::to_canonical_string(&value).map_err(Failure::runtime)?
                     );
                 } else {
                     println!(
@@ -1181,8 +1182,7 @@ impl Llm {
                     }
                     println!(
                         "{}",
-                        steno_bridge::json::to_canonical_string(&value)
-                            .map_err(Failure::runtime)?
+                        steno_core::json::to_canonical_string(&value).map_err(Failure::runtime)?
                     );
                 } else {
                     println!("# {}\n", output.title);
