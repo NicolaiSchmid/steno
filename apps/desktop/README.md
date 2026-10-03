@@ -16,7 +16,7 @@ Everything the Swift app does outside its three windows, per OS:
 | | macOS | Linux | Windows |
 |---|---|---|---|
 | Tray (`tray.rs`) | Menu bar extra with a template icon | Status notifier item (libayatana-appindicator) | Notification area icon |
-| Floating panels (`panels.rs`) | Non-activating `NSPanel`s on every space (`tauri-nspanel`) | Always-on-top undecorated windows | Always-on-top undecorated windows |
+| Floating panels (`panels.rs`) | Non-activating `NSPanel`s on every space (`tauri-nspanel`) | Always-on-top undecorated windows, under XWayland on a Wayland session (see below) | Always-on-top undecorated windows |
 | Launch at login (`autostart.rs`) | Launch Agent | `~/.config/autostart` entry | Run registry key |
 | Updates (`updater.rs`) | signed manifest per lane | same | same |
 | Permissions (`permissions.rs`) | microphone TCC status and prompt; system audio and calendar deferred to the host's probes | unknown (nothing to query before capture; the portal asks when the stream opens) | unknown (the privacy switch decides at capture time) |
@@ -61,6 +61,17 @@ the panels do goes through the bridge (`recording.stop`,
 `recording.keepGoing`, `recording.start`, `window.open`). The host raises
 and clears the prompt through `panels::set_prompt` (WP6b wires the
 detection controller).
+
+On a Wayland session the shell runs under XWayland. GTK 3 on Wayland can
+neither place a window nor keep it above the others, and it reports no
+moves, so the panels would not float, would not stay where they are put,
+and would never save the anchor. When `WAYLAND_DISPLAY` and `DISPLAY` are
+both set and `GDK_BACKEND` is not, `main` sets `GDK_BACKEND=x11` before
+anything else starts and logs one `display:` line. A `GDK_BACKEND` set
+before launch always wins: `GDK_BACKEND=wayland steno-desktop` runs
+natively on Wayland, with panels that do neither. A Wayland session
+without XWayland (no `DISPLAY`) runs on Wayland too, since X11 would not
+open there.
 
 The bridge methods the shell answers itself, beside `window.*` and
 `system.openURL`: `system.openSystemSettings` (the pane per OS),

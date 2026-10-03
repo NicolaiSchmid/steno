@@ -632,6 +632,12 @@ fix is ported to Swift before cutover.
   the approval state becomes unreachable.
 - The menu bar on macOS carries the application, Edit and Window menus; the Swift
   Record menu (`⌘⇧R`, Record In Person) and Find Meetings (`⌘F`) are not in it yet.
+- Linux on a Wayland session runs under XWayland: `main` sets `GDK_BACKEND=x11` when
+  `WAYLAND_DISPLAY` and `DISPLAY` are set and the user set no `GDK_BACKEND`, because
+  GTK 3 on Wayland cannot place a window, keep it on top or report its moves, which
+  the panels need. A user's `GDK_BACKEND=wayland`, or a session without XWayland,
+  runs natively with panels that neither float nor keep their place; a native path
+  would need the layer-shell protocol and is not planned.
 - Updates: Sparkle checks daily on its own (`SUEnableAutomaticChecks`,
   `SUScheduledCheckInterval` 86400 in `apps/macos/project.yml`); the shell checks only
   when asked (the tray's Check for Updates, `updates.check` from Settings).

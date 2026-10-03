@@ -9,14 +9,16 @@
 //! What the shell owns beside the windows (WP8): the tray (`tray`), the
 //! macOS menu bar (`menu`), the actions behind both menus (`actions`), the
 //! recorder state the shell follows (`recording`), the panels (`panels`)
-//! and their geometry (`panel_geometry`), window lifetime (`windows`),
-//! launch at login (`autostart`), updates (`updater`), the OS permissions
-//! (`permissions`), the `steno:` links (`deep_links`), the native dialogs
-//! (`dialogs`) and the single instance. Secrets are not the shell's: the
-//! keyring `SecretStore` lives in `steno-services` (#173, `WP6b`). Every
-//! one is a thin module over a Tauri plugin or an OS API with its rules in
-//! plain functions the tests cover. Everything that is on the wire
-//! (errors, topics, windows, sections, params) is the `steno-bridge`
+//! and their geometry (`panel_geometry`), window lifetime (`windows`; the
+//! close and exit rules are in this file), launch at login (`autostart`),
+//! updates (`updater`), the OS permissions (`permissions`), the `steno:`
+//! links (`deep_links`), the native dialogs (`dialogs`), the single
+//! instance, and on a Wayland session the `XWayland` backend the panels
+//! need (`display_backend`, in this file). Secrets are not the shell's:
+//! the keyring `SecretStore` lives in `steno-services` (#173, `WP6b`).
+//! Every one is a thin module over a Tauri plugin or an OS API with its
+//! rules in plain functions the tests cover. Everything that is on the
+//! wire (errors, topics, windows, sections, params) is the `steno-bridge`
 //! crate's type; the shell adds only what it needs on top
 //! (`recording::RecorderState`, `windows::Spec`).
 
@@ -45,11 +47,16 @@ mod tray;
 mod updater;
 mod windows;
 
+#[cfg(target_os = "linux")]
+use std::ffi::OsStr;
+
 use tauri::Manager;
 
 use crate::windows::BridgeWindow;
 
 fn main() {
+    #[cfg(target_os = "linux")]
+    use_xwayland_on_wayland();
     let mut builder = tauri::Builder::default();
     // First, so a second instance exits before it builds anything; it
     // hands its arguments (a `steno:` link among them) to this one and
@@ -209,6 +216,89 @@ fn single_instance_available() -> bool {
     !cfg!(target_os = "linux") || std::env::var_os("DBUS_SESSION_BUS_ADDRESS").is_some()
 }
 
+/// Which GDK backend the shell runs on (`display_backend`).
+#[cfg(target_os = "linux")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DisplayBackend {
+    /// No Wayland session: GTK picks, which is X11.
+    GtksChoice,
+    /// A Wayland session with `XWayland`: the shell sets
+    /// `GDK_BACKEND=x11` and runs under it.
+    ForcedX11,
+    /// A Wayland session without `XWayland` (no `DISPLAY`): X11 would not
+    /// open, so GTK runs on Wayland and the panels neither float nor stay
+    /// where they are put.
+    WaylandOnly,
+    /// The user's `GDK_BACKEND`, whatever it says.
+    Users,
+}
+
+#[cfg(target_os = "linux")]
+impl DisplayBackend {
+    /// The startup log line; it names no value from the environment.
+    const fn describe(self) -> &'static str {
+        match self {
+            Self::GtksChoice => "display: GTK's default backend (no Wayland session)",
+            Self::ForcedX11 => {
+                "display: a Wayland session, so the shell runs under XWayland \
+                 (GDK_BACKEND=x11) to keep the panels on top and where they are put; \
+                 a GDK_BACKEND set before launch overrides this"
+            }
+            Self::WaylandOnly => {
+                "display: a Wayland session without XWayland, so the panels \
+                 neither stay on top nor keep their place"
+            }
+            Self::Users => "display: the GDK_BACKEND set before launch",
+        }
+    }
+}
+
+/// The GDK backend for a session with these `WAYLAND_DISPLAY`, `DISPLAY`
+/// and `GDK_BACKEND` values (an empty value counts as none, except the
+/// user's `GDK_BACKEND`). On Wayland GTK 3 can neither place a top-level
+/// window nor keep it above the others, and reports no moves, so the
+/// panels would neither float nor stay where they are put nor save their
+/// anchor; under `XWayland` all three work. A `GDK_BACKEND` the user set,
+/// even to `wayland` or empty, always wins.
+#[cfg(target_os = "linux")]
+fn display_backend(
+    wayland_display: Option<&OsStr>,
+    x11_display: Option<&OsStr>,
+    gdk_backend: Option<&OsStr>,
+) -> DisplayBackend {
+    let set = |value: Option<&OsStr>| value.is_some_and(|value| !value.is_empty());
+    if gdk_backend.is_some() {
+        DisplayBackend::Users
+    } else if !set(wayland_display) {
+        DisplayBackend::GtksChoice
+    } else if set(x11_display) {
+        DisplayBackend::ForcedX11
+    } else {
+        DisplayBackend::WaylandOnly
+    }
+}
+
+/// Applies `display_backend` to this process and logs it once. Runs first
+/// in `main`.
+#[cfg(target_os = "linux")]
+fn use_xwayland_on_wayland() {
+    let backend = display_backend(
+        std::env::var_os("WAYLAND_DISPLAY").as_deref(),
+        std::env::var_os("DISPLAY").as_deref(),
+        std::env::var_os("GDK_BACKEND").as_deref(),
+    );
+    if backend == DisplayBackend::ForcedX11 {
+        // SAFETY: this is the first statement of `main`, before the Tauri
+        // builder, the tokio runtime, GTK or any plugin exists, so the
+        // process has one thread and nothing reads the environment
+        // concurrently. Nothing before `main` starts one: the only
+        // constructor in the tree (`tauri-utils`' starting binary) reads
+        // the executable's path and spawns nothing.
+        unsafe { std::env::set_var("GDK_BACKEND", "x11") };
+    }
+    eprintln!("[steno-desktop] {}", backend.describe());
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -237,6 +327,53 @@ mod tests {
                 assert!(!hides_on_close(label, tray), "{label}");
                 assert!(!exits_when_destroyed(label, tray), "{label}");
             }
+        }
+    }
+
+    /// A Wayland session runs under `XWayland` when there is one, unless
+    /// the user chose a backend; an X11 session, or an empty
+    /// `WAYLAND_DISPLAY`, is left to GTK.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_wayland_session_runs_under_xwayland_unless_the_user_chose() {
+        let wayland = Some(OsStr::new("wayland-0"));
+        let x11 = Some(OsStr::new(":0"));
+        assert_eq!(
+            display_backend(wayland, None, None),
+            DisplayBackend::WaylandOnly
+        );
+        assert_eq!(display_backend(None, x11, None), DisplayBackend::GtksChoice);
+        assert_eq!(
+            display_backend(wayland, x11, None),
+            DisplayBackend::ForcedX11
+        );
+        assert_eq!(
+            display_backend(wayland, x11, Some(OsStr::new("wayland"))),
+            DisplayBackend::Users
+        );
+        assert_eq!(
+            display_backend(None, x11, Some(OsStr::new("x11"))),
+            DisplayBackend::Users
+        );
+        assert_eq!(
+            display_backend(wayland, x11, Some(OsStr::new(""))),
+            DisplayBackend::Users
+        );
+        assert_eq!(
+            display_backend(Some(OsStr::new("")), x11, None),
+            DisplayBackend::GtksChoice
+        );
+        assert_eq!(
+            display_backend(wayland, Some(OsStr::new("")), None),
+            DisplayBackend::WaylandOnly
+        );
+        for backend in [
+            DisplayBackend::GtksChoice,
+            DisplayBackend::ForcedX11,
+            DisplayBackend::WaylandOnly,
+            DisplayBackend::Users,
+        ] {
+            assert!(backend.describe().starts_with("display: "));
         }
     }
 
