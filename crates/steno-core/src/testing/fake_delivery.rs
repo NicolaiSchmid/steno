@@ -172,6 +172,41 @@ mod tests {
         assert_eq!(destination.deliveries.count(), 3);
     }
 
+    /// Attempt numbers come from one atomic counter, so concurrent
+    /// deliveries see every number once, in no particular order.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn concurrent_deliveries_number_their_attempts_once_each() {
+        const TASKS: usize = 8;
+        const PER_TASK: usize = 50;
+        let root = tempfile::tempdir().unwrap();
+        let destination = std::sync::Arc::new(FakeDestination {
+            fail_until: usize::MAX,
+            ..FakeDestination::new(root.path())
+        });
+        let export = sample_data::export();
+        let tasks: Vec<_> = (0..TASKS)
+            .map(|_| {
+                let destination = destination.clone();
+                let export = export.clone();
+                tokio::spawn(async move {
+                    let mut attempts = Vec::with_capacity(PER_TASK);
+                    for _ in 0..PER_TASK {
+                        let error = destination.deliver(&export, None).await.unwrap_err();
+                        attempts.push(error.downcast_ref::<Transient>().unwrap().attempt);
+                    }
+                    attempts
+                })
+            })
+            .collect();
+        let mut attempts = Vec::with_capacity(TASKS * PER_TASK);
+        for task in tasks {
+            attempts.extend(task.await.unwrap());
+        }
+        attempts.sort_unstable();
+        assert_eq!(attempts, (1..=TASKS * PER_TASK).collect::<Vec<_>>());
+        assert_eq!(destination.deliveries.count(), TASKS * PER_TASK);
+    }
+
     #[tokio::test]
     async fn the_intake_records_admissions() {
         let fixed = Uuid::new_v4();

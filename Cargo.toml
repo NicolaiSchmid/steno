@@ -42,7 +42,7 @@ tempfile = "3"
 # fakes write into receipts, and the executor the trait tests run on.
 async-trait = "0.1"
 sha2 = "0.10"
-tokio = { version = "1", default-features = false, features = ["macros", "rt"] }
+tokio = { version = "1", default-features = false, features = ["macros", "rt", "rt-multi-thread"] }
 
 [workspace.lints.clippy]
 all = { level = "warn", priority = -1 }
