@@ -283,8 +283,8 @@ mod tests {
         assert_eq!(uuid_string(id), "516EADE8-40E5-4434-8AAF-9214A21A604E");
     }
 
-    /// `UUID(uuidString:)` reads either case of the hyphenated form and
-    /// nothing else; the codecs follow it rather than the `uuid` crate.
+    /// Both `with` modules reject what [`parse_uuid`] rejects, naming the
+    /// text in serde's error.
     #[test]
     fn uuids_read_only_the_hyphenated_form() {
         #[derive(Debug, PartialEq, Deserialize)]
@@ -296,6 +296,10 @@ mod tests {
         let id = Uuid::parse_str("516eade8-40e5-4434-8aaf-9214a21a604e").unwrap();
         assert_eq!(parse_uuid("516EADE8-40E5-4434-8AAF-9214A21A604E"), Some(id));
         assert_eq!(parse_uuid("516eade8-40e5-4434-8aaf-9214a21a604e"), Some(id));
+        let wire: Wire =
+            serde_json::from_str("[\"516eade8-40e5-4434-8aaf-9214a21a604e\",null]").unwrap();
+        assert_eq!(wire, Wire(id, None));
+
         for rejected in [
             "516eade840e544348aaf9214a21a604e",
             "{516eade8-40e5-4434-8aaf-9214a21a604e}",
