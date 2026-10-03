@@ -15,7 +15,10 @@
 //! updates (`updater`), the OS permissions (`permissions`), the `steno:`
 //! links (`deep_links`), the native dialogs (`dialogs`), the single
 //! instance, and on a Wayland session the `XWayland` backend the panels
-//! need (`display`). Secrets are not the shell's:
+//! need (`display`). Every exit goes through `App::shutdown` first
+//! (`exit_request`): Quit from either menu, and the close that ends the
+//! process when no tray stands, stop and save a recording in progress
+//! before the process ends. Secrets are not the shell's:
 //! the keyring `SecretStore` lives in `steno-services` (#173, `WP6b`).
 //! Every one is a thin module over a Tauri plugin or an OS API with its
 //! rules in plain functions the tests cover. Everything that is on the
@@ -106,7 +109,8 @@ fn main() {
         .setup(move |app| setup(app.handle(), &runtime))
         .build(tauri::generate_context!())
         .expect("steno-desktop failed to build");
-    app.run(on_event);
+    let exits = steno_services::app::ExitGate::default();
+    app.run(move |app, event| on_event(app, event, &exits));
 }
 
 /// Builds the host, the tray and the main window, opens onboarding when
@@ -136,10 +140,22 @@ fn setup(
 }
 
 /// One turn of the run loop.
-fn on_event(app: &tauri::AppHandle, event: tauri::RunEvent) {
+fn on_event(app: &tauri::AppHandle, event: tauri::RunEvent, exits: &steno_services::app::ExitGate) {
     match event {
+        // Quit from either menu, the smoke's exit, the last window closing
+        // with no tray: a recording in progress is stopped and saved first
+        // (`exit_request`).
         tauri::RunEvent::ExitRequested { code, api, .. } => {
-            if !exits_on(code, || tray_at_close(app)) {
+            let host = host::host(app);
+            let handle = app.clone();
+            if !exit_request(
+                code,
+                || tray_at_close(app),
+                exits,
+                host.recording(),
+                host.shutdown_action(),
+                move |code| handle.exit(code),
+            ) {
                 api.prevent_exit();
             }
         }
@@ -284,6 +300,37 @@ fn exits_when_destroyed(label: &str, has_tray: impl FnOnce() -> bool) -> bool {
     label == BridgeWindow::Main.as_str() && !has_tray()
 }
 
+/// What an exit request does; true lets it through now. `exits_on`
+/// decides whether the process ends at all. One that ends it while
+/// `recording` names a meeting is held: `shutdown` stops and saves the
+/// recording on a thread of its own (`App::shutdown`), at most
+/// `SHUTDOWN_PATIENCE`, and then `exit` raises the request again with its
+/// code (zero for one without), which goes through. Re-entry is the gate's:
+/// every request after the first that held goes ahead, the one `exit`
+/// raises included, and the shutdown runs once.
+///
+/// Swift: `applicationShouldTerminate` answered `.terminateLater`, awaited
+/// `AppController.shutdown()` and replied.
+fn exit_request(
+    code: Option<i32>,
+    has_tray: impl FnOnce() -> bool,
+    gate: &steno_services::app::ExitGate,
+    recording: Option<uuid::Uuid>,
+    shutdown: impl FnOnce() + Send + 'static,
+    exit: impl FnOnce(i32) + Send + 'static,
+) -> bool {
+    if !exits_on(code, has_tray) {
+        return false;
+    }
+    let code = code.unwrap_or(0);
+    gate.exit_requested(
+        recording,
+        steno_services::app::SHUTDOWN_PATIENCE,
+        shutdown,
+        move || exit(code),
+    )
+}
+
 /// Whether an exit request ends the process. One with a code is the shell's
 /// own (`AppHandle::exit` from Quit, the smoke's) and always does. One
 /// without comes from the last window closing: with a tray the process
@@ -314,6 +361,137 @@ mod tests {
         assert!(!exits_on(None, || true));
         // No tray: the last window closing ends the process.
         assert!(exits_on(None, || false));
+    }
+
+    /// The run loop's round trip: `exit` raises the request again, as
+    /// `AppHandle::exit` raises `ExitRequested`, and reports whether that
+    /// one went through.
+    fn requested_again(
+        gate: std::sync::Arc<steno_services::app::ExitGate>,
+        recording: Option<uuid::Uuid>,
+        steps: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+        went_through: std::sync::mpsc::Sender<bool>,
+    ) -> impl FnOnce(i32) + Send + 'static {
+        move |code| {
+            steps.lock().unwrap().push(format!("exit {code}"));
+            let _ = went_through.send(exit_request(
+                Some(code),
+                || panic!("the tray asked for an exit with a code"),
+                &gate,
+                recording,
+                || panic!("a second shutdown"),
+                |_| panic!("a second exit"),
+            ));
+        }
+    }
+
+    /// Quit (the tray's item, the menu bar's, `actions::quit`) while
+    /// recording: the request is held, the recording is stopped and saved
+    /// once, then the process exits with Quit's code; nothing exits before
+    /// the save, and a second Quit meanwhile neither saves nor waits again.
+    #[test]
+    fn a_quit_while_recording_stops_once_and_exits_after_the_save() {
+        use std::sync::{Arc, Mutex, atomic::AtomicUsize, atomic::Ordering};
+        use std::time::Duration;
+
+        let gate = Arc::new(steno_services::app::ExitGate::default());
+        let steps = Arc::new(Mutex::new(Vec::<String>::new()));
+        let shutdowns = Arc::new(AtomicUsize::new(0));
+        let (went_through, exit_seen) = std::sync::mpsc::channel();
+        let meeting = Some(uuid::Uuid::new_v4());
+        let shutdown = {
+            let (steps, shutdowns) = (steps.clone(), shutdowns.clone());
+            move || {
+                shutdowns.fetch_add(1, Ordering::SeqCst);
+                std::thread::sleep(Duration::from_millis(100));
+                steps.lock().unwrap().push("saved".to_owned());
+            }
+        };
+        let held = !exit_request(
+            Some(actions::QUIT_CODE),
+            || panic!("the tray asked for an exit with a code"),
+            &gate,
+            meeting,
+            shutdown,
+            requested_again(gate.clone(), meeting, steps.clone(), went_through),
+        );
+        assert!(held, "Quit waits for the save");
+        assert!(
+            exit_request(
+                Some(actions::QUIT_CODE),
+                || true,
+                &gate,
+                meeting,
+                || panic!("a second shutdown"),
+                |_| panic!("a second exit"),
+            ),
+            "a second Quit while saving goes ahead"
+        );
+        assert!(
+            exit_seen.recv_timeout(Duration::from_secs(5)).unwrap(),
+            "the exit after the save goes through"
+        );
+        assert_eq!(*steps.lock().unwrap(), ["saved", "exit 0"]);
+        assert_eq!(shutdowns.load(Ordering::SeqCst), 1);
+    }
+
+    /// Closing main with no tray while recording: the code-less request
+    /// that ends the process is held the same way and exits with zero
+    /// after the save.
+    #[test]
+    fn a_close_without_a_tray_saves_the_recording_before_the_process_ends() {
+        use std::sync::{Arc, Mutex};
+        use std::time::Duration;
+
+        let gate = Arc::new(steno_services::app::ExitGate::default());
+        let steps = Arc::new(Mutex::new(Vec::<String>::new()));
+        let (went_through, exit_seen) = std::sync::mpsc::channel();
+        let meeting = Some(uuid::Uuid::new_v4());
+        let saved = steps.clone();
+        assert!(!exit_request(
+            None,
+            || false,
+            &gate,
+            meeting,
+            move || saved.lock().unwrap().push("saved".to_owned()),
+            requested_again(gate.clone(), meeting, steps.clone(), went_through),
+        ));
+        assert!(exit_seen.recv_timeout(Duration::from_secs(5)).unwrap());
+        assert_eq!(*steps.lock().unwrap(), ["saved", "exit 0"]);
+    }
+
+    /// A close behind a tray ends nothing, so it stops nothing; with no
+    /// recording, an exit goes through at once without a shutdown.
+    #[test]
+    fn only_an_exit_that_ends_the_process_during_a_recording_waits() {
+        let gate = steno_services::app::ExitGate::default();
+        let meeting = Some(uuid::Uuid::new_v4());
+        let untouched = || panic!("a shutdown");
+        let no_exit = |_| panic!("an exit");
+        assert!(!exit_request(
+            None,
+            || true,
+            &gate,
+            meeting,
+            untouched,
+            no_exit
+        ));
+        assert!(exit_request(
+            Some(actions::QUIT_CODE),
+            || true,
+            &gate,
+            None,
+            untouched,
+            no_exit
+        ));
+        assert!(exit_request(
+            None,
+            || false,
+            &gate,
+            None,
+            untouched,
+            no_exit
+        ));
     }
 
     /// A tray stands when it was built and a host or a smoke run shows it;

@@ -295,6 +295,33 @@ impl Host {
         self.inner.host.onboarding_window_closed();
     }
 
+    /// The meeting being recorded, which an exit has to save first; never
+    /// one for the fixtures.
+    pub fn recording(&self) -> Option<uuid::Uuid> {
+        #[cfg(not(feature = "fixture-host"))]
+        {
+            self.inner.app.recording()
+        }
+        #[cfg(feature = "fixture-host")]
+        {
+            None
+        }
+    }
+
+    /// Stops and saves a recording in progress before the process exits
+    /// (`steno_services::App::shutdown`); a no-op for the fixtures.
+    pub fn shutdown_action(&self) -> impl FnOnce() + Send + 'static {
+        #[cfg(not(feature = "fixture-host"))]
+        {
+            let app = self.inner.app.clone();
+            move || app.shutdown()
+        }
+        #[cfg(feature = "fixture-host")]
+        {
+            || {}
+        }
+    }
+
     /// The launch sequence on the runtime; a no-op for the fixtures.
     pub fn launch(&self, runtime: &tokio::runtime::Runtime) {
         #[cfg(not(feature = "fixture-host"))]

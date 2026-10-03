@@ -507,6 +507,49 @@ mod tests {
         assert!(harness.store.asset(meeting_id).unwrap().is_some());
     }
 
+    /// Quit while recording, as the shell's run loop drives it: the exit
+    /// request is held, the recording is stopped once and saved, and only
+    /// then the exit runs; by then the asset is written and the meeting is
+    /// queued, and the pipeline goes on to process it.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_quit_through_the_exit_gate_exits_after_the_recording_is_saved() {
+        let harness = harness(&[]);
+        start(&harness.recorder).await;
+        let meeting_id = harness.recorder.status().meeting_id.unwrap();
+        let gate = crate::app::ExitGate::default();
+        let (exited, exit_seen) = std::sync::mpsc::channel();
+        let quitting = harness.recorder.clone();
+        let (store, at_exit) = (harness.store.clone(), harness.recorder.clone());
+        let held = gate.exit_requested(
+            Some(meeting_id),
+            crate::app::SHUTDOWN_PATIENCE,
+            move || quitting.stop_for_quit(),
+            move || {
+                let meeting = store.meeting(meeting_id).unwrap().unwrap();
+                let saved = store.asset(meeting_id).unwrap().is_some();
+                let _ = exited.send((at_exit.status().state, meeting, saved));
+            },
+        );
+        assert!(!held, "the exit waits for the save");
+        let (state, meeting, saved) = tokio::task::spawn_blocking(move || {
+            exit_seen.recv_timeout(std::time::Duration::from_secs(20))
+        })
+        .await
+        .unwrap()
+        .expect("exited after the save");
+        assert_eq!(state, RecordingState::Idle);
+        assert!(saved, "the asset was written before the exit");
+        assert_eq!(meeting.end_reason, Some(RecordingEndReason::Quit));
+        assert_ne!(
+            meeting.state.kind(),
+            steno_core::MeetingStateKind::Recording
+        );
+        eventually("the pipeline picked the saved meeting up", || {
+            harness.engine.transcriptions.count() > 0
+        })
+        .await;
+    }
+
     /// The configured engine decides which model counts: with the `CoreML`
     /// Parakeet and the diarizer on disk but another engine id stored (a
     /// Swift user who picked Whisper), the ONNX engine would load, its
