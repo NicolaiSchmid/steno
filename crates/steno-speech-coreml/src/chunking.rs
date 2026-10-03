@@ -680,7 +680,7 @@ mod tests {
     }
 
     #[test]
-    fn a_silence_past_six_frames_before_the_window_end_is_out_of_reach() {
+    fn a_silence_within_six_frames_of_the_window_end_is_out_of_reach() {
         let layout = Layout::v3();
         let chunk_frames = layout.chunk_samples / FRAME_SAMPLES; // 187
         // Silence at frames 182 to 184 of a 30 s tone: within the 4 s
