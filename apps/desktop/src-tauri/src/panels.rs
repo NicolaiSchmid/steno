@@ -46,7 +46,10 @@ use tauri::{
 use crate::{
     bridge::{BridgeError, failed},
     navigation,
-    panel_geometry::{PROBE_SIZE, PanelAnchor, Rect, accepted_size, frame_hanging_from, same_size},
+    panel_geometry::{
+        PROBE_SIZE, PanelAnchor, Rect, accepted_size, fitted, frame_hanging_from, same_point,
+        same_size,
+    },
     recording::{RecorderState, RecordingState},
     windows,
 };
@@ -168,13 +171,29 @@ impl FloatingContent {
     }
 }
 
+/// Where the shell last put a panel: the point it hangs from and the
+/// origin of the frame it was given, so `Panels::dragged` tells the
+/// window reporting the shell's own move from the user dragging it.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct Placement {
+    top_center: (f64, f64),
+    origin: (f64, f64),
+}
+
+/// The saved anchor, read from disk on first use.
+#[derive(Debug, Default)]
+struct AnchorState {
+    loaded: bool,
+    anchor: Option<PanelAnchor>,
+}
+
 /// The panels' state, managed by the app.
 #[derive(Debug)]
 pub struct Panels {
-    anchor: Mutex<Option<PanelAnchor>>,
-    anchor_loaded: Mutex<bool>,
+    anchor: Mutex<AnchorState>,
     /// The size each panel's page last reported.
     sizes: Mutex<HashMap<Panel, (f64, f64)>>,
+    placed: Mutex<HashMap<Panel, Placement>>,
     prompt: Mutex<Option<PromptRequest>>,
     recording: Mutex<RecordingState>,
     /// What `apply` last showed, so a snapshot that changes nothing does
@@ -188,8 +207,8 @@ impl Default for Panels {
     fn default() -> Self {
         Self {
             anchor: Mutex::default(),
-            anchor_loaded: Mutex::default(),
             sizes: Mutex::default(),
+            placed: Mutex::default(),
             prompt: Mutex::default(),
             recording: Mutex::new(RecordingState::Idle),
             showing: Mutex::default(),
@@ -210,6 +229,19 @@ impl Panels {
     /// The measured size, else the one to lay out with before measuring.
     fn size_of(&self, panel: Panel) -> (f64, f64) {
         self.measured(panel).unwrap_or(panel.initial_size())
+    }
+
+    /// Records the size a page reported; `false` when the panel already
+    /// has it.
+    fn note_size(&self, panel: Panel, size: (f64, f64)) -> bool {
+        self.sizes.lock().is_ok_and(|mut sizes| {
+            if sizes.get(&panel).is_some_and(|last| same_size(*last, size)) {
+                false
+            } else {
+                sizes.insert(panel, size);
+                true
+            }
+        })
     }
 
     pub fn content(&self) -> Option<FloatingContent> {
@@ -236,6 +268,96 @@ impl Panels {
     /// The query for a prompt raised now, numbered.
     fn prompt_query(&self, request: &PromptRequest) -> String {
         request.query(Some(self.raised.fetch_add(1, Ordering::SeqCst) + 1))
+    }
+
+    /// The anchor to lay out from: the saved one (`load` reads it on first
+    /// use) while a panel of `size` hanging from it fits one of `screens`,
+    /// else the default.
+    fn anchor_for(
+        &self,
+        size: (f64, f64),
+        screens: &[Rect],
+        load: impl FnOnce() -> Option<PanelAnchor>,
+    ) -> PanelAnchor {
+        let Ok(mut state) = self.anchor.lock() else {
+            return PanelAnchor::default_in(fallback_screen(screens));
+        };
+        if !state.loaded {
+            state.loaded = true;
+            state.anchor = load();
+        }
+        let resolved =
+            PanelAnchor::validated(state.anchor, size, screens, fallback_screen(screens));
+        state.anchor = Some(resolved);
+        resolved
+    }
+
+    /// The frame `panel` takes at `size` hanging from `top_center`, moved
+    /// inside the screen that holds the point where it would overhang
+    /// (a saved anchor near an edge, a report as large as the screen), and
+    /// recorded as the panel's placement.
+    fn place(
+        &self,
+        panel: Panel,
+        top_center: (f64, f64),
+        size: (f64, f64),
+        screens: &[Rect],
+    ) -> Rect {
+        let screen = Rect::holding(screens, top_center, fallback_screen(screens));
+        let frame = fitted(frame_hanging_from(top_center, size), screen);
+        if let Ok(mut placed) = self.placed.lock() {
+            placed.insert(
+                panel,
+                Placement {
+                    top_center,
+                    origin: (frame.x, frame.y),
+                },
+            );
+        }
+        frame
+    }
+
+    /// The point `panel` hangs from, once the shell has placed it.
+    fn hung_from(&self, panel: Panel) -> Option<(f64, f64)> {
+        self.placed
+            .lock()
+            .ok()
+            .and_then(|placed| placed.get(&panel).map(|placement| placement.top_center))
+    }
+
+    /// The window of `panel` reports it is at `frame`. A frame at the
+    /// origin the shell gave it is the shell's own move, and one with
+    /// another size than the page's is the window still taking that size;
+    /// neither moves the anchor (else each prompt, bubble and launch would
+    /// shift it by the rounding of a half point). Anything else is a drag:
+    /// the panel hangs from the new point and the anchor follows, returned
+    /// when it changed so the caller saves it.
+    fn dragged(&self, panel: Panel, frame: Rect, screens: &[Rect]) -> Option<PanelAnchor> {
+        if !same_size((frame.width, frame.height), self.size_of(panel)) {
+            return None;
+        }
+        let anchor = PanelAnchor::from_frame(frame, screens, fallback_screen(screens));
+        {
+            let mut placed = self.placed.lock().ok()?;
+            if placed
+                .get(&panel)
+                .is_some_and(|placement| same_point(placement.origin, (frame.x, frame.y)))
+            {
+                return None;
+            }
+            placed.insert(
+                panel,
+                Placement {
+                    top_center: anchor.top_center,
+                    origin: (frame.x, frame.y),
+                },
+            );
+        }
+        let mut state = self.anchor.lock().ok()?;
+        (state.anchor != Some(anchor)).then(|| {
+            state.anchor = Some(anchor);
+            anchor
+        })
     }
 }
 
@@ -277,25 +399,10 @@ fn fallback_screen(screens: &[Rect]) -> Rect {
         .unwrap_or(Rect::new(0.0, 0.0, 1280.0, 800.0))
 }
 
-/// The anchor to lay out from, loading the saved one on first use and
-/// validating it for a panel of `size`. The screens are asked for before
-/// the lock is taken: off the main thread the query waits on it, and the
-/// main thread takes the same lock in `moved`.
-fn current_anchor(app: &AppHandle, size: (f64, f64)) -> PanelAnchor {
-    let screens = screens(app);
-    let panels = app.state::<Panels>();
-    let mut anchor = panels.anchor.lock().expect("anchor");
-    if let Ok(mut loaded) = panels.anchor_loaded.lock()
-        && !*loaded
-    {
-        *loaded = true;
-        *anchor = anchor_path(app)
-            .and_then(|path| fs::read(path).ok())
-            .and_then(|bytes| serde_json::from_slice(&bytes).ok());
-    }
-    let resolved = PanelAnchor::validated(*anchor, size, &screens, fallback_screen(&screens));
-    *anchor = Some(resolved);
-    resolved
+fn load_anchor(app: &AppHandle) -> Option<PanelAnchor> {
+    anchor_path(app)
+        .and_then(|path| fs::read(path).ok())
+        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
 }
 
 fn save_anchor(app: &AppHandle, anchor: PanelAnchor) {
@@ -333,33 +440,51 @@ fn top_center_of(window: &WebviewWindow) -> tauri::Result<(f64, f64)> {
 
 /// Shows `panel` at the anchor, creating its window when needed. The
 /// anchor is validated with the size the page reported, or with
-/// `PROBE_SIZE` before it has, never with the pre-measure maximum.
+/// `PROBE_SIZE` before it has, never with the pre-measure maximum. The
+/// screens are read before any lock is taken (off the main thread the
+/// query waits on it).
 pub fn show(app: &AppHandle, panel: Panel, query: Option<&str>) -> tauri::Result<WebviewWindow> {
+    let screens = screens(app);
     let panels = app.state::<Panels>();
     let size = panels.size_of(panel);
     let probe = panels.measured(panel).unwrap_or(PROBE_SIZE);
-    let frame = current_anchor(app, probe).frame_for(size);
-    show_at(app, panel, query, (frame.x, frame.y))
+    let anchor = panels.anchor_for(probe, &screens, || load_anchor(app));
+    let frame = panels.place(panel, anchor.top_center, size, &screens);
+    show_window(app, panel, query, frame)
 }
 
-/// `show` at an explicit position (the smoke run lays the panels out
-/// beside the windows). An existing window is reused: the prompt's is
-/// navigated to the new request first.
+/// `show` with the frame's top-left corner at `position` (the smoke run
+/// lays the panels out beside the windows).
 pub fn show_at(
     app: &AppHandle,
     panel: Panel,
     query: Option<&str>,
     position: (f64, f64),
 ) -> tauri::Result<WebviewWindow> {
+    let screens = screens(app);
+    let panels = app.state::<Panels>();
+    let size = panels.size_of(panel);
+    let top_center = (position.0 + size.0 / 2.0, position.1);
+    let frame = panels.place(panel, top_center, size, &screens);
+    show_window(app, panel, query, frame)
+}
+
+/// Shows `panel` at `frame`. An existing window is reused: the prompt's
+/// is navigated to the new request first.
+fn show_window(
+    app: &AppHandle,
+    panel: Panel,
+    query: Option<&str>,
+    frame: Rect,
+) -> tauri::Result<WebviewWindow> {
     if let Some(existing) = app.get_webview_window(panel.label()) {
         if panel.navigates_per_request() {
             existing.navigate(panel.route_url(&existing.url()?, query))?;
         }
-        existing.set_position(LogicalPosition::new(position.0, position.1))?;
+        existing.set_position(LogicalPosition::new(frame.x, frame.y))?;
         existing.show()?;
         return Ok(existing);
     }
-    let size = app.state::<Panels>().size_of(panel);
     let dev_server = navigation::dev_server(app);
     let window = WebviewWindowBuilder::new(
         app,
@@ -367,8 +492,8 @@ pub fn show_at(
         WebviewUrl::App(panel.start_path(query).into()),
     )
     .title("Steno")
-    .inner_size(size.0, size.1)
-    .position(position.0, position.1)
+    .inner_size(frame.width, frame.height)
+    .position(frame.x, frame.y)
     .decorations(false)
     .transparent(true)
     .shadow(false)
@@ -481,37 +606,38 @@ pub fn dismiss_prompt(app: &AppHandle) {
 }
 
 /// The page measured its content: the window takes that size around the
-/// top-centre point it already hangs from (the anchor in the normal flow,
-/// wherever the smoke put it otherwise), so a change of content never
-/// moves the panel. A report that is not a size is `invalidParams`; one
-/// larger than the screen is clamped to its work area.
+/// top-centre point it hangs from (the anchor in the normal flow, wherever
+/// the smoke put it otherwise), so a change of content never moves the
+/// panel, short of moving it back inside the screen. A report that is not
+/// a size is `invalidParams`; one larger than the screen is clamped to its
+/// work area.
 pub fn resize(app: &AppHandle, panel: Panel, reported: (f64, f64)) -> Result<(), BridgeError> {
     let screens = screens(app);
     let fallback = fallback_screen(&screens);
     let window = app.get_webview_window(panel.label());
-    let top_center = window
-        .as_ref()
-        .map(top_center_of)
-        .transpose()
-        .map_err(failed)?;
+    let panels = app.state::<Panels>();
+    let top_center = match panels.hung_from(panel) {
+        Some(point) => Some(point),
+        None => window
+            .as_ref()
+            .map(top_center_of)
+            .transpose()
+            .map_err(failed)?,
+    };
     let screen = top_center.map_or(fallback, |point| Rect::holding(&screens, point, fallback));
     let size = accepted_size(reported, (screen.width, screen.height)).ok_or_else(|| {
         BridgeError::invalid_params(format!(
-            "resize: {} by {} is not a size",
+            "resize: {:?} by {:?} is not a size",
             reported.0, reported.1
         ))
     })?;
-    let panels = app.state::<Panels>();
-    if let Ok(mut sizes) = panels.sizes.lock() {
-        if sizes.get(&panel).is_some_and(|last| same_size(*last, size)) {
-            return Ok(());
-        }
-        sizes.insert(panel, size);
+    if !panels.note_size(panel, size) {
+        return Ok(());
     }
     let (Some(window), Some(top_center)) = (window, top_center) else {
         return Ok(());
     };
-    let frame = frame_hanging_from(top_center, size);
+    let frame = panels.place(panel, top_center, size, &screens);
     window
         .set_size(LogicalSize::new(size.0, size.1))
         .map_err(failed)?;
@@ -521,9 +647,9 @@ pub fn resize(app: &AppHandle, panel: Panel, reported: (f64, f64)) -> Result<(),
     Ok(())
 }
 
-/// The window moved. A move with the size the page last reported is a
-/// drag and updates the anchor; one with another size is the window still
-/// taking its content's size, and is not.
+/// The window moved: a drag moves the anchor and saves it
+/// (`Panels::dragged` tells a drag from the shell's own moves). Runs on
+/// the main thread, the window event's.
 pub fn moved(app: &AppHandle, panel: Panel, position: PhysicalPosition<i32>) {
     let Some(window) = app.get_webview_window(panel.label()) else {
         return;
@@ -531,11 +657,6 @@ pub fn moved(app: &AppHandle, panel: Panel, position: PhysicalPosition<i32>) {
     let (Ok(scale), Ok(size)) = (window.scale_factor(), logical_size(&window)) else {
         return;
     };
-    let panels = app.state::<Panels>();
-    let reported = panels.size_of(panel);
-    if !same_size(size, reported) {
-        return;
-    }
     let frame = Rect::new(
         f64::from(position.x) / scale,
         f64::from(position.y) / scale,
@@ -543,16 +664,7 @@ pub fn moved(app: &AppHandle, panel: Panel, position: PhysicalPosition<i32>) {
         size.1,
     );
     let screens = screens(app);
-    let anchor = PanelAnchor::from_frame(frame, &screens, fallback_screen(&screens));
-    let changed = panels.anchor.lock().is_ok_and(|mut current| {
-        if *current == Some(anchor) {
-            false
-        } else {
-            *current = Some(anchor);
-            true
-        }
-    });
-    if changed {
+    if let Some(anchor) = app.state::<Panels>().dragged(panel, frame, &screens) {
         save_anchor(app, anchor);
     }
 }
@@ -720,13 +832,104 @@ mod tests {
         assert!(matches!(panels.content(), Some(FloatingContent::Prompt(_))));
         *panels.recording.lock().unwrap() = RecordingState::Recording;
         assert_eq!(panels.content(), Some(FloatingContent::Bubble));
-        panels
-            .sizes
-            .lock()
-            .unwrap()
-            .insert(Panel::Bubble, (300.0, 68.0));
+        assert!(panels.note_size(Panel::Bubble, (300.0, 68.0)));
+        assert!(!panels.note_size(Panel::Bubble, (300.4, 68.0)));
         assert_eq!(panels.measured(Panel::Bubble), Some((300.0, 68.0)));
         assert_eq!(panels.size_of(Panel::Bubble), (300.0, 68.0));
+    }
+
+    const SCREEN: Rect = Rect::new(0.0, 0.0, 2200.0, 1500.0);
+    const PROMPT: (f64, f64) = (463.0, 56.0);
+    const BUBBLE: (f64, f64) = (79.0, 42.0);
+
+    /// The window system reporting where a panel now is, at the size it
+    /// has.
+    fn at(frame: Rect, size: (f64, f64)) -> Rect {
+        Rect::new(frame.x, frame.y, size.0, size.1)
+    }
+
+    /// What `show` does for a measured panel, then the window reporting
+    /// the move: the anchor must not change.
+    fn show_measured(panels: &Panels, panel: Panel, size: (f64, f64), saved: Option<PanelAnchor>) {
+        panels.note_size(panel, size);
+        let anchor = panels.anchor_for(size, &[SCREEN], || saved);
+        let frame = panels.place(panel, anchor.top_center, size, &[SCREEN]);
+        assert_eq!(panels.dragged(panel, at(frame, size), &[SCREEN]), None);
+    }
+
+    /// The prompt (odd width) and the bubble (odd width) hang from a whole
+    /// point; each switch and each launch used to read the shell's own move
+    /// back as a drag and creep the anchor a point to the right.
+    #[test]
+    fn the_anchor_stays_put_through_prompts_bubbles_and_launches() {
+        let saved = PanelAnchor::default_in(SCREEN);
+        assert_eq!(saved.top_center, (1100.0, 8.0));
+        for _launch in 0..3 {
+            let panels = Panels::default();
+            for _ in 0..6 {
+                show_measured(&panels, Panel::Prompt, PROMPT, Some(saved));
+                show_measured(&panels, Panel::Bubble, BUBBLE, Some(saved));
+            }
+            assert_eq!(panels.anchor.lock().unwrap().anchor, Some(saved));
+            assert_eq!(panels.hung_from(Panel::Bubble), Some(saved.top_center));
+        }
+    }
+
+    /// A drag is a move away from where the shell put the panel: the anchor
+    /// and the point the panel hangs from follow it, once.
+    #[test]
+    fn a_drag_moves_the_anchor_and_the_panel_hangs_from_it() {
+        let panels = Panels::default();
+        show_measured(&panels, Panel::Bubble, BUBBLE, None);
+        let dragged = Rect::new(500.0, 300.0, BUBBLE.0, BUBBLE.1);
+        let anchor = panels
+            .dragged(Panel::Bubble, dragged, &[SCREEN])
+            .expect("a drag");
+        assert_eq!(anchor.top_center, (539.5, 300.0));
+        assert_eq!(anchor.screen, SCREEN);
+        assert_eq!(panels.hung_from(Panel::Bubble), Some((539.5, 300.0)));
+        // The same position reported again is not a second drag.
+        assert_eq!(panels.dragged(Panel::Bubble, dragged, &[SCREEN]), None);
+        // The prompt now hangs from the dragged point.
+        let prompt = panels.anchor_for(PROMPT, &[SCREEN], || None);
+        assert_eq!(prompt, anchor);
+        let frame = panels.place(Panel::Prompt, prompt.top_center, PROMPT, &[SCREEN]);
+        assert_eq!((frame.x, frame.y), (308.0, 300.0));
+    }
+
+    /// A move at another size than the page reported is the window still
+    /// taking its size, not a drag.
+    #[test]
+    fn a_move_while_the_window_takes_its_size_is_not_a_drag() {
+        let panels = Panels::default();
+        show_measured(&panels, Panel::Bubble, BUBBLE, None);
+        let elsewhere = Rect::new(500.0, 300.0, 480.0, 40.0);
+        assert_eq!(panels.dragged(Panel::Bubble, elsewhere, &[SCREEN]), None);
+        assert_eq!(panels.hung_from(Panel::Bubble), Some((1100.0, 8.0)));
+    }
+
+    /// A saved anchor near the right edge passes the probe; the measured
+    /// prompt is then moved inside the screen, not left hanging off it,
+    /// and the anchor itself stays where the user put it.
+    #[test]
+    fn a_panel_near_an_edge_is_moved_inside_the_screen() {
+        let panels = Panels::default();
+        let near_edge = PanelAnchor {
+            top_center: (2190.0, 100.0),
+            screen: SCREEN,
+        };
+        let anchor = panels.anchor_for(PROBE_SIZE, &[SCREEN], || Some(near_edge));
+        assert_eq!(anchor, near_edge);
+        let frame = panels.place(Panel::Prompt, anchor.top_center, PROMPT, &[SCREEN]);
+        assert_eq!(frame, Rect::new(1737.0, 100.0, PROMPT.0, PROMPT.1));
+        assert!(SCREEN.contains(&frame));
+        assert_eq!(panels.hung_from(Panel::Prompt), Some((2190.0, 100.0)));
+        // The shell's own move to the fitted frame is not a drag.
+        panels.note_size(Panel::Prompt, PROMPT);
+        assert_eq!(panels.dragged(Panel::Prompt, frame, &[SCREEN]), None);
+        // A report as large as the screen fills it from its top-left corner.
+        let whole = panels.place(Panel::Prompt, (1100.0, 8.0), (2200.0, 1500.0), &[SCREEN]);
+        assert_eq!(whole, SCREEN);
     }
 
     /// A snapshot that changes nothing leaves the panel alone; a prompt

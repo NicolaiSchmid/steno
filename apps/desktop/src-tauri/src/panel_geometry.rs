@@ -141,6 +141,27 @@ pub fn same_size(a: (f64, f64), b: (f64, f64)) -> bool {
     (a.0 - b.0).abs() < 1.0 && (a.1 - b.1).abs() < 1.0
 }
 
+/// Two points within a point of each other are the same point: a window
+/// at a logical position reports it back in pixels.
+pub fn same_point(a: (f64, f64), b: (f64, f64)) -> bool {
+    same_size(a, b)
+}
+
+/// `frame` moved by the least that puts it inside `screen`, on whole
+/// points, its size kept; a frame as wide or as tall as the screen sits
+/// at its left or top edge.
+pub fn fitted(frame: Rect, screen: Rect) -> Rect {
+    let x = frame
+        .x
+        .min((screen.max_x() - frame.width).floor())
+        .max(screen.x.ceil());
+    let y = frame
+        .y
+        .min((screen.max_y() - frame.height).floor())
+        .max(screen.y.ceil());
+    Rect::new(x, y, frame.width, frame.height)
+}
+
 /// The size a panel takes from its page's report: finite and at least a
 /// point each way (a sub-point, zero or negative size is no size), rounded
 /// up to whole points (the window system sizes in whole pixels, and a
@@ -332,6 +353,33 @@ mod tests {
         assert_eq!(accepted_size((78.465, 41.91), AREA), Some((79.0, 42.0)));
         assert_eq!(accepted_size((244.5, 40.0), AREA), Some((245.0, 40.0)));
         assert_eq!(accepted_size((1.2, 1.0), AREA), Some((2.0, 1.0)));
+        // Up, not to the nearest: a tenth of a point is a whole point more.
+        assert_eq!(accepted_size((244.1, 40.2), AREA), Some((245.0, 41.0)));
+    }
+
+    /// A frame that overhangs its screen moves in by the overhang and keeps
+    /// its size; one inside stays where it is.
+    #[test]
+    fn a_frame_is_moved_inside_its_screen() {
+        let inside = Rect::new(480.0, 33.0, 480.0, 56.0);
+        assert_eq!(fitted(inside, SCREEN), inside);
+        // A saved anchor near the right edge and a page wider than the probe.
+        let right = frame_hanging_from((1430.0, 100.0), (463.0, 56.0));
+        assert_eq!(fitted(right, SCREEN), Rect::new(977.0, 100.0, 463.0, 56.0));
+        // The default anchor and a report as large as the work area.
+        let whole = frame_hanging_from((720.0, 33.0), (1440.0, 875.0));
+        assert_eq!(fitted(whole, SCREEN), SCREEN);
+        let left_top = Rect::new(-30.0, 0.0, 79.0, 42.0);
+        assert_eq!(fitted(left_top, SCREEN), Rect::new(0.0, 25.0, 79.0, 42.0));
+        // A screen at a fractional origin (a scaled monitor) is entered on
+        // whole points.
+        let scaled = Rect::new(1440.4, 0.0, 1535.2, 863.2);
+        assert_eq!(
+            fitted(Rect::new(2900.0, 850.0, 79.0, 42.0), scaled),
+            Rect::new(2896.0, 821.0, 79.0, 42.0)
+        );
+        assert!(same_point((100.0, 33.0), (100.4, 32.6)));
+        assert!(!same_point((100.0, 33.0), (101.0, 33.0)));
     }
 
     #[test]
