@@ -3,7 +3,9 @@
 //! `STENO_CALIBRATION_CORPUS` points at the corpus directory
 //! (`audio/<id>/system.wav` and `truth.json`, read only). Analyses each
 //! lane once and sweeps the clustering cut, with and without refinement,
-//! and prints a Markdown table per backend for the PR.
+//! and prints a Markdown table per backend for the PR. The run fails when
+//! any lane misses the gate at [`DEFAULT_CLUSTERING_THRESHOLD`] or has no
+//! audio in the corpus; the other cuts are reported, not asserted.
 //!
 //! Environment:
 //! - `STENO_CALIBRATION_CORPUS`: the corpus directory (required).
@@ -27,7 +29,7 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use steno_core::AudioBuffer16k;
-use steno_diarize::{DiarizerConfig, Pipeline, TensorBackend};
+use steno_diarize::{DEFAULT_CLUSTERING_THRESHOLD, DiarizerConfig, Pipeline, TensorBackend};
 
 /// The remote speaker count per call from `truth.json`, whatever shape
 /// the file has: an object keyed by id with a number or an object holding
@@ -218,6 +220,59 @@ fn requested_lanes(truth: &BTreeMap<String, usize>) -> Option<Vec<String>> {
     Some(requested)
 }
 
+/// The cuts `STENO_DIARIZE_THRESHOLDS` names, or the default sweep.
+fn thresholds() -> Vec<f32> {
+    std::env::var("STENO_DIARIZE_THRESHOLDS").ok().map_or_else(
+        || vec![0.20, 0.26, 0.32, 0.38, 0.44, 0.50, 0.60],
+        |list| {
+            list.split(',')
+                .map(|s| s.trim().parse().expect("threshold"))
+                .collect()
+        },
+    )
+}
+
+/// The backend's heading and the table header with its delimiter row.
+fn print_header(name: &str, thresholds: &[f32]) {
+    println!("\n### {name}\n");
+    println!(
+        "Counts per clustering cut (cosine distance); `refined` is after the refinement pass, `mapped` before it.\n"
+    );
+    println!(
+        "| Call | Truth | Minutes | {} | Analysis s | Load |",
+        thresholds
+            .iter()
+            .map(|t| format!("{t:.2} refined / mapped"))
+            .collect::<Vec<_>>()
+            .join(" | ")
+    );
+    println!(
+        "|---|---:|---:|{}---:|---:|",
+        "---:|".repeat(thresholds.len())
+    );
+}
+
+/// Gate G3 for one lane: exactly the truth for a call with at most one
+/// remote speaker, within one of it for a group call.
+fn within_gate(refined: usize, expected: usize) -> bool {
+    if expected <= 1 {
+        refined == expected
+    } else {
+        refined.abs_diff(expected) <= 1
+    }
+}
+
+#[test]
+fn the_gate_is_exact_for_one_remote_speaker_and_within_one_for_a_group() {
+    assert!(within_gate(0, 0));
+    assert!(!within_gate(1, 0), "a phantom speaker on a silent lane");
+    assert!(within_gate(1, 1));
+    assert!(!within_gate(0, 1));
+    assert!(!within_gate(2, 1));
+    assert!(within_gate(6, 7) && within_gate(7, 7) && within_gate(8, 7));
+    assert!(!within_gate(5, 7) && !within_gate(9, 7));
+}
+
 #[test]
 #[ignore = "needs the calibration corpus: STENO_CALIBRATION_CORPUS"]
 fn g3_speaker_counts_against_truth() {
@@ -228,35 +283,13 @@ fn g3_speaker_counts_against_truth() {
     let truth = truth(&corpus.join("truth.json"));
     assert!(!truth.is_empty(), "truth.json yielded no counts");
     let only = requested_lanes(&truth);
-    let thresholds: Vec<f32> = std::env::var("STENO_DIARIZE_THRESHOLDS").ok().map_or_else(
-        || vec![0.20, 0.26, 0.32, 0.38, 0.44, 0.50, 0.60],
-        |list| {
-            list.split(',')
-                .map(|s| s.trim().parse().expect("threshold"))
-                .collect()
-        },
-    );
+    let thresholds = thresholds();
     let (name, backend) = backend();
     let mut pipeline = Pipeline::new(backend, DiarizerConfig::default());
-
-    let header: Vec<String> = thresholds.iter().map(|t| format!("{t:.2}")).collect();
-    println!("\n### {name}\n");
-    println!(
-        "Counts per clustering cut (cosine distance); `refined` is after the refinement pass, `mapped` before it.\n"
-    );
-    println!(
-        "| Call | Truth | Minutes | {} | Analysis s | Load |",
-        header
-            .iter()
-            .map(|t| format!("{t} refined / mapped"))
-            .collect::<Vec<_>>()
-            .join(" | ")
-    );
-    println!(
-        "|---|---:|---:|{}---:|---:|",
-        "---:|".repeat(thresholds.len())
-    );
+    print_header(&name, &thresholds);
     let mut gate: BTreeMap<String, Vec<bool>> = BTreeMap::new();
+    // Lanes that miss the gate at the default cut or have no audio.
+    let mut failures: Vec<String> = Vec::new();
     for (id, expected) in &truth {
         if only
             .as_ref()
@@ -264,9 +297,16 @@ fn g3_speaker_counts_against_truth() {
         {
             continue;
         }
+        let short = &id[..id.len().min(8)];
         let wav = corpus.join("audio").join(id).join("system.wav");
         if !wav.is_file() {
-            eprintln!("{}: missing, skipped", wav.display());
+            eprintln!("{}: missing, counted as a miss", wav.display());
+            for threshold in &thresholds {
+                gate.entry(format!("{threshold:.2}"))
+                    .or_default()
+                    .push(false);
+            }
+            failures.push(format!("{short}: no system.wav"));
             continue;
         }
         let audio = read_wav(&wav);
@@ -275,14 +315,14 @@ fn g3_speaker_counts_against_truth() {
         let analysis = pipeline.analyze(&audio).expect("analysis");
         let analysis_seconds = started.elapsed().as_secs_f64();
         let mut cells = Vec::new();
+        let mut at_default = None;
         for threshold in &thresholds {
             let mapped = pipeline.map(&analysis, *threshold);
             let refined = pipeline.refine(&mapped, &audio).expect("refinement");
-            let pass = if *expected == 1 {
-                refined.clusters.len() == 1
-            } else {
-                refined.clusters.len().abs_diff(*expected) <= 1
-            };
+            let pass = within_gate(refined.clusters.len(), *expected);
+            if *threshold == DEFAULT_CLUSTERING_THRESHOLD {
+                at_default = Some(refined.clusters.len());
+            }
             gate.entry(format!("{threshold:.2}"))
                 .or_default()
                 .push(pass);
@@ -295,13 +335,22 @@ fn g3_speaker_counts_against_truth() {
         }
         println!(
             "| {} | {} | {:.0} | {} | {:.0} | {} |",
-            &id[..id.len().min(8)],
+            short,
             expected,
             audio.duration() / 60.0,
             cells.join(" | "),
             analysis_seconds,
             load
         );
+        // The default cut is asserted even when the sweep leaves it out.
+        let refined = at_default.unwrap_or_else(|| {
+            let mapped = pipeline.map(&analysis, DEFAULT_CLUSTERING_THRESHOLD);
+            let refined = pipeline.refine(&mapped, &audio).expect("refinement");
+            refined.clusters.len()
+        });
+        if !within_gate(refined, *expected) {
+            failures.push(format!("{short}: {refined} speakers, truth {expected}"));
+        }
     }
     println!();
     for (threshold, results) in &gate {
@@ -311,4 +360,8 @@ fn g3_speaker_counts_against_truth() {
             results.len()
         );
     }
+    assert!(
+        failures.is_empty(),
+        "gate G3 fails at the default cut {DEFAULT_CLUSTERING_THRESHOLD:.2}: {failures:?}"
+    );
 }
