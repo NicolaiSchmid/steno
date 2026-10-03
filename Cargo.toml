@@ -37,9 +37,6 @@ tauri-plugin-dialog = "2.8"
 tauri-plugin-opener = "2.7"
 tauri-plugin-single-instance = { version = "2.5", features = ["deep-link"] }
 tauri-plugin-updater = "2.13"
-# The platform keyrings behind the shell's `SecretStore`; the platform
-# features are chosen per target in apps/desktop/src-tauri/Cargo.toml.
-keyring = "3.6"
 # `sync` for the shell's one-shot channels; `macros`, `rt` and
 # `rt-multi-thread` for the executor the core's boundary tests run on.
 tokio = { version = "1", default-features = false, features = ["sync", "macros", "rt", "rt-multi-thread"] }

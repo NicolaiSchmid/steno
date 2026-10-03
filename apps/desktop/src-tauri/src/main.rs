@@ -8,9 +8,10 @@
 //!
 //! What the shell owns beside the windows (WP8): the tray (`tray`), the
 //! panels (`panels`), launch at login (`autostart`), updates (`updater`),
-//! the keyring (`secrets`), the OS permissions (`permissions`), the
-//! `steno:` links (`deep_links`), the native dialogs (`dialogs`) and the
-//! single instance. Every one is a thin module over a Tauri plugin or an
+//! the OS permissions (`permissions`), the `steno:` links (`deep_links`),
+//! the native dialogs (`dialogs`) and the single instance. Secrets are not
+//! the shell's: the keyring `SecretStore` lives in `steno-services` (#173,
+//! `WP6b`). Every one is a thin module over a Tauri plugin or an
 //! OS API with its rules in plain functions the tests cover. Everything
 //! that is on the wire (errors, topics, windows, sections, params) is the
 //! `steno-bridge` crate's type; the shell adds only what it needs on top
@@ -36,7 +37,6 @@ mod panel_geometry;
 mod panels;
 mod permissions;
 mod recording;
-mod secrets;
 mod smoke;
 mod tray;
 mod updater;

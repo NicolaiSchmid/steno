@@ -66,7 +66,7 @@ crates/
   steno-handover/          phone handover server (TLS pinned), shared wire contract with mobile/
   steno-cli/               `steno` binary: record, process, export, dev tools
 apps/
-  desktop/                 Tauri 2 shell: windows, tray, panels, autostart, updater, keyring; bridge host
+  desktop/                 Tauri 2 shell: windows, tray, panels, autostart, updater; bridge host
   web/                     the React app (moved from apps/macos/web once the Tauri shell hosts it)
   macos/                   the Swift app, unchanged until cutover, then removed
 spikes/                    frozen evidence; code moves into crates and is deleted here as it lands
@@ -288,11 +288,12 @@ bridge's copies of the macro and codecs. Packages after WP3 branch from `main`.
   is removed), the real `Recorder` and `Pipeline` behind the host's traits. Parity: the
   Swift `steno export` of a calibration meeting equals the Rust one field for field. The
   shell's seams towards the host (the prompt, the login item and update outcomes, the
-  permissions, the folder choices, the secrets) are filled by WP6b.
+  permissions, the folder choices, the reveal methods) are filled by WP6b. The keyring
+  `SecretStore` is not the shell's: it lives in `steno-services` (#173, WP6b).
 - **WP7 LLM, adapters, handover.** Ports of `StenoLLM` (Codex and OpenAI-compatible),
   `StenoAdapters`, `StenoHandover` (rustls, the pinned trust evaluation, the shared
   `wire.ts` contract test). Lands as three PRs: WP7a LLM, WP7b adapters, WP7c handover.
-- **WP8 shell completion.** Tray, floating panels, autostart, updater, keyring,
+- **WP8 shell completion.** Tray, floating panels, autostart, updater,
   onboarding permissions per OS, deep links, single instance, dialogs, the six
   installer bundles, and `.github/workflows/desktop-release.yml`: a manual run that
   builds the bundles on the three platforms, unsigned, as workflow artifacts.
@@ -726,7 +727,7 @@ PR off `main`.
 | WP5a audio (`steno-audio`) | `feat/rust-audio` | #166 | merged |
 | WP4d diarization (`steno-diarize`) | `feat/rust-diarize` | #164 | merged |
 | WP7c handover | `feat/rust-handover` | #169 | merged |
-| WP8 shell completion: tray, floating panels, autostart, updater, keyring, permissions, deep links, single instance, dialogs, installer bundles and the unsigned release workflow (`cargo deny` and signing follow with WP9) | `feat/rust-shell` | #172 | open |
+| WP8 shell completion: tray, floating panels, autostart, updater, permissions, deep links, single instance, dialogs, installer bundles and the unsigned release workflow (`cargo deny` and signing follow with WP9) | `feat/rust-shell` | #172 | open |
 
 WP4b is `crates/steno-speech-coreml`: `objc2-core-ml` behind one safe module,
 the four backend calls, the FluidAudio 0.17.4 heuristics ported

@@ -19,11 +19,14 @@ Everything the Swift app does outside its three windows, per OS:
 | Floating panels (`panels.rs`) | Non-activating `NSPanel`s on every space (`tauri-nspanel`) | Always-on-top undecorated windows | Always-on-top undecorated windows |
 | Launch at login (`autostart.rs`) | Launch Agent | `~/.config/autostart` entry | Run registry key |
 | Updates (`updater.rs`) | signed manifest per lane | same | same |
-| Secrets (`secrets.rs`) | login Keychain | Secret Service over D-Bus | Credential Manager |
 | Permissions (`permissions.rs`) | microphone TCC status and prompt; system audio and calendar deferred to the host's probes | unknown (nothing to query before capture; the portal asks when the stream opens) | unknown (the privacy switch decides at capture time) |
 | Deep links (`deep_links.rs`) | `steno:` through `Info.plist` | the desktop entry in `linux/` (`Exec=… %u`, the `x-scheme-handler/steno` MIME type; debug builds register at start) | registry (debug builds register at start) |
 | Single instance | Unix socket | session bus name (skipped without a session bus, as in the headless smoke) | named mutex |
 | Dialogs (`dialogs.rs`) | `NSOpenPanel` sheet | GTK file chooser | common item dialog |
+
+Secrets are not the shell's: the keyring `SecretStore` (login Keychain,
+Secret Service, Credential Manager) lives in `steno-services` (#173,
+WP6b), which the host reads the API key through.
 
 The tray menu is the Swift menu bar popover's controls: Record (Stop
 recording while recording, with the recorder's words between), Record in
@@ -131,8 +134,7 @@ come from `cargo tauri icon` over the Swift app icon
 (`apps/macos/Steno/Resources/Assets.xcassets/AppIcon.appiconset/icon_512x512@2x.png`),
 the tray's template mark in `icons/tray/` is drawn by hand. The identifier
 stays `uno.schmid.steno.desktop` so the shell installs beside the Swift
-app; WP9 changes it to `uno.schmid.steno.mac` for the cutover (and the
-keyring service with it, so the API key the Swift app stored is read).
+app; WP9 changes it to `uno.schmid.steno.mac` for the cutover.
 
 Updates are signed: `plugins.updater.pubkey` is the public half of a key
 pair from `cargo tauri signer generate`. The private half is never in the
@@ -174,9 +176,7 @@ loss and JSON, the probe before measuring, which size reports are
 accepted and how they are clamped), the one content rule, the prompt
 query and its numbering, the window requests a page is owed before it
 mounts, when the main window hides on close and when the process ends,
-the login item states, the update lanes, the keyring store over a
-recording mock (which pins the service and account order), the
-permission panes per OS, the `steno:` link grammar and its case rules,
+the login item states, the update lanes, the permission panes per OS, the `steno:` link grammar and its case rules,
 the Linux desktop entry, and the folder choosers' replies. `cargo test -p steno-desktop --no-default-features` the
 same without the fixture host. In the web app, `tauri-transport.test.ts`
 covers the page's half of the wire and `src/windows/panels/*.test.tsx` the
@@ -252,7 +252,7 @@ Nothing beyond the Rust toolchain. WebView2 ships with Windows 11; the
 | `apps/desktop/src-tauri/src/main.rs` | Wires the plugins (single instance first, autostart, deep link, dialog, opener, updater, `tauri-nspanel` on macOS), the managed state, the one menu handler, the tray and the windows; hides the main window on close and keeps the process while a tray stands, ends it otherwise; a dragged panel's anchor, a destroyed window's page, and the Dock's reopen |
 | `apps/desktop/src-tauri/src/tray.rs`, `menu.rs`, `actions.rs`, `recording.rs` | The tray menu and icon, the macOS menu bar, the actions behind their items, the recorder state the shell follows |
 | `apps/desktop/src-tauri/src/panels.rs`, `panel_geometry.rs` | The two floating panels and the one content rule, the macOS `NSPanel` conversion; the anchor, frames and size validation as plain values |
-| `apps/desktop/src-tauri/src/autostart.rs`, `updater.rs`, `secrets.rs`, `permissions.rs`, `deep_links.rs`, `dialogs.rs` | One module per service (see What the shell owns); each is plain rules the tests cover over a plugin or OS call |
+| `apps/desktop/src-tauri/src/autostart.rs`, `updater.rs`, `permissions.rs`, `deep_links.rs`, `dialogs.rs` | One module per service (see What the shell owns); each is plain rules the tests cover over a plugin or OS call |
 | `apps/desktop/src-tauri/src/windows.rs` | The three windows with the Swift sizes: main 1120 by 720 (minimum 960 by 600) at `#/main`, Settings 960 by 640 (minimum 760 by 520) at `#/settings`, onboarding fixed 560 by 620 at `#/onboarding`. Main opens at start; the others on `window.open`, focused when already open. New windows from the page are denied. `Pages` holds the requests a window is owed until its page mounts |
 | `apps/desktop/src-tauri/src/bridge.rs` | `bridge_call(method, params)` and the `steno:event` emitter, scoped to the calling window; a finished `onboarding` snapshot closes the onboarding window, a `recording` snapshot to main moves the tray and the panels. `window.open` (typed: one of the six sections, a UUID meeting id), `window.close` (the onboarding window, from itself), `system.openURL` (`https:` and `mailto:` only) and the WP8 methods listed above are the shell's; everything else goes to the host. `panel_call(action, params)` is the panels' own command |
 | `apps/desktop/src-tauri/src/host.rs`, `fixtures.rs` | The fixture host: the fixtures `index.json` lists, embedded with `include_str!`; every topic's snapshot on `page.ready`; replies as `mock-transport.ts` gives them (`speakers.options.reply`, `reply.confirm` and `reply.chosenPath` for the alerts and folder panels, `null` otherwise); a deep link as the `app` snapshot with the request set, then the clean one |
@@ -270,8 +270,7 @@ the prompt (`panels::set_prompt`), the General snapshot reading
 `autostart::status` and `Updates::last`, the onboarding and Settings
 permission rows calling `permissions::state` and `request`, the folder
 choice arriving as `{ "path": … }`, the reveal methods calling
-`dialogs::reveal`, the LLM client reading `secrets::KeyringSecretStore`
-through `secrets::secret_blocking`. The host may treat the main window as
+`dialogs::reveal`. The host may treat the main window as
 always present: a close hides it, so publishing to it never fails for want
 of a window. Launch at login is a Launch Agent, not `SMAppService`; WP9
 has to retire the Swift registration at cutover so the user does not get
