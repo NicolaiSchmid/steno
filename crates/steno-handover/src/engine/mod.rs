@@ -632,16 +632,20 @@ impl RequestHandling for Engine {
                 };
                 let hash = DeviceTokens::hash(token);
                 let lookup = hash.clone();
-                let device = self
+                // A failed read is a 500, not a 401: the phone takes 401
+                // for a revoke and unpairs.
+                match self
                     .with_store(move |store| store.paired_device_for_token_hash(&lookup))
                     .await
-                    .ok()
-                    .flatten();
-                match device {
-                    Some(device) => {
+                {
+                    Ok(Some(device)) => {
                         AuthOutcome::Allowed(Principal::Device(self.touch(device, hash).await))
                     }
-                    None => AuthOutcome::Rejected(Self::unauthorized()),
+                    Ok(None) => AuthOutcome::Rejected(Self::unauthorized()),
+                    Err(error) => AuthOutcome::Rejected(HandoverResponse::internal_error(
+                        "reading the device",
+                        &error,
+                    )),
                 }
             }
         }

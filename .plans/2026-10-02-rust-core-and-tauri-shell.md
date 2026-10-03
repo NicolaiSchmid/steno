@@ -468,12 +468,13 @@ another release, otherwise the cutover closes them:
   token hash. The Rust engine runs an `UPDATE` of the row that still holds the token
   (`Store::touch_paired_device`); add an `UPDATE` method to `MeetingStore+Handover.swift`
   and call it there before cutover.
-- Receipt reads: Swift's `HandoverEngine.sweepOrphans` and `RecordingHandler.receipt(_:)`
+- Store reads: Swift's `HandoverEngine.sweepOrphans` and `RecordingHandler.receipt(_:)`
   read with `try?`, so a failed read counts as no receipt: the sweep deletes a
   resumable upload, a route answers 404, and an announce starts the recording over,
   overwriting a `complete` receipt so that the next `complete` admits the meeting
-  twice. Rust keeps the files and answers 500 (`Engine::receipt`); move the Swift side
-  to the same before cutover.
+  twice. `HandoverEngine.authenticate` reads the device with `try?`, so a failed read
+  answers 401 and the phone unpairs. Rust keeps the files and answers 500
+  (`Engine::receipt`, the bearer gate); move the Swift side to the same before cutover.
 - Revoked receipts: Swift's `HandoverEngine.persist` puts a receipt back into
   `activeReceipts` after a revoke removed it, when a `complete` that read it before the
   revoke writes it back; the receipt stream then shows an upload of a revoked phone

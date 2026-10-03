@@ -1,9 +1,11 @@
-//! A receipt the store cannot read is an error, not a missing receipt: the
-//! sweep keeps the upload's files and every recording route answers 500,
-//! so a failed read never deletes a resumable upload, nor lets an announce
-//! start the recording over (which would overwrite a `complete` receipt
-//! and admit the meeting twice). The read fails because a temporary table
-//! of the same name shadows `handoverReceipt` on the store's connection.
+//! A row the store cannot read is an error, not a missing row. A receipt:
+//! the sweep keeps the upload's files and every recording route answers
+//! 500, so a failed read never deletes a resumable upload, nor lets an
+//! announce start the recording over (which would overwrite a `complete`
+//! receipt and admit the meeting twice). A device: the gate answers 500,
+//! not the 401 the phone takes for a revoke. The read fails because a
+//! temporary table of the same name shadows `handoverReceipt` or
+//! `pairedDevice` on the store's connection.
 
 #![allow(clippy::cast_possible_truncation, clippy::large_futures)]
 
@@ -11,8 +13,9 @@ mod common;
 
 use std::sync::Arc;
 
-use common::{EngineDevice, TestService, chunks, execute_batch, seeded_bytes};
+use common::{EngineDevice, Phone, TestService, chunks, execute_batch, seeded_bytes};
 use steno_handover::{HandoverService, wire};
+use uuid::Uuid;
 
 const CHUNK_SIZE: i64 = 64 * 1024;
 
@@ -80,4 +83,23 @@ async fn a_failed_receipt_read_keeps_the_upload_and_answers_500() {
     );
     assert_eq!(resumed.upload(id, 1, &parts[1]).await.status.as_u16(), 204);
     assert_eq!(resumed.complete(id).await.status.as_u16(), 200);
+}
+
+#[tokio::test]
+async fn a_failed_device_read_answers_500_and_keeps_the_phone_paired() {
+    let test = TestService::start().await;
+    let phone = Phone::pair(&test).await;
+    let recording_id = Uuid::new_v4();
+
+    execute_batch(
+        &test.store,
+        "CREATE TEMP TABLE pairedDevice (unreadable INTEGER)",
+    );
+    assert_eq!(phone.status(recording_id).await.status, 500, "not 401");
+
+    // Once the store reads again, the same token passes the gate.
+    execute_batch(&test.store, "DROP TABLE temp.pairedDevice");
+    assert_eq!(phone.status(recording_id).await.status, 404);
+    assert_eq!(test.store.paired_devices().unwrap().len(), 1);
+    test.stop().await;
 }
