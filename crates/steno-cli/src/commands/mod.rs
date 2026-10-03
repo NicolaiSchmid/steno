@@ -8,13 +8,8 @@ pub mod record;
 
 use clap::{Parser, Subcommand};
 
-/// Bot-free meeting recorder.
 #[derive(Debug, Parser)]
-#[command(
-    name = "steno",
-    version,
-    about = "Bot-free meeting recorder for the Mac."
-)]
+#[command(name = "steno", version, about = "Bot-free meeting recorder.")]
 pub struct Steno {
     #[command(subcommand)]
     pub command: Command,

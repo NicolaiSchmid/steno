@@ -18,7 +18,7 @@ use steno_core::{
 use steno_diarize::{DiarizerConfig, ModelDiarizer};
 use steno_host::speech::ModelAsset;
 use steno_llm::{LlmClient, LlmEndpoint, LlmMeetingSummarizer, LlmTranscriptCleaner, RetryPolicy};
-use steno_services::speech::RealSpeechModels;
+use steno_services::speech::ModelStoreSpeechModels;
 use steno_speech_coreml::wer;
 
 use crate::wiring::{DatabaseOptions, Failure, Outcome, sha256_hex};
@@ -178,7 +178,7 @@ impl AudioDevices {
         {
             let _ = self.running_only;
             Err(Failure::runtime(
-                "audio-devices: device enumeration is not available on this platform yet (WP5b, WP10)",
+                "audio-devices: device enumeration is only available on the Mac.",
             ))
         }
     }
@@ -394,33 +394,26 @@ pub struct ModelsOptions {
 
 impl ModelsOptions {
     fn store(&self) -> Result<steno_speech::ModelStore, Failure> {
-        if let Some(directory) = &self.models_directory {
-            return Ok(steno_speech::ModelStore::new(directory.join("onnx")));
-        }
-        let store = self.database.open()?;
-        let settings = store.settings().map_err(Failure::runtime)?;
-        Ok(steno_services::speech::speech_store(
-            &settings,
-            &crate::wiring::paths()?,
-        ))
+        Ok(steno_services::speech::speech_store_under(&self.root()?))
     }
 
-    fn service(&self) -> Result<RealSpeechModels, Failure> {
-        Ok(RealSpeechModels {
+    fn service(&self) -> Result<ModelStoreSpeechModels, Failure> {
+        Ok(ModelStoreSpeechModels {
             speech: self.store()?,
         })
     }
 
+    /// The models root every store sits under; `dev models list` prints it.
     fn root(&self) -> Result<PathBuf, Failure> {
-        Ok(match &self.models_directory {
-            Some(directory) => directory.clone(),
-            None => self
-                .store()?
-                .root()
-                .parent()
-                .map(Path::to_path_buf)
-                .unwrap_or_default(),
-        })
+        if let Some(directory) = &self.models_directory {
+            return Ok(directory.clone());
+        }
+        let store = self.database.open()?;
+        let settings = store.settings().map_err(Failure::runtime)?;
+        Ok(steno_services::speech::models_root(
+            &settings,
+            &crate::wiring::paths()?,
+        ))
     }
 }
 
@@ -521,11 +514,15 @@ pub struct Bakeoff {
     /// Engines to compare.
     #[arg(long, value_delimiter = ',', default_value = "parakeet-v3")]
     pub engines: Vec<String>,
-    /// Reference transcripts (`<name>.txt` beside each recording by default).
-    #[arg(long = "reference-dir")]
+    #[arg(
+        long = "reference-dir",
+        help = "Reference transcripts; by default <name>.txt beside each recording."
+    )]
     pub reference_directory: Option<PathBuf>,
-    /// Where the reports go; defaults to `<audio-dir>/bakeoff`.
-    #[arg(long = "out")]
+    #[arg(
+        long = "out",
+        help = "Where the reports go; defaults to <audio-dir>/bakeoff."
+    )]
     pub output: Option<PathBuf>,
     /// Also run the cleanup pass and report the cleaned WER.
     #[arg(long)]
@@ -926,8 +923,10 @@ impl DiarizeSweep {
 
 #[derive(Debug, Args)]
 pub struct EndpointOptions {
-    /// OpenAI-compatible base URL (…/v1); defaults to the settings.
-    #[arg(long = "base-url")]
+    #[arg(
+        long = "base-url",
+        help = "OpenAI-compatible root, for example http://127.0.0.1:1234/v1; defaults to the settings."
+    )]
     pub base_url: Option<String>,
     /// Model name as the server knows it.
     #[arg(long)]
@@ -935,7 +934,7 @@ pub struct EndpointOptions {
     /// The model's context window.
     #[arg(long = "context-tokens")]
     pub context_tokens: Option<i64>,
-    /// Use the Codex (`ChatGPT`) backend with this model instead of an endpoint.
+    /// Use the Codex backend with this model and the Codex CLI's sign-in.
     #[arg(long = "codex-model")]
     pub codex_model: Option<String>,
     /// Ceiling for one answer.
@@ -1016,7 +1015,7 @@ pub enum LlmCommand {
     },
     /// Run the cleanup pass over a meeting.json and print the corrected segments.
     Cleanup {
-        /// A meeting.json (`MeetingExport`), for example from `steno export`.
+        #[arg(help = "A meeting.json (a MeetingExport), for example from steno export.")]
         input: PathBuf,
         /// Write the export with cleaned segments to this path.
         #[arg(long)]
@@ -1026,13 +1025,12 @@ pub enum LlmCommand {
     },
     /// Run the summary pass over a meeting.json and print the result.
     Summarize {
-        /// A meeting.json (`MeetingExport`), for example from `steno export`.
+        #[arg(help = "A meeting.json (a MeetingExport), for example from steno export.")]
         input: PathBuf,
         /// Summary template id; defaults to the meeting's template.
         #[arg(long)]
         template: Option<String>,
-        /// Print the `SummaryOutput` as JSON instead of text.
-        #[arg(long)]
+        #[arg(long, help = "Print the SummaryOutput as JSON instead of text.")]
         json: bool,
         #[command(flatten)]
         options: EndpointOptions,

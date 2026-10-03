@@ -10,9 +10,11 @@ use steno_pipeline::{MeetingEventBus, PipelineDependencies};
 use uuid::Uuid;
 
 /// A usage error exits 1, a runtime failure 2.
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq, thiserror::Error)]
 pub enum Failure {
+    #[error("{0}")]
     Usage(String),
+    #[error("{0}")]
     Runtime(String),
 }
 
@@ -66,7 +68,7 @@ pub const ENGINE_IDS: [&str; 4] = [
 /// store, models downloading on first use.
 #[derive(Debug, Clone, Args)]
 pub struct SpeechOptions {
-    /// Real speech engine: parakeet-v3, parakeet-ultra, parakeet-de, whisperkit-large-v3-turbo.
+    /// Speech engine id (parakeet-v3, parakeet-ultra, parakeet-de, whisperkit-large-v3-turbo); every id runs the ONNX Parakeet v3 engine off the Mac.
     #[arg(long, value_name = "engine")]
     pub engine: Option<String>,
 }
@@ -128,7 +130,7 @@ pub fn dependencies(
 ) -> Result<PipelineDependencies, Failure> {
     let paths = paths()?;
     let speech_store = match models_directory {
-        Some(directory) => steno_speech::ModelStore::new(directory.join("onnx")),
+        Some(directory) => steno_services::speech::speech_store_under(directory),
         None => steno_services::speech::speech_store(settings, &paths),
     };
     let (speech_engine, diarizer, memory): (
