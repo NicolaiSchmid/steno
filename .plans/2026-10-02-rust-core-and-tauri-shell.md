@@ -400,6 +400,17 @@ parity item until a plan says otherwise:
   recorder.
 - **`steno dev` tooling** (`capture-spike`, `aec-bench`, `audio-devices`)
   is not ported; it arrives with the CLI in WP6.
+- **Call mode waits for an output client.** Swift and Rust both clock the
+  tap aggregate from the system output. Without the capture permission,
+  the IOProc runs only once another client opens the output
+  (`.plans/spikes/2026-10-01-spike-rust-capture.md`; `tests/live.rs`
+  skips). Whether a GUI session also loses its first seconds is
+  unchecked. Check on the Swift app before cutover; a plan decides any
+  remedy.
+
+Six Swift defects the port does not share; fix them in Swift if it ships
+another release, otherwise the cutover closes them:
+
 - `CaptureSession.finish()` should read the sink's ring overrun counts
   before `sink.clear()`, as the Rust `finish()` does; today `clear()` zeroes
   them first (`CaptureSession.swift`, the `clear()` before the
@@ -415,6 +426,14 @@ parity item until a plan says otherwise:
   first source whose buffer carries frames, as the Rust `deliver` does;
   today an unusable first buffer drops the whole callback, the other lanes
   included.
+- `CaptureSession` should end `.failed(.writerFailed)` with the recording
+  when a write fails while `stop()` drains the relay, as the Rust session
+  does; today the `writerFailed` task runs after `stop()` and is ignored,
+  so the state reads `.idle` over a master short of what was delivered.
+- `CaptureSession.finish()` should count the whole frames left in the
+  rings as dropped, as the Rust session does; today a stop between a
+  rebuild's successful restart and `resume` clears the new backend's
+  audio and reports nothing.
 
 ### Bridge
 
