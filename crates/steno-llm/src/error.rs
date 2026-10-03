@@ -1,10 +1,15 @@
-//! Every failure this crate reports.
+//! The model-service failures of both clients and both passes; sign-in
+//! failures are [`CodexCredentialError`]'s.
 //! Swift: `Sources/StenoLLM/LLMError.swift`.
+//!
+//! [`CodexCredentialError`]: crate::CodexCredentialError
 
 use std::time::Duration;
 
-/// Every failure this crate reports. Bodies and messages are redacted by
-/// the client before they get here, so no case ever carries a secret.
+/// The model-service failures of both clients and both passes; sign-in
+/// failures are [`CodexCredentialError`]'s. Bodies and messages are
+/// redacted by the client before they get here, so no case ever carries a
+/// secret.
 ///
 /// `Display` mirrors Swift's `description` word for word, which is why it
 /// is lowercase and technical where [`CodexCredentialError`] speaks to the

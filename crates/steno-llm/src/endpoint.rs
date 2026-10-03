@@ -1,4 +1,5 @@
-//! Where the model lives and how much it can hold.
+//! Where the model lives, how much it holds, how JSON is asked for and the
+//! mode a client falls back to, and the trait both clients implement.
 //! Swift: `Sources/StenoLLM/LLMEndpoint.swift`.
 
 use std::sync::{Mutex, PoisonError};
