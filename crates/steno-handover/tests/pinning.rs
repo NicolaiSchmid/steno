@@ -1,5 +1,5 @@
-//! The trust boundary: only the exact leaf fingerprint from the pairing
-//! completes a handshake, with the rule the phone's
+//! The trust boundary: only TLS 1.3, and only the exact leaf fingerprint
+//! from the pairing completes a handshake, with the rule the phone's
 //! `PinnedTrustEvaluator.swift` applies.
 
 #![allow(
@@ -13,11 +13,15 @@
 
 mod common;
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use common::TestService;
+use rustls::{AlertDescription, ClientConfig, SupportedProtocolVersion};
 use steno_handover::pinning::PinnedVerifier;
 use steno_handover::{HandoverIdentity, PairingPayload};
+use tokio::net::TcpStream;
+use tokio_rustls::TlsConnector;
 
 #[tokio::test]
 async fn the_right_fingerprint_completes_the_handshake() {
@@ -147,5 +151,56 @@ async fn the_raw_client_pins_the_same_way() {
             .is_err()
     );
     assert_eq!(test.metrics().request_heads, 1);
+    test.stop().await;
+}
+
+/// A handshake with the listener from a client that trusts the pinned leaf
+/// and offers only `version`.
+async fn handshake_offering(
+    test: &TestService,
+    version: &'static SupportedProtocolVersion,
+) -> std::io::Result<()> {
+    let verifier = PinnedVerifier::new(&test.fingerprint());
+    let config =
+        ClientConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
+            .with_protocol_versions(&[version])
+            .unwrap()
+            .dangerous()
+            .with_custom_certificate_verifier(Arc::new(verifier))
+            .with_no_client_auth();
+    let tcp = TcpStream::connect(("127.0.0.1", test.port())).await?;
+    let name = rustls_pki_types::ServerName::try_from("steno.local").unwrap();
+    TlsConnector::from(Arc::new(config))
+        .connect(name, tcp)
+        .await
+        .map(drop)
+}
+
+#[tokio::test]
+async fn a_client_offering_only_tls_1_2_is_refused_with_a_protocol_version_alert() {
+    // The workspace builds rustls with TLS 1.2 for the LLM client; the
+    // listener's own configuration is what keeps it out.
+    let test = TestService::start().await;
+    handshake_offering(&test, &rustls::version::TLS13)
+        .await
+        .expect("the same client offering TLS 1.3 connects");
+
+    let error = handshake_offering(&test, &rustls::version::TLS12)
+        .await
+        .unwrap_err();
+    let alert = error
+        .get_ref()
+        .and_then(|inner| inner.downcast_ref::<rustls::Error>());
+    assert!(
+        matches!(
+            alert,
+            Some(rustls::Error::AlertReceived(
+                AlertDescription::ProtocolVersion
+            ))
+        ),
+        "{error:?}"
+    );
+    assert_eq!(test.metrics().request_heads, 0);
+    assert_eq!(test.metrics().handled_requests, 0);
     test.stop().await;
 }
