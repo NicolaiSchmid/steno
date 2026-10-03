@@ -46,38 +46,24 @@ use steno_speech::{
     ModelStore, OnnxBackend, OnnxOptions, OnnxSpeechEngine, PipelineConfig, Transcriber, VadConfig,
 };
 
-/// What the next transcription of the fake engine does instead of
-/// answering.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Fault {
-    /// `std::process::abort`, as a C++ exception through the FFI ends.
-    Abort,
-    /// A Rust panic, which ends the process with status 101.
-    Panic,
-    /// Exits with status 3.
-    Exit,
-    /// Never answers.
-    Hang,
-    /// Allocates and touches memory without bound, then hangs.
-    Allocate,
-    /// Writes bytes that are not a frame, then hangs.
-    Garbage,
-    /// Answers with an error and keeps running.
-    Error,
-}
-
-impl Fault {
-    fn parse(name: &str) -> Option<Self> {
-        Some(match name {
-            "abort" => Fault::Abort,
-            "panic" => Fault::Panic,
-            "exit" => Fault::Exit,
-            "hang" => Fault::Hang,
-            "allocate" => Fault::Allocate,
-            "garbage" => Fault::Garbage,
-            "error" => Fault::Error,
-            _ => return None,
-        })
+steno_core::string_enum! {
+    /// What the next transcription of the fake engine does instead of
+    /// answering.
+    pub enum Fault {
+        /// `std::process::abort`, as a C++ exception through the FFI ends.
+        Abort = "abort",
+        /// A Rust panic, which ends the process with status 101.
+        Panic = "panic",
+        /// Exits with status 3.
+        Exit = "exit",
+        /// Never answers.
+        Hang = "hang",
+        /// Allocates and touches memory without bound, then hangs.
+        Allocate = "allocate",
+        /// Writes bytes that are not a frame, then hangs.
+        Garbage = "garbage",
+        /// Answers with an error and keeps running.
+        Error = "error",
     }
 }
 
@@ -112,7 +98,7 @@ impl Options {
                 "--fault" => {
                     let name = value("--fault")?;
                     options.fault =
-                        Some(Fault::parse(&name).ok_or_else(|| format!("unknown fault {name}"))?);
+                        Some(name.parse().map_err(|_| format!("unknown fault {name}"))?);
                 }
                 "--fault-once" => options.fault_once = Some(PathBuf::from(value("--fault-once")?)),
                 "--heartbeat-ms" => {

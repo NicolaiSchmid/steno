@@ -16,6 +16,7 @@ path = "src/main.rs"
 steno-core = { path = "../steno-core" }
 steno-speech = { path = "../steno-speech" }
 memory-stats.workspace = true
+serde.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
