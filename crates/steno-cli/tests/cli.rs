@@ -320,6 +320,87 @@ fn a_run_whose_meeting_ends_failed_exits_two_and_says_why() {
     assert_eq!(process.stdout, "", "no meeting id on a failed run");
 }
 
+#[test]
+fn relative_paths_are_taken_from_the_working_directory() {
+    let home = tempfile::tempdir().unwrap();
+    let home = home.path();
+    let work = home.join("work");
+    std::fs::create_dir_all(work.join("nested")).unwrap();
+    std::fs::copy(
+        fixtures_root().join("audio/sweep-3s.wav"),
+        work.join("sweep.wav"),
+    )
+    .unwrap();
+    let run = |args: &[&str]| {
+        let output = Command::new(env!("CARGO_BIN_EXE_steno"))
+            .args(args)
+            .current_dir(&work)
+            .env("HOME", home)
+            .env("XDG_DATA_HOME", home.join("share"))
+            .env("APPDATA", home.join("appdata"))
+            .env_remove("STENO_LLM_API_KEY")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8_lossy(&output.stdout).trim().to_owned()
+    };
+    let meeting_id = run(&[
+        "process",
+        "sweep.wav",
+        "--db",
+        "steno.sqlite",
+        "--audio-folder",
+        "nested/../audio",
+    ]);
+    let printed = run(&[
+        "export",
+        &meeting_id,
+        "--out",
+        "./out/",
+        "--db",
+        "steno.sqlite",
+    ]);
+    let canonical_work = work.canonicalize().unwrap();
+    let json_path = PathBuf::from(&printed);
+    assert!(json_path.is_absolute(), "{printed}");
+    assert_eq!(
+        json_path.parent().unwrap().canonicalize().unwrap(),
+        canonical_work.join("out")
+    );
+    assert!(
+        !work.join("out/.meeting.json.partial").exists(),
+        "the partial file was renamed away"
+    );
+    let exported = export(&json_path);
+    let url = exported["audio"]["url"].as_str().unwrap();
+    let stored = path_of_file_url(url);
+    assert!(stored.is_absolute(), "{url}");
+    assert!(
+        !url.contains("/../") && !url.contains("nested"),
+        "the audio folder was standardized: {url}"
+    );
+    assert!(
+        stored.starts_with(&work) || stored.starts_with(&canonical_work),
+        "{url}"
+    );
+}
+
+/// The path of a `file://` URL as the export writes it.
+fn path_of_file_url(url: &str) -> PathBuf {
+    let rest = url.strip_prefix("file://").unwrap();
+    // `file:///C:/...` on Windows keeps a slash before the drive letter.
+    let rest = if cfg!(windows) {
+        rest.trim_start_matches('/')
+    } else {
+        rest
+    };
+    PathBuf::from(rest.replace("%20", " "))
+}
+
 // Every usage error of the Swift test in one place.
 #[allow(clippy::too_many_lines)]
 #[test]

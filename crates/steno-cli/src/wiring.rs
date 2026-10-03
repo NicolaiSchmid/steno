@@ -1,7 +1,7 @@
 //! `--db PATH`, the failure type with its exit code, and the dependencies
 //! every command that processes needs. Swift: `Sources/steno/Wiring.swift`.
 
-use std::path::PathBuf;
+use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 
 use clap::Args;
@@ -83,6 +83,27 @@ impl SpeechOptions {
     }
 }
 
+/// The absolute path with `.` and `..` resolved lexically and no trailing
+/// separator, so the same vault gets the same destination id, and a path
+/// the CLI stores or prints is the same however it was spelled. Swift:
+/// `URL.standardizedFileURL.path`, which does not resolve symlinks either.
+pub fn standardized(path: &Path) -> PathBuf {
+    let absolute = std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf());
+    let mut result = PathBuf::new();
+    for component in absolute.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if matches!(result.components().next_back(), Some(Component::Normal(_))) {
+                    result.pop();
+                }
+            }
+            other => result.push(other.as_os_str()),
+        }
+    }
+    result
+}
+
 /// The parsed `<meeting-id>` argument.
 pub fn parse_uuid(argument: &str) -> Result<Uuid, String> {
     Uuid::parse_str(argument).map_err(|_| format!("{argument} is not a UUID."))
@@ -127,7 +148,7 @@ pub fn dependencies(
     events: MeetingEventBus,
 ) -> Result<PipelineDependencies, Failure> {
     let models_directory = match models_directory {
-        Some(directory) => steno_services::speech::absolute(directory),
+        Some(directory) => standardized(directory),
         None => steno_services::speech::models_directory(settings, &paths()?),
     };
     let (speech_engine, diarizer, memory): (
@@ -176,4 +197,22 @@ pub fn sha256_hex(data: &[u8]) -> String {
             let _ = write!(text, "{byte:02x}");
             text
         })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_path_is_standardized_lexically() {
+        let cwd = std::env::current_dir().unwrap();
+        assert_eq!(standardized(&cwd.join("vault/")), cwd.join("vault"));
+        assert_eq!(
+            standardized(&cwd.join("./notes/../vault/.")),
+            cwd.join("vault")
+        );
+        assert_eq!(standardized(Path::new("vault")), cwd.join("vault"));
+        let root = cwd.ancestors().last().unwrap().to_path_buf();
+        assert_eq!(standardized(&root.join("..")), root);
+    }
 }

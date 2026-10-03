@@ -111,7 +111,7 @@ impl Process {
         // `--audio-folder` is a plain path for this run; the stored setting
         // is the app's and never changes here.
         let root = match &self.audio_folder {
-            Some(folder) => folder.clone(),
+            Some(folder) => crate::wiring::standardized(folder),
             None => path_from_file_url(&settings.audio_folder)
                 .ok_or_else(|| Failure::runtime("the audio folder setting is not a file URL"))?,
         };

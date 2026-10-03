@@ -27,17 +27,23 @@ impl Export {
             .export(self.meeting_id)
             .map_err(Failure::runtime)?
             .ok_or_else(|| Failure::runtime(format!("meeting {} not found", self.meeting_id)))?;
-        std::fs::create_dir_all(&self.out).map_err(Failure::runtime)?;
-        let path = self.out.join("meeting.json");
+        let out = crate::wiring::standardized(&self.out);
+        std::fs::create_dir_all(&out).map_err(Failure::runtime)?;
+        let path = out.join("meeting.json");
         let json = steno_adapters::ArtifactRenderer
             .render_json(&export)
             .map_err(Failure::runtime)?;
         // Written beside the target and renamed over it, so a reader never
-        // sees a half-written file.
-        let partial = self.out.join(".meeting.json.partial");
+        // sees a half-written file. A failed write removes its partial
+        // file; one a killed process left behind is overwritten and
+        // renamed away by the next export.
+        let partial = out.join(".meeting.json.partial");
         std::fs::write(&partial, json)
             .and_then(|()| std::fs::rename(&partial, &path))
-            .map_err(Failure::runtime)?;
+            .map_err(|error| {
+                let _ = std::fs::remove_file(&partial);
+                Failure::runtime(error)
+            })?;
         println!("{}", path.display());
         Ok(())
     }

@@ -6,7 +6,7 @@
 //! stored destination's receipt are touched. Prints one line per
 //! destination of this run.
 
-use std::path::{Component, Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use chrono::Utc;
@@ -16,7 +16,7 @@ use steno_core::{DeliveryStatus, Destination, ObsidianSettings};
 use steno_pipeline::{MeetingEventBus, ProcessingPipeline};
 use uuid::Uuid;
 
-use crate::wiring::{DatabaseOptions, Failure, Outcome, parse_uuid};
+use crate::wiring::{DatabaseOptions, Failure, Outcome, parse_uuid, standardized};
 
 #[derive(Debug, Args)]
 pub struct ObsidianOptions {
@@ -61,27 +61,6 @@ impl ObsidianOptions {
             &format!("{}@{path}", ObsidianFolderDestination::DESTINATION_ID),
         )))
     }
-}
-
-/// The absolute path with `.` and `..` resolved lexically and no trailing
-/// separator, so the same vault gets the same destination id however it
-/// was spelled. Swift: `URL.standardizedFileURL.path`, which does not
-/// resolve symlinks either.
-fn standardized(path: &Path) -> PathBuf {
-    let absolute = std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf());
-    let mut result = PathBuf::new();
-    for component in absolute.components() {
-        match component {
-            Component::CurDir => {}
-            Component::ParentDir => {
-                if matches!(result.components().next_back(), Some(Component::Normal(_))) {
-                    result.pop();
-                }
-            }
-            other => result.push(other.as_os_str()),
-        }
-    }
-    result
 }
 
 #[derive(Debug, Args)]
@@ -174,15 +153,22 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_vault_path_is_standardized_lexically() {
+    fn the_vault_destination_is_named_after_the_standardized_path() {
         let cwd = std::env::current_dir().unwrap();
-        assert_eq!(standardized(&cwd.join("vault/")), cwd.join("vault"));
+        let options = ObsidianOptions {
+            vault: Some(PathBuf::from("./notes/../vault/")),
+            people_folder: None,
+            include_audio: false,
+            task_tag: None,
+        };
+        let destination = options.destination().unwrap();
         assert_eq!(
-            standardized(&cwd.join("./notes/../vault/.")),
-            cwd.join("vault")
+            destination.id(),
+            format!(
+                "{}@{}",
+                ObsidianFolderDestination::DESTINATION_ID,
+                cwd.join("vault").display()
+            )
         );
-        assert_eq!(standardized(Path::new("vault")), cwd.join("vault"));
-        let root = cwd.ancestors().last().unwrap().to_path_buf();
-        assert_eq!(standardized(&root.join("..")), root);
     }
 }

@@ -204,7 +204,8 @@ impl Record {
 
     pub async fn run(self) -> Outcome {
         let id = self.validate()?;
-        let mut configuration = CaptureConfiguration::new(self.mode.into(), &self.out);
+        let out = crate::wiring::standardized(&self.out);
+        let mut configuration = CaptureConfiguration::new(self.mode.into(), &out);
         configuration
             .input_device_uid
             .clone_from(&self.input_device_uid);
@@ -218,7 +219,7 @@ impl Record {
         eprintln!(
             "recording {} into {} ({})",
             steno_core::json::uuid_string(id),
-            self.out.display(),
+            out.display(),
             match self.mode {
                 Mode::Call => "call",
                 Mode::InPerson => "in-person",
