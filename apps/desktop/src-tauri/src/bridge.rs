@@ -216,7 +216,7 @@ pub async fn bridge_call(
             // What was asked of the window before its page could hear it
             // (a deep link at launch) goes out after the first snapshots.
             if let Some(owed) = app.state::<windows::Pages>().ready(window.label()) {
-                host.publish_request(&window, owed.field, &owed.value)?;
+                host.publish_request(&window, owed.field.as_str(), &owed.value)?;
             }
             Ok(Value::Null)
         }

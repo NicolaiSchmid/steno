@@ -165,25 +165,35 @@ pub fn open_requested(
     Ok(())
 }
 
+steno_core::string_enum! {
+    /// The `app` snapshot's two request fields, as `steno_bridge`'s
+    /// `AppSnapshot` names them (`requested_meeting_id`,
+    /// `requested_settings_section`); a test pins the two together.
+    pub enum RequestField {
+        MeetingId = "requestedMeetingID",
+        SettingsSection = "requestedSettingsSection",
+    }
+}
+
 /// A meeting or a section for a window, as the `app` snapshot carries it:
-/// `requestedMeetingID` or `requestedSettingsSection` and its value.
+/// the request field and its value.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Request {
-    pub field: &'static str,
+    pub field: RequestField,
     pub value: String,
 }
 
 impl Request {
     pub fn meeting(id: &::uuid::Uuid) -> Self {
         Self {
-            field: "requestedMeetingID",
+            field: RequestField::MeetingId,
             value: uuid_string(*id),
         }
     }
 
     pub fn section(section: steno_bridge::SettingsSection) -> Self {
         Self {
-            field: "requestedSettingsSection",
+            field: RequestField::SettingsSection,
             value: section.as_str().to_owned(),
         }
     }
@@ -255,7 +265,7 @@ pub fn request(
     request: Request,
 ) -> Result<(), BridgeError> {
     match pages.publish_or_owe(window.label(), request) {
-        Some(now) => host.publish_request(window, now.field, &now.value),
+        Some(now) => host.publish_request(window, now.field.as_str(), &now.value),
         None => Ok(()),
     }
 }
@@ -298,6 +308,41 @@ mod tests {
         assert_eq!(Spec::of(BridgeWindow::Onboarding).min_size, None);
     }
 
+    /// The field names are the contract's: an `AppSnapshot` with both
+    /// requests set writes exactly these keys beside its own.
+    #[test]
+    fn the_request_fields_are_the_app_snapshots() {
+        let id = steno_core::json::parse_uuid("00000000-0000-0000-0000-00000000000c").unwrap();
+        let mut app: steno_bridge::AppSnapshot =
+            serde_json::from_str(include_str!("../../../macos/web/fixtures/bridge/app.json"))
+                .unwrap();
+        let bare = serde_json::to_value(&app).unwrap();
+        app.requested_meeting_id = Some(id);
+        app.requested_settings_section = Some(steno_bridge::SettingsSection::Export);
+        let requesting = serde_json::to_value(&app).unwrap();
+        let added: Vec<&str> = requesting
+            .as_object()
+            .unwrap()
+            .keys()
+            .filter(|key| bare.get(key.as_str()).is_none())
+            .map(String::as_str)
+            .collect();
+        let mut fields: Vec<&str> = RequestField::ALL
+            .iter()
+            .map(|field| field.as_str())
+            .collect();
+        fields.sort_unstable();
+        assert_eq!(added, fields);
+        assert_eq!(
+            requesting[RequestField::MeetingId.as_str()],
+            Request::meeting(&id).value
+        );
+        assert_eq!(
+            requesting[RequestField::SettingsSection.as_str()],
+            Request::section(steno_bridge::SettingsSection::Export).value
+        );
+    }
+
     /// A request for a page that has not mounted waits for its
     /// `page.ready`; one for a page that has goes out at once; a destroyed
     /// window forgets both.
@@ -314,7 +359,7 @@ mod tests {
         assert_eq!(
             pages.ready("main"),
             Some(Request {
-                field: "requestedSettingsSection",
+                field: RequestField::SettingsSection,
                 value: "export".into(),
             })
         );
@@ -339,7 +384,7 @@ mod tests {
         assert_eq!(
             Request::meeting(&id),
             Request {
-                field: "requestedMeetingID",
+                field: RequestField::MeetingId,
                 value: "00000000-0000-0000-0000-00000000000C".into(),
             }
         );
