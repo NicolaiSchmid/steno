@@ -3,6 +3,7 @@
 //! Swift: `StenoSpeechError` in `Sources/StenoSpeech/StenoSpeech.swift`.
 
 use std::path::PathBuf;
+use std::time::Duration;
 
 use thiserror::Error;
 
@@ -80,6 +81,51 @@ pub enum SpeechError {
     /// `transcribe` before `prepare` succeeded.
     #[error("the speech engine is not prepared; call prepare() first")]
     NotPrepared,
+    /// A WAV file is not 16 kHz PCM-16.
+    #[error("{}: {detail}", path.display())]
+    Wav { path: PathBuf, detail: String },
+    /// The sidecar process failed; unless the child itself reported the
+    /// error ([`SidecarError::Remote`]) the client has stopped it, and the
+    /// next call starts a fresh one.
+    #[error("speech sidecar: {0}")]
+    Sidecar(#[from] SidecarError),
+}
+
+/// How the sidecar process failed. Every variant but
+/// [`SidecarError::Remote`] leaves the client without a child: the next
+/// `prepare` or `transcribe` spawns and loads again.
+#[derive(Debug, Error)]
+pub enum SidecarError {
+    /// The binary could not be started.
+    #[error("could not start {}: {source}", program.display())]
+    Spawn {
+        program: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    /// Writing to the child's stdin failed while it was still running.
+    #[error("pipe to the sidecar: {0}")]
+    Pipe(#[source] std::io::Error),
+    /// The child sent bytes the protocol does not define, answered with
+    /// the wrong message or spoke another protocol version; it was killed.
+    #[error("protocol violation, the sidecar was stopped: {0}")]
+    Protocol(String),
+    /// The child died before answering: an abort out of ONNX Runtime, a
+    /// panic, a signal, an exit. `stderr` is the last lines it wrote.
+    #[error("the sidecar died mid-request ({status}){}", if stderr.is_empty() { String::new() } else { format!(": {stderr}") })]
+    Crashed { status: String, stderr: String },
+    /// The child did not answer within the request's limit and was killed.
+    #[error("the sidecar did not answer within {:.1} s and was stopped", after.as_secs_f64())]
+    Timeout { after: Duration },
+    /// The child's resident set passed the ceiling and it was killed.
+    #[error(
+        "the sidecar used {rss_bytes} bytes, over the {ceiling_bytes} byte ceiling, and was stopped"
+    )]
+    MemoryCeiling { rss_bytes: u64, ceiling_bytes: u64 },
+    /// The child reported an error of its own (models that failed to load,
+    /// a run ONNX Runtime refused) and keeps running.
+    #[error("{0}")]
+    Remote(String),
 }
 
 impl SpeechError {

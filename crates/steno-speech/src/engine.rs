@@ -102,10 +102,40 @@ impl OnnxSpeechEngine {
                 "model download"
             );
         };
-        let vad_directory = store.ensure(&ModelAsset::silero_vad(), &mut report)?;
-        let model_directory = store.ensure(&ModelAsset::parakeet_v3_fp32(), &mut report)?;
-        let (backend, vocab) = OnnxBackend::load(&model_directory, options)?;
-        let detector = SileroVad::load(&vad_directory.join("silero_vad.onnx"), options, vad)?;
+        store.ensure(&ModelAsset::silero_vad(), &mut report)?;
+        store.ensure(&ModelAsset::parakeet_v3_fp32(), &mut report)?;
+        Self::load_installed(store, options, config, vad)
+    }
+
+    /// [`OnnxSpeechEngine::open_transcriber`] without the downloads: the
+    /// export and Silero must already be in `store`, else
+    /// [`SpeechError::NotInstalled`]. What `steno-speech-sidecar` runs, so
+    /// the child never opens a connection.
+    pub fn load_installed(
+        store: &ModelStore,
+        options: &OnnxOptions,
+        config: PipelineConfig,
+        vad: VadConfig,
+    ) -> Result<Transcriber<OnnxBackend>, SpeechError> {
+        let silero = ModelAsset::silero_vad();
+        let parakeet = ModelAsset::parakeet_v3_fp32();
+        for asset in [&silero, &parakeet] {
+            asset.validate()?;
+            let missing = store.missing_files(asset);
+            if !missing.is_empty() {
+                return Err(SpeechError::NotInstalled {
+                    asset: asset.id.clone(),
+                    directory: store.directory(asset),
+                    missing,
+                });
+            }
+        }
+        let (backend, vocab) = OnnxBackend::load(&store.directory(&parakeet), options)?;
+        let detector = SileroVad::load(
+            &store.directory(&silero).join("silero_vad.onnx"),
+            options,
+            vad,
+        )?;
         Ok(Transcriber::new(
             backend,
             vocab,
@@ -118,7 +148,7 @@ impl OnnxSpeechEngine {
 
 /// Runs `work` off the async executor when one is present, inline
 /// otherwise.
-async fn blocking<T: Send + 'static>(
+pub(crate) async fn blocking<T: Send + 'static>(
     work: impl FnOnce() -> T + Send + 'static,
 ) -> Result<T, SpeechError> {
     match tokio::runtime::Handle::try_current() {
