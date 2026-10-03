@@ -18,7 +18,10 @@
 //!   drop; nothing here calls `AddRef` or `Release` by hand.
 //! - **Callee-allocated memory.** Strings and formats WASAPI returns
 //!   (`GetId`, `GetMixFormat`) are copied and freed with `CoTaskMemFree` in
-//!   the function that received them; nothing keeps such a pointer.
+//!   the function that received them; nothing keeps such a pointer. A
+//!   `PROPVARIANT` frees its contents in `Drop` (`PropVariantClear`), so a
+//!   variant the store filled is simply dropped, and one that borrows our
+//!   memory (the activation blob) is `ManuallyDrop` and never cleared.
 //! - **Capture buffers.** A packet from `IAudioCaptureClient::GetBuffer`
 //!   is lent to the caller's closure as a slice and released with
 //!   `ReleaseBuffer` right after the closure returns; the slice cannot
@@ -35,6 +38,7 @@
 
 use std::ffi::c_void;
 use std::marker::PhantomData;
+use std::mem::ManuallyDrop;
 use std::sync::mpsc::{SyncSender, sync_channel};
 use std::time::Duration;
 
@@ -60,7 +64,7 @@ use windows::Win32::Media::Audio::{
     WAVEFORMATEX, eCapture, eCommunications, eConsole, eRender,
 };
 use windows::Win32::Media::Multimedia::WAVE_FORMAT_IEEE_FLOAT;
-use windows::Win32::System::Com::StructuredStorage::{PROPVARIANT, PropVariantClear};
+use windows::Win32::System::Com::StructuredStorage::PROPVARIANT;
 use windows::Win32::System::Com::{
     BLOB, CLSCTX_ALL, COINIT_MULTITHREADED, CoCreateInstance, CoInitializeEx, CoTaskMemFree,
     CoUninitialize, IAgileObject, IAgileObject_Impl, STGM_READ,
@@ -385,20 +389,18 @@ impl Endpoint {
         let store = unsafe { self.0.OpenPropertyStore(STGM_READ) }.ok()?;
         let key = PKEY_Device_FriendlyName;
         // SAFETY: the key is a live local for the call; on success the
-        // variant is ours and is cleared below.
-        let mut value: PROPVARIANT = unsafe { store.GetValue(&raw const key) }.ok()?;
+        // variant is ours, and its `Drop` (`PropVariantClear`) frees what
+        // the store allocated.
+        let value: PROPVARIANT = unsafe { store.GetValue(&raw const key) }.ok()?;
         // SAFETY: `vt` says which union arm is live; `pwszVal` is read
-        // only when it is `VT_LPWSTR`, copied before the clear, and the
-        // clear frees what the store allocated, once.
+        // only when it is `VT_LPWSTR`, and copied before `value` drops.
         unsafe {
             let inner = &value.Anonymous.Anonymous;
-            let name = if inner.vt == VT_LPWSTR {
+            if inner.vt == VT_LPWSTR {
                 inner.Anonymous.pwszVal.to_string().ok()
             } else {
                 None
-            };
-            let _ = PropVariantClear(&raw mut value);
-            name
+            }
         }
     }
 
@@ -773,12 +775,14 @@ fn activate_process_loopback(
             },
         },
     };
-    let mut variant = PROPVARIANT::default();
+    // Never dropped: `PROPVARIANT`'s `Drop` is `PropVariantClear`, which
+    // would `CoTaskMemFree` the blob, and the blob is `params` on this
+    // stack. (Dropping it was a heap corruption the Windows runner caught.)
+    let mut variant = ManuallyDrop::new(PROPVARIANT::default());
     // SAFETY: writes the `VT_BLOB` arm of a zeroed variant. The blob
     // points at `params`, which outlives the activation call below (the
     // call copies it; Microsoft's sample frees it as soon as the call
-    // returns). The variant is never passed to `PropVariantClear`, which
-    // would free memory it does not own, and `PROPVARIANT` has no `Drop`.
+    // returns); the variant is never cleared (above).
     unsafe {
         let inner = &mut *variant.Anonymous.Anonymous;
         inner.vt = VT_BLOB;
@@ -799,7 +803,7 @@ fn activate_process_loopback(
             ActivateAudioInterfaceAsync(
                 VIRTUAL_AUDIO_DEVICE_PROCESS_LOOPBACK,
                 &IAudioClient::IID,
-                Some(&raw const variant),
+                Some(&raw const *variant),
                 &handler,
             )
         },
