@@ -20,6 +20,7 @@ use crate::{
 };
 
 /// The model's answer to one cleanup chunk: the same segments by index.
+/// Swift: `Sources/StenoLLM/Cleanup/CleanupDraft.swift`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CleanupDraft {
     pub segments: Vec<CleanupDraftSegment>,
@@ -151,6 +152,7 @@ pub fn glossary(input: &CleanupInput) -> Vec<String> {
 /// Builds the pass 1 request for one chunk: fix speech-to-text mistakes,
 /// keep count, order and wording. Temperature 0. Pinned by the goldens in
 /// `Tests/Fixtures/llm/prompts/cleanup-*.txt`.
+/// Swift: `Sources/StenoLLM/Cleanup/CleanupPromptBuilder.swift`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CleanupPromptBuilder {
     /// The endpoint's ceiling for one answer.
@@ -313,7 +315,7 @@ impl CleanupPromptBuilder {
 /// as raw text and listed in `failed_chunks`. Network and HTTP failures
 /// propagate: the pipeline keeps the raw transcript and marks the stage
 /// failed. `raw_text` is never touched; ids, order and count come back as
-/// they went in.
+/// they went in. Swift: `Sources/StenoLLM/Cleanup/LLMTranscriptCleaner.swift`.
 pub struct LlmTranscriptCleaner {
     pub model: Arc<dyn LanguageModel>,
     pub endpoint: LlmEndpoint,
@@ -338,6 +340,8 @@ impl LlmTranscriptCleaner {
         self
     }
 
+    /// The pass over `input` with this crate's own types; the
+    /// [`TranscriptCleaner`] impl calls it.
     pub async fn clean_input(&self, input: &CleanupInput) -> BoundaryResult<CleanupOutput> {
         let chunks = self.chunker.chunk(&input.segments, input.language.as_ref());
         let glossary = glossary(input);

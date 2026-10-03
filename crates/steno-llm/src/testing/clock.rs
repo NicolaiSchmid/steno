@@ -1,4 +1,5 @@
 //! A clock the test advances by hand.
+//! Swift: `Sources/StenoCore/Testing/ManualClock.swift`.
 
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;

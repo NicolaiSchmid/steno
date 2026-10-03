@@ -30,6 +30,7 @@ pub fn encode<T: Serialize>(value: &T) -> Result<Vec<u8>, serde_json::Error> {
     steno_core::json::to_column_string(value).map(String::into_bytes)
 }
 
+/// The one JSON decoder for the wire, the counterpart of [`encode`].
 pub fn decode<T: DeserializeOwned>(bytes: &[u8]) -> Result<T, serde_json::Error> {
     serde_json::from_slice(bytes)
 }

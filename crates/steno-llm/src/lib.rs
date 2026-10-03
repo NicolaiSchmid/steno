@@ -66,5 +66,9 @@ pub use summary::{
 };
 pub use transport::{Clock, LlmClientEvent, Observer, SystemClock};
 
-/// The `User-Agent` and `originator` this crate identifies itself with.
+/// The `User-Agent` and `originator` this crate identifies itself with:
+/// `steno/<crate version>`. Swift sends the app version in its place; the
+/// Codex backend was verified against exactly this string (plan
+/// `.plans/2026-09-29-codex-chatgpt-provider.md`), so the Tauri shell that
+/// wants the app version on the wire changes it here and re-verifies.
 pub const USER_AGENT: &str = concat!("steno/", env!("CARGO_PKG_VERSION"));

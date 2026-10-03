@@ -69,7 +69,7 @@ pub struct CodexResponsesClient {
 impl CodexResponsesClient {
     /// The `client_version` the model list is filtered by: the server hides
     /// models newer than the Codex version named, so a high sentinel shows
-    /// them all. A capability filter, not who we are; that is in the
+    /// them all. A capability filter, not Steno's identity; that is in the
     /// headers.
     pub const MODEL_LIST_CLIENT_VERSION: &'static str = "99.0.0";
     pub const ORIGINATOR: &'static str = "steno";

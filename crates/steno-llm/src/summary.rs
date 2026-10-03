@@ -50,6 +50,7 @@ pub struct DraftSpeakerName {
 }
 
 /// The single-shot or reduce answer.
+/// Swift: `Sources/StenoLLM/Summary/AnalysisDraft.swift`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AnalysisDraft {
@@ -97,7 +98,7 @@ pub struct Assignee {
     pub person_id: Option<Uuid>,
 }
 
-// "The model returned X, what do we make of it": the summary pass's
+// "The model returned X, what the pass makes of it": the summary pass's
 // post-processing as pure functions over the draft, mirroring
 // `CleanupDraft::problems` for pass 1. `LlmMeetingSummarizer` only talks to
 // the model.
@@ -114,6 +115,7 @@ impl AnalysisDraft {
     /// the output's `language` is the meeting's tag as elected, `None`
     /// included, so the pipeline never stores English for a meeting the
     /// engine left untagged.
+    /// Swift: `Sources/StenoLLM/Summary/AnalysisDraft+Output.swift`.
     #[must_use]
     pub fn summary_output(
         &self,
@@ -379,6 +381,7 @@ impl AnalysisDraft {
 /// after a decode failure. English prompts; the model writes in the
 /// meeting's language. Every string here is pinned by a golden in
 /// `Tests/Fixtures/llm/prompts/`.
+/// Swift: `Sources/StenoLLM/Summary/SummaryPromptBuilder.swift`.
 #[derive(Debug, Clone)]
 pub struct SummaryPromptBuilder<Tz: TimeZone> {
     pub template: SummaryTemplate,
@@ -824,6 +827,7 @@ impl<Tz: TimeZone> SummaryPromptBuilder<Tz> {
 /// failure goes once through the repair request, then fails the call.
 /// Post-processing is [`AnalysisDraft::summary_output`]. No Markdown is
 /// produced here; the core renders the [`SummaryDocument`].
+/// Swift: `Sources/StenoLLM/Summary/LLMMeetingSummarizer.swift`.
 pub struct LlmMeetingSummarizer<Tz: TimeZone> {
     pub model: Arc<dyn LanguageModel>,
     pub endpoint: LlmEndpoint,
@@ -859,6 +863,8 @@ where
         SummaryPromptBuilder::new(input.template.clone(), self.zone.clone())
     }
 
+    /// The pass over `input` with this crate's own types; the
+    /// [`MeetingSummarizer`] impl calls it.
     pub async fn summarize_input(&self, input: &SummaryInput) -> BoundaryResult<SummaryOutput> {
         let builder = self.builder(input);
         let mut single_shot = builder.build_single_shot(input);

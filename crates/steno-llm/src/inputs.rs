@@ -5,6 +5,8 @@
 
 use steno_core::{CleanupInput, MeetingExport, SummaryInput, SummaryTemplate};
 
+/// Pass 1's input: the export's segments, speakers, participants and
+/// known people under the meeting's language.
 #[must_use]
 pub fn cleanup_input(export: &MeetingExport) -> CleanupInput {
     CleanupInput {

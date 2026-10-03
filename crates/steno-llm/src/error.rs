@@ -17,6 +17,7 @@ pub enum LlmError {
     /// The per-attempt timeout on the injected clock elapsed.
     #[error("request timed out")]
     Timeout,
+    /// A 429; `retry_after` is the server's `Retry-After` when it sent one.
     #[error("{}", rate_limited_message(retry_after.as_ref()))]
     RateLimited { retry_after: Option<Duration> },
     /// The model's text did not decode into the expected type.
