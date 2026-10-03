@@ -111,7 +111,10 @@ pub use engine::OnnxSpeechEngine;
 pub use error::SpeechError;
 pub use features::MelExtractor;
 pub use language::{LanguageRecognizer, LanguageTagger, StopwordRecognizer, WhatlangRecognizer};
-pub use model_store::{DownloadProgress, ModelAsset, ModelFile, ModelStore};
+pub use model_store::{
+    DownloadProgress, GITHUB_RELEASE_ASSET_LIMIT, ModelAsset, ModelFile, ModelSource, ModelStore,
+    PARAKEET_V3_FP32_REVISION, STENO_MODELS_REPO,
+};
 pub use onnx::{OnnxBackend, OnnxOptions};
 pub use pipeline::{PipelineConfig, RecoveryConfig, Transcriber, Transcript};
 pub use segmentation::{TokenAggregator, TranscriptSegmenter};
