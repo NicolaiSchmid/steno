@@ -13,8 +13,8 @@ use crate::model::{MeetingExport, Speaker};
 /// name, speakers by cluster label, the persons any of them or any task
 /// points at (by display name), segments by start, tasks and decisions by
 /// id, and the asset. `None` when there is no such meeting. Takes the
-/// transaction rather than the connection so the seven queries cannot run
-/// outside one snapshot.
+/// transaction rather than the connection so no query can run outside
+/// one snapshot.
 pub(super) fn export_rows(
     transaction: &Transaction<'_>,
     meeting_id: Uuid,
@@ -58,7 +58,7 @@ pub(super) fn export_rows(
 
 impl Store {
     /// Everything an adapter receives, read in one deferred transaction:
-    /// one snapshot across the seven queries while the Swift app may be
+    /// one snapshot across every query while the Swift app may be
     /// writing the same file (GRDB's `writer.read` on the Swift side),
     /// released when the rows are in hand. The `StenoJSON` pretty form of
     /// the result is `meeting.json`.

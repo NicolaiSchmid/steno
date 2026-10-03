@@ -1,7 +1,6 @@
-//! The printer: the one JSON convention as `StenoJSON`
-//! (`Sources/StenoCore/Model/StenoJSON.swift`) and `BridgeDispatcher.encoder()`
-//! produce it, sorted keys, slashes unescaped, dates as
-//! `2026-09-29T12:48:00.000Z`, UUIDs upper case. Two styles:
+//! The printer: the parent module's convention as `StenoJSON` and
+//! `BridgeDispatcher.encoder()` produce it, sorted keys, slashes unescaped,
+//! dates as `2026-09-29T12:48:00.000Z`, UUIDs upper case. Two styles:
 //! [`to_canonical_string`] is Foundation's `.prettyPrinted` (the bridge
 //! fixtures and `meeting.json`), [`to_compact_string`] is the one-line form
 //! the bridge dispatcher sends. The date and UUID codecs the fields use are
