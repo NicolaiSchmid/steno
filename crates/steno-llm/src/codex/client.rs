@@ -405,8 +405,11 @@ impl CodexResponsesClient {
                 transport::redact(&reply.body_text(), secrets)
             ))
         })?;
-        let items = response.output.clone().unwrap_or_default();
-        Self::result(&response, &items, secrets)
+        Self::result(
+            &response,
+            response.output.as_deref().unwrap_or_default(),
+            secrets,
+        )
     }
 
     /// The buffered event stream to one response: message items from
@@ -458,10 +461,12 @@ impl CodexResponsesClient {
         let terminal = terminal.ok_or_else(|| {
             LlmError::Transport("stream closed before response.completed".to_owned())
         })?;
-        if items.is_empty() {
-            items = terminal.output.clone().unwrap_or_default();
-        }
-        Self::result(&terminal, &items, secrets)
+        let items = if items.is_empty() {
+            terminal.output.as_deref().unwrap_or_default()
+        } else {
+            items.as_slice()
+        };
+        Self::result(&terminal, items, secrets)
     }
 
     fn result(

@@ -123,8 +123,8 @@ impl OpenAiCompatibleClient {
         self
     }
 
-    fn secrets(&self) -> Vec<String> {
-        self.api_key.iter().cloned().collect()
+    fn secrets(&self) -> &[String] {
+        self.api_key.as_slice()
     }
 
     fn rejected_parameters(&self) -> std::sync::MutexGuard<'_, BTreeSet<String>> {
@@ -349,7 +349,7 @@ impl OpenAiCompatibleClient {
             request,
             self.clock.as_ref(),
             self.endpoint.request_timeout,
-            &self.secrets(),
+            self.secrets(),
         )
         .await
     }
@@ -365,7 +365,8 @@ impl OpenAiCompatibleClient {
         })?;
         let choice = decoded
             .choices
-            .first()
+            .into_iter()
+            .next()
             .ok_or_else(|| LlmError::Transport("completion without choices".to_owned()))?;
         if let Some(refusal) = &choice.message.refusal
             && !refusal.is_empty()
@@ -380,7 +381,7 @@ impl OpenAiCompatibleClient {
         };
         let usage = decoded.usage.unwrap_or_default();
         Ok(LlmResponse {
-            text: choice.message.content.clone().unwrap_or_default(),
+            text: choice.message.content.unwrap_or_default(),
             finish_reason,
             usage: Some(LlmUsage {
                 prompt_tokens: usage.prompt_tokens.unwrap_or(0),
@@ -435,7 +436,7 @@ impl OpenAiCompatibleClient {
     }
 
     fn redact(&self, text: &str) -> String {
-        transport::redact(text, &self.secrets())
+        transport::redact(text, self.secrets())
     }
 }
 
