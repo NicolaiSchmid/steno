@@ -812,6 +812,90 @@ fn a_failing_write_mid_recording_finalises_what_was_written() {
     assert_eq!(master_of(&result).frame_count(), 30 * 480);
 }
 
+/// A writer failure names its cause once from each place the session
+/// reports one: a writer that cannot open its folder, a failed close and a
+/// failed write, each read as `Display`.
+#[test]
+fn a_writer_failure_says_writing_the_recording_failed_once() {
+    let once = |error: &CaptureError| {
+        let text = error.to_string();
+        assert_eq!(
+            text.matches("writing the recording failed").count(),
+            1,
+            "{text}"
+        );
+        text
+    };
+
+    // The output directory is a file, so the meeting's folder cannot be made.
+    let directory = tempfile::tempdir().unwrap();
+    let blocked = directory.path().join("a-file");
+    std::fs::write(&blocked, b"").unwrap();
+    let session = CaptureSession::with_backend(
+        configuration(CaptureMode::InPerson, &blocked, false),
+        Arc::new(SyntheticCaptureBackend::new(tones(
+            &[AudioLane::Mixed],
+            0.1,
+        ))),
+        None,
+        200,
+        Arc::new(SystemClock::new()),
+    )
+    .unwrap();
+    let meeting_id = Uuid::new_v4();
+    let opened = once(&session.start(meeting_id).unwrap_err());
+    let folder = RecordingLayout::new(&blocked, meeting_id).directory;
+    assert!(
+        opened.starts_with(&format!(
+            "writing the recording failed: {}: ",
+            folder.display()
+        )),
+        "{opened}"
+    );
+
+    let failed_error = |session: &CaptureSession| match session.state() {
+        CaptureState::Failed { error, .. } => error,
+        other => panic!("expected Failed, got {other:?}"),
+    };
+    let backend = Arc::new(SyntheticCaptureBackend::new(tones(
+        &[AudioLane::Mixed],
+        0.5,
+    )));
+    let closing = faulty_session(
+        directory.path(),
+        backend.clone(),
+        None,
+        true,
+        Arc::new(SystemClock::new()),
+    );
+    closing.start(Uuid::new_v4()).unwrap();
+    backend.wait_until_finished();
+    closing.stop().unwrap();
+    assert_eq!(
+        once(&failed_error(&closing)),
+        "writing the recording failed: DiskFull"
+    );
+
+    let backend = Arc::new(SyntheticCaptureBackend::new(tones(
+        &[AudioLane::Mixed],
+        0.5,
+    )));
+    let writing = faulty_session(
+        directory.path(),
+        backend.clone(),
+        Some(5),
+        false,
+        Arc::new(SystemClock::new()),
+    );
+    let states = writing.states();
+    writing.start(Uuid::new_v4()).unwrap();
+    collect_states(&states, until_failed);
+    assert_eq!(
+        once(&failed_error(&writing)),
+        "writing the recording failed: DiskFull"
+    );
+}
+
 /// The writer thread panics on its tenth frame and takes the writer with
 /// it: `stop()` fails with `WriterFailed` instead of leaving the session
 /// stuck in `Stopping`, and the next recording starts.

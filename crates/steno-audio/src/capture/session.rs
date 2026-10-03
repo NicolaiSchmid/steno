@@ -503,7 +503,7 @@ impl Core {
         let writer = match (self.make_writer)(&layout, &lanes, keep_raw) {
             Ok(writer) => writer,
             Err(error) => {
-                let failure = CaptureError::WriterFailed(error.to_string());
+                let failure = as_writer_failure(error);
                 self.set_state(
                     &mut inner,
                     &CaptureState::Failed {
@@ -706,9 +706,7 @@ impl Core {
         let undrained = active.sink.available_to_read() / FRAME_SIZE;
         active.sink.clear();
         let closing = writer.finish().err();
-        let failure = write_failure
-            .or(closing)
-            .map(|error| CaptureError::WriterFailed(error.to_string()));
+        let failure = write_failure.or(closing).map(as_writer_failure);
         let files = writer.files();
         if matches!(files.master.try_exists(), Ok(false)) {
             return Err(CaptureError::WriterFailed(format!(
@@ -1081,9 +1079,18 @@ impl Core {
         self.set_state(
             &mut inner,
             &CaptureState::Failed {
-                error: CaptureError::WriterFailed(error.to_string()),
+                error: as_writer_failure(error.clone()),
                 recording: result,
             },
         );
+    }
+}
+
+/// `error` as a `WriterFailed`: one that already is passes through, so its
+/// `Display` says "writing the recording failed" once.
+fn as_writer_failure(error: CaptureError) -> CaptureError {
+    match error {
+        CaptureError::WriterFailed(_) => error,
+        other => CaptureError::WriterFailed(other.to_string()),
     }
 }
