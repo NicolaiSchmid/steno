@@ -1,5 +1,5 @@
 //! Gate G3 of `.plans/2026-10-01-cross-platform-speech-stack.md`: the seven
-//! calibration calls on Forge against `truth.json`. Ignored unless
+//! calibration calls against `truth.json`. Ignored unless
 //! `STENO_CALIBRATION_CORPUS` points at the corpus directory
 //! (`audio/<id>/system.wav` and `truth.json`, read only). Analyses each
 //! lane once and sweeps the clustering cut, with and without refinement,
@@ -15,7 +15,9 @@
 //! - `STENO_DIARIZE_THRESHOLDS`: comma-separated cosine-distance cuts
 //!   (default `0.20,0.26,0.32,0.38,0.44,0.50,0.60`).
 //! - `STENO_DIARIZE_THREADS`: ONNX Runtime intra-op threads (default 4).
-//! - `STENO_DIARIZE_FILES`: comma-separated ids to restrict the run.
+//! - `STENO_DIARIZE_FILES`: comma-separated ids to restrict the run, each
+//!   a full id or its first eight characters; an id that matches no lane
+//!   fails the run rather than silently running fewer lanes.
 //!
 //! Run: `STENO_CALIBRATION_CORPUS=~/steno-calibration cargo test -p steno-diarize
 //! --release --test calibration -- --ignored --nocapture`.
@@ -191,8 +193,33 @@ fn load_average() -> String {
         .unwrap_or_else(|| "?".to_owned())
 }
 
+/// Whether `id` is one of the `requested` lanes: a full id or its first
+/// eight characters, as the table prints them.
+fn is_requested(id: &str, requested: &str) -> bool {
+    id == requested || (requested.len() >= 8 && id.starts_with(requested))
+}
+
+/// The lanes `STENO_DIARIZE_FILES` restricts the run to, `None` for all;
+/// an id that names no lane in `truth` fails the run.
+fn requested_lanes(truth: &BTreeMap<String, usize>) -> Option<Vec<String>> {
+    let requested: Vec<String> = std::env::var("STENO_DIARIZE_FILES")
+        .ok()?
+        .split(',')
+        .map(|s| s.trim().to_owned())
+        .collect();
+    let unknown: Vec<&String> = requested
+        .iter()
+        .filter(|wanted| !truth.keys().any(|id| is_requested(id, wanted)))
+        .collect();
+    assert!(
+        unknown.is_empty(),
+        "STENO_DIARIZE_FILES names no lane in truth.json: {unknown:?}"
+    );
+    Some(requested)
+}
+
 #[test]
-#[ignore = "needs the calibration corpus on Forge: STENO_CALIBRATION_CORPUS"]
+#[ignore = "needs the calibration corpus: STENO_CALIBRATION_CORPUS"]
 fn g3_speaker_counts_against_truth() {
     let Some(corpus) = std::env::var_os("STENO_CALIBRATION_CORPUS").map(PathBuf::from) else {
         eprintln!("STENO_CALIBRATION_CORPUS unset; nothing to do");
@@ -200,9 +227,7 @@ fn g3_speaker_counts_against_truth() {
     };
     let truth = truth(&corpus.join("truth.json"));
     assert!(!truth.is_empty(), "truth.json yielded no counts");
-    let only: Option<Vec<String>> = std::env::var("STENO_DIARIZE_FILES")
-        .ok()
-        .map(|list| list.split(',').map(|s| s.trim().to_owned()).collect());
+    let only = requested_lanes(&truth);
     let thresholds: Vec<f32> = std::env::var("STENO_DIARIZE_THRESHOLDS").ok().map_or_else(
         || vec![0.20, 0.26, 0.32, 0.38, 0.44, 0.50, 0.60],
         |list| {
@@ -228,12 +253,15 @@ fn g3_speaker_counts_against_truth() {
             .join(" | ")
     );
     println!(
-        "|---|---:|---:|{}|---:|---:|",
-        "---|".repeat(thresholds.len())
+        "|---|---:|---:|{}---:|---:|",
+        "---:|".repeat(thresholds.len())
     );
     let mut gate: BTreeMap<String, Vec<bool>> = BTreeMap::new();
     for (id, expected) in &truth {
-        if only.as_ref().is_some_and(|list| !list.contains(id)) {
+        if only
+            .as_ref()
+            .is_some_and(|list| !list.iter().any(|wanted| is_requested(id, wanted)))
+        {
             continue;
         }
         let wav = corpus.join("audio").join(id).join("system.wav");
