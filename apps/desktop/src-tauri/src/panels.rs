@@ -1185,6 +1185,19 @@ mod tests {
         assert_eq!(pending_query(&panels), "app=Delta&seconds=60&raised=2");
     }
 
+    /// Clearing the prompt keeps the count: the prompt raised after it is
+    /// a new number, so the first one's X cannot dismiss it.
+    #[test]
+    fn a_prompt_raised_after_a_clear_takes_the_next_number() {
+        let panels = Panels::default();
+        panels.set_prompt(Some(request("Charlie")));
+        panels.set_prompt(None);
+        assert_eq!(panels.content(), None);
+        panels.set_prompt(Some(request("Charlie")));
+        assert!(!panels.dismiss_prompt(Some(1)), "the first one's X");
+        assert_eq!(pending_query(&panels), "app=Charlie&seconds=60&raised=2");
+    }
+
     /// An identical request raised again is a new prompt (it remounts);
     /// the pending one shown again after the bubble is the same.
     #[test]
