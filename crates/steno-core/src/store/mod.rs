@@ -193,7 +193,9 @@ impl Store {
     /// sees the same snapshot of the file (an export's seven selects read
     /// one meeting, not a meeting another process is rewriting between
     /// them), as GRDB's `reader.read` did. Nothing is written; the
-    /// transaction is rolled back when `body` returns.
+    /// transaction is rolled back when `body` returns. `body` must not
+    /// begin a transaction of its own: SQLite does not nest them, so its
+    /// `BEGIN` fails.
     pub fn read<T>(&self, body: impl FnOnce(&Connection) -> Result<T>) -> Result<T> {
         self.snapshot(|transaction| body(transaction))
     }
