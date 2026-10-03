@@ -6,9 +6,12 @@
 //! returns `[1, 589, 7]` powerset logits; `FBank` turns the window into
 //! `fbank_features`; `Embedding` takes those and per-frame `weights`
 //! `[1, 589]` and returns `embedding` `[1, 256]`, so the mask is applied
-//! inside the model rather than by selecting frames. macOS only; the
-//! bindings live in [`binding`], the one module in this crate with
-//! `unsafe`.
+//! inside the model rather than by selecting frames. The leading
+//! dimension of every input is the batch; it is pinned to 1 as
+//! `FluidAudio`'s `SegmentationProcessor` does, whatever default the model
+//! declares (the models accept 1 to 32 and `Segmentation.mlmodelc`
+//! declares 32). macOS only; the bindings live in [`binding`], the one
+//! module in this crate with `unsafe`.
 
 mod binding;
 
@@ -46,15 +49,21 @@ impl CoreMlBackend {
         let fbank = load("FBank.mlmodelc")?;
         let embedding = load("Embedding.mlmodelc")?;
         let geometry = SegmentationGeometry::PYANNOTE_3_0;
-        let segmentation_input = segmentation
-            .input_shape("audio")
-            .unwrap_or_else(|| vec![1, 1, geometry.window_samples]);
-        let fbank_input = fbank
-            .input_shape("audio")
-            .unwrap_or_else(|| vec![1, geometry.window_samples]);
-        let weights_input = embedding
-            .input_shape("weights")
-            .unwrap_or_else(|| vec![1, geometry.frames_per_window]);
+        let segmentation_input = one_window(
+            segmentation
+                .input_shape("audio")
+                .unwrap_or_else(|| vec![1, 1, geometry.window_samples]),
+        );
+        let fbank_input = one_window(
+            fbank
+                .input_shape("audio")
+                .unwrap_or_else(|| vec![1, geometry.window_samples]),
+        );
+        let weights_input = one_window(
+            embedding
+                .input_shape("weights")
+                .unwrap_or_else(|| vec![1, geometry.frames_per_window]),
+        );
         let window = *segmentation_input.last().unwrap_or(&0);
         if window != geometry.window_samples {
             return Err(DiarizeError::message(format!(
@@ -72,6 +81,16 @@ impl CoreMlBackend {
             weights_input,
         })
     }
+}
+
+/// `shape` with its leading (batch) dimension set to 1: the pipeline
+/// feeds one window per prediction, as `FluidAudio` does, whatever batch
+/// the model declares as its default.
+fn one_window(mut shape: Vec<usize>) -> Vec<usize> {
+    if let Some(batch) = shape.first_mut() {
+        *batch = 1;
+    }
+    shape
 }
 
 impl TensorBackend for CoreMlBackend {
