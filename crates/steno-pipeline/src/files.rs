@@ -135,9 +135,36 @@ fn write_durably(
     let mut temporary = builder.tempfile_in(directory)?;
     write(temporary.as_file_mut())?;
     syncs.file(temporary.as_file(), temporary.path())?;
-    temporary.persist(path).map_err(|error| error.error)?;
+    // From here the temporary is renamed with std's `rename` rather than
+    // `persist`: on Windows std replaces a target another handle has open
+    // (POSIX rename semantics), where `MoveFileEx` answers "access denied".
+    let (file, temporary) = temporary.keep().map_err(|error| error.error)?;
+    drop(file);
+    if let Err(error) = rename_over(&temporary, path) {
+        let _ = std::fs::remove_file(&temporary);
+        return Err(error);
+    }
     syncs.directory(directory);
     Ok(())
+}
+
+/// `std::fs::rename`, retried for a moment where Windows refuses to replace
+/// a file another writer is replacing at the same instant ("access
+/// denied"); one attempt elsewhere.
+fn rename_over(from: &Path, to: &Path) -> std::io::Result<()> {
+    let attempts = if cfg!(windows) { 50 } else { 1 };
+    let mut attempt = 1;
+    loop {
+        match std::fs::rename(from, to) {
+            Err(error)
+                if attempt < attempts && error.kind() == std::io::ErrorKind::PermissionDenied =>
+            {
+                attempt += 1;
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            outcome => return outcome,
+        }
+    }
 }
 
 /// Removes this file's temporaries in `directory` that are older than
