@@ -142,13 +142,24 @@ const STDERR_LINES: usize = 20;
 impl SidecarProcess {
     /// Spawns the child and waits for its [`Reply::Ready`].
     fn spawn(config: &SidecarConfig) -> Result<Self, SidecarError> {
-        let mut child = Command::new(&config.program)
+        let mut command = Command::new(&config.program);
+        command
             .args(&config.args)
             .arg("--heartbeat-ms")
             .arg(config.heartbeat.as_millis().max(1).to_string())
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
+            .stderr(Stdio::piped());
+        // The child is a console program: started from the windowed app
+        // without this flag, Windows opens a console window for it on every
+        // job, and closing that window kills the child mid-request.
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+            command.creation_flags(CREATE_NO_WINDOW);
+        }
+        let mut child = command
             .spawn()
             .map_err(|source| SidecarError::Spawn {
                 program: config.program.clone(),
