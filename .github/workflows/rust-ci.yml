@@ -46,7 +46,7 @@ name: Rust CI
 # catches a weakened memory ordering on the ring indices, and only a
 # sanitizer sees that on x86. It needs nightly and `-Zbuild-std`, so it is
 # its own job and is not a required check: a nightly breakage must not block
-# the workspace jobs. About 30 s warm, a few minutes cold.
+# the workspace jobs.
 
 on:
   pull_request:
